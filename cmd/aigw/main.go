@@ -18,6 +18,7 @@ import (
 	"github.com/winger/ai-gateway/internal/creds"
 	"github.com/winger/ai-gateway/internal/httpapi"
 	"github.com/winger/ai-gateway/internal/logx"
+	"github.com/winger/ai-gateway/internal/mcpsrv"
 	"github.com/winger/ai-gateway/internal/pluginhost"
 	"github.com/winger/ai-gateway/internal/quota"
 	"github.com/winger/ai-gateway/internal/registry"
@@ -142,6 +143,12 @@ func run() int {
 		CredentialsKey: creds.DeriveKey(cfg.CredentialsKey),
 	}, db, reg, host, balancerState, log)
 
+	mcpService := mcpsrv.New(db, reg, mcpsrv.Config{
+		MaxRows:    cfg.MCP.MaxQueryRows,
+		WindowDays: cfg.MCP.RequestWindowDays,
+		Currency:   cfg.Billing.Currency,
+	})
+
 	api := httpapi.New(httpapi.Deps{
 		Config:     cfg,
 		Registry:   reg,
@@ -151,6 +158,8 @@ func run() int {
 		Limiter:    limiter,
 		Meter:      meter,
 		Records:    db,
+		MCP:        mcpService,
+		MCPTokens:  db,
 		Log:        log,
 		Version:    version,
 	})

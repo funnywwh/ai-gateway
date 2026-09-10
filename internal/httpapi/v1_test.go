@@ -16,6 +16,7 @@ import (
 	"github.com/winger/ai-gateway/internal/balancer"
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/mcpsrv"
 	"github.com/winger/ai-gateway/internal/quota"
 	"github.com/winger/ai-gateway/internal/registry"
 	"github.com/winger/ai-gateway/internal/routing"
@@ -103,6 +104,7 @@ func newFixture(t *testing.T) *fixture {
 	dispatcher := runtime.New(runtime.Config{}, db, reg, nil, bal, nil)
 
 	verifier := apikey.New(db, apikey.DefaultConfig())
+	mcpService := mcpsrv.New(db, reg, mcpsrv.Config{MaxRows: 100, WindowDays: 30, Currency: "USD"})
 	srv := New(Deps{
 		Config:     &cfg,
 		Registry:   reg,
@@ -112,6 +114,8 @@ func newFixture(t *testing.T) *fixture {
 		Limiter:    quota.New(8),
 		Meter:      usage.New(db),
 		Records:    db,
+		MCP:        mcpService,
+		MCPTokens:  db,
 		Version:    "test",
 	})
 	ts := httptest.NewServer(srv.Handler())

@@ -249,6 +249,15 @@ ON CONFLICT(token_prefix) DO UPDATE SET
 	return id, nil
 }
 
+// TouchMCPToken records the last use of an MCP token.
+func (db *DB) TouchMCPToken(ctx context.Context, id int64) error {
+	if _, err := db.write.ExecContext(ctx,
+		"UPDATE mcp_tokens SET last_used_at = ? WHERE id = ?", unix(time.Now()), id); err != nil {
+		return fmt.Errorf("store: touch mcp token %d: %w", id, err)
+	}
+	return nil
+}
+
 // RevokeMCPToken marks a token as revoked.
 func (db *DB) RevokeMCPToken(ctx context.Context, id int64) error {
 	_, err := db.write.ExecContext(ctx, "UPDATE mcp_tokens SET status = 'revoked' WHERE id = ?", id)

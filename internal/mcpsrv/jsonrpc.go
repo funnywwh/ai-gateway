@@ -1,0 +1,117 @@
+package mcpsrv
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+)
+
+// ProtocolVersion is the MCP protocol revision this server speaks.
+const ProtocolVersion = "2025-06-18"
+
+// Request is one JSON-RPC 2.0 request.
+type Request struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+// Response is one JSON-RPC 2.0 response.
+type Response struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Result  any             `json:"result,omitempty"`
+	Error   *RPCError       `json:"error,omitempty"`
+}
+
+// RPCError is a JSON-RPC error object.
+type RPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
+}
+
+// JSON-RPC / MCP error codes used by this server.
+const (
+	CodeParse          = -32700
+	CodeInvalidRequest = -32600
+	CodeMethodNotFound = -32601
+	CodeInvalidParams  = -32602
+	CodeInternal       = -32603
+	CodeUnauthorized   = -32001
+)
+
+// Handle processes one JSON-RPC request on behalf of an authenticated account.
+// It never panics: internal failures are reported as JSON-RPC errors.
+func (s *Service) Handle(ctx context.Context, accountID int64, raw []byte) *Response {
+	var req Request
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return &Response{JSONRPC: "2.0", Error: &RPCError{Code: CodeParse, Message: "invalid JSON"}}
+	}
+	if req.JSONRPC != "" && req.JSONRPC != "2.0" {
+		return &Response{JSONRPC: "2.0", ID: req.ID, Error: &RPCError{Code: CodeInvalidRequest, Message: "unsupported jsonrpc version"}}
+	}
+
+	switch req.Method {
+	case "initialize":
+		return &Response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+			"protocolVersion": ProtocolVersion,
+			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
+			"serverInfo":      map[string]any{"name": "aigw-mcp", "version": "0.1.0"},
+			"instructions":    "Read-only access to this account's usage, balance, ledger and recorded requests. Content is available only for channels the account opted into recording.",
+		}}
+	case "ping":
+		return &Response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{}}
+	case "tools/list":
+		return &Response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"tools": s.Tools()}}
+	case "tools/call":
+		return s.handleToolCall(ctx, accountID, req)
+	default:
+		return &Response{JSONRPC: "2.0", ID: req.ID, Error: &RPCError{
+			Code: CodeMethodNotFound, Message: "unknown method: " + req.Method,
+		}}
+	}
+}
+
+func (s *Service) handleToolCall(ctx context.Context, accountID int64, req Request) *Response {
+	var params struct {
+		Name      string         `json:"name"`
+		Arguments map[string]any `json:"arguments"`
+	}
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return &Response{JSONRPC: "2.0", ID: req.ID, Error: &RPCError{Code: CodeInvalidParams, Message: "invalid params"}}
+		}
+	}
+	if params.Name == "" {
+		return &Response{JSONRPC: "2.0", ID: req.ID, Error: &RPCError{Code: CodeInvalidParams, Message: "tool name is required"}}
+	}
+
+	result, err := s.Call(ctx, accountID, params.Name, params.Arguments)
+	if err != nil {
+		return &Response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+			"content": []map[string]any{{"type": "text", "text": err.Error()}},
+			"isError": true,
+		}}
+	}
+
+	payload, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return &Response{JSONRPC: "2.0", ID: req.ID, Error: &RPCError{Code: CodeInternal, Message: "encoding result failed"}}
+	}
+	return &Response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
+		"content": []map[string]any{{"type": "text", "text": string(payload)}},
+		"isError": false,
+	}}
+}
+
+// DescribeTools returns a human-readable tool catalogue (admin diagnostics).
+func (s *Service) DescribeTools() []string {
+	tools := s.Tools()
+	out := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		out = append(out, fmt.Sprintf("%s - %s", tool.Name, tool.Description))
+	}
+	return out
+}

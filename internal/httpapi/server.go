@@ -42,8 +42,11 @@ type Deps struct {
 	Limiter    *quota.Limiter
 	Meter      *usage.Meter
 	Records    Records
-	Log        *slog.Logger
-	Version    string
+	// MCP/ MCPTokens enable the read-only MCP query endpoint (POST /mcp).
+	MCP       MCPQuery
+	MCPTokens MCPTokens
+	Log       *slog.Logger
+	Version   string
 }
 
 // Server wires the HTTP surfaces.
@@ -77,6 +80,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/responses/{id}", s.handleGetResponse)
 	s.mux.HandleFunc("DELETE /v1/responses/{id}", s.handleDeleteResponse)
 	s.mux.HandleFunc("GET /v1/models", s.handleListModels)
+	s.mux.HandleFunc("POST /mcp", s.handleMCP)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)

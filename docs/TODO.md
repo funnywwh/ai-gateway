@@ -70,9 +70,14 @@
 - [x] 端到端验证：httptest 全链路测试 + 真实二进制 curl 走查（非流式/流式/401/400/模型列表/用量落库）
 
 ## M6 MCP 查询服务（网关为 MCP Server）
-- [ ] /mcp（Streamable HTTP）+ mcp_tokens 鉴权 + 账户强作用域
-- [ ] 10 个只读工具（含 list_requests / get_request）
-- [ ] bin/aigw mcp-serve（stdio）
+- [x] 设计文档 docs/design/m6-mcp-server.md；规格 docs/mcp.md 状态更新
+- [x] POST /mcp（JSON-RPC 2.0：initialize / ping / tools/list / tools/call）+ mcp_tokens 鉴权 + 账户强作用域
+- [x] 首批 6 个只读工具：get_balance / get_ledger / get_usage_summary / list_requests / get_request / get_models
+- [x] 跨账户访问按"不存在"处理；API Key 不能用于 MCP（必须账户级 MCP 令牌）；吊销/过期即 401
+- [x] 内容可见性绑定录制开关（未录制返回 recorded=false + 原因）
+- [x] 测试：6 个端到端用例（缺令牌/API Key 拒绝、initialize+tools/list、工具数据、未知工具与方法、跨账户隔离、吊销）
+- [ ] 后续工具：get_dashboard / get_usage_breakdown / list_invoices / get_invoice / get_rate_limits（依赖 M11/M12）
+- [ ] bin/aigw mcp-serve（stdio 模式）
 
 ## M7 Hooks 与录制
 - [ ] 异步 worker 池 + 有界队列 + HMAC 签名 + 重试 + 死信

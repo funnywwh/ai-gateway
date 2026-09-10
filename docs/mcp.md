@@ -1,6 +1,7 @@
 # MCP 查询服务（网关作为 MCP Server）
 
-> 状态：**规格（M6 实现）**。方向：**网关对外提供只读查询**，不是"网关帮模型调外部工具"（后者属 v2 可选）。
+> 状态：**已实现（M6，首批 6 个工具）**。实现见 `internal/mcpsrv`（工具与 JSON-RPC）与 `internal/httpapi/mcp.go`（`POST /mcp` 与令牌鉴权）。
+> 尚未实现（依赖后续里程碑）：`get_dashboard`、`get_usage_breakdown`、`list_invoices`/`get_invoice`（M11/M12 的账单与聚合查询）、`get_rate_limits`、stdio 模式 `bin/aigw mcp-serve`。
 
 ## 1. 定位与接入
 

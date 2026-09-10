@@ -55,4 +55,14 @@ POST /mcp  { "jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_
 标准库 + `internal/{domain,store,registry,secret,config}`。
 
 ## 实现与设计差异
-（实现完成后回填）
+- **JSON-RPC 子集自实现**：MCP 规范里本服务只需要 initialize / ping / tools/list / tools/call，
+  自实现约 200 行即可（`internal/mcpsrv/jsonrpc.go`），避免为一个子集引入官方 SDK 与 gRPC 依赖；
+  协议形状与规范一致，后续可平滑替换。
+- **鉴权与 API Key 完全分离**：MCP 只接受账户级 `aigw_mcp_` 令牌，API Key 一律 401
+  （测试显式覆盖），避免把"调用上游"的凭据当成"读取账务"的凭据。
+- **首批只开放 6 个工具**：`get_dashboard`/`get_usage_breakdown`/`list_invoices` 等依赖 M11/M12 的
+  聚合与账单表，先不提供半成品；`get_usage_summary` 已覆盖当前可算的汇总。
+- **跨账户一律返回"not found"**（而非 403），避免泄露其他租户请求 ID 的存在性。
+- **`list_requests` 只在返回中给标记不给内容**：内容必须通过 `get_request` 逐条获取，
+  便于按需审计并减少一次性泄露面。
+- **`last_used_at` 异步更新**，不阻塞查询响应。
