@@ -14,9 +14,28 @@ import (
 	"github.com/winger/ai-gateway/pkg/providerkit"
 )
 
-// doubleQuote is the ASCII double-quote as a string (escape-free construction);
-// it strips JSON quoting from raw content blobs.
-var doubleQuote = string([]byte{0x22})
+// flattenContent turns a Responses content blob (string or array of parts) into text.
+func flattenContent(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var plain string
+	if err := json.Unmarshal(raw, &plain); err == nil {
+		return plain
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return string(raw)
+	}
+	var sb strings.Builder
+	for _, part := range parts {
+		sb.WriteString(part.Text)
+	}
+	return sb.String()
+}
 
 // Config configures the echo provider.
 type Config struct {
@@ -177,10 +196,9 @@ func (p *Provider) reply(req *pluginapi.Request) string {
 	var last string
 	for _, item := range req.Input {
 		if item.Type == "message" && item.Role == "user" {
-			last = string(item.Content)
+			last = flattenContent(item.Content)
 		}
 	}
-	last = strings.Trim(last, doubleQuote)
 	if last == "" {
 		last = req.Model
 	}

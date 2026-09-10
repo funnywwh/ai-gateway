@@ -57,10 +57,17 @@
 - [x] 流式用量累加器（delta 累加 → 最终值覆盖；只有增量则标 estimated）
 
 ## M5 Responses API
-- [ ] POST /v1/responses（非流式 + SSE 全事件序列、sequence_number）
-- [ ] GET/DELETE /v1/responses/{id}、previous_response_id 续接
-- [ ] GET /v1/models（仅对客售价）
-- [ ] 输入/思考/最终输出分离录制（默认：输入 full、思考与最终输出 off）
+- [x] 设计文档 docs/design/m5-responses-api.md；规格 docs/api-responses.md 状态改为已实现
+- [x] POST /v1/responses（非流式 + SSE 全事件序列、sequence_number 自增、逐帧 Flush）
+- [x] 请求校验（不允许项不出网）：background / 托管工具 / max_output_tokens<16 / 空 input / 温度范围
+- [x] responseAssembler：流式与非流式共用，保证 GET 与流式聚合逐字段一致
+- [x] GET/DELETE /v1/responses/{id}（按 Key 隔离所有权）、previous_response_id 续接
+- [x] GET /v1/models（仅对客售价，无成本/上游泄露）
+- [x] 输入/思考/最终输出分离录制（默认：输入 full、思考与最终输出 off）+ 敏感字段脱敏
+- [x] 执行运行时（`internal/runtime`）：内置/插件分派、熔断在途与延迟观测、额度冷却持久化
+- [x] 凭据 AES-GCM 加解密（`internal/creds`，AAD=provider id）
+- [x] 逐次尝试计量 + 限速票据结算；本地拒绝不计量
+- [x] 端到端验证：httptest 全链路测试 + 真实二进制 curl 走查（非流式/流式/401/400/模型列表/用量落库）
 
 ## M6 MCP 查询服务（网关为 MCP Server）
 - [ ] /mcp（Streamable HTTP）+ mcp_tokens 鉴权 + 账户强作用域

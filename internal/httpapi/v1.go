@@ -1,0 +1,698 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/winger/ai-gateway/internal/config"
+	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/quota"
+	"github.com/winger/ai-gateway/internal/responses"
+	"github.com/winger/ai-gateway/internal/runtime"
+	"github.com/winger/ai-gateway/internal/usage"
+	"github.com/winger/ai-gateway/pkg/pluginapi"
+)
+
+const (
+	maxAttemptsKey = "max_attempts"
+)
+
+// handleCreateResponse implements POST /v1/responses.
+func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	key, account, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, s.deps.Config.Server.MaxBodyBytes))
+	if err != nil {
+		writeAPIError(w, domain.ErrInvalidRequest("failed to read the request body"))
+		return
+	}
+
+	req, apiErr := responses.Parse(body)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
+
+	// Continuation: prepend the stored input+output items of the previous response.
+	var priorItems []pluginapi.Item
+	if req.PreviousResponseID != "" {
+		prev, err := s.deps.Records.GetResponse(ctx, req.PreviousResponseID)
+		if err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		if prev.APIKeyID != key.ID {
+			writeAPIError(w, domain.ErrNotFound("previous response "+req.PreviousResponseID))
+			return
+		}
+		priorItems = decodeStoredItems(prev.OutputJSON)
+		if req.Instructions == "" {
+			req.Instructions = prev.Instructions
+		}
+	}
+
+	// Admission: rate limits before any upstream work.
+	limits := s.limitsFor(key)
+	ticket, err := s.deps.Limiter.Reserve(ctx, scopeForKey(key.ID), limits)
+	if err != nil {
+		writeRateLimitError(w, err)
+		return
+	}
+	defer ticket.Release()
+
+	plan, err := s.deps.Router.Plan(domain.RouteRequest{
+		Model:       req.Model,
+		Key:         key,
+		Features:    featuresOf(req),
+		ProviderPin: r.Header.Get("X-Gateway-Provider"),
+		Strategy:    r.Header.Get("X-Gateway-Strategy"),
+	})
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+
+	canonical := plan.Resolved.Canonical
+	startedAt := time.Now()
+
+	var sse *sseWriter
+	var assembler *responses.Assembler
+	if req.Stream {
+		sse = newSSEWriter(w)
+		assembler = responses.NewAssembler(canonical, sse.Send)
+	} else {
+		assembler = responses.NewAssembler(canonical, nil)
+	}
+	if err := assembler.Start(); err != nil {
+		return // client already gone
+	}
+
+	var (
+		chosen     *domain.Candidate
+		providerID int64
+		lastErr    error
+		attemptNo  int
+		usage      pluginapi.Usage
+		ttftMS     int
+	)
+
+	maxAttempts := s.deps.Config.Routing.MaxAttempts
+	if maxAttempts <= 0 {
+		maxAttempts = 3
+	}
+
+	for i := range plan.Candidates {
+		if i >= maxAttempts {
+			break
+		}
+		cand := plan.Candidates[i]
+		attemptNo++
+
+		provReq, apiErr := req.ToProviderRequest(cand.UpstreamModel)
+		if apiErr != nil {
+			writeAPIError(w, apiErr)
+			return
+		}
+		if len(priorItems) > 0 {
+			provReq.Input = append(append([]pluginapi.Item{}, priorItems...), provReq.Input...)
+		}
+		provReq.Stream = req.Stream
+
+		attemptStarted := time.Now()
+		if req.Stream {
+			_, err = s.deps.Dispatcher.Stream(ctx, cand.ProviderID, provReq, assembler.Add)
+		} else {
+			var providerResp *pluginapi.Response
+			providerResp, err = s.deps.Dispatcher.Complete(ctx, cand.ProviderID, provReq)
+			if err == nil {
+				if ferr := responses.FeedItems(assembler, providerResp.Items); ferr != nil {
+					err = ferr
+				} else {
+					usage = providerResp.Usage
+				}
+			}
+		}
+
+		latency := int(time.Since(attemptStarted).Milliseconds())
+		if err == nil && ttftMS == 0 && assembler.Deltas() > 0 {
+			ttftMS = latency
+		}
+
+		s.recordAttempt(ctx, key, account, req, plan.Resolved, cand, attemptNo, err, latency, ttftMS, usage, assembler)
+
+		if err == nil {
+			chosen = &cand
+			providerID = cand.ProviderID
+			break
+		}
+		lastErr = err
+
+		// A stream that already produced output must not fail over: the client has
+		// seen partial content and a retry would duplicate or contradict it.
+		if assembler.Deltas() > 0 {
+			break
+		}
+		if resetAt, isQuota := runtime.QuotaError(err); isQuota {
+			s.deps.Dispatcher.CooldownForProvider(ctx, cand.RouteID, resetAt, "upstream quota exhausted")
+		}
+		if !runtime.Retryable(err) {
+			break
+		}
+	}
+
+	if chosen == nil {
+		payload := &responses.ErrorPayload{Code: "upstream_error", Message: errorMessage(lastErr)}
+		if apiErr, ok := domain.AsAPIError(lastErr); ok {
+			payload.Code = apiErr.Code
+			payload.Message = apiErr.Message
+		}
+		if req.Stream {
+			_, _ = assembler.Fail(payload)
+			s.persist(ctx, key, account, req, plan.Resolved.Canonical, 0, assembler, "failed")
+		} else {
+			writeAPIError(w, toAPIError(lastErr))
+		}
+		ticket.Settle(totalTokens(assembler.Usage()))
+		return
+	}
+
+	if req.Stream {
+		final := assembler.Usage()
+		if len(usage.Dimensions) > 0 {
+			final = usage
+		}
+		if _, err := assembler.Complete(final); err != nil {
+			return
+		}
+	} else {
+		final := usage
+		if len(final.Dimensions) == 0 {
+			final = assembler.Usage()
+		}
+		if _, err := assembler.Complete(final); err != nil {
+			writeAPIError(w, domain.ErrInternal(err.Error()))
+			return
+		}
+		resp := assembler.Response()
+		w.Header().Set("x-gateway-provider", chosen.ProviderName)
+		w.Header().Set("x-gateway-model", canonical)
+		if len(chosen.Degraded) > 0 {
+			w.Header().Set("x-gateway-degraded", strings.Join(chosen.Degraded, ","))
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+
+	s.persist(ctx, key, account, req, canonical, providerID, assembler, "completed")
+	ticket.Settle(totalTokens(assembler.Usage()))
+	_ = startedAt
+}
+
+// recordAttempt writes one usage_records row per upstream attempt.
+func (s *Server) recordAttempt(
+	ctx context.Context,
+	key *domain.APIKey,
+	account *domain.Account,
+	req *responses.Request,
+	resolved *domain.ResolvedModel,
+	cand domain.Candidate,
+	attemptNo int,
+	attemptErr error,
+	latencyMS, ttftMS int,
+	u pluginapi.Usage,
+	assembler *responses.Assembler,
+) {
+	if s.deps.Meter == nil {
+		return
+	}
+	dims := u.Dimensions
+	estimated := u.Estimated
+	if len(dims) == 0 {
+		dims = assembler.Usage().Dimensions
+		estimated = assembler.Usage().Estimated
+	}
+	status := "completed"
+	errorCode := ""
+	terminated := "completed"
+	if attemptErr != nil {
+		status = "failed"
+		terminated = "upstream_error"
+		if apiErr, ok := pluginapi.IsError(attemptErr); ok {
+			errorCode = apiErr.Code
+			if apiErr.Kind == pluginapi.KindQuotaExhausted {
+				terminated = "aborted_quota"
+			}
+		} else {
+			errorCode = "upstream_error"
+		}
+	}
+	_, err := s.deps.Meter.Record(ctx, &usage.Attempt{
+		RequestID:        requestIDFrom(ctx),
+		AttemptNo:        attemptNo,
+		AccountID:        account.ID,
+		APIKeyID:         key.ID,
+		Model:            req.Model,
+		ResolvedModel:    resolved.Canonical,
+		ProviderID:       cand.ProviderID,
+		Dimensions:       dims,
+		Estimated:        estimated,
+		LatencyMS:        latencyMS,
+		TTFTMS:           ttftMS,
+		Status:           status,
+		ErrorCode:        errorCode,
+		DegradedFeatures: cand.Degraded,
+		TerminatedReason: terminated,
+	})
+	if err != nil {
+		s.deps.Log.Warn("recording usage failed", "err", err, "request_id", requestIDFrom(ctx))
+	}
+}
+
+// persist stores the response (when requested) and the request log.
+func (s *Server) persist(
+	ctx context.Context,
+	key *domain.APIKey,
+	account *domain.Account,
+	req *responses.Request,
+	canonical string,
+	providerID int64,
+	assembler *responses.Assembler,
+	status string,
+) {
+	resp := assembler.Response()
+	outputJSON, err := json.Marshal(resp.Output)
+	if err != nil {
+		s.deps.Log.Warn("marshalling response output failed", "err", err)
+		outputJSON = []byte("[]")
+	}
+	usageJSON, _ := json.Marshal(resp.Usage)
+	completed := time.Now().UTC()
+	expires := completed.Add(30 * 24 * time.Hour)
+
+	if req.Stored() {
+		rec := &domain.ResponseRecord{
+			ID:           assembler.ID(),
+			APIKeyID:     key.ID,
+			AccountID:    account.ID,
+			Model:        canonical,
+			ProviderID:   providerID,
+			Status:       status,
+			RequestJSON:  truncate(string(mustJSON(req)), s.deps.Config.Recording.MaxBytes),
+			OutputJSON:   string(outputJSON),
+			UsageJSON:    string(usageJSON),
+			Instructions: req.Instructions,
+			CreatedAt:    completed,
+			CompletedAt:  &completed,
+			ExpiresAt:    &expires,
+		}
+		if err := s.deps.Records.PutResponse(ctx, rec); err != nil {
+			s.deps.Log.Warn("storing response failed", "err", err, "response_id", assembler.ID())
+		}
+	}
+
+	s.recordContent(ctx, key, account, req, assembler, status)
+}
+
+// recordContent applies the three-channel recording policy: input text is recorded by
+// default, thinking text and final output text only when the key opts in.
+func (s *Server) recordContent(
+	ctx context.Context,
+	key *domain.APIKey,
+	account *domain.Account,
+	req *responses.Request,
+	assembler *responses.Assembler,
+	status string,
+) {
+	cfg := s.deps.Config.Recording
+	inputMode := key.RecordInputMode
+	if inputMode == "" || inputMode == "inherit" {
+		inputMode = cfg.RecordInput
+	}
+	recordReasoning := key.RecordReasoning || cfg.RecordReasoning
+	recordOutput := key.RecordOutputText || cfg.RecordOutputText
+
+	limit := cfg.MaxBytes
+	if limit <= 0 {
+		limit = 1 << 20
+	}
+
+	rec := &domain.RequestLogRecord{
+		RequestID:        requestIDFrom(ctx),
+		APIKeyID:         key.ID,
+		AccountID:        account.ID,
+		Endpoint:         "/v1/responses",
+		Status:           status,
+		RecordInputMode:  inputMode,
+		RecordReasoning:  recordReasoning,
+		RecordOutputText: recordOutput,
+		CreatedAt:        time.Now().UTC(),
+	}
+	if inputMode != "off" {
+		payload := redact(string(mustJSON(req)), s.deps.Config.Recording.RedactPaths)
+		rec.RequestBytes = len(payload)
+		if len(payload) > limit {
+			payload = payload[:limit]
+			rec.Truncated = true
+		}
+		rec.RequestJSON = payload
+	}
+	if recordReasoning {
+		text := assembler.Reasoning()
+		rec.ReasoningRecorded = text != ""
+		if len(text) > limit {
+			text = text[:limit]
+			rec.Truncated = true
+		}
+		rec.ResponseReasoning = text
+	}
+	if recordOutput {
+		text := assembler.Text()
+		rec.OutputTextRecorded = text != ""
+		if len(text) > limit {
+			text = text[:limit]
+			rec.Truncated = true
+		}
+		rec.ResponseText = text
+	}
+	rec.ResponseBytes = len(rec.ResponseReasoning) + len(rec.ResponseText)
+
+	if err := s.deps.Records.PutRequestLog(ctx, rec); err != nil {
+		s.deps.Log.Warn("recording request content failed", "err", err, "request_id", rec.RequestID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GET / DELETE /v1/responses/{id}
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleGetResponse(w http.ResponseWriter, r *http.Request) {
+	key, _, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	rec, err := s.deps.Records.GetResponse(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	if rec.APIKeyID != key.ID {
+		writeAPIError(w, domain.ErrNotFound("response "+r.PathValue("id")))
+		return
+	}
+	out := map[string]any{
+		"id":         rec.ID,
+		"object":     "response",
+		"created_at": rec.CreatedAt.Unix(),
+		"status":     rec.Status,
+		"model":      rec.Model,
+		"output":     json.RawMessage(rec.OutputJSON),
+	}
+	if rec.UsageJSON != "" {
+		out["usage"] = json.RawMessage(rec.UsageJSON)
+	}
+	if rec.Instructions != "" {
+		out["instructions"] = rec.Instructions
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleDeleteResponse(w http.ResponseWriter, r *http.Request) {
+	key, _, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	rec, err := s.deps.Records.GetResponse(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	if rec.APIKeyID != key.ID {
+		writeAPIError(w, domain.ErrNotFound("response "+r.PathValue("id")))
+		return
+	}
+	if err := s.deps.Records.DeleteResponse(r.Context(), rec.ID); err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": rec.ID, "object": "response.deleted", "deleted": true,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// GET /v1/models
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
+	key, _, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	snap := s.deps.Registry.Snapshot()
+	grant := s.deps.Router.Authorize(key, s.deps.Router.ResolveTags(snap, key))
+
+	list := responses.ModelList{Object: "list", Data: []responses.Model{}}
+	for _, model := range snap.Models {
+		if !model.Enabled {
+			continue
+		}
+		if !granted(grant.Models, model.PublicName) {
+			continue
+		}
+		cands, err := s.deps.Router.Candidates(domain.RouteRequest{Model: model.PublicName, Key: key, Grant: grant})
+		if err != nil || len(cands) == 0 {
+			continue
+		}
+		entry := responses.Model{
+			ID: model.PublicName, Object: "model", Created: model.CreatedAt.Unix(), OwnedBy: "aigw",
+		}
+		if pricing := salePricing(model.SalePricingJSON, s.deps.Config.Billing); pricing != nil {
+			entry.Pricing = pricing
+		}
+		list.Data = append(list.Data, entry)
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+func scopeForKey(keyID int64) string { return fmt.Sprintf("key:%d", keyID) }
+
+// salePricing renders the sale price advertised on GET /v1/models. It deliberately
+// never exposes cost prices or upstream discounts.
+func salePricing(raw string, cfg config.Billing) *responses.ModelPricing {
+	out := &responses.ModelPricing{Currency: cfg.Currency}
+	if strings.TrimSpace(raw) == "" {
+		out.Basis = cfg.BasisDefault
+		out.MarkupBP = cfg.DefaultMarkupBP
+		return out
+	}
+	var wire struct {
+		Basis               string `json:"basis"`
+		MarkupBP            int    `json:"markup_bp"`
+		InputMicrosPerMTok  int64  `json:"input_micros_per_mtok"`
+		OutputMicrosPerMTok int64  `json:"output_micros_per_mtok"`
+	}
+	if err := json.Unmarshal([]byte(raw), &wire); err != nil {
+		return nil
+	}
+	out.Basis = wire.Basis
+	if out.Basis == "" {
+		out.Basis = cfg.BasisDefault
+	}
+	out.MarkupBP = wire.MarkupBP
+	if out.MarkupBP == 0 {
+		out.MarkupBP = cfg.DefaultMarkupBP
+	}
+	out.InputMicrosPerMTok = wire.InputMicrosPerMTok
+	out.OutputMicrosPerMTok = wire.OutputMicrosPerMTok
+	return out
+}
+
+// sensitiveKeys are always removed from recorded request bodies.
+var sensitiveKeys = map[string]bool{
+	"api_key": true, "apikey": true, "authorization": true, "password": true,
+	"secret": true, "token": true, "access_token": true, "refresh_token": true,
+	"credentials": true,
+}
+
+// redact removes credentials from a recorded payload, then applies operator-configured
+// JSON paths (dot notation, e.g. "metadata.internal_id").
+func redact(raw string, paths []string) string {
+	if strings.TrimSpace(raw) == "" {
+		return raw
+	}
+	var doc any
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		return raw // not JSON: leave untouched rather than corrupt it
+	}
+	redactValue(doc, "", paths)
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return raw
+	}
+	return string(out)
+}
+
+func redactValue(node any, path string, paths []string) {
+	switch typed := node.(type) {
+	case map[string]any:
+		for key, value := range typed {
+			child := key
+			if path != "" {
+				child = path + "." + key
+			}
+			if sensitiveKeys[strings.ToLower(key)] || matchesPath(child, paths) {
+				typed[key] = "[redacted]"
+				continue
+			}
+			redactValue(value, child, paths)
+		}
+	case []any:
+		for i, value := range typed {
+			redactValue(value, fmt.Sprintf("%s[%d]", path, i), paths)
+		}
+	}
+}
+
+func matchesPath(path string, paths []string) bool {
+	for _, want := range paths {
+		want = strings.TrimSpace(want)
+		if want == "" {
+			continue
+		}
+		if path == want || strings.HasPrefix(path, want+".") || strings.HasPrefix(path, want+"[") {
+			return true
+		}
+	}
+	return false
+}
+
+// limitsFor merges the key policy with every tag policy (strictest wins).
+func (s *Server) limitsFor(key *domain.APIKey) quota.Limits {
+	merged := quota.LimitsFromPolicy(key.PolicyJSON)
+	snap := s.deps.Registry.Snapshot()
+	for _, tag := range s.deps.Router.ResolveTags(snap, key) {
+		merged = quota.Merge(merged, quota.LimitsFromPolicy(tag.PolicyJSON))
+	}
+	return merged
+}
+
+func writeRateLimitError(w http.ResponseWriter, err error) {
+	exceeded, ok := err.(*quota.ExceededError)
+	if !ok {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	now := time.Now().UTC()
+	w.Header().Set("Retry-After", fmt.Sprintf("%d", exceeded.RetryAfter(now)))
+	limitKinds := map[quota.LimitKind]string{
+		quota.LimitRequests:    "requests",
+		quota.LimitTokens:      "tokens",
+		quota.LimitConcurrency: "requests",
+	}
+	kind := limitKinds[exceeded.Kind]
+	w.Header().Set("x-ratelimit-limit-"+kind, fmt.Sprintf("%d", exceeded.Limit))
+	w.Header().Set("x-ratelimit-remaining-"+kind, fmt.Sprintf("%d", exceeded.Remaining))
+	w.Header().Set("x-ratelimit-reset-"+kind, exceeded.ResetAt.UTC().Format(time.RFC3339))
+	writeAPIError(w, exceeded.ToAPIError())
+}
+
+// featuresOf derives the capability features a request requires.
+func featuresOf(req *responses.Request) map[string]bool {
+	features := map[string]bool{}
+	if req.Stream {
+		features["stream"] = true
+	}
+	if len(req.Tools) > 0 {
+		features["tools"] = true
+	}
+	if req.ParallelToolCalls != nil && *req.ParallelToolCalls {
+		features["parallel_tools"] = true
+	}
+	if req.Reasoning != nil && req.Reasoning.Effort != "" {
+		features["reasoning"] = true
+	}
+	if req.Text != nil && len(req.Text.Format) > 0 {
+		features["json_schema"] = true
+	}
+	return features
+}
+
+func granted(set map[string]bool, name string) bool {
+	if set == nil {
+		return false
+	}
+	return set["*"] || set[name]
+}
+
+func totalTokens(u pluginapi.Usage) int64 {
+	var total int64
+	for _, v := range u.Dimensions {
+		total += v
+	}
+	return total
+}
+
+func errorMessage(err error) string {
+	if err == nil {
+		return "no provider could serve the request"
+	}
+	return err.Error()
+}
+
+func mustJSON(v any) []byte {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return []byte("{}")
+	}
+	return raw
+}
+
+func truncate(s string, limit int) string {
+	if limit <= 0 || len(s) <= limit {
+		return s
+	}
+	return s[:limit]
+}
+
+func decodeStoredItems(outputJSON string) []pluginapi.Item {
+	if strings.TrimSpace(outputJSON) == "" {
+		return nil
+	}
+	var items []responses.OutputItem
+	if err := json.Unmarshal([]byte(outputJSON), &items); err != nil {
+		return nil
+	}
+	out := make([]pluginapi.Item, 0, len(items))
+	for _, item := range items {
+		switch item.Type {
+		case "message":
+			parts := make([]map[string]string, 0, len(item.Content))
+			for _, part := range item.Content {
+				parts = append(parts, map[string]string{"type": part.Type, "text": part.Text})
+			}
+			content, _ := json.Marshal(parts)
+			out = append(out, pluginapi.Item{Type: "message", Role: item.Role, Content: content})
+		case "function_call":
+			out = append(out, pluginapi.Item{
+				Type: "function_call", ID: item.ID, CallID: item.CallID,
+				Name: item.Name, Arguments: item.Arguments,
+			})
+		case "reasoning":
+			out = append(out, pluginapi.Item{Type: "reasoning", ID: item.ID})
+		}
+	}
+	return out
+}

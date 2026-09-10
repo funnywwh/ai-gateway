@@ -88,10 +88,11 @@ type Metrics struct {
 type State struct {
 	cfg Config
 
-	mu      sync.Mutex
-	targets map[string]*targetState
-	cursor  map[string]int
-	rnd     *rand.Rand
+	mu        sync.Mutex
+	targets   map[string]*targetState
+	cursor    map[string]int
+	cooldowns map[string]cooldownState
+	rnd       *rand.Rand
 }
 
 type targetState struct {

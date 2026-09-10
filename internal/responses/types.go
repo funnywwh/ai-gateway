@@ -1,0 +1,195 @@
+// Package responses implements the OpenAI Responses API surface: request parsing and
+// validation, the response assembler shared by the streaming and non-streaming paths,
+// and the wire types of the protocol.
+package responses
+
+import "encoding/json"
+
+// Request is the accepted subset of POST /v1/responses.
+type Request struct {
+	Model              string                     `json:"model"`
+	Input              json.RawMessage            `json:"input"`
+	Instructions       string                     `json:"instructions,omitempty"`
+	MaxOutputTokens    *int                       `json:"max_output_tokens,omitempty"`
+	Temperature        *float64                   `json:"temperature,omitempty"`
+	TopP               *float64                   `json:"top_p,omitempty"`
+	Stream             bool                       `json:"stream,omitempty"`
+	Tools              []Tool                     `json:"tools,omitempty"`
+	ToolChoice         json.RawMessage            `json:"tool_choice,omitempty"`
+	ParallelToolCalls  *bool                      `json:"parallel_tool_calls,omitempty"`
+	PreviousResponseID string                     `json:"previous_response_id,omitempty"`
+	Store              *bool                      `json:"store,omitempty"`
+	Metadata           map[string]string          `json:"metadata,omitempty"`
+	Reasoning          *Reasoning                 `json:"reasoning,omitempty"`
+	Text               *TextConfig                `json:"text,omitempty"`
+	Truncation         string                     `json:"truncation,omitempty"`
+	User               string                     `json:"user,omitempty"`
+	Include            []string                   `json:"include,omitempty"`
+	ServiceTier        string                     `json:"service_tier,omitempty"`
+	SafetyIdentifier   string                     `json:"safety_identifier,omitempty"`
+	PromptCacheKey     string                     `json:"prompt_cache_key,omitempty"`
+	Background         *bool                      `json:"background,omitempty"`
+	// Extra keeps unrecognised fields so they can be forwarded verbatim.
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// Tool is a function tool as accepted by the Responses API.
+type Tool struct {
+	Type        string          `json:"type"`
+	Name        string          `json:"name,omitempty"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Strict      *bool           `json:"strict,omitempty"`
+	// Function supports the nested form some clients still send.
+	Function *struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description,omitempty"`
+		Parameters  json.RawMessage `json:"parameters,omitempty"`
+		Strict      *bool           `json:"strict,omitempty"`
+	} `json:"function,omitempty"`
+}
+
+// Reasoning mirrors the reasoning parameter.
+type Reasoning struct {
+	Effort  string `json:"effort,omitempty"`
+	Summary string `json:"summary,omitempty"`
+}
+
+// TextConfig mirrors the text parameter.
+type TextConfig struct {
+	Format json.RawMessage `json:"format,omitempty"`
+}
+
+// Response is the OpenAI response object.
+type Response struct {
+	ID                 string             `json:"id"`
+	Object             string             `json:"object"`
+	CreatedAt          int64              `json:"created_at"`
+	Status             string             `json:"status"`
+	Model              string             `json:"model"`
+	Output             []OutputItem       `json:"output"`
+	Usage              *Usage             `json:"usage,omitempty"`
+	Instructions       string             `json:"instructions,omitempty"`
+	Metadata           map[string]string  `json:"metadata,omitempty"`
+	Error              *ErrorPayload      `json:"error,omitempty"`
+	IncompleteDetails  *IncompleteDetails `json:"incomplete_details,omitempty"`
+	PreviousResponseID string             `json:"previous_response_id,omitempty"`
+}
+
+// OutputItem is one entry of Response.Output.
+type OutputItem struct {
+	Type      string        `json:"type"`
+	ID        string        `json:"id"`
+	Status    string        `json:"status,omitempty"`
+	Role      string        `json:"role,omitempty"`
+	Content   []ContentPart `json:"content,omitempty"`
+	CallID    string        `json:"call_id,omitempty"`
+	Name      string        `json:"name,omitempty"`
+	Arguments string        `json:"arguments,omitempty"`
+	Summary   []ContentPart `json:"summary,omitempty"`
+}
+
+// ContentPart is one content fragment of a message or reasoning item.
+type ContentPart struct {
+	Type        string `json:"type"`
+	Text        string `json:"text,omitempty"`
+	Annotations []any  `json:"annotations,omitempty"`
+}
+
+// Usage is the token accounting block.
+type Usage struct {
+	InputTokens         int64                `json:"input_tokens"`
+	OutputTokens        int64                `json:"output_tokens"`
+	TotalTokens         int64                `json:"total_tokens"`
+	InputTokensDetails  *InputTokensDetails  `json:"input_tokens_details,omitempty"`
+	OutputTokensDetails *OutputTokensDetails `json:"output_tokens_details,omitempty"`
+}
+
+// InputTokensDetails breaks input tokens down by cache status.
+type InputTokensDetails struct {
+	CachedTokens int64 `json:"cached_tokens"`
+}
+
+// OutputTokensDetails breaks output tokens down by kind.
+type OutputTokensDetails struct {
+	ReasoningTokens int64 `json:"reasoning_tokens"`
+}
+
+// ErrorPayload is the error object embedded in a failed response.
+type ErrorPayload struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Type    string `json:"type,omitempty"`
+	Param   string `json:"param,omitempty"`
+}
+
+// IncompleteDetails explains why a response stopped early.
+type IncompleteDetails struct {
+	Reason string `json:"reason"`
+}
+
+// Event is one SSE event of the streaming protocol.
+type Event struct {
+	Type           string        `json:"type"`
+	SequenceNumber int           `json:"sequence_number"`
+	Response       *Response     `json:"response,omitempty"`
+	Item           *OutputItem   `json:"item,omitempty"`
+	ItemID         string        `json:"item_id,omitempty"`
+	OutputIndex    int           `json:"output_index,omitempty"`
+	ContentIndex   int           `json:"content_index,omitempty"`
+	SummaryIndex   int           `json:"summary_index,omitempty"`
+	Part           *ContentPart  `json:"part,omitempty"`
+	Delta          string        `json:"delta,omitempty"`
+	Text           string        `json:"text,omitempty"`
+	Arguments      string        `json:"arguments,omitempty"`
+	Error          *ErrorPayload `json:"error,omitempty"`
+}
+
+// Event type names (mirrors the Responses API streaming protocol).
+const (
+	EventCreated                = "response.created"
+	EventInProgress             = "response.in_progress"
+	EventOutputItemAdded        = "response.output_item.added"
+	EventOutputItemDone         = "response.output_item.done"
+	EventContentPartAdded       = "response.content_part.added"
+	EventContentPartDone        = "response.content_part.done"
+	EventOutputTextDelta        = "response.output_text.delta"
+	EventOutputTextDone         = "response.output_text.done"
+	EventRefusalDelta           = "response.refusal.delta"
+	EventRefusalDone            = "response.refusal.done"
+	EventReasoningSummaryAdded  = "response.reasoning_summary_part.added"
+	EventReasoningSummaryDelta  = "response.reasoning_summary_text.delta"
+	EventReasoningSummaryDone   = "response.reasoning_summary_text.done"
+	EventReasoningSummaryClosed = "response.reasoning_summary_part.done"
+	EventFunctionArgsDelta      = "response.function_call_arguments.delta"
+	EventFunctionArgsDone       = "response.function_call_arguments.done"
+	EventCompleted              = "response.completed"
+	EventFailed                 = "response.failed"
+	EventIncomplete             = "response.incomplete"
+	EventError                  = "error"
+)
+
+// Model is the object returned by GET /v1/models.
+type Model struct {
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created"`
+	OwnedBy string `json:"owned_by"`
+	// Pricing is the gateway extension: sale prices only, never cost.
+	Pricing *ModelPricing `json:"x-gateway-pricing,omitempty"`
+}
+
+// ModelPricing describes the sale price of a model.
+type ModelPricing struct {
+	Currency            string `json:"currency"`
+	InputMicrosPerMTok  int64  `json:"input_micros_per_mtok,omitempty"`
+	OutputMicrosPerMTok int64  `json:"output_micros_per_mtok,omitempty"`
+	Basis               string `json:"basis,omitempty"`
+	MarkupBP            int    `json:"markup_bp,omitempty"`
+}
+
+// ModelList is the response of GET /v1/models.
+type ModelList struct {
+	Object string  `json:"object"`
+	Data   []Model `json:"data"`
+}

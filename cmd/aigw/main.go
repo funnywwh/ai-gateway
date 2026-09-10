@@ -3,8 +3,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,12 +15,16 @@ import (
 	"github.com/winger/ai-gateway/internal/apikey"
 	"github.com/winger/ai-gateway/internal/balancer"
 	"github.com/winger/ai-gateway/internal/config"
-	"github.com/winger/ai-gateway/internal/quota"
-	"github.com/winger/ai-gateway/internal/usage"
+	"github.com/winger/ai-gateway/internal/creds"
+	"github.com/winger/ai-gateway/internal/httpapi"
 	"github.com/winger/ai-gateway/internal/logx"
+	"github.com/winger/ai-gateway/internal/pluginhost"
+	"github.com/winger/ai-gateway/internal/quota"
 	"github.com/winger/ai-gateway/internal/registry"
 	"github.com/winger/ai-gateway/internal/routing"
+	"github.com/winger/ai-gateway/internal/runtime"
 	"github.com/winger/ai-gateway/internal/store"
+	"github.com/winger/ai-gateway/internal/usage"
 )
 
 var (
@@ -122,20 +128,64 @@ func run() int {
 		"default_grant", cfg.Auth.DefaultGrant,
 	)
 
-	// Wired into the HTTP layer in M5.
-	_, _, _ = router, verifier, limiter
-	_ = meter
+	host := pluginhost.New(pluginhost.Config{
+		Dir:                  cfg.Plugins.Dir,
+		Extra:                cfg.Plugins.Extra,
+		StateDir:             cfg.Plugins.StateDir,
+		StartTimeout:         time.Duration(cfg.Plugins.StartTimeoutS) * time.Second,
+		PingInterval:         time.Duration(cfg.Plugins.PingIntervalS) * time.Second,
+		MaxRestartsPerMinute: cfg.Plugins.MaxRestartsPerMin,
+		LogTailLines:         cfg.Plugins.LogTailLines,
+		CancelGrace:          time.Duration(cfg.Routing.TTFTTimeoutS) * time.Second,
+	}, log)
+	dispatcher := runtime.New(runtime.Config{
+		CredentialsKey: creds.DeriveKey(cfg.CredentialsKey),
+	}, db, reg, host, balancerState, log)
 
-	if cfg.CredentialsKey == "" {
-		log.Warn("credentials_key is empty: provider credentials cannot be encrypted at rest")
+	api := httpapi.New(httpapi.Deps{
+		Config:     cfg,
+		Registry:   reg,
+		Router:     router,
+		Dispatcher: dispatcher,
+		Verifier:   verifier,
+		Limiter:    limiter,
+		Meter:      meter,
+		Records:    db,
+		Log:        log,
+		Version:    version,
+	})
+
+	httpServer := &http.Server{
+		Addr:              cfg.Server.Listen,
+		Handler:           api.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       cfg.Server.ReadTimeout(),
+	}
+	serverErr := make(chan error, 1)
+	go func() {
+		log.Info("http server listening", "addr", cfg.Server.Listen)
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+	}()
+
+	select {
+	case err := <-serverErr:
+		log.Error("http server failed", "err", err)
+		_ = host.StopAll(ctx)
+		return 1
+	case <-ctx.Done():
 	}
 
-	// Remaining wiring: M4 key auth + rate limits, M5 HTTP API, M6 MCP server,
-	// M7 hooks/recording, M8 admin API, M11+ billing, M16 backups.
-	log.Info("aigw ready",
-		"store", "sqlite",
-		"registry", snap.String(),
-		"next", "M5 responses API (see docs/TODO.md)",
-	)
+	log.Info("shutting down")
+	api.SetReady(false)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Warn("graceful shutdown incomplete", "err", err)
+	}
+	if err := host.StopAll(shutdownCtx); err != nil {
+		log.Warn("stopping plugin processes failed", "err", err)
+	}
 	return 0
 }

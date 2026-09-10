@@ -77,6 +77,14 @@ func ErrInsufficientQuota(msg string) *APIError {
 func ErrUnsupported(msg string) *APIError {
 	return newErr(http.StatusBadRequest, ErrTypeUnsupported, "unsupported_parameter", msg)
 }
+func ErrInternal(msg string) *APIError {
+	return newErr(http.StatusInternalServerError, ErrTypeAPI, "internal_error", msg)
+}
+
+func ErrGatewayTimeout(msg string) *APIError {
+	return newErr(http.StatusGatewayTimeout, ErrTypeAPI, "upstream_timeout", msg)
+}
+
 func ErrUpstream(status int, msg string) *APIError {
 	if status == 0 {
 		status = http.StatusBadGateway

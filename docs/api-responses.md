@@ -1,6 +1,6 @@
 # Responses API 兼容面
 
-> 状态：**规格（M5 实现）**。目标：OpenAI SDK / `curl` 可直接使用。
+> 状态：**已实现（M5）**。实现见 `internal/responses`（装配器/校验）、`internal/httpapi`（路由与 SSE）、`internal/runtime`（执行）。
 
 ## 端点
 

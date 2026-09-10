@@ -160,6 +160,47 @@ type MCPToken struct {
 	CreatedAt  time.Time
 }
 
+// ResponseRecord is one stored Responses API response (for GET /v1/responses/{id}
+// and previous_response_id continuation).
+type ResponseRecord struct {
+	ID           string
+	APIKeyID     int64
+	AccountID    int64
+	Model        string
+	ProviderID   int64
+	Status       string
+	RequestJSON  string
+	OutputJSON   string
+	UsageJSON    string
+	Instructions string
+	CreatedAt    time.Time
+	CompletedAt  *time.Time
+	ExpiresAt    *time.Time
+}
+
+// RequestLogRecord is one recorded request/response pair. Input text is recorded by
+// default; thinking text and final output text are only stored when the key opts in.
+type RequestLogRecord struct {
+	ID                  int64
+	RequestID           string
+	APIKeyID            int64
+	AccountID           int64
+	Endpoint            string
+	RequestJSON         string
+	ResponseReasoning   string
+	ResponseText        string
+	ReasoningRecorded   bool
+	OutputTextRecorded  bool
+	RequestBytes        int
+	ResponseBytes       int
+	Truncated           bool
+	RecordInputMode     string
+	RecordReasoning     bool
+	RecordOutputText    bool
+	Status              string
+	CreatedAt           time.Time
+}
+
 // LedgerEntry is an append-only balance mutation.
 type LedgerEntry struct {
 	ID                int64
