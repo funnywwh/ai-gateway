@@ -74,3 +74,41 @@ type BackupJob struct {
 	TriggeredBy string
 	Note        string
 }
+
+// UsageTotals is a single-row aggregate over one account's usage.
+type UsageTotals struct {
+	Attempts         int64
+	Failed           int64
+	Estimated        int64
+	PromptTokens     int64
+	CompletionTokens int64
+	CostMicros       int64
+	ChargeMicros     int64
+	TTFTAvgMS        int64
+	TTFTP95MS        int64
+	// TTFTP95Estimated is true when the percentile was computed from a capped sample.
+	TTFTP95Estimated bool
+}
+
+// UsageBreakdownRow is one group of a usage breakdown.
+type UsageBreakdownRow struct {
+	GroupKey         string
+	Requests         int64
+	Failed           int64
+	PromptTokens     int64
+	CompletionTokens int64
+	CostMicros       int64
+	ChargeMicros     int64
+}
+
+// UsageCounter is the pre-aggregated rollup used for quotas and reporting.
+type UsageCounter struct {
+	AccountID    int64
+	APIKeyID     int64
+	Tag          string
+	Period       string
+	Requests     int64
+	Tokens       int64
+	CostMicros   int64
+	ChargeMicros int64
+}

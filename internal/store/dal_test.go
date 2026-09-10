@@ -322,3 +322,41 @@ func TestBootstrapSeedsAccountsAndKeys(t *testing.T) {
 		t.Fatalf("tags json = %q", keys[0].TagsJSON)
 	}
 }
+
+func TestListRequestLogsTreatsZeroAsEveryAccount(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	first, err := db.UpsertAccount(ctx, &domain.Account{Name: "a", BillingMode: domain.BillingPrepaid, Status: "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := db.UpsertAccount(ctx, &domain.Account{Name: "b", BillingMode: domain.BillingPrepaid, Status: "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, accountID := range []int64{first, second} {
+		if err := db.PutRequestLog(ctx, &domain.RequestLogRecord{
+			RequestID: "req_log_" + string(rune('a'+index)), AccountID: accountID, APIKeyID: 1,
+			Endpoint: "/v1/responses", RequestJSON: `{"input":"hi"}`, Status: "200",
+			CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	all, err := db.ListRequestLogs(ctx, 0, time.Time{}, time.Time{}, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("account_id 0 returned %d rows, want every account's 2", len(all))
+	}
+
+	one, err := db.ListRequestLogs(ctx, first, time.Time{}, time.Time{}, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(one) != 1 || one[0].AccountID != first {
+		t.Fatalf("account filter returned %+v", one)
+	}
+}

@@ -66,6 +66,10 @@
    没有 go 工具链时 `t.Skip`。
 4. **额外加了三条结构性断言**：任何包不得 import `cmd/`；除 `cmd/aigw` 外不得同时 import `store` 与 `httpapi`；
    关键包（domain/store/routing/httpapi/billing/backup/webui/pluginapi/cmd）必须存在。
-5. **接口替身测试**：`billing` 用 `proxyStore`（内嵌端口、转发并计数）替换 `*store.DB`，
+5. **分层断言又抓到一次真实回退**（MCP-2 期间）：`internal/mcpsrv` 为了用聚合类型 import 了 `internal/store`，
+   测试立刻红。修法不是放宽规则，而是把 `UsageTotals`/`UsageBreakdownRow`/`UsageCounter` 三个类型上移到 `internal/domain`，
+   由 store 提供别名——**第三次出现同一模式**（`BackupJob`、这次的三个聚合类型）：凡是被「非持久化层」消费的数据形状，
+   都应定义在无依赖的领域包里。
+6. **接口替身测试**：`billing` 用 `proxyStore`（内嵌端口、转发并计数）替换 `*store.DB`，
    证明 `Grant`/`Balance` 只经过端口方法；httpapi 侧的可替换端口（`ProviderAdmin`/`Sealer`/`Prober`/`Backups`）
    已由 M8b/M16 的假实现覆盖。

@@ -11,17 +11,9 @@ import (
 	"github.com/winger/ai-gateway/internal/domain"
 )
 
-// UsageCounter is the pre-aggregated rollup used for monthly quotas and reporting.
-type UsageCounter struct {
-	AccountID    int64
-	APIKeyID     int64
-	Tag          string
-	Period       string
-	Requests     int64
-	Tokens       int64
-	CostMicros   int64
-	ChargeMicros int64
-}
+// UsageCounter is the domain rollup type; the alias keeps call sites readable while the
+// type itself lives in the dependency-free layer (see docs/design/m15-decoupling.md).
+type UsageCounter = domain.UsageCounter
 
 // SettlementInput is one attempt's worth of persistence work.
 type SettlementInput struct {

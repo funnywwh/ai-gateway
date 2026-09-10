@@ -17,8 +17,15 @@ func (db *DB) ListRequestLogs(ctx context.Context, accountID int64, from, to tim
 SELECT id, request_id, api_key_id, account_id, endpoint, request_json, response_reasoning,
        response_text, reasoning_recorded, output_text_recorded, request_bytes, response_bytes,
        truncated, record_input_mode, record_reasoning, record_output_text, status, created_at
-FROM request_logs WHERE account_id = ?`
-	args := []any{accountID}
+FROM request_logs WHERE 1 = 1`
+	args := []any{}
+	// account_id <= 0 means "every account": the management console lists requests across
+	// tenants, so the filter has to be optional (it used to be applied unconditionally,
+	// which silently returned nothing for the console).
+	if accountID > 0 {
+		query += " AND account_id = ?"
+		args = append(args, accountID)
+	}
 	if !from.IsZero() {
 		query += " AND created_at >= ?"
 		args = append(args, unix(from))

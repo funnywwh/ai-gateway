@@ -2,26 +2,18 @@ package store
 
 import (
 	"context"
+
 	"fmt"
+	"github.com/winger/ai-gateway/internal/domain"
 	"sort"
 	"time"
 )
 
-// UsageWindowTotals is a single-row aggregate over usage_records.
-type UsageWindowTotals struct {
-	Attempts         int64
-	Failed           int64
-	Estimated        int64
-	PromptTokens     int64
-	CompletionTokens int64
-	CostMicros       int64
-	ChargeMicros     int64
-	TTFTAvgMS        int64
-	TTFTP95MS        int64
-	// TTFTP95Estimated is true when the sample was capped, so the percentile is an
-	// approximation over the most recent requests rather than the whole window.
-	TTFTP95Estimated bool
-}
+// UsageWindowTotals and UsageBreakdownRow alias the domain types: persistence returns
+// the shared vocabulary instead of defining its own.
+type UsageWindowTotals = domain.UsageTotals
+
+type UsageBreakdownRow = domain.UsageBreakdownRow
 
 // UsageWindowTotals aggregates one account's attempts inside a window.
 //
@@ -94,17 +86,6 @@ func percentile(values []int64, fraction float64) int64 {
 		index = 0
 	}
 	return sorted[index]
-}
-
-// UsageBreakdownRow is one group of the usage breakdown.
-type UsageBreakdownRow struct {
-	GroupKey         string
-	Requests         int64
-	Failed           int64
-	PromptTokens     int64
-	CompletionTokens int64
-	CostMicros       int64
-	ChargeMicros     int64
 }
 
 // UsageBreakdown groups one account's attempts by model, key or day.

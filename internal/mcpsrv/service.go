@@ -12,7 +12,6 @@ import (
 
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/registry"
-	"github.com/winger/ai-gateway/internal/store"
 )
 
 // Store is the read-only persistence subset the service needs.
@@ -24,9 +23,9 @@ type Store interface {
 	GetRequestLog(ctx context.Context, requestID string) (*domain.RequestLogRecord, error)
 	ListRequestLogs(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*domain.RequestLogRecord, error)
 	ListAPIKeys(ctx context.Context, accountID int64) ([]*domain.APIKey, error)
-	UsageWindowTotals(ctx context.Context, accountID int64, from, to time.Time) (*store.UsageWindowTotals, error)
-	UsageBreakdown(ctx context.Context, accountID int64, from, to time.Time, groupBy string) ([]store.UsageBreakdownRow, error)
-	ListUsageCounters(ctx context.Context, accountID int64, period string) ([]store.UsageCounter, error)
+	UsageWindowTotals(ctx context.Context, accountID int64, from, to time.Time) (*domain.UsageTotals, error)
+	UsageBreakdown(ctx context.Context, accountID int64, from, to time.Time, groupBy string) ([]domain.UsageBreakdownRow, error)
+	ListUsageCounters(ctx context.Context, accountID int64, period string) ([]domain.UsageCounter, error)
 	ListInvoices(ctx context.Context, accountID int64, limit int) ([]*domain.Invoice, error)
 	GetInvoice(ctx context.Context, id int64) (*domain.Invoice, error)
 }

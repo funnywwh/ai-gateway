@@ -7,6 +7,7 @@ export const routes = [
   { path: '/accounts', title: '账户', module: './pages/accounts.js', group: '访问控制' },
   { path: '/tags', title: '标签', module: './pages/tags.js', group: '访问控制' },
   { path: '/mcp-tokens', title: 'MCP 令牌', module: './pages/mcp.js', group: '访问控制' },
+  { path: '/redemption-codes', title: '兑换码', module: './pages/codes.js', group: '访问控制' },
   { path: '/providers', title: '模型供应商', module: './pages/providers.js', group: '路由配置' },
   { path: '/models', title: '模型与路由', module: './pages/models.js', group: '路由配置' },
   { path: '/mappings', title: '模型映射', module: './pages/mappings.js', group: '路由配置' },
