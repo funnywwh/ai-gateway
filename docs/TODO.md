@@ -47,9 +47,14 @@
 - [x] Explain（解析链路 + 有序候选 + 排除原因），与数据面共用同一纯函数
 
 ## M4 鉴权 / 限速 / 计量
-- [ ] API Key 哈希校验与缓存（TTL 30s）
-- [ ] 分片滑动窗口限速（rpm/tpm/并发）
-- [ ] usage_records（attempt 粒度、分维度、overshoot）
+- [x] 设计文档 docs/design/m4-auth-quota-metering.md；规格补入 docs/api-responses.md「认证与限速」
+- [x] API Key 前缀索引 + 常量时间哈希比较 + 正/负缓存（30s/5s）+ 容量上限 + Invalidate
+- [x] last_used_at 节流异步更新（>60s 才写）
+- [x] 账户 suspended → 402（区别于 401）
+- [x] 分片滑动窗口限速（64 分片 × 60 个每秒槽位）：rpm/tpm/并发，最严合并，票据 Release/Settle
+- [x] ExceededError 携带维度/上限/剩余/重置时刻，可生成 x-ratelimit-* 与 Retry-After
+- [x] usage_records（attempt 粒度、分维度 JSON、degraded features、overshoot、来源标记）
+- [x] 流式用量累加器（delta 累加 → 最终值覆盖；只有增量则标 estimated）
 
 ## M5 Responses API
 - [ ] POST /v1/responses（非流式 + SSE 全事件序列、sequence_number）

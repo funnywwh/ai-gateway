@@ -10,8 +10,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/winger/ai-gateway/internal/apikey"
 	"github.com/winger/ai-gateway/internal/balancer"
 	"github.com/winger/ai-gateway/internal/config"
+	"github.com/winger/ai-gateway/internal/quota"
+	"github.com/winger/ai-gateway/internal/usage"
 	"github.com/winger/ai-gateway/internal/logx"
 	"github.com/winger/ai-gateway/internal/registry"
 	"github.com/winger/ai-gateway/internal/routing"
@@ -104,7 +107,24 @@ func run() int {
 		"routes", len(snap.Routes),
 		"mappings", len(snap.Mappings),
 	)
-	_ = router // wired into the HTTP layer in M5
+
+	verifier := apikey.New(db, apikey.Config{
+		TTL:           cfg.Auth.KeyCacheTTL(),
+		NegativeTTL:   5 * time.Second,
+		MaxEntries:    10000,
+		TouchInterval: time.Minute,
+	})
+	limiter := quota.New(cfg.RateLimit.Shards)
+	meter := usage.New(db)
+	log.Info("auth, rate limit and metering ready",
+		"key_cache_ttl", cfg.Auth.KeyCacheTTL().String(),
+		"limiter_shards", cfg.RateLimit.Shards,
+		"default_grant", cfg.Auth.DefaultGrant,
+	)
+
+	// Wired into the HTTP layer in M5.
+	_, _, _ = router, verifier, limiter
+	_ = meter
 
 	if cfg.CredentialsKey == "" {
 		log.Warn("credentials_key is empty: provider credentials cannot be encrypted at rest")

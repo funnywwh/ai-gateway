@@ -16,6 +16,21 @@
 
 鉴权：`Authorization: Bearer sk-gw-…`（亦兼容 `x-api-key`）。
 
+## 认证与限速
+
+- **凭据形式**：`sk-gw_` / `sk-gw-` 前缀的高熵随机串；服务端只存 **SHA-256 哈希 + 前 12 字符前缀**。
+- **校验路径**：前缀唯一索引取行 → 常量时间比较哈希 → 校验状态/有效期 → 校验账户状态。
+- **缓存**：成功结果缓存 30s（`auth.key_cache_ttl_s`）；失败结果短缓存 5s（防爆破/防打库）；
+  管理面写操作后立即失效（`Invalidate`/`InvalidateAll`）。
+- **账户停用**：凭据正确但账户 `suspended` → **402 `billing_hard_limit_reached`**（不是 401）。
+- **限速维度**：`rpm`（请求数）、`tpm`（token，完成后结算）、`concurrency`（进行中）。
+  有效限额 = key / 标签 / 账户三处**取最严**。
+- **限速响应**：429，附
+  `x-ratelimit-limit-requests`、`x-ratelimit-remaining-requests`、`x-ratelimit-reset-requests`、
+  `x-ratelimit-limit-tokens`、`x-ratelimit-remaining-tokens`、`x-ratelimit-reset-tokens` 与 `Retry-After`。
+- **计量**：只有**实际出网**的尝试才写 `usage_records`；本地拒绝（401/402/403/404/429/400 未出网）
+  只写 `request_logs`、审计与 hook，**不计费**。
+
 ## 请求字段
 
 透传（进入供应商请求）：`model`、`input`、`instructions`、`max_output_tokens`、
