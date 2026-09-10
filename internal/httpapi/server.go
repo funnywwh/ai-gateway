@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/winger/ai-gateway/internal/admin"
 	"github.com/winger/ai-gateway/internal/apikey"
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/domain"
@@ -23,6 +24,13 @@ import (
 	"github.com/winger/ai-gateway/internal/runtime"
 	"github.com/winger/ai-gateway/internal/usage"
 )
+
+// AdminService is the management authentication port.
+type AdminService interface {
+	Login(ctx context.Context, username, password, clientKey string) (*admin.Session, error)
+	Authenticate(ctx context.Context, sessionID, token string) (*domain.AdminUser, error)
+	Logout(ctx context.Context, sessionID string) error
+}
 
 // HookEmitter publishes lifecycle events (best effort, never blocking).
 type HookEmitter interface {
@@ -52,6 +60,15 @@ type Deps struct {
 	MCPTokens MCPTokens
 	// Hooks receives lifecycle events; nil disables hook delivery.
 	Hooks HookEmitter
+	// Admin enables the management API (session auth + CRUD).
+	Admin       AdminService
+	AdminStore  AdminStore
+	// Reload rebuilds the routing snapshot after a write; InvalidateKey/All drop
+	// cached credentials; KeyCacheSize reports cache occupancy for /stats.
+	Reload        func(ctx context.Context) (any, error)
+	InvalidateKey func(prefix string)
+	InvalidateAll func()
+	KeyCacheSize  func() int
 	Log       *slog.Logger
 	Version   string
 }
@@ -88,6 +105,17 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /v1/responses/{id}", s.handleDeleteResponse)
 	s.mux.HandleFunc("GET /v1/models", s.handleListModels)
 	s.mux.HandleFunc("POST /mcp", s.handleMCP)
+
+	s.mux.HandleFunc("POST /admin/api/v1/auth/login", s.handleAdminLogin)
+	s.mux.HandleFunc("POST /admin/api/v1/auth/logout", s.handleAdminLogout)
+	s.mux.HandleFunc("GET /admin/api/v1/auth/me", s.handleAdminMe)
+	s.mux.HandleFunc("GET /admin/api/v1/stats", s.handleAdminStats)
+	s.mux.HandleFunc("GET /admin/api/v1/keys", s.handleAdminListKeys)
+	s.mux.HandleFunc("POST /admin/api/v1/keys", s.handleAdminCreateKey)
+	s.mux.HandleFunc("PATCH /admin/api/v1/keys/{id}", s.handleAdminPatchKey)
+	s.mux.HandleFunc("GET /admin/api/v1/requests", s.handleAdminRequests)
+	s.mux.HandleFunc("GET /admin/api/v1/requests/{id}", s.handleAdminRequestDetail)
+	s.mux.HandleFunc("GET /admin/api/v1/audit-logs", s.handleAdminAuditLogs)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)

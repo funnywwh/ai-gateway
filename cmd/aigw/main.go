@@ -12,10 +12,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/winger/ai-gateway/internal/admin"
 	"github.com/winger/ai-gateway/internal/apikey"
 	"github.com/winger/ai-gateway/internal/balancer"
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/creds"
+	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/hook"
 	"github.com/winger/ai-gateway/internal/httpapi"
 	"github.com/winger/ai-gateway/internal/logx"
@@ -164,6 +166,26 @@ func run() int {
 		Currency:   cfg.Billing.Currency,
 	})
 
+	adminAuth := admin.NewAuth(db, admin.Config{
+		SessionTTL:    12 * time.Hour,
+		LoginAttempts: 10,
+		LoginWindow:   5 * time.Minute,
+	})
+	adminHash, err := admin.HashPassword(cfg.Bootstrap.Admin.Password)
+	if err != nil {
+		log.Error("hashing the bootstrap admin password failed", "err", err)
+		return 1
+	}
+	if cfg.Bootstrap.Admin.Username != "" && cfg.Bootstrap.Admin.Password != "" {
+		if _, err := db.UpsertAdminUser(ctx, &domain.AdminUser{
+			Username: cfg.Bootstrap.Admin.Username, PasswordHash: adminHash, Role: "admin",
+		}); err != nil {
+			log.Error("seeding the bootstrap admin user failed", "err", err)
+			return 1
+		}
+		log.Info("admin user ready", "username", cfg.Bootstrap.Admin.Username)
+	}
+
 	api := httpapi.New(httpapi.Deps{
 		Config:     cfg,
 		Registry:   reg,
@@ -176,6 +198,22 @@ func run() int {
 		MCP:        mcpService,
 		MCPTokens:  db,
 		Hooks:      hookDispatcher,
+		Admin:      adminAuth,
+		AdminStore: db,
+		Reload: func(ctx context.Context) (any, error) {
+			snap, err := reg.Reload(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return snap.String(), nil
+		},
+		InvalidateKey: func(prefix string) {
+			if prefix != "" {
+				verifier.Invalidate(prefix)
+			}
+		},
+		InvalidateAll: verifier.InvalidateAll,
+		KeyCacheSize:  verifier.Size,
 		Log:        log,
 		Version:    version,
 	})
