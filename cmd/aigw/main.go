@@ -267,6 +267,8 @@ func run() int {
 		ReplayInterval: time.Minute,
 	}, log)
 	billingService.StartReservationGC(ctx, time.Minute)
+	// Gift credit matures on a daily policy, not in real time.
+	billingService.StartExpiryJob(ctx, 24*time.Hour)
 	mcpService.SetReservationReporter(func(accountID int64) int64 {
 		var total int64
 		for _, reservation := range billingService.Reservations() {

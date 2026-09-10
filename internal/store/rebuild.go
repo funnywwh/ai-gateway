@@ -75,13 +75,15 @@ func (db *DB) RebuildCharges(ctx context.Context, accountID int64, charges []*do
 			entry     domain.LedgerEntry
 			apiKeyID  sql.NullInt64
 			createdAt int64
+			expiresAt sql.NullInt64
 		)
 		if err := rows.Scan(&entry.ID, &entry.AccountID, &apiKeyID, &entry.Kind, &entry.AmountMicros,
 			&entry.BalanceAfterMicros, &entry.RefType, &entry.RefID, &entry.IdemKey,
-			&entry.RebuildSeq, &entry.Note, &entry.Actor, &createdAt); err != nil {
+			&entry.RebuildSeq, &entry.Note, &entry.Actor, &createdAt, &expiresAt); err != nil {
 			rows.Close()
 			return outcome, fmt.Errorf("store: scan non-charge ledger row: %w", err)
 		}
+		entry.ExpiresAt = timePtrFromNull(expiresAt)
 		keep = append(keep, row{entry: entry, keyID: nullInt64Ptr(apiKeyID), created: createdAt})
 	}
 	if err := rows.Err(); err != nil {
@@ -112,10 +114,10 @@ func (db *DB) RebuildCharges(ctx context.Context, accountID int64, charges []*do
 		entry := item.entry
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO ledger_entries(account_id, api_key_id, kind, amount_micros, balance_after_micros,
-  ref_type, ref_id, idem_key, rebuild_seq, note, actor, created_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ref_type, ref_id, idem_key, rebuild_seq, note, actor, created_at, expires_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			accountID, item.keyID, entry.Kind, entry.AmountMicros, running, entry.RefType,
-			entry.RefID, entry.IdemKey, entry.RebuildSeq+1, entry.Note, entry.Actor, item.created); err != nil {
+			entry.RefID, entry.IdemKey, entry.RebuildSeq+1, entry.Note, entry.Actor, item.created, unixPtr(entry.ExpiresAt)); err != nil {
 			return outcome, fmt.Errorf("store: reinsert ledger entry %s: %w", entry.IdemKey, err)
 		}
 	}

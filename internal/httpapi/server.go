@@ -245,6 +245,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /admin/api/v1/billing/reconcile", s.handleAdminReconcile)
 	s.mux.HandleFunc("GET /admin/api/v1/billing/reconciliations", s.handleAdminReconciliations)
 	s.mux.HandleFunc("POST /admin/api/v1/billing/failures/replay", s.handleAdminReplayFailures)
+	s.mux.HandleFunc("POST /admin/api/v1/billing/expire-credit", s.handleAdminExpireCredit)
 	s.mux.HandleFunc("GET /admin/api/v1/backups", s.handleAdminListBackups)
 	s.mux.HandleFunc("POST /admin/api/v1/backups", s.handleAdminRunBackup)
 	s.mux.HandleFunc("DELETE /admin/api/v1/backups/{id}", s.handleAdminDeleteBackup)

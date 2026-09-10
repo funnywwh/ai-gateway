@@ -22,6 +22,7 @@ type ServiceStore interface {
 	GetAccount(ctx context.Context, id int64) (*domain.Account, error)
 	SetAccountStatus(ctx context.Context, id int64, status string) error
 	AppendLedger(ctx context.Context, entries []*domain.LedgerEntry) (int, error)
+	ListExpiringGrants(ctx context.Context, now time.Time, limit int) ([]*domain.LedgerEntry, error)
 	GetInvoiceByPeriod(ctx context.Context, accountID int64, start, end time.Time) (*domain.Invoice, error)
 	GetInvoice(ctx context.Context, id int64) (*domain.Invoice, error)
 	ListInvoices(ctx context.Context, accountID int64, limit int) ([]*domain.Invoice, error)

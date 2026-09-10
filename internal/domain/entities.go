@@ -216,4 +216,7 @@ type LedgerEntry struct {
 	Note               string
 	Actor              string
 	CreatedAt          time.Time
+	// ExpiresAt applies to credit_grant entries: unused gift credit matures here and is
+	// written off by the expiry job.
+	ExpiresAt *time.Time
 }

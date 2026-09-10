@@ -24,6 +24,7 @@ type BillingPort interface {
 	Rebuild(ctx context.Context, accountID int64, apply bool) (*billing.RebuildPlan, error)
 	Stats() billing.Stats
 	Reservations() []billing.Reservation
+	ExpireGiftCredit(ctx context.Context, now time.Time, limit int) (billing.ExpiryResult, error)
 }
 
 // ruleSetsFor resolves the cost table of one provider's mapping and the model's sale

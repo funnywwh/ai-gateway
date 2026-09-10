@@ -45,10 +45,10 @@ func (db *DB) AppendLedger(ctx context.Context, entries []*domain.LedgerEntry) (
 
 		res, err := tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO ledger_entries(account_id, api_key_id, kind, amount_micros, balance_after_micros,
-  ref_type, ref_id, idem_key, rebuild_seq, note, actor, created_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ref_type, ref_id, idem_key, rebuild_seq, note, actor, created_at, expires_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			e.AccountID, e.APIKeyID, e.Kind, e.AmountMicros, newBalance, e.RefType, e.RefID,
-			e.IdemKey, e.RebuildSeq, e.Note, e.Actor, unix(e.CreatedAt))
+			e.IdemKey, e.RebuildSeq, e.Note, e.Actor, unix(e.CreatedAt), unixPtr(e.ExpiresAt))
 		if err != nil {
 			return 0, fmt.Errorf("store: insert ledger entry %s: %w", e.IdemKey, err)
 		}
@@ -76,8 +76,47 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 	return applied, nil
 }
 
+// ListExpiringGrants returns matured gift grants that have not been expired yet.
+func (db *DB) ListExpiringGrants(ctx context.Context, now time.Time, limit int) ([]*domain.LedgerEntry, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	rows, err := db.read.QueryContext(ctx, `
+SELECT `+ledgerCols+` FROM ledger_entries le
+WHERE le.kind = 'credit_grant' AND le.expires_at IS NOT NULL AND le.expires_at <= ?
+  AND le.amount_micros > 0
+  AND NOT EXISTS (SELECT 1 FROM ledger_entries x WHERE x.kind = 'expire' AND x.ref_id = le.idem_key)
+ORDER BY le.expires_at, le.id LIMIT ?`, unix(now), limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: list expiring grants: %w", err)
+	}
+	defer rows.Close()
+	out := []*domain.LedgerEntry{}
+	for rows.Next() {
+		var (
+			e         domain.LedgerEntry
+			apiKeyID  sql.NullInt64
+			createdAt int64
+			expiresAt sql.NullInt64
+		)
+		if err := rows.Scan(&e.ID, &e.AccountID, &apiKeyID, &e.Kind, &e.AmountMicros,
+			&e.BalanceAfterMicros, &e.RefType, &e.RefID, &e.IdemKey, &e.RebuildSeq,
+			&e.Note, &e.Actor, &createdAt, &expiresAt); err != nil {
+			return nil, fmt.Errorf("store: scan expiring grant: %w", err)
+		}
+		e.APIKeyID = nullInt64Ptr(apiKeyID)
+		e.ExpiresAt = timePtrFromNull(expiresAt)
+		e.CreatedAt = timeFromUnix(createdAt)
+		out = append(out, &e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate expiring grants: %w", err)
+	}
+	return out, nil
+}
+
 const ledgerCols = `id, account_id, api_key_id, kind, amount_micros, balance_after_micros,
-	ref_type, ref_id, idem_key, rebuild_seq, note, actor, created_at`
+	ref_type, ref_id, idem_key, rebuild_seq, note, actor, created_at, expires_at`
 
 // ListLedger returns ledger entries of one account inside a time window (newest first).
 func (db *DB) ListLedger(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*domain.LedgerEntry, error) {
@@ -109,14 +148,16 @@ func (db *DB) ListLedger(ctx context.Context, accountID int64, from, to time.Tim
 			e         domain.LedgerEntry
 			apiKeyID  sql.NullInt64
 			createdAt int64
+			expiresAt sql.NullInt64
 		)
 		if err := rows.Scan(&e.ID, &e.AccountID, &apiKeyID, &e.Kind, &e.AmountMicros,
 			&e.BalanceAfterMicros, &e.RefType, &e.RefID, &e.IdemKey, &e.RebuildSeq,
-			&e.Note, &e.Actor, &createdAt); err != nil {
+			&e.Note, &e.Actor, &createdAt, &expiresAt); err != nil {
 			return nil, fmt.Errorf("store: scan ledger entry: %w", err)
 		}
 		e.APIKeyID = nullInt64Ptr(apiKeyID)
 		e.CreatedAt = timeFromUnix(createdAt)
+		e.ExpiresAt = timePtrFromNull(expiresAt)
 		out = append(out, &e)
 	}
 	if err := rows.Err(); err != nil {

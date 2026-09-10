@@ -60,6 +60,7 @@ func (s *Service) Grant(ctx context.Context, req CreditRequest) (*domain.LedgerE
 		RefType: "credit", RefID: req.RefID,
 		IdemKey: fmt.Sprintf("%s:%s", req.Kind, req.RefID),
 		Note:    req.Note, Actor: req.Actor, CreatedAt: now,
+		ExpiresAt: req.ExpiresAt,
 	}
 	n, err := s.store.AppendLedger(ctx, []*domain.LedgerEntry{entry})
 	if err != nil {
@@ -155,17 +156,4 @@ func (s *Service) RedeemCode(ctx context.Context, code string, accountID int64, 
 		return nil, nil, err
 	}
 	return record, entry, nil
-}
-
-// ExpireGiftCredit writes the offsetting entry for a matured gift grant.
-func (s *Service) ExpireGiftCredit(ctx context.Context, accountID int64, amount int64, refID, actor string) (*domain.LedgerEntry, error) {
-	return s.expire(ctx, accountID, amount, refID, actor)
-}
-
-func (s *Service) expire(ctx context.Context, accountID int64, amount int64, refID, actor string) (*domain.LedgerEntry, error) {
-	entry, _, err := s.Grant(ctx, CreditRequest{
-		AccountID: accountID, Kind: "expire", AmountMicros: -amount,
-		RefID: refID, Note: "gift credit expired", Actor: actor,
-	})
-	return entry, err
 }

@@ -119,11 +119,11 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			newBalance := balance + entry.AmountMicros
 			res, err := tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO ledger_entries(account_id, api_key_id, kind, amount_micros, balance_after_micros,
-  ref_type, ref_id, idem_key, rebuild_seq, note, actor, created_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+  ref_type, ref_id, idem_key, rebuild_seq, note, actor, created_at, expires_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				entry.AccountID, entry.APIKeyID, entry.Kind, entry.AmountMicros, newBalance,
 				entry.RefType, entry.RefID, entry.IdemKey, entry.RebuildSeq, entry.Note,
-				entry.Actor, unix(entry.CreatedAt))
+				entry.Actor, unix(entry.CreatedAt), unixPtr(entry.ExpiresAt))
 			if err != nil {
 				return 0, fmt.Errorf("store: insert ledger entry %s: %w", entry.IdemKey, err)
 			}

@@ -172,3 +172,32 @@ func toInt64(value any) int64 {
 	}
 	return 0
 }
+
+// handleAdminExpireCredit runs the gift-credit expiry pass on demand. The same job
+// runs at startup and daily; this endpoint exists so an operator can see the outcome
+// without waiting for the schedule.
+func (s *Server) handleAdminExpireCredit(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.adminActor(w, r, true)
+	if !ok {
+		return
+	}
+	service, ok := portReady(w, s.deps.Billing, "billing")
+	if !ok {
+		return
+	}
+	result, err := service.ExpireGiftCredit(r.Context(), time.Now().UTC(), 500)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	s.audit(r.Context(), actor.Username, "expire", "credit_grant", "", map[string]any{
+		"scanned": result.Scanned, "expired": result.Expired, "micros": result.Micros,
+	}, "ok")
+	if result.Expired > 0 {
+		s.reload(r.Context(), "gift credit expired", true)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"scanned": result.Scanned, "expired": result.Expired,
+		"skipped": result.Skipped, "expired_micros": result.Micros,
+	})
+}
