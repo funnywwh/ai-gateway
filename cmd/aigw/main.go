@@ -15,6 +15,7 @@ import (
 	"github.com/winger/ai-gateway/internal/admin"
 	"github.com/winger/ai-gateway/internal/apikey"
 	"github.com/winger/ai-gateway/internal/balancer"
+	"github.com/winger/ai-gateway/internal/billing"
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/creds"
 	"github.com/winger/ai-gateway/internal/domain"
@@ -175,6 +176,24 @@ func run() int {
 		Currency:   cfg.Billing.Currency,
 	})
 
+	billingService := billing.NewService(ctx, db, billing.ServiceConfig{
+		Writer: billing.Config{
+			BatchSize:     cfg.Billing.WriterBatchSize,
+			FlushInterval: time.Duration(cfg.Billing.WriterFlushMS) * time.Millisecond,
+			FallbackFile:  cfg.Billing.FallbackFile,
+			OnFallback: func(settlement *billing.Settlement, cause error) {
+				// The fallback file is the durable record; the database row is for querying.
+				if err := db.RecordBillingFailure(ctx, settlement, cause); err != nil {
+					log.Error("recording a billing failure failed", "err", err)
+				}
+			},
+		},
+		ReservationTTL: time.Duration(cfg.Billing.ReservationTTLS) * time.Second,
+		ReplayInterval: time.Minute,
+	}, log)
+	billingService.StartReservationGC(ctx, time.Minute)
+	log.Info("billing ready", "batch_size", cfg.Billing.WriterBatchSize, "fallback_file", cfg.Billing.FallbackFile)
+
 	adminAuth := admin.NewAuth(db, admin.Config{
 		SessionTTL:    12 * time.Hour,
 		LoginAttempts: 10,
@@ -244,6 +263,8 @@ func run() int {
 		InvalidateAll: verifier.InvalidateAll,
 		KeyCacheSize:  verifier.Size,
 		UI:            webui.Handler(),
+		Billing:       billingService,
+		Ledger:        billingService,
 		Log:           log,
 		Version:       version,
 	})
@@ -279,6 +300,9 @@ func run() int {
 	}
 	if err := host.StopAll(shutdownCtx); err != nil {
 		log.Warn("stopping plugin processes failed", "err", err)
+	}
+	if remaining := billingService.Close(5 * time.Second); remaining > 0 {
+		log.Error("billing settlements could not be persisted before shutdown", "remaining", remaining)
 	}
 	hookDispatcher.Close(3 * time.Second)
 	return 0

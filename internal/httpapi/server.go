@@ -79,6 +79,9 @@ type Deps struct {
 	ReloadHooks func(ctx context.Context) error
 	// UI serves the embedded management console at /admin/ui/; nil disables it.
 	UI http.Handler
+	// Billing exposes ledger maintenance; Ledger reads balances and history.
+	Billing BillingAdmin
+	Ledger  LedgerAdmin
 	// Reload rebuilds the routing snapshot after a write; InvalidateKey/All drop
 	// cached credentials; KeyCacheSize reports cache occupancy for /stats.
 	Reload        func(ctx context.Context) (any, error)
@@ -208,6 +211,11 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("GET /admin/api/v1/router/explain", s.handleAdminExplainRouter)
 	s.mux.HandleFunc("POST /admin/api/v1/pricing/simulate", s.handleAdminSimulatePricing)
+	s.mux.HandleFunc("GET /admin/api/v1/billing/invariants", s.handleAdminInvariants)
+	s.mux.HandleFunc("GET /admin/api/v1/billing/status", s.handleAdminBillingStatus)
+	s.mux.HandleFunc("POST /admin/api/v1/billing/rebuild-ledger", s.handleAdminRebuildLedger)
+	s.mux.HandleFunc("GET /admin/api/v1/accounts/{id}/balance", s.handleAdminAccountBalance)
+	s.mux.HandleFunc("GET /admin/api/v1/accounts/{id}/ledger", s.handleAdminAccountLedger)
 	s.mux.HandleFunc("POST /admin/api/v1/pricing/validate", s.handleAdminValidatePricing)
 	s.mux.HandleFunc("GET /admin/api/v1/settings", s.handleAdminGetSettings)
 	s.mux.HandleFunc("PUT /admin/api/v1/settings/{key}", s.handleAdminPutSetting)

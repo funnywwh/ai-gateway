@@ -137,9 +137,17 @@
 - [ ] 界面：Pricing 页面（规则表格编辑器、模板、阶梯预览）——依赖 M11b 的账本与真实用量展示
 
 ## M11b 账本与在途额度
-- [ ] 单写者批处理 + fsync 兜底 + 幂等键
-- [ ] 预付/后付、预留、在途策略、中断超支吸收、TTL/心跳
-- [ ] rebuild-ledger 全量重放 + 四条不变量巡检
+- [x] 设计文档 docs/design/m11b-ledger-inflight.md（已在对话中输出，分两批提交）
+- [x] **M11b-1**：`store.SettleBatch` 单事务结算（用量 + 账本 + 余额 + 计数器一次落盘）
+- [x] 迁移 0002：`usage_records(request_id, attempt_no)` 唯一索引（重放幂等的前提，测试抓到的真缺陷）
+- [x] 单写者批处理写入器：攒批/定时 flush、队列满同步直写、批失败降级逐条、再失败落兜底
+- [x] 兜底：`billing-fallback.jsonl`（fsync）+ `billing_failures` 表 + 启动与每 60s 幂等重放 + 清空已重放行
+- [x] 在途预留表（TTL + 心跳 + GC）与准入判定（预付 ≥0、后付到授信、overdraft 策略）
+- [x] `pricing.WorstCaseRates` + `billing.EstimateReserve`：按最贵档位/时段预留，防止预付超卖
+- [x] 四条不变量巡检 + `rebuild-ledger`（默认 dry-run，apply 单事务重写 charge 并重算余额）
+- [x] 管理面：/billing/invariants、/billing/status、/billing/rebuild-ledger、/accounts/{id}/balance、/accounts/{id}/ledger
+- [x] 测试：6 个用例（原子性+幂等、批量回滚、写入器批量与兜底重放、预留与准入、预留估算、巡检与重建）
+- [ ] **M11b-2**：接入 `/v1/responses`（准入 402、逐尝试计价、结算投递、在途策略 warn/throttle/abort/allow_overdraft 与中断语义）
 
 ## M12 账单 / 充值 / 对账补偿
 - [ ] invoice_lines 物化 + 状态流转 + 导出
