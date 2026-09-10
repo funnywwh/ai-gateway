@@ -120,7 +120,7 @@ type Billing struct {
 	InflightSoftRatio     float64 `yaml:"inflight_soft_ratio"`
 	InflightHardRatio     float64 `yaml:"inflight_hard_ratio"`
 	OverdraftLimitMicros  int64   `yaml:"overdraft_limit_micros"`
-	OvershootPolicy       string  `yaml:"overshoot_policy"` // absorb|overdraft
+	OvershootPolicy       string  `yaml:"overshoot_policy"`  // absorb|overdraft
 	InflightEstimate      string  `yaml:"inflight_estimate"` // chars4|off
 	CancelGraceMS         int     `yaml:"cancel_grace_ms"`
 	UnavailableChargePol  string  `yaml:"unavailable_charge_policy"`
@@ -158,11 +158,14 @@ type MCP struct {
 
 // Hooks configures async hook delivery.
 type Hooks struct {
-	QueueSize   int    `yaml:"queue_size"`
-	Workers     int    `yaml:"workers"`
-	TimeoutS    int    `yaml:"timeout_s"`
-	Retries     int    `yaml:"retries"`
-	DeadLetter  string `yaml:"dead_letter"`
+	QueueSize  int    `yaml:"queue_size"`
+	Workers    int    `yaml:"workers"`
+	TimeoutS   int    `yaml:"timeout_s"`
+	Retries    int    `yaml:"retries"`
+	DeadLetter string `yaml:"dead_letter"`
+	// AllowInsecure permits http:// webhook targets. Off by default so credentials
+	// and payloads cannot be pushed over plaintext by accident.
+	AllowInsecure bool `yaml:"allow_insecure"`
 }
 
 // RateLimit configures the sharded rate limiter.
@@ -253,10 +256,10 @@ type BootstrapTag struct {
 
 // Bootstrap seeds the database when it is empty (or merges, per Mode).
 type Bootstrap struct {
-	Mode      string             `yaml:"mode"` // upsert|merge|off
-	Admin     BootstrapAdmin     `yaml:"admin"`
-	Accounts  []BootstrapAccount `yaml:"accounts"`
-	APIKeys   []BootstrapAPIKey  `yaml:"api_keys"`
+	Mode      string              `yaml:"mode"` // upsert|merge|off
+	Admin     BootstrapAdmin      `yaml:"admin"`
+	Accounts  []BootstrapAccount  `yaml:"accounts"`
+	APIKeys   []BootstrapAPIKey   `yaml:"api_keys"`
 	Providers []BootstrapProvider `yaml:"providers"`
 	Models    []BootstrapModel    `yaml:"models"`
 	Routes    []BootstrapRoute    `yaml:"routes"`

@@ -24,14 +24,14 @@ type Snapshot struct {
 	Routes         []*domain.Route
 	Tags           []*domain.Tag
 
-	AccountByID     map[int64]*domain.Account
-	AccountByName   map[string]*domain.Account
-	ProviderByID    map[int64]*domain.Provider
-	ProviderByName  map[string]*domain.Provider
-	ModelByName     map[string]*domain.Model
-	TagByName       map[string]*domain.Tag
-	routesByModel   map[int64][]*domain.Route
-	pmByProvider    map[int64][]*domain.ProviderModel
+	AccountByID    map[int64]*domain.Account
+	AccountByName  map[string]*domain.Account
+	ProviderByID   map[int64]*domain.Provider
+	ProviderByName map[string]*domain.Provider
+	ModelByName    map[string]*domain.Model
+	TagByName      map[string]*domain.Tag
+	routesByModel  map[int64][]*domain.Route
+	pmByProvider   map[int64][]*domain.ProviderModel
 }
 
 // Registry owns the current snapshot.

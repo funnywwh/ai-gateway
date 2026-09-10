@@ -16,11 +16,11 @@ const providerCols = `id, name, kind, display_name, config_json, config_version,
 
 func scanProvider(row rowScanner) (*domain.Provider, error) {
 	var (
-		p                       domain.Provider
-		enabled, draining       int
-		cooldownUntil           sql.NullInt64
-		createdAt, updatedAt    int64
-		creds                   []byte
+		p                    domain.Provider
+		enabled, draining    int
+		cooldownUntil        sql.NullInt64
+		createdAt, updatedAt int64
+		creds                []byte
 	)
 	if err := row.Scan(&p.ID, &p.Name, &p.Kind, &p.DisplayName, &p.ConfigJSON, &p.ConfigVersion,
 		&creds, &p.StateDir, &p.MetaJSON, &p.DiscoveredJSON, &p.HealthJSON, &p.LastError,
@@ -183,9 +183,9 @@ const providerModelCols = `id, provider_id, public_model, upstream_model, enable
 
 func scanProviderModel(row rowScanner) (*domain.ProviderModel, error) {
 	var (
-		pm           domain.ProviderModel
-		enabled      int
-		updatedAt    int64
+		pm        domain.ProviderModel
+		enabled   int
+		updatedAt int64
 	)
 	if err := row.Scan(&pm.ID, &pm.ProviderID, &pm.PublicModel, &pm.UpstreamModel, &enabled,
 		&pm.Priority, &pm.Weight, &pm.ContextWindow, &pm.MaxOutputTokens, &pm.PricingRulesJSON,
@@ -195,6 +195,14 @@ func scanProviderModel(row rowScanner) (*domain.ProviderModel, error) {
 	pm.Enabled = enabled != 0
 	pm.UpdatedAt = timeFromUnix(updatedAt)
 	return &pm, nil
+}
+
+// DeleteProviderModel removes one provider-model mapping.
+func (db *DB) DeleteProviderModel(ctx context.Context, id int64) error {
+	if _, err := db.write.ExecContext(ctx, "DELETE FROM provider_models WHERE id = ?", id); err != nil {
+		return fmt.Errorf("store: delete provider model %d: %w", id, err)
+	}
+	return nil
 }
 
 // ListProviderModels lists every provider-model mapping (providerID <= 0 means all).

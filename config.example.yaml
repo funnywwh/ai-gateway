@@ -109,6 +109,9 @@ hooks:
   timeout_s: 5
   retries: 5
   dead_letter: "./data/hooks-dead.jsonl"
+  # Allow http:// webhook targets. Keep false in production: payloads and HMAC
+  # signatures would otherwise travel in plaintext.
+  allow_insecure: false
 
 ratelimit:
   shards: 64

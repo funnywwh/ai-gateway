@@ -29,7 +29,7 @@ type Store interface {
 
 // Config configures the dispatcher.
 type Config struct {
-	CredentialsKey []byte
+	CredentialsKey  []byte
 	CooldownDefault time.Duration
 }
 

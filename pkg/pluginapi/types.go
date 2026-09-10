@@ -43,13 +43,13 @@ type Info struct {
 
 // ModelInfo describes one upstream model a plugin can serve.
 type ModelInfo struct {
-	ID               string          `json:"id"`
-	UpstreamModel    string          `json:"upstream_model,omitempty"`
-	DisplayName      string          `json:"display_name,omitempty"`
-	ContextWindow    int             `json:"context_window,omitempty"`
-	MaxOutputTokens  int             `json:"max_output_tokens,omitempty"`
-	Capabilities     map[string]bool `json:"capabilities,omitempty"`
-	PricingRules     json.RawMessage `json:"pricing_rules,omitempty"`
+	ID              string          `json:"id"`
+	UpstreamModel   string          `json:"upstream_model,omitempty"`
+	DisplayName     string          `json:"display_name,omitempty"`
+	ContextWindow   int             `json:"context_window,omitempty"`
+	MaxOutputTokens int             `json:"max_output_tokens,omitempty"`
+	Capabilities    map[string]bool `json:"capabilities,omitempty"`
+	PricingRules    json.RawMessage `json:"pricing_rules,omitempty"`
 }
 
 // Usage is the metered quantity of one attempt, expressed as named dimensions:
@@ -81,16 +81,16 @@ type Tool struct {
 
 // Item is one element of the canonical input/output list. Unknown fields are preserved in Extra.
 type Item struct {
-	Type      string          `json:"type"`
-	ID        string          `json:"id,omitempty"`
-	Role      string          `json:"role,omitempty"`
-	Content   json.RawMessage `json:"content,omitempty"`
-	CallID    string          `json:"call_id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Arguments string          `json:"arguments,omitempty"`
-	Output    string          `json:"output,omitempty"`
-	Status    string          `json:"status,omitempty"`
-	Summary   []SummaryPart   `json:"summary,omitempty"`
+	Type      string                     `json:"type"`
+	ID        string                     `json:"id,omitempty"`
+	Role      string                     `json:"role,omitempty"`
+	Content   json.RawMessage            `json:"content,omitempty"`
+	CallID    string                     `json:"call_id,omitempty"`
+	Name      string                     `json:"name,omitempty"`
+	Arguments string                     `json:"arguments,omitempty"`
+	Output    string                     `json:"output,omitempty"`
+	Status    string                     `json:"status,omitempty"`
+	Summary   []SummaryPart              `json:"summary,omitempty"`
 	Extra     map[string]json.RawMessage `json:"-"`
 }
 
@@ -136,13 +136,13 @@ type Event struct {
 
 // Event type constants.
 const (
-	EventTextDelta     = "text.delta"
+	EventTextDelta      = "text.delta"
 	EventReasoningDelta = "reasoning.delta"
-	EventRefusalDelta  = "refusal.delta"
-	EventToolCallStart = "tool_call.start"
-	EventToolArgsDelta = "tool_call.arguments.delta"
-	EventUsage         = "usage"
-	EventUsageDelta    = "usage.delta"
+	EventRefusalDelta   = "refusal.delta"
+	EventToolCallStart  = "tool_call.start"
+	EventToolArgsDelta  = "tool_call.arguments.delta"
+	EventUsage          = "usage"
+	EventUsageDelta     = "usage.delta"
 )
 
 // Response is the canonical non-streaming provider response.

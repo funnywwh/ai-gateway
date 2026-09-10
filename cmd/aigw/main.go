@@ -142,8 +142,16 @@ func run() int {
 		LogTailLines:         cfg.Plugins.LogTailLines,
 		CancelGrace:          time.Duration(cfg.Routing.TTFTTimeoutS) * time.Second,
 	}, log)
+	credKey := creds.DeriveKey(cfg.CredentialsKey)
+	var credentialSealer *creds.Sealer
+	if cfg.CredentialsKey == "" {
+		log.Warn("credentials_key is not configured: provider credentials cannot be stored through the admin API")
+		credentialSealer = creds.NewSealer(nil)
+	} else {
+		credentialSealer = creds.NewSealer(credKey)
+	}
 	dispatcher := runtime.New(runtime.Config{
-		CredentialsKey: creds.DeriveKey(cfg.CredentialsKey),
+		CredentialsKey: credKey,
 	}, db, reg, host, balancerState, log)
 
 	hooks, err := db.ListHooks(ctx)
@@ -200,6 +208,26 @@ func run() int {
 		Hooks:      hookDispatcher,
 		Admin:      adminAuth,
 		AdminStore: db,
+		// One narrow port per resource family; the composition root is the only place
+		// that knows a single *store.DB backs all of them.
+		Accounts:      db,
+		Providers:     db,
+		Models:        db,
+		Tags:          db,
+		HookStore:     db,
+		MCPTokenStore: db,
+		Settings:      db,
+		Secrets:       credentialSealer,
+		Prober:        dispatcher,
+		ReloadHooks: func(ctx context.Context) error {
+			list, err := db.ListHooks(ctx)
+			if err != nil {
+				return err
+			}
+			hookDispatcher.SetHooks(list)
+			log.Info("hooks reloaded", "configured", len(list))
+			return nil
+		},
 		Reload: func(ctx context.Context) (any, error) {
 			snap, err := reg.Reload(ctx)
 			if err != nil {
@@ -214,8 +242,8 @@ func run() int {
 		},
 		InvalidateAll: verifier.InvalidateAll,
 		KeyCacheSize:  verifier.Size,
-		Log:        log,
-		Version:    version,
+		Log:           log,
+		Version:       version,
 	})
 
 	httpServer := &http.Server{

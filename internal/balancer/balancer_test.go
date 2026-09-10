@@ -81,7 +81,7 @@ func TestLeastLatencyNormalisesPerToken(t *testing.T) {
 		{Key: "fast-small", Weight: 100, MaxOutputTokens: 1000},
 	}
 	for i := 0; i < 10; i++ {
-		s.Observe("slow-big", 2000, true)  // 0.5 ms per token
+		s.Observe("slow-big", 2000, true)   // 0.5 ms per token
 		s.Observe("fast-small", 1000, true) // 1.0 ms per token
 	}
 	if got := s.Order(LeastLatency, tier)[0].Key; got != "slow-big" {

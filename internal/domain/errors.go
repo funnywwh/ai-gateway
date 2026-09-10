@@ -62,6 +62,12 @@ func ErrUnauthorized(msg string) *APIError {
 func ErrForbidden(msg string) *APIError {
 	return newErr(http.StatusForbidden, ErrTypePermission, "permission_denied", msg)
 }
+
+// ErrConflict reports a uniqueness or reference-integrity violation: the request
+// is well formed but contradicts the current configuration.
+func ErrConflict(msg string) *APIError {
+	return newErr(http.StatusConflict, ErrTypeInvalidRequest, "conflict", msg)
+}
 func ErrNotFound(msg string) *APIError {
 	return newErr(http.StatusNotFound, ErrTypeNotFound, "not_found", msg)
 }

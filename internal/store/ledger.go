@@ -99,9 +99,9 @@ func (db *DB) ListLedger(ctx context.Context, accountID int64, from, to time.Tim
 	out := []*domain.LedgerEntry{}
 	for rows.Next() {
 		var (
-			e          domain.LedgerEntry
-			apiKeyID   sql.NullInt64
-			createdAt  int64
+			e         domain.LedgerEntry
+			apiKeyID  sql.NullInt64
+			createdAt int64
 		)
 		if err := rows.Scan(&e.ID, &e.AccountID, &apiKeyID, &e.Kind, &e.AmountMicros,
 			&e.BalanceAfterMicros, &e.RefType, &e.RefID, &e.IdemKey, &e.RebuildSeq,

@@ -334,15 +334,15 @@ func (s *Server) persist(
 			Name:      event,
 			Timestamp: time.Now().UTC(),
 			Payload: map[string]any{
-				"request_id": requestIDFrom(ctx),
+				"request_id":  requestIDFrom(ctx),
 				"response_id": assembler.ID(),
-				"account":    accountName,
-				"api_key":    key.Name,
-				"model":      canonical,
-				"status":     status,
-				"usage":      assembler.Usage().Dimensions,
-				"input":      truncate(assembler.Text(), 0),
-				"output":     assembler.Text(),
+				"account":     accountName,
+				"api_key":     key.Name,
+				"model":       canonical,
+				"status":      status,
+				"usage":       assembler.Usage().Dimensions,
+				"input":       truncate(assembler.Text(), 0),
+				"output":      assembler.Text(),
 			},
 		})
 	}

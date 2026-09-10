@@ -7,28 +7,28 @@ import "encoding/json"
 
 // Request is the accepted subset of POST /v1/responses.
 type Request struct {
-	Model              string                     `json:"model"`
-	Input              json.RawMessage            `json:"input"`
-	Instructions       string                     `json:"instructions,omitempty"`
-	MaxOutputTokens    *int                       `json:"max_output_tokens,omitempty"`
-	Temperature        *float64                   `json:"temperature,omitempty"`
-	TopP               *float64                   `json:"top_p,omitempty"`
-	Stream             bool                       `json:"stream,omitempty"`
-	Tools              []Tool                     `json:"tools,omitempty"`
-	ToolChoice         json.RawMessage            `json:"tool_choice,omitempty"`
-	ParallelToolCalls  *bool                      `json:"parallel_tool_calls,omitempty"`
-	PreviousResponseID string                     `json:"previous_response_id,omitempty"`
-	Store              *bool                      `json:"store,omitempty"`
-	Metadata           map[string]string          `json:"metadata,omitempty"`
-	Reasoning          *Reasoning                 `json:"reasoning,omitempty"`
-	Text               *TextConfig                `json:"text,omitempty"`
-	Truncation         string                     `json:"truncation,omitempty"`
-	User               string                     `json:"user,omitempty"`
-	Include            []string                   `json:"include,omitempty"`
-	ServiceTier        string                     `json:"service_tier,omitempty"`
-	SafetyIdentifier   string                     `json:"safety_identifier,omitempty"`
-	PromptCacheKey     string                     `json:"prompt_cache_key,omitempty"`
-	Background         *bool                      `json:"background,omitempty"`
+	Model              string            `json:"model"`
+	Input              json.RawMessage   `json:"input"`
+	Instructions       string            `json:"instructions,omitempty"`
+	MaxOutputTokens    *int              `json:"max_output_tokens,omitempty"`
+	Temperature        *float64          `json:"temperature,omitempty"`
+	TopP               *float64          `json:"top_p,omitempty"`
+	Stream             bool              `json:"stream,omitempty"`
+	Tools              []Tool            `json:"tools,omitempty"`
+	ToolChoice         json.RawMessage   `json:"tool_choice,omitempty"`
+	ParallelToolCalls  *bool             `json:"parallel_tool_calls,omitempty"`
+	PreviousResponseID string            `json:"previous_response_id,omitempty"`
+	Store              *bool             `json:"store,omitempty"`
+	Metadata           map[string]string `json:"metadata,omitempty"`
+	Reasoning          *Reasoning        `json:"reasoning,omitempty"`
+	Text               *TextConfig       `json:"text,omitempty"`
+	Truncation         string            `json:"truncation,omitempty"`
+	User               string            `json:"user,omitempty"`
+	Include            []string          `json:"include,omitempty"`
+	ServiceTier        string            `json:"service_tier,omitempty"`
+	SafetyIdentifier   string            `json:"safety_identifier,omitempty"`
+	PromptCacheKey     string            `json:"prompt_cache_key,omitempty"`
+	Background         *bool             `json:"background,omitempty"`
 	// Extra keeps unrecognised fields so they can be forwarded verbatim.
 	Extra map[string]json.RawMessage `json:"-"`
 }

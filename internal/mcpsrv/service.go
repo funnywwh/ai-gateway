@@ -27,9 +27,9 @@ type Store interface {
 
 // Config tunes the service.
 type Config struct {
-	MaxRows     int
-	WindowDays  int
-	Currency    string
+	MaxRows    int
+	WindowDays int
+	Currency   string
 }
 
 // Service answers the read-only tools.
@@ -127,14 +127,14 @@ func (s *Service) getBalance(ctx context.Context, accountID int64) (any, error) 
 		return nil, err
 	}
 	return map[string]any{
-		"account":           account.Name,
-		"billing_mode":      string(account.BillingMode),
-		"status":            account.Status,
-		"currency":          s.cfg.Currency,
-		"balance_micros":    balance,
-		"balance_usd":       microsToUSD(balance),
-		"credit_limit_usd":  microsToUSD(account.CreditLimitMicros),
-		"low_balance_usd":   microsToUSD(account.LowBalanceThresholdMicros),
+		"account":          account.Name,
+		"billing_mode":     string(account.BillingMode),
+		"status":           account.Status,
+		"currency":         s.cfg.Currency,
+		"balance_micros":   balance,
+		"balance_usd":      microsToUSD(balance),
+		"credit_limit_usd": microsToUSD(account.CreditLimitMicros),
+		"low_balance_usd":  microsToUSD(account.LowBalanceThresholdMicros),
 	}, nil
 }
 
@@ -148,22 +148,22 @@ func (s *Service) getLedger(ctx context.Context, accountID int64, args map[strin
 	out := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, map[string]any{
-			"created_at":     row.CreatedAt.Format(time.RFC3339),
-			"kind":           row.Kind,
-			"amount_usd":     microsToUSD(row.AmountMicros),
-			"amount_micros":  row.AmountMicros,
-			"balance_usd":    microsToUSD(row.BalanceAfterMicros),
-			"ref_type":       row.RefType,
-			"ref_id":         row.RefID,
-			"note":           row.Note,
+			"created_at":    row.CreatedAt.Format(time.RFC3339),
+			"kind":          row.Kind,
+			"amount_usd":    microsToUSD(row.AmountMicros),
+			"amount_micros": row.AmountMicros,
+			"balance_usd":   microsToUSD(row.BalanceAfterMicros),
+			"ref_type":      row.RefType,
+			"ref_id":        row.RefID,
+			"note":          row.Note,
 		})
 	}
 	return map[string]any{
-		"period":  map[string]string{"from": from.Format(time.RFC3339), "to": to.Format(time.RFC3339)},
+		"period":   map[string]string{"from": from.Format(time.RFC3339), "to": to.Format(time.RFC3339)},
 		"currency": s.cfg.Currency,
-		"entries": out,
-		"count":   len(out),
-		"note":    "amounts are micro-USD (1e-6 USD); positive means credit",
+		"entries":  out,
+		"count":    len(out),
+		"note":     "amounts are micro-USD (1e-6 USD); positive means credit",
 	}, nil
 }
 
@@ -189,13 +189,13 @@ func (s *Service) getUsageSummary(ctx context.Context, accountID int64, args map
 		byDay[row.CreatedAt.Format("2006-01-02")]++
 	}
 	return map[string]any{
-		"period":      map[string]string{"from": from.Format(time.RFC3339), "to": to.Format(time.RFC3339)},
-		"attempts":    len(rows),
-		"tokens":      dims,
-		"statuses":    statuses,
-		"by_model":    models,
+		"period":          map[string]string{"from": from.Format(time.RFC3339), "to": to.Format(time.RFC3339)},
+		"attempts":        len(rows),
+		"tokens":          dims,
+		"statuses":        statuses,
+		"by_model":        models,
 		"requests_by_day": byDay,
-		"note":        "one row per upstream attempt; token dimensions are provider-reported when available",
+		"note":            "one row per upstream attempt; token dimensions are provider-reported when available",
 	}, nil
 }
 

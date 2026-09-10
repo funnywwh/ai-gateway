@@ -268,6 +268,15 @@ ON CONFLICT(model_id, provider_id) DO UPDATE SET
 	return id, nil
 }
 
+// DeleteRoute removes one model->provider route. Deleting a route only affects
+// future routing decisions; usage and ledger history stay untouched.
+func (db *DB) DeleteRoute(ctx context.Context, id int64) error {
+	if _, err := db.write.ExecContext(ctx, "DELETE FROM routes WHERE id = ?", id); err != nil {
+		return fmt.Errorf("store: delete route %d: %w", id, err)
+	}
+	return nil
+}
+
 // SetRouteCooldown persists a cooldown deadline (upstream quota exhaustion etc.).
 func (db *DB) SetRouteCooldown(ctx context.Context, id int64, until *time.Time) error {
 	if _, err := db.write.ExecContext(ctx,

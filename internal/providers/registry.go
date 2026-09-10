@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/winger/ai-gateway/internal/providers/openairesponses"
 	"github.com/winger/ai-gateway/internal/providers/openaichat"
+	"github.com/winger/ai-gateway/internal/providers/openairesponses"
 	"github.com/winger/ai-gateway/internal/providers/testecho"
 	"github.com/winger/ai-gateway/pkg/pluginapi"
 )

@@ -170,20 +170,20 @@ type PriceEvaluator interface {
 
 // PriceInput feeds the pricing engine.
 type PriceInput struct {
-	AccountID     int64
-	APIKeyID      int64
-	Model         string
-	ProviderID    int64
-	RequestedAt   time.Time
-	Dimensions    map[string]int64
+	AccountID       int64
+	APIKeyID        int64
+	Model           string
+	ProviderID      int64
+	RequestedAt     time.Time
+	Dimensions      map[string]int64
 	InputTokensHint int64
 }
 
 // PriceResult is the computed charge plus the audit snapshot.
 type PriceResult struct {
-	CostMicros      int64
-	ChargeMicros    int64
-	SnapshotJSON    string
+	CostMicros   int64
+	ChargeMicros int64
+	SnapshotJSON string
 }
 
 // Ledger is the balance/ledger port (M11b).
@@ -201,19 +201,19 @@ type ReservationManager interface {
 
 // ReserveInput describes an admission request.
 type ReserveInput struct {
-	AccountID  int64
-	APIKeyID   int64
+	AccountID     int64
+	APIKeyID      int64
 	ReserveMicros int64
-	RequestID  string
+	RequestID     string
 }
 
 // Reservation is a granted in-flight reservation.
 type Reservation struct {
-	ID            string
-	AccountID     int64
-	APIKeyID      int64
+	ID             string
+	AccountID      int64
+	APIKeyID       int64
 	ReservedMicros int64
-	ExpiresAt     time.Time
+	ExpiresAt      time.Time
 }
 
 // Recorder persists request/response content per recording policy (M7).
@@ -223,17 +223,17 @@ type Recorder interface {
 
 // ContentRecord is one recorded request/response pair.
 type ContentRecord struct {
-	RequestID        string
-	APIKeyID         int64
-	AccountID        int64
-	Endpoint         string
-	RequestJSON      string
-	ResponseReasoning string
-	ResponseText     string
-	ReasoningRecorded bool
+	RequestID          string
+	APIKeyID           int64
+	AccountID          int64
+	Endpoint           string
+	RequestJSON        string
+	ResponseReasoning  string
+	ResponseText       string
+	ReasoningRecorded  bool
 	OutputTextRecorded bool
-	Truncated        bool
-	CreatedAt        time.Time
+	Truncated          bool
+	CreatedAt          time.Time
 }
 
 // HookDispatcher delivers lifecycle events to configured hooks (M7).

@@ -118,10 +118,10 @@ func TestSchemaValidation(t *testing.T) {
 	}
 
 	bad := map[string]any{
-		"timeout_s": float64(0),     // below minimum
-		"mode":      "turbo",        // not in enum
+		"timeout_s": float64(0),           // below minimum
+		"mode":      "turbo",              // not in enum
 		"headers":   []any{"a", "b", "c"}, // too many items
-		"name":      "ABC",          // pattern mismatch
+		"name":      "ABC",                // pattern mismatch
 		"retry":     map[string]any{"attempts": "two"},
 	}
 	errs := schema.Validate(bad)

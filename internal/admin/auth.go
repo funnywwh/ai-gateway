@@ -80,9 +80,9 @@ type Store interface {
 
 // Config tunes the auth service.
 type Config struct {
-	SessionTTL        time.Duration
-	LoginAttempts     int
-	LoginWindow       time.Duration
+	SessionTTL    time.Duration
+	LoginAttempts int
+	LoginWindow   time.Duration
 }
 
 // Session is an issued administrator session.

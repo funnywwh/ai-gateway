@@ -61,16 +61,30 @@ type Deps struct {
 	// Hooks receives lifecycle events; nil disables hook delivery.
 	Hooks HookEmitter
 	// Admin enables the management API (session auth + CRUD).
-	Admin       AdminService
-	AdminStore  AdminStore
+	Admin      AdminService
+	AdminStore AdminStore
+	// The resource ports below are one narrow interface per resource family; a nil
+	// port disables just that family with a 501 instead of breaking the server.
+	Accounts      AccountAdmin
+	Providers     ProviderAdmin
+	Models        ModelAdmin
+	Tags          TagAdmin
+	HookStore     HookAdmin
+	MCPTokenStore MCPTokenAdmin
+	Settings      SettingsAdmin
+	// Secrets seals provider credentials; Prober exercises providers out of band.
+	Secrets Sealer
+	Prober  Prober
+	// ReloadHooks swaps the in-memory hook set after a hook write.
+	ReloadHooks func(ctx context.Context) error
 	// Reload rebuilds the routing snapshot after a write; InvalidateKey/All drop
 	// cached credentials; KeyCacheSize reports cache occupancy for /stats.
 	Reload        func(ctx context.Context) (any, error)
 	InvalidateKey func(prefix string)
 	InvalidateAll func()
 	KeyCacheSize  func() int
-	Log       *slog.Logger
-	Version   string
+	Log           *slog.Logger
+	Version       string
 }
 
 // Server wires the HTTP surfaces.
@@ -116,6 +130,54 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /admin/api/v1/requests", s.handleAdminRequests)
 	s.mux.HandleFunc("GET /admin/api/v1/requests/{id}", s.handleAdminRequestDetail)
 	s.mux.HandleFunc("GET /admin/api/v1/audit-logs", s.handleAdminAuditLogs)
+
+	s.mux.HandleFunc("GET /admin/api/v1/accounts", s.handleAdminListAccounts)
+	s.mux.HandleFunc("POST /admin/api/v1/accounts", s.handleAdminCreateAccount)
+	s.mux.HandleFunc("PATCH /admin/api/v1/accounts/{id}", s.handleAdminPatchAccount)
+
+	s.mux.HandleFunc("GET /admin/api/v1/providers", s.handleAdminListProviders)
+	s.mux.HandleFunc("POST /admin/api/v1/providers", s.handleAdminCreateProvider)
+	s.mux.HandleFunc("GET /admin/api/v1/providers/{id}", s.handleAdminGetProvider)
+	s.mux.HandleFunc("PATCH /admin/api/v1/providers/{id}", s.handleAdminPatchProvider)
+	s.mux.HandleFunc("DELETE /admin/api/v1/providers/{id}", s.handleAdminDeleteProvider)
+	s.mux.HandleFunc("POST /admin/api/v1/providers/{id}/test", s.handleAdminProbeProvider)
+	s.mux.HandleFunc("POST /admin/api/v1/providers/{id}/restart", s.handleAdminRestartProvider)
+	s.mux.HandleFunc("GET /admin/api/v1/providers/{id}/logs", s.handleAdminProviderLogs)
+	s.mux.HandleFunc("GET /admin/api/v1/providers/{id}/actions", s.handleAdminProviderActions)
+	s.mux.HandleFunc("POST /admin/api/v1/providers/{id}/actions/{name}", s.handleAdminRunProviderAction)
+	s.mux.HandleFunc("GET /admin/api/v1/providers/{id}/models", s.handleAdminListProviderModels)
+	s.mux.HandleFunc("POST /admin/api/v1/providers/{id}/models", s.handleAdminUpsertProviderModel)
+	s.mux.HandleFunc("POST /admin/api/v1/providers/{id}/models/refresh", s.handleAdminRefreshProviderModels)
+	s.mux.HandleFunc("GET /admin/api/v1/provider-models", s.handleAdminListProviderModels)
+	s.mux.HandleFunc("DELETE /admin/api/v1/provider-models/{id}", s.handleAdminDeleteProviderModel)
+
+	s.mux.HandleFunc("GET /admin/api/v1/models", s.handleAdminListModels)
+	s.mux.HandleFunc("POST /admin/api/v1/models", s.handleAdminUpsertModel)
+	s.mux.HandleFunc("PATCH /admin/api/v1/models/{name}", s.handleAdminUpsertModel)
+
+	s.mux.HandleFunc("GET /admin/api/v1/model-mappings", s.handleAdminListMappings)
+	s.mux.HandleFunc("POST /admin/api/v1/model-mappings", s.handleAdminUpsertMapping)
+	s.mux.HandleFunc("DELETE /admin/api/v1/model-mappings/{id}", s.handleAdminDeleteMapping)
+
+	s.mux.HandleFunc("GET /admin/api/v1/routes", s.handleAdminListRoutes)
+	s.mux.HandleFunc("POST /admin/api/v1/routes", s.handleAdminUpsertRoute)
+	s.mux.HandleFunc("PATCH /admin/api/v1/routes/{id}", s.handleAdminPatchRoute)
+	s.mux.HandleFunc("DELETE /admin/api/v1/routes/{id}", s.handleAdminDeleteRoute)
+
+	s.mux.HandleFunc("GET /admin/api/v1/tags", s.handleAdminListTags)
+	s.mux.HandleFunc("POST /admin/api/v1/tags", s.handleAdminUpsertTag)
+	s.mux.HandleFunc("DELETE /admin/api/v1/tags/{id}", s.handleAdminDeleteTag)
+
+	s.mux.HandleFunc("GET /admin/api/v1/mcp-tokens", s.handleAdminListMCPTokens)
+	s.mux.HandleFunc("POST /admin/api/v1/mcp-tokens", s.handleAdminCreateMCPToken)
+	s.mux.HandleFunc("DELETE /admin/api/v1/mcp-tokens/{id}", s.handleAdminRevokeMCPToken)
+
+	s.mux.HandleFunc("GET /admin/api/v1/hooks", s.handleAdminListHooks)
+	s.mux.HandleFunc("POST /admin/api/v1/hooks", s.handleAdminUpsertHook)
+	s.mux.HandleFunc("DELETE /admin/api/v1/hooks/{id}", s.handleAdminDeleteHook)
+
+	s.mux.HandleFunc("GET /admin/api/v1/settings", s.handleAdminGetSettings)
+	s.mux.HandleFunc("PUT /admin/api/v1/settings/{key}", s.handleAdminPutSetting)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)

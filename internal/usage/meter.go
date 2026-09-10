@@ -115,10 +115,10 @@ func SourceOf(estimated bool, dims map[string]int64) string {
 // Accumulator merges streaming usage events: usage.delta values accumulate, and a
 // final usage event (when present) replaces them authoritatively.
 type Accumulator struct {
-	dims        map[string]int64
-	estimated   bool
-	sawFinal    bool
-	deltas      int
+	dims      map[string]int64
+	estimated bool
+	sawFinal  bool
+	deltas    int
 }
 
 // NewAccumulator builds an empty accumulator.

@@ -84,11 +84,11 @@ FROM admin_sessions s JOIN admin_users u ON u.id = s.user_id
 WHERE s.id = ?`, id)
 
 	var (
-		u                       domain.AdminUser
-		createdAt               int64
-		lastLoginAt             sql.NullInt64
-		tokenHash               string
-		expiresAt               int64
+		u           domain.AdminUser
+		createdAt   int64
+		lastLoginAt sql.NullInt64
+		tokenHash   string
+		expiresAt   int64
 	)
 	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &createdAt, &lastLoginAt, &tokenHash, &expiresAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

@@ -272,8 +272,8 @@ func addTo(slots *[Slots]bucket, sec int64, n int64) {
 	(*slots)[idx].value += n
 }
 
-func (s *scopeState) sumReqs(sec int64) int64  { return sumWindow(&s.reqs, sec) }
-func (s *scopeState) sumToks(sec int64) int64  { return sumWindow(&s.toks, sec) }
+func (s *scopeState) sumReqs(sec int64) int64 { return sumWindow(&s.reqs, sec) }
+func (s *scopeState) sumToks(sec int64) int64 { return sumWindow(&s.toks, sec) }
 
 func sumWindow(slots *[Slots]bucket, sec int64) int64 {
 	var total int64

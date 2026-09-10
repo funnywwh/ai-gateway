@@ -68,9 +68,9 @@ func TestStreamEmitsDeltasAndIncrementalUsage(t *testing.T) {
 
 func TestFailureModes(t *testing.T) {
 	cases := []struct {
-		mode    string
-		kind    string
-		retry   bool
+		mode  string
+		kind  string
+		retry bool
 	}{
 		{"retryable", pluginapi.KindRetryable, true},
 		{"quota", pluginapi.KindQuotaExhausted, true},

@@ -21,10 +21,10 @@ import (
 
 // Config is the provider configuration (stored as JSON on the provider record).
 type Config struct {
-	BaseURL   string            `json:"base_url"`
-	APIKey    string            `json:"api_key"`
-	Headers   map[string]string `json:"headers"`
-	TimeoutS  int               `json:"timeout_s"`
+	BaseURL  string            `json:"base_url"`
+	APIKey   string            `json:"api_key"`
+	Headers  map[string]string `json:"headers"`
+	TimeoutS int               `json:"timeout_s"`
 	// Models lets the operator declare the upstream catalogue when the upstream has no list endpoint.
 	Models []ModelConfig `json:"models"`
 }

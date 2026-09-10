@@ -32,28 +32,28 @@ type Account struct {
 
 // Provider is one upstream provider instance (builtin kind or plugin process).
 type Provider struct {
-	ID                 int64
-	Name               string
-	Kind               string
-	DisplayName        string
-	ConfigJSON         string
-	ConfigVersion      int
-	CredentialsEnc     []byte
-	StateDir           string
-	MetaJSON           string
-	DiscoveredJSON     string
-	HealthJSON         string
-	LastError          string
-	Enabled            bool
-	Priority           int
-	Weight             int
-	MaxInflight        int
-	TimeoutOverrides   string
-	Degradation        string
-	CooldownUntil      *time.Time
-	Draining           bool
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	ID               int64
+	Name             string
+	Kind             string
+	DisplayName      string
+	ConfigJSON       string
+	ConfigVersion    int
+	CredentialsEnc   []byte
+	StateDir         string
+	MetaJSON         string
+	DiscoveredJSON   string
+	HealthJSON       string
+	LastError        string
+	Enabled          bool
+	Priority         int
+	Weight           int
+	MaxInflight      int
+	TimeoutOverrides string
+	Degradation      string
+	CooldownUntil    *time.Time
+	Draining         bool
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 // ProviderModel maps a public model name to an upstream model name for one provider.
@@ -147,17 +147,17 @@ type APIKey struct {
 
 // MCPToken authenticates the read-only MCP query endpoint.
 type MCPToken struct {
-	ID         int64
-	AccountID  int64
-	Name       string
-	TokenHash  string
+	ID          int64
+	AccountID   int64
+	Name        string
+	TokenHash   string
 	TokenPrefix string
-	Status     string
-	LastUsedAt *time.Time
-	ExpiresAt  *time.Time
-	CreatedBy  string
-	Note       string
-	CreatedAt  time.Time
+	Status      string
+	LastUsedAt  *time.Time
+	ExpiresAt   *time.Time
+	CreatedBy   string
+	Note        string
+	CreatedAt   time.Time
 }
 
 // ResponseRecord is one stored Responses API response (for GET /v1/responses/{id}
@@ -181,39 +181,39 @@ type ResponseRecord struct {
 // RequestLogRecord is one recorded request/response pair. Input text is recorded by
 // default; thinking text and final output text are only stored when the key opts in.
 type RequestLogRecord struct {
-	ID                  int64
-	RequestID           string
-	APIKeyID            int64
-	AccountID           int64
-	Endpoint            string
-	RequestJSON         string
-	ResponseReasoning   string
-	ResponseText        string
-	ReasoningRecorded   bool
-	OutputTextRecorded  bool
-	RequestBytes        int
-	ResponseBytes       int
-	Truncated           bool
-	RecordInputMode     string
-	RecordReasoning     bool
-	RecordOutputText    bool
-	Status              string
-	CreatedAt           time.Time
+	ID                 int64
+	RequestID          string
+	APIKeyID           int64
+	AccountID          int64
+	Endpoint           string
+	RequestJSON        string
+	ResponseReasoning  string
+	ResponseText       string
+	ReasoningRecorded  bool
+	OutputTextRecorded bool
+	RequestBytes       int
+	ResponseBytes      int
+	Truncated          bool
+	RecordInputMode    string
+	RecordReasoning    bool
+	RecordOutputText   bool
+	Status             string
+	CreatedAt          time.Time
 }
 
 // LedgerEntry is an append-only balance mutation.
 type LedgerEntry struct {
-	ID                int64
-	AccountID         int64
-	APIKeyID          *int64
-	Kind              string // credit_grant|topup|charge|adjustment|refund|expire
-	AmountMicros      int64
+	ID                 int64
+	AccountID          int64
+	APIKeyID           *int64
+	Kind               string // credit_grant|topup|charge|adjustment|refund|expire
+	AmountMicros       int64
 	BalanceAfterMicros int64
-	RefType           string
-	RefID             string
-	IdemKey           string
-	RebuildSeq        int64
-	Note              string
-	Actor             string
-	CreatedAt         time.Time
+	RefType            string
+	RefID              string
+	IdemKey            string
+	RebuildSeq         int64
+	Note               string
+	Actor              string
+	CreatedAt          time.Time
 }

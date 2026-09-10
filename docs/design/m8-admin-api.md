@@ -62,5 +62,11 @@ POST /admin/api/v1/auth/login → 校验用户 → 建会话（存哈希）→ S
   将来切回 argon2id 时可按前缀分支平滑迁移。
 - **会话令牌与 Cookie 双层**：Cookie 形如 `<session_id>.<token>`；session_id 只用于索引，
   token 经 SHA-256 后入库比较——即使数据库泄露也无法直接冒用（token 本身不可从库中恢复）。
-- **本轮到鉴权与服务层为止**：管理面 HTTP 路由、资源 CRUD 与热更新接线放在本轮之后，
-  避免在上下文受限时留下半可用的端点集合。
+- **HTTP 面已落地（本里程碑第二部分）**：登录/退出/me、stats、keys（列表/创建/PATCH）、
+  requests（列表/详情）、audit-logs；Cookie 鉴权中间件区分 401（无会话）与 403（角色不足）。
+- **热更新实现为三个可注入端口**（`Reload`/`InvalidateKey`/`InvalidateAll`），
+  httpapi 不直接依赖 registry 与 apikey，便于测试与管理面替换。
+- **Key 的 PATCH 走"读-改-写"**：先按 id 取出记录，再写回状态与录制开关，
+  避免引入只写单列的 DAL；写后定向失效该前缀的鉴权缓存。
+- **剩余资源 CRUD**（providers/models/model-mappings/routes/tags/mcp-tokens/hooks）
+  沿用同一套中间件与热更新流程，在 M9 界面阶段一并补齐（界面需要它们才能联通）。

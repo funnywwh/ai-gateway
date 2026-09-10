@@ -137,8 +137,8 @@ func TestClientCompleteAndErrorMapping(t *testing.T) {
 			return nil, NewRetryableError("upstream_5xx", "upstream exploded", 503)
 		}
 		return Response{
-			Items: []Item{{Type: "message", Role: "assistant", Content: json.RawMessage(`[{"type":"output_text","text":"hi"}]`)}},
-			Usage: Usage{Dimensions: map[string]int64{"input": 10, "output": 2}},
+			Items:  []Item{{Type: "message", Role: "assistant", Content: json.RawMessage(`[{"type":"output_text","text":"hi"}]`)}},
+			Usage:  Usage{Dimensions: map[string]int64{"input": 10, "output": 2}},
 			Status: "completed",
 		}, nil
 	}, nil)

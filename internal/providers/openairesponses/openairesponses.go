@@ -255,12 +255,12 @@ func (p *Provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 
 	for {
 		var frame struct {
-			Type     string `json:"type"`
-			Delta    string `json:"delta"`
-			Text     string `json:"text"`
-			ItemID   string `json:"item_id"`
-			CallID   string `json:"call_id"`
-			Name     string `json:"name"`
+			Type     string          `json:"type"`
+			Delta    string          `json:"delta"`
+			Text     string          `json:"text"`
+			ItemID   string          `json:"item_id"`
+			CallID   string          `json:"call_id"`
+			Name     string          `json:"name"`
 			Item     json.RawMessage `json:"item"`
 			Response *responseWire   `json:"response"`
 			Error    *struct {

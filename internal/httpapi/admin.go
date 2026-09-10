@@ -172,7 +172,7 @@ func (s *Server) handleAdminListKeys(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{
 			"id": key.ID, "name": key.Name, "account_id": key.AccountID,
 			"key_prefix": key.KeyPrefix, "status": key.Status,
-			"tags": jsonOrEmptyArray(key.TagsJSON),
+			"tags":               jsonOrEmptyArray(key.TagsJSON),
 			"record_input_mode":  key.RecordInputMode,
 			"record_reasoning":   key.RecordReasoning,
 			"record_output_text": key.RecordOutputText,
@@ -350,7 +350,7 @@ func (s *Server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{
 			"request_id": row.RequestID, "account_id": row.AccountID, "api_key_id": row.APIKeyID,
 			"endpoint": row.Endpoint, "status": row.Status,
-			"created_at": row.CreatedAt.Format(time.RFC3339),
+			"created_at":     row.CreatedAt.Format(time.RFC3339),
 			"input_recorded": row.RequestJSON != "", "reasoning_recorded": row.ReasoningRecorded,
 			"output_text_recorded": row.OutputTextRecorded, "truncated": row.Truncated,
 		})
@@ -370,10 +370,10 @@ func (s *Server) handleAdminRequestDetail(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"request_id": row.RequestID, "account_id": row.AccountID, "api_key_id": row.APIKeyID,
 		"endpoint": row.Endpoint, "status": row.Status,
-		"created_at": row.CreatedAt.Format(time.RFC3339),
-		"input":      jsonOrNil(row.RequestJSON),
-		"reasoning":  jsonOrNil(row.ResponseReasoning),
-		"output":     jsonOrNil(row.ResponseText),
+		"created_at":     row.CreatedAt.Format(time.RFC3339),
+		"input":          jsonOrNil(row.RequestJSON),
+		"reasoning":      jsonOrNil(row.ResponseReasoning),
+		"output":         jsonOrNil(row.ResponseText),
 		"input_recorded": row.RequestJSON != "", "reasoning_recorded": row.ReasoningRecorded,
 		"output_text_recorded": row.OutputTextRecorded, "truncated": row.Truncated,
 	})

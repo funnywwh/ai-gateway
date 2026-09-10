@@ -16,10 +16,10 @@ const apiKeyCols = `id, account_id, name, key_prefix, key_hash, tags_json, grant
 
 func scanAPIKey(row rowScanner) (*domain.APIKey, error) {
 	var (
-		k                          domain.APIKey
-		recordOutput, recordThink  int
-		expiresAt, lastUsedAt      sql.NullInt64
-		createdAt                  int64
+		k                         domain.APIKey
+		recordOutput, recordThink int
+		expiresAt, lastUsedAt     sql.NullInt64
+		createdAt                 int64
 	)
 	if err := row.Scan(&k.ID, &k.AccountID, &k.Name, &k.KeyPrefix, &k.KeyHash, &k.TagsJSON,
 		&k.GrantsJSON, &k.PolicyJSON, &k.RecordInputMode, &recordOutput, &recordThink, &k.Status,

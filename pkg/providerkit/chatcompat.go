@@ -24,11 +24,11 @@ type ChatToolCall struct {
 
 // ChatMessage is one chat-completions message.
 type ChatMessage struct {
-	Role       string          `json:"role"`
-	Content    string          `json:"content,omitempty"`
-	ToolCalls  []ChatToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
-	Refusal    string          `json:"refusal,omitempty"`
+	Role       string         `json:"role"`
+	Content    string         `json:"content,omitempty"`
+	ToolCalls  []ChatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Refusal    string         `json:"refusal,omitempty"`
 }
 
 // ChatTool is a function tool in chat-completions form.

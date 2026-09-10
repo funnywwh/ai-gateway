@@ -155,9 +155,9 @@ type Host struct {
 	mu    sync.Mutex
 	procs map[string]*Process
 
-	restartMu         sync.Mutex
-	restartsInWindow  int
-	windowStart       time.Time
+	restartMu        sync.Mutex
+	restartsInWindow int
+	windowStart      time.Time
 
 	// OnCredentials is called when a plugin rotates its own credentials.
 	OnCredentials func(instance string, creds map[string]string, reason string)
