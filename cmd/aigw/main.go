@@ -110,7 +110,12 @@ func run() int {
 		log.Warn("credentials_key is empty: provider credentials cannot be encrypted at rest")
 	}
 
-	// M2+ wires the plugin host, M3 the router, M5 the HTTP API, M6 the MCP server.
-	log.Info("M1 ready: store + registry online (next milestone: plugin protocol, see docs/TODO.md)")
+	// Remaining wiring: M4 key auth + rate limits, M5 HTTP API, M6 MCP server,
+	// M7 hooks/recording, M8 admin API, M11+ billing, M16 backups.
+	log.Info("aigw ready",
+		"store", "sqlite",
+		"registry", snap.String(),
+		"next", "M4 api keys + rate limiting (see docs/TODO.md)",
+	)
 	return 0
 }
