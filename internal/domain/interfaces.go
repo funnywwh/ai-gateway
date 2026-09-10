@@ -155,6 +155,10 @@ type RouteExplanation struct {
 	Rule      string
 	Order     []Candidate
 	Excluded  []Exclusion
+	// Failure carries the reason no candidate survived ("no_candidates", a missing
+	// capability, and so on). Exclusions are the answer to a diagnostic question, so
+	// Explain reports them with a nil error and puts the failure here instead.
+	Failure string
 }
 
 // Exclusion records why a candidate was filtered out.

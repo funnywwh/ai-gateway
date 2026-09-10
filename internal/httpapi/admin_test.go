@@ -583,3 +583,78 @@ func containsID(ids []int64, want int64) bool {
 	}
 	return false
 }
+
+func TestAdminWritesRequireJSONContentType(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+	req, err := http.NewRequest(http.MethodPost, f.server.URL+"/admin/api/v1/providers",
+		strings.NewReader("name=x&kind=testecho"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: adminCookieName, Value: cookie})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, _ := decodeError(t, resp)
+	if status != http.StatusBadRequest {
+		t.Fatalf("form-encoded write status = %d, want 400", status)
+	}
+	// Deleting needs no body, so it must keep working without a content type.
+	created := f.call(t, http.MethodPost, "/admin/api/v1/providers", `{"name":"csrf-ok","kind":"testecho"}`, cookie)
+	payload := decodeJSONBody(t, created)
+	id := int64(payload["id"].(float64))
+	del := f.call(t, http.MethodDelete, "/admin/api/v1/providers/"+itoa(id), "", cookie)
+	del.Body.Close()
+	if del.StatusCode != http.StatusOK {
+		t.Fatalf("delete status = %d, want 200", del.StatusCode)
+	}
+}
+
+func TestAdminRouterExplain(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	provider := decodeJSONBody(t, f.call(t, http.MethodPost, "/admin/api/v1/providers",
+		`{"name":"echo-explain","kind":"testecho"}`, cookie))
+	providerID := int64(provider["id"].(float64))
+	f.call(t, http.MethodPost, "/admin/api/v1/models", `{"public_name":"explain-model"}`, cookie).Body.Close()
+	f.call(t, http.MethodPost, "/admin/api/v1/providers/"+itoa(providerID)+"/models",
+		`{"public_model":"explain-model","upstream_model":"up-1"}`, cookie).Body.Close()
+	f.call(t, http.MethodPost, "/admin/api/v1/routes",
+		`{"model":"explain-model","provider_id":`+itoa(providerID)+`,"upstream_model":"up-1"}`, cookie).Body.Close()
+
+	resp := f.call(t, http.MethodGet, "/admin/api/v1/router/explain?model=explain-model", "", cookie)
+	payload := decodeJSONBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("explain status = %d body=%v", resp.StatusCode, payload)
+	}
+	if payload["canonical"] != "explain-model" {
+		t.Fatalf("canonical = %v", payload["canonical"])
+	}
+	order, _ := payload["order"].([]any)
+	if len(order) != 1 {
+		t.Fatalf("explain order = %v, want one candidate", payload["order"])
+	}
+	first, _ := order[0].(map[string]any)
+	if first["upstream_model"] != "up-1" || first["provider"] != "echo-explain" {
+		t.Fatalf("candidate = %v", first)
+	}
+
+	// An unresolvable model is still a successful diagnosis: the exclusion says why.
+	missing := f.call(t, http.MethodGet, "/admin/api/v1/router/explain?model=ghost", "", cookie)
+	missingPayload := decodeJSONBody(t, missing)
+	if missing.StatusCode != http.StatusOK {
+		t.Fatalf("unknown model explain status = %d, want 200", missing.StatusCode)
+	}
+	if excluded, _ := missingPayload["excluded"].([]any); len(excluded) == 0 {
+		t.Fatalf("unknown model explain should report an exclusion: %v", missingPayload)
+	}
+	noModel := f.call(t, http.MethodGet, "/admin/api/v1/router/explain", "", cookie)
+	if noModel.StatusCode != http.StatusBadRequest {
+		t.Fatalf("missing model status = %d, want 400", noModel.StatusCode)
+	}
+	noModel.Body.Close()
+}

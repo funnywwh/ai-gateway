@@ -324,9 +324,14 @@ func (r *Router) Candidates(in domain.RouteRequest) ([]domain.Candidate, error) 
 }
 
 // Explain returns the full diagnostic view (used by the simulate-routing UI).
+//
+// Unlike Plan, a request that resolves but has no usable candidate is *not* an
+// error here: the exclusion list is the answer the caller asked for, so it comes
+// back with a nil error and the reason in Failure. Only an unresolvable request
+// (unknown model, no routes at all) returns an error.
 func (r *Router) Explain(in domain.RouteRequest) (*domain.RouteExplanation, error) {
 	res, err := r.Plan(in)
-	if err != nil {
+	if err != nil && res == nil {
 		if apiErr, ok := domain.AsAPIError(err); ok && apiErr.Code == "model_not_found" {
 			return &domain.RouteExplanation{Requested: in.Model, Excluded: []domain.Exclusion{{Reason: apiErr.Code}}}, nil
 		}
@@ -338,6 +343,9 @@ func (r *Router) Explain(in domain.RouteRequest) (*domain.RouteExplanation, erro
 		Rule:      res.Resolved.MatchedRule,
 		Order:     res.Candidates,
 		Excluded:  res.Excluded,
+	}
+	if err != nil {
+		out.Failure = err.Error()
 	}
 	return out, nil
 }

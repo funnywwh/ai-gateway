@@ -77,6 +77,8 @@ type Deps struct {
 	Prober  Prober
 	// ReloadHooks swaps the in-memory hook set after a hook write.
 	ReloadHooks func(ctx context.Context) error
+	// UI serves the embedded management console at /admin/ui/; nil disables it.
+	UI http.Handler
 	// Reload rebuilds the routing snapshot after a write; InvalidateKey/All drop
 	// cached credentials; KeyCacheSize reports cache occupancy for /stats.
 	Reload        func(ctx context.Context) (any, error)
@@ -107,13 +109,41 @@ func New(deps Deps) *Server {
 
 // Handler returns the root handler.
 func (s *Server) Handler() http.Handler {
-	return s.withRecovery(s.withRequestID(s.withLogging(s.mux)))
+	return s.withRecovery(s.withRequestID(s.withLogging(s.withAdminCSRF(s.mux))))
+}
+
+// withAdminCSRF rejects management writes that do not declare a JSON body. A
+// cross-site HTML form cannot set that content type without a CORS preflight, so
+// this closes the classic form-post CSRF hole on top of the SameSite=Lax cookie.
+// DELETE carries no body and is exempt; the session cookie is still required.
+func (s *Server) withAdminCSRF(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/admin/api/v1/") {
+			switch r.Method {
+			case http.MethodPost, http.MethodPatch, http.MethodPut:
+				contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+				if !strings.HasPrefix(contentType, "application/json") {
+					writeAPIError(w, domain.ErrInvalidRequest("management writes require Content-Type: application/json"))
+					return
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // SetReady flips the readiness probe (used during shutdown/drain).
 func (s *Server) SetReady(v bool) { s.ready.Store(v) }
 
 func (s *Server) routes() {
+	if s.deps.UI != nil {
+		ui := s.deps.UI
+		s.mux.Handle("GET /admin/ui/", http.StripPrefix("/admin/ui/", ui))
+		s.mux.HandleFunc("GET /admin/ui", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/admin/ui/", http.StatusMovedPermanently)
+		})
+	}
+
 	s.mux.HandleFunc("POST /v1/responses", s.handleCreateResponse)
 	s.mux.HandleFunc("GET /v1/responses/{id}", s.handleGetResponse)
 	s.mux.HandleFunc("DELETE /v1/responses/{id}", s.handleDeleteResponse)
@@ -176,6 +206,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /admin/api/v1/hooks", s.handleAdminUpsertHook)
 	s.mux.HandleFunc("DELETE /admin/api/v1/hooks/{id}", s.handleAdminDeleteHook)
 
+	s.mux.HandleFunc("GET /admin/api/v1/router/explain", s.handleAdminExplainRouter)
 	s.mux.HandleFunc("GET /admin/api/v1/settings", s.handleAdminGetSettings)
 	s.mux.HandleFunc("PUT /admin/api/v1/settings/{key}", s.handleAdminPutSetting)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)

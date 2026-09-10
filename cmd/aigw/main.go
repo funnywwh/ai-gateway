@@ -29,6 +29,7 @@ import (
 	"github.com/winger/ai-gateway/internal/runtime"
 	"github.com/winger/ai-gateway/internal/store"
 	"github.com/winger/ai-gateway/internal/usage"
+	"github.com/winger/ai-gateway/internal/webui"
 )
 
 var (
@@ -242,6 +243,7 @@ func run() int {
 		},
 		InvalidateAll: verifier.InvalidateAll,
 		KeyCacheSize:  verifier.Size,
+		UI:            webui.Handler(),
 		Log:           log,
 		Version:       version,
 	})

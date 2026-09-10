@@ -115,7 +115,16 @@
 - [x] gofmt 全仓清理（34 个文件的对齐差异）
 
 ## M9 Web 管理界面
-- [ ] 概览/Keys/Tags/Providers/Model Mappings/Models & Routes/Pricing/Accounts/Invoices/Reconciliation/MCP/Hooks/Request Logs/Usage/Backups/Audit/Settings
+- [x] 设计文档 docs/design/m9-web-console.md（已在对话中输出）
+- [x] internal/webui：go:embed 静态资源 + SPA 回落 + CSP + 缓存头；`/admin/ui/` 与 API 同源同会话
+- [x] 原生 HTML + ES modules + fetch，零构建零依赖（环境无 node/npm，界面必须浏览器直跑）
+- [x] 页面：概览 / API Keys（双勾选录制）/ 账户 / 标签 / MCP 令牌 / 供应商（详情·探测·发现·日志·动作·重启）/ 模型与路由 / 映射（含试算器）/ 请求日志（输入·思考·输出分栏）/ Hooks / 审计 / 设置
+- [x] 定价 / 账本 / 账单 / 对账 / 备份 五个占位页（明确标注 M11/M12/M16，不做假交互）
+- [x] 新增 `GET /admin/api/v1/router/explain`：复用数据面 Plan，返回解析结果、有序候选、排除原因与失败原因
+- [x] 管理面 CSRF 收紧：POST/PATCH/PUT 必须 `Content-Type: application/json`
+- [x] 测试：webui 资源/回落/CSP 用例 + CSRF 与 explain 端点用例（真实 store）
+- [x] Node 语法检查与导入图校验（13 个页面模块，0 问题）
+- [ ] 浏览器人工走查（当前环境无浏览器）
 
 ## M11a 计价引擎
 - [ ] 计量维度 + 有序价格规则集（catch-all 强制、遮蔽检测、时段/档位/{model}）
