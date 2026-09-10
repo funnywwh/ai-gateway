@@ -193,6 +193,7 @@ func (s *Server) settleAttempt(
 	attemptErr error,
 	startedAt time.Time,
 	dims map[string]int64,
+	chargePartial bool,
 ) {
 	record, err := s.deps.Meter.Build(attempt)
 	if err != nil {
@@ -205,7 +206,9 @@ func (s *Server) settleAttempt(
 
 	// A failed attempt still costs us money, but charging the customer for it depends
 	// on billing.charge_on_error. Cost is always recorded so the waste is visible.
-	chargeEnabled := attemptErr == nil || s.deps.Config.Billing.ChargeOnError
+	// An abort because of quota still charges what was metered before the decision;
+	// everything after it is absorbed as cost only.
+	chargeEnabled := attemptErr == nil || s.deps.Config.Billing.ChargeOnError || chargePartial
 	settlement := billing.NewCharge(record, result, chargeEnabled)
 	if !chargeEnabled {
 		settlement.Usage.ChargeMicros = 0

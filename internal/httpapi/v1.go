@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,6 +27,8 @@ const (
 // handleCreateResponse implements POST /v1/responses.
 func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	// admission holds this request's in-flight reservation, if billing is enabled.
+	var admission *billing.Reservation
 
 	key, account, ok := s.authenticate(w, r)
 	if !ok {
@@ -106,6 +109,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		}
 		if reservation != nil {
 			defer s.deps.Billing.Release(reservation)
+			admission = reservation
 		}
 	}
 
@@ -153,8 +157,16 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		provReq.Stream = req.Stream
 
 		attemptStarted := time.Now()
+		var guard *inflightGuard
 		if req.Stream {
-			_, err = s.deps.Dispatcher.Stream(ctx, cand.ProviderID, provReq, assembler.Add)
+			attemptCtx, cancelAttempt := context.WithCancel(ctx)
+			costRules, saleRules := s.ruleSetsFor(plan.Resolved.Canonical, cand.ProviderID)
+			guard = s.newInflightGuard(attemptCtx, cancelAttempt, account, requestID,
+				plan.Resolved.Canonical, cand.UpstreamModel, cand.ProviderID, costRules, saleRules, admission)
+			_, err = s.deps.Dispatcher.Stream(attemptCtx, cand.ProviderID, provReq, func(ev pluginapi.Event) error {
+				return guard.Observe(ev, assembler.Add)
+			})
+			cancelAttempt()
 		} else {
 			var providerResp *pluginapi.Response
 			providerResp, err = s.deps.Dispatcher.Complete(ctx, cand.ProviderID, provReq)
@@ -172,7 +184,16 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 			ttftMS = latency
 		}
 
-		s.recordAttempt(ctx, key, account, req, plan.Resolved, cand, attemptNo, err, latency, ttftMS, attemptStarted, usage, assembler)
+		var outcome *inflightOutcome
+		if guard != nil {
+			outcome = guard.Outcome(assembler.Usage().Dimensions)
+			if outcome != nil && outcome.aborted {
+				// The upstream call usually fails with a cancellation; the reason the
+				// client must see is the quota decision, not the transport error.
+				err = errQuotaAborted
+			}
+		}
+		s.recordAttempt(ctx, key, account, req, plan.Resolved, cand, attemptNo, err, latency, ttftMS, attemptStarted, usage, outcome, assembler)
 
 		if err == nil {
 			chosen = &cand
@@ -196,6 +217,10 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 
 	if chosen == nil {
 		payload := &responses.ErrorPayload{Code: "upstream_error", Message: errorMessage(lastErr)}
+		if errors.Is(lastErr, errQuotaAborted) {
+			payload.Code = "insufficient_quota"
+			payload.Message = "the account ran out of quota while the response was streaming"
+		}
 		if apiErr, ok := domain.AsAPIError(lastErr); ok {
 			payload.Code = apiErr.Code
 			payload.Message = apiErr.Message
@@ -254,6 +279,7 @@ func (s *Server) recordAttempt(
 	latencyMS, ttftMS int,
 	startedAt time.Time,
 	u pluginapi.Usage,
+	outcome *inflightOutcome,
 	assembler *responses.Assembler,
 ) {
 	if s.deps.Meter == nil {
@@ -264,6 +290,12 @@ func (s *Server) recordAttempt(
 	if len(dims) == 0 {
 		dims = assembler.Usage().Dimensions
 		estimated = assembler.Usage().Estimated
+	}
+	// An aborted attempt is charged only for what was metered at the decision point.
+	if outcome != nil && outcome.aborted {
+		if len(outcome.dims) > 0 {
+			dims = outcome.dims
+		}
 	}
 	status := "completed"
 	errorCode := ""
@@ -276,6 +308,9 @@ func (s *Server) recordAttempt(
 			if apiErr.Kind == pluginapi.KindQuotaExhausted {
 				terminated = "aborted_quota"
 			}
+		} else if errors.Is(attemptErr, errQuotaAborted) {
+			errorCode = "insufficient_quota"
+			terminated = "aborted_quota"
 		} else {
 			errorCode = "upstream_error"
 		}
@@ -297,11 +332,17 @@ func (s *Server) recordAttempt(
 		DegradedFeatures: cand.Degraded,
 		TerminatedReason: terminated,
 	}
+	if outcome != nil {
+		attempt.OvershootCost = outcome.overshootCostMicros
+		if outcome.terminatedReason != "" {
+			attempt.TerminatedReason = outcome.terminatedReason
+		}
+	}
 
 	// With billing enabled the usage row is written by the settlement transaction, so
 	// that the metered attempt and the money it costs can never disagree.
 	if s.deps.Billing != nil {
-		s.settleAttempt(ctx, attempt, resolved, cand, attemptErr, startedAt, dims)
+		s.settleAttempt(ctx, attempt, resolved, cand, attemptErr, startedAt, dims, outcome != nil && outcome.aborted)
 		return
 	}
 	if _, err := s.deps.Meter.Record(ctx, attempt); err != nil {

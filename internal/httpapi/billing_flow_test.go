@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"github.com/winger/ai-gateway/internal/billing"
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/pricing"
 	"github.com/winger/ai-gateway/internal/quota"
 	"github.com/winger/ai-gateway/internal/registry"
 	"github.com/winger/ai-gateway/internal/routing"
@@ -23,6 +25,7 @@ import (
 	"github.com/winger/ai-gateway/internal/secret"
 	"github.com/winger/ai-gateway/internal/store"
 	"github.com/winger/ai-gateway/internal/usage"
+	"github.com/winger/ai-gateway/pkg/pluginapi"
 )
 
 const billingToken = "sk-gw-billing-path-token-0001"
@@ -248,5 +251,221 @@ func TestInsufficientBalanceIsRejectedBeforeUpstream(t *testing.T) {
 	}
 	if reservations := f.service.Reservations(); len(reservations) != 0 {
 		t.Fatalf("a rejected request must not hold a reservation: %+v", reservations)
+	}
+}
+
+// newAbortFixture wires a greedy provider: it ignores max_output_tokens and echoes a
+// long reply in many chunks, so a deliberately small reservation is exhausted mid-stream.
+func newAbortFixture(t *testing.T) *billingFixture {
+	t.Helper()
+	ctx := context.Background()
+
+	cfg := config.Default()
+	cfg.Database.Path = filepath.Join(t.TempDir(), "abort.db")
+	cfg.Billing.DefaultMarkupBP = 10000
+	cfg.Billing.InflightPolicy = "abort"
+	cfg.Billing.InflightCheckMS = 0 // check on every usage event
+	cfg.Billing.CancelGraceMS = 200
+	db, err := store.Open(ctx, cfg.Database)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	accountID, err := db.UpsertAccount(ctx, &domain.Account{
+		Name: "payer", BillingMode: domain.BillingPrepaid, Status: "active",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AppendLedger(ctx, []*domain.LedgerEntry{{
+		AccountID: accountID, Kind: "topup", AmountMicros: 1_000_000, IdemKey: "topup:abort",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	account, err := db.GetAccount(ctx, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.UpsertAPIKey(ctx, &domain.APIKey{
+		AccountID: accountID, Name: "dev",
+		KeyPrefix: secret.Prefix(billingToken), KeyHash: secret.Hash(billingToken),
+		Status: "active", RecordInputMode: "inherit",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	providerID, err := db.UpsertProvider(ctx, &domain.Provider{
+		Name: "greedy", Kind: "testecho", Enabled: true, Priority: 10, Weight: 100,
+		ConfigJSON: `{"chunks":50}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.UpsertProviderModel(ctx, &domain.ProviderModel{
+		ProviderID: providerID, PublicModel: "greedy-echo", UpstreamModel: "greedy-echo", Enabled: true,
+		MaxOutputTokens: 100000, CapabilitiesJSON: capabilitiesJSON,
+		PricingRulesJSON: `{"rules":[{"id":"cost","order":10,"when":{},"rates":{"output":2000000}}]}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	modelID, err := db.UpsertModel(ctx, &domain.Model{
+		PublicName: "greedy-echo", Enabled: true,
+		SalePricingJSON: `{"basis":"cost_follow","markup_bp":10000}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.UpsertRoute(ctx, &domain.Route{
+		ModelID: modelID, ProviderID: providerID, UpstreamModel: "greedy-echo",
+		Priority: 10, Weight: 100, Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := registry.New(db)
+	if _, err := reg.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bal := balancer.New(balancer.DefaultConfig())
+	router := routing.New(routing.Config{DefaultGrant: "all", Degradation: "strip"}, reg, bal)
+	dispatcher := runtime.New(runtime.Config{}, db, reg, nil, bal, nil)
+	service := billing.NewService(ctx, db, billing.ServiceConfig{
+		Writer:         billing.Config{BatchSize: 1, FlushInterval: 2 * time.Millisecond},
+		ReservationTTL: time.Minute,
+	}, nil)
+	t.Cleanup(func() { service.Close(time.Second) })
+
+	srv := New(Deps{
+		Config: &cfg, Registry: reg, Router: router, Dispatcher: dispatcher,
+		Verifier: apikey.New(db, apikey.DefaultConfig()),
+		Limiter:  quota.New(4), Meter: usage.New(db), Records: db,
+		Billing: service, Ledger: service, Version: "test",
+	})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return &billingFixture{server: ts, db: db, service: service, account: account}
+}
+
+func TestStreamingAbortChargesOnlyUpToTheDecisionPoint(t *testing.T) {
+	ctx := context.Background()
+	f := newAbortFixture(t)
+
+	// max_output_tokens=16 reserves 32 micros; the echo ignores it and streams far
+	// more, which is exactly the case the in-flight policy exists for.
+	body := fmt.Sprintf(`{"model":"greedy-echo","input":%q,"stream":true,"max_output_tokens":16}`,
+		strings.Repeat("x", 4000))
+	resp := f.call(t, body)
+	defer resp.Body.Close()
+	stream, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %d body=%s", resp.StatusCode, stream)
+	}
+	if !strings.Contains(string(stream), "response.failed") {
+		t.Fatalf("an aborted stream must end with response.failed:\n%s", stream)
+	}
+	if !strings.Contains(string(stream), "insufficient_quota") {
+		t.Fatalf("the failure must name insufficient_quota:\n%s", stream)
+	}
+
+	stats := f.waitForSettlement(t, 1)
+	if stats.Settled != 1 {
+		t.Fatalf("the aborted attempt must still settle: %+v", stats)
+	}
+	rows, err := f.db.ListUsageAsc(ctx, f.account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("usage rows = %d, want 1", len(rows))
+	}
+	record := rows[0]
+	if record.TerminatedReason != "aborted_quota" {
+		t.Fatalf("terminated reason = %q, want aborted_quota", record.TerminatedReason)
+	}
+	if record.OvershootCost < 0 {
+		t.Fatalf("overshoot cost must never be negative: %+v", record)
+	}
+	if record.ChargeMicros <= 0 {
+		t.Fatalf("the metered part must still be charged: %+v", record)
+	}
+	if record.ChargeMicros > 200 {
+		t.Fatalf("only the pre-decision usage may be charged, got %d micros", record.ChargeMicros)
+	}
+	if record.ChargeMicros != record.CostMicros {
+		t.Fatalf("the metered part must be charged at the 1.0x markup: charge=%d cost=%d",
+			record.ChargeMicros, record.CostMicros)
+	}
+
+	balance, err := f.service.Balance(ctx, f.account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if balance != 1_000_000-record.ChargeMicros {
+		t.Fatalf("balance = %d, want %d: the overshoot must not be charged",
+			balance, 1_000_000-record.ChargeMicros)
+	}
+	report, err := f.service.Invariants(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.OK {
+		t.Fatalf("invariants must survive an abort: %+v", report)
+	}
+}
+
+func mustRuleSet(t *testing.T, raw string) *pricing.RuleSet {
+	t.Helper()
+	set, err := pricing.ParseRuleSet(raw)
+	if err != nil {
+		t.Fatalf("ParseRuleSet: %v", err)
+	}
+	return set
+}
+
+// The overshoot accounting cannot be driven end to end (cancelling a well-behaved echo
+// stops it immediately), so the arithmetic is tested directly.
+func TestInflightOutcomeCountsOvershootAsCostOnly(t *testing.T) {
+	cfg := config.Default()
+	cfg.Billing.DefaultMarkupBP = 10000
+	server := New(Deps{Config: &cfg})
+	cost := mustRuleSet(t, `{"rules":[{"id":"c","order":10,"when":{},"rates":{"output":2000000}}]}`)
+
+	guard := &inflightGuard{
+		server: server, upstream: "m", policy: "abort", limit: 100,
+		cost: cost, dims: map[string]int64{"output": 10},
+	}
+	guard.outcome.aborted = true
+	guard.outcome.dims = map[string]int64{"output": 10}      // frozen at the decision point
+	outcome := guard.Outcome(map[string]int64{"output": 60}) // the upstream kept going
+	if outcome == nil {
+		t.Fatal("an aborted guard must report an outcome")
+	}
+	// 50 extra tokens at 2 micros each: cost only, never charged.
+	if outcome.overshootCostMicros != 100 {
+		t.Fatalf("overshoot cost = %d, want 100", outcome.overshootCostMicros)
+	}
+	if outcome.dims["output"] != 10 {
+		t.Fatalf("chargeable dimensions = %v, want the frozen snapshot", outcome.dims)
+	}
+}
+
+func TestInflightGuardIsInertWithoutALimit(t *testing.T) {
+	cfg := config.Default()
+	server := New(Deps{Config: &cfg})
+	guard := &inflightGuard{server: server, policy: "abort", limit: 0, dims: map[string]int64{}}
+	calls := 0
+	err := guard.Observe(pluginapi.Event{Type: pluginapi.EventUsageDelta, Usage: &pluginapi.Usage{Dimensions: map[string]int64{"output": 5}}}, func(pluginapi.Event) error {
+		calls++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("guard returned %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("the wrapped callback must still run: %d calls", calls)
+	}
+	if guard.outcome.aborted {
+		t.Fatal("a guard without a limit must never abort")
 	}
 }

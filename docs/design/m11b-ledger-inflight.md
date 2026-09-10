@@ -87,6 +87,25 @@ reserve = 输出单价(最贵档) × min(req.max_output_tokens, model.max_output
   递增 `rebuild_seq`，最后重算 `accounts.balance_micros`；
 - 重建不修改 `usage_records`（用量是真源）。
 
+## 11. M11b-3 实现与设计差异（流中在途策略）
+
+1. **决策函数是纯函数**（`billing.DecideInflight`）：输入「已计费金额 + 本次可用上限 + 策略 + 软硬阈值」，
+   输出 continue|warn|throttle|abort。软阈值只告警或节流；硬阈值除 `warn` 策略外一律结束调用
+   （`warn` 的语义就是「跑完再说，后面靠对账补偿」）。
+2. **限额 = 预留额，`allow_overdraft` 时再加上「余额 − 允许下限」**（`billing.InflightLimit`）。
+   下限：预付 = 0，后付 = −授信额度。
+3. **`throttle` 用真背压实现**：在 emit 回调里暂停读取上游管道（有界 grace，期间监听 ctx），
+   上游的 stdout 写满后自然阻塞。因为余额在请求进行中不会变多，grace 到期仍未缓解就转 abort——
+   这一点写进了设计（原来只写了「暂停读取」，没说暂停之后怎么办）。
+4. **abort 走 ctx 取消**：`context.WithCancel` 取消后，`pluginapi.Client` 会自动发 `provider.cancel{reason:\"context_cancelled\"}`，
+   上游被中断；客户端收到 `response.failed` + `insufficient_quota`。
+5. **abort 决策点冻结可计费用量**：`Outcome()` 把决策时刻的维度快照作为计费依据，
+   之后到达的用量只算成本（`overshoot_cost_micros`）不计费；实测终止时刻上游已停止，overshoot = 0。
+6. **配额中断也要计费**：`chargePartial` 让 abort 走的结算绕过 `charge_on_error=false`，
+   否则「已产出的内容」会白送（实测 charge=cost=42 微美元，余额 1000000 → 999958，从未为负）。
+7. **长调用心跳**：guard 按 `reservation_heartbeat_s` 调用 `Touch` 延长预留，避免 GC 在请求进行中把额度收走。
+8. **仍未实现**：`reservation_mode` 的 `fixed`/`hybrid`（当前一律用 max_tokens 公式）与
+   `unavailable_charge_policy`（上游连增量都不给时的三种兜底）留待 M12 与对账一起做。
 ## 10. M11b-2 实现与设计差异（数据面接线）
 
 1. **准入在路由规划之后、发起上游之前**：只有拿到候选才谈得上估算成本（不同供应商成本不同）。

@@ -150,7 +150,11 @@
 - [x] **M11b-2**：接入 `/v1/responses`——余额准入（402 在发起上游之前）+ 单次预留与释放 + 逐尝试计价（成本/售价/快照）+ 结算走批处理写者
 - [x] 失败尝试记成本不计费（`charge_on_error` 控制），并把 `usage.charge_micros` 同步置 0 以维持不变量
 - [x] 端到端实测：402 拒付不写用量；有余额时 cost=7 / charge=11（1.5× ceil）、账本 topup→charge、余额 4999989、四条不变量全绿
-- [ ] **M11b-3**：在途策略 `throttle`（上游 TCP 背压）与 `abort`（流中中断 + overshoot 记为成本不 charge）、长调用预留心跳与 `provider.cancel` 语义
+- [x] **M11b-3**：流中在途策略——纯函数决策（continue/warn/throttle/abort）、`throttle` 用上游背压实现、`abort` 经 ctx 取消触发 `provider.cancel`
+- [x] abort 决策点冻结可计费用量，之后的用量只记 `overshoot_cost_micros` 不 charge；配额中断仍按已计量部分计费
+- [x] 长调用预留心跳（按 `reservation_heartbeat_s` 续期，避免 GC 误收）
+- [x] 测试：`billing.DecideInflight` 表驱动 10 例、限额计算、guard 无上限时惰性、overshoot 只算成本、端到端流式 abort
+- [x] 端到端实测：`response.failed` + `insufficient_quota`、usage(42/42, aborted_quota)、账本 charge −42、余额 999958、不变量成立
 
 ## M12 账单 / 充值 / 对账补偿
 - [ ] invoice_lines 物化 + 状态流转 + 导出
