@@ -135,7 +135,7 @@ func run() int {
 	log.Info("aigw ready",
 		"store", "sqlite",
 		"registry", snap.String(),
-		"next", "M4 api keys + rate limiting (see docs/TODO.md)",
+		"next", "M5 responses API (see docs/TODO.md)",
 	)
 	return 0
 }
