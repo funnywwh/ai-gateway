@@ -176,7 +176,12 @@
 - [ ] 基线：≥2000 rps、TTFT P95<150ms、结算 ≥5000 条/s
 
 ## M15 模块解耦验证
-- [ ] 接口替身替换测试 + go list 依赖方向检查
+- [x] 设计文档 docs/design/m15-decoupling.md（已在对话中输出）
+- [x] `internal/arch` 分层断言：读取 `go list` 真实依赖图，逐包比对允许的模块内依赖
+- [x] 三条关键禁令：httpapi 不得直接 import pluginhost/creds；只有 cmd/aigw 能同时 import store+httpapi；任何包不得 import cmd/
+- [x] `examples/` 与 `pkg/` 同样受检（插件作者代码不得依赖 internal）
+- [x] 接口替身：`billing` 用 `proxyStore` 证明只依赖端口；httpapi 的端口假实现已在 M8b/M16 覆盖
+- [x] 规则表修正 5 处与实际 import 图的偏差（pricing→domain、providers 子包、examples、arch 自身）
 
 ## M16 数据库自动备份
 - [x] 设计文档 docs/design/m16-backup.md（已在对话中输出）；规格 docs/backup.md 状态改为已实现
