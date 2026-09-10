@@ -78,6 +78,10 @@
 - [x] 测试：6 个端到端用例（缺令牌/API Key 拒绝、initialize+tools/list、工具数据、未知工具与方法、跨账户隔离、吊销）
 - [ ] 后续工具：get_dashboard / get_usage_breakdown / list_invoices / get_invoice / get_rate_limits（依赖 M11/M12）
 - [ ] bin/aigw mcp-serve（stdio 模式）
+- [x] MCP-2：补齐 5 个工具（get_dashboard / get_usage_breakdown / get_rate_limits / list_invoices / get_invoice），共 11 个
+- [x] MCP-2：聚合下沉到 SQL（不再受 max_query_rows 截断影响）+ TTFT P95 精度标注
+- [x] MCP-2：`bin/aigw mcp-serve --account <name>` stdio 模式，复用同一个 Service（工具集不会漂移）
+- [x] MCP-2：测试 5 个（聚合不受行数限制、分组、限额+账单、跨账户不可见、tools/list 覆盖新工具）+ 端到端实测（HTTP 11 工具、stdio 2 响应）
 
 ## M7 Hooks 与录制
 - [x] 设计文档 docs/design/m7-hooks-recording.md

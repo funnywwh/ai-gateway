@@ -43,6 +43,11 @@ var (
 func main() { os.Exit(run()) }
 
 func run() int {
+	// A subcommand form keeps the local MCP server out of the HTTP binary''s flag space.
+	if len(os.Args) > 1 && os.Args[1] == "mcp-serve" {
+		return runMCPServe(os.Args[2:])
+	}
+
 	showVersion := flag.Bool("version", false, "print version information and exit")
 	configPath := flag.String("config", "config.yaml", "path to the YAML configuration file")
 	flag.Parse()
@@ -262,6 +267,15 @@ func run() int {
 		ReplayInterval: time.Minute,
 	}, log)
 	billingService.StartReservationGC(ctx, time.Minute)
+	mcpService.SetReservationReporter(func(accountID int64) int64 {
+		var total int64
+		for _, reservation := range billingService.Reservations() {
+			if reservation.AccountID == accountID {
+				total += reservation.AmountMicros
+			}
+		}
+		return total
+	})
 	billingService.SetMismatchHandler(func(record *domain.Reconciliation) {
 		hookDispatcher.Emit(ctx, &domain.Event{
 			Name:      "billing.reconcile_mismatch",

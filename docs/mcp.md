@@ -1,13 +1,14 @@
 # MCP 查询服务（网关作为 MCP Server）
 
-> 状态：**已实现（M6，首批 6 个工具）**。实现见 `internal/mcpsrv`（工具与 JSON-RPC）与 `internal/httpapi/mcp.go`（`POST /mcp` 与令牌鉴权）。
-> 尚未实现（依赖后续里程碑）：`get_dashboard`、`get_usage_breakdown`、`list_invoices`/`get_invoice`（M11/M12 的账单与聚合查询）、`get_rate_limits`、stdio 模式 `bin/aigw mcp-serve`。
+> 状态：**已实现（M6 首批 6 个 + MCP-2 补齐 5 个，共 11 个工具 + stdio 模式）**。
+> 实现见 `internal/mcpsrv`（工具与 JSON-RPC）、`internal/httpapi/mcp.go`（`POST /mcp` 与令牌鉴权）、`cmd/aigw mcpstdio.go`（stdio）。
+> 设计：`docs/design/mcp2-tools.md`。
 
 ## 1. 定位与接入
 
 - 面向外部 LLM/Agent（Claude、Cursor、自研 agent）：用它自己的账户凭据连入，查询**该账户的统计与请求内容**。
 - 传输：`POST /mcp`（MCP Streamable HTTP）。
-- 本地 agent 亦可使用 `bin/aigw mcp-serve`（stdio）。
+- 本地 agent 亦可使用 `bin/aigw mcp-serve --config <cfg> --account <name>`（stdio；本机信任，不走令牌）。
 - 鉴权：`Authorization: Bearer aigw_mcp_<token>`；令牌存 SHA-256 哈希 + 前缀索引（`mcp_tokens` 表），
   创建时**明文只显示一次**，支持轮换/吊销/过期。
 
@@ -49,7 +50,8 @@
 
 ## 5. 实现要点
 
-- 使用官方 `modelcontextprotocol/go-sdk` 的 **server** 端（`mcp.NewServer` + `AddTool`，处理 `tools/list` 与 `tools/call`）。
+- 手写 JSON-RPC 2.0 子集（`initialize`/`ping`/`tools/list`/`tools/call`），协议版本 `2025-06-18`：
+  环境无法拉取官方 SDK，且 SDK 的体积与依赖对「只有四个方法」的只读服务不划算（见 M6 的差异说明）。
 - 查询走**读连接池**（WAL 并发读），并优先读预聚合（`usage_counters`）+ 索引 + `LIMIT`，不做全表扫描。
 - 每次调用记录 `mcp_tokens.last_used_at`，并可发 hook `mcp.call`。
 

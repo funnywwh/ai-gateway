@@ -12,6 +12,7 @@ import (
 
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/registry"
+	"github.com/winger/ai-gateway/internal/store"
 )
 
 // Store is the read-only persistence subset the service needs.
@@ -23,6 +24,11 @@ type Store interface {
 	GetRequestLog(ctx context.Context, requestID string) (*domain.RequestLogRecord, error)
 	ListRequestLogs(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*domain.RequestLogRecord, error)
 	ListAPIKeys(ctx context.Context, accountID int64) ([]*domain.APIKey, error)
+	UsageWindowTotals(ctx context.Context, accountID int64, from, to time.Time) (*store.UsageWindowTotals, error)
+	UsageBreakdown(ctx context.Context, accountID int64, from, to time.Time, groupBy string) ([]store.UsageBreakdownRow, error)
+	ListUsageCounters(ctx context.Context, accountID int64, period string) ([]store.UsageCounter, error)
+	ListInvoices(ctx context.Context, accountID int64, limit int) ([]*domain.Invoice, error)
+	GetInvoice(ctx context.Context, id int64) (*domain.Invoice, error)
 }
 
 // Config tunes the service.
@@ -38,6 +44,9 @@ type Service struct {
 	reg   *registry.Registry
 	cfg   Config
 	now   func() time.Time
+	// reservations reports the account's in-flight holds. It is injected so this
+	// package does not depend on the billing package.
+	reservations func(accountID int64) int64
 }
 
 // New builds the service.
@@ -53,6 +62,12 @@ func New(store Store, reg *registry.Registry, cfg Config) *Service {
 	}
 	return &Service{store: store, reg: reg, cfg: cfg, now: func() time.Time { return time.Now().UTC() }}
 }
+
+// SetReservationReporter installs the in-flight reader used by get_dashboard.
+func (s *Service) SetReservationReporter(report func(accountID int64) int64) { s.reservations = report }
+
+// CounterPeriod is the "YYYY-MM" rollup bucket for a time.
+func CounterPeriod(at time.Time) string { return at.UTC().Format("2006-01") }
 
 // Tool is one exposed MCP tool.
 type Tool struct {
@@ -90,6 +105,31 @@ func (s *Service) Tools() []Tool {
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"request_id":{"type":"string"}},"required":["request_id"]}`),
 		},
 		{
+			Name:        "get_dashboard",
+			Description: "One-call summary for a period: requests, failures, tokens, charge, cost, margin, TTFT, balance and in-flight holds.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"period":{"type":"string","enum":["today","yesterday","last_7_days","last_30_days","this_month","last_month"]}}}`),
+		},
+		{
+			Name:        "get_usage_breakdown",
+			Description: "Usage grouped by model, key or day, with charge and token totals per group.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"period":{"type":"string"},"group_by":{"type":"string","enum":["model","key","day"]}}}`),
+		},
+		{
+			Name:        "get_rate_limits",
+			Description: "Configured limits per API key plus this month's usage from the rollup.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+		},
+		{
+			Name:        "list_invoices",
+			Description: "Billing periods for this account with status and totals.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":200}}}`),
+		},
+		{
+			Name:        "get_invoice",
+			Description: "One invoice with its lines (grouped by model, key or day).",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}`),
+		},
+		{
 			Name:        "get_models",
 			Description: "Models available to this account with their sale prices.",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
@@ -110,6 +150,16 @@ func (s *Service) Call(ctx context.Context, accountID int64, name string, args m
 		return s.listRequests(ctx, accountID, args)
 	case "get_request":
 		return s.getRequest(ctx, accountID, args)
+	case "get_dashboard":
+		return s.getDashboard(ctx, accountID, args)
+	case "get_usage_breakdown":
+		return s.getUsageBreakdown(ctx, accountID, args)
+	case "get_rate_limits":
+		return s.getRateLimits(ctx, accountID)
+	case "list_invoices":
+		return s.listInvoices(ctx, accountID, args)
+	case "get_invoice":
+		return s.getInvoice(ctx, accountID, args)
 	case "get_models":
 		return s.getModels(ctx, accountID)
 	default:
