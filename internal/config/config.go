@@ -39,6 +39,9 @@ type Server struct {
 	SecretKey    string `yaml:"secret_key"`
 	ReadTimeoutS int    `yaml:"read_timeout_s"`
 	MaxBodyBytes int64  `yaml:"max_body_bytes"`
+	// Pprof exposes /debug/pprof. Off by default: a profiling endpoint should not be
+	// open in production.
+	Pprof bool `yaml:"pprof"`
 }
 
 // ReadTimeout returns the HTTP read timeout.

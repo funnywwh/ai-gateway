@@ -5,14 +5,14 @@ import (
 	"time"
 
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/store"
 )
 
-// InvariantStore is the read-only view the audit needs.
+// InvariantStore is the read-only view the audit needs. Reading it must happen in one
+// consistent snapshot: on a busy gateway, summing usage and ledger with separate
+// queries reports a mismatch whenever the settlement writer commits in between.
 type InvariantStore interface {
-	ListAccounts(ctx context.Context) ([]*domain.Account, error)
-	LedgerTotals(ctx context.Context) (map[int64]int64, map[string]int64, error)
-	LastLedgerBalances(ctx context.Context) (map[int64]int64, error)
-	UsageCharges(ctx context.Context) (map[int64]int64, int64, error)
+	BillingAuditSnapshot(ctx context.Context) (*store.BillingAudit, error)
 }
 
 // Mismatch is one account that violates an invariant.
@@ -40,73 +40,62 @@ type InvariantReport struct {
 }
 
 // CheckInvariants verifies the four invariants from docs/billing.md section 3.
+//
+// Every aggregate comes from one consistent read snapshot, so a concurrent settlement
+// can never make the sums disagree by accident.
 func CheckInvariants(ctx context.Context, store InvariantStore, now time.Time) (*InvariantReport, error) {
-	accounts, err := store.ListAccounts(ctx)
-	if err != nil {
-		return nil, err
-	}
-	sums, byKind, err := store.LedgerTotals(ctx)
-	if err != nil {
-		return nil, err
-	}
-	lastBalances, err := store.LastLedgerBalances(ctx)
-	if err != nil {
-		return nil, err
-	}
-	usageByAccount, usageTotal, err := store.UsageCharges(ctx)
+	audit, err := store.BillingAuditSnapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	report := &InvariantReport{
 		CheckedAt:          now.UTC(),
-		Accounts:           len(accounts),
+		Accounts:           len(audit.BalanceByAccount),
 		BalanceSumMismatch: []Mismatch{},
 		LastEntryMismatch:  []Mismatch{},
 		ChargeMismatch:     []Mismatch{},
 		NegativeBalance:    []Mismatch{},
 	}
-
-	var ledgerChargeTotal int64
-	for _, account := range accounts {
-		name := account.Name
-		if sum := sums[account.ID]; sum != account.BalanceMicros {
+	for accountID, balance := range audit.BalanceByAccount {
+		name := audit.NameByAccount[accountID]
+		if sum := audit.LedgerSumByAccount[accountID]; sum != balance {
 			report.BalanceSumMismatch = append(report.BalanceSumMismatch, Mismatch{
-				AccountID: account.ID, Account: name,
-				Expected: sum, Actual: account.BalanceMicros,
+				AccountID: accountID, Account: name,
+				Expected: sum, Actual: balance,
 				Detail: "sum(ledger.amount) must equal accounts.balance_micros",
 			})
 		}
-		if last, ok := lastBalances[account.ID]; !ok {
-			if account.BalanceMicros != 0 {
+		last, ok := audit.LastBalanceByAccount[accountID]
+		switch {
+		case !ok:
+			if balance != 0 {
 				report.LastEntryMismatch = append(report.LastEntryMismatch, Mismatch{
-					AccountID: account.ID, Account: name, Expected: 0,
-					Actual: account.BalanceMicros, Detail: "account has a balance but no ledger entries",
+					AccountID: accountID, Account: name, Expected: 0, Actual: balance,
+					Detail: "account has a balance but no ledger entries",
 				})
 			}
-		} else if last != account.BalanceMicros {
+		case last != balance:
 			report.LastEntryMismatch = append(report.LastEntryMismatch, Mismatch{
-				AccountID: account.ID, Account: name,
-				Expected: last, Actual: account.BalanceMicros,
+				AccountID: accountID, Account: name, Expected: last, Actual: balance,
 				Detail: "the newest ledger entry must carry the current balance",
 			})
 		}
-		if account.BillingMode == domain.BillingPrepaid && account.BalanceMicros < 0 {
+		if audit.BillingModeByAccount[accountID] == string(domain.BillingPrepaid) && balance < 0 {
 			report.NegativeBalance = append(report.NegativeBalance, Mismatch{
-				AccountID: account.ID, Account: name, Expected: 0, Actual: account.BalanceMicros,
+				AccountID: accountID, Account: name, Expected: 0, Actual: balance,
 				Detail: "prepaid balances must never go negative (overshoot is absorbed as cost)",
 			})
 		}
 	}
-	ledgerChargeTotal = byKind["charge"]
-	if -ledgerChargeTotal != usageTotal {
+	if ledgerCharge := audit.LedgerSumByKind["charge"]; -ledgerCharge != audit.UsageChargeTotal {
 		report.ChargeMismatch = append(report.ChargeMismatch, Mismatch{
-			Expected: -ledgerChargeTotal, Actual: usageTotal,
+			Expected: -ledgerCharge, Actual: audit.UsageChargeTotal,
 			Detail: "sum(charge ledger entries) must equal sum(usage.charge_micros)",
 		})
 	}
-	for accountID, usageSum := range usageByAccount {
-		if _, ok := sums[accountID]; !ok && usageSum != 0 {
+	for accountID, usageSum := range audit.UsageChargeByAccount {
+		if _, ok := audit.BalanceByAccount[accountID]; !ok && usageSum != 0 {
 			report.ChargeMismatch = append(report.ChargeMismatch, Mismatch{
 				AccountID: accountID, Expected: 0, Actual: usageSum,
 				Detail: "usage exists for an account with no ledger entries",

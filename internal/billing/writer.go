@@ -187,9 +187,6 @@ func (w *Writer) loop() {
 // then to the fallback file.
 func (w *Writer) flushBatch(batch []*Settlement) {
 	w.batches.Add(1)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	w.mu.Lock()
 	applier := w.applier
 	w.mu.Unlock()
@@ -200,7 +197,13 @@ func (w *Writer) flushBatch(batch []*Settlement) {
 		return
 	}
 
-	applied, err := settleBatch(ctx, applier, batch)
+	// Every attempt gets its own deadline. Reusing one context across the batch try and
+	// the per-row retries meant that a batch which ran long expired the context, so every
+	// retry failed instantly and the whole batch went to the fallback file (found by the
+	// load test, not by the unit tests).
+	batchCtx, cancelBatch := context.WithTimeout(context.Background(), w.batchTimeout(len(batch)))
+	defer cancelBatch()
+	applied, err := settleBatch(batchCtx, applier, batch)
 	if err == nil {
 		w.settled.Add(int64(applied))
 		w.replayed.Add(int64(len(batch) - applied))
@@ -208,7 +211,9 @@ func (w *Writer) flushBatch(batch []*Settlement) {
 	}
 	w.log.Warn("batched settlement failed; retrying row by row", "err", err, "rows", len(batch))
 	for _, settlement := range batch {
-		one, err := applier.SettleAttempt(ctx, settlement.Usage, settlement.Entries, settlement.Counters)
+		rowCtx, cancelRow := context.WithTimeout(context.Background(), 5*time.Second)
+		one, err := applier.SettleAttempt(rowCtx, settlement.Usage, settlement.Entries, settlement.Counters)
+		cancelRow()
 		if err != nil {
 			w.fallback(settlement, err)
 			continue
@@ -309,3 +314,12 @@ func MarshalSettlement(settlement *Settlement) ([]byte, error) {
 }
 
 var _ = os.O_APPEND
+
+// batchTimeout scales with the batch so a large flush is not cut off mid-transaction.
+func (w *Writer) batchTimeout(rows int) time.Duration {
+	timeout := 10*time.Second + time.Duration(rows)*50*time.Millisecond
+	if timeout > 2*time.Minute {
+		return 2 * time.Minute
+	}
+	return timeout
+}

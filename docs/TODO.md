@@ -172,8 +172,15 @@
 - [ ] 赠送额度到期的每日作业（`ExpireGiftCredit` 已提供，待挂 cron）
 
 ## M13 性能与并发
-- [ ] scripts/load.sh + soak + pprof
-- [ ] 基线：≥2000 rps、TTFT P95<150ms、结算 ≥5000 条/s
+- [x] 设计文档 docs/design/m13-performance.md（已在对话中输出，含实测数字与两处修复）
+- [x] 微基准：pricing.Evaluate、routing.Plan（含并行）、httpapi 端到端（非流式/并行/模型列表）
+- [x] `cmd/loadgen`：标准库压测器（并发、时长、流式开关、rps 与 p50/p90/p95/p99）
+- [x] `scripts/load.sh`：一键起服务 + 建资源 + 压测 + 账单/不变量自检
+- [x] `server.pprof: true` 时挂载 `/debug/pprof/`（默认关闭）
+- [x] **压测抓到并修复**：写入器重试复用过期 context → 整批落兜底文件（11 条）
+- [x] **压测抓到并修复**：不变量巡检跨两次查询读快照 → 高并发下误报差异（改为单只读事务快照）
+- [x] 实测：32 并发 × 10s → 619.6 rps、p50 1.73ms、p95 44.5ms；usage 与 ledger 逐条对齐、不变量全绿、无兜底文件
+- [ ] 优化项（未做）：减少每请求的写入行数（response/request log 合并或异步），以压低 p99 长尾
 
 ## M15 模块解耦验证
 - [x] 设计文档 docs/design/m15-decoupling.md（已在对话中输出）

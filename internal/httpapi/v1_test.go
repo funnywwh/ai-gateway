@@ -36,7 +36,7 @@ type fixture struct {
 	verifier *apikey.Verifier
 }
 
-func newFixture(t *testing.T) *fixture {
+func newFixture(t testing.TB) *fixture {
 	t.Helper()
 	ctx := context.Background()
 
@@ -130,7 +130,7 @@ const (
 	nonStreamBody    = `{"model":"echo-model","input":"ping"}`
 )
 
-func (f *fixture) do(t *testing.T, method, path, body string, headers map[string]string) *http.Response {
+func (f *fixture) do(t testing.TB, method, path, body string, headers map[string]string) *http.Response {
 	t.Helper()
 	var reader io.Reader
 	if body != "" {

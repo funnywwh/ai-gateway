@@ -18,6 +18,7 @@ type ServiceStore interface {
 	RebuildStore
 	GetBalance(ctx context.Context, accountID int64) (int64, error)
 	ListLedger(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*domain.LedgerEntry, error)
+	ListAccounts(ctx context.Context) ([]*domain.Account, error)
 	GetAccount(ctx context.Context, id int64) (*domain.Account, error)
 	SetAccountStatus(ctx context.Context, id int64, status string) error
 	AppendLedger(ctx context.Context, entries []*domain.LedgerEntry) (int, error)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -145,6 +146,15 @@ func (s *Server) withAdminCSRF(next http.Handler) http.Handler {
 func (s *Server) SetReady(v bool) { s.ready.Store(v) }
 
 func (s *Server) routes() {
+	if s.deps.Config != nil && s.deps.Config.Server.Pprof {
+		// Profiling is opt-in: it exposes goroutine dumps and heap profiles.
+		s.mux.HandleFunc("GET /debug/pprof/", pprof.Index)
+		s.mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
+		s.mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+		s.mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+		s.mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
+	}
+
 	if s.deps.UI != nil {
 		ui := s.deps.UI
 		s.mux.Handle("GET /admin/ui/", http.StripPrefix("/admin/ui/", ui))
