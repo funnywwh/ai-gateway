@@ -207,6 +207,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /admin/api/v1/hooks/{id}", s.handleAdminDeleteHook)
 
 	s.mux.HandleFunc("GET /admin/api/v1/router/explain", s.handleAdminExplainRouter)
+	s.mux.HandleFunc("POST /admin/api/v1/pricing/simulate", s.handleAdminSimulatePricing)
+	s.mux.HandleFunc("POST /admin/api/v1/pricing/validate", s.handleAdminValidatePricing)
 	s.mux.HandleFunc("GET /admin/api/v1/settings", s.handleAdminGetSettings)
 	s.mux.HandleFunc("PUT /admin/api/v1/settings/{key}", s.handleAdminPutSetting)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)

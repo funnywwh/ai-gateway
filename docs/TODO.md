@@ -127,9 +127,14 @@
 - [ ] 浏览器人工走查（当前环境无浏览器）
 
 ## M11a 计价引擎
-- [ ] 计量维度 + 有序价格规则集（catch-all 强制、遮蔽检测、时段/档位/{model}）
-- [ ] 成本/售价双规则集（cost_follow | absolute）+ 快照内联副本
-- [ ] 试算器 + 定价诊断 + Pricing 界面
+- [x] 设计文档 docs/design/m11a-pricing.md（已在对话中输出）；规格 docs/pricing.md 状态改为已实现
+- [x] internal/pricing：纯函数 Evaluate（成本侧/售价侧同一条路径），int64 + ceil，禁浮点
+- [x] 有序规则集：首命中、catch-all 强制、时段（含跨午夜与星期归属、内嵌 tzdata）、档位半开、valid_from/to、变体
+- [x] 成本/售价双规则集：cost_follow（含按维度覆写倍率）| absolute，互斥语义明确
+- [x] 校验（400）+ 遮蔽检测（告警，不拒绝）；快照内联命中规则完整副本，可脱离规则表复算
+- [x] 管理面：POST /pricing/simulate（可内联规则做「改了会怎样」预览）与 POST /pricing/validate
+- [x] 测试：13 个引擎用例（首命中/时段/跨午夜/档位/取整/倍率/最低收费/校验/遮蔽/快照复算）+ 2 个 HTTP 用例
+- [ ] 界面：Pricing 页面（规则表格编辑器、模板、阶梯预览）——依赖 M11b 的账本与真实用量展示
 
 ## M11b 账本与在途额度
 - [ ] 单写者批处理 + fsync 兜底 + 幂等键

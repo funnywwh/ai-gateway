@@ -658,3 +658,84 @@ func TestAdminRouterExplain(t *testing.T) {
 	}
 	noModel.Body.Close()
 }
+
+func TestAdminPricingSimulate(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	provider := decodeJSONBody(t, f.call(t, http.MethodPost, "/admin/api/v1/providers",
+		`{"name":"price-echo","kind":"testecho"}`, cookie))
+	providerID := int64(provider["id"].(float64))
+	f.call(t, http.MethodPost, "/admin/api/v1/models",
+		`{"public_name":"priced-model","sale_pricing":{"basis":"absolute","rules":[{"id":"sale","order":10,"when":{},"rates":{"output":2000000}}]}}`,
+		cookie).Body.Close()
+	f.call(t, http.MethodPost, "/admin/api/v1/providers/"+itoa(providerID)+"/models",
+		`{"public_model":"priced-model","upstream_model":"up","pricing_rules":{"rules":[{"id":"cost","order":10,"when":{},"rates":{"output":1000000}}]}}`,
+		cookie).Body.Close()
+
+	resp := f.call(t, http.MethodPost, "/admin/api/v1/pricing/simulate",
+		`{"model":"priced-model","at":"2026-03-02T12:00:00Z","dimensions":{"output":1000000}}`, cookie)
+	payload := decodeJSONBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("simulate status = %d body=%v", resp.StatusCode, payload)
+	}
+	if payload["cost_micros"] != float64(1000000) {
+		t.Fatalf("cost = %v, want 1000000", payload["cost_micros"])
+	}
+	if payload["charge_micros"] != float64(2000000) {
+		t.Fatalf("charge = %v, want 2000000 (absolute sale table)", payload["charge_micros"])
+	}
+	sources, _ := payload["sources"].(map[string]any)
+	if sources["cost"] == "none" || sources["sale"] == "none (cost_follow with the configured default markup)" {
+		t.Fatalf("rule set sources were not resolved: %v", sources)
+	}
+	if _, ok := payload["snapshot"].(map[string]any); !ok {
+		t.Fatalf("simulate must return a replayable snapshot: %v", payload["snapshot"])
+	}
+
+	// Inline rules let an operator preview an unsaved change.
+	offpeak := f.call(t, http.MethodPost, "/admin/api/v1/pricing/simulate",
+		`{"model":"priced-model","at":"2026-03-02T17:00:00Z","dimensions":{"output":1000000},`+
+			`"cost_rules":{"rules":[{"id":"offpeak","order":10,"when":{"time_windows":[{"start":"16:30","end":"00:30"}]},"rates":{"output":100000}},`+
+			`{"id":"standard","order":100,"when":{},"rates":{"output":1000000}}]}}`, cookie)
+	offPeakPayload := decodeJSONBody(t, offpeak)
+	if offPeakPayload["cost_rule_id"] != "offpeak" || offPeakPayload["cost_micros"] != float64(100000) {
+		t.Fatalf("inline off-peak rules not applied: %v", offPeakPayload)
+	}
+
+	bad := f.call(t, http.MethodPost, "/admin/api/v1/pricing/simulate",
+		`{"model":"priced-model","dimensions":{"output":1},"cost_rules":{"rules":[{"id":"x","order":10,"when":{"model_variant":"v"},"rates":{"output":1}}]}}`,
+		cookie)
+	if bad.StatusCode != http.StatusBadRequest {
+		t.Fatalf("rule set without a catch-all must be rejected: status %d", bad.StatusCode)
+	}
+	bad.Body.Close()
+}
+
+func TestAdminPricingValidate(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	good := f.call(t, http.MethodPost, "/admin/api/v1/pricing/validate",
+		`{"rules":[{"id":"catchall","order":10,"when":{},"rates":{"input":100}},`+
+			`{"id":"never","order":20,"when":{"model_variant":"x"},"rates":{"input":50}}]}`, cookie)
+	payload := decodeJSONBody(t, good)
+	if payload["valid"] != true {
+		t.Fatalf("validate payload = %v", payload)
+	}
+	shadowed, _ := payload["shadowed"].([]any)
+	if len(shadowed) != 1 {
+		t.Fatalf("expected one shadowed rule, got %v", payload["shadowed"])
+	}
+
+	broken := f.call(t, http.MethodPost, "/admin/api/v1/pricing/validate",
+		`{"rules":[{"id":"a","order":10,"when":{"model_variant":"x"},"rates":{"input":1}}]}`, cookie)
+	brokenPayload := decodeJSONBody(t, broken)
+	if broken.StatusCode != http.StatusOK || brokenPayload["valid"] != false {
+		t.Fatalf("invalid rule set should report valid=false with 200: %v", brokenPayload)
+	}
+	message, _ := brokenPayload["error"].(string)
+	if !strings.Contains(message, "catch-all") {
+		t.Fatalf("error should name the missing catch-all: %q", message)
+	}
+}
