@@ -1,6 +1,7 @@
 # 实现 TODO（里程碑检查清单）
 
-> 维护规则：每完成一项即勾选；每里程碑开工前先写 `docs/design/{milestone}-*.md`。
+> 维护规则：每完成一项即勾选；每里程碑开工前先写 `docs/design/{milestone}-*.md`
+> **并贴到对话中确认后再写代码**（详见 `docs/PROCESS.md`，提交前按其中的检查项自检）。
 > 状态：`[ ]` 未开始 · `[~]` 进行中 · `[x]` 完成
 
 ## M0 脚手架 + git 仓库
@@ -26,11 +27,13 @@
 - [x] 读写双连接池（WAL 并发读 + 单写者）
 
 ## M2 插件协议与宿主
-- [ ] pkg/pluginapi：帧编解码/schema 子集/Serve/stdout 背压
-- [ ] internal/pluginhost：握手/心跳/取消/draining/重启退避/凭据回写
-- [ ] 内置 provider：openai-responses / openai-chat / testecho(testreplay)
+- [x] pkg/pluginapi：帧编解码 / schema 子集 / Serve / stdout 背压 / Client
+- [x] 设计文档 docs/design/m2-plugin-protocol.md + 规格文档 docs/plugin-protocol-v1.md（已在对话中输出）
+- [x] internal/pluginhost：启动/握手/心跳/取消/draining/重启退避/凭据文件/日志环形缓冲
+- [x] 示例插件 examples/provider-replay（可控慢流、增量用量、可控失败）
+- [x] 真实子进程 E2E（生命周期/崩溃重启/流中失败/发现可执行文件）
 - [ ] pkg/providerkit：SSEReader / chat↔responses / CharEstimator / OAuthDeviceFlow
-- [ ] 示例插件 + 真实子进程 E2E
+- [ ] 内置 provider：openai-responses / openai-chat / testecho
 
 ## M3 路由 / 权限 / 模型自由映射
 - [ ] 鉴权与授权并集（key + tags）

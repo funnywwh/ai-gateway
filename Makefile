@@ -16,6 +16,15 @@ build:
 test:
 	@$(GOENV) go test ./...
 
+# The race detector requires cgo and a C toolchain. This sandbox has neither
+# (CGO_ENABLED=0, no gcc), so test-race explains itself instead of failing hard.
+test-race:
+	@if command -v gcc >/dev/null 2>&1 || command -v cc >/dev/null 2>&1; then \
+		$(GOENV) CGO_ENABLED=1 go test -race ./... ; \
+	else \
+		echo "skip: -race needs cgo and a C compiler (not available here); run 'make test' instead" ; \
+	fi
+
 vet:
 	@$(GOENV) go vet ./...
 
