@@ -87,7 +87,8 @@
 - [x] 事件过滤（白名单/通配）与采样率；`include_content` 控制内容附带并受 max_bytes 截断
 - [x] hook 配置持久化（`hooks` 表 List/Upsert/Delete）+ SetHooks 热替换
 - [x] 请求路径接入：response.completed / response.failed 事件
-- [ ] 其余事件接入（provider.*、apikey.*、backup.*）随对应里程碑补齐
+- [x] 事件接入：response.completed/failed、request.denied、billing.inflight_warn/throttle/abort、billing.reconcile_mismatch、backup.finished/failed
+- [ ] 其余事件（provider.*、apikey.*）在需要时补齐（当前没有消费方，避免无谓的事件量）
 - [ ] 管理面请求日志查询 API（M8；MCP 侧已提供账户作用域查询）
 
 ## M8 管理面 REST API
@@ -168,7 +169,7 @@
 - [x] 修复 `AppendLedger` 幂等判定缺陷（重复 ref_id 曾被判为已入账）
 - [x] 测试：账期（含时区边界）、账单全生命周期、充值幂等与自动恢复、兑换码单次核销、对账发现差异与记录
 - [x] 端到端实测：充值（重复提交不重复入账）、兑换码（二次核销 409）、对账 diff=0、账单生成/issue/CSV
-- [ ] 控制台「账本与账期」页面（后端接口就绪）
+- [x] 控制台页：账本与充值（余额/在途/流水/充值表单）、账单（生成/签发/已付/作废/CSV）、对账（触发/历史/不变量/重放失败结算）
 - [ ] 赠送额度到期的每日作业（`ExpireGiftCredit` 已提供，待挂 cron）
 
 ## M13 性能与并发
@@ -200,7 +201,7 @@
 - [x] 管理面：列表（含目录/占用/下次触发）、手动触发、删除、下载（仅 admin）、暂存恢复、手动清理
 - [x] 测试：cron 下次触发 5 例+非法表达式、保留计划、备份产出与校验、校验失败保留文件、冷恢复替换（含 WAL 清理与二次调用幂等）
 - [x] 端到端实测：手动备份(quick_check=ok, 274KB)、下载后 quick_check=ok 且数据完整、restore 缺 confirm 400、带 confirm 暂存、重启后自动替换且数据可读
-- [ ] 控制台 Backups 页面（接口已就绪）
+- [x] 控制台页：备份（列表/手动触发/下载/两阶段恢复/删除/按策略清理，含目录占用与下次触发时刻）
 - [ ] v2：对象存储/异地同步（规格已声明不在 v1 范围）
 
 ## 可选

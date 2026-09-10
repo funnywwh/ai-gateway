@@ -194,6 +194,11 @@ func run() int {
 	})
 
 	backupManager := backup.New(backup.Config{
+		OnEvent: func(name string, payload map[string]any) {
+			hookDispatcher.Emit(ctx, &domain.Event{
+				Name: name, Timestamp: time.Now().UTC(), Payload: payload,
+			})
+		},
 
 		DatabasePath: cfg.Database.Path,
 

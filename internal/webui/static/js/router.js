@@ -11,13 +11,13 @@ export const routes = [
   { path: '/models', title: '模型与路由', module: './pages/models.js', group: '路由配置' },
   { path: '/mappings', title: '模型映射', module: './pages/mappings.js', group: '路由配置' },
   { path: '/pricing', title: '定价', module: './pages/placeholder.js', group: '计费', milestone: 'M11a' },
-  { path: '/billing', title: '账本与账期', module: './pages/placeholder.js', group: '计费', milestone: 'M11b/M12' },
-  { path: '/invoices', title: '账单', module: './pages/placeholder.js', group: '计费', milestone: 'M12' },
-  { path: '/reconciliation', title: '对账', module: './pages/placeholder.js', group: '计费', milestone: 'M12' },
+  { path: '/billing', title: '账本与充值', module: './pages/billing.js', group: '计费' },
+  { path: '/invoices', title: '账单', module: './pages/billing.js', group: '计费' },
+  { path: '/reconciliation', title: '对账', module: './pages/billing.js', group: '计费' },
   { path: '/requests', title: '请求日志', module: './pages/requests.js', group: '可观测' },
   { path: '/hooks', title: 'Hooks', module: './pages/hooks.js', group: '可观测' },
   { path: '/audit', title: '审计日志', module: './pages/audit.js', group: '可观测' },
-  { path: '/backups', title: '备份', module: './pages/placeholder.js', group: '运维', milestone: 'M16' },
+  { path: '/backups', title: '备份', module: './pages/backups.js', group: '运维' },
   { path: '/settings', title: '设置', module: './pages/settings.js', group: '运维' },
 ];
 
