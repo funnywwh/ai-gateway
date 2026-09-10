@@ -1,0 +1,145 @@
+# ai-gateway configuration example
+#
+# Precedence: built-in defaults < this file < GW_* environment variables.
+# Most fields mirror config.Default(); see internal/config/config.go for the full list.
+
+server:
+  listen: ":8080"
+  secret_key: "change-me-session-signing-key"
+  read_timeout_s: 30
+  max_body_bytes: 10485760
+
+database:
+  path: "./data/aigw.db"
+  busy_timeout_ms: 5000
+  wal: true
+  max_open_conns: 16        # 1 writer + readers (WAL allows concurrent reads)
+
+auth:
+  default_grant: all        # all|none - keys without tags/grants get everything
+  key_cache_ttl_s: 30
+
+plugins:
+  dir: "./plugins"
+  extra: []
+  state_dir: "./data/plugin-state"
+  start_timeout_s: 3
+  ping_interval_s: 15
+  max_restarts_per_min: 5
+  log_tail_lines: 200
+  restart_drain_grace_s: 30
+  restart_force_s: 600
+
+routing:
+  default_strategy: weighted_random   # weighted_random|round_robin|least_inflight|least_latency|strict_order
+  max_attempts: 3
+  per_attempt_timeout_s: 120
+  ttft_timeout_s: 60
+  total_budget_s: 600
+  degradation: strip                  # strip|reject
+  quota_cooldown_default_s: 1800
+  breaker:
+    failures: 5
+    window_s: 60
+    cooldown_s: 30
+  model_fallback: ""                  # catch-all model when nothing matches
+
+billing:
+  currency: USD
+  default_markup_bp: 10000            # cost_follow default multiplier (10000 = 1.0x)
+  basis_default: cost_follow          # cost_follow|absolute
+  peak_boundary: request_start        # request_start|completion (off-peak window attribution)
+  reasoning_counts_as_output: true
+  per_request_fee_scope: attempt      # attempt|request
+  min_charge_micros: 0
+  charge_on_error: false
+  charge_estimated: true
+  charge_partial: true                # aborted streams are charged for metered usage only
+  record_partial_cost: true
+  prepaid_enforce: true
+  reject_as_429: false
+  monthly_usage_conditions: false
+  # reservation / in-flight accounting
+  reservation_mode: max_tokens        # max_tokens|fixed|hybrid
+  reserve_micros_default: 20000
+  default_max_output_tokens: 4096
+  reservation_ttl_s: 660
+  reservation_heartbeat_s: 15
+  inflight_check_interval_ms: 1000
+  inflight_policy: abort              # warn|throttle|abort|allow_overdraft
+  inflight_soft_ratio: 0.8
+  inflight_hard_ratio: 1.0
+  overdraft_limit_micros: 0
+  overshoot_policy: absorb            # absorb|overdraft
+  inflight_estimate: chars4           # chars4|off
+  cancel_grace_ms: 1500
+  unavailable_charge_policy: charge_estimated   # charge_estimated|charge_reserved|charge_zero
+  # invoicing / reconciliation
+  low_balance_ratio: 0.1
+  auto_suspend_default: false
+  auto_resume_default: false
+  invoice_period: monthly
+  period_start_day: 1
+  timezone: UTC
+  fallback_file: "./data/billing-fallback.jsonl"
+  reconcile_cron: "0 3 * * *"
+  display_currency_rate: 1.0
+  # single-writer settlement batching
+  writer_batch_size: 256
+  writer_flush_interval_ms: 20
+  writer_queue_size: 65536
+
+recording:
+  record_input: full          # full|metadata|off - request input text is recorded by default (redacted)
+  record_reasoning: false     # "save thinking text" checkbox - off by default, per key
+  record_output_text: false   # "save final output text" checkbox - off by default, per key
+  max_bytes: 1048576
+  retention_days: 30
+  redact_paths: []
+  queue_size: 16384
+
+mcp:
+  enabled: true
+  max_query_rows: 1000
+  request_window_days: 30
+
+hooks:
+  queue_size: 1024
+  workers: 8
+  timeout_s: 5
+  retries: 5
+  dead_letter: "./data/hooks-dead.jsonl"
+
+ratelimit:
+  shards: 64
+
+backup:
+  enabled: true
+  dir: "./data/backups"
+  cron: "30 3 * * *"
+  retention_daily: 7
+  retention_weekly: 4
+  retention_monthly: 3
+  verify: true
+
+log:
+  level: info                 # debug|info|warn|error
+  format: text                # text|json
+
+# AES-GCM key for provider credentials at rest; override with GW_CREDENTIALS_KEY in production.
+credentials_key: "change-me-32-byte-encryption-key!!"
+
+bootstrap:
+  mode: upsert                # upsert|merge|off
+  admin:
+    username: admin
+    password: "change-me-admin-password"
+  accounts:
+    - name: internal
+      billing_mode: postpaid
+      credit_limit_usd: 1000
+  api_keys:
+    - name: dev
+      key: "sk-gw-REPLACE-ME"
+      account: internal
+      tags: [free]

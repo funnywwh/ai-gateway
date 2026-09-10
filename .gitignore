@@ -1,0 +1,22 @@
+# build artifacts
+/bin/
+*.exe
+
+# runtime data (db, fallback ledgers, backups, plugin state)
+/data/
+*.db
+*.db-wal
+*.db-shm
+billing-fallback.jsonl
+hooks-dead.jsonl
+
+# workspace-local toolchain caches (see scripts/goenv.sh)
+/.cache/
+
+# built plugin binaries
+/plugins/*.bin
+
+# editors
+.idea/
+.vscode/
+*.swp
