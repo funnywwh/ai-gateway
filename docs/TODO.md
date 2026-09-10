@@ -76,8 +76,6 @@
 - [x] 跨账户访问按"不存在"处理；API Key 不能用于 MCP（必须账户级 MCP 令牌）；吊销/过期即 401
 - [x] 内容可见性绑定录制开关（未录制返回 recorded=false + 原因）
 - [x] 测试：6 个端到端用例（缺令牌/API Key 拒绝、initialize+tools/list、工具数据、未知工具与方法、跨账户隔离、吊销）
-- [ ] 后续工具：get_dashboard / get_usage_breakdown / list_invoices / get_invoice / get_rate_limits（依赖 M11/M12）
-- [ ] bin/aigw mcp-serve（stdio 模式）
 - [x] MCP-2：补齐 5 个工具（get_dashboard / get_usage_breakdown / get_rate_limits / list_invoices / get_invoice），共 11 个
 - [x] MCP-2：聚合下沉到 SQL（不再受 max_query_rows 截断影响）+ TTFT P95 精度标注
 - [x] MCP-2：`bin/aigw mcp-serve --account <name>` stdio 模式，复用同一个 Service（工具集不会漂移）
@@ -93,7 +91,6 @@
 - [x] 请求路径接入：response.completed / response.failed 事件
 - [x] 事件接入：response.completed/failed、request.denied、billing.inflight_warn/throttle/abort、billing.reconcile_mismatch、backup.finished/failed
 - [ ] 其余事件（provider.*、apikey.*）在需要时补齐（当前没有消费方，避免无谓的事件量）
-- [ ] 管理面请求日志查询 API（M8；MCP 侧已提供账户作用域查询）
 
 ## M8 管理面 REST API
 - [x] 设计文档 docs/design/m8-admin-api.md（面隔离、会话、热更新三件套、审计、分页）
@@ -129,7 +126,7 @@
 - [x] 管理面 CSRF 收紧：POST/PATCH/PUT 必须 `Content-Type: application/json`
 - [x] 测试：webui 资源/回落/CSP 用例 + CSRF 与 explain 端点用例（真实 store）
 - [x] Node 语法检查与导入图校验（13 个页面模块，0 问题）
-- [ ] 浏览器人工走查（当前环境无浏览器）
+- [ ] 浏览器人工走查（当前环境无浏览器；已用 Node 对新页面做语法与导入图校验，接口逐条 curl 验证）
 
 ## M11a 计价引擎
 - [x] 设计文档 docs/design/m11a-pricing.md（已在对话中输出）；规格 docs/pricing.md 状态改为已实现
@@ -210,8 +207,8 @@
 - [x] 控制台页：兑换码（批量生成一次性明文、按批次过滤、核销到指定账户）——至此所有资源都有界面
 - [x] 收尾修复：管理面请求日志列表把 `account_id=0` 当字面量匹配，导致「全部账户」视图恒为空（端到端走查发现）
 - [x] 收尾：README 状态与文档索引刷新；`UsageTotals`/`UsageBreakdownRow`/`UsageCounter` 上移到 `domain` 以保持分层断言通过
-- [ ] v2：对象存储/异地同步（规格已声明不在 v1 范围）
+- [ ] v2：备份到对象存储/异地同步（规格已声明不在 v1 范围）
 
 ## 可选
-- [ ] M10 订阅后端参考适配器（examples/provider-codex，默认禁用）
-- [ ] M14 客户自服务门户
+- [ ] 可选：M10 订阅后端参考适配器（examples/provider-codex，默认禁用；计划内可选项）
+- [ ] 可选：M14 客户自服务门户（计划内可选项，不在 M0–M16 主链）
