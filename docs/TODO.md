@@ -91,9 +91,14 @@
 - [ ] 管理面请求日志查询 API（M8；MCP 侧已提供账户作用域查询）
 
 ## M8 管理面 REST API
-- [ ] 会话鉴权（argon2id + 会话 Cookie）
-- [ ] 供应商端点（kinds/preview/validate/test/restart/rollback/logs/refresh/actions/state）
-- [ ] model-mappings / mcp-tokens / keys（双勾选）/ audit
+- [x] 设计文档 docs/design/m8-admin-api.md（面隔离、会话、热更新三件套、审计、分页）
+- [x] 口令哈希：标准库 PBKDF2-HMAC-SHA256（21 万次迭代 + 16 字节盐，格式可平滑升级）
+- [x] 会话：`sess_<随机>` + 每会话随机令牌，**库里只存哈希**，12h 过期；`admin_users`/`admin_sessions` 表
+- [x] 登录限速（按客户端键的失败窗口，超限 429）；失败信息统一（不区分用户不存在/口令错误）
+- [x] 测试：哈希往返与加盐、登录/鉴权/退出全链路、错误口令与限速、过期会话、角色检查
+- [ ] 管理面 HTTP 路由与中间件（Cookie 鉴权、401/403、面隔离）
+- [ ] 资源 CRUD：providers / models / model-mappings / routes / tags / keys（双勾选）/ mcp-tokens / hooks
+- [ ] 热更新三件套接线（缓存失效 + registry.Reload + 审计）与请求日志/统计/审计查询端点
 
 ## M9 Web 管理界面
 - [ ] 概览/Keys/Tags/Providers/Model Mappings/Models & Routes/Pricing/Accounts/Invoices/Reconciliation/MCP/Hooks/Request Logs/Usage/Backups/Audit/Settings
