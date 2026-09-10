@@ -143,3 +143,31 @@ bootstrap:
       key: "sk-gw-REPLACE-ME"
       account: internal
       tags: [free]
+  # Optional: seed the routing graph on first start (upsert = only create what is missing).
+  providers:
+    - name: local-chat
+      kind: openai-chat            # builtin: openai-responses | openai-chat ; or plugin:<name>
+      display_name: "Local OpenAI-compatible upstream"
+      enabled: false               # flip to true once base_url / credentials are configured
+      priority: 10
+      weight: 100
+      config:
+        base_url: "http://127.0.0.1:11434/v1"
+      models:
+        - public: llama-local
+          upstream: "llama3.1:8b"
+          capabilities: {stream: true, tools: false}
+  models:
+    - public_name: llama-local
+      aliases: ["local", "llama"]
+  routes:
+    - model: llama-local
+      provider: local-chat
+      upstream_model: "llama3.1:8b"
+      priority: 10
+      weight: 100
+  tags:
+    - name: free
+      models: ["llama-local"]
+      providers: ["local-chat"]
+      priority: 10

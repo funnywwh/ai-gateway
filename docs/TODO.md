@@ -18,11 +18,12 @@
 - [x] 首次提交
 
 ## M1 存储与注册表
-- [ ] 迁移框架（schema_migrations，内嵌 SQL）
-- [ ] DAL（accounts/providers/provider_models/models/model_mappings/routes/tags/api_keys/mcp_tokens/ledger/invoices/usage/request_logs/hooks/backup_jobs/settings/audit）
-- [ ] YAML 引导（bootstrap.mode=upsert/merge）
-- [ ] registry：内存快照 + 原子换入
-- [ ] audit 日志
+- [x] 迁移框架（schema_migrations，内嵌 SQL，幂等）
+- [x] DAL（accounts/api_keys/mcp_tokens/providers/provider_models/models/model_mappings/routes/tags/ledger/usage/audit/settings）
+- [x] YAML 引导（bootstrap.mode=off/upsert/merge，含 providers/models/routes/tags）
+- [x] registry：内存快照 + 原子换入
+- [x] audit 日志
+- [x] 读写双连接池（WAL 并发读 + 单写者）
 
 ## M2 插件协议与宿主
 - [ ] pkg/pluginapi：帧编解码/schema 子集/Serve/stdout 背压

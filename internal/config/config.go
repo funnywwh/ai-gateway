@@ -202,12 +202,65 @@ type BootstrapAPIKey struct {
 	Tags    []string `yaml:"tags"`
 }
 
+// BootstrapProviderModel maps one public model to an upstream model for a plugin/builtin provider.
+type BootstrapProviderModel struct {
+	Public          string          `yaml:"public"`
+	Upstream        string          `yaml:"upstream"`
+	Capabilities    map[string]bool `yaml:"capabilities"`
+	PricingRules    string          `yaml:"pricing_rules"` // raw JSON rule set (cost side)
+	MaxOutputTokens int             `yaml:"max_output_tokens"`
+	ContextWindow   int             `yaml:"context_window"`
+	Enabled         *bool           `yaml:"enabled"`
+}
+
+// BootstrapProvider declares one provider instance.
+type BootstrapProvider struct {
+	Name        string                   `yaml:"name"`
+	Kind        string                   `yaml:"kind"`
+	DisplayName string                   `yaml:"display_name"`
+	Enabled     *bool                    `yaml:"enabled"`
+	Priority    int                      `yaml:"priority"`
+	Weight      int                      `yaml:"weight"`
+	Config      map[string]any           `yaml:"config"`
+	Models      []BootstrapProviderModel `yaml:"models"`
+}
+
+// BootstrapModel declares one canonical (client-facing) model.
+type BootstrapModel struct {
+	PublicName  string   `yaml:"public_name"`
+	Aliases     []string `yaml:"aliases"`
+	Enabled     *bool    `yaml:"enabled"`
+	SalePricing string   `yaml:"sale_pricing"` // raw JSON rule set (sale side)
+}
+
+// BootstrapRoute binds a canonical model to a provider.
+type BootstrapRoute struct {
+	Model         string `yaml:"model"`
+	Provider      string `yaml:"provider"`
+	UpstreamModel string `yaml:"upstream_model"`
+	Priority      int    `yaml:"priority"`
+	Weight        int    `yaml:"weight"`
+	Enabled       *bool  `yaml:"enabled"`
+}
+
+// BootstrapTag declares a tag with union grants.
+type BootstrapTag struct {
+	Name      string   `yaml:"name"`
+	Models    []string `yaml:"models"`
+	Providers []string `yaml:"providers"`
+	Priority  int      `yaml:"priority"`
+}
+
 // Bootstrap seeds the database when it is empty (or merges, per Mode).
 type Bootstrap struct {
-	Mode     string             `yaml:"mode"` // upsert|merge|off
-	Admin    BootstrapAdmin     `yaml:"admin"`
-	Accounts []BootstrapAccount `yaml:"accounts"`
-	APIKeys  []BootstrapAPIKey  `yaml:"api_keys"`
+	Mode      string             `yaml:"mode"` // upsert|merge|off
+	Admin     BootstrapAdmin     `yaml:"admin"`
+	Accounts  []BootstrapAccount `yaml:"accounts"`
+	APIKeys   []BootstrapAPIKey  `yaml:"api_keys"`
+	Providers []BootstrapProvider `yaml:"providers"`
+	Models    []BootstrapModel    `yaml:"models"`
+	Routes    []BootstrapRoute    `yaml:"routes"`
+	Tags      []BootstrapTag      `yaml:"tags"`
 }
 
 // Default returns the built-in configuration (matches config.example.yaml).

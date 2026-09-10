@@ -1,0 +1,215 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/winger/ai-gateway/internal/domain"
+)
+
+// AppendLedger applies ledger entries atomically: each entry is inserted at most once
+// (idem_key is unique) and the account balance is updated in the same transaction, so a
+// replay of an already-applied entry is a no-op instead of a double charge.
+func (db *DB) AppendLedger(ctx context.Context, entries []*domain.LedgerEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	tx, err := db.write.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin ledger tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, e := range entries {
+		if e == nil || e.AccountID == 0 || e.IdemKey == "" {
+			return domain.ErrInvalidRequest("ledger entry requires account_id and idem_key")
+		}
+		var balance int64
+		if err := tx.QueryRowContext(ctx,
+			"SELECT balance_micros FROM accounts WHERE id = ?", e.AccountID).Scan(&balance); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return domain.ErrNotFound(fmt.Sprintf("account %d", e.AccountID))
+			}
+			return fmt.Errorf("store: read balance of account %d: %w", e.AccountID, err)
+		}
+		if e.CreatedAt.IsZero() {
+			e.CreatedAt = time.Now().UTC()
+		}
+		newBalance := balance + e.AmountMicros
+
+		res, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO ledger_entries(account_id, api_key_id, kind, amount_micros, balance_after_micros,
+  ref_type, ref_id, idem_key, rebuild_seq, note, actor, created_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+			e.AccountID, e.APIKeyID, e.Kind, e.AmountMicros, newBalance, e.RefType, e.RefID,
+			e.IdemKey, e.RebuildSeq, e.Note, e.Actor, unix(e.CreatedAt))
+		if err != nil {
+			return fmt.Errorf("store: insert ledger entry %s: %w", e.IdemKey, err)
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("store: ledger rows affected: %w", err)
+		}
+		if affected == 0 {
+			continue // already applied by an earlier attempt: idempotent replay
+		}
+		e.BalanceAfterMicros = newBalance
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE accounts SET balance_micros = ?, updated_at = ? WHERE id = ?",
+			newBalance, unix(time.Now()), e.AccountID); err != nil {
+			return fmt.Errorf("store: update balance of account %d: %w", e.AccountID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit ledger: %w", err)
+	}
+	return nil
+}
+
+const ledgerCols = `id, account_id, api_key_id, kind, amount_micros, balance_after_micros,
+	ref_type, ref_id, idem_key, rebuild_seq, note, actor, created_at`
+
+// ListLedger returns ledger entries of one account inside a time window (newest first).
+func (db *DB) ListLedger(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*domain.LedgerEntry, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	query := "SELECT " + ledgerCols + " FROM ledger_entries WHERE account_id = ?"
+	args := []any{accountID}
+	if !from.IsZero() {
+		query += " AND created_at >= ?"
+		args = append(args, unix(from))
+	}
+	if !to.IsZero() {
+		query += " AND created_at <= ?"
+		args = append(args, unix(to))
+	}
+	query += " ORDER BY id DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := db.read.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: list ledger: %w", err)
+	}
+	defer rows.Close()
+
+	out := []*domain.LedgerEntry{}
+	for rows.Next() {
+		var (
+			e          domain.LedgerEntry
+			apiKeyID   sql.NullInt64
+			createdAt  int64
+		)
+		if err := rows.Scan(&e.ID, &e.AccountID, &apiKeyID, &e.Kind, &e.AmountMicros,
+			&e.BalanceAfterMicros, &e.RefType, &e.RefID, &e.IdemKey, &e.RebuildSeq,
+			&e.Note, &e.Actor, &createdAt); err != nil {
+			return nil, fmt.Errorf("store: scan ledger entry: %w", err)
+		}
+		e.APIKeyID = nullInt64Ptr(apiKeyID)
+		e.CreatedAt = timeFromUnix(createdAt)
+		out = append(out, &e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate ledger: %w", err)
+	}
+	return out, nil
+}
+
+// GetBalance returns the materialised balance of an account.
+func (db *DB) GetBalance(ctx context.Context, accountID int64) (int64, error) {
+	var balance int64
+	if err := db.read.QueryRowContext(ctx,
+		"SELECT balance_micros FROM accounts WHERE id = ?", accountID).Scan(&balance); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, domain.ErrNotFound(fmt.Sprintf("account %d", accountID))
+		}
+		return 0, fmt.Errorf("store: get balance of account %d: %w", accountID, err)
+	}
+	return balance, nil
+}
+
+const usageCols = `id, request_id, attempt_no, account_id, api_key_id, model, resolved_model,
+	provider_id, dimensions_json, cost_micros, charge_micros, overshoot_cost_micros,
+	pricing_snapshot_json, latency_ms, ttft_ms, status, error_code, degraded_features_json,
+	usage_source, terminated_reason, created_at`
+
+// InsertUsage appends one metered upstream attempt.
+func (db *DB) InsertUsage(ctx context.Context, rec *domain.UsageRecord) (int64, error) {
+	if rec == nil || rec.RequestID == "" {
+		return 0, domain.ErrInvalidRequest("usage record requires request_id")
+	}
+	if rec.AttemptNo == 0 {
+		rec.AttemptNo = 1
+	}
+	if rec.CreatedAt.IsZero() {
+		rec.CreatedAt = time.Now().UTC()
+	}
+	res, err := db.write.ExecContext(ctx, `
+INSERT INTO usage_records(request_id, attempt_no, account_id, api_key_id, model, resolved_model,
+  provider_id, dimensions_json, cost_micros, charge_micros, overshoot_cost_micros,
+  pricing_snapshot_json, latency_ms, ttft_ms, status, error_code, degraded_features_json,
+  usage_source, terminated_reason, created_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		rec.RequestID, rec.AttemptNo, rec.AccountID, rec.APIKeyID, rec.Model, rec.ResolvedModel,
+		rec.ProviderID, rec.DimensionsJSON, rec.CostMicros, rec.ChargeMicros, rec.OvershootCost,
+		rec.PricingSnapshot, rec.LatencyMS, rec.TTFTMS, rec.Status, rec.ErrorCode,
+		rec.DegradedFeatures, rec.UsageSource, rec.TerminatedReason, unix(rec.CreatedAt))
+	if err != nil {
+		return 0, fmt.Errorf("store: insert usage record: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("store: usage record id: %w", err)
+	}
+	rec.ID = id
+	return id, nil
+}
+
+// ListUsage returns usage rows of one account inside a window (newest first).
+func (db *DB) ListUsage(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*domain.UsageRecord, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	query := "SELECT " + usageCols + " FROM usage_records WHERE account_id = ?"
+	args := []any{accountID}
+	if !from.IsZero() {
+		query += " AND created_at >= ?"
+		args = append(args, unix(from))
+	}
+	if !to.IsZero() {
+		query += " AND created_at <= ?"
+		args = append(args, unix(to))
+	}
+	query += " ORDER BY id DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := db.read.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: list usage: %w", err)
+	}
+	defer rows.Close()
+
+	out := []*domain.UsageRecord{}
+	for rows.Next() {
+		var (
+			r         domain.UsageRecord
+			createdAt int64
+		)
+		if err := rows.Scan(&r.ID, &r.RequestID, &r.AttemptNo, &r.AccountID, &r.APIKeyID,
+			&r.Model, &r.ResolvedModel, &r.ProviderID, &r.DimensionsJSON, &r.CostMicros,
+			&r.ChargeMicros, &r.OvershootCost, &r.PricingSnapshot, &r.LatencyMS, &r.TTFTMS,
+			&r.Status, &r.ErrorCode, &r.DegradedFeatures, &r.UsageSource, &r.TerminatedReason,
+			&createdAt); err != nil {
+			return nil, fmt.Errorf("store: scan usage record: %w", err)
+		}
+		r.CreatedAt = timeFromUnix(createdAt)
+		out = append(out, &r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate usage: %w", err)
+	}
+	return out, nil
+}

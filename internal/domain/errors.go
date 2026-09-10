@@ -84,6 +84,27 @@ func ErrUpstream(status int, msg string) *APIError {
 	return newErr(status, ErrTypeAPI, "upstream_error", msg)
 }
 
+// HasStatus reports whether err carries the given HTTP status.
+func HasStatus(err error, status int) bool {
+	ae, ok := AsAPIError(err)
+	return ok && ae.Status == status
+}
+
+// IsNotFound reports whether err is a not-found error.
+func IsNotFound(err error) bool { return HasStatus(err, http.StatusNotFound) }
+
+// IsUnauthorized reports whether err is an authentication error.
+func IsUnauthorized(err error) bool { return HasStatus(err, http.StatusUnauthorized) }
+
+// IsForbidden reports whether err is a permission error.
+func IsForbidden(err error) bool { return HasStatus(err, http.StatusForbidden) }
+
+// IsRateLimited reports whether err indicates rate limiting.
+func IsRateLimited(err error) bool { return HasStatus(err, http.StatusTooManyRequests) }
+
+// IsInsufficientQuota reports whether err indicates exhausted balance or credit.
+func IsInsufficientQuota(err error) bool { return HasStatus(err, http.StatusPaymentRequired) }
+
 // AsAPIError extracts an *APIError from err (if any).
 func AsAPIError(err error) (*APIError, bool) {
 	var ae *APIError
