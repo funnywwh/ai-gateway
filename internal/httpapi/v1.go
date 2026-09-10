@@ -320,6 +320,32 @@ func (s *Server) persist(
 	}
 
 	s.recordContent(ctx, key, account, req, assembler, status)
+
+	if s.deps.Hooks != nil {
+		event := "response.completed"
+		if status != "completed" {
+			event = "response.failed"
+		}
+		accountName := ""
+		if account != nil {
+			accountName = account.Name
+		}
+		s.deps.Hooks.Emit(ctx, &domain.Event{
+			Name:      event,
+			Timestamp: time.Now().UTC(),
+			Payload: map[string]any{
+				"request_id": requestIDFrom(ctx),
+				"response_id": assembler.ID(),
+				"account":    accountName,
+				"api_key":    key.Name,
+				"model":      canonical,
+				"status":     status,
+				"usage":      assembler.Usage().Dimensions,
+				"input":      truncate(assembler.Text(), 0),
+				"output":     assembler.Text(),
+			},
+		})
+	}
 }
 
 // recordContent applies the three-channel recording policy: input text is recorded by

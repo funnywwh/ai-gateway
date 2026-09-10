@@ -16,6 +16,7 @@ import (
 	"github.com/winger/ai-gateway/internal/balancer"
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/creds"
+	"github.com/winger/ai-gateway/internal/hook"
 	"github.com/winger/ai-gateway/internal/httpapi"
 	"github.com/winger/ai-gateway/internal/logx"
 	"github.com/winger/ai-gateway/internal/mcpsrv"
@@ -143,6 +144,20 @@ func run() int {
 		CredentialsKey: creds.DeriveKey(cfg.CredentialsKey),
 	}, db, reg, host, balancerState, log)
 
+	hooks, err := db.ListHooks(ctx)
+	if err != nil {
+		log.Error("loading hooks failed", "err", err)
+		return 1
+	}
+	hookCfg := hook.DefaultConfig()
+	hookCfg.QueueSize = cfg.Hooks.QueueSize
+	hookCfg.Workers = cfg.Hooks.Workers
+	hookCfg.Timeout = time.Duration(cfg.Hooks.TimeoutS) * time.Second
+	hookCfg.Retries = cfg.Hooks.Retries
+	hookCfg.DeadLetter = cfg.Hooks.DeadLetter
+	hookDispatcher := hook.New(hookCfg, hooks, log)
+	log.Info("hooks ready", "configured", len(hookDispatcher.Hooks()), "queue_size", hookCfg.QueueSize)
+
 	mcpService := mcpsrv.New(db, reg, mcpsrv.Config{
 		MaxRows:    cfg.MCP.MaxQueryRows,
 		WindowDays: cfg.MCP.RequestWindowDays,
@@ -160,6 +175,7 @@ func run() int {
 		Records:    db,
 		MCP:        mcpService,
 		MCPTokens:  db,
+		Hooks:      hookDispatcher,
 		Log:        log,
 		Version:    version,
 	})
@@ -196,5 +212,6 @@ func run() int {
 	if err := host.StopAll(shutdownCtx); err != nil {
 		log.Warn("stopping plugin processes failed", "err", err)
 	}
+	hookDispatcher.Close(3 * time.Second)
 	return 0
 }

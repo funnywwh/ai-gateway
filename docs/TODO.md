@@ -80,8 +80,15 @@
 - [ ] bin/aigw mcp-serve（stdio 模式）
 
 ## M7 Hooks 与录制
-- [ ] 异步 worker 池 + 有界队列 + HMAC 签名 + 重试 + 死信
-- [ ] 请求日志查询 API
+- [x] 设计文档 docs/design/m7-hooks-recording.md
+- [x] 异步 worker 池 + 有界队列（满则丢弃并计数，绝不阻塞请求）
+- [x] Webhook HMAC-SHA256 签名（`t=…,v1=…`）+ 事件头 + 投递 ID；提供 VerifySignature 供接收方校验
+- [x] 指数退避重试；4xx 不重试；最终失败写死信 JSONL；JSONL 投递器（本地审计）
+- [x] 事件过滤（白名单/通配）与采样率；`include_content` 控制内容附带并受 max_bytes 截断
+- [x] hook 配置持久化（`hooks` 表 List/Upsert/Delete）+ SetHooks 热替换
+- [x] 请求路径接入：response.completed / response.failed 事件
+- [ ] 其余事件接入（provider.*、apikey.*、backup.*）随对应里程碑补齐
+- [ ] 管理面请求日志查询 API（M8；MCP 侧已提供账户作用域查询）
 
 ## M8 管理面 REST API
 - [ ] 会话鉴权（argon2id + 会话 Cookie）

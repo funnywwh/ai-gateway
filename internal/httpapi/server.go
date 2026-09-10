@@ -24,6 +24,11 @@ import (
 	"github.com/winger/ai-gateway/internal/usage"
 )
 
+// HookEmitter publishes lifecycle events (best effort, never blocking).
+type HookEmitter interface {
+	Emit(ctx context.Context, ev *domain.Event)
+}
+
 // Records is the persistence subset the public API needs.
 type Records interface {
 	PutResponse(ctx context.Context, rec *domain.ResponseRecord) error
@@ -45,6 +50,8 @@ type Deps struct {
 	// MCP/ MCPTokens enable the read-only MCP query endpoint (POST /mcp).
 	MCP       MCPQuery
 	MCPTokens MCPTokens
+	// Hooks receives lifecycle events; nil disables hook delivery.
+	Hooks HookEmitter
 	Log       *slog.Logger
 	Version   string
 }
