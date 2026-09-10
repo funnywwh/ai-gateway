@@ -179,8 +179,17 @@
 - [ ] 接口替身替换测试 + go list 依赖方向检查
 
 ## M16 数据库自动备份
-- [ ] 一致点快照（wal_checkpoint + 排空 writer）+ quick_check + 保留策略
-- [ ] /backups API + UI + 恢复流程
+- [x] 设计文档 docs/design/m16-backup.md（已在对话中输出）；规格 docs/backup.md 状态改为已实现
+- [x] 一致点：`VACUUM INTO` 产出紧凑单文件（不阻塞写入）+ `quick_check` 校验 + `backup_jobs` 落库
+- [x] cron 子集解析（`*` / 列表 / 区间 / 步长 / mon-jan 名称）+ 下次触发计算 + 调度器（重启不补跑）
+- [x] 保留策略：每日 N + 每周 M + 每月 K 的并集，校验失败的快照永不自动删除
+- [x] 崩溃自愈：启动时把遗留 `running` 任务标记为 failed(interrupted)
+- [x] 两阶段冷恢复：restore 暂存 `<db>.restore-pending`，启动时替换并保留 `<db>.pre-restore-<ts>`
+- [x] 管理面：列表（含目录/占用/下次触发）、手动触发、删除、下载（仅 admin）、暂存恢复、手动清理
+- [x] 测试：cron 下次触发 5 例+非法表达式、保留计划、备份产出与校验、校验失败保留文件、冷恢复替换（含 WAL 清理与二次调用幂等）
+- [x] 端到端实测：手动备份(quick_check=ok, 274KB)、下载后 quick_check=ok 且数据完整、restore 缺 confirm 400、带 confirm 暂存、重启后自动替换且数据可读
+- [ ] 控制台 Backups 页面（接口已就绪）
+- [ ] v2：对象存储/异地同步（规格已声明不在 v1 范围）
 
 ## 可选
 - [ ] M10 订阅后端参考适配器（examples/provider-codex，默认禁用）

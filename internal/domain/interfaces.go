@@ -263,19 +263,6 @@ type BackupManager interface {
 	List(ctx context.Context) ([]*BackupJob, error)
 }
 
-// BackupJob records one backup attempt.
-type BackupJob struct {
-	ID          int64
-	StartedAt   time.Time
-	FinishedAt  *time.Time
-	Path        string
-	SizeBytes   int64
-	Status      string
-	QuickCheck  string
-	TriggeredBy string
-	Note        string
-}
-
 // Clock abstracts time for deterministic tests.
 type Clock interface {
 	Now() time.Time

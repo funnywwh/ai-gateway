@@ -14,6 +14,7 @@ import (
 
 	"github.com/winger/ai-gateway/internal/admin"
 	"github.com/winger/ai-gateway/internal/apikey"
+	"github.com/winger/ai-gateway/internal/backup"
 	"github.com/winger/ai-gateway/internal/balancer"
 	"github.com/winger/ai-gateway/internal/billing"
 	"github.com/winger/ai-gateway/internal/config"
@@ -68,6 +69,22 @@ func run() int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// A staged restore is applied before anything opens the database: the swap has to
+
+	// happen while no connection pool holds the old file.
+
+	if preserved, err := backup.ApplyPendingRestore(cfg.Database.Path, time.Now().UTC(), log); err != nil {
+
+		log.Error("applying a staged database restore failed", "err", err)
+
+		return 1
+
+	} else if preserved != "" {
+
+		log.Warn("database restored from a staged snapshot", "preserved", preserved)
+
+	}
 
 	db, err := store.Open(ctx, cfg.Database)
 	if err != nil {
@@ -176,6 +193,54 @@ func run() int {
 		Currency:   cfg.Billing.Currency,
 	})
 
+	backupManager := backup.New(backup.Config{
+
+		DatabasePath: cfg.Database.Path,
+
+		Dir: cfg.Backup.Dir,
+
+		Enabled: cfg.Backup.Enabled,
+
+		Verify: cfg.Backup.Verify,
+
+		Retention: backup.Retention{
+
+			Daily: cfg.Backup.RetentionDaily, Weekly: cfg.Backup.RetentionWeekly,
+
+			Monthly: cfg.Backup.RetentionMonthly,
+		},
+	}, db, log)
+
+	if interrupted, err := db.FailRunningBackupJobs(ctx, "interrupted by a restart"); err != nil {
+
+		log.Warn("closing out interrupted backup jobs failed", "err", err)
+
+	} else if interrupted > 0 {
+
+		log.Warn("marked interrupted backup jobs as failed", "count", interrupted)
+
+	}
+
+	backupScheduler, err := backup.NewScheduler(backupManager, cfg.Backup.Cron)
+
+	if err != nil {
+
+		log.Error("backup schedule is invalid", "err", err, "cron", cfg.Backup.Cron)
+
+		return 2
+
+	}
+
+	if cfg.Backup.Enabled {
+
+		backupScheduler.Start(ctx, log)
+
+	} else {
+
+		log.Info("automatic backups are disabled")
+
+	}
+
 	billingService := billing.NewService(ctx, db, billing.ServiceConfig{
 		Writer: billing.Config{
 			BatchSize:     cfg.Billing.WriterBatchSize,
@@ -279,6 +344,7 @@ func run() int {
 		Invoices:       billingService,
 		Codes:          billingService,
 		Reconciliation: billingService,
+		Backups:        backupManager,
 		Log:            log,
 		Version:        version,
 	})

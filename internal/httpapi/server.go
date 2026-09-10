@@ -86,6 +86,8 @@ type Deps struct {
 	Invoices       InvoiceAdmin
 	Codes          RedemptionAdmin
 	Reconciliation ReconciliationAdmin
+	// Backups snapshots the database on a schedule (M16).
+	Backups BackupAdmin
 	// Reload rebuilds the routing snapshot after a write; InvalidateKey/All drop
 	// cached credentials; KeyCacheSize reports cache occupancy for /stats.
 	Reload        func(ctx context.Context) (any, error)
@@ -233,6 +235,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /admin/api/v1/billing/reconcile", s.handleAdminReconcile)
 	s.mux.HandleFunc("GET /admin/api/v1/billing/reconciliations", s.handleAdminReconciliations)
 	s.mux.HandleFunc("POST /admin/api/v1/billing/failures/replay", s.handleAdminReplayFailures)
+	s.mux.HandleFunc("GET /admin/api/v1/backups", s.handleAdminListBackups)
+	s.mux.HandleFunc("POST /admin/api/v1/backups", s.handleAdminRunBackup)
+	s.mux.HandleFunc("DELETE /admin/api/v1/backups/{id}", s.handleAdminDeleteBackup)
+	s.mux.HandleFunc("GET /admin/api/v1/backups/{id}/download", s.handleAdminDownloadBackup)
+	s.mux.HandleFunc("POST /admin/api/v1/backups/{id}/restore", s.handleAdminRestoreBackup)
+	s.mux.HandleFunc("POST /admin/api/v1/backups/prune", s.handleAdminPruneBackups)
 	s.mux.HandleFunc("POST /admin/api/v1/pricing/validate", s.handleAdminValidatePricing)
 	s.mux.HandleFunc("GET /admin/api/v1/settings", s.handleAdminGetSettings)
 	s.mux.HandleFunc("PUT /admin/api/v1/settings/{key}", s.handleAdminPutSetting)

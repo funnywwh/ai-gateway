@@ -61,3 +61,16 @@ type Reconciliation struct {
 	DetailsJSON        string
 	CreatedAt          time.Time
 }
+
+// BackupJob is one database snapshot attempt.
+type BackupJob struct {
+	ID          int64
+	StartedAt   time.Time
+	FinishedAt  *time.Time
+	Path        string
+	SizeBytes   int64
+	Status      string
+	QuickCheck  string
+	TriggeredBy string
+	Note        string
+}

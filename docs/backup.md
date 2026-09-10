@@ -1,6 +1,6 @@
 # 数据库备份与恢复
 
-> 状态：**规格（M16 实现）**。SQLite 单文件 + WAL；备份目标是**一致点快照**。
+> 状态：**已实现**（M16：`internal/backup` + `/admin/api/v1/backups`；恢复为两阶段冷恢复，见 `docs/design/m16-backup.md`）。SQLite 单文件 + WAL；备份目标是**一致点快照**。
 
 ## 1. 机制
 
