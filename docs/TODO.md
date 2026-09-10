@@ -32,8 +32,10 @@
 - [x] internal/pluginhost：启动/握手/心跳/取消/draining/重启退避/凭据文件/日志环形缓冲
 - [x] 示例插件 examples/provider-replay（可控慢流、增量用量、可控失败）
 - [x] 真实子进程 E2E（生命周期/崩溃重启/流中失败/发现可执行文件）
-- [ ] pkg/providerkit：SSEReader / chat↔responses / CharEstimator / OAuthDeviceFlow
-- [ ] 内置 provider：openai-responses / openai-chat / testecho
+- [x] pkg/providerkit：SSEReader / chat↔responses 双向转换 / ChatUsage→维度映射 / CharEstimator
+- [x] 内置 provider：openai-responses / openai-chat / testecho + registry（Build/IsBuiltin）
+- [x] 错误分类映射（retryable/quota_exhausted/fatal，Retry-After→reset_at）
+- [x] openai-chat httptest 覆盖（非流式/流式/429 冷却/5xx 可重试/4xx 致命）
 
 ## M3 路由 / 权限 / 模型自由映射
 - [ ] 鉴权与授权并集（key + tags）

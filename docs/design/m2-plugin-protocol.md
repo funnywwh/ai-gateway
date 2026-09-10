@@ -63,3 +63,16 @@
   在途计数将在 M3 的 provider 运行时补齐（设计文档已标注 best-effort）。
 - **`-race` 不可用**：本沙箱无 C 编译器且 `CGO_ENABLED=0`，race detector 需要 cgo。
   `make test-race` 在缺 cgo 时给出明确提示而非失败；测试以普通模式全绿。
+- **内置 provider 走同一 Provider 接口**：`internal/providers` 里的 `openai-chat`/`openai-responses`/`testecho`
+  都实现 `pluginapi.Provider`，因此"进程内内置"与"子进程插件"对上层完全同构
+  （差异只在 M3 的运行时适配：直接调用 vs 帧调用）。
+- **chat↔Responses 转换放在 `pkg/providerkit`**（而非 internal）：插件作者也需要它，
+  这样"只支持 chat 的上游"适配器只需 ~150 行。
+- **用量维度映射规则**：chat 的 `prompt_cache_hit_tokens/prompt_cache_miss_tokens` 存在时映射为
+  `input_cache_hit`/`input_cache_miss`（**不再单列 input**，避免重复计数）；否则映射 `input`。
+  `completion_tokens_details.reasoning_tokens` → `reasoning`。
+- **上游错误分类**：429 带 `Retry-After` → `quota_exhausted` + `reset_at`；408/409/425/5xx → `retryable`；
+  其余 4xx → `fatal`（附 `http_status`），并尽力从 `{"error":{"message":...}}` 提取原始信息。
+- **`stream_options.include_usage=true`**：openai-chat 流式请求自动注入，以便拿到最终 usage；
+  若上游仍未返回，则用 `CharEstimator` 估算并标 `estimated`。
+- **`tests` 用 `httptest` 假上游**验证转换与错误映射，不依赖外网。
