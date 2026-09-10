@@ -6,6 +6,7 @@ package registry
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -46,6 +47,17 @@ func New(store domain.Store) *Registry {
 	return r
 }
 
+// NewStatic returns a registry pinned to one snapshot. It is used by tests and by
+// the admin "simulate routing" preview, where no reloading is wanted.
+func NewStatic(snap *Snapshot) *Registry {
+	r := &Registry{}
+	if snap == nil {
+		snap = &Snapshot{LoadedAt: time.Now().UTC()}
+	}
+	r.cur.Store(snap)
+	return r
+}
+
 // Snapshot returns the current immutable snapshot (never nil).
 func (r *Registry) Snapshot() *Snapshot { return r.cur.Load() }
 
@@ -80,6 +92,22 @@ func (r *Registry) Reload(ctx context.Context) (*Snapshot, error) {
 		return nil, err
 	}
 
+	snap := NewSnapshot(accounts, providers, providerModels, models, mappings, routes, tags)
+	r.cur.Store(snap)
+	return snap, nil
+}
+
+// NewSnapshot builds a fully indexed immutable snapshot from slices.
+// It is used by Reload, by tests and by admin previews.
+func NewSnapshot(
+	accounts []*domain.Account,
+	providers []*domain.Provider,
+	providerModels []*domain.ProviderModel,
+	models []*domain.Model,
+	mappings []*domain.ModelMapping,
+	routes []*domain.Route,
+	tags []*domain.Tag,
+) *Snapshot {
 	snap := &Snapshot{
 		LoadedAt:       time.Now().UTC(),
 		Accounts:       accounts,
@@ -118,9 +146,15 @@ func (r *Registry) Reload(ctx context.Context) (*Snapshot, error) {
 	for _, rt := range routes {
 		snap.routesByModel[rt.ModelID] = append(snap.routesByModel[rt.ModelID], rt)
 	}
-
-	r.cur.Store(snap)
-	return snap, nil
+	// Mapping rules are evaluated in priority order (then by id for determinism),
+	// so the snapshot guarantees that ordering regardless of the caller's input order.
+	sort.SliceStable(snap.Mappings, func(i, j int) bool {
+		if snap.Mappings[i].Priority != snap.Mappings[j].Priority {
+			return snap.Mappings[i].Priority < snap.Mappings[j].Priority
+		}
+		return snap.Mappings[i].ID < snap.Mappings[j].ID
+	})
+	return snap
 }
 
 // RoutesFor returns the routes of one canonical model.

@@ -99,12 +99,16 @@ type ModelResolver interface {
 
 // ResolvedModel is the outcome of model resolution.
 type ResolvedModel struct {
-	Requested   string
-	Canonical   string
-	Pinned      bool
-	ProviderID  int64
-	Upstream    string
-	MatchedRule string
+	Requested    string
+	Canonical    string
+	Pinned       bool
+	ProviderID   int64
+	ProviderName string
+	Upstream     string
+	MatchedRule  string
+	// Groups holds capture groups from prefix/glob/regex mapping rules,
+	// used to expand {1}/{name} placeholders in upstream model names.
+	Groups map[string]string
 }
 
 // Router selects provider candidates and can explain the decision (M3).
@@ -118,15 +122,30 @@ type RouteRequest struct {
 	Model    string
 	KeyID    int64
 	Features map[string]bool
+	// ProviderPin forces a specific provider instance (from model@provider or a header).
+	ProviderPin string
+	// Strategy overrides the layer-internal strategy for this request.
+	Strategy string
+	// Grant is the pre-computed permission set (nil means "compute from Key").
+	Grant *Grant
+	// Key is the authenticated API key.
+	Key *APIKey
+	// Tags are the resolved tags of the key.
+	Tags []*Tag
 }
 
 // Candidate is one selectable route target.
 type Candidate struct {
+	RouteID       int64
 	ProviderID    int64
 	ProviderName  string
 	UpstreamModel string
 	Priority      int
 	Weight        int
+	// Degraded lists request features stripped for this candidate (degradation=strip).
+	Degraded []string
+	// Strategy is the layer-internal strategy that produced ordering.
+	Strategy string
 }
 
 // RouteExplanation is the diagnostic output used by the "simulate routing" UI.

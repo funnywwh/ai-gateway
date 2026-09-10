@@ -8,10 +8,13 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/winger/ai-gateway/internal/balancer"
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/logx"
 	"github.com/winger/ai-gateway/internal/registry"
+	"github.com/winger/ai-gateway/internal/routing"
 	"github.com/winger/ai-gateway/internal/store"
 )
 
@@ -82,6 +85,26 @@ func run() int {
 		return 1
 	}
 	log.Info("registry loaded", "summary", snap.String(), "ready", snap.Ready())
+
+	balancerState := balancer.New(balancer.Config{
+		BreakerFailures: cfg.Routing.Breaker.Failures,
+		BreakerWindow:   time.Duration(cfg.Routing.Breaker.WindowS) * time.Second,
+		BreakerCooldown: time.Duration(cfg.Routing.Breaker.CooldownS) * time.Second,
+	})
+	router := routing.New(routing.Config{
+		DefaultStrategy: cfg.Routing.DefaultStrategy,
+		Degradation:     cfg.Routing.Degradation,
+		DefaultGrant:    cfg.Auth.DefaultGrant,
+		ModelFallback:   cfg.Routing.ModelFallback,
+	}, reg, balancerState)
+	log.Info("routing ready",
+		"strategy", cfg.Routing.DefaultStrategy,
+		"degradation", cfg.Routing.Degradation,
+		"models", len(snap.Models),
+		"routes", len(snap.Routes),
+		"mappings", len(snap.Mappings),
+	)
+	_ = router // wired into the HTTP layer in M5
 
 	if cfg.CredentialsKey == "" {
 		log.Warn("credentials_key is empty: provider credentials cannot be encrypted at rest")

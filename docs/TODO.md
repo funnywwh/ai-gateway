@@ -38,10 +38,13 @@
 - [x] openai-chat httptest 覆盖（非流式/流式/429 冷却/5xx 可重试/4xx 致命）
 
 ## M3 路由 / 权限 / 模型自由映射
-- [ ] 鉴权与授权并集（key + tags）
-- [ ] 候选过滤（能力/degradation/draining/冷却）+ 优先级分层 + 4 种 LB 策略 + 熔断
-- [ ] 模型自由映射（exact/prefix/glob/regex、{model} 占位符、钉死供应商、兜底、跨模型校验）
-- [ ] Explain（解析链路 + 排除原因）
+- [x] 设计文档 docs/design/m3-routing.md + 规格文档 docs/routing.md（已产出）
+- [x] 模型自由映射：exact/prefix/glob/regex、priority 抢占、{model} 与捕获组、兜底、@provider 钉死、直接钉死供应商
+- [x] 鉴权与授权并集（key + tags，`*` 通配，default_grant all/none）+ 策略合并（tag→key 覆盖）
+- [x] 候选过滤：disabled/draining/not_granted/冷却/熔断/not_mapped/能力缺失（含 degradation strip|reject）
+- [x] 优先级分层 + 5 种层内策略（加权随机/轮询/最少连接/每 token 延迟/严格顺序）
+- [x] 熔断（连续失败 + 失败率双条件、冷却、半开探测、探测失败重开）
+- [x] Explain（解析链路 + 有序候选 + 排除原因），与数据面共用同一纯函数
 
 ## M4 鉴权 / 限速 / 计量
 - [ ] API Key 哈希校验与缓存（TTL 30s）
