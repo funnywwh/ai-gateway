@@ -6,18 +6,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/billing"
 	"github.com/winger/ai-gateway/internal/domain"
 )
-
-// BillingAdmin is the billing surface the management API needs. It is satisfied by
-// *billing.Service.
-type BillingAdmin interface {
-	Invariants(ctx context.Context) (*billing.InvariantReport, error)
-	Rebuild(ctx context.Context, accountID int64, apply bool) (*billing.RebuildPlan, error)
-	Stats() billing.Stats
-	Reservations() []billing.Reservation
-}
 
 // LedgerAdmin reads balances and ledger history.
 type LedgerAdmin interface {

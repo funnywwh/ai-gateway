@@ -89,3 +89,20 @@ func (s *Settlement) FailureRef() (string, int, int64) {
 	}
 	return s.Usage.RequestID, s.Usage.AttemptNo, s.Usage.AccountID
 }
+
+// WithCounter rolls the settlement up into the usage counters of a period.
+func (s *Settlement) WithCounter(period string, tokens int64) *Settlement {
+	if s == nil || s.Usage == nil || period == "" {
+		return s
+	}
+	s.Counters = append(s.Counters, store.UsageCounter{
+		AccountID:    s.Usage.AccountID,
+		APIKeyID:     s.Usage.APIKeyID,
+		Period:       period,
+		Requests:     1,
+		Tokens:       tokens,
+		CostMicros:   s.Usage.CostMicros,
+		ChargeMicros: s.Usage.ChargeMicros,
+	})
+	return s
+}

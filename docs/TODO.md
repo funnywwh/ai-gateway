@@ -147,7 +147,10 @@
 - [x] 四条不变量巡检 + `rebuild-ledger`（默认 dry-run，apply 单事务重写 charge 并重算余额）
 - [x] 管理面：/billing/invariants、/billing/status、/billing/rebuild-ledger、/accounts/{id}/balance、/accounts/{id}/ledger
 - [x] 测试：6 个用例（原子性+幂等、批量回滚、写入器批量与兜底重放、预留与准入、预留估算、巡检与重建）
-- [ ] **M11b-2**：接入 `/v1/responses`（准入 402、逐尝试计价、结算投递、在途策略 warn/throttle/abort/allow_overdraft 与中断语义）
+- [x] **M11b-2**：接入 `/v1/responses`——余额准入（402 在发起上游之前）+ 单次预留与释放 + 逐尝试计价（成本/售价/快照）+ 结算走批处理写者
+- [x] 失败尝试记成本不计费（`charge_on_error` 控制），并把 `usage.charge_micros` 同步置 0 以维持不变量
+- [x] 端到端实测：402 拒付不写用量；有余额时 cost=7 / charge=11（1.5× ceil）、账本 topup→charge、余额 4999989、四条不变量全绿
+- [ ] **M11b-3**：在途策略 `throttle`（上游 TCP 背压）与 `abort`（流中中断 + overshoot 记为成本不 charge）、长调用预留心跳与 `provider.cancel` 语义
 
 ## M12 账单 / 充值 / 对账补偿
 - [ ] invoice_lines 物化 + 状态流转 + 导出

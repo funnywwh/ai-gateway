@@ -87,7 +87,23 @@ reserve = 输出单价(最贵档) × min(req.max_output_tokens, model.max_output
   递增 `rebuild_seq`，最后重算 `accounts.balance_micros`；
 - 重建不修改 `usage_records`（用量是真源）。
 
-## 9. 实现与设计差异
+## 10. M11b-2 实现与设计差异（数据面接线）
+
+1. **准入在路由规划之后、发起上游之前**：只有拿到候选才谈得上估算成本（不同供应商成本不同）。
+   被拒的请求**不写用量**，只写 `request_logs` + hook `request.denied`（符合规格 §1）。
+2. **`usage.Meter` 拆成 `Build` + `Record`**：接入计费后，用量行由结算事务写入，
+   避免「用量一次、账本另一次」的两次落库；未接入计费时仍走原来的 `Record`。
+3. **失败尝试记成本、是否计费看 `billing.charge_on_error`**；不计费时把
+   `usage.charge_micros` 一并置 0，保证不变量 3 在故障切换场景下也成立。
+4. **售价倍率优先级修正（实测抓到的真缺陷）**：原实现把 `billing.default_markup_bp` 无条件当成
+   `MarkupSet` 传给计价引擎，覆盖了模型自己的 `sale_pricing.markup_bp`——实测请求 cost=7/charge=7（应为 10.5→11）。
+   现在全局默认只在模型未声明倍率时生效（试算器同一处也修了）。
+5. **`effectiveMaxOutput` 缺省 512**：请求未给 `max_output_tokens` 且配置未给默认值时用它做预留估算，
+   宁可少留一点也不能不留。
+6. **尚未实现**：在途策略的 `throttle`（暂停读上游做 TCP 背压）与 `abort`（中断中流调用、
+   把决策点之后的 overshoot 记为成本不 charge）以及长调用的预留心跳。当前策略值已贯穿到准入判定
+   （`allow_overdraft` 生效），但流中检查与中断语义留下一批（M11b-3）。
+## 9. 实现与设计差异（M11b-1 账本原语）
 
 1. **新增迁移 `0002_usage_attempt_unique.sql`**：`usage_records(request_id, attempt_no)` 原本只有普通索引，
    `INSERT OR IGNORE` 根本不会忽略，重放会插入第二条用量行，进而破坏不变量 3。这是实现过程中被测试

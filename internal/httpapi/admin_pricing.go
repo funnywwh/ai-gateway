@@ -75,7 +75,7 @@ func (s *Server) handleAdminSimulatePricing(w http.ResponseWriter, r *http.Reque
 		if input.MinChargeMicros == 0 {
 			input.MinChargeMicros = s.deps.Config.Billing.MinChargeMicros
 		}
-		if !input.MarkupSet && s.deps.Config.Billing.DefaultMarkupBP > 0 {
+		if !input.MarkupSet && s.deps.Config.Billing.DefaultMarkupBP > 0 && (saleSet == nil || saleSet.MarkupBP == 0) {
 			input.MarkupBP = s.deps.Config.Billing.DefaultMarkupBP
 			input.MarkupSet = true
 		}

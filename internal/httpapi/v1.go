@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/winger/ai-gateway/internal/billing"
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/quota"
@@ -84,6 +85,29 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 
 	canonical := plan.Resolved.Canonical
 	startedAt := time.Now()
+	requestID := requestIDFrom(ctx)
+
+	// Balance admission happens before any upstream work: a request that cannot be paid
+	// for must not reach a provider, and the reservation stops concurrent requests from
+	// collectively overselling the account.
+	if s.deps.Billing != nil && account != nil && len(plan.Candidates) > 0 {
+		first := plan.Candidates[0]
+		cost, sale := s.ruleSetsFor(canonical, first.ProviderID)
+		estimate := billing.EstimateInput{
+			Cost: cost, Sale: sale,
+			MaxOutputTokens: s.effectiveMaxOutput(req, canonical),
+			EstInputTokens:  estimateInputTokens(body),
+			DefaultMarkupBP: s.deps.Config.Billing.DefaultMarkupBP,
+		}
+		decision, reservation := s.deps.Billing.Admit(account, requestID, estimate, s.inflightPolicy(account), startedAt)
+		if !decision.Allowed {
+			s.rejectForQuota(w, r, key, account, req, decision)
+			return
+		}
+		if reservation != nil {
+			defer s.deps.Billing.Release(reservation)
+		}
+	}
 
 	var sse *sseWriter
 	var assembler *responses.Assembler
@@ -148,7 +172,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 			ttftMS = latency
 		}
 
-		s.recordAttempt(ctx, key, account, req, plan.Resolved, cand, attemptNo, err, latency, ttftMS, usage, assembler)
+		s.recordAttempt(ctx, key, account, req, plan.Resolved, cand, attemptNo, err, latency, ttftMS, attemptStarted, usage, assembler)
 
 		if err == nil {
 			chosen = &cand
@@ -228,6 +252,7 @@ func (s *Server) recordAttempt(
 	attemptNo int,
 	attemptErr error,
 	latencyMS, ttftMS int,
+	startedAt time.Time,
 	u pluginapi.Usage,
 	assembler *responses.Assembler,
 ) {
@@ -255,7 +280,7 @@ func (s *Server) recordAttempt(
 			errorCode = "upstream_error"
 		}
 	}
-	_, err := s.deps.Meter.Record(ctx, &usage.Attempt{
+	attempt := &usage.Attempt{
 		RequestID:        requestIDFrom(ctx),
 		AttemptNo:        attemptNo,
 		AccountID:        account.ID,
@@ -271,8 +296,15 @@ func (s *Server) recordAttempt(
 		ErrorCode:        errorCode,
 		DegradedFeatures: cand.Degraded,
 		TerminatedReason: terminated,
-	})
-	if err != nil {
+	}
+
+	// With billing enabled the usage row is written by the settlement transaction, so
+	// that the metered attempt and the money it costs can never disagree.
+	if s.deps.Billing != nil {
+		s.settleAttempt(ctx, attempt, resolved, cand, attemptErr, startedAt, dims)
+		return
+	}
+	if _, err := s.deps.Meter.Record(ctx, attempt); err != nil {
 		s.deps.Log.Warn("recording usage failed", "err", err, "request_id", requestIDFrom(ctx))
 	}
 }

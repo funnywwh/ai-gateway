@@ -80,7 +80,7 @@ type Deps struct {
 	// UI serves the embedded management console at /admin/ui/; nil disables it.
 	UI http.Handler
 	// Billing exposes ledger maintenance; Ledger reads balances and history.
-	Billing BillingAdmin
+	Billing BillingPort
 	Ledger  LedgerAdmin
 	// Reload rebuilds the routing snapshot after a write; InvalidateKey/All drop
 	// cached credentials; KeyCacheSize reports cache occupancy for /stats.

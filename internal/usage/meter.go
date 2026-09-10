@@ -54,6 +54,20 @@ type Attempt struct {
 // Record persists the attempt. Local rejections (which never reach an upstream)
 // must not call this: they are recorded in request_logs instead.
 func (m *Meter) Record(ctx context.Context, a *Attempt) (*domain.UsageRecord, error) {
+	rec, err := m.Build(a)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := m.store.InsertUsage(ctx, rec); err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// Build turns an attempt into a usage row without persisting it. The billing path
+// uses it so the usage row can be written by the same transaction that moves the
+// money (see store.SettleBatch), instead of a second, unrelated insert.
+func (m *Meter) Build(a *Attempt) (*domain.UsageRecord, error) {
 	if a == nil || a.RequestID == "" {
 		return nil, domain.ErrInvalidRequest("usage attempt requires request_id")
 	}
@@ -94,9 +108,6 @@ func (m *Meter) Record(ctx context.Context, a *Attempt) (*domain.UsageRecord, er
 		UsageSource:      SourceOf(a.Estimated, dims),
 		TerminatedReason: a.TerminatedReason,
 		CreatedAt:        m.now(),
-	}
-	if _, err := m.store.InsertUsage(ctx, rec); err != nil {
-		return nil, err
 	}
 	return rec, nil
 }
