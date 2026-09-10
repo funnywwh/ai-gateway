@@ -6,15 +6,40 @@ import (
 	"time"
 
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/store"
 )
 
-// ServiceStore is everything the billing service needs from persistence.
+// ServiceStore is everything the billing service needs from persistence. It is one
+// wide port on purpose: every method here is a store primitive the service composes,
+// and splitting it further would only scatter the same dependencies.
 type ServiceStore interface {
 	Batching
 	InvariantStore
 	RebuildStore
 	GetBalance(ctx context.Context, accountID int64) (int64, error)
 	ListLedger(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*domain.LedgerEntry, error)
+	GetAccount(ctx context.Context, id int64) (*domain.Account, error)
+	SetAccountStatus(ctx context.Context, id int64, status string) error
+	AppendLedger(ctx context.Context, entries []*domain.LedgerEntry) (int, error)
+	GetInvoiceByPeriod(ctx context.Context, accountID int64, start, end time.Time) (*domain.Invoice, error)
+	GetInvoice(ctx context.Context, id int64) (*domain.Invoice, error)
+	ListInvoices(ctx context.Context, accountID int64, limit int) ([]*domain.Invoice, error)
+	AggregateInvoiceLines(ctx context.Context, accountID int64, start, end time.Time, groupBy string) ([]domain.InvoiceLine, error)
+	PutInvoice(ctx context.Context, inv *domain.Invoice, lines []domain.InvoiceLine, replace bool) (int64, bool, error)
+	SetInvoiceStatus(ctx context.Context, id int64, status string, at time.Time) error
+	InsertRedemptionCodes(ctx context.Context, codes []*domain.RedemptionCode) error
+	ListRedemptionCodes(ctx context.Context, batchID string, limit int) ([]*domain.RedemptionCode, error)
+	RedeemCode(ctx context.Context, codeHash string, accountID int64, now time.Time) (*domain.RedemptionCode, error)
+	ReleaseRedemptionCode(ctx context.Context, codeHash string) error
+	InsertReconciliation(ctx context.Context, rec *domain.Reconciliation) (int64, error)
+	ListReconciliations(ctx context.Context, limit int) ([]*domain.Reconciliation, error)
+	LedgerChargeTotals(ctx context.Context, from, to time.Time) (map[int64]int64, map[int64]int64, error)
+	UsageSamplesForWindow(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]string, error)
+	EstimatedUsageRatio(ctx context.Context, from, to time.Time) (int64, error)
+	CreditTotals(ctx context.Context, accountID int64, from, to time.Time) (map[string]int64, error)
+	ListBillingFailures(ctx context.Context, limit int) ([]store.BillingFailure, error)
+	ResolveBillingFailure(ctx context.Context, id int64) error
+	MarkBillingFailureRetry(ctx context.Context, id int64, message string) error
 }
 
 // Service bundles the settlement writer, the in-flight reservation table and the
@@ -25,6 +50,9 @@ type Service struct {
 	writer       *Writer
 	reservations *ReservationTable
 	log          *slog.Logger
+	// onMismatch is called when a reconciliation finds a difference, so the caller can
+	// raise a hook or a page without the billing package importing the hook package.
+	onMismatch func(*domain.Reconciliation)
 }
 
 // ServiceConfig configures the billing service.
@@ -139,3 +167,11 @@ func (s *Service) StartReservationGC(ctx context.Context, interval time.Duration
 // Close drains the writer, returning the number of settlements that could not be
 // persisted in time.
 func (s *Service) Close(timeout time.Duration) int { return s.writer.Close(timeout) }
+
+// SetMismatchHandler installs the callback used when reconciliation finds a difference.
+func (s *Service) SetMismatchHandler(fn func(*domain.Reconciliation)) { s.onMismatch = fn }
+
+// Accounts returns the accounts the console shows alongside balances.
+func (s *Service) Accounts(ctx context.Context) ([]*domain.Account, error) {
+	return s.store.ListAccounts(ctx)
+}

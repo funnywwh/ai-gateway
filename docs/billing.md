@@ -1,6 +1,6 @@
 # 计量与计费
 
-> 状态：**部分实现**（L3 账本与在途预留已落地，见 `docs/design/m11b-ledger-inflight.md`；M11b-2 接入数据面，M12 做账单/充值/对账）。金额一律 int64 **微美分**（1e-6 USD）；时间 UTC。
+> 状态：**已实现**（L1–L6：计量/计价/账本与在途额度/账期账单/充值兑换码/对账补偿）。设计见 `docs/design/m11a-pricing.md`、`m11b-ledger-inflight.md`、`m12-invoices-credits-reconcile.md`；剩余：控制台账期页面与赠送到期 cron。金额一律 int64 **微美分**（1e-6 USD）；时间 UTC。
 
 ## 1. 计量（L1）
 

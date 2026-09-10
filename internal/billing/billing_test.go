@@ -36,7 +36,7 @@ func seedAccount(t *testing.T, db *store.DB, balanceMicros int64) int64 {
 		t.Fatal(err)
 	}
 	if balanceMicros != 0 {
-		if err := db.AppendLedger(context.Background(), []*domain.LedgerEntry{{
+		if _, err := db.AppendLedger(context.Background(), []*domain.LedgerEntry{{
 			AccountID: id, Kind: "topup", AmountMicros: balanceMicros, IdemKey: "topup:seed",
 		}}); err != nil {
 			t.Fatal(err)

@@ -59,7 +59,7 @@ func newBillingFixture(t *testing.T, balanceMicros int64) *billingFixture {
 		t.Fatal(err)
 	}
 	if balanceMicros > 0 {
-		if err := db.AppendLedger(ctx, []*domain.LedgerEntry{{
+		if _, err := db.AppendLedger(ctx, []*domain.LedgerEntry{{
 			AccountID: accountID, Kind: "topup", AmountMicros: balanceMicros, IdemKey: "topup:test",
 		}}); err != nil {
 			t.Fatal(err)
@@ -278,7 +278,7 @@ func newAbortFixture(t *testing.T) *billingFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AppendLedger(ctx, []*domain.LedgerEntry{{
+	if _, err := db.AppendLedger(ctx, []*domain.LedgerEntry{{
 		AccountID: accountID, Kind: "topup", AmountMicros: 1_000_000, IdemKey: "topup:abort",
 	}}); err != nil {
 		t.Fatal(err)

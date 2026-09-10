@@ -192,6 +192,17 @@ func run() int {
 		ReplayInterval: time.Minute,
 	}, log)
 	billingService.StartReservationGC(ctx, time.Minute)
+	billingService.SetMismatchHandler(func(record *domain.Reconciliation) {
+		hookDispatcher.Emit(ctx, &domain.Event{
+			Name:      "billing.reconcile_mismatch",
+			Timestamp: time.Now().UTC(),
+			Payload: map[string]any{
+				"kind": record.Kind, "diff_micros": record.DiffMicros,
+				"usage_charge_micros":  record.UsageChargeMicros,
+				"ledger_charge_micros": record.LedgerChargeMicros,
+			},
+		})
+	})
 	log.Info("billing ready", "batch_size", cfg.Billing.WriterBatchSize, "fallback_file", cfg.Billing.FallbackFile)
 
 	adminAuth := admin.NewAuth(db, admin.Config{
@@ -260,13 +271,16 @@ func run() int {
 				verifier.Invalidate(prefix)
 			}
 		},
-		InvalidateAll: verifier.InvalidateAll,
-		KeyCacheSize:  verifier.Size,
-		UI:            webui.Handler(),
-		Billing:       billingService,
-		Ledger:        billingService,
-		Log:           log,
-		Version:       version,
+		InvalidateAll:  verifier.InvalidateAll,
+		KeyCacheSize:   verifier.Size,
+		UI:             webui.Handler(),
+		Billing:        billingService,
+		Ledger:         billingService,
+		Invoices:       billingService,
+		Codes:          billingService,
+		Reconciliation: billingService,
+		Log:            log,
+		Version:        version,
 	})
 
 	httpServer := &http.Server{

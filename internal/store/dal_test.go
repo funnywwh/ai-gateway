@@ -42,7 +42,7 @@ func TestAccountRoundTrip(t *testing.T) {
 	}
 
 	// Upsert must not clobber the ledger-owned balance.
-	if err := db.AppendLedger(ctx, []*domain.LedgerEntry{{
+	if _, err := db.AppendLedger(ctx, []*domain.LedgerEntry{{
 		AccountID: id, Kind: "topup", AmountMicros: 1_000_000, IdemKey: "topup:manual:1",
 	}}); err != nil {
 		t.Fatal(err)
@@ -80,7 +80,7 @@ func TestLedgerIsIdempotentAndTracksBalance(t *testing.T) {
 		{AccountID: id, Kind: "credit_grant", AmountMicros: 2_000_000, IdemKey: "grant:1"},
 		{AccountID: id, Kind: "charge", AmountMicros: -500_000, IdemKey: "charge:usage:1", RefType: "usage", RefID: "1"},
 	}
-	if err := db.AppendLedger(ctx, entries); err != nil {
+	if _, err := db.AppendLedger(ctx, entries); err != nil {
 		t.Fatal(err)
 	}
 	if entries[0].BalanceAfterMicros != 2_000_000 || entries[1].BalanceAfterMicros != 1_500_000 {
@@ -88,7 +88,7 @@ func TestLedgerIsIdempotentAndTracksBalance(t *testing.T) {
 	}
 
 	// Replaying the same entries must not double-charge.
-	if err := db.AppendLedger(ctx, entries); err != nil {
+	if _, err := db.AppendLedger(ctx, entries); err != nil {
 		t.Fatalf("replay must be a no-op: %v", err)
 	}
 	balance, err := db.GetBalance(ctx, id)

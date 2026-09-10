@@ -273,6 +273,10 @@ func validDay(day string) bool {
 	return false
 }
 
+// LoadLocation resolves UTC, Local and fixed offsets such as +08:00. It is exported
+// so the billing period and the pricing engine agree on what a timezone means.
+func LoadLocation(tz string) (*time.Location, error) { return windowLocation(tz) }
+
 // windowLocation resolves UTC, Local and fixed offsets such as +08:00.
 func windowLocation(tz string) (*time.Location, error) {
 	trimmed := strings.TrimSpace(tz)

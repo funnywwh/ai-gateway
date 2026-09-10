@@ -82,6 +82,10 @@ type Deps struct {
 	// Billing exposes ledger maintenance; Ledger reads balances and history.
 	Billing BillingPort
 	Ledger  LedgerAdmin
+	// Invoicing, credits, redemption codes and reconciliation (M12).
+	Invoices       InvoiceAdmin
+	Codes          RedemptionAdmin
+	Reconciliation ReconciliationAdmin
 	// Reload rebuilds the routing snapshot after a write; InvalidateKey/All drop
 	// cached credentials; KeyCacheSize reports cache occupancy for /stats.
 	Reload        func(ctx context.Context) (any, error)
@@ -216,6 +220,19 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /admin/api/v1/billing/rebuild-ledger", s.handleAdminRebuildLedger)
 	s.mux.HandleFunc("GET /admin/api/v1/accounts/{id}/balance", s.handleAdminAccountBalance)
 	s.mux.HandleFunc("GET /admin/api/v1/accounts/{id}/ledger", s.handleAdminAccountLedger)
+	s.mux.HandleFunc("GET /admin/api/v1/invoices", s.handleAdminListInvoices)
+	s.mux.HandleFunc("GET /admin/api/v1/accounts/{id}/invoices", s.handleAdminListInvoices)
+	s.mux.HandleFunc("POST /admin/api/v1/accounts/{id}/invoices", s.handleAdminBuildInvoice)
+	s.mux.HandleFunc("GET /admin/api/v1/invoices/{id}", s.handleAdminGetInvoice)
+	s.mux.HandleFunc("POST /admin/api/v1/invoices/{id}/{action}", s.handleAdminInvoiceAction)
+	s.mux.HandleFunc("POST /admin/api/v1/accounts/{id}/credits", s.handleAdminAccountCredits)
+	s.mux.HandleFunc("GET /admin/api/v1/accounts/{id}/credits", s.handleAdminAccountCreditList)
+	s.mux.HandleFunc("POST /admin/api/v1/redemption-codes", s.handleAdminGenerateCodes)
+	s.mux.HandleFunc("GET /admin/api/v1/redemption-codes", s.handleAdminListCodes)
+	s.mux.HandleFunc("POST /admin/api/v1/redemption-codes/redeem", s.handleAdminRedeemCode)
+	s.mux.HandleFunc("POST /admin/api/v1/billing/reconcile", s.handleAdminReconcile)
+	s.mux.HandleFunc("GET /admin/api/v1/billing/reconciliations", s.handleAdminReconciliations)
+	s.mux.HandleFunc("POST /admin/api/v1/billing/failures/replay", s.handleAdminReplayFailures)
 	s.mux.HandleFunc("POST /admin/api/v1/pricing/validate", s.handleAdminValidatePricing)
 	s.mux.HandleFunc("GET /admin/api/v1/settings", s.handleAdminGetSettings)
 	s.mux.HandleFunc("PUT /admin/api/v1/settings/{key}", s.handleAdminPutSetting)

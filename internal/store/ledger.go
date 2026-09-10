@@ -13,27 +13,30 @@ import (
 // AppendLedger applies ledger entries atomically: each entry is inserted at most once
 // (idem_key is unique) and the account balance is updated in the same transaction, so a
 // replay of an already-applied entry is a no-op instead of a double charge.
-func (db *DB) AppendLedger(ctx context.Context, entries []*domain.LedgerEntry) error {
+// It returns how many entries were newly applied, so a replay can be told apart
+// from a first write.
+func (db *DB) AppendLedger(ctx context.Context, entries []*domain.LedgerEntry) (int, error) {
 	if len(entries) == 0 {
-		return nil
+		return 0, nil
 	}
 	tx, err := db.write.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("store: begin ledger tx: %w", err)
+		return 0, fmt.Errorf("store: begin ledger tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	applied := 0
 
 	for _, e := range entries {
 		if e == nil || e.AccountID == 0 || e.IdemKey == "" {
-			return domain.ErrInvalidRequest("ledger entry requires account_id and idem_key")
+			return 0, domain.ErrInvalidRequest("ledger entry requires account_id and idem_key")
 		}
 		var balance int64
 		if err := tx.QueryRowContext(ctx,
 			"SELECT balance_micros FROM accounts WHERE id = ?", e.AccountID).Scan(&balance); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return domain.ErrNotFound(fmt.Sprintf("account %d", e.AccountID))
+				return 0, domain.ErrNotFound(fmt.Sprintf("account %d", e.AccountID))
 			}
-			return fmt.Errorf("store: read balance of account %d: %w", e.AccountID, err)
+			return 0, fmt.Errorf("store: read balance of account %d: %w", e.AccountID, err)
 		}
 		if e.CreatedAt.IsZero() {
 			e.CreatedAt = time.Now().UTC()
@@ -47,26 +50,30 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 			e.AccountID, e.APIKeyID, e.Kind, e.AmountMicros, newBalance, e.RefType, e.RefID,
 			e.IdemKey, e.RebuildSeq, e.Note, e.Actor, unix(e.CreatedAt))
 		if err != nil {
-			return fmt.Errorf("store: insert ledger entry %s: %w", e.IdemKey, err)
+			return 0, fmt.Errorf("store: insert ledger entry %s: %w", e.IdemKey, err)
 		}
 		affected, err := res.RowsAffected()
 		if err != nil {
-			return fmt.Errorf("store: ledger rows affected: %w", err)
+			return 0, fmt.Errorf("store: ledger rows affected: %w", err)
 		}
 		if affected == 0 {
-			continue // already applied by an earlier attempt: idempotent replay
+			// Already applied: report where the account stands, but do not
+			// count it as applied so callers can detect a replay.
+			e.BalanceAfterMicros = balance
+			continue
 		}
+		applied++
 		e.BalanceAfterMicros = newBalance
 		if _, err := tx.ExecContext(ctx,
 			"UPDATE accounts SET balance_micros = ?, updated_at = ? WHERE id = ?",
 			newBalance, unix(time.Now()), e.AccountID); err != nil {
-			return fmt.Errorf("store: update balance of account %d: %w", e.AccountID, err)
+			return 0, fmt.Errorf("store: update balance of account %d: %w", e.AccountID, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: commit ledger: %w", err)
+		return 0, fmt.Errorf("store: commit ledger: %w", err)
 	}
-	return nil
+	return applied, nil
 }
 
 const ledgerCols = `id, account_id, api_key_id, kind, amount_micros, balance_after_micros,

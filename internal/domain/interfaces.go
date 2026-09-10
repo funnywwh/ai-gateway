@@ -35,7 +35,7 @@ type Store interface {
 	UpsertTag(ctx context.Context, t *Tag) (int64, error)
 
 	// Billing
-	AppendLedger(ctx context.Context, entries []*LedgerEntry) error
+	AppendLedger(ctx context.Context, entries []*LedgerEntry) (int, error)
 	ListLedger(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*LedgerEntry, error)
 	GetBalance(ctx context.Context, accountID int64) (int64, error)
 	InsertUsage(ctx context.Context, rec *UsageRecord) (int64, error)

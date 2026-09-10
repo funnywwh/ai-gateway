@@ -157,9 +157,19 @@
 - [x] 端到端实测：`response.failed` + `insufficient_quota`、usage(42/42, aborted_quota)、账本 charge −42、余额 999958、不变量成立
 
 ## M12 账单 / 充值 / 对账补偿
-- [ ] invoice_lines 物化 + 状态流转 + 导出
-- [ ] credits / 赠送到期 / 兑换码
-- [ ] 每日对账 + 差异告警 + 失败重放
+- [x] 设计文档 docs/design/m12-invoices-credits-reconcile.md（已在对话中输出）；规格 docs/billing.md 状态改为已实现
+- [x] 账期纯函数 `billing.PeriodFor`（自然月 / period_start_day / 时区，复用 `pricing.LoadLocation`）
+- [x] `invoice_lines` 物化（json_extract 聚合 model/key/day）+ 幂等 `(account, period)` + draft 可重算 / issued 冻结
+- [x] 状态流转 issue / void / pay（后付还款写 `topup`，幂等键 `invoice:{id}:payment`）+ CSV 导出
+- [x] 充值四类：topup / credit_grant / adjustment / refund，幂等键 = kind:ref_id；到账按 auto_resume 自动恢复账户
+- [x] 兑换码：批量生成（明文只回一次、库里只存哈希）、条件更新核销（并发仅一次成功）、失败释放占位、过期拒绝
+- [x] 对账：用量 vs 账本汇总、差异样例（≤100）、估算占比、不变量结果并入 details、差异触发 `billing.reconcile_mismatch` hook
+- [x] 失败重放：兜底文件 + `billing_failures` 表，成功标记 resolved、失败累加 retries
+- [x] 修复 `AppendLedger` 幂等判定缺陷（重复 ref_id 曾被判为已入账）
+- [x] 测试：账期（含时区边界）、账单全生命周期、充值幂等与自动恢复、兑换码单次核销、对账发现差异与记录
+- [x] 端到端实测：充值（重复提交不重复入账）、兑换码（二次核销 409）、对账 diff=0、账单生成/issue/CSV
+- [ ] 控制台「账本与账期」页面（后端接口就绪）
+- [ ] 赠送额度到期的每日作业（`ExpireGiftCredit` 已提供，待挂 cron）
 
 ## M13 性能与并发
 - [ ] scripts/load.sh + soak + pprof
