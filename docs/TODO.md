@@ -189,7 +189,7 @@
 - [x] 设计文档 docs/design/m15-decoupling.md（已在对话中输出）
 - [x] `internal/arch` 分层断言：读取 `go list` 真实依赖图，逐包比对允许的模块内依赖
 - [x] 三条关键禁令：httpapi 不得直接 import pluginhost/creds；只有 cmd/aigw 能同时 import store+httpapi；任何包不得 import cmd/
-- [x] `examples/` 与 `pkg/` 同样受检（插件作者代码不得依赖 internal）
+- [x] `examples/` 与 `pkg/` 同样受检（插件作者代码不得依赖 internal；新增 provider-codex 已登记）
 - [x] 接口替身：`billing` 用 `proxyStore` 证明只依赖端口；httpapi 的端口假实现已在 M8b/M16 覆盖
 - [x] 规则表修正 5 处与实际 import 图的偏差（pricing→domain、providers 子包、examples、arch 自身）
 
@@ -210,5 +210,11 @@
 - [ ] v2：备份到对象存储/异地同步（规格已声明不在 v1 范围）
 
 ## 可选
-- [ ] 可选：M10 订阅后端参考适配器（examples/provider-codex，默认禁用；计划内可选项）
+- [x] M10 订阅后端参考适配器 `examples/provider-codex`（默认禁用、非官方）：设计文档 docs/design/m10-subscription-adapter.md
+- [x] 三种凭据形态与自动续期：refresh_token（OAuth 刷新，轮换落盘 + 单飞）> session_cookie（/api/auth/session 换取）> 静态 access_token
+- [x] token_file 一次性导入（CLI auth.json 等）；到期前 60s/启动前 5min 刷新；401 后只重试一次
+- [x] 流式逐事件翻译（文本/思考/工具调用/用量）、Complete 复用同一 Stream 聚合、缓存命中与 reasoning 维度拆分
+- [x] 动作 whoami/refresh_session/set_token（挂在既有 Providers 详情）；凭据永不回显、不进日志
+- [x] 测试 9 个（假端点覆盖轮换落盘、单飞、invalid_grant、429 reset、session 换取、401→刷新→重试、导入、whoami 不泄露）+ README
+- [x] 端到端实测：真实子进程经宿主拉起，探测 ok=true、流式 2+1 增量、非流式文本与 usage 正确、账本 cost116/charge174（1.5×）、轮换 token 落盘
 - [ ] 可选：M14 客户自服务门户（计划内可选项，不在 M0–M16 主链）

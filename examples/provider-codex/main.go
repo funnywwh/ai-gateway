@@ -1,0 +1,1216 @@
+// Command provider-codex is a reference plugin that wraps a subscription-backed
+// Responses endpoint (ChatGPT/Codex style) behind the gateway's plugin protocol.
+//
+// It is deliberately an example rather than a builtin provider: such backends are
+// unofficial, may stop working without notice, and carry terms-of-service risk, so
+// they must be deployable and removable out of tree and stay disabled by default.
+//
+// Credentials are resolved in this order: refresh_token (OAuth refresh, fully
+// automatic) > session_cookie (exchanged at the session endpoint) > access_token
+// (static, expires eventually). Everything is stored in the plugin's state
+// directory; tokens never appear in logs or error messages.
+package main
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/winger/ai-gateway/pkg/providerkit"
+)
+
+const (
+	defaultBaseURL    = "https://chatgpt.com/backend-api/codex"
+	defaultSessionURL = "https://chatgpt.com/api/auth/session"
+	defaultTokenURL   = "https://auth.openai.com/oauth/token"
+	// defaultClientID comes from public precedent for the Codex client; override it
+	// in credentials when the upstream expects a different one.
+	defaultClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
+	sessionFile     = "session.json"
+	// refreshSkew refreshes slightly before expiry so an in-flight request never
+	// carries a token that dies mid-stream; startupSkew is the startup margin.
+	refreshSkew = 60 * time.Second
+	startupSkew = 5 * time.Minute
+)
+
+type modelConfig struct {
+	ID              string          `json:"id"`
+	UpstreamModel   string          `json:"upstream_model"`
+	DisplayName     string          `json:"display_name"`
+	ContextWindow   int             `json:"context_window"`
+	MaxOutputTokens int             `json:"max_output_tokens"`
+	Capabilities    map[string]bool `json:"capabilities"`
+}
+
+type config struct {
+	BaseURL         string            `json:"base_url"`
+	SessionURL      string            `json:"session_url"`
+	TokenURL        string            `json:"token_url"`
+	ClientID        string            `json:"client_id"`
+	Models          []modelConfig     `json:"models"`
+	Headers         map[string]string `json:"headers"`
+	HealthPath      string            `json:"health_path"`
+	Store           bool              `json:"store"`
+	ReasoningEffort string            `json:"reasoning_effort"`
+	TimeoutMS       int               `json:"timeout_ms"`
+	AccountID       string            `json:"account_id"`
+}
+
+var configSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "base_url": {"type": "string", "description": "Responses endpoint root"},
+    "session_url": {"type": "string", "description": "Endpoint that turns a session cookie into an access token"},
+    "token_url": {"type": "string", "description": "OAuth token endpoint used with refresh_token"},
+    "client_id": {"type": "string"},
+    "account_id": {"type": "string", "description": "Value for the chatgpt-account-id header"},
+    "reasoning_effort": {"type": "string", "enum": ["minimal", "low", "medium", "high"]},
+    "store": {"type": "boolean", "description": "Whether the upstream may store the response (usually false)"},
+    "health_path": {"type": "string"},
+    "timeout_ms": {"type": "integer", "minimum": 1000},
+    "headers": {"type": "object"},
+    "models": {"type": "array", "items": {"type": "object"}}
+  }
+}`)
+
+var credentialsSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "refresh_token": {"type": "string", "description": "Preferred: refreshed automatically"},
+    "session_cookie": {"type": "string", "description": "__Secure-next-auth.session-token from the browser"},
+    "access_token": {"type": "string", "description": "Static token; expires and then needs replacing"},
+    "client_id": {"type": "string"},
+    "token_endpoint": {"type": "string"},
+    "token_file": {"type": "string", "description": "Import tokens from a local file once (for example a CLI auth.json)"},
+    "account_id": {"type": "string"}
+  }
+}`)
+
+// session is the persisted credential state.
+type session struct {
+	Mode                  string     `json:"mode"`
+	AccessToken           string     `json:"access_token"`
+	RefreshToken          string     `json:"refresh_token"`
+	AccountID             string     `json:"account_id"`
+	ExpiresAt             *time.Time `json:"expires_at"`
+	RefreshTokenExpiresAt *time.Time `json:"refresh_token_expires_at"`
+	LastRefreshAt         *time.Time `json:"last_refresh_at"`
+	LastError             string     `json:"last_error"`
+}
+
+type provider struct {
+	cfg      config
+	stateDir string
+	http     *http.Client
+	now      func() time.Time
+
+	mu          sync.Mutex
+	creds       map[string]string
+	state       session
+	stateLoaded bool
+	refreshing  bool
+	refreshCh   chan struct{}
+}
+
+func main() {
+	p := &provider{
+		cfg:  config{HealthPath: "/me", TimeoutMS: 300000},
+		http: &http.Client{},
+		now:  func() time.Time { return time.Now().UTC() },
+	}
+	if raw := os.Getenv(pluginapi.EnvConfig); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &p.cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "provider-codex: bad GW_PLUGIN_CONFIG:", err)
+			os.Exit(2)
+		}
+	}
+	p.stateDir = os.Getenv(pluginapi.EnvStateDir)
+	p.applyDefaults()
+	if err := pluginapi.Serve(p); err != nil {
+		fmt.Fprintln(os.Stderr, "provider-codex:", err)
+		os.Exit(1)
+	}
+}
+
+func (p *provider) applyDefaults() {
+	if p.cfg.BaseURL == "" {
+		p.cfg.BaseURL = defaultBaseURL
+	}
+	p.cfg.BaseURL = strings.TrimRight(p.cfg.BaseURL, "/")
+	if p.cfg.SessionURL == "" {
+		p.cfg.SessionURL = defaultSessionURL
+	}
+	if p.cfg.TokenURL == "" {
+		p.cfg.TokenURL = defaultTokenURL
+	}
+	if p.cfg.ClientID == "" {
+		p.cfg.ClientID = defaultClientID
+	}
+	if p.cfg.HealthPath == "" {
+		p.cfg.HealthPath = "/me"
+	}
+	if p.cfg.TimeoutMS <= 0 {
+		p.cfg.TimeoutMS = 300000
+	}
+	p.http.Timeout = time.Duration(p.cfg.TimeoutMS) * time.Millisecond
+}
+
+func (p *provider) Info() pluginapi.Info {
+	return pluginapi.Info{
+		Name:    "provider-codex",
+		Version: "0.1.0",
+		Capabilities: pluginapi.Capabilities{
+			Complete: true, Stream: true, Health: true,
+			UsageDimensions: true, UsageDelta: true,
+			Actions: []pluginapi.Action{
+				{Name: "whoami", Title: "Show the current session state"},
+				{Name: "refresh_session", Title: "Refresh the access token now"},
+				{Name: "set_token", Title: "Replace the stored credentials"},
+			},
+		},
+	}
+}
+
+func (p *provider) ConfigSchema() json.RawMessage      { return configSchema }
+func (p *provider) CredentialsSchema() json.RawMessage { return credentialsSchema }
+func (p *provider) StateDir() string                   { return p.stateDir }
+func (p *provider) ListModels(ctx context.Context) ([]pluginapi.ModelInfo, error) {
+	out := make([]pluginapi.ModelInfo, 0, len(p.cfg.Models))
+	for _, model := range p.cfg.Models {
+		id := model.UpstreamModel
+		if id == "" {
+			id = model.ID
+		}
+		out = append(out, pluginapi.ModelInfo{
+			ID: model.ID, UpstreamModel: id, DisplayName: model.DisplayName,
+			ContextWindow: model.ContextWindow, MaxOutputTokens: model.MaxOutputTokens,
+			Capabilities: model.Capabilities,
+		})
+	}
+	return out, nil
+}
+
+func (p *provider) SetCredentials(creds map[string]string) {
+	p.mu.Lock()
+	p.creds = creds
+	p.mu.Unlock()
+}
+
+func (p *provider) credential(name string) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.creds == nil {
+		return ""
+	}
+	return strings.TrimSpace(p.creds[name])
+}
+
+// Actions lists the interactive operations; they are what an operator uses to
+// recover from an expired credential without restarting anything.
+func (p *provider) Actions() []pluginapi.Action {
+	return p.Info().Capabilities.Actions
+}
+
+func (p *provider) RunAction(ctx context.Context, name string, in json.RawMessage) (json.RawMessage, error) {
+	switch name {
+	case "whoami":
+		state, err := p.currentState()
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(p.describe(state))
+	case "refresh_session":
+		if _, err := p.ensureToken(ctx, true); err != nil {
+			return nil, err
+		}
+		state, err := p.currentState()
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(p.describe(state))
+	case "set_token":
+		var body struct {
+			AccessToken   string `json:"access_token"`
+			RefreshToken  string `json:"refresh_token"`
+			SessionCookie string `json:"session_cookie"`
+			AccountID     string `json:"account_id"`
+		}
+		if len(in) > 0 {
+			if err := json.Unmarshal(in, &body); err != nil {
+				return nil, pluginapi.NewError("bad_request", "set_token: invalid JSON")
+			}
+		}
+		if body.AccessToken == "" && body.RefreshToken == "" && body.SessionCookie == "" {
+			return nil, pluginapi.NewError("bad_request", "set_token: provide access_token, refresh_token or session_cookie")
+		}
+		p.mu.Lock()
+		if p.creds == nil {
+			p.creds = map[string]string{}
+		}
+		if body.AccessToken != "" {
+			p.creds["access_token"] = body.AccessToken
+		}
+		if body.RefreshToken != "" {
+			p.creds["refresh_token"] = body.RefreshToken
+		}
+		if body.SessionCookie != "" {
+			p.creds["session_cookie"] = body.SessionCookie
+		}
+		if body.AccountID != "" {
+			p.creds["account_id"] = body.AccountID
+		}
+		p.mu.Unlock()
+		if _, err := p.ensureToken(ctx, true); err != nil {
+			return nil, err
+		}
+		state, err := p.currentState()
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(p.describe(state))
+	default:
+		return nil, pluginapi.NewError("unknown_action", "unknown action: "+name)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// credentials and session state
+// ---------------------------------------------------------------------------
+
+type credSnapshot struct {
+	AccessToken   string
+	RefreshToken  string
+	SessionCookie string
+	AccountID     string
+	ClientID      string
+	TokenEndpoint string
+	TokenFile     string
+}
+
+func (p *provider) snapshot() credSnapshot {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return credSnapshot{
+		AccessToken:   strings.TrimSpace(p.creds["access_token"]),
+		RefreshToken:  strings.TrimSpace(p.creds["refresh_token"]),
+		SessionCookie: strings.TrimSpace(p.creds["session_cookie"]),
+		AccountID:     strings.TrimSpace(p.creds["account_id"]),
+		ClientID:      strings.TrimSpace(p.creds["client_id"]),
+		TokenEndpoint: strings.TrimSpace(p.creds["token_endpoint"]),
+		TokenFile:     strings.TrimSpace(p.creds["token_file"]),
+	}
+}
+
+func (p *provider) statePath() string {
+	if p.stateDir == "" {
+		return ""
+	}
+	return filepath.Join(p.stateDir, sessionFile)
+}
+
+func (p *provider) loadState() error {
+	p.mu.Lock()
+	if p.stateLoaded {
+		p.mu.Unlock()
+		return nil
+	}
+	p.mu.Unlock()
+	path := p.statePath()
+	if path == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			p.mu.Lock()
+			p.stateLoaded = true
+			p.mu.Unlock()
+			return nil
+		}
+		return pluginapi.NewError("state_read_failed", "cannot read the session state file")
+	}
+	var state session
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return pluginapi.NewError("state_corrupt", "the session state file is not valid JSON")
+	}
+	p.mu.Lock()
+	p.state = state
+	p.stateLoaded = true
+	p.mu.Unlock()
+	return nil
+}
+
+// saveState replaces the state file atomically so a crash cannot leave a half
+// written refresh token behind (that would break the refresh chain for good).
+func (p *provider) saveState(state session) error {
+	path := p.statePath()
+	p.mu.Lock()
+	p.state = state
+	p.stateLoaded = true
+	p.mu.Unlock()
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return pluginapi.NewError("state_write_failed", "cannot create the plugin state directory")
+	}
+	raw, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return pluginapi.NewError("state_write_failed", "cannot encode the session state")
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		return pluginapi.NewError("state_write_failed", "cannot write the session state")
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return pluginapi.NewError("state_write_failed", "cannot replace the session state")
+	}
+	return nil
+}
+
+func (p *provider) currentState() (session, error) {
+	if err := p.loadState(); err != nil {
+		return session{}, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.state, nil
+}
+
+// expiring reports whether a deadline is missing or within the margin.
+func (p *provider) expiring(at *time.Time, margin time.Duration) bool {
+	if at == nil {
+		return true
+	}
+	return at.Sub(p.now()) <= margin
+}
+
+// ensureToken returns a usable access token, refreshing when necessary. Concurrent
+// callers share one refresh: the first performs it, the rest wait for the result
+// instead of stampeding the token endpoint.
+func (p *provider) ensureToken(ctx context.Context, force bool) (string, error) {
+	if err := p.loadState(); err != nil {
+		return "", err
+	}
+	snap := p.snapshot()
+	p.mu.Lock()
+	state := p.state
+	p.mu.Unlock()
+
+	if snap.TokenFile != "" && state.AccessToken == "" && state.RefreshToken == "" {
+		imported, err := importTokenFile(snap.TokenFile)
+		if err != nil {
+			return "", err
+		}
+		imported.Mode = "imported"
+		if err := p.saveState(imported); err != nil {
+			return "", err
+		}
+		state = imported
+	}
+
+	mode := "access_token"
+	switch {
+	case snap.RefreshToken != "" || state.RefreshToken != "":
+		mode = "refresh_token"
+	case snap.SessionCookie != "":
+		mode = "session_cookie"
+	}
+
+	refreshable := mode == "refresh_token" || mode == "session_cookie"
+	if !force && state.AccessToken != "" && !p.expiring(state.ExpiresAt, refreshSkew) {
+		return state.AccessToken, nil
+	}
+	if !refreshable {
+		if snap.AccessToken != "" && !force {
+			return snap.AccessToken, nil
+		}
+		if snap.AccessToken != "" {
+			return "", pluginapi.NewError("token_expired",
+				"the static access token was rejected; provide a refresh_token or a session_cookie so it can renew itself")
+		}
+		return "", pluginapi.NewError("no_credentials",
+			"no credentials configured: set refresh_token, session_cookie or access_token on the provider")
+	}
+
+	// single-flight
+	p.mu.Lock()
+	if p.refreshing {
+		wait := p.refreshCh
+		p.mu.Unlock()
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		p.mu.Lock()
+		state = p.state
+		p.mu.Unlock()
+		if state.AccessToken != "" {
+			return state.AccessToken, nil
+		}
+		return "", pluginapi.NewError("token_expired", "the token refresh failed")
+	}
+	p.refreshing = true
+	p.refreshCh = make(chan struct{})
+	done := p.refreshCh
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		p.refreshing = false
+		close(done)
+		p.mu.Unlock()
+	}()
+
+	fresh, err := p.refresh(ctx, snap, state, mode)
+	if err != nil {
+		p.recordError(err)
+		return "", err
+	}
+	if err := p.saveState(fresh); err != nil {
+		return "", err
+	}
+	return fresh.AccessToken, nil
+}
+
+func (p *provider) recordError(err error) {
+	p.mu.Lock()
+	p.state.LastError = err.Error()
+	state := p.state
+	p.mu.Unlock()
+	_ = p.saveState(state)
+}
+
+// refresh performs one credential exchange and returns the new state. Rotation of
+// the refresh token is persisted by the caller.
+func (p *provider) refresh(ctx context.Context, snap credSnapshot, state session, mode string) (session, error) {
+	now := p.now()
+	switch mode {
+	case "refresh_token":
+		refreshToken := snap.RefreshToken
+		if refreshToken == "" {
+			refreshToken = state.RefreshToken
+		}
+		clientID := snap.ClientID
+		if clientID == "" {
+			clientID = p.cfg.ClientID
+		}
+		endpoint := snap.TokenEndpoint
+		if endpoint == "" {
+			endpoint = p.cfg.TokenURL
+		}
+		form := url.Values{}
+		form.Set("grant_type", "refresh_token")
+		form.Set("refresh_token", refreshToken)
+		form.Set("client_id", clientID)
+		form.Set("scope", "openid profile email")
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+		if err != nil {
+			return session{}, pluginapi.NewError("bad_request", "cannot build the token request")
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Accept", "application/json")
+		resp, err := p.http.Do(req)
+		if err != nil {
+			return session{}, pluginapi.NewRetryableError("token_endpoint_unreachable", err.Error(), 502)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if resp.StatusCode >= 400 {
+			return session{}, tokenError(resp, body)
+		}
+		var payload struct {
+			AccessToken           string `json:"access_token"`
+			RefreshToken          string `json:"refresh_token"`
+			ExpiresIn             int64  `json:"expires_in"`
+			RefreshTokenExpiresIn int64  `json:"refresh_token_expires_in"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil || payload.AccessToken == "" {
+			return session{}, pluginapi.NewError("token_response_invalid", "the token endpoint did not return an access_token")
+		}
+		next := session{
+			Mode:          mode,
+			AccessToken:   payload.AccessToken,
+			RefreshToken:  refreshToken,
+			AccountID:     state.AccountID,
+			LastRefreshAt: &now,
+		}
+		if payload.RefreshToken != "" {
+			// Rotation: keeping the new token is what makes the next refresh work.
+			next.RefreshToken = payload.RefreshToken
+		}
+		if payload.ExpiresIn > 0 {
+			expires := now.Add(time.Duration(payload.ExpiresIn) * time.Second)
+			next.ExpiresAt = &expires
+		} else if exp, ok := jwtExpiry(payload.AccessToken); ok {
+			next.ExpiresAt = &exp
+		}
+		if payload.RefreshTokenExpiresIn > 0 {
+			expires := now.Add(time.Duration(payload.RefreshTokenExpiresIn) * time.Second)
+			next.RefreshTokenExpiresAt = &expires
+		}
+		if next.AccountID == "" {
+			next.AccountID = jwtAccountID(payload.AccessToken)
+		}
+		return next, nil
+	case "session_cookie":
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.SessionURL, nil)
+		if err != nil {
+			return session{}, pluginapi.NewError("bad_request", "cannot build the session request")
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Cookie", "__Secure-next-auth.session-token="+snap.SessionCookie)
+		resp, err := p.http.Do(req)
+		if err != nil {
+			return session{}, pluginapi.NewRetryableError("session_endpoint_unreachable", err.Error(), 502)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if resp.StatusCode >= 400 {
+			return session{}, tokenError(resp, body)
+		}
+		var payload struct {
+			AccessToken    string `json:"accessToken"`
+			AccessTokenAlt string `json:"access_token"`
+			Expires        string `json:"expires"`
+			SessionToken   string `json:"sessionToken"`
+			AuthProvider   string `json:"authProvider"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return session{}, pluginapi.NewError("session_response_invalid", "the session endpoint returned invalid JSON")
+		}
+		token := payload.AccessToken
+		if token == "" {
+			token = payload.AccessTokenAlt
+		}
+		if token == "" {
+			// A logged-out browser session returns an empty object: say so plainly.
+			return session{}, pluginapi.NewError("token_expired",
+				"the session endpoint returned no access token; the session cookie has probably expired")
+		}
+		next := session{
+			Mode:          mode,
+			AccessToken:   token,
+			AccountID:     state.AccountID,
+			LastRefreshAt: &now,
+		}
+		if payload.Expires != "" {
+			if parsed, err := time.Parse(time.RFC3339, payload.Expires); err == nil {
+				expires := parsed.UTC()
+				next.ExpiresAt = &expires
+			}
+		}
+		if next.ExpiresAt == nil {
+			if exp, ok := jwtExpiry(token); ok {
+				next.ExpiresAt = &exp
+			}
+		}
+		if next.AccountID == "" {
+			next.AccountID = jwtAccountID(token)
+		}
+		return next, nil
+	default:
+		return session{}, pluginapi.NewError("no_credentials", "unsupported credential mode")
+	}
+}
+
+// importTokenFile reads a CLI-style auth file once. Field names vary between tools,
+// so both the flat and the nested shapes are accepted.
+func importTokenFile(path string) (session, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return session{}, pluginapi.NewError("token_file_unreadable", "cannot read token_file: "+filepath.Base(path))
+	}
+	var payload struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		AccountID    string `json:"account_id"`
+		Tokens       struct {
+			AccessToken  string `json:"access_token"`
+			RefreshToken string `json:"refresh_token"`
+			AccountID    string `json:"account_id"`
+		} `json:"tokens"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return session{}, pluginapi.NewError("token_file_invalid", "token_file is not valid JSON")
+	}
+	state := session{
+		AccessToken:  payload.AccessToken,
+		RefreshToken: payload.RefreshToken,
+		AccountID:    payload.AccountID,
+	}
+	if state.AccessToken == "" {
+		state.AccessToken = payload.Tokens.AccessToken
+	}
+	if state.RefreshToken == "" {
+		state.RefreshToken = payload.Tokens.RefreshToken
+	}
+	if state.AccountID == "" {
+		state.AccountID = payload.Tokens.AccountID
+	}
+	if state.AccessToken == "" && state.RefreshToken == "" {
+		return session{}, pluginapi.NewError("token_file_invalid", "token_file contains neither an access_token nor a refresh_token")
+	}
+	if exp, ok := jwtExpiry(state.AccessToken); ok {
+		state.ExpiresAt = &exp
+	}
+	if state.AccountID == "" {
+		state.AccountID = jwtAccountID(state.AccessToken)
+	}
+	return state, nil
+}
+
+// jwtExpiry reads exp from a JWT without verifying it: the token came from the
+// upstream over TLS, and this is only used to refresh early.
+func jwtExpiry(token string) (time.Time, bool) {
+	claims, ok := jwtClaims(token)
+	if !ok {
+		return time.Time{}, false
+	}
+	switch value := claims["exp"].(type) {
+	case float64:
+		return time.Unix(int64(value), 0).UTC(), true
+	case json.Number:
+		seconds, err := value.Int64()
+		if err == nil {
+			return time.Unix(seconds, 0).UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func jwtAccountID(token string) string {
+	claims, ok := jwtClaims(token)
+	if !ok {
+		return ""
+	}
+	for _, key := range []string{"chatgpt_account_id", "account_id", "sub"} {
+		if value, ok := claims[key].(string); ok && strings.Contains(key, "account") {
+			return value
+		}
+	}
+	// The auth claim nests the account id under a URL-shaped key in some tokens.
+	for _, key := range []string{"https://api.openai.com/auth", "auth"} {
+		if nested, ok := claims[key].(map[string]any); ok {
+			if value, ok := nested["chatgpt_account_id"].(string); ok {
+				return value
+			}
+		}
+	}
+	return ""
+}
+
+func jwtClaims(token string) (map[string]any, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return nil, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, false
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(raw, &claims); err != nil {
+		return nil, false
+	}
+	return claims, true
+}
+
+// tokenError classifies a credential endpoint failure. A rejected grant is fatal
+// (retrying cannot help), while an unreachable endpoint is retryable.
+func tokenError(resp *http.Response, body []byte) *pluginapi.Error {
+	if resp.StatusCode >= 500 {
+		return pluginapi.NewRetryableError("token_endpoint_error", "the token endpoint returned "+resp.Status, 502)
+	}
+	code := upstreamErrorCode(body)
+	if code == "" {
+		code = "invalid_grant"
+	}
+	return pluginapi.NewError("token_expired", "credential refresh rejected ("+code+"); sign in again and update the stored credentials")
+}
+
+func upstreamErrorCode(body []byte) string {
+	var payload struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil || len(payload.Error) == 0 {
+		return ""
+	}
+	var asObject struct {
+		Code string `json:"code"`
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(payload.Error, &asObject); err == nil {
+		if asObject.Code != "" {
+			return asObject.Code
+		}
+		if asObject.Type != "" {
+			return asObject.Type
+		}
+	}
+	var asString string
+	if err := json.Unmarshal(payload.Error, &asString); err == nil {
+		return asString
+	}
+	return ""
+}
+
+// ---------------------------------------------------------------------------
+// requests and event translation
+// ---------------------------------------------------------------------------
+
+// responsesRequest is the upstream request body. Only documented Responses fields
+// are sent: store is false by default because this backend refuses stored responses.
+type responsesRequest struct {
+	Model           string               `json:"model"`
+	Instructions    string               `json:"instructions,omitempty"`
+	Input           []pluginapi.Item     `json:"input,omitempty"`
+	Tools           []pluginapi.Tool     `json:"tools,omitempty"`
+	ToolChoice      json.RawMessage      `json:"tool_choice,omitempty"`
+	MaxOutputTokens *int                 `json:"max_output_tokens,omitempty"`
+	Reasoning       *pluginapi.Reasoning `json:"reasoning,omitempty"`
+	Store           bool                 `json:"store"`
+	Stream          bool                 `json:"stream"`
+}
+
+type wireUsage struct {
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+	TotalTokens  int64 `json:"total_tokens"`
+	InputDetails *struct {
+		CachedTokens int64 `json:"cached_tokens"`
+	} `json:"input_tokens_details,omitempty"`
+	OutputDetails *struct {
+		ReasoningTokens int64 `json:"reasoning_tokens"`
+	} `json:"output_tokens_details,omitempty"`
+}
+
+// wireEvent is the subset of upstream events this adapter understands. Unknown
+// event types are ignored so an upstream addition cannot break the stream.
+type wireEvent struct {
+	Type        string        `json:"type"`
+	Delta       string        `json:"delta"`
+	Text        string        `json:"text"`
+	ItemID      string        `json:"item_id"`
+	OutputIndex int           `json:"output_index"`
+	Arguments   string        `json:"arguments"`
+	Item        *wireItem     `json:"item"`
+	Response    *wireResponse `json:"response"`
+	Error       *wireError    `json:"error"`
+}
+
+type wireItem struct {
+	Type   string `json:"type"`
+	ID     string `json:"id"`
+	CallID string `json:"call_id"`
+	Name   string `json:"name"`
+}
+
+type wireResponse struct {
+	Status string     `json:"status"`
+	Usage  *wireUsage `json:"usage"`
+	Error  *wireError `json:"error"`
+}
+
+type wireError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func (p *provider) buildRequest(req *pluginapi.Request, stream bool) ([]byte, error) {
+	if req == nil {
+		return nil, pluginapi.NewError("bad_request", "provider-codex: nil request")
+	}
+	model := req.Model
+	for _, configured := range p.cfg.Models {
+		if configured.ID == req.Model && configured.UpstreamModel != "" {
+			model = configured.UpstreamModel
+			break
+		}
+	}
+	wire := responsesRequest{
+		Model:           model,
+		Instructions:    req.Instructions,
+		Input:           req.Input,
+		Tools:           req.Tools,
+		ToolChoice:      req.ToolChoice,
+		MaxOutputTokens: req.MaxOutputTokens,
+		Store:           p.cfg.Store,
+		Stream:          stream,
+	}
+	if req.Reasoning != nil {
+		wire.Reasoning = req.Reasoning
+	} else if p.cfg.ReasoningEffort != "" {
+		wire.Reasoning = &pluginapi.Reasoning{Effort: p.cfg.ReasoningEffort}
+	}
+	return json.Marshal(wire)
+}
+
+func (p *provider) doRequest(ctx context.Context, body []byte, token string, state session, snap credSnapshot, acceptStream bool) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.cfg.BaseURL+"/responses", strings.NewReader(string(body)))
+	if err != nil {
+		return nil, pluginapi.NewError("bad_request", "provider-codex: cannot build the upstream request")
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	if acceptStream {
+		req.Header.Set("Accept", "text/event-stream")
+	} else {
+		req.Header.Set("Accept", "application/json")
+	}
+	if account := p.resolveAccountID(state, snap); account != "" {
+		req.Header.Set("chatgpt-account-id", account)
+	}
+	for key, value := range p.cfg.Headers {
+		req.Header.Set(key, value)
+	}
+	return p.http.Do(req)
+}
+
+func (p *provider) resolveAccountID(state session, snap credSnapshot) string {
+	if p.cfg.AccountID != "" {
+		return p.cfg.AccountID
+	}
+	if snap.AccountID != "" {
+		return snap.AccountID
+	}
+	if state.AccountID != "" {
+		return state.AccountID
+	}
+	return ""
+}
+
+// Stream performs one streaming attempt, refreshing the token once if the upstream
+// rejects it. Every event is translated into the canonical plugin events.
+func (p *provider) Stream(ctx context.Context, req *pluginapi.Request, emit func(pluginapi.Event) error) error {
+	body, err := p.buildRequest(req, true)
+	if err != nil {
+		return err
+	}
+	token, err := p.ensureToken(ctx, false)
+	if err != nil {
+		return err
+	}
+	state, _ := p.currentState()
+	snap := p.snapshot()
+
+	resp, err := p.doRequest(ctx, body, token, state, snap, true)
+	if err != nil {
+		return pluginapi.NewRetryableError("upstream_unreachable", err.Error(), 502)
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		resp.Body.Close()
+		// One refresh-and-retry: a token that died between requests is recoverable,
+		// a second rejection means the credentials themselves are gone.
+		if _, refreshErr := p.ensureToken(ctx, true); refreshErr != nil {
+			return refreshErr
+		}
+		state, _ = p.currentState()
+		snap = p.snapshot()
+		resp, err = p.doRequest(ctx, body, state.AccessToken, state, snap, true)
+		if err != nil {
+			return pluginapi.NewRetryableError("upstream_unreachable", err.Error(), 502)
+		}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		payload, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return classifyResponse(resp, payload)
+	}
+
+	reader := providerkit.NewSSEReader(resp.Body, 0)
+	for {
+		event, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return pluginapi.NewRetryableError("stream_read_failed", "provider-codex: reading the upstream stream failed", 502)
+		}
+		if event.Name == "done" {
+			return nil
+		}
+		if len(event.Data) == 0 {
+			continue
+		}
+		var payload wireEvent
+		if err := json.Unmarshal(event.Data, &payload); err != nil {
+			continue // a data line the adapter does not model
+		}
+		if err := p.translate(payload, emit); err != nil {
+			return err
+		}
+	}
+}
+
+// translate maps one upstream event onto zero or more plugin events.
+func (p *provider) translate(event wireEvent, emit func(pluginapi.Event) error) error {
+	switch event.Type {
+	case "response.output_text.delta":
+		if event.Delta == "" {
+			return nil
+		}
+		return emit(pluginapi.Event{
+			Type: pluginapi.EventTextDelta, Index: event.OutputIndex,
+			ItemID: event.ItemID, Text: event.Delta,
+		})
+	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		if event.Delta == "" {
+			return nil
+		}
+		return emit(pluginapi.Event{
+			Type: pluginapi.EventReasoningDelta, Index: event.OutputIndex,
+			ItemID: event.ItemID, Text: event.Delta,
+		})
+	case "response.output_item.added":
+		if event.Item == nil || event.Item.Type != "function_call" {
+			return nil
+		}
+		return emit(pluginapi.Event{
+			Type: pluginapi.EventToolCallStart, Index: event.OutputIndex,
+			ItemID: event.Item.ID, CallID: event.Item.CallID, Name: event.Item.Name,
+		})
+	case "response.function_call_arguments.delta":
+		if event.Delta == "" {
+			return nil
+		}
+		return emit(pluginapi.Event{
+			Type: pluginapi.EventToolArgsDelta, Index: event.OutputIndex,
+			ItemID: event.ItemID, Text: event.Delta,
+		})
+	case "response.completed", "response.incomplete":
+		if event.Response == nil || event.Response.Usage == nil {
+			return nil
+		}
+		return emit(pluginapi.Event{Type: pluginapi.EventUsage, Usage: usageFromWire(event.Response.Usage)})
+	case "response.failed":
+		message := "the upstream reported a failed response"
+		if event.Response != nil && event.Response.Error != nil && event.Response.Error.Message != "" {
+			message = event.Response.Error.Message
+		}
+		return pluginapi.NewError("upstream_failed", message)
+	case "error":
+		message := "the upstream reported an error"
+		code := "upstream_error"
+		if event.Error != nil {
+			if event.Error.Message != "" {
+				message = event.Error.Message
+			}
+			if event.Error.Code != "" {
+				code = event.Error.Code
+			}
+		}
+		return pluginapi.NewRetryableError(code, message, 502)
+	default:
+		return nil
+	}
+}
+
+// usageFromWire maps upstream usage onto the gateway's dimensions. Cache hits are
+// split out because they are priced differently, and reasoning tokens are reported
+// separately so the pricing engine can decide how to treat them.
+func usageFromWire(usage *wireUsage) *pluginapi.Usage {
+	dims := map[string]int64{}
+	if usage == nil {
+		return &pluginapi.Usage{Dimensions: dims, Estimated: true}
+	}
+	cached := int64(0)
+	if usage.InputDetails != nil {
+		cached = usage.InputDetails.CachedTokens
+	}
+	switch {
+	case cached > 0 && cached < usage.InputTokens:
+		dims["input_cache_hit"] = cached
+		dims["input_cache_miss"] = usage.InputTokens - cached
+	case cached > 0:
+		dims["input_cache_hit"] = usage.InputTokens
+	default:
+		dims["input"] = usage.InputTokens
+	}
+	reasoning := int64(0)
+	if usage.OutputDetails != nil {
+		reasoning = usage.OutputDetails.ReasoningTokens
+	}
+	if reasoning > 0 {
+		dims["reasoning"] = reasoning
+	}
+	output := usage.OutputTokens
+	if reasoning > 0 && reasoning <= output {
+		output -= reasoning
+	}
+	if output > 0 {
+		dims["output"] = output
+	}
+	return &pluginapi.Usage{Dimensions: dims}
+}
+
+// Complete assembles a non-streaming response from the same stream, so there is
+// exactly one place where upstream events are interpreted.
+func (p *provider) Complete(ctx context.Context, req *pluginapi.Request) (*pluginapi.Response, error) {
+	var (
+		builder    strings.Builder
+		finalUsage *pluginapi.Usage
+	)
+	err := p.Stream(ctx, req, func(event pluginapi.Event) error {
+		switch event.Type {
+		case pluginapi.EventTextDelta:
+			builder.WriteString(event.Text)
+		case pluginapi.EventUsage:
+			if event.Usage != nil {
+				finalUsage = event.Usage
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if finalUsage == nil {
+		finalUsage = &pluginapi.Usage{Dimensions: map[string]int64{"output": providerkit.EstimateTokens(builder.String(), 0)}, Estimated: true}
+	}
+	return &pluginapi.Response{
+		Items: []pluginapi.Item{{
+			Type: "message", ID: "msg_codex", Role: "assistant",
+			Content: outputText(builder.String()), Status: "completed",
+		}},
+		Usage:  *finalUsage,
+		Status: "completed",
+	}, nil
+}
+
+func (p *provider) Health(ctx context.Context) error {
+	token, err := p.ensureToken(ctx, false)
+	if err != nil {
+		return err
+	}
+	state, _ := p.currentState()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.BaseURL+p.cfg.HealthPath, nil)
+	if err != nil {
+		return pluginapi.NewError("bad_request", "provider-codex: cannot build the health request")
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	if account := p.resolveAccountID(state, p.snapshot()); account != "" {
+		req.Header.Set("chatgpt-account-id", account)
+	}
+	for key, value := range p.cfg.Headers {
+		req.Header.Set(key, value)
+	}
+	resp, err := p.http.Do(req)
+	if err != nil {
+		return pluginapi.NewRetryableError("upstream_unreachable", err.Error(), 502)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return pluginapi.NewError("token_expired", "the upstream rejected the credentials; refresh them and try again")
+	}
+	if resp.StatusCode >= 400 {
+		return pluginapi.NewError("health_failed", "provider-codex: health check returned "+resp.Status)
+	}
+	return nil
+}
+
+// classifyResponse turns an HTTP failure into the plugin error kinds the router
+// understands. Messages carry the upstream code but never request headers.
+func classifyResponse(resp *http.Response, body []byte) *pluginapi.Error {
+	message := upstreamMessage(body)
+	if message == "" {
+		message = "the upstream returned " + resp.Status
+	}
+	switch {
+	case resp.StatusCode == http.StatusTooManyRequests:
+		return pluginapi.NewQuotaError(message, retryAfterUnix(resp))
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return pluginapi.NewError("token_expired", message)
+	case resp.StatusCode >= 500:
+		return pluginapi.NewRetryableError("upstream_5xx", message, resp.StatusCode)
+	default:
+		code := upstreamErrorCode(body)
+		if code == "" {
+			code = "upstream_error"
+		}
+		if apiErr := pluginapi.NewError(code, message); apiErr != nil {
+			apiErr.HTTPStatus = resp.StatusCode
+			return apiErr
+		}
+	}
+	return pluginapi.NewError("upstream_error", message)
+}
+
+func upstreamMessage(body []byte) string {
+	var payload struct {
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return ""
+	}
+	if len(payload.Error) > 0 {
+		var asObject struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(payload.Error, &asObject); err == nil && asObject.Message != "" {
+			return asObject.Message
+		}
+	}
+	return payload.Message
+}
+
+func retryAfterUnix(resp *http.Response) int64 {
+	raw := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if raw == "" {
+		return 0
+	}
+	if seconds, err := time.ParseDuration(raw + "s"); err == nil {
+		return time.Now().Add(seconds).Unix()
+	}
+	if at, err := http.ParseTime(raw); err == nil {
+		return at.Unix()
+	}
+	return 0
+}
+
+// describe reports session metadata; secrets are never included, only their presence.
+func (p *provider) describe(state session) map[string]any {
+	snap := p.snapshot()
+	payload := map[string]any{
+		"mode":               state.Mode,
+		"account_id":         p.resolveAccountID(state, snap),
+		"has_access_token":   state.AccessToken != "" || snap.AccessToken != "",
+		"has_refresh_token":  state.RefreshToken != "" || snap.RefreshToken != "",
+		"has_session_cookie": snap.SessionCookie != "",
+		"last_error":         state.LastError,
+	}
+	if state.ExpiresAt != nil {
+		payload["expires_at"] = state.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	if state.RefreshTokenExpiresAt != nil {
+		payload["refresh_token_expires_at"] = state.RefreshTokenExpiresAt.UTC().Format(time.RFC3339)
+	}
+	if state.LastRefreshAt != nil {
+		payload["last_refresh_at"] = state.LastRefreshAt.UTC().Format(time.RFC3339)
+	}
+	return payload
+}
+
+func outputText(text string) json.RawMessage {
+	parts := []map[string]string{{"type": "output_text", "text": text}}
+	raw, err := json.Marshal(parts)
+	if err != nil {
+		return json.RawMessage("[]")
+	}
+	return raw
+}

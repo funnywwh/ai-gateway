@@ -58,6 +58,7 @@ var allowed = map[string][]string{
 	"internal/admin": {"internal/domain", "internal/ids", "internal/secret", "internal/store"},
 	// Example provider plugins are published code: the public protocol only.
 	"examples/provider-replay": {"pkg/pluginapi", "pkg/providerkit"},
+	"examples/provider-codex":  {"pkg/pluginapi", "pkg/providerkit"},
 	// Example provider plugins: published code, so they may only use the public protocol.
 	"internal/apikey": {"internal/domain", "internal/secret"},
 
