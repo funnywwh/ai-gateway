@@ -333,6 +333,14 @@ else
   grep -q "replay=True" "$WORK/upstream.log" \
     || { cat "$WORK/upstream.log"; fail "the continuation must replay reasoning_content"; }
   pass "continuation replays reasoning_content (upstream saw it)"
+  # A client that never sends reasoning items (DSH pointed at this gateway does not)
+  # must still get its tool turn through: the upstream demands the reasoning_content
+  # KEY on assistant messages that carry tool_calls, and takes an empty value.
+  curl -fsS -X POST "http://127.0.0.1:${GATEWAY_PORT}/v1/responses" \
+    -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
+    -d "{\"model\":\"deepseek-flash\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"weather in hz?\"},{\"type\":\"function_call\",\"call_id\":\"call_smoke_2\",\"name\":\"weather\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_smoke_2\",\"output\":\"cloudy\"}],$TOOLS}" \
+    >/dev/null || fail "a tool turn without client reasoning items must still be accepted"
+  pass "tool turn without reasoning items carries the empty reasoning_content key"
 
   echo "== error mapping"
   code="$(curl -s -o "$WORK/err.json" -w '%{http_code}' -X POST "http://127.0.0.1:${GATEWAY_PORT}/v1/responses" \

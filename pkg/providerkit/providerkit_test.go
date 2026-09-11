@@ -403,6 +403,62 @@ func TestResponsesToChatReplaysReasoningOnlyForToolTurns(t *testing.T) {
 		}
 	}
 
+	// The upstream demands the key itself, not just a non-empty value: a client that
+	// sends no reasoning items at all (DSH pointed at a gateway does not) must still
+	// see the request go through, so the tool-calling message carries an empty
+	// reasoning_content rather than a missing one.
+	bare, err := ResponsesToChatWithOptions(&pluginapi.Request{Model: "m",
+		Input: []pluginapi.Item{
+			{Type: "message", Role: "user", Content: content},
+			{Type: "function_call", CallID: "call_1", Name: "weather", Arguments: "{}"},
+			{Type: "function_call_output", CallID: "call_1", Output: "cloudy"},
+		}}, ChatConvertOptions{ReplayReasoningContent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(bare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"reasoning_content":""`) {
+		t.Fatalf("a tool turn without reasoning must still send the key: %s", raw)
+	}
+	// ... and without the opt-in the field stays off the wire entirely.
+	def, err := ResponsesToChat(&pluginapi.Request{Model: "m",
+		Input: []pluginapi.Item{
+			{Type: "message", Role: "user", Content: content},
+			{Type: "function_call", CallID: "call_1", Name: "weather", Arguments: "{}"},
+			{Type: "function_call_output", CallID: "call_1", Output: "cloudy"},
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawDefault, err := json.Marshal(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rawDefault), "reasoning_content") {
+		t.Fatalf("default translation must not mention reasoning_content: %s", rawDefault)
+	}
+
+	// A reasoning item that carries its text in content parts (the shape an upstream
+	// Responses stream produces) is honoured too.
+	contentReasoning := pluginapi.Item{Type: "reasoning", ID: "rs_2",
+		Content: json.RawMessage(`[{"type":"reasoning_text","text":"from content"}]`)}
+	fromContent, err := ResponsesToChatWithOptions(&pluginapi.Request{Model: "m",
+		Input: []pluginapi.Item{
+			{Type: "message", Role: "user", Content: content},
+			contentReasoning,
+			{Type: "function_call", CallID: "call_1", Name: "weather", Arguments: "{}"},
+			{Type: "function_call_output", CallID: "call_1", Output: "cloudy"},
+		}}, ChatConvertOptions{ReplayReasoningContent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fromContent.Messages[1].ReasoningContent; got != "from content" {
+		t.Fatalf("reasoning carried in content parts = %q, want %q", got, "from content")
+	}
+
 	// A conversation without tool calls never carries the field: it is only
 	// required when the upstream asked for tools.
 	plain, err := ResponsesToChatWithOptions(&pluginapi.Request{

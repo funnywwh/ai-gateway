@@ -109,6 +109,15 @@ providers:
   模型能力明显下降、任务做一半就停；而同一直连 DeepSeek 的客户端（会发 `thinking.enabled`）不受影响。
   修复后同一形态请求恢复思考（reasoning_tokens 19 vs 0），`effort="none"` 仍然能关掉。
 - `reasoning_effort` 支持 `minimal/low/medium/high/xhigh/max`，上游自行映射（`minimal→low`、`medium/xhigh→high`）。
+- **带工具的一轮必须把 `reasoning_content` 原样回传**，而且**要的是这个键本身**：缺键直接 400
+  （`The `reasoning_content` in the thinking mode must be passed back to the API.`），空串可以。
+  这条约束在**非流式**请求上即使没显式发 `thinking` 也照样生效（实测：`thinking=disabled` 时不需要，
+  其余情况——包括不传该字段——都必须带）。
+  网关的策略：**客户端给了就回放原文**（`reasoning` 项，正文在 `summary` 或 `content` 里都认）；
+  **客户端没给就回放空串**，而不是拿"缺键"去换一个整条请求失败——无状态网关无法恢复客户端没有回传的思维链，
+  空串是它能诚实给出的值，上游也确实接受（实测 4/4 通过）。
+  真实后果（2026-09-11）：DSH 指向网关时从不回传 `reasoning` 项，于是每遇到"工具轮 + 思考开启"就整条请求 400；
+  修复后同一形态 4/4 通过。
 - thinking 模式下 `temperature` / `presence_penalty` **被忽略**（不报错），`top_p` 下限被抬到 0.95；网关原样透传，不代改。
 - thinking 模式下 `tool_choice` 不支持 `required` 与具名工具（上游 400）；网关不拦截，错误原样透出。
 - `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` 拆出缓存维度；

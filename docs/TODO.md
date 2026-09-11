@@ -426,3 +426,29 @@
   退出码 0，网关侧三次调用 `reasoning=50/27` —— 整条 DSH→网关→DeepSeek 链路恢复思考
 - [x] 文档：`docs/api-providers.md`（`thinking.mode=auto` 的三种输入 + 沉默即不干预的理由与实测数据）、
   `docs/design/m17-openaichat-deepseek.md` 差异节补记第 6 条、`config.example.yaml` 注释
+
+### M19d 思考模式下工具轮的 `reasoning_content` 必须带键（DSH 实测报告）
+- [x] 触发：M19c 之后 DSH 经网关报错
+  `upstream_400: The \`reasoning_content\` in the thinking mode must be passed back to the API.`
+  —— 思考一打开，上游的硬约束立刻显形（此前思考被关掉，所以从没触发过）
+- [x] 真机把规则测清楚（`api.deepseek.com/deepseek-flash`，逐格 4 次）：
+  `thinking=disabled` → 工具轮不需要该字段；**`thinking=enabled` 或缺省** → 带 `tool_calls` 的 assistant 消息
+  **必须有 `reasoning_content` 键**（值可以为空串），缺键 4/4 报同一条 400；这与消息 `content` 是否为空无关。
+  即"要的是键本身"，不是"要有正文"
+- [x] 复现（隔离实例，修复前）：非流式 + DSH 形态（不回传 `reasoning` 项）→ HTTP 500 + 上述 400；
+  带 `reasoning` 项 → completed；流式同形态 → `response.failed`（M19b 让它不再静默）
+- [x] 根因：`ChatMessage.ReasoningContent` 带 `omitempty`，而"客户端没给思维链"与"不发这个键"在
+  `providerkit` 里是同一件事 —— 无状态网关无法恢复客户端没有回传的思维链，于是只能不发键，整条请求被上游拒掉
+- [x] 修复（`pkg/providerkit`）：
+  ① `ChatMessage` 增加 `ReasoningRequired`（不参与 JSON）+ 自定义 `MarshalJSON`：需要时**带键写出**（值允许为空串）；
+  ② `ResponsesToChatWithOptions` 在 `ReplayReasoningContent` 打开时，给**每个带 tool_calls 的 assistant 消息**打上该标记，
+     有原文就用原文（客户端发了 `reasoning` 项），没有就用空串；
+  ③ `itemReasoningText` 增加 `content` 兜底（正文放在 `reasoning_text` 内容项里的客户端同样能回放原文），
+     与 M17「summary 优先、content 兜底」的口径一致
+- [x] 测试：`providerkit` 3 条（缺 reasoning 项 → 必带空键；未开开关 → 完全不出该字段；正文在 `content` 里 → 回放原文）
+  + `openaichat` 1 条（走 `renderBody` 的配置路径），两处都用变异验证过（改回即精确失败）；
+  `scripts/deepseek-smoke.sh` 增加"工具轮不带 reasoning 项 → 上游仍看到该键"的离线断言
+- [x] 真机复验（隔离实例 `:8095`，新二进制，真实 DeepSeek）：四种组合（流式/非流式 × 带/不带 reasoning 项）**全部 completed**
+  （修复前"不带"的两种必失败）；再用 DSH 本体（headless，供应商指向隔离实例）跑"读 README 首行 + `wc -l`"：
+  同一轮两次工具调用、退出码 0，网关侧 `reasoning=89/79/64/37/13/12` —— 思考与工具往返同时成立
+- [x] 文档：`docs/api-providers.md`（该约束的实测结论 + 网关"有原文用原文、没有就空串"的策略）

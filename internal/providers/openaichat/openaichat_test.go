@@ -448,6 +448,52 @@ func TestNonDeepSeekDialectKeepsEffortOnly(t *testing.T) {
 	}
 }
 
+// TestToolTurnKeepsTheReasoningKeyWithoutAChainOfThought: DeepSeek's thinking mode
+// rejects an assistant message that carries tool_calls but no reasoning_content
+// ("The `reasoning_content` in the thinking mode must be passed back to the API.").
+// A client that sends no reasoning items — DSH pointed at this gateway does not —
+// would otherwise lose the whole request, so the key travels empty; the real text is
+// used whenever the client does provide it.
+func TestToolTurnKeepsTheReasoningKeyWithoutAChainOfThought(t *testing.T) {
+	var body map[string]any
+	p, _ := newUpstreamWith(t, captureBody(t, nonStreamBody, &body), map[string]any{
+		"thinking": map[string]any{"style": deepseekThinking, "replay_reasoning_content": true},
+	})
+	content, _ := json.Marshal("what is the weather")
+	req := &pluginapi.Request{Model: "public-model", Input: []pluginapi.Item{
+		{Type: "message", Role: "user", Content: content},
+		{Type: "function_call", CallID: "call_1", Name: "weather", Arguments: `{"city":"hz"}`},
+		{Type: "function_call_output", CallID: "call_1", Output: "cloudy"},
+	}}
+	if _, err := p.Complete(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	messages, ok := body["messages"].([]any)
+	if !ok {
+		t.Fatalf("messages missing from the upstream body: %v", body)
+	}
+	found := false
+	for _, raw := range messages {
+		message, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if calls, ok := message["tool_calls"].([]any); ok && len(calls) > 0 {
+			value, present := message["reasoning_content"]
+			if !present {
+				t.Fatalf("the tool-calling message must carry reasoning_content: %v", message)
+			}
+			if value != "" {
+				t.Fatalf("no chain of thought is available, so the value must be empty: %v", message)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no tool-calling message in %v", body)
+	}
+}
+
 func TestReasoningContentReplayedOnlyForToolTurns(t *testing.T) {
 	var body map[string]any
 	p, _ := newUpstreamWith(t, captureBody(t, nonStreamBody, &body), map[string]any{

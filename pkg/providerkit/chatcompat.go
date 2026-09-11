@@ -35,6 +35,32 @@ type ChatMessage struct {
 	ToolCalls        []ChatToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string         `json:"tool_call_id,omitempty"`
 	Refusal          string         `json:"refusal,omitempty"`
+	// ReasoningRequired puts reasoning_content on the wire even when it is empty.
+	// Thinking-mode upstreams require the key on every assistant message that carries
+	// tool_calls, and reject the whole request when it is missing ("The
+	// `reasoning_content` in the thinking mode must be passed back to the API."). A
+	// stateless gateway cannot recover a chain of thought the client did not send
+	// back, so the key travels with the value it can honestly offer — empty — instead
+	// of taking the request down. The empty string is accepted by the upstream;
+	// omitting the field is not.
+	ReasoningRequired bool `json:"-"`
+}
+
+// MarshalJSON writes the message with reasoning_content present when required. An
+// empty chain of thought is omitted otherwise: most OpenAI-compatible upstreams do
+// not know the field and should not see it.
+func (m ChatMessage) MarshalJSON() ([]byte, error) {
+	type plain ChatMessage
+	if !m.ReasoningRequired {
+		return json.Marshal(plain(m))
+	}
+	// The outer field shadows the embedded one (encoding/json prefers the shallowest
+	// match), so this writes reasoning_content without omitempty.
+	type withReasoning struct {
+		plain
+		ReasoningContent string `json:"reasoning_content"`
+	}
+	return json.Marshal(withReasoning{plain: plain(m), ReasoningContent: m.ReasoningContent})
 }
 
 // ChatTool is a function tool in chat-completions form.
@@ -164,10 +190,16 @@ func ResponsesToChatWithOptions(req *pluginapi.Request, opts ChatConvertOptions)
 		if !ok {
 			continue
 		}
-		if text := replay[index]; text != "" {
+		// Upstreams that demand their chain of thought back only demand it on
+		// tool-calling turns, and they demand the key itself: a client that never
+		// sends reasoning items (DSH pointed at this gateway does not) must still get
+		// its request through, with an empty value rather than a missing field.
+		if opts.ReplayReasoningContent {
+			text := replay[index]
 			for i := range msg {
 				if msg[i].Role == "assistant" && len(msg[i].ToolCalls) > 0 {
 					msg[i].ReasoningContent = text
+					msg[i].ReasoningRequired = true
 					break
 				}
 			}
@@ -236,11 +268,26 @@ func reasoningByToolTurn(items []pluginapi.Item) map[int]string {
 	return out
 }
 
-// itemReasoningText concatenates the summary parts of a reasoning item.
+// itemReasoningText extracts the chain of thought of a reasoning item. The text
+// rides in the summary parts when the gateway itself produced the item (that is the
+// part it streams as reasoning summary events), and in content parts when it came
+// from an upstream Responses shape — the same "summary first, content as fallback"
+// rule the assembler applies, so a client may send either form.
 func itemReasoningText(item pluginapi.Item) string {
 	var sb strings.Builder
 	for _, part := range item.Summary {
 		sb.WriteString(part.Text)
+	}
+	if sb.Len() == 0 && len(item.Content) > 0 {
+		var parts []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(item.Content, &parts); err == nil {
+			for _, part := range parts {
+				sb.WriteString(part.Text)
+			}
+		}
 	}
 	return strings.TrimSpace(sb.String())
 }
