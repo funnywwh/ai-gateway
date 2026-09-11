@@ -161,6 +161,10 @@ type responseWire struct {
 		Message string `json:"message"`
 		Code    string `json:"code"`
 	} `json:"error,omitempty"`
+	// IncompleteDetails is what an upstream says when it stopped early.
+	IncompleteDetails *struct {
+		Reason string `json:"reason"`
+	} `json:"incomplete_details,omitempty"`
 }
 
 func (u *usageWire) dimensions() pluginapi.Usage {
@@ -252,6 +256,11 @@ func (p *Provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 	reader := providerkit.NewSSEReader(resp.Body, 0)
 	estimator := providerkit.NewCharEstimator(0)
 	var finalUsage *pluginapi.Usage
+	// The upstream declares the end of the answer with response.completed or
+	// response.incomplete; anything else (body ending, [DONE] without either) means
+	// the stream was cut, and a fragment must not be served as a complete answer.
+	finishReason := ""
+	terminal := false
 
 	for {
 		var frame struct {
@@ -317,9 +326,17 @@ func (p *Provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 				return err
 			}
 		case "response.completed", "response.incomplete":
+			terminal = true
+			finishReason = "stop"
+			if frame.Type == "response.incomplete" {
+				finishReason = "incomplete"
+			}
 			if frame.Response != nil {
 				u := frame.Response.Usage.dimensions()
 				finalUsage = &u
+				if frame.Response.IncompleteDetails != nil && frame.Response.IncompleteDetails.Reason != "" {
+					finishReason = frame.Response.IncompleteDetails.Reason
+				}
 			}
 		case "response.failed", "error":
 			msg := "upstream reported a failed response"
@@ -330,6 +347,10 @@ func (p *Provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 		}
 	}
 
+	if !terminal {
+		return pluginapi.NewRetryableError("upstream_stream_incomplete",
+			"the upstream stream ended before the response was finished", 502)
+	}
 	if finalUsage == nil {
 		estimated := pluginapi.Usage{
 			Dimensions: map[string]int64{
@@ -339,6 +360,9 @@ func (p *Provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 			Estimated: true,
 		}
 		finalUsage = &estimated
+	}
+	if err := emit(pluginapi.Event{Type: pluginapi.EventFinish, Reason: finishReason}); err != nil {
+		return err
 	}
 	return emit(pluginapi.Event{Type: pluginapi.EventUsage, Usage: finalUsage})
 }
@@ -370,6 +394,13 @@ func convertResponse(wire *responseWire) *pluginapi.Response {
 	out := &pluginapi.Response{Status: wire.Status}
 	if out.Status == "" {
 		out.Status = "completed"
+	}
+	out.FinishReason = "stop"
+	if out.Status == "incomplete" {
+		out.FinishReason = "incomplete"
+		if wire.IncompleteDetails != nil && wire.IncompleteDetails.Reason != "" {
+			out.FinishReason = wire.IncompleteDetails.Reason
+		}
 	}
 	for _, raw := range wire.Output {
 		var item pluginapi.Item

@@ -132,6 +132,10 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		attemptNo  int
 		usage      pluginapi.Usage
 		ttftMS     int
+		// finishReason is the chosen provider's own reason for stopping ("stop",
+		// "length", "content_filter", ...). It is what separates "the model finished"
+		// from "the answer was cut off", which the client cannot see otherwise.
+		finishReason string
 	)
 
 	maxAttempts := s.deps.Config.Routing.MaxAttempts
@@ -164,10 +168,14 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 			guard = s.newInflightGuard(attemptCtx, cancelAttempt, account, requestID,
 				plan.Resolved.Canonical, cand.UpstreamModel, cand.ProviderID, costRules, saleRules,
 				s.resolveMarkup(key, account, saleRules), admission)
-			_, err = s.deps.Dispatcher.Stream(attemptCtx, cand.ProviderID, provReq, func(ev pluginapi.Event) error {
+			var end *pluginapi.StreamEnd
+			end, err = s.deps.Dispatcher.Stream(attemptCtx, cand.ProviderID, provReq, func(ev pluginapi.Event) error {
 				return guard.Observe(ev, assembler.Add)
 			})
 			cancelAttempt()
+			if err == nil && end != nil {
+				finishReason = end.FinishReason
+			}
 		} else {
 			var providerResp *pluginapi.Response
 			providerResp, err = s.deps.Dispatcher.Complete(ctx, cand.ProviderID, provReq)
@@ -176,6 +184,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 					err = ferr
 				} else {
 					usage = providerResp.Usage
+					finishReason = providerResp.FinishReason
 				}
 			}
 		}
@@ -194,7 +203,14 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 				err = errQuotaAborted
 			}
 		}
-		s.recordAttempt(ctx, key, account, req, plan.Resolved, cand, attemptNo, err, latency, ttftMS, attemptStarted, usage, outcome, assembler)
+		// An attempt that served a fragment is metered like any other answer; the
+		// reason it ended is recorded separately so the usage table can still tell
+		// a truncated answer from a complete one.
+		attemptTerminal := ""
+		if _, truncated := pluginapi.IncompleteReason(finishReason); err == nil && truncated {
+			attemptTerminal = "incomplete"
+		}
+		s.recordAttempt(ctx, key, account, req, plan.Resolved, cand, attemptNo, err, attemptTerminal, latency, ttftMS, attemptStarted, usage, outcome, assembler)
 
 		if err == nil {
 			chosen = &cand
@@ -236,12 +252,27 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The answer the client is about to receive is a fragment when the provider said
+	// so (token limit, content filter): finalise it as `response.incomplete` instead
+	// of `response.completed`, otherwise a client that derives its own stop reason
+	// from the terminal status (every Responses client does) reads a cut-off answer
+	// as a finished one.
+	incompleteReason, truncated := pluginapi.IncompleteReason(finishReason)
+	status := "completed"
+	if truncated {
+		status = "incomplete"
+	}
+
 	if req.Stream {
 		final := assembler.Usage()
 		if len(usage.Dimensions) > 0 {
 			final = usage
 		}
-		if _, err := assembler.Complete(final); err != nil {
+		if truncated {
+			if _, err := assembler.Incomplete(incompleteReason, final); err != nil {
+				return
+			}
+		} else if _, err := assembler.Complete(final); err != nil {
 			return
 		}
 	} else {
@@ -249,11 +280,19 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		if len(final.Dimensions) == 0 {
 			final = assembler.Usage()
 		}
-		if _, err := assembler.Complete(final); err != nil {
-			writeAPIError(w, domain.ErrInternal(err.Error()))
+		var (
+			resp *responses.Response
+			ferr error
+		)
+		if truncated {
+			resp, ferr = assembler.Incomplete(incompleteReason, final)
+		} else {
+			resp, ferr = assembler.Complete(final)
+		}
+		if ferr != nil {
+			writeAPIError(w, domain.ErrInternal(ferr.Error()))
 			return
 		}
-		resp := assembler.Response()
 		w.Header().Set("x-gateway-provider", chosen.ProviderName)
 		w.Header().Set("x-gateway-model", canonical)
 		if len(chosen.Degraded) > 0 {
@@ -262,7 +301,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 	}
 
-	s.persist(ctx, key, account, req, canonical, providerID, assembler, "completed")
+	s.persist(ctx, key, account, req, canonical, providerID, assembler, status)
 	ticket.Settle(totalTokens(assembler.Usage()))
 	_ = startedAt
 }
@@ -277,6 +316,7 @@ func (s *Server) recordAttempt(
 	cand domain.Candidate,
 	attemptNo int,
 	attemptErr error,
+	terminalReason string,
 	latencyMS, ttftMS int,
 	startedAt time.Time,
 	u pluginapi.Usage,
@@ -315,6 +355,11 @@ func (s *Server) recordAttempt(
 		} else {
 			errorCode = "upstream_error"
 		}
+	} else if terminalReason != "" {
+		// The attempt succeeded and was metered: an answer cut short by the token
+		// limit is still a served answer, but it must be distinguishable in the
+		// record from one the model finished on its own.
+		terminated = terminalReason
 	}
 	attempt := &usage.Attempt{
 		RequestID:        requestIDFrom(ctx),
@@ -397,7 +442,11 @@ func (s *Server) persist(
 
 	if s.deps.Hooks != nil {
 		event := "response.completed"
-		if status != "completed" {
+		switch status {
+		case "incomplete":
+			event = "response.incomplete"
+		case "completed":
+		default:
 			event = "response.failed"
 		}
 		accountName := ""

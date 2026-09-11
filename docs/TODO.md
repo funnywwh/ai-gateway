@@ -362,3 +362,39 @@
 - [x] M14(1) 测试：门户登录/鉴权/登出/全局登出/禁用拒登/限速 429 + 管理侧生命周期（一次性口令、不回显、重复 409、非法名 400）
 - [ ] M14(2) 门户 API（`/portal/api/v1/*`：读自有数据 + 建/轮换自己的 Key + 兑换码 + 改口令）与第二套嵌入式 UI
 - [ ] M14(2) 前端共享化：`internal/webui/shared/{api.js,ui.js}` 被 admin 与门户两套 UI 复用（各自前缀下服务）
+
+### M19b 流式终态：截断不得伪装成完成（DSH 实测报告）
+- [x] 触发场景：DSH 经 8088 的 aigw 供应商跑任务（`provider: aigw` / `deepseek-flash`），14:56–15:00 那次在
+  第 60 步"没做完就停了"，网关侧**一条错误都没有**。排查结论：上游那次只产出 15 token 就结束（`usage_source=provider`、`output=15`），
+  模型自己收尾；但顺着这条线索挖出网关流式路径的两个"把截断伪装成完成"的缺陷（客户端是从终态反推 stop reason 的，
+  `response.completed` → `stop`，所以半句话会被当成模型的最终答复）
+- [x] 缺陷 1（静默截断）：`io.EOF` 被当作流正常结束 —— `openaichat`/`openairesponses`/codex 插件三处
+  `errors.Is(err, io.EOF) → break/return nil`，之后只要没有 `finish_reason` 就按成功上报，`v1.go` 再无条件 `assembler.Complete`
+  → 上游连接中途断开 = 客户端收到半截文本 + `response.completed`，任务"无声中断"
+- [x] 缺陷 2（截断无标记）：`finish_reason=length`/`content_filter` 在**流式路径**从不映射成 `incomplete`
+  （`mapFinishReason` 只作用于非流式，`Assembler.Incomplete` 从未被调用）→ 被 token 上限截断也报 `completed`
+- [x] 缺陷 3（协议字段）：`responses.Event` 的 `output_index`/`content_index` 带 `omitempty`，第 0 项被省略
+  （`index>0` 才带）；Codex 的 `OutputTextDelta without active item` 即此，pi-ai 还会因 slot 查不到而丢弃增量
+- [x] 协议：`pluginapi.Event` 新增 `finish`（`reason` 为上游终止原因原文）；SDK 把它写进 end 帧的 `finish_reason`，
+  内建 provider 经 dispatcher 同样归一为 `StreamEnd`；`pluginapi.IncompleteReason` 统一"哪些原因算截断"
+  （`length`/`max_tokens`/`max_output_tokens`/`content_filter`/`incomplete` → 截断；未知原因一律按正常结束，避免把健康回答标成截断）
+- [x] provider：`openaichat`、`openairesponses` 要求"见到 `finish_reason`/`[DONE]`/`response.completed|incomplete`"才算结束，
+  否则 retryable `upstream_stream_incomplete`；codex 插件同口径，并映射 `response.incomplete` 的 `incomplete_details.reason`
+- [x] dispatcher：内建 provider 未上报终态即视为被截断（插件路径兼容旧 SDK：无 `finish` 事件时 end 帧仍为 `stop`）
+- [x] host：终态原因 → `response.incomplete`（流式与非流式都覆盖）；`usage_records.terminated_reason=incomplete`
+  （`status` 仍 `completed`，上游确实产出了这些 token）；钩子事件 `response.incomplete`
+- [x] 前端/协议字段：`responses.Event` 自定义 `MarshalJSON`，按事件类型决定索引字段是否出现（`created`/`completed`/`error` 不带）
+- [x] 测试：provider 3 例（截断流必 retryable、`length` 必上报、正常 stop 不受影响）+ openairesponses 4 例（新文件）+ host 5 例
+  （切流 → `response.failed`、`length` → `response.incomplete`、非流式 `incomplete`、索引恒在、用量标记）+ SDK 2 例 + 事件序列化 2 例；
+  6 处修复各做一次变异验证（改回即精确失败）
+- [x] 文档：`docs/plugin-protocol-v1.md` §6.1（finish 事件与"流必须声明自己为什么结束"）、`docs/api-responses.md`（异常终止表 + 截断/切流判据 + 索引字段恒在）
+- [x] 真机复验（隔离实例 `:8099` + 库快照，跑的就是新二进制；2026-09-11）：
+  切流（`cut_stream`）→ `response.failed`，`error.message` 点名 `upstream_stream_incomplete`，且**不再出现**
+  `response.completed`；`finish_reason=length` → 流式 `response.incomplete`（`incomplete_details.reason=max_output_tokens`）、
+  非流式 `status=incomplete`；`usage_records.terminated_reason=incomplete`（`status` 仍 `completed`）。
+  索引字段复验：`response.output_item.added`/`response.output_text.delta`/`response.content_part.added` 全部带
+  `output_index:0`（`content_index:0`），不再有缺字段的事件。
+  无回归复验（同一实例打真实 DeepSeek）：两轮工具往返都 `response.completed`（第 1 轮产出 `function_call`，
+  第 2 轮回灌 `function_call_output` 后给出终答）。
+- [ ] **待宿主执行**：运行中的 8088 仍是旧二进制（本次会话所在的沙箱与宿主不同 PID namespace，无法向该进程发信号），
+  需在启动它的终端执行 `./scripts/local-run.sh restart`；插件二进制已重建（`bin/` 与 `plugins/aigw-provider-codex`），重启后生效

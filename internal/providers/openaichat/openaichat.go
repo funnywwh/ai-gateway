@@ -314,6 +314,12 @@ func (p *Provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 	reader := providerkit.NewSSEReader(resp.Body, 0)
 	estimator := providerkit.NewCharEstimator(0)
 
+	// A chat stream ends in exactly two ways: a chunk that carries finish_reason, or
+	// the [DONE] sentinel. Reaching the end of the body without either means the
+	// upstream connection died mid-answer — the text seen so far is a fragment, so
+	// the stream must not be reported as a finished response (io.EOF alone is what
+	// a truncated body looks like to a reader).
+	terminal := false
 	for {
 		var chunk providerkit.ChatResponse
 		ev, err := reader.NextJSON(&chunk)
@@ -327,15 +333,21 @@ func (p *Provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 			return pluginapi.NewRetryableError("upstream_stream_error", err.Error(), 502)
 		}
 		if ev.Name == "done" {
+			terminal = true
 			break
 		}
-		if _, err := state.Translate(&chunk, func(ev pluginapi.Event) error {
+		finished, err := state.Translate(&chunk, func(ev pluginapi.Event) error {
 			if ev.Type == pluginapi.EventTextDelta {
 				estimator.Add(ev.Text)
 			}
 			return emit(ev)
-		}); err != nil {
+		})
+		if err != nil {
 			return pluginapi.NewRetryableError("upstream_stream_error", err.Error(), 502)
+		}
+		// Keep reading after finish_reason: usage arrives in the trailing chunk.
+		if finished {
+			terminal = true
 		}
 	}
 
@@ -344,6 +356,10 @@ func (p *Provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 	if providerkit.UpstreamFailure(state.FinishReason) {
 		return pluginapi.NewRetryableError("upstream_"+state.FinishReason,
 			"upstream could not produce the answer: "+state.FinishReason, 503)
+	}
+	if !terminal {
+		return pluginapi.NewRetryableError("upstream_stream_incomplete",
+			"the upstream stream ended before the answer was finished", 502)
 	}
 
 	usage := providerkit.ChatUsageToDimensions(state.Usage)
@@ -355,6 +371,12 @@ func (p *Provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 			},
 			Estimated: true,
 		}
+	}
+	// Report why the upstream stopped: "length" and "content_filter" mean the answer
+	// is a fragment even though the stream itself ended cleanly, and only the
+	// provider knows the difference.
+	if err := emit(pluginapi.Event{Type: pluginapi.EventFinish, Reason: state.FinishReason}); err != nil {
+		return err
 	}
 	return emit(pluginapi.Event{Type: pluginapi.EventUsage, Usage: &usage})
 }

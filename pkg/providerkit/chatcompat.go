@@ -363,6 +363,9 @@ func ChatResponseToResponsesWithOptions(resp *ChatResponse, opts ChatConvertOpti
 	}
 	if choice.FinishReason != "" {
 		out.Status = mapFinishReason(choice.FinishReason)
+		// Status collapses every reason into completed|incomplete; the host needs the
+		// raw value to say why an answer was cut short (token limit vs content filter).
+		out.FinishReason = choice.FinishReason
 	}
 	out.Usage = ChatUsageToDimensions(resp.Usage)
 	return out, nil

@@ -112,6 +112,27 @@
 | `tool_call.arguments.delta` | 工具参数增量 |
 | `usage` | **最终**用量 |
 | `usage.delta` | **增量**用量（在途计量用；可带 `estimated:true`） |
+| `finish` | **终止事件**：`reason` 是上游的终止原因原文（`stop`/`length`/`content_filter`/…）。宿主消费它，不作为事件转发给客户端（见下） |
+
+### 6.1 流必须声明自己为什么结束
+
+`finish` 是插件的收尾声明，宿主拿它做两件事：
+
+1. 写进 end 帧的 `finish_reason`（`StreamEnd.FinishReason`）；
+2. 决定客户端看到的终态：`length`/`content_filter`/`incomplete` 这类"答案被截断"的原因 →
+   `response.incomplete`（`incomplete_details.reason` 为 `max_output_tokens`/`content_filter`）；
+   其余 → `response.completed`。
+
+约定与理由：
+
+- **上游正常结束也要发**（`reason: "stop"`）。宿主需要在"模型说完了"和"流被切断"之间做区分，
+  而这两者在字节层面一模一样。
+- **上游中途断开时不要伪造 `stop`，也不要用 `end` 帧把半截答案当成功收尾**：直接返回
+  retryable 错误（推荐 code `upstream_stream_incomplete`）。此时若客户端已收到增量，宿主会让
+  这条响应以 `response.failed` 收尾（不会故障切换，否则会重复/矛盾）；若一个增量的没有，还可以切换候选。
+- **不认识的 reason 按"正常结束"处理**：把健康的回答标成截断会让客户端重试本来没问题的答案。
+- **兼容**：不发 `finish` 的插件（老版本 SDK）按旧语义处理——end 帧的 `finish_reason` 取 `stop`，
+  响应照旧 `completed`。要拿到截断语义就必须发这个事件。
 
 ## 7. 取消与部分结算
 

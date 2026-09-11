@@ -155,7 +155,16 @@ type Request struct {
 // Event is a streaming increment emitted by a plugin.
 //
 // Event types: text.delta, reasoning.delta, refusal.delta, tool_call.start,
-// tool_call.arguments.delta, usage, usage.delta.
+// tool_call.arguments.delta, usage, usage.delta, finish.
+//
+// finish is the terminal event: Reason carries the upstream finish reason
+// verbatim ("stop", "length", "content_filter", ...). The host consumes it — it
+// never reaches the client as an event, it becomes the stream's end frame, and
+// when the reason says the answer was cut short the response ends as
+// `response.incomplete` instead of `response.completed`. Emitting it is how a
+// provider distinguishes "the model finished" from "the answer was truncated";
+// an upstream that dies mid-answer must NOT end the stream silently, or the
+// half-sentence is served as a complete answer.
 type Event struct {
 	Type      string `json:"type"`
 	Index     int    `json:"index,omitempty"`
@@ -165,6 +174,8 @@ type Event struct {
 	Text      string `json:"text,omitempty"`
 	Usage     *Usage `json:"usage,omitempty"`
 	Estimated bool   `json:"estimated,omitempty"`
+	// Reason is the terminal finish reason carried by a finish event.
+	Reason string `json:"reason,omitempty"`
 }
 
 // Event type constants.
@@ -176,6 +187,7 @@ const (
 	EventToolArgsDelta  = "tool_call.arguments.delta"
 	EventUsage          = "usage"
 	EventUsageDelta     = "usage.delta"
+	EventFinish         = "finish"
 )
 
 // Response is the canonical non-streaming provider response.
@@ -183,6 +195,11 @@ type Response struct {
 	Items  []Item `json:"items"`
 	Usage  Usage  `json:"usage"`
 	Status string `json:"status,omitempty"`
+	// FinishReason is the upstream's own reason for stopping ("stop", "length",
+	// "content_filter", ...). Status collapses those into completed|incomplete,
+	// which loses the distinction between "hit the token limit" and "cut by the
+	// content filter" — the host needs the raw value to report why.
+	FinishReason string `json:"finish_reason,omitempty"`
 }
 
 // Provider is implemented by plugin authors.

@@ -80,6 +80,11 @@
 每条事件一行 `event: <type>` + `data: <json>`，并带自增 `sequence_number`；**不发 `[DONE]`**；
 响应头 `X-Accel-Buffering: no` 且逐帧 Flush。
 
+索引字段按协议**恒在**：凡是作用在单个输出项上的事件都带 `output_index`（第一项就是 `0`，不省略），
+项内内容事件另带 `content_index`，reasoning 摘要事件另带 `summary_index`。客户端以 `output_index`
+作为自己的 item 表主键（Codex 会报 `OutputTextDelta without active item`；pi-ai 对找不到 slot 的
+增量直接丢弃），省略 0 会让第一项的所有增量挂到不存在的项上。
+
 ```
 response.created
 response.in_progress
@@ -103,9 +108,23 @@ response.completed      (含完整 response 与 usage)
 
 | 事件 | 场景 |
 |---|---|
-| `response.failed` | 上游错误 / 中途失败 / 额度中断（此前先发 `event: error`） |
-| `response.incomplete` | 达到 `max_output_tokens` 等正常截断 |
+| `response.failed` | 上游错误 / 中途失败 / **流被切断** / 额度中断（此前先发 `event: error`） |
+| `response.incomplete` | 上游声明答案被截断（`length`→`max_output_tokens`、`content_filter`） |
 | `event: error` | 流内错误（`type`/`code` 与错误封装一致） |
+
+**截断与切流的区分**（决定客户端看到 `completed` 还是别的终态）：
+
+| 上游实际发生的事 | 客户端看到 | 判据 |
+|---|---|---|
+| 模型自己说完 | `response.completed` | provider 的终态原因 = `stop` |
+| 达到 token 上限 / 被内容过滤 | `response.incomplete` + `incomplete_details.reason` | 终态原因 = `length`/`content_filter`/`incomplete` |
+| 上游连接中途断开（没有终态） | `response.failed`（`error.message` 含 `upstream_stream_incomplete`） | provider 一个终态都没给 |
+
+第三种尤其重要：客户端（Codex、DSH/pi-ai 等）是**从终态反推自己的 stop reason 的**
+（`completed` → `stop`），所以把切流报成 `completed` 会让它把半句话当作模型的最终答复，任务就此
+"无声中断"。因此这条路径宁可失败：客户端已经收到增量时不做故障切换（会重复/矛盾），直接以
+`response.failed` 收尾；一个增量的没有，还能切换候选。
+`usage_records.terminated_reason` 同步记录 `incomplete`（`status` 仍为 `completed`，因为上游确实产出了这些 token）。
 
 **额度中断**（详见 `docs/billing.md`）：`event: error{type:"insufficient_quota", code:"billing_hard_limit_reached"}`
 后接 `response.failed`；已产出的部分内容保留，`terminated_reason=aborted_quota`。

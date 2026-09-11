@@ -32,7 +32,11 @@ var configSchema = json.RawMessage(`{
     "fail_mode": {"type": "string", "enum": ["", "retryable", "quota", "fatal"], "default": "",
       "description": "强制失败：空=正常；retryable=可重试（触发故障切换）；quota=配额耗尽（冷却该候选）；fatal=致命错误（不切换，直接回客户端）。"},
     "fail_after": {"type": "integer", "default": 0,
-      "description": "先发出 N 个增量再按 fail_mode 失败，用于测试流中途失败与部分用量结算。"}
+      "description": "先发出 N 个增量再按 fail_mode 失败，用于测试流中途失败与部分用量结算。"},
+    "finish_reason": {"type": "string", "default": "stop",
+      "description": "上报给宿主的终止原因。填 length/content_filter 可模拟“流正常结束但答案被截断”，此时网关会以 response.incomplete 收尾而不是 response.completed。"},
+    "cut_stream": {"type": "boolean", "default": false,
+      "description": "流不回终止事件就结束，模拟上游连接中途断开：文本已经发出、结尾永远没来。宿主必须把它当作被截断的流而不是完整回答。"}
   }
 }`)
 

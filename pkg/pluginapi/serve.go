@@ -224,7 +224,18 @@ func (s *server) dispatchStream(id string, req *Request) bool {
 		if id == "" {
 			return
 		}
+		// The plugin states why generation stopped with a finish event; the SDK turns
+		// it into the end frame so the host can tell a complete answer from a
+		// truncated one. A plugin that emits no finish event keeps the legacy
+		// reading ("stop").
+		finishReason := "stop"
 		emit := func(ev Event) error {
+			if ev.Type == EventFinish {
+				if ev.Reason != "" {
+					finishReason = ev.Reason
+				}
+				return nil // terminal marker: reported in the end frame, not as an event
+			}
 			return s.enc.Write(Frame{ID: id, Type: FrameEvent, Event: &ev})
 		}
 		err := s.streamSafely(reqCtx, req, emit)
@@ -239,7 +250,7 @@ func (s *server) dispatchStream(id string, req *Request) bool {
 			_ = s.writeError(id, protoErr)
 			return
 		}
-		_ = s.writeEnd(id, StreamEnd{FinishReason: "stop"})
+		_ = s.writeEnd(id, StreamEnd{FinishReason: finishReason})
 	}()
 	return false
 }

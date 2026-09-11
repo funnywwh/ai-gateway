@@ -293,16 +293,73 @@ func TestStreamTranslatesEvents(t *testing.T) {
 	p := newTestProvider(t, server.URL, server.URL+"/session", server.URL+"/token", map[string]string{"access_token": "static-token"})
 
 	var types []string
+	reasons := []string{}
 	err := p.Stream(context.Background(), &pluginapi.Request{Model: "codex"}, func(event pluginapi.Event) error {
 		types = append(types, event.Type)
+		if event.Type == pluginapi.EventFinish {
+			reasons = append(reasons, event.Reason)
+		}
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("stream: %v", err)
 	}
-	want := []string{pluginapi.EventTextDelta, pluginapi.EventReasoningDelta, pluginapi.EventTextDelta, pluginapi.EventUsage}
+	want := []string{pluginapi.EventTextDelta, pluginapi.EventReasoningDelta, pluginapi.EventTextDelta, pluginapi.EventUsage, pluginapi.EventFinish}
 	if strings.Join(types, ",") != strings.Join(want, ",") {
 		t.Fatalf("event order = %v, want %v", types, want)
+	}
+	if len(reasons) != 1 || reasons[0] != "stop" {
+		t.Fatalf("finish reasons = %v, want [stop]", reasons)
+	}
+}
+
+// TestStreamEndedWithoutTerminalEventIsRetryable: the subscription backend declares
+// the end of the answer with response.completed / response.incomplete. A body that just
+// stops must fail the attempt — the fragment must not be forwarded as a complete answer.
+func TestStreamEndedWithoutTerminalEventIsRetryable(t *testing.T) {
+	server := sseServer(t, 200, happyFrames[:3], nil)
+	defer server.Close()
+	p := newTestProvider(t, server.URL, server.URL+"/session", server.URL+"/token", map[string]string{"access_token": "static-token"})
+
+	err := p.Stream(context.Background(), &pluginapi.Request{Model: "codex"}, func(pluginapi.Event) error { return nil })
+	apiErr, ok := pluginapi.IsError(err)
+	if !ok || apiErr.Code != "upstream_stream_incomplete" || apiErr.Kind != pluginapi.KindRetryable {
+		t.Fatalf("error = %+v, want a retryable upstream_stream_incomplete", err)
+	}
+}
+
+// TestStreamIncompleteCarriesTheUpstreamReason: an answer the upstream cut short (token
+// limit, content filter) must reach the host with the reason attached, or the client is
+// told the model finished.
+func TestStreamIncompleteCarriesTheUpstreamReason(t *testing.T) {
+	frames := []string{
+		happyFrames[0],
+		"event: response.incomplete" + string([]byte{0x0A}) + `data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":10,"output_tokens":5}}}` + string([]byte{0x0A}) + string([]byte{0x0A}),
+	}
+	server := sseServer(t, 200, frames, nil)
+	defer server.Close()
+	p := newTestProvider(t, server.URL, server.URL+"/session", server.URL+"/token", map[string]string{"access_token": "static-token"})
+
+	var reasons []string
+	if err := p.Stream(context.Background(), &pluginapi.Request{Model: "codex"}, func(event pluginapi.Event) error {
+		if event.Type == pluginapi.EventFinish {
+			reasons = append(reasons, event.Reason)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if len(reasons) != 1 || reasons[0] != "max_output_tokens" {
+		t.Fatalf("finish reasons = %v, want [max_output_tokens]", reasons)
+	}
+
+	// The non-streaming façade must agree, so a JSON client sees status=incomplete too.
+	response, err := p.Complete(context.Background(), &pluginapi.Request{Model: "codex"})
+	if err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if response.Status != "incomplete" || response.FinishReason != "max_output_tokens" {
+		t.Fatalf("status=%q finish_reason=%q", response.Status, response.FinishReason)
 	}
 }
 

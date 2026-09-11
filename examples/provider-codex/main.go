@@ -960,9 +960,12 @@ type wireItem struct {
 }
 
 type wireResponse struct {
-	Status string     `json:"status"`
-	Usage  *wireUsage `json:"usage"`
-	Error  *wireError `json:"error"`
+	Status            string     `json:"status"`
+	Usage             *wireUsage `json:"usage"`
+	Error             *wireError `json:"error"`
+	IncompleteDetails *struct {
+		Reason string `json:"reason"`
+	} `json:"incomplete_details,omitempty"`
 }
 
 type wireError struct {
@@ -1116,16 +1119,22 @@ func (p *provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 	}
 
 	reader := providerkit.NewSSEReader(resp.Body, 0)
+	// finishReason is what the upstream said about the end of the answer; terminal
+	// records whether it said anything at all. A stream that ends without a
+	// terminal event (response.completed / response.incomplete) was cut off, and a
+	// fragment must not be forwarded as a complete answer.
+	finishReason := ""
+	terminal := false
 	for {
 		event, err := reader.Next()
 		if errors.Is(err, io.EOF) {
-			return nil
+			break
 		}
 		if err != nil {
 			return pluginapi.NewRetryableError("stream_read_failed", "provider-codex: reading the upstream stream failed", 502)
 		}
 		if event.Name == "done" {
-			return nil
+			break
 		}
 		if len(event.Data) == 0 {
 			continue
@@ -1134,9 +1143,44 @@ func (p *provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 		if err := json.Unmarshal(event.Data, &payload); err != nil {
 			continue // a data line the adapter does not model
 		}
+		if reason, ok := terminalReason(payload); ok {
+			terminal = true
+			if reason != "" {
+				finishReason = reason
+			}
+		}
 		if err := p.translate(payload, emit); err != nil {
 			return err
 		}
+	}
+	if !terminal {
+		return pluginapi.NewRetryableError("upstream_stream_incomplete",
+			"provider-codex: the upstream stream ended before the response was finished", 502)
+	}
+	if finishReason == "" {
+		finishReason = "stop"
+	}
+	return emit(pluginapi.Event{Type: pluginapi.EventFinish, Reason: finishReason})
+}
+
+// terminalReason reports whether one upstream event ends the answer, and why. The
+// subscription backend states it with response.completed / response.incomplete;
+// an incomplete response carries the reason the model stopped early
+// (max_output_tokens, content_filter, ...).
+func terminalReason(event wireEvent) (string, bool) {
+	switch event.Type {
+	case "response.completed":
+		return "stop", true
+	case "response.incomplete":
+		if event.Response != nil && event.Response.IncompleteDetails != nil && event.Response.IncompleteDetails.Reason != "" {
+			return event.Response.IncompleteDetails.Reason, true
+		}
+		return "incomplete", true
+	case "response.failed":
+		// Handled as an error by translate; the stream is over either way.
+		return "", false
+	default:
+		return "", false
 	}
 }
 
@@ -1245,8 +1289,9 @@ func usageFromWire(usage *wireUsage) *pluginapi.Usage {
 // exactly one place where upstream events are interpreted.
 func (p *provider) Complete(ctx context.Context, req *pluginapi.Request) (*pluginapi.Response, error) {
 	var (
-		builder    strings.Builder
-		finalUsage *pluginapi.Usage
+		builder      strings.Builder
+		finalUsage   *pluginapi.Usage
+		finishReason string
 	)
 	err := p.Stream(ctx, req, func(event pluginapi.Event) error {
 		switch event.Type {
@@ -1256,6 +1301,8 @@ func (p *provider) Complete(ctx context.Context, req *pluginapi.Request) (*plugi
 			if event.Usage != nil {
 				finalUsage = event.Usage
 			}
+		case pluginapi.EventFinish:
+			finishReason = event.Reason
 		}
 		return nil
 	})
@@ -1265,13 +1312,25 @@ func (p *provider) Complete(ctx context.Context, req *pluginapi.Request) (*plugi
 	if finalUsage == nil {
 		finalUsage = &pluginapi.Usage{Dimensions: map[string]int64{"output": providerkit.EstimateTokens(builder.String(), 0)}, Estimated: true}
 	}
+	if _, truncated := pluginapi.IncompleteReason(finishReason); truncated {
+		return &pluginapi.Response{
+			Items: []pluginapi.Item{{
+				Type: "message", ID: "msg_codex", Role: "assistant",
+				Content: outputText(builder.String()), Status: "incomplete",
+			}},
+			Usage:        *finalUsage,
+			Status:       "incomplete",
+			FinishReason: finishReason,
+		}, nil
+	}
 	return &pluginapi.Response{
 		Items: []pluginapi.Item{{
 			Type: "message", ID: "msg_codex", Role: "assistant",
 			Content: outputText(builder.String()), Status: "completed",
 		}},
-		Usage:  *finalUsage,
-		Status: "completed",
+		Usage:        *finalUsage,
+		Status:       "completed",
+		FinishReason: pluginapi.ReasonStop,
 	}, nil
 }
 
@@ -1285,9 +1344,10 @@ func (p *provider) Complete(ctx context.Context, req *pluginapi.Request) (*plugi
 //   - A real completion exercises the path that actually matters: proxy, token
 //     refresh, model acceptance, streaming and event translation.
 //
-// The probe is healthy only when the request succeeded AND the stream reached a
-// terminal usage event. Stream alone treats a truncated body as success (io.EOF),
-// so requiring the terminal event is what makes this a real end-to-end check.
+// The probe is healthy only when the request succeeded AND the stream reached its
+// terminal usage event. Stream already fails a body that ends without the upstream
+// declaring the end of the answer; the probe keeps its own check so a plugin whose
+// Stream behaves differently cannot report a truncated body as a healthy provider.
 func (p *provider) Health(ctx context.Context) error {
 	if err := p.proxyError(); err != nil {
 		return err
@@ -1309,6 +1369,14 @@ func (p *provider) Health(ctx context.Context) error {
 		}
 		return nil
 	}); err != nil {
+		// A cut stream is exactly what this probe exists to catch, and the diagnosis
+		// belongs in the health report: the transport error behind it is retryable,
+		// which would leave the console showing a transient blip instead of the
+		// reason the provider cannot be trusted.
+		if apiErr, ok := pluginapi.IsError(err); ok && apiErr.Code == "upstream_stream_incomplete" {
+			return pluginapi.NewError("health_stream_incomplete",
+				"provider-codex: the health stream ended before the response was finished")
+		}
 		return err
 	}
 	if !sawTerminal {

@@ -37,6 +37,7 @@ type fixture struct {
 	cfg      *config.Config
 	key      *domain.APIKey
 	verifier *apikey.Verifier
+	registry *registry.Registry
 }
 
 func newFixture(t testing.TB) *fixture {
@@ -124,7 +125,7 @@ func newFixture(t testing.TB) *fixture {
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
-	return &fixture{server: ts, db: db, cfg: &cfg, key: key, verifier: verifier}
+	return &fixture{server: ts, db: db, cfg: &cfg, key: key, verifier: verifier, registry: reg}
 }
 
 const (

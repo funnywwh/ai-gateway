@@ -165,6 +165,95 @@ type Event struct {
 	Error          *ErrorPayload `json:"error,omitempty"`
 }
 
+// itemScoped are the events the protocol scopes to one output item: they carry
+// output_index, and the first item's index is 0.
+var itemScoped = map[string]bool{
+	EventOutputItemAdded:        true,
+	EventOutputItemDone:         true,
+	EventContentPartAdded:       true,
+	EventContentPartDone:        true,
+	EventOutputTextDelta:        true,
+	EventOutputTextDone:         true,
+	EventRefusalDelta:           true,
+	EventRefusalDone:            true,
+	EventFunctionArgsDelta:      true,
+	EventFunctionArgsDone:       true,
+	EventReasoningSummaryAdded:  true,
+	EventReasoningSummaryDelta:  true,
+	EventReasoningSummaryDone:   true,
+	EventReasoningSummaryClosed: true,
+}
+
+// contentScoped are the item-scoped events that additionally address a content part.
+var contentScoped = map[string]bool{
+	EventContentPartAdded: true,
+	EventContentPartDone:  true,
+	EventOutputTextDelta:  true,
+	EventOutputTextDone:   true,
+	EventRefusalDelta:     true,
+	EventRefusalDone:      true,
+}
+
+// summaryScoped are the reasoning events that address a summary part.
+var summaryScoped = map[string]bool{
+	EventReasoningSummaryAdded:  true,
+	EventReasoningSummaryDelta:  true,
+	EventReasoningSummaryDone:   true,
+	EventReasoningSummaryClosed: true,
+}
+
+// MarshalJSON writes an event with the index fields its type requires.
+//
+// The struct tags are omitempty because the fields are meaningless on
+// response.created/completed/error, but that also dropped them when they were 0 —
+// i.e. for the first item of every response. Clients key their item table by
+// output_index (Codex reports "OutputTextDelta without active item"; pi-ai, which
+// DSH uses, looks the slot up by output_index and silently discards a delta it
+// cannot place), so the protocol's "always present" fields are decided by event
+// type here rather than by their value.
+func (e Event) MarshalJSON() ([]byte, error) {
+	type wireEvent struct {
+		Type           string        `json:"type"`
+		SequenceNumber int           `json:"sequence_number"`
+		Response       *Response     `json:"response,omitempty"`
+		Item           *OutputItem   `json:"item,omitempty"`
+		ItemID         string        `json:"item_id,omitempty"`
+		OutputIndex    *int          `json:"output_index,omitempty"`
+		ContentIndex   *int          `json:"content_index,omitempty"`
+		SummaryIndex   *int          `json:"summary_index,omitempty"`
+		Part           *ContentPart  `json:"part,omitempty"`
+		Delta          string        `json:"delta,omitempty"`
+		Text           string        `json:"text,omitempty"`
+		Arguments      string        `json:"arguments,omitempty"`
+		Error          *ErrorPayload `json:"error,omitempty"`
+	}
+	out := wireEvent{
+		Type:           e.Type,
+		SequenceNumber: e.SequenceNumber,
+		Response:       e.Response,
+		Item:           e.Item,
+		ItemID:         e.ItemID,
+		Part:           e.Part,
+		Delta:          e.Delta,
+		Text:           e.Text,
+		Arguments:      e.Arguments,
+		Error:          e.Error,
+	}
+	if itemScoped[e.Type] {
+		index := e.OutputIndex
+		out.OutputIndex = &index
+	}
+	if contentScoped[e.Type] {
+		index := e.ContentIndex
+		out.ContentIndex = &index
+	}
+	if summaryScoped[e.Type] {
+		index := e.SummaryIndex
+		out.SummaryIndex = &index
+	}
+	return json.Marshal(out)
+}
+
 // Event type names (mirrors the Responses API streaming protocol).
 const (
 	EventCreated                = "response.created"

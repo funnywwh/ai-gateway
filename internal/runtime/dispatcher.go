@@ -126,11 +126,29 @@ func (d *Dispatcher) stream(ctx context.Context, providerID int64, req *pluginap
 		if err != nil {
 			return nil, err
 		}
-		// Builtin providers emit events through a callback; synthesise the stream end.
-		if err := p.Stream(ctx, req, emit); err != nil {
+		// Builtin providers emit events through a callback; the terminal reason
+		// arrives as a finish event and is reported as the stream's end. A builtin
+		// that produced no terminal event was cut off mid-answer (the upstream
+		// connection died, the body was truncated, ...): reporting that as a
+		// finished stream would serve a half sentence as a complete answer, so it
+		// fails instead — failover when nothing was emitted yet, a client-visible
+		// failure when the client already saw partial content.
+		var end *pluginapi.StreamEnd
+		err = p.Stream(ctx, req, func(ev pluginapi.Event) error {
+			if ev.Type == pluginapi.EventFinish {
+				end = &pluginapi.StreamEnd{FinishReason: ev.Reason}
+				return nil
+			}
+			return emit(ev)
+		})
+		if err != nil {
 			return nil, err
 		}
-		return &pluginapi.StreamEnd{FinishReason: "stop"}, nil
+		if end == nil {
+			return nil, pluginapi.NewRetryableError("upstream_stream_incomplete",
+				"the upstream stream ended without reporting why it stopped", 502)
+		}
+		return end, nil
 	}
 	client, err := d.pluginClient(ctx, provider)
 	if err != nil {

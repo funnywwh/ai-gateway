@@ -63,6 +63,12 @@ type Handshake struct {
 }
 
 // StreamEnd terminates a stream frame sequence.
+//
+// FinishReason is the upstream's own reason for stopping, forwarded verbatim from
+// the plugin's finish event ("stop", "length", "content_filter", ...). The host
+// maps it onto the client-visible terminal status: a reason that means the answer
+// was cut short ends the response as `response.incomplete` rather than
+// `response.completed`, so a truncated answer is never served as a complete one.
 type StreamEnd struct {
 	Usage        Usage  `json:"usage"`
 	FinishReason string `json:"finish_reason,omitempty"`

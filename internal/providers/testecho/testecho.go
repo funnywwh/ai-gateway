@@ -46,6 +46,14 @@ type Config struct {
 	FailMode string `json:"fail_mode"`
 	// FailAfter emits N deltas before failing (used for mid-stream failure tests).
 	FailAfter int `json:"fail_after"`
+	// FinishReason is the terminal reason reported to the host ("stop" by default).
+	// A truncating reason ("length", "content_filter") makes the host end the
+	// response as incomplete instead of completed.
+	FinishReason string `json:"finish_reason"`
+	// CutStream ends the stream without a finish event, which is what a dropped
+	// upstream connection looks like to a reader: the text arrived, the ending never
+	// did. The host must not serve that fragment as a complete answer.
+	CutStream bool `json:"cut_stream"`
 }
 
 // Provider implements pluginapi.Provider.
@@ -134,11 +142,29 @@ func (p *Provider) Complete(ctx context.Context, req *pluginapi.Request) (*plugi
 	if err != nil {
 		return nil, pluginapi.NewError("encode_error", err.Error())
 	}
+	reason := p.finishReason()
+	status := "completed"
+	if _, truncated := pluginapi.IncompleteReason(reason); truncated {
+		status = "incomplete"
+	}
 	return &pluginapi.Response{
-		Items:  []pluginapi.Item{{Type: "message", Role: "assistant", Content: content, Status: "completed"}},
-		Usage:  p.usage(req, text),
-		Status: "completed",
+		Items:        []pluginapi.Item{{Type: "message", Role: "assistant", Content: content, Status: status}},
+		Usage:        p.usage(req, text),
+		Status:       status,
+		FinishReason: reason,
 	}, nil
+}
+
+// finishReason reports the configured terminal reason, defaulting to a normal stop.
+func (p *Provider) finishReason() string {
+	if p.cfg.CutStream {
+		// A cut stream still has to answer Complete(): report it as a fragment.
+		return "incomplete"
+	}
+	if p.cfg.FinishReason != "" {
+		return p.cfg.FinishReason
+	}
+	return pluginapi.ReasonStop
 }
 
 // Stream emits the reply in chunks with incremental usage.
@@ -181,6 +207,14 @@ func (p *Provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 		if err := emit(pluginapi.Event{Type: pluginapi.EventUsageDelta, Usage: &usage, Estimated: true}); err != nil {
 			return err
 		}
+	}
+	// A cut stream ends here: no finish event, exactly like an upstream whose
+	// connection dropped mid-answer. The host has to notice on its own.
+	if p.cfg.CutStream {
+		return nil
+	}
+	if err := emit(pluginapi.Event{Type: pluginapi.EventFinish, Reason: p.finishReason()}); err != nil {
+		return err
 	}
 	final := p.usage(req, text)
 	return emit(pluginapi.Event{Type: pluginapi.EventUsage, Usage: &final})
