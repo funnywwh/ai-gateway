@@ -1,6 +1,7 @@
 import { api, me, login, logout } from './api.js';
 import { el, toast, clear } from './ui.js';
 import { startRouter, renderNav, loadPage, navigate, currentRoute } from './router.js';
+import { initCurrency, currencies, displayCurrency, setDisplayCurrency, missingRates } from './money.js';
 
 const app = document.getElementById('app');
 let session = null;
@@ -57,6 +58,7 @@ function renderShell() {
   const title = el('h1');
   const actions = el('div', { class: 'actions' });
   const page = el('section', { class: 'page' });
+  const currencyBox = el('div', { class: 'currency-picker' });
   const whoami = el('span', { text: session.username + ' · ' + session.role });
   const logoutBtn = el('button', { class: 'btn btn-ghost', text: '退出' });
   logoutBtn.addEventListener('click', async () => {
@@ -68,10 +70,10 @@ function renderShell() {
     el('div', { class: 'app' }, [
       el('aside', { class: 'sidebar' }, [el('div', { class: 'brand', text: 'AI Gateway' }), nav,
         el('div', { class: 'sidebar-foot' }, [whoami, logoutBtn])]),
-      el('main', { class: 'main' }, [el('header', { class: 'topbar' }, [title, actions]), page]),
+      el('main', { class: 'main' }, [el('header', { class: 'topbar' }, [title, currencyBox, actions]), page]),
     ]));
 
-  startRouter(async (route) => {
+  const showRoute = async (route) => {
     renderNav(nav);
     title.textContent = route.title;
     clear(actions);
@@ -86,6 +88,45 @@ function renderShell() {
       page.append(el('div', { class: 'empty', text: '页面加载失败：' + api.errorMessage(err) }));
       toast(api.errorMessage(err), 'error');
     }
+  };
+
+  startRouter(showRoute);
+
+  // The display currency is a view preference: it lives in this browser and only
+  // changes how ledger amounts are rendered, so switching it simply re-renders the
+  // page that is already open.
+  renderCurrencyPicker(currencyBox, () => showRoute(currentRoute()));
+}
+
+// renderCurrencyPicker draws the display-currency selector. It stays quiet when
+// there is nothing to choose (a single-currency deployment), and it warns about
+// currencies some model uses but the rate table cannot convert.
+function renderCurrencyPicker(host, rerender) {
+  clear(host);
+  initCurrency().then(() => {
+    const options = currencies();
+    const selected = displayCurrency();
+    if (options.length > 1) {
+      const select = el('select', { title: '账本类金额按所选币种换算显示（带 ≈）；计价类金额始终按模型自己的币种显示' },
+        options.map((entry) => el('option', {
+          value: entry.code, text: entry.code, selected: entry.code === selected,
+        })));
+      select.addEventListener('change', () => {
+        setDisplayCurrency(select.value);
+        rerender();
+      });
+      host.append(el('span', { class: 'muted', text: '显示币种' }), select);
+    }
+    const missing = missingRates();
+    if (missing.length) {
+      host.append(el('span', {
+        class: 'badge danger',
+        text: missing.join(' / ') + ' 缺汇率',
+        title: '这些币种被某个模型的定价规则使用，但 billing.fx_rates 里没有汇率；该模型目前无法计价（成本与收费记 0）。请在「设置 → 汇率表」补齐。',
+      }));
+    }
+  }).catch(() => {
+    // The banner is chrome, not content: a failure here must not break the page.
   });
 }
 

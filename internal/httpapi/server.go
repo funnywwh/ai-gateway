@@ -18,6 +18,7 @@ import (
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/ids"
+	"github.com/winger/ai-gateway/internal/pricing"
 	"github.com/winger/ai-gateway/internal/quota"
 	"github.com/winger/ai-gateway/internal/registry"
 	"github.com/winger/ai-gateway/internal/responses"
@@ -79,6 +80,12 @@ type Deps struct {
 	Prober  Prober
 	// ReloadHooks swaps the in-memory hook set after a hook write.
 	ReloadHooks func(ctx context.Context) error
+	// FX is the live currency table (ledger currency + rates). A nil store means
+	// "no conversion": every currency is read as the ledger currency, which is what
+	// a deployment with a single currency wants. ReloadFX swaps the table after an
+	// operator edits billing.fx_rates in the console.
+	FX       *pricing.FXStore
+	ReloadFX func(ctx context.Context) error
 	// UI serves the embedded management console at /admin/ui/; nil disables it.
 	UI http.Handler
 	// Billing exposes ledger maintenance; Ledger reads balances and history.

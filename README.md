@@ -30,8 +30,8 @@ agent 通过 admin_endpoints → admin_describe → admin_request 三个入口�
 | `docs/api-providers.md` | openai-chat 供应商（配置开关、思考模式、用量维度、错误分类、DeepSeek 接入） | **已实现（M17）** |
 | `docs/provider-ui.md` | 控制台如何展示供应商配置说明（字段语义、配置与凭据两条通道、密钥录入路径与优先级、排障） | **已实现（M18）** |
 | `docs/routing.md` | 路由解析、候选过滤、负载均衡策略、熔断与冷却 | **已实现（M3）** |
-| `docs/pricing.md` | 计量维度 × 有序价格规则集（分时/分档/分维度） | **已实现（M11a）** |
-| `docs/billing.md` | 计量、账本、在途额度、账单、充值、对账、赠送到期 | **已实现（M11/M12）** |
+| `docs/pricing.md` | 计量维度 × 有序价格规则集（分时/分档/分维度）；多币种（模型级币种 + 汇率换算） | **已实现（M11a / M22）** |
+| `docs/billing.md` | 计量、账本、在途额度、账单、充值、对账、赠送到期；账本币种与显示币种 | **已实现（M11/M12/M22）** |
 | `docs/mcp.md` | MCP 服务（11 个查询工具 + 3 个后台工具、令牌 scope、渐进披露、审计、内容可见性、stdio） | **已实现（M6 + MCP-2 + M21）** |
 | `docs/backup.md` | 一致点备份、保留、校验与两阶段恢复 | **已实现（M16）** |
 

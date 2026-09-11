@@ -147,3 +147,64 @@ func TestBadEnvIntFails(t *testing.T) {
 		t.Fatal("expected error for non-numeric env int")
 	}
 }
+
+// The FX table is what keeps a CNY-priced model from being charged as if CNY were
+// USD, so a typo in it must stop the gateway at start-up instead of at the first
+// request.
+func TestValidateCurrencies(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"bad ledger currency", func(c *Config) { c.Billing.Currency = "US" }},
+		{"ledger currency in the table", func(c *Config) {
+			c.Billing.FXRates = map[string]int64{"USD": 1_000_000}
+		}},
+		{"zero rate", func(c *Config) { c.Billing.FXRates = map[string]int64{"CNY": 0} }},
+		{"negative rate", func(c *Config) { c.Billing.FXRates = map[string]int64{"CNY": -141000} }},
+		{"bad rate key", func(c *Config) { c.Billing.FXRates = map[string]int64{"CN": 141000} }},
+		{"display currency without a rate", func(c *Config) { c.Billing.DisplayCurrency = "CNY" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			tc.mutate(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("expected validation error for %s", tc.name)
+			}
+		})
+	}
+
+	cfg := Default()
+	cfg.Billing.FXRates = map[string]int64{"cny": 141000}
+	cfg.Billing.DisplayCurrency = "cny"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("lower-case codes must be normalized, not rejected: %v", err)
+	}
+	if cfg.Billing.FXRates["CNY"] != 141000 || cfg.Billing.DisplayCurrency != "CNY" {
+		t.Fatalf("normalized billing = %+v", cfg.Billing.FXRates)
+	}
+}
+
+func TestLoadFXRatesFromYAML(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := yamlListenOnly + `billing:
+  currency: USD
+  display_currency: CNY
+  fx_rates:
+    CNY: 141000
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Billing.FXRates["CNY"] != 141000 {
+		t.Fatalf("fx_rates = %+v", cfg.Billing.FXRates)
+	}
+	if cfg.Billing.DisplayCurrency != "CNY" || cfg.Billing.Currency != "USD" {
+		t.Fatalf("currencies = %q / %q", cfg.Billing.Currency, cfg.Billing.DisplayCurrency)
+	}
+}

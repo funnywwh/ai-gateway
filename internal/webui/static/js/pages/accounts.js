@@ -1,11 +1,10 @@
 import { api } from '../api.js';
 import { el, card, table, modal, toast, statusBadge, confirmDialog } from '../ui.js';
-
-const MICRO = 1000000;
-const money = (micros) => (Number(micros || 0) / MICRO).toFixed(6);
+import { initCurrency, money, ledgerCurrency } from '../money.js';
 
 export async function render({ page, actions, session }) {
   const readonly = session.role !== 'admin';
+  await initCurrency();
   const create = el('button', { class: 'btn btn-primary', text: '新建账户', disabled: readonly });
   const refresh = el('button', { class: 'btn', text: '刷新' });
   actions.append(refresh, create);
@@ -43,8 +42,8 @@ export async function render({ page, actions, session }) {
       fields: [
         { name: 'name', label: '名称', required: true },
         { name: 'billing_mode', label: '计费模式', type: 'select', options: ['prepaid', 'postpaid'] },
-        { name: 'credit_limit_micros', label: '授信上限（微美元）', type: 'number' },
-        { name: 'low_balance_threshold_micros', label: '低额告警阈值（微美元）', type: 'number' },
+        { name: 'credit_limit_micros', label: '授信上限（微' + ledgerCurrency() + '）', type: 'number' },
+        { name: 'low_balance_threshold_micros', label: '低额告警阈值（微' + ledgerCurrency() + '）', type: 'number' },
         { name: 'note', label: '备注' },
       ],
       onSubmit: (values) => api.post('/accounts', values),
@@ -60,9 +59,9 @@ async function edit(row, reload) {
     fields: [
       { name: 'status', label: '状态', type: 'select', options: ['active', 'suspended', 'closed'], value: row.status },
       { name: 'billing_mode', label: '计费模式', type: 'select', options: ['prepaid', 'postpaid'], value: row.billing_mode },
-      { name: 'credit_limit_micros', label: '授信上限（微美元）', type: 'number', value: row.credit_limit_micros },
+      { name: 'credit_limit_micros', label: '授信上限（微' + ledgerCurrency() + '）', type: 'number', value: row.credit_limit_micros },
       { name: 'low_balance_threshold_micros', label: '低额阈值（微美元）', type: 'number', value: row.low_balance_threshold_micros },
-      { name: 'overdraft_limit_micros', label: '在途透支上限（微美元）', type: 'number', value: row.overdraft_limit_micros },
+      { name: 'overdraft_limit_micros', label: '在途透支上限（微' + ledgerCurrency() + '）', type: 'number', value: row.overdraft_limit_micros },
       { name: 'note', label: '备注', value: row.note },
     ],
     onSubmit: (values) => api.patch('/accounts/' + row.id, values),

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -302,5 +303,136 @@ func TestInvariantsAndRebuild(t *testing.T) {
 	}
 	if !repaired.OK {
 		t.Fatalf("rebuild must restore the invariants: %+v", repaired)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M22: currency conversion at the settlement boundary
+// ---------------------------------------------------------------------------
+
+func mustFX(t *testing.T, ledger string, rates map[string]int64) pricing.FXTable {
+	t.Helper()
+	table, err := pricing.NewFXTable(ledger, rates)
+	if err != nil {
+		t.Fatalf("NewFXTable: %v", err)
+	}
+	return table
+}
+
+// A reserve is a hold on a ledger-denominated balance, so a CNY-priced model must
+// have its worst case converted, not held as if CNY were USD.
+func TestEstimateReserveConvertsIntoTheLedgerCurrency(t *testing.T) {
+	rules := `{"currency": "CNY", "rules": [{"order": 1, "when": {}, "rates": {"input": 1000000, "output": 1000000}}]}`
+	cost, err := pricing.ParseRuleSet(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx := mustFX(t, "USD", map[string]int64{"CNY": 141000})
+
+	// 1000 output tokens at 1e6 micros CNY per million = 1000 micros CNY = 141 micros USD.
+	reserve := EstimateReserve(EstimateInput{
+		Cost: cost, MaxOutputTokens: 1000, Ledger: "USD", FX: fx,
+	})
+	if reserve != 141 {
+		t.Fatalf("reserve = %d, want 141 micros of the ledger currency", reserve)
+	}
+
+	// The same rule set without a rate table keeps its pre-M22 (native) number.
+	native := EstimateReserve(EstimateInput{Cost: cost, MaxOutputTokens: 1000})
+	if native != 1000 {
+		t.Fatalf("native reserve = %d, want 1000", native)
+	}
+}
+
+// The two sides are compared after conversion: a CNY cost and a USD sale price are
+// only comparable in one currency.
+func TestEstimateReserveComparesSidesInTheLedgerCurrency(t *testing.T) {
+	cost, err := pricing.ParseRuleSet(`{"currency": "CNY", "rules": [{"order": 1, "when": {}, "rates": {"output": 1000000}}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 5 USD per million output tokens is far more expensive than 1 CNY per million
+	// (0.141 USD), so the sale side must win the comparison.
+	sale, err := pricing.ParseRuleSet(`{"currency": "USD", "basis": "absolute", "rules": [{"order": 1, "when": {}, "rates": {"output": 5000000}}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserve := EstimateReserve(EstimateInput{
+		Cost: cost, Sale: sale, MaxOutputTokens: 1000,
+		Ledger: "USD", FX: mustFX(t, "USD", map[string]int64{"CNY": 141000}),
+	})
+	if reserve != 5000 {
+		t.Fatalf("reserve = %d, want the 5000 micros of the USD sale side", reserve)
+	}
+}
+
+// A per-request fee is an absolute amount: it must not be divided by the per-million
+// scale (which silently held nothing for it).
+func TestEstimateReserveIncludesThePerRequestFeeUnscaled(t *testing.T) {
+	cost, err := pricing.ParseRuleSet(`{"rules": [{"order": 1, "when": {}, "rates": {"output": 0}, "per_request_fee_micros": 20000}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserve := EstimateReserve(EstimateInput{Cost: cost, MaxOutputTokens: 10})
+	if reserve != 20000 {
+		t.Fatalf("reserve = %d, want the 20000 micro fee", reserve)
+	}
+	// In cost_follow the charged fee is marked up, so the hold follows it.
+	marked := EstimateReserve(EstimateInput{Cost: cost, MaxOutputTokens: 10, DefaultMarkupBP: 20000})
+	if marked != 40000 {
+		t.Fatalf("marked-up reserve = %d, want 40000", marked)
+	}
+}
+
+// Without a rate the gateway cannot price the request, so it holds the configured
+// default instead of guessing.
+func TestEstimateReserveFallsBackWhenARateIsMissing(t *testing.T) {
+	cost, err := pricing.ParseRuleSet(`{"currency": "EUR", "rules": [{"order": 1, "when": {}, "rates": {"output": 1000000}}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserve := EstimateReserve(EstimateInput{
+		Cost: cost, MaxOutputTokens: 1000, Ledger: "USD",
+		FX:                   mustFX(t, "USD", map[string]int64{"CNY": 141000}),
+		DefaultReserveMicros: 20000,
+	})
+	if reserve != 20000 {
+		t.Fatalf("reserve = %d, want the configured default 20000", reserve)
+	}
+	if zero := EstimateReserve(EstimateInput{Cost: cost, MaxOutputTokens: 1000, Ledger: "USD",
+		FX: mustFX(t, "USD", map[string]int64{"CNY": 141000})}); zero != 0 {
+		t.Fatalf("without a default the hold is 0, got %d", zero)
+	}
+}
+
+// The usage row and the ledger entry must hold ledger currency amounts; the native
+// amounts survive in the snapshot.
+func TestNewChargeWritesLedgerAmounts(t *testing.T) {
+	sale, err := pricing.ParseRuleSet(`{"currency": "CNY", "basis": "absolute", "rules": [{"order": 1, "when": {}, "rates": {"input": 2000000}}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := pricing.Evaluate(pricing.Input{
+		Sale: sale, At: time.Now().UTC(), Dimensions: map[string]int64{"input": 500000},
+		Ledger: "USD", FX: mustFX(t, "USD", map[string]int64{"CNY": 141000}),
+	})
+	if result.ChargeMicros != 1_000_000 {
+		t.Fatalf("native charge = %d, want 1000000 micros CNY", result.ChargeMicros)
+	}
+	usage := &domain.UsageRecord{RequestID: "req-1", AttemptNo: 1, AccountID: 7, Model: "m",
+		ChargeMicros: result.ChargeMicros, CreatedAt: time.Now().UTC()}
+
+	settlement := NewCharge(usage, result, true)
+	if settlement.Usage.ChargeMicros != 141_000 {
+		t.Fatalf("usage charge = %d, want the ledger amount 141000", settlement.Usage.ChargeMicros)
+	}
+	if len(settlement.Entries) != 1 || settlement.Entries[0].AmountMicros != -141_000 {
+		t.Fatalf("ledger entries = %+v, want one entry of -141000", settlement.Entries)
+	}
+	if !strings.Contains(settlement.Usage.PricingSnapshot, `"charge_micros_native":1000000`) {
+		t.Fatalf("snapshot must keep the native amount: %s", settlement.Usage.PricingSnapshot)
+	}
+	if !strings.Contains(settlement.Usage.PricingSnapshot, `"sale_currency":"CNY"`) {
+		t.Fatalf("snapshot must keep the sale currency: %s", settlement.Usage.PricingSnapshot)
 	}
 }

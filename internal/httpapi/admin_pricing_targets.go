@@ -69,6 +69,9 @@ func (s *Server) handleAdminPricingTargets(w http.ResponseWriter, r *http.Reques
 		for key, value := range describeRuleSet(model.SalePricingJSON) {
 			payload[key] = value
 		}
+		for key, value := range s.currencyInfoFor(model.SalePricingJSON) {
+			payload[key] = value
+		}
 		if s.deps.Config != nil {
 			sale, _ := pricing.ParseRuleSet(model.SalePricingJSON)
 			resolved := billing.ResolveMarkup(nil, nil, nil, modelMarkupOf(sale), s.deps.Config.Billing.DefaultMarkupBP)
@@ -86,6 +89,9 @@ func (s *Server) handleAdminPricingTargets(w http.ResponseWriter, r *http.Reques
 		for key, value := range describeRuleSet(mapping.PricingRulesJSON) {
 			payload[key] = value
 		}
+		for key, value := range s.currencyInfoFor(mapping.PricingRulesJSON) {
+			payload[key] = value
+		}
 		targets = append(targets, payload)
 	}
 	sort.SliceStable(targets, func(i, j int) bool {
@@ -98,7 +104,34 @@ func (s *Server) handleAdminPricingTargets(w http.ResponseWriter, r *http.Reques
 		}
 		return left < right
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"targets": targets, "count": len(targets)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"targets":          targets,
+		"count":            len(targets),
+		"ledger_currency":  s.ledgerCurrency(),
+		"display_currency": s.displayCurrency(),
+		"missing_rates":    s.missingRates(),
+	})
+}
+
+// currencyInfoFor describes the currency of one stored rule document: what it
+// declares (or the ledger currency it inherits), the rate to apply and whether
+// that rate exists at all. The console uses it to badge a target that cannot be
+// priced instead of showing a number the gateway would not charge.
+func (s *Server) currencyInfoFor(raw string) map[string]any {
+	currency := pricing.DeclaredCurrency(raw)
+	source := "declared"
+	if currency == "" {
+		currency = s.ledgerCurrency()
+		source = "ledger"
+	}
+	info := map[string]any{"currency": currency, "currency_source": source}
+	if rate, ok := s.fxTable().RateOf(currency); ok {
+		info["fx_rate_micros"] = rate
+		info["fx_rate_known"] = true
+	} else {
+		info["fx_rate_known"] = false
+	}
+	return info
 }
 
 func modelMarkupOf(set *pricing.RuleSet) int {
@@ -157,6 +190,9 @@ func (s *Server) handleAdminPatchMarkup(w http.ResponseWriter, r *http.Request) 
 		Basis             string         `json:"basis"`
 		MarkupBP          *int           `json:"markup_bp"`
 		DimensionMarkupBP map[string]int `json:"dimension_markup_bp"`
+		// Currency is the sale currency. Omitted leaves it untouched; an empty
+		// string clears it back to "inherit the ledger currency".
+		Currency *string `json:"currency"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
@@ -205,6 +241,20 @@ func (s *Server) handleAdminPatchMarkup(w http.ResponseWriter, r *http.Request) 
 	}
 	document["basis"], _ = json.Marshal(basis)
 	document["markup_bp"], _ = json.Marshal(*body.MarkupBP)
+	currency := ""
+	if body.Currency != nil {
+		normalized, err := pricing.NormalizeCurrency(*body.Currency)
+		if err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		currency = normalized
+		if currency == "" {
+			delete(document, "currency")
+		} else {
+			document["currency"], _ = json.Marshal(currency)
+		}
+	}
 	if body.DimensionMarkupBP != nil {
 		if len(body.DimensionMarkupBP) == 0 {
 			delete(document, "dimension_markup_bp")
@@ -217,8 +267,23 @@ func (s *Server) handleAdminPatchMarkup(w http.ResponseWriter, r *http.Request) 
 		writeAPIError(w, domain.ErrInternal("cannot encode the sale pricing document"))
 		return
 	}
-	if _, err := pricing.ParseRuleSet(string(encoded)); err != nil {
+	parsed, err := pricing.ParseRuleSet(string(encoded))
+	if err != nil {
 		writeAPIError(w, toAPIError(err))
+		return
+	}
+	// A currency the gateway cannot convert would silently stop charging, so it is
+	// rejected here (the rate table lives in configuration and settings).
+	if err := s.validateRuleSetCurrency(parsed); err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	if currency != "" {
+		document["currency"], _ = json.Marshal(parsed.Currency)
+	}
+	encoded, err = json.Marshal(document)
+	if err != nil {
+		writeAPIError(w, domain.ErrInternal("cannot encode the sale pricing document"))
 		return
 	}
 	model.SalePricingJSON = string(encoded)
@@ -230,9 +295,14 @@ func (s *Server) handleAdminPatchMarkup(w http.ResponseWriter, r *http.Request) 
 	s.audit(r.Context(), actor.Username, "update", "pricing_markup", strconv.FormatInt(id, 10), map[string]any{
 		"model": name, "basis": basis, "markup_bp": *body.MarkupBP,
 		"dimension_markup_bp": body.DimensionMarkupBP,
+		"currency":            currency,
 	}, "ok")
 	s.reload(r.Context(), "sale markup updated", true)
-	writeJSON(w, http.StatusOK, describeRuleSet(model.SalePricingJSON))
+	payload := describeRuleSet(model.SalePricingJSON)
+	for key, value := range s.currencyInfoFor(model.SalePricingJSON) {
+		payload[key] = value
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 // dimensionNameRE mirrors the pricing package's dimension naming rule so the console

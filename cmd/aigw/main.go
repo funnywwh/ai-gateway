@@ -25,6 +25,7 @@ import (
 	"github.com/winger/ai-gateway/internal/logx"
 	"github.com/winger/ai-gateway/internal/mcpsrv"
 	"github.com/winger/ai-gateway/internal/pluginhost"
+	"github.com/winger/ai-gateway/internal/pricing"
 	"github.com/winger/ai-gateway/internal/quota"
 	"github.com/winger/ai-gateway/internal/registry"
 	"github.com/winger/ai-gateway/internal/routing"
@@ -311,8 +312,65 @@ func run() int {
 		log.Info("admin user ready", "username", cfg.Bootstrap.Admin.Username)
 	}
 
+	// The currency table: configuration first, then the console override stored in
+	// settings. It is rebuilt on every settings write, so an operator can fix a rate
+	// without restarting the gateway.
+	fxStore := pricing.NewFXStore(cfg.Billing.Currency, cfg.Billing.FXRates)
+	reloadFX := func(ctx context.Context) error {
+		rates := cfg.Billing.FXRates
+		raw, found, err := db.GetSetting(ctx, pricing.SettingFXRates)
+		if err != nil {
+			return err
+		}
+		if found {
+			override, err := pricing.ParseFXRates(raw)
+			if err != nil {
+				return err
+			}
+			rates = pricing.MergeFXRates(rates, override)
+		}
+		table, err := pricing.NewFXTable(cfg.Billing.Currency, rates)
+		if err != nil {
+			return err
+		}
+		fxStore.Replace(table.Ledger, table.Rates)
+		return nil
+	}
+	if err := reloadFX(ctx); err != nil {
+		log.Error("loading the fx table failed", "err", err)
+		return 1
+	}
+	if codes := fxStore.Codes(); len(codes) > 1 {
+		log.Info("fx table ready", "ledger", fxStore.Ledger(), "currencies", codes)
+	}
+
+	// Rule sets declared in the configuration file never pass a write API, so a
+	// currency without a rate is named here: such a model is recorded with zero
+	// cost and charge rather than converted with a guessed rate.
+	fxTable := fxStore.Snapshot()
+	warnMissingRate := func(where, raw string) {
+		code := pricing.DeclaredCurrency(raw)
+		if code == "" || code == fxTable.Ledger {
+			return
+		}
+		if _, ok := fxTable.RateOf(code); !ok {
+			log.Warn("rule set declares a currency with no exchange rate; add it to billing.fx_rates",
+				"where", where, "currency", code)
+		}
+	}
+	for _, provider := range cfg.Bootstrap.Providers {
+		for _, model := range provider.Models {
+			warnMissingRate("bootstrap.providers."+provider.Name+"."+model.Public, model.PricingRules)
+		}
+	}
+	for _, model := range cfg.Bootstrap.Models {
+		warnMissingRate("bootstrap.models."+model.PublicName, model.SalePricing)
+	}
+
 	api := httpapi.New(httpapi.Deps{
 		Config:     cfg,
+		FX:         fxStore,
+		ReloadFX:   reloadFX,
 		Registry:   reg,
 		Router:     router,
 		Dispatcher: dispatcher,

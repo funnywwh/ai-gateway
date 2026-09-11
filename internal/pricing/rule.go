@@ -89,8 +89,11 @@ type RuleSet struct {
 	MarkupBP int `json:"markup_bp,omitempty"`
 	// DimensionMarkupBP overrides the mark-up per dimension.
 	DimensionMarkupBP map[string]int `json:"dimension_markup_bp,omitempty"`
-	Currency          string         `json:"currency,omitempty"`
-	Rules             []Rule         `json:"rules"`
+	// Currency is the currency every rate in this set is expressed in (three
+	// uppercase letters). Empty means "the ledger currency", which keeps every
+	// rule set written before M22 working unchanged.
+	Currency string `json:"currency,omitempty"`
+	Rules    []Rule `json:"rules"`
 }
 
 // ParseRuleSet decodes and validates a rule set. An empty document yields an empty
@@ -117,6 +120,13 @@ func Validate(set *RuleSet) error {
 	if set == nil {
 		return nil
 	}
+	// The currency of a rule set is what makes its rates meaningful, so it is
+	// normalized and shape-checked here rather than at first use.
+	currency, err := NormalizeCurrency(set.Currency)
+	if err != nil {
+		return err
+	}
+	set.Currency = currency
 	switch set.Basis {
 	case "", BasisCostFollow, BasisAbsolute:
 	default:

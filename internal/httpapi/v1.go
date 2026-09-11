@@ -13,6 +13,7 @@ import (
 	"github.com/winger/ai-gateway/internal/billing"
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/pricing"
 	"github.com/winger/ai-gateway/internal/quota"
 	"github.com/winger/ai-gateway/internal/responses"
 	"github.com/winger/ai-gateway/internal/runtime"
@@ -101,6 +102,11 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 			MaxOutputTokens: s.effectiveMaxOutput(req, canonical),
 			EstInputTokens:  estimateInputTokens(body),
 			DefaultMarkupBP: s.deps.Config.Billing.DefaultMarkupBP,
+			// The hold is taken on a ledger-denominated balance, so a model priced
+			// in another currency is converted before the two sides are compared.
+			Ledger:               s.ledgerCurrency(),
+			FX:                   s.fxTable(),
+			DefaultReserveMicros: s.deps.Config.Billing.ReserveMicrosDefault,
 		}
 		decision, reservation := s.deps.Billing.Admit(account, requestID, estimate, s.inflightPolicy(account), startedAt)
 		if !decision.Allowed {
@@ -666,11 +672,17 @@ func salePricing(raw string, cfg config.Billing) *responses.ModelPricing {
 	var wire struct {
 		Basis               string `json:"basis"`
 		MarkupBP            int    `json:"markup_bp"`
+		Currency            string `json:"currency"`
 		InputMicrosPerMTok  int64  `json:"input_micros_per_mtok"`
 		OutputMicrosPerMTok int64  `json:"output_micros_per_mtok"`
 	}
 	if err := json.Unmarshal([]byte(raw), &wire); err != nil {
 		return nil
+	}
+	// A model may be priced in its own currency (M22), and this advertisement has
+	// to say which one: the client multiplies the number by its own token counts.
+	if code, err := pricing.NormalizeCurrency(wire.Currency); err == nil && code != "" {
+		out.Currency = code
 	}
 	out.Basis = wire.Basis
 	if out.Basis == "" {

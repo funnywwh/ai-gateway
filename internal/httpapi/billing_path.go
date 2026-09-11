@@ -62,7 +62,9 @@ func (s *Server) ruleSetsFor(canonical string, providerID int64) (*pricing.RuleS
 }
 
 // priceAttempt evaluates cost and charge for one attempt with the same pure function
-// the admin simulator uses.
+// the admin simulator uses. Rates stay in the currency their rule set declares, and
+// the ledger amounts are converted here, so every caller that persists money sees
+// one currency.
 func (s *Server) priceAttempt(dims map[string]int64, at time.Time, variant string, cost, sale *pricing.RuleSet, markup billing.MarkupResolution) *pricing.Result {
 	cfg := s.deps.Config.Billing
 	input := pricing.Input{
@@ -73,6 +75,8 @@ func (s *Server) priceAttempt(dims map[string]int64, at time.Time, variant strin
 		Sale:               sale,
 		MinChargeMicros:    cfg.MinChargeMicros,
 		PerRequestFeeScope: cfg.PerRequestFeeScope,
+		Ledger:             s.ledgerCurrency(),
+		FX:                 s.fxTable(),
 	}
 	switch {
 	case markup.Set:

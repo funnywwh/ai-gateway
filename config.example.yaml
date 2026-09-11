@@ -45,7 +45,9 @@ routing:
   model_fallback: ""                  # catch-all model when nothing matches
 
 billing:
-  currency: USD
+  currency: USD                       # ledger currency: balance, credit, reservations, ledger, invoices, reconcile
+  display_currency: USD               # console default display currency (must be the ledger or have an fx rate)
+  fx_rates: {}                        # 1 unit of the currency = N micros of the ledger currency, e.g. {CNY: 141000} = 1 CNY = 0.141000 USD
   default_markup_bp: 10000            # cost_follow default multiplier (10000 = 1.0x)
   basis_default: cost_follow          # cost_follow|absolute
   peak_boundary: request_start        # request_start|completion (off-peak window attribution)
@@ -83,7 +85,6 @@ billing:
   timezone: UTC
   fallback_file: "./data/billing-fallback.jsonl"
   reconcile_cron: "0 3 * * *"
-  display_currency_rate: 1.0
   # single-writer settlement batching
   writer_batch_size: 256
   writer_flush_interval_ms: 20

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/pricing"
 	"github.com/winger/ai-gateway/internal/providers"
 	"github.com/winger/ai-gateway/internal/runtime"
 )
@@ -698,12 +699,26 @@ func (s *Server) handleAdminUpsertProviderModel(w http.ResponseWriter, r *http.R
 	} else {
 		pm.CapabilitiesJSON = raw
 	}
-	if raw, err := jsonObjectString(body.PricingRules, "pricing_rules"); err != nil {
+	raw, err := jsonObjectString(body.PricingRules, "pricing_rules")
+	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
-	} else {
-		pm.PricingRulesJSON = raw
 	}
+	if strings.TrimSpace(raw) != "" {
+		// Cost rules decide what we pay upstream; they are parsed (and their
+		// currency checked) at write time so a typo cannot silently zero our cost.
+		set, err := pricing.ParseRuleSet(raw)
+		if err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		if err := s.validateRuleSetCurrency(set); err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		raw = normalizeCurrencyInDocument(raw, set)
+	}
+	pm.PricingRulesJSON = raw
 	if err := validateNonNegative("priority", body.Priority); err != nil {
 		writeAPIError(w, toAPIError(err))
 		return

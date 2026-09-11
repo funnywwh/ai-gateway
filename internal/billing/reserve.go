@@ -156,24 +156,65 @@ type EstimateInput struct {
 	EstInputTokens int64
 	// DefaultMarkupBP applies when the sale side is cost-follow.
 	DefaultMarkupBP int
+	// Ledger is the currency the hold is taken in, and FX is the rate table that
+	// converts each side into it. A zero FX table disables conversion (pre-M22
+	// behaviour: every currency is read as the ledger currency).
+	Ledger string
+	FX     pricing.FXTable
+	// DefaultReserveMicros is held when a needed rate is missing: without a rate
+	// the gateway cannot price the request at all, and holding nothing would let a
+	// prepaid account run unbounded.
+	DefaultReserveMicros int64
 }
 
 // EstimateReserve computes the amount to hold for one request using the most
 // expensive rate that could apply, so a prepaid account can never be oversold as
 // long as upstream honours max_output_tokens.
+//
+// Every rate is converted into the ledger currency before the two sides are
+// compared: with per-model currencies, "which side is more expensive" only has an
+// answer in one common currency.
 func EstimateReserve(in EstimateInput) int64 {
-	costRates := pricing.WorstCaseRates(in.Cost)
-	saleRates := pricing.WorstCaseRates(in.Sale)
+	costRates, costOK := in.ledgerRates(in.Cost)
+	saleRates, saleOK := in.ledgerRates(in.Sale)
+	if !costOK || !saleOK {
+		// A missing rate is a configuration fault; fall back to the configured
+		// default hold instead of guessing a number.
+		return in.DefaultReserveMicros
+	}
 
 	// Input tokens are not distinguished here: charge both cache buckets to be safe.
 	inputUnits := in.EstInputTokens
 	total := int64(0)
 	total += in.MaxOutputTokens * worstRate(worstOf(costRates["output"], saleRates["output"]), in)
 	total += inputUnits * worstRate(worstOf(costRates["input"], saleRates["input"]), in)
+
+	reserve := ceilDiv(total, pricing.RateScale)
+	// A per-request fee is already an absolute amount, so it is added outside the
+	// per-million scaling (it used to be divided by the scale, which under-held).
 	if fee := worstOf(costRates["per_request"], saleRates["per_request"]); fee > 0 {
-		total += fee
+		reserve += worstRate(fee, in)
 	}
-	return ceilDiv(total, pricing.RateScale)
+	return reserve
+}
+
+// ledgerRates returns one side's worst-case rates expressed in the ledger
+// currency. The second result is false when a currency of that side has no rate.
+func (in EstimateInput) ledgerRates(set *pricing.RuleSet) (map[string]int64, bool) {
+	worst := pricing.WorstCaseRates(set)
+	currency := in.Ledger
+	if set != nil && set.Currency != "" {
+		currency = set.Currency
+	}
+	out := make(map[string]int64, len(worst))
+	for dimension, rate := range worst {
+		converted, ok := in.FX.Convert(rate, currency, in.Ledger, pricing.RoundCeil)
+		if !ok {
+			return nil, false
+		}
+		out[dimension] = converted
+	}
+	return out, true
 }
 
 // worstRate applies the sale mark-up when the sale side is cost-follow (or absent).

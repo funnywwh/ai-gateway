@@ -1,11 +1,10 @@
 import { api } from '../api.js';
 import { el, card, table, modal, toast, badge, stat, jsonBlock, formatTime, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
-
-const MICRO = 1_000_000;
-const money = (micros) => (Number(micros || 0) / MICRO).toFixed(6);
+import { initCurrency, money, ledgerCurrency } from '../money.js';
 
 export async function render({ page, actions, session, route }) {
 	const readonly = session.role !== 'admin';
+	await initCurrency();
 	switch (route.path) {
 	case '/invoices':
 		return renderInvoices({ page, actions, session, readonly });
@@ -43,9 +42,9 @@ async function renderLedger({ page, actions, readonly }) {
 			api.get('/accounts/' + accountID + '/credits', { days: 90, limit: 200 }),
 		]);
 		summary.replaceChildren(
-			stat('余额（USD）', money(balance.balance_micros)),
-			stat('在途预留（USD）', money(balance.in_flight_micros || 0)),
-			stat('可用（USD）', money((balance.balance_micros || 0) - (balance.in_flight_micros || 0))),
+			stat('余额', money(balance.balance_micros)),
+			stat('在途预留', money(balance.in_flight_micros || 0)),
+			stat('可用', money((balance.balance_micros || 0) - (balance.in_flight_micros || 0))),
 		);
 		ledgerView.replaceChildren(ledgerTable(ledger.data || []).node);
 		creditsView.replaceChildren(creditsTable(credits.data || []).node);
@@ -56,8 +55,8 @@ async function renderLedger({ page, actions, readonly }) {
 			columns: [
 				{ key: 'created_at', label: '时间', render: (row) => formatTime(row.created_at) },
 				{ key: 'kind', label: '类型', render: (row) => badge(row.kind, row.kind === 'charge' ? '' : 'ok') },
-				{ key: 'amount_micros', label: '金额（USD）', render: (row) => money(row.amount_micros) },
-				{ key: 'balance_after_micros', label: '余额（USD）', render: (row) => money(row.balance_after_micros) },
+				{ key: 'amount_micros', label: '金额', render: (row) => money(row.amount_micros) },
+				{ key: 'balance_after_micros', label: '余额', render: (row) => money(row.balance_after_micros) },
 				{ key: 'note', label: '备注' },
 				{ key: 'idem_key', label: '幂等键', render: (row) => el('code', { text: row.idem_key }) },
 			],
@@ -71,7 +70,7 @@ async function renderLedger({ page, actions, readonly }) {
 			columns: [
 				{ key: 'created_at', label: '时间', render: (row) => formatTime(row.created_at) },
 				{ key: 'kind', label: '类型' },
-				{ key: 'amount_micros', label: '金额（USD）', render: (row) => money(row.amount_micros) },
+				{ key: 'amount_micros', label: '金额', render: (row) => money(row.amount_micros) },
 				{ key: 'ref_id', label: '外部流水号', render: (row) => el('code', { text: row.ref_id || '—' }) },
 				{ key: 'actor', label: '操作者' },
 			],
@@ -92,13 +91,13 @@ async function renderLedger({ page, actions, readonly }) {
 					{ value: 'adjustment', label: 'adjustment 调整（可为负）' },
 					{ value: 'refund', label: 'refund 退款' },
 				] },
-				{ name: 'amount_usd', label: '金额（USD，最多 6 位小数）', required: true },
+				{ name: 'amount', label: '金额（' + ledgerCurrency() + '，最多 6 位小数）', required: true },
 				{ name: 'ref_id', label: '外部流水号（幂等键，必填）', required: true },
 				{ name: 'expires_at', label: '到期时间（仅赠送，RFC3339，可留空）' },
 				{ name: 'note', label: '备注' },
 			],
 			onSubmit: (values) => api.post('/accounts/' + accountID + '/credits', {
-				kind: values.kind, amount_usd: values.amount_usd, ref_id: values.ref_id,
+				kind: values.kind, amount: values.amount, ref_id: values.ref_id,
 				note: values.note, expires_at: values.expires_at || undefined,
 			}),
 		});
@@ -126,8 +125,8 @@ async function renderInvoices({ page, actions, session, readonly }) {
 				columns: [
 					{ key: 'period_start', label: '账期', render: (row) => formatTime(row.period_start) + ' → ' + formatTime(row.period_end) },
 					{ key: 'status', label: '状态', render: (row) => badge(row.status, row.status === 'paid' ? 'ok' : row.status === 'void' ? 'danger' : '') },
-					{ key: 'total_cost_micros', label: '成本（USD）', render: (row) => money(row.total_cost_micros) },
-					{ key: 'total_charge_micros', label: '对客（USD）', render: (row) => money(row.total_charge_micros) },
+					{ key: 'total_cost_micros', label: '成本', render: (row) => money(row.total_cost_micros) },
+					{ key: 'total_charge_micros', label: '对客', render: (row) => money(row.total_charge_micros) },
 					{ key: 'created_at', label: '生成时间', render: (row) => formatTime(row.created_at) },
 				],
 				rows,
@@ -158,7 +157,7 @@ async function renderInvoices({ page, actions, session, readonly }) {
 		}));
 		const body = rows.length
 			? el('table', {}, [
-				el('thead', {}, [el('tr', {}, ['分组', '请求数', '输入 tokens', '输出 tokens', '成本 USD', '对客 USD'].map((label) => el('th', { text: label })))]),
+				el('thead', {}, [el('tr', {}, ['分组', '请求数', '输入 tokens', '输出 tokens', '成本', '对客'].map((label) => el('th', { text: label })))]),
 				el('tbody', {}, rows.map((row) => el('tr', {}, [row.group, row.requests, row.prompt, row.completion, row.cost, row.charge].map((value) => el('td', { text: String(value) }))))),
 			])
 			: el('div', { class: 'empty', text: '该账期没有用量' });
@@ -228,9 +227,9 @@ async function renderReconciliation({ page, actions, session, readonly }) {
 				columns: [
 					{ key: 'created_at', label: '时间', render: (row) => formatTime(row.created_at) },
 					{ key: 'kind', label: '类型' },
-					{ key: 'usage_charge_micros', label: '用量侧（USD）', render: (row) => money(row.usage_charge_micros) },
-					{ key: 'ledger_charge_micros', label: '账本侧（USD）', render: (row) => money(row.ledger_charge_micros) },
-					{ key: 'diff_micros', label: '差异（USD）', render: (row) => row.diff_micros === 0
+					{ key: 'usage_charge_micros', label: '用量侧', render: (row) => money(row.usage_charge_micros) },
+					{ key: 'ledger_charge_micros', label: '账本侧', render: (row) => money(row.ledger_charge_micros) },
+					{ key: 'diff_micros', label: '差异', render: (row) => row.diff_micros === 0
 						? badge('0', 'ok') : badge(money(row.diff_micros), 'danger') },
 					{ key: 'estimated_ratio_bp', label: '估算占比', render: (row) => (row.estimated_ratio_bp / 100).toFixed(2) + '%' },
 				],
@@ -255,7 +254,7 @@ async function renderReconciliation({ page, actions, session, readonly }) {
 
 	run.addEventListener('click', async () => {
 		const result = await api.post('/billing/reconcile', { days: 1 });
-		toast(result.diff_micros === 0 ? '对账完成，无差异' : '对账发现差异：' + money(result.diff_micros) + ' USD',
+		toast(result.diff_micros === 0 ? '对账完成，无差异' : '对账发现差异：' + money(result.diff_micros),
 			result.diff_micros === 0 ? 'ok' : 'error');
 		await load();
 	});

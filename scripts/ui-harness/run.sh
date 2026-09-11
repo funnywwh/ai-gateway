@@ -19,7 +19,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${UI_HARNESS_WORK:-$ROOT/.cache/ui-harness}"
 PORT="${UI_HARNESS_PORT:-8097}"
-VIEWS="docs detail create plugin plugin-cached"
+VIEWS="docs detail create plugin plugin-cached currency"
 FIXTURES="$ROOT/scripts/ui-harness/fixtures.json"
 REFRESH=0
 
@@ -58,13 +58,22 @@ rm -rf "$WORK"
 mkdir -p "$WORK/site" "$WORK/home" "$WORK/run" "$WORK/profiles"
 chmod 700 "$WORK/run"
 cp -r "$ROOT/internal/webui/static/." "$WORK/site/"
-python3 - "$ROOT/scripts/ui-harness/providers.page.html" "$FIXTURES" "$WORK/site/harness.html" <<'PY'
-import json, sys
-template, fixtures, out = sys.argv[1], sys.argv[2], sys.argv[3]
-html = open(template, encoding='utf-8').read()
-data = json.load(open(fixtures, encoding='utf-8'))
-open(out, 'w', encoding='utf-8').write(html.replace('__FIXTURES__', json.dumps(data, ensure_ascii=False)))
-PY
+
+# One harness page per area under test: providers.page.html carries the provider and
+# plugin views, currency.page.html the multi-currency money rendering. Both embed the
+# same fixtures, so a view only has to name the page that renders it.
+render_page() {
+  python3 "$ROOT/scripts/ui-harness/render_page.py" "$1" "$FIXTURES" "$2"
+}
+render_page "$ROOT/scripts/ui-harness/providers.page.html" "$WORK/site/harness.html"
+render_page "$ROOT/scripts/ui-harness/currency.page.html" "$WORK/site/currency.html"
+
+page_for_view() {
+  case "$1" in
+    currency) echo "currency.html" ;;
+    *) echo "harness.html" ;;
+  esac
+}
 
 (cd "$WORK/site" && python3 -m http.server "$PORT" --bind 127.0.0.1 >"$WORK/server.log" 2>&1 &
  echo $! >"$WORK/server.pid")
@@ -81,7 +90,7 @@ for view in $VIEWS; do
   HOME="$WORK/home" XDG_RUNTIME_DIR="$WORK/run" MOZ_HEADLESS=1 \
     timeout 90 "$FIREFOX" --headless --no-remote --profile "$profile" \
     --window-size=1500,2400 --screenshot "$WORK/$view.png" \
-    "http://127.0.0.1:$PORT/harness.html#$view" >/dev/null 2>&1
+    "http://127.0.0.1:$PORT/$(page_for_view "$view")#$view" >/dev/null 2>&1
   echo "ran: $view"
 done
 

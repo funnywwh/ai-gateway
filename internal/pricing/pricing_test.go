@@ -241,3 +241,196 @@ func TestSnapshotIsReplayable(t *testing.T) {
 		t.Fatalf("replay cost = %d, want %d", replay.CostMicros, result.CostMicros)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// M22: per-model currencies
+// ---------------------------------------------------------------------------
+
+func mustFX(t *testing.T, ledger string, rates map[string]int64) FXTable {
+	t.Helper()
+	table, err := NewFXTable(ledger, rates)
+	if err != nil {
+		t.Fatalf("NewFXTable: %v", err)
+	}
+	return table
+}
+
+func TestRuleSetCurrencyIsValidated(t *testing.T) {
+	if _, err := ParseRuleSet(`{"currency": "CN-Y", "rules": [{"order": 1, "when": {}, "rates": {"input": 1}}]}`); err == nil {
+		t.Fatal("a malformed currency code must be rejected")
+	}
+	// Lower case is normalized rather than rejected, and the normalized code is
+	// what gets stored and later compared.
+	set := mustParse(t, `{"currency": "cny", "rules": [{"order": 1, "when": {}, "rates": {"input": 100}}]}`)
+	if set.Currency != "CNY" {
+		t.Fatalf("currency = %q, want CNY", set.Currency)
+	}
+}
+
+// A CNY cost table with a USD sale table must convert before applying the markup:
+// multiplying a CNY amount by 1.5 and calling it USD would overcharge by ~7x.
+func TestCostFollowConvertsCostIntoTheSaleCurrency(t *testing.T) {
+	cost := mustParse(t, `{"currency": "CNY", "rules": [{"id": "c", "order": 1, "when": {}, "rates": {"input": 1000000}}]}`)
+	sale := mustParse(t, `{"currency": "USD", "basis": "cost_follow", "rules": [{"id": "s", "order": 1, "when": {}, "rates": {"input": 0}}]}`)
+	fx := mustFX(t, "USD", map[string]int64{"CNY": 141000})
+	result := Evaluate(Input{
+		Cost: cost, Sale: sale, At: time.Now().UTC(),
+		Dimensions: map[string]int64{"input": 1_000_000},
+		MarkupBP:   15000, MarkupSet: true, MarkupSource: "model",
+		Ledger: "USD", FX: fx,
+	})
+
+	// 1M tokens at 1e6 micros CNY per 1M = 1e6 micros CNY (= 1 CNY) of cost.
+	if result.CostMicros != 1_000_000 {
+		t.Fatalf("native cost = %d, want 1000000", result.CostMicros)
+	}
+	// 1 CNY = 141000 micros USD; x1.5 -> 211500 micros, and the sale line repeats it.
+	if result.ChargeMicros != 211_500 {
+		t.Fatalf("native charge = %d, want 211500", result.ChargeMicros)
+	}
+	if len(result.SaleLines) != 1 || result.SaleLines[0].Rate != 141_000 {
+		t.Fatalf("sale lines = %+v, want one line at the converted rate 141000", result.SaleLines)
+	}
+	if got := applyMarkup(mulDivCeil(result.SaleLines[0].Units, result.SaleLines[0].Rate, RateScale), 15000); result.SaleLines[0].AmountMicros != got {
+		t.Fatalf("sale amount %d is not reproducible from units x rate x markup (%d)", result.SaleLines[0].AmountMicros, got)
+	}
+	if result.LedgerChargeMicros != 211_500 {
+		t.Fatalf("ledger charge = %d, want 211500", result.LedgerChargeMicros)
+	}
+	if result.FXCostSale != 141_000 || result.FXSaleLedger != RateScale || result.FXCostLedger != 141_000 {
+		t.Fatalf("rates = cost->sale %d, cost->ledger %d, sale->ledger %d",
+			result.FXCostSale, result.FXCostLedger, result.FXSaleLedger)
+	}
+	if len(result.FXUnavailable) != 0 {
+		t.Fatalf("fx_unavailable = %v, want none", result.FXUnavailable)
+	}
+}
+
+// Same-currency pricing must stay bit-for-bit identical to the pre-M22 engine.
+func TestSameCurrencyPricingIsUnchanged(t *testing.T) {
+	cost := mustParse(t, `{"rules": [{"id": "c", "order": 1, "when": {}, "rates": {"input": 270000, "output": 1100000}, "per_request_fee_micros": 7}]}`)
+	sale := mustParse(t, `{"basis": "cost_follow", "markup_bp": 15000, "dimension_markup_bp": {"output": 25000}, "rules": [{"id": "s", "order": 1, "when": {}, "rates": {"input": 0}}]}`)
+	dimensions := map[string]int64{"input": 33, "output": 7}
+	at := time.Now().UTC()
+
+	plain := Evaluate(Input{Cost: cost, Sale: sale, At: at, Dimensions: dimensions})
+	withFX := Evaluate(Input{Cost: cost, Sale: sale, At: at, Dimensions: dimensions,
+		Ledger: "USD", FX: mustFX(t, "USD", map[string]int64{"CNY": 141000})})
+
+	if plain.CostMicros != withFX.CostMicros || plain.ChargeMicros != withFX.ChargeMicros {
+		t.Fatalf("wiring the FX table changed same-currency pricing: %d/%d vs %d/%d",
+			plain.CostMicros, plain.ChargeMicros, withFX.CostMicros, withFX.ChargeMicros)
+	}
+	if withFX.LedgerCostMicros != plain.CostMicros || withFX.LedgerChargeMicros != plain.ChargeMicros {
+		t.Fatalf("same-currency ledger amounts = %d/%d, want the native ones %d/%d",
+			withFX.LedgerCostMicros, withFX.LedgerChargeMicros, plain.CostMicros, plain.ChargeMicros)
+	}
+	if withFX.FXSaleLedger != RateScale {
+		t.Fatalf("fx_sale_ledger = %d, want %d", withFX.FXSaleLedger, RateScale)
+	}
+}
+
+// An absolute sale price in CNY is charged in CNY and only converted for the
+// ledger, so the customer price never depends on the ledger currency.
+func TestAbsoluteSaleInAnotherCurrency(t *testing.T) {
+	sale := mustParse(t, `{"currency": "CNY", "basis": "absolute", "rules": [{"id": "s", "order": 1, "when": {}, "rates": {"input": 2000000}}]}`)
+	result := Evaluate(Input{
+		Sale: sale, At: time.Now().UTC(), Dimensions: map[string]int64{"input": 500_000},
+		Ledger: "USD", FX: mustFX(t, "USD", map[string]int64{"CNY": 141000}),
+	})
+	if result.ChargeMicros != 1_000_000 {
+		t.Fatalf("native charge = %d, want 1000000 micros CNY", result.ChargeMicros)
+	}
+	if result.LedgerChargeMicros != 141_000 {
+		t.Fatalf("ledger charge = %d, want 141000 micros USD", result.LedgerChargeMicros)
+	}
+	if result.SaleCurrency != "CNY" || result.LedgerCurrency != "USD" {
+		t.Fatalf("currencies = %q / %q", result.SaleCurrency, result.LedgerCurrency)
+	}
+}
+
+// A missing rate must never turn into a wrong number: the affected amounts stay
+// zero and the currency is reported.
+func TestMissingRateIsReportedInsteadOfGuessed(t *testing.T) {
+	cost := mustParse(t, `{"currency": "EUR", "rules": [{"id": "c", "order": 1, "when": {}, "rates": {"input": 1000000}}]}`)
+	sale := mustParse(t, `{"currency": "USD", "basis": "cost_follow", "rules": [{"id": "s", "order": 1, "when": {}, "rates": {"input": 0}}]}`)
+	result := Evaluate(Input{
+		Cost: cost, Sale: sale, At: time.Now().UTC(), Dimensions: map[string]int64{"input": 1000},
+		MarkupBP: 15000, MarkupSet: true, Ledger: "USD", FX: mustFX(t, "USD", map[string]int64{"CNY": 141000}),
+	})
+	if result.ChargeMicros != 0 || result.LedgerChargeMicros != 0 {
+		t.Fatalf("charge = %d / ledger %d, want 0 and 0", result.ChargeMicros, result.LedgerChargeMicros)
+	}
+	if len(result.SaleLines) != 0 {
+		t.Fatalf("sale lines = %+v, want none when the conversion is impossible", result.SaleLines)
+	}
+	if result.CostMicros == 0 {
+		t.Fatal("the native cost is known even when it cannot be converted")
+	}
+	if len(result.FXUnavailable) != 1 || result.FXUnavailable[0] != "EUR" {
+		t.Fatalf("fx_unavailable = %v, want [EUR]", result.FXUnavailable)
+	}
+	if result.MinChargeApplied || result.ChargeMicros != 0 {
+		t.Fatal("a minimum charge must not apply to a request the gateway could not price")
+	}
+}
+
+// The snapshot must describe the conversion well enough to replay it after the
+// operator changed (or removed) the rate table.
+func TestSnapshotRecordsTheRatesUsed(t *testing.T) {
+	cost := mustParse(t, `{"currency": "CNY", "rules": [{"id": "c", "order": 1, "when": {}, "rates": {"input": 1000000}}]}`)
+	sale := mustParse(t, `{"currency": "USD", "basis": "cost_follow", "markup_bp": 20000, "rules": [{"id": "s", "order": 1, "when": {}, "rates": {"input": 0}}]}`)
+	at := time.Date(2026, 3, 2, 9, 0, 0, 0, time.UTC)
+	result := Evaluate(Input{Cost: cost, Sale: sale, At: at, Dimensions: map[string]int64{"input": 1_000_000},
+		Ledger: "USD", FX: mustFX(t, "USD", map[string]int64{"CNY": 141000})})
+
+	raw, err := json.Marshal(result.Snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot Snapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.CostCurrency != "CNY" || snapshot.SaleCurrency != "USD" || snapshot.LedgerCurrency != "USD" {
+		t.Fatalf("snapshot currencies = %q/%q/%q", snapshot.CostCurrency, snapshot.SaleCurrency, snapshot.LedgerCurrency)
+	}
+	if snapshot.CostMicrosNative != 1_000_000 || snapshot.ChargeMicrosNative != 282_000 {
+		t.Fatalf("native amounts = %d / %d, want 1000000 / 282000",
+			snapshot.CostMicrosNative, snapshot.ChargeMicrosNative)
+	}
+	if snapshot.LedgerChargeMicros != 282_000 || snapshot.FXCostSale != 141_000 {
+		t.Fatalf("ledger charge = %d, fx_cost_sale = %d", snapshot.LedgerChargeMicros, snapshot.FXCostSale)
+	}
+
+	// Replay from the snapshot alone, with a rate table that no longer knows CNY:
+	// the recorded rates are what make the historical number reproducible.
+	replay := Evaluate(Input{
+		Cost:       &RuleSet{Currency: snapshot.CostCurrency, Rules: []Rule{*snapshot.CostRule}},
+		Sale:       sale,
+		At:         at,
+		Dimensions: snapshot.Dimensions,
+		Ledger:     snapshot.LedgerCurrency,
+		FX:         mustFX(t, snapshot.LedgerCurrency, map[string]int64{snapshot.CostCurrency: snapshot.FXCostSale}),
+	})
+	if replay.LedgerChargeMicros != snapshot.LedgerChargeMicros {
+		t.Fatalf("replayed ledger charge = %d, want %d", replay.LedgerChargeMicros, snapshot.LedgerChargeMicros)
+	}
+}
+
+// The minimum charge is a floor in the model's own sale currency, applied before
+// the ledger conversion.
+func TestMinChargeAppliesInTheSaleCurrency(t *testing.T) {
+	sale := mustParse(t, `{"currency": "CNY", "basis": "absolute", "rules": [{"id": "s", "order": 1, "when": {}, "rates": {"input": 1000}}]}`)
+	result := Evaluate(Input{
+		Sale: sale, At: time.Now().UTC(), Dimensions: map[string]int64{"input": 10},
+		MinChargeMicros: 10_000, // 0.01 CNY
+		Ledger:          "USD", FX: mustFX(t, "USD", map[string]int64{"CNY": 141000}),
+	})
+	if !result.MinChargeApplied || result.ChargeMicros != 10_000 {
+		t.Fatalf("charge = %d (applied=%v), want the 10000 micro CNY floor", result.ChargeMicros, result.MinChargeApplied)
+	}
+	if result.LedgerChargeMicros != 1_410 {
+		t.Fatalf("ledger charge = %d, want 1410 micros USD", result.LedgerChargeMicros)
+	}
+}

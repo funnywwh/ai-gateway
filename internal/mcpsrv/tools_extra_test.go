@@ -196,3 +196,71 @@ func TestStdioHandleServesTheSameTools(t *testing.T) {
 		}
 	}
 }
+
+// Amounts are micros of the ledger currency, which a deployment may keep in CNY.
+// The payload must then say so and must not call the number "usd".
+func TestMoneyFieldsFollowTheLedgerCurrency(t *testing.T) {
+	ctx := context.Background()
+	service, _, accountID := newMCPFixture(t)
+
+	payload, err := service.Call(ctx, accountID, "get_balance", map[string]any{})
+	if err != nil {
+		t.Fatalf("get_balance: %v", err)
+	}
+	usd := payload.(map[string]any)
+	if usd["balance"] == nil {
+		t.Fatalf("payload must carry a currency-neutral balance: %v", usd)
+	}
+	if _, ok := usd["balance_usd"]; !ok {
+		t.Fatalf("a USD ledger keeps the historical alias: %v", usd)
+	}
+
+	// The same deployment with a CNY ledger: the amount is a CNY amount, so the
+	// dollar-suffixed key would be a lie.
+	service.cfg.Currency = "CNY"
+	payload, err = service.Call(ctx, accountID, "get_balance", map[string]any{})
+	if err != nil {
+		t.Fatalf("get_balance (CNY): %v", err)
+	}
+	cny := payload.(map[string]any)
+	if cny["currency"] != "CNY" {
+		t.Fatalf("currency = %v, want CNY", cny["currency"])
+	}
+	if _, ok := cny["balance_usd"]; ok {
+		t.Fatalf("a CNY ledger must not report balance_usd: %v", cny)
+	}
+	if cny["balance"] != usd["balance"] {
+		t.Fatalf("the neutral key must carry the same amount: %v vs %v", cny["balance"], usd["balance"])
+	}
+}
+
+// A model priced in its own currency advertises that currency, not the ledger's.
+func TestGetModelsAdvertisesTheModelCurrency(t *testing.T) {
+	ctx := context.Background()
+	service, db, accountID := newMCPFixture(t)
+	if _, err := db.UpsertModel(ctx, &domain.Model{
+		PublicName: "cny-echo", Enabled: true,
+		SalePricingJSON: `{"currency":"CNY","basis":"absolute","rules":[{"order":1,"when":{},"rates":{"input":1000000}}]}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.reg.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	payload, err := service.Call(ctx, accountID, "get_models", map[string]any{})
+	if err != nil {
+		t.Fatalf("get_models: %v", err)
+	}
+	models := payload.(map[string]any)["models"].([]map[string]any)
+	for _, entry := range models {
+		if entry["id"] != "cny-echo" {
+			continue
+		}
+		if entry["currency"] != "CNY" {
+			t.Fatalf("cny-echo currency = %v, want CNY", entry["currency"])
+		}
+		return
+	}
+	t.Fatalf("cny-echo missing from %v", models)
+}

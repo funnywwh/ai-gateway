@@ -156,7 +156,9 @@ func (g *inflightGuard) check() error {
 		return nil
 	}
 	result := g.server.priceAttempt(g.dims, time.Now(), g.upstream, g.cost, g.sale, g.markup)
-	g.accrued = result.ChargeMicros
+	// The budget is a ledger-denominated balance, so the accrued amount is the
+	// ledger charge (a model priced in another currency is converted).
+	g.accrued = result.LedgerChargeMicros
 	action := billing.DecideInflight(billing.InflightState{
 		Policy: g.policy, AccruedMicros: g.accrued,
 		LimitMicros: g.limit, SoftRatio: g.soft, HardRatio: g.hard,
@@ -240,7 +242,7 @@ func (g *inflightGuard) Outcome(finalDims map[string]int64) *inflightOutcome {
 		delta := subtractDimensions(finalDims, g.outcome.dims)
 		if len(delta) > 0 {
 			cost := g.server.priceAttempt(delta, time.Now(), g.upstream, g.cost, g.sale, g.markup)
-			g.outcome.overshootCostMicros = cost.CostMicros
+			g.outcome.overshootCostMicros = cost.LedgerCostMicros
 		}
 	}
 	return &g.outcome

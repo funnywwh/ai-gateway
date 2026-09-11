@@ -1,8 +1,7 @@
 import { api } from '../api.js';
 import { el, card, modal, toast, badge, stat, jsonBlock, confirmDialog } from '../ui.js';
+import { initCurrency, money, nativeMoney, ledgerCurrency, currencies } from '../money.js';
 
-const MICRO = 1_000_000;
-const money = (micros) => (Number(micros || 0) / MICRO).toFixed(6);
 const bpToFactor = (bp) => (Number(bp || 0) / 10000);
 const factorToBP = (factor) => Math.round(Number(factor || 0) * 10000);
 
@@ -34,6 +33,7 @@ const TEMPLATES = {
 
 export async function render({ page, actions, session }) {
   const readonly = session.role !== 'admin';
+  await initCurrency();
   const refresh = el('button', { class: 'btn', text: '刷新' });
   const tabMarkup = el('button', { class: 'btn btn-primary', text: '倍数（推荐）' });
   const tabRules = el('button', { class: 'btn', text: '高级：绝对定价 / 促销规则' });
@@ -106,7 +106,16 @@ export async function render({ page, actions, session }) {
       bp: Number(target.markup_bp || 10000),
       basis: target.basis || 'cost_follow',
       dimensions: { ...(target.dimension_markup_bp || {}) },
+      currency: target.currency_source === 'declared' ? target.currency : '',
     };
+    // The sale currency decides what the customer is quoted in; leaving it empty
+    // means "the ledger currency", which keeps a single-currency deployment simple.
+    const currencySelect = el('select', { style: 'max-width:200px' },
+      [{ value: '', label: '继承账本币种（' + ledgerCurrency() + '）' }]
+        .concat(currencies().map((entry) => ({ value: entry.code, label: entry.code })))
+        .map((option) => el('option', { value: option.value, text: option.label, selected: option.value === state.currency })));
+    currencySelect.addEventListener('change', () => { state.currency = currencySelect.value; updatePreview(); });
+
     const factor = el('input', { type: 'number', step: '0.05', min: '0', value: bpToFactor(state.bp).toFixed(2), style: 'max-width:140px' });
     const bp = el('input', { type: 'number', step: '100', min: '0', value: String(state.bp), style: 'max-width:160px' });
     factor.addEventListener('input', () => { state.bp = factorToBP(factor.value); bp.value = String(state.bp); updatePreview(); });
@@ -137,7 +146,7 @@ export async function render({ page, actions, session }) {
       try {
         await api.patch('/pricing/markup', {
           model: target.model, basis: state.basis, markup_bp: state.bp,
-          dimension_markup_bp: state.dimensions,
+          dimension_markup_bp: state.dimensions, currency: state.currency,
         });
       } catch (err) { toast(api.errorMessage(err), 'error'); return; }
       toast('倍数已保存，下一次请求即生效', 'ok');
@@ -147,16 +156,20 @@ export async function render({ page, actions, session }) {
     async function updatePreview() {
       const dimensions = { input: Number(previewInput.value || 0), output: Number(previewOutput.value || 0) };
       try {
+        const saleRules = { basis: 'cost_follow', markup_bp: state.bp, dimension_markup_bp: state.dimensions };
+        if (state.currency) saleRules.currency = state.currency;
         const result = await api.post('/pricing/simulate', {
-          model: target.model, dimensions,
-          sale_rules: { basis: 'cost_follow', markup_bp: state.bp, dimension_markup_bp: state.dimensions },
+          model: target.model, dimensions, sale_rules: saleRules,
         });
         preview.replaceChildren(el('div', { class: 'grid' }, [
-          stat('成本（USD）', money(result.cost_micros)),
-          stat('售价（USD）', money(result.charge_micros)),
-          stat('毛利（USD）', money((result.charge_micros || 0) - (result.cost_micros || 0))),
+          stat('成本（' + (result.cost_currency || ledgerCurrency()) + '）', nativeMoney(result.cost_micros, result.cost_currency)),
+          stat('售价（' + (result.sale_currency || ledgerCurrency()) + '）', nativeMoney(result.charge_micros, result.sale_currency)),
+          stat('毛利（账本 ' + (result.ledger_currency || ledgerCurrency()) + '）',
+            money((result.ledger_charge_micros || 0) - (result.ledger_cost_micros || 0))),
           stat('规模', '×' + bpToFactor(result.markup_bp || state.bp).toFixed(2)),
-        ]), jsonBlock({ cost_lines: result.cost_lines, sale_lines: result.sale_lines }));
+          (result.fx_unavailable || []).length
+            ? stat('缺汇率', result.fx_unavailable.join(' / ') + ' → 记 0') : null,
+        ].filter(Boolean)), jsonBlock({ cost_lines: result.cost_lines, sale_lines: result.sale_lines }));
       } catch (err) {
         preview.replaceChildren(el('div', { class: 'empty', text: api.errorMessage(err) }));
       }
@@ -168,6 +181,10 @@ export async function render({ page, actions, session }) {
           el('span', { text: '售价 = 成本 ×' }), factor,
           el('span', { class: 'muted', text: '基点' }), bp,
           badge(((target.effective_markup || {}).source) || '—'),
+        ]),
+        el('div', { class: 'toolbar' }, [
+          el('span', { text: '售价币种' }), currencySelect,
+          el('span', { class: 'muted', text: '缺汇率的币种无法保存；换算与汇率见「设置 → 汇率表」' }),
         ]),
         el('p', { class: 'muted', text: '倍数模式下，上游调价、优惠时段与缓存命中都会自动跟随；若要固定价，请用「高级」标签页的绝对定价。' }),
         save,
@@ -258,8 +275,8 @@ export async function render({ page, actions, session }) {
         });
         simulation.replaceChildren(el('div', { class: 'grid' }, [
           stat('命中规则', result.cost_rule_id || result.sale_rule_id || '（兜底）'),
-          stat('成本（USD）', money(result.cost_micros)),
-          stat('售价（USD）', money(result.charge_micros)),
+          stat('成本（' + (result.cost_currency || ledgerCurrency()) + '）', nativeMoney(result.cost_micros, result.cost_currency)),
+          stat('售价（' + (result.sale_currency || ledgerCurrency()) + '）', nativeMoney(result.charge_micros, result.sale_currency)),
         ]), jsonBlock({ cost_lines: result.cost_lines, sale_lines: result.sale_lines }));
       } catch (err) { toast(api.errorMessage(err), 'error'); }
     });
@@ -294,8 +311,12 @@ export async function render({ page, actions, session }) {
           sale_rules: target.kind === 'sale' ? parsed : undefined,
         }).catch(() => null);
         if (result) {
-          rows.push({ 输入: size, 成本: money(result.cost_micros), 售价: money(result.charge_micros),
-            毛利: money((result.charge_micros || 0) - (result.cost_micros || 0)) });
+          rows.push({
+            输入: size,
+            成本: nativeMoney(result.cost_micros, result.cost_currency),
+            售价: nativeMoney(result.charge_micros, result.sale_currency),
+            毛利: money((result.ledger_charge_micros || 0) - (result.ledger_cost_micros || 0)),
+          });
         }
       }
       simulation.replaceChildren(el('table', {}, [

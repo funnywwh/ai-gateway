@@ -1,11 +1,11 @@
 import { api } from '../api.js';
 import { el, card, table, modal, toast, badge, formatTime, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
+import { initCurrency, money, ledgerCurrency } from '../money.js';
 
-const MICRO = 1_000_000;
-const money = (micros) => (Number(micros || 0) / MICRO).toFixed(6);
 
 export async function render({ page, actions, session }) {
 	const readonly = session.role !== 'admin';
+	await initCurrency();
 	const create = el('button', { class: 'btn btn-primary', text: '生成兑换码', disabled: readonly });
 	const redeem = el('button', { class: 'btn', text: '核销兑换码', disabled: readonly });
 	const refresh = el('button', { class: 'btn', text: '刷新' });
@@ -21,7 +21,7 @@ export async function render({ page, actions, session }) {
 			view = table({
 				columns: [
 					{ key: 'hash_prefix', label: '哈希前缀', render: (row) => el('code', { text: row.hash_prefix }) },
-					{ key: 'amount_micros', label: '面额（USD）', render: (row) => money(row.amount_micros) },
+					{ key: 'amount_micros', label: '面额', render: (row) => money(row.amount_micros) },
 					{ key: 'status', label: '状态', render: (row) => badge(row.status, row.status === 'unused' ? 'ok' : row.status === 'expired' ? 'warn' : '') },
 					{ key: 'batch_id', label: '批次', render: (row) => el('code', { text: row.batch_id || '—' }) },
 					{ key: 'expires_at', label: '到期', render: (row) => formatTime(row.expires_at) },
@@ -47,14 +47,14 @@ export async function render({ page, actions, session }) {
 			title: '生成兑换码',
 			fields: [
 				{ name: 'count', label: '数量', type: 'number', value: 10, required: true },
-				{ name: 'amount_usd', label: '每张面额（USD）', value: '10.00', required: true },
+				{ name: 'amount', label: '每张面额（' + ledgerCurrency() + '）', value: '10.00', required: true },
 				{ name: 'batch_id', label: '批次号（可留空自动生成）' },
 				{ name: 'expires_at', label: '到期时间（RFC3339，可留空）', placeholder: '2027-01-01T00:00:00Z' },
 				{ name: 'note', label: '备注' },
 			],
 			onSubmit: async (values) => {
 				const first = await api.post('/redemption-codes', {
-					count: Number(values.count), amount_usd: values.amount_usd,
+					count: Number(values.count), amount: values.amount,
 					batch_id: values.batch_id, note: values.note,
 					expires_at: values.expires_at || undefined,
 				});
@@ -79,7 +79,7 @@ export async function render({ page, actions, session }) {
 			}),
 		});
 		if (result) {
-			toast('已核销 ' + money(result.amount_micros) + ' USD', 'ok');
+			toast('已核销 ' + money(result.amount_micros), 'ok');
 			await load();
 		}
 	});

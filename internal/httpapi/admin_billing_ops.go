@@ -260,10 +260,13 @@ func (s *Server) handleAdminAccountCredits(w http.ResponseWriter, r *http.Reques
 	var body struct {
 		Kind         string `json:"kind"`
 		AmountMicros int64  `json:"amount_micros"`
-		AmountUSD    string `json:"amount_usd"`
-		RefID        string `json:"ref_id"`
-		Note         string `json:"note"`
-		ExpiresAt    string `json:"expires_at"`
+		// Amount is a decimal amount in the ledger currency; amount_usd is the
+		// pre-M22 name of the same field and stays accepted.
+		Amount    string `json:"amount"`
+		AmountUSD string `json:"amount_usd"`
+		RefID     string `json:"ref_id"`
+		Note      string `json:"note"`
+		ExpiresAt string `json:"expires_at"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
@@ -273,14 +276,10 @@ func (s *Server) handleAdminAccountCredits(w http.ResponseWriter, r *http.Reques
 	if kind == "" {
 		kind = "topup"
 	}
-	amount := body.AmountMicros
-	if amount == 0 && body.AmountUSD != "" {
-		parsed, err := parseUSDToMicros(body.AmountUSD)
-		if err != nil {
-			writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
-			return
-		}
-		amount = parsed
+	amount, err := ledgerAmountFromBody(body.AmountMicros, body.Amount, body.AmountUSD)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
 	}
 	var expiresAt *time.Time
 	if body.ExpiresAt != "" {
@@ -309,7 +308,28 @@ func (s *Server) handleAdminAccountCredits(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// parseUSDToMicros converts a decimal dollar amount to micro-USD without floats.
+// ledgerAmountFromBody resolves the amount of a manual ledger movement. The value
+// is always in the ledger currency, whichever field name the caller used: "amount"
+// is the current name, "amount_usd" and the raw "amount_micros" predate M22 and
+// keep working.
+func ledgerAmountFromBody(micros int64, amount, amountUSD string) (int64, error) {
+	if micros != 0 {
+		return micros, nil
+	}
+	for _, value := range []string{amount, amountUSD} {
+		if value == "" {
+			continue
+		}
+		parsed, err := parseUSDToMicros(value)
+		if err != nil {
+			return 0, domain.ErrInvalidRequest(err.Error())
+		}
+		return parsed, nil
+	}
+	return 0, nil
+}
+
+// parseUSDToMicros converts a decimal amount to micros without floats.
 func parseUSDToMicros(value string) (int64, error) {
 	trimmed := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(value), "$"))
 	if trimmed == "" {
@@ -391,6 +411,7 @@ func (s *Server) handleAdminGenerateCodes(w http.ResponseWriter, r *http.Request
 	var body struct {
 		Count        int    `json:"count"`
 		AmountMicros int64  `json:"amount_micros"`
+		Amount       string `json:"amount"`
 		AmountUSD    string `json:"amount_usd"`
 		ExpiresAt    string `json:"expires_at"`
 		BatchID      string `json:"batch_id"`
@@ -400,14 +421,10 @@ func (s *Server) handleAdminGenerateCodes(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
 		return
 	}
-	amount := body.AmountMicros
-	if amount == 0 && body.AmountUSD != "" {
-		parsed, err := parseUSDToMicros(body.AmountUSD)
-		if err != nil {
-			writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
-			return
-		}
-		amount = parsed
+	amount, err := ledgerAmountFromBody(body.AmountMicros, body.Amount, body.AmountUSD)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
 	}
 	var expiresAt *time.Time
 	if body.ExpiresAt != "" {

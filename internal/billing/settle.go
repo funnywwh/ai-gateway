@@ -30,6 +30,11 @@ func ChargeIdemKey(requestID string, attemptNo int) string {
 
 // NewCharge builds the settlement for one priced attempt: the usage row plus, when
 // the account is charged, a single negative ledger entry.
+//
+// The usage row and the ledger entry carry the *ledger currency* amounts: a model
+// may be priced in a currency of its own, but everything the ledger sees is one
+// currency (docs/pricing.md §9). The native amounts and the rates used stay in the
+// pricing snapshot, so the charge can still be replayed and explained.
 func NewCharge(usage *domain.UsageRecord, result *pricing.Result, charge bool) *Settlement {
 	settlement := &Settlement{Usage: usage, CreatedAt: usage.CreatedAt}
 	if settlement.CreatedAt.IsZero() {
@@ -37,8 +42,8 @@ func NewCharge(usage *domain.UsageRecord, result *pricing.Result, charge bool) *
 		settlement.Usage.CreatedAt = settlement.CreatedAt
 	}
 	if result != nil {
-		settlement.Usage.CostMicros = result.CostMicros
-		settlement.Usage.ChargeMicros = result.ChargeMicros
+		settlement.Usage.CostMicros = result.LedgerCostMicros
+		settlement.Usage.ChargeMicros = result.LedgerChargeMicros
 		if raw, err := json.Marshal(result.Snapshot); err == nil {
 			settlement.Usage.PricingSnapshot = string(raw)
 		}

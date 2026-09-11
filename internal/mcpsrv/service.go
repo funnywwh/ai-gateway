@@ -217,12 +217,60 @@ func (s *Service) Call(ctx context.Context, accountID int64, name string, args m
 // are reported identically, so the surface is not enumerable from a query token).
 func (s *Service) CallAs(ctx context.Context, p Principal, name string, args map[string]any) (ToolResult, error) {
 	if value, err, known := s.callRead(ctx, p.AccountID, name, args); known {
-		return ToolResult{Value: value}, err
+		return ToolResult{Value: s.withLedgerKeys(value)}, err
 	}
 	if s.backend != nil && p.AllowsAdmin() {
 		return s.backend.CallAdmin(ctx, p, name, args)
 	}
 	return ToolResult{}, fmt.Errorf("unknown tool %q", name)
+}
+
+// withLedgerKeys makes every amount self-describing. Amounts are micros of the
+// ledger currency (billing.currency), which is not necessarily USD, so each
+// *_usd field also appears under a currency-neutral name and the *_usd alias is
+// dropped when the ledger currency is something else. An agent reading
+// "balance": "7.092199" with "currency": "CNY" cannot mistake it for dollars.
+func (s *Service) withLedgerKeys(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return s.ledgerKeysInMap(typed)
+	case []map[string]any:
+		for _, entry := range typed {
+			s.ledgerKeysInMap(entry)
+		}
+		return typed
+	case []any:
+		for _, entry := range typed {
+			s.withLedgerKeys(entry)
+		}
+		return typed
+	default:
+		return value
+	}
+}
+
+func (s *Service) ledgerKeysInMap(payload map[string]any) map[string]any {
+	for key, raw := range payload {
+		if !strings.HasSuffix(key, "_usd") {
+			continue
+		}
+		neutral := strings.TrimSuffix(key, "_usd")
+		if _, exists := payload[neutral]; !exists {
+			payload[neutral] = raw
+		}
+		if s.ledgerCurrency() != "USD" {
+			delete(payload, key)
+		}
+	}
+	return payload
+}
+
+// ledgerCurrency is the currency every amount in this service is denominated in.
+func (s *Service) ledgerCurrency() string {
+	if code := strings.ToUpper(strings.TrimSpace(s.cfg.Currency)); code != "" {
+		return code
+	}
+	return "USD"
 }
 
 // callRead dispatches the account-scoped query tools; known reports whether the
@@ -430,6 +478,11 @@ func (s *Service) getModels(ctx context.Context, accountID int64) (any, error) {
 			var pricing map[string]any
 			if err := json.Unmarshal([]byte(raw), &pricing); err == nil {
 				entry["pricing"] = pricing
+			}
+			// A model may be priced in a currency of its own (M22); the advertised
+			// currency is then the model's, not the ledger's.
+			if code, ok := pricing["currency"].(string); ok && strings.TrimSpace(code) != "" {
+				entry["currency"] = strings.ToUpper(strings.TrimSpace(code))
 			}
 		}
 		out = append(out, entry)

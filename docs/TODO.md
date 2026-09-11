@@ -570,3 +570,27 @@
   `docs/api-providers.md` §3 片段补 `deepseek-v4-flash` 并写明"只加供应商模型不够，三层齐全才对客可用"
 - [x] 文件校验：临时程序 `.cache/cfgcheck`（在 gitignore 的 `.cache/` 下，未入库）用 `internal/config.Load`
   解析改后的 `config.yaml` → ok，`providers=3 models=6 routes=6`
+
+## M22 多币种：模型级币种 + 账本换算 + 可选显示币种
+
+> 设计：`docs/design/m22-currency.md`（已批准的口径：单一账本币种 + 结算换算；
+> 成本/售价各自可配币种；汇率 config 静态表 + 设置页可覆盖；显示币种覆盖控制台并修正对外币种字段）。
+
+- [x] `docs/design/m22-currency.md` 设计文档 + `docs/pricing.md` §9 / `docs/billing.md` §2 / `docs/api-responses.md` / `docs/mcp.md` 规格文档先行
+- [x] `internal/config`：`billing.fx_rates`（整数微账本币种/单位）、`billing.display_currency`、删除死配置 `display_currency_rate`、五条新增校验
+- [x] `internal/pricing/currency.go`：`FXTable`（ToLedger ceil / FromLedger half-up / 零值关闭换算）+ `FXStore`（atomic 替换）+ 单测
+- [x] `internal/pricing`：`RuleSet.Currency` 校验与规整；`cost_follow` 跨币种「先换币再乘倍数」；`Result`/`Snapshot` 增币种、原生金额、入账金额与汇率；缺汇率 `fx_unavailable`
+- [x] `internal/billing`：`EstimateReserve` 两侧各自换算后取 max、缺汇率回退 `reserve_micros_default`；`NewCharge` 写账本币种金额
+- [x] `internal/httpapi`：Deps 注入 FX store、请求路径换算、写入校验 400、`GET /admin/api/v1/billing/currency`（路由表条目 + `expectedAdminPatterns`）、targets/simulate/`/v1/models` 币种字段、`PUT /settings/billing.fx_rates` 校验 + 热重载 + 审计
+- [x] `cmd/aigw`：装配 FXStore / `ReloadFX`；bootstrap 里缺汇率只告警；`config.yaml` 与 `config.example.yaml` 同步
+- [x] 控制台：`js/money.js`（BigInt 整数换算 + `≈` + 币种码）、顶栏显示币种选择器（记住选择）、accounts/billing/codes/pricing 四页替换硬编码 USD、定价页售价币种下拉与缺汇率徽标
+- [x] `scripts/ui-harness`：新增 `currency` 视图（fixtures + 视图→模板映射），断言默认无 `≈`、切 CNY 后 `≈` + 正确数值 + 后缀、缺汇率红色徽标、无页面错误
+- [x] MCP：`get_models` 的 `currency` 取模型售价币种；金额工具补不带 `_usd` 的字段与 `currency`（放在最后，避让 M21(2) 的并发改动）
+- [x] 测试：`make verify` 全绿；变异验证（ceil 改截断 / 先乘倍数改回去 / `missing_rates` 恒空各自精确失败）
+- [x] 端到端实测：CNY 售价模型 → `usage_records.charge_micros == ceil(原生 × 汇率)`、快照含原生金额与汇率、`/v1/models` 报 CNY、控制台切币种显示 `≈`
+- [x] 回填设计文档「实现与设计差异」、提交（引用设计文档路径）
+
+### M22 实测与收尾
+- [x] `make verify` 全绿（vet + test + build）；`internal/arch` 分层测试未新增包、无需改表
+- [x] 控制台走查：`make ui-check`（headless firefox）新增 `currency` 视图 16 项断言（默认无 ≈、切 CNY 后 ≈ + 正确数值、缺汇率徽标、无页面错误）
+- [x] 真实实例端到端：CNY 售价模型 → `usage_records.charge_micros == ceil(原生 × 汇率)`、快照含 `sale_currency`/`fx_sale_ledger`/原生金额、账本条目同额、`/v1/models` 报 CNY、`/billing/currency` 列表与缺汇率

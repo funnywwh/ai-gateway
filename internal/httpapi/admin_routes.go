@@ -830,6 +830,11 @@ func (s *Server) providerAdminRoutes() []adminRoute {
 func (s *Server) billingAdminRoutes() []adminRoute {
 	return []adminRoute{
 		{
+			Method: "GET", Path: "/admin/api/v1/billing/currency", Handler: s.handleAdminGetBillingCurrency,
+			Name: "admin_billing_currency", Group: groupBilling, Role: roleViewer,
+			Summary: "账本币种、默认展示币种、可用汇率表与缺汇率的币种（控制台显示币种选择器用）",
+		},
+		{
 			Method: "GET", Path: "/admin/api/v1/billing/invariants", Handler: s.handleAdminInvariants,
 			Name: "admin_billing_invariants", Group: groupBilling, Role: roleViewer,
 			Summary: "巡检计费不变量（余额一致、账本可复算、用量与账本对齐等）",

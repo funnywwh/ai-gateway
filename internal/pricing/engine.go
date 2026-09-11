@@ -35,6 +35,14 @@ type Input struct {
 	// UsageDimensionsIncomplete marks usage that had to be bucketed by the caller
 	// (for example the upstream did not report cache hits).
 	UsageDimensionsIncomplete bool
+
+	// Ledger is the currency the ledger is kept in (billing.currency). Rule sets
+	// may declare a currency of their own; amounts are converted into Ledger when
+	// they are written down.
+	Ledger string
+	// FX is the live rate table. Its zero value disables conversion, which is the
+	// pre-M22 behaviour: every currency is read as the ledger currency.
+	FX FXTable
 }
 
 // Line is one dimension's contribution.
@@ -48,18 +56,35 @@ type Line struct {
 }
 
 // Result is the priced outcome plus everything needed to reproduce it.
+//
+// CostMicros and ChargeMicros are in the *native* currency of their own rule set
+// (CostCurrency / SaleCurrency); LedgerCostMicros and LedgerChargeMicros are the
+// same amounts converted into the ledger currency, and are what the ledger and
+// usage rows store.
 type Result struct {
-	CostMicros       int64  `json:"cost_micros"`
-	ChargeMicros     int64  `json:"charge_micros"`
-	CostRuleID       string `json:"cost_rule_id,omitempty"`
-	SaleRuleID       string `json:"sale_rule_id,omitempty"`
-	SaleBasis        string `json:"sale_basis,omitempty"`
-	MarkupBP         int    `json:"markup_bp,omitempty"`
-	MarkupSource     string `json:"markup_source,omitempty"`
-	RequestFeeMicros int64  `json:"request_fee_micros,omitempty"`
-	MinChargeApplied bool   `json:"min_charge_applied,omitempty"`
-	CostLines        []Line `json:"cost_lines"`
-	SaleLines        []Line `json:"sale_lines"`
+	CostMicros         int64  `json:"cost_micros"`
+	ChargeMicros       int64  `json:"charge_micros"`
+	LedgerCostMicros   int64  `json:"ledger_cost_micros"`
+	LedgerChargeMicros int64  `json:"ledger_charge_micros"`
+	CostCurrency       string `json:"cost_currency,omitempty"`
+	SaleCurrency       string `json:"sale_currency,omitempty"`
+	LedgerCurrency     string `json:"ledger_currency,omitempty"`
+	// FXCostLedger and FXSaleLedger are the rates used (micros of the ledger
+	// currency per whole unit of the cost/sale currency); FXCostSale is the cross
+	// rate used by a cross-currency cost_follow sale, and is zero otherwise.
+	FXCostLedger     int64    `json:"fx_cost_ledger,omitempty"`
+	FXSaleLedger     int64    `json:"fx_sale_ledger,omitempty"`
+	FXCostSale       int64    `json:"fx_cost_sale,omitempty"`
+	FXUnavailable    []string `json:"fx_unavailable,omitempty"`
+	CostRuleID       string   `json:"cost_rule_id,omitempty"`
+	SaleRuleID       string   `json:"sale_rule_id,omitempty"`
+	SaleBasis        string   `json:"sale_basis,omitempty"`
+	MarkupBP         int      `json:"markup_bp,omitempty"`
+	MarkupSource     string   `json:"markup_source,omitempty"`
+	RequestFeeMicros int64    `json:"request_fee_micros,omitempty"`
+	MinChargeApplied bool     `json:"min_charge_applied,omitempty"`
+	CostLines        []Line   `json:"cost_lines"`
+	SaleLines        []Line   `json:"sale_lines"`
 	// UnpricedDimensions lists metered dimensions the matched rule gave no rate
 	// for. They are charged at zero, but the caller should log them.
 	UnpricedDimensions []string `json:"unpriced_dimensions,omitempty"`
@@ -68,9 +93,22 @@ type Result struct {
 }
 
 // Evaluate prices one usage dimension set. It is pure: same input, same output.
+//
+// Currency handling: every rule set declares the currency its rates are written
+// in (empty = the ledger currency). The native amounts are computed first, then
+// converted into the ledger currency with the caller's rate table. A conversion
+// the table cannot make never fails the request: the affected amount is recorded
+// as zero and the currency is listed in FXUnavailable, so a misconfiguration is
+// visible instead of silently mispriced.
 func Evaluate(in Input) *Result {
 	dimensions := normalizeDimensions(in.Dimensions)
 	result := &Result{CostLines: []Line{}, SaleLines: []Line{}}
+
+	costCurrency := currencyOrDefault(in.Cost, in.Ledger)
+	saleCurrency := currencyOrDefault(in.Sale, in.Ledger)
+	result.CostCurrency = costCurrency
+	result.SaleCurrency = saleCurrency
+	result.LedgerCurrency = in.Ledger
 
 	costRule := matchRule(in.Cost, in.At, dimensions, in.Variant)
 	if costRule != nil {
@@ -92,6 +130,25 @@ func Evaluate(in Input) *Result {
 		basis = BasisCostFollow
 	}
 
+	// A cost_follow sale multiplies our cost by the mark-up, so when the two sides
+	// are quoted in different currencies the cost rate must be converted into the
+	// sale currency first — otherwise a CNY cost would be charged as if it were
+	// USD. Same-currency pricing keeps RateScale and stays bit-for-bit identical
+	// to the single-currency implementation.
+	salePricingUnavailable := false
+	costToSaleRate := RateScale
+	if basis != BasisAbsolute && costCurrency != saleCurrency {
+		rate, ok := in.FX.RateBetween(costCurrency, saleCurrency)
+		if !ok {
+			// Name exactly the currencies the table cannot resolve.
+			result.markMissingRates(in.FX, costCurrency, saleCurrency)
+			salePricingUnavailable = true
+		} else {
+			costToSaleRate = rate
+			result.FXCostSale = rate
+		}
+	}
+
 	switch basis {
 	case BasisAbsolute:
 		rule := matchRule(sale, in.At, dimensions, in.Variant)
@@ -107,6 +164,9 @@ func Evaluate(in Input) *Result {
 			result.RequestFeeMicros += rule.PerRequestFeeMicros
 		}
 	default:
+		if salePricingUnavailable {
+			break
+		}
 		markupBP := 10000
 		if in.MarkupSet {
 			markupBP = in.MarkupBP
@@ -119,35 +179,101 @@ func Evaluate(in Input) *Result {
 			result.SaleRuleID = sale.Basis
 		}
 		for _, line := range result.CostLines {
+			saleRate := scaleCeil(line.Rate, costToSaleRate, RateScale)
+			base := mulDivCeil(line.Units, saleRate, RateScale)
 			effective := markupBP
 			if sale != nil {
 				if override, ok := sale.DimensionMarkupBP[line.Dimension]; ok {
 					effective = override
 				}
 			}
-			amount := applyMarkup(line.AmountMicros, effective)
+			amount := applyMarkup(base, effective)
 			result.SaleLines = append(result.SaleLines, Line{
-				Dimension: line.Dimension, Units: line.Units, Rate: line.Rate,
+				Dimension: line.Dimension, Units: line.Units, Rate: saleRate,
 				AmountMicros: amount, MarkupBP: effective,
 			})
 			result.ChargeMicros += amount
 		}
-		// A per-request fee follows the same mark-up in cost_follow mode.
+		// A per-request fee follows the same currency and the same mark-up.
 		if result.RequestFeeMicros > 0 {
-			fee := applyMarkup(result.RequestFeeMicros, markupBP)
-			result.ChargeMicros += fee - result.RequestFeeMicros
+			saleBase := scaleCeil(result.RequestFeeMicros, costToSaleRate, RateScale)
+			fee := applyMarkup(saleBase, markupBP)
+			result.ChargeMicros += fee - saleBase
 			result.RequestFeeMicros = fee
 		}
 	}
 	result.SaleBasis = basis
 
-	if in.MinChargeMicros > 0 && result.ChargeMicros < in.MinChargeMicros {
+	if !salePricingUnavailable && in.MinChargeMicros > 0 && result.ChargeMicros < in.MinChargeMicros {
 		result.ChargeMicros = in.MinChargeMicros
 		result.MinChargeApplied = true
 	}
 
+	result.convertToLedger(in)
 	result.Snapshot = buildSnapshot(in, dimensions, result, costRule, sale)
 	return result
+}
+
+// currencyOrDefault resolves the currency a rule set is quoted in; an undeclared
+// currency means "the ledger currency".
+func currencyOrDefault(set *RuleSet, ledger string) string {
+	if set != nil && set.Currency != "" {
+		return set.Currency
+	}
+	return ledger
+}
+
+// convertToLedger fills in the ledger-currency amounts and the rates used. A rate
+// the table does not know leaves the ledger amount at zero and records the gap.
+func (r *Result) convertToLedger(in Input) {
+	if in.Ledger != "" {
+		if rate, ok := in.FX.RateBetween(r.CostCurrency, in.Ledger); ok {
+			r.FXCostLedger = rate
+		} else {
+			r.markUnavailable(r.CostCurrency)
+		}
+		if rate, ok := in.FX.RateBetween(r.SaleCurrency, in.Ledger); ok {
+			r.FXSaleLedger = rate
+		} else {
+			r.markUnavailable(r.SaleCurrency)
+		}
+	}
+	if cost, ok := in.FX.ToLedger(r.CostMicros, r.CostCurrency); ok {
+		r.LedgerCostMicros = cost
+	} else {
+		r.markUnavailable(r.CostCurrency)
+	}
+	if charge, ok := in.FX.ToLedger(r.ChargeMicros, r.SaleCurrency); ok {
+		r.LedgerChargeMicros = charge
+	} else {
+		r.markUnavailable(r.SaleCurrency)
+	}
+}
+
+// markMissingRates records the currencies of a failed conversion, naming only the
+// ones the table genuinely cannot resolve.
+func (r *Result) markMissingRates(fx FXTable, codes ...string) {
+	for _, code := range codes {
+		if code == "" {
+			continue
+		}
+		if _, ok := fx.RateOf(code); !ok {
+			r.markUnavailable(code)
+		}
+	}
+}
+
+// markUnavailable records a currency the FX table cannot convert, once.
+func (r *Result) markUnavailable(code string) {
+	if code == "" {
+		return
+	}
+	for _, existing := range r.FXUnavailable {
+		if existing == code {
+			return
+		}
+	}
+	r.FXUnavailable = append(r.FXUnavailable, code)
 }
 
 // matchRule returns the first rule (ascending order) whose conditions all hold.

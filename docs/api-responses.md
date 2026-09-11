@@ -73,7 +73,9 @@
   再按 routes 选择供应商；也支持 `model@provider_name` 与 `X-Gateway-Provider` 显式钉死。
 - 网关扩展头（响应）：`x-gateway-provider`（实际使用的供应商实例）、`x-gateway-model`（解析后的 canonical 模型）、
   `x-gateway-degraded`（被剥离的字段）。
-- `GET /v1/models` 的每项可带 `x-gateway-pricing`：**仅对客售价**（按当前命中规则预估）与币种。
+- `GET /v1/models` 的每项可带 `x-gateway-pricing`：**仅对客售价**（按当前命中规则预估）与币种；
+  币种是该模型的**售价币种**（模型售价文档里的 `currency`，缺省为账本币种 `billing.currency`，默认 USD）。
+  多币种下不同模型的 `currency` 可以不同，客户端按各自币种解读单价。
 
 ## 流式事件序列
 

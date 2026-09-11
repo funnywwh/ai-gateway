@@ -65,6 +65,10 @@ func (s *Server) handleAdminSimulatePricing(w http.ResponseWriter, r *http.Reque
 		Cost:            costSet,
 		Sale:            saleSet,
 		MinChargeMicros: body.MinChargeMicros,
+		// The simulator prices exactly like the data plane, currencies included, so
+		// the number on screen is the number that would be charged.
+		Ledger: s.ledgerCurrency(),
+		FX:     s.fxTable(),
 	}
 	if body.MarkupBP != nil {
 		input.MarkupBP = *body.MarkupBP
@@ -84,19 +88,30 @@ func (s *Server) handleAdminSimulatePricing(w http.ResponseWriter, r *http.Reque
 	result := pricing.Evaluate(input)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"model": model, "at": at.Format(time.RFC3339), "variant": input.Variant,
-		"sources":             sources,
-		"dimensions":          input.Dimensions,
-		"cost_micros":         result.CostMicros,
-		"charge_micros":       result.ChargeMicros,
-		"cost_rule_id":        result.CostRuleID,
-		"sale_rule_id":        result.SaleRuleID,
-		"sale_basis":          result.SaleBasis,
-		"markup_bp":           result.MarkupBP,
-		"cost_lines":          result.CostLines,
-		"sale_lines":          result.SaleLines,
-		"unpriced_dimensions": result.UnpricedDimensions,
-		"min_charge_applied":  result.MinChargeApplied,
-		"snapshot":            result.Snapshot,
+		"sources":    sources,
+		"dimensions": input.Dimensions,
+		// cost_micros / charge_micros are in the currency their own rule set
+		// declares; the ledger_* pair is what the account would actually be charged.
+		"cost_micros":          result.CostMicros,
+		"charge_micros":        result.ChargeMicros,
+		"cost_currency":        result.CostCurrency,
+		"sale_currency":        result.SaleCurrency,
+		"ledger_currency":      result.LedgerCurrency,
+		"ledger_cost_micros":   result.LedgerCostMicros,
+		"ledger_charge_micros": result.LedgerChargeMicros,
+		"fx_cost_ledger":       result.FXCostLedger,
+		"fx_sale_ledger":       result.FXSaleLedger,
+		"fx_cost_sale":         result.FXCostSale,
+		"fx_unavailable":       result.FXUnavailable,
+		"cost_rule_id":         result.CostRuleID,
+		"sale_rule_id":         result.SaleRuleID,
+		"sale_basis":           result.SaleBasis,
+		"markup_bp":            result.MarkupBP,
+		"cost_lines":           result.CostLines,
+		"sale_lines":           result.SaleLines,
+		"unpriced_dimensions":  result.UnpricedDimensions,
+		"min_charge_applied":   result.MinChargeApplied,
+		"snapshot":             result.Snapshot,
 	})
 }
 

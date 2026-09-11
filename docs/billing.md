@@ -1,7 +1,9 @@
 # 计量与计费
 
-> 状态：**已实现**（L1–L6：计量/计价/账本与在途额度/账期账单/充值兑换码/对账补偿/赠送到期冲销）。
-> 设计见 `docs/design/m11a-pricing.md`、`m11b-ledger-inflight.md`、`m12-invoices-credits-reconcile.md`、`m12b-credit-expiry.md`。金额一律 int64 **微美分**（1e-6 USD）；时间 UTC。
+> 状态：**已实现**（L1–L6：计量/计价/账本与在途额度/账期账单/充值兑换码/对账补偿/赠送到期冲销）；
+> **多币种已实现（M22）**。
+> 设计见 `docs/design/m11a-pricing.md`、`m11b-ledger-inflight.md`、`m12-invoices-credits-reconcile.md`、`m12b-credit-expiry.md`、`m22-currency.md`。
+> 金额一律 int64 **微单位**（1e-6 个**账本币种**，`billing.currency`，默认 USD）；时间 UTC。
 
 ## 1. 计量（L1）
 
@@ -16,6 +18,20 @@
 成本价（我方付上游）与售价（对客）**分离**，规则模型见 `docs/pricing.md`。
 每次请求同时产生 `cost_micros` 与 `charge_micros`，并写入**内联了命中规则完整副本**的 `pricing_snapshot_json`
 （即使规则随后被改/删，历史仍可逐笔复算）。毛利 = Σcharge − Σcost，可按 day/account/key/model/tier/window 查看。
+
+### 币种（M22）
+
+| 概念 | 取值 | 影响面 |
+|---|---|---|
+| **账本币种** | `billing.currency`（默认 `USD`，全局一个） | 余额、授信上限、在途预留、`ledger_entries`、`usage_records.*_micros`、发票 `currency`、对账 |
+| **成本币种** | 每个供应商映射的成本规则文档里的 `currency`（缺省 = 账本币种） | 只决定成本金额怎么读、怎么换算 |
+| **售价币种** | 每个模型售价文档里的 `currency`（缺省 = 账本币种） | 对客报价（含 `GET /v1/models` 的 `currency`）与收费 |
+| **显示币种** | 控制台顶栏选择（默认 `billing.display_currency`） | **仅界面显示**：账本类金额按它换算并标 `≈`；不改账本、不改发票 |
+
+- 账本**永远单一币种**：任何跨界金额在结算时按 `billing.fx_rates`（1 单位外币 = N 微账本币种，整数）换算入账；外币 → 账本 `ceil`，账本 → 显示币种四舍五入（仅展示）。
+- 每次结算的快照记录原生金额、入账金额与当次汇率，因此**改汇率不影响历史**，历史账单始终可复算。
+- 汇率缺失只可能来自手改库（写入接口会 400 拦截）：该次 cost/charge 记 0 + 快照 `fx_unavailable` + Error 日志 + `billing.fx_missing` hook + invariants 计数，**不打断客户请求**；预留回退 `billing.reserve_micros_default`。
+- 明细与口径见 `docs/pricing.md` §9。
 
 ## 3. 账本与余额（L3）
 

@@ -40,12 +40,16 @@
 | 4 | `get_balance` | — | 余额、信用额度、计费模式、状态、低水位 |
 | 5 | `get_ledger` | `period, limit` | 账本流水（充值/消费/调整/退款/过期） |
 | 6 | `list_invoices` / `get_invoice` | `limit` / `id` | 账单与明细 |
-| 7 | `get_models` | — | 该账户可用模型与**对客售价** |
+| 7 | `get_models` | — | 该账户可用模型与**对客售价**（`currency` 为该模型的售价币种，缺省账本币种） |
 | 8 | `list_requests` | `period, limit` | 请求列表（含录制标记） |
 | 9 | `get_request` | `request_id` | 该请求**输入文本**（脱敏后）；思考与最终输出按开关返回 |
 | 10 | `get_usage_breakdown` / `get_rate_limits` | — | 分组统计 / 当前限额与已用 |
 
-返回为结构化 JSON；金额同时给出 USD 可读值与 micros 原始值，并附口径说明（时间范围、聚合方式、币种）。
+返回为结构化 JSON；金额同时给出可读值与 micros 原始值，并附口径说明（时间范围、聚合方式、币种）。
+
+**金额币种（M22）**：所有账户金额都是**账本币种**（`billing.currency`）的微单位，字段名不带币种后缀（`balance`/`charge`/`cost`/`margin`/`amount`/`in_flight`/`available` …），
+并在同一层给出 `currency`。历史字段名 `*_usd` 只在账本币种真的是 `USD` 时保留（兼容旧客户端）；
+账本币种是 `CNY` 之类时不再输出 `*_usd`，避免把人民币金额读成美元。`get_models` 的 `currency` 是该**模型的售价币种**（缺省为账本币种）。
 
 ## 4. 后台工具：渐进披露的三个入口（scope ≠ query 时出现）
 

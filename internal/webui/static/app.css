@@ -29,6 +29,11 @@ a { color: var(--accent); }
 .topbar h1 { font-size:16px; margin:0; font-weight:600; }
 .page { padding:20px; min-width:0; }
 .actions { display:flex; gap:8px; flex-wrap:wrap; }
+/* Display-currency selector (M22): it sits between the page title and the page
+   actions because it changes how every amount below is rendered. */
+.currency-picker { display:flex; gap:8px; align-items:center; margin-left:auto; font-size:12.5px; }
+.currency-picker select { padding:5px 8px; }
+.currency-picker .badge { white-space:nowrap; }
 .btn { background:var(--panel-2); color:var(--fg); border:1px solid var(--line);
   border-radius:8px; padding:7px 12px; cursor:pointer; font-size:13px; }
 .btn:hover { border-color: var(--accent); }

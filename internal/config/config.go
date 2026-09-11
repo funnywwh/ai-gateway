@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,11 @@ import (
 
 	"github.com/winger/ai-gateway/internal/logx"
 )
+
+// currencyRE mirrors pricing.CurrencyRE. The configuration checks the shape of
+// every currency code itself so a typo fails at start-up; the pricing package
+// re-checks and normalizes when a rule set is parsed.
+var currencyRE = regexp.MustCompile(`^[A-Z]{3}$`)
 
 // Config is the complete gateway configuration.
 type Config struct {
@@ -100,46 +106,56 @@ type Routing struct {
 
 // Billing holds pricing, reservation, in-flight and invoicing policy.
 type Billing struct {
-	Currency              string  `yaml:"currency"`
-	DefaultMarkupBP       int     `yaml:"default_markup_bp"`
-	BasisDefault          string  `yaml:"basis_default"` // cost_follow|absolute
-	PeakBoundary          string  `yaml:"peak_boundary"` // request_start|completion
-	ReasoningCountsAsOut  bool    `yaml:"reasoning_counts_as_output"`
-	PerRequestFeeScope    string  `yaml:"per_request_fee_scope"` // attempt|request
-	MinChargeMicros       int64   `yaml:"min_charge_micros"`
-	ChargeOnError         bool    `yaml:"charge_on_error"`
-	ChargeEstimated       bool    `yaml:"charge_estimated"`
-	ChargePartial         bool    `yaml:"charge_partial"`
-	RecordPartialCost     bool    `yaml:"record_partial_cost"`
-	PrepaidEnforce        bool    `yaml:"prepaid_enforce"`
-	RejectAs429           bool    `yaml:"reject_as_429"`
-	MonthlyUsageConds     bool    `yaml:"monthly_usage_conditions"`
-	ReservationMode       string  `yaml:"reservation_mode"` // max_tokens|fixed|hybrid
-	ReserveMicrosDefault  int64   `yaml:"reserve_micros_default"`
-	DefaultMaxOutputToken int     `yaml:"default_max_output_tokens"`
-	ReservationTTLS       int     `yaml:"reservation_ttl_s"`
-	ReservationHeartbeatS int     `yaml:"reservation_heartbeat_s"`
-	InflightCheckMS       int     `yaml:"inflight_check_interval_ms"`
-	InflightPolicy        string  `yaml:"inflight_policy"` // warn|throttle|abort|allow_overdraft
-	InflightSoftRatio     float64 `yaml:"inflight_soft_ratio"`
-	InflightHardRatio     float64 `yaml:"inflight_hard_ratio"`
-	OverdraftLimitMicros  int64   `yaml:"overdraft_limit_micros"`
-	OvershootPolicy       string  `yaml:"overshoot_policy"`  // absorb|overdraft
-	InflightEstimate      string  `yaml:"inflight_estimate"` // chars4|off
-	CancelGraceMS         int     `yaml:"cancel_grace_ms"`
-	UnavailableChargePol  string  `yaml:"unavailable_charge_policy"`
-	LowBalanceRatio       float64 `yaml:"low_balance_ratio"`
-	AutoSuspendDefault    bool    `yaml:"auto_suspend_default"`
-	AutoResumeDefault     bool    `yaml:"auto_resume_default"`
-	InvoicePeriod         string  `yaml:"invoice_period"`
-	PeriodStartDay        int     `yaml:"period_start_day"`
-	Timezone              string  `yaml:"timezone"`
-	FallbackFile          string  `yaml:"fallback_file"`
-	ReconcileCron         string  `yaml:"reconcile_cron"`
-	DisplayCurrencyRate   float64 `yaml:"display_currency_rate"`
-	WriterBatchSize       int     `yaml:"writer_batch_size"`
-	WriterFlushMS         int     `yaml:"writer_flush_interval_ms"`
-	WriterQueueSize       int     `yaml:"writer_queue_size"`
+	// Currency is the ledger currency: balances, credit limits, reservations,
+	// ledger entries, usage amounts and invoices are all kept in it. A model may
+	// be priced in another currency (docs/pricing.md §9); those amounts are
+	// converted into this one before they are written down.
+	Currency string `yaml:"currency"`
+	// DisplayCurrency is the currency the console shows amounts in by default. It
+	// must be the ledger currency or have an entry in FXRates.
+	DisplayCurrency string `yaml:"display_currency"`
+	// FXRates maps a currency to how many micros of the ledger currency one whole
+	// unit of it is worth: {CNY: 141000} means 1 CNY = 0.141000 USD. Integer micros
+	// only; the ledger currency itself must not appear here (it is always 1:1).
+	FXRates               map[string]int64 `yaml:"fx_rates"`
+	DefaultMarkupBP       int              `yaml:"default_markup_bp"`
+	BasisDefault          string           `yaml:"basis_default"` // cost_follow|absolute
+	PeakBoundary          string           `yaml:"peak_boundary"` // request_start|completion
+	ReasoningCountsAsOut  bool             `yaml:"reasoning_counts_as_output"`
+	PerRequestFeeScope    string           `yaml:"per_request_fee_scope"` // attempt|request
+	MinChargeMicros       int64            `yaml:"min_charge_micros"`
+	ChargeOnError         bool             `yaml:"charge_on_error"`
+	ChargeEstimated       bool             `yaml:"charge_estimated"`
+	ChargePartial         bool             `yaml:"charge_partial"`
+	RecordPartialCost     bool             `yaml:"record_partial_cost"`
+	PrepaidEnforce        bool             `yaml:"prepaid_enforce"`
+	RejectAs429           bool             `yaml:"reject_as_429"`
+	MonthlyUsageConds     bool             `yaml:"monthly_usage_conditions"`
+	ReservationMode       string           `yaml:"reservation_mode"` // max_tokens|fixed|hybrid
+	ReserveMicrosDefault  int64            `yaml:"reserve_micros_default"`
+	DefaultMaxOutputToken int              `yaml:"default_max_output_tokens"`
+	ReservationTTLS       int              `yaml:"reservation_ttl_s"`
+	ReservationHeartbeatS int              `yaml:"reservation_heartbeat_s"`
+	InflightCheckMS       int              `yaml:"inflight_check_interval_ms"`
+	InflightPolicy        string           `yaml:"inflight_policy"` // warn|throttle|abort|allow_overdraft
+	InflightSoftRatio     float64          `yaml:"inflight_soft_ratio"`
+	InflightHardRatio     float64          `yaml:"inflight_hard_ratio"`
+	OverdraftLimitMicros  int64            `yaml:"overdraft_limit_micros"`
+	OvershootPolicy       string           `yaml:"overshoot_policy"`  // absorb|overdraft
+	InflightEstimate      string           `yaml:"inflight_estimate"` // chars4|off
+	CancelGraceMS         int              `yaml:"cancel_grace_ms"`
+	UnavailableChargePol  string           `yaml:"unavailable_charge_policy"`
+	LowBalanceRatio       float64          `yaml:"low_balance_ratio"`
+	AutoSuspendDefault    bool             `yaml:"auto_suspend_default"`
+	AutoResumeDefault     bool             `yaml:"auto_resume_default"`
+	InvoicePeriod         string           `yaml:"invoice_period"`
+	PeriodStartDay        int              `yaml:"period_start_day"`
+	Timezone              string           `yaml:"timezone"`
+	FallbackFile          string           `yaml:"fallback_file"`
+	ReconcileCron         string           `yaml:"reconcile_cron"`
+	WriterBatchSize       int              `yaml:"writer_batch_size"`
+	WriterFlushMS         int              `yaml:"writer_flush_interval_ms"`
+	WriterQueueSize       int              `yaml:"writer_queue_size"`
 }
 
 // Recording controls content capture (input text vs thinking/final output text).
@@ -327,6 +343,8 @@ func Default() Config {
 		},
 		Billing: Billing{
 			Currency:              "USD",
+			DisplayCurrency:       "USD",
+			FXRates:               map[string]int64{},
 			DefaultMarkupBP:       10000,
 			BasisDefault:          "cost_follow",
 			PeakBoundary:          "request_start",
@@ -362,7 +380,6 @@ func Default() Config {
 			Timezone:              "UTC",
 			FallbackFile:          "./data/billing-fallback.jsonl",
 			ReconcileCron:         "0 3 * * *",
-			DisplayCurrencyRate:   1.0,
 			WriterBatchSize:       256,
 			WriterFlushMS:         20,
 			WriterQueueSize:       65536,
@@ -538,6 +555,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("billing.inflight_hard_ratio (%v) must be >= inflight_soft_ratio (%v)",
 			b.InflightHardRatio, b.InflightSoftRatio)
 	}
+	if err := validateCurrencies(c); err != nil {
+		return err
+	}
 	if b.WriterBatchSize <= 0 || b.WriterQueueSize <= 0 {
 		return fmt.Errorf("billing.writer_batch_size and writer_queue_size must be positive")
 	}
@@ -555,5 +575,48 @@ func (c *Config) Validate() error {
 	if c.RateLimit.Shards < 1 {
 		return fmt.Errorf("ratelimit.shards must be >= 1")
 	}
+	return nil
+}
+
+// validateCurrencies normalizes and checks the ledger currency, the console's
+// default display currency and the FX table. It fails at start-up rather than at
+// the first request, because a currency typo would otherwise surface as a wrong
+// charge (or as a request the gateway claims it cannot price).
+func validateCurrencies(c *Config) error {
+	ledger := strings.ToUpper(strings.TrimSpace(c.Billing.Currency))
+	if !currencyRE.MatchString(ledger) {
+		return fmt.Errorf("billing.currency %q must be three uppercase letters, such as USD", c.Billing.Currency)
+	}
+	c.Billing.Currency = ledger
+
+	rates := make(map[string]int64, len(c.Billing.FXRates))
+	for code, rate := range c.Billing.FXRates {
+		key := strings.ToUpper(strings.TrimSpace(code))
+		if !currencyRE.MatchString(key) {
+			return fmt.Errorf("billing.fx_rates key %q must be three uppercase letters, such as CNY", code)
+		}
+		if key == ledger {
+			return fmt.Errorf("billing.fx_rates must not contain the ledger currency %s (it is always 1:1)", ledger)
+		}
+		if rate <= 0 {
+			return fmt.Errorf("billing.fx_rates[%s] must be a positive number of micros of %s", key, ledger)
+		}
+		rates[key] = rate
+	}
+	c.Billing.FXRates = rates
+
+	display := strings.ToUpper(strings.TrimSpace(c.Billing.DisplayCurrency))
+	if display == "" {
+		display = ledger
+	}
+	if !currencyRE.MatchString(display) {
+		return fmt.Errorf("billing.display_currency %q must be three uppercase letters, such as CNY", c.Billing.DisplayCurrency)
+	}
+	if display != ledger {
+		if _, ok := rates[display]; !ok {
+			return fmt.Errorf("billing.display_currency %s has no billing.fx_rates entry", display)
+		}
+	}
+	c.Billing.DisplayCurrency = display
 	return nil
 }

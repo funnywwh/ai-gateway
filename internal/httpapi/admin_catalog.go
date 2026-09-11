@@ -14,6 +14,7 @@ import (
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/ids"
 	"github.com/winger/ai-gateway/internal/mcpsrv"
+	"github.com/winger/ai-gateway/internal/pricing"
 	"github.com/winger/ai-gateway/internal/secret"
 )
 
@@ -313,7 +314,18 @@ func (s *Server) handleAdminUpsertModel(w http.ResponseWriter, r *http.Request) 
 			writeAPIError(w, toAPIError(err))
 			return
 		}
-		m.SalePricingJSON = raw
+		// A sale price in a currency the gateway cannot convert would silently stop
+		// charging, so the document is parsed and its currency checked here.
+		set, err := pricing.ParseRuleSet(raw)
+		if err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		if err := s.validateRuleSetCurrency(set); err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		m.SalePricingJSON = normalizeCurrencyInDocument(raw, set)
 	}
 	if body.Policy != nil {
 		raw, err := jsonObjectString(body.Policy, "policy")
@@ -1281,9 +1293,27 @@ func (s *Server) handleAdminPutSetting(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal([]byte(trimmed), &wrapper); err == nil && len(wrapper.Value) > 0 {
 		stored = string(wrapper.Value)
 	}
+	// The FX table is the one setting with a shape the gateway depends on: a bad
+	// rate would turn into a wrong charge, so it is validated before it is stored
+	// and the live table is rebuilt right after.
+	if key == pricing.SettingFXRates {
+		rates, err := pricing.ParseFXRates(stored)
+		if err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		merged := pricing.MergeFXRates(s.configuredFXRates(), rates)
+		if _, err := pricing.NewFXTable(s.ledgerCurrency(), merged); err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+	}
 	if err := store.SetSetting(r.Context(), key, stored); err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
+	}
+	if key == pricing.SettingFXRates {
+		s.reloadFX(r.Context(), actor.Username)
 	}
 	s.audit(r.Context(), actor.Username, "update", "setting", key, map[string]any{"bytes": len(stored)}, "ok")
 	writeJSON(w, http.StatusOK, map[string]any{"key": key, "value": json.RawMessage(stored)})

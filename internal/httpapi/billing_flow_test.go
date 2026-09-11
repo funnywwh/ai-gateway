@@ -41,6 +41,14 @@ type billingFixture struct {
 // prepaid tenant with a starting balance and a priced model.
 func newBillingFixture(t *testing.T, balanceMicros int64) *billingFixture {
 	t.Helper()
+	return newBillingFixtureWith(t, balanceMicros, nil)
+}
+
+// newBillingFixtureWith is the same fixture with a hook that can adjust the
+// configuration, the provider's cost rules and the model's sale rules before the
+// registry snapshot is built (used by the multi-currency tests).
+func newBillingFixtureWith(t *testing.T, balanceMicros int64, tune func(*config.Config, *domain.ProviderModel, *domain.Model)) *billingFixture {
+	t.Helper()
 	ctx := context.Background()
 
 	cfg := config.Default()
@@ -85,17 +93,22 @@ func newBillingFixture(t *testing.T, balanceMicros int64) *billingFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.UpsertProviderModel(ctx, &domain.ProviderModel{
+	providerModel := &domain.ProviderModel{
 		ProviderID: providerID, PublicModel: "priced-echo", UpstreamModel: "priced-echo", Enabled: true,
 		MaxOutputTokens: 1024, CapabilitiesJSON: capabilitiesJSON,
 		PricingRulesJSON: `{"rules":[{"id":"cost","order":10,"when":{},"rates":{"input":100000,"output":2000000}}]}`,
-	}); err != nil {
-		t.Fatal(err)
 	}
-	modelID, err := db.UpsertModel(ctx, &domain.Model{
+	model := &domain.Model{
 		PublicName: "priced-echo", Enabled: true,
 		SalePricingJSON: `{"basis":"cost_follow","markup_bp":20000}`,
-	})
+	}
+	if tune != nil {
+		tune(&cfg, providerModel, model)
+	}
+	if _, err := db.UpsertProviderModel(ctx, providerModel); err != nil {
+		t.Fatal(err)
+	}
+	modelID, err := db.UpsertModel(ctx, model)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,6 +137,7 @@ func newBillingFixture(t *testing.T, balanceMicros int64) *billingFixture {
 
 	srv := New(Deps{
 		Config:     &cfg,
+		FX:         pricing.NewFXStore(cfg.Billing.Currency, cfg.Billing.FXRates),
 		Registry:   reg,
 		Router:     router,
 		Dispatcher: dispatcher,

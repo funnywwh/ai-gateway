@@ -847,5 +847,65 @@
   "mode": "info",
   "ok": true,
   "plugin": false
+ },
+ "/billing/currency": {
+  "ledger_currency": "USD",
+  "display_currency": "USD",
+  "fx_source": "config",
+  "currencies": [
+   {
+    "code": "USD",
+    "rate_micros": 1000000,
+    "rate_source": "ledger"
+   },
+   {
+    "code": "CNY",
+    "rate_micros": 141000,
+    "rate_source": "config"
+   }
+  ],
+  "missing_rates": [
+   "EUR"
+  ]
+ },
+ "/accounts": {
+  "data": [
+   {
+    "id": 1,
+    "name": "acme",
+    "billing_mode": "postpaid",
+    "status": "active",
+    "balance_micros": 500000,
+    "credit_limit_micros": 10000000,
+    "low_balance_threshold_micros": 100000
+   }
+  ]
+ },
+ "/accounts/1/balance": {
+  "account_id": 1,
+  "balance_micros": 500000,
+  "in_flight_micros": 0
+ },
+ "/accounts/1/ledger": {
+  "data": [
+   {
+    "kind": "charge",
+    "amount_micros": -141000,
+    "balance_after_micros": 500000,
+    "note": "cny-model",
+    "idem_key": "charge:req-1:1",
+    "created_at": "2026-03-02T09:00:00Z"
+   }
+  ]
+ },
+ "/accounts/1/credits": {
+  "data": []
+ },
+ "/billing/status": {
+  "queued": 0,
+  "batches": 0,
+  "settled": 0,
+  "fallbacks": 0,
+  "dropped": 0
  }
 }

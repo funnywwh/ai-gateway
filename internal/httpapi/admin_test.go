@@ -18,6 +18,7 @@ import (
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/mcpsrv"
+	"github.com/winger/ai-gateway/internal/pricing"
 	"github.com/winger/ai-gateway/internal/quota"
 	"github.com/winger/ai-gateway/internal/registry"
 	"github.com/winger/ai-gateway/internal/routing"
@@ -103,6 +104,8 @@ type adminFixture struct {
 	sealer      *fakeSealer
 	prober      *fakeProber
 	hookReloads int
+	fxReloads   int
+	fx          *pricing.FXStore
 }
 
 func newAdminFixture(t *testing.T) *adminFixture {
@@ -147,9 +150,37 @@ func newAdminFixture(t *testing.T) *adminFixture {
 	mcpService := mcpsrv.New(db, reg, mcpsrv.Config{MaxRows: 100, WindowDays: 30, Currency: "USD"})
 	fixture := &adminFixture{db: db, reg: reg, cfg: &cfg, sealer: sealer, prober: prober}
 
+	// The currency table mirrors the wiring in cmd/aigw: configuration first, then
+	// the console override, and a reload after every settings write.
+	fxStore := pricing.NewFXStore(cfg.Billing.Currency, cfg.Billing.FXRates)
+	fixture.fx = fxStore
+	reloadFX := func(ctx context.Context) error {
+		fixture.fxReloads++
+		rates := cfg.Billing.FXRates
+		raw, found, err := db.GetSetting(ctx, pricing.SettingFXRates)
+		if err != nil {
+			return err
+		}
+		if found {
+			override, err := pricing.ParseFXRates(raw)
+			if err != nil {
+				return err
+			}
+			rates = pricing.MergeFXRates(rates, override)
+		}
+		table, err := pricing.NewFXTable(cfg.Billing.Currency, rates)
+		if err != nil {
+			return err
+		}
+		fxStore.Replace(table.Ledger, table.Rates)
+		return nil
+	}
+
 	auth := admin.NewAuth(db, admin.Config{SessionTTL: time.Hour, LoginAttempts: 20, LoginWindow: time.Minute})
 	srv := New(Deps{
 		Config:        &cfg,
+		FX:            fxStore,
+		ReloadFX:      reloadFX,
 		Registry:      reg,
 		Router:        router,
 		Dispatcher:    dispatcher,

@@ -4,6 +4,10 @@ import "time"
 
 // Snapshot is the self-contained record stored with usage so a historical charge
 // can be replayed even after the rules changed or were deleted.
+//
+// Since M22 it also carries the currencies, the native amounts and the rates used,
+// so a historical charge replays identically even after the operator edits the FX
+// table.
 type Snapshot struct {
 	EvaluatedAt               time.Time        `json:"evaluated_at"`
 	Variant                   string           `json:"variant,omitempty"`
@@ -22,6 +26,20 @@ type Snapshot struct {
 	UsageDimensionsIncomplete bool             `json:"usage_dimensions_incomplete,omitempty"`
 	PerRequestFeeScope        string           `json:"per_request_fee_scope,omitempty"`
 	MinChargeMicros           int64            `json:"min_charge_micros,omitempty"`
+	CostCurrency              string           `json:"cost_currency,omitempty"`
+	SaleCurrency              string           `json:"sale_currency,omitempty"`
+	LedgerCurrency            string           `json:"ledger_currency,omitempty"`
+	CostMicrosNative          int64            `json:"cost_micros_native,omitempty"`
+	ChargeMicrosNative        int64            `json:"charge_micros_native,omitempty"`
+	LedgerCostMicros          int64            `json:"ledger_cost_micros,omitempty"`
+	LedgerChargeMicros        int64            `json:"ledger_charge_micros,omitempty"`
+	// FXCostLedger / FXSaleLedger: micros of the ledger currency per whole unit of
+	// the cost / sale currency. FXCostSale is the cross rate a cross-currency
+	// cost_follow sale used, and is zero when the two sides share a currency.
+	FXCostLedger  int64    `json:"fx_cost_ledger,omitempty"`
+	FXSaleLedger  int64    `json:"fx_sale_ledger,omitempty"`
+	FXCostSale    int64    `json:"fx_cost_sale,omitempty"`
+	FXUnavailable []string `json:"fx_unavailable,omitempty"`
 }
 
 func buildSnapshot(in Input, dimensions map[string]int64, result *Result, costRule *Rule, sale *RuleSet) Snapshot {
@@ -39,6 +57,17 @@ func buildSnapshot(in Input, dimensions map[string]int64, result *Result, costRu
 		UsageDimensionsIncomplete: in.UsageDimensionsIncomplete,
 		PerRequestFeeScope:        in.PerRequestFeeScope,
 		MinChargeMicros:           in.MinChargeMicros,
+		CostCurrency:              result.CostCurrency,
+		SaleCurrency:              result.SaleCurrency,
+		LedgerCurrency:            result.LedgerCurrency,
+		CostMicrosNative:          result.CostMicros,
+		ChargeMicrosNative:        result.ChargeMicros,
+		LedgerCostMicros:          result.LedgerCostMicros,
+		LedgerChargeMicros:        result.LedgerChargeMicros,
+		FXCostLedger:              result.FXCostLedger,
+		FXSaleLedger:              result.FXSaleLedger,
+		FXCostSale:                result.FXCostSale,
+		FXUnavailable:             result.FXUnavailable,
 	}
 	if sale != nil && sale.Basis == BasisAbsolute {
 		matched := matchRule(sale, in.At, dimensions, in.Variant)
