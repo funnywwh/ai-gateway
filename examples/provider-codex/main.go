@@ -39,6 +39,9 @@ const (
 	// in credentials when the upstream expects a different one.
 	defaultClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
 	sessionFile     = "session.json"
+	// defaultHealthPrompt is the probe prompt: short enough to be cheap, real
+	// enough to exercise the whole path (auth, model, stream, translation).
+	defaultHealthPrompt = "hi"
 	// refreshSkew refreshes slightly before expiry so an in-flight request never
 	// carries a token that dies mid-stream; startupSkew is the startup margin.
 	refreshSkew = 60 * time.Second
@@ -55,17 +58,21 @@ type modelConfig struct {
 }
 
 type config struct {
-	BaseURL         string            `json:"base_url"`
-	SessionURL      string            `json:"session_url"`
-	TokenURL        string            `json:"token_url"`
-	ClientID        string            `json:"client_id"`
-	Models          []modelConfig     `json:"models"`
-	Headers         map[string]string `json:"headers"`
-	HealthPath      string            `json:"health_path"`
-	Store           bool              `json:"store"`
-	ReasoningEffort string            `json:"reasoning_effort"`
-	TimeoutMS       int               `json:"timeout_ms"`
-	AccountID       string            `json:"account_id"`
+	BaseURL    string            `json:"base_url"`
+	SessionURL string            `json:"session_url"`
+	TokenURL   string            `json:"token_url"`
+	ClientID   string            `json:"client_id"`
+	Models     []modelConfig     `json:"models"`
+	Headers    map[string]string `json:"headers"`
+	// Health probes a real streaming completion (see Health), which is the only
+	// reliable liveness signal for this backend: the /me style endpoint probe it
+	// replaced was Cloudflare-challenged and reported a healthy provider as broken.
+	HealthPrompt    string `json:"health_prompt"`
+	HealthModel     string `json:"health_model"`
+	Store           bool   `json:"store"`
+	ReasoningEffort string `json:"reasoning_effort"`
+	TimeoutMS       int    `json:"timeout_ms"`
+	AccountID       string `json:"account_id"`
 	// Proxy is the egress proxy for every upstream call. Empty means "follow the
 	// process environment" (HTTPS_PROXY/HTTP_PROXY/NO_PROXY), i.e. the behaviour
 	// before M10b. Credentials may override it; see credentialsSchema.
@@ -82,7 +89,10 @@ var configSchema = json.RawMessage(`{
     "account_id": {"type": "string", "description": "Value for the chatgpt-account-id header"},
     "reasoning_effort": {"type": "string", "enum": ["minimal", "low", "medium", "high"]},
     "store": {"type": "boolean", "description": "Whether the upstream may store the response (usually false)"},
-    "health_path": {"type": "string"},
+    "health_prompt": {"type": "string", "x-advanced": true,
+      "description": "Prompt sent by the health probe. The probe performs a real streaming completion, so it costs a few tokens; keep it short."},
+    "health_model": {"type": "string", "x-advanced": true,
+      "description": "Model the health probe asks for. Empty uses the first configured model."},
     "timeout_ms": {"type": "integer", "minimum": 1000},
     "proxy": {"type": "string", "x-advanced": true,
       "description": "Egress proxy for upstream calls: http://host:port, https://host:port, socks5://host:port. Empty follows HTTPS_PROXY/NO_PROXY. Only needed when the direct egress is blocked (for example by a region restriction)."},
@@ -151,7 +161,7 @@ type provider struct {
 
 func main() {
 	p := &provider{
-		cfg:      config{HealthPath: "/me", TimeoutMS: 300000},
+		cfg:      config{HealthPrompt: defaultHealthPrompt, TimeoutMS: 300000},
 		now:      func() time.Time { return time.Now().UTC() },
 		envProxy: http.ProxyFromEnvironment,
 	}
@@ -192,8 +202,8 @@ func (p *provider) applyDefaults() {
 	if p.cfg.ClientID == "" {
 		p.cfg.ClientID = defaultClientID
 	}
-	if p.cfg.HealthPath == "" {
-		p.cfg.HealthPath = "/me"
+	if p.cfg.HealthPrompt == "" {
+		p.cfg.HealthPrompt = defaultHealthPrompt
 	}
 	if p.cfg.TimeoutMS <= 0 {
 		p.cfg.TimeoutMS = 300000
@@ -904,16 +914,16 @@ func upstreamErrorCode(body []byte) string {
 
 // responsesRequest is the upstream request body. Only documented Responses fields
 // are sent: store is false by default because this backend refuses stored responses.
+// max_output_tokens is absent on purpose — this backend rejects it (see buildRequest).
 type responsesRequest struct {
-	Model           string               `json:"model"`
-	Instructions    string               `json:"instructions,omitempty"`
-	Input           []pluginapi.Item     `json:"input,omitempty"`
-	Tools           []pluginapi.Tool     `json:"tools,omitempty"`
-	ToolChoice      json.RawMessage      `json:"tool_choice,omitempty"`
-	MaxOutputTokens *int                 `json:"max_output_tokens,omitempty"`
-	Reasoning       *pluginapi.Reasoning `json:"reasoning,omitempty"`
-	Store           bool                 `json:"store"`
-	Stream          bool                 `json:"stream"`
+	Model        string               `json:"model"`
+	Instructions string               `json:"instructions,omitempty"`
+	Input        []pluginapi.Item     `json:"input,omitempty"`
+	Tools        []pluginapi.Tool     `json:"tools,omitempty"`
+	ToolChoice   json.RawMessage      `json:"tool_choice,omitempty"`
+	Reasoning    *pluginapi.Reasoning `json:"reasoning,omitempty"`
+	Store        bool                 `json:"store"`
+	Stream       bool                 `json:"stream"`
 }
 
 type wireUsage struct {
@@ -972,15 +982,19 @@ func (p *provider) buildRequest(req *pluginapi.Request, stream bool) ([]byte, er
 		}
 	}
 	wire := responsesRequest{
-		Model:           model,
-		Instructions:    req.Instructions,
-		Input:           req.Input,
-		Tools:           req.Tools,
-		ToolChoice:      req.ToolChoice,
-		MaxOutputTokens: req.MaxOutputTokens,
-		Store:           p.cfg.Store,
-		Stream:          stream,
+		Model:        model,
+		Instructions: req.Instructions,
+		Input:        req.Input,
+		Tools:        req.Tools,
+		ToolChoice:   req.ToolChoice,
+		Store:        p.cfg.Store,
+		Stream:       stream,
 	}
+	// req.MaxOutputTokens is deliberately NOT forwarded: this backend rejects the
+	// parameter outright ("Unsupported parameter: max_output_tokens", measured for
+	// every value), so passing a client's cap through turned a normal request into a
+	// hard 400. The gateway still accounts for an in-flight reservation from its own
+	// billing.configuration; the client's cap simply does not reach the upstream.
 	if req.Reasoning != nil {
 		wire.Reasoning = req.Reasoning
 	} else if p.cfg.ReasoningEffort != "" {
@@ -1228,39 +1242,67 @@ func (p *provider) Complete(ctx context.Context, req *pluginapi.Request) (*plugi
 	}, nil
 }
 
+// Health probes by issuing a real streaming completion, not by poking a status
+// endpoint. Two reasons, both learned the hard way:
+//
+//   - This backend has no trustworthy liveness endpoint. The /me style probe this
+//     replaced was answered by a Cloudflare challenge (403 + cf-mitigated), which
+//     the classifier reported as "credentials rejected" while the credentials were
+//     in fact fine — a permanently red light on a working provider.
+//   - A real completion exercises the path that actually matters: proxy, token
+//     refresh, model acceptance, streaming and event translation.
+//
+// The probe is healthy only when the request succeeded AND the stream reached a
+// terminal usage event. Stream alone treats a truncated body as success (io.EOF),
+// so requiring the terminal event is what makes this a real end-to-end check.
 func (p *provider) Health(ctx context.Context) error {
 	if err := p.proxyError(); err != nil {
 		return err
 	}
-	token, err := p.ensureToken(ctx, false)
+	model, err := p.healthModel()
 	if err != nil {
 		return err
 	}
-	state, _ := p.currentState()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.BaseURL+p.cfg.HealthPath, nil)
-	if err != nil {
-		return pluginapi.NewError("bad_request", "provider-codex: cannot build the health request")
+	prompt := p.cfg.HealthPrompt
+	if prompt == "" {
+		prompt = defaultHealthPrompt
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	if account := p.resolveAccountID(state, p.snapshot()); account != "" {
-		req.Header.Set("chatgpt-account-id", account)
+	probe := &pluginapi.Request{Model: model, Input: []pluginapi.Item{healthInput(prompt)}}
+
+	sawTerminal := false
+	if err := p.Stream(ctx, probe, func(event pluginapi.Event) error {
+		if event.Type == pluginapi.EventUsage {
+			sawTerminal = true
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
-	for key, value := range p.cfg.Headers {
-		req.Header.Set(key, value)
-	}
-	resp, err := p.http.Do(req)
-	if err != nil {
-		return pluginapi.NewRetryableError("upstream_unreachable", err.Error(), 502)
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return pluginapi.NewError("token_expired", "the upstream rejected the credentials; refresh them and try again")
-	}
-	if resp.StatusCode >= 400 {
-		return pluginapi.NewError("health_failed", "provider-codex: health check returned "+resp.Status)
+	if !sawTerminal {
+		return pluginapi.NewError("health_stream_incomplete",
+			"provider-codex: the health stream ended without a terminal usage event")
 	}
 	return nil
+}
+
+// healthModel resolves the model the probe asks for: health_model when set,
+// otherwise the first configured model. buildRequest maps a configured ID onto its
+// upstream model, so passing the configured ID is correct here.
+func (p *provider) healthModel() (string, error) {
+	if model := strings.TrimSpace(p.cfg.HealthModel); model != "" {
+		return model, nil
+	}
+	if len(p.cfg.Models) == 0 {
+		return "", pluginapi.NewError("health_unconfigured",
+			"provider-codex: no models are configured, so the health probe has nothing to call; add a model or set health_model")
+	}
+	return p.cfg.Models[0].ID, nil
+}
+
+// healthInput builds the probe prompt as a minimal user message.
+func healthInput(prompt string) pluginapi.Item {
+	content, _ := json.Marshal([]map[string]string{{"type": "input_text", "text": prompt}})
+	return pluginapi.Item{Type: "message", Role: "user", Content: content}
 }
 
 // classifyResponse turns an HTTP failure into the plugin error kinds the router
@@ -1273,6 +1315,12 @@ func classifyResponse(resp *http.Response, body []byte) *pluginapi.Error {
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests:
 		return pluginapi.NewQuotaError(message, retryAfterUnix(resp))
+	case isCloudflareChallenge(resp, body):
+		// A challenge means the request never reached the model. Calling it
+		// "credentials rejected" sends the operator off to re-mint tokens that are
+		// perfectly fine, so it gets its own retryable code: another egress may pass.
+		return pluginapi.NewRetryableError("upstream_challenge",
+			"the upstream answered with a Cloudflare challenge, so the egress IP is probably blocked: "+resp.Status, resp.StatusCode)
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return pluginapi.NewError("token_expired", message)
 	case resp.StatusCode >= 500:
@@ -1290,10 +1338,32 @@ func classifyResponse(resp *http.Response, body []byte) *pluginapi.Error {
 	return pluginapi.NewError("upstream_error", message)
 }
 
+// isCloudflareChallenge reports whether a rejection came from Cloudflare's bot
+// challenge rather than from the API. The header is the reliable marker; the HTML
+// body check is the fallback for intermediaries that strip it.
+func isCloudflareChallenge(resp *http.Response, body []byte) bool {
+	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
+		return false
+	}
+	if strings.Contains(strings.ToLower(resp.Header.Get("cf-mitigated")), "challenge") {
+		return true
+	}
+	head := strings.ToLower(strings.TrimSpace(string(body)))
+	if len(head) > 64 {
+		head = head[:64]
+	}
+	return strings.HasPrefix(head, "<html") || strings.HasPrefix(head, "<!doctype html")
+}
+
 func upstreamMessage(body []byte) string {
+	// Upstream error envelopes come in more than one shape and all of them have
+	// been observed in the wild: {"error":{"message":…}}, {"message":…} and the
+	// FastAPI style {"detail":…}. Missing the last one turned "the model is not
+	// supported" into an uninformative "upstream returned 400".
 	var payload struct {
 		Error   json.RawMessage `json:"error"`
 		Message string          `json:"message"`
+		Detail  string          `json:"detail"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return ""
@@ -1305,6 +1375,9 @@ func upstreamMessage(body []byte) string {
 		if err := json.Unmarshal(payload.Error, &asObject); err == nil && asObject.Message != "" {
 			return asObject.Message
 		}
+	}
+	if payload.Detail != "" {
+		return payload.Detail
 	}
 	return payload.Message
 }

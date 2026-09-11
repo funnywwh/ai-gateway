@@ -25,7 +25,7 @@ func newTestProvider(t *testing.T, baseURL, sessionURL, tokenURL string, creds m
 	p := &provider{
 		cfg: config{
 			BaseURL: baseURL, SessionURL: sessionURL, TokenURL: tokenURL,
-			HealthPath: "/me", TimeoutMS: 5000,
+			HealthPrompt: defaultHealthPrompt, TimeoutMS: 5000,
 			Models: []modelConfig{{ID: "codex", UpstreamModel: "gpt-5-codex", ContextWindow: 1000, MaxOutputTokens: 100}},
 		},
 		now:      func() time.Time { return time.Now().UTC() },
@@ -514,5 +514,154 @@ func TestWhoamiNeverLeaksSecrets(t *testing.T) {
 	}
 	if !strings.Contains(text, "has_refresh_token") {
 		t.Fatalf("whoami should report presence: %s", text)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M10c: the health probe is a real streaming completion
+// ---------------------------------------------------------------------------
+
+func TestHealthSendsAStreamingProbe(t *testing.T) {
+	var (
+		method, path, rawBody string
+	)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path = r.Method, r.URL.Path
+		raw, _ := io.ReadAll(r.Body)
+		rawBody = string(raw)
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, frame := range happyFrames {
+			_, _ = fmt.Fprint(w, frame)
+		}
+	}))
+	defer upstream.Close()
+
+	p := newTestProvider(t, upstream.URL, upstream.URL+"/session", upstream.URL+"/token",
+		map[string]string{"access_token": "static-token"})
+	if err := p.Health(context.Background()); err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+	if method != http.MethodPost || path != "/responses" {
+		t.Fatalf("probe hit %s %s, want POST /responses", method, path)
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatal(err)
+	}
+	if stream, _ := body["stream"].(bool); !stream {
+		t.Fatalf("the probe must stream, body = %s", rawBody)
+	}
+	if _, present := body["max_output_tokens"]; present {
+		t.Fatalf("the probe must not send max_output_tokens (the upstream rejects it): %s", rawBody)
+	}
+	// The probe asks for the configured model ID and buildRequest maps it upstream.
+	if got := body["model"]; got != "gpt-5-codex" {
+		t.Fatalf("probe model = %v, want the configured upstream model", got)
+	}
+	if !strings.Contains(rawBody, `"text":"`+defaultHealthPrompt+`"`) {
+		t.Fatalf("probe must send the configured prompt, body = %s", rawBody)
+	}
+}
+
+func TestHealthRejectsATruncatedStream(t *testing.T) {
+	// A body that ends before the terminal event is what Stream alone reports as
+	// success (io.EOF); the probe must not call that healthy.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, happyFrames[0])
+	}))
+	defer upstream.Close()
+
+	p := newTestProvider(t, upstream.URL, upstream.URL+"/session", upstream.URL+"/token",
+		map[string]string{"access_token": "static-token"})
+	err := p.Health(context.Background())
+	apiErr, ok := pluginapi.IsError(err)
+	if !ok || apiErr.Code != "health_stream_incomplete" || apiErr.Kind != pluginapi.KindFatal {
+		t.Fatalf("error = %+v, want a fatal health_stream_incomplete", err)
+	}
+}
+
+func TestHealthSurfacesTheUpstreamDetailMessage(t *testing.T) {
+	// The upstream uses the FastAPI shape for this class of error; dropping it made
+	// a misconfigured model look like a bare "upstream returned 400 Bad Request".
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"detail":"Unsupported parameter: max_output_tokens"}`))
+	}))
+	defer upstream.Close()
+
+	p := newTestProvider(t, upstream.URL, upstream.URL+"/session", upstream.URL+"/token",
+		map[string]string{"access_token": "static-token"})
+	err := p.Health(context.Background())
+	if err == nil {
+		t.Fatal("expected the probe to fail")
+	}
+	if !strings.Contains(err.Error(), "Unsupported parameter: max_output_tokens") {
+		t.Fatalf("the upstream detail must reach the caller, got: %v", err)
+	}
+}
+
+func TestHealthDoesNotMistakeAChallengeForCredentials(t *testing.T) {
+	responses := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("cf-mitigated", "challenge")
+		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("<html><head><title>Just a moment...</title></head></html>"))
+	}))
+	defer responses.Close()
+	tokens := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"fresh","expires_in":3600}`))
+	}))
+	defer tokens.Close()
+
+	// Refresh-capable credentials: Stream refreshes once on 403 and only then
+	// classifies, which is exactly the path that used to yield token_expired.
+	p := newTestProvider(t, responses.URL, "http://unused", tokens.URL,
+		map[string]string{"refresh_token": "r1"})
+	err := p.Health(context.Background())
+	apiErr, ok := pluginapi.IsError(err)
+	if !ok || apiErr.Code != "upstream_challenge" {
+		t.Fatalf("error = %+v, want upstream_challenge (not a credential failure)", err)
+	}
+	if !apiErr.Retryable {
+		t.Fatal("a challenge is a blocked egress, not a dead credential: it must be retryable")
+	}
+}
+
+func TestHealthWithoutModelsIsExplicit(t *testing.T) {
+	p := newTestProvider(t, "http://unused", "http://unused", "http://unused",
+		map[string]string{"access_token": "static-token"})
+	p.cfg.Models = nil
+
+	err := p.Health(context.Background())
+	apiErr, ok := pluginapi.IsError(err)
+	if !ok || apiErr.Code != "health_unconfigured" {
+		t.Fatalf("error = %+v, want health_unconfigured naming the missing configuration", err)
+	}
+	if !strings.Contains(err.Error(), "model") {
+		t.Fatalf("the error should say what is missing: %v", err)
+	}
+}
+
+func TestMaxOutputTokensIsNotForwarded(t *testing.T) {
+	var rawBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		rawBody = string(raw)
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, frame := range happyFrames {
+			_, _ = fmt.Fprint(w, frame)
+		}
+	}))
+	defer upstream.Close()
+
+	p := newTestProvider(t, upstream.URL, upstream.URL+"/session", upstream.URL+"/token",
+		map[string]string{"access_token": "static-token"})
+	limit := 64
+	if _, err := p.Complete(context.Background(), &pluginapi.Request{Model: "codex", MaxOutputTokens: &limit}); err != nil {
+		t.Fatalf("a client max_output_tokens must not fail the call: %v", err)
+	}
+	if strings.Contains(rawBody, "max_output_tokens") {
+		t.Fatalf("max_output_tokens must not reach the upstream: %s", rawBody)
 	}
 }

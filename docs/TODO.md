@@ -247,11 +247,31 @@
 - [x] make verify 全绿（vet + 全量测试 + build，含 `internal/arch` 分层断言）
 - [x] 端到端（真实代理 `http://192.168.140.252:2334`，2026-09-11）：**全链路打通，网关已服务真实请求**。代理侧：出口国家 CN → PH，探测不再报 `unsupported_country_region_territory`；凭据侧：经代理**真实刷新成功**（新的 `expires_at`/`last_refresh_at`，轮换后的 refresh_token 已落盘）；模型侧：`gpt-5.6-luna` 下 `/v1/responses` 非流式与流式均返回正确文本，`usage_records` 落库（含 `reasoning` 维度拆分），零价不产生账本分录
 - [x] **更正一处先前错误结论**：我曾依据 `GET /backend-api/codex/models?client_version=…` 返回 `{"models":[]}` 判定"该账号无 Codex 授权"，这是**错的** —— 同一账号用 `gpt-5.6-luna` 完全可用。该目录端点对这类账号**不能作为授权判据**。被拒的 id 实为 `gpt-5`/`gpt-5-codex`/`codex-mini-latest`/`o3`/`gpt-5.1-codex`（均为 `not supported when using Codex with a ChatGPT account`）。另：`/responses` 强制要求 `stream:true`（`{"detail":"Stream must be set to true"}`），插件恒以流式发送，故不受影响
-- [ ] 实测发现（M10 适配器缺陷，另立）：`upstreamMessage` 只认 `{"error":{"message"}}` 与 `{"message"}`，不认上游实际使用的 `{"detail":"…"}`（FastAPI 形状），把「模型不受支持」「必须开流式」这类关键原因丢成无信息量的 `the upstream returned 400 Bad Request`；本次定位是靠手工 curl 才拿到 `detail` 原文
-- [ ] 实测发现（M10 适配器缺陷，另立）：健康检查走 `base_url + /me`，该路径在此出口被 Cloudflare 挑战（403 + `cf-mitigated: challenge`，HTML 正文），被 `classifyResponse` 映射成误导性的 `token_expired`。**当前可见症状：业务请求全部正常，控制台却把该供应商显示为不健康**。实测 `/backend-api/codex/models?client_version=…` 带鉴权返回 200 且未被挑战，是更合适的探针
+- [x] 实测发现（M10 适配器缺陷）→ **在 M10c 修复**：`upstreamMessage` 只认 `{"error":{"message"}}` 与 `{"message"}`，不认上游实际使用的 `{"detail":"…"}`（FastAPI 形状），把「模型不受支持」「必须开流式」这类关键原因丢成无信息量的 `the upstream returned 400 Bad Request`；本次定位是靠手工 curl 才拿到 `detail` 原文
+- [x] 实测发现（M10 适配器缺陷）→ **在 M10c 修复**：健康检查走 `base_url + /me`，该路径在此出口被 Cloudflare 挑战（403 + `cf-mitigated: challenge`，HTML 正文），被 `classifyResponse` 映射成误导性的 `token_expired`。**可见症状：业务请求全部正常，控制台却把该供应商显示为不健康**
+
 - [x] 回填设计文档「实现与设计差异」（含 D7 修正与 7 个实现期发现），单提交并引用设计文档路径
 - [ ] 范围外（另立）：内建 provider 接代理，需新增 `internal/providers/httpx → pkg/providerkit` 分层边
 - [x] 环境前置（已解决）：代理最初从本机不可达（0.12s 快速 RST，疑似只绑回环）；在客户端开启局域网监听后 `192.168.140.252:2334` 于 0.11s 连通
+
+### M10c 健康探测改为真实流式补全
+- [x] 设计文档 docs/design/m10c-codex-health-probe.md + 规格文档 plugin-protocol-v1.md §5（`provider.health` 三条约定）
+- [x] 探测改为复用 `p.Stream` 发一次流式 "hi"；判据 = 请求成功 **且** 观测到终态 `EventUsage`（`Stream` 单独用会把被截断的流当成功）
+- [x] 新增 `health_prompt`（默认 `hi`）与 `health_model`（默认首个配置模型）；删除 `health_path`（该端点在本出口被 Cloudflare 挑战，无法区分"健康"与"被拦"）
+- [x] 探测 deadline 10s → 60s：实测流式 "hi" 经代理 TTFB 1.2–4.2s、总耗时 9.6–16.4s（另有 18.8s 样本），10s 必然误判
+- [x] `classifyResponse` 识别 Cloudflare 挑战（`cf-mitigated` / HTML 正文）→ `upstream_challenge`（retryable），不再冒充 `token_expired`
+- [x] `upstreamMessage` 增加 `detail` 解析（优先级 `error.message` → `detail` → `message`）
+- [x] 不再向上游透传 `max_output_tokens`：实测该端点任何取值都 400（`{"detail":"Unsupported parameter: max_output_tokens"}`），且客户端带该参数经网关必然 500；改为丢弃并在 README 写明
+- [x] 测试：新增 6 例（探测形状 / 截断流→`health_stream_incomplete` / `detail` 正文 / 挑战分类 / 无模型 / 不透传 `max_output_tokens`）；计划里的第 7 例（非法代理优先）已由 M10b 的用例覆盖，不重复新增。三道关键行为均用变异验证过（去掉终态判据、`detail` 解析、挑战识别各自精确失败）
+- [x] make verify 全绿（含 `internal/arch` 分层断言）
+- [x] 实测（隔离实例，新二进制）：探测 `ok=true`、`latency_ms=16601` —— **16.6s > 旧 10s deadline**，坐实 deadline 调整是必需项而非预防性；`last_error` 清空
+- [x] 实测：带 `max_output_tokens` 的请求由 500 变为 200 + 正文 `好`；不带该参数与流式调用同时回归通过
+- [x] 实测：刻意配错模型后探测直接显示上游原文（`The 'gpt-5-codex' model is not supported when using Codex with a ChatGPT account.`），不再是 `returned 400 Bad Request`
+- [x] 实测的隔离方式（值得复用）：用 `:8099` + 库快照（sqlite backup API）+ 独立 `GW_PLUGINS_STATE_DIR`，并把凭据换成 **`access_token`-only**（该模式永不调用 token 端点），从机制上排除 refresh_token 轮换风险
+- [ ] 已知限制（本次不改行为，仅记录）：`reasoning.effort:"minimal"` 被上游 400 拒绝（`"low"` 可用但实测仍 14–17s 且 `reasoning_tokens:0`）；插件仍会透传客户端/配置的 `reasoning_effort`，配成 `minimal` 会导致 400
+- [ ] **新发现的运维隐患（比本里程碑更严重，另立处理）**：真实部署里 refresh_token **已被轮换**，而插件**不把轮换后的凭据回写到数据库** —— 有效值只在 `$GW_PLUGIN_STATE_DIR/<instance>/session.json`，而数据库/控制台里显示"已设置"的那份是轮换前的失效值。状态目录一旦丢失（清 `data/`、改实例名、重装插件），供应商会以"凭据已配置"的姿态持续失败。协议里的 `notify`（设计用途正是凭据回写）插件未使用，属 M10 设计缺口
+- [ ] 部署动作（需在宿主执行）：运行中的网关仍是旧二进制（10s deadline + 旧 `/me` 探测），需 `./scripts/local-run.sh restart` 才生效
+- [x] 回填设计文档「实现与设计差异」（含实测结果与 7 条差异），单提交并引用设计文档路径
 - [x] M14(1) 会话层抽取 `internal/sessionauth`（口令/会话/限速），`internal/admin` 改为薄适配器（既有测试全绿）
 - [x] M14(1) 迁移 0004：`portal_users`/`portal_sessions`（用户名全局唯一、绑定唯一账户、级联删除）
 - [x] M14(1) `internal/portal` 认证适配器（禁用账号拒登、按用户吊销会话）+ 管理侧门户用户端点（创建/重置/停用，一次性口令只回一次）

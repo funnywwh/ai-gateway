@@ -36,13 +36,28 @@ Concurrent requests share a single refresh.
   "account_id": "",
   "reasoning_effort": "medium",
   "store": false,
-  "health_path": "/me",
+  "health_prompt": "hi",
+  "health_model": "",
   "models": [
-    {"id": "gpt-5-codex", "upstream_model": "gpt-5-codex", "context_window": 272000, "max_output_tokens": 128000,
-     "capabilities": {"stream": true, "tools": true, "reasoning": true}}
+    {"id": "gpt-5.6-luna", "upstream_model": "gpt-5.6-luna",
+     "capabilities": {"stream": true, "tools": true}}
   ]
 }
 ```
+
+Model IDs are **not** interchangeable. On a ChatGPT-account subscription the backend answers
+`The '<id>' model is not supported when using Codex with a ChatGPT account.` for ids such as
+`gpt-5`, `gpt-5-codex`, `codex-mini-latest`, `o3` and `gpt-5.1-codex`, while `gpt-5.6-luna`
+works. Beware: `GET /backend-api/codex/models?client_version=…` returns `{"models":[]}` for such
+an account even when a model does work, so that endpoint cannot tell you whether the account is
+entitled — exercise the model instead (the health probe does exactly that).
+
+`health_model` defaults to the first entry of `models`; `health_prompt` defaults to `hi`.
+
+The subscription backend also rejects `max_output_tokens` for **every** value
+(`{"detail":"Unsupported parameter: max_output_tokens"}`), so the adapter does not forward it:
+a client that sets a cap gets its request served without one rather than a hard 400. The
+gateway's own in-flight reservation (`billing.reservation_mode`) still applies for accounting.
 
 ## Actions (admin console → Providers → detail)
 
@@ -54,10 +69,23 @@ Concurrent requests share a single refresh.
 
 ## Behaviour notes
 
-- The upstream only offers streaming, so `Complete` is implemented by consuming the
-  same stream: there is one event-translation path, not two.
 - Usage is reported with cache hits split out and reasoning tokens separate, which is
   what the pricing engine needs to apply a different rate.
+- The upstream only offers streaming, so `Complete` is implemented by consuming the
+  same stream: there is one event-translation path, not two. It also insists on
+  `stream: true` (`{"detail":"Stream must be set to true"}`), which the adapter always does.
+- **The health probe is a real streaming completion** (it sends `health_prompt` to
+  `health_model`), not a status ping: this backend has no trustworthy liveness endpoint —
+  the `/me` style probe it used to call was answered by a Cloudflare challenge, so the
+  console showed a working provider as broken. The probe counts as healthy only when the
+  stream reaches a terminal usage event, so a truncated stream is not mistaken for health.
+  It runs only when an operator probes the provider, and it spends a few tokens.
+- Error envelopes are read from `error.message`, `detail` and `message`, in that order:
+  the upstream uses the FastAPI `detail` shape for parameter and model errors, and dropping
+  it turned an actionable message into a bare "upstream returned 400".
+- A Cloudflare challenge (403 + `cf-mitigated: challenge`, or an HTML body) is reported as
+  retryable `upstream_challenge`, **not** as `token_expired`: the credentials are fine, the
+  egress is blocked, and calling it a credential problem sends operators off re-minting tokens.
 - 401/403 → fatal `token_expired` (no failover: another provider would fail the same
   way, this is a credential problem); 429 → quota exhaustion with the `Retry-After`
   deadline; 5xx → retryable; 4xx → fatal with the upstream code.

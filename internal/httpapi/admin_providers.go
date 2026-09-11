@@ -464,7 +464,11 @@ func (s *Server) handleAdminProbeProvider(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	// A probe may be a real upstream call, not just a status ping: the codex
+	// adapter probes with a streaming completion, measured at 9.6-16.4s (worst
+	// sample 18.8s) through a cross-border egress, plus plugin start and token
+	// refresh. The previous 10s deadline made a healthy provider look broken.
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	res := prober.Probe(ctx, id, mode)
 	s.recordProbe(r.Context(), store, id, res)

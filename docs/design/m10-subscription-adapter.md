@@ -60,7 +60,9 @@
 | `response.failed` / `error` | 返回 `*pluginapi.Error`（按 4xx/5xx 分类） |
 
 - `Complete`：**复用 `Stream`** 并在内部聚合（该后端只有流式），保证两条路径的事件翻译只有一份实现；
-- 健康检查：`GET {health_path}`（默认 `/me`）→ 200 视为健康；401/403 → `token_expired`。
+- 健康检查：~~`GET {health_path}`（默认 `/me`）~~ → **已由 M10c 改为发一次流式 "hi" 真实补全**
+  （见 `docs/design/m10c-codex-health-probe.md`）。原端点探测在本机出口被 Cloudflare 挑战，
+  会把"出口被拦"误报成 `token_expired`，即一个恒亮的假红灯。
 
 ## 5. 交互动作
 
@@ -91,6 +93,8 @@ JWT 只做**不验签**的 payload 解码，用于取 `exp` 与账号字段；�
    不再用字符估算覆盖。
 4. **`Health` 的 URL 是 `base_url + health_path`**（默认 `/me`）：因此假后端必须在 base 路径下服务该端点；
    这一点写进了测试夹具注释（首次实测就是被它绊了一下：404 被如实报告为 `health_failed`，而不是假装健康）。
+   **该设计已被 M10c 取代**（`health_path` 已删除，探测改为真实流式补全）——真实上游上这个端点既被
+   Cloudflare 挑战、其存在性本身也存疑，属"设计时无法预见、只能靠真实调用暴露"的一类差异。
 5. **usage 维度切分按设计执行**：缓存命中/未命中拆分、reasoning 单列且从 output 中扣除，实测
    `{input_cache_hit:60, input_cache_miss:40, output:30, reasoning:10}`，与计价引擎的维度口径一致。
 6. **`set_token` 只改插件内存中的凭据与状态文件**：宿主下一次推送凭据仍以 Providers 页保存的值为准，
