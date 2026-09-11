@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, table, modal, toast, statusBadge, formatTime, confirmDialog } from '../ui.js';
+import { el, card, table, modal, toast, statusBadge, formatTime, confirmDialog, modalHead } from '../ui.js';
 
 const INPUT_MODES = [
   { value: 'inherit', label: '继承全局默认（输入 full）' },
@@ -122,7 +122,9 @@ function showSecret(title, secret, after) {
     catch (err) { box.select(); document.execCommand('copy'); }
   });
   const dialog = el('div', { class: 'modal' }, [
-    el('h3', { text: title }),
+    // The ✕ abandons the reveal without the refresh, exactly like closing the
+    // dialog by hand: the secret is already stored server-side either way.
+    modalHead(title, () => backdrop.remove()),
     el('p', { class: 'muted', text: '这是明文唯一一次出现，关闭后无法再次获取。' }),
     box,
     el('div', { class: 'modal-actions' }, [copy, done]),

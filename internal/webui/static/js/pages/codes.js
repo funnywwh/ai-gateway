@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, table, modal, toast, badge, formatTime, confirmDialog } from '../ui.js';
+import { el, card, table, modal, toast, badge, formatTime, confirmDialog, modalHead } from '../ui.js';
 
 const MICRO = 1_000_000;
 const money = (micros) => (Number(micros || 0) / MICRO).toFixed(6);
@@ -98,7 +98,7 @@ function showCodes(payload) {
 	});
 	const done = el('button', { class: 'btn btn-primary', text: '我已保存' });
 	const dialog = el('div', { class: 'modal', style: 'width:min(720px,100%)' }, [
-		el('h3', { text: '兑换码已生成（' + (payload.count || 0) + ' 张）' }),
+		modalHead('兑换码已生成（' + (payload.count || 0) + ' 张）', () => backdrop.remove()),
 		el('p', { class: 'muted', text: '明文只显示这一次；数据库里只有哈希，关闭后无法再次获取。' }),
 		box,
 		el('div', { class: 'modal-actions' }, [copy, done]),

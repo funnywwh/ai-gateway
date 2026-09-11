@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, table, modal, toast, badge, stat, jsonBlock, formatTime, confirmDialog } from '../ui.js';
+import { el, card, table, modal, toast, badge, stat, jsonBlock, formatTime, confirmDialog, modalHead } from '../ui.js';
 
 const MICRO = 1_000_000;
 const money = (micros) => (Number(micros || 0) / MICRO).toFixed(6);
@@ -165,7 +165,7 @@ async function renderInvoices({ page, actions, session, readonly }) {
 		const csv = el('a', { class: 'btn', href: '/admin/api/v1/invoices/' + invoice.id + '?format=csv', text: '导出 CSV' });
 		const close = el('button', { class: 'btn', text: '关闭' });
 		const dialog = el('div', { class: 'modal', style: 'width:min(900px,100%)' }, [
-			el('h3', { text: '账单 #' + invoice.id + ' · ' + invoice.status }), body,
+			modalHead('账单 #' + invoice.id + ' · ' + invoice.status, () => backdrop.remove()), body,
 			el('div', { class: 'modal-actions' }, [csv, close]),
 		]);
 		const backdrop = el('div', { class: 'modal-backdrop' }, [dialog]);
@@ -270,8 +270,8 @@ async function renderReconciliation({ page, actions, session, readonly }) {
 
 function title(heading, body) {
 	const close = el('button', { class: 'btn', text: '关闭' });
-	const dialog = el('div', { class: 'modal', style: 'width:min(900px,100%)' }, [el('h3', { text: heading }), body,
-		el('div', { class: 'modal-actions' }, [close])]);
+	const dialog = el('div', { class: 'modal', style: 'width:min(900px,100%)' },
+		[modalHead(heading, () => backdrop.remove()), body, el('div', { class: 'modal-actions' }, [close])]);
 	const backdrop = el('div', { class: 'modal-backdrop' }, [dialog]);
 	close.addEventListener('click', () => backdrop.remove());
 	document.getElementById('modal-root').append(backdrop);

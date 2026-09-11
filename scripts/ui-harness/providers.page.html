@@ -53,6 +53,26 @@ const find = (label) => [...document.querySelectorAll('button')].find((b) => b.t
 const rowFor = (needle) => [...document.querySelectorAll('tbody tr')].find((tr) => tr.textContent.includes(needle));
 const rows = () => modal().querySelectorAll('tbody tr').length;
 const rowTexts = () => [...modal().querySelectorAll('tbody tr')].map((tr) => tr.textContent.trim().slice(0, 40));
+// closeButton is the round ✕ every dialog must carry in its top-right corner.
+const closeButton = () => modal().querySelector('.modal-head .modal-close');
+// The affordance is checked as rendered, not as class names: a round hit target,
+// inside the header, sitting to the right of the title.
+const closeChecks = () => {
+  const btn = closeButton();
+  if (!btn) return { closeButton: false };
+  const head = btn.closest('.modal-head');
+  const title = head && head.querySelector('h3');
+  const dialog = btn.closest('.modal');
+  const radius = parseFloat(getComputedStyle(btn).borderTopLeftRadius) || 0;
+  const size = btn.getBoundingClientRect();
+  return {
+    closeButton: true,
+    closeRound: radius >= size.width / 2 - 1 && radius >= size.height / 2 - 1,
+    closeInHeader: !!head && dialog && dialog.firstElementChild === head,
+    closeRightOfTitle: !!title && title.getBoundingClientRect().right <= btn.getBoundingClientRect().left,
+    closeLabel: btn.getAttribute('aria-label') === '关闭',
+  };
+};
 // Microtasks only: a timer would hand control back to the browser, which may close the
 // page before every check has reported (see the note above report()).
 const settle = async () => { for (let i = 0; i < 300; i++) await Promise.resolve(); };
@@ -67,6 +87,7 @@ try {
     await settle();
     const t = modalText();
     checks.dialogOpen = modal().querySelectorAll('.modal').length === 1;
+    Object.assign(checks, closeChecks());
     checks.noteShown = t.includes('对接 OpenAI 兼容的 /chat/completions');
     checks.configTable = t.includes('配置字段（config）');
     checks.credentialsTable = t.includes('凭据字段（credentials');
@@ -87,6 +108,15 @@ try {
     await settle();
     const t = modalText();
     checks.dialogOpen = modal().querySelectorAll('.modal').length === 1;
+    Object.assign(checks, closeChecks());
+    // The ✕ must actually dismiss: clicking it removes the whole backdrop, not just
+    // the button, so the console is never left with an invisible click blocker.
+    closeButton().click();
+    await settle();
+    checks.closeDismisses = modal().querySelectorAll('.modal, .modal-backdrop').length === 0;
+    [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '详情').click();
+    await settle();
+    checks.reopenedAfterClose = modal().querySelectorAll('.modal').length === 1;
     checks.detailSection = t.includes('配置说明');
     checks.detailFields = ['default_max_output_tokens', 'thinking.replay_reasoning_content', 'models[]'].every((f) => t.includes(f));
     checks.detailCredentialHint = t.includes('建议填「凭据」栏');
@@ -118,6 +148,7 @@ try {
     await settle();
     const before = modalText();
     checks.pluginPrompt = before.includes('由插件在握手时声明');
+    Object.assign(checks, closeChecks());
     const read = find('读取插件声明（会启动/连接该插件进程）');
     checks.readButton = !!read;
     if (read) { read.click(); await settle(); }
@@ -135,6 +166,7 @@ try {
     await settle();
     const t = modalText();
     checks.pluginPrompt = t.includes('由插件在握手时声明');
+    Object.assign(checks, closeChecks());
     checks.pluginTableShown = t.includes('配置字段（config）');
     checks.pluginFieldsAfterHandshake = ['reply', 'chunks', 'delay_ms', 'api_key'].every((f) => t.includes(f));
     checks.fieldRows = rows();

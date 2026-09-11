@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, table, toast, badge, formatTime, jsonBlock, statusBadge } from '../ui.js';
+import { el, card, table, toast, badge, formatTime, jsonBlock, statusBadge, modalHead } from '../ui.js';
 
 export async function render({ page, actions }) {
   const days = el('select', {}, [1, 3, 7, 30].map((n) => el('option', { value: n, text: '最近 ' + n + ' 天' })));
@@ -46,13 +46,16 @@ async function detail(requestID) {
     panel('最终输出' + (row.output_text_recorded ? '' : '（未录制）'), row.output),
   ]);
   const dialog = el('div', { class: 'modal', style: 'width:min(1000px,100%)' }, [
-    el('h3', { text: '请求 ' + requestID }),
+    modalHead('请求 ' + requestID, close),
     el('div', { class: 'muted', text: row.endpoint + ' · ' + formatTime(row.created_at) + ' · HTTP ' + row.status }),
     body,
-    el('div', { class: 'modal-actions' }, [el('button', { class: 'btn', text: '关闭' })]),
+    el('div', { class: 'modal-actions' }, [el('button', { class: 'btn', text: '关闭', onclick: () => close() })]),
   ]);
   const backdrop = el('div', { class: 'modal-backdrop' }, [dialog]);
-  dialog.querySelector('button').addEventListener('click', () => backdrop.remove());
+  // Closing goes through one function: the round ✕ in the header and the footer
+  // button are the same action, and the click-outside rule reuses it too.
+  function close() { backdrop.remove(); }
+  backdrop.addEventListener('click', (ev) => { if (ev.target === backdrop) close(); });
   document.getElementById('modal-root').append(backdrop);
 }
 

@@ -93,6 +93,27 @@ export function jsonBlock(value) {
   return el('pre', { class: 'mono', text });
 }
 
+// closeButton is the round ✕ every dialog carries in its top-right corner, so a
+// popup is always dismissable the same way. Pages that hand-roll a dialog (a
+// secret reveal, a detail view) call this instead of inventing their own, and
+// modal()/confirmDialog() below use it too. The glyph is text, not an inline
+// icon font or SVG, because the console is served under a strict CSP with no
+// inline styles and no external assets.
+export function closeButton(onClose, options) {
+  const opts = options || {};
+  return el('button', {
+    class: 'modal-close' + (opts.danger ? ' modal-close-danger' : ''),
+    type: 'button', title: '关闭', 'aria-label': '关闭', onclick: onClose,
+  }, ['✕']);
+}
+
+// modalHead is the dialog header: the title on the left, the round close button
+// on the right. Every dialog builds its header this way so the close button can
+// never be missing from one of them.
+export function modalHead(title, onClose, options) {
+  return el('div', { class: 'modal-head' }, [el('h3', { text: title }), closeButton(onClose, options)]);
+}
+
 // modal renders a form and resolves with the collected values, or null on cancel.
 export function modal({ title, fields, submitLabel, onSubmit, wide }) {
   return new Promise((resolve) => {
@@ -116,7 +137,7 @@ export function modal({ title, fields, submitLabel, onSubmit, wide }) {
     });
     const cancel = el('button', { class: 'btn', text: '取消', onclick: () => close(null) });
     const dialog = el('div', { class: 'modal', style: wide ? 'width:min(900px,100%)' : '' }, [
-      el('h3', { text: title }), body, error,
+      modalHead(title, () => close(null)), body, error,
       el('div', { class: 'modal-actions' }, [cancel, submit]),
     ]);
     const backdrop = el('div', { class: 'modal-backdrop' }, [dialog]);
@@ -132,7 +153,8 @@ export function confirmDialog(title, message) {
     const root = document.getElementById('modal-root');
     const ok = el('button', { class: 'btn btn-danger', text: '确认', onclick: () => { backdrop.remove(); resolve(true); } });
     const cancel = el('button', { class: 'btn', text: '取消', onclick: () => { backdrop.remove(); resolve(false); } });
-    const dialog = el('div', { class: 'modal' }, [el('h3', { text: title }), el('p', { text: message }),
+    const dialog = el('div', { class: 'modal' }, [modalHead(title, () => { backdrop.remove(); resolve(false); }, { danger: true }),
+      el('p', { text: message }),
       el('div', { class: 'modal-actions' }, [cancel, ok])]);
     const backdrop = el('div', { class: 'modal-backdrop' }, [dialog]);
     root.append(backdrop);
