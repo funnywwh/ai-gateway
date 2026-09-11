@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, table, modal, toast, badge, jsonBlock, formatTime, confirmDialog } from '../ui.js';
+import { el, card, table, modal, toast, badge, jsonBlock, formatTime, confirmDialog, withBusy } from '../ui.js';
 
 const KINDS = ['openai-chat', 'openai-responses', 'testecho'];
 const CONFIG_HINT = JSON.stringify({ base_url: 'https://api.example.com/v1' }, null, 2);
@@ -30,7 +30,7 @@ export async function render({ page, actions, session }) {
         rows,
         rowActions: (row) => [
           el('button', { class: 'btn', text: '详情', onclick: () => detail(row, load, readonly) }),
-          el('button', { class: 'btn', text: '探测', onclick: () => probe(row) }),
+          el('button', { class: 'btn', text: '探测', onclick: (ev) => probe(row, ev.currentTarget, load) }),
           readonly ? null : el('button', { class: 'btn btn-danger', text: '删除', onclick: () => remove(row, load) }),
         ].filter(Boolean),
       });
@@ -61,7 +61,7 @@ export async function render({ page, actions, session }) {
         return created;
       },
     });
-    if (result) probe(result);
+    if (result) probe(result, null, load);
   });
   await load();
 }
@@ -139,10 +139,27 @@ async function edit(row, reload) {
   return result;
 }
 
-async function probe(row) {
-  const result = await api.post('/providers/' + row.id + '/test?mode=health');
-  toast(result.ok ? (row.name + ' 正常（' + result.latency_ms + 'ms）') : (row.name + ' 探测失败：' + result.error),
-    result.ok ? 'ok' : 'error');
+// probe exercises one provider. A health probe is a real upstream request (the codex
+// adapter streams a completion), so it routinely takes tens of seconds: the button
+// carries the progress so a slow answer never reads as a hung page. Errors are caught
+// too — a probe can outlive a client or proxy timeout, and failing silently would
+// leave the operator with no feedback at all.
+async function probe(row, button, reload) {
+  const pending = button ? null : toast(row.name + ' 正在探测…', '', { sticky: true });
+  try {
+    const result = await withBusy(button, '探测中',
+      () => api.post('/providers/' + row.id + '/test?mode=health'));
+    toast(result.ok
+      ? row.name + ' 正常（' + result.latency_ms + 'ms）'
+      : row.name + ' 探测失败：' + result.error,
+      result.ok ? 'ok' : 'error');
+  } catch (err) {
+    toast(row.name + ' 探测失败：' + api.errorMessage(err), 'error');
+  } finally {
+    if (pending) pending.remove();
+  }
+  // The probe persists health/last_error, so refresh the row to show what it found.
+  if (reload) await reload().catch(() => {});
 }
 
 async function runAction(row, action) {

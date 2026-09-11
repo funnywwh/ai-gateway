@@ -41,11 +41,43 @@ export function statusBadge(status) {
   return badge(status || 'unknown', kind);
 }
 
-export function toast(message, kind) {
+export function toast(message, kind, options) {
+  const opts = options || {};
   const host = document.getElementById('toasts');
   const node = el('div', { class: 'toast ' + (kind || ''), text: message });
   host.append(node);
-  setTimeout(() => node.remove(), kind === 'error' ? 8000 : 4000);
+  // sticky toasts are removed by the caller: they narrate an operation that can
+  // outlive the normal auto-dismiss window.
+  if (!opts.sticky) setTimeout(() => node.remove(), kind === 'error' ? 8000 : 4000);
+  return node;
+}
+
+export function spinner() { return el('span', { class: 'spinner', 'aria-hidden': 'true' }); }
+
+// withBusy runs an async action while showing progress on the button that started
+// it: the button is disabled, its label becomes spinner + text, and the elapsed
+// seconds tick up so a genuinely slow call (a provider probe is a real upstream
+// request) never looks like a hung page. The button is always restored, and the
+// action's result is passed through. Without a button, the action simply runs.
+export async function withBusy(button, label, action) {
+  if (!button) return action();
+  const original = button.textContent;
+  const wasDisabled = button.disabled;
+  const elapsed = el('span', { text: '' });
+  const started = Date.now();
+  const tick = () => { elapsed.textContent = ' ' + Math.round((Date.now() - started) / 1000) + 's'; };
+  clear(button);
+  button.append(spinner(), document.createTextNode(label + '…'), elapsed);
+  button.disabled = true;
+  tick();
+  const timer = setInterval(tick, 1000);
+  try {
+    return await action();
+  } finally {
+    clearInterval(timer);
+    button.textContent = original;
+    button.disabled = wasDisabled;
+  }
 }
 
 export function formatTime(value) {

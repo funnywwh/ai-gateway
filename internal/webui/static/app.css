@@ -36,6 +36,13 @@ a { color: var(--accent); }
 .btn-danger { background:transparent; border-color:var(--danger); color:var(--danger); }
 .btn-ghost { background:transparent; }
 .btn:disabled { opacity:.55; cursor:not-allowed; }
+/* A slow call must read as "still working", not as a hung page: a provider health
+   probe is a real upstream completion and legitimately takes ~16s. */
+.spinner { display:inline-block; width:11px; height:11px; margin-right:6px; vertical-align:-1px;
+  border:2px solid currentColor; border-right-color:transparent; border-radius:50%; opacity:.85;
+  animation: spin .7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.2s; } }
 .card { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
   padding:16px; margin-bottom:16px; }
 .card h2 { margin:0 0 12px; font-size:14px; font-weight:600; }
