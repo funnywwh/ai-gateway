@@ -590,6 +590,24 @@
 - [x] 端到端实测：CNY 售价模型 → `usage_records.charge_micros == ceil(原生 × 汇率)`、快照含原生金额与汇率、`/v1/models` 报 CNY、控制台切币种显示 `≈`
 - [x] 回填设计文档「实现与设计差异」、提交（引用设计文档路径）
 
+### M22 运维：8088 运行态加人民币（展示币种）
+
+> `config.yaml` 被 gitignore，运行态改动在这里留痕（沿用 M20b 的做法）。
+
+- [x] 口径：只做**展示币种**（不改任何定价与账本）；控制台默认展示币种改为 CNY
+- [x] 汇率：`CNY: 147567`（1 CNY = 0.147567 USD，即市场中间价 1 USD = 6.7766 CNY，2026-09-11；
+  来源 [中间价 6.7766](https://sjqcj.com/news/detail?id=104727)）。**不用** 7.1：那是既有 DeepSeek 成本价折算成美元时用的口径，
+  与当前市场偏离约 4.6%，会污染所有美元金额的 ¥ 展示
+- [x] 运行态（免重启）：`PUT /admin/api/v1/settings/billing.fx_rates {"CNY":147567}` →
+  `GET /billing/currency` 显示 `CNY rate_micros=147567 rate_source=settings`，控制台顶栏可选 ¥
+- [x] 文件基线：`config.yaml` 的 `billing.display_currency: CNY`、`billing.fx_rates.CNY: 147567`，
+  用 `internal/config.Load` 校验通过（`ledger=USD display=CNY fx=map[CNY:147567]`）
+- [x] `make build` 已把 `bin/aigw` 更新到 `6a8967d`（运行中的进程仍是旧 inode，报 `06265d2-dirty`）
+- [ ] **待人工执行**（必须在自己终端里跑，DSH 沙箱启动的进程会被回收）：
+  `scripts/local-run.sh restart` —— 让「默认展示币种 = CNY」与最终 M22 二进制生效
+- [x] 注意：汇率在两处（config.yaml 文件 + settings 覆盖），**覆盖优先**；以后只在控制台改就地生效，
+  想让文件成为唯一来源，就在「设置 → 汇率表」清空保存一次
+
 ### M22 实测与收尾
 - [x] `make verify` 全绿（vet + test + build）；`internal/arch` 分层测试未新增包、无需改表
 - [x] 控制台走查：`make ui-check`（headless firefox）新增 `currency` 视图 16 项断言（默认无 ≈、切 CNY 后 ≈ + 正确数值、缺汇率徽标、无页面错误）
