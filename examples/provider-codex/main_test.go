@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,12 +28,209 @@ func newTestProvider(t *testing.T, baseURL, sessionURL, tokenURL string, creds m
 			HealthPath: "/me", TimeoutMS: 5000,
 			Models: []modelConfig{{ID: "codex", UpstreamModel: "gpt-5-codex", ContextWindow: 1000, MaxOutputTokens: 100}},
 		},
-		http:     &http.Client{Timeout: 5 * time.Second},
 		now:      func() time.Time { return time.Now().UTC() },
 		stateDir: t.TempDir(),
+		// Hermetic by default: never consult the developer's ambient proxy
+		// variables. The environment-fallback test injects its own hook.
+		envProxy: func(*http.Request) (*url.URL, error) { return nil, nil },
 	}
+	p.installTransport()
+	p.http.Timeout = 5 * time.Second
+	p.applyProxy()
 	p.SetCredentials(creds)
 	return p
+}
+
+// recordingProxy is a plain-HTTP forwarding proxy: requests for http:// targets
+// arrive with an absolute URI, so no CONNECT or TLS interception is needed. It
+// counts the traffic that actually went through it and forwards it upstream.
+func recordingProxy(t *testing.T, calls *atomic.Int64) *httptest.Server {
+	t.Helper()
+	direct := &http.Client{Transport: &http.Transport{}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		out := r.Clone(r.Context())
+		out.RequestURI = ""
+		resp, err := direct.Do(out)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		for key, values := range resp.Header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// userInput is the minimal request input the proxy tests need.
+func userInput(text string) []pluginapi.Item {
+	content, _ := json.Marshal([]map[string]string{{"type": "input_text", "text": text}})
+	return []pluginapi.Item{{Type: "message", Role: "user", Content: content}}
+}
+
+func TestConfigProxyIsUsedForUpstreamCalls(t *testing.T) {
+	var upstreamCalls, proxyCalls atomic.Int64
+	upstream := sseServer(t, 200, happyFrames, &upstreamCalls)
+	defer upstream.Close()
+	proxy := recordingProxy(t, &proxyCalls)
+
+	p := newTestProvider(t, upstream.URL, upstream.URL+"/session", upstream.URL+"/token",
+		map[string]string{"access_token": "static-token"})
+	p.cfg.Proxy = proxy.URL
+	p.applyProxy()
+
+	if _, err := p.Complete(context.Background(), &pluginapi.Request{Model: "codex", Input: userInput("hi")}); err != nil {
+		t.Fatalf("Complete through the proxy: %v", err)
+	}
+	if proxyCalls.Load() == 0 {
+		t.Fatal("the configured proxy was not used")
+	}
+	if upstreamCalls.Load() == 0 {
+		t.Fatal("the request never reached the upstream")
+	}
+}
+
+func TestCredentialsProxyOverridesConfig(t *testing.T) {
+	upstream := sseServer(t, 200, happyFrames, nil)
+	defer upstream.Close()
+	var configCalls, credCalls atomic.Int64
+	configProxy := recordingProxy(t, &configCalls)
+	credProxy := recordingProxy(t, &credCalls)
+
+	p := newTestProvider(t, upstream.URL, upstream.URL+"/session", upstream.URL+"/token",
+		map[string]string{"access_token": "static-token", "proxy": credProxy.URL})
+	p.cfg.Proxy = configProxy.URL
+	p.applyProxy()
+
+	if _, err := p.Complete(context.Background(), &pluginapi.Request{Model: "codex", Input: userInput("hi")}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if credCalls.Load() == 0 {
+		t.Fatal("the proxy from credentials was not used")
+	}
+	if configCalls.Load() != 0 {
+		t.Fatalf("the configured proxy was used %d times despite the credential override", configCalls.Load())
+	}
+}
+
+func TestProxyUnsetDelegatesToEnvironment(t *testing.T) {
+	upstream := sseServer(t, 200, happyFrames, nil)
+	defer upstream.Close()
+	var envCalls, proxyCalls atomic.Int64
+	envProxy := recordingProxy(t, &proxyCalls)
+
+	p := newTestProvider(t, upstream.URL, upstream.URL+"/session", upstream.URL+"/token",
+		map[string]string{"access_token": "static-token"})
+	// t.Setenv would be unreliable here: net/http memoizes the environment on the
+	// first ProxyFromEnvironment call (envProxyOnce), so the outcome would depend
+	// on test ordering. Inject the hook instead.
+	p.envProxy = func(*http.Request) (*url.URL, error) {
+		envCalls.Add(1)
+		return url.Parse(envProxy.URL)
+	}
+	p.applyProxy()
+
+	if _, err := p.Complete(context.Background(), &pluginapi.Request{Model: "codex", Input: userInput("hi")}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if envCalls.Load() == 0 {
+		t.Fatal("an unset proxy must still consult the environment hook")
+	}
+	if proxyCalls.Load() == 0 {
+		t.Fatal("the proxy returned by the environment hook was not used")
+	}
+}
+
+func TestInvalidProxyIsRejectedAndFailsClosed(t *testing.T) {
+	upstream := sseServer(t, 200, happyFrames, nil)
+	defer upstream.Close()
+
+	for _, bad := range []string{"127.0.0.1:2334", "ftp://127.0.0.1:2121", "http://", "socks5://127.0.0.1"} {
+		t.Run(bad, func(t *testing.T) {
+			p := newTestProvider(t, upstream.URL, upstream.URL+"/session", upstream.URL+"/token",
+				map[string]string{"access_token": "static-token"})
+			p.cfg.Proxy = bad
+			p.applyProxy()
+
+			if err := p.proxyError(); err == nil {
+				t.Fatal("an unusable proxy must be reported")
+			}
+			// A bad proxy value is reported rather than crashing the plugin: a dead
+			// plugin reaches the operator only as "handshake: EOF", which names no
+			// cause. Health is where the console looks.
+			healthErr, ok := pluginapi.IsError(p.Health(context.Background()))
+			if !ok || healthErr.Code != "proxy_invalid" || healthErr.Kind != pluginapi.KindFatal {
+				t.Fatalf("Health error = %+v, want a fatal proxy_invalid", healthErr)
+			}
+			if !strings.Contains(healthErr.Error(), "config") {
+				t.Fatalf("the error should name where the bad value came from: %v", healthErr)
+			}
+			// The request path must fail closed rather than quietly going direct.
+			_, err := p.Complete(context.Background(), &pluginapi.Request{Model: "codex", Input: userInput("hi")})
+			if err == nil {
+				t.Fatal("an unusable proxy must fail the request")
+			}
+			apiErr, ok := pluginapi.IsError(err)
+			if !ok || apiErr.Code != "proxy_invalid" || apiErr.Kind != pluginapi.KindFatal {
+				t.Fatalf("error = %+v, want a fatal proxy_invalid", err)
+			}
+		})
+	}
+}
+
+func TestInvalidProxyFromCredentialsSurfacesInHealth(t *testing.T) {
+	upstream := sseServer(t, 200, happyFrames, nil)
+	defer upstream.Close()
+
+	p := newTestProvider(t, upstream.URL, upstream.URL+"/session", upstream.URL+"/token",
+		map[string]string{"access_token": "static-token"})
+	// A socks5 URL without a port is the realistic mistake; SetCredentials cannot
+	// return an error, so it must surface through Health.
+	p.SetCredentials(map[string]string{"access_token": "static-token", "proxy": "socks5://127.0.0.1"})
+
+	err := p.Health(context.Background())
+	apiErr, ok := pluginapi.IsError(err)
+	if !ok || apiErr.Code != "proxy_invalid" || apiErr.Kind != pluginapi.KindFatal {
+		t.Fatalf("Health error = %+v, want a fatal proxy_invalid", err)
+	}
+	if !strings.Contains(err.Error(), "credentials") {
+		t.Fatalf("the error should name where the bad value came from: %v", err)
+	}
+}
+
+func TestDescribeMasksProxyCredentials(t *testing.T) {
+	p := newTestProvider(t, "http://unused", "http://unused", "http://unused",
+		map[string]string{"access_token": "static-token"})
+	p.cfg.Proxy = "http://alice:s3cret@127.0.0.1:2334"
+	p.applyProxy()
+
+	state, err := p.currentState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(p.describe(state))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, secret := range []string{"s3cret", "alice"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("describe leaked %q: %s", secret, text)
+		}
+	}
+	if !strings.Contains(text, `"proxy":"http://127.0.0.1:2334"`) {
+		t.Fatalf("describe should report the masked proxy: %s", text)
+	}
+	if !strings.Contains(text, `"proxy_source":"config"`) {
+		t.Fatalf("describe should report where the proxy came from: %s", text)
+	}
 }
 
 // sseServer answers the responses endpoint with a fixed event sequence.

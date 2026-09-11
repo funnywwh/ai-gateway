@@ -566,3 +566,69 @@ func TestMergeAndTotalTokens(t *testing.T) {
 		t.Fatalf("total = %d, want 6", got)
 	}
 }
+
+func TestParseProxyURL(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     string
+		want    string // normalized URL, empty means nil
+		wantErr string // substring of the expected error, empty means success
+	}{
+		{name: "empty means unconfigured", raw: "   ", want: ""},
+		{name: "http with port", raw: "http://127.0.0.1:2334", want: "http://127.0.0.1:2334"},
+		{name: "https without port", raw: "https://proxy.example.com", want: "https://proxy.example.com"},
+		{name: "socks5 with port", raw: "socks5://127.0.0.1:1080", want: "socks5://127.0.0.1:1080"},
+		{name: "socks5h with port", raw: "socks5h://10.0.0.9:1080", want: "socks5h://10.0.0.9:1080"},
+		{name: "scheme is lowercased", raw: "HTTP://127.0.0.1:2334", want: "http://127.0.0.1:2334"},
+		{name: "userinfo is preserved", raw: "http://user:pw@127.0.0.1:2334", want: "http://user:pw@127.0.0.1:2334"},
+		{name: "surrounding space is trimmed", raw: "  http://127.0.0.1:2334  ", want: "http://127.0.0.1:2334"},
+
+		{name: "missing scheme is named", raw: "127.0.0.1:2334", wantErr: "must start with a scheme"},
+		{name: "unknown scheme is rejected", raw: "ftp://127.0.0.1:2121", wantErr: "unsupported proxy scheme"},
+		{name: "missing host is rejected", raw: "http://", wantErr: "must include a host"},
+		{name: "socks5 without port is rejected", raw: "socks5://127.0.0.1", wantErr: "socks5 proxy URL must include a port"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseProxyURL(tc.raw)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("ParseProxyURL(%q) = %v, want error containing %q", tc.raw, got, tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %q, want it to contain %q", err.Error(), tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseProxyURL(%q) unexpected error: %v", tc.raw, err)
+			}
+			if tc.want == "" {
+				if got != nil {
+					t.Fatalf("ParseProxyURL(%q) = %v, want nil for an unconfigured proxy", tc.raw, got)
+				}
+				return
+			}
+			if got == nil || got.String() != tc.want {
+				t.Fatalf("ParseProxyURL(%q) = %v, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMaskProxyURLNeverLeaksCredentials(t *testing.T) {
+	u, err := ParseProxyURL("http://alice:s3cret@proxy.example.com:2334")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := MaskProxyURL(u)
+	if got != "http://proxy.example.com:2334" {
+		t.Fatalf("MaskProxyURL = %q, want %q", got, "http://proxy.example.com:2334")
+	}
+	if strings.Contains(got, "s3cret") || strings.Contains(got, "alice") {
+		t.Fatalf("masked URL leaked userinfo: %q", got)
+	}
+	if MaskProxyURL(nil) != "" {
+		t.Fatal("MaskProxyURL(nil) must be empty")
+	}
+}

@@ -237,6 +237,18 @@
 - [x] 动作 whoami/refresh_session/set_token（挂在既有 Providers 详情）；凭据永不回显、不进日志
 - [x] 测试 9 个（假端点覆盖轮换落盘、单飞、invalid_grant、429 reset、session 换取、401→刷新→重试、导入、whoami 不泄露）+ README
 - [x] 端到端实测：真实子进程经宿主拉起，探测 ok=true、流式 2+1 增量、非流式文本与 usage 正确、账本 cost116/charge174（1.5×）、轮换 token 落盘
+
+### M10b 出网代理（`proxy`）
+- [x] 设计文档 docs/design/m10b-codex-egress-proxy.md + 规格文档 plugin-protocol-v1.md §12（先行，已在对话中展示）
+- [x] pkg/providerkit：`ParseProxyURL` / `MaskProxyURL` + 表驱动单测（含「忘记写 scheme」的友好提示）
+- [x] 插件：`config.proxy` 与 `credentials.proxy`（凭据优先）、clone `DefaultTransport` + 动态 `Proxy` 函数（atomic 读，零竞争）、生效值变化时 `CloseIdleConnections`
+- [x] 插件：非法代理**记录并上报**（原计划的 exit 2 被实测推翻：宿主只报 `handshake: EOF`，原因在控制台/网关日志/`/providers/{id}/logs` 三处都看不到）；`Health()` 与请求入口报 fatal `proxy_invalid`；`whoami` 回报脱敏代理与来源
+- [x] 测试：插件 6 例（配置代理命中 / 凭据优先 / 未配置委派环境变量 / 非法配置经 Health+请求双路 fail-closed / 凭据非法 / 不泄露 userinfo）+ providerkit 2 例；并用变异验证测试非空转
+- [x] make verify 全绿（vet + 全量测试 + build，含 `internal/arch` 分层断言）
+- [~] 端到端：本地记录型替身代理验证「配置→宿主→插件→transport→代理」全链路（替身日志见 `CONNECT auth.openai.com:443`、`whoami` 回报来源、撤配置后回到 `unsupported_country_region_territory`）；**真实代理下的 `gpt-5-codex` 成功调用与计量落库待代理可达后补测**
+- [x] 回填设计文档「实现与设计差异」（含 D7 修正与 7 个实现期发现），单提交并引用设计文档路径
+- [ ] 范围外（另立）：内建 provider 接代理，需新增 `internal/providers/httpx → pkg/providerkit` 分层边
+- [ ] 环境前置（非代码缺口）：候选代理 `http://192.168.140.252:2334` 从本机不可达（0.12s 快速 RST，疑似只绑回环）→ 需在客户端开「允许局域网连接」+ 放行入站，或用反向隧道 `ssh -N -R 2334:127.0.0.1:2334 winger@192.168.190.86`
 - [x] M14(1) 会话层抽取 `internal/sessionauth`（口令/会话/限速），`internal/admin` 改为薄适配器（既有测试全绿）
 - [x] M14(1) 迁移 0004：`portal_users`/`portal_sessions`（用户名全局唯一、绑定唯一账户、级联删除）
 - [x] M14(1) `internal/portal` 认证适配器（禁用账号拒登、按用户吊销会话）+ 管理侧门户用户端点（创建/重置/停用，一次性口令只回一次）

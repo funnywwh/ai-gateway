@@ -23,6 +23,8 @@
 **凭据传递（推荐）**：宿主在启动前把凭据写入 `$GW_PLUGIN_STATE_DIR/credentials.json`（**0600**），
 插件启动时读取并可自行删除。这样避免 `/proc/<pid>/environ` 同 UID 可读与 env ~128KB 上限。
 
+插件若需要**出网代理**（境外上游受地区限制等），约定写在插件自己的配置/凭据里，而非宿主进程环境变量——见 §12。
+
 ## 3. 握手
 
 插件 stdout 的**第一行**必须是握手帧：
@@ -174,3 +176,28 @@ func main() {
 ```
 
 参考实现：`examples/provider-replay`（含可控慢流、增量用量、可控失败，用于 E2E 与压测）。
+
+## 12. 出网与代理
+
+需要访问境外上游的插件（地区限制、链路质量），**约定**把代理声明在自己的配置里，而不是依赖宿主进程的
+`HTTPS_PROXY`：环境变量要求重启网关才生效，而配置/凭据变更会让宿主停掉插件进程、下次请求以新配置拉起。
+
+| 位置 | 字段 | 说明 |
+|---|---|---|
+| 配置（非密，明文存储、管理面回显） | `proxy` | 代理 URL，例如 `http://127.0.0.1:2334` |
+| 凭据（AES-GCM 封装，写后不回显） | `proxy` | 覆盖配置值；URL 含 `user:pass` 时填这里 |
+
+规则：
+
+1. **优先级**：`credentials.proxy` > `config.proxy` > 进程环境变量（`HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY`）。
+2. **留空即回退环境变量**，因此不配置代理的插件与不支持代理的插件行为一致，无需开关。
+3. **支持的 scheme**：`http`、`https`、`socks5`、`socks5h`（`net/http` 原生支持，`socks5` 等价于 `socks5h`）。
+   URL 内的 userinfo 由标准库自动转为 `Proxy-Authorization`，插件无需自行实现认证。
+4. **只作用于该插件自己的上游请求**，不影响宿主，也不影响同宿主下的其他插件。
+5. **日志与诊断输出必须脱敏**：只允许出现 `scheme://host[:port]`，绝不包含 userinfo。
+   建议在 `whoami` 之类的只读动作里回报生效代理与来源（`credentials`/`config`/`env`）以便排障。
+6. **错误分类**：代理不可达属**瞬时故障** → `retryable`（允许故障切换）；代理**配置非法**属 `fatal`，不重试。
+7. 代理 URL 的校验由**插件自己**完成：宿主当前不对插件配置执行 schema 校验（`pluginapi.Schema` 尚未接线），
+   因此不得依赖 `config_schema` 里的 `format` 声明来拦截非法值。
+
+参考实现：`examples/provider-codex`（设计与取舍见 `docs/design/m10b-codex-egress-proxy.md`）。

@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/winger/ai-gateway/pkg/pluginapi"
@@ -65,6 +66,10 @@ type config struct {
 	ReasoningEffort string            `json:"reasoning_effort"`
 	TimeoutMS       int               `json:"timeout_ms"`
 	AccountID       string            `json:"account_id"`
+	// Proxy is the egress proxy for every upstream call. Empty means "follow the
+	// process environment" (HTTPS_PROXY/HTTP_PROXY/NO_PROXY), i.e. the behaviour
+	// before M10b. Credentials may override it; see credentialsSchema.
+	Proxy string `json:"proxy"`
 }
 
 var configSchema = json.RawMessage(`{
@@ -79,6 +84,8 @@ var configSchema = json.RawMessage(`{
     "store": {"type": "boolean", "description": "Whether the upstream may store the response (usually false)"},
     "health_path": {"type": "string"},
     "timeout_ms": {"type": "integer", "minimum": 1000},
+    "proxy": {"type": "string", "x-advanced": true,
+      "description": "Egress proxy for upstream calls: http://host:port, https://host:port, socks5://host:port. Empty follows HTTPS_PROXY/NO_PROXY. Only needed when the direct egress is blocked (for example by a region restriction)."},
     "headers": {"type": "object"},
     "models": {"type": "array", "items": {"type": "object"}}
   }
@@ -93,7 +100,9 @@ var credentialsSchema = json.RawMessage(`{
     "client_id": {"type": "string"},
     "token_endpoint": {"type": "string"},
     "token_file": {"type": "string", "description": "Import tokens from a local file once (for example a CLI auth.json)"},
-    "account_id": {"type": "string"}
+    "account_id": {"type": "string"},
+    "proxy": {"type": "string", "x-secret": true,
+      "description": "Overrides the configured proxy. Put it here when the URL carries credentials (user:pass), because config is stored and displayed in clear text while credentials are sealed."}
   }
 }`)
 
@@ -109,11 +118,28 @@ type session struct {
 	LastError             string     `json:"last_error"`
 }
 
+// proxySetting is one immutable view of the egress proxy in force. It is swapped
+// as a whole through an atomic pointer so the request path never locks and never
+// races with a credential push.
+type proxySetting struct {
+	url    *url.URL // nil with err == nil means "not configured: follow the environment"
+	source string   // credentials | config | env
+	err    error    // non-nil means the configured value is unusable
+}
+
 type provider struct {
 	cfg      config
 	stateDir string
 	http     *http.Client
 	now      func() time.Time
+
+	// transport is shared for the whole process; only its Proxy hook changes.
+	transport *http.Transport
+	proxy     atomic.Pointer[proxySetting]
+	// envProxy is a seam for tests: the standard library memoizes the environment
+	// on first use (net/http envProxyOnce), so asserting the fallback behaviour via
+	// t.Setenv would depend on test ordering.
+	envProxy func(*http.Request) (*url.URL, error)
 
 	mu          sync.Mutex
 	creds       map[string]string
@@ -125,10 +151,14 @@ type provider struct {
 
 func main() {
 	p := &provider{
-		cfg:  config{HealthPath: "/me", TimeoutMS: 300000},
-		http: &http.Client{},
-		now:  func() time.Time { return time.Now().UTC() },
+		cfg:      config{HealthPath: "/me", TimeoutMS: 300000},
+		now:      func() time.Time { return time.Now().UTC() },
+		envProxy: http.ProxyFromEnvironment,
 	}
+	// Clone the stock transport so the dial/TLS timeouts and HTTP/2 support the
+	// standard library tuned for us are preserved; only Proxy is replaced.
+	p.installTransport()
+
 	if raw := os.Getenv(pluginapi.EnvConfig); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &p.cfg); err != nil {
 			fmt.Fprintln(os.Stderr, "provider-codex: bad GW_PLUGIN_CONFIG:", err)
@@ -136,6 +166,11 @@ func main() {
 		}
 	}
 	p.stateDir = os.Getenv(pluginapi.EnvStateDir)
+	// applyDefaults validates the configured proxy and records any fault. A bad
+	// proxy value is deliberately NOT a startup exit: the host surfaces a dead
+	// plugin only as "handshake: EOF" (its stderr is not visible in the console nor
+	// in the gateway log), whereas a recorded fault reaches the operator as the
+	// provider's last_error, e.g. "proxy_invalid: provider-codex: bad config proxy: ...".
 	p.applyDefaults()
 	if err := pluginapi.Serve(p); err != nil {
 		fmt.Fprintln(os.Stderr, "provider-codex:", err)
@@ -164,6 +199,99 @@ func (p *provider) applyDefaults() {
 		p.cfg.TimeoutMS = 300000
 	}
 	p.http.Timeout = time.Duration(p.cfg.TimeoutMS) * time.Millisecond
+	p.applyProxy()
+}
+
+// ---------------------------------------------------------------------------
+// egress proxy
+// ---------------------------------------------------------------------------
+
+// installTransport wires the shared client whose transport carries the dynamic
+// Proxy hook. Only Proxy is replaced: cloning DefaultTransport keeps the dial and
+// TLS timeouts and the HTTP/2 opt-in that the standard library chose.
+func (p *provider) installTransport() {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{}
+	}
+	p.transport = base.Clone()
+	p.transport.Proxy = p.proxyFor
+	p.http = &http.Client{Transport: p.transport}
+}
+
+// effectiveProxy resolves the proxy in force: credentials beat config, and an
+// empty value means "follow the process environment" (the pre-M10b behaviour).
+func (p *provider) effectiveProxy() *proxySetting {
+	raw, source := strings.TrimSpace(p.credential("proxy")), "credentials"
+	if raw == "" {
+		raw, source = strings.TrimSpace(p.cfg.Proxy), "config"
+	}
+	if raw == "" {
+		return &proxySetting{source: "env"}
+	}
+	u, err := providerkit.ParseProxyURL(raw)
+	if err != nil {
+		return &proxySetting{source: source, err: fmt.Errorf("provider-codex: bad %s proxy: %w", source, err)}
+	}
+	return &proxySetting{url: u, source: source}
+}
+
+// applyProxy installs the current setting. It runs at startup and whenever
+// credentials arrive; the request path only ever reads the atomic pointer.
+func (p *provider) applyProxy() {
+	next := p.effectiveProxy()
+	prev := p.proxy.Load()
+	p.proxy.Store(next)
+	if prev != nil && proxyKey(prev) != proxyKey(next) && p.transport != nil {
+		// Pooled connections were dialled through the previous route; drop them so
+		// the change applies to the next request instead of the next reconnect.
+		p.transport.CloseIdleConnections()
+	}
+}
+
+// proxyKey is the identity used to notice a change. Source and error are
+// deliberately excluded so a credential push that does not move the URL does not
+// churn the connection pool.
+func proxyKey(s *proxySetting) string {
+	if s == nil || s.url == nil {
+		return ""
+	}
+	return s.url.String()
+}
+
+// proxyFor is the transport's Proxy hook: it returns the configured proxy, or
+// falls back to the environment when none is configured. Returning an error here
+// fails the request with a readable message, which is why no call site needs a
+// special case for an invalid setting.
+func (p *provider) proxyFor(req *http.Request) (*url.URL, error) {
+	s := p.proxy.Load()
+	if s == nil || (s.err == nil && s.url == nil) {
+		return p.envProxyFor(req)
+	}
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.url, nil
+}
+
+// envProxyFor guards the test seam: a provider built directly in a test may not
+// have set envProxy.
+func (p *provider) envProxyFor(req *http.Request) (*url.URL, error) {
+	if p.envProxy == nil {
+		return nil, nil
+	}
+	return p.envProxy(req)
+}
+
+// proxyError surfaces an unusable proxy setting as a fatal protocol error:
+// retrying or failing over cannot fix a typo, and the operator sees the reason in
+// the provider's health and last_error.
+func (p *provider) proxyError() error {
+	s := p.proxy.Load()
+	if s == nil || s.err == nil {
+		return nil
+	}
+	return pluginapi.NewError("proxy_invalid", s.err.Error())
 }
 
 func (p *provider) Info() pluginapi.Info {
@@ -205,6 +333,9 @@ func (p *provider) SetCredentials(creds map[string]string) {
 	p.mu.Lock()
 	p.creds = creds
 	p.mu.Unlock()
+	// Credentials may carry a proxy override, and SetCredentials has no error
+	// return, so an invalid value is recorded and reported through Health.
+	p.applyProxy()
 }
 
 func (p *provider) credential(name string) string {
@@ -895,6 +1026,12 @@ func (p *provider) resolveAccountID(state session, snap credSnapshot) string {
 // Stream performs one streaming attempt, refreshing the token once if the upstream
 // rejects it. Every event is translated into the canonical plugin events.
 func (p *provider) Stream(ctx context.Context, req *pluginapi.Request, emit func(pluginapi.Event) error) error {
+	// Fail an unusable proxy setting as fatal before any token or network work.
+	// Without this the transport error would be classified retryable and the
+	// router would waste attempts failing over on a configuration typo.
+	if err := p.proxyError(); err != nil {
+		return err
+	}
 	body, err := p.buildRequest(req, true)
 	if err != nil {
 		return err
@@ -1092,6 +1229,9 @@ func (p *provider) Complete(ctx context.Context, req *pluginapi.Request) (*plugi
 }
 
 func (p *provider) Health(ctx context.Context) error {
+	if err := p.proxyError(); err != nil {
+		return err
+	}
 	token, err := p.ensureToken(ctx, false)
 	if err != nil {
 		return err
@@ -1203,6 +1343,20 @@ func (p *provider) describe(state session) map[string]any {
 	if state.LastRefreshAt != nil {
 		payload["last_refresh_at"] = state.LastRefreshAt.UTC().Format(time.RFC3339)
 	}
+	// The effective egress proxy, masked: an operator needs to confirm the setting
+	// took effect, but the URL may carry credentials.
+	proxyValue, proxySource := "", "env"
+	if s := p.proxy.Load(); s != nil {
+		proxySource = s.source
+		switch {
+		case s.err != nil:
+			proxyValue = "invalid"
+		case s.url != nil:
+			proxyValue = providerkit.MaskProxyURL(s.url)
+		}
+	}
+	payload["proxy"] = proxyValue
+	payload["proxy_source"] = proxySource
 	return payload
 }
 
