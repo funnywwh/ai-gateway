@@ -24,7 +24,21 @@ window.fetch = async (url, options) => {
     window.__sent = window.__sent || {};
     window.__sent[path] = options.body;
   }
+  // __detailOverride answers one request-log id with an empty body — a 200 whose payload
+  // api.js parses to null — and lists it as a second row so the page can be asked for that
+  // detail. Without it the fixtures only ever describe a readable row, which is how the
+  // requests page shipped with an unguarded dereference of that null.
+  if (window.__detailOverride && path === '/requests/' + window.__detailOverride) {
+    return { ok: true, status: 200, text: async () => '' };
+  }
+  if (window.__detailOverride && path === '/requests') {
+    const list = FIXTURES['/requests'];
+    const row = { ...list.data[0], request_id: window.__detailOverride };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ ...list, count: 2, total: 2, data: list.data.concat([row]), has_more: false }) };
+  }
   const body = FIXTURES[path] !== undefined ? FIXTURES[path] : { data: [] };
+  // A fixture of null stands for an empty body: api.js parses that to null, not to {}.
+  if (body === null) return { ok: true, status: 200, text: async () => '' };
   return { ok: true, status: 200, text: async () => JSON.stringify(body) };
 };
 const errors = [];
@@ -139,6 +153,23 @@ try {
     closeButton().click();
     await settle();
     checks.closeDismisses = modal().querySelectorAll('.modal, .modal-backdrop').length === 0;
+
+    // A detail whose body is empty parses to null. That used to throw a TypeError inside
+    // the click handler and leave the operator with an empty screen and a console stack,
+    // so the page must report it on screen and stay usable. The window is reloaded first:
+    // the row whose detail is empty is a separate fixture row.
+    window.__detailOverride = 'req_pruned0002';
+    const spent = errors.length;
+    find('刷新').click();
+    await settle();
+    const prunedRow = [...document.querySelectorAll('tbody tr')].find((tr) => tr.textContent.includes('req_pruned0002'));
+    checks.nullBodyRowListed = !!prunedRow;
+    if (prunedRow) [...prunedRow.querySelectorAll('button')].find((b) => b.textContent.trim() === '详情').click();
+    await settle();
+    checks.clickWithoutRejection = errors.length === spent;
+    checks.emptyDetailExplained = [...document.querySelectorAll('.toast')].some((n) => n.textContent.includes('详情为空'));
+    checks.noDialogOnEmpty = modal().querySelectorAll('.modal').length === 0;
+    window.__detailOverride = null;
   }
 
   const flags = Object.entries(checks).filter(([, v]) => typeof v === 'boolean');

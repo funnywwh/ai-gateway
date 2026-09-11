@@ -612,14 +612,30 @@ func jsonOrEmptyArray(raw string) any {
 	if strings.TrimSpace(raw) == "" {
 		return []any{}
 	}
-	return json.RawMessage(raw)
+	return jsonOrNil(raw)
 }
 
+// jsonOrNil embeds a stored payload in a response: JSON documents are handed over as
+// JSON so the console can render their structure, and plain text is handed over as a
+// string.
+//
+// The distinction is not cosmetic. A recorded column holds either a JSON document
+// (request_json, output_json) or plain prose (response_text, response_reasoning — the
+// model's own words, appended as text), and encoding/json *fails* on a json.RawMessage
+// that is not valid JSON. That failure happens inside the encoder, after the status line
+// has already gone out, so the answer was a 200 with a completely empty body — which the
+// console's api.get() parses to null and then dereferences. Recording output text on a
+// Key was therefore enough to make every one of its request details unopenable.
 func jsonOrNil(raw string) any {
 	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
-	return json.RawMessage(raw)
+	if json.Valid([]byte(raw)) {
+		return json.RawMessage(raw)
+	}
+	// Text/plain columns and any payload truncated mid-escape: a JSON string always
+	// encodes, and the console shows it verbatim (as it does for a plain string today).
+	return raw
 }
 
 func marshalOrEmpty(v any) string {

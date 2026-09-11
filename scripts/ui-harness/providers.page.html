@@ -19,6 +19,8 @@ window.fetch = async (url) => {
   if (path === '/providers/2/test') window.__handshakeDone = true;
   let body = FIXTURES[path] !== undefined ? FIXTURES[path] : { data: [] };
   if (path === '/providers/2' && window.__handshakeDone) body = FIXTURES['/providers/2-after'];
+  // A fixture of null stands for a 200 with an empty body, which api.js parses to null.
+  if (body === null) return { ok: true, status: 200, text: async () => '' };
   return { ok: true, status: 200, text: async () => JSON.stringify(body) };
 };
 const errors = [];

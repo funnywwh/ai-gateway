@@ -1268,3 +1268,92 @@ func TestPruneRequestsReportsDisabledRetention(t *testing.T) {
 		t.Fatalf("retention_days=0 must report disabled: %v", payload)
 	}
 }
+
+// TestAdminRequestDetailRendersProseColumns pins the shape of a recorded row that made
+// the detail endpoint unusable: request_json is a JSON document, but response_text and
+// response_reasoning hold the model's own words as plain text.
+//
+// Wrapping prose in json.RawMessage makes encoding/json fail *inside* the encoder, after
+// the 200 status line has already been written, so the answer was an empty body. The
+// console's api.get() parses that to null and dereferences it, which is the "Cannot read
+// properties of null (reading 'input_recorded')" an operator sees when a Key records
+// output text. The row has to arrive with the prose readable instead.
+func TestAdminRequestDetailRendersProseColumns(t *testing.T) {
+	f := newAdminFixture(t)
+	ctx := context.Background()
+	cookie := f.login(t, adminUser, adminPassword)
+
+	const output = "The fix is a one-line guard: json.Valid before json.RawMessage."
+	const reasoning = "Weigh the two shapes: a document and a paragraph."
+	if err := f.db.PutRequestLog(ctx, &domain.RequestLogRecord{
+		RequestID: "req_prose", AccountID: 1, APIKeyID: 1, Endpoint: "/v1/responses",
+		RequestJSON: `{"input":[{"role":"user","content":"hi"}]}`, RequestBytes: 40,
+		ResponseText: output, ResponseReasoning: reasoning,
+		OutputTextRecorded: true, ReasoningRecorded: true, Status: "completed",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed request log: %v", err)
+	}
+
+	resp := f.call(t, http.MethodGet, "/admin/api/v1/requests/req_prose", "", cookie)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("detail status = %d, want 200", resp.StatusCode)
+	}
+	// The regression is only visible on the wire: the status was 200 even when the encoder
+	// gave up, so the body itself has to be checked for a document.
+	raw, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) == 0 {
+		t.Fatal("the detail answer must carry a body: an empty 200 parses to null in the console")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("detail body is not a JSON object (%v): %s", err, raw)
+	}
+	if got, _ := payload["output"].(string); got != output {
+		t.Errorf("output = %#v, want the recorded prose as a string", payload["output"])
+	}
+	if got, _ := payload["reasoning"].(string); got != reasoning {
+		t.Errorf("reasoning = %#v, want the recorded prose as a string", payload["reasoning"])
+	}
+	// A JSON-document column keeps its structure: the console renders objects as such.
+	input, ok := payload["input"].(map[string]any)
+	if !ok {
+		t.Fatalf("input = %#v, want the stored JSON document as an object", payload["input"])
+	}
+	if _, ok := input["input"]; !ok {
+		t.Errorf("input lost its fields: %#v", input)
+	}
+	if payload["input_recorded"] != true || payload["output_text_recorded"] != true {
+		t.Errorf("recording flags = %v/%v, want both true", payload["input_recorded"], payload["output_text_recorded"])
+	}
+}
+
+// TestWriteJSONNeverSendsABodylessSuccess pins the transport-level rule behind the bug
+// above: a payload the encoder cannot handle must not leave a 200 with an empty body,
+// because no client can tell that apart from an empty answer.
+func TestWriteJSONNeverSendsABodylessSuccess(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeJSON(rec, http.StatusOK, map[string]any{"broken": json.RawMessage("{not json")})
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("status = %d: an unencodable payload must not be reported as success", rec.Code)
+	}
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatal("the failure itself must be described in the body")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("error body is not JSON (%v): %s", err, rec.Body.String())
+	}
+	if _, ok := payload["error"]; !ok {
+		t.Fatalf("error body lacks the envelope: %s", rec.Body.String())
+	}
+}

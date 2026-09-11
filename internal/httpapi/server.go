@@ -2,6 +2,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -460,10 +461,22 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	_ = balances
 }
 
+// writeJSON writes one JSON answer. The payload is encoded before the status line goes
+// out: encoding/json reports a value it cannot encode (a json.RawMessage holding
+// something that is not JSON, a NaN, a channel) as an error *after* the status has been
+// committed, which used to hand the caller a 200 with no body at all — a shape no client
+// can tell from an empty payload, and one the console parsed to null before
+// dereferencing it. A body that cannot be produced is now a 500 that says so.
 func writeJSON(w http.ResponseWriter, status int, payload any) {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(payload); err != nil {
+		slog.Default().Error("encoding an API response failed", "err", err, "status", status)
+		writeAPIError(w, domain.ErrInternal("failed to encode the response"))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+	_, _ = w.Write(buf.Bytes())
 }
 
 // normalizedModel strips an optional @provider suffix for presentation purposes.

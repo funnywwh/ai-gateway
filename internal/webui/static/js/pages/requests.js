@@ -66,7 +66,12 @@ export async function render({ page, actions, session }) {
       { key: 'reasoning_recorded', label: '思考文本', render: (row) => row.reasoning_recorded ? badge('已录制', 'ok') : badge('未录制') },
     ],
     empty: '该窗口内没有请求日志',
-    rowActions: (row) => [el('button', { class: 'btn', text: '详情', onclick: () => detail(row.request_id) })],
+    rowActions: (row) => [el('button', {
+      class: 'btn', text: '详情',
+      // The click handler owns the failure: an unawaited promise here would surface as
+      // "Uncaught (in promise)" in the console instead of a message on screen.
+      onclick: () => detail(row.request_id).catch((err) => toast(api.errorMessage(err), 'error')),
+    })],
     load: ({ limit, offset }) => api.get('/requests', { days: days.value, limit, offset }),
     onError: (err) => toast(api.errorMessage(err), 'error'),
   });
@@ -86,6 +91,13 @@ export async function render({ page, actions, session }) {
 
 async function detail(requestID) {
   const row = await api.get('/requests/' + encodeURIComponent(requestID));
+  // api.get answers with whatever the body parsed to: an empty or unparseable body is
+  // null, not an object. Dereferencing that used to throw a TypeError inside the click
+  // handler, which left the operator with nothing but "Cannot read properties of null"
+  // in the console — so an answer that is not a log row is reported, not assumed away.
+  if (!row || typeof row !== 'object') {
+    throw new Error('该请求的详情为空（服务端未返回内容），日志可能刚好被保留期清理，请刷新列表');
+  }
   const body = el('div', { class: 'split' }, [
     panel('输入' + (row.input_recorded ? '' : '（未录制）'), row.input),
     panel('思考文本' + (row.reasoning_recorded ? '' : '（未录制）'), row.reasoning),
