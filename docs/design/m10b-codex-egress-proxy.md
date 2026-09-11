@@ -262,6 +262,29 @@ func (p *provider) proxyError() error
    - 撤掉代理配置后探测回到 `unsupported_country_region_territory`，替身日志无新增流量
      ——**证明未配置时的默认路径未被破坏**。
 
-8. **未完成的部分**：真实代理下的成功链路（`gpt-5-codex` 真实调用出字、计量落库）**尚未验证**，
-   因为候选代理 `http://192.168.140.252:2334` 从本机不可达（0.12s 快速 RST，疑似只绑回环）。
-   这是环境前置条件，不是实现缺口；打通后按 `docs/TODO.md` 的 M10b 验收项补测即可。
+8. **真实代理下的端到端（2026-09-11 补测）**：代理 `http://192.168.140.252:2334` 可用后完成实测，**M10b 的目标全部达成**：
+
+   | 环节 | 结果 |
+   |---|---|
+   | 出口地区 | `ipinfo` 由国家 **CN** 变为 **PH**（Manila）；探测不再报 `unsupported_country_region_territory` |
+   | 凭据刷新 | **成功**。`whoami` 报出新的 `expires_at=2026-09-21`、`last_refresh_at`，且轮换后的 refresh_token 已由插件落盘到 `session.json` |
+   | 推理端点 | 已穿过 Cloudflare，返回**鉴权后的业务响应**（HTTP 400 + JSON），证明地区与凭据两道门都过了 |
+   | 代理生效 | `whoami` 报 `proxy=http://192.168.140.252:2334`、`proxy_source=config` |
+
+   **未出字的原因不在本里程碑范围**：账号侧无 Codex 授权——`GET /backend-api/codex/models?client_version=0.50.0` 带鉴权返回 `{"models":[]}`，
+   所有模型 id（`gpt-5`/`gpt-5-codex`/`codex-mini-latest`/`o3`/`gpt-5.1-codex`）均被拒为
+   `The '<id>' model is not supported when using Codex with a ChatGPT account.`；三种 `chatgpt-account-id` 取值
+   （不带 / 账号 id / 组织 id）结果一致。另试过 Codex CLI 的客户端身份头（`OpenAI-Beta`、`originator: codex_cli_rs`、`User-Agent`、`session_id`），均不影响。
+   → 结论：属账号订阅授权问题，需账号侧开通后才能完成"成功出字 + 计量落库"的最后一步。
+
+9. **这次真实调用额外暴露两个 M10 适配器缺陷（不在 M10b 范围，已记入 `docs/TODO.md`）**：
+
+   - `upstreamMessage` 只识别 `{"error":{"message"}}` 与 `{"message"}`，而该上游对这类错误用的是
+     **`{"detail":"…"}`**（FastAPI 形状），于是把唯一有诊断价值的那句话丢成
+     `the upstream returned 400 Bad Request`。本次定位正是靠手工 curl 才拿到 `detail` 原文——
+     这说明"错误正文丢失"是真实排障成本的来源，不是洁癖问题。
+   - 健康检查打 `base_url + /me`，而 `/me` 在此出口被 **Cloudflare 挑战**
+     （403 + `cf-mitigated: challenge` + HTML 正文），被 `classifyResponse` 归为
+     `token_expired: the upstream rejected the credentials; refresh them and try again`——
+     **完全误导**：凭据当时刚刚刷新成功。实测 `/backend-api/codex/models?client_version=…`
+     带鉴权返回 200 且未被挑战，是更合适的健康探针。两项都建议另立里程碑处理。
