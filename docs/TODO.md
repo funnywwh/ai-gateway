@@ -655,10 +655,21 @@
 - [x] `make verify` 全绿（vet + test + build）；`internal/arch` 未新增包、无需改表
 - [x] 文件基线：`config.example.yaml` 的 `recording.record_input: user`；README 状态与设计文档行刷新
 - [x] 运行态：`config.yaml` 的 `record_input` 由 `metadata` 改为 `user`（语义已变，必须显式改）
-- [ ] **待人工执行**（必须在自己终端里跑，DSH 沙箱启动的进程会被回收）：
-  `scripts/local-run.sh restart` —— 让新的录制口径、配额校验与控制台资源生效
-- [ ] 重启后实测：真实请求的新行只含用户输入（工具输出标记不出现）、`record_input_mode=user`；
-  PATCH 切 `full` 后正文含标记；PATCH 嵌套 policy 得 400
+- [x] **已人工执行**：`scripts/local-run.sh restart` —— 新二进制（`/healthz` → `f990a75`）与
+  `config.yaml` 的 `record_input: user` 已在 8088 生效，控制台内嵌资源同步（`/admin/ui/js/pages/keys.js`
+  已是四档 + 无 `'meta'`）
+- [x] 重启后实测（真库 `data/aigw-local.db`，未改任何策略、录制模式用完即复原为 inherit）：
+  * 默认（inherit → user）：新行 `mode=user request_bytes=506`，正文只含 `M23 live check`，
+    工具输出 `ZZ_LIVE_MARKER`、系统指令、assistant 轮次均不出现，`omitted` 计数齐全，思考/输出为空
+  * PATCH `record_input_mode=metadata` → 新行 `mode=metadata request_json='' request_bytes=506`
+    （证明 PATCH 真的落库，旧实现会被 `UpsertAPIKey` 覆盖回旧值）；随后 PATCH 回 `inherit` 并复验成功
+  * 写守卫：嵌套 `{"rate_limit":{"rpm":60}}` → 400 且错误里列出可接受字段；`'meta'` → 400；
+    `GET /keys` 能读回 `policy`（当前为 null）
+  * 实测顺带发现：重启前日志里有 **20 次** `recording request content failed ... context deadline
+    exceeded`，其中至少 2 个请求**整行都没落库**（正文 ~985 KB，撞上 `max_bytes` 上限），
+    正是 M19 那类「要排障的请求恰恰没记录」；默认改 `user`（~500 B/行）后这类超时预期基本消失
+- [ ] 观察项：若仍有 `put request log` 超时，考虑把请求日志写入移出 5s 的 `auditWriteTimeout`
+  或按行大小做背压（与 M13 的「减少每请求写入」是同一条线）
 - [ ] 另立：**实现月度配额**（`monthly_*` 目前只解析不执行）——需要读 `usage_counters` + 缓存 +
   结算后失效，注意不要给请求路径增加无谓的打库开销
 - [ ] 另立：死设置键（`recording.default`/`recording.max_bytes`/`mcp.max_query_rows`/`backup.retention`）
