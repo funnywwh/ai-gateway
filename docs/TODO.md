@@ -214,6 +214,28 @@
 - [ ] v2：备份到对象存储/异地同步（规格已声明不在 v1 范围）
 
 ## M17 完善内置供应商（openai-chat）：DeepSeek 适配与思考模式
+- [ ] **实测发现的语义缺陷（待定方案）**：`response_format` 被**无条件下发**到每个上游请求
+  （`internal/providers/openaichat/openaichat.go:432`），且该 provider **从不读取请求里的 `text.format`**。
+  但 `docs/api-providers.md` 把它定义为"上游真实支持到哪一档"的**能力申报**——两者语义冲突：一旦声明
+  `json_object`，**所有**请求都被强制 JSON 模式。真实后果（2026-09-11 实测）：DeepSeek 对任何不含 "json"
+  字样的提示词直接 400（`Prompt must contain the word 'json' in some form to use 'response_format' of type
+  'json_object'`），该供应商因此只能服务 JSON 类请求、普通流量全失败（DSH 的真实流量即如此）。
+  本部署已从供应商配置里移除该键（`config.yaml` 有注释说明），但**代码层的语义**仍需定夺：
+  是"能力上限 + 按请求档位下发"（读 `req.Text`），还是保留"配置即下发"。`config.example.yaml:186`
+  的 DeepSeek 片段当前会把这个坑带给新用户，方案定了要一并改。
+- [x] **用 DSH 本体做端到端验证（deepseek-flash，2026-09-11）**：DSH 默认模型是 `aigw/gpt-5.6-luna`
+  （`~/.dsh/settings.yaml` 的 `agent-default-model`），验证时改用 `deepseek-flash`。沙箱内 `~/.dsh` 只读、
+  DSH 启动 profile 要写 `profiles/*/package.json`，故用 `DSH_HOME` 重定向搭等价配置（拷 `settings.yaml`
+  与 headless profile、`node_modules` 用符号链接、密钥只走 `AIGW_API_KEY` 环境变量不落盘）：
+  ```sh
+  export DSH_HOME=<工作区内的临时目录> AIGW_API_KEY=<网关 Key>
+  node <DSH>/lib/bin.js --profile headless "用一句话回答：1+1 等于几？不要使用任何工具"
+  ```
+  - 结果：stdout `1+1 等于 2。`、**退出码 0**；网关侧 `model=deepseek-flash provider_id=15 status=completed`，
+    真实用量 `input_cache_miss=7909 output=8`。
+  - 带工具的任务同样通过：读 `README.md` 首行 → 输出 `# ai-gateway`、退出码 0；网关侧是标准多轮工具往返
+    （14:24:44→45→46 三次调用，缓存命中 138 → 7552 → 7808），说明 system 提示词（约 7900 token）、
+    tools 定义、工具结果回灌、缓存计量四条链路都正常。
 - [x] 设计文档 docs/design/m17-openaichat-deepseek.md（已在对话中输出）+ 规格文档 docs/api-providers.md（状态：已实现 M17）
 - [x] 决策：内置而非插件（`pkg/providerkit` 翻译层 367 行 + `internal/` 97 行插件不可引用，做插件等于复制两份并各修一遍）；不新增 `deepseek` kind（只能是预设壳，却要改 registry 三处 + 分层表）
 - [x] 能力开关（默认=既有行为，升级不改任何部署）：`thinking.mode/style/replay_reasoning_content`、`response_format`、`default_max_output_tokens`，枚举非法即构建失败

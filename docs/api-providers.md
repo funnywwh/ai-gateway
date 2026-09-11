@@ -40,6 +40,13 @@
 | `thinking.style` | `none` | `deepseek` → 下发 `{"thinking":{"type":"enabled\|disabled"}}`；`none` → 不下发（通用形态） |
 | `thinking.replay_reasoning_content` | `false` | 把历史 `reasoning` 项正文回传为 assistant 的 `reasoning_content`（带工具的多轮必需，见 §4） |
 | `response_format` | `text` | 上游真实支持到哪一档：`text`（不下发）/`json_object`/`json_schema`。**能力申报要与它一致** |
+
+> ⚠️ **当前实现是"配置即下发"，与上表的"能力申报"语义不一致**（已记账待定夺）：
+> `response_format` 会被**无条件**写入每个上游请求（`internal/providers/openaichat/openaichat.go:432`），
+> 而该 provider **不读取请求里的 `text.format`**。因此声明 `json_object` 会把**所有**请求变成 JSON 模式。
+> 真实后果：DeepSeek 对任何不含 "json" 字样的提示词直接 400
+> （`Prompt must contain the word 'json' in some form to use 'response_format' of type 'json_object'`），
+> 该供应商于是只能服务 JSON 类请求。**除非你确实要让全部流量走 JSON 模式，否则保持 `text`（默认）。**
 | `default_max_output_tokens` | `0` | `>0` 且客户端未给 `max_output_tokens` 时才补，只影响在途额度预留，不吃掉上游默认 |
 
 枚举取值非法 → 供应商构建失败（不静默降级）：`thinking.mode`、`thinking.style`、`response_format` 均校验；
