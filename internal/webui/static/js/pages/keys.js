@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, table, modal, toast, statusBadge, formatTime, confirmDialog, modalHead } from '../ui.js';
+import { el, card, table, modal, toast, statusBadge, formatTime, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
 
 const INPUT_MODES = [
   { value: 'inherit', label: '继承全局默认（输入 full）' },
@@ -125,9 +125,11 @@ function showSecret(title, secret, after) {
     // The ✕ abandons the reveal without the refresh, exactly like closing the
     // dialog by hand: the secret is already stored server-side either way.
     modalHead(title, () => backdrop.remove()),
-    el('p', { class: 'muted', text: '这是明文唯一一次出现，关闭后无法再次获取。' }),
-    box,
-    el('div', { class: 'modal-actions' }, [copy, done]),
+    modalBody([
+      el('p', { class: 'muted', text: '这是明文唯一一次出现，关闭后无法再次获取。' }),
+      box,
+    ]),
+    modalActions([copy, done]),
   ]);
   const backdrop = el('div', { class: 'modal-backdrop' }, [dialog]);
   done.addEventListener('click', async () => { backdrop.remove(); await after(); });

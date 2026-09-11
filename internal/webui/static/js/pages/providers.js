@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, table, modal, toast, badge, jsonBlock, formatTime, confirmDialog, withBusy, modalHead } from '../ui.js';
+import { el, card, table, modal, toast, badge, jsonBlock, formatTime, confirmDialog, withBusy, modalHead, modalBody, modalActions } from '../ui.js';
 
 const KINDS = ['openai-chat', 'openai-responses', 'testecho'];
 const CONFIG_HINT = JSON.stringify({ base_url: 'https://api.example.com/v1' }, null, 2);
@@ -122,8 +122,9 @@ async function detail(row, reload, readonly) {
   const restart = el('button', { class: 'btn', text: '重启进程', disabled: readonly });
   const close = el('button', { class: 'btn', text: '关闭' });
   const dialog = el('div', { class: 'modal', style: 'width:min(900px,100%)' }, [
-    modalHead('供应商 ' + row.name, () => backdrop.remove()), body,
-    el('div', { class: 'modal-actions' }, [refreshModels, restart, editBtn, close]),
+    modalHead('供应商 ' + row.name, () => backdrop.remove()),
+    modalBody([body]),
+    modalActions([refreshModels, restart, editBtn, close]),
   ]);
   const backdrop = el('div', { class: 'modal-backdrop' }, [dialog]);
   close.addEventListener('click', () => backdrop.remove());
@@ -281,9 +282,11 @@ async function kindDocs(reload) {
   const close = el('button', { class: 'btn', text: '关闭', onclick: () => backdrop.remove() });
   const dialog = el('div', { class: 'modal', style: 'width:min(1000px,100%)' }, [
     modalHead('内建供应商类型：支持的配置说明', () => backdrop.remove()),
-    el('p', { class: 'muted', text: '插件类型（plugin:<名称>）的字段由插件在握手时声明，见该供应商详情页的「配置说明」。' }),
-    body,
-    el('div', { class: 'modal-actions' }, [close]),
+    modalBody([
+      el('p', { class: 'muted', text: '插件类型（plugin:<名称>）的字段由插件在握手时声明，见该供应商详情页的「配置说明」。' }),
+      body,
+    ]),
+    modalActions([close]),
   ]);
   const backdrop = el('div', { class: 'modal-backdrop' }, [dialog]);
   backdrop.addEventListener('click', (ev) => { if (ev.target === backdrop) backdrop.remove(); });
@@ -360,7 +363,7 @@ async function runAction(row, action) {
   const result = await api.post('/providers/' + row.id + '/actions/' + action.name, params);
   toast('动作已执行', 'ok');
   const body = el('pre', { class: 'mono', text: JSON.stringify(result.result, null, 2) });
-  const dialog = el('div', { class: 'modal' }, [modalHead('动作结果', close), body]);
+  const dialog = el('div', { class: 'modal' }, [modalHead('动作结果', close), modalBody([body])]);
   const backdrop = el('div', { class: 'modal-backdrop' }, [dialog]);
   // The result is read-only text, so the round ✕ is the close affordance. Closing
   // is bound to the backdrop (not to the dialog, which used to dismiss the result

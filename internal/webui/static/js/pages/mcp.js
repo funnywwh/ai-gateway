@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, table, modal, toast, statusBadge, formatTime, confirmDialog, modalHead } from '../ui.js';
+import { el, card, table, modal, toast, statusBadge, formatTime, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
 
 export async function render({ page, actions, session }) {
   const readonly = session.role !== 'admin';
@@ -72,9 +72,11 @@ function showToken(token, after) {
   const done = el('button', { class: 'btn btn-primary', text: '我已保存' });
   const dialog = el('div', { class: 'modal' }, [
     modalHead('MCP 令牌已签发', () => backdrop.remove()),
-    el('p', { class: 'muted', text: '明文只显示一次。客户端用 Authorization: Bearer <token> 调用 POST /mcp。' }),
-    box,
-    el('div', { class: 'modal-actions' }, [done]),
+    modalBody([
+      el('p', { class: 'muted', text: '明文只显示一次。客户端用 Authorization: Bearer <token> 调用 POST /mcp。' }),
+      box,
+    ]),
+    modalActions([done]),
   ]);
   const backdrop = el('div', { class: 'modal-backdrop' }, [dialog]);
   done.addEventListener('click', async () => { backdrop.remove(); await after(); });

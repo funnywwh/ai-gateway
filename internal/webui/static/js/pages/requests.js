@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, table, toast, badge, formatTime, jsonBlock, statusBadge, modalHead } from '../ui.js';
+import { el, card, table, toast, badge, formatTime, jsonBlock, statusBadge, modalHead, modalBody, modalActions } from '../ui.js';
 
 export async function render({ page, actions }) {
   const days = el('select', {}, [1, 3, 7, 30].map((n) => el('option', { value: n, text: '最近 ' + n + ' 天' })));
@@ -47,9 +47,13 @@ async function detail(requestID) {
   ]);
   const dialog = el('div', { class: 'modal', style: 'width:min(1000px,100%)' }, [
     modalHead('请求 ' + requestID, close),
-    el('div', { class: 'muted', text: row.endpoint + ' · ' + formatTime(row.created_at) + ' · HTTP ' + row.status }),
-    body,
-    el('div', { class: 'modal-actions' }, [el('button', { class: 'btn', text: '关闭', onclick: () => close() })]),
+    // Everything that can grow goes into the scrolling body, so the header (and the
+    // round ✕ with it) stays pinned to the dialog frame while a long log scrolls.
+    modalBody([
+      el('div', { class: 'muted', text: row.endpoint + ' · ' + formatTime(row.created_at) + ' · HTTP ' + row.status }),
+      body,
+    ]),
+    modalActions([el('button', { class: 'btn', text: '关闭', onclick: () => close() })]),
   ]);
   const backdrop = el('div', { class: 'modal-backdrop' }, [dialog]);
   // Closing goes through one function: the round ✕ in the header and the footer

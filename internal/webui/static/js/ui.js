@@ -109,9 +109,23 @@ export function closeButton(onClose, options) {
 
 // modalHead is the dialog header: the title on the left, the round close button
 // on the right. Every dialog builds its header this way so the close button can
-// never be missing from one of them.
+// never be missing from one of them. It is a direct child of .modal, outside
+// .modal-body, so the ✕ stays pinned to the dialog frame while the body scrolls.
 export function modalHead(title, onClose, options) {
   return el('div', { class: 'modal-head' }, [el('h3', { text: title }), closeButton(onClose, options)]);
+}
+
+// modalBody is the scrolling region of a dialog: everything that can grow (a field
+// list, a long log, a detail table) goes in here, so a tall dialog scrolls its
+// content instead of pushing the header — and with it the round ✕ — off screen.
+export function modalBody(children) {
+  return el('div', { class: 'modal-body' }, children);
+}
+
+// modalActions is the footer action row, also outside the scrolling region so the
+// primary buttons stay reachable in a tall dialog.
+export function modalActions(children) {
+  return el('div', { class: 'modal-actions' }, children);
 }
 
 // modal renders a form and resolves with the collected values, or null on cancel.
@@ -137,8 +151,9 @@ export function modal({ title, fields, submitLabel, onSubmit, wide }) {
     });
     const cancel = el('button', { class: 'btn', text: '取消', onclick: () => close(null) });
     const dialog = el('div', { class: 'modal', style: wide ? 'width:min(900px,100%)' : '' }, [
-      modalHead(title, () => close(null)), body, error,
-      el('div', { class: 'modal-actions' }, [cancel, submit]),
+      modalHead(title, () => close(null)),
+      modalBody([body, error]),
+      modalActions([cancel, submit]),
     ]);
     const backdrop = el('div', { class: 'modal-backdrop' }, [dialog]);
     backdrop.addEventListener('click', (ev) => { if (ev.target === backdrop) close(null); });
@@ -154,8 +169,8 @@ export function confirmDialog(title, message) {
     const ok = el('button', { class: 'btn btn-danger', text: '确认', onclick: () => { backdrop.remove(); resolve(true); } });
     const cancel = el('button', { class: 'btn', text: '取消', onclick: () => { backdrop.remove(); resolve(false); } });
     const dialog = el('div', { class: 'modal' }, [modalHead(title, () => { backdrop.remove(); resolve(false); }, { danger: true }),
-      el('p', { text: message }),
-      el('div', { class: 'modal-actions' }, [cancel, ok])]);
+      modalBody([el('p', { text: message })]),
+      modalActions([cancel, ok])]);
     const backdrop = el('div', { class: 'modal-backdrop' }, [dialog]);
     root.append(backdrop);
   });

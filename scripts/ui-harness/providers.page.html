@@ -55,6 +55,45 @@ const rows = () => modal().querySelectorAll('tbody tr').length;
 const rowTexts = () => [...modal().querySelectorAll('tbody tr')].map((tr) => tr.textContent.trim().slice(0, 40));
 // closeButton is the round ✕ every dialog must carry in its top-right corner.
 const closeButton = () => modal().querySelector('.modal-head .modal-close');
+// The ✕ must sit on the dialog's frame, not inside the scrolling region: the header
+// is a direct child of .modal while content goes in .modal-body. This shrinks the
+// dialog (CSSOM, so CSP does not apply) until its body genuinely overflows, scrolls
+// every container that will scroll, and then checks the ✕ has not moved and is still
+// inside the dialog's visible frame. It scrolls the dialog as well as the body on
+// purpose: before the fix .modal itself was the scroller, so the ✕ rode up out of the
+// frame with the content — a body-only scroll test would have missed exactly that.
+const pinnedChecks = () => {
+  const btn = closeButton();
+  const dialog = modal().querySelector('.modal');
+  const body = dialog && dialog.querySelector('.modal-body');
+  if (!btn || !body) return { closeOnFrame: false };
+  const restore = dialog.style.maxHeight;
+  dialog.style.maxHeight = '160px';
+  const before = btn.getBoundingClientRect();
+  const dialogBox = dialog.getBoundingClientRect();
+  const bodyOverflows = body.scrollHeight > body.clientHeight;
+  body.scrollTop = body.scrollHeight;
+  dialog.scrollTop = dialog.scrollHeight;
+  const after = btn.getBoundingClientRect();
+  const frame = dialog.getBoundingClientRect();
+  const result = {
+    // The furniture lives outside the element that scrolls.
+    closeOnFrame: !body.contains(btn) && !body.contains(dialog.firstElementChild),
+    // Something must really have scrolled, or the positional checks prove nothing.
+    bodyScrollable: bodyOverflows && body.scrollTop > 0,
+    // The dialog itself must not be a scroll container at all.
+    dialogNotScrollable: dialog.scrollTop === 0,
+    // Measured: after scrolling content to the bottom, the ✕ has not moved…
+    closeStaysPutAfterScroll: Math.abs(after.top - before.top) < 0.5 && Math.abs(after.right - before.right) < 0.5,
+    // …and it is still fully inside the dialog's frame, not scrolled out of view.
+    closeVisibleInFrame: after.top >= frame.top - 0.5 && after.bottom <= frame.bottom + 0.5
+      && after.left >= frame.left - 0.5 && after.right <= frame.right + 0.5,
+  };
+  body.scrollTop = 0;
+  dialog.scrollTop = 0;
+  dialog.style.maxHeight = restore;
+  return result;
+};
 // The affordance is checked as rendered, not as class names: a round hit target,
 // inside the header, sitting to the right of the title.
 const closeChecks = () => {
@@ -71,6 +110,7 @@ const closeChecks = () => {
     closeInHeader: !!head && dialog && dialog.firstElementChild === head,
     closeRightOfTitle: !!title && title.getBoundingClientRect().right <= btn.getBoundingClientRect().left,
     closeLabel: btn.getAttribute('aria-label') === '关闭',
+    ...pinnedChecks(),
   };
 };
 // Microtasks only: a timer would hand control back to the browser, which may close the
