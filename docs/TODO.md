@@ -490,3 +490,37 @@
   客户端挂断时该次尝试的用量行同样会丢（上条测试的日志里就能看到
   `recording usage failed err="store: insert usage record: context canceled"`），
   即上游已经产出的 token 不会被计量。改法与审计一致（派生 detached context），但会改变用量/账本里出现的行数，需先定口径
+
+### M20 DSH 侧可设推理档位：能力申报与档位表对齐（DSH 实测报告）
+- [x] 症状：DSH 的模型菜单里，本网关（`aigw` 路由）的模型**没有「推理等级」入口**，而同为推理模型的
+  DeepSeek 官方模型有。定位：`@deepseek-ai/dsh-llm-pi-ai` 只在 `model.reasoning` 为真时才暴露 `reasoning.efforts`；
+  手写路由（pi-ai 目录里没有的网关）若不逐模型声明 `reasoningEfforts`，解析结果是 `reasoning: false` ——
+  **客户端侧缺声明**，不是网关缺功能
+- [x] 同时发现网关侧一处申报不准：`gpt-5.6-luna`（`provider_models` id 12）只声明了 `{stream,tools}`，
+  于是每次带 `reasoning.effort` 的请求都被打上 `X-Gateway-Degraded: reasoning`。
+  `degradation=strip` 只做标记、不剥离参数（`internal/routing/routing.go` 的 `checkCapabilities` 只产出名单，
+  `v1.go` 只加响应头），所以功能能跑、失真在可观测性与 `least_latency` 对推理模型的降权
+- [x] 实测矩阵（2026-09-11，运行中的 8088）：`deepseek-flash`（openai-chat）接受
+  `none/minimal/low/medium/high/xhigh/max` 全部，`high` 产出 reasoning 项 + `reasoning_tokens`；
+  `gpt-5.6-luna`（codex 插件）接受 `none/low/medium/high/xhigh/max`，`xhigh` 明显更慢（档位确实透传），
+  但 **`minimal` 被上游 500 拒绝**（`unsupported_value`；同模型对非法拼写 `off` 回的是 `invalid_value`，两者可区分）；
+  `replay` 忽略 effort 并稳定回报降级
+- [x] DSH 侧改动（只改配置，不动客户端实现）：`~/.dsh/settings.yaml` 的 aigw 两个模型声明 `reasoningEfforts`
+  （`gpt-5.6-luna` 刻意不含 `minimal`），补全 `contextWindow`/`maxTokens`，`off: none` 使「提供方默认」= 显式关闭思考；
+  不设路由级默认档；`replay` 系列不声明（免得给出做不到的承诺）
+- [x] 网关侧改动：`config.yaml` 的 codex 模型补 `capabilities.reasoning`（插件 `ListModels` 直接透传）、
+  补 `public: gpt-5.6-luna` 发现条目、修 `deepseek.enabled` 的文件/运行态漂移；运行态用管理 API 把 id 12 的
+  capabilities 更新为 `{stream,tools,reasoning}`（bootstrap 不回填非空 capabilities，只改文件对运行中的实例无效）
+- [x] 测试：`internal/providers/openairesponses/body_test.go` 四例钉住"客户端 reasoning 原样进出站请求体"
+  （chat 侧在 `pkg/providerkit` 已有等价断言）；变异验证过（`delete(payload,"reasoning")` 即精确失败）
+- [x] 复验：`gpt-5.6-luna` 降级头消失；`deepseek-flash` 无降级头且输出 reasoning 项；`replay` 仍报降级；
+  用 pi-ai 自己的 `Config` schema 解析改后设置段通过。设计记录：`docs/design/m20-dsh-reasoning-effort.md`
+- [ ] 未覆盖：DSH GUI 里菜单文案与"选档位跑一轮任务"的人工确认
+- [ ] 可选（未做）：让 DSH 在"添加模型"时自动识别推理能力。**已查明这条在纯配置层面走不通**（2026-09-11 读 DSH 0.1.2-rc.1 源码）：
+  ① 发现链路只搬运四个字段——`llm-pi-ai` 的 `readListing()` 只读 `id/name/context_window/max_output_tokens`，
+  `discoverModels()` 对目录路由也只返回 `id/name/contextWindow/maxTokens`；② 客户端"采纳"候选时写死同样四个键
+  （`dsh-client-ui-settings-models/lib/client.js` 的 `adopt()`：`{id, name?, contextWindow?, maxTokens?}`）；
+  ③ 唯一能带 reasoning 元数据的来源是 pi-ai 自带目录（40 个 provider 的 `dist/providers/data/*.json` 里有
+  `reasoning` 与 `thinkingLevelMap`），但那要求路由名与 model id 都命中目录——本网关的 `aigw`/`gpt-5.6-luna`/`deepseek-flash`
+  都不在其中。所以"自动识别"要么改 DSH 自身，要么写 DSH 插件自带模型目录；两者都超出本仓库范围
+

@@ -130,6 +130,30 @@ providers:
 - `finish_reason` 出现的 `insufficient_system_resource` / `aborted` 视为**上游失败**（可故障切换），不伪装成正常完成。
 - 402 = 余额耗尽：映射为 `quota_exhausted` 并冷却该候选（默认 1800s）。
 
+### 让 agent 客户端能选推理档位（两端各一半，缺一不可）
+
+客户端（DSH、Codex 等）要在界面上给出「推理等级」，需要**两件事同时成立**：
+
+1. **网关侧如实申报能力**：模型行声明 `reasoning: true`，否则客户端带 `reasoning.effort` 的请求会被打上
+   `X-Gateway-Degraded: reasoning`（`degradation: strip` 只做标记、不剥离参数，所以功能照样跑，失真的是可观测性与
+   `least_latency` 对推理模型的降权）。改法：`config.yaml` 的 `bootstrap.providers[].models[].capabilities`、
+   控制台「供应商 → 模型 → 能力」、或管理 API `POST /admin/api/v1/providers/{id}/models`。
+   **只改 config.yaml 对运行中的实例不生效**——bootstrap 不回填非空 capabilities、也不覆盖已存在 provider 的 enabled。
+2. **客户端侧声明可选档位**：DSH 的模型目录只在 model 带 reasoning 元数据时才提供档位选择，而手写路由
+   （pi-ai 目录里没有的网关）必须逐模型写出来；DSH 的档位 key 与出线拼写是分开的，因此可以逐模型裁剪：
+
+```yaml
+# ~/.dsh/settings.yaml → llm-pi-ai.providers.<route>.models[]
+- id: deepseek-flash
+  reasoningEfforts: {off: none, minimal: minimal, low: low, medium: medium, high: high, xhigh: xhigh, max: max}
+```
+
+**档位表必须按上游实测填，不要照抄全集**：本网关的 DeepSeek 接受全部拼写，但 codex 订阅后端的
+`gpt-5.6-luna` 明确拒绝 `minimal`（`unsupported_value`，HTTP 500），而 `off` 这种非法拼写回的是
+`invalid_value`——两者可区分，说明不是"取值随便填"的宽容后端。把 `off` 写成 `none`（而不是留空）才能让
+「提供方默认」= 显式关闭思考；留空表示"支持但不发参数"，会落到上游自己的默认（DeepSeek 默认是开启思考），
+于是「Off」这一档名不副实。完整实测矩阵与取舍见 `docs/design/m20-dsh-reasoning-effort.md`。
+
 ## 4. 思考内容（reasoning）
 
 - **入站**：`reasoning_content`（非流式消息字段 / 流式 delta）→ 思考增量事件，最终落成 `reasoning` 输出项；
