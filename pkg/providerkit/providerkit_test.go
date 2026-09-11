@@ -370,6 +370,70 @@ func TestToolArgumentDeltasReuseTheCallID(t *testing.T) {
 	}
 }
 
+// TestAssistantTextIsFoldedIntoTheToolCall pins the shape a thinking-mode upstream
+// validates as one turn. A Responses client sends the assistant's text and its tool
+// calls as separate items, and two assistant messages are what the upstream rejects
+// ("The `reasoning_content` in the thinking mode must be passed back to the API.") even
+// when the tool-calling message carries the field — the text that announces the call
+// belongs to the same turn. Folding reproduces the message the upstream's own API would
+// have produced.
+func TestAssistantTextIsFoldedIntoTheToolCall(t *testing.T) {
+	content, _ := json.Marshal("what is the weather")
+	calls := []pluginapi.Item{
+		{Type: "function_call", CallID: "call_1", Name: "weather", Arguments: "{}"},
+		{Type: "function_call_output", CallID: "call_1", Output: "cloudy"},
+	}
+	assistantText := pluginapi.Item{Type: "message", Role: "assistant", Content: json.RawMessage(`[{"type":"output_text","text":"let me check"}]`)}
+	secondText := pluginapi.Item{Type: "message", Role: "assistant", Content: json.RawMessage(`[{"type":"output_text","text":"and now:"}]`)}
+
+	req := &pluginapi.Request{Model: "m", Input: append([]pluginapi.Item{
+		{Type: "message", Role: "user", Content: content},
+		reasoningItem("check the tool"),
+		assistantText, secondText,
+	}, calls...)}
+
+	chat, err := ResponsesToChatWithOptions(req, ChatConvertOptions{ReplayReasoningContent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistants := 0
+	var tool *ChatMessage
+	for i := range chat.Messages {
+		if chat.Messages[i].Role != "assistant" {
+			continue
+		}
+		assistants++
+		if len(chat.Messages[i].ToolCalls) > 0 {
+			tool = &chat.Messages[i]
+		}
+	}
+	if assistants != 1 || tool == nil {
+		t.Fatalf("the turn must travel as one assistant message, got %d: %+v", assistants, chat.Messages)
+	}
+	if !strings.Contains(tool.Content, "let me check") || !strings.Contains(tool.Content, "and now:") {
+		t.Fatalf("the announcing text must survive the fold: %q", tool.Content)
+	}
+	if tool.ReasoningContent != "check the tool" || !tool.ReasoningRequired {
+		t.Fatalf("the folded message must carry the chain of thought: %+v", tool)
+	}
+
+	// Without the opt-in the message boundary is untouched: the fold belongs to the
+	// dialect that needs it.
+	plain, err := ResponsesToChat(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainAssistants := 0
+	for _, msg := range plain.Messages {
+		if msg.Role == "assistant" {
+			plainAssistants++
+		}
+	}
+	if plainAssistants != 3 {
+		t.Fatalf("default translation must keep text and calls apart, got %d: %+v", plainAssistants, plain.Messages)
+	}
+}
+
 func TestResponsesToChatReplaysReasoningOnlyForToolTurns(t *testing.T) {
 	content, _ := json.Marshal("what is the weather")
 	base := []pluginapi.Item{

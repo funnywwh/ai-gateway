@@ -95,7 +95,9 @@ class Fake(BaseHTTPRequestHandler):
         reasoning = req.get("reasoning_effort") or "<absent>"
         tools = "tools" in req
         replay = "reasoning_content" in json.dumps(req.get("messages", []))
-        print("REQUEST thinking=%s effort=%s tools=%s replay=%s" % (thinking, reasoning, tools, replay), flush=True)
+        assistants = sum(1 for m in req.get("messages", []) if m.get("role") == "assistant")
+        print("REQUEST thinking=%s effort=%s tools=%s replay=%s assistant=%d"
+              % (thinking, reasoning, tools, replay, assistants), flush=True)
 
         if not req.get("stream"):
             message = {
@@ -341,6 +343,17 @@ else
     -d "{\"model\":\"deepseek-flash\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"weather in hz?\"},{\"type\":\"function_call\",\"call_id\":\"call_smoke_2\",\"name\":\"weather\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_smoke_2\",\"output\":\"cloudy\"}],$TOOLS}" \
     >/dev/null || fail "a tool turn without client reasoning items must still be accepted"
   pass "tool turn without reasoning items carries the empty reasoning_content key"
+  # A turn that announces itself in text before calling a tool is ONE assistant turn for
+  # the upstream: sent as two chat messages, the thinking-mode validator rejects it even
+  # with the key on the tool-calling message (the text that announces the call has none).
+  # DSH produces exactly this shape whenever the model writes a sentence before acting.
+  curl -fsS -X POST "http://127.0.0.1:${GATEWAY_PORT}/v1/responses" \
+    -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
+    -d "{\"model\":\"deepseek-flash\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"weather in hz?\"},{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"let me check:\"},{\"type\":\"function_call\",\"call_id\":\"call_smoke_3\",\"name\":\"weather\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_smoke_3\",\"output\":\"cloudy\"}],$TOOLS}" \
+    >/dev/null || fail "a text-then-call turn must still be accepted"
+  grep -q "replay=True assistant=1" "$WORK/upstream.log" \
+    || { cat "$WORK/upstream.log"; fail "the announcing text must be folded into one assistant message"; }
+  pass "text before a tool call folds into one assistant turn (assistant=1, key present)"
 
   echo "== error mapping"
   code="$(curl -s -o "$WORK/err.json" -w '%{http_code}' -X POST "http://127.0.0.1:${GATEWAY_PORT}/v1/responses" \

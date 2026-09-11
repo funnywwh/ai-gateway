@@ -452,3 +452,26 @@
   （修复前"不带"的两种必失败）；再用 DSH 本体（headless，供应商指向隔离实例）跑"读 README 首行 + `wc -l`"：
   同一轮两次工具调用、退出码 0，网关侧 `reasoning=89/79/64/37/13/12` —— 思考与工具往返同时成立
 - [x] 文档：`docs/api-providers.md`（该约束的实测结论 + 网关"有原文用原文、没有就空串"的策略）
+
+### M19e 工具轮的「整段 assistant」都要带 reasoning_content（DSH 实测报告）
+- [x] 触发：M19d 之后仍报同一条 400，但**只在模型先写一句话再调工具的那一步**失败（时好时坏）
+- [x] 真机把规则补全（`api.deepseek.com/deepseek-flash`）：thinking 模式下**进入工具轮的整段 assistant 内容算一轮**——
+  `[用户, 文本(无键), 工具轮(带键), 工具结果]` → 400；`[用户, 文本(带空键), 工具轮(带键), 工具结果]` → 通过；
+  连续多条文本消息同样必须都有键；把文本与工具调用**合成一条** assistant 消息（`content`+`reasoning_content`+`tool_calls`，
+  即上游自己产出的形态）→ 通过
+- [x] 取证过程（值得复用）：失败请求因为客户端随即断开，`recordContent` 用请求 context 落库被取消，
+  **请求日志没写成**（日志里只有 `recording request content failed ... context canceled`），所以一开始误判成"非流式"。
+  改为从 DSH 会话记录里**重建**了那一步的请求（用第 8 步那条已落库的真实请求 + 第 8 步的输出与工具结果），
+  在线上复现了同一失败，再离线用 `pkg/providerkit` 逐层定位
+- [x] 根因：DSH 把 assistant 文本与工具调用作为**两条 item** 发来，网关翻成**两条** assistant 消息，
+  第一条（纯文本）没有 `reasoning_content` → 上游按"这一轮缺思维链"拒掉整条请求
+- [x] 修复（`pkg/providerkit`）：新增 `foldAssistantTextIntoCall` —— 在 `ReplayReasoningContent` 打开时，
+  把紧邻工具调用之前的连续纯文本 assistant 消息**折进**工具调用那条消息（内容用换行拼接、空文本直接丢弃），
+  使一轮 assistant 内容以**一条** chat 消息出行（与上游原生形态一致；未打开该开关时消息边界保持原样）
+- [x] 测试：`providerkit` 1 条（一条 assistant 消息 + 内容保留 + 键与标记在位；未开开关时仍是 3 条 assistant 消息），
+  变异验证过（改回即精确失败）；`scripts/deepseek-smoke.sh` 增加"文本 + 工具轮 → 上游看到 `assistant=1` 且带键"的离线断言
+- [x] 真机复验（隔离实例 `:8094`，新二进制，真实 DeepSeek）：
+  ① 重建出来的**那条真实失败请求** → `response.completed`（模型继续把任务做下去）；
+  ② 回归：四种组合（流式/非流式 × 带/不带 reasoning 项）、"文本+工具轮"、DSH 第 8 步原样重放 → 全部 completed；
+  ③ DSH 本体 headless 跑"先写一句 → 读 README 首行 → wc -l"（正是失败形态）→ 退出码 0
+- [x] 文档：`docs/api-providers.md`（该约束的完整规则与网关的折叠策略）

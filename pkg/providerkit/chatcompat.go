@@ -207,6 +207,12 @@ func ResponsesToChatWithOptions(req *pluginapi.Request, opts ChatConvertOptions)
 		if mergeParallelToolCalls(out.Messages, msg) {
 			continue
 		}
+		if opts.ReplayReasoningContent {
+			if folded, ok := foldAssistantTextIntoCall(out.Messages, msg); ok {
+				out.Messages = folded
+				continue
+			}
+		}
 		out.Messages = append(out.Messages, msg...)
 	}
 	out.Messages = repairToolSequences(out.Messages)
@@ -564,6 +570,50 @@ func (s *ChatStreamState) Translate(chunk *ChatResponse, emit func(pluginapi.Eve
 		}
 	}
 	return choice.FinishReason != "", nil
+}
+
+// foldAssistantTextIntoCall merges the plain assistant messages that directly precede a
+// tool-calling message into it, so one assistant turn travels as ONE chat message:
+// content, reasoning_content and tool_calls together.
+//
+// A Responses client sends the assistant's text and its tool calls as separate items
+// (DSH does), which the translation turns into two assistant messages. That shape is
+// what a thinking-mode upstream validates as one turn: with only the tool-calling
+// message carrying reasoning_content, DeepSeek still rejects the request
+// ("The `reasoning_content` in the thinking mode must be passed back to the API."),
+// because the text that announces the call belongs to the same turn and has none.
+// Folding reproduces what the upstream itself would have produced, instead of leaving
+// it to accept a conversation its own API never generates.
+//
+// It returns the possibly shortened message list; ok is false when there is nothing to
+// fold (no preceding text-only assistant message).
+func foldAssistantTextIntoCall(messages []ChatMessage, msg []ChatMessage) ([]ChatMessage, bool) {
+	if len(msg) != 1 || msg[0].Role != "assistant" || len(msg[0].ToolCalls) == 0 {
+		return messages, false
+	}
+	start := len(messages)
+	for start > 0 {
+		prev := messages[start-1]
+		if prev.Role != "assistant" || len(prev.ToolCalls) > 0 {
+			break
+		}
+		start--
+	}
+	if start == len(messages) {
+		return messages, false
+	}
+	parts := make([]string, 0, len(messages)-start+1)
+	for _, prev := range messages[start:] {
+		if strings.TrimSpace(prev.Content) != "" {
+			parts = append(parts, prev.Content)
+		}
+	}
+	if strings.TrimSpace(msg[0].Content) != "" {
+		parts = append(parts, msg[0].Content)
+	}
+	msg[0].Content = strings.Join(parts, "\n")
+	// Cap the slice so the append cannot write into the caller's array.
+	return append(messages[:start:start], msg[0]), true
 }
 
 // mergeParallelToolCalls folds msg into the previous assistant tool-call message when both

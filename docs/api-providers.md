@@ -118,6 +118,11 @@ providers:
   空串是它能诚实给出的值，上游也确实接受（实测 4/4 通过）。
   真实后果（2026-09-11）：DSH 指向网关时从不回传 `reasoning` 项，于是每遇到"工具轮 + 思考开启"就整条请求 400；
   修复后同一形态 4/4 通过。
+- **进入工具轮的那一整段 assistant 内容算"一轮"**：紧挨在工具调用之前的纯文本 assistant 消息**也必须带该键**，
+  否则同样 400 —— 实测：`[用户, 文本(无键), 工具轮(带键), 工具结果]` 报 400；把文本与工具调用**并成同一条**
+  assistant 消息（`content` + `reasoning_content` + `tool_calls`，也就是上游自己产出的形态）则通过。
+  Responses 客户端把文本与工具调用作为两条 item 发来（DSH 就是这样），网关翻译时会**折成一条** assistant 消息
+  （`ReplayReasoningContent` 打开时），而不是留下两条让上游去校验。
 - thinking 模式下 `temperature` / `presence_penalty` **被忽略**（不报错），`top_p` 下限被抬到 0.95；网关原样透传，不代改。
 - thinking 模式下 `tool_choice` 不支持 `required` 与具名工具（上游 400）；网关不拦截，错误原样透出。
 - `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` 拆出缓存维度；
