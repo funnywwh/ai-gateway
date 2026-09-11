@@ -97,6 +97,8 @@ func (s *Server) handleAdminCreateAccount(w http.ResponseWriter, r *http.Request
 	}
 	if body.MarkupOverrideBP != nil {
 		a.MarkupOverrideBP = *body.MarkupOverrideBP
+		// 0 is a meaningful override (free usage), so record that it was chosen.
+		a.MarkupOverrideSet = true
 	}
 	if body.AutoSuspend != nil {
 		a.AutoSuspend = *body.AutoSuspend
@@ -182,6 +184,7 @@ func (s *Server) handleAdminPatchAccount(w http.ResponseWriter, r *http.Request)
 	}
 	if body.MarkupOverrideBP != nil {
 		a.MarkupOverrideBP = *body.MarkupOverrideBP
+		a.MarkupOverrideSet = true
 	}
 	if body.AutoSuspend != nil {
 		a.AutoSuspend = *body.AutoSuspend

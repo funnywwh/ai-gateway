@@ -12,6 +12,7 @@ type Snapshot struct {
 	SaleRule                  *Rule            `json:"sale_rule,omitempty"`
 	SaleBasis                 string           `json:"sale_basis"`
 	SaleMarkupBP              int              `json:"sale_markup_bp,omitempty"`
+	MarkupSource              string           `json:"markup_source,omitempty"`
 	DimensionMarkupBP         map[string]int   `json:"dimension_markup_bp,omitempty"`
 	CostLines                 []Line           `json:"cost_lines"`
 	SaleLines                 []Line           `json:"sale_lines"`
@@ -31,6 +32,7 @@ func buildSnapshot(in Input, dimensions map[string]int64, result *Result, costRu
 		CostRule:                  cloneRule(costRule),
 		SaleBasis:                 result.SaleBasis,
 		SaleMarkupBP:              result.MarkupBP,
+		MarkupSource:              result.MarkupSource,
 		CostLines:                 result.CostLines,
 		SaleLines:                 result.SaleLines,
 		UnpricedDimensions:        result.UnpricedDimensions,

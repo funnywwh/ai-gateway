@@ -11,7 +11,7 @@ export const routes = [
   { path: '/providers', title: '模型供应商', module: './pages/providers.js', group: '路由配置' },
   { path: '/models', title: '模型与路由', module: './pages/models.js', group: '路由配置' },
   { path: '/mappings', title: '模型映射', module: './pages/mappings.js', group: '路由配置' },
-  { path: '/pricing', title: '定价', module: './pages/placeholder.js', group: '计费', milestone: 'M11a' },
+  { path: '/pricing', title: '定价', module: './pages/pricing.js', group: '计费' },
   { path: '/billing', title: '账本与充值', module: './pages/billing.js', group: '计费' },
   { path: '/invoices', title: '账单', module: './pages/billing.js', group: '计费' },
   { path: '/reconciliation', title: '对账', module: './pages/billing.js', group: '计费' },

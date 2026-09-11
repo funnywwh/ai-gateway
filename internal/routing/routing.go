@@ -71,6 +71,8 @@ type grantsWire struct {
 type policyWire struct {
 	Strategy      string   `json:"strategy"`
 	ProviderOrder []string `json:"provider_order"`
+	// MarginBP is the customer-facing multiplier in basis points (10000 = 1.0x).
+	MarginBP *int `json:"margin_bp"`
 }
 
 // ResolveTags maps a key's tag names onto tag records (ordered by priority).
@@ -153,6 +155,10 @@ func mergePolicy(key *domain.APIKey, tags []*domain.Tag) domain.Policy {
 		}
 		if len(pw.ProviderOrder) > 0 {
 			out.ProviderOrder = pw.ProviderOrder
+		}
+		if pw.MarginBP != nil && *pw.MarginBP >= 0 {
+			out.MarginBP = *pw.MarginBP
+			out.MarginSet = true
 		}
 	}
 	for _, t := range tags {

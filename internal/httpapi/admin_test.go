@@ -739,3 +739,88 @@ func TestAdminPricingValidate(t *testing.T) {
 		t.Fatalf("error should name the missing catch-all: %q", message)
 	}
 }
+
+func TestAdminPricingTargetsAndMarkup(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	provider := decodeJSONBody(t, f.call(t, http.MethodPost, "/admin/api/v1/providers",
+		`{"name":"price-provider","kind":"testecho"}`, cookie))
+	providerID := int64(provider["id"].(float64))
+	f.call(t, http.MethodPost, "/admin/api/v1/providers/"+itoa(providerID)+"/models",
+		`{"public_model":"priced","upstream_model":"up","pricing_rules":{"rules":[{"id":"cost","order":10,"when":{},"rates":{"input":1000},"per_request_fee_micros":0},{"id":"alt","order":20,"when":{"model_variant":"x"},"rates":{"input":2000}}]}}`,
+		cookie).Body.Close()
+	f.call(t, http.MethodPost, "/admin/api/v1/models",
+		`{"public_name":"priced","sale_pricing":{"basis":"cost_follow","markup_bp":10000,"dimension_markup_bp":{"output":20000}}}`,
+		cookie).Body.Close()
+
+	resp := f.call(t, http.MethodGet, "/admin/api/v1/pricing/targets", "", cookie)
+	payload := decodeJSONBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("targets status = %d body=%v", resp.StatusCode, payload)
+	}
+	targets, _ := payload["targets"].([]any)
+	if len(targets) != 2 {
+		t.Fatalf("targets = %v, want one sale and one cost entry", targets)
+	}
+	var sale, cost map[string]any
+	for _, entry := range targets {
+		item, _ := entry.(map[string]any)
+		switch item["kind"] {
+		case "sale":
+			sale = item
+		case "cost":
+			cost = item
+		}
+	}
+	if sale == nil || cost == nil {
+		t.Fatalf("missing a target kind: %v", targets)
+	}
+	if sale["markup_bp"] != float64(10000) || sale["cost_rules_configured"] != true {
+		t.Fatalf("sale target = %v", sale)
+	}
+	// A cost_follow sale side carries no rules of its own: the multiplier does the work,
+	// so it must not be reported as having a catch-all rule.
+	if sale["catch_all"] != false {
+		t.Fatalf("sale target should have no rules: %v", sale)
+	}
+	if cost["catch_all"] != true {
+		t.Fatalf("the cost table has a catch-all rule: %v", cost)
+	}
+	if cost["shadowed"] != float64(1) {
+		t.Fatalf("cost shadowed = %v, want 1 (the variant rule is unreachable)", cost["shadowed"])
+	}
+	effective, _ := sale["effective_markup"].(map[string]any)
+	if effective["bp"] != float64(10000) || effective["source"] != "model" {
+		t.Fatalf("effective markup = %v", effective)
+	}
+
+	// Changing the multiplier must keep the rule array untouched.
+	patched := f.call(t, http.MethodPatch, "/admin/api/v1/pricing/markup",
+		`{"model":"priced","markup_bp":17500,"dimension_markup_bp":{"output":25000}}`, cookie)
+	patchedPayload := decodeJSONBody(t, patched)
+	if patched.StatusCode != http.StatusOK {
+		t.Fatalf("patch status = %d body=%v", patched.StatusCode, patchedPayload)
+	}
+	if patchedPayload["markup_bp"] != float64(17500) {
+		t.Fatalf("markup not applied: %v", patchedPayload)
+	}
+	stored, err := f.db.GetModelByName(context.Background(), "priced")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stored.SalePricingJSON, "cost_follow") {
+		t.Fatalf("basis lost: %s", stored.SalePricingJSON)
+	}
+
+	bad := f.call(t, http.MethodPatch, "/admin/api/v1/pricing/markup", `{"model":"priced","markup_bp":-1}`, cookie)
+	bad.Body.Close()
+	if bad.StatusCode != http.StatusBadRequest {
+		t.Fatalf("negative markup status = %d, want 400", bad.StatusCode)
+	}
+	missing := f.call(t, http.MethodPatch, "/admin/api/v1/pricing/markup", `{"model":"ghost","markup_bp":15000}`, cookie)
+	missing.Body.Close()
+	if missing.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown model status = %d, want 404", missing.StatusCode)
+	}
+}

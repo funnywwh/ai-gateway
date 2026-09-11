@@ -253,6 +253,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /admin/api/v1/backups/{id}/restore", s.handleAdminRestoreBackup)
 	s.mux.HandleFunc("POST /admin/api/v1/backups/prune", s.handleAdminPruneBackups)
 	s.mux.HandleFunc("POST /admin/api/v1/pricing/validate", s.handleAdminValidatePricing)
+	s.mux.HandleFunc("GET /admin/api/v1/pricing/targets", s.handleAdminPricingTargets)
+	s.mux.HandleFunc("PATCH /admin/api/v1/pricing/markup", s.handleAdminPatchMarkup)
 	s.mux.HandleFunc("GET /admin/api/v1/settings", s.handleAdminGetSettings)
 	s.mux.HandleFunc("PUT /admin/api/v1/settings/{key}", s.handleAdminPutSetting)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)

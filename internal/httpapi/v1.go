@@ -162,7 +162,8 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 			attemptCtx, cancelAttempt := context.WithCancel(ctx)
 			costRules, saleRules := s.ruleSetsFor(plan.Resolved.Canonical, cand.ProviderID)
 			guard = s.newInflightGuard(attemptCtx, cancelAttempt, account, requestID,
-				plan.Resolved.Canonical, cand.UpstreamModel, cand.ProviderID, costRules, saleRules, admission)
+				plan.Resolved.Canonical, cand.UpstreamModel, cand.ProviderID, costRules, saleRules,
+				s.resolveMarkup(key, account, saleRules), admission)
 			_, err = s.deps.Dispatcher.Stream(attemptCtx, cand.ProviderID, provReq, func(ev pluginapi.Event) error {
 				return guard.Observe(ev, assembler.Add)
 			})
@@ -342,7 +343,7 @@ func (s *Server) recordAttempt(
 	// With billing enabled the usage row is written by the settlement transaction, so
 	// that the metered attempt and the money it costs can never disagree.
 	if s.deps.Billing != nil {
-		s.settleAttempt(ctx, attempt, resolved, cand, attemptErr, startedAt, dims, outcome != nil && outcome.aborted)
+		s.settleAttempt(ctx, attempt, resolved, cand, attemptErr, startedAt, dims, outcome != nil && outcome.aborted, s.resolveMarkup(key, account, s.saleRulesFor(resolved.Canonical, cand.ProviderID)))
 		return
 	}
 	if _, err := s.deps.Meter.Record(ctx, attempt); err != nil {

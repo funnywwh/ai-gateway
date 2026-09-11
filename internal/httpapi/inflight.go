@@ -39,6 +39,7 @@ type inflightGuard struct {
 	requestID  string
 	cost       *pricing.RuleSet
 	sale       *pricing.RuleSet
+	markup     billing.MarkupResolution
 
 	policy string
 	limit  int64
@@ -70,6 +71,7 @@ func (s *Server) newInflightGuard(
 	requestID, canonical, upstream string,
 	providerID int64,
 	cost, sale *pricing.RuleSet,
+	markup billing.MarkupResolution,
 	reservation *billing.Reservation,
 ) *inflightGuard {
 	cfg := s.deps.Config.Billing
@@ -95,7 +97,7 @@ func (s *Server) newInflightGuard(
 	return &inflightGuard{
 		server: s, account: account, canonical: canonical, upstream: upstream,
 		providerID: providerID, requestID: requestID,
-		cost: cost, sale: sale,
+		cost: cost, sale: sale, markup: markup,
 		policy:   policy,
 		limit:    billing.InflightLimit(policy, reserved, available),
 		soft:     cfg.InflightSoftRatio,
@@ -153,7 +155,7 @@ func (g *inflightGuard) check() error {
 	if g.cancel == nil || g.limit <= 0 || len(g.dims) == 0 {
 		return nil
 	}
-	result := g.server.priceAttempt(g.dims, time.Now(), g.upstream, g.cost, g.sale)
+	result := g.server.priceAttempt(g.dims, time.Now(), g.upstream, g.cost, g.sale, g.markup)
 	g.accrued = result.ChargeMicros
 	action := billing.DecideInflight(billing.InflightState{
 		Policy: g.policy, AccruedMicros: g.accrued,
@@ -237,7 +239,7 @@ func (g *inflightGuard) Outcome(finalDims map[string]int64) *inflightOutcome {
 	if len(finalDims) > 0 {
 		delta := subtractDimensions(finalDims, g.outcome.dims)
 		if len(delta) > 0 {
-			cost := g.server.priceAttempt(delta, time.Now(), g.upstream, g.cost, g.sale)
+			cost := g.server.priceAttempt(delta, time.Now(), g.upstream, g.cost, g.sale, g.markup)
 			g.outcome.overshootCostMicros = cost.CostMicros
 		}
 	}

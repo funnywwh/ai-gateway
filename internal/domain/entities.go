@@ -20,14 +20,16 @@ type Account struct {
 	LowBalanceThresholdMicros int64
 	PriceOverridesJSON        string
 	MarkupOverrideBP          int
-	AutoSuspend               bool
-	AutoResume                bool
-	InflightPolicyOverride    string
-	OverdraftLimitMicros      int64
-	Status                    string
-	Note                      string
-	CreatedAt                 time.Time
-	UpdatedAt                 time.Time
+	// MarkupOverrideSet distinguishes "no account override" from "override to 0".
+	MarkupOverrideSet      bool
+	AutoSuspend            bool
+	AutoResume             bool
+	InflightPolicyOverride string
+	OverdraftLimitMicros   int64
+	Status                 string
+	Note                   string
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
 }
 
 // Provider is one upstream provider instance (builtin kind or plugin process).

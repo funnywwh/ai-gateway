@@ -23,6 +23,9 @@ type Input struct {
 	MarkupBP int
 	// MarkupSet distinguishes "use 0" from "use the default".
 	MarkupSet bool
+	// MarkupSource names where the multiplier came from (key|tag|account|model|default)
+	// so a charge can be explained after the fact.
+	MarkupSource string
 	// MinChargeMicros applies to the sale side only.
 	MinChargeMicros int64
 	// PerRequestFeeScope is "attempt" or "request"; it only affects the snapshot
@@ -52,6 +55,7 @@ type Result struct {
 	SaleRuleID       string `json:"sale_rule_id,omitempty"`
 	SaleBasis        string `json:"sale_basis,omitempty"`
 	MarkupBP         int    `json:"markup_bp,omitempty"`
+	MarkupSource     string `json:"markup_source,omitempty"`
 	RequestFeeMicros int64  `json:"request_fee_micros,omitempty"`
 	MinChargeApplied bool   `json:"min_charge_applied,omitempty"`
 	CostLines        []Line `json:"cost_lines"`
@@ -110,6 +114,7 @@ func Evaluate(in Input) *Result {
 			markupBP = sale.MarkupBP
 		}
 		result.MarkupBP = markupBP
+		result.MarkupSource = in.MarkupSource
 		if sale != nil {
 			result.SaleRuleID = sale.Basis
 		}

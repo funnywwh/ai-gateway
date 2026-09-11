@@ -16,21 +16,24 @@ type rowScanner interface {
 }
 
 const accountCols = `id, name, billing_mode, balance_micros, credit_limit_micros,
-	low_balance_threshold_micros, price_overrides_json, markup_override_bp, auto_suspend,
-	auto_resume, inflight_policy_override, overdraft_limit_micros, status, note, created_at, updated_at`
+	low_balance_threshold_micros, price_overrides_json, markup_override_bp, markup_override_set,
+	auto_suspend, auto_resume, inflight_policy_override, overdraft_limit_micros, status, note,
+	created_at, updated_at`
 
 func scanAccount(row rowScanner) (*domain.Account, error) {
 	var (
 		a                       domain.Account
 		autoSuspend, autoResume int
+		markupOverrideSet       int
 		createdAt, updatedAt    int64
 	)
 	if err := row.Scan(&a.ID, &a.Name, &a.BillingMode, &a.BalanceMicros, &a.CreditLimitMicros,
-		&a.LowBalanceThresholdMicros, &a.PriceOverridesJSON, &a.MarkupOverrideBP, &autoSuspend,
-		&autoResume, &a.InflightPolicyOverride, &a.OverdraftLimitMicros, &a.Status, &a.Note,
-		&createdAt, &updatedAt); err != nil {
+		&a.LowBalanceThresholdMicros, &a.PriceOverridesJSON, &a.MarkupOverrideBP, &markupOverrideSet,
+		&autoSuspend, &autoResume, &a.InflightPolicyOverride, &a.OverdraftLimitMicros, &a.Status,
+		&a.Note, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
+	a.MarkupOverrideSet = markupOverrideSet != 0
 	a.AutoSuspend = autoSuspend != 0
 	a.AutoResume = autoResume != 0
 	a.CreatedAt = timeFromUnix(createdAt)
@@ -106,15 +109,17 @@ func (db *DB) UpsertAccount(ctx context.Context, a *domain.Account) (int64, erro
 
 	if _, err := db.write.ExecContext(ctx, `
 INSERT INTO accounts(name, billing_mode, balance_micros, credit_limit_micros,
-  low_balance_threshold_micros, price_overrides_json, markup_override_bp, auto_suspend,
-  auto_resume, inflight_policy_override, overdraft_limit_micros, status, note, created_at, updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  low_balance_threshold_micros, price_overrides_json, markup_override_bp, markup_override_set,
+  auto_suspend, auto_resume, inflight_policy_override, overdraft_limit_micros, status, note,
+  created_at, updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(name) DO UPDATE SET
   billing_mode = excluded.billing_mode,
   credit_limit_micros = excluded.credit_limit_micros,
   low_balance_threshold_micros = excluded.low_balance_threshold_micros,
   price_overrides_json = excluded.price_overrides_json,
   markup_override_bp = excluded.markup_override_bp,
+  markup_override_set = excluded.markup_override_set,
   auto_suspend = excluded.auto_suspend,
   auto_resume = excluded.auto_resume,
   inflight_policy_override = excluded.inflight_policy_override,
@@ -123,7 +128,8 @@ ON CONFLICT(name) DO UPDATE SET
   note = excluded.note,
   updated_at = excluded.updated_at`,
 		a.Name, string(a.BillingMode), a.BalanceMicros, a.CreditLimitMicros,
-		a.LowBalanceThresholdMicros, a.PriceOverridesJSON, a.MarkupOverrideBP, boolInt(a.AutoSuspend),
+		a.LowBalanceThresholdMicros, a.PriceOverridesJSON, a.MarkupOverrideBP,
+		boolInt(a.MarkupOverrideSet), boolInt(a.AutoSuspend),
 		boolInt(a.AutoResume), a.InflightPolicyOverride, a.OverdraftLimitMicros, a.Status, a.Note,
 		unix(a.CreatedAt), unix(a.UpdatedAt)); err != nil {
 		return 0, fmt.Errorf("store: upsert account %q: %w", a.Name, err)

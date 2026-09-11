@@ -90,6 +90,10 @@ type Policy struct {
 	Strategy      string
 	ProviderOrder []string
 	StrategySet   bool
+	// MarginBP is the customer-facing multiplier in basis points (10000 = 1.0x) when
+	// the key or tag policy sets one.
+	MarginBP  int
+	MarginSet bool
 }
 
 // ModelResolver performs free-form model mapping (M3).

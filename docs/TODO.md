@@ -136,7 +136,11 @@
 - [x] 校验（400）+ 遮蔽检测（告警，不拒绝）；快照内联命中规则完整副本，可脱离规则表复算
 - [x] 管理面：POST /pricing/simulate（可内联规则做「改了会怎样」预览）与 POST /pricing/validate
 - [x] 测试：13 个引擎用例（首命中/时段/跨午夜/档位/取整/倍率/最低收费/校验/遮蔽/快照复算）+ 2 个 HTTP 用例
-- [ ] 界面：Pricing 页面（规则表格编辑器、模板、阶梯预览）——依赖 M11b 的账本与真实用量展示
+- [x] 对客价以倍数为主路径：生效链 key > tag > account > model > default，快照记录 markup_source
+- [x] `PATCH /pricing/markup`（只改倍数、保留规则数组）与 `GET /pricing/targets`（一次拉全、含成本规则缺失与生效来源）
+- [x] 迁移 0005：`accounts.markup_override_set`（区分「未设置」与「设为 0」）
+- [x] 控制台 Pricing 页：倍数标签页（×↔bp 联动、按维度覆写、实时试算、空转红色告警）+ 高级标签页（规则 JSON、校验、遮蔽告警、阶梯预览、模板）
+- [x] 测试：ResolveMarkup 优先级 6 例 + 坏策略容错、targets/markup 端点用例；端到端验证 1.0×/1.5×/账户 2.0× 三档与账本一致性
 
 ## M11b 账本与在途额度
 - [x] 设计文档 docs/design/m11b-ledger-inflight.md（已在对话中输出，分两批提交）

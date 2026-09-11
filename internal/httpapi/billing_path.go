@@ -63,7 +63,7 @@ func (s *Server) ruleSetsFor(canonical string, providerID int64) (*pricing.RuleS
 
 // priceAttempt evaluates cost and charge for one attempt with the same pure function
 // the admin simulator uses.
-func (s *Server) priceAttempt(dims map[string]int64, at time.Time, variant string, cost, sale *pricing.RuleSet) *pricing.Result {
+func (s *Server) priceAttempt(dims map[string]int64, at time.Time, variant string, cost, sale *pricing.RuleSet, markup billing.MarkupResolution) *pricing.Result {
 	cfg := s.deps.Config.Billing
 	input := pricing.Input{
 		Dimensions:         dims,
@@ -74,11 +74,16 @@ func (s *Server) priceAttempt(dims map[string]int64, at time.Time, variant strin
 		MinChargeMicros:    cfg.MinChargeMicros,
 		PerRequestFeeScope: cfg.PerRequestFeeScope,
 	}
-	// The global default markup is a fallback: a mark-up declared by the model's own
-	// sale rule set wins, otherwise every model would silently be repriced.
-	if cfg.DefaultMarkupBP > 0 && (sale == nil || sale.MarkupBP == 0) {
+	switch {
+	case markup.Set:
+		// key / tag / account / model / default, resolved before the attempt ran.
+		input.MarkupBP = markup.BP
+		input.MarkupSet = true
+		input.MarkupSource = markup.Source
+	case cfg.DefaultMarkupBP > 0 && (sale == nil || sale.MarkupBP == 0):
 		input.MarkupBP = cfg.DefaultMarkupBP
 		input.MarkupSet = true
+		input.MarkupSource = billing.MarkupSourceDefault
 	}
 	return pricing.Evaluate(input)
 }
@@ -195,6 +200,7 @@ func (s *Server) settleAttempt(
 	startedAt time.Time,
 	dims map[string]int64,
 	chargePartial bool,
+	markup billing.MarkupResolution,
 ) {
 	record, err := s.deps.Meter.Build(attempt)
 	if err != nil {
@@ -203,7 +209,7 @@ func (s *Server) settleAttempt(
 	}
 
 	cost, sale := s.ruleSetsFor(resolved.Canonical, cand.ProviderID)
-	result := s.priceAttempt(dims, startedAt, cand.UpstreamModel, cost, sale)
+	result := s.priceAttempt(dims, startedAt, cand.UpstreamModel, cost, sale, markup)
 
 	// A failed attempt still costs us money, but charging the customer for it depends
 	// on billing.charge_on_error. Cost is always recorded so the waste is visible.
@@ -225,4 +231,29 @@ func totalTokensOf(dims map[string]int64) int64 {
 		total += units
 	}
 	return total
+}
+
+// resolveMarkup walks the multiplier precedence chain for one request: key policy, tag
+// policies, account override, the model's sale rule set, then the configured default.
+func (s *Server) resolveMarkup(key *domain.APIKey, account *domain.Account, sale *pricing.RuleSet) billing.MarkupResolution {
+	modelMarkup := 0
+	if sale != nil {
+		modelMarkup = sale.MarkupBP
+	}
+	var tags []*domain.Tag
+	if s.deps.Router != nil && s.deps.Registry != nil && key != nil {
+		tags = s.deps.Router.ResolveTags(s.deps.Registry.Snapshot(), key)
+	}
+	defaultBP := 0
+	if s.deps.Config != nil {
+		defaultBP = s.deps.Config.Billing.DefaultMarkupBP
+	}
+	return billing.ResolveMarkup(key, tags, account, modelMarkup, defaultBP)
+}
+
+// saleRulesFor returns only the customer-side rule set, which is what the multiplier
+// chain needs (the cost side is irrelevant to it).
+func (s *Server) saleRulesFor(canonical string, providerID int64) *pricing.RuleSet {
+	_, sale := s.ruleSetsFor(canonical, providerID)
+	return sale
 }
