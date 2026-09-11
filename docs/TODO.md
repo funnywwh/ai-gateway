@@ -245,9 +245,10 @@
 - [x] 插件：非法代理**记录并上报**（原计划的 exit 2 被实测推翻：宿主只报 `handshake: EOF`，原因在控制台/网关日志/`/providers/{id}/logs` 三处都看不到）；`Health()` 与请求入口报 fatal `proxy_invalid`；`whoami` 回报脱敏代理与来源
 - [x] 测试：插件 6 例（配置代理命中 / 凭据优先 / 未配置委派环境变量 / 非法配置经 Health+请求双路 fail-closed / 凭据非法 / 不泄露 userinfo）+ providerkit 2 例；并用变异验证测试非空转
 - [x] make verify 全绿（vet + 全量测试 + build，含 `internal/arch` 分层断言）
-- [~] 端到端（真实代理 `http://192.168.140.252:2334`，2026-09-11）：代理侧全部通过 —— 出口国家由 CN 变为 PH，探测不再报 `unsupported_country_region_territory`；插件经代理**真实刷新成功**（`whoami` 报出新的 `expires_at` 与 `last_refresh_at`，轮换后的 refresh_token 已落盘）；推理端点已穿过 Cloudflare 并返回鉴权后的业务响应。**未出字的原因在账号侧**：`GET /backend-api/codex/models?client_version=…` 返回 `{"models":[]}`，所有模型 id（gpt-5 / gpt-5-codex / codex-mini-latest / o3 / gpt-5.1-codex）均被拒为 `The '…' model is not supported when using Codex with a ChatGPT account.`；三种 `chatgpt-account-id` 取值（不带 / 账号 id / 组织 id）结果相同 → 属账号授权而非代码/配置/代理问题
-- [ ] 实测发现（M10 适配器缺陷，另立）：`upstreamMessage` 只认 `{"error":{"message"}}` 与 `{"message"}`，不认上游实际使用的 `{"detail":"…"}`，把「模型不受支持」这类关键原因丢成无信息量的 `the upstream returned 400 Bad Request`
-- [ ] 实测发现（M10 适配器缺陷，另立）：健康检查走 `base_url + /me`，该路径在此出口被 Cloudflare 挑战（403 + `cf-mitigated: challenge`，返回 HTML），被 `classifyResponse` 映射成误导性的 `token_expired`；实测 `GET /backend-api/codex/models?client_version=…` 带鉴权返回 200 且未被挑战，是更合适的健康探针
+- [x] 端到端（真实代理 `http://192.168.140.252:2334`，2026-09-11）：**全链路打通，网关已服务真实请求**。代理侧：出口国家 CN → PH，探测不再报 `unsupported_country_region_territory`；凭据侧：经代理**真实刷新成功**（新的 `expires_at`/`last_refresh_at`，轮换后的 refresh_token 已落盘）；模型侧：`gpt-5.6-luna` 下 `/v1/responses` 非流式与流式均返回正确文本，`usage_records` 落库（含 `reasoning` 维度拆分），零价不产生账本分录
+- [x] **更正一处先前错误结论**：我曾依据 `GET /backend-api/codex/models?client_version=…` 返回 `{"models":[]}` 判定"该账号无 Codex 授权"，这是**错的** —— 同一账号用 `gpt-5.6-luna` 完全可用。该目录端点对这类账号**不能作为授权判据**。被拒的 id 实为 `gpt-5`/`gpt-5-codex`/`codex-mini-latest`/`o3`/`gpt-5.1-codex`（均为 `not supported when using Codex with a ChatGPT account`）。另：`/responses` 强制要求 `stream:true`（`{"detail":"Stream must be set to true"}`），插件恒以流式发送，故不受影响
+- [ ] 实测发现（M10 适配器缺陷，另立）：`upstreamMessage` 只认 `{"error":{"message"}}` 与 `{"message"}`，不认上游实际使用的 `{"detail":"…"}`（FastAPI 形状），把「模型不受支持」「必须开流式」这类关键原因丢成无信息量的 `the upstream returned 400 Bad Request`；本次定位是靠手工 curl 才拿到 `detail` 原文
+- [ ] 实测发现（M10 适配器缺陷，另立）：健康检查走 `base_url + /me`，该路径在此出口被 Cloudflare 挑战（403 + `cf-mitigated: challenge`，HTML 正文），被 `classifyResponse` 映射成误导性的 `token_expired`。**当前可见症状：业务请求全部正常，控制台却把该供应商显示为不健康**。实测 `/backend-api/codex/models?client_version=…` 带鉴权返回 200 且未被挑战，是更合适的探针
 - [x] 回填设计文档「实现与设计差异」（含 D7 修正与 7 个实现期发现），单提交并引用设计文档路径
 - [ ] 范围外（另立）：内建 provider 接代理，需新增 `internal/providers/httpx → pkg/providerkit` 分层边
 - [x] 环境前置（已解决）：代理最初从本机不可达（0.12s 快速 RST，疑似只绑回环）；在客户端开启局域网监听后 `192.168.140.252:2334` 于 0.11s 连通

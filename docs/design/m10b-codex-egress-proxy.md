@@ -271,11 +271,17 @@ func (p *provider) proxyError() error
    | 推理端点 | 已穿过 Cloudflare，返回**鉴权后的业务响应**（HTTP 400 + JSON），证明地区与凭据两道门都过了 |
    | 代理生效 | `whoami` 报 `proxy=http://192.168.140.252:2334`、`proxy_source=config` |
 
-   **未出字的原因不在本里程碑范围**：账号侧无 Codex 授权——`GET /backend-api/codex/models?client_version=0.50.0` 带鉴权返回 `{"models":[]}`，
-   所有模型 id（`gpt-5`/`gpt-5-codex`/`codex-mini-latest`/`o3`/`gpt-5.1-codex`）均被拒为
-   `The '<id>' model is not supported when using Codex with a ChatGPT account.`；三种 `chatgpt-account-id` 取值
-   （不带 / 账号 id / 组织 id）结果一致。另试过 Codex CLI 的客户端身份头（`OpenAI-Beta`、`originator: codex_cli_rs`、`User-Agent`、`session_id`），均不影响。
-   → 结论：属账号订阅授权问题，需账号侧开通后才能完成"成功出字 + 计量落库"的最后一步。
+   **出字的最后一环是模型 id**：`gpt-5-codex` 等 id 会被拒，而 **`gpt-5.6-luna` 可用**。换上该 id 后
+   `/v1/responses` 非流式与流式均返回正确文本（`1+1等于2。` / `收到` / 流式 `delta` 分块拼接一致），
+   `usage_records` 落库（含 `reasoning` 维度拆分），零价故不产生账本分录。至此本里程碑目标全部达成。
+
+   **一处我先前的错误结论，在此更正**：我曾据 `GET /backend-api/codex/models?client_version=0.50.0` 带鉴权返回
+   `{"models":[]}` 判定"该账号无 Codex 授权"。**这是错的**——同一账号用 `gpt-5.6-luna` 完全可用。
+   该目录端点对这类账号**不能作为授权判据**（三种 `chatgpt-account-id` 取值、以及 Codex CLI 的客户端身份头
+   `OpenAI-Beta`/`originator: codex_cli_rs`/`User-Agent`/`session_id` 都不改变它的空结果，而请求换个模型 id 就通了）。
+   被拒的 id 实为 `gpt-5`/`gpt-5-codex`/`codex-mini-latest`/`o3`/`gpt-5.1-codex`。
+   另一条同源约束：`/responses` **强制要求 `stream:true`**（`{"detail":"Stream must be set to true"}`），
+   插件恒以流式发送（`Complete` 也复用 `Stream` 聚合），因此不受影响——这一点在本里程碑里属巧合般的好运，值得记录。
 
 9. **这次真实调用额外暴露两个 M10 适配器缺陷（不在 M10b 范围，已记入 `docs/TODO.md`）**：
 
@@ -287,4 +293,6 @@ func (p *provider) proxyError() error
      （403 + `cf-mitigated: challenge` + HTML 正文），被 `classifyResponse` 归为
      `token_expired: the upstream rejected the credentials; refresh them and try again`——
      **完全误导**：凭据当时刚刚刷新成功。实测 `/backend-api/codex/models?client_version=…`
-     带鉴权返回 200 且未被挑战，是更合适的健康探针。两项都建议另立里程碑处理。
+     带鉴权返回 200 且未被挑战，是更合适的健康探针。**当前可见症状：业务请求（非流式/流式）全部正常，
+     而探测仍返回 `ok=false`，控制台把该供应商显示为不健康**——这正是"错误分类吞掉真因"的代价。
+     两项都建议另立里程碑处理。
