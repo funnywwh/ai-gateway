@@ -262,6 +262,8 @@
 - [x] 测试 internal/httpapi：`/provider-kinds` 200 且含三个内建 kind、字段与密钥标记齐全；详情返回非空 `config_schema` 且无凭据明文；`plugin:does-not-exist` → `schema_source=plugin`、无 schema、**Prober 调用次数不变**
 - [x] make verify 全绿（含 internal/arch 分层断言，本轮未新增分层边）
 - [x] **验证方式升级为真实浏览器自动化**（原计划人工走查）：`scripts/ui-harness/`（API 快照 + headless firefox + `/report` 回报）与 `make ui-check`；5 个视图 40 项断言全绿（docs/detail/create/plugin/plugin-cached），无 firefox 或 python3 时自行 skip
+- [x] 弹框统一在右上角带圆形关闭按钮：`ui.js` 新增 `closeButton()`/`modalHead()`，`modal()`、`confirmDialog()` 与 8 处页面手写弹框（providers 详情/内建类型说明/动作结果、billing 账单详情、keys 密钥明文、codes 兑换码、mcp 令牌、requests 详情）全部改走同一套头部；`app.css` 补 `.modal-head`/`.modal-close`（28px、`border-radius:50%`、hover 与 focus-visible，确认类弹框用 danger 配色）。`closeButton`/`modalHead` 是本次新增的公共 API，`modal()`/`confirmDialog()` 的签名与「取消 → `null`/`false`」语义未变
+- [x] 上述弹框改动的验证：`make ui-check` 新增 5 类断言（✕ 存在、按渲染后的 border-radius 与实际尺寸判定为圆形、位于头部且是 dialog 首个元素、在标题右侧、`aria-label="关闭"`；detail 视图另加「点击 ✕ 后整个 backdrop 被移除」与「关闭后可重新打开」），5 个视图 62 项断言全绿；真实浏览器另核对了 `modal()`/`confirmDialog()` 的关闭返回值（`null`/`false`，与「取消」一致）及按钮几何（28×28，距弹框上/右各 19px = 18px padding + 1px 边框，即贴齐右上角）；`go test ./...` 与 `make build` 全绿
 - [x] 回填设计文档「实现与设计差异」，单提交并引用设计文档路径
 - [x] 顺带修复：`docs/plugin-protocol-v1.md` 第 3 节引用的 `docs/provider-ui` 此前并不存在（本轮补上），并把「建议每个插件声明 schema」写进协议文档（不改协议、不加校验）
 
