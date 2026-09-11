@@ -30,7 +30,7 @@ func newMCPFixture(t *testing.T) (*Service, *store.DB, int64) {
 	}
 	if _, err := db.UpsertAPIKey(ctx, &domain.APIKey{
 		AccountID: accountID, Name: "dev", KeyPrefix: "sk-gw-mcp", KeyHash: "hash", Status: "active",
-		TagsJSON: `["free"]`, PolicyJSON: `{"rate_limit":{"rpm":60,"tpm":100000}}`,
+		TagsJSON: `["free"]`, PolicyJSON: `{"rpm":60,"tpm":100000,"monthly_tokens":5000000}`,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -125,8 +125,12 @@ func TestRateLimitsAndInvoices(t *testing.T) {
 		t.Fatalf("keys = %v", keys)
 	}
 	limits := keys[0]["configured_limits"].(map[string]any)
-	if limits["rpm"] != float64(60) {
-		t.Fatalf("rpm = %v, want 60 from the key policy", limits["rpm"])
+	if limits["rpm"] != 60 || limits["tpm"] != int64(100000) {
+		t.Fatalf("configured_limits = %v, want the flat key policy fields", limits)
+	}
+	unenforced := keys[0]["not_enforced"].([]string)
+	if len(unenforced) != 1 || unenforced[0] != "monthly_tokens" {
+		t.Fatalf("not_enforced = %v, want the monthly cap admission does not check", unenforced)
 	}
 	used := keys[0]["used_this_period"].(map[string]any)
 	if used["requests"] != int64(5) {

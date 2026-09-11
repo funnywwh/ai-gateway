@@ -1,4 +1,85 @@
 {
+ "/accounts": {
+  "data": [
+   {
+    "balance_micros": 500000,
+    "billing_mode": "postpaid",
+    "credit_limit_micros": 10000000,
+    "id": 1,
+    "low_balance_threshold_micros": 100000,
+    "name": "acme",
+    "status": "active"
+   }
+  ]
+ },
+ "/accounts/1/balance": {
+  "account_id": 1,
+  "balance_micros": 500000,
+  "in_flight_micros": 0
+ },
+ "/accounts/1/credits": {
+  "data": []
+ },
+ "/accounts/1/ledger": {
+  "data": [
+   {
+    "amount_micros": -141000,
+    "balance_after_micros": 500000,
+    "created_at": "2026-03-02T09:00:00Z",
+    "idem_key": "charge:req-1:1",
+    "kind": "charge",
+    "note": "cny-model"
+   }
+  ]
+ },
+ "/billing/currency": {
+  "currencies": [
+   {
+    "code": "USD",
+    "rate_micros": 1000000,
+    "rate_source": "ledger"
+   },
+   {
+    "code": "CNY",
+    "rate_micros": 141000,
+    "rate_source": "config"
+   }
+  ],
+  "display_currency": "USD",
+  "fx_source": "config",
+  "ledger_currency": "USD",
+  "missing_rates": [
+   "EUR"
+  ]
+ },
+ "/billing/status": {
+  "batches": 0,
+  "dropped": 0,
+  "fallbacks": 0,
+  "queued": 0,
+  "settled": 0
+ },
+ "/keys": {
+  "count": 1,
+  "data": [
+   {
+    "account_id": 1,
+    "id": 1,
+    "key_prefix": "sk-gw-981065ae",
+    "last_used_at": "2026-09-11T11:00:00Z",
+    "name": "dev-key",
+    "policy": {
+     "concurrency": 4,
+     "rpm": 60
+    },
+    "record_input_mode": "user",
+    "record_output_text": false,
+    "record_reasoning": false,
+    "status": "active",
+    "tags": []
+   }
+  ]
+ },
  "/provider-kinds": {
   "data": [
    {
@@ -848,64 +929,59 @@
   "ok": true,
   "plugin": false
  },
- "/billing/currency": {
-  "ledger_currency": "USD",
-  "display_currency": "USD",
-  "fx_source": "config",
-  "currencies": [
-   {
-    "code": "USD",
-    "rate_micros": 1000000,
-    "rate_source": "ledger"
-   },
-   {
-    "code": "CNY",
-    "rate_micros": 141000,
-    "rate_source": "config"
-   }
-  ],
-  "missing_rates": [
-   "EUR"
-  ]
- },
- "/accounts": {
+ "/requests": {
+  "count": 1,
   "data": [
    {
-    "id": 1,
-    "name": "acme",
-    "billing_mode": "postpaid",
-    "status": "active",
-    "balance_micros": 500000,
-    "credit_limit_micros": 10000000,
-    "low_balance_threshold_micros": 100000
+    "account_id": 1,
+    "api_key_id": 1,
+    "created_at": "2026-09-11T11:00:00Z",
+    "endpoint": "/v1/responses",
+    "input_recorded": true,
+    "output_text_recorded": false,
+    "reasoning_recorded": false,
+    "request_bytes": 483,
+    "request_id": "req_demo0001",
+    "status": "completed",
+    "truncated": false
    }
   ]
  },
- "/accounts/1/balance": {
+ "/requests/req_demo0001": {
   "account_id": 1,
-  "balance_micros": 500000,
-  "in_flight_micros": 0
- },
- "/accounts/1/ledger": {
-  "data": [
-   {
-    "kind": "charge",
-    "amount_micros": -141000,
-    "balance_after_micros": 500000,
-    "note": "cny-model",
-    "idem_key": "charge:req-1:1",
-    "created_at": "2026-03-02T09:00:00Z"
-   }
-  ]
- },
- "/accounts/1/credits": {
-  "data": []
- },
- "/billing/status": {
-  "queued": 0,
-  "batches": 0,
-  "settled": 0,
-  "fallbacks": 0,
-  "dropped": 0
+  "api_key_id": 1,
+  "created_at": "2026-09-11T11:00:00Z",
+  "endpoint": "/v1/responses",
+  "input": {
+   "input": [
+    {
+     "content": [
+      {
+       "text": "ping from m23",
+       "type": "input_text"
+      }
+     ],
+     "role": "user",
+     "type": "message"
+    }
+   ],
+   "model": "replay",
+   "omitted": {
+    "function_call": 1,
+    "function_call_output": 1,
+    "tools": 1
+   },
+   "request_bytes": 483
+  },
+  "input_recorded": true,
+  "output": null,
+  "output_text_recorded": false,
+  "reasoning": null,
+  "reasoning_recorded": false,
+  "request_bytes": 483,
+  "request_id": "req_demo0001",
+  "response_bytes": 0,
+  "status": "completed",
+  "truncated": false
  }
 }

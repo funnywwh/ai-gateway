@@ -19,7 +19,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${UI_HARNESS_WORK:-$ROOT/.cache/ui-harness}"
 PORT="${UI_HARNESS_PORT:-8097}"
-VIEWS="docs detail create plugin plugin-cached currency"
+VIEWS="docs detail create plugin plugin-cached currency keys requests"
 FIXTURES="$ROOT/scripts/ui-harness/fixtures.json"
 REFRESH=0
 
@@ -60,17 +60,20 @@ chmod 700 "$WORK/run"
 cp -r "$ROOT/internal/webui/static/." "$WORK/site/"
 
 # One harness page per area under test: providers.page.html carries the provider and
-# plugin views, currency.page.html the multi-currency money rendering. Both embed the
-# same fixtures, so a view only has to name the page that renders it.
+# plugin views, currency.page.html the multi-currency money rendering, keys.page.html the
+# key editor and the request log. All embed the same fixtures, so a view only has to name
+# the page that renders it.
 render_page() {
   python3 "$ROOT/scripts/ui-harness/render_page.py" "$1" "$FIXTURES" "$2"
 }
 render_page "$ROOT/scripts/ui-harness/providers.page.html" "$WORK/site/harness.html"
 render_page "$ROOT/scripts/ui-harness/currency.page.html" "$WORK/site/currency.html"
+render_page "$ROOT/scripts/ui-harness/keys.page.html" "$WORK/site/keys.html"
 
 page_for_view() {
   case "$1" in
     currency) echo "currency.html" ;;
+    keys|requests) echo "keys.html" ;;
     *) echo "harness.html" ;;
   esac
 }

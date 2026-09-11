@@ -9,10 +9,11 @@
 
 ## 它做什么
 
-1. 把 `internal/webui/static/`（页面、`js/pages/*.js`、`app.css`）复制到工作目录，再用
-   `providers.page.html` + 一份 **API 快照**（`fixtures.json`）生成 `harness.html`；
+1. 把 `internal/webui/static/`（页面、`js/pages/*.js`、`app.css`）复制到工作目录，再用三个 harness 页
+   （`providers.page.html` → `harness.html`、`currency.page.html` → `currency.html`、
+   `keys.page.html` → `keys.html`）+ 一份 **API 快照**（`fixtures.json`）生成页面；
 2. 起一个本地静态服务器，用 **headless firefox** 打开 harness，逐个视图（`#docs`、`#detail`、`#create`、
-   `#plugin`、`#plugin-cached`）渲染真实页面；
+   `#plugin`、`#plugin-cached`、`#currency`、`#keys`、`#requests`）渲染真实页面；
 3. harness 里 **stub 掉 `window.fetch`**，用快照回答所有 `/admin/api/v1/*` 调用——所以它不需要会话、
    不需要数据库、不碰任何上游，只验证「界面拿到这些数据会渲染成什么」；
 4. 断言结果通过 HTTP 回报给 runner，runner 打印每个视图的检查项并在失败时以非 0 退出。
@@ -40,7 +41,9 @@ GW_BASE=http://127.0.0.1:8099 GW_COOKIE=... scripts/ui-harness/capture.py       
 - **真实快照**：`/providers`、`/provider-kinds`、每个供应商的详情/日志/动作（由 `capture.py` 覆盖写入）；
 - **合成条目**（为了覆盖插件的两条路径，故意不依赖真实插件）：
   `/providers/2`（插件，尚未握手 → 只有「读取插件声明」按钮）、`/providers/2-after`（握手后带 schema）、
-  `/providers/1`（插件，已有握手记录 → 直接渲染字段表）、`/providers/*/test`（返回 `ok:true`）。
+  `/providers/1`（插件，已有握手记录 → 直接渲染字段表）、`/providers/*/test`（返回 `ok:true`）；
+- **M23 起新增**：`/keys`（带扁平配额策略与录制模式的 Key）与 `/requests`、`/requests/{id}`
+  （录制文档 + `request_bytes`），供 `#keys`、`#requests` 两个视图使用，`capture.py` 会一并重取。
 
 ## 三个踩过的坑（改这个 harness 前先读）
 
@@ -58,6 +61,7 @@ GW_BASE=http://127.0.0.1:8099 GW_COOKIE=... scripts/ui-harness/capture.py       
 |---|---|
 | schema 与 `Config` 字段不漂移、字段必须有说明 | `internal/providers/schema_test.go`（反射，双向差集） |
 | 管理面契约：`/provider-kinds`、详情带 schema、读文档不启动插件 | `internal/httpapi/admin_test.go` |
-| 界面渲染与交互（字段表、模板、插件握手按钮） | 本目录（真实浏览器 + API 快照） |
+| 界面渲染与交互（字段表、模板、插件握手按钮、Key 配额/录制编辑、请求日志详情） | 本目录（真实浏览器 + API 快照） |
+| 控制台录制枚举与服务端一致、设置页不出现死键 | `internal/webui/embed_test.go`（读内嵌资源） |
 
 也就是说：**Go 测试保证数据对，这里保证界面把数据讲明白了。**

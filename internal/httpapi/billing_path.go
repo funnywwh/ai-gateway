@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
@@ -169,21 +168,25 @@ func (s *Server) rejectForQuota(
 
 // recordDenied logs a locally rejected request. No usage row is written: the request
 // never reached an upstream, so it must not appear in billing at all.
+//
+// The row goes through the same input policy as a served request (recordInput): a
+// rejected request carries exactly the same client content, and this path used to store
+// the whole body with no redaction at all — the one place where the recording policy and
+// its redaction rules were not applied.
 func (s *Server) recordDenied(ctx context.Context, key *domain.APIKey, account *domain.Account, req *responses.Request, apiErr *domain.APIError) {
 	if s.deps.Records == nil {
 		return
 	}
-	raw, err := json.Marshal(req)
-	if err != nil {
-		raw = []byte("{}")
-	}
+	input := s.recordInput(ctx, key, req)
 	record := &domain.RequestLogRecord{
 		RequestID:       requestIDFrom(ctx),
 		APIKeyID:        key.ID,
 		AccountID:       account.ID,
 		Endpoint:        "/v1/responses",
-		RequestJSON:     truncate(string(raw), s.deps.Config.Recording.MaxBytes),
-		RecordInputMode: key.RecordInputMode,
+		RequestJSON:     input.Payload,
+		RequestBytes:    input.Bytes,
+		Truncated:       input.Truncated,
+		RecordInputMode: input.Mode,
 		Status:          strconv.Itoa(apiErr.Status),
 		CreatedAt:       time.Now().UTC(),
 	}

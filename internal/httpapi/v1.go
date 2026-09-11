@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/winger/ai-gateway/internal/billing"
 	"github.com/winger/ai-gateway/internal/config"
@@ -439,6 +440,10 @@ func (s *Server) persist(
 	completed := time.Now().UTC()
 	expires := completed.Add(30 * 24 * time.Hour)
 
+	// One computation feeds the stored response, the request log and the hook event, so
+	// the three can never disagree about what was recorded under which policy.
+	input := s.recordInput(auditCtx, key, req)
+
 	if req.Stored() {
 		rec := &domain.ResponseRecord{
 			ID:           assembler.ID(),
@@ -447,7 +452,7 @@ func (s *Server) persist(
 			Model:        canonical,
 			ProviderID:   providerID,
 			Status:       status,
-			RequestJSON:  truncate(string(mustJSON(req)), s.deps.Config.Recording.MaxBytes),
+			RequestJSON:  input.Payload,
 			OutputJSON:   string(outputJSON),
 			UsageJSON:    string(usageJSON),
 			Instructions: req.Instructions,
@@ -460,7 +465,7 @@ func (s *Server) persist(
 		}
 	}
 
-	s.recordContent(auditCtx, key, account, req, assembler, status)
+	s.recordContent(auditCtx, key, account, assembler, status, input)
 
 	if s.deps.Hooks != nil {
 		event := "response.completed"
@@ -486,35 +491,91 @@ func (s *Server) persist(
 				"model":       canonical,
 				"status":      status,
 				"usage":       assembler.Usage().Dimensions,
-				"input":       truncate(assembler.Text(), 0),
-				"output":      assembler.Text(),
+				// The input is the same document the request log stores, under the same
+				// policy. It used to be filled with the model's answer (assembler.Text()),
+				// which made "input" a second copy of "output" and leaked content into a
+				// field the recording switches were supposed to govern.
+				"input":  input.Payload,
+				"output": assembler.Text(),
 			},
 		})
 	}
 }
 
-// recordContent applies the three-channel recording policy: input text is recorded by
-// default, thinking text and final output text only when the key opts in.
+// inputRecord is one request's recorded input under the key's effective policy.
+type inputRecord struct {
+	Mode      string // full|user|metadata|off
+	Payload   string // the stored document ("" for metadata and off)
+	Bytes     int    // serialized size of the whole request body
+	Truncated bool
+}
+
+// recordInput applies the input channel of the recording policy to one request.
+//
+// Three channels are recorded independently: this one decides what happens to the
+// client's request, and recordContent decides what happens to the model's thinking and
+// final text. The default here is "user": only the user's own input is stored, with a
+// tally of what was left out. "full" keeps the whole body for the times when an upstream
+// 400 has to be diagnosed against the exact bytes the client sent.
+func (s *Server) recordInput(ctx context.Context, key *domain.APIKey, req *responses.Request) inputRecord {
+	cfg := s.deps.Config.Recording
+	rec := inputRecord{Mode: cfg.InputModeFor(key.RecordInputMode)}
+	if rec.Mode == "off" {
+		return rec
+	}
+
+	raw := mustJSON(req)
+	rec.Bytes = len(raw)
+	switch rec.Mode {
+	case "full":
+		rec.Payload = string(raw)
+	case "user":
+		doc, err := req.UserInputDocument(len(raw))
+		if err != nil {
+			// The request parsed, so this cannot normally happen; if it ever does, a row
+			// with the envelope and no body still beats no row at all — the operator has
+			// to be able to see that the request happened.
+			if s.deps.Log != nil {
+				s.deps.Log.Warn("building the recorded input document failed",
+					"err", err, "request_id", requestIDFrom(ctx))
+			}
+			rec.Payload = string(mustJSON(map[string]any{"model": req.Model, "request_bytes": len(raw)}))
+		} else {
+			rec.Payload = string(mustJSON(doc))
+		}
+	}
+
+	rec.Payload = redact(rec.Payload, cfg.RedactPaths)
+	if limit := s.recordingLimit(); len(rec.Payload) > limit {
+		rec.Payload = truncate(rec.Payload, limit)
+		rec.Truncated = true
+	}
+	return rec
+}
+
+// recordingLimit is recording.max_bytes with the same default the config ships.
+func (s *Server) recordingLimit() int {
+	if limit := s.deps.Config.Recording.MaxBytes; limit > 0 {
+		return limit
+	}
+	return 1 << 20
+}
+
+// recordContent applies the three-channel recording policy: input text is recorded
+// according to recordInput's policy, thinking text and final output text only when the
+// key opts in.
 func (s *Server) recordContent(
 	ctx context.Context,
 	key *domain.APIKey,
 	account *domain.Account,
-	req *responses.Request,
 	assembler *responses.Assembler,
 	status string,
+	input inputRecord,
 ) {
 	cfg := s.deps.Config.Recording
-	inputMode := key.RecordInputMode
-	if inputMode == "" || inputMode == "inherit" {
-		inputMode = cfg.RecordInput
-	}
 	recordReasoning := key.RecordReasoning || cfg.RecordReasoning
 	recordOutput := key.RecordOutputText || cfg.RecordOutputText
-
-	limit := cfg.MaxBytes
-	if limit <= 0 {
-		limit = 1 << 20
-	}
+	limit := s.recordingLimit()
 
 	rec := &domain.RequestLogRecord{
 		RequestID:        requestIDFrom(ctx),
@@ -522,19 +583,13 @@ func (s *Server) recordContent(
 		AccountID:        account.ID,
 		Endpoint:         "/v1/responses",
 		Status:           status,
-		RecordInputMode:  inputMode,
+		RecordInputMode:  input.Mode,
 		RecordReasoning:  recordReasoning,
 		RecordOutputText: recordOutput,
+		RequestJSON:      input.Payload,
+		RequestBytes:     input.Bytes,
+		Truncated:        input.Truncated,
 		CreatedAt:        time.Now().UTC(),
-	}
-	if inputMode != "off" {
-		payload := redact(string(mustJSON(req)), s.deps.Config.Recording.RedactPaths)
-		rec.RequestBytes = len(payload)
-		if len(payload) > limit {
-			payload = payload[:limit]
-			rec.Truncated = true
-		}
-		rec.RequestJSON = payload
 	}
 	if recordReasoning {
 		text := assembler.Reasoning()
@@ -837,11 +892,18 @@ func mustJSON(v any) []byte {
 	return raw
 }
 
+// truncate cuts a string to at most limit bytes, never in the middle of a rune: the
+// recorded documents are mostly Chinese text, and a cut inside a multi-byte rune would
+// store invalid UTF-8 that no console or JSON reader can display.
 func truncate(s string, limit int) string {
 	if limit <= 0 || len(s) <= limit {
 		return s
 	}
-	return s[:limit]
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // decodeStoredItems rebuilds the canonical items of a stored response so a

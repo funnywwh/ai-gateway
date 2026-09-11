@@ -158,15 +158,44 @@ type Billing struct {
 	WriterQueueSize       int              `yaml:"writer_queue_size"`
 }
 
+// RecordingInputModes are the accepted recording.record_input values, from the most
+// detailed capture to none. The console's per-key select offers the same set plus
+// "inherit", and internal/config's tests assert the two lists never drift apart.
+var RecordingInputModes = []string{"full", "user", "metadata", "off"}
+
 // Recording controls content capture (input text vs thinking/final output text).
 type Recording struct {
-	RecordInput      string   `yaml:"record_input"` // full|metadata|off
+	RecordInput      string   `yaml:"record_input"` // full|user|metadata|off
 	RecordReasoning  bool     `yaml:"record_reasoning"`
 	RecordOutputText bool     `yaml:"record_output_text"`
 	MaxBytes         int      `yaml:"max_bytes"`
 	RetentionDays    int      `yaml:"retention_days"`
 	RedactPaths      []string `yaml:"redact_paths"`
 	QueueSize        int      `yaml:"queue_size"`
+}
+
+// InputModeFor resolves one API key's record_input_mode against the deployment default.
+// "" and "inherit" mean "use the deployment default"; "meta" is the value an older
+// console sent for "metadata" and is normalized; anything unrecognised falls back to the
+// deployment default rather than silently widening what gets stored. The result is
+// always one of RecordingInputModes.
+func (r Recording) InputModeFor(keyMode string) string {
+	switch mode := strings.ToLower(strings.TrimSpace(keyMode)); mode {
+	case "meta":
+		return "metadata"
+	case "full", "user", "metadata", "off":
+		return mode
+	}
+	// "" and "inherit" mean the deployment default; so does anything unrecognised, which
+	// can only come from a hand-edited row. Falling back to the default never widens
+	// what gets stored beyond what the operator asked for globally.
+	fallback := strings.ToLower(strings.TrimSpace(r.RecordInput))
+	for _, known := range RecordingInputModes {
+		if fallback == known {
+			return known
+		}
+	}
+	return "user"
 }
 
 // MCP configures the MCP server (account query tools plus, for tokens whose scope
@@ -385,7 +414,7 @@ func Default() Config {
 			WriterQueueSize:       65536,
 		},
 		Recording: Recording{
-			RecordInput:      "full",
+			RecordInput:      "user",
 			RecordReasoning:  false,
 			RecordOutputText: false,
 			MaxBytes:         1048576,
@@ -561,7 +590,7 @@ func (c *Config) Validate() error {
 	if b.WriterBatchSize <= 0 || b.WriterQueueSize <= 0 {
 		return fmt.Errorf("billing.writer_batch_size and writer_queue_size must be positive")
 	}
-	if err := oneOf("recording.record_input", c.Recording.RecordInput, "full", "metadata", "off"); err != nil {
+	if err := oneOf("recording.record_input", c.Recording.RecordInput, RecordingInputModes...); err != nil {
 		return err
 	}
 	if c.Backup.Enabled {

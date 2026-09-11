@@ -805,9 +805,9 @@ func (s *Server) handleAdminUpsertTag(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	policy, err := jsonObjectString(body.Policy, "policy")
-	if err != nil {
-		writeAPIError(w, toAPIError(err))
+	policy, apiErr := keyPolicyDocument(body.Policy)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
 		return
 	}
 	tag := &domain.Tag{Name: name, Description: body.Description, GrantsJSON: grants, PolicyJSON: policy, Priority: 100}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/winger/ai-gateway/internal/apikey"
 	"github.com/winger/ai-gateway/internal/balancer"
@@ -41,6 +42,9 @@ type fixture struct {
 	// handler is the server itself, so a test can drive it with a context of its own
 	// (a canceled one stands in for a client that has already hung up).
 	handler http.Handler
+	// srv is that same instance, for paths a data-plane request cannot reach here (a
+	// billing rejection needs Deps.Billing, which this fixture leaves nil).
+	srv *Server
 }
 
 func newFixture(t testing.TB) *fixture {
@@ -128,13 +132,23 @@ func newFixture(t testing.TB) *fixture {
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
-	return &fixture{server: ts, db: db, cfg: &cfg, key: key, verifier: verifier, registry: reg, handler: srv.Handler()}
+	return &fixture{server: ts, db: db, cfg: &cfg, key: key, verifier: verifier, registry: reg, handler: srv.Handler(), srv: srv}
 }
 
 const (
 	capabilitiesJSON = `{"stream":true,"tools":true}`
 	grantsAll        = `{"models":["*"],"providers":["*"]}`
 	nonStreamBody    = `{"model":"echo-model","input":"ping"}`
+	// agentBody is shaped like a real agent turn: a developer instruction, a tool
+	// definition, the user's own message, a tool call and its output (a whole file in
+	// practice) and an earlier assistant turn. Only "ping" is user input.
+	agentBody = `{"model":"echo-model","input":[` +
+		`{"type":"message","role":"developer","content":[{"type":"input_text","text":"SYSTEM INSTRUCTION"}]},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]},` +
+		`{"type":"function_call","call_id":"call_1","name":"read","arguments":"{\"file\":\"/etc/shadow\"}"},` +
+		`{"type":"function_call_output","call_id":"call_1","output":"ZZ_TOOL_OUTPUT_SECRET"},` +
+		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"an earlier answer"}]}` +
+		`],"tools":[{"type":"function","name":"read","parameters":{"type":"object"}}]}`
 )
 
 func (f *fixture) do(t testing.TB, method, path, body string, headers map[string]string) *http.Response {
@@ -465,8 +479,10 @@ func TestRecordingSwitchesAreIndependent(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
-	// Default: input recorded, thinking and final output not recorded.
-	resp := f.do(t, "POST", "/v1/responses", nonStreamBody, nil)
+	// Default: only the user's own input is recorded; everything else the client sent
+	// (developer instruction, tool definition, tool output, earlier assistant turn) is
+	// tallied but not stored, and thinking/final output are not recorded at all.
+	resp := f.do(t, "POST", "/v1/responses", agentBody, nil)
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Fatalf("request failed: %d", resp.StatusCode)
@@ -476,8 +492,22 @@ func TestRecordingSwitchesAreIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request log missing: %v", err)
 	}
-	if log.RequestJSON == "" || !strings.Contains(log.RequestJSON, "ping") {
-		t.Fatalf("input text must be recorded by default: %q", log.RequestJSON)
+	if log.RecordInputMode != "user" {
+		t.Fatalf("record_input_mode = %q, want the resolved default user", log.RecordInputMode)
+	}
+	if !strings.Contains(log.RequestJSON, "ping") {
+		t.Fatalf("the user's own input must be recorded by default: %q", log.RequestJSON)
+	}
+	for _, forbidden := range []string{"ZZ_TOOL_OUTPUT_SECRET", "SYSTEM INSTRUCTION", "an earlier answer", "/etc/shadow"} {
+		if strings.Contains(log.RequestJSON, forbidden) {
+			t.Fatalf("only user input may be recorded by default, found %q in %q", forbidden, log.RequestJSON)
+		}
+	}
+	if !strings.Contains(log.RequestJSON, `"function_call_output":1`) || !strings.Contains(log.RequestJSON, `"tools":1`) {
+		t.Fatalf("the record must tally what was left out: %q", log.RequestJSON)
+	}
+	if log.RequestBytes <= 0 {
+		t.Fatalf("request_bytes must still report how big the request was: %+v", log)
 	}
 	if log.OutputTextRecorded || log.ResponseText != "" {
 		t.Fatalf("final output text must NOT be recorded by default: %+v", log)
@@ -486,13 +516,14 @@ func TestRecordingSwitchesAreIndependent(t *testing.T) {
 		t.Fatalf("thinking text must NOT be recorded by default: %+v", log)
 	}
 
-	// Enable the output-text switch for this key. The admin API invalidates the
-	// verification cache after such a write; do the same here.
+	// The output-text switch is per key; switching to full keeps the whole body. The two
+	// channels stay independent of each other. The admin API invalidates the verification
+	// cache after such a write; do the same here.
 	if err := f.db.SetAPIKeyRecording(ctx, f.key.ID, true, false, "full"); err != nil {
 		t.Fatal(err)
 	}
 	f.verifier.Invalidate(secret.Prefix(testToken))
-	resp2 := f.do(t, "POST", "/v1/responses", nonStreamBody, nil)
+	resp2 := f.do(t, "POST", "/v1/responses", agentBody, nil)
 	resp2.Body.Close()
 	log2, err := f.db.GetRequestLog(ctx, resp2.Header.Get("x-request-id"))
 	if err != nil {
@@ -503,6 +534,184 @@ func TestRecordingSwitchesAreIndependent(t *testing.T) {
 	}
 	if log2.ReasoningRecorded {
 		t.Fatalf("thinking text must stay off: %+v", log2)
+	}
+	if log2.RecordInputMode != "full" || !strings.Contains(log2.RequestJSON, "ZZ_TOOL_OUTPUT_SECRET") {
+		t.Fatalf("full mode must keep the whole body for diagnosis: %+v", log2)
+	}
+}
+
+// TestMetadataAndOffModesStoreNoBody pins the two modes that store no content: metadata
+// keeps the size of the request, off keeps nothing at all.
+func TestMetadataAndOffModesStoreNoBody(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// metadata used to behave exactly like full, which made the mode name a lie.
+	if err := f.db.SetAPIKeyRecording(ctx, f.key.ID, false, false, "metadata"); err != nil {
+		t.Fatal(err)
+	}
+	f.verifier.Invalidate(secret.Prefix(testToken))
+	resp := f.do(t, "POST", "/v1/responses", agentBody, nil)
+	resp.Body.Close()
+	row, err := f.db.GetRequestLog(ctx, resp.Header.Get("x-request-id"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.RequestJSON != "" {
+		t.Fatalf("metadata mode must not store content: %q", row.RequestJSON)
+	}
+	if row.RequestBytes <= 0 {
+		t.Fatalf("metadata mode must still report the size: %+v", row)
+	}
+	if row.RecordInputMode != "metadata" {
+		t.Fatalf("record_input_mode = %q", row.RecordInputMode)
+	}
+
+	if err := f.db.SetAPIKeyRecording(ctx, f.key.ID, false, false, "off"); err != nil {
+		t.Fatal(err)
+	}
+	f.verifier.Invalidate(secret.Prefix(testToken))
+	resp2 := f.do(t, "POST", "/v1/responses", agentBody, nil)
+	resp2.Body.Close()
+	row2, err := f.db.GetRequestLog(ctx, resp2.Header.Get("x-request-id"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row2.RequestJSON != "" || row2.RequestBytes != 0 {
+		t.Fatalf("off mode must store nothing at all: %+v", row2)
+	}
+	// The row itself must survive: a request with recording off is still a request, and
+	// its status is what an operator reads.
+	if row2.Status != "completed" {
+		t.Fatalf("status = %q, want completed", row2.Status)
+	}
+}
+
+// TestFlatKeyPolicyIsEnforced pins the shape admission actually reads: the quota fields
+// live at the top level of the policy. The console used to advertise a nested
+// {"rate_limit":{...}} document that nothing enforced.
+func TestFlatKeyPolicyIsEnforced(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	key, err := f.db.GetAPIKeyByPrefix(ctx, secret.Prefix(testToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key.PolicyJSON = `{"rpm":1}`
+	if _, err := f.db.UpsertAPIKey(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	f.verifier.Invalidate(secret.Prefix(testToken))
+
+	first := f.do(t, "POST", "/v1/responses", nonStreamBody, nil)
+	first.Body.Close()
+	if first.StatusCode != 200 {
+		t.Fatalf("the first request inside the window must pass: %d", first.StatusCode)
+	}
+	second := f.do(t, "POST", "/v1/responses", nonStreamBody, nil)
+	second.Body.Close()
+	if second.StatusCode != 429 {
+		t.Fatalf("rpm=1 in the key policy must reject the second request, got %d", second.StatusCode)
+	}
+	if got := second.Header.Get("x-ratelimit-limit-requests"); got != "1" {
+		t.Fatalf("x-ratelimit-limit-requests = %q, want 1", got)
+	}
+}
+
+// TestDeniedRequestGoesThroughTheRecordingPolicy covers the local-rejection path, which
+// used to store the whole request body with no redaction at all.
+func TestDeniedRequestGoesThroughTheRecordingPolicy(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// The fixture has no billing wired, so the rejection is invoked the way the data
+	// plane invokes it (rejectForQuota) instead of by driving a payment failure.
+	req, apiErr := responses.Parse([]byte(agentBody))
+	if apiErr != nil {
+		t.Fatal(apiErr)
+	}
+	account := &domain.Account{ID: f.key.AccountID, Name: "acme", Status: "active"}
+	// The request id normally arrives from the middleware; without it there is nothing to
+	// key the row on and the write is refused.
+	ctx = context.WithValue(ctx, ctxRequestID, "req_denied0001")
+	f.srv.recordDenied(ctx, f.key, account, req, domain.ErrInsufficientQuota("no funds"))
+
+	logs, err := f.db.ListRequestLogs(ctx, f.key.AccountID, time.Time{}, time.Time{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("the rejected request must still be recorded, got %d rows", len(logs))
+	}
+	denied := logs[0]
+	if denied.Status != "402" {
+		t.Fatalf("status = %q, want the rejection's HTTP status", denied.Status)
+	}
+	if denied.RecordInputMode != "user" {
+		t.Fatalf("the denial must resolve the key policy, got %q", denied.RecordInputMode)
+	}
+	if !strings.Contains(denied.RequestJSON, "ping") {
+		t.Fatalf("the user input must survive for diagnosis: %q", denied.RequestJSON)
+	}
+	for _, forbidden := range []string{"ZZ_TOOL_OUTPUT_SECRET", "SYSTEM INSTRUCTION"} {
+		if strings.Contains(denied.RequestJSON, forbidden) {
+			t.Fatalf("the denial path must apply the input policy, found %q", forbidden)
+		}
+	}
+}
+
+// TestDeniedRequestIsRedacted pins that the rejection path runs the same redaction as a
+// served request: it used to store the body verbatim, credentials included. Redaction is
+// observable in full mode; under the default policy a credential that is not part of the
+// user's own input is dropped outright, which is stricter still.
+func TestDeniedRequestIsRedacted(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	if err := f.db.SetAPIKeyRecording(ctx, f.key.ID, false, false, "full"); err != nil {
+		t.Fatal(err)
+	}
+	key, err := f.db.GetAPIKeyByPrefix(ctx, secret.Prefix(testToken))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"model":"echo-model","input":"ping","metadata":{"api_key":"sk-leak-me"}}`
+	req, apiErr := responses.Parse([]byte(body))
+	if apiErr != nil {
+		t.Fatal(apiErr)
+	}
+	account := &domain.Account{ID: key.AccountID, Name: "acme", Status: "active"}
+	// The request id normally arrives from the middleware; without it there is nothing to
+	// key the row on and the write is refused.
+	ctx = context.WithValue(ctx, ctxRequestID, "req_denied0002")
+	f.srv.recordDenied(ctx, key, account, req, domain.ErrInsufficientQuota("no funds"))
+
+	logs, err := f.db.ListRequestLogs(ctx, f.key.AccountID, time.Time{}, time.Time{}, 10)
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("request log = %v (err %v)", logs, err)
+	}
+	if logs[0].RecordInputMode != "full" {
+		t.Fatalf("record_input_mode = %q, want the key's full", logs[0].RecordInputMode)
+	}
+	if strings.Contains(logs[0].RequestJSON, "sk-leak-me") || !strings.Contains(logs[0].RequestJSON, "[redacted]") {
+		t.Fatalf("the denial path must redact credentials: %q", logs[0].RequestJSON)
+	}
+}
+
+func TestTruncateKeepsRunesIntact(t *testing.T) {
+	// Eight Chinese characters, 24 bytes: cutting at 5 must not split the second rune.
+	text := "配置请求日志"
+	got := truncate(text, 5)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncate produced invalid UTF-8: %q", got)
+	}
+	if got != "配" {
+		t.Fatalf("truncate(%q, 5) = %q, want the first whole rune", text, got)
+	}
+	if truncate(text, 0) != text || truncate(text, 99) != text {
+		t.Fatal("limit<=0 and limits past the end must return the string unchanged")
 	}
 }
 

@@ -27,7 +27,7 @@ export async function render({ page, actions }) {
       });
       page.append(card('请求日志', view.node, [
         days,
-        el('span', { class: 'muted', text: '默认只记录输入；最终输出与思考文本需在 Key 上单独开启' })]));
+        el('span', { class: 'muted', text: '默认只记录用户输入；系统指令、工具定义与工具输出只留计数，最终输出与思考文本需在 Key 上单独开启' })]));
     } else {
       view.refresh(rows);
     }
@@ -51,6 +51,9 @@ async function detail(requestID) {
     // round ✕ with it) stays pinned to the dialog frame while a long log scrolls.
     modalBody([
       el('div', { class: 'muted', text: row.endpoint + ' · ' + formatTime(row.created_at) + ' · HTTP ' + row.status }),
+      // The size of the request is recorded even when its content is not, so a
+      // "未录制" panel can still say how big the request was.
+      el('div', { class: 'muted', text: row.request_bytes ? '请求正文 ' + row.request_bytes + ' 字节' + (row.truncated ? '（已截断）' : '') : '' }),
       body,
     ]),
     modalActions([el('button', { class: 'btn', text: '关闭', onclick: () => close() })]),

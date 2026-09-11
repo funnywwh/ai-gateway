@@ -2,7 +2,10 @@ import { api } from '../api.js';
 import { el, card, table, modal, toast, confirmDialog } from '../ui.js';
 
 const SAMPLE_GRANTS = JSON.stringify({ models: ['gpt-*'], providers: ['*'] }, null, 2);
-const SAMPLE_POLICY = JSON.stringify({ rate_limit: { rpm: 60 }, recording: { output_text: false } }, null, 2);
+// The quota policy is FLAT: only top-level fields are read (rpm/tpm/concurrency are
+// enforced, monthly_* are parsed but not checked yet). A nested {"rate_limit":{...}}
+// document is rejected by the server, because it used to be stored and then ignored.
+const SAMPLE_POLICY = JSON.stringify({ rpm: 60, concurrency: 4 }, null, 2);
 
 export async function render({ page, actions, session }) {
   const readonly = session.role !== 'admin';
@@ -51,7 +54,7 @@ function form(row, reload) {
       { name: 'priority', label: '优先级', type: 'number', value: row ? row.priority : 100 },
       { name: 'grants', label: '授权（JSON）', type: 'textarea', json: true, rows: 8,
         value: row && row.grants ? JSON.stringify(row.grants, null, 2) : SAMPLE_GRANTS },
-      { name: 'policy', label: '策略（JSON）', type: 'textarea', json: true, rows: 8,
+      { name: 'policy', label: '策略（JSON，扁平字段）', type: 'textarea', json: true, rows: 8,
         value: row && row.policy ? JSON.stringify(row.policy, null, 2) : SAMPLE_POLICY },
     ],
     onSubmit: async (values) => {

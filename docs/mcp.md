@@ -43,7 +43,7 @@
 | 7 | `get_models` | — | 该账户可用模型与**对客售价**（`currency` 为该模型的售价币种，缺省账本币种） |
 | 8 | `list_requests` | `period, limit` | 请求列表（含录制标记） |
 | 9 | `get_request` | `request_id` | 该请求**输入文本**（脱敏后）；思考与最终输出按开关返回 |
-| 10 | `get_usage_breakdown` / `get_rate_limits` | — | 分组统计 / 当前限额与已用 |
+| 10 | `get_usage_breakdown` / `get_rate_limits` | — | 分组统计 / 当前限额与已用。`configured_limits` 读的是**扁平**策略字段（与实际生效路径同一解析器）；`monthly_*` 只解析不执行，会在 `not_enforced` 里列出；读不懂的字段进 `ignored_policy_fields`。标签策略在生效时合并，此处不合并 |
 
 返回为结构化 JSON；金额同时给出可读值与 micros 原始值，并附口径说明（时间范围、聚合方式、币种）。
 
@@ -103,7 +103,7 @@
 
 | 字段 | 默认 | 返回条件 |
 |---|---|---|
-| 输入文本 | **记录**（`record_input=full`，脱敏） | 默认可见；`record_input=off` 时返回"不可用"说明 |
+| 输入文本 | **记录用户输入**（`record_input=user`，脱敏） | 默认可见；返回的是录制文档（用户消息 + `omitted` 计数 + `request_bytes`），系统指令、工具定义与工具输出不落正文；`record_input=off` 时返回"不可用"说明 |
 | 思考文本 | **不记录**（`record_reasoning=false`） | 仅当该 Key 勾选"保存思考文本" |
 | 最终输出文本 | **不记录**（`record_output_text=false`） | 仅当该 Key 勾选"保存最终输出文本" |
 

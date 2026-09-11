@@ -297,25 +297,20 @@ func (s *scopeState) resetAt(sec int64, slots *[Slots]bucket) time.Time {
 }
 
 // LimitsFromPolicy converts a key/tag policy JSON into Limits.
-// Recognised fields: rpm, tpm, concurrency, monthly_requests, monthly_tokens, monthly_cost_micros.
+//
+// The document is decoded by domain.ParsePolicy so enforcement, the management console
+// and the MCP report can never disagree about the shape: only *top-level* quota fields
+// count. Recognised fields: rpm, tpm, concurrency, monthly_requests, monthly_tokens,
+// monthly_cost_micros — of which this limiter checks rpm, tpm and concurrency (the
+// monthly caps are parsed but not enforced yet).
 func LimitsFromPolicy(raw string) Limits {
-	if raw == "" {
-		return Limits{}
-	}
-	var wire struct {
-		RPM               int   `json:"rpm"`
-		TPM               int64 `json:"tpm"`
-		Concurrency       int   `json:"concurrency"`
-		MonthlyRequests   int64 `json:"monthly_requests"`
-		MonthlyTokens     int64 `json:"monthly_tokens"`
-		MonthlyCostMicros int64 `json:"monthly_cost_micros"`
-	}
-	if err := jsonUnmarshal(raw, &wire); err != nil {
+	rl, _, err := domain.ParsePolicy(raw)
+	if err != nil {
 		return Limits{}
 	}
 	return Limits{
-		RPM: wire.RPM, TPM: wire.TPM, Concurrency: wire.Concurrency,
-		MonthlyRequests: wire.MonthlyRequests, MonthlyTokens: wire.MonthlyTokens,
-		MonthlyCostMicros: wire.MonthlyCostMicros,
+		RPM: rl.RPM, TPM: rl.TPM, Concurrency: rl.Concurrency,
+		MonthlyRequests: rl.MonthlyRequests, MonthlyTokens: rl.MonthlyTokens,
+		MonthlyCostMicros: rl.MonthlyCostMicros,
 	}
 }

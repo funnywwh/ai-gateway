@@ -21,14 +21,40 @@ func TestDefaultIsValid(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("default config must validate: %v", err)
 	}
-	if cfg.Recording.RecordInput != "full" {
-		t.Errorf("record_input default = %q, want full", cfg.Recording.RecordInput)
+	if cfg.Recording.RecordInput != "user" {
+		t.Errorf("record_input default = %q, want user (only the user's own input)", cfg.Recording.RecordInput)
 	}
 	if cfg.Recording.RecordReasoning || cfg.Recording.RecordOutputText {
 		t.Errorf("thinking/final-output recording must default to off")
 	}
 	if cfg.Billing.InflightPolicy != "abort" || cfg.Billing.OvershootPolicy != "absorb" {
 		t.Errorf("in-flight defaults wrong: %q/%q", cfg.Billing.InflightPolicy, cfg.Billing.OvershootPolicy)
+	}
+}
+
+func TestRecordingInputModeFor(t *testing.T) {
+	cases := []struct {
+		name    string
+		global  string
+		keyMode string
+		want    string
+	}{
+		{"key inherit takes the deployment default", "full", "inherit", "full"},
+		{"empty key mode takes the deployment default", "full", "", "full"},
+		{"key mode wins over the deployment default", "off", "full", "full"},
+		{"an older console's meta means metadata", "user", "meta", "metadata"},
+		{"unknown key modes fall back to the deployment default", "metadata", "everything", "metadata"},
+		{"unknown key mode with an unset default", "", "everything", "user"},
+		{"case and padding do not change the mode", "user", " Full ", "full"},
+		{"an unset default is user", "", "", "user"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recording := Recording{RecordInput: tc.global}
+			if got := recording.InputModeFor(tc.keyMode); got != tc.want {
+				t.Fatalf("InputModeFor(%q) with default %q = %q, want %q", tc.keyMode, tc.global, got, tc.want)
+			}
+		})
 	}
 }
 

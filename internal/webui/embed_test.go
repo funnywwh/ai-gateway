@@ -6,6 +6,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	// Test-only import: the console assets and the server's accepted values are two
+	// halves of one contract, so the test needs the server's list. Production code in
+	// this package still imports nothing from the module (guarded by internal/arch).
+	"github.com/winger/ai-gateway/internal/config"
 )
 
 func TestConsoleAssetsAreEmbedded(t *testing.T) {
@@ -60,5 +65,52 @@ func TestConsoleSendsCSP(t *testing.T) {
 	policy := resp.Header.Get("Content-Security-Policy")
 	if !strings.Contains(policy, "default-src 'self'") {
 		t.Fatalf("missing content security policy: %q", policy)
+	}
+}
+
+// TestConsoleRecordingModesMatchTheServer pins the per-key recording select to the values
+// the server accepts. The console used to offer "meta" while the backend only understood
+// "metadata", so the choice was stored as an unknown mode and silently ignored.
+func TestConsoleRecordingModesMatchTheServer(t *testing.T) {
+	srv := httptest.NewServer(Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/js/pages/keys.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	source := string(body)
+
+	want := append([]string{"inherit"}, config.RecordingInputModes...)
+	for _, mode := range want {
+		if !strings.Contains(source, "value: '"+mode+"'") {
+			t.Errorf("the console must offer %q (accepted by the server)", mode)
+		}
+	}
+	if strings.Contains(source, "value: 'meta'") {
+		t.Error(`the console must not offer "meta": the server only understands "metadata"`)
+	}
+}
+
+// TestConsoleDoesNotSuggestDeadSettingKeys keeps the settings page honest: a suggested key
+// with no reader is a change that silently does nothing.
+func TestConsoleDoesNotSuggestDeadSettingKeys(t *testing.T) {
+	srv := httptest.NewServer(Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/js/pages/settings.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	source := string(body)
+	if !strings.Contains(source, "'billing.fx_rates'") {
+		t.Fatal("the FX table is a live setting and must stay reachable from the console")
+	}
+	for _, dead := range []string{"'recording.default'", "'recording.max_bytes'", "'mcp.max_query_rows'", "'backup.retention'"} {
+		if strings.Contains(source, dead) {
+			t.Errorf("%s has no reader; suggesting it makes a no-op look like configuration", dead)
+		}
 	}
 }

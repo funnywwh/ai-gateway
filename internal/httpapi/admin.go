@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/winger/ai-gateway/internal/admin"
+	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/ids"
 	"github.com/winger/ai-gateway/internal/secret"
@@ -24,7 +25,6 @@ type AdminStore interface {
 	GetAccountByName(ctx context.Context, name string) (*domain.Account, error)
 	ListAPIKeys(ctx context.Context, accountID int64) ([]*domain.APIKey, error)
 	UpsertAPIKey(ctx context.Context, k *domain.APIKey) (int64, error)
-	SetAPIKeyRecording(ctx context.Context, id int64, recordOutputText, recordReasoning bool, inputMode string) error
 	ListRequestLogs(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*domain.RequestLogRecord, error)
 	GetRequestLog(ctx context.Context, requestID string) (*domain.RequestLogRecord, error)
 	InsertAudit(ctx context.Context, e *AuditEntry) error
@@ -185,6 +185,7 @@ func (s *Server) handleAdminListKeys(w http.ResponseWriter, r *http.Request) {
 			"id": key.ID, "name": key.Name, "account_id": key.AccountID,
 			"key_prefix": key.KeyPrefix, "status": key.Status,
 			"tags":               jsonOrEmptyArray(key.TagsJSON),
+			"policy":             jsonOrNil(key.PolicyJSON),
 			"record_input_mode":  key.RecordInputMode,
 			"record_reasoning":   key.RecordReasoning,
 			"record_output_text": key.RecordOutputText,
@@ -200,15 +201,20 @@ func (s *Server) handleAdminCreateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name      string   `json:"name"`
-		AccountID int64    `json:"account_id"`
-		Account   string   `json:"account"`
-		Tags      []string `json:"tags"`
-		Grants    any      `json:"grants"`
-		Policy    any      `json:"policy"`
+		Name      string          `json:"name"`
+		AccountID int64           `json:"account_id"`
+		Account   string          `json:"account"`
+		Tags      []string        `json:"tags"`
+		Grants    any             `json:"grants"`
+		Policy    json.RawMessage `json:"policy"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
+		return
+	}
+	policy, apiErr := keyPolicyDocument(body.Policy)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
 		return
 	}
 	accountID := body.AccountID
@@ -233,7 +239,7 @@ func (s *Server) handleAdminCreateKey(w http.ResponseWriter, r *http.Request) {
 		KeyHash:         secret.Hash(token),
 		TagsJSON:        marshalOrEmpty(body.Tags),
 		GrantsJSON:      marshalAny(body.Grants),
-		PolicyJSON:      marshalAny(body.Policy),
+		PolicyJSON:      policy,
 		RecordInputMode: "inherit",
 		Status:          "active",
 		CreatedBy:       actor.Username,
@@ -265,14 +271,30 @@ func (s *Server) handleAdminPatchKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Status           *string `json:"status"`
-		RecordReasoning  *bool   `json:"record_reasoning"`
-		RecordOutputText *bool   `json:"record_output_text"`
-		RecordInputMode  *string `json:"record_input_mode"`
+		Status           *string          `json:"status"`
+		RecordReasoning  *bool            `json:"record_reasoning"`
+		RecordOutputText *bool            `json:"record_output_text"`
+		RecordInputMode  *string          `json:"record_input_mode"`
+		Policy           *json.RawMessage `json:"policy"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
 		return
+	}
+	if body.RecordInputMode != nil {
+		if apiErr := validRecordInputMode(*body.RecordInputMode); apiErr != nil {
+			writeAPIError(w, apiErr)
+			return
+		}
+	}
+	policy := ""
+	if body.Policy != nil {
+		raw, apiErr := keyPolicyDocument(*body.Policy)
+		if apiErr != nil {
+			writeAPIError(w, apiErr)
+			return
+		}
+		policy = raw
 	}
 
 	keys, err := s.deps.AdminStore.ListAPIKeys(r.Context(), 0)
@@ -309,11 +331,22 @@ func (s *Server) handleAdminPatchKey(w http.ResponseWriter, r *http.Request) {
 		status = *body.Status
 	}
 
-	if err := s.deps.AdminStore.SetAPIKeyRecording(r.Context(), id, recOutput, recReasoning, inputMode); err != nil {
-		writeAPIError(w, toAPIError(err))
-		return
+	// One write, not two: the upsert below rewrites every column from this struct, so
+	// anything set on the row but not on the struct is reverted. That is exactly how the
+	// recording switches used to be saved and then silently overwritten with the values
+	// the row already had — the PATCH looked successful and changed nothing.
+	if inputMode == "" {
+		inputMode = "inherit"
 	}
+	target.RecordInputMode = inputMode
+	target.RecordOutputText = recOutput
+	target.RecordReasoning = recReasoning
 	target.Status = status
+	// A quota policy is only settable at creation otherwise, which left an operator with
+	// no way to fix a limit on a key that already had traffic.
+	if body.Policy != nil {
+		target.PolicyJSON = policy
+	}
 	if _, err := s.deps.AdminStore.UpsertAPIKey(r.Context(), target); err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
@@ -322,6 +355,9 @@ func (s *Server) handleAdminPatchKey(w http.ResponseWriter, r *http.Request) {
 	s.audit(r.Context(), actor.Username, "update", "api_key", strconv.FormatInt(id, 10), map[string]any{
 		"record_output_text": recOutput, "record_reasoning": recReasoning,
 		"record_input_mode": inputMode, "status": status,
+		// The policy itself is not secret, but the audit trail records that it changed
+		// rather than duplicating configuration into a second table.
+		"policy_set": body.Policy != nil,
 	}, "ok")
 	if s.deps.InvalidateKey != nil {
 		s.deps.InvalidateKey(target.KeyPrefix)
@@ -333,7 +369,47 @@ func (s *Server) handleAdminPatchKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": id, "status": status, "record_output_text": recOutput,
 		"record_reasoning": recReasoning, "record_input_mode": inputMode,
+		"policy": jsonOrNil(target.PolicyJSON),
 	})
+}
+
+// validRecordInputMode rejects a per-key recording mode the gateway cannot resolve, so a
+// console that sends a stale value fails loudly instead of silently storing it.
+func validRecordInputMode(mode string) *domain.APIError {
+	normalized := strings.ToLower(strings.TrimSpace(mode))
+	if normalized == "inherit" {
+		return nil
+	}
+	for _, known := range config.RecordingInputModes {
+		if normalized == known {
+			return nil
+		}
+	}
+	return domain.ErrInvalidRequest(fmt.Sprintf("record_input_mode %q is not supported (use inherit, %s)",
+		mode, strings.Join(config.RecordingInputModes, ", "))).WithParam("record_input_mode")
+}
+
+// keyPolicyDocument validates an optional key/tag policy document: it must be a JSON
+// object, and every top-level field must be one the gateway reads. A stored-but-ignored
+// policy is worse than a rejected one — the console used to advertise a nested shape
+// ({"rate_limit":{"rpm":60}}) that nothing enforced, so a limit could look configured
+// while the traffic kept flowing.
+func keyPolicyDocument(raw json.RawMessage) (string, *domain.APIError) {
+	text, err := jsonObjectString(raw, "policy")
+	if err != nil {
+		return "", toAPIError(err)
+	}
+	if text == "" {
+		return "", nil
+	}
+	if _, unknown, parseErr := domain.ParsePolicy(text); parseErr != nil {
+		return "", domain.ErrInvalidRequest(parseErr.Error()).WithParam("policy")
+	} else if len(unknown) > 0 {
+		return "", domain.ErrInvalidRequest(fmt.Sprintf(
+			"policy has fields the gateway does not read: %s (accepted: %s)",
+			strings.Join(unknown, ", "), domain.PolicyFieldList())).WithParam("policy")
+	}
+	return text, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +441,7 @@ func (s *Server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
 			"created_at":     row.CreatedAt.Format(time.RFC3339),
 			"input_recorded": row.RequestJSON != "", "reasoning_recorded": row.ReasoningRecorded,
 			"output_text_recorded": row.OutputTextRecorded, "truncated": row.Truncated,
+			"request_bytes": row.RequestBytes,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
@@ -388,6 +465,7 @@ func (s *Server) handleAdminRequestDetail(w http.ResponseWriter, r *http.Request
 		"output":         jsonOrNil(row.ResponseText),
 		"input_recorded": row.RequestJSON != "", "reasoning_recorded": row.ReasoningRecorded,
 		"output_text_recorded": row.OutputTextRecorded, "truncated": row.Truncated,
+		"request_bytes": row.RequestBytes, "response_bytes": row.ResponseBytes,
 	})
 }
 

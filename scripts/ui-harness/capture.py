@@ -61,6 +61,12 @@ def main():
         fixtures = json.load(open(OUT, encoding="utf-8"))
 
     fixtures["/providers"] = call("/admin/api/v1/providers", cookie)
+    # The key editor and the request log (keys.page.html). Kept in the capture so a
+    # --refresh does not silently drop the fixtures those views depend on.
+    fixtures["/keys"] = call("/admin/api/v1/keys", cookie)
+    fixtures["/requests"] = call("/admin/api/v1/requests?days=7&limit=50", cookie)
+    for row in fixtures["/requests"].get("data", [])[:1]:
+        fixtures[f"/requests/{row['request_id']}"] = call(f"/admin/api/v1/requests/{row['request_id']}", cookie)
     fixtures["/provider-kinds"] = call("/admin/api/v1/provider-kinds", cookie)
     for row in fixtures["/providers"].get("data", []):
         pid = str(row["id"])

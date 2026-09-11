@@ -91,7 +91,13 @@ billing:
   writer_queue_size: 65536
 
 recording:
-  record_input: full          # full|metadata|off - request input text is recorded by default (redacted)
+  # 输入通道四档（可在控制台按 Key 覆盖）：
+  #   user     - 只记用户自己写的输入（默认）：user 消息原样保留，系统/开发者指令、工具定义、
+  #              工具调用与工具输出、历史 assistant 轮次只留 omitted 计数与 request_bytes
+  #   full     - 整份请求正文（排障用：上游 400 需要客户端原样字节时临时打开）
+  #   metadata - 不落正文，只留体积/状态等列内元数据
+  #   off      - 什么都不留（仍会写一行请求日志，状态可见）
+  record_input: user
   record_reasoning: false     # "save thinking text" checkbox - off by default, per key
   record_output_text: false   # "save final output text" checkbox - off by default, per key
   max_bytes: 1048576

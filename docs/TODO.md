@@ -612,3 +612,54 @@
 - [x] `make verify` 全绿（vet + test + build）；`internal/arch` 分层测试未新增包、无需改表
 - [x] 控制台走查：`make ui-check`（headless firefox）新增 `currency` 视图 16 项断言（默认无 ≈、切 CNY 后 ≈ + 正确数值、缺汇率徽标、无页面错误）
 - [x] 真实实例端到端：CNY 售价模型 → `usage_records.charge_micros == ceil(原生 × 汇率)`、快照含 `sale_currency`/`fx_sale_ledger`/原生金额、账本条目同额、`/v1/models` 报 CNY、`/billing/currency` 列表与缺汇率
+
+## M23 请求日志默认只保留用户输入 + 配额口径收口
+
+> 设计文档 `docs/design/m23-input-recording.md`（实现前已在对话中输出并确认）。
+> `config.yaml` 被 gitignore，运行态改动在这里留痕（沿用 M22 的做法）。
+
+- [x] 口径：请求日志输入通道默认只记**用户自己写的输入**（`input` 里 `type=message, role=user`），
+  系统/开发者指令、工具定义、`function_call`/`function_call_output`（真实流量里是整份文件内容）、
+  历史 assistant 轮次只留 `omitted` 计数与 `request_bytes`
+- [x] 四档语义：`full`（整份正文，排障用）/ `user`（默认）/ `metadata`（只记元数据，不落正文）/
+  `off`（什么都不留）；Key 级 `inherit` 继承部署默认，历史脏值 `meta` 归一化为 `metadata`
+- [x] **行为变更**：`metadata` 此前与 `full` 等价（代码里 `if inputMode != "off"` 就落整份正文），
+  现在真的只记元数据——把 `record_input` 写成 `metadata` 的部署需要改成 `user` 或 `full`
+- [x] 落地位置：`config.Recording.InputModeFor` 解析策略；`responses.Request.UserInputDocument` 抽取
+  用户输入；`httpapi.recordInput` 统一构造（脱敏 → rune 安全截断），正常/失败/本地拒绝三条路径共用
+- [x] 修 `recordDenied`：本地拒绝路径此前落整份正文且**完全不脱敏**，现在走同一策略（含脱敏）
+- [x] 修 hook `input` 字段：此前填的是模型输出（`assembler.Text()`），现在是与请求日志同一份文档
+- [x] 修 `truncate`：按 rune 边界回退，不再把中文切成非法 UTF-8
+- [x] `persist` 只算一次输入文档，落库（`request_logs` + `responses.request_json`）与 hook 事件共用
+- [x] 配额口径：唯一形状 = **扁平顶层**（`rpm/tpm/concurrency/monthly_*/strategy/provider_order/margin_bp`），
+  `domain.ParsePolicy` 为唯一解析器（`quota` 与 `mcpsrv` 共用，`domain` 是两者都能 import 的层）
+- [x] 写入即校验：Key 创建/PATCH、标签 upsert 的 `policy` 必须是非空对象且不含未知顶层字段，
+  否则 400 并列出可接受字段（控制台标签页示例的嵌套 `{"rate_limit":{"rpm":60}}` 从此会被拒绝）
+- [x] Key 配额**建完可改**：`PATCH /admin/api/v1/keys/{id}` 接受 `policy`，`GET /keys` 返回 `policy`，
+  控制台 Key 编辑弹框可直接改（此前只在创建时可写，建完只能重建）
+- [x] 修 PATCH 录制开关**保存不上**：原实现先 `SetAPIKeyRecording` 再 `UpsertAPIKey(target)`，
+  后者用行里的旧值把刚写入的模式与两个布尔开关覆盖回去；改为单次 upsert
+- [x] `record_input_mode` 校验：只接受 `inherit|user|full|metadata|off`，控制台此前送 `'meta'` 会被静默存成未知值
+- [x] 管理面请求列表/详情返回 `request_bytes`（详情另有 `response_bytes`），控制台详情显示「请求正文 N 字节」
+- [x] MCP `get_rate_limits`：`configured_limits` 改读扁平字段（与生效路径同一解析器），新增
+  `not_enforced` / `ignored_policy_fields` / `policy_error`，note 说明标签策略在生效时合并
+- [x] 控制台：Key 页四档选择 + 配额列与编辑框、标签页示例改为能生效的扁平写法、请求日志页文案、
+  设置页只建议有读取方的键（`recording.default` 等四个死键移除）
+- [x] 测试：`InputModeFor` 表驱动、`ParsePolicy`（未知字段/非数字/非对象）、用户输入抽取（工具输出
+  等不得出现在结果里）、默认文档只含用户输入、`metadata`/`off`、拒绝路径脱敏、扁平 `rpm=1` 生效、
+  PATCH 校验与 policy 读回、`truncate` rune 边界、控制台枚举一致性
+- [x] 控制台走查：`scripts/ui-harness` 新增 `keys.page.html`（`#keys`/`#requests` 视图，17 + 10 项断言：
+  配额列与回填、四档枚举与后端一致、PATCH 载荷、详情 `request_bytes`、圆形 ✕ 可关闭），8 个视图全绿
+- [x] 冒烟：独立实例（`:8099` + 临时库 + 新二进制）实测——默认文档只含用户输入、嵌套 policy 400、
+  `'meta'` 400、扁平 `rpm=1` 生效得 429
+- [x] `make verify` 全绿（vet + test + build）；`internal/arch` 未新增包、无需改表
+- [x] 文件基线：`config.example.yaml` 的 `recording.record_input: user`；README 状态与设计文档行刷新
+- [x] 运行态：`config.yaml` 的 `record_input` 由 `metadata` 改为 `user`（语义已变，必须显式改）
+- [ ] **待人工执行**（必须在自己终端里跑，DSH 沙箱启动的进程会被回收）：
+  `scripts/local-run.sh restart` —— 让新的录制口径、配额校验与控制台资源生效
+- [ ] 重启后实测：真实请求的新行只含用户输入（工具输出标记不出现）、`record_input_mode=user`；
+  PATCH 切 `full` 后正文含标记；PATCH 嵌套 policy 得 400
+- [ ] 另立：**实现月度配额**（`monthly_*` 目前只解析不执行）——需要读 `usage_counters` + 缓存 +
+  结算后失效，注意不要给请求路径增加无谓的打库开销
+- [ ] 另立：死设置键（`recording.default`/`recording.max_bytes`/`mcp.max_query_rows`/`backup.retention`）
+  要么实现读取方，要么从设置页文案里彻底移除

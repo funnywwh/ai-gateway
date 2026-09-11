@@ -1,10 +1,13 @@
 import { api } from '../api.js';
 import { el, card, table, modal, toast, statusBadge, formatTime, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
 
+// Accepted values mirror config.RecordingInputModes plus "inherit"; internal/webui's
+// test asserts the console and the server never drift apart.
 const INPUT_MODES = [
-  { value: 'inherit', label: '继承全局默认（输入 full）' },
-  { value: 'full', label: 'full：完整记录输入' },
-  { value: 'meta', label: 'meta：只记元数据' },
+  { value: 'inherit', label: '继承全局默认（默认：只记用户输入）' },
+  { value: 'user', label: 'user：只记用户输入' },
+  { value: 'full', label: 'full：整份请求正文（排障用）' },
+  { value: 'metadata', label: 'metadata：只记元数据（不落正文）' },
   { value: 'off', label: 'off：不记录输入' },
 ];
 
@@ -32,6 +35,7 @@ export async function render({ page, actions, session }) {
           { key: 'record_input_mode', label: '输入录制' },
           { key: 'record_output_text', label: '输出文本', render: (row) => (row.record_output_text ? '已开启' : '关闭') },
           { key: 'record_reasoning', label: '思考文本', render: (row) => (row.record_reasoning ? '已开启' : '关闭') },
+          { key: 'policy', label: '配额', render: (row) => el('code', { text: JSON.stringify(row.policy || {}) }) },
           { key: 'last_used_at', label: '最近使用', render: (row) => formatTime(row.last_used_at) },
         ],
         rows,
@@ -40,7 +44,7 @@ export async function render({ page, actions, session }) {
           el('button', { class: 'btn', text: row.status === 'active' ? '停用' : '启用', onclick: () => toggle(row, load) }),
         ],
       });
-      page.append(card('API Keys', view.node, [el('span', { class: 'muted', text: '明文只在创建时显示一次；输入默认记录，思考与最终输出需单独勾选' })]));
+      page.append(card('API Keys', view.node, [el('span', { class: 'muted', text: '明文只在创建时显示一次；默认只记录用户输入，思考与最终输出需单独勾选' })]));
     } else {
       view.refresh(rows);
     }
@@ -92,12 +96,17 @@ async function editKey(row, reload) {
       { name: 'record_output_text', label: '记录最终输出文本', type: 'checkbox', value: row.record_output_text },
       { name: 'record_reasoning', label: '记录思考文本', type: 'checkbox', value: row.record_reasoning },
       { name: 'status', label: '状态', type: 'select', options: ['active', 'suspended', 'revoked'], value: row.status },
+      // Quota policy. Only the flat fields are read (rpm/tpm/concurrency are enforced);
+      // anything else is rejected by the server instead of being stored and ignored.
+      { name: 'policy', label: '配额策略（扁平 JSON）', type: 'textarea', json: true, rows: 6,
+        hint: '例：{"rpm":60,"concurrency":4}；留空=不改动', value: row.policy ? JSON.stringify(row.policy, null, 2) : '' },
     ],
     onSubmit: (values) => api.patch('/keys/' + row.id, {
       record_input_mode: values.record_input_mode,
       record_output_text: !!values.record_output_text,
       record_reasoning: !!values.record_reasoning,
       status: values.status,
+      ...(values.policy === undefined ? {} : { policy: values.policy }),
     }),
   });
   if (result) { toast('已更新', 'ok'); await reload(); }

@@ -359,20 +359,21 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 				bodyOptional("account", "string", "所属账户名（与 account_id 二选一）"),
 				bodyOptional("tags", "array", "标签名数组，决定授权与策略合并"),
 				bodyOptional("grants", "object", "授权对象，例如 models/providers 两个通配数组"),
-				bodyOptional("policy", "object", "限速与配额策略对象"),
+				bodyOptional("policy", "object", "限速与配额策略（扁平顶层字段）：rpm/tpm/concurrency 生效，monthly_* 已解析未执行，strategy/provider_order/margin_bp 影响路由与加价；其它字段会被拒绝"),
 			},
 		},
 		{
 			Method: "PATCH", Path: "/admin/api/v1/keys/{id}", Handler: s.handleAdminPatchKey,
 			Name: "admin_update_key", Group: groupKeys, Role: roleAdmin,
-			Summary:   "改 Key 的状态与内容录制开关（输入/思考/最终输出）",
+			Summary:   "改 Key 的状态、配额策略与内容录制开关（输入/思考/最终输出）",
 			Dangerous: true, ConfirmReason: "可停用或启用密钥，也能改动内容录制开关（影响隐私）",
 			Params: []adminField{pathParam("id", "API Key 的数字 id")},
 			Body: []adminField{
 				enumField(bodyOptional("status", "string", "状态"), "active", "disabled"),
 				bodyOptional("record_reasoning", "boolean", "是否保存思考文本"),
 				bodyOptional("record_output_text", "boolean", "是否保存最终输出文本"),
-				enumField(bodyOptional("record_input_mode", "string", "输入文本录制级别"), "inherit", "full", "metadata", "off"),
+				enumField(bodyOptional("record_input_mode", "string", "输入文本录制级别：user 只记用户输入（默认），full 整份请求正文，metadata 只记元数据，off 不记"), "inherit", "user", "full", "metadata", "off"),
+				bodyOptional("policy", "object", "限速与配额策略（扁平顶层字段，与创建 Key 相同；省略则不改）"),
 			},
 		},
 		{
@@ -388,7 +389,7 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/requests/{id}", Handler: s.handleAdminRequestDetail,
 			Name: "admin_get_request", Group: groupRequests, Role: roleViewer,
-			Summary: "单条请求详情（输入/思考/输出，按录制开关决定是否可见）",
+			Summary: "单条请求详情（输入/思考/输出，按录制开关决定是否可见；默认只记用户输入）",
 			Params:  []adminField{pathParam("id", "请求 id（x-request-id）")},
 		},
 		{
@@ -573,7 +574,7 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 				bodyRequired("name", "string", "标签名"),
 				bodyOptional("description", "string", "说明"),
 				bodyOptional("grants", "object", "该标签授予的模型/供应商访问权"),
-				bodyOptional("policy", "object", "该标签的限速与配额策略"),
+				bodyOptional("policy", "object", "该标签的限速与配额策略（扁平顶层字段：rpm/tpm/concurrency 生效，monthly_* 已解析未执行；嵌套的 rate_limit 会被拒绝）"),
 				bodyOptional("priority", "integer", "策略合并优先级"),
 			},
 		},

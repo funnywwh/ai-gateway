@@ -141,28 +141,40 @@ func (s *Service) getRateLimits(ctx context.Context, accountID int64) (any, erro
 
 	out := make([]map[string]any, 0, len(keys))
 	for _, key := range keys {
-		limits := map[string]any{}
-		if policy := parsePolicy(key.PolicyJSON); policy != nil {
-			if rate, ok := policy["rate_limit"].(map[string]any); ok {
-				limits = rate
+		entry := map[string]any{
+			"api_key_id": key.ID, "name": key.Name, "status": key.Status,
+			"tags": jsonArray(key.TagsJSON),
+		}
+		// The report reads the same document admission reads (domain.ParsePolicy), so a
+		// limit can never show up here while being ignored on the request path. It used to
+		// read a nested policy["rate_limit"], a shape nothing enforced.
+		parsed, unknown, parseErr := domain.ParsePolicy(key.PolicyJSON)
+		if parseErr != nil {
+			entry["configured_limits"] = map[string]any{}
+			entry["policy_error"] = parseErr.Error()
+		} else {
+			entry["configured_limits"] = parsed.Configured()
+			if notEnforced := parsed.UnenforcedFields(); len(notEnforced) > 0 {
+				entry["not_enforced"] = notEnforced
+			}
+			if len(unknown) > 0 {
+				entry["ignored_policy_fields"] = unknown
 			}
 		}
-		entry := used[key.ID]
-		if entry == nil {
-			entry = map[string]any{"requests": int64(0), "tokens": int64(0), "charge_usd": microsToUSD(0)}
+		used := used[key.ID]
+		if used == nil {
+			used = map[string]any{"requests": int64(0), "tokens": int64(0), "charge_usd": microsToUSD(0)}
 		}
-		out = append(out, map[string]any{
-			"api_key_id": key.ID, "name": key.Name, "status": key.Status,
-			"tags":              jsonArray(key.TagsJSON),
-			"configured_limits": limits,
-			"used_this_period":  entry,
-		})
+		entry["used_this_period"] = used
+		out = append(out, entry)
 	}
 	return map[string]any{
 		"period": period,
 		"keys":   out,
-		"note": "configured_limits come from the key policy; used_this_period comes from the monthly rollup. " +
-			"Real-time sliding-window headroom is process state and is not reported here.",
+		"note": "configured_limits are the key policy's own quota fields; tag policies merge in at " +
+			"enforcement time and are not merged here. rpm/tpm/concurrency are enforced; anything " +
+			"listed in not_enforced is stored but not checked yet. used_this_period comes from the " +
+			"monthly rollup. Real-time sliding-window headroom is process state and is not reported here.",
 	}, nil
 }
 
@@ -216,17 +228,6 @@ func invoiceSummary(invoice *domain.Invoice) map[string]any {
 		"total_charge_micros": invoice.TotalChargeMicros,
 		"total_cost_usd":      microsToUSD(invoice.TotalCostMicros),
 	}
-}
-
-func parsePolicy(raw string) map[string]any {
-	if strings.TrimSpace(raw) == "" {
-		return nil
-	}
-	var policy map[string]any
-	if err := json.Unmarshal([]byte(raw), &policy); err != nil {
-		return nil
-	}
-	return policy
 }
 
 func jsonArray(raw string) []string {

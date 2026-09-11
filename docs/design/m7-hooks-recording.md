@@ -66,3 +66,8 @@ handler 完成响应 → hook.Emit(response.completed, payload)
 - **本轮只接入 completion/failed 两类事件**：其余事件（provider.attempt、apikey.*、backup.*）
   依赖对应里程碑的状态位，避免为凑数量而发出信息量不足的事件。
 - **管理面请求日志查询**并入 M8（与其它管理端点一起实现会话鉴权与分页）。
+- **三通道录制口径（M23 收敛）**：`input`/`reasoning`/`output` 三个字段的落库策略独立，默认只记
+  **用户自己的输入**（`record_input=user`）：`user` 消息原样保留，系统/开发者指令、工具定义、
+  工具调用与工具输出、历史 assistant 轮次只留 `omitted` 计数与 `request_bytes`。需要客户端原样字节
+  排障时按 Key 切 `full`。hook 事件里的 `input` 字段此前被填成模型输出（`assembler.Text()`），现在
+  填的是与请求日志同一份、受同一策略约束的文档。

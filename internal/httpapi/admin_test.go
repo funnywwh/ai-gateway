@@ -1034,3 +1034,72 @@ func TestAdminPortalUserLifecycle(t *testing.T) {
 		t.Fatalf("disable payload = %v", disabledPayload)
 	}
 }
+
+// TestKeyQuotaAndRecordingWritesAreValidated covers the two write paths that used to
+// accept anything: a recording mode no code resolves, and a quota policy in a shape no
+// code reads (the console used to advertise {"rate_limit":{"rpm":60}}, which was stored
+// and then ignored, so a limit could look configured while traffic kept flowing).
+func TestKeyQuotaAndRecordingWritesAreValidated(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	created := decodeJSONBody(t, f.call(t, http.MethodPost, "/admin/api/v1/keys",
+		`{"name":"dev","account":"acme","policy":{"rpm":5,"monthly_tokens":1000}}`, cookie))
+	id, ok := created["id"].(float64)
+	if !ok {
+		t.Fatalf("key creation failed: %v", created)
+	}
+	path := "/admin/api/v1/keys/" + itoa(int64(id))
+
+	// A policy field nothing reads is refused, with the accepted list in the message.
+	bad := f.call(t, http.MethodPatch, path, `{"policy":{"rate_limit":{"rpm":60}}}`, cookie)
+	if bad.StatusCode != http.StatusBadRequest {
+		t.Fatalf("a nested policy must be rejected, got %d", bad.StatusCode)
+	}
+	if message := apiErrorMessage(t, bad); !strings.Contains(message, "rate_limit") || !strings.Contains(message, "rpm") {
+		t.Fatalf("the rejection must name the offending field and the accepted ones: %q", message)
+	}
+
+	// The mode a stale console sends is refused instead of stored.
+	badMode := f.call(t, http.MethodPatch, path, `{"record_input_mode":"meta"}`, cookie)
+	if badMode.StatusCode != http.StatusBadRequest {
+		t.Fatalf("an unknown recording mode must be rejected, got %d", badMode.StatusCode)
+	}
+	if message := apiErrorMessage(t, badMode); !strings.Contains(message, "record_input_mode") {
+		t.Fatalf("the rejection must name the parameter: %q", message)
+	}
+
+	// A valid mode and a flat quota policy are stored and readable back.
+	patched := decodeJSONBody(t, f.call(t, http.MethodPatch, path,
+		`{"record_input_mode":"user","policy":{"rpm":5,"concurrency":2}}`, cookie))
+	if patched["record_input_mode"] != "user" {
+		t.Fatalf("patch response = %v", patched)
+	}
+
+	list := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/keys", "", cookie))
+	rows, _ := list["data"].([]any)
+	for _, raw := range rows {
+		row, _ := raw.(map[string]any)
+		if row["id"] != id {
+			continue
+		}
+		policy, _ := row["policy"].(map[string]any)
+		if policy["rpm"] != float64(5) || policy["concurrency"] != float64(2) {
+			t.Fatalf("the console must be able to read the key policy back: %v", row["policy"])
+		}
+		if row["record_input_mode"] != "user" {
+			t.Fatalf("record_input_mode = %v", row["record_input_mode"])
+		}
+		return
+	}
+	t.Fatalf("the created key is missing from the list: %v", list)
+}
+
+// apiErrorMessage returns error.message from an API error response.
+func apiErrorMessage(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	payload := decodeJSONBody(t, resp)
+	envelope, _ := payload["error"].(map[string]any)
+	message, _ := envelope["message"].(string)
+	return message
+}

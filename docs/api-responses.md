@@ -24,12 +24,21 @@
   管理面写操作后立即失效（`Invalidate`/`InvalidateAll`）。
 - **账户停用**：凭据正确但账户 `suspended` → **402 `billing_hard_limit_reached`**（不是 401）。
 - **限速维度**：`rpm`（请求数）、`tpm`（token，完成后结算）、`concurrency`（进行中）。
-  有效限额 = key / 标签 / 账户三处**取最严**。
+  有效限额 = key 与**其命中的全部标签**逐项**取最严**（账户级没有 rpm/tpm 配额；账户侧是计费授信：
+  授信上限、低额阈值、在途透支上限、`inflight_policy_override`）。
+- **策略形状是扁平的**：配额字段放在 Key/标签 `policy` 的**顶层**（`{"rpm":60,"concurrency":4}`）。
+  写入时会校验：非对象、配额字段非数字、或出现 `PolicyFields` 之外的顶层字段（例如嵌套的
+  `{"rate_limit":{...}}`）一律 400，并在错误信息里列出可接受字段——存下来却被忽略的策略比被拒绝更危险。
+- **`monthly_requests` / `monthly_tokens` / `monthly_cost_micros` 已解析、未执行**：它们会被解析、会在
+  `GET /keys`、控制台与 MCP `get_rate_limits`（`not_enforced`）里如实展示，但准入不检查它们。
+  实现（读 `usage_counters` + 缓存 + 结算后失效）见 `docs/TODO.md`。
 - **限速响应**：429，附
   `x-ratelimit-limit-requests`、`x-ratelimit-remaining-requests`、`x-ratelimit-reset-requests`、
   `x-ratelimit-limit-tokens`、`x-ratelimit-remaining-tokens`、`x-ratelimit-reset-tokens` 与 `Retry-After`。
 - **计量**：只有**实际出网**的尝试才写 `usage_records`；本地拒绝（401/402/403/404/429/400 未出网）
-  只写 `request_logs`、审计与 hook，**不计费**。
+  只写 `request_logs`、审计与 hook，**不计费**。其中**限速拒绝（本地滑动窗口 429）不写 `request_logs`**
+  ——它在准入之前就返回了；计费与配额拒绝（402，`RejectAs429` 时 429）走 `rejectForQuota`，
+  会写一行请求日志（同样受录制策略与脱敏约束）。
 
 ## 请求字段
 

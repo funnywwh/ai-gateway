@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>keys console harness</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="actions" class="toolbar"></div>
+<div id="page"></div>
+<div id="modal-root"></div>
+<!-- toast() appends into #toasts, which the console shell provides; without it the key
+     editor's "已更新" would be a null dereference instead of a visible confirmation. -->
+<div id="toasts" class="toasts"></div>
+<script>
+// Same shape as providers.page.html: fixtures answer every management API call, so the
+// pages under test need no session and no database. Unlike that page this one also
+// records request bodies, because the key editor's job is to *send* the right policy.
+const FIXTURES = __FIXTURES__;
+window.fetch = async (url, options) => {
+  const path = String(url).replace('/admin/api/v1', '').split('?')[0];
+  window.__fetched = (window.__fetched || []).concat([path]);
+  if (options && options.body) {
+    window.__sent = window.__sent || {};
+    window.__sent[path] = options.body;
+  }
+  const body = FIXTURES[path] !== undefined ? FIXTURES[path] : { data: [] };
+  return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+};
+const errors = [];
+window.onerror = (msg) => errors.push('onerror: ' + msg);
+window.onunhandledrejection = (ev) => errors.push('rejection: ' + ev.reason);
+
+function report(data) {
+  data.errors = errors;
+  data.toasts = [...document.querySelectorAll('.toast')].map((n) => n.textContent);
+  const url = '/report?data=' + encodeURIComponent(JSON.stringify(data));
+  try { if (navigator.sendBeacon && navigator.sendBeacon(url)) return; } catch (err) { /* fall through */ }
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url, false);
+    xhr.send();
+  } catch (err) { /* reporting must never break the harness */ }
+}
+</script>
+<script type="module">
+import { render as renderKeys } from '/js/pages/keys.js';
+import { render as renderRequests } from '/js/pages/requests.js';
+// Imported for their import graph and module-level code: without node there is no other
+// syntax check for the console, and these two pages share the same helpers.
+import '/js/pages/tags.js';
+import '/js/pages/settings.js';
+
+const view = location.hash.replace('#', '') || 'keys';
+const checks = {};
+const modal = () => document.getElementById('modal-root');
+const modalText = () => modal().textContent;
+const pageText = () => document.getElementById('page').textContent;
+const find = (label) => [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === label);
+const settle = async () => { for (let i = 0; i < 300; i++) await Promise.resolve(); };
+const closeButton = () => modal().querySelector('.modal-head .modal-close');
+const closeChecks = () => {
+  const btn = closeButton();
+  if (!btn) return { closeButton: false };
+  return { closeButton: true, closeLabel: btn.getAttribute('aria-label') === '关闭' };
+};
+
+try {
+  if (view === 'keys') {
+    await renderKeys({ page: document.getElementById('page'), actions: document.getElementById('actions'), session: { role: 'admin' } });
+    await settle();
+    checks.tableRendered = pageText().includes('dev-key');
+    checks.quotaColumn = pageText().includes('配额');
+    checks.quotaShown = pageText().includes('"rpm":60');
+    checks.recordingHint = pageText().includes('默认只记录用户输入');
+
+    [...document.querySelectorAll('tbody button')].find((b) => b.textContent.trim() === '编辑').click();
+    await settle();
+    checks.dialogOpen = modal().querySelectorAll('.modal').length === 1;
+    Object.assign(checks, closeChecks());
+
+    const select = modal().querySelector('select[name="record_input_mode"]');
+    checks.modeSelect = !!select;
+    // The console and the server must agree on the accepted values: "meta" used to be
+    // offered while the backend only understood "metadata", so the choice vanished.
+    checks.modeValues = !!select && [...select.options].map((o) => o.value).join(',') === 'inherit,user,full,metadata,off';
+
+    const policy = modal().querySelector('textarea[name="policy"]');
+    checks.policyField = !!policy;
+    checks.policyPrefilled = !!policy && policy.value.includes('"rpm": 60');
+    checks.policyHint = modalText().includes('扁平');
+    checks.fieldRows = modal().querySelectorAll('label.field').length;
+
+    find('保存').click();
+    await settle();
+    const sent = (window.__sent || {})['/keys/1'];
+    checks.patchSent = !!sent;
+    let body = null;
+    try { body = JSON.parse(sent); } catch (err) { body = null; }
+    checks.policyInPatch = !!body && !!body.policy && body.policy.rpm === 60 && body.policy.concurrency === 4;
+    checks.modeInPatch = !!body && body.record_input_mode === 'user';
+    checks.toastShown = [...document.querySelectorAll('.toast')].some((n) => n.textContent.includes('已更新'));
+  }
+
+  if (view === 'requests') {
+    await renderRequests({ page: document.getElementById('page'), actions: document.getElementById('actions'), session: { role: 'admin' } });
+    await settle();
+    checks.tableRendered = pageText().includes('req_demo0001');
+    checks.recordingHint = pageText().includes('默认只记录用户输入');
+    checks.columns = ['输入', '输出文本', '思考文本'].every((c) => pageText().includes(c));
+
+    find('详情').click();
+    await settle();
+    checks.dialogOpen = modal().querySelectorAll('.modal').length === 1;
+    Object.assign(checks, closeChecks());
+    const t = modalText();
+    // The size of a request is recorded even when its content is not, so a "未录制"
+    // panel can still say how big the request was.
+    checks.bytesShown = t.includes('请求正文 483 字节');
+    checks.inputPanel = t.includes('ping from m23');
+    checks.omittedTally = t.includes('omitted');
+    closeButton().click();
+    await settle();
+    checks.closeDismisses = modal().querySelectorAll('.modal, .modal-backdrop').length === 0;
+  }
+
+  const flags = Object.entries(checks).filter(([, v]) => typeof v === 'boolean');
+  const numeric = Object.entries(checks).filter(([, v]) => typeof v === 'number');
+  report({ view, stage: 'done', checks, fetched: window.__fetched,
+    ok: errors.length === 0 && flags.every(([, v]) => v === true) && numeric.every(([, v]) => v > 0) });
+} catch (err) {
+  report({ view, stage: 'threw', checks, thrown: String(err && err.stack ? err.stack : err), fetched: window.__fetched });
+}
+</script>
+</body>
+</html>

@@ -2,17 +2,16 @@ import { api } from '../api.js';
 import { el, card, toast, jsonBlock } from '../ui.js';
 import { initCurrency, currencies, ledgerCurrency, displayCurrency, fxSource, missingRates } from '../money.js';
 
+// Only settings a module actually reads are suggested: any other key would be stored and
+// then ignored, which looks like a configuration change that never happened. The
+// recording policy and the MCP/backup knobs live in config.yaml.
 const KNOWN_KEYS = [
-  'recording.default',
-  'recording.max_bytes',
-  'mcp.max_query_rows',
-  'backup.retention',
   'billing.fx_rates',
 ];
 
 export async function render({ page, session }) {
   const readonly = session.role !== 'admin';
-  const keyInput = el('input', { placeholder: '设置键，例如 recording.default', list: 'known-keys' });
+  const keyInput = el('input', { placeholder: '设置键，例如 billing.fx_rates', list: 'known-keys' });
   const datalist = el('datalist', { id: 'known-keys' }, KNOWN_KEYS.map((k) => el('option', { value: k })));
   const load = el('button', { class: 'btn', text: '读取' });
   const valueBox = el('textarea', { rows: 10 });
@@ -48,7 +47,7 @@ export async function render({ page, session }) {
     el('label', { class: 'field' }, [el('span', { text: 'JSON 值' }), valueBox]),
     el('div', { class: 'toolbar' }, [save]),
     output,
-  ], [el('span', { class: 'muted', text: '设置以 JSON 存储；启动配置（config.yaml）优先级低于环境变量，设置项由各模块自行读取' })]));
+  ], [el('span', { class: 'muted', text: '设置以 JSON 存储，只有实现了读取方的设置键才会生效（当前只有汇率表）；录制口径与 MCP/备份参数在 config.yaml 里配置' })]));
 
   // The FX table is the one setting the console edits structurally: a mistyped rate
   // would turn into a wrong charge, so the server validates it (and reloads the live
