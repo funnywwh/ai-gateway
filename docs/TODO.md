@@ -524,3 +524,23 @@
   `reasoning` 与 `thinkingLevelMap`），但那要求路由名与 model id 都命中目录——本网关的 `aigw`/`gpt-5.6-luna`/`deepseek-flash`
   都不在其中。所以"自动识别"要么改 DSH 自身，要么写 DSH 插件自带模型目录；两者都超出本仓库范围
 
+
+### M20b deepseek 供应商补 v4 系列模型（8088 运行态 + 文件基线）
+- [x] 起点事实：运行中的 `:8088` 实例里 `deepseek` 供应商（provider id 15）只有
+  `provider_models` 两条（`deepseek-flash` id 13、`deepseek-v4-pro` id 14）；对客 `models` 只有 `deepseek-flash`（id 6），
+  `routes` 也只有它（id 5）。于是 `deepseek-v4-pro` **声明了却不可调用**（`not_mapped` 之外的模型根本不在
+  `GET /v1/models` 里），`deepseek-v4-flash` 三层全缺
+- [x] 改动（管理 API 直改运行态，**不需要重启**——bootstrap 在 upsert 语义下既不更新也不删除已存在的行）：
+  `POST /admin/api/v1/providers/15/models` ×2（新增 `deepseek-v4-flash` id 16；把 id 14 刷成同一形状：
+  `capabilities {stream,tools,reasoning}`、1M/65536、priority 30/weight 100）、`POST /admin/api/v1/models` ×2
+  （对客模型 id 7/8）、`POST /admin/api/v1/routes` ×2（route id 6/7，priority 30/weight 100，均指 provider `deepseek` 且上游同名）
+- [x] 验证（同一实例，改动后立即复验）：`GET /admin/api/v1/router/explain?model=…` 两个模型各出 1 个候选
+  （provider `deepseek`、`excluded` 为空）；`GET /v1/models`（dev key）出现两个新 id；真实请求
+  `POST /v1/responses`（`max_output_tokens:16`）——`deepseek-v4-pro` → `completed` + `output_text="ok"`，
+  `deepseek-v4-flash` → `incomplete`（16 token 被思考吃满、非错误）+ reasoning 项，两者都带
+  `X-Gateway-Provider: deepseek`、无降级头
+- [x] 文件基线同步：`config.yaml` 的 `bootstrap.providers[deepseek].models` 补 `deepseek-v4-flash`，
+  `bootstrap.models` / `bootstrap.routes` 各补两条（与运行态的 priority/weight 一致）；
+  `docs/api-providers.md` §3 片段补 `deepseek-v4-flash` 并写明"只加供应商模型不够，三层齐全才对客可用"
+- [x] 文件校验：临时程序 `.cache/cfgcheck`（在 gitignore 的 `.cache/` 下，未入库）用 `internal/config.Load`
+  解析改后的 `config.yaml` → ok，`providers=3 models=6 routes=6`

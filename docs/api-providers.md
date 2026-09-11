@@ -92,12 +92,26 @@ providers:
         context_window: 1000000
         max_output_tokens: 65536
         capabilities: {stream: true, tools: true, reasoning: true}
+      - public: deepseek-v4-flash
+        upstream: deepseek-v4-flash
+        context_window: 1000000
+        max_output_tokens: 65536
+        capabilities: {stream: true, tools: true, reasoning: true}
       - public: deepseek-v4-pro
         upstream: deepseek-v4-pro
         context_window: 1000000
         max_output_tokens: 65536
         capabilities: {stream: true, tools: true, reasoning: true}
 ```
+
+两个 `v4` id 都已对着真实上游验证过（2026-09-11，运行中的 `:8088` 实例）：`deepseek-v4-pro` 回
+`completed` + `output_text`，`deepseek-v4-flash` 在 `max_output_tokens:16` 下把额度全花在思考上、状态
+`incomplete`（不是错误）——这恰好说明思考默认开启，要给正文留额度。
+
+**只加供应商模型不够，对客可用需要三层齐全**：`provider_models`（能力申报与上游映射，路由缺它即
+`not_mapped`）、`models`（对客模型名，`GET /v1/models` 只列它）、`routes`（模型 → 供应商 + 上游模型）。
+管理 API 的 `POST /admin/api/v1/providers/{id}/models` 在缺 canonical model 时会回
+`warning: no canonical model with this public name exists yet; add one so it becomes routable` —— 这句就是提醒还差后两层。
 
 **DeepSeek 的语义要点（官方文档）**
 
