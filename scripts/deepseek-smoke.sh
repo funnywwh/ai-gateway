@@ -305,6 +305,14 @@ else
   grep -q "REQUEST thinking=enabled effort=high" "$WORK/upstream.log" \
     || { cat "$WORK/upstream.log"; fail "effort=high must switch thinking on"; }
   pass "effort=high → thinking.type=enabled + reasoning_effort=high"
+  # Silence is not "off": the upstream's own default decides (DeepSeek defaults to
+  # thinking on). Sending type=disabled here stripped the chain of thought from every
+  # client that does not speak the reasoning field — DSH pointed at the gateway sends
+  # none — and the downgraded model stopped tasks half-finished.
+  ask '"2+2?"' '' >/dev/null || fail "silent request failed"
+  grep -q "REQUEST thinking=<absent> effort=<absent>" "$WORK/upstream.log" \
+    || { cat "$WORK/upstream.log"; fail "a silent client must not get an explicit thinking switch"; }
+  pass "no reasoning field → no thinking field (upstream default decides)"
 
   echo "== tool turn replays the chain of thought on continuation"
   TOOLS='"tools":[{"type":"function","name":"weather","description":"d","parameters":{"type":"object"}}],"tool_choice":"auto"'
@@ -314,9 +322,13 @@ else
     || fail "tool request failed"
   rid="$(echo "$OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
   pass "first tool turn stored as $rid"
+  # The continuation answers the tool call, which is the only real shape: an
+  # unanswered tool_call is pruned (the upstream rejects a call with no tool
+  # message behind it), and with the call gone there is no chain of thought to
+  # replay. Sending a bare user message here tested a request no client sends.
   curl -fsS -X POST "http://127.0.0.1:${GATEWAY_PORT}/v1/responses" \
     -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
-    -d "{\"model\":\"deepseek-flash\",\"previous_response_id\":\"${rid}\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"and tomorrow?\"}],$TOOLS,\"reasoning\":{\"effort\":\"low\"}}" \
+    -d "{\"model\":\"deepseek-flash\",\"previous_response_id\":\"${rid}\",\"input\":[{\"type\":\"function_call_output\",\"call_id\":\"call_smoke_1\",\"output\":\"Cloudy 7~13C\"}],$TOOLS,\"reasoning\":{\"effort\":\"low\"}}" \
     >/dev/null || fail "continuation request failed"
   grep -q "replay=True" "$WORK/upstream.log" \
     || { cat "$WORK/upstream.log"; fail "the continuation must replay reasoning_content"; }

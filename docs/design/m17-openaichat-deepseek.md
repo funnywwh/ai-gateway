@@ -225,7 +225,15 @@ func ChatResponseToResponsesWithOptions(resp *ChatResponse, opts ChatConvertOpti
 5. **顺手修了分层断言**：`internal/arch` 的允许依赖表遗漏了 M14(1) 引入的 `internal/sessionauth` / `internal/portal`，
    该里程碑提交后 `make verify` 一直是红的。本轮补上两行与 `internal/admin`/`internal/httpapi` 的对应依赖，
    否则 M17 的验收标准（`make verify` 全绿）无法成立。
-6. **验收走查的形态**：没有用插件或真实上游，而是 `scripts/deepseek-smoke.sh` 起一个 DeepSeek 形状的假上游 + 真实 `bin/aigw` 二进制，
+6. **补记（2026-09-11，M19b 期间）：`auto` 对沉默客户端不再下发 `disabled`**。原实现在 `mode=auto` 下把"请求里没有 `reasoning` 字段"
+   也当成"客户端要求关闭"，于是**恒发** `{"thinking":{"type":"disabled"}}`。这与本文档第 3 节的用途说明相悖（`style=deepseek` 是要表达
+   DeepSeek 方言的思考开关，而 DeepSeek 的语义是"不发即默认开启"），且后果实测可见：DSH 指向网关时请求里没有 `reasoning`，
+   于是每一步都在无思维链下回答（`usage_records` 的 `reasoning` 维度恒缺），任务做到一半就停；同一直连 `api.deepseek.com` 的客户端
+   因为发 `thinking:{type:"enabled"}` 不受影响。直连实测（同一提示词）：不发字段 reasoning_tokens=235、`disabled` 0、`enabled+high` 151。
+   现在 `auto` 的三种输入分别是：有 `reasoning.effort` → 照办；显式 `none` → `disabled`；**完全没有该字段 → 不下发**
+   （原文只写"由客户端决定"，没写"客户端沉默时谁决定"，这一条是本次补的）。`mode=enabled/disabled` 的强制语义不变。
+   走查脚本 `scripts/deepseek-smoke.sh` 增加一条断言覆盖这个形态。
+7. **验收走查的形态**：没有用插件或真实上游，而是 `scripts/deepseek-smoke.sh` 起一个 DeepSeek 形状的假上游 + 真实 `bin/aigw` 二进制，
    校验请求形状（`thinking` / `reasoning_effort` / `tools`）、流式顺序（思考先于正文）、用量维度（缓存 80 / reasoning 5）、
    错误映射（400 → fatal 且保留 message、402 → 配额）与**续接回传**（假上游记录 `replay=True`）。
    真机走查（`--live`）已执行，见第 8 条。
@@ -240,7 +248,7 @@ func ChatResponseToResponsesWithOptions(resp *ChatResponse, opts ChatConvertOpti
      故走查脚本改用默认档位（该档位的覆盖在单测里做）。
    - 另据实测：DeepSeek 对"带 tools 但不回传 reasoning_content"的续接**没有**报 400（文档如此要求，实测宽容）。
      网关仍按文档回传——回传是上游明确要求的行为，且不增加成本。
-7. **测试规模**：`pkg/providerkit` 新增 8 个用例（含"默认参数不产生思考事件"的不变断言），
+9. **测试规模**：`pkg/providerkit` 新增 8 个用例（含"默认参数不产生思考事件"的不变断言），
    `internal/providers/openaichat` 新增 10 个用例（思考开关矩阵 6 个子例、思考回传 2 例、流式 2 例、
    上游失败原因 2 例、错误分类 5 例、response_format 3 例、max_tokens 补缺、Health，共 30 个断言点），
    `internal/httpapi` 新增 3 个用例（续接往返、空值兼容表、上游 reasoning 形状）。

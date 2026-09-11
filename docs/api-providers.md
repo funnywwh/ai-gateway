@@ -36,7 +36,7 @@
 | `headers` | 空 | 额外请求头（给需要自定义头或改协议的上游留后路） |
 | `timeout_s` | 120 | HTTP 客户端超时；单次尝试的最终上限由路由的 `per_attempt_timeout_s` 决定 |
 | `models` | 空 | **上游目录只能声明，不能猜**：`public`/`upstream`/`context_window`/`max_output_tokens`/`capabilities` |
-| `thinking.mode` | `auto` | `auto` 由客户端 `reasoning.effort` 决定；`enabled` 强制开启；`disabled` 强制关闭 |
+| `thinking.mode` | `auto` | `auto`：客户端给了 `reasoning.effort` 就照办（`none`→关，其余→开）；**没给就根本不下发该字段**，由上游默认决定（DeepSeek 默认就是开）。`enabled` / `disabled` 分别强制开关 |
 | `thinking.style` | `none` | `deepseek` → 下发 `{"thinking":{"type":"enabled\|disabled"}}`；`none` → 不下发（通用形态） |
 | `thinking.replay_reasoning_content` | `false` | 把历史 `reasoning` 项正文回传为 assistant 的 `reasoning_content`（带工具的多轮必需，见 §4） |
 | `response_format` | `text` | 上游真实支持到哪一档：`text`（不下发）/`json_object`/`json_schema`。**能力申报要与它一致** |
@@ -103,6 +103,11 @@ providers:
 
 - **思考默认开启**：不发 `thinking` 就是开启。想省思考 token 只能显式关（`mode=disabled` 或客户端 `reasoning.effort="none"`）；
   "客户端不要思考"≠"上游不思考"。
+- 因此 `auto` 对**沉默的客户端**（请求里没有 `reasoning` 字段）不下发该字段，而不是下发 `disabled`：
+  后者会把"客户端没提这件事"翻译成"关掉思考"，等于替上游做了一个它没被要求做的决定。
+  实测后果（2026-09-11）：DSH 指向本网关时不发 `reasoning`，于是每一步都在无思维链下回答，
+  模型能力明显下降、任务做一半就停；而同一直连 DeepSeek 的客户端（会发 `thinking.enabled`）不受影响。
+  修复后同一形态请求恢复思考（reasoning_tokens 19 vs 0），`effort="none"` 仍然能关掉。
 - `reasoning_effort` 支持 `minimal/low/medium/high/xhigh/max`，上游自行映射（`minimal→low`、`medium/xhigh→high`）。
 - thinking 模式下 `temperature` / `presence_penalty` **被忽略**（不报错），`top_p` 下限被抬到 0.95；网关原样透传，不代改。
 - thinking 模式下 `tool_choice` 不支持 `required` 与具名工具（上游 400）；网关不拦截，错误原样透出。

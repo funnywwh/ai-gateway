@@ -151,6 +151,12 @@ bootstrap:
   # openai-chat speaks /chat/completions. Extra keys (all optional, defaults keep the
   # plain OpenAI-compatible behaviour):
   #   thinking.mode                  auto|enabled|disabled   - who decides whether the model thinks
+  #                                  auto: the client's reasoning.effort decides. A client that
+  #                                  sends no reasoning field gets no thinking field at all, so the
+  #                                  upstream default applies (DeepSeek's default is on); sending
+  #                                  "disabled" there would strip the chain of thought from every
+  #                                  client that does not speak the field — DSH pointed at this
+  #                                  gateway sends none, and stops tasks mid-way without it.
   #   thinking.style                 none|deepseek           - deepseek sends {"thinking":{"type":...}}
   #   thinking.replay_reasoning_content bool                 - send earlier reasoning back on tool turns
   #   response_format                text|json_object|json_schema - highest level the upstream accepts

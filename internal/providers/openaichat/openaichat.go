@@ -51,6 +51,11 @@ const (
 	ResponseFormatJSONSchema = "json_schema"
 )
 
+// reasoningEffortNone is the effort value a client sends to ask for no reasoning at
+// all; it maps onto the dialect's "disabled" switch and is never forwarded as an
+// effort level (the upstream would reject it).
+const reasoningEffortNone = "none"
+
 // quotaCooldown is how long a candidate is cooled when the upstream reports an
 // exhausted balance without saying when it recovers.
 const quotaCooldown = 30 * time.Minute
@@ -433,23 +438,41 @@ func renderBody(cfg Config, req *pluginapi.Request, stream bool) ([]byte, error)
 
 	out := payload{ChatRequest: chatReq}
 	if cfg.thinkingStyle() == ThinkingStyleDeepSeek {
-		enabled := false
+		effort := ""
+		if req.Reasoning != nil {
+			effort = strings.TrimSpace(req.Reasoning.Effort)
+		}
+		// "none" is what a client says to ask for no reasoning at all; it is not an
+		// effort level the upstream accepts, so the hint never travels with it.
+		clearEffort := func() {
+			if effort == reasoningEffortNone {
+				chatReq.ReasoningEffort = ""
+			}
+		}
 		switch cfg.thinkingMode() {
 		case ThinkingEnabled:
-			enabled = true
+			out.Thinking = &thinkingField{Type: "enabled"}
+			clearEffort()
 		case ThinkingDisabled:
-			enabled = false
-		default: // auto: the request decides
-			enabled = req.Reasoning != nil && req.Reasoning.Effort != "" && req.Reasoning.Effort != "none"
+			out.Thinking = &thinkingField{Type: "disabled"}
+			chatReq.ReasoningEffort = "" // a stale hint would contradict the switch
+		default: // auto: the request decides — including "the request said nothing"
+			switch effort {
+			case "":
+				// A silent client gets no field at all: the upstream's own default is the
+				// only honest reading of silence. Answering it with type=disabled is not a
+				// neutral choice — DeepSeek's default is thinking ON, so "auto" downgraded
+				// the model for every client that does not speak the reasoning field
+				// (DSH pointed at this gateway sends none), and a model stripped of its
+				// chain of thought turns capable and stops tasks half-finished.
+				out.Thinking = nil
+			case reasoningEffortNone:
+				out.Thinking = &thinkingField{Type: "disabled"}
+				chatReq.ReasoningEffort = ""
+			default:
+				out.Thinking = &thinkingField{Type: "enabled"}
+			}
 		}
-		typeName := "disabled"
-		if enabled {
-			typeName = "enabled"
-		} else {
-			// An explicit "no reasoning" must not carry a stale effort hint.
-			chatReq.ReasoningEffort = ""
-		}
-		out.Thinking = &thinkingField{Type: typeName}
 	}
 	if raw := responseFormat(cfg.ResponseFormat); len(raw) > 0 {
 		out.ResponseFormat = raw

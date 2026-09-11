@@ -400,3 +400,29 @@
   第 2 轮回灌 `function_call_output` 后给出终答）。
 - [ ] **待宿主执行**：运行中的 8088 仍是旧二进制（本次会话所在的沙箱与宿主不同 PID namespace，无法向该进程发信号），
   需在启动它的终端执行 `./scripts/local-run.sh restart`；插件二进制已重建（`bin/` 与 `plugins/aigw-provider-codex`），重启后生效
+
+### M19c 思考开关：客户端沉默不等于"关掉思考"（DSH 实测报告）
+- [x] 触发：M19b 修复后 DSH 经 8088 仍会"任务做一半就停"，而**同一直连 DeepSeek 的客户端不会**。
+  排查发现 `usage_records` 里经网关的所有 deepseek-flash 请求**几乎完全没有 reasoning 维度**
+  （40+ 次调用里只有几个显式带 `reasoning.effort` 的探针请求有），而同模型的直连路径每步都有
+- [x] 根因：`openaichat` 在 `thinking.mode=auto` 下把"请求里没有 `reasoning` 字段"与"客户端要求关闭"混为一谈，
+  于是**恒发** `{"thinking":{"type":"disabled"}}`。DSH 指向网关的供应商（`api: openai-responses`，
+  models 未声明 reasoning）**不发** `reasoning` 字段，因此每一步都在无思维链下回答；而 DSH 的内置 deepseek
+  供应商按 pi-ai 的 deepseek 方言发 `thinking:{type:"enabled"}` + `reasoning_effort`，所以不受影响
+- [x] 直连实测（同一提示词，`api.deepseek.com`）：不发 `thinking` 字段 → `reasoning_tokens=235`；
+  `disabled` → 0；`enabled`+`effort=high` → 151。即 **DeepSeek 默认就是开思考**，"不发"与"关"完全是两回事
+- [x] 修复：`auto` 的三种输入分开处理——有 `reasoning.effort` → 照办；显式 `none` → `disabled`（并清掉会误导的
+  `reasoning_effort`）；**完全没有该字段 → 不下发 thinking 字段**，由上游默认决定。
+  `mode=enabled/disabled` 的强制语义不变（`enabled` 下客户端给 `none` 时不再透传该 effort）
+- [x] 测试：`TestDeepSeekThinkingSwitch` 矩阵改为 7 个子例（新增"沉默 → 不下发"与"mode=enabled 忽略显式 off"）；
+  `scripts/deepseek-smoke.sh` 增加"沉默客户端 → 上游收到 `thinking=<absent>`"断言
+- [x] 顺手修掉 `make smoke` 一条**过期断言**（与本次改动无关）：离线分支的续接用"紧接着发新用户消息"的形态，
+  而该形态下上一轮工具调用未被应答，会被 M19b 的 `repairToolSequences` 按设计剪掉（上游拒绝没有 tool 应答的调用），
+  没有调用自然没有思维链可回放 → 断言恒红。改成按真实形态回灌 `function_call_output` 后恢复有意义（`replay=True`）
+- [x] 真机复验（隔离实例 `:8097` + 库快照，新二进制，真实 DeepSeek）：
+  同一形态请求（不发 `reasoning`）reasoning 事件 19、`reasoning_tokens=19`（修复前 0）、工具调用正常；
+  `effort=high` 20、`effort=none` 0（显式关闭仍然有效）；
+  再用 DSH 本体（`DSH_HOME` 重定向 + `--profile headless`，供应商指向隔离实例）跑"读 README 首行"：
+  退出码 0，网关侧三次调用 `reasoning=50/27` —— 整条 DSH→网关→DeepSeek 链路恢复思考
+- [x] 文档：`docs/api-providers.md`（`thinking.mode=auto` 的三种输入 + 沉默即不干预的理由与实测数据）、
+  `docs/design/m17-openaichat-deepseek.md` 差异节补记第 6 条、`config.example.yaml` 注释

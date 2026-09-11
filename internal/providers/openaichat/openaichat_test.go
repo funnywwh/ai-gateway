@@ -371,9 +371,13 @@ func TestDeepSeekThinkingSwitch(t *testing.T) {
 			effort: "low", wantType: "enabled", wantEffort: "low", wantEffort_: true,
 		},
 		{
-			name:   "auto stays off without a reasoning request",
+			// Silence is not "off": the upstream's default decides (DeepSeek defaults to
+			// thinking on). Sending type=disabled here used to strip the chain of thought
+			// from every client that does not speak the reasoning field — DSH pointed at
+			// this gateway does not — and the downgraded model stops tasks mid-way.
+			name:   "auto leaves the upstream default alone for a silent request",
 			config: map[string]any{"thinking": map[string]any{"style": deepseekThinking}},
-			effort: "", wantType: "disabled",
+			effort: "", wantType: "",
 		},
 		{
 			name:   "auto treats effort=none as off",
@@ -384,6 +388,11 @@ func TestDeepSeekThinkingSwitch(t *testing.T) {
 			name:   "mode=enabled overrides a silent request",
 			config: map[string]any{"thinking": map[string]any{"style": deepseekThinking, "mode": "enabled"}},
 			effort: "", wantType: "enabled",
+		},
+		{
+			name:   "mode=enabled ignores an explicit off and drops its hint",
+			config: map[string]any{"thinking": map[string]any{"style": deepseekThinking, "mode": "enabled"}},
+			effort: "none", wantType: "enabled",
 		},
 		{
 			name:   "mode=disabled overrides a loud request",
