@@ -137,6 +137,63 @@ func providerJSON(p *domain.Provider, credentialKeys []string) map[string]any {
 	}
 }
 
+// providerDetailJSON is providerJSON plus the configuration documentation of the
+// kind. The list endpoint stays lean; the detail endpoint is what the console
+// renders as a field table, which is how an operator learns what may be configured
+// and where the API key belongs.
+func providerDetailJSON(p *domain.Provider, credentialKeys []string) map[string]any {
+	out := providerJSON(p, credentialKeys)
+	for key, value := range providerDocsJSON(p) {
+		out[key] = value
+	}
+	return out
+}
+
+// providerDocsJSON describes the configuration surface of one provider's kind.
+//
+// Builtin kinds carry their schema in this binary, so this is free of side effects.
+// A plugin kind can only be described by the plugin itself, during a handshake, so
+// the schemas of the last recorded probe are reused when present — never by
+// starting a process here (opening a page must not manage process lifetimes).
+func providerDocsJSON(p *domain.Provider) map[string]any {
+	ks := providers.SchemaFor(p.Kind)
+	out := map[string]any{
+		"schema_source":      ks.Source,
+		"kind_note":          ks.Note,
+		"config_schema":      jsonOrNil(string(ks.Config)),
+		"credentials_schema": jsonOrNil(string(ks.Credentials)),
+		"config_template":    jsonOrNil(string(ks.Template)),
+	}
+	if ks.Source == providers.SchemaSourceBuiltin || len(p.DiscoveredJSON) == 0 {
+		return out
+	}
+	var discovered struct {
+		ConfigSchema      json.RawMessage `json:"config_schema"`
+		CredentialsSchema json.RawMessage `json:"credentials_schema"`
+	}
+	if err := json.Unmarshal([]byte(p.DiscoveredJSON), &discovered); err != nil {
+		return out
+	}
+	if schema := nonNullJSON(discovered.ConfigSchema); schema != nil {
+		out["config_schema"] = schema
+	}
+	if schema := nonNullJSON(discovered.CredentialsSchema); schema != nil {
+		out["credentials_schema"] = schema
+	}
+	return out
+}
+
+// nonNullJSON drops the JSON literal null: a probe stores it whenever the plugin
+// declared no schema, and a null schema would read as "no documentation exists"
+// rather than "not declared yet" in the console.
+func nonNullJSON(raw json.RawMessage) json.RawMessage {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil
+	}
+	return raw
+}
+
 func providerModelJSON(pm *domain.ProviderModel) map[string]any {
 	return map[string]any{
 		"id": pm.ID, "provider_id": pm.ProviderID,

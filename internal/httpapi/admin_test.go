@@ -66,9 +66,11 @@ type fakeProber struct {
 	result    *runtime.ProbeResult
 	actions   []pluginapi.Action
 	restarted []int64
+	probes    int
 }
 
 func (f *fakeProber) Probe(ctx context.Context, providerID int64, mode string) *runtime.ProbeResult {
+	f.probes++
 	if f.result != nil {
 		return f.result
 	}
@@ -472,6 +474,112 @@ func TestAdminProbeReportsBusinessFailure(t *testing.T) {
 	logsPayload := decodeJSONBody(t, logs)
 	if logsPayload["running"] != true {
 		t.Fatalf("logs running = %v, want true", logsPayload["running"])
+	}
+}
+
+func TestAdminProviderKindsDocumentEveryBuiltin(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	resp := f.call(t, http.MethodGet, "/admin/api/v1/provider-kinds", "", cookie)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("provider-kinds status = %d, want 200", resp.StatusCode)
+	}
+	payload := decodeJSONBody(t, resp)
+	rows := payload["data"].([]any)
+	if len(rows) != 3 {
+		t.Fatalf("provider-kinds returned %d kinds, want the three builtin ones", len(rows))
+	}
+	found := map[string]map[string]any{}
+	for _, row := range rows {
+		entry := row.(map[string]any)
+		found[entry["kind"].(string)] = entry
+		if entry["schema_source"] != "builtin" {
+			t.Fatalf("%v: schema_source = %v", entry["kind"], entry["schema_source"])
+		}
+		if strings.TrimSpace(entry["kind_note"].(string)) == "" {
+			t.Fatalf("%v: kind_note is empty; operators need to know what the kind talks to", entry["kind"])
+		}
+		if entry["config_schema"] == nil {
+			t.Fatalf("%v: config_schema is missing", entry["kind"])
+		}
+	}
+	chat, ok := found["openai-chat"]
+	if !ok {
+		t.Fatal("openai-chat is missing from provider-kinds")
+	}
+	props := chat["config_schema"].(map[string]any)["properties"].(map[string]any)
+	for _, field := range []string{"base_url", "api_key", "models", "thinking", "response_format"} {
+		if _, ok := props[field]; !ok {
+			t.Fatalf("openai-chat config_schema does not document %q", field)
+		}
+	}
+	// The whole point of the milestone: an operator must be told where the key goes.
+	apiKey := props["api_key"].(map[string]any)
+	if apiKey["x-prefer-credential"] != "api_key" {
+		t.Fatalf("config.api_key = %v, want a pointer to the credential field", apiKey)
+	}
+	creds := chat["credentials_schema"].(map[string]any)["properties"].(map[string]any)
+	if _, ok := creds["api_key"]; !ok {
+		t.Fatal("openai-chat credentials_schema does not document api_key")
+	}
+}
+
+func TestAdminProviderDetailCarriesSchemaWithoutStartingPlugins(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+	ctx := context.Background()
+
+	// A builtin kind is documented straight from the binary.
+	builtinID, err := f.db.UpsertProvider(ctx, &domain.Provider{Name: "echo", Kind: "testecho", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/providers/"+itoa(builtinID), "", cookie))
+	if detail["schema_source"] != "builtin" {
+		t.Fatalf("builtin schema_source = %v", detail["schema_source"])
+	}
+	if detail["config_schema"] == nil {
+		t.Fatal("a builtin kind must carry its config schema on the detail endpoint")
+	}
+
+	// A plugin kind is only documented by its handshake: the detail endpoint must
+	// report that instead of starting the plugin process to find out.
+	pluginID, err := f.db.UpsertProvider(ctx, &domain.Provider{Name: "ghost", Kind: "plugin:does-not-exist"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := f.prober.probes
+	plugin := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/providers/"+itoa(pluginID), "", cookie))
+	if plugin["schema_source"] != "plugin" {
+		t.Fatalf("plugin schema_source = %v", plugin["schema_source"])
+	}
+	if plugin["config_schema"] != nil {
+		t.Fatalf("a plugin kind has no builtin schema, got %v", plugin["config_schema"])
+	}
+	if !strings.Contains(plugin["kind_note"].(string), "握手") {
+		t.Fatalf("plugin kind_note must say the schema comes from the handshake: %v", plugin["kind_note"])
+	}
+	if f.prober.probes != before {
+		t.Fatal("reading provider documentation must not probe (and therefore must not start) the plugin")
+	}
+
+	// Once a handshake happened, its schema is reused — still without probing.
+	discovered := `{"config_schema":{"type":"object","properties":{"base_url":{"type":"string","description":"上游根地址"}}},` +
+		`"credentials_schema":{"type":"object","properties":{"access_token":{"type":"string","x-secret":true}}}}`
+	if err := f.db.SetProviderDiscovered(ctx, pluginID, discovered, `{"ok":true}`, ""); err != nil {
+		t.Fatal(err)
+	}
+	after := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/providers/"+itoa(pluginID), "", cookie))
+	schema, ok := after["config_schema"].(map[string]any)
+	if !ok {
+		t.Fatalf("the last handshake schema was not surfaced: %v", after["config_schema"])
+	}
+	if _, ok := schema["properties"].(map[string]any)["base_url"]; !ok {
+		t.Fatalf("surfaced plugin schema = %v", schema)
+	}
+	if f.prober.probes != before {
+		t.Fatal("surfacing a recorded schema must not probe")
 	}
 }
 

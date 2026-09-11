@@ -1,0 +1,85 @@
+# 供应商配置的界面说明（管理控制台）
+
+> 状态：**已实现（M18）**。适用于内置控制台「模型供应商 → 详情」以及插件作者声明的配置/凭据 schema。
+> 语义细节（DeepSeek 思考模式、错误分类等）见 `docs/api-providers.md`；插件协议侧见 `docs/plugin-protocol-v1.md`。
+> 界面行为的自动走查见 `scripts/ui-harness/`（`make ui-check`）。
+
+## 1. 范围
+
+本文规定**操作者在控制台里能看到什么**：一个供应商实例支持哪些配置字段、默认值是什么、密钥应该填在哪里。
+它不重复各上游的语义（那是 `docs/api-providers.md` 的职责），也不规定界面的具体排版。
+
+读者：部署与运维网关的人（不需要读 Go 源码或仓库文档就能把一个供应商配起来）；插件作者（了解自己声明的 schema 会如何被展示）。
+
+## 2. 详情页必须给出的信息
+
+打开「模型供应商」→ 某实例的「详情」，**必须**能看到：
+
+1. 该 kind 的**全部**配置字段，逐个给出：字段路径、类型、默认值、取值范围（枚举）、是否必填、一句话说明；
+2. 该 kind 的**凭据字段**（哪些是密文），以及「凭据填在凭据栏、不要写进配置」的提示；
+3. 该 kind 的**能力边界**说明（例如 `openai-chat` 只讲 `/chat/completions`、不支持 `json_schema`、
+   与 `openai-responses` 的分工）；
+4. 一份**可复制的配置模板**，含必须填写的字段；
+5. 「新建供应商」之前也能拿到上述 1–4（不需要先建一个实例）。
+
+字段集合与代码一致是硬要求：新增字段而说明缺失，`make test` 必须失败（反射断言，见
+`docs/design/m18-provider-config-docs.md` §2.3）。
+
+## 3. 字段说明的语义
+
+说明以 JSON Schema 子集描述（与插件 handshake 同一形状），扩展项如下：
+
+| 键 | 含义 | 界面表现 |
+|---|---|---|
+| `type` | `object`/`string`/`integer`/`number`/`boolean`/`array` | 「类型」列 |
+| `description` | 一句话说明（内建 kind 为中文） | 「说明」列 |
+| `default` | 默认值 | 「默认」列，并作为模板骨架来源 |
+| `enum` | 允许取值 | 「说明」列内列出 |
+| `required` / `x-required` | 必填，不填则供应商构建失败 | 「必填」标记 |
+| `x-advanced` | 调优项，默认值对多数部署可用 | 收进「高级」子表 |
+| `x-prefer-credential` | 该值**更推荐**经凭据通道下发，值 = 凭据里的键名（如 `api_key`） | 「密钥」标记 + 指向凭据栏的提示 |
+| `x-secret` | 密文字段（只出现在凭据 schema） | 「密钥」标记，值永不回显 |
+| `items` / `properties` | 数组/对象的元素结构 | 数组字段合并成一行，元素字段写在说明列 |
+
+## 4. 配置与凭据：两条通道，一处优先级
+
+**配置（`config`）**：非密设置。明文存库（`providers.config_json`），管理面**会回显**，审计记录变更。改它会 `config_version++`，
+内建供应商实例与插件进程在下次使用时按新配置重建。
+
+**凭据（`credentials`）**：密钥等密文。明文只在内存，用 `credentials_key` 做 AES-256-GCM 密封后写 `credentials_enc`
+（AAD 绑定 provider id）；管理面只回 `has_credentials` 与字段名列表，响应/日志/审计均无明文。
+
+操作者录入密钥的三条路径：
+
+| 路径 | 说明 | 备注 |
+|---|---|---|
+| 控制台「凭据」栏（推荐） | 填 `{"api_key": "sk-…"}`；留空 = 保持不变，`{}` = 清空 | 需已配置 `credentials_key`，否则 400 |
+| 管理 API | `PATCH /admin/api/v1/providers/{id}`，体 `{"credentials":{"api_key":"sk-…"}}`（`Content-Type: application/json`） | 与界面同源同语义 |
+| `bootstrap.providers[].config.api_key` | 写进 YAML 的配置块 | **明文落库且界面回显**；bootstrap 结构没有凭据字段，不要指望它加密 |
+
+**优先级（易踩的坑）**：构建实例时，若 `config.api_key` 非空，**它优先于凭据通道**（`openaichat.go` / `openairesponses.go`
+的 `New`：仅当 `cfg.APIKey == ""` 才采用 `creds["api_key"]`）；运行期凭据轮换推送（`SetCredentials`）则反过来覆盖配置值。
+因此：**只填一处**——要么凭据栏，要么配置栏，不要两处都填，否则排障时会看到「改了凭据但请求仍用旧密钥」。
+
+## 5. 内建 kind 与插件 kind
+
+- **内建 kind**（`openai-chat`、`openai-responses`、`testecho`）：schema 内嵌在二进制里，打开详情页即见，无副作用。
+- **插件 kind**（`plugin:<名称>`）：配置与凭据 schema 由插件在握手时声明，只有在插件进程运行过之后才拿得到。
+  详情页给出显式按钮「读取插件声明」——**打开页面不会启动进程**；点了按钮才会连接/启动该插件。
+
+## 6. 排障
+
+| 现象 | 先看哪里 |
+|---|---|
+| 详情页「凭据」显示未配置 | 凭据通道为空：按 §4 录入；确认 `credentials_key` 已配置（缺了会 400 而不是静默失败） |
+| 凭据显示已配置但请求 401/403 | 该错误被分类为 `fatal token_invalid`，**不会故障切换**：密钥本身失效或写错了栏位（见 §4 优先级） |
+| 换了 `credentials_key` 之后凭据全部解不开 | 密文绑定 provider id 且用旧密钥加密：界面会提示「凭据无法解密」，需要重新录入 |
+| `config` 里写了字段却报 `bad config` / 构建失败 | 字段名拼写与类型：以详情页字段表为准（枚举非法、`base_url` 缺失都会直接失败，不静默降级） |
+| 插件 kind 看不到字段表 | 插件未运行：点「读取插件声明」，失败原因在「探测」结果与进程日志里 |
+| 改了说明文案但界面没变 | 界面资源内嵌在二进制里：需要重启网关（`./scripts/local-run.sh restart`） |
+
+## 7. 插件作者需要做的
+
+在 handshake 里返回 `config_schema` / `credentials_schema`（JSON Schema 子集，见 `docs/plugin-protocol-v1.md` 第 4 节），
+并给每个字段写 `description`——控制台会原样展示。可用的扩展：`x-secret`（密文）、`x-advanced`（折叠）。
+没有 schema 的插件仍可工作，只是操作者在界面上只能看到裸 JSON 框。

@@ -48,6 +48,13 @@
 
 - 宿主 **3 秒**（可配）内未收到握手、或 `protocol` 不匹配 → 判定不可用、kill 进程并记录 `last_error`。
 - `config_schema` / `credentials_schema` 用于管理界面**通用表单渲染**（见 `docs/provider-ui`）。
+  **强烈建议每个插件都声明它们**（可选实现 `pluginapi.SchemaProvider`）：控制台「供应商详情」会把每个字段的
+  `description`、`default`、`enum` 渲染成字段表，并把 `x-secret` 标成密文；不声明时操作者只能看到一个裸 JSON 框
+  —— 面板上会明确写出「该插件未声明配置说明」，但网关无从代替插件解释它自己的字段。
+  内建供应商（`openai-chat` 等）在二进制里带同样的 schema，两类供应商在界面上是同一种展示。
+- 扩展键：`x-secret`（密文，只应出现在 `credentials_schema`）、`x-advanced`（折叠到「高级」）、
+  `x-required`（必填标记）、`x-prefer-credential`（该值更推荐经凭据通道下发）。未知扩展键被忽略。
+- schema 只用于**展示**：网关不按它校验配置。协议已明确不得依赖 `format` 之类的声明去拦截非法值（见第 12 节）。
 
 ## 4. 帧格式
 

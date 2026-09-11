@@ -8,6 +8,8 @@ MCP 只读查询、内容录制与 hooks、模型自由映射、数据库自动�
 
 计划中的里程碑 M0–M16 已全部落地并通过验证（M10 订阅后端参考适配器、M14 客户自助门户为计划内的可选项，未做）。
 M17 完善了内置 `openai-chat` 供应商（思考模式、思考内容续接、DeepSeek 适配），不引入新插件。
+M18 让控制台把「每个供应商类型支持哪些配置、密钥填哪一栏」直接讲清楚（内建 kind 自带字段说明，插件走 handshake），
+并为无 node 环境补上真实浏览器里的控制台走查（`make ui-check`）。
 当前规模：约 3.35 万行 Go + 原生前端；24 个测试包、1 个分层断言包；真实二进制端到端走查覆盖数据面、计费、MCP、备份与控制台。
 
 ## 文档
@@ -24,6 +26,7 @@ M17 完善了内置 `openai-chat` 供应商（思考模式、思考内容续接�
 | `docs/plugin-protocol-v1.md` | 插件协议 v1（帧/方法/事件/取消/背压/错误分类） | **已实现（M2）** |
 | `docs/api-responses.md` | Responses 兼容面（端点/字段/SSE 事件/错误封装/认证与限速） | **已实现（M5）** |
 | `docs/api-providers.md` | openai-chat 供应商（配置开关、思考模式、用量维度、错误分类、DeepSeek 接入） | **已实现（M17）** |
+| `docs/provider-ui.md` | 控制台如何展示供应商配置说明（字段语义、配置与凭据两条通道、密钥录入路径与优先级、排障） | **已实现（M18）** |
 | `docs/routing.md` | 路由解析、候选过滤、负载均衡策略、熔断与冷却 | **已实现（M3）** |
 | `docs/pricing.md` | 计量维度 × 有序价格规则集（分时/分档/分维度） | **已实现（M11a）** |
 | `docs/billing.md` | 计量、账本、在途额度、账单、充值、对账、赠送到期 | **已实现（M11/M12）** |
@@ -62,6 +65,7 @@ make verify     # vet + test + build
 | `/admin/ui/*` | 内置控制台（零构建，随二进制发布） |
 | `scripts/load.sh` | 一键压测（自建 `cmd/loadgen`，输出 rps 与分位延迟） |
 | `scripts/deepseek-smoke.sh` | DeepSeek 接入走查（离线假上游；加 `--live` 与 `DEEPSEEK_API_KEY` 打真机） |
+| `scripts/ui-harness/run.sh`（`make ui-check`） | 控制台走查：API 快照 + headless firefox 渲染真实页面并断言（无 node 环境下的 UI 验证手段） |
 | `make verify` | vet + 全量测试 + 构建 |
 
 ## 压测基线（本机 i7-12700K，testecho 供应商）

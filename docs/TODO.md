@@ -229,6 +229,20 @@
 - [x] 顺手修复：`internal/arch` 分层表缺 M14(1) 新增的 `internal/sessionauth`/`internal/portal`（该里程碑提交后 `make verify` 一直红）
 - [ ] 暂不纳入：内置 `openai-responses` 接 DeepSeek `/responses` 的三处缺口（`response.reasoning_text.delta` 事件名、`output_tokens_details.reasoning_tokens`、思考正文承载字段）
 
+## M18 控制台展示供应商配置说明（内建 kind 的字段文档）
+- [x] 设计文档 docs/design/m18-provider-config-docs.md + 规格文档 docs/provider-ui.md（先行，已在对话中展示）
+- [x] 内建供应商包各加 `schema.go`：`Schema()`（config + credentials 的 JSON Schema 子集）/ `Note()`（kind 级说明）/ `Template()`（可复制模板）
+- [x] `internal/providers`：`KindSchema{Kind,Note,Config,Credentials,Template,Source}` + `Schemas()` / `SchemaFor(kind)`；未知与 `plugin:` kind → `Source=unknown|plugin` 且 note 指向插件 handshake
+- [x] `GET /admin/api/v1/provider-kinds`（新增，内建 kind 全集）；`GET /providers/{id}` 增 `config_schema`/`credentials_schema`/`kind_note`/`schema_source`（内建即有；插件复用 `discovered` 里上次握手的 schema，**不隐式启动进程**）；列表端点保持精简
+- [x] 字段级事实写进 schema：`default`/`x-required`/`x-advanced`/`x-prefer-credential`；`api_key` 在 config 里标注为「建议填凭据栏」并写明「只填一处」
+- [x] 控制台：列表工具栏「内建类型说明」（note + 字段表 + 凭据字段 + 模板 + 用此模板新建预填）；详情页「配置说明」区块（builtin 直渲 / plugin 未声明时给「读取插件声明」按钮 / 未声明但已握手时直接渲染 / unknown 明确提示）
+- [x] 测试 internal/providers：kind 全覆盖、反射双向防漂移（Config 的 json tag == schema properties）、schema 合法性（type/default/enum/x-required/x-secret）、模板键 ⊆ schema 键、凭据 schema 含 `api_key`；两处变异验证（加字段不写说明、删 description 各自精确失败）
+- [x] 测试 internal/httpapi：`/provider-kinds` 200 且含三个内建 kind、字段与密钥标记齐全；详情返回非空 `config_schema` 且无凭据明文；`plugin:does-not-exist` → `schema_source=plugin`、无 schema、**Prober 调用次数不变**
+- [x] make verify 全绿（含 internal/arch 分层断言，本轮未新增分层边）
+- [x] **验证方式升级为真实浏览器自动化**（原计划人工走查）：`scripts/ui-harness/`（API 快照 + headless firefox + `/report` 回报）与 `make ui-check`；5 个视图 40 项断言全绿（docs/detail/create/plugin/plugin-cached），无 firefox 或 python3 时自行 skip
+- [x] 回填设计文档「实现与设计差异」，单提交并引用设计文档路径
+- [x] 顺带修复：`docs/plugin-protocol-v1.md` 第 3 节引用的 `docs/provider-ui` 此前并不存在（本轮补上），并把「建议每个插件声明 schema」写进协议文档（不改协议、不加校验）
+
 ## 可选
 - [x] M10 订阅后端参考适配器 `examples/provider-codex`（默认禁用、非官方）：设计文档 docs/design/m10-subscription-adapter.md
 - [x] 三种凭据形态与自动续期：refresh_token（OAuth 刷新，轮换落盘 + 单飞）> session_cookie（/api/auth/session 换取）> 静态 access_token

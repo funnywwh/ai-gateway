@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/providers"
 	"github.com/winger/ai-gateway/internal/runtime"
 )
 
@@ -233,7 +234,18 @@ func (s *Server) handleAdminGetProvider(w http.ResponseWriter, r *http.Request) 
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	writeJSON(w, http.StatusOK, providerJSON(p, s.credentialKeys(p)))
+	writeJSON(w, http.StatusOK, providerDetailJSON(p, s.credentialKeys(p)))
+}
+
+// handleAdminListProviderKinds returns the configuration documentation of every
+// builtin kind, so the create form can explain a kind before any instance of it
+// exists. Plugin kinds are absent on purpose: their schema only exists inside a
+// handshake, and it is not worth starting a process to render a help panel.
+func (s *Server) handleAdminListProviderKinds(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.adminActor(w, r, false); !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": providers.Schemas()})
 }
 
 func (s *Server) handleAdminCreateProvider(w http.ResponseWriter, r *http.Request) {
@@ -297,7 +309,7 @@ func (s *Server) handleAdminCreateProvider(w http.ResponseWriter, r *http.Reques
 	if restart && !created {
 		s.restartProvider(p)
 	}
-	writeJSON(w, status, providerJSON(p, s.credentialKeys(p)))
+	writeJSON(w, status, providerDetailJSON(p, s.credentialKeys(p)))
 }
 
 func (s *Server) handleAdminPatchProvider(w http.ResponseWriter, r *http.Request) {
@@ -348,7 +360,7 @@ func (s *Server) handleAdminPatchProvider(w http.ResponseWriter, r *http.Request
 	if restart {
 		s.restartProvider(p)
 	}
-	writeJSON(w, http.StatusOK, providerJSON(p, s.credentialKeys(p)))
+	writeJSON(w, http.StatusOK, providerDetailJSON(p, s.credentialKeys(p)))
 }
 
 // restartProvider stops the plugin process so the next attempt picks up the new

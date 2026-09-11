@@ -5,7 +5,7 @@ COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: all build test vet fmt tidy run clean verify smoke plugin-example load
+.PHONY: all build test vet fmt tidy run clean verify smoke plugin-example load ui-check
 
 all: build
 
@@ -46,6 +46,12 @@ plugin-example:
 
 smoke:
 	@bash scripts/smoke.sh
+
+# The console has no JS test runner here (no node/npm), so it is exercised in a real
+# headless browser against captured API fixtures. Skips itself when firefox or python3
+# is missing, exactly like test-race does without a C compiler.
+ui-check:
+	@bash scripts/ui-harness/run.sh
 
 clean:
 	@rm -rf bin

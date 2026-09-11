@@ -187,6 +187,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PATCH /admin/api/v1/accounts/{id}", s.handleAdminPatchAccount)
 
 	s.mux.HandleFunc("GET /admin/api/v1/providers", s.handleAdminListProviders)
+	s.mux.HandleFunc("GET /admin/api/v1/provider-kinds", s.handleAdminListProviderKinds)
 	s.mux.HandleFunc("POST /admin/api/v1/providers", s.handleAdminCreateProvider)
 	s.mux.HandleFunc("GET /admin/api/v1/providers/{id}", s.handleAdminGetProvider)
 	s.mux.HandleFunc("PATCH /admin/api/v1/providers/{id}", s.handleAdminPatchProvider)

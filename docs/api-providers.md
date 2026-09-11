@@ -45,6 +45,10 @@
 枚举取值非法 → 供应商构建失败（不静默降级）：`thinking.mode`、`thinking.style`、`response_format` 均校验；
 `replay_reasoning_content` 需要 `style=deepseek` 才允许打开。
 
+**控制台是本节的可读版本**：供应商详情页的「配置说明」按 kind 渲染上述字段（名称 / 类型 / 默认值 / 取值 / 说明）
+与凭据字段，并在 `api_key` 上标出「建议填凭据栏」；新建供应商前可在「内建类型说明」里查看全部内建类型并一键套用模板
+（行为规格见 `docs/provider-ui.md`，字段说明与代码同源、由 `internal/providers/*/schema.go` 提供）。
+
 `capabilities` 决定路由：客户端请求 `reasoning.effort` 会要求候选具备 `reasoning`；
 `text.format` 会要求 `json_schema`。因此 DeepSeek 的模型应声明 `{"stream":true,"tools":true,"reasoning":true}`，
 而**不要**声明 `json_schema`（`/chat/completions` 不支持，声明了会让请求带着降级标记继续打到上游）。
