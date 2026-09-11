@@ -172,8 +172,12 @@ func ResponsesToChatWithOptions(req *pluginapi.Request, opts ChatConvertOptions)
 				}
 			}
 		}
+		if mergeParallelToolCalls(out.Messages, msg) {
+			continue
+		}
 		out.Messages = append(out.Messages, msg...)
 	}
+	out.Messages = repairToolSequences(out.Messages)
 	for _, tool := range req.Tools {
 		// Chat Completions can only express function tools. The richer Responses types
 		// (web_search, namespace, ...) are client-side conveniences for upstreams that
@@ -510,6 +514,80 @@ func (s *ChatStreamState) Translate(chunk *ChatResponse, emit func(pluginapi.Eve
 		}
 	}
 	return choice.FinishReason != "", nil
+}
+
+// mergeParallelToolCalls folds msg into the previous assistant tool-call message when both
+// carry tool calls.
+//
+// Chat Completions ties an assistant message's tool_calls to the tool messages that directly
+// follow it, so parallel calls have to travel in ONE assistant message. Emitting one
+// assistant message per function_call item leaves every earlier one with unmatched
+// tool_calls, and upstreams reject the whole request
+// (DeepSeek: "An assistant message with 'tool_calls' must be followed by tool messages
+// responding to each 'tool_call_id'").
+func mergeParallelToolCalls(messages []ChatMessage, msg []ChatMessage) bool {
+	if len(messages) == 0 || len(msg) != 1 {
+		return false
+	}
+	if msg[0].Role != "assistant" || len(msg[0].ToolCalls) == 0 {
+		return false
+	}
+	last := &messages[len(messages)-1]
+	if last.Role != "assistant" || len(last.ToolCalls) == 0 {
+		return false
+	}
+	last.ToolCalls = append(last.ToolCalls, msg[0].ToolCalls...)
+	if last.ReasoningContent == "" {
+		last.ReasoningContent = msg[0].ReasoningContent
+	}
+	return true
+}
+
+// repairToolSequences enforces the same rule from both sides, because the upstream applies it
+// to the finished list: every announced tool_call must be answered by the tool message that
+// follows, and a tool message must answer a call announced directly before it.
+//
+// The repairs cover input shapes a client cannot avoid producing: an interrupted turn (a call
+// whose output never arrived) and a trimmed history (an output whose call was cut off). Both
+// would otherwise be rejected outright, taking the whole request down with them.
+func repairToolSequences(messages []ChatMessage) []ChatMessage {
+	out := make([]ChatMessage, 0, len(messages))
+	for i := 0; i < len(messages); i++ {
+		msg := messages[i]
+		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
+			if msg.Role == "tool" {
+				continue // orphan: no assistant tool_calls directly before it
+			}
+			out = append(out, msg)
+			continue
+		}
+		var answers []ChatMessage
+		byCallID := map[string]ChatMessage{}
+		for j := i + 1; j < len(messages) && messages[j].Role == "tool"; j++ {
+			answers = append(answers, messages[j])
+			byCallID[messages[j].ToolCallID] = messages[j]
+			i = j
+		}
+		keptCalls := make([]ChatToolCall, 0, len(msg.ToolCalls))
+		keptAnswers := make([]ChatMessage, 0, len(answers))
+		seen := map[string]bool{}
+		for _, call := range msg.ToolCalls {
+			answer, ok := byCallID[call.ID]
+			if !ok || seen[call.ID] {
+				continue // never answered (or an upstream-invalid duplicate): the call cannot stay
+			}
+			seen[call.ID] = true
+			keptCalls = append(keptCalls, call)
+			keptAnswers = append(keptAnswers, answer)
+		}
+		if len(keptCalls) == 0 && strings.TrimSpace(msg.Content) == "" {
+			continue // nothing left to say and no call left to answer
+		}
+		msg.ToolCalls = keptCalls
+		out = append(out, msg)
+		out = append(out, keptAnswers...)
+	}
+	return out
 }
 
 // EventsToChatDelta is the inverse of Translate: it converts canonical events into

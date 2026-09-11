@@ -575,7 +575,11 @@ func TestStoredReasoningSurvivesContinuation(t *testing.T) {
 
 	chat, err := providerkit.ResponsesToChatWithOptions(&pluginapi.Request{
 		Model: "deepseek-flash",
-		Input: items,
+		// The stored items are what the gateway prepends to a continuation request; the
+		// request itself carries the tool output that answers the stored call, so the pair
+		// travels together (a chat request may not contain an unanswered tool_call).
+		Input: append(append([]pluginapi.Item{}, items...),
+			pluginapi.Item{Type: "function_call_output", CallID: "call_1", Output: "sunny"}),
 	}, providerkit.ChatConvertOptions{ReplayReasoningContent: true})
 	if err != nil {
 		t.Fatal(err)

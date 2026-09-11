@@ -429,13 +429,17 @@ func TestReasoningReplayStopsAtATurnBoundary(t *testing.T) {
 			{Type: "function_call_output", CallID: "call_1", Output: "x"},
 			{Type: "message", Role: "user", Content: content},
 			{Type: "function_call", CallID: "call_2", Name: "b", Arguments: "{}"},
+			{Type: "function_call_output", CallID: "call_2", Output: "y"},
 		},
 	}
 	chat, err := ResponsesToChatWithOptions(req, ChatConvertOptions{ReplayReasoningContent: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(chat.Messages) != 4 {
+	// The second call carries an output on purpose: a chat request may not contain a
+	// tool_call that no tool message answers, so an unanswered fixture would be repaired
+	// away and the turn boundary would no longer be observable.
+	if len(chat.Messages) != 5 {
 		t.Fatalf("message count = %d: %+v", len(chat.Messages), chat.Messages)
 	}
 	if chat.Messages[0].ReasoningContent != "belongs to the old turn" {
@@ -443,6 +447,68 @@ func TestReasoningReplayStopsAtATurnBoundary(t *testing.T) {
 	}
 	if chat.Messages[3].ReasoningContent != "" {
 		t.Fatalf("a user message closes the turn; the next tool call has no reasoning: %+v", chat.Messages[3])
+	}
+}
+
+// Parallel tool calls are one assistant turn, and Chat Completions ties an assistant
+// message's tool_calls to the tool messages directly after it: one assistant message per
+// function_call item leaves the earlier ones unanswered and the upstream rejects the whole
+// request ("An assistant message with 'tool_calls' must be followed by tool messages
+// responding to each 'tool_call_id'").
+func TestParallelToolCallsShareOneAssistantMessage(t *testing.T) {
+	req := &pluginapi.Request{Model: "m", Input: []pluginapi.Item{
+		{Type: "function_call", CallID: "call_a", Name: "bash", Arguments: "{}"},
+		{Type: "function_call", CallID: "call_b", Name: "grep", Arguments: "{}"},
+		{Type: "function_call_output", CallID: "call_a", Output: "file1"},
+		{Type: "function_call_output", CallID: "call_b", Output: "no match"},
+	}}
+	chat, err := ResponsesToChat(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Messages) != 3 {
+		t.Fatalf("messages = %+v, want one assistant message plus two tool messages", chat.Messages)
+	}
+	if chat.Messages[0].Role != "assistant" || len(chat.Messages[0].ToolCalls) != 2 {
+		t.Fatalf("parallel calls must share one assistant message: %+v", chat.Messages[0])
+	}
+	if chat.Messages[0].ToolCalls[0].ID != "call_a" || chat.Messages[0].ToolCalls[1].ID != "call_b" {
+		t.Fatalf("tool call order must be preserved: %+v", chat.Messages[0].ToolCalls)
+	}
+	for i, want := range []string{"call_a", "call_b"} {
+		msg := chat.Messages[i+1]
+		if msg.Role != "tool" || msg.ToolCallID != want {
+			t.Fatalf("messages[%d] = %+v, want a tool answer for %s", i+1, msg, want)
+		}
+	}
+}
+
+// An interrupted turn (call without output) and a trimmed history (output without call) are
+// shapes a client cannot avoid producing; both violate the same upstream rule, so the
+// translation repairs them instead of letting the whole request fail.
+func TestUnansweredAndOrphanToolMessagesAreRepaired(t *testing.T) {
+	req := &pluginapi.Request{Model: "m", Input: []pluginapi.Item{
+		{Type: "function_call", CallID: "answered", Name: "a", Arguments: "{}"},
+		{Type: "function_call", CallID: "never_ran", Name: "b", Arguments: "{}"},
+		{Type: "function_call_output", CallID: "answered", Output: "ok"},
+		{Type: "function_call_output", CallID: "from_a_trimmed_turn", Output: "orphan"},
+		{Type: "message", Role: "user", Content: json.RawMessage(`"next"`)},
+	}}
+	chat, err := ResponsesToChat(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Messages) != 3 {
+		t.Fatalf("messages = %+v, want assistant + its tool answer + the user message", chat.Messages)
+	}
+	if len(chat.Messages[0].ToolCalls) != 1 || chat.Messages[0].ToolCalls[0].ID != "answered" {
+		t.Fatalf("the unanswered call must be dropped: %+v", chat.Messages[0])
+	}
+	if chat.Messages[1].Role != "tool" || chat.Messages[1].ToolCallID != "answered" {
+		t.Fatalf("the answered call must keep its tool message: %+v", chat.Messages[1])
+	}
+	if chat.Messages[2].Role != "user" {
+		t.Fatalf("the orphan tool message must be dropped: %+v", chat.Messages)
 	}
 }
 

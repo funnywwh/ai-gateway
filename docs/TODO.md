@@ -283,6 +283,21 @@
 - [x] 同时确认既有修复在重启后的实例上仍然有效：codex 供应商探测 `ok=true`（`latency_ms=31149`，印证 60s deadline 的必要性——31s 远超旧的 10s）；`gpt-5.6-luna` 带 system 消息的请求返回 `好的，1+1=2。`（M10d）；界面资源含 `.spinner`/`withBusy`/`探测中`（M10c 的探测动画）
 - [ ] 后续议题：provider 跳过工具（如 chat 路径丢掉 `web_search`）目前**无上报通道** —— 协议里没有 provider 声明降级的字段（`DegradedFeatures` 只由路由的能力校验写入）。要为"能力降级可见"补协议字段，另立里程碑
 - [x] 回填设计文档「实现与设计差异」（含验收结果与两项观察），单提交并引用设计文档路径
+- [x] **修复：并行工具调用导致上游 400（DSH 实测报告）** —— 报错
+  `upstream_400: An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'`。
+  根因：Responses→Chat 翻译**每个 `function_call` 项各生成一条 assistant 消息**，于是相邻的并行调用变成
+  `assistant(tool_calls=[a])` → `assistant(tool_calls=[b])` → `tool(a)` → `tool(b)`，而 chat 协议要求带
+  tool_calls 的 assistant 消息**必须紧跟**应答其每个 tool_call_id 的 tool 消息——第一条永远无应答，整条请求被拒。
+  复现（隔离实例）：两个相邻 `function_call` → 500；单个 → 200。
+  修复（`pkg/providerkit`）：① `mergeParallelToolCalls` 把相邻并行调用合并进**同一条** assistant 消息；
+  ② `repairToolSequences` 从另一侧补齐同一不变量——未被应答的 tool_call 剪掉、无对应调用的孤儿 tool 消息丢弃，
+  并让 tool 消息按调用顺序紧随其后。后两条覆盖客户端无法避免的输入形态：**中断的轮次**（调用没有输出）与
+  **被裁剪的历史**（输出还在、调用已被截断），它们此前会让整条请求一起失败。
+  修复后实测：并行调用 200（原 500）、单调用、未应答调用、孤儿输出四种形态全部 200。
+  同步修正两条夹具（`TestReasoningReplayStopsAtATurnBoundary` 与 `TestStoredReasoningSurvivesContinuation`）：
+  它们此前构造的正是这种非法序列（未应答的 call / 只翻译存储项而不含其输出）；真实续接流程里存储项是**前置**
+  再拼新请求项（`v1.go:154-155`），调用与输出成对出现，故夹具按真实形态补上输出，测试本意（reasoning 不跨轮次、
+  存储思维链存活）不变。
 
 ## 可选
 - [x] M10 订阅后端参考适配器 `examples/provider-codex`（默认禁用、非官方）：设计文档 docs/design/m10-subscription-adapter.md
