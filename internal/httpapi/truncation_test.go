@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -267,5 +269,55 @@ func TestIncompleteUsageIsFlaggedInTheRecord(t *testing.T) {
 	}
 	if row.TerminatedReason != "incomplete" {
 		t.Fatalf("terminated_reason = %q, want incomplete", row.TerminatedReason)
+	}
+}
+
+// TestFailedRequestIsRecordedAfterTheClientHungUp pins the audit trail's survival.
+//
+// A request that fails hard (upstream 400, cut stream) usually ends with the client
+// disconnecting, which cancels the request context — and the record of what happened used
+// to die with it, leaving exactly the requests somebody has to diagnose as the only ones
+// missing from the request log (M19d/M19e were found the hard way: the failing request
+// body had to be reconstructed from the client's own session).
+//
+// The context is canceled while the provider is still answering, which is what a client
+// hanging up looks like to the handler; the request then fails and the audit write has to
+// happen anyway.
+func TestFailedRequestIsRecordedAfterTheClientHungUp(t *testing.T) {
+	f := newFixture(t)
+	// Streaming plus a delay, so the cancellation lands mid-call — past authentication
+	// and admission, inside the provider.
+	f.setProviderConfig(t, `{"prefix":"echo:","chunks":2,"delay_ms":300}`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		cancel()
+	}()
+
+	body := `{"model":"echo-model","input":"ping","store":true,"stream":true}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-request-id", "req_hungup0001")
+	rec := httptest.NewRecorder()
+	f.handler.ServeHTTP(rec, req)
+
+	logs, err := f.db.ListRequestLogs(context.Background(), f.key.AccountID, time.Time{}, time.Time{}, 10)
+	if err != nil {
+		t.Fatalf("listing request logs: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("the failed request must still be recorded, got %d rows", len(logs))
+	}
+	if logs[0].Status != "failed" {
+		t.Fatalf("status = %q, want failed", logs[0].Status)
+	}
+	if !strings.Contains(logs[0].RequestJSON, "ping") {
+		t.Fatalf("the request body must survive for diagnosis: %q", logs[0].RequestJSON)
+	}
+	if logs[0].RequestID != "req_hungup0001" {
+		t.Fatalf("the detached write must keep the context values, got request id %q", logs[0].RequestID)
 	}
 }

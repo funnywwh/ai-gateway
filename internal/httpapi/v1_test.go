@@ -38,6 +38,9 @@ type fixture struct {
 	key      *domain.APIKey
 	verifier *apikey.Verifier
 	registry *registry.Registry
+	// handler is the server itself, so a test can drive it with a context of its own
+	// (a canceled one stands in for a client that has already hung up).
+	handler http.Handler
 }
 
 func newFixture(t testing.TB) *fixture {
@@ -125,7 +128,7 @@ func newFixture(t testing.TB) *fixture {
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
-	return &fixture{server: ts, db: db, cfg: &cfg, key: key, verifier: verifier, registry: reg}
+	return &fixture{server: ts, db: db, cfg: &cfg, key: key, verifier: verifier, registry: reg, handler: srv.Handler()}
 }
 
 const (

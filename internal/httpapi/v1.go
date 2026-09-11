@@ -396,7 +396,20 @@ func (s *Server) recordAttempt(
 	}
 }
 
+// auditWriteTimeout bounds the detached write of the audit trail (see persist).
+const auditWriteTimeout = 5 * time.Second
+
 // persist stores the response (when requested) and the request log.
+//
+// The audit trail must outlive the client. A request that fails hard — an upstream 400,
+// a stream that was cut — usually ends with the client hanging up, which cancels the
+// request context and with it every write that records what happened. Those are exactly
+// the requests somebody later has to diagnose: during the M19d/M19e investigation the
+// failing requests were the only ones missing from the request log, the write having
+// died with the connection ("recording request content failed: context canceled"), and
+// the request body had to be reconstructed from the client's own session.
+// WithoutCancel keeps the context values (request id, and whatever else is read
+// downstream) and drops only the cancellation; the timeout bounds the detached write.
 func (s *Server) persist(
 	ctx context.Context,
 	key *domain.APIKey,
@@ -407,6 +420,9 @@ func (s *Server) persist(
 	assembler *responses.Assembler,
 	status string,
 ) {
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
+	defer cancel()
+
 	resp := assembler.Response()
 	outputJSON, err := json.Marshal(resp.Output)
 	if err != nil {
@@ -433,12 +449,12 @@ func (s *Server) persist(
 			CompletedAt:  &completed,
 			ExpiresAt:    &expires,
 		}
-		if err := s.deps.Records.PutResponse(ctx, rec); err != nil {
+		if err := s.deps.Records.PutResponse(auditCtx, rec); err != nil {
 			s.deps.Log.Warn("storing response failed", "err", err, "response_id", assembler.ID())
 		}
 	}
 
-	s.recordContent(ctx, key, account, req, assembler, status)
+	s.recordContent(auditCtx, key, account, req, assembler, status)
 
 	if s.deps.Hooks != nil {
 		event := "response.completed"

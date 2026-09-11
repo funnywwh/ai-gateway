@@ -475,3 +475,16 @@
   ② 回归：四种组合（流式/非流式 × 带/不带 reasoning 项）、"文本+工具轮"、DSH 第 8 步原样重放 → 全部 completed；
   ③ DSH 本体 headless 跑"先写一句 → 读 README 首行 → wc -l"（正是失败形态）→ 退出码 0
 - [x] 文档：`docs/api-providers.md`（该约束的完整规则与网关的折叠策略）
+
+### M19f 审计落库不跟随请求 context（诊断盲点修复）
+- [x] 问题（M19d/M19e 定位时踩到）：请求硬失败（上游 400、流被切断）后客户端通常立刻断开，
+  而 `persist` 用请求自身的 context 写请求日志与存储响应，于是**失败请求恰恰是唯一没有记录的**：
+  日志里只留下 `recording request content failed ... context canceled`，请求正文得从客户端会话里重建才能定位
+- [x] 修复（`internal/httpapi/v1.go`）：`persist` 用 `context.WithoutCancel` + 5s 超时派生的 context 写审计
+  （保留 request id 等 context 取值，只丢掉取消）；钩子走内存队列本就不受影响
+- [x] 测试：`TestFailedRequestIsRecordedAfterTheClientHungUp` —— 流式请求 + 300ms 延迟，在 provider 应答中途取消 context
+  （模拟客户端挂断），断言请求日志仍然落库、状态 `failed`、正文完整、request id 保留；变异验证过（改回跟随 ctx 即失败）
+- [ ] **同类问题（未改，涉及计费语义，待定）**：`recordAttempt` 写用量/结算也跟随请求 context ——
+  客户端挂断时该次尝试的用量行同样会丢（上条测试的日志里就能看到
+  `recording usage failed err="store: insert usage record: context canceled"`），
+  即上游已经产出的 token 不会被计量。改法与审计一致（派生 detached context），但会改变用量/账本里出现的行数，需先定口径
