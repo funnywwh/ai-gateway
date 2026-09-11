@@ -94,6 +94,7 @@ var expectedAdminPatterns = []string{
 	"POST /admin/api/v1/providers/{id}/models/refresh",
 	"POST /admin/api/v1/providers/{id}/restart",
 	"POST /admin/api/v1/providers/{id}/test",
+	"POST /admin/api/v1/requests/prune",
 	"POST /admin/api/v1/redemption-codes",
 	"POST /admin/api/v1/redemption-codes/redeem",
 	"POST /admin/api/v1/routes",

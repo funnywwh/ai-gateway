@@ -63,6 +63,9 @@ type Deps struct {
 	MCPTokens MCPTokens
 	// Hooks receives lifecycle events; nil disables hook delivery.
 	Hooks HookEmitter
+	// LogJanitor prunes recorded observability data past the retention window; nil
+	// disables the manual prune endpoint (the daily job lives in cmd/aigw).
+	LogJanitor LogJanitor
 	// Admin enables the management API (session auth + CRUD).
 	Admin      AdminService
 	AdminStore AdminStore
@@ -121,6 +124,10 @@ type Server struct {
 	// registered records every pattern handed to the mux (tests compare it against
 	// the table; it is never read on the request path).
 	registered []string
+	// Request-log write health: a failed content write is retried as a skeleton row, and
+	// a failure of that retry is counted here rather than only logged.
+	requestLogWriteFailures atomic.Int64
+	requestLogDropped       atomic.Int64
 }
 
 // New builds the HTTP server.
@@ -439,6 +446,16 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintf(w, "# TYPE aigw_cooldowns gauge%c", lf)
 	for key, until := range cooldowns {
 		_, _ = fmt.Fprintf(w, "aigw_cooldown_until_seconds{target=%q} %d%c", key, until.Unix(), lf)
+	}
+	_, _ = fmt.Fprintf(w, "# HELP aigw_request_log_write_failures_total Request-log writes that failed and had to be retried without content%c", lf)
+	_, _ = fmt.Fprintf(w, "# TYPE aigw_request_log_write_failures_total counter%c", lf)
+	_, _ = fmt.Fprintf(w, "aigw_request_log_write_failures_total %d%c", s.requestLogWriteFailures.Load(), lf)
+	_, _ = fmt.Fprintf(w, "# HELP aigw_request_log_dropped_total Request logs lost entirely, even as a content-free skeleton%c", lf)
+	_, _ = fmt.Fprintf(w, "# TYPE aigw_request_log_dropped_total counter%c", lf)
+	_, _ = fmt.Fprintf(w, "aigw_request_log_dropped_total %d%c", s.requestLogDropped.Load(), lf)
+	if janitor := s.deps.LogJanitor; janitor != nil {
+		_, _ = fmt.Fprintf(w, "# TYPE aigw_request_log_pruned_total counter%c", lf)
+		_, _ = fmt.Fprintf(w, "aigw_request_log_pruned_total %d%c", janitor.PrunedTotal(), lf)
 	}
 	_ = balances
 }

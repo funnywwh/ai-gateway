@@ -735,3 +735,41 @@
   `POST /accounts/{id}/invoices` 的 `period` 文档写自然月却只认 `current|previous|last30`
 - [x] 控制台页面大小 20 条/页（可选 20/50/100）；`table()` 的 `#count` 由死 span 变成「本页 N 行」，
   过滤框标注「本页过滤…」；分页控件渲染在 `<table>` 之外（不动 `tbody tr` 选择器）
+
+## M25 请求日志的写入兜底与保留期清理
+
+> 设计文档 `docs/design/m25-log-retention.md`（实现前已在对话中输出确认；编号顺延说明见文档开头）。
+> 起因：M23 收尾时把那次写入超时量化了——真库 708 MB 里 689 MB 是历史正文，且 20 次失败里至少 2 个
+> 请求**整行都没落库**（详见 M23 的观察项）。
+
+- [x] 量化结论（先做，避免误改架构）：写入池 `SetMaxOpenConns(1)` 串行，单行成本 × 并发 = 队首等待；
+  收窄到 `user` 后 1.8 KB 行 p50≈40 µs，余量有数量级级别 → **不改异步/背压**
+- [x] 写入兜底：`storeRequestLog` 统一入口，首次失败 → `write_failures` 计数 + **去正文骨架行重写**
+  （独立 15 s 超时），再失败 → `dropped` 计数 + ERROR 日志；`request_bytes`/状态/请求 id 全部保留
+- [x] 两条写入路径共用该入口：`recordContent` 与 `recordDenied`；后者顺带**脱离请求 context**
+  （客户端挂断不再丢掉「本地拒绝」那一行，与 `persist` 的 M19 修复对齐）
+- [x] 计数可见：`/admin/api/v1/stats` 增加 `request_log` 块（retention_days / write_failures / dropped /
+  pruned / enabled / last_run / last_error）；`/metrics` 增加
+  `aigw_request_log_write_failures_total`、`aigw_request_log_dropped_total`、`aigw_request_log_pruned_total`
+- [x] 保留期生效：新增 `internal/retention`（叶子包，端口注入）——启动跑一次 + 每 24 h 一次，
+  **分批**删除（每批 500 行、每轮每表最多 200 批），一次 pass 用 `TryLock` 防重叠
+- [x] 清理范围：`request_logs`（按 `created_at < now - retention_days`）与 `responses`
+  （按 `expires_at < now`）；新增迁移 0007 给 `responses.expires_at` 建索引
+  （`request_logs.created_at` 早有 `idx_request_logs_time`）
+- [x] `responses.expires_at` 不再硬编码 30 天：由 `recording.retention_days` 推导；
+  **0 = 关闭保留期**（不清理，且 `expires_at` 写 NULL = 永久可取回），负数在校验里被拒
+- [x] 手动触发：`POST /admin/api/v1/requests/prune`（roleAdmin + Dangerous + ConfirmReason），
+  返回删除条数并写审计（`prune` / `request_log`）；MCP 后台工具通过路由表自动获得该端点
+- [x] 控制台：请求日志页显示保留期/已清理行数/写入失败与丢弃告警，并提供「清理过期日志」按钮
+  （二次确认里写明将要删除的窗口）
+- [x] 测试：骨架行（内容为空但事实齐全、计数正确）、两次都失败时 `dropped` 计数、客户端 context 已取消
+  时拒绝行仍落库、批量删除的条数/上限/边界时间/NULL 永不到期、janitor 分批到上限/关闭/不重叠/错误传播、
+  手动端点（viewer 403、admin 200、审计、`0` 时如实报 disabled）、`/stats` 字段
+- [x] `make verify` 全绿；`make ui-check` 视图全绿（requests 视图 18 项断言，含保留期与清理按钮）
+- [ ] **待人工执行**（宿主终端）：`scripts/local-run.sh restart` —— 让 M24（列表分页）与 M25 一起生效
+- [ ] **待人工执行（宿主终端，需停实例）**：VACUUM 回收空间。删行只把页还给 freelist，文件不会自己缩小：
+  `scripts/local-run.sh stop` →
+  `python3 -c "import sqlite3;c=sqlite3.connect('data/aigw-local.db');c.execute('VACUUM');c.close()"` →
+  `scripts/local-run.sh start`（VACUUM 需要独占访问；本机没有 sqlite3 CLI，用 python 的 sqlite3 即可）
+- [ ] 观察项：清理后若仍有 `put request log` 超时，先看 `/stats` 的 `request_log.dropped`——
+  它是「连骨架行都没写进去」的权威计数，比翻日志可靠

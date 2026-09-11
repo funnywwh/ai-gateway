@@ -27,6 +27,9 @@ func TestDefaultIsValid(t *testing.T) {
 	if cfg.Recording.RecordReasoning || cfg.Recording.RecordOutputText {
 		t.Errorf("thinking/final-output recording must default to off")
 	}
+	if cfg.Recording.RetentionDays != 30 {
+		t.Errorf("retention default = %d, want 30 days", cfg.Recording.RetentionDays)
+	}
 	if cfg.Billing.InflightPolicy != "abort" || cfg.Billing.OvershootPolicy != "absorb" {
 		t.Errorf("in-flight defaults wrong: %q/%q", cfg.Billing.InflightPolicy, cfg.Billing.OvershootPolicy)
 	}
@@ -153,6 +156,7 @@ func TestValidateRejectsBadValues(t *testing.T) {
 		{"bad strategy", func(c *Config) { c.Routing.DefaultStrategy = "random" }},
 		{"bad inflight policy", func(c *Config) { c.Billing.InflightPolicy = "explode" }},
 		{"bad recording mode", func(c *Config) { c.Recording.RecordInput = "everything" }},
+		{"negative retention", func(c *Config) { c.Recording.RetentionDays = -1 }},
 		{"ratios inverted", func(c *Config) { c.Billing.InflightSoftRatio = 0.9; c.Billing.InflightHardRatio = 0.5 }},
 		{"backup without dir", func(c *Config) { c.Backup.Enabled = true; c.Backup.Dir = "" }},
 	}

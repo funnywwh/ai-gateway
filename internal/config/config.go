@@ -165,13 +165,15 @@ var RecordingInputModes = []string{"full", "user", "metadata", "off"}
 
 // Recording controls content capture (input text vs thinking/final output text).
 type Recording struct {
-	RecordInput      string   `yaml:"record_input"` // full|user|metadata|off
-	RecordReasoning  bool     `yaml:"record_reasoning"`
-	RecordOutputText bool     `yaml:"record_output_text"`
-	MaxBytes         int      `yaml:"max_bytes"`
-	RetentionDays    int      `yaml:"retention_days"`
-	RedactPaths      []string `yaml:"redact_paths"`
-	QueueSize        int      `yaml:"queue_size"`
+	RecordInput      string `yaml:"record_input"` // full|user|metadata|off
+	RecordReasoning  bool   `yaml:"record_reasoning"`
+	RecordOutputText bool   `yaml:"record_output_text"`
+	MaxBytes         int    `yaml:"max_bytes"`
+	// RetentionDays is how long recorded content lives: request logs older than the
+	// window are pruned daily, and a stored response expires with it. 0 disables cleanup.
+	RetentionDays int      `yaml:"retention_days"`
+	RedactPaths   []string `yaml:"redact_paths"`
+	QueueSize     int      `yaml:"queue_size"`
 }
 
 // InputModeFor resolves one API key's record_input_mode against the deployment default.
@@ -592,6 +594,11 @@ func (c *Config) Validate() error {
 	}
 	if err := oneOf("recording.record_input", c.Recording.RecordInput, RecordingInputModes...); err != nil {
 		return err
+	}
+	// 0 switches retention off (nothing is pruned, stored responses never expire);
+	// a negative window is a typo, not a policy.
+	if c.Recording.RetentionDays < 0 {
+		return fmt.Errorf("recording.retention_days must be >= 0 (0 disables cleanup)")
 	}
 	if c.Backup.Enabled {
 		if strings.TrimSpace(c.Backup.Dir) == "" {

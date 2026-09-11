@@ -108,6 +108,23 @@ try {
     checks.tableRendered = pageText().includes('req_demo0001');
     checks.recordingHint = pageText().includes('默认只记录用户输入');
     checks.columns = ['输入', '输出文本', '思考文本'].every((c) => pageText().includes(c));
+    // The retention policy is reported from /stats: the window, what this process has
+    // already pruned, and whether any write had to fall back to a skeleton row.
+    checks.retentionWindow = pageText().includes('保留期 30 天');
+    checks.prunedSoFar = pageText().includes('本进程已清理 12 行');
+    checks.fallbackReported = pageText().includes('写入失败 1 次');
+    checks.pruneButton = !!find('清理过期日志');
+
+    // Manual prune: the confirmation must name the window it will cut at, and the result
+    // must come back as a toast with the counts.
+    find('清理过期日志').click();
+    await settle();
+    checks.pruneConfirms = modalText().includes('保留期 30 天之前的请求日志');
+    find('确认').click();
+    await settle();
+    checks.pruneSent = !!(window.__sent || {})['/requests/prune'];
+    checks.pruneToast = [...document.querySelectorAll('.toast')].some((n) => n.textContent.includes('已删除请求日志 12 行'));
+    checks.pruneStayedOnPage = pageText().includes('req_demo0001');
 
     find('详情').click();
     await settle();

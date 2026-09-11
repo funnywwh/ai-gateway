@@ -12,6 +12,9 @@ M18 让控制台把「每个供应商类型支持哪些配置、密钥填哪一�
 并为无 node 环境补上真实浏览器里的控制台走查（`make ui-check`）。
 M21 让 MCP 从"只读查询"变成"可执行全部后台接口"：令牌分 query / admin_read / admin 三档 scope，
 agent 通过 admin_endpoints → admin_describe → admin_request 三个入口（渐进披露）驱动整张管理面。
+M25 给请求日志补上写入兜底与保留期：内容写失败时退化为「无正文骨架行」（请求仍可见，失败/丢弃计数在
+`/stats` 与 `/metrics`），`recording.retention_days` 从死配置变成真正的每日清理（手动端点
+`POST /admin/api/v1/requests/prune`），存储响应与它同一个窗口到期。
 M23 把「请求日志只留用户输入」定为默认口径：输入通道分 full / user / metadata / off 四档，默认 `user`
 只保留用户自己写的输入（系统指令、工具定义与工具输出只留计数），思考与最终输出仍默认不落；同时把配额
 策略的口径收敛成一个扁平形状并在写入时校验，`monthly_*` 如实标注为「已解析、未执行」。
@@ -27,7 +30,7 @@ M23 把「请求日志只留用户输入」定为默认口径：输入通道分 
 | `docs/PROCESS.md` | 实现流程约定（设计文档 / todo / 提交自检） | 生效中 |
 | `docs/TODO.md` | 里程碑 → 任务 → 验收 的检查清单（随实现勾选） | 持续更新 |
 | `docs/architecture.md` | 分层、模块边界与可替换扩展点 | 已落地（由 `internal/arch` 断言守护） |
-| `docs/design/` | 每个里程碑的设计文档（接口、数据流、决策、异常、测试策略、实现差异） | M0–M23 全部产出 |
+| `docs/design/` | 每个里程碑的设计文档（接口、数据流、决策、异常、测试策略、实现差异） | M0–M25 全部产出 |
 | `docs/plugin-protocol-v1.md` | 插件协议 v1（帧/方法/事件/取消/背压/错误分类） | **已实现（M2）** |
 | `docs/api-responses.md` | Responses 兼容面（端点/字段/SSE 事件/错误封装/认证与限速） | **已实现（M5）** |
 | `docs/api-providers.md` | openai-chat 供应商（配置开关、思考模式、用量维度、错误分类、DeepSeek 接入） | **已实现（M17）** |

@@ -12,7 +12,7 @@
             ├──────────────────────────────────────────────┤
             │ internal/pluginhost internal/mcpsrv          │  进程与协议适配
             │ internal/billing/*  internal/hook            │
-            │ internal/recording  internal/quota           │
+            │ internal/retention  internal/quota           │
             ├──────────────────────────────────────────────┤
             │ internal/routing    internal/balancer        │  纯函数
             │ internal/registry                            │  不可变快照
@@ -54,6 +54,7 @@
 | `internal/httpapi` | Responses/MCP/管理面 HTTP（含 MCP 后台工具桥） | M5/M6/M8/M21 |
 | `internal/billing/*` | 计价、账本、在途、账单、对账、充值 | M11/M12 |
 | `internal/backup` | 一致点备份、保留、恢复 | M16 |
+| `internal/retention` | 录制数据（请求日志/存储响应）的保留期清理（叶子包，端口注入） | M25 |
 
 ## 可替换扩展点（SPI）
 

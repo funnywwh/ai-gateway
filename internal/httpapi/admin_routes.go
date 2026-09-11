@@ -392,6 +392,12 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 			Params:  []adminField{pathParam("id", "请求 id（x-request-id）")},
 		},
 		{
+			Method: "POST", Path: "/admin/api/v1/requests/prune", Handler: s.handleAdminPruneRequests,
+			Name: "admin_prune_requests", Group: groupRequests, Role: roleAdmin,
+			Summary:   "立即清理超过保留期的请求日志与已过期的存储响应（保留期取 recording.retention_days）",
+			Dangerous: true, ConfirmReason: "会永久删除超过保留期的请求日志与已过期的存储响应；计费（usage/ledger）与审计记录不受影响",
+		},
+		{
 			Method: "GET", Path: "/admin/api/v1/audit-logs", Handler: s.handleAdminAuditLogs,
 			Name: "admin_list_audit_logs", Group: groupAudit, Role: roleViewer,
 			Summary: "管理面审计流水（谁在什么时候改了什么）",

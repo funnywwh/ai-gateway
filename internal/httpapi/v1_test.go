@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -852,5 +853,114 @@ func TestFeedItemsReadsUpstreamReasoningShape(t *testing.T) {
 	}
 	if got := assembler.Reasoning(); got != "upstream thinking" {
 		t.Fatalf("reasoning = %q, want the upstream text", got)
+	}
+}
+
+// flakyRecords fails the first content-bearing request-log write and records what the
+// server did next. The skeleton fallback is the whole point: the row must survive even
+// when its content does not.
+type flakyRecords struct {
+	Records
+	failNext  bool
+	skeletons int
+}
+
+func (f *flakyRecords) PutRequestLog(ctx context.Context, rec *domain.RequestLogRecord) error {
+	if rec.RequestJSON != "" && f.failNext {
+		f.failNext = false
+		return errors.New("store: put request log: context deadline exceeded")
+	}
+	if rec.RequestJSON == "" {
+		f.skeletons++
+	}
+	return f.Records.PutRequestLog(ctx, rec)
+}
+
+func TestFailedContentWriteStillLeavesASkeletonRow(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	flaky := &flakyRecords{Records: f.srv.deps.Records, failNext: true}
+	f.srv.deps.Records = flaky
+
+	resp := f.do(t, "POST", "/v1/responses", agentBody, nil)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("the request itself must be served: %d", resp.StatusCode)
+	}
+	requestID := resp.Header.Get("x-request-id")
+
+	log, err := f.db.GetRequestLog(ctx, requestID)
+	if err != nil {
+		t.Fatalf("the request must still be recorded: %v", err)
+	}
+	if log.RequestJSON != "" {
+		t.Fatalf("the fallback row must carry no content: %q", log.RequestJSON)
+	}
+	if log.RequestBytes <= 0 {
+		t.Fatalf("the fallback row must keep the size of what was lost: %+v", log)
+	}
+	if log.Status != "completed" || log.RecordInputMode != "user" {
+		t.Fatalf("the fallback row must keep the facts: %+v", log)
+	}
+	if flaky.skeletons != 1 {
+		t.Fatalf("exactly one skeleton write, got %d", flaky.skeletons)
+	}
+	if got := f.srv.requestLogWriteFailures.Load(); got != 1 {
+		t.Fatalf("write failures = %d, want 1", got)
+	}
+	if got := f.srv.requestLogDropped.Load(); got != 0 {
+		t.Fatalf("nothing was dropped: %d", got)
+	}
+}
+
+// TestDroppedRequestLogIsCounted covers the second failure: the skeleton write fails too,
+// and the loss must be visible as a number rather than only as a log line.
+func TestDroppedRequestLogIsCounted(t *testing.T) {
+	f := newFixture(t)
+	f.srv.deps.Records = &alwaysFailRecords{Records: f.srv.deps.Records}
+
+	resp := f.do(t, "POST", "/v1/responses", agentBody, nil)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("a broken audit write must not fail the request: %d", resp.StatusCode)
+	}
+	if got := f.srv.requestLogWriteFailures.Load(); got != 1 {
+		t.Fatalf("write failures = %d, want 1", got)
+	}
+	if got := f.srv.requestLogDropped.Load(); got != 1 {
+		t.Fatalf("dropped = %d, want 1", got)
+	}
+}
+
+type alwaysFailRecords struct {
+	Records
+}
+
+func (f *alwaysFailRecords) PutRequestLog(context.Context, *domain.RequestLogRecord) error {
+	return errors.New("store: put request log: database is locked")
+}
+
+// TestDeniedRequestSurvivesACancelledClient pins the other half of the same lesson: the
+// local-rejection row used to be written with the request's own context, so a client that
+// hung up took the evidence with it.
+func TestDeniedRequestSurvivesACancelledClient(t *testing.T) {
+	f := newFixture(t)
+	req, apiErr := responses.Parse([]byte(agentBody))
+	if apiErr != nil {
+		t.Fatal(apiErr)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx = context.WithValue(ctx, ctxRequestID, "req_cancelled01")
+	cancel()
+
+	f.srv.recordDenied(ctx, f.key, &domain.Account{ID: f.key.AccountID, Name: "acme"}, req,
+		domain.ErrInsufficientQuota("no funds"))
+
+	logs, err := f.db.ListRequestLogs(context.Background(), f.key.AccountID, time.Time{}, time.Time{}, 10)
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("the rejected request must be recorded despite the cancelled client: %v (%v)", logs, err)
+	}
+	if logs[0].RequestID != "req_cancelled01" {
+		t.Fatalf("request id = %q", logs[0].RequestID)
 	}
 }

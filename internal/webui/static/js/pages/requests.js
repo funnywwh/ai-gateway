@@ -1,11 +1,59 @@
 import { api } from '../api.js';
-import { el, card, pagedTable, toast, badge, formatTime, jsonBlock, statusBadge, modalHead, modalBody, modalActions } from '../ui.js';
+import { el, card, pagedTable, toast, badge, formatTime, jsonBlock, statusBadge, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
 
-export async function render({ page, actions }) {
+export async function render({ page, actions, session }) {
   const days = el('select', {}, [1, 3, 7, 30].map((n) => el('option', { value: n, text: '最近 ' + n + ' 天' })));
   days.value = '7';
   const refresh = el('button', { class: 'btn', text: '刷新' });
-  actions.append(refresh);
+  // Retention is a daily policy: this button is how an operator reclaims space without
+  // waiting for the tick, and the hint next to it reports the window it will cut at.
+  const prune = el('button', { class: 'btn btn-danger', text: '清理过期日志', disabled: session.role !== 'admin' });
+  const hint = el('span', { class: 'muted', text: '' });
+  actions.append(refresh, prune);
+  let retention = null;
+
+  async function loadRetention() {
+    try {
+      retention = (await api.get('/stats')).request_log || null;
+    } catch (err) { retention = null; }
+    renderRetention();
+  }
+
+  // The hint reports the live policy and the write health: a retention window nothing
+  // enforces would be worse than no window at all, which is what recording.retention_days
+  // used to be. A dropped row is called out loudly because it is a hole in the audit trail.
+  function renderRetention() {
+    if (!retention) { hint.textContent = ''; return; }
+    const parts = [retention.retention_days > 0
+      ? '保留期 ' + retention.retention_days + ' 天（每日自动清理，可手动触发）'
+      : '保留期已关闭（recording.retention_days=0，不自动清理）'];
+    if (retention.pruned) parts.push('本进程已清理 ' + retention.pruned + ' 行');
+    if (retention.dropped) parts.push('⚠ 有 ' + retention.dropped + ' 行日志写入失败且未能留下兜底行');
+    else if (retention.write_failures) parts.push('写入失败 ' + retention.write_failures + ' 次（已用无正文兜底行写入）');
+    if (retention.last_error) parts.push('上次清理失败：' + retention.last_error);
+    hint.textContent = parts.join('；');
+  }
+
+  async function pruneNow() {
+    const window = retention && retention.retention_days > 0
+      ? '保留期 ' + retention.retention_days + ' 天'
+      : '保留期已关闭';
+    const ok = await confirmDialog('清理过期日志',
+      '将永久删除' + window + '之前的请求日志与已过期的存储响应（计费与审计记录不受影响）。继续吗？');
+    if (!ok) return;
+    try {
+      const result = await api.post('/requests/prune', {});
+      if (result.disabled) {
+        toast('保留期已关闭（recording.retention_days=0），未删除任何内容', 'error');
+      } else {
+        toast('已删除请求日志 ' + (result.request_logs || 0) + ' 行、存储响应 ' + (result.responses || 0) + ' 行'
+          + (result.exhausted ? '（本轮达到批量上限，下一轮继续）' : ''), 'ok');
+      }
+      await loadRetention();
+      // Deleting rows shifts every offset, so the pager goes back to page 1.
+      view.reset();
+    } catch (err) { toast(api.errorMessage(err), 'error'); }
+  }
 
   const view = pagedTable({
     columns: [
@@ -24,12 +72,15 @@ export async function render({ page, actions }) {
   });
   page.append(card('请求日志', view.node, [
     days,
-    el('span', { class: 'muted', text: '默认只记录用户输入；系统指令、工具定义与工具输出只留计数，最终输出与思考文本需在 Key 上单独开启' })]));
+    el('span', { class: 'muted', text: '默认只记录用户输入；系统指令、工具定义与工具输出只留计数，最终输出与思考文本需在 Key 上单独开启' }),
+    hint]));
 
   // Changing the time window restarts at page 1: the rows of the current page belong
   // to a different filter, so their offset is meaningless.
   days.addEventListener('change', () => view.reset());
   refresh.addEventListener('click', () => view.refresh());
+  prune.addEventListener('click', () => pruneNow());
+  await loadRetention();
   await view.refresh();
 }
 

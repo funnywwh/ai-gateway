@@ -190,9 +190,9 @@ func (s *Server) recordDenied(ctx context.Context, key *domain.APIKey, account *
 		Status:          strconv.Itoa(apiErr.Status),
 		CreatedAt:       time.Now().UTC(),
 	}
-	if err := s.deps.Records.PutRequestLog(ctx, record); err != nil {
-		s.deps.Log.Warn("recording a denied request failed", "err", err)
-	}
+	// The shared writer detaches from the request context: a rejected request whose client
+	// hung up is still a request somebody has to be able to see.
+	s.storeRequestLog(ctx, record)
 }
 
 // settleAttempt prices one attempt and hands it to the billing writer. The usage row

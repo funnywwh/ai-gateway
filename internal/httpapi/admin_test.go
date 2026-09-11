@@ -23,6 +23,7 @@ import (
 	"github.com/winger/ai-gateway/internal/pricing"
 	"github.com/winger/ai-gateway/internal/quota"
 	"github.com/winger/ai-gateway/internal/registry"
+	"github.com/winger/ai-gateway/internal/retention"
 	"github.com/winger/ai-gateway/internal/routing"
 	"github.com/winger/ai-gateway/internal/runtime"
 	"github.com/winger/ai-gateway/internal/store"
@@ -100,6 +101,7 @@ func (f *fakeProber) Restart(ctx context.Context, providerID int64) error {
 
 type adminFixture struct {
 	server      *httptest.Server
+	api         *Server
 	db          *store.DB
 	reg         *registry.Registry
 	cfg         *config.Config
@@ -259,10 +261,14 @@ func newAdminFixtureWithout(t *testing.T, unwired string) *adminFixture {
 	default:
 		t.Fatalf("unknown port to leave unwired: %q", unwired)
 	}
+	// The retention janitor is wired here too: the manual prune endpoint is part of the
+	// management surface, and a fixture without it would answer 501 (M25).
+	deps.LogJanitor = retention.New(db, retention.Config{RetentionDays: cfg.Recording.RetentionDays}, nil)
 	srv := New(deps)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	fixture.server = ts
+	fixture.api = srv
 	return fixture
 }
 
@@ -1147,4 +1153,118 @@ func apiErrorMessage(t *testing.T, resp *http.Response) string {
 	envelope, _ := payload["error"].(map[string]any)
 	message, _ := envelope["message"].(string)
 	return message
+}
+
+// TestPruneRequestsEndpointAndStats covers the retention surface end to end: the manual
+// endpoint deletes exactly what the window says, the daily job is not needed to make it
+// work, and /stats reports the policy and the write health the console renders.
+func TestPruneRequestsEndpointAndStats(t *testing.T) {
+	f := newAdminFixture(t)
+	ctx := context.Background()
+	cookie := f.login(t, adminUser, adminPassword)
+
+	seed := func(id string, ageDays int) {
+		t.Helper()
+		if err := f.db.PutRequestLog(ctx, &domain.RequestLogRecord{
+			RequestID: id, AccountID: 1, APIKeyID: 1, Endpoint: "/v1/responses",
+			RequestJSON: `{"input":"ping"}`, Status: "completed",
+			CreatedAt: time.Now().UTC().AddDate(0, 0, -ageDays),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("req_old_a", 40)
+	seed("req_old_b", 31)
+	seed("req_new", 1)
+
+	now := time.Now().UTC()
+	expired, live := now.Add(-time.Hour), now.Add(time.Hour)
+	for _, rec := range []*domain.ResponseRecord{
+		{ID: "resp_old", Model: "m", Status: "completed", ExpiresAt: &expired},
+		{ID: "resp_live", Model: "m", Status: "completed", ExpiresAt: &live},
+	} {
+		if err := f.db.PutResponse(ctx, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A viewer may read the log but not decide what to delete.
+	viewer := f.login(t, "reader", adminPassword)
+	denied := f.call(t, http.MethodPost, "/admin/api/v1/requests/prune", "", viewer)
+	denied.Body.Close()
+	if denied.StatusCode != http.StatusForbidden {
+		t.Fatalf("viewer prune status = %d, want 403", denied.StatusCode)
+	}
+
+	resp := f.call(t, http.MethodPost, "/admin/api/v1/requests/prune", "", cookie)
+	payload := decodeJSONBody(t, resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("prune status = %d: %v", resp.StatusCode, payload)
+	}
+	if payload["request_logs"] != float64(2) || payload["responses"] != float64(1) {
+		t.Fatalf("prune result = %v, want the two old logs and the expired response", payload)
+	}
+	if payload["disabled"] == true {
+		t.Fatalf("retention is on by default: %v", payload)
+	}
+
+	logs, err := f.db.ListRequestLogs(ctx, 0, time.Time{}, time.Time{}, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range logs {
+		if row.RequestID != "req_new" {
+			t.Fatalf("only the row inside the window may survive, found %q", row.RequestID)
+		}
+	}
+	if _, err := f.db.GetResponse(ctx, "resp_old"); err == nil {
+		t.Fatal("the expired stored response must be gone")
+	}
+	if _, err := f.db.GetResponse(ctx, "resp_live"); err != nil {
+		t.Fatalf("a response inside its window must survive: %v", err)
+	}
+
+	audit, err := f.db.ListAudit(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entry := range audit {
+		if entry.Action == "prune" && entry.TargetType == "request_log" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the manual prune must be audited: %+v", audit)
+	}
+
+	stats := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/stats", "", cookie))
+	block, ok := stats["request_log"].(map[string]any)
+	if !ok {
+		t.Fatalf("stats must report the request-log block: %v", stats)
+	}
+	if block["retention_days"] != float64(30) || block["enabled"] != true {
+		t.Fatalf("retention block = %v", block)
+	}
+	if block["pruned"] != float64(3) {
+		t.Fatalf("pruned = %v, want the 3 rows this process deleted", block["pruned"])
+	}
+	if _, ok := block["dropped"]; !ok {
+		t.Fatalf("the console needs the drop counter too: %v", block)
+	}
+}
+
+// TestPruneRequestsReportsDisabledRetention pins the 0 case: the endpoint must say that
+// nothing is pruned rather than silently reporting a successful empty pass.
+func TestPruneRequestsReportsDisabledRetention(t *testing.T) {
+	f := newAdminFixture(t)
+	// The janitor is built from the configuration at start-up, so a test that changes the
+	// policy has to wire the janitor it wants (exactly as a restart would).
+	f.api.deps.LogJanitor = retention.New(f.db, retention.Config{RetentionDays: 0}, nil)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	payload := decodeJSONBody(t, f.call(t, http.MethodPost, "/admin/api/v1/requests/prune", "", cookie))
+	if payload["disabled"] != true {
+		t.Fatalf("retention_days=0 must report disabled: %v", payload)
+	}
 }

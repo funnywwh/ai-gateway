@@ -101,6 +101,9 @@ recording:
   record_reasoning: false     # "save thinking text" checkbox - off by default, per key
   record_output_text: false   # "save final output text" checkbox - off by default, per key
   max_bytes: 1048576
+  # 记录内容的保留期：请求日志按它清理，存储响应（store=true）按它到期；0 = 不清理（永久保留）。
+  # 清理是每日任务（启动时跑一次），也可在控制台「请求日志」页手动触发；
+  # 计费（usage/ledger）与审计记录不受影响。
   retention_days: 30
   redact_paths: []
   queue_size: 16384

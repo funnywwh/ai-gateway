@@ -945,7 +945,18 @@
     "status": "completed",
     "truncated": false
    }
-  ]
+  ],
+  "has_more": false,
+  "limit": 20,
+  "offset": 0,
+  "total": 1
+ },
+ "/requests/prune": {
+  "batches": 1,
+  "disabled": false,
+  "exhausted": false,
+  "request_logs": 12,
+  "responses": 3
  },
  "/requests/req_demo0001": {
   "account_id": 1,
@@ -983,5 +994,21 @@
   "response_bytes": 0,
   "status": "completed",
   "truncated": false
+ },
+ "/stats": {
+  "registry": {
+   "models": 7,
+   "providers": 3,
+   "ready": true
+  },
+  "request_log": {
+   "dropped": 0,
+   "enabled": true,
+   "last_run": "2026-09-11T20:12:00Z",
+   "pruned": 12,
+   "retention_days": 30,
+   "write_failures": 1
+  },
+  "version": "test"
  }
 }

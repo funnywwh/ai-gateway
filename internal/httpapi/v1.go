@@ -438,7 +438,14 @@ func (s *Server) persist(
 	}
 	usageJSON, _ := json.Marshal(resp.Usage)
 	completed := time.Now().UTC()
-	expires := completed.Add(30 * 24 * time.Hour)
+	// A stored response lives exactly as long as the retention window says. When cleanup
+	// is switched off there is no expiry at all (NULL), which is what "keep forever" has
+	// to mean for a client that can still fetch the response by id.
+	var expires *time.Time
+	if window, ok := s.retentionWindow(); ok {
+		at := completed.Add(window)
+		expires = &at
+	}
 
 	// One computation feeds the stored response, the request log and the hook event, so
 	// the three can never disagree about what was recorded under which policy.
@@ -458,7 +465,7 @@ func (s *Server) persist(
 			Instructions: req.Instructions,
 			CreatedAt:    completed,
 			CompletedAt:  &completed,
-			ExpiresAt:    &expires,
+			ExpiresAt:    expires,
 		}
 		if err := s.deps.Records.PutResponse(auditCtx, rec); err != nil {
 			s.deps.Log.Warn("storing response failed", "err", err, "response_id", assembler.ID())
@@ -611,9 +618,7 @@ func (s *Server) recordContent(
 	}
 	rec.ResponseBytes = len(rec.ResponseReasoning) + len(rec.ResponseText)
 
-	if err := s.deps.Records.PutRequestLog(ctx, rec); err != nil {
-		s.deps.Log.Warn("recording request content failed", "err", err, "request_id", rec.RequestID)
-	}
+	s.storeRequestLog(ctx, rec)
 }
 
 // ---------------------------------------------------------------------------

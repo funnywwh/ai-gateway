@@ -68,6 +68,8 @@ def main():
     for row in fixtures["/requests"].get("data", [])[:1]:
         fixtures[f"/requests/{row['request_id']}"] = call(f"/admin/api/v1/requests/{row['request_id']}", cookie)
     fixtures["/provider-kinds"] = call("/admin/api/v1/provider-kinds", cookie)
+    # The request-log page reads the retention/write-health block from /stats.
+    fixtures["/stats"] = call("/admin/api/v1/stats", cookie)
     for row in fixtures["/providers"].get("data", []):
         pid = str(row["id"])
         fixtures[f"/providers/{pid}"] = call(f"/admin/api/v1/providers/{pid}", cookie)

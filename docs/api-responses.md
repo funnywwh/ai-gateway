@@ -39,6 +39,11 @@
   只写 `request_logs`、审计与 hook，**不计费**。其中**限速拒绝（本地滑动窗口 429）不写 `request_logs`**
   ——它在准入之前就返回了；计费与配额拒绝（402，`RejectAs429` 时 429）走 `rejectForQuota`，
   会写一行请求日志（同样受录制策略与脱敏约束）。
+- **内容清理**：请求日志与存储响应按 `recording.retention_days` 每日清理（分批删除，见
+  `docs/design/m25-log-retention.md`），也可由管理员用 `POST /admin/api/v1/requests/prune` 立即触发。
+  `usage_records` / `ledger_entries` / `audit_logs` **不在清理范围内**——计费与审计历史必须保留。
+  请求日志写入失败时会退化为「无正文的骨架行」（保住 request_id/状态/字节数），`/stats` 与 `/metrics`
+  暴露失败与丢弃计数。
 
 ## 请求字段
 
@@ -145,7 +150,9 @@ response.completed      (含完整 response 与 usage)
 ## 会话续接
 
 `previous_response_id`：读取存储的响应（须属于同一 Key/账户，否则 404），把其 `input + output` 作为上下文前缀；
-`instructions` 缺省时继承。`store:false` 且无续接时不落库。默认保留 30 天。
+`instructions` 缺省时继承。`store:false` 且无续接时不落库。保留期由 `recording.retention_days` 决定
+（默认 30 天，写入 `responses.expires_at`，由每日清理任务删除）；把它设为 `0` 表示**不清理**，此时
+`expires_at` 为 NULL，存储的响应永久可取回。
 
 ## 错误封装
 

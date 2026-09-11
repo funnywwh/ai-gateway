@@ -28,6 +28,7 @@ import (
 	"github.com/winger/ai-gateway/internal/pricing"
 	"github.com/winger/ai-gateway/internal/quota"
 	"github.com/winger/ai-gateway/internal/registry"
+	"github.com/winger/ai-gateway/internal/retention"
 	"github.com/winger/ai-gateway/internal/routing"
 	"github.com/winger/ai-gateway/internal/runtime"
 	"github.com/winger/ai-gateway/internal/store"
@@ -292,6 +293,11 @@ func run() int {
 	})
 	log.Info("billing ready", "batch_size", cfg.Billing.WriterBatchSize, "fallback_file", cfg.Billing.FallbackFile)
 
+	// Recorded observability data (request logs, stored responses) is pruned on a daily
+	// policy, in batches so the single writer connection stays available to requests.
+	logJanitor := retention.New(db, retention.Config{RetentionDays: cfg.Recording.RetentionDays}, log)
+	logJanitor.Start(ctx, 24*time.Hour)
+
 	adminAuth := admin.NewAuth(db, admin.Config{
 		SessionTTL:    12 * time.Hour,
 		LoginAttempts: 10,
@@ -378,6 +384,7 @@ func run() int {
 		Limiter:    limiter,
 		Meter:      meter,
 		Records:    db,
+		LogJanitor: logJanitor,
 		MCP:        mcpService,
 		MCPTokens:  db,
 		Hooks:      hookDispatcher,

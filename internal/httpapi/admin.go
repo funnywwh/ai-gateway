@@ -532,9 +532,10 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 			"mappings": len(snap.Mappings), "tags": len(snap.Tags), "accounts": len(snap.Accounts),
 			"ready": snap.Ready(),
 		},
-		"balancer":  s.deps.Router.Balancer().SnapshotMetrics(),
-		"cooldowns": s.deps.Router.Balancer().Cooldowns(now),
-		"version":   s.deps.Version,
+		"balancer":    s.deps.Router.Balancer().SnapshotMetrics(),
+		"cooldowns":   s.deps.Router.Balancer().Cooldowns(now),
+		"request_log": s.requestLogStats(),
+		"version":     s.deps.Version,
 	}
 	if s.deps.KeyCacheSize != nil {
 		payload["key_cache_entries"] = s.deps.KeyCacheSize()
