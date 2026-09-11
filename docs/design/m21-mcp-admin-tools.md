@@ -118,4 +118,22 @@ POST /mcp  Authorization: Bearer aigw_mcp_…
 
 ## 9. 实现与设计差异
 
-（实现完成后回填）
+1. **路由表集中在一个文件**：设计里写的是"各族条目写在各自的 handler 文件里"，实现改成全部集中在
+   `internal/httpapi/admin_routes.go`（按族分成 8 个构造函数）。理由：审计"管理面到底有哪些接口"时只看一个文件，
+   评审与新增都更省事；完整性由 `admin_routes_test.go` 与字面清单比对兜底，与放哪里无关。
+2. **提交切分**：计划是"纯重构 / 能力 / 界面与文档"三个提交，实际合并为"路由表 + scope 基础"与
+   "后台工具 + 界面 + 文档"两次（表里已包含 scope 元数据与新端点，硬拆会让第一个提交无法编译）。
+3. **不暴露的接口命名**：`auth/login|logout`、`backups/{id}/download` 仍然有工具名（`admin_login` 等），
+   调用时给出"未对 MCP 开放 + 原因"，而不是报"未知接口"——比设计里"列在目录、tool=null"更明确。
+4. **新增 `PATCH /admin/api/v1/mcp-tokens/{id}`**：设计里只提到"改权限"，实现落成一个正式端点（scope/status），
+   于是管理面路由从 85 条变成 86 条，暴露给 MCP 的是 83 条（86 − login − logout − download）。
+5. **端口未接线的错误码**：设计里写"501"，实际 `portReady` 写的是 400 `unsupported_error`；
+   桥原样透传 handler 的状态码，不为它改口径（测试按 400 断言）。
+6. **body 值一律不入审计**：设计里已写，实现时进一步把"键名列表"（`body_keys`）写进 started 那一条，
+   排障时能看出"这次调用带了哪些字段"而不泄露值。
+7. **`mcp.call` hook 补上了**：`docs/mcp.md` 早就声明过这个事件但一直没实现，本轮随审计一起补上。
+8. **真机走查结论**：MCP 建出来的供应商/模型/路由**不需要重启**即可服务真实请求（走的是同一套 handler +
+   既有热更新三件套），`POST /v1/responses` 返回 `echo: ping`；令牌吊销后立即 401。
+9. **变异验证（5 处护栏逐一咬合）**：去掉 confirm 闸门、去掉角色预检、去掉截断标记、去掉桥的审计写入，
+   各自精确失败；scope 闸门需要**同时**去掉两层（`mcpsrv.AllowsAdminTools` 与桥里的 `AdminRole` 判定）才会让
+   `query` 令牌看到后台工具——两层是刻意的纵深，单层失效不会立刻提权。

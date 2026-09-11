@@ -1,5 +1,7 @@
-// Package mcpsrv implements the read-only MCP query service: an MCP client (an LLM
-// agent) connects with an account token and can only read that account's data.
+// Package mcpsrv implements the MCP server: an MCP client (an LLM agent) connects
+// with an MCP token, reads its own account through the query tools, and — when the
+// token scope allows it — drives the management API through the administrative tool
+// surface that the transport layer injects as a Backend.
 package mcpsrv
 
 import (
@@ -37,6 +39,50 @@ type Config struct {
 	Currency   string
 }
 
+// Principal identifies the caller of one MCP request: which token, which
+// account, and what that token is allowed to do.
+type Principal struct {
+	AccountID int64
+	TokenID   int64
+	Name      string
+	Scope     string
+}
+
+// Actor is the identity recorded in audit logs and hooks. Naming the token (not
+// just the account) is what makes an agent's writes traceable afterwards.
+func (p Principal) Actor() string {
+	name := strings.TrimSpace(p.Name)
+	if name == "" {
+		name = "token"
+	}
+	if p.TokenID == 0 {
+		return "mcp:" + name
+	}
+	return fmt.Sprintf("mcp:%s#%d", name, p.TokenID)
+}
+
+// AllowsAdmin reports whether the scope may see and call the administrative tools.
+func (p Principal) AllowsAdmin() bool { return AllowsAdminTools(p.Scope) }
+
+// Backend is the administrative tool surface. It is implemented by the transport
+// layer (httpapi), because executing a management endpoint means dispatching into
+// the HTTP handlers, and this package must not know how that works.
+type Backend interface {
+	// AdminTools lists the administrative tools visible to this principal.
+	AdminTools(p Principal) []Tool
+	// CallAdmin runs one administrative tool. A returned error means the call
+	// never reached an endpoint (unknown name, bad arguments); a call that reached
+	// an endpoint and failed comes back as ToolResult with IsError set.
+	CallAdmin(ctx context.Context, p Principal, name string, args map[string]any) (ToolResult, error)
+}
+
+// ToolResult is a tool outcome whose isError flag is decided by the producer, so an
+// endpoint answering 403 is reported as a failed call rather than a broken tool.
+type ToolResult struct {
+	Value   any
+	IsError bool
+}
+
 // Service answers the read-only tools.
 type Service struct {
 	store Store
@@ -46,6 +92,8 @@ type Service struct {
 	// reservations reports the account's in-flight holds. It is injected so this
 	// package does not depend on the billing package.
 	reservations func(accountID int64) int64
+	// backend is the optional administrative surface (nil disables it entirely).
+	backend Backend
 }
 
 // New builds the service.
@@ -64,6 +112,20 @@ func New(store Store, reg *registry.Registry, cfg Config) *Service {
 
 // SetReservationReporter installs the in-flight reader used by get_dashboard.
 func (s *Service) SetReservationReporter(report func(accountID int64) int64) { s.reservations = report }
+
+// SetBackend installs the administrative tool surface. Without it the service
+// serves the read-only query tools only (the stdio entry point relies on that).
+func (s *Service) SetBackend(backend Backend) { s.backend = backend }
+
+// ToolsFor lists the tools a principal may call: the eleven read-only query tools,
+// plus the administrative entry points when the token scope allows them.
+func (s *Service) ToolsFor(p Principal) []Tool {
+	tools := s.Tools()
+	if s.backend != nil && p.AllowsAdmin() {
+		tools = append(tools, s.backend.AdminTools(p)...)
+	}
+	return tools
+}
 
 // CounterPeriod is the "YYYY-MM" rollup bucket for a time.
 func CounterPeriod(at time.Time) string { return at.UTC().Format("2006-01") }
@@ -136,33 +198,72 @@ func (s *Service) Tools() []Tool {
 	}
 }
 
-// Call executes one tool for the authenticated account.
+// Call executes one read-only tool for the authenticated account.
+//
+// This is the account-scoped entry point used by the stdio server and by tests: it
+// has no token and therefore no administrative surface. The HTTP endpoint goes
+// through CallAs with the caller's real scope.
 func (s *Service) Call(ctx context.Context, accountID int64, name string, args map[string]any) (any, error) {
+	result, err := s.CallAs(ctx, Principal{AccountID: accountID, Scope: ScopeQuery}, name, args)
+	if err != nil {
+		return nil, err
+	}
+	return result.Value, nil
+}
+
+// CallAs executes one tool on behalf of a principal. Read-only tools keep their
+// account scope; administrative tools are delegated to the backend and are only
+// reachable when the token scope allows them (an unknown tool and a forbidden one
+// are reported identically, so the surface is not enumerable from a query token).
+func (s *Service) CallAs(ctx context.Context, p Principal, name string, args map[string]any) (ToolResult, error) {
+	if value, err, known := s.callRead(ctx, p.AccountID, name, args); known {
+		return ToolResult{Value: value}, err
+	}
+	if s.backend != nil && p.AllowsAdmin() {
+		return s.backend.CallAdmin(ctx, p, name, args)
+	}
+	return ToolResult{}, fmt.Errorf("unknown tool %q", name)
+}
+
+// callRead dispatches the account-scoped query tools; known reports whether the
+// name belongs to this set at all.
+func (s *Service) callRead(ctx context.Context, accountID int64, name string, args map[string]any) (any, error, bool) {
 	switch name {
 	case "get_balance":
-		return s.getBalance(ctx, accountID)
+		value, err := s.getBalance(ctx, accountID)
+		return value, err, true
 	case "get_ledger":
-		return s.getLedger(ctx, accountID, args)
+		value, err := s.getLedger(ctx, accountID, args)
+		return value, err, true
 	case "get_usage_summary":
-		return s.getUsageSummary(ctx, accountID, args)
+		value, err := s.getUsageSummary(ctx, accountID, args)
+		return value, err, true
 	case "list_requests":
-		return s.listRequests(ctx, accountID, args)
+		value, err := s.listRequests(ctx, accountID, args)
+		return value, err, true
 	case "get_request":
-		return s.getRequest(ctx, accountID, args)
+		value, err := s.getRequest(ctx, accountID, args)
+		return value, err, true
 	case "get_dashboard":
-		return s.getDashboard(ctx, accountID, args)
+		value, err := s.getDashboard(ctx, accountID, args)
+		return value, err, true
 	case "get_usage_breakdown":
-		return s.getUsageBreakdown(ctx, accountID, args)
+		value, err := s.getUsageBreakdown(ctx, accountID, args)
+		return value, err, true
 	case "get_rate_limits":
-		return s.getRateLimits(ctx, accountID)
+		value, err := s.getRateLimits(ctx, accountID)
+		return value, err, true
 	case "list_invoices":
-		return s.listInvoices(ctx, accountID, args)
+		value, err := s.listInvoices(ctx, accountID, args)
+		return value, err, true
 	case "get_invoice":
-		return s.getInvoice(ctx, accountID, args)
+		value, err := s.getInvoice(ctx, accountID, args)
+		return value, err, true
 	case "get_models":
-		return s.getModels(ctx, accountID)
+		value, err := s.getModels(ctx, accountID)
+		return value, err, true
 	default:
-		return nil, fmt.Errorf("unknown tool %q", name)
+		return nil, nil, false
 	}
 }
 

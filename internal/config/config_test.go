@@ -32,6 +32,40 @@ func TestDefaultIsValid(t *testing.T) {
 	}
 }
 
+func TestMCPAdminDefaultsAndOverrides(t *testing.T) {
+	cfg := Default()
+	if !cfg.MCP.AdminTools {
+		t.Error("the administrative MCP surface must default to enabled; the token scope is the gate")
+	}
+	if cfg.MCP.AdminMaxResponseBytes != 256*1024 {
+		t.Errorf("admin_max_response_bytes default = %d", cfg.MCP.AdminMaxResponseBytes)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("mcp:\n  admin_tools: false\n  admin_max_response_bytes: 4096\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.MCP.AdminTools {
+		t.Error("admin_tools: false must survive loading")
+	}
+	if loaded.MCP.AdminMaxResponseBytes != 4096 {
+		t.Errorf("admin_max_response_bytes = %d", loaded.MCP.AdminMaxResponseBytes)
+	}
+
+	t.Setenv("GW_MCP_ADMIN_TOOLS", "true")
+	fromEnv, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fromEnv.MCP.AdminTools {
+		t.Error("GW_MCP_ADMIN_TOOLS must override the file")
+	}
+}
+
 func TestLoadMissingFileUsesDefaults(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
 	if err != nil {

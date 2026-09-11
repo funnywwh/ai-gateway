@@ -42,9 +42,9 @@ const (
 	CodeUnauthorized   = -32001
 )
 
-// Handle processes one JSON-RPC request on behalf of an authenticated account.
+// Handle processes one JSON-RPC request on behalf of an authenticated principal.
 // It never panics: internal failures are reported as JSON-RPC errors.
-func (s *Service) Handle(ctx context.Context, accountID int64, raw []byte) *Response {
+func (s *Service) Handle(ctx context.Context, principal Principal, raw []byte) *Response {
 	var req Request
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return &Response{JSONRPC: "2.0", Error: &RPCError{Code: CodeParse, Message: "invalid JSON"}}
@@ -58,15 +58,15 @@ func (s *Service) Handle(ctx context.Context, accountID int64, raw []byte) *Resp
 		return &Response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
 			"protocolVersion": ProtocolVersion,
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
-			"serverInfo":      map[string]any{"name": "aigw-mcp", "version": "0.1.0"},
-			"instructions":    "Read-only access to this account's usage, balance, ledger and recorded requests. Content is available only for channels the account opted into recording.",
+			"serverInfo":      map[string]any{"name": "aigw-mcp", "version": "0.2.0"},
+			"instructions":    s.instructions(principal),
 		}}
 	case "ping":
 		return &Response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{}}
 	case "tools/list":
-		return &Response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"tools": s.Tools()}}
+		return &Response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"tools": s.ToolsFor(principal)}}
 	case "tools/call":
-		return s.handleToolCall(ctx, accountID, req)
+		return s.handleToolCall(ctx, principal, req)
 	default:
 		return &Response{JSONRPC: "2.0", ID: req.ID, Error: &RPCError{
 			Code: CodeMethodNotFound, Message: "unknown method: " + req.Method,
@@ -74,7 +74,26 @@ func (s *Service) Handle(ctx context.Context, accountID int64, raw []byte) *Resp
 	}
 }
 
-func (s *Service) handleToolCall(ctx context.Context, accountID int64, req Request) *Response {
+// instructions tells the client what this credential can do. Scope is the whole
+// difference between "read your own usage" and "operate the gateway", so it is
+// stated up front instead of being discovered by a 403.
+func (s *Service) instructions(principal Principal) string {
+	base := "Read-only access to this account's usage, balance, ledger and recorded requests. " +
+		"Content is available only for channels the account opted into recording."
+	switch NormalizeScope(principal.Scope) {
+	case ScopeAdmin:
+		return base + " This token also carries scope=admin: every management endpoint is available through " +
+			"admin_endpoints (overview), admin_describe (parameters and body schema) and admin_request (execute). " +
+			"Prefer the query tools for reporting questions; call admin_endpoints before the first administrative call."
+	case ScopeAdminRead:
+		return base + " This token also carries scope=admin_read: the management endpoints are visible through " +
+			"admin_endpoints / admin_describe, and admin_request may only call the read-only ones (writes answer 403)."
+	default:
+		return base + " This token has scope=query: administrative endpoints are not available."
+	}
+}
+
+func (s *Service) handleToolCall(ctx context.Context, principal Principal, req Request) *Response {
 	var params struct {
 		Name      string         `json:"name"`
 		Arguments map[string]any `json:"arguments"`
@@ -88,7 +107,7 @@ func (s *Service) handleToolCall(ctx context.Context, accountID int64, req Reque
 		return &Response{JSONRPC: "2.0", ID: req.ID, Error: &RPCError{Code: CodeInvalidParams, Message: "tool name is required"}}
 	}
 
-	result, err := s.Call(ctx, accountID, params.Name, params.Arguments)
+	result, err := s.CallAs(ctx, principal, params.Name, params.Arguments)
 	if err != nil {
 		return &Response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
 			"content": []map[string]any{{"type": "text", "text": err.Error()}},
@@ -96,13 +115,13 @@ func (s *Service) handleToolCall(ctx context.Context, accountID int64, req Reque
 		}}
 	}
 
-	payload, err := json.MarshalIndent(result, "", "  ")
+	payload, err := json.MarshalIndent(result.Value, "", "  ")
 	if err != nil {
 		return &Response{JSONRPC: "2.0", ID: req.ID, Error: &RPCError{Code: CodeInternal, Message: "encoding result failed"}}
 	}
 	return &Response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
 		"content": []map[string]any{{"type": "text", "text": string(payload)}},
-		"isError": false,
+		"isError": result.IsError,
 	}}
 }
 

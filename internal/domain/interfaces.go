@@ -256,7 +256,7 @@ type Event struct {
 	Payload   map[string]any
 }
 
-// MCPQuerier serves the read-only MCP query tools (M6).
+// MCPQuerier serves the MCP tools (M6; administrative tools added in M21).
 type MCPQuerier interface {
 	Query(ctx context.Context, accountID int64, tool string, args map[string]any) (any, error)
 }

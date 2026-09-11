@@ -63,7 +63,7 @@ type HookAdmin interface {
 	DeleteHook(ctx context.Context, id int64) error
 }
 
-// MCPTokenAdmin manages read-only MCP query tokens.
+// MCPTokenAdmin manages MCP tokens (scope decides query-only vs administrative).
 type MCPTokenAdmin interface {
 	ListMCPTokens(ctx context.Context, accountID int64) ([]*domain.MCPToken, error)
 	UpsertMCPToken(ctx context.Context, tok *domain.MCPToken) (int64, error)

@@ -37,10 +37,22 @@ type AuditEntry = store.AuditEntry
 const adminCookieName = "aigw_admin"
 
 // adminActor returns the authenticated administrator, or writes 401/403 and reports false.
+//
+// Two identities are accepted: a browser session cookie, and the synthetic
+// principal the MCP admin bridge injects for an in-process call (mcp_admin.go).
+// The latter can only be created inside this package, so a plain HTTP request
+// cannot claim to be one.
 func (s *Server) adminActor(w http.ResponseWriter, r *http.Request, requireAdmin bool) (*domain.AdminUser, bool) {
 	if s.deps.Admin == nil || s.deps.AdminStore == nil {
 		writeAPIError(w, domain.ErrUnsupported("the management API is disabled"))
 		return nil, false
+	}
+	if actor, ok := mcpActorFrom(r.Context()); ok {
+		if requireAdmin && !admin.RequireRole(&domain.AdminUser{Role: actor.Role}, "admin") {
+			writeAPIError(w, domain.ErrForbidden("this MCP token may only call read-only management endpoints"))
+			return nil, false
+		}
+		return &domain.AdminUser{Username: actor.Username, Role: actor.Role}, true
 	}
 	cookie, err := r.Cookie(adminCookieName)
 	if err != nil || cookie.Value == "" {

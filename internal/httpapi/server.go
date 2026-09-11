@@ -56,7 +56,8 @@ type Deps struct {
 	Limiter    *quota.Limiter
 	Meter      *usage.Meter
 	Records    Records
-	// MCP/ MCPTokens enable the read-only MCP query endpoint (POST /mcp).
+	// MCP/ MCPTokens enable the MCP endpoint (POST /mcp): account query tools plus,
+	// for admin-scoped tokens, the administrative tool surface.
 	MCP       MCPQuery
 	MCPTokens MCPTokens
 	// Hooks receives lifecycle events; nil disables hook delivery.
@@ -123,6 +124,11 @@ func New(deps Deps) *Server {
 	s := &Server{deps: deps, mux: http.NewServeMux()}
 	s.admin = s.adminRoutes()
 	s.adminIndex = newAdminEndpointIndex(s.admin)
+	if binder, ok := deps.MCP.(MCPBackendBinder); ok {
+		// The MCP service gains the administrative surface from here: the transport
+		// layer owns both halves, so no other package needs to know they are linked.
+		binder.SetBackend(&adminBackend{s: s})
+	}
 	s.ready.Store(true)
 	s.routes()
 	return s

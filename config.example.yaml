@@ -102,6 +102,14 @@ mcp:
   enabled: true
   max_query_rows: 1000
   request_window_days: 30
+  # Administrative tools over MCP (admin_endpoints / admin_describe / admin_request).
+  # The real gate is the token scope: only a token issued with scope=admin_read or
+  # scope=admin ever sees these tools, and existing tokens stay scope=query. Set this
+  # to false to switch the whole surface off for the deployment.
+  admin_tools: true
+  # Cap on one administrative call's response body; a larger answer is truncated and
+  # flagged instead of being pasted into the model's context.
+  admin_max_response_bytes: 262144
 
 hooks:
   queue_size: 1024

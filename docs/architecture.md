@@ -51,7 +51,7 @@
 | `pkg/providerkit` | SSE 解析、chat↔responses 转换、估算 | M2 |
 | `internal/routing`/`balancer` | 模型解析、候选选择、LB 策略 | M3 |
 | `internal/apikey`/`quota` | 鉴权缓存、分片限速 | M4 |
-| `internal/httpapi` | Responses/MCP/管理面 HTTP | M5/M6/M8 |
+| `internal/httpapi` | Responses/MCP/管理面 HTTP（含 MCP 后台工具桥） | M5/M6/M8/M21 |
 | `internal/billing/*` | 计价、账本、在途、账单、对账、充值 | M11/M12 |
 | `internal/backup` | 一致点备份、保留、恢复 | M16 |
 
@@ -65,7 +65,7 @@
 | Hook 投递 | webhook（HMAC）+ JSONL | MQ / 对象存储 |
 | LB 策略 | 加权随机/轮询/最少连接/最低延迟/严格顺序 | 注册表可加自定义策略 |
 | 认证 | API Key（哈希 + 前缀索引） | OIDC / JWT |
-| MCP 工具 | 10 个只读查询工具 | 注册表可加 |
+| MCP 工具 | 11 个账户查询工具 + 3 个后台入口（渐进披露） | 管理面路由表驱动：新增接口自动出现在目录里 |
 | 备份后端 | 本地目录 | 对象存储（v2） |
 
 ## 并发与性能要点（详见各模块设计文档）

@@ -17,6 +17,7 @@ import (
 	"github.com/winger/ai-gateway/internal/balancer"
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/mcpsrv"
 	"github.com/winger/ai-gateway/internal/quota"
 	"github.com/winger/ai-gateway/internal/registry"
 	"github.com/winger/ai-gateway/internal/routing"
@@ -98,6 +99,7 @@ type adminFixture struct {
 	server      *httptest.Server
 	db          *store.DB
 	reg         *registry.Registry
+	cfg         *config.Config
 	sealer      *fakeSealer
 	prober      *fakeProber
 	hookReloads int
@@ -142,7 +144,8 @@ func newAdminFixture(t *testing.T) *adminFixture {
 	dispatcher := runtime.New(runtime.Config{}, db, reg, nil, bal, nil)
 	sealer := &fakeSealer{ready: true}
 	prober := &fakeProber{}
-	fixture := &adminFixture{db: db, reg: reg, sealer: sealer, prober: prober}
+	mcpService := mcpsrv.New(db, reg, mcpsrv.Config{MaxRows: 100, WindowDays: 30, Currency: "USD"})
+	fixture := &adminFixture{db: db, reg: reg, cfg: &cfg, sealer: sealer, prober: prober}
 
 	auth := admin.NewAuth(db, admin.Config{SessionTTL: time.Hour, LoginAttempts: 20, LoginWindow: time.Minute})
 	srv := New(Deps{
@@ -156,6 +159,8 @@ func newAdminFixture(t *testing.T) *adminFixture {
 		Records:       db,
 		Admin:         auth,
 		AdminStore:    db,
+		MCP:           mcpService,
+		MCPTokens:     db,
 		Accounts:      db,
 		Providers:     db,
 		Models:        db,

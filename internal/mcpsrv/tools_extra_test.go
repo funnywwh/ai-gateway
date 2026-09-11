@@ -182,7 +182,7 @@ func TestStdioHandleServesTheSameTools(t *testing.T) {
 	raw, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "tools/list",
 	})
-	response := service.Handle(ctx, accountID, raw)
+	response := service.Handle(ctx, Principal{AccountID: accountID, Scope: ScopeQuery}, raw)
 	if response == nil || response.Error != nil {
 		t.Fatalf("tools/list failed: %+v", response)
 	}

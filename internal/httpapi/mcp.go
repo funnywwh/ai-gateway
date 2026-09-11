@@ -18,15 +18,25 @@ type MCPTokens interface {
 	TouchMCPToken(ctx context.Context, id int64) error
 }
 
-// MCPQuery is the read-only query service.
+// MCPQuery is the MCP protocol service (query tools plus, when the token scope
+// allows it, the administrative tool surface).
 type MCPQuery interface {
-	Handle(ctx context.Context, accountID int64, raw []byte) *mcpsrv.Response
+	Handle(ctx context.Context, principal mcpsrv.Principal, raw []byte) *mcpsrv.Response
 }
 
-// handleMCP implements POST /mcp: the read-only MCP query endpoint.
+// MCPBackendBinder is implemented by an MCP service that accepts the
+// administrative tool surface. New() binds the bridge automatically, so the
+// composition root does not have to know about it.
+type MCPBackendBinder interface {
+	SetBackend(backend mcpsrv.Backend)
+}
+
+// handleMCP implements POST /mcp.
 //
-// Authentication uses a dedicated account-scoped token (aigw_mcp_…), never an API key:
-// the token grants read access to exactly one account's data.
+// Authentication uses a dedicated MCP token (aigw_mcp_…), never an API key. The
+// token's scope decides what it may do: query tokens only read their own account,
+// admin_read/admin tokens also reach the administrative tool surface described in
+// internal/httpapi/mcp_admin.go.
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	if s.deps.MCP == nil || s.deps.MCPTokens == nil {
 		writeAPIError(w, domain.ErrUnsupported("the MCP query service is disabled"))
@@ -66,7 +76,15 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := s.deps.MCP.Handle(r.Context(), row.AccountID, body)
+	// An unknown scope is normalized to query, so a row written by an older version
+	// can never escalate by accident.
+	principal := mcpsrv.Principal{
+		AccountID: row.AccountID,
+		TokenID:   row.ID,
+		Name:      row.Name,
+		Scope:     mcpsrv.NormalizeScope(row.Scope),
+	}
+	resp := s.deps.MCP.Handle(r.Context(), principal, body)
 
 	// last_used_at is best-effort and out of band.
 	id := row.ID

@@ -153,11 +153,20 @@ type Recording struct {
 	QueueSize        int      `yaml:"queue_size"`
 }
 
-// MCP configures the read-only MCP query server.
+// MCP configures the MCP server (account query tools plus, for tokens whose scope
+// allows it, the administrative tool surface).
 type MCP struct {
 	Enabled           bool `yaml:"enabled"`
 	MaxQueryRows      int  `yaml:"max_query_rows"`
 	RequestWindowDays int  `yaml:"request_window_days"`
+	// AdminTools enables the administrative tool surface (admin_endpoints /
+	// admin_describe / admin_request). The real gate is the token scope: only a
+	// token issued with scope=admin_read or admin ever sees these tools, so this is
+	// the deployment-wide kill switch.
+	AdminTools bool `yaml:"admin_tools"`
+	// AdminMaxResponseBytes caps one administrative call's response body; a larger
+	// answer is truncated and flagged instead of being pasted into the transcript.
+	AdminMaxResponseBytes int `yaml:"admin_max_response_bytes"`
 }
 
 // Hooks configures async hook delivery.
@@ -366,7 +375,10 @@ func Default() Config {
 			RetentionDays:    30,
 			QueueSize:        16384,
 		},
-		MCP:       MCP{Enabled: true, MaxQueryRows: 1000, RequestWindowDays: 30},
+		MCP: MCP{
+			Enabled: true, MaxQueryRows: 1000, RequestWindowDays: 30,
+			AdminTools: true, AdminMaxResponseBytes: 256 * 1024,
+		},
 		Hooks:     Hooks{QueueSize: 1024, Workers: 8, TimeoutS: 5, Retries: 5, DeadLetter: "./data/hooks-dead.jsonl"},
 		Portal:    Portal{SessionTTLH: 12, LoginAttempts: 10},
 		RateLimit: RateLimit{Shards: 64},
@@ -462,6 +474,8 @@ func applyEnv(cfg *Config) error {
 	for _, step := range []error{
 		envBool(&cfg.Backup.Enabled, "GW_BACKUP_ENABLED"),
 		envBool(&cfg.MCP.Enabled, "GW_MCP_ENABLED"),
+		envBool(&cfg.MCP.AdminTools, "GW_MCP_ADMIN_TOOLS"),
+		envInt(&cfg.MCP.AdminMaxResponseBytes, "GW_MCP_ADMIN_MAX_RESPONSE_BYTES"),
 		envInt(&cfg.Server.ReadTimeoutS, "GW_SERVER_READ_TIMEOUT_S"),
 		envInt(&cfg.RateLimit.Shards, "GW_RATELIMIT_SHARDS"),
 	} {

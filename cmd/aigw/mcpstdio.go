@@ -20,8 +20,12 @@ import (
 // It exists so a local agent (Claude Desktop, an editor plugin, a shell script) can
 // query the gateway without exposing an HTTP endpoint. The account is chosen on the
 // command line instead of by token: whoever can run this binary already has the
-// database. Every tool still enforces the account scope, and the tool set is exactly
-// the one served over HTTP because both use the same mcpsrv.Service.
+// database. Every tool still enforces the account scope, and the query tools are
+// exactly the ones served over HTTP because both use the same mcpsrv.Service.
+//
+// The administrative tool surface is deliberately absent here: it needs an
+// administrator principal, which only the HTTP endpoint can build from a token scope.
+// See docs/mcp.md ("已知限制").
 func runMCPServe(arguments []string) int {
 	flags := flag.NewFlagSet("mcp-serve", flag.ContinueOnError)
 	configPath := flags.String("config", "config.yaml", "path to the YAML configuration file")
@@ -70,7 +74,11 @@ func runMCPServe(arguments []string) int {
 		line, err := reader.ReadBytes(byte(0x0A))
 		trimmed := strings.TrimSpace(string(line))
 		if trimmed != "" {
-			response := service.Handle(ctx, account.ID, []byte(trimmed))
+			response := service.Handle(ctx, mcpsrv.Principal{
+				AccountID: account.ID,
+				Name:      account.Name,
+				Scope:     mcpsrv.ScopeQuery,
+			}, []byte(trimmed))
 			if response != nil {
 				encoded, marshalErr := json.Marshal(response)
 				if marshalErr != nil {

@@ -81,6 +81,32 @@
 - [x] MCP-2：`bin/aigw mcp-serve --account <name>` stdio 模式，复用同一个 Service（工具集不会漂移）
 - [x] MCP-2：测试 5 个（聚合不受行数限制、分组、限额+账单、跨账户不可见、tools/list 覆盖新工具）+ 端到端实测（HTTP 11 工具、stdio 2 响应）
 
+## M21 MCP 后台工具（让 MCP 能执行全部后台 API）
+- [x] 设计文档 docs/design/m21-mcp-admin-tools.md；规格 docs/mcp.md 状态更新（对话中已展示并确认）
+- [x] 单一路由表 `internal/httpapi/admin_routes.go`：86 条管理面路由的声明式表（Method/Path/Handler + 工具名/摘要/
+  分组/角色/危险标记/路径参数/查询参数/请求体 schema/备注/不暴露原因），`routes()` 按表注册
+- [x] 完整性测试：表 == 字面清单 86 条、注册 == 表、名称唯一且带 `admin_` 前缀、摘要/分组/角色齐备、
+  `{param}` 与声明双向一致、危险必带原因、describe 负载可序列化
+- [x] `mcp_tokens.scope`（迁移 0006，默认 query）+ 签发/列表/PATCH 改权限；scope 常量与角色映射在 `internal/mcpsrv/scope.go`
+- [x] `mcpsrv`：`Principal`（含 `Actor()` 审计身份）、`Backend` 端口、`ToolResult`（isError 由执行方决定）、
+  `ToolsFor(principal)`；`Handle` 改收 Principal；stdio 走 `ScopeQuery`
+- [x] 渐进披露三工具：`admin_endpoints`（概要/过滤/分组）、`admin_describe`（参数+body schema+example+confirm 原因）、
+  `admin_request`（进程内直调同一 handler）
+- [x] 权限与安全：query 令牌看不到后台工具（调用报"未知工具"）、admin_read 写接口 403 并说明、
+  危险接口必须 `confirm:true`、合成主体经未导出 context key 注入（HTTP 无法伪造）
+- [x] 审计与可观测：每次调用两条 `mcp.admin_call`（started/ok|failed，只记 body 的键名不记值）、
+  handler 自身审计归到 `mcp:<名称>#<id>`、`mcp.call` hook 事件
+- [x] 响应处理：`mcp.admin_max_response_bytes`（默认 262144）截断并标记；text/* 原样文本；二进制只回元数据
+- [x] 配置：`mcp.admin_tools`（默认 true，部署级熔断）、`mcp.admin_max_response_bytes` + `GW_MCP_ADMIN_*` 环境覆盖
+- [x] 控制台：MCP 令牌页 scope 列（彩色徽标）、签发时选择 scope（含人话解释）、"改权限"弹框、admin 令牌签发后的警示
+- [x] 测试：路由表 4 例 + 桥 11 例（含 schema 合法性、截断、隐藏接口、端口未接线、审计、非伪造）+ mcpsrv 4 例 +
+  store 1 例 + config 1 例；`make verify` 全绿、`make ui-check` 82 项断言全绿
+- [x] 真机走查（隔离实例 8093 + 全新库）：签发 admin 令牌 → `initialize`/`tools/list`（14 工具）→
+  `admin_endpoints`（total=86）→ `admin_describe`（body schema + confirm 原因）→ 用 MCP 建供应商/上游模型/对客模型/路由/
+  定价倍数/API Key → `admin_explain_router` 候选为空、`excluded` 为空 → 真实 `POST /v1/responses` 返回 `echo: ping` →
+  `admin_account_balance` 读计费 → 吊销令牌后 401；query 令牌 `tools/list` 只有 11 个工具
+- [ ] 未覆盖：stdio 模式的后台工具（无管理员主体，需把 `cmd/aigw/main.go` 的依赖构造抽成共用函数；另立）
+
 ## M7 Hooks 与录制
 - [x] 设计文档 docs/design/m7-hooks-recording.md
 - [x] 异步 worker 池 + 有界队列（满则丢弃并计数，绝不阻塞请求）
