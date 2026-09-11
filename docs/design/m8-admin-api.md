@@ -18,6 +18,11 @@
 6. **审计**：每次写操作记 `audit_logs`（actor/action/target/changes/result），值做脱敏。
 7. **分页与筛选**：列表端点统一 `limit`（默认 50，上限 500）+ `cursor`/`offset`；
    请求日志支持按账户、Key、状态、时间窗筛选。
+   —— **M24 落地口径**（`docs/design/m24-console-pagination.md`）：每个列表端点接受 `limit` + `offset`
+   （默认值与上限按端点不同，见该文档 §3.2），统一返回
+   `{data, count, total, limit, offset, has_more}`（`count` = 本页条数，`total` = 过滤后的总行数，
+   `has_more = offset + count < total`）；`limit` 超上限夹住，`offset` 非整数或负数 → 400。
+   游标分页（`cursor`）仍留在 TODO。
 8. **不泄露**：供应商凭据永不回显（只回 `set:true, preview`），hook secret 与 MCP 令牌明文只在创建时返回一次。
 
 ## 首批端点（本轮）

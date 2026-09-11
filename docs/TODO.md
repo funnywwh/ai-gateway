@@ -668,8 +668,18 @@
   * 实测顺带发现：重启前日志里有 **20 次** `recording request content failed ... context deadline
     exceeded`，其中至少 2 个请求**整行都没落库**（正文 ~985 KB，撞上 `max_bytes` 上限），
     正是 M19 那类「要排障的请求恰恰没记录」；默认改 `user`（~500 B/行）后这类超时预期基本消失
-- [ ] 观察项：若仍有 `put request log` 超时，考虑把请求日志写入移出 5s 的 `auditWriteTimeout`
-  或按行大小做背压（与 M13 的「减少每请求写入」是同一条线）
+- [ ] 观察项（已量化，2026-09-11）：在 708 MB 真库的**副本**上用同一驱动与同一 pragma
+  （WAL + synchronous=NORMAL + busy_timeout=5000，写入池 `SetMaxOpenConns(1)`）实测单行插入：
+  * 新形态 1.8 KB：p50 ≈ 40 µs、p95 ≈ 0.3 ms、max ≈ 0.4 s
+  * 旧形态 985 KB：p50 ≈ 7 ms、p95 ≈ 0.5 ms、max ≈ 0.7 s
+  * `wal_checkpoint(PASSIVE)` 0.26–0.49 s；计费批 256 行 0.12 s
+  结论：写入池按设计串行，单行成本 × 并发 = 队首等待；**旧默认每请求塞 ~1 MB 是主导项**，
+  收窄到 `user` 后余量有数量级级别，因此不需要改异步/背压架构。
+  但仍有两条口子：① 失败即丢行（5s 截止 + 任何一次多秒级停顿，实测外部大 IO 刷脏页时
+  1.8 KB 行也能到 5.5 s）；② `recording.retention_days` 至今无效 → 请求日志永不清理
+  （真库 708 MB 里 689 MB 是历史正文，占 97%）
+- [ ] 建议的小改动（待定）：写入失败时**降级重写骨架行**（只留 request_id/status/bytes，正文为空）
+  并加一个 dropped 计数，保证最坏情况下请求仍可见——M19 的教训正是「要排障的请求恰恰没记录」
 - [ ] 另立：**实现月度配额**（`monthly_*` 目前只解析不执行）——需要读 `usage_counters` + 缓存 +
   结算后失效，注意不要给请求路径增加无谓的打库开销
 - [ ] 另立：死设置键（`recording.default`/`recording.max_bytes`/`mcp.max_query_rows`/`backup.retention`）
