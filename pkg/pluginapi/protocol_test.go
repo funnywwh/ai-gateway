@@ -162,3 +162,34 @@ func TestParseEmptySchemaIsPermissive(t *testing.T) {
 		t.Fatalf("empty schema must accept anything: %+v", errs)
 	}
 }
+
+// A tool type this package does not model must survive the plugin protocol byte for byte:
+// which tool types an upstream understands is that upstream's business, so the frame must
+// not quietly reshape it into the function fields.
+func TestToolRawRoundTripsThroughTheProtocol(t *testing.T) {
+	raw := json.RawMessage(`{"type":"namespace","name":"multi_agent_v1","tools":[{"type":"function","name":"close_agent"}]}`)
+	var tool Tool
+	if err := json.Unmarshal(raw, &tool); err != nil {
+		t.Fatal(err)
+	}
+	if string(tool.Raw) != string(raw) {
+		t.Fatalf("Raw = %s, want %s", tool.Raw, raw)
+	}
+	encoded, err := json.Marshal(tool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != string(raw) {
+		t.Fatalf("encoded = %s, want the original bytes %s", encoded, raw)
+	}
+
+	// A function tool keeps the structured form, so provider-side edits still apply.
+	fn := Tool{Type: "function", Name: "bash", Description: "run"}
+	encoded, err = json.Marshal(fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"name":"bash"`) || strings.Contains(string(encoded), `"Raw"`) {
+		t.Fatalf("function tool encoded as %s", encoded)
+	}
+}

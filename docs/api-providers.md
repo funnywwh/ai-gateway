@@ -41,6 +41,20 @@
 | `thinking.replay_reasoning_content` | `false` | 把历史 `reasoning` 项正文回传为 assistant 的 `reasoning_content`（带工具的多轮必需，见 §4） |
 | `response_format` | `text` | 上游真实支持到哪一档：`text`（不下发）/`json_object`/`json_schema`。**能力申报要与它一致** |
 
+### 出站方言翻译（`openai-chat` 一系）
+
+Responses 表面比 chat completions 宽，翻译层负责把宽的那一侧收敛到上游认的形状——**客户端不需要
+为某个上游改写请求**（见 `docs/design/m19-client-dialects.md`）：
+
+- **系统级角色归一化为 `system`**。`developer` 只是该槽位在 OpenAI 新 API 里的名字，而 OpenAI 兼容
+  上游（DeepSeek、vLLM、Ollama…）普遍只认 `system`，直接透传会得到
+  `unknown variant 'developer'`。注意 Codex 订阅后端正好相反（拒绝 `system`、接受 `developer`），
+  那个方言由 `examples/provider-codex` 负责。
+- **只有 function 工具下发**。chat completions 表达不了 `web_search`/`namespace` 等类型：它们被
+  跳过（而不是塞进 function 字段变成无名工具）。模型因此拿不到该工具——属能力降级，不是错误；
+  请求其余部分照常完成。
+- 未建模类型的原始结构由 `pluginapi.Tool.Raw` 带到 provider，插件类 provider 可自行翻译或丢弃。
+
 > ⚠️ **当前实现是"配置即下发"，与上表的"能力申报"语义不一致**（已记账待定夺）：
 > `response_format` 会被**无条件**写入每个上游请求（`internal/providers/openaichat/openaichat.go:432`），
 > 而该 provider **不读取请求里的 `text.format`**。因此声明 `json_object` 会把**所有**请求变成 JSON 模式。

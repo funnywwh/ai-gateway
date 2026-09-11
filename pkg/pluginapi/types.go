@@ -71,12 +71,45 @@ type TextConfig struct {
 }
 
 // Tool is a function tool exposed to the model.
+// Tool is one tool offered to the model.
+//
+// Only "function" tools are modelled here: the richer Responses types (web_search,
+// file_search, computer_use, namespace, ...) have payloads that vary and keep growing.
+// Those are carried verbatim in Raw so they survive the plugin protocol and reach a
+// provider that may well support them, instead of the core deciding what to discard.
 type Tool struct {
 	Type        string          `json:"type"`
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
 	Strict      *bool           `json:"strict,omitempty"`
+
+	// Raw is the tool exactly as the client sent it, set for types this package does not
+	// model. It wins over the structured fields when marshalling.
+	Raw json.RawMessage `json:"-"`
+}
+
+// MarshalJSON emits Raw verbatim for an unmodelled tool, the structured form otherwise.
+func (t Tool) MarshalJSON() ([]byte, error) {
+	if len(t.Raw) > 0 {
+		return t.Raw, nil
+	}
+	type plain Tool // sheds the method set, so this cannot recurse
+	return json.Marshal(plain(t))
+}
+
+// UnmarshalJSON preserves the original bytes of a tool type this package does not model.
+func (t *Tool) UnmarshalJSON(data []byte) error {
+	type plain Tool
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*t = Tool(decoded)
+	if t.Type != "" && t.Type != "function" {
+		t.Raw = append(json.RawMessage(nil), data...)
+	}
+	return nil
 }
 
 // Item is one element of the canonical input/output list. Unknown fields are preserved in Extra.

@@ -715,7 +715,7 @@ func featuresOf(req *responses.Request) map[string]bool {
 	if req.Stream {
 		features["stream"] = true
 	}
-	if len(req.Tools) > 0 {
+	if req.HasFunctionTools() {
 		features["tools"] = true
 	}
 	if req.ParallelToolCalls != nil && *req.ParallelToolCalls {

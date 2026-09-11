@@ -175,6 +175,14 @@ func ResponsesToChatWithOptions(req *pluginapi.Request, opts ChatConvertOptions)
 		out.Messages = append(out.Messages, msg...)
 	}
 	for _, tool := range req.Tools {
+		// Chat Completions can only express function tools. The richer Responses types
+		// (web_search, namespace, ...) are client-side conveniences for upstreams that
+		// implement them natively; here they are simply not offered to the model, which is
+		// the honest translation — inventing a nameless function tool would garble the
+		// request, and rejecting it would fail a call the model can otherwise serve.
+		if tool.Type != "" && tool.Type != "function" {
+			continue
+		}
 		var ct ChatTool
 		ct.Type = "function"
 		ct.Function.Name = tool.Name
@@ -239,6 +247,14 @@ func itemToChatMessages(item pluginapi.Item) ([]ChatMessage, bool, error) {
 		role := item.Role
 		if role == "" {
 			role = "user"
+		}
+		// Chat Completions names the system-level channel "system"; "developer" is the newer
+		// Responses-side alias for that same slot, and most OpenAI-compatible servers
+		// (DeepSeek, vLLM, Ollama, ...) reject it as an unknown role variant. Translating
+		// here lets a client that speaks the newer dialect reach a classic upstream unchanged
+		// — the alternative is telling every such client to rewrite its requests.
+		if role == "developer" {
+			role = "system"
 		}
 		return []ChatMessage{{Role: role, Content: contentToText(item.Content, role)}}, true, nil
 	case "function_call":

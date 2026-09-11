@@ -45,10 +45,15 @@
 | 输入 | 结果 |
 |---|---|
 | `background: true` | 400 `unsupported_parameter` |
-| `tools[].type` ∈ web_search / file_search / computer_use / code_interpreter / image_generation | 400 `unsupported_parameter` |
 | `tools[].type == "mcp"` | v1 返回 400（网关作为 MCP **client** 的能力属 v2；查询服务见 `docs/mcp.md`） |
 | `max_output_tokens < 16` | 400 `invalid_request` |
 | `input` 为空 | 400 `invalid_request` |
+
+**工具类型不再被网关拒绝**：`web_search`、`file_search`、`computer_use`、`namespace` 等在 Responses
+规范内合法、但目前不建模的类型，会**连原始结构一起**交给 provider 层（见 `pluginapi.Tool.Raw`），
+由它按自己上游的方言翻译或不下发。理由：这些工具是可选的，而真实客户端（Codex CLI 默认就带
+`web_search` 与 multi-agent `namespace`）不会为某个网关改写请求；替上游拒绝整个请求，等于把
+"上游能力"误当成"客户端合法性"。代价是模型可能拿不到该工具——属**能力降级**，不是错误。
 
 `input` 为字符串时视为单条 user message。
 

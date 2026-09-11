@@ -71,14 +71,13 @@ func (r *Request) Validate() *domain.APIError {
 		return domain.ErrInvalidRequest("top_p must be between 0 and 1").WithParam("top_p")
 	}
 	for i, tool := range r.Tools {
-		toolType := tool.Type
-		if toolType == "" {
-			toolType = "function"
-		}
-		if toolType != "function" {
-			return domain.ErrUnsupported(
-				fmt.Sprintf("tool type %q is not supported by this gateway", toolType)).
-				WithParam(fmt.Sprintf("tools[%d].type", i))
+		// Types this gateway does not model (web_search, namespace, ...) are accepted and
+		// forwarded verbatim: which of them an upstream can actually use is a property of
+		// that upstream, and the provider layer is where that dialect is known. Rejecting
+		// here would fail the whole request over an optional tool — real clients ship such
+		// tools by default, and they cannot be asked to change.
+		if toolType(tool.Type) != "function" {
+			continue
 		}
 		if tool.Name == "" && (tool.Function == nil || tool.Function.Name == "") {
 			return domain.ErrInvalidRequest("function tools require a name").
@@ -157,6 +156,13 @@ func (r *Request) ToProviderRequest(upstreamModel string) (*pluginapi.Request, *
 		out.Text = &pluginapi.TextConfig{Format: r.Text.Format}
 	}
 	for _, tool := range r.Tools {
+		if toolType(tool.Type) != "function" {
+			// Unmodelled shape: hand the provider the client's own bytes rather than trying
+			// to squeeze it into the function fields (which produced a nameless tool). A
+			// provider that understands the type can use it as-is; the rest drop it.
+			out.Tools = append(out.Tools, pluginapi.Tool{Type: toolType(tool.Type), Raw: tool.Raw})
+			continue
+		}
 		t := pluginapi.Tool{Type: "function", Name: tool.Name, Description: tool.Description,
 			Parameters: tool.Parameters, Strict: tool.Strict}
 		if tool.Function != nil {
@@ -184,4 +190,24 @@ func (r *Request) Stored() bool {
 		return true
 	}
 	return *r.Store
+}
+
+// toolType reports a tool's effective type; an omitted type means a function tool.
+func toolType(raw string) string {
+	if trimmed := strings.TrimSpace(raw); trimmed != "" {
+		return trimmed
+	}
+	return "function"
+}
+
+// HasFunctionTools reports whether the request offers at least one tool the routing layer
+// can reason about. Tool types the gateway does not model are not counted: whether an
+// upstream can use them is that upstream's business (see Tool.Raw).
+func (r *Request) HasFunctionTools() bool {
+	for _, tool := range r.Tools {
+		if toolType(tool.Type) == "function" {
+			return true
+		}
+	}
+	return false
 }

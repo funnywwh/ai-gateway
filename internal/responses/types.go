@@ -47,6 +47,26 @@ type Tool struct {
 		Parameters  json.RawMessage `json:"parameters,omitempty"`
 		Strict      *bool           `json:"strict,omitempty"`
 	} `json:"function,omitempty"`
+
+	// Raw is the tool exactly as the client sent it, set for the types this struct does
+	// not model (web_search, namespace, ...). The provider layer forwards or translates
+	// it: which tool types an upstream understands is a property of that upstream, not of
+	// the client-facing surface, so the core keeps the shape intact instead of judging it.
+	Raw json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON preserves the original bytes of an unmodelled tool type.
+func (t *Tool) UnmarshalJSON(data []byte) error {
+	type plain Tool
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*t = Tool(decoded)
+	if toolType(t.Type) != "function" {
+		t.Raw = append(json.RawMessage(nil), data...)
+	}
+	return nil
 }
 
 // Reasoning mirrors the reasoning parameter.

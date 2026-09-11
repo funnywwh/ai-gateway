@@ -632,3 +632,45 @@ func TestMaskProxyURLNeverLeaksCredentials(t *testing.T) {
 		t.Fatal("MaskProxyURL(nil) must be empty")
 	}
 }
+
+// Chat Completions names the system-level channel "system"; "developer" is the newer
+// Responses-side alias and most OpenAI-compatible upstreams reject it outright.
+func TestChatTranslationNormalizesSystemRoles(t *testing.T) {
+	req := &pluginapi.Request{Model: "m", Input: []pluginapi.Item{
+		{Type: "message", Role: "developer", Content: json.RawMessage(`[{"type":"input_text","text":"be terse"}]`)},
+		{Type: "message", Role: "user", Content: json.RawMessage(`[{"type":"input_text","text":"hi"}]`)},
+		{Type: "message", Role: "assistant", Content: json.RawMessage(`[{"type":"output_text","text":"ok"}]`)},
+	}}
+	out, err := ResponsesToChat(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Messages) != 3 {
+		t.Fatalf("messages = %+v", out.Messages)
+	}
+	if out.Messages[0].Role != "system" {
+		t.Fatalf("developer must be sent as system, got %q", out.Messages[0].Role)
+	}
+	if out.Messages[1].Role != "user" || out.Messages[2].Role != "assistant" {
+		t.Fatalf("other roles must be untouched: %+v", out.Messages)
+	}
+}
+
+// Chat Completions can only express function tools; the richer Responses types are for
+// upstreams that implement them natively.
+func TestChatTranslationDropsToolsItCannotExpress(t *testing.T) {
+	req := &pluginapi.Request{Model: "m", Tools: []pluginapi.Tool{
+		{Type: "web_search", Raw: json.RawMessage(`{"type":"web_search","external_web_access":false}`)},
+		{Type: "function", Name: "bash", Description: "run"},
+	}}
+	out, err := ResponsesToChat(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Tools) != 1 {
+		t.Fatalf("chat tools = %+v, want only the function tool", out.Tools)
+	}
+	if out.Tools[0].Function.Name != "bash" || out.Tools[0].Type != "function" {
+		t.Fatalf("chat tool = %+v", out.Tools[0])
+	}
+}

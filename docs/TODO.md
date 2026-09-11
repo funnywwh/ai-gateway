@@ -265,6 +265,20 @@
 - [x] 回填设计文档「实现与设计差异」，单提交并引用设计文档路径
 - [x] 顺带修复：`docs/plugin-protocol-v1.md` 第 3 节引用的 `docs/provider-ui` 此前并不存在（本轮补上），并把「建议每个插件声明 schema」写进协议文档（不改协议、不加校验）
 
+## M19 面向真实客户端的方言翻译（核心只接受，翻译在 provider 层）
+- [x] 设计文档 docs/design/m19-client-dialects.md + 规格文档 docs/api-responses.md（工具类型不再被拒）与 docs/api-providers.md（出站方言翻译小节）
+- [x] 触发场景（约束：**不能改客户端**）：Codex CLI 0.153.4 指向网关后撞三处 —— `tools[].type="namespace"` 与 `"web_search"` 被网关 400；`input[].role="developer"` 被 DeepSeek 400（`unknown variant 'developer'`）
+- [x] 决策 D1：`internal/responses` 是面向客户端的表面，只按 Responses 规范接受，不再判断"本网关支不支持某工具类型"（把上游能力误当客户端合法性，会让整条请求因一个可选工具失败）
+- [x] 决策 D2：协议层保真 —— `pluginapi.Tool` 与 `responses.Tool` 增加 `Raw`，自定义 `MarshalJSON`/`UnmarshalJSON` 让未建模类型**逐字节**进出；否决"核心丢弃 + 上报降级"（不可逆，且仍是核心替上游裁决）
+- [x] 决策 D3：方言翻译归 provider —— `providerkit`（chat 方言）：系统级角色归一化为 `system`、非 function 工具不下发；codex 插件（codex 方言，M10c/M10d）保持 `system → developer`、丢 `max_output_tokens`、恒流式
+- [x] 决策 D4：`featuresOf` 的 `tools` 特征改为"存在 function 工具"（`HasFunctionTools()`），避免让无法执行的工具类型影响候选能力判定
+- [x] 测试：responses 3 例（未建模类型逐字节保留且未被折成 function / function 缺 name 仍 400 / `HasFunctionTools` 忽略未建模类型）、pluginapi 1 例（`Raw` 经协议往返不变、function 仍结构化）、providerkit 2 例（`developer→system` 且其它角色不动 / 非 function 工具不下发）；同步删除 httpapi 里"非 function 工具必须 400"的旧断言
+- [x] make verify 全绿（vet + 全量测试 + build + `internal/arch` 分层断言）
+- [x] **端到端验收：Codex CLI 零改动跑通** —— `multi_agent`、`web_search` 保持默认开启，仅把 `base_url` 指向新网关、模型设为 `deepseek-flash`：输出 `1+1 等于 2。`、退出码 0（此前网关 400，关掉工具后上游 400）
+- [ ] 观察项（非阻塞，未追查）：上述成功运行的 stderr 有 7 条 `codex_core::util: OutputTextDelta without active item`。已核对网关输出**事件顺序规范**且 delta 的 `item_id` 确为已 added 的那个，答案与退出码均正确 → 判断为客户端侧噪声或其对某类流式形状的额外期待
+- [ ] 后续议题：provider 跳过工具（如 chat 路径丢掉 `web_search`）目前**无上报通道** —— 协议里没有 provider 声明降级的字段（`DegradedFeatures` 只由路由的能力校验写入）。要为"能力降级可见"补协议字段，另立里程碑
+- [x] 回填设计文档「实现与设计差异」（含验收结果与两项观察），单提交并引用设计文档路径
+
 ## 可选
 - [x] M10 订阅后端参考适配器 `examples/provider-codex`（默认禁用、非官方）：设计文档 docs/design/m10-subscription-adapter.md
 - [x] 三种凭据形态与自动续期：refresh_token（OAuth 刷新，轮换落盘 + 单飞）> session_cookie（/api/auth/session 换取）> 静态 access_token

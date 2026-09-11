@@ -198,7 +198,6 @@ func TestValidationRejectionsDoNotReachUpstream(t *testing.T) {
 	cases := []struct{ name, body string }{
 		{"background", `{"model":"echo-model","input":"hi","background":true}`},
 		{"max_output_tokens", `{"model":"echo-model","input":"hi","max_output_tokens":8}`},
-		{"unsupported tool", `{"model":"echo-model","input":"hi","tools":[{"type":"web_search"}]}`},
 		{"empty input", `{"model":"echo-model","input":""}`},
 		{"missing model", `{"input":"hi"}`},
 	}
