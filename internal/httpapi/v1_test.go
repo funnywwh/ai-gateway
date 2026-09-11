@@ -19,11 +19,14 @@ import (
 	"github.com/winger/ai-gateway/internal/mcpsrv"
 	"github.com/winger/ai-gateway/internal/quota"
 	"github.com/winger/ai-gateway/internal/registry"
+	"github.com/winger/ai-gateway/internal/responses"
 	"github.com/winger/ai-gateway/internal/routing"
 	"github.com/winger/ai-gateway/internal/runtime"
 	"github.com/winger/ai-gateway/internal/secret"
 	"github.com/winger/ai-gateway/internal/store"
 	"github.com/winger/ai-gateway/internal/usage"
+	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/winger/ai-gateway/pkg/providerkit"
 )
 
 const testToken = "sk-gw-httpapi-test-token-0001"
@@ -526,5 +529,112 @@ func TestUsageIsMeteredPerAttempt(t *testing.T) {
 	}
 	if row.DimensionsJSON == "" || row.DimensionsJSON == "{}" {
 		t.Fatalf("dimensions must be recorded: %q", row.DimensionsJSON)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// chain-of-thought continuation (M17)
+// ---------------------------------------------------------------------------
+
+// TestStoredReasoningSurvivesContinuation walks the path a previous_response_id
+// continuation takes: the reasoning streamed by a provider is assembled, stored as
+// output JSON, decoded back into canonical items, and finally translated into the
+// upstream request. Upstreams that require their own reasoning back (DeepSeek, when
+// tools are involved) reject the request with 400 when any step loses the text.
+func TestStoredReasoningSurvivesContinuation(t *testing.T) {
+	assembler := responses.NewAssembler("deepseek-flash", nil)
+	if err := assembler.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []pluginapi.Event{
+		{Type: pluginapi.EventReasoningDelta, Text: "look up the "},
+		{Type: pluginapi.EventReasoningDelta, Text: "weather first"},
+		{Type: pluginapi.EventTextDelta, Text: "checking"},
+		{Type: pluginapi.EventToolCallStart, CallID: "call_1", Name: "weather"},
+		{Type: pluginapi.EventToolArgsDelta, CallID: "call_1", Name: "weather", Text: `{"city":"hz"}`},
+		{Type: pluginapi.EventUsage, Usage: &pluginapi.Usage{Dimensions: map[string]int64{"input": 10, "output": 4}}},
+	} {
+		if err := assembler.Add(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stored, err := json.Marshal(assembler.Response().Output)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	items := decodeStoredItems(string(stored))
+	if len(items) != 3 {
+		t.Fatalf("expected reasoning + message + function_call, got %+v", items)
+	}
+	if items[0].Type != "reasoning" {
+		t.Fatalf("reasoning item must lead the stored output: %+v", items[0])
+	}
+	if got := items[0].Summary; len(got) != 1 || got[0].Text != "look up the weather first" {
+		t.Fatalf("the stored chain of thought must survive decoding: %+v", got)
+	}
+
+	chat, err := providerkit.ResponsesToChatWithOptions(&pluginapi.Request{
+		Model: "deepseek-flash",
+		Input: items,
+	}, providerkit.ChatConvertOptions{ReplayReasoningContent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var assistant *providerkit.ChatMessage
+	for i := range chat.Messages {
+		if len(chat.Messages[i].ToolCalls) > 0 {
+			assistant = &chat.Messages[i]
+		}
+	}
+	if assistant == nil {
+		t.Fatalf("the tool call must survive the round trip: %+v", chat.Messages)
+	}
+	if assistant.ReasoningContent != "look up the weather first" {
+		t.Fatalf("reasoning_content = %q, want the stored chain of thought", assistant.ReasoningContent)
+	}
+}
+
+func TestDecodeStoredItemsWithoutReasoning(t *testing.T) {
+	cases := []struct {
+		name   string
+		stored string
+		items  int
+	}{
+		{name: "empty output", stored: "", items: 0},
+		{name: "malformed output", stored: "{not json", items: 0},
+		{name: "reasoning without text", stored: `[{"type":"reasoning","id":"rs_1"}]`, items: 1},
+		{name: "blank reasoning text", stored: `[{"type":"reasoning","id":"rs_1","content":[{"type":"reasoning_text","text":"  "}]}]`, items: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			items := decodeStoredItems(tc.stored)
+			if len(items) != tc.items {
+				t.Fatalf("items = %+v, want %d", items, tc.items)
+			}
+			if tc.items == 1 && len(items[0].Summary) != 0 {
+				t.Fatalf("a chain of thought with no text must not invent a summary part: %+v", items[0])
+			}
+		})
+	}
+}
+
+// TestFeedItemsReadsUpstreamReasoningShape covers an upstream that returns reasoning
+// in the Responses shape (reasoning_text content parts) without a summary.
+func TestFeedItemsReadsUpstreamReasoningShape(t *testing.T) {
+	assembler := responses.NewAssembler("deepseek-flash", nil)
+	if err := assembler.Start(); err != nil {
+		t.Fatal(err)
+	}
+	items := []pluginapi.Item{{
+		Type:    "reasoning",
+		ID:      "rs_1",
+		Content: json.RawMessage(`[{"type":"reasoning_text","text":"upstream thinking"}]`),
+	}}
+	if err := responses.FeedItems(assembler, items); err != nil {
+		t.Fatal(err)
+	}
+	if got := assembler.Reasoning(); got != "upstream thinking" {
+		t.Fatalf("reasoning = %q, want the upstream text", got)
 	}
 }

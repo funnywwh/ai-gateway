@@ -767,6 +767,11 @@ func truncate(s string, limit int) string {
 	return s[:limit]
 }
 
+// decodeStoredItems rebuilds the canonical items of a stored response so a
+// previous_response_id continuation can replay them. A reasoning item carries its
+// chain of thought in content (see responses.OutputItem): without it the item would
+// be an empty husk, and an upstream that requires its own reasoning back (DeepSeek,
+// with tools) rejects the continuation.
 func decodeStoredItems(outputJSON string) []pluginapi.Item {
 	if strings.TrimSpace(outputJSON) == "" {
 		return nil
@@ -791,8 +796,33 @@ func decodeStoredItems(outputJSON string) []pluginapi.Item {
 				Name: item.Name, Arguments: item.Arguments,
 			})
 		case "reasoning":
-			out = append(out, pluginapi.Item{Type: "reasoning", ID: item.ID})
+			out = append(out, pluginapi.Item{
+				Type: "reasoning", ID: item.ID, Summary: reasoningSummary(item),
+			})
 		}
 	}
 	return out
+}
+
+// reasoningSummary carries a stored chain of thought into the canonical summary
+// parts, where the translation layer looks for replayable reasoning text.
+func reasoningSummary(item responses.OutputItem) []pluginapi.SummaryPart {
+	parts := make([]pluginapi.SummaryPart, 0, len(item.Summary)+len(item.Content))
+	for _, part := range item.Summary {
+		if strings.TrimSpace(part.Text) != "" {
+			parts = append(parts, pluginapi.SummaryPart{Type: part.Type, Text: part.Text})
+		}
+	}
+	if len(parts) > 0 {
+		return parts
+	}
+	for _, part := range item.Content {
+		if strings.TrimSpace(part.Text) != "" {
+			parts = append(parts, pluginapi.SummaryPart{Type: part.Type, Text: part.Text})
+		}
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return parts
 }

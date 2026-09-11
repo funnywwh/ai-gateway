@@ -1,5 +1,11 @@
 // Package openaichat implements a builtin provider for OpenAI-compatible
 // /chat/completions upstreams (DeepSeek, Qwen, Ollama, vLLM, LM Studio, ...).
+//
+// The wire dialect is OpenAI's, but deployments differ in ways that are silent
+// when guessed wrong: whether a chain of thought is returned and must be replayed,
+// how thinking is switched on, which response_format levels exist, and what a 402
+// means. Everything beyond the common denominator is therefore an explicit opt-in,
+// and the defaults keep the previous behaviour byte for byte.
 package openaichat
 
 import (
@@ -10,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +26,38 @@ import (
 	"github.com/winger/ai-gateway/pkg/providerkit"
 )
 
+// Thinking modes (config `thinking.mode`).
+const (
+	// ThinkingAuto lets the request decide: a client asking for reasoning gets it.
+	ThinkingAuto = "auto"
+	// ThinkingEnabled turns the mode on even when the client did not ask.
+	ThinkingEnabled = "enabled"
+	// ThinkingDisabled turns the mode off even when the client did ask.
+	ThinkingDisabled = "disabled"
+)
+
+// Thinking styles (config `thinking.style`), the upstream parameter shape.
+const (
+	// ThinkingStyleNone sends no extra field: the generic OpenAI-compatible dialect.
+	ThinkingStyleNone = "none"
+	// ThinkingStyleDeepSeek sends {"thinking":{"type":"enabled|disabled"}}.
+	ThinkingStyleDeepSeek = "deepseek"
+)
+
+// response_format levels (config `response_format`), what the upstream really supports.
+const (
+	ResponseFormatText       = "text"
+	ResponseFormatJSONObject = "json_object"
+	ResponseFormatJSONSchema = "json_schema"
+)
+
+// quotaCooldown is how long a candidate is cooled when the upstream reports an
+// exhausted balance without saying when it recovers.
+const quotaCooldown = 30 * time.Minute
+
+// maxUpstreamBody caps how much of a response body is buffered.
+const maxUpstreamBody = 32 << 20
+
 // Config is the provider configuration (stored as JSON on the provider record).
 type Config struct {
 	BaseURL  string            `json:"base_url"`
@@ -27,6 +66,28 @@ type Config struct {
 	TimeoutS int               `json:"timeout_s"`
 	// Models lets the operator declare the upstream catalogue when the upstream has no list endpoint.
 	Models []ModelConfig `json:"models"`
+
+	// Thinking configures the chain-of-thought dialect. The zero value sends no
+	// extra field at all, which is what generic OpenAI-compatible upstreams expect.
+	Thinking ThinkingConfig `json:"thinking"`
+	// ResponseFormat declares the highest response_format level the upstream accepts.
+	ResponseFormat string `json:"response_format"`
+	// DefaultMaxOutputTokens is applied only when the client sent no max_output_tokens.
+	// It bounds the in-flight reservation without overriding the upstream default
+	// (DeepSeek, for example, defaults to 64K in thinking mode).
+	DefaultMaxOutputTokens int `json:"default_max_output_tokens"`
+}
+
+// ThinkingConfig is the chain-of-thought dialect of the upstream.
+type ThinkingConfig struct {
+	// Mode is auto | enabled | disabled.
+	Mode string `json:"mode"`
+	// Style is none | deepseek.
+	Style string `json:"style"`
+	// ReplayReasoningContent writes the chain of thought of earlier tool-calling
+	// turns back as assistant.reasoning_content. Upstreams that reason before
+	// calling tools reject the request when it is missing.
+	ReplayReasoningContent bool `json:"replay_reasoning_content"`
 }
 
 // ModelConfig declares one upstream model.
@@ -61,6 +122,9 @@ func New(name, configJSON, stateDir string, creds map[string]string) (*Provider,
 		return nil, fmt.Errorf("openai-chat: base_url is required")
 	}
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
 	if cfg.APIKey == "" && creds != nil {
 		cfg.APIKey = creds["api_key"]
 	}
@@ -71,6 +135,48 @@ func New(name, configJSON, stateDir string, creds map[string]string) (*Provider,
 		stateDir: stateDir,
 		creds:    creds,
 	}, nil
+}
+
+// validate rejects unknown enum values instead of silently falling back: a typo in
+// `thinking.style` would otherwise look like a working configuration that quietly
+// never switches thinking off.
+func (c *Config) validate() error {
+	switch c.Thinking.Mode {
+	case "", ThinkingAuto, ThinkingEnabled, ThinkingDisabled:
+	default:
+		return fmt.Errorf("openai-chat: thinking.mode must be auto|enabled|disabled, got %q", c.Thinking.Mode)
+	}
+	switch c.Thinking.Style {
+	case "", ThinkingStyleNone, ThinkingStyleDeepSeek:
+	default:
+		return fmt.Errorf("openai-chat: thinking.style must be none|deepseek, got %q", c.Thinking.Style)
+	}
+	switch c.ResponseFormat {
+	case "", ResponseFormatText, ResponseFormatJSONObject, ResponseFormatJSONSchema:
+	default:
+		return fmt.Errorf("openai-chat: response_format must be text|json_object|json_schema, got %q", c.ResponseFormat)
+	}
+	if c.Thinking.ReplayReasoningContent && c.thinkingStyle() == ThinkingStyleNone {
+		return fmt.Errorf("openai-chat: thinking.replay_reasoning_content needs thinking.style=deepseek")
+	}
+	if c.DefaultMaxOutputTokens < 0 {
+		return fmt.Errorf("openai-chat: default_max_output_tokens must not be negative")
+	}
+	return nil
+}
+
+func (c *Config) thinkingStyle() string {
+	if c.Thinking.Style == "" {
+		return ThinkingStyleNone
+	}
+	return c.Thinking.Style
+}
+
+func (c *Config) thinkingMode() string {
+	if c.Thinking.Mode == "" {
+		return ThinkingAuto
+	}
+	return c.Thinking.Mode
 }
 
 // Info reports capabilities.
@@ -128,7 +234,7 @@ func (p *Provider) Health(ctx context.Context) error {
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode >= 400 {
-		return httpx.ErrorFromResponse(resp)
+		return p.classify(resp, nil)
 	}
 	return nil
 }
@@ -143,15 +249,9 @@ func (p *Provider) RunAction(ctx context.Context, name string, in json.RawMessag
 
 // Complete performs a non-streaming chat completion.
 func (p *Provider) Complete(ctx context.Context, req *pluginapi.Request) (*pluginapi.Response, error) {
-	chatReq, err := providerkit.ResponsesToChat(req)
+	body, err := p.requestBody(req, false)
 	if err != nil {
-		return nil, pluginapi.NewError("bad_request", err.Error())
-	}
-	chatReq.Stream = false
-
-	body, err := json.Marshal(chatReq)
-	if err != nil {
-		return nil, pluginapi.NewError("encode_error", err.Error())
+		return nil, err
 	}
 	httpReq, err := httpx.NewRequest(ctx, http.MethodPost, p.cfg.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
@@ -162,21 +262,25 @@ func (p *Provider) Complete(ctx context.Context, req *pluginapi.Request) (*plugi
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, pluginapi.NewRetryableError("upstream_timeout", err.Error(), 504)
-		}
-		return nil, pluginapi.NewRetryableError("upstream_unreachable", err.Error(), 0)
+		return nil, transportError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return nil, httpx.ErrorFromResponse(resp)
+		return nil, p.classify(resp, nil)
 	}
 
 	var chatResp providerkit.ChatResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 32<<20)).Decode(&chatResp); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxUpstreamBody)).Decode(&chatResp); err != nil {
 		return nil, pluginapi.NewRetryableError("upstream_bad_response", err.Error(), 502)
 	}
-	out, err := providerkit.ChatResponseToResponses(&chatResp)
+	if chatResp.Error != nil {
+		return nil, pluginapi.NewError("upstream_error", chatResp.Error.Message)
+	}
+	if len(chatResp.Choices) > 0 && providerkit.UpstreamFailure(chatResp.Choices[0].FinishReason) {
+		return nil, pluginapi.NewRetryableError("upstream_"+chatResp.Choices[0].FinishReason,
+			"upstream could not produce the answer: "+chatResp.Choices[0].FinishReason, 503)
+	}
+	out, err := providerkit.ChatResponseToResponsesWithOptions(&chatResp, convertOptions(p.snapshot()))
 	if err != nil {
 		return nil, pluginapi.NewError("upstream_bad_response", err.Error())
 	}
@@ -185,16 +289,9 @@ func (p *Provider) Complete(ctx context.Context, req *pluginapi.Request) (*plugi
 
 // Stream performs a streaming chat completion and translates chunks into canonical events.
 func (p *Provider) Stream(ctx context.Context, req *pluginapi.Request, emit func(pluginapi.Event) error) error {
-	chatReq, err := providerkit.ResponsesToChat(req)
+	body, err := p.requestBody(req, true)
 	if err != nil {
-		return pluginapi.NewError("bad_request", err.Error())
-	}
-	chatReq.Stream = true
-	chatReq.StreamOptions = &providerkit.ChatStreamOptions{IncludeUsage: true}
-
-	body, err := json.Marshal(chatReq)
-	if err != nil {
-		return pluginapi.NewError("encode_error", err.Error())
+		return err
 	}
 	httpReq, err := httpx.NewRequest(ctx, http.MethodPost, p.cfg.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
@@ -206,14 +303,11 @@ func (p *Provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return pluginapi.NewRetryableError("upstream_timeout", err.Error(), 504)
-		}
-		return pluginapi.NewRetryableError("upstream_unreachable", err.Error(), 0)
+		return transportError(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return httpx.ErrorFromResponse(resp)
+		return p.classify(resp, nil)
 	}
 
 	state := providerkit.NewChatStreamState()
@@ -245,6 +339,13 @@ func (p *Provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 		}
 	}
 
+	// The upstream can end the stream by admitting it could not answer; failing over
+	// is the only useful reaction, so it must not be reported as a finished response.
+	if providerkit.UpstreamFailure(state.FinishReason) {
+		return pluginapi.NewRetryableError("upstream_"+state.FinishReason,
+			"upstream could not produce the answer: "+state.FinishReason, 503)
+	}
+
 	usage := providerkit.ChatUsageToDimensions(state.Usage)
 	if state.Usage == nil {
 		usage = pluginapi.Usage{
@@ -256,6 +357,223 @@ func (p *Provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 		}
 	}
 	return emit(pluginapi.Event{Type: pluginapi.EventUsage, Usage: &usage})
+}
+
+// payload is the upstream request body: the shared chat-completions request plus
+// the two fields that only some deployments accept.
+type payload struct {
+	*providerkit.ChatRequest
+	Thinking       *thinkingField  `json:"thinking,omitempty"`
+	ResponseFormat json.RawMessage `json:"response_format,omitempty"`
+}
+
+// thinkingField is the thinking switch DeepSeek-compatible deployments accept.
+type thinkingField struct {
+	Type string `json:"type"`
+}
+
+// requestBody renders the upstream request body for one attempt.
+func (p *Provider) requestBody(req *pluginapi.Request, stream bool) ([]byte, error) {
+	return renderBody(p.snapshot(), req, stream)
+}
+
+// snapshot reads the mutable configuration under the lock once per attempt.
+func (p *Provider) snapshot() Config {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.cfg
+}
+
+// convertOptions carries the opt-in translation behaviours from the config.
+func convertOptions(cfg Config) providerkit.ChatConvertOptions {
+	return providerkit.ChatConvertOptions{
+		KeepReasoningContent:   cfg.thinkingStyle() == ThinkingStyleDeepSeek,
+		ReplayReasoningContent: cfg.Thinking.ReplayReasoningContent,
+	}
+}
+
+func renderBody(cfg Config, req *pluginapi.Request, stream bool) ([]byte, error) {
+	if req == nil {
+		return nil, pluginapi.NewError("bad_request", "openai-chat: nil request")
+	}
+	chatReq, err := providerkit.ResponsesToChatWithOptions(req, convertOptions(cfg))
+	if err != nil {
+		return nil, pluginapi.NewError("bad_request", err.Error())
+	}
+	chatReq.Stream = stream
+	if stream {
+		chatReq.StreamOptions = &providerkit.ChatStreamOptions{IncludeUsage: true}
+	}
+	if chatReq.MaxTokens == nil && cfg.DefaultMaxOutputTokens > 0 {
+		limit := cfg.DefaultMaxOutputTokens
+		chatReq.MaxTokens = &limit
+	}
+
+	out := payload{ChatRequest: chatReq}
+	if cfg.thinkingStyle() == ThinkingStyleDeepSeek {
+		enabled := false
+		switch cfg.thinkingMode() {
+		case ThinkingEnabled:
+			enabled = true
+		case ThinkingDisabled:
+			enabled = false
+		default: // auto: the request decides
+			enabled = req.Reasoning != nil && req.Reasoning.Effort != "" && req.Reasoning.Effort != "none"
+		}
+		typeName := "disabled"
+		if enabled {
+			typeName = "enabled"
+		} else {
+			// An explicit "no reasoning" must not carry a stale effort hint.
+			chatReq.ReasoningEffort = ""
+		}
+		out.Thinking = &thinkingField{Type: typeName}
+	}
+	if raw := responseFormat(cfg.ResponseFormat); len(raw) > 0 {
+		out.ResponseFormat = raw
+	}
+
+	body, err := json.Marshal(out)
+	if err != nil {
+		return nil, pluginapi.NewError("encode_error", err.Error())
+	}
+	return body, nil
+}
+
+// responseFormat maps the configured level onto the upstream field. The default
+// (text) sends nothing: the upstream then applies its own default.
+func responseFormat(level string) json.RawMessage {
+	switch level {
+	case ResponseFormatJSONObject:
+		return json.RawMessage(`{"type":"json_object"}`)
+	case ResponseFormatJSONSchema:
+		return json.RawMessage(`{"type":"json_schema"}`)
+	default:
+		return nil
+	}
+}
+
+// transportError classifies a failed round trip.
+func transportError(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return pluginapi.NewRetryableError("upstream_timeout", err.Error(), 504)
+	}
+	return pluginapi.NewRetryableError("upstream_unreachable", err.Error(), 0)
+}
+
+// errorEnvelope is the error shape OpenAI-compatible upstreams return.
+type errorEnvelope struct {
+	Error struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    any    `json:"code"`
+	} `json:"error"`
+	Message string `json:"message"`
+}
+
+// decodeErrorEnvelope reads the upstream error body (never fails: an unparsable
+// body simply leaves both fields empty).
+func decodeErrorEnvelope(body []byte) errorEnvelope {
+	var envelope errorEnvelope
+	_ = json.Unmarshal(body, &envelope)
+	return envelope
+}
+
+func (e errorEnvelope) message() string {
+	if e.Error.Message != "" {
+		return e.Error.Message
+	}
+	return e.Message
+}
+
+// code returns the upstream error code, when the body carries one. Some
+// deployments signal an exhausted balance with a body-level code instead of relying
+// on the HTTP status alone.
+func (e errorEnvelope) code() any { return e.Error.Code }
+
+// classify converts a non-2xx upstream response into a protocol error.
+//
+// Two upstream habits matter here. A provider that runs out of balance reports it
+// as 402 (DeepSeek, whose body repeats 402 in error.code), sometimes with a 200
+// envelope and the code in the body instead. Descriptions differ per deployment,
+// so the classification is deliberately explicit rather than "any 402 is quota".
+func (p *Provider) classify(resp *http.Response, code any) *pluginapi.Error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, httpx.MaxErrorBody))
+	envelope := decodeErrorEnvelope(body)
+	message := envelope.message()
+	if code == nil {
+		code = envelope.code()
+	}
+	if message == "" {
+		message = strings.TrimSpace(string(body))
+	}
+	if message == "" {
+		message = resp.Status
+	}
+
+	status := resp.StatusCode
+	statusText := fmt.Sprintf("upstream_%d", status)
+	resetAt := retryAfter(resp)
+
+	if isQuotaStatus(status) || isQuotaCode(code) {
+		if resetAt == 0 {
+			resetAt = time.Now().Add(quotaCooldown).Unix()
+		}
+		err := pluginapi.NewQuotaError(message, resetAt)
+		err.HTTPStatus = status
+		return err
+	}
+
+	switch {
+	case status == http.StatusUnauthorized, status == http.StatusForbidden:
+		// A credential problem: failing over to another provider fails identically.
+		err := pluginapi.NewError("token_invalid", message)
+		err.HTTPStatus = status
+		return err
+	case status == http.StatusRequestTimeout, status == http.StatusConflict,
+		status == http.StatusTooEarly, status >= 500:
+		return pluginapi.NewRetryableError(statusText, message, status)
+	default:
+		// 400/422 and friends are the client's request: report it, do not fail over,
+		// and keep the upstream message so the operator can act on it.
+		err := pluginapi.NewError(statusText, message)
+		err.HTTPStatus = status
+		return err
+	}
+}
+
+func isQuotaStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status == http.StatusPaymentRequired
+}
+
+// isQuotaCode reports whether a body error code means "out of quota/balance".
+// The JSON decoder yields float64 for numbers, so both forms are accepted.
+func isQuotaCode(code any) bool {
+	switch v := code.(type) {
+	case float64:
+		return int(v) == http.StatusPaymentRequired || int(v) == http.StatusTooManyRequests
+	case int:
+		return v == http.StatusPaymentRequired || v == http.StatusTooManyRequests
+	case string:
+		return v == "402" || v == "429" || v == "insufficient_balance" || v == "insufficient_quota"
+	default:
+		return false
+	}
+}
+
+// retryAfter reads the upstream cooldown hint, when it sends a usable one.
+func retryAfter(resp *http.Response) int64 {
+	raw := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if raw == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(raw); err == nil && secs > 0 {
+		return time.Now().Add(time.Duration(secs) * time.Second).Unix()
+	}
+	if when, err := http.ParseTime(raw); err == nil {
+		return when.Unix()
+	}
+	return 0
 }
 
 func (p *Provider) applyHeaders(req *http.Request) {

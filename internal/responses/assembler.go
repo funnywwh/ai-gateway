@@ -202,6 +202,10 @@ func (a *Assembler) addReasoning(delta string) error {
 		}
 		item := OutputItem{
 			Type: "reasoning", ID: ids.Reasoning(), Status: "in_progress",
+			// The chain of thought is kept twice on purpose: summary drives the
+			// reasoning_summary events, content carries the text in the upstream shape
+			// (reasoning_text parts) so a stored response can replay it verbatim.
+			Content: []ContentPart{{Type: "reasoning_text"}},
 			Summary: []ContentPart{{Type: "summary_text"}},
 		}
 		a.output = append(a.output, item)
@@ -217,6 +221,7 @@ func (a *Assembler) addReasoning(delta string) error {
 	a.reasoningText += delta
 	a.deltas++
 	a.open.item.Summary[0].Text += delta
+	a.open.item.Content[0].Text += delta
 	return a.send(&Event{
 		Type: EventReasoningSummaryDelta, ItemID: a.open.item.ID,
 		OutputIndex: a.open.index, SummaryIndex: 0, Delta: delta,

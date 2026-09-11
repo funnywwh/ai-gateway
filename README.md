@@ -7,6 +7,7 @@ MCP 只读查询、内容录制与 hooks、模型自由映射、数据库自动�
 ## 状态
 
 计划中的里程碑 M0–M16 已全部落地并通过验证（M10 订阅后端参考适配器、M14 客户自助门户为计划内的可选项，未做）。
+M17 完善了内置 `openai-chat` 供应商（思考模式、思考内容续接、DeepSeek 适配），不引入新插件。
 当前规模：约 3.35 万行 Go + 原生前端；24 个测试包、1 个分层断言包；真实二进制端到端走查覆盖数据面、计费、MCP、备份与控制台。
 
 ## 文档
@@ -19,9 +20,10 @@ MCP 只读查询、内容录制与 hooks、模型自由映射、数据库自动�
 | `docs/PROCESS.md` | 实现流程约定（设计文档 / todo / 提交自检） | 生效中 |
 | `docs/TODO.md` | 里程碑 → 任务 → 验收 的检查清单（随实现勾选） | 持续更新 |
 | `docs/architecture.md` | 分层、模块边界与可替换扩展点 | 已落地（由 `internal/arch` 断言守护） |
-| `docs/design/` | 每个里程碑的设计文档（接口、数据流、决策、异常、测试策略、实现差异） | M0–M16 全部产出 |
+| `docs/design/` | 每个里程碑的设计文档（接口、数据流、决策、异常、测试策略、实现差异） | M0–M17 全部产出 |
 | `docs/plugin-protocol-v1.md` | 插件协议 v1（帧/方法/事件/取消/背压/错误分类） | **已实现（M2）** |
 | `docs/api-responses.md` | Responses 兼容面（端点/字段/SSE 事件/错误封装/认证与限速） | **已实现（M5）** |
+| `docs/api-providers.md` | openai-chat 供应商（配置开关、思考模式、用量维度、错误分类、DeepSeek 接入） | **已实现（M17）** |
 | `docs/routing.md` | 路由解析、候选过滤、负载均衡策略、熔断与冷却 | **已实现（M3）** |
 | `docs/pricing.md` | 计量维度 × 有序价格规则集（分时/分档/分维度） | **已实现（M11a）** |
 | `docs/billing.md` | 计量、账本、在途额度、账单、充值、对账、赠送到期 | **已实现（M11/M12）** |
@@ -59,6 +61,7 @@ make verify     # vet + test + build
 | `/admin/api/v1/*` | 管理面：账户/Key/标签/供应商/模型/路由/映射/定价/账单/充值/对账/备份/审计 |
 | `/admin/ui/*` | 内置控制台（零构建，随二进制发布） |
 | `scripts/load.sh` | 一键压测（自建 `cmd/loadgen`，输出 rps 与分位延迟） |
+| `scripts/deepseek-smoke.sh` | DeepSeek 接入走查（离线假上游；加 `--live` 与 `DEEPSEEK_API_KEY` 打真机） |
 | `make verify` | vet + 全量测试 + 构建 |
 
 ## 压测基线（本机 i7-12700K，testecho 供应商）

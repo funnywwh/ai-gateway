@@ -147,6 +147,14 @@ bootstrap:
       account: internal
       tags: [free]
   # Optional: seed the routing graph on first start (upsert = only create what is missing).
+  #
+  # openai-chat speaks /chat/completions. Extra keys (all optional, defaults keep the
+  # plain OpenAI-compatible behaviour):
+  #   thinking.mode                  auto|enabled|disabled   - who decides whether the model thinks
+  #   thinking.style                 none|deepseek           - deepseek sends {"thinking":{"type":...}}
+  #   thinking.replay_reasoning_content bool                 - send earlier reasoning back on tool turns
+  #   response_format                text|json_object|json_schema - highest level the upstream accepts
+  #   default_max_output_tokens      int                     - applied only when the client sent none
   providers:
     - name: local-chat
       kind: openai-chat            # builtin: openai-responses | openai-chat ; or plugin:<name>
@@ -160,13 +168,48 @@ bootstrap:
         - public: llama-local
           upstream: "llama3.1:8b"
           capabilities: {stream: true, tools: false}
+    # DeepSeek: the same builtin provider with its thinking dialect switched on.
+    # Set the API key on the provider (admin console -> Providers -> credentials
+    # {"api_key":"sk-..."} or GW_* env), then enable it.
+    - name: deepseek
+      kind: openai-chat
+      display_name: "DeepSeek"
+      enabled: false
+      priority: 10
+      weight: 100
+      config:
+        base_url: "https://api.deepseek.com/v1"
+        thinking:
+          mode: auto                   # auto = the client's reasoning.effort decides
+          style: deepseek
+          replay_reasoning_content: true
+        response_format: json_object   # chat/completions has no json_schema
+        default_max_output_tokens: 8192
+      models:
+        - public: deepseek-flash
+          upstream: deepseek-flash
+          context_window: 1000000
+          max_output_tokens: 65536
+          capabilities: {stream: true, tools: true, reasoning: true}
+        - public: deepseek-v4-pro
+          upstream: deepseek-v4-pro
+          context_window: 1000000
+          max_output_tokens: 65536
+          capabilities: {stream: true, tools: true, reasoning: true}
   models:
     - public_name: llama-local
       aliases: ["local", "llama"]
+    - public_name: deepseek-flash
+      aliases: ["ds", "flash"]
   routes:
     - model: llama-local
       provider: local-chat
       upstream_model: "llama3.1:8b"
+      priority: 10
+      weight: 100
+    - model: deepseek-flash
+      provider: deepseek
+      upstream_model: deepseek-flash
       priority: 10
       weight: 100
   tags:

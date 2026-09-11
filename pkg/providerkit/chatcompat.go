@@ -3,6 +3,7 @@ package providerkit
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/winger/ai-gateway/pkg/pluginapi"
 )
@@ -23,12 +24,17 @@ type ChatToolCall struct {
 }
 
 // ChatMessage is one chat-completions message.
+//
+// ReasoningContent carries the chain of thought some upstreams (DeepSeek and
+// compatible deployments) return at the same level as content. It is only ever
+// populated or sent when the caller opts in through ChatConvertOptions.
 type ChatMessage struct {
-	Role       string         `json:"role"`
-	Content    string         `json:"content,omitempty"`
-	ToolCalls  []ChatToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
-	Refusal    string         `json:"refusal,omitempty"`
+	Role             string         `json:"role"`
+	Content          string         `json:"content,omitempty"`
+	ReasoningContent string         `json:"reasoning_content,omitempty"`
+	ToolCalls        []ChatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string         `json:"tool_call_id,omitempty"`
+	Refusal          string         `json:"refusal,omitempty"`
 }
 
 // ChatTool is a function tool in chat-completions form.
@@ -99,10 +105,29 @@ type ChatResponse struct {
 // Translation
 // ---------------------------------------------------------------------------
 
+// ChatConvertOptions switches the opt-in behaviours of the chat-completions
+// translation. The zero value is the conservative default: no reasoning content
+// moves in either direction, which is what generic OpenAI-compatible upstreams
+// expect.
+type ChatConvertOptions struct {
+	// ReplayReasoningContent writes the text of reasoning items onto the assistant
+	// message that carries the following tool calls. Upstreams that reason before
+	// calling tools (DeepSeek) reject the request when it is missing.
+	ReplayReasoningContent bool
+	// KeepReasoningContent maps upstream reasoning_content onto a reasoning item
+	// (non-streaming) so the gateway can surface and persist the chain of thought.
+	KeepReasoningContent bool
+}
+
 // ResponsesToChat converts a canonical (Responses-shaped) request into a
 // chat-completions request. Reasoning items are dropped (they are not replayable),
 // function calls/results become tool_calls / role:tool messages.
 func ResponsesToChat(req *pluginapi.Request) (*ChatRequest, error) {
+	return ResponsesToChatWithOptions(req, ChatConvertOptions{})
+}
+
+// ResponsesToChatWithOptions is ResponsesToChat with the opt-in behaviours enabled.
+func ResponsesToChatWithOptions(req *pluginapi.Request, opts ChatConvertOptions) (*ChatRequest, error) {
 	if req == nil {
 		return nil, fmt.Errorf("providerkit: nil request")
 	}
@@ -124,14 +149,30 @@ func ResponsesToChat(req *pluginapi.Request) (*ChatRequest, error) {
 	if req.Instructions != "" {
 		out.Messages = append(out.Messages, ChatMessage{Role: "system", Content: req.Instructions})
 	}
-	for _, item := range req.Input {
+	// Reasoning replay is only defined for tool-calling turns: an upstream that
+	// requires its own chain of thought back rejects a request that drops it, and
+	// only tool-calling turns carry that requirement.
+	replay := map[int]string{}
+	if opts.ReplayReasoningContent && hasToolCallItems(req.Input) {
+		replay = reasoningByToolTurn(req.Input)
+	}
+	for index, item := range req.Input {
 		msg, ok, err := itemToChatMessages(item)
 		if err != nil {
 			return nil, err
 		}
-		if ok {
-			out.Messages = append(out.Messages, msg...)
+		if !ok {
+			continue
 		}
+		if text := replay[index]; text != "" {
+			for i := range msg {
+				if msg[i].Role == "assistant" && len(msg[i].ToolCalls) > 0 {
+					msg[i].ReasoningContent = text
+					break
+				}
+			}
+		}
+		out.Messages = append(out.Messages, msg...)
 	}
 	for _, tool := range req.Tools {
 		var ct ChatTool
@@ -143,6 +184,53 @@ func ResponsesToChat(req *pluginapi.Request) (*ChatRequest, error) {
 		out.Tools = append(out.Tools, ct)
 	}
 	return out, nil
+}
+
+// hasToolCallItems reports whether the input replays a tool-calling turn.
+func hasToolCallItems(items []pluginapi.Item) bool {
+	for _, item := range items {
+		if item.Type == "function_call" {
+			return true
+		}
+	}
+	return false
+}
+
+// reasoningByToolTurn maps the index of each assistant tool-calling message onto
+// the reasoning text that precedes it within the same turn. A reasoning item with
+// no following tool call (or with empty text) is left alone: guessing where it
+// belongs would send the upstream a context it never produced.
+func reasoningByToolTurn(items []pluginapi.Item) map[int]string {
+	out := map[int]string{}
+	pending := ""
+	for index, item := range items {
+		switch item.Type {
+		case "reasoning":
+			pending = itemReasoningText(item)
+		case "function_call":
+			if pending != "" {
+				out[index] = pending
+				pending = ""
+			}
+		case "message":
+			// Assistant history stays inside the turn; a user message opens a new one.
+			if role := item.Role; role != "assistant" && role != "" {
+				pending = ""
+			}
+		default:
+			pending = ""
+		}
+	}
+	return out
+}
+
+// itemReasoningText concatenates the summary parts of a reasoning item.
+func itemReasoningText(item pluginapi.Item) string {
+	var sb strings.Builder
+	for _, part := range item.Summary {
+		sb.WriteString(part.Text)
+	}
+	return strings.TrimSpace(sb.String())
 }
 
 func itemToChatMessages(item pluginapi.Item) ([]ChatMessage, bool, error) {
@@ -196,8 +284,27 @@ func contentToText(raw json.RawMessage, role string) string {
 	return out
 }
 
+// ReasoningItem builds the canonical reasoning item for a chain of thought.
+// The text rides in Summary because that is the part the gateway maps onto
+// response.reasoning_summary_text.delta and persists for continuation.
+func ReasoningItem(text string) pluginapi.Item {
+	return pluginapi.Item{
+		Type:    "reasoning",
+		Status:  "completed",
+		Summary: []pluginapi.SummaryPart{{Type: "summary_text", Text: text}},
+	}
+}
+
 // ChatResponseToResponses converts a non-streaming chat response.
 func ChatResponseToResponses(resp *ChatResponse) (*pluginapi.Response, error) {
+	return ChatResponseToResponsesWithOptions(resp, ChatConvertOptions{})
+}
+
+// ChatResponseToResponsesWithOptions is ChatResponseToResponses with the opt-in
+// behaviours enabled: KeepReasoningContent turns the upstream chain of thought
+// into a leading reasoning item (the gateway renders it as reasoning summary
+// events and persists it for continuation).
+func ChatResponseToResponsesWithOptions(resp *ChatResponse, opts ChatConvertOptions) (*pluginapi.Response, error) {
 	if resp == nil {
 		return nil, fmt.Errorf("providerkit: nil chat response")
 	}
@@ -210,6 +317,11 @@ func ChatResponseToResponses(resp *ChatResponse) (*pluginapi.Response, error) {
 	}
 	choice := resp.Choices[0]
 
+	if opts.KeepReasoningContent {
+		if reasoning := strings.TrimSpace(choice.Message.ReasoningContent); reasoning != "" {
+			out.Items = append(out.Items, ReasoningItem(reasoning))
+		}
+	}
 	if choice.Message.Content != "" {
 		content, err := json.Marshal([]map[string]string{{"type": "output_text", "text": choice.Message.Content}})
 		if err != nil {
@@ -261,10 +373,28 @@ func mapFinishReason(reason string) string {
 	switch reason {
 	case "stop", "tool_calls", "function_call":
 		return "completed"
-	case "length":
+	case "length", "content_filter":
+		// Both mean the answer is not the whole answer: truncated at the token
+		// limit, or cut by the upstream's content filter.
 		return "incomplete"
+	case "":
+		// A response without a finish reason is complete as far as the upstream said.
+		return "completed"
 	default:
 		return reason
+	}
+}
+
+// UpstreamFailure reports whether a finish reason means the upstream failed to
+// produce the answer (as opposed to the model finishing it). DeepSeek reports
+// `insufficient_system_resource` when it cannot allocate capacity and `aborted`
+// when generation was cut short; both must fail over rather than look complete.
+func UpstreamFailure(reason string) bool {
+	switch reason {
+	case "insufficient_system_resource", "aborted":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -281,14 +411,18 @@ type ChatStreamState struct {
 	// Usage is the final usage block, when the upstream reports it.
 	Usage *ChatUsage
 
-	toolIndex map[int]bool
-	toolName  map[int]string
-	emitted   bool
+	toolIndex  map[int]bool
+	toolName   map[int]string
+	toolCallID map[int]string
 }
 
 // NewChatStreamState creates an empty stream state.
 func NewChatStreamState() *ChatStreamState {
-	return &ChatStreamState{toolIndex: map[int]bool{}, toolName: map[int]string{}}
+	return &ChatStreamState{
+		toolIndex:  map[int]bool{},
+		toolName:   map[int]string{},
+		toolCallID: map[int]string{},
+	}
 }
 
 // Translate converts one streaming chat chunk into pluginapi events.
@@ -312,6 +446,13 @@ func (s *ChatStreamState) Translate(chunk *ChatResponse, emit func(pluginapi.Eve
 	}
 
 	delta := choice.Delta
+	// Upstreams that think out loud send the chain of thought before the answer.
+	if delta.ReasoningContent != "" {
+		s.ReasoningText += delta.ReasoningContent
+		if err := emit(pluginapi.Event{Type: pluginapi.EventReasoningDelta, Text: delta.ReasoningContent, Index: 0}); err != nil {
+			return false, err
+		}
+	}
 	if delta.Content != "" {
 		if err := emit(pluginapi.Event{Type: pluginapi.EventTextDelta, Text: delta.Content, Index: 0}); err != nil {
 			return false, err
@@ -323,9 +464,12 @@ func (s *ChatStreamState) Translate(chunk *ChatResponse, emit func(pluginapi.Eve
 		}
 	}
 	for _, call := range delta.ToolCalls {
+		// Only the first chunk of a call carries the id and name; the argument
+		// fragments that follow must reuse them or the two halves cannot be paired.
 		if !s.toolIndex[call.Index] {
 			s.toolIndex[call.Index] = true
 			s.toolName[call.Index] = call.Function.Name
+			s.toolCallID[call.Index] = call.ID
 			if err := emit(pluginapi.Event{
 				Type: pluginapi.EventToolCallStart, Index: call.Index,
 				CallID: call.ID, ItemID: call.ID, Name: call.Function.Name,
@@ -333,10 +477,17 @@ func (s *ChatStreamState) Translate(chunk *ChatResponse, emit func(pluginapi.Eve
 				return false, err
 			}
 		}
+		if call.ID != "" {
+			s.toolCallID[call.Index] = call.ID
+		}
+		if call.Function.Name != "" {
+			s.toolName[call.Index] = call.Function.Name
+		}
 		if call.Function.Arguments != "" {
 			if err := emit(pluginapi.Event{
 				Type: pluginapi.EventToolArgsDelta, Index: call.Index,
-				CallID: call.ID, ItemID: call.ID, Name: s.toolName[call.Index], Text: call.Function.Arguments,
+				CallID: s.toolCallID[call.Index], ItemID: s.toolCallID[call.Index],
+				Name: s.toolName[call.Index], Text: call.Function.Arguments,
 			}); err != nil {
 				return false, err
 			}

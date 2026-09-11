@@ -287,6 +287,239 @@ func TestChatStreamStateTranslatesDeltas(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// chain-of-thought translation (M17)
+// ---------------------------------------------------------------------------
+
+// reasoningItem builds a reasoning item the way the gateway stores one.
+func reasoningItem(text string) pluginapi.Item {
+	return ReasoningItem(text)
+}
+
+func TestReasoningDeltaIsTranslated(t *testing.T) {
+	state := NewChatStreamState()
+	var got []pluginapi.Event
+	emit := func(ev pluginapi.Event) error {
+		got = append(got, ev)
+		return nil
+	}
+
+	chunks := []ChatResponse{
+		{Choices: []ChatChoice{{Delta: ChatMessage{ReasoningContent: "think "}}}},
+		{Choices: []ChatChoice{{Delta: ChatMessage{ReasoningContent: "harder"}}}},
+		{Choices: []ChatChoice{{Delta: ChatMessage{Content: "answer"}}}},
+		{Choices: []ChatChoice{{Delta: ChatMessage{}, FinishReason: "stop"}}},
+	}
+	for i := range chunks {
+		if _, err := state.Translate(&chunks[i], emit); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if state.ReasoningText != "think harder" {
+		t.Fatalf("reasoning text = %q", state.ReasoningText)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 2 reasoning + 1 text event, got %+v", got)
+	}
+	if got[0].Type != pluginapi.EventReasoningDelta || got[0].Text != "think " ||
+		got[1].Type != pluginapi.EventReasoningDelta || got[1].Text != "harder" {
+		t.Fatalf("reasoning events mismatch: %+v", got[:2])
+	}
+	if got[2].Type != pluginapi.EventTextDelta || got[2].Text != "answer" {
+		t.Fatalf("text event must follow the reasoning: %+v", got[2])
+	}
+}
+
+func TestToolArgumentDeltasReuseTheCallID(t *testing.T) {
+	state := NewChatStreamState()
+	var got []pluginapi.Event
+	emit := func(ev pluginapi.Event) error {
+		got = append(got, ev)
+		return nil
+	}
+
+	// Upstreams send the id and name once, then only argument fragments.
+	var head, frag ChatToolCall
+	head.Index, head.ID, head.Type = 0, "call_7", "function"
+	head.Function.Name = "lookup"
+	frag.Index = 0
+	frag.Function.Arguments = `{"q":1}`
+
+	chunks := []ChatResponse{
+		{Choices: []ChatChoice{{Delta: ChatMessage{ToolCalls: []ChatToolCall{head}}}}},
+		{Choices: []ChatChoice{{Delta: ChatMessage{ToolCalls: []ChatToolCall{frag}}}}},
+	}
+	for i := range chunks {
+		if _, err := state.Translate(&chunks[i], emit); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if len(got) != 2 {
+		t.Fatalf("expected a start and an arguments event, got %+v", got)
+	}
+	if got[0].CallID != "call_7" {
+		t.Fatalf("start event must carry the call id: %+v", got[0])
+	}
+	if got[1].CallID != "call_7" || got[1].ItemID != "call_7" {
+		t.Fatalf("argument delta must reuse the call id, got %+v", got[1])
+	}
+	if got[1].Name != "lookup" {
+		t.Fatalf("argument delta must carry the tool name: %+v", got[1])
+	}
+}
+
+func TestResponsesToChatReplaysReasoningOnlyForToolTurns(t *testing.T) {
+	content, _ := json.Marshal("what is the weather")
+	base := []pluginapi.Item{
+		{Type: "message", Role: "user", Content: content},
+		reasoningItem("check the tool"),
+		{Type: "function_call", CallID: "call_1", Name: "weather", Arguments: "{}"},
+		{Type: "function_call_output", CallID: "call_1", Output: "cloudy"},
+	}
+
+	withReplay, err := ResponsesToChatWithOptions(&pluginapi.Request{Model: "m", Input: base},
+		ChatConvertOptions{ReplayReasoningContent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant := withReplay.Messages[1]
+	if assistant.Role != "assistant" || len(assistant.ToolCalls) != 1 {
+		t.Fatalf("expected the tool-calling assistant message second: %+v", withReplay.Messages)
+	}
+	if assistant.ReasoningContent != "check the tool" {
+		t.Fatalf("reasoning must be replayed onto the tool call: %+v", assistant)
+	}
+
+	// Opting out keeps the old shape: reasoning items are simply dropped.
+	withoutReplay, err := ResponsesToChat(&pluginapi.Request{Model: "m", Input: base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range withoutReplay.Messages {
+		if msg.ReasoningContent != "" {
+			t.Fatalf("default translation must not emit reasoning_content: %+v", withoutReplay.Messages)
+		}
+	}
+
+	// A conversation without tool calls never carries the field: it is only
+	// required when the upstream asked for tools.
+	plain, err := ResponsesToChatWithOptions(&pluginapi.Request{
+		Model: "m",
+		Input: []pluginapi.Item{{Type: "message", Role: "user", Content: content}, reasoningItem("thinking")},
+	}, ChatConvertOptions{ReplayReasoningContent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, msg := range plain.Messages {
+		if msg.ReasoningContent != "" {
+			t.Fatalf("reasoning must not be replayed without tool calls: %+v", plain.Messages)
+		}
+	}
+}
+
+func TestReasoningReplayStopsAtATurnBoundary(t *testing.T) {
+	content, _ := json.Marshal("next question")
+	req := &pluginapi.Request{
+		Model: "m",
+		Input: []pluginapi.Item{
+			reasoningItem("belongs to the old turn"),
+			{Type: "function_call", CallID: "call_1", Name: "a", Arguments: "{}"},
+			{Type: "function_call_output", CallID: "call_1", Output: "x"},
+			{Type: "message", Role: "user", Content: content},
+			{Type: "function_call", CallID: "call_2", Name: "b", Arguments: "{}"},
+		},
+	}
+	chat, err := ResponsesToChatWithOptions(req, ChatConvertOptions{ReplayReasoningContent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Messages) != 4 {
+		t.Fatalf("message count = %d: %+v", len(chat.Messages), chat.Messages)
+	}
+	if chat.Messages[0].ReasoningContent != "belongs to the old turn" {
+		t.Fatalf("first tool call must keep its reasoning: %+v", chat.Messages[0])
+	}
+	if chat.Messages[3].ReasoningContent != "" {
+		t.Fatalf("a user message closes the turn; the next tool call has no reasoning: %+v", chat.Messages[3])
+	}
+}
+
+func TestChatResponseKeepsReasoningAsItem(t *testing.T) {
+	resp := &ChatResponse{Choices: []ChatChoice{{
+		Message:      ChatMessage{Role: "assistant", Content: "answer", ReasoningContent: "because"},
+		FinishReason: "stop",
+	}}}
+
+	kept, err := ChatResponseToResponsesWithOptions(resp, ChatConvertOptions{KeepReasoningContent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kept.Items) != 2 || kept.Items[0].Type != "reasoning" {
+		t.Fatalf("reasoning item must lead: %+v", kept.Items)
+	}
+	if kept.Items[0].Summary[0].Type != "summary_text" || kept.Items[0].Summary[0].Text != "because" {
+		t.Fatalf("reasoning text must ride in the summary part: %+v", kept.Items[0])
+	}
+	if kept.Items[1].Type != "message" {
+		t.Fatalf("answer item mismatch: %+v", kept.Items[1])
+	}
+
+	// Default behaviour is unchanged: no reasoning item at all.
+	dropped, err := ChatResponseToResponses(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dropped.Items) != 1 || dropped.Items[0].Type != "message" {
+		t.Fatalf("default conversion must drop reasoning: %+v", dropped.Items)
+	}
+}
+
+func TestFinishReasonMapping(t *testing.T) {
+	cases := map[string]string{
+		"stop":           "completed",
+		"tool_calls":     "completed",
+		"length":         "incomplete",
+		"content_filter": "incomplete",
+		"":               "completed",
+	}
+	for reason, want := range cases {
+		resp := &ChatResponse{Choices: []ChatChoice{{
+			Message: ChatMessage{Role: "assistant", Content: "x"}, FinishReason: reason,
+		}}}
+		out, err := ChatResponseToResponses(resp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.Status != want {
+			t.Fatalf("finish_reason %q → %q, want %q", reason, out.Status, want)
+		}
+	}
+
+	// A response without choices must still look completed, not blank.
+	empty, err := ChatResponseToResponses(&ChatResponse{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty.Status != "completed" {
+		t.Fatalf("empty choices must still produce a completed status, got %q", empty.Status)
+	}
+}
+
+func TestUpstreamFailureReasons(t *testing.T) {
+	for _, reason := range []string{"insufficient_system_resource", "aborted"} {
+		if !UpstreamFailure(reason) {
+			t.Fatalf("%q must be treated as an upstream failure", reason)
+		}
+	}
+	for _, reason := range []string{"stop", "tool_calls", "length", "content_filter", ""} {
+		if UpstreamFailure(reason) {
+			t.Fatalf("%q must not be treated as an upstream failure", reason)
+		}
+	}
+}
+
 func TestCharEstimatorRoundsUp(t *testing.T) {
 	e := NewCharEstimator(4)
 	if got := e.Add("abcde"); got != 2 {

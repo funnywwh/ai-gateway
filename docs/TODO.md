@@ -213,6 +213,22 @@
 - [x] 收尾：README 状态与文档索引刷新；`UsageTotals`/`UsageBreakdownRow`/`UsageCounter` 上移到 `domain` 以保持分层断言通过
 - [ ] v2：备份到对象存储/异地同步（规格已声明不在 v1 范围）
 
+## M17 完善内置供应商（openai-chat）：DeepSeek 适配与思考模式
+- [x] 设计文档 docs/design/m17-openaichat-deepseek.md（已在对话中输出）+ 规格文档 docs/api-providers.md（状态：已实现 M17）
+- [x] 决策：内置而非插件（`pkg/providerkit` 翻译层 367 行 + `internal/` 97 行插件不可引用，做插件等于复制两份并各修一遍）；不新增 `deepseek` kind（只能是预设壳，却要改 registry 三处 + 分层表）
+- [x] 能力开关（默认=既有行为，升级不改任何部署）：`thinking.mode/style/replay_reasoning_content`、`response_format`、`default_max_output_tokens`，枚举非法即构建失败
+- [x] 出站翻译：`reasoning_content` 回传（存在工具调用时）、`thinking:{"type":enabled|disabled}` + `reasoning_effort`、`response_format` 按档位下发
+- [x] 入站翻译：`reasoning_content` → `reasoning` 项（非流式）与 `reasoning.delta`（流式，先于正文）
+- [x] 共享翻译层修复：流式工具参数增量**沿用首块 call_id**（原先发空）、`insufficient_system_resource`/`aborted` 视为上游失败可切换、`content_filter` → incomplete、空 `choices` 不再产出空状态
+- [x] 错误分类：402（HTTP 或体 `code`）→ `quota_exhausted` 冷却、429 保留 `Retry-After`、401/403 → `fatal token_invalid`、400/422 → fatal 且保留上游 message、5xx/超时/网络 → retryable
+- [x] 网关侧思考续接：`reasoning` 输出项正文写入 `content:[{type:"reasoning_text"}]`（与上游 Responses 形状一致）并随 output JSON 落库，`decodeStoredItems` 回填 → `previous_response_id` 的 thinking+tools 多轮不再 400（**未新增迁移/列**，见设计文档第 7 节差异）
+- [x] 测试：providerkit 8 例（含「默认不变」断言）、openaichat 15 例（开关矩阵、用量、错误分类、response_format、Health）、httpapi 3 例（续接往返、空值兼容、上游 reasoning 形状）
+- [x] 走查脚本 `scripts/deepseek-smoke.sh`：离线假上游校验请求形状/思考开关/流式顺序/用量维度/错误映射/续接回传；`--live` 打真机
+- [x] 真机走查（2026-09-11，api.deepseek.com / deepseek-flash）：非流式带回 reasoning 项与 reasoning_tokens=27、工具轮思考经 `previous_response_id` 续接被上游接受（丢正文即 400）、流式思考先于正文且 `response.completed` 带 usage
+- [x] 文档：`config.example.yaml` 与本地 `config.yaml` 增加 DeepSeek 现成片段；README 文档表与状态刷新
+- [x] 顺手修复：`internal/arch` 分层表缺 M14(1) 新增的 `internal/sessionauth`/`internal/portal`（该里程碑提交后 `make verify` 一直红）
+- [ ] 暂不纳入：内置 `openai-responses` 接 DeepSeek `/responses` 的三处缺口（`response.reasoning_text.delta` 事件名、`output_tokens_details.reasoning_tokens`、思考正文承载字段）
+
 ## 可选
 - [x] M10 订阅后端参考适配器 `examples/provider-codex`（默认禁用、非官方）：设计文档 docs/design/m10-subscription-adapter.md
 - [x] 三种凭据形态与自动续期：refresh_token（OAuth 刷新，轮换落盘 + 单飞）> session_cookie（/api/auth/session 换取）> 静态 access_token
