@@ -18,8 +18,11 @@ hooks-dead.jsonl
 # Derive your own from config.example.yaml instead.
 /config.yaml
 
-# built plugin binaries
-/plugins/*.bin
+# built plugin binaries: `make plugin-example` writes bin/aigw-provider-*, and a
+# deployment copies them into plugins/ (the directory the host scans for plugins).
+# Neither is a source artifact, so ignore the discovery directory wholesale.
+# The previous /plugins/*.bin pattern never matched the real names.
+/plugins/
 
 # editors
 .idea/
