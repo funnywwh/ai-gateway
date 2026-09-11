@@ -69,6 +69,13 @@ gateway's own in-flight reservation (`billing.reservation_mode`) still applies f
 
 ## Behaviour notes
 
+- **`role: "system"` input items are rewritten to `role: "developer"`.** This backend rejects a
+  system message outright (`400 System messages are not allowed`), while clients legitimately send
+  their system prompt that way — the Responses API allows it, so the translation belongs here rather
+  than in every client. `developer` is the same role under its modern name, verified accepted in every
+  position (first, middle, last, alongside `tools`). Rewriting the role instead of folding the text into
+  `instructions` keeps the message at its original position and cannot leave `input` empty, which this
+  backend also rejects. Other roles pass through untouched.
 - Usage is reported with cache hits split out and reasoning tokens separate, which is
   what the pricing engine needs to apply a different rate.
 - The upstream only offers streaming, so `Complete` is implemented by consuming the

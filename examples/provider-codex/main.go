@@ -970,6 +970,39 @@ type wireError struct {
 	Message string `json:"message"`
 }
 
+// rewriteSystemRoles renames input items whose role is "system" to "developer".
+//
+// This backend rejects a system message outright ("System messages are not allowed"),
+// while clients legitimately send their system prompt as one — the Responses API allows
+// that shape, so the translation belongs here rather than in every client. "developer"
+// is the same role under its modern name and is accepted in every position (first,
+// middle, last, alongside tools).
+//
+// Renaming rather than folding the text into instructions keeps the message at its
+// original position, needs no content parsing, and cannot leave input empty (this
+// backend also rejects an empty input).
+//
+// The caller's slice is never mutated: the gateway may reuse the request.
+func rewriteSystemRoles(items []pluginapi.Item) []pluginapi.Item {
+	changed := false
+	for _, item := range items {
+		if item.Role == "system" {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		return items
+	}
+	out := append([]pluginapi.Item(nil), items...)
+	for i := range out {
+		if out[i].Role == "system" {
+			out[i].Role = "developer"
+		}
+	}
+	return out
+}
+
 func (p *provider) buildRequest(req *pluginapi.Request, stream bool) ([]byte, error) {
 	if req == nil {
 		return nil, pluginapi.NewError("bad_request", "provider-codex: nil request")
@@ -984,7 +1017,7 @@ func (p *provider) buildRequest(req *pluginapi.Request, stream bool) ([]byte, er
 	wire := responsesRequest{
 		Model:        model,
 		Instructions: req.Instructions,
-		Input:        req.Input,
+		Input:        rewriteSystemRoles(req.Input),
 		Tools:        req.Tools,
 		ToolChoice:   req.ToolChoice,
 		Store:        p.cfg.Store,

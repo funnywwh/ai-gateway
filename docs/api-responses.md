@@ -57,6 +57,11 @@
 `message`（`input_text`/`input_image`/`input_file`/`refusal`/`output_text`）、
 `function_call`、`function_call_output`、`reasoning`、`mcp_call`、`mcp_list_tools`、`item_reference`。
 
+消息项的 `role` 可取 `user`、`assistant`、`system`、`developer`，网关**原样透传**（与其它字段一致）。
+个别供应商的后端不接受其中某些角色——例如订阅型 codex 后端直接拒绝 `system`
+（`400 System messages are not allowed`）——这类**后端约束由适配器负责翻译**，客户端无需为此改写请求，
+也不必为不同供应商准备两套报文。参考实现见 `examples/provider-codex/README.md`。
+
 ## 模型解析与路由扩展
 
 - 请求的 `model` 先经**自由映射**（`docs/routing` 与 `model_mappings` 表）解析为 canonical 模型，

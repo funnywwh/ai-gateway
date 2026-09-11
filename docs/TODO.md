@@ -287,6 +287,18 @@
 - [x] 控制台「探测」加处理中动画（M10c 的直接后果）：`ui.js` 新增可复用的 `withBusy`（禁用按钮 + spinner + 秒数递增 + 结束/异常都还原）、`toast` 支持 `{sticky}`、`probe()` 补上原先缺失的错误捕获并在探测后刷新列表；用 node + 最小 DOM 桩跑 10 项行为断言，并在隔离实例核对新二进制的内嵌资源
 - [ ] 部署动作（需在宿主执行）：运行中的网关仍是旧二进制（10s deadline + 旧 `/me` 探测 + 旧界面资源；界面资源内嵌在二进制里，所以这次 UI 改动同样要重启才生效），需 `./scripts/local-run.sh restart`
 - [x] 回填设计文档「实现与设计差异」（含实测结果与 8 条差异），单提交并引用设计文档路径
+
+### M10d codex 适配器翻译 `system` 角色
+- [x] 设计文档 docs/design/m10d-codex-system-role.md + 规格文档 docs/api-responses.md「输入项类型」（网关原样透传角色，后端方言由适配器翻译）+ 适配器 README
+- [x] 根因：客户端（DSH）把系统提示词作为 `input` 里 `role:"system"` 的消息项发送，订阅后端直接拒绝（`400 System messages are not allowed`）→ 凡用该形状的客户端**完全无法使用 codex 供应商**
+- [x] 实测矩阵决定方案：`system` 在任意位置（首/中/并存的 instructions）都被拒；`developer` 在任意位置（含带 tools）都被接受；另注意 `input` 必须非空
+- [x] 实现：`rewriteSystemRoles` 就地改角色名 `system → developer`（保留消息位置与语义、无需解析内容、不会让 `input` 变空），其余角色与 `instructions` 不动，且不修改调用方请求
+- [x] 否决的方案：折叠进 `instructions`（会提升位置、需拼接内容、可能让 `input` 为空而触发另一个 400）
+- [x] 测试 2 例（上游收到 `developer` 且调用方请求未被改 / 其它角色不动且无 system 时不拷贝），并用变异验证非空转
+- [x] 端到端：DSH 真实失败形状（system 项 + tools + `max_output_tokens`）经网关 **3/3 返回 200**，同报文直连上游 **2/2 返回 200**；且系统提示词确实影响回答（自称"软件工程助手"），证明是语义保留的翻译而非丢弃
+- [x] 横向对照：同形状打 `deepseek`（`openai-chat`）无角色问题 → 该约束是订阅后端特有，翻译放在适配器这一层是对的
+- [ ] **顺带发现的配置问题（另立处理）**：deepseek 供应商的 `config.response_format="json_object"` 是**供应商级全局套用**（`openaichat.go:432` 无条件写入，且该 provider 从不读取请求的 `text.format`），导致任何不含 "json" 字样的提示词被 DeepSeek 拒绝（`Prompt must contain the word 'json' ...`）→ 该供应商目前只能服务 JSON 类请求，普通流量全 400
+- [x] 回填设计文档「实现与设计差异」（含端到端结果、与 deepseek 的对照、以及一次与本改动无关的瞬时 `server_is_overloaded`），单提交并引用设计文档路径
 - [x] M14(1) 会话层抽取 `internal/sessionauth`（口令/会话/限速），`internal/admin` 改为薄适配器（既有测试全绿）
 - [x] M14(1) 迁移 0004：`portal_users`/`portal_sessions`（用户名全局唯一、绑定唯一账户、级联删除）
 - [x] M14(1) `internal/portal` 认证适配器（禁用账号拒登、按用户吊销会话）+ 管理侧门户用户端点（创建/重置/停用，一次性口令只回一次）

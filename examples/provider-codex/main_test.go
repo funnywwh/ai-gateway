@@ -665,3 +665,96 @@ func TestMaxOutputTokensIsNotForwarded(t *testing.T) {
 		t.Fatalf("max_output_tokens must not reach the upstream: %s", rawBody)
 	}
 }
+
+func TestSystemRoleIsRewrittenForTheUpstream(t *testing.T) {
+	var rawBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		rawBody = string(raw)
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, frame := range happyFrames {
+			_, _ = fmt.Fprint(w, frame)
+		}
+	}))
+	defer upstream.Close()
+
+	p := newTestProvider(t, upstream.URL, upstream.URL+"/session", upstream.URL+"/token",
+		map[string]string{"access_token": "static-token"})
+	// The shape a client like the harness sends: system prompt as an input item,
+	// plus tools. This backend answers it with "System messages are not allowed"
+	// unless the adapter renames the role.
+	req := &pluginapi.Request{
+		Model: "codex",
+		Input: []pluginapi.Item{
+			{Type: "message", Role: "system", Content: json.RawMessage(`[{"type":"input_text","text":"You are a software engineer."}]`)},
+			{Type: "message", Role: "user", Content: json.RawMessage(`[{"type":"input_text","text":"hi"}]`)},
+		},
+		Tools: []pluginapi.Tool{{Type: "function", Name: "get_weather"}},
+	}
+	if _, err := p.Complete(context.Background(), req); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	var body struct {
+		Input []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"input"`
+		Tools []json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal([]byte(rawBody), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Input) != 2 {
+		t.Fatalf("input = %+v", body.Input)
+	}
+	if body.Input[0].Role != "developer" {
+		t.Fatalf("upstream role = %q, want developer (this backend rejects system)", body.Input[0].Role)
+	}
+	if !strings.Contains(string(body.Input[0].Content), "You are a software engineer.") {
+		t.Fatalf("the message text must survive the rename: %s", body.Input[0].Content)
+	}
+	if body.Input[1].Role != "user" {
+		t.Fatalf("the user item must be untouched, role = %q", body.Input[1].Role)
+	}
+	if len(body.Tools) != 1 {
+		t.Fatalf("tools must still be sent, got %d", len(body.Tools))
+	}
+	// The gateway may reuse the request (retry, recording), so the caller's slice
+	// must come back unchanged.
+	if req.Input[0].Role != "system" {
+		t.Fatalf("rewriteSystemRoles mutated the caller's request: role = %q", req.Input[0].Role)
+	}
+}
+
+func TestOtherRolesAreLeftAlone(t *testing.T) {
+	items := []pluginapi.Item{
+		{Type: "message", Role: "developer"},
+		{Type: "message", Role: "user"},
+		{Type: "message", Role: "assistant"},
+		{Type: "function_call_output", CallID: "call_1", Output: "42"},
+	}
+	got := rewriteSystemRoles(items)
+	for i := range items {
+		if got[i].Role != items[i].Role {
+			t.Fatalf("item %d role = %q, want %q", i, got[i].Role, items[i].Role)
+		}
+	}
+	if &got[0] != &items[0] {
+		t.Fatal("with nothing to rewrite the original slice should be returned as-is")
+	}
+
+	withSystem := append([]pluginapi.Item{{Type: "message", Role: "system"}}, items...)
+	rewritten := rewriteSystemRoles(withSystem)
+	if rewritten[0].Role != "developer" {
+		t.Fatalf("system must be renamed, got %q", rewritten[0].Role)
+	}
+	if withSystem[0].Role != "system" {
+		t.Fatalf("rewriteSystemRoles must not mutate its input, got %q", withSystem[0].Role)
+	}
+	for i := 1; i < len(rewritten); i++ {
+		if rewritten[i].Role != items[i-1].Role {
+			t.Fatalf("item %d was changed: %q != %q", i, rewritten[i].Role, items[i-1].Role)
+		}
+	}
+}
