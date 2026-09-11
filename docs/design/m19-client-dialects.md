@@ -138,13 +138,27 @@ func toolType(raw string) string // "" 视为 function
    `{"type":"namespace","name":"multi_agent_v1","tools":[ … 嵌套 function … ]}` 与
    `{"type":"web_search","external_web_access":false}`；新实现下两者都以客户端原始字节传给 provider。
 
-4. **观察项（未处理，非阻塞）**：Codex CLI 在这次成功运行的 stderr 里刷了 7 条
+4. **带工具往返的端到端验收（2026-09-11，重启后的真实实例 8088）**：任务「读取 README.md 第一行」
+   要求模型必须先调用工具，结果：
+   ```
+   exec /bin/bash -lc 'head -n 1 README.md'
+    succeeded: # ai-gateway
+   codex → # ai-gateway       退出码 0
+   ```
+   网关侧时间线正是两次模型调用（工具往返的定义）：`14:43:55 out=70`（产出工具调用）→
+   `14:43:56 out=5`（工具结果回灌后给出终答）。这把 Responses↔Chat 的双向翻译整条链路都验证到了：
+   工具定义 → chat `tools`；chat `tool_calls` → Responses `function_call` 输出项；
+   `function_call_output` → chat `tool` 消息；终答 → Responses 文本输出。
+   环境备注：在 DSH/harness 沙箱内 Codex 自带的 bubblewrap 起不来（嵌套 user namespace 不允许），
+   工具**执行**会失败但**协议往返已经成功**；普通终端无此限制。
+
+5. **观察项（未处理，非阻塞）**：Codex CLI 在这次成功运行的 stderr 里刷了 7 条
    `codex_core::util: OutputTextDelta without active item`。我核对了网关的输出：事件顺序是规范的
    （`response.created` → `in_progress` → `output_item.added` → `content_part.added` → 多个
    `output_text.delta` → `done` → `completed`），且 delta 的 `item_id` 正是 added 过的那个；
    答案与退出码均正确。判断为客户端侧的噪声或它对某类流式形状的额外期待，已记入 `docs/TODO.md`
    待观察，不在本里程碑内追查。
 
-5. **没有为降级新增协议通道**：原先的实现把"被丢弃的工具类型"上报为 degraded feature；改为保真透传后，
+6. **没有为降级新增协议通道**：原先的实现把"被丢弃的工具类型"上报为 degraded feature；改为保真透传后，
    "丢不丢"由 provider 决定，而协议里**没有** provider 上报降级的字段（`DegradedFeatures` 目前只由
    路由的能力校验写入）。本次不做协议扩展，工具被 provider 跳过的可见性作为后续议题记入 TODO。

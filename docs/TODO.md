@@ -275,7 +275,12 @@
 - [x] 测试：responses 3 例（未建模类型逐字节保留且未被折成 function / function 缺 name 仍 400 / `HasFunctionTools` 忽略未建模类型）、pluginapi 1 例（`Raw` 经协议往返不变、function 仍结构化）、providerkit 2 例（`developer→system` 且其它角色不动 / 非 function 工具不下发）；同步删除 httpapi 里"非 function 工具必须 400"的旧断言
 - [x] make verify 全绿（vet + 全量测试 + build + `internal/arch` 分层断言）
 - [x] **端到端验收：Codex CLI 零改动跑通** —— `multi_agent`、`web_search` 保持默认开启，仅把 `base_url` 指向新网关、模型设为 `deepseek-flash`：输出 `1+1 等于 2。`、退出码 0（此前网关 400，关掉工具后上游 400）
-- [ ] 观察项（非阻塞，未追查）：上述成功运行的 stderr 有 7 条 `codex_core::util: OutputTextDelta without active item`。已核对网关输出**事件顺序规范**且 delta 的 `item_id` 确为已 added 的那个，答案与退出码均正确 → 判断为客户端侧噪声或其对某类流式形状的额外期待
+- [x] **端到端验收（带工具往返，2026-09-11，跑在重启后的真实实例 8088 上）**：任务「读取 README.md 第一行」→ Codex 实际执行 `exec /bin/bash -lc 'head -n 1 README.md'` → `# ai-gateway` → 回答 `# ai-gateway`、退出码 0。网关侧时间线正是**两次模型调用**（工具往返的定义）：
+  `14:43:55 in=383 out=70 hit=5248`（模型产出工具调用）→ `14:43:56 in=251 out=5 hit=5504`（工具结果回灌后给出终答）。
+  这一次把 Responses↔Chat 的双向翻译整条链路都验证到了：Responses 工具定义 → chat `tools`；chat `tool_calls` → Responses `function_call` 输出项；`function_call_output` → chat `tool` 消息；终答 → Responses 文本。
+- [x] 环境备注（非网关问题）：在 DSH/harness 沙箱内跑 Codex 时，它自带的 bubblewrap 起不来（`No permissions to create a new namespace`，嵌套 user namespace 不被允许），工具执行会失败——此时**协议往返其实已经成功**（模型产出调用、Codex 尝试执行）。本轮用 `--dangerously-bypass-approvals-and-sandbox` 让闭环走完（任务严格只读，外层仍有 harness 沙箱兜底）；**在普通终端里不需要该参数**，`-s read-only` 即可。
+- [ ] 观察项（非阻塞，未追查）：上述成功运行的 stderr 有 1–7 条 `codex_core::util: OutputTextDelta without active item`。已核对网关输出**事件顺序规范**且 delta 的 `item_id` 确为已 added 的那个，答案与退出码均正确 → 判断为客户端侧噪声或其对某类流式形状的额外期待
+- [x] 同时确认既有修复在重启后的实例上仍然有效：codex 供应商探测 `ok=true`（`latency_ms=31149`，印证 60s deadline 的必要性——31s 远超旧的 10s）；`gpt-5.6-luna` 带 system 消息的请求返回 `好的，1+1=2。`（M10d）；界面资源含 `.spinner`/`withBusy`/`探测中`（M10c 的探测动画）
 - [ ] 后续议题：provider 跳过工具（如 chat 路径丢掉 `web_search`）目前**无上报通道** —— 协议里没有 provider 声明降级的字段（`DegradedFeatures` 只由路由的能力校验写入）。要为"能力降级可见"补协议字段，另立里程碑
 - [x] 回填设计文档「实现与设计差异」（含验收结果与两项观察），单提交并引用设计文档路径
 
