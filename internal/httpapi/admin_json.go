@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/mcpsrv"
 	"github.com/winger/ai-gateway/internal/modelmap"
 	"github.com/winger/ai-gateway/internal/providers"
 )
@@ -259,7 +260,7 @@ func hookJSON(h *domain.Hook) map[string]any {
 func mcpTokenJSON(t *domain.MCPToken) map[string]any {
 	return map[string]any{
 		"id": t.ID, "account_id": t.AccountID, "name": t.Name,
-		"token_prefix": t.TokenPrefix, "status": t.Status,
+		"token_prefix": t.TokenPrefix, "scope": mcpsrv.NormalizeScope(t.Scope), "status": t.Status,
 		"last_used_at": timeOrNil(t.LastUsedAt), "expires_at": timeOrNil(t.ExpiresAt),
 		"created_by": t.CreatedBy, "note": t.Note,
 		"created_at": t.CreatedAt.UTC().Format(time.RFC3339),

@@ -147,13 +147,16 @@ type APIKey struct {
 	CreatedAt        time.Time
 }
 
-// MCPToken authenticates the read-only MCP query endpoint.
+// MCPToken authenticates the MCP endpoint. Scope decides whether the token only
+// reads its own account (query) or may also drive the management API
+// (admin_read / admin).
 type MCPToken struct {
 	ID          int64
 	AccountID   int64
 	Name        string
 	TokenHash   string
 	TokenPrefix string
+	Scope       string
 	Status      string
 	LastUsedAt  *time.Time
 	ExpiresAt   *time.Time

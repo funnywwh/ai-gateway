@@ -151,7 +151,7 @@ func (db *DB) TouchAPIKey(ctx context.Context, id int64) error {
 	return nil
 }
 
-const mcpTokenCols = `id, account_id, name, token_hash, token_prefix, status, last_used_at,
+const mcpTokenCols = `id, account_id, name, token_hash, token_prefix, scope, status, last_used_at,
 	expires_at, created_by, note, created_at`
 
 func scanMCPToken(row rowScanner) (*domain.MCPToken, error) {
@@ -161,7 +161,7 @@ func scanMCPToken(row rowScanner) (*domain.MCPToken, error) {
 		createdAt           int64
 	)
 	if err := row.Scan(&tok.ID, &tok.AccountID, &tok.Name, &tok.TokenHash, &tok.TokenPrefix,
-		&tok.Status, &lastUsed, &expiresAt, &tok.CreatedBy, &tok.Note, &createdAt); err != nil {
+		&tok.Scope, &tok.Status, &lastUsed, &expiresAt, &tok.CreatedBy, &tok.Note, &createdAt); err != nil {
 		return nil, err
 	}
 	tok.LastUsedAt = timePtrFromNull(lastUsed)
@@ -227,17 +227,23 @@ func (db *DB) UpsertMCPToken(ctx context.Context, tok *domain.MCPToken) (int64, 
 	if tok.Status == "" {
 		tok.Status = "active"
 	}
+	if tok.Scope == "" {
+		// The database default is the read-only scope; spelling it out here keeps the
+		// in-memory value and the stored row in agreement.
+		tok.Scope = "query"
+	}
 	if _, err := db.write.ExecContext(ctx, `
-INSERT INTO mcp_tokens(account_id, name, token_hash, token_prefix, status, last_used_at, expires_at, created_by, note, created_at)
-VALUES(?,?,?,?,?,?,?,?,?,?)
+INSERT INTO mcp_tokens(account_id, name, token_hash, token_prefix, scope, status, last_used_at, expires_at, created_by, note, created_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(token_prefix) DO UPDATE SET
   account_id = excluded.account_id,
   name = excluded.name,
   token_hash = excluded.token_hash,
+  scope = excluded.scope,
   status = excluded.status,
   expires_at = excluded.expires_at,
   note = excluded.note`,
-		tok.AccountID, tok.Name, tok.TokenHash, tok.TokenPrefix, tok.Status,
+		tok.AccountID, tok.Name, tok.TokenHash, tok.TokenPrefix, tok.Scope, tok.Status,
 		unixPtr(tok.LastUsedAt), unixPtr(tok.ExpiresAt), tok.CreatedBy, tok.Note, unix(tok.CreatedAt)); err != nil {
 		return 0, fmt.Errorf("store: upsert mcp token: %w", err)
 	}

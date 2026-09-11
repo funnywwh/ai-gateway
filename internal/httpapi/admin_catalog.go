@@ -13,6 +13,7 @@ import (
 
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/ids"
+	"github.com/winger/ai-gateway/internal/mcpsrv"
 	"github.com/winger/ai-gateway/internal/secret"
 )
 
@@ -888,6 +889,7 @@ func (s *Server) handleAdminCreateMCPToken(w http.ResponseWriter, r *http.Reques
 		Account   string `json:"account"`
 		Note      string `json:"note"`
 		ExpiresAt string `json:"expires_at"`
+		Scope     string `json:"scope"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
@@ -928,11 +930,22 @@ func (s *Server) handleAdminCreateMCPToken(w http.ResponseWriter, r *http.Reques
 		expiresAt = &parsed
 	}
 
+	// The scope is the whole security decision for an MCP token: the default is the
+	// account-scoped read-only query surface, and anything wider has to be asked for.
+	scope := strings.TrimSpace(body.Scope)
+	if scope == "" {
+		scope = mcpsrv.ScopeQuery
+	}
+	if !mcpsrv.ValidScope(scope) {
+		writeAPIError(w, domain.ErrInvalidRequest("scope must be query, admin_read or admin"))
+		return
+	}
+
 	token := ids.MCPToken()
 	record := &domain.MCPToken{
 		AccountID: accountID, Name: strings.TrimSpace(body.Name),
 		TokenHash: secret.Hash(token), TokenPrefix: secret.Prefix(token),
-		Status: "active", CreatedBy: actor.Username, Note: body.Note, ExpiresAt: expiresAt,
+		Scope: scope, Status: "active", CreatedBy: actor.Username, Note: body.Note, ExpiresAt: expiresAt,
 	}
 	id, err := store.UpsertMCPToken(r.Context(), record)
 	if err != nil {
@@ -940,10 +953,13 @@ func (s *Server) handleAdminCreateMCPToken(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.audit(r.Context(), actor.Username, "create", "mcp_token", strconv.FormatInt(id, 10),
-		map[string]any{"name": record.Name, "account_id": accountID}, "ok")
+		map[string]any{"name": record.Name, "account_id": accountID, "scope": record.Scope}, "ok")
 	payload := mcpTokenJSON(record)
 	payload["token"] = token
 	payload["note"] = "store this token now: it cannot be retrieved again; API keys are rejected on /mcp"
+	if scope != mcpsrv.ScopeQuery {
+		payload["scope_note"] = "this token may call the management API through MCP; treat it like an administrator credential"
+	}
 	writeJSON(w, http.StatusCreated, payload)
 }
 
@@ -967,6 +983,76 @@ func (s *Server) handleAdminRevokeMCPToken(w http.ResponseWriter, r *http.Reques
 	}
 	s.audit(r.Context(), actor.Username, "revoke", "mcp_token", strconv.FormatInt(id, 10), nil, "ok")
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "revoked"})
+}
+
+// handleAdminPatchMCPToken changes a token's scope or status. Downgrading a
+// powerful token must not require re-issuing it: the old plaintext is gone, so an
+// admin could otherwise only revoke and start over.
+func (s *Server) handleAdminPatchMCPToken(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.adminActor(w, r, true)
+	if !ok {
+		return
+	}
+	store, ok := portReady(w, s.deps.MCPTokenStore, "MCP token management")
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeAPIError(w, domain.ErrInvalidRequest("invalid token id"))
+		return
+	}
+	var body struct {
+		Scope  *string `json:"scope"`
+		Status *string `json:"status"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
+		return
+	}
+	if body.Scope == nil && body.Status == nil {
+		writeAPIError(w, domain.ErrInvalidRequest("scope or status is required"))
+		return
+	}
+	if body.Scope != nil && !mcpsrv.ValidScope(*body.Scope) {
+		writeAPIError(w, domain.ErrInvalidRequest("scope must be query, admin_read or admin"))
+		return
+	}
+	if body.Status != nil && *body.Status != "active" && *body.Status != "revoked" {
+		writeAPIError(w, domain.ErrInvalidRequest("status must be active or revoked"))
+		return
+	}
+
+	tokens, err := store.ListMCPTokens(r.Context(), 0)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	var target *domain.MCPToken
+	for _, token := range tokens {
+		if token.ID == id {
+			target = token
+			break
+		}
+	}
+	if target == nil {
+		writeAPIError(w, domain.ErrNotFound(fmt.Sprintf("mcp token %d", id)))
+		return
+	}
+	previousScope := mcpsrv.NormalizeScope(target.Scope)
+	if body.Scope != nil {
+		target.Scope = *body.Scope
+	}
+	if body.Status != nil {
+		target.Status = *body.Status
+	}
+	if _, err := store.UpsertMCPToken(r.Context(), target); err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	s.audit(r.Context(), actor.Username, "update", "mcp_token", strconv.FormatInt(id, 10),
+		map[string]any{"scope": mcpsrv.NormalizeScope(target.Scope), "previous_scope": previousScope, "status": target.Status}, "ok")
+	writeJSON(w, http.StatusOK, mcpTokenJSON(target))
 }
 
 // ---------------------------------------------------------------------------
