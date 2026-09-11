@@ -11,6 +11,7 @@ import (
 
 	"github.com/winger/ai-gateway/internal/billing"
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/store"
 )
 
 // InvoiceAdmin is the invoicing and credit surface the management API needs.
@@ -18,6 +19,8 @@ type InvoiceAdmin interface {
 	BuildInvoice(ctx context.Context, accountID int64, start, end time.Time, groupBy string, replace bool, currency, note string) (*domain.Invoice, bool, error)
 	InvoiceAction(ctx context.Context, id int64, action, actor string) (*domain.Invoice, error)
 	Invoices(ctx context.Context, accountID int64, limit int) ([]*domain.Invoice, error)
+	InvoicesPage(ctx context.Context, accountID int64, limit, offset int) ([]*domain.Invoice, error)
+	CountInvoices(ctx context.Context, accountID int64) (int, error)
 	Invoice(ctx context.Context, id int64) (*domain.Invoice, error)
 	Grant(ctx context.Context, req billing.CreditRequest) (*domain.LedgerEntry, bool, error)
 	GenerateCodes(ctx context.Context, req billing.CodeBatchRequest) ([]string, error)
@@ -27,12 +30,16 @@ type InvoiceAdmin interface {
 type ReconciliationAdmin interface {
 	Reconcile(ctx context.Context, req billing.ReconcileRequest) (*domain.Reconciliation, error)
 	Reconciliations(ctx context.Context, limit int) ([]*domain.Reconciliation, error)
+	ReconciliationsPage(ctx context.Context, limit, offset int) ([]*domain.Reconciliation, error)
+	CountReconciliations(ctx context.Context) (int, error)
 	ReplayFailures(ctx context.Context, limit int) (billing.ReplayResult, error)
 }
 
 // RedemptionAdmin reads and redeems codes.
 type RedemptionAdmin interface {
 	Codes(ctx context.Context, batchID string, limit int) ([]*domain.RedemptionCode, error)
+	CodesPage(ctx context.Context, batchID string, limit, offset int) ([]*domain.RedemptionCode, error)
+	CountCodes(ctx context.Context, batchID string) (int, error)
 	RedeemCode(ctx context.Context, code string, accountID int64, actor string) (*domain.RedemptionCode, *domain.LedgerEntry, error)
 }
 
@@ -44,16 +51,34 @@ func (s *Server) handleAdminListInvoices(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	// The account can be named by path (/accounts/{id}/invoices) or by query
+	// (/invoices?account_id=…). The query form is what the console's account picker
+	// uses, and it was documented in the route table long before it was read here —
+	// a documented filter that silently does nothing is worse than no filter.
 	accountID := int64(0)
-	if raw := r.PathValue("id"); raw != "" {
+	raw := r.PathValue("id")
+	if raw == "" {
+		raw = r.URL.Query().Get("account_id")
+	}
+	if raw != "" {
 		parsed, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil {
-			writeAPIError(w, domain.ErrInvalidRequest("invalid account id"))
+		if err != nil || parsed < 0 {
+			writeAPIError(w, domain.ErrInvalidRequest("account_id must be a positive integer"))
 			return
 		}
 		accountID = parsed
 	}
-	invoices, err := store.Invoices(r.Context(), accountID, adminLimit(r, 50, 200))
+	page, err := pageInvoices.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	invoices, err := store.InvoicesPage(r.Context(), accountID, page.Limit, page.Offset)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	total, err := store.CountInvoices(r.Context(), accountID)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
@@ -62,7 +87,7 @@ func (s *Server) handleAdminListInvoices(w http.ResponseWriter, r *http.Request)
 	for _, invoice := range invoices {
 		out = append(out, invoiceJSON(invoice, false))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	writeList(w, out, total, page)
 }
 
 func (s *Server) handleAdminBuildInvoice(w http.ResponseWriter, r *http.Request) {
@@ -107,8 +132,16 @@ func (s *Server) handleAdminBuildInvoice(w http.ResponseWriter, r *http.Request)
 		periodCfg.Timezone = "UTC"
 		periodCfg = billing.PeriodConfig{StartDay: start.Day(), Timezone: "UTC"}
 	default:
-		writeAPIError(w, domain.ErrInvalidRequest("period must be current, previous or last30"))
-		return
+		// A natural month is what the route table documents and what an operator typing
+		// last month's bill reaches for. Supporting only the three keywords while the
+		// docs promised "2026-08" was a contract that could not be honoured.
+		month, err := time.Parse("2006-01", strings.TrimSpace(body.Period))
+		if err != nil {
+			writeAPIError(w, domain.ErrInvalidRequest(
+				"period must be current, previous, last30 or a natural month like 2026-08"))
+			return
+		}
+		at = month
 	}
 	start, end, err := billing.PeriodFor(at, periodCfg)
 	if err != nil {
@@ -379,16 +412,29 @@ func (s *Server) handleAdminAccountCreditList(w http.ResponseWriter, r *http.Req
 		return
 	}
 	from, to := adminWindow(r)
-	entries, err := ledger.Ledger(r.Context(), accountID, from, to, adminLimit(r, 100, 1000))
+	page, err := pageLedger.params(r)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	out := []map[string]any{}
+	// Charges are excluded in SQL, not after the page was cut: otherwise a page of 100
+	// rows could render 12 credits and the total would count rows the caller never sees.
+	window := store.LedgerWindow{
+		AccountID: accountID, From: from, To: to,
+		ExcludeKinds: []string{"charge"}, Limit: page.Limit, Offset: page.Offset,
+	}
+	entries, err := ledger.LedgerPage(r.Context(), window)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	total, err := ledger.CountLedger(r.Context(), window)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	out := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
-		if entry.Kind == "charge" {
-			continue
-		}
 		out = append(out, map[string]any{
 			"id": entry.ID, "kind": entry.Kind, "amount_micros": entry.AmountMicros,
 			"balance_after_micros": entry.BalanceAfterMicros, "ref_id": entry.RefID,
@@ -396,7 +442,7 @@ func (s *Server) handleAdminAccountCreditList(w http.ResponseWriter, r *http.Req
 			"created_at": entry.CreatedAt.UTC().Format(time.RFC3339),
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	writeList(w, out, total, page)
 }
 
 func (s *Server) handleAdminGenerateCodes(w http.ResponseWriter, r *http.Request) {
@@ -459,7 +505,18 @@ func (s *Server) handleAdminListCodes(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	codes, err := store.Codes(r.Context(), r.URL.Query().Get("batch_id"), adminLimit(r, 100, 500))
+	batchID := r.URL.Query().Get("batch_id")
+	page, err := pageCodes.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	codes, err := store.CodesPage(r.Context(), batchID, page.Limit, page.Offset)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	total, err := store.CountCodes(r.Context(), batchID)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
@@ -484,7 +541,7 @@ func (s *Server) handleAdminListCodes(w http.ResponseWriter, r *http.Request) {
 			"created_at":  code.CreatedAt.UTC().Format(time.RFC3339),
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	writeList(w, out, total, page)
 }
 
 func (s *Server) handleAdminRedeemCode(w http.ResponseWriter, r *http.Request) {
@@ -597,7 +654,17 @@ func (s *Server) handleAdminReconciliations(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	records, err := store.Reconciliations(r.Context(), adminLimit(r, 30, 200))
+	page, err := pageReconciliations.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	records, err := store.ReconciliationsPage(r.Context(), page.Limit, page.Offset)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	total, err := store.CountReconciliations(r.Context())
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
@@ -606,7 +673,7 @@ func (s *Server) handleAdminReconciliations(w http.ResponseWriter, r *http.Reque
 	for _, record := range records {
 		out = append(out, reconciliationJSON(record))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	writeList(w, out, total, page)
 }
 
 func reconciliationJSON(record *domain.Reconciliation) map[string]any {

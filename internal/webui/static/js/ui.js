@@ -223,13 +223,18 @@ function collect(fields, body) {
 }
 
 // table renders rows with a filter box, optional sortable headers and row actions.
-export function table({ columns, rows, filter, onFilter, empty, rowActions }) {
+//
+// filterPlaceholder is for server-paged tables: there the filter can only see the
+// current page, so pagedTable labels it accordingly instead of pretending to search
+// the whole table (see docs/design/m24-console-pagination.md).
+export function table({ columns, rows, filter, onFilter, empty, rowActions, filterPlaceholder }) {
   const wrap = el('div');
   let query = '';
   const head = el('thead', {}, [el('tr', {}, columns.map((col) => el('th', {
     text: col.label, onclick: col.sortable ? () => toggleSort(col.key) : undefined,
   })).concat(rowActions ? [el('th', { text: '' })] : []))]);
   const tbody = el('tbody');
+  const countLabel = el('span', { class: 'muted', id: 'count' });
   let sortKey = null;
   let sortDir = 1;
 
@@ -259,6 +264,7 @@ export function table({ columns, rows, filter, onFilter, empty, rowActions }) {
   function render() {
     clear(tbody);
     const data = visible();
+    countLabel.textContent = query ? '本页 ' + data.length + ' / ' + rows.length + ' 行' : '本页 ' + rows.length + ' 行';
     if (!data.length) {
       tbody.append(el('tr', {}, [el('td', { colspan: columns.length + (rowActions ? 1 : 0) }, [el('div', { class: 'empty', text: empty || '暂无数据' })])]));
       return;
@@ -276,12 +282,122 @@ export function table({ columns, rows, filter, onFilter, empty, rowActions }) {
   }
 
   if (filter !== false) {
-    const box = el('input', { type: 'search', placeholder: '过滤…' });
+    const box = el('input', { type: 'search', placeholder: filterPlaceholder || '过滤…' });
     box.addEventListener('input', () => { query = box.value; render(); });
-    wrap.append(el('div', { class: 'toolbar' }, [box, el('span', { class: 'muted', id: 'count' })]));
+    wrap.append(el('div', { class: 'toolbar' }, [box, countLabel]));
   }
   wrap.append(el('table', {}, [head, tbody]));
   const api = { refresh: (next) => { rows = next || rows; render(); }, node: wrap };
   render();
   return api;
+}
+
+// ---------------------------------------------------------------------------
+// server-side pagination
+// ---------------------------------------------------------------------------
+
+const PAGE_SIZES = [20, 50, 100];
+
+// pager renders the navigation below a list: the range it shows, the total the server
+// counted, the page size and prev/next/jump. It is presentation only — pagedTable owns
+// the window — and it lives outside the <table> element on purpose, so nothing that
+// reads tbody rows (styles, other pages, the UI harness) has to know about it.
+export function pager({ limit, offset, total, pageSizes, onChange }) {
+  const sizes = pageSizes || PAGE_SIZES;
+  const pages = Math.max(1, Math.ceil(total / limit));
+  const current = Math.min(pages, Math.floor(offset / limit) + 1);
+  const first = total === 0 ? 0 : offset + 1;
+  const last = Math.min(offset + limit, total);
+
+  const info = el('span', { class: 'muted', text: total === 0
+    ? '共 0 条'
+    : '共 ' + total + ' 条 · 本页 ' + first + '–' + last + ' · 第 ' + current + '/' + pages + ' 页' });
+
+  const sizeSelect = el('select', { title: '每页条数' },
+    sizes.map((n) => el('option', { value: n, text: n + ' 条/页', selected: n === limit })));
+  // A new page size always restarts at the first page: keeping the offset would show a
+  // window that no longer lines up with the pages the user was browsing.
+  sizeSelect.addEventListener('change', () => onChange({ limit: Number(sizeSelect.value), offset: 0 }));
+
+  const prev = el('button', { class: 'btn', text: '上一页', disabled: offset === 0 });
+  prev.addEventListener('click', () => onChange({ limit, offset: Math.max(0, offset - limit) }));
+  const next = el('button', { class: 'btn', text: '下一页', disabled: offset + limit >= total });
+  next.addEventListener('click', () => onChange({ limit, offset: offset + limit }));
+
+  const jump = el('input', { type: 'number', min: 1, max: pages, value: String(current), 'aria-label': '跳至第几页' });
+  const go = el('button', { class: 'btn', text: '跳转' });
+  const jumpTo = () => {
+    const target = Math.min(pages, Math.max(1, Number(jump.value) || 1));
+    if (target === current) return;
+    onChange({ limit, offset: (target - 1) * limit });
+  };
+  go.addEventListener('click', jumpTo);
+  jump.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') jumpTo(); });
+
+  return el('div', { class: 'pager' }, [info,
+    el('div', { class: 'pager-actions' }, [sizeSelect, prev, next, jump, go])]);
+}
+
+// pagedTable couples a server-paged list to table(). It owns {limit, offset, total}:
+// load({limit, offset}) asks the page for one window and must answer with an object
+// carrying data + total. The returned handle is what a page keeps:
+//
+//   const view = pagedTable({ columns, load: ({limit, offset}) => api.get('/keys', {limit, offset}) });
+//   await view.refresh();       // (re)load the current window
+//   await view.reset();         // filters changed: back to the first page
+//
+// Failure never locks the pager: onError reports it and the previous window stays put.
+export function pagedTable({ columns, load, pageSize, pageSizes, rowActions, empty, filter = true, onError }) {
+  const state = { limit: pageSize || 20, offset: 0, total: 0, loaded: false };
+  const host = el('div');
+  const loading = el('div', { class: 'empty', text: '加载中…' });
+  host.append(loading);
+  let view = null;
+
+  function renderPager() {
+    if (!state.loaded) return;
+    const node = pager({
+      limit: state.limit, offset: state.offset, total: state.total, pageSizes,
+      onChange: (next) => { state.limit = next.limit; state.offset = next.offset; loadWindow().catch(report); },
+    });
+    const existing = host.querySelector('.pager');
+    if (existing) existing.replaceWith(node); else host.append(node);
+  }
+
+  function report(err) {
+    if (onError) onError(err);
+    else throw err;
+  }
+
+  async function loadWindow() {
+    for (;;) {
+      const payload = await load({ limit: state.limit, offset: state.offset });
+      const rows = payload.data || [];
+      // total is what the server counted after filtering; an endpoint that predates
+      // pagination would omit it, and then the page can only speak for itself.
+      state.total = payload.total === undefined || payload.total === null ? state.offset + rows.length : Number(payload.total);
+      if (!rows.length && state.offset > 0) {
+        // Deleting the last row of the last page must not leave an empty page on screen.
+        state.offset = Math.max(0, state.offset - state.limit);
+        continue;
+      }
+      if (!view) {
+        view = table({ columns, rows, filter, empty, rowActions, filterPlaceholder: filter === false ? undefined : '本页过滤…' });
+        clear(host);
+        host.append(view.node);
+      } else {
+        view.refresh(rows);
+      }
+      state.loaded = true;
+      renderPager();
+      return;
+    }
+  }
+
+  return {
+    node: host,
+    refresh: () => loadWindow().catch(report),
+    reset: () => { state.offset = 0; return loadWindow().catch(report); },
+    state: () => ({ ...state }),
+  };
 }

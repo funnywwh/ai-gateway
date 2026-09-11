@@ -94,6 +94,14 @@ func (db *DB) CountLedger(ctx context.Context, w LedgerWindow) (int, error)
 账户/供应商/模型下拉框用的是同一批列表端点。它们的调用显式带 `limit: 1000`（＝上限），
 并在 §6 记录已知限制：选择器最多 1000 项；主表格分页不受影响。
 
+### 2.6b 顺手修掉的「文档里有、代码里没有」的过滤器
+
+`GET /invoices` 的路由表从 M12 起就写着 `account_id` 查询参数，而 handler 只读路径参数
+`r.PathValue("id")`，也就是说 `/invoices?account_id=7` 会**静默返回所有账户的账单**。
+控制台的账单页正好需要它（原来是在浏览器里 `.filter`），所以本轮让它真正生效：
+路径与查询二者取一（路径优先），非整数/负数 → 400，`accountID <= 0` 仍表示全部账户。
+这是 M23「后台能存什么必须等于后台真正读什么」同一类问题，不修就会在分页后变成可见回归。
+
 ### 2.7 `offset` 非法即 400，`limit` 沿用宽容语义
 
 `limit` 继续用 `adminLimit`（缺省/非法/≤0 → 默认值，超上限 → 夹住），保持既有行为；
@@ -187,9 +195,8 @@ export function pagedTable({ columns, load, pageSize = 20, pageSizes = [20, 50, 
 - 游标（cursor）分页：列表按 id/时间倒序且基本只追加，offset 足够；
 - 门户（portal）页面尚未实现，不在本轮；
 - 不分页并写明理由的界面：概览页（数据来自 `/stats` 快照）、设置页（键值 + 汇率表）、
-  定价页（`/pricing/targets` 是选择器网格 + 搜索，不是表格）、供应商详情弹框的上游模型表
-  （对话框明细，用 `limit=1000`）、供应商日志弹框（环形缓冲尾部，`limit` 语义更贴切）、
-  `/provider-kinds`（内建类型固定集）。
+  定价页（`/pricing/targets` 是选择器网格 + 搜索，不是表格）、供应商日志弹框
+  （环形缓冲尾部，`limit` 语义更贴切）、`/provider-kinds`（内建类型固定集）。
 
 ## 7. 测试策略
 
@@ -207,4 +214,49 @@ export function pagedTable({ columns, load, pageSize = 20, pageSizes = [20, 50, 
 
 ## 8. 实现与设计差异
 
-（实现完成后回填。）
+1. **顺手修掉两处「文档里有、代码里没有」的过滤器**（都是走查时撞上的，不修就会在分页后变成可见回归）：
+   - `GET /invoices` 的路由表从 M12 起就写着 `account_id` 查询参数，handler 却只读路径参数
+     `r.PathValue("id")` —— 也就是说 `/invoices?account_id=7` **静默返回所有账户**。控制台账单页要在
+     服务端按账户过滤（分页后不能再在浏览器 `.filter`），所以让它真正生效：路径/查询二者取一（路径优先），
+     非整数/负数 → 400（`accountID <= 0` 仍表示全部账户）。
+   - `POST /accounts/{id}/invoices` 的 `period` 文档写「自然月账期，例如 2026-08」，实现只认
+     `current|previous|last30`，文档里的写法一律 400。现在 `YYYY-MM` 真正可用（`time.Parse("2006-01")`
+     → 用该月走 `billing.PeriodFor`），报错文案也列出全部可接受形式。
+   两处都有测试：`internal/httpapi/pagination_test.go`（账户过滤）与
+   `internal/httpapi/admin_billing_contract_test.go`（自然月 + 非法值 400）。
+2. **页面大小的默认值与上限集中成一个 `pageSpec`**：设计里只说"默认值/上限按端点不同"。
+   实现把每个族的 `{Def, Max}` 放在 `internal/httpapi/pagination.go`，handler 用 `spec.params(r)` 解析、
+   路由表用 `spec.fields()` 生成文档 —— 于是 `admin_describe` 里写的数字与 handler 强制的数字**不可能漂移**。
+3. **`writeList` 之外多了一个 `listPayload`**：`/backups` 要在信封上带 `dir`/`total_bytes`/`next_run`，
+   因此提供"返回 map 版本"的同一个渲染函数，避免该端点自己拼信封造成字段不一致。
+   `/backups` 归到**内存窗口**（保留策略把行数封顶），这样 `total_bytes` 仍描述整个备份目录；
+   控制台的「份数」随之改用 `total`（`count` 现在是本页条数）。
+4. **配置类端点仍整表读取**（设计 §2.1 的取舍），只有 `/backups` 由 SQL 窗口改为内存窗口（同上）。
+5. **控制台细节**：分页默认 20 条/页，可选 20/50/100；`table()` 新增 `filterPlaceholder`，
+   分页表格的过滤框标成「本页过滤…」，并把一直空着的 `#count` span 填成「本页 N 行」；
+   `pager` 渲染在 `<table>` 之外的兄弟 `<div>`，`tbody tr` 选择器与既有样式不受影响。
+6. **`ui.js` 的多余能力没有引入**：不做列排序/列宽/多选；窗口状态只由 `pagedTable` 持有，
+   页面拿到的句柄只有 `refresh()` / `reset()` / `state()`。
+7. **走查工具**：`scripts/ui-harness` 新增 `paging.page.html`（`#paging` 视图）：它是唯一**按窗口**回答
+   `/accounts` 的 harness 页（解析 URL 里的 `limit`/`offset` 再切片），断言读的是**带查询串的原始 URL**
+   —— 旧的两个 harness 页会把 query 丢掉，分页在那里无从验证。`run.sh` 的视图列表与 README 同步更新。
+8. **MCP 侧**：`admin_list_*` 通过路由表拿到 `offset`（`admin_describe`/`admin_endpoints` 自动可见）；
+   账户自助查询工具（`get_ledger`/`list_requests`/`list_invoices`）按设计**没有**加 `offset`。
+9. **DAL 取舍落地**：旧方法（`ListAudit`/`ListRequestLogs`/`ListLedger`/`ListInvoices`/
+   `ListRedemptionCodes`/`ListReconciliations`）都改成一行包装，`registry`/`bootstrap`/`mcpsrv`/
+   `billing` 的调用点**一行未改**；`LedgerWindow.ExcludeKinds` 按设计在 SQL 里排除 charge。
+
+### 验证与实测结论（2026-09-11）
+
+- `internal/httpapi/pagination_test.go`（7 个用例）：配置类窗口/越界/夹上限/`offset` 非法 400、
+  历史类第二页内容与 `total`、额度明细只数非 charge、账单账户过滤（路径与查询两种写法）、
+  `/backups` 的 `total_bytes` 覆盖全部作业；`internal/store/pagination_test.go`（4 个用例）覆盖
+  Page/Count/`ExcludeKinds` 与旧方法的"第一页"语义。
+- `scripts/ui-harness` 九个视图全绿（`docs 23 / detail 20 / create 6 / plugin 17 / plugin-cached 16 /
+  currency 16 / keys 17 / requests 10 / paging 30` 项断言）；`paging` 视图证明了首屏
+  `limit=20&offset=0`、范围与总条数文案、首页禁用上一页、下一页发 `offset=20`、
+  改页大小回到第 1 页、**删空末页自动回退一页**、跳页越界夹到最后一页。
+- 隔离实例真机走查（`:8098` + 全新库 + 新二进制，`ALL CHECKS PASSED`）：55 条请求日志 3 页且互不重叠、
+  45 张兑换码单批次分页、账本 67 行（含 55 条真实 charge）而额度明细 `total=12` 且不含 charge、
+  3 张账单按账户过滤、审计流水跨页、13 个账户的窗口切片、`offset=abc`/`-1` → 400、
+  `limit=99999` → 夹到 500；并确认二进制里内嵌的 `ui.js` 带 `pagedTable`、`accounts.js` 会发 `offset`。

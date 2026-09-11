@@ -14,7 +14,9 @@ import (
 
 	"github.com/winger/ai-gateway/internal/admin"
 	"github.com/winger/ai-gateway/internal/apikey"
+	"github.com/winger/ai-gateway/internal/backup"
 	"github.com/winger/ai-gateway/internal/balancer"
+	"github.com/winger/ai-gateway/internal/billing"
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/mcpsrv"
@@ -110,6 +112,15 @@ type adminFixture struct {
 
 func newAdminFixture(t *testing.T) *adminFixture {
 	t.Helper()
+	return newAdminFixtureWithout(t, "")
+}
+
+// newAdminFixtureWithout builds the management fixture with one resource port left
+// unwired, by name ("backups", "invoices", "ledger", "codes", "reconciliation"). The
+// unwired path is part of the contract: portReady answers 501/400 and the MCP bridge
+// must pass that refusal through unchanged, so a test needs a way to reach it.
+func newAdminFixtureWithout(t *testing.T, unwired string) *adminFixture {
+	t.Helper()
 	ctx := context.Background()
 
 	cfg := config.Default()
@@ -177,31 +188,49 @@ func newAdminFixture(t *testing.T) *adminFixture {
 	}
 
 	auth := admin.NewAuth(db, admin.Config{SessionTTL: time.Hour, LoginAttempts: 20, LoginWindow: time.Minute})
-	srv := New(Deps{
-		Config:        &cfg,
-		FX:            fxStore,
-		ReloadFX:      reloadFX,
-		Registry:      reg,
-		Router:        router,
-		Dispatcher:    dispatcher,
-		Verifier:      apikey.New(db, apikey.DefaultConfig()),
-		Limiter:       quota.New(4),
-		Meter:         usage.New(db),
-		Records:       db,
-		Admin:         auth,
-		AdminStore:    db,
-		MCP:           mcpService,
-		MCPTokens:     db,
-		Accounts:      db,
-		Providers:     db,
-		Models:        db,
-		Tags:          db,
-		HookStore:     db,
-		MCPTokenStore: db,
-		Settings:      db,
-		Secrets:       sealer,
-		Prober:        prober,
-		PortalUsers:   db,
+	// The billing reads and the backup manager are wired here as well: they are the
+	// ports the paged list endpoints need (M24), and a fixture without them would make
+	// those endpoints answer 501 instead of a page.
+	billingService := billing.NewService(ctx, db, billing.ServiceConfig{
+		Writer:         billing.Config{BatchSize: 2, FlushInterval: 5 * time.Millisecond},
+		ReservationTTL: time.Minute,
+	}, nil)
+	t.Cleanup(func() { billingService.Close(time.Second) })
+	backupManager := backup.New(backup.Config{
+		DatabasePath: cfg.Database.Path, Dir: filepath.Join(t.TempDir(), "backups"),
+	}, db, nil)
+
+	deps := Deps{
+		Config:         &cfg,
+		FX:             fxStore,
+		ReloadFX:       reloadFX,
+		Registry:       reg,
+		Router:         router,
+		Dispatcher:     dispatcher,
+		Verifier:       apikey.New(db, apikey.DefaultConfig()),
+		Limiter:        quota.New(4),
+		Meter:          usage.New(db),
+		Records:        db,
+		Admin:          auth,
+		AdminStore:     db,
+		MCP:            mcpService,
+		MCPTokens:      db,
+		Accounts:       db,
+		Providers:      db,
+		Models:         db,
+		Tags:           db,
+		HookStore:      db,
+		MCPTokenStore:  db,
+		Settings:       db,
+		Secrets:        sealer,
+		Prober:         prober,
+		PortalUsers:    db,
+		Billing:        billingService,
+		Ledger:         billingService,
+		Invoices:       billingService,
+		Codes:          billingService,
+		Reconciliation: billingService,
+		Backups:        backupManager,
 		Reload: func(ctx context.Context) (any, error) {
 			snap, err := reg.Reload(ctx)
 			if err != nil {
@@ -214,7 +243,23 @@ func newAdminFixture(t *testing.T) *adminFixture {
 			return nil
 		},
 		Version: "test",
-	})
+	}
+	switch unwired {
+	case "backups":
+		deps.Backups = nil
+	case "invoices":
+		deps.Invoices = nil
+	case "ledger":
+		deps.Ledger = nil
+	case "codes":
+		deps.Codes = nil
+	case "reconciliation":
+		deps.Reconciliation = nil
+	case "":
+	default:
+		t.Fatalf("unknown port to leave unwired: %q", unwired)
+	}
+	srv := New(deps)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	fixture.server = ts

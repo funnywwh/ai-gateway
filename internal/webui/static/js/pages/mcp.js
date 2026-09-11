@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, table, modal, toast, statusBadge, formatTime, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
+import { el, card, pagedTable, modal, toast, statusBadge, formatTime, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
 
 // The scope is the whole security decision of an MCP token, so it is spelled out
 // in the list, in the issue form and in the "change permission" dialog.
@@ -26,39 +26,34 @@ export async function render({ page, actions, session }) {
   const create = el('button', { class: 'btn btn-primary', text: '签发令牌', disabled: readonly });
   const refresh = el('button', { class: 'btn', text: '刷新' });
   actions.append(refresh, create);
-  const accountsPromise = api.get('/accounts');
-  let view;
+  // 账户下拉框要一次拿全：显式请求上限 1000（配置类列表的服务端上限），分页表格不带这个 limit。
+  const accountsPromise = api.get('/accounts', { limit: 1000 });
+  const view = pagedTable({
+    columns: [
+      { key: 'name', label: '名称' },
+      { key: 'account', label: '账户' },
+      { key: 'scope', label: '权限', render: (row) => scopeBadge(row.scope) },
+      { key: 'token_prefix', label: '前缀', render: (row) => el('code', { text: row.token_prefix + '…' }) },
+      { key: 'status', label: '状态', render: (row) => statusBadge(row.status) },
+      { key: 'last_used_at', label: '最近使用', render: (row) => formatTime(row.last_used_at) },
+      { key: 'expires_at', label: '过期', render: (row) => formatTime(row.expires_at) },
+    ],
+    rowActions: (row) => readonly || row.status === 'revoked' ? [] : [
+      el('button', { class: 'btn', text: '改权限', onclick: () => changeScope(row, () => view.refresh()) }),
+      el('button', { class: 'btn btn-danger', text: '吊销', onclick: () => revoke(row, () => view.refresh()) }),
+    ],
+    // 账户名来自上面那份完整列表；令牌列表本身由服务端分页。
+    load: async ({ limit, offset }) => {
+      const [payload, accountsPayload] = await Promise.all([api.get('/mcp-tokens', { limit, offset }), accountsPromise]);
+      const byId = new Map(((accountsPayload.data) || []).map((a) => [a.id, a.name]));
+      return { ...payload, data: (payload.data || []).map((token) => ({ ...token, account: byId.get(token.account_id) || ('#' + token.account_id) })) };
+    },
+    onError: (err) => toast(api.errorMessage(err), 'error'),
+  });
+  page.append(card('MCP 令牌', view.node, [
+    el('span', { class: 'muted', text: 'scope=query 只能查本账户数据；scope=admin_read / admin 的令牌可通过 MCP 执行后台接口（admin_endpoints / admin_describe / admin_request），请按最短有效期限签发。API Key 不能用于 /mcp' })]));
 
-  async function load() {
-    const payload = await api.get('/mcp-tokens');
-    const accounts = (await accountsPromise).data || [];
-    const byId = new Map(accounts.map((a) => [a.id, a.name]));
-    const rows = (payload.data || []).map((token) => ({ ...token, account: byId.get(token.account_id) || ('#' + token.account_id) }));
-    if (!view) {
-      view = table({
-        columns: [
-          { key: 'name', label: '名称' },
-          { key: 'account', label: '账户' },
-          { key: 'scope', label: '权限', render: (row) => scopeBadge(row.scope) },
-          { key: 'token_prefix', label: '前缀', render: (row) => el('code', { text: row.token_prefix + '…' }) },
-          { key: 'status', label: '状态', render: (row) => statusBadge(row.status) },
-          { key: 'last_used_at', label: '最近使用', render: (row) => formatTime(row.last_used_at) },
-          { key: 'expires_at', label: '过期', render: (row) => formatTime(row.expires_at) },
-        ],
-        rows,
-        rowActions: (row) => readonly || row.status === 'revoked' ? [] : [
-          el('button', { class: 'btn', text: '改权限', onclick: () => changeScope(row, load) }),
-          el('button', { class: 'btn btn-danger', text: '吊销', onclick: () => revoke(row, load) }),
-        ],
-      });
-      page.append(card('MCP 令牌', view.node, [
-        el('span', { class: 'muted', text: 'scope=query 只能查本账户数据；scope=admin_read / admin 的令牌可通过 MCP 执行后台接口（admin_endpoints / admin_describe / admin_request），请按最短有效期限签发。API Key 不能用于 /mcp' })]));
-    } else {
-      view.refresh(rows);
-    }
-  }
-
-  refresh.addEventListener('click', () => load().catch((err) => toast(api.errorMessage(err), 'error')));
+  refresh.addEventListener('click', () => view.refresh());
   create.addEventListener('click', async () => {
     const accounts = (await accountsPromise).data || [];
     if (!accounts.length) { toast('请先创建一个账户', 'error'); return; }
@@ -77,9 +72,9 @@ export async function render({ page, actions, session }) {
       }),
     });
     if (!result) return;
-    showToken(result.token, result.scope, load);
+    showToken(result.token, result.scope, () => view.refresh());
   });
-  await load();
+  await view.refresh();
 }
 
 async function revoke(row, reload) {

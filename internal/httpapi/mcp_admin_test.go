@@ -378,7 +378,7 @@ func TestMCPAdminRequestAuditsTheAgent(t *testing.T) {
 }
 
 func TestMCPAdminRequestPassesThroughUnwiredPorts(t *testing.T) {
-	f := newAdminFixture(t)
+	f := newAdminFixtureWithout(t, "backups")
 	f.seedScopedMCPToken(t, testAdminMCPToken, mcpsrv.ScopeAdmin)
 
 	// This fixture wires no backup manager. The endpoint's own refusal (400

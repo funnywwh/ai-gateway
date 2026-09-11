@@ -8,34 +8,47 @@ import (
 	"github.com/winger/ai-gateway/internal/domain"
 )
 
-// ListRequestLogs returns recorded requests of one account (newest first).
-func (db *DB) ListRequestLogs(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*domain.RequestLogRecord, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 100
-	}
-	query := `
-SELECT id, request_id, api_key_id, account_id, endpoint, request_json, response_reasoning,
-       response_text, reasoning_recorded, output_text_recorded, request_bytes, response_bytes,
-       truncated, record_input_mode, record_reasoning, record_output_text, status, created_at
-FROM request_logs WHERE 1 = 1`
+// requestLogFilter builds the WHERE clause shared by the request-log page query and
+// its count, so a page can never disagree with the total it reports.
+func requestLogFilter(accountID int64, from, to time.Time) (string, []any) {
+	where := " WHERE 1 = 1"
 	args := []any{}
 	// account_id <= 0 means "every account": the management console lists requests across
 	// tenants, so the filter has to be optional (it used to be applied unconditionally,
 	// which silently returned nothing for the console).
 	if accountID > 0 {
-		query += " AND account_id = ?"
+		where += " AND account_id = ?"
 		args = append(args, accountID)
 	}
 	if !from.IsZero() {
-		query += " AND created_at >= ?"
+		where += " AND created_at >= ?"
 		args = append(args, unix(from))
 	}
 	if !to.IsZero() {
-		query += " AND created_at <= ?"
+		where += " AND created_at <= ?"
 		args = append(args, unix(to))
 	}
-	query += " ORDER BY id DESC LIMIT ?"
-	args = append(args, limit)
+	return where, args
+}
+
+// ListRequestLogs returns the newest recorded requests of one account (first page).
+func (db *DB) ListRequestLogs(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*domain.RequestLogRecord, error) {
+	return db.ListRequestLogsPage(ctx, accountID, from, to, limit, 0)
+}
+
+// ListRequestLogsPage returns one page of recorded requests (newest first).
+func (db *DB) ListRequestLogsPage(ctx context.Context, accountID int64, from, to time.Time, limit, offset int) ([]*domain.RequestLogRecord, error) {
+	limit = normalizeLimit(limit, 100, 1000)
+	if offset < 0 {
+		offset = 0
+	}
+	where, args := requestLogFilter(accountID, from, to)
+	query := `
+SELECT id, request_id, api_key_id, account_id, endpoint, request_json, response_reasoning,
+       response_text, reasoning_recorded, output_text_recorded, request_bytes, response_bytes,
+       truncated, record_input_mode, record_reasoning, record_output_text, status, created_at
+FROM request_logs` + where + " ORDER BY id DESC LIMIT ? OFFSET ?"
+	args = append(args, limit, offset)
 
 	rows, err := db.read.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -69,4 +82,11 @@ FROM request_logs WHERE 1 = 1`
 		return nil, fmt.Errorf("store: iterate request logs: %w", err)
 	}
 	return out, nil
+}
+
+// CountRequestLogs counts the recorded requests the same filters select. The console
+// needs it to show "共 N 条" and to know whether a next page exists.
+func (db *DB) CountRequestLogs(ctx context.Context, accountID int64, from, to time.Time) (int, error) {
+	where, args := requestLogFilter(accountID, from, to)
+	return db.countRows(ctx, "request_logs", where, args, "request logs")
 }

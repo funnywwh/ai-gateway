@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>pagination console harness</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="actions" class="toolbar"></div>
+<div id="page"></div>
+<div id="modal-root"></div>
+<div id="toasts" class="toasts"></div>
+<script>
+// The pagination harness. Unlike providers.page.html — where the fixtures are captured
+// snapshots served per path — this page answers /accounts *by window*: it parses
+// limit/offset out of the request URL and returns that slice with a total. A pager can
+// only be verified against a server that really moves, and the recorded URLs are what
+// the assertions read (the older pages throw the query string away).
+const FIXTURES = __FIXTURES__;
+
+// 45 rows, newest first, exactly like the server orders them (id DESC).
+const ACCOUNTS = [];
+for (let id = 45; id >= 1; id--) {
+  ACCOUNTS.push({
+    id, name: 'acct-' + String(id).padStart(2, '0'), billing_mode: 'postpaid',
+    status: 'active', balance_micros: 1000000 + id, credit_limit_micros: 10000000,
+    low_balance_threshold_micros: 0, overdraft_limit_micros: 0, markup_override_bp: 0,
+    auto_suspend: false, auto_resume: false, note: '',
+  });
+}
+
+const reply = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+
+// __emptyOnce makes the server answer one specific offset with an empty page, which is
+// what the console sees after the last row of the last page is deleted.
+function accountsPage(params) {
+  const limit = Number(params.get('limit') || 200);
+  const offset = Number(params.get('offset') || 0);
+  if (window.__emptyOnce === offset) {
+    window.__emptyOnce = null;
+    return { data: [], count: 0, total: ACCOUNTS.length, limit, offset, has_more: false };
+  }
+  const data = ACCOUNTS.slice(offset, offset + limit);
+  return {
+    data, count: data.length, total: ACCOUNTS.length, limit, offset,
+    has_more: offset + data.length < ACCOUNTS.length,
+  };
+}
+
+window.fetch = async (url) => {
+  const raw = String(url).replace('/admin/api/v1', '');
+  window.__urls = (window.__urls || []).concat([raw]);
+  const [path, query] = raw.split('?');
+  if (path === '/accounts') return reply(accountsPage(new URLSearchParams(query || '')));
+  const body = FIXTURES[path] !== undefined ? FIXTURES[path] : { data: [], total: 0 };
+  return reply(body);
+};
+
+const errors = [];
+window.onerror = (msg) => errors.push('onerror: ' + msg);
+window.onunhandledrejection = (ev) => errors.push('rejection: ' + ev.reason);
+
+function report(data) {
+  data.errors = errors;
+  data.toasts = [...document.querySelectorAll('.toast')].map((n) => n.textContent);
+  const url = '/report?data=' + encodeURIComponent(JSON.stringify(data));
+  try { if (navigator.sendBeacon && navigator.sendBeacon(url)) return; } catch (err) { /* fall through */ }
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url, false);
+    xhr.send();
+  } catch (err) { /* reporting must never break the harness */ }
+}
+</script>
+<script type="module">
+import { render as renderAccounts } from '/js/pages/accounts.js';
+
+const view = location.hash.replace('#', '') || 'paging';
+const checks = {};
+const page = () => document.getElementById('page');
+const pageText = () => page().textContent;
+const urls = () => window.__urls || [];
+const lastUrl = () => urls()[urls().length - 1] || '';
+const find = (label) => [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === label);
+const rows = () => page().querySelectorAll('tbody tr').length;
+// Microtasks only: headless screenshot mode may tear the page down as soon as it has a
+// picture, so nothing here may wait on a timer (see scripts/ui-harness/README.md).
+const settle = async () => { for (let i = 0; i < 300; i++) await Promise.resolve(); };
+
+try {
+  await renderAccounts({ page: page(), actions: document.getElementById('actions'), session: { role: 'admin' } });
+  await settle();
+
+  // 1. The first window is explicit about where it starts.
+  checks.firstRequest = lastUrl() === '/accounts?limit=20&offset=0';
+  checks.defaultPageSize = page().querySelector('.pager select').value === '20';
+  checks.rowsOnFirstPage = rows() === 20;
+  checks.rowContent = pageText().includes('acct-45');
+  checks.totalShown = pageText().includes('共 45 条');
+  checks.rangeShown = pageText().includes('本页 1–20') && pageText().includes('第 1/3 页');
+  checks.countLabel = pageText().includes('本页 20 行');
+  checks.filterIsScopedToPage = page().querySelector('input[type=search]').placeholder === '本页过滤…';
+  checks.prevDisabledOnFirstPage = find('上一页').disabled === true;
+  checks.nextEnabled = find('下一页').disabled === false;
+
+  // 2. Next page asks the server for the next window, not for a bigger one.
+  find('下一页').click();
+  await settle();
+  checks.secondRequest = lastUrl() === '/accounts?limit=20&offset=20';
+  checks.rowsOnSecondPage = rows() === 20;
+  checks.secondRange = pageText().includes('本页 21–40') && pageText().includes('第 2/3 页');
+  checks.prevEnabledNow = find('上一页').disabled === false;
+  checks.secondPageContent = pageText().includes('acct-25') && !pageText().includes('acct-45');
+
+  // 3. The last page is short and cannot go further.
+  find('下一页').click();
+  await settle();
+  checks.thirdRequest = lastUrl() === '/accounts?limit=20&offset=40';
+  checks.rowsOnLastPage = rows() === 5;
+  checks.lastRange = pageText().includes('本页 41–45') && pageText().includes('第 3/3 页');
+  checks.nextDisabledOnLastPage = find('下一页').disabled === true;
+
+  // 4. Back, then change the page size: a new size restarts at the first page. At 50 per
+  //    page the 45 rows fit in a single page, so there is no next page any more.
+  find('上一页').click();
+  await settle();
+  checks.backRequest = lastUrl() === '/accounts?limit=20&offset=20';
+  const size = page().querySelector('.pager select');
+  size.value = '50';
+  size.dispatchEvent(new Event('change'));
+  await settle();
+  checks.pageSizeRequest = lastUrl() === '/accounts?limit=50&offset=0';
+  checks.pageSizeRows = rows() === 45;
+  checks.pageSizeRange = pageText().includes('本页 1–45') && pageText().includes('第 1/1 页');
+  checks.pageSizeDisablesNext = find('下一页').disabled === true;
+
+  // 5. Back to 20 per page (three pages again), then prove that deleting the last row of
+  //    the last page does not strand the operator on an empty page: the server answers
+  //    the requested window with nothing, and the table steps back one window and
+  //    reloads it.
+  size.value = '20';
+  size.dispatchEvent(new Event('change'));
+  await settle();
+  checks.pageSizeBackRequest = lastUrl() === '/accounts?limit=20&offset=0';
+  window.__emptyOnce = 20;
+  find('下一页').click();
+  await settle();
+  const tail = urls().slice(-2);
+  checks.emptyPageRetried = tail.length === 2 &&
+    tail[0].endsWith('limit=20&offset=20') && tail[1].endsWith('limit=20&offset=0');
+  checks.recoveredRows = rows() === 20;
+  checks.recoveredRange = pageText().includes('第 1/3 页');
+
+  // 6. An out-of-range jump is clamped to the last page instead of producing a blank screen.
+  const jump = page().querySelector('.pager input[type=number]');
+  jump.value = '99';
+  find('跳转').click();
+  await settle();
+  checks.jumpClampedToLastPage = lastUrl() === '/accounts?limit=20&offset=40';
+  checks.jumpRange = pageText().includes('第 3/3 页');
+
+  const flags = Object.entries(checks).filter(([, v]) => typeof v === 'boolean');
+  const numeric = Object.entries(checks).filter(([, v]) => typeof v === 'number');
+  report({ view, stage: 'done', checks, urls: urls(),
+    ok: errors.length === 0 && flags.every(([, v]) => v === true) && numeric.every(([, v]) => v > 0) });
+} catch (err) {
+  report({ view, stage: 'threw', checks, thrown: String(err && err.stack ? err.stack : err), urls: urls() });
+}
+</script>
+</body>
+</html>

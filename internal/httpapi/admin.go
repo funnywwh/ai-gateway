@@ -26,9 +26,13 @@ type AdminStore interface {
 	ListAPIKeys(ctx context.Context, accountID int64) ([]*domain.APIKey, error)
 	UpsertAPIKey(ctx context.Context, k *domain.APIKey) (int64, error)
 	ListRequestLogs(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*domain.RequestLogRecord, error)
+	ListRequestLogsPage(ctx context.Context, accountID int64, from, to time.Time, limit, offset int) ([]*domain.RequestLogRecord, error)
+	CountRequestLogs(ctx context.Context, accountID int64, from, to time.Time) (int, error)
 	GetRequestLog(ctx context.Context, requestID string) (*domain.RequestLogRecord, error)
 	InsertAudit(ctx context.Context, e *AuditEntry) error
 	ListAudit(ctx context.Context, limit int) ([]*AuditEntry, error)
+	ListAuditPage(ctx context.Context, limit, offset int) ([]*AuditEntry, error)
+	CountAudit(ctx context.Context) (int, error)
 }
 
 // AuditEntry is the store's audit record type (aliased so the port stays narrow).
@@ -192,7 +196,13 @@ func (s *Server) handleAdminListKeys(w http.ResponseWriter, r *http.Request) {
 			"last_used_at":       timeOrNil(key.LastUsedAt),
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	page, err := pageConfig.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	window := sliceWindow(out, page)
+	writeList(w, window, len(out), page)
 }
 
 func (s *Server) handleAdminCreateKey(w http.ResponseWriter, r *http.Request) {
@@ -426,9 +436,18 @@ func (s *Server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
 			accountID = parsed
 		}
 	}
-	limit := adminLimit(r, 50, 500)
+	page, err := pageRequests.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
 	from, to := adminWindow(r)
-	rows, err := s.deps.AdminStore.ListRequestLogs(r.Context(), accountID, from, to, limit)
+	rows, err := s.deps.AdminStore.ListRequestLogsPage(r.Context(), accountID, from, to, page.Limit, page.Offset)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	total, err := s.deps.AdminStore.CountRequestLogs(r.Context(), accountID, from, to)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
@@ -444,7 +463,7 @@ func (s *Server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
 			"request_bytes": row.RequestBytes,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	writeList(w, out, total, page)
 }
 
 func (s *Server) handleAdminRequestDetail(w http.ResponseWriter, r *http.Request) {
@@ -473,7 +492,17 @@ func (s *Server) handleAdminAuditLogs(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.adminActor(w, r, false); !ok {
 		return
 	}
-	rows, err := s.deps.AdminStore.ListAudit(r.Context(), adminLimit(r, 100, 500))
+	page, err := pageAudit.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	rows, err := s.deps.AdminStore.ListAuditPage(r.Context(), page.Limit, page.Offset)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	total, err := s.deps.AdminStore.CountAudit(r.Context())
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
@@ -487,7 +516,7 @@ func (s *Server) handleAdminAuditLogs(w http.ResponseWriter, r *http.Request) {
 			"created_at": row.CreatedAt.Format(time.RFC3339),
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	writeList(w, out, total, page)
 }
 
 func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {

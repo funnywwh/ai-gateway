@@ -35,14 +35,20 @@ VALUES(?,?,?,?,?,?,?)`,
 	return nil
 }
 
-// ListAudit returns the newest audit records.
+// ListAudit returns the newest audit records (first page).
 func (db *DB) ListAudit(ctx context.Context, limit int) ([]*AuditEntry, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 100
+	return db.ListAuditPage(ctx, limit, 0)
+}
+
+// ListAuditPage returns one page of the audit trail, newest first.
+func (db *DB) ListAuditPage(ctx context.Context, limit, offset int) ([]*AuditEntry, error) {
+	limit = normalizeLimit(limit, 100, 1000)
+	if offset < 0 {
+		offset = 0
 	}
 	rows, err := db.read.QueryContext(ctx, `
 SELECT id, actor, action, target_type, target_id, changes_json, result, created_at
-FROM audit_logs ORDER BY id DESC LIMIT ?`, limit)
+FROM audit_logs ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("store: list audit: %w", err)
 	}
@@ -65,4 +71,9 @@ FROM audit_logs ORDER BY id DESC LIMIT ?`, limit)
 		return nil, fmt.Errorf("store: iterate audit: %w", err)
 	}
 	return out, nil
+}
+
+// CountAudit counts the whole audit trail.
+func (db *DB) CountAudit(ctx context.Context) (int, error) {
+	return db.countRows(ctx, "audit_logs", "", nil, "audit logs")
 }

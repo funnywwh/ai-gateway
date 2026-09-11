@@ -70,6 +70,9 @@ internal/webui/
 - 删除、清空凭据、吊销令牌一律二次确认，确认框写明对象名；
 - 所有表格支持客户端过滤（一个输入框）与列排序；本轮**不做服务端分页**
   （管理数据量在校验过的 500 行上限内），服务端游标分页列入 TODO；
+  —— **M24 已补齐**：所有列表改为服务端分页（`limit` + `offset` + `total`/`has_more`），
+  控件为 `ui.js` 的 `pagedTable`/`pager`，见 `docs/design/m24-console-pagination.md`；
+  过滤框只作用于当前页（界面上标注「本页过滤…」），游标分页仍留在 TODO；
 - 表单来源优先级：插件 handshake 的 `config_schema`/`credentials_schema` → 通用 JSON 文本域；
 - 任何后端 4xx 都把 `error.message` 原样展示（后端已给出人类可读文案）。
 
@@ -90,6 +93,7 @@ internal/webui/
 3. **Key 的录制开关分两步写**：创建 Key 的接口不接受录制参数（M8 的契约），界面在创建成功后
    立刻补一次 PATCH，保证「勾了就生效」，即使操作者马上关掉明文弹窗。
 4. **弱化了服务端分页承诺**：本轮列表统一 `limit=500` + 客户端过滤/排序。
+   —— M24 已按承诺补齐服务端分页（`docs/design/m24-console-pagination.md`），本行保留为历史记录。
 5. **新增 CSRF 收紧**：管理面 POST/PATCH/PUT 必须声明 `Content-Type: application/json`，
    跨站表单无法伪造该类型；这一条在设计与 API 文档里都补记了。
 6. **界面资源也带 CSP**：`default-src 'self'`，无内联脚本、无外部 CDN，离线可用。

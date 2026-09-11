@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, table, modal, toast, badge, jsonBlock, formatTime, confirmDialog, withBusy, modalHead, modalBody, modalActions } from '../ui.js';
+import { el, card, table, pagedTable, modal, toast, badge, jsonBlock, formatTime, confirmDialog, withBusy, modalHead, modalBody, modalActions } from '../ui.js';
 
 const KINDS = ['openai-chat', 'openai-responses', 'testecho'];
 const CONFIG_HINT = JSON.stringify({ base_url: 'https://api.example.com/v1' }, null, 2);
@@ -10,43 +10,35 @@ export async function render({ page, actions, session }) {
   const kinds = el('button', { class: 'btn', text: '内建类型说明' });
   const refresh = el('button', { class: 'btn', text: '刷新' });
   actions.append(refresh, kinds, create);
-  let view;
 
-  async function load() {
-    const payload = await api.get('/providers');
-    const rows = payload.data || [];
-    if (!view) {
-      view = table({
-        columns: [
-          { key: 'name', label: '名称' },
-          { key: 'kind', label: '类型', render: (row) => el('code', { text: row.kind }) },
-          { key: 'enabled', label: '启用', render: (row) => row.enabled ? badge('on', 'ok') : badge('off') },
-          { key: 'priority', label: '优先级' },
-          { key: 'weight', label: '权重' },
-          { key: 'has_credentials', label: '凭据', render: (row) => row.has_credentials
-            ? badge((row.credential_keys || []).join(', ') || '已配置', 'ok') : badge('未配置', 'warn') },
-          { key: 'last_error', label: '最近错误', render: (row) => row.last_error ? el('span', { class: 'muted', text: row.last_error }) : '—' },
-          { key: 'updated_at', label: '更新时间', render: (row) => formatTime(row.updated_at) },
-        ],
-        rows,
-        rowActions: (row) => [
-          el('button', { class: 'btn', text: '详情', onclick: () => detail(row, load, readonly) }),
-          el('button', { class: 'btn', text: '探测', onclick: (ev) => probe(row, ev.currentTarget, load) }),
-          readonly ? null : el('button', { class: 'btn btn-danger', text: '删除', onclick: () => remove(row, load) }),
-        ].filter(Boolean),
-      });
-      page.append(card('模型供应商', view.node, [
-        el('span', { class: 'muted', text: '内建类型开箱可用；插件类型填写 plugin:<名称>，凭据加密存储且永不回显。' }),
-        el('span', { class: 'muted', text: '每个类型的全部配置字段与密钥填法见「内建类型说明」或详情页的「配置说明」。' })]));
-    } else {
-      view.refresh(rows);
-    }
-  }
+  const view = pagedTable({
+    columns: [
+      { key: 'name', label: '名称' },
+      { key: 'kind', label: '类型', render: (row) => el('code', { text: row.kind }) },
+      { key: 'enabled', label: '启用', render: (row) => row.enabled ? badge('on', 'ok') : badge('off') },
+      { key: 'priority', label: '优先级' },
+      { key: 'weight', label: '权重' },
+      { key: 'has_credentials', label: '凭据', render: (row) => row.has_credentials
+        ? badge((row.credential_keys || []).join(', ') || '已配置', 'ok') : badge('未配置', 'warn') },
+      { key: 'last_error', label: '最近错误', render: (row) => row.last_error ? el('span', { class: 'muted', text: row.last_error }) : '—' },
+      { key: 'updated_at', label: '更新时间', render: (row) => formatTime(row.updated_at) },
+    ],
+    rowActions: (row) => [
+      el('button', { class: 'btn', text: '详情', onclick: () => detail(row, () => view.refresh(), readonly) }),
+      el('button', { class: 'btn', text: '探测', onclick: (ev) => probe(row, ev.currentTarget, () => view.refresh()) }),
+      readonly ? null : el('button', { class: 'btn btn-danger', text: '删除', onclick: () => remove(row, () => view.refresh()) }),
+    ].filter(Boolean),
+    load: ({ limit, offset }) => api.get('/providers', { limit, offset }),
+    onError: (err) => toast(api.errorMessage(err), 'error'),
+  });
+  page.append(card('模型供应商', view.node, [
+    el('span', { class: 'muted', text: '内建类型开箱可用；插件类型填写 plugin:<名称>，凭据加密存储且永不回显。' }),
+    el('span', { class: 'muted', text: '每个类型的全部配置字段与密钥填法见「内建类型说明」或详情页的「配置说明」。' })]));
 
-  refresh.addEventListener('click', () => load().catch((err) => toast(api.errorMessage(err), 'error')));
-  create.addEventListener('click', () => createProvider({}, load));
-  kinds.addEventListener('click', () => kindDocs(load).catch((err) => toast(api.errorMessage(err), 'error')));
-  await load();
+  refresh.addEventListener('click', () => view.refresh());
+  create.addEventListener('click', () => createProvider({}, () => view.refresh()));
+  kinds.addEventListener('click', () => kindDocs(() => view.refresh()).catch((err) => toast(api.errorMessage(err), 'error')));
+  await view.refresh();
 }
 
 // createProvider opens the create form, optionally pre-filled from one kind's

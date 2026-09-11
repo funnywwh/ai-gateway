@@ -78,6 +78,10 @@
   设置写入、账户与 Key 状态变更、供应商凭据覆盖、密钥/MCP 令牌/门户口令签发）必须 `confirm: true`；
   否则拒绝并原文说明原因，让模型先向用户交代将要做什么。标记与原因都在路由表里，`admin_describe` 会提前给出。
 - 路径参数缺失/类型不对 → 结构化报错并点名缺哪个；查询参数支持数组（展开为重复键，如 `?key=a&key=b`）。
+- **列表统一分页**：所有 `admin_list_*` 与其它列表型接口都接受 `limit` + `offset`，返回
+  `{data,count,total,limit,offset,has_more}`（`limit` 的默认值与上限逐接口不同，`admin_describe` 会写出来；
+  `offset` 必须是 >= 0 的整数，否则 400）。取下一页就是 `offset += count`，`has_more=false` 表示到底。
+  账户自助查询工具 `get_ledger` / `list_requests` / `list_invoices` 不在此约定内，仍只有 `limit`。
 - 注册但不暴露的 3 条：`auth/login`、`auth/logout`（Cookie 语义）、`backups/{id}/download`（二进制大文件）。
   它们仍出现在 `admin_endpoints` 里，`tool=null` 并附原因；调用会被拒并说明。
 - 常见排障路径都在里面：`admin_provider_logs`（插件 stderr）、`admin_test_provider`（真实探测）、

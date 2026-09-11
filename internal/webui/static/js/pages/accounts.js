@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, table, modal, toast, statusBadge, confirmDialog } from '../ui.js';
+import { el, card, pagedTable, modal, toast, statusBadge, confirmDialog } from '../ui.js';
 import { initCurrency, money, ledgerCurrency } from '../money.js';
 
 export async function render({ page, actions, session }) {
@@ -8,34 +8,26 @@ export async function render({ page, actions, session }) {
   const create = el('button', { class: 'btn btn-primary', text: '新建账户', disabled: readonly });
   const refresh = el('button', { class: 'btn', text: '刷新' });
   actions.append(refresh, create);
-  let view;
 
-  async function load() {
-    const payload = await api.get('/accounts');
-    const rows = payload.data || [];
-    if (!view) {
-      view = table({
-        columns: [
-          { key: 'name', label: '名称' },
-          { key: 'billing_mode', label: '计费模式' },
-          { key: 'status', label: '状态', render: (row) => statusBadge(row.status) },
-          { key: 'balance_micros', label: '余额', render: (row) => money(row.balance_micros) },
-          { key: 'credit_limit_micros', label: '授信上限', render: (row) => money(row.credit_limit_micros) },
-          { key: 'low_balance_threshold_micros', label: '低额阈值', render: (row) => money(row.low_balance_threshold_micros) },
-        ],
-        rows,
-        rowActions: (row) => readonly ? [] : [
-          el('button', { class: 'btn', text: '编辑', onclick: () => edit(row, load) }),
-        ],
-      });
-      page.append(card('账户', view.node, [
-        el('span', { class: 'muted', text: '余额只能通过账本变动；这里只调整计费属性与状态' })]));
-    } else {
-      view.refresh(rows);
-    }
-  }
+  const view = pagedTable({
+    columns: [
+      { key: 'name', label: '名称' },
+      { key: 'billing_mode', label: '计费模式' },
+      { key: 'status', label: '状态', render: (row) => statusBadge(row.status) },
+      { key: 'balance_micros', label: '余额', render: (row) => money(row.balance_micros) },
+      { key: 'credit_limit_micros', label: '授信上限', render: (row) => money(row.credit_limit_micros) },
+      { key: 'low_balance_threshold_micros', label: '低额阈值', render: (row) => money(row.low_balance_threshold_micros) },
+    ],
+    rowActions: (row) => readonly ? [] : [
+      el('button', { class: 'btn', text: '编辑', onclick: () => edit(row, () => view.refresh()) }),
+    ],
+    load: ({ limit, offset }) => api.get('/accounts', { limit, offset }),
+    onError: (err) => toast(api.errorMessage(err), 'error'),
+  });
+  page.append(card('账户', view.node, [
+    el('span', { class: 'muted', text: '余额只能通过账本变动；这里只调整计费属性与状态' })]));
 
-  refresh.addEventListener('click', () => load().catch((err) => toast(api.errorMessage(err), 'error')));
+  refresh.addEventListener('click', () => view.refresh());
   create.addEventListener('click', async () => {
     const result = await modal({
       title: '新建账户', submitLabel: '创建',
@@ -48,9 +40,9 @@ export async function render({ page, actions, session }) {
       ],
       onSubmit: (values) => api.post('/accounts', values),
     });
-    if (result) { toast('账户已创建', 'ok'); await load(); }
+    if (result) { toast('账户已创建', 'ok'); await view.refresh(); }
   });
-  await load();
+  await view.refresh();
 }
 
 async function edit(row, reload) {

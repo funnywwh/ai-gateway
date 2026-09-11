@@ -214,7 +214,13 @@ func (s *Server) handleAdminListProviders(w http.ResponseWriter, r *http.Request
 	for _, p := range list {
 		out = append(out, providerJSON(p, s.credentialKeys(p)))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	page, err := pageConfig.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	window := sliceWindow(out, page)
+	writeList(w, window, len(out), page)
 }
 
 func (s *Server) handleAdminGetProvider(w http.ResponseWriter, r *http.Request) {
@@ -625,7 +631,13 @@ func (s *Server) handleAdminListProviderModels(w http.ResponseWriter, r *http.Re
 	for _, pm := range rows {
 		out = append(out, providerModelJSON(pm))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	page, err := pageConfig.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	window := sliceWindow(out, page)
+	writeList(w, window, len(out), page)
 }
 
 func (s *Server) handleAdminUpsertProviderModel(w http.ResponseWriter, r *http.Request) {

@@ -684,3 +684,54 @@
   结算后失效，注意不要给请求路径增加无谓的打库开销
 - [ ] 另立：死设置键（`recording.default`/`recording.max_bytes`/`mcp.max_query_rows`/`backup.retention`）
   要么实现读取方，要么从设置页文案里彻底移除
+
+## M24 管理后台所有列表支持分页
+
+> 需求：「使用列表要支持分页显示」→ 澄清为「管理后台的所有列表」。
+> 设计文档 `docs/design/m24-console-pagination.md`（实现前已在对话中输出并确认）。
+
+- [x] 统一契约：所有列表端点接受 `limit` + `offset`，返回
+  `{data, count, total, limit, offset, has_more}`（`count` = 本页条数，`total` = 过滤后总行数）；
+  `limit` 超上限夹住，`offset` 非整数/负数 → 400（不静默当 0）
+- [x] 分页原语 `internal/httpapi/pagination.go`：`pageParams` / `adminPage` / `sliceWindow` / `writeList`
+- [x] 历史类列表（7 个端点）SQL 窗口化 + `COUNT(*)`：`/requests`、`/audit-logs`、
+  `/accounts/{id}/ledger`、`/accounts/{id}/credits`、`/invoices`（含按账户路径）、
+  `/redemption-codes`、`/billing/reconciliations`
+- [x] `store.LedgerWindow.ExcludeKinds`：额度明细的 `kind != 'charge'` 下沉到 SQL
+  （否则每页条数不均、`total` 无意义）
+- [x] 旧 DAL 签名不动，新增 `ListXPage`/`CountX` + 一行包装（`registry`/`bootstrap`/`mcpsrv`/
+  `billing` 零改动）
+- [x] 配置类列表（14 个端点）handler 内窗口：账户/Key/标签/模型/路由/映射/Hooks/MCP 令牌/
+  门户用户/供应商/上游模型/备份
+- [x] `internal/billing/readers.go` 分页直通（Ledger/Invoices/Codes/Reconciliations）
+- [x] 路由表补 `offset` 查询参数与 `limit` 默认/上限说明（MCP `admin_describe`/`admin_endpoints` 随之生效）
+- [x] 控制台 `ui.js`：`pager()` + `pagedTable()`（持窗口状态、过滤/页大小变化归零、
+  末页删空自动回退一页、失败不锁死）；`table()` 的 `#count` 填「本页 N 行」，过滤框标注「本页过滤…」
+- [x] `app.css` 增加 `.pager` 样式；分页控件渲染在 `<table>` 之外（不动 `tbody tr` 选择器）
+- [x] 13 个页面模块接入：keys/accounts/tags/mcp/codes/providers/models/mappings/billing(4 张表)/
+  requests/hooks/audit/backups；选择器调用显式 `limit: 1000`
+- [x] `models.js` 删掉客户端 `route_count` 推导（服务端已返回），账单改为服务端按账户过滤
+  （顺手修 `GET /invoices` 的 `account_id`：路由表从 M12 起就写着这个参数，handler 却只读路径参数，
+  等于**静默返回所有账户**；现在路径/查询二者取一，非法值 400）
+- [x] 明确不分页并写明理由：概览（`/stats` 快照）、设置（键值/汇率表）、定价（选择器网格）、
+  供应商日志弹框（环形缓冲）、`/provider-kinds`
+- [x] 测试：`internal/httpapi/pagination_test.go`（7 例：窗口/`total`/`has_more`/越界/400/夹上限/
+  额度明细只数非 charge/账单账户过滤/备份 `total_bytes`）、`internal/store/pagination_test.go`
+  （4 例：Page + Count + `ExcludeKinds` + 旧方法的"第一页"语义）、
+  `internal/httpapi/admin_billing_contract_test.go`（自然月账期 + 非法值 400）
+- [x] 设计文档先于代码落盘（`docs/design/m24-console-pagination.md`），规格侧同步
+  `docs/design/m8-admin-api.md`（分页契约）、`docs/design/m9-web-console.md`（§8 第 4 条）、
+  `docs/mcp.md`（后台工具的分页约定）；「实现与设计差异」已回填
+- [x] `make verify`（vet + test + build）与 `make ui-check` 全绿；`internal/arch` 未新增包，无需改表
+- [x] 走查工具：`scripts/ui-harness` 新增 `paging.page.html`（30 项断言）+ 视图注册 + README 说明；
+  九个视图全绿（docs 23 / detail 20 / create 6 / plugin 17 / plugin-cached 16 / currency 16 /
+  keys 17 / requests 10 / paging 30）
+- [x] 隔离实例真机走查（`:8098` + 全新库 + 新二进制，`ALL CHECKS PASSED`）：55 条请求日志 3 页互不重叠、
+  45 张兑换码分批分页、账本 67 行（含 55 条真实 charge）而额度明细 `total=12` 且无 charge、
+  3 张账单按账户过滤、审计跨页、13 个账户窗口切片、`offset=abc|-1` → 400、`limit=99999` → 夹到 500、
+  二进制内嵌 `ui.js` 带 `pagedTable` + `accounts.js` 发 `offset`
+- [x] 顺带修两处「文档里有、代码里没有」的契约（M24 走查撞上，不修会在分页后变成可见回归）：
+  `GET /invoices` 的 `account_id` 查询参数此前被忽略（静默返回所有账户）、
+  `POST /accounts/{id}/invoices` 的 `period` 文档写自然月却只认 `current|previous|last30`
+- [x] 控制台页面大小 20 条/页（可选 20/50/100）；`table()` 的 `#count` 由死 span 变成「本页 N 行」，
+  过滤框标注「本页过滤…」；分页控件渲染在 `<table>` 之外（不动 `tbody tr` 选择器）

@@ -1,0 +1,245 @@
+package store
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/winger/ai-gateway/internal/domain"
+)
+
+// The windowed reads behind the management console's paged lists
+// (docs/design/m24-console-pagination.md §2.2): every Page query has a Count that
+// shares its WHERE clause, and the legacy non-paged method stays a first-page wrapper.
+
+func seedPagedAccount(t *testing.T, db *DB) int64 {
+	t.Helper()
+	id, err := db.UpsertAccount(context.Background(), &domain.Account{
+		Name: "paged", BillingMode: domain.BillingPostpaid, Status: "active",
+	})
+	if err != nil {
+		t.Fatalf("seed account: %v", err)
+	}
+	return id
+}
+
+func TestListAuditPageWindowsAndCounts(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for i := 0; i < 5; i++ {
+		if err := db.InsertAudit(ctx, &AuditEntry{
+			Actor: "tester", Action: fmt.Sprintf("action-%02d", i), TargetType: "test",
+			TargetID: "1", Result: "ok", CreatedAt: now,
+		}); err != nil {
+			t.Fatalf("insert audit %d: %v", i, err)
+		}
+	}
+
+	first, err := db.ListAuditPage(ctx, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 || first[0].Action != "action-04" {
+		t.Fatalf("first page = %+v, want the two newest rows", first)
+	}
+	second, err := db.ListAuditPage(ctx, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 2 || second[0].Action != "action-02" {
+		t.Fatalf("second page = %+v, want action-02 first", second)
+	}
+	last, err := db.ListAuditPage(ctx, 2, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(last) != 1 {
+		t.Fatalf("last page holds %d rows, want 1", len(last))
+	}
+	beyond, err := db.ListAuditPage(ctx, 2, 50)
+	if err != nil || len(beyond) != 0 {
+		t.Fatalf("offset past the end must be an empty page, got %d rows (err=%v)", len(beyond), err)
+	}
+	total, err := db.CountAudit(ctx)
+	if err != nil || total != 5 {
+		t.Fatalf("CountAudit = %d (err=%v), want 5", total, err)
+	}
+
+	// The non-paged method keeps its old meaning: the newest `limit` rows.
+	legacy, err := db.ListAudit(ctx, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(legacy) != 3 || legacy[0].Action != "action-04" {
+		t.Fatalf("ListAudit = %+v, want it to stay the first page", legacy)
+	}
+}
+
+func TestListRequestLogsPageRespectsFiltersAndCounts(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	accountID := seedPagedAccount(t, db)
+	now := time.Now().UTC()
+
+	// Three rows for our account (newest first) plus one for another account and one
+	// outside the time window: neither may leak into the page or the total.
+	for i := 0; i < 3; i++ {
+		if err := db.PutRequestLog(ctx, &domain.RequestLogRecord{
+			RequestID: fmt.Sprintf("req-%02d", i), AccountID: accountID, APIKeyID: 1,
+			Endpoint: "/v1/responses", Status: "ok", CreatedAt: now.Add(-time.Duration(i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("put request log: %v", err)
+		}
+	}
+	if err := db.PutRequestLog(ctx, &domain.RequestLogRecord{
+		RequestID: "req-other", AccountID: accountID + 99, APIKeyID: 1,
+		Endpoint: "/v1/responses", Status: "ok", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutRequestLog(ctx, &domain.RequestLogRecord{
+		RequestID: "req-old", AccountID: accountID, APIKeyID: 1,
+		Endpoint: "/v1/responses", Status: "ok", CreatedAt: now.AddDate(0, 0, -30),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	from, to := now.Add(-time.Hour), now.Add(time.Minute)
+
+	page, err := db.ListRequestLogsPage(ctx, accountID, from, to, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Newest first means insertion order descending (the list orders by id), so the
+	// last row written is the first one a console shows.
+	if len(page) != 2 || page[0].RequestID != "req-02" {
+		t.Fatalf("page = %+v, want req-02 first", page)
+	}
+	second, err := db.ListRequestLogsPage(ctx, accountID, from, to, 2, 2)
+	if err != nil || len(second) != 1 || second[0].RequestID != "req-00" {
+		t.Fatalf("second page = %+v (err=%v), want the remaining req-00", second, err)
+	}
+	total, err := db.CountRequestLogs(ctx, accountID, from, to)
+	if err != nil || total != 3 {
+		t.Fatalf("CountRequestLogs = %d (err=%v), want 3 (filtered by account and window)", total, err)
+	}
+	// accountID 0 means "every account", which is the console's cross-tenant view.
+	total, err = db.CountRequestLogs(ctx, 0, from, to)
+	if err != nil || total != 4 {
+		t.Fatalf("CountRequestLogs(all) = %d (err=%v), want 4", total, err)
+	}
+}
+
+func TestListLedgerPageExcludesKindsInSQL(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	accountID := seedPagedAccount(t, db)
+	now := time.Now().UTC()
+
+	entries := []*domain.LedgerEntry{{
+		AccountID: accountID, Kind: "topup", AmountMicros: 5_000_000,
+		IdemKey: "seed:topup", CreatedAt: now,
+	}}
+	for i := 0; i < 4; i++ {
+		entries = append(entries, &domain.LedgerEntry{
+			AccountID: accountID, Kind: "charge", AmountMicros: -100,
+			IdemKey: fmt.Sprintf("seed:charge:%02d", i), CreatedAt: now,
+		})
+	}
+	if _, err := db.AppendLedger(ctx, entries); err != nil {
+		t.Fatalf("append ledger: %v", err)
+	}
+
+	all := LedgerWindow{AccountID: accountID, Limit: 3, Offset: 0}
+	page, err := db.ListLedgerPage(ctx, all)
+	if err != nil || len(page) != 3 {
+		t.Fatalf("ledger page = %d rows (err=%v), want 3", len(page), err)
+	}
+	if total, err := db.CountLedger(ctx, all); err != nil || total != 5 {
+		t.Fatalf("CountLedger = %d (err=%v), want 5", total, err)
+	}
+
+	// The credits view: charges are dropped by the WHERE clause, so the page size and
+	// the total describe the same row set.
+	creditsOnly := LedgerWindow{AccountID: accountID, ExcludeKinds: []string{"charge"}, Limit: 3, Offset: 0}
+	page, err = db.ListLedgerPage(ctx, creditsOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 1 || page[0].Kind != "topup" {
+		t.Fatalf("credits page = %+v, want only the topup", page)
+	}
+	if total, err := db.CountLedger(ctx, creditsOnly); err != nil || total != 1 {
+		t.Fatalf("CountLedger(credits) = %d (err=%v), want 1", total, err)
+	}
+
+	// The legacy read stays the first page of every kind.
+	legacy, err := db.ListLedger(ctx, accountID, time.Time{}, time.Time{}, 2)
+	if err != nil || len(legacy) != 2 {
+		t.Fatalf("ListLedger = %d rows (err=%v), want 2", len(legacy), err)
+	}
+}
+
+func TestListInvoicesCodesAndReconciliationsPage(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	accountID := seedPagedAccount(t, db)
+	now := time.Now().UTC()
+
+	for i := 0; i < 3; i++ {
+		start := now.AddDate(0, -i-1, 0)
+		if _, _, err := db.PutInvoice(ctx, &domain.Invoice{
+			AccountID: accountID, PeriodStart: start, PeriodEnd: start.AddDate(0, 1, 0),
+			Status: "draft", Currency: "USD", CreatedAt: start,
+		}, nil, false); err != nil {
+			t.Fatalf("put invoice: %v", err)
+		}
+	}
+	invoices, err := db.ListInvoicesPage(ctx, accountID, 2, 0)
+	if err != nil || len(invoices) != 2 {
+		t.Fatalf("invoice page = %d rows (err=%v), want 2", len(invoices), err)
+	}
+	if total, err := db.CountInvoices(ctx, accountID); err != nil || total != 3 {
+		t.Fatalf("CountInvoices = %d (err=%v), want 3", total, err)
+	}
+	if total, err := db.CountInvoices(ctx, 0); err != nil || total != 3 {
+		t.Fatalf("CountInvoices(all) = %d (err=%v), want 3", total, err)
+	}
+
+	codes := []*domain.RedemptionCode{}
+	for i := 0; i < 3; i++ {
+		codes = append(codes, &domain.RedemptionCode{
+			CodeHash: fmt.Sprintf("hash-%02d", i), AmountMicros: 100,
+			BatchID: "batch-a", CreatedBy: "tester", CreatedAt: now,
+		})
+	}
+	if err := db.InsertRedemptionCodes(ctx, codes); err != nil {
+		t.Fatalf("insert codes: %v", err)
+	}
+	page, err := db.ListRedemptionCodesPage(ctx, "batch-a", 2, 2)
+	if err != nil || len(page) != 1 {
+		t.Fatalf("code page = %d rows (err=%v), want 1", len(page), err)
+	}
+	if total, err := db.CountRedemptionCodes(ctx, "batch-a"); err != nil || total != 3 {
+		t.Fatalf("CountRedemptionCodes = %d (err=%v), want 3", total, err)
+	}
+	if total, err := db.CountRedemptionCodes(ctx, "batch-b"); err != nil || total != 0 {
+		t.Fatalf("CountRedemptionCodes(other batch) = %d (err=%v), want 0", total, err)
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := db.InsertReconciliation(ctx, &domain.Reconciliation{
+			PeriodStart: now.Add(-time.Hour), PeriodEnd: now, Kind: "manual", CreatedAt: now,
+		}); err != nil {
+			t.Fatalf("insert reconciliation: %v", err)
+		}
+	}
+	reconciliations, err := db.ListReconciliationsPage(ctx, 2, 2)
+	if err != nil || len(reconciliations) != 1 {
+		t.Fatalf("reconciliation page = %d rows (err=%v), want 1", len(reconciliations), err)
+	}
+	if total, err := db.CountReconciliations(ctx); err != nil || total != 3 {
+		t.Fatalf("CountReconciliations = %d (err=%v), want 3", total, err)
+	}
+}

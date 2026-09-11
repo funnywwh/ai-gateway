@@ -16,6 +16,7 @@ type ServiceStore interface {
 	Batching
 	InvariantStore
 	RebuildStore
+	PageStore
 	GetBalance(ctx context.Context, accountID int64) (int64, error)
 	ListLedger(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*domain.LedgerEntry, error)
 	ListAccounts(ctx context.Context) ([]*domain.Account, error)

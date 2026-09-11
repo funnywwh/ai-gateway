@@ -7,12 +7,17 @@ import (
 	"time"
 
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/store"
 )
 
-// LedgerAdmin reads balances and ledger history.
+// LedgerAdmin reads balances and ledger history. The paged reads take a
+// store.LedgerWindow so the credits view can exclude charges in SQL (see
+// docs/design/m24-console-pagination.md §2.4).
 type LedgerAdmin interface {
 	Balance(ctx context.Context, accountID int64) (int64, error)
 	Ledger(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*domain.LedgerEntry, error)
+	LedgerPage(ctx context.Context, w store.LedgerWindow) ([]*domain.LedgerEntry, error)
+	CountLedger(ctx context.Context, w store.LedgerWindow) (int, error)
 }
 
 func (s *Server) handleAdminInvariants(w http.ResponseWriter, r *http.Request) {
@@ -143,7 +148,18 @@ func (s *Server) handleAdminAccountLedger(w http.ResponseWriter, r *http.Request
 		return
 	}
 	from, to := adminWindow(r)
-	entries, err := ledger.Ledger(r.Context(), accountID, from, to, adminLimit(r, 100, 1000))
+	page, err := pageLedger.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	window := store.LedgerWindow{AccountID: accountID, From: from, To: to, Limit: page.Limit, Offset: page.Offset}
+	entries, err := ledger.LedgerPage(r.Context(), window)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	total, err := ledger.CountLedger(r.Context(), window)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
@@ -163,7 +179,7 @@ func (s *Server) handleAdminAccountLedger(w http.ResponseWriter, r *http.Request
 		}
 		out = append(out, payload)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	writeList(w, out, total, page)
 }
 
 func toInt64(value any) int64 {

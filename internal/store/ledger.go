@@ -118,23 +118,66 @@ ORDER BY le.expires_at, le.id LIMIT ?`, unix(now), limit)
 const ledgerCols = `id, account_id, api_key_id, kind, amount_micros, balance_after_micros,
 	ref_type, ref_id, idem_key, rebuild_seq, note, actor, created_at, expires_at`
 
-// ListLedger returns ledger entries of one account inside a time window (newest first).
+// LedgerWindow describes one window over an account's ledger. ExcludeKinds, when
+// non-empty, drops those entry kinds in SQL: the console's credits view excludes
+// charges, and filtering after the LIMIT would return uneven pages with a total that
+// describes a different row set than the page shows. It is an exclusion list rather
+// than an allow-list so a kind added later still shows up in that view.
+type LedgerWindow struct {
+	AccountID     int64
+	From, To      time.Time
+	ExcludeKinds  []string
+	Limit, Offset int
+}
+
+// ledgerFilter builds the WHERE clause shared by the ledger page query and its count.
+func ledgerFilter(w LedgerWindow) (string, []any) {
+	where := " WHERE account_id = ?"
+	args := []any{w.AccountID}
+	if !w.From.IsZero() {
+		where += " AND created_at >= ?"
+		args = append(args, unix(w.From))
+	}
+	if !w.To.IsZero() {
+		where += " AND created_at <= ?"
+		args = append(args, unix(w.To))
+	}
+	if len(w.ExcludeKinds) > 0 {
+		where += " AND kind NOT IN (" + placeholders(len(w.ExcludeKinds)) + ")"
+		for _, kind := range w.ExcludeKinds {
+			args = append(args, kind)
+		}
+	}
+	return where, args
+}
+
+// placeholders renders "?, ?, ?" for an IN clause with n values.
+func placeholders(n int) string {
+	out := ""
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			out += ", "
+		}
+		out += "?"
+	}
+	return out
+}
+
+// ListLedger returns the first page of an account's ledger entries (newest first).
 func (db *DB) ListLedger(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*domain.LedgerEntry, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 100
+	return db.ListLedgerPage(ctx, LedgerWindow{AccountID: accountID, From: from, To: to, Limit: limit})
+}
+
+// ListLedgerPage returns one window of an account's ledger entries (newest first).
+func (db *DB) ListLedgerPage(ctx context.Context, w LedgerWindow) ([]*domain.LedgerEntry, error) {
+	limit := normalizeLimit(w.Limit, 100, 1000)
+	offset := w.Offset
+	if offset < 0 {
+		offset = 0
 	}
-	query := "SELECT " + ledgerCols + " FROM ledger_entries WHERE account_id = ?"
-	args := []any{accountID}
-	if !from.IsZero() {
-		query += " AND created_at >= ?"
-		args = append(args, unix(from))
-	}
-	if !to.IsZero() {
-		query += " AND created_at <= ?"
-		args = append(args, unix(to))
-	}
-	query += " ORDER BY id DESC LIMIT ?"
-	args = append(args, limit)
+	where, args := ledgerFilter(w)
+	query := "SELECT " + ledgerCols + " FROM ledger_entries" + where + " ORDER BY id DESC LIMIT ? OFFSET ?"
+	args = append(args, limit, offset)
 
 	rows, err := db.read.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -164,6 +207,12 @@ func (db *DB) ListLedger(ctx context.Context, accountID int64, from, to time.Tim
 		return nil, fmt.Errorf("store: iterate ledger: %w", err)
 	}
 	return out, nil
+}
+
+// CountLedger counts the rows the same window selects (without limit/offset).
+func (db *DB) CountLedger(ctx context.Context, w LedgerWindow) (int, error) {
+	where, args := ledgerFilter(w)
+	return db.countRows(ctx, "ledger_entries", where, args, "ledger entries")
 }
 
 // GetBalance returns the materialised balance of an account.

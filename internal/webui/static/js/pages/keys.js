@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, table, modal, toast, statusBadge, formatTime, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
+import { el, card, pagedTable, modal, toast, statusBadge, formatTime, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
 
 // Accepted values mirror config.RecordingInputModes plus "inherit"; internal/webui's
 // test asserts the console and the server never drift apart.
@@ -17,40 +17,36 @@ export async function render({ page, actions, session }) {
   const create = el('button', { class: 'btn btn-primary', text: '新建 Key', disabled: readonly });
   actions.append(refresh, create);
 
-  const accountsPromise = api.get('/accounts');
-  let view;
-  async function load() {
-    const payload = await api.get('/keys');
-    const accounts = (await accountsPromise).data || [];
-    const byId = new Map(accounts.map((a) => [a.id, a.name]));
-    const rows = (payload.data || []).map((key) => ({ ...key, account: byId.get(key.account_id) || ('#' + key.account_id) }));
-    if (!view) {
-      view = table({
-        columns: [
-          { key: 'name', label: '名称' },
-          { key: 'account', label: '账户' },
-          { key: 'key_prefix', label: '前缀', render: (row) => el('code', { text: row.key_prefix + '…' }) },
-          { key: 'status', label: '状态', render: (row) => statusBadge(row.status) },
-          { key: 'tags', label: '标签', render: (row) => (row.tags || []).join(', ') || '—' },
-          { key: 'record_input_mode', label: '输入录制' },
-          { key: 'record_output_text', label: '输出文本', render: (row) => (row.record_output_text ? '已开启' : '关闭') },
-          { key: 'record_reasoning', label: '思考文本', render: (row) => (row.record_reasoning ? '已开启' : '关闭') },
-          { key: 'policy', label: '配额', render: (row) => el('code', { text: JSON.stringify(row.policy || {}) }) },
-          { key: 'last_used_at', label: '最近使用', render: (row) => formatTime(row.last_used_at) },
-        ],
-        rows,
-        rowActions: (row) => readonly ? [] : [
-          el('button', { class: 'btn', text: '编辑', onclick: () => editKey(row, load) }),
-          el('button', { class: 'btn', text: row.status === 'active' ? '停用' : '启用', onclick: () => toggle(row, load) }),
-        ],
-      });
-      page.append(card('API Keys', view.node, [el('span', { class: 'muted', text: '明文只在创建时显示一次；默认只记录用户输入，思考与最终输出需单独勾选' })]));
-    } else {
-      view.refresh(rows);
-    }
-  }
+  // 账户下拉框要一次拿全：显式请求上限 1000（配置类列表的服务端上限），分页表格不带这个 limit。
+  const accountsPromise = api.get('/accounts', { limit: 1000 });
+  const view = pagedTable({
+    columns: [
+      { key: 'name', label: '名称' },
+      { key: 'account', label: '账户' },
+      { key: 'key_prefix', label: '前缀', render: (row) => el('code', { text: row.key_prefix + '…' }) },
+      { key: 'status', label: '状态', render: (row) => statusBadge(row.status) },
+      { key: 'tags', label: '标签', render: (row) => (row.tags || []).join(', ') || '—' },
+      { key: 'record_input_mode', label: '输入录制' },
+      { key: 'record_output_text', label: '输出文本', render: (row) => (row.record_output_text ? '已开启' : '关闭') },
+      { key: 'record_reasoning', label: '思考文本', render: (row) => (row.record_reasoning ? '已开启' : '关闭') },
+      { key: 'policy', label: '配额', render: (row) => el('code', { text: JSON.stringify(row.policy || {}) }) },
+      { key: 'last_used_at', label: '最近使用', render: (row) => formatTime(row.last_used_at) },
+    ],
+    rowActions: (row) => readonly ? [] : [
+      el('button', { class: 'btn', text: '编辑', onclick: () => editKey(row, () => view.refresh()) }),
+      el('button', { class: 'btn', text: row.status === 'active' ? '停用' : '启用', onclick: () => toggle(row, () => view.refresh()) }),
+    ],
+    // 账户名来自上面那份完整列表；Key 列表本身由服务端分页。
+    load: async ({ limit, offset }) => {
+      const [payload, accountsPayload] = await Promise.all([api.get('/keys', { limit, offset }), accountsPromise]);
+      const byId = new Map(((accountsPayload.data) || []).map((a) => [a.id, a.name]));
+      return { ...payload, data: (payload.data || []).map((key) => ({ ...key, account: byId.get(key.account_id) || ('#' + key.account_id) })) };
+    },
+    onError: (err) => toast(api.errorMessage(err), 'error'),
+  });
+  page.append(card('API Keys', view.node, [el('span', { class: 'muted', text: '明文只在创建时显示一次；默认只记录用户输入，思考与最终输出需单独勾选' })]));
 
-  refresh.addEventListener('click', () => load().catch((err) => toast(api.errorMessage(err), 'error')));
+  refresh.addEventListener('click', () => view.refresh());
   create.addEventListener('click', async () => {
     const accounts = (await accountsPromise).data || [];
     if (!accounts.length) { toast('请先创建一个账户', 'error'); return; }
@@ -82,10 +78,10 @@ export async function render({ page, actions, session }) {
       },
     });
     if (!result) return;
-    showSecret('API Key 已创建', result.key, load);
+    showSecret('API Key 已创建', result.key, () => view.refresh());
   });
 
-  await load();
+  await view.refresh();
 }
 
 async function editKey(row, reload) {

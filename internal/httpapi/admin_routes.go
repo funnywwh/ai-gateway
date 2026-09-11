@@ -346,7 +346,8 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 			Method: "GET", Path: "/admin/api/v1/keys", Handler: s.handleAdminListKeys,
 			Name: "admin_list_keys", Group: groupKeys, Role: roleViewer,
 			Summary: "列出 API Key（前缀、状态、标签、内容录制开关）",
-			Query:   []adminField{queryParam("account_id", "integer", "只看某个账户的 Key，省略表示全部")},
+			Query: append(pageConfig.fields(),
+				queryParam("account_id", "integer", "只看某个账户的 Key，省略表示全部")),
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/keys", Handler: s.handleAdminCreateKey,
@@ -380,11 +381,9 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 			Method: "GET", Path: "/admin/api/v1/requests", Handler: s.handleAdminRequests,
 			Name: "admin_list_requests", Group: groupRequests, Role: roleViewer,
 			Summary: "全部账户的请求日志（跨账户视图，可按账户与天数过滤）",
-			Query: []adminField{
+			Query: append(pageRequests.fields(),
 				queryParam("account_id", "integer", "只看某个账户"),
-				queryParam("limit", "integer", "返回条数上限，默认 50，最大 500"),
-				queryParam("days", "integer", "回溯天数，默认 7，最大 365"),
-			},
+				queryParam("days", "integer", "回溯天数，默认 7，最大 365")),
 		},
 		{
 			Method: "GET", Path: "/admin/api/v1/requests/{id}", Handler: s.handleAdminRequestDetail,
@@ -396,7 +395,7 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 			Method: "GET", Path: "/admin/api/v1/audit-logs", Handler: s.handleAdminAuditLogs,
 			Name: "admin_list_audit_logs", Group: groupAudit, Role: roleViewer,
 			Summary: "管理面审计流水（谁在什么时候改了什么）",
-			Query:   []adminField{queryParam("limit", "integer", "返回条数上限，默认 100，最大 500")},
+			Query:   pageAudit.fields(),
 		},
 		{
 			Method: "GET", Path: "/admin/api/v1/router/explain", Handler: s.handleAdminExplainRouter,
@@ -422,6 +421,7 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			Method: "GET", Path: "/admin/api/v1/accounts", Handler: s.handleAdminListAccounts,
 			Name: "admin_list_accounts", Group: groupAccounts, Role: roleViewer,
 			Summary: "列出全部账户（计费模式、状态、授信与低余额阈值）",
+			Query:   pageConfig.fields(),
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/accounts", Handler: s.handleAdminCreateAccount,
@@ -463,6 +463,7 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			Method: "GET", Path: "/admin/api/v1/models", Handler: s.handleAdminListModels,
 			Name: "admin_list_models", Group: groupModels, Role: roleViewer,
 			Summary: "列出对客模型（含别名、启用状态与售价文档）",
+			Query:   pageConfig.fields(),
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/models", Handler: s.handleAdminUpsertModel,
@@ -495,6 +496,7 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			Method: "GET", Path: "/admin/api/v1/model-mappings", Handler: s.handleAdminListMappings,
 			Name: "admin_list_model_mappings", Group: groupModels, Role: roleViewer,
 			Summary: "列出模型名映射规则（exact/prefix/glob/regex）",
+			Query:   pageConfig.fields(),
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/model-mappings", Handler: s.handleAdminUpsertMapping,
@@ -523,6 +525,7 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			Method: "GET", Path: "/admin/api/v1/routes", Handler: s.handleAdminListRoutes,
 			Name: "admin_list_routes", Group: groupModels, Role: roleViewer,
 			Summary: "列出模型到供应商的路由（优先级、权重、启用状态）",
+			Query:   pageConfig.fields(),
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/routes", Handler: s.handleAdminUpsertRoute,
@@ -565,6 +568,7 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			Method: "GET", Path: "/admin/api/v1/tags", Handler: s.handleAdminListTags,
 			Name: "admin_list_tags", Group: groupModels, Role: roleViewer,
 			Summary: "列出标签（授权并集与策略合并的来源）",
+			Query:   pageConfig.fields(),
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/tags", Handler: s.handleAdminUpsertTag,
@@ -589,7 +593,8 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			Method: "GET", Path: "/admin/api/v1/mcp-tokens", Handler: s.handleAdminListMCPTokens,
 			Name: "admin_list_mcp_tokens", Group: groupMCP, Role: roleViewer,
 			Summary: "列出 MCP 令牌（前缀、scope、状态、最近使用、过期时间）",
-			Query:   []adminField{queryParam("account_id", "integer", "只看某个账户的令牌")},
+			Query: append(pageConfig.fields(),
+				queryParam("account_id", "integer", "只看某个账户的令牌")),
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/mcp-tokens", Handler: s.handleAdminCreateMCPToken,
@@ -627,6 +632,7 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			Method: "GET", Path: "/admin/api/v1/hooks", Handler: s.handleAdminListHooks,
 			Name: "admin_list_hooks", Group: groupHooks, Role: roleViewer,
 			Summary: "列出事件投递目标（webhook / jsonl）",
+			Query:   pageConfig.fields(),
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/hooks", Handler: s.handleAdminUpsertHook,
@@ -676,6 +682,7 @@ func (s *Server) providerAdminRoutes() []adminRoute {
 			Method: "GET", Path: "/admin/api/v1/providers", Handler: s.handleAdminListProviders,
 			Name: "admin_list_providers", Group: groupProviders, Role: roleViewer,
 			Summary: "列出供应商（状态、优先级、权重、健康、最近错误）",
+			Query:   pageConfig.fields(),
 		},
 		{
 			Method: "GET", Path: "/admin/api/v1/provider-kinds", Handler: s.handleAdminListProviderKinds,
@@ -785,11 +792,13 @@ func (s *Server) providerAdminRoutes() []adminRoute {
 			Name: "admin_list_provider_models", Group: groupProviders, Role: roleViewer,
 			Summary: "列出某个供应商声明的上游模型",
 			Params:  []adminField{pathParam("id", "供应商数字 id")},
+			Query:   pageConfig.fields(),
 		},
 		{
 			Method: "GET", Path: "/admin/api/v1/provider-models", Handler: s.handleAdminListProviderModels,
 			Name: "admin_list_all_provider_models", Group: groupProviders, Role: roleViewer,
 			Summary: "列出全部供应商模型（跨供应商视图）",
+			Query:   pageConfig.fields(),
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/providers/{id}/models", Handler: s.handleAdminUpsertProviderModel,
@@ -868,10 +877,8 @@ func (s *Server) billingAdminRoutes() []adminRoute {
 			Name: "admin_account_ledger", Group: groupBilling, Role: roleViewer,
 			Summary: "账户账本流水（充值、消费、调整、退款、过期）",
 			Params:  []adminField{pathParam("id", "账户数字 id")},
-			Query: []adminField{
-				queryParam("days", "integer", "回溯天数，默认 7，最大 365"),
-				queryParam("limit", "integer", "返回条数，默认 100，最大 1000"),
-			},
+			Query: append(pageLedger.fields(),
+				queryParam("days", "integer", "回溯天数，默认 7，最大 365")),
 		},
 	}
 }
@@ -883,17 +890,15 @@ func (s *Server) invoiceAdminRoutes() []adminRoute {
 			Method: "GET", Path: "/admin/api/v1/invoices", Handler: s.handleAdminListInvoices,
 			Name: "admin_list_invoices", Group: groupBilling, Role: roleViewer,
 			Summary: "列出账单（可按账户过滤）",
-			Query: []adminField{
-				queryParam("account_id", "integer", "只看某个账户"),
-				queryParam("limit", "integer", "返回条数，默认 50，最大 200"),
-			},
+			Query: append(pageInvoices.fields(),
+				queryParam("account_id", "integer", "只看某个账户")),
 		},
 		{
 			Method: "GET", Path: "/admin/api/v1/accounts/{id}/invoices", Handler: s.handleAdminListInvoices,
 			Name: "admin_list_account_invoices", Group: groupBilling, Role: roleViewer,
 			Summary: "列出某个账户的账单",
 			Params:  []adminField{pathParam("id", "账户数字 id")},
-			Query:   []adminField{queryParam("limit", "integer", "返回条数，默认 50，最大 200")},
+			Query:   pageInvoices.fields(),
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/accounts/{id}/invoices", Handler: s.handleAdminBuildInvoice,
@@ -901,7 +906,7 @@ func (s *Server) invoiceAdminRoutes() []adminRoute {
 			Summary: "为一个账期生成（或重算）草稿账单",
 			Params:  []adminField{pathParam("id", "账户数字 id")},
 			Body: []adminField{
-				bodyOptional("period", "string", "自然月账期，例如 2026-08"),
+				bodyOptional("period", "string", "账期：current / previous / last30，或自然月如 2026-08"),
 				bodyOptional("group_by", "string", "明细分组维度，默认 model"),
 				bodyOptional("force", "boolean", "草稿已存在时是否重算"),
 				bodyOptional("note", "string", "备注"),
@@ -946,10 +951,8 @@ func (s *Server) invoiceAdminRoutes() []adminRoute {
 			Name: "admin_list_credits", Group: groupBilling, Role: roleViewer,
 			Summary: "账户的充值/赠送记录",
 			Params:  []adminField{pathParam("id", "账户数字 id")},
-			Query: []adminField{
-				queryParam("days", "integer", "回溯天数，默认 7，最大 365"),
-				queryParam("limit", "integer", "返回条数，默认 100，最大 1000"),
-			},
+			Query: append(pageLedger.fields(),
+				queryParam("days", "integer", "回溯天数，默认 7，最大 365")),
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/redemption-codes", Handler: s.handleAdminGenerateCodes,
@@ -969,10 +972,8 @@ func (s *Server) invoiceAdminRoutes() []adminRoute {
 			Method: "GET", Path: "/admin/api/v1/redemption-codes", Handler: s.handleAdminListCodes,
 			Name: "admin_list_redemption_codes", Group: groupBilling, Role: roleViewer,
 			Summary: "列出兑换码（不返回明文）",
-			Query: []adminField{
-				queryParam("batch_id", "string", "只看某个批次"),
-				queryParam("limit", "integer", "返回条数，默认 100，最大 500"),
-			},
+			Query: append(pageCodes.fields(),
+				queryParam("batch_id", "string", "只看某个批次")),
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/redemption-codes/redeem", Handler: s.handleAdminRedeemCode,
@@ -1000,7 +1001,7 @@ func (s *Server) invoiceAdminRoutes() []adminRoute {
 			Method: "GET", Path: "/admin/api/v1/billing/reconciliations", Handler: s.handleAdminReconciliations,
 			Name: "admin_list_reconciliations", Group: groupBilling, Role: roleViewer,
 			Summary: "历史对账记录",
-			Query:   []adminField{queryParam("limit", "integer", "返回条数，默认 30，最大 200")},
+			Query:   pageReconciliations.fields(),
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/billing/failures/replay", Handler: s.handleAdminReplayFailures,
@@ -1024,7 +1025,7 @@ func (s *Server) backupAdminRoutes() []adminRoute {
 			Method: "GET", Path: "/admin/api/v1/backups", Handler: s.handleAdminListBackups,
 			Name: "admin_list_backups", Group: groupBackups, Role: roleViewer,
 			Summary: "列出备份作业（时间、大小、校验结果、路径）",
-			Query:   []adminField{queryParam("limit", "integer", "返回条数，默认 100，最大 500")},
+			Query:   pageBackups.fields(),
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/backups", Handler: s.handleAdminRunBackup,
@@ -1070,13 +1071,15 @@ func (s *Server) portalAdminRoutes() []adminRoute {
 			Method: "GET", Path: "/admin/api/v1/portal-users", Handler: s.handleAdminListPortalUsers,
 			Name: "admin_list_portal_users", Group: groupPortal, Role: roleViewer,
 			Summary: "列出门户用户（可按账户过滤）",
-			Query:   []adminField{queryParam("account_id", "integer", "只看某个账户")},
+			Query: append(pageConfig.fields(),
+				queryParam("account_id", "integer", "只看某个账户")),
 		},
 		{
 			Method: "GET", Path: "/admin/api/v1/accounts/{id}/portal-users", Handler: s.handleAdminListPortalUsers,
 			Name: "admin_list_account_portal_users", Group: groupPortal, Role: roleViewer,
 			Summary: "列出某个账户的门户用户",
 			Params:  []adminField{pathParam("id", "账户数字 id")},
+			Query:   pageConfig.fields(),
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/accounts/{id}/portal-users", Handler: s.handleAdminCreatePortalUser,

@@ -39,7 +39,13 @@ func (s *Server) handleAdminListAccounts(w http.ResponseWriter, r *http.Request)
 	for _, a := range list {
 		out = append(out, accountJSON(a))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	page, err := pageConfig.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	window := sliceWindow(out, page)
+	writeList(w, window, len(out), page)
 }
 
 func (s *Server) handleAdminCreateAccount(w http.ResponseWriter, r *http.Request) {
@@ -252,7 +258,13 @@ func (s *Server) handleAdminListModels(w http.ResponseWriter, r *http.Request) {
 		payload["route_count"] = routeCount[m.ID]
 		out = append(out, payload)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	page, err := pageConfig.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	window := sliceWindow(out, page)
+	writeList(w, window, len(out), page)
 }
 
 func (s *Server) handleAdminUpsertModel(w http.ResponseWriter, r *http.Request) {
@@ -373,7 +385,13 @@ func (s *Server) handleAdminListMappings(w http.ResponseWriter, r *http.Request)
 	for _, m := range list {
 		out = append(out, mappingJSON(m))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	page, err := pageConfig.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	window := sliceWindow(out, page)
+	writeList(w, window, len(out), page)
 }
 
 func (s *Server) handleAdminUpsertMapping(w http.ResponseWriter, r *http.Request) {
@@ -501,7 +519,13 @@ func (s *Server) handleAdminListRoutes(w http.ResponseWriter, r *http.Request) {
 	for _, route := range list {
 		out = append(out, routeJSON(route, models[route.ModelID], providers[route.ProviderID]))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	page, err := pageConfig.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	window := sliceWindow(out, page)
+	writeList(w, window, len(out), page)
 }
 
 // nameLookups resolves ids to names for presentation only; failures degrade to
@@ -768,7 +792,13 @@ func (s *Server) handleAdminListTags(w http.ResponseWriter, r *http.Request) {
 	for _, t := range list {
 		out = append(out, tagJSON(t))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	page, err := pageConfig.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	window := sliceWindow(out, page)
+	writeList(w, window, len(out), page)
 }
 
 func (s *Server) handleAdminUpsertTag(w http.ResponseWriter, r *http.Request) {
@@ -879,7 +909,13 @@ func (s *Server) handleAdminListMCPTokens(w http.ResponseWriter, r *http.Request
 	for _, t := range list {
 		out = append(out, mcpTokenJSON(t))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	page, err := pageConfig.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	window := sliceWindow(out, page)
+	writeList(w, window, len(out), page)
 }
 
 func (s *Server) handleAdminCreateMCPToken(w http.ResponseWriter, r *http.Request) {
@@ -1088,7 +1124,13 @@ func (s *Server) handleAdminListHooks(w http.ResponseWriter, r *http.Request) {
 	for _, h := range list {
 		out = append(out, hookJSON(h))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	page, err := pageConfig.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	window := sliceWindow(out, page)
+	writeList(w, window, len(out), page)
 }
 
 func (s *Server) handleAdminUpsertHook(w http.ResponseWriter, r *http.Request) {

@@ -35,7 +35,10 @@ func (s *Server) handleAdminListBackups(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	jobs, err := manager.Jobs(r.Context(), adminLimit(r, 100, 500))
+	// Backups are bounded by the retention policy, and the page has to report the whole
+	// directory's footprint — loading every job row is what total_bytes already required,
+	// so this list pages in memory instead of in SQL.
+	jobs, err := manager.Jobs(r.Context(), 1000)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
@@ -46,10 +49,15 @@ func (s *Server) handleAdminListBackups(w http.ResponseWriter, r *http.Request) 
 		out = append(out, backupJobJSON(job))
 		totalBytes += job.SizeBytes
 	}
-	payload := map[string]any{
-		"data": out, "count": len(out),
-		"dir": manager.Dir(), "total_bytes": totalBytes,
+	page, err := pageBackups.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
 	}
+	window := sliceWindow(out, page)
+	payload := listPayload(window, len(out), page)
+	payload["dir"] = manager.Dir()
+	payload["total_bytes"] = totalBytes
 	if next := manager.NextRun(); !next.IsZero() {
 		payload["next_run"] = next.UTC().Format(time.RFC3339)
 	}

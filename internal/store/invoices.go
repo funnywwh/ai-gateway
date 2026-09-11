@@ -94,10 +94,16 @@ FROM invoice_lines WHERE invoice_id = ? ORDER BY charge_micros DESC, group_key`,
 	return out, nil
 }
 
-// ListInvoices returns the invoices of one account (accountID <= 0 means all).
+// ListInvoices returns the first page of invoices (accountID <= 0 means all).
 func (db *DB) ListInvoices(ctx context.Context, accountID int64, limit int) ([]*domain.Invoice, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
+	return db.ListInvoicesPage(ctx, accountID, limit, 0)
+}
+
+// ListInvoicesPage returns one page of invoices, newest period first.
+func (db *DB) ListInvoicesPage(ctx context.Context, accountID int64, limit, offset int) ([]*domain.Invoice, error) {
+	limit = normalizeLimit(limit, 100, 500)
+	if offset < 0 {
+		offset = 0
 	}
 	query := "SELECT " + invoiceCols + " FROM invoices"
 	args := []any{}
@@ -105,8 +111,8 @@ func (db *DB) ListInvoices(ctx context.Context, accountID int64, limit int) ([]*
 		query += " WHERE account_id = ?"
 		args = append(args, accountID)
 	}
-	query += " ORDER BY period_start DESC, id DESC LIMIT ?"
-	args = append(args, limit)
+	query += " ORDER BY period_start DESC, id DESC LIMIT ? OFFSET ?"
+	args = append(args, limit, offset)
 	rows, err := db.read.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list invoices: %w", err)
@@ -124,6 +130,17 @@ func (db *DB) ListInvoices(ctx context.Context, accountID int64, limit int) ([]*
 		return nil, fmt.Errorf("store: iterate invoices: %w", err)
 	}
 	return out, nil
+}
+
+// CountInvoices counts the invoices the same account filter selects.
+func (db *DB) CountInvoices(ctx context.Context, accountID int64) (int, error) {
+	where := ""
+	args := []any{}
+	if accountID > 0 {
+		where = " WHERE account_id = ?"
+		args = append(args, accountID)
+	}
+	return db.countRows(ctx, "invoices", where, args, "invoices")
 }
 
 // AggregateInvoiceLines computes the invoice lines of one account and period from

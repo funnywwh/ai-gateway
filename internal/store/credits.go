@@ -70,10 +70,16 @@ VALUES(?,?,?,?,?,?,?)`,
 	return nil
 }
 
-// ListRedemptionCodes returns codes (optionally one batch) newest first.
+// ListRedemptionCodes returns the first page of codes (optionally one batch).
 func (db *DB) ListRedemptionCodes(ctx context.Context, batchID string, limit int) ([]*domain.RedemptionCode, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
+	return db.ListRedemptionCodesPage(ctx, batchID, limit, 0)
+}
+
+// ListRedemptionCodesPage returns one page of codes (optionally one batch), newest first.
+func (db *DB) ListRedemptionCodesPage(ctx context.Context, batchID string, limit, offset int) ([]*domain.RedemptionCode, error) {
+	limit = normalizeLimit(limit, 100, 500)
+	if offset < 0 {
+		offset = 0
 	}
 	query := "SELECT " + codeCols + " FROM redemption_codes"
 	args := []any{}
@@ -81,8 +87,8 @@ func (db *DB) ListRedemptionCodes(ctx context.Context, batchID string, limit int
 		query += " WHERE batch_id = ?"
 		args = append(args, batchID)
 	}
-	query += " ORDER BY id DESC LIMIT ?"
-	args = append(args, limit)
+	query += " ORDER BY id DESC LIMIT ? OFFSET ?"
+	args = append(args, limit, offset)
 	rows, err := db.read.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list redemption codes: %w", err)
@@ -100,6 +106,17 @@ func (db *DB) ListRedemptionCodes(ctx context.Context, batchID string, limit int
 		return nil, fmt.Errorf("store: iterate redemption codes: %w", err)
 	}
 	return out, nil
+}
+
+// CountRedemptionCodes counts the codes the same batch filter selects.
+func (db *DB) CountRedemptionCodes(ctx context.Context, batchID string) (int, error) {
+	where := ""
+	args := []any{}
+	if batchID != "" {
+		where = " WHERE batch_id = ?"
+		args = append(args, batchID)
+	}
+	return db.countRows(ctx, "redemption_codes", where, args, "redemption codes")
 }
 
 // RedeemCode claims one code for an account. The conditional UPDATE is the whole
@@ -188,15 +205,21 @@ VALUES(?,?,?,?,?,?,?,?,?,?)`,
 	return id, nil
 }
 
-// ListReconciliations returns recent reconciliation runs.
+// ListReconciliations returns the first page of reconciliation runs.
 func (db *DB) ListReconciliations(ctx context.Context, limit int) ([]*domain.Reconciliation, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 50
+	return db.ListReconciliationsPage(ctx, limit, 0)
+}
+
+// ListReconciliationsPage returns one page of reconciliation runs, newest first.
+func (db *DB) ListReconciliationsPage(ctx context.Context, limit, offset int) ([]*domain.Reconciliation, error) {
+	limit = normalizeLimit(limit, 50, 500)
+	if offset < 0 {
+		offset = 0
 	}
 	rows, err := db.read.QueryContext(ctx, `
 SELECT id, period_start, period_end, kind, usage_charge_micros, ledger_charge_micros,
   diff_micros, missing_usage_count, estimated_ratio_bp, details_json, created_at
-FROM billing_reconciliations ORDER BY id DESC LIMIT ?`, limit)
+FROM billing_reconciliations ORDER BY id DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("store: list reconciliations: %w", err)
 	}
@@ -222,6 +245,11 @@ FROM billing_reconciliations ORDER BY id DESC LIMIT ?`, limit)
 		return nil, fmt.Errorf("store: iterate reconciliations: %w", err)
 	}
 	return out, nil
+}
+
+// CountReconciliations counts every reconciliation run.
+func (db *DB) CountReconciliations(ctx context.Context) (int, error) {
+	return db.countRows(ctx, "billing_reconciliations", "", nil, "reconciliations")
 }
 
 // LedgerChargeTotals sums charge ledger entries per account inside a window.

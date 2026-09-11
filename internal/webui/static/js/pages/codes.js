@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, table, modal, toast, badge, formatTime, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
+import { el, card, pagedTable, modal, toast, badge, formatTime, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
 import { initCurrency, money, ledgerCurrency } from '../money.js';
 
 
@@ -12,35 +12,28 @@ export async function render({ page, actions, session }) {
 	actions.append(create, redeem, refresh);
 
 	const batchInput = el('input', { placeholder: '按批次过滤（留空显示全部）' });
-	let view;
 
-	async function load() {
-		const payload = await api.get('/redemption-codes', { batch_id: batchInput.value.trim() || undefined, limit: 200 });
-		const rows = payload.data || [];
-		if (!view) {
-			view = table({
-				columns: [
-					{ key: 'hash_prefix', label: '哈希前缀', render: (row) => el('code', { text: row.hash_prefix }) },
-					{ key: 'amount_micros', label: '面额', render: (row) => money(row.amount_micros) },
-					{ key: 'status', label: '状态', render: (row) => badge(row.status, row.status === 'unused' ? 'ok' : row.status === 'expired' ? 'warn' : '') },
-					{ key: 'batch_id', label: '批次', render: (row) => el('code', { text: row.batch_id || '—' }) },
-					{ key: 'expires_at', label: '到期', render: (row) => formatTime(row.expires_at) },
-					{ key: 'redeemed_at', label: '核销时间', render: (row) => formatTime(row.redeemed_at) },
-					{ key: 'created_at', label: '生成时间', render: (row) => formatTime(row.created_at) },
-				],
-				rows,
-				empty: '还没有兑换码',
-			});
-			page.append(card('兑换码', view.node, [
-				batchInput,
-				el('span', { class: 'muted', text: '库里只存哈希：明文只在生成时显示一次，泄露数据库也无法核销' })]));
-		} else {
-			view.refresh(rows);
-		}
-	}
+	const view = pagedTable({
+		columns: [
+			{ key: 'hash_prefix', label: '哈希前缀', render: (row) => el('code', { text: row.hash_prefix }) },
+			{ key: 'amount_micros', label: '面额', render: (row) => money(row.amount_micros) },
+			{ key: 'status', label: '状态', render: (row) => badge(row.status, row.status === 'unused' ? 'ok' : row.status === 'expired' ? 'warn' : '') },
+			{ key: 'batch_id', label: '批次', render: (row) => el('code', { text: row.batch_id || '—' }) },
+			{ key: 'expires_at', label: '到期', render: (row) => formatTime(row.expires_at) },
+			{ key: 'redeemed_at', label: '核销时间', render: (row) => formatTime(row.redeemed_at) },
+			{ key: 'created_at', label: '生成时间', render: (row) => formatTime(row.created_at) },
+		],
+		empty: '还没有兑换码',
+		load: ({ limit, offset }) => api.get('/redemption-codes', { batch_id: batchInput.value.trim() || undefined, limit, offset }),
+		onError: (err) => toast(api.errorMessage(err), 'error'),
+	});
+	page.append(card('兑换码', view.node, [
+		batchInput,
+		el('span', { class: 'muted', text: '库里只存哈希：明文只在生成时显示一次，泄露数据库也无法核销' })]));
 
-	refresh.addEventListener('click', () => load().catch((err) => toast(api.errorMessage(err), 'error')));
-	batchInput.addEventListener('change', () => load().catch((err) => toast(api.errorMessage(err), 'error')));
+	refresh.addEventListener('click', () => view.refresh());
+	// 换批次就是换了一份列表：当前页的 offset 属于上一批数据，必须回到第 1 页。
+	batchInput.addEventListener('change', () => view.reset());
 
 	create.addEventListener('click', async () => {
 		const result = await modal({
@@ -62,11 +55,12 @@ export async function render({ page, actions, session }) {
 				return first;
 			},
 		});
-		if (result) await load();
+		if (result) await view.refresh();
 	});
 
 	redeem.addEventListener('click', async () => {
-		const accounts = (await api.get('/accounts')).data || [];
+		// 选择器要一次拿全：显式请求上限 1000（配置类列表的服务端上限）。
+		const accounts = (await api.get('/accounts', { limit: 1000 })).data || [];
 		if (!accounts.length) { toast('请先创建一个账户', 'error'); return; }
 		const result = await modal({
 			title: '核销兑换码',
@@ -80,10 +74,10 @@ export async function render({ page, actions, session }) {
 		});
 		if (result) {
 			toast('已核销 ' + money(result.amount_micros), 'ok');
-			await load();
+			await view.refresh();
 		}
 	});
-	await load();
+	await view.refresh();
 }
 
 // showCodes displays the one-time plaintext list with a copy helper.

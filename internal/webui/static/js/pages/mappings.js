@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, table, modal, toast, badge, confirmDialog, jsonBlock } from '../ui.js';
+import { el, card, pagedTable, modal, toast, badge, confirmDialog, jsonBlock } from '../ui.js';
 
 export async function render({ page, actions, session }) {
   const readonly = session.role !== 'admin';
@@ -22,34 +22,27 @@ export async function render({ page, actions, session }) {
     el('div', { class: 'toolbar' }, [probeInput, probeBtn]), probeOut,
   ]));
 
-  let view;
-  async function load() {
-    const payload = await api.get('/model-mappings');
-    const rows = payload.data || [];
-    if (!view) {
-      view = table({
-        columns: [
-          { key: 'priority', label: '优先级' },
-          { key: 'kind', label: '类型', render: (row) => badge(row.kind) },
-          { key: 'pattern', label: '匹配', render: (row) => el('code', { text: row.pattern }) },
-          { key: 'target_model', label: '目标模型' },
-          { key: 'target_provider_id', label: '目标供应商', render: (row) => row.target_provider_id || '—' },
-          { key: 'target_upstream_model', label: '上游模型名模板', render: (row) => el('code', { text: row.target_upstream_model || '—' }) },
-          { key: 'enabled', label: '启用', render: (row) => row.enabled ? badge('on', 'ok') : badge('off') },
-        ],
-        rows,
-        rowActions: (row) => readonly ? [] : [el('button', { class: 'btn btn-danger', text: '删除', onclick: () => remove(row, load) })],
-      });
-      page.append(card('模型映射规则', view.node, [
-        el('span', { class: 'muted', text: '按优先级从小到大匹配；模板支持 {model}、{1}、{name} 捕获组' })]));
-    } else {
-      view.refresh(rows);
-    }
-  }
+  const view = pagedTable({
+    columns: [
+      { key: 'priority', label: '优先级' },
+      { key: 'kind', label: '类型', render: (row) => badge(row.kind) },
+      { key: 'pattern', label: '匹配', render: (row) => el('code', { text: row.pattern }) },
+      { key: 'target_model', label: '目标模型' },
+      { key: 'target_provider_id', label: '目标供应商', render: (row) => row.target_provider_id || '—' },
+      { key: 'target_upstream_model', label: '上游模型名模板', render: (row) => el('code', { text: row.target_upstream_model || '—' }) },
+      { key: 'enabled', label: '启用', render: (row) => row.enabled ? badge('on', 'ok') : badge('off') },
+    ],
+    rowActions: (row) => readonly ? [] : [el('button', { class: 'btn btn-danger', text: '删除', onclick: () => remove(row, () => view.refresh()) })],
+    load: ({ limit, offset }) => api.get('/model-mappings', { limit, offset }),
+    onError: (err) => toast(api.errorMessage(err), 'error'),
+  });
+  page.append(card('模型映射规则', view.node, [
+    el('span', { class: 'muted', text: '按优先级从小到大匹配；模板支持 {model}、{1}、{name} 捕获组' })]));
 
-  refresh.addEventListener('click', () => load().catch((err) => toast(api.errorMessage(err), 'error')));
+  refresh.addEventListener('click', () => view.refresh());
   create.addEventListener('click', async () => {
-    const providers = (await api.get('/providers')).data || [];
+    // 供应商下拉框要一次拿全：显式请求上限 1000（配置类列表的服务端上限）。
+    const providers = (await api.get('/providers', { limit: 1000 })).data || [];
     await modal({
       title: '新建映射规则', wide: true,
       fields: [
@@ -67,12 +60,12 @@ export async function render({ page, actions, session }) {
         else delete payload.target_provider_id;
         await api.post('/model-mappings', payload);
         toast('已创建', 'ok');
-        await load();
+        await view.refresh();
         return true;
       },
     });
   });
-  await load();
+  await view.refresh();
 }
 
 async function remove(row, reload) {

@@ -58,7 +58,13 @@ func (s *Server) handleAdminListPortalUsers(w http.ResponseWriter, r *http.Reque
 	for _, user := range users {
 		out = append(out, portalUserJSON(user))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": out, "count": len(out)})
+	page, err := pageConfig.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	window := sliceWindow(out, page)
+	writeList(w, window, len(out), page)
 }
 
 func (s *Server) handleAdminCreatePortalUser(w http.ResponseWriter, r *http.Request) {

@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, table, modal, toast, confirmDialog } from '../ui.js';
+import { el, card, pagedTable, modal, toast, confirmDialog } from '../ui.js';
 
 const SAMPLE_GRANTS = JSON.stringify({ models: ['gpt-*'], providers: ['*'] }, null, 2);
 // The quota policy is FLAT: only top-level fields are read (rpm/tpm/concurrency are
@@ -12,36 +12,28 @@ export async function render({ page, actions, session }) {
   const create = el('button', { class: 'btn btn-primary', text: '新建标签', disabled: readonly });
   const refresh = el('button', { class: 'btn', text: '刷新' });
   actions.append(refresh, create);
-  let view;
 
-  async function load() {
-    const payload = await api.get('/tags');
-    const rows = payload.data || [];
-    if (!view) {
-      view = table({
-        columns: [
-          { key: 'name', label: '名称' },
-          { key: 'description', label: '说明' },
-          { key: 'priority', label: '优先级' },
-          { key: 'grants', label: '授权', render: (row) => el('code', { text: JSON.stringify(row.grants || {}) }) },
-          { key: 'policy', label: '策略', render: (row) => el('code', { text: JSON.stringify(row.policy || {}) }) },
-        ],
-        rows,
-        rowActions: (row) => readonly ? [] : [
-          el('button', { class: 'btn', text: '编辑', onclick: () => edit(row, load) }),
-          el('button', { class: 'btn btn-danger', text: '删除', onclick: () => remove(row, load) }),
-        ],
-      });
-      page.append(card('标签（API Key 分组）', view.node, [
-        el('span', { class: 'muted', text: 'Key 的可用模型/供应商 = 全部标签授权的并集；策略按 tag 覆盖 key' })]));
-    } else {
-      view.refresh(rows);
-    }
-  }
+  const view = pagedTable({
+    columns: [
+      { key: 'name', label: '名称' },
+      { key: 'description', label: '说明' },
+      { key: 'priority', label: '优先级' },
+      { key: 'grants', label: '授权', render: (row) => el('code', { text: JSON.stringify(row.grants || {}) }) },
+      { key: 'policy', label: '策略', render: (row) => el('code', { text: JSON.stringify(row.policy || {}) }) },
+    ],
+    rowActions: (row) => readonly ? [] : [
+      el('button', { class: 'btn', text: '编辑', onclick: () => edit(row, () => view.refresh()) }),
+      el('button', { class: 'btn btn-danger', text: '删除', onclick: () => remove(row, () => view.refresh()) }),
+    ],
+    load: ({ limit, offset }) => api.get('/tags', { limit, offset }),
+    onError: (err) => toast(api.errorMessage(err), 'error'),
+  });
+  page.append(card('标签（API Key 分组）', view.node, [
+    el('span', { class: 'muted', text: 'Key 的可用模型/供应商 = 全部标签授权的并集；策略按 tag 覆盖 key' })]));
 
-  refresh.addEventListener('click', () => load().catch((err) => toast(api.errorMessage(err), 'error')));
-  create.addEventListener('click', () => form(null, load));
-  await load();
+  refresh.addEventListener('click', () => view.refresh());
+  create.addEventListener('click', () => form(null, () => view.refresh()));
+  await view.refresh();
 }
 
 function form(row, reload) {
