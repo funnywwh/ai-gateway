@@ -366,6 +366,7 @@ func run() int {
 		Codes:          billingService,
 		Reconciliation: billingService,
 		Backups:        backupManager,
+		PortalUsers:    db,
 		Log:            log,
 		Version:        version,
 	})

@@ -112,3 +112,16 @@ type UsageCounter struct {
 	CostMicros   int64
 	ChargeMicros int64
 }
+
+// PortalUser is a customer self-service login bound to exactly one account.
+type PortalUser struct {
+	ID                 int64
+	AccountID          int64
+	Username           string
+	PasswordHash       string
+	Status             string // active|disabled
+	MustChangePassword bool
+	LastLoginAt        *time.Time
+	CreatedBy          string
+	CreatedAt          time.Time
+}

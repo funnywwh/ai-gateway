@@ -26,6 +26,7 @@ type Config struct {
 	Recording      Recording   `yaml:"recording"`
 	MCP            MCP         `yaml:"mcp"`
 	Hooks          Hooks       `yaml:"hooks"`
+	Portal         Portal      `yaml:"portal"`
 	RateLimit      RateLimit   `yaml:"ratelimit"`
 	Backup         Backup      `yaml:"backup"`
 	Log            logx.Config `yaml:"log"`
@@ -169,6 +170,17 @@ type Hooks struct {
 	// AllowInsecure permits http:// webhook targets. Off by default so credentials
 	// and payloads cannot be pushed over plaintext by accident.
 	AllowInsecure bool `yaml:"allow_insecure"`
+}
+
+// Portal configures the customer self-service portal (M14). It is off by default: an
+// operator opts in after creating portal users.
+type Portal struct {
+	Enabled       bool `yaml:"enabled"`
+	SessionTTLH   int  `yaml:"session_ttl_h"`
+	LoginAttempts int  `yaml:"login_attempts"`
+	// AllowedTags limits which tags a customer may attach to their own API keys. Empty
+	// means "only the account default tags".
+	AllowedTags []string `yaml:"allowed_tags"`
 }
 
 // RateLimit configures the sharded rate limiter.
@@ -356,6 +368,7 @@ func Default() Config {
 		},
 		MCP:       MCP{Enabled: true, MaxQueryRows: 1000, RequestWindowDays: 30},
 		Hooks:     Hooks{QueueSize: 1024, Workers: 8, TimeoutS: 5, Retries: 5, DeadLetter: "./data/hooks-dead.jsonl"},
+		Portal:    Portal{SessionTTLH: 12, LoginAttempts: 10},
 		RateLimit: RateLimit{Shards: 64},
 		Backup: Backup{
 			Enabled:          true,

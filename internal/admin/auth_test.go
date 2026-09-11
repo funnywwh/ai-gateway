@@ -70,6 +70,15 @@ func (m *memStore) DeleteAdminSession(ctx context.Context, id string) error {
 	return nil
 }
 
+func (m *memStore) DeleteAdminSessions(ctx context.Context, userID int64) error {
+	for id, session := range m.sessions {
+		if session.userID == userID {
+			delete(m.sessions, id)
+		}
+	}
+	return nil
+}
+
 func (m *memStore) TouchAdminLogin(ctx context.Context, id int64) error {
 	m.loginTicks++
 	return nil

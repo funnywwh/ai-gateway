@@ -163,6 +163,7 @@ func newAdminFixture(t *testing.T) *adminFixture {
 		Settings:      db,
 		Secrets:       sealer,
 		Prober:        prober,
+		PortalUsers:   db,
 		Reload: func(ctx context.Context) (any, error) {
 			snap, err := reg.Reload(ctx)
 			if err != nil {
@@ -822,5 +823,70 @@ func TestAdminPricingTargetsAndMarkup(t *testing.T) {
 	missing.Body.Close()
 	if missing.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown model status = %d, want 404", missing.StatusCode)
+	}
+}
+
+func TestAdminPortalUserLifecycle(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	account := decodeJSONBody(t, f.call(t, http.MethodPost, "/admin/api/v1/accounts",
+		`{"name":"portal-tenant","billing_mode":"prepaid"}`, cookie))
+	accountID := int64(account["id"].(float64))
+
+	created := f.call(t, http.MethodPost, "/admin/api/v1/accounts/"+itoa(accountID)+"/portal-users",
+		`{"username":"customer"}`, cookie)
+	payload := decodeJSONBody(t, created)
+	if created.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d body=%v", created.StatusCode, payload)
+	}
+	password, _ := payload["password"].(string)
+	if len(password) < 12 {
+		t.Fatalf("the one-time password is too short: %q", password)
+	}
+	if payload["must_change_password"] != true {
+		t.Fatalf("a new portal user must be asked to change the password: %v", payload)
+	}
+	userID := int64(payload["id"].(float64))
+
+	// The plaintext password must never be readable again.
+	list := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/accounts/"+itoa(accountID)+"/portal-users", "", cookie))
+	if list["count"] != float64(1) {
+		t.Fatalf("list = %v", list)
+	}
+	entry, _ := list["data"].([]any)[0].(map[string]any)
+	if _, leaked := entry["password"]; leaked {
+		t.Fatalf("the list must not expose the password: %v", entry)
+	}
+	if entry["username"] != "customer" || entry["status"] != "active" {
+		t.Fatalf("entry = %v", entry)
+	}
+
+	duplicate := f.call(t, http.MethodPost, "/admin/api/v1/accounts/"+itoa(accountID)+"/portal-users",
+		`{"username":"customer"}`, cookie)
+	duplicate.Body.Close()
+	if duplicate.StatusCode != http.StatusConflict {
+		t.Fatalf("duplicate username status = %d, want 409", duplicate.StatusCode)
+	}
+	badName := f.call(t, http.MethodPost, "/admin/api/v1/accounts/"+itoa(accountID)+"/portal-users",
+		`{"username":"has space"}`, cookie)
+	badName.Body.Close()
+	if badName.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bad username status = %d, want 400", badName.StatusCode)
+	}
+
+	reset := f.call(t, http.MethodPost, "/admin/api/v1/portal-users/"+itoa(userID)+"/password", `{}`, cookie)
+	resetPayload := decodeJSONBody(t, reset)
+	if resetPayload["password"] == password {
+		t.Fatal("the reset must issue a new password")
+	}
+	if resetPayload["sessions_revoked"] != true {
+		t.Fatalf("reset payload = %v", resetPayload)
+	}
+
+	disabled := f.call(t, http.MethodDelete, "/admin/api/v1/portal-users/"+itoa(userID), "", cookie)
+	disabledPayload := decodeJSONBody(t, disabled)
+	if disabledPayload["status"] != "disabled" {
+		t.Fatalf("disable payload = %v", disabledPayload)
 	}
 }

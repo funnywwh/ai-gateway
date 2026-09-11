@@ -89,6 +89,8 @@ type Deps struct {
 	Reconciliation ReconciliationAdmin
 	// Backups snapshots the database on a schedule (M16).
 	Backups BackupAdmin
+	// PortalUsers manages customer self-service logins (M14).
+	PortalUsers PortalUserAdmin
 	// Reload rebuilds the routing snapshot after a write; InvalidateKey/All drop
 	// cached credentials; KeyCacheSize reports cache occupancy for /stats.
 	Reload        func(ctx context.Context) (any, error)
@@ -252,6 +254,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /admin/api/v1/backups/{id}/download", s.handleAdminDownloadBackup)
 	s.mux.HandleFunc("POST /admin/api/v1/backups/{id}/restore", s.handleAdminRestoreBackup)
 	s.mux.HandleFunc("POST /admin/api/v1/backups/prune", s.handleAdminPruneBackups)
+	s.mux.HandleFunc("GET /admin/api/v1/portal-users", s.handleAdminListPortalUsers)
+	s.mux.HandleFunc("GET /admin/api/v1/accounts/{id}/portal-users", s.handleAdminListPortalUsers)
+	s.mux.HandleFunc("POST /admin/api/v1/accounts/{id}/portal-users", s.handleAdminCreatePortalUser)
+	s.mux.HandleFunc("POST /admin/api/v1/portal-users/{id}/password", s.handleAdminResetPortalPassword)
+	s.mux.HandleFunc("DELETE /admin/api/v1/portal-users/{id}", s.handleAdminDisablePortalUser)
 	s.mux.HandleFunc("POST /admin/api/v1/pricing/validate", s.handleAdminValidatePricing)
 	s.mux.HandleFunc("GET /admin/api/v1/pricing/targets", s.handleAdminPricingTargets)
 	s.mux.HandleFunc("PATCH /admin/api/v1/pricing/markup", s.handleAdminPatchMarkup)
