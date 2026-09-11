@@ -13,6 +13,11 @@ hooks-dead.jsonl
 # workspace-local toolchain caches (see scripts/goenv.sh)
 /.cache/
 
+# local deployment configuration: it carries the bootstrap admin password, API keys,
+# the session secret and credentials_key, so it must never enter git history.
+# Derive your own from config.example.yaml instead.
+/config.yaml
+
 # built plugin binaries
 /plugins/*.bin
 
