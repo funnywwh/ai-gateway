@@ -15,6 +15,10 @@ import (
 // Store is the persistence subset the verifier needs.
 type Store interface {
 	GetAPIKeyByPrefix(ctx context.Context, prefix string) (*domain.APIKey, error)
+	// GetAPIKey resolves a key by database id. It exists for the console chat, which is an
+	// in-process client of the data plane: the browser session says *which* key may be
+	// spent, and no plaintext key ever exists to send as a bearer token.
+	GetAPIKey(ctx context.Context, id int64) (*domain.APIKey, error)
 	GetAccount(ctx context.Context, id int64) (*domain.Account, error)
 	TouchAPIKey(ctx context.Context, id int64) error
 }
@@ -57,6 +61,9 @@ type Verifier struct {
 
 	mu    sync.RWMutex
 	cache map[string]*entry
+	// touchedIDs throttles last_used_at for keys resolved by id (console chat), which have
+	// no cache entry to hang the timestamp on.
+	touchedIDs map[int64]time.Time
 
 	now func() time.Time
 }
@@ -76,10 +83,11 @@ func New(store Store, cfg Config) *Verifier {
 		cfg.TouchInterval = DefaultConfig().TouchInterval
 	}
 	return &Verifier{
-		store: store,
-		cfg:   cfg,
-		cache: make(map[string]*entry),
-		now:   func() time.Time { return time.Now().UTC() },
+		store:      store,
+		cfg:        cfg,
+		cache:      make(map[string]*entry),
+		touchedIDs: make(map[int64]time.Time),
+		now:        func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -147,6 +155,57 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*domain.APIKey, *d
 	v.put(prefix, e)
 	v.touchAsync(prefix, e, now)
 	return key, account, nil
+}
+
+// VerifyID authenticates a key by its database id, applying exactly the same validity
+// checks as Verify: the key exists, is active, has not expired, and its account is active.
+//
+// It is the in-process variant used by the console chat, where the browser session names
+// which key may be spent instead of holding its plaintext. It deliberately does not read
+// the verification cache: a chat turn can run for minutes, and a key revoked in the middle
+// of a conversation must stop working on the very next step. The cost is one indexed row
+// read per model step, which is noise next to a multi-second upstream call.
+func (v *Verifier) VerifyID(ctx context.Context, id int64) (*domain.APIKey, *domain.Account, error) {
+	now := v.now()
+	key, err := v.store.GetAPIKey(ctx, id)
+	if err != nil {
+		if domain.IsUnauthorized(err) {
+			return nil, nil, domain.ErrUnauthorized("invalid API key")
+		}
+		return nil, nil, err
+	}
+	if key.Status != "active" {
+		return nil, nil, domain.ErrUnauthorized("API key is not active")
+	}
+	if key.ExpiresAt != nil && now.After(*key.ExpiresAt) {
+		return nil, nil, domain.ErrUnauthorized("API key has expired")
+	}
+	account, err := v.store.GetAccount(ctx, key.AccountID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if account.Status != "active" {
+		return nil, nil, domain.ErrInsufficientQuota("account " + account.Name + " is " + account.Status)
+	}
+	v.touchByID(ctx, key, now)
+	return key, account, nil
+}
+
+// touchByID refreshes last_used_at for a key resolved by id, under the same throttle that
+// touchAsync applies to bearer traffic.
+func (v *Verifier) touchByID(ctx context.Context, key *domain.APIKey, now time.Time) {
+	v.mu.Lock()
+	last, seen := v.touchedIDs[key.ID]
+	if !seen && key.LastUsedAt != nil {
+		last, seen = *key.LastUsedAt, true
+	}
+	if seen && now.Sub(last) < v.cfg.TouchInterval {
+		v.mu.Unlock()
+		return
+	}
+	v.touchedIDs[key.ID] = now
+	v.mu.Unlock()
+	_ = v.store.TouchAPIKey(ctx, key.ID)
 }
 
 // Invalidate drops one cache entry (called by the admin API after a key write).

@@ -46,7 +46,14 @@ type Principal struct {
 	TokenID   int64
 	Name      string
 	Scope     string
+	// Source names where the caller came from. Empty means an MCP token, which is the
+	// original and still the common case; SourceConsole means the management console's own
+	// chat page, which acts on a real administrator session rather than on a token.
+	Source string
 }
+
+// SourceConsole is the principal source of the console chat.
+const SourceConsole = "console"
 
 // Actor is the identity recorded in audit logs and hooks. Naming the token (not
 // just the account) is what makes an agent's writes traceable afterwards.
@@ -54,6 +61,11 @@ func (p Principal) Actor() string {
 	name := strings.TrimSpace(p.Name)
 	if name == "" {
 		name = "token"
+	}
+	// The console is not a token holder: its identity is the administrator who is logged
+	// in, and saying so is what makes an audit row actionable.
+	if p.Source == SourceConsole {
+		return "console:" + name
 	}
 	if p.TokenID == 0 {
 		return "mcp:" + name

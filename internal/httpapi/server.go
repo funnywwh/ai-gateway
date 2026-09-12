@@ -16,6 +16,7 @@ import (
 
 	"github.com/winger/ai-gateway/internal/admin"
 	"github.com/winger/ai-gateway/internal/apikey"
+	"github.com/winger/ai-gateway/internal/chat"
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/ids"
@@ -93,6 +94,12 @@ type Deps struct {
 	// Admin enables the management API (session auth + CRUD).
 	Admin      AdminService
 	AdminStore AdminStore
+	// ChatStore is the owner-scoped persistence of the console chat. When it is set, the
+	// chat service (and its preview-ticket signer) is built here, so the composition root
+	// only has to hand over the store.
+	ChatStore chat.Store
+	// Chat overrides the built-in chat service (tests drive the handlers with a fake).
+	Chat ChatService
 	// The resource ports below are one narrow interface per resource family; a nil
 	// port disables just that family with a 501 instead of breaking the server.
 	Accounts      AccountAdmin
@@ -148,6 +155,13 @@ type Server struct {
 	// registered records every pattern handed to the mux (tests compare it against
 	// the table; it is never read on the request path).
 	registered []string
+	// chatAllowed is the management-endpoint allowlist console conversations may use. The
+	// route table is immutable after startup, so it is derived once.
+	chatAllowed map[string]bool
+	// chat is the console chat service (nil when the deployment disabled it).
+	chat ChatService
+	// chatSigner signs the short-lived preview tickets.
+	chatSigner *chatTicketSigner
 	// Request-log write health: a failed content write is retried as a skeleton row, and
 	// a failure of that retry is counted here rather than only logged.
 	requestLogWriteFailures atomic.Int64
@@ -162,6 +176,9 @@ func New(deps Deps) *Server {
 	s := &Server{deps: deps, mux: http.NewServeMux()}
 	s.admin = s.adminRoutes()
 	s.adminIndex = newAdminEndpointIndex(s.admin)
+	s.chatAllowed = s.buildChatAllowlist()
+	s.chatSigner = newChatTicketSigner()
+	s.chat = s.newChatService()
 	if binder, ok := deps.MCP.(MCPBackendBinder); ok {
 		// The MCP service gains the administrative surface from here: the transport
 		// layer owns both halves, so no other package needs to know they are linked.
@@ -237,6 +254,10 @@ func (s *Server) routes() {
 	for _, route := range s.admin {
 		s.handle(route.pattern(), route.Handler)
 	}
+
+	// The preview document is fetched by a sandboxed frame that carries no cookie, so it
+	// authorizes with the short-lived ticket the console obtained instead.
+	s.handle("GET /admin/chat-artifact/{id}", s.handleAdminChatArtifact)
 
 	s.handle("GET /healthz", s.handleHealthz)
 	s.handle("GET /readyz", s.handleReadyz)
@@ -333,6 +354,13 @@ func (r *statusRecorder) Flush() {
 // ---------------------------------------------------------------------------
 
 func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (*domain.APIKey, *domain.Account, bool) {
+	// An in-process caller (the console chat) has no bearer token to send: it names a key
+	// in its own session and the server resolves it with the same checks bearer traffic
+	// gets. The context key is an unexported type, so an external request cannot install
+	// one no matter what it sends.
+	if identity, ok := verifiedIdentityFrom(r.Context()); ok && identity.key != nil && identity.account != nil {
+		return identity.key, identity.account, true
+	}
 	header := r.Header.Get("Authorization")
 	if header == "" {
 		header = r.Header.Get("x-api-key")

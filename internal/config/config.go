@@ -31,6 +31,7 @@ type Config struct {
 	Billing        Billing     `yaml:"billing"`
 	Recording      Recording   `yaml:"recording"`
 	MCP            MCP         `yaml:"mcp"`
+	Chat           Chat        `yaml:"chat"`
 	Hooks          Hooks       `yaml:"hooks"`
 	Portal         Portal      `yaml:"portal"`
 	RateLimit      RateLimit   `yaml:"ratelimit"`
@@ -257,6 +258,50 @@ type Hooks struct {
 	AllowInsecure bool `yaml:"allow_insecure"`
 }
 
+// Chat configures the console's smart-chat page, its private skill library and the
+// isolated HTML/SVG previews. Content from this page is recorded as metadata only (never
+// as request/response bodies), because a skill is private to the administrator who wrote
+// it and the global request log is readable by every administrator.
+type Chat struct {
+	Enabled bool `yaml:"enabled"`
+	// MaxSteps bounds how many model calls one question may cost: every step is a
+	// separately billed request, so this is the ceiling on what one click can spend.
+	MaxSteps     int `yaml:"max_steps"`
+	MaxToolCalls int `yaml:"max_tool_calls"`
+	// MaxToolResultBytes truncates one management tool result before it is fed back to the
+	// model; a truncated result says so instead of silently losing the tail.
+	MaxToolResultBytes int `yaml:"max_tool_result_bytes"`
+	// MaxHistoryMessages / MaxHistoryBytes bound the replayed conversation. History is cut
+	// at whole turns so a tool call never loses its output.
+	MaxHistoryMessages int `yaml:"max_history_messages"`
+	MaxHistoryBytes    int `yaml:"max_history_bytes"`
+	// MaxLoadedSkills is a per-conversation limit, not a library limit: the library itself
+	// is paged and unlimited.
+	MaxLoadedSkills int `yaml:"max_loaded_skills"`
+	MaxSkillBytes   int `yaml:"max_skill_bytes"`
+	// RecordReasoning keeps the model's thinking with the message so the console can show
+	// it collapsed. It never reaches the global request log either way.
+	RecordReasoning bool `yaml:"record_reasoning"`
+	// ArtifactMaxBytes / ArtifactMaxPerSession bound preview payloads and how many one
+	// conversation may keep.
+	ArtifactMaxBytes      int `yaml:"artifact_max_bytes"`
+	ArtifactMaxPerSession int `yaml:"artifact_max_per_session"`
+	// ArtifactTicketTTL is how long a preview URL stays usable. A preview is a short-lived
+	// bearer credential for exactly one payload, so the window is deliberately short.
+	ArtifactTicketTTL time.Duration `yaml:"artifact_ticket_ttl"`
+	// ArtifactAllowNetwork lets a previewed page load external resources (for example a
+	// CDN chart library). Off by default: it turns a model-authored page into outbound
+	// traffic from the operator's browser.
+	ArtifactAllowNetwork bool `yaml:"artifact_allow_network"`
+	// MaxOutputTokens caps one step's answer (0 keeps the provider default).
+	MaxOutputTokens int `yaml:"max_output_tokens"`
+	// HighRiskTools names management endpoints the chat must never call, on top of the
+	// built-in list (credentials, permissions, backups, hooks, provider secrets).
+	HighRiskTools []string `yaml:"high_risk_tools"`
+	// SystemPrompt replaces the built-in instructions when set.
+	SystemPrompt string `yaml:"system_prompt"`
+}
+
 // Portal configures the customer self-service portal (M14). It is off by default: an
 // operator opts in after creating portal users.
 type Portal struct {
@@ -465,6 +510,21 @@ func Default() Config {
 			Enabled: true, MaxQueryRows: 1000, RequestWindowDays: 30,
 			AdminTools: true, AdminMaxResponseBytes: 256 * 1024,
 		},
+		Chat: Chat{
+			Enabled:               true,
+			MaxSteps:              8,
+			MaxToolCalls:          16,
+			MaxToolResultBytes:    64 * 1024,
+			MaxHistoryMessages:    40,
+			MaxHistoryBytes:       256 * 1024,
+			MaxLoadedSkills:       12,
+			MaxSkillBytes:         16 * 1024,
+			RecordReasoning:       true,
+			ArtifactMaxBytes:      256 * 1024,
+			ArtifactMaxPerSession: 50,
+			ArtifactTicketTTL:     5 * time.Minute,
+			ArtifactAllowNetwork:  false,
+		},
 		Hooks:     Hooks{QueueSize: 1024, Workers: 8, TimeoutS: 5, Retries: 5, DeadLetter: "./data/hooks-dead.jsonl"},
 		Portal:    Portal{SessionTTLH: 12, LoginAttempts: 10},
 		RateLimit: RateLimit{Shards: 64},
@@ -562,6 +622,7 @@ func applyEnv(cfg *Config) error {
 		envBool(&cfg.MCP.Enabled, "GW_MCP_ENABLED"),
 		envBool(&cfg.MCP.AdminTools, "GW_MCP_ADMIN_TOOLS"),
 		envInt(&cfg.MCP.AdminMaxResponseBytes, "GW_MCP_ADMIN_MAX_RESPONSE_BYTES"),
+		envBool(&cfg.Chat.Enabled, "GW_CHAT_ENABLED"),
 		envInt(&cfg.Server.ReadTimeoutS, "GW_SERVER_READ_TIMEOUT_S"),
 		envInt(&cfg.RateLimit.Shards, "GW_RATELIMIT_SHARDS"),
 	} {
@@ -667,6 +728,54 @@ func (c *Config) Validate() error {
 	}
 	if c.RateLimit.Shards < 1 {
 		return fmt.Errorf("ratelimit.shards must be >= 1")
+	}
+	if err := validateChat(c); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateChat rejects a chat configuration that would make the console lie about what it
+// does: a step budget of zero would silently fall back to a default, a non-positive ticket
+// TTL would make every preview unusable, and a history bound smaller than one turn would
+// cut conversations mid-tool-call.
+func validateChat(c *Config) error {
+	chat := c.Chat
+	if !chat.Enabled {
+		return nil
+	}
+	if chat.MaxSteps <= 0 {
+		return fmt.Errorf("chat.max_steps must be positive")
+	}
+	if chat.MaxToolCalls < 0 {
+		return fmt.Errorf("chat.max_tool_calls must be >= 0")
+	}
+	if chat.MaxToolResultBytes <= 0 {
+		return fmt.Errorf("chat.max_tool_result_bytes must be positive")
+	}
+	if chat.MaxHistoryMessages < 2 {
+		return fmt.Errorf("chat.max_history_messages must be >= 2 (one user message and its answer)")
+	}
+	if chat.MaxHistoryBytes <= 0 {
+		return fmt.Errorf("chat.max_history_bytes must be positive")
+	}
+	if chat.MaxLoadedSkills < 0 {
+		return fmt.Errorf("chat.max_loaded_skills must be >= 0")
+	}
+	if chat.MaxSkillBytes <= 0 {
+		return fmt.Errorf("chat.max_skill_bytes must be positive")
+	}
+	if chat.ArtifactMaxBytes <= 0 {
+		return fmt.Errorf("chat.artifact_max_bytes must be positive")
+	}
+	if chat.ArtifactMaxPerSession <= 0 {
+		return fmt.Errorf("chat.artifact_max_per_session must be positive")
+	}
+	if chat.ArtifactTicketTTL <= 0 {
+		return fmt.Errorf("chat.artifact_ticket_ttl must be positive (previews are short-lived by design)")
+	}
+	if chat.MaxOutputTokens < 0 {
+		return fmt.Errorf("chat.max_output_tokens must be >= 0 (0 keeps the provider default)")
 	}
 	return nil
 }

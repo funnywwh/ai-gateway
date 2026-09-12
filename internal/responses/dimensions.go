@@ -11,8 +11,12 @@ import (
 // agent sent the request; CallKind says whether the request is the agent's own turn or
 // one of its auxiliary calls.
 const (
-	ClientDSH     = "dsh"
-	ClientCodex   = "codex"
+	ClientDSH   = "dsh"
+	ClientCodex = "codex"
+	// ClientConsole is the gateway's own management console (the smart-chat page). It is a
+	// first-class client because its traffic is billed like any other: an operator asking
+	// "which client spent this money" must be able to see the console next to the agents.
+	ClientConsole = "console"
 	ClientUnknown = "unknown"
 
 	CallKindAgent = "agent"
@@ -138,6 +142,10 @@ func (r *Request) Dimensions(clientHint string) Dimensions {
 // "deepseek-harness/<version> (+https://github.com/deepseek-ai/deepseek-harness)"; Codex
 // sends originator/version headers instead on its built-in provider, and a user-defined
 // provider entry may send nothing at all — which is exactly why this is only a fallback.
+//
+// The console's own requests set "aigw-console/<version>" server-side (they never come
+// from a browser), so this marker is reliable for them in a way a client-supplied header
+// would not be; nothing security-relevant is decided from it either way.
 func clientFromHint(hint string) string {
 	hint = strings.ToLower(strings.TrimSpace(hint))
 	switch {
@@ -147,6 +155,8 @@ func clientFromHint(hint string) string {
 		return ClientDSH
 	case strings.Contains(hint, "codex"):
 		return ClientCodex
+	case strings.Contains(hint, "aigw-console"):
+		return ClientConsole
 	default:
 		return ClientUnknown
 	}

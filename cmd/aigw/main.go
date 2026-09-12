@@ -407,11 +407,14 @@ func run() int {
 		Records:     db,
 		LogRecorder: auditWriter,
 		LogJanitor:  logJanitor,
-		MCP:        mcpService,
-		MCPTokens:  db,
-		Hooks:      hookDispatcher,
-		Admin:      adminAuth,
-		AdminStore: db,
+		MCP:         mcpService,
+		MCPTokens:   db,
+		Hooks:       hookDispatcher,
+		Admin:       adminAuth,
+		AdminStore:  db,
+		// The console chat persists conversations, skills and preview payloads in the same
+		// database; the transport builds its service and preview-ticket signer from here.
+		ChatStore: db,
 		// One narrow port per resource family; the composition root is the only place
 		// that knows a single *store.DB backs all of them.
 		Accounts:      db,
@@ -462,6 +465,17 @@ func run() int {
 		// The transport owns the skeleton fallback and its counters; the store owns the
 		// queue. Hand the store a way to report a row it gave up on.
 		api.SetRecordingFailureHandler(auditWriter.SetFailureHandler)
+	}
+
+	if cfg.Chat.Enabled {
+		// A turn that was running when the process died may have executed write tools
+		// already. Marking it interrupted (and its pending tool calls unknown) is what
+		// keeps a restart from silently replaying them.
+		if n, err := api.RecoverChatTurns(ctx); err != nil {
+			log.Warn("recovering interrupted chat turns failed", "err", err)
+		} else if n > 0 {
+			log.Info("marked interrupted chat turns", "turns", n)
+		}
 	}
 
 	httpServer := &http.Server{

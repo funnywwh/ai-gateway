@@ -238,3 +238,45 @@ func TestLoadFXRatesFromYAML(t *testing.T) {
 		t.Fatalf("currencies = %q / %q", cfg.Billing.Currency, cfg.Billing.DisplayCurrency)
 	}
 }
+
+// TestChatConfigIsValidated covers the console chat's own bounds. Each case is a value that
+// would otherwise make the console lie: a zero step budget silently falls back to a default,
+// a non-positive ticket TTL makes every preview unusable, and a history bound smaller than
+// one turn would cut a conversation in the middle of a tool call.
+func TestChatConfigIsValidated(t *testing.T) {
+	cases := []struct {
+		name   string
+		tune   func(*Config)
+		broken bool
+	}{
+		{"defaults are valid", func(c *Config) {}, false},
+		{"disabled chat ignores the rest", func(c *Config) { c.Chat.Enabled = false; c.Chat.MaxSteps = 0 }, false},
+		{"zero steps", func(c *Config) { c.Chat.MaxSteps = 0 }, true},
+		{"negative tool calls", func(c *Config) { c.Chat.MaxToolCalls = -1 }, true},
+		{"zero tool result bytes", func(c *Config) { c.Chat.MaxToolResultBytes = 0 }, true},
+		{"history below one turn", func(c *Config) { c.Chat.MaxHistoryMessages = 1 }, true},
+		{"zero history bytes", func(c *Config) { c.Chat.MaxHistoryBytes = 0 }, true},
+		{"negative loaded skills", func(c *Config) { c.Chat.MaxLoadedSkills = -1 }, true},
+		{"zero skill bytes", func(c *Config) { c.Chat.MaxSkillBytes = 0 }, true},
+		{"zero artifact bytes", func(c *Config) { c.Chat.ArtifactMaxBytes = 0 }, true},
+		{"zero artifact count", func(c *Config) { c.Chat.ArtifactMaxPerSession = 0 }, true},
+		{"zero ticket ttl", func(c *Config) { c.Chat.ArtifactTicketTTL = 0 }, true},
+		{"negative max output", func(c *Config) { c.Chat.MaxOutputTokens = -1 }, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			tc.tune(&cfg)
+			err := cfg.Validate()
+			if tc.broken && err == nil {
+				t.Fatal("expected a validation error")
+			}
+			if !tc.broken && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+	if cfg := Default(); cfg.Chat.ArtifactAllowNetwork {
+		t.Fatal("previews must not load external resources unless an operator turns that on")
+	}
+}

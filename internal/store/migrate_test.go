@@ -51,6 +51,10 @@ func TestSchemaHasCoreTables(t *testing.T) {
 		"accounts", "api_keys", "providers", "provider_models", "models", "model_mappings",
 		"routes", "tags", "mcp_tokens", "ledger_entries", "invoices", "invoice_lines",
 		"usage_records", "request_logs", "responses", "backup_jobs", "audit_logs", "settings",
+		// M32 console chat: conversations are owned by administrator accounts, so these
+		// tables reference admin_users rather than accounts.
+		"chat_sessions", "chat_turns", "chat_messages", "chat_tool_calls",
+		"chat_skills", "chat_artifacts",
 	}
 	for _, table := range want {
 		var name string

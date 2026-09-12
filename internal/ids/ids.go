@@ -32,3 +32,11 @@ func MCPToken() string       { return New("aigw_mcp") }
 func Session() string        { return New("sess") }
 func RedemptionCode() string { return New("gwrc") }
 func BackupJob() string      { return New("bkp") }
+
+// Console chat identifiers. They are prefixed like everything else so a log line or a
+// support ticket says at a glance which kind of object an id names.
+func ChatSession() string  { return New("chat") }
+func ChatTurn() string     { return New("turn") }
+func ChatMessage() string  { return New("cmsg") }
+func ChatToolCall() string { return New("tcall") }
+func ChatArtifact() string { return New("art") }

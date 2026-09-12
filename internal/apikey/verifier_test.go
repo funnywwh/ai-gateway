@@ -29,6 +29,17 @@ func (f *fakeStore) GetAPIKeyByPrefix(ctx context.Context, prefix string) (*doma
 	return f.key, nil
 }
 
+// GetAPIKey resolves a key by id, which is how the console chat names the key it bills.
+func (f *fakeStore) GetAPIKey(ctx context.Context, id int64) (*domain.APIKey, error) {
+	f.mu.Lock()
+	f.getKeyCalls++
+	f.mu.Unlock()
+	if f.key == nil || f.key.ID != id {
+		return nil, domain.ErrUnauthorized("invalid API key")
+	}
+	return f.key, nil
+}
+
 func (f *fakeStore) GetAccount(ctx context.Context, id int64) (*domain.Account, error) {
 	f.mu.Lock()
 	f.getAccountCalls++

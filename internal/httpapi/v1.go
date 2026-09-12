@@ -222,6 +222,15 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			chosen = &cand
 			providerID = cand.ProviderID
+			// An in-process caller (the console chat) needs the routing facts the
+			// non-streaming branch would have put in response headers, and this is the one
+			// place that knows them.
+			reportStep(ctx, stepOutcome{
+				Provider:      cand.ProviderName,
+				Canonical:     plan.Resolved.Canonical,
+				UpstreamModel: cand.UpstreamModel,
+				Degraded:      cand.Degraded,
+			})
 			break
 		}
 		lastErr = err
@@ -456,7 +465,10 @@ func (s *Server) persist(
 	input.Resolved = canonical
 
 	var storedResp *domain.ResponseRecord
-	if req.Stored() {
+	// Console steps already send store:false; the guard keeps a stored copy out of the
+	// database even if that ever changes, because a stored response is readable by every
+	// administrator while a conversation belongs to one.
+	if req.Stored() && !isChatRecording(ctx) {
 		storedResp = &domain.ResponseRecord{
 			ID:           assembler.ID(),
 			APIKeyID:     key.ID,
@@ -497,6 +509,22 @@ func (s *Server) persist(
 		accountName := ""
 		if account != nil {
 			accountName = account.Name
+		}
+		payload := map[string]any{
+			"request_id":  requestIDFrom(ctx),
+			"response_id": assembler.ID(),
+			"account":     accountName,
+			"api_key":     key.Name,
+			"model":       canonical,
+			"status":      status,
+			"usage":       assembler.Usage().Dimensions,
+		}
+		if isChatRecording(ctx) {
+			// A hook delivers to an external sink; console content must not ride along.
+			payload["client"] = responses.ClientConsole
+			payload["content_withheld"] = true
+			s.deps.Hooks.Emit(ctx, &domain.Event{Name: event, Timestamp: time.Now().UTC(), Payload: payload})
+			return
 		}
 		s.deps.Hooks.Emit(ctx, &domain.Event{
 			Name:      event,
@@ -547,6 +575,14 @@ type inputRecord struct {
 func (s *Server) recordInput(ctx context.Context, key *domain.APIKey, req *responses.Request, clientHint string) inputRecord {
 	cfg := s.deps.Config.Recording
 	rec := inputRecord{Mode: cfg.InputModeFor(key.RecordInputMode)}
+	if isChatRecording(ctx) {
+		// A console conversation carries private material: the operator's own skills, the
+		// questions they asked about their gateway, and whatever the management tools
+		// returned. The request log is global, so this traffic is recorded as metadata
+		// only regardless of what the key's policy says — while quota, metering,
+		// settlement and the row itself stay exactly as they are for every other request.
+		rec.Mode = "off"
+	}
 	// Identity first: it is recorded under every input policy, including "off".
 	rec.Dims = s.redactDimensions(req.Dimensions(clientHint))
 	rec.Model = s.redactDimension("model", strings.TrimSpace(req.Model))
@@ -606,6 +642,12 @@ func (s *Server) recordContent(
 	cfg := s.deps.Config.Recording
 	recordReasoning := key.RecordReasoning || cfg.RecordReasoning
 	recordOutput := key.RecordOutputText || cfg.RecordOutputText
+	if isChatRecording(ctx) {
+		// Same reasoning as recordInput: the answer to a private question does not belong
+		// in a log every administrator can read.
+		recordReasoning = false
+		recordOutput = false
+	}
 	limit := s.recordingLimit()
 
 	rec := &domain.RequestLogRecord{

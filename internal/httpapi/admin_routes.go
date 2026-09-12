@@ -42,6 +42,7 @@ const (
 	groupMCP       = "mcp"
 	groupHooks     = "hooks"
 	groupSettings  = "settings"
+	// groupChat lives in admin_chat_routes.go, next to the routes it groups.
 )
 
 // adminField documents one path parameter, query parameter or body field.
@@ -331,6 +332,7 @@ func (s *Server) adminRoutes() []adminRoute {
 	out = append(out, s.backupAdminRoutes()...)
 	out = append(out, s.portalAdminRoutes()...)
 	out = append(out, s.pricingAdminRoutes()...)
+	out = append(out, s.chatAdminRoutes()...)
 	return out
 }
 

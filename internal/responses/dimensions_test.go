@@ -169,6 +169,11 @@ func TestDimensionsFallBackToUserAgentHint(t *testing.T) {
 	if got := req.Dimensions("codex_cli_rs/0.50.0"); got.Client != ClientCodex {
 		t.Fatalf("client = %q, want codex from the User-Agent hint", got.Client)
 	}
+	// The console's own steps set this agent server-side, so "console" is how an operator
+	// finds the conversations they paid for in the request log next to the agents.
+	if got := req.Dimensions("aigw-console/1"); got.Client != ClientConsole {
+		t.Fatalf("client = %q, want console from the User-Agent hint", got.Client)
+	}
 	if got := req.Dimensions("curl/8.5.0"); got.Client != ClientUnknown {
 		t.Fatalf("client = %q, want unknown", got.Client)
 	}

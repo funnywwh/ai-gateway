@@ -101,6 +101,23 @@ var expectedAdminPatterns = []string{
 	"POST /admin/api/v1/routes",
 	"POST /admin/api/v1/tags",
 	"PUT /admin/api/v1/settings/{key}",
+
+	// Console chat (M32). Every one of these is NoTool: a conversation and a skill library
+	// belong to a logged-in administrator account, which an MCP token does not have.
+	"GET /admin/api/v1/chat/sessions",
+	"POST /admin/api/v1/chat/sessions",
+	"GET /admin/api/v1/chat/sessions/{id}",
+	"PATCH /admin/api/v1/chat/sessions/{id}",
+	"DELETE /admin/api/v1/chat/sessions/{id}",
+	"POST /admin/api/v1/chat/sessions/{id}/turns",
+	"POST /admin/api/v1/chat/sessions/{id}/skill-draft",
+	"POST /admin/api/v1/chat/sessions/{id}/artifacts",
+	"POST /admin/api/v1/chat/sessions/{id}/artifacts/{art}/ticket",
+	"GET /admin/api/v1/chat/models",
+	"GET /admin/api/v1/chat/skills",
+	"POST /admin/api/v1/chat/skills",
+	"PATCH /admin/api/v1/chat/skills/{id}",
+	"DELETE /admin/api/v1/chat/skills/{id}",
 }
 
 func testServer(t *testing.T) *Server {
@@ -138,10 +155,10 @@ func TestAdminRoutesAreRegisteredFromTheTable(t *testing.T) {
 			t.Errorf("route %q was not registered on the mux", route.pattern())
 		}
 	}
-	// 13 public routes: /v1 (5), health+ready+metrics (3), pprof block is off here,
-	// so public patterns are 8 plus the admin table.
-	if len(s.registered) != len(s.admin)+8 {
-		t.Errorf("registered %d patterns, expected %d management entries plus 8 public routes",
+	// Public routes: /v1 (5), health+ready+metrics (3) and the sandboxed preview document
+	// (1). pprof is off in this fixture, so public patterns are 9 plus the admin table.
+	if len(s.registered) != len(s.admin)+9 {
+		t.Errorf("registered %d patterns, expected %d management entries plus 9 public routes",
 			len(s.registered), len(s.admin))
 	}
 }
