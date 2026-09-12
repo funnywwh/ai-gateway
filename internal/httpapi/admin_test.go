@@ -532,6 +532,70 @@ func TestAdminProviderModelRefreshOnlyFillsBlanks(t *testing.T) {
 	}
 }
 
+// A mapping write is a partial update: a field the request omits keeps its stored value,
+// and an explicit null (or "" for the override) clears one. The console's pricing page
+// posts only public_model/upstream_model/pricing_rules; under the previous whole-row
+// upsert that silently reset capabilities, context_window and max_output_tokens of a row
+// the operator had configured by hand — the mapping still routed, but every client
+// carrying tools or reasoning came back marked degraded.
+func TestAdminProviderModelPartialUpdate(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	provider := decodeJSONBody(t, f.call(t, http.MethodPost, "/admin/api/v1/providers",
+		`{"name":"partial-provider","kind":"testecho"}`, cookie))
+	providerID := int64(provider["id"].(float64))
+	base := "/admin/api/v1/providers/" + itoa(providerID) + "/models"
+
+	created := decodeJSONBody(t, f.call(t, http.MethodPost, base,
+		`{"public_model":"partial","upstream_model":"up-1","context_window":272000,"max_output_tokens":128000,`+
+			`"capabilities":{"stream":true,"tools":true},"capabilities_override":"strip"}`, cookie))
+	if created["context_window"] != float64(272000) || created["capabilities_override"] != "strip" {
+		t.Fatalf("create payload = %v", created)
+	}
+
+	// Exactly what the pricing page sends: new rules, nothing else.
+	updated := decodeJSONBody(t, f.call(t, http.MethodPost, base,
+		`{"public_model":"partial","upstream_model":"up-1","pricing_rules":{"rules":[{"id":"cost","order":10,"when":{},"rates":{"output":1000}}]}}`, cookie))
+	if updated["context_window"] != float64(272000) || updated["max_output_tokens"] != float64(128000) {
+		t.Fatalf("omitted numeric fields must keep their stored value: %v", updated)
+	}
+	if updated["capabilities_override"] != "strip" {
+		t.Fatalf("an omitted capabilities_override must keep its stored value: %v", updated["capabilities_override"])
+	}
+	caps, _ := updated["capabilities"].(map[string]any)
+	if caps["stream"] != true || caps["tools"] != true {
+		t.Fatalf("a partial update wiped capabilities: %v", updated["capabilities"])
+	}
+	if updated["pricing_rules"] == nil {
+		t.Fatalf("pricing rules were not stored: %v", updated)
+	}
+
+	// An explicit null is how a caller clears one field, and it must clear only that one.
+	cleared := decodeJSONBody(t, f.call(t, http.MethodPost, base,
+		`{"public_model":"partial","capabilities":null,"capabilities_override":"","pricing_rules":null}`, cookie))
+	if cleared["capabilities"] != nil || cleared["pricing_rules"] != nil || cleared["capabilities_override"] != "" {
+		t.Fatalf("explicit null/empty must clear: %v", cleared)
+	}
+	if cleared["context_window"] != float64(272000) || cleared["upstream_model"] != "up-1" {
+		t.Fatalf("clearing two fields must not touch the rest: %v", cleared)
+	}
+
+	// A brand-new row still gets the documented defaults.
+	fresh := decodeJSONBody(t, f.call(t, http.MethodPost, base, `{"public_model":"fresh"}`, cookie))
+	if fresh["upstream_model"] != "fresh" || fresh["enabled"] != true ||
+		fresh["priority"] != float64(100) || fresh["weight"] != float64(100) ||
+		fresh["context_window"] != float64(0) || fresh["capabilities"] != nil {
+		t.Fatalf("new row defaults = %v", fresh)
+	}
+
+	bad := f.call(t, http.MethodPost, base, `{"public_model":"partial","capabilities_override":"nonsense"}`, cookie)
+	if bad.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid capabilities_override status = %d, want 400", bad.StatusCode)
+	}
+	bad.Body.Close()
+}
+
 func TestAdminProbeReportsBusinessFailure(t *testing.T) {
 	f := newAdminFixture(t)
 	cookie := f.login(t, adminUser, adminPassword)

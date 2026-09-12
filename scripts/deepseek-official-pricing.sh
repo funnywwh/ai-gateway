@@ -163,8 +163,9 @@ echo "deepseek provider id=$PROVIDER_ID"
 
 curl -s -m 10 -b "$COOKIE" "$GW_BASE/admin/api/v1/providers/$PROVIDER_ID/models" -o "$WORK/existing.json"
 
-# 关键：POST /providers/{id}/models 是整行覆盖（UPSERT 会把未提供的字段重置为默认值，
-# enabled 默认 true、priority/weight 默认 100），所以必须先取回当前行再合并着提交。
+# 关键：POST /providers/{id}/models 过去是整行覆盖（UPSERT 会把未提供的字段重置为默认值，
+# enabled 默认 true、priority/weight 默认 100）；M28 起改成部分更新——省缺的字段保持原值、
+# 写 null 才清空。脚本仍然取回当前行再合并提交：对旧版实例同样成立，且提交内容自解释。
 python3 - "$WORK/existing.json" "$WORK/plan.json" "$WORK/bodies" <<'PY'
 import json, sys, os
 existing = {m["public_model"]: m for m in json.load(open(sys.argv[1]))["data"]}

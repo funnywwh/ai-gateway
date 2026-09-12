@@ -79,6 +79,11 @@ def main():
         fixtures[f"/providers/{pid}"] = call(f"/admin/api/v1/providers/{pid}", cookie)
         fixtures[f"/providers/{pid}/logs"] = call(f"/admin/api/v1/providers/{pid}/logs", cookie)
         fixtures[f"/providers/{pid}/actions"] = call(f"/admin/api/v1/providers/{pid}/actions", cookie)
+        # The detail dialog's model-mapping section (M28) reads both of these: the
+        # provider's own mappings, and every route so it can name the routes that point
+        # here without a mapping (the row that makes a model silently unroutable).
+        fixtures[f"/providers/{pid}/models"] = call(f"/admin/api/v1/providers/{pid}/models?limit=500", cookie)
+    fixtures["/routes"] = call("/admin/api/v1/routes?limit=1000", cookie)
 
     json.dump(fixtures, open(OUT, "w", encoding="utf-8"), ensure_ascii=False, indent=1, sort_keys=True)
     print(f"wrote {OUT}: {len(fixtures)} endpoints")

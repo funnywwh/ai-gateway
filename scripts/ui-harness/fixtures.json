@@ -672,6 +672,80 @@
    "replay plugin stderr tail"
   ]
  },
+ "/providers/1/models": {
+  "count": 3,
+  "data": [
+   {
+    "capabilities": {
+     "stream": true,
+     "tools": false
+    },
+    "capabilities_override": "",
+    "context_window": 8192,
+    "enabled": true,
+    "id": 11,
+    "max_output_tokens": 1024,
+    "pricing_rules": {
+     "currency": "USD",
+     "rules": [
+      {
+       "id": "replay-cost",
+       "order": 100,
+       "rates": {
+        "output": 1000
+       },
+       "when": {}
+      }
+     ]
+    },
+    "priority": 0,
+    "provider_id": 1,
+    "public_model": "replay",
+    "source": "bootstrap",
+    "updated_at": "2026-09-12T02:00:00Z",
+    "upstream_model": "replay",
+    "weight": 0
+   },
+   {
+    "capabilities": {},
+    "capabilities_override": "strip",
+    "context_window": 0,
+    "enabled": true,
+    "id": 12,
+    "max_output_tokens": 0,
+    "pricing_rules": null,
+    "priority": 100,
+    "provider_id": 1,
+    "public_model": "replay-slow",
+    "source": "manual",
+    "updated_at": "2026-09-12T02:01:00Z",
+    "upstream_model": "replay-slow",
+    "weight": 100
+   },
+   {
+    "capabilities": {
+     "stream": true
+    },
+    "capabilities_override": "",
+    "context_window": 0,
+    "enabled": false,
+    "id": 13,
+    "max_output_tokens": 0,
+    "pricing_rules": null,
+    "priority": 100,
+    "provider_id": 1,
+    "public_model": "replay-retired",
+    "source": "discovered",
+    "updated_at": "2026-09-12T02:02:00Z",
+    "upstream_model": "replay-retired",
+    "weight": 100
+   }
+  ],
+  "has_more": false,
+  "limit": 500,
+  "offset": 0,
+  "total": 3
+ },
  "/providers/1/test": {
   "mode": "info",
   "ok": true,
@@ -1100,6 +1174,54 @@
    "ttft_ms": 120
   },
   "workspace": "/home/winger/work/ai_gateway"
+ },
+ "/routes": {
+  "count": 3,
+  "data": [
+   {
+    "cooldown_until": null,
+    "enabled": true,
+    "id": 1,
+    "model": "replay",
+    "model_id": 1,
+    "policy": null,
+    "priority": 10,
+    "provider": "replay-local",
+    "provider_id": 1,
+    "upstream_model": "replay",
+    "weight": 100
+   },
+   {
+    "cooldown_until": null,
+    "enabled": true,
+    "id": 2,
+    "model": "replay-slow",
+    "model_id": 2,
+    "policy": null,
+    "priority": 10,
+    "provider": "replay-local",
+    "provider_id": 1,
+    "upstream_model": "replay-slow",
+    "weight": 100
+   },
+   {
+    "cooldown_until": null,
+    "enabled": true,
+    "id": 9,
+    "model": "ghost-model",
+    "model_id": 9,
+    "policy": null,
+    "priority": 100,
+    "provider": "replay-local",
+    "provider_id": 1,
+    "upstream_model": "ghost-model",
+    "weight": 100
+   }
+  ],
+  "has_more": false,
+  "limit": 1000,
+  "offset": 0,
+  "total": 3
  },
  "/stats": {
   "registry": {

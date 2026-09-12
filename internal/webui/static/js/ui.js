@@ -195,6 +195,9 @@ function renderField(field) {
     input = el('input', { id, name: field.name, type: field.type || 'text', value: field.value === undefined || field.value === null ? '' : field.value, placeholder: field.placeholder || '' });
   }
   if (field.required) input.required = true;
+  // A read-only field still submits its value (collect() reads node.value); it is how an
+  // edit form shows the identity of the row without letting the operator rename it.
+  if (field.readonly) input.readOnly = true;
   return el('label', { class: 'field' }, [el('span', { text: field.label }), input, field.hint ? el('span', { class: 'muted', text: field.hint }) : null]);
 }
 

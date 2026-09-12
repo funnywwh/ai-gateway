@@ -667,21 +667,43 @@ func (s *Server) handleAdminUpsertProviderModel(w http.ResponseWriter, r *http.R
 		ContextWindow        *int            `json:"context_window"`
 		MaxOutputTokens      *int            `json:"max_output_tokens"`
 		Capabilities         json.RawMessage `json:"capabilities"`
-		CapabilitiesOverride string          `json:"capabilities_override"`
+		CapabilitiesOverride *string         `json:"capabilities_override"`
 		PricingRules         json.RawMessage `json:"pricing_rules"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
 		return
 	}
-	if strings.TrimSpace(body.PublicModel) == "" {
+	publicModel := strings.TrimSpace(body.PublicModel)
+	if publicModel == "" {
 		writeAPIError(w, domain.ErrInvalidRequest("public_model is required"))
 		return
 	}
-	pm := &domain.ProviderModel{
-		ProviderID: providerID, PublicModel: strings.TrimSpace(body.PublicModel),
-		UpstreamModel: firstNonEmpty(strings.TrimSpace(body.UpstreamModel), strings.TrimSpace(body.PublicModel)),
-		Enabled:       true, Priority: 100, Weight: 100, Source: "manual",
+
+	// A partial update, not a whole-row replace: a field the body omits keeps its
+	// stored value, and an explicit null clears one (encoding/json keeps "null" as the
+	// raw bytes, which is not the same as leaving the key out). The console's pricing
+	// page posts only public_model/upstream_model/pricing_rules, and under the previous
+	// whole-row upsert that silently reset capabilities, context_window and
+	// max_output_tokens of a mapping the operator had configured by hand — the row still
+	// routed, but every client carrying tools or reasoning was marked degraded.
+	existing, err := findProviderModel(r.Context(), store, providerID, publicModel)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	pm := existing
+	if pm == nil {
+		pm = &domain.ProviderModel{
+			ProviderID: providerID, PublicModel: publicModel,
+			// Upstream defaults to the public name, which is what a same-named mapping
+			// means; an empty upstream_model on an existing row keeps what it had.
+			UpstreamModel: publicModel,
+			Enabled:       true, Priority: 100, Weight: 100,
+		}
+	}
+	if upstream := strings.TrimSpace(body.UpstreamModel); upstream != "" {
+		pm.UpstreamModel = upstream
 	}
 	if body.Enabled != nil {
 		pm.Enabled = *body.Enabled
@@ -698,39 +720,46 @@ func (s *Server) handleAdminUpsertProviderModel(w http.ResponseWriter, r *http.R
 	if body.MaxOutputTokens != nil {
 		pm.MaxOutputTokens = *body.MaxOutputTokens
 	}
-	if body.CapabilitiesOverride != "" {
-		if !validCapabilityOverride(body.CapabilitiesOverride) {
+	if body.CapabilitiesOverride != nil {
+		override := strings.TrimSpace(*body.CapabilitiesOverride)
+		if override != "" && !validCapabilityOverride(override) {
 			writeAPIError(w, domain.ErrInvalidRequest("capabilities_override must be inherit, strip or reject"))
 			return
 		}
-		pm.CapabilitiesOverride = body.CapabilitiesOverride
+		pm.CapabilitiesOverride = override
 	}
-	if raw, err := jsonObjectString(body.Capabilities, "capabilities"); err != nil {
-		writeAPIError(w, toAPIError(err))
-		return
-	} else {
-		pm.CapabilitiesJSON = raw
-	}
-	raw, err := jsonObjectString(body.PricingRules, "pricing_rules")
-	if err != nil {
-		writeAPIError(w, toAPIError(err))
-		return
-	}
-	if strings.TrimSpace(raw) != "" {
-		// Cost rules decide what we pay upstream; they are parsed (and their
-		// currency checked) at write time so a typo cannot silently zero our cost.
-		set, err := pricing.ParseRuleSet(raw)
+	if body.Capabilities != nil {
+		raw, err := jsonObjectString(body.Capabilities, "capabilities")
 		if err != nil {
 			writeAPIError(w, toAPIError(err))
 			return
 		}
-		if err := s.validateRuleSetCurrency(set); err != nil {
+		pm.CapabilitiesJSON = raw
+	}
+	if body.PricingRules != nil {
+		raw, err := jsonObjectString(body.PricingRules, "pricing_rules")
+		if err != nil {
 			writeAPIError(w, toAPIError(err))
 			return
 		}
-		raw = normalizeCurrencyInDocument(raw, set)
+		if strings.TrimSpace(raw) != "" {
+			// Cost rules decide what we pay upstream; they are parsed (and their
+			// currency checked) at write time so a typo cannot silently zero our cost.
+			set, err := pricing.ParseRuleSet(raw)
+			if err != nil {
+				writeAPIError(w, toAPIError(err))
+				return
+			}
+			if err := s.validateRuleSetCurrency(set); err != nil {
+				writeAPIError(w, toAPIError(err))
+				return
+			}
+			raw = normalizeCurrencyInDocument(raw, set)
+		}
+		pm.PricingRulesJSON = raw
 	}
-	pm.PricingRulesJSON = raw
+	// The operator touched this row, so it stops being a discovery artifact.
+	pm.Source = "manual"
 	if err := validateNonNegative("priority", body.Priority); err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
@@ -910,4 +939,20 @@ func validCapabilityOverride(v string) bool {
 		return true
 	}
 	return false
+}
+
+// findProviderModel returns the stored mapping of one provider for a public model
+// name, or nil when it has none. The partial-update path needs it so a field the
+// request leaves out keeps its stored value instead of being reset to a default.
+func findProviderModel(ctx context.Context, store ProviderAdmin, providerID int64, publicModel string) (*domain.ProviderModel, error) {
+	list, err := store.ListProviderModels(ctx, providerID)
+	if err != nil {
+		return nil, err
+	}
+	for _, pm := range list {
+		if pm.PublicModel == publicModel {
+			return pm, nil
+		}
+	}
+	return nil, nil
 }

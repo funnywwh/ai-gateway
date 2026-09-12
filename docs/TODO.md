@@ -871,3 +871,33 @@
   按设计文档 §2.2 的同一形态补 workspace/call_kind 索引
 - [ ] 观察项：`unknown` 桶的占比。持续偏高说明出现了新的客户端（或某个客户端改了提示词），
   需要在 `dimensions.go` 补一条结构性规则，而不是放宽全文匹配
+
+## M28 控制台补齐「供应商模型」管理 + 映射写入改成部分更新
+
+> 起因（用户报告）：在控制台「模型」页加了 `gpt-6-astra`、在「模型路由」页加了指向 codex 的路由，
+> `/v1/models` 里却始终没有它。查下来是三层里漏了第一层 `provider_models`，而**控制台根本没有管理它的界面**：
+> 「模型」页管 `models`、「模型路由」页管 `routes`，供应商详情页只有配置/凭据/探测/日志。
+> 前端里唯一碰 provider model 的两处是详情弹窗的「刷新模型发现」（只能落库"插件 config 里已声明的模型"）
+> 和定价页的「保存为成本规则」（见下条，它会毁字段）。
+
+- [x] 后端 `POST /admin/api/v1/providers/{id}/models` 由整行覆盖改为**部分更新**：省缺字段保持原值、
+  写 `null` 清空、新行默认值不变（`upstream_model` = 对客名、`enabled` = true、`priority`/`weight` = 100）。
+  实测 bug：控制台定价页只发 3 个字段，保存一次成本规则就把 `capabilities`（→ null）、
+  `context_window`/`max_output_tokens`（→ 0）静默清零——映射还能路由，但客户端带 tools/reasoning
+  会被打上 `X-Gateway-Degraded`，是「看着不对却查不出为什么」的典型
+- [x] 测试 `TestAdminProviderModelPartialUpdate`：省略即保留、`null`/`""` 清空且不误伤其他字段、新行默认值、
+  非法 `capabilities_override` 仍 400
+- [x] 控制台供应商详情新增「模型映射」区（M18 文档同步为必需项）：列出对客名/上游名/启用/能力/上下文/
+  最大输出/成本规则/来源，可就地新建、编辑、删除；表单里对客名在编辑时只读（改名请新建再删旧）
+- [x] **点名断链**：把「指向本供应商但没有映射的路由」标红列出并写上 `not_mapped`——
+  这正是用户遇到的那种静默失败，之前只能靠 `GET /router/explain` 才发现
+- [x] UI harness 新增 `models` 视图（17 项断言：区块渲染、三个映射行、能力徽标、成本规则有无、
+  未映射告警点名 `ghost-model` + `not_mapped`、行内编辑/删除按钮、表单字段齐全）；
+  `capture.py --refresh` 一并采集 `/providers/{id}/models` 与 `/routes`，刷新不会丢掉这两个 fixture
+- [x] 文档：`docs/api-providers.md` 写清三层检查与新的写入语义；`docs/provider-ui.md` §2 增加第 6 条
+- [x] `make verify` 全绿；`make ui-check` 11 个视图全绿（`docs` 23 / `detail` 20 / `models` 17 …）
+- [ ] **待人工执行**（宿主终端）：`scripts/local-run.sh restart` 让 8088 用上新二进制，
+  然后在控制台验证「模型供应商 → codex → 详情 → 模型映射」能看到 luna 与 astra 两行、
+  且不再出现「路由缺映射」告警
+- [ ] 观察项：同类"静默排除"还有没有别处——候选过滤的其它原因（`not_granted` / `missing_capability` /
+  `circuit_open`）在 `/v1/models` 里同样是无声丢弃，是否也要在控制台集中暴露

@@ -215,6 +215,40 @@ try {
     checks.sample = rowTexts().slice(0, 4);
   }
 
+  // The model-mapping section (M28). It exists because a model plus a route without this
+  // third row is excluded by the router as "not_mapped" and then vanishes from
+  // /v1/models without an error — the console used to have no surface for it at all.
+  if (view === 'models') {
+    const row = rowFor('replay-local');
+    [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '详情').click();
+    await settle();
+    const t = modalText();
+    checks.dialogOpen = modal().querySelectorAll('.modal').length === 1;
+    checks.sectionShown = t.includes('模型映射');
+    checks.addButton = !!find('新增模型映射');
+    // Every mapping is listed, with its declared capabilities and whether cost rules exist.
+    checks.mappingRows = rows();
+    checks.listedMappings = ['replay', 'replay-slow', 'replay-retired'].every((m) => t.includes(m));
+    checks.capabilityBadges = t.includes('stream') && t.includes('未声明');
+    checks.costRuleColumn = t.includes('成本规则') && t.includes('有') && t.includes('无');
+    checks.disabledShown = t.includes('off');
+    // The route without a mapping must be named, with the reason the data plane gives.
+    checks.orphanWarning = t.includes('条路由缺映射') && t.includes('ghost-model') && t.includes('not_mapped');
+    checks.rowActions = [...modal().querySelectorAll('tbody button')].map((b) => b.textContent.trim());
+    checks.rowActionsPresent = checks.rowActions.includes('编辑') && checks.rowActions.includes('删除');
+    checks.sample = rowTexts().slice(0, 4);
+
+    // The create form must carry every field the mapping is made of.
+    const add = find('新增模型映射');
+    if (add) { add.click(); await settle(); }
+    const form = modalText();
+    checks.formFields = ['对客模型名', '上游模型名', '能力（JSON）', '能力校验', '成本规则（JSON）']
+      .every((f) => form.includes(f));
+    checks.formHints = form.includes('保持原值');
+    checks.publicModelField = !!document.querySelector('input[name="public_model"]');
+    checks.capabilitiesField = !!document.querySelector('textarea[name="capabilities"]');
+  }
+
   const flags = Object.entries(checks).filter(([, v]) => typeof v === 'boolean');
   const numeric = Object.entries(checks).filter(([, v]) => typeof v === 'number');
   report({ view, stage: 'done', checks, fetched: window.__fetched,

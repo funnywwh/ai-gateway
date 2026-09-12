@@ -75,6 +75,8 @@ async function detail(row, reload, readonly) {
   const logs = await api.get('/providers/' + row.id + '/logs').catch(() => ({ data: [] }));
   const actions = await api.get('/providers/' + row.id + '/actions').catch(() => ({ data: [] }));
   const docsSlot = el('div', {});
+  const modelsSlot = el('div', {});
+  const addModel = el('button', { class: 'btn btn-primary', text: '新增模型映射', disabled: readonly });
   const body = el('div', {}, [
     el('div', { class: 'split' }, [
       kv('ID', String(row.id)),
@@ -84,6 +86,12 @@ async function detail(row, reload, readonly) {
       kv('凭据键', (row.credential_keys || []).join(', ') || '无'),
       kv('冷却至', formatTime(row.cooldown_until)),
     ]),
+    // The mapping decides whether the routes pointing here can be used at all, so it
+    // comes before the configuration documentation: a model and a route without this
+    // row is the "configured it and it still does not work" case.
+    el('h4', { text: '模型映射' }),
+    el('div', { class: 'toolbar' }, [addModel]),
+    modelsSlot,
     el('h4', { text: '配置说明' }), docsSlot,
     el('h4', { text: '配置' }), jsonBlock(provider.config),
     el('h4', { text: '最近探测' }), jsonBlock(provider.health),
@@ -109,6 +117,14 @@ async function detail(row, reload, readonly) {
   }
   renderDocs(provider);
 
+  const reloadModels = () => loadProviderModels(row.id, modelsSlot, readonly).catch((err) => {
+    modelsSlot.replaceChildren(el('div', { class: 'empty', text: api.errorMessage(err) }));
+  });
+  addModel.addEventListener('click', async () => {
+    if (await modelForm(row.id, null)) await reloadModels();
+  });
+  reloadModels();
+
   const editBtn = el('button', { class: 'btn btn-primary', text: '编辑', disabled: readonly });
   const refreshModels = el('button', { class: 'btn', text: '刷新模型发现' });
   const restart = el('button', { class: 'btn', text: '重启进程', disabled: readonly });
@@ -128,8 +144,111 @@ async function detail(row, reload, readonly) {
   refreshModels.addEventListener('click', async () => {
     const result = await api.post('/providers/' + row.id + '/models/refresh');
     toast(result.ok ? ('发现 ' + result.discovered + ' 个模型，新增 ' + result.added) : ('发现失败：' + result.error), result.ok ? 'ok' : 'error');
+    if (result.ok) await reloadModels();
   });
   document.getElementById('modal-root').append(backdrop);
+}
+
+// ---------------------------------------------------------------------------
+// provider model mappings
+// ---------------------------------------------------------------------------
+
+// loadProviderModels renders one provider's mappings, plus the warning that matters
+// most: a route pointing at this provider with no mapping here is excluded by the
+// router as "not_mapped", and GET /v1/models then drops the model without a word.
+// Before this section existed the console had no way to see or create that row at all,
+// which made "I added the model and the route, why is it not there?" unanswerable.
+async function loadProviderModels(providerID, slot, readonly) {
+  const [payload, routesPayload] = await Promise.all([
+    api.get('/providers/' + providerID + '/models', { limit: 500 }),
+    api.get('/routes', { limit: 1000 }).catch(() => ({ data: [] })),
+  ]);
+  const list = payload.data || [];
+  const mapped = new Set(list.map((pm) => pm.public_model));
+  const orphans = (routesPayload.data || []).filter((route) => route.provider_id === providerID && !mapped.has(route.model));
+
+  const nodes = [];
+  if (orphans.length) {
+    nodes.push(el('p', {}, [
+      badge(orphans.length + ' 条路由缺映射', 'warn'),
+      el('span', { text: ' ' + orphans.map((route) => route.model).join('、') +
+        '：路由指向本供应商，但这里没有对应映射，路由会被判为 not_mapped —— 模型既不出现在 /v1/models，' +
+        '客户请求也拿不到候选，而且不会报任何错。用「新增模型映射」补上（对客名必须与模型/路由里的名字一致）。' }),
+    ]));
+  }
+  nodes.push(table({
+    columns: [
+      { key: 'public_model', label: '对客模型' },
+      { key: 'upstream_model', label: '上游模型' },
+      { key: 'enabled', label: '启用', render: (pm) => (pm.enabled ? badge('on', 'ok') : badge('off')) },
+      { key: 'capabilities', label: '能力', render: (pm) => capabilityBadges(pm.capabilities) },
+      { key: 'context_window', label: '上下文' },
+      { key: 'max_output_tokens', label: '最大输出' },
+      { key: 'pricing_rules', label: '成本规则', render: (pm) => (pm.pricing_rules ? badge('有', 'ok') : badge('无', 'warn')) },
+      { key: 'source', label: '来源' },
+    ],
+    rows: list,
+    empty: '还没有任何模型映射：模型与路由都建好了，这个供应商也供不了它（模型不会出现在 /v1/models）',
+    rowActions: (pm) => [
+      el('button', { class: 'btn', text: '编辑', disabled: readonly, onclick: async () => {
+        if (await modelForm(providerID, pm)) await loadProviderModels(providerID, slot, readonly);
+      } }),
+      readonly ? null : el('button', { class: 'btn btn-danger', text: '删除', onclick: async () => {
+        if (!await confirmDialog('删除模型映射', '删除后该供应商不再提供 ' + pm.public_model + '，指向它的路由会被判为 not_mapped（模型随之从 /v1/models 消失）。')) return;
+        try {
+          await api.del('/provider-models/' + pm.id);
+          toast('已删除', 'ok');
+        } catch (err) {
+          toast(api.errorMessage(err), 'error');
+        }
+        await loadProviderModels(providerID, slot, readonly);
+      } }),
+    ].filter(Boolean),
+  }).node);
+  slot.replaceChildren(...nodes);
+}
+
+// capabilityBadges shows what the mapping declares. An empty set is not cosmetic: the
+// router matches requested features against it, so a client sending tools or reasoning
+// is either downgraded or rejected depending on routing.degradation.
+function capabilityBadges(caps) {
+  const declared = Object.keys(caps || {}).filter((key) => caps[key]);
+  if (!declared.length) return badge('未声明', 'warn');
+  return el('span', {}, declared.map((name) => badge(name)));
+}
+
+// modelForm creates or edits one mapping. Leaving a JSON field empty omits the key, and
+// the API keeps the stored value for it; typing null clears it.
+async function modelForm(providerID, pm) {
+  const editing = !!pm;
+  return modal({
+    title: editing ? '编辑模型映射 · ' + pm.public_model : '新增模型映射',
+    wide: true, submitLabel: editing ? '保存' : '创建',
+    fields: [
+      { name: 'public_model', label: '对客模型名', required: true, readonly: editing, value: pm ? pm.public_model : '',
+        hint: editing ? '对客名是这条映射的身份，改不了；要改名请新建一条再删掉旧的' : '必须与「模型」页和「路由」页里用的名字逐字符一致' },
+      { name: 'upstream_model', label: '上游模型名', value: pm ? pm.upstream_model : '',
+        hint: '留空 = 与对客名相同（新行）；编辑时留空 = 保持原值' },
+      { name: 'enabled', label: '启用', type: 'checkbox', value: pm ? pm.enabled !== false : true },
+      { name: 'priority', label: '优先级（越小越优先）', type: 'number', value: pm ? pm.priority : 100 },
+      { name: 'weight', label: '权重', type: 'number', value: pm ? pm.weight : 100 },
+      { name: 'context_window', label: '上下文窗口（token，0 = 未声明）', type: 'number', value: pm ? pm.context_window : 0 },
+      { name: 'max_output_tokens', label: '最大输出（token，0 = 未声明）', type: 'number', value: pm ? pm.max_output_tokens : 0 },
+      { name: 'capabilities', label: '能力（JSON）', type: 'textarea', rows: 4, json: true,
+        value: pm && pm.capabilities ? pm.capabilities : '',
+        hint: '例如 {"stream":true,"tools":true,"reasoning":true}。留空 = 保持原值（新建则未声明），填 null 清空' },
+      { name: 'capabilities_override', label: '能力校验', type: 'select', options: ['', 'inherit', 'strip', 'reject'],
+        value: pm ? pm.capabilities_override || '' : '', hint: '空 = inherit（按能力表判定）' },
+      { name: 'pricing_rules', label: '成本规则（JSON）', type: 'textarea', rows: 8, json: true,
+        value: pm && pm.pricing_rules ? pm.pricing_rules : '',
+        hint: '留空 = 保持原值（新建则不计成本），填 null 清空。售价默认按成本 × 倍数' },
+    ],
+    onSubmit: async (values) => {
+      await api.post('/providers/' + providerID + '/models', values);
+      toast(editing ? '已保存' : '已创建', 'ok');
+      return true;
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------

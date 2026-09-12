@@ -113,6 +113,19 @@ providers:
 管理 API 的 `POST /admin/api/v1/providers/{id}/models` 在缺 canonical model 时会回
 `warning: no canonical model with this public name exists yet; add one so it becomes routable` —— 这句就是提醒还差后两层。
 
+三层里最容易漏的是**第一层**，而且漏了不报错：控制台原来没有管理 `provider_models` 的界面，
+「模型」页加的是第二层、「模型路由」页加的是第三层，于是「都配了却不显示」只能靠
+`GET /admin/api/v1/router/explain?model=<名字>`（回 `excluded: [{provider, reason: "not_mapped"}]`）才能定位。
+M28 起「模型供应商 → 详情 → **模型映射**」直接列出该供应商的映射，并把**指向本供应商却没有映射的路由**
+标红点名（含 `not_mapped` 的字样），可以在那里直接新建/编辑/删除。
+
+`POST /admin/api/v1/providers/{id}/models` 是**部分更新**：请求体里**没写的字段保持原值**，
+写 `null` 才是清空（数值字段写 `0` 是把它设成 0）。这条语义是 M28 改的——
+在这之前它是整行覆盖，而控制台定价页只发三个字段，于是保存一次成本规则就会把
+capabilities、context_window、max_output_tokens 静默清零（映射仍然可用，但客户端一带
+tools/reasoning 就会被打上 `X-Gateway-Degraded`）。只发 `public_model` 仍可新建一行，新行的默认值不变
+（`upstream_model` = 对客名、`enabled` = true、`priority`/`weight` = 100）。
+
 **DeepSeek 的语义要点（官方文档）**
 
 - **思考默认开启**：不发 `thinking` 就是开启。想省思考 token 只能显式关（`mode=disabled` 或客户端 `reasoning.effort="none"`）；
