@@ -187,7 +187,13 @@ export function parseBlocks(source) {
 }
 
 // renderMarkdown renders one document into a fragment. Code blocks carry data-lang and
-// data-block-index so a page can attach "preview"/"export" toolbars without re-parsing.
+// data-block-index so a page can attach "preview"/"export" toolbars without re-parsing, plus
+// data-closed, which says whether the fence was terminated.
+//
+// data-closed exists because an answer streams: while the model is still writing, the last fence
+// has no closing marker, so its body is a *prefix* of whatever it is writing. A renderer that
+// tried to use that prefix would report "not valid JSON" for most of every answer — a fabricated
+// error about the model, caused entirely by the reader looking too early.
 export function renderMarkdown(source) {
   const fragment = document.createDocumentFragment();
   let codeIndex = 0;
@@ -198,6 +204,7 @@ export function renderMarkdown(source) {
         const code = element('code', 'md-code-block', [block.text]);
         code.setAttribute('data-lang', (block.lang || '').split(/\s+/)[0] || 'text');
         code.setAttribute('data-block-index', String(codeIndex));
+        if (!block.closed) code.setAttribute('data-closed', '0');
         pre.append(code);
         fragment.append(element('div', 'md-code-wrap', [pre]));
         codeIndex += 1;

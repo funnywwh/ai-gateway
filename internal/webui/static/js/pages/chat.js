@@ -12,6 +12,7 @@ import { renderMarkdown } from '../markdown.js';
 import { renderChart, chartToCSV, chartToSVG, downloadText } from '../chart.js';
 import { openPreview, uiReplyParts } from './chat_artifact.js';
 import { parseUISpec, describeUIResult } from './chat_ui.js';
+import { parseFormSpec, renderForm, describeFormOps } from './chat_form.js';
 
 // paintTimer throttles the live bubble's Markdown rebuild. It is declared at module scope
 // rather than next to the code that uses it, because submit() assigns it during the stream
@@ -135,8 +136,17 @@ export async function render({ page, actions, session, route }) {
     // The open preview, when it is interactive: the console's half of the bridge and where a
     // submission goes. One console has one open preview, so one slot is enough.
     preview: null,
-    // Submissions that arrived while a turn was in flight, oldest first.
+    // Submissions that arrived while a turn was in flight, oldest first. An inline form and an
+    // interactive preview both land here; each entry remembers where it came from, because the
+    // answer has to be patched back into the thing that asked.
     queue: [],
+    // What the operator typed into a form but has not submitted, keyed by message and block.
+    // renderMain() rebuilds the whole transcript after every turn, so without this a draft would
+    // be wiped out by the act of sending a *different* question.
+    formDrafts: new Map(),
+    // A `ui` directive that arrived with the turn that just finished, for an inline form. It is
+    // parked here until the transcript has been rebuilt from the server: see applyPendingFormOps.
+    pendingFormOps: null,
   };
 
   const layout = el('div', { class: 'chat-layout' });
@@ -443,7 +453,37 @@ export async function render({ page, actions, session, route }) {
     main.append(el('div', { class: 'empty', text: '新建一个会话开始提问：会话会绑定模型、计费 Key 和一个 MCP 令牌——令牌的 scope 决定它能做什么，admin scope 的令牌可以执行全部控制台操作。' }));
   }
 
+  // captureFormDrafts saves what is typed into every inline form on screen. renderMain() throws
+  // the whole transcript away and rebuilds it, so this has to run before `clear(main)` or a
+  // half-filled form would lose its contents to an unrelated question — or to the very turn the
+  // form just started, since a turn rebuilds the transcript when it finishes.
+  function captureFormDrafts() {
+    for (const node of main.querySelectorAll('.chat-form')) {
+      const form = node.__aigwForm;
+      if (!form) continue;
+      const key = formKeyOf(form);
+      if (!key) continue;
+      state.formDrafts.set(key, form.collect());
+    }
+  }
+
+  // formKeyOf rebuilds the key a form was rendered under (`<message id>:<block index>`) from the
+  // form itself, so capture and restore cannot disagree about which form this is.
+  function formKeyOf(form) {
+    const node = form && form.node;
+    if (!node) return '';
+    const holder = node.closest('.chat-msg');
+    // `live` is the id of the assistant bubble being streamed, and it is the one id that is not
+    // on the element (the live message has no server id yet). Anything else without a holder is
+    // a form the console cannot key, and returning '' makes the caller skip it rather than file
+    // a draft under a name that will never be read back.
+    const messageID = (holder && holder.getAttribute('data-message-id')) || '';
+    if (!messageID) return '';
+    return messageID + ':' + form.spec.id;
+  }
+
   function renderMain() {
+    captureFormDrafts();
     clear(main);
     if (!state.session) { renderEmptyState(); return; }
     const s = state.session;
@@ -489,8 +529,9 @@ export async function render({ page, actions, session, route }) {
   }
 
   function renderMessage(message) {
+    const id = message.id || '';
     if (message.role === 'user') {
-      return el('div', { class: 'chat-msg user' }, [
+      return el('div', { class: 'chat-msg user', 'data-message-id': id }, [
         el('div', { class: 'chat-bubble' }, [el('div', { class: 'chat-text', text: message.content })]),
       ]);
     }
@@ -516,7 +557,7 @@ export async function render({ page, actions, session, route }) {
     }
     if (!(message.parts || []).length && message.content) body.append(renderRichText(message.content, message));
     body.append(renderFooter(message));
-    return el('div', { class: 'chat-msg assistant' }, [body]);
+    return el('div', { class: 'chat-msg assistant', 'data-message-id': id }, [body]);
   }
 
   function renderToolCard(part) {
@@ -578,6 +619,17 @@ export async function render({ page, actions, session, route }) {
       copy.addEventListener('click', () => copyText(source));
       bar.append(copy);
 
+      if (lang === 'form') {
+        // An inline form replaces the block: the spec is not something a reader wants to read,
+        // it is something they fill in. The block stays in the message, so a re-render (after
+        // every turn, and after a reload from the server) rebuilds exactly the same form.
+        //
+        // A fence that is still open is skipped rather than reported: the answer is streaming,
+        // so a half-written spec is a fact about the reader, not about the model.
+        if (code.getAttribute('data-closed') === '0') return;
+        renderFormBlock(host, wrap, message, code, source);
+        return;
+      }
       if (lang === 'ui') {
         // The directive is a patch for the *preview's* document, not for this transcript: on
         // its own it is inert here, so the block stays visible as the record of what the model
@@ -669,6 +721,75 @@ export async function render({ page, actions, session, route }) {
       }
       wrap.prepend(bar);
     });
+  }
+
+  // renderFormBlock builds one inline form and puts it in place of its code block.
+  //
+  // A form is a rendering of its message, not a piece of state: the only thing carried across a
+  // re-render is what the operator typed and has not submitted yet (`state.formDrafts`). That is
+  // what makes a reload, a session switch, or the post-turn transcript rebuild harmless.
+  function renderFormBlock(host, wrap, message, code, source) {
+    const blockIndex = code.getAttribute('data-block-index') || '0';
+    const formKey = (message.id || 'live') + ':' + blockIndex;
+    const parsed = parseFormSpec(source, blockIndex);
+    if (parsed.error) {
+      // Same contract as a chart spec the renderer cannot draw: keep the raw block visible and
+      // say what is wrong with it, instead of rendering half a form.
+      wrap.after(el('div', { class: 'notice form-note-error', text: '表单未渲染：' + parsed.error }));
+      return;
+    }
+    const spec = parsed.spec;
+    const draft = state.formDrafts.get(formKey);
+    if (draft) {
+      for (const field of spec.fields) {
+        if (!field || !field.name) continue;
+        if (!Object.prototype.hasOwnProperty.call(draft, field.name)) continue;
+        field.value = draft[field.name];
+        if (field.type === 'checkbox') field.checked = draft[field.name] === true;
+      }
+    }
+    const lines = source.split('\n');
+    const head = lines.slice(0, 2).join('\n');
+
+    const form = renderForm(spec, {
+      onSubmit: (event) => onFormSubmit(form, formKey, event),
+    });
+    form.node.__aigwForm = form;
+    wrap.replaceWith(form.node);
+    // The transcript keeps the spec itself one click away. The form is a rendering; this is what
+    // the model actually sent, which is what someone checks when a field is not what they meant.
+    form.node.append(el('details', { class: 'form-source' }, [
+      el('summary', { text: '查看表单规格' }),
+      el('pre', { class: 'md-pre' }, [
+        el('code', { class: 'md-code-block', text: head + (lines.length > 2 ? '\n…' : '') }),
+      ]),
+    ]));
+  }
+
+  // onFormSubmit is the console's side of "the operator answered the form". It becomes an
+  // ordinary question in this conversation: same endpoint, same billing, same transcript. There
+  // is no second path, which is why a form submission shows up in the request log exactly like
+  // something typed by hand.
+  function onFormSubmit(form, formKey, event) {
+    if (!state.session) return;
+    if (!state.session.account_id || !state.session.api_key_id) {
+      form.setStatus('这个会话还没有绑定计费 Key，提交不会产生请求', 'error');
+      return;
+    }
+    // The submission is about to become a message, so the draft has served its purpose: keeping
+    // it would refill the form with values the transcript already contains.
+    state.formDrafts.delete(formKey);
+    const item = { event, form, formKey };
+    if (state.running) {
+      if (state.queue.length >= 5) {
+        form.setStatus('还有 5 条提交在排队，请等模型答完', 'error');
+        return;
+      }
+      state.queue.push(item);
+      form.setStatus(`模型还在回答；已排队 ${state.queue.length} 条提交，本轮结束后自动发出`);
+      return;
+    }
+    sendFormEvent(item);
   }
 
   // toolCallNames lists the management calls this answer actually made. The chart footer
@@ -776,9 +897,42 @@ export async function render({ page, actions, session, route }) {
   // submit is the composer's entry point. Everything below it is the turn itself, which the
   // interactive preview uses too: an event from a generated page is a question in this
   // conversation, billed and stored the same way, so it must not have its own request path.
+  // submit is a question typed by hand. A live inline form is *also* told what the model is
+  // writing: someone who asked a follow-up while a form sat on screen should not have to guess
+  // whether the answer belongs to the form or to their question.
   async function submit(content) {
     if (!state.session) { toast('先新建一个会话', 'error'); return; }
-    await runTurn(content);
+    const form = lastLiveForm();
+    let streamed = '';
+    await runTurn(content, form ? {
+      onDelta: (frame) => {
+        if (frame.type !== 'text') return;
+        streamed += frame.delta || '';
+        form.setStatus(streamed.length > 200 ? '…' + streamed.slice(-200) : streamed);
+      },
+      onFinish: (result) => {
+        form.setBusy(false);
+        if (result.error) { form.setStatus('本轮失败：' + result.error, 'error'); return; }
+        // Parked for the same reason a form submission's directive is: the transcript is about to
+        // be rebuilt, so anything applied to this node now would be discarded with it.
+        state.pendingFormOps = { formId: form.spec.id, ops: result.ops || [] };
+        if (!result.ops || !result.ops.length) {
+          form.setStatus('本轮结束（' + result.status + '）。继续填写或提交即可。');
+        }
+      },
+    } : undefined);
+  }
+
+  // lastLiveForm is the last inline form on screen, or nothing.
+  //
+  // It is read out of the DOM rather than kept in a map of handles, because the transcript is
+  // rebuilt after every turn: a handle kept across that rebuild is a detached ghost, and a map of
+  // ghosts has to be swept. The document is the source of truth for what is on screen, so this
+  // asks it. Only one turn can be in flight, so at most one form can be "the one being answered".
+  function lastLiveForm() {
+    const nodes = main.querySelectorAll('.chat-form');
+    const node = nodes[nodes.length - 1];
+    return (node && node.__aigwForm) || null;
   }
 
   // runTurn posts one question and folds the stream into the transcript. When the answer
@@ -876,6 +1030,11 @@ export async function render({ page, actions, session, route }) {
       }
       await loadSessions();
       await openSession(state.session.id);
+      // A directive for an inline form is applied *after* the refresh, and this ordering is the
+      // whole reason: openSession rebuilds the transcript from the server, so a directive applied
+      // inside onFinish would patch a node that is about to be thrown away — the operator would
+      // see the model's update flash and vanish, which is worse than not applying it at all.
+      applyPendingFormOps();
       // A submission that arrived while this turn was in flight runs now, so a form does not
       // silently lose the second click.
       drainQueue();
@@ -887,8 +1046,8 @@ export async function render({ page, actions, session, route }) {
   // events from a generated interface
   // -------------------------------------------------------------------------
 
-  // onUIEvent is the bridge's callback: a form was submitted, or an element carrying
-  // data-aigw-send was clicked. It becomes a question in this conversation.
+  // onUIEvent is the bridge's callback: a form was submitted inside an interactive preview, or
+  // an element carrying data-aigw-send was clicked. It becomes a question in this conversation.
   function onUIEvent(event) {
     if (!state.session) return;
     if (state.running) {
@@ -896,7 +1055,7 @@ export async function render({ page, actions, session, route }) {
         toast('还有 5 条界面提交在排队，请等模型答完', 'error');
         return;
       }
-      state.queue.push(event);
+      state.queue.push({ event, preview: state.preview });
       state.notice = `模型还在回答；已排队 ${state.queue.length} 条界面提交，本轮结束后自动发出。`;
       renderMain();
       return;
@@ -904,16 +1063,79 @@ export async function render({ page, actions, session, route }) {
     sendUIEvent(event, state.preview);
   }
 
+  // drainQueue sends the submissions that arrived while a turn was in flight, oldest first.
+  //
+  // Each queued item remembers the thing that asked — an open preview or an inline form — and
+  // an item whose target is gone is dropped rather than re-routed: the transcript already holds
+  // everything that was paid for, and patching an answer into a form that did not ask for it
+  // would attribute the model's words to the wrong question.
   function drainQueue() {
-    const preview = state.preview;
-    if (state.running || !state.queue.length || !preview || !preview.isOpen()) {
-      // Nothing to drain into: the operator closed the preview, so the queued submissions have
-      // no page left to answer. Dropping them is right — the transcript already has everything
-      // that was paid for.
-      if (!preview) state.queue = [];
+    if (state.running || !state.queue.length) return;
+    const item = state.queue[0];
+    if (item.form) {
+      state.queue.shift();
+      sendFormEvent(item);
       return;
     }
-    sendUIEvent(state.queue.shift(), preview);
+    if (!item.preview || !item.preview.isOpen()) {
+      state.queue.shift();
+      drainQueue();
+      return;
+    }
+    state.queue.shift();
+    sendUIEvent(item.event, item.preview);
+  }
+
+  // applyPendingFormOps applies the directive of the turn that just finished to the form that
+  // asked for it. It runs after the transcript has been rebuilt, and it looks its target up in
+  // the *live* document rather than trusting the handle the turn started with: the rebuild
+  // replaced that node, so the handle is a detached ghost by now. The form's id is derived from
+  // its block, so the same id names the same form before and after the rebuild.
+  function applyPendingFormOps() {
+    const pending = state.pendingFormOps;
+    state.pendingFormOps = null;
+    if (!pending || !pending.ops || !pending.ops.length) return;
+    const node = main.querySelector('.chat-form#form_' + pending.formId);
+    const form = node && node.__aigwForm;
+    if (!form) return;
+    const summary = describeFormOps(form.apply(pending.ops));
+    if (summary) form.setStatus(summary);
+    else form.setStatus('本轮完成');
+  }
+
+  // sendFormEvent turns one inline-form submission into a billed turn, and streams the answer
+  // back into the form that asked for it: text deltas land in the form's status line while the
+  // model writes, and the `ui` directive at the end of the turn patches the fields in place.
+  //
+  // The form is passed in rather than looked up by id afterwards, for the same reason the
+  // preview is: by the time the answer arrives the transcript may have been rebuilt, and an
+  // answer must not be patched into a form that did not ask for it.
+  function sendFormEvent({ event, form }) {
+    if (!form) return;
+    form.setBusy(true, '模型正在处理…');
+    let streamed = '';
+    runTurn(uiEventContent(event), {
+      onDelta: (frame) => {
+        if (frame.type !== 'text') return;
+        streamed += frame.delta || '';
+        form.setStatus(streamed.length > 200 ? '…' + streamed.slice(-200) : streamed);
+      },
+      onFinish: (result) => {
+        form.setBusy(false);
+        if (result.error) {
+          form.setStatus('本轮失败：' + result.error, 'error');
+          return;
+        }
+        // The fields are patched after the refresh, not here: `result.ops` is parked for
+        // applyPendingFormOps. A directive that came back with an error is reported now, because
+        // it will never have a target worth retrying against.
+        state.pendingFormOps = { formId: form.spec.id, ops: result.ops || [] };
+        if (result.opsError) form.setStatus('回答里的界面指令无法应用：' + result.opsError, 'error');
+        else if (!result.ops || !result.ops.length) {
+          form.setStatus('本轮结束（' + result.status + '）。继续填写或提交即可。');
+        }
+      },
+    });
   }
 
   // sendUIEvent turns one submission into a billed turn. The preview it belongs to is passed in
