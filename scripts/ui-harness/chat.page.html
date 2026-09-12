@@ -264,9 +264,15 @@ try {
         && ![...picker.options].some((o) => o.textContent.includes('retired'));
       checks.rebindPickerPreselectsCurrent = !!picker && picker.value === '2';
       if (picker) {
+        // Switch to the admin-scope token and check the selection sticks. Refilling the options
+        // from the change handler would reset the select and snap back to the first option,
+        // which is exactly the bug operators reported as "I cannot choose anything"
+        // (see commit d240287) — so this assertion is the regression guard for it.
         picker.value = '3';
         picker.dispatchEvent(new Event('change'));
         await settle();
+        checks.rebindSelectionSticks = picker.value === '3'
+          && [...picker.options].filter((o) => o.selected).map((o) => o.value).join() === '3';
         // The dialog is appended to #modal-root, outside pageEl, so read it directly.
         const lastModal = [...document.querySelectorAll('.modal')].pop();
         checks.rebindHintUpdates = !!lastModal
