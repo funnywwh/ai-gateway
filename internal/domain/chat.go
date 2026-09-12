@@ -163,5 +163,10 @@ type ChatArtifact struct {
 	Format      string
 	Body        string
 	SizeBytes   int
+	// BridgeToken is the handshake secret the injected client answers its host with. It is
+	// stored (not derived at serve time) because the console must hold the same value, and the
+	// console cannot read it back out of a sandboxed frame: that document is an opaque origin,
+	// so `frame.contentDocument` is null for the parent. Empty means this preview is read-only.
+	BridgeToken string
 	CreatedAt   time.Time
 }

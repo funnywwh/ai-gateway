@@ -276,10 +276,23 @@ func TestConsoleChatRoutesMatchTheServer(t *testing.T) {
 			t.Errorf("chat_ui.js is missing %s", want)
 		}
 	}
-	// The two halves of one protocol must agree on the markers.
+	// The two halves of one protocol must agree on the handshake. The console generates the
+	// secret, sends it with the upload, and puts it in the frame's URL; the server's injected
+	// client reads it back out of that URL. The parameter name is the whole contract, so it is
+	// pinned here in the client that has to spell it.
 	bridgeSource := source("/js/pages/chat_artifact.js")
-	if !strings.Contains(bridgeSource, "aigw-ui-bridge") {
-		t.Error("the console must look for the injected script by the id the server gives it")
+	if !strings.Contains(bridgeSource, "'aigw_token'") {
+		t.Error("the console must put the handshake token in the preview URL under aigw_token")
+	}
+	if !strings.Contains(bridgeSource, "bridge_token") {
+		t.Error("the console must send the handshake token with the upload")
+	}
+	// It must not try to read it back out of the frame: a sandboxed document is an opaque
+	// origin, so that read returns null and every preview reports "不可交互" (which is exactly
+	// what happened the first time this shipped).
+	// Comments are stripped first: this file *explains* the bug it must not reintroduce.
+	if strings.Contains(stripJSComments(bridgeSource), "contentDocument") {
+		t.Error("the console must not read the preview's document: a sandbox forbids it")
 	}
 
 	artifactSource := source("/js/pages/chat_artifact.js")

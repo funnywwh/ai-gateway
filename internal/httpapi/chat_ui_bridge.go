@@ -37,6 +37,14 @@ import (
 // a document that already contains it is served unchanged.
 const uiBridgeScriptID = "aigw-ui-bridge"
 
+// uiBridgeTokenParam is the query parameter carrying the handshake secret inside the preview
+// URL. It is in the URL on purpose: the page's own script must be able to read it (that is what
+// makes "this window really is the frame we loaded" checkable), and the value is generated per
+// preview by the console, which is also the only party that checks it. What it must never be is
+// readable by *another* document — and location is per-window, so this is the one place only
+// this frame and its host can see.
+const uiBridgeTokenParam = "aigw_token"
+
 // Handshake frames. `hello` travels as a window message (there is no port yet); everything
 // after the port transfer happens on the port itself.
 const (
@@ -66,6 +74,13 @@ func uiBridgeScript() string {
 	return `(function () {
   if (window.AIGW && window.AIGW.__aigwBridge) { return; }
   var self = document.currentScript;
+  // The handshake secret is read from this document's own URL, not from the injected tag: the
+  // page shares this document and can read the tag's attributes with one querySelector, while
+  // no other frame can read this window's location. Comparing the two also catches a document
+  // that was assembled by something other than this server.
+  var token = tokenFromLocation();
+  var declared = self ? (self.getAttribute('data-token') || '') : '';
+  if (!token || token !== declared) { return; }
   // Captured before any page code can run: the page shares this document and may replace
   // window.postMessage later.
   var post = window.parent.postMessage;
@@ -75,6 +90,20 @@ func uiBridgeScript() string {
   var byName = {};
   var directSeq = 0;
   var maxBytes = ` + strconv.Itoa(uiBridgeMaxEventBytes) + `;
+
+  function tokenFromLocation() {
+    var query = '';
+    try { query = String(window.location.search || ''); } catch (err) { return ''; }
+    if (!query) { return ''; }
+    var parts = query.replace(/^\?/, '').split('&');
+    for (var i = 0; i < parts.length; i++) {
+      var pair = parts[i].split('=');
+      if (pair[0] === '` + uiBridgeTokenParam + `') {
+        try { return decodeURIComponent(pair.slice(1).join('=')); } catch (err) { return pair.slice(1).join('='); }
+      }
+    }
+    return '';
+  }
 
   // flatten turns a form into a flat object. Names are collapsed to their last segment
   // (items[0].sku -> sku) because the model is the consumer and a flat map is what it can

@@ -27,12 +27,25 @@ M34 补上这条回路，让「模型生成的界面」成为**用户与 AI 交�
 实现采用 `MessageChannel`：握手阶段父侧只收到一次 hello，校验通过后把 `MessagePort` 交给 iframe；
 此后双方只走这条 port 通道，与页面的全局环境彻底无关。
 
-### 2. 握手鉴权：服务端注入的随机 `bridgeToken`
+### 2. 握手鉴权：控制台生成、随上传提交的 `bridgeToken`
 
-已有的 `ticket` 在 URL 里（`?ticket=…`），模型页面通过 `location.search` 就能读到，因此**不能**
-当握手凭据。服务端渲染响应时生成一次性 `bridgeToken`，写进注入脚本的 `data-token` 属性：
-模型页面的代码看不到我们的标记（标记由服务端拼接，不在 artifact 正文里），父侧收到 hello 时比对
-`frame.contentWindow` 与 token 两项，两项都对才交出 port。
+已有的 `ticket` 在 URL 里（`?ticket=…`），模型页面也能读到自己的 `location.search`，因此**票据
+不能**当握手凭据。握手凭证必须满足两条互相拉扯的要求：**注入脚本读得到**（否则它无法证明自己是
+服务端放进去的那段代码），而**别的文档读不到**（否则页面里嵌套的同源 iframe 可以冒充它来骗走 port）。
+
+只有一对地方同时满足：**这个窗口自己的 `location`**，以及**控制台手里的那一份**。所以凭证由
+控制台生成（每次预览一个），随上传请求体提交、由服务端注入进脚本，而页面 URL 带上
+`?aigw_token=…`。注入脚本从自己的 location 读它，与注入标签上的 `data-token` 比对（不一致就
+不启动），hello 时回给父窗口；父窗口比对 `event.source === frame.contentWindow` 与 token 两项。
+
+> **这一段是踩了坑之后重写的。** 初版让服务端**每个响应**现生成 token，控制台去读
+> `frame.contentDocument` 里的脚本标签拿它：实现上线后每一份交互预览都显示「不可交互」。
+> 原因是沙箱：省略 `allow-same-origin` 的文档是不透明源，对父窗口而言是跨源，
+> `frame.contentDocument` 恒为 `null`——凭证被放在了一个父窗口根本读不到的地方。
+> 改法不只是换读取位置：token 也不再每响应更换（重载页面后控制台手里那份必须还有效），
+> 而是**属于某一份预览**，落库在 `chat_artifacts.bridge_token`（迁移 0012）。
+> 这个坑能在实现期溜过去，是因为 harness 用一个 stub 顶替了 `contentDocument`——**替身把真实
+> 边界条件掩盖掉了**，见「未验证的部分」。
 
 ### 3. 注入脚本的 CSP：`script-src 'nonce-<每次随机>'`
 
@@ -157,7 +170,14 @@ type chatArtifactRequest struct {
     Body   string `json:"body"`
     // Bridge 请求一张「可交互」票据：只有它对应的响应会被注入桥接脚本。
     Bridge bool `json:"bridge"`
+    // BridgeToken 是握手凭证，由控制台生成、随上传提交，并原样回显；
+    // 服务端把它落库（chat_artifacts.bridge_token）并注入进页面。交互预览缺它就拒绝（400）。
+    BridgeToken string `json:"bridge_token"`
 }
+
+// 存储层多一个方法：凭证是行上的一个字段，但 upsert 的身份是 (session_id, key)，
+// 调用者并不拥有行 id，所以单独一条语句写它。
+SetChatArtifactBridgeToken(ctx context.Context, id, token string) error
 ```
 
 响应头：交互预览额外带 `script-src … 'nonce-<随机>'` 与 `X-Aigw-Bridge: 1`。
@@ -314,6 +334,13 @@ artifact 正文按 `(session_id, key)` 幂等 upsert，页面新版本仍走同�
   里跑过——harness 的静态服务器不提供带票据的产物 URL。**注入脚本的语法**由 harness 的
   `bridge` 视图覆盖（见下），语义（绑定 submit、握手标记、不用 fetch/innerHTML、ES5）由 Go 侧
   测试与 `bridge` 视图共同断言，**运行**它仍然只能靠人工走查。
+  > 这段"未验证"很快就以最直接的方式兑现了：**上线后每一份交互预览都显示「不可交互」**，
+  > 原因正是本页「关键决策 2」里记的那个沙箱边界（父窗口读不到沙箱文档）。更值得记的是
+  > **为什么没测出来**：harness 当时用一个 stub 顶替了 `contentDocument`，于是"读不到"
+  > 这一条真实约束被替身抹平了。教训不是"要多写测试"，而是**替身要替得准**：替身只能替掉
+  > 被测代码不关心的东西，而"沙箱文档对父窗口不可见"恰恰是这段代码唯一在乎的事实。
+  > 现在那个 stub 已删除，harness 改为读控制台真正写进 iframe `src` 的 URL 参数——不替任何
+  > 真实约束；同时 `scripts/verify-m34.sh` 在真二进制上断言凭证往返（34 项）。
 - **`bridge` 视图（第 13 个视图）**：注入脚本是 Go 字符串拼接出来的，所以"Go 能编译"完全不能说明
   JavaScript 合法。`scripts/ui-harness/bridge_syntax.page.html` 在真实浏览器里用
   `new Function(source)` **只编译不执行**地验证它，并顺带断言无 `fetch`/`XHR`/`eval`/`innerHTML`/

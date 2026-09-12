@@ -690,7 +690,7 @@ func (db *DB) DeleteChatSkill(ctx context.Context, id, ownerUserID int64) error 
 	return nil
 }
 
-const chatArtifactCols = `id, owner_user_id, session_id, key, title, format, body, size_bytes, created_at`
+const chatArtifactCols = `id, owner_user_id, session_id, key, title, format, body, size_bytes, bridge_token, created_at`
 
 func scanChatArtifact(row rowScanner) (*domain.ChatArtifact, error) {
 	var (
@@ -698,7 +698,7 @@ func scanChatArtifact(row rowScanner) (*domain.ChatArtifact, error) {
 		createdAt int64
 	)
 	if err := row.Scan(&a.ID, &a.OwnerUserID, &a.SessionID, &a.Key, &a.Title, &a.Format,
-		&a.Body, &a.SizeBytes, &createdAt); err != nil {
+		&a.Body, &a.SizeBytes, &a.BridgeToken, &createdAt); err != nil {
 		return nil, err
 	}
 	a.CreatedAt = timeFromUnix(createdAt)
@@ -737,6 +737,7 @@ ON CONFLICT(session_id, key) DO UPDATE SET
   format = excluded.format,
   body = excluded.body,
   size_bytes = excluded.size_bytes,
+  bridge_token = excluded.bridge_token,
   created_at = excluded.created_at
 RETURNING id`,
 		a.ID, a.OwnerUserID, a.SessionID, a.Key, a.Title, a.Format, a.Body, a.SizeBytes, unix(a.CreatedAt)).Scan(&storedID)
@@ -745,6 +746,20 @@ RETURNING id`,
 	}
 	if storedID != "" {
 		a.ID = storedID
+	}
+	return nil
+}
+
+// SetChatArtifactBridgeToken sets (or with an empty token clears) one preview's handshake
+// secret. A separate statement rather than part of the upsert because the row's identity is
+// decided by (session_id, key), which the caller of the upsert does not own.
+func (db *DB) SetChatArtifactBridgeToken(ctx context.Context, id, token string) error {
+	if id == "" {
+		return domain.ErrInvalidRequest("chat artifact id is required")
+	}
+	if _, err := db.write.ExecContext(ctx,
+		"UPDATE chat_artifacts SET bridge_token = ? WHERE id = ?", token, id); err != nil {
+		return fmt.Errorf("store: set chat artifact bridge token: %w", err)
 	}
 	return nil
 }

@@ -31,13 +31,24 @@ import (
 // putArtifact uploads one preview payload and returns the response payload. The key is the
 // caller's: uploading the same key twice replaces the stored row (that is how re-previewing a
 // code block stays bounded), so tests that need two live previews must use two keys.
+//
+// An interactive upload carries the handshake token the console generated for it; tests mint one
+// per call, exactly as the console does.
 func (f *chatFixture) putArtifact(t *testing.T, cookie, sessionID, key, format, body string, bridge bool) map[string]any {
 	t.Helper()
+	token := ""
+	if bridge {
+		token = "tok_" + strings.ReplaceAll(key, ":", "_")
+	}
 	resp := f.call(t, http.MethodPost, "/admin/api/v1/chat/sessions/"+sessionID+"/artifacts",
-		fmt.Sprintf(`{"key":%q,"format":%q,"title":"表单","bridge":%t,"body":%q}`, key, format, bridge, body), cookie)
+		fmt.Sprintf(`{"key":%q,"format":%q,"title":"表单","bridge":%t,"bridge_token":%q,"body":%q}`,
+			key, format, bridge, token, body), cookie)
 	payload := decodeChatJSON(t, resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("upload preview status = %d payload=%v", resp.StatusCode, payload)
+	}
+	if bridge {
+		payload["_token"] = token
 	}
 	return payload
 }
@@ -151,6 +162,15 @@ func TestUIPreviewInjectsTheBridgeOnlyForAnInteractiveTicket(t *testing.T) {
 		t.Fatal("injection must land in the head, before the page's own content")
 	}
 	token := bridgeTokenFromBody(t, body)
+	// The token the page answers with is the one the console generated and sent: it has to
+	// survive the round trip, because the console keeps its own copy to check the handshake
+	// against (it cannot read it back out of the frame — that document is an opaque origin).
+	if token != interactive["_token"] {
+		t.Fatalf("the injected token %q is not the one the upload supplied (%q)", token, interactive["_token"])
+	}
+	if got := interactive["bridge_token"]; got != interactive["_token"] {
+		t.Fatalf("the upload did not echo the token: %v", got)
+	}
 	csp := header.Get("Content-Security-Policy")
 	if !strings.Contains(csp, "'nonce-"+nonceFromBody(t, body)+"'") {
 		t.Fatalf("the policy does not authorize the injected script: %s", csp)
@@ -161,13 +181,24 @@ func TestUIPreviewInjectsTheBridgeOnlyForAnInteractiveTicket(t *testing.T) {
 		}
 	}
 
-	// Every response gets its own nonce and token: a leaked pair must not work twice.
+	// Each response gets its own nonce, while the handshake token is stable for one preview
+	// (it belongs to the artifact, not to a response) — which is what lets a reloaded frame
+	// answer with the token the console still holds.
 	_, _, second := f.getPreview(t, previewPath(interactive, true))
 	if nonceFromBody(t, second) == nonceFromBody(t, body) {
 		t.Fatal("two responses shared a nonce")
 	}
-	if bridgeTokenFromBody(t, second) == token {
-		t.Fatal("two responses shared a handshake token")
+	if bridgeTokenFromBody(t, second) != token {
+		t.Fatal("reloading a preview changed its handshake token")
+	}
+	// A different preview gets a different token: it identifies one page, not a deployment.
+	third := f.putArtifact(t, cookie, sessionID, "interactive:2", "html", page, true)
+	if third["_token"] == interactive["_token"] {
+		t.Fatal("two previews were issued the same handshake token")
+	}
+	_, _, thirdBody := f.getPreview(t, previewPath(third, true))
+	if bridgeTokenFromBody(t, thirdBody) != third["_token"] {
+		t.Fatal("the third preview did not get its own token")
 	}
 
 	// The ticket names one artifact: this session's other block is a different payload, and a
@@ -509,4 +540,58 @@ func TestUIBridgeScriptDumpForTheHarness(t *testing.T) {
 		t.Fatalf("rewriting the harness fixtures failed: %v", err)
 	}
 	t.Logf("refreshed %s in scripts/ui-harness/fixtures.json (%d bytes)", key, len(script))
+}
+
+// TestUIPreviewBridgeTokenRoundTrip pins the fix for the bug this feature shipped with: the
+// console used to read the handshake token out of the frame's document, which a sandbox forbids
+// (a document without allow-same-origin is an opaque origin, so `frame.contentDocument` is null
+// for the parent). Every interactive preview therefore reported "不可交互".
+//
+// The token now travels the other way — the console generates it, the upload carries it, the
+// server injects it — so this test asserts all three ends agree, and that an interactive upload
+// without one is refused rather than served with a channel nobody can authenticate.
+func TestUIPreviewBridgeTokenRoundTrip(t *testing.T) {
+	f := newChatFixture(t)
+	cookie := f.login(t, "admin")
+	sessionID := f.createSession(t, cookie)
+	const page = "<html><head></head><body><form><input name=x></form></body></html>"
+
+	// No token: refused, and for a reason the operator can act on.
+	noToken := f.call(t, http.MethodPost, "/admin/api/v1/chat/sessions/"+sessionID+"/artifacts",
+		`{"key":"notoken:0","format":"html","bridge":true,"body":"<form></form>"}`, cookie)
+	payload := decodeChatJSON(t, noToken)
+	if noToken.StatusCode != http.StatusBadRequest {
+		t.Fatalf("an interactive upload without a token = %d, payload=%v", noToken.StatusCode, payload)
+	}
+	if !strings.Contains(fmt.Sprint(payload), "bridge_token") {
+		t.Fatalf("the refusal does not name the missing field: %v", payload)
+	}
+
+	// With a token: echoed to the console and injected into the document.
+	up := f.putArtifact(t, cookie, sessionID, "roundtrip:0", "html", page, true)
+	status, _, body := f.getPreview(t, previewPath(up, true))
+	if status != http.StatusOK {
+		t.Fatalf("interactive preview = %d", status)
+	}
+	if got := bridgeTokenFromBody(t, body); got != up["_token"] {
+		t.Fatalf("served token = %q, console holds %q", got, up["_token"])
+	}
+	// The injected client reads the token from its own location, which is the one place another
+	// document cannot look — so the URL must carry it under the parameter the script looks for.
+	if !strings.Contains(body, "aigw_token") {
+		t.Fatal("the injected client no longer looks for the token in its own location")
+	}
+	if !strings.Contains(uiBridgeScript(), uiBridgeTokenParam) {
+		t.Fatalf("the injected client must read %q out of its own URL", uiBridgeTokenParam)
+	}
+
+	// Re-opening through the ticket endpoint hands back the same token, so a reloaded frame and
+	// the console still agree without re-uploading the payload.
+	fresh := f.call(t, http.MethodPost,
+		"/admin/api/v1/chat/sessions/"+sessionID+"/artifacts/"+up["id"].(string)+"/ticket",
+		`{"bridge":true}`, cookie)
+	freshPayload := decodeChatJSON(t, fresh)
+	if freshPayload["bridge_token"] != up["_token"] {
+		t.Fatalf("re-ticketing changed the token: %v", freshPayload["bridge_token"])
+	}
 }

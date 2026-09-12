@@ -209,43 +209,31 @@ function json(body) {
 
 // Console-side helpers for the interactive preview (M34).
 //
-// The console identifies its frame's bridge by reading the injected script's token out of the
-// frame's document. Opening a URL that this server does not have cannot produce that script, so
-// that accessor is stubbed — and it is stubbed in a way that reads the token *from the frame*,
-// which is what lets the "wrong token" case be exercised instead of assumed.
-const UI_BRIDGE_ID = 'aigw-ui-bridge';
-const realContentDocument = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentDocument');
-Object.defineProperty(HTMLIFrameElement.prototype, 'contentDocument', {
-  configurable: true,
-  get() {
-    const stub = document.createElement('div');
-    const token = this.getAttribute('aigw-token') || window.__uiFrameToken || '';
-    if (token) stub.innerHTML = '<script id="' + UI_BRIDGE_ID + '" data-token="' + token + '"><\/script>';
-    return { querySelector: (selector) => stub.querySelector(selector) };
-  },
-});
-window.__realContentDocument = realContentDocument;
+// There used to be a stub here that faked `frame.contentDocument` and handed the console a token
+// out of it. That stub was the reason a real bug shipped: a sandboxed document is an opaque
+// origin, so `contentDocument` is null in a browser, and every interactive preview reported
+// "不可交互". The console now generates the token itself and puts it in the frame's URL, so the
+// harness only has to read the same URL the browser would load — no stub, nothing faked.
+function previewFrameToken() {
+  const frame = document.querySelector('.preview-frame');
+  if (!frame) return '';
+  const match = /(?:[?&])aigw_token=([^&]+)/.exec(frame.getAttribute('src') || '');
+  return match ? decodeURIComponent(match[1]) : '';
+}
 
-// openInteractivePreview clicks the preview button, answers the token lookup the way the server
-// would, and waits for the toolbar to report the state.
-async function openInteractivePreview({ token = 'tok_demo' } = {}) {
-  window.__uiFrameToken = token;
+// openInteractivePreview clicks the preview button and returns the frame the console built.
+async function openInteractivePreview() {
   const button = find('预览（可交互）') || find('预览');
   if (!button) return null;
   button.click();
   await settle();
-  const frame = document.querySelector('.preview-frame');
-  if (!frame) return null;
-  frame.setAttribute('aigw-token', token);
-  // The frame has to be loaded before the console looks for the injected script.
-  frame.dispatchEvent(new Event('load'));
-  await settle();
-  return frame;
+  return document.querySelector('.preview-frame');
 }
 
 // handOverPort plays the frame's side of the handshake and returns a port the harness can use
 // to drive (and observe) the channel.
-async function handOverPort(frame, { token = 'tok_demo', withPort = true } = {}) {
+async function handOverPort(frame, { token = null, withPort = true } = {}) {
+  if (token === null) token = previewFrameToken();
   const channel = new MessageChannel();
   const seen = [];
   channel.port1.onmessage = (ev) => seen.push(ev.data);
@@ -411,6 +399,13 @@ try {
       checks.previewUploadedBody = typeof sent.body === 'string' && sent.body.includes('<h1>hi</h1>');
       checks.previewFormat = sent.format === 'html';
       checks.previewUploadSaysBridge = sent.bridge === true;
+      // The handshake token must be in the frame's URL: that is where the injected script reads
+      // it, and it is the only place another document cannot look. It must also be the token the
+      // upload carried, because the console keeps that copy to check the handshake against.
+      checks.previewUrlCarriesToken = /(?:[?&])aigw_token=[0-9a-f]{16,}/.test(frame.getAttribute('src') || '');
+      checks.previewUploadSaysToken = typeof sent.bridge_token === 'string' && sent.bridge_token.length >= 16;
+      checks.previewTokenMatchesUrl = !!sent.bridge_token
+        && previewFrameToken() === sent.bridge_token;
       const close = [...document.querySelectorAll('.modal-actions button')].find((b) => b.textContent.trim() === '关闭');
       if (close) close.click();
       await settle();
@@ -548,7 +543,7 @@ try {
     // ---- the live channel ------------------------------------------------
     // Drives the console's half of the bridge the way the injected script does: hello from the
     // frame, a MessagePort, then events.
-    const uiFrame = await openInteractivePreview({ token: 'tok_live' });
+    const uiFrame = await openInteractivePreview();
     checks.uiFrameOpens = !!uiFrame;
     checks.uiBadgeWaitsForHandshake = !!document.querySelector('.bridge-badge')
       && document.querySelector('.bridge-badge').textContent.includes('等待页面握手');
@@ -558,19 +553,21 @@ try {
     // rather than a message listener.
     if (uiFrame) {
       const before = document.querySelector('.bridge-badge').textContent;
+      const realToken = previewFrameToken();
+      checks.previewTokenAvailable = !!realToken;
       uiFrame.contentWindow.dispatchEvent(new MessageEvent('message', {
-        data: { aigw: 'ui', t: 'hello', token: 'wrong' }, source: uiFrame.contentWindow,
+        data: { aigw: 'ui', t: 'hello', token: 'not-the-token' }, source: uiFrame.contentWindow,
         ports: [new MessageChannel().port2],
       }));
       uiFrame.contentWindow.dispatchEvent(new MessageEvent('message', {
-        data: { aigw: 'ui', t: 'hello', token: 'tok_live' }, source: window,
+        data: { aigw: 'ui', t: 'hello', token: realToken }, source: window,
         ports: [new MessageChannel().port2],
       }));
       uiFrame.contentWindow.dispatchEvent(new MessageEvent('message', {
-        data: { aigw: 'ui', t: 'hello', token: 'tok_live' }, source: uiFrame.contentWindow, ports: [],
+        data: { aigw: 'ui', t: 'hello', token: realToken }, source: uiFrame.contentWindow, ports: [],
       }));
       uiFrame.contentWindow.dispatchEvent(new MessageEvent('message', {
-        data: { aigw: 'ui', t: 'port', token: 'tok_live' }, source: uiFrame.contentWindow,
+        data: { aigw: 'ui', t: 'port', token: realToken }, source: uiFrame.contentWindow,
         ports: [new MessageChannel().port2],
       }));
       await settle();
@@ -583,7 +580,7 @@ try {
     }
 
     if (uiFrame) {
-      const channel = await handOverPort(uiFrame, { token: 'tok_live' });
+      const channel = await handOverPort(uiFrame);
       checks.uiPortAccepted = document.querySelector('.modal .bridge-badge').textContent.includes('已连接');
 
       // A submission becomes a normal question: the request body has to be the ui_event payload,
@@ -644,12 +641,16 @@ try {
       const reloadBtn = [...document.querySelectorAll('.modal-actions button')].find((b) => b.textContent.trim() === '重新加载');
       checks.uiReloadPresent = !!reloadBtn;
       if (reloadBtn) {
-        window.__uiFrameToken = 'tok_live';
         reloadBtn.click();
         await settle();
         const sentAfter = (window.__sent || {})['/chat/sessions/chat_1/artifacts'];
         checks.uiReloadReuploads = sentAfter !== sentBefore;
         checks.uiReloadResetsBadge = document.querySelector('.modal .bridge-badge').textContent.includes('等待页面握手');
+        // A reload is a new page: it must get its own secret rather than reuse the old one.
+        const reloaded = JSON.parse(sentAfter || '{}');
+        checks.uiReloadNewToken = typeof reloaded.bridge_token === 'string'
+          && reloaded.bridge_token.length >= 16
+          && reloaded.bridge_token !== JSON.parse(sentBefore || '{}').bridge_token;
       }
 
       // Closing the preview tears the channel down: the listener and the port go with the frame.
