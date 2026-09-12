@@ -33,17 +33,29 @@ function scopeSummary(scope) {
 
 // Only tokens that are usable right now can be bound: a revoked or expired one would be
 // refused by the server anyway, and offering it would just be a trap.
+//
+// The answer is { tokens, error } rather than a bare list: "no usable token" and "the list
+// could not be read" both leave a picker with nothing to offer, and a picker that conflates
+// them tells the operator to go issue a token when the real problem is the request.
 async function fetchUsableTokens() {
+  let payload;
   try {
-    const payload = await api.get('/mcp-tokens', { limit: 200 });
-    return (payload.data || []).filter((token) => {
-      if (token.status !== 'active') return false;
-      if (!token.expires_at) return true;
-      return new Date(token.expires_at).getTime() > Date.now();
-    });
+    payload = await api.get('/mcp-tokens', { limit: 200 });
   } catch (err) {
-    return [];
+    return { tokens: [], error: api.errorMessage(err) };
   }
+  const tokens = (payload.data || []).filter((token) => {
+    if (token.status !== 'active') return false;
+    if (!token.expires_at) return true;
+    return new Date(token.expires_at).getTime() > Date.now();
+  });
+  return { tokens, error: '' };
+}
+
+// What a token picker says when it has nothing to offer. Both dialogs share it, so the same
+// empty picker never reads two different ways.
+function tokensUnavailableHint(error, emptyText) {
+  return error ? '读取 MCP 令牌失败：' + error : emptyText;
 }
 
 function tokenOption(token) {
@@ -177,7 +189,7 @@ export async function render({ page, actions, session, route }) {
   // abandoning it (and the skills it has loaded) and starting over.
   async function rebindToken() {
     const current = state.session.mcp_token_id ? String(state.session.mcp_token_id) : '';
-    const tokens = await fetchUsableTokens();
+    const { tokens, error } = await fetchUsableTokens();
     const picker = el('select', {});
     for (const token of tokens) picker.append(tokenOption(token));
     if (current && tokens.some((token) => String(token.id) === current)) picker.value = current;
@@ -187,7 +199,7 @@ export async function render({ page, actions, session, route }) {
       const chosen = tokens.find((token) => String(token.id) === picker.value);
       hint.textContent = chosen
         ? '改绑后本会话权限：' + scopeSummary(chosen.scope || 'query')
-        : '没有可用的 MCP 令牌：请先到「MCP 令牌」页签发一个。';
+        : tokensUnavailableHint(error, '没有可用的 MCP 令牌：请先到「MCP 令牌」页签发一个。');
     };
     picker.addEventListener('change', describe);
     describe();
@@ -291,18 +303,30 @@ export async function render({ page, actions, session, route }) {
 
     // Only tokens that are usable right now can be bound: a revoked or expired one would be
     // refused by the server anyway, and offering it would just be a trap.
+    //
+    // The options are filled once, at open; a change only re-describes the choice. Refilling
+    // from the change handler would throw away the very selection that fired the event:
+    // removing the options resets the select, and the first option appended afterwards becomes
+    // the selected one again — so the picker would snap back to the first token no matter
+    // which one the operator clicked (and refetch the list on every click).
+    let tokenError = '';
     async function loadTokens() {
       clear(tokenSelect);
-      state.tokens = await fetchUsableTokens();
+      const loaded = await fetchUsableTokens();
+      state.tokens = loaded.tokens;
+      tokenError = loaded.error;
       for (const token of state.tokens) {
         tokenSelect.append(tokenOption(token));
       }
+      describeToken();
+    }
+    function describeToken() {
       const chosen = state.tokens.find((token) => String(token.id) === tokenSelect.value);
       tokenHint.textContent = chosen
         ? '本会话权限：' + scopeSummary(chosen.scope || 'query')
-        : '没有可用的 MCP 令牌：请先到「MCP 令牌」页签发一个，scope 决定本会话能做什么。';
+        : tokensUnavailableHint(tokenError, '没有可用的 MCP 令牌：请先到「MCP 令牌」页签发一个，scope 决定本会话能做什么。');
     }
-    tokenSelect.addEventListener('change', loadTokens);
+    tokenSelect.addEventListener('change', describeToken);
 
     const dialog = el('div', { class: 'modal' }, [
       el('div', { class: 'toolbar' }, [el('h2', { text: '新建会话' })]),

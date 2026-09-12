@@ -1181,6 +1181,18 @@
       （徽章可点、只列可用令牌、预选当前、提示随选择更新、PATCH 只发一个字段、服务端派生值生效）
 - [x] 已随用户重启生效：迁移 0011 已在开发库应用（`mcp_token_id` 列存在，旧会话保持 NULL）；
       实测改绑 `query`→`read_only`、`admin`→`allow_writes`、不存在的 id 返回 400 且不改动原绑定
+- [x] 修正（真机反馈）「新建会话时 MCP 令牌选不了」：`tokenSelect` 的 `change` 处理函数原本就是
+      `loadTokens` 本身，而它先 `clear()` 再重新填充——移除选项会重置 select，随后 append 的第一个
+      选项又成为选中项，于是点哪个令牌都弹回第一项（每点一次还多一次 `/mcp-tokens` 请求）。
+      代价不只是「选不动」：`创建` 拿的是这个被重置的值，操作员以为选了 `query`，实际绑定的可能是
+      列表里第一个 `admin` 令牌。现在选项只在开窗时填一次，`change` 只调 `describeToken()` 更新提示
+      （与「改绑」弹窗同一写法）；`/mcp-tokens` 读取失败时提示「读取 MCP 令牌失败：<原因>」，
+      不再把请求失败说成「请先去签发一个」（`fetchUsableTokens` 改回 `{ tokens, error }`）
+- [x] `scripts/ui-harness`：`chat` 视图补上**此前从未被覆盖的新建会话弹窗**（8 项断言：选项=2 且不含
+      revoked、开窗即描述第一个令牌的 scope、切换后选中值不弹回、提示随 scope 变化、切换不额外请求
+      `/mcp-tokens`、`创建` 发出的 `mcp_token_id` 就是所选令牌），另加 `rebindModalOpens`；
+      `chat` 52 → 61 项。反向验证过：把 `change` 改回 `loadTokens` 时其中 4 项转红
+      （含 `newSessionCreateSendsChosenToken`），让 `tokenOption` 抛错时 8 项转红
 - [ ] **待人工执行**（宿主终端）：硬刷新
       http://127.0.0.1:8088/admin/ui/#/chat ——新建会话时选一个 `admin` scope 的令牌，
       在智能问答里建账户/发 Key，确认账户出现在账户页、明文 Key 只返回一次并带提示、

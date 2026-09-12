@@ -258,6 +258,7 @@ try {
       tokenBadge.click();
       await settle();
       const picker = document.querySelector('.modal-body select');
+      checks.rebindModalOpens = !!document.querySelector('.modal');
 
       checks.rebindPickerOffersUsableTokens = !!picker && picker.options.length === 2
         && ![...picker.options].some((o) => o.textContent.includes('retired'));
@@ -341,6 +342,43 @@ try {
     checks.plusSkillChecked = !!menu && !!menu.querySelector('.plus-skill input[type=checkbox]').checked;
     checks.plusManage = !!menu && menu.textContent.includes('管理技能');
     if (menu) menu.remove();
+
+    // 新建会话 — the dialog the operator reported as "MCP 令牌选择不了". The picker must keep
+    // what was picked: rebuilding its option list from the change event throws that selection
+    // away (removing the options resets the select, and the first option appended afterwards
+    // becomes the selected one again), so these assertions read the picker *after* the change
+    // rather than only checking that it was populated.
+    find('新建会话').click();
+    await settle();
+    const newDialog = [...document.querySelectorAll('.modal')].pop();
+    checks.newSessionDialogOpens = !!newDialog && newDialog.textContent.includes('新建会话');
+    const tokenField = newDialog
+      ? [...newDialog.querySelectorAll('label.field')].find((l) => l.textContent.includes('MCP 令牌'))
+      : null;
+    const tokenPicker = tokenField ? tokenField.querySelector('select') : null;
+    checks.newSessionTokenOptions = !!tokenPicker && tokenPicker.options.length === 2
+      && ![...tokenPicker.options].some((o) => o.textContent.includes('retired'));
+    // Opening on the first usable token (admin_read) must already describe that token.
+    checks.newSessionTokenHintOnOpen = !!newDialog && newDialog.textContent.includes('后台只读');
+    if (tokenPicker) {
+      const fetchesBefore = (window.__fetched || []).filter((p) => p === '/mcp-tokens').length;
+      tokenPicker.value = '3';
+      tokenPicker.dispatchEvent(new Event('change'));
+      await settle();
+      checks.newSessionTokenSelectionSticks = tokenPicker.value === '3' && tokenPicker.options.length === 2;
+      checks.newSessionTokenHintUpdates = newDialog.textContent.includes('可执行全部控制台操作');
+      checks.newSessionTokenNoRefetch =
+        (window.__fetched || []).filter((p) => p === '/mcp-tokens').length === fetchesBefore;
+      const createBtn = [...document.querySelectorAll('.modal-actions button')]
+        .find((b) => b.textContent.trim() === '创建');
+      checks.newSessionCreatePresent = !!createBtn;
+      if (createBtn) {
+        createBtn.click();
+        await settle();
+        const created = JSON.parse((window.__sent || {})['/chat/sessions'] || '{}');
+        checks.newSessionCreateSendsChosenToken = created.mcp_token_id === 3;
+      }
+    }
 
     // Leaving the page must abort the stream (the shell calls the returned teardown).
     checks.teardown = typeof destroy === 'function';
