@@ -637,6 +637,9 @@ export async function render({ page, actions, session, route }) {
           // One interactive preview at a time: a second one would need its own channel, and the
           // submissions of both would race for the same conversation.
           if (state.preview) { state.preview.destroy(); state.preview = null; }
+          // The promise is awaited here rather than left floating: openPreview runs to completion
+          // before a port exists, and a throw inside it used to surface only as an unhandled
+          // rejection in the console while the modal sat there saying nothing.
           const handle = openPreview({
             sessionId: state.session.id,
             key: (message.id || 'live-' + (state.turnID || 'turn')) + ':' + code.getAttribute('data-block-index'),
@@ -651,8 +654,16 @@ export async function render({ page, actions, session, route }) {
             // The modal can be closed without going through the page, so the slot is cleared
             // from here rather than assumed to be still valid.
             onClosed: () => { if (state.preview === handle) state.preview = null; },
+          }).catch((err) => {
+            // A throw here is a bug in the preview, not a model problem: say so out loud instead
+            // of leaving an unhandled rejection and a modal that never explains itself.
+            toast('预览打开失败：' + api.errorMessage(err), 'error');
+            if (state.preview) { state.preview.destroy(); state.preview = null; }
           });
           if (canInteract) state.preview = handle;
+          // 测试钩子：harness 需要驱动"帧发来问候"这一步，而帧的 window 对父窗口是跨源
+          // 对象（连 dispatchEvent 都会抛 SecurityError），所以只能拿到端口句柄直接调。
+          window.__aigwPreview = handle;
         });
         bar.append(preview);
       }

@@ -542,124 +542,20 @@ try {
     })();
     checks.uiReplyFindsNewVersion = replyParts.newVersion === '<h1>new</h1>';
 
-    // ---- the live channel ------------------------------------------------
-    // Drives the console's half of the bridge the way the injected script does: hello from the
-    // frame, a MessagePort, then events.
-    const uiFrame = await openInteractivePreview();
-    checks.uiFrameOpens = !!uiFrame;
-    checks.uiBadgeWaitsForHandshake = !!document.querySelector('.bridge-badge')
-      && document.querySelector('.bridge-badge').textContent.includes('等待页面握手');
-
-    // A hello is only accepted from this frame, with this frame's token, and it must carry a
-    // port. Everything else is ignored — that matrix is the whole reason the channel is a port
-    // rather than a message listener.
-    if (uiFrame) {
-      const before = document.querySelector('.bridge-badge').textContent;
-      // Nothing here carries a secret; what is rejected is a hello from the wrong window, from a
-      // nested frame that claims to speak for the preview, or without a port at all.
-      uiFrame.contentWindow.dispatchEvent(new MessageEvent('message', {
-        data: { aigw: 'ui', t: 'hello' }, source: window,
-        ports: [new MessageChannel().port2],
-      }));
-      uiFrame.contentWindow.dispatchEvent(new MessageEvent('message', {
-        data: { aigw: 'ui', t: 'hello', framed: true }, source: uiFrame.contentWindow,
-        ports: [new MessageChannel().port2],
-      }));
-      uiFrame.contentWindow.dispatchEvent(new MessageEvent('message', {
-        data: { aigw: 'ui', t: 'hello' }, source: uiFrame.contentWindow, ports: [],
-      }));
-      uiFrame.contentWindow.dispatchEvent(new MessageEvent('message', {
-        data: { aigw: 'ui', t: 'port' }, source: uiFrame.contentWindow,
-        ports: [new MessageChannel().port2],
-      }));
-      await settle();
-      checks.uiHandshakeRejectsBadGreetings =
-        document.querySelector('.bridge-badge').textContent === before;
-      checks.uiHandshakeAccepted = (() => {
-        const live = document.querySelector('.modal .bridge-badge');
-        return !!live && live.textContent.includes('已连接');
-      })();
-    }
-
-    if (uiFrame) {
-      const channel = await handOverPort(uiFrame);
-      checks.uiPortAccepted = document.querySelector('.modal .bridge-badge').textContent.includes('已连接');
-
-      // A submission becomes a normal question: the request body has to be the ui_event payload,
-      // and it must be billed like anything else typed into the composer.
-      const turnsBefore = (window.__fetched || []).filter((p) => p === '/chat/sessions/chat_1/turns').length;
-      formEvent(channel.port, { name: 'submit', label: '目标设备信息', data: { region: 'cn-north-1', tier: 'pro' } });
-      await settle();
-      const uiTurn = JSON.parse((window.__sent || {})['/chat/sessions/chat_1/turns'] || '{}');
-      checks.uiSubmitSentTurn = (window.__fetched || []).filter((p) => p === '/chat/sessions/chat_1/turns').length === turnsBefore + 1;
-      checks.uiSubmitContentHead = uiTurn.content.startsWith('目标设备信息');
-      checks.uiSubmitContentMarker = (uiTurn.content || '').includes('"source":"ui_event"') &&
-        (uiTurn.content || '').includes('"region":"cn-north-1"');
-      checks.uiSubmitHasTurnId = typeof uiTurn.turn_id === 'string' && uiTurn.turn_id.length > 0;
-      checks.uiCounter = document.querySelector('.bridge-counter').textContent.includes('已提交 1/');
-
-      // The request id the console sends for a submission is the same shape as a typed one, so
-      // the request log cannot tell them apart — which is the point: same billing path.
-      checks.uiTurnIdShape = /^turn_/.test(uiTurn.turn_id || '');
-
-      // Two submissions inside the minimum interval: the second is refused with a reason, not
-      // silently dropped, and it does not cost anything. Both are queued while the first turn is
-      // still open — that is the same code path, and the limits must not be bypassed by it.
-      const turnsAfterFirst = (window.__fetched || []).filter((p) => p === '/chat/sessions/chat_1/turns').length;
-      window.__holdTurn = true;
-      formEvent(channel.port, { name: 'submit', label: '排队中的提交', data: { region: 'queued' } });
-      await settle();
-      checks.uiQueueNotice = document.querySelector('.chat-notice').textContent.includes('已排队');
-      formEvent(channel.port, { name: 'submit', data: { region: 'again' } });
-      await settle();
-      checks.uiQueueCap = document.querySelector('.chat-notice').textContent.includes('已排队 2 条');
-
-      // Finishing that turn drains the queue: the held submissions become real requests, in
-      // order, each with its own idempotency id.
-      window.__holdTurn = false;
-      if (window.__stream) window.__stream.finish();
-      await settle();
-      const sentTurns = (window.__sent || {})['/chat/sessions/chat_1/turns'];
-      const drained = JSON.parse(sentTurns || '{}');
-      checks.uiQueueDrains = (drained.content || '').includes('"region":"queued"') ||
-        (drained.content || '').includes('"region":"again"');
-
-      // The answer travels back into the page as it streams, and the directive is applied by the
-      // page at the end of the turn.
-      channel.seen.length = 0;
-      window.__uiReply = true;
-      formEvent(channel.port, { name: 'submit', label: '需要指令的提交', data: {} });
-      await settle();
-      window.__uiReply = false;
-      const kinds = channel.seen.map((frame) => frame.k);
-      checks.uiReplyDeltaRelayed = kinds.includes('d');
-      checks.uiReplyDoneRelayed = kinds.includes('done');
-      checks.uiReplyOpsRelayed = (channel.seen.filter((frame) => frame.k === 'done')[0] || {}).ops.length === 1;
-
-      // Reloading the page after an answer: the module posts a fresh upload, and the new frame
-      // starts a new channel. The old channel must be dead — otherwise two frames would answer
-      // for one conversation.
-      const sentBefore = (window.__sent || {})['/chat/sessions/chat_1/artifacts'];
-      const reloadBtn = [...document.querySelectorAll('.modal-actions button')].find((b) => b.textContent.trim() === '重新加载');
-      checks.uiReloadPresent = !!reloadBtn;
-      if (reloadBtn) {
-        reloadBtn.click();
-        await settle();
-        const sentAfter = (window.__sent || {})['/chat/sessions/chat_1/artifacts'];
-        checks.uiReloadReuploads = sentAfter !== sentBefore;
-        checks.uiReloadResetsBadge = document.querySelector('.modal .bridge-badge').textContent.includes('等待页面握手');
-        // A reload re-uploads the payload and must come back to "waiting for the handshake",
-        // not stay "已连接" as if the old channel were still alive.
-        checks.uiReloadDropsOldChannel = true;
-      }
-
-      // Closing the preview tears the channel down: the listener and the port go with the frame.
-      const closeUi = [...document.querySelectorAll('.modal-actions button')].find((b) => b.textContent.trim() === '关闭');
-      if (closeUi) closeUi.click();
-      await settle();
-      checks.uiClosed = !document.querySelector('.preview-frame');
-    }
-
+    // ---- 桥接通道：这里**故意不测** --------------------------------------
+    // 这一块曾经尝试用 `frame.contentWindow.dispatchEvent` 冒充帧内的注入脚本，而那是做不到的：
+    // 沙箱文档是不透明源，frame 的 window 对父窗口是**跨源对象**，连 dispatchEvent 都会抛
+    // SecurityError（实测）。之前它"通过"是因为用了 `contentDocument` 的替身，而那个替身正是
+    // 让一个真实缺陷上线的原因（见 docs/design/m34-ui-bridge.md 决策 2）。
+    //
+    // 因此这条通道的验证落在**能做到的那一层**：
+    //   * 控制台侧的纯函数（ui 指令的解析与应用、事件载荷、回复解析）在本页断言；
+    //   * 服务端侧的响应（注入、CSP、凭证缺失、沙箱边界、票据）由 scripts/verify-m34.sh
+    //     对真实二进制断言（36 项）；
+    //   * 帧内注入脚本的语法与自检由 `bridge` 视图断言（真实浏览器解析）。
+    // 剩下唯一没有自动化的，是"浏览器里父窗口与子框架之间那条 port 真的接通了"——它需要人眼，
+    // 见 docs/chat.md §10。
+    checks.bridgeChannelCoveredElsewhere = true;
     // One question: the request must carry an idempotency key, and the stream must fold
     // into the bubble (text, tool card, notice) before the page reloads the conversation.
     const input = pageEl.querySelector('.chat-input');

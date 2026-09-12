@@ -179,8 +179,12 @@ export async function openPreview({ sessionId, key, format, body, title, interac
         title: title || '预览',
         referrerpolicy: 'no-referrer',
       });
-      frameHost.append(frame);
-      reload.disabled = false;
+      // The listener goes up *before* the frame is attached to the document. Once a frame is in
+      // the DOM its document starts loading immediately, and the injected client fires its
+      // handshake as soon as it runs — a hello that arrives before `addEventListener` exists is
+      // dropped by the browser and never repeats, which is a preview stuck on "等待页面握手"
+      // until the toolbar gives up and says 不可交互. The harness never caught this because it
+      // dispatched the frame's load event by hand, so the real ordering never happened.
       if (interactive) {
         port = createUIPort({
           sessionId, frame,
@@ -194,6 +198,10 @@ export async function openPreview({ sessionId, key, format, body, title, interac
           onError: (message) => { status.textContent = message; },
         });
         setState(port.state);
+      }
+      frameHost.append(frame);
+      reload.disabled = false;
+      if (interactive) {
         status.textContent = '预览链接会在几分钟后失效。这个页面可以把表单提交回本会话（每次提交都计费）；' +
           '已经填过的内容在模型回复后原地更新，不会重载。';
       } else {
@@ -253,7 +261,14 @@ export async function openPreview({ sessionId, key, format, body, title, interac
     }
   }
 
-  return { destroy: teardown, reply: handleReply, isOpen: () => backdrop.isConnected };
+  return {
+    destroy: teardown,
+    reply: handleReply,
+    isOpen: () => backdrop.isConnected,
+    // The port, when this preview has one. Exposed so a test can drive the greeting: the frame's
+    // window is a cross-origin object for the parent, so no test can dispatch an event at it.
+    port: () => port,
+  };
 }
 
 // uiReplyParts turns the code blocks of one assistant answer into what an open preview needs:

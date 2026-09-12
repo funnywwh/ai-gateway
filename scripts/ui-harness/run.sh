@@ -145,7 +145,14 @@ for view in views:
         continue
     checks = data.get('checks', {})
     bad = [k for k, v in checks.items() if v is False or (isinstance(v, (int, float)) and v <= 0)]
-    state = 'ok' if data.get('ok') else 'FAIL'
+    # `threwLate` means the view's script threw after collecting some checks; the harness catches
+    # it so the partial report survives, but a throw must still fail the view — otherwise a
+    # broken helper silently skips half the assertions and the run reports success.
+    if checks.get('threwLate'):
+        bad.append('threwLate')
+    # `bad` decides, not the page's own `ok`: the page can only judge the checks it managed to
+    # record, while `bad` also carries a late throw (a helper that broke mid-view).
+    state = 'ok' if (data.get('ok') and not bad) else 'FAIL'
     print(f"[{state}] {view}: {len(checks)} checks" + (f", failed={bad}" if bad else ""))
     if data.get('thrown'):
         print(f"        thrown: {data['thrown'].splitlines()[0]}")
@@ -154,7 +161,7 @@ for view in views:
     for key in ('fieldRows', 'sample'):
         if key in checks:
             print(f"        {key}: {checks[key]}")
-    if not data.get('ok'):
+    if not data.get('ok') or bad:
         failed.append(view)
 
 if failed:

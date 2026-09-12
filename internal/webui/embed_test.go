@@ -288,8 +288,11 @@ func TestConsoleChatRoutesMatchTheServer(t *testing.T) {
 		}
 	}
 	portSource := stripJSComments(source("/js/pages/chat_ui.js"))
-	// The three checks that carry the weight instead of a secret.
-	for _, want := range []string{"ev.source !== frame.contentWindow", "data.framed === true", "ev.ports"} {
+	// The three checks that carry the weight instead of a secret. The first compares against the
+	// frame's window, which the console holds as a value (`greetingSource`) because a sandboxed
+	// frame's window is a cross-origin object: it is good for `postMessage` and for an identity
+	// comparison, and for nothing else.
+	for _, want := range []string{"ev.source !== greetingSource", "data.framed === true", "ev.ports"} {
 		if !strings.Contains(portSource, want) {
 			t.Errorf("the port must check %q before accepting a handshake", want)
 		}

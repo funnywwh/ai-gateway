@@ -57,6 +57,14 @@ const (
 	uiBridgeKind  = "ui"
 )
 
+// How many times, and how often, the injected client repeats its greeting. The host may attach
+// the frame before it installs the listener that receives the greeting, and a greeting that
+// arrives first is gone for good; five attempts over ~3s covers that without being chatty.
+const (
+	uiBridgeHelloAttempts   = 6
+	uiBridgeHelloIntervalMS = 600
+)
+
 // Frame-side limits, mirroring the host's. They exist so a runaway page cannot fill the
 // console's memory before the host has a chance to reject anything.
 const (
@@ -91,6 +99,8 @@ func uiBridgeScript() string {
   var handlers = [];
   var byName = {};
   var directSeq = 0;
+  var helloSent = 0;
+  var helloTimer = 0;
   var maxBytes = ` + strconv.Itoa(uiBridgeMaxEventBytes) + `;
 
   // flatten turns a form into a flat object. Names are collapsed to their last segment
@@ -370,6 +380,7 @@ func uiBridgeScript() string {
     if (port) { return; } // one port per document; a second offer is ignored
     port = ev.ports && ev.ports[0];
     if (!port) { return; }
+    if (helloTimer) { window.clearInterval(helloTimer); helloTimer = 0; }
     port.onmessage = function (msg) {
       var frame = msg && msg.data;
       if (!frame) { return; }
@@ -398,10 +409,25 @@ func uiBridgeScript() string {
     isReady: function () { return !!port; }
   };
 
-  function start() {
-    bind(document);
+  // sayHello announces this document. It is sent once, and repeated a few times until the host
+  // answers with a port: the host may not have installed its listener yet when this runs (it
+  // attaches the frame and then listens, and the document can start loading in between), and a
+  // dropped hello would otherwise leave a preview that can never connect. Repetition is
+  // harmless — the host ignores every offer after the first, and each one is identical.
+  function sayHello() {
+    if (port || helloSent >= ` + strconv.Itoa(uiBridgeHelloAttempts) + `) { return; }
+    helloSent++;
     try { post.call(window.parent, { aigw: '` + uiBridgeKind + `', t: 'hello', framed: false }, '*'); }
     catch (err) { /* a frame with no parent cannot be interactive */ }
+  }
+
+  function start() {
+    bind(document);
+    sayHello();
+    if (!port) { helloTimer = window.setInterval(function () {
+      if (port) { window.clearInterval(helloTimer); helloTimer = 0; return; }
+      sayHello();
+    }, ` + strconv.Itoa(uiBridgeHelloIntervalMS) + `); }
   }
   if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', start); }
   else { start(); }

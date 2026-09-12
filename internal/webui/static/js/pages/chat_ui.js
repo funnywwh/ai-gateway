@@ -294,7 +294,7 @@ export function describeUIResult(result) {
 // It returns a handle rather than closing over the modal, because the modal owns the toolbar
 // and the chat page owns the turn: the port's job is the channel and the limits, nothing else.
 export function createUIPort({
-  sessionId, frame, limits, onEvent, onApply, onState, onError, onLog,
+  sessionId, frame, limits, onEvent, onApply, onState, onError, onLog, frameWindow,
 } = {}) {
   const cap = Object.assign({}, UI_LIMITS, limits || {});
   const state = { status: 'handshaking', events: 0, pending: 0, error: '', bridge: false };
@@ -319,16 +319,31 @@ export function createUIPort({
   //   - it says it is the top document of that frame (a nested frame on the page can post to us
   //     itself, and it must not be able to speak for the preview);
   //   - it actually carries a port (a message-shaped object without one is not our script).
+  // The window the greeting must come from. In production this is the frame's own window; a test
+  // passes a stand-in because that property is a *cross-origin object* for the parent — the
+  // sandbox makes `frame.contentWindow` unusable for anything except `postMessage` (even
+  // dispatching an event at it throws a SecurityError), so a fake object is the only way to drive
+  // this half at all. That is why the greeting is dispatched through `handleWindowMessage` rather
+  // than by the frame's window: the logic under test must not depend on a capability the sandbox
+  // does not give us.
+  const greetingSource = frameWindow !== undefined ? frameWindow : (frame ? frame.contentWindow : null);
+
   function onWindowMessage(ev) {
     if (closed) return;
-    if (ev.source !== frame.contentWindow) return;
-    const data = ev.data;
+    if (ev.source !== greetingSource) return;
+    handleWindowMessage(ev.data, ev.ports);
+  }
+
+  // handleWindowMessage is the whole greeting decision, separated from the event so it can be
+  // driven directly. `ports` is what a real MessageEvent carries.
+  function handleWindowMessage(data, ports) {
+    if (closed) return;
     if (!data || data.aigw !== 'ui' || data.t !== 'hello') return;
     if (data.framed === true) {
       if (onLog) onLog('ignored a hello from a nested frame');
       return;
     }
-    const port = ev.ports && ev.ports[0];
+    const port = ports && ports[0];
     if (!port) {
       // A message-shaped object without a port is not our bridge; ignoring it is the whole
       // point of using a port rather than this channel.
@@ -427,6 +442,10 @@ export function createUIPort({
 
   return {
     state,
+    // handleWindowMessage is exported for the harness: the greeting cannot be delivered through
+    // the frame's window (cross-origin object), so the test calls this with the same arguments a
+    // real MessageEvent would carry.
+    handleWindowMessage,
     // sendToFrame carries the console's own frames: deltas while the answer streams, the
     // applied directive, the busy/idle state.
     send: sendToFrame,
