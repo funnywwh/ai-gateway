@@ -225,6 +225,17 @@ label.field > span { display:block; color:var(--muted); font-size:12px; margin-b
 .modal-wide { width:min(1000px, 100%); }
 .preview-host { flex:1 1 auto; min-height:360px; display:flex; }
 .preview-frame { width:100%; min-height:360px; border:1px solid var(--line); border-radius:8px; background:#fff; }
+/* The interactive preview's toolbar. The bridge badge has to be readable at a glance: it is
+   the only place the operator can tell whether the page in the frame can reach the model, and
+   how many submissions have already been billed. */
+.bridge-badge { white-space:nowrap; }
+.bridge-badge.ok { color:var(--ok); border-color:var(--ok); }
+.bridge-badge.off { color:var(--warn); border-color:var(--warn); }
+.bridge-counter { white-space:nowrap; font-size:11.5px; }
+/* A directive the model asked for that could not be applied. Shown under the code block rather
+   than swallowed — the same rule the chart renderer follows for an unusable spec. */
+.ui-note { margin:6px 0 10px; font-size:12.5px; }
+.ui-note.error { color:var(--warn); }
 
 /* Skills */
 .table-wrap { overflow:auto; }

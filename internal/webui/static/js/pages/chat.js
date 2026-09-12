@@ -10,12 +10,63 @@ import { el, clear, toast, confirmDialog, statusBadge, formatTime } from '../ui.
 import { navigate } from '../router.js';
 import { renderMarkdown } from '../markdown.js';
 import { renderChart, chartToCSV, chartToSVG, downloadText } from '../chart.js';
-import { openPreview } from './chat_artifact.js';
+import { openPreview, uiReplyParts } from './chat_artifact.js';
+import { parseUISpec, describeUIResult } from './chat_ui.js';
 
 // paintTimer throttles the live bubble's Markdown rebuild. It is declared at module scope
 // rather than next to the code that uses it, because submit() assigns it during the stream
 // and a page can be re-rendered while an earlier turn is still finishing.
 let paintTimer = null;
+
+// codeBlocksOf lists the fenced blocks of one message, in order, with their language. It is
+// exported because it is the one piece of parsing the preview toolbar and the tests both need:
+// the console finds a chart, a page or a `ui` directive by asking this, never by re-reading
+// the markdown.
+export function codeBlocksOf(message) {
+  if (!message) return [];
+  if (Array.isArray(message.blocks) && message.blocks.length) {
+    return message.blocks.filter((block) => block && block.text !== undefined);
+  }
+  const parts = message.parts && message.parts.length
+    ? message.parts
+    : [{ type: 'text', text: message.content || '' }];
+  const blocks = [];
+  for (const part of parts) {
+    if (!part || part.type !== 'text') continue;
+    const text = part.text || '';
+    const fence = /^[ \t]*(`{3,}|~{3,})[ \t]*([^\n`]*)\n([\s\S]*?)^[ \t]*\1[ \t]*$/gm;
+    let match = fence.exec(text);
+    while (match) {
+      blocks.push({
+        lang: (match[2] || '').trim().split(/\s+/)[0].toLowerCase(),
+        text: match[3].replace(/\n$/, ''),
+        index: blocks.length,
+      });
+      match = fence.exec(text);
+    }
+  }
+  return blocks;
+}
+
+// uiEventContent renders one interface submission as the question the model receives: a line a
+// person can read (which also becomes the conversation title) followed by the structured data.
+// The `source` marker is what lets the model tell a page event from something typed, and the
+// prompt tells it to treat everything in `data` as data rather than as instructions.
+export function uiEventContent({ name, label, data }) {
+  const head = String(label || '').trim() || ('界面事件：' + name);
+  const payload = {
+    source: 'ui_event',
+    event: String(name || 'action'),
+    data: data && typeof data === 'object' ? data : {},
+  };
+  return head + '\n\n```json\n' + JSON.stringify(payload) + '\n```';
+}
+
+// partsText concatenates the text parts of a message, which is what a `ui` directive or a chart
+// spec is parsed out of.
+export function partsText(parts) {
+  return (parts || []).filter((part) => part && part.type === 'text').map((part) => part.text || '').join('\n');
+}
 
 // MCP token helpers.
 //
@@ -81,6 +132,11 @@ export async function render({ page, actions, session, route }) {
     tools: new Map(),
     turnID: null,
     notice: '',
+    // The open preview, when it is interactive: the console's half of the bridge and where a
+    // submission goes. One console has one open preview, so one slot is enough.
+    preview: null,
+    // Submissions that arrived while a turn was in flight, oldest first.
+    queue: [],
   };
 
   const layout = el('div', { class: 'chat-layout' });
@@ -97,7 +153,13 @@ export async function render({ page, actions, session, route }) {
   sidebar.append(sessionList);
   newBtn.addEventListener('click', () => createSession());
 
-  const destroy = () => { if (state.controller) state.controller.abort(); };
+  // Leaving the page tears both live channels down: the turn stream, and the bridge to any open
+  // preview (whose frame is about to disappear with the page).
+  const destroy = () => {
+    if (state.controller) state.controller.abort();
+    if (state.preview) { state.preview.destroy(); state.preview = null; }
+    state.queue = [];
+  };
   if (actions) {
     clear(actions);
     const refresh = el('button', { class: 'btn btn-ghost', text: '刷新' });
@@ -440,9 +502,17 @@ export async function render({ page, actions, session, route }) {
       ]);
       body.append(details);
     }
-    for (const part of message.parts || []) {
+    const parts = message.parts || [];
+    for (const part of parts) {
+      if (!part || typeof part !== 'object') continue;
       if (part.type === 'text') body.append(renderRichText(part.text, message));
-      else body.append(renderToolCard(part));
+      else if (part.type === 'tool_call') body.append(renderToolCard(part));
+    }
+    // A message with no renderable part but a status is a real case — a turn interrupted before
+    // it produced anything, or one rejected before it started. Showing nothing at all would
+    // make it look like the question vanished.
+    if (!parts.length && !message.content && message.status && message.status !== 'ok') {
+      body.append(el('div', { class: 'muted', text: '这一轮没有产生内容（' + message.status + '）' })); 
     }
     if (!(message.parts || []).length && message.content) body.append(renderRichText(message.content, message));
     body.append(renderFooter(message));
@@ -508,6 +578,28 @@ export async function render({ page, actions, session, route }) {
       copy.addEventListener('click', () => copyText(source));
       bar.append(copy);
 
+      if (lang === 'ui') {
+        // The directive is a patch for the *preview's* document, not for this transcript: on
+        // its own it is inert here, so the block stays visible as the record of what the model
+        // asked for. Parsing it eagerly is what turns a malformed directive into an error the
+        // operator can see instead of a mysterious nothing.
+        const parsed = parseUISpec(source);
+        bar.append(el('span', {
+          class: 'muted', text: parsed.error ? '规格有问题' : `${parsed.ops.length} 条更新`,
+        }));
+        const replay = el('button', { class: 'btn btn-ghost btn-xs', text: '重新应用', disabled: !state.preview });
+        replay.addEventListener('click', () => {
+          if (!state.preview || !state.preview.isOpen()) { toast('先打开这个页面（点上面的「预览」）', 'error'); return; }
+          state.preview.reply({ type: 'ui', ops: parsed.ops });
+          toast('已把这几条更新重新发到页面');
+        });
+        bar.append(replay);
+        wrap.prepend(bar);
+        if (parsed.error) {
+          wrap.after(el('div', { class: 'notice ui-note error', text: '界面指令未生效：' + parsed.error }));
+        }
+        return;
+      }
       if (lang === 'chart') {
         const parsed = renderChart(source, { toolCalls: toolCallNames(message) });
         if (parsed.error) {
@@ -529,14 +621,39 @@ export async function render({ page, actions, session, route }) {
           wrap.classList.add('collapsed');
         }
       } else if (lang === 'html' || lang === 'svg') {
-        const preview = el('button', { class: 'btn btn-ghost btn-xs', text: '预览' });
-        preview.addEventListener('click', () => openPreview({
-          sessionId: state.session.id,
-          key: (message.id || 'live-' + (state.turnID || 'turn')) + ':' + code.getAttribute('data-block-index'),
-          format: lang,
-          body: source,
-          title: state.session.title || '预览',
-        }));
+        // Only an HTML preview with a billed conversation can be interactive: interacting means
+        // submitting, and submitting means spending. Everything else stays a read-only preview.
+        const canInteract = lang === 'html' && !!(state.session.account_id && state.session.api_key_id);
+        const preview = el('button', {
+          class: 'btn btn-ghost btn-xs',
+          text: canInteract ? '预览（可交互）' : '预览',
+          title: canInteract
+            ? '在沙箱里打开这个页面；页面上的表单可以提交回本会话，每次提交都是一条计费的模型请求'
+            : (lang === 'html'
+              ? '只读预览：本会话没有绑定计费 Key，页面里的按钮不会产生请求'
+              : '只读预览'),
+        });
+        preview.addEventListener('click', () => {
+          // One interactive preview at a time: a second one would need its own channel, and the
+          // submissions of both would race for the same conversation.
+          if (state.preview) { state.preview.destroy(); state.preview = null; }
+          const handle = openPreview({
+            sessionId: state.session.id,
+            key: (message.id || 'live-' + (state.turnID || 'turn')) + ':' + code.getAttribute('data-block-index'),
+            format: lang,
+            body: source,
+            title: state.session.title || '预览',
+            interactive: canInteract,
+            onSubmit: onUIEvent,
+            // Stopping is a control on the *open turn*, not an event from the page: it aborts
+            // the stream the console owns, exactly like the composer's own stop button.
+            onStop: () => { if (state.controller) state.controller.abort(); },
+            // The modal can be closed without going through the page, so the slot is cleared
+            // from here rather than assumed to be still valid.
+            onClosed: () => { if (state.preview === handle) state.preview = null; },
+          });
+          if (canInteract) state.preview = handle;
+        });
         bar.append(preview);
       }
       wrap.prepend(bar);
@@ -645,18 +762,35 @@ export async function render({ page, actions, session, route }) {
   // one question
   // -------------------------------------------------------------------------
 
+  // submit is the composer's entry point. Everything below it is the turn itself, which the
+  // interactive preview uses too: an event from a generated page is a question in this
+  // conversation, billed and stored the same way, so it must not have its own request path.
   async function submit(content) {
-    if (state.running) { toast('上一条还在生成', 'error'); return; }
-    const text = (content || '').trim();
-    if (!text) return;
     if (!state.session) { toast('先新建一个会话', 'error'); return; }
-    if (!state.session.account_id || !state.session.api_key_id) { toast('这个会话还没有绑定计费 Key', 'error'); return; }
+    await runTurn(content);
+  }
+
+  // runTurn posts one question and folds the stream into the transcript. When the answer
+  // mentions an open interactive preview, the same events are relayed into that page so it
+  // updates in place instead of being reloaded.
+  async function runTurn(content, { onDelta, onFinish } = {}) {
+    if (state.running) { toast('上一条还在生成', 'error'); return false; }
+    const text = (content || '').trim();
+    if (!text) return false;
+    if (!state.session) { toast('先新建一个会话', 'error'); return false; }
+    if (!state.session.account_id || !state.session.api_key_id) {
+      toast('这个会话还没有绑定计费 Key', 'error');
+      return false;
+    }
 
     state.running = true;
     paintTimer = null;
     state.controller = new AbortController();
     state.turnID = 'turn_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
     state.notice = '';
+    // One turn id for this attempt: a retry after a transport error reuses it, and the server
+    // answers with what already happened instead of charging twice.
+    const turnID = state.turnID;
     const pending = { id: 'live', role: 'assistant', parts: [], status: 'ok', content: '' };
     state.messages = state.messages.concat([{ id: 'local-user', role: 'user', content: text }]);
     renderMain();
@@ -677,27 +811,120 @@ export async function render({ page, actions, session, route }) {
       else paintTimer = setTimeout(paint, 50);
     };
 
+    // The preview sees the answer as it is written. It is sent as a delta rather than a final
+    // blob because a two-step investigation can take half a minute, and a page that stays
+    // silent for that long reads as broken.
+    const relay = (event) => {
+      if (!onDelta) return;
+      if (event.type === 'text') onDelta({ type: 'text', delta: event.delta || '' });
+      else if (event.type === 'busy') onDelta({ type: 'busy', busy: true });
+    };
+    if (onDelta) onDelta({ type: 'busy', busy: true });
+
+    let status = 'completed';
+    let failure = '';
     try {
       await streamPost('/chat/sessions/' + encodeURIComponent(state.session.id) + '/turns', {
-        turn_id: state.turnID, content: text,
+        turn_id: turnID, content: text,
       }, {
         signal: state.controller.signal,
-        onEvent: (event) => applyEvent(event, pending, repaint),
+        onEvent: (event) => {
+          applyEvent(event, pending, repaint);
+          if (event.type === 'error') failure = event.message || '生成失败';
+          relay(event);
+        },
       });
     } catch (err) {
       if (err && err.name === 'AbortError') {
         state.notice = '已停止生成';
+        status = 'aborted';
       } else {
         state.notice = api.errorMessage(err);
+        failure = state.notice;
+        status = 'failed';
         toast(state.notice, 'error');
       }
     } finally {
       if (paintTimer) { clearTimeout(paintTimer); paintTimer = null; }
       state.running = false;
       state.controller = null;
+      if (!failure && pending.status === 'failed') { failure = pending.error || '生成失败'; }
+      if (failure) status = 'failed';
+      // The directive and any new document version come out of the whole answer, which is
+      // exactly what the live bubble accumulated.
+      const reply = uiReplyParts(codeBlocksOf(pending));
+      if (onFinish) {
+        onFinish({
+          status,
+          error: failure,
+          ops: reply.ops,
+          opsError: reply.error,
+          newVersion: reply.newVersion,
+          blocks: codeBlocksOf(pending),
+        });
+      }
       await loadSessions();
       await openSession(state.session.id);
+      // A submission that arrived while this turn was in flight runs now, so a form does not
+      // silently lose the second click.
+      drainQueue();
     }
+    return true;
+  }
+
+  // -------------------------------------------------------------------------
+  // events from a generated interface
+  // -------------------------------------------------------------------------
+
+  // onUIEvent is the bridge's callback: a form was submitted, or an element carrying
+  // data-aigw-send was clicked. It becomes a question in this conversation.
+  function onUIEvent(event) {
+    if (!state.session) return;
+    if (state.running) {
+      if (state.queue.length >= 5) {
+        toast('还有 5 条界面提交在排队，请等模型答完', 'error');
+        return;
+      }
+      state.queue.push(event);
+      state.notice = `模型还在回答；已排队 ${state.queue.length} 条界面提交，本轮结束后自动发出。`;
+      renderMain();
+      return;
+    }
+    sendUIEvent(event, state.preview);
+  }
+
+  function drainQueue() {
+    const preview = state.preview;
+    if (state.running || !state.queue.length || !preview || !preview.isOpen()) {
+      // Nothing to drain into: the operator closed the preview, so the queued submissions have
+      // no page left to answer. Dropping them is right — the transcript already has everything
+      // that was paid for.
+      if (!preview) state.queue = [];
+      return;
+    }
+    sendUIEvent(state.queue.shift(), preview);
+  }
+
+  // sendUIEvent turns one submission into a billed turn. The preview it belongs to is passed in
+  // rather than read from `state`: by the time the answer arrives the operator may have opened
+  // another one, and an answer must not be patched into a page that did not ask for it.
+  function sendUIEvent(event, preview) {
+    const content = uiEventContent(event);
+    const alive = () => !!(preview && preview.isOpen());
+    runTurn(content, {
+      onDelta: (frame) => { if (alive()) preview.reply(frame); },
+      onFinish: (result) => {
+        if (!alive()) return;
+        preview.reply({
+          type: 'done',
+          status: result.error ? 'failed' : result.status,
+          error: result.error,
+          ops: result.ops,
+          opsError: result.opsError,
+          newVersion: result.newVersion,
+        });
+      },
+    });
   }
   // applyEvent folds one SSE event into the live bubble. Text deltas are appended to the
   // current text part so the stream reads like DSH's chat rather than a series of blobs.
