@@ -1057,3 +1057,86 @@
       按设计文档退回「只有 `has_more`」的形态（`pager` 已支持 `total == null` 显示「还有更多」）
 - [ ] 观察项：「按分组名排序」未做：凭据维度按 id 转文本分组，字典序会把 `10` 排在 `2` 前面。
       要做需先把 id 数值化（`CAST(... AS INTEGER)`），并让分组与排序用同一套键
+
+## M32 控制台「智能问答」+ 私有技能库 + 图表与 HTML5 预览
+
+设计：`docs/design/m32-console-smart-chat.md`；使用者规格：`docs/chat.md`（均先行落盘，见 `docs/PROCESS.md`）。
+
+### 权限与隐私（评审阻断项，先修后做）
+- [x] 首版只有 `admin` 能绑定计费 Key、发起问答与生成技能草稿；`viewer` 仅能读自己的会话、管理自己的技能
+      （Key 列表对 viewer 可见，只校验 Key 本身会把「能看」变成「能花」）
+- [x] 每一步模型调用前重新解析登录会话与角色（`Store.AdminRole`）、账户与 Key 归属及状态，客户端提交的 id 不构成授权
+- [x] 问答内容不进全局记录：请求日志只落身份维度/token/成本/状态，`store:false` 不落存储响应，
+      hooks 不带 input/output，技能审计只记操作与不透明 id（不记技能名与指令）
+- [x] `docs/chat.md` 明确「应用内私有 ≠ 不离开本机」：技能与问题会随请求发送给所选上游模型
+
+### 计费与数据面复用
+- [x] 进程内直连既有 `handleCreateResponse`：配额/限流/在途/结算/计量/请求日志/hooks 零重复实现
+- [x] 不存在的 bearer 令牌 → 私有 context 身份（`verifiedIdentityFrom`，unexported key，外部无法伪造）
+- [x] `apikey.VerifyID`：与 `Verify` 完全相同的检查（key 有效/未过期/账户 active），按 id 解析，节流 touch
+- [x] 每步独立 `request_id` + `client=console`（服务端设置 User-Agent）+ `prompt_cache_key` = 会话 id
+- [x] 内部 step 观察端口（`stepObserver`）回传真实 provider/canonical/degraded：流式分支不设这些响应头
+- [x] `internal/responses`：`ClientConsole` 常量 + `clientFromHint` 识别；控制台请求日志客户端下拉同步
+
+### 工具面（MCP 复用 + 默认拒绝）
+- [x] 复用 `admin_endpoints`/`admin_describe`/`admin_request`；scope 由会话写开关与角色共同决定
+- [x] 聊天专用允许清单：读接口（viewer+GET）全部可用，写接口只有显式列入的可用，**未列入的默认拒绝**（含未来新增）
+- [x] 清单在 list/describe/execute 三处一致生效（`chatToolPolicy` 经 context 传入桥接层），不修改全局 MCP 可见性
+- [x] 审计 actor 渲染为 `console:<用户名>`（`mcpsrv.Principal.Source`）
+- [x] 被拒调用原样回给模型解释，并写入 `chat_tool_calls`（`is_error`）
+
+### 轮次、幂等与恢复
+- [x] 客户端幂等 `turn_id` + 唯一索引：重复提交返回既有轮次，不重复计费；同会话并发轮次 409
+- [x] 工具执行前落 `pending` 行（唯一键 `turn_id+step+call_id`），崩溃后标记 `unknown` 且不自动重放
+- [x] 重启把 `running` 轮次标记 `interrupted`（`cmd/aigw` 启动时调用 `RecoverChatTurns`）
+- [x] 仅 `completed` 且参数完整合法的工具调用可执行；`incomplete`/取消/参数截断一律不执行并向用户说明
+- [x] 取消/断线用 `context.WithoutCancel` + 5s 超时保存已得内容（`aborted`）
+- [x] 历史按**整轮**裁剪（保留 `function_call`/`function_call_output` 配对），超限明确报错而不是发半个问题
+
+### 预览与图表
+- [x] HTML5/SVG 预览 = owner + 会话绑定的**短时票据**（HMAC、纳秒精度、进程内密钥 → 重启即失效）
+- [x] 票据绑定登录会话：登出后票据立即失效（`AdminSessionUser` 校验）；无票据/伪造/过期一律 404
+- [x] 预览响应 `sandbox`（HTML 带 `allow-scripts`，SVG 不带）+ `default-src 'none'` + `connect-src 'none'` + `no-store`/`nosniff`/`no-referrer`
+- [x] 文档用「默认禁止外部资源加载与网络连接」而非「断网」（`connect-src` 管不到子框架自导航）
+- [x] 图表：`chart` JSON → 手写 SVG（离线、不执行模型代码），上限 8 序列/500 点，非法规格退回代码块并说明原因
+- [x] 图表附数据表、来源工具/请求 id 与本轮真实调用名；文档明确控制台**无法验证**模型是否如实使用工具数据
+- [x] 边界：空数组/全零/负数/饼图负值/全 null/非有限数/超长标签/CSV 公式注入（`=+-@` 前缀转义）
+
+### 控制台
+- [x] 路由：`#/chat`、`#/skills` 紧随「概览」；hash 支持 `path?query`（`#/chat?session=<id>` 深链）
+- [x] 页面 teardown：切页/登出时 abort 流并清定时器（`app.js` 支持 render 返回清理函数）
+- [x] `markdown.js` 手写渲染（全程 `textContent`、链接协议白名单）；`chart.js` 本地 SVG + 导出
+- [x] `pages/chat.js`：会话列表/流式气泡/思考折叠/工具卡片/usage 脚注/停止/`＋` 菜单（含技能勾选）/会话设置
+- [x] `pages/skills.js`：分页列表 + 手写新建 + 编辑 + 删除确认 + 来源会话跳转 + 草稿交接（sessionStorage）
+- [x] `chat_artifact.js`：外部资源预检查提示 + 沙箱 iframe + 新标签打开 + 复制源码
+
+### 测试与验收
+- [x] store：owner 隔离（会话/消息/技能/产物）、唯一约束、级联删除、分页、pending 恢复、产物 upsert/淘汰、`AdminRole`/`AdminSessionUser`
+- [x] `internal/chat`：工具循环与配对回灌、步数/工具次数上限、`incomplete`/参数截断不执行、幂等、取消落库、
+      整轮裁剪与超限拒绝、技能注入与悬空 id 跳过、草稿解析与兜底、角色每次工具调用重读
+- [x] `internal/httpapi`：鉴权矩阵（匿名 401 / viewer 403 / MCP 合成身份 403 / 跨 owner 404）、
+      **viewer 被拒请求不产生任何账本与计量记录**、端到端（testecho）计费与控制台录制口径、
+      请求日志隐私字段断言、票据与 CSP、高危端点清单与 `console:admin` 审计、草稿计费且不落库
+- [x] `internal/apikey`：`VerifyID` 四态（有效/停用/过期/账户挂起在既有用例中覆盖，fake 增 `GetAPIKey`）
+- [x] `internal/config`：chat 越界值校验 + `artifact_allow_network` 默认关闭
+- [x] `internal/webui`：chat/skills/chart/markdown 资源已内嵌；`chart.js` 上限常量 == `chat.MaxChartSeries/Points`；
+      提示词含同一组数字；页面调用的路径与路由表一致
+- [x] UI harness：新增 `chat`（45 项）与 `skills`（10 项）视图，SSE 用真实 `ReadableStream` 打桩，
+      覆盖 Markdown/图表（含非法回退）/工具卡片/`＋` 菜单勾选/预览票据与沙箱/深链/流式通知
+- [x] `make verify` 全绿；`make ui-check` 12 个视图全绿（`chat` 45 项、`skills` 10 项）
+- [x] 隔离实例走查（`:8099` + 全新库 + 新二进制 `bin/aigw`，不动 8088）：登录 → `/chat/models` 列出该 Key
+      可路由的模型 → 建会话 → 提问跑通真实流式回答（`event: turn/step/text/usage/message/done`）；
+      请求日志 `client=console`、`session_id`=会话 id、正文为空、输出/思考未录制；账本出现
+      `charge:req_...:1` 扣费；同 `turn_id` 重发**不产生新请求**（仍 1 行日志）；
+      `skill-draft` 正常计费并给出「模型没返回可解析 JSON」的骨架草稿；
+      HTML5 预览返回 `sandbox allow-scripts; default-src 'none'; connect-src 'none'` + `no-store`，
+      无票据 404，**登出后同一票据 404**；SVG 预览只有 `sandbox`（无 `allow-scripts`）；
+      `/admin/ui/` 下的 chat/skills/chart/markdown/chat_artifact 资源全部 200
+- [ ] **待人工执行**（宿主终端）：`make build` + `scripts/local-run.sh restart`，硬刷新
+      http://127.0.0.1:8088/admin/ui/#/chat ——在真实部署上用有余额的账户选模型提问，
+      确认回答流式出现、图表与 HTML5 预览可打开、`console` 出现在请求日志
+- [ ] 观察项：`chat.max_steps: 8` 是「一次点击最多花 8 步」的上限；若某类问题经常撞上限，
+      优先改提示词而不是调大这个值
+- [ ] 观察项：工具循环的端到端（模型真的发起 `admin_request`）目前由 `internal/chat` 与
+      `internal/httpapi` 的测试用脚本化 runner/假上游覆盖——内建 `testecho` **不会**发起工具调用，
+      真机验证需要接一个会调用工具的模型

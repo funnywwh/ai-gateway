@@ -19,7 +19,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${UI_HARNESS_WORK:-$ROOT/.cache/ui-harness}"
 PORT="${UI_HARNESS_PORT:-8097}"
-VIEWS="docs detail models create plugin plugin-cached currency keys requests paging"
+VIEWS="docs detail models create plugin plugin-cached currency keys requests paging chat skills"
 FIXTURES="$ROOT/scripts/ui-harness/fixtures.json"
 REFRESH=0
 
@@ -70,12 +70,14 @@ render_page "$ROOT/scripts/ui-harness/providers.page.html" "$WORK/site/harness.h
 render_page "$ROOT/scripts/ui-harness/currency.page.html" "$WORK/site/currency.html"
 render_page "$ROOT/scripts/ui-harness/keys.page.html" "$WORK/site/keys.html"
 render_page "$ROOT/scripts/ui-harness/paging.page.html" "$WORK/site/paging.html"
+render_page "$ROOT/scripts/ui-harness/chat.page.html" "$WORK/site/chat.html"
 
 page_for_view() {
   case "$1" in
     currency) echo "currency.html" ;;
     keys|requests) echo "keys.html" ;;
     paging) echo "paging.html" ;;
+    chat|skills) echo "chat.html" ;;
     *) echo "harness.html" ;;
   esac
 }

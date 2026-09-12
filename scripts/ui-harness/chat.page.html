@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>chat console harness</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="actions" class="toolbar"></div>
+<div id="page"></div>
+<div id="modal-root"></div>
+<div id="toasts" class="toasts"></div>
+<script>
+// 智能问答 / 技能库 harness.
+//
+// Two things here cannot be taken from a captured fixture:
+//
+//   * the answer stream. The chat page consumes SSE through api.js streamPost, so the stub
+//     answers POST …/turns with a real ReadableStream of frames — that is the only way to
+//     exercise the delta folding (text/reasoning/tool_call/tool_result/notice/message/done)
+//     without a model;
+//   * the preview round trip, which has to show that the page posts the exact bytes it is
+//     about to preview and then frames the returned ticket.
+//
+// Everything else is a small synthetic fixture, because these endpoints are new in M32 and a
+// captured snapshot would only restate what the page already sends.
+const FIXTURES = __FIXTURES__;
+
+const SESSION = {
+  id: 'chat_1', object: 'chat.session', title: '本月成本', model: 'deepseek-flash',
+  account_id: 1, api_key_id: 1, write_mode: 'read_only', skill_ids: [7],
+  message_count: 2, status: 'active', tokens_in: 1200, tokens_out: 240, tokens_reasoning: 0,
+  owner: 'admin', created_at: '2026-09-12T08:00:00Z', updated_at: '2026-09-12T08:05:00Z',
+  skills: [{ id: 7, name: '成本排查', description: '按账户核对成本与收费', instructions: '先查账户，再查用量。', chars: 12 }],
+  messages: [
+    {
+      id: 'cmsg_u1', session_id: 'chat_1', turn_id: 'turn_1', seq: 1, role: 'user',
+      content: '这个月哪个模型最贵？', parts: [{ type: 'text', text: '这个月哪个模型最贵？' }],
+      status: 'ok', request_ids: [], created_at: '2026-09-12T08:00:00Z',
+    },
+    {
+      id: 'cmsg_a1', session_id: 'chat_1', turn_id: 'turn_1', seq: 2, role: 'assistant',
+      content: '结论…', status: 'ok', truncated: false, error: '', model: 'deepseek-flash',
+      resolved_model: 'deepseek-flash', provider: 'testecho',
+      request_ids: ['req_demo0001'], tokens_in: 1200, tokens_out: 240, tokens_reasoning: 0,
+      cost_micros: 1200, charge_micros: 2400, created_at: '2026-09-12T08:00:05Z',
+      reasoning: '先看看请求日志，再按模型分组。',
+      parts: [
+        {
+          type: 'text',
+          text: '## 结论\n\n最贵的是 **deepseek-flash**，本月成本见下表。\n\n| 模型 | 成本 |\n| --- | --- |\n| deepseek-flash | 1.20 |\n| luna | 0.40 |\n',
+        },
+        {
+          type: 'tool_call', id: 'call_1', name: 'admin_request',
+          arguments: '{"name":"admin_request_dimensions","query":{"group_by":"model"}}',
+          result: '{"count":2,"rows":[{"key":"deepseek-flash"}]}', is_error: false, status: 'done',
+        },
+        {
+          type: 'text',
+          text: '```chart\n' + JSON.stringify({
+            type: 'bar', title: '本月成本', y_label: '成本', unit: 'USD',
+            categories: ['flash', 'luna'], series: [{ name: '成本', values: [1.2, 0.4] }],
+            source: { tool: 'admin_request', request_id: 'req_demo0001', note: '本月 1 日至今天' },
+          }) + '\n```\n\n```chart\n{"type":"bar","categories":["a"]}\n```\n\n' +
+            '```html\n<!doctype html><html><body><h1>hi</h1><script>document.title="x"<\/script></body></html>\n```\n',
+        },
+      ],
+    },
+  ],
+  tool_calls: [{ id: 'tcall_1', call_id: 'call_1', step: 1, name: 'admin_request', status: 'done', is_error: false, duration_ms: 12, created_at: '2026-09-12T08:00:03Z' }],
+};
+
+const SKILLS = {
+  data: [{
+    id: 7, name: '成本排查', description: '按账户核对成本与收费',
+    instructions: '先查账户，再查用量，最后核对收费。', chars: 18, source_session_id: 'chat_1',
+    source_model: 'deepseek-flash', created_at: '2026-09-11T08:00:00Z', updated_at: '2026-09-12T08:00:00Z',
+  }],
+  total: 1, count: 1, limit: 20, offset: 0, has_more: false,
+};
+
+// Turn frames: the shape the server emits, including the two terminal events.
+function turnFrames(turnID) {
+  const frames = [
+    { type: 'turn', turn_id: turnID },
+    { type: 'step', step: 1, model: 'deepseek-flash' },
+    { type: 'text', delta: '让我先查一下' },
+    { type: 'reasoning', delta: '按模型分组' },
+    { type: 'tool_call', call_id: 'call_9', tool: { call_id: 'call_9', name: 'admin_request' } },
+    { type: 'tool_call', call_id: 'call_9', delta: '{"name":"admin_list_requests"}' },
+    { type: 'tool_result', call_id: 'call_9', tool: { call_id: 'call_9', name: 'admin_request', result: '{"count":2}', is_error: false, status: 'done', duration_ms: 8 } },
+    { type: 'usage', step: 1, usage: { input_tokens: 100, output_tokens: 20, reasoning_tokens: 0, metered: true }, request_id: 'req_stream01' },
+    { type: 'notice', level: 'info', notice: '流式回答已就绪' },
+    { type: 'message', message: SESSION.messages[1] },
+    { type: 'done', status: 'completed' },
+  ];
+  return frames.map((frame) => 'event: ' + frame.type + '\ndata: ' + JSON.stringify(frame) + '\n\n').join('');
+}
+
+function sseResponse(body) {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(body));
+      controller.close();
+    },
+  });
+  return {
+    ok: true, status: 200,
+    headers: { get: (key) => (String(key).toLowerCase() === 'content-type' ? 'text/event-stream' : null) },
+    body: stream,
+    text: async () => body,
+  };
+}
+
+window.fetch = async (url, options) => {
+  const target = String(url);
+  const path = target.replace('/admin/api/v1', '').split('?')[0];
+  const query = new URLSearchParams(target.split('?')[1] || '');
+  window.__fetched = (window.__fetched || []).concat([path]);
+  window.__urls = (window.__urls || []).concat([target]);
+  if (options && options.body) {
+    window.__sent = window.__sent || {};
+    window.__sent[path] = options.body;
+  }
+  if (path === '/chat/sessions/chat_1/turns') {
+    const body = JSON.parse((options && options.body) || '{}');
+    return sseResponse(turnFrames(body.turn_id));
+  }
+  if (path === '/chat/sessions/chat_1/artifacts') {
+    return json({ id: 'art_1', url: '/admin/chat-artifact/art_1', ticket: 'tkt_demo', expires_at: '2026-09-12T08:10:00Z' });
+  }
+  if (path === '/chat/sessions/chat_1') return json(SESSION);
+  if (path === '/chat/sessions' && options && options.method === 'POST') return json(SESSION);
+  if (path === '/chat/sessions') return json({ object: 'list', data: [SESSION], total: 1, limit: 30, offset: 0, count: 1 });
+  if (path === '/chat/skills' && options && (options.method === 'POST' || options.method === 'PATCH')) {
+    return json(SKILLS.data[0]);
+  }
+  if (path === '/chat/skills') {
+    if (window.__skillsEmpty) return json({ object: 'list', data: [], total: 0, limit: 20, offset: 0, count: 0 });
+    return json(SKILLS);
+  }
+  if (path === '/chat/models') return json({ object: 'list', account: 'acme', data: [{ id: 'deepseek-flash', has_tools: true }] });
+  if (path === '/accounts') return json({ data: [{ id: 1, name: 'acme', billing_mode: 'postpaid' }], total: 1, count: 1, limit: 200, offset: 0 });
+  if (path === '/keys') return json({ data: [{ id: 1, name: 'console-chat', key_prefix: 'sk-gw-abc', status: 'active' }], total: 1, count: 1, limit: 200, offset: 0 });
+  if (path === '/chat/sessions/chat_1/skill-draft') {
+    return json({ name: '成本核对', description: '每月核对成本', instructions: '查账户→查用量', note: '', request_id: 'req_draft01', model: 'deepseek-flash' });
+  }
+  if (FIXTURES[path] !== undefined) return json(FIXTURES[path]);
+  return json({ data: [] });
+};
+
+function json(body) {
+  return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(body) };
+}
+
+const errors = [];
+window.onerror = (msg) => errors.push('onerror: ' + msg);
+window.onunhandledrejection = (ev) => errors.push('rejection: ' + ev.reason);
+
+function report(data) {
+  data.errors = errors;
+  data.toasts = [...document.querySelectorAll('.toast')].map((n) => n.textContent);
+  const url = '/report?data=' + encodeURIComponent(JSON.stringify(data));
+  try { if (navigator.sendBeacon && navigator.sendBeacon(url)) return; } catch (err) { /* fall through */ }
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url, false);
+    xhr.send();
+  } catch (err) { /* reporting must never break the harness */ }
+}
+</script>
+<script type="module">
+import { render as renderChat } from '/js/pages/chat.js';
+import { render as renderSkills } from '/js/pages/skills.js';
+import { parseChart } from '/js/chart.js';
+import { renderMarkdown, safeHref } from '/js/markdown.js';
+
+const view = location.hash.replace('#', '') || 'chat';
+const checks = {};
+const pageEl = document.getElementById('page');
+const pageText = () => pageEl.textContent;
+const find = (label) => [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === label);
+const settle = async () => { for (let i = 0; i < 400; i++) await Promise.resolve(); };
+
+try {
+  if (view === 'chat') {
+    // The pure helpers first: they carry the security-relevant rules, and a broken one would
+    // otherwise only show up as an odd-looking answer.
+    checks.mdHeading = renderMarkdown('## 标题').querySelector('.md-heading') !== null;
+    checks.mdTable = renderMarkdown('| a | b |\n| --- | --- |\n| 1 | 2 |').querySelectorAll('.md-table td').length === 2;
+    checks.mdCodeLang = renderMarkdown('```chart\n{}\n```').querySelector('code').getAttribute('data-lang') === 'chart';
+    checks.mdLinkScheme = safeHref('javascript:alert(1)') === null && safeHref('https://example.com') !== null;
+    checks.mdNoInnerHTML = renderMarkdown('<img src=x onerror=alert(1)>').querySelector('img') === null;
+
+    checks.chartValid = parseChart(JSON.stringify({ type: 'bar', categories: ['a'], series: [{ name: 's', values: [1] }] })).spec !== undefined;
+    checks.chartRejectsBadJSON = !!parseChart('not json').error;
+    checks.chartRejectsMismatch = !!parseChart(JSON.stringify({ type: 'bar', categories: ['a', 'b'], series: [{ values: [1] }] })).error;
+    checks.chartRejectsTooMany = !!parseChart(JSON.stringify({
+      type: 'line', categories: ['a'],
+      series: Array.from({ length: 9 }, (_, i) => ({ name: 's' + i, values: [i] })),
+    })).error;
+    checks.chartRejectsNegativePie = !!parseChart(JSON.stringify({
+      type: 'pie', categories: ['a', 'b'], series: [{ name: 's', values: [1, -1] }],
+    })).error;
+    checks.chartRejectsEmpty = !!parseChart(JSON.stringify({
+      type: 'bar', categories: ['a'], series: [{ name: 's', values: [null] }],
+    })).error;
+
+    const destroy = await renderChat({
+      page: pageEl,
+      actions: document.getElementById('actions'),
+      session: { role: 'admin', username: 'admin' },
+      route: { path: '/chat', params: new URLSearchParams('session=chat_1') },
+      navigate: () => {},
+    });
+    await settle();
+
+    checks.deepLinkFetched = (window.__fetched || []).includes('/chat/sessions/chat_1');
+    checks.sessionTitle = pageText().includes('本月成本');
+    checks.messageRendered = pageText().includes('最贵的是');
+    checks.markdownHeadingInAnswer = !!pageEl.querySelector('.chat-text .md-heading');
+    checks.markdownTableInAnswer = !!pageEl.querySelector('.chat-text .md-table');
+    checks.reasoningCollapsed = !!pageEl.querySelector('.chat-reasoning');
+    checks.toolCard = !!pageEl.querySelector('.chat-tool-name')
+      && pageEl.querySelector('.chat-tool-name').textContent === 'admin_request';
+    checks.toolResultShown = pageText().includes('admin_request_dimensions');
+    checks.usageFooter = pageText().includes('tokens 1200→240') || pageText().includes('收费');
+    checks.skillChip = [...pageEl.querySelectorAll('.chip')].some((n) => n.textContent.includes('成本排查'));
+
+    // The chart is drawn locally as SVG; its data table and source note are what let a
+    // person check the numbers the model drew.
+    const chart = pageEl.querySelector('.chart');
+    checks.chartRendered = !!chart && chart.querySelectorAll('svg rect').length >= 2;
+    checks.chartAxis = !!chart && !!chart.querySelector('.chart-axis');
+    checks.chartDataTable = !!chart && !!chart.querySelector('.chart-data');
+    checks.chartSource = !!chart && (chart.querySelector('.chart-source').textContent || '').includes('admin_request');
+    checks.chartTools = !!find('CSV') && !!find('SVG');
+    checks.chartFallback = pageText().includes('图表未渲染');
+
+    // HTML code blocks get a preview button (the model's page never touches this DOM).
+    const preview = find('预览');
+    checks.previewButton = !!preview;
+    if (preview) {
+      preview.click();
+      await settle();
+      const frame = document.querySelector('.preview-frame');
+      checks.previewFrame = !!frame;
+      checks.previewSandbox = !!frame && frame.getAttribute('sandbox') === 'allow-scripts';
+      checks.previewSrc = !!frame && (frame.getAttribute('src') || '').includes('/admin/chat-artifact/art_1?ticket=');
+      const sent = JSON.parse((window.__sent || {})['/chat/sessions/chat_1/artifacts'] || '{}');
+      checks.previewUploadedBody = typeof sent.body === 'string' && sent.body.includes('<h1>hi</h1>');
+      checks.previewFormat = sent.format === 'html';
+      const close = [...document.querySelectorAll('.modal-actions button')].find((b) => b.textContent.trim() === '关闭');
+      if (close) close.click();
+      await settle();
+    }
+
+    // One question: the request must carry an idempotency key, and the stream must fold
+    // into the bubble (text, tool card, notice) before the page reloads the conversation.
+    const input = pageEl.querySelector('.chat-input');
+    checks.composerPresent = !!input && !!find('发送') && !!find('停止');
+    input.value = '这个月哪个模型最贵？';
+    find('发送').click();
+    await settle();
+    const turnBody = JSON.parse((window.__sent || {})['/chat/sessions/chat_1/turns'] || '{}');
+    checks.turnIdSent = typeof turnBody.turn_id === 'string' && turnBody.turn_id.length > 0;
+    checks.turnContentSent = turnBody.content === '这个月哪个模型最贵？';
+    checks.noticeShown = pageText().includes('流式回答已就绪');
+    checks.afterTurnReloaded = (window.__fetched || []).filter((p) => p === '/chat/sessions/chat_1').length >= 2;
+    checks.sample = {
+      reloadCount: (window.__fetched || []).filter((p) => p === '/chat/sessions/chat_1').length,
+      streamed: pageText().includes('让我先查一下'),
+      toasts: [...document.querySelectorAll('.toast')].map((n) => n.textContent),
+      notice: (pageEl.querySelector('.chat-notice') || {}).textContent || '',
+    };
+
+    // The "+" menu lists the operator's own skills with their loaded state, and offers to
+    // create one from this conversation.
+    find('＋').click();
+    await settle();
+    const menu = document.querySelector('.plus-menu');
+    checks.plusMenu = !!menu;
+    checks.plusCreate = !!menu && menu.textContent.includes('创建技能');
+    checks.plusSkillRow = !!menu && !!menu.querySelector('.plus-skill input[type=checkbox]');
+    checks.plusSkillChecked = !!menu && !!menu.querySelector('.plus-skill input[type=checkbox]').checked;
+    checks.plusManage = !!menu && menu.textContent.includes('管理技能');
+    if (menu) menu.remove();
+
+    // Leaving the page must abort the stream (the shell calls the returned teardown).
+    checks.teardown = typeof destroy === 'function';
+    if (typeof destroy === 'function') destroy();
+  }
+
+  if (view === 'skills') {
+    await renderSkills({
+      page: pageEl, actions: document.getElementById('actions'),
+      session: { role: 'admin', username: 'admin' },
+      route: { path: '/skills', params: new URLSearchParams('') },
+      navigate: () => {},
+    });
+    await settle();
+    checks.listRendered = pageText().includes('成本排查');
+    checks.sourceLink = !!pageEl.querySelector('a[href="#/chat?session=chat_1"]');
+    checks.privacyNote = pageText().includes('只属于当前登录账号');
+
+    find('新建技能').click();
+    await settle();
+    checks.editorOpen = pageText().includes('新建技能');
+    const nameInput = pageEl.querySelector('input[placeholder^="例如"]');
+    const instructionsInput = pageEl.querySelector('textarea');
+    checks.editorFields = !!nameInput && !!instructionsInput;
+    if (nameInput && instructionsInput) {
+      nameInput.value = '手写技能';
+      nameInput.dispatchEvent(new Event('input'));
+      instructionsInput.value = '第一步：查账户';
+      instructionsInput.dispatchEvent(new Event('input'));
+      find('创建并加载').click();
+      await settle();
+      const sent = JSON.parse((window.__sent || {})['/chat/skills'] || '{}');
+      checks.createSent = sent.name === '手写技能' && (sent.instructions || '').includes('第一步');
+    }
+
+    const edit = find('编辑');
+    checks.editButton = !!edit;
+    if (edit) {
+      edit.click();
+      await settle();
+      checks.editPrefilled = !!pageEl.querySelector('textarea') && pageEl.querySelector('textarea').value.includes('先查账户');
+    }
+
+    const remove = find('删除');
+    checks.deleteButton = !!remove;
+    if (remove) {
+      remove.click();
+      await settle();
+      checks.deleteConfirm = !!document.querySelector('.modal') && document.body.textContent.includes('删除技能');
+      const cancel = [...document.querySelectorAll('.modal button')].find((b) => b.textContent.trim() === '取消');
+      if (cancel) cancel.click();
+      await settle();
+    }
+  }
+} catch (err) {
+  report({ view, stage: 'threw', ok: false, checks, thrown: String(err && err.stack ? err.stack : err) });
+  throw err;
+}
+
+const bad = Object.keys(checks).filter((key) => checks[key] === false);
+report({ view, stage: 'done', ok: bad.length === 0, checks, failed: bad });
+</script>
+</body>
+</html>

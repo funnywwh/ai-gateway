@@ -31,6 +31,7 @@ export async function render({ page, actions, session }) {
     el('option', { value: '', text: '全部客户端' }),
     el('option', { value: 'dsh', text: 'DSH' }),
     el('option', { value: 'codex', text: 'Codex' }),
+    el('option', { value: 'console', text: '控制台智能问答' }),
     el('option', { value: 'unknown', text: '未识别' }),
   ]);
   const model = el('select', {}, [el('option', { value: '', text: '全部模型' })]);

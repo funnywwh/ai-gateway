@@ -9,12 +9,12 @@
 
 ## 它做什么
 
-1. 把 `internal/webui/static/`（页面、`js/pages/*.js`、`app.css`）复制到工作目录，再用四个 harness 页
+1. 把 `internal/webui/static/`（页面、`js/pages/*.js`、`app.css`）复制到工作目录，再用五个 harness 页
    （`providers.page.html` → `harness.html`、`currency.page.html` → `currency.html`、
-   `keys.page.html` → `keys.html`、`paging.page.html` → `paging.html`）+ 一份 **API 快照**
-   （`fixtures.json`）生成页面；
+   `keys.page.html` → `keys.html`、`paging.page.html` → `paging.html`、
+   `chat.page.html` → `chat.html`）+ 一份 **API 快照**（`fixtures.json`）生成页面；
 2. 起一个本地静态服务器，用 **headless firefox** 打开 harness，逐个视图（`#docs`、`#detail`、`#create`、
-   `#plugin`、`#plugin-cached`、`#currency`、`#keys`、`#requests`、`#paging`）渲染真实页面；
+   `#plugin`、`#plugin-cached`、`#currency`、`#keys`、`#requests`、`#paging`、`#chat`、`#skills`）渲染真实页面；
 3. harness 里 **stub 掉 `window.fetch`**，用快照回答所有 `/admin/api/v1/*` 调用——所以它不需要会话、
    不需要数据库、不碰任何上游，只验证「界面拿到这些数据会渲染成什么」；
    两个例外是**会动的**那两张表：`paging.page.html` **按窗口**回答 `/accounts`（解析请求 URL 里的
@@ -82,3 +82,22 @@ GW_BASE=http://127.0.0.1:8099 GW_COOKIE=... scripts/ui-harness/capture.py       
 | 控制台录制枚举与服务端一致、设置页不出现死键 | `internal/webui/embed_test.go`（读内嵌资源） |
 
 也就是说：**Go 测试保证数据对，这里保证界面把数据讲明白了。**
+
+## M32 起：`chat` 与 `skills` 两个视图
+
+`chat.page.html` 与其它 harness 页有两个不同点，都是被功能本身逼出来的：
+
+- **回答流是真的流**。`api.js` 的 `streamPost` 从 `resp.body` 逐帧读 SSE，所以 stub 必须返回一个真的
+  `ReadableStream`（`sseResponse()`）而不是一段字符串——否则测的就不是页面，而是 stub。
+  帧序列照抄服务端：`turn/step/text/reasoning/tool_call/tool_result/usage/notice/message/done`。
+- **预览是一次往返**。点「预览」会上传待预览的正文、拿回票据、再把票据拼进 iframe 的 `src`；
+  断言读的是**发出去的请求体**（必须是用户看到的那份字节）与 iframe 的 `sandbox`/`src`，
+  而不是"有没有弹出窗口"。
+
+两个视图的断言都在**纯函数**上起步：`markdown.js` 的转义与协议白名单、`chart.js` 的规格校验
+（非法 JSON、长度不一致、超过 8 序列、饼图负值、全 null），因为这些规则是安全相关的，
+坏了以后只会表现成"图有点怪"。随后才是页面行为：`＋` 菜单里技能的勾选态、停止按钮、
+usage 脚注、`#/chat?session=` 深链、`#/skills` 的编辑/删除确认与空态。
+
+技能草稿在两个页面之间用 `sessionStorage` 交接（`aigw.chat.draft`）：草稿是**未保存**的东西，
+没有理由先发到服务端再取回来，所以 harness 里也是同一个进程内的这一个小箱子。

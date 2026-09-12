@@ -6,12 +6,14 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
 	// Test-only import: the console assets and the server's accepted values are two
 	// halves of one contract, so the test needs the server's list. Production code in
 	// this package still imports nothing from the module (guarded by internal/arch).
+	"github.com/winger/ai-gateway/internal/chat"
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/store"
 )
@@ -34,6 +36,11 @@ func TestConsoleAssetsAreEmbedded(t *testing.T) {
 		{"/app.css", http.StatusOK, "--accent", "text/css"},
 		{"/js/app.js", http.StatusOK, "renderShell", "javascript"},
 		{"/js/pages/keys.js", http.StatusOK, "record_output_text", "javascript"},
+		{"/js/pages/chat.js", http.StatusOK, "chat/sessions", "javascript"},
+		{"/js/pages/skills.js", http.StatusOK, "chat/skills", "javascript"},
+		{"/js/pages/chat_artifact.js", http.StatusOK, "allow-scripts", "javascript"},
+		{"/js/markdown.js", http.StatusOK, "renderMarkdown", "javascript"},
+		{"/js/chart.js", http.StatusOK, "renderChart", "javascript"},
 		{"/providers", http.StatusOK, "<div id=\"app\">", "text/html"},
 		{"/js/pages/missing.js", http.StatusNotFound, "", ""},
 	}
@@ -189,3 +196,78 @@ func TestConsoleDoesNotSuggestDeadSettingKeys(t *testing.T) {
 		}
 	}
 }
+
+// TestConsoleChartBoundsMatchTheServer pins the chart renderer's two limits to the numbers
+// the server's instructions promise the model. They are the same contract as the enum tests
+// above, with a sharper failure mode: if the renderer's cap were lower than the prompt's, a
+// model that followed the instructions would produce charts the console refuses to draw, and
+// the answer would silently fall back to a code block.
+func TestConsoleChartBoundsMatchTheServer(t *testing.T) {
+	srv := httptest.NewServer(Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/js/chart.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	source := string(body)
+
+	if !strings.Contains(source, "export const MAX_SERIES = "+itoa(chat.MaxChartSeries)) {
+		t.Errorf("the console must cap series at the server's %d", chat.MaxChartSeries)
+	}
+	if !strings.Contains(source, "export const MAX_POINTS = "+itoa(chat.MaxChartPoints)) {
+		t.Errorf("the console must cap points at the server's %d", chat.MaxChartPoints)
+	}
+	// The prompt itself has to state those numbers, otherwise the contract is only half
+	// written down.
+	if prompts := chat.DefaultSystemPromptForTest(); !strings.Contains(prompts, itoa(chat.MaxChartSeries)) ||
+		!strings.Contains(prompts, itoa(chat.MaxChartPoints)) {
+		t.Error("the chat instructions must state the chart bounds the renderer enforces")
+	}
+}
+
+// TestConsoleChatRoutesMatchTheServer keeps the console's API paths in step with the route
+// table: a page that calls a path the server does not register renders an error the
+// operator cannot act on, and it is invisible until someone opens that page.
+func TestConsoleChatRoutesMatchTheServer(t *testing.T) {
+	srv := httptest.NewServer(Handler())
+	defer srv.Close()
+	source := func(path string) string {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return string(body)
+	}
+	chatSource := source("/js/pages/chat.js")
+	skillsSource := source("/js/pages/skills.js")
+	for _, want := range []string{"/chat/sessions", "/chat/models", "/skill-draft", "/turns"} {
+		if !strings.Contains(chatSource, want) {
+			t.Errorf("the chat page no longer calls %s", want)
+		}
+	}
+	for _, want := range []string{"/chat/skills"} {
+		if !strings.Contains(skillsSource, want) {
+			t.Errorf("the skills page no longer calls %s", want)
+		}
+	}
+	// The preview upload and the ticket endpoint are a pair: uploading without a ticket
+	// would leave the frame unable to load anything.
+	artifactSource := source("/js/pages/chat_artifact.js")
+	if !strings.Contains(artifactSource, "/artifacts") || !strings.Contains(artifactSource, "ticket") {
+		t.Error("the preview helper must upload the payload and then use the ticket it gets back")
+	}
+	// A route the router knows but nobody registered is a 404 the operator sees as a blank
+	// page; this asserts the two new pages are both reachable by hash.
+	routerSource := source("/js/router.js")
+	for _, path := range []string{"'/chat'", "'/skills'"} {
+		if !strings.Contains(routerSource, "path: "+path) {
+			t.Errorf("the router does not offer %s", path)
+		}
+	}
+}
+
+func itoa(v int) string { return strconv.Itoa(v) }

@@ -54,6 +54,9 @@ function renderLogin(notice) {
 
 function renderShell() {
   clear(app);
+  // A page may return a teardown function (see showRoute); it is declared here so the logout
+  // handler above can reach it.
+  let teardown = null;
   const nav = el('nav');
   const title = el('h1');
   const actions = el('div', { class: 'actions' });
@@ -62,6 +65,12 @@ function renderShell() {
   const whoami = el('span', { text: session.username + ' · ' + session.role });
   const logoutBtn = el('button', { class: 'btn btn-ghost', text: '退出' });
   logoutBtn.addEventListener('click', async () => {
+    // Logging out while an answer is streaming must abort it: the stream carries the
+    // previous session's data and would otherwise keep writing into a dead page.
+    if (typeof teardown === 'function') {
+      try { teardown(); } catch (err) { /* ignore */ }
+      teardown = null;
+    }
     try { await logout(); } catch (err) { /* the cookie is cleared client-side anyway */ }
     session = null;
     renderLogin('已退出');
@@ -73,7 +82,14 @@ function renderShell() {
       el('main', { class: 'main' }, [el('header', { class: 'topbar' }, [title, currencyBox, actions]), page]),
     ]));
 
+  // The chat page returns a teardown function: its answer stream and its timers must stop
+  // when the operator navigates away, otherwise a stream from the previous page keeps
+  // appending into a detached DOM node and keeps a request alive.
   const showRoute = async (route) => {
+    if (typeof teardown === 'function') {
+      try { teardown(); } catch (err) { /* a broken teardown must not block navigation */ }
+      teardown = null;
+    }
     renderNav(nav);
     title.textContent = route.title;
     clear(actions);
@@ -82,7 +98,8 @@ function renderShell() {
     try {
       const mod = await loadPage(route);
       clear(page);
-      await mod.render({ page, actions, session, route, navigate });
+      const result = await mod.render({ page, actions, session, route, navigate });
+      if (typeof result === 'function') teardown = result;
     } catch (err) {
       clear(page);
       page.append(el('div', { class: 'empty', text: '页面加载失败：' + api.errorMessage(err) }));

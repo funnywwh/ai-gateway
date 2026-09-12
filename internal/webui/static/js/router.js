@@ -3,6 +3,8 @@
 
 export const routes = [
   { path: '/', title: '概览', module: './pages/dashboard.js', group: '总览' },
+  { path: '/chat', title: '智能问答', module: './pages/chat.js', group: '总览' },
+  { path: '/skills', title: '技能库', module: './pages/skills.js', group: '总览' },
   { path: '/keys', title: 'API Keys', module: './pages/keys.js', group: '访问控制' },
   { path: '/accounts', title: '账户', module: './pages/accounts.js', group: '访问控制' },
   { path: '/tags', title: '标签', module: './pages/tags.js', group: '访问控制' },
@@ -24,9 +26,20 @@ export const routes = [
 
 const cache = new Map();
 
+// currentRoute resolves the hash. The path may carry a query string ("#/chat?session=…"),
+// which pages use for deep links into a specific conversation; the path alone decides which
+// route matches, so adding a query never changes which page is shown.
 export function currentRoute() {
   const hash = window.location.hash.replace(/^#/, '') || '/';
-  return routes.find((route) => route.path === hash) || routes[0];
+  const [path, search] = splitHash(hash);
+  const route = routes.find((entry) => entry.path === path) || routes[0];
+  return Object.assign({}, route, { params: new URLSearchParams(search || '') });
+}
+
+function splitHash(hash) {
+  const index = hash.indexOf('?');
+  if (index < 0) return [hash, ''];
+  return [hash.slice(0, index), hash.slice(index + 1)];
 }
 
 export function startRouter(onNavigate) {

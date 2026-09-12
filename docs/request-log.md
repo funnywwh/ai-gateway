@@ -31,7 +31,7 @@
 
 | 列 | 含义 | 取值来源 |
 |---|---|---|
-| `client` | 哪个编码 agent 在调用 | `dsh` / `codex` / `unknown`（请求体结构优先，User-Agent 仅兜底） |
+| `client` | 哪个编码 agent 在调用 | `dsh` / `codex` / `console` / `unknown`（请求体结构优先，User-Agent 仅兜底；`console` 是控制台智能问答自己发的请求，User-Agent 由服务端设置） |
 | `model` | 客户端请求的模型名 | 请求的 `model` 字段；**与账单口径一致**（发票按 `usage_records.model` 分组） |
 | `resolved_model` | 路由后的规范模型名 | 路由结果；被本地拒绝的请求为空 |
 | `workspace` | 客户端的工作区根路径 | DSH 的沙箱策略行 / Codex 的 `<environment_context><cwd>` |

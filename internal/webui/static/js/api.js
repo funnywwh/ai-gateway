@@ -50,6 +50,64 @@ export const api = {
   errorMessage: (err) => (err instanceof ApiError ? err.message : String(err && err.message ? err.message : err)),
 };
 
+// streamPost posts a JSON body and feeds every SSE frame to onEvent. EventSource cannot be
+// used here because the console needs a POST body and the session cookie, so the frames are
+// decoded by hand from the fetch body stream.
+export async function streamPost(path, body, { signal, onEvent } = {}) {
+  const resp = await fetch(BASE + path, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body === undefined ? {} : body),
+    signal,
+  });
+  if (resp.status === 401) {
+    window.dispatchEvent(new CustomEvent('aigw:unauthorized'));
+  }
+  const isStream = (resp.headers.get('content-type') || '').includes('text/event-stream');
+  if (!resp.ok || !isStream) {
+    const text = await resp.text();
+    let payload = null;
+    try { payload = JSON.parse(text); } catch (err) { payload = null; }
+    const err = payload && payload.error ? payload.error : {};
+    throw new ApiError(err.message || ('请求失败：HTTP ' + resp.status), resp.status, err.code || '');
+  }
+  if (!resp.body || typeof resp.body.getReader !== 'function') {
+    throw new ApiError('当前浏览器不支持流式响应', 0, '');
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let index = buffer.indexOf('\n\n');
+    while (index >= 0) {
+      const frame = buffer.slice(0, index);
+      buffer = buffer.slice(index + 2);
+      const event = parseFrame(frame);
+      if (event && onEvent) onEvent(event);
+      index = buffer.indexOf('\n\n');
+    }
+  }
+}
+
+function parseFrame(frame) {
+  let type = 'message';
+  const data = [];
+  for (const line of frame.split('\n')) {
+    if (line.startsWith('event:')) type = line.slice(6).trim();
+    else if (line.startsWith('data:')) data.push(line.slice(5).trim());
+  }
+  if (!data.length) return null;
+  try {
+    return Object.assign({ type }, JSON.parse(data.join('\n')));
+  } catch (err) {
+    return { type, raw: data.join('\n') };
+  }
+}
+
 export function login(username, password) {
   return request('POST', '/auth/login', { username, password });
 }
