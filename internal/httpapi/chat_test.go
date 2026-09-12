@@ -700,6 +700,45 @@ func TestChatToolsHideAndRefuseHighRiskEndpoints(t *testing.T) {
 	}
 }
 
+// A model that collapses the two-level convention and calls a management endpoint by its own
+// name must get the call it meant — this is what the console actually saw in production
+// ("unknown tool \"admin_request_dimensions\"" while the model was holding a perfectly good
+// endpoint name and a matching argument shape).
+func TestChatToolAcceptsEndpointNamesAsToolNames(t *testing.T) {
+	f := newChatFixture(t)
+	tools := &chatTools{s: f.api}
+	access := chat.Access{OwnerID: 1, Username: "admin", Role: chat.RoleAdmin, WriteMode: domain.ChatWriteModeAllow}
+	ctx := context.Background()
+
+	result, err := tools.Call(ctx, access, "admin_request_dimensions", map[string]any{
+		"query": map[string]any{"days": 30, "group_by": "api_key", "limit": 50, "sort": "requests"},
+	})
+	if err != nil {
+		t.Fatalf("an endpoint name must be routed to admin_request: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("the routed call failed: %+v", result.Value)
+	}
+	payload, ok := result.Value.(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected result shape: %T", result.Value)
+	}
+	if payload["endpoint"] != "admin_request_dimensions" {
+		t.Fatalf("the call did not reach the endpoint: %v", payload)
+	}
+
+	// The routing goes through the same allowlist: an endpoint the chat may not call is
+	// still refused when it is named directly.
+	if _, err := tools.Call(ctx, access, "admin_create_key", map[string]any{"body": map[string]any{"name": "x"}}); err == nil {
+		t.Fatal("naming a forbidden endpoint directly bypassed the allowlist")
+	}
+	// And a name that is neither a tool nor an endpoint is answered with what does exist.
+	_, err = tools.Call(ctx, access, "admin_make_me_a_sandwich", nil)
+	if err == nil || !strings.Contains(err.Error(), "admin_request") {
+		t.Fatalf("unknown tool error = %v, want it to name the real tools", err)
+	}
+}
+
 func TestChatActorIdentityIsTheConsoleNotAToken(t *testing.T) {
 	f := newChatFixture(t)
 	tools := &chatTools{s: f.api}

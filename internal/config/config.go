@@ -264,9 +264,12 @@ type Hooks struct {
 // it and the global request log is readable by every administrator.
 type Chat struct {
 	Enabled bool `yaml:"enabled"`
-	// MaxSteps bounds how many model calls one question may cost: every step is a
-	// separately billed request, so this is the ceiling on what one click can spend.
-	MaxSteps     int `yaml:"max_steps"`
+	// MaxSteps bounds how many model calls one question may cost; 0 means no limit and is
+	// the default. Every step is a separately billed request, so a finite value here is the
+	// ceiling on what one click can spend — set it when the account's balance matters more
+	// than letting a long investigation finish in one go.
+	MaxSteps int `yaml:"max_steps"`
+	// MaxToolCalls bounds one question's tool calls; 0 means no limit and is the default.
 	MaxToolCalls int `yaml:"max_tool_calls"`
 	// MaxToolResultBytes truncates one management tool result before it is fed back to the
 	// model; a truncated result says so instead of silently losing the tail.
@@ -512,8 +515,9 @@ func Default() Config {
 		},
 		Chat: Chat{
 			Enabled:               true,
-			MaxSteps:              8,
-			MaxToolCalls:          16,
+			// 0 = no limit: a question keeps going until the model stops calling tools.
+			MaxSteps:              0,
+			MaxToolCalls:          0,
 			MaxToolResultBytes:    64 * 1024,
 			MaxHistoryMessages:    40,
 			MaxHistoryBytes:       256 * 1024,
@@ -744,11 +748,12 @@ func validateChat(c *Config) error {
 	if !chat.Enabled {
 		return nil
 	}
-	if chat.MaxSteps <= 0 {
-		return fmt.Errorf("chat.max_steps must be positive")
+	// 0 disables the ceiling (see the field comments); a negative value is a typo.
+	if chat.MaxSteps < 0 {
+		return fmt.Errorf("chat.max_steps must be >= 0 (0 disables the step limit)")
 	}
 	if chat.MaxToolCalls < 0 {
-		return fmt.Errorf("chat.max_tool_calls must be >= 0")
+		return fmt.Errorf("chat.max_tool_calls must be >= 0 (0 disables the tool-call limit)")
 	}
 	if chat.MaxToolResultBytes <= 0 {
 		return fmt.Errorf("chat.max_tool_result_bytes must be positive")

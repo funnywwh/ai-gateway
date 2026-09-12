@@ -149,6 +149,38 @@ mcp:
   # flagged instead of being pasted into the model's context.
   admin_max_response_bytes: 262144
 
+# 控制台「智能问答」与「技能库」（M32）。
+chat:
+  enabled: true
+  # 步数与工具调用次数：0 = 不限制（默认）。一次提问会一直进行到模型不再调用工具为止；
+  # 每多一步都是一条按所选 API Key 计费的模型请求，所以想让「一次点击」的花费有上界时
+  # 把它们设成正整数——达到上限会停止本轮并在页面上提示。负数会被配置校验拒绝。
+  max_steps: 0
+  max_tool_calls: 0
+  # 单个工具结果回灌给模型前的大小上限（超出会截断并在结果里标注）。
+  max_tool_result_bytes: 65536
+  # 回灌给模型的历史窗口：按整轮裁剪，绝不切开一次工具调用。
+  max_history_messages: 40
+  max_history_bytes: 262144
+  # 技能：每个会话最多加载几个、单个技能的指令字节上限（技能库本身不限量）。
+  max_loaded_skills: 12
+  max_skill_bytes: 16384
+  # 是否把模型的思考过程随消息保存（只在会话里可见，不进全局请求日志）。
+  record_reasoning: true
+  # HTML5/SVG 预览：正文上限、每个会话保留份数、票据有效期。
+  artifact_max_bytes: 262144
+  artifact_max_per_session: 50
+  artifact_ticket_ttl: 5m
+  # 允许预览页加载外部资源（CDN 图表库等）。默认 false：模型写的页面不会把你的浏览器
+  # 变成对外发起请求的客户端。打开它等于信任模型生成的页面。
+  artifact_allow_network: false
+  # 单步回答的 token 上限，0 = 用供应商默认值。
+  max_output_tokens: 0
+  # 在内置的高危禁止清单之外再禁用的管理端点名（只能做减法，不能用来放开写接口）。
+  high_risk_tools: []
+  # 空 = 使用内置指令（含工具用法、图表规格、HTML 沙箱边界）。
+  system_prompt: ""
+
 hooks:
   queue_size: 1024
   workers: 8

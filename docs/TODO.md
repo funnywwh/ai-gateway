@@ -1135,8 +1135,14 @@
 - [ ] **待人工执行**（宿主终端）：`make build` + `scripts/local-run.sh restart`，硬刷新
       http://127.0.0.1:8088/admin/ui/#/chat ——在真实部署上用有余额的账户选模型提问，
       确认回答流式出现、图表与 HTML5 预览可打开、`console` 出现在请求日志
-- [ ] 观察项：`chat.max_steps: 8` 是「一次点击最多花 8 步」的上限；若某类问题经常撞上限，
-      优先改提示词而不是调大这个值
+- [x] 修正（真机反馈）：步数与工具次数改为 **`0 = 不限制` 且默认 0**——一次提问一直进行到模型
+      不再调用工具为止；配置成正整数时才在达到上限处停止并提示（`chat.max_steps` /
+      `chat.max_tool_calls`，负数仍是校验错误）
+- [x] 修正（真机反馈）：模型把端点名当工具名调用时（`admin_request_dimensions` →
+      `unknown tool`），`chatTools.Call` 现在按 `admin_request` + `name=<端点>` 转发，
+      判定仍走同一条允许清单；既不是工具也不是端点的名字回复「本网关提供哪三个工具」
+- [ ] 观察项：不限制步数意味着一次点击的花费上限由模型的步数决定。若某个账户余额敏感，
+      给它的部署设 `max_steps`/`max_tool_calls` 正整数上界
 - [ ] 观察项：工具循环的端到端（模型真的发起 `admin_request`）目前由 `internal/chat` 与
       `internal/httpapi` 的测试用脚本化 runner/假上游覆盖——内建 `testecho` **不会**发起工具调用，
       真机验证需要接一个会调用工具的模型

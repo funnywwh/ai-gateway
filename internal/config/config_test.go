@@ -251,7 +251,9 @@ func TestChatConfigIsValidated(t *testing.T) {
 	}{
 		{"defaults are valid", func(c *Config) {}, false},
 		{"disabled chat ignores the rest", func(c *Config) { c.Chat.Enabled = false; c.Chat.MaxSteps = 0 }, false},
-		{"zero steps", func(c *Config) { c.Chat.MaxSteps = 0 }, true},
+		{"zero steps means no ceiling", func(c *Config) { c.Chat.MaxSteps = 0 }, false},
+		{"zero tool calls means no ceiling", func(c *Config) { c.Chat.MaxToolCalls = 0 }, false},
+		{"negative steps", func(c *Config) { c.Chat.MaxSteps = -1 }, true},
 		{"negative tool calls", func(c *Config) { c.Chat.MaxToolCalls = -1 }, true},
 		{"zero tool result bytes", func(c *Config) { c.Chat.MaxToolResultBytes = 0 }, true},
 		{"history below one turn", func(c *Config) { c.Chat.MaxHistoryMessages = 1 }, true},
@@ -278,5 +280,11 @@ func TestChatConfigIsValidated(t *testing.T) {
 	}
 	if cfg := Default(); cfg.Chat.ArtifactAllowNetwork {
 		t.Fatal("previews must not load external resources unless an operator turns that on")
+	}
+	// The default is "no ceiling on steps or tool calls": a deployment that never asked for
+	// a limit must not silently inherit one.
+	if cfg := Default(); cfg.Chat.MaxSteps != 0 || cfg.Chat.MaxToolCalls != 0 {
+		t.Fatalf("default ceilings = %d steps / %d calls, want 0 (no limit)",
+			cfg.Chat.MaxSteps, cfg.Chat.MaxToolCalls)
 	}
 }

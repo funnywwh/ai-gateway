@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -72,9 +73,33 @@ func (t *chatTools) List(access chat.Access) []chat.Tool {
 }
 
 // Call executes one management tool call under the conversation's policy.
+//
+// Models routinely collapse the two-level convention and call a *management endpoint* by
+// its own name ("admin_request_dimensions") instead of calling admin_request with that
+// name. The intent is unambiguous — the name is the endpoint they wanted, and the arguments
+// are already shaped the way admin_request takes them — so the call is routed rather than
+// bounced. This is not a widened surface: the same allowlist decides, because the call ends
+// up in exactly the same place it would have.
 func (t *chatTools) Call(ctx context.Context, access chat.Access, name string, args map[string]any) (chat.ToolResult, error) {
+	backend := &adminBackend{s: t.s}
+	toolName := name
+	if name != toolAdminEndpoints && name != toolAdminDescribe && name != toolAdminRequest {
+		// A name that is not one of the three tools is either an endpoint the model meant to
+		// invoke (handled here) or a hallucination (answered with what does exist).
+		if _, ok := t.s.adminIndex.lookup(name); !ok {
+			return chat.ToolResult{}, fmt.Errorf("unknown tool %q: this gateway offers %s, %s and %s (use %s with the endpoint name in its name argument)",
+				name, toolAdminEndpoints, toolAdminDescribe, toolAdminRequest, toolAdminRequest)
+		}
+		toolName = toolAdminRequest
+		if args == nil {
+			args = map[string]any{}
+		}
+		if _, exists := args["name"]; !exists {
+			args["name"] = name
+		}
+	}
 	ctx = withChatToolPolicy(ctx, t.s.chatToolPolicy())
-	result, err := (&adminBackend{s: t.s}).CallAdmin(ctx, chatPrincipal(access), name, args)
+	result, err := backend.CallAdmin(ctx, chatPrincipal(access), toolName, args)
 	if err != nil {
 		return chat.ToolResult{}, err
 	}

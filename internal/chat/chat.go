@@ -271,12 +271,11 @@ func New(cfg Config, store Store, runner Runner, tools Tools, log *slog.Logger) 
 }
 
 // withDefaults fills in the values a zero config would otherwise turn into a broken
-// service (a zero MaxSteps would mean "never call the model").
+// service. MaxSteps and MaxToolCalls are deliberately *not* defaulted: zero means "no
+// limit", which is what an operator who did not configure a ceiling asked for.
 func withDefaults(cfg Config) Config {
 	def := Config{
 		Enabled:            true,
-		MaxSteps:           8,
-		MaxToolCalls:       16,
 		MaxToolResultBytes: 64 * 1024,
 		MaxHistoryMessages: 40,
 		MaxHistoryBytes:    256 * 1024,
@@ -284,11 +283,11 @@ func withDefaults(cfg Config) Config {
 		MaxSkillBytes:      16 * 1024,
 		RecordReasoning:    true,
 	}
-	if cfg.MaxSteps <= 0 {
-		cfg.MaxSteps = def.MaxSteps
+	if cfg.MaxSteps < 0 {
+		cfg.MaxSteps = 0
 	}
 	if cfg.MaxToolCalls < 0 {
-		cfg.MaxToolCalls = def.MaxToolCalls
+		cfg.MaxToolCalls = 0
 	}
 	if cfg.MaxToolResultBytes <= 0 {
 		cfg.MaxToolResultBytes = def.MaxToolResultBytes

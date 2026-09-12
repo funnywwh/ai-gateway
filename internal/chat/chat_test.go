@@ -728,6 +728,42 @@ func TestToolResultTruncationSaysSo(t *testing.T) {
 	}
 }
 
+func TestNoStepLimitKeepsGoing(t *testing.T) {
+	// The default configuration sets no ceiling, so a model that keeps asking for tools
+	// must be allowed to finish: the loop only ends when it stops calling them.
+	service, _, runner, tools, session := chatFixture(t, Config{})
+	steps := make([]*StepResult, 0, 12)
+	for i := 0; i < 11; i++ {
+		steps = append(steps, textStep("继续", callItem(
+			fmt.Sprintf("call_%d", i), "admin_request", `{"name":"admin_list_accounts"}`)))
+	}
+	steps = append(steps, textStep("查完了"))
+	runner.script(steps...)
+	events, emit := collectEvents()
+
+	result, err := service.Turn(context.Background(), TurnRequest{
+		OwnerID: 1, Username: "admin", Role: RoleAdmin,
+		SessionID: session.ID, TurnID: "turn_1", Content: "一直查",
+	}, emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 12 {
+		t.Fatalf("steps = %d, want all 12", len(runner.calls))
+	}
+	if len(tools.executed()) != 11 {
+		t.Fatalf("tool calls = %d, want all 11", len(tools.executed()))
+	}
+	if result.Status != domain.ChatTurnCompleted || !strings.Contains(result.Assistant.Content, "查完了") {
+		t.Fatalf("turn did not finish: %+v", result.Assistant)
+	}
+	for _, ev := range *events {
+		if ev.Type == EventNotice && strings.Contains(ev.Notice, "上限") {
+			t.Fatalf("a limit was reported although none is configured: %q", ev.Notice)
+		}
+	}
+}
+
 func TestStepLimitStopsTheLoop(t *testing.T) {
 	service, _, runner, _, session := chatFixture(t, Config{MaxSteps: 2, MaxToolCalls: 8})
 	runner.steps = []*StepResult{

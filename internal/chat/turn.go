@@ -202,7 +202,15 @@ func (s *Service) runTurn(ctx context.Context, session *domain.ChatSession, turn
 		})
 	}
 
-	for step := 1; step <= s.cfg.MaxSteps; step++ {
+	// The loop ends when the model stops calling tools (or an error/cancellation ends it).
+	// MaxSteps > 0 adds a ceiling on what one question may spend; 0 means no ceiling, and
+	// the operator can still press stop.
+	for step := 1; ; step++ {
+		if s.cfg.MaxSteps > 0 && step > s.cfg.MaxSteps {
+			s.emit(emit, Event{Type: EventNotice, TurnID: turn.TurnID, Level: LevelWarn,
+				Notice: fmt.Sprintf("已达到本次提问的步数上限（%d 步），回答可能还没完成", s.cfg.MaxSteps)})
+			break
+		}
 		if err := ctx.Err(); err != nil {
 			run.status, run.outcome = domain.ChatMessageAborted, OutcomeCancelled
 			run.errMsg = "已停止生成"
@@ -281,7 +289,9 @@ func (s *Service) runTurn(ctx context.Context, session *domain.ChatSession, turn
 				Notice: "工具调用的参数没有完整生成，已跳过执行以免误操作"})
 			break
 		}
-		if len(calls) > remainingToolCalls(s.cfg.MaxToolCalls, run.toolCalls) {
+		// A configured ceiling applies to the whole question, not to one step: a batch that
+		// would cross it is refused as a whole rather than run halfway.
+		if overToolBudget(s.cfg.MaxToolCalls, run.toolCalls, len(calls)) {
 			s.emit(emit, Event{Type: EventNotice, TurnID: turn.TurnID, Step: step, Level: LevelWarn,
 				Notice: fmt.Sprintf("已达到本次提问的工具调用上限（%d 次），剩余调用未执行", s.cfg.MaxToolCalls)})
 			break
@@ -320,10 +330,6 @@ func (s *Service) runTurn(ctx context.Context, session *domain.ChatSession, turn
 			})
 			run.providerItems = append(run.providerItems, outcome.items...)
 			s.emit(emit, Event{Type: EventToolResult, TurnID: turn.TurnID, Step: step, Tool: outcome.record})
-		}
-		if step == s.cfg.MaxSteps {
-			s.emit(emit, Event{Type: EventNotice, TurnID: turn.TurnID, Level: LevelWarn,
-				Notice: fmt.Sprintf("已达到本次提问的步数上限（%d 步），回答可能还没完成", s.cfg.MaxSteps)})
 		}
 	}
 	return run
@@ -636,11 +642,13 @@ func callsOf(result *StepResult) []pluginapi.Item {
 	return out
 }
 
-func remainingToolCalls(max, used int) int {
+// overToolBudget reports whether executing a batch of calls would cross the configured
+// ceiling. A ceiling of 0 is no ceiling at all.
+func overToolBudget(max, used, batch int) bool {
 	if max <= 0 {
-		return 1 << 30
+		return false
 	}
-	return max - used
+	return used+batch > max
 }
 
 // contentOf projects the ordered parts onto plain text: it is what the console shows in a
