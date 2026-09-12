@@ -828,3 +828,46 @@
 - [ ] 观察项：`aigw_audit_queued_requests` 持续 >0 且不降说明写侧堵了；若同时
   `/stats` 的 `request_log.batching.backpressure` 在涨，就是队列满了在背压，需要调大
   `batch_queue_bytes` / `batch_max_bytes`，或排查请求体为何变得很大
+
+## M27 请求日志的身份维度与消耗度量
+
+> 设计文档 `docs/design/m27-request-dimensions.md`，规格文档 `docs/request-log.md`（编号顺延说明见设计文档开头：M26 已被 `e42b066` 占用）。
+> 起因：请求日志只能回答「有一条请求、它多大、成功没有」——要回答「谁在用、用哪个模型、在哪个工作区、
+> 属于哪个会话、花了多少」只能去翻正文，而正文会撞 1 MiB 截断（实测 397/2297 行）又会按保留期被清掉。
+
+- [x] 迁移 0008：7 个身份列（client / model / resolved_model / workspace / session_id / call_kind / title）
+  + 三条 `(维度, created_at, id)` 索引；`ADD COLUMN … DEFAULT ''` 在 SQLite 只改元数据，747 MB 库瞬时完成
+- [x] 索引取舍实测（先做，避免拍脑袋）：同构表 + 默认口径行形状 + 256 行/事务，用 **WAL 页字节/行**
+  这个确定性指标（墙钟被 checkpoint 抖动淹没，同档在不同行数上抖动到 20 倍）：
+  现状 4449 B/行 → +client+session 4820（1.08×）→ +model 5008（**1.13×**）；悲观局部性上界 1.43×/1.54×
+- [x] 查询计划对照：清理 `DELETE … ORDER BY id LIMIT 500` 三档**计划完全一致**；无筛选列表仍走时间索引；
+  `client=?`/`model=?` 用新索引且**无 temp B-tree**（索引带 `id` 列是这一条成立的原因，否则退回 M24 修掉的排序器）
+- [x] 提取器 `internal/responses/dimensions.go`：结构性识别（顶层 instructions / 首条 developer 消息 /
+  以 `<environment_context>` 开头的消息 / 标题提示词前缀），**不做全文匹配**——实测库里 265 行含
+  `Codex CLI`，其中 259 行其实是 DSH 请求的工具输出；原始 User-Agent 只作兜底且不落库
+- [x] 接线：`recordInput` 把维度计算提到 `off` 早退之前（身份独立于正文口径）；
+  `persist` 补 `input.Resolved = plan.Resolved.Canonical`；`recordDenied` 同样落身份但 `resolved_model` 为空
+- [x] 标题：`recording.record_title`（默认 **true**）只写在 `call_kind=title` 那一行；与输出文本录制解耦
+- [x] 脱敏：`recording.redact_paths` 逐列生效（`workspace`/`session_id`/… 命中即整列置空）
+- [x] 消耗读时关联：`RequestUsages` 一次批量点查（跨 attempt 求和、延迟取最差），未计量返回
+  `metered=false`（本地拒绝的请求按设计不写 usage，与「消耗为 0」区分）；token 表达式与
+  `UsageBreakdown` 同源
+- [x] 维度聚合 `RequestLogDimensions`：白名单 6 个维度，`LEFT JOIN usage_records` 汇总 token/成本，
+  **只选维度列与 created_at**（选正文列会把窗口内每行溢出页读进来）；`session` 分组带标题与工作区
+- [x] 管理面：列表/详情增 7 个身份字段与 `usage`；6 个过滤参数；新端点
+  `GET /admin/api/v1/requests/dimensions`（未知 `group_by` 返回 400 并列出取值，不是 500）；
+  路由表新增条目使 MCP 自动获得 `admin_request_dimensions`
+- [x] MCP 查询面：`list_requests` 同样返回身份字段
+- [x] 控制台：列表增客户端/模型（含 `gpt-5.6-luna ← luna` 别名显示）/工作区/会话/类型/标题/
+  tokens/成本（按展示币种渲染），服务端筛选（客户端下拉、模型下拉、会话与工作区输入），
+  「维度统计」卡片（6 个分组、已计量与请求数分列显示），详情弹框增身份与消耗
+- [x] 测试：提取器表驱动 + 三个反例；store 往返/冲突不抹身份/六筛选一致性/跨 attempt 求和/聚合/白名单/
+  聚合 SQL 不含 `request_json`；httpapi served+denied 两条路径、别名、`off`、标题开关、脱敏、
+  骨架行保留身份、未计量、端点权限与参数校验；`TestHistoryListsAreOrderedByAnIndexNotASorter`
+  增加 client/model/session 三种筛选用例
+- [x] `make verify` 全绿；`make ui-check` requests 视图 18 → **38** 项断言全绿
+- [ ] **待人工执行**（宿主终端）：重启 8088 实例让迁移 0008 生效，然后发一条 DSH 请求核对身份列
+- [ ] 观察项：维度统计卡在窗口很大时的耗时（当前是窗口扫描 + usage 点查 join）；若 p95 超过 1 秒，
+  按设计文档 §2.2 的同一形态补 workspace/call_kind 索引
+- [ ] 观察项：`unknown` 桶的占比。持续偏高说明出现了新的客户端（或某个客户端改了提示词），
+  需要在 `dimensions.go` 补一条结构性规则，而不是放宽全文匹配

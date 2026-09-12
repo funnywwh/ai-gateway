@@ -111,7 +111,7 @@ func TestListRequestLogsPageRespectsFiltersAndCounts(t *testing.T) {
 	}
 	from, to := now.Add(-time.Hour), now.Add(time.Minute)
 
-	page, err := db.ListRequestLogsPage(ctx, accountID, from, to, 2, 0)
+	page, err := db.ListRequestLogsPage(ctx, domain.RequestLogFilter{AccountID: accountID, From: from, To: to}, 2, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,16 +121,16 @@ func TestListRequestLogsPageRespectsFiltersAndCounts(t *testing.T) {
 	if len(page) != 2 || page[0].RequestID != "req-02" {
 		t.Fatalf("page = %+v, want req-02 first", page)
 	}
-	second, err := db.ListRequestLogsPage(ctx, accountID, from, to, 2, 2)
+	second, err := db.ListRequestLogsPage(ctx, domain.RequestLogFilter{AccountID: accountID, From: from, To: to}, 2, 2)
 	if err != nil || len(second) != 1 || second[0].RequestID != "req-00" {
 		t.Fatalf("second page = %+v (err=%v), want the remaining req-00", second, err)
 	}
-	total, err := db.CountRequestLogs(ctx, accountID, from, to)
+	total, err := db.CountRequestLogs(ctx, domain.RequestLogFilter{AccountID: accountID, From: from, To: to})
 	if err != nil || total != 3 {
 		t.Fatalf("CountRequestLogs = %d (err=%v), want 3 (filtered by account and window)", total, err)
 	}
 	// accountID 0 means "every account", which is the console's cross-tenant view.
-	total, err = db.CountRequestLogs(ctx, 0, from, to)
+	total, err = db.CountRequestLogs(ctx, domain.RequestLogFilter{AccountID: 0, From: from, To: to})
 	if err != nil || total != 4 {
 		t.Fatalf("CountRequestLogs(all) = %d (err=%v), want 4", total, err)
 	}
@@ -267,8 +267,16 @@ func TestHistoryListsAreOrderedByAnIndexNotASorter(t *testing.T) {
 	now := time.Now().UTC()
 	from, to := now.AddDate(0, 0, -7), now
 
-	requestWhere, requestArgs := requestLogFilter(0, from, to)
+	requestWhere, requestArgs := requestLogFilter("", domain.RequestLogFilter{From: from, To: to})
 	ledgerWhere, ledgerArgs := ledgerFilter(LedgerWindow{AccountID: 1, From: from, To: to})
+
+	// The identity filters (M27) each have an index, and that index carries the id column
+	// so the same ORDER BY is satisfied by a reverse scan of an equality-constrained
+	// prefix. Without the id column SQLite sorts the window again — which is the whole
+	// reason the three indexes are shaped the way they are.
+	clientWhere, clientArgs := requestLogFilter("", domain.RequestLogFilter{From: from, To: to, Client: "dsh"})
+	modelWhere, modelArgs := requestLogFilter("", domain.RequestLogFilter{From: from, To: to, Model: "deepseek-flash"})
+	sessionWhere, sessionArgs := requestLogFilter("", domain.RequestLogFilter{From: from, To: to, SessionID: "session-abc"})
 
 	cases := []struct {
 		name  string
@@ -276,6 +284,9 @@ func TestHistoryListsAreOrderedByAnIndexNotASorter(t *testing.T) {
 		args  []any
 	}{
 		{"request_logs", requestLogListSQL(requestWhere), append(requestArgs, 50, 0)},
+		{"request_logs_by_client", requestLogListSQL(clientWhere), append(clientArgs, 50, 0)},
+		{"request_logs_by_model", requestLogListSQL(modelWhere), append(modelArgs, 50, 0)},
+		{"request_logs_by_session", requestLogListSQL(sessionWhere), append(sessionArgs, 50, 0)},
 		{"ledger_entries", ledgerListSQL(ledgerWhere), append(ledgerArgs, 100, 0)},
 		{"usage_records", ttftSamplesSQL(), []any{int64(1), unix(from), unix(to), 2000}},
 	}

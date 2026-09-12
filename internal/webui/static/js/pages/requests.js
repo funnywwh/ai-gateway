@@ -1,9 +1,31 @@
 import { api } from '../api.js';
 import { el, card, pagedTable, toast, badge, formatTime, jsonBlock, statusBadge, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
+import { initCurrency, money } from '../money.js';
+
+// Dimension labels for the statistics card. The keys are the API's group_by values.
+const DIMENSIONS = [
+  ['client', '客户端'], ['model', '请求的模型'], ['resolved_model', '路由到的模型'],
+  ['workspace', '工作区'], ['session', '会话'], ['call_kind', '调用类型'],
+];
 
 export async function render({ page, actions, session }) {
+  // Cost is a ledger amount, so it renders in the operator's display currency like every
+  // other money column in the console.
+  await initCurrency();
+
   const days = el('select', {}, [1, 3, 7, 30].map((n) => el('option', { value: n, text: '最近 ' + n + ' 天' })));
   days.value = '7';
+  // The identity filters are server-side: filtering in the browser would only sift the
+  // current page while "共 N 条" kept describing every request.
+  const client = el('select', {}, [
+    el('option', { value: '', text: '全部客户端' }),
+    el('option', { value: 'dsh', text: 'DSH' }),
+    el('option', { value: 'codex', text: 'Codex' }),
+    el('option', { value: 'unknown', text: '未识别' }),
+  ]);
+  const model = el('select', {}, [el('option', { value: '', text: '全部模型' })]);
+  const sessionFilter = el('input', { placeholder: '会话 id（回车）', style: 'min-width:220px' });
+  const workspaceFilter = el('input', { placeholder: '工作区（回车）', style: 'min-width:200px' });
   const refresh = el('button', { class: 'btn', text: '刷新' });
   // Retention is a daily policy: this button is how an operator reclaims space without
   // waiting for the tick, and the hint next to it reports the window it will cut at.
@@ -55,15 +77,27 @@ export async function render({ page, actions, session }) {
     } catch (err) { toast(api.errorMessage(err), 'error'); }
   }
 
+  function filterParams() {
+    const params = { days: days.value, client: client.value, model: model.value };
+    if (sessionFilter.value.trim()) params.session_id = sessionFilter.value.trim();
+    if (workspaceFilter.value.trim()) params.workspace = workspaceFilter.value.trim();
+    return params;
+  }
+
   const view = pagedTable({
     columns: [
       { key: 'created_at', label: '时间', render: (row) => formatTime(row.created_at) },
       { key: 'request_id', label: '请求 ID', render: (row) => el('code', { text: row.request_id }) },
-      { key: 'endpoint', label: '端点' },
       { key: 'status', label: '状态', render: (row) => statusBadge(row.status) },
-      { key: 'input_recorded', label: '输入', render: (row) => row.input_recorded ? badge('已录制', 'ok') : badge('未录制') },
-      { key: 'output_text_recorded', label: '输出文本', render: (row) => row.output_text_recorded ? badge('已录制', 'ok') : badge('未录制') },
-      { key: 'reasoning_recorded', label: '思考文本', render: (row) => row.reasoning_recorded ? badge('已录制', 'ok') : badge('未录制') },
+      { key: 'client', label: '客户端', render: (row) => (row.client ? badge(row.client, row.client === 'unknown' ? '' : 'ok') : el('span', { class: 'muted', text: '—' })) },
+      { key: 'model', label: '模型', render: (row) => modelCell(row) },
+      { key: 'workspace', label: '工作区', render: (row) => pathCell(row.workspace) },
+      { key: 'session_id', label: '会话', render: (row) => sessionCell(row.session_id) },
+      { key: 'call_kind', label: '类型', render: (row) => callKindCell(row) },
+      { key: 'title', label: '标题', render: (row) => (row.title ? el('span', { text: row.title }) : el('span', { class: 'muted', text: '—' })) },
+      { key: 'usage', label: 'tokens（入/出）', render: (row) => tokensCell(row.usage) },
+      { key: 'charge', label: '成本', render: (row) => costCell(row.usage) },
+      { key: 'output_text_recorded', label: '输出文本', render: (row) => (row.output_text_recorded ? badge('已录制', 'ok') : badge('未录制')) },
     ],
     empty: '该窗口内没有请求日志',
     rowActions: (row) => [el('button', {
@@ -72,21 +106,151 @@ export async function render({ page, actions, session }) {
       // "Uncaught (in promise)" in the console instead of a message on screen.
       onclick: () => detail(row.request_id).catch((err) => toast(api.errorMessage(err), 'error')),
     })],
-    load: ({ limit, offset }) => api.get('/requests', { days: days.value, limit, offset }),
+    load: ({ limit, offset }) => api.get('/requests', { ...filterParams(), limit, offset }),
     onError: (err) => toast(api.errorMessage(err), 'error'),
   });
-  page.append(card('请求日志', view.node, [
-    days,
-    el('span', { class: 'muted', text: '默认只记录用户输入；系统指令、工具定义与工具输出只留计数，最终输出与思考文本需在 Key 上单独开启' }),
-    hint]));
 
-  // Changing the time window restarts at page 1: the rows of the current page belong
-  // to a different filter, so their offset is meaningless.
-  days.addEventListener('change', () => view.reset());
-  refresh.addEventListener('click', () => view.refresh());
+  // ---------------------------------------------------------------------------
+  // 维度统计：谁在用、用哪个模型、哪个工作区/会话、花了多少
+  // ---------------------------------------------------------------------------
+  const groupBy = el('select', {}, DIMENSIONS.map(([value, label]) => el('option', { value, text: label })));
+  const statsHost = el('div', { class: 'muted', text: '加载中…' });
+  const statsCard = card('维度统计', statsHost, [groupBy, el('span', {
+    class: 'muted', text: '按身份维度汇总请求数、token 与成本；成本与账单同源（计量表）',
+  })]);
+
+  async function loadStats() {
+    try {
+      const payload = await api.get('/requests/dimensions', { ...filterParams(), group_by: groupBy.value, limit: 20 });
+      renderStats(payload);
+    } catch (err) {
+      statsHost.replaceChildren(el('div', { class: 'muted', text: api.errorMessage(err) }));
+    }
+  }
+
+  function renderStats(payload) {
+    const rows = payload.rows || [];
+    const bySession = payload.group_by === 'session';
+    if (!rows.length) {
+      statsHost.replaceChildren(el('div', { class: 'muted', text: '该窗口内没有可统计的请求' }));
+      return;
+    }
+    const head = ['分组', '请求数', '已计量', '输入 tokens', '输出 tokens', '成本'];
+    if (bySession) head.splice(1, 0, '标题', '工作区');
+    const header = el('thead', {}, [el('tr', {}, head.map((label) => el('th', { text: label })))]);
+    const body = el('tbody', {}, rows.map((row) => {
+      const cells = [el('td', {}, [keyCell(row.key)])];
+      if (bySession) {
+        cells.push(el('td', { text: row.title || '—' }), el('td', {}, [pathCell(row.workspace)]));
+      }
+      cells.push(
+        el('td', { text: String(row.requests) }),
+        // "已计量" is the count with a usage row: the difference from 请求数 is requests a
+        // local rejection or a lost row left unmetered, which is worth seeing.
+        el('td', { text: row.metered === row.requests ? String(row.metered) : row.metered + ' / ' + row.requests }),
+        el('td', { text: formatTokens(row.input_tokens) }),
+        el('td', { text: formatTokens(row.output_tokens) }),
+        el('td', { text: row.metered ? money(row.charge_micros) : '未计量' }),
+      );
+      return el('tr', {}, cells);
+    }));
+    statsHost.replaceChildren(el('table', {}, [header, body]));
+  }
+
+  function keyCell(key) {
+    if (!key) return el('span', { class: 'muted', text: '（未知）' });
+    const text = String(key);
+    return el('span', { title: text, text: text.length > 44 ? text.slice(0, 42) + '…' : text });
+  }
+
+  groupBy.addEventListener('change', () => { loadStats(); });
+
+  // The model dropdown is filled from the same statistics endpoint, so it offers the
+  // models this window actually used rather than a configuration list that may be empty.
+  async function loadModelOptions() {
+    try {
+      const payload = await api.get('/requests/dimensions', { days: days.value, group_by: 'model', limit: 50 });
+      const current = model.value;
+      const options = [el('option', { value: '', text: '全部模型' })];
+      for (const row of payload.rows || []) {
+        if (!row.key) continue;
+        options.push(el('option', { value: row.key, text: row.key + '（' + row.requests + '）' }));
+      }
+      model.replaceChildren(...options);
+      model.value = current;
+    } catch (err) { /* a filter list that cannot load must not block the page */ }
+  }
+
+  page.append(card('请求日志', view.node, [
+    days, client, model, sessionFilter, workspaceFilter,
+    el('span', { class: 'muted', text: '客户端/模型/工作区/会话/标题与 token 成本是独立于正文口径记录的元数据（record_input=off 也记）；标题来自会话的标题调用，成本来自计量表，与账单一致' }),
+    hint]));
+  page.append(statsCard);
+
+  // Changing any filter restarts at page 1: the rows of the current page belong to a
+  // different filter, so their offset is meaningless.
+  days.addEventListener('change', () => { view.reset(); loadStats(); loadModelOptions(); });
+  client.addEventListener('change', () => { view.reset(); loadStats(); });
+  model.addEventListener('change', () => { view.reset(); loadStats(); });
+  for (const input of [sessionFilter, workspaceFilter]) {
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter') return;
+      view.reset();
+      loadStats();
+    });
+  }
+  refresh.addEventListener('click', () => { view.refresh(); loadStats(); loadModelOptions(); });
   prune.addEventListener('click', () => pruneNow());
   await loadRetention();
-  await view.refresh();
+  await Promise.all([view.refresh(), loadStats(), loadModelOptions()]);
+}
+
+// modelCell shows the model that actually served the request, with the requested name
+// when they differ: an alias such as `luna -> gpt-5.6-luna` is exactly the case where the
+// two columns say different things, and hiding either would be lying about one of them.
+function modelCell(row) {
+  const resolved = row.resolved_model || '';
+  const requested = row.model || '';
+  if (!resolved && !requested) return el('span', { class: 'muted', text: '—' });
+  const primary = resolved || requested;
+  const node = el('span', { text: primary });
+  if (resolved && requested && resolved !== requested) {
+    node.append(el('span', { class: 'muted', text: ' ← ' + requested }));
+  }
+  return node;
+}
+
+function callKindCell(row) {
+  if (row.call_kind === 'title') return badge('标题调用', 'ok');
+  if (row.call_kind === 'agent') return badge('会话轮次');
+  return el('span', { class: 'muted', text: '—' });
+}
+
+function pathCell(value) {
+  if (!value) return el('span', { class: 'muted', text: '—' });
+  return el('code', { title: value, text: value });
+}
+
+function sessionCell(value) {
+  if (!value) return el('span', { class: 'muted', text: '—' });
+  return el('code', { title: value, text: value.length > 18 ? value.slice(0, 16) + '…' : value });
+}
+
+// A request with no usage row is "未计量", not zero: a locally rejected request never
+// reached an upstream, and reporting 0 tokens would read as "it consumed nothing".
+function tokensCell(usage) {
+  if (!usage || !usage.metered) return el('span', { class: 'muted', text: '未计量' });
+  return el('span', { text: formatTokens(usage.input_tokens) + ' / ' + formatTokens(usage.output_tokens) });
+}
+
+function costCell(usage) {
+  if (!usage || !usage.metered) return el('span', { class: 'muted', text: '未计量' });
+  return el('span', { text: money(usage.charge_micros) });
+}
+
+function formatTokens(value) {
+  const n = Number(value || 0);
+  return n.toLocaleString('en-US');
 }
 
 async function detail(requestID) {
@@ -98,6 +262,7 @@ async function detail(requestID) {
   if (!row || typeof row !== 'object') {
     throw new Error('该请求的详情为空（服务端未返回内容），日志可能刚好被保留期清理，请刷新列表');
   }
+  const usage = row.usage || { metered: false };
   const body = el('div', { class: 'split' }, [
     panel('输入' + (row.input_recorded ? '' : '（未录制）'), row.input),
     panel('思考文本' + (row.reasoning_recorded ? '' : '（未录制）'), row.reasoning),
@@ -109,6 +274,8 @@ async function detail(requestID) {
     // round ✕ with it) stays pinned to the dialog frame while a long log scrolls.
     modalBody([
       el('div', { class: 'muted', text: row.endpoint + ' · ' + formatTime(row.created_at) + ' · HTTP ' + row.status }),
+      identityBlock(row),
+      usageBlock(usage),
       // The size of the request is recorded even when its content is not, so a
       // "未录制" panel can still say how big the request was.
       el('div', { class: 'muted', text: row.request_bytes ? '请求正文 ' + row.request_bytes + ' 字节' + (row.truncated ? '（已截断）' : '') : '' }),
@@ -122,6 +289,40 @@ async function detail(requestID) {
   function close() { backdrop.remove(); }
   backdrop.addEventListener('click', (ev) => { if (ev.target === backdrop) close(); });
   document.getElementById('modal-root').append(backdrop);
+}
+
+// identityBlock shows what the gateway could tell about the caller without reading the
+// body: the row keeps this even when record_input is off.
+function identityBlock(row) {
+  const fields = [
+    ['客户端', row.client || '未识别'],
+    ['请求的模型', row.model || '—'],
+    ['路由到的模型', row.resolved_model || '—'],
+    ['工作区', row.workspace || '—'],
+    ['会话', row.session_id || '—'],
+    ['调用类型', row.call_kind || '—'],
+    ['标题', row.title || '—'],
+  ];
+  return el('div', { class: 'muted' }, fields.map(([label, value]) =>
+    el('div', {}, [el('strong', { text: label + '：' }), el('span', { text: String(value) })])));
+}
+
+function usageBlock(usage) {
+  if (!usage || !usage.metered) {
+    return el('div', { class: 'muted', text: '未计量：该请求没有计量行（本地拒绝的请求按设计不写 usage），与「消耗为 0」不同' });
+  }
+  const fields = [
+    ['输入 tokens', formatTokens(usage.input_tokens)],
+    ['输出 tokens', formatTokens(usage.output_tokens)],
+    ['思考 tokens', formatTokens(usage.reasoning_tokens)],
+    ['成本', money(usage.cost_micros)],
+    ['对客', money(usage.charge_micros)],
+    ['延迟', usage.latency_ms + ' ms'],
+    ['首字延迟', usage.ttft_ms + ' ms'],
+    ['上游尝试', String(usage.attempts)],
+  ];
+  return el('div', { class: 'muted' }, fields.map(([label, value]) =>
+    el('div', {}, [el('strong', { text: label + '：' }), el('span', { text: String(value) })])));
 }
 
 function panel(title, value) {

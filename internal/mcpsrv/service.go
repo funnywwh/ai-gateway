@@ -23,7 +23,7 @@ type Store interface {
 	ListUsage(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*domain.UsageRecord, error)
 	GetBalance(ctx context.Context, accountID int64) (int64, error)
 	GetRequestLog(ctx context.Context, requestID string) (*domain.RequestLogRecord, error)
-	ListRequestLogs(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*domain.RequestLogRecord, error)
+	ListRequestLogs(ctx context.Context, f domain.RequestLogFilter, limit int) ([]*domain.RequestLogRecord, error)
 	ListAPIKeys(ctx context.Context, accountID int64) ([]*domain.APIKey, error)
 	UsageWindowTotals(ctx context.Context, accountID int64, from, to time.Time) (*domain.UsageTotals, error)
 	UsageBreakdown(ctx context.Context, accountID int64, from, to time.Time, groupBy string) ([]domain.UsageBreakdownRow, error)
@@ -400,7 +400,7 @@ func (s *Service) getUsageSummary(ctx context.Context, accountID int64, args map
 func (s *Service) listRequests(ctx context.Context, accountID int64, args map[string]any) (any, error) {
 	from, to := s.period(args)
 	limit := s.limit(args)
-	rows, err := s.store.ListRequestLogs(ctx, accountID, from, to, limit)
+	rows, err := s.store.ListRequestLogs(ctx, domain.RequestLogFilter{AccountID: accountID, From: from, To: to}, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -411,6 +411,12 @@ func (s *Service) listRequests(ctx context.Context, accountID int64, args map[st
 			"created_at":           row.CreatedAt.Format(time.RFC3339),
 			"endpoint":             row.Endpoint,
 			"status":               row.Status,
+			"client":               row.Client,
+			"model":                row.Model,
+			"resolved_model":       row.ResolvedModel,
+			"workspace":            row.Workspace,
+			"session_id":           row.SessionID,
+			"call_kind":            row.CallKind,
 			"input_recorded":       row.RequestJSON != "",
 			"reasoning_recorded":   row.ReasoningRecorded,
 			"output_text_recorded": row.OutputTextRecorded,

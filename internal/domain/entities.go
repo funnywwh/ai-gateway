@@ -185,6 +185,11 @@ type ResponseRecord struct {
 
 // RequestLogRecord is one recorded request/response pair. Input text is recorded by
 // default; thinking text and final output text are only stored when the key opts in.
+//
+// The identity columns (Client .. Title) are extracted from the parsed request and are
+// recorded regardless of the input policy — including `off`, which keeps a row with no
+// content. They are what makes "who is calling, with which model, from where" answerable
+// without reading a body that may have been truncated or pruned.
 type RequestLogRecord struct {
 	ID                 int64
 	RequestID          string
@@ -204,6 +209,82 @@ type RequestLogRecord struct {
 	RecordOutputText   bool
 	Status             string
 	CreatedAt          time.Time
+
+	// Client is dsh | codex | unknown; CallKind is agent | title.
+	Client string
+	// Model is the model name the client asked for (the billed dimension: usage_records
+	// and the invoice breakdown group by it); ResolvedModel is the canonical model the
+	// gateway routed to. A locally rejected request never reached routing, so its
+	// ResolvedModel is empty.
+	Model         string
+	ResolvedModel string
+	// Workspace is the client's workspace root, "" when it did not send one.
+	Workspace string
+	// SessionID is the client's session key (the request's prompt_cache_key).
+	SessionID string
+	CallKind  string
+	// Title is the session title produced by a title call; it is only ever set on the row
+	// whose CallKind is title.
+	Title string
+}
+
+// RequestUsage is the metered consumption of one request, summed over its attempts. It is
+// read from usage_records rather than duplicated onto the log row: usage is the single
+// owner of the money-adjacent facts, and it outlives the log (retention prunes logs, not
+// billing).
+//
+// Metered is false when the request has no usage row at all — a locally rejected request
+// deliberately has none (it never reached an upstream). That is a different statement from
+// "consumed zero tokens", and the console shows them differently.
+type RequestUsage struct {
+	RequestID       string
+	Attempts        int
+	InputTokens     int64
+	OutputTokens    int64
+	ReasoningTokens int64
+	CostMicros      int64
+	ChargeMicros    int64
+	LatencyMS       int
+	TTFTMS          int
+	Metered         bool
+}
+
+// RequestLogFilter selects recorded requests for every read path (the console's page, its
+// totals, the MCP query tools and the dimension breakdown). Every field is optional: the
+// zero value means "all accounts, no window, no dimension filter".
+//
+// It lives in the domain layer because the MCP service may not import the store
+// (internal/arch), and both have to describe the same query.
+type RequestLogFilter struct {
+	AccountID int64
+	From      time.Time
+	To        time.Time
+
+	// Dimension filters, each an exact match; "" means "do not filter".
+	Client        string
+	Model         string
+	ResolvedModel string
+	Workspace     string
+	SessionID     string
+	CallKind      string
+}
+
+// RequestLogDimensionRow is one bucket of the request log's dimension breakdown. Title and
+// Workspace only carry meaning when the grouping is by session, where a group owns one
+// title and one workspace; for other groupings they are what the group's rows had.
+type RequestLogDimensionRow struct {
+	Key             string
+	Requests        int
+	Metered         int
+	FirstSeen       time.Time
+	LastSeen        time.Time
+	Title           string
+	Workspace       string
+	InputTokens     int64
+	OutputTokens    int64
+	ReasoningTokens int64
+	CostMicros      int64
+	ChargeMicros    int64
 }
 
 // LedgerEntry is an append-only balance mutation.

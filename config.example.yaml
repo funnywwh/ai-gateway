@@ -96,10 +96,16 @@ recording:
   #              工具调用与工具输出、历史 assistant 轮次只留 omitted 计数与 request_bytes
   #   full     - 整份请求正文（排障用：上游 400 需要客户端原样字节时临时打开）
   #   metadata - 不落正文，只留体积/状态等列内元数据
-  #   off      - 什么都不留（仍会写一行请求日志，状态可见）
+  #   off      - 不落正文（仍会写一行请求日志：状态、体积与身份维度都在，只是没有正文）
+  #
+  # 注意：客户端/模型/工作区/会话/调用类型/标题这些身份维度（M27）不受本开关影响，只要写了
+  # 日志行就一并记录——它们是元数据不是正文。要让某一列不留痕，把列名写进下面的 redact_paths。
   record_input: user
   record_reasoning: false     # "save thinking text" checkbox - off by default, per key
   record_output_text: false   # "save final output text" checkbox - off by default, per key
+  # 会话标题（M27）：客户端的标题调用产出的标题，记在那一行请求日志上。它是会话级元数据而不是
+  # 用户问题的答案，因此单独开关且默认开。关掉后 call_kind=title 仍会被识别，只是不记标题文本。
+  record_title: true
   max_bytes: 1048576
   # 记录内容的保留期：请求日志按它清理，存储响应（store=true）按它到期；0 = 不清理（永久保留）。
   # 清理是每日任务（启动时跑一次），也可在控制台「请求日志」页手动触发；

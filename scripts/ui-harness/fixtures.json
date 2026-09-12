@@ -930,26 +930,114 @@
   "plugin": false
  },
  "/requests": {
-  "count": 1,
+  "count": 2,
   "data": [
    {
     "account_id": 1,
     "api_key_id": 1,
+    "call_kind": "agent",
+    "client": "dsh",
     "created_at": "2026-09-11T11:00:00Z",
     "endpoint": "/v1/responses",
     "input_recorded": true,
+    "model": "deepseek-flash",
     "output_text_recorded": false,
     "reasoning_recorded": false,
     "request_bytes": 483,
     "request_id": "req_demo0001",
+    "resolved_model": "deepseek-flash",
+    "session_id": "session-ebf36761-3295-4881-bbec-73f80c9a4589",
     "status": "completed",
-    "truncated": false
+    "title": "",
+    "truncated": false,
+    "usage": {
+     "attempts": 1,
+     "charge_micros": 2468,
+     "cost_micros": 1234,
+     "input_tokens": 1200,
+     "latency_ms": 900,
+     "metered": true,
+     "output_tokens": 34,
+     "reasoning_tokens": 12,
+     "ttft_ms": 120
+    },
+    "workspace": "/home/winger/work/ai_gateway"
+   },
+   {
+    "account_id": 1,
+    "api_key_id": 1,
+    "call_kind": "title",
+    "client": "codex",
+    "created_at": "2026-09-11T11:05:00Z",
+    "endpoint": "/v1/responses",
+    "input_recorded": true,
+    "model": "luna",
+    "output_text_recorded": false,
+    "reasoning_recorded": false,
+    "request_bytes": 311,
+    "request_id": "req_demo0002",
+    "resolved_model": "gpt-5.6-luna",
+    "session_id": "01a08f27-cc56-7491-abf3-c5db92e442d9",
+    "status": "completed",
+    "title": "从 dsh 和 codex 请求解析 workspace",
+    "truncated": false,
+    "usage": {
+     "attempts": 0,
+     "charge_micros": 0,
+     "cost_micros": 0,
+     "input_tokens": 0,
+     "latency_ms": 0,
+     "metered": false,
+     "output_tokens": 0,
+     "reasoning_tokens": 0,
+     "ttft_ms": 0
+    },
+    "workspace": "/home/winger/work/other"
    }
   ],
   "has_more": false,
   "limit": 20,
   "offset": 0,
-  "total": 1
+  "total": 2
+ },
+ "/requests/dimensions": {
+  "days": 7,
+  "dimensions": [
+   "client",
+   "model",
+   "resolved_model",
+   "workspace",
+   "session",
+   "call_kind"
+  ],
+  "group_by": "model",
+  "limit": 20,
+  "rows": [
+   {
+    "charge_micros": 7404,
+    "cost_micros": 3702,
+    "first_seen": "2026-09-11T11:00:00Z",
+    "input_tokens": 3600,
+    "key": "deepseek-flash",
+    "last_seen": "2026-09-11T11:30:00Z",
+    "metered": 3,
+    "output_tokens": 102,
+    "reasoning_tokens": 36,
+    "requests": 3
+   },
+   {
+    "charge_micros": 18,
+    "cost_micros": 9,
+    "first_seen": "2026-09-11T11:05:00Z",
+    "input_tokens": 50,
+    "key": "gpt-5.6-luna",
+    "last_seen": "2026-09-11T11:20:00Z",
+    "metered": 1,
+    "output_tokens": 5,
+    "reasoning_tokens": 0,
+    "requests": 2
+   }
+  ]
  },
  "/requests/prune": {
   "batches": 1,
@@ -961,6 +1049,8 @@
  "/requests/req_demo0001": {
   "account_id": 1,
   "api_key_id": 1,
+  "call_kind": "agent",
+  "client": "dsh",
   "created_at": "2026-09-11T11:00:00Z",
   "endpoint": "/v1/responses",
   "input": {
@@ -985,15 +1075,31 @@
    "request_bytes": 483
   },
   "input_recorded": true,
+  "model": "deepseek-flash",
   "output": null,
   "output_text_recorded": false,
   "reasoning": null,
   "reasoning_recorded": false,
   "request_bytes": 483,
   "request_id": "req_demo0001",
+  "resolved_model": "deepseek-flash",
   "response_bytes": 0,
+  "session_id": "session-ebf36761-3295-4881-bbec-73f80c9a4589",
   "status": "completed",
-  "truncated": false
+  "title": "",
+  "truncated": false,
+  "usage": {
+   "attempts": 1,
+   "charge_micros": 2468,
+   "cost_micros": 1234,
+   "input_tokens": 1200,
+   "latency_ms": 900,
+   "metered": true,
+   "output_tokens": 34,
+   "reasoning_tokens": 12,
+   "ttft_ms": 120
+  },
+  "workspace": "/home/winger/work/ai_gateway"
  },
  "/stats": {
   "registry": {

@@ -65,6 +65,10 @@ def main():
     # --refresh does not silently drop the fixtures those views depend on.
     fixtures["/keys"] = call("/admin/api/v1/keys", cookie)
     fixtures["/requests"] = call("/admin/api/v1/requests?days=7&limit=50", cookie)
+    # The dimension breakdown and the model filter list share this endpoint (M27), so a
+    # --refresh has to capture it or the statistics card renders empty.
+    fixtures["/requests/dimensions"] = call(
+        "/admin/api/v1/requests/dimensions?days=7&group_by=model&limit=20", cookie)
     for row in fixtures["/requests"].get("data", [])[:1]:
         fixtures[f"/requests/{row['request_id']}"] = call(f"/admin/api/v1/requests/{row['request_id']}", cookie)
     fixtures["/provider-kinds"] = call("/admin/api/v1/provider-kinds", cookie)

@@ -25,10 +25,12 @@ type AdminStore interface {
 	GetAccountByName(ctx context.Context, name string) (*domain.Account, error)
 	ListAPIKeys(ctx context.Context, accountID int64) ([]*domain.APIKey, error)
 	UpsertAPIKey(ctx context.Context, k *domain.APIKey) (int64, error)
-	ListRequestLogs(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*domain.RequestLogRecord, error)
-	ListRequestLogsPage(ctx context.Context, accountID int64, from, to time.Time, limit, offset int) ([]*domain.RequestLogRecord, error)
-	CountRequestLogs(ctx context.Context, accountID int64, from, to time.Time) (int, error)
+	ListRequestLogs(ctx context.Context, f domain.RequestLogFilter, limit int) ([]*domain.RequestLogRecord, error)
+	ListRequestLogsPage(ctx context.Context, f domain.RequestLogFilter, limit, offset int) ([]*domain.RequestLogRecord, error)
+	CountRequestLogs(ctx context.Context, f domain.RequestLogFilter) (int, error)
 	GetRequestLog(ctx context.Context, requestID string) (*domain.RequestLogRecord, error)
+	RequestUsages(ctx context.Context, requestIDs []string) (map[string]*domain.RequestUsage, error)
+	RequestLogDimensions(ctx context.Context, f domain.RequestLogFilter, groupBy string, limit int) ([]domain.RequestLogDimensionRow, error)
 	InsertAudit(ctx context.Context, e *AuditEntry) error
 	ListAudit(ctx context.Context, limit int) ([]*AuditEntry, error)
 	ListAuditPage(ctx context.Context, limit, offset int) ([]*AuditEntry, error)
@@ -430,40 +432,160 @@ func (s *Server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.adminActor(w, r, false); !ok {
 		return
 	}
-	accountID := int64(0)
-	if raw := r.URL.Query().Get("account_id"); raw != "" {
-		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil {
-			accountID = parsed
-		}
-	}
 	page, err := pageRequests.params(r)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	from, to := adminWindow(r)
-	rows, err := s.deps.AdminStore.ListRequestLogsPage(r.Context(), accountID, from, to, page.Limit, page.Offset)
+	filter := requestLogFilterFromQuery(r)
+	rows, err := s.deps.AdminStore.ListRequestLogsPage(r.Context(), filter, page.Limit, page.Offset)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	total, err := s.deps.AdminStore.CountRequestLogs(r.Context(), accountID, from, to)
+	total, err := s.deps.AdminStore.CountRequestLogs(r.Context(), filter)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	// One query for the whole page: the token and money columns live in usage_records, and
+	// joining them into the page query would put a group-by in front of the ORDER BY the
+	// console's paging depends on.
+	usages, err := s.requestUsages(r, rows)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, map[string]any{
+		payload := map[string]any{
 			"request_id": row.RequestID, "account_id": row.AccountID, "api_key_id": row.APIKeyID,
 			"endpoint": row.Endpoint, "status": row.Status,
 			"created_at":     row.CreatedAt.Format(time.RFC3339),
 			"input_recorded": row.RequestJSON != "", "reasoning_recorded": row.ReasoningRecorded,
 			"output_text_recorded": row.OutputTextRecorded, "truncated": row.Truncated,
 			"request_bytes": row.RequestBytes,
-		})
+			"client":        row.Client, "model": row.Model, "resolved_model": row.ResolvedModel,
+			"workspace": row.Workspace, "session_id": row.SessionID, "call_kind": row.CallKind,
+			"title": row.Title,
+		}
+		// The usage object is always present: "no usage row" (a locally rejected
+		// request) and "consumed nothing" are different statements, and a missing key
+		// would collapse them into the same blank cell.
+		payload["usage"] = usagePayload(usages[row.RequestID])
+		out = append(out, payload)
 	}
 	writeList(w, out, total, page)
+}
+
+// requestLogFilterFromQuery reads the account, window and identity filters the console and
+// MCP pass. Unknown or empty values are simply "no filter"; a dimension filter is an exact
+// match, which is what the indexed columns can serve.
+func requestLogFilterFromQuery(r *http.Request) domain.RequestLogFilter {
+	query := r.URL.Query()
+	filter := domain.RequestLogFilter{
+		Client:        query.Get("client"),
+		Model:         query.Get("model"),
+		ResolvedModel: query.Get("resolved_model"),
+		Workspace:     query.Get("workspace"),
+		SessionID:     query.Get("session_id"),
+		CallKind:      query.Get("call_kind"),
+	}
+	if raw := query.Get("account_id"); raw != "" {
+		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			filter.AccountID = parsed
+		}
+	}
+	filter.From, filter.To = adminWindow(r)
+	return filter
+}
+
+// requestUsages loads the page's metered consumption in one query.
+func (s *Server) requestUsages(r *http.Request, rows []*domain.RequestLogRecord) (map[string]*domain.RequestUsage, error) {
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.RequestID)
+	}
+	return s.deps.AdminStore.RequestUsages(r.Context(), ids)
+}
+
+// usagePayload renders one request's consumption. metered=false is reported as such
+// instead of as zero: a locally rejected request has no usage row on purpose, and showing
+// it as "0 tokens" would read as "it consumed nothing".
+func usagePayload(usage *domain.RequestUsage) map[string]any {
+	if usage == nil {
+		return map[string]any{"metered": false}
+	}
+	return map[string]any{
+		"metered":          usage.Metered,
+		"attempts":         usage.Attempts,
+		"input_tokens":     usage.InputTokens,
+		"output_tokens":    usage.OutputTokens,
+		"reasoning_tokens": usage.ReasoningTokens,
+		"cost_micros":      usage.CostMicros,
+		"charge_micros":    usage.ChargeMicros,
+		"latency_ms":       usage.LatencyMS,
+		"ttft_ms":          usage.TTFTMS,
+	}
+}
+
+// validRequestLogDimension reports whether the store can group by this dimension. The
+// check lives here so an unknown value is a 400 naming the accepted set, rather than a
+// store error surfacing as a 500.
+func validRequestLogDimension(groupBy string) bool {
+	for _, name := range store.RequestLogDimensionNames {
+		if name == groupBy {
+			return true
+		}
+	}
+	return false
+}
+
+// handleAdminRequestDimensions groups recorded requests by one identity dimension and sums
+// what they consumed. It is the "statistics" half of the request log: which client, model,
+// workspace or session is producing the traffic and the spend.
+func (s *Server) handleAdminRequestDimensions(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.adminActor(w, r, false); !ok {
+		return
+	}
+	groupBy := strings.TrimSpace(r.URL.Query().Get("group_by"))
+	if groupBy == "" {
+		groupBy = "client"
+	}
+	if !validRequestLogDimension(groupBy) {
+		writeAPIError(w, toAPIError(domain.ErrInvalidRequest(
+			"group_by must be one of "+strings.Join(store.RequestLogDimensionNames, ", ")).WithParam("group_by")))
+		return
+	}
+	limit := adminLimit(r, 20, 200)
+	filter := requestLogFilterFromQuery(r)
+	rows, err := s.deps.AdminStore.RequestLogDimensions(r.Context(), filter, groupBy, limit)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		payload := map[string]any{
+			"key": row.Key, "requests": row.Requests, "metered": row.Metered,
+			"first_seen":   row.FirstSeen.Format(time.RFC3339),
+			"last_seen":    row.LastSeen.Format(time.RFC3339),
+			"input_tokens": row.InputTokens, "output_tokens": row.OutputTokens,
+			"reasoning_tokens": row.ReasoningTokens,
+			"cost_micros":      row.CostMicros, "charge_micros": row.ChargeMicros,
+		}
+		// A session owns one title and one workspace; for the other groupings these say
+		// nothing, so they are only reported where they mean something.
+		if groupBy == "session" {
+			payload["title"] = row.Title
+			payload["workspace"] = row.Workspace
+		}
+		out = append(out, payload)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"group_by": groupBy, "days": adminDays(r), "limit": limit,
+		"dimensions": store.RequestLogDimensionNames, "rows": out,
+	})
 }
 
 func (s *Server) handleAdminRequestDetail(w http.ResponseWriter, r *http.Request) {
@@ -475,7 +597,12 @@ func (s *Server) handleAdminRequestDetail(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	usage, err := s.deps.AdminStore.RequestUsages(r.Context(), []string{row.RequestID})
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	payload := map[string]any{
 		"request_id": row.RequestID, "account_id": row.AccountID, "api_key_id": row.APIKeyID,
 		"endpoint": row.Endpoint, "status": row.Status,
 		"created_at":     row.CreatedAt.Format(time.RFC3339),
@@ -485,7 +612,12 @@ func (s *Server) handleAdminRequestDetail(w http.ResponseWriter, r *http.Request
 		"input_recorded": row.RequestJSON != "", "reasoning_recorded": row.ReasoningRecorded,
 		"output_text_recorded": row.OutputTextRecorded, "truncated": row.Truncated,
 		"request_bytes": row.RequestBytes, "response_bytes": row.ResponseBytes,
-	})
+		"client": row.Client, "model": row.Model, "resolved_model": row.ResolvedModel,
+		"workspace": row.Workspace, "session_id": row.SessionID, "call_kind": row.CallKind,
+		"title": row.Title,
+		"usage": usagePayload(usage[row.RequestID]),
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) handleAdminAuditLogs(w http.ResponseWriter, r *http.Request) {
@@ -592,13 +724,18 @@ func adminLimit(r *http.Request, def, max int) int {
 
 func adminWindow(r *http.Request) (time.Time, time.Time) {
 	now := time.Now().UTC()
-	from := now.AddDate(0, 0, -7)
+	return now.AddDate(0, 0, -adminDays(r)), now
+}
+
+// adminDays is the effective window of adminWindow, in days, so a response can echo the
+// window it actually used rather than the one that was asked for.
+func adminDays(r *http.Request) int {
 	if raw := r.URL.Query().Get("days"); raw != "" {
 		if days, err := strconv.Atoi(raw); err == nil && days > 0 && days <= 365 {
-			from = now.AddDate(0, 0, -days)
+			return days
 		}
 	}
-	return from, now
+	return 7
 }
 
 func timeOrNil(t *time.Time) any {

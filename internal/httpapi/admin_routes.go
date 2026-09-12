@@ -3,6 +3,8 @@ package httpapi
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/winger/ai-gateway/internal/store"
 )
 
 // This file is the single source of truth for the management surface: every
@@ -70,6 +72,20 @@ func bodyOptional(name, typ, desc string) adminField {
 func enumField(field adminField, values ...string) adminField {
 	field.Enum = values
 	return field
+}
+
+// dimensionQueryFields are the identity filters every request-log read accepts. They are
+// declared once so the console, MCP's admin_describe and the store's filter cannot drift
+// apart.
+func dimensionQueryFields() []adminField {
+	return []adminField{
+		queryParam("client", "string", "按客户端过滤：dsh | codex | unknown"),
+		queryParam("model", "string", "按请求的模型名过滤（账单口径，与发票分组一致）"),
+		queryParam("resolved_model", "string", "按路由后的规范模型名过滤"),
+		queryParam("workspace", "string", "按工作区根路径过滤"),
+		queryParam("session_id", "string", "按会话 id 过滤（客户端的 prompt_cache_key）"),
+		queryParam("call_kind", "string", "按调用类型过滤：agent | title"),
+	}
 }
 
 // prop describes one property of a hand-written body schema.
@@ -380,15 +396,30 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/requests", Handler: s.handleAdminRequests,
 			Name: "admin_list_requests", Group: groupRequests, Role: roleViewer,
-			Summary: "全部账户的请求日志（跨账户视图，可按账户与天数过滤）",
-			Query: append(pageRequests.fields(),
+			Summary: "全部账户的请求日志（跨账户视图，可按账户、天数与身份维度过滤；带该请求的 token 与成本）",
+			Query: append(append(pageRequests.fields(),
 				queryParam("account_id", "integer", "只看某个账户"),
 				queryParam("days", "integer", "回溯天数，默认 7，最大 365")),
+				dimensionQueryFields()...),
+		},
+		{
+			// The literal path wins over /requests/{id} in Go's ServeMux, so a request
+			// whose x-request-id is literally "dimensions" has no reachable detail page.
+			// Request ids are req_* (internal/ids), so that is accepted rather than
+			// worked around; /requests/prune has the same shape.
+			Method: "GET", Path: "/admin/api/v1/requests/dimensions", Handler: s.handleAdminRequestDimensions,
+			Name: "admin_request_dimensions", Group: groupRequests, Role: roleViewer,
+			Summary: "请求日志的维度统计：按客户端/模型/工作区/会话/调用类型分组，汇总请求数、token 与成本",
+			Query: append([]adminField{
+				queryParam("days", "integer", "回溯天数，默认 7，最大 365"),
+				queryParam("limit", "integer", "返回的分组数，默认 20，最大 200"),
+				enumField(queryParam("group_by", "string", "分组维度"), append([]string{"client"}, store.RequestLogDimensionNames...)...),
+			}, dimensionQueryFields()...),
 		},
 		{
 			Method: "GET", Path: "/admin/api/v1/requests/{id}", Handler: s.handleAdminRequestDetail,
 			Name: "admin_get_request", Group: groupRequests, Role: roleViewer,
-			Summary: "单条请求详情（输入/思考/输出，按录制开关决定是否可见；默认只记用户输入）",
+			Summary: "单条请求详情（输入/思考/输出，按录制开关决定是否可见；含身份维度与 token/成本）",
 			Params:  []adminField{pathParam("id", "请求 id（x-request-id）")},
 		},
 		{

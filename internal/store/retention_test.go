@@ -46,7 +46,7 @@ func TestPruneRequestLogsHonoursCutoffAndLimit(t *testing.T) {
 		t.Fatalf("only the second old row was due, deleted %d", deleted)
 	}
 
-	logs, err := db.ListRequestLogs(ctx, 0, time.Time{}, time.Time{}, 50)
+	logs, err := db.ListRequestLogs(ctx, domain.RequestLogFilter{AccountID: 0, From: time.Time{}, To: time.Time{}}, 50)
 	if err != nil {
 		t.Fatal(err)
 	}

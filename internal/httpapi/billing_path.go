@@ -162,7 +162,7 @@ func (s *Server) rejectForQuota(
 			},
 		})
 	}
-	s.recordDenied(r.Context(), key, account, req, apiErr)
+	s.recordDenied(r.Context(), key, account, req, apiErr, clientHintFromRequest(r))
 	writeAPIError(w, apiErr)
 }
 
@@ -173,16 +173,21 @@ func (s *Server) rejectForQuota(
 // rejected request carries exactly the same client content, and this path used to store
 // the whole body with no redaction at all — the one place where the recording policy and
 // its redaction rules were not applied.
-func (s *Server) recordDenied(ctx context.Context, key *domain.APIKey, account *domain.Account, req *responses.Request, apiErr *domain.APIError) {
+func (s *Server) recordDenied(ctx context.Context, key *domain.APIKey, account *domain.Account, req *responses.Request, apiErr *domain.APIError, clientHint string) {
 	if s.deps.Records == nil {
 		return
 	}
-	input := s.recordInput(ctx, key, req)
+	input := s.recordInput(ctx, key, req, clientHint)
 	record := &domain.RequestLogRecord{
 		RequestID:       requestIDFrom(ctx),
 		APIKeyID:        key.ID,
 		AccountID:       account.ID,
 		Endpoint:        "/v1/responses",
+		Client:          input.Dims.Client,
+		Model:           input.Model,
+		Workspace:       input.Dims.Workspace,
+		SessionID:       input.Dims.SessionID,
+		CallKind:        input.Dims.CallKind,
 		RequestJSON:     input.Payload,
 		RequestBytes:    input.Bytes,
 		Truncated:       input.Truncated,

@@ -163,12 +163,17 @@ type Billing struct {
 // "inherit", and internal/config's tests assert the two lists never drift apart.
 var RecordingInputModes = []string{"full", "user", "metadata", "off"}
 
-// Recording controls content capture (input text vs thinking/final output text).
+// Recording controls content capture (input text vs thinking/final output text) plus the
+// identity dimensions every row carries.
 type Recording struct {
 	RecordInput      string `yaml:"record_input"` // full|user|metadata|off
 	RecordReasoning  bool   `yaml:"record_reasoning"`
 	RecordOutputText bool   `yaml:"record_output_text"`
-	MaxBytes         int    `yaml:"max_bytes"`
+	// RecordTitle keeps the session title produced by a client's title call. It is
+	// metadata about the session rather than an answer to the user, so it has its own
+	// switch and is on by default; it is only ever written on the title call's own row.
+	RecordTitle bool `yaml:"record_title"`
+	MaxBytes    int  `yaml:"max_bytes"`
 	// RetentionDays is how long recorded content lives: request logs older than the
 	// window are pruned daily, and a stored response expires with it. 0 disables cleanup.
 	RetentionDays int      `yaml:"retention_days"`
@@ -443,14 +448,18 @@ func Default() Config {
 			RecordInput:      "user",
 			RecordReasoning:  false,
 			RecordOutputText: false,
-			MaxBytes:         1048576,
-			RetentionDays:    30,
-			QueueSize:        16384,
-			BatchFlushMS:     250,
-			BatchMaxRows:     256,
-			BatchMaxBytes:    16 << 20,
-			BatchQueueRows:   4096,
-			BatchQueueBytes:  32 << 20,
+			// Session titles are on by default: they are the one piece of a client's
+			// traffic that makes a request log readable at a glance, and they are
+			// metadata about the session rather than the user's own content.
+			RecordTitle:     true,
+			MaxBytes:        1048576,
+			RetentionDays:   30,
+			QueueSize:       16384,
+			BatchFlushMS:    250,
+			BatchMaxRows:    256,
+			BatchMaxBytes:   16 << 20,
+			BatchQueueRows:  4096,
+			BatchQueueBytes: 32 << 20,
 		},
 		MCP: MCP{
 			Enabled: true, MaxQueryRows: 1000, RequestWindowDays: 30,

@@ -1208,7 +1208,7 @@ func TestPruneRequestsEndpointAndStats(t *testing.T) {
 		t.Fatalf("retention is on by default: %v", payload)
 	}
 
-	logs, err := f.db.ListRequestLogs(ctx, 0, time.Time{}, time.Time{}, 50)
+	logs, err := f.db.ListRequestLogs(ctx, domain.RequestLogFilter{AccountID: 0, From: time.Time{}, To: time.Time{}}, 50)
 	if err != nil {
 		t.Fatal(err)
 	}

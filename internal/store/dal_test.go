@@ -344,7 +344,7 @@ func TestListRequestLogsTreatsZeroAsEveryAccount(t *testing.T) {
 		}
 	}
 
-	all, err := db.ListRequestLogs(ctx, 0, time.Time{}, time.Time{}, 50)
+	all, err := db.ListRequestLogs(ctx, domain.RequestLogFilter{AccountID: 0, From: time.Time{}, To: time.Time{}}, 50)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestListRequestLogsTreatsZeroAsEveryAccount(t *testing.T) {
 		t.Fatalf("account_id 0 returned %d rows, want every account's 2", len(all))
 	}
 
-	one, err := db.ListRequestLogs(ctx, first, time.Time{}, time.Time{}, 50)
+	one, err := db.ListRequestLogs(ctx, domain.RequestLogFilter{AccountID: first, From: time.Time{}, To: time.Time{}}, 50)
 	if err != nil {
 		t.Fatal(err)
 	}

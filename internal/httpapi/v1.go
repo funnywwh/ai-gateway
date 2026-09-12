@@ -251,7 +251,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Stream {
 			_, _ = assembler.Fail(payload)
-			s.persist(ctx, key, account, req, plan.Resolved.Canonical, 0, assembler, "failed")
+			s.persist(ctx, key, account, req, plan.Resolved.Canonical, 0, assembler, "failed", clientHintFromRequest(r))
 		} else {
 			writeAPIError(w, toAPIError(lastErr))
 		}
@@ -308,7 +308,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 	}
 
-	s.persist(ctx, key, account, req, canonical, providerID, assembler, status)
+	s.persist(ctx, key, account, req, canonical, providerID, assembler, status, clientHintFromRequest(r))
 	ticket.Settle(totalTokens(assembler.Usage()))
 	_ = startedAt
 }
@@ -426,6 +426,7 @@ func (s *Server) persist(
 	providerID int64,
 	assembler *responses.Assembler,
 	status string,
+	clientHint string,
 ) {
 	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
 	defer cancel()
@@ -449,7 +450,10 @@ func (s *Server) persist(
 
 	// One computation feeds the stored response, the request log and the hook event, so
 	// the three can never disagree about what was recorded under which policy.
-	input := s.recordInput(auditCtx, key, req)
+	input := s.recordInput(auditCtx, key, req, clientHint)
+	// The routed model is only known once routing succeeded; a locally rejected request
+	// keeps the empty value, which is the honest answer for "it never reached a model".
+	input.Resolved = canonical
 
 	var storedResp *domain.ResponseRecord
 	if req.Stored() {
@@ -516,12 +520,21 @@ func (s *Server) persist(
 	}
 }
 
-// inputRecord is one request's recorded input under the key's effective policy.
+// inputRecord is one request's recorded input under the key's effective policy, plus the
+// identity dimensions the row carries.
+//
+// The dimensions are deliberately not part of the policy: they are facts about which
+// client, model and workspace the request came from, not content, so they are recorded
+// even when record_input is "off" (which keeps a row with no body at all).
 type inputRecord struct {
 	Mode      string // full|user|metadata|off
 	Payload   string // the stored document ("" for metadata and off)
 	Bytes     int    // serialized size of the whole request body
 	Truncated bool
+
+	Dims     responses.Dimensions // client / workspace / session / call_kind
+	Model    string               // the model the client asked for (billed dimension)
+	Resolved string               // the model routing picked; set by persist
 }
 
 // recordInput applies the input channel of the recording policy to one request.
@@ -531,9 +544,12 @@ type inputRecord struct {
 // final text. The default here is "user": only the user's own input is stored, with a
 // tally of what was left out. "full" keeps the whole body for the times when an upstream
 // 400 has to be diagnosed against the exact bytes the client sent.
-func (s *Server) recordInput(ctx context.Context, key *domain.APIKey, req *responses.Request) inputRecord {
+func (s *Server) recordInput(ctx context.Context, key *domain.APIKey, req *responses.Request, clientHint string) inputRecord {
 	cfg := s.deps.Config.Recording
 	rec := inputRecord{Mode: cfg.InputModeFor(key.RecordInputMode)}
+	// Identity first: it is recorded under every input policy, including "off".
+	rec.Dims = s.redactDimensions(req.Dimensions(clientHint))
+	rec.Model = s.redactDimension("model", strings.TrimSpace(req.Model))
 	if rec.Mode == "off" {
 		return rec
 	}
@@ -598,6 +614,12 @@ func (s *Server) recordContent(
 		AccountID:        account.ID,
 		Endpoint:         "/v1/responses",
 		Status:           status,
+		Client:           input.Dims.Client,
+		Model:            input.Model,
+		ResolvedModel:    input.Resolved,
+		Workspace:        input.Dims.Workspace,
+		SessionID:        input.Dims.SessionID,
+		CallKind:         input.Dims.CallKind,
 		RecordInputMode:  input.Mode,
 		RecordReasoning:  recordReasoning,
 		RecordOutputText: recordOutput,
@@ -623,6 +645,13 @@ func (s *Server) recordContent(
 			rec.Truncated = true
 		}
 		rec.ResponseText = text
+	}
+	// A session title is metadata about the session, not the answer to a user's question:
+	// it is kept even when final-output recording is off, under its own switch. It is only
+	// ever written on the row of the title call itself (call_kind=title) — no other row
+	// produced it, and copying it around would be inventing provenance.
+	if input.Dims.CallKind == responses.CallKindTitle && cfg.RecordTitle {
+		rec.Title = responses.TitleOf(assembler.Text())
 	}
 	rec.ResponseBytes = len(rec.ResponseReasoning) + len(rec.ResponseText)
 
@@ -786,6 +815,43 @@ var sensitiveKeys = map[string]bool{
 	"api_key": true, "apikey": true, "authorization": true, "password": true,
 	"secret": true, "token": true, "access_token": true, "refresh_token": true,
 	"credentials": true,
+}
+
+// redactDimensions applies recording.redact_paths to the identity columns. A workspace
+// path is exactly the kind of value an operator lists there, and a column that ignored the
+// list would quietly defeat the setting the stored body honours.
+func (s *Server) redactDimensions(d responses.Dimensions) responses.Dimensions {
+	d.Client = s.redactDimension("client", d.Client)
+	d.Workspace = s.redactDimension("workspace", d.Workspace)
+	d.SessionID = s.redactDimension("session_id", d.SessionID)
+	d.CallKind = s.redactDimension("call_kind", d.CallKind)
+	return d
+}
+
+// redactDimension blanks one identity value when its column name is named in
+// recording.redact_paths (or is a prefix of a listed path).
+func (s *Server) redactDimension(column, value string) string {
+	if value == "" {
+		return ""
+	}
+	if matchesPath(column, s.deps.Config.Recording.RedactPaths) {
+		return ""
+	}
+	return value
+}
+
+// clientHintFromRequest returns the User-Agent the identity extractor may fall back on.
+// It is never stored: it only maps onto the client vocabulary, and a client that sends
+// nothing is still identified by what it actually put in the request body.
+func clientHintFromRequest(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	hint := strings.TrimSpace(r.Header.Get("User-Agent"))
+	if len(hint) > 64 {
+		hint = hint[:64]
+	}
+	return hint
 }
 
 // redact removes credentials from a recorded payload, then applies operator-configured

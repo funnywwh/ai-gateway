@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"github.com/winger/ai-gateway/internal/domain"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -304,7 +305,7 @@ func TestFailedRequestIsRecordedAfterTheClientHungUp(t *testing.T) {
 	rec := httptest.NewRecorder()
 	f.handler.ServeHTTP(rec, req)
 
-	logs, err := f.db.ListRequestLogs(context.Background(), f.key.AccountID, time.Time{}, time.Time{}, 10)
+	logs, err := f.db.ListRequestLogs(context.Background(), domain.RequestLogFilter{AccountID: f.key.AccountID, From: time.Time{}, To: time.Time{}}, 10)
 	if err != nil {
 		t.Fatalf("listing request logs: %v", err)
 	}

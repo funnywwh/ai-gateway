@@ -636,9 +636,9 @@ func TestDeniedRequestGoesThroughTheRecordingPolicy(t *testing.T) {
 	// The request id normally arrives from the middleware; without it there is nothing to
 	// key the row on and the write is refused.
 	ctx = context.WithValue(ctx, ctxRequestID, "req_denied0001")
-	f.srv.recordDenied(ctx, f.key, account, req, domain.ErrInsufficientQuota("no funds"))
+	f.srv.recordDenied(ctx, f.key, account, req, domain.ErrInsufficientQuota("no funds"), "")
 
-	logs, err := f.db.ListRequestLogs(ctx, f.key.AccountID, time.Time{}, time.Time{}, 10)
+	logs, err := f.db.ListRequestLogs(ctx, domain.RequestLogFilter{AccountID: f.key.AccountID, From: time.Time{}, To: time.Time{}}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -687,9 +687,9 @@ func TestDeniedRequestIsRedacted(t *testing.T) {
 	// The request id normally arrives from the middleware; without it there is nothing to
 	// key the row on and the write is refused.
 	ctx = context.WithValue(ctx, ctxRequestID, "req_denied0002")
-	f.srv.recordDenied(ctx, key, account, req, domain.ErrInsufficientQuota("no funds"))
+	f.srv.recordDenied(ctx, key, account, req, domain.ErrInsufficientQuota("no funds"), "")
 
-	logs, err := f.db.ListRequestLogs(ctx, f.key.AccountID, time.Time{}, time.Time{}, 10)
+	logs, err := f.db.ListRequestLogs(ctx, domain.RequestLogFilter{AccountID: f.key.AccountID, From: time.Time{}, To: time.Time{}}, 10)
 	if err != nil || len(logs) != 1 {
 		t.Fatalf("request log = %v (err %v)", logs, err)
 	}
@@ -954,9 +954,9 @@ func TestDeniedRequestSurvivesACancelledClient(t *testing.T) {
 	cancel()
 
 	f.srv.recordDenied(ctx, f.key, &domain.Account{ID: f.key.AccountID, Name: "acme"}, req,
-		domain.ErrInsufficientQuota("no funds"))
+		domain.ErrInsufficientQuota("no funds"), "")
 
-	logs, err := f.db.ListRequestLogs(context.Background(), f.key.AccountID, time.Time{}, time.Time{}, 10)
+	logs, err := f.db.ListRequestLogs(context.Background(), domain.RequestLogFilter{AccountID: f.key.AccountID, From: time.Time{}, To: time.Time{}}, 10)
 	if err != nil || len(logs) != 1 {
 		t.Fatalf("the rejected request must be recorded despite the cancelled client: %v (%v)", logs, err)
 	}

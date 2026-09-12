@@ -72,6 +72,16 @@ const modalText = () => modal().textContent;
 const pageText = () => document.getElementById('page').textContent;
 const find = (label) => [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === label);
 const settle = async () => { for (let i = 0; i < 300; i++) await Promise.resolve(); };
+// groupBySelected drives the request log's statistics card: the grouping select is the one
+// offering the call-kind dimension, which no other select on the page has.
+const groupBySelected = (value) => {
+  const select = [...document.querySelectorAll('select')]
+    .find((s) => [...s.options].some((o) => o.value === 'call_kind'));
+  if (!select) return false;
+  select.value = value;
+  select.dispatchEvent(new Event('change'));
+  return true;
+};
 const closeButton = () => modal().querySelector('.modal-head .modal-close');
 const closeChecks = () => {
   const btn = closeButton();
@@ -120,8 +130,34 @@ try {
     await renderRequests({ page: document.getElementById('page'), actions: document.getElementById('actions'), session: { role: 'admin' } });
     await settle();
     checks.tableRendered = pageText().includes('req_demo0001');
-    checks.recordingHint = pageText().includes('默认只记录用户输入');
-    checks.columns = ['输入', '输出文本', '思考文本'].every((c) => pageText().includes(c));
+    checks.recordingHint = pageText().includes('独立于正文口径记录的元数据');
+    checks.columns = ['输出文本', '客户端', '模型', '工作区', '会话', '类型', '标题', '成本'].every((c) => pageText().includes(c));
+    // The identity filters are the point of the page now: a client select, a model select
+    // filled from the statistics endpoint, and free-text session/workspace boxes.
+    checks.clientFilter = [...document.querySelectorAll('select')].some((s) => [...s.options].some((o) => o.value === 'codex'));
+    checks.modelFilter = [...document.querySelectorAll('select')].some((s) => [...s.options].some((o) => o.value === 'deepseek-flash'));
+    checks.sessionFilter = !!document.querySelector('input[placeholder^="会话 id"]');
+    // Identity columns render what was recorded, and the alias case shows both names.
+    checks.clientShown = pageText().includes('dsh') && pageText().includes('codex');
+    checks.aliasShown = pageText().includes('gpt-5.6-luna') && pageText().includes('← luna');
+    checks.titleShown = pageText().includes('从 dsh 和 codex 请求解析 workspace');
+    // Tokens come from the metering table; a request with no usage row says so instead of
+    // reporting a zero that would read as "it consumed nothing".
+    checks.tokensShown = pageText().includes('1,200 / 34');
+    checks.unmeteredShown = pageText().includes('未计量');
+    checks.costShown = pageText().includes('≈') || pageText().includes('USD') || pageText().includes('CNY');
+    checks.costFetched = (window.__fetched || []).includes('/requests/dimensions');
+    // The dimension card groups by an identity dimension and sums consumption per group.
+    checks.dimensionCard = pageText().includes('维度统计');
+    checks.dimensionRows = pageText().includes('deepseek-flash') && pageText().includes('已计量');
+    checks.dimensionMeteredGap = pageText().includes('1 / 2');
+    // The fetch stub strips the query string, so the grouping change is observed by the
+    // card asking the endpoint again rather than by reading the URL back.
+    const dimensionFetches = () => (window.__fetched || []).filter((p) => p === '/requests/dimensions').length;
+    const beforeRegroup = dimensionFetches();
+    groupBySelected('session');
+    await settle();
+    checks.dimensionRegrouped = dimensionFetches() > beforeRegroup;
     // The retention policy is reported from /stats: the window, what this process has
     // already pruned, and whether any write had to fall back to a skeleton row.
     checks.retentionWindow = pageText().includes('保留期 30 天');
@@ -150,6 +186,9 @@ try {
     checks.bytesShown = t.includes('请求正文 483 字节');
     checks.inputPanel = t.includes('ping from m23');
     checks.omittedTally = t.includes('omitted');
+    // The detail carries the identity and the metered consumption alongside the content.
+    checks.detailIdentity = t.includes('客户端：') && t.includes('会话：') && t.includes('路由到的模型：');
+    checks.detailUsage = t.includes('输入 tokens：') && t.includes('对客：');
     closeButton().click();
     await settle();
     checks.closeDismisses = modal().querySelectorAll('.modal, .modal-backdrop').length === 0;

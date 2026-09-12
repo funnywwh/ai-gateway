@@ -53,6 +53,7 @@ var expectedAdminPatterns = []string{
 	"GET /admin/api/v1/providers/{id}/models",
 	"GET /admin/api/v1/redemption-codes",
 	"GET /admin/api/v1/requests",
+	"GET /admin/api/v1/requests/dimensions",
 	"GET /admin/api/v1/requests/{id}",
 	"GET /admin/api/v1/router/explain",
 	"GET /admin/api/v1/routes",

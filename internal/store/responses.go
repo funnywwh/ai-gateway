@@ -131,16 +131,21 @@ func requestLogArgs(rec *domain.RequestLogRecord) ([]any, error) {
 		rec.ResponseReasoning, rec.ResponseText, boolInt(rec.ReasoningRecorded),
 		boolInt(rec.OutputTextRecorded), rec.RequestBytes, rec.ResponseBytes, boolInt(rec.Truncated),
 		rec.RecordInputMode, boolInt(rec.RecordReasoning), boolInt(rec.RecordOutputText),
-		rec.Status, unix(rec.CreatedAt),
+		rec.Status, unix(rec.CreatedAt), rec.Client, rec.Model, rec.ResolvedModel,
+		rec.Workspace, rec.SessionID, rec.CallKind, rec.Title,
 	}, nil
 }
 
+// The identity columns are inserted but never refreshed on conflict: a second write of the
+// same request id (the content-free skeleton retry) must not blank the identity the first
+// write captured.
 const putRequestLogSQL = `
 INSERT INTO request_logs(request_id, api_key_id, account_id, endpoint, request_json,
   response_reasoning, response_text, reasoning_recorded, output_text_recorded,
   request_bytes, response_bytes, truncated, record_input_mode, record_reasoning,
-  record_output_text, status, created_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  record_output_text, status, created_at, client, model, resolved_model, workspace,
+  session_id, call_kind, title)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(request_id) DO UPDATE SET
   response_reasoning = excluded.response_reasoning,
   response_text = excluded.response_text,
@@ -153,31 +158,15 @@ ON CONFLICT(request_id) DO UPDATE SET
 // GetRequestLog loads one recorded request/response pair.
 func (db *DB) GetRequestLog(ctx context.Context, requestID string) (*domain.RequestLogRecord, error) {
 	row := db.read.QueryRowContext(ctx, `
-SELECT id, request_id, api_key_id, account_id, endpoint, request_json, response_reasoning,
-       response_text, reasoning_recorded, output_text_recorded, request_bytes, response_bytes,
-       truncated, record_input_mode, record_reasoning, record_output_text, status, created_at
+SELECT `+requestLogColumns+`
 FROM request_logs WHERE request_id = ?`, requestID)
 
-	var (
-		rec                                 domain.RequestLogRecord
-		reasoningRecorded, outputRecorded   int
-		reasoningFlag, outputFlag, truncate int
-		createdAt                           int64
-	)
-	if err := row.Scan(&rec.ID, &rec.RequestID, &rec.APIKeyID, &rec.AccountID, &rec.Endpoint,
-		&rec.RequestJSON, &rec.ResponseReasoning, &rec.ResponseText, &reasoningRecorded,
-		&outputRecorded, &rec.RequestBytes, &rec.ResponseBytes, &truncate, &rec.RecordInputMode,
-		&reasoningFlag, &outputFlag, &rec.Status, &createdAt); err != nil {
+	rec, err := scanRequestLog(row)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, domain.ErrNotFound("request log " + requestID)
 		}
 		return nil, fmt.Errorf("store: get request log %s: %w", requestID, err)
 	}
-	rec.ReasoningRecorded = reasoningRecorded != 0
-	rec.OutputTextRecorded = outputRecorded != 0
-	rec.RecordReasoning = reasoningFlag != 0
-	rec.RecordOutputText = outputFlag != 0
-	rec.Truncated = truncate != 0
-	rec.CreatedAt = timeFromUnix(createdAt)
-	return &rec, nil
+	return rec, nil
 }
