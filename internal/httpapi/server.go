@@ -155,9 +155,6 @@ type Server struct {
 	// registered records every pattern handed to the mux (tests compare it against
 	// the table; it is never read on the request path).
 	registered []string
-	// chatAllowed is the management-endpoint allowlist console conversations may use. The
-	// route table is immutable after startup, so it is derived once.
-	chatAllowed map[string]bool
 	// chat is the console chat service (nil when the deployment disabled it).
 	chat ChatService
 	// chatSigner signs the short-lived preview tickets.
@@ -176,7 +173,6 @@ func New(deps Deps) *Server {
 	s := &Server{deps: deps, mux: http.NewServeMux()}
 	s.admin = s.adminRoutes()
 	s.adminIndex = newAdminEndpointIndex(s.admin)
-	s.chatAllowed = s.buildChatAllowlist()
 	s.chatSigner = newChatTicketSigner()
 	s.chat = s.newChatService()
 	if binder, ok := deps.MCP.(MCPBackendBinder); ok {

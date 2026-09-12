@@ -93,7 +93,6 @@ type Config struct {
 	MaxSkillBytes      int
 	RecordReasoning    bool
 	MaxOutputTokens    int
-	HighRiskTools      []string
 	SystemPrompt       string
 }
 
@@ -173,8 +172,8 @@ type Tools interface {
 }
 
 // Access is the authorization context of one turn. It is rebuilt from the database for
-// every tool call rather than trusted for the length of a turn: a viewer demoted or a
-// session switched back to read-only must take effect immediately.
+// every tool call rather than trusted for the length of a turn: a viewer demoted, a session
+// rebound to another token or a token revoked must take effect immediately.
 type Access struct {
 	OwnerID      int64
 	Username     string
@@ -182,6 +181,11 @@ type Access struct {
 	WriteMode    string
 	SessionID    string
 	SessionTitle string
+	// MCPTokenID is the MCP token this conversation acts as, and therefore the only source
+	// of its authority. The tool surface resolves it again on every call instead of trusting
+	// a scope captured here, so a revoked or expired token stops the conversation at the
+	// next call. Zero means unbound.
+	MCPTokenID int64
 }
 
 // Store is the owner-scoped persistence the service needs.
@@ -331,8 +335,71 @@ type SessionInput struct {
 	Model     string
 	AccountID int64
 	APIKeyID  int64
-	WriteMode string
-	SkillIDs  []int64
+	// MCPTokenID binds the MCP token this conversation acts as. It is the only input that
+	// decides authority; write_mode is derived from it and is not accepted from a client.
+	MCPTokenID int64
+	SkillIDs   []int64
+}
+
+// mcpTokenLookup is the optional persistence half of token binding. It is separate from
+// Store because the token table belongs to the MCP token store, not the chat store; a Store
+// that does not implement it simply cannot validate a binding at creation time (authority
+// still lives in the per-call resolution the tool surface does).
+type mcpTokenLookup interface {
+	GetMCPTokenByID(ctx context.Context, id int64) (*domain.MCPToken, error)
+}
+
+// resolveMCPToken loads the bound token and refuses one that is unusable right now. Checking
+// at binding time turns "your token was revoked an hour ago" into an error on the form
+// instead of a mystery failure on the first question.
+func (s *Service) resolveMCPToken(ctx context.Context, tokenID int64) (*domain.MCPToken, error) {
+	if tokenID <= 0 {
+		return nil, domain.ErrInvalidRequest("choose an MCP token for this conversation")
+	}
+	lookup, ok := s.store.(mcpTokenLookup)
+	if !ok {
+		return nil, domain.ErrInternal("this deployment cannot resolve MCP tokens")
+	}
+	token, err := lookup.GetMCPTokenByID(ctx, tokenID)
+	if err != nil {
+		if isNotFound(err) {
+			return nil, domain.ErrInvalidRequest("that MCP token no longer exists")
+		}
+		return nil, err
+	}
+	if token.Status != "active" {
+		return nil, domain.ErrForbidden("that MCP token is revoked; issue a new one before binding it")
+	}
+	if token.ExpiresAt != nil && time.Now().UTC().After(*token.ExpiresAt) {
+		return nil, domain.ErrForbidden("that MCP token has expired; issue a new one before binding it")
+	}
+	return token, nil
+}
+
+// MCP token scopes, as the token row stores them. They are spelled out here rather than
+// imported from internal/mcpsrv because the chat service must not depend on the MCP server
+// package (see the layering table in docs/architecture.md); the two spellings are held
+// together by TestChatScopeVocabularyMatchesMCP in the transport's test suite, which is the
+// one place both packages are legitimately visible.
+const scopeAdmin = "admin"
+
+// WritableScope names the one scope that makes a conversation able to write. It is exported
+// for that anti-drift assertion: without it, renaming the scope in internal/mcpsrv would
+// silently turn every console conversation read-only.
+func WritableScope() string { return scopeAdmin }
+
+// WriteModeForScope exposes writeModeFor to the same assertion.
+func WriteModeForScope(scope string) string { return writeModeFor(scope) }
+
+// writeModeFor derives the session's displayed write mode from the bound token's scope. The
+// token stays the authority; this field exists so the console can label a conversation and so
+// code holding only the session row can still tell read-only from writable. Anything that is
+// not an admin scope reads as read-only, so an unknown or empty scope can never widen access.
+func writeModeFor(scope string) string {
+	if strings.TrimSpace(scope) == scopeAdmin {
+		return domain.ChatWriteModeAllow
+	}
+	return domain.ChatWriteModeReadOnly
 }
 
 // CreateSession opens a conversation owned by the calling administrator. Only an admin may
@@ -351,15 +418,22 @@ func (s *Service) CreateSession(ctx context.Context, ownerID int64, username, ro
 	if in.AccountID <= 0 || in.APIKeyID <= 0 {
 		return nil, domain.ErrInvalidRequest("choose the account and API key that will be billed for this conversation")
 	}
-	writeMode := normalizeWriteMode(in.WriteMode)
-	if writeMode == domain.ChatWriteModeAllow && role != RoleAdmin {
-		return nil, domain.ErrForbidden("only an administrator may allow write operations in a conversation")
+	// An admin-scope token is an administrator credential, so binding one is an
+	// administrator act. Every caller today is already an admin; this is the anchor that
+	// keeps that true if the console ever admits another role.
+	token, err := s.resolveMCPToken(ctx, in.MCPTokenID)
+	if err != nil {
+		return nil, err
+	}
+	if writeModeFor(token.Scope) == domain.ChatWriteModeAllow && role != RoleAdmin {
+		return nil, domain.ErrForbidden("only an administrator may bind an admin-scope MCP token")
 	}
 	skills, err := s.normalizeSkillIDs(ctx, ownerID, in.SkillIDs)
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
+	tokenID := token.ID
 	session := &domain.ChatSession{
 		ID:          ids.ChatSession(),
 		OwnerUserID: ownerID,
@@ -367,7 +441,8 @@ func (s *Service) CreateSession(ctx context.Context, ownerID int64, username, ro
 		Model:       model,
 		AccountID:   in.AccountID,
 		APIKeyID:    in.APIKeyID,
-		WriteMode:   writeMode,
+		WriteMode:   writeModeFor(token.Scope),
+		MCPTokenID:  &tokenID,
 		SkillIDs:    skills,
 		Status:      "active",
 		CreatedAt:   now,
@@ -402,13 +477,20 @@ func (s *Service) UpdateSession(ctx context.Context, ownerID int64, role, id str
 		bindingChanged = true
 		session.APIKeyID = in.APIKeyID
 	}
-	if in.WriteMode != "" && normalizeWriteMode(in.WriteMode) != session.WriteMode {
-		bindingChanged = true
-		writeMode := normalizeWriteMode(in.WriteMode)
-		if writeMode == domain.ChatWriteModeAllow && role != RoleAdmin {
-			return nil, domain.ErrForbidden("only an administrator may allow write operations in a conversation")
+	if in.MCPTokenID > 0 {
+		token, err := s.resolveMCPToken(ctx, in.MCPTokenID)
+		if err != nil {
+			return nil, err
 		}
-		session.WriteMode = writeMode
+		if writeModeFor(token.Scope) == domain.ChatWriteModeAllow && role != RoleAdmin {
+			return nil, domain.ErrForbidden("only an administrator may bind an admin-scope MCP token")
+		}
+		if session.MCPTokenID == nil || *session.MCPTokenID != token.ID {
+			bindingChanged = true
+			tokenID := token.ID
+			session.MCPTokenID = &tokenID
+			session.WriteMode = writeModeFor(token.Scope)
+		}
 	}
 	if in.SkillIDs != nil {
 		skills, err := s.normalizeSkillIDs(ctx, ownerID, in.SkillIDs)
@@ -418,7 +500,7 @@ func (s *Service) UpdateSession(ctx context.Context, ownerID int64, role, id str
 		session.SkillIDs = skills
 	}
 	if bindingChanged {
-		if err := requireAdmin(role, "change the model, billing key or write permission of a conversation"); err != nil {
+		if err := requireAdmin(role, "change the model, billing key or MCP token of a conversation"); err != nil {
 			return nil, err
 		}
 	}
@@ -644,13 +726,6 @@ func requireAdmin(role, action string) error {
 		return nil
 	}
 	return domain.ErrForbidden("only an administrator may " + action + "; the gateway bills the account behind the selected API key, and a viewer role cannot spend it")
-}
-
-func normalizeWriteMode(mode string) string {
-	if strings.TrimSpace(mode) == domain.ChatWriteModeAllow {
-		return domain.ChatWriteModeAllow
-	}
-	return domain.ChatWriteModeReadOnly
 }
 
 func (s *Service) isBusy(sessionID string) bool {

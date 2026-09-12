@@ -53,35 +53,6 @@ func mcpActorFrom(ctx context.Context) (mcpActor, bool) {
 // adminBackend implements mcpsrv.Backend.
 type adminBackend struct{ s *Server }
 
-// chatToolPolicyKey carries the console-chat restriction to the bridge. It is an unexported
-// type, so only this package can install one, and the bridge reads it from the context the
-// management handler is dispatched with.
-type chatToolPolicyKey struct{}
-
-// chatToolPolicy is the set of management endpoints a console conversation may use.
-type chatToolPolicy struct {
-	// allow holds the permitted endpoint names. A nil map means "no restriction", which is
-	// what an MCP token gets; the console always installs a populated one.
-	allow map[string]bool
-}
-
-func withChatToolPolicy(ctx context.Context, p chatToolPolicy) context.Context {
-	return context.WithValue(ctx, chatToolPolicyKey{}, p)
-}
-
-func chatToolPolicyFrom(ctx context.Context) (chatToolPolicy, bool) {
-	p, ok := ctx.Value(chatToolPolicyKey{}).(chatToolPolicy)
-	return p, ok
-}
-
-// allows reports whether one endpoint may be listed, described or executed.
-func (p chatToolPolicy) allows(name string) bool {
-	if p.allow == nil {
-		return true
-	}
-	return p.allow[name]
-}
-
 // Tool names of the administrative entry points.
 const (
 	toolAdminEndpoints = "admin_endpoints"
@@ -186,7 +157,6 @@ func (b *adminBackend) CallAdmin(ctx context.Context, p mcpsrv.Principal, name s
 
 // listEndpoints answers the overview query.
 func (b *adminBackend) listEndpoints(ctx context.Context, args map[string]any) (any, error) {
-	policy, restricted := chatToolPolicyFrom(ctx)
 	filter := strings.ToLower(strings.TrimSpace(stringArg(args, "filter")))
 	group := strings.TrimSpace(stringArg(args, "group"))
 	limit := intArg(args, "limit")
@@ -197,11 +167,14 @@ func (b *adminBackend) listEndpoints(ctx context.Context, args map[string]any) (
 	groups := map[string]int{}
 	visible, hidden := 0, 0
 	for _, route := range b.s.adminIndex.routes {
-		if restricted && !policy.allows(route.Name) {
-			hidden++
-			continue
-		}
+		// Every route is listed, including the ones with NoTool: they appear with tool=null
+		// and a reason, so a model learns the boundary instead of assuming the endpoint does
+		// not exist and inventing a name. NoTool is a property of the surface itself, not of
+		// the caller — the caller's scope decides what it may CALL, which execute() enforces.
 		visible++
+		if !route.exposed() {
+			hidden++
+		}
 		groups[route.Group]++
 		if group != "" && route.Group != group {
 			continue
@@ -224,10 +197,7 @@ func (b *adminBackend) listEndpoints(ctx context.Context, args map[string]any) (
 		"note":      note,
 	}
 	if hidden > 0 {
-		// Saying so is better than a silently shorter list: the model learns the boundary
-		// instead of assuming the endpoint does not exist and inventing a name.
-		payload["unavailable_from_console_chat"] = hidden
-		payload["unavailable_reason"] = chatToolRefusalReason
+		payload["unavailable_over_mcp"] = hidden
 	}
 	return payload, nil
 }
@@ -239,7 +209,6 @@ func endpointMatches(route adminRoute, filter string) bool {
 
 // describeEndpoints answers the "how do I call this" query.
 func (b *adminBackend) describeEndpoints(ctx context.Context, args map[string]any) (any, error) {
-	policy, restricted := chatToolPolicyFrom(ctx)
 	names := make([]string, 0, 4)
 	if name := strings.TrimSpace(stringArg(args, "name")); name != "" {
 		names = append(names, name)
@@ -259,9 +228,6 @@ func (b *adminBackend) describeEndpoints(ctx context.Context, args map[string]an
 		route, ok := b.s.adminIndex.lookup(name)
 		if !ok {
 			return nil, fmt.Errorf("unknown endpoint %q; call %s to list the available names", name, toolAdminEndpoints)
-		}
-		if restricted && !policy.allows(name) {
-			return nil, fmt.Errorf("%s cannot be called from the console chat: %s", name, chatToolRefusalReason)
 		}
 		out = append(out, route.detail())
 	}
@@ -283,9 +249,6 @@ func (b *adminBackend) execute(ctx context.Context, p mcpsrv.Principal, role str
 	}
 	if !route.exposed() {
 		return mcpsrv.ToolResult{}, fmt.Errorf("%s is not available over MCP: %s", name, route.NoTool)
-	}
-	if policy, restricted := chatToolPolicyFrom(ctx); restricted && !policy.allows(name) {
-		return mcpsrv.ToolResult{}, fmt.Errorf("%s cannot be called from the console chat: %s", name, chatToolRefusalReason)
 	}
 	if route.Role == roleAdmin && role != roleAdmin {
 		return mcpsrv.ToolResult{}, fmt.Errorf(

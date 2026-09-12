@@ -1146,3 +1146,34 @@
 - [ ] 观察项：工具循环的端到端（模型真的发起 `admin_request`）目前由 `internal/chat` 与
       `internal/httpapi` 的测试用脚本化 runner/假上游覆盖——内建 `testecho` **不会**发起工具调用，
       真机验证需要接一个会调用工具的模型
+
+### M33：智能问答改为 MCP 客户端（按令牌 scope 执行）
+
+- [x] 设计决策：控制台「智能问答」不再拥有专属写白名单，而是**当作一个 MCP 客户端**——
+      会话绑定 MCP 令牌，权限完全来自该令牌的 scope。旧的默认拒绝写允许清单、
+      `chat.high_risk_tools`、`SourceConsole` 身份全部删除，权限只剩一个决定点
+- [x] 迁移 `0011_chat_session_mcp_token.sql`：`chat_sessions.mcp_token_id`（可空、不回填，
+      旧会话保持「未绑定」需改绑）；`store.GetMCPTokenByID`；会话读写带上该列
+- [x] `internal/chat`：`Access`/`SessionInput` 改为携带 `MCPTokenID`；`CreateSession` 必须绑定
+      可用令牌（不存在/已撤销/已过期都在表单阶段就拒绝）；`UpdateSession` 改为改绑令牌；
+      `write_mode` 降级为按 scope 派生的展示字段（不再接受客户端设置）
+- [x] 分层：`internal/chat` 不 import `internal/mcpsrv`（`internal/arch` 断言），scope 名在
+      chat 侧本地拼写，并由 `internal/httpapi` 的 `TestChatScopeVocabularyMatchesMCP` 钉住等价
+- [x] `internal/httpapi/chat_tools.go` 重写为 MCP 客户端：每次调用构造 `POST /mcp` 请求并交给
+      同一个 `handleMCP`（复用仓库既有的「合成请求 + 注入身份」惯用法，见 `chatRunner`）；
+      保留端点名当工具名的折叠转发；JSON-RPC 错误转成 `isError` 结果而不打断整轮
+- [x] `handleMCP` 增加进程内 principal 注入分支（`withMCPPrincipal`，包内私有），
+      外部令牌鉴权路径一行未改
+- [x] 测试：`chat_test.go` 原「隐藏并拒绝高危接口」的断言整体重写为按 scope 分组的表驱动测试，
+      另加撤销/过期中途失效、只会存令牌 id（不存明文与 hash）、审计 actor 为 `mcp:<name>#<id>`、
+      工具面随 scope（14 / 11）、无令牌会话无法创建；`mcp_admin_test.go` 保持不动作为令牌路径不变量
+- [x] 界面：新建会话的「写权限」开关换成 MCP 令牌选择器（只列 active 且未过期，选中后显示
+      该 scope 的能力摘要）；会话头显示绑定的令牌与派生权限；`scripts/ui-harness` 同步更新
+- [ ] **待人工执行**（宿主终端）：`make build` + `scripts/local-run.sh restart`，硬刷新
+      http://127.0.0.1:8088/admin/ui/#/chat ——新建会话时选一个 `admin` scope 的令牌，
+      在智能问答里建账户/发 Key，确认账户出现在账户页、明文 Key 只返回一次并带提示、
+      `chat_tool_calls` 有记录、审计 actor 为 `mcp:<令牌名>#<id>`；再撤销该令牌，
+      确认同一会话的下一次提问明确失效
+- [ ] 观察项：明文凭据（API Key / MCP 令牌）现在会落进 `chat_tool_calls.result` 与会话记录。
+      当前只在响应里追加一次性提示，不做脱敏——静默改写会让「已落盘」这一事实不可见。
+      若日后要收紧，应做的是「返回后可选地从转录中清除」，而不是悄悄改内容

@@ -19,22 +19,24 @@ import (
 // than another administrator's data.
 
 const chatSessionCols = `id, owner_user_id, owner_username, title, model, account_id, api_key_id,
-	write_mode, skill_ids_json, status, message_count, tokens_in, tokens_out, tokens_reasoning,
-	last_message_at, created_at, updated_at`
+	write_mode, mcp_token_id, skill_ids_json, status, message_count, tokens_in, tokens_out,
+	tokens_reasoning, last_message_at, created_at, updated_at`
 
 func scanChatSession(row rowScanner) (*domain.ChatSession, error) {
 	var (
 		s          domain.ChatSession
 		skillsJSON string
+		mcpTokenID sql.NullInt64
 		lastMsg    sql.NullInt64
 		createdAt  int64
 		updatedAt  int64
 	)
 	if err := row.Scan(&s.ID, &s.OwnerUserID, &s.OwnerName, &s.Title, &s.Model, &s.AccountID,
-		&s.APIKeyID, &s.WriteMode, &skillsJSON, &s.Status, &s.MessageCount, &s.TokensIn,
+		&s.APIKeyID, &s.WriteMode, &mcpTokenID, &skillsJSON, &s.Status, &s.MessageCount, &s.TokensIn,
 		&s.TokensOut, &s.Reasoning, &lastMsg, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
+	s.MCPTokenID = nullInt64Ptr(mcpTokenID)
 	s.SkillIDs = decodeInt64List(skillsJSON)
 	s.LastMessage = timePtrFromNull(lastMsg)
 	s.CreatedAt = timeFromUnix(createdAt)
@@ -62,12 +64,12 @@ func (db *DB) CreateChatSession(ctx context.Context, s *domain.ChatSession) erro
 	}
 	if _, err := db.write.ExecContext(ctx, `
 INSERT INTO chat_sessions(id, owner_user_id, owner_username, title, model, account_id, api_key_id,
-  write_mode, skill_ids_json, status, message_count, tokens_in, tokens_out, tokens_reasoning,
-  last_message_at, created_at, updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  write_mode, mcp_token_id, skill_ids_json, status, message_count, tokens_in, tokens_out,
+  tokens_reasoning, last_message_at, created_at, updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		s.ID, s.OwnerUserID, s.OwnerName, s.Title, s.Model, s.AccountID, s.APIKeyID,
-		s.WriteMode, encodeInt64List(s.SkillIDs), s.Status, s.MessageCount, s.TokensIn,
-		s.TokensOut, s.Reasoning, unixPtr(s.LastMessage), unix(s.CreatedAt), unix(s.UpdatedAt)); err != nil {
+		s.WriteMode, int64PtrNull(s.MCPTokenID), encodeInt64List(s.SkillIDs), s.Status, s.MessageCount,
+		s.TokensIn, s.TokensOut, s.Reasoning, unixPtr(s.LastMessage), unix(s.CreatedAt), unix(s.UpdatedAt)); err != nil {
 		return fmt.Errorf("store: create chat session: %w", err)
 	}
 	return nil
@@ -131,10 +133,10 @@ func (db *DB) UpdateChatSession(ctx context.Context, s *domain.ChatSession) erro
 	}
 	res, err := db.write.ExecContext(ctx, `
 UPDATE chat_sessions SET title = ?, model = ?, account_id = ?, api_key_id = ?, write_mode = ?,
-  skill_ids_json = ?, status = ?, updated_at = ?
+  mcp_token_id = ?, skill_ids_json = ?, status = ?, updated_at = ?
 WHERE id = ? AND owner_user_id = ?`,
-		s.Title, s.Model, s.AccountID, s.APIKeyID, s.WriteMode, encodeInt64List(s.SkillIDs),
-		s.Status, unix(time.Now()), s.ID, s.OwnerUserID)
+		s.Title, s.Model, s.AccountID, s.APIKeyID, s.WriteMode, int64PtrNull(s.MCPTokenID),
+		encodeInt64List(s.SkillIDs), s.Status, unix(time.Now()), s.ID, s.OwnerUserID)
 	if err != nil {
 		return fmt.Errorf("store: update chat session: %w", err)
 	}

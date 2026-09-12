@@ -49,7 +49,8 @@ func (s *Server) newChatService() ChatService {
 	if !cfg.Enabled {
 		return nil
 	}
-	return chat.New(cfg, s.deps.ChatStore, &chatRunner{s: s}, &chatTools{s: s}, s.deps.Log)
+	return chat.New(cfg, s.deps.ChatStore, &chatRunner{s: s},
+		&chatTools{s: s, token: s.deps.MCPTokens, log: s.deps.Log}, s.deps.Log)
 }
 
 // chatConfig maps the gateway configuration onto the chat service's.
@@ -68,7 +69,6 @@ func chatConfig(cfg *config.Config) chat.Config {
 		MaxSkillBytes:      cfg.Chat.MaxSkillBytes,
 		RecordReasoning:    cfg.Chat.RecordReasoning,
 		MaxOutputTokens:    cfg.Chat.MaxOutputTokens,
-		HighRiskTools:      cfg.Chat.HighRiskTools,
 		SystemPrompt:       cfg.Chat.SystemPrompt,
 	}
 }
@@ -121,8 +121,11 @@ type chatSessionRequest struct {
 	Model     string  `json:"model"`
 	AccountID int64   `json:"account_id"`
 	APIKeyID  int64   `json:"api_key_id"`
-	WriteMode string  `json:"write_mode"`
-	SkillIDs  []int64 `json:"skill_ids"`
+	// MCPTokenID is the token this conversation acts as; it decides the tool surface and
+	// which endpoints may be written. write_mode is no longer accepted — it is derived from
+	// this token's scope, so a client cannot claim an authority the token does not carry.
+	MCPTokenID int64   `json:"mcp_token_id"`
+	SkillIDs   []int64 `json:"skill_ids"`
 }
 
 func (s *Server) handleAdminChatListSessions(w http.ResponseWriter, r *http.Request) {
@@ -160,14 +163,15 @@ func (s *Server) handleAdminChatCreateSession(w http.ResponseWriter, r *http.Req
 	}
 	session, err := s.chat.CreateSession(r.Context(), user.ID, user.Username, user.Role, chat.SessionInput{
 		Title: body.Title, Model: body.Model, AccountID: body.AccountID,
-		APIKeyID: body.APIKeyID, WriteMode: body.WriteMode, SkillIDs: body.SkillIDs,
+		APIKeyID: body.APIKeyID, MCPTokenID: body.MCPTokenID, SkillIDs: body.SkillIDs,
 	})
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
 	s.audit(r.Context(), user.Username, "chat.session_create", "chat_session", session.ID,
-		map[string]any{"model": session.Model, "account_id": session.AccountID, "write_mode": session.WriteMode}, "ok")
+		map[string]any{"model": session.Model, "account_id": session.AccountID,
+			"mcp_token_id": session.MCPTokenID, "write_mode": session.WriteMode}, "ok")
 	writeJSON(w, http.StatusCreated, chatSessionJSON(session, true))
 }
 
@@ -199,14 +203,15 @@ func (s *Server) handleAdminChatUpdateSession(w http.ResponseWriter, r *http.Req
 	}
 	session, err := s.chat.UpdateSession(r.Context(), user.ID, user.Role, r.PathValue("id"), chat.SessionInput{
 		Title: body.Title, Model: body.Model, AccountID: body.AccountID,
-		APIKeyID: body.APIKeyID, WriteMode: body.WriteMode, SkillIDs: body.SkillIDs,
+		APIKeyID: body.APIKeyID, MCPTokenID: body.MCPTokenID, SkillIDs: body.SkillIDs,
 	})
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
 	s.audit(r.Context(), user.Username, "chat.session_update", "chat_session", session.ID,
-		map[string]any{"model": session.Model, "account_id": session.AccountID, "write_mode": session.WriteMode}, "ok")
+		map[string]any{"model": session.Model, "account_id": session.AccountID,
+			"mcp_token_id": session.MCPTokenID, "write_mode": session.WriteMode}, "ok")
 	writeJSON(w, http.StatusOK, chatSessionJSON(session, true))
 }
 
@@ -573,6 +578,9 @@ func chatSessionJSON(session *domain.ChatSession, detail bool) map[string]any {
 		"tokens_in": session.TokensIn, "tokens_out": session.TokensOut,
 		"tokens_reasoning": session.Reasoning, "owner": session.OwnerName,
 		"created_at": session.CreatedAt, "updated_at": session.UpdatedAt,
+	}
+	if session.MCPTokenID != nil {
+		out["mcp_token_id"] = *session.MCPTokenID
 	}
 	if session.LastMessage != nil {
 		out["last_message_at"] = session.LastMessage

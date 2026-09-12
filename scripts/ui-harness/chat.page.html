@@ -28,7 +28,7 @@ const FIXTURES = __FIXTURES__;
 
 const SESSION = {
   id: 'chat_1', object: 'chat.session', title: '本月成本', model: 'deepseek-flash',
-  account_id: 1, api_key_id: 1, write_mode: 'read_only', skill_ids: [7],
+  account_id: 1, api_key_id: 1, mcp_token_id: 2, write_mode: 'read_only', skill_ids: [7],
   message_count: 2, status: 'active', tokens_in: 1200, tokens_out: 240, tokens_reasoning: 0,
   owner: 'admin', created_at: '2026-09-12T08:00:00Z', updated_at: '2026-09-12T08:05:00Z',
   skills: [{ id: 7, name: '成本排查', description: '按账户核对成本与收费', instructions: '先查账户，再查用量。', chars: 12 }],
@@ -143,6 +143,14 @@ window.fetch = async (url, options) => {
   if (path === '/chat/models') return json({ object: 'list', account: 'acme', data: [{ id: 'deepseek-flash', has_tools: true }] });
   if (path === '/accounts') return json({ data: [{ id: 1, name: 'acme', billing_mode: 'postpaid' }], total: 1, count: 1, limit: 200, offset: 0 });
   if (path === '/keys') return json({ data: [{ id: 1, name: 'console-chat', key_prefix: 'sk-gw-abc', status: 'active' }], total: 1, count: 1, limit: 200, offset: 0 });
+  // The new-session dialog lists the tokens a conversation may act as.
+  if (path === '/mcp-tokens') return json({
+    data: [
+      { id: 2, name: 'dsh', token_prefix: 'aigw_mcp_qad', scope: 'admin_read', status: 'active' },
+      { id: 3, name: 'operator', token_prefix: 'aigw_mcp_zzz', scope: 'admin', status: 'active' },
+      { id: 4, name: 'retired', token_prefix: 'aigw_mcp_old', scope: 'admin', status: 'revoked' },
+    ], total: 3, count: 3, limit: 200, offset: 0,
+  });
   if (path === '/chat/sessions/chat_1/skill-draft') {
     return json({ name: '成本核对', description: '每月核对成本', instructions: '查账户→查用量', note: '', request_id: 'req_draft01', model: 'deepseek-flash' });
   }

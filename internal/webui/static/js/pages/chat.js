@@ -26,6 +26,7 @@ export async function render({ page, actions, session, route }) {
     models: [],
     accounts: [],
     keys: [],
+    tokens: [],
     stream: null,
     controller: null,
     running: false,
@@ -149,10 +150,10 @@ export async function render({ page, actions, session, route }) {
     })));
     const keySelect = el('select', {});
     const modelSelect = el('select', {});
-    const writeSelect = el('select', {}, [
-      el('option', { value: 'read_only', text: '只读：模型只能查询' }),
-      el('option', { value: 'allow_writes', text: '允许写操作（含不可逆操作）' }),
-    ]);
+    // The conversation acts as an MCP token, so picking the token IS picking the permission:
+    // there is no separate write switch to keep consistent with it.
+    const tokenSelect = el('select', {});
+    const tokenHint = el('p', { class: 'muted' });
     const status = el('div', { class: 'muted' });
 
     async function loadKeys() {
@@ -187,26 +188,64 @@ export async function render({ page, actions, session, route }) {
     accountSelect.addEventListener('change', loadKeys);
     keySelect.addEventListener('change', loadModels);
 
+    // Only tokens that are usable right now can be bound: a revoked or expired one would be
+    // refused by the server anyway, and offering it would just be a trap.
+    const scopeSummary = (scope) => {
+      if (scope === 'admin') return '可执行全部控制台操作（含发凭据、动账、删除）';
+      if (scope === 'admin_read') return '后台只读：可查询，不能修改';
+      return '只能查询本账户的用量与账单';
+    };
+    async function loadTokens() {
+      clear(tokenSelect);
+      try {
+        const payload = await api.get('/mcp-tokens', { limit: 200 });
+        state.tokens = (payload.data || []).filter((token) => {
+          if (token.status !== 'active') return false;
+          if (!token.expires_at) return true;
+          return new Date(token.expires_at).getTime() > Date.now();
+        });
+      } catch (err) {
+        state.tokens = [];
+      }
+      for (const token of state.tokens) {
+        tokenSelect.append(el('option', {
+          value: String(token.id),
+          text: (token.name || token.token_prefix) + ' · scope=' + (token.scope || 'query'),
+        }));
+      }
+      const chosen = state.tokens.find((token) => String(token.id) === tokenSelect.value);
+      tokenHint.textContent = chosen
+        ? '本会话权限：' + scopeSummary(chosen.scope || 'query')
+        : '没有可用的 MCP 令牌：请先到「MCP 令牌」页签发一个，scope 决定本会话能做什么。';
+    }
+    tokenSelect.addEventListener('change', loadTokens);
+
     const dialog = el('div', { class: 'modal' }, [
       el('div', { class: 'toolbar' }, [el('h2', { text: '新建会话' })]),
       el('div', { class: 'modal-body' }, [
         el('label', { class: 'field' }, [el('span', { text: '计费账户' }), accountSelect]),
         el('label', { class: 'field' }, [el('span', { text: 'API Key（用于计费）' }), keySelect]),
         el('label', { class: 'field' }, [el('span', { text: '模型' }), modelSelect]),
-        el('label', { class: 'field' }, [el('span', { text: '写权限' }), writeSelect]),
-        el('p', { class: 'muted', text: '每一步模型调用都会按所选 API Key 正常计费，并出现在「请求日志」里（客户端记为 console，正文不记录）。' }),
+        el('label', { class: 'field' }, [el('span', { text: 'MCP 令牌（决定本会话能做什么）' }), tokenSelect]),
+        tokenHint,
+        el('p', { class: 'muted', text: '智能问答就是一个 MCP 客户端：工具面与可执行范围完全来自所选令牌的 scope，令牌被撤销或过期后本会话立即失效。每一步模型调用仍按所选 API Key 正常计费，并出现在「请求日志」里（客户端记为 console，正文不记录）。' }),
         status,
       ]),
       el('div', { class: 'modal-actions' }, [
         el('button', { class: 'btn', text: '取消', onclick: () => backdrop.remove() }),
         el('button', {
           class: 'btn btn-primary', text: '创建', onclick: async () => {
+            if (!tokenSelect.value) {
+              status.textContent = '请先选择一个 MCP 令牌。';
+              status.className = 'toast error';
+              return;
+            }
             try {
               const created = await api.post('/chat/sessions', {
                 model: modelSelect.value,
                 account_id: Number(accountSelect.value),
                 api_key_id: Number(keySelect.value),
-                write_mode: writeSelect.value,
+                mcp_token_id: Number(tokenSelect.value),
               });
               backdrop.remove();
               await loadSessions();
@@ -222,7 +261,7 @@ export async function render({ page, actions, session, route }) {
     const backdrop = el('div', { class: 'modal-backdrop' }, [dialog]);
     backdrop.addEventListener('click', (ev) => { if (ev.target === backdrop) backdrop.remove(); });
     document.getElementById('modal-root').append(backdrop);
-    await loadKeys();
+    await Promise.all([loadKeys(), loadTokens()]);
   }
 
   // -------------------------------------------------------------------------
@@ -231,7 +270,7 @@ export async function render({ page, actions, session, route }) {
 
   function renderEmptyState() {
     clear(main);
-    main.append(el('div', { class: 'empty', text: '新建一个会话开始提问：会话会绑定模型与计费 Key，回答里可以直接调用网关的后台接口。' }));
+    main.append(el('div', { class: 'empty', text: '新建一个会话开始提问：会话会绑定模型、计费 Key 和一个 MCP 令牌——令牌的 scope 决定它能做什么，admin scope 的令牌可以执行全部控制台操作。' }));
   }
 
   function renderMain() {
@@ -242,7 +281,15 @@ export async function render({ page, actions, session, route }) {
     const header = el('div', { class: 'chat-header' }, [
       el('div', { class: 'chat-header-title', text: s.title || '未命名会话' }),
       el('div', { class: 'chat-header-meta', text: s.model + ' · 账户 #' + s.account_id + ' · Key #' + s.api_key_id }),
-      el('span', { class: 'badge ' + (s.write_mode === 'allow_writes' ? 'danger' : ''), text: s.write_mode === 'allow_writes' ? '允许写操作' : '只读' }),
+      el('span', {
+        class: 'badge ' + (s.write_mode === 'allow_writes' ? 'danger' : ''),
+        text: s.mcp_token_id
+          ? 'MCP 令牌 #' + s.mcp_token_id + (s.write_mode === 'allow_writes' ? '（全部控制台操作）' : '（只读）')
+          : '未绑定 MCP 令牌',
+        title: s.mcp_token_id
+          ? '本会话的权限来自该令牌；在「MCP 令牌」页撤销或让其过期后，本会话的下一次工具调用会立即失效。'
+          : '升级前的会话没有绑定令牌，因此不能调用任何工具；请新建会话并选择令牌。',
+      }),
     ]);
     const chips = el('div', { class: 'chat-chips' });
     for (const skill of state.session.skills || []) {

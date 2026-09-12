@@ -298,9 +298,6 @@ type Chat struct {
 	ArtifactAllowNetwork bool `yaml:"artifact_allow_network"`
 	// MaxOutputTokens caps one step's answer (0 keeps the provider default).
 	MaxOutputTokens int `yaml:"max_output_tokens"`
-	// HighRiskTools names management endpoints the chat must never call, on top of the
-	// built-in list (credentials, permissions, backups, hooks, provider secrets).
-	HighRiskTools []string `yaml:"high_risk_tools"`
 	// SystemPrompt replaces the built-in instructions when set.
 	SystemPrompt string `yaml:"system_prompt"`
 }
@@ -514,7 +511,7 @@ func Default() Config {
 			AdminTools: true, AdminMaxResponseBytes: 256 * 1024,
 		},
 		Chat: Chat{
-			Enabled:               true,
+			Enabled: true,
 			// 0 = no limit: a question keeps going until the model stops calling tools.
 			MaxSteps:              0,
 			MaxToolCalls:          0,

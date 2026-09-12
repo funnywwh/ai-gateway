@@ -26,6 +26,7 @@ type fakeStore struct {
 	turns    map[string]*domain.ChatTurn // key: session|turnID
 	tools    []*domain.ChatToolCall
 	skills   map[int64]*domain.ChatSkill
+	tokens   map[int64]*domain.MCPToken
 	nextID   int64
 	role     string
 	seq      map[string]int
@@ -37,9 +38,32 @@ func newFakeStore() *fakeStore {
 		messages: map[string][]*domain.ChatMessage{},
 		turns:    map[string]*domain.ChatTurn{},
 		skills:   map[int64]*domain.ChatSkill{},
+		tokens:   map[int64]*domain.MCPToken{},
 		seq:      map[string]int{},
 		role:     RoleAdmin,
 	}
+}
+
+// GetMCPTokenByID is the optional port the service uses to resolve a bound token. It lives
+// on the store because that is where the token rows are, not on Store, so a store that does
+// not implement it simply cannot validate a binding (see mcpTokenLookup).
+func (f *fakeStore) GetMCPTokenByID(_ context.Context, id int64) (*domain.MCPToken, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	token, ok := f.tokens[id]
+	if !ok {
+		return nil, domain.ErrNotFound("MCP token")
+	}
+	return token, nil
+}
+
+// addToken seeds one token row for binding tests.
+func (f *fakeStore) addToken(id int64, scope string) *domain.MCPToken {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	token := &domain.MCPToken{ID: id, AccountID: 7, Name: "t", Scope: scope, Status: "active"}
+	f.tokens[id] = token
+	return token
 }
 
 func turnKey(sessionID, turnID string) string { return sessionID + "|" + turnID }
@@ -603,7 +627,7 @@ func TestTurnIsIdempotentAndDoesNotSpendTwice(t *testing.T) {
 }
 
 func TestViewerCannotAskOrBind(t *testing.T) {
-	service, _, runner, _, session := chatFixture(t, Config{MaxSteps: 4})
+	service, store, runner, _, session := chatFixture(t, Config{MaxSteps: 4})
 	_, emit := collectEvents()
 	_, err := service.Turn(context.Background(), TurnRequest{
 		OwnerID: 1, Username: "reader", Role: RoleViewer,
@@ -620,10 +644,69 @@ func TestViewerCannotAskOrBind(t *testing.T) {
 	}); err == nil {
 		t.Fatal("a viewer must not be able to bind a billing key")
 	}
+	// Rebinding is an administrator act too: a viewer must not be able to point the
+	// conversation at another token, not even a harmless one.
+	store.addToken(5, "admin_read")
 	if _, err := service.UpdateSession(context.Background(), 1, RoleViewer, session.ID, SessionInput{
-		WriteMode: domain.ChatWriteModeAllow,
+		MCPTokenID: 5,
 	}); err == nil {
-		t.Fatal("a viewer must not be able to enable writes")
+		t.Fatal("a viewer must not be able to rebind the conversation's MCP token")
+	}
+}
+
+// Binding is what decides a conversation's authority, so an unusable token is refused at
+// binding time rather than accepted and discovered on the first question.
+func TestSessionBindingRefusesUnusableTokens(t *testing.T) {
+	service, store, _, _, _ := chatFixture(t, Config{MaxSteps: 4})
+	ctx := context.Background()
+
+	// No token at all.
+	if _, err := service.CreateSession(ctx, 1, "admin", RoleAdmin, SessionInput{
+		Model: "m", AccountID: 1, APIKeyID: 1,
+	}); err == nil {
+		t.Fatal("a conversation without an MCP token was created")
+	}
+	// A token that does not exist.
+	if _, err := service.CreateSession(ctx, 1, "admin", RoleAdmin, SessionInput{
+		Model: "m", AccountID: 1, APIKeyID: 1, MCPTokenID: 404,
+	}); err == nil {
+		t.Fatal("a conversation bound to a missing token was created")
+	}
+	// A revoked one.
+	revoked := store.addToken(6, "admin")
+	revoked.Status = "revoked"
+	if _, err := service.CreateSession(ctx, 1, "admin", RoleAdmin, SessionInput{
+		Model: "m", AccountID: 1, APIKeyID: 1, MCPTokenID: 6,
+	}); err == nil {
+		t.Fatal("a conversation bound to a revoked token was created")
+	}
+
+	// A usable admin-scope token is accepted, and the write mode is derived from its scope
+	// rather than supplied by the caller.
+	store.addToken(7, "admin")
+	created, err := service.CreateSession(ctx, 1, "admin", RoleAdmin, SessionInput{
+		Model: "m", AccountID: 1, APIKeyID: 1, MCPTokenID: 7,
+	})
+	if err != nil {
+		t.Fatalf("binding an active admin token failed: %v", err)
+	}
+	if created.MCPTokenID == nil || *created.MCPTokenID != 7 {
+		t.Fatalf("session token = %v, want 7", created.MCPTokenID)
+	}
+	if created.WriteMode != domain.ChatWriteModeAllow {
+		t.Fatalf("write mode = %q, want %q", created.WriteMode, domain.ChatWriteModeAllow)
+	}
+
+	// A read-scope token yields a read-only conversation.
+	store.addToken(8, "query")
+	readOnly, err := service.CreateSession(ctx, 1, "admin", RoleAdmin, SessionInput{
+		Model: "m", AccountID: 1, APIKeyID: 1, MCPTokenID: 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readOnly.WriteMode != domain.ChatWriteModeReadOnly {
+		t.Fatalf("write mode = %q, want %q", readOnly.WriteMode, domain.ChatWriteModeReadOnly)
 	}
 }
 

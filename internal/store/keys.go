@@ -183,6 +183,27 @@ func (db *DB) GetMCPTokenByPrefix(ctx context.Context, prefix string) (*domain.M
 	return tok, nil
 }
 
+// GetMCPTokenByID loads an MCP token row by its primary key.
+//
+// The console chat binds a token by id rather than by value (migration 0011), so it needs a
+// lookup that does not start from the secret: the plaintext only exists in the response that
+// issued it. Revocation is expressed by this row's status and expiry, which is why the chat
+// re-reads it on every tool call instead of caching the scope on the session.
+func (db *DB) GetMCPTokenByID(ctx context.Context, id int64) (*domain.MCPToken, error) {
+	if id <= 0 {
+		return nil, domain.ErrNotFound("MCP token")
+	}
+	row := db.read.QueryRowContext(ctx, "SELECT "+mcpTokenCols+" FROM mcp_tokens WHERE id = ?", id)
+	tok, err := scanMCPToken(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, domain.ErrNotFound("MCP token")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get mcp token by id: %w", err)
+	}
+	return tok, nil
+}
+
 // ListMCPTokens lists MCP tokens (accountID <= 0 means all accounts).
 func (db *DB) ListMCPTokens(ctx context.Context, accountID int64) ([]*domain.MCPToken, error) {
 	query := "SELECT " + mcpTokenCols + " FROM mcp_tokens"

@@ -46,26 +46,15 @@ type Principal struct {
 	TokenID   int64
 	Name      string
 	Scope     string
-	// Source names where the caller came from. Empty means an MCP token, which is the
-	// original and still the common case; SourceConsole means the management console's own
-	// chat page, which acts on a real administrator session rather than on a token.
-	Source string
 }
 
-// SourceConsole is the principal source of the console chat.
-const SourceConsole = "console"
-
 // Actor is the identity recorded in audit logs and hooks. Naming the token (not
-// just the account) is what makes an agent's writes traceable afterwards.
+// just the account) is what makes a write traceable afterwards — including a write made by
+// the console chat, which acts as a token like any other client.
 func (p Principal) Actor() string {
 	name := strings.TrimSpace(p.Name)
 	if name == "" {
 		name = "token"
-	}
-	// The console is not a token holder: its identity is the administrator who is logged
-	// in, and saying so is what makes an audit row actionable.
-	if p.Source == SourceConsole {
-		return "console:" + name
 	}
 	if p.TokenID == 0 {
 		return "mcp:" + name
@@ -75,6 +64,14 @@ func (p Principal) Actor() string {
 
 // AllowsAdmin reports whether the scope may see and call the administrative tools.
 func (p Principal) AllowsAdmin() bool { return AllowsAdminTools(p.Scope) }
+
+// PrincipalLookup resolves an MCP token row by id. It is what lets a caller holding no secret
+// — the console chat, which presents a token an administrator already issued — learn the
+// account, name and scope that token carries. It is a read-only port: issuing, mutating and
+// revoking tokens stay behind the admin API.
+type PrincipalLookup interface {
+	GetMCPTokenByID(ctx context.Context, id int64) (*domain.MCPToken, error)
+}
 
 // Backend is the administrative tool surface. It is implemented by the transport
 // layer (httpapi), because executing a management endpoint means dispatching into

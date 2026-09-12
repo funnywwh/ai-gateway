@@ -6,14 +6,20 @@ import "time"
 // (AdminUser), not by a billing account: the model steps are billed through the API key
 // the session binds, but "whose conversation is this" is the person who is logged in.
 type ChatSession struct {
-	ID           string
-	OwnerUserID  int64
-	OwnerName    string
-	Title        string
-	Model        string
-	AccountID    int64
-	APIKeyID     int64
-	WriteMode    string // read_only | allow_writes
+	ID          string
+	OwnerUserID int64
+	OwnerName   string
+	Title       string
+	Model       string
+	AccountID   int64
+	APIKeyID    int64
+	WriteMode   string // read_only | allow_writes; derived from MCPTokenID's scope
+	// MCPTokenID is the MCP token this conversation acts as. It is the whole authorization
+	// model: the tool surface and the writable endpoints both come from that token's scope,
+	// read fresh on every tool call, so revoking the token ends the conversation's ability
+	// immediately rather than leaving a snapshot of authority behind. Nil means unbound —
+	// a session created before token binding existed, which can call nothing until rebound.
+	MCPTokenID   *int64
 	SkillIDs     []int64
 	Status       string // active
 	MessageCount int
@@ -25,9 +31,9 @@ type ChatSession struct {
 	UpdatedAt    time.Time
 }
 
-// AllowsWrites reports whether this session's management tool calls may modify the
-// gateway. It is one of two gates that must agree — the other is the administrator's own
-// role, re-checked on every tool call rather than trusted from the session row.
+// AllowsWrites reports whether this session's management tool calls may modify the gateway.
+// It reads the derived write mode, which mirrors the bound token's scope; the authoritative
+// check is the token itself, re-read on every call.
 func (s *ChatSession) AllowsWrites() bool { return s != nil && s.WriteMode == ChatWriteModeAllow }
 
 // Chat turn and session vocabulary.

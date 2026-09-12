@@ -595,6 +595,10 @@ func (s *Service) accessFor(session *domain.ChatSession, username, role string) 
 	if session == nil {
 		return Access{Username: username, Role: role}
 	}
+	var tokenID int64
+	if session.MCPTokenID != nil {
+		tokenID = *session.MCPTokenID
+	}
 	return Access{
 		OwnerID:      session.OwnerUserID,
 		Username:     username,
@@ -602,6 +606,7 @@ func (s *Service) accessFor(session *domain.ChatSession, username, role string) 
 		WriteMode:    session.WriteMode,
 		SessionID:    session.ID,
 		SessionTitle: session.Title,
+		MCPTokenID:   tokenID,
 	}
 }
 

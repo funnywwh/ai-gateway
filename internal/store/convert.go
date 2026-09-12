@@ -49,3 +49,13 @@ func nullInt64Ptr(v sql.NullInt64) *int64 {
 	n := v.Int64
 	return &n
 }
+
+// int64PtrNull is its inverse: a nil pointer binds as SQL NULL. A zero value is treated as
+// NULL too, because no row in this schema uses 0 to mean "row id zero" — an unset reference
+// and a null one are the same absence.
+func int64PtrNull(v *int64) any {
+	if v == nil || *v == 0 {
+		return nil
+	}
+	return *v
+}

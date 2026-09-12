@@ -19,6 +19,7 @@ import (
 	"github.com/winger/ai-gateway/internal/chat"
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/ids"
 	"github.com/winger/ai-gateway/internal/mcpsrv"
 	"github.com/winger/ai-gateway/internal/quota"
 	"github.com/winger/ai-gateway/internal/registry"
@@ -43,9 +44,35 @@ type chatFixture struct {
 	accountID int64
 	keyID     int64
 	model     string
+	// The console chat is an MCP client, so every conversation must be bound to a token.
+	// The fixture mints one per scope so a test can pick the authority it needs.
+	adminTokenID int64
+	readTokenID  int64
+	queryTokenID int64
 }
 
 const chatPassword = "chat-secret-1"
+
+// newMCPToken issues one token row directly, the way the admin API would. The plaintext is
+// random because the store upserts on token_prefix (its first 12 characters) and a readable
+// name would collide with every other token that shares its opening words.
+func newMCPToken(t *testing.T, db *store.DB, accountID int64, name, scope string) int64 {
+	t.Helper()
+	plaintext := ids.MCPToken()
+	id, err := db.UpsertMCPToken(context.Background(), &domain.MCPToken{
+		AccountID:   accountID,
+		Name:        name,
+		TokenHash:   secret.Hash(plaintext),
+		TokenPrefix: secret.Prefix(plaintext),
+		Scope:       scope,
+		Status:      "active",
+		CreatedBy:   "admin",
+	})
+	if err != nil {
+		t.Fatalf("issue MCP token %s: %v", name, err)
+	}
+	return id
+}
 
 func newChatFixture(t *testing.T) *chatFixture {
 	t.Helper()
@@ -152,7 +179,13 @@ func newChatFixture(t *testing.T) *chatFixture {
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return &chatFixture{server: ts, api: srv, db: db, cfg: &cfg, service: service, accountID: accountID, keyID: keyID, model: model}
+	return &chatFixture{
+		server: ts, api: srv, db: db, cfg: &cfg, service: service,
+		accountID: accountID, keyID: keyID, model: model,
+		adminTokenID: newMCPToken(t, db, accountID, "chat-admin", mcpsrv.ScopeAdmin),
+		readTokenID:  newMCPToken(t, db, accountID, "chat-read", mcpsrv.ScopeAdminRead),
+		queryTokenID: newMCPToken(t, db, accountID, "chat-query", mcpsrv.ScopeQuery),
+	}
 }
 
 func (f *chatFixture) call(t *testing.T, method, path, body, cookie string) *http.Response {
@@ -204,11 +237,19 @@ func decodeChatJSON(t *testing.T, resp *http.Response) map[string]any {
 	return payload
 }
 
-// createSession makes a conversation bound to the fixture's billed key.
+// createSession makes a conversation bound to the fixture's billed key and to the
+// admin-scope MCP token, which is what makes it able to drive every console operation.
 func (f *chatFixture) createSession(t *testing.T, cookie string) string {
 	t.Helper()
+	return f.createSessionWithToken(t, cookie, f.adminTokenID)
+}
+
+// createSessionWithToken binds a specific token, so a test can pin the authority under test.
+func (f *chatFixture) createSessionWithToken(t *testing.T, cookie string, tokenID int64) string {
+	t.Helper()
 	resp := f.call(t, http.MethodPost, "/admin/api/v1/chat/sessions", fmt.Sprintf(
-		`{"model":%q,"account_id":%d,"api_key_id":%d}`, f.model, f.accountID, f.keyID), cookie)
+		`{"model":%q,"account_id":%d,"api_key_id":%d,"mcp_token_id":%d}`,
+		f.model, f.accountID, f.keyID, tokenID), cookie)
 	payload := decodeChatJSON(t, resp)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create session status = %d payload=%v", resp.StatusCode, payload)
@@ -218,6 +259,16 @@ func (f *chatFixture) createSession(t *testing.T, cookie string) string {
 		t.Fatalf("created session has no id: %v", payload)
 	}
 	return id
+}
+
+// callTool invokes one management tool through the console's MCP client.
+func (f *chatFixture) callTool(t *testing.T, ctx context.Context, tools *chatTools, access chat.Access, args map[string]any) chat.ToolResult {
+	t.Helper()
+	result, err := tools.Call(ctx, access, toolAdminRequest, args)
+	if err != nil {
+		t.Fatalf("tool call %v failed: %v", args["name"], err)
+	}
+	return result
 }
 
 // runTurn posts one question and returns the raw SSE body.
@@ -614,89 +665,303 @@ func TestChatPreviewTicketIsReissuedAndBounded(t *testing.T) {
 	}
 }
 
-func TestChatToolsHideAndRefuseHighRiskEndpoints(t *testing.T) {
+// The console chat is an MCP client: what it may do is exactly what the MCP token it is
+// bound to may do. These tests pin that down from both sides — an admin-scope token drives
+// every console operation, and a narrower token (or a revoked one) is refused by the same
+// rules an external MCP client meets, because both go through POST /mcp.
+func TestChatAdminTokenExecutesEveryEndpoint(t *testing.T) {
 	f := newChatFixture(t)
-	tools := &chatTools{s: f.api}
-	access := chat.Access{OwnerID: 1, Username: "admin", Role: chat.RoleAdmin, WriteMode: domain.ChatWriteModeAllow}
-
-	listed := tools.List(access)
-	if len(listed) != 3 {
-		t.Fatalf("tool surface = %d tools, want admin_endpoints/admin_describe/admin_request", len(listed))
-	}
-
+	tools := &chatTools{s: f.api, token: f.api.deps.MCPTokens}
 	ctx := context.Background()
-	// A read endpoint is available.
-	read, err := tools.Call(ctx, access, toolAdminRequest, map[string]any{"name": "admin_list_keys"})
-	if err != nil {
-		t.Fatalf("a read endpoint must be callable from the chat: %v", err)
+	access := chat.Access{
+		OwnerID: 1, Username: "admin", Role: chat.RoleAdmin,
+		WriteMode: domain.ChatWriteModeAllow, MCPTokenID: f.adminTokenID, SessionID: "s1",
 	}
+
+	// A read endpoint works.
+	read := f.callTool(t, ctx, tools, access, map[string]any{"name": "admin_list_keys"})
 	if read.IsError {
-		t.Fatalf("admin_list_keys reported an error: %+v", read)
+		t.Fatalf("admin_list_keys reported an error: %+v", read.Value)
 	}
 
-	// Credential issuance is refused even though the conversation allows writes and the
-	// caller is an administrator.
-	for _, name := range []string{"admin_create_key", "admin_create_mcp_token", "admin_run_backup", "admin_restore_backup", "admin_upsert_hook", "admin_grant_credits", "admin_prune_requests", "admin_put_setting"} {
-		result, err := tools.Call(ctx, access, toolAdminRequest, map[string]any{"name": name, "confirm": true})
-		if err == nil && !result.IsError {
-			t.Fatalf("%s was callable from the console chat", name)
-		}
-		message := ""
-		if err != nil {
-			message = err.Error()
-		} else if text, ok := result.Value.(string); ok {
-			message = text
-		}
-		if err == nil && !strings.Contains(fmt.Sprint(result.Value), "console chat") {
-			t.Fatalf("%s refusal does not explain itself: %v", name, result.Value)
-		}
-		if err != nil && !strings.Contains(message, "console chat") {
-			t.Fatalf("%s refusal does not explain itself: %v", name, err)
-		}
+	// The write the old console allowlist used to refuse. Creating an account is not marked
+	// dangerous, so it needs no confirm.
+	created := f.callTool(t, ctx, tools, access, map[string]any{
+		"name": "admin_create_account", "body": map[string]any{"name": "ranqiliang"},
+	})
+	if created.IsError {
+		t.Fatalf("admin_create_account must be callable from the console chat: %+v", created.Value)
+	}
+	if _, err := f.db.GetAccountByName(ctx, "ranqiliang"); err != nil {
+		t.Fatalf("the account was not created: %v", err)
 	}
 
-	// The allowlisted configuration writes stay available.
-	updateModel := map[string]any{
+	// Credential issuance is the case the old design blocked outright. It is reachable now,
+	// but only with confirm=true, and the plaintext comes back with a one-time warning.
+	unconfirmed := f.callTool(t, ctx, tools, access, map[string]any{
+		"name": "admin_create_key", "body": map[string]any{"name": "k1", "account_id": f.accountID},
+	})
+	if !unconfirmed.IsError {
+		t.Fatalf("a dangerous endpoint must require confirm: %+v", unconfirmed.Value)
+	}
+	if text, _ := unconfirmed.Value.(string); !strings.Contains(text, "confirm=true") {
+		t.Fatalf("the refusal does not ask for confirmation: %v", unconfirmed.Value)
+	}
+
+	issued := f.callTool(t, ctx, tools, access, map[string]any{
+		"name": "admin_create_key", "confirm": true,
+		"body": map[string]any{"name": "k1", "account_id": f.accountID},
+	})
+	if issued.IsError {
+		t.Fatalf("admin_create_key with confirm failed: %+v", issued.Value)
+	}
+	text, _ := issued.Value.(string)
+	if !strings.Contains(text, "sk-gw_") {
+		t.Fatalf("the issued key is missing from the result: %s", text)
+	}
+	if !strings.Contains(text, "只显示这一次") {
+		t.Fatalf("the one-time-credential warning is missing: %s", text)
+	}
+}
+
+// A narrower token cannot reach what its scope forbids, and the refusal comes from the MCP
+// scope rule rather than from a console-specific second implementation.
+func TestChatTokenScopeBoundsWhatItCanDo(t *testing.T) {
+	f := newChatFixture(t)
+	tools := &chatTools{s: f.api, token: f.api.deps.MCPTokens}
+	ctx := context.Background()
+	write := map[string]any{
 		"name": "admin_update_model", "params": map[string]any{"name": "chat-echo"},
 		"body": map[string]any{"enabled": true},
 	}
-	allowed, err := tools.Call(ctx, access, toolAdminRequest, updateModel)
+
+	readAccess := chat.Access{
+		OwnerID: 1, Username: "admin", Role: chat.RoleAdmin,
+		WriteMode: domain.ChatWriteModeReadOnly, MCPTokenID: f.readTokenID, SessionID: "s2",
+	}
+	ok := f.callTool(t, ctx, tools, readAccess, map[string]any{"name": "admin_list_keys"})
+	if ok.IsError {
+		t.Fatalf("an admin_read token must still read: %+v", ok.Value)
+	}
+	refused := f.callTool(t, ctx, tools, readAccess, write)
+	if !refused.IsError {
+		t.Fatalf("an admin_read token executed a write: %+v", refused.Value)
+	}
+	if text, _ := refused.Value.(string); !strings.Contains(text, "scope=admin") {
+		t.Fatalf("the refusal does not name the missing scope: %v", refused.Value)
+	}
+
+	// A query token gets the account-scoped query tools and no administrative surface at all.
+	queryAccess := chat.Access{
+		OwnerID: 1, Username: "admin", Role: chat.RoleAdmin,
+		WriteMode: domain.ChatWriteModeReadOnly, MCPTokenID: f.queryTokenID, SessionID: "s3",
+	}
+	for _, tool := range tools.List(queryAccess) {
+		if strings.HasPrefix(tool.Name, "admin_") {
+			t.Fatalf("a query token was offered %q", tool.Name)
+		}
+	}
+	hidden := f.callTool(t, ctx, tools, queryAccess, map[string]any{"name": "admin_list_keys"})
+	if !hidden.IsError {
+		t.Fatalf("a query token reached the administrative surface: %+v", hidden.Value)
+	}
+
+	// An admin token sees the endpoints that exist, including credential issuance, and the
+	// console-only restriction is gone.
+	adminAccess := chat.Access{
+		OwnerID: 1, Username: "admin", Role: chat.RoleAdmin,
+		WriteMode: domain.ChatWriteModeAllow, MCPTokenID: f.adminTokenID, SessionID: "s4",
+	}
+	overview, err := tools.Call(ctx, adminAccess, toolAdminEndpoints, map[string]any{})
 	if err != nil {
-		t.Fatalf("an allowlisted write must remain available: %v", err)
+		t.Fatalf("admin_endpoints failed: %v", err)
 	}
-	if allowed.IsError {
-		t.Fatalf("admin_update_model reported an error: %+v", allowed)
+	encoded, _ := json.Marshal(overview.Value)
+	if !strings.Contains(string(encoded), "admin_create_key") {
+		t.Fatalf("an admin token cannot see credential issuance in the catalogue: %s", encoded)
+	}
+	if strings.Contains(string(encoded), "unavailable_from_console_chat") {
+		t.Fatalf("the console-only restriction is still advertised: %s", encoded)
+	}
+	detail, err := tools.Call(ctx, adminAccess, toolAdminDescribe, map[string]any{"name": "admin_create_key"})
+	if err != nil {
+		t.Fatalf("admin_describe failed: %v", err)
+	}
+	if detail.IsError {
+		t.Fatalf("admin_describe must explain credential issuance now: %+v", detail.Value)
+	}
+}
+
+// The tool surface is exactly the bound token's: the administrative entry points on top of
+// the query tools, and nothing at all without a token.
+func TestChatToolSurfaceFollowsTheBoundToken(t *testing.T) {
+	f := newChatFixture(t)
+	tools := &chatTools{s: f.api, token: f.api.deps.MCPTokens}
+	base := chat.Access{OwnerID: 1, Username: "admin", Role: chat.RoleAdmin, WriteMode: domain.ChatWriteModeAllow}
+
+	withAdmin := base
+	withAdmin.MCPTokenID = f.adminTokenID
+	listed := tools.List(withAdmin)
+	if len(listed) != 14 {
+		t.Fatalf("admin-scope tool surface = %d tools, want 11 query + 3 administrative", len(listed))
+	}
+	names := map[string]bool{}
+	for _, tool := range listed {
+		names[tool.Name] = true
+		if len(tool.Schema) == 0 {
+			t.Fatalf("tool %q reached the model without a schema", tool.Name)
+		}
+	}
+	for _, want := range []string{"admin_endpoints", "admin_describe", "admin_request", "get_balance"} {
+		if !names[want] {
+			t.Fatalf("tool %q is missing from the surface", want)
+		}
 	}
 
-	// A read-only conversation gets the read-only scope, so writes are refused by the
-	// existing scope rule rather than by a second implementation.
-	readOnly := access
-	readOnly.WriteMode = domain.ChatWriteModeReadOnly
-	if _, err := tools.Call(ctx, readOnly, toolAdminRequest, updateModel); err == nil {
-		t.Fatal("a read-only conversation executed a write")
-	}
-	// A viewer's conversation is read-only even if the switch says otherwise.
-	viewer := access
-	viewer.Role = chat.RoleViewer
-	if _, err := tools.Call(ctx, viewer, toolAdminRequest, updateModel); err == nil {
-		t.Fatal("a viewer executed a write inside a write-enabled conversation")
+	withQuery := base
+	withQuery.MCPTokenID = f.queryTokenID
+	if got := len(tools.List(withQuery)); got != 11 {
+		t.Fatalf("query-scope tool surface = %d tools, want 11", got)
 	}
 
-	// The catalogue the model sees does not advertise what it may not call, and says how
-	// many endpoints are hidden.
-	overview, err := tools.Call(ctx, access, toolAdminEndpoints, map[string]any{})
+	// An unbound conversation has no tools, and calling anything explains what to do.
+	unbound := base
+	result, err := tools.Call(context.Background(), unbound, toolAdminRequest, map[string]any{"name": "admin_list_keys"})
+	if err != nil {
+		t.Fatalf("an unbound conversation must answer, not fail the turn: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("an unbound conversation executed a call")
+	}
+	if text, _ := result.Value.(string); !strings.Contains(text, "not bound to an MCP token") {
+		t.Fatalf("the unbound refusal is not actionable: %v", result.Value)
+	}
+}
+
+// Revoking the token ends the conversation's authority at the next call. This is the whole
+// reason scope is re-read per call instead of snapshotted onto the session.
+func TestChatRevokedOrExpiredTokenStopsTheConversation(t *testing.T) {
+	f := newChatFixture(t)
+	tools := &chatTools{s: f.api, token: f.api.deps.MCPTokens}
+	ctx := context.Background()
+	access := chat.Access{
+		OwnerID: 1, Username: "admin", Role: chat.RoleAdmin,
+		WriteMode: domain.ChatWriteModeAllow, MCPTokenID: f.adminTokenID, SessionID: "s5",
+	}
+
+	if got := f.callTool(t, ctx, tools, access, map[string]any{"name": "admin_list_keys"}); got.IsError {
+		t.Fatalf("the bound token must work before revocation: %+v", got.Value)
+	}
+	if err := f.db.RevokeMCPToken(ctx, f.adminTokenID); err != nil {
+		t.Fatal(err)
+	}
+	revoked := f.callTool(t, ctx, tools, access, map[string]any{"name": "admin_list_keys"})
+	if !revoked.IsError {
+		t.Fatalf("a revoked token still executed a call: %+v", revoked.Value)
+	}
+	if text, _ := revoked.Value.(string); !strings.Contains(text, "not active") {
+		t.Fatalf("the revoked refusal does not match the MCP wording: %v", revoked.Value)
+	}
+
+	// The same holds for expiry.
+	expiredID := newMCPToken(t, f.db, f.accountID, "chat-expiring", mcpsrv.ScopeAdmin)
+	if _, err := f.db.Writer().ExecContext(ctx,
+		"UPDATE mcp_tokens SET expires_at = unixepoch('now') - 60 WHERE id = ?", expiredID); err != nil {
+		t.Fatal(err)
+	}
+	expiring := access
+	expiring.MCPTokenID = expiredID
+	expired := f.callTool(t, ctx, tools, expiring, map[string]any{"name": "admin_list_keys"})
+	if !expired.IsError {
+		t.Fatalf("an expired token still executed a call: %+v", expired.Value)
+	}
+	if text, _ := expired.Value.(string); !strings.Contains(text, "expired") {
+		t.Fatalf("the expiry refusal does not explain itself: %v", expired.Value)
+	}
+}
+
+// A conversation stores the token's id and nothing else: no plaintext, no hash. The
+// credential stays in the row that issued it.
+func TestChatSessionStoresOnlyTheTokenID(t *testing.T) {
+	f := newChatFixture(t)
+	cookie := f.login(t, "admin")
+	sessionID := f.createSession(t, cookie)
+
+	session, err := f.db.GetChatSession(context.Background(), sessionID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	encoded, _ := json.Marshal(overview.Value)
-	if strings.Contains(string(encoded), "admin_create_key") {
-		t.Fatalf("a hidden endpoint is still advertised: %s", encoded)
+	if session.MCPTokenID == nil || *session.MCPTokenID != f.adminTokenID {
+		t.Fatalf("session token binding = %v, want %d", session.MCPTokenID, f.adminTokenID)
 	}
-	if !strings.Contains(string(encoded), "unavailable_from_console_chat") {
-		t.Fatalf("the catalogue does not mention the restriction: %s", encoded)
+	if session.WriteMode != domain.ChatWriteModeAllow {
+		t.Fatalf("write mode = %q, want it derived as %q from the admin-scope token",
+			session.WriteMode, domain.ChatWriteModeAllow)
 	}
-	if describe, err := tools.Call(ctx, access, toolAdminDescribe, map[string]any{"name": "admin_create_key"}); err == nil {
-		t.Fatalf("admin_describe explained a hidden endpoint: %v", describe.Value)
+	encoded, err := json.Marshal(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"aigw_mcp_", "token_hash", "TokenHash"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("the session row carries %q: %s", forbidden, encoded)
+		}
+	}
+
+	// Binding is rejected outright when the token is not usable, rather than accepted and
+	// failing later on the first question.
+	if err := f.db.RevokeMCPToken(context.Background(), f.readTokenID); err != nil {
+		t.Fatal(err)
+	}
+	resp := f.call(t, http.MethodPost, "/admin/api/v1/chat/sessions", fmt.Sprintf(
+		`{"model":%q,"account_id":%d,"api_key_id":%d,"mcp_token_id":%d}`,
+		f.model, f.accountID, f.keyID, f.readTokenID), cookie)
+	payload := decodeChatJSON(t, resp)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("binding a revoked token = %d %v, want 403", resp.StatusCode, payload)
+	}
+}
+
+// A conversation with no token cannot be created: the token is what the tool surface is
+// derived from, so "no token" would mean "a chat that can do nothing".
+func TestChatSessionRequiresAToken(t *testing.T) {
+	f := newChatFixture(t)
+	cookie := f.login(t, "admin")
+	resp := f.call(t, http.MethodPost, "/admin/api/v1/chat/sessions", fmt.Sprintf(
+		`{"model":%q,"account_id":%d,"api_key_id":%d}`, f.model, f.accountID, f.keyID), cookie)
+	payload := decodeChatJSON(t, resp)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d %v, want 400", resp.StatusCode, payload)
+	}
+	if message := fmt.Sprint(payload["error"]); !strings.Contains(message, "MCP token") {
+		t.Fatalf("the error does not say what is missing: %v", payload)
+	}
+}
+
+// A write made from the console is attributed to the MCP token, because the console is
+// acting as that token — the same identity an external client would produce.
+func TestChatWriteIsAuditedAsTheToken(t *testing.T) {
+	f := newChatFixture(t)
+	tools := &chatTools{s: f.api, token: f.api.deps.MCPTokens}
+	access := chat.Access{
+		OwnerID: 1, Username: "admin", Role: chat.RoleAdmin,
+		WriteMode: domain.ChatWriteModeAllow, MCPTokenID: f.adminTokenID, SessionID: "s6",
+	}
+	f.callTool(t, context.Background(), tools, access, map[string]any{
+		"name": "admin_update_model", "params": map[string]any{"name": "chat-echo"},
+		"body": map[string]any{"enabled": false},
+	})
+	var actor string
+	for _, entry := range f.auditEntries(t) {
+		if entry.Action == "mcp.admin_call" {
+			actor = entry.Actor
+		}
+	}
+	want := fmt.Sprintf("mcp:chat-admin#%d", f.adminTokenID)
+	if actor != want {
+		t.Fatalf("audit actor = %q, want %q", actor, want)
 	}
 }
 
@@ -706,8 +971,11 @@ func TestChatToolsHideAndRefuseHighRiskEndpoints(t *testing.T) {
 // endpoint name and a matching argument shape).
 func TestChatToolAcceptsEndpointNamesAsToolNames(t *testing.T) {
 	f := newChatFixture(t)
-	tools := &chatTools{s: f.api}
-	access := chat.Access{OwnerID: 1, Username: "admin", Role: chat.RoleAdmin, WriteMode: domain.ChatWriteModeAllow}
+	tools := &chatTools{s: f.api, token: f.api.deps.MCPTokens}
+	access := chat.Access{
+		OwnerID: 1, Username: "admin", Role: chat.RoleAdmin,
+		WriteMode: domain.ChatWriteModeAllow, MCPTokenID: f.adminTokenID, SessionID: "s7",
+	}
 	ctx := context.Background()
 
 	result, err := tools.Call(ctx, access, "admin_request_dimensions", map[string]any{
@@ -719,45 +987,17 @@ func TestChatToolAcceptsEndpointNamesAsToolNames(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("the routed call failed: %+v", result.Value)
 	}
-	payload, ok := result.Value.(map[string]any)
-	if !ok {
-		t.Fatalf("unexpected result shape: %T", result.Value)
-	}
-	if payload["endpoint"] != "admin_request_dimensions" {
-		t.Fatalf("the call did not reach the endpoint: %v", payload)
-	}
 
-	// The routing goes through the same allowlist: an endpoint the chat may not call is
-	// still refused when it is named directly.
-	if _, err := tools.Call(ctx, access, "admin_create_key", map[string]any{"body": map[string]any{"name": "x"}}); err == nil {
-		t.Fatal("naming a forbidden endpoint directly bypassed the allowlist")
+	// The same routing works for a write, which is what an operator now expects to be able to
+	// ask for in plain language.
+	routed := f.callTool(t, ctx, tools, access, map[string]any{
+		"name": "admin_create_account", "body": map[string]any{"name": "routed-account"},
+	})
+	if routed.IsError {
+		t.Fatalf("a named write endpoint was not routed: %+v", routed.Value)
 	}
-	// And a name that is neither a tool nor an endpoint is answered with what does exist.
-	_, err = tools.Call(ctx, access, "admin_make_me_a_sandwich", nil)
-	if err == nil || !strings.Contains(err.Error(), "admin_request") {
-		t.Fatalf("unknown tool error = %v, want it to name the real tools", err)
-	}
-}
-
-func TestChatActorIdentityIsTheConsoleNotAToken(t *testing.T) {
-	f := newChatFixture(t)
-	tools := &chatTools{s: f.api}
-	access := chat.Access{OwnerID: 1, Username: "admin", Role: chat.RoleAdmin, WriteMode: domain.ChatWriteModeAllow}
-	if _, err := tools.Call(context.Background(), access, toolAdminRequest, map[string]any{
-		"name": "admin_update_model", "params": map[string]any{"name": "chat-echo"},
-		"body": map[string]any{"enabled": true},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	entries := f.auditEntries(t)
-	var actor string
-	for _, entry := range entries {
-		if entry.Action == "mcp.admin_call" {
-			actor = entry.Actor
-		}
-	}
-	if actor != "console:admin" {
-		t.Fatalf("audit actor = %q, want console:admin", actor)
+	if _, err := f.db.GetAccountByName(ctx, "routed-account"); err != nil {
+		t.Fatalf("the routed write did not reach the endpoint: %v", err)
 	}
 }
 
@@ -815,3 +1055,31 @@ func itoa64(v int64) string { return fmt.Sprintf("%d", v) }
 func mcspAdminScope() string { return mcpsrv.ScopeAdmin }
 
 func quotaLimiter() *quota.Limiter { return quota.New(4) }
+
+// The chat service must not import internal/mcpsrv (see the layering table in
+// docs/architecture.md), so it spells the three scope names itself and derives write mode
+// from them. This is the one package where both vocabularies are legitimately visible, so the
+// equivalence is asserted here: if either side is renamed, the chat would silently stop
+// honouring admin tokens and every conversation would become read-only.
+func TestChatScopeVocabularyMatchesMCP(t *testing.T) {
+	cases := []struct {
+		scope string
+		want  string
+	}{
+		{mcpsrv.ScopeAdmin, domain.ChatWriteModeAllow},
+		{mcpsrv.ScopeAdminRead, domain.ChatWriteModeReadOnly},
+		{mcpsrv.ScopeQuery, domain.ChatWriteModeReadOnly},
+		{"", domain.ChatWriteModeReadOnly},
+		{"ADMIN", domain.ChatWriteModeReadOnly}, // only the exact spelling counts
+	}
+	for _, tc := range cases {
+		got := chat.WriteModeForScope(tc.scope)
+		if got != tc.want {
+			t.Errorf("chat write mode for scope %q = %q, want %q", tc.scope, got, tc.want)
+		}
+	}
+	// The scope the chat treats as writable must be the one the MCP service calls admin.
+	if chat.WritableScope() != mcpsrv.ScopeAdmin {
+		t.Fatalf("chat writable scope = %q, want %q", chat.WritableScope(), mcpsrv.ScopeAdmin)
+	}
+}

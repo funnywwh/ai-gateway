@@ -1,166 +1,266 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
-	"sort"
+	"log/slog"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/winger/ai-gateway/internal/chat"
-	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/mcpsrv"
 )
 
-// The console chat gets the same three administrative entry points an MCP token with
-// admin_read scope gets — admin_endpoints, admin_describe, admin_request — because they are
-// the gateway's own progressive-disclosure surface and reimplementing them would guarantee
-// drift. What differs is the restriction layered on top:
+// The console chat is a plain MCP client. It holds no privileges of its own: every tool call
+// is a POST /mcp whose authority comes from the MCP token the conversation is bound to. That
+// means there is exactly one implementation of "what may be done" — the one behind the /mcp
+// endpoint — instead of a second, drifting copy shaped for the console.
 //
-//   - reads are allowed exactly as a viewer token sees them;
-//   - writes are allowed only for endpoints on an explicit allowlist, so an endpoint added
-//     in a future milestone is unreachable from a chat transcript until someone decides
-//     otherwise;
-//   - dangerous side effects (credentials, permissions, money, backups, hooks, deletions)
-//     stay in the console pages where a person is looking at what they are doing.
-//
-// The filter is applied in the bridge itself (list, describe and execute alike), not just
-// in what the model is shown: a model that guesses a forbidden endpoint name is refused by
-// the same rule that hid it.
+// The call is made in-process, through the same handler an external client reaches, because
+// the gateway already calls its own endpoints that way (see chatRunner, which POSTs
+// /v1/responses with an injected identity). The difference from a socket client is only the
+// transport: the request object, the handler, the scope checks, the audit rows and the JSON
+// error shapes are identical. Doing it over TCP instead would require the gateway to hold the
+// *plaintext* token, which exists only in the response that issued it — a credential copy the
+// database deliberately does not keep.
 
-// chatWritableEndpoints is the write allowlist for console conversations. Everything not
-// listed here is refused from chat even when the conversation has writes enabled, which is
-// what makes the refusal list below a *default* rather than an enumeration that rots.
-var chatWritableEndpoints = map[string]bool{
-	// Routing and model configuration: reversible, no secrets, and exactly the kind of
-	// "why is this model not being served" work a console conversation is for.
-	"admin_update_model":          true,
-	"admin_upsert_model":          true,
-	"admin_update_route":          true,
-	"admin_upsert_route":          true,
-	"admin_upsert_model_mapping":  true,
-	"admin_upsert_provider_model": true,
-	// Provider operations that do not hand out or rewrite credentials.
-	"admin_restart_provider":        true,
-	"admin_test_provider":           true,
-	"admin_refresh_provider_models": true,
+// mcpCallRecorder captures one handler response. It is the chat equivalent of stepRecorder:
+// the handler writes bytes, we read them back instead of sending them over a socket.
+type mcpCallRecorder struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
 }
 
-// chatToolRefusalReason is shown to the model (and echoed to the operator) when it reaches
-// for something outside the allowlist. It names the alternative, because "denied" without a
-// next step just makes a model retry.
-const chatToolRefusalReason = "this operation is not available from the console chat: it issues or changes credentials, " +
-	"moves money, changes permissions, touches backups or hooks, or deletes data. Ask the operator to do it on the " +
-	"matching console page, where they can see what they are changing"
+func newMCPCallRecorder() *mcpCallRecorder {
+	return &mcpCallRecorder{header: http.Header{}, status: http.StatusOK}
+}
 
-// chatTools implements chat.Tools.
-type chatTools struct{ s *Server }
+func (r *mcpCallRecorder) Header() http.Header { return r.header }
 
-// List returns the tool surface for one conversation, with a description note that states
-// the restriction up front.
+func (r *mcpCallRecorder) WriteHeader(status int) { r.status = status }
+
+func (r *mcpCallRecorder) Write(p []byte) (int, error) { return r.body.Write(p) }
+
+// Flush satisfies http.Flusher. Nothing here streams: one MCP response arrives whole.
+func (r *mcpCallRecorder) Flush() {}
+
+// chatTools implements chat.Tools over the MCP endpoint.
+type chatTools struct {
+	s     *Server
+	token mcpsrv.PrincipalLookup
+	log   *slog.Logger
+}
+
+// principal resolves the token a conversation is bound to, and refuses one that has stopped
+// working. This runs on every call rather than once per conversation: revoking a token is
+// how an operator takes authority away, so it has to bite at the next call.
+func (t *chatTools) principal(ctx context.Context, access chat.Access) (mcpsrv.Principal, error) {
+	lookup, err := t.lookup()
+	if err != nil {
+		return mcpsrv.Principal{}, err
+	}
+	if access.MCPTokenID <= 0 {
+		return mcpsrv.Principal{}, fmt.Errorf(
+			"this conversation is not bound to an MCP token, so it cannot call any tool; " +
+				"bind one on the conversation, or start a new conversation and choose a token")
+	}
+	row, err := lookup.GetMCPTokenByID(ctx, access.MCPTokenID)
+	if err != nil {
+		return mcpsrv.Principal{}, fmt.Errorf(
+			"the MCP token bound to this conversation no longer exists; bind another one to continue")
+	}
+	if row.Status != "active" {
+		return mcpsrv.Principal{}, fmt.Errorf("MCP token is not active")
+	}
+	if row.ExpiresAt != nil && time.Now().UTC().After(*row.ExpiresAt) {
+		return mcpsrv.Principal{}, fmt.Errorf("MCP token has expired")
+	}
+	return mcpsrv.Principal{
+		AccountID: row.AccountID,
+		TokenID:   row.ID,
+		Name:      row.Name,
+		Scope:     mcpsrv.NormalizeScope(row.Scope),
+	}, nil
+}
+
+func (t *chatTools) lookup() (mcpsrv.PrincipalLookup, error) {
+	if t.token == nil {
+		return nil, fmt.Errorf("this deployment cannot resolve MCP tokens")
+	}
+	return t.token, nil
+}
+
+// warn logs a tool-surface problem. A missing tool list is not fatal to a turn — the model
+// simply has nothing to call — so it must not fail the whole answer, but it must be visible
+// to the operator rather than silently producing an unhelpful reply.
+func (t *chatTools) warn(msg string, args ...any) {
+	if t.log != nil {
+		t.log.Warn(msg, args...)
+	}
+}
+
+// List offers the tools the bound token may call. The list comes from the MCP service itself
+// so a scope change (or a new endpoint) cannot make the console's menu disagree with what the
+// endpoint would actually accept.
 func (t *chatTools) List(access chat.Access) []chat.Tool {
-	backend := &adminBackend{s: t.s}
-	tools := backend.AdminTools(chatPrincipal(access))
+	ctx := context.Background()
+	principal, err := t.principal(ctx, access)
+	if err != nil {
+		// No usable token means no tools, which is the honest answer; the failure itself is
+		// reported when the model tries to call something.
+		return nil
+	}
+	resp, err := t.exchange(ctx, principal, "tools/list", nil)
+	if err != nil {
+		t.warn("chat: listing MCP tools failed", "err", err, "session", access.SessionID)
+		return nil
+	}
+	raw, ok := resp.Result.(map[string]any)
+	if !ok {
+		return nil
+	}
+	encoded, err := json.Marshal(raw["tools"])
+	if err != nil {
+		t.warn("chat: encoding MCP tool list failed", "err", err)
+		return nil
+	}
+	var tools []mcpsrv.Tool
+	if err := json.Unmarshal(encoded, &tools); err != nil {
+		t.warn("chat: decoding MCP tool list failed", "err", err)
+		return nil
+	}
 	out := make([]chat.Tool, 0, len(tools))
 	for _, tool := range tools {
-		item := chat.Tool{Name: tool.Name, Description: tool.Description, Schema: tool.InputSchema}
-		if tool.Name == toolAdminRequest {
-			item.Description += ". From the console chat only read-only endpoints and a small allowlist of " +
-				"configuration changes may be called; admin_endpoints marks what is unavailable"
+		schema := tool.InputSchema
+		if len(schema) == 0 {
+			// A tool without a declared schema must still be callable; an empty object
+			// schema is what the model can actually use.
+			schema = json.RawMessage(`{"type":"object","properties":{}}`)
 		}
-		out = append(out, item)
+		out = append(out, chat.Tool{Name: tool.Name, Description: tool.Description, Schema: schema})
 	}
 	return out
 }
 
-// Call executes one management tool call under the conversation's policy.
-//
-// Models routinely collapse the two-level convention and call a *management endpoint* by
-// its own name ("admin_request_dimensions") instead of calling admin_request with that
-// name. The intent is unambiguous — the name is the endpoint they wanted, and the arguments
-// are already shaped the way admin_request takes them — so the call is routed rather than
-// bounced. This is not a widened surface: the same allowlist decides, because the call ends
-// up in exactly the same place it would have.
+// Call runs one tool through POST /mcp.
 func (t *chatTools) Call(ctx context.Context, access chat.Access, name string, args map[string]any) (chat.ToolResult, error) {
-	backend := &adminBackend{s: t.s}
-	toolName := name
+	principal, err := t.principal(ctx, access)
+	if err != nil {
+		// A binding problem is an answer the operator needs to see, not a silent failure of
+		// the whole turn.
+		return chat.ToolResult{Value: err.Error(), IsError: true}, nil
+	}
+	if args == nil {
+		args = map[string]any{}
+	}
+	// Models routinely collapse the two-level convention and call a management endpoint by
+	// its own name instead of routing through admin_request. The intent is unambiguous — the
+	// name is the endpoint they wanted and the arguments are already shaped for it — so the
+	// call is routed rather than bounced. This is not a widened surface: it lands in exactly
+	// the place the equivalent admin_request call would.
 	if name != toolAdminEndpoints && name != toolAdminDescribe && name != toolAdminRequest {
-		// A name that is not one of the three tools is either an endpoint the model meant to
-		// invoke (handled here) or a hallucination (answered with what does exist).
-		if _, ok := t.s.adminIndex.lookup(name); !ok {
-			return chat.ToolResult{}, fmt.Errorf("unknown tool %q: this gateway offers %s, %s and %s (use %s with the endpoint name in its name argument)",
-				name, toolAdminEndpoints, toolAdminDescribe, toolAdminRequest, toolAdminRequest)
-		}
-		toolName = toolAdminRequest
-		if args == nil {
-			args = map[string]any{}
-		}
 		if _, exists := args["name"]; !exists {
 			args["name"] = name
 		}
+		name = toolAdminRequest
 	}
-	ctx = withChatToolPolicy(ctx, t.s.chatToolPolicy())
-	result, err := backend.CallAdmin(ctx, chatPrincipal(access), toolName, args)
+	resp, err := t.exchange(ctx, principal, "tools/call", map[string]any{"name": name, "arguments": args})
 	if err != nil {
-		return chat.ToolResult{}, err
+		return chat.ToolResult{Value: err.Error(), IsError: true}, nil
 	}
-	return chat.ToolResult{Value: result.Value, IsError: result.IsError}, nil
+	if resp.Error != nil {
+		return chat.ToolResult{Value: resp.Error.Message, IsError: true}, nil
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		return chat.ToolResult{Value: "the gateway returned an unreadable tool response", IsError: true}, nil
+	}
+	text := mcpContentText(result)
+	// A plaintext credential is shown exactly once, and from here it also lands in the
+	// conversation record. Saying so is the only mitigation that does not hide the fact.
+	if issued := issuedCredentialNotice(name, args, text); issued != "" {
+		text += issued
+	}
+	isError, _ := result["isError"].(bool)
+	return chat.ToolResult{Value: text, IsError: isError}, nil
 }
 
-// chatPrincipal maps a conversation's access onto the MCP principal the management handlers
-// already understand. Writes require both the conversation switch *and* the administrator
-// role, re-checked by the chat service before every call.
-func chatPrincipal(access chat.Access) mcpsrv.Principal {
-	scope := mcpsrv.ScopeAdminRead
-	if access.Role == chat.RoleAdmin && access.WriteMode == domain.ChatWriteModeAllow {
-		scope = mcpsrv.ScopeAdmin
+// exchange performs one in-process POST /mcp and decodes the JSON-RPC response.
+func (t *chatTools) exchange(ctx context.Context, principal mcpsrv.Principal, method string, params map[string]any) (*mcpsrv.Response, error) {
+	if t.s == nil || t.s.deps.MCP == nil {
+		return nil, fmt.Errorf("the MCP service is unavailable on this deployment")
 	}
-	name := strings.TrimSpace(access.Username)
-	if name == "" {
-		name = "admin"
+	envelope := map[string]any{"jsonrpc": "2.0", "id": 1, "method": method}
+	if params != nil {
+		envelope["params"] = params
 	}
-	return mcpsrv.Principal{Name: name, Scope: scope, Source: mcpsrv.SourceConsole}
+	body, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, fmt.Errorf("encoding the MCP request failed")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "/mcp", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("building the MCP request failed")
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request = withMCPPrincipal(request, principal)
+	recorder := newMCPCallRecorder()
+	// The real handler. It enforces the same scope checks, confirm requirements and audit
+	// rows an external MCP client meets.
+	t.s.handleMCP(recorder, request)
+	if recorder.status != http.StatusOK {
+		return nil, fmt.Errorf("the MCP endpoint answered %d: %s", recorder.status, truncateForError(recorder.body.String()))
+	}
+	var response mcpsrv.Response
+	if err := json.Unmarshal(recorder.body.Bytes(), &response); err != nil {
+		return nil, fmt.Errorf("decoding the MCP response failed")
+	}
+	return &response, nil
 }
 
-// chatToolPolicy computes the endpoint allowlist for console conversations. The index is
-// immutable after startup, so this is computed once.
-func (s *Server) chatToolPolicy() chatToolPolicy {
-	if s.chatAllowed != nil {
-		return chatToolPolicy{allow: s.chatAllowed}
+// mcpContentText flattens the MCP content array into the text the model reads.
+func mcpContentText(result map[string]any) string {
+	content, ok := result["content"].([]any)
+	if !ok {
+		return ""
 	}
-	return chatToolPolicy{}
-}
-
-// buildChatAllowlist derives the allowlist from the route table, so it cannot disagree with
-// what actually exists.
-func (s *Server) buildChatAllowlist() map[string]bool {
-	extra := map[string]bool{}
-	if s.deps.Config != nil {
-		for _, name := range s.deps.Config.Chat.HighRiskTools {
-			extra[strings.TrimSpace(name)] = true
-		}
-	}
-	allow := map[string]bool{}
-	for _, route := range s.admin {
-		if !route.exposed() || extra[route.Name] {
+	var parts []string
+	for _, item := range content {
+		entry, ok := item.(map[string]any)
+		if !ok {
 			continue
 		}
-		if route.Method == "GET" && route.Role == roleViewer {
-			allow[route.Name] = true
-			continue
-		}
-		if chatWritableEndpoints[route.Name] {
-			allow[route.Name] = true
+		if text, ok := entry["text"].(string); ok && text != "" {
+			parts = append(parts, text)
 		}
 	}
-	return allow
+	return strings.Join(parts, "\n")
 }
 
-// chatAllEndpoints is the sorted allowlist, used by tests and diagnostics.
-func (s *Server) chatAllowedEndpoints() []string {
-	out := make([]string, 0, len(s.chatAllowed))
-	for name := range s.chatAllowed {
-		out = append(out, name)
+// issuedCredentialNotice appends a one-time-secret warning to the two endpoints that hand out
+// a credential. The value is not redacted: hiding it would leave the operator without a
+// credential while still having stored it, which is strictly worse than saying so.
+func issuedCredentialNotice(name string, args map[string]any, text string) string {
+	if text == "" {
+		return ""
 	}
-	sort.Strings(out)
-	return out
+	endpoint, _ := args["name"].(string)
+	if name != toolAdminRequest || (endpoint != "admin_create_key" && endpoint != "admin_create_mcp_token") {
+		return ""
+	}
+	return "\n\n[注意] 上面这个明文凭据只显示这一次。它现在也保存在本会话记录里，请立即复制到密码管理器；" +
+		"如果结果看起来被截断了，请到控制台对应页面重新签发，不要使用不完整的凭据。"
+}
+
+// truncateForError keeps a non-200 response readable in a tool result.
+func truncateForError(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 400 {
+		return s[:400] + "…"
+	}
+	return s
 }

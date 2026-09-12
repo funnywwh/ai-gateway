@@ -150,6 +150,12 @@ mcp:
   admin_max_response_bytes: 262144
 
 # 控制台「智能问答」与「技能库」（M32）。
+#
+# 权限模型：智能问答就是一个 MCP 客户端。每个会话在新建时绑定一个 MCP 令牌，工具面与
+# 可执行范围完全由该令牌的 scope 决定——query 只能查本账户用量，admin_read 可读后台只读
+# 接口，admin 等同于管理员凭据（可发 Key、动账、删除等）。因此本页没有任何「写开关」：
+# 想收紧权限就给会话绑一个 scope 更小的令牌，想收回权限就在 MCP 令牌页撤销该令牌（下一次
+# 工具调用立即失效）。后台能力要求 mcp.enabled 与 mcp.admin_tools 同时为 true。
 chat:
   enabled: true
   # 步数与工具调用次数：0 = 不限制（默认）。一次提问会一直进行到模型不再调用工具为止；
@@ -176,8 +182,6 @@ chat:
   artifact_allow_network: false
   # 单步回答的 token 上限，0 = 用供应商默认值。
   max_output_tokens: 0
-  # 在内置的高危禁止清单之外再禁用的管理端点名（只能做减法，不能用来放开写接口）。
-  high_risk_tools: []
   # 空 = 使用内置指令（含工具用法、图表规格、HTML 沙箱边界）。
   system_prompt: ""
 
