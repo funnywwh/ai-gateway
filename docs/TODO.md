@@ -1201,3 +1201,75 @@
 - [ ] 观察项：明文凭据（API Key / MCP 令牌）现在会落进 `chat_tool_calls.result` 与会话记录。
       当前只在响应里追加一次性提示，不做脱敏——静默改写会让「已落盘」这一事实不可见。
       若日后要收紧，应做的是「返回后可选地从转录中清除」，而不是悄悄改内容
+
+## M34 智能问答的可交互 HTML5 界面（表单 → 提交 → 模型继续）
+
+设计：`docs/design/m34-ui-bridge.md`；规格：`docs/chat.md` §4（可交互的界面）、§8（配置）、§9（排障）。
+
+### 后端：票据 scope 与桥接注入
+- [x] 票据 payload 变四元 `artifact|adminSession|expiryNanos|scope`；`scope` = artifact id（交互）
+      或 `"view"`（只读）。旧三元 payload 按字段数自然拒绝（`TestUIPreviewTicketCarriesAnAudience`）
+- [x] `POST …/artifacts` 与 `POST …/artifacts/{art}/ticket` 接受 `bridge:true`；SVG 与
+      `chat.ui_bridge_enabled=false` 都被拒（400），错误文案说明原因
+- [x] `GET /admin/chat-artifact/{id}?bridge=1` 只在**票据 scope == 本 artifact** 且是 html 且开关打开时
+      注入桥接脚本；查询参数本身不构成升权（`?bridge=1` 打在只读票据上仍是只读）
+- [x] 注入 `script#aigw-ui-bridge`（`data-token` = 每响应随机、CSP `nonce` = 每响应随机），
+      插到 `<head>`/`<html>` 之后；正文里已有该 id 时幂等跳过
+- [x] 响应头新增 `X-Aigw-Bridge: 1`；CSP 在交互预览上多一个 `'nonce-…'`，其余（`sandbox allow-scripts`、
+      `default-src 'none'`、`connect-src 'none'`、`no-store`/`nosniff`/`no-referrer`）逐字不变
+- [x] 注入脚本是 ES5、无 `fetch`/`XMLHttpRequest`/`eval`/`innerHTML`/`document.write`/存储访问；
+      表单提交 `preventDefault` 后走桥接（沙箱没有 `allow-forms`，且**不**为它放开）
+- [x] 字段扁平化：跳过 `file`、checkbox 归一为布尔、多选为数组、`__proto__`/`constructor`/`prototype`
+      一律丢弃；单事件 8 KiB、单表单 64 字段上限
+- [x] 配置 `chat.ui_bridge_enabled`（默认 true）+ `config.example.yaml` + 本机 `config.yaml` 显式写入
+- [x] 提示词：契约文本 `chat.DefaultUIBridgeInstructions` 由 `chat.Config.UIBridge` 决定是否追加到系统提示词
+      （运维自定义 `system_prompt` 时也生效；关掉开关时不再教模型建表单）
+
+### 控制台：端口、工具栏与回灌
+- [x] 新模块 `pages/chat_ui.js`：`createUIPort`（MessageChannel 握手、`doc`/`root` 分离的 `applyUIOps`）、
+      `parseUISpec`、限流（最小间隔 1.5s / 单预览 40 次 / 单事件 8 KiB）、拒绝必带原因
+- [x] 握手凭证 = 服务端注入的 `data-token`（从**帧自己的文档**读，不是 URL 里的票据，也不是第二份 fetch）；
+      校验 `event.source === frame.contentWindow` + token + 必须带 port
+- [x] 握手 3 秒无响应 → 工具栏「不可交互」并说明"脚本被沙箱或页面策略拦住"，预览本身仍可查看
+- [x] 预览工具栏：桥接状态徽章、已提交计数、`停止生成`（abort 控制台自己那条流）、`重新加载`、
+      `加载新版本`（**不自动换页**）、复制源码、新标签打开、关闭（关闭即销毁 port 与监听）
+- [x] `chat.js` 抽出 `runTurn(content, { onDelta, onFinish })`：手动提问与界面提交**共用同一条**
+      SSE + 计费 + 幂等 + 保存路径；导出 `codeBlocksOf` / `uiEventContent` / `partsText` 供测试直接断言
+- [x] 提交内容 = `label` 一行人话 + ` ```json {"source":"ui_event","event":…,"data":{…}} ````（首行顺带成为会话标题）
+- [x] 回答边流边回灌（`{k:'d'}`），结束时把 ` ```ui ```` 指令与状态发回页面（`{k:'done'}`）；
+      模型若给出新的整页版本 → 工具栏出现「加载新版本」
+- [x] 在途轮次时界面提交排队（上限 5）并提示，本轮结束后按序发出；`停止生成` 与手动停止同一语义
+- [x] 转录里 ` ```ui ```` 代码块显示条数/规格错误，并提供「重新应用」（页面重开后重放补丁）
+
+### 顺手修掉的既有缺陷
+- [x] `UpsertChatArtifact` 冲突分支不覆盖 `id`，而上传处理器用自己新生成的 id 拼 URL 签票据 →
+      同一代码块第二次预览拿到 **404 的 URL**。改成 `INSERT … RETURNING id` 并回写真实 id
+      （`TestUIPreviewUploadUsesTheKeyAsItsIdentity` 从"红"变"绿"）
+
+### 测试与验收
+- [x] `internal/httpapi/chat_ui_bridge_test.go`：交互/只读票据矩阵（含 `?bridge=1` 打在只读票据上、
+      票与 artifact 不匹配、旧三元 payload）、幂等注入、SVG 永不注入、nonce 与 token 每响应不同、
+      开关关闭后**已签发的交互票据也失效**、注入脚本不含网络/求值/markup API 且保持 ES5、
+      提示词契约 == 注入脚本实现的操作、`ui_event` 走正常计费且正文仍不进全局日志
+- [x] `internal/webui/embed_test.go`：`chat_ui.js` 已内嵌、`chat_ui.js`/`chat_artifact.js` 不含
+      `innerHTML`/`insertAdjacentHTML`/`document.write`（先剥注释，避免测试把自己的说明判成违规）
+- [x] `scripts/ui-harness/chat.page.html`：`chat` 视图 61 → **75** 项，新增 `ui` 指令解析/应用/拒绝、
+      SVG 属性白名单、握手拒绝矩阵（错 token / 错 source / 无 port / 错帧类型）、表单提交 →
+      `ui_event` 请求体、限流与排队（含真实 `MessageChannel` 与延迟关闭的 SSE 流）、
+      流式 delta 与 `done`（含 ops）回灌、「重新加载」后旧通道失效
+- [x] `scripts/ui-harness/server.py`：harness 静态资源改 `no-store`（原来浏览器会缓存上一版 JS，
+      让已修的报错反复出现）
+- [x] `make verify` 全绿；`make ui-check` **13 个视图全绿**（`chat` 75 项 + 新增 `bridge` 17 项）
+- [x] `bridge` 视图：真实浏览器用 `new Function(source)` 只编译不执行地验证**服务端注入的脚本**
+      （Go 拼接出的 JS 没有别的办法证明合法），并断言无 fetch/XHR/eval/innerHTML/存储访问、保持 ES5、
+      含握手与表单绑定；夹具由 `TestUIBridgeScriptDumpForTheHarness` 在每次 `go test` 时重写，
+      不会退化成"自己和自己一致"的假检查
+- [ ] **待人工执行**（宿主终端）：硬刷新 `http://127.0.0.1:8088/admin/ui/#/chat`，用真模型要一次
+      "需要用户选择的信息"（例如"帮我建一个账户，先问我账户名和限额"）→ 确认模型输出表单 →
+      点「预览（可交互）」→ 填写提交 → 确认工具栏计数 +1、会话里出现带 `ui_event` 的新提问、
+      模型继续执行；再确认请求日志里这一条是 `client=console`、正文为空
+- [ ] 观察项：界面提交与手动提问走同一条计费路径，所以**一次预览里的连续提交会连续计费**。
+      限流（1.5s / 40 次）是控制台侧的上界，不是服务端强制的；若某个部署需要硬上界，应加服务端
+      配额而不是依赖控制台
+- [ ] 观察项：`chat.ui_bridge_enabled` 是**部署级**开关，不是"关掉模型写表单的能力"——模型仍然
+      可能输出表单，只是提交没有出口（工具栏会说明）。文档已按此口径描述
