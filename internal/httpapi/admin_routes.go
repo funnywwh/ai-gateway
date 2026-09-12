@@ -74,11 +74,13 @@ func enumField(field adminField, values ...string) adminField {
 	return field
 }
 
-// dimensionQueryFields are the identity filters every request-log read accepts. They are
-// declared once so the console, MCP's admin_describe and the store's filter cannot drift
-// apart.
+// dimensionQueryFields are the filters every request-log read accepts: the account and API
+// key the request authenticated with, plus the six identity dimensions. They are declared
+// once so the console, MCP's admin_describe and the store's filter cannot drift apart.
 func dimensionQueryFields() []adminField {
 	return []adminField{
+		queryParam("account_id", "integer", "按账户（用户）过滤；非数字返回 400"),
+		queryParam("api_key_id", "integer", "按 API Key 过滤（凭据 id，见 GET /keys）；非数字返回 400"),
 		queryParam("client", "string", "按客户端过滤：dsh | codex | unknown"),
 		queryParam("model", "string", "按请求的模型名过滤（账单口径，与发票分组一致）"),
 		queryParam("resolved_model", "string", "按路由后的规范模型名过滤"),
@@ -396,9 +398,8 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/requests", Handler: s.handleAdminRequests,
 			Name: "admin_list_requests", Group: groupRequests, Role: roleViewer,
-			Summary: "全部账户的请求日志（跨账户视图，可按账户、天数与身份维度过滤；带该请求的 token 与成本）",
+			Summary: "全部账户的请求日志（跨账户视图，可按账户/API Key、天数与身份维度过滤；带该请求的用户与 Key 名字、token 与成本）",
 			Query: append(append(pageRequests.fields(),
-				queryParam("account_id", "integer", "只看某个账户"),
 				queryParam("days", "integer", "回溯天数，默认 7，最大 365")),
 				dimensionQueryFields()...),
 		},
@@ -409,7 +410,7 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 			// worked around; /requests/prune has the same shape.
 			Method: "GET", Path: "/admin/api/v1/requests/dimensions", Handler: s.handleAdminRequestDimensions,
 			Name: "admin_request_dimensions", Group: groupRequests, Role: roleViewer,
-			Summary: "请求日志的维度统计：按客户端/模型/工作区/会话/调用类型分组，汇总请求数、token 与成本",
+			Summary: "请求日志的维度统计：按客户端/模型/工作区/会话/调用类型/账户（用户）/API Key 分组，汇总请求数、token 与成本",
 			Query: append([]adminField{
 				queryParam("days", "integer", "回溯天数，默认 7，最大 365"),
 				queryParam("limit", "integer", "返回的分组数，默认 20，最大 200"),
@@ -419,7 +420,7 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/requests/{id}", Handler: s.handleAdminRequestDetail,
 			Name: "admin_get_request", Group: groupRequests, Role: roleViewer,
-			Summary: "单条请求详情（输入/思考/输出，按录制开关决定是否可见；含身份维度与 token/成本）",
+			Summary: "单条请求详情（输入/思考/输出，按录制开关决定是否可见；含身份维度、用户与 API Key 名字、token/成本）",
 			Params:  []adminField{pathParam("id", "请求 id（x-request-id）")},
 		},
 		{

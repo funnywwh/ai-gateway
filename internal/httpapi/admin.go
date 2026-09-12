@@ -30,6 +30,10 @@ type AdminStore interface {
 	CountRequestLogs(ctx context.Context, f domain.RequestLogFilter) (int, error)
 	GetRequestLog(ctx context.Context, requestID string) (*domain.RequestLogRecord, error)
 	RequestUsages(ctx context.Context, requestIDs []string) (map[string]*domain.RequestUsage, error)
+	// The two credential dimensions (M30) read their labels from the tables that own
+	// them; the log row keeps only the ids.
+	AccountNames(ctx context.Context, ids []int64) (map[int64]string, error)
+	APIKeyLabels(ctx context.Context, ids []int64) (map[int64]domain.APIKeyLabel, error)
 	RequestLogDimensions(ctx context.Context, f domain.RequestLogFilter, groupBy string, limit int) ([]domain.RequestLogDimensionRow, error)
 	InsertAudit(ctx context.Context, e *AuditEntry) error
 	ListAudit(ctx context.Context, limit int) ([]*AuditEntry, error)
@@ -437,7 +441,11 @@ func (s *Server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	filter := requestLogFilterFromQuery(r)
+	filter, err := requestLogFilterFromQuery(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
 	rows, err := s.deps.AdminStore.ListRequestLogsPage(r.Context(), filter, page.Limit, page.Offset)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
@@ -456,10 +464,26 @@ func (s *Server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
+	// The same rule for the two credential dimensions: the row keeps the ids, and the
+	// names come from one batched lookup per page (ownerLabels).
+	accountIDs := make([]int64, 0, len(rows))
+	keyIDs := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		accountIDs = append(accountIDs, row.AccountID)
+		keyIDs = append(keyIDs, row.APIKeyID)
+	}
+	accounts, keys, err := s.ownerLabels(r.Context(), accountIDs, keyIDs)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
+		key := keys[row.APIKeyID]
 		payload := map[string]any{
 			"request_id": row.RequestID, "account_id": row.AccountID, "api_key_id": row.APIKeyID,
+			"account_name": accounts[row.AccountID],
+			"api_key_name": key.Name, "api_key_prefix": key.Prefix,
 			"endpoint": row.Endpoint, "status": row.Status,
 			"created_at":     row.CreatedAt.Format(time.RFC3339),
 			"input_recorded": row.RequestJSON != "", "reasoning_recorded": row.ReasoningRecorded,
@@ -478,10 +502,15 @@ func (s *Server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
 	writeList(w, out, total, page)
 }
 
-// requestLogFilterFromQuery reads the account, window and identity filters the console and
-// MCP pass. Unknown or empty values are simply "no filter"; a dimension filter is an exact
-// match, which is what the indexed columns can serve.
-func requestLogFilterFromQuery(r *http.Request) domain.RequestLogFilter {
+// requestLogFilterFromQuery reads the account/key, window and identity filters the console
+// and MCP pass. Unknown or empty dimension values are simply "no filter"; a dimension
+// filter is an exact match, which is what the indexed columns can serve.
+//
+// The two numeric filters are rejected when they are not numbers. Silently ignoring a
+// malformed id answers "every account" to a question that asked for one, which is the
+// failure mode /invoices?account_id= was already fixed for; a 400 names the parameter
+// instead (docs/design/m30-request-log-owner-dimensions.md D8).
+func requestLogFilterFromQuery(r *http.Request) (domain.RequestLogFilter, error) {
 	query := r.URL.Query()
 	filter := domain.RequestLogFilter{
 		Client:        query.Get("client"),
@@ -491,13 +520,41 @@ func requestLogFilterFromQuery(r *http.Request) domain.RequestLogFilter {
 		SessionID:     query.Get("session_id"),
 		CallKind:      query.Get("call_kind"),
 	}
-	if raw := query.Get("account_id"); raw != "" {
-		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil {
-			filter.AccountID = parsed
+	for _, id := range []struct {
+		param  string
+		target *int64
+	}{
+		{"account_id", &filter.AccountID},
+		{"api_key_id", &filter.APIKeyID},
+	} {
+		raw := query.Get(id.param)
+		if raw == "" {
+			continue
 		}
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return domain.RequestLogFilter{}, domain.ErrInvalidRequest(id.param + " must be an integer").WithParam(id.param)
+		}
+		*id.target = parsed
 	}
 	filter.From, filter.To = adminWindow(r)
-	return filter
+	return filter, nil
+}
+
+// ownerLabels resolves the account and API-key labels of the rows (or dimension buckets)
+// in hand, one batched point lookup per table. Both maps are keyed by id and simply lack
+// an entry for an id that has no row: a request log keeps its id and the console renders
+// the id, rather than blanking the cell and hiding that the row exists.
+func (s *Server) ownerLabels(ctx context.Context, accountIDs, keyIDs []int64) (map[int64]string, map[int64]domain.APIKeyLabel, error) {
+	accounts, err := s.deps.AdminStore.AccountNames(ctx, accountIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	keys, err := s.deps.AdminStore.APIKeyLabels(ctx, keyIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	return accounts, keys, nil
 }
 
 // requestUsages loads the page's metered consumption in one query.
@@ -543,7 +600,7 @@ func validRequestLogDimension(groupBy string) bool {
 
 // handleAdminRequestDimensions groups recorded requests by one identity dimension and sums
 // what they consumed. It is the "statistics" half of the request log: which client, model,
-// workspace or session is producing the traffic and the spend.
+// workspace, session, account (user) or API key is producing the traffic and the spend.
 func (s *Server) handleAdminRequestDimensions(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.adminActor(w, r, false); !ok {
 		return
@@ -558,16 +615,42 @@ func (s *Server) handleAdminRequestDimensions(w http.ResponseWriter, r *http.Req
 		return
 	}
 	limit := adminLimit(r, 20, 200)
-	filter := requestLogFilterFromQuery(r)
+	filter, err := requestLogFilterFromQuery(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
 	rows, err := s.deps.AdminStore.RequestLogDimensions(r.Context(), filter, groupBy, limit)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	// The credential groupings bucket on ids; their names are labels read from the tables
+	// that own them, resolved for the buckets actually being returned (never for the whole
+	// window — the aggregate query would have to join per row to do that).
+	var accountIDs, keyIDs []int64
+	switch groupBy {
+	case "account":
+		accountIDs = dimensionGroupIDs(rows)
+	case "api_key":
+		keyIDs = dimensionGroupIDs(rows)
+	}
+	accounts, keys, err := s.ownerLabels(r.Context(), accountIDs, keyIDs)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
+		key := row.Key
+		// An id of 0 (or below) is the unknown bucket — a historical row, or a row written
+		// without a credential. It is reported as an empty key, the same "（未知）" bucket
+		// the other dimensions use, and its counts are kept.
+		if id, err := strconv.ParseInt(key, 10, 64); err == nil && id <= 0 {
+			key = ""
+		}
 		payload := map[string]any{
-			"key": row.Key, "requests": row.Requests, "metered": row.Metered,
+			"key": key, "requests": row.Requests, "metered": row.Metered,
 			"first_seen":   row.FirstSeen.Format(time.RFC3339),
 			"last_seen":    row.LastSeen.Format(time.RFC3339),
 			"input_tokens": row.InputTokens, "output_tokens": row.OutputTokens,
@@ -576,9 +659,21 @@ func (s *Server) handleAdminRequestDimensions(w http.ResponseWriter, r *http.Req
 		}
 		// A session owns one title and one workspace; for the other groupings these say
 		// nothing, so they are only reported where they mean something.
-		if groupBy == "session" {
+		switch groupBy {
+		case "session":
 			payload["title"] = row.Title
 			payload["workspace"] = row.Workspace
+		case "account":
+			if id, err := strconv.ParseInt(row.Key, 10, 64); err == nil {
+				payload["account_id"] = id
+				payload["account_name"] = accounts[id]
+			}
+		case "api_key":
+			if id, err := strconv.ParseInt(row.Key, 10, 64); err == nil {
+				payload["api_key_id"] = id
+				payload["api_key_name"] = keys[id].Name
+				payload["api_key_prefix"] = keys[id].Prefix
+			}
 		}
 		out = append(out, payload)
 	}
@@ -586,6 +681,19 @@ func (s *Server) handleAdminRequestDimensions(w http.ResponseWriter, r *http.Req
 		"group_by": groupBy, "days": adminDays(r), "limit": limit,
 		"dimensions": store.RequestLogDimensionNames, "rows": out,
 	})
+}
+
+// dimensionGroupIDs reads the numeric group keys of a credential grouping. The store
+// returns them as text (SQLite has no other way to group a leftover-typed column), and a
+// bucket whose key is not a number cannot be looked up by id.
+func dimensionGroupIDs(rows []domain.RequestLogDimensionRow) []int64 {
+	ids := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		if id, err := strconv.ParseInt(row.Key, 10, 64); err == nil && id > 0 {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func (s *Server) handleAdminRequestDetail(w http.ResponseWriter, r *http.Request) {
@@ -602,8 +710,16 @@ func (s *Server) handleAdminRequestDetail(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, toAPIError(err))
 		return
 	}
+	accounts, keys, err := s.ownerLabels(r.Context(), []int64{row.AccountID}, []int64{row.APIKeyID})
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	key := keys[row.APIKeyID]
 	payload := map[string]any{
 		"request_id": row.RequestID, "account_id": row.AccountID, "api_key_id": row.APIKeyID,
+		"account_name": accounts[row.AccountID],
+		"api_key_name": key.Name, "api_key_prefix": key.Prefix,
 		"endpoint": row.Endpoint, "status": row.Status,
 		"created_at":     row.CreatedAt.Format(time.RFC3339),
 		"input":          jsonOrNil(row.RequestJSON),

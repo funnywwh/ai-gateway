@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -501,4 +502,201 @@ func TestAdminRequestsFilterByIdentity(t *testing.T) {
 	if len(wrows) != 1 {
 		t.Fatalf("workspace filter returned %d rows, want 1", len(wrows))
 	}
+}
+
+// seedAdminKey inserts one API key into the admin fixture and returns its id. The fixture
+// seeds an account but no key, and the request log's Key dimension reads its names from
+// api_keys — so a test that asserts a name has to create the row that owns it.
+func seedAdminKey(t *testing.T, f *adminFixture, name, prefix string) int64 {
+	t.Helper()
+	id, err := f.db.UpsertAPIKey(context.Background(), &domain.APIKey{
+		AccountID: 1, Name: name, KeyPrefix: prefix, KeyHash: "hash-" + prefix, Status: "active",
+	})
+	if err != nil {
+		t.Fatalf("seed api key: %v", err)
+	}
+	return id
+}
+
+// The credential dimensions (M30) are read-time labels: the row keeps the account/key ids
+// the request authenticated with, and the names come from the tables that own them.
+func TestAdminRequestsCarryOwnerLabels(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+	keyID := seedAdminKey(t, f, "dev-key", "sk-gw-label001")
+
+	seedIdentityRow(t, f, &domain.RequestLogRecord{
+		RequestID: "req_owner0001", AccountID: 1, APIKeyID: keyID, Endpoint: "/v1/responses",
+		Status: "completed", Client: "dsh", Model: "deepseek-flash",
+	})
+	// A row with no credential at all: the ids stay 0 and the labels stay empty. It must
+	// still be listed — an unowned request is exactly the kind an operator needs to see.
+	seedIdentityRow(t, f, &domain.RequestLogRecord{
+		RequestID: "req_owner0002", AccountID: 0, APIKeyID: 0, Endpoint: "/v1/responses",
+		Status: "completed", Client: "unknown", Model: "deepseek-flash",
+	})
+
+	body := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/requests?days=1&limit=10", "", cookie))
+	rows, _ := body["data"].([]any)
+	byID := map[string]map[string]any{}
+	for _, raw := range rows {
+		row, _ := raw.(map[string]any)
+		byID[row["request_id"].(string)] = row
+	}
+	named := byID["req_owner0001"]
+	if named == nil {
+		t.Fatalf("the recorded request is missing from the list: %v", rows)
+	}
+	if named["account_name"] != "acme" || named["api_key_name"] != "dev-key" || named["api_key_prefix"] != "sk-gw-label001" {
+		t.Fatalf("owner labels = %v, want the account and key names", named)
+	}
+	unowned := byID["req_owner0002"]
+	if unowned == nil {
+		t.Fatalf("a request without a credential must still be listed: %v", rows)
+	}
+	if unowned["account_id"].(float64) != 0 || unowned["api_key_id"].(float64) != 0 {
+		t.Fatalf("unowned ids = %v", unowned)
+	}
+	if unowned["account_name"] != "" || unowned["api_key_name"] != "" || unowned["api_key_prefix"] != "" {
+		t.Fatalf("an id with no row must resolve to empty labels, not an error: %v", unowned)
+	}
+
+	detail := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/requests/req_owner0001", "", cookie))
+	if detail["account_name"] != "acme" || detail["api_key_name"] != "dev-key" || detail["api_key_prefix"] != "sk-gw-label001" {
+		t.Fatalf("detail owner labels = %v", detail)
+	}
+}
+
+// The API key filter is an exact match on the credential, and the total describes the same
+// rows the page does (the credential dimensions are what make "whose traffic is this"
+// answerable, so a page and its count drifting apart would be a wrong answer, not a bug in
+// a filter).
+func TestAdminRequestsFilterByAPIKey(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+	keyA := seedAdminKey(t, f, "key-a", "sk-gw-keya00001")
+	keyB := seedAdminKey(t, f, "key-b", "sk-gw-keyb00001")
+
+	seedIdentityRow(t, f, &domain.RequestLogRecord{
+		RequestID: "req_keyf0001", AccountID: 1, APIKeyID: keyA, Status: "completed", Client: "dsh",
+	})
+	seedIdentityRow(t, f, &domain.RequestLogRecord{
+		RequestID: "req_keyf0002", AccountID: 1, APIKeyID: keyB, Status: "completed", Client: "codex",
+	})
+
+	body := decodeJSONBody(t, f.call(t, http.MethodGet,
+		"/admin/api/v1/requests?days=1&api_key_id="+strconv.FormatInt(keyB, 10)+"&limit=10", "", cookie))
+	rows, _ := body["data"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("api_key_id filter returned %d rows, want 1", len(rows))
+	}
+	if item, _ := rows[0].(map[string]any); item["request_id"] != "req_keyf0002" || item["api_key_name"] != "key-b" {
+		t.Fatalf("filtered row = %v", rows[0])
+	}
+	if total, _ := body["total"].(float64); total != 1 {
+		t.Fatalf("total = %v, want the filtered count", body["total"])
+	}
+
+	// The credential filter composes with the account filter and with the identity
+	// dimensions instead of replacing them.
+	combined := decodeJSONBody(t, f.call(t, http.MethodGet,
+		"/admin/api/v1/requests?days=1&account_id=1&api_key_id="+strconv.FormatInt(keyA, 10)+"&client=dsh", "", cookie))
+	if crows, _ := combined["data"].([]any); len(crows) != 1 {
+		t.Fatalf("combined filter returned %d rows, want 1", len(crows))
+	}
+	mismatch := decodeJSONBody(t, f.call(t, http.MethodGet,
+		"/admin/api/v1/requests?days=1&account_id=1&api_key_id="+strconv.FormatInt(keyA, 10)+"&client=codex", "", cookie))
+	if mrows, _ := mismatch["data"].([]any); len(mrows) != 0 {
+		t.Fatalf("combined filter returned %d rows, want 0", len(mrows))
+	}
+}
+
+// A malformed id is rejected instead of ignored: answering "every account" to a question
+// that named one account is the failure mode the invoices endpoint was fixed for.
+func TestAdminRequestsRejectMalformedOwnerFilters(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+	for _, path := range []string{
+		"/admin/api/v1/requests?days=1&account_id=abc",
+		"/admin/api/v1/requests?days=1&api_key_id=1.5",
+		"/admin/api/v1/requests/dimensions?days=1&group_by=api_key&account_id=abc",
+		"/admin/api/v1/requests/dimensions?days=1&group_by=account&api_key_id=two",
+	} {
+		resp := f.call(t, http.MethodGet, path, "", cookie)
+		if resp.StatusCode != http.StatusBadRequest {
+			resp.Body.Close()
+			t.Fatalf("%s: status = %d, want 400", path, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+}
+
+// The credential groupings bucket on ids and carry the names the console renders; the id
+// 0 bucket (a row with no credential) is reported with an empty key, the same unknown
+// bucket the other dimensions use, and its counts are kept.
+func TestAdminRequestDimensionsGroupByOwner(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+	keyA := seedAdminKey(t, f, "key-a", "sk-gw-keya00001")
+	keyB := seedAdminKey(t, f, "key-b", "sk-gw-keyb00001")
+
+	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_grp0001", AccountID: 1, APIKeyID: keyA, Status: "completed", Client: "dsh"})
+	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_grp0002", AccountID: 1, APIKeyID: keyA, Status: "completed", Client: "dsh"})
+	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_grp0003", AccountID: 1, APIKeyID: keyB, Status: "completed", Client: "codex"})
+	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_grp0004", AccountID: 0, APIKeyID: 0, Status: "completed", Client: "unknown"})
+
+	accounts := decodeJSONBody(t, f.call(t, http.MethodGet,
+		"/admin/api/v1/requests/dimensions?days=1&group_by=account&limit=10", "", cookie))
+	if accounts["group_by"] != "account" {
+		t.Fatalf("group_by = %v", accounts["group_by"])
+	}
+	if names, _ := accounts["dimensions"].([]any); !containsString(names, "account") || !containsString(names, "api_key") {
+		t.Fatalf("the endpoint must advertise the credential groupings: %v", accounts["dimensions"])
+	}
+	arows, _ := accounts["rows"].([]any)
+	if len(arows) != 2 {
+		t.Fatalf("account buckets = %v, want acme and the unknown bucket", arows)
+	}
+	acme, _ := arows[0].(map[string]any)
+	if acme["key"] != "1" || acme["account_name"] != "acme" || acme["requests"].(float64) != 3 {
+		t.Fatalf("account bucket = %v", acme)
+	}
+	unknown, _ := arows[1].(map[string]any)
+	if unknown["key"] != "" || unknown["requests"].(float64) != 1 || unknown["account_name"] != "" {
+		t.Fatalf("the unknown credential bucket = %v, want key \"\" with its count kept", unknown)
+	}
+
+	keys := decodeJSONBody(t, f.call(t, http.MethodGet,
+		"/admin/api/v1/requests/dimensions?days=1&group_by=api_key&limit=10", "", cookie))
+	krows, _ := keys["rows"].([]any)
+	if len(krows) != 3 {
+		t.Fatalf("api key buckets = %v, want key-a, key-b and the unknown bucket", krows)
+	}
+	first, _ := krows[0].(map[string]any)
+	if first["key"] != strconv.FormatInt(keyA, 10) || first["api_key_name"] != "key-a" ||
+		first["api_key_prefix"] != "sk-gw-keya00001" || first["requests"].(float64) != 2 {
+		t.Fatalf("api key bucket = %v", first)
+	}
+
+	// The API key filter narrows the breakdown, so a drill-down from the list keeps
+	// describing one key.
+	filtered := decodeJSONBody(t, f.call(t, http.MethodGet,
+		"/admin/api/v1/requests/dimensions?days=1&group_by=api_key&api_key_id="+strconv.FormatInt(keyB, 10), "", cookie))
+	frows, _ := filtered["rows"].([]any)
+	if len(frows) != 1 {
+		t.Fatalf("filtered breakdown = %v, want one bucket", frows)
+	}
+	if bucket, _ := frows[0].(map[string]any); bucket["api_key_name"] != "key-b" || bucket["requests"].(float64) != 1 {
+		t.Fatalf("filtered bucket = %v", frows[0])
+	}
+}
+
+// containsString reports whether a decoded JSON array carries a string.
+func containsString(values []any, want string) bool {
+	for _, raw := range values {
+		if text, _ := raw.(string); text == want {
+			return true
+		}
+	}
+	return false
 }

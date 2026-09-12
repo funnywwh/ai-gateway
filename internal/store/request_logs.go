@@ -24,10 +24,14 @@ func requestLogFilter(prefix string, f domain.RequestLogFilter) (string, []any) 
 	args := []any{}
 	// account_id <= 0 means "every account": the management console lists requests across
 	// tenants, so the filter has to be optional (it used to be applied unconditionally,
-	// which silently returned nothing for the console).
+	// which silently returned nothing for the console). api_key_id follows the same rule.
 	if f.AccountID > 0 {
 		where += " AND " + prefix + "account_id = ?"
 		args = append(args, f.AccountID)
+	}
+	if f.APIKeyID > 0 {
+		where += " AND " + prefix + "api_key_id = ?"
+		args = append(args, f.APIKeyID)
 	}
 	if !f.From.IsZero() {
 		where += " AND " + prefix + "created_at >= ?"
@@ -192,7 +196,7 @@ func (db *DB) RequestUsages(ctx context.Context, requestIDs []string) (map[strin
 	for _, id := range ids {
 		args = append(args, id)
 	}
-	query := requestUsageSQL(strings.TrimSuffix(strings.Repeat("?,", len(ids)), ","))
+	query := requestUsageSQL(idPlaceholders(len(ids)))
 	rows, err := db.read.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: read request usage: %w", err)
@@ -281,9 +285,13 @@ FROM request_logs r LEFT JOIN usage_records u ON u.request_id = r.request_id`+wh
 
 // RequestLogDimensionNames are the accepted group_by values, in the order the console and
 // MCP describe them.
-var RequestLogDimensionNames = []string{"client", "model", "resolved_model", "workspace", "session", "call_kind"}
+var RequestLogDimensionNames = []string{"client", "model", "resolved_model", "workspace", "session", "call_kind", "account", "api_key"}
 
 // requestLogGroupExpr maps a group_by value onto its column.
+//
+// The two credential dimensions (M30) group on the id cast to text, not on the name: the
+// name lives in another table, is mutable, and is not unique for api_keys. The caller
+// resolves ids to names for the buckets it is about to return.
 func requestLogGroupExpr(groupBy string) (string, error) {
 	switch groupBy {
 	case "client", "":
@@ -298,7 +306,108 @@ func requestLogGroupExpr(groupBy string) (string, error) {
 		return "r.session_id", nil
 	case "call_kind":
 		return "r.call_kind", nil
+	case "account":
+		return "CAST(r.account_id AS TEXT)", nil
+	case "api_key":
+		return "CAST(r.api_key_id AS TEXT)", nil
 	default:
-		return "", fmt.Errorf("store: group_by must be client, model, resolved_model, workspace, session or call_kind")
+		return "", fmt.Errorf("store: group_by must be client, model, resolved_model, workspace, session, call_kind, account or api_key")
 	}
+}
+
+// idPlaceholders renders "?,?,…" for one IN list. It is shared by the request log's batch
+// lookups so their placeholder building cannot drift apart.
+func idPlaceholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+// positiveIDs dedupes and drops the ids that name nothing (0 and below): a log row whose
+// account or key id is 0 is the unknown bucket, and looking it up would only waste a scan.
+func positiveIDs(ids []int64) []int64 {
+	out := make([]int64, 0, len(ids))
+	seen := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+// AccountNames resolves account ids to names for the request log's 用户 (account)
+// dimension: one batched point lookup per page, the same shape as RequestUsages.
+//
+// It is a second query rather than a join in the page query on purpose: that query's
+// ORDER BY (historyPageOrder) is satisfied by idx_request_logs_time, and joining a table
+// that also has id/created_at would both make those names ambiguous and invite the temp
+// B-tree M24 removed. An id with no row is simply absent from the map — the log row keeps
+// its id and the console shows the id instead of a blank.
+func (db *DB) AccountNames(ctx context.Context, ids []int64) (map[int64]string, error) {
+	out := map[int64]string{}
+	unique := positiveIDs(ids)
+	if len(unique) == 0 {
+		return out, nil
+	}
+	args := make([]any, 0, len(unique))
+	for _, id := range unique {
+		args = append(args, id)
+	}
+	rows, err := db.read.QueryContext(ctx,
+		"SELECT id, name FROM accounts WHERE id IN ("+idPlaceholders(len(unique))+")", args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: read account names: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			id   int64
+			name string
+		)
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, fmt.Errorf("store: scan account name: %w", err)
+		}
+		out[id] = name
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate account names: %w", err)
+	}
+	return out, nil
+}
+
+// APIKeyLabels resolves API key ids to their read-time labels (name + prefix). Same
+// contract as AccountNames: batched, missing ids absent, empty input an empty map.
+func (db *DB) APIKeyLabels(ctx context.Context, ids []int64) (map[int64]domain.APIKeyLabel, error) {
+	out := map[int64]domain.APIKeyLabel{}
+	unique := positiveIDs(ids)
+	if len(unique) == 0 {
+		return out, nil
+	}
+	args := make([]any, 0, len(unique))
+	for _, id := range unique {
+		args = append(args, id)
+	}
+	rows, err := db.read.QueryContext(ctx,
+		"SELECT id, name, key_prefix FROM api_keys WHERE id IN ("+idPlaceholders(len(unique))+")", args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: read api key labels: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			id    int64
+			label domain.APIKeyLabel
+		)
+		if err := rows.Scan(&id, &label.Name, &label.Prefix); err != nil {
+			return nil, fmt.Errorf("store: scan api key label: %w", err)
+		}
+		out[id] = label
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate api key labels: %w", err)
+	}
+	return out, nil
 }

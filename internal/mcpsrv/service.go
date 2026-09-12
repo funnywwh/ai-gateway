@@ -404,6 +404,9 @@ func (s *Service) listRequests(ctx context.Context, accountID int64, args map[st
 	if err != nil {
 		return nil, err
 	}
+	// Which of the account's keys produced this traffic is part of the answer; the ids are
+	// on the row and the names come from one list per call (M30).
+	keys := s.apiKeyNames(ctx, accountID)
 	out := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, map[string]any{
@@ -417,12 +420,31 @@ func (s *Service) listRequests(ctx context.Context, accountID int64, args map[st
 			"workspace":            row.Workspace,
 			"session_id":           row.SessionID,
 			"call_kind":            row.CallKind,
+			"api_key_id":           row.APIKeyID,
+			"api_key_name":         keys[row.APIKeyID],
 			"input_recorded":       row.RequestJSON != "",
 			"reasoning_recorded":   row.ReasoningRecorded,
 			"output_text_recorded": row.OutputTextRecorded,
 		})
 	}
 	return map[string]any{"requests": out, "count": len(out)}, nil
+}
+
+// apiKeyNames maps one account's key ids to their names for the query tools.
+//
+// A failure to read the labels must not fail the tool: the rows are the answer, and the
+// key ids alone are actionable (the caller can name a key from that id). So the map comes
+// back empty and the payload carries an empty name rather than a tool error.
+func (s *Service) apiKeyNames(ctx context.Context, accountID int64) map[int64]string {
+	keys, err := s.store.ListAPIKeys(ctx, accountID)
+	if err != nil {
+		return nil
+	}
+	out := make(map[int64]string, len(keys))
+	for _, key := range keys {
+		out[key.ID] = key.Name
+	}
+	return out
 }
 
 func (s *Service) getRequest(ctx context.Context, accountID int64, args map[string]any) (any, error) {
@@ -439,10 +461,12 @@ func (s *Service) getRequest(ctx context.Context, accountID int64, args map[stri
 		return nil, fmt.Errorf("request not found")
 	}
 	out := map[string]any{
-		"request_id": row.RequestID,
-		"endpoint":   row.Endpoint,
-		"status":     row.Status,
-		"created_at": row.CreatedAt.Format(time.RFC3339),
+		"request_id":   row.RequestID,
+		"endpoint":     row.Endpoint,
+		"status":       row.Status,
+		"created_at":   row.CreatedAt.Format(time.RFC3339),
+		"api_key_id":   row.APIKeyID,
+		"api_key_name": s.apiKeyNames(ctx, accountID)[row.APIKeyID],
 	}
 	if row.RequestJSON != "" {
 		out["input"] = json.RawMessage(row.RequestJSON)

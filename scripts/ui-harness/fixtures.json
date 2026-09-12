@@ -1008,7 +1008,10 @@
   "data": [
    {
     "account_id": 1,
+    "account_name": "acme",
     "api_key_id": 1,
+    "api_key_name": "dev-key",
+    "api_key_prefix": "sk-gw-981065ae",
     "call_kind": "agent",
     "client": "dsh",
     "created_at": "2026-09-11T11:00:00Z",
@@ -1039,7 +1042,10 @@
    },
    {
     "account_id": 1,
+    "account_name": "acme",
     "api_key_id": 1,
+    "api_key_name": "dev-key",
+    "api_key_prefix": "sk-gw-981065ae",
     "call_kind": "title",
     "client": "codex",
     "created_at": "2026-09-11T11:05:00Z",
@@ -1082,7 +1088,9 @@
    "resolved_model",
    "workspace",
    "session",
-   "call_kind"
+   "call_kind",
+   "account",
+   "api_key"
   ],
   "group_by": "model",
   "limit": 20,
@@ -1113,6 +1121,83 @@
    }
   ]
  },
+ "/requests/dimensions?group_by=account": {
+  "days": 7,
+  "dimensions": [
+   "client",
+   "model",
+   "resolved_model",
+   "workspace",
+   "session",
+   "call_kind",
+   "account",
+   "api_key"
+  ],
+  "group_by": "account",
+  "limit": 20,
+  "rows": [
+   {
+    "account_id": 1,
+    "account_name": "acme",
+    "charge_micros": 7404,
+    "cost_micros": 3702,
+    "first_seen": "2026-09-11T11:00:00Z",
+    "input_tokens": 3600,
+    "key": "1",
+    "last_seen": "2026-09-11T11:30:00Z",
+    "metered": 3,
+    "output_tokens": 102,
+    "reasoning_tokens": 36,
+    "requests": 3
+   },
+   {
+    "account_id": 0,
+    "account_name": "",
+    "charge_micros": 0,
+    "cost_micros": 0,
+    "first_seen": "2026-09-11T11:00:00Z",
+    "input_tokens": 0,
+    "key": "",
+    "last_seen": "2026-09-11T11:30:00Z",
+    "metered": 0,
+    "output_tokens": 0,
+    "reasoning_tokens": 0,
+    "requests": 1
+   }
+  ]
+ },
+ "/requests/dimensions?group_by=api_key": {
+  "days": 7,
+  "dimensions": [
+   "client",
+   "model",
+   "resolved_model",
+   "workspace",
+   "session",
+   "call_kind",
+   "account",
+   "api_key"
+  ],
+  "group_by": "api_key",
+  "limit": 20,
+  "rows": [
+   {
+    "api_key_id": 1,
+    "api_key_name": "dev-key",
+    "api_key_prefix": "sk-gw-981065ae",
+    "charge_micros": 7404,
+    "cost_micros": 3702,
+    "first_seen": "2026-09-11T11:00:00Z",
+    "input_tokens": 3600,
+    "key": "1",
+    "last_seen": "2026-09-11T11:30:00Z",
+    "metered": 3,
+    "output_tokens": 102,
+    "reasoning_tokens": 36,
+    "requests": 3
+   }
+  ]
+ },
  "/requests/prune": {
   "batches": 1,
   "disabled": false,
@@ -1122,7 +1207,10 @@
  },
  "/requests/req_demo0001": {
   "account_id": 1,
+  "account_name": "acme",
   "api_key_id": 1,
+  "api_key_name": "dev-key",
+  "api_key_prefix": "sk-gw-981065ae",
   "call_kind": "agent",
   "client": "dsh",
   "created_at": "2026-09-11T11:00:00Z",

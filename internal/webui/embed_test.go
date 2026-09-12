@@ -11,6 +11,7 @@ import (
 	// halves of one contract, so the test needs the server's list. Production code in
 	// this package still imports nothing from the module (guarded by internal/arch).
 	"github.com/winger/ai-gateway/internal/config"
+	"github.com/winger/ai-gateway/internal/store"
 )
 
 func TestConsoleAssetsAreEmbedded(t *testing.T) {
@@ -90,6 +91,38 @@ func TestConsoleRecordingModesMatchTheServer(t *testing.T) {
 	}
 	if strings.Contains(source, "value: 'meta'") {
 		t.Error(`the console must not offer "meta": the server only understands "metadata"`)
+	}
+}
+
+// TestConsoleDimensionOptionsMatchTheServer pins the request log's grouping select to the
+// server's whitelist. The same shape as the recording-mode test above: a dimension the
+// console offers but the server rejects is not a cosmetic mismatch, it is a control that
+// answers 400, and one the server gained but the console never offers is invisible.
+func TestConsoleDimensionOptionsMatchTheServer(t *testing.T) {
+	srv := httptest.NewServer(Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/js/pages/requests.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	source := string(body)
+
+	if len(store.RequestLogDimensionNames) == 0 {
+		t.Fatal("the store's dimension whitelist is empty; the console reads nothing to offer")
+	}
+	for _, name := range store.RequestLogDimensionNames {
+		if !strings.Contains(source, "['"+name+"',") {
+			t.Errorf("the console must offer the %q grouping (accepted by the server)", name)
+		}
+	}
+	// The two credential dimensions are the ones this milestone added; naming them here
+	// keeps the test honest if the whitelist is ever emptied by accident.
+	for _, name := range []string{"account", "api_key"} {
+		if !strings.Contains(source, "['"+name+"',") {
+			t.Errorf("the console must offer the %q grouping", name)
+		}
 	}
 }
 

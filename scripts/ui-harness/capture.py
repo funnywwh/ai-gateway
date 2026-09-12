@@ -64,11 +64,18 @@ def main():
     # The key editor and the request log (keys.page.html). Kept in the capture so a
     # --refresh does not silently drop the fixtures those views depend on.
     fixtures["/keys"] = call("/admin/api/v1/keys", cookie)
+    # The request log's 用户 (account) filter lists the accounts, like the key editor does.
+    fixtures["/accounts"] = call("/admin/api/v1/accounts?limit=1000", cookie)
     fixtures["/requests"] = call("/admin/api/v1/requests?days=7&limit=50", cookie)
     # The dimension breakdown and the model filter list share this endpoint (M27), so a
-    # --refresh has to capture it or the statistics card renders empty.
+    # --refresh has to capture it or the statistics card renders empty. The two credential
+    # groupings (M30) are captured under their own keys because the harness answers them by
+    # group_by — they are the ones whose names the card has to render.
     fixtures["/requests/dimensions"] = call(
         "/admin/api/v1/requests/dimensions?days=7&group_by=model&limit=20", cookie)
+    for grouping in ("account", "api_key"):
+        fixtures[f"/requests/dimensions?group_by={grouping}"] = call(
+            f"/admin/api/v1/requests/dimensions?days=7&group_by={grouping}&limit=20", cookie)
     for row in fixtures["/requests"].get("data", [])[:1]:
         fixtures[f"/requests/{row['request_id']}"] = call(f"/admin/api/v1/requests/{row['request_id']}", cookie)
     fixtures["/provider-kinds"] = call("/admin/api/v1/provider-kinds", cookie)

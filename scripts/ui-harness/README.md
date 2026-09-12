@@ -47,6 +47,10 @@ GW_BASE=http://127.0.0.1:8099 GW_COOKIE=... scripts/ui-harness/capture.py       
   `/providers/1`（插件，已有握手记录 → 直接渲染字段表）、`/providers/*/test`（返回 `ok:true`）；
 - **M23 起新增**：`/keys`（带扁平配额策略与录制模式的 Key）与 `/requests`、`/requests/{id}`
   （录制文档 + `request_bytes`），供 `#keys`、`#requests` 两个视图使用，`capture.py` 会一并重取。
+- **M30 起**：`/requests` 的行带 `account_name`/`api_key_name`/`api_key_prefix`，`/accounts` 供
+  「用户」筛选用，另有两份**按分组切片**的维度快照 `/requests/dimensions?group_by=account` 与
+  `?group_by=api_key`——stub 会读 URL 里的 `group_by` 去取对应条目（取不到就回落到共享那份），
+  因为「按 id 分组、按名字显示」只有各自的快照能描述；`capture.py --refresh` 会一并重取。
 - **M24 起**：快照条目可以带分页信封（`total`/`limit`/`offset`/`has_more`）；缺 `total` 时
   `pagedTable` 退化成"只有本页"（下一页禁用），所以旧快照不会因为分页改造而报错。
   `#paging` 视图不用快照，它自带 45 行的虚拟账户表（见上）。

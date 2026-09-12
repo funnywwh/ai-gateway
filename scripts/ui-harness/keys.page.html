@@ -18,8 +18,12 @@
 // records request bodies, because the key editor's job is to *send* the right policy.
 const FIXTURES = __FIXTURES__;
 window.fetch = async (url, options) => {
-  const path = String(url).replace('/admin/api/v1', '').split('?')[0];
+  const target = String(url);
+  const path = target.replace('/admin/api/v1', '').split('?')[0];
   window.__fetched = (window.__fetched || []).concat([path]);
+  // The raw URL, query string included: whether a filter value actually reaches the server
+  // is the part the console can get wrong while still rendering a plausible table.
+  window.__urls = (window.__urls || []).concat([target]);
   if (options && options.body) {
     window.__sent = window.__sent || {};
     window.__sent[path] = options.body;
@@ -35,6 +39,15 @@ window.fetch = async (url, options) => {
     const list = FIXTURES['/requests'];
     const row = { ...list.data[0], request_id: window.__detailOverride };
     return { ok: true, status: 200, text: async () => JSON.stringify({ ...list, count: 2, total: 2, data: list.data.concat([row]), has_more: false }) };
+  }
+  // The dimension endpoint answers one shape per grouping, so a fixture key may name the
+  // group_by value ("/requests/dimensions?group_by=account"). The credential groupings are
+  // the ones whose *names* the requests view has to render, and one shared fixture could
+  // not describe them.
+  const groupBy = new URLSearchParams(target.split('?')[1] || '').get('group_by');
+  if (path === '/requests/dimensions' && groupBy && FIXTURES[path + '?group_by=' + groupBy] !== undefined) {
+    const grouped = FIXTURES[path + '?group_by=' + groupBy];
+    return { ok: true, status: 200, text: async () => JSON.stringify(grouped) };
   }
   const body = FIXTURES[path] !== undefined ? FIXTURES[path] : { data: [] };
   // A fixture of null stands for an empty body: api.js parses that to null, not to {}.
@@ -180,7 +193,13 @@ try {
     await settle();
     checks.summaryRestored = footText().includes('共 2 行') && footText().includes('1,200 / 34');
     // The dimension card groups by an identity dimension and sums consumption per group.
+    // Its default grouping is 用户（账户）(M30), which is the question this page is opened
+    // with; the metered-vs-requests gap it explains is asserted on the model grouping,
+    // whose fixture carries one (luna: 1 of 2).
     checks.dimensionCard = pageText().includes('维度统计');
+    checks.dimensionDefaultGrouping = pageText().includes('acme #1') && pageText().includes('（未知）');
+    groupBySelected('model');
+    await settle();
     checks.dimensionRows = pageText().includes('deepseek-flash') && pageText().includes('已计量');
     checks.dimensionMeteredGap = pageText().includes('1 / 2');
     // The fetch stub strips the query string, so the grouping change is observed by the
@@ -190,6 +209,48 @@ try {
     groupBySelected('session');
     await settle();
     checks.dimensionRegrouped = dimensionFetches() > beforeRegroup;
+
+    // 用户（账户）与 API Key 是凭据维度（M30）：列、筛选下拉与统计分组都按它们成立。
+    const headers = () => [...document.querySelectorAll('thead th')].map((th) => th.textContent);
+    checks.ownerColumns = ['用户', 'API Key'].every((c) => headers().includes(c));
+    // 名字要出现在**行**里（下拉选项里也有 'dev-key'，只查页面文本会被它蒙过去）。
+    const ownerRow = [...document.querySelectorAll('tbody tr')].find((tr) => tr.textContent.includes('req_demo0001'));
+    checks.ownerNamesShown = !!ownerRow && ownerRow.textContent.includes('acme') && ownerRow.textContent.includes('dev-key');
+    const selectByOptionText = (text) => [...document.querySelectorAll('select')].find((s) => [...s.options].some((o) => o.textContent === text));
+    const accountSelect = selectByOptionText('全部用户');
+    const keySelect = selectByOptionText('全部 API Key');
+    checks.accountFilter = !!accountSelect && [...accountSelect.options].some((o) => o.textContent === 'acme');
+    checks.keyFilter = !!keySelect && [...keySelect.options].some((o) => o.textContent.includes('dev-key'));
+    // 筛选是服务端的：切账户会带 account_id 取列表、按该账户重取 Key 列表；切 Key 会带
+    // api_key_id 取列表。只断言「控件存在」会漏掉「值没发出去」这类错误，所以读原始 URL。
+    const urlsSince = (mark) => (window.__urls || []).slice(mark);
+    const accountMark = (window.__urls || []).length;
+    accountSelect.value = '1';
+    accountSelect.dispatchEvent(new Event('change'));
+    await settle();
+    checks.filterSendsAccountId = urlsSince(accountMark).some((u) => u.includes('account_id=1'));
+    checks.keyListFollowsAccount = urlsSince(accountMark).some((u) => u.includes('/keys?') && u.includes('account_id=1'));
+    const keyMark = (window.__urls || []).length;
+    keySelect.value = '1';
+    keySelect.dispatchEvent(new Event('change'));
+    await settle();
+    checks.filterSendsKeyId = urlsSince(keyMark).some((u) => u.includes('api_key_id=1'));
+    // 统计卡的两个新分组按 id 分组、按名字显示；id 为 0 的历史行归入「（未知）」桶。
+    groupBySelected('account');
+    await settle();
+    checks.dimensionAccountNames = pageText().includes('acme #1');
+    checks.dimensionUnknownBucket = pageText().includes('（未知）');
+    // 留一份可读证据在 make ui-check 的输出里（sample 由 runner 打印）。
+    const accountBuckets = ([...document.querySelectorAll('table')].pop() || {}).textContent || '';
+    groupBySelected('api_key');
+    await settle();
+    checks.dimensionKeyNames = pageText().includes('dev-key #1');
+    const apiKeyBuckets = ([...document.querySelectorAll('table')].pop() || {}).textContent || '';
+    const accountMark2 = (window.__urls || []).length;
+    accountSelect.value = '';
+    accountSelect.dispatchEvent(new Event('change'));
+    await settle();
+    checks.clearingAccountDropsId = !urlsSince(accountMark2).some((u) => u.includes('account_id='));
     // The retention policy is reported from /stats: the window, what this process has
     // already pruned, and whether any write had to fall back to a skeleton row.
     checks.retentionWindow = pageText().includes('保留期 30 天');
@@ -220,6 +281,8 @@ try {
     checks.omittedTally = t.includes('omitted');
     // The detail carries the identity and the metered consumption alongside the content.
     checks.detailIdentity = t.includes('客户端：') && t.includes('会话：') && t.includes('路由到的模型：');
+    // 凭据维度在详情里带名字与 id：名字给人读，id 是筛选参数。
+    checks.detailOwner = t.includes('用户（账户）：') && t.includes('API Key：') && t.includes('acme #1') && t.includes('dev-key #1');
     checks.detailUsage = t.includes('输入 tokens：') && t.includes('对客：');
     closeButton().click();
     await settle();
@@ -238,7 +301,7 @@ try {
     // The reload brought a third row (a second metered one, same numbers as the first),
     // so the summary has to have followed the list rather than kept its first numbers.
     checks.summaryFollowsRefresh = footText().includes('2,400 / 68') && footText().includes('已计量 2');
-    checks.sample = [footText()];
+    checks.sample = [footText(), '账户分组：' + accountBuckets, 'API Key 分组：' + apiKeyBuckets];
     if (prunedRow) [...prunedRow.querySelectorAll('button')].find((b) => b.textContent.trim() === '详情').click();
     await settle();
     checks.clickWithoutRejection = errors.length === spent;

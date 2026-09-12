@@ -277,6 +277,10 @@ func TestHistoryListsAreOrderedByAnIndexNotASorter(t *testing.T) {
 	clientWhere, clientArgs := requestLogFilter("", domain.RequestLogFilter{From: from, To: to, Client: "dsh"})
 	modelWhere, modelArgs := requestLogFilter("", domain.RequestLogFilter{From: from, To: to, Model: "deepseek-flash"})
 	sessionWhere, sessionArgs := requestLogFilter("", domain.RequestLogFilter{From: from, To: to, SessionID: "session-abc"})
+	// The credential filters (M30) are indexed the same way: the console offers both, and
+	// an unindexed one would read every row of the window (bodies included) to show a page.
+	accountWhere, accountArgs := requestLogFilter("", domain.RequestLogFilter{From: from, To: to, AccountID: 1})
+	keyWhere, keyArgs := requestLogFilter("", domain.RequestLogFilter{From: from, To: to, APIKeyID: 3})
 
 	cases := []struct {
 		name  string
@@ -287,6 +291,8 @@ func TestHistoryListsAreOrderedByAnIndexNotASorter(t *testing.T) {
 		{"request_logs_by_client", requestLogListSQL(clientWhere), append(clientArgs, 50, 0)},
 		{"request_logs_by_model", requestLogListSQL(modelWhere), append(modelArgs, 50, 0)},
 		{"request_logs_by_session", requestLogListSQL(sessionWhere), append(sessionArgs, 50, 0)},
+		{"request_logs_by_account", requestLogListSQL(accountWhere), append(accountArgs, 50, 0)},
+		{"request_logs_by_api_key", requestLogListSQL(keyWhere), append(keyArgs, 50, 0)},
 		{"ledger_entries", ledgerListSQL(ledgerWhere), append(ledgerArgs, 100, 0)},
 		{"usage_records", ttftSamplesSQL(), []any{int64(1), unix(from), unix(to), 2000}},
 	}
@@ -312,5 +318,27 @@ func TestHistoryListsAreOrderedByAnIndexNotASorter(t *testing.T) {
 				t.Fatalf("iterate plan rows: %v", err)
 			}
 		})
+	}
+}
+
+// The index a filter relies on has to exist in the schema: the plan assertions above can
+// only prove "no sorter", which a full-then-filter scan satisfies too. Migration 0009 adds
+// the two credential indexes; this pins them by name so a later migration cannot quietly
+// drop one and leave the console reading whole windows (M30).
+func TestCredentialDimensionIndexesExist(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	for _, name := range []string{"idx_request_logs_account", "idx_request_logs_key"} {
+		var sql string
+		err := db.read.QueryRowContext(ctx,
+			"SELECT COALESCE(sql, '') FROM sqlite_master WHERE type = 'index' AND name = ?", name).Scan(&sql)
+		if err != nil {
+			t.Fatalf("index %s is missing (err %v); migration 0009 adds it", name, err)
+		}
+		// The shape is the contract: the id column is what keeps the paged ORDER BY
+		// index-satisfied on an equality-constrained prefix (docs/design/m27 §2.2).
+		if !strings.Contains(sql, "created_at") || !strings.Contains(strings.ToLower(sql), "id)") {
+			t.Fatalf("index %s has the wrong shape: %s", name, sql)
+		}
 	}
 }

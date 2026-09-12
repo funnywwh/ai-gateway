@@ -940,3 +940,61 @@
 - [ ] 观察项：本页合计是否被误读成窗口合计。若确实有人这么读，按设计文档 §2.1 的路径补窗口级
   `summary`（真库实测 11 ms；未计量计数写成 `SUM(CASE WHEN u.request_id IS NULL …)` 可避开
   `COUNT(DISTINCT)` 的 temp B-tree），footer 机制不用改，只换数据源
+
+## M30 请求日志的用户（账户）与 API Key 维度
+
+> 设计文档 `docs/design/m30-request-log-owner-dimensions.md`，规格文档 `docs/request-log.md` §2/§4/§6。
+> 起因（用户原话）：「请求日志添加用户,api key 维度统计」。
+> 口径当场澄清并选定：**「用户」= 账户**（`accounts` 表）——API 请求只携带凭据，
+> `api_key_id → account_id` 是唯一可归因的身份；门户用户与 API Key 没有绑定，今天无法判定。
+
+- [x] 现状核对：`account_id`/`api_key_id` 从迁移 0001 起就写在每一行（服务路径与本地拒绝路径都写），
+  缺的是**名字、过滤与统计**——所以本期不新增身份列，只补读取面
+- [x] 名字**读时解析**、不落列（同 token/成本的口径）：改名不该分裂/合并分组，`api_keys.name` 不唯一
+  （同账户可重名），两表都没有硬删除 → 按 id 一定取得到名字
+- [x] `store.AccountNames` / `store.APIKeyLabels`：批量点查（形制同 `RequestUsages`：去重、跳过 ≤0、
+  空入参返回空 map、缺失 id 缺席而非报错），页面与维度卡共用**同一个取名机制**
+- [x] **不把 join 塞进页面查询**：页面查询的 `ORDER BY created_at DESC, id DESC` 依赖
+  `idx_request_logs_time`，而 `accounts`/`api_keys` 也有 `id`/`created_at`，join 会让列名歧义并
+  动摇 M24/M27 修掉的排序器契约；维度聚合也不 join（那是窗口内每行一次 PK lookup，而 top-N 之后
+  补标签最多 200 次）
+- [x] 维度聚合 `group_by=account|api_key`：`CAST(account_id/api_key_id AS TEXT)` 作为 key，
+  名字由 handler 补；id ≤ 0 归入「（未知）」桶（`key: ""`），**计数保留**
+- [x] 过滤：`RequestLogFilter.APIKeyID` 精确匹配；`account_id`/`api_key_id` 非法值 **400**（此前
+  `account_id` 是静默忽略，即「筛了却返回全部」——`/invoices?account_id=` 修过的同一类）
+- [x] 迁移 0009：`idx_request_logs_account` / `idx_request_logs_key`，形状同 M27 三条
+  `(维度, created_at, id)`
+- [x] 索引取舍实测（先做，避免拍脑袋）：**WAL 页字节/行**（2.5 KB 行、256 行/事务、真机局部性）
+  4709.8 → 4937.7（**1.048×**），悲观上界（每行不同账户/Key）6945.1（1.475×，落在 M27 为 4 条索引
+  估的 1.54× 之内）；判定阈值 1.25× → **采纳**。探针保留在
+  `internal/store/index_write_probe_test.go`（默认 skip，可用同一把尺子量下次的索引）
+- [x] 索引收益实测：6 万行 / 5000 账户 / 2.5 KB 正文、投影全部列的一页 —— 59.9 ms → **92 µs**
+  （没有索引时扫的是窗口内**每一行的正文页**）
+- [x] 查询计划对照（真库与迁移后副本）：`api_key_id=?`/`account_id=?` 从时间索引窗口扫描变为
+  新索引等值前缀；无筛选列表一致；清理 `DELETE … ORDER BY id LIMIT 500` 计划**完全一致**
+- [x] 迁移代价实测（718 MB 真库副本）：`Open`（含两条 `CREATE INDEX`）758 ms，WAL +0.1 MB
+- [x] 管理面：列表/详情增 `account_name`/`api_key_name`/`api_key_prefix`；`dimensions` 增两个分组
+  取值与名字；`dimensionQueryFields` 增 `api_key_id` 并把 `account_id` 移入（此前 `/dimensions`
+  接受 `account_id` 却没在路由表里声明，MCP `admin_describe` 看不到）
+- [x] MCP：`list_requests`/`get_request` 返回 `api_key_id`/`api_key_name`（`ListAPIKeys` 一次建
+  map，失败只回 id 不报错）；后台工具 `admin_request_dimensions` 的 `group_by` 自动多出两个取值
+- [x] 控制台：列表增「用户」「API Key」两列（名字 + title 里的 id/前缀）、工具栏增账户与 Key 两个
+  服务端筛选（Key 下拉随账户联动，切账户会按新账户重取 Key 列表）、「维度统计」增两个分组
+  （默认分组改为「用户（账户）」）、详情弹框增「用户（账户）」与「API Key」
+- [x] 测试：store（两个过滤、两个分组、白名单信息列全 8 个取值、批量取名容错、冲突不抹凭据、
+  两条索引存在、两种筛选无 temp B-tree）；httpapi（列表/详情名称、`api_key_id` 过滤与 total 一致、
+  非法值 400、两个分组与未知桶）；webui（控制台维度选项与 `store.RequestLogDimensionNames` 不漂移）
+- [x] UI harness：fetch stub 记录**原始 URL**（断言筛选值真的发到服务端）并按 `group_by` 应答专用
+  fixture；requests 视图断言 48 → **61** 项；`capture.py` 补抓 `/accounts` 与两份分组 fixture
+- [x] `checks.sample` 回报两份分组表的文本，让输出里留下可读证据：
+  `账户分组：…acme #1 3 3 3,600 102 0.007404 USD（未知）1 0 / 1 0 0 未计量`、
+  `API Key 分组：…dev-key #1 3 3 3,600 102 0.007404 USD`
+- [x] 文档：`docs/request-log.md` §2（两行维度 + 读时取名的规矩 + 不受 `redact_paths` 影响）、§4
+  （过滤参数、分组取值、名字字段、下拉上限）、§6 状态补 M30；README 文档表改 M0–M30；
+  `config.example.yaml` 注明凭据维度不参与脱敏
+- [x] `make verify` 全绿；`make ui-check` 10 个视图全绿（`requests` 61 项）
+- [ ] **待人工执行**（宿主终端）：`make build` + `scripts/local-run.sh restart`，让 8088 应用迁移
+  0009 并载入新控制台资源，然后硬刷新（Ctrl+Shift+R）看 http://127.0.0.1:8088/admin/ui/#/requests
+  ——确认两列/两个下拉/两个分组/详情里的用户与 Key，并发一条真实 DSH 请求核对显示的是名字
+- [ ] 观察项：控制台下拉只列前 1000 个 Key（配置类列表的既有上限）——若出现超过该规模的部署，
+  按设计文档 D2 的路径给 `/keys` 加分页搜索，而不是把名字落到日志行上

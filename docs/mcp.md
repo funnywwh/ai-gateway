@@ -41,8 +41,8 @@
 | 5 | `get_ledger` | `period, limit` | 账本流水（充值/消费/调整/退款/过期） |
 | 6 | `list_invoices` / `get_invoice` | `limit` / `id` | 账单与明细 |
 | 7 | `get_models` | — | 该账户可用模型与**对客售价**（`currency` 为该模型的售价币种，缺省账本币种） |
-| 8 | `list_requests` | `period, limit` | 请求列表（含录制标记） |
-| 9 | `get_request` | `request_id` | 该请求**输入文本**（脱敏后）；思考与最终输出按开关返回 |
+| 8 | `list_requests` | `period, limit` | 请求列表（含录制标记、身份维度与 `api_key_id`/`api_key_name`） |
+| 9 | `get_request` | `request_id` | 该请求**输入文本**（脱敏后）；思考与最终输出按开关返回；含它用的是哪个 Key（`api_key_id`/`api_key_name`） |
 | 10 | `get_usage_breakdown` / `get_rate_limits` | — | 分组统计 / 当前限额与已用。`configured_limits` 读的是**扁平**策略字段（与实际生效路径同一解析器）；`monthly_*` 只解析不执行，会在 `not_enforced` 里列出；读不懂的字段进 `ignored_policy_fields`。标签策略在生效时合并，此处不合并 |
 
 返回为结构化 JSON；金额同时给出可读值与 micros 原始值，并附口径说明（时间范围、聚合方式、币种）。

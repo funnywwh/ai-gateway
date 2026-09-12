@@ -100,6 +100,10 @@ recording:
   #
   # 注意：客户端/模型/工作区/会话/调用类型/标题这些身份维度（M27）不受本开关影响，只要写了
   # 日志行就一并记录——它们是元数据不是正文。要让某一列不留痕，把列名写进下面的 redact_paths。
+  # 用户（账户）与 API Key（M30）同样不受本开关影响，但它们来自**凭据本身**（account_id /
+  # api_key_id），不是请求正文解析出来的，因此也**不参与 redact_paths**：要让某个 Key 不留痕，
+  # 手段是停用该 Key。名字（account_name / api_key_name）是查询时从账户/Key 表现取的，日志行
+  # 只存 id。
   record_input: user
   record_reasoning: false     # "save thinking text" checkbox - off by default, per key
   record_output_text: false   # "save final output text" checkbox - off by default, per key

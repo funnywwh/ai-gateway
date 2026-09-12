@@ -4,6 +4,7 @@ import { initCurrency, money } from '../money.js';
 
 // Dimension labels for the statistics card. The keys are the API's group_by values.
 const DIMENSIONS = [
+  ['account', '用户（账户）'], ['api_key', 'API Key'],
   ['client', '客户端'], ['model', '请求的模型'], ['resolved_model', '路由到的模型'],
   ['workspace', '工作区'], ['session', '会话'], ['call_kind', '调用类型'],
 ];
@@ -24,6 +25,11 @@ export async function render({ page, actions, session }) {
     el('option', { value: 'unknown', text: '未识别' }),
   ]);
   const model = el('select', {}, [el('option', { value: '', text: '全部模型' })]);
+  // 用户（账户）与 API Key 是凭据维度：行的身份、筛选与统计都按它们成立。选项来自配置类
+  // 列表（/accounts、/keys，控制台读全再切片），筛选本身仍在服务端做——否则「共 N 条」
+  // 描述的会是别的行集。Key 下拉跟随账户：选中账户后只列该账户的 Key。
+  const accountFilter = el('select', {}, [el('option', { value: '', text: '全部用户' })]);
+  const keyFilter = el('select', {}, [el('option', { value: '', text: '全部 API Key' })]);
   const sessionFilter = el('input', { placeholder: '会话 id（回车）', style: 'min-width:220px' });
   const workspaceFilter = el('input', { placeholder: '工作区（回车）', style: 'min-width:200px' });
   const refresh = el('button', { class: 'btn', text: '刷新' });
@@ -79,6 +85,8 @@ export async function render({ page, actions, session }) {
 
   function filterParams() {
     const params = { days: days.value, client: client.value, model: model.value };
+    if (accountFilter.value) params.account_id = accountFilter.value;
+    if (keyFilter.value) params.api_key_id = keyFilter.value;
     if (sessionFilter.value.trim()) params.session_id = sessionFilter.value.trim();
     if (workspaceFilter.value.trim()) params.workspace = workspaceFilter.value.trim();
     return params;
@@ -89,6 +97,8 @@ export async function render({ page, actions, session }) {
       { key: 'created_at', label: '时间', render: (row) => formatTime(row.created_at) },
       { key: 'request_id', label: '请求 ID', render: (row) => el('code', { text: row.request_id }) },
       { key: 'status', label: '状态', render: (row) => statusBadge(row.status) },
+      { key: 'account_id', label: '用户', render: (row) => ownerCell(row) },
+      { key: 'api_key_id', label: 'API Key', render: (row) => apiKeyCell(row) },
       { key: 'client', label: '客户端', render: (row) => (row.client ? badge(row.client, row.client === 'unknown' ? '' : 'ok') : el('span', { class: 'muted', text: '—' })) },
       { key: 'model', label: '模型', render: (row) => modelCell(row) },
       { key: 'workspace', label: '工作区', render: (row) => pathCell(row.workspace) },
@@ -114,12 +124,12 @@ export async function render({ page, actions, session }) {
   });
 
   // ---------------------------------------------------------------------------
-  // 维度统计：谁在用、用哪个模型、哪个工作区/会话、花了多少
+  // 维度统计：谁在用（用户/API Key）、用哪个模型、哪个工作区/会话、花了多少
   // ---------------------------------------------------------------------------
   const groupBy = el('select', {}, DIMENSIONS.map(([value, label]) => el('option', { value, text: label })));
   const statsHost = el('div', { class: 'muted', text: '加载中…' });
   const statsCard = card('维度统计', statsHost, [groupBy, el('span', {
-    class: 'muted', text: '按身份维度汇总请求数、token 与成本；成本与账单同源（计量表）',
+    class: 'muted', text: '按维度汇总请求数、token 与成本；用户与 API Key 是凭据维度（名字由账户/Key 表读时解析，分组按 id），成本与账单同源（计量表）',
   })]);
 
   async function loadStats() {
@@ -142,7 +152,7 @@ export async function render({ page, actions, session }) {
     if (bySession) head.splice(1, 0, '标题', '工作区');
     const header = el('thead', {}, [el('tr', {}, head.map((label) => el('th', { text: label })))]);
     const body = el('tbody', {}, rows.map((row) => {
-      const cells = [el('td', {}, [keyCell(row.key)])];
+      const cells = [el('td', {}, [groupKeyCell(row, payload.group_by)])];
       if (bySession) {
         cells.push(el('td', { text: row.title || '—' }), el('td', {}, [pathCell(row.workspace)]));
       }
@@ -160,7 +170,27 @@ export async function render({ page, actions, session }) {
     statsHost.replaceChildren(el('table', {}, [header, body]));
   }
 
-  function keyCell(key) {
+  // groupKeyCell renders one bucket's key. The two credential groupings bucket on ids
+  // (names are mutable labels owned by another table, and api_keys.name is not unique), so
+  // their cells show the name the API resolved plus the id it grouped by — the id is what
+  // a filter needs, the name is what a human reads. An id of 0 is the API's unknown bucket
+  // (historical rows, or rows written without a credential), which the other dimensions
+  // spell the same way.
+  function groupKeyCell(row, groupColumn) {
+    if (groupColumn === 'account' || groupColumn === 'api_key') {
+      const isAccount = groupColumn === 'account';
+      const raw = isAccount ? row.account_id : row.api_key_id;
+      const id = Number(raw ?? row.key ?? 0) || 0;
+      if (!id) return el('span', { class: 'muted', text: '（未知）' });
+      const name = isAccount ? row.account_name : row.api_key_name;
+      const label = (name || '（无名字）') + ' #' + id;
+      const title = !isAccount && row.api_key_prefix ? row.api_key_prefix + ' · #' + id : label;
+      return el('span', { title, text: label });
+    }
+    return keyValueCell(row.key);
+  }
+
+  function keyValueCell(key) {
     if (!key) return el('span', { class: 'muted', text: '（未知）' });
     const text = String(key);
     return el('span', { title: text, text: text.length > 44 ? text.slice(0, 42) + '…' : text });
@@ -184,15 +214,47 @@ export async function render({ page, actions, session }) {
     } catch (err) { /* a filter list that cannot load must not block the page */ }
   }
 
+  // The two credential filters list the configuration tables (bounded: the console's
+  // config lists are read whole and sliced server-side). A list that cannot load must not
+  // block the page — the filter simply stays at "all".
+  async function loadAccountOptions() {
+    try {
+      const accounts = (await api.get('/accounts', { limit: 1000 })).data || [];
+      const current = accountFilter.value;
+      accountFilter.replaceChildren(el('option', { value: '', text: '全部用户' }),
+        ...accounts.map((a) => el('option', { value: a.id, text: a.name })));
+      accountFilter.value = current;
+    } catch (err) { /* see above */ }
+    await loadKeyOptions();
+  }
+
+  // The Key list follows the account: with an account selected it offers only the keys
+  // that can actually appear in the rows. A selected key that is not in the new list (the
+  // account changed) falls back to "all keys" rather than silently filtering by a key of
+  // another account.
+  async function loadKeyOptions() {
+    const params = { limit: 1000 };
+    if (accountFilter.value) params.account_id = accountFilter.value;
+    try {
+      const keys = (await api.get('/keys', params)).data || [];
+      const current = keyFilter.value;
+      keyFilter.replaceChildren(el('option', { value: '', text: '全部 API Key' }),
+        ...keys.map((k) => el('option', { value: k.id, text: k.name + '（' + k.key_prefix + '）' })));
+      keyFilter.value = keys.some((k) => String(k.id) === current) ? current : '';
+    } catch (err) { /* see above */ }
+  }
+
   page.append(card('请求日志', view.node, [
-    days, client, model, sessionFilter, workspaceFilter,
-    el('span', { class: 'muted', text: '客户端/模型/工作区/会话/标题与 token 成本是独立于正文口径记录的元数据（record_input=off 也记）；标题来自会话的标题调用，成本来自计量表，与账单一致；列表底部的「本页汇总」只合计当前页已加载的行（含本页过滤），窗口口径看下方「维度统计」' }),
+    days, accountFilter, keyFilter, client, model, sessionFilter, workspaceFilter,
+    el('span', { class: 'muted', text: '用户（账户）/API Key 与客户端/模型/工作区/会话/标题、token 成本都是独立于正文口径记录的元数据（record_input=off 也记）；用户与 Key 的名字由账户/Key 表读时解析，分组按 id；标题来自会话的标题调用，成本来自计量表，与账单一致；列表底部的「本页汇总」只合计当前页已加载的行（含本页过滤），窗口口径看下方「维度统计」' }),
     hint]));
   page.append(statsCard);
 
   // Changing any filter restarts at page 1: the rows of the current page belong to a
   // different filter, so their offset is meaningless.
   days.addEventListener('change', () => { view.reset(); loadStats(); loadModelOptions(); });
+  accountFilter.addEventListener('change', () => { view.reset(); loadStats(); loadKeyOptions(); });
+  keyFilter.addEventListener('change', () => { view.reset(); loadStats(); });
   client.addEventListener('change', () => { view.reset(); loadStats(); });
   model.addEventListener('change', () => { view.reset(); loadStats(); });
   for (const input of [sessionFilter, workspaceFilter]) {
@@ -202,10 +264,10 @@ export async function render({ page, actions, session }) {
       loadStats();
     });
   }
-  refresh.addEventListener('click', () => { view.refresh(); loadStats(); loadModelOptions(); });
+  refresh.addEventListener('click', () => { view.refresh(); loadStats(); loadModelOptions(); loadAccountOptions(); });
   prune.addEventListener('click', () => pruneNow());
   await loadRetention();
-  await Promise.all([view.refresh(), loadStats(), loadModelOptions()]);
+  await Promise.all([view.refresh(), loadStats(), loadModelOptions(), loadAccountOptions()]);
 }
 
 // modelCell shows the model that actually served the request, with the requested name
@@ -237,6 +299,26 @@ function pathCell(value) {
 function sessionCell(value) {
   if (!value) return el('span', { class: 'muted', text: '—' });
   return el('code', { title: value, text: value.length > 18 ? value.slice(0, 16) + '…' : value });
+}
+
+// ownerCell renders the account a request is billed to — 「用户」 on this page, the same
+// entity the console calls 账户 elsewhere. The name is a read-time label from
+// accounts.name; the tooltip carries the id the account_id filter takes. A row whose id has
+// no name still shows what it has rather than a blank: the request exists and belongs to
+// somebody.
+function ownerCell(row) {
+  if (!row.account_id && !row.account_name) return el('span', { class: 'muted', text: '—' });
+  const text = row.account_name || '（无名字）';
+  return el('span', { title: '账户 #' + row.account_id, text });
+}
+
+// apiKeyCell renders which key authenticated the request: name plus the stable prefix in
+// the tooltip. Nothing here is a secret — the prefix is what the console already lists.
+function apiKeyCell(row) {
+  if (!row.api_key_id && !row.api_key_name) return el('span', { class: 'muted', text: '—' });
+  const text = row.api_key_name || '（无名字）';
+  const title = (row.api_key_prefix ? row.api_key_prefix + ' · ' : '') + 'Key #' + row.api_key_id;
+  return el('span', { title, text });
 }
 
 // A request with no usage row is "未计量", not zero: a locally rejected request never
@@ -334,9 +416,20 @@ async function detail(requestID) {
 }
 
 // identityBlock shows what the gateway could tell about the caller without reading the
-// body: the row keeps this even when record_input is off.
+// body: the row keeps this even when record_input is off. The first two fields are the
+// credential dimensions (M30): the account this request is billed to — 「用户」 on this
+// page, the console's 账户 elsewhere — and the API key it authenticated with. Their names
+// are read-time labels; the ids are what the filters take, so both are shown.
 function identityBlock(row) {
+  const owner = row.account_id
+    ? (row.account_name || '（无名字）') + ' #' + row.account_id
+    : '—';
+  const apiKey = row.api_key_id
+    ? (row.api_key_name || '（无名字）') + ' #' + row.api_key_id + (row.api_key_prefix ? ' · ' + row.api_key_prefix : '')
+    : '—';
   const fields = [
+    ['用户（账户）', owner],
+    ['API Key', apiKey],
     ['客户端', row.client || '未识别'],
     ['请求的模型', row.model || '—'],
     ['路由到的模型', row.resolved_model || '—'],

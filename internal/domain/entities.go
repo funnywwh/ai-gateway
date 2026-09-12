@@ -257,8 +257,12 @@ type RequestUsage struct {
 // (internal/arch), and both have to describe the same query.
 type RequestLogFilter struct {
 	AccountID int64
-	From      time.Time
-	To        time.Time
+	// APIKeyID narrows to one API key; 0 means "every key". It is an exact match on the
+	// credential the request authenticated with, so it also covers requests the gateway
+	// rejected locally (they never reached a model but they did arrive with a key).
+	APIKeyID int64
+	From     time.Time
+	To       time.Time
 
 	// Dimension filters, each an exact match; "" means "do not filter".
 	Client        string
@@ -269,9 +273,27 @@ type RequestLogFilter struct {
 	CallKind      string
 }
 
+// APIKeyLabel is the read-time label of one API key in the request log's Key dimension:
+// the operator-chosen name plus the stable prefix. It deliberately carries no hash.
+//
+// The label is resolved when a page (or a dimension bucket) is read rather than copied
+// onto the log row, for the same reason token and cost stay in usage_records: a name is a
+// mutable fact owned by another table, and a second copy would drift silently — a rename
+// would split one key into two buckets. api_keys.name is not unique (two keys of one
+// account may share a name), which is why grouping keys on the id and only displays this.
+type APIKeyLabel struct {
+	Name   string
+	Prefix string
+}
+
 // RequestLogDimensionRow is one bucket of the request log's dimension breakdown. Title and
 // Workspace only carry meaning when the grouping is by session, where a group owns one
 // title and one workspace; for other groupings they are what the group's rows had.
+//
+// Key is the dimension's own value, except for the two credential dimensions (account,
+// api_key) where it is the numeric id as a string: names belong to another table and are
+// resolved by the caller, so that a rename cannot split or merge a bucket. An empty Key on
+// those groupings is the unknown bucket (rows whose id is 0 or absent).
 type RequestLogDimensionRow struct {
 	Key             string
 	Requests        int

@@ -267,6 +267,163 @@ func TestRequestLogDimensionsRejectsUnknownGrouping(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "group_by must be") {
 		t.Fatalf("err = %v, want a group_by error naming the accepted values", err)
 	}
+	// The message is what a caller reads after a typo, so it has to name every accepted
+	// value — including the two credential dimensions (M30).
+	for _, name := range RequestLogDimensionNames {
+		if !strings.Contains(err.Error(), name) {
+			t.Fatalf("the rejection must name %q: %v", name, err)
+		}
+	}
+}
+
+// The credential filters (M30) are exact matches on the columns the request authenticated
+// with, and the credential groupings bucket on those columns' ids.
+func TestRequestLogFiltersAndGroupsByOwner(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	rows := []*domain.RequestLogRecord{
+		{RequestID: "req-o1", AccountID: 1, APIKeyID: 11, Client: "dsh", Model: "m"},
+		{RequestID: "req-o2", AccountID: 1, APIKeyID: 11, Client: "dsh", Model: "m"},
+		{RequestID: "req-o3", AccountID: 1, APIKeyID: 12, Client: "codex", Model: "m"},
+		{RequestID: "req-o4", AccountID: 2, APIKeyID: 21, Client: "dsh", Model: "m"},
+		// A row written without a credential (the unknown bucket).
+		{RequestID: "req-o5", AccountID: 0, APIKeyID: 0, Client: "unknown", Model: "m"},
+	}
+	for _, rec := range rows {
+		seedDimensionRow(t, db, rec)
+	}
+
+	cases := []struct {
+		name   string
+		filter domain.RequestLogFilter
+		want   int
+	}{
+		{"api_key", domain.RequestLogFilter{APIKeyID: 11}, 2},
+		{"account", domain.RequestLogFilter{AccountID: 1}, 3},
+		{"api_key+account", domain.RequestLogFilter{AccountID: 1, APIKeyID: 12}, 1},
+		{"api_key of another account", domain.RequestLogFilter{AccountID: 2, APIKeyID: 11}, 0},
+		{"unknown credential", domain.RequestLogFilter{AccountID: 0, APIKeyID: 0}, 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			page, err := db.ListRequestLogsPage(ctx, tc.filter, 10, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			total, err := db.CountRequestLogs(ctx, tc.filter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(page) != tc.want || total != tc.want {
+				t.Fatalf("page=%d total=%d, want %d for both", len(page), total, tc.want)
+			}
+		})
+	}
+
+	// The account grouping returns the id as text (the caller resolves the name); the
+	// bucket order is by request count.
+	byAccount, err := db.RequestLogDimensions(ctx, domain.RequestLogFilter{}, "account", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, row := range byAccount {
+		counts[row.Key] = row.Requests
+	}
+	if counts["1"] != 3 || counts["2"] != 1 || counts["0"] != 1 {
+		t.Fatalf("account buckets = %v, want 1→3, 2→1, 0→1 (the unknown bucket is kept)", counts)
+	}
+
+	byKey, err := db.RequestLogDimensions(ctx, domain.RequestLogFilter{}, "api_key", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyCounts := map[string]int{}
+	for _, row := range byKey {
+		keyCounts[row.Key] = row.Requests
+	}
+	if keyCounts["11"] != 2 || keyCounts["12"] != 1 || keyCounts["21"] != 1 || keyCounts["0"] != 1 {
+		t.Fatalf("api key buckets = %v", keyCounts)
+	}
+
+	// A credential filter narrows the breakdown the same way it narrows the list.
+	filtered, err := db.RequestLogDimensions(ctx, domain.RequestLogFilter{APIKeyID: 11}, "api_key", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) != 1 || filtered[0].Key != "11" || filtered[0].Requests != 2 {
+		t.Fatalf("filtered breakdown = %+v", filtered)
+	}
+}
+
+// Names are read-time labels: one batched point lookup per page or per breakdown, keyed by
+// id. An id with no row is absent (not an error) — the log row keeps its id and the
+// console shows the id instead of a blank.
+func TestOwnerLabelLookupsAreBatchedAndTolerant(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	if _, err := db.UpsertAccount(ctx, &domain.Account{
+		Name: "acme", BillingMode: domain.BillingPostpaid, Status: "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.UpsertAPIKey(ctx, &domain.APIKey{
+		AccountID: 1, Name: "dev-key", KeyPrefix: "sk-gw-abcdef", KeyHash: "hash",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	names, err := db.AccountNames(ctx, []int64{1, 1, 0, -3, 99})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 || names[1] != "acme" {
+		t.Fatalf("account names = %v, want only id 1 (duplicates and unknown ids dropped)", names)
+	}
+
+	labels, err := db.APIKeyLabels(ctx, []int64{1, 1, 0, 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(labels) != 1 {
+		t.Fatalf("api key labels = %v, want only the key that exists", labels)
+	}
+	if got := labels[1]; got.Name != "dev-key" || got.Prefix != "sk-gw-abcdef" {
+		t.Fatalf("label = %+v", got)
+	}
+
+	// Empty and all-invalid input answer with empty maps rather than nil: callers index
+	// them without a nil check.
+	if empty, err := db.AccountNames(ctx, nil); err != nil || empty == nil || len(empty) != 0 {
+		t.Fatalf("empty lookup = %v (err %v)", empty, err)
+	}
+	if empty, err := db.APIKeyLabels(ctx, []int64{0}); err != nil || empty == nil || len(empty) != 0 {
+		t.Fatalf("invalid-only lookup = %v (err %v)", empty, err)
+	}
+}
+
+// The credential dimensions travel with the row and, like the identity columns, are never
+// refreshed by a conflict update: the content-free skeleton retry writes the same request
+// id with nothing recomputed, and it must not blank the account or the key (M30).
+func TestRequestLogConflictKeepsOwner(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	seedDimensionRow(t, db, &domain.RequestLogRecord{
+		RequestID: "req-owner-keep", AccountID: 7, APIKeyID: 3, Status: "completed", Client: "dsh",
+	})
+	if err := db.PutRequestLog(ctx, &domain.RequestLogRecord{
+		RequestID: "req-owner-keep", Status: "failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.GetRequestLog(ctx, "req-owner-keep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AccountID != 7 || got.APIKeyID != 3 {
+		t.Fatalf("the conflict update blanked the credential dimensions: %+v", got)
+	}
 }
 
 // The breakdown must never read the recorded bodies: selecting request_json would make
