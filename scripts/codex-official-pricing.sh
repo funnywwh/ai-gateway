@@ -34,15 +34,22 @@
 #
 # 为什么每条规则里除了 input_cache_hit / input_cache_miss 还要写一个裸 `input`：
 #   codex 插件在上游没给 cached_tokens 明细时上报的是**裸 `input` 维度**
-#   （examples/provider-codex/main.go:1268 的 cached==0 分支），而 docs/pricing.md §1
-#   承诺的兜底（"input_cache_hit=0、其余计入 input_cache_miss"）在网关侧**没有实现**：
-#   pricing.Input.UsageDimensionsIncomplete 没有任何调用方设置，计价引擎只按维度名
-#   精确查表（internal/pricing/engine.go:346 起），查不到的维度只记进 unpriced_dimensions
-#   而不计费。实测（2026-09-12，8088 实例）：usage_records#2855 dimensions=
-#   {"input":13,"output":5} → cost_lines 只有 output，unpriced_dimensions=["input"]，
-#   13 个输入 token 按 0 计费。所以成本表自己给 `input` 一个"未命中"价——这正是
-#   "宁可高估、不把缓存命中漏算"的保守口径；上游真的给了明细时维度名是 hit/miss，
-#   插件的分支互斥，不会重复计费。
+#   （examples/provider-codex/main.go:1268 的 cached==0 分支）。
+#
+#   计价引擎现在自己会兜底：`input` 没有自有费率时按 `input_cache_miss` 计价，并标
+#   usage_dimensions_incomplete=true、把 `input->input_cache_miss` 记进快照的
+#   bucketed_dimensions（internal/pricing/engine.go 的 dimensionFallbacks，
+#   见 docs/pricing.md §1）。所以**不写**裸 `input` 也已经能正确计费。
+#   修复（2026-09-12）之前不行：引擎只按维度名精确查表，查不到的维度只记进
+#   unpriced_dimensions 并按 0 计费——实测 usage_records#2855 dimensions=
+#   {"input":13,"output":5} → cost_lines 只有 output，13 个输入 token 记成 0。
+#
+#   本脚本仍然**显式写出**裸 `input`，两个理由：
+#     1. 费率表自解释，不依赖引擎的隐式约定；回滚到旧二进制时也仍然计费，
+#        不会因为旧引擎精确查表而把整段 prompt 记成 0；
+#     2. 显式费率优先于兜底，**含显式 0**——想表达"这个维度免费"必须显式写 0，
+#        不会被兜底改写。
+#   上游真的给了明细时维度名是 hit/miss，按名字精确命中，插件的分支互斥，不会重复计费。
 #
 # 与 scripts/deepseek-official-pricing.sh 同样的两个坑：
 #   * POST /providers/{id}/models 过去是**整行覆盖**（UPSERT 把未提供的字段重置为默认值，
@@ -84,10 +91,10 @@ ASTRA_LONG_IN_MULT, ASTRA_LONG_OUT_MULT = 2.0, 1.5
 LUNA_IN, LUNA_HIT, LUNA_OUT = 0.20, 0.02, 1.20
 
 def rates(miss_usd, hit_usd, out_usd):
-    """一条规则的三档费率。裸 `input` 按未命中价兜底，理由见文件头。"""
+    """一条规则的三档费率。裸 `input` 显式按未命中价，理由见文件头。"""
     miss = mc(miss_usd)
     return {
-        "input": miss,                 # 上游没给 cached_tokens 明细时的兜底
+        "input": miss,                 # 显式兜底；引擎也会把无费率的 input 按 miss 计
         "input_cache_hit": mc(hit_usd),
         "input_cache_miss": miss,
         "output": mc(out_usd),
@@ -144,7 +151,7 @@ assert (luna["rules"][0]["rates"]["input_cache_miss"], luna["rules"][0]["rates"]
 for ruleset in plan.values():
     for rule in ruleset["rules"]:
         assert rule["rates"]["input"] == rule["rates"]["input_cache_miss"], \
-            f"{rule['id']}：裸 input 必须按未命中价兜底"
+            f"{rule['id']}：裸 input 必须显式按未命中价，不能比 miss 便宜"
 print("\n自检通过：档位倍数、官方贴价与裸 input 兜底一致。")
 PY
 

@@ -3,7 +3,9 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/winger/ai-gateway/internal/billing"
@@ -102,6 +104,48 @@ func (s *Server) effectiveMaxOutput(req *responses.Request, canonical string) in
 	}
 	_ = canonical
 	return 512
+}
+
+// warnAboutPricingGaps makes the two ways a charge can silently lose units visible
+// in the log.
+//
+// An unpriced dimension is metered usage the matched rule gave no rate for: it is
+// charged at zero, which is how a bare `input` used to disappear from the invoice
+// unnoticed until somebody read the raw usage rows. Bucketed usage is the milder
+// case the engine resolves itself (a bare `input` priced at the cache-miss rate, or
+// reasoning priced as output); it is charged, but the amount rests on a documented
+// assumption, so it is worth a line in the log.
+func (s *Server) warnAboutPricingGaps(result *pricing.Result, model, variant string, dims map[string]int64) {
+	if s.deps.Log == nil || result == nil {
+		return
+	}
+	if len(result.UnpricedDimensions) > 0 {
+		s.deps.Log.Warn("metered dimensions have no rate in the matched pricing rule and were charged at zero",
+			"model", model, "variant", variant, "rule", result.CostRuleID,
+			"unpriced_dimensions", strings.Join(result.UnpricedDimensions, ","),
+			"dimensions", dimensionsLogValue(dims))
+	}
+	if len(result.BucketedDimensions) > 0 {
+		s.deps.Log.Warn("usage was priced through a fallback rate because the upstream did not break it down",
+			"model", model, "variant", variant, "rule", result.CostRuleID,
+			"bucketed_dimensions", strings.Join(result.BucketedDimensions, ","),
+			"dimensions", dimensionsLogValue(dims))
+	}
+}
+
+// dimensionsLogValue renders a metered dimension set for the log in a stable order,
+// so repeated requests produce comparable lines.
+func dimensionsLogValue(dims map[string]int64) string {
+	names := make([]string, 0, len(dims))
+	for name := range dims {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, name+"="+strconv.FormatInt(dims[name], 10))
+	}
+	return strings.Join(parts, ",")
 }
 
 // estimateInputTokens is a cheap, deliberately conservative prompt size estimate:
@@ -222,6 +266,7 @@ func (s *Server) settleAttempt(
 
 	cost, sale := s.ruleSetsFor(resolved.Canonical, cand.ProviderID)
 	result := s.priceAttempt(dims, startedAt, cand.UpstreamModel, cost, sale, markup)
+	s.warnAboutPricingGaps(result, resolved.Canonical, cand.UpstreamModel, dims)
 
 	// A failed attempt still costs us money, but charging the customer for it depends
 	// on billing.charge_on_error. Cost is always recorded so the waste is visible.

@@ -20,6 +20,26 @@
 **缺失维度兜底**：上游未给分维度 usage 时，`input_cache_hit = 0`、其余计入 `input_cache_miss`，
 并标 `usage_dimensions_incomplete = true` + 告警（**宁可高估成本，不把缓存命中按未命中漏算**）。
 
+兜底由计价引擎自己完成（`internal/pricing/engine.go` 的 `dimensionFallbacks`），**不要求成本表
+为此多写一条费率**。规则里没有该维度自己的费率时，按下列来源借用，并把借来的来源记进
+`bucketed_dimensions`：
+
+| 计量维度 | 无自有费率时借用 | 依据 |
+|---|---|---|
+| `input` | `input_cache_miss` | 上游没给缓存明细，按未命中计（保守方向） |
+| `reasoning` | `output` | 默认计入 output，可单列 |
+
+两条硬约束：
+
+* **显式费率永远优先，显式 `0` 也算显式**——所以想免费就得写 `"input": 0`，不会被兜底覆盖，
+  也不会被当成"缺费率"。兜底只在 `rates` 里**没有这个键**时生效。
+* **兜底不改变已上报明细的计价**：上游真给了 `input_cache_hit`/`input_cache_miss` 时按名字精确
+  命中，不会走兜底，因此不存在重复计费。
+
+规则里既没有该维度的费率、也无可借用的来源时，该维度仍进 `unpriced_dimensions` 并按 **0** 计费，
+此时请求路径会打一条 `WARN`（`internal/httpapi/billing_path.go` 的 `warnAboutPricingGaps`），
+以免像过去那样只能靠翻 `usage_records.pricing_snapshot_json` 才发现漏计。
+
 ## 2. 价格规则
 
 ```json
@@ -84,6 +104,10 @@
 - **档位**：`basis=input` 在准入阶段即可精确确定；`basis=total|output` 时准入按
   `input + max_output_tokens` 取**可能落入的最贵档**，结算按实际数量校正。
 - **在途估算**一律取**当前可能适用的最贵规则**（含更高档位与更贵时段），结束时按真实维度校正（多退少补）。
+  最贵规则表（`pricing.WorstCaseRates`）**同样带兜底维度**：规则只写了 `input_cache_miss` 时，
+  冻结额度里的 `input` 取该 miss 价，否则"只按维度名查表"会给整段 prompt 冻结 **0**，
+  预付账户就能开出一个自己付不起的请求。同名维度显式价与兜底价取 **max**——多冻结在结算时释放，
+  少冻结才是超卖。
 
 ## 5. 快照与可复算
 
@@ -91,6 +115,8 @@
 
 - 命中的**成本规则完整副本**与 `sale_rule` 副本（`when` + `rates` + `per_request_fee`）+ 双方 rule id；
 - 各维度数量与单价、命中的时段窗口与档位、`tier_basis`、`usage_dimensions_incomplete`；
+- 走兜底费率计价的维度（`bucketed_dimensions`，形如 `input->input_cache_miss`）与按 0 计费的
+  `unpriced_dimensions`，两者都是"这笔钱怎么来的"的一部分；
 - **多币种**：`cost_currency` / `sale_currency` / `ledger_currency`、原生金额
   `cost_micros_native` / `charge_micros_native`、入账金额 `ledger_cost_micros` / `ledger_charge_micros`、
   本次使用的汇率 `fx_cost_ledger` / `fx_sale_ledger`（跨币种 `cost_follow` 时另有 `fx_cost_sale`），

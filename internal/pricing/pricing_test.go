@@ -16,6 +16,16 @@ func mustParse(t *testing.T, raw string) *RuleSet {
 	return set
 }
 
+// ceilMicros is an independent restatement of the documented rounding rule (each
+// line rounds up, so non-zero usage is never free). Tests spell it out rather than
+// calling the engine's own helper, so a broken rounding rule cannot hide behind it.
+func ceilMicros(units, rate int64) int64 {
+	if units <= 0 || rate <= 0 {
+		return 0
+	}
+	return (units*rate + 999_999) / 1_000_000
+}
+
 const deepseekCost = `{
   "rules": [
     {
@@ -432,5 +442,178 @@ func TestMinChargeAppliesInTheSaleCurrency(t *testing.T) {
 	}
 	if result.LedgerChargeMicros != 1_410 {
 		t.Fatalf("ledger charge = %d, want 1410 micros USD", result.LedgerChargeMicros)
+	}
+}
+
+// A bare `input` dimension is input the upstream did not break down by cache
+// status. docs/pricing.md §1 requires it to be priced as a cache miss, so a rule
+// set that only names the cache-split dimensions must still bill it. Before this
+// was implemented the dimension matched no rate and the entire prompt was charged
+// at zero (observed on real traffic as unpriced_dimensions=["input"]).
+func TestBareInputFallsBackToTheCacheMissRate(t *testing.T) {
+	set := mustParse(t, deepseekCost)
+	result := Evaluate(Input{
+		Cost: set, At: time.Date(2026, 3, 2, 9, 0, 0, 0, time.UTC),
+		Dimensions: map[string]int64{"input": 13, "output": 5},
+	})
+	// 13 tokens at the standard miss rate (270000) plus 5 output tokens.
+	want := ceilMicros(13, 270000) + ceilMicros(5, 1100000)
+	if result.CostMicros != want {
+		t.Fatalf("cost = %d, want %d (bare input must not be free)", result.CostMicros, want)
+	}
+	if len(result.UnpricedDimensions) != 0 {
+		t.Fatalf("unpriced = %v, want none: the fallback priced the input", result.UnpricedDimensions)
+	}
+	if !result.UsageDimensionsIncomplete {
+		t.Fatal("usage_dimensions_incomplete = false, want true when the engine buckets input itself")
+	}
+	if got := strings.Join(result.BucketedDimensions, ","); got != "input->input_cache_miss" {
+		t.Fatalf("bucketed = %q, want input->input_cache_miss", got)
+	}
+	if got := strings.Join(result.Snapshot.BucketedDimensions, ","); got != "input->input_cache_miss" {
+		t.Fatalf("snapshot bucketed = %q, want the same (the snapshot must explain the charge)", got)
+	}
+	if !result.Snapshot.UsageDimensionsIncomplete {
+		t.Fatal("snapshot usage_dimensions_incomplete = false, want true")
+	}
+}
+
+// An explicit rate for the dimension always wins, including an explicit zero, so a
+// rule set can keep pricing bare input on its own terms — which is what the codex
+// rules do — without the fallback double-counting it.
+func TestExplicitRateBeatsTheFallback(t *testing.T) {
+	set := mustParse(t, `{"rules": [{"id": "s", "order": 1, "when": {},
+		"rates": {"input": 200000, "input_cache_hit": 20000, "input_cache_miss": 200000, "output": 1200000}}]}`)
+	result := Evaluate(Input{
+		Cost: set, At: time.Now().UTC(),
+		Dimensions: map[string]int64{"input": 10, "output": 1},
+	})
+	want := ceilMicros(10, 200000) + ceilMicros(1, 1200000)
+	if result.CostMicros != want {
+		t.Fatalf("cost = %d, want %d", result.CostMicros, want)
+	}
+	if result.UsageDimensionsIncomplete || len(result.BucketedDimensions) != 0 {
+		t.Fatalf("explicit rate must not be reported as bucketed: %v", result.BucketedDimensions)
+	}
+
+	// An explicit zero is a deliberate "this dimension is free", not a gap.
+	free := mustParse(t, `{"rules": [{"id": "s", "order": 1, "when": {},
+		"rates": {"input": 0, "input_cache_miss": 500000, "output": 1000000}}]}`)
+	priced := Evaluate(Input{
+		Cost: free, At: time.Now().UTC(), Dimensions: map[string]int64{"input": 1000},
+	})
+	if priced.CostMicros != 0 || len(priced.UnpricedDimensions) != 0 {
+		t.Fatalf("explicit zero rate: cost = %d unpriced = %v, want 0 with nothing unpriced",
+			priced.CostMicros, priced.UnpricedDimensions)
+	}
+}
+
+// The cache-split dimensions are priced by name and never through the fallback, so
+// a request that reports a breakdown is not charged twice.
+func TestCacheSplitDimensionsAreNotBucketed(t *testing.T) {
+	set := mustParse(t, deepseekCost)
+	result := Evaluate(Input{
+		Cost: set, At: time.Date(2026, 3, 2, 9, 0, 0, 0, time.UTC),
+		Dimensions: map[string]int64{"input_cache_hit": 2000, "input_cache_miss": 3000, "output": 5000},
+	})
+	if result.UsageDimensionsIncomplete || len(result.BucketedDimensions) != 0 {
+		t.Fatalf("a reported breakdown must not be flagged incomplete: %v", result.BucketedDimensions)
+	}
+	if len(result.CostLines) != 3 {
+		t.Fatalf("cost lines = %d, want 3", len(result.CostLines))
+	}
+}
+
+// `reasoning` is documented as billed inside `output` unless a rule lists it
+// separately. Plugins split reasoning out of output before reporting, so without
+// this fallback the reasoning half of the answer was charged at zero.
+func TestReasoningFallsBackToTheOutputRate(t *testing.T) {
+	set := mustParse(t, deepseekCost)
+	result := Evaluate(Input{
+		Cost: set, At: time.Date(2026, 3, 2, 9, 0, 0, 0, time.UTC),
+		Dimensions: map[string]int64{"input_cache_miss": 100, "output": 40, "reasoning": 60},
+	})
+	// The whole 100 output-side tokens are billed at the output rate: 40 by name
+	// plus 60 through the fallback.
+	want := ceilMicros(100, 270000) + ceilMicros(100, 1100000)
+	if result.CostMicros != want {
+		t.Fatalf("cost = %d, want %d", result.CostMicros, want)
+	}
+	if len(result.UnpricedDimensions) != 0 {
+		t.Fatalf("unpriced = %v, want none", result.UnpricedDimensions)
+	}
+	if got := strings.Join(result.BucketedDimensions, ","); got != "reasoning->output" {
+		t.Fatalf("bucketed = %q, want reasoning->output", got)
+	}
+
+	// A rule that prices reasoning on its own keeps that rate.
+	own := mustParse(t, `{"rules": [{"id": "s", "order": 1, "when": {},
+		"rates": {"input_cache_miss": 1000000, "output": 2000000, "reasoning": 500000}}]}`)
+	separate := Evaluate(Input{
+		Cost: own, At: time.Now().UTC(),
+		Dimensions: map[string]int64{"output": 10, "reasoning": 10},
+	})
+	wantSeparate := ceilMicros(10, 2000000) + ceilMicros(10, 500000)
+	if separate.CostMicros != wantSeparate {
+		t.Fatalf("cost = %d, want %d (an explicit reasoning rate must win)", separate.CostMicros, wantSeparate)
+	}
+	if len(separate.BucketedDimensions) != 0 {
+		t.Fatalf("bucketed = %v, want none when reasoning has its own rate", separate.BucketedDimensions)
+	}
+}
+
+// The caller can declare the usage incomplete upfront; the flag survives even when
+// no dimension needed bucketing.
+func TestCallerDeclaredIncompleteUsageIsPreserved(t *testing.T) {
+	set := mustParse(t, deepseekCost)
+	result := Evaluate(Input{
+		Cost: set, At: time.Now().UTC(), UsageDimensionsIncomplete: true,
+		Dimensions: map[string]int64{"input_cache_miss": 10},
+	})
+	if !result.UsageDimensionsIncomplete || !result.Snapshot.UsageDimensionsIncomplete {
+		t.Fatal("caller-declared incompleteness was dropped")
+	}
+}
+
+// A dimension with no rate and no fallback is still reported as unpriced rather
+// than silently dropped.
+func TestUnknownDimensionStaysUnpriced(t *testing.T) {
+	set := mustParse(t, `{"rules": [{"id": "s", "order": 1, "when": {}, "rates": {"output": 1000000}}]}`)
+	result := Evaluate(Input{
+		Cost: set, At: time.Now().UTC(), Dimensions: map[string]int64{"output": 1, "image": 3},
+	})
+	if got := strings.Join(result.UnpricedDimensions, ","); got != "image" {
+		t.Fatalf("unpriced = %q, want image", got)
+	}
+	if result.UsageDimensionsIncomplete {
+		t.Fatal("an unpriced dimension is not bucketed usage; the flag must stay off")
+	}
+}
+
+// The reservation estimate asks for the worst rate per dimension by name, so a
+// fallback dimension must be present there too: a cache-split rule set names no
+// `input`, and a hold that resolved it by name alone reserved nothing for the prompt.
+func TestWorstCaseRatesCarryTheFallbackDimensions(t *testing.T) {
+	set := mustParse(t, deepseekCost)
+	worst := WorstCaseRates(set)
+	// The most expensive miss rate across the three rules is the long-input tier.
+	if worst["input"] != 540000 {
+		t.Fatalf("worst input = %d, want the 540000 cache-miss rate", worst["input"])
+	}
+	if worst["reasoning"] != worst["output"] {
+		t.Fatalf("worst reasoning = %d, want the output rate %d", worst["reasoning"], worst["output"])
+	}
+
+	// An explicit rate still wins, so a rule set that prices `input` itself is
+	// unchanged by the fallback.
+	explicit := mustParse(t, `{"rules": [{"id": "s", "order": 1, "when": {},
+		"rates": {"input": 300000, "input_cache_miss": 900000, "output": 1000000}}]}`)
+	if got := WorstCaseRates(explicit)["input"]; got != 900000 {
+		t.Fatalf("worst input = %d, want the 900000 maximum of the explicit and fallback rates", got)
+	}
+
+	// A nil set stays empty rather than inventing rates.
+	if got := WorstCaseRates(nil); len(got) != 0 {
+		t.Fatalf("worst of nil = %v, want empty", got)
 	}
 }

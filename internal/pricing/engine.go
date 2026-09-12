@@ -88,6 +88,15 @@ type Result struct {
 	// UnpricedDimensions lists metered dimensions the matched rule gave no rate
 	// for. They are charged at zero, but the caller should log them.
 	UnpricedDimensions []string `json:"unpriced_dimensions,omitempty"`
+	// BucketedDimensions names the dimensions the engine priced through a fallback
+	// rate instead of by name, written as "dimension->rate_source" (for example
+	// "input->input_cache_miss"). It is the reason UsageDimensionsIncomplete is set.
+	BucketedDimensions []string `json:"bucketed_dimensions,omitempty"`
+	// UsageDimensionsIncomplete is true when the upstream did not break its usage
+	// down and the engine had to bucket it itself, or when the caller said so. The
+	// amounts are still charged — this marks the usage as approximated so the
+	// guesswork is visible instead of silent.
+	UsageDimensionsIncomplete bool `json:"usage_dimensions_incomplete,omitempty"`
 	// Snapshot is the self-contained, replayable record stored with usage.
 	Snapshot Snapshot `json:"snapshot"`
 }
@@ -113,7 +122,9 @@ func Evaluate(in Input) *Result {
 	costRule := matchRule(in.Cost, in.At, dimensions, in.Variant)
 	if costRule != nil {
 		result.CostRuleID = costRule.ID
-		result.CostLines, result.UnpricedDimensions = priceDimensions(dimensions, costRule.Rates)
+		var bucketed []string
+		result.CostLines, result.UnpricedDimensions, bucketed = priceDimensions(dimensions, costRule.Rates)
+		result.BucketedDimensions = mergeDimensions(result.BucketedDimensions, bucketed)
 		for _, line := range result.CostLines {
 			result.CostMicros += line.AmountMicros
 		}
@@ -154,9 +165,10 @@ func Evaluate(in Input) *Result {
 		rule := matchRule(sale, in.At, dimensions, in.Variant)
 		if rule != nil {
 			result.SaleRuleID = rule.ID
-			lines, unpriced := priceDimensions(dimensions, rule.Rates)
+			lines, unpriced, bucketed := priceDimensions(dimensions, rule.Rates)
 			result.SaleLines = lines
 			result.UnpricedDimensions = mergeDimensions(result.UnpricedDimensions, unpriced)
+			result.BucketedDimensions = mergeDimensions(result.BucketedDimensions, bucketed)
 			for _, line := range lines {
 				result.ChargeMicros += line.AmountMicros
 			}
@@ -210,6 +222,9 @@ func Evaluate(in Input) *Result {
 	}
 
 	result.convertToLedger(in)
+	// Usage the engine had to bucket itself is incomplete by definition; the caller
+	// can also declare it upfront when it knows the upstream omitted the breakdown.
+	result.UsageDimensionsIncomplete = in.UsageDimensionsIncomplete || len(result.BucketedDimensions) > 0
 	result.Snapshot = buildSnapshot(in, dimensions, result, costRule, sale)
 	return result
 }
@@ -341,20 +356,61 @@ func tierMatches(tier Tier, dimensions map[string]int64) bool {
 	return true
 }
 
+// dimensionFallbacks maps a metered dimension onto the dimension whose rate
+// prices it when the matched rule has no rate of its own. Both entries encode a
+// contract from docs/pricing.md §1:
+//
+//   - a bare `input` is input the upstream did not break down by cache status, so
+//     it is priced as a cache miss. This is the conservative direction required by
+//     the docs ("宁可高估成本，不把缓存命中按未命中漏算"): billing it as a hit
+//     would undercharge, and billing it as nothing at all — which is what an exact
+//     name lookup did — silently dropped the whole prompt from the invoice.
+//   - `reasoning` is billed inside `output` unless a rule lists it separately,
+//     matching the documented default ("默认计入 output，可单列"). Plugins that
+//     split reasoning out of output would otherwise have it fall between the two
+//     dimensions and be charged at zero.
+//
+// An explicit rate always wins, including an explicit zero, so a rule set can
+// still price either dimension on its own terms.
+var dimensionFallbacks = map[string]string{
+	"input":     "input_cache_miss",
+	"reasoning": "output",
+}
+
+// resolveRate finds the rate that prices one metered dimension. The second result
+// names the dimension the rate was borrowed from, and is empty when the rule
+// priced the dimension by name.
+func resolveRate(dimension string, rates map[string]int64) (int64, string, bool) {
+	if rate, ok := rates[dimension]; ok {
+		return rate, "", true
+	}
+	if fallback, ok := dimensionFallbacks[dimension]; ok {
+		if rate, ok := rates[fallback]; ok {
+			return rate, fallback, true
+		}
+	}
+	return 0, "", false
+}
+
 // priceDimensions multiplies each dimension by its rate and rounds up, so a
 // non-zero usage never becomes a free request.
-func priceDimensions(dimensions map[string]int64, rates map[string]int64) ([]Line, []string) {
+//
+// It also reports which dimensions had to be priced through a fallback rate and
+// which the rule left unpriced, so the caller can flag the usage as incomplete
+// rather than silently dropping units from the invoice.
+func priceDimensions(dimensions map[string]int64, rates map[string]int64) (lines []Line, unpriced []string, bucketed []string) {
 	names := make([]string, 0, len(dimensions))
 	for name := range dimensions {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 
-	lines := []Line{}
-	unpriced := []string{}
+	lines = []Line{}
+	unpriced = []string{}
+	bucketed = []string{}
 	for _, name := range names {
 		units := dimensions[name]
-		rate, ok := rates[name]
+		rate, borrowed, ok := resolveRate(name, rates)
 		if !ok {
 			if units > 0 {
 				unpriced = append(unpriced, name)
@@ -362,8 +418,11 @@ func priceDimensions(dimensions map[string]int64, rates map[string]int64) ([]Lin
 			continue
 		}
 		lines = append(lines, Line{Dimension: name, Units: units, Rate: rate, AmountMicros: mulDivCeil(units, rate, RateScale)})
+		if borrowed != "" && units > 0 {
+			bucketed = append(bucketed, name+"->"+borrowed)
+		}
 	}
-	return lines, unpriced
+	return lines, unpriced, bucketed
 }
 
 // mulDivCeil computes ceil(a*b/scale) in int64 without overflowing for realistic

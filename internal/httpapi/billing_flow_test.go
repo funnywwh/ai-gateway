@@ -483,3 +483,91 @@ func TestInflightGuardIsInertWithoutALimit(t *testing.T) {
 		t.Fatal("a guard without a limit must never abort")
 	}
 }
+
+// A provider that reports a bare `input` dimension (no cache breakdown) priced by a
+// rule set that only names the cache-split dimensions — exactly the shape of the
+// DeepSeek cost table — must still be billed.
+//
+// This is the end-to-end guard for the defect found on real codex traffic: the
+// engine looked the dimension up by name, found no `input` rate, recorded it in
+// unpriced_dimensions and charged the whole prompt at zero. The fallback now prices
+// it at the cache-miss rate and flags the usage as bucketed.
+func TestBareInputIsBilledAgainstACacheSplitRuleSet(t *testing.T) {
+	ctx := context.Background()
+	f := newBillingFixtureWith(t, 5_000_000, func(_ *config.Config, pm *domain.ProviderModel, model *domain.Model) {
+		pm.PricingRulesJSON = `{"rules":[{"id":"cost","order":10,"when":{},"rates":{"input_cache_hit":20000,"input_cache_miss":1000000,"output":2000000}}]}`
+		model.SalePricingJSON = `{"basis":"cost_follow","markup_bp":10000}`
+	})
+
+	resp := f.call(t, `{"model":"priced-echo","input":"ping"}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
+	}
+	if stats := f.waitForSettlement(t, 1); stats.Settled != 1 {
+		t.Fatalf("settlement did not happen: %+v", stats)
+	}
+
+	rows, err := f.db.ListUsageAsc(ctx, f.account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("usage rows = %d, want 1", len(rows))
+	}
+	record := rows[0]
+
+	var dims map[string]int64
+	if err := json.Unmarshal([]byte(record.DimensionsJSON), &dims); err != nil {
+		t.Fatalf("dimensions are not JSON: %v", err)
+	}
+	if dims["input"] <= 0 {
+		t.Fatalf("fixture precondition failed: expected a bare input dimension, got %v", dims)
+	}
+	if record.CostMicros <= 0 {
+		t.Fatalf("cost = %d, want a positive cost: a bare input must not be free (dims %v)", record.CostMicros, dims)
+	}
+
+	var snapshot struct {
+		UnpricedDimensions        []string `json:"unpriced_dimensions"`
+		BucketedDimensions        []string `json:"bucketed_dimensions"`
+		UsageDimensionsIncomplete bool     `json:"usage_dimensions_incomplete"`
+		CostLines                 []struct {
+			Dimension string `json:"dimension"`
+			Units     int64  `json:"units"`
+			Rate      int64  `json:"rate"`
+		} `json:"cost_lines"`
+	}
+	if err := json.Unmarshal([]byte(record.PricingSnapshot), &snapshot); err != nil {
+		t.Fatalf("pricing snapshot is not JSON: %v", err)
+	}
+	if len(snapshot.UnpricedDimensions) != 0 {
+		t.Fatalf("unpriced = %v, want none: the fallback must price the bare input", snapshot.UnpricedDimensions)
+	}
+	if !snapshot.UsageDimensionsIncomplete {
+		t.Fatal("usage_dimensions_incomplete = false, want true so the approximation is visible")
+	}
+	if got := strings.Join(snapshot.BucketedDimensions, ","); got != "input->input_cache_miss" {
+		t.Fatalf("bucketed = %q, want input->input_cache_miss", got)
+	}
+
+	// The bare input must be priced at the miss rate, and the hit rate must not have
+	// been used (that would undercharge).
+	var pricedInput bool
+	for _, line := range snapshot.CostLines {
+		if line.Dimension != "input" {
+			continue
+		}
+		pricedInput = true
+		if line.Rate != 1_000_000 {
+			t.Fatalf("input rate = %d, want the 1000000 cache-miss rate", line.Rate)
+		}
+		if line.Units != dims["input"] {
+			t.Fatalf("input units = %d, want %d", line.Units, dims["input"])
+		}
+	}
+	if !pricedInput {
+		t.Fatalf("no cost line priced the input dimension: %+v", snapshot.CostLines)
+	}
+}

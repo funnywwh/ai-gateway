@@ -436,3 +436,24 @@ func TestNewChargeWritesLedgerAmounts(t *testing.T) {
 		t.Fatalf("snapshot must keep the sale currency: %s", settlement.Usage.PricingSnapshot)
 	}
 }
+
+// A cache-split rule set names no bare `input`, so a hold that resolved the dimension
+// by name alone reserved nothing for the prompt — a prepaid account could start a
+// request whose input cost it could not cover. The hold must fall back to the
+// cache-miss rate, exactly as the pricing engine does when it charges.
+func TestEstimateReserveCoversInputForACacheSplitRuleSet(t *testing.T) {
+	cost, err := pricing.ParseRuleSet(`{"rules": [{"id": "s", "order": 10, "when": {},` +
+		`"rates": {"input_cache_hit": 20000, "input_cache_miss": 1000000, "output": 2000000}}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserve := EstimateReserve(EstimateInput{Cost: cost, MaxOutputTokens: 1000, EstInputTokens: 2000})
+	outputOnly := int64(1000) * 2000000 / pricing.RateScale
+	want := outputOnly + int64(2000)*1000000/pricing.RateScale
+	if reserve != want {
+		t.Fatalf("reserve = %d, want %d", reserve, want)
+	}
+	if reserve <= outputOnly {
+		t.Fatalf("reserve = %d holds only the output (%d): the prompt was held at zero", reserve, outputOnly)
+	}
+}

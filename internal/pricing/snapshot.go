@@ -23,6 +23,7 @@ type Snapshot struct {
 	MatchedWindows            []string         `json:"matched_windows,omitempty"`
 	MatchedTier               string           `json:"matched_tier,omitempty"`
 	UnpricedDimensions        []string         `json:"unpriced_dimensions,omitempty"`
+	BucketedDimensions        []string         `json:"bucketed_dimensions,omitempty"`
 	UsageDimensionsIncomplete bool             `json:"usage_dimensions_incomplete,omitempty"`
 	PerRequestFeeScope        string           `json:"per_request_fee_scope,omitempty"`
 	MinChargeMicros           int64            `json:"min_charge_micros,omitempty"`
@@ -54,7 +55,8 @@ func buildSnapshot(in Input, dimensions map[string]int64, result *Result, costRu
 		CostLines:                 result.CostLines,
 		SaleLines:                 result.SaleLines,
 		UnpricedDimensions:        result.UnpricedDimensions,
-		UsageDimensionsIncomplete: in.UsageDimensionsIncomplete,
+		BucketedDimensions:        result.BucketedDimensions,
+		UsageDimensionsIncomplete: result.UsageDimensionsIncomplete,
 		PerRequestFeeScope:        in.PerRequestFeeScope,
 		MinChargeMicros:           in.MinChargeMicros,
 		CostCurrency:              result.CostCurrency,
