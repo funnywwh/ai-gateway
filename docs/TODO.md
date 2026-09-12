@@ -1325,3 +1325,72 @@
       配额而不是依赖控制台
 - [ ] 观察项：`chat.ui_bridge_enabled` 是**部署级**开关，不是"关掉模型写表单的能力"——模型仍然
       可能输出表单，只是提交没有出口（工具栏会说明）。文档已按此口径描述
+
+---
+
+## M35 内联声明式表单（气泡内渲染 = 提交 = 模型原地更新）
+
+起于一个实测结论：M34 的**流式回灌整条链路是死机制**——服务端注入脚本把增量写进页面的
+`[data-aigw-live]` 节点，而这个标记在给模型的契约、文档与测试里**一处都没有**（全仓库仅有实现处
+与它的自动 dump）。增量帧确实送达页面、然后被静默丢弃，harness 的断言只检查"`d` 帧到了端口"，
+所以它一直是绿的。这是"能力存在、契约没写"的典型，M35 顺带把它变成一条机械化的检查。
+
+方向经用户确认：**先只做内联声明式表单这一半，把 iframe 那条链路暂时冻结**。
+
+### 设计（`docs/design/m35-inline-forms.md`）
+
+- [x] 不用 iframe：模型给**字段规格**（JSON），控制台用 `createElement` 造元素；任何模型文本只经
+      `textContent` 落地。被否决的是"净化后注入"——净化器是一个会出错的信任边界，而且净化过的
+      HTML 里脚本仍不能跑，既没有沙箱的保证也没有自由页面的收益
+- [x] `chat_form.js` 加入既有的**无标记写入禁令**（`innerHTML`/`insertAdjacentHTML`/`outerHTML`/
+      `document.write`/`html:`），与桥接两个文件同列
+- [x] 提交复用既有轮次端点（`ui_event` 同形），因此计费、幂等、请求日志与服务端**零改动**：
+      无迁移、无新端点、无新配置
+- [x] `ui` 指令复用 `applyUIOps`，不另写一套；契约里没有新增任何操作
+- [x] 凭据类字段（`password`/`file`）**明确拒绝并给出理由**，而不是降级成文本框
+
+### 顺手修掉的两个真实缺陷（都是 harness 抓出来的）
+
+- [x] **`applyUIOps` 匹配不到 root 自身**：`root.querySelectorAll(selector)` 只搜后代，于是模型用最
+      自然的写法 `#form_0` 定位表单（例如挂一条 `message`）永远失败，报"没有节点匹配"而节点明明在。
+      修法是给 `applyUIOps` 加一个可选的 `resolve` 钩子，内联表单传入"root 自身优先"的解析器。
+      **没有**改成把 root 包进 wrapper：那会在每次指令时重新挂载节点，导致 iframe 重载与焦点丢失
+- [x] **指令打在了即将被丢弃的节点上**：`runTurn` 结束时会 `openSession()` 重建整个转录，原先在
+      `onFinish` 里应用指令的写法会让更新"闪一下然后消失"——比不更新更糟。改成停放到
+      `state.pendingFormOps`，在重建之后按 `#form_<块序号>` 重新找目标再应用
+
+### 实现
+
+- [x] `internal/webui/static/js/pages/chat_form.js`（新增，约 500 行）：`parseFormSpec` /
+      `renderForm` / `collectFormValues` / `resolveIn` / `describeFormOps` + `FORM_LIMITS`
+- [x] `chat.js`：`form` 块内联渲染（`renderFormBlock`）、提交（`onFormSubmit`/`sendFormEvent`）、
+      重建后应用指令（`applyPendingFormOps`）、未提交草稿保留（`formDrafts` + `captureFormDrafts`）、
+      队列条目改为带来源的对象（原本只认"一个打开的预览"）
+- [x] `markdown.js`：把围栏是否收尾标成 `data-closed`，流式期间不解析半截规格（否则整个回答过程都
+      挂着一条"不是合法 JSON"——由"读得太早"造成的、关于模型的假报错）
+- [x] `app.css`：表单样式，全部限定在 `.chat-form` 之下（模型不能改控制台的样式）
+- [x] `internal/chat/prompt.go`：`DefaultInlineFormInstructions`（格式、字段类型表、`ui_event` 形状、
+      `#form_<n>`/`#f_<name>`、两条硬边界）。**不挂部署开关**——内联表单不需要票据、沙箱或桥接
+
+### 测试与验收
+
+- [x] `internal/webui/embed_test.go`：`chat_form.js` 内嵌断言 + 无标记写入禁令 +
+      `chat.js` 的 `form` 路径与 `data-closed` 两侧都在
+- [x] `TestInlineFormContractMatchesTheRenderer`：**解析渲染器自己的 `FIELD_TYPES`** 与提示词双向
+      比对，拒绝类型点名，id 方案与硬边界必须出现。**做了方向性验证**：临时从提示词里删掉
+      `textarea`/`radio` → 测试变红并指出缺哪一个；还原 → 绿
+- [x] `scripts/ui-harness/chat.page.html` 新增 `form` 视图（65 项）并注册进 `run.sh` 的 `VIEWS`：
+      解析/拒绝矩阵（含凭据与原型污染）、渲染断言（label 绑定、占位项、选项标签、无标记落地）、
+      取值形状（数字为数字、复选为布尔、可选项省略）、超限拒绝、忙碌禁用、指令应用与逐条报错，
+      以及**完整的 `内联表单 → 提交 → 断言请求体 → SSE 回答 → 指令原地更新` 链路**
+- [x] `make verify` 全绿；`make ui-check` **14 个视图全绿**（`chat` 78 → **98** 项、新增 `form` 65 项）
+- [x] `docs/chat.md` 新增第 4 节并重编号其后各节与交叉引用；`README.md` 更新；设计文档
+      `docs/design/m35-inline-forms.md`
+- [ ] **待人工执行**（宿主终端）：用真模型要一次"需要几个字段的信息"（例如"帮我建一个账户，
+      先问我账户名和限额"）→ 确认模型输出 `form` 而不是整页 HTML → 填写提交 → 确认表单显示
+      「模型正在处理…」、状态行实时出现回答、结束后表单原地更新、会话里出现带 `ui_event` 的提问；
+      再到「请求日志」确认这一条是 `client=console`、正文为空
+- [ ] 观察项：内联表单与手动提问走同一条计费路径，所以表单上的连续提交会连续计费。一轮一次的
+      禁用与 5 条排队是控制台侧的上界，不是服务端强制的
+- [ ] 观察项：模型可能该用内联表单时仍输出整页 `html`（或反之）。契约里写了选择口径
+      （"要几个字段就用表单；要自由排版或页面脚本才用 html"），但**模型是否照做只能人工走查**
