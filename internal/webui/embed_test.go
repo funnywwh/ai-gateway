@@ -343,6 +343,54 @@ func TestConsoleChatRoutesMatchTheServer(t *testing.T) {
 	}
 }
 
+// TestEmptySendRunsLoadedSkills checks the two halves of one behaviour that only exists because
+// both are true at once: the console may send an empty box, and the server must accept what it
+// sends. The console composes the text (it is shown in the transcript and becomes the title, so it
+// has to be readable), while the server keeps a default for the same gesture made through the API.
+//
+// Writing this test is what found the second half missing: a console-only change would have posted
+// an empty string, which the server rejected as "type a question first" — the operator would have
+// seen a toast about their own empty box.
+func TestEmptySendRunsLoadedSkills(t *testing.T) {
+	srv := httptest.NewServer(Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/js/pages/chat.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	// The prose is stripped: skillRunText's own comment quotes the phrase this test looks for.
+	chatPage := stripJSComments(string(body))
+
+	if !strings.Contains(chatPage, "skillRunText") {
+		t.Error("the chat page must compose what an empty send means; otherwise it posts empty content")
+	}
+	// Read from the function itself rather than the whole file: the fallback wording and the
+	// wording that lists the loaded skills are two different sentences for two different cases,
+	// and only the function's own body says which is which. The next function declaration (the
+	// token helpers) is where this one ends.
+	start := strings.Index(chatPage, "export function skillRunText")
+	if start < 0 {
+		t.Fatal("skillRunText must be exported: the composer decides when an empty send is allowed")
+	}
+	rest := chatPage[start:]
+	end := strings.Index(rest, "function scopeSummary")
+	if end < 0 {
+		t.Fatal("the extraction ran past skillRunText; this test reads the file's layout")
+	}
+	runText := rest[:end]
+	for _, want := range []string{"已加载的技能", "执行", "names"} {
+		if !strings.Contains(runText, want) {
+			t.Errorf("skillRunText must name the loaded skills and tell the model to run them (missing %q)", want)
+		}
+	}
+	if !strings.Contains(chat.DefaultSkillRunText, "技能") || !strings.Contains(chat.DefaultSkillRunText, "执行") {
+		t.Errorf("the server's default run text reads %q; it is stored as a question and shown to the operator",
+			chat.DefaultSkillRunText)
+	}
+}
+
 func itoa(v int) string { return strconv.Itoa(v) }
 
 // stripJSComments removes // and /* */ comments so a source scan looks at code, not prose.

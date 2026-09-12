@@ -1020,6 +1020,59 @@ func TestSkillsAreInjectedIntoTheInstructions(t *testing.T) {
 	}
 }
 
+// TestEmptyQuestionRunsLoadedSkills covers the send an empty input box produces once skills are
+// loaded: the skills carry the instructions, so the turn is real and must be stored as something
+// a person can read back. It is refused exactly when there is nothing to run — no skills at all,
+// or an id whose skill was deleted from the library (the id stays in the session).
+func TestEmptyQuestionRunsLoadedSkills(t *testing.T) {
+	service, store, runner, _, session := chatFixture(t, Config{MaxSteps: 2})
+	ctx := context.Background()
+	_, emit := collectEvents()
+
+	empty := TurnRequest{OwnerID: 1, Username: "admin", Role: RoleAdmin, SessionID: session.ID}
+	empty.TurnID, empty.Content = "turn_empty", "   "
+	if _, err := service.Turn(ctx, empty, emit); err == nil {
+		t.Fatal("an empty question with no skills loaded has nothing to ask: it must be refused")
+	}
+
+	skill := &domain.ChatSkill{OwnerUserID: 1, Name: "成本排查", Instructions: "先查账户，再查用量。"}
+	if _, err := store.CreateChatSkill(ctx, skill); err != nil {
+		t.Fatal(err)
+	}
+	session.SkillIDs = []int64{skill.ID}
+	runner.steps = []*StepResult{textStep("开始核对")}
+	result, err := service.Turn(ctx, TurnRequest{
+		OwnerID: 1, Username: "admin", Role: RoleAdmin,
+		SessionID: session.ID, TurnID: "turn_1", Content: "  ",
+	}, emit)
+	if err != nil {
+		t.Fatalf("an empty question with a loaded skill must run: %v", err)
+	}
+	if result.User.Content != DefaultSkillRunText {
+		t.Fatalf("stored question = %q, want the readable default %q", result.User.Content, DefaultSkillRunText)
+	}
+	if len(result.User.Parts) != 1 || result.User.Parts[0].Text != DefaultSkillRunText {
+		t.Fatalf("the stored user message must carry the same text as its parts: %+v", result.User.Parts)
+	}
+	// The skill body belongs in the instructions, not in the question: repeating it as if the
+	// operator had typed it would deliver the same instructions twice.
+	if strings.Contains(result.User.Content, "先查账户，再查用量") {
+		t.Fatalf("the question must not repeat the skill body: %q", result.User.Content)
+	}
+	if !strings.Contains(runner.calls[0].Instructions, "先查账户，再查用量") {
+		t.Fatal("the skill still has to reach the model, through the system prompt")
+	}
+
+	// The dangling id: the session still lists it, the library no longer holds it.
+	store.skills = map[int64]*domain.ChatSkill{}
+	runner.steps = []*StepResult{textStep("好的")}
+	gone := TurnRequest{OwnerID: 1, Username: "admin", Role: RoleAdmin,
+		SessionID: session.ID, TurnID: "turn_2", Content: ""}
+	if _, err := service.Turn(ctx, gone, emit); err == nil {
+		t.Fatal("an empty question whose only skill was deleted must be refused, not sent as an empty turn")
+	}
+}
+
 func TestSkillLibraryIsPrivateAndValidated(t *testing.T) {
 	service, _, _, _, _ := chatFixture(t, Config{})
 	ctx := context.Background()

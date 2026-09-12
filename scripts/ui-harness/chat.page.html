@@ -27,6 +27,11 @@
 // captured snapshot would only restate what the page already sends.
 const FIXTURES = __FIXTURES__;
 
+// 两个视图共用这一页：`#chat` / `#skills` 是正常账号，`#noSkills` 是**技能库为空**的账号。
+// 空库是拒绝路径的前提（见该视图的断言），而它必须从**第一帧**就是空的：技能是在页面初始化
+// 时载入的，等到断言再改 flag 就晚了一轮，页面已经拿到技能了。
+if (location.hash === '#noSkills') window.__skillsEmpty = true;
+
 const MCP_TOKENS = [
   { id: 2, name: 'dsh', token_prefix: 'aigw_mcp_qad', scope: 'admin_read', status: 'active' },
   { id: 3, name: 'operator', token_prefix: 'aigw_mcp_zzz', scope: 'admin', status: 'active' },
@@ -186,13 +191,22 @@ window.fetch = async (url, options) => {
     // Answer like the real server: re-derive write_mode from the newly bound token's scope
     // instead of echoing the old value. A stub that echoed would let "rebind to an admin
     // token" pass while the badge still said 只读.
+    //
+    // skill_ids is applied the same way, and for the same reason: 「卸载技能后再发送空提问必须
+    // 什么都不发」只有在会话真的少了一个技能时才成立；一个把 skill_ids 原样吐回的 stub 会让
+    // 那条断言测到的是它自己的谎言。
     const body = JSON.parse(options.body || '{}');
     const bound = MCP_TOKENS.find((t) => t.id === body.mcp_token_id);
-    return json({
+    const patched = {
       ...SESSION,
       mcp_token_id: body.mcp_token_id === undefined ? SESSION.mcp_token_id : body.mcp_token_id,
       write_mode: bound && bound.scope === 'admin' ? 'allow_writes' : 'read_only',
-    });
+    };
+    if (Array.isArray(body.skill_ids)) {
+      patched.skill_ids = body.skill_ids;
+      patched.skills = SESSION.skills.filter((s) => body.skill_ids.includes(s.id));
+    }
+    return json(patched);
   }
   if (path === '/chat/sessions/chat_1') return json(SESSION);
   if (path === '/chat/sessions' && options && options.method === 'POST') return json(SESSION);
@@ -596,10 +610,52 @@ try {
     const menu = document.querySelector('.plus-menu');
     checks.plusMenu = !!menu;
     checks.plusCreate = !!menu && menu.textContent.includes('创建技能');
-    checks.plusSkillRow = !!menu && !!menu.querySelector('.plus-skill input[type=checkbox]');
-    checks.plusSkillChecked = !!menu && !!menu.querySelector('.plus-skill input[type=checkbox]').checked;
+    const skillBox = menu ? menu.querySelector('.plus-skill input[type=checkbox]') : null;
+    const skillName = menu ? menu.querySelector('.plus-skill span') : null;
+    checks.plusSkillRow = !!skillBox;
+    checks.plusSkillChecked = !!skillBox && skillBox.checked;
     checks.plusManage = !!menu && menu.textContent.includes('管理技能');
+    // 勾选框的几何：全局 `input { width:100% }` 曾把这个没有 class 的 checkbox 撑满整行，
+    // 技能名被推到菜单最右边（与 .form-radio 是同一条坑）。这里量的是真实布局，不是规则文本。
+    checks.plusSkillBoxSize = !!skillBox && Math.round(skillBox.getBoundingClientRect().width) === 16;
+    checks.plusSkillNameFollows = !!skillBox && !!skillName
+      && (skillName.getBoundingClientRect().left - skillBox.getBoundingClientRect().right) <= 12;
+    checks.plusSkillAligned = !!skillBox && !!skillName
+      && Math.abs((skillBox.getBoundingClientRect().top + skillBox.getBoundingClientRect().height / 2)
+        - (skillName.getBoundingClientRect().top + skillName.getBoundingClientRect().height / 2)) <= 4;
+    checks.plusSkillSample = !!skillBox && !!skillName && {
+      boxWidth: Math.round(skillBox.getBoundingClientRect().width),
+      gap: Math.round(skillName.getBoundingClientRect().left - skillBox.getBoundingClientRect().right),
+      nameWidth: Math.round(skillName.getBoundingClientRect().width),
+    };
     if (menu) menu.remove();
+
+    // 「选择技能后直接发送」：输入框留空时，按「发送」也要真的发出这一轮。问题由页面按已加载的
+    // 技能拼出来落到请求体里（服务端拒绝空提问），而不是发一个空字符串；先按住这一轮，好在刷新
+    // 之前看到气泡里显示的就是这句人话。
+    window.__holdTurn = true;
+    const emptyInput = pageEl.querySelector('.chat-input');
+    emptyInput.value = '   ';
+    find('发送').click();
+    await settle();
+    const sentBody = JSON.parse((window.__sent || {})['/chat/sessions/chat_1/turns'] || '{}');
+    checks.emptySendPostsSkillRun =
+      !!sentBody.content && sentBody.content.includes('成本排查') && sentBody.content.includes('技能');
+    checks.emptySendHasTurnId = typeof sentBody.turn_id === 'string' && sentBody.turn_id.length > 0;
+    checks.emptySendBubbleReadable = pageText().includes('按本会话已加载的技能执行');
+    checks.emptySendPlaceholder = (() => {
+      const box = pageEl.querySelector('.chat-input');
+      return !!box && String(box.placeholder || '').includes('留空直接发送');
+    })();
+    checks.emptySendSample = { content: sentBody.content || '' };
+    // The held stream is closed and the turn allowed to finish before anything else runs: its
+    // completion reloads the session and re-renders the page, so a later view that rendered
+    // *before* that would be measuring a page the turn then replaced.
+    if (window.__stream) window.__stream.finish();
+    window.__holdTurn = false;
+    await settle();
+    const finished = pageEl.querySelector('.chat-input');
+    checks.emptySendFinishedCleanly = !!finished && !finished.disabled;
 
     // 新建会话 — the dialog the operator reported as "MCP 令牌选择不了". The picker must keep
     // what was picked: rebuilding its option list from the change event throws that selection
@@ -695,6 +751,41 @@ try {
       if (cancel) cancel.click();
       await settle();
     }
+  }
+
+  if (view === 'noSkills') {
+    // 技能库为空的账号：会话里仍然写着技能 id（技能被删除后就是这样，id 留在会话上、内容没了），
+    // 但没有任何可执行的技能。此时空输入框的「发送」必须什么都不发——一次点击就是一次计费调用，
+    // 不能悄悄花掉。它也必须说清原因，并且输入框的提示语不能承诺一件做不到的事。
+    await renderChat({
+      page: pageEl,
+      actions: document.getElementById('actions'),
+      session: { role: 'admin', username: 'admin' },
+      route: { path: '/chat', params: new URLSearchParams('session=chat_1') },
+      navigate: () => {},
+    });
+    await settle();
+    const input = pageEl.querySelector('.chat-input');
+    checks.noSkillsComposerPresent = !!input;
+    checks.noSkillsHintDoesNotPromiseEmptySend =
+      !!input && !String(input.placeholder || '').includes('留空直接发送');
+    checks.noSkillsStillListsSessionSkill = pageText().includes('成本排查');
+    find('＋').click();
+    await settle();
+    const menu = document.querySelector('.plus-menu');
+    checks.noSkillsMenuOpens = !!menu;
+    // 库是空的，菜单里就没有技能行——这也解释了为什么发不出去：会话记着的 id 已经没有内容可跑。
+    checks.noSkillsMenuHasNoRows = !!menu && !menu.querySelector('.plus-skill');
+    if (menu) menu.remove();
+
+    input.value = '   ';
+    const before = (window.__fetched || []).filter((p) => p === '/chat/sessions/chat_1/turns').length;
+    find('发送').click();
+    await settle();
+    checks.emptySendWithoutSkillsRefused =
+      (window.__fetched || []).filter((p) => p === '/chat/sessions/chat_1/turns').length === before;
+    // 浮层挂在 #toasts 上，不在这一页读的节点里。
+    checks.emptySendRefusalExplains = document.body.textContent.includes('问题不能为空');
   }
 
   if (view === 'form') {

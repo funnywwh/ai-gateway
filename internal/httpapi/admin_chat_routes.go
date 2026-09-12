@@ -77,10 +77,10 @@ func (s *Server) chatAdminRoutes() []adminRoute {
 			Summary: "**SSE** 提一个问题并流式接收回答：事件为 turn/step/text/reasoning/tool_call/tool_result/usage/notice/message/error/done",
 			Params:  []adminField{pathParam("id", "会话 id")},
 			Body: []adminField{
-				bodyRequired("content", "string", "问题内容"),
+				bodyRequired("content", "string", "问题内容；会话已加载技能时可以留空，服务端会按默认文案「按本会话已加载的技能执行」提问"),
 				bodyOptional("turn_id", "string", "幂等 id：同一 id 重发返回既有结果而不会重复计费"),
 			},
-			Notes:  "每一步模型调用都是一条独立的计费请求（客户端记为 console），因此一次提问可能产生多条请求日志；被截断的步骤不会执行工具调用。",
+			Notes:  "每一步模型调用都是一条独立的计费请求（客户端记为 console），因此一次提问可能产生多条请求日志；被截断的步骤不会执行工具调用。content 留空只在会话确实加载了技能时成立（技能全部被删掉后同样会被拒绝），否则返回 400：空提问没有任何东西可执行，却会产生计费调用。",
 			NoTool: chatNoTool,
 		},
 		{

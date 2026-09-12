@@ -69,6 +69,28 @@ export function partsText(parts) {
   return (parts || []).filter((part) => part && part.type === 'text').map((part) => part.text || '').join('\n');
 }
 
+// loadedSkillNames lists the skills attached to a session, in the order the session stores
+// their ids. A skill deleted from the library keeps its id in the session (the server skips it
+// on the next question), so an id with no matching skill is dropped rather than shown as a
+// number the operator never chose.
+export function loadedSkillNames(session, skills) {
+  const ids = (session && session.skill_ids) || [];
+  const byID = new Map((skills || []).map((skill) => [String(skill.id), skill]));
+  return ids.map((id) => byID.get(String(id))).filter(Boolean).map((skill) => skill.name);
+}
+
+// skillRunText is the question a send with an empty input box becomes once skills are loaded.
+//
+// The text belongs to the console rather than to the server: it ends up in the transcript and in
+// the conversation's title, so it has to be the sentence the operator can read back afterwards.
+// Sending it explicitly also means the request never carries empty content — an empty turn would
+// be indistinguishable from a client bug on the wire.
+export function skillRunText(names) {
+  const list = (names || []).filter((name) => String(name || '').trim() !== '');
+  if (!list.length) return '请按本会话已加载的技能开始执行，并说明每一步的数据来源。';
+  return '按本会话已加载的技能执行：' + list.join('、') + '。请按技能的步骤开始，并说明每一步的数据来源。';
+}
+
 // MCP token helpers.
 //
 // These live at module scope rather than inside render(): they are pure functions of their
@@ -799,17 +821,41 @@ export async function render({ page, actions, session, route }) {
     return message.parts.filter((part) => part.type === 'tool_call').map((part) => part.name);
   }
 
+  // composerPlaceholder and composerHint say what an empty box will do. They are derived from
+  // the session's loaded skills rather than fixed strings, because "leave it empty and press
+  // send" is only true while skills are loaded — promising it otherwise would be a lie the
+  // server then refuses.
+  function sessionSkillNames() {
+    return loadedSkillNames(state.session, state.skills);
+  }
+
+  function composerPlaceholder() {
+    const base = '问点什么…（Enter 发送，Shift+Enter 换行';
+    return sessionSkillNames().length ? base + '；已加载技能时可留空直接发送）' : base + '）';
+  }
+
+  function composerHint() {
+    const billing = '每步模型调用都按所选 Key 计费';
+    return sessionSkillNames().length ? billing + '；文本留空时按已加载的技能执行' : billing;
+  }
+
   function renderComposer() {
-    const input = el('textarea', { class: 'chat-input', rows: '3', placeholder: '问点什么…（Enter 发送，Shift+Enter 换行）' });
+    const input = el('textarea', { class: 'chat-input', rows: '3', placeholder: composerPlaceholder() });
     const send = el('button', { class: 'btn btn-primary', text: '发送' });
     const stop = el('button', { class: 'btn btn-danger', text: '停止', disabled: !state.running });
     const plus = el('button', { class: 'btn', text: '＋', title: '创建技能 / 选择技能' });
-    const hint = el('div', { class: 'muted chat-hint', text: '每步模型调用都按所选 Key 计费' });
+    const hint = el('div', { class: 'muted chat-hint', text: composerHint() });
     const bar = el('div', { class: 'chat-composer-bar' }, [plus, hint, el('span', { class: 'spacer' }), stop, send]);
 
     send.addEventListener('click', () => submit(input.value));
     input.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); submit(input.value); }
+      // Enter on an empty box does nothing: the click handled above reports the real reason
+      // (nothing to send, or nothing loaded to run), and a keystroke is not the place for a
+      // toast about it. Once skills are loaded, Enter on an empty box sends like the button.
+      if (ev.key !== 'Enter' || ev.shiftKey) return;
+      ev.preventDefault();
+      if (!input.value.trim() && !sessionSkillNames().length) return;
+      submit(input.value);
     });
     stop.addEventListener('click', () => {
       if (state.controller) state.controller.abort();
@@ -902,6 +948,17 @@ export async function render({ page, actions, session, route }) {
   // whether the answer belongs to the form or to their question.
   async function submit(content) {
     if (!state.session) { toast('先新建一个会话', 'error'); return; }
+    // An empty box is a real request once skills are loaded: the skills carry the instructions,
+    // so "send" means "run what this conversation has loaded". Without them there is nothing to
+    // send, and saying so here beats posting an empty turn the server rejects.
+    if (!String(content || '').trim()) {
+      const names = sessionSkillNames();
+      if (!names.length) {
+        toast('问题不能为空：输入一个问题，或用 ＋ 选择技能后直接发送', 'error');
+        return;
+      }
+      content = skillRunText(names);
+    }
     const form = lastLiveForm();
     let streamed = '';
     await runTurn(content, form ? {
@@ -941,6 +998,9 @@ export async function render({ page, actions, session, route }) {
   async function runTurn(content, { onDelta, onFinish } = {}) {
     if (state.running) { toast('上一条还在生成', 'error'); return false; }
     const text = (content || '').trim();
+    // runTurn is reached from three places (a typed question, an inline-form submission, a
+    // sandbox page event), and submit() has already turned an empty box into the skill-run text
+    // when that is possible. Anything still empty here has nothing to send.
     if (!text) return false;
     if (!state.session) { toast('先新建一个会话', 'error'); return false; }
     if (!state.session.account_id || !state.session.api_key_id) {

@@ -50,6 +50,16 @@ const (
 	defaultDraftMaxTurns = 20
 )
 
+// DefaultSkillRunText is the question a turn with empty content becomes when the conversation
+// has skills loaded (see Service.Turn): the console's "send with an empty box" and a direct API
+// call both land here, and what gets stored has to be readable, because it is replayed to the
+// model on every later step and it becomes the conversation's title.
+//
+// The skill bodies themselves are not repeated here — they are injected into the system prompt
+// (prompt.go), and echoing them as a question would make the same instructions arrive twice, once
+// as policy and once as if the operator had typed them.
+const DefaultSkillRunText = "按本会话已加载的技能执行。请按技能里写明的步骤开始，并说明每一步的数据来源。"
+
 // Step outcomes. They decide whether the loop may execute the tools a step proposed: only
 // a step that finished normally can be trusted to have produced complete arguments.
 const (

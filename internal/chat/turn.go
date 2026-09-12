@@ -73,9 +73,6 @@ func (s *Service) Turn(ctx context.Context, req TurnRequest, emit func(Event) er
 		return nil, err
 	}
 	content := strings.TrimSpace(req.Content)
-	if content == "" {
-		return nil, domain.ErrInvalidRequest("type a question first")
-	}
 	if len(content) > maxQuestionBytes {
 		return nil, domain.ErrInvalidRequest(fmt.Sprintf("the question must be at most %d bytes", maxQuestionBytes))
 	}
@@ -88,6 +85,21 @@ func (s *Service) Turn(ctx context.Context, req TurnRequest, emit func(Event) er
 	}
 	if session.Status != "" && session.Status != "active" {
 		return nil, domain.ErrConflict("this conversation is archived")
+	}
+	// An empty question is not always an empty request: a conversation with skills loaded has
+	// instructions of its own, so "send with an empty box" means "run the skills" (docs/chat.md §7).
+	// That is why this is judged *after* the session is read rather than on the body alone. The
+	// ids alone are not enough — a skill deleted from the library leaves its id behind, and a
+	// conversation whose only skill is gone has nothing left to run.
+	if content == "" {
+		skills, err := s.loadedSkills(ctx, req.OwnerID, session.SkillIDs)
+		if err != nil {
+			return nil, err
+		}
+		if len(skills) == 0 {
+			return nil, domain.ErrInvalidRequest("type a question first, or load a skill and send with an empty box")
+		}
+		content = DefaultSkillRunText
 	}
 	if session.AccountID <= 0 || session.APIKeyID <= 0 {
 		return nil, domain.ErrInvalidRequest("bind an account and API key to this conversation before asking")
