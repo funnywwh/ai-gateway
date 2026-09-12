@@ -28,3 +28,4 @@ hooks-dead.jsonl
 .idea/
 .vscode/
 *.swp
+.billing_report/
