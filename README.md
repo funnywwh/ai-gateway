@@ -38,7 +38,7 @@ M27 给请求日志补上身份维度与消耗度量：客户端（dsh/codex）�
 | `docs/PROCESS.md` | 实现流程约定（设计文档 / todo / 提交自检） | 生效中 |
 | `docs/TODO.md` | 里程碑 → 任务 → 验收 的检查清单（随实现勾选） | 持续更新 |
 | `docs/architecture.md` | 分层、模块边界与可替换扩展点 | 已落地（由 `internal/arch` 断言守护） |
-| `docs/design/` | 每个里程碑的设计文档（接口、数据流、决策、异常、测试策略、实现差异） | M0–M30 全部产出（M28 的决策记在 `docs/api-providers.md` 与 `docs/TODO.md`） |
+| `docs/design/` | 每个里程碑的设计文档（接口、数据流、决策、异常、测试策略、实现差异） | M0–M31 全部产出（M28 的决策记在 `docs/api-providers.md` 与 `docs/TODO.md`） |
 | `docs/plugin-protocol-v1.md` | 插件协议 v1（帧/方法/事件/取消/背压/错误分类） | **已实现（M2）** |
 | `docs/api-responses.md` | Responses 兼容面（端点/字段/SSE 事件/错误封装/认证与限速） | **已实现（M5）** |
 | `docs/api-providers.md` | openai-chat 供应商（配置开关、思考模式、用量维度、错误分类、DeepSeek 接入） | **已实现（M17）** |

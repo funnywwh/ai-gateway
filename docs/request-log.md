@@ -77,7 +77,7 @@ token 口径与计费一致：输入 = `input + input_cache_hit + input_cache_mi
 |---|---|
 | `GET /admin/api/v1/requests` | 分页列表；可按 `account_id`/`api_key_id`/`days` 与六个身份维度过滤；每行含 7 个身份字段、`account_name`/`api_key_name`/`api_key_prefix` 与 `usage` |
 | `GET /admin/api/v1/requests/{id}` | 单条详情：输入/思考/输出（按录制开关）＋身份＋用户与 Key 的名字＋消耗 |
-| `GET /admin/api/v1/requests/dimensions` | top-N 维度统计：`group_by=client\|model\|resolved_model\|workspace\|session\|call_kind\|account\|api_key`，汇总请求数、已计量数、token、成本；`session` 分组额外带标题与工作区，`account`/`api_key` 分组额外带名字（`api_key` 还带前缀） |
+| `GET /admin/api/v1/requests/dimensions` | 维度统计（**可分页、可排序**）：`group_by=client\|model\|resolved_model\|workspace\|session\|call_kind\|account\|api_key`，汇总请求数、已计量数、token、成本与首次/最近出现时间；`session` 分组额外带标题与工作区，`account`/`api_key` 分组额外带名字（`api_key` 还带前缀）；`sort=last_seen\|requests\|charge`（默认 `last_seen`），`limit`/`offset` 同列表契约，响应 `total` 是**分组数** |
 | `POST /admin/api/v1/requests/prune` | 立即执行保留期清理（admin） |
 
 `account_id`/`api_key_id` 是**精确匹配**的数字过滤；非数字取值返回 400 并指出参数名
@@ -90,15 +90,29 @@ token 口径与计费一致：输入 = `input + input_cache_hit + input_cache_mi
 MCP 侧：查询工具 `list_requests` / `get_request` 同样返回身份字段与 `api_key_id`/`api_key_name`；
 后台工具 `admin_request_dimensions` 由路由表自动暴露，`group_by` 取值同步扩展。
 
-控制台「请求日志」页：按客户端/模型/工作区/会话/用户（账户）/API Key 筛选，列表显示身份、
-用户与 Key、token（入/出）与成本（按展示币种渲染，换算值带「≈」），列表底部有一行
-**本页汇总**（M29），并有「维度统计」卡片。Key 下拉随账户联动（选中账户只列该账户的 Key），
+维度统计的**排序与分页**（M31）：三种排序键都是**降序**，并以分组键升序兜底（保证分页不重不漏）：
+
+| `sort` | 含义 | 对应列 |
+|---|---|---|
+| `last_seen`（默认） | 最近一次请求时间，最近活跃的排最前 | 「最近一次」 |
+| `requests` | 请求数最多（M27 起的原顺序） | 「请求数」 |
+| `charge` | 对客成本 `charge_micros` 最高（与列表「成本」列同源） | 「成本」 |
+
+未知 `sort` 返回 400 并列出取值（不静默忽略）；`limit` 默认 20、上限 200，`offset` 语义与列表一致。
+`total` 是**分组数**（不是请求数），且与 `sort` 无关；`first_seen`/`last_seen` 是**窗口内**的极值
+（窗口外的请求不参与，保留期清理会让它前移）。
+
+控制台「请求日志」页：「维度统计」卡在**列表卡之上**（M31），按客户端/模型/工作区/会话/
+用户（账户）/API Key 筛选（筛选栏在下方列表卡内，两张表共用），统计卡工具栏可在三种排序键之间切换
+（切换回到第 1 页），表格顶部标出当前排序列（`↓`），底部分页器写「共 N 个分组」以区别于列表分页器的
+「共 N 条」——两个分页器各说各的口径。列表显示身份、用户与 Key、token（入/出）与成本（按展示币种渲染，
+换算值带「≈」），列表底部有一行**本页汇总**（M29）。Key 下拉随账户联动（选中账户只列该账户的 Key），
 超过 1000 个 Key 的部署下拉只列前 1000（配置类列表的既有上限），API 过滤对任意 id 仍精确。
 
 汇总行的口径（M29）：**只合计当前页已加载的行**（卡片上「本页过滤」生效时就是屏幕上剩下的行），
 tokens 与成本落在它们各自表头列的正下方；未计量的行只计入行数（标签写「已计量 M · 未计量 K」），
 两格显示「未计量」而不是 0。它**不是**筛选窗口的合计——窗口口径看「维度统计」卡
-（分组数不超过 limit 时，各组之和即窗口合计），窗口行数看分页器的「共 N 条」。
+（分页器给出本窗口的分组总数，各组之和要翻完各页才是窗口合计），窗口行数看分页器的「共 N 条」。
 
 ## 5. 保留期与写入兜底
 
@@ -117,8 +131,11 @@ tokens 与成本落在它们各自表头列的正下方；未计量的行只计�
 **已实现（M30）**：用户（账户）与 API Key 维度——列表/详情带名字、按 `api_key_id` 过滤、
 维度统计两个新分组、控制台两列与两个下拉、MCP 查询工具返回 Key 归属，以及
 `(account_id|api_key_id, created_at, id)` 两条索引（迁移 0009）。
+**已实现（M31）**：维度统计卡置顶；统计表服务端分页（`offset` + 精确分组总数 `total`）与三种排序键
+（默认 `last_seen` 降序，`sort=requests|charge` 可切换），控制台排序下拉、`↓` 标记与「最近一次」列，
+分页器写「共 N 个分组」；计数查询走覆盖/时间索引，不 join 计量表。
 历史行（迁移 0008 之前）的七列为空，控制台显示「—」，聚合归入「（未知）」桶；
 `account_id`/`api_key_id` ≤ 0 的行归入「（未知）」桶，计数同样保留。
 
 相关设计：`docs/design/m27-request-dimensions.md`、`docs/design/m29-request-log-page-summary.md`、
-`docs/design/m30-request-log-owner-dimensions.md`。
+`docs/design/m30-request-log-owner-dimensions.md`、`docs/design/m31-request-log-stats-pagination.md`。

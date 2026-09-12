@@ -17,8 +17,9 @@
    `#plugin`、`#plugin-cached`、`#currency`、`#keys`、`#requests`、`#paging`）渲染真实页面；
 3. harness 里 **stub 掉 `window.fetch`**，用快照回答所有 `/admin/api/v1/*` 调用——所以它不需要会话、
    不需要数据库、不碰任何上游，只验证「界面拿到这些数据会渲染成什么」；
-   `paging.page.html` 是唯一例外：它**按窗口**回答 `/accounts`（解析请求 URL 里的 `limit`/`offset`
-   并切片），因为分页只能对着一个"真的会动"的服务端验证，断言读的也是**带查询串的原始 URL**；
+   两个例外是**会动的**那两张表：`paging.page.html` **按窗口**回答 `/accounts`（解析请求 URL 里的
+   `limit`/`offset` 并切片），`keys.page.html` 的 `/requests/dimensions` 同样按 `limit`/`offset`/`sort`
+   应答（M31）——分页与排序只能对着一个"真的会动"的服务端验证，断言读的也是**带查询串的原始 URL**；
 4. 断言结果通过 HTTP 回报给 runner，runner 打印每个视图的检查项并在失败时以非 0 退出。
 
 ## 用法
@@ -54,6 +55,12 @@ GW_BASE=http://127.0.0.1:8099 GW_COOKIE=... scripts/ui-harness/capture.py       
 - **M24 起**：快照条目可以带分页信封（`total`/`limit`/`offset`/`has_more`）；缺 `total` 时
   `pagedTable` 退化成"只有本页"（下一页禁用），所以旧快照不会因为分页改造而报错。
   `#paging` 视图不用快照，它自带 45 行的虚拟账户表（见上）。
+- **M31 起**：`/requests/dimensions` 由 stub **按 `limit`/`offset` 切片、按 `sort` 排序**之后再应答
+  （照抄真实端点做的两件事）——「分页器发了什么」「排序开关发了什么」只有对着一个**会动**的服务端
+  才看得出来，一个忽略查询串的 stub 会让两者都变成不可观测。`group_by=workspace` 用**合成的 45 个
+  分组**（真实快照的分组数不够翻一页），并且故意让三种排序键的**首桶互不相同**：若它们指向同一个桶，
+  「切了排序但顺序没变」也会全绿。合成数据写在 `keys.page.html` 的 `syntheticWorkspaces()` 里，
+  `capture.py --refresh` 不会覆盖它（它只重写自己列出的键）。
 
 ## 三个踩过的坑（改这个 harness 前先读）
 

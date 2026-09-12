@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/responses"
+	"github.com/winger/ai-gateway/internal/store"
 )
 
 // The bodies below are the shapes M27's extractor keys on, trimmed to what it reads: a
@@ -394,12 +396,27 @@ func TestAdminRequestDimensionsGroupsAndFilters(t *testing.T) {
 	if body["group_by"] != "client" {
 		t.Fatalf("group_by = %v", body["group_by"])
 	}
+	// The paging envelope (M31): rows stays the list it has been since M27, and the
+	// identifiers around it are the ones every other list endpoint answers with.
+	if body["sort"] != "last_seen" {
+		t.Fatalf("sort = %v, want the default last_seen", body["sort"])
+	}
+	if body["limit"].(float64) != 10 || body["offset"].(float64) != 0 || body["count"].(float64) != 2 {
+		t.Fatalf("window = limit %v offset %v count %v, want 10/0/2", body["limit"], body["offset"], body["count"])
+	}
+	if body["total"].(float64) != 2 || body["has_more"] != false {
+		t.Fatalf("total = %v has_more = %v, want 2 buckets and no next page", body["total"], body["has_more"])
+	}
 	rows, _ := body["rows"].([]any)
 	counts := map[string]float64{}
 	for _, raw := range rows {
 		row, _ := raw.(map[string]any)
 		key, _ := row["key"].(string)
 		counts[key], _ = row["requests"].(float64)
+		// The window a bucket spans travels with it (the console renders last_seen).
+		if row["first_seen"] == "" || row["last_seen"] == "" {
+			t.Fatalf("bucket %q lost its window: %v", key, row)
+		}
 		// No usage rows were seeded here, so every bucket is unmetered — and the two
 		// counts must say exactly that.
 		if row["metered"].(float64) != 0 {
@@ -454,6 +471,177 @@ func TestAdminRequestDimensionsRejectsUnknownGrouping(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 for an unknown grouping", resp.StatusCode)
+	}
+}
+
+// A page of buckets and the total that describes them: the console's pager reads both, so
+// they have to come from the same filters and the pages must neither repeat nor skip a
+// bucket (docs/design/m31-request-log-stats-pagination.md).
+func TestAdminRequestDimensionsPaging(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+	// Bucket cN holds N+1 requests, so sort=requests ranks c4 first and c0 last.
+	for i := 0; i < 5; i++ {
+		for n := 0; n <= i; n++ {
+			seedIdentityRow(t, f, &domain.RequestLogRecord{
+				RequestID: fmt.Sprintf("req_pg_%d_%d", i, n),
+				AccountID: 1, APIKeyID: 1, Endpoint: "/v1/responses", Status: "completed",
+				Client: fmt.Sprintf("c%d", i), Model: "deepseek-flash",
+			})
+		}
+	}
+	const base = "/admin/api/v1/requests/dimensions?days=1&group_by=client&sort=requests&limit=2"
+
+	pages := []struct {
+		offset int
+		want   string
+		more   bool
+		count  int
+	}{
+		{0, "c4,c3", true, 2},
+		{2, "c2,c1", true, 2},
+		{4, "c0", false, 1},
+	}
+	seen := map[string]int{}
+	for _, page := range pages {
+		body := decodeJSONBody(t, f.call(t, http.MethodGet,
+			fmt.Sprintf("%s&offset=%d", base, page.offset), "", cookie))
+		if got := joinedKeys(body); got != page.want {
+			t.Fatalf("offset %d: buckets %s, want %s", page.offset, got, page.want)
+		}
+		if body["total"].(float64) != 5 {
+			t.Fatalf("offset %d: total = %v, want 5 buckets", page.offset, body["total"])
+		}
+		if body["offset"].(float64) != float64(page.offset) {
+			t.Fatalf("offset %d echoed as %v", page.offset, body["offset"])
+		}
+		if body["count"].(float64) != float64(page.count) || body["has_more"] != page.more {
+			t.Fatalf("offset %d: count %v has_more %v, want %d/%v",
+				page.offset, body["count"], body["has_more"], page.count, page.more)
+		}
+		rows, _ := body["rows"].([]any)
+		for _, raw := range rows {
+			row, _ := raw.(map[string]any)
+			key, _ := row["key"].(string)
+			seen[key]++
+		}
+	}
+	if len(seen) != 5 {
+		t.Fatalf("the three pages covered %d buckets, want 5", len(seen))
+	}
+	for key, count := range seen {
+		if count != 1 {
+			t.Fatalf("bucket %q appeared %d times across pages", key, count)
+		}
+	}
+
+	// An offset past the end is an empty page with the total unmoved, not an error: that is
+	// what the console's "step back a page" rule reacts to.
+	beyond := decodeJSONBody(t, f.call(t, http.MethodGet, base+"&offset=40", "", cookie))
+	if rows, _ := beyond["rows"].([]any); len(rows) != 0 {
+		t.Fatalf("an offset past the end returned %d buckets", len(rows))
+	}
+	if beyond["total"].(float64) != 5 || beyond["has_more"] != false {
+		t.Fatalf("an empty page changed the total: %v / %v", beyond["total"], beyond["has_more"])
+	}
+
+	// A filter narrows the pages and the total together.
+	filtered := decodeJSONBody(t, f.call(t, http.MethodGet, base+"&client=c0", "", cookie))
+	if got := joinedKeys(filtered); got != "c0" || filtered["total"].(float64) != 1 {
+		t.Fatalf("filtered breakdown = %s with total %v, want the single c0 bucket", got, filtered["total"])
+	}
+
+	// A malformed offset is a 400 rather than "page 1", which is the worst possible answer
+	// to a request for page 5 (the rule the list endpoints already follow).
+	for _, path := range []string{
+		"/admin/api/v1/requests/dimensions?group_by=client&offset=abc",
+		"/admin/api/v1/requests/dimensions?group_by=client&offset=-1",
+	} {
+		resp := f.call(t, http.MethodGet, path, "", cookie)
+		if resp.StatusCode != http.StatusBadRequest {
+			resp.Body.Close()
+			t.Fatalf("%s: status = %d, want 400", path, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+}
+
+// The sort key decides which bucket is first, and the three keys exist to answer three
+// different questions about the same buckets. An unknown key is refused by name.
+func TestAdminRequestDimensionsSort(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	// a: 3 requests, most recent, cheapest · b: 2 requests, oldest, dearest ·
+	// c: 1 request, in between.
+	buckets := []struct {
+		key     string
+		count   int
+		minutes int
+		charge  int64
+	}{
+		{"a", 3, 1, 100},
+		{"b", 2, 3, 450},
+		{"c", 1, 2, 500},
+	}
+	for _, bucket := range buckets {
+		for i := 0; i < bucket.count; i++ {
+			id := fmt.Sprintf("req_sort_%s_%d", bucket.key, i)
+			seedIdentityRow(t, f, &domain.RequestLogRecord{
+				RequestID: id, AccountID: 1, APIKeyID: 1, Endpoint: "/v1/responses",
+				Status: "completed", Client: bucket.key,
+				CreatedAt: base.Add(-time.Duration(bucket.minutes)*time.Minute + time.Duration(i)*time.Second),
+			})
+			if _, err := f.db.InsertUsage(context.Background(), &domain.UsageRecord{
+				RequestID: id, AttemptNo: 1, AccountID: 1, APIKeyID: 1, Model: "m", ResolvedModel: "m",
+				DimensionsJSON: `{"input":10,"output":2}`, CostMicros: 1, ChargeMicros: bucket.charge,
+				Status: "completed", CreatedAt: time.Now().UTC(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	cases := []struct {
+		query string
+		key   string
+		want  string
+	}{
+		{"", "last_seen", "a,c,b"}, // the default is "active most recently"
+		{"&sort=last_seen", "last_seen", "a,c,b"},
+		{"&sort=requests", "requests", "a,b,c"},
+		{"&sort=charge", "charge", "b,c,a"},
+	}
+	for _, tc := range cases {
+		body := decodeJSONBody(t, f.call(t, http.MethodGet,
+			"/admin/api/v1/requests/dimensions?days=1&group_by=client&limit=10"+tc.query, "", cookie))
+		if got := joinedKeys(body); got != tc.want {
+			t.Fatalf("sort %q ordered %s, want %s", tc.query, got, tc.want)
+		}
+		if body["sort"] != tc.key {
+			t.Fatalf("the response must echo the sort it used: %v, want %q", body["sort"], tc.key)
+		}
+		// The number of buckets is a property of the set, not of the order.
+		if body["total"].(float64) != 3 {
+			t.Fatalf("sort %q changed the total: %v", tc.query, body["total"])
+		}
+	}
+
+	// A sort the store cannot honour is refused by name: silently falling back to the
+	// default would answer a question nobody asked, which is the failure mode the
+	// account_id filter had (M30).
+	resp := f.call(t, http.MethodGet, "/admin/api/v1/requests/dimensions?group_by=client&sort=latency", "", cookie)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an unknown sort", resp.StatusCode)
+	}
+	payload := decodeJSONBody(t, resp)
+	message, _ := payload["error"].(map[string]any)
+	text, _ := message["message"].(string)
+	for _, name := range store.RequestLogDimensionSorts {
+		if !strings.Contains(text, name) {
+			t.Fatalf("the rejection must name %q: %q", name, text)
+		}
 	}
 }
 
@@ -645,8 +833,11 @@ func TestAdminRequestDimensionsGroupByOwner(t *testing.T) {
 	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_grp0003", AccountID: 1, APIKeyID: keyB, Status: "completed", Client: "codex"})
 	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_grp0004", AccountID: 0, APIKeyID: 0, Status: "completed", Client: "unknown"})
 
+	// The credential buckets are read with an explicit sort=requests so this case keeps
+	// asserting identity and counts: the ordering has its own test
+	// (TestAdminRequestDimensionsSort), and the seeded rows all share one timestamp.
 	accounts := decodeJSONBody(t, f.call(t, http.MethodGet,
-		"/admin/api/v1/requests/dimensions?days=1&group_by=account&limit=10", "", cookie))
+		"/admin/api/v1/requests/dimensions?days=1&group_by=account&limit=10&sort=requests", "", cookie))
 	if accounts["group_by"] != "account" {
 		t.Fatalf("group_by = %v", accounts["group_by"])
 	}
@@ -667,7 +858,7 @@ func TestAdminRequestDimensionsGroupByOwner(t *testing.T) {
 	}
 
 	keys := decodeJSONBody(t, f.call(t, http.MethodGet,
-		"/admin/api/v1/requests/dimensions?days=1&group_by=api_key&limit=10", "", cookie))
+		"/admin/api/v1/requests/dimensions?days=1&group_by=api_key&limit=10&sort=requests", "", cookie))
 	krows, _ := keys["rows"].([]any)
 	if len(krows) != 3 {
 		t.Fatalf("api key buckets = %v, want key-a, key-b and the unknown bucket", krows)
@@ -689,6 +880,19 @@ func TestAdminRequestDimensionsGroupByOwner(t *testing.T) {
 	if bucket, _ := frows[0].(map[string]any); bucket["api_key_name"] != "key-b" || bucket["requests"].(float64) != 1 {
 		t.Fatalf("filtered bucket = %v", frows[0])
 	}
+}
+
+// joinedKeys renders the bucket keys of a breakdown response in the order the server sent
+// them: the ordering is what these cases are about, so it must not be read through a map.
+func joinedKeys(body map[string]any) string {
+	rows, _ := body["rows"].([]any)
+	keys := make([]string, 0, len(rows))
+	for _, raw := range rows {
+		row, _ := raw.(map[string]any)
+		key, _ := row["key"].(string)
+		keys = append(keys, key)
+	}
+	return strings.Join(keys, ",")
 }
 
 // containsString reports whether a decoded JSON array carries a string.

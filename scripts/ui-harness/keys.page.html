@@ -17,6 +17,52 @@
 // pages under test need no session and no database. Unlike that page this one also
 // records request bodies, because the key editor's job is to *send* the right policy.
 const FIXTURES = __FIXTURES__;
+
+// 45 synthetic workspace buckets (M31). The captured breakdowns hold fewer buckets than one
+// page, and a pager can only be exercised against more than one page. The three sort keys
+// are made to disagree on their first bucket on purpose: if 最近一次, 请求数 and 成本 all
+// led with the same bucket, a broken sort switch would still pass every assertion.
+function syntheticWorkspaces() {
+  const rows = [];
+  const base = Date.parse('2026-09-11T12:00:00Z');
+  for (let i = 1; i <= 45; i++) {
+    rows.push({
+      key: '/w/' + String(i).padStart(3, '0'),
+      // 请求数 grows with the index while 最近一次 runs the other way, so those two orders
+      // are exact reverses of each other; 成本 peaks at /w/023 instead.
+      requests: i, metered: i,
+      first_seen: new Date(base - 90 * 60000).toISOString(),
+      last_seen: new Date(base - (i - 1) * 60000).toISOString(),
+      input_tokens: 100 * i, output_tokens: i, reasoning_tokens: 0,
+      cost_micros: 10 * i, charge_micros: 1000 * (45 - Math.abs(i - 23)),
+    });
+  }
+  return rows;
+}
+
+// dimensionRows answers a grouping with the captured fixture when there is one (the
+// credential groupings are the ones whose *names* the view has to render, and one shared
+// fixture could not describe them) and with the synthetic workspaces otherwise.
+function dimensionRows(groupBy) {
+  const key = '/requests/dimensions?group_by=' + groupBy;
+  if (FIXTURES[key] !== undefined) return FIXTURES[key].rows || [];
+  if (groupBy === 'workspace') return syntheticWorkspaces();
+  return (FIXTURES['/requests/dimensions'] || {}).rows || [];
+}
+
+// sortDimensions applies the endpoint's ordering: three descending keys, each with the
+// group key as its tiebreaker. The paged breakdown has to be *served* ordered and sliced —
+// a stub that ignored limit/offset/sort would make the console's pager and sort switch
+// unobservable, because both only ever send a query string.
+function sortDimensions(rows, sort) {
+  const value = (row) => {
+    if (sort === 'requests') return Number(row.requests || 0);
+    if (sort === 'charge') return Number(row.charge_micros || 0);
+    return Date.parse(row.last_seen || '') || 0;
+  };
+  return rows.slice().sort((a, b) => (value(b) - value(a)) || String(a.key).localeCompare(String(b.key)));
+}
+
 window.fetch = async (url, options) => {
   const target = String(url);
   const path = target.replace('/admin/api/v1', '').split('?')[0];
@@ -40,14 +86,20 @@ window.fetch = async (url, options) => {
     const row = { ...list.data[0], request_id: window.__detailOverride };
     return { ok: true, status: 200, text: async () => JSON.stringify({ ...list, count: 2, total: 2, data: list.data.concat([row]), has_more: false }) };
   }
-  // The dimension endpoint answers one shape per grouping, so a fixture key may name the
-  // group_by value ("/requests/dimensions?group_by=account"). The credential groupings are
-  // the ones whose *names* the requests view has to render, and one shared fixture could
-  // not describe them.
-  const groupBy = new URLSearchParams(target.split('?')[1] || '').get('group_by');
-  if (path === '/requests/dimensions' && groupBy && FIXTURES[path + '?group_by=' + groupBy] !== undefined) {
-    const grouped = FIXTURES[path + '?group_by=' + groupBy];
-    return { ok: true, status: 200, text: async () => JSON.stringify(grouped) };
+  const query = new URLSearchParams(target.split('?')[1] || '');
+  if (path === '/requests/dimensions') {
+    const all = dimensionRows(query.get('group_by'));
+    const limit = Number(query.get('limit') || 20);
+    const offset = Number(query.get('offset') || 0);
+    const rows = sortDimensions(all, query.get('sort')).slice(offset, offset + limit);
+    return {
+      ok: true, status: 200,
+      text: async () => JSON.stringify({
+        group_by: query.get('group_by'), sort: query.get('sort') || 'last_seen',
+        limit, offset, count: rows.length, total: all.length,
+        has_more: offset + rows.length < all.length, rows,
+      }),
+    };
   }
   const body = FIXTURES[path] !== undefined ? FIXTURES[path] : { data: [] };
   // A fixture of null stands for an empty body: api.js parses that to null, not to {}.
@@ -251,6 +303,72 @@ try {
     accountSelect.dispatchEvent(new Event('change'));
     await settle();
     checks.clearingAccountDropsId = !urlsSince(accountMark2).some((u) => u.includes('account_id='));
+
+    // ---- M31：统计卡置顶 + 排序下拉 + 分组分页 ----
+    // 卡片顺序按 **DOM** 读：统计卡必须在列表卡之前（按文本出现顺序断言会被页面任意位置的
+    // 文字蒙过去）。
+    const cards = [...document.querySelectorAll('#page > .card')];
+    checks.statsCardAboveList = cards.length === 2
+      && cards[0].textContent.includes('维度统计') && cards[1].textContent.includes('req_demo0001');
+    const statsCard = cards[0];
+    const statsPager = () => statsCard.querySelector('.pager');
+    const statsFirstRow = () => {
+      const first = statsCard.querySelector('tbody tr');
+      return first ? first.textContent : '';
+    };
+    const statsHeaders = () => [...statsCard.querySelectorAll('thead th')].map((th) => th.textContent);
+    // 改造没有动列表的分页器：它仍然说「共 N 条」，与统计卡的「共 N 个分组」区分开——
+    // 页面上同时有两个分页器，各自的单位就是各自口径的第一句话。
+    checks.listPagerUnchanged = pageText().includes('共 2 条') && !pageText().includes('共 2 个分组');
+
+    // 45 个合成工作区分组：默认排序是「最近一次」，第 1 页装 001–020，共 3 页。
+    groupBySelected('workspace');
+    await settle();
+    checks.statsPagerShown = !!statsPager()
+      && statsPager().textContent.includes('共 45 个分组')
+      && statsPager().textContent.includes('本页 1–20')
+      && statsPager().textContent.includes('第 1/3 页');
+    checks.statsSortedByTime = statsFirstRow().includes('/w/001');
+    // 排序依据必须在屏幕上：「最近一次」列存在、当前排序列带 ↓、值是时间。
+    checks.statsTimeColumn = statsHeaders().includes('最近一次 ↓');
+    checks.statsTimeShown = statsFirstRow().includes('2026');
+    // 下一页：请求带 offset=20，第 2 页装 021–040（分页器在统计卡内部，不能读到列表那个）。
+    const statsMark = (window.__urls || []).length;
+    const nextButton = [...statsPager().querySelectorAll('button')].find((b) => b.textContent.trim() === '下一页');
+    checks.statsNextButton = !!nextButton;
+    if (nextButton) nextButton.click();
+    await settle();
+    checks.statsNextSendsOffset = urlsSince(statsMark)
+      .some((u) => u.includes('/requests/dimensions?') && u.includes('offset=20'));
+    checks.statsSecondPage = statsFirstRow().includes('/w/021') && statsPager().textContent.includes('本页 21–40');
+    // 「刷新」重读当前页：offset 与排序键都保持（旧 offset 不属于别的行集就不会被归零）。
+    const refreshMark = (window.__urls || []).length;
+    find('刷新').click();
+    await settle();
+    checks.statsRefreshKeepsPage = urlsSince(refreshMark)
+      .some((u) => u.includes('/requests/dimensions?') && u.includes('offset=20'));
+    // 切换排序键：带 sort= 重取、offset 归零、首桶换成最忙的那个、↓ 跟着移动。
+    const sortSelect = [...document.querySelectorAll('select')].find((s) => [...s.options].some((o) => o.value === 'charge'));
+    checks.sortSelectShown = !!sortSelect;
+    const sortMark = (window.__urls || []).length;
+    sortSelect.value = 'requests';
+    sortSelect.dispatchEvent(new Event('change'));
+    await settle();
+    checks.sortSendsKey = urlsSince(sortMark).some((u) => u.includes('sort=requests') && u.includes('offset=0'));
+    checks.sortedByRequests = statsFirstRow().includes('/w/045') && statsHeaders().includes('请求数 ↓');
+    sortSelect.value = 'charge';
+    sortSelect.dispatchEvent(new Event('change'));
+    await settle();
+    checks.sortedByCharge = statsFirstRow().includes('/w/023') && statsHeaders().includes('成本 ↓');
+    // 切筛选把统计窗口也归零（老 offset 属于另一套行集），并保留排序键。
+    const clientSelect = [...document.querySelectorAll('select')].find((s) => [...s.options].some((o) => o.value === 'unknown'));
+    const filterMark = (window.__urls || []).length;
+    clientSelect.value = 'dsh';
+    clientSelect.dispatchEvent(new Event('change'));
+    await settle();
+    checks.statsFilterResetsOffset = urlsSince(filterMark)
+      .some((u) => u.includes('/requests/dimensions?') && u.includes('offset=0') && u.includes('sort=charge'));
+
     // The retention policy is reported from /stats: the window, what this process has
     // already pruned, and whether any write had to fall back to a skeleton row.
     checks.retentionWindow = pageText().includes('保留期 30 天');
@@ -301,7 +419,8 @@ try {
     // The reload brought a third row (a second metered one, same numbers as the first),
     // so the summary has to have followed the list rather than kept its first numbers.
     checks.summaryFollowsRefresh = footText().includes('2,400 / 68') && footText().includes('已计量 2');
-    checks.sample = [footText(), '账户分组：' + accountBuckets, 'API Key 分组：' + apiKeyBuckets];
+    checks.sample = [footText(), '账户分组：' + accountBuckets, 'API Key 分组：' + apiKeyBuckets,
+      '统计分页器：' + (statsPager() ? statsPager().textContent : '（无）'), '统计首行：' + statsFirstRow().slice(0, 70)];
     if (prunedRow) [...prunedRow.querySelectorAll('button')].find((b) => b.textContent.trim() === '详情').click();
     await settle();
     checks.clickWithoutRejection = errors.length === spent;

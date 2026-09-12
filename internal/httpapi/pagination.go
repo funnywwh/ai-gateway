@@ -28,7 +28,13 @@ type pageParams struct {
 // absent and the ceiling a caller cannot exceed. Both the handler (which parses) and
 // the route table (which documents for MCP clients) go through it, so the number an
 // agent reads in admin_describe cannot drift from the one the handler enforces.
-type pageSpec struct{ Def, Max int }
+type pageSpec struct {
+	Def, Max int
+	// Noun names what one page holds, for the description the route table publishes. Every
+	// other list pages records; the dimension breakdown pages groups, and "返回条数上限" on
+	// a grouping report is the kind of small lie an agent plans around.
+	Noun string
+}
 
 var (
 	// History tables stream from SQL. Their defaults keep the pre-pagination behaviour,
@@ -40,6 +46,9 @@ var (
 	pageCodes           = pageSpec{Def: 100, Max: 500}
 	pageReconciliations = pageSpec{Def: 30, Max: 200}
 	pageBackups         = pageSpec{Def: 100, Max: 500}
+	// The dimension breakdown is a grouping report rather than a list of records: its rows
+	// are buckets, and the console shows twenty of them at a time.
+	pageDimensions = pageSpec{Def: 20, Max: 200, Noun: "分组数"}
 
 	// Configuration tables are read whole and sliced in memory: they are bounded by the
 	// number of configured objects, which the registry reads wholesale on every reload.
@@ -52,8 +61,12 @@ func (s pageSpec) params(r *http.Request) (pageParams, error) { return adminPage
 // fields documents the window in the management route table, which is also what MCP
 // clients read through admin_endpoints/admin_describe.
 func (s pageSpec) fields() []adminField {
+	noun := s.Noun
+	if noun == "" {
+		noun = "条数"
+	}
 	return []adminField{
-		queryParam("limit", "integer", fmt.Sprintf("返回条数上限，默认 %d，最大 %d", s.Def, s.Max)),
+		queryParam("limit", "integer", fmt.Sprintf("返回%s上限，默认 %d，最大 %d", noun, s.Def, s.Max)),
 		offsetParam(),
 	}
 }

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -212,7 +213,7 @@ func TestRequestLogDimensionsGroupAndSum(t *testing.T) {
 	seedUsage(t, db, "req-d1", 1, `{"input":10,"output":2}`, 5, 9)
 	seedUsage(t, db, "req-d2", 1, `{"input":4,"output":1}`, 2, 4)
 
-	rows, err := db.RequestLogDimensions(ctx, domain.RequestLogFilter{}, "client", 10)
+	rows, err := db.ListRequestLogDimensionsPage(ctx, domain.RequestLogFilter{}, "client", "requests", 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +235,7 @@ func TestRequestLogDimensionsGroupAndSum(t *testing.T) {
 		t.Fatalf("codex bucket = %+v, want an unmetered bucket", codex)
 	}
 
-	sessions, err := db.RequestLogDimensions(ctx, domain.RequestLogFilter{}, "session", 10)
+	sessions, err := db.ListRequestLogDimensionsPage(ctx, domain.RequestLogFilter{}, "session", RequestLogDimensionDefaultSort, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +253,7 @@ func TestRequestLogDimensionsGroupAndSum(t *testing.T) {
 	}
 
 	// A filter narrows the breakdown the same way it narrows the list.
-	filtered, err := db.RequestLogDimensions(ctx, domain.RequestLogFilter{Client: "codex"}, "client", 10)
+	filtered, err := db.ListRequestLogDimensionsPage(ctx, domain.RequestLogFilter{Client: "codex"}, "client", RequestLogDimensionDefaultSort, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,9 +262,212 @@ func TestRequestLogDimensionsGroupAndSum(t *testing.T) {
 	}
 }
 
+// A page and its total must describe the same buckets, and the only reason LIMIT/OFFSET is
+// exact here is that the order is total: these 201 buckets were all written in the same
+// second, so they tie on time, and paging them without a repeat or a gap is the group-key
+// tiebreaker doing its job (docs/design/m31-request-log-stats-pagination.md D6).
+func TestRequestLogDimensionsPaging(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	const buckets = 201
+	stamp := time.Now().UTC().Truncate(time.Second)
+	for i := 0; i < buckets; i++ {
+		seedDimensionRow(t, db, &domain.RequestLogRecord{
+			RequestID: fmt.Sprintf("req-page-%03d", i),
+			AccountID: 1, APIKeyID: 1, Client: fmt.Sprintf("c%03d", i), CreatedAt: stamp,
+		})
+	}
+
+	total, err := db.CountRequestLogDimensionGroups(ctx, domain.RequestLogFilter{}, "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != buckets {
+		t.Fatalf("group count = %d, want %d", total, buckets)
+	}
+
+	// A caller that forgets limit gets the endpoint default; one asking above the ceiling
+	// gets the ceiling rather than an error, and never the whole window.
+	byDefault, err := db.ListRequestLogDimensionsPage(ctx, domain.RequestLogFilter{}, "client", RequestLogDimensionDefaultSort, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byDefault) != 20 {
+		t.Fatalf("limit 0 returned %d buckets, want the default 20", len(byDefault))
+	}
+	capped, err := db.ListRequestLogDimensionsPage(ctx, domain.RequestLogFilter{}, "client", RequestLogDimensionDefaultSort, 1000, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capped) != 200 {
+		t.Fatalf("limit 1000 returned %d buckets, want the cap 200", len(capped))
+	}
+	// Every bucket ties on both the sort key and the time, so the order can only come from
+	// the group key — and the first page is therefore the first twenty keys, in order.
+	if byDefault[0].Key != "c000" || byDefault[19].Key != "c019" {
+		t.Fatalf("tied buckets are not ordered by group key: %q … %q", byDefault[0].Key, byDefault[19].Key)
+	}
+
+	// Walk every page: the union must be exactly the seeded keys, each exactly once.
+	seen := map[string]int{}
+	pages := 0
+	for offset := 0; offset <= buckets+20; offset += 20 {
+		page, err := db.ListRequestLogDimensionsPage(ctx, domain.RequestLogFilter{}, "client", "requests", 20, offset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		pages++
+		for _, row := range page {
+			seen[row.Key]++
+		}
+	}
+	if len(seen) != buckets {
+		t.Fatalf("paging reached %d distinct buckets, want %d", len(seen), buckets)
+	}
+	for key, count := range seen {
+		if count != 1 {
+			t.Fatalf("bucket %q appeared %d times across pages", key, count)
+		}
+	}
+	if pages != 11 {
+		t.Fatalf("walked %d pages of 20, want 11 (10 full + 1)", pages)
+	}
+
+	// An offset past the end is an empty page, not an error; a negative one is the first
+	// page; and neither moves the total.
+	beyond, err := db.ListRequestLogDimensionsPage(ctx, domain.RequestLogFilter{}, "client", "requests", 20, buckets+50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(beyond) != 0 {
+		t.Fatalf("an offset past the end returned %d buckets, want none", len(beyond))
+	}
+	negative, err := db.ListRequestLogDimensionsPage(ctx, domain.RequestLogFilter{}, "client", "requests", 20, -5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(negative) != 20 || negative[0].Key != "c000" {
+		t.Fatalf("a negative offset must clamp to the first page: %d buckets starting at %q", len(negative), negative[0].Key)
+	}
+	stillTotal, err := db.CountRequestLogDimensionGroups(ctx, domain.RequestLogFilter{}, "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillTotal != buckets {
+		t.Fatalf("group count changed after paging: %d", stillTotal)
+	}
+
+	// A filter narrows the page and the count together, so "共 N 个分组" keeps describing
+	// the buckets the pages actually hold.
+	filtered, err := db.ListRequestLogDimensionsPage(ctx, domain.RequestLogFilter{Client: "c000"}, "client", "requests", 20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filteredTotal, err := db.CountRequestLogDimensionGroups(ctx, domain.RequestLogFilter{Client: "c000"}, "client")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) != 1 || filteredTotal != 1 || filtered[0].Key != "c000" {
+		t.Fatalf("filtered page=%+v total=%d, want the single c000 bucket", filtered, filteredTotal)
+	}
+}
+
+// The three sort keys are the three questions the console's card can be asked, and each
+// one has to put a different bucket first — otherwise the switch would look broken while
+// every assertion on "a table rendered" still passed.
+func TestRequestLogDimensionSorts(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	// a: 3 requests, most recent, cheapest · b: 2 requests, oldest, most expensive ·
+	// c: 1 request, in between. So last_seen → a,c,b · requests → a,b,c · charge → b,c,a.
+	buckets := []struct {
+		key     string
+		count   int
+		minutes int
+		charge  int64
+	}{
+		{"a", 3, 1, 100},
+		{"b", 2, 3, 450},
+		{"c", 1, 2, 500},
+	}
+	for _, bucket := range buckets {
+		for i := 0; i < bucket.count; i++ {
+			id := fmt.Sprintf("req-sort-%s-%d", bucket.key, i)
+			seedDimensionRow(t, db, &domain.RequestLogRecord{
+				RequestID: id, AccountID: 1, APIKeyID: 1, Client: bucket.key,
+				// The newest request of the bucket is what last_seen reports.
+				CreatedAt: base.Add(-time.Duration(bucket.minutes) * time.Minute).Add(time.Duration(i) * time.Second),
+			})
+			seedUsage(t, db, id, 1, `{"input":10,"output":2}`, 1, bucket.charge)
+		}
+	}
+
+	if RequestLogDimensionSorts[0] != RequestLogDimensionDefaultSort {
+		t.Fatalf("the whitelist must list the default first: %v vs %q", RequestLogDimensionSorts, RequestLogDimensionDefaultSort)
+	}
+	// Every key must end on the group key: an ORDER BY without a unique tail cannot be
+	// paged, and this is the cheapest place to say so (the behavioral half is
+	// TestRequestLogDimensionsPaging, which pages 201 tied buckets).
+	for _, key := range RequestLogDimensionSorts {
+		order, err := requestLogDimensionSortExpr(key)
+		if err != nil {
+			t.Fatalf("sort %q: %v", key, err)
+		}
+		if !strings.HasSuffix(order, "group_key ASC") {
+			t.Fatalf("sort %q does not tie-break on the group key: %q", key, order)
+		}
+	}
+	cases := []struct {
+		sort string
+		want string
+	}{
+		{RequestLogDimensionDefaultSort, "a,c,b"},
+		{"", "a,c,b"}, // an absent sort is the default
+		{"requests", "a,b,c"},
+		{"charge", "b,c,a"},
+	}
+	for _, tc := range cases {
+		rows, err := db.ListRequestLogDimensionsPage(ctx, domain.RequestLogFilter{}, "client", tc.sort, 10, 0)
+		if err != nil {
+			t.Fatalf("sort %q: %v", tc.sort, err)
+		}
+		got := make([]string, 0, len(rows))
+		for _, row := range rows {
+			got = append(got, row.Key)
+		}
+		if joined := strings.Join(got, ","); joined != tc.want {
+			t.Fatalf("sort %q ordered %s, want %s", tc.sort, joined, tc.want)
+		}
+		// The bucket count is a property of the set, not of the order it is read in.
+		total, err := db.CountRequestLogDimensionGroups(ctx, domain.RequestLogFilter{}, "client")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total != len(buckets) {
+			t.Fatalf("sort %q changed the group count: %d", tc.sort, total)
+		}
+	}
+
+	// An unknown key is rejected by name, the same shape as an unknown group_by: a silently
+	// ignored sort answers the question that was not asked.
+	_, err := db.ListRequestLogDimensionsPage(ctx, domain.RequestLogFilter{}, "client", "tokens", 10, 0)
+	if err == nil || !strings.Contains(err.Error(), "sort must be") {
+		t.Fatalf("err = %v, want a sort error naming the accepted values", err)
+	}
+	for _, name := range RequestLogDimensionSorts {
+		if !strings.Contains(err.Error(), name) {
+			t.Fatalf("the rejection must name %q: %v", name, err)
+		}
+	}
+}
+
 func TestRequestLogDimensionsRejectsUnknownGrouping(t *testing.T) {
 	db := testDB(t)
-	_, err := db.RequestLogDimensions(context.Background(), domain.RequestLogFilter{}, "password", 10)
+	_, err := db.ListRequestLogDimensionsPage(context.Background(), domain.RequestLogFilter{}, "password", RequestLogDimensionDefaultSort, 10, 0)
 	if err == nil || !strings.Contains(err.Error(), "group_by must be") {
 		t.Fatalf("err = %v, want a group_by error naming the accepted values", err)
 	}
@@ -321,8 +525,8 @@ func TestRequestLogFiltersAndGroupsByOwner(t *testing.T) {
 	}
 
 	// The account grouping returns the id as text (the caller resolves the name); the
-	// bucket order is by request count.
-	byAccount, err := db.RequestLogDimensions(ctx, domain.RequestLogFilter{}, "account", 10)
+	// counts are what this case is about, so the order it reads them in does not matter.
+	byAccount, err := db.ListRequestLogDimensionsPage(ctx, domain.RequestLogFilter{}, "account", RequestLogDimensionDefaultSort, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +538,7 @@ func TestRequestLogFiltersAndGroupsByOwner(t *testing.T) {
 		t.Fatalf("account buckets = %v, want 1→3, 2→1, 0→1 (the unknown bucket is kept)", counts)
 	}
 
-	byKey, err := db.RequestLogDimensions(ctx, domain.RequestLogFilter{}, "api_key", 10)
+	byKey, err := db.ListRequestLogDimensionsPage(ctx, domain.RequestLogFilter{}, "api_key", RequestLogDimensionDefaultSort, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +551,7 @@ func TestRequestLogFiltersAndGroupsByOwner(t *testing.T) {
 	}
 
 	// A credential filter narrows the breakdown the same way it narrows the list.
-	filtered, err := db.RequestLogDimensions(ctx, domain.RequestLogFilter{APIKeyID: 11}, "api_key", 10)
+	filtered, err := db.ListRequestLogDimensionsPage(ctx, domain.RequestLogFilter{APIKeyID: 11}, "api_key", RequestLogDimensionDefaultSort, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,25 +633,45 @@ func TestRequestLogConflictKeepsOwner(t *testing.T) {
 // The breakdown must never read the recorded bodies: selecting request_json would make
 // SQLite pull every row's overflow pages into the window scan, which is the cost M24
 // removed from the console's list (docs/design/m24-console-pagination.md §8.10). The
-// assertion runs against the store's own builder so it cannot drift from production.
+// assertion runs against the store's own builders so it cannot drift from production.
 func TestRequestLogDimensionQueryAvoidsBodies(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	seedDimensionRow(t, db, &domain.RequestLogRecord{RequestID: "req-q1", AccountID: 1, Client: "dsh"})
+	since := time.Now().UTC().AddDate(0, 0, -7)
 
-	where, args := requestLogFilter("r.", domain.RequestLogFilter{From: time.Now().UTC().AddDate(0, 0, -7)})
-	query := requestLogDimensionsSQL("r.client", where)
+	where, args := requestLogFilter("r.", domain.RequestLogFilter{From: since})
+	query := requestLogDimensionsSQL("r.client", "MAX(r.created_at) DESC, group_key ASC", where)
 	if strings.Contains(query, "request_json") {
 		t.Fatalf("the dimension breakdown must not select request_json:\n%s", query)
 	}
 
-	// And the statement must actually run.
-	rows, err := db.read.QueryContext(ctx, query, append(args, 10)...)
+	// And the statement must actually run — with the paging tail it now carries.
+	rows, err := db.read.QueryContext(ctx, query, append(args, 10, 0)...)
 	if err != nil {
 		t.Fatalf("run breakdown: %v", err)
 	}
 	defer rows.Close()
 	if !rows.Next() {
 		t.Fatal("the breakdown returned no bucket for one recorded row")
+	}
+	rows.Close()
+
+	// The bucket count is what the pager shows as "共 N 个分组", so it must not pay for the
+	// usage join the paged query needs: the WHERE names only request_logs columns and a LEFT
+	// JOIN can neither add nor drop a left-hand row, so the counting statement drops it
+	// (docs/design/m31-request-log-stats-pagination.md D9).
+	countSQL := requestLogDimensionCountSQL("r.client", where)
+	for _, banned := range []string{"request_json", "usage_records"} {
+		if strings.Contains(countSQL, banned) {
+			t.Fatalf("the bucket count must not touch %s:\n%s", banned, countSQL)
+		}
+	}
+	total, err := db.CountRequestLogDimensionGroups(ctx, domain.RequestLogFilter{From: since}, "client")
+	if err != nil {
+		t.Fatalf("count buckets: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("bucket count = %d, want the one recorded bucket", total)
 	}
 }

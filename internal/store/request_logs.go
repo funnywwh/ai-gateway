@@ -218,27 +218,61 @@ func (db *DB) RequestUsages(ctx context.Context, requestIDs []string) (map[strin
 	return out, nil
 }
 
-// RequestLogDimensions groups recorded requests by one identity dimension and sums what
-// they consumed. Title and Workpace only carry meaning in the session grouping (a session
-// owns one title and one workspace); elsewhere they are whatever the group's last row had.
+// RequestLogDimensionSorts are the accepted sort keys of the dimension breakdown, the
+// default first. Every one of them is descending and ends with the group key as its
+// tiebreaker: created_at is stamped in whole seconds, so "最近一次" has many ties, and an
+// ORDER BY without a unique tail would let LIMIT/OFFSET repeat or skip a bucket — the same
+// rule historyPageOrder follows with id.
+var RequestLogDimensionSorts = []string{"last_seen", "requests", "charge"}
+
+// RequestLogDimensionDefaultSort is what a caller that passes no sort gets: the buckets
+// that were active most recently, which is the question the console's card opens with.
+const RequestLogDimensionDefaultSort = "last_seen"
+
+// requestLogDimensionSortExpr maps a sort key onto the ORDER BY tail of the breakdown.
+//
+// It spells the aggregate out instead of naming a SELECT alias on purpose: usage_records
+// owns columns called charge_micros and cost_micros, so an ORDER BY identifier that could
+// resolve to either the output column or the input column is exactly the ambiguity that
+// silently changes an order. group_key is unique inside one grouping, which is what makes
+// the sort total — and a total order is what pagination needs.
+func requestLogDimensionSortExpr(sort string) (string, error) {
+	switch sort {
+	case "last_seen", "":
+		return "MAX(r.created_at) DESC, group_key ASC", nil
+	case "requests":
+		return "COUNT(*) DESC, group_key ASC", nil
+	case "charge":
+		return "COALESCE(SUM(u.charge_micros), 0) DESC, group_key ASC", nil
+	default:
+		return "", fmt.Errorf("store: sort must be one of %s", strings.Join(RequestLogDimensionSorts, ", "))
+	}
+}
+
+// ListRequestLogDimensionsPage groups recorded requests by one identity dimension, sums what
+// they consumed, and returns one page of the buckets in the requested order. Title and
+// Workspace only carry meaning in the session grouping (a session owns one title and one
+// workspace); elsewhere they are whatever the group's last row had.
 //
 // The query deliberately selects only dimension columns and created_at: picking any
 // content column would make SQLite read the body pages of every row in the window, which
 // is the cost M24 removed from the console's list.
-func (db *DB) RequestLogDimensions(ctx context.Context, f domain.RequestLogFilter, groupBy string, limit int) ([]domain.RequestLogDimensionRow, error) {
+func (db *DB) ListRequestLogDimensionsPage(ctx context.Context, f domain.RequestLogFilter, groupBy, sort string, limit, offset int) ([]domain.RequestLogDimensionRow, error) {
 	expression, err := requestLogGroupExpr(groupBy)
 	if err != nil {
 		return nil, err
 	}
-	if limit <= 0 {
-		limit = 20
+	order, err := requestLogDimensionSortExpr(sort)
+	if err != nil {
+		return nil, err
 	}
-	if limit > 200 {
-		limit = 200
+	limit = normalizeLimit(limit, 20, 200)
+	if offset < 0 {
+		offset = 0
 	}
 	where, args := requestLogFilter("r.", f)
-	query := requestLogDimensionsSQL(expression, where)
-	args = append(args, limit)
+	query := requestLogDimensionsSQL(expression, order, where)
+	args = append(args, limit, offset)
 
 	rows, err := db.read.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -267,11 +301,34 @@ func (db *DB) RequestLogDimensions(ctx context.Context, f domain.RequestLogFilte
 	return out, nil
 }
 
+// CountRequestLogDimensionGroups counts the buckets the same filters select — the number
+// the console's pager shows as "共 N 个分组". It takes no sort key: the number of buckets is
+// a property of the set, not of the order it is read in.
+//
+// It also omits the usage join the paged query needs, and that is not an approximation:
+// the WHERE clause only names request_logs columns, and a LEFT JOIN can neither add nor
+// drop a left-hand row, so the bucket set is identical either way. Dropping the join is
+// what keeps this an index-only scan — a covering dimension index where the planner picks
+// one, the time index plus a small GROUP BY sort otherwise, but never the table body or the
+// metering table (docs/design/m31-request-log-stats-pagination.md §8).
+func (db *DB) CountRequestLogDimensionGroups(ctx context.Context, f domain.RequestLogFilter, groupBy string) (int, error) {
+	expression, err := requestLogGroupExpr(groupBy)
+	if err != nil {
+		return 0, err
+	}
+	where, args := requestLogFilter("r.", f)
+	var total int
+	if err := db.read.QueryRowContext(ctx, requestLogDimensionCountSQL(expression, where), args...).Scan(&total); err != nil {
+		return 0, fmt.Errorf("store: count request log dimension groups: %w", err)
+	}
+	return total, nil
+}
+
 // requestLogDimensionsSQL builds the breakdown query. It is a named function rather than
 // an inline literal so the body-free assertion in the store's tests EXPLAINs the very
 // statement production runs: selecting any content column would pull the recorded bodies
 // of the whole window into the scan.
-func requestLogDimensionsSQL(expression, where string) string {
+func requestLogDimensionsSQL(expression, order, where string) string {
 	return fmt.Sprintf(`
 SELECT %s AS group_key, COUNT(*), COUNT(u.request_id),
        MIN(r.created_at), MAX(r.created_at), MAX(r.title), MAX(r.workspace),
@@ -280,7 +337,17 @@ SELECT %s AS group_key, COUNT(*), COUNT(u.request_id),
        COALESCE(SUM(COALESCE(json_extract(u.dimensions_json, '$.reasoning'), 0)), 0),
        COALESCE(SUM(u.cost_micros), 0), COALESCE(SUM(u.charge_micros), 0)
 FROM request_logs r LEFT JOIN usage_records u ON u.request_id = r.request_id`+where+
-		` GROUP BY group_key ORDER BY COUNT(*) DESC, group_key LIMIT ?`, expression)
+		` GROUP BY group_key ORDER BY `+order+` LIMIT ? OFFSET ?`, expression)
+}
+
+// requestLogDimensionCountSQL counts the buckets of the breakdown. It is a named function
+// for the same reason as requestLogDimensionsSQL: the test that pins "no bodies, no usage
+// join" has to EXPLAIN the statement production runs, not a copy of it.
+func requestLogDimensionCountSQL(expression, where string) string {
+	return fmt.Sprintf(`
+SELECT COUNT(*) FROM (
+  SELECT %s AS group_key FROM request_logs r%s GROUP BY group_key
+)`, expression, where)
 }
 
 // RequestLogDimensionNames are the accepted group_by values, in the order the console and

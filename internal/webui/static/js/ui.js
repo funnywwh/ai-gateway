@@ -324,10 +324,15 @@ export function table({ columns, rows, filter, onFilter, empty, rowActions, filt
 const PAGE_SIZES = [20, 50, 100];
 
 // pager renders the navigation below a list: the range it shows, the total the server
-// counted, the page size and prev/next/jump. It is presentation only — pagedTable owns
-// the window — and it lives outside the <table> element on purpose, so nothing that
-// reads tbody rows (styles, other pages, the UI harness) has to know about it.
-export function pager({ limit, offset, total, pageSizes, onChange }) {
+// counted, the page size and prev/next/jump. It is presentation only — the caller owns the
+// window (pagedTable is one such caller, the request log's statistics card is another) —
+// and it lives outside the <table> element on purpose, so nothing that reads tbody rows
+// (styles, other pages, the UI harness) has to know about it.
+//
+// unit names what is being counted, because a page does not always hold records: the
+// request log's breakdown pages groups, and "共 12 条" would describe requests it never
+// counted. It defaults to 条, so every existing caller keeps its wording.
+export function pager({ limit, offset, total, pageSizes, unit, onChange }) {
   const sizes = pageSizes || PAGE_SIZES;
   const pages = Math.max(1, Math.ceil(total / limit));
   const current = Math.min(pages, Math.floor(offset / limit) + 1);
@@ -335,8 +340,8 @@ export function pager({ limit, offset, total, pageSizes, onChange }) {
   const last = Math.min(offset + limit, total);
 
   const info = el('span', { class: 'muted', text: total === 0
-    ? '共 0 条'
-    : '共 ' + total + ' 条 · 本页 ' + first + '–' + last + ' · 第 ' + current + '/' + pages + ' 页' });
+    ? '共 0 ' + (unit || '条')
+    : '共 ' + total + ' ' + (unit || '条') + ' · 本页 ' + first + '–' + last + ' · 第 ' + current + '/' + pages + ' 页' });
 
   const sizeSelect = el('select', { title: '每页条数' },
     sizes.map((n) => el('option', { value: n, text: n + ' 条/页', selected: n === limit })));

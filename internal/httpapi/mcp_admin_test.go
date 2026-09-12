@@ -11,6 +11,7 @@ import (
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/mcpsrv"
 	"github.com/winger/ai-gateway/internal/secret"
+	"github.com/winger/ai-gateway/internal/store"
 )
 
 // Three tokens, one per scope, so every branch of the permission model is
@@ -235,6 +236,49 @@ func TestMCPAdminTokenListsAndDescribesEndpoints(t *testing.T) {
 
 	if _, isError := f.callTool(t, testAdminMCPToken, 5, toolAdminDescribe, `{"name":"admin_nope"}`); !isError {
 		t.Fatal("describing an unknown endpoint must fail")
+	}
+}
+
+// The dimension breakdown's window and order are declared in the route table, which is what
+// an MCP client reads: a parameter the handler accepts but admin_describe does not list is
+// invisible to an agent, and a limit described as "条数" on a table of buckets is a small
+// lie an agent plans around (docs/design/m31-request-log-stats-pagination.md).
+func TestMCPDescribesTheDimensionBreakdownWindow(t *testing.T) {
+	f := newAdminFixture(t)
+	f.seedScopedMCPToken(t, testAdminMCPToken, mcpsrv.ScopeAdmin)
+
+	detail, isError := f.callTool(t, testAdminMCPToken, 1, toolAdminDescribe, `{"name":"admin_request_dimensions"}`)
+	if isError {
+		t.Fatalf("admin_describe failed: %+v", detail)
+	}
+	docs, _ := detail["query"].([]any)
+	fields := map[string]map[string]any{}
+	for _, raw := range docs {
+		field, _ := raw.(map[string]any)
+		name, _ := field["name"].(string)
+		fields[name] = field
+	}
+	for _, name := range []string{"limit", "offset", "sort", "group_by", "days"} {
+		if fields[name] == nil {
+			t.Fatalf("admin_describe must list the %q query parameter: %v", name, fields)
+		}
+	}
+	// The window and the order are the two things this milestone added; naming them here
+	// keeps the test honest if the route entry is ever trimmed back.
+	if text, _ := fields["offset"]["description"].(string); text == "" {
+		t.Errorf("offset must be described, not just listed: %v", fields["offset"])
+	}
+	if !strings.Contains(fields["limit"]["description"].(string), "分组数") {
+		t.Errorf("limit must say what it counts on this endpoint: %v", fields["limit"])
+	}
+	enum, _ := fields["sort"]["enum"].([]any)
+	got := make([]string, 0, len(enum))
+	for _, value := range enum {
+		text, _ := value.(string)
+		got = append(got, text)
+	}
+	if strings.Join(got, ",") != strings.Join(store.RequestLogDimensionSorts, ",") {
+		t.Fatalf("the advertised sort values %v must be the store's %v", got, store.RequestLogDimensionSorts)
 	}
 }
 

@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, pagedTable, toast, badge, formatTime, jsonBlock, statusBadge, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
+import { el, card, pagedTable, pager, toast, badge, formatTime, jsonBlock, statusBadge, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
 import { initCurrency, money } from '../money.js';
 
 // Dimension labels for the statistics card. The keys are the API's group_by values.
@@ -7,6 +7,15 @@ const DIMENSIONS = [
   ['account', '用户（账户）'], ['api_key', 'API Key'],
   ['client', '客户端'], ['model', '请求的模型'], ['resolved_model', '路由到的模型'],
   ['workspace', '工作区'], ['session', '会话'], ['call_kind', '调用类型'],
+];
+
+// Sort keys of the statistics table. The keys are the API's sort values; each one has a
+// column of its own (see the columns built in renderStats), so the table always shows the
+// value it is ordered by. The default is the first entry — 最近活跃的排最前.
+const STATS_SORTS = [
+  ['last_seen', '按最近一次请求'],
+  ['requests', '按请求数'],
+  ['charge', '按成本'],
 ];
 
 export async function render({ page, actions, session }) {
@@ -78,8 +87,10 @@ export async function render({ page, actions, session }) {
           + (result.exhausted ? '（本轮达到批量上限，下一轮继续）' : ''), 'ok');
       }
       await loadRetention();
-      // Deleting rows shifts every offset, so the pager goes back to page 1.
+      // Deleting rows shifts every offset and can empty a whole bucket, so both tables go
+      // back to page 1.
       view.reset();
+      loadStats({ reset: true });
     } catch (err) { toast(api.errorMessage(err), 'error'); }
   }
 
@@ -127,36 +138,82 @@ export async function render({ page, actions, session }) {
   // 维度统计：谁在用（用户/API Key）、用哪个模型、哪个工作区/会话、花了多少
   // ---------------------------------------------------------------------------
   const groupBy = el('select', {}, DIMENSIONS.map(([value, label]) => el('option', { value, text: label })));
+  // 排序键决定第 1 页装的是哪 20 个分组：默认「最近一次请求」（最近活跃的排最前），
+  // 也能回到 M27 的老问题「谁最忙」「谁最花钱」。排序是服务端做的——只排当前页会把
+  // 「第 1 页里最大的」当成全局最大。
+  const sortBy = el('select', { title: '排序方式（均为降序，同数按分组名升序）；切换后回到第 1 页' },
+    STATS_SORTS.map(([value, label]) => el('option', { value, text: label })));
   const statsHost = el('div', { class: 'muted', text: '加载中…' });
-  const statsCard = card('维度统计', statsHost, [groupBy, el('span', {
-    class: 'muted', text: '按维度汇总请求数、token 与成本；用户与 API Key 是凭据维度（名字由账户/Key 表读时解析，分组按 id），成本与账单同源（计量表）',
+  const statsCard = card('维度统计', statsHost, [groupBy, sortBy, el('span', {
+    class: 'muted', text: '按维度汇总请求数、token 与成本；默认按最近一次请求时间降序，工具栏可切请求数/成本；分页器给的是本窗口的分组总数（不是请求总数）；用户与 API Key 是凭据维度（名字由账户/Key 表读时解析，分组按 id），成本与账单同源（计量表）；筛选条件在下方「请求日志」卡片里改',
   })]);
+  // 这张表是服务端分页的（同 M24 的列表契约），但窗口由本页持有而不是 pagedTable：
+  // 表体是手写的（列随分组维度变化），pager() 只负责呈现。
+  const statsWindow = { limit: 20, offset: 0, total: 0 };
 
-  async function loadStats() {
+  async function loadStats({ reset = false } = {}) {
+    if (reset) statsWindow.offset = 0;
     try {
-      const payload = await api.get('/requests/dimensions', { ...filterParams(), group_by: groupBy.value, limit: 20 });
-      renderStats(payload);
+      for (;;) {
+        const payload = await api.get('/requests/dimensions', {
+          ...filterParams(), group_by: groupBy.value, sort: sortBy.value,
+          limit: statsWindow.limit, offset: statsWindow.offset,
+        });
+        const rows = payload.rows || [];
+        // total is what the server counted for these filters; an endpoint that does not
+        // report it can only speak for the page in hand (the rule pagedTable follows).
+        statsWindow.total = payload.total === undefined || payload.total === null
+          ? statsWindow.offset + rows.length
+          : Number(payload.total);
+        // 清理过期日志或更窄的筛选都会让分组变少，末页可能是空的：回退一页重取，而不是
+        // 停在一个空页上（与 pagedTable 同一条规则）。
+        if (!rows.length && statsWindow.offset > 0 && statsWindow.total > 0) {
+          statsWindow.offset = Math.max(0, statsWindow.offset - statsWindow.limit);
+          continue;
+        }
+        renderStats(payload, rows);
+        return;
+      }
     } catch (err) {
+      // 失败时连分页器一起换掉：留一个指向没加载出来的窗口的控件，比没有控件更糟。
       statsHost.replaceChildren(el('div', { class: 'muted', text: api.errorMessage(err) }));
     }
   }
 
-  function renderStats(payload) {
-    const rows = payload.rows || [];
+  function renderStats(payload, rows) {
     const bySession = payload.group_by === 'session';
     if (!rows.length) {
       statsHost.replaceChildren(el('div', { class: 'muted', text: '该窗口内没有可统计的请求' }));
       return;
     }
-    const head = ['分组', '请求数', '已计量', '输入 tokens', '输出 tokens', '成本'];
-    if (bySession) head.splice(1, 0, '标题', '工作区');
-    const header = el('thead', {}, [el('tr', {}, head.map((label) => el('th', { text: label })))]);
+    // 当前排序列带 ↓：表格要说清「凭什么这个分组排第一」，而不是只让工具栏的下拉去暗示。
+    const columns = [
+      { label: '分组' },
+      {
+        label: '最近一次', key: 'last_seen',
+        title: '本窗口内该分组最近一次请求的时间（窗口外的请求不参与）；它是默认排序键',
+      },
+      {
+        label: '请求数', key: 'requests',
+        title: '本窗口内该分组的请求数（排序键之一）；与「已计量」不同时，差额是本地拒绝或写入失败留下的行',
+      },
+      { label: '已计量' },
+      { label: '输入 tokens' },
+      { label: '输出 tokens' },
+      { label: '成本', key: 'charge', title: '对客成本（charge_micros，与列表「成本」列同源）；它是排序键之一' },
+    ];
+    if (bySession) columns.splice(1, 0, { label: '标题' }, { label: '工作区' });
+    const header = el('thead', {}, [el('tr', {}, columns.map((col) => el('th', {
+      text: col.key && col.key === sortBy.value ? col.label + ' ↓' : col.label,
+      title: col.title,
+    })))]);
     const body = el('tbody', {}, rows.map((row) => {
       const cells = [el('td', {}, [groupKeyCell(row, payload.group_by)])];
       if (bySession) {
         cells.push(el('td', { text: row.title || '—' }), el('td', {}, [pathCell(row.workspace)]));
       }
       cells.push(
+        el('td', { text: formatTime(row.last_seen) }),
         el('td', { text: String(row.requests) }),
         // "已计量" is the count with a usage row: the difference from 请求数 is requests a
         // local rejection or a lost row left unmetered, which is worth seeing.
@@ -167,7 +224,19 @@ export async function render({ page, actions, session }) {
       );
       return el('tr', {}, cells);
     }));
-    statsHost.replaceChildren(el('table', {}, [header, body]));
+    // 分页器说「个分组」而不是「条」：这一页装的是分组，不是请求——页面上同时还有列表的
+    // 分页器，两者各自的单位就是它们口径的第一句话。
+    statsHost.replaceChildren(el('table', {}, [header, body]), pager({
+      limit: payload.limit || statsWindow.limit,
+      offset: payload.offset || 0,
+      total: statsWindow.total,
+      unit: '个分组',
+      onChange: (next) => {
+        statsWindow.limit = next.limit;
+        statsWindow.offset = next.offset;
+        loadStats();
+      },
+    }));
   }
 
   // groupKeyCell renders one bucket's key. The two credential groupings bucket on ids
@@ -195,8 +264,6 @@ export async function render({ page, actions, session }) {
     const text = String(key);
     return el('span', { title: text, text: text.length > 44 ? text.slice(0, 42) + '…' : text });
   }
-
-  groupBy.addEventListener('change', () => { loadStats(); });
 
   // The model dropdown is filled from the same statistics endpoint, so it offers the
   // models this window actually used rather than a configuration list that may be empty.
@@ -244,26 +311,32 @@ export async function render({ page, actions, session }) {
     } catch (err) { /* see above */ }
   }
 
+  // 统计卡在列表卡之上：它回答「谁在用、用哪个模型、花了多少」，是打开页面先看的问题；
+  // 列表回答「具体是哪一条」。筛选栏留在列表卡里（它属于它筛的那张表），两张表共用。
+  page.append(statsCard);
   page.append(card('请求日志', view.node, [
     days, accountFilter, keyFilter, client, model, sessionFilter, workspaceFilter,
-    el('span', { class: 'muted', text: '用户（账户）/API Key 与客户端/模型/工作区/会话/标题、token 成本都是独立于正文口径记录的元数据（record_input=off 也记）；用户与 Key 的名字由账户/Key 表读时解析，分组按 id；标题来自会话的标题调用，成本来自计量表，与账单一致；列表底部的「本页汇总」只合计当前页已加载的行（含本页过滤），窗口口径看下方「维度统计」' }),
+    el('span', { class: 'muted', text: '用户（账户）/API Key 与客户端/模型/工作区/会话/标题、token 成本都是独立于正文口径记录的元数据（record_input=off 也记）；用户与 Key 的名字由账户/Key 表读时解析，分组按 id；标题来自会话的标题调用，成本来自计量表，与账单一致；列表底部的「本页汇总」只合计当前页已加载的行（含本页过滤），窗口口径看上方「维度统计」' }),
     hint]));
-  page.append(statsCard);
 
-  // Changing any filter restarts at page 1: the rows of the current page belong to a
-  // different filter, so their offset is meaningless.
-  days.addEventListener('change', () => { view.reset(); loadStats(); loadModelOptions(); });
-  accountFilter.addEventListener('change', () => { view.reset(); loadStats(); loadKeyOptions(); });
-  keyFilter.addEventListener('change', () => { view.reset(); loadStats(); });
-  client.addEventListener('change', () => { view.reset(); loadStats(); });
-  model.addEventListener('change', () => { view.reset(); loadStats(); });
+  // Changing any filter restarts both tables at page 1: the rows of the current page belong
+  // to a different filter, so their offset is meaningless.
+  days.addEventListener('change', () => { view.reset(); loadStats({ reset: true }); loadModelOptions(); });
+  accountFilter.addEventListener('change', () => { view.reset(); loadStats({ reset: true }); loadKeyOptions(); });
+  keyFilter.addEventListener('change', () => { view.reset(); loadStats({ reset: true }); });
+  client.addEventListener('change', () => { view.reset(); loadStats({ reset: true }); });
+  model.addEventListener('change', () => { view.reset(); loadStats({ reset: true }); });
   for (const input of [sessionFilter, workspaceFilter]) {
     input.addEventListener('keydown', (ev) => {
       if (ev.key !== 'Enter') return;
       view.reset();
-      loadStats();
+      loadStats({ reset: true });
     });
   }
+  // The grouping and the sort key both re-rank the buckets, so both restart at page 1.
+  groupBy.addEventListener('change', () => { loadStats({ reset: true }); });
+  sortBy.addEventListener('change', () => { loadStats({ reset: true }); });
+  // 「刷新」重新读当前这一页（两张表都保持位置）；清理过期日志会删掉整组，所以回第 1 页。
   refresh.addEventListener('click', () => { view.refresh(); loadStats(); loadModelOptions(); loadAccountOptions(); });
   prune.addEventListener('click', () => pruneNow());
   await loadRetention();

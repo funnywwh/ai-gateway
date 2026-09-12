@@ -4,6 +4,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -123,6 +125,46 @@ func TestConsoleDimensionOptionsMatchTheServer(t *testing.T) {
 		if !strings.Contains(source, "['"+name+"',") {
 			t.Errorf("the console must offer the %q grouping", name)
 		}
+	}
+}
+
+// TestConsoleSortOptionsMatchTheServer pins the request log's statistics sort select to the
+// server's whitelist and to its order. It is the same contract as the dimension test above,
+// with one extra: the console's first entry is what the select opens on, so it has to be
+// the server's default — a list with the right members in the wrong order would open the
+// page on a sort nobody chose.
+func TestConsoleSortOptionsMatchTheServer(t *testing.T) {
+	srv := httptest.NewServer(Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/js/pages/requests.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	source := string(body)
+
+	if len(store.RequestLogDimensionSorts) == 0 {
+		t.Fatal("the store's sort whitelist is empty; the console reads nothing to offer")
+	}
+	if store.RequestLogDimensionSorts[0] != store.RequestLogDimensionDefaultSort {
+		t.Fatalf("the store's whitelist must list its default first: %v", store.RequestLogDimensionSorts)
+	}
+	const marker = "const STATS_SORTS = ["
+	start := strings.Index(source, marker)
+	if start < 0 {
+		t.Fatal("the console must declare the sorts it offers")
+	}
+	block := source[start+len(marker):]
+	if end := strings.Index(block, "];"); end > 0 {
+		block = block[:end]
+	}
+	var offered []string
+	for _, match := range regexp.MustCompile(`\['([a-z_]+)',`).FindAllStringSubmatch(block, -1) {
+		offered = append(offered, match[1])
+	}
+	if !reflect.DeepEqual(offered, store.RequestLogDimensionSorts) {
+		t.Fatalf("the console offers %v, the server accepts %v", offered, store.RequestLogDimensionSorts)
 	}
 }
 

@@ -998,3 +998,62 @@
   ——确认两列/两个下拉/两个分组/详情里的用户与 Key，并发一条真实 DSH 请求核对显示的是名字
 - [ ] 观察项：控制台下拉只列前 1000 个 Key（配置类列表的既有上限）——若出现超过该规模的部署，
   按设计文档 D2 的路径给 `/keys` 加分页搜索，而不是把名字落到日志行上
+
+## M31 请求日志页「维度统计」卡片置顶 + 排序 + 分组列表分页
+
+> 设计文档 `docs/design/m31-request-log-stats-pagination.md`，规格文档 `docs/request-log.md` §4/§6。
+> 起因（用户原话）：「将后台请求日志页面的维度统计卡片放上面，并且列表要加分页」。
+> 口径当场澄清并选定：「列表」=「维度统计」表（「请求日志」列表在 M24 已有服务端分页）；
+> 排序补充确认为**默认按最近一次请求时间降序**，并保留可切换的排序入口（服务端 `sort` 参数）。
+
+- [x] 现状核对：统计接口只有 `LIMIT ?`、没有 `offset`/`total`，排序写死 `ORDER BY COUNT(*) DESC, group_key`；
+      控制台写死 `limit: 20`、无分页控件、无时间列 → 分组数超过 20 时第 21 个永远看不到，
+      也判断不出「到底了还是被截断了」。控制台全站没有可排序表头（M24 §6 明确不做列排序），
+      所以排序要真做就得落到服务端（客户端只能排当前页，会把「第 1 页里最大的」当成全局最大）
+- [x] store：`ListRequestLogDimensionsPage`（`LIMIT ? OFFSET ?` + 排序子句）与
+      `CountRequestLogDimensionGroups`（`COUNT(*)` 套一层分组子查询，**不 join `usage_records`**：
+      WHERE 只涉及 `r.`，而 LEFT JOIN 不增不减分组键，所以两者分组集合恒等）；
+      删掉没有生产调用点的 `RequestLogDimensions`（保留旧的「默认排序」包装会把排序口径藏起来）
+- [x] 排序白名单 `last_seen`（默认，最近一次请求时间）/ `requests` / `charge`，每条都以 `group_key ASC`
+      兜底（`created_at` 是秒级整数，`last_seen` 大量并列——没有唯一兜底键就无法分页）；
+      ORDER BY 写**完整聚合表达式**而不用输出别名（`usage_records` 有同名 `charge_micros` 列，
+      别名参与名字解析会踩歧义）
+- [x] httpapi：`pageDimensions = pageSpec{Def: 20, Max: 200, Noun: "分组数"}`（`pageSpec` 增可选 `Noun`）；
+      响应增 `sort/count/total/offset/has_more`（`rows` 保留：它自 M27 起就是这个端点的文档形状）；
+      未知 `sort` 与非法 `offset` 都是 **400 并列出取值**（静默忽略 = 「换了排序却没变」）；路由表声明
+      `offset`/`sort` → MCP `admin_describe`/`admin_endpoints`/后台工具自动获得，MCP 侧零代码改动
+- [x] 控制台：统计卡置顶（列表卡在其下）；工具栏增排序下拉（按最近一次请求/按请求数/按成本）；
+      表格增「最近一次」列、当前排序列的表头带 `↓`；复用 `ui.js` 的 `pager()`（新增可选 `unit`，
+      默认 `条`）→ 统计卡写「共 N 个分组」，与列表的「共 N 条」区分；切分组/排序/筛选都回到第 1 页，
+      「刷新」保持当前页与排序，「清理过期日志」回到第 1 页；末页删空自动回退一页；
+      响应缺 `total` 时退化成「只有本页」（旧服务端不会白屏）
+- [x] 测试：store（201 个同秒桶翻页不重不漏、`limit` 默认 20 与夹取 200、`offset` 越界/负值、
+      三种排序各自的首桶、并列时 `group_key` 兜底、未知 sort 报错列取值、计数 SQL 不含 `request_json`
+      也不含 `usage_records`）；httpapi（信封与 `sort` 回显、两页不重叠、过滤后 `total` 一致、
+      `offset=abc|-1` 400、未知 sort 400）；webui（控制台排序下拉的**取值与顺序** ==
+      `store.RequestLogDimensionSorts`）；MCP（`admin_describe` 列出 `offset`/`sort`、
+      limit 描述写「分组数」、enum 与 store 白名单一致）
+- [x] UI harness：stub 对 `/requests/dimensions` **按 `limit/offset` 切片、按 `sort` 排序**后应答
+      （照抄真实端点做的两件事；忽略查询串的 stub 会让分页与排序都变成不可观测），
+      `group_by=workspace` 用合成的 45 个分组（三个排序键的**首桶互不相同**，否则「切了排序但顺序没变」
+      也会全绿）；requests 视图断言 61 → **76** 项
+- [x] 实测（真库只读副本）：新增的分组计数在 8 个维度上全部只走覆盖/时间索引，**不读正文页、不 join 计量表**
+      （`client`/`model`/`session` 直接 `SCAN USING COVERING INDEX`；其余走 `idx_request_logs_time` + 分组 temp B-tree）；
+      60k 行 / 2.5 KB 正文探针库上：聚合 p50 **80.3 → 80.4 ms**（换排序键零成本，临时 B-tree 今天就有），
+      分组计数 p50 **2.4 ms**（≈ 聚合的 3%，不是翻倍）
+- [x] 隔离实例走查（`:8099` + 全新库 + 新二进制，`ALL CHECKS PASSED`）：默认排序首桶=最近一次的桶、
+      三种排序键首桶各不相同、两页不重叠且 `total` 是**分组数**（3 个桶 6 条请求）、
+      `offset=abc`/`offset=-1`/`sort=latency` 全部 400 且报错文本列出取值
+- [x] 文档：设计文档（决策 15 条 + 实测 + 边界）、`docs/request-log.md` §4（端点表 + 排序表 +
+      控制台段）与 §6、README 文档表 M0–M31、harness README 的 fixture 约定
+- [x] `make verify` 全绿；`make ui-check` 10 个视图全绿（`requests` 76 项）
+- [ ] **待人工执行**（宿主终端）：`make build` + `scripts/local-run.sh restart`，然后硬刷新
+      （Ctrl+Shift+R）http://127.0.0.1:8088/admin/ui/#/requests ——确认统计卡在列表之上、
+      排序下拉能切换（表头 `↓` 跟着走）、分页器写「共 N 个分组」而不是「共 N 条」
+- [ ] 观察项：`requests`/`metered` 是**上游尝试**计数（LEFT JOIN 后的 `COUNT(*)` / `COUNT(u.request_id)`），
+      failover 多 attempt 的请求会被计两次（本机库当前 0 例）。要收口就改成
+      `COUNT(DISTINCT r.request_id)`——会引入 temp B-tree，改前先实测
+- [ ] 观察项：大窗口下分组计数的耗时（60k 行实测 2.4 ms）。若某天超过聚合耗时的 1/3，
+      按设计文档退回「只有 `has_more`」的形态（`pager` 已支持 `total == null` 显示「还有更多」）
+- [ ] 观察项：「按分组名排序」未做：凭据维度按 id 转文本分组，字典序会把 `10` 排在 `2` 前面。
+      要做需先把 id 数值化（`CAST(... AS INTEGER)`），并让分组与排序用同一套键

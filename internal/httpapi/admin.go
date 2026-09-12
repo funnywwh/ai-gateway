@@ -34,7 +34,10 @@ type AdminStore interface {
 	// them; the log row keeps only the ids.
 	AccountNames(ctx context.Context, ids []int64) (map[int64]string, error)
 	APIKeyLabels(ctx context.Context, ids []int64) (map[int64]domain.APIKeyLabel, error)
-	RequestLogDimensions(ctx context.Context, f domain.RequestLogFilter, groupBy string, limit int) ([]domain.RequestLogDimensionRow, error)
+	// The dimension breakdown is read as a page of buckets plus the number of buckets the
+	// filters matched, so the console's pager can say "共 N 个分组 · 第 x/y 页".
+	ListRequestLogDimensionsPage(ctx context.Context, f domain.RequestLogFilter, groupBy, sort string, limit, offset int) ([]domain.RequestLogDimensionRow, error)
+	CountRequestLogDimensionGroups(ctx context.Context, f domain.RequestLogFilter, groupBy string) (int, error)
 	InsertAudit(ctx context.Context, e *AuditEntry) error
 	ListAudit(ctx context.Context, limit int) ([]*AuditEntry, error)
 	ListAuditPage(ctx context.Context, limit, offset int) ([]*AuditEntry, error)
@@ -598,9 +601,27 @@ func validRequestLogDimension(groupBy string) bool {
 	return false
 }
 
+// validRequestLogDimensionSort reports whether the store can order the breakdown by this
+// key, for the same reason as validRequestLogDimension: "which bucket is busiest" and
+// "which bucket was active last" are different questions about the same buckets, and a
+// silently ignored sort answers neither.
+func validRequestLogDimensionSort(sort string) bool {
+	for _, name := range store.RequestLogDimensionSorts {
+		if name == sort {
+			return true
+		}
+	}
+	return false
+}
+
 // handleAdminRequestDimensions groups recorded requests by one identity dimension and sums
 // what they consumed. It is the "statistics" half of the request log: which client, model,
 // workspace, session, account (user) or API key is producing the traffic and the spend.
+//
+// It answers with a page of buckets plus the number of buckets the filters matched, so the
+// console can page it like every other list (M31). The envelope's identifiers are the ones
+// M24 defined; the list itself stays under "rows", which is this endpoint's documented
+// shape since M27 (the console and the MCP tool admin_request_dimensions both read it).
 func (s *Server) handleAdminRequestDimensions(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.adminActor(w, r, false); !ok {
 		return
@@ -614,13 +635,33 @@ func (s *Server) handleAdminRequestDimensions(w http.ResponseWriter, r *http.Req
 			"group_by must be one of "+strings.Join(store.RequestLogDimensionNames, ", ")).WithParam("group_by")))
 		return
 	}
-	limit := adminLimit(r, 20, 200)
+	sortKey := strings.TrimSpace(r.URL.Query().Get("sort"))
+	if sortKey == "" {
+		sortKey = store.RequestLogDimensionDefaultSort
+	}
+	if !validRequestLogDimensionSort(sortKey) {
+		writeAPIError(w, toAPIError(domain.ErrInvalidRequest(
+			"sort must be one of "+strings.Join(store.RequestLogDimensionSorts, ", ")).WithParam("sort")))
+		return
+	}
+	page, err := pageDimensions.params(r)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
 	filter, err := requestLogFilterFromQuery(r)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	rows, err := s.deps.AdminStore.RequestLogDimensions(r.Context(), filter, groupBy, limit)
+	rows, err := s.deps.AdminStore.ListRequestLogDimensionsPage(r.Context(), filter, groupBy, sortKey, page.Limit, page.Offset)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	// The bucket count is what the pager's "共 N 个分组" reads. It is a property of the
+	// filtered set, so it does not depend on the sort key or on the page.
+	total, err := s.deps.AdminStore.CountRequestLogDimensionGroups(r.Context(), filter, groupBy)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
@@ -678,7 +719,9 @@ func (s *Server) handleAdminRequestDimensions(w http.ResponseWriter, r *http.Req
 		out = append(out, payload)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"group_by": groupBy, "days": adminDays(r), "limit": limit,
+		"group_by": groupBy, "sort": sortKey, "days": adminDays(r),
+		"limit": page.Limit, "offset": page.Offset, "count": len(out),
+		"total": total, "has_more": page.Offset+len(out) < total,
 		"dimensions": store.RequestLogDimensionNames, "rows": out,
 	})
 }
