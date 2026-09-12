@@ -31,7 +31,10 @@ SELECT COUNT(*),
   COALESCE(SUM(json_extract(dimensions_json, '$.output')), 0)
     + COALESCE(SUM(json_extract(dimensions_json, '$.reasoning')), 0),
   COALESCE(SUM(cost_micros), 0), COALESCE(SUM(charge_micros), 0),
-  COALESCE(AVG(CASE WHEN ttft_ms > 0 THEN ttft_ms END), 0)
+  -- AVG always returns REAL, but TTFTAvgMS is an int64, so the mean must be rounded and
+  -- cast in SQL: scanning the raw average fails whenever it is fractional, which is the
+  -- common case (it made every dashboard/summary read that carried TTFT samples error out).
+  COALESCE(CAST(ROUND(AVG(CASE WHEN ttft_ms > 0 THEN ttft_ms END)) AS INTEGER), 0)
 FROM usage_records WHERE account_id = ? AND created_at >= ? AND created_at <= ?`,
 		accountID, unix(from), unix(to))
 	if err := row.Scan(&totals.Attempts, &totals.Failed, &totals.Estimated, &totals.PromptTokens,
