@@ -4,6 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI Gateway 控制台</title>
+  <!-- 浏览器会自己请求 /favicon.ico，而这个控制台从来没有过它：每次打开都多一行 404 噪音。
+       给一个内联 SVG 图标即可（控制台 CSP 的 img-src 允许 'self'）。 -->
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="app.css">
 </head>
 <body>

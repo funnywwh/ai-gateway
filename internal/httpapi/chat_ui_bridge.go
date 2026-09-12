@@ -11,23 +11,35 @@ import (
 // back: the model builds a form, the operator fills it in, and the submission becomes a
 // normal question in the same conversation.
 //
-// Four constraints shape everything below.
+// Three constraints shape everything below.
 //
 //  1. The page runs in a sandbox without allow-same-origin and without allow-forms, so it has
 //     no cookie, no parent DOM, and no native form submission. Whatever channel exists has to
 //     be built out of postMessage and JavaScript interception.
 //  2. The page and the injected script share one document, so the page can rewrite
-//     `window.postMessage`. A bare postMessage channel is therefore both hijackable and
-//     spoofable. The handshake therefore hands out a MessagePort, which is bound to the
-//     receiving window at transfer time and cannot be reached through any global afterwards.
-//  3. The ticket travels in the URL, so the page can read it out of `location.search`. It is
-//     therefore not usable as a handshake credential. The credential is a per-response random
-//     token that exists only inside the injected script tag.
-//  4. The page's own Content-Security-Policy allows inline scripts (that is how these pages
-//     work at all), so a nonce is what distinguishes "the server put this script here" from
-//     "the document asked for this script". The nonce is regenerated for every response, which
-//     is why it is used instead of a hash: a hash silently breaks the day someone edits the
-//     script, a nonce cannot go stale.
+//     `window.postMessage` and can post to the parent itself. A bare postMessage channel is
+//     therefore both hijackable and spoofable. The handshake therefore hands out a MessagePort,
+//     which is bound to the receiving window at transfer time and cannot be reached through any
+//     global afterwards — and the script captures `postMessage` before any page code runs.
+//  3. The document's own Content-Security-Policy must keep allowing the page's inline scripts:
+//     these pages are model-authored HTML whose whole point is inline CSS and JS, so a policy
+//     that blocks inline script breaks the feature it was meant to protect. That rules out
+//     authorizing our injected script with a nonce or a hash — either one makes browsers ignore
+//     `'unsafe-inline'`, which would take the page's own scripts and event handlers down with it.
+//
+// So the injected script is authorized by `'unsafe-inline'` like the page's own code, and the
+// channel is authenticated structurally instead of by a secret:
+//
+//   * the offered port reaches exactly one window — the one that loaded this document — so only
+//     the page itself could ever hold it;
+//   * the injected script refuses to start when it is not the top document (`window.top` check),
+//     which is what stops a nested frame on the page from being the one that gets a port;
+//   * the host accepts a hello only from that exact frame window.
+//
+// A token was tried first and removed: it cannot be read by the parent (a sandboxed document is
+// an opaque origin, so `frame.contentDocument` is null) without either a second request or a
+// query parameter the page itself can read, and once a nonce is needed to hide it the page's own
+// inline scripts stop working. The structural check is both simpler and harder to get wrong.
 //
 // The script is deliberately written as ES5 (no template literals, no arrow functions, no
 // const/let): it is concatenated into arbitrary documents, and the smallest possible surface
@@ -36,14 +48,6 @@ import (
 // uiBridgeScriptID is the id of the injected script tag. It doubles as the idempotency marker:
 // a document that already contains it is served unchanged.
 const uiBridgeScriptID = "aigw-ui-bridge"
-
-// uiBridgeTokenParam is the query parameter carrying the handshake secret inside the preview
-// URL. It is in the URL on purpose: the page's own script must be able to read it (that is what
-// makes "this window really is the frame we loaded" checkable), and the value is generated per
-// preview by the console, which is also the only party that checks it. What it must never be is
-// readable by *another* document — and location is per-window, so this is the one place only
-// this frame and its host can see.
-const uiBridgeTokenParam = "aigw_token"
 
 // Handshake frames. `hello` travels as a window message (there is no port yet); everything
 // after the port transfer happens on the port itself.
@@ -64,46 +68,30 @@ const (
 	uiBridgeMaxFields = 64
 )
 
-// uiBridgeScript returns the client half of the bridge, without the token or nonce (they are
-// attributes on the tag, added by injectUIBridge).
+// uiBridgeScript returns the client half of the bridge.
 //
 // It returns a string rather than a constant so tests can read exactly what is served: the
-// guarantees worth pinning (no fetch, no XMLHttpRequest, no eval, no innerHTML) are properties
-// of this text.
+// guarantees worth pinning (no fetch, no XMLHttpRequest, no eval, no innerHTML, top document
+// only) are properties of this text.
 func uiBridgeScript() string {
 	return `(function () {
   if (window.AIGW && window.AIGW.__aigwBridge) { return; }
-  var self = document.currentScript;
-  // The handshake secret is read from this document's own URL, not from the injected tag: the
-  // page shares this document and can read the tag's attributes with one querySelector, while
-  // no other frame can read this window's location. Comparing the two also catches a document
-  // that was assembled by something other than this server.
-  var token = tokenFromLocation();
-  var declared = self ? (self.getAttribute('data-token') || '') : '';
-  if (!token || token !== declared) { return; }
   // Captured before any page code can run: the page shares this document and may replace
   // window.postMessage later.
   var post = window.parent.postMessage;
   if (typeof post !== 'function') { return; }
+  // Only the top document of the frame gets the port. A nested frame on the page is a different
+  // window and can post to the host itself, so without this it could be the one that receives a
+  // port and then speak for the preview. This is the whole authentication: the secret-free
+  // version of "prove you are the document we loaded".
+  var framed = false;
+  try { framed = window.top !== window; } catch (err) { framed = true; }
+  if (framed) { return; }
   var port = null;
   var handlers = [];
   var byName = {};
   var directSeq = 0;
   var maxBytes = ` + strconv.Itoa(uiBridgeMaxEventBytes) + `;
-
-  function tokenFromLocation() {
-    var query = '';
-    try { query = String(window.location.search || ''); } catch (err) { return ''; }
-    if (!query) { return ''; }
-    var parts = query.replace(/^\?/, '').split('&');
-    for (var i = 0; i < parts.length; i++) {
-      var pair = parts[i].split('=');
-      if (pair[0] === '` + uiBridgeTokenParam + `') {
-        try { return decodeURIComponent(pair.slice(1).join('=')); } catch (err) { return pair.slice(1).join('='); }
-      }
-    }
-    return '';
-  }
 
   // flatten turns a form into a flat object. Names are collapsed to their last segment
   // (items[0].sku -> sku) because the model is the consumer and a flat map is what it can
@@ -412,7 +400,7 @@ func uiBridgeScript() string {
 
   function start() {
     bind(document);
-    try { post.call(window.parent, { aigw: '` + uiBridgeKind + `', t: 'hello', token: token }, '*'); }
+    try { post.call(window.parent, { aigw: '` + uiBridgeKind + `', t: 'hello', framed: false }, '*'); }
     catch (err) { /* a frame with no parent cannot be interactive */ }
   }
   if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', start); }
@@ -426,12 +414,11 @@ func uiBridgeScript() string {
 //
 // A document that already carries the marker is returned unchanged: uploading the same page
 // twice must not double-inject it.
-func injectUIBridge(body, token, nonce string) string {
+func injectUIBridge(body string) string {
 	if strings.Contains(body, uiBridgeScriptID) {
 		return body
 	}
-	tag := `<script id="` + uiBridgeScriptID + `" data-token="` + token + `" nonce="` + nonce + `">` +
-		uiBridgeScript() + `</script>`
+	tag := `<script id="` + uiBridgeScriptID + `">` + uiBridgeScript() + `</script>`
 	lower := strings.ToLower(body)
 	for _, marker := range []string{"<head", "<html"} {
 		index := strings.Index(lower, marker)

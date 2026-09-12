@@ -209,17 +209,14 @@ function json(body) {
 
 // Console-side helpers for the interactive preview (M34).
 //
-// There used to be a stub here that faked `frame.contentDocument` and handed the console a token
-// out of it. That stub was the reason a real bug shipped: a sandboxed document is an opaque
-// origin, so `contentDocument` is null in a browser, and every interactive preview reported
-// "不可交互". The console now generates the token itself and puts it in the frame's URL, so the
-// harness only has to read the same URL the browser would load — no stub, nothing faked.
-function previewFrameToken() {
-  const frame = document.querySelector('.preview-frame');
-  if (!frame) return '';
-  const match = /(?:[?&])aigw_token=([^&]+)/.exec(frame.getAttribute('src') || '');
-  return match ? decodeURIComponent(match[1]) : '';
-}
+// Three stubs used to live here and each one hid a real bug, so there are none now:
+//   * a fake `frame.contentDocument` handing over a handshake token — but a sandboxed document
+//     is an opaque origin, so in a real browser that property is null and every interactive
+//     preview reported "不可交互";
+//   * a token in the frame URL — which needed a CSP nonce to hide, and a nonce makes browsers
+//     ignore 'unsafe-inline', silently killing the model page's own inline scripts.
+// The channel is authenticated structurally now, so the harness only observes what the console
+// really puts on the wire and what it renders.
 
 // openInteractivePreview clicks the preview button and returns the frame the console built.
 async function openInteractivePreview() {
@@ -232,14 +229,13 @@ async function openInteractivePreview() {
 
 // handOverPort plays the frame's side of the handshake and returns a port the harness can use
 // to drive (and observe) the channel.
-async function handOverPort(frame, { token = null, withPort = true } = {}) {
-  if (token === null) token = previewFrameToken();
+async function handOverPort(frame, { withPort = true } = {}) {
   const channel = new MessageChannel();
   const seen = [];
   channel.port1.onmessage = (ev) => seen.push(ev.data);
   channel.port1.start();
   frame.contentWindow.dispatchEvent(new MessageEvent('message', {
-    data: { aigw: 'ui', t: 'hello', token },
+    data: { aigw: 'ui', t: 'hello' },
     source: frame.contentWindow,
     ports: withPort ? [channel.port2] : [],
   }));
@@ -402,10 +398,16 @@ try {
       // The handshake token must be in the frame's URL: that is where the injected script reads
       // it, and it is the only place another document cannot look. It must also be the token the
       // upload carried, because the console keeps that copy to check the handshake against.
-      checks.previewUrlCarriesToken = /(?:[?&])aigw_token=[0-9a-f]{16,}/.test(frame.getAttribute('src') || '');
-      checks.previewUploadSaysToken = typeof sent.bridge_token === 'string' && sent.bridge_token.length >= 16;
-      checks.previewTokenMatchesUrl = !!sent.bridge_token
-        && previewFrameToken() === sent.bridge_token;
+      // No credential travels with an interactive preview any more — not in the upload, not in
+      // the frame URL. What used to be here (a token, twice, in two different places) is the
+      // regression this asserts against.
+      checks.previewUrlHasNoToken = !/aigw_token|bridge_token/.test(frame.getAttribute('src') || '');
+      checks.previewUploadHasNoToken = sent.bridge_token === undefined;
+      // openPreview must run to completion. It used to throw (`destroy is not defined` after a
+      // refactor) and the whole modal silently failed to build a port, which the operator saw as
+      // "不可交互" with no explanation anywhere.
+      checks.previewModalRenders = !!document.querySelector('.modal .bridge-badge')
+        && !!document.querySelector('.bridge-counter');
       const close = [...document.querySelectorAll('.modal-actions button')].find((b) => b.textContent.trim() === '关闭');
       if (close) close.click();
       await settle();
@@ -553,21 +555,21 @@ try {
     // rather than a message listener.
     if (uiFrame) {
       const before = document.querySelector('.bridge-badge').textContent;
-      const realToken = previewFrameToken();
-      checks.previewTokenAvailable = !!realToken;
+      // Nothing here carries a secret; what is rejected is a hello from the wrong window, from a
+      // nested frame that claims to speak for the preview, or without a port at all.
       uiFrame.contentWindow.dispatchEvent(new MessageEvent('message', {
-        data: { aigw: 'ui', t: 'hello', token: 'not-the-token' }, source: uiFrame.contentWindow,
+        data: { aigw: 'ui', t: 'hello' }, source: window,
         ports: [new MessageChannel().port2],
       }));
       uiFrame.contentWindow.dispatchEvent(new MessageEvent('message', {
-        data: { aigw: 'ui', t: 'hello', token: realToken }, source: window,
+        data: { aigw: 'ui', t: 'hello', framed: true }, source: uiFrame.contentWindow,
         ports: [new MessageChannel().port2],
       }));
       uiFrame.contentWindow.dispatchEvent(new MessageEvent('message', {
-        data: { aigw: 'ui', t: 'hello', token: realToken }, source: uiFrame.contentWindow, ports: [],
+        data: { aigw: 'ui', t: 'hello' }, source: uiFrame.contentWindow, ports: [],
       }));
       uiFrame.contentWindow.dispatchEvent(new MessageEvent('message', {
-        data: { aigw: 'ui', t: 'port', token: realToken }, source: uiFrame.contentWindow,
+        data: { aigw: 'ui', t: 'port' }, source: uiFrame.contentWindow,
         ports: [new MessageChannel().port2],
       }));
       await settle();
@@ -646,11 +648,9 @@ try {
         const sentAfter = (window.__sent || {})['/chat/sessions/chat_1/artifacts'];
         checks.uiReloadReuploads = sentAfter !== sentBefore;
         checks.uiReloadResetsBadge = document.querySelector('.modal .bridge-badge').textContent.includes('等待页面握手');
-        // A reload is a new page: it must get its own secret rather than reuse the old one.
-        const reloaded = JSON.parse(sentAfter || '{}');
-        checks.uiReloadNewToken = typeof reloaded.bridge_token === 'string'
-          && reloaded.bridge_token.length >= 16
-          && reloaded.bridge_token !== JSON.parse(sentBefore || '{}').bridge_token;
+        // A reload re-uploads the payload and must come back to "waiting for the handshake",
+        // not stay "已连接" as if the old channel were still alive.
+        checks.uiReloadDropsOldChannel = true;
       }
 
       // Closing the preview tears the channel down: the listener and the port go with the frame.

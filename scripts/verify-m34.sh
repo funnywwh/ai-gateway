@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # 验证 M34「可交互 HTML5 界面」在本机实例上是否真的生效。
 #
-# 它验证的是**服务端那一半**：票据 scope、桥接脚本注入、握手凭证的往返、CSP nonce、沙箱边界、
-# 登出即失效，以及"同一个代码块重复预览不会拿到坏 URL"。这些都不需要模型，因此可以在你自己的
-# 部署上反复运行，且全部走真实 HTTP（不碰数据库、不读进程内存）。
+# 它验证的是**服务端那一半**：票据 scope、桥接脚本注入、通道的**结构性**鉴权（不带任何凭证）、
+# CSP 保留 'unsafe-inline' 且不加 nonce、沙箱边界、登出即失效，以及"同一个代码块重复预览不会
+# 拿到坏 URL"。这些都不需要模型，因此可以在你自己的部署上反复运行，且全部走真实 HTTP
+# （不碰数据库、不读进程内存）。
 #
 # 模型那一半（模型是否真的会输出表单）只能人工走查，见 docs/chat.md §4 与 docs/TODO.md 的 M34 小节。
 #
@@ -145,14 +146,13 @@ echo
 echo '4) 登记页面（模拟模型输出的 html 代码块）'
 FORM='<!doctype html><html><head><title>账户信息</title></head><body><h2>请填写账户信息</h2><form><label>账户名 <input name="name" value="demo"></label><button type="submit">提交</button></form></body></html>'
 
-# 握手凭证由控制台生成、随上传提交；服务端把它注入进页面，两端各存一份。这里扮演控制台。
-BRIDGE_TOKEN=$(rand_hex)
-BODY=$(FORM="$FORM" TOKEN="$BRIDGE_TOKEN" python3 -c 'import json,os; print(json.dumps(
-  {"key":"verify:0","format":"html","title":"验证用表单","bridge":True,
-   "bridge_token":os.environ["TOKEN"],"body":os.environ["FORM"]}))')
+# 交互预览不带任何凭证：交出的 MessagePort 只能被加载该文档的 window 收到，注入脚本只在
+# 自己是顶层文档时启动，宿主只接受来自那个 frame 的 hello——三条合起来等价于凭证。
+BODY=$(FORM="$FORM" python3 -c 'import json,os; print(json.dumps(
+  {"key":"verify:0","format":"html","title":"验证用表单","bridge":True,"body":os.environ["FORM"]}))')
 RO=$(curl -s -b "$JAR" -H 'Content-Type: application/json' -d "$BODY" "$BASE/admin/api/v1/chat/sessions/$SID/artifacts")
 ROURL=$(get "$RO" "url"); ROTK=$(get "$RO" "ticket"); ROID=$(get "$RO" "id")
-have "上传的凭证被原样回显" "$RO" "$BRIDGE_TOKEN"
+
 
 # 同一份正文再登记一份只读副本（不同 key），用来验证"没申请交互就没有通道"。
 RO_ONLY_BODY=$(FORM="$FORM" python3 -c 'import json,os; print(json.dumps(
@@ -198,43 +198,32 @@ if [ -z "$ROTK" ]; then
   exit 1
 fi
 # 页面 URL 必须带上凭证：注入脚本从**自己的 location** 读它，那是唯一别的文档看不到的地方。
-PREVIEW_URL="$BASE$ROURL?ticket=$ROTK&bridge=1&aigw_token=$BRIDGE_TOKEN"
+PREVIEW_URL="$BASE$ROURL?ticket=$ROTK&bridge=1"
 H3=$(mktemp); B3=$(curl -s -D "$H3" "$PREVIEW_URL")
 have "响应头 X-Aigw-Bridge: 1" "$(cat "$H3")" 'X-Aigw-Bridge: 1'
 have "注入了 script#aigw-ui-bridge" "$B3" 'id="aigw-ui-bridge"'
-have "注入脚本带着控制台那份凭证" "$B3" "data-token=\"$BRIDGE_TOKEN\""
-have "注入脚本会从自己的 URL 读凭证" "$B3" 'aigw_token'
-NONCE3=$(printf '%s' "$B3" | grab 'nonce="([^"]+)"')
-have "CSP 授权了这个 nonce" "$(cat "$H3")" "'nonce-$NONCE3'"
-have "保留了页面自己的内联脚本能力" "$(cat "$H3")" "'unsafe-inline'"
+lack "注入标签不带任何凭证（没有 data-token）" "$B3" 'data-token'
+have "注入脚本只在自己是顶层文档时启动" "$B3" 'window.top'
+have "CSP 保留 'unsafe-inline'（模型页面自己的内联脚本必须还能跑）" "$(cat "$H3")" "'unsafe-inline'"
+lack "CSP 里没有 nonce（有它会忽略 'unsafe-inline'，连带拦掉页面自己的脚本）" "$(cat "$H3")" 'nonce-'
+# 模型页面自己的内联脚本与事件处理器必须原样留在响应里
+have "模型页面的内联脚本仍在" "$B3" '<form' 
 have "沙箱没有被放松（仍无 allow-forms/allow-same-origin）" "$(cat "$H3")" 'sandbox allow-scripts'
 lack "没有 allow-forms" "$(cat "$H3")" 'allow-forms'
 lack "没有 allow-same-origin" "$(cat "$H3")" 'allow-same-origin'
 have "模型原文仍在" "$B3" '请填写账户信息'
 
 echo
-echo "8) 凭证属于这一份预览，nonce 属于这一个响应"
+echo "8) 通道是结构性鉴权：响应里没有秘密，也不需要每响应的例外"
 B4=$(curl -s "$PREVIEW_URL")
-T4=$(printf '%s' "$B4" | grab 'data-token="([^"]+)"')
-N4=$(printf '%s' "$B4" | grab 'nonce="([^"]+)"')
-# 重新加载页面时控制台仍然握着同一个凭证，所以它必须稳定；nonce 则必须每次响应都换。
-[ "$BRIDGE_TOKEN" = "$T4" ] && ok "重新加载页面后凭证不变（控制台手里那份还能用）" \
-  || bad "凭证随响应变了：$BRIDGE_TOKEN / $T4"
-[ "$NONCE3" != "$N4" ] && ok "每个响应的 nonce 不同" || bad "两次的 nonce 相同"
-
-# 另一份预览必须拿到另一个凭证：它标识的是一个页面，不是一个部署。
-OTHER_TOKEN=$(rand_hex)
-B5=$(curl -s -b "$JAR" -H 'Content-Type: application/json' -d "$(FORM="$FORM" TOKEN="$OTHER_TOKEN" python3 -c 'import json,os; print(json.dumps(
-  {"key":"verify:other","format":"html","title":"另一份","bridge":True,"bridge_token":os.environ["TOKEN"],"body":os.environ["FORM"]}))')" \
-  "$BASE/admin/api/v1/chat/sessions/$SID/artifacts")
-[ "$(get "$B5" "bridge_token")" = "$OTHER_TOKEN" ] && ok "另一份预览拿到的是另一个凭证" || bad "另一份预览的凭证不对"
-
-# 没有凭证就不该有交互通道。修复前每一份预览都会走到这一步的等价情形：控制台去读沙箱文档
-# 拿凭证，而沙箱文档对父窗口是跨源的，读到的永远是 null。
-NORESP=$(curl -s -b "$JAR" -H 'Content-Type: application/json' -d "$(FORM="$FORM" python3 -c 'import json,os; print(json.dumps(
-  {"key":"verify:notoken","format":"html","bridge":True,"body":os.environ["FORM"]}))')" \
-  "$BASE/admin/api/v1/chat/sessions/$SID/artifacts")
-have "不带凭证的交互登记被拒绝，并说明少了什么" "$NORESP" 'bridge_token'
+[ "$B3" = "$B4" ] && ok "两次响应的正文逐字相同（没有每响应的随机秘密）" \
+  || bad "两次响应不一致——有东西在每次响应里变化"
+lack "正文里没有 aigw_token/bridge_token" "$B4" 'aigw_token'
+# 沙箱与策略的边界：这几条是"没被放松"的证据，逐条摆出来而不是笼统说"安全"。
+have "沙箱仍是 allow-scripts" "$(cat "$H3")" 'sandbox allow-scripts'
+lack "没有 allow-forms（表单提交由脚本拦截，不是导航）" "$(cat "$H3")" 'allow-forms'
+lack "没有 allow-same-origin（页面读不到控制台的登录态）" "$(cat "$H3")" 'allow-same-origin'
+lack "没有 allow-popups" "$(cat "$H3")" 'allow-popups'
 
 # ── 9. 重复预览同一代码块 ───────────────────────────────────────────────────
 echo

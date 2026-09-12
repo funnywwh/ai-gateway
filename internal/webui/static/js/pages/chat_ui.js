@@ -11,9 +11,12 @@
 //     document with our injected script, so it can replace window.postMessage or post to the
 //     parent itself. Once the port is handed over, neither is possible: the port is bound to
 //     the frame's window at transfer time.
-//  2. The handshake carries the token the server injected into that document. It is not in
-//     the ticket URL (the page can read location.search), so a nested frame on the page cannot
-//     offer a port and then claim to be the preview.
+//  2. The handshake is authenticated structurally, not by a secret. The port we hand over can
+//     only be received by the window that loaded the preview document, the injected script
+//     refuses to start when it is not that window's top document, and this side accepts a hello
+//     only from that exact frame. A secret was tried twice and removed twice: it cannot be read
+//     out of a sandboxed frame, and the CSP exception needed to hide it breaks the page's own
+//     inline scripts.
 //  3. Nothing here writes HTML into the frame. The directive is applied as element
 //     construction and property assignment, exactly like the console's own Markdown and chart
 //     renderers, which never touch innerHTML either.
@@ -291,7 +294,7 @@ export function describeUIResult(result) {
 // It returns a handle rather than closing over the modal, because the modal owns the toolbar
 // and the chat page owns the turn: the port's job is the channel and the limits, nothing else.
 export function createUIPort({
-  sessionId, frame, token, limits, onEvent, onApply, onState, onError, onLog,
+  sessionId, frame, limits, onEvent, onApply, onState, onError, onLog,
 } = {}) {
   const cap = Object.assign({}, UI_LIMITS, limits || {});
   const state = { status: 'handshaking', events: 0, pending: 0, error: '', bridge: false };
@@ -310,16 +313,21 @@ export function createUIPort({
     if (onError) onError(message);
   }
 
-  // The handshake arrives as a window message, which is the only unframed step. It is accepted
-  // only from this exact frame and only with the token the server injected into this exact
-  // document — the ticket in the URL is readable by the page, so it cannot serve as the
-  // credential.
+  // The handshake arrives as a window message, which is the only unframed step. Three things
+  // must hold before a port is accepted:
+  //   - it came from this frame's window (a sibling frame or an opener cannot send as this one);
+  //   - it says it is the top document of that frame (a nested frame on the page can post to us
+  //     itself, and it must not be able to speak for the preview);
+  //   - it actually carries a port (a message-shaped object without one is not our script).
   function onWindowMessage(ev) {
     if (closed) return;
     if (ev.source !== frame.contentWindow) return;
     const data = ev.data;
     if (!data || data.aigw !== 'ui' || data.t !== 'hello') return;
-    if (!token || data.token !== token) return;
+    if (data.framed === true) {
+      if (onLog) onLog('ignored a hello from a nested frame');
+      return;
+    }
     const port = ev.ports && ev.ports[0];
     if (!port) {
       // A message-shaped object without a port is not our bridge; ignoring it is the whole
@@ -419,7 +427,6 @@ export function createUIPort({
 
   return {
     state,
-    token,
     // sendToFrame carries the console's own frames: deltas while the answer streams, the
     // applied directive, the busy/idle state.
     send: sendToFrame,

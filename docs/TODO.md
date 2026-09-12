@@ -1257,6 +1257,23 @@
       不带凭证的交互登记被拒），在真二进制上 34/34 通过
 - [x] `make verify` 全绿；`make ui-check` 13 视图全绿
 
+### 修正（真机反馈二）：页面自己的内联脚本被 CSP 拦 + `destroy is not defined`
+- [x] 现象 A：模型页面自己的 `<script>` 与 `onclick=` 被拦（"Note that 'unsafe-inline' is ignored if
+      either a hash or nonce value is present in the source list"）。根因是上一版为了藏握手凭证给
+      `script-src` 加了 nonce——**nonce/hash 一旦出现，`'unsafe-inline'` 被完全忽略**，而这类页面
+      就是内联 HTML/JS。这是"用更严的策略把功能本身打掉"
+- [x] 现象 B：`ReferenceError: destroy is not defined`（`chat_artifact.js` 的 `openPreview`）——
+      重构时删了 `function destroy()` 却留着 `return { destroy, … }`，函数抛异常 → 控制台根本没建端口
+      → 必然显示「不可交互」。已改为 `return { destroy: teardown, … }`，并在 harness 里加断言
+      "预览弹窗渲染出了状态徽章与计数"（它若抛异常，这条就红）
+- [x] 根本修法：**通道不再需要凭证**。交出端口的只能是加载该文档的那个 window；注入脚本只在
+      `window.top === window` 时启动（挡住页面里的嵌套框架）；宿主只接受来自那个 frame 的 hello。
+      凭证、`bridge_token`、迁移 0012 的列（保留但代码不读写，迁移文件写明缘由）与 CSP nonce 全部撤掉
+- [x] 回归保护：`internal/httpapi` 断言 CSP 里既无 `nonce-` 也无 `sha256-`、注入标签不含 `data-token`、
+      模型的 `onclick` 与内联脚本原样保留；`verify-m34.sh` 同步（36 项）；harness 删掉全部替身 stub
+- [x] 顺手：控制台从来没有 favicon，浏览器每次打开都多一行 404；补一个内联 SVG 图标
+- [x] `make verify` 全绿；`make ui-check` 13 视图全绿（chat 78 项）
+
 ### 顺手修掉的既有缺陷
 - [x] `UpsertChatArtifact` 冲突分支不覆盖 `id`，而上传处理器用自己新生成的 id 拼 URL 签票据 →
       同一代码块第二次预览拿到 **404 的 URL**。改成 `INSERT … RETURNING id` 并回写真实 id

@@ -35,30 +35,19 @@ function referencesExternal(body) {
   return EXTERNAL.some((pattern) => pattern.test(body || ''));
 }
 
-// The console generates the handshake secret for each preview and hands it over with the
-// upload, so that the very same value reaches two places and no others: the injected script tag
-// (in the served document) and this page.
+// The interactive channel needs no secret, and that is deliberate.
 //
-// It cannot be read back out of the frame afterwards. A sandboxed document without
-// allow-same-origin is an opaque origin, so `frame.contentDocument` is null for the parent —
-// reading it there is what made every interactive preview report "不可交互" the first time this
-// shipped. It also cannot live in a response header (that would cost a second request) and must
-// not live somewhere the model's page can read, such as the artifact body or the script tag's
-// attributes.
-function newBridgeToken() {
-  const bytes = new Uint8Array(16);
-  if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(bytes);
-  else for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-}
-
-// bridgeTokenParam must match uiBridgeTokenParam in internal/httpapi/chat_ui_bridge.go: the
-// server's injected client reads this parameter out of its own location and answers with it.
-const bridgeTokenParam = 'aigw_token';
-
-function withBridgeToken(url, token) {
-  return url + '&' + bridgeTokenParam + '=' + encodeURIComponent(token);
-}
+// Two earlier designs tried to hand one over, and both failed for the same underlying reason: a
+// sandboxed document is an opaque origin, so the console cannot read anything out of the frame
+// (frame.contentDocument is null — that cost this feature one full outage), and a nonce that
+// would have hidden a token in the URL makes browsers ignore `script-src 'unsafe-inline'`, which
+// silently breaks the model's own inline scripts. What actually authenticates the channel is
+// structural: the offered MessagePort can only be received by the window that loaded this
+// document, the injected script refuses to run when it is not the top document, and the host
+// accepts a hello only from that exact frame window.
+//
+// So this side only has to remember: never read into the frame, and never take a port from a
+// message whose shape or source is even slightly off.
 
 export async function openPreview({ sessionId, key, format, body, title, interactive, onSubmit, onStop, onClosed }) {
   const root = document.getElementById('modal-root');
@@ -174,12 +163,8 @@ export async function openPreview({ sessionId, key, format, body, title, interac
     status.className = 'muted';
     status.textContent = '正在准备预览…';
     try {
-      // The handshake secret is minted here, per preview: it travels with the upload and comes
-      // back inside the served document, so this page and that frame end up as the only two
-      // holders. Nothing has to be read back out of the frame (which a sandbox forbids anyway).
-      const token = interactive ? newBridgeToken() : '';
       const payload = await api.post('/chat/sessions/' + encodeURIComponent(sessionId) + '/artifacts', {
-        key, format, body, title, bridge: !!interactive, bridge_token: token,
+        key, format, body, title, bridge: !!interactive,
       });
       const base = payload.url + '?ticket=' + encodeURIComponent(payload.ticket);
       url = base;
@@ -190,9 +175,7 @@ export async function openPreview({ sessionId, key, format, body, title, interac
         // (the frame must not reach the console), no allow-forms (a native form submission is a
         // navigation, and the bridge intercepts submit anyway), no allow-popups.
         sandbox: format === 'svg' ? '' : 'allow-scripts',
-        // The token rides in the frame's own URL, so the injected script can read it out of its
-        // own location — the one place no other document can look.
-        src: interactive ? withBridgeToken(base + '&bridge=1', token) : base,
+        src: interactive ? base + '&bridge=1' : base,
         title: title || '预览',
         referrerpolicy: 'no-referrer',
       });
@@ -200,7 +183,7 @@ export async function openPreview({ sessionId, key, format, body, title, interac
       reload.disabled = false;
       if (interactive) {
         port = createUIPort({
-          sessionId, frame, token,
+          sessionId, frame,
           onState: setState,
           onEvent: (event) => { if (!stopped && onSubmit) onSubmit(event); },
           onApply: (ops, frameData) => {
@@ -270,7 +253,7 @@ export async function openPreview({ sessionId, key, format, body, title, interac
     }
   }
 
-  return { destroy, reply: handleReply, isOpen: () => backdrop.isConnected };
+  return { destroy: teardown, reply: handleReply, isOpen: () => backdrop.isConnected };
 }
 
 // uiReplyParts turns the code blocks of one assistant answer into what an open preview needs:

@@ -27,39 +27,43 @@ M34 补上这条回路，让「模型生成的界面」成为**用户与 AI 交�
 实现采用 `MessageChannel`：握手阶段父侧只收到一次 hello，校验通过后把 `MessagePort` 交给 iframe；
 此后双方只走这条 port 通道，与页面的全局环境彻底无关。
 
-### 2. 握手鉴权：控制台生成、随上传提交的 `bridgeToken`
+### 2. 握手鉴权：结构性，不需要凭证
 
-已有的 `ticket` 在 URL 里（`?ticket=…`），模型页面也能读到自己的 `location.search`，因此**票据
-不能**当握手凭据。握手凭证必须满足两条互相拉扯的要求：**注入脚本读得到**（否则它无法证明自己是
-服务端放进去的那段代码），而**别的文档读不到**（否则页面里嵌套的同源 iframe 可以冒充它来骗走 port）。
+凭证这条路走了两次，两次都拆掉了。记在这里，因为**两次失败的原因合起来才是设计依据**。
 
-只有一对地方同时满足：**这个窗口自己的 `location`**，以及**控制台手里的那一份**。所以凭证由
-控制台生成（每次预览一个），随上传请求体提交、由服务端注入进脚本，而页面 URL 带上
-`?aigw_token=…`。注入脚本从自己的 location 读它，与注入标签上的 `data-token` 比对（不一致就
-不启动），hello 时回给父窗口；父窗口比对 `event.source === frame.contentWindow` 与 token 两项。
+**第一次**：服务端每个响应现生成一个 token，控制台去读 `frame.contentDocument` 里注入标签的
+`data-token`。上线后每一份交互预览都显示「不可交互」——沙箱省略 `allow-same-origin` 的文档是
+**不透明源**，对父窗口而言跨源，`frame.contentDocument` 恒为 `null`。凭证被放在了一个父窗口
+根本读不到的地方。更糟的是 harness 用一个 stub 顶替了 `contentDocument`，把这条约束抹平了。
 
-> **这一段是踩了坑之后重写的。** 初版让服务端**每个响应**现生成 token，控制台去读
-> `frame.contentDocument` 里的脚本标签拿它：实现上线后每一份交互预览都显示「不可交互」。
-> 原因是沙箱：省略 `allow-same-origin` 的文档是不透明源，对父窗口而言是跨源，
-> `frame.contentDocument` 恒为 `null`——凭证被放在了一个父窗口根本读不到的地方。
-> 改法不只是换读取位置：token 也不再每响应更换（重载页面后控制台手里那份必须还有效），
-> 而是**属于某一份预览**，落库在 `chat_artifacts.bridge_token`（迁移 0012）。
-> 这个坑能在实现期溜过去，是因为 harness 用一个 stub 顶替了 `contentDocument`——**替身把真实
-> 边界条件掩盖掉了**，见「未验证的部分」。
+**第二次**：改由控制台生成 token、随上传提交、写进页面 URL（`?aigw_token=`）。这能工作，但
+为了让页面里嵌套的框架读不到它，就得给 `script-src` 加 **nonce**——而 nonce 一旦出现，浏览器会
+**忽略 `'unsafe-inline'`**，于是模型页面自己的内联脚本与 `onclick` 全部被拦。这个功能的页面
+**就是**内联 HTML/JS，所以这等于用一个看起来更严的策略把功能本身打掉。
 
-### 3. 注入脚本的 CSP：`script-src 'nonce-<每次随机>'`
+真正需要的事实是**结构性的**，不是秘密：
 
-注入脚本必须是内联脚本，而预览的 CSP 只有 `script-src 'unsafe-inline'`——那是给**页面自己**的
-内联脚本用的，服务端注入的脚本与页面脚本在策略上没有区别，理论上可以被页面的 CSP 元标签放大
-（`sha256` 白名单方案也有同样的放大面，而且要做到字节级稳定）。
+1. 我们交出的 `MessagePort` 只能被**加载该文档的那个 window** 收到——端口在传递时就绑定了接收者，
+   之后不经过任何全局对象；
+2. 注入脚本**只在自己是顶层文档时才启动**（`window.top !== window` 直接返回）。页面里的嵌套框架
+   是另一个 window，它也能给宿主发消息，这一步就是把它挡在门外的全部；
+3. 宿主只接受来自**那个确切 frame window** 的 hello，而且必须带着 port。
 
-实现给每个响应生成一个随机 nonce，同时出现在响应头的 `script-src` 与注入的 `<script>` 标签上，
-并**保留** `'unsafe-inline'`：nonce 只用来标记"这个脚本是服务端放的"，不改变页面自身的能力。
-nonce 不需要同源（sandboxed document 一样生效），因此不需要 `allow-same-origin`。
+三条合起来与"凭证"等价，且不需要任何策略例外、不需要落库、不需要额外请求。副作用是
+`injectUIBridge` 不再带参数，`chat_artifacts.bridge_token`（迁移 0012）成了一个空占位列
+（保留列不动已应用它的库，代码完全不读写，迁移文件里写明了缘由）。
 
-> 被否决的方案：第一次调研时打算用 `sha256-<hash>` + `'unsafe-hashes'` 白名单。它要求哈希与脚本
-> 字节完全一致，脚本一改就静默失效，且 `'unsafe-hashes'` 的浏览器支持面更窄。nonce 每次响应
-> 重新生成，没有"改脚本忘了改哈希"的失败模式。
+### 3. 注入脚本的授权：`'unsafe-inline'`，且**绝不能**加 nonce 或 hash
+
+注入脚本是内联脚本，它与模型页面自己的脚本共享同一条策略。因此它由 `script-src 'unsafe-inline'`
+授权——和页面自己的代码一样，策略上不做区分。
+
+**这里加 nonce 或 hash 不是加固，是自伤**：只要有 nonce 或 hash 出现在 `script-src` 里，浏览器就
+完全忽略 `'unsafe-inline'`，于是页面自己的内联脚本与 `onclick=` 一起失效。这个回归在第二次
+凭证方案里真实发生过（浏览器控制台的原话是 "Note that 'unsafe-inline' is ignored if either a
+hash or nonce value is present in the source list"），而它与凭证无关——**不管用什么通道，
+这条策略都不能动**。因此 `internal/httpapi` 的测试直接断言 CSP 里既没有 `nonce-` 也没有
+`sha256-`，部署自查脚本也断言同一条。
 
 ### 4. 表单提交：拦截，而不是放开 `allow-forms`
 
@@ -145,9 +149,9 @@ const (
 // 测试能直接读它（断言不含 fetch/eval/innerHTML），也让提示词能引用同一份契约说明。
 func uiBridgeScript() string
 
-// injectUIBridge 把 <script id=aigw-ui-bridge data-token=… nonce=…> 插进文档。
+// injectUIBridge 把 <script id=aigw-ui-bridge> 插进文档（不带任何凭证）。
 // 幂等：正文里已经有该 id 时原样返回。
-func injectUIBridge(html, token, nonce string) string
+func injectUIBridge(body string) string
 
 // bridgeContractPrompt 是注入脚本暴露给模型的 API 契约说明（中文），由提示词引用。
 func bridgeContractPrompt() string
@@ -170,14 +174,7 @@ type chatArtifactRequest struct {
     Body   string `json:"body"`
     // Bridge 请求一张「可交互」票据：只有它对应的响应会被注入桥接脚本。
     Bridge bool `json:"bridge"`
-    // BridgeToken 是握手凭证，由控制台生成、随上传提交，并原样回显；
-    // 服务端把它落库（chat_artifacts.bridge_token）并注入进页面。交互预览缺它就拒绝（400）。
-    BridgeToken string `json:"bridge_token"`
 }
-
-// 存储层多一个方法：凭证是行上的一个字段，但 upsert 的身份是 (session_id, key)，
-// 调用者并不拥有行 id，所以单独一条语句写它。
-SetChatArtifactBridgeToken(ctx context.Context, id, token string) error
 ```
 
 响应头：交互预览额外带 `script-src … 'nonce-<随机>'` 与 `X-Aigw-Bridge: 1`。
@@ -339,8 +336,12 @@ artifact 正文按 `(session_id, key)` 幂等 upsert，页面新版本仍走同�
   > **为什么没测出来**：harness 当时用一个 stub 顶替了 `contentDocument`，于是"读不到"
   > 这一条真实约束被替身抹平了。教训不是"要多写测试"，而是**替身要替得准**：替身只能替掉
   > 被测代码不关心的东西，而"沙箱文档对父窗口不可见"恰恰是这段代码唯一在乎的事实。
-  > 现在那个 stub 已删除，harness 改为读控制台真正写进 iframe `src` 的 URL 参数——不替任何
-  > 真实约束；同时 `scripts/verify-m34.sh` 在真二进制上断言凭证往返（34 项）。
+  > 现在那个 stub 已删除，harness 只观察控制台真正放到线上的东西。
+  >
+  > **紧接着还有第二次**：改用"控制台生成 token + 页面 URL 带参数"之后，为了让嵌套框架读不到
+  > 那个参数，给 `script-src` 加了 nonce——而 nonce 会让浏览器忽略 `'unsafe-inline'`，把模型页面
+  > 自己的内联脚本一起拦掉（日志见「决策 3」）。两次的教训是同一个：**别用秘密去解决一个结构性
+  > 问题**。凭证换成结构检查之后，既不碰 CSP，也不需要落库与额外请求。
 - **`bridge` 视图（第 13 个视图）**：注入脚本是 Go 字符串拼接出来的，所以"Go 能编译"完全不能说明
   JavaScript 合法。`scripts/ui-harness/bridge_syntax.page.html` 在真实浏览器里用
   `new Function(source)` **只编译不执行**地验证它，并顺带断言无 `fetch`/`XHR`/`eval`/`innerHTML`/
