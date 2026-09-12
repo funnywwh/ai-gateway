@@ -39,6 +39,7 @@ func TestConsoleAssetsAreEmbedded(t *testing.T) {
 		{"/js/pages/chat.js", http.StatusOK, "chat/sessions", "javascript"},
 		{"/js/pages/skills.js", http.StatusOK, "chat/skills", "javascript"},
 		{"/js/pages/chat_artifact.js", http.StatusOK, "allow-scripts", "javascript"},
+		{"/js/pages/chat_ui.js", http.StatusOK, "createUIPort", "javascript"},
 		{"/js/markdown.js", http.StatusOK, "renderMarkdown", "javascript"},
 		{"/js/chart.js", http.StatusOK, "renderChart", "javascript"},
 		{"/providers", http.StatusOK, "<div id=\"app\">", "text/html"},
@@ -256,6 +257,31 @@ func TestConsoleChatRoutesMatchTheServer(t *testing.T) {
 	}
 	// The preview upload and the ticket endpoint are a pair: uploading without a ticket
 	// would leave the frame unable to load anything.
+	// The interactive bridge is code that runs next to a model-authored document, so it is the
+	// last place that should be able to build markup: the directive is applied through element
+	// construction, never by handing a string to the DOM.
+	for _, path := range []string{"/js/pages/chat_ui.js", "/js/pages/chat_artifact.js"} {
+		// Comments are stripped first: these files *talk* about never using innerHTML, and a
+		// test that flags its own documentation is a test nobody keeps.
+		code := stripJSComments(source(path))
+		for _, forbidden := range []string{"innerHTML", "insertAdjacentHTML", "outerHTML", "document.write"} {
+			if strings.Contains(code, forbidden) {
+				t.Errorf("%s must not write markup into a document (found %s)", path, forbidden)
+			}
+		}
+	}
+	uiSource := source("/js/pages/chat_ui.js")
+	for _, want := range []string{"parseUISpec", "applyUIOps", "createUIPort", "ev.ports"} {
+		if !strings.Contains(uiSource, want) {
+			t.Errorf("chat_ui.js is missing %s", want)
+		}
+	}
+	// The two halves of one protocol must agree on the markers.
+	bridgeSource := source("/js/pages/chat_artifact.js")
+	if !strings.Contains(bridgeSource, "aigw-ui-bridge") {
+		t.Error("the console must look for the injected script by the id the server gives it")
+	}
+
 	artifactSource := source("/js/pages/chat_artifact.js")
 	if !strings.Contains(artifactSource, "/artifacts") || !strings.Contains(artifactSource, "ticket") {
 		t.Error("the preview helper must upload the payload and then use the ticket it gets back")
@@ -271,3 +297,28 @@ func TestConsoleChatRoutesMatchTheServer(t *testing.T) {
 }
 
 func itoa(v int) string { return strconv.Itoa(v) }
+
+// stripJSComments removes // and /* */ comments so a source scan looks at code, not prose.
+func stripJSComments(source string) string {
+	var out strings.Builder
+	for i := 0; i < len(source); {
+		switch {
+		case strings.HasPrefix(source[i:], "//"):
+			if end := strings.IndexByte(source[i:], '\n'); end >= 0 {
+				i += end
+			} else {
+				i = len(source)
+			}
+		case strings.HasPrefix(source[i:], "/*"):
+			if end := strings.Index(source[i+2:], "*/"); end >= 0 {
+				i += 2 + end + 2
+			} else {
+				i = len(source)
+			}
+		default:
+			out.WriteByte(source[i])
+			i++
+		}
+	}
+	return out.String()
+}

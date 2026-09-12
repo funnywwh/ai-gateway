@@ -101,3 +101,47 @@ usage 脚注、`#/chat?session=` 深链、`#/skills` 的编辑/删除确认与�
 
 技能草稿在两个页面之间用 `sessionStorage` 交接（`aigw.chat.draft`）：草稿是**未保存**的东西，
 没有理由先发到服务端再取回来，所以 harness 里也是同一个进程内的这一个小箱子。
+
+## M34 起：可交互预览的桥接断言（仍在 `chat` 视图内）
+
+模型生成的 HTML5 页面提交表单要回到会话，这条链路横跨四个地方：服务端注入的脚本、iframe 的沙箱、
+控制台的 `MessagePort`、以及"提交就是一条正常提问"的计费路径。harness 覆盖的是**中间两段加上最后一段**：
+
+- **握手是一个拒绝矩阵**：`hello` 必须来自这个 frame、带这个 frame 的 token（从帧自己的文档里读，
+  不是 URL 里的票据）、且必须带 `MessagePort`。错 token、错 source、无 port、错帧类型四种都被断言
+  "状态没变"，因为这条通道的鉴权全部在这里。
+- **`MessageChannel` 是真的**：harness 建一条真 `MessageChannel`，把 `port2` 随 `hello` 交给控制台，
+  再用 `port1` 发事件、读回灌。这样测的是 `chat_ui.js` 的真代码，而不是一个模仿它的替身。
+- **流可以被按住不放**：`sseStream()` 返回一个由测试推动的 `ReadableStream`（`window.__stream.frame/finish`），
+  用来制造"模型还在回答时用户又提交了一次"——排队路径只能在那种时刻被观测到。
+- **提交就是提问**：断言读的是发往 `/chat/sessions/{id}/turns` 的**请求体**，必须是
+  `label` + ```` ```json {"source":"ui_event",…} ````，并且带自己的幂等 `turn_id`。
+- **回灌**：`window.__uiReply` 让 stub 的回答带一个 ```` ```ui ```` 指令块，然后断言端口收到
+  `{k:'d'}` 与 `{k:'done', ops:[…]}`。
+
+两处与真实环境的差异要记住（见 `docs/design/m34-ui-bridge.md`「未验证的部分」）：
+
+1. **帧内的注入脚本没有真跑**：harness 的静态服务器不提供带票据的产物 URL，所以
+   `contentDocument` 的 token 读取用一个**读取帧属性**的 stub 代替（也因此"错 token"这一格测的是
+   真代码）。注入脚本本身由 Go 侧测试钉住（无 fetch/eval/innerHTML、ES5、握手标记）。
+2. **没有真实模型**：表单是测试直接构造的 HTML，`ui_event` 的"模型如何响应"由脚本化 SSE 回答。
+
+`scripts/ui-harness/server.py` 取代了 `python3 -m http.server`：它给每个响应加 `no-store`。
+console 自己的 `max-age=300` 在生产里是对的，在这里会让浏览器跑**上一版**模块——第一次调试时
+就因此追着一个已经修好的报错跑了一轮。
+
+## `bridge` 视图：注入脚本的浏览器语法检查
+
+第 13 个视图不是控制台页面，而是**服务端注入脚本**的检查：注入脚本由 Go 字符串拼接生成
+（`internal/httpapi/chat_ui_bridge.go`），"Go 代码能编译"完全不能说明它是合法的 JavaScript。
+`bridge_syntax.page.html` 用 `new Function(source)` **只编译不执行**（这条脚本会绑定 submit 监听并向
+父窗口发端口，不能真跑），并顺带断言：无 `fetch`/`XMLHttpRequest`/`eval`/`innerHTML`/`document.write`/
+存储访问、保持 ES5（无箭头函数、无模板字符串、无 const/let）、含握手标记、绑定
+`submit`/`data-aigw-send`、以及 SVG 走 `createElementNS`。
+
+脚本正文来自 `fixtures.json` 的合成条目 `/js/pages/chat_ui_bridge_script.js`。它之所以不会漂移，
+是因为 `internal/httpapi` 的 `TestUIBridgeScriptDumpForTheHarness` 在**每次 `go test`** 时把
+`uiBridgeScript()` 重写进该夹具——那个测试会写仓库，这是刻意的：一个不更新的夹具会变成
+"自己和自己一致"的假检查，比没有检查更糟。
+
+改了注入脚本之后的正确顺序是 `make test`（刷新夹具）→ `make ui-check`（浏览器判读）。

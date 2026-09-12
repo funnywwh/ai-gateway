@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>bridge script syntax harness</title>
+</head>
+<body>
+<pre id="out">running…</pre>
+<script>
+// The browser's verdict on the script the *server* injects into an interactive preview.
+//
+// That script is assembled by Go string concatenation (internal/httpapi/chat_ui_bridge.go), so
+// "the Go code compiles" says nothing about whether the JavaScript does. This page is the only
+// place it is parsed by a real JavaScript engine. It deliberately does not run the script:
+// `new Function(source)` compiles without executing, which matters because the script binds a
+// submit listener and posts to its parent window.
+//
+// The source comes from the harness fixtures, where TestUIBridgeScriptDumpForTheHarness rewrites
+// it from uiBridgeScript() on every `go test`. That is what keeps this page honest: it always
+// parses what the server would actually serve.
+const FIXTURES = __FIXTURES__;
+const SOURCE = FIXTURES['/js/pages/chat_ui_bridge_script.js'] || '';
+const lines = [];
+const checks = {};
+
+function report(data) {
+  data.errors = errors;
+  const url = '/report?data=' + encodeURIComponent(JSON.stringify(data));
+  try {
+    if (navigator.sendBeacon && navigator.sendBeacon(url)) return;
+  } catch (err) { /* fall through */ }
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url, false);
+    xhr.send();
+  } catch (err) { /* reporting must never break the harness */ }
+}
+
+const errors = [];
+window.onerror = (msg) => errors.push('onerror: ' + msg);
+window.onunhandledrejection = (ev) => errors.push('rejection: ' + ev.reason);
+
+try {
+  checks.scriptPresent = SOURCE.length > 500;
+  let parsed = false;
+  let parseError = '';
+  try {
+    // Compile only. A syntax error here is a hard failure: the browser would refuse the whole
+    // script and the preview would silently lose its bridge.
+    new Function(SOURCE);
+    parsed = true;
+  } catch (err) {
+    parseError = (err && err.name ? err.name : 'Error') + ': ' + (err && err.message ? err.message : String(err));
+  }
+  checks.parsesInThisBrowser = parsed;
+  checks.parseError = parseError;
+  checks.isIife = /^\(function\s*\(\)/.test(SOURCE.trim());
+  // The frame name is assembled from a Go constant, so the served text reads `aigw: 'ui'` rather
+  // than a literal 'aigw:hello' — assert the frame, not one spelling of the message.
+  checks.hasHandshake = SOURCE.indexOf("'hello'") >= 0 && SOURCE.indexOf("aigw: 'ui'") >= 0;
+  checks.usesMessagePort = /ev\.ports/.test(SOURCE);
+  checks.bindsSubmit = /addEventListener\('submit'/.test(SOURCE);
+  checks.bindsDataAigwSend = SOURCE.indexOf('data-aigw-send') >= 0;
+  checks.readsFormData = SOURCE.indexOf('FormData') >= 0;
+  checks.exposesAIGW = SOURCE.indexOf('window.AIGW') >= 0;
+  // The guarantees internal/httpapi's Go test also pins; asserted here as well because this is
+  // the copy that actually runs in a browser.
+  checks.noFetch = !/fetch\s*\(/.test(SOURCE);
+  checks.noXHR = SOURCE.indexOf('XMLHttpRequest') < 0;
+  checks.noEval = !/eval\s*\(/.test(SOURCE) && SOURCE.indexOf('new Function') < 0;
+  checks.noMarkup = !/innerHTML|insertAdjacentHTML|document\.write/.test(SOURCE);
+  checks.noStorage = !/localStorage|sessionStorage|document\.cookie/.test(SOURCE);
+  checks.es5Only = !/=>/.test(SOURCE) && !/\$\{/.test(SOURCE) && !/\bconst\s/.test(SOURCE) && !/\blet\s/.test(SOURCE);
+  // SVG patches are built node by node rather than parsed out of a string.
+  checks.buildsSvgNodes = SOURCE.indexOf("'http://www.w3.org/2000/svg'") >= 0;
+  lines.push('bytes=' + SOURCE.length);
+  for (const [key, value] of Object.entries(checks)) lines.push(key + '=' + value);
+  document.getElementById('out').textContent = lines.join('\n');
+} catch (err) {
+  errors.push('harness threw: ' + err);
+}
+
+const failed = Object.keys(checks).filter((key) => checks[key] === false);
+report({
+  view: 'bridge', stage: 'done', ok: failed.length === 0, failed, checks,
+  // A parse failure is the one thing that must not scroll past, so it is surfaced explicitly.
+  sample: { bytes: SOURCE.length, parse: checks.parseError || 'ok' },
+});
+</script>
+</body>
+</html>

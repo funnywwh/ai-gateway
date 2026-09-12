@@ -708,6 +708,13 @@ func scanChatArtifact(row rowScanner) (*domain.ChatArtifact, error) {
 // UpsertChatArtifact stores a preview payload. (session_id, key) is the identity: the
 // console re-previews the same code block with the same key, so this replaces instead of
 // accumulating copies.
+//
+// The conflicting branch deliberately does not overwrite `id` — the row keeps the id it was
+// first stored under, so a URL handed out for that block stays the URL for that block. That
+// makes the caller's `a.ID` stale whenever it generated a fresh one, so it is replaced here
+// with the id that actually identifies the row. Returning silently and letting the caller
+// keep its own id is what produced a preview URL that 404'd: the console built `url` from the
+// id it sent, while the row (and the ticket the handler then signed) carried the old one.
 func (db *DB) UpsertChatArtifact(ctx context.Context, a *domain.ChatArtifact) error {
 	if a == nil || a.ID == "" || a.SessionID == "" || a.OwnerUserID <= 0 {
 		return domain.ErrInvalidRequest("chat artifact requires an id, session and owner")
@@ -718,7 +725,10 @@ func (db *DB) UpsertChatArtifact(ctx context.Context, a *domain.ChatArtifact) er
 	if a.CreatedAt.IsZero() {
 		a.CreatedAt = time.Now().UTC()
 	}
-	_, err := db.write.ExecContext(ctx, `
+	// RETURNING makes the identity decision the database's, in one statement: on insert it is
+	// the row we just wrote, on conflict it is the row that was already there.
+	var storedID string
+	err := db.write.QueryRowContext(ctx, `
 INSERT INTO chat_artifacts(id, owner_user_id, session_id, key, title, format, body, size_bytes, created_at)
 VALUES(?,?,?,?,?,?,?,?,?)
 ON CONFLICT(session_id, key) DO UPDATE SET
@@ -727,10 +737,14 @@ ON CONFLICT(session_id, key) DO UPDATE SET
   format = excluded.format,
   body = excluded.body,
   size_bytes = excluded.size_bytes,
-  created_at = excluded.created_at`,
-		a.ID, a.OwnerUserID, a.SessionID, a.Key, a.Title, a.Format, a.Body, a.SizeBytes, unix(a.CreatedAt))
+  created_at = excluded.created_at
+RETURNING id`,
+		a.ID, a.OwnerUserID, a.SessionID, a.Key, a.Title, a.Format, a.Body, a.SizeBytes, unix(a.CreatedAt)).Scan(&storedID)
 	if err != nil {
 		return fmt.Errorf("store: upsert chat artifact: %w", err)
+	}
+	if storedID != "" {
+		a.ID = storedID
 	}
 	return nil
 }
