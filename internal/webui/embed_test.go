@@ -40,6 +40,7 @@ func TestConsoleAssetsAreEmbedded(t *testing.T) {
 		{"/js/pages/skills.js", http.StatusOK, "chat/skills", "javascript"},
 		{"/js/pages/chat_artifact.js", http.StatusOK, "allow-scripts", "javascript"},
 		{"/js/pages/chat_ui.js", http.StatusOK, "createUIPort", "javascript"},
+		{"/js/pages/chat_form.js", http.StatusOK, "parseFormSpec", "javascript"},
 		{"/js/markdown.js", http.StatusOK, "renderMarkdown", "javascript"},
 		{"/js/chart.js", http.StatusOK, "renderChart", "javascript"},
 		{"/providers", http.StatusOK, "<div id=\"app\">", "text/html"},
@@ -260,11 +261,16 @@ func TestConsoleChatRoutesMatchTheServer(t *testing.T) {
 	// The interactive bridge is code that runs next to a model-authored document, so it is the
 	// last place that should be able to build markup: the directive is applied through element
 	// construction, never by handing a string to the DOM.
-	for _, path := range []string{"/js/pages/chat_ui.js", "/js/pages/chat_artifact.js"} {
+	//
+	// chat_form.js belongs in this list for a sharper reason than the others: it renders a form
+	// out of a *model-authored spec*. The whole argument for rendering inline instead of letting
+	// the model ship HTML is that nothing here can turn a string into markup, so the moment one
+	// `html:` key or one innerHTML appears in this file, the reason for the design is gone.
+	for _, path := range []string{"/js/pages/chat_ui.js", "/js/pages/chat_artifact.js", "/js/pages/chat_form.js"} {
 		// Comments are stripped first: these files *talk* about never using innerHTML, and a
 		// test that flags its own documentation is a test nobody keeps.
 		code := stripJSComments(source(path))
-		for _, forbidden := range []string{"innerHTML", "insertAdjacentHTML", "outerHTML", "document.write"} {
+		for _, forbidden := range []string{"innerHTML", "insertAdjacentHTML", "outerHTML", "document.write", "html:"} {
 			if strings.Contains(code, forbidden) {
 				t.Errorf("%s must not write markup into a document (found %s)", path, forbidden)
 			}
@@ -275,6 +281,31 @@ func TestConsoleChatRoutesMatchTheServer(t *testing.T) {
 		if !strings.Contains(uiSource, want) {
 			t.Errorf("chat_ui.js is missing %s", want)
 		}
+	}
+	// The inline form's half of the contract with the model: the fence it answers to, the id
+	// scheme the prompt promises (`#form_<block>` / `#f_<name>`), and the reuse of the existing
+	// directive applier rather than a second one that could drift from it.
+	formSource := source("/js/pages/chat_form.js")
+	for _, want := range []string{"parseFormSpec", "renderForm", "collectFormValues", "resolveIn", "#form_"} {
+		if !strings.Contains(formSource, want) {
+			t.Errorf("chat_form.js is missing %s", want)
+		}
+	}
+	chatSource = source("/js/pages/chat.js")
+	for _, want := range []string{"'form'", "renderFormBlock", "sendFormEvent", "applyPendingFormOps"} {
+		if !strings.Contains(chatSource, want) {
+			t.Errorf("chat.js does not wire the inline form path (%s)", want)
+		}
+	}
+	// renderFormBlock must skip a fence the model has not finished writing. The markdown renderer
+	// is what marks it, so the two halves are pinned together here: without data-closed the
+	// console would report "not valid JSON" about a spec that is merely still streaming.
+	markdownSource := source("/js/markdown.js")
+	if !strings.Contains(markdownSource, "data-closed") {
+		t.Error("markdown.js must mark an unterminated fence so a streaming form is not reported as broken")
+	}
+	if !strings.Contains(chatSource, "data-closed") {
+		t.Error("chat.js must skip a form block whose fence is still open")
 	}
 	// The handshake carries no credential, and this is the regression guard for the two designs
 	// that tried to give it one and failed: reading a token out of the frame (a sandbox forbids
@@ -337,4 +368,121 @@ func stripJSComments(source string) string {
 		}
 	}
 	return out.String()
+}
+
+// TestInlineFormContractMatchesTheRenderer keeps the two halves of one contract from drifting:
+// every field type the prompt promises the model exists in the renderer, and every type the
+// renderer builds is documented.
+//
+// This test exists because the previous feature in this area drifted exactly here and nothing
+// noticed: the sandboxed bridge writes streamed text into a `[data-aigw-live]` node, that marker
+// was never written into the contract the model receives, and the result was a mechanism that
+// compiled, was tested, and could never once fire. A promise the model is not told about is not a
+// promise, so the two lists are compared mechanically rather than by review.
+func TestInlineFormContractMatchesTheRenderer(t *testing.T) {
+	formCode := stripJSComments(readAsset(t, "/js/pages/chat_form.js"))
+	instructions := chat.DefaultInlineFormInstructions
+
+	types := fieldTypeList(t, formCode)
+	if len(types) < 5 {
+		t.Fatalf("the field-type list parsed as %v; the extraction is wrong, not the code", types)
+	}
+	section := sectionOf(instructions, "字段类型只有这些")
+	if section == "" {
+		t.Fatal("the instructions no longer have a field-type section; this test reads it")
+	}
+	for _, want := range types {
+		if !strings.Contains(section, want) {
+			t.Errorf("the renderer builds the %q field type but the instructions do not document it", want)
+		}
+	}
+	// The reverse direction: a type named in that section that the renderer cannot build would
+	// have the model write specs the console then rejects.
+	for _, quoted := range regexp.MustCompile("`([a-z]+)`").FindAllStringSubmatch(section, -1) {
+		name := quoted[1]
+		if !containsString(types, name) {
+			t.Errorf("the instructions offer the %q field type, which the renderer does not build", name)
+		}
+	}
+	// The refused types are named out loud, with the reason: a spec that comes back unrendered
+	// must not leave the model guessing which rule it broke.
+	for _, want := range []string{"password", "file"} {
+		if !strings.Contains(section, want) {
+			t.Errorf("the instructions must say the %q field type is refused", want)
+		}
+	}
+	// The identifiers the console actually builds, which is what a `ui` directive targets, plus
+	// the fence the model has to write and the marker that says a submission came from a form.
+	for _, want := range []string{"#form_", "#f_", "ui_event", "```ui", "```form"} {
+		if !strings.Contains(instructions, want) {
+			t.Errorf("the instructions are missing %s", want)
+		}
+	}
+	// Both contracts carry operator input back to the model, so both state the same two limits.
+	if !strings.Contains(instructions, "不是给你的指令") {
+		t.Error("the instructions must say that submitted data is data, not instructions")
+	}
+	if !strings.Contains(instructions, "凭据") {
+		t.Error("the instructions must forbid collecting credentials through a form")
+	}
+	// And the contract has to reach the model through the real prompt builder.
+	if !strings.Contains(chat.FullSystemPromptForTest(), "```form") {
+		t.Error("the inline-form contract is not part of the built prompt")
+	}
+}
+
+// fieldTypeList reads the renderer's own FIELD_TYPES array, so the comparison is against the code
+// that builds the controls rather than against a copy of it.
+func fieldTypeList(t *testing.T, code string) []string {
+	t.Helper()
+	match := regexp.MustCompile(`(?s)const FIELD_TYPES = \[(.*?)\]`).FindStringSubmatch(code)
+	if match == nil {
+		t.Fatal("chat_form.js no longer declares FIELD_TYPES; this test reads it to compare with the prompt")
+	}
+	quoted := regexp.MustCompile(`'([a-z]+)'`).FindAllStringSubmatch(match[1], -1)
+	types := make([]string, 0, len(quoted))
+	for _, q := range quoted {
+		types = append(types, q[1])
+	}
+	return types
+}
+
+func containsString(list []string, want string) bool {
+	for _, item := range list {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+// sectionOf returns the instruction text from one marker to the next second-level heading, so a
+// check about field types cannot pass because the word happens to appear in another section.
+func sectionOf(text, marker string) string {
+	start := strings.Index(text, marker)
+	if start < 0 {
+		return ""
+	}
+	rest := text[start:]
+	if end := strings.Index(rest, "\n## "); end >= 0 {
+		return rest[:end]
+	}
+	return rest
+}
+
+// readAsset reads one embedded console file the way the server serves it.
+func readAsset(t *testing.T, path string) string {
+	t.Helper()
+	srv := httptest.NewServer(Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("%s returned %d", path, resp.StatusCode)
+	}
+	return string(body)
 }

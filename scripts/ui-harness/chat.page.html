@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <title>chat console harness</title>
 <link rel="stylesheet" href="/app.css">
+
 </head>
 <body>
 <div id="actions" class="toolbar"></div>
@@ -105,6 +106,12 @@ function turnFrames(turnID) {
   if (window.__uiReply) {
     frames.splice(2, 0, { type: 'text', delta: '\n\n```ui\n{"ops":[{"op":"text","target":"#result","value":"ok"}]}\n```' });
   }
+  return toSSE(frames);
+}
+
+// toSSE renders frames as an SSE body. Extracted so a view that needs its own answer (the
+// inline-form view does) can describe that answer as data rather than as a hand-built string.
+function toSSE(frames) {
   return frames.map((frame) => 'event: ' + frame.type + '\ndata: ' + JSON.stringify(frame) + '\n\n').join('');
 }
 
@@ -157,7 +164,13 @@ window.fetch = async (url, options) => {
   if (path === '/chat/sessions/chat_1/turns') {
     const body = JSON.parse((options && options.body) || '{}');
     if (window.__holdTurn) return sseStream();
+    // The `form` view swaps in its own frames and its own session body; both exist so the view
+    // can describe an answer that contains a form, which no captured fixture can.
+    if (window.__forcedFrames) return sseResponse(toSSE(window.__forcedFrames));
     return sseResponse(turnFrames(body.turn_id));
+  }
+  if (path === '/chat/sessions/chat_1' && window.__formSession) {
+    return json(window.__formSession);
   }
   if (path === '/chat/sessions/chat_1/artifacts') {
     // Echo the bridge flag the way the server does: the console decides whether the frame is
@@ -271,6 +284,7 @@ import { parseChart } from '/js/chart.js';
 import { renderMarkdown, safeHref } from '/js/markdown.js';
 import { parseUISpec, applyUIOps, UI_LIMITS } from '/js/pages/chat_ui.js';
 import { uiReplyParts } from '/js/pages/chat_artifact.js';
+import { parseFormSpec, renderForm, collectFormValues, describeFormOps } from '/js/pages/chat_form.js';
 
 const view = location.hash.replace('#', '') || 'chat';
 const checks = {};
@@ -680,6 +694,251 @@ try {
       const cancel = [...document.querySelectorAll('.modal button')].find((b) => b.textContent.trim() === '取消');
       if (cancel) cancel.click();
       await settle();
+    }
+  }
+
+  if (view === 'form') {
+    // M35 inline forms. Two halves, both of which have burned us before:
+    //   * the pure parse/render/collect path, which carries the security rules;
+    //   * the live path inside chat.js, which is the only place the "does the answer come back
+    //     into the form" claim can actually be observed.
+    try {
+      const okSpec = JSON.stringify({
+        title: '目标设备信息',
+        description: '先确认这两项，我再继续。',
+        fields: [
+          { name: 'name', label: '账户名', required: true, placeholder: 'demo' },
+          { name: 'tier', label: '套餐', type: 'select', options: ['free', { value: 'pro', label: '专业版' }], value: 'pro' },
+          { name: 'note', type: 'note', label: '下面这项可以留空' },
+          { name: 'region', label: '区域', help: '例如 cn-north-1' },
+          { name: 'count', label: '数量', type: 'number', min: 1, max: 10 },
+          { name: 'urgent', label: '加急', type: 'checkbox' },
+          { name: 'env', label: '环境', type: 'radio', options: ['prod', 'staging'] },
+        ],
+      });
+      const parsed = parseFormSpec(okSpec, '0');
+      checks.parseValid = !parsed.error && parsed.spec.fields.length === 7;
+      checks.parseKeepsSubmit = parsed.spec.submit.name === 'submit' && parsed.spec.submit.label === '提交';
+      checks.parseRejectsBadJSON = !!parseFormSpec('{oops', '0').error;
+      checks.parseRejectsEmpty = !!parseFormSpec('', '0').error;
+      checks.parseRejectsNonObject = !!parseFormSpec('[1,2]', '0').error;
+      checks.parseRejectsNoFields = !!parseFormSpec('{"title":"x"}', '0').error;
+      checks.parseRejectsUnknownType = !!parseFormSpec('{"fields":[{"name":"a","label":"A","type":"canvas"}]}', '0').error;
+      checks.parseRejectsNoName = !!parseFormSpec('{"fields":[{"label":"A"}]}', '0').error;
+      checks.parseRejectsDupName = !!parseFormSpec('{"fields":[{"name":"a","label":"A"},{"name":"a","label":"B"}]}', '0').error;
+      // Credentials never belong in a form: the value becomes a normal question, i.e. it lands in
+      // the transcript. The type is refused by name, and the reason is shown to whoever asked.
+      const pwd = parseFormSpec('{"fields":[{"name":"secret","label":"密钥","type":"password"}]}', '0');
+      checks.parseRejectsPassword = !!pwd.error && pwd.error.includes('凭据');
+      checks.parseRejectsFile = !!parseFormSpec('{"fields":[{"name":"f","label":"文件","type":"file"}]}', '0').error;
+      // Prototype pollution on the way back to the model.
+      checks.parseRejectsProto = !!parseFormSpec('{"fields":[{"name":"__proto__","label":"A"}]}', '0').error;
+      checks.parseRejectsBadSelect = !!parseFormSpec('{"fields":[{"name":"a","label":"A","type":"select","options":[{"value":"x"},{"value":"x"}]}]}', '0').error;
+      checks.parseRejectsBadNumber = !!parseFormSpec('{"fields":[{"name":"a","label":"A","type":"number","min":5,"max":1}]}', '0').error;
+      checks.parseRejectsActionCollision = !!parseFormSpec('{"fields":[{"name":"a","label":"A"}],"actions":[{"name":"submit","label":"S"}]}', '0').error;
+      checks.parseAcceptsActions = !parseFormSpec('{"fields":[{"name":"a","label":"A"}],"submit":{"name":"go","label":"开始"},"actions":[{"name":"skip","label":"跳过","value":{"skipped":true}}]}', '0').error;
+      checks.parseTooManyFields = !!parseFormSpec(JSON.stringify({
+        fields: Array.from({ length: 41 }, (_, i) => ({ name: 'f' + i, label: 'F' + i })),
+      }), '0').error;
+
+      // Rendering. The rules worth pinning: every control is associated with its label, and no
+      // model-authored string ever becomes markup.
+      let submitted = null;
+      const rendered = renderForm(parsed.spec, { onSubmit: (ev) => { submitted = ev; } });
+      const rnode = rendered.node;
+      checks.renderTitle = rnode.querySelector('.form-title').textContent === '目标设备信息';
+      checks.renderFieldCount = rnode.querySelectorAll('.form-row').length === 6;
+      checks.renderNoteIsNotARow = rnode.querySelectorAll('.form-note').length === 1;
+      checks.renderLabelsBound = [...rnode.querySelectorAll('.form-label')].every((l) => !!rnode.querySelector('#' + l.getAttribute('for')));
+      checks.renderPlaceholder = rnode.querySelector('#f_name').getAttribute('placeholder') === 'demo';
+      checks.renderRequiredMark = !!rnode.querySelector('.form-req');
+      checks.renderSelectDefault = rnode.querySelector('#f_tier').value === 'pro';
+      // Index 1 is the "（不选）" placeholder an optional select gets, so the first real option
+      // is index 1 and the labelled one is index 2: the label has to survive next to the value.
+      checks.renderSelectPlaceholder = rnode.querySelector('#f_tier').options[0].value === '';
+      checks.renderSelectLabels = rnode.querySelector('#f_tier').options[2].textContent === '专业版';
+      checks.renderNumberBounds = rnode.querySelector('#f_count').getAttribute('min') === '1'
+        && rnode.querySelector('#f_count').getAttribute('max') === '10';
+      checks.renderCheckbox = rnode.querySelector('#f_urgent').type === 'checkbox';
+      checks.renderRadioGroup = rnode.querySelectorAll('#f_env input[type=radio]').length === 2;
+      // A model that writes HTML in a label gets it as text, exactly like the Markdown renderer
+      // treats it. This is the assertion that would fail if anyone ever "helpfully" switched a
+      // textContent to an innerHTML.
+      // The closing tag is built by concatenation on purpose: a literal one inside this inline
+      // script would end the script block and break the whole page — the same trap the prompt
+      // contract avoids when it talks about ```html.
+      const hostile = parseFormSpec(JSON.stringify({
+        title: '<img src=x onerror=alert(1)>',
+        fields: [{ name: 'a', label: '<script>alert(1)<' + '/script>', help: '<b>x</b>' }],
+      }), '0');
+      const hostileNode = renderForm(hostile.spec, {}).node;
+      checks.renderNoMarkup = hostileNode.querySelectorAll('img, script, b').length === 0
+        && hostileNode.querySelector('.form-title').textContent.includes('<img');
+      checks.renderSelectMulti = parseFormSpec(JSON.stringify({
+        fields: [{ name: 'tags', label: '标签', type: 'select', multiple: true, options: ['a', 'b'] }],
+      }), '0').spec.fields[0].multiple === true;
+
+      // Collecting values: the shape the model receives.
+      rnode.querySelector('#f_name').value = 'demo';
+      rnode.querySelector('#f_urgent').checked = true;
+      rnode.querySelector('#f_env').querySelectorAll('input')[1].checked = true;
+      rnode.querySelector('#f_count').value = '3';
+      const submitBtn = rnode.querySelector('.form-actions .btn-primary');
+      submitBtn.click();
+      checks.submitFired = !!submitted;
+      checks.submitName = submitted && submitted.name === 'submit';
+      checks.submitLabelIsTitle = submitted && submitted.label === '目标设备信息';
+      checks.submitValues = submitted && submitted.data.name === 'demo'
+        && submitted.data.tier === 'pro' && submitted.data.urgent === true
+        && submitted.data.env === 'staging' && submitted.data.count === 3;
+      // Omitted rather than sent as "" or 0: "not answered" has to be distinguishable.
+      checks.submitOmitsEmpty = submitted && !Object.prototype.hasOwnProperty.call(submitted.data, 'region');
+      checks.collectHasNoProto = !Object.prototype.hasOwnProperty.call(rendered.collect(), '__proto__');
+
+      // An action button reports its own event name and merges its value.
+      submitted = null;
+      const withAction = renderForm(parseFormSpec(JSON.stringify({
+        fields: [{ name: 'a', label: 'A' }],
+        actions: [{ name: 'skip', label: '跳过', value: { skipped: true } }],
+      }), '0').spec, { onSubmit: (ev) => { submitted = ev; } });
+      [...withAction.node.querySelectorAll('.form-actions button')].find((b) => b.textContent === '跳过').click();
+      checks.actionEventName = submitted && submitted.name === 'skip';
+      checks.actionMergesValue = submitted && submitted.data.skipped === true;
+      checks.actionSendsFields = submitted && submitted.data.a === undefined; // empty optional omitted
+
+      // A busy form cannot submit twice: that is the difference between one billed turn and two.
+      submitted = null;
+      rendered.setBusy(true);
+      checks.busyDisablesButton = submitBtn.disabled === true;
+      checks.busyDisablesControls = rnode.querySelector('#f_name').disabled === true;
+      submitBtn.click();
+      checks.busyBlocksSubmit = submitted === null;
+      rendered.setBusy(false);
+      checks.idleReenables = submitBtn.disabled === false;
+
+      // An oversize submission is refused with a reason instead of being sent. One long field
+      // would not prove this: a single value is clipped at 2000 characters, so the only way past
+      // the 8 KiB event cap is many fields at once — which is exactly how a form gets there in
+      // practice.
+      submitted = null;
+      const manyFields = parseFormSpec(JSON.stringify({
+        fields: Array.from({ length: 20 }, (_, i) => ({ name: 'f' + i, label: 'F' + i })),
+      }), '0').spec;
+      const manyRendered = renderForm(manyFields, { onSubmit: (ev) => { submitted = ev; } });
+      for (const input of manyRendered.node.querySelectorAll('.form-input')) input.value = 'y'.repeat(900);
+      manyRendered.node.querySelector('.btn-primary').click();
+      checks.oversizeRefused = submitted === null
+        && manyRendered.node.querySelector('.form-status').className.includes('error');
+      checks.oversizeSaysWhy = (manyRendered.node.querySelector('.form-status').textContent || '').includes('上限');
+      // Detached again before anything else applies a directive: two forms on screen at once
+      // would share the id `#form_0`, and a duplicate id makes every later selector ambiguous.
+      manyRendered.node.remove();
+
+      // The `ui` directive patches a form in place, using the same whitelist as a preview. The
+      // form has to be in the document for this: the directive resolves its selectors against
+      // the form's own subtree, exactly as the transcript does.
+      pageEl.append(rnode);
+      const applied = rendered.apply([
+        { op: 'text', target: '#f_region', value: 'cn-north-1' },
+        { op: 'disable', target: '#f_name', value: true },
+        { op: 'message', target: '#form_0', value: '已按 demo 查询', level: 'ok' },
+      ]);
+      checks.applyTextOp = rnode.querySelector('#f_region').textContent === 'cn-north-1';
+      checks.applyDisableOp = rnode.querySelector('#f_name').disabled === true;
+      checks.applyMessageOp = !!rnode.querySelector('#form_0 > .aigw-msg');
+      checks.applyReportsCount = applied.applied.length === 3 && applied.errors.length === 0;
+      // The reason travels with the failure: an assertion that only says `false` costs a whole
+      // extra run to interpret.
+      if (!checks.applyReportsCount) {
+        checks.applyErrors = JSON.stringify(applied.errors)
+          + ' | id=' + rnode.id + ' | inDoc=' + rnode.isConnected
+          + ' | byId=' + (document.getElementById('form_0') === rnode)
+          + ' | count=' + document.querySelectorAll('#form_0').length
+          + ' | scopeCount=' + rnode.querySelectorAll('#form_0').length
+          + ' | tag=' + rnode.tagName;
+      }
+      const appliedBad = rendered.apply([{ op: 'text', target: '#nope', value: 'x' }]);
+      checks.applyReportsMissingTarget = appliedBad.errors.length === 1 && appliedBad.errors[0].includes('#nope');
+      checks.applyRefusesUnknownOp = rendered.apply([{ op: 'html', target: '#form_0', value: '<b>x</b>' }]).errors.length === 1;
+      checks.applyWroteNoMarkup = rnode.querySelectorAll('b').length === 0;
+      rnode.remove();
+
+      // ---- the live path: chat.js renders a form out of an answer, and the answer comes back
+      // The session fixture gets one assistant message whose text carries a form block.
+      const FORM_SPEC = {
+        title: '目标设备信息',
+        fields: [
+          { name: 'region', label: '区域', required: true },
+          { name: 'tier', label: '套餐', type: 'select', options: ['free', 'pro'], value: 'free' },
+        ],
+      };
+      const FENCE = '`'.repeat(3);
+      const formText = '我需要两项信息：\n\n' + FENCE + 'form\n' + JSON.stringify(FORM_SPEC) + '\n' + FENCE + '\n';
+      const sessionWithForm = JSON.parse(JSON.stringify(SESSION));
+      sessionWithForm.messages = sessionWithForm.messages.concat([{
+        id: 'cmsg_form1', session_id: 'chat_1', turn_id: 'turn_form', seq: 3, role: 'assistant',
+        content: formText, parts: [{ type: 'text', text: formText }],
+        status: 'ok', request_ids: [], created_at: '2026-09-12T08:01:00Z',
+      }]);
+      window.__formSession = sessionWithForm;
+      window.__forcedFrames = [
+        { type: 'text', delta: '正在查 ' },
+        { type: 'text', delta: 'cn-north-1…' },
+        { type: 'text', delta: '\n\n' + FENCE + 'ui\n{"ops":[{"op":"set","target":"#f_region","value":"cn-north-1"},{"op":"text","target":"#form_0 .form-title","value":"已按区域查询"}]}\n' + FENCE + '\n' },
+        { type: 'done', status: 'completed' },
+      ];
+      const destroyForm = await renderChat({
+        page: pageEl,
+        actions: document.getElementById('actions'),
+        session: { role: 'admin', username: 'admin' },
+        route: { path: '/chat', params: new URLSearchParams('session=chat_1') },
+        navigate: () => {},
+      });
+      await settle();
+      checks.inlineFormRendered = !!pageEl.querySelector('.chat-form');
+      checks.inlineFormInBubble = !!pageEl.querySelector('.chat-msg.assistant .chat-form');
+      checks.inlineFormTitle = (pageEl.querySelector('.chat-form .form-title') || {}).textContent === '目标设备信息';
+      checks.inlineFormNoCodeBlock = !pageEl.querySelector('.chat-form .md-code-wrap');
+      checks.inlineFormSpecReachable = !!pageEl.querySelector('.chat-form .form-source');
+
+      // Submit it: the console must post the structured event as a normal turn. The value typed
+      // here is deliberately NOT what the directive sets (`cn-north-1`): if both were the same,
+      // "the answer patched the field" and "nothing happened at all" would look identical.
+      const inline = pageEl.querySelector('.chat-form');
+      inline.querySelector('#f_region').value = 'eu-west-1';
+      inline.querySelector('.form-actions .btn-primary').click();
+      await settle();
+      const sentTurn = JSON.parse((window.__sent || {})['/chat/sessions/chat_1/turns'] || '{}');
+      checks.inlineSubmitPosts = (sentTurn.content || '').includes('"source":"ui_event"');
+      checks.inlineSubmitData = (sentTurn.content || '').includes('"region":"eu-west-1"');
+      checks.inlineSubmitTitle = (sentTurn.content || '').startsWith('目标设备信息');
+      // The answer streams into the form itself, and the directive lands at the end of the turn.
+      checks.inlineAnswerStreamed = pageText().includes('正在查') || !!pageEl.querySelector('.form-status');
+      const afterTurn = [...pageEl.querySelectorAll('.chat-form')][0];
+      checks.inlineDirectiveApplied = afterTurn
+        && (afterTurn.querySelector('#f_region') || {}).value === 'cn-north-1';
+      checks.inlineDirectiveText = afterTurn
+        && ((afterTurn.querySelector('.form-title') || {}).textContent || '').includes('已按区域查询');
+      if (!checks.inlineDirectiveApplied || !checks.inlineDirectiveText) {
+        checks.inlineWhy = afterTurn
+          ? JSON.stringify({
+            forms: pageEl.querySelectorAll('.chat-form').length,
+            region: (afterTurn.querySelector('#f_region') || {}).value,
+            title: (afterTurn.querySelector('.form-title') || {}).textContent,
+            status: (afterTurn.querySelector('.form-status') || {}).textContent,
+            disabled: (afterTurn.querySelector('.btn-primary') || {}).disabled,
+          })
+          : 'no .chat-form in the transcript';
+      }
+      // The transcript keeps both bubbles: the form's question and the model's answer.
+      checks.inlineTranscriptKept = pageText().includes('目标设备信息');
+
+      window.__formSession = null;
+      window.__forcedFrames = null;
+      if (typeof destroyForm === 'function') destroyForm();
+      await settle();
+    } catch (err) {
+      checks.formThrew = String(err && err.stack ? String(err.stack).split('\n')[0] : err);
     }
   }
 } catch (err) {

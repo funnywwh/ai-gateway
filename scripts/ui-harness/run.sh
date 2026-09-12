@@ -19,7 +19,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${UI_HARNESS_WORK:-$ROOT/.cache/ui-harness}"
 PORT="${UI_HARNESS_PORT:-8097}"
-VIEWS="docs detail models create plugin plugin-cached currency keys requests paging chat skills bridge"
+VIEWS="docs detail models create plugin plugin-cached currency keys requests paging chat skills form bridge"
 FIXTURES="$ROOT/scripts/ui-harness/fixtures.json"
 REFRESH=0
 
@@ -78,7 +78,7 @@ page_for_view() {
     currency) echo "currency.html" ;;
     keys|requests) echo "keys.html" ;;
     paging) echo "paging.html" ;;
-    chat|skills) echo "chat.html" ;;
+    chat|skills|form) echo "chat.html" ;;
     # Not a console view: the browser's syntax check on the script the server injects into an
     # interactive preview. It shares the fixtures mechanism, so it rides along with the others.
     bridge) echo "bridge_syntax.html" ;;
