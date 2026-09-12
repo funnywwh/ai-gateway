@@ -96,6 +96,7 @@ make verify     # vet + test + build
 | `/admin/ui/*` | 内置控制台（零构建，随二进制发布） |
 | `scripts/load.sh` | 一键压测（自建 `cmd/loadgen`，输出 rps 与分位延迟） |
 | `scripts/deepseek-smoke.sh` | DeepSeek 接入走查（离线假上游；加 `--live` 与 `DEEPSEEK_API_KEY` 打真机） |
+| `scripts/verify-m34.sh` | 可交互预览的自查（29 项，真实 HTTP、不产生模型费用、结束自动清理）；`GW_ADMIN_PASSWORD=… scripts/verify-m34.sh` |
 | `scripts/ui-harness/run.sh`（`make ui-check`） | 控制台走查：API 快照 + headless firefox 渲染真实页面并断言（无 node 环境下的 UI 验证手段） |
 | `make verify` | vet + 全量测试 + 构建 |
 
