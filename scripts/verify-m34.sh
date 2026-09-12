@@ -204,7 +204,15 @@ have "响应头 X-Aigw-Bridge: 1" "$(cat "$H3")" 'X-Aigw-Bridge: 1'
 have "注入了 script#aigw-ui-bridge" "$B3" 'id="aigw-ui-bridge"'
 lack "注入标签不带任何凭证（没有 data-token）" "$B3" 'data-token'
 have "注入脚本只在自己是顶层文档时启动" "$B3" 'window.top'
-have "CSP 保留 'unsafe-inline'（模型页面自己的内联脚本必须还能跑）" "$(cat "$H3")" "'unsafe-inline'"
+# 问候必须重发：宿主可能先挂载 frame 再注册监听，只发一次的问候会丢（这正是"等待握手 3 秒后
+# 变成不可交互"的原因）。
+have "问候会重发（不会因为一次丢失就永远握不上手）" "$B3" 'sayHello'
+have "收到 port 后停止重发" "$B3" 'helloTimer'
+CSP3=$(grep -i '^Content-Security-Policy' "$H3" || true)
+# 先确认策略本身在，再断言内容：只匹配子串的话，一个空策略也会"通过"。
+have "交互预览带 CSP" "$CSP3" 'Content-Security-Policy'
+have "CSP 保留 'unsafe-inline'（模型页面自己的内联脚本必须还能跑）" "$CSP3" "'unsafe-inline'"
+have "CSP 的 script-src 就是 unsafe-inline" "$CSP3" "script-src 'unsafe-inline'"
 lack "CSP 里没有 nonce（有它会忽略 'unsafe-inline'，连带拦掉页面自己的脚本）" "$(cat "$H3")" 'nonce-'
 # 模型页面自己的内联脚本与事件处理器必须原样留在响应里
 have "模型页面的内联脚本仍在" "$B3" '<form' 

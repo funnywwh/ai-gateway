@@ -1274,6 +1274,21 @@
 - [x] 顺手：控制台从来没有 favicon，浏览器每次打开都多一行 404；补一个内联 SVG 图标
 - [x] `make verify` 全绿；`make ui-check` 13 视图全绿（chat 78 项）
 
+### 修正（真机反馈三）：问候比监听器更早发出（竞态）
+- [x] 根因：控制台先 `append(frame)` 再注册 `message` 监听器；iframe 一进 DOM 就开始加载，
+      注入脚本的问候可能在监听器存在之前发出并**被浏览器丢掉**，而脚本只发一次 → 永远握不上手，
+      工具栏「等待页面握手」→ 3 秒后「不可交互」
+- [x] 两处修：监听器先注册再挂载 frame；问候重发（600ms × 最多 6 次，收到 port 即停，幂等）
+- [x] 预览按钮的点击处理器改为 await + catch，失败弹「预览打开失败：<原因>」而不是留下无人处理的
+      rejection（此前界面上什么都不说）
+- [x] **删掉 harness 的 live 通道块（118 行）**，因为它在结构上无法真实驱动：沙箱 frame 的 window
+      对父窗口是跨源对象，`dispatchEvent` 直接抛 `SecurityError`（实测）。以前它"通过"靠的是
+      `contentDocument` 替身——那正是上一个缺陷上线的原因。原地写清它为何不可测、验证落在哪一层
+- [x] `verify-m34.sh` 扩到 **40 项**（新增：问候会重发、收到 port 后停发、CSP 必须存在且
+      `script-src 'unsafe-inline'`——这三条都是本次回归的判据）
+- [x] 设计文档新增「哪些能自动测、哪些不能」一节，把四个层次的覆盖方式列成表
+- [x] `make verify` 全绿；`make ui-check` 13 视图全绿（chat 98 项）
+
 ### 顺手修掉的既有缺陷
 - [x] `UpsertChatArtifact` 冲突分支不覆盖 `id`，而上传处理器用自己新生成的 id 拼 URL 签票据 →
       同一代码块第二次预览拿到 **404 的 URL**。改成 `INSERT … RETURNING id` 并回写真实 id
