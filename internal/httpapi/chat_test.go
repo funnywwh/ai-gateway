@@ -838,6 +838,48 @@ func TestChatToolSurfaceFollowsTheBoundToken(t *testing.T) {
 	}
 }
 
+// A model may call a query tool by its own name (they are first-class tools, listed
+// alongside the administrative entry points). The call must reach the query handler, not be
+// misrouted into admin_request — which would answer "unknown endpoint" and make the model
+// believe the read-only tools do not exist.
+func TestChatToolCallsQueryToolsDirectly(t *testing.T) {
+	f := newChatFixture(t)
+	tools := &chatTools{s: f.api, token: f.api.deps.MCPTokens}
+	ctx := context.Background()
+	access := chat.Access{
+		OwnerID: 1, Username: "admin", Role: chat.RoleAdmin,
+		WriteMode: domain.ChatWriteModeAllow, MCPTokenID: f.adminTokenID, SessionID: "s6",
+	}
+
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+		want string // a substring only the query handler produces
+	}{
+		{"get_balance", map[string]any{}, "balance"},
+		{"get_usage_summary", map[string]any{"period": "last_7_days"}, "attempts"},
+		{"get_usage_breakdown", map[string]any{"period": "last_7_days", "group_by": "key"}, "group_by"},
+		{"get_dashboard", map[string]any{"period": "last_7_days"}, "requests"},
+		{"get_models", map[string]any{}, "models"},
+		{"list_requests", map[string]any{"period": "last_7_days"}, "requests"},
+	} {
+		result, err := tools.Call(ctx, access, tc.name, tc.args)
+		if err != nil {
+			t.Fatalf("%s failed: %v", tc.name, err)
+		}
+		if result.IsError {
+			t.Fatalf("%s was reported as an error: %v", tc.name, result.Value)
+		}
+		text, _ := result.Value.(string)
+		if strings.Contains(text, "unknown endpoint") || strings.Contains(text, "unknown tool") {
+			t.Fatalf("%s was misrouted through admin_request: %s", tc.name, text)
+		}
+		if !strings.Contains(text, tc.want) {
+			t.Fatalf("%s response lacks %q: %s", tc.name, tc.want, text)
+		}
+	}
+}
+
 // Revoking the token ends the conversation's authority at the next call. This is the whole
 // reason scope is re-read per call instead of snapshotted onto the session.
 func TestChatRevokedOrExpiredTokenStopsTheConversation(t *testing.T) {

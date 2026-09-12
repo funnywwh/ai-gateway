@@ -120,6 +120,34 @@ func TestPrincipalActorNamesTheToken(t *testing.T) {
 	}
 }
 
+// The query tool names are written in three places — the closed set behind
+// IsQueryTool, the declarations in Tools, and the dispatch switch in callRead —
+// and they must never drift apart, because the console chat routes on IsQueryTool.
+func TestQueryToolSetIsConsistent(t *testing.T) {
+	service, _, _ := newMCPFixture(t)
+
+	declared := map[string]bool{}
+	for _, tool := range service.Tools() {
+		declared[tool.Name] = true
+	}
+	if len(declared) != len(queryToolNames) {
+		t.Fatalf("Tools() declares %d tools but queryToolNames has %d", len(declared), len(queryToolNames))
+	}
+	for name := range queryToolNames {
+		if !declared[name] {
+			t.Errorf("query tool %q is in queryToolNames but not declared in Tools()", name)
+		}
+		if _, _, known := service.callRead(context.Background(), 0, name, nil); !known {
+			t.Errorf("query tool %q is in queryToolNames but callRead does not dispatch it", name)
+		}
+	}
+	for name := range declared {
+		if !IsQueryTool(name) {
+			t.Errorf("tool %q is declared in Tools() but IsQueryTool reports false", name)
+		}
+	}
+}
+
 func TestScopeHelpers(t *testing.T) {
 	if NormalizeScope("admin") != ScopeAdmin || NormalizeScope("") != ScopeQuery || NormalizeScope("root") != ScopeQuery {
 		t.Fatal("NormalizeScope must map unknown scopes to the read-only default")

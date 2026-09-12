@@ -79,6 +79,14 @@
    所以这不是放宽权限，只是把意图明确的调用接住。既不是工具也不是端点的名字，
    回一句「本网关提供 admin_endpoints / admin_describe / admin_request」。
    > 折叠逻辑保留，但「走同一条允许清单」这句话已被取代：现在判定走的是令牌 scope。
+   >
+   > 早期折叠只服务 3 个后台工具，M33 把工具面变成「11 个查询工具 + 3 个后台工具」后这段
+   > 没跟着改：`chatTools.Call` 把 `get_balance`/`get_usage_summary`/`get_dashboard`/
+   > `get_usage_breakdown` 等查询工具也一并折叠成 `admin_request{name: <工具名>}`，后端回
+   > `unknown endpoint`，让模型误以为这些只读工具没注册（真机出现过）。修复：`mcpsrv`
+   > 提供查询工具名清单 `queryToolNames` 与 `IsQueryTool`，折叠只在「既不是查询工具、也不是
+   > 三个后台工具」时才发生；`TestQueryToolSetIsConsistent` 钉住清单与 `Tools()`/`callRead`
+   > 不漂移，`TestChatToolCallsQueryToolsDirectly` 钉住查询工具按名字直接透传。
 
 另外两点实现细节值得记录：
 

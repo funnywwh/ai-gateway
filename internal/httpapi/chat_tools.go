@@ -162,7 +162,12 @@ func (t *chatTools) Call(ctx context.Context, access chat.Access, name string, a
 	// name is the endpoint they wanted and the arguments are already shaped for it — so the
 	// call is routed rather than bounced. This is not a widened surface: it lands in exactly
 	// the place the equivalent admin_request call would.
-	if name != toolAdminEndpoints && name != toolAdminDescribe && name != toolAdminRequest {
+	//
+	// The read-only query tools (get_balance, get_usage_summary, …) are *not* endpoints:
+	// they are first-class MCP tools and must be passed through unchanged. Rewriting them
+	// into admin_request{name: "get_balance"} would answer "unknown endpoint", which is what
+	// made the console chat claim the query tools were not registered at all.
+	if name != toolAdminEndpoints && name != toolAdminDescribe && name != toolAdminRequest && !mcpsrv.IsQueryTool(name) {
 		if _, exists := args["name"]; !exists {
 			args["name"] = name
 		}

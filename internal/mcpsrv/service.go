@@ -146,6 +146,32 @@ type Tool struct {
 	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
+// queryToolNames is the closed set of read-only query tool names. The console
+// chat uses it (via IsQueryTool) to tell a direct query-tool call apart from a
+// management endpoint name the model abbreviated, so the read-only tools are
+// passed straight to the MCP handler instead of being misrouted through
+// admin_request. TestQueryToolSetIsConsistent pins it to the tools declared in
+// Tools and dispatched in callRead.
+var queryToolNames = map[string]struct{}{
+	"get_balance":         {},
+	"get_ledger":          {},
+	"get_usage_summary":   {},
+	"list_requests":       {},
+	"get_request":         {},
+	"get_dashboard":       {},
+	"get_usage_breakdown": {},
+	"get_rate_limits":     {},
+	"list_invoices":       {},
+	"get_invoice":         {},
+	"get_models":          {},
+}
+
+// IsQueryTool reports whether name is one of the read-only query tools.
+func IsQueryTool(name string) bool {
+	_, ok := queryToolNames[name]
+	return ok
+}
+
 // Tools lists the read-only tools.
 func (s *Service) Tools() []Tool {
 	return []Tool{
