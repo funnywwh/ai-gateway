@@ -88,7 +88,14 @@ export function parseUISpec(text) {
 // nodes (a fixture tree must not be asked for createElement), and `root` is the subtree the
 // selectors are resolved against. In the console both are the console document; the frame is
 // patched through the port instead, by the page's own copy of this logic.
-export function applyUIOps(ops, { doc, root } = {}) {
+//
+// `resolve` is for callers whose root is an element that the directive also has to be able to
+// name. `Element.querySelectorAll` only ever matches *descendants*, so a directive targeting
+// `#form_0` -- the form itself, which is the obvious way to put a message on a form -- finds
+// nothing under a root that is `#form_0`. Passing a resolver that checks the root first fixes
+// that without changing where the root lives in the document (moving it into a wrapper would
+// re-parent the node on every directive, which detaches iframes and drops focus).
+export function applyUIOps(ops, { doc, root, resolve } = {}) {
   // The variable names matter here: an earlier version called the document `target` and then
   // shadowed it with `const target = String(op.target)`, so every operation that creates a node
   // was handed a CSS selector instead of a document. Distinct names are the whole fix.
@@ -97,6 +104,7 @@ export function applyUIOps(ops, { doc, root } = {}) {
   const applied = [];
   const errors = [];
   if (!owner || !scope) return { applied, errors: ['当前环境没有可操作的文档'] };
+  const pick = resolve || ((selector) => scope.querySelectorAll(selector));
   for (const [index, raw] of (ops || []).entries()) {
     const op = raw && typeof raw === 'object' ? raw : null;
     if (!op) {
@@ -115,7 +123,7 @@ export function applyUIOps(ops, { doc, root } = {}) {
     }
     let nodes;
     try {
-      nodes = scope.querySelectorAll(selector);
+      nodes = pick(selector);
     } catch (err) {
       errors.push(`第 ${index + 1} 条（${kind}）：选择器 ${selector} 不合法`);
       continue;
