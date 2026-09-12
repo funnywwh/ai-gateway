@@ -1132,7 +1132,13 @@
       HTML5 预览返回 `sandbox allow-scripts; default-src 'none'; connect-src 'none'` + `no-store`，
       无票据 404，**登出后同一票据 404**；SVG 预览只有 `sandbox`（无 `allow-scripts`）；
       `/admin/ui/` 下的 chat/skills/chart/markdown/chat_artifact 资源全部 200
-- [ ] **待人工执行**（宿主终端）：`make build` + `scripts/local-run.sh restart`，硬刷新
+- [x] 补充：会话头部的令牌徽章可点击**改绑** `mcp_token_id`（后端 PATCH 早已支持，之前没有
+      界面入口，导致升级前的会话只能丢弃重建）。改绑只换身份，技能/消息/计费绑定不动；
+      界面把派生出的 `write_mode` 交给服务端算，不自己推。harness 增加 7 项断言
+      （徽章可点、只列可用令牌、预选当前、提示随选择更新、PATCH 只发一个字段、服务端派生值生效）
+- [x] 已随用户重启生效：迁移 0011 已在开发库应用（`mcp_token_id` 列存在，旧会话保持 NULL）；
+      实测改绑 `query`→`read_only`、`admin`→`allow_writes`、不存在的 id 返回 400 且不改动原绑定
+- [ ] **待人工执行**（宿主终端）：硬刷新
       http://127.0.0.1:8088/admin/ui/#/chat ——在真实部署上用有余额的账户选模型提问，
       确认回答流式出现、图表与 HTML5 预览可打开、`console` 出现在请求日志
 - [x] 修正（真机反馈）：步数与工具次数改为 **`0 = 不限制` 且默认 0**——一次提问一直进行到模型
@@ -1169,7 +1175,13 @@
       工具面随 scope（14 / 11）、无令牌会话无法创建；`mcp_admin_test.go` 保持不动作为令牌路径不变量
 - [x] 界面：新建会话的「写权限」开关换成 MCP 令牌选择器（只列 active 且未过期，选中后显示
       该 scope 的能力摘要）；会话头显示绑定的令牌与派生权限；`scripts/ui-harness` 同步更新
-- [ ] **待人工执行**（宿主终端）：`make build` + `scripts/local-run.sh restart`，硬刷新
+- [x] 补充：会话头部的令牌徽章可点击**改绑** `mcp_token_id`（后端 PATCH 早已支持，之前没有
+      界面入口，导致升级前的会话只能丢弃重建）。改绑只换身份，技能/消息/计费绑定不动；
+      界面把派生出的 `write_mode` 交给服务端算，不自己推。harness 增加 7 项断言
+      （徽章可点、只列可用令牌、预选当前、提示随选择更新、PATCH 只发一个字段、服务端派生值生效）
+- [x] 已随用户重启生效：迁移 0011 已在开发库应用（`mcp_token_id` 列存在，旧会话保持 NULL）；
+      实测改绑 `query`→`read_only`、`admin`→`allow_writes`、不存在的 id 返回 400 且不改动原绑定
+- [ ] **待人工执行**（宿主终端）：硬刷新
       http://127.0.0.1:8088/admin/ui/#/chat ——新建会话时选一个 `admin` scope 的令牌，
       在智能问答里建账户/发 Key，确认账户出现在账户页、明文 Key 只返回一次并带提示、
       `chat_tool_calls` 有记录、审计 actor 为 `mcp:<令牌名>#<id>`；再撤销该令牌，

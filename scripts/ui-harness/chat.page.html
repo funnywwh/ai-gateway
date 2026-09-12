@@ -26,6 +26,12 @@
 // captured snapshot would only restate what the page already sends.
 const FIXTURES = __FIXTURES__;
 
+const MCP_TOKENS = [
+  { id: 2, name: 'dsh', token_prefix: 'aigw_mcp_qad', scope: 'admin_read', status: 'active' },
+  { id: 3, name: 'operator', token_prefix: 'aigw_mcp_zzz', scope: 'admin', status: 'active' },
+  { id: 4, name: 'retired', token_prefix: 'aigw_mcp_old', scope: 'admin', status: 'revoked' },
+];
+
 const SESSION = {
   id: 'chat_1', object: 'chat.session', title: '本月成本', model: 'deepseek-flash',
   account_id: 1, api_key_id: 1, mcp_token_id: 2, write_mode: 'read_only', skill_ids: [7],
@@ -130,6 +136,18 @@ window.fetch = async (url, options) => {
   if (path === '/chat/sessions/chat_1/artifacts') {
     return json({ id: 'art_1', url: '/admin/chat-artifact/art_1', ticket: 'tkt_demo', expires_at: '2026-09-12T08:10:00Z' });
   }
+  if (path === '/chat/sessions/chat_1' && options && options.method === 'PATCH') {
+    // Answer like the real server: re-derive write_mode from the newly bound token's scope
+    // instead of echoing the old value. A stub that echoed would let "rebind to an admin
+    // token" pass while the badge still said 只读.
+    const body = JSON.parse(options.body || '{}');
+    const bound = MCP_TOKENS.find((t) => t.id === body.mcp_token_id);
+    return json({
+      ...SESSION,
+      mcp_token_id: body.mcp_token_id === undefined ? SESSION.mcp_token_id : body.mcp_token_id,
+      write_mode: bound && bound.scope === 'admin' ? 'allow_writes' : 'read_only',
+    });
+  }
   if (path === '/chat/sessions/chat_1') return json(SESSION);
   if (path === '/chat/sessions' && options && options.method === 'POST') return json(SESSION);
   if (path === '/chat/sessions') return json({ object: 'list', data: [SESSION], total: 1, limit: 30, offset: 0, count: 1 });
@@ -144,13 +162,7 @@ window.fetch = async (url, options) => {
   if (path === '/accounts') return json({ data: [{ id: 1, name: 'acme', billing_mode: 'postpaid' }], total: 1, count: 1, limit: 200, offset: 0 });
   if (path === '/keys') return json({ data: [{ id: 1, name: 'console-chat', key_prefix: 'sk-gw-abc', status: 'active' }], total: 1, count: 1, limit: 200, offset: 0 });
   // The new-session dialog lists the tokens a conversation may act as.
-  if (path === '/mcp-tokens') return json({
-    data: [
-      { id: 2, name: 'dsh', token_prefix: 'aigw_mcp_qad', scope: 'admin_read', status: 'active' },
-      { id: 3, name: 'operator', token_prefix: 'aigw_mcp_zzz', scope: 'admin', status: 'active' },
-      { id: 4, name: 'retired', token_prefix: 'aigw_mcp_old', scope: 'admin', status: 'revoked' },
-    ], total: 3, count: 3, limit: 200, offset: 0,
-  });
+  if (path === '/mcp-tokens') return json({ data: MCP_TOKENS, total: MCP_TOKENS.length, count: MCP_TOKENS.length, limit: 200, offset: 0 });
   if (path === '/chat/sessions/chat_1/skill-draft') {
     return json({ name: '成本核对', description: '每月核对成本', instructions: '查账户→查用量', note: '', request_id: 'req_draft01', model: 'deepseek-flash' });
   }
@@ -235,6 +247,41 @@ try {
     checks.toolResultShown = pageText().includes('admin_request_dimensions');
     checks.usageFooter = pageText().includes('tokens 1200→240') || pageText().includes('收费');
     checks.skillChip = [...pageEl.querySelectorAll('.chip')].some((n) => n.textContent.includes('成本排查'));
+
+    // The token badge is the control for a conversation's authority. It must show the bound
+    // token, and rebinding must PATCH mcp_token_id — that is the only way to bring an older
+    // conversation back to life (or move it to a narrower scope) without abandoning the
+    // skills it has loaded.
+    const tokenBadge = pageEl.querySelector('.chat-header .badge-button');
+    checks.tokenBadgeShown = !!tokenBadge && tokenBadge.textContent.includes('MCP 令牌 #2');
+    if (tokenBadge) {
+      tokenBadge.click();
+      await settle();
+      const picker = document.querySelector('.modal-body select');
+
+      checks.rebindPickerOffersUsableTokens = !!picker && picker.options.length === 2
+        && ![...picker.options].some((o) => o.textContent.includes('retired'));
+      checks.rebindPickerPreselectsCurrent = !!picker && picker.value === '2';
+      if (picker) {
+        picker.value = '3';
+        picker.dispatchEvent(new Event('change'));
+        await settle();
+        // The dialog is appended to #modal-root, outside pageEl, so read it directly.
+        const lastModal = [...document.querySelectorAll('.modal')].pop();
+        checks.rebindHintUpdates = !!lastModal
+          && lastModal.textContent.includes('可执行全部控制台操作（含发凭据、动账、删除）');
+        const confirmBtn = [...document.querySelectorAll('.modal-actions button')]
+          .find((b) => b.textContent.trim() === '改绑');
+        checks.rebindConfirmPresent = !!confirmBtn;
+        if (confirmBtn) {
+          confirmBtn.click();
+          await settle();
+          const sent = JSON.parse((window.__sent || {})['/chat/sessions/chat_1'] || '{}');
+          checks.rebindPatched = sent.mcp_token_id === 3;
+          checks.rebindSingleField = Object.keys(sent).length === 1;
+        }
+      }
+    }
 
     // The chart is drawn locally as SVG; its data table and source note are what let a
     // person check the numbers the model drew.

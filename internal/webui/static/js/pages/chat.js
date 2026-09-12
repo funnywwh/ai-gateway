@@ -17,6 +17,42 @@ import { openPreview } from './chat_artifact.js';
 // and a page can be re-rendered while an earlier turn is still finishing.
 let paintTimer = null;
 
+// MCP token helpers.
+//
+// These live at module scope rather than inside render(): they are pure functions of their
+// arguments, several call sites need them, and hoisted declarations cannot be caught in a
+// temporal-dead-zone error by a handler that runs earlier than the point of declaration.
+
+// What a scope means in plain language. Used by both the new-session dialog and the rebind
+// dialog, so the two cannot describe the same scope differently.
+function scopeSummary(scope) {
+  if (scope === 'admin') return '可执行全部控制台操作（含发凭据、动账、删除）';
+  if (scope === 'admin_read') return '后台只读：可查询，不能修改';
+  return '只能查询本账户的用量与账单';
+}
+
+// Only tokens that are usable right now can be bound: a revoked or expired one would be
+// refused by the server anyway, and offering it would just be a trap.
+async function fetchUsableTokens() {
+  try {
+    const payload = await api.get('/mcp-tokens', { limit: 200 });
+    return (payload.data || []).filter((token) => {
+      if (token.status !== 'active') return false;
+      if (!token.expires_at) return true;
+      return new Date(token.expires_at).getTime() > Date.now();
+    });
+  } catch (err) {
+    return [];
+  }
+}
+
+function tokenOption(token) {
+  return el('option', {
+    value: String(token.id),
+    text: (token.name || token.token_prefix) + ' · scope=' + (token.scope || 'query'),
+  });
+}
+
 export async function render({ page, actions, session, route }) {
   const state = {
     sessions: [],
@@ -135,6 +171,71 @@ export async function render({ page, actions, session, route }) {
     renderMain();
   }
 
+  // rebindToken points an existing conversation at another token. It exists because a
+  // conversation's authority lives in the token, not in the session row: when a token is
+  // revoked or expires, rebinding is how the operator restores the conversation instead of
+  // abandoning it (and the skills it has loaded) and starting over.
+  async function rebindToken() {
+    const current = state.session.mcp_token_id ? String(state.session.mcp_token_id) : '';
+    const tokens = await fetchUsableTokens();
+    const picker = el('select', {});
+    for (const token of tokens) picker.append(tokenOption(token));
+    if (current && tokens.some((token) => String(token.id) === current)) picker.value = current;
+    const hint = el('p', { class: 'muted' });
+    const status = el('div', { class: 'muted' });
+    const describe = () => {
+      const chosen = tokens.find((token) => String(token.id) === picker.value);
+      hint.textContent = chosen
+        ? '改绑后本会话权限：' + scopeSummary(chosen.scope || 'query')
+        : '没有可用的 MCP 令牌：请先到「MCP 令牌」页签发一个。';
+    };
+    picker.addEventListener('change', describe);
+    describe();
+
+    const dialog = el('div', { class: 'modal' }, [
+      el('div', { class: 'toolbar' }, [el('h2', { text: '改绑 MCP 令牌' })]),
+      el('div', { class: 'modal-body' }, [
+        el('label', { class: 'field' }, [el('span', { text: 'MCP 令牌' }), picker]),
+        hint,
+        el('p', {
+          class: 'muted',
+          text: '本会话已加载的技能、消息与计费绑定都不受影响；只换执行时使用的身份。工具面会在下一次提问时按新令牌的 scope 重新计算。',
+        }),
+        status,
+      ]),
+      el('div', { class: 'modal-actions' }, [
+        el('button', { class: 'btn', text: '取消', onclick: () => backdrop.remove() }),
+        el('button', {
+          class: 'btn btn-primary', text: '改绑', onclick: async () => {
+            if (!picker.value) {
+              status.textContent = '请先选择一个 MCP 令牌。';
+              status.className = 'toast error';
+              return;
+            }
+            try {
+              const updated = await api.patch('/chat/sessions/' + encodeURIComponent(state.session.id),
+                { mcp_token_id: Number(picker.value) });
+              // Trust the server's derived values rather than recomputing them here: write_mode
+              // is derived from the token's scope, and only the server knows the new one.
+              state.session.mcp_token_id = updated.mcp_token_id;
+              state.session.write_mode = updated.write_mode;
+              backdrop.remove();
+              renderSessionList();
+              renderMain();
+              toast('已改绑令牌', 'ok');
+            } catch (err) {
+              status.textContent = api.errorMessage(err);
+              status.className = 'toast error';
+            }
+          },
+        }),
+      ]),
+    ]);
+    const backdrop = el('div', { class: 'modal-backdrop' }, [dialog]);
+    backdrop.addEventListener('click', (ev) => { if (ev.target === backdrop) backdrop.remove(); });
+    document.getElementById('modal-root').append(backdrop);
+  }
+
   async function createSession() {
     if (!state.accounts.length) {
       try {
@@ -190,28 +291,11 @@ export async function render({ page, actions, session, route }) {
 
     // Only tokens that are usable right now can be bound: a revoked or expired one would be
     // refused by the server anyway, and offering it would just be a trap.
-    const scopeSummary = (scope) => {
-      if (scope === 'admin') return '可执行全部控制台操作（含发凭据、动账、删除）';
-      if (scope === 'admin_read') return '后台只读：可查询，不能修改';
-      return '只能查询本账户的用量与账单';
-    };
     async function loadTokens() {
       clear(tokenSelect);
-      try {
-        const payload = await api.get('/mcp-tokens', { limit: 200 });
-        state.tokens = (payload.data || []).filter((token) => {
-          if (token.status !== 'active') return false;
-          if (!token.expires_at) return true;
-          return new Date(token.expires_at).getTime() > Date.now();
-        });
-      } catch (err) {
-        state.tokens = [];
-      }
+      state.tokens = await fetchUsableTokens();
       for (const token of state.tokens) {
-        tokenSelect.append(el('option', {
-          value: String(token.id),
-          text: (token.name || token.token_prefix) + ' · scope=' + (token.scope || 'query'),
-        }));
+        tokenSelect.append(tokenOption(token));
       }
       const chosen = state.tokens.find((token) => String(token.id) === tokenSelect.value);
       tokenHint.textContent = chosen
@@ -278,18 +362,25 @@ export async function render({ page, actions, session, route }) {
     if (!state.session) { renderEmptyState(); return; }
     const s = state.session;
 
+    // The badge is the control: a conversation's authority lives in its token, so this is
+    // where the operator both reads and changes it.
+    const tokenBadge = el('button', {
+      class: 'badge badge-button ' + (s.write_mode === 'allow_writes' ? 'danger' : ''),
+      text: s.mcp_token_id
+        ? 'MCP 令牌 #' + s.mcp_token_id + (s.write_mode === 'allow_writes' ? '（全部控制台操作）' : '（只读）') + ' · 改绑'
+        : '未绑定 MCP 令牌 · 点击绑定',
+      title: s.mcp_token_id
+        ? '本会话的权限来自该令牌；撤销或让它过期后，下一次工具调用会立即失效。点击可换成别的令牌。'
+        : '这个会话没有绑定令牌，因此不能调用任何工具（技能只能被读到，执行不了）。点击绑定一个令牌即可恢复。',
+    });
+    tokenBadge.addEventListener('click', () => {
+      rebindToken().catch((err) => { toast(api.errorMessage(err), 'error'); });
+    });
+
     const header = el('div', { class: 'chat-header' }, [
       el('div', { class: 'chat-header-title', text: s.title || '未命名会话' }),
       el('div', { class: 'chat-header-meta', text: s.model + ' · 账户 #' + s.account_id + ' · Key #' + s.api_key_id }),
-      el('span', {
-        class: 'badge ' + (s.write_mode === 'allow_writes' ? 'danger' : ''),
-        text: s.mcp_token_id
-          ? 'MCP 令牌 #' + s.mcp_token_id + (s.write_mode === 'allow_writes' ? '（全部控制台操作）' : '（只读）')
-          : '未绑定 MCP 令牌',
-        title: s.mcp_token_id
-          ? '本会话的权限来自该令牌；在「MCP 令牌」页撤销或让其过期后，本会话的下一次工具调用会立即失效。'
-          : '升级前的会话没有绑定令牌，因此不能调用任何工具；请新建会话并选择令牌。',
-      }),
+      tokenBadge,
     ]);
     const chips = el('div', { class: 'chat-chips' });
     for (const skill of state.session.skills || []) {

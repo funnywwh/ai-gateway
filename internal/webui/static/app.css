@@ -85,6 +85,10 @@ label.field > span { display:block; color:var(--muted); font-size:12px; margin-b
 .badge.ok { color:var(--ok); border-color:var(--ok); }
 .badge.warn { color:var(--warn); border-color:var(--warn); }
 .badge.danger { color:var(--danger); border-color:var(--danger); }
+/* A badge that is also the control for what it describes (the chat's MCP token). It keeps
+   the badge shape so it still reads as status, but it must look clickable. */
+.badge-button { font: inherit; font-size:11.5px; background:transparent; cursor:pointer; }
+.badge-button:hover { color:var(--fg); border-color:var(--fg); }
 .muted { color:var(--muted); }
 .mono { font-family: ui-monospace, Menlo, monospace; font-size:12px; white-space:pre-wrap; word-break:break-word; }
 .toasts { position:fixed; right:16px; bottom:16px; display:flex; flex-direction:column; gap:8px; z-index:50; }
