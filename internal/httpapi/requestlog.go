@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -18,33 +19,63 @@ import (
 // dropped counter is then the honest signal.
 const skeletonWriteTimeout = 15 * time.Second
 
-// storeRequestLog writes one request-log row, and if that write fails it retries once with
-// the content stripped.
+// storeRequestLog records one request-log row.
 //
-// The audit trail has to outlive both the client and a busy writer. Before this, a failed
-// insert meant the row simply did not exist: an operator saw the request nowhere, which is
-// exactly the blind spot M19d/M19e were found through (20 such losses were logged in one
-// day on the local deployment, two of them losing the request entirely). A skeleton row —
-// which request, whose, when, how it ended, how big it was — keeps the request visible and
-// still says, honestly, that its content is not there.
+// Two paths, same audit contract:
+//
+//   - Batched (Deps.LogRecorder set): the row is queued and written by the background
+//     flusher in a shared transaction. The handler does not wait, which is the whole
+//     point — the write lock is the process's bottleneck, and a request has no reason to
+//     hold it. A row the batch could not write comes back through
+//     handleFailedRecording, which is the same skeleton fallback as below.
+//   - Synchronous (no LogRecorder): write now, and on failure write the row again
+//     without its content.
+//
+// The fallback exists because the audit trail has to outlive both the client and a busy
+// writer. Before it, a failed insert meant the row simply did not exist: an operator saw
+// the request nowhere, which is exactly the blind spot M19d/M19e were found through (20
+// such losses were logged in one day on the local deployment, two of them losing the
+// request entirely). A skeleton row — which request, whose, when, how it ended, how big it
+// was — keeps the request visible and still says, honestly, that its content is not there.
 func (s *Server) storeRequestLog(ctx context.Context, rec *domain.RequestLogRecord) {
 	if s.deps.Records == nil {
+		return
+	}
+	if s.deps.LogRecorder != nil {
+		s.deps.LogRecorder.EnqueueRecording(nil, rec)
 		return
 	}
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
 	err := s.deps.Records.PutRequestLog(writeCtx, rec)
 	cancel()
-	if err == nil {
-		return
+	if err != nil {
+		s.handleFailedRecording(ctx, rec, err)
 	}
+}
 
+// handleFailedRecording is the fallback for a content write that did not land, whether it
+// failed synchronously or in a batch. It writes a content-free skeleton row through
+// WriteNow when the recorder is batching (queuing the fallback behind the failed batch
+// would just fail again), and counts the loss when even that fails.
+func (s *Server) handleFailedRecording(ctx context.Context, rec *domain.RequestLogRecord, err error) {
 	s.requestLogWriteFailures.Add(1)
 	s.deps.Log.Warn("recording request content failed",
 		"err", err, "request_id", rec.RequestID, "request_bytes", rec.RequestBytes)
 
 	retryCtx, cancelRetry := context.WithTimeout(context.WithoutCancel(ctx), skeletonWriteTimeout)
 	defer cancelRetry()
-	if retryErr := s.deps.Records.PutRequestLog(retryCtx, skeletonLog(rec)); retryErr != nil {
+
+	bare := skeletonLog(rec)
+	var retryErr error
+	switch {
+	case s.deps.LogRecorder != nil:
+		retryErr = s.deps.LogRecorder.WriteNow(retryCtx, nil, bare)
+	case s.deps.Records != nil:
+		retryErr = s.deps.Records.PutRequestLog(retryCtx, bare)
+	default:
+		retryErr = errors.New("no record store configured")
+	}
+	if retryErr != nil {
 		s.requestLogDropped.Add(1)
 		s.deps.Log.Error("request log lost entirely",
 			"err", retryErr, "request_id", rec.RequestID, "status", rec.Status)
@@ -78,6 +109,21 @@ func (s *Server) retentionWindow() (time.Duration, bool) {
 	return time.Duration(days) * 24 * time.Hour, true
 }
 
+// SetRecordingFailureHandler installs the callback the batched recorder calls when it
+// could not write a queued row. It exists because the two halves own different things:
+// the store owns the queue, the transport owns the retry policy (skeleton fallback plus
+// the counters an operator reads). The composition root wires them after both exist.
+func (s *Server) SetRecordingFailureHandler(install func(func(*domain.RequestLogRecord, error))) {
+	if install == nil {
+		return
+	}
+	install(func(rec *domain.RequestLogRecord, err error) {
+		// The batch has already given up on this row; ctx only carries the request id
+		// and is used for the detached fallback write.
+		s.handleFailedRecording(context.Background(), rec, err)
+	})
+}
+
 // requestLogStats reports the write health of the request log plus the retention policy,
 // for /stats and the console.
 func (s *Server) requestLogStats() map[string]any {
@@ -85,6 +131,9 @@ func (s *Server) requestLogStats() map[string]any {
 		"write_failures": s.requestLogWriteFailures.Load(),
 		"dropped":        s.requestLogDropped.Load(),
 		"retention_days": s.deps.Config.Recording.RetentionDays,
+	}
+	if rec := s.deps.LogRecorder; rec != nil {
+		stats["batching"] = rec.Stats()
 	}
 	if janitor := s.deps.LogJanitor; janitor != nil {
 		stats["pruned"] = janitor.PrunedTotal()

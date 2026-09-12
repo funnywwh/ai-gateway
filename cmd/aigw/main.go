@@ -373,18 +373,40 @@ func run() int {
 		warnMissingRate("bootstrap.models."+model.PublicName, model.SalePricing)
 	}
 
+	// Audit batching: the request path hands its two audit rows (stored response +
+	// request log) to a background flusher instead of taking the single writer
+	// connection twice per request. The transport keeps the retry policy, so the store
+	// reports a row it could not write back to the server that counts and retries it.
+	var auditWriter *store.LogWriter
+	if cfg.Recording.BatchingEnabled() {
+		auditWriter = store.NewLogWriter(db, store.LogWriterConfig{
+			FlushInterval: time.Duration(cfg.Recording.BatchFlushMS) * time.Millisecond,
+			MaxBatch:      cfg.Recording.BatchMaxRows,
+			MaxBytes:      cfg.Recording.BatchMaxBytes,
+			QueueRows:     cfg.Recording.BatchQueueRows,
+			QueueBytes:    cfg.Recording.BatchQueueBytes,
+		}, log, nil)
+		log.Info("audit writes batched in the background",
+			"flush_ms", cfg.Recording.BatchFlushMS,
+			"max_rows", cfg.Recording.BatchMaxRows,
+			"max_bytes", cfg.Recording.BatchMaxBytes,
+			"queue_rows", cfg.Recording.BatchQueueRows,
+			"queue_bytes", cfg.Recording.BatchQueueBytes)
+	}
+
 	api := httpapi.New(httpapi.Deps{
-		Config:     cfg,
-		FX:         fxStore,
-		ReloadFX:   reloadFX,
-		Registry:   reg,
-		Router:     router,
-		Dispatcher: dispatcher,
-		Verifier:   verifier,
-		Limiter:    limiter,
-		Meter:      meter,
-		Records:    db,
-		LogJanitor: logJanitor,
+		Config:      cfg,
+		FX:          fxStore,
+		ReloadFX:    reloadFX,
+		Registry:    reg,
+		Router:      router,
+		Dispatcher:  dispatcher,
+		Verifier:    verifier,
+		Limiter:     limiter,
+		Meter:       meter,
+		Records:     db,
+		LogRecorder: auditWriter,
+		LogJanitor:  logJanitor,
 		MCP:        mcpService,
 		MCPTokens:  db,
 		Hooks:      hookDispatcher,
@@ -436,6 +458,12 @@ func run() int {
 		Version:        version,
 	})
 
+	if auditWriter != nil {
+		// The transport owns the skeleton fallback and its counters; the store owns the
+		// queue. Hand the store a way to report a row it gave up on.
+		api.SetRecordingFailureHandler(auditWriter.SetFailureHandler)
+	}
+
 	httpServer := &http.Server{
 		Addr:              cfg.Server.Listen,
 		Handler:           api.Handler(),
@@ -464,6 +492,13 @@ func run() int {
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Warn("graceful shutdown incomplete", "err", err)
+	}
+	// Drain the audit queue after the server has stopped accepting requests and before
+	// the store closes: everything accepted is written, nothing is left in memory.
+	if auditWriter != nil {
+		if err := auditWriter.Close(shutdownCtx); err != nil {
+			log.Error("audit write queue could not be drained", "err", err)
+		}
 	}
 	if err := host.StopAll(shutdownCtx); err != nil {
 		log.Warn("stopping plugin processes failed", "err", err)

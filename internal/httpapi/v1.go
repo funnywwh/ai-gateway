@@ -451,8 +451,9 @@ func (s *Server) persist(
 	// the three can never disagree about what was recorded under which policy.
 	input := s.recordInput(auditCtx, key, req)
 
+	var storedResp *domain.ResponseRecord
 	if req.Stored() {
-		rec := &domain.ResponseRecord{
+		storedResp = &domain.ResponseRecord{
 			ID:           assembler.ID(),
 			APIKeyID:     key.ID,
 			AccountID:    account.ID,
@@ -467,12 +468,18 @@ func (s *Server) persist(
 			CompletedAt:  &completed,
 			ExpiresAt:    expires,
 		}
-		if err := s.deps.Records.PutResponse(auditCtx, rec); err != nil {
-			s.deps.Log.Warn("storing response failed", "err", err, "response_id", assembler.ID())
+		// The response has already been written to the client, so this row is not on
+		// anyone's critical path: batch it with the request log instead of taking the
+		// writer lock twice per request.
+		if s.deps.LogRecorder == nil {
+			if err := s.deps.Records.PutResponse(auditCtx, storedResp); err != nil {
+				s.deps.Log.Warn("storing response failed", "err", err, "response_id", assembler.ID())
+				storedResp = nil
+			}
 		}
 	}
 
-	s.recordContent(auditCtx, key, account, assembler, status, input)
+	s.recordContent(auditCtx, key, account, assembler, status, input, storedResp)
 
 	if s.deps.Hooks != nil {
 		event := "response.completed"
@@ -578,6 +585,7 @@ func (s *Server) recordContent(
 	assembler *responses.Assembler,
 	status string,
 	input inputRecord,
+	storedResp *domain.ResponseRecord,
 ) {
 	cfg := s.deps.Config.Recording
 	recordReasoning := key.RecordReasoning || cfg.RecordReasoning
@@ -618,6 +626,12 @@ func (s *Server) recordContent(
 	}
 	rec.ResponseBytes = len(rec.ResponseReasoning) + len(rec.ResponseText)
 
+	// Batched mode: hand both rows to the recorder together, so they land in one
+	// transaction and a stored response is never missing while its request log exists.
+	if s.deps.LogRecorder != nil {
+		s.deps.LogRecorder.EnqueueRecording(storedResp, rec)
+		return
+	}
 	s.storeRequestLog(ctx, rec)
 }
 
@@ -630,7 +644,17 @@ func (s *Server) handleGetResponse(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	rec, err := s.deps.Records.GetResponse(r.Context(), r.PathValue("id"))
+	id := r.PathValue("id")
+	// The stored response is written by the background batcher, so a client that POSTs and
+	// immediately GETs the id it was just handed could otherwise read a 404 for a row that
+	// is only microseconds behind. Wait for that one id instead of making every write
+	// synchronous again.
+	if waiter, ok := s.deps.LogRecorder.(responseWaiter); ok {
+		if err := waiter.AwaitResponse(r.Context(), id); err != nil {
+			s.deps.Log.Warn("waiting for a stored response timed out", "err", err, "response_id", id)
+		}
+	}
+	rec, err := s.deps.Records.GetResponse(r.Context(), id)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return

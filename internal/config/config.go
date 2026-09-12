@@ -174,6 +174,30 @@ type Recording struct {
 	RetentionDays int      `yaml:"retention_days"`
 	RedactPaths   []string `yaml:"redact_paths"`
 	QueueSize     int      `yaml:"queue_size"`
+	// BatchWrites groups the per-request audit rows (stored response + request log) into
+	// one background transaction instead of two synchronous ones. On the local deployment
+	// the synchronous path took the single writer connection twice per request, and a
+	// goroutine dump under load showed request goroutines queued on it.
+	// Set false to keep the strictly-synchronous behaviour (the row is written before the
+	// handler returns).
+	BatchWrites *bool `yaml:"batch_writes"`
+	// BatchFlushMS is how long a queued audit row may wait for company. Smaller means
+	// fresher rows and more transactions.
+	BatchFlushMS int `yaml:"batch_flush_ms"`
+	// BatchMaxRows caps how many requests share one transaction.
+	BatchMaxRows int `yaml:"batch_max_rows"`
+	// BatchMaxBytes caps the payload one transaction carries, which matters because a
+	// recorded body can be hundreds of kilobytes.
+	BatchMaxBytes int `yaml:"batch_max_bytes"`
+	// BatchQueueRows and BatchQueueBytes bound what may wait in memory before the request
+	// path applies backpressure instead of queueing more.
+	BatchQueueRows  int `yaml:"batch_queue_rows"`
+	BatchQueueBytes int `yaml:"batch_queue_bytes"`
+}
+
+// BatchingEnabled reports whether audit writes are batched. Absent means the default (on).
+func (r Recording) BatchingEnabled() bool {
+	return r.BatchWrites == nil || *r.BatchWrites
 }
 
 // InputModeFor resolves one API key's record_input_mode against the deployment default.
@@ -422,6 +446,11 @@ func Default() Config {
 			MaxBytes:         1048576,
 			RetentionDays:    30,
 			QueueSize:        16384,
+			BatchFlushMS:     250,
+			BatchMaxRows:     256,
+			BatchMaxBytes:    16 << 20,
+			BatchQueueRows:   4096,
+			BatchQueueBytes:  32 << 20,
 		},
 		MCP: MCP{
 			Enabled: true, MaxQueryRows: 1000, RequestWindowDays: 30,
@@ -599,6 +628,25 @@ func (c *Config) Validate() error {
 	// a negative window is a typo, not a policy.
 	if c.Recording.RetentionDays < 0 {
 		return fmt.Errorf("recording.retention_days must be >= 0 (0 disables cleanup)")
+	}
+	if c.Recording.BatchingEnabled() {
+		// A zero here would silently fall back to the built-in default, which makes the
+		// config file lie about what the process does; say so instead.
+		if c.Recording.BatchFlushMS <= 0 {
+			return fmt.Errorf("recording.batch_flush_ms must be positive when batch_writes is on")
+		}
+		if c.Recording.BatchMaxRows <= 0 || c.Recording.BatchMaxBytes <= 0 {
+			return fmt.Errorf("recording.batch_max_rows and batch_max_bytes must be positive when batch_writes is on")
+		}
+		if c.Recording.BatchQueueRows <= 0 || c.Recording.BatchQueueBytes <= 0 {
+			return fmt.Errorf("recording.batch_queue_rows and batch_queue_bytes must be positive when batch_writes is on")
+		}
+		if c.Recording.BatchQueueRows < c.Recording.BatchMaxRows {
+			// A queue smaller than one batch means every batch starts with producers
+			// blocked on a queue that cannot hold what the writer is about to take.
+			return fmt.Errorf("recording.batch_queue_rows (%d) must be >= batch_max_rows (%d)",
+				c.Recording.BatchQueueRows, c.Recording.BatchMaxRows)
+		}
 	}
 	if c.Backup.Enabled {
 		if strings.TrimSpace(c.Backup.Dir) == "" {

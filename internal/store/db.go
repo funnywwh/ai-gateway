@@ -20,6 +20,10 @@ type DB struct {
 	write *sql.DB
 	read  *sql.DB
 	path  string
+	// stmts caches the write statements. See stmtcache.go: the pure-Go driver
+	// re-parses every statement on every Exec, and the three fixed INSERTs on the
+	// request path were paying that parser cost per request.
+	stmts *writerStmtCache
 }
 
 // Open opens (creating if needed) the database, applies migrations and returns the handle.
@@ -52,7 +56,7 @@ func Open(ctx context.Context, cfg config.Database) (*DB, error) {
 	read.SetMaxOpenConns(maxConns)
 	read.SetMaxIdleConns(maxConns)
 
-	db := &DB{write: write, read: read, path: cfg.Path}
+	db := &DB{write: write, read: read, path: cfg.Path, stmts: newWriterStmtCache()}
 	if err := db.ping(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -97,6 +101,11 @@ func (db *DB) Reader() *sql.DB { return db.read }
 
 // Close closes both pools.
 func (db *DB) Close() error {
+	// Close the statements first: closing a pool closes the statements bound to its
+	// connections, and database/sql then reports the cached handles as closed.
+	if db.stmts != nil {
+		db.stmts.Close()
+	}
 	var first error
 	if db.read != nil {
 		if err := db.read.Close(); err != nil {

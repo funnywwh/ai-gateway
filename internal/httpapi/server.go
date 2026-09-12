@@ -48,6 +48,26 @@ type Records interface {
 	PutRequestLog(ctx context.Context, rec *domain.RequestLogRecord) error
 }
 
+// LogRecorder batches the per-request audit writes instead of performing them inside the
+// handler. It is optional: when Deps.LogRecorder is nil the server writes the same rows
+// synchronously through Records, which is what tests and small deployments want.
+//
+// Contract: Enqueue must not block on the database, and WriteNow must write immediately
+// (used for the content-free fallback row, which must not be batched again behind the
+// rows whose failure caused it).
+type LogRecorder interface {
+	EnqueueRecording(resp *domain.ResponseRecord, log *domain.RequestLogRecord)
+	WriteNow(ctx context.Context, resp *domain.ResponseRecord, log *domain.RequestLogRecord) error
+	Stats() map[string]any
+}
+
+// responseWaiter is the optional read-after-write half of a batching LogRecorder: a reader
+// that names a response id can wait for that id's row specifically. A recorder that does
+// not implement it (or no recorder at all) means reads never need to wait.
+type responseWaiter interface {
+	AwaitResponse(ctx context.Context, id string) error
+}
+
 // Deps are the collaborators of the HTTP server.
 type Deps struct {
 	Config     *config.Config
@@ -58,6 +78,9 @@ type Deps struct {
 	Limiter    *quota.Limiter
 	Meter      *usage.Meter
 	Records    Records
+	// LogRecorder batches the request-log and stored-response writes in the background.
+	// nil keeps the synchronous per-request write path.
+	LogRecorder LogRecorder
 	// MCP/ MCPTokens enable the MCP endpoint (POST /mcp): account query tools plus,
 	// for admin-scoped tokens, the administrative tool surface.
 	MCP       MCPQuery
@@ -454,6 +477,18 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintf(w, "# HELP aigw_request_log_dropped_total Request logs lost entirely, even as a content-free skeleton%c", lf)
 	_, _ = fmt.Fprintf(w, "# TYPE aigw_request_log_dropped_total counter%c", lf)
 	_, _ = fmt.Fprintf(w, "aigw_request_log_dropped_total %d%c", s.requestLogDropped.Load(), lf)
+	if rec := s.deps.LogRecorder; rec != nil {
+		st := rec.Stats()
+		_, _ = fmt.Fprintf(w, "# HELP aigw_audit_batched_requests_total Requests whose audit rows were written by the background batcher%c", lf)
+		_, _ = fmt.Fprintf(w, "# TYPE aigw_audit_batched_requests_total counter%c", lf)
+		_, _ = fmt.Fprintf(w, "aigw_audit_batched_requests_total %v%c", st["batched_requests"], lf)
+		_, _ = fmt.Fprintf(w, "# HELP aigw_audit_batches_total Batched transactions committed%c", lf)
+		_, _ = fmt.Fprintf(w, "# TYPE aigw_audit_batches_total counter%c", lf)
+		_, _ = fmt.Fprintf(w, "aigw_audit_batches_total %v%c", st["batches"], lf)
+		_, _ = fmt.Fprintf(w, "# HELP aigw_audit_queued_requests Requests waiting for the next flush%c", lf)
+		_, _ = fmt.Fprintf(w, "# TYPE aigw_audit_queued_requests gauge%c", lf)
+		_, _ = fmt.Fprintf(w, "aigw_audit_queued_requests %v%c", st["queued_requests"], lf)
+	}
 	if janitor := s.deps.LogJanitor; janitor != nil {
 		_, _ = fmt.Fprintf(w, "# TYPE aigw_request_log_pruned_total counter%c", lf)
 		_, _ = fmt.Fprintf(w, "aigw_request_log_pruned_total %d%c", janitor.PrunedTotal(), lf)

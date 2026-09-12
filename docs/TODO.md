@@ -773,3 +773,58 @@
   `scripts/local-run.sh start`（VACUUM 需要独占访问；本机没有 sqlite3 CLI，用 python 的 sqlite3 即可）
 - [ ] 观察项：清理后若仍有 `put request log` 超时，先看 `/stats` 的 `request_log.dropped`——
   它是「连骨架行都没写进去」的权威计数，比翻日志可靠
+
+## M26 请求路径的审计写入批量化（CPU 与尾延迟）
+
+设计文档：`docs/design/m26-audit-batching.md`（含取舍、接口、异常边界与实测数据；实现了 M25 里
+「不需要异步队列或背压」那个结论的反例）。
+
+起因：用宿主 `--pid=host` 容器采样 8088 实例（沙箱 PID namespace 看不到宿主进程），再用
+带 pprof 的副本实例压测归因，结果指向同一个瓶颈 —— **请求路径上的落盘**。
+
+- [x] 测量基线（副本实例、离线 replay 上游、16 并发小请求 60s）：63 rps、每请求 2.57ms CPU、
+  p50 16ms、p90 480ms；pprof 里 `handleCreateResponse` 占进程 CPU 51.7%，
+  其中 `storeRequestLog` 18.5% + `store.PutResponse` 13.5%，后台计费结算另占 11%
+- [x] 根因（goroutine dump 直接印证）：写连接池是 `write.SetMaxOpenConns(1)`，而每个请求要
+  同步写两行（`responses` + `request_logs`），于是**全局串行**；6 个请求 goroutine 卡在
+  `store.(*DB).PutRequestLog` → `database/sql.(*DB).conn` 等这条连接
+- [x] 修复 1：`internal/store/stmtcache.go` —— 写路径复用 `database/sql` 的 `*sql.Stmt`
+  （纯 Go 驱动每次 Exec 都要重跑 SQL 解析器；profile 里 `_sqlite3Prepare` 累计 14%）
+- [x] 修复 2：`internal/store/logwriter.go` —— 后台批量化。请求把两行交给 `LogWriter`，
+  由它在一个事务里成批提交（默认 250ms / 256 请求 / 16MiB 触发）
+- [x] 审计语义不变：批量整体失败时逐行重试；单行仍失败则报回 transport，由它写内容为空的
+  骨架行并计数（`request_log.write_failures` / `dropped` 口径与同步路径完全一致）
+- [x] 读一致性：`GET /v1/responses/{id}` 在返回前会等该 id 的队列行落库（`AwaitResponse`），
+  POST 后立刻按 id 取回不会 404；为此新增测试 `TestImmediateGetSeesItsOwnResponse`
+- [x] 关闭排空：`main.go` 在 HTTP 优雅关闭之后、`db.Close()` 之前 `LogWriter.Close(ctx)`，
+  排空队列再退出（实测：200 个请求后立刻 SIGTERM，200 行全部落库）
+- [x] 顺带发现并修掉一个真缺陷：`tx.StmtContext(池级语句)` 与单连接写池**会自锁**
+  （语句占着那条连接，`StmtContext` 又去要同一条），第一次执行就超时；改为事务内
+  `tx.PrepareContext`，并留下回归测试 `TestStmtCacheInsideTxDoesNotDeadlock`
+- [x] 开关与观测：`recording.batch_writes` / `batch_flush_ms` / `batch_max_rows` /
+  `batch_max_bytes` / `batch_queue_rows` / `batch_queue_bytes`（默认开）；`/metrics` 增加
+  `aigw_audit_batched_requests_total`、`aigw_audit_batches_total`、`aigw_audit_queued_requests`；
+  `/stats` 的 `request_log` 块增加 `batching` 子块
+- [x] 背压（生产规模压测暴露）：队列必须有上限，否则写侧跟不上时内存无界增长、优雅关闭也排不空
+  （实测：700KB 请求持续 116 rps → 积压 1584 个请求、约 350MB，`docker stop` 15s 未排完）。
+  现在 `Enqueue` 在队列满时等写入推进（`QueueRows`/`QueueBytes`，默认 4096 / 32MiB，
+  上限 30s），等不到空位的那一行走骨架兜底并计入 dropped；背压次数在 `/stats` 的
+  `batching.backpressure` 可见。测试 `TestFullQueueAppliesBackpressure`（用「写侧卡住」的
+  store 制造真实满队列）
+- [x] 正确性复验（修复版副本，32 并发 20s）：9616 个请求 → `request_logs` 恰好 9616 行、
+  0 错误、`queued_requests` 归零，只用了 **61 个事务**（同步路径是 9616 个）
+- [x] A/B 复验（同机同脚本，60s）：**186 rps 对 63 rps**；每请求 CPU **0.82ms 对 2.57ms**；
+  p50 **4.3ms 对 16.3ms**；p90 **17ms 对 480ms**；`_full_fsync` 从可观占比降到 0.34%
+- [x] `make verify` 全绿（33 个包；新增 8 条测试覆盖批量路径、回退、排空、读一致性、自锁回归）
+- [x] **运行态生效**（2026-09-12 10:17 重启，PID 2783609）：启动日志出现
+  `audit writes batched in the background flush_ms=250 max_rows=256 queue_rows=4096 queue_bytes=33554432`；
+  `/metrics` 出现 `aigw_audit_batched_requests_total` / `aigw_audit_batches_total` /
+  `aigw_audit_queued_requests`。实测：16 个并发请求只用了 **2 个事务**、`write_failures` 与
+  `dropped` 均为 0、`queued_requests` 归零；带 `store:true` 的 POST 后立刻 GET 返回 **200**
+- [x] 验证数据清理：验证用的 17 行 `request_logs`（`PROBE-DELETE-ME`）与 1 行 `responses` 已删除，
+  残留 0；确认用户原有 38 条历史存储响应完好
+- [ ] 观察项：若 N 个请求对应的事务数接近 N，说明批没合上（看 `batch_writes` 是否被关、或并发太低 /
+  间隔太短）——注意**低频逐个请求时 1:1 是正常的**（每个请求自己触发一次 flush）
+- [ ] 观察项：`aigw_audit_queued_requests` 持续 >0 且不降说明写侧堵了；若同时
+  `/stats` 的 `request_log.batching.backpressure` 在涨，就是队列满了在背压，需要调大
+  `batch_queue_bytes` / `batch_max_bytes`，或排查请求体为何变得很大

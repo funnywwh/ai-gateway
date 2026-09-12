@@ -44,6 +44,11 @@
   `usage_records` / `ledger_entries` / `audit_logs` **不在清理范围内**——计费与审计历史必须保留。
   请求日志写入失败时会退化为「无正文的骨架行」（保住 request_id/状态/字节数），`/stats` 与 `/metrics`
   暴露失败与丢弃计数。
+- **写入批量化（M26）**：存储响应与请求日志由后台线程成批提交（默认 250 ms / 256 请求一个事务；
+  `recording.batch_writes` 可关回逐请求同步写）。审计行因此最多晚一个 flush 间隔落库，
+  **硬杀进程会丢最后这个窗口的行**；SIGTERM / `scripts/local-run.sh stop` 是优雅关闭，
+  会先排空队列再退出。客户端可见行为不变：POST 返回的 `id` 立刻可以
+  `GET /v1/responses/{id}` 取回 —— 该 id 若仍在队列里，读路径会先等它落库（不会 404）。
 
 ## 请求字段
 

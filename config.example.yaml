@@ -107,6 +107,24 @@ recording:
   retention_days: 30
   redact_paths: []
   queue_size: 16384
+  # 审计写入批量化（M26）。开 = 请求路径把「存储响应 + 请求日志」交给后台线程，在一个事务里
+  # 成批落库；关 = 每请求同步写两行（老行为，行在 handler 返回前落库）。
+  # 为什么默认开：写连接池只有 1 条连接，同步写意味着每个请求独占它一次（含一次 fsync）；
+  # 8088 实例的 goroutine dump 抓到过 6 个请求 goroutine 卡在 database/sql 等这条连接。
+  # 实测（16 并发小请求 60s，同一台机器 A/B）：186 rps 对 63 rps；每请求 CPU 0.82ms 对 2.57ms；
+  # p50 4.3ms 对 16.3ms；p90 17ms 对 480ms。
+  # 代价：审计行最多晚 batch_flush_ms 落库；硬杀进程会丢最后这个窗口的行
+  #（`scripts/local-run.sh stop`/SIGTERM 是优雅关闭，先排空队列再退出，不丢行）。
+  # 读一致性：POST 之后按 id GET 刚拿到的响应不会 404 —— 该 id 若还在队列里会先等它落库。
+  batch_writes: true
+  batch_flush_ms: 250        # 一行最多等多久；调小 = 审计更实时、事务更多
+  batch_max_rows: 256        # 一个事务最多带多少个请求
+  batch_max_bytes: 16777216  # 一个事务最多带多少字节（记录正文可能很大，所以也按字节设上限）
+  # 在内存里排队的上限。写侧跟不上时，请求路径在这里施加背压（等写入推进），而不是无限
+  # 堆积：无限队列既是无界内存，也让优雅关闭排不空（实测 700KB 请求持续 116 rps 时，
+  # 队列涨到 350MB、关停排空超时）。等不到空位的那一行会走骨架行兜底并计入 dropped。
+  batch_queue_rows: 4096
+  batch_queue_bytes: 33554432
 
 mcp:
   enabled: true
