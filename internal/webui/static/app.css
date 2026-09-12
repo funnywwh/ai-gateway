@@ -179,6 +179,12 @@ label.field > span { display:block; color:var(--muted); font-size:12px; margin-b
 .plus-item { display:flex; gap:8px; align-items:center; width:100%; text-align:left; background:transparent;
   border:0; color:var(--fg); padding:7px 8px; border-radius:6px; cursor:pointer; font:inherit; font-size:13px; }
 .plus-item:hover { background:var(--panel-2); }
+/* 技能行的勾选框：全局 `input { width:100% }` 同样命中这个没有 class 的 checkbox，把它
+   撑满整行、把技能名推到最右边（与 .form-radio 是同一条坑）。行内只有「勾选框 + 名字」，
+   所以用 align-items:center 让两者垂直居中；名字过长时换行，不溢出菜单。 */
+.plus-skill input[type=checkbox] { flex:0 0 auto; width:16px; height:16px; margin:0;
+  accent-color:var(--accent); }
+.plus-skill span { flex:1 1 0; min-width:0; overflow-wrap:anywhere; }
 .plus-sep { height:1px; background:var(--line); margin:5px 0; }
 .plus-filter { width:100%; margin-bottom:4px; background:var(--panel-2); color:var(--fg);
   border:1px solid var(--line); border-radius:6px; padding:5px 8px; font:inherit; font-size:12.5px; }
