@@ -296,6 +296,11 @@ type Chat struct {
 	// CDN chart library). Off by default: it turns a model-authored page into outbound
 	// traffic from the operator's browser.
 	ArtifactAllowNetwork bool `yaml:"artifact_allow_network"`
+	// UIBridgeEnabled allows an interactive preview: the model-authored page may send a form
+	// submission back into the conversation, where it becomes a normally billed question and
+	// the answer is patched back into the page. Off means previews are read-only, and a page's
+	// buttons produce no model request at all.
+	UIBridgeEnabled bool `yaml:"ui_bridge_enabled"`
 	// MaxOutputTokens caps one step's answer (0 keeps the provider default).
 	MaxOutputTokens int `yaml:"max_output_tokens"`
 	// SystemPrompt replaces the built-in instructions when set.
@@ -525,6 +530,7 @@ func Default() Config {
 			ArtifactMaxPerSession: 50,
 			ArtifactTicketTTL:     5 * time.Minute,
 			ArtifactAllowNetwork:  false,
+			UIBridgeEnabled:       true,
 		},
 		Hooks:     Hooks{QueueSize: 1024, Workers: 8, TimeoutS: 5, Retries: 5, DeadLetter: "./data/hooks-dead.jsonl"},
 		Portal:    Portal{SessionTTLH: 12, LoginAttempts: 10},

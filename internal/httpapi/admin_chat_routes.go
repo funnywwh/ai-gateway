@@ -141,23 +141,27 @@ func (s *Server) chatAdminRoutes() []adminRoute {
 		{
 			Method: "POST", Path: "/admin/api/v1/chat/sessions/{id}/artifacts", Handler: s.handleAdminChatPutArtifact,
 			Name: "admin_chat_put_artifact", Group: groupChat, Role: roleViewer,
-			Summary: "登记一份待预览的 HTML/SVG 正文，返回短时预览票据（预览链接不绑定 Cookie，因此由票据授权）",
+			Summary: "登记一份待预览的 HTML/SVG 正文，返回短时预览票据（预览链接不绑定 Cookie，因此由票据授权；bridge=true 时票据可交互）",
 			Params:  []adminField{pathParam("id", "会话 id")},
 			Body: []adminField{
 				bodyRequired("key", "string", "代码块的稳定标识（同一会话内重复预览同一个块会覆盖，不堆积副本）"),
 				bodyRequired("format", "string", "html 或 svg"),
 				bodyRequired("body", "string", "要预览的正文"),
 				bodyOptional("title", "string", "预览窗标题"),
+				bodyOptional("bridge", "boolean", "true = 交互预览：页面可把表单提交回本会话（每次提交都是一条正常计费的模型请求）；仅 html 且 chat.ui_bridge_enabled=true 时可用"),
 			},
 			NoTool: chatNoTool,
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/chat/sessions/{id}/artifacts/{art}/ticket", Handler: s.handleAdminChatTicket,
 			Name: "admin_chat_artifact_ticket", Group: groupChat, Role: roleViewer,
-			Summary: "为已有的预览产物重新签发短时票据（票过期后重新打开预览用）",
+			Summary: "为已有的预览产物重新签发短时票据（票过期后重新打开预览用；bridge=true 签交互票据，默认只读）",
 			Params: []adminField{
 				pathParam("id", "会话 id"),
 				pathParam("art", "产物 id"),
+			},
+			Body: []adminField{
+				bodyOptional("bridge", "boolean", "true = 签发交互票据（仅 html 且 chat.ui_bridge_enabled=true 时可用）"),
 			},
 			NoTool: chatNoTool,
 		},

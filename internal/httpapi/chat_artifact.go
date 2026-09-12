@@ -55,6 +55,17 @@ func (s *Server) chatArtifacts() ChatArtifactStore {
 	return nil
 }
 
+// chatTicketScopeView is the audience of a read-only preview ticket.
+//
+// A ticket carries an audience because a preview can be opened in two modes: as a document to
+// look at, or as an interface the operator interacts with. Only the second mode gets the
+// bridge injected, and a page must not be able to promote itself by appending a query
+// parameter — so "interactive" is a property of the ticket the console asked for, not of the
+// URL the frame happens to load. The interactive audience is spelled as the artifact id
+// itself: it is the same value the signature already covers, and it cannot be confused with
+// this constant.
+const chatTicketScopeView = "view"
+
 // chatTicketSigner signs preview tickets. The key is generated per process: a restart
 // invalidates every outstanding ticket, which is the right default for a five-minute URL.
 type chatTicketSigner struct{ key []byte }
@@ -71,46 +82,60 @@ func newChatTicketSigner() *chatTicketSigner {
 
 func (s *chatTicketSigner) ready() bool { return s != nil && len(s.key) == 32 }
 
-// sign returns the ticket for one (artifact, session, expiry) triple.
-func (s *chatTicketSigner) sign(artifactID, adminSessionID string, expires time.Time) string {
+// sign returns the ticket for one (artifact, session, audience, expiry) tuple.
+func (s *chatTicketSigner) sign(artifactID, adminSessionID, scope string, expires time.Time) string {
 	if !s.ready() {
 		return ""
 	}
-	payload := artifactID + "|" + adminSessionID + "|" + strconv.FormatInt(expires.UnixNano(), 10)
+	payload := artifactID + "|" + adminSessionID + "|" + strconv.FormatInt(expires.UnixNano(), 10) + "|" + scope
 	mac := hmac.New(sha256.New, s.key)
 	mac.Write([]byte(payload))
 	return base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." +
 		hex.EncodeToString(mac.Sum(nil))
 }
 
-// verify checks a ticket and returns the administrator session it was issued to.
-func (s *chatTicketSigner) verify(ticket, artifactID string, now time.Time) (string, bool) {
+// verify checks a ticket and returns the administrator session it was issued to together with
+// its audience. A three-field payload (the pre-M34 shape) fails on the field count, which is
+// what it should do: the process key is random per boot, so those tickets were never valid
+// across a restart anyway.
+func (s *chatTicketSigner) verify(ticket, artifactID string, now time.Time) (string, string, bool) {
 	if !s.ready() || ticket == "" {
-		return "", false
+		return "", "", false
 	}
 	parts := strings.SplitN(ticket, ".", 2)
 	if len(parts) != 2 {
-		return "", false
+		return "", "", false
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	fields := strings.Split(string(decoded), "|")
-	if len(fields) != 3 || fields[0] != artifactID {
-		return "", false
+	if len(fields) != 4 || fields[0] != artifactID {
+		return "", "", false
 	}
 	expires, err := strconv.ParseInt(fields[2], 10, 64)
 	if err != nil || now.UnixNano() > expires {
-		return "", false
+		return "", "", false
 	}
 	mac := hmac.New(sha256.New, s.key)
 	mac.Write(decoded)
 	expected := hex.EncodeToString(mac.Sum(nil))
 	if !hmac.Equal([]byte(expected), []byte(parts[1])) {
-		return "", false
+		return "", "", false
 	}
-	return fields[1], true
+	return fields[1], fields[3], true
+}
+
+// newTicketNonce mints the per-response nonce the injected bridge script carries. It is not a
+// secret (the page can read it); it is the marker that separates "the server put this script
+// here" from "the document asked for this script" under a policy that allows inline scripts.
+func newTicketNonce() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(buf)
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +147,10 @@ type chatArtifactRequest struct {
 	Title  string `json:"title"`
 	Format string `json:"format"`
 	Body   string `json:"body"`
+	// Bridge asks for an interactive ticket. Only an interactive ticket lets the served
+	// document talk back to the console, and asking for one is an explicit act: a preview is
+	// read-only unless the console says otherwise, because interacting means spending.
+	Bridge bool `json:"bridge"`
 }
 
 // handleAdminChatPutArtifact stores a preview payload. The console uploads the exact bytes
@@ -155,6 +184,19 @@ func (s *Server) handleAdminChatPutArtifact(w http.ResponseWriter, r *http.Reque
 	if format != domain.ChatArtifactHTML && format != domain.ChatArtifactSVG {
 		writeAPIError(w, domain.ErrInvalidRequest("format must be html or svg"))
 		return
+	}
+	if body.Bridge {
+		// An SVG cannot host a form and never gets the bridge; refusing here beats handing
+		// out an interactive ticket that the serving handler will then ignore.
+		if format != domain.ChatArtifactHTML {
+			writeAPIError(w, domain.ErrInvalidRequest("only an html artifact can be interactive"))
+			return
+		}
+		if !s.uiBridgeEnabled() {
+			writeAPIError(w, domain.ErrInvalidRequest(
+				"interactive previews are disabled on this deployment (chat.ui_bridge_enabled)"))
+			return
+		}
 	}
 	key := strings.TrimSpace(body.Key)
 	if key == "" {
@@ -195,10 +237,14 @@ func (s *Server) handleAdminChatPutArtifact(w http.ResponseWriter, r *http.Reque
 	if err != nil || stored == nil {
 		stored = artifact
 	}
-	ticket, expires := s.issueChatTicket(r, stored.ID)
+	scope := chatTicketScopeView
+	if body.Bridge {
+		scope = stored.ID
+	}
+	ticket, expires := s.issueChatTicket(r, stored.ID, scope)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": stored.ID, "format": stored.Format, "url": "/admin/chat-artifact/" + stored.ID,
-		"ticket": ticket, "expires_at": expires,
+		"ticket": ticket, "expires_at": expires, "bridge": body.Bridge,
 	})
 }
 
@@ -215,13 +261,28 @@ func (s *Server) handleAdminChatTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("art")
-	if _, err := artifacts.GetChatArtifact(r.Context(), id, user.ID); err != nil {
+	stored, err := artifacts.GetChatArtifact(r.Context(), id, user.ID)
+	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	ticket, expires := s.issueChatTicket(r, id)
+	var body chatArtifactRequest
+	if !decodeChatBody(w, r, &body) {
+		return
+	}
+	scope := chatTicketScopeView
+	if body.Bridge {
+		if stored.Format != domain.ChatArtifactHTML || !s.uiBridgeEnabled() {
+			writeAPIError(w, domain.ErrInvalidRequest(
+				"this preview cannot be interactive (html format and chat.ui_bridge_enabled are both required)"))
+			return
+		}
+		scope = stored.ID
+	}
+	ticket, expires := s.issueChatTicket(r, id, scope)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id": id, "url": "/admin/chat-artifact/" + id, "ticket": ticket, "expires_at": expires,
+		"id": id, "url": "/admin/chat-artifact/" + id, "ticket": ticket,
+		"expires_at": expires, "bridge": body.Bridge,
 	})
 }
 
@@ -229,6 +290,12 @@ func (s *Server) handleAdminChatTicket(w http.ResponseWriter, r *http.Request) {
 // by a cookie: a sandboxed frame without allow-same-origin sends no cookie at all, and
 // pretending otherwise would make previews fail intermittently depending on the browser's
 // SameSite treatment of an opaque origin.
+//
+// `?bridge=1` asks for the interactive form of the document. It is honoured only for a ticket
+// whose audience is this artifact (the console asks for that when it opens an interactive
+// preview), and only while the deployment has interactive previews enabled. The audience
+// check is what makes the mode unforgeable: a query parameter cannot upgrade a read-only
+// ticket, because the mode is inside the signature.
 func (s *Server) handleAdminChatArtifact(w http.ResponseWriter, r *http.Request) {
 	artifacts := s.chatArtifacts()
 	if artifacts == nil || s.chatSigner == nil || !s.chatSigner.ready() {
@@ -236,7 +303,7 @@ func (s *Server) handleAdminChatArtifact(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	id := r.PathValue("id")
-	adminSession, ok := s.chatSigner.verify(r.URL.Query().Get("ticket"), id, time.Now().UTC())
+	adminSession, scope, ok := s.chatSigner.verify(r.URL.Query().Get("ticket"), id, time.Now().UTC())
 	if !ok {
 		// No hint about whether the artifact exists: the ticket check comes first.
 		writeAPIError(w, domain.ErrNotFound("this preview link has expired"))
@@ -254,17 +321,45 @@ func (s *Server) handleAdminChatArtifact(w http.ResponseWriter, r *http.Request)
 		writeAPIError(w, toAPIError(err))
 		return
 	}
+	interactive := r.URL.Query().Get("bridge") != "" && scope == artifact.ID &&
+		artifact.Format == domain.ChatArtifactHTML && s.uiBridgeEnabled()
+
+	body := []byte(artifact.Body)
 	header := w.Header()
 	header.Set("Content-Type", "text/html; charset=utf-8")
 	if artifact.Format == domain.ChatArtifactSVG {
 		header.Set("Content-Type", "image/svg+xml; charset=utf-8")
 	}
-	header.Set("Content-Security-Policy", s.chatArtifactCSP(artifact.Format))
+	nonce := ""
+	if interactive {
+		nonce = newTicketNonce()
+		// A nonce that could not be generated means the bridge script would be blocked by
+		// the policy below; serving a page that silently cannot interact is worse than
+		// serving the read-only document, which is what happens here.
+		if nonce == "" {
+			interactive = false
+		}
+	}
+	if interactive {
+		body = []byte(injectUIBridge(artifact.Body, newBridgeToken(), nonce))
+		header.Set("X-Aigw-Bridge", "1")
+	}
+	header.Set("Content-Security-Policy", s.chatArtifactCSP(artifact.Format, nonce))
 	header.Set("Cache-Control", "no-store")
 	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("Referrer-Policy", "no-referrer")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(artifact.Body))
+	_, _ = w.Write(body)
+}
+
+// newBridgeToken is the per-response handshake secret. It is not in the URL and not in the
+// artifact body, so the page cannot read it: only the console (which signed the upload) and
+// the injected script know it. Without it, any nested frame on the page could offer a port.
+func newBridgeToken() string { return newTicketNonce() }
+
+// uiBridgeEnabled reports whether this deployment allows interactive previews.
+func (s *Server) uiBridgeEnabled() bool {
+	return s.deps.Config != nil && s.deps.Config.Chat.UIBridgeEnabled
 }
 
 // chatArtifactCSP is the sandbox a previewed page lives in.
@@ -276,7 +371,11 @@ func (s *Server) handleAdminChatArtifact(w http.ResponseWriter, r *http.Request)
 // and WebSocket. What this does *not* claim to do is stop every possible navigation — a
 // nested frame can still navigate itself — which is why the console says "external
 // resources are blocked by default" rather than "this page has no network".
-func (s *Server) chatArtifactCSP(format string) string {
+//
+// A non-empty nonce is added only for an interactive preview: it is what authorizes the
+// server's own bridge script. `'unsafe-inline'` stays either way, because the document's own
+// inline scripts are the whole point of a model-authored page.
+func (s *Server) chatArtifactCSP(format, nonce string) string {
 	allowNetwork := s.deps.Config != nil && s.deps.Config.Chat.ArtifactAllowNetwork
 	script := "'unsafe-inline'"
 	style := "'unsafe-inline'"
@@ -290,6 +389,9 @@ func (s *Server) chatArtifactCSP(format string) string {
 		img += " https:"
 		font += " https:"
 		connect = "https:"
+	}
+	if nonce != "" {
+		script = "'nonce-" + nonce + "' " + script
 	}
 	directives := []string{
 		"default-src 'none'",
@@ -312,15 +414,15 @@ func (s *Server) chatArtifactCSP(format string) string {
 }
 
 // issueChatTicket signs a fresh ticket for one artifact, bound to the administrator session
-// that is asking for it.
-func (s *Server) issueChatTicket(r *http.Request, artifactID string) (string, time.Time) {
+// that is asking for it and to the audience it is being issued for.
+func (s *Server) issueChatTicket(r *http.Request, artifactID, scope string) (string, time.Time) {
 	ttl := 5 * time.Minute
 	if s.deps.Config != nil && s.deps.Config.Chat.ArtifactTicketTTL > 0 {
 		ttl = s.deps.Config.Chat.ArtifactTicketTTL
 	}
 	expires := time.Now().UTC().Add(ttl)
 	sessionID := adminSessionFromRequest(r)
-	return s.chatSigner.sign(artifactID, sessionID, expires), expires
+	return s.chatSigner.sign(artifactID, sessionID, scope, expires), expires
 }
 
 // adminSessionFromRequest reads the console session id out of the request's cookie. The

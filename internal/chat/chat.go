@@ -94,6 +94,11 @@ type Config struct {
 	RecordReasoning    bool
 	MaxOutputTokens    int
 	SystemPrompt       string
+	// UIBridge tells the model that a previewed HTML page can send an event back into this
+	// conversation. It mirrors chat.ui_bridge_enabled: when the deployment serves read-only
+	// previews, instructing the model to build submitting forms would only produce buttons
+	// that do nothing.
+	UIBridge bool
 }
 
 // Usage is what one model step consumed. Tokens come from the provider's own report; cost

@@ -70,6 +70,10 @@ func chatConfig(cfg *config.Config) chat.Config {
 		RecordReasoning:    cfg.Chat.RecordReasoning,
 		MaxOutputTokens:    cfg.Chat.MaxOutputTokens,
 		SystemPrompt:       cfg.Chat.SystemPrompt,
+		// The instructions about interactive previews describe a capability the deployment can
+		// switch off; when it is off, the page a form would submit from has no way to talk
+		// back, so the model is not told to build one.
+		UIBridge: cfg.Chat.UIBridgeEnabled,
 	}
 }
 
