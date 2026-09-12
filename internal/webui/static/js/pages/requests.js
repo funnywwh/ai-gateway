@@ -107,6 +107,9 @@ export async function render({ page, actions, session }) {
       onclick: () => detail(row.request_id).catch((err) => toast(api.errorMessage(err), 'error')),
     })],
     load: ({ limit, offset }) => api.get('/requests', { ...filterParams(), limit, offset }),
+    // The summary row under the list: the page's tokens and money, in the same cells as
+    // the columns above them (summaryCells).
+    footer: summaryCells,
     onError: (err) => toast(api.errorMessage(err), 'error'),
   });
 
@@ -183,7 +186,7 @@ export async function render({ page, actions, session }) {
 
   page.append(card('请求日志', view.node, [
     days, client, model, sessionFilter, workspaceFilter,
-    el('span', { class: 'muted', text: '客户端/模型/工作区/会话/标题与 token 成本是独立于正文口径记录的元数据（record_input=off 也记）；标题来自会话的标题调用，成本来自计量表，与账单一致' }),
+    el('span', { class: 'muted', text: '客户端/模型/工作区/会话/标题与 token 成本是独立于正文口径记录的元数据（record_input=off 也记）；标题来自会话的标题调用，成本来自计量表，与账单一致；列表底部的「本页汇总」只合计当前页已加载的行（含本页过滤），窗口口径看下方「维度统计」' }),
     hint]));
   page.append(statsCard);
 
@@ -246,6 +249,45 @@ function tokensCell(usage) {
 function costCell(usage) {
   if (!usage || !usage.metered) return el('span', { class: 'muted', text: '未计量' });
   return el('span', { text: money(usage.charge_micros) });
+}
+
+// summaryCells is the list's summary row: the tokens and the money of the rows on screen,
+// keyed by the columns they belong under. The scope is the page — these rows, or what the
+// in-page filter left of them — not the whole filtered window: the pager's 共 N 条 and the
+// 维度统计 card describe the window, and a page-sized total dressed up as that would be a
+// different claim. Rows with no usage row are counted in the label and contribute no
+// number, which is the rule the cells above already follow ("未计量" ≠ "消耗为 0").
+function summaryCells(rows) {
+  if (!rows.length) return null;
+  let metered = 0;
+  let input = 0;
+  let output = 0;
+  let charge = 0;
+  for (const row of rows) {
+    const usage = row.usage;
+    if (!usage || !usage.metered) continue;
+    metered += 1;
+    input += Number(usage.input_tokens || 0);
+    output += Number(usage.output_tokens || 0);
+    // The sum goes to money(), which converts through BigInt: a fraction would throw.
+    charge += Math.round(Number(usage.charge_micros || 0));
+  }
+  const unmetered = rows.length - metered;
+  // On a fully metered page "共 N 行" and "已计量 N" would say the same thing twice, so
+  // the breakdown only appears when there is something to explain (the 维度统计 card
+  // reports its own counts the same way).
+  const counted = unmetered
+    ? '共 ' + rows.length + ' 行（已计量 ' + metered + ' · 未计量 ' + unmetered + '）'
+    : '共 ' + rows.length + ' 行';
+  return {
+    created_at: el('div', {
+      title: '只合计当前页已加载的行（本页过滤生效时就是屏幕上剩下的行），不是整个筛选窗口',
+    }, [el('strong', { text: '本页汇总' }), el('span', { class: 'muted', text: ' · ' + counted })]),
+    usage: metered
+      ? el('span', { text: formatTokens(input) + ' / ' + formatTokens(output) })
+      : el('span', { class: 'muted', text: '未计量' }),
+    charge: metered ? el('span', { text: money(charge) }) : el('span', { class: 'muted', text: '未计量' }),
+  };
 }
 
 function formatTokens(value) {

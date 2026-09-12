@@ -230,13 +230,23 @@ function collect(fields, body) {
 // filterPlaceholder is for server-paged tables: there the filter can only see the
 // current page, so pagedTable labels it accordingly instead of pretending to search
 // the whole table (see docs/design/m24-console-pagination.md).
-export function table({ columns, rows, filter, onFilter, empty, rowActions, filterPlaceholder }) {
+//
+// footer is for lists that carry a summary row under their own columns (the request
+// log's token/cost totals). It receives the rows currently shown — after the in-page
+// filter — and returns the cells it wants to fill, keyed by column. Every column it does
+// not name gets an empty cell, so the row cannot drift out of alignment when a column is
+// added; colspan arithmetic at the call site is exactly what goes stale. Returning
+// nothing (or having no rows to show) renders no summary row at all.
+export function table({ columns, rows, filter, onFilter, empty, rowActions, filterPlaceholder, footer }) {
   const wrap = el('div');
   let query = '';
   const head = el('thead', {}, [el('tr', {}, columns.map((col) => el('th', {
     text: col.label, onclick: col.sortable ? () => toggleSort(col.key) : undefined,
   })).concat(rowActions ? [el('th', { text: '' })] : []))]);
   const tbody = el('tbody');
+  // The element only exists when the list has a summary: a table without one keeps the
+  // exact DOM it had before.
+  const tfoot = footer ? el('tfoot') : null;
   const countLabel = el('span', { class: 'muted', id: 'count' });
   let sortKey = null;
   let sortDir = 1;
@@ -268,6 +278,7 @@ export function table({ columns, rows, filter, onFilter, empty, rowActions, filt
     clear(tbody);
     const data = visible();
     countLabel.textContent = query ? '本页 ' + data.length + ' / ' + rows.length + ' 行' : '本页 ' + rows.length + ' 行';
+    renderFooter(data);
     if (!data.length) {
       tbody.append(el('tr', {}, [el('td', { colspan: columns.length + (rowActions ? 1 : 0) }, [el('div', { class: 'empty', text: empty || '暂无数据' })])]));
       return;
@@ -277,6 +288,17 @@ export function table({ columns, rows, filter, onFilter, empty, rowActions, filt
       if (rowActions) cells.push(el('td', { class: 'actions' }, rowActions(row)));
       tbody.append(el('tr', {}, cells));
     }
+  }
+
+  // renderFooter places each summary cell under its own column, and an empty cell
+  // everywhere else, so the summary always lines up with the header it belongs to.
+  function renderFooter(data) {
+    if (!tfoot) return;
+    clear(tfoot);
+    const cells = data.length ? footer(data) : null;
+    if (!cells) return;
+    tfoot.append(el('tr', {}, columns.map((col) => el('td', {}, [cells[col.key]]))
+      .concat(rowActions ? [el('td')] : [])));
   }
 
   function text(value) {
@@ -289,7 +311,7 @@ export function table({ columns, rows, filter, onFilter, empty, rowActions, filt
     box.addEventListener('input', () => { query = box.value; render(); });
     wrap.append(el('div', { class: 'toolbar' }, [box, countLabel]));
   }
-  wrap.append(el('table', {}, [head, tbody]));
+  wrap.append(el('table', {}, [head, tbody, tfoot]));
   const api = { refresh: (next) => { rows = next || rows; render(); }, node: wrap };
   render();
   return api;
@@ -350,7 +372,10 @@ export function pager({ limit, offset, total, pageSizes, onChange }) {
 //   await view.reset();         // filters changed: back to the first page
 //
 // Failure never locks the pager: onError reports it and the previous window stays put.
-export function pagedTable({ columns, load, pageSize, pageSizes, rowActions, empty, filter = true, onError }) {
+// footer is forwarded to table(): a paged list whose page carries a summary row (the
+// request log's token/cost totals) hands one in, and the summary is recomputed from the
+// rows of whichever page is on screen.
+export function pagedTable({ columns, load, pageSize, pageSizes, rowActions, empty, filter = true, onError, footer }) {
   const state = { limit: pageSize || 20, offset: 0, total: 0, loaded: false };
   const host = el('div');
   const loading = el('div', { class: 'empty', text: '加载中…' });
@@ -385,7 +410,7 @@ export function pagedTable({ columns, load, pageSize, pageSizes, rowActions, emp
         continue;
       }
       if (!view) {
-        view = table({ columns, rows, filter, empty, rowActions, filterPlaceholder: filter === false ? undefined : '本页过滤…' });
+        view = table({ columns, rows, filter, empty, rowActions, footer, filterPlaceholder: filter === false ? undefined : '本页过滤…' });
         clear(host);
         host.append(view.node);
       } else {

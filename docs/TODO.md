@@ -901,3 +901,42 @@
   且不再出现「路由缺映射」告警
 - [ ] 观察项：同类"静默排除"还有没有别处——候选过滤的其它原因（`not_granted` / `missing_capability` /
   `circuit_open`）在 `/v1/models` 里同样是无声丢弃，是否也要在控制台集中暴露
+
+## M29 请求日志列表底部的本页汇总行（tokens 入/出 + 成本）
+
+> 设计文档 `docs/design/m29-request-log-page-summary.md`，规格文档 `docs/request-log.md` §4/§6。
+> 起因（用户原话）：「管理后台的请求日志列表在列表底部添加一列汇总行：tokens（入/出），成本，汇总这两列」。
+> 口径当场澄清并选定：**只汇总当前页已加载的行**，不做筛选窗口级合计（窗口口径看「维度统计」卡）。
+
+- [x] 设计文档先于代码落盘（含口径取舍与窗口级备选方案的实测数字）
+- [x] `table()` / `pagedTable()` 增可选 `footer(visibleRows) -> {列key: 节点} | null`：按列 key 落位，
+  未命名的列空单元格；返回 `null` 或本页无行则不渲染汇总行。用 keyed 落位而不是在调用点算 `colspan`——
+  列数一旦增减，后者必然过期。不传 `footer` 的页面（keys/models/accounts/…）DOM 与行为不变
+- [x] `requests.js` 新增 `summaryCells(rows)`：单次遍历求已计量行数与 tokens（入/出）/成本之和；
+  金额取整后再求和（`money()` 内部走 `BigInt()`，小数会抛）；标签 `本页汇总 · 共 N 行`，
+  有未计量行时补 `（已计量 M · 未计量 K）`；**本页全部未计量时两格写「未计量」而不是 0**
+  （沿用行内 `tokensCell`/`costCell` 的规则：未计量 ≠ 消耗为 0）
+- [x] 成本列汇总的是**对客 `charge_micros`**，与它上方那一列同源（`costCell` 用的就是它）
+- [x] `app.css` 一条 `tfoot td { background: var(--panel-2) }`：汇总行用 `td` 不用 `th`
+  （`th` 带 muted 颜色与可排序表头的 `cursor:pointer`，会让合计看起来可点）
+- [x] 后端零改动：`/admin/api/v1/requests` 响应、store、迁移、MCP 查询与后台桥全部未动
+- [x] UI harness requests 视图断言 38 → **48** 项：
+  - `summaryRow` 汇总行存在且只有一行；`summaryLabel` 文案（共 2 行 / 已计量 1 / 未计量 1）；
+  - `summaryTokens` = `1,200 / 34`、`summaryCost` = `0.002468 USD`（夹具里只有一行计量，故等于该行金额）；
+  - `summaryAligned` 单元格数 === 本表 `thead th` 数（**错行会直接失败**；表头取自 footer 自己那张表，
+    因为页面上还有「维度统计」卡的表）；
+  - `summaryFollowsFilter`（本页过滤框输入 `codex` 后只剩那行未计量的：`共 1 行`、`已计量 0`，
+    且不再出现 `1,200`）、`summaryHiddenWhenEmpty`（筛到空 → 没有汇总行，而不是 0/0）、
+    `summaryRestored`（清空过滤后回到 `共 2 行`）；`summaryFollowsRefresh`（刷新后 3 行 → `2,400 / 68`、`已计量 2`）
+- [x] `checks.sample` 回报 tfoot 文本，让 `make ui-check` 的输出里留下可读证据：
+  `本页汇总 · 共 3 行（已计量 2 · 未计量 1）2,400 / 680.004936 USD`
+- [x] 文档：`docs/request-log.md` §4 增汇总行口径、§6 状态补 M29；README 文档表设计文档区间改到 M0–M29
+- [x] `make verify` 全绿（无 Go 改动，用于确认嵌入资源与既有测试未受牵连）；
+  `make ui-check` 10 个视图全绿（`docs` 23 / `detail` 20 / `models` 17 / `create` 6 / `plugin` 17 /
+  `plugin-cached` 16 / `currency` 16 / `keys` 17 / `requests` 48 / `paging` 30）
+- [ ] **待人工执行**（宿主终端）：`make build` + `scripts/local-run.sh restart` 后看
+  http://127.0.0.1:8088/admin/ui/#/requests —— 控制台资源是 `//go:embed` 进二进制的，
+  且 JS 带 `Cache-Control: public, max-age=300`，要硬刷新（Ctrl+Shift+R）才不会看到旧脚本
+- [ ] 观察项：本页合计是否被误读成窗口合计。若确实有人这么读，按设计文档 §2.1 的路径补窗口级
+  `summary`（真库实测 11 ms；未计量计数写成 `SUM(CASE WHEN u.request_id IS NULL …)` 可避开
+  `COUNT(DISTINCT)` 的 temp B-tree），footer 机制不用改，只换数据源

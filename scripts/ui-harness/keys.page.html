@@ -147,6 +147,38 @@ try {
     checks.unmeteredShown = pageText().includes('未计量');
     checks.costShown = pageText().includes('≈') || pageText().includes('USD') || pageText().includes('CNY');
     checks.costFetched = (window.__fetched || []).includes('/requests/dimensions');
+    // The summary row under the list sums the page's two consumption columns. It is the
+    // page, not the window: the fixtures hold one metered row (1,200 / 34, charge 2,468
+    // micros) and one unmetered row, so the totals are that row's numbers and the label
+    // has to say which rows were left out.
+    const foot = document.querySelector('tfoot');
+    const footText = () => (document.querySelector('tfoot') || {}).textContent || '';
+    checks.summaryRow = !!foot && foot.querySelectorAll('tr').length === 1;
+    checks.summaryLabel = footText().includes('本页汇总') && footText().includes('共 2 行')
+      && footText().includes('已计量 1') && footText().includes('未计量 1');
+    checks.summaryTokens = footText().includes('1,200 / 34');
+    checks.summaryCost = footText().includes('0.002468 USD');
+    // A summary that dropped or shifted a cell would still "show numbers": the alignment
+    // is the part that silently rots when a column is added. The header is read from the
+    // footer's own table — the page also carries the 维度统计 card's table.
+    checks.summaryAligned = !!foot
+      && foot.querySelector('tr').children.length === foot.closest('table').querySelectorAll('thead th').length;
+    // The filter box in the table's toolbar sifts this page in the browser, so the summary
+    // has to follow what is left on screen: "codex" leaves the unmetered fixture row, and
+    // a page with nothing left shows no summary row at all (instead of 0 / 0).
+    const typeFilter = (value) => {
+      const box = document.querySelector('input[type=search]');
+      box.value = value;
+      box.dispatchEvent(new Event('input'));
+    };
+    typeFilter('codex');
+    checks.summaryFollowsFilter = footText().includes('共 1 行') && footText().includes('已计量 0')
+      && footText().includes('未计量 1') && !footText().includes('1,200');
+    typeFilter('zzz-no-such-row');
+    checks.summaryHiddenWhenEmpty = !document.querySelector('tfoot tr') && pageText().includes('该窗口内没有请求日志');
+    typeFilter('');
+    await settle();
+    checks.summaryRestored = footText().includes('共 2 行') && footText().includes('1,200 / 34');
     // The dimension card groups by an identity dimension and sums consumption per group.
     checks.dimensionCard = pageText().includes('维度统计');
     checks.dimensionRows = pageText().includes('deepseek-flash') && pageText().includes('已计量');
@@ -203,6 +235,10 @@ try {
     await settle();
     const prunedRow = [...document.querySelectorAll('tbody tr')].find((tr) => tr.textContent.includes('req_pruned0002'));
     checks.nullBodyRowListed = !!prunedRow;
+    // The reload brought a third row (a second metered one, same numbers as the first),
+    // so the summary has to have followed the list rather than kept its first numbers.
+    checks.summaryFollowsRefresh = footText().includes('2,400 / 68') && footText().includes('已计量 2');
+    checks.sample = [footText()];
     if (prunedRow) [...prunedRow.querySelectorAll('button')].find((b) => b.textContent.trim() === '详情').click();
     await settle();
     checks.clickWithoutRejection = errors.length === spent;
