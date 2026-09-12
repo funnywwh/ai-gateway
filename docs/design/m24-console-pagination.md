@@ -245,6 +245,28 @@ export function pagedTable({ columns, load, pageSize = 20, pageSizes = [20, 50, 
 9. **DAL 取舍落地**：旧方法（`ListAudit`/`ListRequestLogs`/`ListLedger`/`ListInvoices`/
    `ListRedemptionCodes`/`ListReconciliations`）都改成一行包装，`registry`/`bootstrap`/`mcpsrv`/
    `billing` 的调用点**一行未改**；`LedgerWindow.ExcludeKinds` 按设计在 SQL 里排除 charge。
+10. **（追加修复）翻页排序改成 `ORDER BY created_at DESC, id DESC`**：M24 把这批列表从「整表读」
+    改成「SQL 窗口读」，但 ORDER BY 沿用了 `id DESC`。带 `created_at` 上下界的窗口查询因此被 SQLite
+    规划成「created_at 索引扫描 + `USE TEMP B-TREE FOR ORDER BY`」——**排序器会把窗口内每一行都物化**，
+    之后才套 `LIMIT`。request_logs 的行带着录制的请求正文（真库实测：1853 行、`request_json` 合计
+    692 MB、均值 376 KB），于是控制台取 50 行要先把 ~700 MB 塞进排序器：
+
+    | 查询 | 计划 | 实测 |
+    |---|---|---|
+    | `... AND created_at >= ? AND created_at <= ? ORDER BY id DESC` | 索引范围 + TEMP B-TREE | **1.21–1.23 s** |
+    | 同上，仅去掉上界（计划退化为倒序全表扫描） | SCAN（无排序器） | 0.00 s |
+    | 同上，仅去掉正文列（排序器只剩元数据） | 索引范围 + TEMP B-TREE | 0.11 s |
+    | `... ORDER BY created_at DESC, id DESC` | 索引范围（无排序器） | **0.00 s** |
+
+    现有 `idx_request_logs_time(created_at)`（以及账本的 `idx_ledger_account_time`、用量的
+    `idx_usage_account_time`）就能提供 `created_at DESC, rowid DESC` 这个顺序，所以**不需要新增索引或迁移**。
+    同一模式在账本列表与 `ttftSamples` 里也存在（当时各约 1500 行、行很窄所以还不慢），一并改掉。
+    排序语义不变：`created_at` 与 `id` 在写入时一起打戳（`recordRequestLog`），两者顺序一致，
+    而控制台展示的正是 `created_at`；`id` 保留为同秒内的稳定 tiebreaker。
+    回归防线是 `internal/store/pagination_test.go` 的 `TestHistoryListsAreOrderedByAnIndexNotASorter`：
+    直接 `EXPLAIN QUERY PLAN` 三个列表的**真实语句**（由 `requestLogListSQL`/`ledgerListSQL`/`ttftSamplesSQL`
+    构造），断言计划里不出现 `TEMP B-TREE`。断言计划而不是断言耗时，因为计划选择是确定性的，
+    而 M13 明确不把绝对数字放进 CI。该用例在旧排序下三条全部失败（已验证），改回即通过。
 
 ### 验证与实测结论（2026-09-11）
 

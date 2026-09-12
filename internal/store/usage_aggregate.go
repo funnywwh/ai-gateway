@@ -48,11 +48,17 @@ FROM usage_records WHERE account_id = ? AND created_at >= ? AND created_at <= ?`
 	return totals, nil
 }
 
-func (db *DB) ttftSamples(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]int64, bool, error) {
-	rows, err := db.read.QueryContext(ctx, `
+// ttftSamplesSQL returns the newest-first sample query; named for the same reason as
+// requestLogListSQL (see historyPageOrder).
+func ttftSamplesSQL() string {
+	return `
 SELECT ttft_ms FROM usage_records
-WHERE account_id = ? AND created_at >= ? AND created_at <= ? AND ttft_ms > 0
-ORDER BY id DESC LIMIT ?`, accountID, unix(from), unix(to), limit+1)
+WHERE account_id = ? AND created_at >= ? AND created_at <= ? AND ttft_ms > 0` +
+		historyPageOrder + " LIMIT ?"
+}
+
+func (db *DB) ttftSamples(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]int64, bool, error) {
+	rows, err := db.read.QueryContext(ctx, ttftSamplesSQL(), accountID, unix(from), unix(to), limit+1)
 	if err != nil {
 		return nil, false, fmt.Errorf("store: ttft samples: %w", err)
 	}

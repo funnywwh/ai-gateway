@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,11 +85,14 @@ func TestListRequestLogsPageRespectsFiltersAndCounts(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Three rows for our account (newest first) plus one for another account and one
-	// outside the time window: neither may leak into the page or the total.
+	// outside the time window: neither may leak into the page or the total. created_at
+	// rises with the insertion order, the way it does in production, where the row is
+	// stamped when it is written (v1.recordRequestLog) — a fixture with the two orders
+	// reversed would pin an order the list never sees.
 	for i := 0; i < 3; i++ {
 		if err := db.PutRequestLog(ctx, &domain.RequestLogRecord{
 			RequestID: fmt.Sprintf("req-%02d", i), AccountID: accountID, APIKeyID: 1,
-			Endpoint: "/v1/responses", Status: "ok", CreatedAt: now.Add(-time.Duration(i) * time.Minute),
+			Endpoint: "/v1/responses", Status: "ok", CreatedAt: now.Add(-time.Duration(2-i) * time.Minute),
 		}); err != nil {
 			t.Fatalf("put request log: %v", err)
 		}
@@ -111,8 +115,9 @@ func TestListRequestLogsPageRespectsFiltersAndCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Newest first means insertion order descending (the list orders by id), so the
-	// last row written is the first one a console shows.
+	// Newest first is the window's newest created_at, with id as the tiebreaker (see
+	// historyPageOrder), so the last row written — which carries the latest stamp — is
+	// the first one a console shows.
 	if len(page) != 2 || page[0].RequestID != "req-02" {
 		t.Fatalf("page = %+v, want req-02 first", page)
 	}
@@ -241,5 +246,60 @@ func TestListInvoicesCodesAndReconciliationsPage(t *testing.T) {
 	}
 	if total, err := db.CountReconciliations(ctx); err != nil || total != 3 {
 		t.Fatalf("CountReconciliations = %d (err=%v), want 3", total, err)
+	}
+}
+
+// TestHistoryListsAreOrderedByAnIndexNotASorter pins *why* historyPageOrder is
+// "created_at DESC, id DESC" rather than "id DESC". These lists filter on a created_at
+// window, so with "ORDER BY id DESC" SQLite answers them with "USE TEMP B-TREE FOR ORDER
+// BY" — it buffers every row of the window before LIMIT applies. On request_logs that
+// buffer carries the recorded request bodies, so the console's 50-row page sorted ~700 MB
+// to show 50 rows (1.23s measured against a real 1.8k-row database; 0.00s once the sorter
+// is gone — docs/design/m24-console-pagination.md §8.10). Ordering by the filtered column
+// first lets the created_at index satisfy the order and no sorter is built.
+//
+// The plan is asserted instead of the timing because a plan choice is deterministic while
+// a duration is not, and because M13 keeps absolute numbers out of CI. The queries come
+// from the store's own builders so this test cannot drift away from what production runs.
+func TestHistoryListsAreOrderedByAnIndexNotASorter(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	from, to := now.AddDate(0, 0, -7), now
+
+	requestWhere, requestArgs := requestLogFilter(0, from, to)
+	ledgerWhere, ledgerArgs := ledgerFilter(LedgerWindow{AccountID: 1, From: from, To: to})
+
+	cases := []struct {
+		name  string
+		query string
+		args  []any
+	}{
+		{"request_logs", requestLogListSQL(requestWhere), append(requestArgs, 50, 0)},
+		{"ledger_entries", ledgerListSQL(ledgerWhere), append(ledgerArgs, 100, 0)},
+		{"usage_records", ttftSamplesSQL(), []any{int64(1), unix(from), unix(to), 2000}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, err := db.read.QueryContext(ctx, "EXPLAIN QUERY PLAN "+tc.query, tc.args...)
+			if err != nil {
+				t.Fatalf("explain %s: %v", tc.name, err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var id, parent, unused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+					t.Fatalf("scan plan row: %v", err)
+				}
+				if strings.Contains(detail, "TEMP B-TREE") {
+					t.Fatalf("%s: SQLite sorts the whole window (%q); historyPageOrder must be an "+
+						"order an index already provides — see pagination.go", tc.name, detail)
+				}
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatalf("iterate plan rows: %v", err)
+			}
+		})
 	}
 }

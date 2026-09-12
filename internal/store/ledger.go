@@ -168,6 +168,12 @@ func (db *DB) ListLedger(ctx context.Context, accountID int64, from, to time.Tim
 	return db.ListLedgerPage(ctx, LedgerWindow{AccountID: accountID, From: from, To: to, Limit: limit})
 }
 
+// ledgerListSQL returns the page query for the ledger list; named for the same reason as
+// requestLogListSQL (see historyPageOrder).
+func ledgerListSQL(where string) string {
+	return "SELECT " + ledgerCols + " FROM ledger_entries" + where + historyPageOrder + " LIMIT ? OFFSET ?"
+}
+
 // ListLedgerPage returns one window of an account's ledger entries (newest first).
 func (db *DB) ListLedgerPage(ctx context.Context, w LedgerWindow) ([]*domain.LedgerEntry, error) {
 	limit := normalizeLimit(w.Limit, 100, 1000)
@@ -176,7 +182,7 @@ func (db *DB) ListLedgerPage(ctx context.Context, w LedgerWindow) ([]*domain.Led
 		offset = 0
 	}
 	where, args := ledgerFilter(w)
-	query := "SELECT " + ledgerCols + " FROM ledger_entries" + where + " ORDER BY id DESC LIMIT ? OFFSET ?"
+	query := ledgerListSQL(where)
 	args = append(args, limit, offset)
 
 	rows, err := db.read.QueryContext(ctx, query, args...)

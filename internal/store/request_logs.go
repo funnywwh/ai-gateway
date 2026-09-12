@@ -36,6 +36,17 @@ func (db *DB) ListRequestLogs(ctx context.Context, accountID int64, from, to tim
 	return db.ListRequestLogsPage(ctx, accountID, from, to, limit, 0)
 }
 
+// requestLogListSQL returns the page query for the console's request-log list. It is a
+// named function rather than an inline literal so the order-and-plan test can EXPLAIN the
+// very statement the store runs; see historyPageOrder for why the ORDER BY is a contract.
+func requestLogListSQL(where string) string {
+	return `
+SELECT id, request_id, api_key_id, account_id, endpoint, request_json, response_reasoning,
+       response_text, reasoning_recorded, output_text_recorded, request_bytes, response_bytes,
+       truncated, record_input_mode, record_reasoning, record_output_text, status, created_at
+FROM request_logs` + where + historyPageOrder + " LIMIT ? OFFSET ?"
+}
+
 // ListRequestLogsPage returns one page of recorded requests (newest first).
 func (db *DB) ListRequestLogsPage(ctx context.Context, accountID int64, from, to time.Time, limit, offset int) ([]*domain.RequestLogRecord, error) {
 	limit = normalizeLimit(limit, 100, 1000)
@@ -43,11 +54,7 @@ func (db *DB) ListRequestLogsPage(ctx context.Context, accountID int64, from, to
 		offset = 0
 	}
 	where, args := requestLogFilter(accountID, from, to)
-	query := `
-SELECT id, request_id, api_key_id, account_id, endpoint, request_json, response_reasoning,
-       response_text, reasoning_recorded, output_text_recorded, request_bytes, response_bytes,
-       truncated, record_input_mode, record_reasoning, record_output_text, status, created_at
-FROM request_logs` + where + " ORDER BY id DESC LIMIT ? OFFSET ?"
+	query := requestLogListSQL(where)
 	args = append(args, limit, offset)
 
 	rows, err := db.read.QueryContext(ctx, query, args...)
