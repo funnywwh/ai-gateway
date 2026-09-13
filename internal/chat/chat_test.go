@@ -537,6 +537,12 @@ func TestTurnRunsToolLoopAndStoresCanonicalItems(t *testing.T) {
 		case EventToolCall:
 			sawToolCall = true
 		case EventToolResult:
+			if ev.CallID == "" || ev.Tool == nil || ev.CallID != ev.Tool.CallID {
+				t.Fatalf("tool result must identify its live UI card: %+v", ev)
+			}
+			if sawDone {
+				t.Fatal("tool result must arrive before the turn completes")
+			}
 			sawToolResult = true
 		case EventDone:
 			sawDone = true

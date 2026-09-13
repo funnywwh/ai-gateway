@@ -57,6 +57,7 @@ ui-base:
 	@if command -v node >/dev/null 2>&1; then \
 		node scripts/ui-base-test.mjs ; \
 		node scripts/ui-badge-test.mjs ; \
+		node internal/webui/tests/requests_test.mjs || exit $$? ; \
 	else \
 		echo "skip: node is not available (the derivation is still covered by make ui-check)" ; \
 	fi

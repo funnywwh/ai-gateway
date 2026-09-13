@@ -196,7 +196,7 @@ try {
     await settle();
     checks.tableRendered = pageText().includes('req_demo0001');
     checks.recordingHint = pageText().includes('独立于正文口径记录的元数据');
-    checks.columns = ['输出文本', '客户端', '模型', '工作区', '会话', '类型', '标题', '成本'].every((c) => pageText().includes(c));
+    checks.columns = ['输出文本', '客户端', '模型', '推理强度', '工作区', '会话', '类型', '标题', '成本'].every((c) => pageText().includes(c));
     // The identity filters are the point of the page now: a client select, a model select
     // filled from the statistics endpoint, and free-text session/workspace boxes.
     checks.clientFilter = [...document.querySelectorAll('select')].some((s) => [...s.options].some((o) => o.value === 'codex'));

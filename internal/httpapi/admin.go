@@ -510,7 +510,8 @@ func (s *Server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
 			"output_text_recorded": row.OutputTextRecorded, "truncated": row.Truncated,
 			"request_bytes": row.RequestBytes,
 			"client":        row.Client, "model": row.Model, "resolved_model": row.ResolvedModel,
-			"workspace": row.Workspace, "session_id": row.SessionID, "call_kind": row.CallKind,
+			"reasoning_effort": row.ReasoningEffort,
+			"workspace":        row.Workspace, "session_id": row.SessionID, "call_kind": row.CallKind,
 			"title": row.Title,
 		}
 		// The usage object is always present: "no usage row" (a locally rejected
@@ -785,7 +786,8 @@ func (s *Server) handleAdminRequestDetail(w http.ResponseWriter, r *http.Request
 		"output_text_recorded": row.OutputTextRecorded, "truncated": row.Truncated,
 		"request_bytes": row.RequestBytes, "response_bytes": row.ResponseBytes,
 		"client": row.Client, "model": row.Model, "resolved_model": row.ResolvedModel,
-		"workspace": row.Workspace, "session_id": row.SessionID, "call_kind": row.CallKind,
+		"reasoning_effort": row.ReasoningEffort,
+		"workspace":        row.Workspace, "session_id": row.SessionID, "call_kind": row.CallKind,
 		"title": row.Title,
 		"usage": usagePayload(usage[row.RequestID]),
 	}

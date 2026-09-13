@@ -113,6 +113,7 @@ export async function render({ page, actions, session }) {
       { key: 'api_key_id', label: 'API Key', render: (row) => apiKeyCell(row) },
       { key: 'client', label: '客户端', render: (row) => (row.client ? badge(row.client, row.client === 'unknown' ? '' : 'ok') : el('span', { class: 'muted', text: '—' })) },
       { key: 'model', label: '模型', render: (row) => modelCell(row) },
+      { key: 'reasoning_effort', label: '推理强度', render: (row) => reasoningEffortCell(row) },
       { key: 'workspace', label: '工作区', render: (row) => pathCell(row.workspace) },
       { key: 'session_id', label: '会话', render: (row) => sessionCell(row.session_id) },
       { key: 'call_kind', label: '类型', render: (row) => callKindCell(row) },
@@ -320,7 +321,7 @@ export async function render({ page, actions, session }) {
   page.append(statsCard);
   page.append(card('请求日志', view.node, [
     days, accountFilter, keyFilter, client, model, sessionFilter, workspaceFilter,
-    el('span', { class: 'muted', text: '用户（账户）/API Key 与客户端/模型/工作区/会话/标题、token 成本都是独立于正文口径记录的元数据（record_input=off 也记）；用户与 Key 的名字由账户/Key 表读时解析，分组按 id；标题来自会话的标题调用，成本来自计量表，与账单一致；列表底部的「本页汇总」只合计当前页已加载的行（含本页过滤），窗口口径看上方「维度统计」' }),
+    el('span', { class: 'muted', text: '用户（账户）/API Key 与客户端/模型/推理强度/工作区/会话/标题、token 成本都是独立于正文口径记录的元数据（record_input=off 也记）；用户与 Key 的名字由账户/Key 表读时解析，分组按 id；标题来自会话的标题调用，成本来自计量表，与账单一致；列表底部的「本页汇总」只合计当前页已加载的行（含本页过滤），窗口口径看上方「维度统计」' }),
     hint]));
 
   // Changing any filter restarts both tables at page 1: the rows of the current page belong
@@ -345,6 +346,12 @@ export async function render({ page, actions, session }) {
   prune.addEventListener('click', () => pruneNow());
   await loadRetention();
   await Promise.all([view.refresh(), loadStats(), loadModelOptions(), loadAccountOptions()]);
+}
+
+function reasoningEffortCell(row) {
+  return row.reasoning_effort
+    ? el('span', { text: row.reasoning_effort, title: '网关记录的推理强度（应用模型策略后；上游可能另行映射）' })
+    : el('span', { class: 'muted', text: '—', title: '未指定、未记录或已脱敏的推理强度' });
 }
 
 // modelCell shows the model that actually served the request, with the requested name
@@ -521,6 +528,7 @@ function identityBlock(row) {
     ['客户端', row.client || '未识别'],
     ['请求的模型', row.model || '—'],
     ['路由到的模型', row.resolved_model || '—'],
+    ['推理强度', row.reasoning_effort || '—'],
     ['工作区', row.workspace || '—'],
     ['会话', row.session_id || '—'],
     ['调用类型', row.call_kind || '—'],

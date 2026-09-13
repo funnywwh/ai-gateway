@@ -263,7 +263,7 @@ func TestSkeletonRowKeepsIdentity(t *testing.T) {
 	rec := &domain.RequestLogRecord{
 		RequestID: "req_skeleton0001", Status: "completed", RequestJSON: `{"input":"ping"}`,
 		ResponseText: "answer", Client: "dsh", Model: "deepseek-flash", ResolvedModel: "deepseek-flash",
-		Workspace: "/home/winger/work/ai_gateway", SessionID: "session-abc", CallKind: "agent",
+		ReasoningEffort: "high", Workspace: "/home/winger/work/ai_gateway", SessionID: "session-abc", CallKind: "agent",
 	}
 	bare := skeletonLog(rec)
 
@@ -271,7 +271,8 @@ func TestSkeletonRowKeepsIdentity(t *testing.T) {
 		t.Fatalf("the skeleton must drop content: %+v", bare)
 	}
 	if bare.Client != "dsh" || bare.Model != "deepseek-flash" || bare.ResolvedModel != "deepseek-flash" ||
-		bare.Workspace != "/home/winger/work/ai_gateway" || bare.SessionID != "session-abc" || bare.CallKind != "agent" {
+		bare.ReasoningEffort != "high" || bare.Workspace != "/home/winger/work/ai_gateway" ||
+		bare.SessionID != "session-abc" || bare.CallKind != "agent" {
 		t.Fatalf("the skeleton must keep the identity: %+v", bare)
 	}
 }
@@ -297,8 +298,8 @@ func TestAdminRequestsCarryIdentityAndUsage(t *testing.T) {
 	seedIdentityRow(t, f, &domain.RequestLogRecord{
 		RequestID: "req_dim0001", AccountID: 1, APIKeyID: 1, Endpoint: "/v1/responses",
 		Status: "completed", RecordInputMode: "user", Client: "dsh", Model: "luna",
-		ResolvedModel: "deepseek-flash", Workspace: "/home/winger/work/ai_gateway",
-		SessionID: "session-ebf36761", CallKind: "agent", Title: "",
+		ResolvedModel: "deepseek-flash", ReasoningEffort: "medium",
+		Workspace: "/home/winger/work/ai_gateway", SessionID: "session-ebf36761", CallKind: "agent", Title: "",
 	})
 	usage := &domain.UsageRecord{
 		RequestID: "req_dim0001", AttemptNo: 1, AccountID: 1, APIKeyID: 1,
@@ -320,6 +321,9 @@ func TestAdminRequestsCarryIdentityAndUsage(t *testing.T) {
 	if item["client"] != "dsh" || item["model"] != "luna" || item["resolved_model"] != "deepseek-flash" {
 		t.Fatalf("list row lacks the identity: %v", item)
 	}
+	if item["reasoning_effort"] != "medium" {
+		t.Fatalf("list row reasoning_effort = %v, want medium", item["reasoning_effort"])
+	}
 	if item["workspace"] != "/home/winger/work/ai_gateway" || item["session_id"] != "session-ebf36761" {
 		t.Fatalf("list row lacks the workspace/session: %v", item)
 	}
@@ -339,6 +343,9 @@ func TestAdminRequestsCarryIdentityAndUsage(t *testing.T) {
 	detail := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/requests/req_dim0001", "", cookie))
 	if detail["model"] != "luna" || detail["resolved_model"] != "deepseek-flash" {
 		t.Fatalf("detail lacks the model identity: %v", detail)
+	}
+	if detail["reasoning_effort"] != "medium" {
+		t.Fatalf("detail reasoning_effort = %v, want medium", detail["reasoning_effort"])
 	}
 	if dusage, _ := detail["usage"].(map[string]any); dusage == nil || dusage["metered"] != true {
 		t.Fatalf("detail lacks usage: %v", detail["usage"])

@@ -341,7 +341,7 @@ func (s *Service) runTurn(ctx context.Context, session *domain.ChatSession, turn
 				Status:    outcome.status,
 			})
 			run.providerItems = append(run.providerItems, outcome.items...)
-			s.emit(emit, Event{Type: EventToolResult, TurnID: turn.TurnID, Step: step, Tool: outcome.record})
+			s.emit(emit, Event{Type: EventToolResult, TurnID: turn.TurnID, Step: step, CallID: call.CallID, Tool: outcome.record})
 		}
 	}
 	return run

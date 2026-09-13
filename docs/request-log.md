@@ -58,6 +58,18 @@
 `danger-full-access` 下 `workspace` 为空；会话经压缩后 runtime context 可能被替换，此时
 `session_id` 仍可用于归组。
 
+### 推理强度（执行元数据）
+
+列表与详情返回独立字段 `reasoning_effort`，控制台在「模型」列后显示「推理强度」。
+它记录网关应用规范模型的 default/force 策略后、交给供应商适配器的 `reasoning.effort`，
+不是当前模型配置的读时值，也不是思考 token 数；供应商仍可能映射参数或采用自身默认值。
+多次上游尝试时记录最后一次尝试的值。
+
+该字段独立持久化，不依赖请求正文录制；`record_input=off` 时仍保留。
+`recording.redact_paths` 包含 `reasoning_effort`、`reasoning.effort` 或 `reasoning` 时会清空该字段。
+显式 `none` 原样显示，不与未指定混同；未指定、未进入上游尝试的本地拒绝请求及旧日志返回空字符串，
+页面显示 `—`，不猜测上游实际采用的强度。历史日志不回填。
+
 ## 3. 消耗（token / 成本）
 
 token 与成本**不复制**到日志表，而是按 `request_id` 从计量表 `usage_records` 关联

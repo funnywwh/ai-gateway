@@ -163,6 +163,9 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		// "length", "content_filter", ...). It is what separates "the model finished"
 		// from "the answer was cut off", which the client cannot see otherwise.
 		finishReason string
+		// reasoningEffort is captured from the canonical provider request after
+		// the model-level policy is applied, independently of content recording.
+		reasoningEffort string
 	)
 
 	maxAttempts := s.deps.Config.Routing.MaxAttempts
@@ -183,6 +186,10 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		applyModelReasoning(provReq, plan.Reasoning)
+		reasoningEffort = ""
+		if provReq.Reasoning != nil {
+			reasoningEffort = strings.TrimSpace(provReq.Reasoning.Effort)
+		}
 		if len(priorItems) > 0 {
 			provReq.Input = append(append([]pluginapi.Item{}, priorItems...), provReq.Input...)
 		}
@@ -292,7 +299,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Stream {
 			_, _ = assembler.Fail(payload)
-			s.persist(ctx, key, account, req, plan.Resolved.Canonical, 0, assembler, "failed", clientHintFromRequest(r))
+			s.persist(ctx, key, account, req, plan.Resolved.Canonical, 0, assembler, "failed", clientHintFromRequest(r), reasoningEffort)
 		} else {
 			writeAPIError(w, toAPIError(lastErr))
 		}
@@ -349,7 +356,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 	}
 
-	s.persist(ctx, key, account, req, canonical, providerID, assembler, status, clientHintFromRequest(r))
+	s.persist(ctx, key, account, req, canonical, providerID, assembler, status, clientHintFromRequest(r), reasoningEffort)
 	ticket.Settle(totalTokens(assembler.Usage()))
 	_ = startedAt
 }
@@ -468,6 +475,7 @@ func (s *Server) persist(
 	assembler *responses.Assembler,
 	status string,
 	clientHint string,
+	reasoningEffort string,
 ) {
 	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
 	defer cancel()
@@ -527,7 +535,7 @@ func (s *Server) persist(
 		}
 	}
 
-	s.recordContent(auditCtx, key, account, assembler, status, input, storedResp)
+	s.recordContent(auditCtx, key, account, assembler, status, input, storedResp, reasoningEffort)
 
 	if s.deps.Hooks != nil {
 		event := "response.completed"
@@ -676,6 +684,7 @@ func (s *Server) recordContent(
 	status string,
 	input inputRecord,
 	storedResp *domain.ResponseRecord,
+	reasoningEffort string,
 ) {
 	cfg := s.deps.Config.Recording
 	recordReasoning := key.RecordReasoning || cfg.RecordReasoning
@@ -699,6 +708,7 @@ func (s *Server) recordContent(
 		Client:           input.Dims.Client,
 		Model:            input.Model,
 		ResolvedModel:    input.Resolved,
+		ReasoningEffort:  s.redactDimension("reasoning_effort", s.redactDimension("reasoning.effort", reasoningEffort)),
 		Workspace:        input.Dims.Workspace,
 		SessionID:        input.Dims.SessionID,
 		CallKind:         input.Dims.CallKind,

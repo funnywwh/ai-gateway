@@ -591,6 +591,63 @@ func TestMetadataAndOffModesStoreNoBody(t *testing.T) {
 	}
 }
 
+// TestEffectiveReasoningEffortIsLoggedWithoutRequestContent keeps execution metadata
+// independent of the request-content recording policy. The logged value comes from the
+// provider request after the canonical model's policy has been applied.
+func TestEffectiveReasoningEffortIsLoggedWithoutRequestContent(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	if err := f.db.SetAPIKeyRecording(ctx, f.key.ID, false, false, "off"); err != nil {
+		t.Fatal(err)
+	}
+	f.verifier.Invalidate(secret.Prefix(testToken))
+
+	model, err := f.db.GetModelByName(ctx, "echo-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.ReasoningJSON = `{"mode":"force","effort":"high"}`
+	if _, err := f.db.UpsertModel(ctx, model); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.registry.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := f.do(t, "POST", "/v1/responses", `{"model":"echo-model","input":"ping","reasoning":{"effort":"low"}}`, nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("request failed: %d", resp.StatusCode)
+	}
+	row, err := f.db.GetRequestLog(ctx, resp.Header.Get("x-request-id"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.RequestJSON != "" || row.RecordInputMode != "off" {
+		t.Fatalf("off recording must not retain a body: %+v", row)
+	}
+	if row.ReasoningEffort != "high" {
+		t.Fatalf("reasoning_effort = %q, want policy-forced high", row.ReasoningEffort)
+	}
+	for _, path := range []string{"reasoning_effort", "reasoning.effort", "reasoning"} {
+		t.Run("redact_"+path, func(t *testing.T) {
+			f.srv.deps.Config.Recording.RedactPaths = []string{path}
+			resp := f.do(t, "POST", "/v1/responses", `{"model":"echo-model","input":"ping","reasoning":{"effort":"low"}}`, nil)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("request failed: %d", resp.StatusCode)
+			}
+			row, err := f.db.GetRequestLog(ctx, resp.Header.Get("x-request-id"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if row.ReasoningEffort != "" {
+				t.Fatalf("redacted reasoning_effort = %q", row.ReasoningEffort)
+			}
+		})
+	}
+}
+
 // TestFlatKeyPolicyIsEnforced pins the shape admission actually reads: the quota fields
 // live at the top level of the policy. The console used to advertise a nested
 // {"rate_limit":{...}} document that nothing enforced.

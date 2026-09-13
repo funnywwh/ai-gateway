@@ -13,8 +13,8 @@ import (
 const requestLogColumns = `id, request_id, api_key_id, account_id, endpoint, request_json,
        response_reasoning, response_text, reasoning_recorded, output_text_recorded,
        request_bytes, response_bytes, truncated, record_input_mode, record_reasoning,
-       record_output_text, status, created_at, client, model, resolved_model, workspace,
-       session_id, call_kind, title`
+       record_output_text, status, created_at, client, model, resolved_model, reasoning_effort,
+       workspace, session_id, call_kind, title`
 
 // requestLogFilter builds the WHERE clause shared by every request-log read. prefix is the
 // table alias the columns carry ("" for the single-table queries, "r." when the query
@@ -118,7 +118,7 @@ func scanRequestLog(row rowScanner) (*domain.RequestLogRecord, error) {
 		&rec.RequestJSON, &rec.ResponseReasoning, &rec.ResponseText, &reasoningRecorded,
 		&outputRecorded, &rec.RequestBytes, &rec.ResponseBytes, &truncate, &rec.RecordInputMode,
 		&reasoningFlag, &outputFlag, &rec.Status, &createdAt, &rec.Client, &rec.Model,
-		&rec.ResolvedModel, &rec.Workspace, &rec.SessionID, &rec.CallKind, &rec.Title); err != nil {
+		&rec.ResolvedModel, &rec.ReasoningEffort, &rec.Workspace, &rec.SessionID, &rec.CallKind, &rec.Title); err != nil {
 		return nil, fmt.Errorf("store: scan request log: %w", err)
 	}
 	rec.ReasoningRecorded = reasoningRecorded != 0

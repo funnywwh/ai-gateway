@@ -222,6 +222,9 @@ type RequestLogRecord struct {
 	// ResolvedModel is empty.
 	Model         string
 	ResolvedModel string
+	// ReasoningEffort is the effort on the canonical provider request after the
+	// model-level policy has been applied. Empty means no effort was applied.
+	ReasoningEffort string
 	// Workspace is the client's workspace root, "" when it did not send one.
 	Workspace string
 	// SessionID is the explicit root session identity, with prompt_cache_key as fallback.

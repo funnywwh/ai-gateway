@@ -1281,7 +1281,8 @@ export async function render({ page, actions, session, route }) {
         break;
       }
       case 'tool_result': {
-        const call = pending.parts.find((part) => part.type === 'tool_call' && part.id === event.call_id);
+        const callID = event.call_id || (event.tool && event.tool.call_id);
+        const call = pending.parts.find((part) => part.type === 'tool_call' && part.id === callID);
         if (call && event.tool) {
           call.result = event.tool.result;
           call.is_error = event.tool.is_error;
