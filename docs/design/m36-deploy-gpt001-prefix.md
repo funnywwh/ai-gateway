@@ -109,3 +109,60 @@ HTTP 的 80 块也已就位（301 跳 443）。
 - **本机 /etc/hosts 的坑**：这台工作站的 `/etc/hosts` 里有 `103.59.145.127 gpt001.iotalking.top`
   这条手工记录（那个 IP 已下线，公网 DNS 里 `gpt001.iotalking.top` 指向 47.80.68.113），
   会让 `curl gpt001.iotalking.top` 静默连到一台不存在的机器。
+
+## 6. Codex 账号导入（sub2api → aigw）
+
+**来源**：同一台机器上跑着的 sub2api（`/opt/sub2api`，docker compose + postgres）。
+它的 `accounts` 表里存着 4 个 openai 账号：1 个 ChatGPT OAuth 订阅号
+（`funnywwh@gmail.com`，plan `prolite`）、2 个已停用的 OAuth 号（同邮箱的第二份、另一个邮箱的失效号，
+后者 401 `authentication token has been invalidated`）、1 个第三方中转的 apikey 号。这里只导入第 1 个。
+
+**做法**：用官方示例插件 `examples/provider-codex`（订阅型 Responses 后端 + OAuth 刷新），
+构建后放到 `/opt/aigw/plugins/provider-codex`，供应商 kind 写 `plugin:provider-codex`：
+
+| 项 | 值 |
+|---|---|
+| 供应商 | `codex-sub`（id=2，priority 50，enabled） |
+| 凭据（sealed） | `refresh_token` / `access_token` / `account_id` / `client_id` |
+| 配置 | `base_url=https://chatgpt.com/backend-api/codex`、`store=false`、`reasoning_effort=medium`、模型 `gpt-5.6-luna` |
+| 对客模型 | `gpt-5.6-luna`（id=5，enabled，售价 `cost_follow` + `markup_bp=0`） |
+| 路由 | `gpt-5.6-luna` → `codex-sub`（id=2，priority 10） |
+| 凭据状态 | `/opt/aigw/data/plugin-state/codex-sub/{credentials,session}.json`（0600） |
+
+**实测**：`refresh_session` 真换到 access_token（有效期 2026-09-23）；健康探测（真实流式补全）
+`ok=true`、latency 2.5s；`POST /aigw/v1/responses` 非流式与 `stream=true` 都返回正确文本与 usage；
+公网域名 `https://mnl.iotalking.top/aigw/v1/responses` 同样通过。出网没有被墙：
+这台机器直连 `chatgpt.com` 的 `/backend-api/*` 正常（首页 403 `cf-mitigated: challenge` 是 Cloudflare
+对浏览器的挑战，接口不受影响）。
+
+### 6.1 refresh_token 轮换：这是本方案唯一需要人工维护的点
+
+ChatGPT 的 OAuth **每次刷新都轮换 refresh_token**，谁最后刷新谁持有唯一可用的那份：
+
+- aigw 的插件刷新后写自己的 `session.json`；
+- sub2api 刷新后写回 `accounts.credentials`。
+
+两边独立刷新时，对方那份会在下一次刷新时报 `invalid_grant`。本次导入过程中真的发生了
+（sub2api 原本是 `rt.1.AAD…`，插件刷成了 `rt.1.AAA…`），当时已把新令牌写回 sub2api 让两边一致。
+**按用户决定不装定时同步**，因此约定为「坏了手动重导」。
+
+工具：`scripts/codex-account.py`（服务器上 `/opt/aigw/codex_account.py`，700）。
+
+```sh
+python3 /opt/aigw/codex_account.py show                              # 比对两边 refresh_token 前缀
+python3 /opt/aigw/codex_account.py import --account 1 --provider codex-sub   # sub2api → aigw（沿用启用状态）
+python3 /opt/aigw/codex_account.py push-to-sub2api --account 1 --provider codex-sub  # aigw → sub2api
+```
+
+凭据值只在进程内传递（psql 变量 / 600 临时文件），不打印到 stdout，所以不会落到对话或日志里。
+`import` 之后建议再跑一次 `push-to-sub2api`：`import` 里的 `set_token` 会真刷新一次，
+刷新后的令牌以 aigw 这边为准。控制台里对应的入口是供应商详情页的
+`whoami` / `refresh_session` / `set_token` 三个动作。
+
+### 6.2 已知取舍
+
+- **计费**：订阅号没有按 token 的公开价格，`cost_follow` 记下的是 0 成本；
+  想让控制台按「订阅折算价」看账，得在该模型上配绝对规则（`pricing.md` 的口径）。
+- **条款风险**：`examples/provider-codex` 的 README 已写明，这是非官方后端、
+  可能随时失效、且可能与上游条款冲突——要留要撤由账号持有者判断。
+- **同一账号被两个系统共用**：sub2api 的调度与 aigw 的请求会共享同一份订阅额度。
