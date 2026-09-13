@@ -144,4 +144,27 @@ AI Gateway  v0.1.0 56df9b5
 
 ## 8. 实现与设计差异
 
-（实现完成后回填）
+1. **版本号从 `0.1.0` 起，首个上线版本是 `0.1.2`**：`0.1.0` 是新建 `VERSION` 时的值，`0.1.1` 加了控制台
+   角标与发布 skill，`0.1.2` 补上 `scripts/format-smoke.sh`（回归脚本属于发布物的一部分）。三个 tag 都指向
+   包含该版本号的 commit，所以 `v0.1.2` 的构建产物自报 `0.1.2`——这也是 `release.sh` 把"改 VERSION"与
+   "构建"放在一条命令里的原因。
+2. **`featuresOf` 的 `text` 档位处理是设计时漏掉的一条**：设计里只写了"按级映射"，实现后由
+   `TestFeaturesOfMapsFormatLevelToCapability` 当场发现——照直映射会把 `text` 变成一个**谁都没有申报**
+   的能力要求，于是"客户端显式写了 `text.format=text`"的请求会找不到任何候选。现在 `text` 与缺省都不要求
+   任何能力（§3.4 表格已按实现补上）。
+3. **额外加了 `scripts/format-smoke.sh`**（设计第 6 节只写了包级测试）：包级测试只能证明"provider 造出的体
+   是对的"，而这次的缺陷恰恰是"配置影响了 provider 的造体行为"，所以要有一层"真实二进制打假上游、读上游
+   收到什么"的验证。变异验证用它跑了修复前的二进制，得到的正是线上那条形状
+   （`#1 ... response_format = {"type":"json_object"}`）。
+4. **`text.format` 归一化放在 `responses` 包**（设计里没指明位置）：`text` → "无格式"的翻译如果留在
+   provider，每个 provider 都要各写一遍，第一个写漏的就会把 `response_format: {"type":"text"}` 发给不认识
+   它的上游。放在协议层只写一次。
+5. **控制台角标的代码从 `app.js` 抽到 `js/brand.js`**（设计写的是"在 `renderShell()` 里渲染"）：外壳需要
+   会话与路由才能渲染，角标只需要一个版本查询；抽出模块后 `scripts/ui-badge-test.mjs` 能用三行 DOM shim
+   直接测它（浏览器版同一批断言在 `scripts/ui-harness/brand.page.html`）。行为与设计一致，只是可测了。
+6. **真机对照证实了 400 的形状**（设计里写的是"预期"）：同一个 DeepSeek key，不带 `response_format` 是
+   200，带 `{"type":"json_object"}` 是 400 且报错文本与 DSH 看到的一字不差。线上 `request_logs` 的
+   448/450 两条 `status=failed` 请求体里**没有** `text` 参数，两处证据合起来把因果闭合了。
+7. **控制台角标的浏览器断言没能实跑**：本机没有 firefox（`make ui-check` 自行 skip），所以
+   `brand.page.html` 只做了静态检查（模块化 script、单一脚本标签、占位符齐全），实际跑过的是 node 版
+   `scripts/ui-badge-test.mjs`（11 项 + 变异验证）。有浏览器时 `make ui-check --views brand` 可补跑。

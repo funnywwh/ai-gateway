@@ -1582,7 +1582,9 @@
       打假 DeepSeek 并逐条读上游收到的请求体。**变异验证**：用修复前的二进制跑，输出
       `#1 keys=…,response_format` + `response_format = {"type": "json_object"}` 并 FAIL（正是线上那条形状）；
       用修复后二进制跑：`#1 keys=max_tokens,messages,model`（无该字段）、`#2` 带 `{"type":"json_object"}`、非法档位 400
-- [ ] 线上配置清理：删掉 deepseek 供应商的 `response_format` 键（能力改由模型 `capabilities.json_object` 申报）
+- [x] 线上配置清理（2026-09-13 16:02）：经管理面 `PATCH /admin/api/v1/providers/8` 删掉 deepseek 供应商的
+      `response_format` 键（剩余键 `base_url/models/thinking/timeout_s`）；能力改由模型 `capabilities.json_object`
+      申报，`router/explain?model=deepseek-flash` 显示候选 `deepseek`、`degraded=null`
 
 ### 发布 skill
 
@@ -1590,4 +1592,17 @@
       脏工作区、tag 已存在、非法档位一律拒绝
 - [x] `.dsh/skills/release-version/SKILL.md`：完整发布流程（定档位 → 升版本 → 部署 gpt001 → 用 `/version` 与
       角标验证 → 回滚点 → 记录），含本次这条 `response_format` 坑的提示
-- [ ] 首次发布：`0.1.0`（`VERSION` 新建），部署 gpt001 后 `/version` 与角标读到的都是 `0.1.0` + 新 revision
+
+### 首次发布记录（v0.1.2）
+
+- [x] `scripts/release.sh patch` 两次：`0.1.0`（`VERSION` 新建）→ `0.1.1` → `0.1.2`（tag 指向包含该版本号的 commit）
+- [x] 部署 gpt001：`scp` → `cp aigw aigw.prev-<时间戳>` → `install` → `systemctl restart aigw`；
+      回滚点 `/opt/aigw/aigw.prev-20260913-160120`（旧版 `d637209`）
+- [x] 验证：`/aigw/version` = `{"revision":"be84cdf","version":"0.1.2"}`、`/aigw/healthz` 200（含 revision）、
+      `readyz` 200、启动日志 `version=0.1.2 revision=be84cdf` 且无 ERROR、管理面仍要会话（`auth/me` 401）、
+      公网 `https://mnl.iotalking.top/aigw/version` 同值、控制台 `admin/ui/js/brand.js` 已随二进制发布（200）
+- [x] **上游真机对照（同一个 DeepSeek key，只差一个字段）**：无 `response_format` → 200；
+      带 `{"type":"json_object"}` → 400 `Prompt must contain the word 'json' …`——线上那条失败的确切形状，
+      证明删掉该字段是必需的，而不只是"看起来更干净"
+- [ ] **待人工验收**（DSH GUI）：选 `deepseek-flash` 发一条普通消息，确认正常出字（此前首轮即 `upstream_400`）。
+      网关侧已无该字段可发，但没有真实客户端请求时无法证明端到端成功
