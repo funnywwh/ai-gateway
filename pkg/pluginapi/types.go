@@ -210,20 +210,22 @@ type SummaryPart struct {
 // Request is the canonical provider request (Responses-shaped).
 // Unknown fields from the client are passed through in Extra.
 type Request struct {
-	Model             string                     `json:"model"`
-	Instructions      string                     `json:"instructions,omitempty"`
-	Input             []Item                     `json:"input,omitempty"`
-	Tools             []Tool                     `json:"tools,omitempty"`
-	ToolChoice        json.RawMessage            `json:"tool_choice,omitempty"`
-	ParallelToolCalls *bool                      `json:"parallel_tool_calls,omitempty"`
-	MaxOutputTokens   *int                       `json:"max_output_tokens,omitempty"`
-	Temperature       *float64                   `json:"temperature,omitempty"`
-	TopP              *float64                   `json:"top_p,omitempty"`
-	Reasoning         *Reasoning                 `json:"reasoning,omitempty"`
-	Text              *TextConfig                `json:"text,omitempty"`
-	Metadata          map[string]string          `json:"metadata,omitempty"`
-	Stream            bool                       `json:"stream,omitempty"`
-	Extra             map[string]json.RawMessage `json:"-"`
+	Model             string            `json:"model"`
+	Instructions      string            `json:"instructions,omitempty"`
+	Input             []Item            `json:"input,omitempty"`
+	Tools             []Tool            `json:"tools,omitempty"`
+	ToolChoice        json.RawMessage   `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool             `json:"parallel_tool_calls,omitempty"`
+	MaxOutputTokens   *int              `json:"max_output_tokens,omitempty"`
+	Temperature       *float64          `json:"temperature,omitempty"`
+	TopP              *float64          `json:"top_p,omitempty"`
+	Reasoning         *Reasoning        `json:"reasoning,omitempty"`
+	Text              *TextConfig       `json:"text,omitempty"`
+	Metadata          map[string]string `json:"metadata,omitempty"`
+	// PromptCacheKey is forwarded verbatim, independently of the gateway's session affinity key.
+	PromptCacheKey string                     `json:"prompt_cache_key,omitempty"`
+	Stream         bool                       `json:"stream,omitempty"`
+	Extra          map[string]json.RawMessage `json:"-"`
 }
 
 // Event is a streaming increment emitted by a plugin.

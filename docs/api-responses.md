@@ -57,6 +57,9 @@
 `previous_response_id`、`store`、`metadata`、`reasoning{effort,summary}`、`text{format}`、
 `truncation`、`user`、`include`、`service_tier`、`safety_identifier`、`prompt_cache_key`。
 
+`prompt_cache_key` 会原样进入标准供应商请求，并由 Codex 插件发送至上游；未提供或为空时不发送。
+该值不使用网关会话粘性键的裁剪结果，也不保证上游一定命中缓存。
+
 **未识别字段会被保留并原样透传**（前向兼容）。
 
 明确拒绝：

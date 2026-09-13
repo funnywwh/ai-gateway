@@ -916,14 +916,15 @@ func upstreamErrorCode(body []byte) string {
 // are sent: store is false by default because this backend refuses stored responses.
 // max_output_tokens is absent on purpose — this backend rejects it (see buildRequest).
 type responsesRequest struct {
-	Model        string               `json:"model"`
-	Instructions string               `json:"instructions,omitempty"`
-	Input        []pluginapi.Item     `json:"input,omitempty"`
-	Tools        []pluginapi.Tool     `json:"tools,omitempty"`
-	ToolChoice   json.RawMessage      `json:"tool_choice,omitempty"`
-	Reasoning    *pluginapi.Reasoning `json:"reasoning,omitempty"`
-	Store        bool                 `json:"store"`
-	Stream       bool                 `json:"stream"`
+	PromptCacheKey string               `json:"prompt_cache_key,omitempty"`
+	Model          string               `json:"model"`
+	Instructions   string               `json:"instructions,omitempty"`
+	Input          []pluginapi.Item     `json:"input,omitempty"`
+	Tools          []pluginapi.Tool     `json:"tools,omitempty"`
+	ToolChoice     json.RawMessage      `json:"tool_choice,omitempty"`
+	Reasoning      *pluginapi.Reasoning `json:"reasoning,omitempty"`
+	Store          bool                 `json:"store"`
+	Stream         bool                 `json:"stream"`
 }
 
 type wireUsage struct {
@@ -1011,13 +1012,14 @@ func (p *provider) buildRequest(req *pluginapi.Request, stream bool) ([]byte, er
 		}
 	}
 	wire := responsesRequest{
-		Model:        model,
-		Instructions: req.Instructions,
-		Input:        rewriteSystemRoles(req.Input),
-		Tools:        explicitToolStrictness(req.Tools),
-		ToolChoice:   req.ToolChoice,
-		Store:        p.cfg.Store,
-		Stream:       stream,
+		PromptCacheKey: req.PromptCacheKey,
+		Model:          model,
+		Instructions:   req.Instructions,
+		Input:          rewriteSystemRoles(req.Input),
+		Tools:          explicitToolStrictness(req.Tools),
+		ToolChoice:     req.ToolChoice,
+		Store:          p.cfg.Store,
+		Stream:         stream,
 	}
 	// req.MaxOutputTokens is deliberately NOT forwarded: this backend rejects the
 	// parameter outright ("Unsupported parameter: max_output_tokens", measured for
