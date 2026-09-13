@@ -240,6 +240,7 @@ type RequestUsage struct {
 	RequestID       string
 	Attempts        int
 	InputTokens     int64
+	CachedTokens    int64 // Cache-hit tokens, already included in InputTokens.
 	OutputTokens    int64
 	ReasoningTokens int64
 	CostMicros      int64
@@ -303,6 +304,7 @@ type RequestLogDimensionRow struct {
 	Title           string
 	Workspace       string
 	InputTokens     int64
+	CachedTokens    int64 // Cache-hit tokens, already included in InputTokens.
 	OutputTokens    int64
 	ReasoningTokens int64
 	CostMicros      int64

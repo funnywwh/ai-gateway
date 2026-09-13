@@ -118,6 +118,7 @@ export async function render({ page, actions, session }) {
       { key: 'call_kind', label: '类型', render: (row) => callKindCell(row) },
       { key: 'title', label: '标题', render: (row) => (row.title ? el('span', { text: row.title }) : el('span', { class: 'muted', text: '—' })) },
       { key: 'usage', label: 'tokens（入/出）', render: (row) => tokensCell(row.usage) },
+      { key: 'cached_tokens', label: '缓存 tokens', render: (row) => cachedTokensCell(row.usage) },
       { key: 'charge', label: '成本', render: (row) => costCell(row.usage) },
       { key: 'output_text_recorded', label: '输出文本', render: (row) => (row.output_text_recorded ? badge('已录制', 'ok') : badge('未录制')) },
     ],
@@ -200,6 +201,7 @@ export async function render({ page, actions, session }) {
       },
       { label: '已计量' },
       { label: '输入 tokens' },
+      { label: '缓存 tokens', title: '缓存命中的输入 tokens，已包含在输入中' },
       { label: '输出 tokens' },
       { label: '成本', key: 'charge', title: '对客成本（charge_micros，与列表「成本」列同源）；它是排序键之一' },
     ];
@@ -220,6 +222,7 @@ export async function render({ page, actions, session }) {
         // local rejection or a lost row left unmetered, which is worth seeing.
         el('td', { text: row.metered === row.requests ? String(row.metered) : row.metered + ' / ' + row.requests }),
         el('td', { text: formatTokens(row.input_tokens) }),
+        el('td', {}, [cachedTokensCell(row)]),
         el('td', { text: formatTokens(row.output_tokens) }),
         el('td', { text: row.metered ? money(row.charge_micros) : '未计量' }),
       );
@@ -402,6 +405,14 @@ function tokensCell(usage) {
   return el('span', { text: formatTokens(usage.input_tokens) + ' / ' + formatTokens(usage.output_tokens) });
 }
 
+function cachedTokensCell(usage) {
+  if (!usage || !usage.metered) return el('span', { class: 'muted', text: '未计量' });
+  return el('span', {
+    title: '缓存命中的输入 tokens，已包含在输入中；缺少缓存维度时按 0 展示',
+    text: formatTokens(usage.cached_tokens),
+  });
+}
+
 function costCell(usage) {
   if (!usage || !usage.metered) return el('span', { class: 'muted', text: '未计量' });
   return el('span', { text: money(usage.charge_micros) });
@@ -418,6 +429,7 @@ function summaryCells(rows) {
   let metered = 0;
   let input = 0;
   let output = 0;
+  let cached = 0;
   let charge = 0;
   for (const row of rows) {
     const usage = row.usage;
@@ -425,6 +437,7 @@ function summaryCells(rows) {
     metered += 1;
     input += Number(usage.input_tokens || 0);
     output += Number(usage.output_tokens || 0);
+    cached += Number(usage.cached_tokens || 0);
     // The sum goes to money(), which converts through BigInt: a fraction would throw.
     charge += Math.round(Number(usage.charge_micros || 0));
   }
@@ -442,6 +455,7 @@ function summaryCells(rows) {
     usage: metered
       ? el('span', { text: formatTokens(input) + ' / ' + formatTokens(output) })
       : el('span', { class: 'muted', text: '未计量' }),
+    cached_tokens: cachedTokensCell({ metered, cached_tokens: cached }),
     charge: metered ? el('span', { text: money(charge) }) : el('span', { class: 'muted', text: '未计量' }),
   };
 }
@@ -522,6 +536,7 @@ function usageBlock(usage) {
   }
   const fields = [
     ['输入 tokens', formatTokens(usage.input_tokens)],
+    ['缓存 tokens（已包含在输入中）', formatTokens(usage.cached_tokens)],
     ['输出 tokens', formatTokens(usage.output_tokens)],
     ['思考 tokens', formatTokens(usage.reasoning_tokens)],
     ['成本', money(usage.cost_micros)],

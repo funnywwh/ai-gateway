@@ -580,6 +580,7 @@ func usagePayload(usage *domain.RequestUsage) map[string]any {
 		"metered":          usage.Metered,
 		"attempts":         usage.Attempts,
 		"input_tokens":     usage.InputTokens,
+		"cached_tokens":    usage.CachedTokens,
 		"output_tokens":    usage.OutputTokens,
 		"reasoning_tokens": usage.ReasoningTokens,
 		"cost_micros":      usage.CostMicros,
@@ -695,6 +696,7 @@ func (s *Server) handleAdminRequestDimensions(w http.ResponseWriter, r *http.Req
 			"first_seen":   row.FirstSeen.Format(time.RFC3339),
 			"last_seen":    row.LastSeen.Format(time.RFC3339),
 			"input_tokens": row.InputTokens, "output_tokens": row.OutputTokens,
+			"cached_tokens":    row.CachedTokens,
 			"reasoning_tokens": row.ReasoningTokens,
 			"cost_micros":      row.CostMicros, "charge_micros": row.ChargeMicros,
 		}

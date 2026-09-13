@@ -345,6 +345,46 @@ func TestAdminRequestsCarryIdentityAndUsage(t *testing.T) {
 	}
 }
 
+func TestAdminRequestCachedTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		dims   string
+		input  float64
+		cached float64
+	}{
+		{"cache hit", `{"input_cache_hit":80,"input_cache_miss":20}`, 100, 80},
+		{"missing cache", `{"input":100}`, 100, 0},
+		{"empty dimensions", `{}`, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAdminFixture(t)
+			cookie := f.login(t, adminUser, adminPassword)
+			seedIdentityRow(t, f, &domain.RequestLogRecord{
+				RequestID: "req_cached0001", AccountID: 1, APIKeyID: 1, Client: "dsh",
+			})
+			if _, err := f.db.InsertUsage(context.Background(), &domain.UsageRecord{
+				RequestID: "req_cached0001", AttemptNo: 1, AccountID: 1, APIKeyID: 1,
+				Model: "m", ResolvedModel: "m", DimensionsJSON: tc.dims,
+				Status: "completed", CreatedAt: time.Now().UTC(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			list := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/requests?days=1", "", cookie))
+			item := list["data"].([]any)[0].(map[string]any)
+			detail := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/requests/req_cached0001", "", cookie))
+			dimensions := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/requests/dimensions?group_by=client&days=1", "", cookie))
+			bucket := dimensions["rows"].([]any)[0].(map[string]any)
+			for name, got := range map[string]map[string]any{
+				"list": item["usage"].(map[string]any), "detail": detail["usage"].(map[string]any), "dimensions": bucket,
+			} {
+				if got["cached_tokens"] != tc.cached || got["input_tokens"] != tc.input {
+					t.Errorf("%s tokens = %v, want input %v including cached %v", name, got, tc.input, tc.cached)
+				}
+			}
+		})
+	}
+}
+
 // A request with no usage row (a locally rejected one) reports metered=false rather than
 // a zero that reads as "it consumed nothing".
 func TestAdminRequestsReportUnmeteredRequests(t *testing.T) {

@@ -212,6 +212,26 @@ try {
     checks.unmeteredShown = pageText().includes('未计量');
     checks.costShown = pageText().includes('≈') || pageText().includes('USD') || pageText().includes('CNY');
     checks.costFetched = (window.__fetched || []).includes('/requests/dimensions');
+    // Read specific cells: a number elsewhere on the page cannot satisfy these checks.
+    const listTable = () => document.querySelector('tfoot').closest('table');
+    const statsTable = () => document.querySelector('#page > .card table');
+    const columnNames = (table) => [...table.querySelectorAll('thead th')].map((n) => n.textContent.trim());
+    const cell = (table, row, label) => {
+      const index = columnNames(table).indexOf(label);
+      return row && index >= 0 && row.children[index] ? row.children[index].textContent.trim() : null;
+    };
+    const requestRow = (id) => [...listTable().querySelectorAll('tbody tr')].find((r) => r.textContent.includes(id));
+    const cachedSummary = () => cell(listTable(), listTable().querySelector('tfoot tr'), '缓存 tokens');
+    const listHeaders = columnNames(listTable());
+    checks.cachedListPosition = listHeaders.indexOf('缓存 tokens') === listHeaders.indexOf('tokens（入/出）') + 1
+      && listHeaders.indexOf('成本') === listHeaders.indexOf('缓存 tokens') + 1;
+    checks.cachedListNonzero = cell(listTable(), requestRow('req_demo0001'), '缓存 tokens') === '960';
+    checks.cachedListUnmetered = cell(listTable(), requestRow('req_demo0002'), '缓存 tokens') === '未计量';
+    checks.cachedSummaryNonzero = cachedSummary() === '960';
+    checks.cachedSummaryAligned = cell(listTable(), listTable().querySelector('tfoot tr'), 'tokens（入/出）') === '1,200 / 34'
+      && cell(listTable(), listTable().querySelector('tfoot tr'), '成本') === '0.002468 USD';
+    const unknownStats = [...statsTable().querySelectorAll('tbody tr')].find((r) => r.textContent.includes('（未知）'));
+    checks.cachedStatsUnmetered = cell(statsTable(), unknownStats, '缓存 tokens') === '未计量';
     // The summary row under the list sums the page's two consumption columns. It is the
     // page, not the window: the fixtures hold one metered row (1,200 / 34, charge 2,468
     // micros) and one unmetered row, so the totals are that row's numbers and the label
@@ -239,6 +259,7 @@ try {
     typeFilter('codex');
     checks.summaryFollowsFilter = footText().includes('共 1 行') && footText().includes('已计量 0')
       && footText().includes('未计量 1') && !footText().includes('1,200');
+    checks.cachedSummaryUnmetered = cachedSummary() === '未计量';
     typeFilter('zzz-no-such-row');
     checks.summaryHiddenWhenEmpty = !document.querySelector('tfoot tr') && pageText().includes('该窗口内没有请求日志');
     typeFilter('');
@@ -254,6 +275,14 @@ try {
     await settle();
     checks.dimensionRows = pageText().includes('deepseek-flash') && pageText().includes('已计量');
     checks.dimensionMeteredGap = pageText().includes('1 / 2');
+    const modelStats = statsTable();
+    const modelHeaders = columnNames(modelStats);
+    checks.cachedStatsPosition = modelHeaders.indexOf('缓存 tokens') === modelHeaders.indexOf('输入 tokens') + 1
+      && modelHeaders.indexOf('输出 tokens') === modelHeaders.indexOf('缓存 tokens') + 1;
+    const modelRow = (name) => [...modelStats.querySelectorAll('tbody tr')].find((r) => r.textContent.includes(name));
+    checks.cachedStatsNonzero = cell(modelStats, modelRow('deepseek-flash'), '缓存 tokens') === '2,880';
+    // The luna bucket deliberately omits cached_tokens, unlike a genuinely unmetered bucket.
+    checks.cachedStatsMissingZero = cell(modelStats, modelRow('gpt-5.6-luna'), '缓存 tokens') === '0';
     // The fetch stub strips the query string, so the grouping change is observed by the
     // card asking the endpoint again rather than by reading the URL back.
     const dimensionFetches = () => (window.__fetched || []).filter((p) => p === '/requests/dimensions').length;
@@ -261,6 +290,15 @@ try {
     groupBySelected('session');
     await settle();
     checks.dimensionRegrouped = dimensionFetches() > beforeRegroup;
+    const sessionTable = statsTable();
+    const sessionRow = sessionTable.querySelector('tbody tr');
+    checks.cachedSessionAligned = sessionRow.children.length === columnNames(sessionTable).length
+      && cell(sessionTable, sessionRow, '标题') === '缓存会话标题'
+      && cell(sessionTable, sessionRow, '工作区') === '/w/cache-session'
+      && cell(sessionTable, sessionRow, '输入 tokens') === '3,600'
+      && cell(sessionTable, sessionRow, '缓存 tokens') === '2,880'
+      && cell(sessionTable, sessionRow, '输出 tokens') === '102'
+      && cell(sessionTable, sessionRow, '成本') === '0.007404 USD';
 
     // 用户（账户）与 API Key 是凭据维度（M30）：列、筛选下拉与统计分组都按它们成立。
     const headers = () => [...document.querySelectorAll('thead th')].map((th) => th.textContent);
@@ -402,9 +440,43 @@ try {
     // 凭据维度在详情里带名字与 id：名字给人读，id 是筛选参数。
     checks.detailOwner = t.includes('用户（账户）：') && t.includes('API Key：') && t.includes('acme #1') && t.includes('dev-key #1');
     checks.detailUsage = t.includes('输入 tokens：') && t.includes('对客：');
+    const detailCached = () => [...modal().querySelectorAll('strong')]
+      .find((n) => n.textContent === '缓存 tokens（已包含在输入中）：')?.nextElementSibling?.textContent;
+    checks.cachedDetailNonzero = detailCached() === '960';
     closeButton().click();
     await settle();
     checks.closeDismisses = modal().querySelectorAll('.modal, .modal-backdrop').length === 0;
+
+    // Replay an older metered payload without the optional cache dimension, then an
+    // unmetered detail. Restore fixtures so the existing refresh regression stays intact.
+    const listUsage = FIXTURES['/requests'].data[0].usage;
+    const detailRow = FIXTURES['/requests/req_demo0001'];
+    const savedDetailUsage = detailRow.usage;
+    const savedCached = listUsage.cached_tokens;
+    try {
+      delete listUsage.cached_tokens;
+      detailRow.usage = { ...savedDetailUsage };
+      delete detailRow.usage.cached_tokens;
+      find('刷新').click();
+      await settle();
+      checks.cachedListMissingZero = cell(listTable(), requestRow('req_demo0001'), '缓存 tokens') === '0';
+      checks.cachedSummaryMissingZero = cachedSummary() === '0';
+      find('详情').click();
+      await settle();
+      checks.cachedDetailMissingZero = detailCached() === '0';
+      closeButton().click();
+      detailRow.usage = { ...savedDetailUsage, metered: false };
+      find('详情').click();
+      await settle();
+      checks.cachedDetailUnmetered = modalText().includes('未计量：该请求没有计量行')
+        && detailCached() === undefined;
+      closeButton().click();
+    } finally {
+      detailRow.usage = savedDetailUsage;
+      listUsage.cached_tokens = savedCached;
+    }
+    checks.cachedFixturesRestored = listUsage.cached_tokens === 960
+      && detailRow.usage === savedDetailUsage && detailRow.usage.cached_tokens === 960;
 
     // A detail whose body is empty parses to null. That used to throw a TypeError inside
     // the click handler and leave the operator with an empty screen and a console stack,
@@ -419,6 +491,7 @@ try {
     // The reload brought a third row (a second metered one, same numbers as the first),
     // so the summary has to have followed the list rather than kept its first numbers.
     checks.summaryFollowsRefresh = footText().includes('2,400 / 68') && footText().includes('已计量 2');
+    checks.cachedSummaryFollowsRefresh = cachedSummary() === '1,920';
     checks.sample = [footText(), '账户分组：' + accountBuckets, 'API Key 分组：' + apiKeyBuckets,
       '统计分页器：' + (statsPager() ? statsPager().textContent : '（无）'), '统计首行：' + statsFirstRow().slice(0, 70)];
     if (prunedRow) [...prunedRow.querySelectorAll('button')].find((b) => b.textContent.trim() === '详情').click();

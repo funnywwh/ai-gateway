@@ -154,6 +154,7 @@ func usageTokenExpr(prefix string) string {
 func requestUsageSQL(placeholders string) string {
 	return `
 SELECT request_id, COUNT(*), COALESCE(SUM(` + usageTokenExpr("") + `), 0),
+       COALESCE(SUM(COALESCE(json_extract(dimensions_json, '$.input_cache_hit'), 0)), 0),
        COALESCE(SUM(COALESCE(json_extract(dimensions_json, '$.output'), 0)), 0),
        COALESCE(SUM(COALESCE(json_extract(dimensions_json, '$.reasoning'), 0)), 0),
        COALESCE(SUM(cost_micros), 0), COALESCE(SUM(charge_micros), 0),
@@ -206,7 +207,7 @@ func (db *DB) RequestUsages(ctx context.Context, requestIDs []string) (map[strin
 	for rows.Next() {
 		usage := &domain.RequestUsage{Metered: true}
 		if err := rows.Scan(&usage.RequestID, &usage.Attempts, &usage.InputTokens,
-			&usage.OutputTokens, &usage.ReasoningTokens, &usage.CostMicros,
+			&usage.CachedTokens, &usage.OutputTokens, &usage.ReasoningTokens, &usage.CostMicros,
 			&usage.ChargeMicros, &usage.LatencyMS, &usage.TTFTMS); err != nil {
 			return nil, fmt.Errorf("store: scan request usage: %w", err)
 		}
@@ -287,7 +288,7 @@ func (db *DB) ListRequestLogDimensionsPage(ctx context.Context, f domain.Request
 			firstSeen, lastSeen int64
 		)
 		if err := rows.Scan(&row.Key, &row.Requests, &row.Metered, &firstSeen, &lastSeen,
-			&row.Title, &row.Workspace, &row.InputTokens, &row.OutputTokens,
+			&row.Title, &row.Workspace, &row.InputTokens, &row.CachedTokens, &row.OutputTokens,
 			&row.ReasoningTokens, &row.CostMicros, &row.ChargeMicros); err != nil {
 			return nil, fmt.Errorf("store: scan request log dimension: %w", err)
 		}
@@ -333,6 +334,7 @@ func requestLogDimensionsSQL(expression, order, where string) string {
 SELECT %s AS group_key, COUNT(*), COUNT(u.request_id),
        MIN(r.created_at), MAX(r.created_at), MAX(r.title), MAX(r.workspace),
        COALESCE(SUM(`+usageTokenExpr("u.")+`), 0),
+       COALESCE(SUM(COALESCE(json_extract(u.dimensions_json, '$.input_cache_hit'), 0)), 0),
        COALESCE(SUM(COALESCE(json_extract(u.dimensions_json, '$.output'), 0)), 0),
        COALESCE(SUM(COALESCE(json_extract(u.dimensions_json, '$.reasoning'), 0)), 0),
        COALESCE(SUM(u.cost_micros), 0), COALESCE(SUM(u.charge_micros), 0)

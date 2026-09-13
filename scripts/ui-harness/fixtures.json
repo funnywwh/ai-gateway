@@ -1030,6 +1030,7 @@
     "truncated": false,
     "usage": {
      "attempts": 1,
+     "cached_tokens": 960,
      "charge_micros": 2468,
      "cost_micros": 1234,
      "input_tokens": 1200,
@@ -1100,6 +1101,7 @@
     "charge_micros": 7404,
     "cost_micros": 3702,
     "first_seen": "2026-09-11T11:00:00Z",
+    "cached_tokens": 2880,
     "input_tokens": 3600,
     "key": "deepseek-flash",
     "last_seen": "2026-09-11T11:30:00Z",
@@ -1143,6 +1145,7 @@
     "charge_micros": 7404,
     "cost_micros": 3702,
     "first_seen": "2026-09-11T11:00:00Z",
+    "cached_tokens": 2880,
     "input_tokens": 3600,
     "key": "1",
     "last_seen": "2026-09-11T11:30:00Z",
@@ -1189,6 +1192,7 @@
     "charge_micros": 7404,
     "cost_micros": 3702,
     "first_seen": "2026-09-11T11:00:00Z",
+    "cached_tokens": 2880,
     "input_tokens": 3600,
     "key": "1",
     "last_seen": "2026-09-11T11:30:00Z",
@@ -1196,6 +1200,22 @@
     "output_tokens": 102,
     "reasoning_tokens": 36,
     "requests": 3
+   }
+  ]
+ },
+ "/requests/dimensions?group_by=session": {
+  "rows": [
+   {
+    "key": "session-cache-demo",
+    "title": "缓存会话标题",
+    "workspace": "/w/cache-session",
+    "last_seen": "2026-09-11T11:30:00Z",
+    "requests": 3,
+    "metered": 3,
+    "input_tokens": 3600,
+    "cached_tokens": 2880,
+    "output_tokens": 102,
+    "charge_micros": 7404
    }
   ]
  },
@@ -1253,6 +1273,7 @@
   "truncated": false,
   "usage": {
    "attempts": 1,
+   "cached_tokens": 960,
    "charge_micros": 2468,
    "cost_micros": 1234,
    "input_tokens": 1200,

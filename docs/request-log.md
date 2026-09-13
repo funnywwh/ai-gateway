@@ -69,7 +69,10 @@ token 与成本**不复制**到日志表，而是按 `request_id` 从计量表 `
   控制台显示「未计量」——这与「消耗为 0」是两句不同的话。
 
 token 口径与计费一致：输入 = `input + input_cache_hit + input_cache_miss`，输出 = `output`，
-思考 = `reasoning`。
+思考 = `reasoning`。列表与详情的 `usage.cached_tokens`、维度统计每行的 `cached_tokens`
+均汇总计量行 `dimensions_json.input_cache_hit`，缺失该维度时为 0。缓存命中 token **已经包含在
+`input_tokens` 中**，是输入的子集，不应再加到输入或总 token 上；多次尝试的缓存命中数同样求和。
+没有计量行的请求仍返回 `usage.metered=false`，不把「未计量」当作零消耗。
 
 ## 4. 查询与统计
 

@@ -163,14 +163,19 @@ func TestRequestUsagesSumAttemptsAndReportMetering(t *testing.T) {
 	if u1 == nil || !u1.Metered || u1.Attempts != 1 {
 		t.Fatalf("req-u1 = %+v", u1)
 	}
-	if u1.InputTokens != 120 || u1.OutputTokens != 7 || u1.ReasoningTokens != 3 {
+	if u1.InputTokens != 120 || u1.CachedTokens != 100 || u1.OutputTokens != 7 || u1.ReasoningTokens != 3 {
 		t.Fatalf("req-u1 tokens = %+v, want input 120 (hit+miss), output 7, reasoning 3", u1)
 	}
 	if u1.CostMicros != 10 || u1.ChargeMicros != 20 {
 		t.Fatalf("req-u1 money = %+v", u1)
 	}
+	seedUsage(t, db, "req-u1", 2, `{"input_cache_hit":30,"input_cache_miss":5}`, 0, 0)
+	retried, err := db.RequestUsage(ctx, "req-u1")
+	if err != nil || retried.CachedTokens != 130 || retried.InputTokens != 155 {
+		t.Fatalf("cached tokens across attempts = %+v (err %v)", retried, err)
+	}
 	u2 := got["req-u2"]
-	if u2.Attempts != 2 || u2.InputTokens != 60 || u2.OutputTokens != 6 || u2.ChargeMicros != 8 {
+	if u2.Attempts != 2 || u2.InputTokens != 60 || u2.CachedTokens != 0 || u2.OutputTokens != 6 || u2.ChargeMicros != 8 {
 		t.Fatalf("req-u2 = %+v, want both attempts summed", u2)
 	}
 	if u2.LatencyMS != 200 || u2.TTFTMS != 20 {
@@ -210,7 +215,7 @@ func TestRequestLogDimensionsGroupAndSum(t *testing.T) {
 		RequestID: "req-d3", AccountID: 1, Client: "codex", Model: "gpt-5.6-luna",
 		Workspace: "/w/b", SessionID: "s2", CallKind: "agent",
 	})
-	seedUsage(t, db, "req-d1", 1, `{"input":10,"output":2}`, 5, 9)
+	seedUsage(t, db, "req-d1", 1, `{"input_cache_hit":6,"input_cache_miss":4,"output":2}`, 5, 9)
 	seedUsage(t, db, "req-d2", 1, `{"input":4,"output":1}`, 2, 4)
 
 	rows, err := db.ListRequestLogDimensionsPage(ctx, domain.RequestLogFilter{}, "client", "requests", 10, 0)
@@ -225,13 +230,13 @@ func TestRequestLogDimensionsGroupAndSum(t *testing.T) {
 	if dsh.Key != "dsh" || dsh.Requests != 2 || dsh.Metered != 2 {
 		t.Fatalf("dsh bucket = %+v", dsh)
 	}
-	if dsh.InputTokens != 14 || dsh.OutputTokens != 3 || dsh.CostMicros != 7 || dsh.ChargeMicros != 13 {
+	if dsh.InputTokens != 14 || dsh.CachedTokens != 6 || dsh.OutputTokens != 3 || dsh.CostMicros != 7 || dsh.ChargeMicros != 13 {
 		t.Fatalf("dsh bucket totals = %+v", dsh)
 	}
 	if dsh.FirstSeen.IsZero() || dsh.LastSeen.IsZero() {
 		t.Fatalf("bucket window = %+v", dsh)
 	}
-	if codex := rows[1]; codex.Key != "codex" || codex.Metered != 0 {
+	if codex := rows[1]; codex.Key != "codex" || codex.Metered != 0 || codex.CachedTokens != 0 {
 		t.Fatalf("codex bucket = %+v, want an unmetered bucket", codex)
 	}
 
@@ -250,6 +255,15 @@ func TestRequestLogDimensionsGroupAndSum(t *testing.T) {
 	}
 	if s1.Title != "会话标题" || s1.Workspace != "/w/a" {
 		t.Fatalf("session bucket lost its title/workspace: %+v", s1)
+	}
+
+	// A metered row without a cache dimension contributes zero cached tokens.
+	uncached, err := db.ListRequestLogDimensionsPage(ctx, domain.RequestLogFilter{CallKind: "title"}, "client", RequestLogDimensionDefaultSort, 10, 0)
+	if err != nil || len(uncached) != 1 {
+		t.Fatalf("uncached breakdown = %+v (err %v)", uncached, err)
+	}
+	if uncached[0].CachedTokens != 0 || uncached[0].InputTokens != 4 || uncached[0].Metered != 1 {
+		t.Fatalf("missing cache dimension must aggregate to zero: %+v", uncached[0])
 	}
 
 	// A filter narrows the breakdown the same way it narrows the list.
