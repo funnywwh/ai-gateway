@@ -1,10 +1,13 @@
 # MCP 服务（网关作为 MCP Server）
 
-> 状态：**已实现（M6 首批 6 个 + MCP-2 补齐 5 个 + M21 后台工具，共 11 个查询工具 + 3 个后台工具）**。
+> 状态：**已实现（M6 首批 6 个 + MCP-2 补齐 5 个 + M21 后台工具，共 11 个查询工具 + 3 个后台工具；
+> M40 起工具说明统一为中文并带完整形状）**。
 > 实现见 `internal/mcpsrv`（工具与 JSON-RPC）、`internal/httpapi/mcp.go`（`POST /mcp` 与令牌鉴权）、
 > `internal/httpapi/mcp_admin.go`（后台工具桥）、`internal/httpapi/admin_routes.go`（管理面路由表）、
 > `cmd/aigw mcpstdio.go`（stdio）。
-> 设计：`docs/design/m6-mcp-server.md`、`docs/design/mcp2-tools.md`、`docs/design/m21-mcp-admin-tools.md`。
+> 设计：`docs/design/m6-mcp-server.md`、`docs/design/mcp2-tools.md`、`docs/design/m21-mcp-admin-tools.md`、
+> `docs/design/m40-tool-descriptions-and-forms.md`。
+> **新增工具或字段前请先读第 4.5 节「工具说明标准」。**
 
 ## 1. 定位与接入
 
@@ -47,6 +50,17 @@
 
 返回为结构化 JSON；金额同时给出可读值与 micros 原始值，并附口径说明（时间范围、聚合方式、币种）。
 
+M40 起每条工具说明都写清了**默认值与口径**，因为"省略参数会得到什么"是这些工具最容易被误读的部分：
+
+- `period` 一律可省略，省略按 `last_7_days`；取值集合在 11 个工具里完全一致
+  （`today`/`yesterday`/`last_7_days`/`last_30_days`/`this_month`/`last_month`），
+  且每个窗口都会被 `mcp.request_window_days` 从更早一侧裁剪——查不到更早的数据是配置限制，不是没有数据。
+- `limit` 可省略，省略时返回本部署上限（`mcp.max_query_rows`，默认 1000）以内的行；
+  返回体里的 `count` 是**实际条数**。
+- **聚合口径决定数字能不能信**：`get_dashboard` 与 `get_usage_breakdown` 在 SQL 里聚合，
+  不受行数上限影响；`get_usage_summary` 是"把明细读进来再累加"，**总量会随上限失真**。
+  工具说明里写明了这条分工，避免模型拿被截断的汇总当总额。
+
 **金额币种（M22）**：所有账户金额都是**账本币种**（`billing.currency`）的微单位，字段名不带币种后缀（`balance`/`charge`/`cost`/`margin`/`amount`/`in_flight`/`available` …），
 并在同一层给出 `currency`。历史字段名 `*_usd` 只在账本币种真的是 `USD` 时保留（兼容旧客户端）；
 账本币种是 `CNY` 之类时不再输出 `*_usd`，避免把人民币金额读成美元。`get_models` 的 `currency` 是该**模型的售价币种**（缺省为账本币种）。
@@ -58,7 +72,7 @@
 
 | 工具 | 入参 | 返回 |
 |---|---|---|
-| `admin_endpoints` | `filter?`（name/path/summary 子串）、`group?`（system/keys/requests/audit/accounts/models/providers/billing/backups/portal/pricing/mcp/hooks/settings）、`limit?` | `{count,total,groups,endpoints:[{name,method,path,summary,group,role,params[],query[],has_body,dangerous,tool,reason?}]}` |
+| `admin_endpoints` | `filter?`（name/path/summary 子串）、`group?`（system/keys/requests/audit/accounts/models/providers/billing/backups/portal/pricing/mcp/hooks/settings）、`limit?` | `{count,total,groups,endpoints:[{name,method,path,summary,group,role,params[],query[],has_body,body_fields[],dangerous,tool,reason?}]}`（`body_fields` 是 M40 新增：概览行直接给出请求体的顶层字段名） |
 | `admin_describe` | `name` 或 `names[]` | 该接口的 method/path/摘要/所需角色、路径参数与查询参数说明、**请求体 JSON Schema**、可直接照抄的 `example`、危险接口的 `confirm_reason` |
 | `admin_request` | `name`、`params?`（路径参数）、`query?`（查询参数）、`body?`（JSON 对象）、`confirm?` | `{endpoint,method,path,status,ok,body|text|meta,truncated?}` |
 
@@ -86,6 +100,54 @@
   它们仍出现在 `admin_endpoints` 里，`tool=null` 并附原因；调用会被拒并说明。
 - 常见排障路径都在里面：`admin_provider_logs`（插件 stderr）、`admin_test_provider`（真实探测）、
   `admin_explain_router`（为什么这个模型不可用）、`admin_billing_invariants`、`admin_list_audit_logs`。
+
+## 4.5 工具说明标准（新增工具/字段必读）
+
+工具说明（`description` 与 `inputSchema` 的属性说明、`admin_describe` 的 `body_schema`/`example`）
+**就是模型唯一的接口文档**。它不完整时，模型不会报错，而是**拒绝执行或猜错字段**。
+
+**一个真实的反例**（M40 之前，见 `docs/design/m40-tool-descriptions-and-forms.md`）：
+`admin_upsert_provider_model` 的 `pricing_rules` 只被标为 `{"type":"object"}`、描述只有"成本侧计价规则"，
+示例是 `{}`。运维让 agent 配一次成本价，模型查完 `admin_list_models`/`admin_list_routes`/
+`admin_describe` 后停下来要求管理员补文档——因为写入侧 `pricing.ParseRuleSet` 是
+`DisallowUnknownFields`，**猜字段名必然 400**。它拒绝写入是正确行为。
+
+### 查询工具（11 个）的描述四要素
+
+缺一不可，由 `internal/mcpsrv` 的 contract 测试逐条钉住：
+
+1. **一句话**：这个工具回答什么问题；
+2. **何时用 / 与相邻工具的分工**（例如汇总要 SQL 聚合的 `get_usage_breakdown`，不要用会受
+   `mcp.max_query_rows` 截断的 `get_usage_summary`；举一反三地写清"另一个工具更适合什么场景"）；
+3. **参数**：`inputSchema` 里**每个**属性都要有 `description`，并写清含义、**缺省值**、单位、枚举取值；
+4. **以「返回：」开头的段落**：返回体里会出现哪些字段、金额的币种与 micros 口径、以及哪些字段
+   可能缺失（例如"未录制时给出原因而不是空串"）。
+
+### 后台路由表的 body 字段标准
+
+`internal/httpapi/admin_routes.go` 的每条 `adminField`：
+
+| 要求 | 为什么 | 怎么满足 |
+|---|---|---|
+| 必须有 `Desc`，且说清**单位/取值范围/缺省行为** | 名词式描述等于没写（"成本侧计价规则"就是反例） | 直接写进 `Desc` |
+| `Type: "object"` **必须带形状** | `{"type":"object"}` 让 agent 只能看到 `{}` | `schemaField(...)`，或整个 body 改用 `RawBody: objectSchema(...)` |
+| 复杂对象**必须给示例** | `sampleBody` 对 object 生成 `{}`，"照抄示例"会被拒 | `exampleField(...)`，且示例必须真能被端点接受（见下） |
+| 枚举用 `enumField`、路径参数用 `pathParam` | 取值只写一遍，不靠 `Desc` 复述 | 既有辅助函数 |
+| `Dangerous` 必须有 `ConfirmReason` | 模型要先交代后果 | 既有测试已钉 |
+| 与代码的校验语义一致 | 写入侧 `DisallowUnknownFields` 的文档要 `additionalProperties:false` | 两者写在一起 |
+| **只存不用的字段不写进 schema** | 写进去等于教 agent 写无效配置 | 描述里标明"当前不生效" |
+
+### 写错了会怎样
+
+- 新增 body 字段不写 `Desc`、或 `object` 不给形状 → **`make test` 直接红**；
+- `object` 不给形状在运行期也会 **panic**（构造工具元数据时，见 `adminRoute.bodySchema`），
+  因此"没跑测试就上线"也藏不住；
+- 失败信息统一指向本节，并说明下一步怎么做；
+- 复杂对象的示例由 `TestMCPPricingExampleIsWritable` 这类**端到端**测试证明可写：
+  示例先喂 `admin_validate_pricing`，再真实写库，读回比对。
+
+**改动工具说明时同步更新**：`docs/mcp.md` 本节所描述的口径、`docs/design/m40-tool-descriptions-and-forms.md`
+的差异回填，以及 `docs/PROCESS.md` 的自检项。
 
 ## 5. 执行语义、审计与安全
 

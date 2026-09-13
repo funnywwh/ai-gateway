@@ -1621,3 +1621,80 @@
       回滚点 `/opt/aigw/aigw.prev-20260913-160527`；公网 `https://mnl.iotalking.top/aigw/version` =
       `{"revision":"2d2d731","version":"0.1.4"}` 与宿主 `HEAD` 一致（`0.1.3` → `0.1.4` 的差异只在测试与文档，
       运行时二进制逐字节相同，仍然发版是为了让"线上版本 = 仓库版本"这条不变量成立）
+
+## M40 MCP 工具说明的完整性 + 智能问答优先用表单
+
+设计：`docs/design/m40-tool-descriptions-and-forms.md`；标准：`docs/mcp.md` §4.5。
+触发点是一次真实失败：运维让 agent 给 `codex-sub` 的 `gpt-5.6-luna` 配成本价，
+模型查完 `admin_list_models`/`admin_list_routes`/`admin_describe(admin_upsert_provider_model)` 后
+**拒绝写入并要求管理员补文档**——因为 `pricing_rules` 只被标为 `{"type":"object"}`、示例是 `{}`，
+而写入侧 `pricing.ParseRuleSet` 是 `DisallowUnknownFields`。模型没错，说明不完整。
+
+### 形状（缺口的根因）
+- [x] `adminField` 增加 `Schema`/`Example` + `schemaField`/`exampleField`/`structuredField` 辅助函数
+- [x] `adminRoute.bodySchema()` 对「声明为 object 却没有形状」的字段 **panic**（原来的静默降级就是根因）
+- [x] `bodySchema` 抽取 `schemaForFields(where, fields)`，panic 文案指向 `docs/mcp.md §4.5`
+- [x] `example()`/`sampleBody()`/`sampleValue()` 优先使用声明的示例（不再给 object 生成 `{}`）
+- [x] `summaryRow()` 增加 `body_fields`（概览行直接给出请求体字段名，少一次 describe 往返）
+
+### 价格规则集（本次故障的字段）
+- [x] 新增 `internal/httpapi/admin_pricing_schema.go`：`pricingRuleSetSchema` / `pricingRuleSetExample` /
+      `salePricingExample` / `pricingRuleSetJSONSchema`，字段严格对应 `pricing.RuleSet/Rule/When/Tier/TimeWindow`
+- [x] 单位写死在 schema 顶层与 rates 描述里：**微单位/百万 token（200000 = $0.20/1M）**
+- [x] 维度名（input / input_cache_hit / input_cache_miss / output / reasoning）逐个带中文说明
+- [x] `additionalProperties:false` 与 `DisallowUnknownFields` 对齐；`docs/pricing.md` 里**未实现**的
+      `when.monthly_usage`、`when.region` **不写进 schema**（写了就是教 agent 写 400）
+- [x] 接线四处：`admin_upsert_provider_model.pricing_rules`、`admin_upsert_model.sale_pricing`、
+      `admin_update_model.sale_pricing`、`admin_validate_pricing`（RawBody 换成规则集 schema）
+- [x] 修正 `admin_simulate_pricing.dimensions` 的既有错误说明（维度键是 `input`/`output`，不是 `input_tokens`）
+
+### 其余结构化字段（同一缺陷族）
+- [x] 新增 `internal/httpapi/admin_field_schemas.go`：policy / grants / capabilities / capabilities_override /
+      provider config·credentials·meta·timeout_overrides / price_overrides / 模型与路由 policy /
+      dimensions / dimension_markup_bp / 事件名与技能 id 数组
+- [x] **只存不读的字段如实标注**：`accounts.price_overrides`、模型级 `policy`、路由级 `policy` 三处
+      在描述里写明「当前不生效」，并指出该用什么替代（不假装它能配置）
+
+### 守卫（防复发）
+- [x] `TestStructuredBodyFieldsCarryTheirShape`：任何 object 字段没有 Schema 即失败（附修复指引）
+- [x] `TestBodyFieldsAreDocumentedInTheCatalogue`：`body_fields` 与声明一致
+- [x] `TestMCPDescribeCarriesThePricingRuleSchema`：describe 必须给出规则集字段名、单位与 catch-all 示例
+- [x] `TestMCPPricingExampleIsWritable`（端到端回归）：示例 → `admin_validate_pricing` 通过 →
+      `admin_upsert_provider_model` / `admin_upsert_model` 真实写库成功
+- [x] `internal/mcpsrv/tools_contract_test.go`：11 个查询工具的说明必须含中文、「返回：」段、用到时机的表述、
+      点名相邻工具，并覆盖自身 schema 的每个参数；period 枚举跨工具一致
+
+### 工具说明本身
+- [x] 11 个查询工具描述改中文并按四要素重写（用途 / 何时用与分工 / 参数默认值与单位 / 「返回：」段）
+- [x] `queryToolNames` 由声明表派生（`queryTools()`），消灭"名字三处写"
+- [x] 三个后台工具描述改中文：明确「先看有什么 → 查怎么用 → 执行」、返回形状、`truncated`、
+      `tool=null` 的语义、`body_fields` 的用途、`admin_read` 的 403 说明
+- [x] `initialize.instructions` 改中文并写入三步工作流与「按 body_schema 写、不猜字段名」
+
+### 智能问答优先用表单
+- [x] 基础提示词新增第 3、4 条规则：写配置前必须 describe 并按 body_schema 写、**不因"不确定字段名"而拒绝**、
+      形状缺失就明说且绝不猜；参数不全先问再动手，可枚举项做成下拉，能推断的默认值写进 value 并说明
+- [x] 反例一起写进去：纯查询且默认合理时**不要**拦着用户填表，直接给答案并注明口径
+- [x] 输出格式一节写死选取顺序：`form`（要信息）→ `chart`/`svg`（要图）→ `html`（要自由排版/脚本）
+- [x] 内联表单一节标明「这是默认手段」，新增「什么时候该出表单」「拿到填写结果之后」两节
+      （先做完事再用 `ui` 原地更新，不要新开一张表重问）
+- [x] `DefaultUIBridgeInstructions` 的标题与开头标注「仅在需要自由排版或页面脚本时用」
+- [x] 表单里的按钮点击**不等于**危险接口的同意（`confirm` 规则不变）
+- [x] `internal/chat/prompt_test.go` 钉住以上三条行为（读的是真正装配出来的提示词）
+
+### 文档
+- [x] 新增 `docs/design/m40-tool-descriptions-and-forms.md`
+- [x] `docs/mcp.md` 新增 **§4.5 工具说明标准**（四要素模板、路由 body 字段判定表、反例、失败信息解读）
+- [x] `docs/PROCESS.md` 提交前自检增加一条：改工具说明/字段必须同时补形状与示例
+- [x] `docs/chat.md` §3/§4 补模型侧选取顺序与"不猜字段名 / 先 validate 再写"
+- [x] `docs/pricing.md` 补 MCP 侧拿到规则集 schema 的路径 + 标注未实现字段
+
+### 观察项（本轮不做，如实记录）
+- [ ] `accounts.price_overrides` 无读取方，而 `docs/pricing.md` §3 把它写进售价来源优先级——两者需要收敛
+- [ ] 模型级 `models.policy_json` 与路由级 `routes.policy_json` 同样只存不读
+- [ ] tag 的 `policy` 未走 `keyPolicyDocument` 校验（Key 的 policy 走），因此 tag 上的未知字段不会被拒
+- [ ] **试算器与数据面的倍率口径不一致**（M40 走查时发现，未修）：`admin_simulate_pricing` /
+      `POST /pricing/simulate` 用 `(sale==nil || sale.MarkupBP == 0) → default_markup_bp` 推断加价，
+      看不到 Key/tag/账户级 `margin_bp`；而数据面走 `billing.ResolveMarkup` 的完整优先级链。
+      于是"某把 Key 设了 `margin_bp: 0`"时，试算器显示 1.0× 而实际按 0 计费。
+      影响面：只影响预览数值，不影响计费。修法需要接口新参数（key/tag/account），属接口变更，另开里程碑

@@ -1,6 +1,7 @@
 # 定价：计量维度 × 有序价格规则集
 
-> 状态：**已实现（M11a：internal/pricing + 管理面试算/校验）**；**多币种已实现（M22：模型级币种 + 账本换算）**。
+> 状态：**已实现（M11a：internal/pricing + 管理面试算/校验）**；**多币种已实现（M22：模型级币种 + 账本换算）**；
+> **通过 MCP/智能问答改价的字段说明已补齐（M40，见 §11）**。
 > 目标：用同一套模型表达"固定单价""分时优惠""按长度分档""缓存命中/未命中"
 > 以及"分维度计费"，**不使用浮点**。
 
@@ -82,8 +83,8 @@
 | `valid_from` / `valid_to` | 促销/临时价生效区间 |
 | `tier` | `{basis: input\|total\|output, gte, lt}` 长度档位 |
 | `model_variant` | 限定上游模型变体 |
-| `region` | 预留 |
-| `monthly_usage` | `{basis: tokens\|cost\|requests, gte, lt}` 累计用量折扣（默认关闭，会增加一次缓存读） |
+| `region` | **尚未实现**：`pricing.When` 里没有这个字段，写进规则会被严格解析拒掉（400） |
+| `monthly_usage` | **尚未实现**：同上，字段不存在。累计用量折扣目前不在计价引擎里 |
 
 ## 3. 成本规则集 与 售价规则集（分离）
 
@@ -92,8 +93,14 @@
   - `cost_follow`：售价 = 该次成本 × `markup_bp`（**上游调价或切换时段时售价自动跟随**），可按维度覆写倍率；
     成本币种 ≠ 售价币种时**先按汇率把成本单价换算到售价币种、再乘倍率**（见 §9）；
   - `absolute`：独立单价规则（可定义自己的时段/档位，例如只对客户在标准时段加价）。
-- 售价来源优先级（首个命中）：`key.policy` → `tag.policy`（按 priority）→ `account.price_overrides` →
-  模型售价规则 → 兜底 `cost_follow` + `billing.default_markup_bp`（默认 10000 = 1.0×）。
+- 售价来源优先级（首个命中）：`key.policy` → `tag.policy`（按 priority）→ 模型售价规则 →
+  兜底 `cost_follow` + `billing.default_markup_bp`（默认 10000 = 1.0×）。
+
+  > **与实现不一致（待收敛）**：上面这条链里已不再包含 `account.price_overrides`——该列目前**没有任何读取方**
+  > （代码实际读的是 `accounts.markup_override_bp`，见 `internal/billing/markup.go`）。
+  > 模型的 `policy_json` 与路由的 `policy_json` 同样只写不读。M40 没有改这些行为，只是在
+  > `admin_describe` 的字段说明里如实标注了「当前不生效」，避免 agent 以为自己配好了；
+  > 收敛方案见 `docs/TODO.md` 的 M40 观察项。
 
 **两种 basis 互斥**：`absolute` 直接用给定单价（不再乘倍率）；`cost_follow` 先算成本再乘倍率。
 
@@ -191,3 +198,61 @@ billing:
   成本币种在成本规则 JSON 里写 `currency`（保存走 `POST /providers/{id}/models`）；目标卡片显示币种徽标与缺汇率告警。
 - 「设置」页：汇率表编辑器（键值对 + 校验），保存即生效。
 - 顶栏：**显示币种**选择器（`GET /admin/api/v1/billing/currency` 提供列表与汇率），选择记住在本浏览器。
+
+## 11. 通过 MCP/智能问答改价（M40）
+
+改价的**写入方**只有管理面接口，所以模型能不能改对，取决于工具说明里有没有规则集的形状。
+M40 之前没有：`admin_upsert_provider_model` 的 `pricing_rules` 只被标成 `{"type":"object"}`、
+示例是 `{}`，而写入侧 `pricing.ParseRuleSet` 是 `DisallowUnknownFields`——于是模型既不能猜
+（猜了必然 400），也没有东西可读，只能拒绝执行。现在规则集的字段名、单位与示例都由
+`admin_describe` 直接返回（schema 定义在 `internal/httpapi/admin_pricing_schema.go`）。
+
+模型侧应当按这个顺序走：
+
+1. `admin_describe(admin_upsert_provider_model)`（或 `admin_upsert_model` / `admin_update_model`）
+   拿到 `body_schema.pricing_rules` / `body_schema.sale_pricing` 与 `example`；
+2. 需要确认合法性时 `admin_validate_pricing`：**请求体就是规则集本身**，不写库、`admin_read` 即可；
+3. 用 `admin_request` 落库，先成本侧（`admin_upsert_provider_model`）、再售价侧
+   （`admin_upsert_model` / `admin_update_model`）。
+
+### 单位：最容易错的一步
+
+`rates` 里每个数字都是**微单位/百万 token 的整数**，不是美元小数：
+
+| 报价 | 写进 `rates` |
+|---|---|
+| $0.20 / 1M 输入 | `200000` |
+| $0.02 / 1M 输入（缓存命中） | `20000` |
+| $1.20 / 1M 输出 | `1200000` |
+
+`schema` 与工具说明里都写死了"200000 = $0.20/1M"，就是为了让这一步不需要推理。
+
+### 一个可抄的最小例子
+
+成本侧（`provider_models.pricing_rules_json`，只认 `currency` 与 `rules`）：
+
+```json
+{"currency":"USD",
+ "rules":[{"id":"cost","title":"标准价","order":10,"when":{},
+           "rates":{"input_cache_hit":20000,"input_cache_miss":200000,"output":1200000}}]}
+```
+
+售价侧（`models.sale_pricing_json`）"按成本加价 10%"：
+
+```json
+{"currency":"USD","basis":"cost_follow","markup_bp":11000}
+```
+
+三点口径：
+
+- `when:{}` 是**必须**有的兜底规则——规则集里没有能匹配的规则时写入会被拒（400）；
+- 加价是**售价侧**字段，**不要**写进成本文档：成本侧多一个 `markup_bp` 就是未知字段，同样 400；
+- **模型级 `markup_bp: 0` 等于没写**：`0` 与"未设置"不可区分，会回落到
+  `billing.default_markup_bp`（默认 10000 = 原价）。真正的"不赚钱"要写在 **Key 或 tag 的
+  `policy.margin_bp: 0`** 上——那条链是显式的（`MarkupSet`），0 会被如实执行
+  （`internal/billing/markup.go` 的 `ResolveMarkup`）。`admin_pricing_targets` 会给出
+  `resolved_markup_bp` 与来源，改完价格用它核对最终生效值，不要凭写入值推断。
+
+> 回归测试 `TestMCPPricingExampleIsWritable`（`internal/httpapi/mcp_admin_test.go`）走的就是这条路：
+> 取 `admin_describe` 的示例 → `admin_validate_pricing` 通过 → 真实写库成功。
+> 说明文档与写入口径一旦漂移，它先红，而不是等运维在对话框里发现模型拒绝干活。

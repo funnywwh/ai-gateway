@@ -512,6 +512,201 @@ func TestMCPPrincipalCannotBeForgedOverHTTP(t *testing.T) {
 	}
 }
 
+// TestMCPDescribeCarriesThePricingRuleSchema pins the fix for the one failure this milestone
+// exists for: an operator asked for a cost price, the model called admin_describe, saw
+// pricing_rules as {"type":"object"} with an example of {}, and — correctly — refused to write
+// a document whose field names it had no way to know.
+//
+// The assertions are about what an agent must be able to read: the field names of a rule set,
+// the unit its rates are in, and the one structural rule that makes a written document valid.
+func TestMCPDescribeCarriesThePricingRuleSchema(t *testing.T) {
+	f := newAdminFixture(t)
+	f.seedScopedMCPToken(t, testAdminMCPToken, mcpsrv.ScopeAdmin)
+
+	detail, isError := f.callTool(t, testAdminMCPToken, 1, toolAdminDescribe,
+		`{"name":"admin_upsert_provider_model"}`)
+	if isError {
+		t.Fatalf("admin_describe failed: %+v", detail)
+	}
+	schema, _ := detail["body_schema"].(map[string]any)
+	properties, _ := schema["properties"].(map[string]any)
+	pricing, _ := properties["pricing_rules"].(map[string]any)
+	if pricing == nil {
+		t.Fatalf("the body schema has no pricing_rules property: %+v", properties)
+	}
+	if pricing["additionalProperties"] != false {
+		t.Errorf("pricing_rules must be strict: the server parses it with DisallowUnknownFields, "+
+			"so a permissive schema would describe a document that cannot be saved: %+v", pricing)
+	}
+	desc, _ := pricing["description"].(string)
+	for _, want := range []string{"微单位/百万 token", "200000"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("the schema must state the rate unit (%q): %s", want, desc)
+		}
+	}
+	inner, _ := pricing["properties"].(map[string]any)
+	for _, want := range []string{"currency", "basis", "markup_bp", "rules"} {
+		if inner[want] == nil {
+			t.Errorf("pricing_rules schema is missing %q: %v", want, inner)
+		}
+	}
+	rules, _ := inner["rules"].(map[string]any)
+	items, _ := rules["items"].(map[string]any)
+	ruleProps, _ := items["properties"].(map[string]any)
+	for _, want := range []string{"id", "order", "when", "rates", "per_request_fee_micros"} {
+		if ruleProps[want] == nil {
+			t.Errorf("a rule is missing %q: %v", want, ruleProps)
+		}
+	}
+	rates, _ := ruleProps["rates"].(map[string]any)
+	rateProps, _ := rates["properties"].(map[string]any)
+	for _, dimension := range pricingDimensions {
+		if rateProps[dimension] == nil {
+			t.Errorf("rates must document the %q dimension: %v", dimension, rateProps)
+		}
+	}
+
+	// The example has to be copyable, which for a rule set means a catch-all rule (an empty
+	// when object): without one the server answers 400.
+	example, _ := detail["example"].(map[string]any)
+	arguments, _ := example["arguments"].(map[string]any)
+	body, _ := arguments["body"].(map[string]any)
+	exampleRules, _ := body["pricing_rules"].(map[string]any)
+	if exampleRules == nil {
+		t.Fatalf("the example has no pricing_rules document: %+v", body)
+	}
+	list, _ := exampleRules["rules"].([]any)
+	if len(list) == 0 {
+		t.Fatalf("the example rule set has no rules: %+v", exampleRules)
+	}
+	first, _ := list[0].(map[string]any)
+	when, ok := first["when"].(map[string]any)
+	if !ok || len(when) != 0 {
+		t.Errorf("the example's first rule must be a catch-all (when: {}): %+v", first)
+	}
+}
+
+// TestMCPPricingExampleIsWritable is the regression test for the reported failure: the document
+// admin_describe hands the model must be a document the gateway accepts.
+//
+// It walks the path an agent would walk — describe, validate, write — against the real
+// handlers, so a description that drifts from pricing.ParseRuleSet fails here instead of
+// leaving a model to guess. The numbers are the ones from the report: $0.20 per 1M input,
+// $1.20 per 1M output, $0.02 per 1M cache-hit, expressed in micros.
+func TestMCPPricingExampleIsWritable(t *testing.T) {
+	f := newAdminFixture(t)
+	f.seedScopedMCPToken(t, testAdminMCPToken, mcpsrv.ScopeAdmin)
+	// The validator is role=viewer, so the read-only token can confirm a rule set before an
+	// operator commits it — that is the workflow the tool description recommends.
+	f.seedScopedMCPToken(t, testReadMCPToken, mcpsrv.ScopeAdminRead)
+
+	// A provider to hang the upstream model on.
+	if _, isError := f.callTool(t, testAdminMCPToken, 1, toolAdminRequest,
+		`{"name":"admin_create_provider","confirm":true,"body":{"name":"codex-sub","kind":"testecho"}}`); isError {
+		t.Fatal("seeding the provider failed")
+	}
+
+	detail, isError := f.callTool(t, testAdminMCPToken, 2, toolAdminDescribe,
+		`{"name":"admin_upsert_provider_model"}`)
+	if isError {
+		t.Fatalf("admin_describe failed: %+v", detail)
+	}
+	example, _ := detail["example"].(map[string]any)
+	arguments, _ := example["arguments"].(map[string]any)
+	body, _ := arguments["body"].(map[string]any)
+	rules, _ := body["pricing_rules"].(map[string]any)
+	raw, err := json.Marshal(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Step 1: the validator accepts the documented shape (viewer scope is enough, which is why
+	// this is the cheap way for a model to check its own work before writing).
+	validated, isError := f.callTool(t, testReadMCPToken, 3, toolAdminRequest,
+		`{"name":"admin_validate_pricing","body":`+string(raw)+`}`)
+	if isError {
+		t.Fatalf("the documented rule set was rejected by the validator: %+v", validated)
+	}
+	inner, _ := validated["body"].(map[string]any)
+	if inner["valid"] != true {
+		t.Fatalf("the documented rule set must validate: %+v", validated)
+	}
+
+	// Step 2: it is accepted at write time too, and reads back unchanged.
+	writeBody, _ := json.Marshal(map[string]any{
+		"public_model": "gpt-5.6-luna", "upstream_model": "gpt-5.6-luna", "pricing_rules": rules,
+	})
+	written, isError := f.callTool(t, testAdminMCPToken, 4, toolAdminRequest,
+		`{"name":"admin_upsert_provider_model","params":{"id":1},"body":`+string(writeBody)+`}`)
+	if isError {
+		t.Fatalf("the documented rule set could not be written: %+v", written)
+	}
+	stored, _ := written["body"].(map[string]any)
+	if stored["pricing_rules"] == nil {
+		t.Fatalf("the write did not keep the rules: %+v", written)
+	}
+	writtenRules, _ := stored["pricing_rules"].(map[string]any)
+	if len(writtenRules) == 0 {
+		t.Fatalf("the stored rule set came back empty: %+v", stored)
+	}
+
+	// Step 3: the sale side's documented example works the same way, and "售价 = 成本" is
+	// markup_bp 0 on the sale side rather than anything on the cost side.
+	saleDetail, isError := f.callTool(t, testAdminMCPToken, 5, toolAdminDescribe,
+		`{"name":"admin_update_model"}`)
+	if isError {
+		t.Fatalf("admin_describe(admin_update_model) failed: %+v", saleDetail)
+	}
+	saleExample, _ := saleDetail["example"].(map[string]any)
+	saleArguments, _ := saleExample["arguments"].(map[string]any)
+	saleBody, _ := saleArguments["body"].(map[string]any)
+	salePricing, _ := saleBody["sale_pricing"].(map[string]any)
+	if salePricing == nil {
+		t.Fatalf("the model example has no sale_pricing document: %+v", saleBody)
+	}
+	pricingJSON, _ := json.Marshal(map[string]any{"public_name": "gpt-5.6-luna", "sale_pricing": salePricing})
+	modelWritten, isError := f.callTool(t, testAdminMCPToken, 6, toolAdminRequest,
+		`{"name":"admin_upsert_model","body":`+string(pricingJSON)+`}`)
+	if isError {
+		t.Fatalf("the documented sale pricing could not be written: %+v", modelWritten)
+	}
+	modelRow, _ := modelWritten["body"].(map[string]any)
+	if modelRow["sale_pricing"] == nil {
+		t.Fatalf("the sale pricing was not stored: %+v", modelWritten)
+	}
+
+	// The markup the example states is the markup that has to take effect. This is the assertion
+	// that keeps the example off a zero: a model-level markup_bp of 0 is indistinguishable from
+	// "unset" and silently resolves to billing.default_markup_bp, so an example built on 0 would
+	// document a document that does not do what it says (see salePricingExample).
+	documentedMarkup := salePricing["markup_bp"]
+	if documentedMarkup == nil {
+		t.Fatalf("the documented sale pricing has no markup_bp: %+v", salePricing)
+	}
+	bp, _ := numeric(documentedMarkup)
+	if bp == 0 {
+		t.Fatalf("the sale-pricing example must not use markup_bp 0: on the model side 0 means "+
+			"\"unset\" and resolves to the default markup, so the example would silently not "+
+			"match what it appears to say: %+v", salePricing)
+	}
+	simulated, isError := f.callTool(t, testAdminMCPToken, 7, toolAdminRequest,
+		`{"name":"admin_simulate_pricing","body":{"model":"gpt-5.6-luna","dimensions":{"input":1000000,"input_cache_miss":1000000,"output":1000000}}}`)
+	if isError {
+		t.Fatalf("simulating the price of what was just written failed: %+v", simulated)
+	}
+	simBody, _ := simulated["body"].(map[string]any)
+	if effective, _ := numeric(simBody["markup_bp"]); effective != bp {
+		t.Errorf("the written sale pricing says markup_bp %v but the simulator priced it at %v "+
+			"(cost_micros %v, charge_micros %v): the two must agree for the example to be "+
+			"copyable", bp, simBody["markup_bp"], simBody["cost_micros"], simBody["charge_micros"])
+	}
+	if cost, _ := numeric(simBody["cost_micros"]); cost != 1600000 {
+		t.Errorf("$0.20/1M input, $0.02/1M cache-hit and $1.20/1M output over 1M+1M+1M tokens "+
+			"is 1.60 USD = 1600000 micros, got %v: the unit conversion the operator's request "+
+			"depended on is wrong", simBody["cost_micros"])
+	}
+}
+
 func TestAdminRecorderRendersNonJSONResponses(t *testing.T) {
 	route := adminRoute{Method: "GET", Path: "/admin/api/v1/x", Name: "admin_x"}
 

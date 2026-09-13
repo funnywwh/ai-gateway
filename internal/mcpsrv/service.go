@@ -119,6 +119,16 @@ func New(store Store, reg *registry.Registry, cfg Config) *Service {
 	return &Service{store: store, reg: reg, cfg: cfg, now: func() time.Time { return time.Now().UTC() }}
 }
 
+// limitBound is the row cap the deployment configured (mcp.max_query_rows). The tool
+// descriptions state it, because "how many rows will I get" decides whether a model can trust
+// a count it just read: a cap that is not documented turns a truncated answer into a wrong one.
+func (s *Service) limitBound() int {
+	if s.cfg.MaxRows > 0 {
+		return s.cfg.MaxRows
+	}
+	return 1000
+}
+
 // SetReservationReporter installs the in-flight reader used by get_dashboard.
 func (s *Service) SetReservationReporter(report func(accountID int64) int64) { s.reservations = report }
 
@@ -150,21 +160,9 @@ type Tool struct {
 // chat uses it (via IsQueryTool) to tell a direct query-tool call apart from a
 // management endpoint name the model abbreviated, so the read-only tools are
 // passed straight to the MCP handler instead of being misrouted through
-// admin_request. TestQueryToolSetIsConsistent pins it to the tools declared in
-// Tools and dispatched in callRead.
-var queryToolNames = map[string]struct{}{
-	"get_balance":         {},
-	"get_ledger":          {},
-	"get_usage_summary":   {},
-	"list_requests":       {},
-	"get_request":         {},
-	"get_dashboard":       {},
-	"get_usage_breakdown": {},
-	"get_rate_limits":     {},
-	"list_invoices":       {},
-	"get_invoice":         {},
-	"get_models":          {},
-}
+// admin_request. It is derived from queryTools below, which is the same table
+// Tools() serves, so the two cannot drift apart.
+var queryToolNames = queryToolNameSet()
 
 // IsQueryTool reports whether name is one of the read-only query tools.
 func IsQueryTool(name string) bool {
@@ -172,65 +170,176 @@ func IsQueryTool(name string) bool {
 	return ok
 }
 
-// Tools lists the read-only tools.
-func (s *Service) Tools() []Tool {
-	return []Tool{
+// periodEnum is the closed set of windows every period-taking tool accepts. It is declared
+// once because a tool that accepts a period but does not list the values makes the model
+// guess, and a guessed window produces a confidently wrong number.
+var periodEnum = []string{"today", "yesterday", "last_7_days", "last_30_days", "this_month", "last_month"}
+
+// periodProperty is the shared description of a period parameter. The default matters: a model
+// that omits period gets 7 days, and the answer must say so rather than imply "everything".
+var periodProperty = map[string]any{
+	"type": "string", "enum": periodEnum,
+	"description": "时间窗口（UTC）：today/yesterday 是整天，last_7_days/last_30_days 是最近 7/30 天，" +
+		"this_month/last_month 是自然月（last_month 为上一个完整自然月）。省略时按 last_7_days 处理。" +
+		"所有窗口都会被 mcp.request_window_days 从更早一侧裁剪，因此更早的数据查不到，这是配置限制而不是没有数据",
+}
+
+// limitProperty describes a row cap. When limit is omitted the tool returns up to the
+// deployment's cap (mcp.max_query_rows), so the description says so rather than implying an
+// unbounded list.
+func limitProperty(maxRows int, unit string) map[string]any {
+	return map[string]any{
+		"type": "integer", "minimum": 1, "maximum": maxRows,
+		"description": fmt.Sprintf("最多返回多少%s；可省略，省略时返回本部署上限（%d）内的全部，返回体里的 count 是实际条数", unit, maxRows),
+	}
+}
+
+// queryTool is one read-only tool: its name, the description an agent reads (see the four
+// required parts in docs/mcp.md §4.5), and its input schema.
+type queryTool struct {
+	Name        string
+	Description string
+	InputSchema json.RawMessage
+}
+
+// queryTools is the single declaration of the read-only surface: Tools() serves it and
+// queryToolNames is derived from it. A tool added here but not dispatched in callRead (or the
+// reverse) fails TestQueryToolSetIsConsistent.
+//
+// The descriptions are the interface documentation an agent actually reads — there is no other.
+// Each one states what it answers, when to use it instead of its neighbour, the defaults and
+// units of its parameters, and what comes back. See docs/mcp.md §4.5.
+func (s *Service) queryTools() []queryTool {
+	return []queryTool{
 		{
-			Name:        "get_balance",
-			Description: "Current balance, credit limit, billing mode and account status.",
+			Name: "get_balance",
+			Description: "查本令牌所属账户的余额与信用状况，没有参数（省略一切即可）。" +
+				"用在「我还有多少钱」「会不会被停」这类问题上；要的是用量与花费就用 get_dashboard。" +
+				"返回：account（账户名）、billing_mode（postpaid 后付/prepaid 预付）、status（active/suspended）、" +
+				"currency（账本币种）、balance（余额，微单位）、credit_limit（后付授信上限）、low_balance_threshold（低余额告警阈值）。" +
+				"金额字段都是微单位整数，同时给出同层 currency，不要当成元或美元。",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
 		},
 		{
-			Name:        "get_ledger",
-			Description: "Ledger entries (charges, top-ups, adjustments, refunds) for a period.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"period":{"type":"string","enum":["today","yesterday","last_7_days","last_30_days","this_month","last_month"]},"limit":{"type":"integer","minimum":1,"maximum":1000}}}`),
+			Name: "get_ledger",
+			Description: "查账本流水：每一次充值、消费、调整、退款、过期。用于回答「钱花到哪去了」" +
+				"「这笔充值什么时候到账」；只看汇总金额用 get_dashboard，看某次请求的详情用 get_request。" +
+				"period 指定时间窗口、limit 限制条数，两者都可省略（省略 period 按 last_7_days）。" +
+				"返回：period（起止时间）、currency、entries[]（created_at、kind（charge/topup/adjust/refund/expire）、" +
+				"amount（正数=入账，负数=扣费，微单位）、balance（该笔之后的余额）、ref_type/ref_id（关联的请求或发票）、note）、count。",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"period":` + periodJSON() + `,"limit":` + limitJSON(s.limitBound(), "条流水") + `}}`),
 		},
 		{
-			Name:        "get_usage_summary",
-			Description: "Aggregated usage for a period: requests, token dimensions and attempt status.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"period":{"type":"string","enum":["today","yesterday","last_7_days","last_30_days","this_month","last_month"]}}}`),
+			Name: "get_usage_summary",
+			Description: "按时间窗口汇总用量明细：上游尝试次数、各 token 维度、状态分布、按模型与按天的请求数。" +
+				"用在「这段时间大致用了多少」这类粗略判断上。" +
+				"注意它是「把明细读进来再累加」，行数受 mcp.max_query_rows 限制，**总量会随行数上限失真**；" +
+				"要准确的总额与金额请用 get_dashboard（SQL 聚合）或 get_usage_breakdown。period 可省略，省略按 last_7_days。" +
+				"返回：period、attempts（上游尝试次数，不是请求数）、tokens（维度→数量）、statuses、by_model、requests_by_day、note。",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"period":` + periodJSON() + `}}`),
 		},
 		{
-			Name:        "list_requests",
-			Description: "Recent requests with their recording flags.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"period":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":1000}}}`),
+			Name: "list_requests",
+			Description: "列出最近请求（本账户），带身份维度与内容录制标记。用于「昨天谁调了什么」「哪个 Key 在报错」，" +
+				"再看单条详情要用 get_request（用这里返回的 request_id）。period 与 limit 都可省略，省略 period 按 last_7_days。" +
+				"返回：requests[]（request_id、created_at、endpoint、status、client、model、resolved_model、workspace、" +
+				"session_id、call_kind、api_key_id/api_key_name、input_recorded、reasoning_recorded、output_text_recorded）、count。" +
+				"三个 *_recorded 说明该请求的正文是否被录制，为 false 时 get_request 会给出原因而不是内容。",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"period":` + periodJSON() + `,"limit":` + limitJSON(s.limitBound(), "条请求") + `}}`),
 		},
 		{
-			Name:        "get_request",
-			Description: "Input text of one request (redacted). Thinking and final output text are returned only when the key opted in.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"request_id":{"type":"string"}},"required":["request_id"]}`),
+			Name: "get_request",
+			Description: "看一条请求的内容：输入文本（脱敏后）、以及按录制开关决定是否可见的思考与最终输出。" +
+				"用在「这条请求到底发了什么」的追问上（先 list_requests 拿到 id）。" +
+				"request_id 必填且必须来自 list_requests，不要自己编 id（没有可省略的参数）。" +
+				"跨账户的 id 一律返回「找不到」，这是权限不是缺失。" +
+				"返回：request_id、endpoint、status、created_at、api_key_id/api_key_name，以及 input/reasoning/output_text 三项" +
+				"（各自配 input_recorded/reasoning_recorded/output_text_recorded；未录制时给出 *_unavailable_reason 说明原因，不会用空串冒充内容）。",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"request_id":{"type":"string","description":"请求 id（x-request-id，形如 req_…），来自 list_requests；必填"}},"required":["request_id"]}`),
 		},
 		{
-			Name:        "get_dashboard",
-			Description: "One-call summary for a period: requests, failures, tokens, charge, cost, margin, TTFT, balance and in-flight holds.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"period":{"type":"string","enum":["today","yesterday","last_7_days","last_30_days","this_month","last_month"]}}}`),
+			Name: "get_dashboard",
+			Description: "一次拿到账户概况，用于回答「最近怎么样」时优先用它：请求与失败数、错误率、token、花费(charge)、成本(cost)、" +
+				"毛利、首字延迟(TTFT)均值与 P95、按模型分布、余额与在途预留。它是 SQL 聚合，不受行数上限影响。" +
+				"只看单个模型/Key/每天的分组用 get_usage_breakdown；要逐笔流水用 get_ledger。period 可省略，省略按 last_7_days。" +
+				"返回：period、currency、requests{attempts,failed,error_rate_bp}、tokens{input,output,total}、" +
+				"money{charge,cost,margin}、latency{ttft_avg_ms,ttft_p95_ms,ttft_p95_estimated}、" +
+				"balance{balance,in_flight,available}、estimated_ratio_bp（用量为估算的比例）、by_model[]。金额单位为微单位整数。",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"period":` + periodJSON() + `}}`),
 		},
 		{
-			Name:        "get_usage_breakdown",
-			Description: "Usage grouped by model, key or day, with charge and token totals per group.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"period":{"type":"string"},"group_by":{"type":"string","enum":["model","key","day"]}}}`),
+			Name: "get_usage_breakdown",
+			Description: "按模型、Key 或天分组统计用量与金额，用于回答「哪个模型最贵」「哪把 Key 用得最多」。它是 SQL 聚合，" +
+				"不受 mcp.max_query_rows 影响，因此要准确总额时用它而不是 get_usage_summary。" +
+				"period 与 group_by 都可省略，省略 period 按 last_7_days、省略 group_by 按 model。" +
+				"返回：period、group_by、currency、groups[]（group、requests、failed、input_tokens、output_tokens、charge、cost）、count。" +
+				"group_by=key 时 group 是 api_key_id（数字），名字要对照 get_rate_limits 或 list_requests。金额为微单位整数。",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"period":` + periodJSON() + `,"group_by":{"type":"string","enum":["model","key","day"],"description":"分组维度：model 对客模型（默认）/ key API Key（值为 api_key_id）/ day 每天；省略按 model"}}}`),
 		},
 		{
-			Name:        "get_rate_limits",
-			Description: "Configured limits per API key plus this month's usage from the rollup.",
+			Name: "get_rate_limits",
+			Description: "查每个 API Key 配置的限额与本月已用，用于回答「这个 Key 会不会被限流」「配额还剩多少」；没有参数（省略一切即可）。要的是用量趋势而不是限额时用 get_usage_summary 或 get_usage_breakdown。" +
+				"返回：period（本月 YYYY-MM）、keys[]（api_key_id、name、status、tags、configured_limits（Key 自身策略里的限额字段）、" +
+				"used_this_period{requests,tokens,charge}、not_enforced[]（配了但尚未执行的字段，例如 monthly_*）、" +
+				"ignored_policy_fields[]（网关不读的字段）、policy_error（策略文档解析失败时））、note。" +
+				"两点口径：这里只报 Key 自身策略，tag 策略在准入时合并、此处不合并；实时滑动窗口余量是进程内状态，跨进程查不到，" +
+				"所以不要用它推断「此刻还能发多少」。",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
 		},
 		{
-			Name:        "list_invoices",
-			Description: "Billing periods for this account with status and totals.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":200}}}`),
+			Name: "list_invoices",
+			Description: "列出本账户的账期账单（新的在前），用于回答「上个月的账在哪」；明细用 get_invoice。limit 可省略（账单总量很小）。" +
+				"返回：invoices[]（id、status、currency、period_start/period_end、total_charge、total_cost）、count。金额为微单位整数。",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"limit":` + limitJSON(s.limitBound(), "张账单") + `}}`),
 		},
 		{
-			Name:        "get_invoice",
-			Description: "One invoice with its lines (grouped by model, key or day).",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}`),
+			Name: "get_invoice",
+			Description: "看一张账单的明细行（按模型、Key 或天分组），用于回答「这张账单为什么这么多」；账单列表来自 list_invoices，id 必填（没有可省略的参数）。别人的账单 id 一律返回「找不到」。" +
+				"返回：id、status、currency、period_start/period_end、total_charge、total_cost，以及 lines[]" +
+				"（group、group_type、requests、input_tokens、output_tokens、charge）。金额为微单位整数。",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"id":{"type":"integer","description":"账单 id，来自 list_invoices 的 invoices[].id；必填"}},"required":["id"]}`),
 		},
 		{
-			Name:        "get_models",
-			Description: "Models available to this account with their sale prices.",
+			Name: "get_models",
+			Description: "列出本账户当前可用的对客模型及售价，用于回答「有哪些模型」「这个模型什么价」；没有参数（省略一切即可）。要改价格请看 admin_list_models / admin_update_model（需要 admin scope）。" +
+				"返回：models[]（id、object、pricing（售价规则文档）、currency）、count。" +
+				"currency 是该模型自己的售价币种，缺省才等于账本币种，所以不同模型的金额不要直接相加。",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
 		},
 	}
+}
+
+// queryToolNameSet derives the closed name set from the declarations.
+func queryToolNameSet() map[string]struct{} {
+	tools := new(Service).queryTools()
+	out := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		out[tool.Name] = struct{}{}
+	}
+	return out
+}
+
+// periodJSON and limitJSON render the shared parameter fragments. They exist so the eleven
+// schemas state the same window and the same row cap instead of eleven near-copies; the values
+// are static because a schema is served as a raw JSON document.
+func periodJSON() string {
+	raw, _ := json.Marshal(periodProperty)
+	return string(raw)
+}
+
+func limitJSON(maxRows int, unit string) string {
+	raw, _ := json.Marshal(limitProperty(maxRows, unit))
+	return string(raw)
+}
+
+// Tools lists the read-only tools.
+func (s *Service) Tools() []Tool {
+	declared := s.queryTools()
+	out := make([]Tool, 0, len(declared))
+	for _, tool := range declared {
+		out = append(out, Tool{Name: tool.Name, Description: tool.Description, InputSchema: tool.InputSchema})
+	}
+	return out
 }
 
 // Call executes one read-only tool for the authenticated account.

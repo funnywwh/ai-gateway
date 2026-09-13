@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sort"
 
 	"github.com/winger/ai-gateway/internal/store"
 )
@@ -46,12 +48,30 @@ const (
 )
 
 // adminField documents one path parameter, query parameter or body field.
+//
+// Desc is not decoration: it is the only thing an agent reads about a parameter. Say what
+// the value means, its unit, its default and (for closed sets) use Enum. See
+// docs/mcp.md §4.5 — a field described as a bare noun ("成本侧计价规则") is how an agent was
+// once left unable to write a cost rule at all.
+//
+// Schema and Example exist because Type alone is not a contract for anything structured:
+// before them, an object-typed field reached the model as {"type":"object"} with an example
+// of {}, so the model saw a field with no fields and refused to write it. A field whose Type
+// is "object" must carry a shape (Schema, or the whole body through RawBody) — bodySchema
+// panics otherwise, deliberately: the silent version of this is what broke.
 type adminField struct {
 	Name     string
 	Type     string // string|integer|number|boolean|object|array
 	Desc     string
 	Required bool
 	Enum     []string
+	// Schema replaces the generated {"type": Type} in the endpoint's body schema. It is how
+	// a nested document states its own field names, units and constraints.
+	Schema map[string]any
+	// Example replaces the placeholder sampleBody/sampleForType would invent for this field:
+	// for an object that placeholder is {}, which teaches an agent nothing and can even be
+	// rejected by a strict parser. It must be a document the endpoint really accepts.
+	Example any
 }
 
 func pathParam(name, desc string) adminField {
@@ -70,9 +90,80 @@ func bodyOptional(name, typ, desc string) adminField {
 	return adminField{Name: name, Type: typ, Desc: desc}
 }
 
+// schemaField gives a field its real shape. Use it for anything structured, and always for
+// a field whose Type is "object".
+func schemaField(field adminField, schema map[string]any) adminField {
+	field.Schema = schema
+	return field
+}
+
+// exampleField gives a field a copyable example value. The example is a promise: it must be
+// accepted by the endpoint (see TestMCPPricingExampleIsWritable).
+//
+// The value is mirrored into the schema it belongs to, in two places that matter:
+//
+//   - schema["example"], so an agent reading only body_schema (not the example arguments) still
+//     sees a value to copy;
+//   - field.Example, which is what sampleBody and the guard test read.
+//
+// A field may carry both a shape and an example, in either order; this is the one place that
+// keeps the two views of the same value in step.
+func exampleField(field adminField, value any) adminField {
+	field.Example = value
+	if field.Schema != nil {
+		field.Schema["example"] = value
+	}
+	return field
+}
+
+// structuredField is the pair the two helpers above are used in for an object body field: a
+// shape plus a writable example. It is named for what it produces (a field with a shape)
+// rather than for its JSON type, because the same helper documents array fields too — what
+// matters is that a structured field never reaches an agent without both.
+func structuredField(name, typ, desc string, schema map[string]any, example any) adminField {
+	field := schemaField(bodyOptional(name, typ, desc), schema)
+	if example != nil {
+		field = exampleField(field, example)
+	}
+	return field
+}
+
 func enumField(field adminField, values ...string) adminField {
 	field.Enum = values
 	return field
+}
+
+// numericField constrains a numeric field. The bounds are part of the interface an agent reads:
+// a weight documented only as "同层内的权重" leaves it to guess the range, and a guessed 0 or a
+// negative is either rejected or meaningless. Bounds are declared here only when the handler or
+// the storage really enforces them — a bound that is not true is worse than none, because a model
+// will trust it.
+func numericField(field adminField, minimum, maximum int) adminField {
+	schema := map[string]any{"type": field.Type, "minimum": minimum, "maximum": maximum,
+		"description": field.Desc}
+	return schemaField(field, schema)
+}
+
+// intRange is numericField for a field with a known upper bound.
+func intRange(field adminField, minimum, maximum int) adminField {
+	return numericField(field, minimum, maximum)
+}
+
+// nonNegative constrains a field to 0 and above, the bound most of these fields really have.
+func nonNegative(field adminField) adminField {
+	return numericField(field, 0, maxSaneInteger)
+}
+
+// maxSaneInteger is the ceiling used for fields whose handler enforces no upper bound: it is
+// listed so the schema communicates "a plain non-negative integer" without pretending to know a
+// domain limit. It stays inside int32 so a value copied from the schema cannot overflow a
+// downstream column.
+const maxSaneInteger = 1 << 31
+
+// stringExample pins the example for a required name/id field. A required field has no default to
+// fall back on, so the example has to carry a value an agent can recognize as its own to fill in.
+func stringExample(field adminField, value string) adminField {
+	return schemaField(field, map[string]any{"type": "string", "example": value, "description": field.Desc})
 }
 
 // dimensionQueryFields are the filters every request-log read accepts: the account and API
@@ -155,6 +246,13 @@ func (r adminRoute) hasBody() bool { return len(r.Body) > 0 || len(r.RawBody) > 
 
 // bodySchema renders the request body as a JSON Schema object, or nil when the
 // endpoint takes no body.
+//
+// A field declared as an object with no Schema panics instead of degrading to
+// {"type":"object"}: that degradation is not a smaller answer, it is a wrong one. It told
+// an agent "pricing_rules is an object" and nothing else, and the agent — correctly —
+// refused to write a document whose field names it could not know. Failing at
+// construction (startup, first tools/list, or any test run) is strictly better than
+// shipping a field description no model can act on. See docs/mcp.md §4.5.
 func (r adminRoute) bodySchema() map[string]any {
 	if len(r.RawBody) > 0 {
 		var schema map[string]any
@@ -165,14 +263,33 @@ func (r adminRoute) bodySchema() map[string]any {
 	if len(r.Body) == 0 {
 		return nil
 	}
+	return schemaForFields(r.Name, r.Body)
+}
+
+// schemaForFields turns declared fields into a JSON Schema object. It takes the endpoint
+// name so the panic above can say which route to fix.
+func schemaForFields(where string, fields []adminField) map[string]any {
 	properties := map[string]any{}
-	required := make([]string, 0, len(r.Body))
-	for _, field := range r.Body {
-		property := map[string]any{"type": field.Type, "description": field.Desc}
-		if len(field.Enum) > 0 {
-			property["enum"] = field.Enum
+	required := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if field.Schema != nil {
+			// A hand-written shape carries its own type and description.
+			properties[field.Name] = field.Schema
+		} else {
+			if field.Type == "object" {
+				panic(fmt.Sprintf(
+					"httpapi: %s field %q is declared as an object with no Schema: an agent would "+
+						"see {\"type\":\"object\"} and cannot write it; give it a shape with "+
+						"schemaField(...) or declare the whole body with RawBody "+
+						"(standard: docs/mcp.md §4.5 工具说明标准)",
+					where, field.Name))
+			}
+			property := map[string]any{"type": field.Type, "description": field.Desc}
+			if len(field.Enum) > 0 {
+				property["enum"] = field.Enum
+			}
+			properties[field.Name] = property
 		}
-		properties[field.Name] = property
 		if field.Required {
 			required = append(required, field.Name)
 		}
@@ -185,12 +302,16 @@ func (r adminRoute) bodySchema() map[string]any {
 }
 
 // summaryRow is the compact catalogue entry returned by admin_endpoints.
+//
+// body_fields names the body's top-level fields. It is here because "has_body: true" alone
+// forces an agent to spend an admin_describe call just to learn whether an endpoint it is
+// looking at could be the one it needs.
 func (r adminRoute) summaryRow() map[string]any {
 	row := map[string]any{
 		"name": r.Name, "method": r.Method, "path": r.Path,
 		"summary": r.Summary, "group": r.Group, "role": r.Role,
 		"params": fieldNames(r.Params), "query": fieldNames(r.Query),
-		"has_body": r.hasBody(), "dangerous": r.Dangerous,
+		"has_body": r.hasBody(), "body_fields": fieldNames(r.Body), "dangerous": r.Dangerous,
 	}
 	if r.exposed() {
 		row["tool"] = r.Name
@@ -247,13 +368,29 @@ func (r adminRoute) example() map[string]any {
 		}
 		arguments["query"] = query
 	}
-	if schema := r.bodySchema(); schema != nil {
-		arguments["body"] = sampleBody(schema)
+	if body := r.sampleBody(); body != nil {
+		arguments["body"] = body
 	}
 	if r.Dangerous {
 		arguments["confirm"] = true
 	}
 	return map[string]any{"tool": "admin_request", "arguments": arguments}
+}
+
+// sampleBody renders the example body: a declared Example wins over anything invented from
+// the schema, because an invented object is {} and an agent that copies {} gets a 400.
+func (r adminRoute) sampleBody() map[string]any {
+	if len(r.Body) == 0 {
+		if schema := r.bodySchema(); schema != nil {
+			return sampleBody(schema)
+		}
+		return nil
+	}
+	out := map[string]any{}
+	for _, field := range r.Body {
+		out[field.Name] = sampleValue(field)
+	}
+	return out
 }
 
 func fieldNames(fields []adminField) []string {
@@ -280,6 +417,14 @@ func fieldDocs(fields []adminField) []map[string]any {
 }
 
 func sampleValue(field adminField) any {
+	if field.Example != nil {
+		return field.Example
+	}
+	if field.Schema != nil {
+		// A declared shape produces a value that satisfies itself: a model copies the example
+		// verbatim, so an example that violates its own schema teaches a 400.
+		return sampleFromSchema(field.Schema, field.Name)
+	}
 	if len(field.Enum) > 0 {
 		return field.Enum[0]
 	}
@@ -301,24 +446,117 @@ func sampleForType(typ, name string) any {
 	}
 }
 
-// sampleBody renders a placeholder body from a schema so the example stays
-// readable even for wide objects.
+// sampleBody renders a placeholder body from a schema, for the routes that declare their whole
+// body with RawBody. It is schema-aware on purpose: inventing {} for a nested object, or 0 for a
+// field whose minimum is 1, produces an example the endpoint then rejects — the same class of
+// defect as describing a field as a bare object. TestGeneratedExamplesSatisfyTheirSchema checks
+// this for every route.
 func sampleBody(schema map[string]any) map[string]any {
-	properties, _ := schema["properties"].(map[string]any)
-	if len(properties) == 0 {
+	value, _ := sampleFromSchema(schema, "").(map[string]any)
+	if value == nil {
 		return map[string]any{}
 	}
-	out := map[string]any{}
-	for name, raw := range properties {
-		property, _ := raw.(map[string]any)
-		if enum, ok := property["enum"].([]any); ok && len(enum) > 0 {
-			out[name] = enum[0]
-			continue
-		}
-		typ, _ := property["type"].(string)
-		out[name] = sampleForType(typ, name)
+	return value
+}
+
+// sampleFromSchema builds one value that satisfies the schema it is given.
+//
+// It is deliberately conservative: when it cannot produce a satisfiable value (an unparseable
+// regex pattern, say) it returns a recognizable placeholder rather than a plausible-looking
+// wrong value, so the failure shows up in the guard test instead of in an agent's call.
+func sampleFromSchema(schema map[string]any, name string) any {
+	if len(schema) == 0 {
+		return sampleForType("", name)
 	}
-	return out
+	if example, ok := schema["example"]; ok {
+		return example
+	}
+	if enum, ok := schema["enum"].([]string); ok && len(enum) > 0 {
+		return enum[0]
+	}
+	if enum, ok := schema["enum"].([]any); ok && len(enum) > 0 {
+		return enum[0]
+	}
+	switch typ, _ := schema["type"].(string); typ {
+	case "object":
+		properties, _ := schema["properties"].(map[string]any)
+		out := map[string]any{}
+		names := make([]string, 0, len(properties))
+		for property := range properties {
+			names = append(names, property)
+		}
+		sort.Strings(names)
+		for _, property := range names {
+			sub, _ := properties[property].(map[string]any)
+			out[property] = sampleFromSchema(sub, property)
+		}
+		// An object with no declared properties renders as an explicitly empty document: it is
+		// honest about there being nothing to fill in.
+		return out
+	case "array":
+		items, _ := schema["items"].(map[string]any)
+		if items == nil {
+			return []any{}
+		}
+		return []any{sampleFromSchema(items, name)}
+	case "integer", "number":
+		return sampleNumber(schema)
+	case "boolean":
+		return false
+	case "string":
+		return sampleString(schema, name)
+	default:
+		return sampleForType(typ, name)
+	}
+}
+
+// sampleNumber picks the smallest value the schema allows, because that is the only choice that
+// cannot exceed a maximum the author wrote down.
+func sampleNumber(schema map[string]any) any {
+	value := 0.0
+	if minimum, ok := numeric(schema["minimum"]); ok && minimum > value {
+		value = minimum
+	}
+	if maximum, ok := numeric(schema["maximum"]); ok && value > maximum {
+		value = maximum
+	}
+	switch schema["type"] {
+	case "integer":
+		return int(value)
+	default:
+		return value
+	}
+}
+
+// sampleString satisfies minLength when one is declared, and otherwise falls back to a
+// placeholder an agent is meant to replace.
+func sampleString(schema map[string]any, name string) any {
+	// A declared format or pattern means the value has meaning the generator cannot guess;
+	// the placeholder keeps that visible instead of inventing a well-formed wrong value.
+	if schema["pattern"] != nil || schema["format"] != nil {
+		return "<" + name + ">"
+	}
+	placeholder := "<" + name + ">"
+	if minimum, ok := numeric(schema["minLength"]); ok {
+		for float64(len(placeholder)) < minimum {
+			placeholder += "x"
+		}
+	}
+	return placeholder
+}
+
+// numeric reads a JSON number as it arrives from a map[string]any literal.
+func numeric(raw any) (float64, bool) {
+	switch v := raw.(type) {
+	case float64:
+		return v, true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	default:
+		return 0, false
+	}
 }
 
 // adminRoutes assembles the whole table.
@@ -376,11 +614,15 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 			Dangerous: true, ConfirmReason: "会签发一个可以立即消费额度的新密钥，且明文只返回一次",
 			Body: []adminField{
 				bodyRequired("name", "string", "Key 名称"),
-				bodyOptional("account_id", "integer", "所属账户 id（与 account 二选一）"),
+				nonNegative(bodyOptional("account_id", "integer", "所属账户 id（与 account 二选一）")),
 				bodyOptional("account", "string", "所属账户名（与 account_id 二选一）"),
-				bodyOptional("tags", "array", "标签名数组，决定授权与策略合并"),
-				bodyOptional("grants", "object", "授权对象，例如 models/providers 两个通配数组"),
-				bodyOptional("policy", "object", "限速与配额策略（扁平顶层字段）：rpm/tpm/concurrency 生效，monthly_* 已解析未执行，strategy/provider_order/margin_bp 影响路由与加价；其它字段会被拒绝"),
+				structuredField("tags", "array", "标签名数组，决定授权与策略合并；标签必须在 admin_list_tags 里存在", arrayOfStrings("标签名列表"), []any{}),
+				structuredField("grants", "object", "这个 Key 能调用哪些模型与供应商（与 tag 的授权取并集）",
+					grantsSchema("Key"), grantsExample()),
+				exampleField(schemaField(bodyOptional("policy", "object",
+					"限速与配额策略：顶层扁平字段，只有 rpm/tpm/concurrency（已强制执行）、monthly_*（只解析未执行）、"+
+						"strategy/provider_order/margin_bp（影响路由与加价）被接受，其它键一律 400。字段说明见本参数 schema"),
+					policySchema()), keyPolicyExample()),
 			},
 		},
 		{
@@ -394,7 +636,9 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 				bodyOptional("record_reasoning", "boolean", "是否保存思考文本"),
 				bodyOptional("record_output_text", "boolean", "是否保存最终输出文本"),
 				enumField(bodyOptional("record_input_mode", "string", "输入文本录制级别：user 只记用户输入（默认），full 整份请求正文，metadata 只记元数据，off 不记"), "inherit", "user", "full", "metadata", "off"),
-				bodyOptional("policy", "object", "限速与配额策略（扁平顶层字段，与创建 Key 相同；省略则不改）"),
+				exampleField(schemaField(bodyOptional("policy", "object",
+					"限速与配额策略，字段与创建 Key 完全相同（见本参数 schema）；省略则不改，写 null 表示清空"),
+					policySchema()), keyPolicyExample()),
 			},
 		},
 		{
@@ -473,10 +717,10 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 				bodyRequired("name", "string", "账户名"),
 				enumField(bodyOptional("billing_mode", "string", "计费模式"), "postpaid", "prepaid"),
 				bodyOptional("note", "string", "备注"),
-				bodyOptional("credit_limit_micros", "integer", "后付授信上限（微美元）"),
-				bodyOptional("low_balance_threshold_micros", "integer", "低余额告警阈值（微美元）"),
+				nonNegative(bodyOptional("credit_limit_micros", "integer", "后付授信上限（微美元，整数，负数会被拒）")),
+				nonNegative(bodyOptional("low_balance_threshold_micros", "integer", "低余额告警阈值（微美元）")),
 				bodyOptional("overdraft_limit_micros", "integer", "允许的透支额度（微美元）"),
-				bodyOptional("markup_override_bp", "integer", "账户级加价倍数（bp，0 表示免费）"),
+				nonNegative(bodyOptional("markup_override_bp", "integer", "账户级加价倍数（bp，0 表示免费；10000 = 1.0 倍）")),
 				bodyOptional("auto_suspend", "boolean", "欠费自动暂停"),
 				bodyOptional("auto_resume", "boolean", "充值后自动恢复"),
 			},
@@ -491,14 +735,16 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 				enumField(bodyOptional("billing_mode", "string", "计费模式"), "postpaid", "prepaid"),
 				enumField(bodyOptional("status", "string", "账户状态"), "active", "suspended"),
 				bodyOptional("note", "string", "备注"),
-				bodyOptional("credit_limit_micros", "integer", "后付授信上限（微美元）"),
-				bodyOptional("low_balance_threshold_micros", "integer", "低余额告警阈值（微美元）"),
+				nonNegative(bodyOptional("credit_limit_micros", "integer", "后付授信上限（微美元，整数，负数会被拒）")),
+				nonNegative(bodyOptional("low_balance_threshold_micros", "integer", "低余额告警阈值（微美元）")),
 				bodyOptional("overdraft_limit_micros", "integer", "允许的透支额度（微美元）"),
 				bodyOptional("markup_override_bp", "integer", "账户级加价倍数（bp）"),
 				bodyOptional("auto_suspend", "boolean", "欠费自动暂停"),
 				bodyOptional("auto_resume", "boolean", "充值后自动恢复"),
 				bodyOptional("inflight_policy_override", "string", "在途超额策略覆写"),
-				bodyOptional("price_overrides", "object", "按维度的价格覆写"),
+				exampleField(schemaField(bodyOptional("price_overrides", "object",
+					"价格覆写文档。字段说明见本参数 schema"), accountPriceOverridesSchema()),
+					map[string]any{}),
 			},
 		},
 		{
@@ -515,10 +761,15 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			Body: []adminField{
 				bodyRequired("public_name", "string", "对客模型名"),
 				bodyOptional("display_name", "string", "展示名"),
-				bodyOptional("aliases", "array", "别名数组"),
+				structuredField("aliases", "array", "别名数组：客户端用别名请求时也能路由到这个模型", arrayOfStrings("别名列表"), []any{}),
 				bodyOptional("enabled", "boolean", "是否对客可用"),
-				bodyOptional("sale_pricing", "object", "售价文档（倍数 basis+markup_bp，或绝对规则）"),
-				bodyOptional("policy", "object", "模型级策略"),
+				salePricingField("对客售价规则集：客户按它计费（成本侧在 provider_models 的 pricing_rules）。"+
+					"只想「售价 = 成本」时写 {\"basis\":\"cost_follow\",\"markup_bp\":10000}；"+
+					"要独立定价写 {\"basis\":\"absolute\",\"rules\":[…]}（此时必须至少一条规则）。"+
+					"字段名与结构必须严格按 schema 写（未知字段 400），单位是微单位/百万 token；拿不准先 admin_validate_pricing。",
+					s.ledgerCurrency()),
+				exampleField(schemaField(bodyOptional("policy", "object", "模型级策略。字段说明见本参数 schema"), modelPolicySchema()),
+					map[string]any{}),
 			},
 		},
 		{
@@ -528,10 +779,13 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			Params:  []adminField{pathParam("name", "对客模型名")},
 			Body: []adminField{
 				bodyOptional("display_name", "string", "展示名"),
-				bodyOptional("aliases", "array", "别名数组"),
+				structuredField("aliases", "array", "别名数组：客户端用别名请求时也能路由到这个模型", arrayOfStrings("别名列表"), []any{}),
 				bodyOptional("enabled", "boolean", "是否对客可用"),
-				bodyOptional("sale_pricing", "object", "售价文档"),
-				bodyOptional("policy", "object", "模型级策略"),
+				salePricingField("对客售价规则集，与 admin_upsert_model 同一形状；省略则不改。"+
+					"只改加价倍数请用 admin_update_markup（它保留规则数组，避免并发编辑互相覆盖）",
+					s.ledgerCurrency()),
+				exampleField(schemaField(bodyOptional("policy", "object", "模型级策略。字段说明见本参数 schema"), modelPolicySchema()),
+					map[string]any{}),
 			},
 		},
 		{
@@ -548,10 +802,10 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 				enumField(bodyRequired("kind", "string", "匹配方式"), "exact", "prefix", "glob", "regex"),
 				bodyRequired("pattern", "string", "匹配模式"),
 				bodyOptional("target_model", "string", "改写成的模型名（可用 {model} 与捕获组）"),
-				bodyOptional("target_provider_id", "integer", "钉死供应商 id"),
+				nonNegative(bodyOptional("target_provider_id", "integer", "钉死供应商 id")),
 				bodyOptional("target_provider", "string", "钉死供应商名"),
 				bodyOptional("target_upstream_model", "string", "改写成的上游模型名"),
-				bodyOptional("priority", "integer", "优先级，数字越大越先匹配"),
+				nonNegative(bodyOptional("priority", "integer", "优先级，数字越大越先匹配（0 及以上）")),
 				bodyOptional("enabled", "boolean", "是否启用"),
 				bodyOptional("note", "string", "备注"),
 			},
@@ -574,15 +828,15 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			Name: "admin_upsert_route", Group: groupModels, Role: roleAdmin,
 			Summary: "新建或更新一条路由（对客模型到供应商上游模型）",
 			Body: []adminField{
-				bodyOptional("model_id", "integer", "对客模型 id（与 model 二选一）"),
+				nonNegative(bodyOptional("model_id", "integer", "对客模型 id（与 model 二选一）")),
 				bodyOptional("model", "string", "对客模型名（与 model_id 二选一）"),
-				bodyOptional("provider_id", "integer", "供应商 id（与 provider 二选一）"),
+				nonNegative(bodyOptional("provider_id", "integer", "供应商 id（与 provider 二选一）")),
 				bodyOptional("provider", "string", "供应商名（与 provider_id 二选一）"),
 				bodyOptional("upstream_model", "string", "上游模型名，省略表示同名"),
-				bodyOptional("priority", "integer", "优先级，数字越大越先选"),
-				bodyOptional("weight", "integer", "同层内的权重"),
+				nonNegative(bodyOptional("priority", "integer", "优先级，数字越大越先选（0 及以上）")),
+				nonNegative(bodyOptional("weight", "integer", "同层内的权重（0 及以上；0 表示不参与抽选）")),
 				bodyOptional("enabled", "boolean", "是否启用"),
-				bodyOptional("policy", "object", "路由级策略"),
+				exampleField(schemaField(bodyOptional("policy", "object", "路由级策略。字段说明见本参数 schema"), routePolicySchema()), map[string]any{}),
 			},
 		},
 		{
@@ -595,7 +849,7 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 				bodyOptional("priority", "integer", "优先级"),
 				bodyOptional("weight", "integer", "同层内权重"),
 				bodyOptional("enabled", "boolean", "是否启用"),
-				bodyOptional("policy", "object", "路由级策略"),
+				exampleField(schemaField(bodyOptional("policy", "object", "路由级策略。字段说明见本参数 schema"), routePolicySchema()), map[string]any{}),
 				bodyOptional("reset_cooldown", "boolean", "是否清掉该目标的冷却与熔断状态"),
 			},
 		},
@@ -619,9 +873,12 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			Body: []adminField{
 				bodyRequired("name", "string", "标签名"),
 				bodyOptional("description", "string", "说明"),
-				bodyOptional("grants", "object", "该标签授予的模型/供应商访问权"),
-				bodyOptional("policy", "object", "该标签的限速与配额策略（扁平顶层字段：rpm/tpm/concurrency 生效，monthly_* 已解析未执行；嵌套的 rate_limit 会被拒绝）"),
-				bodyOptional("priority", "integer", "策略合并优先级"),
+				structuredField("grants", "object", "这个标签授予的模型与供应商访问权（挂在标签下的 Key 都会获得）", grantsSchema("标签"), grantsExample()),
+				exampleField(schemaField(bodyOptional("policy", "object",
+					"该标签的限速与配额策略，字段与 Key 的 policy 相同（见本参数 schema）。"+
+						"多个标签按 priority 依次合并、最后 Key 自己的 policy 覆盖"),
+					policySchema()), keyPolicyExample()),
+				nonNegative(bodyOptional("priority", "integer", "策略合并优先级（0 及以上，数字大者先合并）")),
 			},
 		},
 		{
@@ -685,10 +942,10 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 				enumField(bodyOptional("type", "string", "投递类型"), "webhook", "jsonl"),
 				bodyOptional("url", "string", "webhook 地址（必须是 https，除非配置放开）"),
 				bodyOptional("secret", "string", "签名密钥（只写，不回显）"),
-				bodyOptional("events", "array", "订阅的事件名，支持通配"),
+				structuredField("events", "array", "订阅的事件名，支持通配（如 request.*、ledger.*）；空数组表示不订阅任何事件", arrayOfStrings("事件名列表"), []any{"request.completed"}),
 				bodyOptional("include_content", "boolean", "是否附带请求/响应内容"),
-				bodyOptional("max_bytes", "integer", "单条投递的正文上限"),
-				bodyOptional("sample_rate", "number", "采样率，取值区间 (0,1]"),
+				nonNegative(bodyOptional("max_bytes", "integer", "单条投递的正文上限（字节）")),
+				numericField(bodyOptional("sample_rate", "number", "采样率，取值区间 [0,1]；1 表示全量"), 0, 1),
 				bodyOptional("enabled", "boolean", "是否启用"),
 			},
 		},
@@ -741,10 +998,10 @@ func (s *Server) providerAdminRoutes() []adminRoute {
 				"kind":              prop("string", "类型：testecho / openai-chat / openai-responses / plugin:<name>"),
 				"display_name":      prop("string", "展示名"),
 				"state_dir":         prop("string", "插件状态目录"),
-				"config":            prop("object", "供应商配置，字段见 admin_list_provider_kinds"),
-				"credentials":       prop("object", "凭据对象，例如 api_key；空对象表示清空，省略表示不变"),
-				"meta":              prop("object", "自定义元数据"),
-				"timeout_overrides": prop("object", "超时覆写"),
+				"config":            providerConfigSchema(),
+				"credentials":       providerCredentialsSchema(),
+				"meta":              providerMetaSchema(),
+				"timeout_overrides": providerTimeoutSchema(),
 				"enabled":           prop("boolean", "是否启用"),
 				"draining":          prop("boolean", "是否排空（不再接新流量）"),
 				"priority":          prop("integer", "优先级"),
@@ -771,8 +1028,8 @@ func (s *Server) providerAdminRoutes() []adminRoute {
 				"kind":           prop("string", "类型"),
 				"display_name":   prop("string", "展示名"),
 				"state_dir":      prop("string", "插件状态目录"),
-				"config":         prop("object", "供应商配置"),
-				"credentials":    prop("object", "凭据对象；空对象清空，省略不变"),
+				"config":         providerConfigSchema(),
+				"credentials":    providerCredentialsSchema(),
 				"enabled":        prop("boolean", "是否启用"),
 				"draining":       prop("boolean", "是否排空"),
 				"priority":       prop("integer", "优先级"),
@@ -853,11 +1110,15 @@ func (s *Server) providerAdminRoutes() []adminRoute {
 				bodyOptional("enabled", "boolean", "是否启用"),
 				bodyOptional("priority", "integer", "优先级"),
 				bodyOptional("weight", "integer", "同层权重"),
-				bodyOptional("context_window", "integer", "上下文窗口（token）"),
-				bodyOptional("max_output_tokens", "integer", "最大输出（token）"),
-				bodyOptional("capabilities", "object", "能力声明，例如 stream/tools/reasoning 三个布尔"),
-				bodyOptional("capabilities_override", "string", "能力覆写模式"),
-				bodyOptional("pricing_rules", "object", "成本侧计价规则"),
+				nonNegative(bodyOptional("context_window", "integer", "上下文窗口（token，0 = 未知）")),
+				nonNegative(bodyOptional("max_output_tokens", "integer", "最大输出（token，0 = 未知）")),
+				exampleField(schemaField(bodyOptional("capabilities", "object",
+					"能力声明：这个上游模型支持什么（流式、工具、思考、用量维度……），字段说明见本参数 schema。省略的键按未知处理"),
+					capabilitiesSchema()),
+					map[string]any{"complete": true, "stream": true, "usage_dimensions": true}),
+				capabilityOverrideField(),
+				// The cost rule set: the field whose missing shape made an operator's request fail.
+				pricingRuleSchemaFields(s.ledgerCurrency())[0],
 			},
 		},
 		{
@@ -981,7 +1242,7 @@ func (s *Server) invoiceAdminRoutes() []adminRoute {
 			Params: []adminField{pathParam("id", "账户数字 id")},
 			Body: []adminField{
 				enumField(bodyRequired("kind", "string", "充值类型"), "topup", "credit_grant", "adjustment", "refund"),
-				bodyOptional("amount_micros", "integer", "金额（微美元，正数；与 amount_usd 二选一）"),
+				bodyOptional("amount_micros", "integer", "金额（微美元整数，正数；与 amount_usd 二选一）"),
 				bodyOptional("amount_usd", "string", "金额（美元字符串，例如 10.00）"),
 				bodyOptional("ref_id", "string", "外部单据号，用于幂等"),
 				bodyOptional("note", "string", "备注"),
@@ -1002,8 +1263,8 @@ func (s *Server) invoiceAdminRoutes() []adminRoute {
 			Summary:   "批量生成兑换码（明文只在响应里出现一次）",
 			Dangerous: true, ConfirmReason: "生成的每个码都可以被兑换成余额，明文只返回一次",
 			Body: []adminField{
-				bodyOptional("count", "integer", "生成数量"),
-				bodyOptional("amount_micros", "integer", "每张面额（微美元）"),
+				intRange(bodyOptional("count", "integer", "生成数量"), 1, 1000),
+				intRange(bodyOptional("amount_micros", "integer", "每张面额（微美元）"), 0, maxSaneInteger),
 				bodyOptional("amount_usd", "string", "每张面额（美元字符串）"),
 				bodyOptional("expires_at", "string", "过期时间（RFC3339）"),
 				bodyOptional("batch_id", "string", "批次号"),
@@ -1033,7 +1294,7 @@ func (s *Server) invoiceAdminRoutes() []adminRoute {
 			Name: "admin_reconcile_billing", Group: groupBilling, Role: roleAdmin,
 			Summary: "对账：用量汇总对比账本汇总，给出差异样例与不变量结果",
 			Body: []adminField{
-				bodyOptional("days", "integer", "回溯天数"),
+				intRange(bodyOptional("days", "integer", "回溯天数（1–365）"), 1, 365),
 				bodyOptional("account_id", "integer", "只对某个账户"),
 				bodyOptional("from", "string", "起点（RFC3339）"),
 				bodyOptional("to", "string", "终点（RFC3339）"),
@@ -1160,18 +1421,27 @@ func (s *Server) pricingAdminRoutes() []adminRoute {
 				bodyRequired("model", "string", "对客模型名"),
 				bodyOptional("at", "string", "计费时刻（RFC3339），省略为现在"),
 				bodyOptional("variant", "string", "计价变体"),
-				bodyOptional("dimensions", "object", "用量维度，例如 input_tokens 与 output_tokens 两个整数"),
-				bodyOptional("markup_bp", "integer", "临时加价倍数（bp）"),
-				bodyOptional("min_charge_micros", "integer", "最低收费（微美元）"),
-				bodyOptional("cost_rules", "array", "内联成本规则集（预览用）"),
-				bodyOptional("sale_rules", "array", "内联售价规则集（预览用）"),
+				exampleField(schemaField(bodyOptional("dimensions", "object",
+					"本次试算的用量：键是计量维度名（input/output/input_cache_hit/input_cache_miss/reasoning），"+
+						"不是 input_tokens。数值为整数 token 数；省略的维度按 0 计"),
+					simulateDimensionsSchema()), simulateDimensionsExample()),
+				nonNegative(bodyOptional("markup_bp", "integer", "临时加价倍数（bp，10000 = 1.0 倍）")),
+				nonNegative(bodyOptional("min_charge_micros", "integer", "最低收费（微美元）")),
+				exampleField(schemaField(bodyOptional("cost_rules", "object",
+					"内联成本规则集（只用于本次试算，不写库）：覆盖该模型路由到的真实成本规则，形状与 pricing_rules 相同"),
+					pricingRuleSetSchema()), pricingRuleSetExample(s.ledgerCurrency())),
+				exampleField(schemaField(bodyOptional("sale_rules", "object",
+					"内联售价规则集（只用于本次试算，不写库），形状与 sale_pricing 相同"),
+					pricingRuleSetSchema()), salePricingExample(s.ledgerCurrency())),
 			},
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/pricing/validate", Handler: s.handleAdminValidatePricing,
 			Name: "admin_validate_pricing", Group: groupPricing, Role: roleViewer,
-			Summary: "校验一份价格规则集是否合法，并报告被遮蔽的规则",
-			RawBody: freeFormSchema("价格规则集本身（对象或数组），格式与模型的 sale_pricing / pricing_rules 相同"),
+			Summary: "校验一份价格规则集是否合法，并报告被遮蔽的规则（不写库；viewer scope 即可调用）",
+			Notes: "请求体就是规则集文档本身（不是 {\"rules\": …} 之外的包装），形状见 admin_describe 的 body_schema。" +
+				"改价前的推荐做法：先 validate，再用 admin_upsert_provider_model / admin_update_model 落库",
+			RawBody: pricingRuleSetJSONSchema(s.ledgerCurrency()),
 		},
 		{
 			Method: "GET", Path: "/admin/api/v1/pricing/targets", Handler: s.handleAdminPricingTargets,
@@ -1186,8 +1456,10 @@ func (s *Server) pricingAdminRoutes() []adminRoute {
 			Body: []adminField{
 				bodyRequired("model", "string", "对客模型名"),
 				enumField(bodyOptional("basis", "string", "计价基准"), "cost_follow", "absolute"),
-				bodyRequired("markup_bp", "integer", "加价倍数（bp，10000 表示 1.0 倍，最大 1000000）"),
-				bodyOptional("dimension_markup_bp", "object", "按维度覆写的倍数，例如 output_tokens"),
+				intRange(bodyRequired("markup_bp", "integer", "加价倍数（bp，10000 表示 1.0 倍，最大 1000000）"), 0, 1000000),
+				exampleField(schemaField(bodyOptional("dimension_markup_bp", "object",
+					"按维度覆写的加价倍数（bp，10000 = 1.0 倍），键是计量维度名；省略的维度用 markup_bp"),
+					dimensionMarkupSchema()), dimensionMarkupExample()),
 			},
 		},
 	}

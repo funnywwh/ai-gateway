@@ -77,42 +77,48 @@ func (b *adminBackend) AdminTools(p mcpsrv.Principal) []mcpsrv.Tool {
 	return []mcpsrv.Tool{
 		{
 			Name: toolAdminEndpoints,
-			Description: "List the management endpoints this token may call (name, method, path, one-line summary, " +
-				"required role, parameters, whether a body is needed, whether the call is destructive). " +
-				"Start here: filter by keyword or group instead of guessing names.",
+			Description: "列出这个令牌可以调用的后台接口（名字、方法、路径、一句话摘要、所需角色、参数、是否有请求体、" +
+				"请求体字段名、是否危险）。**动手前先看有什么**：用 filter/group 缩小范围，不要凭记忆猜接口名。" +
+				"返回：{count, total, groups, endpoints[]}，每行含 name/method/path/summary/group/role/params/query/" +
+				"has_body/body_fields/dangerous/tool；tool=null 表示该接口已注册但不提供给 MCP，reason 说明原因。" +
+				"拿到 name 后用 " + toolAdminDescribe + " 查怎么调，最后才 " + toolAdminRequest + "。",
 			InputSchema: objectSchema(map[string]any{
-				"filter": prop("string", "Case-insensitive substring matched against name, path and summary (for example provider or credit)"),
-				"group":  prop("string", "Only endpoints of one family: system, keys, requests, audit, accounts, models, providers, billing, backups, portal, pricing, mcp, hooks, settings, chat"),
+				"filter": prop("string", "不区分大小写的关键字，匹配接口名、路径与摘要（例如 provider、credit、pricing）"),
+				"group":  prop("string", "只看某一族接口：system, keys, requests, audit, accounts, models, providers, billing, backups, portal, pricing, mcp, hooks, settings, chat"),
 				"limit": map[string]any{
 					"type": "integer", "minimum": 1, "maximum": 200,
-					"description": "Maximum rows to return (default 200)",
+					"description": "最多返回多少行（默认 200，也是上限）",
 				},
 			}),
 		},
 		{
 			Name: toolAdminDescribe,
-			Description: "Explain one management endpoint in full: path parameters, query parameters, request body JSON Schema, " +
-				"an example admin_request payload, and why a destructive endpoint needs confirmation. " +
-				"Call this before the first admin_request for an endpoint.",
+			Description: "查一个后台接口怎么调：路径参数、查询参数、**请求体 JSON Schema**、可直接照抄的 " +
+				toolAdminRequest + " 参数示例，以及危险接口为什么需要确认。首次调用某个接口前必须查一次，不要猜参数名或字段名。" +
+				"配置类文档（价格规则集等）的字段名、单位与约束都在 body_schema 里，按它写就不会被严格解析拒掉。" +
+				"返回：{name, method, path, group, summary, role, dangerous, exposed, params[], query[], body_schema, example, notes?, confirm_reason?}。",
 			InputSchema: objectSchema(map[string]any{
-				"name": prop("string", "Endpoint name from admin_endpoints, for example admin_create_provider"),
+				"name": prop("string", "接口名，来自 "+toolAdminEndpoints+"，例如 admin_create_provider"),
 				"names": map[string]any{
-					"type": "array", "items": prop("string", "Endpoint name"),
-					"description": "Describe several endpoints in one call",
+					"type": "array", "items": prop("string", "接口名"),
+					"description": "一次查多个接口（与 name 二选一或同时给）",
 				},
 			}),
 		},
 		{
 			Name: toolAdminRequest,
-			Description: "Execute one management endpoint by name. Pass path parameters in params, query parameters in query " +
-				"and the JSON body in body. Returns the endpoint's HTTP status and response. Destructive endpoints require confirm=true." +
+			Description: "执行一个后台接口：路径参数放 params、查询参数放 query、JSON 请求体放 body（用 " +
+				toolAdminDescribe + " 的 example 照抄最省事）。" +
+				"返回：{endpoint, method, path, status, ok, body|text|truncated}；HTTP 状态 ≥400 时以 isError 返回，" +
+				"**读错误正文并修正参数，不要原样重试**；truncated=true 表示响应超过 mcp.admin_max_response_bytes 被截断" +
+				"（要完整内容请缩小查询范围）。危险接口必须 confirm=true，且在此之前先向用户说清将要发生什么。" +
 				readOnlyNote(readOnly),
 			InputSchema: objectSchema(map[string]any{
-				"name":    prop("string", "Endpoint name from admin_endpoints"),
-				"params":  prop("object", "Path parameters, for example {\"id\": 12}"),
-				"query":   prop("object", "Query parameters; arrays become repeated keys"),
-				"body":    prop("object", "JSON request body (omit for endpoints that take none)"),
-				"confirm": prop("boolean", "Required for destructive endpoints: set true only after telling the user what will happen"),
+				"name":    prop("string", "接口名，来自 "+toolAdminEndpoints),
+				"params":  prop("object", "路径参数，例如 {\"id\": 12}；必填项缺失会被点名报错"),
+				"query":   prop("object", "查询参数；数组会展开成重复键（?key=a&key=b）"),
+				"body":    prop("object", "JSON 请求体；没有请求体的接口省略。字段与约束见 "+toolAdminDescribe+" 的 body_schema"),
+				"confirm": prop("boolean", "危险接口必须设为 true，且必须是先向用户交代后果之后"),
 			}, "name"),
 		},
 	}
@@ -120,7 +126,7 @@ func (b *adminBackend) AdminTools(p mcpsrv.Principal) []mcpsrv.Tool {
 
 func readOnlyNote(readOnly bool) string {
 	if readOnly {
-		return " This token has scope=admin_read, so only endpoints with role=viewer can run."
+		return " 这个令牌的 scope 是 admin_read，因此只有 role=viewer 的接口能跑通，写接口会返回 403（需要 scope=admin 的令牌）。"
 	}
 	return ""
 }
@@ -187,8 +193,9 @@ func (b *adminBackend) listEndpoints(ctx context.Context, args map[string]any) (
 			break
 		}
 	}
-	note := "call admin_describe with a name before the first admin_request; " +
-		"endpoints with tool=null are registered but not offered to MCP (see reason)"
+	note := "先 " + toolAdminDescribe + " 拿到参数与 body_schema 再 " + toolAdminRequest + "；" +
+		"tool=null 的接口已注册但不提供给 MCP（见 reason）。body_fields 是请求体的顶层字段名，" +
+		"完整形状（单位、取值、嵌套字段）在 " + toolAdminDescribe + " 的 body_schema 里。"
 	payload := map[string]any{
 		"count":     len(rows),
 		"total":     visible,

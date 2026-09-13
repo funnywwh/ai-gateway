@@ -33,3 +33,6 @@
 - [ ] docs/TODO.md 已同步勾选
 - [ ] 设计文档"实现与设计差异"已回填
 - [ ] 规格文档的"状态"已更新为对应实现里程碑
+- [ ] **改了 MCP 工具说明或后台路由的 body 字段** → 已按 `docs/mcp.md` §4.5 补齐形状（`Schema`/`RawBody`）、
+      示例（`exampleField`）与参数说明，并已跑 `go test ./internal/mcpsrv/ ./internal/httpapi/`。
+      守卫测试与构造期 panic 会让漏写的字段直接失败：工具说明不完整时模型不会报错，它会拒绝执行或猜错字段
