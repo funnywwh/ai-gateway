@@ -66,5 +66,14 @@ config.server.base_path: "/aigw"      # 空 = 挂在根上（默认，行为与�
 | `make test` / `go vet` / `make build` | 全绿（含新增 `basepath_test.go`） |
 | `make ui-base`（node 推导挂载点） | 10 项通过 |
 
-**未完成**：`gpt.iotalking.top` 的 A 记录不存在（权威 NS `dns23/dns24.hichina.com` 返回 NXDOMAIN），
-需要域名持有者在阿里云 DNS 加 `gpt → 47.80.68.113`；加完即有真实 DNS + 证书的完整访问。
+**未完成（域名侧，不在这台机器上）**：`gpt.iotalking.top` 的 A 记录不存在
+（权威 NS `dns23/dns24.hichina.com` 返回 NXDOMAIN），因此真实域名还打不开。
+域名持有者要在阿里云 DNS 加一条记录后即可用真实域名访问：
+
+| 主机记录 | 类型 | 记录值 | TTL |
+|---|---|---|---|
+| `gpt` | A | `47.80.68.113` | 默认（10 分钟） |
+
+证书不需要新签：现有的 `*.iotalking.top`（ACMEdns 签发，2026-10-06 到期）已覆盖该子域，
+HTTP 的 80 块也已就位（301 跳 443）。
+
