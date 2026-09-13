@@ -97,6 +97,17 @@ func (db *DB) DeleteResponse(ctx context.Context, id string) error {
 
 // PutRequestLog stores one recorded request/response pair (upsert by request id).
 func (db *DB) PutRequestLog(ctx context.Context, rec *domain.RequestLogRecord) error {
+	if rec != nil && rec.TitleFingerprint != "" {
+		tx, err := db.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if err = db.putRequestLogTx(ctx, tx, rec); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
 	args, err := requestLogArgs(rec)
 	if err != nil {
 		return err
@@ -116,7 +127,7 @@ func (db *DB) putRequestLogTx(ctx context.Context, tx *sql.Tx, rec *domain.Reque
 	if _, err := db.stmts.execInTx(ctx, db.write, tx, putRequestLogSQL, args...); err != nil {
 		return fmt.Errorf("store: put request log %s: %w", rec.RequestID, err)
 	}
-	return nil
+	return db.linkTitleSessionTx(ctx, tx, rec)
 }
 
 func requestLogArgs(rec *domain.RequestLogRecord) ([]any, error) {

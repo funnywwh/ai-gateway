@@ -586,10 +586,12 @@ func (s *Server) persist(
 // client, model and workspace the request came from, not content, so they are recorded
 // even when record_input is "off" (which keeps a row with no body at all).
 type inputRecord struct {
-	Mode      string // full|user|metadata|off
-	Payload   string // the stored document ("" for metadata and off)
-	Bytes     int    // serialized size of the whole request body
-	Truncated bool
+	TitleFingerprint string
+	StartedAt        time.Time
+	Mode             string // full|user|metadata|off
+	Payload          string // the stored document ("" for metadata and off)
+	Bytes            int    // serialized size of the whole request body
+	Truncated        bool
 
 	Dims     responses.Dimensions // client / workspace / session / call_kind
 	Model    string               // the model the client asked for (billed dimension)
@@ -605,7 +607,7 @@ type inputRecord struct {
 // 400 has to be diagnosed against the exact bytes the client sent.
 func (s *Server) recordInput(ctx context.Context, key *domain.APIKey, req *responses.Request, clientHint string) inputRecord {
 	cfg := s.deps.Config.Recording
-	rec := inputRecord{Mode: cfg.InputModeFor(key.RecordInputMode)}
+	rec := inputRecord{Mode: cfg.InputModeFor(key.RecordInputMode), StartedAt: time.Now().UTC()}
 	if isChatRecording(ctx) {
 		// A console conversation carries private material: the operator's own skills, the
 		// questions they asked about their gateway, and whatever the management tools
@@ -621,6 +623,10 @@ func (s *Server) recordInput(ctx context.Context, key *domain.APIKey, req *respo
 		return rec
 	}
 
+	// Do not derive content fingerprints when input recording/redaction forbids it.
+	if (rec.Mode == "user" || rec.Mode == "full") && len(cfg.RedactPaths) == 0 {
+		rec.TitleFingerprint = req.TitlePromptFingerprint(rec.Dims)
+	}
 	raw := mustJSON(req)
 	rec.Bytes = len(raw)
 	switch rec.Mode {
@@ -682,6 +688,8 @@ func (s *Server) recordContent(
 	limit := s.recordingLimit()
 
 	rec := &domain.RequestLogRecord{
+		TitleFingerprint: input.TitleFingerprint,
+		StartedAt:        input.StartedAt,
 		RequestID:        requestIDFrom(ctx),
 		APIKeyID:         key.ID,
 		AccountID:        account.ID,

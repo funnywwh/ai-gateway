@@ -191,6 +191,9 @@ type ResponseRecord struct {
 // content. They are what makes "who is calling, with which model, from where" answerable
 // without reading a body that may have been truncated or pruned.
 type RequestLogRecord struct {
+	// TitleFingerprint and StartedAt are private correlation evidence, not API fields.
+	TitleFingerprint   string    `json:"-"`
+	StartedAt          time.Time `json:"-"`
 	ID                 int64
 	RequestID          string
 	APIKeyID           int64
