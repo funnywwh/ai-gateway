@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>console build badge harness</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="out">running…</div>
+<div id="host"></div>
+<script type="module">
+// The sidebar badge: "AI Gateway  v0.1.0  56df9b5".
+//
+// It lives in js/brand.js rather than inside the shell precisely so this page can render it:
+// the shell needs a session, a router and sixteen page modules, while the badge needs a
+// version lookup and nothing else. What is asserted here is the *contract with the server*
+// (GET <mount>/version, not the management API) and the three ways the answer can arrive.
+const FIXTURES = __FIXTURES__;
+const checks = {};
+const lines = [];
+
+function report(data) {
+  data.errors = errors;
+  const url = '/report?data=' + encodeURIComponent(JSON.stringify(data));
+  try {
+    if (navigator.sendBeacon && navigator.sendBeacon(url)) return;
+  } catch (err) { /* fall through */ }
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url, false);
+    xhr.send();
+  } catch (err) { /* reporting must never break the harness */ }
+}
+
+const errors = [];
+window.onerror = (msg) => errors.push('onerror: ' + msg);
+window.onunhandledrejection = (ev) => errors.push('rejection: ' + ev.reason);
+
+// The badge is appended from a promise, so every assertion below has to let the microtask
+// queue drain first. Microtasks only, like the other harness pages: headless screenshot
+// mode may tear the page down as soon as it has a picture, and a timer would never fire.
+const settled = async () => { for (let i = 0; i < 300; i++) await Promise.resolve(); };
+
+// api.js resolves its mount from import.meta.url. This page is served from the site root
+// rather than from /admin/ui/, so the derived mount is '' and the URL to assert is
+// '/version' — the absolute form a root deployment must produce. The prefixed case is
+// covered by node in scripts/ui-base-test.mjs and by the Go base-path test.
+let requested = [];
+const realFetch = window.fetch;
+window.fetch = (url, init) => {
+  requested.push(String(url));
+  return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ version: '9.9.9', revision: 'abc1234' }) });
+};
+
+const { renderBrand } = await import('/js/brand.js');
+const { version } = await import('/js/api.js');
+
+try {
+  const host = document.getElementById('host');
+
+  // 1. The happy path, which is what an operator sees.
+  const ok = renderBrand(() => Promise.resolve({ version: '0.1.0', revision: '56df9b5' }));
+  host.append(ok);
+  await settled();
+  checks.rendersProductName = ok.textContent.indexOf('AI Gateway') === 0;
+  checks.rendersVersion = ok.querySelector('.brand-version') !== null
+    && ok.querySelector('.brand-version').textContent === 'v0.1.0';
+  checks.rendersRevision = ok.querySelector('.brand-revision') !== null
+    && ok.querySelector('.brand-revision').textContent === '56df9b5';
+  checks.groupsBoth = ok.querySelector('.brand-build') !== null
+    && ok.querySelectorAll('.brand-build > span').length === 2;
+
+  // 2. A build with no revision (source tarball, no git): the version still shows, and the
+  //    literal "none" is never printed where a commit hash belongs.
+  const noneRevision = renderBrand(() => Promise.resolve({ version: '0.1.0', revision: 'none' }));
+  host.append(noneRevision);
+  await settled();
+  checks.hidesNoneRevision = noneRevision.querySelector('.brand-revision') === null;
+  checks.keepsVersionWithoutRevision = noneRevision.textContent === 'AI Gatewayv0.1.0';
+
+  // 3. A failed lookup leaves the badge empty instead of breaking the shell, and the
+  //    promise never rejects into the console's global handler.
+  let rejected = false;
+  const broken = renderBrand(() => Promise.reject(new Error('offline')));
+  host.append(broken);
+  await settled();
+  checks.survivesFailedLookup = broken.querySelector('.brand-build') === null
+    && broken.textContent === 'AI Gateway' && !errors.length;
+  checks.rejectionHandled = !rejected;
+
+  // 4. The URL the console asks for. A wrong one here is invisible in a browser (the badge
+  //    just stays empty), so it is worth pinning: /version is public and sits outside the
+  //    management API.
+  const info = await version();
+  checks.requestsPublicVersionEndpoint = requested.length === 1 && requested[0] === '/version';
+  checks.readsTheAnswer = info.version === '9.9.9' && info.revision === 'abc1234';
+
+  lines.push('url=' + requested.join(','));
+  lines.push('badge=' + ok.textContent);
+  for (const [key, value] of Object.entries(checks)) lines.push(key + '=' + value);
+  document.getElementById('out').textContent = lines.join('\n');
+} catch (err) {
+  errors.push('harness threw: ' + (err && err.stack ? err.stack : String(err)));
+} finally {
+  window.fetch = realFetch;
+}
+
+const failed = Object.keys(checks).filter((key) => checks[key] === false);
+report({
+  view: 'brand', stage: 'done', ok: failed.length === 0, failed, checks,
+  sample: { url: requested.join(','), badge: document.getElementById('host').textContent },
+});
+</script>
+</body>
+</html>

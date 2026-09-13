@@ -112,6 +112,9 @@ func TestBasePathServesEverySurfaceUnderThePrefix(t *testing.T) {
 		status       int
 	}{
 		{http.MethodGet, "/aigw/healthz", http.StatusOK},
+		// The version endpoint is public and prefix-mounted like the probes: the console
+		// badge fetches it with a path relative to its own mount.
+		{http.MethodGet, "/aigw/version", http.StatusOK},
 		{http.MethodGet, "/aigw/admin/ui/", http.StatusOK},
 		{http.MethodGet, "/aigw/admin/ui/index.html", http.StatusOK},
 		{http.MethodGet, "/aigw/admin/ui/js/api.js", http.StatusOK},

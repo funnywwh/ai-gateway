@@ -1,4 +1,5 @@
-import { api, me, login, logout } from './api.js';
+import { api, me, login, logout, version } from './api.js';
+import { renderBrand } from './brand.js';
 import { el, toast, clear } from './ui.js';
 import { startRouter, renderNav, loadPage, navigate, currentRoute } from './router.js';
 import { initCurrency, currencies, displayCurrency, setDisplayCurrency, missingRates } from './money.js';
@@ -77,7 +78,7 @@ function renderShell() {
   });
   app.append(
     el('div', { class: 'app' }, [
-      el('aside', { class: 'sidebar' }, [el('div', { class: 'brand', text: 'AI Gateway' }), nav,
+      el('aside', { class: 'sidebar' }, [renderBrand(version), nav,
         el('div', { class: 'sidebar-foot' }, [whoami, logoutBtn])]),
       el('main', { class: 'main' }, [el('header', { class: 'topbar' }, [title, currencyBox, actions]), page]),
     ]));

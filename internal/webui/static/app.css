@@ -13,7 +13,15 @@ body { margin:0; font: 14px/1.5 system-ui, -apple-system, 'Segoe UI', 'Noto Sans
 a { color: var(--accent); }
 .app { display:grid; grid-template-columns: 220px 1fr; min-height:100vh; }
 .sidebar { background: var(--panel); border-right:1px solid var(--line); display:flex; flex-direction:column; }
-.brand { padding:16px 18px; font-weight:600; letter-spacing:.3px; border-bottom:1px solid var(--line); }
+.brand { padding:16px 18px; font-weight:600; letter-spacing:.3px; border-bottom:1px solid var(--line);
+  display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
+/* The build identity of the server: a.b.c version and short revision, kept on one line
+   beside the name but visually subordinate to it — it is what you read when you go
+   looking for it, not something that competes with the navigation. */
+.brand-build { font-weight:500; font-size:11px; font-family: ui-monospace, SFMono-Regular,
+  Menlo, Consolas, monospace; color:var(--muted); letter-spacing:0; display:inline-flex; gap:6px; }
+.brand-version, .brand-revision { white-space:nowrap; }
+.brand-revision { opacity:.75; }
 .sidebar nav { flex:1; padding:10px 8px; overflow:auto; }
 .sidebar nav a { display:block; padding:8px 10px; border-radius:8px; color:var(--fg);
   text-decoration:none; margin-bottom:2px; font-size:13.5px; }

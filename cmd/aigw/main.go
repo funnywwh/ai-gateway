@@ -37,9 +37,13 @@ import (
 )
 
 var (
-	version = "dev"
-	commit  = "none"
-	date    = "unknown"
+	// Set by the build (`make build`): the release version comes from the VERSION file at
+	// the repository root, the revision from git. The defaults describe a binary built by
+	// hand — a bare `go build` reports "dev", which is honest, rather than inventing a
+	// version number nobody can trace back to a release.
+	version  = "dev"
+	revision = "none"
+	date     = "unknown"
 )
 
 func main() { os.Exit(run()) }
@@ -55,7 +59,7 @@ func run() int {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("aigw", version, "(commit "+commit+",", "built "+date+")")
+		fmt.Println("aigw", version, "(revision "+revision+",", "built "+date+")")
 		return 0
 	}
 
@@ -68,7 +72,7 @@ func run() int {
 	log := logx.New(cfg.Log)
 	log.Info("aigw starting",
 		"version", version,
-		"commit", commit,
+		"revision", revision,
 		"config", *configPath,
 		"listen", cfg.Server.Listen,
 		"database", cfg.Database.Path,
@@ -468,6 +472,7 @@ func run() int {
 		PortalUsers:    db,
 		Log:            log,
 		Version:        version,
+		Revision:       revision,
 	})
 
 	if auditWriter != nil {

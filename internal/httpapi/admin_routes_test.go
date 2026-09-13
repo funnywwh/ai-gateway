@@ -155,10 +155,11 @@ func TestAdminRoutesAreRegisteredFromTheTable(t *testing.T) {
 			t.Errorf("route %q was not registered on the mux", route.pattern())
 		}
 	}
-	// Public routes: /v1 (5), health+ready+metrics (3) and the sandboxed preview document
-	// (1). pprof is off in this fixture, so public patterns are 9 plus the admin table.
-	if len(s.registered) != len(s.admin)+9 {
-		t.Errorf("registered %d patterns, expected %d management entries plus 9 public routes",
+	// Public routes: /v1 (5), health+ready+metrics+version (4) and the sandboxed preview
+	// document (1). pprof is off in this fixture, so public patterns are 10 plus the
+	// admin table.
+	if len(s.registered) != len(s.admin)+10 {
+		t.Errorf("registered %d patterns, expected %d management entries plus 10 public routes",
 			len(s.registered), len(s.admin))
 	}
 }

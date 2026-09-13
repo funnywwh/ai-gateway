@@ -19,7 +19,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${UI_HARNESS_WORK:-$ROOT/.cache/ui-harness}"
 PORT="${UI_HARNESS_PORT:-8097}"
-VIEWS="docs detail models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge"
+VIEWS="docs detail models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand"
 FIXTURES="$ROOT/scripts/ui-harness/fixtures.json"
 REFRESH=0
 
@@ -72,6 +72,7 @@ render_page "$ROOT/scripts/ui-harness/keys.page.html" "$WORK/site/keys.html"
 render_page "$ROOT/scripts/ui-harness/paging.page.html" "$WORK/site/paging.html"
 render_page "$ROOT/scripts/ui-harness/chat.page.html" "$WORK/site/chat.html"
 render_page "$ROOT/scripts/ui-harness/bridge_syntax.page.html" "$WORK/site/bridge_syntax.html"
+render_page "$ROOT/scripts/ui-harness/brand.page.html" "$WORK/site/brand.html"
 
 page_for_view() {
   case "$1" in
@@ -84,6 +85,9 @@ page_for_view() {
     # Not a console view: the browser's syntax check on the script the server injects into an
     # interactive preview. It shares the fixtures mechanism, so it rides along with the others.
     bridge) echo "bridge_syntax.html" ;;
+    # Not a console view either: the sidebar brand with its build badge, rendered straight
+    # from js/brand.js against a stubbed version lookup and a stubbed fetch.
+    brand) echo "brand.html" ;;
     *) echo "harness.html" ;;
   esac
 }

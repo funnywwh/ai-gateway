@@ -35,6 +35,15 @@ export function apiRoot(moduleURL) {
 }
 
 /**
+ * The server root of the deployment, e.g. '/aigw' at the root or '' when the console is
+ * served from '/admin/ui/'. Public endpoints that sit outside the management API
+ * (`/version`, `/healthz`) hang off this, not off the API root.
+ */
+export function serverRoot(moduleURL) {
+	return consoleBasePath(moduleURL);
+}
+
+/**
  * A path relative to the console root, e.g. '/aigw/admin/chat-artifact/x' or
  * '/admin/api/v1/invoices/1?format=csv'. Relative URLs here are resolved against the
  * console shell's URL (`/aigw/admin/ui/`), so a link built from one stays inside the

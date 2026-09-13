@@ -1,7 +1,7 @@
 // Thin fetch wrapper for the management API. Every call is same-origin and relies
 // on the HttpOnly session cookie; nothing here stores credentials.
 
-import { apiRoot } from './base.js';
+import { apiRoot, serverRoot } from './base.js';
 
 export class ApiError extends Error {
   constructor(message, status, code) {
@@ -122,4 +122,18 @@ export function logout() {
 
 export function me() {
   return request('GET', '/auth/me');
+}
+
+// The build identity of the server this console is talking to. It is a public endpoint
+// (no session needed), which is why it is fetched with plain fetch instead of the
+// management request helper: the badge must render on the login screen too, before
+// there is any session to carry.
+let versionPromise = null;
+export function version() {
+  if (!versionPromise) {
+    versionPromise = fetch(serverRoot() + '/version', { credentials: 'same-origin' })
+      .then((resp) => (resp.ok ? resp.json() : null))
+      .catch(() => null);
+  }
+  return versionPromise;
 }

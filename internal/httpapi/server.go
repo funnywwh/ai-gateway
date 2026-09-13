@@ -140,7 +140,11 @@ type Deps struct {
 	InvalidateAll func()
 	KeyCacheSize  func() int
 	Log           *slog.Logger
-	Version       string
+	// Version is the release version (a.b.c) and Revision the short commit the binary
+	// was built from. Both are build-time facts surfaced by /version, /healthz and the
+	// console badge, so an operator can tell what is running without reading logs.
+	Version  string
+	Revision string
 }
 
 // Server wires the HTTP surfaces.
@@ -314,6 +318,7 @@ func (s *Server) routes() {
 	s.handle("GET /healthz", s.handleHealthz)
 	s.handle("GET /readyz", s.handleReadyz)
 	s.handle("GET /metrics", s.handleMetrics)
+	s.handle("GET /version", s.handleVersion)
 }
 
 // ---------------------------------------------------------------------------
@@ -509,7 +514,21 @@ var errClientGone = errors.New("httpapi: client disconnected")
 // ---------------------------------------------------------------------------
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": s.deps.Version})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "ok",
+		"version":  s.deps.Version,
+		"revision": s.deps.Revision,
+	})
+}
+
+// handleVersion answers with the build identity and nothing else. It is deliberately
+// unauthenticated and touches nothing but its own fields: it must answer while the
+// database is still opening, because that is exactly when an operator asks it.
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":  s.deps.Version,
+		"revision": s.deps.Revision,
+	})
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {

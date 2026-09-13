@@ -240,15 +240,16 @@
 - [ ] v2：备份到对象存储/异地同步（规格已声明不在 v1 范围）
 
 ## M17 完善内置供应商（openai-chat）：DeepSeek 适配与思考模式
-- [ ] **实测发现的语义缺陷（待定方案）**：`response_format` 被**无条件下发**到每个上游请求
+- [x] **实测发现的语义缺陷 → 已修复（M39，2026-09-13）**：`response_format` 被**无条件下发**到每个上游请求
   （`internal/providers/openaichat/openaichat.go:432`），且该 provider **从不读取请求里的 `text.format`**。
   但 `docs/api-providers.md` 把它定义为"上游真实支持到哪一档"的**能力申报**——两者语义冲突：一旦声明
   `json_object`，**所有**请求都被强制 JSON 模式。真实后果（2026-09-11 实测）：DeepSeek 对任何不含 "json"
   字样的提示词直接 400（`Prompt must contain the word 'json' in some form to use 'response_format' of type
   'json_object'`），该供应商因此只能服务 JSON 类请求、普通流量全失败（DSH 的真实流量即如此）。
-  本部署已从供应商配置里移除该键（`config.yaml` 有注释说明），但**代码层的语义**仍需定夺：
-  是"能力上限 + 按请求档位下发"（读 `req.Text`），还是保留"配置即下发"。`config.example.yaml:186`
-  的 DeepSeek 片段当前会把这个坑带给新用户，方案定了要一并改。
+  方案定为"**能力上限 + 按请求档位下发**"：档位由 `req.Text.Format` 决定，配置只作能力申报；
+  `config.example.yaml` 的 DeepSeek 片段与 `docs/api-providers.md` §2/§3 同步改写。
+  **2026-09-13 复现**：线上 deepseek 供应商的该键又被加回（经管理面写入数据库，不在 `config.yaml` 里），
+  DSH 选 `deepseek-flash` 首轮即 `upstream_400`——这正是只改部署、不改代码的代价，故本次一并修代码。
 - [x] **用 DSH 本体做端到端验证（deepseek-flash，2026-09-11）**：DSH 默认模型是 `aigw/gpt-5.6-luna`
   （`~/.dsh/settings.yaml` 的 `agent-default-model`），验证时改用 `deepseek-flash`。沙箱内 `~/.dsh` 只读、
   DSH 启动 profile 要写 `profiles/*/package.json`，故用 `DSH_HOME` 重定向搭等价配置（拷 `settings.yaml`
@@ -383,7 +384,7 @@
 - [x] 测试 2 例（上游收到 `developer` 且调用方请求未被改 / 其它角色不动且无 system 时不拷贝），并用变异验证非空转
 - [x] 端到端：DSH 真实失败形状（system 项 + tools + `max_output_tokens`）经网关 **3/3 返回 200**，同报文直连上游 **2/2 返回 200**；且系统提示词确实影响回答（自称"软件工程助手"），证明是语义保留的翻译而非丢弃
 - [x] 横向对照：同形状打 `deepseek`（`openai-chat`）无角色问题 → 该约束是订阅后端特有，翻译放在适配器这一层是对的
-- [ ] **顺带发现的配置问题（另立处理）**：deepseek 供应商的 `config.response_format="json_object"` 是**供应商级全局套用**（`openaichat.go:432` 无条件写入，且该 provider 从不读取请求的 `text.format`），导致任何不含 "json" 字样的提示词被 DeepSeek 拒绝（`Prompt must contain the word 'json' ...`）→ 该供应商目前只能服务 JSON 类请求，普通流量全 400
+- [x] **顺带发现的配置问题 → 已修复（M39）**：deepseek 供应商的 `config.response_format="json_object"` 是**供应商级全局套用**（`openaichat.go:477` 曾无条件写入，且该 provider 从不读取请求的 `text.format`），导致任何不含 "json" 字样的提示词被 DeepSeek 拒绝（`Prompt must contain the word 'json' ...`）→ 该供应商当时只能服务 JSON 类请求，普通流量全 400。修复见 `docs/design/m39-version-and-format.md`：档位改由请求的 `text.format` 决定，配置退回能力申报
 - [x] 回填设计文档「实现与设计差异」（含端到端结果、与 deepseek 的对照、以及一次与本改动无关的瞬时 `server_is_overloaded`），单提交并引用设计文档路径
 - [x] M14(1) 会话层抽取 `internal/sessionauth`（口令/会话/限速），`internal/admin` 改为薄适配器（既有测试全绿）
 - [x] M14(1) 迁移 0004：`portal_users`/`portal_sessions`（用户名全局唯一、绑定唯一账户、级联删除）
@@ -1545,3 +1546,44 @@
 - [ ] 观察项：会话恢复（DSH `--continue`）会换一个 `prompt_cache_key`，因此旧粘性不会被继承。
       这符合"会话 = 客户端给的键"的定义，但运营者若按 `workspace` 期待粘性，会发现不生效
 
+
+## M39 对外版本号（`/version` + 控制台角标）与 `response_format` 语义修正
+
+设计文档：`docs/design/m39-version-and-format.md`；规格文档：`docs/api-providers.md`（§2 字段表与警示、§3 DeepSeek 片段）、`README.md`（入口表 + 状态）。
+
+### 版本号
+
+- [x] `VERSION` 文件（`a.b.c`）作为版本真值，`Makefile` 的 `version-check` 拒绝非法写法（`1.2`/`v1.2.3`/空）
+- [x] 构建注入改为 `-X main.version`（来自 `VERSION`）+ `-X main.revision`（`git rev-parse --short HEAD`）；
+      `main.commit` 重命名为 `main.revision`，`-version` 输出 `aigw 0.1.0 (revision …, built …)`
+- [x] `GET /version` → `{"version":"0.1.0","revision":"<短 sha>"}`，公开、带 `base_path` 前缀、不碰数据库
+- [x] `/healthz` 增加 `revision`（既有 `status`/`version` 不变）
+- [x] 控制台左上角 `AI Gateway` 旁显示 `v<a.b.c>` 与短 revision 两格（`js/brand.js`，模块级 Promise 缓存，读不到就留空不报错）
+- [x] 测试：`internal/httpapi/version_test.go`（端点 + `/healthz`）、basepath 表加 `/aigw/version`、
+      `scripts/ui-badge-test.mjs`（node，11 项，含变异验证）、`scripts/ui-harness/brand.page.html`（有浏览器时的同一批断言）、
+      路由覆盖断言 9 → 10 条公开路由
+- [x] 收尾：`make ui-base` 纳入 `make verify`；`README.md` 文档表/入口表/脚本表同步
+
+### `response_format` 语义修正（线上故障）
+
+- [x] 复现与定位：线上 gpt001 的 `deepseek` 供应商 `config.response_format="json_object"`（存数据库、不在 `config.yaml`），
+      `openai-chat` 无条件下发 → DeepSeek 拒绝不含 "json" 的提示词；`journalctl -u aigw` 无该错误是因为
+      **网关侧没有失败记录**（4xx 来自上游、请求被计费层正常收尾），只有 DSH 侧看到 `upstream_400`
+- [x] 代码：档位改由请求 `text.format` 决定（`requestFormat`），配置只作能力申报并保留取值校验；
+      `json_schema` 原样透传客户端的整个对象
+- [x] 能力门槛按级：`featuresOf` 把 `json_object` 映射到 `json_object`、`json_schema` 映射到 `json_schema`，
+      `text`/缺省不要求任何能力（否则会要求一个没人申报的 `text` 能力）
+- [x] 解析层校验 `text.format.type`（未知取值/非对象 → 400），`text` 档位在 `ToProviderRequest` 归一化为"无格式"
+- [x] 测试：`TestResponseFormatFollowsTheRequest`（openaichat，含"配了 json_object 也不下发"这条回归）、
+      `TestParseValidatesTextFormat`、`ToProviderRequest` 归一化、`TestFeaturesOf*`、
+      `internal/routing/format_capability_test.go`（`json_object` 与 `json_schema` 互不蕴含）
+- [x] 变异验证：把 `renderBody` 改回"按配置下发"，openaichat 的三条用例立即失败（复现线上形状）
+- [ ] 线上配置清理：删掉 deepseek 供应商的 `response_format` 键（能力改由模型 `capabilities.json_object` 申报）
+
+### 发布 skill
+
+- [x] `scripts/release.sh`：`patch|minor|major` 升 `VERSION` → 提交 → 打 `v<a.b.c>` tag → `make build`；
+      脏工作区、tag 已存在、非法档位一律拒绝
+- [x] `.dsh/skills/release-version/SKILL.md`：完整发布流程（定档位 → 升版本 → 部署 gpt001 → 用 `/version` 与
+      角标验证 → 回滚点 → 记录），含本次这条 `response_format` 坑的提示
+- [ ] 首次发布：`0.1.0`（`VERSION` 新建），部署 gpt001 后 `/version` 与角标读到的都是 `0.1.0` + 新 revision

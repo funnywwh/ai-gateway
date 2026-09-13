@@ -1,15 +1,31 @@
 SHELL := /bin/bash
 GOENV := source scripts/goenv.sh &&
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+# The release version lives in VERSION at the repository root, not in a git tag: a tag is
+# an index a release can forget to create, while this file travels with the commit that
+# declares the release. A build with no VERSION file reports 0.0.0 rather than a commit
+# prefix — reading "0.0.0" an operator knows nothing was released, whereas "56df9b5" looks
+# like a version and compares with nothing.
+VERSION ?= $(shell cat VERSION 2>/dev/null | tr -d '[:space:]')
+REVISION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
+LDFLAGS := -X main.version=$(VERSION) -X main.revision=$(REVISION) -X main.date=$(DATE)
 
-.PHONY: all build test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base
+.PHONY: all build test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check
 
 all: build
 
-build:
+# The version is a published fact, so a typo in it is a release-blocking error rather
+# than something to paper over with a fallback: "1.2" and "v1.2.3" both fail here.
+version-check:
+	@v="$(VERSION)"; \
+	if [ -z "$$v" ]; then \
+		echo "version-check: VERSION file is missing or empty; write a.b.c into it" >&2; exit 1; \
+	fi; \
+	if ! printf '%s' "$$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$'; then \
+		echo "version-check: VERSION must be a.b.c (got '$$v')" >&2; exit 1; \
+	fi
+
+build: version-check
 	@mkdir -p bin
 	@$(GOENV) go build -trimpath -ldflags "$(LDFLAGS)" -o bin/aigw ./cmd/aigw
 
@@ -40,11 +56,14 @@ tidy:
 ui-base:
 	@if command -v node >/dev/null 2>&1; then \
 		node scripts/ui-base-test.mjs ; \
+		node scripts/ui-badge-test.mjs ; \
 	else \
 		echo "skip: node is not available (the derivation is still covered by make ui-check)" ; \
 	fi
 
-verify: vet test build
+# ui-base rides along because it needs no browser and checks the two console facts that are
+# invisible to `go test`: where the console thinks it is mounted, and what its build badge says.
+verify: vet test ui-base build
 
 run: build
 	@./bin/aigw --config config.yaml

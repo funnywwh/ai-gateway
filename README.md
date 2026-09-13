@@ -47,6 +47,13 @@ JSON），控制台**用自己的元素**把它渲染成对话气泡里的表单
 勾选技能之后，输入框**留空也能直接发送**：技能本身就是指令，那一轮会带着「按本会话已加载的技能执行」
 发出（服务端对同一个动作另有兜底文案）；没有可执行的技能时空文本框点「发送」不发出任何请求，
 只在界面上说明原因——一次点击就是一次计费调用。
+M39 让「线上跑的是哪个版本」有一个能读的答案：版本号的真值是仓库根的 `VERSION`（`a.b.c`，不再是
+`git describe` 给的 commit 前缀），构建时连同 revision 一起注入二进制，由 `GET /version` 与 `/healthz`
+对外暴露，并在控制台左上角 `AI Gateway` 旁显示为 `v0.1.0 56df9b5`。同一里程碑修掉一个把供应商打挂的
+缺陷：`openai-chat` 过去把 `config.response_format` **无条件**写进每个上游请求，于是声明 `json_object`
+会把所有流量变成 JSON 模式，DeepSeek 对任何不含 "json" 的提示词直接 400（线上 DSH 选 `deepseek-flash`
+首轮即失败）。现在档位只由请求的 `text.format` 决定，配置退回它文档里本来就写的"能力申报"语义，
+且 `json_object` 与 `json_schema` 在路由层按级校验。
 当前规模：约 4 万行 Go + 原生前端；26 个测试包、1 个分层断言包；真实二进制端到端走查覆盖数据面、计费、MCP、备份与控制台。
 
 ## 文档
@@ -59,7 +66,7 @@ JSON），控制台**用自己的元素**把它渲染成对话气泡里的表单
 | `docs/PROCESS.md` | 实现流程约定（设计文档 / todo / 提交自检） | 生效中 |
 | `docs/TODO.md` | 里程碑 → 任务 → 验收 的检查清单（随实现勾选） | 持续更新 |
 | `docs/architecture.md` | 分层、模块边界与可替换扩展点 | 已落地（由 `internal/arch` 断言守护） |
-| `docs/design/` | 每个里程碑的设计文档（接口、数据流、决策、异常、测试策略、实现差异） | M0–M38 全部产出（M28 的决策记在 `docs/api-providers.md` 与 `docs/TODO.md`） |
+| `docs/design/` | 每个里程碑的设计文档（接口、数据流、决策、异常、测试策略、实现差异） | M0–M39 全部产出（M28 的决策记在 `docs/api-providers.md` 与 `docs/TODO.md`） |
 | `docs/plugin-protocol-v1.md` | 插件协议 v1（帧/方法/事件/取消/背压/错误分类） | **已实现（M2）** |
 | `docs/api-responses.md` | Responses 兼容面（端点/字段/SSE 事件/错误封装/认证与限速） | **已实现（M5）** |
 | `docs/api-providers.md` | openai-chat 供应商（配置开关、思考模式、用量维度、错误分类、DeepSeek 接入） | **已实现（M17）** |
@@ -98,6 +105,8 @@ make verify     # vet + test + build
 |---|---|
 | `POST /v1/responses` | Responses API（流式 / 非流式） |
 | `GET /v1/models` | 可用模型与**对客售价** |
+| `GET /version` | 构建身份：`{"version":"a.b.c","revision":"<短 sha>"}`（公开，带 `base_path` 前缀） |
+| `GET /healthz` | 存活探针（同样带 `version` 与 `revision`） |
 | `POST /mcp` | MCP 服务（账户查询 + 按 scope 可执行后台接口，`aigw_mcp_` 令牌） |
 | `bin/aigw mcp-serve --account <name>` | 本地 stdio MCP（复用同一套工具） |
 | `/admin/api/v1/*` | 管理面：账户/Key/标签/供应商/模型/路由/映射/定价/账单/充值/对账/备份/审计 |
@@ -106,7 +115,9 @@ make verify     # vet + test + build
 | `scripts/deepseek-smoke.sh` | DeepSeek 接入走查（离线假上游；加 `--live` 与 `DEEPSEEK_API_KEY` 打真机） |
 | `scripts/verify-m34.sh` | 可交互预览的自查（29 项，真实 HTTP、不产生模型费用、结束自动清理）；`GW_ADMIN_PASSWORD=… scripts/verify-m34.sh` |
 | `scripts/ui-harness/run.sh`（`make ui-check`） | 控制台走查：API 快照 + headless firefox 渲染真实页面并断言（无 node 环境下的 UI 验证手段） |
-| `make verify` | vet + 全量测试 + 构建 |
+| `scripts/ui-badge-test.mjs`（`make ui-base`） | 左上角版本角标的 node 断言（三行 DOM shim，不需要浏览器）：两格内容、revision 为 `none` 时不显示、端点读不到时不报错 |
+| `scripts/release.sh`（skill `release-version`） | 发版：升 `VERSION`（a.b.c）→ 提交打 tag → `make build`；用法 `scripts/release.sh patch/minor/major` |
+| `make verify` | vet + 全量测试 + 控制台 node 断言 + 构建 |
 
 ## 压测基线（本机 i7-12700K，testecho 供应商）
 
