@@ -70,6 +70,14 @@ type Dimensions struct {
 	CallKind  string // agent | title
 }
 
+// SessionKey is the client's own session key: the request's prompt_cache_key, bounded to
+// the same length the recorded dimension uses. It is what a caller indexes sticky routing
+// by, and it is deliberately the single definition of "the session of this request" —
+// Dimensions below reuses it so the recorded value and the routing key cannot drift.
+func (r *Request) SessionKey() string {
+	return clampBytes(r.PromptCacheKey, maxSessionIDBytes)
+}
+
 // Dimensions identifies the caller behind one request. clientHint is the User-Agent,
 // used only as a fallback: the body rules above are the ones verified against real
 // traffic, and a client that lies about its User-Agent still gets identified by what it
@@ -78,7 +86,7 @@ func (r *Request) Dimensions(clientHint string) Dimensions {
 	out := Dimensions{
 		Client:    ClientUnknown,
 		CallKind:  CallKindAgent,
-		SessionID: clampBytes(strings.TrimSpace(r.PromptCacheKey), maxSessionIDBytes),
+		SessionID: r.SessionKey(),
 	}
 
 	items, apiErr := r.Items()

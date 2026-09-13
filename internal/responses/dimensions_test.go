@@ -215,6 +215,31 @@ func TestDimensionsBoundsEveryField(t *testing.T) {
 	}
 }
 
+// SessionKey is what session stickiness indexes by, while SessionID is what the request log
+// records. They must be the same value (and the same bound), or the console would show one
+// session and routing would stick to another.
+func TestSessionKeyMatchesTheRecordedDimension(t *testing.T) {
+	long := strings.Repeat("a", 4096)
+	for name, raw := range map[string]string{
+		"plain":      "session-ebf36761",
+		"padded":     "  session-ebf36761  ",
+		"empty":      "",
+		"whitespace": "   ",
+		"overlong":   long,
+	} {
+		req := &Request{Model: "m", PromptCacheKey: raw}
+		if got, want := req.SessionKey(), req.Dimensions("").SessionID; got != want {
+			t.Errorf("%s: SessionKey() = %q, Dimensions().SessionID = %q", name, got, want)
+		}
+		if len(req.SessionKey()) > maxSessionIDBytes {
+			t.Errorf("%s: session key length = %d, want <= %d", name, len(req.SessionKey()), maxSessionIDBytes)
+		}
+	}
+	if got := (&Request{Model: "m", PromptCacheKey: "  session-ebf36761  "}).SessionKey(); got != "session-ebf36761" {
+		t.Fatalf("padding must not become part of the key: %q", got)
+	}
+}
+
 func TestTitleOfCollapsesLinesAndBoundsRunes(t *testing.T) {
 	if got := TitleOf("  从 dsh 和 codex 请求解析 workspace  \n"); got != "从 dsh 和 codex 请求解析 workspace" {
 		t.Fatalf("title = %q", got)

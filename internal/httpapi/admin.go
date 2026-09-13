@@ -825,6 +825,7 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		},
 		"balancer":    s.deps.Router.Balancer().SnapshotMetrics(),
 		"cooldowns":   s.deps.Router.Balancer().Cooldowns(now),
+		"affinity":    s.deps.Router.AffinityStats(),
 		"request_log": s.requestLogStats(),
 		"version":     s.deps.Version,
 	}

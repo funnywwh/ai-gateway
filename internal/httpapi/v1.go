@@ -88,12 +88,19 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ticket.Release()
 
+	// The client's own session key: it makes consecutive requests of one session prefer
+	// the upstream that last served them (docs/routing.md §4.4). It never affects what
+	// the key is allowed to use — the candidate list is filtered for authorization
+	// exactly as before — and it is read once so the routing key and the value written
+	// to the log cannot disagree.
+	sessionKey := req.SessionKey()
 	plan, err := s.deps.Router.Plan(domain.RouteRequest{
 		Model:       req.Model,
 		Key:         key,
 		Features:    featuresOf(req),
 		ProviderPin: r.Header.Get("X-Gateway-Provider"),
 		Strategy:    r.Header.Get("X-Gateway-Strategy"),
+		SessionID:   sessionKey,
 	})
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
@@ -234,6 +241,9 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			chosen = &cand
 			providerID = cand.ProviderID
+			// Only a request that actually succeeded re-binds its session: a route that
+			// merely got picked is not evidence that it works.
+			s.deps.Router.NoteSuccess(plan.Affinity, cand.RouteID)
 			// An in-process caller (the console chat) needs the routing facts the
 			// non-streaming branch would have put in response headers, and this is the one
 			// place that knows them.
@@ -257,6 +267,14 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		}
 		if !runtime.Retryable(err) {
 			break
+		}
+		// The attempt is about to move on to the next authorised candidate, so the
+		// session must not be sent back here next time. Only a retryable failure says
+		// that; a client error (400/404 from upstream) says nothing about the route.
+		if s.deps.Router.NoteFailure(plan.Affinity, cand.RouteID) && s.deps.Log != nil {
+			s.deps.Log.Info("session affinity dropped after a retryable failure",
+				"request_id", requestID, "route", cand.RouteID, "provider", cand.ProviderName,
+				"session", sessionKey, "attempt", attemptNo)
 		}
 	}
 

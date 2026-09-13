@@ -87,15 +87,30 @@ POST /v1/responses
 ## 测试策略
 
 - **单元（`internal/routing/affinity_test.go`）**：TTL 到期（注入 `now`，不 sleep）、命中刷新、容量淘汰最旧、键三轴隔离、`nil` store 空转、并发 put/get（`-race` 真跑）、统计计数。
-- **路由（`internal/routing/routing_test.go` 扩展）**：同层提升、跨层不提升、`strict_order` 重排例外、stale 删除且不复活、`NoteFailure` 只清"就是它"的记录、pinned 不产出键、无 session 顺序等于策略输出、`Explain` 不受影响。
-- **端到端（`internal/httpapi/v1_test.go` 扩展）**：两个 `testecho` 供应商用不同 `prefix` 暴露"谁作答"；
-  同会话连发多次前缀一致；flaky(priority 10) + 好供应商(priority 20) → 200 且来自好供应商；粘性目标 `enabled=false` + `reg.Reload()` → 同会话下一请求由另一家作答；无 `prompt_cache_key` 回归。
-  注意：`testecho.Complete` 才会执行 `fail_mode`，`Stream` 只在 `FailAfter` 时失败，所以端到端用非流式 body。
+- **路由（`internal/routing/affinity_test.go` 同文件）**：同层提升（判定用"整个候选序列"，不只是队首）、**跨层不提升**、`strict_order` 不参与、stale 删除且不复活、`NoteFailure` 只清"就是它"的记录、pinned 不产出槽、无 session 时顺序等于策略输出、配置零值不开启。
+  判定顺序需要一台**确定性**策略做底座：用例用 `least_inflight`（并列时按权重、再按 registry 顺序），否则加权随机下"有没有提升"不可判定。
+  同理，夹具必须包含**同层两家 + 下一层一家**：只给每家一个层级，跨层不提升的用例会连变异体都测不出来（层内提升对"本层唯一候选"是空操作）。
+- **端到端（`internal/httpapi/affinity_test.go`，独立文件避免污染既有 `v1_test.go` 夹具）**：三个 `testecho` 供应商用不同 `prefix` 暴露"谁作答"；
+  同层两家等价 → 同会话连发 6 次同一家；flaky(priority 5) 失败 → 200 且来自已授权的下一候选；只授权 flaky 的 key 复用别人的 `prompt_cache_key` → 既不借到好供应商、也不继承别人的粘性；粘性目标 `enabled=false` + `SetProviderFlags`/`Reload` → 同会话改由另一家作答并**重新绑定**；无 `prompt_cache_key` → `affinity` 计数全 0。
+  注意：`testecho.Complete` 才会执行 `fail_mode`，`Stream` 只在 `FailAfter` 时失败，所以端到端一律用非流式 body；新增 API key 的 token 必须在 `secret.PrefixLen`（12）字符内就与既有 token 不同，否则 `ON CONFLICT(key_prefix)` 会改写夹具自己的 key。
 - **配置（`internal/config/config_test.go`）**：默认值、YAML 覆盖、`GW_ROUTING_*` 覆盖、开启时非法值报错 / 关闭时不报错。
 - **维度（`internal/responses/dimensions_test.go`）**：`SessionKey()` 与 `Dimensions().SessionID` 相等（含截断与首尾空白）。
 - **统计（`internal/httpapi/admin_test.go`）**：`/stats` 的 `affinity` 块形状。
-- **变异验证**：去掉层内提升 / 盲目提升（不校验候选存在）/ 去掉 stale 删除 / 去掉 `NoteFailure` / pinned 也产出键 —— 各自必须有精确变红的用例。
+- **变异验证**（逐条临时改代码，确认**恰好**对应用例变红，然后还原）：① `Plan` 不应用粘性 → 路由用例 + 端到端用例同时红；② 提升时越过 tier 边界 → 跨层用例红；③ 去掉 stale 删除 → 不复活用例红；④ `NoteFailure` 不清粘性 → 对应用例红；⑤ pinned 分支也产出槽 → pinned 用例红；⑥ `v1.go` 成功回调不写粘性 → 端到端用例红。
 
 ## 依赖
 
 仅标准库（`sync`、`time`、`strconv`）+ 既有 `internal/{domain,registry,balancer,modelmap}`。不新增第三方依赖，不改分层表。
+
+## 实现与设计差异
+
+实现与本文档的设计一致，只有下面几处落地时收紧或收窄的判断，逐条记录：
+
+1. **`strict_order` 的处理从"不重排"收紧为"完全不参与"**。设计里写的是"有效策略为 `strict_order` 时不重排"，实现把这一类请求排除在整套机制之外：`Plan` 连 `Result.Affinity` 都不产出，`NoteSuccess`/`NoteFailure` 于是天然空转。
+   理由：如果只"不重排"而仍然产出槽，调用方拿到的就是一个永远用不上的键——它会占容量、会让 `/stats` 的 `entries` 说谎，而且一旦以后有人给 `strict_order` 加别的排序逻辑，这个键会突然生效。不参与比不生效更容易验证。
+2. **粘性槽也在 `Affinity` 上携带"是否参与"的信息**，没有另设 `Sticky bool`。`Result.Affinity == ""` 即"本次请求不参与"，调用方（`internal/httpapi/v1.go`）不需要再判断 pinned/strict_order/无 session 三种情况，避免了"调用点忘记判断"这类错误。
+3. **无 `api_key_id`（`KeyID <= 0`）时不产出槽**。设计只说了粘性键包含 key id，没说 key id 缺失怎么办；实现选择不参与，而不是退化成"按 session 全局共享"——否则两个不同客户端的同一 `prompt_cache_key` 会互相带偏。
+4. **`SessionKey()` 复用 `Dimensions()` 的同一个常量**（`maxSessionIDBytes = 128`），而不是各写一份截断。二者必须相等，否则"日志里看到的 session"和"路由粘住的 session"会是两个东西（`dimensions_test.go` 已钉死）。
+5. **stale 只用一个信号判定：命中路由是否还在本次候选列表里**。设计把 stale 列成一串原因（撤权/停用/draining/冷却/熔断/能力不足/`not_mapped`），实现不去逐个分辨——这些原因的作用正是让候选列表不含该路由，于是 `promoteWithinTier` 返回 `false`，删除该记录并记一次 `stale`。"跨层命中"不在此列：它仍在候选里，只是层更靠后，因此既不提升也不删除（与设计一致，也有用例钉住）。
+6. **`/stats` 的 `affinity` 块只在进程内聚合**，没有计数器的持久化或重置端点（`make verify` 之外无新端点）。重启即归零，与"粘性不持久化"一致。
+7. **`record_input_mode`/脱敏与粘性键无关**：粘性键在内存里由 `key id + session + canonical model` 现场拼出，不经过 `recording.redact_paths`，也不会因为日志脱敏而变化。

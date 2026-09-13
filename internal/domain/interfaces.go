@@ -136,6 +136,10 @@ type RouteRequest struct {
 	Key *APIKey
 	// Tags are the resolved tags of the key.
 	Tags []*Tag
+	// SessionID is the client's session key (the request's prompt_cache_key). It feeds
+	// session stickiness only: it is never an authorization input, and an empty value
+	// simply means the request does not take part.
+	SessionID string
 }
 
 // Candidate is one selectable route target.

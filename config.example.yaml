@@ -51,6 +51,12 @@ routing:
     window_s: 60
     cooldown_s: 30
   model_fallback: ""                  # catch-all model when nothing matches
+  # 会话粘性：同一 API Key + session_id + canonical 模型 的连续请求复用上次成功的 route。
+  # 只在同一 priority 层内重排（strict_order 不重排），因此不会放宽 key 的授权；
+  # 不带 prompt_cache_key 的请求完全不受影响。进程内状态，重启后重新负载均衡。
+  session_affinity: true
+  session_affinity_ttl_s: 1800        # 无新成功请求则过期（命中即刷新）
+  session_affinity_max_entries: 10000 # 表容量上界（session_id 由客户端提供）
 
 billing:
   currency: USD                       # ledger currency: balance, credit, reservations, ledger, invoices, reconcile

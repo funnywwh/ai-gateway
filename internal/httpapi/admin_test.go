@@ -156,7 +156,9 @@ func newAdminFixtureWithout(t *testing.T, unwired string) *adminFixture {
 		t.Fatal(err)
 	}
 	bal := balancer.New(balancer.DefaultConfig())
-	router := routing.New(routing.Config{DefaultGrant: "all", Degradation: "strip"}, reg, bal)
+	router := routing.New(routing.Config{
+		DefaultGrant: "all", Degradation: "strip", SessionAffinity: true,
+	}, reg, bal)
 	dispatcher := runtime.New(runtime.Config{}, db, reg, nil, bal, nil)
 	sealer := &fakeSealer{ready: true}
 	prober := &fakeProber{}
@@ -1315,6 +1317,21 @@ func TestPruneRequestsEndpointAndStats(t *testing.T) {
 	}
 	if _, ok := block["dropped"]; !ok {
 		t.Fatalf("the console needs the drop counter too: %v", block)
+	}
+
+	// Session stickiness is part of the routing state an operator has to be able to see
+	// (docs/routing.md §4.4): the counts say whether it is doing anything at all.
+	affinity, ok := stats["affinity"].(map[string]any)
+	if !ok {
+		t.Fatalf("stats must report the session-affinity block: %v", stats)
+	}
+	if affinity["enabled"] != true {
+		t.Fatalf("affinity.enabled = %v, want the fixture's default-on value", affinity["enabled"])
+	}
+	for _, key := range []string{"entries", "hits", "misses", "stale", "evictions"} {
+		if _, ok := affinity[key]; !ok {
+			t.Fatalf("affinity block lacks %q: %v", key, affinity)
+		}
 	}
 }
 

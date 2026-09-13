@@ -178,6 +178,73 @@ func TestBadEnvIntFails(t *testing.T) {
 	}
 }
 
+// Session stickiness ships on (a client that sends no prompt_cache_key is unaffected, and
+// one that does is exactly the traffic a weighted draw would scatter), so the defaults and
+// both override paths have to be pinned.
+func TestSessionAffinityDefaultsAndOverrides(t *testing.T) {
+	cfg := Default()
+	if !cfg.Routing.SessionAffinity {
+		t.Error("session_affinity must default to on")
+	}
+	if cfg.Routing.SessionAffinityTTLS != 1800 || cfg.Routing.SessionAffinityMaxEntries != 10000 {
+		t.Errorf("affinity bounds = %d/%d, want 1800/10000",
+			cfg.Routing.SessionAffinityTTLS, cfg.Routing.SessionAffinityMaxEntries)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("routing:\n  session_affinity: false\n  session_affinity_ttl_s: 60\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Routing.SessionAffinity {
+		t.Error("session_affinity: false must survive loading")
+	}
+	if loaded.Routing.SessionAffinityTTLS != 60 {
+		t.Errorf("ttl = %d, want 60", loaded.Routing.SessionAffinityTTLS)
+	}
+	if loaded.Routing.SessionAffinityMaxEntries != 10000 {
+		t.Errorf("an absent key must keep its default, got %d", loaded.Routing.SessionAffinityMaxEntries)
+	}
+
+	t.Setenv("GW_ROUTING_SESSION_AFFINITY", "true")
+	t.Setenv("GW_ROUTING_SESSION_AFFINITY_MAX_ENTRIES", "5")
+	fromEnv, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fromEnv.Routing.SessionAffinity || fromEnv.Routing.SessionAffinityMaxEntries != 5 {
+		t.Errorf("env override failed: %+v", fromEnv.Routing)
+	}
+}
+
+// The bounds are only read while the feature is on: a deployment that switched it off must
+// not be stopped from starting by a value it no longer reads.
+func TestSessionAffinityBoundsAreValidatedOnlyWhenOn(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"zero ttl", func(c *Config) { c.Routing.SessionAffinityTTLS = 0 }},
+		{"negative ttl", func(c *Config) { c.Routing.SessionAffinityTTLS = -1 }},
+		{"zero capacity", func(c *Config) { c.Routing.SessionAffinityMaxEntries = 0 }},
+	} {
+		t.Run("on: "+tc.name, func(t *testing.T) {
+			cfg := Default()
+			tc.mutate(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("%s must be rejected while session_affinity is on", tc.name)
+			}
+			cfg.Routing.SessionAffinity = false
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("an off feature must not validate its bounds: %v", err)
+			}
+		})
+	}
+}
+
 // The FX table is what keeps a CNY-priced model from being charged as if CNY were
 // USD, so a typo in it must stop the gateway at start-up instead of at the first
 // request.

@@ -130,11 +130,17 @@ func run() int {
 		BreakerWindow:   time.Duration(cfg.Routing.Breaker.WindowS) * time.Second,
 		BreakerCooldown: time.Duration(cfg.Routing.Breaker.CooldownS) * time.Second,
 	})
+	// Session stickiness is configured in seconds; the router works in durations.
+	affinityTTL := time.Duration(cfg.Routing.SessionAffinityTTLS) * time.Second
 	router := routing.New(routing.Config{
 		DefaultStrategy: cfg.Routing.DefaultStrategy,
 		Degradation:     cfg.Routing.Degradation,
 		DefaultGrant:    cfg.Auth.DefaultGrant,
 		ModelFallback:   cfg.Routing.ModelFallback,
+
+		SessionAffinity:    cfg.Routing.SessionAffinity,
+		AffinityTTL:        affinityTTL,
+		AffinityMaxEntries: cfg.Routing.SessionAffinityMaxEntries,
 	}, reg, balancerState)
 	log.Info("routing ready",
 		"strategy", cfg.Routing.DefaultStrategy,
@@ -142,6 +148,9 @@ func run() int {
 		"models", len(snap.Models),
 		"routes", len(snap.Routes),
 		"mappings", len(snap.Mappings),
+		"session_affinity", cfg.Routing.SessionAffinity,
+		"affinity_ttl", affinityTTL.String(),
+		"affinity_max_entries", cfg.Routing.SessionAffinityMaxEntries,
 	)
 
 	verifier := apikey.New(db, apikey.Config{

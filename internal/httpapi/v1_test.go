@@ -112,7 +112,10 @@ func newFixture(t testing.TB) *fixture {
 		t.Fatal(err)
 	}
 	bal := balancer.New(balancer.DefaultConfig())
-	router := routing.New(routing.Config{DefaultGrant: "all", Degradation: "strip"}, reg, bal)
+	// Session stickiness is on, as it is in a default deployment (config.Default()).
+	router := routing.New(routing.Config{
+		DefaultGrant: "all", Degradation: "strip", SessionAffinity: true,
+	}, reg, bal)
 	dispatcher := runtime.New(runtime.Config{}, db, reg, nil, bal, nil)
 
 	verifier := apikey.New(db, apikey.DefaultConfig())

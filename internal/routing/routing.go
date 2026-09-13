@@ -24,6 +24,13 @@ type Config struct {
 	DefaultGrant    string // all | none
 	ModelFallback   string
 	Breaker         balancer.Config
+
+	// SessionAffinity keeps a client session on the route that last served it
+	// (docs/routing.md §4.4). AffinityTTL and AffinityMaxEntries fall back to
+	// DefaultAffinityTTL / DefaultAffinityMaxEntries when they are left at zero.
+	SessionAffinity    bool
+	AffinityTTL        time.Duration
+	AffinityMaxEntries int
 }
 
 // Router computes candidate lists.
@@ -32,6 +39,7 @@ type Router struct {
 	reg *registry.Registry
 	bal *balancer.State
 	mm  *modelmap.Resolver
+	aff *affinityStore
 }
 
 // New builds a router over the given registry and balancer state.
@@ -45,10 +53,25 @@ func New(cfg Config, reg *registry.Registry, state *balancer.State) *Router {
 	if cfg.DefaultGrant == "" {
 		cfg.DefaultGrant = "all"
 	}
+	if cfg.SessionAffinity {
+		if cfg.AffinityTTL <= 0 {
+			cfg.AffinityTTL = DefaultAffinityTTL
+		}
+		if cfg.AffinityMaxEntries <= 0 {
+			cfg.AffinityMaxEntries = DefaultAffinityMaxEntries
+		}
+	} else {
+		// Keep the resolved config honest: with the feature off the bounds are unread.
+		cfg.AffinityTTL = 0
+		cfg.AffinityMaxEntries = 0
+	}
 	if state == nil {
 		state = balancer.New(cfg.Breaker)
 	}
-	return &Router{cfg: cfg, reg: reg, bal: state, mm: modelmap.New(cfg.ModelFallback)}
+	return &Router{
+		cfg: cfg, reg: reg, bal: state, mm: modelmap.New(cfg.ModelFallback),
+		aff: newAffinityStore(cfg.AffinityTTL, cfg.AffinityMaxEntries),
+	}
 }
 
 // Balancer exposes the runtime state (used by /stats and tests).
@@ -61,6 +84,12 @@ type Result struct {
 	Candidates []domain.Candidate
 	Excluded   []domain.Exclusion
 	Strategy   string
+	// Affinity is this request's sticky-routing slot, and "" when the request does not
+	// take part in stickiness at all: the feature is off, the client sent no session
+	// key, no key was identified, or the request pinned a provider. It is opaque on
+	// purpose — a caller reports the route it actually used back through NoteSuccess /
+	// NoteFailure and cannot mint a slot of its own.
+	Affinity string
 }
 
 type grantsWire struct {
@@ -206,6 +235,8 @@ func (r *Router) Plan(in domain.RouteRequest) (*Result, error) {
 	now := time.Now()
 
 	if resolved.Pinned {
+		// A pinned request states its own provider, so it neither reads nor writes a
+		// sticky binding: Affinity stays "" and the Note* calls that follow are no-ops.
 		cand, excl := r.buildPinned(snap, resolved, in, grant, res.Strategy, now)
 		if excl != "" {
 			res.Excluded = append(res.Excluded, domain.Exclusion{ProviderName: resolved.ProviderName, Reason: excl})
@@ -213,6 +244,20 @@ func (r *Router) Plan(in domain.RouteRequest) (*Result, error) {
 		}
 		res.Candidates = []domain.Candidate{*cand}
 		return res, nil
+	}
+
+	// Stickiness needs a client session and an identified key; without either the
+	// request is routed exactly as it was before this feature existed. strict_order
+	// promises a fixed order ("永不打散，确定性"), so such a request does not take part
+	// at all rather than binding a route that would never be used to reorder anything.
+	if r.aff != nil && in.SessionID != "" && res.Strategy != string(balancer.StrictOrder) {
+		keyID := in.KeyID
+		if in.Key != nil {
+			keyID = in.Key.ID
+		}
+		if keyID > 0 {
+			res.Affinity = affinityKey(keyID, in.SessionID, resolved.Canonical)
+		}
 	}
 
 	model := snap.ModelByName[resolved.Canonical]
@@ -317,8 +362,40 @@ func (r *Router) Plan(in domain.RouteRequest) (*Result, error) {
 			res.Candidates = append(res.Candidates, byKey[t.Key])
 		}
 	}
+
+	// Sticky ordering is applied last, over candidates that have already passed every
+	// filter: it can reorder what this request may use, never extend it.
+	if res.Affinity != "" {
+		if routeID, ok := r.aff.get(res.Affinity, now); ok {
+			if !promoteWithinTier(res.Candidates, routeID) {
+				// The bound route is not usable for this request any more (revoked,
+				// disabled, draining, cooling, breaker open, capability lost): forget
+				// the binding instead of keeping it to surprise the session later.
+				r.aff.dropStale(res.Affinity)
+			}
+		}
+	}
 	return res, nil
 }
+
+// NoteSuccess binds the session to the route that just served it, refreshing the binding's
+// TTL. Call it only for a request whose Result.Affinity was non-empty and whose attempt
+// actually succeeded.
+func (r *Router) NoteSuccess(affinity string, routeID int64) {
+	r.aff.put(affinity, routeID, time.Now())
+}
+
+// NoteFailure drops the session's binding, and only while it still points at routeID: a
+// retryable failure of the bound route means the next request of this session should not
+// walk back into it. It reports whether a binding was dropped, so the caller can log the
+// failover. Call it only for retryable failures — a client error says nothing about the
+// health of the route, and moving the session for one would be noise.
+func (r *Router) NoteFailure(affinity string, routeID int64) bool {
+	return r.aff.drop(affinity, routeID)
+}
+
+// AffinityStats reports the session stickiness table (used by /stats).
+func (r *Router) AffinityStats() AffinityStats { return r.aff.stats() }
 
 // Candidates returns only the ordered candidate list.
 func (r *Router) Candidates(in domain.RouteRequest) ([]domain.Candidate, error) {

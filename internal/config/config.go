@@ -126,6 +126,18 @@ type Routing struct {
 	QuotaCooldownDefaultS int     `yaml:"quota_cooldown_default_s"`
 	Breaker               Breaker `yaml:"breaker"`
 	ModelFallback         string  `yaml:"model_fallback"`
+
+	// SessionAffinity makes consecutive requests of one client session reuse the route
+	// that last served them successfully. It only reorders candidates inside a
+	// priority tier (and never for strict_order), so it cannot widen what a key is
+	// authorised for; a request without a session key is not affected at all.
+	SessionAffinity bool `yaml:"session_affinity"`
+	// SessionAffinityTTLS is how long a binding lives without being refreshed by
+	// another successful request of the same session.
+	SessionAffinityTTLS int `yaml:"session_affinity_ttl_s"`
+	// SessionAffinityMaxEntries bounds the in-process table: session keys come from
+	// the client, so the table needs a ceiling.
+	SessionAffinityMaxEntries int `yaml:"session_affinity_max_entries"`
 }
 
 // Billing holds pricing, reservation, in-flight and invoicing policy.
@@ -473,6 +485,13 @@ func Default() Config {
 			Degradation:           "strip",
 			QuotaCooldownDefaultS: 1800,
 			Breaker:               Breaker{Failures: 5, WindowS: 60, CooldownS: 30},
+			// Sticky sessions are on by default: a session that carries a
+			// prompt_cache_key is exactly the traffic that a weighted draw would
+			// otherwise scatter across upstreams, and a client that sends no key
+			// is not affected at all.
+			SessionAffinity:           true,
+			SessionAffinityTTLS:       1800,
+			SessionAffinityMaxEntries: 10000,
 		},
 		Billing: Billing{
 			Currency:              "USD",
@@ -654,6 +673,9 @@ func applyEnv(cfg *Config) error {
 		envBool(&cfg.MCP.AdminTools, "GW_MCP_ADMIN_TOOLS"),
 		envInt(&cfg.MCP.AdminMaxResponseBytes, "GW_MCP_ADMIN_MAX_RESPONSE_BYTES"),
 		envBool(&cfg.Chat.Enabled, "GW_CHAT_ENABLED"),
+		envBool(&cfg.Routing.SessionAffinity, "GW_ROUTING_SESSION_AFFINITY"),
+		envInt(&cfg.Routing.SessionAffinityTTLS, "GW_ROUTING_SESSION_AFFINITY_TTL_S"),
+		envInt(&cfg.Routing.SessionAffinityMaxEntries, "GW_ROUTING_SESSION_AFFINITY_MAX_ENTRIES"),
 		envInt(&cfg.Server.ReadTimeoutS, "GW_SERVER_READ_TIMEOUT_S"),
 		envInt(&cfg.RateLimit.Shards, "GW_RATELIMIT_SHARDS"),
 	} {
@@ -720,6 +742,16 @@ func (c *Config) Validate() error {
 	}
 	if err := oneOf("routing.degradation", c.Routing.Degradation, "strip", "reject"); err != nil {
 		return err
+	}
+	// Only checked while the feature is on: a deployment that switched sticky sessions
+	// off should not be stopped from starting by a stale value it no longer reads.
+	if c.Routing.SessionAffinity {
+		if c.Routing.SessionAffinityTTLS < 1 {
+			return fmt.Errorf("routing.session_affinity_ttl_s must be >= 1 when session_affinity is on")
+		}
+		if c.Routing.SessionAffinityMaxEntries < 1 {
+			return fmt.Errorf("routing.session_affinity_max_entries must be >= 1 when session_affinity is on")
+		}
 	}
 	b := c.Billing
 	checks := []error{
