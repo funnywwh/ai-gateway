@@ -5,7 +5,7 @@ COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: all build test vet fmt tidy run clean verify smoke plugin-example load ui-check
+.PHONY: all build test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base
 
 all: build
 
@@ -33,6 +33,16 @@ fmt:
 
 tidy:
 	@$(GOENV) go mod tidy
+
+# The console derives its mount prefix from its own module URL, so one build serves both
+# `/admin/ui/` and `/aigw/admin/ui/`. That derivation is a pure function, which is why it
+# can be pinned by node instead of a browser (no node here means skip, like test-race).
+ui-base:
+	@if command -v node >/dev/null 2>&1; then \
+		node scripts/ui-base-test.mjs ; \
+	else \
+		echo "skip: node is not available (the derivation is still covered by make ui-check)" ; \
+	fi
 
 verify: vet test build
 

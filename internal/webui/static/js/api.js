@@ -1,6 +1,8 @@
 // Thin fetch wrapper for the management API. Every call is same-origin and relies
 // on the HttpOnly session cookie; nothing here stores credentials.
 
+import { apiRoot } from './base.js';
+
 export class ApiError extends Error {
   constructor(message, status, code) {
     super(message);
@@ -10,7 +12,9 @@ export class ApiError extends Error {
   }
 }
 
-const BASE = '/admin/api/v1';
+// Derived from where this module was loaded, so the console works unchanged behind a
+// reverse-proxy prefix (/aigw/admin/api/v1) and at the root (/admin/api/v1).
+const BASE = apiRoot();
 
 async function request(method, path, body) {
   const init = { method, credentials: 'same-origin', headers: {} };

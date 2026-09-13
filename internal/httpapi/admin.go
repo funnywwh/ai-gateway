@@ -144,7 +144,7 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: adminCookieName, Value: admin.CookieValue(session),
-		Path: "/admin", HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		Path: s.url("/admin"), HttpOnly: true, SameSite: http.SameSiteLaxMode,
 		Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds()),
 	})
 	s.audit(r.Context(), session.User.Username, "login", "admin_user", session.User.Username, nil, "ok")
@@ -161,7 +161,7 @@ func (s *Server) handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 			_ = s.deps.Admin.Logout(r.Context(), id)
 		}
 	}
-	http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: "", Path: "/admin", MaxAge: -1, HttpOnly: true})
+	http.SetCookie(w, &http.Cookie{Name: adminCookieName, Value: "", Path: s.url("/admin"), MaxAge: -1, HttpOnly: true})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

@@ -1,4 +1,5 @@
 import { api } from '../api.js';
+import { consolePath } from '../base.js';
 import { el, card, pagedTable, modal, toast, badge, formatTime, confirmDialog } from '../ui.js';
 
 const bytes = (value) => {
@@ -29,7 +30,7 @@ export async function render({ page, actions, session }) {
 		empty: '还没有备份',
 		rowActions: (row) => {
 			const buttons = [
-				el('a', { class: 'btn', href: '/admin/api/v1/backups/' + row.id + '/download', text: '下载' }),
+				el('a', { class: 'btn', href: consolePath('/admin/api/v1/backups/' + row.id + '/download'), text: '下载' }),
 			];
 			if (!readonly) {
 				buttons.push(el('button', { class: 'btn btn-danger', text: '恢复', onclick: () => restore(row, () => view.refresh()) }));

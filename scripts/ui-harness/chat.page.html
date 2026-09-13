@@ -158,7 +158,7 @@ function sseResponse(body) {
 
 window.fetch = async (url, options) => {
   const target = String(url);
-  const path = target.replace('/admin/api/v1', '').split('?')[0];
+  const path = target.replace(/^.*\/admin\/api\/v1/, '').split('?')[0];
   const query = new URLSearchParams(target.split('?')[1] || '');
   window.__fetched = (window.__fetched || []).concat([path]);
   window.__urls = (window.__urls || []).concat([target]);

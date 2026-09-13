@@ -232,7 +232,7 @@ func (s *Server) handleAdminChatPutArtifact(w http.ResponseWriter, r *http.Reque
 	}
 	ticket, expires := s.issueChatTicket(r, stored.ID, scope)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id": stored.ID, "format": stored.Format, "url": "/admin/chat-artifact/" + stored.ID,
+		"id": stored.ID, "format": stored.Format, "url": s.url("/admin/chat-artifact/") + stored.ID,
 		"ticket": ticket, "expires_at": expires, "bridge": body.Bridge,
 	})
 }
@@ -270,7 +270,7 @@ func (s *Server) handleAdminChatTicket(w http.ResponseWriter, r *http.Request) {
 	}
 	ticket, expires := s.issueChatTicket(r, id, scope)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id": id, "url": "/admin/chat-artifact/" + id, "ticket": ticket,
+		"id": id, "url": s.url("/admin/chat-artifact/") + id, "ticket": ticket,
 		"expires_at": expires, "bridge": body.Bridge,
 	})
 }

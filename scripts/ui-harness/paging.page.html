@@ -48,7 +48,7 @@ function accountsPage(params) {
 }
 
 window.fetch = async (url) => {
-  const raw = String(url).replace('/admin/api/v1', '');
+  const raw = String(url).replace(/^.*\/admin\/api\/v1/, '');
   window.__urls = (window.__urls || []).concat([raw]);
   const [path, query] = raw.split('?');
   if (path === '/accounts') return reply(accountsPage(new URLSearchParams(query || '')));

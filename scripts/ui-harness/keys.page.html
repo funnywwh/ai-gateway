@@ -65,7 +65,7 @@ function sortDimensions(rows, sort) {
 
 window.fetch = async (url, options) => {
   const target = String(url);
-  const path = target.replace('/admin/api/v1', '').split('?')[0];
+  const path = target.replace(/^.*\/admin\/api\/v1/, '').split('?')[0];
   window.__fetched = (window.__fetched || []).concat([path]);
   // The raw URL, query string included: whether a filter value actually reaches the server
   // is the part the console can get wrong while still rendering a plausible table.

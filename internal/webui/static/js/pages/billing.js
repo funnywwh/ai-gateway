@@ -1,4 +1,5 @@
 import { api } from '../api.js';
+import { consolePath } from '../base.js';
 import { el, card, pagedTable, modal, toast, badge, stat, jsonBlock, formatTime, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
 import { initCurrency, money, ledgerCurrency } from '../money.js';
 
@@ -160,7 +161,7 @@ async function renderInvoices({ page, actions, session, readonly }) {
 				el('tbody', {}, rows.map((row) => el('tr', {}, [row.group, row.requests, row.prompt, row.completion, row.cost, row.charge].map((value) => el('td', { text: String(value) }))))),
 			])
 			: el('div', { class: 'empty', text: '该账期没有用量' });
-		const csv = el('a', { class: 'btn', href: '/admin/api/v1/invoices/' + invoice.id + '?format=csv', text: '导出 CSV' });
+		const csv = el('a', { class: 'btn', href: consolePath('/admin/api/v1/invoices/' + invoice.id + '?format=csv'), text: '导出 CSV' });
 		const close = el('button', { class: 'btn', text: '关闭' });
 		const dialog = el('div', { class: 'modal', style: 'width:min(900px,100%)' }, [
 			modalHead('账单 #' + invoice.id + ' · ' + invoice.status, () => backdrop.remove()),

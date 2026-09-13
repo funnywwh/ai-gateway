@@ -193,7 +193,60 @@ func (s *Server) handle(pattern string, handler http.HandlerFunc) {
 
 // Handler returns the root handler.
 func (s *Server) Handler() http.Handler {
-	return s.withRecovery(s.withRequestID(s.withLogging(s.withAdminCSRF(s.mux))))
+	return s.withBasePath(s.withRecovery(s.withRequestID(s.withLogging(s.withAdminCSRF(s.mux)))))
+}
+
+// basePath is the deployment's mount prefix ("" when the surface is served from the
+// root). It is read from the configuration rather than from a forwarded header: a
+// header a proxy sets would have to be trusted, while this one is a deployment fact.
+func (s *Server) basePath() string {
+	if s.deps.Config == nil {
+		return ""
+	}
+	return s.deps.Config.Server.NormalizedBasePath()
+}
+
+// url joins the mount prefix with an internal path. It is the one place a generated
+// URL learns about the prefix.
+func (s *Server) url(path string) string {
+	return s.basePath() + path
+}
+
+// withBasePath mounts the whole surface under the configured prefix. The prefix is
+// stripped before routing, so every pattern stays written as if the server owned the
+// root ("GET /admin/ui/", "POST /v1/responses") and a prefixed deployment cannot drift
+// from an unprefixed one. A request outside the prefix is answered 404 here, because a
+// proxy that forwards the prefix is the only way such a request can arrive.
+func (s *Server) withBasePath(next http.Handler) http.Handler {
+	base := s.basePath()
+	if base == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rest, ok := trimBasePath(r.URL.Path, base)
+		if !ok {
+			writeAPIError(w, domain.ErrNotFound("no route matches this path"))
+			return
+		}
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = rest
+		if r.URL.RawPath != "" {
+			r2.URL.RawPath = strings.TrimPrefix(r.URL.RawPath, base)
+		}
+		next.ServeHTTP(w, r2)
+	})
+}
+
+// trimBasePath removes prefix from path. The prefix only matches on a segment
+// boundary, so a mount at /aigw never swallows /aigw-other.
+func trimBasePath(path, prefix string) (string, bool) {
+	if path == prefix {
+		return "/", true
+	}
+	if strings.HasPrefix(path, prefix+"/") {
+		return strings.TrimPrefix(path, prefix), true
+	}
+	return "", false
 }
 
 // withAdminCSRF rejects management writes that do not declare a JSON body. A
@@ -234,7 +287,10 @@ func (s *Server) routes() {
 		s.registered = append(s.registered, "GET /admin/ui/")
 		s.mux.Handle("GET /admin/ui/", http.StripPrefix("/admin/ui/", ui))
 		s.handle("GET /admin/ui", func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, "/admin/ui/", http.StatusMovedPermanently)
+			// Built from the mount prefix rather than written literally: a prefixed
+			// deployment has to redirect inside its own mount, and http.Redirect would
+			// not add a prefix the handler does not know about.
+			http.Redirect(w, r, s.url("/admin/ui/"), http.StatusMovedPermanently)
 		})
 	}
 

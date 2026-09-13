@@ -14,7 +14,7 @@
 // so the page under test needs no session and no database.
 const FIXTURES = __FIXTURES__;
 window.fetch = async (url) => {
-  const path = String(url).replace('/admin/api/v1', '').split('?')[0];
+  const path = String(url).replace(/^.*\/admin\/api\/v1/, '').split('?')[0];
   window.__fetched = (window.__fetched || []).concat([path]);
   const body = FIXTURES[path] !== undefined ? FIXTURES[path] : { data: [] };
   // A fixture of null stands for a 200 with an empty body, which api.js parses to null.

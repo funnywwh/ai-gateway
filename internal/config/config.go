@@ -50,10 +50,33 @@ type Server struct {
 	// Pprof exposes /debug/pprof. Off by default: a profiling endpoint should not be
 	// open in production.
 	Pprof bool `yaml:"pprof"`
+	// BasePath mounts the whole surface under one URL prefix, for a reverse proxy that
+	// forwards a prefix without stripping it (nginx `location /aigw/ { proxy_pass
+	// http://127.0.0.1:8088; }`). Every route — data plane, console and management API —
+	// is then served under it, and paths this server generates itself (the session
+	// cookie's Path, the console's redirects, preview URLs) carry the prefix too, so the
+	// prefix is a deployment choice rather than a hole in the surface.
+	BasePath string `yaml:"base_path"`
 }
 
 // ReadTimeout returns the HTTP read timeout.
 func (s Server) ReadTimeout() time.Duration { return time.Duration(s.ReadTimeoutS) * time.Second }
+
+// NormalizedBasePath returns the mount prefix without a trailing slash: "" for the
+// root mount, "/aigw" for `base_path: /aigw/`.
+func (s Server) NormalizedBasePath() string {
+	path := strings.TrimSpace(s.BasePath)
+	for strings.HasSuffix(path, "/") {
+		path = strings.TrimSuffix(path, "/")
+	}
+	if path == "" || path == "/" {
+		return ""
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return path
+}
 
 // Database holds SQLite settings.
 type Database struct {
@@ -612,6 +635,7 @@ func envInt(dst *int, key string) error {
 func applyEnv(cfg *Config) error {
 	envStr(&cfg.Server.Listen, "GW_SERVER_LISTEN")
 	envStr(&cfg.Server.SecretKey, "GW_SERVER_SECRET_KEY")
+	envStr(&cfg.Server.BasePath, "GW_SERVER_BASE_PATH")
 	envStr(&cfg.Database.Path, "GW_DATABASE_PATH")
 	envStr(&cfg.CredentialsKey, "GW_CREDENTIALS_KEY")
 	envStr(&cfg.Log.Level, "GW_LOG_LEVEL")
@@ -640,6 +664,30 @@ func applyEnv(cfg *Config) error {
 	return nil
 }
 
+// validateBasePath accepts one or more plain path segments. A prefix that contains a
+// space, a query or a wildcard cannot be matched against a request path, so it is
+// rejected at start-up rather than turning into a mysterious 404 on every request.
+func validateBasePath(path string) error {
+	if path == "" {
+		return nil
+	}
+	for _, r := range path {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '/', r == '-', r == '_', r == '.', r == '~':
+		default:
+			return fmt.Errorf("server.base_path must be a plain URL path (got %q)", path)
+		}
+	}
+	if strings.Contains(path, "//") {
+		return fmt.Errorf("server.base_path must not contain an empty segment (got %q)", path)
+	}
+	if strings.Contains(path, "/.") {
+		return fmt.Errorf("server.base_path must not contain a dot segment (got %q)", path)
+	}
+	return nil
+}
+
 func oneOf(field, value string, allowed ...string) error {
 	for _, a := range allowed {
 		if value == a {
@@ -653,6 +701,9 @@ func oneOf(field, value string, allowed ...string) error {
 func (c *Config) Validate() error {
 	if strings.TrimSpace(c.Server.Listen) == "" {
 		return fmt.Errorf("server.listen must not be empty")
+	}
+	if err := validateBasePath(c.Server.NormalizedBasePath()); err != nil {
+		return err
 	}
 	if strings.TrimSpace(c.Database.Path) == "" {
 		return fmt.Errorf("database.path must not be empty")

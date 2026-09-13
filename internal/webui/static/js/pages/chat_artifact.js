@@ -19,6 +19,7 @@
 // blocks — a warning is honest here, a promise that everything will render is not.
 
 import { api } from '../api.js';
+import { consolePath } from '../base.js';
 import { el, toast } from '../ui.js';
 import { createUIPort, parseUISpec, UI_LIMITS } from './chat_ui.js';
 
@@ -166,7 +167,12 @@ export async function openPreview({ sessionId, key, format, body, title, interac
       const payload = await api.post('/chat/sessions/' + encodeURIComponent(sessionId) + '/artifacts', {
         key, format, body, title, bridge: !!interactive,
       });
-      const base = payload.url + '?ticket=' + encodeURIComponent(payload.ticket);
+      // The server hands back a root-absolute URL, and the frame is the only place in the
+      // console that navigates to it. A prefixed deployment has to keep the prefix: a bare
+      // /admin/chat-artifact/... would leave the mount and 404 at the proxy.
+      const artifact = String(payload.url || '');
+      const base = (artifact.startsWith('/admin/') ? consolePath(artifact) : artifact) +
+        '?ticket=' + encodeURIComponent(payload.ticket);
       url = base;
       openTab.disabled = false;
       frame = el('iframe', {
