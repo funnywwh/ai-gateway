@@ -114,3 +114,7 @@ POST /v1/responses
 5. **stale 只用一个信号判定：命中路由是否还在本次候选列表里**。设计把 stale 列成一串原因（撤权/停用/draining/冷却/熔断/能力不足/`not_mapped`），实现不去逐个分辨——这些原因的作用正是让候选列表不含该路由，于是 `promoteWithinTier` 返回 `false`，删除该记录并记一次 `stale`。"跨层命中"不在此列：它仍在候选里，只是层更靠后，因此既不提升也不删除（与设计一致，也有用例钉住）。
 6. **`/stats` 的 `affinity` 块只在进程内聚合**，没有计数器的持久化或重置端点（`make verify` 之外无新端点）。重启即归零，与"粘性不持久化"一致。
 7. **`record_input_mode`/脱敏与粘性键无关**：粘性键在内存里由 `key id + session + canonical model` 现场拼出，不经过 `recording.redact_paths`，也不会因为日志脱敏而变化。
+
+## 2026-09-13 会话标识修正
+
+日志 `Dimensions().SessionID` 改为优先读取显式根会话元数据，`SessionKey()` 仍为缓存键。本文早期关于两者始终相等的约定已被修正：只有缺少显式会话标识时相等。路由行为不变，详见 `docs/session-grouping-fix.md`。

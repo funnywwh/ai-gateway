@@ -35,7 +35,7 @@
 | `model` | 客户端请求的模型名 | 请求的 `model` 字段；**与账单口径一致**（发票按 `usage_records.model` 分组） |
 | `resolved_model` | 路由后的规范模型名 | 路由结果；被本地拒绝的请求为空 |
 | `workspace` | 客户端的工作区根路径 | DSH 的沙箱策略行 / Codex 的 `<environment_context><cwd>` |
-| `session_id` | 客户端的会话键 | 请求的 `prompt_cache_key`（DSH 形如 `session-<uuid>`，Codex 为裸 uuid） |
+| `session_id` | 客户端的根会话标识 | 优先取 Codex `client_metadata` 权威快照/平铺字段及兼容请求头中的 `session_id`；通用 `metadata.session_id` 也可提供。无根标识时回退 `thread_id`，最后回退 `prompt_cache_key` |
 | `call_kind` | 会话轮次还是辅助调用 | `agent` / `title` |
 | `title` | 会话标题 | DSH 的标题响应文本 / Codex 结构化响应的 `title` 字段（兼容纯文本）；**只写在标题调用那一行** |
 | `account_id` / **用户** | 这笔消耗算在哪个账户（租户） | 该请求使用的 API Key 的所属账户；控制台列头写「用户」，详情写「用户（账户）」 |
@@ -143,4 +143,6 @@ tokens 与成本落在它们各自表头列的正下方；未计量的行只计�
 相关设计：`docs/design/m27-request-dimensions.md`、`docs/design/m29-request-log-page-summary.md`、
 `docs/design/m30-request-log-owner-dimensions.md`、`docs/design/m31-request-log-stats-pagination.md`。
 
-Codex 标题辅助请求根据 user 消息开头的专用任务标题提示词识别为 `call_kind=title`。标题和描述一起返回时仅记录 `title`；损坏的 JSON 对象或缺失标题时留空。标题辅助请求可能使用独立的 `prompt_cache_key`，因此标题归于辅助请求自己的会话分组；没有明确的父会话标识时，不按时间或工作区猜测归属。历史日志未录制响应正文时不能恢复标题。
+Codex 标题辅助请求根据元数据 `turn_trigger=thread_title` 或 user 消息开头的专用任务标题提示词识别为 `call_kind=title`。标题和描述一起返回时仅记录 `title`；损坏的 JSON 对象或缺失标题时留空。标题辅助请求可能使用独立的 `prompt_cache_key`，若携带显式根会话 ID 则归于根会话；没有明确的根会话标识时保留自身分组，不按时间或工作区猜测归属。历史日志未录制响应正文时不能恢复标题。
+
+会话标识字段与源码依据见 `docs/session-grouping-fix.md`。日志分组标识与缓存路由键独立；读取显式元数据不改上游 `prompt_cache_key`，不增加统计查询或 SQL 关联。

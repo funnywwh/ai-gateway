@@ -177,7 +177,7 @@ func dimensionQueryFields() []adminField {
 		queryParam("model", "string", "按请求的模型名过滤（账单口径，与发票分组一致）"),
 		queryParam("resolved_model", "string", "按路由后的规范模型名过滤"),
 		queryParam("workspace", "string", "按工作区根路径过滤"),
-		queryParam("session_id", "string", "按会话 id 过滤（客户端的 prompt_cache_key）"),
+		queryParam("session_id", "string", "按会话 id 过滤（显式会话标识优先，缺失时使用 prompt_cache_key）"),
 		queryParam("call_kind", "string", "按调用类型过滤：agent | title"),
 	}
 }

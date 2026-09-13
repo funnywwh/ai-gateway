@@ -69,14 +69,12 @@ const (
 type Dimensions struct {
 	Client    string // dsh | codex | unknown
 	Workspace string // absolute workspace root, "" when the client did not send one
-	SessionID string // the client's session key (prompt_cache_key), "" when absent
+	SessionID string // explicit root session identity, falling back to prompt_cache_key
 	CallKind  string // agent | title
 }
 
-// SessionKey is the client's own session key: the request's prompt_cache_key, bounded to
-// the same length the recorded dimension uses. It is what a caller indexes sticky routing
-// by, and it is deliberately the single definition of "the session of this request" —
-// Dimensions below reuses it so the recorded value and the routing key cannot drift.
+// SessionKey is the bounded prompt cache key used by sticky routing. LogSessionKey
+// may identify a different conversation; neither method changes the upstream cache key.
 func (r *Request) SessionKey() string {
 	return clampBytes(r.PromptCacheKey, maxSessionIDBytes)
 }
@@ -86,10 +84,11 @@ func (r *Request) SessionKey() string {
 // traffic, and a client that lies about its User-Agent still gets identified by what it
 // actually sent.
 func (r *Request) Dimensions(clientHint string) Dimensions {
+	sessionID, titleHint := r.logSession()
 	out := Dimensions{
 		Client:    ClientUnknown,
 		CallKind:  CallKindAgent,
-		SessionID: r.SessionKey(),
+		SessionID: sessionID,
 	}
 
 	items, apiErr := r.Items()
@@ -126,12 +125,12 @@ func (r *Request) Dimensions(clientHint string) Dimensions {
 			codexTitleCall = true
 		}
 	}
-	if titleCall || codexTitleCall {
+	if titleCall || codexTitleCall || titleHint {
 		out.CallKind = CallKindTitle
 	}
 
 	switch {
-	case codexTitleCall:
+	case codexTitleCall || titleHint:
 		out.Client = ClientCodex
 	case strings.HasPrefix(strings.TrimSpace(r.Instructions), codexInstructionPrefix):
 		out.Client = ClientCodex

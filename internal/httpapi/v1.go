@@ -49,6 +49,8 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	req.SetSessionHeaders(r.Header)
+
 	// Continuation: prepend the stored input+output items of the previous response.
 	var priorItems []pluginapi.Item
 	if req.PreviousResponseID != "" {
@@ -91,8 +93,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	// The client's own session key: it makes consecutive requests of one session prefer
 	// the upstream that last served them (docs/routing.md §4.4). It never affects what
 	// the key is allowed to use — the candidate list is filtered for authorization
-	// exactly as before — and it is read once so the routing key and the value written
-	// to the log cannot disagree.
+	// exactly as before. Log grouping independently uses explicit session metadata.
 	sessionKey := req.SessionKey()
 	plan, err := s.deps.Router.Plan(domain.RouteRequest{
 		Model:       req.Model,

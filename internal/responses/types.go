@@ -14,6 +14,7 @@ import (
 
 // Request is the accepted subset of POST /v1/responses.
 type Request struct {
+	SessionHeaders     SessionHeaders    `json:"-"`
 	Model              string            `json:"model"`
 	Input              json.RawMessage   `json:"input"`
 	Instructions       string            `json:"instructions,omitempty"`

@@ -217,9 +217,9 @@ func TestDimensionsBoundsEveryField(t *testing.T) {
 }
 
 // SessionKey is what session stickiness indexes by, while SessionID is what the request log
-// records. They must be the same value (and the same bound), or the console would show one
-// session and routing would stick to another.
-func TestSessionKeyMatchesTheRecordedDimension(t *testing.T) {
+// records. Without explicit conversation metadata both fall back to the same bounded
+// cache key; explicit root identity is tested separately in session_test.go.
+func TestSessionKeyMatchesRecordedDimensionWithoutExplicitMetadata(t *testing.T) {
 	long := strings.Repeat("a", 4096)
 	for name, raw := range map[string]string{
 		"plain":      "session-ebf36761",

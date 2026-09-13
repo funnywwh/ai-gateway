@@ -220,7 +220,7 @@ type RequestLogRecord struct {
 	ResolvedModel string
 	// Workspace is the client's workspace root, "" when it did not send one.
 	Workspace string
-	// SessionID is the client's session key (the request's prompt_cache_key).
+	// SessionID is the explicit root session identity, with prompt_cache_key as fallback.
 	SessionID string
 	CallKind  string
 	// Title is the session title produced by a title call; it is only ever set on the row
