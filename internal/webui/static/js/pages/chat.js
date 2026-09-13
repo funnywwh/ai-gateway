@@ -582,21 +582,66 @@ export async function render({ page, actions, session, route }) {
     return el('div', { class: 'chat-msg assistant', 'data-message-id': id }, [body]);
   }
 
+  function toolDisplayName(name) {
+    return name === 'create_skill' ? '创建技能' : name;
+  }
+
+  function skillDraftFromResult(result) {
+    try {
+      const parsed = JSON.parse(result || '{}');
+      return parsed && parsed.draft && parsed.requires_confirmation ? parsed : null;
+    } catch (err) { return null; }
+  }
+
+  function renderSkillDraftCard(host, draft) {
+    const value = draft.draft || {};
+    const get = (key) => value[key] || value[key[0].toUpperCase() + key.slice(1)] || '';
+    const box = el('div', { class: 'skill-draft-card' }, [
+      el('div', { class: 'skill-draft-title', text: '已生成技能草稿，等待确认保存' }),
+      el('div', { class: 'skill-draft-field', text: '名称：' + get('name') }),
+      el('div', { class: 'skill-draft-field', text: '说明：' + (get('description') || '（无）') }),
+      el('pre', { class: 'md-pre skill-draft-instructions' }, [el('code', { text: get('instructions') })]),
+    ]);
+    const save = el('button', { class: 'btn btn-primary btn-xs', text: '确认保存' });
+    const discard = el('button', { class: 'btn btn-ghost btn-xs', text: '放弃草稿' });
+    const status = el('span', { class: 'muted', text: '' });
+    save.addEventListener('click', async () => {
+      save.disabled = true; discard.disabled = true; status.textContent = '正在保存…';
+      try {
+        const skill = await api.post('/chat/skills', {
+          name: get('name'), description: get('description'),
+          instructions: get('instructions'), session_id: draft.source_session_id || state.session.id,
+        });
+        status.textContent = '已保存到技能库：' + skill.name;
+        toast('技能已保存，可在「＋」菜单中加载');
+        await loadSkills();
+      } catch (err) {
+        save.disabled = false; discard.disabled = false; status.textContent = '保存失败：' + api.errorMessage(err);
+      }
+    });
+    discard.addEventListener('click', () => { save.disabled = true; discard.disabled = true; status.textContent = '已放弃草稿'; });
+    box.append(el('div', { class: 'skill-draft-actions' }, [save, discard, status]));
+    host.append(box);
+  }
+
   function renderToolCard(part) {
     const known = state.tools.get(part.id);
     const status = part.status || (known && known.status) || 'done';
     const details = el('details', { class: 'chat-tool' + (part.is_error ? ' error' : '') }, [
       el('summary', {}, [
-        el('span', { class: 'chat-tool-name', text: part.name }),
+        el('span', { class: 'chat-tool-name', text: toolDisplayName(part.name) }),
         statusBadge(status === 'done' ? 'ok' : status === 'pending' ? 'pending' : status),
       ]),
     ]);
-    details.append(el('div', { class: 'chat-tool-body' }, [
+    const body = el('div', { class: 'chat-tool-body' }, [
       el('div', { class: 'chat-tool-label', text: '参数' }),
       el('pre', { class: 'md-pre' }, [el('code', { text: prettyJSON(part.arguments) })]),
       el('div', { class: 'chat-tool-label', text: '结果' }),
       el('pre', { class: 'md-pre' }, [el('code', { text: prettyJSON(part.result) })]),
-    ]));
+    ]);
+    const draft = part.name === 'create_skill' && skillDraftFromResult(part.result);
+    if (draft) renderSkillDraftCard(body, draft);
+    details.append(body);
     return details;
   }
 
@@ -919,21 +964,11 @@ export async function render({ page, actions, session, route }) {
 
   async function createSkillFromSession() {
     if (!state.messages.length) { toast('先问一个问题，再把它沉淀成技能', 'error'); return; }
-    try {
-      toast('正在让模型整理技能草稿…（这次调用也会计费）');
-      const draft = await api.post('/chat/sessions/' + encodeURIComponent(state.session.id) + '/skill-draft', {});
-      // The draft stays in this browser: it is unsaved, and the server has no reason to
-      // keep a second copy of something the operator may throw away.
-      try {
-        window.sessionStorage.setItem('aigw.chat.draft', JSON.stringify({
-          name: draft.name, description: draft.description, instructions: draft.instructions,
-          note: draft.note, session_id: state.session.id,
-        }));
-      } catch (err) { /* private mode: the skills page will simply open empty */ }
-      navigate('/skills?new=1');
-    } catch (err) {
-      toast(api.errorMessage(err), 'error');
-    }
+    if (!state.session.account_id || !state.session.api_key_id) { toast('这个会话还没有绑定计费 Key', 'error'); return; }
+    // The legacy /skill-draft endpoint remains available for API clients; the UI now routes
+    // creation through the normal SSE turn so the operator sees step/text/tool/result
+    // events instead of a silent blocking HTTP request followed by a page jump.
+    await submit('请根据当前会话整理一个可复用的技能草稿，并调用“创建技能”工具。生成后先不要保存，展示名称、说明和详细执行指令，等待我确认。');
   }
 
   // -------------------------------------------------------------------------

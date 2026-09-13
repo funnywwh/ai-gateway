@@ -625,6 +625,16 @@ func (s *Service) ListSkills(ctx context.Context, ownerID int64, limit, offset i
 }
 
 // CreateSkill stores a private skill, either handwritten or saved from a draft.
+// ValidateSkillDraft normalizes and validates a model-generated skill without storing it.
+// The HTTP tool surface uses this to keep draft validation identical to skill CRUD.
+func (s *Service) ValidateSkillDraft(ownerID int64, in SkillInput) (SkillInput, error) {
+	skill, err := s.validateSkill(ownerID, in)
+	if err != nil {
+		return SkillInput{}, err
+	}
+	return SkillInput{Name: skill.Name, Description: skill.Description, Instructions: skill.Instructions}, nil
+}
+
 func (s *Service) CreateSkill(ctx context.Context, ownerID int64, in SkillInput, sourceSessionID, sourceModel string) (*domain.ChatSkill, error) {
 	if ownerID <= 0 {
 		return nil, domain.ErrUnauthorized("chat skills require an authenticated administrator session")

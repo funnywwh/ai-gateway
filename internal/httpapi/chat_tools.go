@@ -49,6 +49,14 @@ func (r *mcpCallRecorder) Write(p []byte) (int, error) { return r.body.Write(p) 
 func (r *mcpCallRecorder) Flush() {}
 
 // chatTools implements chat.Tools over the MCP endpoint.
+const toolCreateSkill = "create_skill"
+
+// skillDraftValidator is intentionally optional so HTTP tests can keep using small fake chat
+// services; production chat.Service implements it and shares the CRUD validation rules.
+type skillDraftValidator interface {
+	ValidateSkillDraft(ownerID int64, in chat.SkillInput) (chat.SkillInput, error)
+}
+
 type chatTools struct {
 	s     *Server
 	token mcpsrv.PrincipalLookup
@@ -134,6 +142,16 @@ func (t *chatTools) List(access chat.Access) []chat.Tool {
 		return nil
 	}
 	out := make([]chat.Tool, 0, len(tools))
+	// Skill creation is a console-only capability: it produces a reviewable draft and
+	// never writes the private library from inside a model call. It requires the full admin
+	// scope because the resulting draft can be confirmed into a private library.
+	if principal.Scope == mcpsrv.ScopeAdmin {
+		out = append(out, chat.Tool{
+			Name:        toolCreateSkill,
+			Description: "创建技能草稿：根据当前会话整理名称、描述和可执行指令；只生成待用户确认的草稿，不会自动保存",
+			Schema:      json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"技能名称"},"description":{"type":"string","description":"何时使用该技能"},"instructions":{"type":"string","description":"给模型执行的详细步骤，Markdown"}},"required":["name","instructions"],"additionalProperties":false}`),
+		})
+	}
 	for _, tool := range tools {
 		schema := tool.InputSchema
 		if len(schema) == 0 {
@@ -156,6 +174,9 @@ func (t *chatTools) Call(ctx context.Context, access chat.Access, name string, a
 	}
 	if args == nil {
 		args = map[string]any{}
+	}
+	if name == toolCreateSkill {
+		return t.createSkillDraft(access, args)
 	}
 	// Models routinely collapse the two-level convention and call a management endpoint by
 	// its own name instead of routing through admin_request. The intent is unambiguous — the
@@ -192,6 +213,34 @@ func (t *chatTools) Call(ctx context.Context, access chat.Access, name string, a
 	}
 	isError, _ := result["isError"].(bool)
 	return chat.ToolResult{Value: text, IsError: isError}, nil
+}
+
+func (t *chatTools) createSkillDraft(access chat.Access, args map[string]any) (chat.ToolResult, error) {
+	if access.Role != chat.RoleAdmin || access.OwnerID <= 0 {
+		return chat.ToolResult{Value: map[string]any{"error": "创建技能需要管理员身份"}, IsError: true}, nil
+	}
+	name, _ := args["name"].(string)
+	description, _ := args["description"].(string)
+	instructions, _ := args["instructions"].(string)
+	input := chat.SkillInput{Name: name, Description: description, Instructions: instructions}
+	if t.s == nil || t.s.chat == nil {
+		return chat.ToolResult{Value: map[string]any{"error": "聊天技能服务不可用"}, IsError: true}, nil
+	}
+	if validator, ok := t.s.chat.(skillDraftValidator); ok {
+		validated, err := validator.ValidateSkillDraft(access.OwnerID, input)
+		if err != nil {
+			return chat.ToolResult{Value: map[string]any{"error": err.Error(), "draft": input}, IsError: true}, nil
+		}
+		input = validated
+	}
+	return chat.ToolResult{Value: map[string]any{
+		"draft": map[string]string{
+			"name": input.Name, "description": input.Description, "instructions": input.Instructions,
+		},
+		"requires_confirmation": true,
+		"source_session_id":     access.SessionID,
+		"message":               "技能草稿已生成，等待用户在对话中确认保存；不会自动写入技能库。",
+	}, IsError: false}, nil
 }
 
 // exchange performs one in-process POST /mcp and decodes the JSON-RPC response.

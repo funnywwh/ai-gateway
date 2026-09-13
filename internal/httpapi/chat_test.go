@@ -802,7 +802,7 @@ func TestChatToolSurfaceFollowsTheBoundToken(t *testing.T) {
 	withAdmin := base
 	withAdmin.MCPTokenID = f.adminTokenID
 	listed := tools.List(withAdmin)
-	if len(listed) != 14 {
+	if len(listed) != 15 {
 		t.Fatalf("admin-scope tool surface = %d tools, want 11 query + 3 administrative", len(listed))
 	}
 	names := map[string]bool{}
@@ -812,7 +812,7 @@ func TestChatToolSurfaceFollowsTheBoundToken(t *testing.T) {
 			t.Fatalf("tool %q reached the model without a schema", tool.Name)
 		}
 	}
-	for _, want := range []string{"admin_endpoints", "admin_describe", "admin_request", "get_balance"} {
+	for _, want := range []string{"admin_endpoints", "admin_describe", "admin_request", "get_balance", toolCreateSkill} {
 		if !names[want] {
 			t.Fatalf("tool %q is missing from the surface", want)
 		}
