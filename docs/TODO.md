@@ -1791,6 +1791,16 @@
 - 回滚点：`/opt/aigw/aigw.pre-v0.3.1`、`/opt/aigw/plugins/provider-codex.pre-v0.3.1`；数据库一致性备份 `/opt/aigw/backups-release/v0.3.1/aigw.sqlite`（0600，quick_check=ok）。回退不覆盖新计费数据。
 - 未额外发起付费上游请求；未进行公网或浏览器目视验证。新自动关联以集成回归为验证依据，先前人工修正的历史例子不作为自动关联实测。
 
+### v0.7.0 发布记录（2026-09-14）
+
+- [x] 新增智能问答 `update_session_title` 工具：模型可更新当前会话标题，沿用 owner 校验、统一标题清洗和审计记录；发布 minor **0.7.0**。
+- [x] 实现提交 `935d0e8`；发布提交 `687aeae`，标签 `v0.7.0`。
+- [x] 全量 `go test ./...` 通过；构建二进制版本为 `0.7.0`，revision `687aeae`。
+- [x] 06:32（UTC+08:00）部署 gpt001；仅替换 `/opt/aigw/aigw`，配置与数据目录未修改，服务 active。
+- [x] gpt001 `/aigw/version` 返回 `0.7.0 / 687aeae`；healthz/readyz 均 HTTP 200，启动日志无 ERROR；公网 `https://mnl.iotalking.top/aigw/version` 同值。
+- [x] 本地与线上二进制 SHA-256 一致：`a6370b2e1b7fffaa5b5a17f8c7f9f091006580f9adb8a10f20a0fbda4547b848`。
+- 回滚点：`/opt/aigw/aigw.prev-20260914-063249`；恢复该二进制后重启 aigw，不回退数据库。
+
 ### v0.6.1 发布记录（2026-09-14）
 
 - [x] 根据 v0.6.0 后的修复提交发布 patch **0.6.1**：`bb8776c` 修复聊天工具状态实时更新并记录 reasoning effort；`415cebe` 修复 DSH 最新运行时工作区解析、新版 developer 工作目录识别及会话最新非空工作区聚合。
