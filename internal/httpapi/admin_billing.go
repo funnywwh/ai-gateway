@@ -174,6 +174,9 @@ func (s *Server) handleAdminAccountLedger(w http.ResponseWriter, r *http.Request
 			"note": entry.Note, "actor": entry.Actor,
 			"created_at": entry.CreatedAt.UTC().Format(time.RFC3339),
 		}
+		if entry.ExpiresAt != nil {
+			payload["expires_at"] = entry.ExpiresAt.UTC().Format(time.RFC3339)
+		}
 		if entry.APIKeyID != nil {
 			payload["api_key_id"] = *entry.APIKeyID
 		}

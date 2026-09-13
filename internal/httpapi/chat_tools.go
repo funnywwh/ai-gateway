@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/winger/ai-gateway/internal/chat"
+	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/mcpsrv"
 )
 
@@ -49,7 +50,10 @@ func (r *mcpCallRecorder) Write(p []byte) (int, error) { return r.body.Write(p) 
 func (r *mcpCallRecorder) Flush() {}
 
 // chatTools implements chat.Tools over the MCP endpoint.
-const toolCreateSkill = "create_skill"
+const (
+	toolCreateSkill        = "create_skill"
+	toolUpdateSessionTitle = "update_session_title"
+)
 
 // skillDraftValidator is intentionally optional so HTTP tests can keep using small fake chat
 // services; production chat.Service implements it and shares the CRUD validation rules.
@@ -152,6 +156,15 @@ func (t *chatTools) List(access chat.Access) []chat.Tool {
 			Schema:      json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"技能名称"},"description":{"type":"string","description":"何时使用该技能"},"instructions":{"type":"string","description":"给模型执行的详细步骤，Markdown"}},"required":["name","instructions"],"additionalProperties":false}`),
 		})
 	}
+	// Updating the current conversation title is a console-only operation. It is deliberately
+	// added after MCP tools are loaded so it is never exposed through the external MCP surface.
+	if access.OwnerID > 0 && access.SessionID != "" {
+		out = append(out, chat.Tool{
+			Name:        toolUpdateSessionTitle,
+			Description: "更新当前智能问答会话标题；标题应简洁、单行，不要包含 Markdown 或解释文字",
+			Schema:      json.RawMessage(`{"type":"object","properties":{"title":{"type":"string","description":"新的简洁单行会话标题"}},"required":["title"],"additionalProperties":false}`),
+		})
+	}
 	for _, tool := range tools {
 		schema := tool.InputSchema
 		if len(schema) == 0 {
@@ -177,6 +190,9 @@ func (t *chatTools) Call(ctx context.Context, access chat.Access, name string, a
 	}
 	if name == toolCreateSkill {
 		return t.createSkillDraft(access, args)
+	}
+	if name == toolUpdateSessionTitle {
+		return t.updateSessionTitle(ctx, access, args)
 	}
 	// Models routinely collapse the two-level convention and call a management endpoint by
 	// its own name instead of routing through admin_request. The intent is unambiguous — the
@@ -213,6 +229,35 @@ func (t *chatTools) Call(ctx context.Context, access chat.Access, name string, a
 	}
 	isError, _ := result["isError"].(bool)
 	return chat.ToolResult{Value: text, IsError: isError}, nil
+}
+
+func (t *chatTools) updateSessionTitle(ctx context.Context, access chat.Access, args map[string]any) (chat.ToolResult, error) {
+	if access.OwnerID <= 0 || strings.TrimSpace(access.SessionID) == "" {
+		return chat.ToolResult{Value: map[string]any{"error": "当前会话身份不可用"}, IsError: true}, nil
+	}
+	title, _ := args["title"].(string)
+	title = chat.NormalizeSessionTitle(title)
+	if title == "" {
+		return chat.ToolResult{Value: map[string]any{"error": "标题不能为空"}, IsError: true}, nil
+	}
+	if t.s == nil || t.s.chat == nil {
+		return chat.ToolResult{Value: map[string]any{"error": "聊天服务不可用"}, IsError: true}, nil
+	}
+	service, ok := t.s.chat.(interface {
+		UpdateSessionTitle(context.Context, int64, string, string) (*domain.ChatSession, error)
+	})
+	if !ok {
+		return chat.ToolResult{Value: map[string]any{"error": "当前部署不支持更新会话标题"}, IsError: true}, nil
+	}
+	session, err := service.UpdateSessionTitle(ctx, access.OwnerID, access.SessionID, title)
+	if err != nil {
+		return chat.ToolResult{Value: map[string]any{"error": err.Error()}, IsError: true}, nil
+	}
+	if t.s != nil {
+		t.s.audit(ctx, access.Username, "chat.session_title_update", "chat_session", session.ID,
+			map[string]any{"title": session.Title}, "ok")
+	}
+	return chat.ToolResult{Value: map[string]any{"updated": true, "title": session.Title, "message": "会话标题已更新"}}, nil
 }
 
 func (t *chatTools) createSkillDraft(access chat.Access, args map[string]any) (chat.ToolResult, error) {

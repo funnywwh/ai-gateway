@@ -54,6 +54,7 @@ async function renderLedger({ page, actions, readonly }) {
 			{ key: 'idem_key', label: '幂等键', render: (row) => el('code', { text: row.idem_key }) },
 		],
 		empty: '该账户在窗口内没有账本记录',
+		rowActions: (row) => [el('button', { class: 'btn', text: '详情', onclick: () => showLedgerDetail(row) })],
 		load: ({ limit, offset }) => api.get('/accounts/' + accountID + '/ledger', { days: 30, limit, offset }),
 		onError: report,
 	});
@@ -67,11 +68,28 @@ async function renderLedger({ page, actions, readonly }) {
 			{ key: 'actor', label: '操作者' },
 		],
 		empty: '没有充值/赠送记录',
+		rowActions: (row) => [el('button', { class: 'btn', text: '详情', onclick: () => showLedgerDetail(row) })],
 		load: ({ limit, offset }) => api.get('/accounts/' + accountID + '/credits', { days: 90, limit, offset }),
 		onError: report,
 	});
 
 	page.append(card('当前账户', summary), card('账本流水（含扣费）', ledgerView.node), card('额度明细（非扣费类）', creditsView.node));
+
+	function showLedgerDetail(row) {
+		const fields = [
+			['时间', formatTime(row.created_at)], ['类型', row.kind], ['金额', money(row.amount_micros)],
+			['余额', money(row.balance_after_micros)], ['引用类型', row.ref_type], ['引用编号', row.ref_id],
+			['幂等键', row.idem_key], ['重建序号', row.rebuild_seq], ['操作者', row.actor], ['备注', row.note],
+		];
+		if (row.api_key_id !== undefined) fields.push(['API Key ID', row.api_key_id]);
+		if (row.expires_at) fields.push(['到期时间', formatTime(row.expires_at)]);
+		const table = el('table', {}, [
+			el('tbody', {}, fields.map(([label, value]) => el('tr', {}, [
+				el('th', { text: label }), el('td', { text: value === undefined || value === null || value === '' ? '—' : String(value) }),
+			]))),
+		]);
+		title('账本流水 #' + row.id, table);
+	}
 
 	// 余额没有窗口，表格各自刷新当前页（刷新保持当前页，不跳回第 1 页）。
 	function reloadAll() {

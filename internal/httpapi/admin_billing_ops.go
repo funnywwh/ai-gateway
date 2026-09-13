@@ -435,12 +435,20 @@ func (s *Server) handleAdminAccountCreditList(w http.ResponseWriter, r *http.Req
 	}
 	out := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
-		out = append(out, map[string]any{
+		payload := map[string]any{
 			"id": entry.ID, "kind": entry.Kind, "amount_micros": entry.AmountMicros,
-			"balance_after_micros": entry.BalanceAfterMicros, "ref_id": entry.RefID,
-			"note": entry.Note, "actor": entry.Actor, "idem_key": entry.IdemKey,
+			"balance_after_micros": entry.BalanceAfterMicros, "ref_type": entry.RefType,
+			"ref_id": entry.RefID, "note": entry.Note, "actor": entry.Actor,
+			"idem_key": entry.IdemKey, "rebuild_seq": entry.RebuildSeq,
 			"created_at": entry.CreatedAt.UTC().Format(time.RFC3339),
-		})
+		}
+		if entry.APIKeyID != nil {
+			payload["api_key_id"] = *entry.APIKeyID
+		}
+		if entry.ExpiresAt != nil {
+			payload["expires_at"] = entry.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+		out = append(out, payload)
 	}
 	writeList(w, out, total, page)
 }

@@ -464,7 +464,7 @@ func (s *Service) CreateSession(ctx context.Context, ownerID int64, username, ro
 		UpdatedAt:   now,
 	}
 	if in.Title != nil {
-		session.Title = truncateRunes(strings.TrimSpace(*in.Title), maxTitleRunes)
+		session.Title = NormalizeSessionTitle(*in.Title)
 	}
 	if err := s.store.CreateChatSession(ctx, session); err != nil {
 		return nil, err
@@ -520,11 +520,32 @@ func (s *Service) UpdateSession(ctx context.Context, ownerID int64, role, id str
 		}
 	}
 	if in.Title != nil {
-		session.Title = truncateRunes(strings.TrimSpace(*in.Title), maxTitleRunes)
+		session.Title = NormalizeSessionTitle(*in.Title)
 	}
 	if session.AccountID <= 0 || session.APIKeyID <= 0 {
 		return nil, domain.ErrInvalidRequest("the conversation needs an account and API key before it can be billed")
 	}
+	if err := s.store.UpdateChatSession(ctx, session); err != nil {
+		return nil, err
+	}
+	return session, nil
+}
+
+// UpdateSessionTitle changes only the current owner's title. It is used by the
+// console-only title tool, so it cannot alter billing or tool authority.
+func (s *Service) UpdateSessionTitle(ctx context.Context, ownerID int64, id, title string) (*domain.ChatSession, error) {
+	if ownerID <= 0 {
+		return nil, domain.ErrUnauthorized("chat requires an authenticated administrator session")
+	}
+	session, err := s.store.GetChatSession(ctx, id, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	title = NormalizeSessionTitle(title)
+	if title == "" {
+		return nil, domain.ErrInvalidRequest("the session title cannot be empty")
+	}
+	session.Title = title
 	if err := s.store.UpdateChatSession(ctx, session); err != nil {
 		return nil, err
 	}
@@ -793,11 +814,17 @@ func truncateRunes(s string, max int) string {
 	return string(runes[:max])
 }
 
-// titleFromQuestion derives a conversation title from its first question.
-func titleFromQuestion(question string) string {
-	line := strings.TrimSpace(question)
+// NormalizeSessionTitle applies the single title policy used by API clients and chat tools.
+// Titles are one readable line and are bounded by runes so UTF-8 text is never split.
+func NormalizeSessionTitle(title string) string {
+	line := strings.TrimSpace(title)
 	if idx := strings.IndexAny(line, "\r\n"); idx >= 0 {
 		line = strings.TrimSpace(line[:idx])
 	}
 	return truncateRunes(line, maxTitleRunes)
+}
+
+// titleFromQuestion derives a conversation title from its first question.
+func titleFromQuestion(question string) string {
+	return NormalizeSessionTitle(question)
 }

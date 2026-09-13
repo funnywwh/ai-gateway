@@ -583,7 +583,7 @@ export async function render({ page, actions, session, route }) {
   }
 
   function toolDisplayName(name) {
-    return name === 'create_skill' ? '创建技能' : name;
+    return name === 'create_skill' ? '创建技能' : (name === 'update_session_title' ? '更新会话标题' : name);
   }
 
   function skillDraftFromResult(result) {

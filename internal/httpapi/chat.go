@@ -26,6 +26,7 @@ type ChatService interface {
 	ListSessions(ctx context.Context, ownerID int64, limit, offset int) ([]*domain.ChatSession, int, error)
 	CreateSession(ctx context.Context, ownerID int64, username, role string, in chat.SessionInput) (*domain.ChatSession, error)
 	UpdateSession(ctx context.Context, ownerID int64, role, id string, in chat.SessionInput) (*domain.ChatSession, error)
+	UpdateSessionTitle(ctx context.Context, ownerID int64, id, title string) (*domain.ChatSession, error)
 	Session(ctx context.Context, ownerID int64, id string, usage chat.UsageRecordReader) (*chat.SessionDetail, error)
 	DeleteSession(ctx context.Context, ownerID int64, id string) error
 	Turn(ctx context.Context, req chat.TurnRequest, emit func(chat.Event) error) (*chat.TurnResult, error)
