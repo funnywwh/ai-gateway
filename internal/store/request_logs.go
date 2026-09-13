@@ -242,7 +242,7 @@ func requestLogDimensionSortExpr(sort string) (string, error) {
 	case "last_seen", "":
 		return "MAX(r.created_at) DESC, group_key ASC", nil
 	case "requests":
-		return "COUNT(*) DESC, group_key ASC", nil
+		return "COUNT(DISTINCT r.request_id) DESC, group_key ASC", nil
 	case "charge":
 		return "COALESCE(SUM(u.charge_micros), 0) DESC, group_key ASC", nil
 	default:
@@ -250,56 +250,11 @@ func requestLogDimensionSortExpr(sort string) (string, error) {
 	}
 }
 
-// ListRequestLogDimensionsPage groups recorded requests by one identity dimension, sums what
-// they consumed, and returns one page of the buckets in the requested order. Title and
-// Workspace only carry meaning in the session grouping (a session owns one title and one
-// workspace); elsewhere they are whatever the group's last row had.
-//
-// The query deliberately selects only dimension columns and created_at: picking any
-// content column would make SQLite read the body pages of every row in the window, which
-// is the cost M24 removed from the console's list.
+// ListRequestLogDimensionsPage is the rows-only convenience wrapper. API callers use
+// RequestLogDimensionsPage so rows and total are read in one snapshot.
 func (db *DB) ListRequestLogDimensionsPage(ctx context.Context, f domain.RequestLogFilter, groupBy, sort string, limit, offset int) ([]domain.RequestLogDimensionRow, error) {
-	expression, err := requestLogGroupExpr(groupBy)
-	if err != nil {
-		return nil, err
-	}
-	order, err := requestLogDimensionSortExpr(sort)
-	if err != nil {
-		return nil, err
-	}
-	limit = normalizeLimit(limit, 20, 200)
-	if offset < 0 {
-		offset = 0
-	}
-	where, args := requestLogFilter("r.", f)
-	query := requestLogDimensionsSQL(expression, order, where)
-	args = append(args, limit, offset)
-
-	rows, err := db.read.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("store: request log dimensions: %w", err)
-	}
-	defer rows.Close()
-
-	out := []domain.RequestLogDimensionRow{}
-	for rows.Next() {
-		var (
-			row                 domain.RequestLogDimensionRow
-			firstSeen, lastSeen int64
-		)
-		if err := rows.Scan(&row.Key, &row.Requests, &row.Metered, &firstSeen, &lastSeen,
-			&row.Title, &row.Workspace, &row.InputTokens, &row.CachedTokens, &row.OutputTokens,
-			&row.ReasoningTokens, &row.CostMicros, &row.ChargeMicros); err != nil {
-			return nil, fmt.Errorf("store: scan request log dimension: %w", err)
-		}
-		row.FirstSeen = timeFromUnix(firstSeen)
-		row.LastSeen = timeFromUnix(lastSeen)
-		out = append(out, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: iterate request log dimensions: %w", err)
-	}
-	return out, nil
+	page, err := db.RequestLogDimensionsPage(ctx, f, groupBy, sort, limit, offset)
+	return page.Rows, err
 }
 
 // CountRequestLogDimensionGroups counts the buckets the same filters select — the number
@@ -325,13 +280,11 @@ func (db *DB) CountRequestLogDimensionGroups(ctx context.Context, f domain.Reque
 	return total, nil
 }
 
-// requestLogDimensionsSQL builds the breakdown query. It is a named function rather than
-// an inline literal so the body-free assertion in the store's tests EXPLAINs the very
-// statement production runs: selecting any content column would pull the recorded bodies
-// of the whole window into the scan.
+// requestLogDimensionsSQL retains the direct-join reference query for compatibility
+// probes and independent correctness comparisons against the contribution query.
 func requestLogDimensionsSQL(expression, order, where string) string {
 	return fmt.Sprintf(`
-SELECT %s AS group_key, COUNT(*), COUNT(u.request_id),
+SELECT %s AS group_key, COUNT(DISTINCT r.request_id), COUNT(DISTINCT u.request_id),
        MIN(r.created_at), MAX(r.created_at), MAX(r.title), MAX(r.workspace),
        COALESCE(SUM(`+usageTokenExpr("u.")+`), 0),
        COALESCE(SUM(COALESCE(json_extract(u.dimensions_json, '$.input_cache_hit'), 0)), 0),
@@ -342,9 +295,9 @@ FROM request_logs r LEFT JOIN usage_records u ON u.request_id = r.request_id`+wh
 		` GROUP BY group_key ORDER BY `+order+` LIMIT ? OFFSET ?`, expression)
 }
 
-// requestLogDimensionCountSQL counts the buckets of the breakdown. It is a named function
-// for the same reason as requestLogDimensionsSQL: the test that pins "no bodies, no usage
-// join" has to EXPLAIN the statement production runs, not a copy of it.
+// requestLogDimensionCountSQL is the raw bucket count used by rows-only compatibility
+// callers and independent comparisons. The paged API counts its selected contributions
+// in RequestLogDimensionsPage instead, within the same snapshot as the returned rows.
 func requestLogDimensionCountSQL(expression, where string) string {
 	return fmt.Sprintf(`
 SELECT COUNT(*) FROM (

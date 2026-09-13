@@ -212,9 +212,11 @@ type Recording struct {
 	MaxBytes    int  `yaml:"max_bytes"`
 	// RetentionDays is how long recorded content lives: request logs older than the
 	// window are pruned daily, and a stored response expires with it. 0 disables cleanup.
-	RetentionDays int      `yaml:"retention_days"`
-	RedactPaths   []string `yaml:"redact_paths"`
-	QueueSize     int      `yaml:"queue_size"`
+	RetentionDays int `yaml:"retention_days"`
+	// DimensionRollupEnabled controls derived hourly statistics; false uses raw queries.
+	DimensionRollupEnabled bool     `yaml:"dimension_rollup_enabled"`
+	RedactPaths            []string `yaml:"redact_paths"`
+	QueueSize              int      `yaml:"queue_size"`
 	// BatchWrites groups the per-request audit rows (stored response + request log) into
 	// one background transaction instead of two synchronous ones. On the local deployment
 	// the synchronous path took the single writer connection twice per request, and a
@@ -543,15 +545,16 @@ func Default() Config {
 			// Session titles are on by default: they are the one piece of a client's
 			// traffic that makes a request log readable at a glance, and they are
 			// metadata about the session rather than the user's own content.
-			RecordTitle:     true,
-			MaxBytes:        1048576,
-			RetentionDays:   30,
-			QueueSize:       16384,
-			BatchFlushMS:    250,
-			BatchMaxRows:    256,
-			BatchMaxBytes:   16 << 20,
-			BatchQueueRows:  4096,
-			BatchQueueBytes: 32 << 20,
+			RecordTitle:            true,
+			MaxBytes:               1048576,
+			RetentionDays:          30,
+			DimensionRollupEnabled: true,
+			QueueSize:              16384,
+			BatchFlushMS:           250,
+			BatchMaxRows:           256,
+			BatchMaxBytes:          16 << 20,
+			BatchQueueRows:         4096,
+			BatchQueueBytes:        32 << 20,
 		},
 		MCP: MCP{
 			Enabled: true, MaxQueryRows: 1000, RequestWindowDays: 30,
@@ -669,6 +672,7 @@ func applyEnv(cfg *Config) error {
 
 	for _, step := range []error{
 		envBool(&cfg.Backup.Enabled, "GW_BACKUP_ENABLED"),
+		envBool(&cfg.Recording.DimensionRollupEnabled, "GW_RECORDING_DIMENSION_ROLLUP_ENABLED"),
 		envBool(&cfg.MCP.Enabled, "GW_MCP_ENABLED"),
 		envBool(&cfg.MCP.AdminTools, "GW_MCP_ADMIN_TOOLS"),
 		envInt(&cfg.MCP.AdminMaxResponseBytes, "GW_MCP_ADMIN_MAX_RESPONSE_BYTES"),

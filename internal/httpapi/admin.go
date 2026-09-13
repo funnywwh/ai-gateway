@@ -36,8 +36,7 @@ type AdminStore interface {
 	APIKeyLabels(ctx context.Context, ids []int64) (map[int64]domain.APIKeyLabel, error)
 	// The dimension breakdown is read as a page of buckets plus the number of buckets the
 	// filters matched, so the console's pager can say "共 N 个分组 · 第 x/y 页".
-	ListRequestLogDimensionsPage(ctx context.Context, f domain.RequestLogFilter, groupBy, sort string, limit, offset int) ([]domain.RequestLogDimensionRow, error)
-	CountRequestLogDimensionGroups(ctx context.Context, f domain.RequestLogFilter, groupBy string) (int, error)
+	RequestLogDimensionsPage(ctx context.Context, f domain.RequestLogFilter, groupBy, sort string, limit, offset int) (domain.RequestLogDimensionPage, error)
 	InsertAudit(ctx context.Context, e *AuditEntry) error
 	ListAudit(ctx context.Context, limit int) ([]*AuditEntry, error)
 	ListAuditPage(ctx context.Context, limit, offset int) ([]*AuditEntry, error)
@@ -655,18 +654,12 @@ func (s *Server) handleAdminRequestDimensions(w http.ResponseWriter, r *http.Req
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	rows, err := s.deps.AdminStore.ListRequestLogDimensionsPage(r.Context(), filter, groupBy, sortKey, page.Limit, page.Offset)
+	result, err := s.deps.AdminStore.RequestLogDimensionsPage(r.Context(), filter, groupBy, sortKey, page.Limit, page.Offset)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	// The bucket count is what the pager's "共 N 个分组" reads. It is a property of the
-	// filtered set, so it does not depend on the sort key or on the page.
-	total, err := s.deps.AdminStore.CountRequestLogDimensionGroups(r.Context(), filter, groupBy)
-	if err != nil {
-		writeAPIError(w, toAPIError(err))
-		return
-	}
+	rows, total := result.Rows, result.Total
 	// The credential groupings bucket on ids; their names are labels read from the tables
 	// that own them, resolved for the buckets actually being returned (never for the whole
 	// window — the aggregate query would have to join per row to do that).
@@ -828,7 +821,7 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		"balancer":    s.deps.Router.Balancer().SnapshotMetrics(),
 		"cooldowns":   s.deps.Router.Balancer().Cooldowns(now),
 		"affinity":    s.deps.Router.AffinityStats(),
-		"request_log": s.requestLogStats(),
+		"request_log": s.requestLogStats(r.Context()),
 		"version":     s.deps.Version,
 	}
 	if s.deps.KeyCacheSize != nil {

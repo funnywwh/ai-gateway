@@ -103,6 +103,9 @@ func run() int {
 		return 1
 	}
 	defer func() { _ = db.Close() }()
+	db.SetDimensionRollupsEnabled(cfg.Recording.DimensionRollupEnabled)
+	stopDimensionRollups := db.StartDimensionRollups(ctx, log)
+	defer stopDimensionRollups()
 	log.Info("database ready", "path", db.Path())
 
 	if res, err := db.Bootstrap(ctx, cfg.Bootstrap, cfg.Plugins.StateDir); err != nil {
@@ -408,23 +411,24 @@ func run() int {
 	}
 
 	api := httpapi.New(httpapi.Deps{
-		Config:      cfg,
-		FX:          fxStore,
-		ReloadFX:    reloadFX,
-		Registry:    reg,
-		Router:      router,
-		Dispatcher:  dispatcher,
-		Verifier:    verifier,
-		Limiter:     limiter,
-		Meter:       meter,
-		Records:     db,
-		LogRecorder: auditWriter,
-		LogJanitor:  logJanitor,
-		MCP:         mcpService,
-		MCPTokens:   db,
-		Hooks:       hookDispatcher,
-		Admin:       adminAuth,
-		AdminStore:  db,
+		Config:           cfg,
+		FX:               fxStore,
+		ReloadFX:         reloadFX,
+		Registry:         reg,
+		Router:           router,
+		Dispatcher:       dispatcher,
+		Verifier:         verifier,
+		Limiter:          limiter,
+		Meter:            meter,
+		Records:          db,
+		LogRecorder:      auditWriter,
+		LogJanitor:       logJanitor,
+		DimensionRollups: db,
+		MCP:              mcpService,
+		MCPTokens:        db,
+		Hooks:            hookDispatcher,
+		Admin:            adminAuth,
+		AdminStore:       db,
 		// The console chat persists conversations, skills and preview payloads in the same
 		// database; the transport builds its service and preview-ticket signer from here.
 		ChatStore: db,

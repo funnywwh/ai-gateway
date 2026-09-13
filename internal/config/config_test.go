@@ -355,3 +355,26 @@ func TestChatConfigIsValidated(t *testing.T) {
 			cfg.Chat.MaxSteps, cfg.Chat.MaxToolCalls)
 	}
 }
+
+func TestDimensionRollupConfig(t *testing.T) {
+	if !Default().Recording.DimensionRollupEnabled {
+		t.Fatal("rollups must default on")
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("recording:\n  dimension_rollup_enabled: false\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil || cfg.Recording.DimensionRollupEnabled {
+		t.Fatalf("YAML false: %+v %v", cfg, err)
+	}
+	t.Setenv("GW_RECORDING_DIMENSION_ROLLUP_ENABLED", "true")
+	cfg, err = Load(path)
+	if err != nil || !cfg.Recording.DimensionRollupEnabled {
+		t.Fatalf("env true: %+v %v", cfg, err)
+	}
+	t.Setenv("GW_RECORDING_DIMENSION_ROLLUP_ENABLED", "invalid")
+	if _, err = Load(path); err == nil {
+		t.Fatal("invalid bool accepted")
+	}
+}

@@ -266,6 +266,7 @@ func newAdminFixtureWithout(t *testing.T, unwired string) *adminFixture {
 	// The retention janitor is wired here too: the manual prune endpoint is part of the
 	// management surface, and a fixture without it would answer 501 (M25).
 	deps.LogJanitor = retention.New(db, retention.Config{RetentionDays: cfg.Recording.RetentionDays}, nil)
+	deps.DimensionRollups = db
 	srv := New(deps)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

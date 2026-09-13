@@ -129,6 +129,8 @@ recording:
   # 清理是每日任务（启动时跑一次），也可在控制台「请求日志」页手动触发；
   # 计费（usage/ledger）与审计记录不受影响。
   retention_days: 30
+  # 历史小时读汇总，当前小时和失效小时实时补算；关闭则全部读明细。后台每 30 秒处理。
+  dimension_rollup_enabled: true
   redact_paths: []
   queue_size: 16384
   # 审计写入批量化（M26）。开 = 请求路径把「存储响应 + 请求日志」交给后台线程，在一个事务里

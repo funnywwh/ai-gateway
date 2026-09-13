@@ -311,6 +311,12 @@ type RequestLogDimensionRow struct {
 	ChargeMicros    int64
 }
 
+// RequestLogDimensionPage contains buckets and their count from one database snapshot.
+type RequestLogDimensionPage struct {
+	Rows  []RequestLogDimensionRow
+	Total int
+}
+
 // LedgerEntry is an append-only balance mutation.
 type LedgerEntry struct {
 	ID                 int64

@@ -126,7 +126,7 @@ func (s *Server) SetRecordingFailureHandler(install func(func(*domain.RequestLog
 
 // requestLogStats reports the write health of the request log plus the retention policy,
 // for /stats and the console.
-func (s *Server) requestLogStats() map[string]any {
+func (s *Server) requestLogStats(ctx context.Context) map[string]any {
 	stats := map[string]any{
 		"write_failures": s.requestLogWriteFailures.Load(),
 		"dropped":        s.requestLogDropped.Load(),
@@ -134,6 +134,13 @@ func (s *Server) requestLogStats() map[string]any {
 	}
 	if rec := s.deps.LogRecorder; rec != nil {
 		stats["batching"] = rec.Stats()
+	}
+	if rollups := s.deps.DimensionRollups; rollups != nil {
+		if status, err := rollups.DimensionRollupStats(ctx); err == nil {
+			stats["dimension_rollup"] = status
+		} else {
+			stats["dimension_rollup"] = map[string]any{"last_error": err.Error()}
+		}
 	}
 	if janitor := s.deps.LogJanitor; janitor != nil {
 		stats["pruned"] = janitor.PrunedTotal()

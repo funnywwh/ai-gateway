@@ -656,7 +656,7 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 			// worked around; /requests/prune has the same shape.
 			Method: "GET", Path: "/admin/api/v1/requests/dimensions", Handler: s.handleAdminRequestDimensions,
 			Name: "admin_request_dimensions", Group: groupRequests, Role: roleViewer,
-			Summary: "请求日志的维度统计：按客户端/模型/工作区/会话/调用类型/账户（用户）/API Key 分组，汇总请求数、token 与成本；默认按最近一次请求时间降序，可分页（total 是分组数）",
+			Summary: "请求日志的维度统计：按客户端/模型/工作区/会话/调用类型/账户（用户）/API Key 分组；请求数和已计量数按请求去重，token 与成本累计全部上游尝试；默认按最近一次请求时间降序，可分页（total 是分组数）",
 			Query: append(append([]adminField{
 				queryParam("days", "integer", "回溯天数，默认 7，最大 365"),
 				enumField(queryParam("group_by", "string", "分组维度"), append([]string{"client"}, store.RequestLogDimensionNames...)...),

@@ -978,3 +978,44 @@ func TestRequestLogCodexStructuredTitle(t *testing.T) {
 		}
 	}
 }
+
+func TestAdminDimensionsRollupRetriesAndDiagnostics(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+	ctx := context.Background()
+	at := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	if err := f.db.PutRequestLog(ctx, &domain.RequestLogRecord{RequestID: "rollup-retry", Client: "codex", AccountID: 1, APIKeyID: 1, CreatedAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if _, err := f.db.InsertUsage(ctx, &domain.UsageRecord{RequestID: "rollup-retry", AttemptNo: attempt, DimensionsJSON: `{"input_cache_hit":7,"output":3}`, ChargeMicros: 5}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, rolled := range []bool{false, true} {
+		if rolled {
+			if err := f.db.RefreshDimensionRollups(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+		body := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/requests/dimensions?days=1&group_by=client", "", cookie))
+		rows := body["rows"].([]any)
+		if body["total"] != float64(1) || len(rows) != 1 {
+			t.Fatalf("envelope: %v", body)
+		}
+		row := rows[0].(map[string]any)
+		if row["requests"] != float64(1) || row["metered"] != float64(1) || row["cached_tokens"] != float64(14) {
+			t.Fatalf("rolled=%v counters: %v", rolled, row)
+		}
+	}
+	stats := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/stats", "", cookie))
+	health := stats["request_log"].(map[string]any)["dimension_rollup"].(map[string]any)
+	if health["enabled"] != true || health["backfill_complete"] != true || health["pending_hours"] != float64(0) || health["last_error"] != "" {
+		t.Fatalf("health: %v", health)
+	}
+	f.db.SetDimensionRollupsEnabled(false)
+	stats = decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/stats", "", cookie))
+	if stats["request_log"].(map[string]any)["dimension_rollup"].(map[string]any)["enabled"] != false {
+		t.Fatal("disabled flag missing")
+	}
+}

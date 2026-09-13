@@ -654,8 +654,10 @@ func TestRequestLogDimensionQueryAvoidsBodies(t *testing.T) {
 	seedDimensionRow(t, db, &domain.RequestLogRecord{RequestID: "req-q1", AccountID: 1, Client: "dsh"})
 	since := time.Now().UTC().AddDate(0, 0, -7)
 
-	where, args := requestLogFilter("r.", domain.RequestLogFilter{From: since})
-	query := requestLogDimensionsSQL("r.client", "MAX(r.created_at) DESC, group_key ASC", where)
+	filter := domain.RequestLogFilter{From: since}
+	selection := dimensionSelection{ranges: [][2]int64{{since.Unix(), time.Now().Unix()}}}
+	source, args := dimensionSourceSQL(selection, filter, false)
+	query := dimensionAggregateSQL(source, "r.client", RequestLogDimensionDefaultSort)
 	if strings.Contains(query, "request_json") {
 		t.Fatalf("the dimension breakdown must not select request_json:\n%s", query)
 	}
@@ -675,7 +677,7 @@ func TestRequestLogDimensionQueryAvoidsBodies(t *testing.T) {
 	// usage join the paged query needs: the WHERE names only request_logs columns and a LEFT
 	// JOIN can neither add nor drop a left-hand row, so the counting statement drops it
 	// (docs/design/m31-request-log-stats-pagination.md D9).
-	countSQL := requestLogDimensionCountSQL("r.client", where)
+	countSQL, _ := dimensionSourceSQL(selection, filter, true)
 	for _, banned := range []string{"request_json", "usage_records"} {
 		if strings.Contains(countSQL, banned) {
 			t.Fatalf("the bucket count must not touch %s:\n%s", banned, countSQL)

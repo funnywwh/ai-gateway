@@ -9,6 +9,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -23,7 +26,13 @@ type DB struct {
 	// stmts caches the write statements. See stmtcache.go: the pure-Go driver
 	// re-parses every statement on every Exec, and the three fixed INSERTs on the
 	// request path were paying that parser cost per request.
-	stmts *writerStmtCache
+	stmts                    *writerStmtCache
+	dimensionRollupsDisabled atomic.Bool
+	dimensionRefreshMu       sync.Mutex
+	dimensionStatusMu        sync.Mutex
+	dimensionLastSuccess     time.Time
+	dimensionLastError       string
+	dimensionWAL             bool
 }
 
 // Open opens (creating if needed) the database, applies migrations and returns the handle.
@@ -56,7 +65,7 @@ func Open(ctx context.Context, cfg config.Database) (*DB, error) {
 	read.SetMaxOpenConns(maxConns)
 	read.SetMaxIdleConns(maxConns)
 
-	db := &DB{write: write, read: read, path: cfg.Path, stmts: newWriterStmtCache()}
+	db := &DB{write: write, read: read, path: cfg.Path, stmts: newWriterStmtCache(), dimensionWAL: cfg.WAL}
 	if err := db.ping(ctx); err != nil {
 		db.Close()
 		return nil, err

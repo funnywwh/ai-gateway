@@ -26,6 +26,7 @@ import (
 	"github.com/winger/ai-gateway/internal/responses"
 	"github.com/winger/ai-gateway/internal/routing"
 	"github.com/winger/ai-gateway/internal/runtime"
+	"github.com/winger/ai-gateway/internal/store"
 	"github.com/winger/ai-gateway/internal/usage"
 )
 
@@ -90,7 +91,10 @@ type Deps struct {
 	Hooks HookEmitter
 	// LogJanitor prunes recorded observability data past the retention window; nil
 	// disables the manual prune endpoint (the daily job lives in cmd/aigw).
-	LogJanitor LogJanitor
+	LogJanitor       LogJanitor
+	DimensionRollups interface {
+		DimensionRollupStats(context.Context) (store.DimensionRollupStatus, error)
+	}
 	// Admin enables the management API (session auth + CRUD).
 	Admin      AdminService
 	AdminStore AdminStore
@@ -591,6 +595,16 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if janitor := s.deps.LogJanitor; janitor != nil {
 		_, _ = fmt.Fprintf(w, "# TYPE aigw_request_log_pruned_total counter%c", lf)
 		_, _ = fmt.Fprintf(w, "aigw_request_log_pruned_total %d%c", janitor.PrunedTotal(), lf)
+	}
+	if rollups := s.deps.DimensionRollups; rollups != nil {
+		if st, err := rollups.DimensionRollupStats(r.Context()); err == nil {
+			for name, value := range map[string]int64{
+				"backfill_cursor": st.BackfillCursor,
+				"pending_hours":   st.PendingHours,
+			} {
+				_, _ = fmt.Fprintf(w, "# TYPE aigw_dimension_rollup_%s gauge\naigw_dimension_rollup_%s %d\n", name, name, value)
+			}
+		}
 	}
 	_ = balances
 }
