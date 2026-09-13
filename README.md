@@ -110,7 +110,8 @@ make verify     # vet + test + build
 | `GET /version` | 构建身份：`{"version":"a.b.c","revision":"<短 sha>"}`（公开，带 `base_path` 前缀） |
 | `GET /healthz` | 存活探针（同样带 `version` 与 `revision`） |
 | `POST /mcp` | MCP 服务（账户查询 + 按 scope 可执行后台接口，`aigw_mcp_` 令牌） |
-| `bin/aigw mcp-serve --account <name>` | 本地 stdio MCP（复用同一套工具） |
+| `bin/aigw mcp-serve --account <name>` | 本地 stdio MCP（11 个只读查询工具） |
+| `bin/aigw mcp-serve --endpoint <完整 MCP URL> --token-env GW_MCP_TOKEN` | stdio 转发到运行中网关，按令牌 scope 提供查询与后台工具（M42） |
 | `/admin/api/v1/*` | 管理面：账户/Key/标签/供应商/模型/路由/映射/定价/账单/充值/对账/备份/审计 |
 | `/admin/ui/*` | 内置控制台（零构建，随二进制发布） |
 | `scripts/load.sh` | 一键压测（自建 `cmd/loadgen`，输出 rps 与分位延迟） |

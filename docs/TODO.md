@@ -105,7 +105,7 @@
   `admin_endpoints`（total=86）→ `admin_describe`（body schema + confirm 原因）→ 用 MCP 建供应商/上游模型/对客模型/路由/
   定价倍数/API Key → `admin_explain_router` 候选为空、`excluded` 为空 → 真实 `POST /v1/responses` 返回 `echo: ping` →
   `admin_account_balance` 读计费 → 吊销令牌后 401；query 令牌 `tools/list` 只有 11 个工具
-- [ ] 未覆盖：stdio 模式的后台工具（无管理员主体，需把 `cmd/aigw/main.go` 的依赖构造抽成共用函数；另立）
+- [x] stdio 模式的后台工具（M42）：设计已展示并确认；新增 `--endpoint` / `--token-env` 转发运行中网关，复用令牌权限和热更新。输入/响应限长、超时、取消、禁止重定向及不重试；三种 scope、真实管理写入读回、吊销与 base_path 集成测试通过，`make verify` 通过。设计：`docs/design/m42-stdio-admin.md`。
 
 ## M7 Hooks 与录制
 - [x] 设计文档 docs/design/m7-hooks-recording.md

@@ -15,7 +15,7 @@
   **scope=query** 时查询该账户的统计与请求内容；**scope=admin_read/admin** 时还可以执行管理面接口。
 - 传输：`POST /mcp`（MCP Streamable HTTP）。
 - 本地 agent 亦可使用 `bin/aigw mcp-serve --config <cfg> --account <name>`（stdio；本机信任，不走令牌；
-  **只提供 11 个只读查询工具**，见第 8 节）。
+  **只提供 11 个只读查询工具**；后台工具可使用第 10 节的 HTTP 转发模式）。
 - 鉴权：`Authorization: Bearer aigw_mcp_<token>`；令牌存 SHA-256 哈希 + 前缀索引（`mcp_tokens` 表），
   创建时**明文只显示一次**，支持轮换/吊销/过期。
 
@@ -190,8 +190,7 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
 
 ## 8. 已知限制
 
-- **stdio 模式没有后台工具**：`aigw mcp-serve` 是本机信任的只读入口（11 个工具）。
-  加后台能力需要给出管理员主体，并把它依赖的构造从 `cmd/aigw/main.go` 抽成共用函数，本轮不做。
+- **stdio 本地账户模式只读**：后台操作使用第 10 节的令牌转发模式，依赖运行中的网关。
 - 后台工具**不按账户作用域**：`admin_read`/`admin` 令牌是网关级凭据。
 - 单接口一个 MCP 工具的形态不做（有意为之，见第 4 节）。
 - 控制台聊天要求 `mcp.enabled` 与 `mcp.admin_tools` 均为 `true`：它走的就是 `/mcp`，
@@ -210,3 +209,12 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
 → `admin_endpoints({filter:"provider"})` → `admin_describe({name:"admin_update_provider"})` →
 `admin_request({name:"admin_update_provider", params:{id:15}, body:{weight:50}})` →
 `admin_request({name:"admin_explain_router", query:{model:"gpt-x"}})`，把 `excluded` 里的原因翻译成人话。
+
+## 10. stdio 后台工具转发（M42 已实现）
+
+现有 `aigw mcp-serve --config <cfg> --account <name>` 保持本地只读查询。
+新增 `aigw mcp-serve --endpoint https://gateway.example/aigw/mcp --token-env GW_MCP_TOKEN`，
+从指定环境变量读取已签发的 MCP 令牌，将 stdio JSON-RPC 转发给运行中网关；不打开本地数据库。
+`--endpoint` 与 `--account` 互斥。工具权限、账户隔离、吊销、危险操作 confirm、审计和热更新均由现有 HTTP 服务决定。
+远端必须 HTTPS，HTTP 仅允许 loopback/localhost；禁止重定向和 URL 内嵌凭据、query、fragment。
+每条输入与响应上限为 10 MiB，每次 HTTP 请求超时为 2 分钟；网络、HTTP 或协议错误以非零状态退出，不自动重试写操作。通知不产生 stdout 响应；每个有 id 的响应压成单行并立即刷新。SIGINT/SIGTERM 可中断空闲读取与在途 HTTP。仅支持本网关 JSON 响应。

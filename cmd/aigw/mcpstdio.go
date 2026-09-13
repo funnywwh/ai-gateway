@@ -7,7 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/mcpsrv"
@@ -23,15 +25,47 @@ import (
 // database. Every tool still enforces the account scope, and the query tools are
 // exactly the ones served over HTTP because both use the same mcpsrv.Service.
 //
-// The administrative tool surface is deliberately absent here: it needs an
-// administrator principal, which only the HTTP endpoint can build from a token scope.
-// See docs/mcp.md ("已知限制").
+// With --endpoint, stdio forwards to a running gateway using its token and live state.
 func runMCPServe(arguments []string) int {
 	flags := flag.NewFlagSet("mcp-serve", flag.ContinueOnError)
 	configPath := flags.String("config", "config.yaml", "path to the YAML configuration file")
-	accountName := flags.String("account", "", "account name whose data may be queried (required)")
+	accountName := flags.String("account", "", "account name whose data may be queried (local mode)")
+	endpoint := flags.String("endpoint", "", "running gateway MCP URL (relay mode)")
+	tokenEnv := flags.String("token-env", "GW_MCP_TOKEN", "environment variable holding the MCP token")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
+	}
+	if flags.NArg() != 0 || (*endpoint != "" && strings.TrimSpace(*accountName) != "") {
+		fmt.Fprintln(os.Stderr, "aigw mcp-serve: use either --endpoint or --account, without positional arguments")
+		return 2
+	}
+	if *endpoint != "" {
+		if err := validateMCPEndpoint(*endpoint); err != nil {
+			fmt.Fprintln(os.Stderr, "aigw mcp-serve:", err)
+			return 2
+		}
+		token := strings.TrimSpace(os.Getenv(*tokenEnv))
+		if token == "" || strings.ContainsAny(token, "\r\n") {
+			fmt.Fprintln(os.Stderr, "aigw mcp-serve: token environment variable is empty or invalid")
+			return 2
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		// Unblock an idle stdin read on shutdown as well as cancelling in-flight HTTP.
+		finished := make(chan struct{})
+		defer close(finished)
+		go func() {
+			select {
+			case <-ctx.Done():
+				_ = os.Stdin.Close()
+			case <-finished:
+			}
+		}()
+		if err := serveMCPRelay(ctx, os.Stdin, os.Stdout, *endpoint, token, nil); err != nil {
+			fmt.Fprintln(os.Stderr, "aigw mcp-serve:", err)
+			return 1
+		}
+		return 0
 	}
 	if strings.TrimSpace(*accountName) == "" {
 		fmt.Fprintln(os.Stderr, "aigw mcp-serve: --account is required")
