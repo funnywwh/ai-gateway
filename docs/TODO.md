@@ -1736,3 +1736,14 @@
 - [x] 验证：全量 Go 测试、go vet、format-smoke、版本角标测试通过；公网与本机 `/aigw/version` 返回 `0.2.4 / bcdb192`，healthz/readyz 正常；控制台页面与 brand.js 可访问，线上 brand.js 与发布源码一致。启动日志无 ERROR，Codex 插件成功启动。
 - [x] 发版前已用线上 gpt-6-astra 验证修复前后差异，并实际执行 pwd、回传工具结果完成第二轮；见 `docs/dsh-codex-tool-strict-fix.md`。
 - 回滚点：`/opt/aigw/aigw.pre-v0.2.4`、`/opt/aigw/plugins/provider-codex.pre-v0.2.4`；恢复两个二进制后重启 aigw。插件回滚点包含本次发版前已部署的 strict 修复。
+
+### Codex 缓存键透传修复发布记录（2026-09-13）
+
+- [x] 根据最新标签 v0.2.4 与本次缺陷修复性质，发布 **v0.2.5**（patch）：客户端 `prompt_cache_key` 经标准供应商请求、插件 JSON 协议与 Codex 请求构造原样发送上游，空值省略；不改变会话粘性键的处理。
+- [x] 修复提交 `3e86f4a`；发布提交与标签 `eb8ca6b` / `v0.2.5`。
+- [x] 网关与 Codex 插件从发布提交构建，19:35（UTC+08:00）部署 gpt001；配置与数据未修改。
+- [x] 本地与线上 SHA-256 一致：网关 `43a71b46a3ea94aa02354c6adf045d22db4a300e2d9dc1c2c82f07b00bd43efb`；Codex 插件 `b5972c2b019fa4f6c66676cb1e38c5573afba45df21685badeeabeb1f1f6e17a`。
+- [x] 验证：全量 Go 测试、go vet、format-smoke、base path（10 项）与版本角标（11 项）测试通过。缓存键回归覆盖流式/非流式、缺省/空值及带空格、中文、超过 128 字节的键。
+- [x] 本机与公网 `/aigw/version` 返回 `0.2.5 / eb8ca6b`；healthz/readyz 正常；控制台页面 HTTP 200，线上 brand.js 与发布源码一致（通过资源与端点验证，未做浏览器目视验证）。启动日志无 ERROR，Codex 插件成功启动。
+- 回滚点：`/opt/aigw/aigw.pre-v0.2.5`、`/opt/aigw/plugins/provider-codex.pre-v0.2.5`（均为上一版部署二进制）；恢复两个二进制后重启 aigw。
+- 未做：真实上游缓存命中率对照实测；透传修复不保证每次请求命中缓存。
