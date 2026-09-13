@@ -1727,3 +1727,12 @@
   admin 令牌，让会话问一句"给某个上游模型配成本价"，即可看到模型先 `admin_describe` 拿
   `body_schema` 再写，而不是像之前那样要求补文档
 - 回滚方式：`cp /opt/aigw/aigw.prev-20260913-165328 /opt/aigw/aigw && systemctl restart aigw`
+
+### Codex 兼容修复发布记录（2026-09-13）
+
+- [x] 发布 **v0.2.4**（patch），修复 DSH 使用 Codex 订阅模型时可选工具参数被严格模式强制填写、导致 Full access 下反复无效提权的问题。
+- [x] 修复提交 `4b4f554`；发布提交与标签 `bcdb192` / `v0.2.4`。
+- [x] 网关与 Codex 插件均从发布提交构建，19:26 部署 gpt001；本地和线上 SHA-256 一致。
+- [x] 验证：全量 Go 测试、go vet、format-smoke、版本角标测试通过；公网与本机 `/aigw/version` 返回 `0.2.4 / bcdb192`，healthz/readyz 正常；控制台页面与 brand.js 可访问，线上 brand.js 与发布源码一致。启动日志无 ERROR，Codex 插件成功启动。
+- [x] 发版前已用线上 gpt-6-astra 验证修复前后差异，并实际执行 pwd、回传工具结果完成第二轮；见 `docs/dsh-codex-tool-strict-fix.md`。
+- 回滚点：`/opt/aigw/aigw.pre-v0.2.4`、`/opt/aigw/plugins/provider-codex.pre-v0.2.4`；恢复两个二进制后重启 aigw。插件回滚点包含本次发版前已部署的 strict 修复。
