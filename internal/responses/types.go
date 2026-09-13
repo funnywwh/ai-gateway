@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/pkg/pluginapi"
 )
 
 // Request is the accepted subset of POST /v1/responses.
@@ -145,15 +146,42 @@ type Response struct {
 
 // OutputItem is one entry of Response.Output.
 type OutputItem struct {
-	Type      string        `json:"type"`
-	ID        string        `json:"id"`
-	Status    string        `json:"status,omitempty"`
-	Role      string        `json:"role,omitempty"`
-	Content   []ContentPart `json:"content,omitempty"`
-	CallID    string        `json:"call_id,omitempty"`
-	Name      string        `json:"name,omitempty"`
-	Arguments string        `json:"arguments,omitempty"`
-	Summary   []ContentPart `json:"summary,omitempty"`
+	// Raw preserves newer Responses output item types through SSE and storage.
+	Raw       *pluginapi.Item `json:"-"`
+	Type      string          `json:"type"`
+	ID        string          `json:"id"`
+	Status    string          `json:"status,omitempty"`
+	Role      string          `json:"role,omitempty"`
+	Content   []ContentPart   `json:"content,omitempty"`
+	CallID    string          `json:"call_id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Arguments string          `json:"arguments,omitempty"`
+	Summary   []ContentPart   `json:"summary,omitempty"`
+}
+
+func (i OutputItem) MarshalJSON() ([]byte, error) {
+	if i.Raw != nil {
+		return json.Marshal(i.Raw)
+	}
+	type plain OutputItem
+	return json.Marshal(plain(i))
+}
+
+func (i *OutputItem) UnmarshalJSON(data []byte) error {
+	type plain OutputItem
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*i = OutputItem(decoded)
+	if i.Type != "message" && i.Type != "reasoning" && i.Type != "function_call" {
+		var raw pluginapi.Item
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return err
+		}
+		i.Raw = &raw
+	}
+	return nil
 }
 
 // ContentPart is one content fragment of a message or reasoning item.

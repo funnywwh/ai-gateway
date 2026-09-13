@@ -1107,6 +1107,10 @@ func decodeStoredItems(outputJSON string) []pluginapi.Item {
 	}
 	out := make([]pluginapi.Item, 0, len(items))
 	for _, item := range items {
+		if item.Raw != nil {
+			out = append(out, *item.Raw)
+			continue
+		}
 		switch item.Type {
 		case "message":
 			parts := make([]map[string]string, 0, len(item.Content))

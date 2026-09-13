@@ -11,6 +11,12 @@ import (
 // both code paths produce identical output items and streaming events.
 func FeedItems(a *Assembler, items []pluginapi.Item) error {
 	for _, item := range items {
+		if item.Type != "" && item.Type != "message" && item.Type != "reasoning" && item.Type != "function_call" {
+			if err := a.Add(pluginapi.Event{Type: pluginapi.EventOutputItemDone, Item: &item}); err != nil {
+				return err
+			}
+			continue
+		}
 		switch item.Type {
 		case "message", "":
 			text, refusal, err := contentText(item.Content)

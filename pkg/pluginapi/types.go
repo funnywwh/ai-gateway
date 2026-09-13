@@ -210,7 +210,7 @@ type Request struct {
 // Event is a streaming increment emitted by a plugin.
 //
 // Event types: text.delta, reasoning.delta, refusal.delta, tool_call.start,
-// tool_call.arguments.delta, usage, usage.delta, finish.
+// tool_call.arguments.delta, output_item.done, usage, usage.delta, finish.
 //
 // finish is the terminal event: Reason carries the upstream finish reason
 // verbatim ("stop", "length", "content_filter", ...). The host consumes it — it
@@ -221,7 +221,9 @@ type Request struct {
 // an upstream that dies mid-answer must NOT end the stream silently, or the
 // half-sentence is served as a complete answer.
 type Event struct {
-	Type      string `json:"type"`
+	Type string `json:"type"`
+	// Item carries a completed output item not represented by delta events.
+	Item      *Item  `json:"item,omitempty"`
 	Index     int    `json:"index,omitempty"`
 	ItemID    string `json:"item_id,omitempty"`
 	CallID    string `json:"call_id,omitempty"`
@@ -235,6 +237,7 @@ type Event struct {
 
 // Event type constants.
 const (
+	EventOutputItemDone = "output_item.done"
 	EventTextDelta      = "text.delta"
 	EventReasoningDelta = "reasoning.delta"
 	EventRefusalDelta   = "refusal.delta"

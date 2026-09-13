@@ -941,22 +941,15 @@ type wireUsage struct {
 // wireEvent is the subset of upstream events this adapter understands. Unknown
 // event types are ignored so an upstream addition cannot break the stream.
 type wireEvent struct {
-	Type        string        `json:"type"`
-	Delta       string        `json:"delta"`
-	Text        string        `json:"text"`
-	ItemID      string        `json:"item_id"`
-	OutputIndex int           `json:"output_index"`
-	Arguments   string        `json:"arguments"`
-	Item        *wireItem     `json:"item"`
-	Response    *wireResponse `json:"response"`
-	Error       *wireError    `json:"error"`
-}
-
-type wireItem struct {
-	Type   string `json:"type"`
-	ID     string `json:"id"`
-	CallID string `json:"call_id"`
-	Name   string `json:"name"`
+	Type        string          `json:"type"`
+	Delta       string          `json:"delta"`
+	Text        string          `json:"text"`
+	ItemID      string          `json:"item_id"`
+	OutputIndex int             `json:"output_index"`
+	Arguments   string          `json:"arguments"`
+	Item        *pluginapi.Item `json:"item"`
+	Response    *wireResponse   `json:"response"`
+	Error       *wireError      `json:"error"`
 }
 
 type wireResponse struct {
@@ -1211,6 +1204,14 @@ func (p *provider) translate(event wireEvent, emit func(pluginapi.Event) error) 
 			Type: pluginapi.EventToolCallStart, Index: event.OutputIndex,
 			ItemID: event.Item.ID, CallID: event.Item.CallID, Name: event.Item.Name,
 		})
+	case "response.output_item.done":
+		// Newer Codex clients use custom tools as well as function tools. Keep
+		// their complete items intact; ignoring them silently ends the agent turn.
+		// The three types below are already emitted through the delta path.
+		if event.Item != nil && event.Item.Type != "message" && event.Item.Type != "reasoning" && event.Item.Type != "function_call" {
+			return emit(pluginapi.Event{Type: pluginapi.EventOutputItemDone, Item: event.Item})
+		}
+		return nil
 	case "response.function_call_arguments.delta":
 		if event.Delta == "" {
 			return nil
@@ -1292,11 +1293,26 @@ func (p *provider) Complete(ctx context.Context, req *pluginapi.Request) (*plugi
 		builder      strings.Builder
 		finalUsage   *pluginapi.Usage
 		finishReason string
+		items        []pluginapi.Item
 	)
+	flushText := func(status string) {
+		if builder.Len() == 0 {
+			return
+		}
+		items = append(items, pluginapi.Item{Type: "message", ID: fmt.Sprintf("msg_codex_%d", len(items)), Role: "assistant", Content: outputText(builder.String()), Status: status})
+		builder.Reset()
+	}
+	var outputChars strings.Builder
 	err := p.Stream(ctx, req, func(event pluginapi.Event) error {
 		switch event.Type {
+		case pluginapi.EventOutputItemDone:
+			if event.Item != nil {
+				flushText("completed")
+				items = append(items, *event.Item)
+			}
 		case pluginapi.EventTextDelta:
 			builder.WriteString(event.Text)
+			outputChars.WriteString(event.Text)
 		case pluginapi.EventUsage:
 			if event.Usage != nil {
 				finalUsage = event.Usage
@@ -1310,28 +1326,14 @@ func (p *provider) Complete(ctx context.Context, req *pluginapi.Request) (*plugi
 		return nil, err
 	}
 	if finalUsage == nil {
-		finalUsage = &pluginapi.Usage{Dimensions: map[string]int64{"output": providerkit.EstimateTokens(builder.String(), 0)}, Estimated: true}
+		finalUsage = &pluginapi.Usage{Dimensions: map[string]int64{"output": providerkit.EstimateTokens(outputChars.String(), 0)}, Estimated: true}
 	}
+	status := "completed"
 	if _, truncated := pluginapi.IncompleteReason(finishReason); truncated {
-		return &pluginapi.Response{
-			Items: []pluginapi.Item{{
-				Type: "message", ID: "msg_codex", Role: "assistant",
-				Content: outputText(builder.String()), Status: "incomplete",
-			}},
-			Usage:        *finalUsage,
-			Status:       "incomplete",
-			FinishReason: finishReason,
-		}, nil
+		status = "incomplete"
 	}
-	return &pluginapi.Response{
-		Items: []pluginapi.Item{{
-			Type: "message", ID: "msg_codex", Role: "assistant",
-			Content: outputText(builder.String()), Status: "completed",
-		}},
-		Usage:        *finalUsage,
-		Status:       "completed",
-		FinishReason: pluginapi.ReasonStop,
-	}, nil
+	flushText(status)
+	return &pluginapi.Response{Items: items, Usage: *finalUsage, Status: status, FinishReason: finishReason}, nil
 }
 
 // Health probes by issuing a real streaming completion, not by poking a status

@@ -84,6 +84,10 @@ func (a *Assembler) Items() []pluginapi.Item {
 	items := make([]pluginapi.Item, 0, len(a.output))
 	for i := range a.output {
 		item := &a.output[i]
+		if item.Raw != nil {
+			items = append(items, *item.Raw)
+			continue
+		}
 		switch item.Type {
 		case "message":
 			content := ""
@@ -129,6 +133,22 @@ func (a *Assembler) Start() error {
 // Add consumes one canonical provider event.
 func (a *Assembler) Add(ev pluginapi.Event) error {
 	switch ev.Type {
+	case pluginapi.EventOutputItemDone:
+		if ev.Item == nil {
+			return nil
+		}
+		if err := a.closeOpen(); err != nil {
+			return err
+		}
+		item := *ev.Item
+		output := OutputItem{Type: item.Type, ID: item.ID, Status: item.Status, Raw: &item}
+		index := len(a.output)
+		a.output = append(a.output, output)
+		a.deltas++ // A delivered tool call must never be retried on another provider.
+		if err := a.send(&Event{Type: EventOutputItemAdded, OutputIndex: index, Item: &output}); err != nil {
+			return err
+		}
+		return a.send(&Event{Type: EventOutputItemDone, OutputIndex: index, Item: &output})
 	case pluginapi.EventTextDelta:
 		return a.addText(ev.Text)
 	case pluginapi.EventReasoningDelta:
