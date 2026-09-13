@@ -1791,6 +1791,14 @@
 - 回滚点：`/opt/aigw/aigw.pre-v0.3.1`、`/opt/aigw/plugins/provider-codex.pre-v0.3.1`；数据库一致性备份 `/opt/aigw/backups-release/v0.3.1/aigw.sqlite`（0600，quick_check=ok）。回退不覆盖新计费数据。
 - 未额外发起付费上游请求；未进行公网或浏览器目视验证。新自动关联以集成回归为验证依据，先前人工修正的历史例子不作为自动关联实测。
 
+### v0.6.0 发布记录（2026-09-14）
+
+- [x] 新增规范/对外模型级 reasoning 配置（inherit/default/force）、管理 API/MCP 与控制台表单，发布 minor **0.6.0**；设计与操作说明见 `docs/design/model-reasoning.md`、`docs/mcp.md`。
+- [x] 实现提交 `9f88fee`；发布提交 `0af1c12`，标签 `v0.6.0`。全量 `go test -count=1 ./...` 与功能相关 race 测试通过。
+- [x] 05:44（UTC+08:00）部署 gpt001；仅替换 `/opt/aigw/aigw`，未修改 `/opt/aigw/config.yaml` 或数据目录，服务 active。
+- [x] 本机、gpt001 与公网 `/aigw/version` 均返回 `{"revision":"0af1c12","version":"0.6.0"}`；healthz/readyz 均 HTTP 200，启动日志无 ERROR。
+- [x] 回滚点：`/opt/aigw/aigw.prev-20260914-054404`；恢复该二进制后重启 aigw，不回退数据库。
+
 ### v0.5.0 发布记录（2026-09-13）
 
 - [x] 新增智能问答“创建技能”工具：通过 SSE 展示创建过程，生成草稿后由用户确认保存；发布 minor **0.5.0**。
