@@ -1464,3 +1464,55 @@
   离线冒烟里这条断言一直是红的（`curl: (22) ... 404`），只是此前没人追。
   修复：续接路径用同一个等待。这也正是 thinking + tools 的必经形态
 - 文档：`docs/api-providers.md` §3（约束的完整范围 + 真实后果）、§4（出站与续接的等待）
+
+---
+
+## M38 会话粘性路由 + 授权范围内故障转移
+
+同一个客户端会话的连续请求，在加权随机下会在同一层的多个供应商之间来回跳：前缀缓存命中率被稀释，
+上游账号侧看到的"一个会话"也被打散。M38 把"上一次真正服务成功的 route"与该会话绑定，
+并明确一条边界：**粘性只重排已授权的候选，永远不放宽授权**。
+
+### 设计（`docs/design/m38-session-affinity.md`）
+
+- [ ] 粘性键 = `api_key_id + session_id + canonical_model`；session_id 取 `prompt_cache_key`（128 字节截断），
+      无该字段的请求完全不参与（无 session 客户端的字节级行为不变）
+- [ ] 只在**同一 `route.priority` 层内**提升到该层首位：跨层提升会让一次失败永久反转运营者写下的优先级意图
+      （`docs/routing.md` §4.2「层间即优先级降级」），坏路由交给既有熔断/冷却剔除
+- [ ] 有效策略为 `strict_order` 时不重排——"永不打散"是该策略的全部意义
+- [ ] 只有 attempt **成功**才写粘性；只有**可重试失败**才清粘性，且只清"正好指向它"的记录
+      （4xx 类客户端错误说明不了路由坏了）
+- [ ] 命中候选若已撤权/停用/draining/冷却/熔断/能力不足/不再映射 → 记录删除并按原生策略路由；
+      重新启用不会复活旧粘性
+- [ ] 进程内、TTL（默认 1800s，命中即刷新）、容量上限（默认 10000，先清过期再淘汰最旧）；
+      **不持久化**（重启后重新负载均衡，无迁移、无清理任务）
+- [ ] 钉死请求（`model@provider` / `X-Gateway-Provider`）既不读也不写粘性；参与与否由 `Plan` 决定，
+      以不可构造的不透明标记 `Result.Affinity` 交给调用方，避免调用点忘记判断 pinned
+- [ ] 不新增响应头、请求日志列、迁移、端点、hook 字段：流式分支本就不设响应头（M32），
+      可观测性走 `/stats` 聚合 + 结构化日志
+
+### 实现
+
+- [ ] `internal/config`：`routing.session_affinity`（默认 true）、`session_affinity_ttl_s`（1800）、
+      `session_affinity_max_entries`（10000）+ `GW_ROUTING_SESSION_AFFINITY*` + 仅开启时校验
+- [ ] `internal/responses`：`(*Request).SessionKey()`，`Dimensions()` 复用它（截断只有一处定义）
+- [ ] `internal/routing/affinity.go`（新）：有界 TTL 表 + 命中计数（hit/miss/stale/evict）
+- [ ] `internal/routing/routing.go`：`Config` 三字段、`Plan` 接入层内提升与 stale 删除、
+      `Result.Affinity`、`NoteSuccess`/`NoteFailure`/`AffinityStats`
+- [ ] `internal/httpapi/v1.go`：`RouteRequest.SessionID`、成功写粘性、可重试失败清粘性
+- [ ] `internal/httpapi/admin.go` + `cmd/aigw`：`/stats` 的 `affinity` 块；启动日志报开关/TTL/容量
+
+### 测试与验收
+
+- [ ] `internal/routing/affinity_test.go`：TTL 到期（注入 `now`）、命中刷新、容量淘汰最旧、键三轴隔离、
+      `nil` store 空转、并发 put/get（`-race` 真跑）、统计计数
+- [ ] `internal/routing/routing_test.go`：同层提升、跨层不提升、`strict_order` 例外、stale 删除且不复活、
+      `NoteFailure` 只清"就是它"的记录、pinned 不产出键、无 session 时顺序等于策略输出、`Explain` 不受影响
+- [ ] `internal/httpapi/v1_test.go`：两个 `testecho` 供应商（不同 `prefix` 暴露"谁作答"）——同会话连发
+      前缀一致、flaky(priority 10) 失败后由好供应商(priority 20) 作答、粘性目标停用后同会话改由另一家作答、
+      无 `prompt_cache_key` 的请求回归不变
+- [ ] `internal/config/config_test.go` + `internal/responses/dimensions_test.go` + `/stats` 形状断言
+- [ ] 变异验证：去掉层内提升 / 盲目提升（不校验候选存在）/ 去掉 stale 删除 / 去掉 `NoteFailure` /
+      pinned 也产出键 —— 各自精确变红
+- [ ] `make verify` 全绿；`make test-race` 在 `internal/routing` 与 `internal/httpapi` 上全绿
+- [ ] 回填设计文档「实现与设计差异」；`docs/routing.md` §4.4 与 `config.example.yaml` 同步

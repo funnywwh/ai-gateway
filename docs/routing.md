@@ -1,6 +1,6 @@
 # 路由与模型自由映射
 
-> 状态：**已实现（M3）**。实现见 `internal/modelmap`、`internal/balancer`、`internal/routing`。
+> 状态：**已实现（M3）**；会话粘性见 §4.4（M38）。实现见 `internal/modelmap`、`internal/balancer`、`internal/routing`。
 
 ## 1. 两段式解析
 
@@ -85,12 +85,35 @@ grantedProviders = ∪( key.grants.providers, 各 tag.grants.providers )   ["*"]
 
 3. 本层候选耗尽（全部可重试失败）后进入下一层；层间即"优先级降级"。
 
+> 会话粘性（§4.4）只在本层内部重排，且对 `strict_order` 不生效——"永不打散"是这个策略的全部意义。
+
 ### 4.3 熔断与冷却
 
 - **熔断**：每 route 维度，60s 窗口内连续 5 次失败或失败率 >60%（样本 ≥10）→ open 30s，随后半开放行 1 次探测。
 - **上游额度冷却**：上游返回 `quota_exhausted` 时按 `reset_at` 冷却该 route（缺省 1800s），并持久化到
   `routes.cooldown_until`，重启后不复活。
 - 冷却为**惰性判断**（读取时比较时间），不依赖后台任务。
+
+### 4.4 会话粘性（M38）
+
+同一 `API Key + session_id + canonical 模型` 的连续请求优先复用**上一次真正服务成功**的那个 route，
+让一个会话的上游保持稳定（前缀缓存命中率、上游账号一致性），而不是每次都由加权随机重新掷骰子。
+
+| 项 | 规则 |
+|---|---|
+| 键 | `api_key_id + session_id + canonical_model`；session_id 取请求的 `prompt_cache_key`（128 字节截断），无该字段的请求**完全不参与** |
+| 生效范围 | 只在**同一 `route.priority` 层内**把命中的候选提到该层首位；跨层不提升（层间是运营者写下的优先级） |
+| 策略交互 | 有效策略为 `strict_order` 时不重排；其余策略都参与 |
+| 写粘性 | 只有 attempt **成功**才写入/刷新；失败的 attempt 不写 |
+| 清粘性 | 仅当该候选**可重试失败**（`runtime.Retryable`）时清除，且只清"正好指向它"的记录 |
+| 失效 | 命中候选若已被撤权、停用、draining、冷却、熔断、能力不足或不再映射 → 记录被删除，按原生策略路由；重新启用不会复活旧粘性 |
+| 钉死 | `model@provider` / `X-Gateway-Provider` 的请求既不读也不写粘性 |
+| 存储 | 进程内、TTL 默认 1800s（命中即刷新）、容量默认 10000 条（先清过期、再淘汰最旧）；**不持久化**，重启后重新负载均衡 |
+| 开关 | `routing.session_affinity`（默认 `true`）、`routing.session_affinity_ttl_s`、`routing.session_affinity_max_entries` |
+| 可观测 | `/admin/api/v1/stats` 的 `affinity` 块（启用状态、条数、命中/落空/失效/淘汰计数）；日志记 route/provider/session_id，不记原始键 |
+
+**粘性不放宽授权**：它只能重排本次请求**已经**通过全部过滤的候选，因此永远不会把一个未授权、已撤权或不可用的供应商拉回来；
+故障转移也只在同一个候选列表内进行（候选耗尽 → 既有 4xx/5xx 语义）。
 
 ## 5. 请求级覆盖
 
