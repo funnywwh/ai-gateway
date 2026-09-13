@@ -77,3 +77,19 @@ config.server.base_path: "/aigw"      # 空 = 挂在根上（默认，行为与�
 证书不需要新签：现有的 `*.iotalking.top`（ACMEdns 签发，2026-10-06 到期）已覆盖该子域，
 HTTP 的 80 块也已就位（301 跳 443）。
 
+
+## 5. 运维要点
+
+- **改代码后怎么上线**：`make build` → `scp bin/aigw gpt001:/tmp/aigw.new` →
+  `install -m0755 /tmp/aigw.new /opt/aigw/aigw` → `systemctl restart aigw`。
+  重装前 `/opt/aigw/aigw` 会被复制成 `aigw.prev-<时间戳>`，回滚就是一次 `mv`。
+- **前缀改回根路径**：把 `/opt/aigw/config.yaml` 的 `server.base_path` 改成 `""` 并重启，
+  同时删掉 nginx 的 `location ^~ /aigw/`（服务端不会再把任何路径指向前缀）。
+- **日志与排障**：`journalctl -u aigw -f`；数据面 `/aigw/healthz`、`/aigw/readyz`、`/aigw/metrics`。
+- **备份**：`backup.enabled=true`，快照落在 `/opt/aigw/data/backups/`，控制台可下载/恢复。
+- **证书风险（值得盯一眼）**：通配符 `*.iotalking.top` 用的是 ACMEdns（`auth.nginxwebui.cn`）
+  验证，2026-10-06 到期，续期依赖那个第三方校验服务；它不是本仓库的一部分，
+  如果续期失败，`gpt`/`dsh`/`ng` 三个 vhost 会一起到期 —— 到期前一周确认 acme.sh 续期日志。
+- **本机 /etc/hosts 的坑**：这台工作站的 `/etc/hosts` 里有 `103.59.145.127 gpt001.iotalking.top`
+  这条手工记录（那个 IP 已下线，公网 DNS 里 `gpt001.iotalking.top` 指向 47.80.68.113），
+  会让 `curl gpt001.iotalking.top` 静默连到一台不存在的机器。
