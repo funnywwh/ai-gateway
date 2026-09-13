@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -301,6 +302,38 @@ func TestMCPAdminReadScopeCannotWrite(t *testing.T) {
 	}
 	if !strings.Contains(decoded["error_text"].(string), "scope=admin") {
 		t.Fatalf("the refusal must explain the required scope: %+v", decoded)
+	}
+
+	// Model reasoning is readable through the list endpoint but remains a write
+	// operation even when a caller only attempts to clear or change that field.
+	f.seedScopedMCPToken(t, testAdminMCPToken, mcpsrv.ScopeAdmin)
+	created, isError := f.callTool(t, testAdminMCPToken, 3, toolAdminRequest,
+		`{"name":"admin_upsert_model","body":{"public_name":"readback-reasoning","reasoning":{"mode":"force","effort":"high"}}}`)
+	if isError {
+		t.Fatalf("admin must create a model reasoning setting: %+v", created)
+	}
+	listed, isError := f.callTool(t, testReadMCPToken, 4, toolAdminRequest, `{"name":"admin_list_models"}`)
+	if isError {
+		t.Fatalf("admin_read must list model reasoning: %+v", listed)
+	}
+	listBody, _ := listed["body"].(map[string]any)
+	rows, _ := listBody["data"].([]any)
+	var reasoning any
+	for _, raw := range rows {
+		row, _ := raw.(map[string]any)
+		if row["public_name"] == "readback-reasoning" {
+			reasoning = row["reasoning"]
+			break
+		}
+	}
+	got, _ := reasoning.(map[string]any)
+	if got == nil || got["mode"] != "force" || got["effort"] != "high" {
+		t.Fatalf("admin_read list must expose reasoning object: %#v", reasoning)
+	}
+	denied, isError := f.callTool(t, testReadMCPToken, 5, toolAdminRequest,
+		`{"name":"admin_update_model","params":{"name":"readback-reasoning"},"body":{"reasoning":null}}`)
+	if !isError || !strings.Contains(denied["error_text"].(string), "scope=admin") {
+		t.Fatalf("admin_read must not change or clear model reasoning: %+v", denied)
 	}
 }
 
@@ -704,6 +737,76 @@ func TestMCPPricingExampleIsWritable(t *testing.T) {
 		t.Errorf("$0.20/1M input, $0.02/1M cache-hit and $1.20/1M output over 1M+1M+1M tokens "+
 			"is 1.60 USD = 1600000 micros, got %v: the unit conversion the operator's request "+
 			"depended on is wrong", simBody["cost_micros"])
+	}
+}
+
+func TestMCPModelReasoningSchemaAndClear(t *testing.T) {
+	f := newAdminFixture(t)
+	f.seedScopedMCPToken(t, testAdminMCPToken, mcpsrv.ScopeAdmin)
+
+	detail, isError := f.callTool(t, testAdminMCPToken, 1, toolAdminDescribe,
+		`{"name":"admin_update_model"}`)
+	if isError {
+		t.Fatalf("admin_describe failed: %+v", detail)
+	}
+	schema, _ := detail["body_schema"].(map[string]any)
+	properties, _ := schema["properties"].(map[string]any)
+	reasoningSchema, _ := properties["reasoning"].(map[string]any)
+	oneOf, _ := reasoningSchema["oneOf"].([]any)
+	if _, hasType := reasoningSchema["type"]; hasType {
+		t.Fatalf("reasoning schema must not constrain its oneOf alternatives with a top-level type: %+v", reasoningSchema)
+	}
+	if len(oneOf) != 2 {
+		t.Fatalf("reasoning schema must allow object or null: %+v", reasoningSchema)
+	}
+	object, _ := oneOf[0].(map[string]any)
+	if object["type"] != "object" || object["additionalProperties"] != false {
+		t.Fatalf("reasoning object must be strict: %+v", object)
+	}
+	required, _ := object["required"].([]any)
+	if len(required) != 2 || required[0] != "mode" || required[1] != "effort" {
+		t.Fatalf("reasoning object must require mode and effort: %+v", object)
+	}
+	null, _ := oneOf[1].(map[string]any)
+	if null["type"] != "null" {
+		t.Fatalf("reasoning schema second alternative must allow clear with null: %+v", null)
+	}
+	reasoningProperties, _ := object["properties"].(map[string]any)
+	mode, _ := reasoningProperties["mode"].(map[string]any)
+	if !strings.Contains(fmt.Sprint(mode["description"]), "客户端未提供") {
+		t.Fatalf("default mode description must state it fills only a missing request effort: %+v", mode)
+	}
+	// admin_request places path values in params and JSON fields under body; keep
+	// the generated MCP example aligned with the bridge's actual convention.
+	example, _ := detail["example"].(map[string]any)
+	arguments, _ := example["arguments"].(map[string]any)
+	params, _ := arguments["params"].(map[string]any)
+	if params["name"] == nil {
+		t.Fatalf("model update example must place path name in params: %+v", arguments)
+	}
+	exampleBody, _ := arguments["body"].(map[string]any)
+	if _, present := exampleBody["reasoning"]; !present {
+		t.Fatalf("model update example must place reasoning in body: %+v", arguments)
+	}
+
+	created, isError := f.callTool(t, testAdminMCPToken, 2, toolAdminRequest,
+		`{"name":"admin_upsert_model","body":{"public_name":"mcp-reasoning","reasoning":{"mode":"force","effort":"high"}}}`)
+	if isError {
+		t.Fatalf("writing model reasoning failed: %+v", created)
+	}
+	body, _ := created["body"].(map[string]any)
+	if got, _ := body["reasoning"].(map[string]any); got == nil || got["effort"] != "high" {
+		t.Fatalf("written reasoning = %#v", body["reasoning"])
+	}
+
+	cleared, isError := f.callTool(t, testAdminMCPToken, 3, toolAdminRequest,
+		`{"name":"admin_update_model","params":{"name":"mcp-reasoning"},"body":{"reasoning":null}}`)
+	if isError {
+		t.Fatalf("clearing model reasoning failed: %+v", cleared)
+	}
+	body, _ = cleared["body"].(map[string]any)
+	if body["reasoning"] != nil {
+		t.Fatalf("cleared reasoning = %#v, want null", body["reasoning"])
 	}
 }
 

@@ -1,0 +1,1 @@
+ALTER TABLE models ADD COLUMN reasoning_json TEXT NOT NULL DEFAULT '';

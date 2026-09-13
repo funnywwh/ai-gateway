@@ -48,6 +48,9 @@ func (db *DB) Bootstrap(ctx context.Context, cfg config.Bootstrap, pluginStateDi
 	if mode != "upsert" && mode != "merge" {
 		return nil, domain.ErrInvalidRequest("bootstrap.mode must be off|upsert|merge")
 	}
+	if err := validateBootstrapReasoning(cfg.Models); err != nil {
+		return nil, err
+	}
 	merge := mode == "merge"
 
 	accountIDs, err := db.seedAccounts(ctx, cfg.Accounts, merge, res)
@@ -262,6 +265,18 @@ func (db *DB) seedProviders(ctx context.Context, providers []config.BootstrapPro
 	return ids, nil
 }
 
+func validateBootstrapReasoning(models []config.BootstrapModel) error {
+	for _, model := range models {
+		if model.Reasoning == nil {
+			continue
+		}
+		if err := model.Reasoning.Validate(); err != nil {
+			return domain.ErrInvalidRequest(fmt.Sprintf("bootstrap model %q reasoning: %v", model.PublicName, err))
+		}
+	}
+	return nil
+}
+
 func (db *DB) seedModels(ctx context.Context, models []config.BootstrapModel, merge bool, res *BootstrapResult) error {
 	for _, bm := range models {
 		if bm.PublicName == "" {
@@ -270,6 +285,21 @@ func (db *DB) seedModels(ctx context.Context, models []config.BootstrapModel, me
 		aliases, err := tagsJSON(bm.Aliases)
 		if err != nil {
 			return err
+		}
+		reasoningJSON := ""
+		if bm.Reasoning != nil {
+			reasoning := domain.ModelReasoning{
+				Mode:   bm.Reasoning.Mode,
+				Effort: bm.Reasoning.Effort,
+			}
+			if err := reasoning.Validate(); err != nil {
+				return fmt.Errorf("bootstrap: model %q reasoning: %w", bm.PublicName, err)
+			}
+			encoded, err := json.Marshal(reasoning)
+			if err != nil {
+				return fmt.Errorf("bootstrap: model %q reasoning: %w", bm.PublicName, err)
+			}
+			reasoningJSON = string(encoded)
 		}
 		existing, getErr := db.GetModelByName(ctx, bm.PublicName)
 		switch {
@@ -282,6 +312,9 @@ func (db *DB) seedModels(ctx context.Context, models []config.BootstrapModel, me
 			if bm.SalePricing != "" {
 				existing.SalePricingJSON = bm.SalePricing
 			}
+			if bm.Reasoning != nil {
+				existing.ReasoningJSON = reasoningJSON
+			}
 			if _, err := db.UpsertModel(ctx, existing); err != nil {
 				return err
 			}
@@ -291,6 +324,7 @@ func (db *DB) seedModels(ctx context.Context, models []config.BootstrapModel, me
 				AliasesJSON:     aliases,
 				Enabled:         boolOr(bm.Enabled, true),
 				SalePricingJSON: bm.SalePricing,
+				ReasoningJSON:   reasoningJSON,
 			}); err != nil {
 				return err
 			}

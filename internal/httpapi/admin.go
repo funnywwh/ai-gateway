@@ -102,6 +102,24 @@ func (s *Server) audit(ctx context.Context, actor, action, targetType, targetID 
 	}
 }
 
+// reloadModel is the model-write variant of reload. Unlike the historical
+// best-effort helper, it reports a registry failure to its caller: the database
+// row is durable, but an unchanged registry means the requested model policy is
+// not active yet. Key-cache invalidation remains best effort and mirrors reload.
+func (s *Server) reloadModel(ctx context.Context, reason string) error {
+	if s.deps.InvalidateAll != nil {
+		s.deps.InvalidateAll()
+	}
+	if s.deps.Reload == nil {
+		return nil
+	}
+	if _, err := s.deps.Reload(ctx); err != nil {
+		s.deps.Log.Error("registry reload after model admin write failed", "err", err, "reason", reason)
+		return err
+	}
+	return nil
+}
+
 // reload refreshes caches and the routing snapshot after a write.
 func (s *Server) reload(ctx context.Context, reason string, invalidateAll bool) {
 	if s.deps.InvalidateKey != nil && !invalidateAll {

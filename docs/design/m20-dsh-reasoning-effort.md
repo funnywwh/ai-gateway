@@ -147,3 +147,5 @@ DSH 模型菜单的档位
 - 网关：把 id 12 的 `capabilities` 改回 `{stream: true, tools: true}`；`config.yaml` 用 `git checkout config.yaml` 还原。
 
 全程不涉及数据库迁移、协议/Schema 变更与代码路径改动，回滚无残留状态。
+
+> 后续新增的网关**模型级** reasoning 覆写是另一项功能，涉及数据库迁移、数据路径与管理面；请见 [`model-reasoning.md`](model-reasoning.md)。本 M20 的历史结论和范围不因该后续功能改变。

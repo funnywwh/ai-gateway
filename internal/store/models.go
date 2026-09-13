@@ -11,7 +11,7 @@ import (
 )
 
 const modelCols = `id, public_name, display_name, aliases_json, enabled, sale_pricing_json,
-	policy_json, created_at, updated_at`
+	policy_json, reasoning_json, created_at, updated_at`
 
 func scanModel(row rowScanner) (*domain.Model, error) {
 	var (
@@ -20,7 +20,7 @@ func scanModel(row rowScanner) (*domain.Model, error) {
 		createdAt, updatedAt int64
 	)
 	if err := row.Scan(&m.ID, &m.PublicName, &m.DisplayName, &m.AliasesJSON, &enabled,
-		&m.SalePricingJSON, &m.PolicyJSON, &createdAt, &updatedAt); err != nil {
+		&m.SalePricingJSON, &m.PolicyJSON, &m.ReasoningJSON, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
 	m.Enabled = enabled != 0
@@ -76,17 +76,18 @@ func (db *DB) UpsertModel(ctx context.Context, m *domain.Model) (int64, error) {
 	m.UpdatedAt = now
 
 	if _, err := db.write.ExecContext(ctx, `
-INSERT INTO models(public_name, display_name, aliases_json, enabled, sale_pricing_json, policy_json, created_at, updated_at)
-VALUES(?,?,?,?,?,?,?,?)
+INSERT INTO models(public_name, display_name, aliases_json, enabled, sale_pricing_json, policy_json, reasoning_json, created_at, updated_at)
+VALUES(?,?,?,?,?,?,?,?,?)
 ON CONFLICT(public_name) DO UPDATE SET
   display_name = excluded.display_name,
   aliases_json = excluded.aliases_json,
   enabled = excluded.enabled,
   sale_pricing_json = excluded.sale_pricing_json,
   policy_json = excluded.policy_json,
+  reasoning_json = excluded.reasoning_json,
   updated_at = excluded.updated_at`,
 		m.PublicName, m.DisplayName, m.AliasesJSON, boolInt(m.Enabled), m.SalePricingJSON,
-		m.PolicyJSON, unix(m.CreatedAt), unix(m.UpdatedAt)); err != nil {
+		m.PolicyJSON, m.ReasoningJSON, unix(m.CreatedAt), unix(m.UpdatedAt)); err != nil {
 		return 0, fmt.Errorf("store: upsert model %q: %w", m.PublicName, err)
 	}
 	var id int64

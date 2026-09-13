@@ -22,6 +22,7 @@ export async function render({ page, actions, session }) {
       { key: 'route_count', label: '路由数' },
       { key: 'aliases', label: '别名', render: (row) => (row.aliases || []).join(', ') || '—' },
       { key: 'sale_pricing', label: '对客定价', render: (row) => row.sale_pricing ? el('code', { text: JSON.stringify(row.sale_pricing) }) : el('span', { class: 'muted', text: '未设置' }) },
+      { key: 'reasoning', label: '推理', render: (row) => reasoningLabel(row.reasoning) },
     ],
     rowActions: (row) => readonly ? [] : [el('button', { class: 'btn', text: '编辑', onclick: () => editModel(row, () => modelView.refresh()) })],
     load: ({ limit, offset }) => api.get('/models', { limit, offset }),
@@ -60,8 +61,10 @@ export async function render({ page, actions, session }) {
         { name: 'public_name', label: '对外模型名', required: true },
         { name: 'display_name', label: '显示名' },
         { name: 'aliases', label: '别名（JSON 数组）', type: 'textarea', json: true, value: '[]' },
+        { name: 'reasoning_mode', label: '推理设置', type: 'select', options: reasoningModeOptions(), hint: reasoningModeHint() },
+        { name: 'reasoning_effort', label: '推理强度（默认/强制模式生效）', type: 'select', options: reasoningEffortOptions(), hint: reasoningEffortHint() },
       ],
-      onSubmit: async (values) => { await api.post('/models', values); toast('已创建', 'ok'); await modelView.refresh(); return true; },
+      onSubmit: async (values) => { await api.post('/models', modelPayload(values)); toast('已创建', 'ok'); await modelView.refresh(); return true; },
     });
     return result;
   });
@@ -91,6 +94,40 @@ export async function render({ page, actions, session }) {
   await Promise.all([modelView.refresh(), routeView.refresh()]);
 }
 
+function reasoningModeOptions() {
+  return [
+    { value: 'inherit', label: '继承（清除模型级设置）' },
+    { value: 'default', label: '默认（未指定时使用以下强度）' },
+    { value: 'force', label: '强制（总是使用以下强度）' },
+  ];
+}
+
+function reasoningModeHint() {
+  return '默认模式会保留客户端明确指定的强度（包括 none）；强制模式会覆盖强度，但保留请求的 summary。仅作用于该对外模型，所有路由共享此设置。';
+}
+
+function reasoningEffortHint() {
+  return '仅默认/强制模式生效；请选目标上游支持的等级，不支持时由上游拒绝请求。';
+}
+
+function reasoningEffortOptions() {
+  return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+    .map((value) => ({ value, label: value }));
+}
+
+function reasoningLabel(reasoning) {
+  if (!reasoning) return el('span', { class: 'muted', text: '继承' });
+  return el('code', { text: `${reasoning.mode}: ${reasoning.effort}` });
+}
+
+// The API represents inheritance as null, while the form uses a readable option.
+function modelPayload({ reasoning_mode, reasoning_effort, ...values }) {
+  values.reasoning = reasoning_mode === 'inherit'
+    ? null
+    : { mode: reasoning_mode, effort: reasoning_effort };
+  return values;
+}
+
 async function editModel(row, reload) {
   const result = await modal({
     title: '编辑模型 ' + row.public_name,
@@ -99,8 +136,10 @@ async function editModel(row, reload) {
       { name: 'enabled', label: '启用', type: 'checkbox', value: row.enabled },
       { name: 'aliases', label: '别名（JSON 数组）', type: 'textarea', json: true, value: row.aliases || [] },
       { name: 'sale_pricing', label: '对客定价（JSON，M11a 计价引擎使用）', type: 'textarea', json: true, value: row.sale_pricing || '' },
+      { name: 'reasoning_mode', label: '推理设置', type: 'select', options: reasoningModeOptions(), value: row.reasoning?.mode || 'inherit', hint: reasoningModeHint() },
+      { name: 'reasoning_effort', label: '推理强度（默认/强制模式生效）', type: 'select', options: reasoningEffortOptions(), value: row.reasoning?.effort || 'medium', hint: reasoningEffortHint() },
     ],
-    onSubmit: async (values) => { await api.patch('/models/' + encodeURIComponent(row.public_name), values); toast('已保存', 'ok'); await reload(); return true; },
+    onSubmit: async (values) => { await api.patch('/models/' + encodeURIComponent(row.public_name), modelPayload(values)); toast('已保存', 'ok'); await reload(); return true; },
   });
   return result;
 }

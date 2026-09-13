@@ -182,6 +182,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, apiErr)
 			return
 		}
+		applyModelReasoning(provReq, plan.Reasoning)
 		if len(priorItems) > 0 {
 			provReq.Input = append(append([]pluginapi.Item{}, priorItems...), provReq.Input...)
 		}

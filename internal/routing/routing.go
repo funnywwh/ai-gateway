@@ -84,6 +84,8 @@ type Result struct {
 	Candidates []domain.Candidate
 	Excluded   []domain.Exclusion
 	Strategy   string
+	// Reasoning is the canonical model policy captured from this routing snapshot.
+	Reasoning *domain.ModelReasoning
 	// Affinity is this request's sticky-routing slot, and "" when the request does not
 	// take part in stickiness at all: the feature is off, the client sent no session
 	// key, no key was identified, or the request pinned a provider. It is opaque on
@@ -232,6 +234,23 @@ func (r *Router) Plan(in domain.RouteRequest) (*Result, error) {
 	}
 
 	res := &Result{Resolved: resolved, Grant: grant, Strategy: r.Strategy(in, grant)}
+	if model := snap.ModelByName[resolved.Canonical]; model != nil {
+		res.Reasoning, err = domain.ParseModelReasoning(model.ReasoningJSON)
+		if err != nil {
+			return nil, err
+		}
+		if res.Reasoning != nil {
+			// Both modes produce a nonempty effort: default either preserves the
+			// client's explicit effort or supplies the configured one. Copy the
+			// caller's feature map rather than leaking this model's policy to it.
+			features := make(map[string]bool, len(in.Features)+1)
+			for name, enabled := range in.Features {
+				features[name] = enabled
+			}
+			features["reasoning"] = true
+			in.Features = features
+		}
+	}
 	now := time.Now()
 
 	if resolved.Pinned {

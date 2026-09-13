@@ -70,6 +70,19 @@ func jsonArrayString(raw json.RawMessage, field string) (string, error) {
 	return trimmed, nil
 }
 
+// modelReasoningString validates the model-level reasoning override. Omission is
+// handled by the caller; null explicitly clears the independent stored setting.
+func modelReasoningString(raw json.RawMessage) (string, error) {
+	value, err := jsonObjectString(raw, "reasoning")
+	if err != nil || value == "" {
+		return value, err
+	}
+	if _, err := domain.ParseModelReasoning(value); err != nil {
+		return "", domain.ErrInvalidRequest(err.Error())
+	}
+	return value, nil
+}
+
 func validateProviderKind(kind string) error {
 	if providers.IsBuiltin(kind) {
 		return nil
@@ -214,6 +227,7 @@ func modelJSON(m *domain.Model) map[string]any {
 		"id": m.ID, "public_name": m.PublicName, "display_name": m.DisplayName,
 		"aliases": jsonOrEmptyArray(m.AliasesJSON), "enabled": m.Enabled,
 		"sale_pricing": jsonOrNil(m.SalePricingJSON), "policy": jsonOrNil(m.PolicyJSON),
+		"reasoning":  jsonOrNil(m.ReasoningJSON),
 		"updated_at": m.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 }

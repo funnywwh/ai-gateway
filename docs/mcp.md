@@ -101,6 +101,33 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
 - 常见排障路径都在里面：`admin_provider_logs`（插件 stderr）、`admin_test_provider`（真实探测）、
   `admin_explain_router`（为什么这个模型不可用）、`admin_billing_invariants`、`admin_list_audit_logs`。
 
+### 模型级推理强度示例
+
+模型 reasoning 是规范/对外模型级设置，所有该模型的路由共享；不是供应商级开关，也不会重启插件。先调用
+`admin_describe({name:"admin_update_model"})` 获取实时 schema。路径模型名必须放进 `params`，`reasoning` 放进 `body`：
+
+```json
+{"name":"admin_request","arguments":{
+  "name":"admin_update_model",
+  "params":{"name":"canonical-model"},
+  "body":{"reasoning":{"mode":"default","effort":"medium"}}
+}}
+```
+
+`default` 只在客户端没有显式 `reasoning.effort` 时补入 `medium`（明确的 `none` 仍保留）；`force` 则覆盖客户端 effort，但保留 reasoning 的 `summary`。对象必须同时有 `mode` 与 `effort`，且没有未知字段。可写 effort 为 `none|minimal|low|medium|high|xhigh|max`；这不是上游逐模型兼容性保证，上游不支持会拒绝请求。
+
+清空该模型覆写并恢复继承时，显式写 `null`，不是省略字段：
+
+```json
+{"name":"admin_request","arguments":{
+  "name":"admin_update_model",
+  "params":{"name":"canonical-model"},
+  "body":{"reasoning":null}
+}}
+```
+
+模型行先持久化、后重载 registry。重载失败时调用返回 500 并说明“已保存但未应用”；修复原因后重试更新。完整架构、bootstrap 与测试边界见 [`docs/design/model-reasoning.md`](design/model-reasoning.md)。
+
 ## 4.5 工具说明标准（新增工具/字段必读）
 
 工具说明（`description` 与 `inputSchema` 的属性说明、`admin_describe` 的 `body_schema`/`example`）

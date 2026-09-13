@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1412,6 +1413,79 @@ func TestAdminRequestDetailRendersProseColumns(t *testing.T) {
 	}
 	if payload["input_recorded"] != true || payload["output_text_recorded"] != true {
 		t.Errorf("recording flags = %v/%v, want both true", payload["input_recorded"], payload["output_text_recorded"])
+	}
+}
+
+func TestAdminModelReasoningCRUD(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	created := decodeJSONBody(t, f.call(t, http.MethodPost, "/admin/api/v1/models",
+		`{"public_name":"reasoning-model","reasoning":{"mode":"force","effort":"high"}}`, cookie))
+	reasoning, ok := created["reasoning"].(map[string]any)
+	if !ok || reasoning["mode"] != "force" || reasoning["effort"] != "high" {
+		t.Fatalf("created reasoning = %#v, want force/high", created["reasoning"])
+	}
+
+	updated := decodeJSONBody(t, f.call(t, http.MethodPatch, "/admin/api/v1/models/reasoning-model",
+		`{"reasoning":{"mode":"default","effort":"low"}}`, cookie))
+	reasoning, ok = updated["reasoning"].(map[string]any)
+	if !ok || reasoning["mode"] != "default" || reasoning["effort"] != "low" {
+		t.Fatalf("updated reasoning = %#v, want default/low", updated["reasoning"])
+	}
+
+	cleared := decodeJSONBody(t, f.call(t, http.MethodPatch, "/admin/api/v1/models/reasoning-model", `{"reasoning":null}`, cookie))
+	if cleared["reasoning"] != nil {
+		t.Fatalf("cleared reasoning = %#v, want null", cleared["reasoning"])
+	}
+
+	for _, body := range []string{
+		`{"reasoning":{"mode":"inherit","effort":"high"}}`,
+		`{"reasoning":{"mode":"force","effort":"unsupported"}}`,
+		`{"reasoning":{"mode":"force","effort":"high","unknown":true}}`,
+		`{"reasoning":[]}`,
+	} {
+		resp := f.call(t, http.MethodPatch, "/admin/api/v1/models/reasoning-model", body, cookie)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("body %s: status = %d, want 400", body, resp.StatusCode)
+		}
+	}
+}
+
+func TestAdminModelWriteReportsPersistedButUnappliedReloadFailure(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+	f.api.deps.Reload = func(context.Context) (any, error) { return nil, errors.New("registry unavailable") }
+
+	resp := f.call(t, http.MethodPost, "/admin/api/v1/models", `{"public_name":"not-applied"}`, cookie)
+	if resp.StatusCode != http.StatusInternalServerError {
+		resp.Body.Close()
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	}
+	var errorPayload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&errorPayload); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if errorPayload.Error.Code != "internal_error" {
+		t.Fatalf("reload failure code = %q, want internal_error", errorPayload.Error.Code)
+	}
+	if !strings.Contains(errorPayload.Error.Message, "saved but was not applied") {
+		t.Fatalf("reload failure must explain persisted-but-unapplied state, got %q", errorPayload.Error.Message)
+	}
+	if strings.Contains(errorPayload.Error.Message, "registry unavailable") {
+		t.Fatalf("reload failure must not expose the underlying error: %q", errorPayload.Error.Message)
+	}
+	stored, err := f.db.GetModelByName(context.Background(), "not-applied")
+	if err != nil || stored.PublicName != "not-applied" {
+		t.Fatalf("model write must persist despite reload failure: model=%+v err=%v", stored, err)
 	}
 }
 

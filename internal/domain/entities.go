@@ -85,6 +85,7 @@ type Model struct {
 	Enabled         bool
 	SalePricingJSON string
 	PolicyJSON      string
+	ReasoningJSON   string
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }

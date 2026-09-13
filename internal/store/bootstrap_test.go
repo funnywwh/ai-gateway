@@ -29,7 +29,11 @@ func TestBootstrapSeedsRoutingGraph(t *testing.T) {
 				Capabilities: map[string]bool{"stream": true, "tools": false},
 			}},
 		}},
-		Models: []config.BootstrapModel{{PublicName: "llama-local", Aliases: []string{"local"}}},
+		Models: []config.BootstrapModel{{
+			PublicName: "llama-local",
+			Aliases:    []string{"local"},
+			Reasoning:  &config.BootstrapModelReasoning{Mode: "force", Effort: "high"},
+		}},
 		Routes: []config.BootstrapRoute{{Model: "llama-local", Provider: "local-chat", UpstreamModel: "llama3.1:8b", Priority: 10, Weight: 100}},
 		Tags:   []config.BootstrapTag{{Name: "free", Models: []string{"llama-local"}, Providers: []string{"local-chat"}, Priority: 10}},
 	}
@@ -71,6 +75,48 @@ func TestBootstrapSeedsRoutingGraph(t *testing.T) {
 	}
 	if model.AliasesJSON != `["local"]` {
 		t.Errorf("aliases json = %q", model.AliasesJSON)
+	}
+	if model.ReasoningJSON != `{"mode":"force","effort":"high"}` {
+		t.Errorf("reasoning json = %q", model.ReasoningJSON)
+	}
+
+	// Merge only changes reasoning when the field was explicitly supplied. This lets a
+	// partial bootstrap file update aliases/pricing without accidentally clearing the
+	// live model override.
+	mergeOmitted := config.Bootstrap{
+		Mode: "merge",
+		Models: []config.BootstrapModel{{
+			PublicName: "llama-local",
+			Aliases:    []string{"local", "retained"},
+		}},
+	}
+	if _, err := db.Bootstrap(ctx, mergeOmitted, stateDir); err != nil {
+		t.Fatal(err)
+	}
+	model, err = db.GetModelByName(ctx, "llama-local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.ReasoningJSON != `{"mode":"force","effort":"high"}` {
+		t.Fatalf("omitted merge reasoning must retain existing value, got %q", model.ReasoningJSON)
+	}
+
+	mergeReplacement := config.Bootstrap{
+		Mode: "merge",
+		Models: []config.BootstrapModel{{
+			PublicName: "llama-local",
+			Reasoning:  &config.BootstrapModelReasoning{Mode: "default", Effort: "minimal"},
+		}},
+	}
+	if _, err := db.Bootstrap(ctx, mergeReplacement, stateDir); err != nil {
+		t.Fatal(err)
+	}
+	model, err = db.GetModelByName(ctx, "llama-local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.ReasoningJSON != `{"mode":"default","effort":"minimal"}` {
+		t.Fatalf("explicit merge reasoning must replace existing value, got %q", model.ReasoningJSON)
 	}
 
 	routes, err := db.ListRoutes(ctx)

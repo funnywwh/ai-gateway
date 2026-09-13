@@ -415,12 +415,54 @@ type BootstrapProvider struct {
 	Models      []BootstrapProviderModel `yaml:"models"`
 }
 
+// BootstrapModelReasoning is the configuration-file representation of a model's
+// reasoning override. The store maps and validates it at the domain boundary.
+type BootstrapModelReasoning struct {
+	Mode   string `yaml:"mode"`
+	Effort string `yaml:"effort"`
+}
+
+// UnmarshalYAML accepts only the two reasoning keys so a misspelled bootstrap
+// setting cannot be silently ignored by YAML's permissive default decoder.
+func (r *BootstrapModelReasoning) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("bootstrap model reasoning must be a mapping")
+	}
+	for i := 0; i < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		if key != "mode" && key != "effort" {
+			return fmt.Errorf("bootstrap model reasoning has unknown field %q", key)
+		}
+	}
+	type plain BootstrapModelReasoning
+	var decoded plain
+	if err := node.Decode(&decoded); err != nil {
+		return err
+	}
+	*r = BootstrapModelReasoning(decoded)
+	return nil
+}
+
+// Validate checks the bootstrap reasoning values before the store maps them to the domain type.
+func (r BootstrapModelReasoning) Validate() error {
+	if r.Mode != "default" && r.Mode != "force" {
+		return fmt.Errorf("bootstrap model reasoning mode must be default|force (got %q)", r.Mode)
+	}
+	switch r.Effort {
+	case "none", "minimal", "low", "medium", "high", "xhigh", "max":
+		return nil
+	default:
+		return fmt.Errorf("bootstrap model reasoning effort must be none|minimal|low|medium|high|xhigh|max (got %q)", r.Effort)
+	}
+}
+
 // BootstrapModel declares one canonical (client-facing) model.
 type BootstrapModel struct {
-	PublicName  string   `yaml:"public_name"`
-	Aliases     []string `yaml:"aliases"`
-	Enabled     *bool    `yaml:"enabled"`
-	SalePricing string   `yaml:"sale_pricing"` // raw JSON rule set (sale side)
+	PublicName  string                   `yaml:"public_name"`
+	Aliases     []string                 `yaml:"aliases"`
+	Enabled     *bool                    `yaml:"enabled"`
+	SalePricing string                   `yaml:"sale_pricing"` // raw JSON rule set (sale side)
+	Reasoning   *BootstrapModelReasoning `yaml:"reasoning"`
 }
 
 // BootstrapRoute binds a canonical model to a provider.
@@ -825,6 +867,13 @@ func (c *Config) Validate() error {
 	}
 	if err := validateChat(c); err != nil {
 		return err
+	}
+	for _, model := range c.Bootstrap.Models {
+		if model.Reasoning != nil {
+			if err := model.Reasoning.Validate(); err != nil {
+				return fmt.Errorf("bootstrap model %q reasoning: %w", model.PublicName, err)
+			}
+		}
 	}
 	return nil
 }

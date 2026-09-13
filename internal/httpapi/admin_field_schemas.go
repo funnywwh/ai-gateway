@@ -197,6 +197,29 @@ func modelPolicySchema() map[string]any {
 		"（限速与路由策略读的是 key/tag 的 policy）。要配置限速与路由请用 admin_create_key / admin_update_key / admin_upsert_tag 的 policy")
 }
 
+// modelReasoningSchema is the independently stored per-model reasoning override.
+// null clears it so the model inherits its provider/default behavior. The object
+// form is intentionally strict because domain.ParseModelReasoning rejects unknown
+// keys and unsupported values.
+func modelReasoningSchema() map[string]any {
+	object := objectDocument(map[string]any{
+		"mode": stringEnumProp(
+			"default = 仅在客户端未提供 reasoning.effort 时补入下方 effort；force = 无论客户端是否提供都使用下方 effort",
+			"default", "force"),
+		"effort": stringEnumProp("推理强度；支持 none、minimal、low、medium、high、xhigh、max", "none", "minimal", "low", "medium", "high", "xhigh", "max"),
+	}, true, "模型级推理覆写。")
+	object["required"] = []string{"mode", "effort"}
+	return map[string]any{
+		// Do not set a top-level type here: schemaForFields uses this map verbatim,
+		// so the alternatives genuinely allow either the strict object or JSON null.
+		"oneOf": []any{
+			object,
+			map[string]any{"type": "null", "description": "清空模型级覆写并继承默认行为"},
+		},
+		"description": "模型级推理配置；省略不改，null 清空并继承。对象必须包含且只包含 mode 与 effort。",
+	}
+}
+
 func routePolicySchema() map[string]any {
 	return unenforcedObjectSchema("路由级策略。**当前不生效**：网关把该文档原样保存，但没有任何读取方。" +
 		"要调整某个模型的路由，请改路由的 priority/weight/enabled（admin_update_route）或加路由（admin_upsert_route），" +

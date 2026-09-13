@@ -770,6 +770,8 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 					s.ledgerCurrency()),
 				exampleField(schemaField(bodyOptional("policy", "object", "模型级策略。字段说明见本参数 schema"), modelPolicySchema()),
 					map[string]any{}),
+				exampleField(schemaField(bodyOptional("reasoning", "object", "模型级推理覆写；省略不改，写 null 清空并继承。字段说明见本参数 schema"), modelReasoningSchema()),
+					map[string]any{"mode": "force", "effort": "high"}),
 			},
 		},
 		{
@@ -786,6 +788,8 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 					s.ledgerCurrency()),
 				exampleField(schemaField(bodyOptional("policy", "object", "模型级策略。字段说明见本参数 schema"), modelPolicySchema()),
 					map[string]any{}),
+				exampleField(schemaField(bodyOptional("reasoning", "object", "模型级推理覆写；省略不改，写 null 清空并继承。字段说明见本参数 schema"), modelReasoningSchema()),
+					map[string]any{"mode": "force", "effort": "high"}),
 			},
 		},
 		{

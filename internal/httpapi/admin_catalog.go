@@ -284,6 +284,7 @@ func (s *Server) handleAdminUpsertModel(w http.ResponseWriter, r *http.Request) 
 		Enabled     *bool           `json:"enabled"`
 		SalePricing json.RawMessage `json:"sale_pricing"`
 		Policy      json.RawMessage `json:"policy"`
+		Reasoning   json.RawMessage `json:"reasoning"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
@@ -347,6 +348,14 @@ func (s *Server) handleAdminUpsertModel(w http.ResponseWriter, r *http.Request) 
 		}
 		m.PolicyJSON = raw
 	}
+	if body.Reasoning != nil {
+		raw, err := modelReasoningString(body.Reasoning)
+		if err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		m.ReasoningJSON = raw
+	}
 	id, err := store.UpsertModel(r.Context(), m)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
@@ -359,8 +368,13 @@ func (s *Server) handleAdminUpsertModel(w http.ResponseWriter, r *http.Request) 
 		status = http.StatusCreated
 	}
 	s.audit(r.Context(), actor.Username, action, "model", strconv.FormatInt(id, 10),
-		map[string]any{"public_name": name, "enabled": m.Enabled}, "ok")
-	s.reload(r.Context(), "model "+action, true)
+		map[string]any{"public_name": name, "enabled": m.Enabled, "reasoning": jsonOrNil(m.ReasoningJSON)}, "ok")
+	if err := s.reloadModel(r.Context(), "model "+action); err != nil {
+		s.audit(r.Context(), actor.Username, "reload", "model", strconv.FormatInt(id, 10),
+			map[string]any{"public_name": name, "reasoning": jsonOrNil(m.ReasoningJSON)}, "failed")
+		writeAPIError(w, domain.ErrInternal("model configuration was saved but was not applied because registry reload failed; resolve the reload error and retry the update"))
+		return
+	}
 	writeJSON(w, status, modelJSON(m))
 }
 

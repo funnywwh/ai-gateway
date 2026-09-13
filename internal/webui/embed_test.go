@@ -66,6 +66,15 @@ func TestConsoleAssetsAreEmbedded(t *testing.T) {
 	}
 }
 
+func TestConsoleModelReasoningControlsAreEmbedded(t *testing.T) {
+	source := readAsset(t, "/js/pages/models.js")
+	for _, want := range []string{"reasoning_mode", "reasoning_effort", "推理强度（默认/强制模式生效）", "? null", "包括 none", "保留请求的 summary", "所有路由", "上游拒绝请求", "'inherit'", "'default'", "'force'"} {
+		if !strings.Contains(source, want) {
+			t.Errorf("embedded model console asset is missing reasoning control %q", want)
+		}
+	}
+}
+
 func TestConsoleSendsCSP(t *testing.T) {
 	srv := httptest.NewServer(Handler())
 	defer srv.Close()
