@@ -139,8 +139,17 @@ func dimensionAggregateSQL(source, expression, sortKey string) string {
 	if sortKey == "charge" {
 		order = "SUM(r.charge_micros) DESC"
 	}
+	workspace := "MAX(r.workspace)"
+	if expression == "r.session_id" {
+		// Workspace is a rollup key, so last_seen also identifies its latest
+		// occurrence. Prefer a nonempty workspace; break timestamp ties stably.
+		source = `SELECT c.*, FIRST_VALUE(c.workspace) OVER (
+ PARTITION BY c.session_id ORDER BY (c.workspace<>'') DESC,c.last_seen DESC,c.workspace DESC
+ ) AS session_workspace FROM (` + source + `) c`
+		workspace = "MAX(r.session_workspace)"
+	}
 	return `WITH contributions AS (` + source + `) SELECT ` + expression + ` AS group_key,
- SUM(r.requests),SUM(r.metered),MIN(r.first_seen),MAX(r.last_seen),MAX(r.title),MAX(r.workspace),
+ SUM(r.requests),SUM(r.metered),MIN(r.first_seen),MAX(r.last_seen),MAX(r.title),` + workspace + `,
  SUM(r.input_tokens),SUM(r.cached_tokens),SUM(r.output_tokens),SUM(r.reasoning_tokens),SUM(r.cost_micros),SUM(r.charge_micros)
  FROM contributions r GROUP BY group_key ORDER BY ` + order + `,group_key ASC LIMIT ? OFFSET ?`
 }

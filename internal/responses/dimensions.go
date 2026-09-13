@@ -46,10 +46,11 @@ const (
 	// developer between DSH versions.
 	dshTitleSystemPrefix = "Create a concise title for an AI coding-assistant session"
 	dshTitleUserPrefix   = "Generate the session title from this JSON array of human messages:"
-	// The sandbox policy line names the session workspace. It is rendered only in
-	// workspace-write mode (dsh-sandbox-policy), so read-only and danger-full-access
-	// sessions legitimately have no workspace in the request.
-	dshWorkspaceMarker = "session workspace: "
+	// Older DSH exposes the workspace in sandbox snapshots; newer versions also
+	// include it in developer instructions, independently of the sandbox mode.
+	dshWorkspaceMarker        = "session workspace: "
+	dshWorkingDirectoryMarker = "Your working directory is "
+	dshRuntimePrefix          = "Current runtime context."
 )
 
 // Bounds on what a single row may carry. These are metadata, not content: they only have
@@ -96,7 +97,7 @@ func (r *Request) Dimensions(clientHint string) Dimensions {
 		items = nil
 	}
 
-	var firstInstruction, envContext, runtimeContext string
+	var firstInstruction, envContext, runtimeContext, workingDirectory string
 	titleCall := false
 	codexTitleCall := false
 	for _, item := range items {
@@ -111,11 +112,16 @@ func (r *Request) Dimensions(clientHint string) Dimensions {
 			if firstInstruction == "" {
 				firstInstruction = text
 			}
+			if path := dshWorkingDirectory(text); path != "" {
+				workingDirectory = path
+			}
 		}
 		if envContext == "" && strings.HasPrefix(text, codexEnvContextTag) {
 			envContext = text
 		}
-		if runtimeContext == "" && strings.Contains(text, dshWorkspaceMarker) {
+		// A snapshot supersedes earlier snapshots, even when its policy carries
+		// no path. Never read quoted policy text from assistant messages.
+		if item.Role == "user" && strings.HasPrefix(text, dshRuntimePrefix) {
 			runtimeContext = text
 		}
 		if strings.HasPrefix(text, dshTitleUserPrefix) {
@@ -149,7 +155,11 @@ func (r *Request) Dimensions(clientHint string) Dimensions {
 	case ClientCodex:
 		out.Workspace = clampBytes(codexWorkspace(envContext), maxWorkspaceBytes)
 	case ClientDSH:
-		out.Workspace = clampBytes(dshWorkspace(runtimeContext), maxWorkspaceBytes)
+		path := dshWorkspace(runtimeContext)
+		if path == "" {
+			path = workingDirectory
+		}
+		out.Workspace = clampBytes(path, maxWorkspaceBytes)
 	}
 	return out
 }
@@ -204,15 +214,23 @@ func dshWorkspace(runtimeContext string) string {
 	if !strings.HasPrefix(rest, `"`) {
 		return ""
 	}
-	end := strings.Index(rest[1:], `"`)
-	if end < 0 {
-		return ""
-	}
 	var path string
-	if err := json.Unmarshal([]byte(rest[:end+2]), &path); err != nil {
+	if err := json.NewDecoder(strings.NewReader(rest)).Decode(&path); err != nil {
 		return ""
 	}
 	return path
+}
+
+// dshWorkingDirectory reads the dedicated developer instruction, not the
+// implementation checkout path (which can be unrelated to the session workspace).
+func dshWorkingDirectory(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, dshWorkingDirectoryMarker) {
+			return strings.TrimSuffix(strings.TrimSpace(strings.TrimPrefix(line, dshWorkingDirectoryMarker)), ".")
+		}
+	}
+	return ""
 }
 
 // TitleOf turns the model's answer to a title call into a title: one line, no surrounding

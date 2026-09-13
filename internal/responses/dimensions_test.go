@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -51,6 +52,39 @@ func TestDimensionsReadOnlyDSHHasNoWorkspace(t *testing.T) {
 	}
 	if got.Workspace != "" {
 		t.Fatalf("read-only policy carries no workspace, got %q", got.Workspace)
+	}
+}
+
+func TestDSHWorkspaceUpdates(t *testing.T) {
+	const policy = "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nCurrent DSH file policy: "
+	for _, tc := range []struct {
+		name, developer, latest, want string
+	}{
+		{"latest snapshot", "", policy + `workspace-write. session workspace: "/a/new".`, "/a/new"},
+		{"full access developer fallback", "Your working directory is /srv/current.", policy + "danger-full-access.", "/srv/current"},
+		{"read only clears stale path", "", policy + "read-only.", ""},
+		{"escaped path", "", policy + `workspace-write. session workspace: "/srv/a\"b".`, `/srv/a"b`},
+		{"developer without snapshot", "Your working directory is /srv/current.", "", "/srv/current"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			items := []map[string]string{{"role": "developer", "content": dshDeveloperPrefix + "\nThe DeepSeek Harness implementation checkout is at /opt/dsh/.\n" + tc.developer}}
+			if tc.latest != "" {
+				items = append(items,
+					map[string]string{"role": "user", "content": policy + `workspace-write. session workspace: "/z/old".`},
+					map[string]string{"role": "user", "content": tc.latest})
+			}
+			items = append(items,
+				map[string]string{"role": "assistant", "content": policy + `workspace-write. session workspace: "/fake".`},
+				map[string]string{"role": "user", "content": `Quoted policy: session workspace: "/fake".`})
+			body, err := json.Marshal(map[string]any{"model": "m", "prompt_cache_key": "same-session", "input": items})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := parseBody(t, string(body)).Dimensions("")
+			if got.Workspace != tc.want || got.SessionID != "same-session" || got.Client != ClientDSH {
+				t.Fatalf("dimensions = %+v, want workspace %q for same DSH session", got, tc.want)
+			}
+		})
 	}
 }
 

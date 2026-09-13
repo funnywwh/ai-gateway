@@ -283,15 +283,23 @@ func (db *DB) CountRequestLogDimensionGroups(ctx context.Context, f domain.Reque
 // requestLogDimensionsSQL retains the direct-join reference query for compatibility
 // probes and independent correctness comparisons against the contribution query.
 func requestLogDimensionsSQL(expression, order, where string) string {
-	return fmt.Sprintf(`
+	prefix, table, workspace := "", "request_logs", "MAX(r.workspace)"
+	if expression == "r.session_id" {
+		prefix = `WITH session_requests AS (
+ SELECT r.*, FIRST_VALUE(r.workspace) OVER (
+ PARTITION BY r.session_id ORDER BY (r.workspace<>'') DESC,r.created_at DESC,r.workspace DESC
+ ) AS session_workspace FROM request_logs r` + where + `)`
+		table, workspace, where = "session_requests", "MAX(r.session_workspace)", ""
+	}
+	return prefix + fmt.Sprintf(`
 SELECT %s AS group_key, COUNT(DISTINCT r.request_id), COUNT(DISTINCT u.request_id),
-       MIN(r.created_at), MAX(r.created_at), MAX(r.title), MAX(r.workspace),
+       MIN(r.created_at), MAX(r.created_at), MAX(r.title), `+workspace+`,
        COALESCE(SUM(`+usageTokenExpr("u.")+`), 0),
        COALESCE(SUM(COALESCE(json_extract(u.dimensions_json, '$.input_cache_hit'), 0)), 0),
        COALESCE(SUM(COALESCE(json_extract(u.dimensions_json, '$.output'), 0)), 0),
        COALESCE(SUM(COALESCE(json_extract(u.dimensions_json, '$.reasoning'), 0)), 0),
        COALESCE(SUM(u.cost_micros), 0), COALESCE(SUM(u.charge_micros), 0)
-FROM request_logs r LEFT JOIN usage_records u ON u.request_id = r.request_id`+where+
+FROM `+table+` r LEFT JOIN usage_records u ON u.request_id = r.request_id`+where+
 		` GROUP BY group_key ORDER BY `+order+` LIMIT ? OFFSET ?`, expression)
 }
 
