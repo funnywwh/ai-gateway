@@ -1604,5 +1604,13 @@
 - [x] **上游真机对照（同一个 DeepSeek key，只差一个字段）**：无 `response_format` → 200；
       带 `{"type":"json_object"}` → 400 `Prompt must contain the word 'json' …`——线上那条失败的确切形状，
       证明删掉该字段是必需的，而不只是"看起来更干净"
-- [ ] **待人工验收**（DSH GUI）：选 `deepseek-flash` 发一条普通消息，确认正常出字（此前首轮即 `upstream_400`）。
-      网关侧已无该字段可发，但没有真实客户端请求时无法证明端到端成功
+- [x] **端到端验收（2026-09-13，用 DSH 本体而非人工点按）**：宿主终端搭隔离 `DSH_HOME`
+      （拷 `settings.yaml`、把 aigw 供应商的 `baseURL` 指向 `ssh -L 18088:127.0.0.1:8088 gpt001` 隧道、
+      `agent-default-model` 改成 `aigw/deepseek-flash`、密钥只走 `AIGW_API_KEY`），跑
+      `node <DSH>/lib/bin.js --profile headless "用一句话回答：1+1 等于几？不要使用任何工具"`
+      → 输出 `1+1 等于 2。`、**退出码 0**（此前同一形状首轮即 `upstream_400`）。
+      网关侧 `request_logs` id=452/453 `client=dsh model=deepseek-flash`，请求体只有 `input/model`、
+      **没有 `text`**，状态 `completed`/`incomplete`（不是 failed）。验收用的临时 Key（id=14）已 revoke，
+      隧道与临时目录已清理
+- [x] 顺带补一条永久防线：`TestResponseFormatFollowsTheRequest` 增加"带 tools + instructions + 工具轮历史的
+      请求体里没有 `response_format`"用例（就是 DSH 那类流量），避免只有"无工具"形状被覆盖

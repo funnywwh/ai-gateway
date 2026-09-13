@@ -142,6 +142,20 @@ AI Gateway  v0.1.0 56df9b5
 - 无新依赖。`VERSION` 是新增的仓库文件，`Makefile` 与 `scripts/release.sh`（发布 skill 调用）读它。
 - 规格文档同步：`docs/api-providers.md`（§2 表格 + §3 片段）、`README.md`（入口表 + 状态）。
 
+## 7.1 端到端验收（2026-09-13）
+
+设计第 6 节的"测试策略"止于包级与脚本级，真正的收尾是拿**出问题的那个客户端**再跑一次。用 DSH 本体
+（隔离 `DSH_HOME` + `--profile headless`，供应商经 SSH 隧道指向线上网关，默认模型改成 `deepseek-flash`）：
+
+| 步骤 | 结果 |
+|---|---|
+| `node <DSH>/lib/bin.js --profile headless "用一句话回答：1+1 等于几？不要使用任何工具"` | stdout `1+1 等于 2。`，退出码 **0** |
+| 网关 `request_logs`（id=452/453，`client=dsh`） | 请求体只有 `input`/`model`（**无 `text`**），状态 `completed`/`incomplete`，无 `failed` |
+| 上游真机对照（同一 key） | 无 `response_format` → 200；带 `{"type":"json_object"}` → 400（与线上报错一字不差） |
+
+三行合起来把因果闭合：客户端的请求形状没变，变的是网关不再给它加上那个字段。
+验收用的临时 Key 事后已 revoke，隧道与临时目录已清理。
+
 ## 8. 实现与设计差异
 
 1. **版本号从 `0.1.0` 起，首个上线版本是 `0.1.2`**：`0.1.0` 是新建 `VERSION` 时的值，`0.1.1` 加了控制台

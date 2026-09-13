@@ -837,6 +837,21 @@ func TestResponseFormatFollowsTheRequest(t *testing.T) {
 			},
 			want: "json_schema",
 		},
+		{
+			// The agent shape — instructions, tools offered, a tool-carrying history — is what
+			// DSH's ordinary traffic looks like, and it is the traffic that went 400 in
+			// production once the provider forced JSON mode onto every request.
+			name:   "an agent request with tools carries no response_format",
+			config: map[string]any{"response_format": "json_object"},
+			req: func() *pluginapi.Request {
+				req := toolTurnRequest()
+				req.Instructions = "you are a coding agent"
+				req.Tools = []pluginapi.Tool{{Type: "function", Name: "read_file",
+					Parameters: json.RawMessage(`{"type":"object"}`)}}
+				return req
+			},
+			want: "",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
