@@ -127,6 +127,61 @@ type Item struct {
 	Extra     map[string]json.RawMessage `json:"-"`
 }
 
+var itemJSONFields = map[string]bool{
+	"type": true, "id": true, "role": true, "content": true, "call_id": true,
+	"name": true, "arguments": true, "output": true, "status": true, "summary": true,
+}
+
+// MarshalJSON keeps fields from input item types that the canonical protocol does not
+// model yet. Some Responses clients put provider-specific data inside an input item
+// (for example additional_tools.tools), so dropping Extra here changes a valid request
+// into an upstream validation error.
+func (i Item) MarshalJSON() ([]byte, error) {
+	type plain Item
+	encoded, err := json.Marshal(plain(i))
+	if err != nil || len(i.Extra) == 0 {
+		return encoded, err
+	}
+
+	fields := map[string]json.RawMessage{}
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		return nil, err
+	}
+	for key, value := range i.Extra {
+		if itemJSONFields[key] {
+			continue
+		}
+		fields[key] = value
+	}
+	return json.Marshal(fields)
+}
+
+// UnmarshalJSON records fields the canonical item shape does not know about. They are
+// emitted again by MarshalJSON so a provider adapter can translate only the fields it
+// understands without making newer client item types unusable.
+func (i *Item) UnmarshalJSON(data []byte) error {
+	type plain Item
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	extra := make(map[string]json.RawMessage)
+	for key, value := range fields {
+		if !itemJSONFields[key] {
+			extra[key] = append(json.RawMessage(nil), value...)
+		}
+	}
+	*i = Item(decoded)
+	if len(extra) > 0 {
+		i.Extra = extra
+	}
+	return nil
+}
+
 // SummaryPart is one reasoning summary fragment.
 type SummaryPart struct {
 	Type string `json:"type"`

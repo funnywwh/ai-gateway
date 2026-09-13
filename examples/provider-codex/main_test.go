@@ -784,6 +784,38 @@ func TestSystemRoleIsRewrittenForTheUpstream(t *testing.T) {
 	}
 }
 
+func TestAdditionalToolsInputItemIsPreservedForTheUpstream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, frame := range happyFrames {
+			_, _ = fmt.Fprint(w, frame)
+		}
+	}))
+	defer upstream.Close()
+
+	p := newTestProvider(t, upstream.URL, upstream.URL+"/session", upstream.URL+"/token",
+		map[string]string{"access_token": "static-token"})
+	var req pluginapi.Request
+	if err := json.Unmarshal([]byte(`{"model":"codex","input":[{"type":"additional_tools","tools":[{"type":"function","name":"bash"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`), &req); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := p.buildRequest(&req, true)
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	var body struct {
+		Input []map[string]json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(body.Input[0]["tools"]); got != `[{"type":"function","name":"bash"}]` {
+		t.Fatalf("additional_tools.tools = %s", got)
+	}
+}
+
 func TestOtherRolesAreLeftAlone(t *testing.T) {
 	items := []pluginapi.Item{
 		{Type: "message", Role: "developer"},

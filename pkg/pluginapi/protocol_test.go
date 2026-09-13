@@ -193,3 +193,31 @@ func TestToolRawRoundTripsThroughTheProtocol(t *testing.T) {
 		t.Fatalf("function tool encoded as %s", encoded)
 	}
 }
+
+// Newer Responses clients may carry provider-specific data inside an input item.
+// additional_tools.tools is the production example: losing it leaves the upstream
+// with an item that fails validation as "input[0].tools" is missing.
+func TestItemExtraFieldsRoundTripThroughTheProtocol(t *testing.T) {
+	raw := []byte(`{"model":"m","input":[{"type":"additional_tools","tools":[{"type":"function","name":"bash"}]}]}`)
+	var req Request
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(req.Input[0].Extra["tools"]); got != `[{"type":"function","name":"bash"}]` {
+		t.Fatalf("input item Extra[tools] = %s", got)
+	}
+
+	encoded, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Input []map[string]json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(wire.Input[0]["tools"]); got != `[{"type":"function","name":"bash"}]` {
+		t.Fatalf("encoded input item tools = %s", got)
+	}
+}
