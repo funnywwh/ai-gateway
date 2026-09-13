@@ -724,6 +724,9 @@ func (s *Server) recordContent(
 	// produced it, and copying it around would be inventing provenance.
 	if input.Dims.CallKind == responses.CallKindTitle && cfg.RecordTitle {
 		rec.Title = responses.TitleOf(assembler.Text())
+		if input.Dims.Client == responses.ClientCodex {
+			rec.Title = responses.CodexTitleOf(assembler.Text())
+		}
 	}
 	rec.ResponseBytes = len(rec.ResponseReasoning) + len(rec.ResponseText)
 

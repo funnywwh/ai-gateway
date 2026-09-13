@@ -37,7 +37,7 @@
 | `workspace` | 客户端的工作区根路径 | DSH 的沙箱策略行 / Codex 的 `<environment_context><cwd>` |
 | `session_id` | 客户端的会话键 | 请求的 `prompt_cache_key`（DSH 形如 `session-<uuid>`，Codex 为裸 uuid） |
 | `call_kind` | 会话轮次还是辅助调用 | `agent` / `title` |
-| `title` | 会话标题 | 标题调用的响应文本；**只写在标题调用那一行** |
+| `title` | 会话标题 | DSH 的标题响应文本 / Codex 结构化响应的 `title` 字段（兼容纯文本）；**只写在标题调用那一行** |
 | `account_id` / **用户** | 这笔消耗算在哪个账户（租户） | 该请求使用的 API Key 的所属账户；控制台列头写「用户」，详情写「用户（账户）」 |
 | `api_key_id` / **API Key** | 用的是哪个 Key | 该请求的凭据自身（`api_key_id`），服务路径与本地拒绝路径都写 |
 
@@ -139,3 +139,5 @@ tokens 与成本落在它们各自表头列的正下方；未计量的行只计�
 
 相关设计：`docs/design/m27-request-dimensions.md`、`docs/design/m29-request-log-page-summary.md`、
 `docs/design/m30-request-log-owner-dimensions.md`、`docs/design/m31-request-log-stats-pagination.md`。
+
+Codex 标题辅助请求根据 user 消息开头的专用任务标题提示词识别为 `call_kind=title`。标题和描述一起返回时仅记录 `title`；损坏的 JSON 对象或缺失标题时留空。标题辅助请求可能使用独立的 `prompt_cache_key`，因此标题归于辅助请求自己的会话分组；没有明确的父会话标识时，不按时间或工作区猜测归属。历史日志未录制响应正文时不能恢复标题。

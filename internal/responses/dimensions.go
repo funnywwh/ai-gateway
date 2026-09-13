@@ -31,6 +31,9 @@ const (
 const (
 	// Codex puts its system prompt in the top-level instructions field, never in a message.
 	codexInstructionPrefix = "You are a coding agent running in the Codex CLI"
+	// Captured from gpt001's Codex task-title request (#966). This is a user
+	// message, not the agent's instructions, and can request JSON title/description.
+	codexTitleUserPrefix = "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task that will be created from that prompt."
 	// Codex opens its first user message with the environment context block.
 	codexEnvContextTag         = "<environment_context>"
 	codexCwdElement            = "cwd"
@@ -96,6 +99,7 @@ func (r *Request) Dimensions(clientHint string) Dimensions {
 
 	var firstInstruction, envContext, runtimeContext string
 	titleCall := false
+	codexTitleCall := false
 	for _, item := range items {
 		if item.Type != "message" {
 			continue
@@ -118,12 +122,17 @@ func (r *Request) Dimensions(clientHint string) Dimensions {
 		if strings.HasPrefix(text, dshTitleUserPrefix) {
 			titleCall = true
 		}
+		if item.Role == "user" && strings.HasPrefix(text, codexTitleUserPrefix) {
+			codexTitleCall = true
+		}
 	}
-	if titleCall {
+	if titleCall || codexTitleCall {
 		out.CallKind = CallKindTitle
 	}
 
 	switch {
+	case codexTitleCall:
+		out.Client = ClientCodex
 	case strings.HasPrefix(strings.TrimSpace(r.Instructions), codexInstructionPrefix):
 		out.Client = ClientCodex
 	case envContext != "":
@@ -212,6 +221,22 @@ func dshWorkspace(runtimeContext string) string {
 // stored as something it is not.
 func TitleOf(text string) string {
 	return clampRunes(strings.Join(strings.Fields(text), " "), maxTitleRunes)
+}
+
+// CodexTitleOf accepts both plain titles and Codex's structured title/description
+// output. Malformed objects must not become visible titles containing raw JSON.
+func CodexTitleOf(text string) string {
+	text = strings.TrimSpace(text)
+	if strings.HasPrefix(text, "{") {
+		var result struct {
+			Title string `json:"title"`
+		}
+		if err := json.Unmarshal([]byte(text), &result); err != nil {
+			return ""
+		}
+		return TitleOf(result.Title)
+	}
+	return TitleOf(text)
 }
 
 // elementText returns the text between <name> and </name>, or "" when the element is

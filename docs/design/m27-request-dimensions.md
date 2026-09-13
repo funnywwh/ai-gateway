@@ -92,8 +92,8 @@ checkpoint I/O 与磁盘。
 | client | 首条 developer/system 消息以 `You are an AI agent powered by DeepSeek Harness.` 开头；或标题调用 | 顶层 `instructions` 以 `You are a coding agent running in the Codex CLI` 开头；或某条消息文本**以** `<environment_context>` 开头 |
 | workspace | user 消息里的 `session workspace: "<path>"`（JSON 字符串，需反转义） | `<environment_context>` 的 `<cwd>…</cwd>`，退回 `<workspace_roots><root>…</root>` |
 | session | `prompt_cache_key` 原样 | 同左 |
-| call_kind | 任一消息文本以 `Generate the session title from this JSON array of human messages:` 开头 → `title` | 恒为 `agent` |
-| title | 标题调用的响应文本 | — |
+| call_kind | 任一消息文本以 `Generate the session title from this JSON array of human messages:` 开头 → `title` | user 消息以 Codex 专用任务标题提示词开头 → `title`，否则 `agent` |
+| title | 标题调用的响应文本 | 标题调用响应的 JSON `title` 字段，兼容纯文本 |
 
 - 标题调用的角色在 DSH 版本间变过（旧 `system`、新 `developer`），因此只用文本前缀判定。
 - 消息 `content` 有两种形态：字符串（DSH 的 developer 段）与 typed parts 数组（两家的 user 段），提取器都处理。

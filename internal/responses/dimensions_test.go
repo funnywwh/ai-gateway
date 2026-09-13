@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -257,5 +258,48 @@ func TestTitleOfCollapsesLinesAndBoundsRunes(t *testing.T) {
 	// Clamping must not split a multi-byte rune into invalid UTF-8.
 	if !strings.ContainsRune(got, '字') || strings.Contains(got, "\uFFFD") {
 		t.Fatalf("title was cut mid-rune: %q", got)
+	}
+}
+
+// The title helper has its own session key; never replace it with a guessed parent.
+func TestDimensionsCodexTitle(t *testing.T) {
+	for _, tc := range []struct {
+		name, role, text string
+		title            bool
+	}{
+		{"user", "user", codexTitleUserPrefix + "\nGenerate a concise UI title (up to 36 characters) for this task.", true},
+		{"quoted", "user", "Explain this prompt: " + codexTitleUserPrefix, false},
+		{"assistant", "assistant", codexTitleUserPrefix, false},
+		{"developer", "developer", codexTitleUserPrefix, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"model":"m","prompt_cache_key":"title-helper-session","input":[{"role":%q,"content":%q}]}`, tc.role, tc.text)
+			got := parseBody(t, body).Dimensions("")
+			if (got.CallKind == CallKindTitle) != tc.title {
+				t.Fatalf("dimensions = %+v", got)
+			}
+			if tc.title && got.Client != ClientCodex {
+				t.Fatalf("client = %q", got.Client)
+			}
+			if got.SessionID != "title-helper-session" {
+				t.Fatalf("session = %q", got.SessionID)
+			}
+		})
+	}
+}
+
+func TestCodexTitleOf(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		{`{"title":" 修复 Codex 标题识别 ","description":"不要记录这个描述"}`, "修复 Codex 标题识别"},
+		{"  普通标题\n", "普通标题"},
+		{`{"description":"missing title"}`, ""},
+		{`{"title":123}`, ""},
+		{`{"title":"incomplete`, ""},
+		{`{"title":null}`, ""},
+		{`{"title":"` + strings.Repeat("字", 201) + `"}`, strings.Repeat("字", 200)},
+	} {
+		if got := CodexTitleOf(tc.input); got != tc.want {
+			t.Errorf("CodexTitleOf(%q) = %q, want %q", tc.input, got, tc.want)
+		}
 	}
 }

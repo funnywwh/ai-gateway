@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -903,4 +904,37 @@ func containsString(values []any, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestRequestLogCodexStructuredTitle(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, enabled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("stream=%v/title=%v", stream, enabled), func(t *testing.T) {
+				f := newFixture(t)
+				f.cfg.Recording.RecordTitle = enabled
+				f.setProviderConfig(t, `{"prefix":" ","chunks":3}`)
+				// Echo the final user message to exercise JSON assembly and persistence.
+				body := fmt.Sprintf(`{"model":"echo-model","stream":%v,"prompt_cache_key":"title-helper","input":[{"role":"user","content":"You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task that will be created from that prompt."},{"role":"user","content":"{\"title\":\"修复 Codex 标题\",\"description\":\"不应写入标题\"}"}]}`, stream)
+				resp := f.postResponses(t, body)
+				defer resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					t.Fatalf("status = %d", resp.StatusCode)
+				}
+				if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+					t.Fatal(err)
+				}
+				row := f.latestLog(t)
+				want := ""
+				if enabled {
+					want = "修复 Codex 标题"
+				}
+				if row.Client != "codex" || row.CallKind != "title" || row.Title != want || row.SessionID != "title-helper" {
+					t.Fatalf("unexpected dimensions: client=%q kind=%q title=%q session=%q", row.Client, row.CallKind, row.Title, row.SessionID)
+				}
+				if row.OutputTextRecorded {
+					t.Fatal("title recording must be independent of output recording")
+				}
+			})
+		}
+	}
 }
