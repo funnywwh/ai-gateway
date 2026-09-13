@@ -1698,3 +1698,32 @@
       看不到 Key/tag/账户级 `margin_bp`；而数据面走 `billing.ResolveMarkup` 的完整优先级链。
       于是"某把 Key 设了 `margin_bp: 0`"时，试算器显示 1.0× 而实际按 0 计费。
       影响面：只影响预览数值，不影响计费。修法需要接口新参数（key/tag/account），属接口变更，另开里程碑
+
+### M40 发布记录
+
+- **版本**：`0.1.4` → **`0.2.0`**（minor）。M40 新增了对外可见的能力（`admin_endpoints` 响应新增
+  `body_fields`、工具说明与 `initialize.instructions` 全量重写为中文、`admin_describe` 的
+  `body_schema`/`example` 补齐所有结构化字段），没有改签名或默认语义，因此是 minor 而不是 patch。
+  唯一的行为变化是智能问答侧：模型在缺关键参数时会用内联表单先问，而不是自行挑一个默认值。
+- **提交与 tag**：`2e8d3c8`（M40 实现）→ `e77af79`（`release: v0.2.0`，tag `v0.2.0` 指向它）
+- **构建物**：`aigw 0.2.0 (revision e77af79, built 2026-09-13T08:53:03Z)`，
+  md5 `88b45d45999561928876c8dbd519e65a`（本地与上传后一致）
+- **部署目标**：gpt001 `127.0.0.1:8088`；**回滚点** `/opt/aigw/aigw.prev-20260913-165328`（= 0.1.4）
+- **部署后验证**：
+  - `GET /aigw/version` = `{"revision":"e77af79","version":"0.2.0"}`（公网 https 同一值，
+    控制台角标 `brand.js` 读的就是这个端点，因此角标显示 `v0.2.0 e77af79`）
+  - `healthz=200`、`readyz=200`、`/admin/ui/` = 200
+  - 启动日志 `msg="aigw starting" version=0.2.0 revision=e77af79`，近 5 分钟内 `level=ERROR` 计数 **0**
+- **部署前在隔离实例上完成的端到端走查**（本地 `bin/aigw 0.2.0` + 临时库，跑完即删）：
+  1. `admin_describe(admin_upsert_provider_model)` 返回的 `pricing_rules` 含
+     `additionalProperties:false`、单位字样（`200000 = $0.20/1M`）、维度名与 catch-all 示例——
+     正是这次故障里缺的那份形状；
+  2. 用运维原场景的数值（$0.20/1M 输入、$1.20/1M 输出、$0.02/1M 缓存命中）走
+     `admin_validate_pricing`（`valid:true`）→ `admin_upsert_provider_model`（200）→
+     `admin_upsert_model`（201）→ `admin_simulate_pricing`：100 万 token × 3 维 = **1.6 USD**，
+     与手算一致（顺带在这条链上发现模型级 `markup_bp: 0` 被静默当成未设置，见 `docs/pricing.md` §11）
+- **部署后在线上能做的只读验证已全部通过**（上条）；线上 `admin_*` 工具的逐字段确认需要一个
+  admin scope 的 MCP 令牌，本轮没有可用凭据，因此**未做**：操作侧只需在「MCP 令牌」页签一个
+  admin 令牌，让会话问一句"给某个上游模型配成本价"，即可看到模型先 `admin_describe` 拿
+  `body_schema` 再写，而不是像之前那样要求补文档
+- 回滚方式：`cp /opt/aigw/aigw.prev-20260913-165328 /opt/aigw/aigw && systemctl restart aigw`
