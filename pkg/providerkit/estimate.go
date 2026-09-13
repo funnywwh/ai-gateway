@@ -91,7 +91,11 @@ func EstimateInputTokens(req *pluginapi.Request, charsPerToken int) int64 {
 	for _, item := range req.Input {
 		chars += int64(len(item.Content))
 		chars += int64(len(item.Arguments))
-		chars += int64(len(item.Output))
+		if len(item.OutputContent) > 0 {
+			chars += int64(len(item.OutputContent))
+		} else {
+			chars += int64(len(item.Output))
+		}
 		for _, part := range item.Summary {
 			chars += int64(len(part.Text))
 		}

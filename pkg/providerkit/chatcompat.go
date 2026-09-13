@@ -328,7 +328,11 @@ func itemToChatMessages(item pluginapi.Item) ([]ChatMessage, bool, error) {
 		call.Function.Arguments = item.Arguments
 		return []ChatMessage{{Role: "assistant", ToolCalls: []ChatToolCall{call}}}, true, nil
 	case "function_call_output":
-		return []ChatMessage{{Role: "tool", ToolCallID: item.CallID, Content: item.Output}}, true, nil
+		output := item.Output
+		if len(item.OutputContent) > 0 {
+			output = contentToText(item.OutputContent, "tool")
+		}
+		return []ChatMessage{{Role: "tool", ToolCallID: item.CallID, Content: output}}, true, nil
 	case "reasoning":
 		return nil, false, nil // not replayable upstream
 	default:

@@ -96,3 +96,37 @@ func TestCustomToolSurvivesProviderProtocolAndResponse(t *testing.T) {
 		t.Fatal("non-streaming response lost tool")
 	}
 }
+
+func TestToolOutputArrayForwardedToCodex(t *testing.T) {
+	const output = `[{"type":"input_text","text":"Script completed"},{"type":"input_text","text":"gateway_input_check"}]`
+	req, apiErr := responses.Parse([]byte(`{"model":"codex","input":[{"type":"custom_tool_call_output","call_id":"call_1","output":` + output + `}]}`))
+	if apiErr != nil {
+		t.Fatal(apiErr)
+	}
+	canonical, apiErr := req.ToProviderRequest("codex")
+	if apiErr != nil {
+		t.Fatal(apiErr)
+	}
+	frame, err := json.Marshal(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored pluginapi.Request
+	if err = json.Unmarshal(frame, &restored); err != nil {
+		t.Fatal(err)
+	}
+	p := newTestProvider(t, "http://localhost", "http://localhost", "http://localhost", nil)
+	body, err := p.buildRequest(&restored, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Input []map[string]json.RawMessage `json:"input"`
+	}
+	if err = json.Unmarshal(body, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if len(wire.Input) != 1 || string(wire.Input[0]["output"]) != output {
+		t.Fatalf("lost structured output: %s", body)
+	}
+}

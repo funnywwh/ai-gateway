@@ -114,17 +114,20 @@ func (t *Tool) UnmarshalJSON(data []byte) error {
 
 // Item is one element of the canonical input/output list. Unknown fields are preserved in Extra.
 type Item struct {
-	Type      string                     `json:"type"`
-	ID        string                     `json:"id,omitempty"`
-	Role      string                     `json:"role,omitempty"`
-	Content   json.RawMessage            `json:"content,omitempty"`
-	CallID    string                     `json:"call_id,omitempty"`
-	Name      string                     `json:"name,omitempty"`
-	Arguments string                     `json:"arguments,omitempty"`
-	Output    string                     `json:"output,omitempty"`
-	Status    string                     `json:"status,omitempty"`
-	Summary   []SummaryPart              `json:"summary,omitempty"`
-	Extra     map[string]json.RawMessage `json:"-"`
+	Type      string          `json:"type"`
+	ID        string          `json:"id,omitempty"`
+	Role      string          `json:"role,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"`
+	CallID    string          `json:"call_id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Arguments string          `json:"arguments,omitempty"`
+	Output    string          `json:"output,omitempty"`
+	// OutputContent preserves array-valued tool results (text, images, files).
+	// When set it takes precedence over the legacy string Output on the wire.
+	OutputContent json.RawMessage            `json:"-"`
+	Status        string                     `json:"status,omitempty"`
+	Summary       []SummaryPart              `json:"summary,omitempty"`
+	Extra         map[string]json.RawMessage `json:"-"`
 }
 
 var itemJSONFields = map[string]bool{
@@ -139,13 +142,16 @@ var itemJSONFields = map[string]bool{
 func (i Item) MarshalJSON() ([]byte, error) {
 	type plain Item
 	encoded, err := json.Marshal(plain(i))
-	if err != nil || len(i.Extra) == 0 {
+	if err != nil || (len(i.Extra) == 0 && len(i.OutputContent) == 0) {
 		return encoded, err
 	}
 
 	fields := map[string]json.RawMessage{}
 	if err := json.Unmarshal(encoded, &fields); err != nil {
 		return nil, err
+	}
+	if len(i.OutputContent) > 0 {
+		fields["output"] = i.OutputContent
 	}
 	for key, value := range i.Extra {
 		if itemJSONFields[key] {
@@ -162,8 +168,21 @@ func (i Item) MarshalJSON() ([]byte, error) {
 func (i *Item) UnmarshalJSON(data []byte) error {
 	type plain Item
 	var decoded plain
-	if err := json.Unmarshal(data, &decoded); err != nil {
+	// Shadow output during decoding: newer clients return content-part arrays,
+	// while existing plugin callers still construct string Output values.
+	wire := struct {
+		*plain
+		Output json.RawMessage `json:"output"`
+	}{plain: &decoded}
+	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
+	}
+	if len(wire.Output) > 0 {
+		if wire.Output[0] == '[' {
+			decoded.OutputContent = append(json.RawMessage(nil), wire.Output...)
+		} else if err := json.Unmarshal(wire.Output, &decoded.Output); err != nil {
+			return err
+		}
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
