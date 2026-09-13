@@ -1767,3 +1767,16 @@
 - [x] 10 万/100 万 × 重复会话/独立会话/账户偏斜六组探针通过。百万重复会话 p95 14.50 s → 38.45 ms，独立会话 13.07 s → 4.26 s；小记录写入吞吐下降约 52%–62%，如实保留代价。
 - [x] 设计与性能记录：`docs/design/request-dimension-rollups.md`；规格：`docs/request-log.md`。
 - 边界：每请求独立会话时无行数压缩；关闭汇总仍保留失效触发器；浏览器 UI 检查因缺少 Firefox 跳过。
+
+### v0.3.0 发布记录（2026-09-13）
+
+- [x] 根据 `v0.2.5..HEAD` 的新增能力与配置发布 minor：`0.2.5` → **`0.3.0`**。包含缓存 token 展示 `c72bb52`、Codex 无输出断流恢复 `bcd6f1a`、根会话标识 `4b1c32e`、M41 小时汇总 `ecae61a`。
+- [x] 发布提交 **`7e68bab`**，标签 **`v0.3.0`**；版本说明 `docs/releases/v0.3.0.md`。
+- [x] `make verify`、format-smoke 通过；汇总相关 race 与六组规模探针已通过；UI harness 因无 Firefox 跳过。
+- [x] 网关与 Codex 插件从发布提交构建，21:19:38（UTC+08:00）部署 gpt001；配置 SHA-256 保持一致，网关启动自动应用迁移 0013。
+- [x] 本地/线上 SHA-256 一致：网关 `c31db6367b496503d167fa82c7420d35a509fac061447d0ecd832300475b353a`；插件 `834a98c5d650eb0da99185464dbeff872a12fbacf92f076920a2efc895fe9145`。
+- [x] 本机/公网 `/aigw/version` = `0.3.0 / 7e68bab`，healthz/readyz/UI HTTP 200；线上 brand.js 与发布源码一致（资源与端点校验，无浏览器目视验证）。服务 active，插件成功启动，启动时段 ERROR 为 0。
+- [x] 数据库 `quick_check=ok`；历史发现游标 1428、完成标记为 true，9 个已结束小时已发布、81 条组合汇总、待处理小时为 0；当前小时继续实时补算。
+- [x] 在线数据库同一只读事务中，对已发布小时的八个分组逐一比较汇总和原始 JOIN：请求/计量数、各项 token、费用、首次/最近时间、标题/工作区完全一致。
+- 回滚二进制：`/opt/aigw/aigw.pre-v0.3.0`、`/opt/aigw/plugins/provider-codex.pre-v0.3.0`；一致性数据库快照 `/opt/aigw/backups-release/v0.3.0/aigw.sqlite`（0600，已 quick_check）。二进制回退保留新数据及派生结构，不以旧快照覆盖发版后的计费记录。
+- 未做：本次发布未额外发起付费上游请求；流式恢复修复的先前真机验证见 `docs/dsh-codex-stream-recovery-fix.md`。
