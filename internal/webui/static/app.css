@@ -11,9 +11,12 @@
 body { margin:0; font: 14px/1.5 system-ui, -apple-system, 'Segoe UI', 'Noto Sans SC', sans-serif;
   background: var(--bg); color: var(--fg); }
 a { color: var(--accent); }
-.app { display:grid; grid-template-columns: 220px 1fr; min-height:100vh; }
-.sidebar { background: var(--panel); border-right:1px solid var(--line); display:flex; flex-direction:column; }
-.brand { padding:16px 18px; font-weight:600; letter-spacing:.3px; border-bottom:1px solid var(--line);
+.app { display:grid; grid-template-columns: 220px minmax(0, 1fr); height:100vh; overflow:hidden; }
+/* Keep the navigation chrome in the viewport. The menu itself is the only scrolling
+   part of the sidebar, so the account/logout row never disappears on a long page. */
+.sidebar { background: var(--panel); border-right:1px solid var(--line); display:flex; flex-direction:column;
+  min-height:0; position:sticky; top:0; height:100vh; }
+.brand { flex:0 0 auto; padding:16px 18px; font-weight:600; letter-spacing:.3px; border-bottom:1px solid var(--line);
   display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
 /* The build identity of the server: a.b.c version and short revision, kept on one line
    beside the name but visually subordinate to it — it is what you read when you go
@@ -22,18 +25,19 @@ a { color: var(--accent); }
   Menlo, Consolas, monospace; color:var(--muted); letter-spacing:0; display:inline-flex; gap:6px; }
 .brand-version, .brand-revision { white-space:nowrap; }
 .brand-revision { opacity:.75; }
-.sidebar nav { flex:1; padding:10px 8px; overflow:auto; }
+.sidebar nav { flex:1 1 auto; min-height:0; padding:10px 8px; overflow:auto; }
 .sidebar nav a { display:block; padding:8px 10px; border-radius:8px; color:var(--fg);
   text-decoration:none; margin-bottom:2px; font-size:13.5px; }
 .sidebar nav a:hover { background: var(--panel-2); }
 .sidebar nav a.active { background: var(--accent); color:#fff; }
 .sidebar nav .group { padding:12px 10px 4px; font-size:11px; text-transform:uppercase;
   letter-spacing:.08em; color:var(--muted); }
-.sidebar-foot { border-top:1px solid var(--line); padding:10px; display:flex;
+.sidebar-foot { flex:0 0 auto; border-top:1px solid var(--line); padding:10px; display:flex;
   justify-content:space-between; align-items:center; font-size:12.5px; color:var(--muted); }
-.main { display:flex; flex-direction:column; min-width:0; }
-.topbar { display:flex; justify-content:space-between; align-items:center; gap:12px;
-  padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel); }
+.main { display:flex; flex-direction:column; min-width:0; min-height:0; overflow:auto; }
+/* The title bar is part of the fixed application chrome, not page content. */
+.topbar { position:sticky; top:0; z-index:10; display:flex; justify-content:space-between; align-items:center; gap:12px;
+  flex:0 0 auto; padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel); }
 .topbar h1 { font-size:16px; margin:0; font-weight:600; }
 .page { padding:20px; min-width:0; }
 .actions { display:flex; gap:8px; flex-wrap:wrap; }
