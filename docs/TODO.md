@@ -1593,7 +1593,7 @@
 - [x] `.dsh/skills/release-version/SKILL.md`：完整发布流程（定档位 → 升版本 → 部署 gpt001 → 用 `/version` 与
       角标验证 → 回滚点 → 记录），含本次这条 `response_format` 坑的提示
 
-### 首次发布记录（v0.1.2）
+### 首次发布记录（v0.1.0 → v0.1.4）
 
 - [x] `scripts/release.sh patch` 两次：`0.1.0`（`VERSION` 新建）→ `0.1.1` → `0.1.2`（tag 指向包含该版本号的 commit）
 - [x] 部署 gpt001：`scp` → `cp aigw aigw.prev-<时间戳>` → `install` → `systemctl restart aigw`；
@@ -1614,3 +1614,10 @@
       隧道与临时目录已清理
 - [x] 顺带补一条永久防线：`TestResponseFormatFollowsTheRequest` 增加"带 tools + instructions + 工具轮历史的
       请求体里没有 `response_format`"用例（就是 DSH 那类流量），避免只有"无工具"形状被覆盖
+- [x] 版本演进：`0.1.0`（新建 `VERSION`）→ `0.1.1`（角标 + 发布 skill）→ `0.1.2`（真机形状回归脚本）
+      → `0.1.3`（部署记录）→ `0.1.4`（端到端验收记录 + 工具形状防线）。每个 tag 都指向内含该版本号的 commit，
+      所以构建产物自报的版本号与 `git log` 里能查到的来源一一对应——这正是"线上跑的是哪个版本"能当依据的原因
+- [x] 最终线上状态（2026-09-13 16:05）：`aigw 0.1.4 (revision 2d2d731)`，`readyz` 200、重启后 0 条 ERROR、
+      回滚点 `/opt/aigw/aigw.prev-20260913-160527`；公网 `https://mnl.iotalking.top/aigw/version` =
+      `{"revision":"2d2d731","version":"0.1.4"}` 与宿主 `HEAD` 一致（`0.1.3` → `0.1.4` 的差异只在测试与文档，
+      运行时二进制逐字节相同，仍然发版是为了让"线上版本 = 仓库版本"这条不变量成立）
