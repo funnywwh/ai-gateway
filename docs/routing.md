@@ -103,7 +103,7 @@ grantedProviders = ∪( key.grants.providers, 各 tag.grants.providers )   ["*"]
 |---|---|
 | 键 | `api_key_id + session_id + canonical_model`；session_id 取请求的 `prompt_cache_key`（128 字节截断），无该字段的请求**完全不参与** |
 | 生效范围 | 只在**同一 `route.priority` 层内**把命中的候选提到该层首位；跨层不提升（层间是运营者写下的优先级） |
-| 策略交互 | 有效策略为 `strict_order` 时不重排；其余策略都参与 |
+| 策略交互 | 有效策略为 `strict_order` 时**完全不参与**（连槽都不产出，`Note*` 天然空转）；其余策略都参与 |
 | 写粘性 | 只有 attempt **成功**才写入/刷新；失败的 attempt 不写 |
 | 清粘性 | 仅当该候选**可重试失败**（`runtime.Retryable`）时清除，且只清"正好指向它"的记录 |
 | 失效 | 命中候选若已被撤权、停用、draining、冷却、熔断、能力不足或不再映射 → 记录被删除，按原生策略路由；重新启用不会复活旧粘性 |
