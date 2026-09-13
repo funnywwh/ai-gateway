@@ -933,11 +933,23 @@ export async function render({ page, actions, session, route }) {
         const row = el('label', { class: 'plus-item plus-skill', title: skill.description || '' }, [
           el('input', { type: 'checkbox', checked: active.has(skill.id) }),
           el('span', { text: skill.name }),
+          el('button', { class: 'btn btn-ghost plus-skill-run', type: 'button', text: '执行', title: '加载并执行此技能' }),
         ]);
         row.querySelector('input').addEventListener('change', async (ev) => {
           const ids = new Set(active);
           if (ev.target.checked) ids.add(skill.id); else ids.delete(skill.id);
           await setSkills([...ids]);
+        });
+        row.querySelector('.plus-skill-run').addEventListener('click', async (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          menu.remove();
+          try {
+            if (!active.has(skill.id)) await setSkills([...active, skill.id]);
+            await submit(skillRunText([skill.name]));
+          } catch (err) {
+            toast(api.errorMessage(err), 'error');
+          }
         });
         list.append(row);
       }
