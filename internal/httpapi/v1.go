@@ -1024,7 +1024,23 @@ func featuresOf(req *responses.Request) map[string]bool {
 		features["reasoning"] = true
 	}
 	if req.Text != nil && len(req.Text.Format) > 0 {
-		features["json_schema"] = true
+		// The level decides which capability is required. A provider that serves
+		// json_object (DeepSeek's /chat/completions, for one) must not be excluded from a
+		// request it handles perfectly well, and a provider that only declares
+		// json_schema must not be handed a schema it cannot enforce.
+		level, err := responses.TextFormatLevel(req.Text.Format)
+		switch {
+		case err != nil:
+			// Parsing rejects an unreadable level before it gets here, so this branch is
+			// about validation drift rather than client input: fall back to the strictest
+			// reading instead of quietly widening the candidate set.
+			features["json_schema"] = true
+		case level == responses.TextFormatText || level == "":
+			// Plain text is what every provider does by default; demanding a "text"
+			// capability would exclude every one of them, since nobody declares it.
+		default:
+			features[level] = true
+		}
 	}
 	return features
 }

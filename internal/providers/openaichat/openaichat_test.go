@@ -793,35 +793,85 @@ func TestUnprocessableEntityKeepsUpstreamMessage(t *testing.T) {
 // response_format and output budget (M17)
 // ---------------------------------------------------------------------------
 
-func TestResponseFormatLevels(t *testing.T) {
+// TestResponseFormatFollowsTheRequest pins the fix for a defect that took a whole
+// provider offline: `config.response_format` used to be written into every upstream
+// request, so declaring json_object put *all* traffic into JSON mode and DeepSeek then
+// rejected any prompt not containing "json" with a 400. The level must come from the
+// request's text.format, and the configuration must not be able to force it.
+func TestResponseFormatFollowsTheRequest(t *testing.T) {
 	cases := []struct {
-		level string
-		want  string
+		name   string
+		config map[string]any
+		req    func() *pluginapi.Request
+		want   string // "" means the field must be absent
 	}{
-		{level: "text", want: ""},
-		{level: "json_object", want: "json_object"},
-		{level: "json_schema", want: "json_schema"},
+		{
+			name: "silent client sends nothing even with json_object configured",
+			// The regression itself: this pair used to emit response_format.
+			config: map[string]any{"response_format": "json_object"},
+			req:    userRequest,
+			want:   "",
+		},
+		{
+			name:   "silent client with the default config sends nothing",
+			config: nil,
+			req:    userRequest,
+			want:   "",
+		},
+		{
+			name: "explicit text level sends nothing",
+			req:  func() *pluginapi.Request { return formatRequest(`{"type":"text"}`) },
+			want: "",
+		},
+		{
+			name: "json_object is sent when the client asks for it",
+			req:  func() *pluginapi.Request { return formatRequest(`{"type":"json_object"}`) },
+			want: "json_object",
+		},
+		{
+			// The client's schema is forwarded verbatim, not rebuilt from the type name:
+			// a reconstructed object would drop the schema it is supposed to enforce.
+			name: "json_schema travels through with its schema",
+			req: func() *pluginapi.Request {
+				return formatRequest(`{"type":"json_schema","name":"recipe","schema":{"type":"object"}}`)
+			},
+			want: "json_schema",
+		},
 	}
 	for _, tc := range cases {
-		t.Run(tc.level, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			var body map[string]any
-			p, _ := newUpstreamWith(t, captureBody(t, nonStreamBody, &body), map[string]any{"response_format": tc.level})
+			p, _ := newUpstreamWith(t, captureBody(t, nonStreamBody, &body), tc.config)
 
-			if _, err := p.Complete(context.Background(), userRequest()); err != nil {
+			if _, err := p.Complete(context.Background(), tc.req()); err != nil {
 				t.Fatal(err)
 			}
-			format, ok := body["response_format"].(map[string]any)
+			raw, ok := body["response_format"]
 			if tc.want == "" {
 				if ok {
-					t.Fatalf("level %q must not send response_format: %v", tc.level, format)
+					t.Fatalf("response_format = %v, want the field absent", raw)
 				}
 				return
 			}
+			format, ok := raw.(map[string]any)
 			if !ok || format["type"] != tc.want {
-				t.Fatalf("response_format = %v, want type %q", body["response_format"], tc.want)
+				t.Fatalf("response_format = %v, want type %q", raw, tc.want)
+			}
+			if tc.want == "json_schema" {
+				if format["name"] != "recipe" || format["schema"] == nil {
+					t.Fatalf("json_schema lost fields the client sent: %v", format)
+				}
 			}
 		})
 	}
+}
+
+// formatRequest is userRequest plus a text.format level, which is how a client asks for
+// structured output on the Responses surface.
+func formatRequest(format string) *pluginapi.Request {
+	req := userRequest()
+	req.Text = &pluginapi.TextConfig{Format: json.RawMessage(format)}
+	return req
 }
 
 func TestDefaultMaxOutputTokensOnlyFillsBlanks(t *testing.T) {

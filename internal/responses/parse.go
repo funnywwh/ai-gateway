@@ -70,6 +70,11 @@ func (r *Request) Validate() *domain.APIError {
 	if r.TopP != nil && (*r.TopP < 0 || *r.TopP > 1) {
 		return domain.ErrInvalidRequest("top_p must be between 0 and 1").WithParam("top_p")
 	}
+	if r.Text != nil {
+		if _, err := TextFormatLevel(r.Text.Format); err != nil {
+			return err
+		}
+	}
 	for i, tool := range r.Tools {
 		// Types this gateway does not model (web_search, namespace, ...) are accepted and
 		// forwarded verbatim: which of them an upstream can actually use is a property of
@@ -153,7 +158,14 @@ func (r *Request) ToProviderRequest(upstreamModel string) (*pluginapi.Request, *
 		out.Reasoning = &pluginapi.Reasoning{Effort: r.Reasoning.Effort, Summary: r.Reasoning.Summary}
 	}
 	if r.Text != nil {
-		out.Text = &pluginapi.TextConfig{Format: r.Text.Format}
+		// An explicit `text` level is the absence of a structured-output request, so it
+		// travels as "no format" rather than as a level every provider would have to
+		// re-interpret. The three levels share one vocabulary in this package.
+		format := r.Text.Format
+		if level, _ := TextFormatLevel(format); level == TextFormatText {
+			format = nil
+		}
+		out.Text = &pluginapi.TextConfig{Format: format}
 	}
 	for _, tool := range r.Tools {
 		if toolType(tool.Type) != "function" {

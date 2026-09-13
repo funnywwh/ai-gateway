@@ -76,6 +76,9 @@ type Config struct {
 	// extra field at all, which is what generic OpenAI-compatible upstreams expect.
 	Thinking ThinkingConfig `json:"thinking"`
 	// ResponseFormat declares the highest response_format level the upstream accepts.
+	// It is a capability declaration, not a request field: what actually travels with a
+	// request is decided by that request's text.format (see requestFormat). Setting it
+	// to json_object therefore no longer puts every completion into JSON mode.
 	ResponseFormat string `json:"response_format"`
 	// DefaultMaxOutputTokens is applied only when the client sent no max_output_tokens.
 	// It bounds the in-flight reservation without overriding the upstream default
@@ -474,7 +477,7 @@ func renderBody(cfg Config, req *pluginapi.Request, stream bool) ([]byte, error)
 			}
 		}
 	}
-	if raw := responseFormat(cfg.ResponseFormat); len(raw) > 0 {
+	if raw := requestFormat(req); len(raw) > 0 {
 		out.ResponseFormat = raw
 	}
 
@@ -485,15 +488,45 @@ func renderBody(cfg Config, req *pluginapi.Request, stream bool) ([]byte, error)
 	return body, nil
 }
 
-// responseFormat maps the configured level onto the upstream field. The default
-// (text) sends nothing: the upstream then applies its own default.
-func responseFormat(level string) json.RawMessage {
-	switch level {
+// requestFormat renders the upstream response_format for one request.
+//
+// The level is decided by the *request*, never by the configuration. `response_format`
+// is an OpenAI chat-completions field that puts the whole completion into JSON mode —
+// and DeepSeek rejects any prompt whose text does not mention "json" once it is set
+// ("Prompt must contain the word 'json' in some form to use 'response_format' of type
+// 'json_object'"). Sending it unconditionally therefore did not "declare a capability":
+// it broke every ordinary request on that provider while looking like a harmless
+// setting (see docs/TODO.md M17, M10d).
+//
+// A client that asks for json_object/json_schema gets exactly that; everybody else gets
+// no field at all, which is what the upstream's own default means.
+func requestFormat(req *pluginapi.Request) json.RawMessage {
+	if req == nil || req.Text == nil {
+		return nil
+	}
+	trimmed := bytes.TrimSpace(req.Text.Format)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil
+	}
+	var level struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(trimmed, &level); err != nil {
+		// The core validates text.format before it reaches a provider; an unreadable
+		// value here is a core bug, not a client one. Forwarding bytes we cannot read
+		// would let an upstream decide the request's fate, so err on the safe side and
+		// send no format — the answer is then plain text, which the client can still read.
+		return nil
+	}
+	switch level.Type {
 	case ResponseFormatJSONObject:
 		return json.RawMessage(`{"type":"json_object"}`)
 	case ResponseFormatJSONSchema:
-		return json.RawMessage(`{"type":"json_schema"}`)
+		// json_schema carries the client's schema, name and strict flag; pass the whole
+		// object through rather than reconstructing a lossy copy.
+		return json.RawMessage(trimmed)
 	default:
+		// "" and "text" both mean "no structured output requested".
 		return nil
 	}
 }

@@ -3,7 +3,13 @@
 // and the wire types of the protocol.
 package responses
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/winger/ai-gateway/internal/domain"
+)
 
 // Request is the accepted subset of POST /v1/responses.
 type Request struct {
@@ -78,6 +84,47 @@ type Reasoning struct {
 // TextConfig mirrors the text parameter.
 type TextConfig struct {
 	Format json.RawMessage `json:"format,omitempty"`
+}
+
+// text.format levels. They are the only three the Responses API defines, and the
+// provider layer needs to recognise them by name to decide what (if anything) to
+// forward upstream — an upstream that is handed a level it cannot serve answers 400
+// at best and silently ignores the client's structured-output request at worst.
+const (
+	TextFormatText       = "text"
+	TextFormatJSONObject = "json_object"
+	TextFormatJSONSchema = "json_schema"
+)
+
+// TextFormatLevel returns the level named by text.format, "" when the client asked for
+// nothing, and an error when the client asked for something unrecognisable.
+//
+// A malformed level is rejected here rather than ignored downstream: dropping it would
+// turn a request for structured output into a plain-text answer, and the client would
+// only find out by failing to parse what it got back.
+func TextFormatLevel(raw json.RawMessage) (string, *domain.APIError) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return "", nil
+	}
+	var format struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &format); err != nil {
+		return "", domain.ErrInvalidRequest("text.format must be an object").
+			WithParam("text.format")
+	}
+	switch format.Type {
+	case "":
+		// `{"format":{}}` names nothing; read it as the default rather than guessing.
+		return "", nil
+	case TextFormatText, TextFormatJSONObject, TextFormatJSONSchema:
+		return format.Type, nil
+	default:
+		return "", domain.ErrInvalidRequest(
+			fmt.Sprintf("text.format.type must be text|json_object|json_schema, got %q", format.Type)).
+			WithParam("text.format.type")
+	}
 }
 
 // Response is the OpenAI response object.

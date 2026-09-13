@@ -40,7 +40,7 @@ var configSchema = json.RawMessage(`{
         "context_window": {"type": "integer"},
         "max_output_tokens": {"type": "integer"},
         "capabilities": {"type": "object",
-          "description": "能力申报决定路由：客户端要 reasoning.effort 就要求 reasoning，要 text.format=json_schema 就要求 json_schema。/chat/completions 不支持 json_schema，别声明它。"}
+          "description": "能力申报决定路由：客户端要 reasoning.effort 就要求 reasoning，要 text.format=json_object/json_schema 就要求同名的能力。/chat/completions 不支持 json_schema，别声明它。"}
       }}},
     "thinking": {"type": "object",
       "description": "思考（思维链）方言。默认一个 thinking 字段都不下发，即通用 OpenAI 兼容行为。",
@@ -53,7 +53,7 @@ var configSchema = json.RawMessage(`{
           "description": "把历史 reasoning 正文回传为 assistant.reasoning_content：带工具调用的多轮必需，上游缺失即 400。需要 style=deepseek。"}
       }},
     "response_format": {"type": "string", "enum": ["text", "json_object", "json_schema"], "default": "text",
-      "description": "上游真实支持到哪一档：text=不下发。能力申报要与它一致——声明了上游不支持的档位，请求会带着降级标记继续打到上游。"},
+      "description": "能力申报，不是下发开关：只说明该上游最高支持到哪一档，实际请求按客户端的 text.format 下发（没要 JSON 就不带该字段）。"},
     "default_max_output_tokens": {"type": "integer", "default": 0,
       "description": ">0 且客户端未给 max_output_tokens 时才补；只影响在途额度预留，不吃掉上游默认值（DeepSeek 思考模式默认 64K）。"}
   }

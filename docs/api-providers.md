@@ -39,7 +39,7 @@
 | `thinking.mode` | `auto` | `auto`：客户端给了 `reasoning.effort` 就照办（`none`→关，其余→开）；**没给就根本不下发该字段**，由上游默认决定（DeepSeek 默认就是开）。`enabled` / `disabled` 分别强制开关 |
 | `thinking.style` | `none` | `deepseek` → 下发 `{"thinking":{"type":"enabled\|disabled"}}`；`none` → 不下发（通用形态） |
 | `thinking.replay_reasoning_content` | `false` | 把历史 `reasoning` 项正文回传为 assistant 的 `reasoning_content`（带工具的多轮必需，见 §4） |
-| `response_format` | `text` | 上游真实支持到哪一档：`text`（不下发）/`json_object`/`json_schema`。**能力申报要与它一致** |
+| `response_format` | `text` | **能力申报**（不是下发开关）：该上游真实支持到哪一档——`text`/`json_object`/`json_schema`。实际下发的档位由**客户端的 `text.format`** 决定：没要 JSON 的请求不带这个字段，要 `json_object` 的带 `{"type":"json_object"}`，要 `json_schema` 的按客户端给的整个对象原样透传 |
 
 ### 出站方言翻译（`openai-chat` 一系）
 
@@ -55,12 +55,15 @@ Responses 表面比 chat completions 宽，翻译层负责把宽的那一侧收�
   请求其余部分照常完成。
 - 未建模类型的原始结构由 `pluginapi.Tool.Raw` 带到 provider，插件类 provider 可自行翻译或丢弃。
 
-> ⚠️ **当前实现是"配置即下发"，与上表的"能力申报"语义不一致**（已记账待定夺）：
-> `response_format` 会被**无条件**写入每个上游请求（`internal/providers/openaichat/openaichat.go:432`），
-> 而该 provider **不读取请求里的 `text.format`**。因此声明 `json_object` 会把**所有**请求变成 JSON 模式。
-> 真实后果：DeepSeek 对任何不含 "json" 字样的提示词直接 400
+> ⚠️ **这条曾经是个坑，现已修正（M39，2026-09-13）**：`response_format` 过去被**无条件**写进每个上游请求，
+> 于是声明 `json_object` 会把**所有**流量变成 JSON 模式——DeepSeek 对任何不含 "json" 字样的提示词直接 400
 > （`Prompt must contain the word 'json' in some form to use 'response_format' of type 'json_object'`），
-> 该供应商于是只能服务 JSON 类请求。**除非你确实要让全部流量走 JSON 模式，否则保持 `text`（默认）。**
+> 该供应商只能服务 JSON 类请求，普通流量全失败（线上 deepseek 供应商真实踩过：DSH 选 `deepseek-flash` 首轮即
+> `upstream_400`）。现在档位由请求的 `text.format` 决定，配置只表达能力上限，所以**这里填什么都不会改变普通请求的行为**。
+>
+> 能力申报仍决定**路由**：`text.format=json_object` 要求候选模型申报 `json_object`，
+> `text.format=json_schema` 要求申报 `json_schema`（两者不互相蕴含）。把一个只支持 `json_object` 的供应商
+> 写成 `json_schema`，会让 schema 请求带着一个上游做不到的要求打过去。
 | `default_max_output_tokens` | `0` | `>0` 且客户端未给 `max_output_tokens` 时才补，只影响在途额度预留，不吃掉上游默认 |
 
 枚举取值非法 → 供应商构建失败（不静默降级）：`thinking.mode`、`thinking.style`、`response_format` 均校验；
@@ -71,7 +74,8 @@ Responses 表面比 chat completions 宽，翻译层负责把宽的那一侧收�
 （行为规格见 `docs/provider-ui.md`，字段说明与代码同源、由 `internal/providers/*/schema.go` 提供）。
 
 `capabilities` 决定路由：客户端请求 `reasoning.effort` 会要求候选具备 `reasoning`；
-`text.format` 会要求 `json_schema`。因此 DeepSeek 的模型应声明 `{"stream":true,"tools":true,"reasoning":true}`，
+`text.format=json_object` 要求 `json_object`，`text.format=json_schema` 要求 `json_schema`（两者独立）。
+因此 DeepSeek 的模型应声明 `{"stream":true,"tools":true,"reasoning":true,"json_object":true}`，
 而**不要**声明 `json_schema`（`/chat/completions` 不支持，声明了会让请求带着降级标记继续打到上游）。
 
 ## 3. DeepSeek 接入（现成片段）
@@ -84,6 +88,7 @@ providers:
     config:
       base_url: "https://api.deepseek.com/v1"
       thinking: {mode: auto, style: deepseek, replay_reasoning_content: true}
+      # 只是能力申报：普通请求（客户端没给 text.format）不会带 response_format
       response_format: json_object
       default_max_output_tokens: 8192
     models:
@@ -91,17 +96,17 @@ providers:
         upstream: deepseek-flash
         context_window: 1000000
         max_output_tokens: 65536
-        capabilities: {stream: true, tools: true, reasoning: true}
+        capabilities: {stream: true, tools: true, reasoning: true, json_object: true}
       - public: deepseek-v4-flash
         upstream: deepseek-v4-flash
         context_window: 1000000
         max_output_tokens: 65536
-        capabilities: {stream: true, tools: true, reasoning: true}
+        capabilities: {stream: true, tools: true, reasoning: true, json_object: true}
       - public: deepseek-v4-pro
         upstream: deepseek-v4-pro
         context_window: 1000000
         max_output_tokens: 65536
-        capabilities: {stream: true, tools: true, reasoning: true}
+        capabilities: {stream: true, tools: true, reasoning: true, json_object: true}
 ```
 
 两个 `v4` id 都已对着真实上游验证过（2026-09-11，运行中的 `:8088` 实例）：`deepseek-v4-pro` 回

@@ -290,6 +290,10 @@ bootstrap:
           mode: auto                   # auto = the client's reasoning.effort decides
           style: deepseek
           replay_reasoning_content: true
+        # A capability declaration, not a send switch: a request whose client did not ask
+        # for JSON carries no response_format at all. Declaring json_object here used to
+        # put *every* request into JSON mode, and DeepSeek then rejected any prompt that
+        # did not contain the word "json" — see docs/api-providers.md §2.
         response_format: json_object   # chat/completions has no json_schema
         default_max_output_tokens: 8192
       models:
@@ -297,12 +301,12 @@ bootstrap:
           upstream: deepseek-flash
           context_window: 1000000
           max_output_tokens: 65536
-          capabilities: {stream: true, tools: true, reasoning: true}
+          capabilities: {stream: true, tools: true, reasoning: true, json_object: true}
         - public: deepseek-v4-pro
           upstream: deepseek-v4-pro
           context_window: 1000000
           max_output_tokens: 65536
-          capabilities: {stream: true, tools: true, reasoning: true}
+          capabilities: {stream: true, tools: true, reasoning: true, json_object: true}
   models:
     - public_name: llama-local
       aliases: ["local", "llama"]
