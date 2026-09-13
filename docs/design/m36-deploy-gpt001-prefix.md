@@ -44,10 +44,25 @@ config.server.base_path: "/aigw"      # 空 = 挂在根上（默认，行为与�
 - 配置：`/opt/aigw/config.yaml`（600，`secret_key`/`credentials_key` 由 `openssl rand` 在本机生成）
 - 数据：`/opt/aigw/data/aigw.db`（WAL）、`data/backups/`（每日备份，默认 cron）
 - 服务：`/etc/systemd/system/aigw.service`，`Restart=always`，只监听 `127.0.0.1:8088`
-- 入口：nginxWebUI 容器（`/root/nginx/nginx.conf`，容器内 `/home/nginxWebUI/nginx.conf`）
-  新增 `gpt.iotalking.top` server 块，`location ^~ /aigw/ { proxy_pass http://127.0.0.1:8088; }`
-  **不做 rewrite**，关缓冲（SSE），`proxy_read_timeout 3600s`。
-  证书复用通配符 `*.iotalking.top`（ACMEdns 签发，含 `gpt.iotalking.top`）。
+- 入口：nginxWebUI 容器（`/root/nginx/nginx.conf`，容器内 `/home/nginxWebUI/nginx.conf`）。
+  `/aigw/` 的路由只写一份，放在 **`conf.d/aigw-location.conf`**，由需要它的 vhost `include`
+  （`^~ /aigw/` 前缀匹配优先于各站自己的 `location /`，所以同名的其余路由原样保留）：
+
+  ```nginx
+  location = /aigw      { return 301 /aigw/; }              # 裸前缀
+  location = /aigw/     { return 302 /aigw/admin/ui/; }
+  location ^~ /aigw/ {                                       # 不做 rewrite
+    proxy_pass http://127.0.0.1:8088;
+    proxy_buffering off;          # SSE：/v1/responses?stream=true、控制台问答
+    proxy_read_timeout 3600s;
+    ...
+  }
+  ```
+
+  两个 vhost 都 include 它：**`gpt.iotalking.top`**（本次新增的 server 块）与
+  **`mnl.iotalking.top`**（这台机器上原本就有的站，`/` 仍走 sub2api:8080、
+  `/nginxwebui/` 仍走 nginxWebUI:9000，`/aigw/` 之后归网关）。
+  证书复用通配符 `*.iotalking.top`（ACMEdns 签发，覆盖这两个名字）。
 - 裸前缀 `/aigw` → `/aigw/` → `/aigw/admin/ui/`。
 
 ## 4. 验收（2026-09-13，实测）
@@ -62,19 +77,20 @@ config.server.base_path: "/aigw"      # 空 = 挂在根上（默认，行为与�
 | `/aigw/v1/models` | 200（带 key）/ 401（不带） |
 | 控制台会话 `POST /aigw/admin/api/v1/chat/sessions/{id}/turns` | SSE：turn → … → done |
 | 预览附件 `POST .../artifacts` | 返回 `url=/aigw/admin/chat-artifact/<id>`，带 ticket 取回 200 |
-| 公开 IP 路径 `https://gpt.iotalking.top/aigw/...`（`--resolve` 到 47.80.68.113） | TLS 校验通过，全部 200 |
+| **真 DNS + 真证书**：`https://mnl.iotalking.top/aigw/...` | 控制台 200、登录 200（`Path=/aigw/admin`）、`/auth/me`、`/stats`、`/requests`、`/providers` 全 200、`/v1/models` 200、`/v1/responses` 返回正确文本、`ssl_verify=0` |
+| `https://gpt.iotalking.top/aigw/...`（`--resolve` 到 47.80.68.113） | TLS 校验通过，全部 200（等 DNS 记录落地即可用真名访问） |
+| 同机既有站的回归：`mnl.iotalking.top` 的 `/`、`/nginxwebui/`、`/hiddify`；`dsh`、`ng` 两个 vhost | 全部 200，未被 `/aigw/` 影响 |
 | `make test` / `go vet` / `make build` | 全绿（含新增 `basepath_test.go`） |
 | `make ui-base`（node 推导挂载点） | 10 项通过 |
 
-**未完成（域名侧，不在这台机器上）**：`gpt.iotalking.top` 的 A 记录不存在
-（权威 NS `dns23/dns24.hichina.com` 返回 NXDOMAIN），因此真实域名还打不开。
-域名持有者要在阿里云 DNS 加一条记录后即可用真实域名访问：
+**两个域名两条 DNS 记录，现状不同**（都在阿里云 DNS，权威 NS `dns23/dns24.hichina.com`）：
 
-| 主机记录 | 类型 | 记录值 | TTL |
-|---|---|---|---|
-| `gpt` | A | `47.80.68.113` | 默认（10 分钟） |
+| 名字 | 当前 A 记录 | 状态 |
+|---|---|---|
+| `mnl.iotalking.top` | `47.80.68.113` | 已存在，实测可访问（真 DNS + 真证书） |
+| `gpt.iotalking.top` | 无（NXDOMAIN） | **待域名持有者添加** `gpt → 47.80.68.113` |
 
-证书不需要新签：现有的 `*.iotalking.top`（ACMEdns 签发，2026-10-06 到期）已覆盖该子域，
+证书不需要新签：现有的 `*.iotalking.top`（ACMEdns 签发，2026-10-06 到期）已覆盖两个名字，
 HTTP 的 80 块也已就位（301 跳 443）。
 
 
