@@ -1791,6 +1791,15 @@
 - 回滚点：`/opt/aigw/aigw.pre-v0.3.1`、`/opt/aigw/plugins/provider-codex.pre-v0.3.1`；数据库一致性备份 `/opt/aigw/backups-release/v0.3.1/aigw.sqlite`（0600，quick_check=ok）。回退不覆盖新计费数据。
 - 未额外发起付费上游请求；未进行公网或浏览器目视验证。新自动关联以集成回归为验证依据，先前人工修正的历史例子不作为自动关联实测。
 
+### v0.5.0 发布记录（2026-09-13）
+
+- [x] 新增智能问答“创建技能”工具：通过 SSE 展示创建过程，生成草稿后由用户确认保存；发布 minor **0.5.0**。
+- [x] 实现提交 `d10f9fb`；发布提交 `1e40420`，标签 `v0.5.0`。
+- [x] 全量 `go test ./...` 通过；构建二进制版本为 `0.5.0`，revision `1e40420`。
+- [x] 部署 gpt001；服务 active，`/aigw/version` 返回 `{"revision":"1e40420","version":"0.5.0"}`，healthz/readyz 均 HTTP 200，启动日志无 ERROR。
+- [x] 公网 `https://mnl.iotalking.top/aigw/version` 返回 `0.5.0 / 1e40420`。
+- 回滚点：本次部署生成的 `/opt/aigw/aigw.prev-20260913-223547`；恢复该二进制后重启 aigw，不回退数据库。
+
 ### v0.4.0 发布记录（2026-09-13）
 
 - [x] 新增 M42 stdio MCP 转发能力，发布 minor **0.4.0**；发布说明 `docs/releases/v0.4.0.md`。
