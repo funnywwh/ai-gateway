@@ -1090,9 +1090,32 @@ func (p *provider) resolveAccountID(state session, snap credSnapshot) string {
 	return ""
 }
 
-// Stream performs one streaming attempt, refreshing the token once if the upstream
-// rejects it. Every event is translated into the canonical plugin events.
+// Stream forwards events immediately and retries a broken upstream stream once
+// only before the first event is delivered. Never replay visible output or tools.
 func (p *provider) Stream(ctx context.Context, req *pluginapi.Request, emit func(pluginapi.Event) error) error {
+	for attempt := 0; ; attempt++ {
+		delivered := false
+		err := p.streamAttempt(ctx, req, func(event pluginapi.Event) error {
+			delivered = true // A consumer error must never trigger a replay.
+			return emit(event)
+		})
+		apiErr, ok := pluginapi.IsError(err)
+		if err == nil || attempt >= 1 || delivered || ctx.Err() != nil || !ok ||
+			(apiErr.Code != "stream_read_failed" && apiErr.Code != "upstream_stream_incomplete") {
+			return err
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// streamAttempt refreshes the token once if rejected, and translates upstream events.
+func (p *provider) streamAttempt(ctx context.Context, req *pluginapi.Request, emit func(pluginapi.Event) error) error {
 	// Fail an unusable proxy setting as fatal before any token or network work.
 	// Without this the transport error would be classified retryable and the
 	// router would waste attempts failing over on a configuration typo.
@@ -1142,13 +1165,16 @@ func (p *provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 	// fragment must not be forwarded as a complete answer.
 	finishReason := ""
 	terminal := false
+	lastEvent := "none"
 	for {
 		event, err := reader.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return pluginapi.NewRetryableError("stream_read_failed", "provider-codex: reading the upstream stream failed", 502)
+			return pluginapi.NewRetryableError("stream_read_failed", fmt.Sprintf(
+				"provider-codex: reading the upstream stream failed: %v (http=%q upstream_request_id=%q last_event=%q)",
+				err, resp.Proto, resp.Header.Get("x-request-id"), lastEvent), 502)
 		}
 		if event.Name == "done" {
 			break
@@ -1160,6 +1186,7 @@ func (p *provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 		if err := json.Unmarshal(event.Data, &payload); err != nil {
 			continue // a data line the adapter does not model
 		}
+		lastEvent = payload.Type
 		if reason, ok := terminalReason(payload); ok {
 			terminal = true
 			if reason != "" {
@@ -1168,6 +1195,11 @@ func (p *provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 		}
 		if err := p.translate(payload, emit); err != nil {
 			return err
+		}
+		// A terminal event completes the protocol; the HTTP body may stay open
+		// or end with a transport error after the answer has already finished.
+		if terminal {
+			break
 		}
 	}
 	if !terminal {

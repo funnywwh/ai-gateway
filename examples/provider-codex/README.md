@@ -76,6 +76,13 @@ gateway's own in-flight reservation (`billing.reservation_mode`) still applies f
   position (first, middle, last, alongside `tools`). Rewriting the role instead of folding the text into
   `instructions` keeps the message at its original position and cannot leave `input` empty, which this
   backend also rejects. Other roles pass through untouched.
+- Function tool starts and argument deltas are forwarded immediately, just like text
+  and reasoning. A read failure or premature EOF is retried once after 250 ms only
+  before the first event is delivered and only if the caller has not cancelled.
+  Tools and other delivered output are never replayed. Read failures include the
+  underlying error, HTTP protocol, upstream request ID and last parsed event type.
+- `response.completed` and `response.incomplete` end stream processing immediately;
+  a later connection reset or delayed HTTP close cannot invalidate a finished response.
 - Usage is reported with cache hits split out and reasoning tokens separate, which is
   what the pricing engine needs to apply a different rate.
 - The upstream only offers streaming, so `Complete` is implemented by consuming the
