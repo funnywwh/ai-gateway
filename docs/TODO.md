@@ -1526,9 +1526,19 @@
 
 ### 观察项 / 待人工执行
 
+- [x] 部署（2026-09-13）：gpt001 已换成 `d637209`（`make build` → `scp` → `install` → `systemctl restart aigw`），
+      `readyz`/`healthz` 200、重启后 0 条 ERROR、公网 `mnl`/`gpt` 两个入口 200；
+      启动日志 `strategy=weighted_random session_affinity=true affinity_ttl=30m0s affinity_max_entries=10000`；
+      `/stats` 报 `version=d637209` 且 `affinity={entries,hits,...}` 随线上 DSH 会话增长。
+      回滚点：`/opt/aigw/aigw.prev-20260913-154048`（旧版 `97ac621`），回滚 = `mv` 回去 + 重启。
+      线上 `config.yaml` 没有 `routing:` 段，因此**靠默认值开启**（按用户决定不改配置）
 - [ ] **待人工执行**（宿主终端）：用真实客户端（DSH 或 Codex）对同一会话连发 3 轮以上，到「请求日志」确认同一
-      `session_id` 的候选供应商保持一致；再到 `/admin/api/v1/stats` 看 `affinity.hits` 随请求增长。
-      这一步只能人工走查：粘性的收益（前缀缓存命中、上游账号一致）在离线用例里只能证明"选谁"，证明不了"更快"
+      `session_id` 的候选供应商保持一致。
+      **注意**：部署当天的 4 条路由是"一模型一供应商"（`e2e-echo`/`gpt-5.6-luna`/`gpt-6-astra`/`deepseek-flash`
+      各 1 条），此时同会话本来就只会落到同一家，所以这条检查现在**证明不了粘性**；
+      要真正验收，得先给某个模型加上**同层第二供应商**（第二个 codex 订阅号或第二个 deepseek key），
+      再看两个供应商之间的会话是否各自稳定。可观测口径：`/stats` 的 `affinity.hits` 增长 + 请求日志里
+      同一 `session_id` 的 provider 不变
 - [ ] 观察项：粘性只在**层内**生效，所以"主供应商 × 备用层"的部署里，一次失败转移**不会**改变下一次的首选——
       坏路由改由既有熔断（60s 窗口 5 次失败）与冷却剔除。这是刻意的取舍（见设计文档 D4）；
       若某个部署希望"一次失败就长期走备用"，需要把 `promoteWithinTier` 改成整体提升
