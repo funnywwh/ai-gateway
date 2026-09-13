@@ -1780,3 +1780,13 @@
 - [x] 在线数据库同一只读事务中，对已发布小时的八个分组逐一比较汇总和原始 JOIN：请求/计量数、各项 token、费用、首次/最近时间、标题/工作区完全一致。
 - 回滚二进制：`/opt/aigw/aigw.pre-v0.3.0`、`/opt/aigw/plugins/provider-codex.pre-v0.3.0`；一致性数据库快照 `/opt/aigw/backups-release/v0.3.0/aigw.sqlite`（0600，已 quick_check）。二进制回退保留新数据及派生结构，不以旧快照覆盖发版后的计费记录。
 - 未做：本次发布未额外发起付费上游请求；流式恢复修复的先前真机验证见 `docs/dsh-codex-stream-recovery-fix.md`。
+
+### v0.3.1 发布记录（2026-09-13）
+
+- [x] 发布 patch **0.3.1**：独立 Codex 标题线程精确提示词关联，支持乱序完成、候选冲突恢复及持久化证据；录制/脱敏策略限制见 `docs/releases/v0.3.1.md`。
+- [x] 修复提交 `b45d411`；发布提交 `ad42b4a`，标签 `v0.3.1`；main 与标签已推送 origin。
+- [x] `make verify`、format-smoke 通过；网关与 Codex 插件均从发布提交构建。
+- [x] 部署 gpt001，本地/线上 SHA-256 一致：网关 `dca7ac14e9f55225a129c72ff8be23833f1121ec1c54a7245f552d7742b7833d`，插件 `2a8a3c9c726dfe5c97da4b62fea10d19a56fbf3a82e8b6f641d8be7646983a65`。
+- [x] 本机 `/aigw/version` 返回 `0.3.1 / ad42b4a`，healthz、readyz、UI 均 HTTP 200；服务 active，数据库 quick_check=ok，迁移 0014 存在，配置 SHA-256 与部署前一致。
+- 回滚点：`/opt/aigw/aigw.pre-v0.3.1`、`/opt/aigw/plugins/provider-codex.pre-v0.3.1`；数据库一致性备份 `/opt/aigw/backups-release/v0.3.1/aigw.sqlite`（0600，quick_check=ok）。回退不覆盖新计费数据。
+- 未额外发起付费上游请求；未进行公网或浏览器目视验证。新自动关联以集成回归为验证依据，先前人工修正的历史例子不作为自动关联实测。
