@@ -1790,3 +1790,14 @@
 - [x] 本机 `/aigw/version` 返回 `0.3.1 / ad42b4a`，healthz、readyz、UI 均 HTTP 200；服务 active，数据库 quick_check=ok，迁移 0014 存在，配置 SHA-256 与部署前一致。
 - 回滚点：`/opt/aigw/aigw.pre-v0.3.1`、`/opt/aigw/plugins/provider-codex.pre-v0.3.1`；数据库一致性备份 `/opt/aigw/backups-release/v0.3.1/aigw.sqlite`（0600，quick_check=ok）。回退不覆盖新计费数据。
 - 未额外发起付费上游请求；未进行公网或浏览器目视验证。新自动关联以集成回归为验证依据，先前人工修正的历史例子不作为自动关联实测。
+
+### v0.4.0 发布记录（2026-09-13）
+
+- [x] 新增 M42 stdio MCP 转发能力，发布 minor **0.4.0**；发布说明 `docs/releases/v0.4.0.md`。
+- [x] 实现提交 `97dfd6d`；发布提交 `13a120d`，标签 `v0.4.0`；main 与标签已原子推送 origin。
+- [x] 实现阶段 `make verify` 与命令包 race 测试通过；发布提交构建成功，二进制帮助包含 endpoint/token-env。
+- [x] 22:01:04（UTC+08:00）部署 gpt001；仅替换网关二进制，Codex 插件保留；配置 SHA-256 与部署前一致。
+- [x] 本地/线上网关 SHA-256 一致：`7731c8bfa0a976d1109e4fabb7d1e6717721edc680c72183d74ce0a43471ac33`。
+- [x] 本机与公网 `/aigw/version` 返回 `0.4.0 / 13a120d`；healthz/readyz 正常，UI 与 brand.js HTTP 200；公网 brand.js 与源码逐字节一致。服务 active，启动日志无 ERROR。重启后的首次连接尚未监听，自动重试后成功。
+- 回滚点：`/opt/aigw/aigw.pre-v0.4.0`（v0.3.1）；恢复该二进制后重启 aigw，不回退数据库。
+- 未发起付费模型验证，未做浏览器目视检查；新转发模式的权限和写入依赖真实 HTTP + 临时 SQLite 集成测试验证。
