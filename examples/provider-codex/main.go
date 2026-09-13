@@ -1014,7 +1014,7 @@ func (p *provider) buildRequest(req *pluginapi.Request, stream bool) ([]byte, er
 		Model:        model,
 		Instructions: req.Instructions,
 		Input:        rewriteSystemRoles(req.Input),
-		Tools:        req.Tools,
+		Tools:        explicitToolStrictness(req.Tools),
 		ToolChoice:   req.ToolChoice,
 		Store:        p.cfg.Store,
 		Stream:       stream,
@@ -1030,6 +1030,28 @@ func (p *provider) buildRequest(req *pluginapi.Request, stream bool) ([]byte, er
 		wire.Reasoning = &pluginapi.Reasoning{Effort: p.cfg.ReasoningEffort}
 	}
 	return json.Marshal(wire)
+}
+
+// The subscription backend normalizes schemas to strict mode when strict is
+// absent, making even optional arguments required. Clients such as DSH omit
+// strict for generic Responses endpoints; preserve their optional arguments by
+// explicitly opting out, while respecting an explicit strict request.
+func explicitToolStrictness(tools []pluginapi.Tool) []pluginapi.Tool {
+	var out []pluginapi.Tool
+	for i, tool := range tools {
+		if (tool.Type != "function" && tool.Type != "") || len(tool.Raw) != 0 || tool.Strict != nil {
+			continue
+		}
+		if out == nil {
+			out = append([]pluginapi.Tool(nil), tools...)
+		}
+		strict := false
+		out[i].Strict = &strict
+	}
+	if out == nil {
+		return tools
+	}
+	return out
 }
 
 func (p *provider) doRequest(ctx context.Context, body []byte, token string, state session, snap credSnapshot, acceptStream bool) (*http.Response, error) {
