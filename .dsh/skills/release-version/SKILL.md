@@ -37,6 +37,8 @@ git log --oneline $(git describe --tags --abbrev=0 2>/dev/null || echo HEAD~10).
 
 ### 2. 升版本并构建
 
+（改过供应商翻译层/路由能力时，先跑一次 `scripts/format-smoke.sh`——它用真实二进制打假上游并读上游收到的请求体。）
+
 ```bash
 ./scripts/release.sh patch        # 改 VERSION + 提交 + 打 v0.1.1 标签 + make build
 ./scripts/release.sh patch --no-tag   # 只改 VERSION 并构建，不提交/不打 tag

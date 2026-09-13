@@ -1578,6 +1578,10 @@
       `TestParseValidatesTextFormat`、`ToProviderRequest` 归一化、`TestFeaturesOf*`、
       `internal/routing/format_capability_test.go`（`json_object` 与 `json_schema` 互不蕴含）
 - [x] 变异验证：把 `renderBody` 改回"按配置下发"，openaichat 的三条用例立即失败（复现线上形状）
+- [x] 真机形状回归脚本 `scripts/format-smoke.sh`：把 `config.response_format=json_object` 留在配置里，用真实二进制
+      打假 DeepSeek 并逐条读上游收到的请求体。**变异验证**：用修复前的二进制跑，输出
+      `#1 keys=…,response_format` + `response_format = {"type": "json_object"}` 并 FAIL（正是线上那条形状）；
+      用修复后二进制跑：`#1 keys=max_tokens,messages,model`（无该字段）、`#2` 带 `{"type":"json_object"}`、非法档位 400
 - [ ] 线上配置清理：删掉 deepseek 供应商的 `response_format` 键（能力改由模型 `capabilities.json_object` 申报）
 
 ### 发布 skill
