@@ -175,11 +175,12 @@ func ResponsesToChatWithOptions(req *pluginapi.Request, opts ChatConvertOptions)
 	if req.Instructions != "" {
 		out.Messages = append(out.Messages, ChatMessage{Role: "system", Content: req.Instructions})
 	}
-	// Reasoning replay is only defined for tool-calling turns: an upstream that
-	// requires its own chain of thought back rejects a request that drops it, and
-	// only tool-calling turns carry that requirement.
+	// Reasoning replay is only defined for a conversation that has tool-calling turns:
+	// that is the case the upstream's requirement covers, and the only case where the
+	// gateway has a chain of thought to place.
 	replay := map[int]string{}
-	if opts.ReplayReasoningContent && hasToolCallItems(req.Input) {
+	reasoningTurn := opts.ReplayReasoningContent && hasToolCallItems(req.Input)
+	if reasoningTurn {
 		replay = reasoningByToolTurn(req.Input)
 	}
 	for index, item := range req.Input {
@@ -190,10 +191,11 @@ func ResponsesToChatWithOptions(req *pluginapi.Request, opts ChatConvertOptions)
 		if !ok {
 			continue
 		}
-		// Upstreams that demand their chain of thought back only demand it on
-		// tool-calling turns, and they demand the key itself: a client that never
-		// sends reasoning items (DSH pointed at this gateway does not) must still get
-		// its request through, with an empty value rather than a missing field.
+		// Upstreams that demand their chain of thought back demand the key itself on
+		// every assistant message it can reach, not only the tool-calling one: a
+		// client that never sends reasoning items (DSH pointed at this gateway does
+		// not) must still get its request through, with an empty value rather than a
+		// missing field, and the text is used whenever the client does provide it.
 		if opts.ReplayReasoningContent {
 			text := replay[index]
 			for i := range msg {
@@ -216,6 +218,9 @@ func ResponsesToChatWithOptions(req *pluginapi.Request, opts ChatConvertOptions)
 		out.Messages = append(out.Messages, msg...)
 	}
 	out.Messages = repairToolSequences(out.Messages)
+	if reasoningTurn {
+		requireReasoningKeys(out.Messages)
+	}
 	for _, tool := range req.Tools {
 		// Chat Completions can only express function tools. The richer Responses types
 		// (web_search, namespace, ...) are client-side conveniences for upstreams that
@@ -570,6 +575,46 @@ func (s *ChatStreamState) Translate(chunk *ChatResponse, emit func(pluginapi.Eve
 		}
 	}
 	return choice.FinishReason != "", nil
+}
+
+// requireReasoningKeys puts the reasoning_content key on every assistant message of a
+// conversation that contains a tool-calling turn, whether or not it has a chain of
+// thought to carry.
+//
+// The upstream validates the request turn by turn, and one tool-calling turn spans the
+// whole assistant side of it: DeepSeek rejects `[user, text(no key), tool turn(key),
+// tool result]` as well as an assistant message that carries tool_calls without the
+// key — "The `reasoning_content` in the thinking mode must be passed back to the API."
+// An assistant message that follows an answered tool call belongs to that same turn
+// (the model announces the call, then narrates what it found), so it needs the key too.
+// The folds above cover the text that precedes a call; this covers what follows it, and
+// anything else the caller's item order produced — the reported failure was exactly the
+// "after the tool result" shape, which the earlier tool-call-only rule missed.
+//
+// Messages that already carry the key are left alone: the guard is the key's presence,
+// so replayed text is never overwritten with an empty value.
+func requireReasoningKeys(messages []ChatMessage) {
+	for i := range messages {
+		if messages[i].Role != "assistant" {
+			continue
+		}
+		if !hasToolTurnBefore(messages, i) {
+			// Only a conversation that reaches a tool call carries the requirement; a
+			// plain chat keeps the field off the wire entirely.
+			continue
+		}
+		messages[i].ReasoningRequired = true
+	}
+}
+
+// hasToolTurnBefore reports whether an assistant tool call appears before messages[i].
+func hasToolTurnBefore(messages []ChatMessage, i int) bool {
+	for j := 0; j < i; j++ {
+		if messages[j].Role == "assistant" && len(messages[j].ToolCalls) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // foldAssistantTextIntoCall merges the plain assistant messages that directly precede a

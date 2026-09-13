@@ -150,6 +150,14 @@ tools/reasoning 就会被打上 `X-Gateway-Degraded`）。只发 `public_model` 
   assistant 消息（`content` + `reasoning_content` + `tool_calls`，也就是上游自己产出的形态）则通过。
   Responses 客户端把文本与工具调用作为两条 item 发来（DSH 就是这样），网关翻译时会**折成一条** assistant 消息
   （`ReplayReasoningContent` 打开时），而不是留下两条让上游去校验。
+- **这条约束覆盖的是"整段 assistant 侧"，不只是那条带工具调用的消息**（M37 修正）：模型先调工具、看到结果、
+  再写一段话说明发现——那段话属于**同一轮**，但中间隔着 `tool` 消息，**折叠够不到它**，于是带着"缺键"出行，
+  整条请求照样 400。这个形态在 agent 循环里比"文本在调用之前"更常见：每次工具返回后模型都会写一段总结，
+  而当轮请求的第一条 assistant 消息恰恰就是它。网关的做法是在翻译收尾时对**工具轮涉及的全部 assistant 消息**
+  统一补键（已有正文的保留正文，没有的用空串；纯聊天、历史上没有工具调用的请求完全不发该字段）。
+  真实后果（2026-09-13）：DSH 指向网关时，凡是"工具结果 → 模型叙述"的一步就报
+  `upstream_400: The \`reasoning_content\` in the thinking mode must be passed back to the API.`；
+  修复后同一形态通过。离线冒烟里的假上游现在**按这条规则真判 400**，所以这类回归不会再静默通过。
 - thinking 模式下 `temperature` / `presence_penalty` **被忽略**（不报错），`top_p` 下限被抬到 0.95；网关原样透传，不代改。
 - thinking 模式下 `tool_choice` 不支持 `required` 与具名工具（上游 400）；网关不拦截，错误原样透出。
 - `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` 拆出缓存维度；
@@ -185,11 +193,15 @@ tools/reasoning 就会被打上 `X-Gateway-Degraded`）。只发 `public_model` 
 
 - **入站**：`reasoning_content`（非流式消息字段 / 流式 delta）→ 思考增量事件，最终落成 `reasoning` 输出项；
   客户端在 SSE 上看到 `response.reasoning_summary_text.delta`。
-- **出站**：`replay_reasoning_content=true` 时，历史 `reasoning` 项正文写入其后第一条带 `tool_calls` 的 assistant 消息的
-  `reasoning_content`。上游要求**全量原样回传**，缺失即 400——这是 thinking + tools 多轮的硬约束。
+- **出站**：`replay_reasoning_content=true` 时，历史 `reasoning` 项正文写入其后第一条 assistant 消息的
+  `reasoning_content`；**工具轮涉及的全部 assistant 消息都会带上这个键**（有正文用正文、没有用空串），
+  因为上游校验的是整段 assistant 侧。上游要求**全量原样回传**，缺失即 400——这是 thinking + tools 多轮的硬约束。
 - **续接**：`reasoning` 输出项把正文存在 `content: [{type:"reasoning_text"}]`（与上游 Responses 形状一致），
   与 `summary`（网关的事件形状）同时写入；因此 `previous_response_id` 续接、`GET /v1/responses/{id}` 与实时事件三者一致。
-  `reasoning_content` 只在存在工具调用时回传：没有工具调用的历史无需回传，上游也会忽略。
+  没有工具调用的请求完全不发该字段：没有工具调用的历史无需回传，上游也会忽略。
+  续接时网关会**等这条响应落库**（与 `GET /v1/responses/{id}` 同样的等待）：审计行由后台批量写入，
+  不等就会把"刚拿到 `id` 就接着发下一轮"的 agent 循环判成 `response not found`——而这正是
+  thinking + tools 的必经形态（工具结果必须在下一个请求里回传）。M37 之前这里恒有竞态。
 
 ## 5. 事件与用量映射
 

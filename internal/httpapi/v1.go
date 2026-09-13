@@ -52,6 +52,18 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	// Continuation: prepend the stored input+output items of the previous response.
 	var priorItems []pluginapi.Item
 	if req.PreviousResponseID != "" {
+		// A continuation reads a row the client was just handed, exactly like
+		// GET /v1/responses/{id} does, and that row is written by the background
+		// batcher: without this wait a client that continues a turn immediately —
+		// which is what an agent loop does, and what the thinking-mode constraint
+		// forces (the tool result has to travel back in the very next request) —
+		// reads a 404 for a row that is microseconds behind.
+		if waiter, ok := s.deps.LogRecorder.(responseWaiter); ok {
+			if err := waiter.AwaitResponse(ctx, req.PreviousResponseID); err != nil {
+				s.deps.Log.Warn("waiting for a stored response timed out",
+					"err", err, "response_id", req.PreviousResponseID)
+			}
+		}
 		prev, err := s.deps.Records.GetResponse(ctx, req.PreviousResponseID)
 		if err != nil {
 			writeAPIError(w, toAPIError(err))

@@ -96,8 +96,21 @@ class Fake(BaseHTTPRequestHandler):
         tools = "tools" in req
         replay = "reasoning_content" in json.dumps(req.get("messages", []))
         assistants = sum(1 for m in req.get("messages", []) if m.get("role") == "assistant")
-        print("REQUEST thinking=%s effort=%s tools=%s replay=%s assistant=%d"
-              % (thinking, reasoning, tools, replay, assistants), flush=True)
+        keyed = sum(1 for m in req.get("messages", [])
+                    if m.get("role") == "assistant" and "reasoning_content" in m)
+        print("REQUEST thinking=%s effort=%s tools=%s replay=%s assistant=%d keyed=%d"
+              % (thinking, reasoning, tools, replay, assistants, keyed), flush=True)
+
+        # DeepSeek's thinking-mode validator, reproduced: unless thinking is explicitly
+        # disabled, EVERY assistant message must carry the reasoning_content key (an
+        # empty value is accepted, a missing key is a 400). The fake used to only report
+        # the shape, so a request the real upstream rejects still looked green here.
+        if thinking != "disabled":
+            for m in req.get("messages", []):
+                if m.get("role") == "assistant" and "reasoning_content" not in m:
+                    return self._json(400, {"error": {"message":
+                        "The `reasoning_content` in the thinking mode must be passed "
+                        "back to the API."}})
 
         if not req.get("stream"):
             message = {
@@ -354,6 +367,17 @@ else
   grep -q "replay=True assistant=1" "$WORK/upstream.log" \
     || { cat "$WORK/upstream.log"; fail "the announcing text must be folded into one assistant message"; }
   pass "text before a tool call folds into one assistant turn (assistant=1, key present)"
+  # The assistant narrating what a tool returned belongs to the same turn, and the fold
+  # cannot reach it (the tool result sits between them): with the earlier tool-call-only
+  # rule that message travelled WITHOUT the key and DeepSeek rejected the whole request.
+  # Two assistant messages, both keyed.
+  curl -fsS -X POST "http://127.0.0.1:${GATEWAY_PORT}/v1/responses" \
+    -H "Authorization: Bearer ${API_KEY}" -H "Content-Type: application/json" \
+    -d "{\"model\":\"deepseek-flash\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"read it\"},{\"type\":\"function_call\",\"call_id\":\"call_smoke_4\",\"name\":\"weather\",\"arguments\":\"{}\"},{\"type\":\"function_call_output\",\"call_id\":\"call_smoke_4\",\"output\":\"42\"},{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"the file has 42 lines\"}],$TOOLS}" \
+    >/dev/null || fail "a narrative after a tool result must still be accepted"
+  grep -q "replay=True assistant=2 keyed=2" "$WORK/upstream.log" \
+    || { cat "$WORK/upstream.log"; fail "every assistant message of a tool conversation must carry the key"; }
+  pass "assistant text after a tool result carries the key too (assistant=2 keyed=2)"
 
   echo "== error mapping"
   code="$(curl -s -o "$WORK/err.json" -w '%{http_code}' -X POST "http://127.0.0.1:${GATEWAY_PORT}/v1/responses" \

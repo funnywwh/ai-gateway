@@ -244,6 +244,7 @@ func TestWriteNowBypassesTheQueue(t *testing.T) {
 		t.Fatalf("WriteNow must write immediately: %v", err)
 	}
 }
+
 // TestRecorderErrorsStillCountOnce keeps the counter contract from the synchronous path:
 // a write failure counts one failure, and a failed fallback counts one drop.
 func TestRecorderErrorsStillCountOnce(t *testing.T) {
@@ -272,5 +273,49 @@ func TestRecorderErrorsStillCountOnce(t *testing.T) {
 	}
 	if got := f.srv.requestLogDropped.Load(); got != 1 {
 		t.Fatalf("dropped = %d, want 1", got)
+	}
+}
+
+// TestImmediateContinuationSeesItsPreviousResponse: an agent loop sends the tool result
+// back in the very next request, naming the response it was just handed as
+// previous_response_id. That lookup reads a row written by the background batcher, so
+// without the same wait the GET path performs, the continuation races the write and the
+// turn dies as "response not found" — the loop cannot continue at all, and with a
+// thinking-mode upstream it cannot even be retried differently (the tool result has to
+// travel back in this shape).
+func TestImmediateContinuationSeesItsPreviousResponse(t *testing.T) {
+	f := newFixture(t)
+	w := store.NewLogWriter(f.db, store.LogWriterConfig{
+		FlushInterval: 10 * time.Second, MaxBatch: 64, MaxBytes: 1 << 20,
+	}, nil, nil)
+	f.srv.deps.LogRecorder = w
+	f.srv.SetRecordingFailureHandler(w.SetFailureHandler)
+	defer func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = w.Close(cctx)
+	}()
+
+	first := f.do(t, "POST", "/v1/responses", agentBody, nil)
+	defer first.Body.Close()
+	if first.StatusCode != 200 {
+		t.Fatalf("first turn status = %d", first.StatusCode)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(first.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == "" {
+		t.Fatal("no response id returned")
+	}
+
+	// No Flush call anywhere: the continuation path waits for the id it names.
+	next := f.do(t, "POST", "/v1/responses", `{"model":"echo-model","previous_response_id":"`+
+		created.ID+`","input":[{"type":"function_call_output","call_id":"call_1","output":"42"}]}`, nil)
+	defer next.Body.Close()
+	if next.StatusCode != 200 {
+		t.Fatalf("continuation status = %d, want 200 (the row is queued, not missing)", next.StatusCode)
 	}
 }

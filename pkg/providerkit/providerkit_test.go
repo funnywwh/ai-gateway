@@ -860,3 +860,106 @@ func TestChatTranslationDropsToolsItCannotExpress(t *testing.T) {
 		t.Fatalf("chat tool = %+v", out.Tools[0])
 	}
 }
+
+// TestEveryAssistantMessageOfAToolConversationCarriesTheReasoningKey pins the full
+// extent of the thinking-mode requirement, which is wider than "the message with the
+// tool calls".
+//
+// The shape below is the one DSH produces and the one the earlier tool-call-only rule
+// missed: the assistant narrates what the tool returned, and that message is the FIRST
+// assistant message of the request while the tool call sits later in the history. An
+// upstream that validates the turn as a whole (DeepSeek: "The `reasoning_content` in the
+// thinking mode must be passed back to the API.") rejects the request over it.
+func TestEveryAssistantMessageOfAToolConversationCarriesTheReasoningKey(t *testing.T) {
+	user := func(text string) pluginapi.Item {
+		raw, _ := json.Marshal(text)
+		return pluginapi.Item{Type: "message", Role: "user", Content: raw}
+	}
+	assistant := func(text string) pluginapi.Item {
+		raw, _ := json.Marshal([]map[string]string{{"type": "output_text", "text": text}})
+		return pluginapi.Item{Type: "message", Role: "assistant", Content: raw}
+	}
+	call := func(id string) pluginapi.Item {
+		return pluginapi.Item{Type: "function_call", CallID: id, Name: "read_file", Arguments: "{}"}
+	}
+	output := func(id string) pluginapi.Item {
+		return pluginapi.Item{Type: "function_call_output", CallID: id, Output: "42"}
+	}
+
+	// Two full tool turns: the text that follows each answer is not adjacent to the
+	// next call, so it cannot be folded into it — and it is still part of the turn.
+	req := &pluginapi.Request{Model: "m", Input: []pluginapi.Item{
+		user("read both files"),
+		reasoningItem("start with the first"),
+		assistant("opening the first file"),
+		call("c1"), output("c1"),
+		assistant("the first file has 42 lines"),
+		assistant("now the second one"),
+		call("c2"), output("c2"),
+		assistant("both files are read"),
+	}}
+	out, err := ResponsesToChatWithOptions(req, ChatConvertOptions{ReplayReasoningContent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	messages := body.Messages
+	assistants := 0
+	for i, message := range messages {
+		if message["role"] != "assistant" {
+			continue
+		}
+		assistants++
+		if _, present := message["reasoning_content"]; !present {
+			t.Fatalf("assistant message %d has no reasoning_content: %v", i, message)
+		}
+	}
+	// The announcing text of each turn is folded into its own tool call, so three
+	// assistant messages travel: two tool turns and the closing narrative.
+	if assistants != 3 {
+		t.Fatalf("expected the two tool turns plus the closing narrative, got %d: %v", assistants, messages)
+	}
+	// The chain of thought stays on the turn it belongs to, and is not duplicated.
+	if got := messages[1]["reasoning_content"]; got != "start with the first" {
+		t.Fatalf("reasoning_content of the first tool turn = %v, want the replayed text", got)
+	}
+	if _, present := messages[1]["reasoning_content"]; !present {
+		t.Fatalf("the first tool turn must carry the key: %v", messages[1])
+	}
+	// The second turn has no reasoning item of its own: the key travels empty rather
+	// than missing, and the first turn's text is not borrowed for it.
+	if got := messages[3]["reasoning_content"]; got != "" {
+		t.Fatalf("the second tool turn must carry an empty key, got %v", got)
+	}
+	if got := messages[5]["reasoning_content"]; got != "" {
+		t.Fatalf("the closing narrative must carry an empty key, got %v", got)
+	}
+	if !strings.Contains(messages[5]["content"].(string), "both files are read") {
+		t.Fatalf("the closing narrative must survive: %v", messages[5])
+	}
+
+	// A conversation that never reaches a tool call keeps the field off the wire: the
+	// requirement is what the opt-in pays for, not a blanket new field.
+	plain, err := ResponsesToChatWithOptions(&pluginapi.Request{Model: "m", Input: []pluginapi.Item{
+		user("hello"), assistant("hi"),
+	}}, ChatConvertOptions{ReplayReasoningContent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainRaw, err := json.Marshal(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(plainRaw), "reasoning_content") {
+		t.Fatalf("a tool-free conversation must not carry the key: %s", plainRaw)
+	}
+}

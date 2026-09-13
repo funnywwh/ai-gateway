@@ -525,6 +525,48 @@ func TestReasoningContentReplayedOnlyForToolTurns(t *testing.T) {
 	}
 }
 
+// TestAssistantTextAfterAToolResultCarriesTheReasoningKey: the reported failure. The
+// model narrates what the tool returned, and that assistant message is the first one in
+// the request while the tool call sits earlier in the history — the fold cannot reach it
+// (they are not adjacent), so nothing put the key on it and DeepSeek rejected the whole
+// request ("The `reasoning_content` in the thinking mode must be passed back to the API.").
+func TestAssistantTextAfterAToolResultCarriesTheReasoningKey(t *testing.T) {
+	var body map[string]any
+	p, _ := newUpstreamWith(t, captureBody(t, nonStreamBody, &body), map[string]any{
+		"thinking": map[string]any{"style": deepseekThinking, "replay_reasoning_content": true},
+	})
+	user, _ := json.Marshal("read the file")
+	narrative, _ := json.Marshal([]map[string]string{{"type": "output_text", "text": "the file has 42 lines"}})
+	req := &pluginapi.Request{Model: "public-model", Input: []pluginapi.Item{
+		{Type: "message", Role: "user", Content: user},
+		{Type: "message", Role: "assistant", Content: narrative},
+		{Type: "function_call", CallID: "call_1", Name: "read_file", Arguments: "{}"},
+		{Type: "function_call_output", CallID: "call_1", Output: "42"},
+		{Type: "message", Role: "assistant", Content: narrative},
+	}}
+	if _, err := p.Complete(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	messages, ok := body["messages"].([]any)
+	if !ok {
+		t.Fatalf("messages missing from the upstream body: %v", body)
+	}
+	assistants := 0
+	for i, raw := range messages {
+		message, ok := raw.(map[string]any)
+		if !ok || message["role"] != "assistant" {
+			continue
+		}
+		assistants++
+		if _, present := message["reasoning_content"]; !present {
+			t.Fatalf("assistant message %d must carry reasoning_content: %v", i, message)
+		}
+	}
+	if assistants != 2 {
+		t.Fatalf("expected the folded tool turn plus the narrative, got %d: %v", assistants, messages)
+	}
+}
+
 func TestStreamForwardsReasoningBeforeText(t *testing.T) {
 	p, _ := newUpstreamWith(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
