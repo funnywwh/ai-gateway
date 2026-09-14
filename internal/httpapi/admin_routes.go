@@ -715,7 +715,8 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			Name: "admin_create_account", Group: groupAccounts, Role: roleAdmin,
 			Summary: "新建账户（按名字 upsert）",
 			Body: []adminField{
-				bodyRequired("name", "string", "账户名"),
+				bodyRequired("name", "string",
+					"账户名；去除首尾空白后须非空，最多 64 个 Unicode 字符，可用邮箱、中文等任意 Unicode（同名按名字 upsert）"),
 				enumField(bodyOptional("billing_mode", "string", "计费模式"), "postpaid", "prepaid"),
 				bodyOptional("note", "string", "备注"),
 				structuredField("tags", "array", "账号级标签名数组；账号下所有 API Key 自动继承，并与 Key 自有标签取并集；空数组清空", arrayOfStrings("标签名列表"), []any{}),

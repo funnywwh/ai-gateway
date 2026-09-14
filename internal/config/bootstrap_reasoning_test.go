@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/winger/ai-gateway/internal/domain"
@@ -64,5 +65,29 @@ func TestBootstrapModelReasoningRejectsInvalidYAML(t *testing.T) {
 				t.Fatal("Load accepted invalid bootstrap reasoning")
 			}
 		})
+	}
+}
+
+// TestBootstrapAccountNameValidationMatchesDomain pins the second restated rule: the
+// configuration DTO trims and measures an account name exactly like domain.NormalizeAccountName,
+// so YAML cannot accept a name the store would later rewrite or refuse.
+func TestBootstrapAccountNameValidationMatchesDomain(t *testing.T) {
+	cases := []string{
+		"internal", "ops@example.com", "北京研发", "  ops@example.com  ", "\u3000运维组\u3000",
+		"客户 A 组 🚀", "acme\xff", "\xc3\x28",
+		strings.Repeat("a", 64), strings.Repeat("中", 64),
+		strings.Repeat("a", 65), strings.Repeat("中", 65),
+		"", "   ", "\u3000 \t\n",
+	}
+	for _, name := range cases {
+		configErr := validateBootstrapAccountName(name)
+		_, domainErr := domain.NormalizeAccountName(name)
+		if (configErr == nil) != (domainErr == nil) {
+			t.Errorf("account name validation drift for %q: config=%v domain=%v", name, configErr, domainErr)
+		}
+	}
+	if MaxBootstrapAccountNameRunes != domain.MaxAccountNameRunes {
+		t.Errorf("rune limits drifted apart: config=%d domain=%d",
+			MaxBootstrapAccountNameRunes, domain.MaxAccountNameRunes)
 	}
 }

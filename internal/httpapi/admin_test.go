@@ -1609,3 +1609,108 @@ func TestWriteJSONNeverSendsABodylessSuccess(t *testing.T) {
 		t.Fatalf("error body lacks the envelope: %s", rec.Body.String())
 	}
 }
+
+// TestAdminCreateAccountAcceptsUnicodeNames pins the management API boundary: an account
+// name is a human label, so an email address and Chinese text are accepted and stored
+// trimmed, and the name is resolvable by the same value the API key endpoints take.
+func TestAdminCreateAccountAcceptsUnicodeNames(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"email", `{"name":"ops@example.com","billing_mode":"prepaid"}`, "ops@example.com"},
+		{"chinese", `{"name":"北京研发","billing_mode":"postpaid"}`, "北京研发"},
+		{"trimmed", `{"name":"  客户 A 组 🚀  ","billing_mode":"prepaid"}`, "客户 A 组 🚀"},
+	}
+	for _, tc := range cases {
+		resp := f.call(t, http.MethodPost, "/admin/api/v1/accounts", tc.body, cookie)
+		payload := decodeJSONBody(t, resp)
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("%s: create status = %d: %v", tc.name, resp.StatusCode, payload)
+		}
+		if got := payload["name"]; got != tc.want {
+			t.Fatalf("%s: created name = %v, want %q", tc.name, got, tc.want)
+		}
+		// The same name must resolve through the by-name path the key endpoints use, so
+		// a name that can be created is never unusable afterwards.
+		key := f.call(t, http.MethodPost, "/admin/api/v1/keys",
+			`{"name":"k-`+tc.name+`","account":"`+tc.want+`"}`, cookie)
+		keyPayload := decodeJSONBody(t, key)
+		if key.StatusCode != http.StatusCreated {
+			t.Fatalf("%s: key create status = %d: %v", tc.name, key.StatusCode, keyPayload)
+		}
+	}
+
+	// Whitespace-only and overlong names are still refused, with the 400 the console shows.
+	for _, body := range []string{
+		`{"name":"   ","billing_mode":"prepaid"}`,
+		`{"name":"` + strings.Repeat("中", 65) + `","billing_mode":"prepaid"}`,
+	} {
+		resp := f.call(t, http.MethodPost, "/admin/api/v1/accounts", body, cookie)
+		payload := decodeJSONBody(t, resp)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("body %s: status = %d, want 400: %v", body, resp.StatusCode, payload)
+		}
+	}
+}
+
+// TestAdminCreateAccountUpsertsByNormalizedName pins the duplicate rule at the HTTP
+// boundary: POST /accounts is "按名字 upsert", so a second create whose name differs only
+// by trimmed whitespace is the same account — same id, still 201, one row — rather than a
+// conflict or a second account. Names that differ beyond padding stay separate accounts.
+func TestAdminCreateAccountUpsertsByNormalizedName(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	first := f.call(t, http.MethodPost, "/admin/api/v1/accounts",
+		`{"name":"客户@example.com","billing_mode":"postpaid","credit_limit_micros":1000000}`, cookie)
+	firstPayload := decodeJSONBody(t, first)
+	if first.StatusCode != http.StatusCreated {
+		t.Fatalf("first create status = %d: %v", first.StatusCode, firstPayload)
+	}
+	firstID := int64(firstPayload["id"].(float64))
+
+	// The padded spelling carries a new credit limit: the upsert must land on the same row.
+	second := f.call(t, http.MethodPost, "/admin/api/v1/accounts",
+		`{"name":"  客户@example.com  ","billing_mode":"postpaid","credit_limit_micros":2000000}`, cookie)
+	secondPayload := decodeJSONBody(t, second)
+	if second.StatusCode != http.StatusCreated {
+		t.Fatalf("padded create status = %d, want 201 (upsert by name): %v", second.StatusCode, secondPayload)
+	}
+	if gotID := int64(secondPayload["id"].(float64)); gotID != firstID {
+		t.Fatalf("padded create id = %d, want the existing %d", gotID, firstID)
+	}
+	if got := secondPayload["name"]; got != "客户@example.com" {
+		t.Fatalf("padded create name = %v, want the trimmed form", got)
+	}
+
+	// One row for the padded pair, plus the fixture's "acme" and the case-differing name.
+	same := f.call(t, http.MethodPost, "/admin/api/v1/accounts", `{"name":"客户@Example.com"}`, cookie)
+	samePayload := decodeJSONBody(t, same)
+	if gotID := int64(samePayload["id"].(float64)); gotID == firstID {
+		t.Fatalf("a name differing in case must be a distinct account, got the same id %d", gotID)
+	}
+
+	list := f.call(t, http.MethodGet, "/admin/api/v1/accounts?limit=100", "", cookie)
+	listPayload := decodeJSONBody(t, list)
+	rows, ok := listPayload["data"].([]any)
+	if !ok {
+		t.Fatalf("list payload has no data array: %v", listPayload)
+	}
+	byName := map[string]int{}
+	for _, row := range rows {
+		entry, _ := row.(map[string]any)
+		name, _ := entry["name"].(string)
+		byName[name]++
+	}
+	if byName["客户@example.com"] != 1 {
+		t.Fatalf("rows for the trimmed name = %d, want 1 (got %v)", byName["客户@example.com"], byName)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("account rows = %d (%v), want 3: acme, the trimmed unicode name, and the case-differing one", len(rows), byName)
+	}
+}

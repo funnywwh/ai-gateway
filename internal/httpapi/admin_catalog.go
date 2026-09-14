@@ -73,13 +73,11 @@ func (s *Server) handleAdminCreateAccount(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
 		return
 	}
-	name := strings.TrimSpace(body.Name)
-	if name == "" {
-		writeAPIError(w, domain.ErrInvalidRequest("name is required"))
-		return
-	}
-	if !validResourceName(name) {
-		writeAPIError(w, domain.ErrInvalidRequest("account name must match [A-Za-z0-9._-] and be at most 64 characters"))
+	// An account name is a human-facing label: it may be an email address, Chinese
+	// text or any other Unicode, and only a blank or overlong value is refused.
+	name, err := domain.NormalizeAccountName(body.Name)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
 		return
 	}
 	mode := body.BillingMode

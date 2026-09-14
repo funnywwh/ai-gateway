@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -376,5 +377,128 @@ func TestDimensionRollupConfig(t *testing.T) {
 	t.Setenv("GW_RECORDING_DIMENSION_ROLLUP_ENABLED", "invalid")
 	if _, err = Load(path); err == nil {
 		t.Fatal("invalid bool accepted")
+	}
+}
+
+// TestBootstrapAccountNamesAreValidated pins the configuration boundary: a name the
+// management API would refuse must not reach the database through YAML, and a name the
+// API accepts (email, Chinese, surrounding whitespace) must pass start-up validation.
+func TestBootstrapAccountNamesAreValidated(t *testing.T) {
+	cases := []struct {
+		name    string
+		account string
+		broken  bool
+	}{
+		{"ascii", "internal", false},
+		{"email", "ops@example.com", false},
+		{"chinese", "北京研发", false},
+		{"padded", "  internal  ", false},
+		{"64 chinese chars", strings.Repeat("中", 64), false},
+		{"empty", "", true},
+		{"spaces only", "\u3000 \t", true},
+		{"65 chinese chars", strings.Repeat("中", 65), true},
+		{"invalid utf8", "acme\xff", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Bootstrap.Accounts = []BootstrapAccount{{Name: tc.account, BillingMode: "postpaid"}}
+			err := cfg.Validate()
+			if tc.broken && err == nil {
+				t.Fatalf("bootstrap account %q must be rejected at start-up", tc.account)
+			}
+			if !tc.broken && err != nil {
+				t.Fatalf("bootstrap account %q must be accepted: %v", tc.account, err)
+			}
+		})
+	}
+
+	// The account referenced by a seeded API key is the same label, so it is validated by
+	// the same rule: a blank "account:" used to mean "skip the key" and now fails loudly.
+	cfg := Default()
+	cfg.Bootstrap.APIKeys = []BootstrapAPIKey{{Name: "dev", Key: "sk-x", Account: "  "}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("an api key with a blank account must be rejected")
+	}
+	cfg = Default()
+	cfg.Bootstrap.APIKeys = []BootstrapAPIKey{{Name: "dev", Key: "sk-x", Account: "运维组"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a unicode account reference must be accepted: %v", err)
+	}
+}
+
+// TestBootstrapSkipsEntriesTheSeederIgnores pins the boundary between "validated" and
+// "skipped": a placeholder api_keys entry with no key material, and an account entry placed
+// in a list the seeder never reads, must not stop start-up. Only entries that would actually
+// seed or resolve an account are held to the name rule.
+func TestBootstrapSkipsEntriesTheSeederIgnores(t *testing.T) {
+	cfg := Default()
+	cfg.Bootstrap.APIKeys = []BootstrapAPIKey{{Name: "placeholder", Key: "", Account: ""}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("an api key entry with no key material must be skipped, got %v", err)
+	}
+	cfg = Default()
+	cfg.Bootstrap.APIKeys = []BootstrapAPIKey{{Name: "", Key: "sk-x", Account: ""}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("an api key entry with no name must be skipped, got %v", err)
+	}
+	// The same empty account on an entry that does carry key material is a real mistake and
+	// must still fail, or the key would seed against nothing.
+	cfg = Default()
+	cfg.Bootstrap.APIKeys = []BootstrapAPIKey{{Name: "dev", Key: "sk-x", Account: ""}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("a seeded api key with no account must be rejected")
+	}
+}
+
+// TestLoadBootstrapUnicodeAccountNames covers the path a `cfg.Validate()` call cannot:
+// the YAML file itself. A unicode account name with surrounding whitespace and an
+// api_keys reference to it must load and validate, and the loaded struct must still carry
+// the file's bytes verbatim — canonicalization belongs to the store's write path
+// (UpsertAccount), so normalizing here would give the composition root a configuration
+// that no longer matches the file it read.
+func TestLoadBootstrapUnicodeAccountNames(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := `server:
+  listen: ":9999"
+bootstrap:
+  mode: upsert
+  accounts:
+    - name: "  运维@example.com  "
+      billing_mode: postpaid
+      credit_limit_usd: 20
+  api_keys:
+    - name: dev
+      key: "sk-gw-unicode-fixture"
+      account: "运维@example.com"
+    - name: placeholder
+      key: ""
+      account: ""
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("a unicode bootstrap account name must load: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a unicode bootstrap account name must validate: %v", err)
+	}
+	if got := cfg.Bootstrap.Accounts[0].Name; got != "  运维@example.com  " {
+		t.Fatalf("loaded name = %q, want the file's bytes (the store trims on write)", got)
+	}
+	if got := cfg.Bootstrap.APIKeys[0].Account; got != "运维@example.com" {
+		t.Fatalf("loaded api key account = %q", got)
+	}
+
+	// The same file with a name that is only whitespace must fail at load/validate time:
+	// nothing would be seeded, so the gateway must not start as if it had.
+	blank := strings.Replace(body, `"  运维@example.com  "`, `"   "`, 1)
+	if err := os.WriteFile(path, []byte(blank), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("a whitespace-only bootstrap account name must be rejected")
 	}
 }

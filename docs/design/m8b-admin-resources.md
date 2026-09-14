@@ -122,6 +122,10 @@ capabilities、pricing_rules），**不覆盖人工设置的 upstream_model 与�
 
 ## 7. 校验规则
 
+- account.name：去除首尾 Unicode 空白后必须非空、为有效 UTF-8，且最多 64 个 Unicode 字符；允许邮箱、中文及其他 Unicode 字符（含 `@`），不再限于 ASCII 标识符字符集。
+  同一条规则在三处生效：`domain.NormalizeAccountName`（唯一实现）、`config` 的 bootstrap 校验（**叶子包不能 import domain**，故按 `TestBootstrapAccountNameValidationMatchesDomain` 钉住一致性）、
+  以及 `store.UpsertAccount`/`GetAccountByName`（写前与查前都规范化，`bootstrap` 用它保证 YAML 名与 `api_keys.account` 引用是同一个账户）。trim 只是规范化、不是新身份：
+  `" acme "` 与 `"acme"` 同一个账户，但 `Ops`/`ops`、`é`/`é` 仍是不同账户（不做大小写折叠、不做 Unicode NFC）。
 - provider.kind：内建 kind 或 `plugin:<name>`；name 为非空、长度<=64、字符集 `[A-Za-z0-9._-]`；
 - provider.max_inflight >= 0；priority/weight >= 0；degradation 属于 `none|fail_fast|best_effort`；
 - provider_model：public_model 必须能在 models 表按名解析（不存在时 404 并提示先建模型），权重/优先级非负；

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 
@@ -875,6 +876,51 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("bootstrap model %q reasoning: %w", model.PublicName, err)
 			}
 		}
+	}
+	// A bootstrap account name is validated rather than silently dropped: a name that the
+	// management API would refuse must fail start-up, because the alternative is a gateway
+	// that starts "successfully" while the account the operator configured never exists.
+	for _, account := range c.Bootstrap.Accounts {
+		if err := validateBootstrapAccountName(account.Name); err != nil {
+			return err
+		}
+	}
+	for _, key := range c.Bootstrap.APIKeys {
+		// Entries the seeder skips outright (no key material or no name) are not validated:
+		// they describe no account reference, so holding start-up hostage over one would be
+		// a new failure mode rather than a caught typo.
+		if key.Key == "" || key.Name == "" {
+			continue
+		}
+		if err := validateBootstrapAccountName(key.Account); err != nil {
+			return fmt.Errorf("bootstrap api key %q account: %w", key.Name, err)
+		}
+	}
+	return nil
+}
+
+// MaxBootstrapAccountNameRunes mirrors domain.MaxAccountNameRunes. This package stays a
+// leaf — it has no module-internal dependency but logx — so the rule is restated here
+// instead of imported; TestBootstrapAccountNameValidationMatchesDomain keeps the two
+// copies from drifting apart.
+const MaxBootstrapAccountNameRunes = 64
+
+// validateBootstrapAccountName applies the rule the domain and the management API enforce,
+// so a name that would be rejected on POST /admin/api/v1/accounts cannot slip into the
+// database through the configuration file: an account name is a non-empty label of at most
+// 64 Unicode characters after trimming (email, Chinese and any other Unicode are all fine).
+// A name written in YAML is therefore accepted or refused by the same rule as a name typed
+// into the console, and the domain still trims again when the row is written.
+func validateBootstrapAccountName(name string) error {
+	trimmed := strings.TrimSpace(name)
+	switch {
+	case trimmed == "":
+		return fmt.Errorf("bootstrap account name %q: account name is required", name)
+	case !utf8.ValidString(trimmed):
+		return fmt.Errorf("bootstrap account name %q: account name must be valid UTF-8", name)
+	case utf8.RuneCountInString(trimmed) > MaxBootstrapAccountNameRunes:
+		return fmt.Errorf("bootstrap account name %q: account name must be at most %d characters",
+			name, MaxBootstrapAccountNameRunes)
 	}
 	return nil
 }

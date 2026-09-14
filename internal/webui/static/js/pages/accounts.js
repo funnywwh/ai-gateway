@@ -33,7 +33,7 @@ export async function render({ page, actions, session }) {
     const result = await modal({
       title: '新建账户', submitLabel: '创建',
       fields: [
-        { name: 'name', label: '名称', required: true },
+        { name: 'name', label: '名称', required: true, hint: '支持邮箱、中文和其他 Unicode 字符；去除首尾空白后最多 64 个字符' },
         { name: 'billing_mode', label: '计费模式', type: 'select', options: ['prepaid', 'postpaid'] },
         { name: 'credit_limit_micros', label: '授信上限（微' + ledgerCurrency() + '）', type: 'number' },
         { name: 'low_balance_threshold_micros', label: '低额告警阈值（微' + ledgerCurrency() + '）', type: 'number' },

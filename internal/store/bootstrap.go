@@ -79,17 +79,21 @@ func (db *DB) Bootstrap(ctx context.Context, cfg config.Bootstrap, pluginStateDi
 func (db *DB) seedAccounts(ctx context.Context, accounts []config.BootstrapAccount, merge bool, res *BootstrapResult) (map[string]int64, error) {
 	ids := map[string]int64{}
 	for _, acc := range accounts {
-		if acc.Name == "" {
-			continue
+		// The configured name goes through the same normalization the management API
+		// applies, so a name with surrounding whitespace seeds the account the console
+		// and the API keys below resolve to instead of a near-duplicate row.
+		name, err := domain.NormalizeAccountName(acc.Name)
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap: account %q: %w", acc.Name, err)
 		}
 		tags, err := tagsJSON(acc.Tags)
 		if err != nil {
-			return nil, fmt.Errorf("bootstrap: account %q tags: %w", acc.Name, err)
+			return nil, fmt.Errorf("bootstrap: account %q tags: %w", name, err)
 		}
-		existing, err := db.GetAccountByName(ctx, acc.Name)
+		existing, err := db.GetAccountByName(ctx, name)
 		switch {
 		case err == nil:
-			ids[acc.Name] = existing.ID
+			ids[name] = existing.ID
 			if !merge {
 				continue
 			}
@@ -106,7 +110,7 @@ func (db *DB) seedAccounts(ctx context.Context, accounts []config.BootstrapAccou
 			res.AccountsUpdated++
 		case domain.IsNotFound(err):
 			created := &domain.Account{
-				Name:              acc.Name,
+				Name:              name,
 				TagsJSON:          tags,
 				BillingMode:       billingMode(acc.BillingMode),
 				CreditLimitMicros: usdToMicros(acc.CreditLimitUSD),
@@ -115,7 +119,7 @@ func (db *DB) seedAccounts(ctx context.Context, accounts []config.BootstrapAccou
 			if err != nil {
 				return nil, err
 			}
-			ids[acc.Name] = id
+			ids[name] = id
 			res.AccountsCreated++
 		default:
 			return nil, err
@@ -129,11 +133,17 @@ func (db *DB) seedAPIKeys(ctx context.Context, keys []config.BootstrapAPIKey, ac
 		if key.Key == "" || key.Name == "" {
 			continue
 		}
-		accountID, ok := accountIDs[key.Account]
+		// Same normalization as seedAccounts, so " account " in api_keys finds the
+		// account seeded as "account".
+		accountName, err := domain.NormalizeAccountName(key.Account)
+		if err != nil {
+			return fmt.Errorf("bootstrap: api key %q account: %w", key.Name, err)
+		}
+		accountID, ok := accountIDs[accountName]
 		if !ok {
-			acc, err := db.GetAccountByName(ctx, key.Account)
+			acc, err := db.GetAccountByName(ctx, accountName)
 			if err != nil {
-				return fmt.Errorf("bootstrap: api key %q references unknown account %q: %w", key.Name, key.Account, err)
+				return fmt.Errorf("bootstrap: api key %q references unknown account %q: %w", key.Name, accountName, err)
 			}
 			accountID = acc.ID
 		}

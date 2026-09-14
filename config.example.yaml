@@ -241,6 +241,7 @@ bootstrap:
     username: admin
     password: "change-me-admin-password"
   accounts:
+    # 名称去除首尾空白后须非空，最多 64 个 Unicode 字符；可用邮箱、中文等。
     - name: internal
       billing_mode: postpaid
       credit_limit_usd: 1000

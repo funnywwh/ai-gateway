@@ -56,6 +56,13 @@ func (db *DB) GetAccount(ctx context.Context, id int64) (*domain.Account, error)
 
 // GetAccountByName loads one account by unique name.
 func (db *DB) GetAccountByName(ctx context.Context, name string) (*domain.Account, error) {
+	// Normalizing here as well as at the API boundary keeps every caller that resolves
+	// an account by name (keys, invoices, credit codes, --account) consistent with what
+	// UpsertAccount stored.
+	name, err := domain.NormalizeAccountName(name)
+	if err != nil {
+		return nil, err
+	}
 	row := db.read.QueryRowContext(ctx, "SELECT "+accountCols+" FROM accounts WHERE name = ?", name)
 	a, err := scanAccount(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -92,9 +99,17 @@ func (db *DB) ListAccounts(ctx context.Context) ([]*domain.Account, error) {
 // UpsertAccount inserts by name or updates the matching row.
 // balance_micros is deliberately NOT overwritten: the ledger owns the balance.
 func (db *DB) UpsertAccount(ctx context.Context, a *domain.Account) (int64, error) {
-	if a == nil || a.Name == "" {
+	if a == nil {
 		return 0, domain.ErrInvalidRequest("account name is required")
 	}
+	// The store is the last gate before the row is written, so it normalizes too: a
+	// caller that skipped the API validation would otherwise store a name (trailing
+	// space, overlong, invalid UTF-8) that GetAccountByName can never match.
+	name, err := domain.NormalizeAccountName(a.Name)
+	if err != nil {
+		return 0, err
+	}
+	a.Name = name
 	now := time.Now().UTC()
 	if a.CreatedAt.IsZero() {
 		a.CreatedAt = now
