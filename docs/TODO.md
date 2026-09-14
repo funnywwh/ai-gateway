@@ -2105,3 +2105,10 @@
   改名 400 且带原因；`DELETE` 自检标签 200。回归：同一把迁移 key 的 `deepseek-flash` 请求仍 200（provider 7）。
 - [x] 控制台角标：`https://gpt.lagenio.xyz/aigw/admin/ui/` 左上角应显示 `v0.11.0  460eee7`（与 `/aigw/version` 同源，
   已用 curl 核对；浏览器目视待人工确认）。
+
+### v0.12.0 发布记录（2026-09-14）
+
+- [x] 路由配置后台改为模型中心的双栏编辑器：左栏可过滤模型，右栏以 checkbox 多选供应商；每个选中供应商可编辑上游模型名，并通过单个“保存路由”提交创建、更新和删除。属于新增管理后台能力，按 **minor** 由 `0.11.0` 升至 **`0.12.0`**。
+- [x] 实现提交 `09cffc3`；发布提交 `60dc1ba`，标签 `v0.12.0`。`go test ./...`、`go vet ./...`、嵌入资源测试与模型页浏览器 UI harness 均通过；本环境无 Node，`make ui-base` 自动跳过。
+- [x] 15:07:27（UTC+08:00）部署 **gptjp**；仅替换 `/opt/aigw/aigw`，未改动 `config.yaml` 或 `data/`。服务 active，回滚点：`/opt/aigw/aigw.prev-20260914-150727`。
+- [x] 校验：本机、`gptjp` 本地及公网 `https://gpt.lagenio.xyz/aigw/version` 均返回 `0.12.0 / 60dc1ba`；`/aigw/healthz`、`/aigw/readyz` 均为 200；本次启动日志无 `level=ERROR`。公网控制台 `https://gpt.lagenio.xyz/aigw/admin/ui/` 返回 200，角标模块会读取同源 `/aigw/version` 并显示 `v0.12.0  60dc1ba`（资源/端点已核验，浏览器目视待人工确认）。
