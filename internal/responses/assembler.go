@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -130,12 +131,108 @@ func (a *Assembler) Start() error {
 	return a.send(&Event{Type: EventInProgress, Response: a.build()})
 }
 
+// itemID prefers the provider's own item id and only falls back to a generated one.
+//
+// Identity is not decoration: a client replays the items this gateway returned, and a
+// stateless upstream resolves a replayed item by the id it issued (or by the encrypted blob
+// that came with it). An id invented here names an item the upstream has never seen, which
+// turns the client's next turn into "Item with id 'rs_…' not found".
+func itemID(fromProvider string, generate func() string) string {
+	if fromProvider != "" {
+		return fromProvider
+	}
+	return generate()
+}
+
+// foldResult says what a provider's finished item did to the output list.
+type foldResult int
+
+const (
+	// foldNew: no item with this id exists, so the finished item is a new output item.
+	foldNew foldResult = iota
+	// foldUpgraded: the item this stream built from deltas now carries the provider payload.
+	foldUpgraded
+	// foldDuplicate: this item's finished form was already published.
+	foldDuplicate
+)
+
+// foldFinishedItem folds a provider's finished item into the item this stream built from
+// deltas for the same id, keeping that item's output_index.
+//
+// A provider that streams an item and then states its finished form is describing ONE item:
+// appending the finished form would publish a duplicate, and ignoring it loses what only the
+// finished form carries — the upstream's item id and provider-side state such as the
+// encrypted reasoning blob a stateless upstream requires on the next turn. An already closed
+// item is upgraded in place without a second done event, so a client never sees the same
+// output_index finish twice.
+//
+// The finished payload *replaces* what deltas accumulated rather than merging with it: the
+// upstream is the authority on its own item, and its finished reasoning items reject the text
+// arrays the delta path builds ("array too long. Expected an array with maximum length 0"), so
+// a merge would poison the very replay this exists to enable.
+func (a *Assembler) foldFinishedItem(item pluginapi.Item) foldResult {
+	if item.ID == "" {
+		return foldNew
+	}
+	for i := range a.output {
+		if a.output[i].ID != item.ID {
+			continue
+		}
+		if a.output[i].Raw != nil {
+			return foldDuplicate
+		}
+		upgraded, err := outputItemFromProvider(item)
+		if err != nil {
+			return foldNew
+		}
+		if upgraded.Type == "" {
+			// A provider that omits the type must not turn a known item into an unknown one:
+			// the delta path already decided what this item is.
+			upgraded.Type = a.output[i].Type
+		}
+		a.output[i] = upgraded
+		if a.open != nil && a.open.index == i {
+			// Still open: closeOpen publishes the upgraded payload, so the client gets the
+			// usual finish sequence exactly once.
+			a.open.item = &a.output[i]
+		}
+		return foldUpgraded
+	}
+	return foldNew
+}
+
+// outputItemFromProvider renders a provider item as both the client-visible payload (Raw,
+// which keeps encrypted_content and every other provider field) and the structured fields the
+// assembler's own finish events read. Going through the item's JSON reuses the mapping the
+// stored-response decoder already relies on, so the two cannot drift apart.
+func outputItemFromProvider(item pluginapi.Item) (OutputItem, error) {
+	encoded, err := json.Marshal(item)
+	if err != nil {
+		return OutputItem{}, err
+	}
+	var out OutputItem
+	if err := json.Unmarshal(encoded, &out); err != nil {
+		return OutputItem{}, err
+	}
+	out.Raw = &item
+	return out, nil
+}
+
 // Add consumes one canonical provider event.
 func (a *Assembler) Add(ev pluginapi.Event) error {
 	switch ev.Type {
 	case pluginapi.EventOutputItemDone:
 		if ev.Item == nil {
 			return nil
+		}
+		switch a.foldFinishedItem(*ev.Item) {
+		case foldDuplicate:
+			// The same item already reached the client in its finished form.
+			return nil
+		case foldUpgraded:
+			// The provider finished an item this stream already streamed: closeOpen
+			// publishes the upgraded payload in the single done event the client expects.
+			return a.closeOpen()
 		}
 		if err := a.closeOpen(); err != nil {
 			return err
@@ -150,11 +247,11 @@ func (a *Assembler) Add(ev pluginapi.Event) error {
 		}
 		return a.send(&Event{Type: EventOutputItemDone, OutputIndex: index, Item: &output})
 	case pluginapi.EventTextDelta:
-		return a.addText(ev.Text)
+		return a.addText(ev)
 	case pluginapi.EventReasoningDelta:
-		return a.addReasoning(ev.Text)
+		return a.addReasoning(ev)
 	case pluginapi.EventRefusalDelta:
-		return a.addRefusal(ev.Text)
+		return a.addRefusal(ev)
 	case pluginapi.EventToolCallStart:
 		return a.startFunctionCall(ev)
 	case pluginapi.EventToolArgsDelta:
@@ -178,11 +275,12 @@ func (a *Assembler) Add(ev pluginapi.Event) error {
 	return nil
 }
 
-func (a *Assembler) addText(delta string) error {
+func (a *Assembler) addText(ev pluginapi.Event) error {
+	delta := ev.Text
 	if delta == "" {
 		return nil
 	}
-	item, err := a.ensurePart("message", "output_text")
+	item, err := a.ensurePart("message", "output_text", ev.ItemID)
 	if err != nil {
 		return err
 	}
@@ -195,11 +293,12 @@ func (a *Assembler) addText(delta string) error {
 	})
 }
 
-func (a *Assembler) addRefusal(delta string) error {
+func (a *Assembler) addRefusal(ev pluginapi.Event) error {
+	delta := ev.Text
 	if delta == "" {
 		return nil
 	}
-	item, err := a.ensurePart("message", "refusal")
+	item, err := a.ensurePart("message", "refusal", ev.ItemID)
 	if err != nil {
 		return err
 	}
@@ -212,7 +311,8 @@ func (a *Assembler) addRefusal(delta string) error {
 	})
 }
 
-func (a *Assembler) addReasoning(delta string) error {
+func (a *Assembler) addReasoning(ev pluginapi.Event) error {
+	delta := ev.Text
 	if delta == "" {
 		return nil
 	}
@@ -221,7 +321,7 @@ func (a *Assembler) addReasoning(delta string) error {
 			return err
 		}
 		item := OutputItem{
-			Type: "reasoning", ID: ids.Reasoning(), Status: "in_progress",
+			Type: "reasoning", ID: itemID(ev.ItemID, ids.Reasoning), Status: "in_progress",
 			// The chain of thought is kept twice on purpose: summary drives the
 			// reasoning_summary events, content carries the text in the upstream shape
 			// (reasoning_text parts) so a stored response can replay it verbatim.
@@ -289,7 +389,7 @@ func (a *Assembler) addFunctionArguments(ev pluginapi.Event) error {
 }
 
 // ensurePart opens (if needed) a message item with the given content part type.
-func (a *Assembler) ensurePart(itemType, partType string) (*OutputItem, error) {
+func (a *Assembler) ensurePart(itemType, partType, itemIDFromProvider string) (*OutputItem, error) {
 	if a.open != nil && a.open.item.Type == itemType && len(a.open.item.Content) > 0 &&
 		a.open.item.Content[0].Type == partType {
 		return a.open.item, nil
@@ -297,9 +397,8 @@ func (a *Assembler) ensurePart(itemType, partType string) (*OutputItem, error) {
 	if err := a.closeOpen(); err != nil {
 		return nil, err
 	}
-	role := "assistant"
 	a.output = append(a.output, OutputItem{
-		Type: itemType, ID: ids.Message(), Role: role, Status: "in_progress",
+		Type: itemType, ID: itemID(itemIDFromProvider, ids.Message), Role: "assistant", Status: "in_progress",
 		Content: []ContentPart{{Type: partType}},
 	})
 	a.open = &openItem{index: len(a.output) - 1, item: &a.output[len(a.output)-1]}

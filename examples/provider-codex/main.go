@@ -1322,13 +1322,19 @@ func (p *provider) translate(event wireEvent, emit func(pluginapi.Event) error) 
 			ItemID: event.Item.ID, CallID: event.Item.CallID, Name: event.Item.Name,
 		})
 	case "response.output_item.done":
-		// Newer Codex clients use custom tools as well as function tools. Keep
-		// their complete items intact; ignoring them silently ends the agent turn.
-		// The three types below are already emitted through the delta path.
-		if event.Item != nil && event.Item.Type != "message" && event.Item.Type != "reasoning" && event.Item.Type != "function_call" {
-			return emit(pluginapi.Event{Type: pluginapi.EventOutputItemDone, Item: event.Item})
+		if event.Item == nil {
+			return nil
 		}
-		return nil
+		// Every finished item is forwarded, including the message / reasoning /
+		// function_call items the delta path already streamed. The finished item is the
+		// only carrier of what deltas cannot express: the upstream's own item id and, on
+		// this stateless backend (store=false), the encrypted reasoning blob that
+		// `include: ["reasoning.encrypted_content"]` asks for. Without the blob a client
+		// cannot replay its own history — the upstream answers "Item with id 'rs_…' not
+		// found. Items are not persisted when `store` is set to false." (measured through
+		// this gateway on 2026-09-14). The host folds a finished item into the item it
+		// built from deltas, so the client still sees exactly one item per output_index.
+		return emit(pluginapi.Event{Type: pluginapi.EventOutputItemDone, Item: event.Item})
 	case "response.function_call_arguments.delta":
 		if event.Delta == "" {
 			return nil
@@ -1412,12 +1418,29 @@ func (p *provider) Complete(ctx context.Context, req *pluginapi.Request) (*plugi
 		finishReason string
 		items        []pluginapi.Item
 	)
+	// textItemID is the upstream's id for the message being streamed, so the item built from
+	// deltas and the finished message the upstream sends afterwards are one item, not two.
+	textItemID := ""
+	upsert := func(item pluginapi.Item) {
+		for i := range items {
+			if item.ID != "" && items[i].ID == item.ID {
+				items[i] = item
+				return
+			}
+		}
+		items = append(items, item)
+	}
 	flushText := func(status string) {
 		if builder.Len() == 0 {
 			return
 		}
-		items = append(items, pluginapi.Item{Type: "message", ID: fmt.Sprintf("msg_codex_%d", len(items)), Role: "assistant", Content: outputText(builder.String()), Status: status})
+		id := textItemID
+		if id == "" {
+			id = fmt.Sprintf("msg_codex_%d", len(items))
+		}
+		upsert(pluginapi.Item{Type: "message", ID: id, Role: "assistant", Content: outputText(builder.String()), Status: status})
 		builder.Reset()
+		textItemID = ""
 	}
 	var outputChars strings.Builder
 	err := p.Stream(ctx, req, func(event pluginapi.Event) error {
@@ -1425,9 +1448,12 @@ func (p *provider) Complete(ctx context.Context, req *pluginapi.Request) (*plugi
 		case pluginapi.EventOutputItemDone:
 			if event.Item != nil {
 				flushText("completed")
-				items = append(items, *event.Item)
+				upsert(*event.Item)
 			}
 		case pluginapi.EventTextDelta:
+			if event.ItemID != "" {
+				textItemID = event.ItemID
+			}
 			builder.WriteString(event.Text)
 			outputChars.WriteString(event.Text)
 		case pluginapi.EventUsage:
