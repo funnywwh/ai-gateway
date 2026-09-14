@@ -934,3 +934,39 @@ func TestNormalizeInputItemsLeavesOtherItemsAlone(t *testing.T) {
 		t.Fatal("a no-op normalization must return the caller's slice")
 	}
 }
+
+// This backend is stateless (store=false), so a reasoning item replayed from an earlier turn
+// is only usable with the encrypted blob that include asked for: without it the upstream
+// rejects the request with "Item with id 'rs_…' not found. Items are not persisted when
+// `store` is set to false." (measured through the gateway on 2026-09-14).
+func TestIncludeIsForwardedToTheUpstream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, frame := range happyFrames {
+			_, _ = fmt.Fprint(w, frame)
+		}
+	}))
+	defer upstream.Close()
+
+	p := newTestProvider(t, upstream.URL, upstream.URL+"/session", upstream.URL+"/token",
+		map[string]string{"access_token": "static-token"})
+	var req pluginapi.Request
+	if err := json.Unmarshal([]byte(`{"model":"codex","include":["reasoning.encrypted_content"],
+      "input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`), &req); err != nil {
+		t.Fatal(err)
+	}
+	body, err := p.buildRequest(&req, true)
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	var wire struct {
+		Include []string `json:"include"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if len(wire.Include) != 1 || wire.Include[0] != "reasoning.encrypted_content" {
+		t.Fatalf("include = %v, want the client's request forwarded verbatim (%s)", wire.Include, body)
+	}
+}

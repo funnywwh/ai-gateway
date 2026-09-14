@@ -923,8 +923,14 @@ type responsesRequest struct {
 	Tools          []pluginapi.Tool     `json:"tools,omitempty"`
 	ToolChoice     json.RawMessage      `json:"tool_choice,omitempty"`
 	Reasoning      *pluginapi.Reasoning `json:"reasoning,omitempty"`
-	Store          bool                 `json:"store"`
-	Stream         bool                 `json:"stream"`
+	// Include is forwarded verbatim. This backend is stateless (store=false): a reasoning
+	// item from an earlier turn can only be replayed when it carries the encrypted blob that
+	// "reasoning.encrypted_content" asks for, otherwise the upstream rejects the whole
+	// request with "Item with id 'rs_…' not found. Items are not persisted when `store` is
+	// set to false." — measured through this gateway on 2026-09-14.
+	Include []string `json:"include,omitempty"`
+	Store   bool     `json:"store"`
+	Stream  bool     `json:"stream"`
 }
 
 type wireUsage struct {
@@ -1072,6 +1078,7 @@ func (p *provider) buildRequest(req *pluginapi.Request, stream bool) ([]byte, er
 		Input:          normalizeInputItems(rewriteSystemRoles(req.Input)),
 		Tools:          explicitToolStrictness(req.Tools),
 		ToolChoice:     req.ToolChoice,
+		Include:        req.Include,
 		Store:          p.cfg.Store,
 		Stream:         stream,
 	}

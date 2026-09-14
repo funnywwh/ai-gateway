@@ -2,6 +2,7 @@ package responses
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -122,5 +123,30 @@ func TestToProviderRequestKeepsExplicitlyEmptyItemFields(t *testing.T) {
 	}
 	if _, ok := body.Input[0]["summary"]; ok {
 		t.Errorf("a user message must not grow a summary key: %s", encoded)
+	}
+}
+
+// include is what makes a replayed reasoning item usable against a stateless upstream: the
+// encrypted blob only comes back when the upstream was asked for it, so dropping the field
+// here turns the client's next turn into "Item with id 'rs_…' not found".
+func TestToProviderRequestForwardsInclude(t *testing.T) {
+	req, err := Parse([]byte(`{"model":"m","input":"hi","store":false,
+      "include":["reasoning.encrypted_content"],"reasoning":{"effort":"medium","summary":"auto"}}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	out, apiErr := req.ToProviderRequest("upstream-m")
+	if apiErr != nil {
+		t.Fatalf("ToProviderRequest: %v", apiErr)
+	}
+	if len(out.Include) != 1 || out.Include[0] != "reasoning.encrypted_content" {
+		t.Fatalf("provider request include = %v, want the client's list", out.Include)
+	}
+	encoded, marshalErr := json.Marshal(out)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if !strings.Contains(string(encoded), `"include":["reasoning.encrypted_content"]`) {
+		t.Fatalf("include did not survive into the plugin frame params: %s", encoded)
 	}
 }

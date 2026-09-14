@@ -295,9 +295,15 @@ type Request struct {
 	Text              *TextConfig       `json:"text,omitempty"`
 	Metadata          map[string]string `json:"metadata,omitempty"`
 	// PromptCacheKey is forwarded verbatim, independently of the gateway's session affinity key.
-	PromptCacheKey string                     `json:"prompt_cache_key,omitempty"`
-	Stream         bool                       `json:"stream,omitempty"`
-	Extra          map[string]json.RawMessage `json:"-"`
+	PromptCacheKey string `json:"prompt_cache_key,omitempty"`
+	// Include carries the extra output data a client asked for, verbatim (for example
+	// "reasoning.encrypted_content"). It has to reach the upstream: a client replaying a
+	// reasoning item from an earlier turn needs the encrypted blob that include asked for,
+	// and without it a stateless upstream answers "Item with id 'rs_…' not found. Items are
+	// not persisted when `store` is set to false."
+	Include []string                   `json:"include,omitempty"`
+	Stream  bool                       `json:"stream,omitempty"`
+	Extra   map[string]json.RawMessage `json:"-"`
 }
 
 // Event is a streaming increment emitted by a plugin.

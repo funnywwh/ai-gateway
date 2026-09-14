@@ -152,6 +152,7 @@ func (r *Request) ToProviderRequest(upstreamModel string) (*pluginapi.Request, *
 		ParallelToolCalls: r.ParallelToolCalls,
 		Metadata:          r.Metadata,
 		PromptCacheKey:    r.PromptCacheKey,
+		Include:           r.Include,
 		Stream:            r.Stream,
 		Extra:             r.Extra,
 	}
