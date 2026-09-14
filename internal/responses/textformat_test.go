@@ -83,3 +83,44 @@ func TestToProviderRequestNormalisesTheTextLevel(t *testing.T) {
 		t.Errorf("json_schema level = %s, want the client's object unchanged", out.Text.Format)
 	}
 }
+
+// A client's explicitly empty item fields are part of the request, not noise: the codex
+// subscription backend answers "Missing required parameter: 'input[3].summary'" for a
+// reasoning item whose empty summary array the gateway dropped (2026-09-14 production
+// failure, see docs/design/m45-input-item-empty-field-preservation.md). The provider request
+// is what the plugin process receives, so that hop is where the fidelity has to hold.
+func TestToProviderRequestKeepsExplicitlyEmptyItemFields(t *testing.T) {
+	req, err := Parse([]byte(`{"model":"m","input":[
+      {"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+      {"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"abc"},
+      {"type":"function_call","call_id":"call_1","name":"noop","arguments":""}]}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	out, apiErr := req.ToProviderRequest("upstream-m")
+	if apiErr != nil {
+		t.Fatalf("ToProviderRequest: %v", apiErr)
+	}
+	encoded, marshalErr := json.Marshal(out)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	var body struct {
+		Input []map[string]json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(encoded, &body); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(body.Input[1]["summary"]); got != `[]` {
+		t.Errorf("reasoning summary = %s, want the client's empty array", got)
+	}
+	if got := string(body.Input[1]["encrypted_content"]); got != `"abc"` {
+		t.Errorf("encrypted_content = %s, want it forwarded", got)
+	}
+	if got := string(body.Input[2]["arguments"]); got != `""` {
+		t.Errorf("function_call arguments = %s, want the client's empty string", got)
+	}
+	if _, ok := body.Input[0]["summary"]; ok {
+		t.Errorf("a user message must not grow a summary key: %s", encoded)
+	}
+}

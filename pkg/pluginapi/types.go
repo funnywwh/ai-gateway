@@ -124,10 +124,19 @@ type Item struct {
 	Output    string          `json:"output,omitempty"`
 	// OutputContent preserves array-valued tool results (text, images, files).
 	// When set it takes precedence over the legacy string Output on the wire.
-	OutputContent json.RawMessage            `json:"-"`
-	Status        string                     `json:"status,omitempty"`
-	Summary       []SummaryPart              `json:"summary,omitempty"`
-	Extra         map[string]json.RawMessage `json:"-"`
+	OutputContent json.RawMessage `json:"-"`
+	Status        string          `json:"status,omitempty"`
+	// Summary is written by MarshalJSON instead of a struct tag. A reasoning item's
+	// summary is a required key upstream and an empty array is a meaningful value ("there
+	// was no summary text"), so an empty-but-non-nil slice has to survive the round trip
+	// while a nil slice stays absent — a distinction `omitempty` cannot express. Losing it
+	// is what turns a valid request into "Missing required parameter:
+	// 'input[3].summary'". Assign []SummaryPart{} to force the key onto the wire.
+	Summary []SummaryPart              `json:"-"`
+	Extra   map[string]json.RawMessage `json:"-"`
+
+	// sent marks the wire keys whose empty value is a legal value (see sentFields).
+	sent sentFields
 }
 
 var itemJSONFields = map[string]bool{
@@ -135,20 +144,65 @@ var itemJSONFields = map[string]bool{
 	"name": true, "arguments": true, "output": true, "status": true, "summary": true,
 }
 
+// sentFields records which of the fields whose *empty* value is meaningful a decoded
+// document carried. "The client sent the key" is information an upstream may be strict
+// about: a no-argument tool call sends `"arguments":""` and an empty tool result sends
+// `"output":""`, and dropping either produces an item the upstream rejects for a missing
+// required parameter. A bitset rather than a map because Item is copied by value in the
+// hot path (assembler, request building).
+type sentFields uint8
+
+const (
+	sentArguments sentFields = 1 << iota
+	sentOutput
+)
+
+var emptyStringJSON = json.RawMessage(`""`)
+
+func (s sentFields) has(f sentFields) bool { return s&f != 0 }
+
+// emptySentFields reports the sent fields whose current value is empty, i.e. the ones a
+// struct tag dropped and MarshalJSON has to put back.
+func (i Item) emptySentFields() sentFields {
+	var out sentFields
+	if i.sent.has(sentArguments) && i.Arguments == "" {
+		out |= sentArguments
+	}
+	// An array-valued result (OutputContent) already carries the key.
+	if i.sent.has(sentOutput) && i.Output == "" && len(i.OutputContent) == 0 {
+		out |= sentOutput
+	}
+	return out
+}
+
 // MarshalJSON keeps fields from input item types that the canonical protocol does not
-// model yet. Some Responses clients put provider-specific data inside an input item
-// (for example additional_tools.tools), so dropping Extra here changes a valid request
-// into an upstream validation error.
+// model yet, and keeps the empty values that a struct tag would drop. Some Responses
+// clients put provider-specific data inside an input item (for example
+// additional_tools.tools), so dropping Extra here changes a valid request into an upstream
+// validation error; and some providers require the *key* even when its value is empty
+// (a reasoning item's `summary`, a tool item's `arguments`/`output`), so a key the client
+// sent is never dropped just because its value is zero.
 func (i Item) MarshalJSON() ([]byte, error) {
 	type plain Item
 	encoded, err := json.Marshal(plain(i))
-	if err != nil || (len(i.Extra) == 0 && len(i.OutputContent) == 0) {
+	if err != nil {
+		return nil, err
+	}
+	restore := i.emptySentFields()
+	if i.Summary == nil && len(i.Extra) == 0 && len(i.OutputContent) == 0 && restore == 0 {
 		return encoded, err
 	}
 
 	fields := map[string]json.RawMessage{}
 	if err := json.Unmarshal(encoded, &fields); err != nil {
 		return nil, err
+	}
+	if i.Summary != nil {
+		summary, err := json.Marshal(i.Summary)
+		if err != nil {
+			return nil, err
+		}
+		fields["summary"] = summary
 	}
 	if len(i.OutputContent) > 0 {
 		fields["output"] = i.OutputContent
@@ -159,6 +213,12 @@ func (i Item) MarshalJSON() ([]byte, error) {
 		}
 		fields[key] = value
 	}
+	if restore.has(sentArguments) {
+		fields["arguments"] = emptyStringJSON
+	}
+	if restore.has(sentOutput) {
+		fields["output"] = emptyStringJSON
+	}
 	return json.Marshal(fields)
 }
 
@@ -168,15 +228,19 @@ func (i Item) MarshalJSON() ([]byte, error) {
 func (i *Item) UnmarshalJSON(data []byte) error {
 	type plain Item
 	var decoded plain
-	// Shadow output during decoding: newer clients return content-part arrays,
-	// while existing plugin callers still construct string Output values.
+	// Shadow output and summary during decoding: newer clients return content-part
+	// arrays, while existing plugin callers still construct string Output values, and
+	// summary is decoded here so that `[]` (an empty but present array) and a missing key
+	// stay distinguishable — see the field comment.
 	wire := struct {
 		*plain
-		Output json.RawMessage `json:"output"`
+		Output  json.RawMessage `json:"output"`
+		Summary []SummaryPart   `json:"summary"`
 	}{plain: &decoded}
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
+	decoded.Summary = wire.Summary
 	if len(wire.Output) > 0 {
 		if wire.Output[0] == '[' {
 			decoded.OutputContent = append(json.RawMessage(nil), wire.Output...)
@@ -193,6 +257,14 @@ func (i *Item) UnmarshalJSON(data []byte) error {
 		if !itemJSONFields[key] {
 			extra[key] = append(json.RawMessage(nil), value...)
 		}
+	}
+	// "summary" needs no marker: decoding `[]` yields an empty non-nil slice, which
+	// MarshalJSON emits again, while a missing (or null) key stays nil and absent.
+	if _, ok := fields["arguments"]; ok {
+		decoded.sent |= sentArguments
+	}
+	if _, ok := fields["output"]; ok {
+		decoded.sent |= sentOutput
 	}
 	*i = Item(decoded)
 	if len(extra) > 0 {

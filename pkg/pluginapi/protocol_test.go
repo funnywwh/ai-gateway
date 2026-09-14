@@ -221,3 +221,122 @@ func TestItemExtraFieldsRoundTripThroughTheProtocol(t *testing.T) {
 		t.Fatalf("encoded input item tools = %s", got)
 	}
 }
+
+// A reasoning item's summary is a *required* key upstream and an empty array is a real
+// value, not a missing one. Production example: the ChatGPT subscription backend answers
+// "Missing required parameter: 'input[1].summary'" for a reasoning item whose empty
+// summary was dropped, and the item then poisons every later request of that session.
+func TestItemKeepsExplicitlyEmptyValues(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string // keys the encoded item must still carry
+		gone []string // keys the encoded item must not carry
+	}{
+		{
+			name: "empty reasoning summary survives",
+			in:   `{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"abc"}`,
+			want: []string{`"summary":[]`, `"encrypted_content":"abc"`},
+		},
+		{
+			name: "non-empty reasoning summary survives",
+			in:   `{"type":"reasoning","id":"rs_2","summary":[{"type":"summary_text","text":"t"}]}`,
+			want: []string{`"summary":[{"type":"summary_text","text":"t"}]`},
+		},
+		{
+			name: "absent summary is not invented",
+			in:   `{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}`,
+			gone: []string{`"summary"`},
+		},
+		{
+			name: "null summary is not a summary",
+			in:   `{"type":"reasoning","id":"rs_3","summary":null}`,
+			gone: []string{`"summary"`},
+		},
+		{
+			name: "empty tool arguments survive",
+			in:   `{"type":"function_call","call_id":"call_1","name":"noop","arguments":""}`,
+			want: []string{`"arguments":""`},
+		},
+		{
+			name: "empty tool output survives",
+			in:   `{"type":"function_call_output","call_id":"call_1","output":""}`,
+			want: []string{`"output":""`},
+		},
+		{
+			name: "array tool output still wins over the string form",
+			in:   `{"type":"custom_tool_call_output","call_id":"call_1","output":[]}`,
+			want: []string{`"output":[]`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var item Item
+			if err := json.Unmarshal([]byte(tc.in), &item); err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := json.Marshal(item)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(string(encoded), want) {
+					t.Errorf("encoded item %s is missing %s", encoded, want)
+				}
+			}
+			for _, gone := range tc.gone {
+				if strings.Contains(string(encoded), gone) {
+					t.Errorf("encoded item %s must not carry %s", encoded, gone)
+				}
+			}
+		})
+	}
+}
+
+// The fidelity has to survive the plugin hop, which re-encodes every item: the host
+// serialises the provider request into the frame's params and the plugin decodes it again.
+func TestItemEmptySummarySurvivesTheProtocolHop(t *testing.T) {
+	req := Request{
+		Model: "m",
+		Input: []Item{{Type: "reasoning", ID: "rs_1", Summary: []SummaryPart{},
+			Extra: map[string]json.RawMessage{"encrypted_content": json.RawMessage(`"abc"`)}}},
+	}
+	params, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	enc := NewEncoder(&buf)
+	if err := enc.Write(Frame{ID: "1", Method: MethodStream, Params: params}); err != nil {
+		t.Fatal(err)
+	}
+
+	dec := NewDecoder(&buf)
+	frame, err := dec.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Request
+	if err := json.Unmarshal(frame.Params, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Input) != 1 || decoded.Input[0].Summary == nil || len(decoded.Input[0].Summary) != 0 {
+		t.Fatalf("decoded item = %+v, want an empty but present summary", decoded.Input)
+	}
+	encoded, err := json.Marshal(decoded.Input[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"summary":[]`) {
+		t.Fatalf("plugin-side item = %s, want an explicit empty summary", encoded)
+	}
+	// A provider adapter can also force the key for a client that never sent one.
+	forced := Item{Type: "reasoning", ID: "rs_2", Summary: []SummaryPart{}}
+	encoded, err = json.Marshal(forced)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"summary":[]`) {
+		t.Fatalf("forced item = %s, want an explicit empty summary", encoded)
+	}
+}

@@ -1000,6 +1000,60 @@ func rewriteSystemRoles(items []pluginapi.Item) []pluginapi.Item {
 	return out
 }
 
+// normalizeInputItems rewrites input items into the shapes this backend accepts.
+//
+// Two of its input rules collide with what clients legitimately send, because the gateway's
+// own output items carry exactly the fields this backend refuses on input:
+//
+//   - a `reasoning` item must carry `summary`, and an empty array is the right answer when
+//     the model produced no summary text. A client that never saw the key, or that lost the
+//     empty array on the way through, otherwise gets a hard
+//     "Missing required parameter: 'input[N].summary'" — and since the item stays in the
+//     history, every later request of that session fails the same way;
+//   - a `reasoning` item must NOT carry `content` (measured: "array too long. Expected an
+//     array with maximum length 0") nor `status` ("Unknown parameter: 'input[N].status'").
+//     Both are output-only fields that the gateway returned with the item, so replaying what
+//     the client received must not be a way to make a request invalid.
+//
+// This is the same kind of translation as rewriteSystemRoles: the backend's input dialect is
+// this adapter's business, not every client's.
+//
+// The caller's slice is never mutated: the gateway may reuse the request.
+func normalizeInputItems(items []pluginapi.Item) []pluginapi.Item {
+	var out []pluginapi.Item
+	for i, item := range items {
+		if !needsInputNormalization(item) {
+			continue
+		}
+		if out == nil {
+			out = append([]pluginapi.Item(nil), items...)
+		}
+		// status is an output-only field on every item type this backend validates.
+		out[i].Status = ""
+		if item.Type != "reasoning" {
+			continue
+		}
+		if out[i].Summary == nil {
+			out[i].Summary = []pluginapi.SummaryPart{}
+		}
+		out[i].Content = nil
+	}
+	if out == nil {
+		return items
+	}
+	return out
+}
+
+// needsInputNormalization reports whether one item carries something this backend refuses
+// on input: an output-only status on any type, or a reasoning item missing the required
+// summary key / carrying the forbidden content array.
+func needsInputNormalization(item pluginapi.Item) bool {
+	if item.Status != "" {
+		return true
+	}
+	return item.Type == "reasoning" && (item.Summary == nil || len(item.Content) != 0)
+}
+
 func (p *provider) buildRequest(req *pluginapi.Request, stream bool) ([]byte, error) {
 	if req == nil {
 		return nil, pluginapi.NewError("bad_request", "provider-codex: nil request")
@@ -1015,7 +1069,7 @@ func (p *provider) buildRequest(req *pluginapi.Request, stream bool) ([]byte, er
 		PromptCacheKey: req.PromptCacheKey,
 		Model:          model,
 		Instructions:   req.Instructions,
-		Input:          rewriteSystemRoles(req.Input),
+		Input:          normalizeInputItems(rewriteSystemRoles(req.Input)),
 		Tools:          explicitToolStrictness(req.Tools),
 		ToolChoice:     req.ToolChoice,
 		Store:          p.cfg.Store,

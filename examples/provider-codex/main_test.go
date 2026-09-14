@@ -847,3 +847,90 @@ func TestOtherRolesAreLeftAlone(t *testing.T) {
 		}
 	}
 }
+
+// Production failure (2026-09-14): a codex session whose history contained a reasoning item
+// with an empty summary was rejected by this backend with
+// "Missing required parameter: 'input[1].summary'", and every later request of that session
+// failed the same way. The item must reach the upstream with the key present, and without
+// the output-only fields this backend refuses on input.
+func TestReasoningInputItemsAreNormalizedForTheUpstream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, frame := range happyFrames {
+			_, _ = fmt.Fprint(w, frame)
+		}
+	}))
+	defer upstream.Close()
+
+	p := newTestProvider(t, upstream.URL, upstream.URL+"/session", upstream.URL+"/token",
+		map[string]string{"access_token": "static-token"})
+	var req pluginapi.Request
+	raw := `{"model":"codex","input":[
+      {"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+      {"type":"reasoning","id":"rs_1","summary":[],"content":[{"type":"reasoning_text","text":"why"}],
+       "status":"completed","encrypted_content":"abc"},
+      {"type":"reasoning","id":"rs_2"}]}`
+	if err := json.Unmarshal([]byte(raw), &req); err != nil {
+		t.Fatal(err)
+	}
+
+	body, err := p.buildRequest(&req, true)
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	var wire struct {
+		Input []map[string]json.RawMessage `json:"input"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatal(err)
+	}
+	reasoning := wire.Input[1]
+	if got := string(reasoning["summary"]); got != `[]` {
+		t.Fatalf("empty summary = %s, want [] (the key is required upstream)", got)
+	}
+	if _, ok := reasoning["content"]; ok {
+		t.Fatalf("input reasoning must not carry content: %s", body)
+	}
+	if _, ok := reasoning["status"]; ok {
+		t.Fatalf("input reasoning must not carry status: %s", body)
+	}
+	if got := string(reasoning["encrypted_content"]); got != `"abc"` {
+		t.Fatalf("encrypted_content = %s, want it forwarded verbatim", got)
+	}
+	// A reasoning item that never carried a summary gets the required empty array.
+	if got := string(wire.Input[2]["summary"]); got != `[]` {
+		t.Fatalf("missing summary = %s, want []", got)
+	}
+	// Untouched types keep their shape, and the caller's slice is not mutated.
+	if got := string(wire.Input[0]["content"]); !strings.Contains(got, `"hi"`) {
+		t.Fatalf("user message content = %s", got)
+	}
+	if len(req.Input[1].Content) == 0 || req.Input[1].Status != "completed" {
+		t.Fatalf("normalizeInputItems mutated the caller's request: %+v", req.Input[1])
+	}
+}
+
+func TestNormalizeInputItemsLeavesOtherItemsAlone(t *testing.T) {
+	items := []pluginapi.Item{
+		{Type: "message", Role: "user", Content: json.RawMessage(`[{"type":"input_text","text":"hi"}]`)},
+		{Type: "function_call", CallID: "call_1", Name: "noop", Arguments: ""},
+		{Type: "function_call_output", CallID: "call_1", Output: "42"},
+		{Type: "reasoning", ID: "rs_1", Summary: []pluginapi.SummaryPart{{Type: "summary_text", Text: "t"}}},
+	}
+	got := normalizeInputItems(items)
+	for i := range items {
+		a, _ := json.Marshal(items[i])
+		b, _ := json.Marshal(got[i])
+		if string(a) != string(b) {
+			t.Fatalf("item %d changed:\n want %s\n  got %s", i, a, b)
+		}
+	}
+	if len(got) != len(items) {
+		t.Fatalf("length changed: %d -> %d", len(items), len(got))
+	}
+	// A no-op pass must not allocate a copy: the caller's backing array is returned.
+	if &got[0] != &items[0] {
+		t.Fatal("a no-op normalization must return the caller's slice")
+	}
+}
