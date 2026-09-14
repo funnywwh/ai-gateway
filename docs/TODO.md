@@ -1824,12 +1824,23 @@
   `0.10.0 / 9368b07`；healthz/readyz 均 HTTP 200；启动日志 `version=0.10.0 revision=9368b07` 且重启后**无 ERROR**；
   控制台 HTTP 200，公网 `js/brand.js` 与源码 SHA-256 逐字节一致（`5c92efb8…`）→ 角标会显示 v0.10.0。
 - [x] 启动日志同时确认新闸门已接线：`provider capacity ready queue_wait=30s queue_max_waiters=100 limited_providers=1`。
-- **运维须知（本次发布后行为变化）**：线上 `deepseek`（id 8）的 `max_inflight` 一直是 **2500**——该字段在 M44 之前
-  存了不生效，现在**真的生效**了：该供应商最多 2500 个在途上游调用，超出后在队列中等待（30s / 最多 100 个排队），
-  等待超时或队满才会换候选/返回 429 `provider_busy`。2500 对当前流量等于"不限"，无需处理；
-  若本意是"完全不限"，把该字段写成 `0`（控制台「最大并发」或 MCP `admin_update_provider`），
-  0 表示不限且**不建闸门**。
-- 回滚点：`/opt/aigw/aigw.prev-20260914-120037`（v0.9.0，`338d4cc`）；恢复该二进制后重启 `aigw`，不回退数据库。
+- [x] 12:03:28（UTC+08:00）部署 **gptjp**（`8.211.157.165`）同一个 `v0.10.0` 二进制：同样先落到 `/opt/aigw/aigw.new`、
+  备份后 `install` 并重启；`/opt/aigw/config.yaml`（SHA-256 `d9b78f7f77f72377005c8c753e2c3ae6910aa306746ab4590195df1c68e75f46`）
+  与数据目录未改动，`aigw.service` active。
+- [x] gptjp 验证：本机 `localhost:8088/aigw/version` 与公网 `https://gpt.lagenio.xyz/aigw/version` 均为
+  `0.10.0 / 9368b07`；healthz/readyz/控制台均 HTTP 200；启动日志 `version=0.10.0 revision=9368b07` 且重启后
+  **无 ERROR**；公网 `js/brand.js` 与源码 SHA-256 一致（`5c92efb8…`）。
+- [x] gptjp 的闸门接线：`provider capacity ready queue_wait=30s queue_max_waiters=100 limited_providers=0`
+  —— 该机四个供应商（三个 codex 插件 + deepseek）的 `max_inflight` 全为 `0`，因此**行为与 0.9.0 完全一致**，
+  没有任何排队；需要限流时再在控制台/MCP 设「最大并发」。
+- **运维须知（本次发布后行为变化，仅 gpt001）**：gpt001 上 `deepseek`（id 8）的 `max_inflight` 一直是 **2500**——
+  该字段在 M44 之前存了不生效，现在**真的生效**了：该供应商最多 2500 个在途上游调用，超出后在队列中等待
+  （30s / 最多 100 个排队），等待超时或队满才会换候选/返回 429 `provider_busy`。2500 对当前流量等于"不限"，
+  无需处理；若本意是"完全不限"，把该字段写成 `0`（控制台「最大并发」或 MCP `admin_update_provider`），
+  0 表示不限且**不建闸门**。gptjp 上没有设过上限，不受影响。
+- 回滚点：gpt001 `/opt/aigw/aigw.prev-20260914-120037`、gptjp `/opt/aigw/aigw.prev-20260914-120328`
+  （均为 v0.9.0，`338d4cc`）；`cp` 回对应二进制后 `systemctl restart aigw`，不回退数据库。
+- 两台机器的二进制 SHA-256 与本机构建一致：`aa123f292a902402579f8d5cac3fb83652ba7643feb2200f2ac575a935e94502`。
 - 未做：未对线上付费上游做并发/排队实测（无付费模型验证）；未做浏览器目视检查（以资源哈希、`/version`
   与探针替代）；`#plugin` UI harness 视图的既有失败仍未修（见上文 M44 边界）。
 
