@@ -1791,6 +1791,20 @@
 - 回滚点：`/opt/aigw/aigw.pre-v0.3.1`、`/opt/aigw/plugins/provider-codex.pre-v0.3.1`；数据库一致性备份 `/opt/aigw/backups-release/v0.3.1/aigw.sqlite`（0600，quick_check=ok）。回退不覆盖新计费数据。
 - 未额外发起付费上游请求；未进行公网或浏览器目视验证。新自动关联以集成回归为验证依据，先前人工修正的历史例子不作为自动关联实测。
 
+### v0.8.0 发布记录（2026-09-14）
+
+- [x] 账户名支持邮箱、中文等非空 Unicode 字符（trim 首尾 Unicode 空白、非空、有效 UTF-8、最多 64 个 Unicode 字符；不改大小写、不做 NFC），发布 minor **0.8.0**；规则与语义边界见 `docs/design/m8b-admin-resources.md` §7。
+- [x] 本版同时包含上一版之后的 **账号级标签继承**（`8a71c4e`）。实现提交 `29cb087`；发布提交 `c3ff39a`，标签 `v0.8.0`。
+- [x] 全量 `go test -count=1 ./...` 与 `go vet ./...` 通过；控制台 UI 走查 16 个 view 通过（`brand` 首轮超时，单独重跑通过）。
+- [x] 10:34:58（UTC+08:00）部署 gptjp（`8.211.157.165`）；仅替换 `/opt/aigw/aigw`，`/opt/aigw/config.yaml` 未改动（SHA-256 `d9b78f7f77f72377005c8c753e2c3ae6910aa306746ab4590195df1c68e75f46`），数据目录未动，`aigw.service` active。
+- [x] 本机与 gptjp 二进制 SHA-256 一致：`9350e02eb1092697bb1c9e0b0cdba8b5b29480bdce2047ac88ec4aa2b6762f06`。
+- [x] gptjp 本机与公网 `https://gpt.lagenio.xyz/aigw/version` 均返回 `0.8.0 / c3ff39a`；healthz/readyz 均 HTTP 200（上一版本记录中的 readyz 503 已恢复）；启动日志版本正确、重启后 `level=ERROR` 计数为 0。
+- [x] 新能力生效证据（只读）：运行的实例已提供新控制台资源，`/aigw/admin/ui/js/pages/accounts.js` 第 36 行含「支持邮箱、中文和其他 Unicode 字符；去除首尾空白后最多 64 个字符」，公网同一资源同样命中。
+- [x] 10:35:56（UTC+08:00）同步升级 gpt001（`0.7.1 / 235e193` → `0.8.0 / c3ff39a`）；仅替换 `/opt/aigw/aigw`，`/opt/aigw/config.yaml` SHA-256 `b3531983905d52a54e75e6d0baaeb500c7496d182425017fa93936ac66a24153` 部署前后一致，数据目录未动，`aigw.service` active。
+- [x] gpt001 本机与公网 `https://mnl.iotalking.top/aigw/version` 均返回 `0.8.0 / c3ff39a`；healthz/readyz 均 HTTP 200；启动日志版本正确、重启后 `level=ERROR` 计数为 0；控制台公开页 HTTP 200，`/aigw/admin/ui/js/pages/accounts.js` 第 36 行含新提示（公网同一资源命中）。
+- 未在线上创建测试账户（避免污染生产数据），接口层行为由 `internal/httpapi`、`internal/store`、`internal/config` 的集成测试覆盖；未发起付费上游请求，未做浏览器目视检查。
+- 回滚点：gptjp `/opt/aigw/aigw.prev-20260914-103458`（v0.7.2）；gpt001 `/opt/aigw/aigw.prev-20260914-103556`（v0.7.1）。`cp` 回对应二进制后 `systemctl restart aigw`，不回退数据库。
+
 ### v0.7.2 发布记录（2026-09-14）
 
 - [x] 发布 patch **0.7.2**；发布提交 `9cd209a`，标签 `v0.7.2`。
