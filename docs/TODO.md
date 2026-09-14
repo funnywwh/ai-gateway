@@ -2042,8 +2042,26 @@
   registry reload（不重启、不改值、audit 有据）；验证：同一把 key 的 `/v1/models` 出现 4 个 deepseek 模型，
   `deepseek-flash` / `deepseek-v4-flash` 均 200，`usage_records.provider_id=7`（官方 deepseek，而非先前顶替它的
   Codex 供应商 5）。
-- [ ] 未部署：本修复尚未发版，gptjp 仍是 0.10.0（`9368b07`）。发版后这类标签改动即可在控制台完成。
+- [x] 已发版部署：**0.11.0**（发布提交 `460eee7`，tag `v0.11.0`），见下方「v0.11.0 发布记录」。发版后这类标签改动可直接在控制台完成。
 - 观察（不属本仓库）：DSH 客户端把任意 401/403 显示为「API 密钥无效」，而网关返回的是
   `permission_error: model or provider not allowed for this API key`；`pkg/pluginapi` 的
   `TestClientCredentialsNotification` 在全量并发 `go test ./...` 下偶发 1s 超时（单独跑 3/3 通过，
   该包对 `internal/…` 零依赖，与本次改动无关）。
+
+### v0.11.0 发布记录（2026-09-14）
+
+- [x] 依据 `ad52aa0`（中文标签名可编辑：`PATCH /admin/api/v1/tags/{id}` + 标签名规则对齐账户名）发布 **minor
+  `0.11.0`**——新端点与新工具名 `admin_update_tag` 属对外能力，按档位规则取 minor。发布提交 `460eee7`，tag `v0.11.0`。
+- [x] `make verify` 等价执行（`go vet ./...` + `go test ./...` + `go build ./...`）全绿；新增
+  `internal/domain/tag_name_test.go`、`internal/httpapi/admin_tags_test.go`、`internal/store/tags_test.go`
+  与真实二进制 smoke（`.cache/probe/tag-patch-smoke.sh`）。本沙箱无 node，`make ui-base` 的 JS 断言以等价正则复核。
+- [x] 14:27:08（UTC+08:00）部署 **gptjp**；仅替换 `/opt/aigw/aigw`，`config.yaml` 与 `data/` 未动，服务 active，
+  回滚点 `/opt/aigw/aigw.prev-20260914-142708`（上一位 `…-120328` 为 0.10.0）。
+- [x] 本机与线上二进制 SHA-256 一致：`3ef8bfe36550082b8235885de1287af5331465fb5397c2274748f10b233b17bd`；
+  本机 `GET /aigw/version` 与对外 `https://gpt.lagenio.xyz/aigw/version` 均为 `0.11.0 / 460eee7`，
+  healthz/readyz 200，启动日志 `level=ERROR` 计数 0，`registry loaded` 显示 tags=3。
+- [x] 线上功能验证（真实管理员会话，自检标签用后即删）：中文名 `POST /tags` 200（0.10.0 是 400）；
+  `PATCH /tags/{id}` 改授权 200 且名字不变；**`PATCH 蓝精灵3` 200**（原先只能直写 SQLite 的那一行）；
+  改名 400 且带原因；`DELETE` 自检标签 200。回归：同一把迁移 key 的 `deepseek-flash` 请求仍 200（provider 7）。
+- [x] 控制台角标：`https://gpt.lagenio.xyz/aigw/admin/ui/` 左上角应显示 `v0.11.0  460eee7`（与 `/aigw/version` 同源，
+  已用 curl 核对；浏览器目视待人工确认）。
