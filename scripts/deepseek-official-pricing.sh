@@ -27,10 +27,12 @@
 # 模型归属（官方脚注）：
 #   deepseek-flash    —— 现行模型 V4.1-Flash，按 Flash 价。
 #   deepseek-v4-flash —— 旧名，模型已下线，请求由 V4.1-Flash 服务，**按 Flash 价计费**。
-#   deepseek-v4-pro   —— 当前仍按 Pro 价；官方公告 2026-09-14 12:00（北京时间，
-#                        = 2026-09-14T04:00:00Z）起，v4-pro 请求全部路由到 V4.1-Flash
-#                        并按 Flash 价计费。因此 Pro 规则带 valid_to，到点自动回落到
-#                        下面的 Flash catch-all，无需人工改表。
+#   deepseek-v4-pro   —— 仍按 Pro 价。**2026-09-14 复核：官方改口了。** 定价页脚注 (2) 现在写
+#                        的是「应广大用户要求，我们决定在 2026 年 9 月 14 日之后继续提供
+#                        DeepSeek V4 Pro 的 API 服务，计费方式保持不变」。此前那条
+#                        `deepseek-v4-pro-retire` 规则（valid_from 2026-09-14T04:00:00Z 起
+#                        把 Pro 请求按 Flash 价计费）已被官方公告推翻，会造成持续少计成本，
+#                        因此删除；Pro 就是 Pro 价，没有到期回落。
 #
 # 实测核对（2026-09-11，运行中的 8088 实例，请求 deepseek-flash）：
 #   usage_records#419 的 pricing_snapshot 命中 cost_rule=deepseek-peak，matched_windows
@@ -38,10 +40,19 @@
 #   input_cache_miss 251×281690=71、output 349×1126761=394，合计 852 微美分 = $0.000852，
 #   与官方价一致（349 output tokens ÷ 1e6 × $1.2 = $0.0004188… 逐维度 ceil 相加）。
 #
-# 注意 `unpriced_dimensions: ["reasoning"]` 是**预期**的、不是漏配：DeepSeek 的
-#   completion_tokens 已包含 reasoning_tokens（该次 349 output 含其中 48 reasoning），
-#   所以思考 token 是经 `output` 维度按官方输出价计费的。给 `reasoning` 再写一个单价
-#   会**重复计费**——docs/pricing.md §1 的"默认计入 output，可单列"正是这个含义。
+# 思考 token 的计费（2026-09-14 用 gptjp 的运行数据核对过，不要按直觉改）：
+#   DeepSeek 的 `completion_tokens` **不含** reasoning tokens，两者是分开报的。证据：gptjp 的
+#   usage_records 里同时有 output 与 reasoning 的 476 条记录中，有 3 条 reasoning > output
+#   （最大 41 vs 23，request_id req_6vadvz6x55mnvwzwdcoxbqmc）——若 completion_tokens 已包含
+#   reasoning，这就不可能发生。openai-chat 通路也确实分开上报
+#   （pkg/providerkit/chatcompat.go 的 ChatUsageToDimensions：output=completion_tokens、
+#   reasoning=completion_tokens_details.reasoning_tokens，且**不**从 output 里扣）。
+#   于是每个 reasoning token 由计价引擎按 docs/pricing.md §1 的兜底（reasoning→output）
+#   记一次输出价，总计恰好等于官方「CoT 按输出 token 计费」的口径——实测 gptjp 上 132 条
+#   DeepSeek 记录逐条复算，成本与 Σ ceil(维度 × 费率) 分毫不差（见 docs/TODO.md 当日记录）。
+#   所以规则里**不需要**写 `reasoning` 费率（它与 output 同价，写了也只是同一个数）；
+#   `unpriced_dimensions` 里也不会出现 reasoning，因为它借到了 output 的费率。
+
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -72,19 +83,9 @@ PEAK_WINDOWS = [
     {"days": ["mon", "tue", "wed", "thu", "fri"], "start": "01:00", "end": "04:00", "tz": "UTC"},
     {"days": ["mon", "tue", "wed", "thu", "fri"], "start": "06:00", "end": "10:00", "tz": "UTC"},
 ]
-# V4-Pro 退役时刻：北京时间 2026-09-14 12:00 == 2026-09-14T04:00:00Z
-PRO_RETIRE = "2026-09-14T04:00:00Z"
-
-def rules(hit_off, hit_peak, miss_off, miss_peak, out_off, out_peak, pro=False):
+# V4-Pro 已确认继续按 Pro 价提供服务（官方定价页脚注 2），因此没有「到期回落」规则。
+def rules(hit_off, hit_peak, miss_off, miss_peak, out_off, out_peak):
     out = []
-    if pro:
-        out.append({
-            "id": "deepseek-v4-pro-retire",
-            "title": "V4-Pro 退役后回落 Flash 价（官方 2026-09-14 12:00 北京时间起路由到 V4.1-Flash）",
-            "order": 5,
-            "when": {"valid_from": PRO_RETIRE},
-            "rates": {"input_cache_hit": mc(0.02), "input_cache_miss": mc(1), "output": mc(4)},
-        })
     out.append({
         "id": "deepseek-peak",
         "title": "高峰时段（北京时间周一至周五 09:00-12:00 / 14:00-18:00）",
@@ -102,7 +103,7 @@ def rules(hit_off, hit_peak, miss_off, miss_peak, out_off, out_peak, pro=False):
     return {"rules": out}
 
 flash = rules(0.02, 0.04, 1, 2, 4, 8)
-pro = rules(0.15, 0.30, 4.5, 9.0, 13.5, 27.0, pro=True)
+pro = rules(0.15, 0.30, 4.5, 9.0, 13.5, 27.0)
 plan = {"deepseek-flash": flash, "deepseek-v4-flash": flash, "deepseek-v4-pro": pro}
 json.dump(plan, open(sys.argv[1], "w"), ensure_ascii=False, indent=2)
 
@@ -126,11 +127,8 @@ dims = ("input_cache_hit", "input_cache_miss", "output")
 for name, ruleset in plan.items():
     for rule in ruleset["rules"]:
         # 注意：不能用 endswith("peak") 判断——"deepseek-offpeak" 也以 peak 结尾。
-        if rule["id"] == "deepseek-v4-pro-retire":
-            ref, label = USD_PAGE["deepseek-flash"]["offpeak"], "Flash 表"
-        else:
-            tag = {"deepseek-peak": "peak", "deepseek-offpeak": "offpeak"}[rule["id"]]
-            ref, label = USD_PAGE[name][tag], "本模型表"
+        tag = {"deepseek-peak": "peak", "deepseek-offpeak": "offpeak"}[rule["id"]]
+        ref, label = USD_PAGE[name][tag], "本模型表"
         ratios = [rule["rates"][d] / (usd * 1_000_000) for d, usd in zip(dims, ref)]
         print(f"  {name:18s} {rule['id']:24s} = {label} × {min(ratios):.4f}~{max(ratios):.4f}"
               f"   (期望 {7.0/FX:.4f})")

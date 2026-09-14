@@ -2112,3 +2112,76 @@
 - [x] 实现提交 `09cffc3`；发布提交 `60dc1ba`，标签 `v0.12.0`。`go test ./...`、`go vet ./...`、嵌入资源测试与模型页浏览器 UI harness 均通过；本环境无 Node，`make ui-base` 自动跳过。
 - [x] 15:07:27（UTC+08:00）部署 **gptjp**；仅替换 `/opt/aigw/aigw`，未改动 `config.yaml` 或 `data/`。服务 active，回滚点：`/opt/aigw/aigw.prev-20260914-150727`。
 - [x] 校验：本机、`gptjp` 本地及公网 `https://gpt.lagenio.xyz/aigw/version` 均返回 `0.12.0 / 60dc1ba`；`/aigw/healthz`、`/aigw/readyz` 均为 200；本次启动日志无 `level=ERROR`。公网控制台 `https://gpt.lagenio.xyz/aigw/admin/ui/` 返回 200，角标模块会读取同源 `/aigw/version` 并显示 `v0.12.0  60dc1ba`（资源/端点已核验，浏览器目视待人工确认）。
+
+### gptjp 按官方价配置全部模型（2026-09-14）
+
+- 背景：gptjp 有 **52 行** `provider_models`，`pricing_rules_json` **全部为空**——成本侧无规则时
+  计价引擎按 0 计，`usage_records` 里 1080 条记录（近 30 天）中 `cost_micros > 0` 的有 **0 条**，
+  客户请求全部免费。售价侧没有模型级 `sale_pricing_json`，走 `cost_follow` × `default_markup_bp`
+  （gptjp 是 10000 = 1.0×），所以**只写成本侧就够了**，客户价自动跟随官方价。
+- [x] 新增 `scripts/official-pricing.sh`：先列实例上的**所有**供应商模型，再逐行取价写入。
+  与既有的 `deepseek-official-pricing.sh` / `codex-official-pricing.sh` 是「并集 + 补齐」关系
+  （那两个脚本各自写死一家、只覆盖当时知道的几个 id）。取价口径三条：
+  ① **按 `upstream_model` 取价、不按 public 名**——同一个 public 名在不同供应商可能指向不同上游
+  （gptjp 上 `deepseek-v4-flash` 在三家 codex 上指向 `gpt-5.6-luna`、在 deepseek provider 上指向
+  `deepseek-flash`；数据面 `ruleSetsFor` 也是按「实际使用的 provider + 对客模型」取成本表）；
+  ② **USD 直写**（官方英文页就是美元；gptjp 的 `billing.fx_rates` 是空表，写 CNY 规则集会被写时
+  校验拒掉），费率为微美元/百万 token；③ **没有官方价的 id 不许猜**——显式白名单（附理由），
+  名单外的未知 upstream 在**写入前整批中止**。干跑会登录（只读）并打印目标实例的真实逐行计划。
+- [x] 价格来源：OpenAI 官方定价页（本机出网被 Cloudflare 403，改从 gptjp 抓取，页面把定价表
+  JSON 内嵌在 Astro island 的 props 里）与 DeepSeek 官方定价页（英文页 USD）。规则集自检把官方
+  关系写成断言（catch-all 存在、裸 `input` == 未命中价、缓存命中 == 输入价 1 折、长档输入 2×/输出
+  1.5×、DeepSeek 空闲价 == 高峰价一半、图像取图像输出价、音频取音频价）。
+- [x] 写入前快照：`/opt/aigw/data/provider-pricing-backup-20260914-084856.json`（0600，52 行、
+  已定价 0 行；本机副本 `.cache/pricing/` 同名，SHA-256 `29b8a52b…` 两端一致）。
+- [x] **写入 43 行**（12 个上游模型），**9 行显式未定价**：`gpt-6`（官方没有裸 `gpt-6` 这个 id，
+  家族只有 `gpt-6-astra`）、`gpt-4o-translate`、`gpt-4o-translate-mini`（官方都没有这些 id；
+  定价页语音类只有 `gpt-4o-transcribe` / `gpt-4o-mini-transcribe` / `gpt-transcribe` /
+  `gpt-realtime-translate`，都不是同一个模型），三家 codex 各 3 行。
+- [x] 验证一（写入链路）：43 行逐行 HTTP 200；读回逐字段与计划比对一致；`pricing/simulate` 7 条
+  用例全绿，含 **272000 输入应走标准档、272001 起才进长档**的边界用例（`gap`: 官方表头 tooltip
+  写的是 ">272K input tokens"，所以 tier 用 `gte: 272001`；旧 `codex-official-pricing.sh` 用的是
+  272000，差一个 token）；`GET /pricing/targets` 52 个成本目标、19 个售价目标，解析失败/非法
+  **0** 个、被遮蔽规则 0 个、`missing_rates` 空。
+- [x] 验证二（线上真实请求）：写入后 171 条有成本的 `usage_records`（deepseek-flash 170 条、
+  gpt-6-astra 1 条）**逐条按官方价复算全部相等**——DeepSeek 按 UTC 周一 01:00-04:00 /
+  06:00-10:00 高峰判档、astra 按 >272K 判长档、逐维度 `ceil(units × rate / 1e6)` 后相加；
+  `charge_micros == cost_micros`（确认 `cost_follow` 1.0×）。失败请求（`status=failed`、
+  维度全 0）成本 0，与预期一致。
+- [x] 验证三（试算复现）：写入前所有记录 `cost_micros = 0`（912 条）；写入后最早有成本的记录是
+  2026-09-14T09:25:55Z——08:52Z 写入完成后到 09:25Z 之间没有成功请求，不是漏计。
+- 决策与已知近似（都写在 `scripts/official-pricing.sh` 头部和规则 `title` 里，控制台可见）：
+  ① **`gpt-5.5` / `gpt-5.4` 只写标准档**：官方行标着 "(<272K context length)"，但定价页**没有**
+  给出它们 >272K 的费率（LiteLLM 声称 2×/1.5×，官方页查无此数），宁可少一条也不编一条；
+  ② **长上下文档只给** `gpt-6-astra` / `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna`；
+  ③ **图像模型**：`output` 取图像输出价（40/32/30）、`input` 取文本输入价（5/1.25）——网关只有
+  input/input_cache_hit/input_cache_miss/output/reasoning 五个维度，没有图像 token 维度，
+  reference image 的输入 token 只能按文本价计，**这是本次唯一一处低估**；
+  ④ **音频模型**（`gpt-4o-audio-preview` / `gpt-4o-realtime-preview` 已从官方定价页移除）：
+  input/output 一律取音频档（40/80，文本档 2.5/10 与 5/20 写进 title），费率取自 LiteLLM 与
+  ModelCosts 一致的记录；这是刻意的保守方向；
+  ⑤ **cache write 收不到**（astra $12.50 等没有计量维度），不编 `per_request_fee` 去凑；
+  ⑥ 不写 `reasoning` 费率：codex 插件把 reasoning 从 output 里扣掉后单列，DeepSeek 的上游本来
+  就分开报（见下条），引擎的兜底 `reasoning → output` 让两类通路都恰好记一次输出价。
+- [x] 顺手修正 `scripts/deepseek-official-pricing.sh` 两处已被推翻的内容：① 删除
+  `deepseek-v4-pro-retire` 规则——官方定价页脚注 (2) 现在写的是「应广大用户要求，决定在
+  2026-09-14 之后**继续提供** V4 Pro 的 API 服务，**计费方式保持不变**」，原规则从
+  2026-09-14T04:00:00Z 起把 Pro 请求按 Flash 价计费，会持续少计成本（已确认 gpt001 上从未写入过
+  这条规则，故线上无影响）；② 改正「completion_tokens 已包含 reasoning_tokens」的注释——
+  gptjp 的 `usage_records` 里同时有 output 与 reasoning 的 476 条记录中有 **3 条 reasoning >
+  output**（最大 41 vs 23），若已包含则不可能出现，实际是 chatcompat 分开上报
+  （`ChatUsageToDimensions` 不从 output 里扣），引擎兜底后总价恰好等于官方「CoT 按输出 token
+  计费」；`unpriced_dimensions` 里不会出现 reasoning。
+- 未做（待产品口径，未擅自改）：
+  ① `gpt-4o-translate` / `gpt-4o-translate-mini` / `gpt-6` 这 3 个公开模型（19 个全局模型中的它们）
+  没有官方价，脚本保持未定价；其中 **`gpt-4o-translate` 与 `gpt-4o-translate-mini` 是 enabled 且
+  各有 3 条路由**，一旦上游接受就会被**免费服务**——要么给价、要么停用/删路由；`gpt-6` 有 3 行
+  映射但 **0 条路由**，不可达，无影响；
+  ② **`gpt-5.4` 不可用**：3 条路由都指向三家 codex，但**没有对应的 `provider_models` 行**，
+  `GET /admin/api/v1/router/explain?model=gpt-5.4` 三家全部 `not_mapped`（`chosen: null`）；
+  ③ 三家 codex 上的死别名行 `deepseek-v4-flash → gpt-5.6-luna`、`deepseek-v4-pro → gpt-5.6-sol`
+  按**上游**价计（luna / sol），与上一节「deepseek-flash 别名下线」遗留的口径问题同源；
+  ④ **gpt001 存在两处偏差**（本次只读核对，未改）：`gpt-5.6-sol` 与 `gpt-5.6-terra` 两行用的是
+  **luna 的费率**（200000/20000/1200000），比官方价低 20× 与 10×；`deepseek-flash` 只有一条
+  **CNY 标准价**、没有分时（高峰期会按空闲价计）。需要时用修好的
+  `scripts/deepseek-official-pricing.sh` 与 `scripts/official-pricing.sh` 对 gpt001 复核后写入。
