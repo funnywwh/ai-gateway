@@ -1809,6 +1809,30 @@
 - 非目标：跨进程/集群并发、按账户公平排队、route/model 级上限、队列持久化、MCP 写排队策略、
   账户级（query）暴露供应商并发、`usage_records` 加 `queue_ms` 列。
 
+### v0.10.0 发布记录（2026-09-14）
+
+- [x] 依据 `v0.9.0..HEAD` 的新增能力发布 minor：`0.9.0` → **`0.10.0`**。包含 M43 收尾（`93e5649`：sub2api 迁移自检、
+  标签授权预检、report 定位修复）与 **M44 供应商并发上限 + 排队等待**（`224ec13`）。
+- [x] 发布提交 `9368b07`，标签 `v0.10.0`；版本真值 `VERSION=0.10.0`，二进制 `aigw 0.10.0 (revision 9368b07)`。
+- [x] `make verify`（vet + 全量 `go test ./...` + ui-base 跳过因无 node + build）、
+  `go test ./internal/mcpsrv/ ./internal/httpapi/`、`scripts/format-smoke.sh`（普通请求不带 `response_format`、
+  `json_object` 按需下发、非法 level 在解析期拒绝）全部通过。
+- [x] 12:00:37（UTC+08:00）部署 gpt001：先 `scp` 到 `/opt/aigw/aigw.new`，备份线上二进制后 `install` 并重启；
+  仅替换二进制，`/opt/aigw/config.yaml` 与数据目录未改动，服务 `active`。
+- [x] 本地与线上二进制 SHA-256 一致：`aa123f292a902402579f8d5cac3fb83652ba7643feb2200f2ac575a935e94502`。
+- [x] 验证：gpt001 `localhost:8088/aigw/version` 与公网 `https://mnl.iotalking.top/aigw/version` 均为
+  `0.10.0 / 9368b07`；healthz/readyz 均 HTTP 200；启动日志 `version=0.10.0 revision=9368b07` 且重启后**无 ERROR**；
+  控制台 HTTP 200，公网 `js/brand.js` 与源码 SHA-256 逐字节一致（`5c92efb8…`）→ 角标会显示 v0.10.0。
+- [x] 启动日志同时确认新闸门已接线：`provider capacity ready queue_wait=30s queue_max_waiters=100 limited_providers=1`。
+- **运维须知（本次发布后行为变化）**：线上 `deepseek`（id 8）的 `max_inflight` 一直是 **2500**——该字段在 M44 之前
+  存了不生效，现在**真的生效**了：该供应商最多 2500 个在途上游调用，超出后在队列中等待（30s / 最多 100 个排队），
+  等待超时或队满才会换候选/返回 429 `provider_busy`。2500 对当前流量等于"不限"，无需处理；
+  若本意是"完全不限"，把该字段写成 `0`（控制台「最大并发」或 MCP `admin_update_provider`），
+  0 表示不限且**不建闸门**。
+- 回滚点：`/opt/aigw/aigw.prev-20260914-120037`（v0.9.0，`338d4cc`）；恢复该二进制后重启 `aigw`，不回退数据库。
+- 未做：未对线上付费上游做并发/排队实测（无付费模型验证）；未做浏览器目视检查（以资源哈希、`/version`
+  与探针替代）；`#plugin` UI harness 视图的既有失败仍未修（见上文 M44 边界）。
+
 ### v0.3.0 发布记录（2026-09-13）
 
 - [x] 根据 `v0.2.5..HEAD` 的新增能力与配置发布 minor：`0.2.5` → **`0.3.0`**。包含缓存 token 展示 `c72bb52`、Codex 无输出断流恢复 `bcd6f1a`、根会话标识 `4b1c32e`、M41 小时汇总 `ecae61a`。
