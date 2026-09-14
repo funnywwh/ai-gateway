@@ -66,11 +66,13 @@ func TestConsoleAssetsAreEmbedded(t *testing.T) {
 	}
 }
 
-func TestConsoleModelReasoningControlsAreEmbedded(t *testing.T) {
+func TestConsoleModelRouteEditorIsEmbedded(t *testing.T) {
 	source := readAsset(t, "/js/pages/models.js")
-	for _, want := range []string{"reasoning_mode", "reasoning_effort", "推理强度（默认/强制模式生效）", "? null", "包括 none", "保留请求的 summary", "所有路由", "上游拒绝请求", "'inherit'", "'default'", "'force'"} {
+	// The screen is model-centred: filter a model, select providers using checkboxes,
+	// edit their upstream names, then save all route changes from one action.
+	for _, want := range []string{"route-model-filter", "route_provider_", "上游模型名", "保存路由", "api.post('/routes'", "api.patch('/routes/'", "api.del('/routes/'", "reasoning_mode", "reasoning_effort", "推理强度（默认/强制模式生效）", "包括 none", "保留请求的 summary", "上游拒绝请求", "'inherit'", "'default'", "'force'"} {
 		if !strings.Contains(source, want) {
-			t.Errorf("embedded model console asset is missing reasoning control %q", want)
+			t.Errorf("embedded model route editor is missing %q", want)
 		}
 	}
 }

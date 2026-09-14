@@ -133,6 +133,27 @@ label.field > span { display:block; color:var(--muted); font-size:12px; margin-b
 .modal-close-danger { color:var(--danger); border-color:var(--danger); }
 .modal-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:14px; flex:0 0 auto; }
 .split { display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:12px; }
+/* Model-centred route editing: choose a client-facing model on the left, then select
+   every provider and its upstream name together on the right. The scroll areas are
+   bounded independently so a long provider catalogue never hides the model picker. */
+.route-editor { display:grid; grid-template-columns:minmax(230px, .8fr) minmax(360px, 1.6fr); gap:12px; align-items:stretch; }
+.route-editor-pane { border:1px solid var(--line); border-radius:8px; padding:12px; min-width:0; background:var(--panel-2); }
+.route-editor-pane-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:10px; }
+.route-editor-pane-head h3 { margin:0; font-size:14px; }
+.route-model-filter { margin-bottom:8px; }
+.route-model-list, .route-provider-list { display:flex; flex-direction:column; gap:6px; max-height:calc(100vh - 320px); min-height:180px; overflow:auto; padding-right:2px; }
+.route-model-item { width:100%; border:1px solid transparent; border-radius:8px; background:transparent; color:var(--fg); padding:9px 10px; text-align:left; cursor:pointer; font:inherit; }
+.route-model-item:hover, .route-model-item.active { background:var(--panel); border-color:var(--accent); }
+.route-model-name { display:flex; align-items:center; gap:6px; min-width:0; }
+.route-model-meta { display:block; margin-top:3px; color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.route-provider-row { border:1px solid var(--line); border-radius:8px; padding:9px 10px; background:var(--panel); }
+.route-provider-choice { display:flex; gap:9px; align-items:flex-start; cursor:pointer; }
+.route-provider-choice input[type=checkbox] { flex:0 0 auto; width:16px; height:16px; margin:2px 0 0; accent-color:var(--accent); }
+.route-provider-choice strong, .route-provider-choice .muted { display:block; }
+.route-provider-choice .muted { font-size:12px; }
+.route-upstream-field { display:block; margin:9px 0 0 25px; }
+.route-upstream-field > span { display:block; color:var(--muted); font-size:12px; margin-bottom:4px; }
+@media (max-width: 780px) { .route-editor { grid-template-columns:1fr; } .route-model-list, .route-provider-list { max-height:300px; } }
 .login { min-height:100vh; display:flex; align-items:center; justify-content:center; }
 .login .card { width:340px; }
 .empty { color:var(--muted); padding:20px; text-align:center; }
