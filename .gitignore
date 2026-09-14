@@ -10,6 +10,10 @@
 billing-fallback.jsonl
 hooks-dead.jsonl
 
+# python bytecode from the ops scripts in scripts/
+__pycache__/
+*.pyc
+
 # workspace-local toolchain caches (see scripts/goenv.sh)
 /.cache/
 

@@ -1884,3 +1884,28 @@
 - [x] `scripts/sub2api-migrate.py`：plan/snapshot/apply/verify/report；哈希在源库 SQL 内计算，脚本从不 `SELECT key`。
 - [x] 分配规则：显式意图分组（21/22/23 → 蓝精灵2/3/1，数据校验）+ 其余按 (全局最少, 该用户最少, 标签 id) 均衡。
 - [x] 预检覆盖：key 形状、前缀唯一性与冲突处置（`--reissue-key`）、账户名冲突、标签授权完整性、目标库占用。
+- [x] 迁移工具补齐：`selftest`（自造密钥走同一导入接口 + 真实数据面请求，证明前缀/哈希链路；用 0600 令牌文件复用同一把自检 key）、`snapshot` 忽略自检残留、`plan` 报告模型名覆盖。
+- [x] gptjp 实测：`plan` 逐把核对分配（22 用户 / 32 key，蓝精灵1=11、蓝精灵2=11、蓝精灵3=10，其中 key #24 因前缀冲突重签）。
+- [x] gptjp 迁移执行：快照 → 建 22 个账户（不带标签）→ 导入 31 把 key → 重签 1 把（aigw key #44，标签 蓝精灵2）→ `verify` 全绿。
+- [x] 验证：三标签各用一把真实迁移 key 发一次请求，`usage_records.provider_id` 依次为 1/3/5；仅前缀与截断明文当 bearer 均 401；长 `sk-` 在 journal 命中 0、报告 0、数据库里 60 处命中全部是「前缀+该行 sha256」相邻字段。
+
+### v0.9.0 发布记录（2026-09-14）
+
+- [x] 新增管理接口 `POST /admin/api/v1/keys/import`（只收前缀与哈希），发布 minor **0.9.0**；实现提交 `13841c3`，发布提交 `338d4cc`，标签 `v0.9.0`。
+- [x] `make verify`（vet + 全量 Go 测试 + 构建）通过；新增端点测试覆盖真机认证路径、形状表、409 冲突、幂等重跑、viewer 403 与审计无密钥材料。
+- [x] 11:00:23（UTC+08:00）部署 gptjp；仅替换 `/opt/aigw/aigw`，配置与数据目录未动，服务 active，回滚点 `/opt/aigw/aigw.prev-20260914-110023`（上一位 `…-103458` 为 v0.8.0）。
+- [x] 11:00:54（UTC+08:00）同步升级 gpt001（0.8.0 → 0.9.0），仅替换 `/opt/aigw/aigw`，配置与数据目录未动，服务 active，回滚点 `/opt/aigw/aigw.prev-20260914-110054`（上一位 `…-103556` 为 v0.8.0）。
+- [x] 两台机本机与本地二进制 SHA-256 一致：`a612ae9642db7b12bee34dcd16e8e7c2652cd8029200040317334241f6b1b1f1`；`/aigw/version` 均为 `0.9.0 / 338d4cc`，healthz/readyz 200，重启后 `level=ERROR` 计数 0。
+
+### M43 迁移执行记录：sub2api「智天成」→ gptjp ai_gateway（2026-09-14）
+
+- 来源：gptjp（8.211.157.165）sub2api 库，`users.notes='智天成' AND deleted_at IS NULL` → **22 个用户**；其未删除且 active 的 key → **32 把**（6 把已删除、1 把 `quota_exhausted` 未迁移，报告已列出）。
+- 目标：同机 aigw（`/opt/aigw`，0.9.0）；账户名=sub2api 用户名，备注记 `sub2api user #<id> · <email>`，账户一律**不带标签**（避免与 key 标签取并集放大授权）。
+- 分配：显式意图分组 21/22/23 → 蓝精灵2/3/1（12 把），其余 20 把按 (全局最少, 该用户最少, 标签 id) 均衡 → **蓝精灵1=11 / 蓝精灵2=11 / 蓝精灵3=10**。
+- 前缀冲突：sub2api key #24（收纳/E26Q）与 #51（郑晓婷）前 12 字符同为 `sk-f69aeca55`；保留 #51，**#24 在网关重签**为 aigw key #44（标签 蓝精灵2），明文只在控制台/响应出现一次，已暂存 `/opt/aigw/data/E26Q-reissue-key.txt`（0600，待交付本人后 `shred -u`）。
+- 迁移前发现并修正的**目标侧缺陷**：三个已有标签的 `grants` 只有 `providers`、没有 `models`，因此绑上去的 key 每个请求都 403；管理 API 因标签名含中文而拒绝写入（名称校验是 ASCII-only），故按既有先例**直写 SQLite** 补 `"models":["*"]`（providers 原样），随后重启 reload 并用管理接口读回复核。改动前值：`蓝精灵1={"providers":["liuhui-wisskys-8-expiry"]}`、`蓝精灵2={"providers":["lizhichao-wisskys-3-expiry"]}`、`蓝精灵3={"providers":["lzhichao-lagenio-3-expiry"]}`。
+- 回滚点：`/opt/aigw/data/aigw.db.pre-sub2api-20260914-110412`（标签修正前）、`…-110602`（导入前，0600，均 quick_check=ok）；二进制 `/opt/aigw/aigw.prev-20260914-110023`。
+- 验证证据：`verify` 逐把比对源库重算的 prefix/hash 与 aigw 行（31/31 一致）、`effective_tags` 逐把等于预期单一标签、账户标签为空；三标签各用一把真实迁移 key 发一次请求，`usage_records.provider_id` = 1/3/5 且 status=completed（蓝精灵1 首轮遇到一次 `server_is_overloaded`，重试即成功）；前缀当 bearer、截断明文当 bearer、未知前缀、无 key 均 401。
+- 保密：明文只在 postgres 进程内算哈希（`encode(sha256(convert_to(btrim(key),'UTF8')),'hex')`），脚本从不 `SELECT key`；迁移窗口 journal 长 `sk-` 命中 0；报告 JSON 命中 0；aigw 库内 60 处长 `sk-` 命中经逐条比对**全部**是记录中 `key_prefix` 与 `key_hash` 相邻字段（长度恒为 76），无一处是明文。
+- 已知残留（自检工具产生，均停用）：账户 `zz-migration-selftest`（closed）+ 自检 key #1/#3/#5（disabled）、3 个已撤销的临时 MCP 令牌、`/opt/aigw/data/.selftest-token`（0600）。网关没有删除账户/key 的路由，故保留为记录。
+- 未迁移/未修（待决策）：计费余额与额度；（模型面）源库近 30 天有 **13 个模型名、2390 次请求**在 aigw 无对应 models/映射，其中 `gpt-4o`(974)、`gpt-5.4-mini`(622)、`gpt-5.6`(412) 量最大；另外两个**供应商映射错误**已实测确认：`deepseek-flash` → 上游 `gpt-5.6-astra`、`gpt-6` → 上游 `gpt-6` 都被 ChatGPT 拒绝（`model is not supported when using Codex with a ChatGPT account`）。sub2api 侧本次**没有任何写入**（双跑）。

@@ -30,9 +30,12 @@ key 表只存 `key_prefix`（明文前 12 字符）与 `key_hash`（明文 SHA-2
 详见 docs/sub2api-migration.md；导入接口的设计见 docs/design/m43-api-key-hash-import.md。
 """
 import argparse
+import base64
+import hashlib
 import http.cookiejar
 import json
 import os
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -52,6 +55,9 @@ DEFAULT_TAGS = ["蓝精灵1", "蓝精灵2", "蓝精灵3"]
 DEFAULT_INTENT_GROUPS = {"21": "蓝精灵2", "22": "蓝精灵3", "23": "蓝精灵1"}
 ACCOUNT_NOTE_PREFIX = "sub2api user #"
 IMPORT_MARKER = "import:"
+# Selftest residue is our own: the gateway has no delete route for accounts or keys, so the
+# probe account stays behind closed and its key disabled. It must not look like foreign state.
+SELFTEST_NOTE_PREFIX = "selftest account created by"
 FIELD_SEP = "\x1f"
 
 
@@ -267,6 +273,22 @@ class Target:
         return None
 
 
+def data_plane_call(base: str, token: str, body: dict, timeout: int = 180) -> tuple[int, str]:
+    """One real data-plane request with a bearer token (used only by the self-test)."""
+    request = urllib.request.Request(
+        base.rstrip("/") + "/v1/responses",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + token},
+        method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            return resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", "replace")
+    except Exception as exc:  # noqa: BLE001 - the self-test reports, it does not raise
+        return 0, str(exc)
+
+
 def load_target(gw: Gateway) -> Target:
     return Target(
         tags=gw.list_all("/admin/api/v1/tags"),
@@ -433,9 +455,16 @@ def preflight(src: Source, target: Target, assignments: list[dict], tags: list[s
             continue
         grants = tag_row.get("grants")
         providers = (grants or {}).get("providers") if isinstance(grants, dict) else None
+        models = (grants or {}).get("models") if isinstance(grants, dict) else None
         if not providers:
             problems.append(f"标签 {tag} 没有任何供应商授权：绑定的 key 会回落到默认通配授权")
             continue
+        # 授权是两个维度的并集：只有 providers 而 models 为空的标签会放行零个模型，
+        # 绑上去的 key 每个请求都 403（实测过），所以这里必须一起检查。
+        if not models:
+            problems.append(
+                f"标签 {tag} 只授权了供应商、没有授权任何模型：绑定的 key 每个请求都会 403 "
+                "(model or provider not allowed)，需要给 grants.models 加 '*' 或具体模型名")
         for provider_name in providers:
             match = [p for p in target.providers if p.get("name") == provider_name]
             if not match:
@@ -555,8 +584,10 @@ def cmd_plan(args, gw: Gateway) -> int:
 
 def cmd_snapshot(args, gw: Gateway) -> int:
     keys, accounts = read_target_db(args.db)
-    foreign_keys = [k for k in keys if not str(k["created_by"]).startswith(IMPORT_MARKER)]
-    foreign_accounts = [a for a in accounts if not str(a["note"]).startswith(ACCOUNT_NOTE_PREFIX)]
+    foreign_keys = [k for k in keys
+                    if not str(k["created_by"]).startswith(IMPORT_MARKER) and k["name"] != "selftest"]
+    foreign_accounts = [a for a in accounts if not str(a["note"]).startswith(ACCOUNT_NOTE_PREFIX)
+                        and not str(a["note"]).startswith(SELFTEST_NOTE_PREFIX)]
     if foreign_keys or foreign_accounts:
         die(f"目标实例上已有 {len(foreign_accounts)} 个非迁移账户、{len(foreign_keys)} 把非导入 key："
             "快照回滚会连带丢掉它们，请先确认或改用逐条回滚")
@@ -713,19 +744,38 @@ def cmd_report(args, gw: Gateway) -> int:
     users = {user.id: user for user in src.users}
     accounts_by_name = {a["name"]: a for a in target.accounts}
 
+    # 重签的那把 key 在网关里换了一把全新的 key：它的旧前缀正是被保留那一把的前缀，
+    # 因此不能按前缀回查（会指到别人身上），要按「同一账户、同一标签、且前缀不属于任何源 key」
+    # 找出替换件——与 verify 用的是同一条判定。
+    source_prefixes = {a["key"].prefix for a in assignments}
     rows = []
     for assignment in assignments:
         key = assignment["key"]
         user = users[key.user_id]
         account = accounts_by_name.get(user.username) or {}
-        stored = keys_by_prefix.get(key.prefix)
+        target_key_id = None
+        target_prefix = key.prefix
+        if assignment["reissue"]:
+            target_prefix = ""
+            for candidate in keys:
+                if candidate["account_id"] != account.get("id"):
+                    continue
+                if json.loads(candidate["tags_json"] or "[]") != [assignment["tag"]]:
+                    continue
+                if candidate["key_prefix"] in source_prefixes:
+                    continue
+                target_key_id, target_prefix = candidate["id"], candidate["key_prefix"]
+                break
+        else:
+            stored = keys_by_prefix.get(key.prefix)
+            target_key_id = None if stored is None else stored["id"]
         rows.append({
             "source_user_id": user.id, "source_username": user.username, "source_email": user.email,
             "source_key_id": key.id, "source_key_name": key.name, "source_group_id": key.group_id,
-            "key_prefix": key.prefix,
+            "source_key_prefix": key.prefix, "target_key_prefix": target_prefix,
             "tag": assignment["tag"], "reason": assignment["reason"], "reissue": assignment["reissue"],
             "target_account_id": account.get("id"), "target_account_name": user.username,
-            "target_key_id": None if stored is None else stored["id"],
+            "target_key_id": target_key_id,
         })
     counts = {tag: 0 for tag in tags}
     for row in rows:
@@ -757,6 +807,82 @@ def cmd_report(args, gw: Gateway) -> int:
     return 0
 
 
+def selftest_token(path: str) -> str:
+    """Reuse one synthetic key across runs so repeated self-tests do not pile up keys.
+
+    The file holds a key this tool minted itself (never a user's), it is 0600, and reusing it
+    keeps the import idempotent instead of adding a disabled key per run.
+    """
+    if path and os.path.exists(path):
+        with open(path) as fh:
+            token = fh.read().strip()
+        if token:
+            return token
+    token = "sk-gw_" + base64.b32encode(secrets.token_bytes(15)).decode().lower().rstrip("=")
+    if path:
+        with open(path, "w") as fh:
+            fh.write(token + "\n")
+        os.chmod(path, 0o600)
+    return token
+
+
+def cmd_selftest(args, gw: Gateway) -> int:
+    """Prove the whole hash pipeline end to end with a key whose plaintext we minted ourselves.
+
+    真实用户 key 的明文我们永远不会看到（这是本次迁移的前提），所以「前缀+哈希算得对不对」只能
+    用一把自己造的 key 走同一条导入接口来证明：接口收下 prefix/hash，数据面再用真实 bearer 认证
+    成功，就说明源库那边的 sha256 与网关这边的一致——同一套 SQL 用在真实 key 上因此也成立。
+    顺带用这把 key 探测每个模型名是否真的能跑通（供应商健康探测用的模型名未必是用户真在用的）。
+    """
+    gw.login()
+    token = selftest_token(args.selftest_token_file)
+    prefix = token[:12]
+    khash = hashlib.sha256(token.encode()).hexdigest()
+
+    target = load_target(gw)
+    account = target.account_by_name(args.selftest_account)
+    if account is None:
+        account = gw.call("POST", "/admin/api/v1/accounts", {
+            "name": args.selftest_account, "billing_mode": "postpaid", "tags": [],
+            "note": SELFTEST_NOTE_PREFIX + " sub2api-migrate.py; safe to close",
+        })
+    elif account.get("status") != "active":
+        # 上一次自检结束时把它关掉了；自检要能反复跑，所以这里先恢复。
+        gw.call("PATCH", f"/admin/api/v1/accounts/{account['id']}", {"status": "active"})
+    result = gw.call("POST", "/admin/api/v1/keys/import", {
+        "account_id": account["id"], "name": "selftest", "key_prefix": prefix,
+        "key_hash": khash, "tags": [args.selftest_tag], "status": "active",
+    })
+    key_id = result["id"]
+    note_line(f"自检 key：aigw key #{key_id}（前缀 {prefix}，标签 {args.selftest_tag}，"
+              f"created={result.get('created')}）")
+
+    failures = 0
+    for model in args.model:
+        status, text = data_plane_call(args.gateway, token, {"model": model, "input": "ping"})
+        if status == 200:
+            note_line(f"  ✓ {model}: HTTP 200")
+        else:
+            failures += 1
+            note_line(f"  ✗ {model}: HTTP {status} {text[:240].replace(chr(10), ' ')}")
+
+    # 负向：前缀本身不是密钥；截断的明文也不该通过。
+    for label, bad in (("仅前缀", prefix), ("截断一位", token[:-1])):
+        status, _ = data_plane_call(args.gateway, bad, {"model": args.model[0], "input": "ping"})
+        if status == 401:
+            note_line(f"  ✓ 负向（{label}）: 401")
+        else:
+            failures += 1
+            note_line(f"  ✗ 负向（{label}）: HTTP {status}，预期 401")
+
+    # 收尾：自检 key 只能停用（网关没有删除 key 的路由），账户置为 closed。
+    gw.call("PATCH", f"/admin/api/v1/keys/{key_id}", {"status": "disabled"})
+    gw.call("PATCH", f"/admin/api/v1/accounts/{account['id']}", {"status": "closed"})
+    note_line(f"自检结束：key #{key_id} 已停用，账户 {args.selftest_account} 已关闭"
+              f"（网关无删除路由，二者保留为记录）")
+    return 1 if failures else 0
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -780,7 +906,7 @@ def main() -> int:
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("cmd", choices=("plan", "snapshot", "apply", "verify", "report"))
+    parser.add_argument("cmd", choices=("plan", "snapshot", "apply", "verify", "report", "selftest"))
     parser.add_argument("--gateway", default=GATEWAY)
     parser.add_argument("--password-file", default=PASSWORD_FILE)
     parser.add_argument("--db", default=DB_PATH, help="目标 ai_gateway 的 SQLite 路径（只读核对用）")
@@ -792,15 +918,25 @@ def main() -> int:
     parser.add_argument("--skip-key", action="append", default=[], help="该源 key 完全跳过")
     parser.add_argument("--limit", type=int, default=0, help="apply 只处理前 N 把（分批）")
     parser.add_argument("--coverage-days", type=int, default=30, help="模型名覆盖统计的回溯天数")
+    parser.add_argument("--selftest-account", default="zz-migration-selftest",
+                        help="selftest 用的临时账户名（结束时置为 closed）")
+    parser.add_argument("--selftest-tag", default=DEFAULT_TAGS[0], help="selftest key 绑定的标签")
+    parser.add_argument("--selftest-token-file", default="/opt/aigw/data/.selftest-token",
+                        help="复用同一把自检 key（0600；由本工具自己生成，与用户密钥无关）")
+    parser.add_argument("--model", action="append", default=[],
+                        help="selftest 要真实调用的模型名（可重复；省略用默认一组）")
     args = parser.parse_args()
     args.intent_group_map = parse_intent_groups(args.intent_group)
 
     gw = Gateway(args.gateway, args.password_file)
-    if args.cmd in ("plan", "snapshot", "apply", "verify", "report"):
+    if args.cmd in ("plan", "snapshot", "apply", "verify", "report", "selftest"):
         # 只读命令也要登录：账户/key/标签的现状只能经管理接口读。plan 不写任何东西。
         gw.login()
+    if args.cmd == "selftest" and not args.model:
+        args.model = ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-6-astra", "deepseek-flash",
+                      "gpt-5.5", "gpt-5.6-terra", "gpt-6", "deepseek-v4-flash"]
     handlers = {"plan": cmd_plan, "snapshot": cmd_snapshot, "apply": cmd_apply,
-                "verify": cmd_verify, "report": cmd_report}
+                "verify": cmd_verify, "report": cmd_report, "selftest": cmd_selftest}
     return handlers[args.cmd](args, gw)
 
 
