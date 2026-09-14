@@ -85,6 +85,7 @@ var expectedAdminPatterns = []string{
 	"POST /admin/api/v1/hooks",
 	"POST /admin/api/v1/invoices/{id}/{action}",
 	"POST /admin/api/v1/keys",
+	"POST /admin/api/v1/keys/import",
 	"POST /admin/api/v1/mcp-tokens",
 	"POST /admin/api/v1/model-mappings",
 	"POST /admin/api/v1/models",

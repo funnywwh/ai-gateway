@@ -47,6 +47,25 @@ func (db *DB) GetAPIKeyByPrefix(ctx context.Context, prefix string) (*domain.API
 	return k, nil
 }
 
+// FindAPIKeyByPrefix is the administrative variant of GetAPIKeyByPrefix: a missing row is
+// reported as (nil, nil) rather than as an authentication failure.
+//
+// The two differ on purpose. On the data plane an unknown prefix is indistinguishable from
+// a wrong secret and must not be described to the caller; the key importer, on the other
+// hand, has to tell "this key is new" from "this key is already here" before it overwrites
+// a row, and it is already behind an administrator session.
+func (db *DB) FindAPIKeyByPrefix(ctx context.Context, prefix string) (*domain.APIKey, error) {
+	row := db.read.QueryRowContext(ctx, "SELECT "+apiKeyCols+" FROM api_keys WHERE key_prefix = ?", prefix)
+	k, err := scanAPIKey(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: find api key by prefix: %w", err)
+	}
+	return k, nil
+}
+
 // ListAPIKeys lists the keys of one account (accountID <= 0 means all accounts).
 func (db *DB) ListAPIKeys(ctx context.Context, accountID int64) ([]*domain.APIKey, error) {
 	query := "SELECT " + apiKeyCols + " FROM api_keys"

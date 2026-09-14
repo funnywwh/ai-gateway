@@ -24,6 +24,9 @@ type AdminStore interface {
 	GetAccount(ctx context.Context, id int64) (*domain.Account, error)
 	GetAccountByName(ctx context.Context, name string) (*domain.Account, error)
 	ListAPIKeys(ctx context.Context, accountID int64) ([]*domain.APIKey, error)
+	// FindAPIKeyByPrefix reports a missing row as (nil, nil): the key importer must tell
+	// "new" from "already here" without the data plane's "unknown prefix is a 401" rule.
+	FindAPIKeyByPrefix(ctx context.Context, prefix string) (*domain.APIKey, error)
 	UpsertAPIKey(ctx context.Context, k *domain.APIKey) (int64, error)
 	ListRequestLogs(ctx context.Context, f domain.RequestLogFilter, limit int) ([]*domain.RequestLogRecord, error)
 	ListRequestLogsPage(ctx context.Context, f domain.RequestLogFilter, limit, offset int) ([]*domain.RequestLogRecord, error)
@@ -297,6 +300,210 @@ func (s *Server) handleAdminCreateKey(w http.ResponseWriter, r *http.Request) {
 		"id": id, "name": body.Name, "key": token, "key_prefix": key.KeyPrefix,
 		"note": "store this key now: it cannot be retrieved again",
 	})
+}
+
+// importedKeyPrefix marks the keys that entered through the hash import path. It is what
+// lets a re-import refresh its own row while a key the console issued stays untouched.
+const importedKeyPrefix = "import:"
+
+// handleAdminImportKey registers a key whose plaintext lives somewhere else: the caller
+// sends the lookup prefix and the SHA-256 of the secret, never the secret itself.
+//
+// This is the migration path for keys that already work against another gateway. The
+// console's create endpoint mints a fresh token and shows it once; an import has nothing
+// to show, because the gateway never learns the plaintext. Two consequences are worth
+// stating plainly: the caller is responsible for the prefix and the hash coming from one
+// and the same secret (nothing here can verify that), and a key imported this way can only
+// be revoked by status — its plaintext cannot be re-displayed to anyone.
+func (s *Server) handleAdminImportKey(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.adminActor(w, r, true)
+	if !ok {
+		return
+	}
+	tags, ok := portReady(w, s.deps.Tags, "tag management")
+	if !ok {
+		return
+	}
+	var body struct {
+		Name      string          `json:"name"`
+		AccountID int64           `json:"account_id"`
+		Account   string          `json:"account"`
+		KeyPrefix string          `json:"key_prefix"`
+		KeyHash   string          `json:"key_hash"`
+		Tags      []string        `json:"tags"`
+		Grants    any             `json:"grants"`
+		Policy    json.RawMessage `json:"policy"`
+		Status    string          `json:"status"`
+		ExpiresAt string          `json:"expires_at"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
+		return
+	}
+	prefix, hash, apiErr := importedCredential(body.KeyPrefix, body.KeyHash)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
+	if strings.TrimSpace(body.Name) == "" {
+		writeAPIError(w, domain.ErrInvalidRequest("name is required").WithParam("name"))
+		return
+	}
+	status := strings.TrimSpace(body.Status)
+	if status == "" {
+		status = "active"
+	}
+	if status != "active" && status != "disabled" {
+		writeAPIError(w, domain.ErrInvalidRequest("status must be active or disabled").WithParam("status"))
+		return
+	}
+	var expiresAt *time.Time
+	if raw := strings.TrimSpace(body.ExpiresAt); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			writeAPIError(w, domain.ErrInvalidRequest("expires_at must be RFC3339").WithParam("expires_at"))
+			return
+		}
+		expiresAt = &parsed
+	}
+	accountID := body.AccountID
+	if accountID == 0 && body.Account != "" {
+		account, err := s.deps.AdminStore.GetAccountByName(r.Context(), body.Account)
+		if err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		accountID = account.ID
+	}
+	if accountID == 0 {
+		writeAPIError(w, domain.ErrInvalidRequest("account_id or account is required"))
+		return
+	}
+	// An id that names no account must fail here rather than at insert time: without this
+	// check the foreign key surfaces as a 500, which reads like a gateway fault instead of
+	// "you pointed the import at the wrong account".
+	if _, err := s.deps.AdminStore.GetAccount(r.Context(), accountID); err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	// An unknown tag name is not a cosmetic typo: tag resolution drops names it cannot
+	// find, and a key left without any grant falls back to the default grant (every
+	// provider). The import therefore refuses names that do not exist instead of storing
+	// a key whose authorization silently widens. The console's create endpoint predates
+	// this check and still accepts them.
+	known, err := tags.ListTags(r.Context())
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	if apiErr := unknownTagName(body.Tags, known); apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
+	policy, apiErr := keyPolicyDocument(body.Policy)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
+
+	// The prefix is the table's lookup key, so an import may only take over a row it owns:
+	// the same secret again (same hash) or a row that already carries the import marker.
+	// Anything else would silently replace a key the console handed to somebody.
+	existing, err := s.deps.AdminStore.FindAPIKeyByPrefix(r.Context(), prefix)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	created := existing == nil
+	if existing != nil && existing.KeyHash != hash && !strings.HasPrefix(existing.CreatedBy, importedKeyPrefix) {
+		writeAPIError(w, domain.ErrConflict(fmt.Sprintf(
+			"key prefix %s already belongs to key %q created by %q; disable or remove it first",
+			prefix, existing.Name, existing.CreatedBy)))
+		return
+	}
+
+	key := &domain.APIKey{
+		AccountID:       accountID,
+		Name:            strings.TrimSpace(body.Name),
+		KeyPrefix:       prefix,
+		KeyHash:         hash,
+		TagsJSON:        marshalOrEmpty(body.Tags),
+		GrantsJSON:      marshalAny(body.Grants),
+		PolicyJSON:      policy,
+		RecordInputMode: "inherit",
+		Status:          status,
+		ExpiresAt:       expiresAt,
+		CreatedBy:       importedKeyPrefix + actor.Username,
+	}
+	id, err := s.deps.AdminStore.UpsertAPIKey(r.Context(), key)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	// The hash stays out of the audit trail on purpose: an operator reading the log needs
+	// to know that a key was imported and which prefix it took, and nothing more.
+	s.audit(r.Context(), actor.Username, "import", "api_key", strconv.FormatInt(id, 10),
+		map[string]any{"name": key.Name, "account_id": accountID, "key_prefix": prefix,
+			"tags_set": body.Tags != nil, "status": status, "created": created}, "ok")
+	s.reload(r.Context(), "api key imported", false)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": id, "name": key.Name, "account_id": accountID, "key_prefix": prefix,
+		"status": status, "tags": jsonOrEmptyArray(key.TagsJSON), "created": created,
+		"note": "only the prefix and its hash were written: the gateway does not know the plaintext",
+	})
+}
+
+// importedCredential validates the two halves of an imported key.
+//
+// The prefix must have exactly the length the data plane looks up by (secret.PrefixLen) and
+// stay within printable ASCII; a shorter or padded prefix would index a row no bearer token
+// can ever match. The hash is the hex SHA-256 the verifier compares against, so accepting
+// anything else would store a key that cannot authenticate.
+func importedCredential(prefix, hash string) (string, string, *domain.APIError) {
+	prefix = strings.TrimSpace(prefix)
+	if len(prefix) != secret.PrefixLen {
+		return "", "", domain.ErrInvalidRequest(fmt.Sprintf(
+			"key_prefix must be exactly %d characters (the length the gateway indexes by)",
+			secret.PrefixLen)).WithParam("key_prefix")
+	}
+	for _, c := range []byte(prefix) {
+		if c < 0x21 || c > 0x7e {
+			return "", "", domain.ErrInvalidRequest(
+				"key_prefix must be printable ASCII without whitespace").WithParam("key_prefix")
+		}
+	}
+	hash = strings.ToLower(strings.TrimSpace(hash))
+	if len(hash) != 64 {
+		return "", "", domain.ErrInvalidRequest(
+			"key_hash must be the 64-character hex SHA-256 of the key").WithParam("key_hash")
+	}
+	for _, c := range []byte(hash) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return "", "", domain.ErrInvalidRequest(
+				"key_hash must be the 64-character hex SHA-256 of the key").WithParam("key_hash")
+		}
+	}
+	return prefix, hash, nil
+}
+
+// unknownTagName reports the first tag name that does not exist.
+func unknownTagName(names []string, known []*domain.Tag) *domain.APIError {
+	if len(names) == 0 {
+		return nil
+	}
+	have := make(map[string]struct{}, len(known))
+	for _, tag := range known {
+		if tag != nil {
+			have[tag.Name] = struct{}{}
+		}
+	}
+	for _, name := range names {
+		if _, ok := have[strings.TrimSpace(name)]; !ok {
+			return domain.ErrInvalidRequest("unknown tag: " + name).WithParam("tags")
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleAdminPatchKey(w http.ResponseWriter, r *http.Request) {

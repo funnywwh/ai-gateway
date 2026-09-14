@@ -626,6 +626,31 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 			},
 		},
 		{
+			Method: "POST", Path: "/admin/api/v1/keys/import", Handler: s.handleAdminImportKey,
+			Name: "admin_import_key", Group: groupKeys, Role: roleAdmin,
+			Summary:   "导入一把已经存在的密钥：只接收明文的前 12 字符与它的 SHA-256，网关不接触明文（迁移用）",
+			Dangerous: true, ConfirmReason: "会把一份已存在的明文密钥接入网关：知道该明文的人立刻可以消费额度",
+			Notes: "用途是把别的网关/平台里已经在用的 key 搬过来，让客户端不用改 key。" +
+				"key_prefix 必须是明文的前 12 个字符（网关按它建索引），key_hash 必须是同一明文的 SHA-256 十六进制。" +
+				"接口无法校验两者是否同源，写错只会得到一把认证不通过的 key，不会泄露任何东西。" +
+				"明文不落库、不返回、不进审计；同一前缀重复导入是幂等的，但该前缀已被控制台签发的 key 占用时返回 409。",
+			Body: []adminField{
+				bodyRequired("key_prefix", "string", "明文密钥的前 12 个字符（网关据此前缀索引查找）"),
+				bodyRequired("key_hash", "string", "同一明文的 SHA-256 十六进制（64 位小写）"),
+				bodyRequired("name", "string", "Key 名称（迁移时沿用源系统名称便于对账）"),
+				nonNegative(bodyOptional("account_id", "integer", "所属账户 id（与 account 二选一）")),
+				bodyOptional("account", "string", "所属账户名（与 account_id 二选一）"),
+				structuredField("tags", "array", "Key 自有标签名数组；这些名字必须已经存在，否则 400（不存在的名字会被解析丢弃，授权随即回落到默认通配）", arrayOfStrings("标签名列表"), []any{}),
+				structuredField("grants", "object", "这个 Key 能调用哪些模型与供应商（与 tag 的授权取并集）",
+					grantsSchema("Key"), grantsExample()),
+				enumField(bodyOptional("status", "string", "导入后的状态，省略为 active；disabled 表示先记录、暂不使用"), "active", "disabled"),
+				bodyOptional("expires_at", "string", "RFC3339 过期时间，省略表示不过期"),
+				exampleField(schemaField(bodyOptional("policy", "object",
+					"限速与配额策略，字段与创建 Key 完全相同（见本参数 schema）"),
+					policySchema()), keyPolicyExample()),
+			},
+		},
+		{
 			Method: "PATCH", Path: "/admin/api/v1/keys/{id}", Handler: s.handleAdminPatchKey,
 			Name: "admin_update_key", Group: groupKeys, Role: roleAdmin,
 			Summary:   "改 Key 的标签、状态、配额策略与内容录制开关（输入/思考/最终输出）",

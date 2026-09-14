@@ -1870,3 +1870,17 @@
 - [x] 本机与公网 `/aigw/version` 返回 `0.4.0 / 13a120d`；healthz/readyz 正常，UI 与 brand.js HTTP 200；公网 brand.js 与源码逐字节一致。服务 active，启动日志无 ERROR。重启后的首次连接尚未监听，自动重试后成功。
 - 回滚点：`/opt/aigw/aigw.pre-v0.4.0`（v0.3.1）；恢复该二进制后重启 aigw，不回退数据库。
 - 未发起付费模型验证，未做浏览器目视检查；新转发模式的权限和写入依赖真实 HTTP + 临时 SQLite 集成测试验证。
+
+## M43 API Key 哈希导入 + sub2api「智天成」用户迁移（2026-09-14）
+
+设计：`docs/design/m43-api-key-hash-import.md`；规格/运行手册：`docs/sub2api-migration.md`。
+
+- [x] 管理接口 `POST /admin/api/v1/keys/import`：只收 `key_prefix` + `key_hash`，明文不进网关、不返回、不进审计。
+- [x] 校验：前缀长度/字符集、哈希 64 位 hex、账户存在（404）、标签必须存在（400，避免静默回落到默认通配授权）、状态 active|disabled、RFC3339 过期时间。
+- [x] 冲突规则：同哈希幂等更新；`created_by` 以 `import:` 开头可更新；控制台签发的 key 占用同前缀 → 409。
+- [x] `store.FindAPIKeyByPrefix`（未命中返回 `(nil,nil)`，与数据面 `GetAPIKeyByPrefix` 的 401 语义分离）。
+- [x] 路由表条目含完整 body 形状/示例（`docs/mcp.md` §4.5 守卫通过）；MCP `admin` scope 自动可见。
+- [x] 测试：真实 bearer 认证/前缀与截断拒绝、响应与审计不含密钥材料、形状与错误表、幂等与 409、viewer 403、store 方法。
+- [x] `scripts/sub2api-migrate.py`：plan/snapshot/apply/verify/report；哈希在源库 SQL 内计算，脚本从不 `SELECT key`。
+- [x] 分配规则：显式意图分组（21/22/23 → 蓝精灵2/3/1，数据校验）+ 其余按 (全局最少, 该用户最少, 标签 id) 均衡。
+- [x] 预检覆盖：key 形状、前缀唯一性与冲突处置（`--reissue-key`）、账户名冲突、标签授权完整性、目标库占用。
