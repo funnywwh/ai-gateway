@@ -16,6 +16,7 @@ func TestAccountRoundTrip(t *testing.T) {
 
 	acc := &domain.Account{
 		Name:              "acme",
+		TagsJSON:          `["internal","priority"]`,
 		BillingMode:       domain.BillingPrepaid,
 		CreditLimitMicros: 5_000_000,
 		AutoSuspend:       true,
@@ -31,6 +32,9 @@ func TestAccountRoundTrip(t *testing.T) {
 	}
 	if got.Name != "acme" || got.BillingMode != domain.BillingPrepaid {
 		t.Fatalf("round trip mismatch: %+v", got)
+	}
+	if got.TagsJSON != `["internal","priority"]` {
+		t.Fatalf("account tags lost: %q", got.TagsJSON)
 	}
 	if !got.AutoSuspend {
 		t.Error("auto_suspend lost")

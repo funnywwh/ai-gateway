@@ -64,6 +64,32 @@ func TestSchemaHasCoreTables(t *testing.T) {
 			t.Errorf("table %s missing: %v", table, err)
 		}
 	}
+	rows, err := db.Reader().QueryContext(ctx, "PRAGMA table_info(accounts)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundTags := false
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		if name == "tags_json" {
+			foundTags = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatal(err)
+	}
+	rows.Close()
+	if !foundTags {
+		t.Fatal("accounts.tags_json column missing")
+	}
 }
 
 func TestWALEnabled(t *testing.T) {

@@ -279,7 +279,7 @@ func (s *Service) queryTools() []queryTool {
 		{
 			Name: "get_rate_limits",
 			Description: "查每个 API Key 配置的限额与本月已用，用于回答「这个 Key 会不会被限流」「配额还剩多少」；没有参数（省略一切即可）。要的是用量趋势而不是限额时用 get_usage_summary 或 get_usage_breakdown。" +
-				"返回：period（本月 YYYY-MM）、keys[]（api_key_id、name、status、tags、configured_limits（Key 自身策略里的限额字段）、" +
+				"返回：period（本月 YYYY-MM）、keys[]（api_key_id、name、status、tags（Key 自有）、account_tags（账号继承）、effective_tags（实际生效并集）、configured_limits（Key 自身策略里的限额字段）、" +
 				"used_this_period{requests,tokens,charge}、not_enforced[]（配了但尚未执行的字段，例如 monthly_*）、" +
 				"ignored_policy_fields[]（网关不读的字段）、policy_error（策略文档解析失败时））、note。" +
 				"两点口径：这里只报 Key 自身策略，tag 策略在准入时合并、此处不合并；实时滑动窗口余量是进程内状态，跨进程查不到，" +

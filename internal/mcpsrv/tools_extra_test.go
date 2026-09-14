@@ -24,9 +24,17 @@ func newMCPFixture(t *testing.T) (*Service, *store.DB, int64) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	accountID, err := db.UpsertAccount(ctx, &domain.Account{Name: "acme", BillingMode: domain.BillingPrepaid, Status: "active"})
+	accountID, err := db.UpsertAccount(ctx, &domain.Account{Name: "acme", TagsJSON: `["account"]`, BillingMode: domain.BillingPrepaid, Status: "active"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	for _, tag := range []*domain.Tag{
+		{Name: "account", Priority: 10},
+		{Name: "free", Priority: 20},
+	} {
+		if _, err := db.UpsertTag(ctx, tag); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := db.UpsertAPIKey(ctx, &domain.APIKey{
 		AccountID: accountID, Name: "dev", KeyPrefix: "sk-gw-mcp", KeyHash: "hash", Status: "active",
@@ -123,6 +131,12 @@ func TestRateLimitsAndInvoices(t *testing.T) {
 	keys := payload.(map[string]any)["keys"].([]map[string]any)
 	if len(keys) != 1 {
 		t.Fatalf("keys = %v", keys)
+	}
+	if got := strings.Join(keys[0]["account_tags"].([]string), ","); got != "account" {
+		t.Fatalf("account_tags = %q", got)
+	}
+	if got := strings.Join(keys[0]["effective_tags"].([]string), ","); got != "account,free" {
+		t.Fatalf("effective_tags = %q", got)
 	}
 	limits := keys[0]["configured_limits"].(map[string]any)
 	if limits["rpm"] != 60 || limits["tpm"] != int64(100000) {

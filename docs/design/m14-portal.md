@@ -67,7 +67,7 @@ func (s *Service) Logout(ctx, sessionID string) error
 
 | 方法 | 路径 | 要点 |
 |---|---|---|
-| POST | `/keys` | name + 三个录制开关 + 标签（**只能选自 `portal.allowed_tags`**，为空则用账户默认组）；不接受 grants/policy；明文只回一次 |
+| POST | `/keys` | name + 三个录制开关 + 标签（**只能选自 `portal.allowed_tags`**，为空则沿用账号绑定标签）；不接受 grants/policy；明文只回一次 |
 | PATCH | `/keys/{id}` | 状态（active/suspended）与录制开关；`{"rotate":true}` 轮换并返回新明文；写后立即 `InvalidateKey(prefix)` |
 | POST | `/redeem` | 兑换码入自己账户（复用 `billing.Service.RedeemCode`） |
 | POST | `/password` | 当前口令校验 + 新口令 ≥12 字符；成功后**吊销该用户其它会话** |
@@ -104,7 +104,7 @@ portal:
   enabled: false          # 默认关闭：路由不注册，/portal/* 一律 404
   session_ttl_h: 12
   login_attempts: 10
-  allowed_tags: []        # 为空 = 门户只能使用账户默认标签
+  allowed_tags: []        # 为空 = 门户只能使用账号绑定标签
 ```
 
 `bootstrap` 可选 `portal_users: [{account, username, password}]`，沿用既有 upsert 语义。

@@ -35,7 +35,7 @@
 
 ## 3. 账本与余额（L3）
 
-- 计费主体是 `accounts`（租户）；API Key 归属账户，**标签只做分组、成本分摊与分账倍率**。
+- 计费主体是 `accounts`（租户）；API Key 归属账户。标签可以绑定在账号或 API Key 上，Key 的生效标签是两者并集，用于分组、成本分摊、授权与分账倍率。
 - `ledger_entries` **append-only**：`credit_grant | topup | charge | adjustment | refund | expire`。
   每条带带符号 `amount_micros`、`balance_after_micros`、`idem_key`（**唯一**）、`rebuild_seq`。
   只插不改不删；纠错一律新增 `adjustment`。

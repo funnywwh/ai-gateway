@@ -12,8 +12,11 @@ const (
 
 // Account is the billing subject (tenant). API keys belong to an account.
 type Account struct {
-	ID                        int64
-	Name                      string
+	ID   int64
+	Name string
+	// TagsJSON stores the account-level tag names. API keys inherit these names at
+	// request time and union them with their own tags.
+	TagsJSON                  string
 	BillingMode               BillingMode
 	BalanceMicros             int64
 	CreditLimitMicros         int64

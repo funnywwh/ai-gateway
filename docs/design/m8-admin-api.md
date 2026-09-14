@@ -14,7 +14,7 @@
    Cookie `aigw_admin`：HttpOnly、SameSite=Lax、Path=/admin；退出即删除该会话行。
 4. **登录限速**：按 (IP, 用户名) 做失败计数窗口，超限返回 429（内存实现，复用分片思路）。
 5. **热更新三件套**：写操作成功后 → ① 失效相关鉴权缓存（Key 变更 → `Invalidate(prefix)`，
-   账户/标签变更 → `InvalidateAll`）；② `registry.Reload` 原子换新快照；③ 审计 + `config.reloaded` 类事件。
+   账户/标签变更 → `InvalidateAll`）；② `registry.Reload` 原子换新快照；③ 审计 + `config.reloaded` 类事件。账号标签和 API Key 标签都可通过各自 PATCH 端点整组替换，Key 生效标签取两者并集。
 6. **审计**：每次写操作记 `audit_logs`（actor/action/target/changes/result），值做脱敏。
 7. **分页与筛选**：列表端点统一 `limit`（默认 50，上限 500）+ `cursor`/`offset`；
    请求日志支持按账户、Key、状态、时间窗筛选。

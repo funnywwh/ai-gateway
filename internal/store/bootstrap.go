@@ -82,6 +82,10 @@ func (db *DB) seedAccounts(ctx context.Context, accounts []config.BootstrapAccou
 		if acc.Name == "" {
 			continue
 		}
+		tags, err := tagsJSON(acc.Tags)
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap: account %q tags: %w", acc.Name, err)
+		}
 		existing, err := db.GetAccountByName(ctx, acc.Name)
 		switch {
 		case err == nil:
@@ -91,6 +95,11 @@ func (db *DB) seedAccounts(ctx context.Context, accounts []config.BootstrapAccou
 			}
 			existing.BillingMode = billingMode(acc.BillingMode)
 			existing.CreditLimitMicros = usdToMicros(acc.CreditLimitUSD)
+			// A nil slice means the YAML field was omitted in merge mode; retain the
+			// live account tags. An explicit empty list clears them.
+			if acc.Tags != nil {
+				existing.TagsJSON = tags
+			}
 			if _, err := db.UpsertAccount(ctx, existing); err != nil {
 				return nil, err
 			}
@@ -98,6 +107,7 @@ func (db *DB) seedAccounts(ctx context.Context, accounts []config.BootstrapAccou
 		case domain.IsNotFound(err):
 			created := &domain.Account{
 				Name:              acc.Name,
+				TagsJSON:          tags,
 				BillingMode:       billingMode(acc.BillingMode),
 				CreditLimitMicros: usdToMicros(acc.CreditLimitUSD),
 			}

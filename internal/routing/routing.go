@@ -106,27 +106,26 @@ type policyWire struct {
 	MarginBP *int `json:"margin_bp"`
 }
 
-// ResolveTags maps a key's tag names onto tag records (ordered by priority).
+// ResolveTags maps account and key tag names onto tag records (ordered by priority).
+// Account tags are prepended to key tags before de-duplication, so equal-priority
+// policies have a deterministic order while the key's own policy still applies last.
 func (r *Router) ResolveTags(snap *registry.Snapshot, key *domain.APIKey) []*domain.Tag {
-	if snap == nil || key == nil || strings.TrimSpace(key.TagsJSON) == "" {
-		return nil
-	}
-	var names []string
-	if err := json.Unmarshal([]byte(key.TagsJSON), &names); err != nil {
-		return nil
-	}
-	tags := make([]*domain.Tag, 0, len(names))
-	for _, name := range names {
-		if t := snap.TagByName[name]; t != nil {
-			tags = append(tags, t)
-		}
-	}
-	sort.SliceStable(tags, func(i, j int) bool { return tags[i].Priority < tags[j].Priority })
-	return tags
+	return ResolveTagRecords(snap, key)
+}
+
+// ResolveTagRecords delegates effective account/key tag resolution to the registry package.
+// The result is derived from the immutable snapshot and never queries the database.
+func ResolveTagRecords(snap *registry.Snapshot, key *domain.APIKey) []*domain.Tag {
+	return registry.ResolveTagRecords(snap, key)
+}
+
+// ResolveTagNames returns effective existing tag names in evaluation order.
+func ResolveTagNames(snap *registry.Snapshot, key *domain.APIKey) []string {
+	return registry.ResolveTagNames(snap, key)
 }
 
 // Authorize computes the effective grant as the UNION of the key's own grants and
-// the grants of every tag attached to it.
+// the grants of every effective account/key tag.
 func (r *Router) Authorize(key *domain.APIKey, tags []*domain.Tag) *domain.Grant {
 	models := map[string]bool{}
 	providers := map[string]bool{}

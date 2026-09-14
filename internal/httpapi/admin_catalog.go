@@ -58,15 +58,16 @@ func (s *Server) handleAdminCreateAccount(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var body struct {
-		Name                      string `json:"name"`
-		BillingMode               string `json:"billing_mode"`
-		Note                      string `json:"note"`
-		CreditLimitMicros         *int64 `json:"credit_limit_micros"`
-		LowBalanceThresholdMicros *int64 `json:"low_balance_threshold_micros"`
-		OverdraftLimitMicros      *int64 `json:"overdraft_limit_micros"`
-		MarkupOverrideBP          *int   `json:"markup_override_bp"`
-		AutoSuspend               *bool  `json:"auto_suspend"`
-		AutoResume                *bool  `json:"auto_resume"`
+		Name                      string   `json:"name"`
+		BillingMode               string   `json:"billing_mode"`
+		Note                      string   `json:"note"`
+		Tags                      []string `json:"tags"`
+		CreditLimitMicros         *int64   `json:"credit_limit_micros"`
+		LowBalanceThresholdMicros *int64   `json:"low_balance_threshold_micros"`
+		OverdraftLimitMicros      *int64   `json:"overdraft_limit_micros"`
+		MarkupOverrideBP          *int     `json:"markup_override_bp"`
+		AutoSuspend               *bool    `json:"auto_suspend"`
+		AutoResume                *bool    `json:"auto_resume"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
@@ -92,7 +93,8 @@ func (s *Server) handleAdminCreateAccount(w http.ResponseWriter, r *http.Request
 	// New accounts always start empty: balances only move through the ledger (M11).
 	a := &domain.Account{
 		Name: name, BillingMode: domain.BillingMode(mode), Note: body.Note,
-		Status: "active", AutoSuspend: true, AutoResume: false,
+		TagsJSON: marshalOrEmpty(body.Tags),
+		Status:   "active", AutoSuspend: true, AutoResume: false,
 	}
 	if body.CreditLimitMicros != nil {
 		a.CreditLimitMicros = *body.CreditLimitMicros
@@ -120,7 +122,7 @@ func (s *Server) handleAdminCreateAccount(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.audit(r.Context(), actor.Username, "create", "account", strconv.FormatInt(id, 10),
-		map[string]any{"name": a.Name, "billing_mode": mode}, "ok")
+		map[string]any{"name": a.Name, "billing_mode": mode, "tags_set": body.Tags != nil}, "ok")
 	s.reload(r.Context(), "account created", true)
 	writeJSON(w, http.StatusCreated, accountJSON(a))
 }
@@ -154,6 +156,7 @@ func (s *Server) handleAdminPatchAccount(w http.ResponseWriter, r *http.Request)
 		MarkupOverrideBP          *int            `json:"markup_override_bp"`
 		AutoSuspend               *bool           `json:"auto_suspend"`
 		AutoResume                *bool           `json:"auto_resume"`
+		Tags                      *[]string       `json:"tags"`
 		InflightPolicyOverride    *string         `json:"inflight_policy_override"`
 		PriceOverrides            json.RawMessage `json:"price_overrides"`
 	}
@@ -200,6 +203,9 @@ func (s *Server) handleAdminPatchAccount(w http.ResponseWriter, r *http.Request)
 	if body.AutoResume != nil {
 		a.AutoResume = *body.AutoResume
 	}
+	if body.Tags != nil {
+		a.TagsJSON = marshalOrEmpty(*body.Tags)
+	}
 	if body.InflightPolicyOverride != nil {
 		a.InflightPolicyOverride = *body.InflightPolicyOverride
 	}
@@ -224,7 +230,7 @@ func (s *Server) handleAdminPatchAccount(w http.ResponseWriter, r *http.Request)
 	}
 	a.Status = status
 	s.audit(r.Context(), actor.Username, "update", "account", strconv.FormatInt(id, 10),
-		map[string]any{"status": status, "billing_mode": string(a.BillingMode)}, "ok")
+		map[string]any{"status": status, "billing_mode": string(a.BillingMode), "tags_set": body.Tags != nil}, "ok")
 	s.reload(r.Context(), "account updated", true)
 	writeJSON(w, http.StatusOK, accountJSON(a))
 }

@@ -44,17 +44,19 @@
 按 `routing.degradation` 处理（`strip` 剥离不支持字段并记录 `degraded_features`；`reject` 返回 400）。
 界面对"替换模型"的规则给出风险标注。
 
-## 3. 权限层（API Key 与标签）
+## 3. 权限层（账号、API Key 与标签）
 
 ```
-grantedModels    = ∪( key.grants.models,    各 tag.grants.models    )   ["*"] = 全部
-grantedProviders = ∪( key.grants.providers, 各 tag.grants.providers )   ["*"] = 全部
+effectiveTags    = account.tags ∪ key.tags
+grantedModels    = ∪( key.grants.models,    effectiveTags[].grants.models )   ["*"] = 全部
+grantedProviders = ∪( key.grants.providers, effectiveTags[].grants.providers )   ["*"] = 全部
 ```
 
-- Key 没有标签且自身 grants 为空时，取 `auth.default_grant`（`all` 默认 / `none`）。
-- **策略合并**：标签按 `priority` 升序 → Key 覆盖标签 → 模型 policy → 全局默认；
+- `account.tags` 与 `key.tags` 都是可编辑的绑定；重复标签只计算一次，账号标签不能被 Key 排除。
+- Key 没有生效标签且自身 grants 为空时，取 `auth.default_grant`（`all` 默认 / `none`）。
+- **策略合并**：生效标签按 `priority` 升序 → Key 覆盖标签 → 模型 policy → 全局默认；
   **限额取各来源的最严值**（min）。
-- 定价覆写优先级：key → tag → account → 模型（见 `docs/pricing.md`）。
+- 定价覆写优先级：key → 生效 tag（账号标签与 Key 标签并集）→ account → 模型。
 
 ## 4. 路由层（候选选择）
 

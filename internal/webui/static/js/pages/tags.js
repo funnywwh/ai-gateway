@@ -28,8 +28,8 @@ export async function render({ page, actions, session }) {
     load: ({ limit, offset }) => api.get('/tags', { limit, offset }),
     onError: (err) => toast(api.errorMessage(err), 'error'),
   });
-  page.append(card('标签（API Key 分组）', view.node, [
-    el('span', { class: 'muted', text: 'Key 的可用模型/供应商 = 全部标签授权的并集；策略按 tag 覆盖 key' })]));
+  page.append(card('标签（账号与 API Key）', view.node, [
+    el('span', { class: 'muted', text: '标签可绑定账号或 API Key；生效授权 = 账号标签与 Key 标签的并集，策略按优先级合并后由 Key 覆盖' })]));
 
   refresh.addEventListener('click', () => view.refresh());
   create.addEventListener('click', () => form(null, () => view.refresh()));
@@ -61,7 +61,7 @@ function form(row, reload) {
 async function edit(row, reload) { await form(row, reload); }
 
 async function remove(row, reload) {
-  const ok = await confirmDialog('删除标签', '确认删除标签 ' + row.name + ' 吗？已签发的 Key 上的同名标签会失效。');
+  const ok = await confirmDialog('删除标签', '确认删除标签 ' + row.name + ' 吗？账号和 Key 上的同名绑定都会在刷新后失效。');
   if (!ok) return;
   await api.del('/tags/' + row.id);
   toast('已删除', 'ok');

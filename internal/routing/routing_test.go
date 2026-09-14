@@ -78,6 +78,26 @@ func TestAuthorizeUnionOfKeyAndTags(t *testing.T) {
 	}
 }
 
+func TestResolveTagsUnionsAccountAndKeyTags(t *testing.T) {
+	accounts := []*domain.Account{{ID: 1, Name: "acme", TagsJSON: `["account-low","shared","missing"]`}}
+	tags := []*domain.Tag{
+		{ID: 1, Name: "account-low", Priority: 20},
+		{ID: 2, Name: "shared", Priority: 10},
+		{ID: 3, Name: "key-high", Priority: 30},
+	}
+	snap := registry.NewSnapshot(accounts, nil, nil, nil, nil, nil, tags)
+	key := keyWith(`["shared","key-high"]`, "", "")
+
+	got := registry.ResolveTagNames(snap, key)
+	want := []string{"shared", "account-low", "key-high"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("effective tag order = %v, want %v", got, want)
+	}
+	if len(got) != 3 {
+		t.Fatalf("duplicate account/key tag should appear once: %v", got)
+	}
+}
+
 func TestAuthorizeWildcardAndDefaultGrantNone(t *testing.T) {
 	snap := fixture()
 	r := newRouter(Config{DefaultGrant: "none"}, snap)

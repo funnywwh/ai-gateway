@@ -119,6 +119,7 @@ func validateDegradation(v string) error {
 func accountJSON(a *domain.Account) map[string]any {
 	return map[string]any{
 		"id": a.ID, "name": a.Name, "billing_mode": string(a.BillingMode),
+		"tags":           jsonOrEmptyArray(a.TagsJSON),
 		"balance_micros": a.BalanceMicros, "credit_limit_micros": a.CreditLimitMicros,
 		"low_balance_threshold_micros": a.LowBalanceThresholdMicros,
 		"overdraft_limit_micros":       a.OverdraftLimitMicros,

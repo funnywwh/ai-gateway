@@ -244,6 +244,8 @@ bootstrap:
     - name: internal
       billing_mode: postpaid
       credit_limit_usd: 1000
+      # Every API Key under this account inherits these tags.
+      tags: [internal]
   api_keys:
     - name: dev
       key: "sk-gw-REPLACE-ME"

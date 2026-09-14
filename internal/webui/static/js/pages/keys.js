@@ -25,7 +25,9 @@ export async function render({ page, actions, session }) {
       { key: 'account', label: '账户' },
       { key: 'key_prefix', label: '前缀', render: (row) => el('code', { text: row.key_prefix + '…' }) },
       { key: 'status', label: '状态', render: (row) => statusBadge(row.status) },
-      { key: 'tags', label: '标签', render: (row) => (row.tags || []).join(', ') || '—' },
+      { key: 'tags', label: 'Key 标签', render: (row) => (row.tags || []).join(', ') || '—' },
+      { key: 'account_tags', label: '账号标签', render: (row) => (row.account_tags || []).join(', ') || '—' },
+      { key: 'effective_tags', label: '生效标签', render: (row) => (row.effective_tags || []).join(', ') || '—' },
       { key: 'record_input_mode', label: '输入录制' },
       { key: 'record_output_text', label: '输出文本', render: (row) => (row.record_output_text ? '已开启' : '关闭') },
       { key: 'record_reasoning', label: '思考文本', render: (row) => (row.record_reasoning ? '已开启' : '关闭') },
@@ -88,6 +90,7 @@ async function editKey(row, reload) {
   const result = await modal({
     title: '编辑 ' + row.name,
     fields: [
+      { name: 'tags', label: 'Key 标签（逗号分隔）', hint: '与账号标签取并集；空输入清空 Key 自有标签', value: (row.tags || []).join(', ') },
       { name: 'record_input_mode', label: '输入录制模式', type: 'select', options: INPUT_MODES, value: row.record_input_mode },
       { name: 'record_output_text', label: '记录最终输出文本', type: 'checkbox', value: row.record_output_text },
       { name: 'record_reasoning', label: '记录思考文本', type: 'checkbox', value: row.record_reasoning },
@@ -98,6 +101,7 @@ async function editKey(row, reload) {
         hint: '例：{"rpm":60,"concurrency":4}；留空=不改动', value: row.policy ? JSON.stringify(row.policy, null, 2) : '' },
     ],
     onSubmit: (values) => api.patch('/keys/' + row.id, {
+      tags: splitTags(values.tags),
       record_input_mode: values.record_input_mode,
       record_output_text: !!values.record_output_text,
       record_reasoning: !!values.record_reasoning,
@@ -116,6 +120,10 @@ async function toggle(row, reload) {
   await api.patch('/keys/' + row.id, { status: next });
   toast('已更新', 'ok');
   await reload();
+}
+
+function splitTags(value) {
+  return (value || '').split(',').map((tag) => tag.trim()).filter(Boolean);
 }
 
 function showSecret(title, secret, after) {

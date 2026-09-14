@@ -211,10 +211,13 @@ func (s *Server) handleAdminListKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0, len(keys))
 	for _, key := range keys {
+		accountTags, effectiveTags := s.keyTagFields(key)
 		out = append(out, map[string]any{
 			"id": key.ID, "name": key.Name, "account_id": key.AccountID,
 			"key_prefix": key.KeyPrefix, "status": key.Status,
 			"tags":               jsonOrEmptyArray(key.TagsJSON),
+			"account_tags":       accountTags,
+			"effective_tags":     effectiveTags,
 			"policy":             jsonOrNil(key.PolicyJSON),
 			"record_input_mode":  key.RecordInputMode,
 			"record_reasoning":   key.RecordReasoning,
@@ -286,7 +289,7 @@ func (s *Server) handleAdminCreateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r.Context(), actor.Username, "create", "api_key", strconv.FormatInt(id, 10),
-		map[string]any{"name": body.Name, "account_id": accountID}, "ok")
+		map[string]any{"name": body.Name, "account_id": accountID, "tags_set": body.Tags != nil}, "ok")
 	s.reload(r.Context(), "api key created", false)
 
 	// The plaintext token is returned exactly once.
@@ -308,6 +311,7 @@ func (s *Server) handleAdminPatchKey(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Status           *string          `json:"status"`
+		Tags             *[]string        `json:"tags"`
 		RecordReasoning  *bool            `json:"record_reasoning"`
 		RecordOutputText *bool            `json:"record_output_text"`
 		RecordInputMode  *string          `json:"record_input_mode"`
@@ -378,6 +382,9 @@ func (s *Server) handleAdminPatchKey(w http.ResponseWriter, r *http.Request) {
 	target.RecordOutputText = recOutput
 	target.RecordReasoning = recReasoning
 	target.Status = status
+	if body.Tags != nil {
+		target.TagsJSON = marshalOrEmpty(*body.Tags)
+	}
 	// A quota policy is only settable at creation otherwise, which left an operator with
 	// no way to fix a limit on a key that already had traffic.
 	if body.Policy != nil {
@@ -391,6 +398,7 @@ func (s *Server) handleAdminPatchKey(w http.ResponseWriter, r *http.Request) {
 	s.audit(r.Context(), actor.Username, "update", "api_key", strconv.FormatInt(id, 10), map[string]any{
 		"record_output_text": recOutput, "record_reasoning": recReasoning,
 		"record_input_mode": inputMode, "status": status,
+		"tags_set": body.Tags != nil,
 		// The policy itself is not secret, but the audit trail records that it changed
 		// rather than duplicating configuration into a second table.
 		"policy_set": body.Policy != nil,
@@ -402,9 +410,11 @@ func (s *Server) handleAdminPatchKey(w http.ResponseWriter, r *http.Request) {
 		s.deps.Log.Info("recording policy changed",
 			"key", target.Name, "output_text", recOutput, "reasoning", recReasoning)
 	}
+	accountTags, effectiveTags := s.keyTagFields(target)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id": id, "status": status, "record_output_text": recOutput,
-		"record_reasoning": recReasoning, "record_input_mode": inputMode,
+		"id": id, "status": status, "tags": jsonOrEmptyArray(target.TagsJSON),
+		"account_tags": accountTags, "effective_tags": effectiveTags,
+		"record_output_text": recOutput, "record_reasoning": recReasoning, "record_input_mode": inputMode,
 		"policy": jsonOrNil(target.PolicyJSON),
 	})
 }
@@ -925,6 +935,40 @@ func jsonOrEmptyArray(raw string) any {
 		return []any{}
 	}
 	return jsonOrNil(raw)
+}
+
+func (s *Server) keyTagFields(key *domain.APIKey) (any, []string) {
+	accountTags := any([]any{})
+	if key == nil {
+		return accountTags, []string{}
+	}
+	effective := jsonStringArray(key.TagsJSON)
+	if s.deps.Registry != nil {
+		snap := s.deps.Registry.Snapshot()
+		if snap != nil {
+			if account := snap.AccountByID[key.AccountID]; account != nil {
+				accountTags = jsonOrEmptyArray(account.TagsJSON)
+			}
+			if s.deps.Router != nil {
+				effective = make([]string, 0)
+				for _, tag := range s.deps.Router.ResolveTags(snap, key) {
+					effective = append(effective, tag.Name)
+				}
+			}
+		}
+	}
+	return accountTags, effective
+}
+
+func jsonStringArray(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return []string{}
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return []string{}
+	}
+	return values
 }
 
 // jsonOrNil embeds a stored payload in a response: JSON documents are handed over as

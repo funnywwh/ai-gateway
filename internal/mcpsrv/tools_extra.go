@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/registry"
 )
 
 // getDashboard answers the "how is my account doing" question in one call.
@@ -141,9 +142,20 @@ func (s *Service) getRateLimits(ctx context.Context, accountID int64) (any, erro
 
 	out := make([]map[string]any, 0, len(keys))
 	for _, key := range keys {
+		accountTags := []string{}
+		effectiveTags := jsonArray(key.TagsJSON)
+		if s.reg != nil {
+			if snap := s.reg.Snapshot(); snap != nil {
+				if account := snap.AccountByID[key.AccountID]; account != nil {
+					accountTags = jsonArray(account.TagsJSON)
+				}
+				effectiveTags = registry.ResolveTagNames(snap, key)
+			}
+		}
 		entry := map[string]any{
 			"api_key_id": key.ID, "name": key.Name, "status": key.Status,
-			"tags": jsonArray(key.TagsJSON),
+			"tags":         jsonArray(key.TagsJSON),
+			"account_tags": accountTags, "effective_tags": effectiveTags,
 		}
 		// The report reads the same document admission reads (domain.ParsePolicy), so a
 		// limit can never show up here while being ignored on the request path. It used to

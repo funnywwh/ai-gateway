@@ -16,7 +16,7 @@ func TestBootstrapSeedsRoutingGraph(t *testing.T) {
 
 	cfg := config.Bootstrap{
 		Mode:     "upsert",
-		Accounts: []config.BootstrapAccount{{Name: "internal", BillingMode: "postpaid", CreditLimitUSD: 100}},
+		Accounts: []config.BootstrapAccount{{Name: "internal", BillingMode: "postpaid", CreditLimitUSD: 100, Tags: []string{"internal", "shared"}}},
 		Providers: []config.BootstrapProvider{{
 			Name:     "local-chat",
 			Kind:     "openai-chat",
@@ -44,6 +44,35 @@ func TestBootstrapSeedsRoutingGraph(t *testing.T) {
 	}
 	if res.ProvidersCreated != 1 || res.ProviderModelsAdded != 1 || res.ModelsCreated != 1 || res.RoutesAdded != 1 || res.TagsAdded != 1 {
 		t.Fatalf("bootstrap counts: %+v", res)
+	}
+
+	account, err := db.GetAccountByName(ctx, "internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.TagsJSON != `["internal","shared"]` {
+		t.Fatalf("bootstrap account tags = %q", account.TagsJSON)
+	}
+
+	if _, err := db.Bootstrap(ctx, config.Bootstrap{Mode: "merge", Accounts: []config.BootstrapAccount{{Name: "internal", BillingMode: "postpaid"}}}, stateDir); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := db.GetAccountByName(ctx, "internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained.TagsJSON != `["internal","shared"]` {
+		t.Fatalf("omitted merge tags = %q", retained.TagsJSON)
+	}
+	if _, err := db.Bootstrap(ctx, config.Bootstrap{Mode: "merge", Accounts: []config.BootstrapAccount{{Name: "internal", Tags: []string{}}}}, stateDir); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := db.GetAccountByName(ctx, "internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.TagsJSON != "" {
+		t.Fatalf("explicit empty merge tags = %q", cleared.TagsJSON)
 	}
 
 	prov, err := db.GetProviderByName(ctx, "local-chat")

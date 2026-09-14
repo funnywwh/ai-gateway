@@ -379,9 +379,10 @@ type BootstrapAdmin struct {
 
 // BootstrapAccount seeds a billing account.
 type BootstrapAccount struct {
-	Name           string  `yaml:"name"`
-	BillingMode    string  `yaml:"billing_mode"`
-	CreditLimitUSD float64 `yaml:"credit_limit_usd"`
+	Name           string   `yaml:"name"`
+	BillingMode    string   `yaml:"billing_mode"`
+	CreditLimitUSD float64  `yaml:"credit_limit_usd"`
+	Tags           []string `yaml:"tags"`
 }
 
 // BootstrapAPIKey seeds an API key (stored hashed on first start).

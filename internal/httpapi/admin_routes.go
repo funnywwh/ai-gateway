@@ -603,7 +603,7 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/keys", Handler: s.handleAdminListKeys,
 			Name: "admin_list_keys", Group: groupKeys, Role: roleViewer,
-			Summary: "列出 API Key（前缀、状态、标签、内容录制开关）",
+			Summary: "列出 API Key（自有/账号继承/生效标签、前缀、状态与内容录制开关）",
 			Query: append(pageConfig.fields(),
 				queryParam("account_id", "integer", "只看某个账户的 Key，省略表示全部")),
 		},
@@ -616,7 +616,7 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 				bodyRequired("name", "string", "Key 名称"),
 				nonNegative(bodyOptional("account_id", "integer", "所属账户 id（与 account 二选一）")),
 				bodyOptional("account", "string", "所属账户名（与 account_id 二选一）"),
-				structuredField("tags", "array", "标签名数组，决定授权与策略合并；标签必须在 admin_list_tags 里存在", arrayOfStrings("标签名列表"), []any{}),
+				structuredField("tags", "array", "Key 自有标签名数组；与账号标签取并集并决定授权与策略合并；标签必须在 admin_list_tags 里存在", arrayOfStrings("标签名列表"), []any{}),
 				structuredField("grants", "object", "这个 Key 能调用哪些模型与供应商（与 tag 的授权取并集）",
 					grantsSchema("Key"), grantsExample()),
 				exampleField(schemaField(bodyOptional("policy", "object",
@@ -628,10 +628,11 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 		{
 			Method: "PATCH", Path: "/admin/api/v1/keys/{id}", Handler: s.handleAdminPatchKey,
 			Name: "admin_update_key", Group: groupKeys, Role: roleAdmin,
-			Summary:   "改 Key 的状态、配额策略与内容录制开关（输入/思考/最终输出）",
+			Summary:   "改 Key 的标签、状态、配额策略与内容录制开关（输入/思考/最终输出）",
 			Dangerous: true, ConfirmReason: "可停用或启用密钥，也能改动内容录制开关（影响隐私）",
 			Params: []adminField{pathParam("id", "API Key 的数字 id")},
 			Body: []adminField{
+				structuredField("tags", "array", "替换 Key 自有标签；空数组清空；与账号标签取并集", arrayOfStrings("标签名列表"), []any{}),
 				enumField(bodyOptional("status", "string", "状态"), "active", "disabled"),
 				bodyOptional("record_reasoning", "boolean", "是否保存思考文本"),
 				bodyOptional("record_output_text", "boolean", "是否保存最终输出文本"),
@@ -706,7 +707,7 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/accounts", Handler: s.handleAdminListAccounts,
 			Name: "admin_list_accounts", Group: groupAccounts, Role: roleViewer,
-			Summary: "列出全部账户（计费模式、状态、授信与低余额阈值）",
+			Summary: "列出全部账户（计费模式、状态、标签、授信与低余额阈值）",
 			Query:   pageConfig.fields(),
 		},
 		{
@@ -717,6 +718,7 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 				bodyRequired("name", "string", "账户名"),
 				enumField(bodyOptional("billing_mode", "string", "计费模式"), "postpaid", "prepaid"),
 				bodyOptional("note", "string", "备注"),
+				structuredField("tags", "array", "账号级标签名数组；账号下所有 API Key 自动继承，并与 Key 自有标签取并集；空数组清空", arrayOfStrings("标签名列表"), []any{}),
 				nonNegative(bodyOptional("credit_limit_micros", "integer", "后付授信上限（微美元，整数，负数会被拒）")),
 				nonNegative(bodyOptional("low_balance_threshold_micros", "integer", "低余额告警阈值（微美元）")),
 				bodyOptional("overdraft_limit_micros", "integer", "允许的透支额度（微美元）"),
@@ -728,13 +730,14 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 		{
 			Method: "PATCH", Path: "/admin/api/v1/accounts/{id}", Handler: s.handleAdminPatchAccount,
 			Name: "admin_update_account", Group: groupAccounts, Role: roleAdmin,
-			Summary:   "改账户的计费模式、状态、授信、加价倍数与在途策略",
+			Summary:   "改账户的计费模式、状态、标签、授信、加价倍数与在途策略",
 			Dangerous: true, ConfirmReason: "可暂停或恢复账户，并改动授信额度、加价倍数与在途策略（直接影响出账）",
 			Params: []adminField{pathParam("id", "账户数字 id")},
 			Body: []adminField{
 				enumField(bodyOptional("billing_mode", "string", "计费模式"), "postpaid", "prepaid"),
 				enumField(bodyOptional("status", "string", "账户状态"), "active", "suspended"),
 				bodyOptional("note", "string", "备注"),
+				structuredField("tags", "array", "替换账号级标签；空数组清空；账号下所有 API Key 自动继承并与 Key 标签取并集", arrayOfStrings("标签名列表"), []any{}),
 				nonNegative(bodyOptional("credit_limit_micros", "integer", "后付授信上限（微美元，整数，负数会被拒）")),
 				nonNegative(bodyOptional("low_balance_threshold_micros", "integer", "低余额告警阈值（微美元）")),
 				bodyOptional("overdraft_limit_micros", "integer", "允许的透支额度（微美元）"),
@@ -877,7 +880,7 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			Body: []adminField{
 				bodyRequired("name", "string", "标签名"),
 				bodyOptional("description", "string", "说明"),
-				structuredField("grants", "object", "这个标签授予的模型与供应商访问权（挂在标签下的 Key 都会获得）", grantsSchema("标签"), grantsExample()),
+				structuredField("grants", "object", "这个标签授予的模型与供应商访问权（绑定该标签的账号和 Key 都会获得）", grantsSchema("标签"), grantsExample()),
 				exampleField(schemaField(bodyOptional("policy", "object",
 					"该标签的限速与配额策略，字段与 Key 的 policy 相同（见本参数 schema）。"+
 						"多个标签按 priority 依次合并、最后 Key 自己的 policy 覆盖"),

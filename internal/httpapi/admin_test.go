@@ -324,6 +324,102 @@ func decodeJSONBody(t *testing.T, resp *http.Response) map[string]any {
 	return payload
 }
 
+func TestAdminAccountAndKeyTagsCanBeEditedAndInherited(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+	ctx := context.Background()
+	for _, tag := range []*domain.Tag{
+		{Name: "account-one", GrantsJSON: `{"models":["account-model"]}`, Priority: 10},
+		{Name: "key-one", GrantsJSON: `{"models":["key-model"]}`, Priority: 20},
+		{Name: "account-two", GrantsJSON: `{"models":["account-model-2"]}`, Priority: 30},
+		{Name: "key-two", GrantsJSON: `{"models":["key-model-2"]}`, Priority: 40},
+	} {
+		if _, err := f.db.UpsertTag(ctx, tag); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.reg.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	account := f.call(t, http.MethodPatch, "/admin/api/v1/accounts/1", `{"tags":["account-one"]}`, cookie)
+	accountPayload := decodeJSONBody(t, account)
+	if account.StatusCode != http.StatusOK {
+		t.Fatalf("account tag patch status = %d: %v", account.StatusCode, accountPayload)
+	}
+	assertJSONStrings(t, accountPayload["tags"], `["account-one"]`)
+
+	created := f.call(t, http.MethodPost, "/admin/api/v1/keys", `{"name":"editable","account_id":1,"tags":["key-one"]}`, cookie)
+	createdPayload := decodeJSONBody(t, created)
+	if created.StatusCode != http.StatusCreated {
+		t.Fatalf("key create status = %d: %v", created.StatusCode, createdPayload)
+	}
+	keyID := int64(createdPayload["id"].(float64))
+
+	list := f.call(t, http.MethodGet, "/admin/api/v1/keys?limit=100", "", cookie)
+	listPayload := decodeJSONBody(t, list)
+	row := findJSONRow(t, listPayload["data"], keyID)
+	assertJSONStrings(t, row["tags"], `["key-one"]`)
+	assertJSONStrings(t, row["account_tags"], `["account-one"]`)
+	assertJSONStrings(t, row["effective_tags"], `["account-one","key-one"]`)
+
+	patchedKey := f.call(t, http.MethodPatch, "/admin/api/v1/keys/"+itoa(keyID), `{"tags":["key-two"]}`, cookie)
+	patchedKeyPayload := decodeJSONBody(t, patchedKey)
+	if patchedKey.StatusCode != http.StatusOK {
+		t.Fatalf("key tag patch status = %d: %v", patchedKey.StatusCode, patchedKeyPayload)
+	}
+	assertJSONStrings(t, patchedKeyPayload["tags"], `["key-two"]`)
+	assertJSONStrings(t, patchedKeyPayload["effective_tags"], `["account-one","key-two"]`)
+
+	patchedAccount := f.call(t, http.MethodPatch, "/admin/api/v1/accounts/1", `{"tags":["account-two"]}`, cookie)
+	patchedAccountPayload := decodeJSONBody(t, patchedAccount)
+	if patchedAccount.StatusCode != http.StatusOK {
+		t.Fatalf("second account tag patch status = %d: %v", patchedAccount.StatusCode, patchedAccountPayload)
+	}
+	assertJSONStrings(t, patchedAccountPayload["tags"], `["account-two"]`)
+
+	list = f.call(t, http.MethodGet, "/admin/api/v1/keys?limit=100", "", cookie)
+	listPayload = decodeJSONBody(t, list)
+	row = findJSONRow(t, listPayload["data"], keyID)
+	assertJSONStrings(t, row["account_tags"], `["account-two"]`)
+	assertJSONStrings(t, row["effective_tags"], `["account-two","key-two"]`)
+
+	clearedKey := f.call(t, http.MethodPatch, "/admin/api/v1/keys/"+itoa(keyID), `{"tags":[]}`, cookie)
+	clearedKeyPayload := decodeJSONBody(t, clearedKey)
+	if clearedKey.StatusCode != http.StatusOK {
+		t.Fatalf("clear key tags status = %d: %v", clearedKey.StatusCode, clearedKeyPayload)
+	}
+	assertJSONStrings(t, clearedKeyPayload["tags"], `[]`)
+	assertJSONStrings(t, clearedKeyPayload["effective_tags"], `["account-two"]`)
+}
+
+func assertJSONStrings(t *testing.T, value any, want string) {
+	t.Helper()
+	got, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("JSON value = %s, want %s", got, want)
+	}
+}
+
+func findJSONRow(t *testing.T, value any, id int64) map[string]any {
+	t.Helper()
+	rows, ok := value.([]any)
+	if !ok {
+		t.Fatalf("rows = %#v, want array", value)
+	}
+	for _, raw := range rows {
+		row, ok := raw.(map[string]any)
+		if ok && int64(row["id"].(float64)) == id {
+			return row
+		}
+	}
+	t.Fatalf("row id %d not found in %#v", id, value)
+	return nil
+}
+
 func TestAdminSurfaceRequiresSession(t *testing.T) {
 	f := newAdminFixture(t)
 	resp := f.call(t, http.MethodGet, "/admin/api/v1/providers", "", "")

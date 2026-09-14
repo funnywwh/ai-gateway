@@ -24,7 +24,7 @@
   管理面写操作后立即失效（`Invalidate`/`InvalidateAll`）。
 - **账户停用**：凭据正确但账户 `suspended` → **402 `billing_hard_limit_reached`**（不是 401）。
 - **限速维度**：`rpm`（请求数）、`tpm`（token，完成后结算）、`concurrency`（进行中）。
-  有效限额 = key 与**其命中的全部标签**逐项**取最严**（账户级没有 rpm/tpm 配额；账户侧是计费授信：
+  有效限额 = Key 自身策略与**账号绑定标签 + Key 自有标签的生效并集**逐项**取最严**（账户级没有 rpm/tpm 配额；账户侧是计费授信：
   授信上限、低额阈值、在途透支上限、`inflight_policy_override`）。
 - **策略形状是扁平的**：配额字段放在 Key/标签 `policy` 的**顶层**（`{"rpm":60,"concurrency":4}`）。
   写入时会校验：非对象、配额字段非数字、或出现 `PolicyFields` 之外的顶层字段（例如嵌套的

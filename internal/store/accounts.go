@@ -15,7 +15,7 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-const accountCols = `id, name, billing_mode, balance_micros, credit_limit_micros,
+const accountCols = `id, name, tags_json, billing_mode, balance_micros, credit_limit_micros,
 	low_balance_threshold_micros, price_overrides_json, markup_override_bp, markup_override_set,
 	auto_suspend, auto_resume, inflight_policy_override, overdraft_limit_micros, status, note,
 	created_at, updated_at`
@@ -27,7 +27,7 @@ func scanAccount(row rowScanner) (*domain.Account, error) {
 		markupOverrideSet       int
 		createdAt, updatedAt    int64
 	)
-	if err := row.Scan(&a.ID, &a.Name, &a.BillingMode, &a.BalanceMicros, &a.CreditLimitMicros,
+	if err := row.Scan(&a.ID, &a.Name, &a.TagsJSON, &a.BillingMode, &a.BalanceMicros, &a.CreditLimitMicros,
 		&a.LowBalanceThresholdMicros, &a.PriceOverridesJSON, &a.MarkupOverrideBP, &markupOverrideSet,
 		&autoSuspend, &autoResume, &a.InflightPolicyOverride, &a.OverdraftLimitMicros, &a.Status,
 		&a.Note, &createdAt, &updatedAt); err != nil {
@@ -108,12 +108,13 @@ func (db *DB) UpsertAccount(ctx context.Context, a *domain.Account) (int64, erro
 	}
 
 	if _, err := db.write.ExecContext(ctx, `
-INSERT INTO accounts(name, billing_mode, balance_micros, credit_limit_micros,
+INSERT INTO accounts(name, tags_json, billing_mode, balance_micros, credit_limit_micros,
   low_balance_threshold_micros, price_overrides_json, markup_override_bp, markup_override_set,
   auto_suspend, auto_resume, inflight_policy_override, overdraft_limit_micros, status, note,
   created_at, updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(name) DO UPDATE SET
+  tags_json = excluded.tags_json,
   billing_mode = excluded.billing_mode,
   credit_limit_micros = excluded.credit_limit_micros,
   low_balance_threshold_micros = excluded.low_balance_threshold_micros,
@@ -127,7 +128,7 @@ ON CONFLICT(name) DO UPDATE SET
   status = excluded.status,
   note = excluded.note,
   updated_at = excluded.updated_at`,
-		a.Name, string(a.BillingMode), a.BalanceMicros, a.CreditLimitMicros,
+		a.Name, a.TagsJSON, string(a.BillingMode), a.BalanceMicros, a.CreditLimitMicros,
 		a.LowBalanceThresholdMicros, a.PriceOverridesJSON, a.MarkupOverrideBP,
 		boolInt(a.MarkupOverrideSet), boolInt(a.AutoSuspend),
 		boolInt(a.AutoResume), a.InflightPolicyOverride, a.OverdraftLimitMicros, a.Status, a.Note,
