@@ -1791,6 +1791,15 @@
 - 回滚点：`/opt/aigw/aigw.pre-v0.3.1`、`/opt/aigw/plugins/provider-codex.pre-v0.3.1`；数据库一致性备份 `/opt/aigw/backups-release/v0.3.1/aigw.sqlite`（0600，quick_check=ok）。回退不覆盖新计费数据。
 - 未额外发起付费上游请求；未进行公网或浏览器目视验证。新自动关联以集成回归为验证依据，先前人工修正的历史例子不作为自动关联实测。
 
+### v0.7.2 发布记录（2026-09-14）
+
+- [x] 发布 patch **0.7.2**；发布提交 `9cd209a`，标签 `v0.7.2`。
+- [x] 构建二进制版本为 `0.7.2`，revision `9cd209a`；部署 gptjp（`8.211.157.165`），服务 `aigw.service` active。
+- [x] 配置 `/opt/aigw/config.yaml` 使用 `server.base_path: /aigw`，公网前缀为 `https://gpt.lagenio.xyz/aigw/`；Nginx 配置已备份并重载。
+- [x] 本机与公网 `https://gpt.lagenio.xyz/aigw/version` 返回 `0.7.2 / 9cd209a`；healthz HTTP 200。
+- [x] 启动日志显示版本正确且无 ERROR；readyz 当前 HTTP 503，因为新实例尚无 providers/routes（服务本身已正常监听）。
+- 回滚点：远程 `/opt/aigw/aigw.prev-*` 与 `/home/nginxWebUI/nginx.conf.pre-aigw-*`；恢复二进制/配置后重启 `aigw` 并重载 `nginxWebUI`。
+
 ### v0.7.1 发布记录（2026-09-14）
 
 - [x] 修复管理后台布局：左侧导航与“退出”项固定，工作区顶部标题栏固定，页面内容独立滚动；发布 patch **0.7.1**。
