@@ -1877,6 +1877,46 @@
   加 `deepseek` 或重新确定别名口径（属产品口径，未擅自改）；③ 非流式失败请求只写计量、不写请求日志
   （`internal/httpapi/v1.go` 失败分支仅在 `req.Stream` 时 persist），11:04–11:05 有 9 条这样的记录。
 
+### gptjp「智能问答改不了供应商并发」的根因与修复（2026-09-14）
+
+- 现象（用户报）：在 gptjp 的智能问答里让模型「把三个 codex 供应商的并发改成 3」，模型回一句
+  「我先查一下…」之后**这一轮就断了**（会话消息 `status=failed`、`error=模型这一轮没有正常结束`），
+  永远走不到 `admin_update_provider`。两个会话 `chat_coigrlhiwkgflserk3bwjfui` /
+  `chat_6uvtp4tqu7e5ai7p2szthjfy` 都是这个形态；审计里只有 `mcp.admin_call … ok` 的只读调用，
+  从没有一次 provider 写入。
+- 根因：**不是权限、不是 MCP 工具面、也不是 M44 的并发闸门**，而是 gptjp 的 `deepseek`（id 7）
+  供应商漏配 DeepSeek 的思考方言。每轮第 1 步（用户消息 → 模型决定调工具）成功，第 2 步
+  （**回放工具结果**）被上游 400 拒绝：`usage_records.error_code=upstream_400` /
+  `terminated_reason=upstream_error`（`req_ysojaxlkwaupdlrcvtzy64e3`、`req_dq2hdkw234xhc4zxp3po4krp`、
+  `req_cquxxpil25j4bqm26t5zyijt`，provider_id=7、零 token、325–421ms）。
+  上游的硬约束是「带工具的一轮 assistant 侧必须带 `reasoning_content` 键」（`docs/api-providers.md` §4），
+  而网关的补键/文本折叠只在供应商配置打开 `thinking.replay_reasoning_content` 时生效
+  （`pkg/providerkit/chatcompat.go`：`reasoningTurn := opts.ReplayReasoningContent && …`、
+  `foldAssistantTextIntoCall`、`requireReasoningKeys`）。gptjp 的 config 只有
+  `{"base_url":"https://api.deepseek.com","timeout_s":120}`；gpt001 的 deepseek（id 8）一直是对的
+  （`{"mode":"auto","style":"deepseek","replay_reasoning_content":true}`），所以只有 gptjp 有这个病。
+- 复现（gptjp，临时会话，跑完即删）：**"先写一句话 + 调 1 个工具" 必 400**；
+  "不写话、直接调 1 个工具" 反而通过。即触发条件是**assistant 侧在工具轮里带了文本**，
+  而不是工具个数或结果大小——所以用户看到的「有时能聊、真要动手就断」并不是随机的。
+- [x] 修复：备份 `/opt/aigw/data/provider-config-backup-20260914-143714.json`（0600），
+  `PATCH /admin/api/v1/providers/7` 只改 `config`（整块替换，必须连同 4 条 `models` 一起提交，
+  否则会丢模型映射），补上 `thinking={"mode":"auto","style":"deepseek","replay_reasoning_content":true}`；
+  读回确认 `models` 四条映射与 `api_key` 凭据键完好。
+- [x] 顺手完成用户原本的目标：`PATCH providers/1`、`providers/3`、`providers/5` → `max_inflight=3`
+  （三家 codex 的并发闸门在此之前都是 `0`＝不限），读回 `capacity.limit=3`，
+  `/admin/api/v1/stats.provider_capacity` 显示三个闸门在线，排队策略 30s / 100。
+- [x] 端到端验证（临时会话 `chat_6fiq2pw6ymosee4wpalv5f24`，绑 scope=admin 的 MCP 令牌 #7，跑完已删）：
+  ①「先一句话 + 查供应商」的三步轮次 `completed`（修复前必死在第 2 步）；
+  ② 让模型真实写入一次（id=1 的 `max_inflight` 3→2，带 `confirm=true`）→ 返回 200、
+  独立 `admin_get_provider` 读回 `capacity.limit=2`；③ 再让它改回 3 → 读回 3。
+  三个供应商最终都是 `max_inflight=3`、`capacity.limit=3`；服务 `active`，0.11.0/`460eee7`，重启后无 ERROR。
+- 回滚：把 `/opt/aigw/data/provider-config-backup-20260914-143714.json` 里 id=7 的 `config` 原样 PATCH 回去
+  （即删掉 `thinking` 块）即可；`max_inflight` 改回 `0` 即恢复不限。
+- 观察项（未改）：gptjp 的 `deepseek` 只服务 `deepseek-flash` 一族，任何"带文本的工具轮"在没有该方言时都会
+  400，属于**供应商配置与上游方言不匹配**这一类问题；这类校验只在真机才会显形（离线假上游按规则判 400，
+  但配置缺 `thinking` 时假上游也一样会放行），值得在部署清单里加一条「openai-chat 指向 DeepSeek 官方
+  endpoint 时必须带 `thinking.style=deepseek` + `replay_reasoning_content=true`」。
+
 ### v0.3.0 发布记录（2026-09-13）
 
 - [x] 根据 `v0.2.5..HEAD` 的新增能力与配置发布 minor：`0.2.5` → **`0.3.0`**。包含缓存 token 展示 `c72bb52`、Codex 无输出断流恢复 `bcd6f1a`、根会话标识 `4b1c32e`、M41 小时汇总 `ecae61a`。
