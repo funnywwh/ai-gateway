@@ -100,6 +100,14 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
   它们仍出现在 `admin_endpoints` 里，`tool=null` 并附原因；调用会被拒并说明。
 - 常见排障路径都在里面：`admin_provider_logs`（插件 stderr）、`admin_test_provider`（真实探测）、
   `admin_explain_router`（为什么这个模型不可用）、`admin_billing_invariants`、`admin_list_audit_logs`。
+- **供应商并发上限是后台可写的**（M44）：`admin_update_provider` 的 `body.max_inflight` 设置该供应商
+  **同时在途的上游调用数**（`0` = 不限，默认；路径参数传供应商 id，`admin_describe` 给出实时 schema）。
+  超出并发的请求**排队等待**，等待上限是部署配置（只读，见 `admin_stats` 的
+  `provider_capacity.queue_wait_s`，默认 30 秒；`0` 表示不排队、超限直接失败）；等待超时或队列已满时
+  该请求按可重试失败换下一个候选，全部候选耗尽返回 HTTP 429 `provider_busy`。
+  写入后用 `admin_get_provider` / `admin_list_providers` 读回：每行带 `capacity`
+  （`limit`/`inflight`/`waiting`/`admitted`/`queue_full`/`timed_out`/`waited_total_ms`），
+  `admin_stats.provider_capacity` 给出全部供应商的实时在途与排队；**读这些只需要 `admin_read`**，写才需要 `admin`。
 
 ### 模型级推理强度示例
 
@@ -127,6 +135,37 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
 ```
 
 模型行先持久化、后重载 registry。重载失败时调用返回 500 并说明“已保存但未应用”；修复原因后重试更新。完整架构、bootstrap 与测试边界见 [`docs/design/model-reasoning.md`](design/model-reasoning.md)。
+
+### 供应商并发上限示例
+
+设置某供应商最多 2 个在途上游调用（`params` 是路径参数 `id`，`body` 是部分更新）：
+
+```json
+{"name":"admin_request","arguments":{
+  "name":"admin_update_provider",
+  "params":{"id":3},
+  "body":{"max_inflight":2}
+}}
+```
+
+```json
+{"name":"admin_request","arguments":{
+  "name":"admin_get_provider",
+  "params":{"id":3}
+}}
+```
+
+读回的行里 `max_inflight` 是配置值，`capacity` 是实时状态：
+
+```json
+{"max_inflight":2,
+ "capacity":{"limit":2,"inflight":1,"waiting":3,"admitted":12,
+             "queue_full":0,"timed_out":1,"cancelled":0,"wait_total_ms":3450}}
+```
+
+`waiting` 长非零说明这家上游在排队；`timed_out` / `queue_full` 计数上升说明排队已触界（客户端会看到 429 `provider_busy`）。
+`max_inflight` 写 `0` 即取消限制（也是默认值）。等待上限是**部署级配置**（`admin_stats.provider_capacity.queue_wait_s`），
+MCP 只读不可写；「谁在排队」看 `admin_stats.provider_capacity.providers`。
 
 ## 4.5 工具说明标准（新增工具/字段必读）
 
@@ -162,6 +201,7 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
 | 枚举用 `enumField`、路径参数用 `pathParam` | 取值只写一遍，不靠 `Desc` 复述 | 既有辅助函数 |
 | `Dangerous` 必须有 `ConfirmReason` | 模型要先交代后果 | 既有测试已钉 |
 | 与代码的校验语义一致 | 写入侧 `DisallowUnknownFields` 的文档要 `additionalProperties:false` | 两者写在一起 |
+| **行为型字段要写清"生效语义"** | 只写单位/范围仍不够：agent 要知道写下去会发生什么 | 例：`max_inflight` 必须写明「0=不限（默认）；超出后请求排队等待，等待上限来自部署配置（默认 30s，0=不排队），超时或队列已满 → 该请求重试下一候选，全耗尽返回 429 `provider_busy`」 |
 | **只存不用的字段不写进 schema** | 写进去等于教 agent 写无效配置 | 描述里标明"当前不生效" |
 
 ### 写错了会怎样
@@ -218,6 +258,9 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
 ## 8. 已知限制
 
 - **stdio 本地账户模式只读**：后台操作使用第 10 节的令牌转发模式，依赖运行中的网关。
+- 供应商**排队策略**（`routing.provider_queue_wait_s` / `routing.provider_queue_max_waiters`）是部署级配置，
+  MCP 只读（`admin_stats.provider_capacity` 给出生效值）不可写；可写的是**每个供应商的并发上限**
+  （`admin_update_provider` 的 `max_inflight`）。排队状态在进程内，多实例部署各自计数。
 - 后台工具**不按账户作用域**：`admin_read`/`admin` 令牌是网关级凭据。
 - 单接口一个 MCP 工具的形态不做（有意为之，见第 4 节）。
 - 控制台聊天要求 `mcp.enabled` 与 `mcp.admin_tools` 均为 `true`：它走的就是 `/mcp`，

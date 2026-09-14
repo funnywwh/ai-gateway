@@ -139,6 +139,16 @@ type Routing struct {
 	// SessionAffinityMaxEntries bounds the in-process table: session keys come from
 	// the client, so the table needs a ceiling.
 	SessionAffinityMaxEntries int `yaml:"session_affinity_max_entries"`
+
+	// ProviderQueueWaitS is how long one attempt may wait for a provider capacity
+	// slot (providers.max_inflight) before it fails retryably and the request moves
+	// on to the next candidate. 0 disables queueing: an attempt that finds the
+	// provider full fails immediately, which is what a deployment that prefers fast
+	// failover wants.
+	ProviderQueueWaitS int `yaml:"provider_queue_wait_s"`
+	// ProviderQueueMaxWaiters bounds how many attempts may queue for one provider.
+	// 0 means the queue depth is bounded only by ProviderQueueWaitS.
+	ProviderQueueMaxWaiters int `yaml:"provider_queue_max_waiters"`
 }
 
 // Billing holds pricing, reservation, in-flight and invoicing policy.
@@ -538,6 +548,11 @@ func Default() Config {
 			SessionAffinity:           true,
 			SessionAffinityTTLS:       1800,
 			SessionAffinityMaxEntries: 10000,
+			// Queueing is on by default, but only matters for providers whose
+			// max_inflight is set: 0 (the default) means unlimited, and no gate is
+			// created at all.
+			ProviderQueueWaitS:      30,
+			ProviderQueueMaxWaiters: 100,
 		},
 		Billing: Billing{
 			Currency:              "USD",
@@ -724,6 +739,8 @@ func applyEnv(cfg *Config) error {
 		envBool(&cfg.Routing.SessionAffinity, "GW_ROUTING_SESSION_AFFINITY"),
 		envInt(&cfg.Routing.SessionAffinityTTLS, "GW_ROUTING_SESSION_AFFINITY_TTL_S"),
 		envInt(&cfg.Routing.SessionAffinityMaxEntries, "GW_ROUTING_SESSION_AFFINITY_MAX_ENTRIES"),
+		envInt(&cfg.Routing.ProviderQueueWaitS, "GW_ROUTING_PROVIDER_QUEUE_WAIT_S"),
+		envInt(&cfg.Routing.ProviderQueueMaxWaiters, "GW_ROUTING_PROVIDER_QUEUE_MAX_WAITERS"),
 		envInt(&cfg.Server.ReadTimeoutS, "GW_SERVER_READ_TIMEOUT_S"),
 		envInt(&cfg.RateLimit.Shards, "GW_RATELIMIT_SHARDS"),
 	} {
@@ -799,6 +816,28 @@ func (c *Config) Validate() error {
 		}
 		if c.Routing.SessionAffinityMaxEntries < 1 {
 			return fmt.Errorf("routing.session_affinity_max_entries must be >= 1 when session_affinity is on")
+		}
+	}
+	// Provider capacity queueing. The cross-check with the reservation TTL is the one
+	// that matters: a request waits for a slot *while* holding its balance reservation,
+	// and holds are reaped on a TTL, so queueing longer than the hold would let a
+	// prepaid account be oversold by waits that outlive their own reservation.
+	if c.Routing.ProviderQueueWaitS < 0 {
+		return fmt.Errorf("routing.provider_queue_wait_s must not be negative (0 disables queueing)")
+	}
+	if c.Routing.ProviderQueueMaxWaiters < 0 {
+		return fmt.Errorf("routing.provider_queue_max_waiters must not be negative (0 means no depth limit)")
+	}
+	if wait := c.Routing.ProviderQueueWaitS; wait > 0 {
+		attempts := c.Routing.MaxAttempts
+		if attempts < 1 {
+			attempts = 1
+		}
+		worst := wait * attempts
+		if ttl := c.Billing.ReservationTTLS; ttl > 0 && worst >= ttl {
+			return fmt.Errorf("routing.provider_queue_wait_s (%d) x max_attempts (%d) must stay below "+
+				"billing.reservation_ttl_s (%d): a queued request would outlive its balance reservation",
+				wait, attempts, ttl)
 		}
 	}
 	b := c.Billing

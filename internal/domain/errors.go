@@ -77,6 +77,15 @@ func ErrModelNotFound(model string) *APIError {
 func ErrRateLimited(msg string) *APIError {
 	return newErr(http.StatusTooManyRequests, ErrTypeRateLimit, "rate_limit_exceeded", msg)
 }
+
+// ErrProviderBusy reports that every candidate was at its provider concurrency limit
+// (providers.max_inflight) when this attempt needed a slot. It is a rate-limit shape so
+// clients back off, with a code of its own: an operator (and a client) must be able to
+// tell gateway capacity from the account's own rpm/tpm/concurrency quota, which is the
+// only thing rate_limit_exceeded ever meant.
+func ErrProviderBusy(msg string) *APIError {
+	return newErr(http.StatusTooManyRequests, ErrTypeRateLimit, "provider_busy", msg)
+}
 func ErrInsufficientQuota(msg string) *APIError {
 	return newErr(http.StatusPaymentRequired, ErrTypeRateLimit, "billing_hard_limit_reached", msg)
 }

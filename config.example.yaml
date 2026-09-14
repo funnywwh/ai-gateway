@@ -57,6 +57,14 @@ routing:
   session_affinity: true
   session_affinity_ttl_s: 1800        # 无新成功请求则过期（命中即刷新）
   session_affinity_max_entries: 10000 # 表容量上界（session_id 由客户端提供）
+  # 供应商并发上限（每个供应商实例的 providers.max_inflight，0=不限）触发后的排队策略。
+  # 超出并发的请求在进程内 FIFO 排队等待名额；等待超过 provider_queue_wait_s 或队列超过
+  # provider_queue_max_waiters 时，该次尝试按可重试失败换下一个候选，全部候选耗尽返回
+  # 429 provider_busy。provider_queue_wait_s: 0 = 不排队（超限立即失败）。
+  # 约束：provider_queue_wait_s × max_attempts 必须小于 billing.reservation_ttl_s
+  # （排队期间请求仍持有余额预留，等太久会让预留先过期）。
+  provider_queue_wait_s: 30           # 排队最长等待秒数；0=不排队
+  provider_queue_max_waiters: 100     # 每个供应商最多排队请求数；0=不限（仍受等待时长约束）
 
 billing:
   currency: USD                       # ledger currency: balance, credit, reservations, ledger, invoices, reconcile

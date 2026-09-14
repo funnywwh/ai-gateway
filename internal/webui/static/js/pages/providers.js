@@ -4,6 +4,36 @@ import { el, card, table, pagedTable, modal, toast, badge, jsonBlock, formatTime
 const KINDS = ['openai-chat', 'openai-responses', 'testecho'];
 const CONFIG_HINT = JSON.stringify({ base_url: 'https://api.example.com/v1' }, null, 2);
 
+// The ceiling is enforced with a queue (M44): saying "并发上限" alone leaves an operator to
+// guess whether the excess is refused or waits.
+const CAPACITY_HINT = '同时在途的上游调用数；0=不限。超出后请求排队等待（部署配置决定等待上限，默认 30 秒），'
+  + '等待超时或队列已满时该请求换下一个候选，全部候选耗尽返回 429 provider_busy。探测/重启不占名额。'
+
+// capacityText renders one provider's live gate. A provider with no ceiling has no gate at
+// all, which is not the same statement as "zero in flight", so it is shown as 不限.
+function capacityText(capacity) {
+  if (!capacity) return '不限';
+  const limit = capacity.limit > 0 ? String(capacity.limit) : '不限';
+  let text = capacity.inflight + ' 在途（上限 ' + limit + '）';
+  if (capacity.waiting > 0) text += '，' + capacity.waiting + ' 排队';
+  return text;
+}
+
+function capacityCell(row) {
+  const capacity = row.capacity;
+  if (!capacity) return '—';
+  const detail = ['累计放行 ' + capacity.admitted]
+    .concat(capacity.timed_out ? ['排队超时 ' + capacity.timed_out] : [])
+    .concat(capacity.queue_full ? ['队满拒绝 ' + capacity.queue_full] : [])
+    .concat(capacity.cancelled ? ['排队中取消 ' + capacity.cancelled] : [])
+    .join('；');
+  return el('span', {
+    text: capacity.inflight + '/' + (capacity.limit > 0 ? capacity.limit : '不限')
+      + (capacity.waiting > 0 ? '，' + capacity.waiting + ' 排队' : ''),
+    title: detail,
+  });
+}
+
 export async function render({ page, actions, session }) {
   const readonly = session.role !== 'admin';
   const create = el('button', { class: 'btn btn-primary', text: '新建供应商', disabled: readonly });
@@ -18,6 +48,7 @@ export async function render({ page, actions, session }) {
       { key: 'enabled', label: '启用', render: (row) => row.enabled ? badge('on', 'ok') : badge('off') },
       { key: 'priority', label: '优先级' },
       { key: 'weight', label: '权重' },
+      { key: 'capacity', label: '在途/排队', render: (row) => capacityCell(row) },
       { key: 'has_credentials', label: '凭据', render: (row) => row.has_credentials
         ? badge((row.credential_keys || []).join(', ') || '已配置', 'ok') : badge('未配置', 'warn') },
       { key: 'last_error', label: '最近错误', render: (row) => row.last_error ? el('span', { class: 'muted', text: row.last_error }) : '—' },
@@ -53,6 +84,7 @@ async function createProvider(preset, reload) {
       { name: 'display_name', label: '显示名' },
       { name: 'priority', label: '优先级（越小越先）', type: 'number', value: 100 },
       { name: 'weight', label: '权重', type: 'number', value: 100 },
+      { name: 'max_inflight', label: '最大并发（0=不限）', type: 'number', value: 0, hint: CAPACITY_HINT },
       { name: 'config', label: '配置（JSON，字段说明见详情页「配置说明」）', type: 'textarea', json: true,
         value: preset.config || CONFIG_HINT },
       { name: 'credentials', label: '凭据（JSON，只写不回显）', type: 'textarea', json: true, value: '{\n  "api_key": ""\n}' },
@@ -85,6 +117,7 @@ async function detail(row, reload, readonly) {
       kv('配置版本', String(row.config_version)),
       kv('凭据键', (row.credential_keys || []).join(', ') || '无'),
       kv('冷却至', formatTime(row.cooldown_until)),
+      kv('在途/排队', capacityText(row.capacity)),
     ]),
     // The mapping decides whether the routes pointing here can be used at all, so it
     // comes before the configuration documentation: a model and a route without this
@@ -423,7 +456,7 @@ async function edit(row, reload) {
       { name: 'draining', label: '排空（不再接新请求）', type: 'checkbox', value: row.draining },
       { name: 'priority', label: '优先级', type: 'number', value: row.priority },
       { name: 'weight', label: '权重', type: 'number', value: row.weight },
-      { name: 'max_inflight', label: '最大在途（0=不限）', type: 'number', value: row.max_inflight },
+      { name: 'max_inflight', label: '最大并发（0=不限）', type: 'number', value: row.max_inflight, hint: CAPACITY_HINT },
       { name: 'degradation', label: '能力降级策略', type: 'select', options: ['', 'none', 'fail_fast', 'best_effort'], value: row.degradation },
       { name: 'config', label: '配置（JSON，字段说明见详情页「配置说明」）', type: 'textarea', json: true, value: row.config },
       { name: 'credentials', label: '凭据（JSON，留空=保持不变，{} = 清空）', type: 'textarea', json: true, value: '' },

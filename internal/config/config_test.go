@@ -34,6 +34,66 @@ func TestDefaultIsValid(t *testing.T) {
 	if cfg.Billing.InflightPolicy != "abort" || cfg.Billing.OvershootPolicy != "absorb" {
 		t.Errorf("in-flight defaults wrong: %q/%q", cfg.Billing.InflightPolicy, cfg.Billing.OvershootPolicy)
 	}
+	// Queueing is on by default but inert until a provider sets max_inflight: these two
+	// values only decide how long an attempt waits once a gate exists.
+	if cfg.Routing.ProviderQueueWaitS != 30 || cfg.Routing.ProviderQueueMaxWaiters != 100 {
+		t.Errorf("provider queue defaults wrong: %d/%d, want 30/100",
+			cfg.Routing.ProviderQueueWaitS, cfg.Routing.ProviderQueueMaxWaiters)
+	}
+}
+
+func TestProviderQueueValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr bool
+	}{
+		{"defaults are valid", func(*Config) {}, false},
+		{"queueing off is valid", func(c *Config) { c.Routing.ProviderQueueWaitS = 0 }, false},
+		{"unlimited depth is valid", func(c *Config) { c.Routing.ProviderQueueMaxWaiters = 0 }, false},
+		{"negative wait", func(c *Config) { c.Routing.ProviderQueueWaitS = -1 }, true},
+		{"negative depth", func(c *Config) { c.Routing.ProviderQueueMaxWaiters = -1 }, true},
+		{
+			// One attempt may not wait as long as a balance reservation lives.
+			"wait reaching the reservation ttl",
+			func(c *Config) { c.Routing.ProviderQueueWaitS = c.Billing.ReservationTTLS },
+			true,
+		},
+		{
+			"wait times attempts exceeding the reservation ttl",
+			func(c *Config) {
+				c.Routing.ProviderQueueWaitS = c.Billing.ReservationTTLS/2 + 1
+				c.Routing.MaxAttempts = 2
+			},
+			true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			tc.mutate(&cfg)
+			err := cfg.Validate()
+			if tc.wantErr && err == nil {
+				t.Fatal("expected a validation error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected validation error: %v", err)
+			}
+		})
+	}
+}
+
+func TestProviderQueueEnvOverrides(t *testing.T) {
+	t.Setenv("GW_ROUTING_PROVIDER_QUEUE_WAIT_S", "5")
+	t.Setenv("GW_ROUTING_PROVIDER_QUEUE_MAX_WAITERS", "7")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Routing.ProviderQueueWaitS != 5 || cfg.Routing.ProviderQueueMaxWaiters != 7 {
+		t.Fatalf("env overrides not applied: %d/%d",
+			cfg.Routing.ProviderQueueWaitS, cfg.Routing.ProviderQueueMaxWaiters)
+	}
 }
 
 func TestRecordingInputModeFor(t *testing.T) {

@@ -128,6 +128,9 @@ capabilities、pricing_rules），**不覆盖人工设置的 upstream_model 与�
   `" acme "` 与 `"acme"` 同一个账户，但 `Ops`/`ops`、`é`/`é` 仍是不同账户（不做大小写折叠、不做 Unicode NFC）。
 - provider.kind：内建 kind 或 `plugin:<name>`；name 为非空、长度<=64、字符集 `[A-Za-z0-9._-]`；
 - provider.max_inflight >= 0；priority/weight >= 0；degradation 属于 `none|fail_fast|best_effort`；
+  `max_inflight` 是**供应商实例的同时在途上限**（`0` = 不限，默认）：超出后在进程内 FIFO 排队等待，
+  等待上限与队列深度来自 `routing.provider_queue_wait_s` / `routing.provider_queue_max_waiters`
+  （M44，见 `docs/routing.md` §4.5）；管理面与 MCP 共用同一写入路径，读回带实时 `capacity`；
 - provider_model：public_model 必须能在 models 表按名解析（不存在时 404 并提示先建模型），权重/优先级非负；
 - mapping：`modelmap.ValidateRule(kind, pattern, target)`，kind 属于 exact|prefix|glob|regex，
   target_model 与 (target_provider_id + target_upstream_model) 至少给一个；

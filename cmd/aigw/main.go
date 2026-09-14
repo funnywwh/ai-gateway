@@ -192,9 +192,20 @@ func run() int {
 	} else {
 		credentialSealer = creds.NewSealer(credKey)
 	}
+	queueWait := time.Duration(cfg.Routing.ProviderQueueWaitS) * time.Second
 	dispatcher := runtime.New(runtime.Config{
-		CredentialsKey: credKey,
+		CredentialsKey:  credKey,
+		QueueWait:       queueWait,
+		QueueMaxWaiters: cfg.Routing.ProviderQueueMaxWaiters,
 	}, db, reg, host, balancerState, log)
+	// Push the ceilings the startup snapshot already carries, so a provider that was limited
+	// before this restart is enforced from the first request rather than from the first
+	// reload.
+	dispatcher.SyncLimits()
+	log.Info("provider capacity ready",
+		"queue_wait", queueWait.String(),
+		"queue_max_waiters", cfg.Routing.ProviderQueueMaxWaiters,
+		"limited_providers", len(dispatcher.CapacityStats()))
 
 	hooks, err := db.ListHooks(ctx)
 	if err != nil {
@@ -443,6 +454,7 @@ func run() int {
 		Settings:      db,
 		Secrets:       credentialSealer,
 		Prober:        dispatcher,
+		Capacity:      dispatcher,
 		ReloadHooks: func(ctx context.Context) error {
 			list, err := db.ListHooks(ctx)
 			if err != nil {
@@ -457,6 +469,10 @@ func run() int {
 			if err != nil {
 				return nil, err
 			}
+			// A raised max_inflight must release the attempts already queued for that
+			// provider; the data path reads the limit per attempt, so new attempts are
+			// correct either way.
+			dispatcher.SyncLimits()
 			return snap.String(), nil
 		},
 		InvalidateKey: func(prefix string) {

@@ -31,7 +31,22 @@ type Store interface {
 type Config struct {
 	CredentialsKey  []byte
 	CooldownDefault time.Duration
+
+	// QueueWait bounds how long one attempt waits for a provider capacity slot
+	// (providers.max_inflight). Zero or negative disables queueing: an attempt that
+	// finds the provider full fails immediately, which is what a deployment that
+	// prefers fast failover over waiting wants.
+	QueueWait time.Duration
+	// QueueMaxWaiters bounds how many attempts may queue for one provider. Zero or
+	// negative means the queue depth is bounded only by QueueWait.
+	QueueMaxWaiters int
 }
+
+// Attempt carries the gateway-side facts of one dispatch that the provider answer itself
+// does not. QueueWaitMS is how long the attempt waited for a provider capacity slot before
+// the upstream call started; a caller subtracts it from its own wall-clock measurement so
+// recorded latency keeps meaning upstream latency rather than gateway queueing.
+type Attempt struct{ QueueWaitMS int }
 
 // Dispatcher runs attempts.
 type Dispatcher struct {
@@ -41,6 +56,8 @@ type Dispatcher struct {
 	host  *pluginhost.Host
 	bal   *balancer.State
 	log   *slog.Logger
+	// gate enforces providers.max_inflight with a FIFO waiting line.
+	gate *gate
 
 	mu       sync.Mutex
 	builtins map[int64]*builtinEntry
@@ -59,6 +76,9 @@ func New(cfg Config, store Store, reg *registry.Registry, host *pluginhost.Host,
 	if cfg.CooldownDefault <= 0 {
 		cfg.CooldownDefault = 30 * time.Minute
 	}
+	if cfg.QueueMaxWaiters < 0 {
+		cfg.QueueMaxWaiters = 0
+	}
 	return &Dispatcher{
 		cfg:      cfg,
 		store:    store,
@@ -66,6 +86,7 @@ func New(cfg Config, store Store, reg *registry.Registry, host *pluginhost.Host,
 		host:     host,
 		bal:      bal,
 		log:      log,
+		gate:     newGate(cfg),
 		builtins: map[int64]*builtinEntry{},
 	}
 }
@@ -74,34 +95,91 @@ func New(cfg Config, store Store, reg *registry.Registry, host *pluginhost.Host,
 func ProviderKey(providerID int64) string { return fmt.Sprintf("provider:%d", providerID) }
 
 // Complete performs one non-streaming attempt.
-func (d *Dispatcher) Complete(ctx context.Context, providerID int64, req *pluginapi.Request) (*pluginapi.Response, error) {
+func (d *Dispatcher) Complete(ctx context.Context, providerID int64, req *pluginapi.Request) (*pluginapi.Response, Attempt, error) {
+	provider, permit, err := d.admit(ctx, providerID)
+	if err != nil {
+		return nil, Attempt{}, err
+	}
+	waited := permit.waitedFor()
+	defer permit.Release()
+
 	key := ProviderKey(providerID)
 	d.bal.Acquire(key)
 	started := time.Now()
 	defer d.bal.Release(key)
 
-	resp, err := d.complete(ctx, providerID, req)
+	resp, err := d.complete(ctx, provider, req)
 	d.bal.Observe(key, float64(time.Since(started).Milliseconds()), err == nil)
-	return resp, err
+	return resp, Attempt{QueueWaitMS: int(waited.Milliseconds())}, err
 }
 
 // Stream performs one streaming attempt. emit is called for every canonical event.
-func (d *Dispatcher) Stream(ctx context.Context, providerID int64, req *pluginapi.Request, emit func(pluginapi.Event) error) (*pluginapi.StreamEnd, error) {
+func (d *Dispatcher) Stream(ctx context.Context, providerID int64, req *pluginapi.Request, emit func(pluginapi.Event) error) (*pluginapi.StreamEnd, Attempt, error) {
+	provider, permit, err := d.admit(ctx, providerID)
+	if err != nil {
+		return nil, Attempt{}, err
+	}
+	waited := permit.waitedFor()
+	defer permit.Release()
+
 	key := ProviderKey(providerID)
 	d.bal.Acquire(key)
 	started := time.Now()
 	defer d.bal.Release(key)
 
-	end, err := d.stream(ctx, providerID, req, emit)
+	end, err := d.stream(ctx, provider, req, emit)
 	d.bal.Observe(key, float64(time.Since(started).Milliseconds()), err == nil)
-	return end, err
+	return end, Attempt{QueueWaitMS: int(waited.Milliseconds())}, err
 }
 
-func (d *Dispatcher) complete(ctx context.Context, providerID int64, req *pluginapi.Request) (*pluginapi.Response, error) {
+// admit loads the provider record and waits for a capacity slot. The gate is entered
+// *before* the balancer's in-flight counter, so requests that are only waiting are not
+// counted as load by least_inflight or by the latency EWMA — they have not touched the
+// upstream yet.
+func (d *Dispatcher) admit(ctx context.Context, providerID int64) (*domain.Provider, *permit, error) {
 	provider, err := d.provider(ctx, providerID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	permit, err := d.gate.acquire(ctx, provider.ID, provider.MaxInflight, provider.Name)
+	if err != nil {
+		return nil, nil, err
+	}
+	return provider, permit, nil
+}
+
+// CapacityStats reports the live provider capacity gates, keyed by provider id.
+func (d *Dispatcher) CapacityStats() map[int64]CapacityStat { return d.gate.stats() }
+
+// CapacityPolicy reports the queue policy the data path applies, so an operator (or an
+// agent through admin_stats) can tell how long a queued request waits without reading the
+// configuration file.
+func (d *Dispatcher) CapacityPolicy() CapacityPolicy {
+	waitS := 0
+	if d.cfg.QueueWait > 0 {
+		waitS = int(d.cfg.QueueWait / time.Second)
+		if waitS < 1 {
+			waitS = 1
+		}
+	}
+	return CapacityPolicy{QueueWaitS: waitS, QueueMaxWaiters: d.cfg.QueueMaxWaiters}
+}
+
+// SyncLimits pushes the ceilings of the current registry snapshot into the gates. The data
+// path already reads the limit per attempt (so a change lands on the next request); this
+// is what makes a *raised* limit release the requests already waiting, instead of leaving
+// them queued until the next release. Called by the composition root after a reload.
+func (d *Dispatcher) SyncLimits() {
+	snap := d.reg.Snapshot()
+	if snap == nil {
+		return
+	}
+	for _, provider := range snap.Providers {
+		d.gate.setLimit(provider.ID, provider.MaxInflight)
+	}
+}
+
+func (d *Dispatcher) complete(ctx context.Context, provider *domain.Provider, req *pluginapi.Request) (*pluginapi.Response, error) {
 	if providers.IsBuiltin(provider.Kind) {
 		p, err := d.builtin(provider)
 		if err != nil {
@@ -116,11 +194,7 @@ func (d *Dispatcher) complete(ctx context.Context, providerID int64, req *plugin
 	return client.Complete(ctx, req)
 }
 
-func (d *Dispatcher) stream(ctx context.Context, providerID int64, req *pluginapi.Request, emit func(pluginapi.Event) error) (*pluginapi.StreamEnd, error) {
-	provider, err := d.provider(ctx, providerID)
-	if err != nil {
-		return nil, err
-	}
+func (d *Dispatcher) stream(ctx context.Context, provider *domain.Provider, req *pluginapi.Request, emit func(pluginapi.Event) error) (*pluginapi.StreamEnd, error) {
 	if providers.IsBuiltin(provider.Kind) {
 		p, err := d.builtin(provider)
 		if err != nil {
@@ -277,6 +351,11 @@ func Retryable(err error) bool {
 	}
 	if apiErr, ok := pluginapi.IsError(err); ok {
 		return apiErr.Retryable
+	}
+	// A capacity refusal is not evidence about the upstream: the request was simply not
+	// admitted here, and another candidate may have room.
+	if errors.Is(err, ErrProviderBusy) {
+		return true
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false

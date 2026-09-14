@@ -13,8 +13,10 @@
    （`providers.page.html` → `harness.html`、`currency.page.html` → `currency.html`、
    `keys.page.html` → `keys.html`、`paging.page.html` → `paging.html`、
    `chat.page.html` → `chat.html`）+ 一份 **API 快照**（`fixtures.json`）生成页面；
-2. 起一个本地静态服务器，用 **headless firefox** 打开 harness，逐个视图（`#docs`、`#detail`、`#create`、
-   `#plugin`、`#plugin-cached`、`#currency`、`#keys`、`#requests`、`#paging`、`#chat`、`#skills`）渲染真实页面；
+2. 起一个本地静态服务器，用 **headless firefox** 打开 harness，逐个视图（`#docs`、`#detail`、`#capacity`、
+   `#create`、`#plugin`、`#plugin-cached`、`#currency`、`#keys`、`#requests`、`#paging`、`#chat`、`#skills`）渲染真实页面；
+   `#capacity` 的供应商并发块是**就地合成**的：快照来自一个没有设并发上限的网关，而 `capacity` 只对设了
+   `max_inflight` 的供应商出现（M44），所以 harness 在 stub 里给 `deepseek` 那一行补上实时名额与排队数；
 3. harness 里 **stub 掉 `window.fetch`**，用快照回答所有 `/admin/api/v1/*` 调用——所以它不需要会话、
    不需要数据库、不碰任何上游，只验证「界面拿到这些数据会渲染成什么」；
    两个例外是**会动的**那两张表：`paging.page.html` **按窗口**回答 `/accounts`（解析请求 URL 里的

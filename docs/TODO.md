@@ -1768,6 +1768,47 @@
 - [x] 设计与性能记录：`docs/design/request-dimension-rollups.md`；规格：`docs/request-log.md`。
 - 边界：每请求独立会话时无行数压缩；关闭汇总仍保留失效触发器；浏览器 UI 检查因缺少 Firefox 跳过。
 
+## M44 供应商并发上限与排队等待（2026-09-14）
+
+- [x] 设计文档 `docs/design/m44-provider-concurrency-queue.md`；规格：`docs/routing.md` §4.5、
+  `docs/api-responses.md`（429 `provider_busy` + 计量口径）、`docs/mcp.md`（后台可写并发上限、读回实时在途与排队、
+  排队策略只读、`max_inflight` 示例与 §4.5「行为型字段」）、`docs/design/m8b-admin-resources.md`、
+  `docs/architecture.md`。**编号从 M43 改为 M44**：`max_inflight` 的字段本来是"存了不生效"的死字段，本次让它在
+  `internal/runtime` 的进程内闸门里真正生效。
+- [x] `internal/config`：`routing.provider_queue_wait_s`（默认 30，`0` = 不排队、超限即失败）与
+  `routing.provider_queue_max_waiters`（默认 100，`0` = 深度不限）+ `GW_ROUTING_PROVIDER_QUEUE_{WAIT_S,MAX_WAITERS}`；
+  校验非负，并要求 `wait × max(1, max_attempts) < billing.reservation_ttl_s`（排队期间请求仍持有余额预留）。
+- [x] `internal/runtime/capacity.go`：每供应商 FIFO 名额闸（`Release` **精确交付队首**、等待者取消/超时时把已交付的
+  名额**转交下一位**、上限动态变更按"最近观察到者胜"并唤醒队列），`max_inflight = 0` 直接放行且不建状态；
+  闸门在 `bal.Acquire` **之前**，因此排队的请求不计入 `least_inflight` 与延迟 EWMA（有测试钉住）。
+- [x] 失败语义：等待超时 / 队列已满 / 不排队而超限 → `*runtime.CapacityError`（`errors.Is(err, ErrProviderBusy)`，
+  `Retryable` 为真）→ 换下一个候选；全部候选耗尽 → **429 `rate_limit_error` / `provider_busy`** + `Retry-After`
+  （流式走 `response.failed`）；客户端取消 → ctx 错误、不换候选。探测/重启等后台动作**不占名额**。
+- [x] 排队时长不计入 `usage_records.latency_ms`/`ttft_ms`（`runtime.Attempt{QueueWaitMS}` 交回后扣除并 clamp）；
+  被拒尝试照常写一行 `status=failed` / `error_code=provider_busy` / `terminated_reason=provider_capacity`、
+  `usage_source=unavailable`、**零费用**（与既有"插件启动失败"等未出网尝试一致）。
+- [x] 可观测：`/metrics` 的 `aigw_provider_capacity_{limit,inflight,waiting}` 与
+  `..._{admitted,queue_full,timeouts,cancelled,wait_ms}_total`（`target="provider:<id>"`）；
+  `/admin/api/v1/stats` 的 `provider_capacity`（含生效排队策略 `queue_wait_s`/`queue_max_waiters`）；
+  供应商列表/详情/创建/更新行内 `capacity`；排队 ≥1s 记 Info、被拒记 Warn（带 `request_id`）。
+- [x] **MCP 可设置并发数**：`admin_update_provider` / `admin_create_provider` 的 `max_inflight` 说明补齐
+  （单位/范围/默认/排队与 429 语义，两处共用同一常量 `maxInflightDesc`）；`admin_list_providers` /
+  `admin_get_provider` / `admin_stats` 摘要在内同步；`admin_read` 可读、写需 `admin`（端到端测试钉住）。
+- [x] 控制台：编辑/新建表单「最大并发（0=不限）」+ 排队提示；列表「在途/排队」列（hover 给累计/超时/队满）；
+  详情页「在途/排队」行。harness 新增 `#capacity` 视图（8 项检查通过）。
+- [x] 测试：门单元 11 项（不限/恰好 N/队首 FIFO/超时/队满/不排队/取消转交/上限升降/Release 幂等/计数/
+  200 并发 limit 8 峰值 ≤ 8）；派发层 7 项（`QueueWaitMS`、排队不计 inflight、可重试、无上限并发、取消后名额可复用、
+  6 个请求在 limit 2 下峰值 ≤ 2）；HTTP 端到端 4 项（串行排队 + `latency_ms` 扣除排队 + 429 `provider_busy` +
+  默认不限无异味）；MCP 写入-读回-生效 1 项；配置校验 8 项。`make verify` 通过，
+  `go test ./internal/mcpsrv/ ./internal/httpapi/` 通过。
+- 边界（如实记录）：
+  - 进程内状态：多实例部署各自计数，有效上限 = N × 实例数；重启后排队与计数清零。
+  - 缓冲：队列深度与等待时长是**部署级**配置（MCP 只读）；每个供应商只有"并发上限"可写。
+  - `#plugin` 视图在 UI harness 里**失败**（`pluginTableShown`/`pluginFieldsAfterHandshake`），
+    用 HEAD 版 `providers.js` 复跑结果相同 → 与本次改动无关（fixture/渲染路径的既有问题），未在本次修复。
+- 非目标：跨进程/集群并发、按账户公平排队、route/model 级上限、队列持久化、MCP 写排队策略、
+  账户级（query）暴露供应商并发、`usage_records` 加 `queue_ms` 列。
+
 ### v0.3.0 发布记录（2026-09-13）
 
 - [x] 根据 `v0.2.5..HEAD` 的新增能力与配置发布 minor：`0.2.5` → **`0.3.0`**。包含缓存 token 展示 `c72bb52`、Codex 无输出断流恢复 `bcd6f1a`、根会话标识 `4b1c32e`、M41 小时汇总 `ecae61a`。

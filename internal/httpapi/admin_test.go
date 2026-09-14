@@ -160,7 +160,12 @@ func newAdminFixtureWithout(t *testing.T, unwired string) *adminFixture {
 	router := routing.New(routing.Config{
 		DefaultGrant: "all", Degradation: "strip", SessionAffinity: true,
 	}, reg, bal)
-	dispatcher := runtime.New(runtime.Config{}, db, reg, nil, bal, nil)
+	// The capacity queue is wired with the production defaults, so a test that sets a
+	// provider ceiling exercises the same path a deployment does (M44).
+	dispatcher := runtime.New(runtime.Config{
+		QueueWait:       30 * time.Second,
+		QueueMaxWaiters: 100,
+	}, db, reg, nil, bal, nil)
 	sealer := &fakeSealer{ready: true}
 	prober := &fakeProber{}
 	mcpService := mcpsrv.New(db, reg, mcpsrv.Config{MaxRows: 100, WindowDays: 30, Currency: "USD"})
@@ -212,6 +217,7 @@ func newAdminFixtureWithout(t *testing.T, unwired string) *adminFixture {
 		Registry:       reg,
 		Router:         router,
 		Dispatcher:     dispatcher,
+		Capacity:       dispatcher,
 		Verifier:       apikey.New(db, apikey.DefaultConfig()),
 		Limiter:        quota.New(4),
 		Meter:          usage.New(db),
@@ -241,6 +247,9 @@ func newAdminFixtureWithout(t *testing.T, unwired string) *adminFixture {
 			if err != nil {
 				return nil, err
 			}
+			// Mirror the composition root: a provider ceiling that just changed must reach
+			// the gate (and release whatever the new one admits).
+			dispatcher.SyncLimits()
 			return snap.String(), nil
 		},
 		ReloadHooks: func(ctx context.Context) error {

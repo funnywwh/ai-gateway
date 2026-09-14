@@ -598,7 +598,7 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/stats", Handler: s.handleAdminStats,
 			Name: "admin_stats", Group: groupSystem, Role: roleViewer,
-			Summary: "运行概览：注册表计数（模型/供应商/路由/账户）、负载均衡指标、冷却中的目标、版本",
+			Summary: "运行概览：注册表计数（模型/供应商/路由/账户）、负载均衡指标、冷却中的目标、供应商并发与排队（含排队策略）、版本",
 		},
 		{
 			Method: "GET", Path: "/admin/api/v1/keys", Handler: s.handleAdminListKeys,
@@ -1006,6 +1006,16 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 	}
 }
 
+// maxInflightDesc documents providers.max_inflight on the create and update bodies. It is
+// one constant because the two endpoints must not drift: a model reads one of them and
+// writes the value, and the *behaviour* (queueing, then 429 provider_busy) is what makes
+// the field usable rather than merely writable.
+const maxInflightDesc = "供应商最大并发：该供应商**同时在途的上游调用数**，0 = 不限（默认）。" +
+	"正整数时超出并发的新请求会**排队等待**名额（FIFO），等待上限由部署配置 routing.provider_queue_wait_s 决定" +
+	"（默认 30 秒，0 = 不排队、超限直接失败）；等待超时或队列已满时该次尝试按可重试失败换下一个候选，" +
+	"全部候选耗尽返回 HTTP 429 provider_busy（带 Retry-After）。探测/重启等后台动作不占名额。" +
+	"写完后 admin_get_provider / admin_list_providers 的 capacity 字段给出实时 limit/inflight/waiting（读回只需 admin_read）"
+
 // providerAdminRoutes covers provider instances, their upstream models and the
 // out-of-band operations (probe, restart, actions, logs).
 func (s *Server) providerAdminRoutes() []adminRoute {
@@ -1013,7 +1023,7 @@ func (s *Server) providerAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/providers", Handler: s.handleAdminListProviders,
 			Name: "admin_list_providers", Group: groupProviders, Role: roleViewer,
-			Summary: "列出供应商（状态、优先级、权重、健康、最近错误）",
+			Summary: "列出供应商（状态、优先级、权重、健康、最近错误、实时在途与排队 capacity）",
 			Query:   pageConfig.fields(),
 		},
 		{
@@ -1039,7 +1049,7 @@ func (s *Server) providerAdminRoutes() []adminRoute {
 				"draining":          prop("boolean", "是否排空（不再接新流量）"),
 				"priority":          prop("integer", "优先级"),
 				"weight":            prop("integer", "同层权重"),
-				"max_inflight":      prop("integer", "并发上限，0 表示不限"),
+				"max_inflight":      prop("integer", maxInflightDesc),
 				"degradation":       prop("string", "能力缺失时的降级策略：none/strip/fail_fast/best_effort"),
 				"reset_cooldown":    prop("boolean", "写完后是否清掉冷却"),
 			}, "name"),
@@ -1047,7 +1057,7 @@ func (s *Server) providerAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/providers/{id}", Handler: s.handleAdminGetProvider,
 			Name: "admin_get_provider", Group: groupProviders, Role: roleViewer,
-			Summary: "单个供应商详情（配置、字段说明、已配置的凭据字段名、健康与最近错误）",
+			Summary: "单个供应商详情（配置、字段说明、已配置的凭据字段名、健康与最近错误、实时并发 capacity）",
 			Params:  []adminField{pathParam("id", "供应商数字 id")},
 		},
 		{
@@ -1067,7 +1077,7 @@ func (s *Server) providerAdminRoutes() []adminRoute {
 				"draining":       prop("boolean", "是否排空"),
 				"priority":       prop("integer", "优先级"),
 				"weight":         prop("integer", "同层权重"),
-				"max_inflight":   prop("integer", "并发上限"),
+				"max_inflight":   prop("integer", maxInflightDesc),
 				"degradation":    prop("string", "降级策略：none/strip/fail_fast/best_effort"),
 				"reset_cooldown": prop("boolean", "写完后是否清掉冷却"),
 			}),

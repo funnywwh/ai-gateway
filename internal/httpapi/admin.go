@@ -1061,6 +1061,11 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		"request_log": s.requestLogStats(r.Context()),
 		"version":     s.deps.Version,
 	}
+	// Provider concurrency and queueing (M44). Omitted when no dispatcher was wired, so the
+	// block never claims "nobody is queueing" on no evidence.
+	if capacity := s.capacityBlock(); capacity != nil {
+		payload["provider_capacity"] = capacity
+	}
 	if s.deps.KeyCacheSize != nil {
 		payload["key_cache_entries"] = s.deps.KeyCacheSize()
 	}

@@ -48,9 +48,43 @@ type fixture struct {
 	srv *Server
 }
 
-func newFixture(t testing.TB) *fixture {
+// fixtureOption tunes what newFixture builds, so a test that needs a different provider
+// configuration (a concurrency ceiling, an upstream that takes measurable time) does not
+// have to rebuild the whole stack around it.
+type fixtureOption func(*fixtureSetup)
+
+type fixtureSetup struct {
+	providerConfig  string
+	maxInflight     int
+	queueWait       time.Duration
+	queueMaxWaiters int
+}
+
+// withProviderCeiling sets providers.max_inflight (0 = unlimited) and the echo provider's
+// configuration JSON. `chunks` and `delay_ms` decide how long one upstream call takes.
+func withProviderCeiling(maxInflight int, providerConfig string) fixtureOption {
+	return func(s *fixtureSetup) {
+		s.maxInflight = maxInflight
+		s.providerConfig = providerConfig
+	}
+}
+
+// withCapacityQueue sets the provider capacity queue policy the dispatcher applies.
+func withCapacityQueue(wait time.Duration, maxWaiters int) fixtureOption {
+	return func(s *fixtureSetup) {
+		s.queueWait = wait
+		s.queueMaxWaiters = maxWaiters
+	}
+}
+
+func newFixture(t testing.TB, opts ...fixtureOption) *fixture {
 	t.Helper()
 	ctx := context.Background()
+
+	setup := fixtureSetup{}
+	for _, opt := range opts {
+		opt(&setup)
+	}
 
 	cfg := config.Default()
 	cfg.Database.Path = filepath.Join(t.TempDir(), "httpapi.db")
@@ -82,6 +116,7 @@ func newFixture(t testing.TB) *fixture {
 
 	provID, err := db.UpsertProvider(ctx, &domain.Provider{
 		Name: "echo", Kind: "testecho", Enabled: true, Priority: 10, Weight: 100,
+		ConfigJSON: setup.providerConfig, MaxInflight: setup.maxInflight,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -116,7 +151,10 @@ func newFixture(t testing.TB) *fixture {
 	router := routing.New(routing.Config{
 		DefaultGrant: "all", Degradation: "strip", SessionAffinity: true,
 	}, reg, bal)
-	dispatcher := runtime.New(runtime.Config{}, db, reg, nil, bal, nil)
+	dispatcher := runtime.New(runtime.Config{
+		QueueWait:       setup.queueWait,
+		QueueMaxWaiters: setup.queueMaxWaiters,
+	}, db, reg, nil, bal, nil)
 
 	verifier := apikey.New(db, apikey.DefaultConfig())
 	mcpService := mcpsrv.New(db, reg, mcpsrv.Config{MaxRows: 100, WindowDays: 30, Currency: "USD"})
@@ -125,6 +163,7 @@ func newFixture(t testing.TB) *fixture {
 		Registry:   reg,
 		Router:     router,
 		Dispatcher: dispatcher,
+		Capacity:   dispatcher,
 		Verifier:   verifier,
 		Limiter:    quota.New(8),
 		Meter:      usage.New(db),

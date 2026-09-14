@@ -18,7 +18,20 @@ window.fetch = async (url) => {
   window.__fetched = (window.__fetched || []).concat([path]);
   if (path === '/providers/2/test') window.__handshakeDone = true;
   let body = FIXTURES[path] !== undefined ? FIXTURES[path] : { data: [] };
-  if (path === '/providers/2' && window.__handshakeDone) body = FIXTURES['/providers/2-after'];
+  // The capture comes from a gateway with no provider ceiling set, so the live gate of a
+  // *limited* provider (M44) is synthesized here: it is what the row looks like once an
+  // operator sets max_inflight and requests queue behind it.
+  if (path === '/providers') {
+    body = JSON.parse(JSON.stringify(body));
+    const limited = (body.data || []).find((row) => row.name === 'deepseek');
+    if (limited) {
+      limited.max_inflight = 2;
+      limited.capacity = {
+        limit: 2, inflight: 1, waiting: 3, admitted: 12,
+        queue_full: 0, timed_out: 1, cancelled: 0, wait_total_ms: 3450,
+      };
+    }
+  }
   // A fixture of null stands for a 200 with an empty body, which api.js parses to null.
   if (body === null) return { ok: true, status: 200, text: async () => '' };
   return { ok: true, status: 200, text: async () => JSON.stringify(body) };
@@ -247,6 +260,29 @@ try {
     checks.formHints = form.includes('保持原值');
     checks.publicModelField = !!document.querySelector('input[name="public_model"]');
     checks.capabilitiesField = !!document.querySelector('textarea[name="capabilities"]');
+  }
+
+  // The provider concurrency ceiling (M44): the list and the detail page must show the live
+  // gate, and the edit form must say what the ceiling does — a number alone leaves
+  // "refused or queued?" unguessable, which is exactly the question an operator has.
+  if (view === 'capacity') {
+    checks.listColumn = pageText().includes('在途/排队');
+    const row = rowFor('deepseek');
+    checks.cellText = !!row && row.textContent.includes('1/2') && row.textContent.includes('3 排队');
+    if (row) {
+      [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '详情').click();
+      await settle();
+    }
+    const detail = modalText();
+    checks.detailRow = detail.includes('在途/排队') && detail.includes('1 在途（上限 2）') && detail.includes('3 排队');
+    const editBtn = find('编辑');
+    checks.editButton = !!editBtn;
+    if (editBtn) { editBtn.click(); await settle(); }
+    const form = modalText();
+    checks.formLabel = form.includes('最大并发（0=不限）');
+    checks.formHint = form.includes('排队') && form.includes('provider_busy');
+    const field = document.querySelector('input[name="max_inflight"]');
+    checks.formValue = !!field && field.value === '2';
   }
 
   const flags = Object.entries(checks).filter(([, v]) => typeof v === 'boolean');

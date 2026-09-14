@@ -212,3 +212,12 @@ func pricingRuleSetExample(currency string) map[string]any
 11. **提示词多了「不要拦着用户填表」一句**：原设计只写了"缺关键信息先问"，实测这种单边指令
     会让模型对"这个月花了多少"这类问题也反问窗口。反例与正例一起写，并由
     `internal/chat/prompt_test.go` 钉住。
+
+12. **M44 的「行为型字段」口径（本轮追加）**：`admin_create_provider` / `admin_update_provider` 的
+    `max_inflight` 说明过去只有「并发上限，0 表示不限」（`admin_update_provider` 那处甚至只有「并发上限」），
+    而字段的含义随 M44 变了：上限现在真的生效，超出后**排队等待**。§4.5 的表格因此加了一条
+    「行为型字段要写清生效语义」，并把两处描述收敛为同一个常量 `maxInflightDesc`（写一遍，不会漂移）；
+    同时给 `admin_list_providers` / `admin_get_provider` / `admin_stats` 的摘要补上实时 `capacity`
+    与排队策略。守卫是端到端的：`TestMCPAdminSetsProviderConcurrency` 用 admin 令牌经
+    `admin_request` 真写 `max_inflight`、读回 provider 行与 `admin_stats` 的 `provider_capacity`、
+    并断言 `admin_describe` 给出的说明里含「0」「排队」「provider_busy」三个关键词。

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -197,6 +198,9 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 
 		attemptStarted := time.Now()
 		var guard *inflightGuard
+		// attempt carries the gateway-side cost of this dispatch: how long it waited for a
+		// provider capacity slot. It is subtracted from the recorded latency below.
+		var attempt runtime.Attempt
 		if req.Stream {
 			attemptCtx, cancelAttempt := context.WithCancel(ctx)
 			costRules, saleRules := s.ruleSetsFor(plan.Resolved.Canonical, cand.ProviderID)
@@ -204,7 +208,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 				plan.Resolved.Canonical, cand.UpstreamModel, cand.ProviderID, costRules, saleRules,
 				s.resolveMarkup(key, account, saleRules), admission)
 			var end *pluginapi.StreamEnd
-			end, err = s.deps.Dispatcher.Stream(attemptCtx, cand.ProviderID, provReq, func(ev pluginapi.Event) error {
+			end, attempt, err = s.deps.Dispatcher.Stream(attemptCtx, cand.ProviderID, provReq, func(ev pluginapi.Event) error {
 				return guard.Observe(ev, assembler.Add)
 			})
 			cancelAttempt()
@@ -213,7 +217,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			var providerResp *pluginapi.Response
-			providerResp, err = s.deps.Dispatcher.Complete(ctx, cand.ProviderID, provReq)
+			providerResp, attempt, err = s.deps.Dispatcher.Complete(ctx, cand.ProviderID, provReq)
 			if err == nil {
 				if ferr := responses.FeedItems(assembler, providerResp.Items); ferr != nil {
 					err = ferr
@@ -223,8 +227,15 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		s.logCapacityWait(requestID, cand, attempt.QueueWaitMS, err)
 
-		latency := int(time.Since(attemptStarted).Milliseconds())
+		// Waiting for a provider slot is gateway-side, not upstream: subtract it so
+		// latency_ms/ttft_ms keep meaning "how slow was the provider". Clamped because the
+		// subtraction runs on millisecond granularity.
+		latency := int(time.Since(attemptStarted).Milliseconds()) - attempt.QueueWaitMS
+		if latency < 0 {
+			latency = 0
+		}
 		if err == nil && ttftMS == 0 && assembler.Deltas() > 0 {
 			ttftMS = latency
 		}
@@ -296,6 +307,15 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		if apiErr, ok := domain.AsAPIError(lastErr); ok {
 			payload.Code = apiErr.Code
 			payload.Message = apiErr.Message
+		}
+		// A capacity refusal is reported under its own code, and the client gets a
+		// Retry-After hint (the configured wait budget — the gate cannot know when a slot
+		// frees, so it is a hint rather than a promise).
+		var busy *runtime.CapacityError
+		if errors.As(lastErr, &busy) {
+			payload.Code = "provider_busy"
+			payload.Message = busy.Error()
+			w.Header().Set("Retry-After", strconv.Itoa(busy.RetryAfterSeconds()))
 		}
 		if req.Stream {
 			_, _ = assembler.Fail(payload)
@@ -399,16 +419,25 @@ func (s *Server) recordAttempt(
 	if attemptErr != nil {
 		status = "failed"
 		terminated = "upstream_error"
-		if apiErr, ok := pluginapi.IsError(attemptErr); ok {
-			errorCode = apiErr.Code
-			if apiErr.Kind == pluginapi.KindQuotaExhausted {
-				terminated = "aborted_quota"
-			}
-		} else if errors.Is(attemptErr, errQuotaAborted) {
+		var busy *runtime.CapacityError
+		switch {
+		case errors.As(attemptErr, &busy):
+			// The attempt never reached the upstream: it gets its own code and reason so a
+			// request log can tell "queued and gave up" from a real upstream failure.
+			errorCode = "provider_busy"
+			terminated = "provider_capacity"
+		case errors.Is(attemptErr, errQuotaAborted):
 			errorCode = "insufficient_quota"
 			terminated = "aborted_quota"
-		} else {
-			errorCode = "upstream_error"
+		default:
+			if apiErr, ok := pluginapi.IsError(attemptErr); ok {
+				errorCode = apiErr.Code
+				if apiErr.Kind == pluginapi.KindQuotaExhausted {
+					terminated = "aborted_quota"
+				}
+			} else {
+				errorCode = "upstream_error"
+			}
 		}
 	} else if terminalReason != "" {
 		// The attempt succeeded and was metered: an answer cut short by the token
@@ -453,6 +482,28 @@ func (s *Server) recordAttempt(
 
 // auditWriteTimeout bounds the detached write of the audit trail (see persist).
 const auditWriteTimeout = 5 * time.Second
+
+// capacityWaitLogThresholdMS is the queue wait worth a log line. Sub-second waits are what
+// a burst looks like and are covered by the counters; a queue a request actually sat in is
+// what an operator gets paged about.
+const capacityWaitLogThresholdMS = 1000
+
+// logCapacityWait reports what the provider capacity gate cost this attempt: a refusal is
+// a warning (it is why the request moved on or failed), a long wait is information.
+func (s *Server) logCapacityWait(requestID string, cand domain.Candidate, queueMS int, err error) {
+	var busy *runtime.CapacityError
+	switch {
+	case errors.As(err, &busy):
+		s.deps.Log.Warn("provider capacity refused the attempt",
+			"request_id", requestID, "provider", busy.Provider, "provider_id", busy.ProviderID,
+			"reason", busy.Reason, "limit", busy.Limit, "waiting", busy.Waiters,
+			"waited_ms", busy.Waited.Milliseconds())
+	case queueMS >= capacityWaitLogThresholdMS:
+		s.deps.Log.Info("request waited for provider capacity",
+			"request_id", requestID, "provider", cand.ProviderName,
+			"provider_id", cand.ProviderID, "queue_ms", queueMS)
+	}
+}
 
 // persist stores the response (when requested) and the request log.
 //

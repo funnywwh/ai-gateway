@@ -841,3 +841,135 @@ func TestAdminRecorderRendersNonJSONResponses(t *testing.T) {
 		t.Fatalf("JSON responses must be decoded: %+v", jsonPayload)
 	}
 }
+
+// TestMCPAdminSetsProviderConcurrency is the M44 acceptance test on the MCP surface: an
+// agent must be able to set a provider's concurrency ceiling and read back both the setting
+// and the live gate. The write goes through the same handler the console uses
+// (admin_update_provider), so there is no second write path to keep in sync — what this
+// test pins is that the field is documented well enough to be written and that the effect
+// is visible to an agent that only has MCP.
+func TestMCPAdminSetsProviderConcurrency(t *testing.T) {
+	f := newAdminFixture(t)
+	f.seedScopedMCPToken(t, testAdminMCPToken, mcpsrv.ScopeAdmin)
+	f.seedScopedMCPToken(t, testReadMCPToken, mcpsrv.ScopeAdminRead)
+
+	ctx := context.Background()
+	providerID, err := f.db.UpsertProvider(ctx, &domain.Provider{
+		Name: "limited", Kind: "testecho", Enabled: true, Priority: 10, Weight: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.api.deps.Reload(ctx); err != nil {
+		t.Fatalf("reload after seeding the provider: %v", err)
+	}
+	id := strconv.FormatInt(providerID, 10)
+
+	// 1) An admin-scope agent sets the ceiling, and the response already carries the live gate.
+	set, isError := f.callTool(t, testAdminMCPToken, 1, toolAdminRequest,
+		`{"name":"admin_update_provider","params":{"id":`+id+`},"confirm":true,"body":{"max_inflight":1}}`)
+	if isError {
+		t.Fatalf("setting max_inflight over MCP failed: %+v", set)
+	}
+	setBody, _ := set["body"].(map[string]any)
+	if setBody == nil || setBody["max_inflight"] != float64(1) {
+		t.Fatalf("the write did not take effect: %+v", set)
+	}
+	if capacity, _ := setBody["capacity"].(map[string]any); capacity == nil || capacity["limit"] != float64(1) {
+		t.Fatalf("the write must report the live gate it created: %+v", setBody)
+	}
+
+	// 2) The read-back an admin_read token has.
+	read, isError := f.callTool(t, testReadMCPToken, 2, toolAdminRequest,
+		`{"name":"admin_get_provider","params":{"id":`+id+`}}`)
+	if isError {
+		t.Fatalf("admin_read must read a provider: %+v", read)
+	}
+	readBody, _ := read["body"].(map[string]any)
+	if readBody == nil || readBody["max_inflight"] != float64(1) {
+		t.Fatalf("read-back mismatch: %+v", readBody)
+	}
+	capacity, _ := readBody["capacity"].(map[string]any)
+	if capacity == nil || capacity["limit"] != float64(1) || capacity["inflight"] != float64(0) {
+		t.Fatalf("capacity read-back mismatch: %+v", readBody)
+	}
+
+	// 3) "Who is queueing" is answerable from the provider list.
+	list, isError := f.callTool(t, testReadMCPToken, 3, toolAdminRequest, `{"name":"admin_list_providers"}`)
+	if isError {
+		t.Fatalf("listing providers failed: %+v", list)
+	}
+	listBody, _ := list["body"].(map[string]any)
+	rows, _ := listBody["data"].([]any)
+	listed := false
+	for _, raw := range rows {
+		row, _ := raw.(map[string]any)
+		if row["name"] != "limited" {
+			continue
+		}
+		if c, ok := row["capacity"].(map[string]any); ok && c["limit"] == float64(1) && c["waiting"] == float64(0) {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Fatalf("admin_list_providers must carry the live capacity: %+v", listBody)
+	}
+
+	// 4) admin_stats reports the queue policy alongside the gates, so an agent can answer
+	// "how long may a request wait here" without reading the configuration file.
+	stats, isError := f.callTool(t, testReadMCPToken, 4, toolAdminRequest, `{"name":"admin_stats"}`)
+	if isError {
+		t.Fatalf("admin_stats failed: %+v", stats)
+	}
+	statsBody, _ := stats["body"].(map[string]any)
+	block, _ := statsBody["provider_capacity"].(map[string]any)
+	if block == nil {
+		t.Fatalf("admin_stats must report provider_capacity: %+v", statsBody)
+	}
+	if block["queue_wait_s"] != float64(30) || block["queue_max_waiters"] != float64(100) {
+		t.Fatalf("the reported queue policy must be the live one: %+v", block)
+	}
+	providers, _ := block["providers"].(map[string]any)
+	entry, _ := providers[id].(map[string]any)
+	if entry == nil || entry["limit"] != float64(1) || entry["admitted"] != float64(0) {
+		t.Fatalf("admin_stats capacity entry mismatch: %+v", block)
+	}
+
+	// 5) The description an agent reads *before* writing must state the default and the
+	// queueing behaviour: "0 = unlimited" alone leaves the consequence unguessable
+	// (docs/mcp.md §4.5).
+	described, isError := f.callTool(t, testAdminMCPToken, 5, toolAdminDescribe, `{"name":"admin_update_provider"}`)
+	if isError {
+		t.Fatalf("admin_describe failed: %+v", described)
+	}
+	schema, _ := described["body_schema"].(map[string]any)
+	properties, _ := schema["properties"].(map[string]any)
+	field, _ := properties["max_inflight"].(map[string]any)
+	desc, _ := field["description"].(string)
+	for _, want := range []string{"0", "排队", "provider_busy"} {
+		if !strings.Contains(desc, want) {
+			t.Fatalf("the max_inflight description must mention %q, got %q", want, desc)
+		}
+	}
+
+	// 6) admin_read may read the ceiling but not write it.
+	denied, deniedErr := f.callTool(t, testReadMCPToken, 6, toolAdminRequest,
+		`{"name":"admin_update_provider","params":{"id":`+id+`},"confirm":true,"body":{"max_inflight":4}}`)
+	if !deniedErr || !strings.Contains(denied["error_text"].(string), "scope=admin") {
+		t.Fatalf("admin_read must not set the ceiling: %+v", denied)
+	}
+
+	// 7) Writing 0 lifts the ceiling.
+	lifted, isError := f.callTool(t, testAdminMCPToken, 7, toolAdminRequest,
+		`{"name":"admin_update_provider","params":{"id":`+id+`},"confirm":true,"body":{"max_inflight":0}}`)
+	if isError {
+		t.Fatalf("lifting the ceiling failed: %+v", lifted)
+	}
+	liftedBody, _ := lifted["body"].(map[string]any)
+	if liftedBody["max_inflight"] != float64(0) {
+		t.Fatalf("lifting the ceiling did not take effect: %+v", liftedBody)
+	}
+	if stat := f.api.deps.Dispatcher.CapacityStats()[providerID]; stat.Limit != 0 {
+		t.Fatalf("the gate must follow the write back to unlimited: %+v", stat)
+	}
+}

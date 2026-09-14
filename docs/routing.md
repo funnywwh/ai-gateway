@@ -117,6 +117,28 @@ grantedProviders = ∪( key.grants.providers, effectiveTags[].grants.providers )
 **粘性不放宽授权**：它只能重排本次请求**已经**通过全部过滤的候选，因此永远不会把一个未授权、已撤权或不可用的供应商拉回来；
 故障转移也只在同一个候选列表内进行（候选耗尽 → 既有 4xx/5xx 语义）。
 
+### 4.5 供应商并发上限与排队（M44）
+
+路由选出候选之后、真正出网之前，还有一道**供应商容量闸门**：`providers.max_inflight` 限制「同一供应商同时
+在途的上游调用数」，超出的请求**排队等待**名额，而不是直接失败。
+
+| 项 | 规则 |
+|---|---|
+| 上限 | `providers.max_inflight`（供应商实例级，其下所有模型共享）；`0` = 不限（默认）。控制台「最大并发」或管理 API `PATCH /admin/api/v1/providers/{id}`（MCP：`admin_request` → `admin_update_provider`）设置 |
+| 计数口径 | **同时在途 attempt**：流式请求持有到流结束；一次尝试释放后名额才给下一个 |
+| 排队 | 每个供应商内部 **FIFO**；名额释放时**直接交给队首**（不广播争抢），因此公平性与计数是同一个动作 |
+| 等待上限 | `routing.provider_queue_wait_s`（默认 `30`，`0` = 不排队，超限立即失败） |
+| 队列深度 | `routing.provider_queue_max_waiters`（默认 `100`，`0` = 深度不限，仍受等待时长约束） |
+| 触界后果 | 等待超时 / 队列已满 / 不排队而超限 → 该次尝试判为**可重试失败**（`runtime.Retryable`）→ 走既有候选循环换下一个供应商；全部候选耗尽 → **429 `rate_limit_error` / `provider_busy`** + `Retry-After` |
+| 上限变更 | 管理面写入后即时生效（下一次尝试读新值）；上限**调大**会立刻唤醒已在排队的请求；调小则在途请求跑完、新请求排队 |
+| 排队与延迟 | 排队时长**不计入** `usage_records.latency_ms`/`ttft_ms`（那两个字段继续只表示上游耗时）；排队 ≥1s 记一条 Info 日志 |
+| 不被限制的路径 | 供应商探测与后台动作（health/models/actions/logs/restart）**不占名额**：上游饱和时管理员仍要能操作 |
+| 可观测 | `/metrics` 的 `aigw_provider_capacity_*`（limit/inflight/waiting 与 admitted/timeouts/rejected/wait_ms 计数）；`/admin/api/v1/stats` 的 `provider_capacity` 块（含生效的排队策略）；供应商列表/详情行内的 `capacity` |
+| 边界 | 状态在**进程内**且不持久化：多实例部署各自计数（有效上限 = N × 实例数）；重启后排队与计数清零 |
+
+**空闲与否不影响授权**：闸门在候选已通过全部过滤之后生效，只会让请求等待或按可重试失败降级，
+不会把未授权/已撤权的供应商拉回来，也不会绕过熔断、冷却与能力校验。
+
 ## 5. 请求级覆盖
 
 | 方式 | 说明 |

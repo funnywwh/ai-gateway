@@ -211,8 +211,11 @@ func (s *Server) handleAdminListProviders(w http.ResponseWriter, r *http.Request
 		return
 	}
 	out := make([]map[string]any, 0, len(list))
+	capacity := s.capacityStats()
 	for _, p := range list {
-		out = append(out, providerJSON(p, s.credentialKeys(p)))
+		row := providerJSON(p, s.credentialKeys(p))
+		attachCapacity(row, p.ID, capacity)
+		out = append(out, row)
 	}
 	page, err := pageConfig.params(r)
 	if err != nil {
@@ -241,7 +244,9 @@ func (s *Server) handleAdminGetProvider(w http.ResponseWriter, r *http.Request) 
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	writeJSON(w, http.StatusOK, providerDetailJSON(p, s.credentialKeys(p)))
+	payload := providerDetailJSON(p, s.credentialKeys(p))
+	attachCapacity(payload, p.ID, s.capacityStats())
+	writeJSON(w, http.StatusOK, payload)
 }
 
 // handleAdminListProviderKinds returns the configuration documentation of every
@@ -316,7 +321,9 @@ func (s *Server) handleAdminCreateProvider(w http.ResponseWriter, r *http.Reques
 	if restart && !created {
 		s.restartProvider(p)
 	}
-	writeJSON(w, status, providerDetailJSON(p, s.credentialKeys(p)))
+	createdPayload := providerDetailJSON(p, s.credentialKeys(p))
+	attachCapacity(createdPayload, p.ID, s.capacityStats())
+	writeJSON(w, status, createdPayload)
 }
 
 func (s *Server) handleAdminPatchProvider(w http.ResponseWriter, r *http.Request) {
@@ -367,7 +374,9 @@ func (s *Server) handleAdminPatchProvider(w http.ResponseWriter, r *http.Request
 	if restart {
 		s.restartProvider(p)
 	}
-	writeJSON(w, http.StatusOK, providerDetailJSON(p, s.credentialKeys(p)))
+	updated := providerDetailJSON(p, s.credentialKeys(p))
+	attachCapacity(updated, p.ID, s.capacityStats())
+	writeJSON(w, http.StatusOK, updated)
 }
 
 // restartProvider stops the plugin process so the next attempt picks up the new

@@ -38,7 +38,10 @@
 - **计量**：只有**实际出网**的尝试才写 `usage_records`；本地拒绝（401/402/403/404/429/400 未出网）
   只写 `request_logs`、审计与 hook，**不计费**。其中**限速拒绝（本地滑动窗口 429）不写 `request_logs`**
   ——它在准入之前就返回了；计费与配额拒绝（402，`RejectAs429` 时 429）走 `rejectForQuota`，
-  会写一行请求日志（同样受录制策略与脱敏约束）。
+  会写一行请求日志（同样受录制策略与脱敏约束）。**进入尝试循环之后**失败的尝试一律写一行
+  `status=failed` 的用量行（`usage_source=unavailable`、零 token、**零费用**）——包括还没出网的失败
+  （插件启动失败、**供应商并发排队超时/队列已满**），它们与成功尝试一样按 attempt 计数，便于在请求日志里
+  看到"在谁那里失败、失败了几次"。`latency_ms` / `ttft_ms` **不含**供应商并发排队时长（M44）。
 - **内容清理**：请求日志与存储响应按 `recording.retention_days` 每日清理（分批删除，见
   `docs/design/m25-log-retention.md`），也可由管理员用 `POST /admin/api/v1/requests/prune` 立即触发。
   `usage_records` / `ledger_entries` / `audit_logs` **不在清理范围内**——计费与审计历史必须保留。
@@ -175,5 +178,6 @@ response.completed      (含完整 response 与 usage)
 | 403 | `permission_error` / `permission_denied`（模型或供应商未授权） |
 | 404 | `not_found_error` / `model_not_found` |
 | 429 | `rate_limit_error` / `rate_limit_exceeded`（带 `Retry-After` 与 `x-ratelimit-*`） |
+| 429 | `rate_limit_error` / `provider_busy`（**供应商并发上限**：排队超时或队列已满；带 `Retry-After`，**不带** `x-ratelimit-*`——它与你的 Key/标签配额无关，见 `docs/routing.md` §4.5） |
 | 402 | `rate_limit_error` / `billing_hard_limit_reached`（余额/信用额度不足或账户停用） |
 | 502/504 | `api_error` / `upstream_error`、`upstream_timeout` |

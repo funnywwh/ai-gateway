@@ -116,6 +116,9 @@ type Deps struct {
 	// Secrets seals provider credentials; Prober exercises providers out of band.
 	Secrets Sealer
 	Prober  Prober
+	// Capacity reports the provider concurrency gates (in-flight slots, waiting queues and
+	// the queue policy). A nil port omits the /stats block and the per-provider field.
+	Capacity Capacity
 	// ReloadHooks swaps the in-memory hook set after a hook write.
 	ReloadHooks func(ctx context.Context) error
 	// FX is the live currency table (ledger currency + rates). A nil store means
@@ -470,6 +473,12 @@ func toAPIError(err error) *domain.APIError {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return domain.ErrGatewayTimeout("request deadline exceeded")
 	}
+	// Every candidate was at its provider concurrency limit: a capacity condition, not an
+	// upstream failure, so it gets the rate-limit shape (and its own code) instead of the
+	// generic 500 an unrecognised error would produce.
+	if errors.Is(err, runtime.ErrProviderBusy) {
+		return domain.ErrProviderBusy(err.Error())
+	}
 	return domain.ErrInternal(err.Error())
 }
 
@@ -605,6 +614,47 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 				_, _ = fmt.Fprintf(w, "# TYPE aigw_dimension_rollup_%s gauge\naigw_dimension_rollup_%s %d\n", name, name, value)
 			}
 		}
+	}
+	// Provider capacity (M44): one series per limited provider. The counters name the three
+	// ways an attempt can be refused, so an alert can tell "queue is too small" (queue_full)
+	// from "the upstream is too slow" (timeouts).
+	if stats := s.capacityStats(); len(stats) > 0 {
+		policy := s.deps.Capacity.CapacityPolicy()
+		_, _ = fmt.Fprintf(w, "# HELP aigw_provider_capacity_limit Configured concurrent attempts per provider (0 means unlimited)%c", lf)
+		_, _ = fmt.Fprintf(w, "# TYPE aigw_provider_capacity_limit gauge%c", lf)
+		for id, stat := range stats {
+			_, _ = fmt.Fprintf(w, "aigw_provider_capacity_limit{target=%q} %d%c", runtime.ProviderKey(id), stat.Limit, lf)
+		}
+		_, _ = fmt.Fprintf(w, "# HELP aigw_provider_capacity_inflight Attempts holding a provider concurrency slot%c", lf)
+		_, _ = fmt.Fprintf(w, "# TYPE aigw_provider_capacity_inflight gauge%c", lf)
+		for id, stat := range stats {
+			_, _ = fmt.Fprintf(w, "aigw_provider_capacity_inflight{target=%q} %d%c", runtime.ProviderKey(id), stat.Inflight, lf)
+		}
+		_, _ = fmt.Fprintf(w, "# HELP aigw_provider_capacity_waiting Attempts queued for a provider concurrency slot%c", lf)
+		_, _ = fmt.Fprintf(w, "# TYPE aigw_provider_capacity_waiting gauge%c", lf)
+		for id, stat := range stats {
+			_, _ = fmt.Fprintf(w, "aigw_provider_capacity_waiting{target=%q} %d%c", runtime.ProviderKey(id), stat.Waiting, lf)
+		}
+		for _, counter := range []struct {
+			name  string
+			help  string
+			value func(runtime.CapacityStat) int64
+		}{
+			{"aigw_provider_capacity_admitted_total", "Attempts admitted by a provider concurrency gate", func(st runtime.CapacityStat) int64 { return st.Admitted }},
+			{"aigw_provider_capacity_queue_full_total", "Attempts refused because a provider's concurrency queue was full", func(st runtime.CapacityStat) int64 { return st.QueueFull }},
+			{"aigw_provider_capacity_timeouts_total", "Attempts that gave up waiting for a provider concurrency slot", func(st runtime.CapacityStat) int64 { return st.TimedOut }},
+			{"aigw_provider_capacity_cancelled_total", "Attempts whose request ended while they queued for a provider slot", func(st runtime.CapacityStat) int64 { return st.Cancelled }},
+			{"aigw_provider_capacity_wait_ms_total", "Total milliseconds attempts spent queued for a provider concurrency slot", func(st runtime.CapacityStat) int64 { return st.WaitTotalMS }},
+		} {
+			_, _ = fmt.Fprintf(w, "# HELP %s %s%c", counter.name, counter.help, lf)
+			_, _ = fmt.Fprintf(w, "# TYPE %s counter%c", counter.name, lf)
+			for id, stat := range stats {
+				_, _ = fmt.Fprintf(w, "%s{target=%q} %d%c", counter.name, runtime.ProviderKey(id), counter.value(stat), lf)
+			}
+		}
+		_, _ = fmt.Fprintf(w, "# HELP aigw_provider_capacity_queue_wait_seconds How long one attempt may wait for a provider concurrency slot (0 disables queueing)%c", lf)
+		_, _ = fmt.Fprintf(w, "# TYPE aigw_provider_capacity_queue_wait_seconds gauge%c", lf)
+		_, _ = fmt.Fprintf(w, "aigw_provider_capacity_queue_wait_seconds %d%c", policy.QueueWaitS, lf)
 	}
 	_ = balances
 }
