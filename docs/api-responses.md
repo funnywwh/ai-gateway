@@ -63,6 +63,19 @@
 `prompt_cache_key` 会原样进入标准供应商请求，并由 Codex 插件发送至上游；未提供或为空时不发送。
 该值不使用网关会话粘性键的裁剪结果，也不保证上游一定命中缓存。
 
+`include` 同样透传到上游（Codex 插件会原样发给订阅后端）。它不是装饰：无状态上游
+（`store:false`）只有在被要求时才返回 `reasoning.encrypted_content`，而客户端续接下一轮要
+靠这个加密块——丢了它，客户的下一轮会收到
+`Item with id 'rs_…' not found. Items are not persisted when store is set to false.`。
+
+**条目（item）的身份与空值都是请求的一部分**：
+
+- 客户端显式发的空值不会被省略：`"summary":[]`、`"arguments":""`、`"output":""` 原样送进供应商请求
+  （丢 `summary` 键会让 codex 订阅后端回 `Missing required parameter: 'input[N].summary'`）；
+- 网关回给客户端的条目保留**上游自己的 `id`** 与上游附带的字段（`encrypted_content`、
+  `phase` 等），因此客户端可以把收到的条目原样回灌。上游流式发的 delta 仍照旧逐字下发，
+  完成条目按 id 就地补齐（同一 `output_index` 只出现一次完成事件）。
+
 **未识别字段会被保留并原样透传**（前向兼容）。
 
 明确拒绝：

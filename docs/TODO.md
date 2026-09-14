@@ -2185,3 +2185,77 @@
   **luna 的费率**（200000/20000/1200000），比官方价低 20× 与 10×；`deepseek-flash` 只有一条
   **CNY 标准价**、没有分时（高峰期会按空闲价计）。需要时用修好的
   `scripts/deepseek-official-pricing.sh` 与 `scripts/official-pricing.sh` 对 gpt001 复核后写入。
+
+### codex 长上下文 400：reasoning 条目的空值与身份（2026-09-14）
+
+- 现象（用户报）：codex 里上下文一长就断流——
+  `stream disconnected before completion: missing_required_parameter: Missing required parameter:
+  'input[N].summary'.`
+- 线上证据（gptjp，用户 codex 走的那台）：17:48:06–17:49:30 同一会话
+  `01a09f08-03f3-7721-8047-d10cb870d17d` 连续 **6 次**失败（工作区 `D:\code\python\售后系统`、
+  模型 `gpt-6-astra`、请求体 1,323,524 字节、latency 0.5–0.6s、
+  `error_code=missing_required_parameter`）；当天同类失败 26 条分四组、**全部 client=codex**，
+  每一组都是"同一份请求反复重试"——历史里一旦有坏条目，该会话此后每个请求都失败。
+- 根因是三层，逐层才露出来：
+  1. **输入空值被抹**：`pkg/pluginapi.Item.Summary` 的 `omitempty` 把客户端显式发的
+     `"summary":[]` 当成"没有值"丢掉 → 上游 400「缺必填键」。codex 的 rollout 记录证实它就是这么发的
+     （`{"type":"reasoning","id":"rs_…","summary":[],"encrypted_content":"gAAAA…"}`）。
+  2. **include 被丢**：`responses.Request.Include` 有值但 `pluginapi.Request` 没有该字段、
+     `ToProviderRequest` 也不拷贝 → 上游从不返回 `encrypted_content`。
+  3. **条目身份被换**：插件在 `response.output_item.done` 上跳过 message/reasoning/function_call
+     （注释写着"已走 delta 路径"）→ 客户端拿到的是网关**拼出来**的条目（自造 id、无加密块），
+     回灌必然 `Item with id 'rs_…' not found. Items are not persisted when store is set to false.`
+- 复现（gptjp，修前，同一份请求）：`summary:[]` → `missing_required_parameter: 'input[1].summary'`；
+  只修 summary 后 → `Item … not found`；把网关自己回给客户端的条目原样回灌 → 同样 `not found`。
+  对照：`summary` 非空 + 带 `content` → `array_above_max_length`（该后端输入 reasoning 的
+  content 上限为 0）；带 `status` → `unknown_parameter`。
+- 三个补丁版本（网关与插件都要换，两侧必须同版本）：
+  - **0.12.1**（`3220894`，fix 提交 `925608c`）：`Item` 显式空值保真（`summary` / `arguments` /
+    `output`）+ `provider-codex.normalizeInputItems`（reasoning 补 `summary`，去掉输入项上
+    被拒的 `content` 与 `status`）。
+  - **0.12.2**（`4191c09`，fix 提交 `ff345cb`）：转发 `include`（`pluginapi.Request.Include` →
+    `ToProviderRequest` → 插件原样发给上游）。
+  - **0.12.3**（`44f9de2`，fix 提交 `df3b956`）：**条目身份保真**——delta 建的条目改用上游的
+    `item_id`；完成条目按 id **就地升级**（保留 `output_index`，`Raw` 换成上游条目，因此
+    `encrypted_content`、`phase` 等字段到客户端）；插件转发所有完成条目；非流式 `Complete`
+    按 id 去重；同一 id 重复送达幂等。
+- 部署记录与回滚点（两台都换了网关二进制 + 插件二进制）：
+  - gptjp：`/opt/aigw/aigw` sha256 `1fde3a6259857d3690fb463d217186684ee846ce7ecaf6d9cd379a65e0c45cc1`、
+    `/opt/aigw/plugins/aigw-provider-codex` sha256
+    `c4253de202628fab6d0f57df84152005bfb697b1cbcac98362240a38005e2ac1`；
+    回滚 `/opt/aigw/aigw.prev-20260914-211131`（0.12.2，`effca7d8…`）+ 同目录
+    `aigw-provider-codex.prev-20260914-211131`（`8225db6a…`）；0.12.1 与 0.12.0 的回滚点
+    （`aigw.prev-20260914-210311`、`aigw.prev-20260914-210043`）也在同目录。
+  - gpt001：`/opt/aigw/aigw` sha256 `1fde3a62…`、`/opt/aigw/plugins/provider-codex`（**这台机器的
+    插件二进制名字就是 `provider-codex`**）sha256 `c4253de2…`；回滚
+    `/opt/aigw/aigw.prev-20260914-211206`（`aa123f292a90…`）+
+    `/opt/aigw/rollback/provider-codex.prev-20260914-211206`（`2a8a3c9c726d…`）。
+    回滚点的插件副本**刻意放在插件扫描目录之外**（`/opt/aigw/rollback/`），避免宿主按文件名
+    子串匹配时选中旧二进制。
+  - 两台 `/aigw/version` 均为 `0.12.3` / `44f9de2`，`healthz`/`readyz` 200，启动日志无 ERROR。
+- 验收：
+  - 新增 `scripts/codex-input-fidelity-smoke.sh`（真实网关 + 真实插件二进制打假上游，无网络、
+    无凭据、无模型成本）：请求方向 10 项（include 到上游、`summary:[]` 不被抹、`arguments`/`output`
+    空串保留、`status`/`content` 被剥、用户消息不长出 `summary`）+ 响应方向 7 项
+    （一条 reasoning、上游 id 与 `encrypted_content` 都在、message 用上游 id、delta 仍逐字流出、
+    每个条目只 done 一次）全绿。
+  - 线上（gptjp，真上游）：网关回给客户端的是上游条目
+    `rs_0de8f8f7d4fae21a016aa7f2dc62f887d08160ab14360f3c6d`（`encrypted_content` 1932 字节）
+    与 `msg_0de8f8f7…`（带 `phase`）；**把这两个条目原样放回下一轮 `input` → `completed`**
+    （修复前 `Item … not found`）。
+  - 回归：`deepseek-flash`（openai-chat）200 completed、`gpt-5.6-luna`（openai-responses）
+    200 completed；`go test ./...` + `go vet ./...` 全绿。
+  - 设计文档：`docs/design/m45-input-item-empty-field-preservation.md`、
+    `docs/design/m47-provider-item-identity.md`（各含第 8 节实现差异）；
+    `docs/api-responses.md` 补了 `include` 与"条目身份/空值都是请求的一部分"。
+- 未做（本次观察到、尚未处理）：
+  ① **`failed to read the request body`（400 `invalid_request`）没有可观测性**：它来自
+     `internal/httpapi/v1.go:43` 的 `io.ReadAll(r.Body)` 失败，即**请求体上传中途断**（前置 nginx 是
+     `client_max_body_size 2g` + `proxy_request_buffering off`，请求体直接透传进网关；不是体积上限——
+     `max_body_bytes` 走的是 `io.LimitReader`，超限是静默截断、报的是 JSON 语法错误）。
+     这条路径**既不写日志也不写 `usage_records`**（它在请求记录之前就返回了），所以服务端事后无法回答
+     "发生过几次、来自谁"。建议：补一条 warn 日志（请求 id / 远端地址 / `Content-Length`），并把
+     `max_body_bytes` 超限从静默截断改成明确的 413。
+  ② 插件 `Info().Version` 仍硬编码 `0.1.0`（控制台与启动日志看不出插件构建差异，见上文错配事故）。
+  ③ `pluginapi.Request.Extra` 的注释说"透传给插件"，但外部插件拿不到（帧 params 里的 `Request`
+     没有 `MarshalJSON`，只有内置 `openai-responses` 读该字段）——注释与实现不符。

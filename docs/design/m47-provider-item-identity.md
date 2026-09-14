@@ -130,3 +130,19 @@ DSH 的思考显示与思考录制都受影响；而 D2 让两者兼得。
 ## 7. 依赖
 
 无新依赖。网关与插件都要更新（插件负责转发，宿主负责就地升级）。
+
+## 8. 实现与设计差异
+
+- **D2 比设计多了一步**：完成条目替换 delta 负载时，结构化字段（`content` / `summary` /
+  `call_id` / `name` / `arguments`）也必须一起填，否则 `closeOpen` 的收尾事件会索引空的
+  切片（首次自测即 panic）。实现改为把 provider 条目编成 JSON 再用
+  `OutputItem.UnmarshalJSON` 解回来（复用既有映射，避免两处漂移），再补 `Raw`。
+- **重复的完成条目按 id 幂等**：设计里写的是「第二次走追加」，实现改为
+  「同一 id 已带过完成负载则忽略」，因为插件现在会转发所有完成条目，重复送达
+  （上游重发）不应该在客户端变成两条。
+- **线上确认**（gptjp，2026-09-14）：网关回给客户端的是上游条目
+  `rs_0de8f8f7d4fae21a016aa7f2dc62f887d08160ab14360f3c6d`（`encrypted_content` 1932 字节）
+  与 `msg_0de8f8f7…`（带 `phase` 字段）；把这两个条目原样放回下一轮 `input` → `completed`
+  （修复前同一形状是 `Item … not found`）。
+- 未做：`pluginapi.Request.Extra` 对外部插件仍不下发（只有内置 `openai-responses` 读它），
+  文档注释与实现不符，属既有偏差，本次未动。

@@ -128,3 +128,18 @@ Go 的 `omitempty` 不区分"空 slice"和"nil slice"：**客户端显式发的 
 ## 7. 依赖
 
 无新依赖。
+
+## 8. 实现与设计差异
+
+- **D4（include）当天就做了，不再是待办**：只修 summary 之后线上复现出的下一个错误是
+  `Item with id 'rs_…' not found. Items are not persisted when store is set to false.`，
+  证明 `include` 必须透传（无状态上游只有在被要求时才回加密块）。已随 0.12.2 上线，
+  见 `docs/design/m47-provider-item-identity.md`。
+- **D2 的两个字段按类型分别实现**：`summary` 用 Go 的 nil / 空切片区分（`json:"-"`，
+  由 `MarshalJSON` 输出，非 nil 即写出），`arguments` / `output` 用 `sentFields` 位集记录
+  「客户端发过这个键」。两者都由回归测试钉住（`pkg/pluginapi/protocol_test.go`）。
+- **实测补充**：该后端对输入 reasoning 项还拒绝 `status`
+  （`unknown_parameter`）与 `content`（`array_above_max_length`，上限 0），
+  已由 D3 的 `normalizeInputItems` 处理；`include` 透传本身不改变这两条。
+- 新增 `scripts/codex-input-fidelity-smoke.sh`：真实网关 + 真实插件二进制打假上游，
+  把这一整条链（客户端 → 网关 → 插件帧 → 上游 body，再回到客户端）钉成可重复验收。
