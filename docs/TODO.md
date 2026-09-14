@@ -1844,6 +1844,39 @@
 - 未做：未对线上付费上游做并发/排队实测（无付费模型验证）；未做浏览器目视检查（以资源哈希、`/version`
   与探针替代）；`#plugin` UI harness 视图的既有失败仍未修（见上文 M44 边界）。
 
+### gptjp 插件版本错配修复与 deepseek-flash 别名下线（2026-09-14）
+
+- 背景：gptjp 的 `/opt/aigw/plugins/aigw-provider-codex` 是 **9/11 15:24 的旧构建**（`9c80dec1…`），
+  而网关已是 9/14 的 0.9.0/0.10.0。旧插件缺 `0db0c19`（保留输入项未知字段）、`f1452d2`（数组型工具输出）、
+  `a2599a3`（自定义工具调用）、`3e86f4a`（prompt_cache_key）四个修复，造成 11:34–11:41 共 **13 条失败**：
+  6 条 `bad_params`（`json: cannot unmarshal array into Go struct field Item.input.output of type string`，
+  25ms 本地解码失败、fatal 不 failover，Codex CLI 自行重试 6 次）与 7 条 `missing_required_parameter`
+  （插件吞掉 `additional_tools.tools`，上游报 `input[0].tools` 缺失）。两处都用「本地假上游 + 新旧插件二进制」
+  对照复现：旧插件复现，新插件均正确转发。
+- [x] 12:07:53 部署新插件（从 `21a6f10` 构建；插件相关代码与该机网关 `9368b07` 逐字节同源）：
+  `/opt/aigw/plugins/aigw-provider-codex` SHA-256 `d210f6ea4a0fa9244a5d27e4c4a5c532ae8e3319fa163454ae96d7cab3218c61`；
+  回滚点 `/opt/aigw/aigw-provider-codex.pre-plugin-skew-20260914-120753`（`9c80dec1…`），
+  刻意放在插件扫描目录之外（宿主的 `ResolveBinary` 对目录内文件名做子串匹配）。
+- [x] 12:08 三家 codex provider（1/3/5）配置：删除 `deepseek-flash → gpt-5.6-astra` 别名
+  （该 ChatGPT 账号类型不支持该模型，健康探测与真实请求都被上游 400 拒绝，11:49–11:51 的 5 条 `upstream_error`
+  就是它，DSH 会话因此中断），并显式设 `health_model=gpt-5.6-luna`；配置备份
+  `/opt/aigw/data/provider-config-backup-20260914-120819.json`（0600），`config_version` 1→3。
+  `provider_models` 目录项 1/18/35（三家 codex 的 `deepseek-flash`）已删除——只删路由不够，
+  目录项还在就会在下次同步时把路由带回来。
+- [x] 验证：三家 provider 健康探测 `ok:true`（此前全失败，`last_error` 已清空）；三个插件进程
+  `/proc/<pid>/exe` 的 SHA-256 等于新二进制；真实请求四类全绿——流式 `pong`、**数组型工具结果
+  （修复前必 `bad_params`）200 completed**、非流式 200 completed、`deepseek-flash` 落到 provider 7
+  （真 deepseek）200 completed；12:07 之后新增失败 **0 条**（累计仍为 24 条历史失败）。
+  验证用的临时 key 45/47/49 已停用，远端 admin cookie 已清理。
+- [x] 本机 `bin/aigw-provider-codex` 与 `plugins/aigw-provider-codex` 一并刷新为新构建，旧产物留作
+  `plugins/legacy-codex-plugin-20260911.bin`（旧名字会让宿主把它当成候选），避免下次部署再拷到旧文件。
+- 未做（三条待办）：① 插件的 `Info().Version` 硬编码 `0.1.0`，控制台与启动日志看不出构建差异——
+  这正是本次错配无人察觉的原因，建议照网关用 ldflags 注入 version/revision；
+  ② `deepseek-flash` 现在只剩 provider 7，而三个标签（蓝精灵1/2/3）各自只授权一个 codex provider，
+  持这些标签的 key 调 `deepseek-flash` 会得 403 `permission_denied`，若希望其继续可用需在标签授权里
+  加 `deepseek` 或重新确定别名口径（属产品口径，未擅自改）；③ 非流式失败请求只写计量、不写请求日志
+  （`internal/httpapi/v1.go` 失败分支仅在 `req.Stream` 时 persist），11:04–11:05 有 9 条这样的记录。
+
 ### v0.3.0 发布记录（2026-09-13）
 
 - [x] 根据 `v0.2.5..HEAD` 的新增能力与配置发布 minor：`0.2.5` → **`0.3.0`**。包含缓存 token 展示 `c72bb52`、Codex 无输出断流恢复 `bcd6f1a`、根会话标识 `4b1c32e`、M41 小时汇总 `ecae61a`。
