@@ -52,7 +52,9 @@ type ModelAdmin interface {
 // TagAdmin manages grants/policy groups.
 type TagAdmin interface {
 	ListTags(ctx context.Context) ([]*domain.Tag, error)
+	GetTagByID(ctx context.Context, id int64) (*domain.Tag, error)
 	UpsertTag(ctx context.Context, t *domain.Tag) (int64, error)
+	UpdateTag(ctx context.Context, t *domain.Tag) error
 	DeleteTag(ctx context.Context, id int64) error
 }
 

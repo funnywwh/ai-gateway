@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/winger/ai-gateway/internal/domain"
@@ -85,6 +86,56 @@ ON CONFLICT(name) DO UPDATE SET
 	}
 	t.ID = id
 	return id, nil
+}
+
+// GetTagByID loads one tag by its numeric id.
+//
+// The id is the identity and the name is a label, which is what makes an update of a tag
+// whose name is not an ASCII identifier possible at all: the UI edit path used to be an
+// upsert *by name* (UpsertTag), so a name the writer refused to accept left that row
+// permanently uneditable.
+func (db *DB) GetTagByID(ctx context.Context, id int64) (*domain.Tag, error) {
+	row := db.read.QueryRowContext(ctx, "SELECT "+tagCols+" FROM tags WHERE id = ?", id)
+	t, err := scanTag(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, domain.ErrNotFound("tag " + strconv.FormatInt(id, 10))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get tag %d: %w", id, err)
+	}
+	return t, nil
+}
+
+// UpdateTag writes every mutable column of an existing row, addressed by id.
+//
+// Unlike UpsertTag it can rename: the row keeps its id and therefore the audit trail and
+// any reference that goes by id. Callers that must not rename simply never set Name to a
+// different value (the management API refuses the change, because bindings in
+// accounts.tags_json / api_keys.tags_json are stored by name).
+func (db *DB) UpdateTag(ctx context.Context, t *domain.Tag) error {
+	if t == nil || t.ID <= 0 {
+		return domain.ErrInvalidRequest("tag id is required")
+	}
+	if t.Name == "" {
+		return domain.ErrInvalidRequest("tag name is required")
+	}
+	res, err := db.write.ExecContext(ctx, `
+UPDATE tags SET name = ?, description = ?, grants_json = ?, policy_json = ?, priority = ?
+WHERE id = ?`, t.Name, t.Description, t.GrantsJSON, t.PolicyJSON, t.Priority, t.ID)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return domain.ErrConflict("another tag already uses the name " + t.Name)
+		}
+		return fmt.Errorf("store: update tag %d: %w", t.ID, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: update tag %d: %w", t.ID, err)
+	}
+	if affected == 0 {
+		return domain.ErrNotFound("tag " + strconv.FormatInt(t.ID, 10))
+	}
+	return nil
 }
 
 // DeleteTag removes a tag.

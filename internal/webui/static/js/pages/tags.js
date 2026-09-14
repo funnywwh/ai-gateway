@@ -41,7 +41,10 @@ function form(row, reload) {
     title: row ? '编辑标签 ' + row.name : '新建标签',
     wide: true,
     fields: [
-      { name: 'name', label: '名称', required: !row, value: row ? row.name : '' },
+      // Identity is read-only while editing: a tag is attached to accounts and API Keys by
+      // NAME, so renaming here would drop every binding instead of moving it. The field
+      // still submits its value, which is what makes the update idempotent.
+      { name: 'name', label: '名称', required: !row, readonly: !!row, value: row ? row.name : '' },
       { name: 'description', label: '说明', value: row ? row.description : '' },
       { name: 'priority', label: '优先级', type: 'number', value: row ? row.priority : 100 },
       { name: 'grants', label: '授权（JSON）', type: 'textarea', json: true, rows: 8,
@@ -50,7 +53,10 @@ function form(row, reload) {
         value: row && row.policy ? JSON.stringify(row.policy, null, 2) : SAMPLE_POLICY },
     ],
     onSubmit: async (values) => {
-      await api.post('/tags', values);
+      // Edit goes by id: POST /tags is an upsert keyed by name and would fork a second tag
+      // (and reject any name the writer does not accept).
+      if (row) await api.patch('/tags/' + row.id, values);
+      else await api.post('/tags', values);
       toast('已保存', 'ok');
       await reload();
       return true;

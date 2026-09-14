@@ -2018,3 +2018,32 @@
 - 保密：明文只在 postgres 进程内算哈希（`encode(sha256(convert_to(btrim(key),'UTF8')),'hex')`），脚本从不 `SELECT key`；迁移窗口 journal 长 `sk-` 命中 0；报告 JSON 命中 0；aigw 库内 60 处长 `sk-` 命中经逐条比对**全部**是记录中 `key_prefix` 与 `key_hash` 相邻字段（长度恒为 76），无一处是明文。
 - 已知残留（自检工具产生，均停用）：账户 `zz-migration-selftest`（closed）+ 自检 key #1/#3/#5（disabled）、3 个已撤销的临时 MCP 令牌、`/opt/aigw/data/.selftest-token`（0600）。网关没有删除账户/key 的路由，故保留为记录。
 - 未迁移/未修（待决策）：计费余额与额度；（模型面）源库近 30 天有 **13 个模型名、2390 次请求**在 aigw 无对应 models/映射，其中 `gpt-4o`(974)、`gpt-5.4-mini`(622)、`gpt-5.6`(412) 量最大；另外两个**供应商映射错误**已实测确认：`deepseek-flash` → 上游 `gpt-5.6-astra`、`gpt-6` → 上游 `gpt-6` 都被 ChatGPT 拒绝（`model is not supported when using Codex with a ChatGPT account`）。sub2api 侧本次**没有任何写入**（双跑）。
+
+## 中文标签名可编辑修复（2026-09-14）
+
+文档：`docs/tag-name-edit-fix.md`。起因：给 gptjp 的三个标签加 `deepseek` 供应商授权时，发现名字含中文的标签
+**无法通过管理 API 更新**——唯一写路径是按名字 upsert，而名字校验是 ASCII-only，于是这些行只能直写 SQLite
+（M43 迁移时已经这么绕过一次）。本次按缺陷修掉。
+
+- [x] `PATCH /admin/api/v1/tags/{id}`（`admin_update_tag`，role admin）：按 id 局部更新 grants/policy/description/priority；
+  省略即保持原值，显式 `null` 才清空；`name` 只允许回传当前名字（改名 → 400 并说明：绑定存在
+  `accounts.tags_json` / `api_keys.tags_json` 里，改名会静默丢绑定）。
+- [x] 标签名校验改用与账户名同一条规则：`domain.NormalizeTagName`（与 `NormalizeAccountName` 共用
+  `normalizeLabel`：裁剪首尾空白、非空、合法 UTF-8、最多 64 rune），`resourceNameRE` 继续用于真标识符。
+  理由：与 `29cb087`（Unicode 账户名）保持同一口径——一个写入方接受、另一个拒绝的名字，正是让某行不可编辑的原因。
+- [x] store：`GetTagByID`（未命中 404）、`UpdateTag`（按 id 写可变列，撞名 409）；`UpsertTag` 语义不变。
+- [x] 控制台标签页：编辑改走 `PATCH /tags/{id}`（原先 POST 会被名字校验拦、且"改名"会分叉出第二个标签），
+  编辑态名称只读（沿用 `ui.js` 的 `readonly` 约定）。
+- [x] 测试：`internal/httpapi/admin_tags_test.go`（中文名创建回归、名字边界、按 id 更新后 registry 快照已 reload、
+  局部更新、改名 400、未知 id 404、被拒写入不动行、null 清空、viewer 403）、`internal/store/tags_test.go`、
+  路由表守卫新增模式、`internal/webui/tests/tags_binding_test.mjs` 两条静态断言。
+- [x] 线上（gptjp，0.10.0 旧二进制）：`蓝精灵1/2/3` 的 grants 各加 `"deepseek"`（备份
+  `/opt/aigw/data/backups/aigw-pre-taggrant-20260914-140716.db`），用管理接口对 provider 7 发空 PATCH 触发
+  registry reload（不重启、不改值、audit 有据）；验证：同一把 key 的 `/v1/models` 出现 4 个 deepseek 模型，
+  `deepseek-flash` / `deepseek-v4-flash` 均 200，`usage_records.provider_id=7`（官方 deepseek，而非先前顶替它的
+  Codex 供应商 5）。
+- [ ] 未部署：本修复尚未发版，gptjp 仍是 0.10.0（`9368b07`）。发版后这类标签改动即可在控制台完成。
+- 观察（不属本仓库）：DSH 客户端把任意 401/403 显示为「API 密钥无效」，而网关返回的是
+  `permission_error: model or provider not allowed for this API key`；`pkg/pluginapi` 的
+  `TestClientCredentialsNotification` 在全量并发 `go test ./...` 下偶发 1s 超时（单独跑 3/3 通过，
+  该包对 `internal/…` 零依赖，与本次改动无关）。

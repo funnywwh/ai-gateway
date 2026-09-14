@@ -839,13 +839,11 @@ func (s *Server) handleAdminUpsertTag(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
 		return
 	}
-	name := strings.TrimSpace(body.Name)
-	if name == "" {
-		writeAPIError(w, domain.ErrInvalidRequest("name is required"))
-		return
-	}
-	if !validResourceName(name) {
-		writeAPIError(w, domain.ErrInvalidRequest("tag name must match [A-Za-z0-9._-] and be at most 64 characters"))
+	// A tag name is a human-facing label like an account name: any valid Unicode, trimmed,
+	// at most 64 characters. See domain.NormalizeTagName for why the ASCII rule had to go.
+	name, err := domain.NormalizeTagName(body.Name)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
 		return
 	}
 	grants, err := jsonObjectString(body.Grants, "grants")
@@ -874,6 +872,99 @@ func (s *Server) handleAdminUpsertTag(w http.ResponseWriter, r *http.Request) {
 	s.audit(r.Context(), actor.Username, "update", "tag", strconv.FormatInt(id, 10),
 		map[string]any{"name": name}, "ok")
 	s.reload(r.Context(), "tag upserted", true)
+	writeJSON(w, http.StatusOK, tagJSON(tag))
+}
+
+// handleAdminPatchTag updates one tag addressed by id. It exists next to the name-keyed
+// upsert because the id is the identity: an upsert cannot touch a row whose name the
+// writer would refuse (that is exactly how 蓝精灵1/2/3 became uneditable), and it cannot
+// tell a rename from a create.
+//
+// Only the fields present in the body change. `grants: null` / `policy: null` clear the
+// field, which is why the two are read as presence-aware raw JSON rather than structs.
+func (s *Server) handleAdminPatchTag(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.adminActor(w, r, true)
+	if !ok {
+		return
+	}
+	store, ok := portReady(w, s.deps.Tags, "tag management")
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeAPIError(w, domain.ErrInvalidRequest("invalid tag id"))
+		return
+	}
+	var body struct {
+		Name        *string         `json:"name"`
+		Description *string         `json:"description"`
+		Grants      json.RawMessage `json:"grants"`
+		Policy      json.RawMessage `json:"policy"`
+		Priority    *int            `json:"priority"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
+		return
+	}
+	tag, err := store.GetTagByID(r.Context(), id)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	if body.Name != nil {
+		name, err := domain.NormalizeTagName(*body.Name)
+		if err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		// Renaming is refused rather than performed: a tag is referenced *by name* from
+		// accounts.tags_json and api_keys.tags_json, so a rename would silently drop every
+		// binding instead of moving it. Accepting the current name keeps the console form
+		// (which echoes the name field) idempotent.
+		if name != tag.Name {
+			writeAPIError(w, domain.ErrInvalidRequest(
+				"a tag cannot be renamed: it is attached to accounts and API keys by name, so renaming would drop every binding; "+
+					"create a new tag with the wanted name, move the bindings, then delete this one").WithParam("name"))
+			return
+		}
+		tag.Name = name
+	}
+	if body.Description != nil {
+		tag.Description = *body.Description
+	}
+	if body.Grants != nil {
+		grants, err := jsonObjectString(body.Grants, "grants")
+		if err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		tag.GrantsJSON = grants
+	}
+	if body.Policy != nil {
+		policy, apiErr := keyPolicyDocument(body.Policy)
+		if apiErr != nil {
+			writeAPIError(w, apiErr)
+			return
+		}
+		tag.PolicyJSON = policy
+	}
+	if body.Priority != nil {
+		if err := validateNonNegative("priority", body.Priority); err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		tag.Priority = *body.Priority
+	}
+	if err := store.UpdateTag(r.Context(), tag); err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	s.audit(r.Context(), actor.Username, "update", "tag", strconv.FormatInt(id, 10), map[string]any{
+		"name": tag.Name, "grants_set": body.Grants != nil, "policy_set": body.Policy != nil,
+		"priority_set": body.Priority != nil, "description_set": body.Description != nil,
+	}, "ok")
+	s.reload(r.Context(), "tag updated", true)
 	writeJSON(w, http.StatusOK, tagJSON(tag))
 }
 

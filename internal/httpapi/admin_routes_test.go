@@ -69,6 +69,7 @@ var expectedAdminPatterns = []string{
 	"PATCH /admin/api/v1/pricing/markup",
 	"PATCH /admin/api/v1/providers/{id}",
 	"PATCH /admin/api/v1/routes/{id}",
+	"PATCH /admin/api/v1/tags/{id}",
 	"POST /admin/api/v1/accounts",
 	"POST /admin/api/v1/accounts/{id}/credits",
 	"POST /admin/api/v1/accounts/{id}/invoices",

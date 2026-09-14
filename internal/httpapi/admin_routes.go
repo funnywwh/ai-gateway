@@ -902,14 +902,30 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 		{
 			Method: "POST", Path: "/admin/api/v1/tags", Handler: s.handleAdminUpsertTag,
 			Name: "admin_upsert_tag", Group: groupModels, Role: roleAdmin,
-			Summary: "新建或更新一个标签（按名字 upsert）",
+			Summary: "新建或更新一个标签（按名字 upsert；写标签名即可改它的授权与策略）",
 			Body: []adminField{
-				bodyRequired("name", "string", "标签名"),
+				bodyRequired("name", "string", "标签名（人类可读标签：去除首尾空白后须非空，最多 64 个 Unicode 字符，中文/邮箱/标点均可）。这个名字就是绑定点：账号与 API Key 用名字引用它，改不了名"),
 				bodyOptional("description", "string", "说明"),
 				structuredField("grants", "object", "这个标签授予的模型与供应商访问权（绑定该标签的账号和 Key 都会获得）", grantsSchema("标签"), grantsExample()),
 				exampleField(schemaField(bodyOptional("policy", "object",
 					"该标签的限速与配额策略，字段与 Key 的 policy 相同（见本参数 schema）。"+
 						"多个标签按 priority 依次合并、最后 Key 自己的 policy 覆盖"),
+					policySchema()), keyPolicyExample()),
+				nonNegative(bodyOptional("priority", "integer", "策略合并优先级（0 及以上，数字大者先合并）")),
+			},
+		},
+		{
+			Method: "PATCH", Path: "/admin/api/v1/tags/{id}", Handler: s.handleAdminPatchTag,
+			Name: "admin_update_tag", Group: groupModels, Role: roleAdmin,
+			Summary:   "按 id 改一个标签的授权/策略/说明（只改传入的字段；不能改名）",
+			Dangerous: true, ConfirmReason: "label 的授权是账号与 API Key 生效权限的一部分：加宽 grants 等于给所有绑定它的凭据放权",
+			Params: []adminField{pathParam("id", "标签数字 id（admin_list_tags 给出）")},
+			Body: []adminField{
+				bodyOptional("name", "string", "只允许回传标签当前的名字（幂等）。改名会被拒绝（400）：标签是按名字绑定在 accounts.tags_json / api_keys.tags_json 上的，改名会静默丢掉全部绑定。要换名字就新建标签、搬绑定、再删旧的"),
+				bodyOptional("description", "string", "说明"),
+				structuredField("grants", "object", "新的授权（整体替换；传 null 清空）。与 admin_upsert_tag 的 grants 同形", grantsSchema("标签"), grantsExample()),
+				exampleField(schemaField(bodyOptional("policy", "object",
+					"新的限速与配额策略（整体替换；传 null 清空）。字段与 Key 的 policy 相同"),
 					policySchema()), keyPolicyExample()),
 				nonNegative(bodyOptional("priority", "integer", "策略合并优先级（0 及以上，数字大者先合并）")),
 			},
