@@ -2407,4 +2407,10 @@
 - 顺带发现（既有问题，本次未改）：该 codex 版本在**普通轮次**也打印
   `ERROR codex_core::util: OutputTextDelta without active item`；用改动前的二进制同样复现（2 次），
   与本修复无关，另行跟进
+- [x] 本机 `:8088` 已部署本次修复：`make build` 出的 `bin/aigw`（`/version` = `0.12.4 / db7d0d2`），
+      healthz/readyz/`admin/ui` 均 200；回滚点 `bin/aigw.prev-0.12.4`（从在跑进程的 `/proc/<pid>/exe` 取出的真 0.12.4，
+      不是被 `go build` 覆盖后的那份 —— 见 v0.12.4 记录里的坑）。部署后用同一套 codex 复测：第二轮 `context compacted`、
+      第三轮正常继续，`request_logs` 里 `call_kind=compaction` 行 `status=completed`
+- 未做：**gpt001 生产未部署**（线上 `/aigw/version` 仍为 `0.12.3 / 44f9de2`）；本仓库面向该路径的发布流程是
+  `release-version`（升 VERSION → tag → 构建 → 部署 gpt001）。需要的话单独发一版
 - 后续（本次不做）：`/responses/compact`（v1 unary）路径 —— v1 会替换客户端历史，需要单独设计
