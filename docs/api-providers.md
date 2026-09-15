@@ -4,8 +4,8 @@
 
 ## 1. 范围
 
-`openai-chat` 对接 **OpenAI 兼容的 `/chat/completions`** 上游：DeepSeek、Qwen、Ollama、vLLM、LM Studio、以及任何自称 OpenAI 兼容的服务。
-它**不**对接 OpenAI 的 `/responses`——那是内置 `openai-responses` 的职责（见 §7）。
+`openai-chat` 对接 **OpenAI 兼容的 `/chat/completions`** 上游：DeepSeek、Qwen、Gemini（Google 官方兼容层，见 §4）、Ollama、vLLM、LM Studio、以及任何自称 OpenAI 兼容的服务。
+它**不**对接 OpenAI 的 `/responses`——那是内置 `openai-responses` 的职责（见 §8）。
 
 上游之间在"教科书式 OpenAI 兼容"之外常有实质差异，且**猜错是静默降级而不是报错**，因此除公共部分外一律显式开关，
 默认值等于通用 OpenAI 兼容行为：升级不会改变既有部署的行为。
@@ -35,10 +35,11 @@
 | `api_key` | 空 | 也可由凭据通道下发（控制台凭据里的 `api_key`，落库加密） |
 | `headers` | 空 | 额外请求头（给需要自定义头或改协议的上游留后路） |
 | `timeout_s` | 120 | HTTP 客户端超时；单次尝试的最终上限由路由的 `per_attempt_timeout_s` 决定 |
+| `proxy` | 空 | 出网代理：`http(s)://host:port`、`socks5(h)://host:port`，或字面量 `env`（跟随 `HTTPS_PROXY`/`NO_PROXY`）。**留空=直连且不读环境变量**——这样升级不会改变既有部署的走向；代理需要账号密码时写进 URL（`http://user:pass@host:port`）。取值非法 → **供应商构建失败**（不静默降级成直连，否则症状与"上游不可达"无法区分）。上游从本机不可达时（如 Gemini）必须要它 |
 | `models` | 空 | **上游目录只能声明，不能猜**：`public`/`upstream`/`context_window`/`max_output_tokens`/`capabilities` |
 | `thinking.mode` | `auto` | `auto`：客户端给了 `reasoning.effort` 就照办（`none`→关，其余→开）；**没给就根本不下发该字段**，由上游默认决定（DeepSeek 默认就是开）。`enabled` / `disabled` 分别强制开关 |
 | `thinking.style` | `none` | `deepseek` → 下发 `{"thinking":{"type":"enabled\|disabled"}}`；`none` → 不下发（通用形态） |
-| `thinking.replay_reasoning_content` | `false` | 把历史 `reasoning` 项正文回传为 assistant 的 `reasoning_content`（带工具的多轮必需，见 §4） |
+| `thinking.replay_reasoning_content` | `false` | 把历史 `reasoning` 项正文回传为 assistant 的 `reasoning_content`（带工具的多轮必需，见 §5） |
 | `response_format` | `text` | **能力申报**（不是下发开关）：该上游真实支持到哪一档——`text`/`json_object`/`json_schema`。实际下发的档位由**客户端的 `text.format`** 决定：没要 JSON 的请求不带这个字段，要 `json_object` 的带 `{"type":"json_object"}`，要 `json_schema` 的按客户端给的整个对象原样透传 |
 
 ### 出站方言翻译（`openai-chat` 一系）
@@ -194,7 +195,58 @@ tools/reasoning 就会被打上 `X-Gateway-Degraded`）。只发 `public_model` 
 「提供方默认」= 显式关闭思考；留空表示"支持但不发参数"，会落到上游自己的默认（DeepSeek 默认是开启思考），
 于是「Off」这一档名不副实。完整实测矩阵与取舍见 `docs/design/m20-dsh-reasoning-effort.md`。
 
-## 4. 思考内容（reasoning）
+## 4. Gemini 接入（Google 官方 OpenAI 兼容层）
+
+Google 提供官方的 OpenAI 兼容层，因此 Gemini **不需要插件**，`openai-chat` 直接对接即可：
+
+```yaml
+providers:
+  - name: gemini
+    kind: openai-chat
+    enabled: true
+    config:
+      base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
+      proxy: "socks5://127.0.0.1:1080"   # 见下面第 2 条：直连不通
+      timeout_s: 120
+      # 不要写 thinking 段：Gemini 不认 DeepSeek 的 {"thinking":{"type":...}}
+    models:
+      - public: gemini-2.5-flash
+        upstream: gemini-2.5-flash
+        context_window: 1048576
+        max_output_tokens: 65536
+        capabilities: {stream: true, tools: true, reasoning: true}
+```
+
+密钥填在**凭据**栏（`{"api_key":"AIza..."}`，AES-GCM 落库），以 `Authorization: Bearer` 发出。
+模型 id 在兼容层里用连字符（`gemini-2.5-flash`），不是原生 API 的 `models/gemini-2.5-flash`。
+
+**必须知道的三件事**（本机实测与官方文档，2026-09-15）：
+
+1. **`thinking` 必须保持 `none`**。Gemini 不接受 DeepSeek 的 `{"thinking":{"type":"enabled"}}`，
+   所以**不要**配 `thinking.style: deepseek`。客户端带 `reasoning.effort` 时，网关照样把它作为
+   `reasoning_effort` 原样透传（`thinking.style=none` 的默认行为），这正是 Gemini 认的字段。
+2. **出网要先解决**。`generativelanguage.googleapis.com:443` 在本机**直连超时**，只有经代理才通
+   （实测 `socks5://127.0.0.1:1080` 可用，与 codex 供应商同一个出口）。这条以前无解：`openai-chat`
+   的 HTTP 客户端是裸 transport，既不认 `HTTPS_PROXY` 也没有 `proxy` 字段——**本机部署等于开箱接不通**。
+   现在有了 `proxy`（§2 的字段表），`env` 表示跟随环境变量，留空表示直连。
+3. **流式可用，且不需要额外开关**。兼容层接受 `stream_options:{include_usage:true}`（网关流式请求
+   本来就无条件带它），SSE 以 `data: [DONE]` 收尾并带 `finish_reason`——两者都满足网关对"流正常结束"
+   的判定，因此不会退化成 `upstream_stream_incomplete`。用量取**最后一块**（网关对 `usage` 是后写覆盖），
+   所以 Gemini「每个 chunk 都带 usage」的不合规行为不影响计费。
+
+**已知差异（真 key 到手前未端到端验证，先按此预期排查）**：
+
+- **`tools` 与 `response_format` 不能同请求**（400）。因此别给 Gemini 声明 `json_object`/`json_schema`
+  能力：声明了，带 `text.format` 的请求才会被路由到它，而两者要求一个 Gemini 无法满足的组合。
+- **坏 key 回的是 400 而不是 401**（body `"Please pass a valid API key"`）。网关按状态码分类，
+  于是它会显示成 `upstream_400` 而不是 `token_invalid`——看到 400 + 这句话时，是凭据问题，不是请求问题。
+- **Gemini 3 的 `thought_signature` 会丢**。它在流式 delta 里以 `extra_content.google.thought_signature`
+  出现，而网关的 chat 结构体不保留未知字段，回传时也拼不回去。多轮工具调用在 Gemini 3 上若出现
+  异常降级，这里是第一嫌疑点（Gemini 2.5 不带该字段，不受影响）。
+- **`total_tokens` 不自洽**（实测 `prompt 9 + completion 3 = 105`）。网关按 `prompt_tokens`/`completion_tokens`
+  计费，不读 `total_tokens`，所以账单口径不受这个上游 bug 影响。
+
+## 5. 思考内容（reasoning）
 
 - **入站**：`reasoning_content`（非流式消息字段 / 流式 delta）→ 思考增量事件，最终落成 `reasoning` 输出项；
   客户端在 SSE 上看到 `response.reasoning_summary_text.delta`。
@@ -208,7 +260,7 @@ tools/reasoning 就会被打上 `X-Gateway-Degraded`）。只发 `public_model` 
   不等就会把"刚拿到 `id` 就接着发下一轮"的 agent 循环判成 `response not found`——而这正是
   thinking + tools 的必经形态（工具结果必须在下一个请求里回传）。M37 之前这里恒有竞态。
 
-## 5. 事件与用量映射
+## 6. 事件与用量映射
 
 | 上游 | 网关 |
 |---|---|
@@ -220,7 +272,7 @@ tools/reasoning 就会被打上 `X-Gateway-Degraded`）。只发 `public_model` 
 | 末尾块 `usage` | 最终 `usage`（流式先发估算 `usage.delta`，最终值覆盖） |
 | 无 `usage` | 字符估算 + `estimated:true` |
 
-## 6. 错误分类
+## 7. 错误分类
 
 | 上游 | 返回 | 路由行为 |
 |---|---|---|
@@ -232,14 +284,14 @@ tools/reasoning 就会被打上 `X-Gateway-Degraded`）。只发 `public_model` 
 
 客户端可见的 HTTP 映射见 `docs/api-responses.md`（致命上游错误经网关统一封装）。
 
-## 7. 与 `openai-responses` 的分工
+## 8. 与 `openai-responses` 的分工
 
 - `/chat/completions` → `openai-chat`（本文档）。**接不了 OpenAI Responses API**。
 - `/responses` → `openai-responses`。DeepSeek 也提供 `/responses`（为 Codex 提供），但该内置实现目前有三处缺口未覆盖
   （`response.reasoning_text.delta` 事件名、`usage.output_tokens_details.reasoning_tokens`、思考正文的承载字段），
   故 DeepSeek 的推荐接入路径是本文档的 `/chat/completions`。
 
-## 8. 验收
+## 9. 验收
 
 离线（无需密钥，假上游校验请求形状、思考开关、流式顺序、用量维度、错误映射与续接回传）：
 

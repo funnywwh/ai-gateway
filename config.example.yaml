@@ -275,6 +275,14 @@ bootstrap:
   #   thinking.replay_reasoning_content bool                 - send earlier reasoning back on tool turns
   #   response_format                text|json_object|json_schema - highest level the upstream accepts
   #   default_max_output_tokens      int                     - applied only when the client sent none
+  #   proxy                          string                  - egress proxy: http://host:port,
+  #                                  https://host:port, socks5://host:port, or the literal "env" to
+  #                                  follow HTTPS_PROXY/NO_PROXY. Empty means a DIRECT connection and
+  #                                  deliberately ignores the environment, so an upgrade never
+  #                                  reroutes an existing deployment; credentials, when the proxy
+  #                                  needs them, go in the URL (http://user:pass@host:port). A
+  #                                  malformed value fails the build loudly instead of degrading to
+  #                                  a direct connection that looks like "the upstream is down".
   providers:
     - name: local-chat
       kind: openai-chat            # builtin: openai-responses | openai-chat ; or plugin:<name>
@@ -320,6 +328,40 @@ bootstrap:
           context_window: 1000000
           max_output_tokens: 65536
           capabilities: {stream: true, tools: true, reasoning: true, json_object: true}
+    # Gemini through Google's official OpenAI-compatibility layer. Two things are
+    # specific to it (measured 2026-09-15, see docs/api-providers.md §4):
+    #   * generativelanguage.googleapis.com is not reachable from a direct connection
+    #     here, so `proxy` is not optional — the same SOCKS5 egress the codex provider
+    #     uses works. Leave the proxy out only if this host has a direct route.
+    #   * the thinking dialect must stay `none`: Gemini rejects DeepSeek's
+    #     {"thinking":{...}} shape. A client's reasoning.effort is then forwarded as
+    #     `reasoning_effort`, which is exactly what Gemini expects.
+    # Set the API key on the provider (console -> Providers -> credentials
+    # {"api_key":"AIza..."}, sealed with credentials_key) and flip enabled to true.
+    # Streaming needs no special configuration: the compatibility layer accepts
+    # stream_options.include_usage and ends the SSE stream with [DONE].
+    - name: gemini
+      kind: openai-chat
+      display_name: "Gemini（Google OpenAI 兼容层）"
+      enabled: false
+      priority: 40
+      weight: 100
+      config:
+        base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
+        proxy: "socks5://127.0.0.1:1080"
+        timeout_s: 120
+        # No `thinking` block on purpose — see above.
+      models:
+        - public: gemini-2.5-flash
+          upstream: gemini-2.5-flash
+          context_window: 1048576
+          max_output_tokens: 65536
+          capabilities: {stream: true, tools: true, reasoning: true}
+        - public: gemini-2.5-flash-lite
+          upstream: gemini-2.5-flash-lite
+          context_window: 1048576
+          max_output_tokens: 65536
+          capabilities: {stream: true, tools: true, reasoning: true}
   models:
     - public_name: llama-local
       aliases: ["local", "llama"]

@@ -929,3 +929,88 @@ func TestHealthClassifiesUnauthorized(t *testing.T) {
 		t.Fatalf("health must report a credential problem as fatal: %+v", apiErr)
 	}
 }
+
+// The `proxy` setting is what makes an upstream that is unreachable from the
+// gateway host usable at all (Gemini's OpenAI-compatible endpoint is blocked on a
+// direct connection here and only answers through a SOCKS5 egress). These tests
+// pin the three states an operator can write, because getting it wrong is
+// indistinguishable from "the upstream is down" at the transport level.
+func TestProxySettingReachesTheTransport(t *testing.T) {
+	p, _ := newUpstreamWith(t, func(w http.ResponseWriter, r *http.Request) {}, map[string]any{
+		"proxy": "socks5://127.0.0.1:1080",
+	})
+	transport, ok := p.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("client transport = %T, want *http.Transport", p.client.Transport)
+	}
+	if transport.Proxy == nil {
+		t.Fatal("a configured proxy must reach the transport; a direct transport here means the setting is decorative")
+	}
+	req, err := http.NewRequest(http.MethodPost, p.cfg.BaseURL+"/chat/completions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := transport.Proxy(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.String() != "socks5://127.0.0.1:1080" {
+		t.Fatalf("transport proxy = %v, want socks5://127.0.0.1:1080", got)
+	}
+}
+
+func TestEmptyProxyStaysDirectEvenWithTheEnvironmentSet(t *testing.T) {
+	// The environment is the trap: a host that exports HTTPS_PROXY for other
+	// tooling must not silently reroute a provider that never asked for a proxy.
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:9")
+	p, _ := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {})
+	transport, ok := p.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("client transport = %T, want *http.Transport", p.client.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatalf("empty proxy must mean direct, got proxy func %p", transport.Proxy)
+	}
+}
+
+func TestProxyEnvOptsIntoTheEnvironment(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://proxy.internal:3128")
+	p, _ := newUpstreamWith(t, func(w http.ResponseWriter, r *http.Request) {}, map[string]any{
+		"proxy": ProxyEnv,
+	})
+	transport, ok := p.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("client transport = %T, want *http.Transport", p.client.Transport)
+	}
+	if transport.Proxy == nil {
+		t.Fatal("proxy=env must consult HTTPS_PROXY")
+	}
+	req, err := http.NewRequest(http.MethodPost, "https://example.invalid/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := transport.Proxy(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Host != "proxy.internal:3128" {
+		t.Fatalf("proxy=env resolved to %v, want http://proxy.internal:3128", got)
+	}
+}
+
+func TestInvalidProxyFailsTheBuild(t *testing.T) {
+	// A wrong proxy value must not degrade into a direct connection: the operator
+	// would otherwise see "upstream unreachable" and look in the wrong place.
+	for _, raw := range []string{"127.0.0.1:1080", "ftp://127.0.0.1:1080", "socks5://127.0.0.1"} {
+		t.Run(raw, func(t *testing.T) {
+			cfg, err := json.Marshal(map[string]any{"base_url": "http://127.0.0.1:1/v1", "proxy": raw})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := New("upstream", string(cfg), t.TempDir(), nil); err == nil {
+				t.Fatalf("proxy %q must fail the build", raw)
+			}
+		})
+	}
+}

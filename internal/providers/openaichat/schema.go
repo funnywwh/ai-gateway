@@ -17,9 +17,10 @@ func Note() string { return kindNote }
 // Template returns a config skeleton with the fields an operator must fill in.
 func Template() json.RawMessage { return configTemplate }
 
-const kindNote = "对接 OpenAI 兼容的 /chat/completions 上游：DeepSeek、Qwen、Ollama、vLLM、LM Studio 以及任何自称 OpenAI 兼容的服务。" +
+const kindNote = "对接 OpenAI 兼容的 /chat/completions 上游：DeepSeek、Qwen、Gemini（Google 官方兼容层）、Ollama、vLLM、LM Studio 以及任何自称 OpenAI 兼容的服务。" +
 	"接不了 OpenAI Responses API —— 那是 openai-responses 类型的职责。" +
-	"默认值等于通用 OpenAI 兼容行为，升级不会改变既有部署；DeepSeek 的思考方言与错误分类见 docs/api-providers.md。"
+	"默认值等于通用 OpenAI 兼容行为，升级不会改变既有部署；上游从本机不可达时用 proxy 字段。" +
+	"DeepSeek 的思考方言、Gemini 的接入差异与错误分类见 docs/api-providers.md。"
 
 var configSchema = json.RawMessage(`{
   "type": "object",
@@ -32,6 +33,8 @@ var configSchema = json.RawMessage(`{
       "description": "附加请求头。上游需要自定义头或非 Bearer 认证（例如 Azure 的 api-key 头）时用它，此时 api_key 留空。"},
     "timeout_s": {"type": "integer", "default": 120,
       "description": "HTTP 客户端超时（秒）。单次尝试的最终上限仍由路由的 per_attempt_timeout_s 决定。"},
+    "proxy": {"type": "string", "x-advanced": true,
+      "description": "出网代理：http://host:port、https://host:port、socks5://host:port（socks5h 同义），或字面量 env 表示跟随 HTTPS_PROXY/NO_PROXY。留空=直连，且**不读**环境变量——这样升级不会改变既有部署的走向；需要带账号密码的代理时把凭据写进 URL（配置明文存储且管理面回显）。代理写错会让供应商构建失败，而不是静默直连，否则症状与「上游不可达」无法区分。"},
     "models": {"type": "array",
       "description": "上游模型目录，只能声明不能猜。元素字段：public（对客模型名）、upstream（上游模型名，省略则用 public）、context_window、max_output_tokens、capabilities{stream,tools,reasoning}。",
       "items": {"type": "object", "properties": {

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,6 +52,11 @@ const (
 	ResponseFormatJSONSchema = "json_schema"
 )
 
+// ProxyEnv is the `proxy` value that means "follow HTTPS_PROXY / NO_PROXY".
+// It is spelled out because an empty `proxy` means direct, not "environment", and
+// the two are easy to confuse when a deployment already exports those variables.
+const ProxyEnv = "env"
+
 // reasoningEffortNone is the effort value a client sends to ask for no reasoning at
 // all; it maps onto the dialect's "disabled" switch and is never forwarded as an
 // effort level (the upstream would reject it).
@@ -69,6 +75,11 @@ type Config struct {
 	APIKey   string            `json:"api_key"`
 	Headers  map[string]string `json:"headers"`
 	TimeoutS int               `json:"timeout_s"`
+	// Proxy is the egress proxy for upstream calls: an http/https/socks5(socks5h)
+	// URL, the literal "env" to follow HTTPS_PROXY/NO_PROXY, or empty for a direct
+	// connection. Empty is direct on purpose — the environment is ignored unless the
+	// operator asks for it, so an upgrade cannot reroute existing traffic.
+	Proxy string `json:"proxy"`
 	// Models lets the operator declare the upstream catalogue when the upstream has no list endpoint.
 	Models []ModelConfig `json:"models"`
 
@@ -136,13 +147,39 @@ func New(name, configJSON, stateDir string, creds map[string]string) (*Provider,
 	if cfg.APIKey == "" && creds != nil {
 		cfg.APIKey = creds["api_key"]
 	}
+	proxy, err := cfg.proxyFunc()
+	if err != nil {
+		return nil, err
+	}
 	return &Provider{
 		name:     name,
 		cfg:      cfg,
-		client:   httpx.ClientWithTimeout(time.Duration(cfg.TimeoutS) * time.Second),
+		client:   httpx.ClientWithProxy(time.Duration(cfg.TimeoutS)*time.Second, proxy),
 		stateDir: stateDir,
 		creds:    creds,
 	}, nil
+}
+
+// proxyFunc turns the `proxy` setting into the transport's proxy function.
+//
+// A malformed value fails the build instead of being ignored: a proxy that never
+// takes effect looks exactly like "the upstream is unreachable", which is the most
+// expensive kind of silent misconfiguration to debug.
+func (c *Config) proxyFunc() (func(*http.Request) (*url.URL, error), error) {
+	switch raw := strings.TrimSpace(c.Proxy); raw {
+	case "":
+		// Direct: the process environment is deliberately not consulted (see
+		// httpx.ClientWithProxy), so nothing changes for existing deployments.
+		return nil, nil
+	case ProxyEnv:
+		return http.ProxyFromEnvironment, nil
+	default:
+		u, err := providerkit.ParseProxyURL(raw)
+		if err != nil {
+			return nil, fmt.Errorf("openai-chat: bad proxy: %w", err)
+		}
+		return http.ProxyURL(u), nil
+	}
 }
 
 // validate rejects unknown enum values instead of silently falling back: a typo in

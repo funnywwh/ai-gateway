@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -84,12 +85,28 @@ func NewRequest(ctx context.Context, method, url string, body io.Reader) (*http.
 // ClientWithTimeout builds an HTTP client used by builtin providers.
 // The transport keeps connections alive to avoid per-request TCP setup.
 func ClientWithTimeout(timeout time.Duration) *http.Client {
+	return ClientWithProxy(timeout, nil)
+}
+
+// ClientWithProxy builds the same client with an egress proxy function.
+//
+// A nil proxy means "connect directly" and deliberately does NOT fall back to the
+// process environment: net/http's zero Transport proxy is direct, while a transport
+// built with http.ProxyFromEnvironment would silently reroute every existing
+// deployment whose host happens to export HTTPS_PROXY. A provider that wants the
+// environment says so explicitly (see openaichat's `proxy: env`), so an upgrade
+// never changes where traffic goes on its own.
+//
+// http.ProxyURL accepts http/https/socks5(socks5h) URLs, which is why the builtin
+// providers validate the operator's value with providerkit.ParseProxyURL first.
+func ClientWithProxy(timeout time.Duration, proxy func(*http.Request) (*url.URL, error)) *http.Client {
 	if timeout <= 0 {
 		timeout = 120 * time.Second
 	}
 	return &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
+			Proxy:               proxy,
 			MaxIdleConns:        64,
 			MaxIdleConnsPerHost: 32,
 			IdleConnTimeout:     90 * time.Second,
