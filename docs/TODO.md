@@ -2414,3 +2414,25 @@
 - 未做：**gpt001 生产未部署**（线上 `/aigw/version` 仍为 `0.12.3 / 44f9de2`）；本仓库面向该路径的发布流程是
   `release-version`（升 VERSION → tag → 构建 → 部署 gpt001）。需要的话单独发一版
 - 后续（本次不做）：`/responses/compact`（v1 unary）路径 —— v1 会替换客户端历史，需要单独设计
+
+### v0.12.5 发布记录（2026-09-15）
+
+- [x] 依据 `db7d0d2`（M48：Codex 远端压缩 v2 在非原生上游回恰好一个 `compaction` 项）发布 **patch
+  `0.12.5`**——只修缺陷、无新端点/配置项（控制台只是给已有的 `call_kind` 值加了标签），按档位规则取 patch。
+  发布提交 `a7a17ff`，tag `v0.12.5`。
+- [x] 发版前 `go vet ./...` + `go test ./...` 全绿；因为动过供应商层（内置 `openai-responses` 的
+  compaction done 帧转发），另跑 `scripts/format-smoke.sh`：普通请求不带 `response_format`、`json_object`
+  按需下发、非法档位在解析处 400 —— 全过（该脚本是 M39 那个"整个供应商被打挂"事故的守卫）。
+- [x] 部署（本机 `:8088`）：`bin/aigw` = 0.12.5（`/version` = `{"revision":"a7a17ff","version":"0.12.5"}`），
+  `healthz`/`readyz`/`admin/ui` 均 200，启动日志 `aigw starting version=0.12.5 revision=a7a17ff` 且本次启动
+  `level=ERROR` 计数 **0**。
+- [x] 回滚点（**停进程前**从 `/proc/<pid>/exe` 取真正在跑的那一份，不是被 `make build` 覆盖后的 `bin/aigw`）：
+  `bin/aigw.prev-m48-db7d0d2`（= 带 M48 修复但未发版的 0.12.4，sha256 `b966aa76…`）与
+  `bin/aigw.prev-0.12.4`（= 已发版 0.12.4，sha256 `f815f53b…`）。回滚：
+  `ssh localhost 'cd /home/winger/work/ai_gateway && scripts/local-run.sh stop && install -m 0755 bin/aigw.prev-<x> bin/aigw && scripts/local-run.sh start'`
+- [x] 控制台：`/admin/ui/` 200，服务的 `js/pages/requests.js` 里能查到 `上下文压缩`（1 处）——即嵌入资产
+  确实是新构建；角标由 `js/brand.js` 读同源 `/version`，与上面的 `/version` 输出同源（浏览器目视待人工确认）。
+- [x] 线上功能复测（同一套 VSCode 自带 codex → 本机 `:8088`）：第二轮自动压缩输出 `context compacted`、
+  无 `Error running remote compact task`/`Fatal error`，随后正常继续；`request_logs#1714` = `call_kind=compaction`、
+  `status=completed`。
+- 未做：**gpt001 生产未部署**（公网 `/aigw/version` 仍为 `0.12.3 / 44f9de2`）。
