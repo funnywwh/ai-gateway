@@ -2640,6 +2640,26 @@ readiness 判据 `curl` 没带 `-f`，一个残留的、正从已删目录应答
       `SIGTERM` 打断后残留服务器进程 0、端口已释放；端口占用时明确拒绝
 - [x] 记录进 `scripts/ui-harness/README.md`「第四个坑」
 
+### v0.14.0 发布与部署记录（2026-09-15，**本机 8088 重启待执行**）
+
+- [x] `scripts/release.sh minor`：`0.13.0 → 0.14.0`，提交 `6bf8dce`、打 tag `v0.14.0`、构建发布物
+      （`bin/aigw -version` = `aigw 0.14.0 (revision 6bf8dce)`）。档位理由：M49 是新对外能力
+      （6 个新管理端点 + MCP 工具、新控制台页、迁移 0018），不是缺陷修复。
+- [x] 发布物内嵌资产抽查：`pages/org.js`/`js/tree.js`/`sidebar-slot`/`org/nodes` 均在二进制内。
+- [x] 回滚点：`bin/aigw.prev-0.13.0-ba25ed3`（用临时 worktree 从 tag `v0.13.0` 原样重建，
+      `-version` 确认 `0.13.0 / ba25ed3`，与正在跑的实例完全一致）。
+- [x] 隔离端口验证（`:8087` + `.cache/v0140-release/` 全新空库）：`/version` = `{"revision":"6bf8dce","version":"0.14.0"}`、
+      `/healthz` ok、`/admin/ui/` 与 `js/pages/org.js`/`js/tree.js` 均 200、登录后 `POST /org/nodes` 201
+      （M49 端点在新库上从零可用）、启动日志 `level=ERROR` 为 0；验证完即释放端口。
+- [x] 磁盘上的 `bin/aigw` 已是 v0.14.0（`scripts/local-run.sh` 的 `BIN` 默认就是它）；在跑的 `:8088`
+      （`0.13.0 / ba25ed3`）在重启前不受影响。
+- [ ] **待用户在宿主终端执行**（沙箱会回收它启动的进程，`stop` 也看不见别的命名空间里的 pid）：
+      `cd /home/winger/work/ai_gateway && scripts/local-run.sh restart`
+      然后 `curl -s localhost:8088/version` 应返回 `{"revision":"6bf8dce","version":"0.14.0"}`，
+      控制台左上角角标应为「AI Gateway  v0.14.0  6bf8dce」，`/admin/ui/js/pages/org.js` 可访问。
+- [ ] 重启后：确认迁移 0018 已在 `data/aigw.db` 应用（`org_nodes`/`org_node_accounts` 表出现）。
+- 回滚（如需）：`cp bin/aigw.prev-0.13.0-ba25ed3 bin/aigw && scripts/local-run.sh restart`。
+
 ### M49 验收记录（2026-09-15）
 
 #### 性能：改前 / 改后实测（12th Gen i7-12700K，`-count=3`）
