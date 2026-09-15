@@ -26,6 +26,10 @@ var allowed = map[string][]string{
 	"internal/arch":       nil,
 	"internal/creds":      nil,
 	"internal/webui":      nil,
+	// The console minifier is a build tool: it reads the console's source tree and writes a
+	// compressed mirror plus a `go build -overlay` file. The console itself never imports it
+	// (internal/webui stays a leaf); its only importer is cmd/minifyui.
+	"internal/webui/minify": nil,
 	"pkg/pluginapi":       nil,
 	"internal/config":     {"internal/logx"},
 	"pkg/providerkit":     {"pkg/pluginapi"},

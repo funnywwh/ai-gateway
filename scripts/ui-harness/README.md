@@ -2,7 +2,7 @@
 
 ## 为什么有这个东西
 
-管理控制台是**原生 ES 模块 + fetch**、零构建（`internal/webui`，见 M9 设计），而本仓库的构建环境
+管理控制台是**原生 ES 模块 + fetch**、源码零构建（`internal/webui`，见 M9 设计），而本仓库的构建环境
 **没有 node/npm**（`scripts/goenv.sh` 只用 Go 工具链，`Makefile` 的 `test-race` 也为此写了 skip 说明）。
 于是「界面改完到底跑不跑得起来」长期只能靠人肉点页面，或者干脆不验证——
 `docs/TODO.md` 记着这条限制。这个目录把它变成一个可重复执行的命令。
@@ -31,6 +31,18 @@ scripts/ui-harness/run.sh                        # 全部视图
 scripts/ui-harness/run.sh --views docs detail    # 只跑指定视图
 make ui-check                                    # 同 run.sh（在 Makefile 里）
 ```
+
+`UI_STATIC_DIR` 换掉被复制的那份控制台资源（默认 `internal/webui/static`，即源码）：
+
+```sh
+make ui-dist                                                             # 生成压缩混淆镜像
+UI_STATIC_DIR=$PWD/.cache/ui-dist/static scripts/ui-harness/run.sh       # 对压缩产物跑同一套走查
+```
+
+**M50 起这是"压缩没有改变行为"的主要证据**：Go 侧的静态合约测试（`internal/webui/embed_test.go`、
+`internal/webui/tests/*.mjs`）读的是源码，看不到"只有压缩后才发生"的回归；对镜像跑一遍同样的
+18 个视图、比对逐视图检查项，才是端到端的保证。harness 页按绝对路径 import（`/js/pages/chat.js`），
+而压缩保持同名文件与同名导出，所以两者走的是同一条路径。
 
 没有 firefox 或 python3 时脚本**跳过并以 0 退出**（与 `test-race` 的处理方式一致），
 所以可以放心挂在 CI/verify 流程里。

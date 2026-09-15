@@ -10,7 +10,15 @@ REVISION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X main.version=$(VERSION) -X main.revision=$(REVISION) -X main.date=$(DATE)
 
-.PHONY: all build test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check
+# The console is embedded minified in a release build. `ui-dist` writes a compressed mirror
+# of internal/webui/static plus an overlay file, and `go build -overlay` then embeds that
+# mirror — so the shipped binary carries stripped, renamed code while the working tree keeps
+# the readable source that the tests and `make ui-check` read. Both live under .cache/,
+# which is ignored by git. See docs/design/m50-frontend-minify.md.
+UIDIST ?= $(CURDIR)/.cache/ui-dist
+UI_OVERLAY ?= $(UIDIST)/overlay.json
+
+.PHONY: all build build-src ui-dist test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check
 
 all: build
 
@@ -25,7 +33,22 @@ version-check:
 		echo "version-check: VERSION must be a.b.c (got '$$v')" >&2; exit 1; \
 	fi
 
-build: version-check
+# ui-dist compresses the console assets and writes the overlay that makes the Go compiler
+# embed the compressed copy instead of the source.
+ui-dist:
+	@mkdir -p $(UIDIST)
+	@$(GOENV) go build -trimpath -o $(UIDIST)/minifyui ./cmd/minifyui
+	@$(UIDIST)/minifyui -src internal/webui/static -out $(UIDIST)/static -overlay $(UI_OVERLAY)
+
+build: version-check ui-dist
+	@mkdir -p bin
+	@$(GOENV) go build -trimpath -ldflags "$(LDFLAGS)" -overlay $(UI_OVERLAY) -o bin/aigw ./cmd/aigw
+
+# build-src is the same binary with the assets as written: for debugging the console in a
+# form a human can read, or for checking that `ui-dist` changed nothing but the bytes. It
+# says so out loud, because "which shape is in this binary" must never be a guess.
+build-src: version-check
+	@echo "ui: source assets (not minified); use 'make build' for the release shape"
 	@mkdir -p bin
 	@$(GOENV) go build -trimpath -ldflags "$(LDFLAGS)" -o bin/aigw ./cmd/aigw
 
@@ -86,4 +109,4 @@ ui-check:
 	@bash scripts/ui-harness/run.sh
 
 clean:
-	@rm -rf bin
+	@rm -rf bin $(UIDIST)

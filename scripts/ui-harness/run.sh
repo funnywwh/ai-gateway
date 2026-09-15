@@ -54,10 +54,19 @@ fi
 
 [ -f "$FIXTURES" ] || { echo "fixtures not found: $FIXTURES" >&2; exit 2; }
 
+# Which console assets to exercise. The default is the source tree; UI_STATIC_DIR points the
+# same walkthrough at the minified mirror (`make ui-dist` leaves it in .cache/ui-dist/static),
+# which is the only way to show that compression changed nothing but the bytes: the Go tests
+# read the readable source, so they cannot see a regression that only exists after minifying.
+# The mirror keeps every file name and every export, so the harness pages import it unchanged.
+ASSETS="${UI_STATIC_DIR:-$ROOT/internal/webui/static}"
+[ -d "$ASSETS" ] || { echo "console assets not found: $ASSETS (run 'make ui-dist' for the mirror)" >&2; exit 2; }
+
 rm -rf "$WORK"
 mkdir -p "$WORK/site" "$WORK/home" "$WORK/run" "$WORK/profiles"
 chmod 700 "$WORK/run"
-cp -r "$ROOT/internal/webui/static/." "$WORK/site/"
+cp -r "$ASSETS/." "$WORK/site/"
+echo "assets: $ASSETS"
 
 # One harness page per area under test: providers.page.html carries the provider and
 # plugin views, currency.page.html the multi-currency money rendering, keys.page.html the
