@@ -2508,27 +2508,51 @@
 - [x] 验证：`plugin` 20 项、`plugin-cached` 19 项全绿（`fieldRows` 1 → 4，`sample` 里能看到
   `health_model` / `proxy` / `session_cookie` 三行），随后**全量 17 个视图全绿**。
 
-## 本机 `:8088` 的重建与验证（2026-09-15，**重启尚未执行**）
+## 发布 v0.13.0 并升级本机 `:8088`（2026-09-15）
 
-- [x] 先确认问题确实出在部署上：修复只在工作区时，`:8088` 服务的 `js/pages/chat_form.js` 里没有
-  `b_submit`、`app.css` 里 `aigw-msg` 命中 0，且四份资产与工作区 diff 全等——即它服务的是旧嵌入资产。
-- [x] 回滚点：`bin/aigw.prev-m35pre-a7a17ff`（= 当时正在跑的 0.12.5/a7a17ff，
-  sha256 `1b04a8f6…`）。注意 `/proc/<pid>/exe` 在 DSH 的命令沙箱里不可见（PID namespace 隔离），
-  所以这里用"`/version` 的 revision 与 `bin/aigw` 的构建来源一致 + 旧二进制里 `b_submit` 计数为 0"
-  作为在跑版本的证据。
-- [x] `make build`：新二进制 sha256 `4329ad0b…`，`VERSION` 仍是 `0.12.5`（**未升版本、未打 tag**：
-  这次不发版，只部署工作区修复），`revision` = 工作区 HEAD `6027237`（比 0.12.5 的 `a7a17ff` 多一个
-  已提交的 feat）。嵌入资产抽查：`b_submit` 0 → 3 处、`aigw-msg` 4 → 10 处、`#b_` 7 处。
-- [x] 在**隔离端口**上验证新二进制（不碰在跑的实例）：复制一份 config 把 `listen` 改 `:8087`、
-  `store.path`/`plugin.state_dir`/`backup.dir` 指到 `.cache/m35-smoke/`（独立空库），启动后
-  `/version` = `{"revision":"6027237","version":"0.12.5"}`、`/admin/ui/` 200、启动日志 `level=ERROR` **0**，
-  服务的 `js/pages/chat_form.js` 能查到 `b_submit`、`app.css` 能查到 `.aigw-msg`——即新构建的嵌入资产
-  确实带修复。验证完即停掉该实例（`:8087` 已释放）。
-- [ ] **未做：在跑的 `:8088` 还没换成新二进制。** 原因不是疏忽，是 `scripts/local-run.sh` 文件头就写明的
-  沙箱约束：DSH 的命令跑在 `bwrap --unshare-pid --die-with-parent` 里，其中启动的进程会被沙箱回收
-  （setsid 也留不住），而当前实例是**宿主终端**启动的——从沙箱里 `stop` 会直接拒（实测 exit 1：
-  "pidfile 里的进程在本命名空间不可见"），`status` 只能靠端口判定。若此时按它提示 `pkill` 再 `start`，
-  新实例会在几十秒后被沙箱回收，等于**把网关打死**。所以这一步必须由人在宿主终端执行：
-  `cd /home/winger/work/ai_gateway && scripts/local-run.sh restart`
-  然后 `curl -s localhost:8088/version` 应返回 `revision=6027237`，浏览器刷新后
-  `/admin/ui/js/pages/chat_form.js` 里能查到 `b_submit`。
+- 档位 **minor `0.12.5 → 0.13.0`**：自 `v0.12.5` 起有一个新增对外能力——`6027237` 给 `openai-chat`
+  加了 `proxy` 配置项（并接入 Gemini 的 OpenAI 兼容层），另两个是本次的 fix 提交。按档位规则取 minor。
+  发布提交 `ba25ed3`，tag `v0.13.0`。
+- [x] 发版前先跑 `scripts/format-smoke.sh`（本次动过供应商层：`internal/providers/openaichat`）：
+  普通请求上游收到 `response_format = null`、`json_object` 按需下发、非法档位在解析处 400 —— 三项全过。
+- [x] `./scripts/release.sh minor`：改 `VERSION` → 提交 → 打 tag → `make build`，
+  产物 `aigw 0.13.0 (revision ba25ed3, built 2026-09-15T08:02:32Z)`，sha256 `e92fd783…`。
+- [x] **发布前先在隔离端口验证发布物**（不碰在跑的实例）：复制 config 把 `listen` 改 `:8086`、
+  `store.path`/`plugin.state_dir`/`backup.dir` 指到 `.cache/rel013/`（独立空库），启动后
+  `/version` 与 `/healthz` 都是 `ba25ed3/0.13.0`、`healthz`/`readyz`/`admin/ui` 均 200、
+  启动日志 `level=ERROR` **0**；服务的 `chat_form.js` 能查到 `b_submit`（1 处）、`app.css` 能查到
+  `aigw-msg`（4 处）——即发布物里确实含 M35 修复。验证完即停掉（`:8086` 已释放）。
+- [x] 部署本机 `:8088`（**由用户在自己的宿主终端执行 `scripts/local-run.sh restart`**，原因见文末"沙箱约束"）。
+  实测：`/version` = `{"revision":"ba25ed3","version":"0.13.0"}`；启动日志
+  `aigw starting version=0.13.0 revision=ba25ed3`（16:05:36）、本次启动 `level=ERROR` 计数 **0**；
+  `healthz`/`readyz`/`admin/ui` 均 200；服务的 `chat_form.js`/`app.css`/`chat.js`/`chat_ui.js`
+  四份资产与工作区 **diff 全等**（即嵌入资产确实是 0.13.0 的新构建，角标由 `js/brand.js` 读同源
+  `/version`，与之同源）。
+- [x] 回滚点：`bin/aigw.prev-0.12.5-a7a17ff`（0.12.5，**revision a7a17ff**，= 升级前在跑的版本）。
+  回滚：`cd /home/winger/work/ai_gateway && install -m 0755 bin/aigw.prev-0.12.5-a7a17ff bin/aigw && scripts/local-run.sh restart`
+- **更正一处上一轮的错误记录**：上一轮写的回滚点 `bin/aigw.prev-m35pre-a7a17ff` 其实**不是**在跑的
+  那一版——它是 `0.12.5 (revision 740b861)`，比在跑版本多一个纯文档提交（`git diff --stat a7a17ff 740b861`
+  只有 `docs/TODO.md`）。代码虽相同，但 `/version` 报的 revision 对不上，不能当"上一版"的回滚依据。
+  这次改用**临时 worktree** 在 `a7a17ff` 上单独 `make build` 出一份 revision 真正匹配的二进制
+  （worktree 用完已 `remove` 并清理，`.cache` 里嵌套的只读 module cache 也一并删掉）。
+- [x] 线上功能复测：用户重启后又提交了一次同一张表单（`chat_52rh7qvmh6m75ryuuftmlhbw` seq 13→14，
+  模型回 `{"ops":[{"op":"message","target":"#form_0",…"level":"ok"}]}`）。用**真实会话字节**在 headless
+  Firefox 里回放这条新回答（`.cache/probe/replay_last_turn.py`，跑之前先逐字节确认所跑资产与 `:8088`
+  线上一致，否则拒绝回放）：表单 `form_0` 渲染正常、提交按钮是
+  `<button … type="button" id="b_submit">`、提示条**存在**且文本正确，
+  `background: rgb(240,242,245)` / `border: 1px` / `border-left: 3px`（ok 绿色条）/ `padding: 8px` /
+  **`order: -1`**、几何位置在 `.form-body` **之前**（卡片顶部），状态行是「已应用 1 处更新」**无**"未生效"。
+  对照修复前同一条指令：`background: transparent / border: 0px / padding: 0px`、排第 5 位、距视口 -2957px。
+  注：这次模型没再发 `disable`，所以线上只证到 `message` 可见这一半；`#b_submit` 那一半由 harness 的
+  `disableButtonById`/`disableWholeForm`/`buttonTypeSubmitNeverMatches` 三项断言覆盖（全绿）。
+- 未做：**gpt001 生产未部署**（公网 `/aigw/version` 仍为 `0.12.3 / 44f9de2`）。
+
+### 沙箱约束（为什么重启必须由人来做）
+
+`scripts/local-run.sh` 文件头写明、本次也实测确认：DSH 的命令跑在
+`bwrap --unshare-pid --die-with-parent` 里（`/proc/1` 就是这条命令），其中启动的进程会被沙箱回收
+（`setsid` 也留不住），而当前实例是**宿主终端**启动的——从沙箱里 `stop` 会直接拒（实测 exit 1：
+"pidfile 里的进程在本命名空间不可见"，`kill -0 <pid>` 报 `No such process`），`status` 只能靠端口判定。
+若此时按它提示 `pkill` 再 `start`，新实例会在几十秒后被沙箱回收，等于**把网关打死**。所以这一版的
+"停 → 换二进制 → 起"由用户在自己的宿主终端执行；我在沙箱里能做的、也已做的是：构建发布物、
+在隔离端口验证发布物、备好 revision 精确匹配的回滚点、以及重启后的线上复测。
