@@ -18,6 +18,13 @@ window.fetch = async (url) => {
   window.__fetched = (window.__fetched || []).concat([path]);
   if (path === '/providers/2/test') window.__handshakeDone = true;
   let body = FIXTURES[path] !== undefined ? FIXTURES[path] : { data: [] };
+  // The plugin path has two states, and the *transition* between them is the thing under test:
+  // 「读取插件声明」 must make the detail page rebuild around the schema the plugin just declared.
+  // The handshake is what flips it, and `/providers/2-after` is the body the gateway answers
+  // afterwards (the pair is documented in README). This branch was missing, so the stub answered
+  // the pre-handshake body forever: the schema table could never appear and the `plugin` view
+  // failed on a fixture nothing ever read.
+  if (path === '/providers/2' && window.__handshakeDone) body = FIXTURES['/providers/2-after'];
   // The capture comes from a gateway with no provider ceiling set, so the live gate of a
   // *limited* provider (M44) is synthesized here: it is what the row looks like once an
   // operator sets max_inflight and requests queue behind it.

@@ -2490,6 +2490,24 @@
   `getBoundingClientRect()` 比较（这条教训也写进了 M35 文档）。
 - 未做：**gpt001 生产还没部署这个修复**（发布按发布流程另走）。本机的重建与验证见文末一节。
 
+### 顺带修掉一个与本次无关的旧红：`plugin` 视图
+
+修完上面去跑全量 `make ui-check` 时 `plugin` 仍红（`pluginTableShown` / `pluginFieldsAfterHandshake`）。
+先在干净工作区上 `git stash` 复跑，**失败完全相同**——所以它是本次之前就存在的，不是这次改出来的。
+
+根因不是 fixture 过期（我先怀疑的是这个，查了才排除）：`/providers/2-after` 这条合成快照（README
+写明"握手后带 schema"）**从来没被任何代码读过**。stub 里 `path === '/providers/2/test'` 只把
+`window.__handshakeDone` 置真，却没有任何分支去用它，于是 `/providers/2` 永远回答握手前那份
+（`config_schema: null`）。而 `providers.js` 的「读取插件声明」流程是"POST /test → 重新 GET /providers/2
+→ 重建详情"（`docsSection` 只在 `config_schema` 非空时才画那张表），所以在 harness 里那张表永远画不出来。
+断言要的三个字段其实都齐——`session_cookie` 在 `credentials_schema` 里，`health_model`/`proxy` 在
+`config_schema` 里——只是页面从没拿到那份 body。
+
+- [x] `scripts/ui-harness/providers.page.html`：补上 `path === '/providers/2' && window.__handshakeDone`
+  → 返回 `/providers/2-after` 的分支，也就是把 README 早就描述的"两个状态"接上。
+- [x] 验证：`plugin` 20 项、`plugin-cached` 19 项全绿（`fieldRows` 1 → 4，`sample` 里能看到
+  `health_model` / `proxy` / `session_cookie` 三行），随后**全量 17 个视图全绿**。
+
 ## 本机 `:8088` 的重建与验证（2026-09-15，**重启尚未执行**）
 
 - [x] 先确认问题确实出在部署上：修复只在工作区时，`:8088` 服务的 `js/pages/chat_form.js` 里没有
