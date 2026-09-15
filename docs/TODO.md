@@ -2653,11 +2653,17 @@ readiness 判据 `curl` 没带 `-f`，一个残留的、正从已删目录应答
       （M49 端点在新库上从零可用）、启动日志 `level=ERROR` 为 0；验证完即释放端口。
 - [x] 磁盘上的 `bin/aigw` 已是 v0.14.0（`scripts/local-run.sh` 的 `BIN` 默认就是它）；在跑的 `:8088`
       （`0.13.0 / ba25ed3`）在重启前不受影响。
-- [ ] **待用户在宿主终端执行**（沙箱会回收它启动的进程，`stop` 也看不见别的命名空间里的 pid）：
-      `cd /home/winger/work/ai_gateway && scripts/local-run.sh restart`
-      然后 `curl -s localhost:8088/version` 应返回 `{"revision":"6bf8dce","version":"0.14.0"}`，
-      控制台左上角角标应为「AI Gateway  v0.14.0  6bf8dce」，`/admin/ui/js/pages/org.js` 可访问。
-- [ ] 重启后：确认迁移 0018 已在 `data/aigw.db` 应用（`org_nodes`/`org_node_accounts` 表出现）。
+- [x] **已重启（2026-09-15 19:27，用户在宿主终端执行 `scripts/local-run.sh restart`）**，线上复测全过：
+      `/version` = `{"revision":"6bf8dce","version":"0.14.0"}`、`/healthz` ok、`/admin/ui/` 与
+      `js/pages/org.js`/`js/tree.js` 均 200，且服务出的 `app.js` 含 `sidebar-slot`（确认不是旧嵌入资产）；
+      启动日志 `aigw starting version=0.14.0 revision=6bf8dce`，**重启之后 `level=ERROR` 为 0**
+      （日志文件里仅存的一条 ERROR 是重启前 17:39 的历史记录）。
+- [x] 迁移确认：实际部署库是 **`data/aigw-local.db`**（启动日志指明；`data/aigw.db` 是另一份示例库，
+      第一次核对查错了文件）——其 `schema_migrations` 已到 `(18, '0018_org_structure')`，
+      `org_nodes`/`org_node_accounts` 两表与 4 个组织索引就位。
+- [x] M49 端点在线上做了一次写路径往返：登录 → `GET /org/nodes`（空列表，端点已接线）→
+      `POST /org/nodes` 201 → 列表可见 → `DELETE` 200 → 列表清空（不留残留）；
+      审计里留下 `create`/`delete` 两条 `org_node` 记录（含 `nodes_deleted: 1`）。
 - 回滚（如需）：`cp bin/aigw.prev-0.13.0-ba25ed3 bin/aigw && scripts/local-run.sh restart`。
 
 ### M49 验收记录（2026-09-15）
