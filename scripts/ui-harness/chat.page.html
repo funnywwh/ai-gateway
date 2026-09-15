@@ -38,6 +38,16 @@ const MCP_TOKENS = [
   { id: 4, name: 'retired', token_prefix: 'aigw_mcp_old', scope: 'admin', status: 'revoked' },
 ];
 
+// Mirrors the local `admin` account, where the unusable keys come first: /keys is ordered by
+// id, so a dialog that listed every key — or that defaulted to the first row — would pick a
+// suspended one and every question would fail with "API key is not active". The new-session
+// dialog must therefore offer the active key only, and open on it.
+const KEYS = [
+  { id: 5, name: 'wiki', key_prefix: 'sk-0faf3f8e0', status: 'suspended' },
+  { id: 8, name: 'deepseek-admin', key_prefix: 'sk-489328a38', status: 'active' },
+  { id: 9, name: 'retired-key', key_prefix: 'sk-89d77f7b0', status: 'disabled' },
+];
+
 const SESSION = {
   id: 'chat_1', object: 'chat.session', title: '本月成本', model: 'deepseek-flash',
   account_id: 1, api_key_id: 1, mcp_token_id: 2, write_mode: 'read_only', skill_ids: [7],
@@ -220,7 +230,7 @@ window.fetch = async (url, options) => {
   }
   if (path === '/chat/models') return json({ object: 'list', account: 'acme', data: [{ id: 'deepseek-flash', has_tools: true }] });
   if (path === '/accounts') return json({ data: [{ id: 1, name: 'acme', billing_mode: 'postpaid' }], total: 1, count: 1, limit: 200, offset: 0 });
-  if (path === '/keys') return json({ data: [{ id: 1, name: 'console-chat', key_prefix: 'sk-gw-abc', status: 'active' }], total: 1, count: 1, limit: 200, offset: 0 });
+  if (path === '/keys') return json({ data: KEYS, total: KEYS.length, count: KEYS.length, limit: 200, offset: 0 });
   // The new-session dialog lists the tokens a conversation may act as.
   if (path === '/mcp-tokens') return json({ data: MCP_TOKENS, total: MCP_TOKENS.length, count: MCP_TOKENS.length, limit: 200, offset: 0 });
   if (path === '/chat/sessions/chat_1/skill-draft') {
@@ -672,6 +682,16 @@ try {
     const tokenPicker = tokenField ? tokenField.querySelector('select') : null;
     checks.newSessionTokenOptions = !!tokenPicker && tokenPicker.options.length === 2
       && ![...tokenPicker.options].some((o) => o.textContent.includes('retired'));
+    // 只列可计费的 Key。fixture 里第一行（id=5 wiki）是 suspended，正是本机 admin 账户的形状：
+    // 若把整份 /keys 都列出来，下拉会默认选中那一行，之后每个问题都会被服务端以
+    // "API key is not active" 拒绝，而模型下拉同时是空的——这就是「模型是空的」的由来。
+    const keyField = newDialog
+      ? [...newDialog.querySelectorAll('label.field')].find((l) => l.textContent.includes('API Key'))
+      : null;
+    const keyPicker = keyField ? keyField.querySelector('select') : null;
+    checks.newSessionKeyPickerOffersActiveOnly = !!keyPicker && keyPicker.options.length === 1
+      && keyPicker.value === '8'
+      && ![...keyPicker.options].some((o) => o.textContent.includes('wiki') || o.textContent.includes('retired-key'));
     // Opening on the first usable token (admin_read) must already describe that token.
     checks.newSessionTokenHintOnOpen = !!newDialog && newDialog.textContent.includes('后台只读');
     if (tokenPicker) {
@@ -691,6 +711,8 @@ try {
         await settle();
         const created = JSON.parse((window.__sent || {})['/chat/sessions'] || '{}');
         checks.newSessionCreateSendsChosenToken = created.mcp_token_id === 3;
+        // The session bills against the key the dialog actually opened on, not the first row.
+        checks.newSessionCreateSendsActiveKey = created.api_key_id === 8;
       }
     }
 

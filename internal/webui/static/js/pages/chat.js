@@ -365,14 +365,27 @@ export async function render({ page, actions, session, route }) {
 
     async function loadKeys() {
       clear(keySelect);
+      status.textContent = '';
+      status.className = 'muted';
+      // Only keys that can be billed right now are offered, for the same reason the token
+      // picker filters (see fetchUsableTokens): the server refuses any other key with
+      // "API key is not active", and /chat/models answers 401 for it — which leaves the
+      // model picker empty with nothing but an error line to explain the blank. /keys is
+      // ordered by id, so an unusable first row would otherwise become the default choice
+      // of the whole dialog, hiding the very keys that do work.
       try {
         const payload = await api.get('/keys', { account_id: accountSelect.value, limit: 200 });
-        state.keys = payload.data || [];
+        state.keys = (payload.data || []).filter((key) => key.status === 'active');
       } catch (err) {
         state.keys = [];
+        status.textContent = api.errorMessage(err);
+        status.className = 'toast error';
       }
       for (const key of state.keys) {
-        keySelect.append(el('option', { value: String(key.id), text: (key.name || key.key_prefix) + ' · ' + key.status }));
+        keySelect.append(el('option', { value: String(key.id), text: key.name || key.key_prefix }));
+      }
+      if (!state.keys.length && !status.textContent) {
+        status.textContent = '该账户没有可用的 API Key：只有 active 的 Key 能计费，请先启用或新建一个。';
       }
       await loadModels();
     }
