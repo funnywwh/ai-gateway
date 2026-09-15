@@ -184,6 +184,26 @@ try {
     // wrong reason as soon as the account list is ordered differently.
     checks.detailShown = pageText().includes('节点详情');
     checks.membersLoaded = !!document.querySelector('.org-member');
+
+    // 成员行的几何：勾选框与账号名必须紧邻且垂直对齐。
+    //
+    // 这里必须量 getBoundingClientRect，不能只看 textContent：这条 bug 的形态是**布局**——
+    // app.css 里全局的 `input, select, textarea { width:100% }` 命中这个没有 class 的
+    // checkbox，把它撑满整行，于是账号名被推到最右边、看起来"没对齐"。文字内容一字不差，
+    // 任何文本断言都会全绿。（与 .plus-skill / .form-radio 是同一条坑，这是第三处。）
+    const memberRow = document.querySelector('.org-member');
+    const memberBoxEl = memberRow.querySelector('input');
+    const memberNameEl = memberRow.querySelector('span');
+    const boxRect = memberBoxEl.getBoundingClientRect();
+    const nameRect = memberNameEl.getBoundingClientRect();
+    checks.memberCheckboxNotStretched = boxRect.width > 0 && boxRect.width <= 20;
+    checks.memberCheckboxNameGap = (nameRect.left - boxRect.right) >= 0 && (nameRect.left - boxRect.right) <= 12;
+    checks.memberVerticallyAligned = Math.abs((boxRect.top + boxRect.height / 2) - (nameRect.top + nameRect.height / 2)) <= 2;
+    checks.memberRowFitsPanel = memberRow.getBoundingClientRect().width <= document.querySelector('.org-members').getBoundingClientRect().width;
+    // 把量到的数字带出来：断言只说真假，数字才能说明"修好了多少"。
+    checks.memberRowMetrics = 'box=' + Math.round(boxRect.width) + 'x' + Math.round(boxRect.height)
+      + ' gap=' + Math.round(nameRect.left - boxRect.right)
+      + ' dy=' + Math.round(Math.abs((boxRect.top + boxRect.height / 2) - (nameRect.top + nameRect.height / 2)));
     const memberBox = (name) => {
       const row = [...document.querySelectorAll('.org-member')]
         .find((el) => el.textContent.includes(name));
@@ -273,6 +293,16 @@ try {
     checks.orgColumnShown = pageText().includes('所属组织');
     checks.orgPathInCell = pageText().includes('总部/研发部/平台组');
     checks.filterPresent = !!document.querySelector('.org-filter');
+
+    // 筛选行的勾选框同样不能被全局 `input { width:100% }` 撑满，文字要与它同一行对齐。
+    const filterBar = document.querySelector('.org-filter-bar');
+    const filterBoxEl = filterBar.querySelector('input[type="checkbox"]');
+    const filterTextEl = filterBoxEl.parentElement.querySelector('span');
+    const fBoxRect = filterBoxEl.getBoundingClientRect();
+    const fTextRect = filterTextEl.getBoundingClientRect();
+    checks.filterCheckboxNotStretched = fBoxRect.width > 0 && fBoxRect.width <= 20;
+    checks.filterCheckboxTextGap = (fTextRect.left - fBoxRect.right) >= 0 && (fTextRect.left - fBoxRect.right) <= 12;
+    checks.filterVerticallyAligned = Math.abs((fBoxRect.top + fBoxRect.height / 2) - (fTextRect.top + fTextRect.height / 2)) <= 2;
     checks.filterHasNodes = (() => {
       const select = document.querySelector('.org-filter');
       return !!select && [...select.options].some((o) => o.text === '全部账户') && select.options.length === window.__org.nodes.length + 1;

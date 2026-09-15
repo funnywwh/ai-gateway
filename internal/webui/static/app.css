@@ -385,5 +385,20 @@ textarea.form-input { resize:vertical; min-height:64px; }
 .org-tree-card { max-height:70vh; overflow:auto; }
 .org-members { max-height:280px; overflow:auto; border:1px solid var(--line); border-radius:8px; padding:8px; }
 .org-member { display:flex; align-items:center; gap:8px; padding:4px 2px; font-size:13px; }
-.org-member input { margin:0; }
+/* 成员行的勾选框：全局 `input, select, textarea { width:100% }`（本文件第 89 行）会命中这个
+   没有 class 的 checkbox，把它撑满整行、账号名被挤到最右边——表现就是"勾选框和文字隔太远、
+   不对齐"。文字内容一字不差，所以只有量几何才看得出来。与 .plus-skill / .form-radio 是同一条
+   坑，这是第三处：显式给出尺寸并禁止伸缩，名字过长时换行而不是把 id 挤出去。 */
+.org-member input[type=checkbox] { flex:0 0 auto; width:16px; height:16px; margin:0;
+  accent-color:var(--accent); }
+.org-member-name { flex:0 1 auto; min-width:0; overflow-wrap:anywhere; }
+.org-member-id { flex:0 0 auto; }
+
+/* 工具栏里的行内筛选控件（标签 + 控件/勾选框）。
+   不要用 `.field` 做这件事：它是块级布局、文字 span 是 display:block，勾选框与文字会分成两行；
+   勾选框还要显式给尺寸，否则同样被全局 width:100% 撑满。 */
+.filter-field, .filter-check { display:flex; align-items:center; gap:6px; font-size:12.5px; flex:0 0 auto; }
+.filter-field > span, .filter-check > span { color:var(--muted); flex:0 0 auto; }
+.filter-check input[type=checkbox] { flex:0 0 auto; width:16px; height:16px; margin:0;
+  accent-color:var(--accent); }
 .org-path { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; color:var(--muted); }

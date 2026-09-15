@@ -12,9 +12,12 @@ export async function render({ page, actions, session }) {
   // 组织筛选：节点列表来自组织架构接口，选中后按节点过滤（默认包含子节点）。
   const orgFilter = el('select', { class: 'org-filter' }, [el('option', { value: '', text: '全部账户' })]);
   const orgDescendants = el('input', { type: 'checkbox', checked: true });
+  // .filter-field / .filter-check are the toolbar's inline label+control pair. `.field` is the
+  // wrong tool here: it is a block layout whose text span is display:block, so the checkbox and
+  // its label end up on separate lines.
   const filterBox = el('div', { class: 'toolbar org-filter-bar' }, [
-    el('label', { class: 'field inline' }, [el('span', { text: '按组织' }), orgFilter]),
-    el('label', { class: 'field inline' }, [orgDescendants, el('span', { text: '含子节点' })]),
+    el('label', { class: 'filter-field' }, [el('span', { text: '按组织' }), orgFilter]),
+    el('label', { class: 'filter-check' }, [orgDescendants, el('span', { text: '含子节点' })]),
   ]);
   const query = { org_node_id: '', include_descendants: 'true' };
 

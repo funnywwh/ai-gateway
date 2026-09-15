@@ -81,6 +81,21 @@ assert.match(org, /const saveMembers = el\('button', \{\s*class: 'btn btn-primar
 // The save path must not run before the current members are known, or it would clear the node.
 assert.match(org, /state\.membersLoaded = false;/, 'the save button must be re-armed only after the members load');
 
+// --- 勾选框不能被全局 `input { width:100% }` 撑满 ------------------------------------------
+//
+// 这条 bug 的形态是布局：文字一字不差，只有量几何才看得出来，所以浏览器走查里量了
+// getBoundingClientRect（见 scripts/ui-harness/org.page.html）。这里再从源码一侧钉住根因：
+// 成员行与工具栏筛选行都必须显式给出勾选框尺寸，且不能用块级的 `.field` 承载行内勾选框。
+assert.match(css, /\.org-member input\[type=checkbox\] \{ flex:0 0 auto; width:16px/,
+  'the member checkbox needs an explicit size: the global input{width:100%} rule stretches it');
+assert.match(css, /\.org-member-name \{ flex:0 1 auto; min-width:0/,
+  'a long account name must wrap instead of pushing the id out of the row');
+assert.match(css, /\.filter-check input\[type=checkbox\] \{ flex:0 0 auto; width:16px/,
+  'the toolbar filter checkbox needs the same explicit size');
+assert.doesNotMatch(accounts, /class: 'field inline'/,
+  "the toolbar filter must not use the block-level .field layout, which puts the checkbox and its text on separate lines");
+assert.match(org, /class: 'org-member-name'/, 'the member name carries its own class so the layout rule is unambiguous');
+
 // --- the accounts page shows and filters by organization ----------------------------------
 
 assert.match(accounts, /key: 'org_nodes', label: '所属组织'/, 'accounts must show the organization column');

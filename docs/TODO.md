@@ -2666,6 +2666,31 @@ readiness 判据 `curl` 没带 `-f`，一个残留的、正从已删目录应答
       审计里留下 `create`/`delete` 两条 `org_node` 记录（含 `nodes_deleted: 1`）。
 - 回滚（如需）：`cp bin/aigw.prev-0.13.0-ba25ed3 bin/aigw && scripts/local-run.sh restart`。
 
+### 修掉组织相关界面的勾选框布局（用户反馈：节点详情里勾选框与文字隔太远、不对齐）
+
+反馈现场是 v0.14.0 上线后的控制台。根因不在组织代码，在 `app.css` 第 89 行的全局规则
+`input, select, textarea { … width:100% }`——它命中成员行里**没有 class 的 checkbox**，把勾选框
+撑满整行，账号名被挤到面板最右缘。这是本仓库同一条坑的**第三处**（`.plus-skill`、`.form-radio`
+的注释里都写着这条），我这次漏了 `width` 的覆盖，只写了 `margin:0`。
+
+同一处还有第二个我引入的问题：账户页筛选行用了`.field inline`——`.inline` 根本没定义，而
+`.field` 是块级布局、文字 span 是 `display:block`，于是勾选框和「含子节点」分成两行、勾选框同样被撑满。
+
+- [x] `app.css`：`.org-member input[type=checkbox]` 显式 `flex:0 0 auto; width/height:16px`；
+      新增 `.org-member-name`（`flex:0 1 auto; min-width:0`，长名换行而不是把 id 挤出去）与 `.org-member-id`
+- [x] `app.css`：新增工具栏行内筛选范式 `.filter-field` / `.filter-check`（标签+控件/勾选框），
+      并在注释里写明「不要用 `.field` 承载行内勾选框」
+- [x] `pages/org.js`：成员行的名字与 id 改用专有 class（原来是无 class 的 `<span>`，CSS 只能按位置猜）
+- [x] `pages/accounts.js`：筛选行改用 `.filter-field` / `.filter-check`
+- [x] **先证伪再修**：先在 `org.page.html` 加几何断言（量 `getBoundingClientRect`）并跑在**未修复**的
+      CSS 上，实测 `memberCheckboxNotStretched`、`filterCheckboxNotStretched`、`filterCheckboxTextGap`、
+      `filterVerticallyAligned` **四项为红**；修复后转绿
+- [x] 实测数字（同一 harness）：**改前 `box=789x14`**（勾选框 789px 宽，名字被挤到最右缘）→
+      **改后 `box=16x16 gap=8 dy=0`**
+- [x] 静态回归（`internal/webui/tests/org_tree_test.mjs`）：钉住"勾选框必须显式给尺寸"与
+      "工具栏不得用 `.field inline`"，从源码一侧守住根因
+- [x] `make ui-check` 21 个视图全绿（org 37 项、org-accounts 10 项）、`make verify` 全绿
+
 ### M49 验收记录（2026-09-15）
 
 #### 性能：改前 / 改后实测（12th Gen i7-12700K，`-count=3`）

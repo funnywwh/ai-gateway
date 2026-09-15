@@ -125,8 +125,13 @@ export async function render({ page, actions, session, sidebar }) {
         box.addEventListener('change', () => {
           if (box.checked) checked.add(account.id); else checked.delete(account.id);
         });
-        list.append(el('label', { class: 'org-member' }, [box, el('span', { text: account.name }),
-          el('span', { class: 'muted', text: '#' + account.id })]));
+        // The name and id carry their own classes: the row's layout rules key off them, and a
+        // bare <span> would have to be targeted positionally in CSS.
+        list.append(el('label', { class: 'org-member' }, [
+          box,
+          el('span', { class: 'org-member-name', text: account.name }),
+          el('span', { class: 'org-member-id muted', text: '#' + account.id }),
+        ]));
       }
     }
 
