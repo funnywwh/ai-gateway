@@ -110,7 +110,10 @@ const pinnedChecks = () => {
   return result;
 };
 // The affordance is checked as rendered, not as class names: a round hit target,
-// inside the header, sitting to the right of the title.
+// inside the header, sitting to the right of the title. The icon itself is checked
+// for being drawn geometry rather than a text glyph, because the glyph this button
+// used to carry (U+2715) is missing from some operator font stacks and then renders
+// as an empty box, which reads as "this dialog has no close button".
 const closeChecks = () => {
   const btn = closeButton();
   if (!btn) return { closeButton: false };
@@ -119,12 +122,18 @@ const closeChecks = () => {
   const dialog = btn.closest('.modal');
   const radius = parseFloat(getComputedStyle(btn).borderTopLeftRadius) || 0;
   const size = btn.getBoundingClientRect();
+  const icon = btn.querySelector('svg.modal-close-icon');
+  const box = icon && icon.getBoundingClientRect();
   return {
     closeButton: true,
     closeRound: radius >= size.width / 2 - 1 && radius >= size.height / 2 - 1,
     closeInHeader: !!head && dialog && dialog.firstElementChild === head,
     closeRightOfTitle: !!title && title.getBoundingClientRect().right <= btn.getBoundingClientRect().left,
     closeLabel: btn.getAttribute('aria-label') === '关闭',
+    // Drawn, not typeset: a rendered cross with real geometry, and no text glyph at all.
+    closeIconDrawn: !!icon && !!icon.querySelector('path,line,polyline'),
+    closeIconNoTextGlyph: btn.textContent.trim() === '',
+    closeIconSized: !!box && box.width > 4 && box.height > 4 && box.width <= size.width,
     ...pinnedChecks(),
   };
 };

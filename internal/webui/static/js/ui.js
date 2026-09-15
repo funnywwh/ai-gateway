@@ -93,18 +93,38 @@ export function jsonBlock(value) {
   return el('pre', { class: 'mono', text });
 }
 
+// closeIcon draws the cross inside the close button. It is inline SVG rather than
+// the "✕" text glyph this used to be: U+2715 is missing from plenty of operator
+// font stacks, and where it is missing the button renders as an empty box — a
+// dialog that looks like it has no close control at all (that is exactly what was
+// reported from a browser whose fonts lacked it). A drawn cross cannot depend on
+// the fonts installed on the machine reading the console. Nothing here needs the
+// network or an inline style, so the strict console CSP is untouched: img-src
+// governs loaded resources, not inline elements.
+function closeIcon() {
+  const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  for (const [key, value] of Object.entries({
+    class: 'modal-close-icon', viewBox: '0 0 14 14', width: '12', height: '12',
+    fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6',
+    'stroke-linecap': 'round', 'aria-hidden': 'true', focusable: 'false',
+  })) icon.setAttribute(key, value);
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', 'M3 3 L11 11 M11 3 L3 11');
+  icon.append(path);
+  return icon;
+}
+
 // closeButton is the round ✕ every dialog carries in its top-right corner, so a
 // popup is always dismissable the same way. Pages that hand-roll a dialog (a
 // secret reveal, a detail view) call this instead of inventing their own, and
-// modal()/confirmDialog() below use it too. The glyph is text, not an inline
-// icon font or SVG, because the console is served under a strict CSP with no
-// inline styles and no external assets.
+// modal()/confirmDialog() below use it too. The label is text (every reader has
+// the CJK font this console is written in); the icon is drawn (see closeIcon).
 export function closeButton(onClose, options) {
   const opts = options || {};
   return el('button', {
     class: 'modal-close' + (opts.danger ? ' modal-close-danger' : ''),
     type: 'button', title: '关闭', 'aria-label': '关闭', onclick: onClose,
-  }, ['✕']);
+  }, [closeIcon()]);
 }
 
 // modalHead is the dialog header: the title on the left, the round close button

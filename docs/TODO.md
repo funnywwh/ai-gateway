@@ -2259,3 +2259,37 @@
   ② 插件 `Info().Version` 仍硬编码 `0.1.0`（控制台与启动日志看不出插件构建差异，见上文错配事故）。
   ③ `pluginapi.Request.Extra` 的注释说"透传给插件"，但外部插件拿不到（帧 params 里的 `Request`
      没有 `MarshalJSON`，只有内置 `openai-responses` 读该字段）——注释与实现不符。
+
+## 弹框关闭按钮显示成豆腐块（2026-09-15）
+
+- 现象（用户实机反馈，本机 `127.0.0.1:8088` 控制台）：弹框右上角的关闭按钮**显示成一个方框**
+  （豆腐块），不是 ×。控制台其余部分正常。
+- 根因：关闭图标是**文字字形** `U+2715 MULTIPLICATION X`（`ui.js` 的 `closeButton()` 写入 `'✕'`）。
+  `app.css` 的 `body` 字体栈是 `system-ui, -apple-system, 'Segoe UI', 'Noto Sans SC', sans-serif`，
+  这几支字体**都没有 U+2715**（本机实测覆盖它的只有 DejaVu Sans / Noto Sans Symbols2 等符号字体）；
+  字体回退一旦落到缺字形的字体，浏览器就画 .notdef 方框。写这段代码时的注释把"用文字字形"当成了
+  对严格 CSP 的让步，但**内联 SVG 与 CSP 无关**（`img-src` 管的是被加载的资源，不是内联元素），
+  这个取舍从一开始就没有必要。
+- [x] `internal/webui/static/js/ui.js`：新增内部函数 `closeIcon()`，用 `createElementNS` 画一个
+  12×12 内联 SVG 十字（`stroke:currentColor`、`stroke-linecap:round`），`closeButton()` 改用它；
+  按钮的 `aria-label`/`title` 仍是 `关闭`（文字标签走的是中文字形，控制台本来就是中文界面，
+  字体栈里有 `Noto Sans SC`，不存在同一问题）。
+- [x] `internal/webui/static/app.css`：补 `.modal-close-icon { display:block; }`，并写明"画出来而不是排出来"
+  的理由；`currentColor` 让 `:hover`（`--fg`）与 `--danger`（确认类弹框）的配色照旧生效。
+- [x] 验证（无 node 环境，走 `make ui-check` 的真实浏览器 harness）：`scripts/ui-harness/providers.page.html`
+  的 `closeChecks()` 新增三项断言 —— `closeIconDrawn`（按钮里真有渲染出来的 `svg.modal-close-icon`
+  且含 `path/line/polyline`）、`closeIconNoTextGlyph`（`textContent` 为空，即不再依赖字形）、
+  `closeIconSized`（图标有实际几何尺寸且不超过按钮）。`UI_HARNESS_PORT=8107 scripts/ui-harness/run.sh`
+  全 18 个视图通过（`plugin` 一项失败**与本改动无关**：已用 `git stash` 在改动前的代码上复现同样两项失败，
+  是那个视图依赖本机插件进程握手的既有问题）。
+  **变异验证**：把 `closeButton()` 改回 `['✕']` 再跑 `--views detail`，恰好 `closeIconDrawn` /
+  `closeIconNoTextGlyph` / `closeIconSized` 三项失败并以非 0 退出，确认断言对"退回文字字形"有咬合力。
+  另用 8 倍放大的探针页截图（`.cache/probe-close/probe.png`）确认渲染出来的是**十字**而不是别的形状。
+- [x] `go vet ./...` + `go test ./...` 全绿；`make build` 通过。
+- 部署：本机 `:8088` 的实例**尚未重启**（PID namespace 隔离，无法从沙箱内给它发信号）。用户需要在宿主
+  终端执行 `scripts/local-run.sh restart`；`ui.js` 与 `app.css` 的 `Cache-Control: max-age=300`，
+  重启后最多 5 分钟内浏览器会拿到新版本（想立刻生效可强刷）。
+- 未做（同类隐患，本次未改）：控制台里还有几处**纯符号字形**，缺字形时会以同样方式显示成方框 ——
+  `chat.js` 技能标签的卸载按钮 `×`（U+00D7，覆盖字体多得多）、`requests.js`/`settings.js` 的 `⚠`
+  （U+26A0）、图表导出的 `→`/`↓`（U+2192/U+2193）。它们不影响可用性（都另有文字标签或上下文），
+  暂不逐一改成 SVG；若用户再遇到方框，按同一思路处理。

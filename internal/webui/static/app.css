@@ -128,6 +128,10 @@ label.field > span { display:block; color:var(--muted); font-size:12px; margin-b
   display:inline-flex; align-items:center; justify-content:center; cursor:pointer;
   border:1px solid var(--line); background:var(--panel-2); color:var(--muted);
   font:inherit; font-size:14px; line-height:1; }
+/* The cross is drawn, not typeset: as a text glyph (U+2715) it is missing from some
+   operator font stacks and then renders as an empty box — a dialog that looks like it
+   has no close control at all. The SVG inherits color, so hover and danger still work. */
+.modal-close-icon { display:block; }
 .modal-close:hover { border-color:var(--accent); color:var(--fg); }
 .modal-close:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
 .modal-close-danger { color:var(--danger); border-color:var(--danger); }
