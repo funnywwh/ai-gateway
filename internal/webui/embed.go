@@ -1,6 +1,9 @@
-// Package webui serves the embedded administration console. It has no build step:
-// the assets are plain ES modules that a browser runs directly, embedded into the
-// binary so the console ships with the server and needs no network access.
+// Package webui serves the embedded administration console. The source has no build
+// step: the assets are plain ES modules that a browser runs directly, and the tests
+// read them as they are. A release build (`make build`) compresses a copy of that tree
+// with cmd/minifyui and compiles this package with `-overlay`, so the binary carries the
+// minified copy while the working tree keeps the readable source. See
+// docs/design/m50-frontend-minify.md.
 package webui
 
 import (

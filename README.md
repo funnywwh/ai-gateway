@@ -89,10 +89,15 @@ M39 让「线上跑的是哪个版本」有一个能读的答案：版本号的�
 
 ```sh
 source scripts/goenv.sh
-make build      # 产出 bin/aigw
+make build      # 产出 bin/aigw（控制台资源先压缩混淆，再用 -overlay 嵌入）
+make build-src  # 同上，但不混淆（排查问题/对照用，日志行会写明）
 make test       # 单元测试
 make verify     # vet + test + build
 ```
+
+`make build` 会把 `internal/webui/static/` 压缩成 `.cache/ui-dist/static/`（去注释、去换行、局部标识符重命名，
+体积 −41%），再用 `go build -overlay` 把镜像嵌进二进制——**工作区源码一个字节都不改**，因此 `go test`、
+`internal/webui/tests/*.mjs` 与 `make ui-check` 读的仍是可读源码。详见 `docs/design/m50-frontend-minify.md`。
 
 ## 运行
 
@@ -115,7 +120,7 @@ make verify     # vet + test + build
 | `bin/aigw mcp-serve --account <name>` | 本地 stdio MCP（11 个只读查询工具） |
 | `bin/aigw mcp-serve --endpoint <完整 MCP URL> --token-env GW_MCP_TOKEN` | stdio 转发到运行中网关，按令牌 scope 提供查询与后台工具（M42） |
 | `/admin/api/v1/*` | 管理面：账户/Key/标签/供应商/模型/路由/映射/定价/账单/充值/对账/备份/审计 |
-| `/admin/ui/*` | 内置控制台（零构建，随二进制发布） |
+| `/admin/ui/*` | 内置控制台（源码零构建；发布构建经压缩混淆后嵌入，M50） |
 | `scripts/load.sh` | 一键压测（自建 `cmd/loadgen`，输出 rps 与分位延迟） |
 | `scripts/deepseek-smoke.sh` | DeepSeek 接入走查（离线假上游；加 `--live` 与 `DEEPSEEK_API_KEY` 打真机） |
 | `scripts/verify-m34.sh` | 可交互预览的自查（29 项，真实 HTTP、不产生模型费用、结束自动清理）；`GW_ADMIN_PASSWORD=… scripts/verify-m34.sh` |
@@ -123,6 +128,8 @@ make verify     # vet + test + build
 | `scripts/format-smoke.sh` | `response_format` 语义走查：真实二进制 + 假 DeepSeek，逐条读上游收到的请求体（无网、无 key、不花钱） |
 | `scripts/ui-badge-test.mjs`（`make ui-base`） | 左上角版本角标的 node 断言（三行 DOM shim，不需要浏览器）：两格内容、revision 为 `none` 时不显示、端点读不到时不报错 |
 | `scripts/release.sh`（skill `release-version`） | 发版：升 `VERSION`（a.b.c）→ 提交打 tag → `make build`；用法 `scripts/release.sh patch/minor/major` |
+| `make build` / `make ui-dist` | 发布构建：`ui-dist` 生成压缩混淆镜像（`.cache/ui-dist/static` + `overlay.json`），`build` 用它嵌入 `bin/aigw` |
+| `make build-src` | 不混淆构建（可读版，排查线上问题用） |
 | `make verify` | vet + 全量测试 + 控制台 node 断言 + 构建 |
 
 ## 压测基线（本机 i7-12700K，testecho 供应商）

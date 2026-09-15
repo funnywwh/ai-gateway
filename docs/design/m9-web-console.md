@@ -12,6 +12,11 @@
 - 因此采用**原生 HTML + ES modules + fetch**，不用框架、不用打包器、不用 CDN（离线可用）；
 - 资源用 `go:embed` 编进二进制，`/admin/ui/*` 提供，**不引入独立前端服务**。
 
+> **M50 补充**：以上三条仍然成立——仓库里的源码依旧零构建、浏览器直跑、测试直读。变的是**发布产物的形态**：
+> `make build` 会先把资源压缩混淆到 `.cache/ui-dist/`，再用 `go build -overlay` 嵌入，于是二进制里那份是去注释、
+> 局部标识符重命名的（体积 −41%，`bin/aigw` −229 KB）。工具是 Go（`cmd/minifyui` + esbuild 的 Go API），
+> 仍然不引入 npm。见 `docs/design/m50-frontend-minify.md`。
+
 ## 2. 结构
 
 ```

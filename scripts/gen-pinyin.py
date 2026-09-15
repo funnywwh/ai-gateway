@@ -94,9 +94,11 @@ def main() -> int:
 // 覆盖：CJK 统一汉字基本区 U+{RANGE_LO:04X}–U+{RANGE_HI:04X}（{len(covered)} 字有声母读音）。
 // 表外的字符不做拼音匹配，只按字面子串匹配——这条限制写在 docs/org.md 里。
 //
-// 为什么是生成的文件：控制台是**零构建**的原生 ES 模块（见 docs/design/m9-web-console.md），
+// 为什么是生成的文件：控制台源码是**零构建**的原生 ES 模块（见 docs/design/m9-web-console.md），
 // 不能 import npm 包，需要的东西必须是 internal/webui/static/ 下的文件；而表是数据，
 // 生成一次提交进来即可（`make verify` 不会重新生成它）。
+// 注意：发布二进制里的副本在 `make build` 时会被压缩混淆（注释头随之消失，M50），
+// 因此**本文件才是出处记录**（版本与 SHA-256 都在这里），别指望从产物里读回来。
 //
 // 声调已剥离、ü 统一写成 v：操作员打的是 "zhangsan"，不会打 "zhāngsān"。
 
