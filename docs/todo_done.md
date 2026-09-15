@@ -3081,3 +3081,41 @@ harness 之所以漏掉它，是因为 fixture 直接给了 `account_count` 字�
   控制流扁平化/字符串加密（需 npm 工具链，且会让既有静态合约测试与 harness 断言大面积失效）
 - 未做：**发版与部署**。本改动只在控制台资产与构建路径上，`VERSION` 未动（仍 0.14.0），
   按 `release-version` skill 升版本/打 tag/部署 gpt001 是独立一步
+
+### v0.14.1 发布与部署记录（2026-09-15，本机 :8088 已升级）
+
+- [x] `scripts/release.sh patch`：`0.14.0 → 0.14.1`，提交 `1a1295d`、tag `v0.14.1`、
+      构建 `aigw 0.14.1 (revision 1a1295d)`。档位理由：本次带的 M50（控制台资源构建期压缩混淆）
+      不改任何 API、配置语义与默认行为，只是产物与构建路径的改进；另附三个 M49 界面修复
+      （组织过滤支持拼音/英文、树形控件展开箭头改内联 SVG、成员行勾选框布局）——都是缺陷修复，
+      故取 patch 而非 minor。发布前工作区是脏的（另一会话的 M50 提交 + 本轮 TODO 拆分），
+      先把 TODO 拆分提交为 `61ec746` 才满足 `release.sh` 的"干净工作区"前置。
+- [x] `make verify` 全绿（vet + 全量测试 + build，38 个测试包；`make ui-base` 因 PATH 上没有 node
+      而跳过——与既有记录一致，该派生仍由 `make ui-check` 覆盖）。
+- [x] 隔离冒烟（`:8086` + 全新空库 `.cache/v0141-release/`，脚本 `.cache/v0141-release/smoke.sh`
+      在同一条命令内起停，因为 DSH 沙箱会回收跨命令的进程）：**全部通过**——`/version` =
+      `{"revision":"1a1295d","version":"0.14.1"}`、healthz/readyz/admin-ui 三个 200、
+      服务出的 `app.js` 与压缩镜像**逐字节一致**（3007 B，源码 6097 B）且 `renderShell`/`STATS_SORTS`
+      各 0 处、`js/ui.js`/`js/router.js`/`js/pages/org.js`/`app.css` 全 200、
+      `schema_migrations` 到 `0018_org_structure` 且 `org_nodes`/`org_node_accounts` 就位、
+      登录 + `POST/GET/DELETE /org/nodes` 写路径往返（跑完即删，无残留）、启动日志 `level=ERROR` 为 0。
+- [x] 回滚点（本次的两个都留着，互为备份）：
+      `data/aigw.prev-running-20260915-210057`（部署脚本从**运行进程** `/proc/<pid>/exe` 取，
+      = 升级前线上真身 `0.14.0 / 6dc9082`，sha256 `87ab477e…`）；
+      `bin/aigw.prev-0.14.0-6bf8dce`（用临时 worktree 从 tag `v0.14.0` 原样重建，sha256 `7cb4f809…`，
+      与真身的差异只是它晚于 tag 的三个界面修复提交）。
+      另有部署前预取的副本 `bin/aigw.prev-running-0.14.0-6dc9082`（与前者 sha256 相同）。
+- [x] 部署：`ssh 127.0.0.1 'bash .cache/deploy-0.14.1/deploy-local.sh'`（**那条 ssh 登录到宿主，
+      所以脚本不在沙箱里**；DSH 沙箱内的进程会被回收、也发不了信号）。顺序是
+      「取回滚点 → `local-run.sh stop` → `install` + `mv` 原子换入 → `start` → 等 `/version` → 自检」，
+      自检失败会自动换回回滚点再起。脚本沿用 v0.12.4 那两条教训：回滚点不从 `bin/aigw` 抄
+      （它早被 `make build` 换成新版），回滚不直接 `cp` 覆盖在跑的二进制（会 ETXTBSY，必须先停）。
+- [x] 线上验证（升级前 `0.14.0 / 6dc9082` → 现在 `0.14.1 / 1a1295d`）：
+      `/version` = `{"revision":"1a1295d","version":"0.14.1"}`；`healthz`/`readyz`/`admin/ui/` 均 200；
+      控制台资产是本版——服务出的 `app.js` 3007 B 与压缩镜像逐字节一致、`renderShell` 0 处、
+      `js/pages/org.js` 200，且 `brand.js` 读 `/version` 渲染角标（左上角应为
+      `AI Gateway  v0.14.1  1a1295d`）；运行库 `data/aigw-local.db` 最高迁移 0018、两张组织表就位；
+      重启之后 `level=ERROR` 为 0。功能面只读走查：登录 200、`GET /org/nodes` 200（空树，端点已接线）、
+      `GET /requests?limit=1` 200（返回真实 codex 行，身份列齐全）、`/v1/models` 401（未带 Key，符合预期）。
+- 回滚（如需，在宿主终端执行）：`cp data/aigw.prev-running-20260915-210057 bin/aigw && scripts/local-run.sh restart`。
+- 未做：**gpt001 生产未部署**（本次只要求升级本机 8088；线上仍为 `0.12.3 / 44f9de2`）。
