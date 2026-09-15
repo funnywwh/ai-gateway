@@ -66,9 +66,10 @@ M39 让「线上跑的是哪个版本」有一个能读的答案：版本号的�
 | 文档 | 内容 | 状态 |
 |---|---|---|
 | `docs/PROCESS.md` | 实现流程约定（设计文档 / todo / 提交自检） | 生效中 |
-| `docs/TODO.md` | 里程碑 → 任务 → 验收 的检查清单（随实现勾选） | 持续更新 |
+| `docs/TODO.md` | 未完成项（`[ ]` / `[~]`）及其所在小节的引言 | 持续更新 |
+| `docs/todo_done.md` | 已完成记录归档（各里程碑清单、发布记录、实测数据） | 持续追加（只增不改） |
 | `docs/architecture.md` | 分层、模块边界与可替换扩展点 | 已落地（由 `internal/arch` 断言守护） |
-| `docs/design/` | 每个里程碑的设计文档（接口、数据流、决策、异常、测试策略、实现差异） | M0–M39 全部产出（M28 的决策记在 `docs/api-providers.md` 与 `docs/TODO.md`） |
+| `docs/design/` | 每个里程碑的设计文档（接口、数据流、决策、异常、测试策略、实现差异） | M0–M39 全部产出（M28 的决策记在 `docs/api-providers.md` 与 `docs/todo_done.md`） |
 | `docs/plugin-protocol-v1.md` | 插件协议 v1（帧/方法/事件/取消/背压/错误分类） | **已实现（M2）** |
 | `docs/api-responses.md` | Responses 兼容面（端点/字段/SSE 事件/错误封装/认证与限速） | **已实现（M5）** |
 | `docs/api-providers.md` | openai-chat 供应商（配置开关、思考模式、用量维度、错误分类、DeepSeek 接入） | **已实现（M17）** |

@@ -97,11 +97,11 @@ ssh gpt001 'cp /opt/aigw/aigw.prev-<时间戳> /opt/aigw/aigw && systemctl resta
 
 ### 6. 记录
 
-在 `docs/TODO.md` 当前里程碑下追加发布记录（日期、版本号、revision、回滚点路径、验证结果），
-然后提交：
+在 `docs/todo_done.md` 的当前里程碑小节下追加发布记录（日期、版本号、revision、回滚点路径、验证结果），
+然后提交（`docs/TODO.md` 现在只留未完成项，发布记录属于已完成记录，写到归档这边）：
 
 ```bash
-git add docs/TODO.md && git commit -m "release: v<版本> 部署记录"
+git add docs/todo_done.md && git commit -m "release: v<版本> 部署记录"
 ```
 
 ## 注意
