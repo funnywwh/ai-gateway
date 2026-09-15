@@ -342,8 +342,9 @@ export function renderForm(spec, { onSubmit, onAction, onState } = {}) {
   const status = el('div', { class: 'form-status muted' });
   const actions = el('div', { class: 'form-actions' });
   // The root carries the id the spec was parsed with, so the `ui` directive can target the form
-  // itself (`#form_0`) as well as its fields (`#f_name`). Both the transcript and the directive
-  // compute the same id from the same block, so no state has to be carried between them.
+  // itself (`#form_0`) as well as its fields (`#f_name`) and its buttons (`#b_submit`). Both the
+  // transcript and the directive compute the same id from the same block, so no state has to be
+  // carried between them.
   const root = el('div', { class: 'chat-form', id: 'form_' + spec.id }, []);
   const body = el('div', { class: 'form-body' });
   root.append(body);
@@ -372,7 +373,15 @@ export function renderForm(spec, { onSubmit, onAction, onState } = {}) {
     body.append(row);
   }
 
-  const submit = el('button', { class: 'btn btn-primary', type: 'button', text: spec.submit.label });
+  // Buttons carry `#b_<name>` for the same reason the root carries `#form_<key>`: the console builds
+  // these elements, so the model can only address one if the console names it. Without that name a
+  // directive that wants to disable a button has nothing to point at — the model reached for
+  // `button[type=submit]`, which is the contract for its *own* HTML pages and never matches here
+  // (these buttons are type="button"; a real `<form>` submit would reload the console). See
+  // docs/chat.md §4.
+  const submit = el('button', {
+    class: 'btn btn-primary', type: 'button', id: 'b_' + spec.submit.name, text: spec.submit.label,
+  });
   submit.addEventListener('click', () => {
     if (registry.disabled) return;
     fire(spec.submit.name, null, submit);
@@ -381,7 +390,9 @@ export function renderForm(spec, { onSubmit, onAction, onState } = {}) {
   registry.buttons.push({ name: spec.submit.name, node: submit });
 
   for (const action of spec.actions) {
-    const button = el('button', { class: 'btn btn-ghost', type: 'button', text: action.label });
+    const button = el('button', {
+      class: 'btn btn-ghost', type: 'button', id: 'b_' + action.name, text: action.label,
+    });
     button.addEventListener('click', () => {
       if (registry.disabled) return;
       fire(action.name, action.value, button);

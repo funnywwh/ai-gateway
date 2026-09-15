@@ -890,6 +890,11 @@ try {
       checks.renderSelectMulti = parseFormSpec(JSON.stringify({
         fields: [{ name: 'tags', label: '标签', type: 'select', multiple: true, options: ['a', 'b'] }],
       }), '0').spec.fields[0].multiple === true;
+      // Every button the console builds carries a name a directive can point at (`#b_<name>`).
+      // The console owns these elements, so without a name the model has nothing to use: in
+      // production it reached for `#form_0 button[type=submit]`, which is the contract for its
+      // *own* HTML pages and matches nothing in an inline form (see the assertions below).
+      checks.renderButtonsNamed = rnode.querySelector('.form-actions .btn-primary').id === 'b_submit';
 
       // Collecting values: the shape the model receives.
       rnode.querySelector('#f_name').value = 'demo';
@@ -918,6 +923,9 @@ try {
       checks.actionEventName = submitted && submitted.name === 'skip';
       checks.actionMergesValue = submitted && submitted.data.skipped === true;
       checks.actionSendsFields = submitted && submitted.data.a === undefined; // empty optional omitted
+      // A secondary button is named after its own action, not after the submit button.
+      checks.actionButtonNamed = !!withAction.node.querySelector('#b_skip')
+        && withAction.node.querySelector('#b_skip').disabled === false;
 
       // A busy form cannot submit twice: that is the difference between one billed turn and two.
       submitted = null;
@@ -960,6 +968,46 @@ try {
       checks.applyDisableOp = rnode.querySelector('#f_name').disabled === true;
       checks.applyMessageOp = !!rnode.querySelector('#form_0 > .aigw-msg');
       checks.applyReportsCount = applied.applied.length === 3 && applied.errors.length === 0;
+      // A message that renders as one more line of body text is a message nobody sees. This rule
+      // did not exist until the fix: `.aigw-msg` had no CSS at all, and the node is appended last
+      // (after 「查看表单规格」), so on a 7-field form it sat far above the viewport — the model
+      // said "已按你选的口径统计完成" and the operator saw nothing at all.
+      const banner = rnode.querySelector('.aigw-msg');
+      const bannerStyle = banner ? getComputedStyle(banner) : null;
+      checks.messageStyled = !!bannerStyle
+        && bannerStyle.backgroundColor !== 'rgba(0, 0, 0, 0)'
+        && bannerStyle.borderTopWidth !== '0px'
+        && bannerStyle.paddingTop !== '0px';
+      // order:-1 is what puts it at the top of the card, where the answer is read, instead of
+      // under a collapsed spec panel at the very bottom. The position is asserted by geometry
+      // rather than by DOM order: `showMessage` appends the node last, and CSS `order` is a
+      // *visual* reordering — firstElementChild still reports the body, which is exactly the
+      // mistake a DOM-order assertion would bake in.
+      checks.messageAtTop = !!bannerStyle && bannerStyle.order === '-1'
+        && banner.getBoundingClientRect().top <= rnode.querySelector('.form-body').getBoundingClientRect().top;
+      checks.messageLevelClass = !!banner && banner.className.includes('aigw-ok');
+      // The three things a directive may point at inside an inline form, and the one it may not.
+      // `#b_<name>` is the button, and `#form_0` reaches the whole form (the console cascades a
+      // disable to every control inside it) — that is how "this form is finished" is expressed.
+      checks.disableButtonById = rendered.apply([{ op: 'disable', target: '#b_submit', value: true }]).errors.length === 0
+        && rnode.querySelector('.form-actions .btn-primary').disabled === true;
+      rendered.apply([{ op: 'disable', target: '#b_submit', value: false }]);
+      const wholeForm = rendered.apply([{ op: 'disable', target: '#form_0', value: true }]);
+      const controls = [...rnode.querySelectorAll('input, select, textarea, button')];
+      checks.disableWholeForm = wholeForm.errors.length === 0 && controls.length > 0
+        && controls.every((node) => node.disabled === true);
+      rendered.apply([{ op: 'disable', target: '#form_0', value: false }]);
+      // The selector the model actually wrote in production. It must stay a *reported* miss and
+      // never a silent no-op: the console's buttons are type="button", so `button[type=submit]`
+      // (the contract for the model's own HTML pages) can never match here.
+      const byTypeSubmit = rendered.apply([{ op: 'disable', target: '#form_0 button[type=submit]', value: true }]);
+      checks.buttonTypeSubmitNeverMatches = byTypeSubmit.applied.length === 0 && byTypeSubmit.errors.length === 1
+        && byTypeSubmit.errors[0].includes('没有节点匹配')
+        && rnode.querySelector('.form-actions .btn-primary').disabled === false;
+      if (!checks.buttonTypeSubmitNeverMatches) {
+        checks.buttonTypeSubmitWhy = JSON.stringify(byTypeSubmit.errors)
+          + ' | button=' + rnode.querySelector('.form-actions .btn-primary').outerHTML;
+      }
       // The reason travels with the failure: an assertion that only says `false` costs a whole
       // extra run to interpret.
       if (!checks.applyReportsCount) {
@@ -997,7 +1045,7 @@ try {
       window.__forcedFrames = [
         { type: 'text', delta: '正在查 ' },
         { type: 'text', delta: 'cn-north-1…' },
-        { type: 'text', delta: '\n\n' + FENCE + 'ui\n{"ops":[{"op":"set","target":"#f_region","value":"cn-north-1"},{"op":"text","target":"#form_0 .form-title","value":"已按区域查询"}]}\n' + FENCE + '\n' },
+        { type: 'text', delta: '\n\n' + FENCE + 'ui\n{"ops":[{"op":"set","target":"#f_region","value":"cn-north-1"},{"op":"text","target":"#form_0 .form-title","value":"已按区域查询"},{"op":"message","target":"#form_0","value":"已按 region 查询完成","level":"ok"},{"op":"disable","target":"#b_submit","value":true}]}\n' + FENCE + '\n' },
         { type: 'done', status: 'completed' },
       ];
       const destroyForm = await renderChat({
@@ -1032,6 +1080,22 @@ try {
         && (afterTurn.querySelector('#f_region') || {}).value === 'cn-north-1';
       checks.inlineDirectiveText = afterTurn
         && ((afterTurn.querySelector('.form-title') || {}).textContent || '').includes('已按区域查询');
+      // The two updates the operator is supposed to *see*: the message has to be a banner at the
+      // top of the card (not an unstyled line at the bottom, which is what shipped), and the
+      // submit button has to actually be disabled — that one is only reachable by `#b_submit`.
+      const liveBanner = afterTurn ? afterTurn.querySelector(':scope > .aigw-msg') : null;
+      checks.inlineMessageLanded = !!liveBanner
+        && (liveBanner.textContent || '').includes('已按 region 查询完成');
+      checks.inlineMessageIsFirst = !!liveBanner && !!afterTurn
+        && liveBanner.getBoundingClientRect().top <= afterTurn.querySelector('.form-body').getBoundingClientRect().top;
+      checks.inlineMessageStyled = !!liveBanner
+        && getComputedStyle(liveBanner).backgroundColor !== 'rgba(0, 0, 0, 0)';
+      checks.inlineSubmitDisabled = !!(afterTurn && afterTurn.querySelector('.form-actions .btn-primary').disabled);
+      // Every operation in that directive had a target that exists, so the form's own status line
+      // must not claim otherwise — this is the assertion that would have caught the production
+      // payload, where `button[type=submit]` matched nothing and only a grey line said so.
+      checks.inlineReportsNoErrors = !!afterTurn
+        && !((afterTurn.querySelector('.form-status') || {}).textContent || '').includes('未生效');
       if (!checks.inlineDirectiveApplied || !checks.inlineDirectiveText) {
         checks.inlineWhy = afterTurn
           ? JSON.stringify({
@@ -1040,6 +1104,7 @@ try {
             title: (afterTurn.querySelector('.form-title') || {}).textContent,
             status: (afterTurn.querySelector('.form-status') || {}).textContent,
             disabled: (afterTurn.querySelector('.btn-primary') || {}).disabled,
+            banner: (afterTurn.querySelector('.aigw-msg') || {}).textContent,
           })
           : 'no .chat-form in the transcript';
       }

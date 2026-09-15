@@ -105,6 +105,8 @@ export const FORM_LIMITS = { maxFields: 40, maxOptions: 100, maxEventBytes: 8 * 
 export function parseFormSpec(text, key)      // → { spec, error }；key 决定 #form_<key>
 export function renderForm(spec, { onSubmit, onAction, onState })
 //   → { node, spec, setBusy, setStatus, collect, apply, destroy }
+//   生成的 id：root = #form_<key>、字段 = #f_<name>、按钮 = #b_<name>（M35 补丁加入按钮 id：
+//   按钮由控制台 createElement 造出，没有 id 时指令无从定位它）
 export function collectFormValues(spec, registry)   // → 提交给模型的对象
 export function resolveIn(root, selector)           // root 自身优先的选择器解析
 export function describeFormOps(result)             // → 一行中文结果
@@ -140,8 +142,34 @@ export function describeFormOps(result)             // → 一行中文结果
 | 模型还在回答时提交 | 排队（最多 5 条），本轮结束后按顺序发出；不做并发计费 |
 | 提交中再点提交 | 按钮与控件禁用，点击被忽略（一轮一次） |
 | 指令的 target 不存在 | 逐条报错并显示在表单状态行；原始 JSON 留在气泡里 |
+| 模型把按钮写成 `button[type=submit]`（沙箱页面那一套） | 报"没有节点匹配"；契约已给出 `#b_<name>`，见下方"M35 补丁" |
 | 轮次结束、转录重建 | 指令在重建**之后**应用；未提交的填写内容从草稿恢复 |
 | 会话未绑定计费 Key | 提交被拒绝并说明原因（与手动提问同一套话术） |
+
+## M35 补丁：`message` 看不见、按钮点不到（2026-09-15，实测一次真实会话）
+
+发布后的第一次真实使用就撞上了两个"能力存在、契约没写"的缺口。现场是一条 7 字段的
+`form`，模型提交后回了一条 `ui` 指令：`message` 到 `#form_0` + `disable` 到
+`#form_0 button[type=submit]`。用真实会话（`chat_messages` 里的原字节）在 headless Firefox 里
+回放后拿到的结论：
+
+| 现象 | 根因 | 修法 |
+| --- | --- | --- |
+| `message` 应用成功（`applied` 有它），人却完全看不到 | `.aigw-msg` **在 `app.css` 里没有任何规则**：它被 append 成卡片最后一行（在「查看表单规格」之下），12.5px/14px 正文，离视口 3000+ 像素 | 给 `.chat-form > .aigw-msg` 一条自己的样式，并用 `order:-1` 贴到卡片**顶部**；级别只改左侧色条 |
+| `disable` 永远不生效：`没有节点匹配 #form_0 button[type=submit]` | 内联表单的按钮是控制台 `createElement` 造的 `type="button"`；`type=submit` 是第 5 节整页 HTML 的契约，被 `DefaultUIBridgeInstructions` 教给了模型，而内联表单这一侧**从没告诉过它按钮的选择器** | 按钮加 `id="b_<name>"`（提交按钮 `#b_submit`），提示词把三种可指目标写清，并点名 `button[type=submit]` 在这里匹配不到 |
+
+顺带修正了提示词里一句不严谨的话：原文写"第一张表就是 `#form_0`"。块序号是**按每个 text part
+各自从 0 数**的（`markdown.js` 的 `codeIndex` + `chat.js` 对每个 text part 调一次 `renderRichText`），
+所以表单前面还有 `chart`/`json` 块时 id 就不是 `form_0`。现在改成"序号是这条回答里代码块的顺序"。
+
+`form` 视图因此多了 8 项断言，其中两条是这次事故的**形状**而不是结论：`message` 必须有非透明
+背景/边框/内边距（规则不存在时 `transparent / 0px / 0px`），且几何位置要在 `.form-body` 之上；
+`#b_submit` 的 `disable` 必须生效；而 `button[type=submit]` 必须**继续**报"没有节点匹配"——它是
+一条正确行为，不是待修的 bug，所以也被钉住。
+
+`message` 的定位断言用 `getBoundingClientRect()` 比较而不是 DOM 顺序：`showMessage` 永远是
+`appendChild`，`order:-1` 只改**视觉**顺序，`firstElementChild` 仍然报告 `form-body`。第一版断言
+就是这么写错的，harness 直接把它抓了出来。
 
 ## 测试策略
 
@@ -159,6 +187,7 @@ export function describeFormOps(result)             // → 一行中文结果
   （label 与控件绑定、占位项、选项标签、无标记落地）、取值形状（数字为数字、复选为布尔、
   可选项省略）、超限拒绝、忙碌禁用、`ui` 指令应用与逐条报错、以及**一次完整的
   `内联表单渲染 → 提交 → 断言请求体 → SSE 回答 → 指令原地更新`** 链路。
+  M35 补丁后为 78 项，新增的 8 项见上一节。
 - `make ui-check`：**14 个视图全绿**（`chat` 78 → 98 项）。
 
 ## 未验证的部分（如实记录）

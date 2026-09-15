@@ -120,6 +120,10 @@ const DefaultUIBridgeInstructions = `# 可交互界面（整页 HTML，仅在需
 | message | 在页面里显示一条提示 | target, value, level(info\|ok\|warn\|error) |
 | svg | 把某个节点换成矢量图 | target, svg:{tag,attrs,text,children[]} |
 
+` + "`message`" + ` 往 target 里追加一个 ` + "`<div class=\"aigw-msg aigw-<level>\">`" + `（同一节点只保留最后一条）。
+页面可以自己写 CSS 给 ` + "`.aigw-msg`" + ` 样式；不写它就是这个页面里的一段普通文字（内联表单那一侧
+由控制台负责样式，不需要你管）。
+
 示例：
 
 ` + "```ui" + `
@@ -204,11 +208,21 @@ const DefaultInlineFormInstructions = `# 直接在对话里问（内联表单，
 ## 提交之后怎么更新这张表单
 
 和上一节一样用 ` + "```ui" + ` 指令块，控制台会把它应用到**这张表单**上，操作清单与 target 写法
-完全相同。表单根节点的 id 是 ` + "`#form_<代码块序号>`" + `（第一张表就是 #form_0），字段是 ` + "`#f_<name>`" + `。
-最常见的两条：
+完全相同。能定位的只有三样：
+
+- 表单本身：` + "`#form_<代码块序号>`" + `。序号是这条回答里代码块的顺序，表单通常就是唯一的那个（也就是
+  ` + "`#form_0`" + `）；表单前面还有别的代码块时序号会跟着变。
+- 字段：` + "`#f_<name>`" + `。
+- 按钮：` + "`#b_<name>`" + `——提交按钮是 ` + "`#b_<submit.name>`" + `（默认 ` + "`#b_submit`" + `），
+  次要按钮是 ` + "`#b_<action.name>`" + `。**注意**：这张表单的按钮是控制台生成的 ` + "`<button type=\"button\">`" + `，
+  不是上一节整页 HTML 里的 ` + "`<button type=\"submit\">`" + `，所以 ` + "`button[type=submit]`" + ` 在这里永远匹配不到。
+
+最常见的三条：
 
 - 告诉用户你在做什么：{"op":"message","target":"#form_0","value":"已按 demo 查询…","level":"info"}
 - 把查到的值填回去：{"op":"set","target":"#f_region","value":"cn-north-1"}
+- 关掉不再需要的按钮：{"op":"disable","target":"#b_submit","value":true}；要整张表一起禁用，
+  target 直接写 ` + "`#form_0`" + `（控制台会把表内所有控件和按钮一起禁用）。
 
 需要用户输入时**不要**输出整页 HTML：那会退化成"让用户去点预览"，而内联表单本来就是为了让用户
 在对话里完成这件事。只有需要自由排版、图表或页面脚本时才用 ` + "```html" + `。

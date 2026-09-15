@@ -329,3 +329,16 @@ textarea.form-input { resize:vertical; min-height:64px; }
 .form-source { font-size:11.5px; }
 .form-source summary { cursor:pointer; color:var(--muted); }
 .form-note-error { margin:6px 0 10px; font-size:12.5px; color:var(--warn); }
+
+/* `message` 指令落地的提示条。
+   这条规则以前**不存在**，于是 `message` 只是往表单卡片末尾追加一段 14px 正文（排在
+   「查看表单规格」之下），与周围的散文没有区别：实测一次真实会话里它离视口 3000 像素，
+   模型说"已按你选的口径统计完成"，操作员什么都没看到——一条已经生效的指令看起来像没生效。
+   所以这里给它自己的样子，并用 order:-1 贴到卡片顶部（表单有 7 个字段时，末尾那一行
+   谁也滚不到）。级别只改左侧色条，不新增字号/版式，免得同一张卡片里出现两套排版。 */
+.chat-form > .aigw-msg { order:-1; border:1px solid var(--line); border-left:3px solid var(--accent);
+  border-radius:8px; padding:8px 10px; background:var(--panel-2); color:var(--fg);
+  font-size:12.5px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; }
+.chat-form > .aigw-msg.aigw-ok { border-left-color:var(--ok); }
+.chat-form > .aigw-msg.aigw-warn { border-left-color:var(--warn); }
+.chat-form > .aigw-msg.aigw-error { border-left-color:var(--danger); color:var(--danger); }

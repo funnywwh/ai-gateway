@@ -2436,3 +2436,81 @@
   无 `Error running remote compact task`/`Fatal error`，随后正常继续；`request_logs#1714` = `call_kind=compaction`、
   `status=completed`。
 - 未做：**gpt001 生产未部署**（公网 `/aigw/version` 仍为 `0.12.3 / 44f9de2`）。
+
+## 内联表单的 `ui` 指令「渲染不出来」：`message` 没样式 + 按钮选择器不存在（2026-09-15）
+
+- 现象（用户实机反馈）：智能问答里，模型回了一条 7 字段的 `form`，用户提交后模型给出
+  `{"ops":[{"op":"message","target":"#form_0",…},{"op":"disable","target":"#form_0 button[type=submit]","value":true}]}`，
+  回答里说「已按 最近7天 / CNY / 全部账户 统计完成」，但界面上**什么也看不到**。
+- 定位方式：不猜、不靠读代码下结论——**把这条真实会话从 `data/aigw-local.db` 里取出来**
+  （`chat_messages` 的 `parts_json` 原字节 + 会话 DTO），生成一个一次性的 harness 视图
+  （`.cache/probe/`，未提交），在 headless Firefox 里跑**控制台自己的** `js/pages/chat.js`。
+  先核对线上服务的资产与工作区逐字节一致（`js/pages/chat.js`、`chat_ui.js`、`chat_form.js`、`app.css`
+  四份 diff 全等），否则复现的是别的版本。
+- 实测三项（这一轮的关键证据，全部来自那次回放）：
+  | 观察 | 实测值 |
+  |---|---|
+  | 表单 id 对不对 | `form.matches('#form_0') === true` → **模型写的 target 是对的** |
+  | `message` 有没有落地 | `.aigw-msg` 节点**存在**、文本正确，但计算样式 `background: rgba(0,0,0,0)` / `border: 0px` / `padding: 0px` / `font-size: 14px`（= 与正文无区别），且在卡片里排第 5（`form-body / form-actions / form-status / form-source / aigw-msg`）、距视口 **-2957px** |
+  | `disable` 为什么不生效 | `#form_0 button[type=submit]` 命中 **0** 个节点：表单只有 1 个按钮，是控制台造的 `<button class="btn btn-primary" type="button">` |
+- 两个根因，都是"能力存在、契约没写"：
+  1. `.aigw-msg` / `.aigw-ok` / `.aigw-info` / `.aigw-warn` / `.aigw-error` **在 `app.css` 里一条规则都没有**
+     （线上 CSS grep 命中 0）。`showMessage` 只是 `appendChild` 一段 14px 正文到卡片**最后一行**，
+     排在「查看表单规格」之下 —— 一条**已经生效**的指令看起来像没生效。
+  2. 内联表单的按钮是控制台 `createElement` 造的 `type="button"`（真正的 submit 会让浏览器重载页面），
+     而提示词只在**沙箱整页 HTML** 那一节教过 `<button type="submit">`（`prompt.go:84`），
+     内联表单这一侧**从未告诉模型按钮的选择器**，模型只能按它唯一见过的那套去猜。
+     另：原文"第一张表就是 `#form_0`"也不严谨——块序号按**每个 text part 各自从 0 数**
+     （`markdown.js:199` 的 `codeIndex` + `chat.js:584` 对每个 text part 调一次 `renderRichText`），
+     表单前面还有 `chart`/`json` 块时 id 就不是 `form_0`。
+- [x] `internal/webui/static/app.css`：给 `.chat-form > .aigw-msg` 一条自己的样式（边框 + `border-left`
+  级别色条 + `--panel-2` 底 + 12.5px），并用 `order:-1` 贴到卡片**顶部**；级别只改色条，
+  不新增字号/版式（卡片内不出现两套排版）。
+- [x] `internal/webui/static/js/pages/chat_form.js`：按钮加 `id="b_<name>"`（提交按钮 `#b_submit`，
+  次要按钮 `#b_<action.name>`），三种可指目标（表单/字段/按钮）都能被 `ui` 指令定位。
+- [x] `internal/chat/prompt.go`：内联表单那节把三种 target 写清，**点名** `button[type=submit]`
+  在这里永远匹配不到，并给出 `#b_submit` 与"target 直接写 `#form_0` 可整表禁用"；
+  修正"第一张表就是 `#form_0`"的说法。另在沙箱那一节补一句 `message` 落地的类名
+  （`.aigw-msg`，页面可自行加 CSS；内联表单那侧样式由控制台负责）。
+- [x] `scripts/ui-harness/chat.page.html` `form` 视图 65 → 78 项，新增 8 条断言，其中两条钉的是
+  **这次事故的形状**：`message` 必须非透明背景/非零边框内边距，且几何位置在 `.form-body` 之上；
+  `#b_submit` 的 `disable` 必须生效、整表 `disable` 必须级联到所有控件；live 链路的指令里
+  补上 `message` + `disable` 两条（否则那两条只在纯渲染路径被测过）；并且
+  `button[type=submit]` 必须**继续**报"没有节点匹配"——它是正确行为，不是待修的 bug。
+- [x] 验证：`go test ./internal/chat/... ./internal/httpapi/... ./internal/webui/...` 全过
+  （含 `TestUIBridgeContractMatchesTheModelInstructions` 这类提示词契约测试）；
+  `scripts/ui-harness/run.sh` 的 `form`/`chat` 视图 78 + 110 全绿。
+  **改前先失败**：把新增的 8 项写在未修复的代码上，`messageStyled` / `messageAtTop` /
+  `disableButtonById` / `disableWholeForm` / `buttonTypeSubmitNeverMatches` / `inlineSubmitDisabled`
+  全部为 false —— 断言确实是这一轮的行为差异，不是同义反复。
+  回放真实会话（修复后）：`message` 样式 `rgb(240,242,245)` / `border 1px` / `order:-1` / 在 `.form-body` 之上；
+  把那条 `disable` 的 target 换成契约里的 `#b_submit` 后 `applied=2, errors=[]`、按钮 `disabled=true`。
+  一条副产品：`message` 的定位断言第一版写成 `firstElementChild === banner`，被 harness 直接判红——
+  `order:-1` 只改**视觉**顺序，DOM 里 `showMessage` 永远 `appendChild`，所以改用
+  `getBoundingClientRect()` 比较（这条教训也写进了 M35 文档）。
+- 未做：**gpt001 生产还没部署这个修复**（发布按发布流程另走）。本机的重建与验证见文末一节。
+
+## 本机 `:8088` 的重建与验证（2026-09-15，**重启尚未执行**）
+
+- [x] 先确认问题确实出在部署上：修复只在工作区时，`:8088` 服务的 `js/pages/chat_form.js` 里没有
+  `b_submit`、`app.css` 里 `aigw-msg` 命中 0，且四份资产与工作区 diff 全等——即它服务的是旧嵌入资产。
+- [x] 回滚点：`bin/aigw.prev-m35pre-a7a17ff`（= 当时正在跑的 0.12.5/a7a17ff，
+  sha256 `1b04a8f6…`）。注意 `/proc/<pid>/exe` 在 DSH 的命令沙箱里不可见（PID namespace 隔离），
+  所以这里用"`/version` 的 revision 与 `bin/aigw` 的构建来源一致 + 旧二进制里 `b_submit` 计数为 0"
+  作为在跑版本的证据。
+- [x] `make build`：新二进制 sha256 `4329ad0b…`，`VERSION` 仍是 `0.12.5`（**未升版本、未打 tag**：
+  这次不发版，只部署工作区修复），`revision` = 工作区 HEAD `6027237`（比 0.12.5 的 `a7a17ff` 多一个
+  已提交的 feat）。嵌入资产抽查：`b_submit` 0 → 3 处、`aigw-msg` 4 → 10 处、`#b_` 7 处。
+- [x] 在**隔离端口**上验证新二进制（不碰在跑的实例）：复制一份 config 把 `listen` 改 `:8087`、
+  `store.path`/`plugin.state_dir`/`backup.dir` 指到 `.cache/m35-smoke/`（独立空库），启动后
+  `/version` = `{"revision":"6027237","version":"0.12.5"}`、`/admin/ui/` 200、启动日志 `level=ERROR` **0**，
+  服务的 `js/pages/chat_form.js` 能查到 `b_submit`、`app.css` 能查到 `.aigw-msg`——即新构建的嵌入资产
+  确实带修复。验证完即停掉该实例（`:8087` 已释放）。
+- [ ] **未做：在跑的 `:8088` 还没换成新二进制。** 原因不是疏忽，是 `scripts/local-run.sh` 文件头就写明的
+  沙箱约束：DSH 的命令跑在 `bwrap --unshare-pid --die-with-parent` 里，其中启动的进程会被沙箱回收
+  （setsid 也留不住），而当前实例是**宿主终端**启动的——从沙箱里 `stop` 会直接拒（实测 exit 1：
+  "pidfile 里的进程在本命名空间不可见"），`status` 只能靠端口判定。若此时按它提示 `pkill` 再 `start`，
+  新实例会在几十秒后被沙箱回收，等于**把网关打死**。所以这一步必须由人在宿主终端执行：
+  `cd /home/winger/work/ai_gateway && scripts/local-run.sh restart`
+  然后 `curl -s localhost:8088/version` 应返回 `revision=6027237`，浏览器刷新后
+  `/admin/ui/js/pages/chat_form.js` 里能查到 `b_submit`。
