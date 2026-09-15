@@ -33,6 +33,7 @@ function report(data) {
 <script type="module">
 import { tree } from '/js/tree.js';
 import { el } from '/js/ui.js';
+import { matchesQuery } from '/js/pinyin.js';
 
 const errors = [];
 window.onerror = (msg) => errors.push('onerror: ' + msg);
@@ -49,6 +50,8 @@ const NODES = [
   { id: 3, parent_id: 1, name: '市场部', sort_order: 200, account_count: 2, tags: [] },
   { id: 4, parent_id: 2, name: '平台组', sort_order: 100, account_count: 1, tags: ['free'] },
   { id: 5, parent_id: null, name: '分公司', sort_order: 200, account_count: 0, tags: [] },
+  // 中文节点：拼音过滤要有中文对象才测得出来（同理，英文名用子串就够，测不出 matcher）。
+  { id: 6, parent_id: null, name: '财务部', sort_order: 300, account_count: 0, tags: [] },
 ];
 
 const events = { select: [], toggle: [], action: [] };
@@ -101,9 +104,9 @@ try {
   checks.sidebarRows = rowsOf(sidebarTree.node).length;
   checks.workspaceRows = rowsOf(mainTree.node).length;
   // sidebar: 总部, 研发部, 市场部, 分公司 = 4 (平台组 is under a closed 研发部)
-  checks.sidebarHidesDeepLevel = labelsOf(sidebarTree.node).join(',') === '总部,研发部,市场部,分公司';
+  checks.sidebarHidesDeepLevel = labelsOf(sidebarTree.node).join(',') === '总部,研发部,市场部,分公司,财务部';
   // workspace: everything, because the default expandDepth is Infinity
-  checks.workspaceShowsAll = labelsOf(mainTree.node).join(',') === '总部,研发部,平台组,市场部,分公司';
+  checks.workspaceShowsAll = labelsOf(mainTree.node).join(',') === '总部,研发部,平台组,市场部,分公司,财务部';
 
   // 展开箭头必须是**画出来的**（内联 SVG），不能是文字字形。
   //
@@ -175,7 +178,7 @@ try {
   // Collapsing a root from the sidebar hides that whole root.
   toggleOf(sidebarTree.node, '总部').click();
   await settle();
-  checks.sidebarCollapseRoot = labelsOf(sidebarTree.node).join(',') === '总部,分公司';
+  checks.sidebarCollapseRoot = labelsOf(sidebarTree.node).join(',') === '总部,分公司,财务部';
   // A selection inside a collapsed branch is kept but not drawn: the row comes back when the
   // branch is opened again, so collapsing to get an overview does not lose the operator's place.
   sidebarTree.setSelected(3);
@@ -251,13 +254,60 @@ try {
   search.dispatchEvent(new Event('input'));
   await settle();
 
+  // --- 过滤：默认子串 vs 调用方传入的拼音匹配器 ------------------------------
+  //
+  // 控件本身**不做拼音**（它只 import ui.js，保持可复用、零依赖）；拼音是调用方通过
+  // `matcher` 注入的能力。所以这里两侧都要断言：默认实例搜 "yanfa" 搜不到中文，
+  // 传了 matchesQuery 的实例搜得到——只测一侧会把"控件偷偷依赖了拼音表"当成通过。
+  const pinyinTree = tree({
+    mode: 'workspace',
+    filter: true,
+    matcher: matchesQuery,
+    renderLabel: (node) => node.name,
+  });
+  const defaultTree = tree({ mode: 'workspace', filter: true, renderLabel: (node) => node.name });
+  mainHost.append(pinyinTree.node, defaultTree.node);
+  pinyinTree.refresh(NODES);
+  defaultTree.refresh(NODES);
+  await settle();
+  const filterOf = (view, value) => {
+    const box = view.node.querySelector('.tree-filter');
+    box.value = value;
+    box.dispatchEvent(new Event('input'));
+  };
+  filterOf(pinyinTree, 'yanfa');
+  filterOf(defaultTree, 'yanfa');
+  await settle();
+  // 研发部 是子节点，树的过滤器会**保留命中项的祖先**（既有设计：层级要读得懂），
+  // 所以结果是"总部,研发部"。只写 === '研发部' 会把这条既有行为误判成失败。
+  checks.pinyinMatcherMatchesChinese = labelsOf(pinyinTree.node).join(',') === '总部,研发部';
+  filterOf(pinyinTree, 'caiwu');
+  await settle();
+  checks.pinyinMatcherMatchesOtherChinese = labelsOf(pinyinTree.node).join(',') === '财务部';
+  filterOf(pinyinTree, 'cw');
+  await settle();
+  checks.pinyinInitialsMatchesChinese = labelsOf(pinyinTree.node).join(',') === '财务部';
+  filterOf(pinyinTree, 'ca');
+  await settle();
+  checks.pinyinPartialInitialPrefix = labelsOf(pinyinTree.node).join(',') === '财务部';
+  checks.defaultMatcherIsLiteralOnly = labelsOf(defaultTree.node).length === 0;
+  filterOf(pinyinTree, '');
+  filterOf(defaultTree, '');
+  await settle();
+  // 子串匹配对英文名仍然有效（默认行为不变）。
+  filterOf(defaultTree, '分');
+  await settle();
+  checks.defaultMatcherStillMatchesLiteral = labelsOf(defaultTree.node).join(',') === '分公司';
+  filterOf(defaultTree, '');
+  await settle();
+
   // --- programmatic controls and degenerate data ----------------------------
   mainTree.collapseAll();
   await settle();
-  checks.collapseAll = labelsOf(mainTree.node).join(',') === '总部,分公司';
+  checks.collapseAll = labelsOf(mainTree.node).join(',') === '总部,分公司,财务部';
   mainTree.expandAll();
   await settle();
-  checks.expandAll = labelsOf(mainTree.node).length === 5;
+  checks.expandAll = labelsOf(mainTree.node).length === 6;
 
   // A node whose parent is not in the list must still be rendered (as a root) rather than
   // silently disappearing: that is what makes a dangling row visible instead of lost.

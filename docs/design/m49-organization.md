@@ -30,7 +30,9 @@
 | D9 | 删除节点：默认**拒绝**有子节点的删除，`cascade=true` 才删整棵子树 | 误删代价高、没有回收站。**否决**默认级联（一次点击删掉一个部门）与"只删叶子"（无法删除中间层） |
 | D10 | 两个写方向都做成**整表替换**：`PATCH /accounts/{id}` 的 `org_node_ids`、`PUT /org/nodes/{id}/accounts` 的 `account_ids` | 两条主用例（"这个账号属于哪些组织" / "这个组织有哪些账号"）各自幂等、可重放、易审计。**否决** add/remove 增量语义：要多一批接口与工具，且并发下语义更绕 |
 | D11 | 树形控件是**独立模块**（`static/js/tree.js`），输入是扁平 `nodes` + 回调，**不知道组织架构、不 fetch、无全局状态** | 用户要求"独立可复用，可放侧边栏也可放工作区"。`mode` 只影响密度与元信息展示，不影响数据结构。**否决**把树写进 `org.js`（无法复用）与写进 `ui.js`（该文件已是通用组件集合，塞入一个 200 行的有状态控件会稀释它） |
-| D12 | 侧边栏插槽是**通用机制**（`app.js` 的 `.sidebar-slot` + 页面上下文里的 `sidebar`），不是 org 专属 | 组织页要把树放侧边栏，但"页面能否往侧边栏放东西"是shell 的能力，不该为单个页面硬编码。`:empty{display:none}` 保证不用插槽的页面布局与今天**逐像素一致** |
+| D12 | ~~侧边栏插槽是**通用机制**（`app.js` 的 `.sidebar-slot` + 页面上下文里的 `sidebar`）~~ **已撤销**：组织树只渲染在工作区，插槽与其 CSS 一并删除 | 当初为了"树可以放侧边栏"而给 shell 加了插槽。上线后产品判定侧边栏那份是冗余（同一棵树在同一屏出现两次，且挤占全局导航），于是撤掉。插槽的唯一使用者消失后它就是死代码，因此连插槽本身一起删——**控件仍然支持 `mode:'sidebar'`**（最初的需求是控件"可放两处"，不是页面必须放两处），那项能力由 harness 的 `tree` 视图继续守着 |
+| D16 | 过滤支持拼音：表是**生成文件**（`scripts/gen-pinyin.py` → `js/pinyin.js`，数据来自 mozillazg/pinyin-data，MIT），**能力通过 `matcher` 回调注入树控件**，控件本身不依赖表 | 操作员记不住「张三」这两个字怎么打，但记得住 `zhangsan`/`zs`。控制台零构建、不能 import npm 包，所以表必须落成仓库文件。**否决**把表 import 进 `tree.js`：那会让每一个用树的地方都背上 137KB，也破坏"控件零依赖、可复用"这条最初的需求 |
+| D17 | 成员面板拆成"固定过滤行 + 独立滚动列表"，勾选的成员置顶 | 过滤框跟着列表滚是错的：列表长到需要过滤时，过滤器正好被滚走。选中项置顶让"这个部门有谁"在一个长账号表里一眼可见。**否决**保持单块滚动区（更简单，但两个问题都还在） |
 | D13 | `registry.NewSnapshot` 旧签名**保留**（转调 `Build`），新构造入口是 `registry.Build(Input)` | 仓库内 12 处 `NewSnapshot` 调用（多在测试），7 个位置参数再加 2 个会更不可读。两个入口的分工写进注释，并由"对拍测试"钉住无组织数据时行为一致 |
 | D14 | `domain.Store`（registry 的读端口）只加 `ListOrgNodes` + `ListOrgMemberships` 两个读方法 | 快照只需要这两份数据；管理面的写方法走 `httpapi.OrgAdmin` 端口，不污染 registry 的读端口 |
 | D15 | 写组织数据后 `reload(ctx, reason, true)`（`invalidateAll=true`） | 节点标签/成员/树形都会改变**既有 Key** 的生效授权，而 Key 在 verifier 里有 30s 正缓存；只 invalidate 单个前缀会留下最长 30s 的越权窗口。与标签写入同一约定 |
@@ -212,7 +214,7 @@ PATCH /org/nodes/{id} ────────┘                      │
 | `internal/httpapi` | 5 条路由 CRUD / 角色（viewer 写 403）/ 环 400 / 超深 400 / 未知标签 400 / 未知 account_id 404 / `cascade` 语义 / 审计条目 / `Deps.Org==nil` 时按 `portReady` 约定 400 `unsupported_parameter` 且账号接口不受影响；`GET /accounts?org_node_id=` 含否子孙；`PATCH /accounts/{id}` 的 `org_node_ids` 替换与未知节点 404；既有 `admin_routes_test.go` 守卫（表覆盖、路径参数声明、body 形状与示例、描述可用性）自动覆盖新路由 |
 | `internal/arch` | 新包 `internal/orgtree` 与新导入入白名单 |
 | 前端静态 | `internal/webui/tests/org_tree_test.mjs`：`tree.js` 的导出与选项名、组织页把 `mode:'sidebar'` 挂到 `sidebar` 插槽、成员保存调 `PUT /org/nodes/{id}/accounts`、只读隐藏写按钮、账户页组织列与筛选参数、router 的 `/org` |
-| 控制台走查 | `scripts/ui-harness/tree.page.html`（视图 `tree`）：同一控件挂**侧边栏**与**工作区**两处，断言两种 mode 的层级缩进、折叠/展开改变可见行数、键盘 ↑↓←→Enter、`renderMeta` 在 sidebar 下隐藏/工作区下显示、action 回调、`filter` 命中数、`aria-*` 与 roving tabindex；`scripts/ui-harness/org.page.html`（视图 `org`）：断言侧边栏树与工作区树选中同步、成员勾选发出**带查询串的原始 URL 与 body**、`cascade` 确认文案、viewer 下写按钮 disabled |
+| 控制台走查 | `scripts/ui-harness/tree.page.html`（视图 `tree`）：同一控件挂**侧边栏**与**工作区**两处，断言两种 mode 的层级缩进、折叠/展开改变可见行数、键盘 ↑↓←→Enter、`renderMeta` 在 sidebar 下隐藏/工作区下显示、action 回调、`filter` 命中数、`aria-*` 与 roving tabindex；`scripts/ui-harness/org.page.html`（视图 `org`）：断言**侧边栏里不得出现树**（负向事实，两侧都钉：页面无侧边栏实例、shell 无插槽）、成员勾选发出**带查询串的原始 URL 与 body**、`cascade` 确认文案、viewer 下写按钮 disabled |
 
 ## 依赖
 
@@ -235,7 +237,7 @@ PATCH /org/nodes/{id} ────────┘                      │
 | 4 | `Snapshot.InheritedTagNames` + 预计算 | 另加了 `Snapshot.OrgNodePath` | 控制台「所属组织」列要显示 `总部/研发部/平台组`，按 id 渲染路径需要祖先链，放在快照里比在 handler 里重建索引便宜 |
 | 5 | `orgtree.Index.Validate()` 用「走链长度与记录深度不一致」判定环 | 改成**显式检测重访**（walk-up 时 revisited 即为环） | 原判据漏掉了"环上各节点深度恰好相等"的情形（实现时被 `TestValidateReportsACycle` 抓到）。同时 `computeDepth` 改为**只在父节点确实存在时**才加一，否则孤立节点的 depth 会与实际渲染位置不符 |
 | 6 | `ResolveTagRecords` 一般路径"先解码 Key 标签再一次排序" | **原地过滤** Key 标签名（keep-idiom），并在"一个名字都没能加进来"时直接返回预计算切片 | 这是被 `BenchmarkPlan` 逼出来的：直接版每请求多 1 次分配（45 → 46 allocs/op）。原地过滤 + 短路回退把它压回 45，与改前**完全一致**。`appendTagNames` 因此仍被账号侧使用，Key 侧改为直接 `json.Unmarshal`（畸形输入同样返回账号侧） |
-| 7 | 侧边栏插槽是"页面往 sidebar 放东西" | 同设计，另加 `.sidebar-slot:empty{display:none}` | 不用插槽的页面必须与改动前**逐像素一致**，`:empty` 是这条承诺的实现方式（`app.js` 在每次路由切换时 `clear` 插槽） |
+| 7 | 侧边栏插槽是"页面往 sidebar 放东西" | **已在 v0.14.0 后撤销**：组织树只留在工作区，`.sidebar-slot` 与 `clear(sidebar)` 及渲染上下文里的 `sidebar` 全部删除 | 唯一使用者消失后，插槽就是没有消费者的死代码。删除比留着更诚实：留着会让人以为"有页面在用"。控件的 `mode:'sidebar'` 能力保留并由 `tree` 视图覆盖 |
 | 8 | `account_count` 的取数 | 实现初版把它挂在 `include_accounts` 分支里（**bug**），冒烟时抓到并修复：成员关系**总是**读，只有账号名按需解析 | 一个"存在但恒为 0"的计数比没有这个字段更糟：树上的「N 个账号」会对真有成员的部门显示 0。单测与 harness 都没抓到（harness fixture 直接给了这个字段），**真实网关是这条字段的裁判** |
 | 9 | 树控件"只渲染展开的节点" | 同设计；另加"不可达节点按根显示"与"过滤时忽略折叠" | 前者让脏数据（孤儿父 id、环）**可见**而不是消失；后者因为"过滤把自己的命中藏在折叠里"等于过滤没生效 |
 

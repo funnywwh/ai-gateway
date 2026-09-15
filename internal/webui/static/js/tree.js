@@ -35,6 +35,11 @@ export function tree({
   renderLabel,
   renderMeta,
   actions,
+  // matcher decides whether a node survives the filter box. The default is a plain
+  // case-insensitive substring test; a caller that wants more (the organization page matches
+  // pinyin, so "zhangsan" finds 张三) passes its own. Keeping it a callback is what lets this
+  // control stay dependency-free and reusable.
+  matcher,
   emptyText = '暂无数据',
   onSelect,
   onToggle,
@@ -106,9 +111,22 @@ export function tree({
     return renderLabel ? renderLabel(node) : node.name;
   }
 
+  // labelText is the plain text of a row, for the filter to search. renderLabel may return a
+  // Node (a page that draws its own label), and String(node) would be "[object ...]" — so the
+  // text is read from the DOM in that case.
+  function labelText(node) {
+    const label = labelOf(node);
+    if (label === null || label === undefined) return '';
+    return typeof label === 'string' ? label : String(label.textContent || '');
+  }
+
+  const matchRow = typeof matcher === 'function'
+    ? (node, query) => matcher(labelText(node), query)
+    : (node, query) => labelText(node).toLowerCase().includes(query);
+
   function matches(node) {
     if (!state.query) return true;
-    return String(labelOf(node)).toLowerCase().includes(state.query);
+    return matchRow(node, state.query);
   }
 
   // visibleRows returns the rows to draw, in render order, each with its depth.

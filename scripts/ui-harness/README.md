@@ -65,12 +65,22 @@ GW_BASE=http://127.0.0.1:8099 GW_COOKIE=... scripts/ui-harness/capture.py       
   `capture.py --refresh` 不会覆盖它（它只重写自己列出的键）。
 
 - **M49 起**：`tree.page.html` 与 `org.page.html` 两个新页，共 4 个视图：
+  - **M49 后续（拼音过滤等）**：`#org` 还断言成员过滤支持拼音（全拼/首字母/中英混合/多音字，按**集合**
+    比较而非行序）、过滤器**不随列表滚动**（滚到底后量过滤器位置不变）、勾选成员**置顶**；
+    `#tree` 断言拼音匹配器是**注入**的——默认实例只做子串匹配，传 `matchesQuery` 的实例才认拼音。
+    另外 runner 支持**按视图声明严格模式**（报表里 `strictChecks: true`）：声明后 checks 里任何**非布尔/数值**
+    的项都按失败处理（`sample`/`fieldRows` 除外），因为一个失败时返回描述字符串的断言 helper 会"失败却显示
+    通过"——组织页就发生过一次。**默认不严格**：models/chat/bridge 等视图故意把 checks 当成证据草稿纸
+    （`rowActions` 是按钮列表、`parseError` 为空表示解析通过、`uiApplyThrew` 为空表示没抛错），判定另用
+    布尔项；改这些视图的语义是另一件事，不该由一条新规则在背后完成。未声明严格模式时，这些非判定项会
+    打印成"仅供参考"。
   - `#tree` **不需要任何快照**——树控件（`js/tree.js`）是纯视图，输入是节点数组加回调。它把**同一个
     控件挂两处**（侧边栏 `.sidebar` 容器 + 工作区容器），断言两种情况下的层级缩进、折叠/展开、键盘
     ↑↓←→Enter/Home/End、roving tabindex、行内 action 回调、过滤（保留祖先）、空态、孤儿节点与
     **成环数据不挂死**。断言读的是**可见行**（`visibleIds` 由标签文本推出），因为「折叠是否真的少画了行」
     只有对着 DOM 才看得出来。
   - `#org` / `#org-readonly` / `#org-accounts`：stub 里有一份**会变的**组织树（写操作会改它），
+    并断言组织树**只出现在工作区**（页面不得挂侧边栏实例、shell 不得再提供 `.sidebar-slot` 插槽），
     所以"保存成员"是否真的落库、删除是否带 `cascade=true`、账户页筛选是否把 `org_node_id` 发到了
     服务端，读的都是**带查询串的原始 URL 与请求体**。`org-readonly` 用 `session.role=viewer` 渲染同一页，
     断言写入口整体消失、成员复选框禁用。

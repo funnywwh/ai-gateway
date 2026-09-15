@@ -1,18 +1,20 @@
 // 组织架构页：一棵独立的组织树 + 选中节点的详情。
 //
-// 同一份数据渲染两棵树：侧边栏里的紧凑树（快速跳转、看层级）和工作区里的完整树（带成员数与
-// 行内操作）。两处的选中状态互为镜像——在任何一处选中节点，另一处跟着选中，详情卡随刷新。
-// 树控件本身（../tree.js）不知道组织架构，这里只负责把接口数据喂给它、把它的回调接回接口。
+// 树只渲染在工作区里。它曾经同时挂一份到左侧栏（紧凑模式）并让两处选中互相镜像，产品上判定
+// 为冗余：同一棵树在同一屏出现两次，反而让左侧栏的全局导航变挤。树控件本身（../tree.js）
+// 仍然支持 `mode:'sidebar'`，那项能力由 scripts/ui-harness 的 `tree` 视图单独守着。
+// 这个页面只负责把接口数据喂给控件、把它的回调接回接口。
 
 import { api } from '../api.js';
 import { el, card, modal, toast, confirmDialog, badge } from '../ui.js';
 import { tree } from '../tree.js';
+import { matchesQuery } from '../pinyin.js';
 
 // 成员勾选列表最多拉这么多账号。组织页需要展示"这个部门有哪些账号"，一次拉全量比做一套
 // 分页多选更简单；账号数量超过这个上限时列表会截断，并明确提示去账户页按组织筛选。
 const MEMBER_PICK_LIMIT = 1000;
 
-export async function render({ page, actions, session, sidebar }) {
+export async function render({ page, actions, session }) {
   const readonly = session.role !== 'admin';
   const refreshBtn = el('button', { class: 'btn', text: '刷新' });
   const createRoot = el('button', { class: 'btn btn-primary', text: '新建根节点', disabled: readonly });
@@ -22,18 +24,11 @@ export async function render({ page, actions, session, sidebar }) {
 
   const state = { nodes: [], selectedId: null, accounts: [], accountsTruncated: false, membersLoaded: false };
 
-  const sidebarTree = tree({
-    mode: 'sidebar',
-    expandDepth: 1,
-    filter: false,
-    emptyText: '暂无组织节点',
-    renderLabel: (node) => node.name,
-    onSelect: (node) => selectNode(node ? node.id : null, { from: 'sidebar' }),
-  });
   const mainTree = tree({
     mode: 'workspace',
     filter: true,
-    filterPlaceholder: '过滤节点名…',
+    filterPlaceholder: '过滤节点名（支持拼音）…',
+    matcher: matchesQuery,
     emptyText: '暂无组织节点，先新建一个根节点',
     renderLabel: (node) => node.name,
     renderMeta: (node) => metaFor(node),
@@ -42,7 +37,7 @@ export async function render({ page, actions, session, sidebar }) {
       el('button', { class: 'btn tree-action', dataset: { action: 'edit' }, text: '编辑' }),
       el('button', { class: 'btn btn-danger tree-action', dataset: { action: 'delete' }, text: '删除' }),
     ],
-    onSelect: (node) => selectNode(node ? node.id : null, { from: 'main' }),
+    onSelect: (node) => selectNode(node ? node.id : null),
     onAction: (name, node) => {
       if (name === 'add-child') createNode(node);
       else if (name === 'edit') editNode(node);
@@ -55,12 +50,6 @@ export async function render({ page, actions, session, sidebar }) {
     el('span', { class: 'muted', text: '节点上的标签会被整棵子树继承；账号可同时属于多个节点' })]);
   treeCard.classList.add('org-tree-card');
   page.append(el('div', { class: 'org-layout' }, [treeCard, detail]));
-
-  // The sidebar slot is the shell's, so this page only fills it when it exists (a harness or an
-  // embedded context may render the page without a sidebar).
-  if (sidebar) {
-    sidebar.append(el('div', { class: 'org-sidebar-head', text: '组织架构' }), sidebarTree.node);
-  }
 
   refreshBtn.addEventListener('click', () => load());
   expandAll.addEventListener('click', () => mainTree.expandAll());
@@ -75,10 +64,9 @@ export async function render({ page, actions, session, sidebar }) {
     return el('span', { class: 'org-meta', text: parts.join(' · ') });
   }
 
-  function selectNode(id, { from }) {
+  function selectNode(id) {
     state.selectedId = id;
-    if (from !== 'sidebar') sidebarTree.setSelected(id);
-    if (from !== 'main') mainTree.setSelected(id);
+    mainTree.setSelected(id);
     renderDetail();
   }
 
@@ -104,17 +92,28 @@ export async function render({ page, actions, session, sidebar }) {
         : el('span', { class: 'muted', text: '未绑定标签（该子树不继承任何组织的标签）' })),
     ]);
 
-    const members = el('div', { class: 'org-members' });
     const checked = new Set();
     let search = '';
 
-    const list = el('div', {});
-    const searchBox = el('input', { type: 'search', placeholder: '按账号名过滤…' });
-    searchBox.addEventListener('input', () => { search = searchBox.value.trim().toLowerCase(); paint(); });
+    const list = el('div', { class: 'org-members' });
+    const selectedCount = el('span', { class: 'muted' });
+    const searchBox = el('input', { type: 'search', placeholder: '按账号名过滤（支持拼音，如 zhangsan）…' });
+    searchBox.addEventListener('input', () => { search = searchBox.value; paint(); });
+    // The filter sits in its own row above the scrolling list, so it stays put while the
+    // operator scrolls through candidates — a filter that scrolls away is unusable exactly
+    // when the list is long enough to need filtering.
+    const memberToolbar = el('div', { class: 'org-member-toolbar' }, [searchBox, selectedCount]);
 
     function paint() {
+      // Already-checked accounts come first, so the members of this node stay visible at the
+      // top of a long account list. Sorting happens on every repaint, which is what makes a
+      // freshly ticked account jump to the top immediately.
+      const wanted = state.accounts
+        .filter((account) => matchesQuery(account.name, search))
+        .sort((left, right) => Number(checked.has(right.id)) - Number(checked.has(left.id))
+          || left.name.localeCompare(right.name, 'zh-Hans-CN'));
+      selectedCount.textContent = checked.size ? '已选 ' + checked.size + ' 个' : '';
       list.replaceChildren();
-      const wanted = state.accounts.filter((account) => !search || account.name.toLowerCase().includes(search));
       if (!wanted.length) {
         list.append(el('div', { class: 'empty', text: state.accounts.length ? '无匹配账号' : '没有可分配的账号' }));
         return;
@@ -124,6 +123,7 @@ export async function render({ page, actions, session, sidebar }) {
         box.checked = checked.has(account.id);
         box.addEventListener('change', () => {
           if (box.checked) checked.add(account.id); else checked.delete(account.id);
+          paint();
         });
         // The name and id carry their own classes: the row's layout rules key off them, and a
         // bare <span> would have to be targeted positionally in CSS.
@@ -152,13 +152,13 @@ export async function render({ page, actions, session, sidebar }) {
       }
     });
 
-    members.append(searchBox, list);
+    const memberPanel = el('div', { class: 'org-member-panel' }, [memberToolbar, list]);
     paint();
     detail.append(card('节点详情：' + node.name, [info,
       el('div', { class: 'toolbar' }, [
         el('h3', { text: '成员账号', style: 'margin:0;flex:1' }),
         readonly ? el('span', { class: 'muted', text: '只读角色不能修改' }) : saveMembers]),
-      members,
+      memberPanel,
       state.accountsTruncated
         ? el('div', { class: 'muted', text: '账号列表已截断（只显示前 ' + MEMBER_PICK_LIMIT + ' 个）；完整列表见账户页按组织筛选' })
         : null,
@@ -199,12 +199,10 @@ export async function render({ page, actions, session, sidebar }) {
       toast(api.errorMessage(err), 'error');
       state.nodes = [];
     }
-    sidebarTree.refresh(state.nodes);
     mainTree.refresh(state.nodes);
     if (state.selectedId === null || !nodeById(state.selectedId)) {
       state.selectedId = state.nodes.length ? state.nodes[0].id : null;
     }
-    sidebarTree.setSelected(state.selectedId);
     mainTree.setSelected(state.selectedId);
     renderDetail();
   }

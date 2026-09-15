@@ -215,6 +215,26 @@ for view in views:
         continue
     checks = data.get('checks', {})
     bad = [k for k, v in checks.items() if v is False or (isinstance(v, (int, float)) and v <= 0)]
+    # A view may declare `strictChecks: true` to mean "every entry in checks is a VERDICT".
+    # Under that flag anything that is not a boolean or a number fails, because a truthy string
+    # (an assertion helper returning 'got […] want […]', say) is otherwise counted as a pass —
+    # which is how one such helper silently passed here.
+    #
+    # The flag is opt-in rather than global because several views deliberately use checks as an
+    # evidence scratchpad (models.rowActions is the list of buttons it found, bridge.parseError
+    # is '' when the script parsed, chat.uiApplyThrew is '' when nothing threw) and carry their
+    # verdict in a separate boolean. Those views predate this rule; changing their meaning is a
+    # separate cleanup, not something a new rule should do behind the scenes.
+    strict = data.get('strictChecks') is True
+    for key, value in checks.items():
+        if key in ('sample', 'fieldRows'):
+            continue
+        if not isinstance(value, (bool, int, float)):
+            if strict:
+                bad.append(key)
+                print(f"        {key}: 检查项不是布尔/数值（{type(value).__name__}），按失败处理：{str(value)[:120]}")
+            else:
+                print(f"        {key}: 非判定项（{type(value).__name__}），仅供参考：{str(value)[:120]}")
     # `threwLate` means the view's script threw after collecting some checks; the harness catches
     # it so the partial report survives, but a throw must still fail the view — otherwise a
     # broken helper silently skips half the assertions and the run reports success.

@@ -59,6 +59,14 @@ window.fetch = async (url, options) => {
     const data = [
       { id: 1, name: 'acme', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [3], org_nodes: [{ id: 3, name: '平台组', path: '总部/研发部/平台组' }], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0 },
       { id: 2, name: 'root-acct', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [1], org_nodes: [{ id: 1, name: '总部', path: '总部' }], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0 },
+      // 中文名：拼音过滤与"选中置顶"都要有中文对象才测得出来。
+      { id: 3, name: '张三', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0 },
+      { id: 4, name: '李四', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0 },
+      // 多音字：长 有 chang/zhang 两读，两种拼法都要能搜到。
+      { id: 5, name: '长伟', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0 },
+      // 中英混合：候选串必须同时包含"原样字符"与"拼音"两条路，否则 研发-张三 这类名字
+      // 只有整串照打才搜得到。
+      { id: 6, name: 'dev-张三', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0 },
     ];
     return ok({ data, count: 2, total: 2, limit: 1000, offset: 0, has_more: false });
   }
@@ -158,16 +166,15 @@ try {
     });
     await settle();
 
-    // Both placements rendered the same data.
-    checks.sidebarTree = sidebar.querySelectorAll('.tree').length === 1;
+    // 组织树只出现在工作区里。
+    //
+    // 侧边栏曾同时挂一份紧凑树，产品上判定为冗余（用户："左侧边栏的组织架构控件去掉"），
+    // 所以这里断言的是**负向事实**：侧边栏里不得出现树。负向断言必须点名容器——不写
+    // `#page .tree` 而写全局 `.tree` 计数，就没法区分"没渲染"与"渲染到别处去了"。
+    checks.noSidebarTree = sidebar.querySelectorAll('.tree').length === 0;
     checks.pageTree = document.querySelectorAll('#page .tree').length === 1;
-    checks.sidebarMode = !!sidebar.querySelector('.tree-sidebar');
     checks.pageMode = !!document.querySelector('#page .tree-workspace');
-    checks.sidebarRows = labels(sidebar).length;
     checks.pageRows = labels(document.getElementById('page')).length;
-    // The sidebar opens only the first level, so the third level is hidden there but visible
-    // in the page: the two placements are genuinely configured differently.
-    checks.sidebarHidesDeep = !labels(sidebar).includes('平台组');
     checks.pageShowsDeep = labels(document.getElementById('page')).includes('平台组');
     // Sibling order comes from the server (sort_order), and the hierarchy is indented.
     checks.rootOrder = labels(document.getElementById('page')).slice(0, 1).join(',') === '总部';
@@ -200,10 +207,10 @@ try {
     checks.memberCheckboxNameGap = (nameRect.left - boxRect.right) >= 0 && (nameRect.left - boxRect.right) <= 12;
     checks.memberVerticallyAligned = Math.abs((boxRect.top + boxRect.height / 2) - (nameRect.top + nameRect.height / 2)) <= 2;
     checks.memberRowFitsPanel = memberRow.getBoundingClientRect().width <= document.querySelector('.org-members').getBoundingClientRect().width;
-    // 把量到的数字带出来：断言只说真假，数字才能说明"修好了多少"。
-    checks.memberRowMetrics = 'box=' + Math.round(boxRect.width) + 'x' + Math.round(boxRect.height)
+    // 量到的数字放进 sample（runner 唯一豁免的信息项）：断言只说真假，数字才说明"修好了多少"。
+    checks.sample = { memberRow: 'box=' + Math.round(boxRect.width) + 'x' + Math.round(boxRect.height)
       + ' gap=' + Math.round(nameRect.left - boxRect.right)
-      + ' dy=' + Math.round(Math.abs((boxRect.top + boxRect.height / 2) - (nameRect.top + nameRect.height / 2)));
+      + ' dy=' + Math.round(Math.abs((boxRect.top + boxRect.height / 2) - (nameRect.top + nameRect.height / 2))) };
     const memberBox = (name) => {
       const row = [...document.querySelectorAll('.org-member')]
         .find((el) => el.textContent.includes(name));
@@ -218,11 +225,94 @@ try {
     checks.pathShown = pageText().includes('总部/研发部/平台组');
     checks.memberFollowsSelection = !!memberBox('acme') && memberBox('acme').checked;
 
-    // Selecting another node in the PAGE tree updates the SIDEBAR tree and the detail card.
+    // Selecting another node in the tree updates the detail card.
     rowOf(document.getElementById('page'), '市场部').click();
     await settle();
-    checks.sidebarMirrorsSelection = rowOf(sidebar, '市场部').classList.contains('selected');
     checks.detailFollows = pageText().includes('节点详情：市场部');
+
+    // --- 成员的拼音过滤 ---
+    //
+    // 断言的是"打字母能搜到中文名"这件事本身：只查 DOM 里有没有那几行是查不出拼音是否生效的
+    // （表格本来就把它们都画出来了），所以每次都必须断言**过滤之后剩下的集合**。
+    const memberNames = () => [...document.querySelectorAll('.org-member-name')].map((n) => n.textContent);
+    const memberSearch = document.querySelector('.org-member-toolbar input[type="search"]');
+    const typeSearch = async (value) => {
+      memberSearch.value = value;
+      memberSearch.dispatchEvent(new Event('input'));
+      await settle();
+    };
+    checks.memberSearchPresent = !!memberSearch;
+    // 每次断言都按**集合**比较（排序后 join），不按顺序：行序会随"选中置顶"规则变化，
+    // 顺序断言会把两件事混在一起，也会在两条断言之间自相矛盾（zhangsan 既命中 张三、
+    // 也命中 dev-张三，写成 === '张三' 就必然红）。
+    // 失败时写 false（而不是描述字符串）并把细节推进 errors：runner 只把 false/非正数当失败，
+    // 返回字符串会被当成通过——这个 helper 的第一版就是这么骗过 runner 的。
+    const expectNames = (label, query, expected) => {
+      const got = memberNames().slice().sort().join(',');
+      const want = expected.slice().sort().join(',');
+      const ok = got === want;
+      checks[label] = ok;
+      if (!ok) errors.push(label + '（查询 ' + JSON.stringify(query) + '）: got [' + got + '] want [' + want + ']');
+    };
+    await typeSearch('zhangsan');
+    expectNames('pinyinFullMatchesChinese', 'zhangsan', ['张三', 'dev-张三']);
+    await typeSearch('zs');
+    expectNames('pinyinInitialsMatch', 'zs', ['张三', 'dev-张三']);
+    await typeSearch('changwei');
+    expectNames('pinyinPolyphoneChang', 'changwei', ['长伟']);
+    await typeSearch('zhangwei');
+    expectNames('pinyinPolyphoneZhang', 'zhangwei', ['长伟']);
+    await typeSearch('lisi');
+    expectNames('pinyinOtherName', 'lisi', ['李四']);
+    await typeSearch('acme');
+    expectNames('englishStillMatches', 'acme', ['acme']);
+    await typeSearch('李');
+    expectNames('literalChineseStillMatches', '李', ['李四']);
+    await typeSearch('dev');
+    expectNames('mixedEnglishPart', 'dev', ['dev-张三']);
+    await typeSearch('devzs');
+    expectNames('mixedCombinedInitials', 'devzs', ['dev-张三']);
+    await typeSearch('nothingmatchesthis');
+    checks.noMatchState = document.querySelector('.org-members').textContent.includes('无匹配账号');
+    await typeSearch('');
+    checks.filterCleared = memberNames().length === 6;
+
+    // --- 过滤器不跟着成员滚动 ---
+    //
+    // 用几何证明：把列表滚到底，过滤器（及其相对列表的偏移）必须一动不动。只断言"存在一个
+    // 搜索框"是没用的——bug 的形态就是它存在、但会跟着滚走。
+    const toolbar = document.querySelector('.org-member-toolbar');
+    const listBox = document.querySelector('.org-members');
+    const toolbarTopBefore = toolbar.getBoundingClientRect().top;
+    listBox.scrollTop = listBox.scrollHeight;
+    await settle();
+    const toolbarTopAfter = toolbar.getBoundingClientRect().top;
+    checks.filterDoesNotScroll = Math.abs(toolbarTopBefore - toolbarTopAfter) <= 1;
+    checks.filterIsOutsideScroller = !listBox.contains(memberSearch);
+    listBox.scrollTop = 0;
+    await settle();
+
+    // --- 选中置顶 ---
+    const checkBoxFor = (name) => {
+      const row = [...document.querySelectorAll('.org-member')].find((el) => el.textContent.includes(name));
+      return row ? row.querySelector('input') : null;
+    };
+    checkBoxFor('李四').click();
+    await settle();
+    checks.checkedPinnedToTop = memberNames()[0] === '李四';
+    checks.checkedCountShown = (document.querySelector('.org-member-toolbar') || {}).textContent.includes('已选');
+    // 再勾一个：两个选中项都必须在未选中的前面。
+    checkBoxFor('张三').click();
+    await settle();
+    checks.bothCheckedOnTop = memberNames().slice(0, 2).sort().join(',') === '张三,李四';
+    // 取消勾选后不再置顶。
+    checkBoxFor('李四').click();
+    await settle();
+    checks.uncheckedLeavesTop = memberNames()[0] === '张三';
+    // 过滤与置顶同时生效：过滤决定"有哪些行"，置顶决定"这些行里谁在前"。
+    await typeSearch('zhangsan');
+    checks.filterOverridesPinning = memberNames().slice().sort().join(',') === 'dev-张三,张三';
+    await typeSearch('');
 
     // Saving the member list sends a whole-list replacement to the node endpoint.
     const checkedBefore = document.querySelectorAll('.org-member input:checked').length;
@@ -275,6 +365,8 @@ try {
     });
     await settle();
     checks.treeRendered = labels(document.getElementById('page')).length > 0;
+    checks.noSidebarTree = (document.getElementById('sidebar-slot') || { querySelectorAll: () => [] })
+      .querySelectorAll('.tree').length === 0;
     checks.noRowActions = document.querySelectorAll('#page .tree-action').length === 0;
     checks.noCreateRoot = !!find('新建根节点') && find('新建根节点').disabled === true;
     checks.noSaveButton = find('保存成员') === undefined;
@@ -322,9 +414,9 @@ try {
   }
 
   const bad = Object.keys(checks).filter((key) => checks[key] === false);
-  report({ view, stage: 'done', ok: bad.length === 0, failed: bad, checks, errors });
+  report({ view, stage: 'done', ok: bad.length === 0, failed: bad, checks, errors, strictChecks: true });
 } catch (err) {
-  report({ view, stage: 'threw', checks, thrown: String(err && err.stack ? err.stack : err), errors });
+  report({ view, stage: 'threw', ok: false, checks, strictChecks: true, thrown: String(err && err.stack ? err.stack : err), errors });
 }
 </script>
 </body>

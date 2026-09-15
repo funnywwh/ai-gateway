@@ -2666,6 +2666,35 @@ readiness 判据 `curl` 没带 `-f`，一个残留的、正从已删目录应答
       审计里留下 `create`/`delete` 两条 `org_node` 记录（含 `nodes_deleted: 1`）。
 - 回滚（如需）：`cp bin/aigw.prev-0.13.0-ba25ed3 bin/aigw && scripts/local-run.sh restart`。
 
+### 组织相关界面的三项改进（用户反馈）
+
+1. **过滤支持拼音与英文**；2. **成员过滤控件不跟着列表滚动**；3. **选中的成员自动排顶部**。
+
+- [x] 生成拼音表：`scripts/gen-pinyin.py` → `internal/webui/static/js/pinyin.js`（20924 字、137KB）。
+      数据源 [mozillazg/pinyin-data](https://github.com/mozillazg/pinyin-data)（**MIT**），文件头记录版本与
+      输入 SHA-256；声调剥离、ü 写 v；覆盖 CJK 基本区，表外字符回退子串匹配（写进 `docs/org.md`）。
+      控制台零构建、不能 import npm 包，所以表必须是仓库文件
+- [x] `pinyin.js`：`matchesQuery(text, query)`（字面量优先，再查拼音）+ `candidates()`（全拼/首字母/多音字，
+      组合数超 64 时退化为首选读音）；**去掉分隔符再算一遍**，所以 `devzs` 能搜到 `dev-张三`
+- [x] `tree.js`：新增 **`matcher` 回调**（默认仍是大小写不敏感子串）。控件**不依赖**拼音表——
+      拼音是调用方注入的能力，任何用树的地方都不必背 137KB。`labelText()` 顺带修掉"renderLabel 返回
+      Node 时 String(node) 变成 [object …]"的过滤失效
+- [x] `pages/org.js`：树过滤器与成员过滤器都走 `matchesQuery`
+- [x] 成员面板：`.org-member-panel` = 固定过滤行 + 独立滚动列表（过滤框不再被滚走）；
+      勾选的成员排序置顶（每次重绘排序，勾选后立即重绘），并显示「已选 N 个」
+- [x] **先证伪再修**：harness 先加断言（拼音全拼/首字母/多音字/中英混合、过滤器滚到底后位置不变、
+      勾选置顶/取消回位），跑在未改代码上为红，改后转绿
+- [x] Go 测试 `internal/webui/pinyin_test.go`：表长度必须是 U+4E00–U+9FFF 的 20924 条（截断/偏移一位
+      都会被抓住）、关键字的读音（含长/重两个多音字）、读音必须是纯 a-z（声调未剥离就是不可匹配）、
+      文件头必须记录来源与许可、**两个过滤器都用了 matchesQuery 而 tree.js 不许 import 拼音表**
+- [x] 静态回归 `org_tree_test.mjs`：拼音注入方式、成员面板结构、滚动/边框归属、置顶排序与"勾选即重绘"
+- [x] 顺带修掉 harness 的一个**"测试不会失败"**漏洞：runner 现在支持视图声明 `strictChecks: true`，
+      声明后 checks 里非布尔/数值的项按失败处理。原因是我的断言 helper 失败时返回描述字符串，
+      在旧规则下**显示通过**（实测：故意写错期望值时旧规则全绿、新规则正确判红）。默认不严格，
+      因为 models/chat/bridge 故意把 checks 当证据草稿纸——改它们的语义是另一件事
+- [x] `make verify` + `make ui-check` 全绿（org 52 项、tree 57 项）
+- 未做：8088 仍是旧构建，这批 UI 修复攒完再发版本（计划 patch 升 `0.14.1`）
+
 ### 修掉树形控件的展开箭头渲染成方框（用户反馈：父节点的左边有一个方块）
 
 反馈现场同样是 v0.14.0 上线后的控制台。这不是布局问题，是**缺字形（tofu）**：树控件的展开/折叠

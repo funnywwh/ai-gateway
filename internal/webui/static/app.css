@@ -344,15 +344,6 @@ textarea.form-input { resize:vertical; min-height:64px; }
 .chat-form > .aigw-msg.aigw-error { border-left-color:var(--danger); color:var(--danger); }
 
 /* ---------------------------------------------------------------------------
-   侧边栏插槽（M49）
-   页面可以往侧边栏放自己的导航（组织架构页把它的树放在这里）。空的时候整块消失，
-   所以不用插槽的页面布局与之前完全一致；有内容时它自己滚动，不与主导航抢空间。
-   --------------------------------------------------------------------------- */
-.sidebar-slot { flex:0 1 auto; min-height:0; max-height:45vh; overflow:auto;
-  border-top:1px solid var(--line); padding:8px 8px 10px; }
-.sidebar-slot:empty { display:none; }
-
-/* ---------------------------------------------------------------------------
    可复用树形控件（internal/webui/static/js/tree.js）
    两种放置方式共用同一套结构，只有密度与次要信息的取舍不同：
    - `.tree-sidebar` 紧凑（12px，不显示 meta/actions，留给侧边栏）；
@@ -388,7 +379,13 @@ textarea.form-input { resize:vertical; min-height:64px; }
 .org-layout { display:grid; grid-template-columns: minmax(240px, 320px) minmax(0, 1fr); gap:14px; align-items:start; }
 @media (max-width: 900px) { .org-layout { grid-template-columns: minmax(0, 1fr); } }
 .org-tree-card { max-height:70vh; overflow:auto; }
-.org-members { max-height:280px; overflow:auto; border:1px solid var(--line); border-radius:8px; padding:8px; }
+/* 成员面板：过滤行固定在上方，只有账号列表滚动。
+   过滤框跟着列表一起滚是错的——列表长到需要过滤时，过滤器正好会被滚走。 */
+.org-member-panel { border:1px solid var(--line); border-radius:8px; }
+.org-member-toolbar { display:flex; align-items:center; gap:8px; padding:8px; border-bottom:1px solid var(--line); }
+.org-member-toolbar input[type=search] { flex:1 1 auto; min-width:0; }
+.org-member-toolbar .muted { flex:0 0 auto; white-space:nowrap; }
+.org-members { max-height:280px; overflow:auto; padding:8px; }
 .org-member { display:flex; align-items:center; gap:8px; padding:4px 2px; font-size:13px; }
 /* 成员行的勾选框：全局 `input, select, textarea { width:100% }`（本文件第 89 行）会命中这个
    没有 class 的 checkbox，把它撑满整行、账号名被挤到最右边——表现就是"勾选框和文字隔太远、

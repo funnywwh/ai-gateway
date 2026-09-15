@@ -50,16 +50,18 @@ assert.match(treeSrc, /root\.addEventListener\('click'/, 'clicks must be delegat
 assert.doesNotMatch(treeSrc, /row\.addEventListener\('click'/,
   'per-row listeners would cost one closure per row');
 
-// --- the shell offers a sidebar slot to every page ----------------------------------------
-
-assert.match(app, /const sidebar = el\('div', \{ class: 'sidebar-slot' \}\)/,
-  'the shell must provide a sidebar slot');
-assert.match(app, /renderBrand\(version\), nav, sidebar,/, 'the slot must sit between the nav and the footer');
-assert.match(app, /clear\(sidebar\)/, 'the slot must be emptied on every route change');
-assert.match(app, /render\(\{ page, actions, session, route, navigate, sidebar \}\)/,
-  'the slot must reach the page through the render context');
-assert.match(css, /\.sidebar-slot:empty \{ display:none; \}/,
-  'an unused slot must not change the layout of pages that do not use it');
+// --- 组织树只渲染在工作区，不再挂到左侧栏 ---------------------------------------------------
+//
+// 这里断言的是**负向事实**，所以两侧都要钉住：页面不得有侧边栏实例，shell 也不得再提供插槽。
+// 只查页面会把"插槽留着但没人用"当成通过，而那段代码没有任何使用者，正是要清掉的东西。
+assert.doesNotMatch(org, /mode: 'sidebar'/, 'the org page must not mount a second tree in the sidebar');
+assert.doesNotMatch(org, /sidebar/, 'the org page must not touch a sidebar at all');
+assert.doesNotMatch(app, /sidebar-slot/, 'the shell slot has no consumer left: it must be gone, not merely unused');
+assert.doesNotMatch(css, /\.sidebar-slot/, 'and so must its CSS');
+// 树控件本身仍然支持两种放置方式（那是最初的需求），由 `tree` harness 视图守：那里把它挂进
+// 一个 .sidebar 形状的容器。控件里必须留着这个能力，页面不再用它而已。
+assert.match(treeSrc, /mode = 'workspace'/, 'the control still defaults to the workspace placement');
+assert.match(treeSrc, /const compact = mode === 'sidebar'/, 'and still supports the compact sidebar placement');
 
 // --- the org page mounts the same control twice and keeps them in step --------------------
 
@@ -80,6 +82,33 @@ assert.match(org, /const saveMembers = el\('button', \{\s*class: 'btn btn-primar
   'the member save button must be disabled for read-only roles');
 // The save path must not run before the current members are known, or it would clear the node.
 assert.match(org, /state\.membersLoaded = false;/, 'the save button must be re-armed only after the members load');
+
+// --- 过滤支持拼音与英文；成员过滤器不滚动；选中的成员置顶 --------------------------------
+
+// 拼音能力是**注入**的：控件自己不依赖拼音表（那是 Go 测试 TestConsoleFiltersUseThePinyinMatcher
+// 也钉着的一条），页面通过 matcher 传进来；成员过滤直接用 matchesQuery。
+assert.match(org, /import \{ matchesQuery \} from '\.\.\/pinyin\.js'/, 'the org page must use the pinyin matcher');
+assert.match(org, /matcher: matchesQuery/, 'the node tree filter must match pinyin too');
+assert.match(org, /matchesQuery\(account\.name, search\)/, 'the member filter must match pinyin and English');
+assert.match(org, /type: 'search', placeholder: '按账号名过滤（支持拼音/, 'the member filter must say that pinyin works');
+assert.match(treeSrc, /matcher,/, 'the control must accept a matcher callback');
+assert.doesNotMatch(treeSrc, /import[^;]*pinyin/, 'the control must not depend on the pinyin table itself');
+
+// 过滤器必须在滚动区之外：`memberToolbar`（含搜索框）与 `list`（滚动区）是两个兄弟节点。
+assert.match(org, /const memberToolbar = el\('div', \{ class: 'org-member-toolbar' \}, \[searchBox, selectedCount\]\)/,
+  'the filter row must be its own element so it can stay put while the list scrolls');
+assert.match(org, /const memberPanel = el\('div', \{ class: 'org-member-panel' \}, \[memberToolbar, list\]\)/,
+  'the panel must hold the fixed toolbar and the scrolling list side by side');
+assert.match(css, /\.org-members \{ max-height:280px; overflow:auto; padding:8px; \}/,
+  'only the list scrolls: the border and the toolbar live on the panel');
+assert.doesNotMatch(css, /\.org-members \{[^}]*border:1px/,
+  'the scrolling element must not be the bordered panel that also holds the filter');
+
+// 选中置顶：排序必须在每次重绘时按"已勾选"分组，且勾选后立即重绘。
+assert.match(org, /Number\(checked\.has\(right\.id\)\) - Number\(checked\.has\(left\.id\)\)/,
+  'checked members must sort before unchecked ones');
+assert.match(org, /checked\.add\(account\.id\); else checked\.delete\(account\.id\);\s*\n\s*paint\(\);/,
+  'ticking a member must repaint, so it lands at the top immediately');
 
 // --- 树的箭头必须是画出来的，不能是文字字形 -----------------------------------------------
 //
