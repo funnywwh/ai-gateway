@@ -75,7 +75,7 @@ GW_BASE=http://127.0.0.1:8099 GW_COOKIE=... scripts/ui-harness/capture.py       
     服务端，读的都是**带查询串的原始 URL 与请求体**。`org-readonly` 用 `session.role=viewer` 渲染同一页，
     断言写入口整体消失、成员复选框禁用。
 
-## 三个踩过的坑（改这个 harness 前先读）
+## 前三个坑（改这个 harness 前先读）
 
 1. **`--screenshot` 的产物不可信**：本环境下所有视图的 PNG 字节完全相同（浏览器在页面还没画完时就截了图），
    所以**不要**用图片判断成败——一切以 `/report` 回报为准。
@@ -84,6 +84,40 @@ GW_BASE=http://127.0.0.1:8099 GW_COOKIE=... scripts/ui-harness/capture.py       
 3. **回报必须用 `navigator.sendBeacon`**：同步 XHR 在页面被拆掉时会被丢弃（实测同一份断言，XHR 版本
    一条都收不到，beacon 版本全部收到）。另外 firefox 的 snap 封装要求 `HOME`/`XDG_RUNTIME_DIR` 可写，
    且每次运行要换一个 `--profile`，脚本都已处理。
+
+## 第四个坑：`$!` 不是服务器的 PID（重复运行会失败）
+
+`run.sh` 曾经这样起服务器：
+
+```sh
+(cd "$WORK/site" && python3 server.py "$PORT" >log 2>&1 & echo $! >"$WORK/server.pid")
+```
+
+这里 `&` 作用在整个 `cd … && python3 …` **列表**上，所以 shell 会 fork 一个子 shell 去跑这个列表，
+`$!` 记下的是**那个子 shell 的 PID**，而不是 python 的（实测：pidfile 写 21，真正的服务器是 22，
+且被 reparent 到 PID 1）。子 shell 很快退出，于是结尾的 `kill $(cat server.pid)` 打在一个**已死的 PID** 上、
+静默失败（`2>/dev/null` 把错误也吞了），真正的服务器一直活着占着 8097。
+
+后果是 **`make ui-check` 不是幂等的**：第二次运行会 `rm -rf` 掉工作目录、新服务器 bind 失败
+（`OSError: [Errno 98] Address already in use`），然后报"the harness server did not start"。
+在 DSH 沙箱里每次命令结束会回收后台进程，所以这个 bug 只在**同一条命令里连跑两次**才暴露
+（实测 20 次连跑挂了 19 次）；在宿主终端上它就是"第二次 `make ui-check` 必挂"。
+
+三处修好，缺一不可：
+
+1. **用 `exec` 让 `$!` 就是服务器本身**：`(cd "$WORK/site" && exec python3 server.py "$PORT") &`。
+   这与 `scripts/local-run.sh` 早就用的写法一致（那边是内层 bash 先 `echo $$` 再 `exec`，注释里写明了原因），
+   也就是说 harness 才是那个例外。
+2. **readiness 检查要对 HTTP 错误失败**：原判据 `curl -sS -o /dev/null …/harness.html` **没带 `-f`**，
+   于是 404 也算"起来了"——一个上轮残留、正从已被删除的目录里应答 404 的服务器能骗过它，
+   接着每个视图都会以"no report"失败（这很可能就是当时 `brand` 视图偶发失败的真身）。
+   现在改为请求一个**每次运行都重新生成的哨兵文件**并比对内容：只有"正在服务本次运行的目录"才算就绪。
+3. **退出时确保端口真的释放**：`stop_server` 会 kill 后轮询到端口不再应答（最多 5 秒），
+   并挂 `trap … EXIT`，所以 `^C`、超时、断言失败都不会给下一次运行留下监听者；
+   入口处还有一道"端口已被占用就明确报错（exit 2）"的检查，而不是甩一段 Python traceback 给人读。
+
+验证：`brand` 视图连跑 20 次全绿；完整 `make ui-check` 连跑 2 次全绿（修复前第二次必挂）；
+`SIGTERM` 打断运行后残留服务器进程数为 0、端口已释放；端口被占用时明确拒绝并给出处理办法。
 
 ## 与 Go 测试的分工
 
