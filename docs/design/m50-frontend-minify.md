@@ -184,4 +184,85 @@ Go 侧的静态合约测试读的是源码，天然看不到"只有压缩后才�
 
 ## 9. 实现与设计差异
 
-（实现完成后回填）
+按设计实现，以下 5 处是写代码时才发现、需要记下来的调整：
+
+1. **百分比做四舍五入**（设计的算式是整除）。`100-100*329702/559442` 整除得 **42**，而真实降幅是 **41.07%**。
+   这个数字要写进设计文档与发布记录，**多报一个百分点**是不能接受的，于是抽了 `percentSaved`（`math.Round`），
+   `Result.Percent()` 与逐文件的 `Result.PercentOf()` 共用它。
+2. **CSS 选择器比对要先归一化组合符周围的空格**。esbuild 会把 `a > b` 压成 `a>b`，第一版测试直接
+   字符串比对，于是 8 条规则被同时报成"丢失"+"凭空出现"。改成只折叠空白与组合符两侧空格
+   （`a b` 后代选择器仍与 `a>b` 区分）后，265 条选择器逐条相等。这是测试写错，不是压缩出错。
+3. **动态 import 的断言不能匹配字面量**。`router.js` 是 `import(route.module)`——说明符是个变量
+   （这正是不能 bundle 的原因）。测试改成断言"存在 `import(` 调用形状"，另加"路由器仍引用
+   `./pages/*.js`"两条，才真正钉住懒加载页面表。
+4. **`Run` 的返回值多了一个 `Warnings`**：esbuild 的 warning 要能出现在 `make build` 的输出里
+   （`minifyui` 打到 stderr），否则"压缩成功了但有个可疑写法"就没人看见。
+5. **`make ui-dist` 每次都重建 `minifyui` 到 `.cache/ui-dist/minifyui`**，而不是写进 `bin/`：
+   `bin/` 只放对外产物（二进制与 `aigw-provider-*`），工具是 11 MB 的中间物。
+
+另外验证方式本身也修正过一次，值得记下来：`scripts/ui-harness/run.sh` 的 `UI_STATIC_DIR` **先写在文档里、
+后写进脚本**，于是第一次"对压缩产物跑走查"实际上复制的仍是源码树（`run.sh` 还没有这个变量），
+两边结果当然一致——**一次没有咬合力的验证**。补上变量后重跑，工作目录里的 `js/app.js` 是 3007 B
+（源码是 6097 B），这时"逐视图一致"才是真证据。教训与 `docs/PROCESS.md` 里"先证伪再修"同源：
+**拿到一致结果时要先确认被测对象真的是被测的那一个**。
+
+## 10. 验收记录（实测）
+
+环境：本机 12th Gen i7-12700K，`source scripts/goenv.sh`，esbuild **v0.28.2**（Go 模块，2026-09-15 引入）。
+
+### 压缩本身
+
+```
+$ make ui-dist
+ui: minified 37 files 559442 -> 329702 bytes (-41%) in 820ms
+ui: overlay -> /home/winger/work/ai_gateway/.cache/ui-dist/overlay.json
+```
+
+| 文件（抽样） | 源 | 镜像 |
+|---|---|---|
+| `js/pages/chat.js` | 65,093 | 27,872 |
+| `js/ui.js` | 21,403 | 9,237 |
+| `js/app.js` | 6,097 | 3,007 |
+| `app.css` | 29,884 | 20,655 |
+| `js/pinyin.js` | 137,477 | 112,658 |
+| `index.html` / `favicon.svg` | 669 / 349 | 不变（逐字节） |
+
+overlay 35 条（= 被改写文件数）；`index.html` 与 `favicon.svg` 不在其中。
+
+### 二进制
+
+| 构建 | 体积 | 说明 |
+|---|---|---|
+| `make build-src` | 21,915,749 B | 日志 `ui: source assets (not minified)` |
+| `make build` | 21,686,381 B | 日志 `ui: minified 37 files …(-41%)`；**−229,368 B（−1.05%）** |
+
+`strings` 抽查：`renderShell` / `const STATS_SORTS` / `api.post('/routes'` 在源码版为 3/1/1，
+在压缩版**全部为 0**；`record_output_text` 两边都是 21（服务端枚举这类字符串合约必须留下）。
+
+### 服务行为 A/B（同一份配置、隔离端口 `:8093` 压缩版 / `:8094` 源码版、各自空库）
+
+| 请求 | 压缩版 | 源码版 |
+|---|---|---|
+| `/admin/ui/`、`/admin/ui/providers`、`/admin/ui/app.css`、`/admin/ui/js/*` | 200 | 200 |
+| `/admin/ui/index.html` | 301（`http.FileServer` 的规范跳转，改动前也是） | 301 |
+| `/admin/ui/js/pages/missing.js` | 404 | 404 |
+| `js/app.js` / `ui.js` / `pages/chat.js` / `app.css` 字节 | 3007 / 9237 / 27872 / 20655 | 6097 / 21403 / 65093 / 29884 |
+| 响应头 | `Content-Type: text/javascript; charset=utf-8`、`Cache-Control: public, max-age=300`、`nosniff`；`/` 带 CSP | 同 |
+| `index.html` 内容 | 与源码逐字节相同 | 同 |
+
+两个实例启动日志 `level=ERROR` 均为 **0**，验证后端口释放；在跑的 `:8088`（`0.14.0 / 6dc9082`）全程未受影响。
+
+### 测试
+
+| 检查 | 结果 |
+|---|---|
+| `go vet ./...` | 干净（改动前也干净） |
+| `go test ./...` | **38 ok**（改动前 37 ok；多的是 `internal/webui/minify`） |
+| `go test ./internal/webui/minify/ -v` | 7 项全过 |
+| 变异验证 | 让 `writeMirror` 跳过 `js/pages/*.js` → `TestMirrorCoversEverySourceFile` 等 5 项变红（"mirror file set differs"），确认断言有咬合力 |
+| `make ui-base`（node 在 PATH 上时） | 与改动前**同样 3 过 2 红**（`tags_binding_test.mjs`、`org_tree_test.mjs` 是既有红项；`models_test.mjs` 需 `--experimental-vm-modules`，未挂进 `ui-base`）——**本改动没有引入新失败** |
+| `make ui-check`（源码树） | **21 个视图全绿**（docs 26 / requests 97 / chat 110 / tree 57 / org 52 …） |
+| `UI_STATIC_DIR=.cache/ui-dist/static make ui-check`（压缩镜像） | **21 个视图全绿，逐视图检查项数量与源码树完全相同**（`diff` 判定 IDENTICAL VERDICTS） |
+
+最后一行是本里程碑的核心证据：同一套真实浏览器断言，跑在压缩产物上与跑在源码上给出同样的结论。
+
