@@ -45,7 +45,8 @@
 | `internal/ids` | 前缀 ID（`resp_`/'msg_'/...） | 已实现 |
 | `internal/secret` | SHA-256 哈希、前缀提取、常量时间比较 | 已实现 |
 | `internal/store` | SQLite（迁移、DAL、引导、审计、设置） | 已实现 |
-| `internal/registry` | 不可变快照 + 原子换入 | 已实现 |
+| `internal/registry` | 不可变快照 + 原子换入（含账号侧标签预计算，热路径 0 分配） | 已实现 |
+| `internal/orgtree` | 组织树的纯算法（祖先链/子孙/环与深度校验/继承标签名），只依赖 `domain` | M49 |
 | `internal/pluginhost` | 插件进程生命周期 | M2 |
 | `pkg/pluginapi` | 插件协议 SDK | M2 |
 | `pkg/providerkit` | SSE 解析、chat↔responses 转换、估算 | M2 |

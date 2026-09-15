@@ -58,6 +58,25 @@ type TagAdmin interface {
 	DeleteTag(ctx context.Context, id int64) error
 }
 
+// OrgAdmin manages the organization structure: the node tree and which accounts sit in it.
+//
+// It is a port of its own rather than part of TagAdmin because the two are independent
+// entities — an operator may run either without the other — even though a node's tag names
+// end up in the same authorization union as an account's own.
+type OrgAdmin interface {
+	ListOrgNodes(ctx context.Context) ([]*domain.OrgNode, error)
+	GetOrgNode(ctx context.Context, id int64) (*domain.OrgNode, error)
+	CreateOrgNode(ctx context.Context, n *domain.OrgNode) (int64, error)
+	UpdateOrgNode(ctx context.Context, n *domain.OrgNode) error
+	// DeleteOrgNode removes the node, or its whole subtree when cascade is set, and reports
+	// how many nodes were removed.
+	DeleteOrgNode(ctx context.Context, id int64, cascade bool) (int, error)
+	ListOrgMemberships(ctx context.Context) ([]domain.OrgMembership, error)
+	ListOrgNodeAccountIDs(ctx context.Context, nodeID int64) ([]int64, error)
+	SetOrgNodeMembers(ctx context.Context, nodeID int64, accountIDs []int64) error
+	SetAccountOrgNodes(ctx context.Context, accountID int64, nodeIDs []int64) error
+}
+
 // HookAdmin manages outbound event sinks.
 type HookAdmin interface {
 	ListHooks(ctx context.Context) ([]*domain.Hook, error)

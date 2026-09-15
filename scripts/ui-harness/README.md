@@ -64,6 +64,17 @@ GW_BASE=http://127.0.0.1:8099 GW_COOKIE=... scripts/ui-harness/capture.py       
   「切了排序但顺序没变」也会全绿。合成数据写在 `keys.page.html` 的 `syntheticWorkspaces()` 里，
   `capture.py --refresh` 不会覆盖它（它只重写自己列出的键）。
 
+- **M49 起**：`tree.page.html` 与 `org.page.html` 两个新页，共 4 个视图：
+  - `#tree` **不需要任何快照**——树控件（`js/tree.js`）是纯视图，输入是节点数组加回调。它把**同一个
+    控件挂两处**（侧边栏 `.sidebar` 容器 + 工作区容器），断言两种情况下的层级缩进、折叠/展开、键盘
+    ↑↓←→Enter/Home/End、roving tabindex、行内 action 回调、过滤（保留祖先）、空态、孤儿节点与
+    **成环数据不挂死**。断言读的是**可见行**（`visibleIds` 由标签文本推出），因为「折叠是否真的少画了行」
+    只有对着 DOM 才看得出来。
+  - `#org` / `#org-readonly` / `#org-accounts`：stub 里有一份**会变的**组织树（写操作会改它），
+    所以"保存成员"是否真的落库、删除是否带 `cascade=true`、账户页筛选是否把 `org_node_id` 发到了
+    服务端，读的都是**带查询串的原始 URL 与请求体**。`org-readonly` 用 `session.role=viewer` 渲染同一页，
+    断言写入口整体消失、成员复选框禁用。
+
 ## 三个踩过的坑（改这个 harness 前先读）
 
 1. **`--screenshot` 的产物不可信**：本环境下所有视图的 PNG 字节完全相同（浏览器在页面还没画完时就截了图），

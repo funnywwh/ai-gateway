@@ -72,7 +72,7 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
 
 | 工具 | 入参 | 返回 |
 |---|---|---|
-| `admin_endpoints` | `filter?`（name/path/summary 子串）、`group?`（system/keys/requests/audit/accounts/models/providers/billing/backups/portal/pricing/mcp/hooks/settings）、`limit?` | `{count,total,groups,endpoints:[{name,method,path,summary,group,role,params[],query[],has_body,body_fields[],dangerous,tool,reason?}]}`（`body_fields` 是 M40 新增：概览行直接给出请求体的顶层字段名） |
+| `admin_endpoints` | `filter?`（name/path/summary 子串）、`group?`（system/keys/requests/audit/accounts/org/models/providers/billing/backups/portal/pricing/mcp/hooks/settings）、`limit?` | `{count,total,groups,endpoints:[{name,method,path,summary,group,role,params[],query[],has_body,body_fields[],dangerous,tool,reason?}]}`（`body_fields` 是 M40 新增：概览行直接给出请求体的顶层字段名） |
 | `admin_describe` | `name` 或 `names[]` | 该接口的 method/path/摘要/所需角色、路径参数与查询参数说明、**请求体 JSON Schema**、可直接照抄的 `example`、危险接口的 `confirm_reason` |
 | `admin_request` | `name`、`params?`（路径参数）、`query?`（查询参数）、`body?`（JSON 对象）、`confirm?` | `{endpoint,method,path,status,ok,body|text|meta,truncated?}` |
 
@@ -108,6 +108,14 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
   写入后用 `admin_get_provider` / `admin_list_providers` 读回：每行带 `capacity`
   （`limit`/`inflight`/`waiting`/`admitted`/`queue_full`/`timed_out`/`waited_total_ms`），
   `admin_stats.provider_capacity` 给出全部供应商的实时在途与排队；**读这些只需要 `admin_read`**，写才需要 `admin`。
+- **组织架构是后台可写的**（M49，`group=org`）：`admin_list_org_nodes`（`include_accounts=true` 时每节点带成员账号；
+  返回扁平列表 + `parent_id`/`depth`/`path`，模型不必自己算层级）、`admin_create_org_node`（`name` 必填，
+  `parent_id` 为空即根节点）、`admin_update_org_node`（改名 / 换父 / 改标签 / 排序；移到自身或子孙、或超过
+  16 层会被拒）、`admin_delete_org_node`（有子节点时必须显式传 `query.cascade=true`，会删除整棵子树，
+  成员关系随之消失，**账号本身不受影响**）、`admin_set_org_node_accounts`（`body.account_ids` 整表替换该节点的成员）。
+  账号侧用 `admin_update_account` 的 `body.org_node_ids` 设置该账号的归属（同样是整表替换）。
+  **节点上的标签会被整棵子树继承**：挂一个带 `grants` 的标签等于给该子树下所有账号的**全部 API Key** 放权，
+  所以这几条路由标记为危险接口、`admin_describe` 会给出 `confirm_reason`。
 
 ### 模型级推理强度示例
 

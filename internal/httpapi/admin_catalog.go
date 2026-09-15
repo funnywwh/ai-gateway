@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/ids"
 	"github.com/winger/ai-gateway/internal/mcpsrv"
+	"github.com/winger/ai-gateway/internal/orgtree"
 	"github.com/winger/ai-gateway/internal/pricing"
 	"github.com/winger/ai-gateway/internal/secret"
 )
@@ -35,9 +37,33 @@ func (s *Server) handleAdminListAccounts(w http.ResponseWriter, r *http.Request)
 		writeAPIError(w, toAPIError(err))
 		return
 	}
+	// The organization columns and the organization filter both need the tree and the
+	// memberships. They are read once here rather than per row, and only when an organization
+	// port exists: a deployment without one answers exactly as it did before.
+	members := map[int64][]int64{}
+	index := orgtree.NewIndex(nil)
+	if orgStore, ready := portReadyNoWrite(s.deps.Org); ready {
+		nodes, err := orgStore.ListOrgNodes(r.Context())
+		if err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		index = orgtree.NewIndex(nodes)
+		all, err := orgStore.ListOrgMemberships(r.Context())
+		if err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		members = orgMembershipsByAccount(all)
+	}
+
 	out := make([]map[string]any, 0, len(list))
 	for _, a := range list {
-		out = append(out, accountJSON(a))
+		if !accountInOrgFilter(r, index, members[a.ID]) {
+			continue
+		}
+		nodeIDs, refs := orgRefsForAccounts(index, members[a.ID])
+		out = append(out, accountJSON(a, nodeIDs, refs))
 	}
 	page, err := pageConfig.params(r)
 	if err != nil {
@@ -45,7 +71,48 @@ func (s *Server) handleAdminListAccounts(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	window := sliceWindow(out, page)
+	// total counts what the filters matched, not the whole table: a pager that ignored the
+	// organization filter would offer pages that are empty.
 	writeList(w, window, len(out), page)
+}
+
+// accountInOrgFilter applies the optional org_node_id / include_descendants query pair.
+//
+// The default is to include descendants, because "show me this division" almost always means
+// the whole division; include_descendants=false is how a caller asks for exactly the accounts
+// attached to that one node.
+func accountInOrgFilter(r *http.Request, index *orgtree.Index, nodeIDs []int64) bool {
+	raw := strings.TrimSpace(r.URL.Query().Get("org_node_id"))
+	if raw == "" {
+		return true
+	}
+	wanted, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || wanted <= 0 {
+		return true
+	}
+	if includeDescendants(r) {
+		// Computed once per row: the subtree of the requested node does not change while a
+		// single response is rendered.
+		subtree := index.Descendants(wanted)
+		for _, nodeID := range nodeIDs {
+			if slices.Contains(subtree, nodeID) {
+				return true
+			}
+		}
+		return false
+	}
+	return slices.Contains(nodeIDs, wanted)
+}
+
+// includeDescendants reads the flag that decides whether an organization filter covers the
+// subtree. It defaults to true, so only an explicit false narrows the query.
+func includeDescendants(r *http.Request) bool {
+	raw := strings.TrimSpace(r.URL.Query().Get("include_descendants"))
+	if raw == "" {
+		return true
+	}
+	value, err := strconv.ParseBool(raw)
+	return err != nil || value
 }
 
 func (s *Server) handleAdminCreateAccount(w http.ResponseWriter, r *http.Request) {
@@ -62,6 +129,7 @@ func (s *Server) handleAdminCreateAccount(w http.ResponseWriter, r *http.Request
 		BillingMode               string   `json:"billing_mode"`
 		Note                      string   `json:"note"`
 		Tags                      []string `json:"tags"`
+		OrgNodeIDs                []int64  `json:"org_node_ids"`
 		CreditLimitMicros         *int64   `json:"credit_limit_micros"`
 		LowBalanceThresholdMicros *int64   `json:"low_balance_threshold_micros"`
 		OverdraftLimitMicros      *int64   `json:"overdraft_limit_micros"`
@@ -119,10 +187,53 @@ func (s *Server) handleAdminCreateAccount(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, toAPIError(err))
 		return
 	}
+	// The account exists now, so its organization memberships can be attached. Doing it after
+	// the insert is what makes them set in one place (the account side owns the relation) and
+	// keeps a failed membership write from leaving a half-created account.
+	nodeIDs, refs, apiErr := s.applyAccountOrgNodes(r, id, body.OrgNodeIDs)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
 	s.audit(r.Context(), actor.Username, "create", "account", strconv.FormatInt(id, 10),
-		map[string]any{"name": a.Name, "billing_mode": mode, "tags_set": body.Tags != nil}, "ok")
+		map[string]any{"name": a.Name, "billing_mode": mode, "tags_set": body.Tags != nil,
+			"org_node_ids": nodeIDs}, "ok")
 	s.reload(r.Context(), "account created", true)
-	writeJSON(w, http.StatusCreated, accountJSON(a))
+	writeJSON(w, http.StatusCreated, accountJSON(a, nodeIDs, refs))
+}
+
+// applyAccountOrgNodes replaces an account's organization memberships and returns the stored
+// ids plus their rendered references.
+//
+// A nil list means "the caller did not mention organizations", which leaves the memberships
+// alone; an empty (non-nil) list means "remove it from every organization". Those two are
+// different requests and conflating them would silently drop a placement on any unrelated
+// field update.
+func (s *Server) applyAccountOrgNodes(r *http.Request, accountID int64, nodeIDs []int64) ([]int64, []map[string]any, *domain.APIError) {
+	orgStore, ready := portReadyNoWrite(s.deps.Org)
+	if !ready {
+		if len(nodeIDs) > 0 {
+			return nil, nil, domain.ErrUnsupported("organization management is disabled in this deployment")
+		}
+		return []int64{}, []map[string]any{}, nil
+	}
+	if nodeIDs != nil {
+		if err := orgStore.SetAccountOrgNodes(r.Context(), accountID, nodeIDs); err != nil {
+			return nil, nil, toAPIError(err)
+		}
+	}
+	stored, err := orgStore.ListOrgMemberships(r.Context())
+	if err != nil {
+		return nil, nil, toAPIError(err)
+	}
+	byAccount := orgMembershipsByAccount(stored)
+	nodes, err := orgStore.ListOrgNodes(r.Context())
+	if err != nil {
+		return nil, nil, toAPIError(err)
+	}
+	index := orgtree.NewIndex(nodes)
+	ids, refs := orgRefsForAccounts(index, byAccount[accountID])
+	return ids, refs, nil
 }
 
 func (s *Server) handleAdminPatchAccount(w http.ResponseWriter, r *http.Request) {
@@ -155,6 +266,7 @@ func (s *Server) handleAdminPatchAccount(w http.ResponseWriter, r *http.Request)
 		AutoSuspend               *bool           `json:"auto_suspend"`
 		AutoResume                *bool           `json:"auto_resume"`
 		Tags                      *[]string       `json:"tags"`
+		OrgNodeIDs                *[]int64        `json:"org_node_ids"`
 		InflightPolicyOverride    *string         `json:"inflight_policy_override"`
 		PriceOverrides            json.RawMessage `json:"price_overrides"`
 	}
@@ -227,10 +339,22 @@ func (s *Server) handleAdminPatchAccount(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	a.Status = status
+	// The organization memberships are written after the account row, so a rejected node id
+	// (404) cannot leave the account's own fields half-updated.
+	orgNodeIDs := []int64(nil)
+	if body.OrgNodeIDs != nil {
+		orgNodeIDs = *body.OrgNodeIDs
+	}
+	nodeIDs, refs, apiErr := s.applyAccountOrgNodes(r, id, orgNodeIDs)
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
 	s.audit(r.Context(), actor.Username, "update", "account", strconv.FormatInt(id, 10),
-		map[string]any{"status": status, "billing_mode": string(a.BillingMode), "tags_set": body.Tags != nil}, "ok")
+		map[string]any{"status": status, "billing_mode": string(a.BillingMode), "tags_set": body.Tags != nil,
+			"org_node_ids": nodeIDs, "org_set": body.OrgNodeIDs != nil}, "ok")
 	s.reload(r.Context(), "account updated", true)
-	writeJSON(w, http.StatusOK, accountJSON(a))
+	writeJSON(w, http.StatusOK, accountJSON(a, nodeIDs, refs))
 }
 
 // ---------------------------------------------------------------------------

@@ -30,11 +30,15 @@ const (
 
 // Resource families used to group the catalogue.
 const (
-	groupSystem    = "system"
-	groupKeys      = "keys"
-	groupRequests  = "requests"
-	groupAudit     = "audit"
-	groupAccounts  = "accounts"
+	groupSystem   = "system"
+	groupKeys     = "keys"
+	groupRequests = "requests"
+	groupAudit    = "audit"
+	groupAccounts = "accounts"
+	// groupOrg is the organization structure. It is its own group rather than a corner of
+	// accounts because it is an independent entity: an operator can run the organization tree
+	// without touching tags, and the tree organizes the accounts it does not own.
+	groupOrg       = "org"
 	groupModels    = "models"
 	groupProviders = "providers"
 	groupBilling   = "billing"
@@ -732,8 +736,12 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/accounts", Handler: s.handleAdminListAccounts,
 			Name: "admin_list_accounts", Group: groupAccounts, Role: roleViewer,
-			Summary: "列出全部账户（计费模式、状态、标签、授信与低余额阈值）",
-			Query:   pageConfig.fields(),
+			Summary: "列出全部账户（计费模式、状态、标签、所属组织、授信与低余额阈值）",
+			Query: append(pageConfig.fields(),
+				queryParam("org_node_id", "integer",
+					"只看某个组织节点下的账户（默认连同子节点，见 include_descendants）；不传则不按组织过滤。节点 id 来自 admin_list_org_nodes"),
+				queryParam("include_descendants", "boolean",
+					"配合 org_node_id：默认 true 表示连同该节点的所有子孙节点一起返回，false 表示只返回直接挂在该节点上的账户")),
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/accounts", Handler: s.handleAdminCreateAccount,
@@ -745,6 +753,10 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 				enumField(bodyOptional("billing_mode", "string", "计费模式"), "postpaid", "prepaid"),
 				bodyOptional("note", "string", "备注"),
 				structuredField("tags", "array", "账号级标签名数组；账号下所有 API Key 自动继承，并与 Key 自有标签取并集；空数组清空", arrayOfStrings("标签名列表"), []any{}),
+				structuredField("org_node_ids", "array",
+					"该账号所属的组织节点 id 列表（多归属：账号可同时属于多个节点）。账号下所有 API Key 会继承这些节点及其祖先节点上的标签。"+
+						"任意 id 不存在会 404，且不会改动已有归属",
+					idArraySchema(), []any{}),
 				nonNegative(bodyOptional("credit_limit_micros", "integer", "后付授信上限（微美元，整数，负数会被拒）")),
 				nonNegative(bodyOptional("low_balance_threshold_micros", "integer", "低余额告警阈值（微美元）")),
 				bodyOptional("overdraft_limit_micros", "integer", "允许的透支额度（微美元）"),
@@ -764,6 +776,9 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 				enumField(bodyOptional("status", "string", "账户状态"), "active", "suspended"),
 				bodyOptional("note", "string", "备注"),
 				structuredField("tags", "array", "替换账号级标签；空数组清空；账号下所有 API Key 自动继承并与 Key 标签取并集", arrayOfStrings("标签名列表"), []any{}),
+				structuredField("org_node_ids", "array",
+					"整表替换该账号所属的组织节点（空数组表示移出全部组织）。账号下所有 API Key 会立即失去/获得相应节点及其祖先节点的标签授权",
+					idArraySchema(), []any{}),
 				nonNegative(bodyOptional("credit_limit_micros", "integer", "后付授信上限（微美元，整数，负数会被拒）")),
 				nonNegative(bodyOptional("low_balance_threshold_micros", "integer", "低余额告警阈值（微美元）")),
 				bodyOptional("overdraft_limit_micros", "integer", "允许的透支额度（微美元）"),
@@ -934,8 +949,85 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			Method: "DELETE", Path: "/admin/api/v1/tags/{id}", Handler: s.handleAdminDeleteTag,
 			Name: "admin_delete_tag", Group: groupModels, Role: roleAdmin,
 			Summary:   "删除一个标签",
-			Dangerous: true, ConfirmReason: "删除后挂在它上面的授权与策略立即消失（不可撤销）",
+			Dangerous: true, ConfirmReason: "删除后挂在它上面的授权与策略立即消失（不可撤销）；组织架构节点上的同名绑定同样失效",
 			Params: []adminField{pathParam("id", "标签数字 id")},
+		},
+		{
+			Method: "GET", Path: "/admin/api/v1/org/nodes", Handler: s.handleAdminListOrgNodes,
+			Name: "admin_list_org_nodes", Group: groupOrg, Role: roleViewer,
+			Summary: "列出组织架构的节点（扁平列表 + parent_id/depth/path，前端不必自己算层级）",
+			Query: append(pageConfig.fields(),
+				queryParam("include_accounts", "boolean",
+					"是否在每个节点内联成员账号（默认 false）。true 时每行多出 accounts[{id,name}] 与 accounts_truncated；"+
+						"成员很多时用 admin_list_org_node_accounts 分页读")),
+		},
+		{
+			Method: "POST", Path: "/admin/api/v1/org/nodes", Handler: s.handleAdminCreateOrgNode,
+			Name: "admin_create_org_node", Group: groupOrg, Role: roleAdmin,
+			Summary:   "新建组织节点（parent_id 为空即根节点；同一父节点下名字唯一）",
+			Dangerous: true, ConfirmReason: "节点上绑定的标签会被整棵子树继承：一个带 grants 的标签等于给该子树下所有账号的全部 API Key 放权",
+			Body: []adminField{
+				bodyRequired("name", "string",
+					"节点名；去除首尾空白后须非空，最多 64 个 Unicode 字符（中文/标点均可）。同一父节点下不能重名，不同父节点下可以同名"),
+				bodyOptional("parent_id", "integer",
+					"父节点数字 id（来自 admin_list_org_nodes）；省略或传 0 表示这是一个根节点。指向不存在的节点会 404"),
+				bodyOptional("note", "string", "备注"),
+				structuredField("tags", "array",
+					"该节点绑定的标签名数组：整棵子树（本节点及所有子孙）下的账号都会继承这些标签，进而获得它们的授权与限速策略。"+
+						"名字必须已经存在（admin_list_tags 可查），未知名字会 400：不存在的名字会被解析丢弃，"+
+						"一旦该凭据因此没有任何授权，就会回落到 routing.default_grant（可能是通配全开）",
+					arrayOfStrings("标签名列表"), []any{}),
+				nonNegative(bodyOptional("sort_order", "integer", "同级排序，数字小者靠前（默认 100）")),
+			},
+		},
+		{
+			Method: "PATCH", Path: "/admin/api/v1/org/nodes/{id}", Handler: s.handleAdminPatchOrgNode,
+			Name: "admin_update_org_node", Group: groupOrg, Role: roleAdmin,
+			Summary:   "改组织节点：改名 / 换父节点 / 改标签 / 改排序（只改传入的字段）",
+			Dangerous: true, ConfirmReason: "改标签会即时改变该子树下所有账号与 API Key 的生效授权；换父节点会改变哪些账号继承到这些标签",
+			Params: []adminField{pathParam("id", "组织节点数字 id（admin_list_org_nodes 给出）")},
+			Body: []adminField{
+				bodyOptional("name", "string", "新名字（最多 64 个字符）。可以改名：节点是按 id 被引用的，改名不会丢绑定"),
+				bodyOptional("parent_id", "integer",
+					"新父节点 id；传 0 表示把它变成根节点。移到自身或自己的子孙会 400（会让子树脱离所有根），"+
+						"移动后使某个节点超过 16 层也会 400。注意：整棵子树会跟着移动，被移动的账号继承的标签随之改变"),
+				bodyOptional("note", "string", "备注"),
+				structuredField("tags", "array",
+					"替换该节点的标签名数组（空数组清空）。整棵子树下的账号都继承这些标签；名字必须已存在，未知名字会 400",
+					arrayOfStrings("标签名列表"), []any{}),
+				nonNegative(bodyOptional("sort_order", "integer", "同级排序，数字小者靠前")),
+			},
+		},
+		{
+			Method: "DELETE", Path: "/admin/api/v1/org/nodes/{id}", Handler: s.handleAdminDeleteOrgNode,
+			Name: "admin_delete_org_node", Group: groupOrg, Role: roleAdmin,
+			Summary:   "删除组织节点（有子节点时必须显式 cascade=true，会删掉整棵子树）",
+			Dangerous: true, ConfirmReason: "删除会移除该节点（及 cascade 时的整棵子树）上的成员关系，账号与 API Key 本身不受影响，但继承来的标签授权会立即消失（不可撤销）",
+			Params: []adminField{pathParam("id", "组织节点数字 id")},
+			Query: []adminField{
+				queryParam("cascade", "boolean",
+					"默认 false：节点还有子节点时返回 409 并说明原因。传 true 表示确认删除整棵子树（本节点及全部子孙）"),
+			},
+		},
+		{
+			Method: "GET", Path: "/admin/api/v1/org/nodes/{id}/accounts", Handler: s.handleAdminListOrgNodeAccounts,
+			Name: "admin_list_org_node_accounts", Group: groupOrg, Role: roleViewer,
+			Summary: "列出某个组织节点下的成员账号（分页，含账号名与状态）",
+			Params:  []adminField{pathParam("id", "组织节点数字 id")},
+			Query:   pageConfig.fields(),
+		},
+		{
+			Method: "PUT", Path: "/admin/api/v1/org/nodes/{id}/accounts", Handler: s.handleAdminSetOrgNodeAccounts,
+			Name: "admin_set_org_node_accounts", Group: groupOrg, Role: roleAdmin,
+			Summary:   "整表替换某个组织节点的成员账号（幂等：重复调用结果相同）",
+			Dangerous: true, ConfirmReason: "整表替换：不在 account_ids 里的账号会被移出该组织，从而失去从该节点继承的标签与授权",
+			Params: []adminField{pathParam("id", "组织节点数字 id")},
+			Body: []adminField{
+				structuredField("account_ids", "array",
+					"该节点最终的成员账号 id 列表（整表替换，不是增量）。传空数组即清空该节点。"+
+						"任意一个 id 不存在会 404，且不会改动已有成员。账号可以同时属于多个节点",
+					idArraySchema(), []any{}),
+			},
 		},
 		{
 			Method: "GET", Path: "/admin/api/v1/mcp-tokens", Handler: s.handleAdminListMCPTokens,

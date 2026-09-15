@@ -30,23 +30,27 @@ var allowed = map[string][]string{
 	"internal/config":     {"internal/logx"},
 	"pkg/providerkit":     {"pkg/pluginapi"},
 	"internal/pluginhost": {"pkg/pluginapi"},
-	"internal/registry":   {"internal/domain"},
-	"internal/quota":      {"internal/domain"},
+	// The organization tree is pure traversal over domain types: the registry folds inherited
+	// tags into the snapshot, httpapi filters accounts by subtree and the store orders its
+	// subtree delete, and none of them may own a second copy of the ancestor walk.
+	"internal/orgtree":  {"internal/domain"},
+	"internal/registry": {"internal/domain", "internal/orgtree"},
+	"internal/quota":    {"internal/domain"},
 	// Retention is a leaf: persistence arrives through a port, so it imports nothing.
-	"internal/retention":   nil,
-	"internal/backup":      {"internal/domain"},
-	"internal/mcpsrv":      {"internal/domain", "internal/registry"},
+	"internal/retention": nil,
+	"internal/backup":    {"internal/domain"},
+	"internal/mcpsrv":    {"internal/domain", "internal/registry"},
 	// The console chat is business logic: persistence, model calls and the management tool
 	// surface all arrive through ports, so it depends on the domain, ids and the provider
 	// protocol only. In particular it does not import internal/store or internal/httpapi —
 	// the transport layer owns those adapters.
-	"internal/chat": {"internal/domain", "internal/ids", "pkg/pluginapi"},
+	"internal/chat":        {"internal/domain", "internal/ids", "pkg/pluginapi"},
 	"internal/hook":        {"internal/domain", "internal/ids", "internal/logx"},
 	"internal/usage":       {"internal/domain", "pkg/pluginapi"},
 	"internal/responses":   {"internal/domain", "internal/ids", "pkg/pluginapi"},
 	"internal/sessionauth": {"internal/domain", "internal/ids", "internal/secret"},
 	"internal/portal":      {"internal/domain", "internal/sessionauth"},
-	"internal/store":       {"internal/config", "internal/domain", "internal/secret"},
+	"internal/store":       {"internal/config", "internal/domain", "internal/orgtree", "internal/secret"},
 	"internal/modelmap":    {"internal/domain", "internal/registry"},
 	"internal/routing":     {"internal/balancer", "internal/domain", "internal/modelmap", "internal/registry"},
 	"internal/providers": {
@@ -76,7 +80,7 @@ var allowed = map[string][]string{
 	"internal/httpapi": {
 		"internal/admin", "internal/apikey", "internal/backup", "internal/billing",
 		"internal/chat", "internal/config", "internal/domain", "internal/ids", "internal/mcpsrv",
-		"internal/modelmap", "internal/portal", "internal/pricing", "internal/providers",
+		"internal/modelmap", "internal/orgtree", "internal/portal", "internal/pricing", "internal/providers",
 		"internal/quota", "internal/registry", "internal/responses", "internal/retention",
 		"internal/routing",
 		"internal/runtime", "internal/secret", "internal/store", "internal/usage", "pkg/pluginapi",

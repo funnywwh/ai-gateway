@@ -110,6 +110,7 @@ type Deps struct {
 	Providers     ProviderAdmin
 	Models        ModelAdmin
 	Tags          TagAdmin
+	Org           OrgAdmin
 	HookStore     HookAdmin
 	MCPTokenStore MCPTokenAdmin
 	Settings      SettingsAdmin

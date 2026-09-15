@@ -116,10 +116,24 @@ func validateDegradation(v string) error {
 // response mappers: one place decides what the management API exposes
 // ---------------------------------------------------------------------------
 
-func accountJSON(a *domain.Account) map[string]any {
+// accountJSON renders one account.
+//
+// nodeIDs/orgs are the account's organization memberships. They are passed in rather than
+// looked up here because the caller has already read them once for the whole page; both are
+// empty when the deployment has no organization port, which keeps the account contract stable
+// (the fields are always present, just empty).
+func accountJSON(a *domain.Account, nodeIDs []int64, orgs []map[string]any) map[string]any {
+	if nodeIDs == nil {
+		nodeIDs = []int64{}
+	}
+	if orgs == nil {
+		orgs = []map[string]any{}
+	}
 	return map[string]any{
 		"id": a.ID, "name": a.Name, "billing_mode": string(a.BillingMode),
 		"tags":           jsonOrEmptyArray(a.TagsJSON),
+		"org_node_ids":   nodeIDs,
+		"org_nodes":      orgs,
 		"balance_micros": a.BalanceMicros, "credit_limit_micros": a.CreditLimitMicros,
 		"low_balance_threshold_micros": a.LowBalanceThresholdMicros,
 		"overdraft_limit_micros":       a.OverdraftLimitMicros,

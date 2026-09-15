@@ -19,7 +19,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${UI_HARNESS_WORK:-$ROOT/.cache/ui-harness}"
 PORT="${UI_HARNESS_PORT:-8097}"
-VIEWS="docs detail capacity models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand"
+VIEWS="docs detail capacity models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand tree org org-readonly org-accounts"
 FIXTURES="$ROOT/scripts/ui-harness/fixtures.json"
 REFRESH=0
 
@@ -73,6 +73,8 @@ render_page "$ROOT/scripts/ui-harness/paging.page.html" "$WORK/site/paging.html"
 render_page "$ROOT/scripts/ui-harness/chat.page.html" "$WORK/site/chat.html"
 render_page "$ROOT/scripts/ui-harness/bridge_syntax.page.html" "$WORK/site/bridge_syntax.html"
 render_page "$ROOT/scripts/ui-harness/brand.page.html" "$WORK/site/brand.html"
+render_page "$ROOT/scripts/ui-harness/tree.page.html" "$WORK/site/tree.html"
+render_page "$ROOT/scripts/ui-harness/org.page.html" "$WORK/site/org.html"
 
 page_for_view() {
   case "$1" in
@@ -88,6 +90,10 @@ page_for_view() {
     # Not a console view either: the sidebar brand with its build badge, rendered straight
     # from js/brand.js against a stubbed version lookup and a stubbed fetch.
     brand) echo "brand.html" ;;
+    # The reusable tree control on its own (it needs no API at all), and the organization page
+    # with its two placements plus the account page's organization column and filter.
+    tree) echo "tree.html" ;;
+    org|org-readonly|org-accounts) echo "org.html" ;;
     *) echo "harness.html" ;;
   esac
 }

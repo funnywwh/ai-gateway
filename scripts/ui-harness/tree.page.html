@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>tree control harness</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="actions" class="toolbar"></div>
+<div id="page"></div>
+<div id="modal-root"></div>
+<div id="toasts" class="toasts"></div>
+<script>
+// The tree control is a pure view: it takes nodes and callbacks and knows nothing about the API.
+// This view therefore needs no fixtures at all — it mounts the SAME control twice, in the two
+// placements the design claims it supports, and drives it the way a person would.
+//
+// The point of mounting it twice in one page is that "可复用" is only true if one instance is not
+// secretly the special case: both are built from the same factory call, with only `mode` and the
+// options that mode implies differing between them.
+
+function report(data) {
+  data.toasts = [...document.querySelectorAll('.toast')].map((n) => n.textContent);
+  const url = '/report?data=' + encodeURIComponent(JSON.stringify(data));
+  try { if (navigator.sendBeacon && navigator.sendBeacon(url)) return; } catch (err) { /* fall through */ }
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url, false);
+    xhr.send();
+  } catch (err) { /* reporting must never break the harness */ }
+}
+</script>
+<script type="module">
+import { tree } from '/js/tree.js';
+import { el } from '/js/ui.js';
+
+const errors = [];
+window.onerror = (msg) => errors.push('onerror: ' + msg);
+window.onunhandledrejection = (ev) => errors.push('rejection: ' + ev.reason);
+
+const checks = {};
+const settle = async () => { for (let i = 0; i < 60; i++) await Promise.resolve(); };
+
+// A three-level hierarchy plus a second root, shaped like the organization tree the page
+// renders — but this view never mentions organizations, which is the reusability claim.
+const NODES = [
+  { id: 1, parent_id: null, name: '总部', sort_order: 100, account_count: 5, tags: ['internal'] },
+  { id: 2, parent_id: 1, name: '研发部', sort_order: 100, account_count: 3, tags: ['vip'] },
+  { id: 3, parent_id: 1, name: '市场部', sort_order: 200, account_count: 2, tags: [] },
+  { id: 4, parent_id: 2, name: '平台组', sort_order: 100, account_count: 1, tags: ['free'] },
+  { id: 5, parent_id: null, name: '分公司', sort_order: 200, account_count: 0, tags: [] },
+];
+
+const events = { select: [], toggle: [], action: [] };
+window.__events = events;
+
+try {
+  // --- the two placements ---------------------------------------------------
+  const sidebarHost = document.createElement('aside');
+  sidebarHost.className = 'sidebar';
+  sidebarHost.style.width = '220px';
+  const mainHost = document.createElement('div');
+  mainHost.id = 'page';
+  document.body.append(sidebarHost, mainHost);
+
+  const sidebarTree = tree({
+    mode: 'sidebar',
+    expandDepth: 1,
+    filter: false,
+    renderLabel: (node) => node.name,
+    onSelect: (node) => events.select.push(['sidebar', node ? node.id : null]),
+  });
+  const mainTree = tree({
+    mode: 'workspace',
+    filter: true,
+    renderLabel: (node) => node.name,
+    renderMeta: (node) => node.account_count + ' 个账号',
+    // Built with el() rather than Object.assign: `dataset` is a read-only DOM accessor, and
+    // assigning it through Object.assign throws in a module's strict mode.
+    actions: () => [el('button', { class: 'btn tree-action', dataset: { action: 'edit' }, text: '编辑' })],
+    onSelect: (node) => events.select.push(['main', node ? node.id : null]),
+    onToggle: (node, expanded) => events.toggle.push([node.id, expanded]),
+    onAction: (name, node) => events.action.push([name, node.id]),
+  });
+  sidebarHost.append(sidebarTree.node);
+  mainHost.append(mainTree.node);
+
+  // expandDepth 1 means the sidebar shows the roots and their children, with the third level
+  // still closed: a sidebar that opened everything would bury the global navigation.
+  sidebarTree.refresh(NODES);
+  mainTree.refresh(NODES);
+  await settle();
+
+  const rowsOf = (root) => [...root.querySelectorAll('.tree-row')];
+  const labelsOf = (root) => rowsOf(root).map((row) => row.querySelector('.tree-label').textContent);
+  const indentOf = (root, name) => {
+    const row = rowsOf(root).find((r) => r.querySelector('.tree-label').textContent === name);
+    return row ? parseInt(row.style.paddingLeft, 10) : null;
+  };
+
+  checks.sidebarRows = rowsOf(sidebarTree.node).length;
+  checks.workspaceRows = rowsOf(mainTree.node).length;
+  // sidebar: 总部, 研发部, 市场部, 分公司 = 4 (平台组 is under a closed 研发部)
+  checks.sidebarHidesDeepLevel = labelsOf(sidebarTree.node).join(',') === '总部,研发部,市场部,分公司';
+  // workspace: everything, because the default expandDepth is Infinity
+  checks.workspaceShowsAll = labelsOf(mainTree.node).join(',') === '总部,研发部,平台组,市场部,分公司';
+
+  // Indentation is depth, and both placements indent the same way.
+  checks.sidebarIndent = indentOf(sidebarTree.node, '研发部') - indentOf(sidebarTree.node, '总部') === 14;
+  checks.workspaceIndent = indentOf(mainTree.node, '平台组') - indentOf(mainTree.node, '研发部') === 14;
+
+  // --- the mode difference is density and secondary information only --------
+  checks.sidebarHidesMeta = !sidebarTree.node.querySelector('.tree-meta') && !sidebarTree.node.querySelector('.tree-actions');
+  checks.workspaceShowsMeta = mainTree.node.textContent.includes('3 个账号');
+  checks.workspaceShowsActions = mainTree.node.querySelectorAll('.tree-action').length === rowsOf(mainTree.node).length;
+  checks.sameRowStructure = rowsOf(sidebarTree.node).every((row) => row.classList.contains('tree-row'));
+  checks.modeClasses = sidebarTree.node.classList.contains('tree-sidebar') && mainTree.node.classList.contains('tree-workspace');
+
+  // --- collapsing and expanding --------------------------------------------
+  const toggleOf = (root, name) => {
+    const row = rowsOf(root).find((r) => r.querySelector('.tree-label').textContent === name);
+    return row.querySelector('.tree-toggle');
+  };
+  toggleOf(mainTree.node, '研发部').click();
+  await settle();
+  checks.collapseHidesSubtree = !labelsOf(mainTree.node).includes('平台组');
+  checks.collapseKeepsParent = labelsOf(mainTree.node).includes('研发部');
+  checks.toggleEvent = events.toggle.some(([id, expanded]) => id === 2 && expanded === false);
+
+  toggleOf(mainTree.node, '研发部').click();
+  await settle();
+  checks.expandRestoresSubtree = labelsOf(mainTree.node).includes('平台组');
+
+  // Collapsing a root from the sidebar hides that whole root.
+  toggleOf(sidebarTree.node, '总部').click();
+  await settle();
+  checks.sidebarCollapseRoot = labelsOf(sidebarTree.node).join(',') === '总部,分公司';
+  // A selection inside a collapsed branch is kept but not drawn: the row comes back when the
+  // branch is opened again, so collapsing to get an overview does not lose the operator's place.
+  sidebarTree.setSelected(3);
+  await settle();
+  checks.hiddenSelectionNotDrawn = sidebarTree.node.querySelector('.tree-row[data-id="3"]') === null;
+  checks.hiddenSelectionKept = sidebarTree.selectedId() === 3;
+  toggleOf(sidebarTree.node, '总部').click();
+  await settle();
+  checks.hiddenSelectionReappears = !!sidebarTree.node.querySelector('.tree-row[data-id="3"]');
+  checks.reappearedRowSelected = sidebarTree.node.querySelector('.tree-row[data-id="3"]').classList.contains('selected');
+
+  // --- selection, and keeping two instances in step -------------------------
+  mainTree.node.querySelector('.tree-row[data-id="3"]').click();
+  await settle();
+  checks.selectEvent = events.select.some(([from, id]) => from === 'main' && id === 3);
+  checks.selectedClass = mainTree.node.querySelector('.tree-row[data-id="3"]').classList.contains('selected');
+  checks.ariaSelected = mainTree.node.querySelector('.tree-row[data-id="3"]').getAttribute('aria-selected') === 'true';
+
+  sidebarTree.setSelected(3);
+  await settle();
+  checks.sidebarMirrorsSelection = sidebarTree.node.querySelector('.tree-row[data-id="3"]').classList.contains('selected');
+  checks.selectedIdReported = sidebarTree.selectedId() === 3;
+
+  // --- keyboard navigation --------------------------------------------------
+  const focusRow = mainTree.node.querySelector('.tree-row[data-id="1"]');
+  focusRow.focus();
+  const press = (key) => {
+    (document.activeElement || mainTree.node).dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+  };
+  press('ArrowDown');
+  await settle();
+  checks.keyboardDown = document.activeElement.querySelector('.tree-label').textContent === '研发部';
+  press('ArrowRight'); // already open, so this steps into the first child
+  await settle();
+  checks.keyboardIntoChild = document.activeElement.querySelector('.tree-label').textContent === '平台组';
+  press('ArrowLeft');
+  await settle();
+  checks.keyboardToParent = document.activeElement.querySelector('.tree-label').textContent === '研发部';
+  press('ArrowLeft'); // now closed
+  await settle();
+  checks.keyboardCollapse = document.activeElement.getAttribute('aria-expanded') === 'false';
+  checks.keyboardCollapseHides = !labelsOf(mainTree.node).includes('平台组');
+  press('ArrowRight');
+  await settle();
+  checks.keyboardExpand = document.activeElement.getAttribute('aria-expanded') === 'true';
+  press('Enter');
+  await settle();
+  checks.keyboardEnterSelects = events.select.some(([from, id]) => from === 'main' && id === 2);
+  checks.rovingTabindex = [...mainTree.node.querySelectorAll('.tree-row')].filter((r) => r.tabIndex === 0).length === 1;
+  press('Home');
+  await settle();
+  checks.keyboardHome = document.activeElement.querySelector('.tree-label').textContent === '总部';
+
+  // --- row actions ----------------------------------------------------------
+  mainTree.node.querySelector('.tree-row[data-id="4"] .tree-action').click();
+  await settle();
+  checks.actionEvent = events.action.some(([name, id]) => name === 'edit' && id === 4);
+  checks.actionDoesNotSelect = !mainTree.node.querySelector('.tree-row[data-id="4"]').classList.contains('selected');
+
+  // --- filtering ------------------------------------------------------------
+  const search = mainTree.node.querySelector('.tree-filter');
+  checks.filterPresent = !!search;
+  search.value = '平台';
+  search.dispatchEvent(new Event('input'));
+  await settle();
+  // A filter shows the match and the ancestors that lead to it, even when those are collapsed.
+  checks.filterKeepsAncestors = labelsOf(mainTree.node).join(',') === '总部,研发部,平台组';
+  search.value = '不存在';
+  search.dispatchEvent(new Event('input'));
+  await settle();
+  checks.filterEmptyState = mainTree.node.textContent.includes('无匹配节点');
+  search.value = '';
+  search.dispatchEvent(new Event('input'));
+  await settle();
+
+  // --- programmatic controls and degenerate data ----------------------------
+  mainTree.collapseAll();
+  await settle();
+  checks.collapseAll = labelsOf(mainTree.node).join(',') === '总部,分公司';
+  mainTree.expandAll();
+  await settle();
+  checks.expandAll = labelsOf(mainTree.node).length === 5;
+
+  // A node whose parent is not in the list must still be rendered (as a root) rather than
+  // silently disappearing: that is what makes a dangling row visible instead of lost.
+  mainTree.refresh([{ id: 7, parent_id: 999, name: '孤儿节点' }]);
+  await settle();
+  checks.orphanRendered = labelsOf(mainTree.node).join(',') === '孤儿节点';
+
+  mainTree.refresh([]);
+  await settle();
+  checks.emptyState = mainTree.node.textContent.includes('暂无数据');
+
+  // A cycle in the data must terminate the walk instead of hanging the browser.
+  mainTree.refresh([
+    { id: 11, parent_id: 12, name: 'a' },
+    { id: 12, parent_id: 11, name: 'b' },
+  ]);
+  await settle();
+  checks.cycleTerminates = rowsOf(mainTree.node).length === 2;
+  // ok is this view's own verdict; the runner additionally treats any false check as a failure,
+  // so the two cannot disagree in the direction of a false pass.
+  const bad = Object.keys(checks).filter((key) => checks[key] === false);
+  report({ view: 'tree', stage: 'done', ok: bad.length === 0, failed: bad, checks, errors });
+} catch (err) {
+  // Report the failure and stop: the runner treats a thrown view as failed, and a second
+  // "done" report would overwrite the diagnostic with a half-filled one.
+  report({ view: 'tree', stage: 'threw', checks, thrown: String(err && err.stack ? err.stack : err), errors });
+}
+</script>
+</body>
+</html>

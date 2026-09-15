@@ -59,6 +59,10 @@ function renderShell() {
   // handler above can reach it.
   let teardown = null;
   const nav = el('nav');
+  // The sidebar slot is where a page may put its own navigation (the organization page puts
+  // its tree here). It is emptied on every route change and collapses entirely while empty, so
+  // a page that does not use it keeps the sidebar exactly as it was.
+  const sidebar = el('div', { class: 'sidebar-slot' });
   const title = el('h1');
   const actions = el('div', { class: 'actions' });
   const page = el('section', { class: 'page' });
@@ -78,7 +82,7 @@ function renderShell() {
   });
   app.append(
     el('div', { class: 'app' }, [
-      el('aside', { class: 'sidebar' }, [renderBrand(version), nav,
+      el('aside', { class: 'sidebar' }, [renderBrand(version), nav, sidebar,
         el('div', { class: 'sidebar-foot' }, [whoami, logoutBtn])]),
       el('main', { class: 'main' }, [el('header', { class: 'topbar' }, [title, currencyBox, actions]), page]),
     ]));
@@ -95,14 +99,18 @@ function renderShell() {
     title.textContent = route.title;
     clear(actions);
     clear(page);
+    // The sidebar slot belongs to the page that is leaving, not to the one arriving: a page
+    // that wants it fills it during its own render.
+    clear(sidebar);
     page.append(el('div', { class: 'empty', text: '加载中…' }));
     try {
       const mod = await loadPage(route);
       clear(page);
-      const result = await mod.render({ page, actions, session, route, navigate });
+      const result = await mod.render({ page, actions, session, route, navigate, sidebar });
       if (typeof result === 'function') teardown = result;
     } catch (err) {
       clear(page);
+      clear(sidebar);
       page.append(el('div', { class: 'empty', text: '页面加载失败：' + api.errorMessage(err) }));
       toast(api.errorMessage(err), 'error');
     }

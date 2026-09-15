@@ -34,6 +34,12 @@ type Store interface {
 	ListTags(ctx context.Context) ([]*Tag, error)
 	UpsertTag(ctx context.Context, t *Tag) (int64, error)
 
+	// Organization structure. The snapshot needs both halves: the nodes carry the tag names
+	// an account inherits, the memberships say which accounts sit where. Writes go through the
+	// management port instead — the data plane only ever reads this configuration.
+	ListOrgNodes(ctx context.Context) ([]*OrgNode, error)
+	ListOrgMemberships(ctx context.Context) ([]OrgMembership, error)
+
 	// Billing
 	AppendLedger(ctx context.Context, entries []*LedgerEntry) (int, error)
 	ListLedger(ctx context.Context, accountID int64, from, to time.Time, limit int) ([]*LedgerEntry, error)

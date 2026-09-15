@@ -2556,3 +2556,136 @@
 若此时按它提示 `pkill` 再 `start`，新实例会在几十秒后被沙箱回收，等于**把网关打死**。所以这一版的
 "停 → 换二进制 → 起"由用户在自己的宿主终端执行；我在沙箱里能做的、也已做的是：构建发布物、
 在隔离端口验证发布物、备好 revision 精确匹配的回滚点、以及重启后的线上复测。
+
+## M49 组织架构（独立树 + 账号多归属 + 节点标签继承）（2026-09-15）
+
+> 设计文档：`docs/design/m49-organization.md`；规格：`docs/org.md`。
+> 需求：一套**独立**的组织架构，账号可以加入组织；节点可绑定标签并被整棵子树继承（用户选定）；
+> **要考虑路由性能**；并交付一个**独立可复用的树形控件**，既能放侧边菜单栏也能放工作区。
+
+### 文档（先于代码）
+- [x] `docs/design/m49-organization.md`（目标 / 15 条关键决策 / 接口 / 数据流 / 边界 / 测试策略 / 性能前后实测）
+- [x] `docs/org.md` 规格（形状、继承顺序与 `default_grant` 回落风险、增删改移语义、树控件复用契约、排障）
+- [x] `README.md` 文档表、`docs/PROCESS.md`「已产出」、`docs/TODO.md`（本节）同步
+- [x] `docs/mcp.md`：`admin_endpoints` 的 `group?` 补 `org`；补 5 个新工具的用途与「节点标签 = 子树放权」提示
+- [x] `docs/architecture.md`：包表补 `internal/orgtree`
+
+### 数据与领域
+- [x] 迁移 `0018_org_structure.sql`：`org_nodes`（自引用 `parent_id`、兄弟内名字唯一、`tags_json`、`sort_order`）
+      + `org_node_accounts`（`(node_id, account_id)` 主键、双向级联）
+- [x] `internal/domain/org.go`（`OrgNode`/`OrgMembership`）、`internal/domain/org_name.go`（`NormalizeOrgNodeName`，复用 `normalizeLabel`）
+- [x] `internal/orgtree` 纯算法包：`Index`/`Chain`/`Depth`/`Descendants`/`SubtreeHeight`/`WouldCreateCycle`/`Ordered`/`InheritedTagNames`/`Validate`，`MaxDepth=16`，全程防环
+- [x] `internal/arch` 白名单：新增 `internal/orgtree` 并在 `registry`/`httpapi` 允许集中登记
+
+### 存储
+- [x] `internal/store/org.go`：CRUD + 成员读写（事务内整表替换）+ 未知 id → `ErrNotFound` + 兄弟重名 → `ErrConflict`
+- [x] `DeleteOrgNode(ctx, id, cascade)`：递归 CTE 取 `(id, depth)`，单事务按深度倒序删除（父 FK 是 RESTRICT）
+- [x] `domain.Store` 读端口只加 `ListOrgNodes` + `ListOrgMemberships`
+
+### 路由性能（本里程碑的硬约束）
+- [x] **改前基线已实测**：`ResolveTagRecords` 512 ns/320 B/11 allocs（无 Key 标签）、800 ns/536 B/17 allocs（有）；
+      `BenchmarkPlan` 3402 ns/4948 B/**45 allocs**
+- [x] `registry.Build(Input)`：组织祖先链**只在建快照时**走一次，按账号物化标签记录（只为有标签/有归属的账号建条目）
+- [x] `ResolveTagRecords` 请求路径：无 Key 标签 → **0 分配返回共享切片**（只读契约）；否则一次定容拼装 + 跳过账号侧已含名字 + 一次稳定排序
+- [x] `registry.NewSnapshot` 旧签名保留（转调 `Build`），由「对拍测试」钉住无组织数据时与旧实现逐项等价
+- [x] 性能守卫：`testing.AllocsPerRun == 0`（无 Key 标签）+ `BenchmarkResolveTagRecords{Without,With}KeyTags` + `BenchmarkPlan` 组织变体
+- [x] 改后复测并把数字写回设计文档与 `perf_test.go` 注释（要求 `Plan` allocs/op **不升**）
+
+### 管理面
+- [x] `internal/httpapi/admin_ports.go`：`OrgAdmin` 端口；`Deps.Org`；`cmd/aigw/main.go` 里 `Org: db`
+- [x] `internal/httpapi/admin_org.go` + `admin_routes.go` 新分组 `org` 的 5 条路由（名称/摘要/param/body 形状与示例按 `docs/mcp.md` §4.5 写全）
+- [x] `GET /admin/api/v1/org/nodes`：扁平列表 + `parent_id`/`depth`/`path`/`tags`/`account_count`，`include_accounts` 可选（超限截断并标注）
+- [x] 环/超深/兄弟重名/未知标签名/未知 account_id 的拒绝路径（400/409/404）与审计条目
+- [x] `GET /admin/api/v1/accounts` 增 `org_node_id` + `include_descendants`；`POST`/`PATCH` 增 `org_node_ids`（整表替换）
+- [x] 写后 `reload(ctx, reason, invalidateAll=true)`（节点标签/成员都会改变既有 Key 的授权，key 缓存 30s 必须清空）
+
+### 控制台
+- [x] `internal/webui/static/js/tree.js`：**独立可复用**树控件（扁平 `nodes` + 回调，不知组织、不 fetch），
+      `mode: 'sidebar' | 'workspace'`、折叠/展开、`filter`、键盘 ↑↓←→Enter、`role=tree/treeitem` + roving tabindex、
+      根上单个委托监听、只渲染展开行
+- [x] `app.js` 通用侧边栏插槽 `.sidebar-slot` + 页面上下文 `sidebar`，随路由清空；`:empty{display:none}` 保证其它页面布局不变
+- [x] `pages/org.js`：侧边栏紧凑树 + 工作区完整树（选中同步）+ 节点详情卡（名称/备注/父节点/排序/标签/成员勾选保存）
+- [x] `pages/accounts.js`：「所属组织」列 + 组织筛选（含子节点开关）+ 编辑弹框的组织节点字段
+- [x] `router.js` 新增 `/org`（访问控制组）；`app.css` 补 `.sidebar-slot`/`.org-*` 少量规则
+
+### 测试与验收
+- [x] `internal/orgtree`（祖先链/子孙/环/DFS 顺序/继承顺序与去重/`Validate`）
+- [x] `internal/store/org_test.go`（CRUD、409/404、成员替换幂等、子树删除只删该子树且账号保留、`cascade=false` 报错）
+- [x] `internal/registry`（对拍等价、继承顺序、`NewSnapshot` 语义、性能守卫）
+- [x] `internal/routing`（节点标签进 `Authorize` 并集与 `mergePolicy` 的节点→账号→Key 覆盖序）
+- [x] `internal/httpapi/admin_org_test.go`（6 条路由 CRUD/角色/拒绝路径/审计/`Deps.Org==nil` 时 400 `unsupported_parameter`；账号筛选与 `org_node_ids`）
+- [x] `internal/webui/tests/org_tree_test.mjs`（静态回归：控件导出、侧边栏插槽、`PUT /org/nodes/{id}/accounts`、只读隐藏、账户页组织列与筛选、`/org` 路由）+ 挂进 `Makefile` 的 `ui-base`
+- [x] `scripts/ui-harness/tree.page.html`（视图 `tree`）：**同一控件挂两处**，断言两种 mode 的缩进/元信息差异、折叠展开、键盘、action、filter、`aria-*`
+- [x] `scripts/ui-harness/org.page.html`（视图 `org`）：侧边栏树与工作区树选中同步、成员勾选发出的原始 URL 与 body、`cascade` 确认文案、viewer 下写按钮 disabled
+- [x] `make verify` + `make ui-check` 全绿
+- [x] 隔离端口（`:8087`，`.cache/m49-smoke/` 空库）冒烟：建节点/标签/账号 → 挂节点 → `effective_tags` 含节点标签、`admin_explain_router` 有候选 → 移出后回收 → 停实例释放端口；结果记入本节
+- [x] 设计文档「实现与设计差异」回填；`docs/org.md` 状态改「已实现（M49）」
+
+> 范围外：按组织的用量/费用汇总、请求日志的组织维度分组、拖拽改父（用「父节点」下拉）、门户侧组织展示、
+> `bootstrap` 初始化组织、生产（gpt001）部署与发版。
+
+### M49 验收记录（2026-09-15）
+
+#### 性能：改前 / 改后实测（12th Gen i7-12700K，`-count=3`）
+
+| 基准 | 改前 | 改后 |
+|---|---|---|
+| `ResolveTagRecords`（Key 无自有标签） | 512 ns / 320 B / **11 allocs** | 3.5 ns / 0 B / **0 allocs** |
+| `ResolveTagRecords`（Key 有自有标签） | 800 ns / 536 B / 17 allocs | 370 ns / 288 B / 9 allocs |
+| `routing.BenchmarkPlan` | 3402 ns / 4948 B / **45 allocs** | 3459 ns / 4948 B / **45 allocs** |
+
+- 关键点：**组织祖先链只在建快照时走一次**，请求路径只做一次 map 查表；`Plan` 的 allocs/op 与改前**完全相同**，
+  即"加了组织继承"没有让路由变贵。守卫测试 `TestResolveTagRecordsFastPathDoesNotAllocate`（`AllocsPerRun == 0`）
+  在改前的代码上**实测为红**（11.0 allocs），改后转绿。
+- 中途一次真实回归：把账号侧搬到建快照后，`Plan` 一度变成 46 allocs/op。定位到一般路径多物化了一份 Key 标签名，
+  改成**原地过滤**（keep-idiom，且"一个都没加进来"时直接返回预计算切片）后回到 45。
+  这条是"性能是硬约束"这条决策真正起作用的地方——没有基准就会带着 +1 分配上线。
+
+#### 隔离端口冒烟（`:8087` + `.cache/m49-smoke/` 独立空库；**未触碰在跑的 `:8088`**）
+
+命令串（单条命令内完成，因为 DSH 沙箱会回收跨命令的进程）：
+
+```sh
+go build -o bin/aigw ./cmd/aigw && ./bin/aigw --config .cache/m49-smoke/config.yaml &
+# 登录 → 建标签 org-only → 建 总部/研发部（研发部绑定 org-only）→ 建账号 + 无 grants 的 Key
+curl -X PUT .../org/nodes/2/accounts -d '{"account_ids":[2]}'   # 账号加入研发部
+```
+
+实测结果：
+
+| 检查 | 结果 |
+|---|---|
+| 启动日志 `level=ERROR` | **0** |
+| 建节点返回 | `{"id":2,...,"path":"总部/研发部","tags":["org-only"],"depth":1}` |
+| 加入前 `effective_tags` | `[]`（账号与 Key 都没有标签） |
+| **加入后 `effective_tags`** | **`['org-only']`** ← 继承自节点，账号自身无标签 |
+| `admin_explain_router`（节点外） | `grant.Models = {"*": true}`（`default_grant` 回落）、无候选 |
+| `admin_explain_router`（节点内） | **`grant.Models = {"org-only-model": true}`** ← 授权并集被节点标签改变 |
+| 移出组织后 `effective_tags` | `[]`（立即回收，写路径 `invalidateAll=true` 清掉了 30s 的 Key 缓存） |
+| `GET /accounts?org_node_id=1`（含子孙） | 命中 1（`org_nodes: ["总部/研发部"]`） |
+| 同查询 `include_descendants=false` | 命中 0（账号挂在**子**节点上） |
+| 拒绝路径 | 环 → 400「cannot be moved under itself or one of its own descendants」；兄弟重名 → 409「already named "研发部" under parent node 1」；未知标签 → 400「unknown tag: nope」；无 cascade 删子树 → 409「has 1 descendant(s)… Pass cascade=true」；未知账号 → 404；缺 `account_ids` → 400 |
+| 迁移 | `schema_migrations` 出现 `(18, '0018_org_structure')`；`org_nodes`/`org_node_accounts` 落库；4 个索引都在 |
+| 审计 | `target_type=org_node` 的 `create/update/assign/delete` 全部记录（含 `nodes_deleted`、`members_after`、`moved`） |
+| 端口 | 验证后 `:8087` 已释放；`:8088` 在跑实例（`0.13.0 / ba25ed3`）**全程未受影响** |
+
+**冒烟抓到一个单测与 harness 都没抓到的真 bug**：`account_count` 只在 `include_accounts=true` 时才算，
+否则恒为 0——控制台树上的「N 个账号」会对一个有成员的部门显示 0。已修（成员关系总是读，只有**账号名**才按需解析），
+并补了回归测试 `TestOrgNodeAccountCountIsAlwaysAccurate`；把修复回退后该测试**实测为红**，确认它盯的就是这个形状。
+harness 之所以漏掉它，是因为 fixture 直接给了 `account_count` 字段——**真实网关才是这条字段的裁判**。
+
+#### 控制台走查（`make ui-check`，21 个视图全绿，新增 4 个）
+
+- `tree`（44 项）：同一控件挂侧边栏与工作区两处，断言两种模式的缩进/元信息差异、折叠展开、
+  键盘 ↑↓←→Enter/Home/End、roving tabindex、行内 action 回调、过滤保留祖先、空态、孤儿节点、**成环数据不挂死**。
+- `org`（32 项）/ `org-readonly`（7 项）/ `org-accounts`（7 项）：stub 是**会变的**组织树，
+  断言侧边栏树与工作区树选中同步、成员保存发出的原始 URL 与请求体、删除带 `cascade=true`、
+  账户页把 `org_node_id`/`include_descendants` 发到服务端、只读角色写入口整体消失。
+
+走查期间修掉 3 个真 bug（都写在上面「可复用树形控件」与页面代码的注释里）：
+1. `visibleRows` 把**被折叠**的节点误判成"不可达"，于是折叠后子节点又被补画回来（折叠看起来没生效）；
+2. 键盘展开/折叠后 DOM 被重建，焦点掉到 `<body>`，**键盘导航只能用一次**；
+3. 组织页调用了一个不存在的 `createChild`（应为 `createNode`）——「子节点」按钮点了没反应。
+
+另外把账户页的组织筛选参数改成**只有选了节点才发送**，这样未筛选的请求 URL 与改动前逐字节相同
+（`paging` 视图的 URL 断言因此保持全绿；那是"不改变既有行为"的可执行证据）。

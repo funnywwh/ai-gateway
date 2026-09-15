@@ -342,3 +342,48 @@ textarea.form-input { resize:vertical; min-height:64px; }
 .chat-form > .aigw-msg.aigw-ok { border-left-color:var(--ok); }
 .chat-form > .aigw-msg.aigw-warn { border-left-color:var(--warn); }
 .chat-form > .aigw-msg.aigw-error { border-left-color:var(--danger); color:var(--danger); }
+
+/* ---------------------------------------------------------------------------
+   侧边栏插槽（M49）
+   页面可以往侧边栏放自己的导航（组织架构页把它的树放在这里）。空的时候整块消失，
+   所以不用插槽的页面布局与之前完全一致；有内容时它自己滚动，不与主导航抢空间。
+   --------------------------------------------------------------------------- */
+.sidebar-slot { flex:0 1 auto; min-height:0; max-height:45vh; overflow:auto;
+  border-top:1px solid var(--line); padding:8px 8px 10px; }
+.sidebar-slot:empty { display:none; }
+
+/* ---------------------------------------------------------------------------
+   可复用树形控件（internal/webui/static/js/tree.js）
+   两种放置方式共用同一套结构，只有密度与次要信息的取舍不同：
+   - `.tree-sidebar` 紧凑（12px，不显示 meta/actions，留给侧边栏）；
+   - `.tree-workspace` 宽松（13.5px，显示 meta 与行内操作）。
+   --------------------------------------------------------------------------- */
+.tree { display:flex; flex-direction:column; min-height:0; }
+.tree-filter { width:100%; margin-bottom:6px; padding:6px 8px; font-size:12.5px;
+  border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg); }
+.tree-body { min-height:0; }
+.tree-row { display:flex; align-items:center; gap:6px; cursor:pointer; border-radius:8px;
+  padding-right:8px; color:var(--fg); }
+.tree-row:hover { background:var(--panel-2); }
+.tree-row.selected { background:var(--accent); color:#fff; }
+.tree-row.selected .tree-meta { color:rgba(255,255,255,.85); }
+.tree-row:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.tree-toggle { flex:0 0 auto; width:14px; text-align:center; color:var(--muted); user-select:none; }
+.tree-row.selected .tree-toggle { color:rgba(255,255,255,.85); }
+.tree-toggle.leaf { opacity:.35; }
+.tree-label { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tree-meta { flex:0 0 auto; font-size:11.5px; color:var(--muted); }
+.tree-actions { flex:0 0 auto; display:flex; gap:4px; }
+.tree-actions .btn { padding:2px 7px; font-size:11.5px; }
+.tree-empty { padding:10px 4px; }
+.tree-sidebar .tree-row { padding-top:5px; padding-bottom:5px; font-size:12.5px; }
+.tree-workspace .tree-row { padding-top:7px; padding-bottom:7px; font-size:13.5px; }
+
+/* 组织架构页：左树右详情。树在工作区里占一列，详情卡是普通卡片。 */
+.org-layout { display:grid; grid-template-columns: minmax(240px, 320px) minmax(0, 1fr); gap:14px; align-items:start; }
+@media (max-width: 900px) { .org-layout { grid-template-columns: minmax(0, 1fr); } }
+.org-tree-card { max-height:70vh; overflow:auto; }
+.org-members { max-height:280px; overflow:auto; border:1px solid var(--line); border-radius:8px; padding:8px; }
+.org-member { display:flex; align-items:center; gap:8px; padding:4px 2px; font-size:13px; }
+.org-member input { margin:0; }
+.org-path { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; color:var(--muted); }

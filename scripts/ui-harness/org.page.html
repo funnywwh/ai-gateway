@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>org console harness</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">AI Gateway</div>
+    <nav><a href="#/org" class="active">组织架构</a></nav>
+    <div id="sidebar-slot" class="sidebar-slot"></div>
+    <div class="sidebar-foot"><span>admin · admin</span></div>
+  </aside>
+  <main class="main">
+    <header class="topbar"><h1>组织架构</h1><div id="actions" class="actions"></div></header>
+    <section id="page" class="page"></section>
+  </main>
+</div>
+<div id="modal-root"></div>
+<div id="toasts" class="toasts"></div>
+<script>
+// The organization page drives real HTTP calls, so this view stubs fetch with a small in-memory
+// tree that *changes* when the page writes to it. A stub that always answered the same snapshot
+// could not tell "the page saved the members" from "the page redrew what it already had".
+//
+// The fixture tree is shaped so the assertions can distinguish things a flat list would hide:
+//
+//   总部(1)[internal] ── 研发部(2)[vip] ── 平台组(3)[free]
+//                    └── 市场部(4)
+//   分公司(5)
+//
+// Two accounts exist: acme (1, in 平台组) and root-acct (2, in 总部).
+
+const ORG = {
+  nodes: [
+    { id: 1, parent_id: null, name: '总部', path: '总部', depth: 0, sort_order: 100, note: '', tags: ['internal'], account_count: 1 },
+    { id: 2, parent_id: 1, name: '研发部', path: '总部/研发部', depth: 1, sort_order: 100, note: '平台与算法', tags: ['vip'], account_count: 0 },
+    { id: 3, parent_id: 2, name: '平台组', path: '总部/研发部/平台组', depth: 2, sort_order: 100, note: '', tags: ['free'], account_count: 1 },
+    { id: 4, parent_id: 1, name: '市场部', path: '总部/市场部', depth: 1, sort_order: 200, note: '', tags: [], account_count: 0 },
+    { id: 5, parent_id: null, name: '分公司', path: '分公司', depth: 0, sort_order: 200, note: '', tags: [], account_count: 0 },
+  ],
+  members: { 3: [1], 1: [2] },
+};
+
+window.fetch = async (url, options) => {
+  const target = String(url);
+  const path = target.replace(/^.*\/admin\/api\/v1/, '').split('?')[0];
+  const method = (options && options.method) || 'GET';
+  window.__calls = (window.__calls || []).concat([method + ' ' + target]);
+  if (options && options.body) window.__sent = (window.__sent || []).concat([{ path, method, body: options.body }]);
+  const ok = (payload) => ({ ok: true, status: 200, text: async () => JSON.stringify(payload) });
+
+  if (path === '/org/nodes' && method === 'GET') {
+    return ok({ data: ORG.nodes, count: ORG.nodes.length, total: ORG.nodes.length, limit: 1000, offset: 0, has_more: false });
+  }
+  if (path === '/accounts' && method === 'GET') {
+    const data = [
+      { id: 1, name: 'acme', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [3], org_nodes: [{ id: 3, name: '平台组', path: '总部/研发部/平台组' }], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0 },
+      { id: 2, name: 'root-acct', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [1], org_nodes: [{ id: 1, name: '总部', path: '总部' }], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0 },
+    ];
+    return ok({ data, count: 2, total: 2, limit: 1000, offset: 0, has_more: false });
+  }
+  const memberMatch = path.match(/^\/org\/nodes\/(\d+)\/accounts$/);
+  if (memberMatch) {
+    const nodeID = Number(memberMatch[1]);
+    if (method === 'PUT') {
+      const body = JSON.parse(options.body || '{}');
+      // The write is reflected in the store, so a reload shows the new membership: that is what
+      // makes "saved" observable rather than merely claimed.
+      ORG.members[nodeID] = (body.account_ids || []).slice();
+      return ok({ id: nodeID, account_ids: ORG.members[nodeID], count: ORG.members[nodeID].length, updated: true });
+    }
+    const ids = ORG.members[nodeID] || [];
+    return ok({
+      data: ids.map((id) => ({ id, name: id === 1 ? 'acme' : 'root-acct', status: 'active' })),
+      count: ids.length, total: ids.length, limit: 1000, offset: 0, has_more: false,
+    });
+  }
+  if (path.match(/^\/org\/nodes\/\d+$/) && method === 'DELETE') {
+    const id = Number(path.split('/').pop());
+    // cascade=true in the page's call: drop the node and its descendants.
+    const doomed = new Set([id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const node of ORG.nodes) {
+        if (node.parent_id !== null && doomed.has(node.parent_id) && !doomed.has(node.id)) { doomed.add(node.id); grew = true; }
+      }
+    }
+    ORG.nodes = ORG.nodes.filter((node) => !doomed.has(node.id));
+    return ok({ id, deleted: true, nodes_deleted: doomed.size });
+  }
+  if (path.match(/^\/org\/nodes\/\d+$/) && method === 'PATCH') {
+    const id = Number(path.split('/').pop());
+    const body = JSON.parse(options.body || '{}');
+    const node = ORG.nodes.find((n) => n.id === id);
+    if (node) {
+      if (body.name !== undefined) node.name = body.name;
+      if (body.tags !== undefined) node.tags = body.tags;
+      if (body.note !== undefined) node.note = body.note;
+    }
+    return ok(node || {});
+  }
+  if (path === '/org/nodes' && method === 'POST') {
+    const body = JSON.parse(options.body || '{}');
+    const id = Math.max(...ORG.nodes.map((n) => n.id)) + 1;
+    const node = { id, parent_id: body.parent_id === undefined ? null : body.parent_id, name: body.name, path: body.name, depth: 0, sort_order: body.sort_order || 100, note: body.note || '', tags: body.tags || [], account_count: 0 };
+    ORG.nodes.push(node);
+    return ok(node);
+  }
+  // Anything else (currency lookups, stats) answers empty: this view only exercises the org page.
+  return ok({ data: [] });
+};
+window.__org = ORG;
+
+const errors = [];
+window.onerror = (msg) => errors.push('onerror: ' + msg);
+window.onunhandledrejection = (ev) => errors.push('rejection: ' + ev.reason);
+
+function report(data) {
+  data.errors = errors;
+  data.toasts = [...document.querySelectorAll('.toast')].map((n) => n.textContent);
+  const url = '/report?data=' + encodeURIComponent(JSON.stringify(data));
+  try { if (navigator.sendBeacon && navigator.sendBeacon(url)) return; } catch (err) { /* fall through */ }
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url, false);
+    xhr.send();
+  } catch (err) { /* reporting must never break the harness */ }
+}
+</script>
+<script type="module">
+import { render as renderOrg } from '/js/pages/org.js';
+import { render as renderAccounts } from '/js/pages/accounts.js';
+import { initCurrency } from '/js/money.js';
+
+const view = location.hash.replace('#', '') || 'org';
+const checks = {};
+const settle = async () => { for (let i = 0; i < 400; i++) await Promise.resolve(); };
+const pageText = () => document.getElementById('page').textContent;
+const rows = (root) => [...root.querySelectorAll('.tree-row')];
+const labels = (root) => rows(root).map((row) => row.querySelector('.tree-label').textContent);
+const rowOf = (root, name) => rows(root).find((row) => row.querySelector('.tree-label').textContent === name);
+const find = (label) => [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === label);
+
+try {
+  // The currency table is fetched by the accounts page; without it money() renders nothing.
+  try { await initCurrency(); } catch (err) { /* the org page does not need it */ }
+
+  if (view === 'org') {
+    const sidebar = document.getElementById('sidebar-slot');
+    const session = window.__role ? { role: window.__role, username: 'admin' } : { role: 'admin', username: 'admin' };
+    await renderOrg({
+      page: document.getElementById('page'), actions: document.getElementById('actions'),
+      session, route: { path: '/org' }, navigate: () => {}, sidebar,
+    });
+    await settle();
+
+    // Both placements rendered the same data.
+    checks.sidebarTree = sidebar.querySelectorAll('.tree').length === 1;
+    checks.pageTree = document.querySelectorAll('#page .tree').length === 1;
+    checks.sidebarMode = !!sidebar.querySelector('.tree-sidebar');
+    checks.pageMode = !!document.querySelector('#page .tree-workspace');
+    checks.sidebarRows = labels(sidebar).length;
+    checks.pageRows = labels(document.getElementById('page')).length;
+    // The sidebar opens only the first level, so the third level is hidden there but visible
+    // in the page: the two placements are genuinely configured differently.
+    checks.sidebarHidesDeep = !labels(sidebar).includes('平台组');
+    checks.pageShowsDeep = labels(document.getElementById('page')).includes('平台组');
+    // Sibling order comes from the server (sort_order), and the hierarchy is indented.
+    checks.rootOrder = labels(document.getElementById('page')).slice(0, 1).join(',') === '总部';
+    checks.indent = (() => {
+      const parent = rowOf(document.getElementById('page'), '研发部');
+      const child = rowOf(document.getElementById('page'), '平台组');
+      return parseInt(child.style.paddingLeft, 10) - parseInt(parent.style.paddingLeft, 10) === 14;
+    })();
+    checks.tagsShown = pageText().includes('vip');
+    checks.accountCountShown = pageText().includes('1 个账号');
+
+    // The first node is selected on load and its detail card is rendered with its members. The
+    // membership is asserted by account name: checking "the first checkbox" would pass for the
+    // wrong reason as soon as the account list is ordered differently.
+    checks.detailShown = pageText().includes('节点详情');
+    checks.membersLoaded = !!document.querySelector('.org-member');
+    const memberBox = (name) => {
+      const row = [...document.querySelectorAll('.org-member')]
+        .find((el) => el.textContent.includes(name));
+      return row ? row.querySelector('input') : null;
+    };
+    checks.memberChecked = !!memberBox('root-acct') && memberBox('root-acct').checked;
+    checks.nonMemberUnchecked = !!memberBox('acme') && !memberBox('acme').checked;
+
+    // Selecting a deeper node shows its full label path and its own member.
+    rowOf(document.getElementById('page'), '平台组').click();
+    await settle();
+    checks.pathShown = pageText().includes('总部/研发部/平台组');
+    checks.memberFollowsSelection = !!memberBox('acme') && memberBox('acme').checked;
+
+    // Selecting another node in the PAGE tree updates the SIDEBAR tree and the detail card.
+    rowOf(document.getElementById('page'), '市场部').click();
+    await settle();
+    checks.sidebarMirrorsSelection = rowOf(sidebar, '市场部').classList.contains('selected');
+    checks.detailFollows = pageText().includes('节点详情：市场部');
+
+    // Saving the member list sends a whole-list replacement to the node endpoint.
+    const checkedBefore = document.querySelectorAll('.org-member input:checked').length;
+    const extra = [...document.querySelectorAll('.org-member input')].find((box) => !box.checked);
+    if (extra) { extra.click(); }
+    find('保存成员').click();
+    await settle();
+    const put = (window.__sent || []).find((call) => call.method === 'PUT' && /\/org\/nodes\/\d+\/accounts$/.test(call.path));
+    checks.memberPutSent = !!put;
+    let body = null;
+    try { body = JSON.parse(put.body); } catch (err) { body = null; }
+    checks.memberBodyIsWholeList = !!body && Array.isArray(body.account_ids) && body.account_ids.length === checkedBefore + (extra ? 1 : 0);
+    checks.toastShown = [...document.querySelectorAll('.toast')].some((n) => n.textContent.includes('成员已保存'));
+
+    // Adding a child node posts with the parent id, and the tree picks the new node up.
+    find('子节点').click();
+    await settle();
+    const modal = document.getElementById('modal-root');
+    checks.childDialogOpen = !!modal.querySelector('.modal');
+    checks.childDialogNamed = modal.textContent.includes('新建子节点');
+    modal.querySelector('input[name="name"]').value = '新小组';
+    [...modal.querySelectorAll('button')].find((b) => b.textContent.trim() === '保存').click();
+    await settle();
+    const created = (window.__sent || []).find((call) => call.method === 'POST' && call.path === '/org/nodes');
+    checks.createSent = !!created;
+    let createBody = null;
+    try { createBody = JSON.parse(created.body); } catch (err) { createBody = null; }
+    checks.createCarriesParent = !!createBody && typeof createBody.parent_id === 'number';
+    checks.createAppearsInTree = labels(document.getElementById('page')).includes('新小组');
+
+    // Deleting confirms first and then cascades.
+    rowOf(document.getElementById('page'), '研发部').querySelector('.tree-action.btn-danger').click();
+    await settle();
+    checks.deleteConfirmShown = document.getElementById('modal-root').textContent.includes('整棵子树');
+    [...document.getElementById('modal-root').querySelectorAll('button')].find((b) => b.textContent.trim() === '确认').click();
+    await settle();
+    const del = (window.__calls || []).find((call) => call.startsWith('DELETE ') && call.includes('/org/nodes/2'));
+    checks.deleteCascadeInUrl = !!del && del.includes('cascade=true');
+    checks.deletedNodeGone = !labels(document.getElementById('page')).includes('研发部');
+    checks.unrelatedNodeKept = labels(document.getElementById('page')).includes('市场部') || labels(document.getElementById('page')).includes('分公司');
+  }
+
+  if (view === 'org-readonly') {
+    // A read-only operator gets the same view with every write affordance gone.
+    window.__role = 'viewer';
+    await renderOrg({
+      page: document.getElementById('page'), actions: document.getElementById('actions'),
+      session: { role: 'viewer', username: 'reader' }, route: { path: '/org' }, navigate: () => {},
+      sidebar: document.getElementById('sidebar-slot'),
+    });
+    await settle();
+    checks.treeRendered = labels(document.getElementById('page')).length > 0;
+    checks.noRowActions = document.querySelectorAll('#page .tree-action').length === 0;
+    checks.noCreateRoot = !!find('新建根节点') && find('新建根节点').disabled === true;
+    checks.noSaveButton = find('保存成员') === undefined;
+    checks.readonlyHintShown = pageText().includes('只读角色不能修改');
+    checks.membersVisible = !!document.querySelector('.org-member');
+    checks.memberCheckboxDisabled = [...document.querySelectorAll('.org-member input')].every((box) => box.disabled);
+  }
+
+  if (view === 'org-accounts') {
+    // The account page's organization column and filter.
+    await renderAccounts({
+      page: document.getElementById('page'), actions: document.getElementById('actions'),
+      session: { role: 'admin', username: 'admin' }, route: { path: '/accounts' }, navigate: () => {},
+    });
+    await settle();
+    checks.orgColumnShown = pageText().includes('所属组织');
+    checks.orgPathInCell = pageText().includes('总部/研发部/平台组');
+    checks.filterPresent = !!document.querySelector('.org-filter');
+    checks.filterHasNodes = (() => {
+      const select = document.querySelector('.org-filter');
+      return !!select && [...select.options].some((o) => o.text === '全部账户') && select.options.length === window.__org.nodes.length + 1;
+    })();
+    // Selecting a node must reach the server: the raw URL is what proves it.
+    const select = document.querySelector('.org-filter');
+    select.value = '1';
+    select.dispatchEvent(new Event('change'));
+    await settle();
+    const filtered = (window.__calls || []).find((call) => call.includes('/accounts') && call.includes('org_node_id=1'));
+    checks.filterInUrl = !!filtered;
+    checks.descendantsDefault = !!filtered && filtered.includes('include_descendants=true');
+    const boxes = [...document.querySelectorAll('.org-filter-bar input[type="checkbox"]')];
+    if (boxes.length) { boxes[0].checked = false; boxes[0].dispatchEvent(new Event('change')); }
+    await settle();
+    checks.descendantsCanBeDisabled = (window.__calls || []).some((call) => call.includes('include_descendants=false'));
+  }
+
+  const bad = Object.keys(checks).filter((key) => checks[key] === false);
+  report({ view, stage: 'done', ok: bad.length === 0, failed: bad, checks, errors });
+} catch (err) {
+  report({ view, stage: 'threw', checks, thrown: String(err && err.stack ? err.stack : err), errors });
+}
+</script>
+</body>
+</html>

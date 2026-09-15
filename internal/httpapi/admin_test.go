@@ -230,6 +230,7 @@ func newAdminFixtureWithout(t *testing.T, unwired string) *adminFixture {
 		Providers:      db,
 		Models:         db,
 		Tags:           db,
+		Org:            db,
 		HookStore:      db,
 		MCPTokenStore:  db,
 		Settings:       db,

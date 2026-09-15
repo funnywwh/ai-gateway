@@ -105,6 +105,7 @@ var expectedAdminPatterns = []string{
 	"POST /admin/api/v1/routes",
 	"POST /admin/api/v1/tags",
 	"PUT /admin/api/v1/settings/{key}",
+	"PUT /admin/api/v1/org/nodes/{id}/accounts",
 
 	// Console chat (M32). Every one of these is NoTool: a conversation and a skill library
 	// belong to a logged-in administrator account, which an MCP token does not have.
@@ -119,9 +120,14 @@ var expectedAdminPatterns = []string{
 	"POST /admin/api/v1/chat/sessions/{id}/artifacts/{art}/ticket",
 	"GET /admin/api/v1/chat/models",
 	"GET /admin/api/v1/chat/skills",
+	"GET /admin/api/v1/org/nodes",
+	"GET /admin/api/v1/org/nodes/{id}/accounts",
 	"POST /admin/api/v1/chat/skills",
+	"POST /admin/api/v1/org/nodes",
 	"PATCH /admin/api/v1/chat/skills/{id}",
+	"PATCH /admin/api/v1/org/nodes/{id}",
 	"DELETE /admin/api/v1/chat/skills/{id}",
+	"DELETE /admin/api/v1/org/nodes/{id}",
 }
 
 func testServer(t *testing.T) *Server {

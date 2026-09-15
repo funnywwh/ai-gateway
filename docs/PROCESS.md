@@ -24,6 +24,7 @@
 | M0 | docs/design/m0-scaffold.md | 否（流程确立前，已补展示） |
 | M1 | docs/design/m1-store-registry.md | 否（流程确立前，已补展示） |
 | M2 | docs/design/m2-plugin-protocol.md | 是 |
+| M49 | docs/design/m49-organization.md + docs/org.md | 是 |
 
 ## 检查项（提交前自检）
 

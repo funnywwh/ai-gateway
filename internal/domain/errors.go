@@ -122,6 +122,15 @@ func IsUnauthorized(err error) bool { return HasStatus(err, http.StatusUnauthori
 // IsForbidden reports whether err is a permission error.
 func IsForbidden(err error) bool { return HasStatus(err, http.StatusForbidden) }
 
+// IsConflict reports whether err is a conflict (409): the request was understood but the
+// state already stored forbids it — a name taken within its scope, or a delete that would
+// remove more than it says.
+func IsConflict(err error) bool { return HasStatus(err, http.StatusConflict) }
+
+// IsInvalidRequest reports whether err is a refused request (400): the caller asked for
+// something the gateway will not do, as opposed to something it cannot find.
+func IsInvalidRequest(err error) bool { return HasStatus(err, http.StatusBadRequest) }
+
 // IsRateLimited reports whether err indicates rate limiting.
 func IsRateLimited(err error) bool { return HasStatus(err, http.StatusTooManyRequests) }
 

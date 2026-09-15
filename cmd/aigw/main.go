@@ -449,6 +449,7 @@ func run() int {
 		Providers:     db,
 		Models:        db,
 		Tags:          db,
+		Org:           db,
 		HookStore:     db,
 		MCPTokenStore: db,
 		Settings:      db,
