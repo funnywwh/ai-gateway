@@ -2286,10 +2286,82 @@
   `closeIconNoTextGlyph` / `closeIconSized` 三项失败并以非 0 退出，确认断言对"退回文字字形"有咬合力。
   另用 8 倍放大的探针页截图（`.cache/probe-close/probe.png`）确认渲染出来的是**十字**而不是别的形状。
 - [x] `go vet ./...` + `go test ./...` 全绿；`make build` 通过。
-- 部署：本机 `:8088` 的实例**尚未重启**（PID namespace 隔离，无法从沙箱内给它发信号）。用户需要在宿主
-  终端执行 `scripts/local-run.sh restart`；`ui.js` 与 `app.css` 的 `Cache-Control: max-age=300`，
-  重启后最多 5 分钟内浏览器会拿到新版本（想立刻生效可强刷）。
+- [x] 部署：本机 `:8088` 已随 **v0.12.4** 一起上线（见本文件「发布 v0.12.4」一节的部署记录，
+  2026-09-15 10:15 重启，`/version` = `0.12.4/fe9ef8c`）。原计划是「从沙箱内发不了信号、要用户在宿主
+  终端执行」，实际找到了更好的路径：`ssh 127.0.0.1` 落到宿主上、不在沙箱的 PID namespace 里，
+  于是这一步由 agent 自己完成了。`ui.js` 与 `app.css` 带 `Cache-Control: max-age=300`，
+  浏览器最多 5 分钟后换到新 JS（想立刻生效可强刷）。
 - 未做（同类隐患，本次未改）：控制台里还有几处**纯符号字形**，缺字形时会以同样方式显示成方框 ——
   `chat.js` 技能标签的卸载按钮 `×`（U+00D7，覆盖字体多得多）、`requests.js`/`settings.js` 的 `⚠`
   （U+26A0）、图表导出的 `→`/`↓`（U+2192/U+2193）。它们不影响可用性（都另有文字标签或上下文），
   暂不逐一改成 SVG；若用户再遇到方框，按同一思路处理。
+
+## 智能问答「新建会话」模型下拉为空（2026-09-15）
+
+- 现象（用户实机反馈，本机 `127.0.0.1:8088`）：点「新建会话」，模型下拉是**空的**；
+  用户随即补充「admin 也没有」，说明不止一个账户命中。
+- 逐步定位（全部用 admin 会话直接打接口复现，不靠猜）：
+  - 模型下拉只有一处数据源：`chat.js` 的 `loadModels()` → `GET /admin/api/v1/chat/models`
+    （`internal/httpapi/chat.go:241`）。它**不是**列全部模型，而是「该 Key 真能路由到」的模型：
+    enabled + 在 grant 里 + `Router.Candidates()` 至少有一个候选。
+  - 把 25 个账户按弹窗的取数顺序扫了一遍（`/accounts` 按 `name` 排序 → 每账户取 `/keys`
+    首行 → 查 `/chat/models`），只有三个账户是空的，且原因分两类：
+    | 账户 | 首行 Key | 状态 | 结果 |
+    |---|---|---|---|
+    | 30 E26Q | 36 图像 | active | 200 + `data:[]`（静默空） |
+    | **4 admin** | **5 wiki** | **suspended** | **401 `API key is not active`** |
+    | 48 m45-e2e | 43 m45-livecheck | disabled | 401 同上 |
+    | 其余 22 个 | 均 active | — | 4 个模型，正常 |
+  - **admin 的根因**：账户 4 名下 9 个 Key 里只有 #8 `deepseek-admin` 是 active，其余
+    suspended/disabled；`/keys` 是 `ORDER BY id`（`internal/store/keys.go:77`），弹窗默认选中
+    第一行 #5 `wiki`，于是 `/chat/models` 直接 401，`state.models` 为空 —— 就只剩一个空下拉。
+- [x] `internal/webui/static/js/pages/chat.js`：`loadKeys()` 只列 `status === 'active'` 的 Key，
+  与同一弹窗里 MCP 令牌选择器早就有的过滤（`fetchUsableTokens`，注释写明「失效的令牌是陷阱」）
+  对齐；选项文字去掉现在恒定的 ` · active` 后缀；过滤后为空时给出原因
+  （「该账户没有可用的 API Key：只有 active 的 Key 能计费…」），否则过滤只是把空下拉从
+  一个账户搬到另一个账户；`catch` 里被吞掉的错误现在显示到弹窗状态行。
+- [x] 验证：`scripts/ui-harness/chat.page.html` 的 `/keys` fixture 原本只有一个 active Key，
+  **测不出这个 bug**；改成复刻本机 admin 账户的形状（首行 id=5 `wiki` 是 suspended，唯一可用的
+  id=8 排在后面），并加两条断言：下拉只列 active 且默认选中 id=8、点「创建」时 `api_key_id`
+  发的是 8 而不是第一行。`chat` 视图 110 checks 全过（改前 108）。
+  **变异验证**：把过滤器改回 `payload.data || []`，恰好 `newSessionKeyPickerOffersActiveOnly` /
+  `newSessionCreateSendsActiveKey` 两项失败并以非 0 退出。
+- 未做（**数据问题，未改**）：E26Q 账户的 Key 都是 active，但标签 `E26Q` 的 grants 是
+  `{"models":["*"],"providers":["azure"]}`，而本机库重建后 `providers` 表里只有 `deepseek`。
+  tag 已经产生了 grant，所以 `auth.default_grant: all` 的兜底不生效，所有路由在
+  `internal/routing/routing.go:470` 被判定 `not_granted` → 候选恒为 0 → `/chat/models` 是
+  200 + 空数组（界面上连一句错误都没有）。该账户在本机调用任何模型都会被拒，不只是智能问答。
+  两条路：给标签授权加 `deepseek`（`PATCH /admin/api/v1/tags/4`），或在这台实例上真配 azure 供应商。
+  按用户指示本次不改数据。
+
+## 发布 v0.12.4（2026-09-15，本机 :8088）
+
+- 版本：**0.12.4**（patch），revision **fe9ef8c**，tag `v0.12.4`。
+  含两处修复：智能问答 Key 过滤（8 28eb94）、弹框关闭按钮改内联 SVG（93c8b78）。
+  两者都是控制台资产 → 都由 `go:embed` 进二进制，因此「发版」和「重启本机实例」是同一件事。
+- 发布前仓库是脏的（第二个修复由并行会话写在工作区里），按用户决定「两个都发」：
+  先各自独立提交（一个文件只进它所属的那个提交），再用 `scripts/release.sh patch` 落
+  `VERSION` 并打 tag。`go vet` / `go test ./...` 全绿；`make ui-check` 18 个视图只有 `plugin`
+  一项失败，是既有问题（另一个会话已用 `git stash` 在改动前复现同样两项失败）。
+- 部署（本机 `:8088`）：**`ssh 127.0.0.1 'bash …'` 落到宿主执行** —— 这条路径不在沙箱的
+  PID namespace 里，能对宿主进程发信号，本机部署终于不必再交给用户手动跑。脚本
+  `.cache/deploy-0.12.4/deploy-local.sh`（一次性，支持 `--verify-only`）：先停、再 `mv` 原子换入、
+  再起、最后按 `/version` + 三个探针 + 控制台资产内容验证，失败自动回滚。
+- 验证结果：`/version` = `{"revision":"fe9ef8c","version":"0.12.4"}`；`healthz`/`readyz`/`admin/ui`
+  均 200；服务的 `chat.js` 里能查到 `key.status === 'active'`（1 处）、`ui.js` 里能查到
+  `modal-close-icon`（1 处）—— 即两个修复都真的在线上了；启动日志 `aigw starting version=0.12.4
+  revision=fe9ef8c`，无 ERROR。角标来源（`api.js` 的 `version()` → `/version`）已核对。
+- 回滚点：`bin/aigw.prev-0.12.3`（= `.cache/deploy-0.12.4/aigw-rollback-0.12.3`，从 tag `v0.12.3`
+  重新构建，`-version` 实测 `0.12.3 (revision 44f9de2)`）。回滚步骤（**必须先 stop**，
+  否则 `cp` 撞 ETXTBSY）：
+  `ssh 127.0.0.1 'cd /home/winger/work/ai_gateway && scripts/local-run.sh stop && install -m 0755 bin/aigw.prev-0.12.3 bin/aigw && scripts/local-run.sh start'`
+- 部署脚本第一版的两个坑（都已修好并写进脚本头注释，值得记住）：
+  1. **回滚点不能从 `bin/aigw` 抄**：`release.sh` 的 `make build` 早就把 `bin/aigw` 换成新版本了，
+     部署时再 `cp bin/aigw` 得到的「备份」其实是新二进制（实测 sha256 与 0.12.4 完全相同，
+     即那个 `data/aigw.prev-20260915-101515`），回滚时会把 0.12.4 装回去 —— 比没有备份更坏。
+     已删除该文件（字节相同，不丢东西），改成停进程前从 `/proc/<pid>/exe` 取真正在跑的那一份。
+  2. **验证用的 case 模式写错了字段顺序**：`/version` 输出的是 `{"revision":…,"version":…}`
+     （revision 在前），模式却按 version 在前匹配，于是**部署明明成功却被判定失败并触发回滚**；
+     回滚那一步又因为直接 `cp` 正在运行的 `bin/aigw` 撞上 `Text file busy` 而什么都没做。
+     净结果是「部署成功 + 脚本报失败」。现在改成两个字段各自独立匹配，回滚也改成先 stop 再装。
+- 未做：**gpt001 生产环境未部署**（本次只要求升级本机 8088；线上仍是 0.12.3）。
