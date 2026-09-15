@@ -86,6 +86,15 @@ window.fetch = async (url, options) => {
     const row = { ...list.data[0], request_id: window.__detailOverride };
     return { ok: true, status: 200, text: async () => JSON.stringify({ ...list, count: 2, total: 2, data: list.data.concat([row]), has_more: false }) };
   }
+  // __kindOverride swaps one fixture row for a Codex remote-compaction turn (M48). The type
+  // column draws its label from call_kind, and a value the console does not know renders as a
+  // dash: without this override the badge is never exercised, because the captured fixtures
+  // predate the value.
+  if (window.__kindOverride && path === '/requests') {
+    const list = FIXTURES['/requests'];
+    const row = { ...list.data[1], request_id: window.__kindOverride, call_kind: 'compaction', title: '' };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ ...list, count: 2, total: 2, data: [list.data[0], row], has_more: false }) };
+  }
   const query = new URLSearchParams(target.split('?')[1] || '');
   if (path === '/requests/dimensions') {
     const all = dimensionRows(query.get('group_by'));
@@ -500,6 +509,21 @@ try {
     checks.emptyDetailExplained = [...document.querySelectorAll('.toast')].some((n) => n.textContent.includes('详情为空'));
     checks.noDialogOnEmpty = modal().querySelectorAll('.modal').length === 0;
     window.__detailOverride = null;
+
+    // A Codex remote-compaction turn (M48) is its own call kind: an operator reading this
+    // page has to be able to tell "the thread replaced its history" from a conversational
+    // turn. The label is what makes the value visible at all — an unknown call_kind renders
+    // as a dash — so the assertion reads the cell, not the row's text.
+    window.__kindOverride = 'req_compact0003';
+    find('刷新').click();
+    await settle();
+    const compactionRow = requestRow('req_compact0003');
+    checks.compactionKindShown = cell(listTable(), compactionRow, '类型') === '上下文压缩';
+    checks.compactionKindStyled = !!compactionRow && [...compactionRow.querySelectorAll('.badge')]
+      .some((b) => b.textContent.trim() === '上下文压缩' && b.className.includes('warn'));
+    // The other two labels must survive the new one.
+    checks.kindLabelsIntact = cell(listTable(), requestRow('req_demo0001'), '类型') === '会话轮次';
+    window.__kindOverride = null;
   }
 
   const flags = Object.entries(checks).filter(([, v]) => typeof v === 'boolean');

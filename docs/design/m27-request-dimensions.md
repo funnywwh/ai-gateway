@@ -74,7 +74,7 @@ checkpoint I/O 与磁盘。
 那个坑（`docs/design/m24-console-pagination.md` §8.10）。
 
 不加 workspace 索引：基数高→索引大，而聚合查询还要取 title/workspace 必然回表、覆盖不了。
-不加 call_kind 索引：只有 agent/title 两个取值，没有区分度。
+不加 call_kind 索引：取值几乎没有区分度（M48 起为 agent/title/compaction 三个）。
 
 随数据量增长这件事：B-tree 插入是 O(log N)，按 4 KB 页与 28–70 B 的索引键估算，1 万–10 万行
 都是 3 层、100 万–1000 万行 4 层、1 亿行才 5 层，每行代价近似常数。而 `request_logs` 的增长由
@@ -92,7 +92,7 @@ checkpoint I/O 与磁盘。
 | client | 首条 developer/system 消息以 `You are an AI agent powered by DeepSeek Harness.` 开头；或标题调用 | 顶层 `instructions` 以 `You are a coding agent running in the Codex CLI` 开头；或某条消息文本**以** `<environment_context>` 开头 |
 | workspace | user 消息里的 `session workspace: "<path>"`（JSON 字符串，需反转义） | `<environment_context>` 的 `<cwd>…</cwd>`，退回 `<workspace_roots><root>…</root>` |
 | session | `prompt_cache_key` 原样 | 同左 |
-| call_kind | 任一消息文本以 `Generate the session title from this JSON array of human messages:` 开头 → `title` | user 消息以 Codex 专用任务标题提示词开头 → `title`，否则 `agent` |
+| call_kind | 任一消息文本以 `Generate the session title from this JSON array of human messages:` 开头 → `title` | user 消息以 Codex 专用任务标题提示词开头 → `title`；input 含 `compaction_trigger`（或旧形态 `context_compaction` 且无密文）→ `compaction`（M48）；否则 `agent` |
 | title | 标题调用的响应文本 | 标题调用响应的 JSON `title` 字段，兼容纯文本 |
 
 - 标题调用的角色在 DSH 版本间变过（旧 `system`、新 `developer`），因此只用文本前缀判定。
@@ -108,6 +108,7 @@ checkpoint I/O 与磁盘。
 const (
     ClientDSH, ClientCodex, ClientUnknown = "dsh", "codex", "unknown"
     CallKindAgent, CallKindTitle          = "agent", "title"
+    CallKindCompaction                    = "compaction" // M48
 )
 
 type Dimensions struct{ Client, Workspace, SessionID, CallKind string }

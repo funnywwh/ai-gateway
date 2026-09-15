@@ -372,6 +372,8 @@ function modelCell(row) {
 function callKindCell(row) {
   if (row.call_kind === 'title') return badge('标题调用', 'ok');
   if (row.call_kind === 'agent') return badge('会话轮次');
+  // Codex 的远端压缩轮：也是一次上游调用，但它替换线程历史而不是推进对话。
+  if (row.call_kind === 'compaction') return badge('上下文压缩', 'warn');
   return el('span', { class: 'muted', text: '—' });
 }
 

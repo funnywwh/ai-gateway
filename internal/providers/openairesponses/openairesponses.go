@@ -319,6 +319,20 @@ func (p *Provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 					return err
 				}
 			}
+		case "response.output_item.done":
+			// Most item types can be rebuilt from the deltas forwarded above, but a compaction
+			// item exists ONLY in this frame: it is the checkpoint an upstream with native
+			// compaction returns for a Codex remote-compaction turn, and dropping it makes the
+			// client fail the thread with "expected exactly one compaction output item, got 0".
+			// Anything else stays on the delta path, which is what the assembler expects.
+			if compactionItemType(frame.Item) {
+				var item pluginapi.Item
+				if err := json.Unmarshal(frame.Item, &item); err == nil {
+					if err := emit(pluginapi.Event{Type: pluginapi.EventOutputItemDone, Item: &item}); err != nil {
+						return err
+					}
+				}
+			}
 		case "response.function_call_arguments.delta":
 			if err := emit(pluginapi.Event{
 				Type: pluginapi.EventToolArgsDelta, CallID: frame.CallID, ItemID: frame.ItemID, Text: frame.Delta,
@@ -365,6 +379,28 @@ func (p *Provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 		return err
 	}
 	return emit(pluginapi.Event{Type: pluginapi.EventUsage, Usage: finalUsage})
+}
+
+// compactionItemType reports whether an output_item.done frame carries a compaction-family
+// item: the opaque checkpoint an upstream with native compaction mints for Codex's remote
+// compaction. The type list matches the client's own ResponseItem variants; keeping it here
+// rather than importing the responses package is deliberate (providers see the wire only).
+func compactionItemType(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var item struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return false
+	}
+	switch item.Type {
+	case "compaction", "compaction_summary", "context_compaction":
+		return true
+	default:
+		return false
+	}
 }
 
 // body renders the upstream request, passing through unknown client fields.

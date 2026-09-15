@@ -139,3 +139,53 @@ func TestCompleteReportsFinishReason(t *testing.T) {
 		t.Fatalf("status=%q finish_reason=%q", out.Status, out.FinishReason)
 	}
 }
+
+// TestStreamForwardsCompactionItems: an upstream with native compaction answers a Codex
+// remote-compaction turn with a `compaction` output item, and that item exists only in the
+// output_item.done frame — there are no deltas to rebuild it from. Dropping it makes the client
+// fail the whole thread with "expected exactly one compaction output item, got 0".
+func TestStreamForwardsCompactionItems(t *testing.T) {
+	p := newUpstream(t,
+		`event: response.output_item.done`+"\n"+`data: {"type":"response.output_item.done","item":{"type":"compaction","encrypted_content":"blob-1"}}`,
+		`event: response.completed`+"\n"+`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}`,
+	)
+	var events []pluginapi.Event
+	if err := runStream(p, &events); err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+	var forwarded []pluginapi.Item
+	for _, ev := range events {
+		if ev.Type == pluginapi.EventOutputItemDone && ev.Item != nil {
+			forwarded = append(forwarded, *ev.Item)
+		}
+	}
+	if len(forwarded) != 1 {
+		t.Fatalf("forwarded items = %+v, want exactly the compaction item", forwarded)
+	}
+	if forwarded[0].Type != "compaction" {
+		t.Fatalf("item type = %q, want compaction", forwarded[0].Type)
+	}
+	if got := string(forwarded[0].Extra["encrypted_content"]); got != `"blob-1"` {
+		t.Fatalf("encrypted_content = %s, want the upstream's blob", got)
+	}
+}
+
+// TestStreamDoesNotForwardOrdinaryDoneItems: message/reasoning items are rebuilt from the
+// deltas this provider already relays, so forwarding their done frames too would make the host
+// publish every item twice.
+func TestStreamDoesNotForwardOrdinaryDoneItems(t *testing.T) {
+	p := newUpstream(t,
+		`event: response.output_text.delta`+"\n"+`data: {"type":"response.output_text.delta","delta":"hi"}`,
+		`event: response.output_item.done`+"\n"+`data: {"type":"response.output_item.done","item":{"type":"message","id":"m1","role":"assistant","content":[{"type":"output_text","text":"hi"}]}}`,
+		`event: response.completed`+"\n"+`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}`,
+	)
+	var events []pluginapi.Event
+	if err := runStream(p, &events); err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+	for _, ev := range events {
+		if ev.Type == pluginapi.EventOutputItemDone {
+			t.Fatalf("an ordinary done frame must stay on the delta path: %+v", ev.Item)
+		}
+	}
+}

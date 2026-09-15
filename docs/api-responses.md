@@ -1,6 +1,6 @@
 # Responses API 兼容面
 
-> 状态：**已实现（M5）**。实现见 `internal/responses`（装配器/校验）、`internal/httpapi`（路由与 SSE）、`internal/runtime`（执行）。
+> 状态：**已实现（M5）**，另有 **Codex 远端压缩 v2** 一节（M48 已实现）。实现见 `internal/responses`（装配器/校验/压缩）、`internal/httpapi`（路由与 SSE）、`internal/runtime`（执行）。
 
 ## 端点
 
@@ -104,6 +104,35 @@
 个别供应商的后端不接受其中某些角色——例如订阅型 codex 后端直接拒绝 `system`
 （`400 System messages are not allowed`）——这类**后端约束由适配器负责翻译**，客户端无需为此改写请求，
 也不必为不同供应商准备两套报文。参考实现见 `examples/provider-codex/README.md`。
+
+## Codex 远端压缩 v2（`compaction_trigger`）
+
+> 状态：**已实现（M48）**。设计见 `docs/design/m48-codex-remote-compaction-v2.md`。
+> 真机验收：VSCode 自带 codex（0.147.0-alpha.6.5）经本机 `:8088` 自动压缩成功。
+
+Codex 的"远端压缩 v2"不是单独的端点，而是**一次普通的 `POST /v1/responses`**：`input` 末尾追加
+`{"type":"compaction_trigger"}`，然后要求这条流里**恰好一个** `{"type":"compaction","encrypted_content":…}`
+输出项（`codex-rs/core/src/compact_remote_v2.rs`）。它在客户端侧按 provider 名判定，关不掉；
+而 `encrypted_content` 对客户端只是不透明字符串 —— **谁产出压缩项，谁就负责它的可读性**。
+
+网关因此分两种情况：
+
+| 上游 | 网关行为 |
+|---|---|
+| 原生支持（订阅 codex 插件、真 OpenAI） | 上游自己产出的 `compaction` 项**原样透传**，网关不合成、不改写 |
+| 不支持（deepseek 等 OpenAI 兼容上游） | 网关自己充当压缩后端：剔除触发项 → 追加压缩指令 → 收集正文摘要 → 回**恰好一个** `compaction` 项 |
+
+自签摘要的信封是 **`gw1:` + base64(UTF-8 摘要)**：客户端只把它当密文回放，网关在后续轮次的
+`input` 里识别到 `gw1:` 前缀时**原位替换**成一条 user 消息
+（`<codex 的 summary_prefix>\n<摘要>`，与 codex 本地压缩写进历史的形状一致），上游才看得见被压缩的历史。
+**不带 `gw1:` 前缀的 `compaction` 项（真 OpenAI 密文）原样透传**：跨路由时网关读不懂它，
+但原生上游读得懂，替换成提示只会让原生路径退化。
+
+压缩轮对客户端**只发**那一个 compaction 输出项（`response.output_item.added` + `response.output_item.done`），
+模型的正文与思考不外发（用量、计费、请求日志、`GET /v1/responses/{id}` 照常记录）。
+压缩轮不发工具（与 codex 本地压缩一致），并在请求日志里记为 `call_kind=compaction`（控制台显示"上下文压缩"）。
+若上游对这一轮**没有产出任何正文**，网关以失败收尾（`compaction_empty_summary`）而不是写入空摘要 ——
+空信封会让客户端以为"没有历史"，比报错更坏。
 
 ## 模型解析与路由扩展
 

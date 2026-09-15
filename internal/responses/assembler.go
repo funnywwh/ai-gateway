@@ -80,6 +80,21 @@ func (a *Assembler) Reasoning() string { return a.reasoningText }
 // Response returns the current response snapshot.
 func (a *Assembler) Response() *Response { return a.build() }
 
+// HasNativeCompactionItem reports whether the provider itself produced the compaction item a
+// Codex compaction turn counts.
+//
+// It gates synthesis and nothing else: exactly one compaction item is required, so an upstream
+// that already answered natively (the subscription backend, real OpenAI) must be forwarded
+// untouched — adding a second one fails the client just as hard as adding none.
+func (a *Assembler) HasNativeCompactionItem() bool {
+	for i := range a.output {
+		if IsNativeCompactionType(a.output[i].Type) {
+			return true
+		}
+	}
+	return false
+}
+
 // Items returns the canonical output items (stored for continuation).
 func (a *Assembler) Items() []pluginapi.Item {
 	items := make([]pluginapi.Item, 0, len(a.output))

@@ -52,6 +52,21 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 
 	req.SetSessionHeaders(r.Header)
 
+	// Codex remote compaction v2 is an ordinary responses call whose input ends with a trigger
+	// item, and whose stream must carry exactly one `compaction` output item. Upstreams without
+	// compaction of their own (every OpenAI-compatible route) answer it as a normal chat, so the
+	// gateway runs the summarization itself and mints that item (see responses.Compaction*).
+	// The input is parsed once here, then adapted per candidate below.
+	inputItems, apiErr := req.Items()
+	if apiErr != nil {
+		writeAPIError(w, apiErr)
+		return
+	}
+	compactionTurn := responses.IsCompactionRequest(inputItems)
+	// Summaries this gateway minted only exist as an envelope the upstream cannot read; turning
+	// them back into text is what keeps a compacted history visible to the model on later turns.
+	inputItems = responses.LocalizeCompactionItems(inputItems)
+
 	// Continuation: prepend the stored input+output items of the previous response.
 	var priorItems []pluginapi.Item
 	if req.PreviousResponseID != "" {
@@ -77,6 +92,9 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		priorItems = decodeStoredItems(prev.OutputJSON)
+		// A stored compaction item is an envelope too (a compact turn's output is stored like
+		// any other), so it needs the same localization before it goes back upstream.
+		priorItems = responses.LocalizeCompactionItems(priorItems)
 		if req.Instructions == "" {
 			req.Instructions = prev.Instructions
 		}
@@ -145,7 +163,15 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 	var assembler *responses.Assembler
 	if req.Stream {
 		sse = newSSEWriter(w)
-		assembler = responses.NewAssembler(canonical, sse.Send)
+		send := sse.Send
+		if compactionTurn {
+			// The client wants a checkpoint, not an answer: the summary belongs in the single
+			// compaction item, so the model's own text and reasoning stay out of the stream.
+			// Everything still reaches the assembler, i.e. usage, billing and the request log
+			// are recorded exactly as for any other turn.
+			send = responses.CompactionObserver(send)
+		}
+		assembler = responses.NewAssembler(canonical, send)
 	} else {
 		assembler = responses.NewAssembler(canonical, nil)
 	}
@@ -181,7 +207,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		cand := plan.Candidates[i]
 		attemptNo++
 
-		provReq, apiErr := req.ToProviderRequest(cand.UpstreamModel)
+		provReq, apiErr := req.ToProviderRequestWithItems(cand.UpstreamModel, inputItems)
 		if apiErr != nil {
 			writeAPIError(w, apiErr)
 			return
@@ -193,6 +219,11 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(priorItems) > 0 {
 			provReq.Input = append(append([]pluginapi.Item{}, priorItems...), provReq.Input...)
+		}
+		if compactionTurn {
+			// Per candidate, and after the continuation prefix is in place, because the trigger
+			// item has to be gone from the body the upstream actually receives.
+			responses.PrepareCompactionRequest(provReq)
 		}
 		provReq.Stream = req.Stream
 
@@ -325,6 +356,34 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		}
 		ticket.Settle(totalTokens(assembler.Usage()))
 		return
+	}
+
+	// A compaction turn owes the client exactly one `compaction` item; an upstream that has no
+	// compaction of its own answered with prose instead, and Codex fails the whole thread
+	// ("expected exactly one compaction output item, got 0 from N") without it. The prose IS the
+	// summary, so it is wrapped in an envelope this gateway can read back on later turns and
+	// published as that item. An upstream that answered natively already produced one, and a
+	// second item fails the client just as hard as none: leave it alone.
+	if compactionTurn && !assembler.HasNativeCompactionItem() {
+		summary := strings.TrimSpace(assembler.Text())
+		if summary == "" {
+			payload := &responses.ErrorPayload{
+				Code:    "compaction_empty_summary",
+				Message: "the upstream produced no summary for the remote compaction request",
+			}
+			if req.Stream {
+				_, _ = assembler.Fail(payload)
+				s.persist(ctx, key, account, req, plan.Resolved.Canonical, providerID, assembler, "failed", clientHintFromRequest(r), reasoningEffort)
+			} else {
+				writeAPIError(w, domain.ErrUpstream(http.StatusBadGateway, payload.Message))
+			}
+			ticket.Settle(totalTokens(assembler.Usage()))
+			return
+		}
+		item := responses.CompactionItem(summary)
+		if err := assembler.Add(pluginapi.Event{Type: pluginapi.EventOutputItemDone, Item: &item}); err != nil {
+			return
+		}
 	}
 
 	// The answer the client is about to receive is a fragment when the provider said

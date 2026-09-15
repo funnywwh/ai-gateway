@@ -2365,3 +2365,46 @@
      回滚那一步又因为直接 `cp` 正在运行的 `bin/aigw` 撞上 `Text file busy` 而什么都没做。
      净结果是「部署成功 + 脚本报失败」。现在改成两个字段各自独立匹配，回滚也改成先 stop 再装。
 - 未做：**gpt001 生产环境未部署**（本次只要求升级本机 8088；线上仍是 0.12.3）。
+
+## M48 Codex 远端压缩 v2（`compaction_trigger` → 恰好一个 `compaction` 输出项）
+
+> 设计文档：`docs/design/m48-codex-remote-compaction-v2.md`；规格：`docs/api-responses.md`「Codex 远端压缩 v2」。
+> 现场：VSCode 里 codex 报 `Fatal error: remote compaction v2 expected exactly one compaction output item,
+> got 0 from 1 output items`；本机请求日志 #1170 就是那一轮（`client=codex`、`model=deepseek-flash`、
+> `input` 含 `compaction_trigger`、网关自己记 `completed`）。
+
+- [x] 设计文档 + 规格文档先行（已产出、已在对话中展示并获得确认）
+- [x] `internal/responses/compaction.go`：`IsCompactionRequest` / `PrepareCompactionRequest` /
+      `LocalizeCompactionItems` / `Encode|DecodeCompactionSummary` / `CompactionItem` /
+      `IsNativeCompactionItem` / `CompactionObserver`；压缩指令与摘要前缀逐字抄 codex 模板
+      （`codex-rs/prompts/templates/compact/{prompt,summary_prefix}.md`）
+- [x] `internal/responses/assembler.go`：`HasNativeCompactionItem()`（只读，不改行为）；
+      `parse.go`：`ToProviderRequestWithItems`（解析一次、每候选复用，避免重复解析 1.3 MB input）
+- [x] `internal/httpapi/v1.go`：压缩轮检测（复用 `req.Items()`）、每候选改写（先本地化信封、再准备压缩轮）、
+      SSE 发射器包 `CompactionObserver`、终局合成那一个 compaction 项、空摘要走既有失败路径
+      （`compaction_empty_summary`）；`previous_response_id` 读回的历史同样本地化
+- [x] **设计外**：内置 `openai-responses` provider 原先完全丢弃 `response.output_item.done`，
+      而原生 compaction 项只存在于该帧里 → 原生上游的项到不了网关，网关会再合成一个（客户端
+      `got 2 from N`，与 `got 0` 一样致命）。现在只转发 compaction 家族的 done 帧
+      （普通项仍走增量路径，否则每个 item 发布两次）。由端到端测试逼出
+- [x] `internal/responses/dimensions.go` + 控制台 `requests.js`：`call_kind=compaction`（"上下文压缩"徽标）；
+      `docs/design/m27-request-dimensions.md` 同步（该值同时让压缩轮不再充当标题指纹来源）
+- [x] 单元测试 `internal/responses/compaction_test.go`：识别（两种触发形态 + 三种近似误判）/信封往返/
+      损坏与空信封/输入改写/本地化（含"外来密文原样透传"）/观察者放行集合
+- [x] 端到端测试 `internal/httpapi/compaction_test.go`（httptest 上游）：恰好一个 compaction 项、无正文增量、
+      上游请求体不含触发项且带压缩指令与清空的 tools；信封回放轮上游收到带 summary_prefix 的 user 消息；
+      **原生路径回归**（只转发上游那一个，网关不合成第二个）；无正文时按 `compaction_empty_summary` 失败
+- [x] provider 单元测试 `internal/providers/openairesponses/stream_test.go`：compaction 家族 done 帧转发，
+      普通 done 帧不转发
+- [x] 控制台 harness：`keys.page.html` 的 requests 视图加 `__kindOverride`（把一行换成压缩轮）与三条断言
+      （标签、warn 徽标、其它标签不变）；94 → **97 checks 全过**，**变异验证**（改回不渲染该分支）→ 该视图失败
+- [x] 真机走查（VSCode 自带 codex `0.147.0-alpha.6.5` + 临时 `CODEX_HOME` → 本机 `:8088`）：
+      纯文本会话第二轮与**工具轮会话**压缩均输出 `context compacted`、无 fatal；后续轮次正常继续；
+      网关侧 `request_logs#1511` = `call_kind=compaction`、`#1512` 的 input 含 `compaction` 项且不含触发项
+      （信封回放成立）。**A/B 负向验证**：同一路径在改动前的 0.12.4 二进制上失败
+      （`Failed to run pre-sampling compact` / `Error running remote compact task`）
+- [x] 回填设计文档「实现与设计差异」，规格状态改为「已实现（M48）」，更新 `docs/TODO.md`
+- 顺带发现（既有问题，本次未改）：该 codex 版本在**普通轮次**也打印
+  `ERROR codex_core::util: OutputTextDelta without active item`；用改动前的二进制同样复现（2 次），
+  与本修复无关，另行跟进
+- 后续（本次不做）：`/responses/compact`（v1 unary）路径 —— v1 会替换客户端历史，需要单独设计

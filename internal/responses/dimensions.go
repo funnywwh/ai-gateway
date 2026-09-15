@@ -21,6 +21,11 @@ const (
 
 	CallKindAgent = "agent"
 	CallKindTitle = "title"
+	// CallKindCompaction is Codex's remote-compaction turn (see IsCompactionRequest). It is a
+	// turn of the session budget-wise, but not a conversational turn: it replaces the thread's
+	// history instead of advancing it, so an operator reading the request log has to be able to
+	// tell the two apart.
+	CallKindCompaction = "compaction"
 )
 
 // The markers below were read off real captured traffic from this deployment (see
@@ -133,6 +138,10 @@ func (r *Request) Dimensions(clientHint string) Dimensions {
 	}
 	if titleCall || codexTitleCall || titleHint {
 		out.CallKind = CallKindTitle
+	} else if IsCompactionRequest(items) {
+		// Compaction outranks nothing here (the checks are exclusive), but it must be decided
+		// before the client fallback below: the compact turn's own instructions are absent.
+		out.CallKind = CallKindCompaction
 	}
 
 	switch {

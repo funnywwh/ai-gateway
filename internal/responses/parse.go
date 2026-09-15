@@ -141,6 +141,14 @@ func (r *Request) ToProviderRequest(upstreamModel string) (*pluginapi.Request, *
 	if apiErr != nil {
 		return nil, apiErr
 	}
+	return r.ToProviderRequestWithItems(upstreamModel, items)
+}
+
+// ToProviderRequestWithItems builds the canonical provider request from items the caller has
+// already parsed and possibly adapted (see LocalizeCompactionItems). It exists so a request can
+// be adapted per provider without re-parsing the body: re-parsing would hand back the client's
+// original items and silently undo the adaptation.
+func (r *Request) ToProviderRequestWithItems(upstreamModel string, items []pluginapi.Item) (*pluginapi.Request, *domain.APIError) {
 	out := &pluginapi.Request{
 		Model:             upstreamModel,
 		Instructions:      r.Instructions,
