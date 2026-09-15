@@ -368,9 +368,14 @@ textarea.form-input { resize:vertical; min-height:64px; }
 .tree-row.selected { background:var(--accent); color:#fff; }
 .tree-row.selected .tree-meta { color:rgba(255,255,255,.85); }
 .tree-row:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
-.tree-toggle { flex:0 0 auto; width:14px; text-align:center; color:var(--muted); user-select:none; }
+/* 展开箭头：内联 SVG（见 tree.js 的 arrowIcon）。原来是 ▸/▾ 两个冷门几何字符，缺字形的字体栈上
+   会渲染成空方框（现场反馈"父节点的左边有一个方块"），所以改为画出来——与弹框关闭按钮的 ✕
+   是同一条规则。用 flex 居中而不是 text-align：里面是 SVG，没有文字。 */
+.tree-toggle { flex:0 0 auto; width:14px; height:14px; display:flex; align-items:center; justify-content:center;
+  color:var(--muted); user-select:none; }
 .tree-row.selected .tree-toggle { color:rgba(255,255,255,.85); }
 .tree-toggle.leaf { opacity:.35; }
+.tree-arrow { display:block; }
 .tree-label { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .tree-meta { flex:0 0 auto; font-size:11.5px; color:var(--muted); }
 .tree-actions { flex:0 0 auto; display:flex; gap:4px; }

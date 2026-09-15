@@ -105,6 +105,47 @@ try {
   // workspace: everything, because the default expandDepth is Infinity
   checks.workspaceShowsAll = labelsOf(mainTree.node).join(',') === '总部,研发部,平台组,市场部,分公司';
 
+  // 展开箭头必须是**画出来的**（内联 SVG），不能是文字字形。
+  //
+  // 现场反馈："父节点的左边有一个方块"。方块 = 缺字形（tofu）：树控件原来用的是 ▸/▾
+  // （U+25B8/U+25BE），这对冷门几何字符在不少运维字体栈里没有，缺了就是个空方框。
+  // 本仓库同一条坑已有先例（弹框关闭按钮的 ✕ → 内联 SVG，commit 93c8b78），这里照同一范式。
+  // 断言必须查 SVG 的存在与 toggle 里**没有文字**——只查"有个东西在那里"是查不出来的，
+  // 一个 tofu 方框在 DOM 里同样是"有内容"。
+  const arrowOf = (root, name) => {
+    const row = rowsOf(root).find((r) => r.querySelector('.tree-label').textContent === name);
+    return row.querySelector('.tree-toggle');
+  };
+  const parentArrow = arrowOf(mainTree.node, '研发部');
+  const leafArrow = arrowOf(mainTree.node, '平台组');
+  checks.arrowIsDrawn = (parentArrow.querySelector('svg') || {}).nodeName === 'svg';
+  checks.arrowHasNoGlyph = parentArrow.textContent.trim() === '';
+  // The arrow must also change when the node opens: a drawn icon that never changes would
+  // lose the one thing the glyph was carrying (which state the node is in).
+  //
+  // This clicks the toggle element it just measured rather than a name-based helper: that
+  // helper is declared later in this script with `const`, and reaching it from here is a
+  // temporal-dead-zone ReferenceError (which is how this block first failed).
+  const collapsedPath = parentArrow.querySelector('svg path').getAttribute('d');
+  parentArrow.click();
+  await settle();
+  const expandedPath = arrowOf(mainTree.node, '研发部').querySelector('svg path').getAttribute('d');
+  checks.arrowReflectsState = collapsedPath !== expandedPath;
+  arrowOf(mainTree.node, '研发部').click();
+  await settle();
+  checks.leafArrowIsDrawn = (leafArrow.querySelector('svg') || {}).nodeName === 'svg';
+  checks.leafArrowIsInert = leafArrow.classList.contains('leaf');
+  // 箭头换成 SVG 后，箭头列必须仍然是等宽的：同一深度的父节点（有箭头）与叶子（圆点）
+  // 的标签要从同一个 x 开始，否则整棵树的标签会参差不齐。
+  const labelLeft = (name) => {
+    const row = rowsOf(mainTree.node).find((r) => r.querySelector('.tree-label').textContent === name);
+    return row.querySelector('.tree-label').getBoundingClientRect().left;
+  };
+  // 研发部 / 市场部 同为 depth 1，前者有子节点、后者是叶子。
+  checks.arrowColumnIsUniform = Math.abs(labelLeft('研发部') - labelLeft('市场部')) <= 1;
+  const arrowRect = arrowOf(mainTree.node, '研发部').querySelector('svg').getBoundingClientRect();
+  checks.arrowIsSized = arrowRect.width > 0 && arrowRect.width <= 12 && Math.abs(arrowRect.width - arrowRect.height) <= 1;
+
   // Indentation is depth, and both placements indent the same way.
   checks.sidebarIndent = indentOf(sidebarTree.node, '研发部') - indentOf(sidebarTree.node, '总部') === 14;
   checks.workspaceIndent = indentOf(mainTree.node, '平台组') - indentOf(mainTree.node, '研发部') === 14;

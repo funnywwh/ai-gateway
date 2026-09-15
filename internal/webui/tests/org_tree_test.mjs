@@ -81,6 +81,26 @@ assert.match(org, /const saveMembers = el\('button', \{\s*class: 'btn btn-primar
 // The save path must not run before the current members are known, or it would clear the node.
 assert.match(org, /state\.membersLoaded = false;/, 'the save button must be re-armed only after the members load');
 
+// --- 树的箭头必须是画出来的，不能是文字字形 -----------------------------------------------
+//
+// 现场反馈："父节点的左边有一个方块"——方块就是缺字形（tofu）。树控件原来用 ▸/▾
+// （U+25B8/U+25BE）这对冷门几何字符，缺它的字体栈上就是个空方框。本仓库已有先例：
+// 弹框关闭按钮的 ✕ 因同样原因改成了内联 SVG（commit 93c8b78）。
+//
+// 判据是"剥掉注释后的代码里不能再出现这些字形"：注释里提到它们是**解释**（必须留着，
+// 否则下一个人会把它们改回来），而代码里出现就是 bug 回来了。
+const treeCodeOnly = treeSrc
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/\/\/[^\n]*/g, '');
+for (const glyph of ['▸', '▾', '·']) {
+  assert.ok(!treeCodeOnly.includes(glyph),
+    'tree.js must not put the ' + glyph + ' glyph in the DOM: it renders as an empty box where the font lacks it; draw it as SVG instead');
+}
+assert.match(treeSrc, /function arrowIcon\(/, 'the expand/collapse arrow must be drawn (arrowIcon)');
+assert.match(treeSrc, /function leafIcon\(/, 'a leaf needs a drawn marker too, not a text dot');
+assert.match(treeSrc, /createElementNS\('http:\/\/www\.w3\.org\/2000\/svg'/, 'icons are inline SVG, like the dialog close button');
+assert.match(treeSrc, /\[kids \? arrowIcon\(expanded\) : leafIcon\(\)\]/, 'the toggle is built from the drawn icons');
+
 // --- 勾选框不能被全局 `input { width:100% }` 撑满 ------------------------------------------
 //
 // 这条 bug 的形态是布局：文字一字不差，只有量几何才看得出来，所以浏览器走查里量了

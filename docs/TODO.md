@@ -2666,6 +2666,28 @@ readiness 判据 `curl` 没带 `-f`，一个残留的、正从已删目录应答
       审计里留下 `create`/`delete` 两条 `org_node` 记录（含 `nodes_deleted: 1`）。
 - 回滚（如需）：`cp bin/aigw.prev-0.13.0-ba25ed3 bin/aigw && scripts/local-run.sh restart`。
 
+### 修掉树形控件的展开箭头渲染成方框（用户反馈：父节点的左边有一个方块）
+
+反馈现场同样是 v0.14.0 上线后的控制台。这不是布局问题，是**缺字形（tofu）**：树控件的展开/折叠
+箭头原来用的是文字字形 `▸`/`▾`（U+25B8/U+25BE），这对冷门几何字符在不少运维字体栈里没有，
+缺了就是个空方框。**本仓库同一条坑已有先例**：弹框关闭按钮的 `✕`（U+2715）当年也是因此改成
+内联 SVG（commit `93c8b78`），`ui.js` 的 `closeIcon()` 注释把这个理由写得很清楚——"画出来的
+图形不依赖读控制台那台机器装了什么字体"。我这次用了字形，等于把那条教训又踩了一遍。
+
+- [x] `tree.js`：新增 `arrowIcon(expanded)` / `leafIcon()`，用 `createElementNS` 画内联 SVG
+      （展开态朝下、折叠态朝右，叶子是圆点），照 `closeIcon()` 的范式；`aria-expanded` 仍然保留
+- [x] `app.css`：`.tree-toggle` 由 `text-align:center` 改为 flex 居中（里面已是 SVG，没有文字），
+      并新增 `.tree-arrow { display:block }`
+- [x] **先证伪再修**：先在 `tree.page.html` 加断言（toggle 里必须有 `<svg>` 且**没有文字内容**，
+      箭头形状随展开态变化），跑在未修复的代码上实测 `arrowIsDrawn`/`arrowHasNoGlyph` 为红；
+      修复后转绿；再把 SVG 换回字形复测，两条再次变红——两个方向都验过
+- [x] 补一条对齐断言：`arrowColumnIsUniform` —— 同一深度的父节点（有箭头）与叶子（圆点）的标签
+      必须从同一 x 开始，避免换成 SVG 后树的标签列参差
+- [x] 静态回归（`org_tree_test.mjs`）：**剥掉注释后**代码里不得再出现 `▸`/`▾`/`·`（注释保留说明是
+      为了下一个人不再改回去），并钉住 `arrowIcon`/`leafIcon`/`createElementNS` 的存在
+- [x] `make verify` 全绿、`make ui-check` 21 视图全绿（tree 由 44 项增至 51 项）
+- 未做：**8088 仍是旧构建**——按你的选择这批 UI 修复攒完再发一个版本（计划 patch 升 `0.14.1`）
+
 ### 修掉组织相关界面的勾选框布局（用户反馈：节点详情里勾选框与文字隔太远、不对齐）
 
 反馈现场是 v0.14.0 上线后的控制台。根因不在组织代码，在 `app.css` 第 89 行的全局规则

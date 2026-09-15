@@ -205,9 +205,8 @@ export function tree({
     const selected = String(state.selected) === String(id);
     const toggle = el('span', {
       class: 'tree-toggle' + (kids ? '' : ' leaf') + (expanded && kids ? ' open' : ''),
-      text: kids ? (expanded ? '▾' : '▸') : '·',
       'aria-hidden': 'true',
-    });
+    }, [kids ? arrowIcon(expanded) : leafIcon()]);
     const label = labelOf(node);
     const meta = !compact && renderMeta ? renderMeta(node) : null;
     const rowActions = !compact && actions ? actions(node) : null;
@@ -418,6 +417,46 @@ export function tree({
 
 function prevent(ev) {
   ev.preventDefault();
+}
+
+// The expand/collapse arrow is drawn, not typed.
+//
+// It used to be the text glyphs ▸ / ▾ (U+25B8 / U+25BE), and on an operator font stack that
+// lacks those two geometric characters the toggle rendered as an empty box — the reported
+// symptom was "父节点的左边有一个方块", a tree that looks broken next to every parent row.
+// This is the same accident the console already fixed once for the dialog close button (its
+// ✕ became inline SVG, see closeIcon() in ui.js), so it follows the same rule: an icon the
+// console depends on is drawn, and never depends on which fonts the machine reading the
+// console happens to have. Nothing here needs the network or an inline style, so the strict
+// console CSP is untouched.
+function arrowIcon(expanded) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  for (const [key, value] of Object.entries({
+    class: 'tree-arrow', viewBox: '0 0 10 10', width: '10', height: '10',
+    fill: 'currentColor', 'aria-hidden': 'true', focusable: 'false',
+  })) svg.setAttribute(key, value);
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  // A closed node points right, an open one points down: the state has to stay visible, because
+  // that is the whole job the glyph was doing.
+  path.setAttribute('d', expanded ? 'M1 2.5 L9 2.5 L5 7.5 Z' : 'M2.5 1 L7.5 5 L2.5 9 Z');
+  svg.append(path);
+  return svg;
+}
+
+// A leaf gets a small dot instead of an arrow, so a row that cannot be opened does not invite
+// a click that would do nothing.
+function leafIcon() {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  for (const [key, value] of Object.entries({
+    class: 'tree-arrow tree-arrow-leaf', viewBox: '0 0 10 10', width: '10', height: '10',
+    fill: 'currentColor', 'aria-hidden': 'true', focusable: 'false',
+  })) svg.setAttribute(key, value);
+  const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  circle.setAttribute('cx', '5');
+  circle.setAttribute('cy', '5');
+  circle.setAttribute('r', '1.6');
+  svg.append(circle);
+  return svg;
 }
 
 function cssEscape(value) {
