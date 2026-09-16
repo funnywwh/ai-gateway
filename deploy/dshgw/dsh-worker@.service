@@ -1,0 +1,46 @@
+[Unit]
+Description=DeepSeek Harness worker for tenant %i
+After=network-online.target dshgw.service
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=dsh-%i
+Group=dsh-%i
+WorkingDirectory=/srv/dsh/%i
+EnvironmentFile=/etc/dshgw/tenants/%i/tenant.env
+Environment=PATH=/opt/dsh/node/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/dsh/node/bin/node /opt/dsh/current/lib/bin.js web --port ${DSH_PORT} --no-open
+ExecStartPost=+/opt/dshgw/bin/dshgw --config /etc/dshgw/config.yaml capture-url %i ${MAINPID}
+Restart=always
+RestartSec=3
+TimeoutStartSec=45
+TimeoutStopSec=30
+KillMode=mixed
+UMask=0077
+Slice=dsh-workers.slice
+MemoryHigh=1536M
+MemoryMax=2G
+CPUQuota=200%
+TasksMax=512
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/srv/dsh/%i /var/lib/dshgw/tenants/%i /var/lib/dshgw/handshake
+
+[Install]
+WantedBy=multi-user.target

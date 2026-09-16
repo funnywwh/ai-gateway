@@ -17,23 +17,23 @@ const modulePath = "github.com/winger/ai-gateway/"
 // allowed lists, per package, the module-internal packages it may import.
 // An entry of nil means: no module-internal imports at all.
 var allowed = map[string][]string{
-	"internal/domain":     nil,
-	"internal/ids":        nil,
-	"internal/secret":     nil,
-	"internal/logx":       nil,
-	"internal/balancer":   nil,
-	"internal/pricing":    {"internal/domain"},
-	"internal/arch":       nil,
-	"internal/creds":      nil,
-	"internal/webui":      nil,
+	"internal/domain":   nil,
+	"internal/ids":      nil,
+	"internal/secret":   nil,
+	"internal/logx":     nil,
+	"internal/balancer": nil,
+	"internal/pricing":  {"internal/domain"},
+	"internal/arch":     nil,
+	"internal/creds":    nil,
+	"internal/webui":    nil,
 	// The console minifier is a build tool: it reads the console's source tree and writes a
 	// compressed mirror plus a `go build -overlay` file. The console itself never imports it
 	// (internal/webui stays a leaf); its only importer is cmd/minifyui.
 	"internal/webui/minify": nil,
-	"pkg/pluginapi":       nil,
-	"internal/config":     {"internal/logx"},
-	"pkg/providerkit":     {"pkg/pluginapi"},
-	"internal/pluginhost": {"pkg/pluginapi"},
+	"pkg/pluginapi":         nil,
+	"internal/config":       {"internal/logx"},
+	"pkg/providerkit":       {"pkg/pluginapi"},
+	"internal/pluginhost":   {"pkg/pluginapi"},
 	// The organization tree is pure traversal over domain types: the registry folds inherited
 	// tags into the snapshot, httpapi filters accounts by subtree and the store orders its
 	// subtree delete, and none of them may own a second copy of the ancestor walk.
@@ -162,6 +162,14 @@ func TestLayeringAllowsOnlyDeclaredImports(t *testing.T) {
 		if strings.HasPrefix(pkg.path, "cmd/") {
 			continue // the composition root may import anything
 		}
+		if strings.HasPrefix(pkg.path, "internal/dshgw/") {
+			for _, imported := range pkg.imports {
+				if !strings.HasPrefix(imported, "internal/dshgw/") {
+					t.Errorf("%s imports %s; dshgw may only import its own internal/dshgw subtree", pkg.path, imported)
+				}
+			}
+			continue
+		}
 		permitted, declared := allowed[pkg.path]
 		if !declared {
 			t.Errorf("package %s is not declared in the layering table; add it with the imports it is allowed to make", pkg.path)
@@ -170,6 +178,20 @@ func TestLayeringAllowsOnlyDeclaredImports(t *testing.T) {
 		for _, imported := range pkg.imports {
 			if !contains(permitted, imported) {
 				t.Errorf("%s imports %s, which is not in its allowed set %v", pkg.path, imported, permitted)
+			}
+		}
+	}
+}
+
+func TestDSHGWStandaloneImports(t *testing.T) {
+	graph := loadGraph(t)
+	for _, pkg := range graph {
+		if pkg.path != "cmd/dshgw" && !strings.HasPrefix(pkg.path, "internal/dshgw/") {
+			continue
+		}
+		for _, imported := range pkg.imports {
+			if !strings.HasPrefix(imported, "internal/dshgw/") {
+				t.Errorf("%s imports forbidden ai-gateway package %s", pkg.path, imported)
 			}
 		}
 	}

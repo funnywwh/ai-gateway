@@ -383,3 +383,21 @@
       看不到 Key/tag/账户级 `margin_bp`；而数据面走 `billing.ResolveMarkup` 的完整优先级链。
       于是"某把 Key 设了 `margin_bp: 0`"时，试算器显示 1.0× 而实际按 0 计费。
       影响面：只影响预览数值，不影响计费。修法需要接口新参数（key/tag/account），属接口变更，另开里程碑
+
+## M51 dshgw 多租户 dsh 网关（写进本仓库、与 aigw / dsh 双向解耦）
+
+设计：`docs/design/m51-dshgw.md`；规格：`docs/dshgw.md`；部署：`deploy/dshgw/README.md`。
+定位：独立 `cmd/dshgw` 与 `internal/dshgw/**`；只走 HTTP/CLI 外部契约，不改 aigw 核心或 dsh 发行包。
+已完成实现与无特权自动化的条目已移入 `docs/todo_done.md`；以下仅列尚未验收/收尾项。
+
+### 主机验收与收尾（不以 mock 或 loopback 代替）
+
+> 2026-09-16：用户决定 M51 先提交、发布另议；后续产品方向为 M52（aigw 后台“启用 DSH/停用 DSH”，设计稿 docs/design/m52-dsh-enable.md）。下列未完成验收不再阻塞提交，但未完成的仍保持未勾选，不得视为已通过。
+
+- [ ] 实际浏览器退出复验：退出返回门户后，访问B租户应重新要求登录；随后重新登录仍可自动跳转（登录的Origin与CSP两阶段修复已确认）
+- [ ] 真实 Key 轮换热载（A停用后模型401且key_revalidate:off保留既有UI会话已由用户验收；同一DSH/PID dummy-Key热载已自动验证，真实新Key热载仍待验收）
+- [ ] 从外部机器验证门户及租户端口的 TLS/防火墙可达（宿主回环 TLS 与实际 handshake 文件 owner/mode 已通过 baseline；回环结果不代表外部可达）
+- [ ] 10–30 worker 的实际 RSS/cgroup、单实例与汇总资源限额命中；不能把 unit 文本验证当作资源实测
+- [ ] 备份恢复主机演练与浏览器人工授权本机目录走查（模板供应、client HTTP200、普通 WS426/upgrade101 已自动验证）
+- [ ] 可选：有 C 编译器后运行 CGO_ENABLED=1 go test -race ./internal/dshgw/... ./cmd/dshgw；本机缺 gcc，普通并发回归已通过
+- [~] 收尾与提交：设计/规格状态回填为“已提交（M51，剩余主机验收项见 docs/design/m51-host-acceptance-remaining.md，部分被 M52 方向取代）”；单一 M51 commit 引用设计文档；不升 VERSION、不打 tag、不发布

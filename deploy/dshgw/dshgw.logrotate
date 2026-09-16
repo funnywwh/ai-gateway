@@ -1,0 +1,11 @@
+/var/lib/dshgw/gateway/audit.jsonl {
+    weekly
+    rotate 12
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su dshgw dshgw
+    create 0600 dshgw dshgw
+}

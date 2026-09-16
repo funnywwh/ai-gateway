@@ -1,0 +1,58 @@
+# dshgw is a standalone service. It does not read aigw's config or database.
+public_host: chat.tirisen.hk
+portal_port: 32600
+tenant_port_lo: 32601
+tenant_port_hi: 32799
+worker_port_lo: 32100
+worker_port_hi: 32299
+listen: 127.0.0.1:3099
+edge_port_header: X-DSHGW-Port
+max_header_bytes: 131072
+max_sessions: 10000
+aigw_base_url: http://192.168.190.86:8088
+validate_timeout: 5s
+session_ttl: 168h
+key_revalidate: off              # off | per-request | interval:<seconds>
+login_rate:
+  requests: 10
+  window: 1m
+directory_picker: clamp          # clamp | browse; intentionally no off mode
+plugin_browser_fs: on            # per-tenant create flag may override to off
+workspace_seed: [work]
+reserved_names: [login, dshgw]
+state_dir: /var/lib/dshgw
+tenant_root: /var/lib/dshgw/tenants
+workspace_root: /srv/dsh
+handshake_dir: /var/lib/dshgw/handshake
+registry_path: /var/lib/dshgw/registry.json
+key_map_path: /var/lib/dshgw/keys.map
+session_path: /var/lib/dshgw/gateway/sessions.json
+audit_path: /var/lib/dshgw/gateway/audit.jsonl
+activity_path: /var/lib/dshgw/gateway/activity.json
+dsh:
+  node_bin: /opt/dsh/node/bin/node
+  bin_js: /opt/dsh/current/lib/bin.js
+  releases_root: /opt/dsh/releases
+  current_link: /opt/dsh/current
+tls:
+  certificate: /home/winger/nginxwebui/.acme.sh/*.tirisen.hk/fullchain.cer
+  certificate_key: /home/winger/nginxwebui/.acme.sh/*.tirisen.hk/*.tirisen.hk.key
+deploy:
+  systemd_dir: /etc/systemd/system
+  nginx_dir: /etc/nginx/conf.d/dshgw
+  nginx_include_path: /etc/nginx/conf.d/dshgw.conf
+  nginx_binary: /usr/sbin/nginx
+  dshgw_binary: /opt/dshgw/bin/dshgw
+  plugin_path: /opt/dshgw/share/dsh-plugin/picker-clamp.js
+  template_home: /opt/dshgw/share/template-home
+  backup_dir: /home/winger/backups/dshgw
+  public_listen: 0.0.0.0
+  worker_unit: dsh-worker@.service
+  gateway_unit: dshgw.service
+  worker_slice: dsh-workers.slice
+  tenant_config_root: /etc/dshgw/tenants
+  config_path: /etc/dshgw/config.yaml
+  gateway_user: dshgw
+  gateway_group: dshgw
+  dsh_user_prefix: dsh-
+  corepack_bin: /opt/dsh/node/bin/corepack

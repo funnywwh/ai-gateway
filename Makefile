@@ -18,7 +18,7 @@ LDFLAGS := -X main.version=$(VERSION) -X main.revision=$(REVISION) -X main.date=
 UIDIST ?= $(CURDIR)/.cache/ui-dist
 UI_OVERLAY ?= $(UIDIST)/overlay.json
 
-.PHONY: all build build-src ui-dist test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check
+.PHONY: all build build-src ui-dist test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check dshgw-build dshgw-test dshgw-verify dshgw-nginx-test
 
 all: build
 
@@ -72,6 +72,36 @@ fmt:
 
 tidy:
 	@$(GOENV) go mod tidy
+
+# dshgw is an independently deployable binary. These targets are deliberately
+# not prerequisites of the existing aigw verify/release path.
+DSHGW_NODE ?= /home/winger/.local/node-v22.23.1-linux-x64/bin/node
+DSHGW_DSH_ROOT ?= /home/winger/.local/dsh-0.1.2-rc.1
+
+dshgw-build: version-check
+	@mkdir -p bin
+	@$(GOENV) go build -trimpath -ldflags "$(LDFLAGS)" -o bin/dshgw ./cmd/dshgw
+
+dshgw-test:
+	@$(GOENV) go test ./internal/dshgw/... ./cmd/dshgw ./internal/arch
+	@test -x "$(DSHGW_NODE)" || { echo "dshgw-test: Node missing: $(DSHGW_NODE)" >&2; exit 1; }
+	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" cmd/dshgw/plugin/picker-clamp.test.mjs
+	@PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_dshgw_host_acceptance.py
+	@PYTHONDONTWRITEBYTECODE=1 DSHGW_NODE="$(DSHGW_NODE)" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" python3 scripts/test_dshgw_host_protocol.py
+
+# Real rendered nginx chain, with disposable TLS and loopback-only listeners.
+# Explicit invocation fails when nginx is absent or the caller is root.
+dshgw-nginx-test:
+	@$(GOENV) DSHGW_TEST_NGINX=1 go test ./internal/dshgw/proxy -run '^TestNginxTLSProxyIntegration$$' -count=1 -timeout=90s
+
+dshgw-verify: dshgw-test dshgw-build
+	@if command -v nginx >/dev/null 2>&1 && [ "$$(id -u)" != 0 ]; then \
+		$(MAKE) --no-print-directory dshgw-nginx-test; \
+	else \
+		echo 'SKIP: real nginx regression needs nginx on PATH and a non-root user (make dshgw-nginx-test)'; \
+	fi
+	@$(GOENV) go vet ./internal/dshgw/... ./cmd/dshgw ./internal/arch
+	@DSHGW_NODE="$(DSHGW_NODE)" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" bash scripts/verify-dshgw.sh
 
 # The console derives its mount prefix from its own module URL, so one build serves both
 # `/admin/ui/` and `/aigw/admin/ui/`. That derivation is a pure function, which is why it

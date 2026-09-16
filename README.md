@@ -83,6 +83,7 @@ M39 让「线上跑的是哪个版本」有一个能读的答案：版本号的�
 | `docs/chat.md` | 控制台智能问答与技能库：计费与隐私口径、按 MCP 令牌 scope 决定的权限边界、Markdown/图表/HTML5 预览、**内联表单（气泡内渲染 → 提交 → 模型原地更新）**、**可交互沙箱页面（生成表单 → 用户提交 → 模型继续执行）**、技能私有性、**勾选技能后留空直接发送**、中断恢复、配置与排障 | **已实现（M32 + M34 + M35）** |
 | `docs/sub2api-migration.md` | sub2api → ai_gateway 的用户与 API Key 迁移：搬什么/不搬什么、明文不出源库的哈希导入、标签分配规则、迁移后的结构/功能/保密验证、前缀冲突与回滚 | **已实现（M43）** |
 | `docs/org.md` | 组织架构：多根森林、账号多归属、节点标签被整棵子树继承（授权与限速口径）、删除与移动语义、**可复用树形控件**（侧边栏/工作区两处放置）、排障 | **已实现（M49）** |
+| `docs/dshgw.md` | 多租户 dsh 网关：用 aigw 的 API Key 登录 DeepSeek Harness 浏览器界面、每租户独立 OS 用户与工作区、与 aigw/dsh 双向解耦（HTTP-only 集成 + 契约测试 + 导入闸门）、登录与会话、隔离强度、排障、已知限制 | **实现中（M51，主机验收待执行）** |
 
 ## 构建
 
@@ -94,6 +95,7 @@ make build      # 产出 bin/aigw（控制台资源先压缩混淆，再用 -ove
 make build-src  # 同上，但不混淆（排查问题/对照用，日志行会写明）
 make test       # 单元测试
 make verify     # vet + test + build
+make dshgw-verify  # 独立 dshgw 测试/构建/契约，不并入 aigw verify
 ```
 
 `make build` 会把 `internal/webui/static/` 压缩成 `.cache/ui-dist/static/`（去注释、去换行、局部标识符重命名，

@@ -3119,3 +3119,155 @@ harness 之所以漏掉它，是因为 fixture 直接给了 `account_count` 字�
       `GET /requests?limit=1` 200（返回真实 codex 行，身份列齐全）、`/v1/models` 401（未带 Key，符合预期）。
 - 回滚（如需，在宿主终端执行）：`cp data/aigw.prev-running-20260915-210057 bin/aigw && scripts/local-run.sh restart`。
 - 未做：**gpt001 生产未部署**（本次只要求升级本机 8088；线上仍为 `0.12.3 / 44f9de2`）。
+
+---
+
+## M51 dshgw 多租户 dsh 网关（写进本仓库、与 aigw / dsh 双向解耦）
+
+设计：`docs/design/m51-dshgw.md`；规格：`docs/dshgw.md`。
+定位：`cmd/dshgw` 独立二进制 + `internal/dshgw/**`，**只通过 HTTP 与 aigw 集成**，
+不改 aigw Go 核心、不改 dsh 发行包；两者各自可独立升级。
+
+### 文档先行（PROCESS.md 硬要求）
+
+- [x] 设计文档 `docs/design/m51-dshgw.md` 已在对话中展示并获确认
+- [x] 规格文档 `docs/dshgw.md` 已在对话中展示并获确认
+- [x] README 文档表登记 `docs/dshgw.md`
+- [x] `docs/TODO.md` 增 M51 小节
+
+### M51 实现与无特权自动化验收
+
+以下勾选表示代码、测试与一次性环境验证完成，**不代表已经在目标主机部署**；root/真实 Key/资源验收仍留在 TODO。
+
+- [x] `cmd/dshgw` 子命令骨架（serve / tenant / bind / login-url / sync-models / revalidate /
+      capture-url / contract / doctor / backup / migrate-nginx / upgrade-dsh）
+
+- [x] `internal/dshgw/{config,registry,session,handshake,proxy,tenancy,aigw,contract}` 包骨架与类型
+
+- [x] **导入闸门测试**：`cmd/dshgw/**`、`internal/dshgw/**` 依赖本仓库 `internal/dshgw/**` 之外的包即失败
+
+- [x] Makefile：`dshgw-build` / `dshgw-test` / `dshgw-verify`（不并入 `verify`，避免拖慢日常）
+
+- [x] config：yaml.v3 严格解码 + `TenantOrigin` / `SessionCookieName`（**cookie 不分端口，故按租户命名**）
+
+- [x] registry：`registry.json`(0600) + `keys.map`(0640) 原子写、**双端口分配**（公开 TLS 段 + worker 回环段，registry ∪ `ss -ltn`）
+
+- [x] session：只存 sha256、滑动续期、会话→上游 cookie 映射、flock + reload/merge 的跨进程原子持久化
+
+- [x] handshake：`handshake/<t>.url` 读取、manual redirect、303 + Set-Cookie 解析、上游 401 自愈重握手
+
+- [x] proxy：8 条不变量（剥 Cookie / 吞 Set-Cookie / 固定 Host / 清 Origin+Sec-Fetch-* / 401 重握手 /
+      拒 absolute-form / **边缘 origin 闸门（按端口判跨源）** / WS 通道不缓冲）
+
+- [x] 门户与分派：登录表单 + `prefix→tenant` + 跳转到租户端口 + 下发该租户 cookie；`Dispatch` 按 Host 端口分派（未知端口 404）
+
+- [x] 登录限流取 `X-Real-IP`（不用可伪造的 XFF 链）
+
+- [x] aigw 客户端：`ValidateKey` 的 401/200/空清单语义（空清单 ≠ Key 无效）
+
+- [x] worker 单元模板：`/srv/dsh/%i`、`EnvironmentFile` + `${DSH_PORT}`、`ProtectHome=tmpfs`、
+      `ExecStartPost=+dshgw capture-url`、`MemoryHigh=1.5G`/`MemoryMax=2G`、`Slice=dsh-workers.slice`
+
+- [x] `dsh-workers.slice` 总账 `MemoryMax=40G`
+
+- [x] 租户 `settings.yaml`（aigw provider + 模型清单）与 `.credentials.yaml`（**仅三键**、0600）渲染
+
+- [x] 目录选择器（D13，默认 `clamp`）：租户 patch 层 disable `directory-picker-auto`，
+      insert **两半**——`file:///opt/dshgw/share/dsh-plugin/picker-clamp.js`（自研夹紧 host 半，root 拥有）+
+      `@deepseek-ai/dsh-client-ui-directory-picker-browse`（官方 browser 半；只插 host 半会导致"添加工作区"点了没反应）
+
+- [x] 写 `picker-clamp.js`：`extends DirectoryPicker` 注册 `ctx.directoryPicker`，`kind: 'browse'`，
+      把 `list` / `createDirectory` 夹到 `/srv/dsh/<t>`；`crumbs` 从租户根起；
+      **必须用 `fs.realpath()` 做根检查以挡住 symlink 逃逸**；构造期自检失败则降级为"一律拒绝"（绝不回退到未夹紧实现）
+
+- [x] `directory_picker: clamp | browse` 配置项（`browse` 仅调试；**不提供 `off`**）
+
+- [x] 网关路径策略（D14 修正）：**不做路径白名单**——保留合法 Path/RawPath/query、拒 `.`/`..` 段与 absolute-form，其余一律转发
+      （理由：插件可注册任意 upgrade 路由如 `/browser-fs/ws`，静态面还有 `/plugins/<pkg>/client.js`；写死白名单会挡掉插件）
+
+- [x] WS upgrade 必须过边缘 origin 闸门并加测试：同源 101 / 跨源经网关 403 / 普通 GET 打 upgrade 路由 426
+
+- [x] 可选插件 `dsh-browser-fs@0.2.0`（D14，**默认 on**，每租户 `plugin_browser_fs: on|off` 可关）：
+      在**模板 home** 里 `dsh plugin --profile web add dsh-browser-fs@0.2.0` 后作为模板复制给新租户
+      （保住"新 home 启动不需网络"）；契约测试断言行加载、DSH 页面广告的 browser-fs client 批量资源 URL 200、WS 426/101
+
+- [x] 契约测试补一条：租户 patch 渲染后 `ctx.directoryPicker.capability().kind === 'browse'`
+      且**夹紧生效**（`list('/etc')` → `directory-unreadable`、`list()` → 租户根、realpath 逃逸被拒）
+
+- [x] `HOME=/srv/dsh/%i` 让选择器从自己的目录打开 + 预注册工作区（`WorkspaceSeed`）
+      注：browse 列的是**服务端**文件系统（不是浏览器本机），夹紧 ≠ 隐藏操作系统可读文件
+
+- [x] 建户全流程：useradd → 家目录 → DSH_HOME → unit → start → 回环 401 探针 → 再 enable
+
+- [x] 入口：**宿主 nginx** `conf.d/dshgw/*.conf`（门户端口 + 各租户端口，TLS 复用现有 `*.tirisen.hk`）；
+      **不动 nginxWebUI 数据库**（可选：经 WebUI 正规注册既有 `/dsh/` location 指向门户）
+
+- [x] `dshgw.service` 绑 `127.0.0.1:3099`（不依赖 docker0）
+
+- [x] dsh 契约 7 条（CLI / 启动行 / token 交换 / 栅栏三态 / `$DSH_HOME` 自举 / 凭据三键 / 沙箱 fail-closed）
+
+- [x] aigw 契约（401/200/空清单/超时；`Bearer` 与 `x-api-key` 等价）
+
+- [x] `upgrade-dsh`：候选契约通过后切软链 → 仅重启原先 active 的 worker，失败先恢复旧链再回滚已尝试 worker
+
+- [x] `backup` + `tenant remove --purge` 先快照再二次确认
+
+- [x] 复核修复 nginx 吞 gateway cookie、doctor 误判目录、失败建户误删保留数据、systemd 状态/回滚吞错、快照覆盖与缺失、升级错误启动停用 worker
+- [x] 新增 CAS 迟到 cookie、会话缓存撤销、原样路径/合法百分号、cookie trailers、重复 cookie logout、源日志/CLI 密钥脱敏、逐级 nofollow 文件操作及容量边界回归
+- [x] 生成支持 strict 字段的 DSH provider 兼容配置，保留普通工具参数可选性；通过公开配置接缝，不改 DSH 发行包/审批策略
+- [x] `go test -count=1 ./...` 与 `go vet ./...` 通过；tenancy/upgrade `-count=5 -shuffle=on` 通过
+- [x] 最新 `make dshgw-verify`：Go/import gate/vet/build、picker 15 项、DSH 7 条契约、临时 browser-fs 模板与 fresh HOME 无 pnpm 安装、client 200、WS 426/101 全通过；`file bin/dshgw` 确认为静态 ELF
+- [x] 已回填当前实现差异与验收边界、提供部署/权限/恢复手册；规格保持实现中，未冒称 root 主机已验收
+
+### M51 主机验收准备与真实热载协议（2026-09-16）
+
+- [x] `login-url` 无参数返回门户；`tenant list --json` 追加 UID/路径/unit/origin/alias 等只读元数据，保持旧字段/表格兼容，CLI 回归通过
+- [x] 分阶段 root 验收脚本 `scripts/dshgw_host_acceptance.py`：先读后建两临时租户、UID/EACCES/cgroup/loopback、TLS/cookie/WS、真实 worker RPC、重启/退出、停用 Key 观察、身份指纹保护与 snapshot-first 清理；公共 report 与私有 state/cli.log 分离
+- [x] 脚本 13 项无特权 orchestration 回归通过；模型 RPC 用真实一次性 DSH + 假模型服务验证，通过公开游标 fence/rpcId/turn 证明完成，且未额外调用标题 LLM
+- [x] 嵌入 `credentials_hotload.mjs`，新增必需升级闸门 `credentials-live-hotload`：同一 DSH/PID/session 上 Key A→B 实际生效；公开 reload 事件栅栏，不靠 sleep；成功/失败/SIGINT/SIGTERM 清理探针通过
+- [x] 最新 `make dshgw-verify` 通过：基础 7 + 热载 1 条 DSH 契约、picker、模板及新增 Python 回归；root/真实凭据/资源等**未执行**项仍留在 TODO
+
+### M51 宿主阶段 1 通过与后续启动修正
+
+- [x] 用户 root 终端回传：nginx -t、/opt 安装及 browser-fs0.2.0 模板供应、8 项 DSH 契约全部通过；未启动公网入口/建户
+- [x] 用户 root 终端回传：两把真实 Key 的认证、模型清单与 Bearer/X-API-Key 等价 contract 均 PASS（不等于模型调用已通过）
+- [x] 修复共享父目录遍历与 umask077 问题，增加建户前真实 UID 读写探针和 doctor shared-root 检查；不增加 gateway 组成员、不放宽私有 Key 文件权限
+- [x] gateway 改为目录级 RO 挂载，避免单文件状态挂载与原子 rename 冲突；serve 使用配置的 max_sessions；回归通过，宿主更新仍留 TODO
+- [x] 用户确认现有 Key 均已授权并批准切 none；核对实际进程配置来源、私有备份后更新 gitignored config.yaml，仅 auth.default_grant 与注释，未重启运行中 aigw（运行态验收留 TODO）
+- [x] 修正后全量 Go 测试/vet、独立 dshgw verify/静态构建/diff-check 通过
+- [x] 提供 `scripts/dshgw_stage2.sh` 人工接续：显式确认、当前部署身份守卫、私有诊断、重启后 auth/Key/model 验证、仅启动回环 gateway；shell/Python 语法与未确认/非 root 拒绝测试通过，实际 root 执行仍未计为通过
+
+### M51 宿主阶段 2：授权收口与回环 gateway 启动
+
+- [x] 用户回传：本地 aigw 已以原身份重启，新日志确认 `auth.default_grant=none`；A/B 认证与 header 等价 contract 再次通过
+- [x] 模型授权守卫正确阻止空清单 Key A 启动验收：A=[]、B 含 deepseek-flash；用户通过管理面补齐 A 显式测试标签后回传 A=[deepseek-flash]、两 Key 共同模型=[deepseek-flash]，未退回默认 all
+- [x] 为这个可重试阶段添加 `scripts/dshgw_stage2.sh --verify-and-start`：跳过安装/重启，只复验模型与启动回环 gateway；语法和未确认/非 root 守卫测试通过
+- [x] 用户执行 resume 回传 A/B deepseek-flash 可用、dshgw active、回环门户200；第一次 curl 连接尚未就绪，受控重试后成功。未由阶段 2 创建租户或开放 nginx 入口
+- [x] agent 只读交叉核对：安装 state 根为751 root:dshgw、tenant根为711 root:root、Node/DSH可执行目录可遍历；systemctl show dshgw.service 为 active，RO=/etc/dshgw /var/lib/dshgw、RW=/var/lib/dshgw/gateway，已载入目录级挂载修正
+- [x] 添加真实 nginx 非特权集成回归（临时可信 TLS/随机回环端口/真实渲染配置/假 worker）：登录/续期 cookie、同浏览器双租户、伪造 Host/端口头、跨源 HTTP/WS403、101帧回传与上游 cookie隔离通过；测试不触碰宿主 nginx、systemd 或现有 GUI
+
+### M51 双真实租户 baseline 部分通过（模型请求仍失败）
+
+- [x] 用户 root 回传 `render-nginx --reload` 成功（创建租户前0项），doctor 所有共享目录/文件模式属主/runtime/template/TLS/unit/include/nginx检查通过
+- [x] run-001 已建立两真实租户 `m51-e2e-b405d9cc-a/b`；A/B实际Key头等价与deepseek-flash授权、两UID不同与互相EACCES通过
+- [x] 两 worker 的进程UID、回环listener、实际 cgroup 1536M/2G/512/200% 与汇总40G检查通过（只读限额，不是压力命中证明）
+- [x] 实际nginx链路门户登录/client200、browser-fs普通GET426/upgrade101、安全cookie与同浏览器租户绑定、跨端口HTTP/WS403通过
+- [x] 验收在首个真实模型turn未完成时正确失败，未把已有部分PASS当成整体成功；agent只读systemctl核对两个测试unit均inactive/dead/MainPID0，数据与run目录保留
+- [x] 修复验收脚本 WebSocket HTTPResponse 资源所有权：不再直接关闭其fp导致Python3.14最终析构flush已关闭对象；新增socketpair回归，14项脚本自测通过（模型turn失败尚未定位，不把它归因于资源关闭警告）
+
+### M51 baseline 修复原因与保留租户续验通过
+
+- [x] 安全限定匹配本地 aigw 日志确认失败原因：m51-test-a 的请求被 insufficient_quota 拒绝，可用0、预留42116微美元（0.042116USD），不是401授权/网络/代理错误；未猜测、未停计费检查、未改透支。用户确认已给两测试账户补齐小额额度
+- [x] `resume-baseline --confirm-start-workers --allow-model-call` 已实现：复用原run目录、config/key指纹、两个精确UID/unit身份；拒绝新Key/model覆盖与未知/过渡态，保留历史证据，失败只停匹配的临时workers，不create/remove/purge、不重启主服务。30项无特权回归及真实一次性DSH协议测试通过
+- [x] 用户root回传 run-001续验全部PASS：两Key认证/授权、两个UID/EACCES、实际cgroup、TLS/client/WS、跨端口/cookie绑定、A/B各一次真实模型turn、重启后请求恢复、退出只撤销当前浏览器会话
+- [x] 公开报告保存在 `/root/dshgw-e2e/run-001/report.json`，私有state不共享；worker保留用于停用Key/外部可达/轮换/恢复等后续验收，尚未清理或提交
+
+
+### M51 接续验收与门户故障定位
+
+- [x] 用户root回传A停用验收 `disabled-key-model-401-and-configured-session-policy` PASS：模型401、key_revalidate:off保留既有UI会话，B未受影响。真实新Key轮换未纳入此通过项。
+- [x] 临时Firefox 155.0.1原生表单对照：no-referrer使/login和/logout的Origin为字面量null；same-origin保留正确同源Origin。四例均为原生导航POST，不是手工Origin或fetch。临时回环/profile已清理；线上用户浏览器修复复验仍待执行。
+
+- [x] gateway更新后真实浏览器 Key B 登录返回302并打开 `https://chat.tirisen.hk:32602/`。
+
+- [x] 门户第二阶段CSP修复与用户最终复验：显式允许registry内租户origin作为form-action重定向目标；用户确认更新后的CSP头及浏览器自动跳转成功。此前“手工可打开32602”不代表自动跳转；最终确认发生于CSP修复部署后。门户保持:32600，不实施/dsh/。增加CSP精确来源无通配符断言，proxy测试通过。
