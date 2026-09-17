@@ -3520,3 +3520,52 @@ sha256 与压缩镜像全部相同），但"曾经不是"可证：M50 随 0.14.1
   （`msg="graceful shutdown incomplete" err="context deadline exceeded"` +
   `level=ERROR msg="audit write queue could not be drained"`）。发生在 5.4 GB 库上、由沙箱回收触发，
   与 M56 无关，但说明停机路径在真实库上的耗时超出宽限。
+
+
+## 发布记录 v0.18.0（2026-09-17）
+
+| 项 | 值 |
+|---|---|
+| 版本号 | `0.18.0`（`0.17.0` → `0.18.0`，**minor**：新增 M57 dshgw 严格租户隔离（bwrap 模式）——新隔离模式、4 个配置项、2 个 CLI 命令，无破坏性变更） |
+| revision | `65b61db`（tag `v0.18.0`；`release: v0.18.0` 提交只含 `VERSION`） |
+| 内容 | M57：dshgw bwrap 隔离模式（不建 per-tenant OS 用户）、`tenant re-isolate --to user\|bwrap`、`sandbox-exec`、doctor 的 bwrap 前置条件、worker unit 与安装产物、设计与部署文档 |
+| 构建 | `scripts/release.sh minor` → `ui: minified 37 files 572454 -> 336354 bytes (-41%); gzip 32 files 333993 -> 132850 bytes (-60%)`；`bin/aigw` 21,986,543 B |
+| 部署目标 | **本机 `:8088`**（`/home/winger/work/ai_gateway`；用户本次指定 "deploy local 8088"，非 gpt001） |
+| 回滚点 | `bin/aigw.prev-0.17.0-e7e3e25`（升级前 on-disk 二进制，`-version` 自证 `0.17.0 (revision e7e3e25)`；更早还有 `bin/aigw.prev-0.16.0-9dc4ed2`、`bin/aigw.prev-0.14.0-6bf8dce`、`bin/aigw.prev-running-0.14.0-6dc9082`） |
+| 部署方式 | `systemd-run --user --unit=aigw-local --collect`（transient unit：`WorkingDirectory=<repo>`、`Restart=on-failure`、`StandardOutput/StandardError=append:data/aigw-local.log`），随后 `systemctl --user show -p MainPID --value aigw-local` 回写 `data/aigw-local.pid`，使 `scripts/local-run.sh status/stop/logs` 继续可用 |
+
+### 与 v0.17.0 同一条陷阱（本次未造成中断，仍按记录改正）
+
+v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的实例约 3 分钟后被沙箱回收，
+而旧实例已被同一次 restart 停掉 → `:8088` 中断约 9 分钟。
+
+本次先是重走了同一条路（18:51:12 起进程 1584710，setsid 子进程）。实测该实例**本次未被回收**
+（本会话文件策略是 `danger-full-access`；同一环境里一个 setsid 心跳进程持续写文件 7 分钟以上），
+但这属于环境差异、不是保证。因此 18:52 立即切回既有部署形态：systemd 用户单元（MainPID 1585697）
+并回写 pidfile。两次切换之间 `:8088` 只在 stop/start 的秒级窗口内不可用，**没有出现 v0.17.0 那样的长时间中断**。
+
+把这条写下来的原因：`scripts/local-run.sh` 头部的告警和 v0.17.0 的修正都还在，但"本次没事"
+很容易被下一次发布误读成"可以在会话里直接 restart"。
+
+### 验证（全部实测）
+
+| 检查 | 结果 |
+|---|---|
+| `GET /version` | `{"revision":"65b61db","ui":"minified","ui_encoding":"gzip","version":"0.18.0"}`（控制台左上角角标读同一端点 → `v0.18.0 65b61db`） |
+| `GET /healthz` | 200：`{"revision":"65b61db","status":"ok","ui":"minified","ui_encoding":"gzip","version":"0.18.0"}` |
+| `GET /readyz` | 200 |
+| `local-run.sh status` | `running (pid 1585697) listen=:8088`；`health: http://127.0.0.1:8088/admin/ui/ -> HTTP 200`；`console: minified · transfer: gzip` |
+| systemd 用户单元 | `ActiveState=active`、`Restart=on-failure`、`MainPID=1585697`（与 pidfile 一致） |
+| 启动日志 | `msg="aigw starting" version=0.18.0 revision=65b61db ui=minified ui_encoding=gzip config=/home/winger/work/ai_gateway/config.yaml listen=:8088 database=./data/aigw-local.db`；`msg="registry loaded" summary="snapshot(models=10 providers=6 provider_models=14 routes=14 mappings=0 tags=7 accounts=28)" ready=true`；**本次启动 0 条 `level=ERROR`** |
+| 数据面/控制面在线 | `/v1/models` 401（未带 Key）、`/admin/ui/` 200、`/admin/api/v1/providers` 401 |
+| 存活（关键） | 单元起于 18:52:13，跨工具调用并越过 v0.17.0 记录的 ~3 分钟回收阈值后仍 `active (running)`、MainPID 未变 |
+| 回归面 | M57 的改动全部在 `internal/dshgw`、`cmd/dshgw`、`deploy/dshgw`、docs 与 dshgw 构建目标内，aigw 不导入这些包；因此本版 aigw 的功能面与 v0.17.0 相同，`/version` 的 version/revision 是唯一变化 |
+| 相邻服务 | 重启后只读检查：本机 `dshgw.service` 与 3 个 `dsh-worker@*.service` 仍为 `active`（未改动任何 dshgw 配置或数据） |
+
+### 未做
+
+- **dshgw 未部署**：M57 的 bwrap 模式要在宿主 root 终端执行 `deploy/dshgw/install.sh` 并把
+  `/etc/dshgw/config.yaml` 的 `deploy.isolation` 改为 `bwrap`（前置条件、验收与回滚命令见
+  `deploy/dshgw/README.md` §7，待办清单见 `docs/TODO.md` M57）。本次只做版本发布 + 本机 aigw `:8088` 部署。
+- 没有部署到 gpt001（用户本次指定只部署本机）。
+- 开机自启仍未落地：`aigw-local` 是 transient 单元，重启机器后需手动起（与 v0.17.0 后的状态相同）。
