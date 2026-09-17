@@ -3486,7 +3486,9 @@ sha256 与压缩镜像全部相同），但"曾经不是"可证：M50 随 0.14.1
 
 - 查看：`systemctl --user status aigw-local`；日志：`journalctl --user -u aigw-local` 或 `data/aigw-local.log`
 - 停止：`systemctl --user stop aigw-local`（`Restart=on-failure` 不覆盖 SIGTERM，所以 `scripts/local-run.sh stop`
-  的 `kill <MainPID>` 同样有效，不会被自动拉起）
+  的 `kill <MainPID>` 同样有效，不会被自动拉起）。这条用同名参数的 dummy 单元实测过：`sleep` 单元被 SIGTERM 后
+  `ActiveState=inactive`、`--collect` 把 transient 单元整个回收——因此停掉之后在宿主终端跑
+  `scripts/local-run.sh start` 能正常拿到端口，两条工作流不打架
 - **transient 单元不跨重启**：与改动前的 durability 相同（以前手动起的实例也不跨重启）。若希望开机自启，
   需要写一份常驻 unit 到 `~/.config/systemd/user/` 并 `enable`——尚未做，待用户决定
 
