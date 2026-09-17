@@ -191,7 +191,7 @@ POST /admin/api/v1/accounts/{id}/dsh        body {"enabled":true|false}
 5. 残余差异（在生产侧待确认）：用户浏览器（Chrome）的陈旧页面/缓存状态、nginx 层、或启用轮换窗口期的瞬时状态。处理建议：彻底关闭标签后用隐私窗口重新登录复验；若仍复现，回传 F12→Network→XHR 过滤 `describe` 的状态码与响应预览（result.value 是否存在），以及 e2e-b 租户同页对照。
 6. 过程中修复：守护 create 补 listeningPorts 端口占用守卫（与 CLI 一致）；aigw 启用流程不再允许空模型建户（无授权时明确报错而非静默建残缺租户）。
 
-### settings 视图上游限制（排查定论，2026-09-16）
+### settings 视图上游限制（排查定论，2026-09-16；2026-09-17 已复核修正，见下节）
 
 租户 UI「settings are unavailable in this browser」根因为 **DSH 0.1.2-rc.1 上游设计**：设置镜像
 `ensure()` 在页面 authority 非回环时直接返回（`persistence="memory"`，构造注释
@@ -202,3 +202,26 @@ worker 端 /api 的 Host 防护（DNS rebinding/跨站），nginx loopback 转�
 
 待用户决策：A 接受上游限制并文档明示（保持零垫片边界，推荐）；B 在网关注入
 `__DSH_TRANSPORT__` 垫片（需实现 fetch 传输并突破 D5 决策，不推荐）。
+
+### 复核修正（2026-09-17）：差异来自入口 nginx，而非上游
+
+用户对照发现 `https://chat.tirisen.hk/dsh/` 的“设置/模型”不报错、租户端口 `:32604` 报错。复核证据：
+
+1. 两侧运行的都是同一份 DSH 0.1.2-rc.1（`~/.local/dsh-0.1.2-rc.1` 与 `/opt/dsh/current`），
+   磁盘上的 `dsh-client-connection`/`dsh-client-ui-settings` 逐字节相同。
+2. 但**下发到浏览器**的插件包不同：`/dsh/` 的 bundle 里
+   `isLoopbackHostname` 首行为 `if (hostname === "chat.tirisen.hk" || hostname === "localhost" …)`，
+   租户 worker 的是原版 `if (hostname === "localhost" || hostname === "[::1]")`。
+3. 改写者是宿主机 nginxWebUI 容器生成的 `/home/nginxWebUI/nginx.conf`：
+   `location ^~ /dsh/` 内 `sub_filter 'if (hostname === "localhost" || hostname === "[::1]") return true;'
+   'if (hostname === "chat.tirisen.hk" || hostname === "localhost" || hostname === "[::1]") return true;'`
+   （注释写明 “Extend that client-side allowlist to this LAN-only trusted domain”），并配
+   `proxy_set_header Accept-Encoding ""` 保证过滤生效。dshgw 生成的租户 vhost 无此类指令。
+4. 日志佐证：nginx 访问日志中 40 次 `POST /api/settings/describe`（200）**全部** Referer 为
+   `https://chat.tirisen.hk/dsh/`；租户端口侧只出现 `credentials/describe`，从未发出
+   `settings/describe`——与“memory 档不发 describe”的代码路径一致。
+5. 两侧加载的前端资源同名同内容（`index-Df-65__b.js` 等），因此差异只能来自下发时改写。
+
+结论：这是**入口层已存在的域名白名单改写**（`/dsh/` 有、租户端口没有），不是上游不可绕过的限制。
+A/B 之外新增可选项 C：在 dshgw 渲染的租户 vhost 上做等价最小改写，使租户端口同样可用；
+代价是网关侧出现对上游客户端代码的字符串级补丁（上游改字即失效），需按 D5 边界显式决策。

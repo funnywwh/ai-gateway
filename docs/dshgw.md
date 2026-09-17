@@ -77,12 +77,23 @@ kind: "spec"
 
 默认登录限流为每 IP 每分钟 10 次；会话默认上限 10,000，状态文件另有 64 MiB 上限。已建立的 WebSocket 不会被 logout/TTL 追溯关闭，新请求或重连会重新验证。
 
-**已知上游限制（DSH 0.1.2-rc.1）**：dsh Web UI 的“设置/模型与提供方目录”视图只在浏览器地址栏为
-回环（localhost/127.x）时工作——DSH 客户端对非回环页面将设置持久化设计为进程内（不发
-`settings.describe`），模型目录因此显示 "settings are unavailable in this browser"。这与网关无关
-（任何域名反代部署都一样，`--trusted-host` 是 worker 端 /api 的 Host 防护，与此闸门无关）。
+**租户端口“设置/模型”不可用的实证根因（2026-09-17 复核，取代此前“与网关无关”的判断）**：
+DSH 0.1.2-rc.1 客户端把设置持久化绑定在浏览器页面 authority 的回环判定上——
+`dsh-client-connection` 的 `isLoopback = transport?.ownsHost === true || !pageLocation ||
+isLoopbackHostname(pageLocation.hostname)`，`dsh-client-ui-settings` 据此取
+`persistence = isLoopback ? "host" : "memory"`；`memory` 时 `SettingsDescribeMirror.ensure()`
+直接返回、视图恒为 `undefined`，模型页即报 "settings are unavailable in this browser"。
+判定只看 `location.hostname`，**不看端口**，也**不看** `--trusted-host`（后者仅是 worker 端 /api 的
+Host 防护）。真正的差异不在上游，而在入口 nginx 是否改写了该函数：宿主机 nginxWebUI 为既有
+`https://chat.tirisen.hk/dsh/` 写了 `sub_filter`，把
+`if (hostname === "localhost" || hostname === "[::1]")` 改写成同时接受 `chat.tirisen.hk`
+（容器 `/home/nginxWebUI/nginx.conf` 的 `location ^~ /dsh/`），因此 `/dsh/` 下发的 bundle 中
+`isLoopbackHostname` 认 `chat.tirisen.hk` 为回环，设置/模型可用；dshgw 生成的租户 vhost
+（`internal/dshgw/tenancy/render.go`）是纯透传、无任何 `sub_filter`，故 `:32604` 走原版闸门。
+`Accept-Encoding ""` 必须保留，否则上游压缩会让 `sub_filter` 失效。
 不受影响：会话对话、模型调用（默认模型由 `sync-models` 写入）、工作区目录选择与 browser-fs
-面板（独立插件）。模型与授权管理在 aigw 控制台完成。
+面板（独立插件）。租户侧模型与授权管理在 aigw 控制台完成；若要租户端口同样可用，见
+`docs/design/m52-dsh-enable.md` 的 A/B 决策。
 
 ## 4. 代理契约
 
