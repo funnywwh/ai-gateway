@@ -1,6 +1,7 @@
 # 路由与模型自由映射
 
-> 状态：**已实现（M3）**；会话粘性见 §4.4（M38）。实现见 `internal/modelmap`、`internal/balancer`、`internal/routing`。
+> 状态：**已实现（M3）**；会话粘性见 §4.4（M38）、供应商并发上限见 §4.5（M44）、供应商成本上限见 §4.6（M56）。
+> 实现见 `internal/modelmap`、`internal/balancer`、`internal/routing`。
 
 ## 1. 两段式解析
 
@@ -71,6 +72,7 @@ grantedProviders = ∪( key.grants.providers, effectiveTags[].grants.providers )
 | 熔断打开 | `circuit_open` |
 | 请求特征不被能力覆盖 | `missing_capability:<feature>` |
 | 该模型在此供应商没有映射 | `not_mapped` |
+| 达到该供应商的成本上限（§4.6） | `cost_cap_reached` |
 
 ### 4.2 分层与层内策略
 
@@ -138,6 +140,26 @@ grantedProviders = ∪( key.grants.providers, effectiveTags[].grants.providers )
 
 **空闲与否不影响授权**：闸门在候选已通过全部过滤之后生效，只会让请求等待或按可重试失败降级，
 不会把未授权/已撤权的供应商拉回来，也不会绕过熔断、冷却与能力校验。
+
+### 4.6 供应商成本上限与复位（M56）
+
+§4.5 管的是"同时几个请求"，这一节管的是"**这家上游总共让我花多少钱**"：
+`providers.cost_limit_micros` 限制该供应商的**累计成本**（我们付给上游的钱，账本币种），
+达到上限后它**从候选里被剔除**（原因 `cost_cap_reached`），请求按既有策略故障转移到其它候选。
+
+| 项 | 规则 |
+|---|---|
+| 上限 | `providers.cost_limit_micros`（供应商实例级，其下所有模型共享），单位 = **账本币种微单位**；`0` = 不限（默认）。控制台「成本上限」或 `PATCH /admin/api/v1/providers/{id}`（MCP：`admin_request` → `admin_update_provider`）设置 |
+| 计什么 | `usage_records.cost_micros` 按 `provider_id` 的累计值——与请求日志「成本」列、发票明细、供应商维度统计**同源**；**包含失败尝试的成本**（失败一样花钱） |
+| 周期 | `providers.cost_period`：`none`（默认，累计自上次复位；从未复位则从有记录以来）/ `daily`（UTC 零点）/ `monthly`（UTC 月初自动重新起算） |
+| 起算点 | `max(周期起点, 手动复位时刻)`；**首次启用上限**（从 0 改为正数且从未复位过）自动把起算点设为当前时刻，否则历史成本会瞬间把老供应商标成超限 |
+| 复位 | 控制台行操作「复位成本」或 `PATCH` 的 `reset_cost:true`：只把起算点挪到当前时刻，**不修改、不删除任何计量行**；复位后该供应商立刻回到候选里 |
+| 触界后果 | 该供应商被剔除（`cost_cap_reached`，见 §4.1）；**全部**候选都因成本上限被剔除时 → **503 `provider_cost_capped`**（不是 502：上游没坏；也不是 429：重试不会变好）。`model@provider` / `X-Gateway-Provider` 钉死的请求同样受约束 |
+| 上限变更 | **调高立即生效**（判定用的是当前上限，不依赖读数）；**复位立即生效**（写路径把起算点挪到当前时刻并通知追踪器归零）；调低与周期切换最多滞后一个读数周期（切换期间保持保守：继续拦截） |
+| 读数 | 进程内后台每 **5 秒**按计量表重读一次（热路径零查询）。最坏超额 = 这 5 秒内该供应商的流量成本；控制台读回的 `used_micros` 就是路由判定用的那个数 |
+| 读失败 | **不阻断流量**（fail-open）：保留最后一次成功读数，错误在 `/stats` 的 `provider_cost.last_error` 可见。这条护栏是运营护栏，不是账务凭证 |
+| 可观测 | `/metrics` 的 `aigw_provider_cost_used_micros` / `aigw_provider_cost_limit_micros` / `aigw_provider_cost_exceeded`；`/admin/api/v1/stats` 的 `provider_cost` 块（`refresh_s`/`as_of`/`last_error`/`tracked` + 每个有上限的供应商）；供应商列表/详情行内的 `cost`，Explain 的 `excluded` |
+| 边界 | 多实例部署各自读数（读的是同一张计量表，所以数值一致，超额窗口各自 ≤5s）；账本币种变更后上限与已用按新币种解释，历史不重算 |
 
 ## 5. 请求级覆盖
 

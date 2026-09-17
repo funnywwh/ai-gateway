@@ -175,6 +175,47 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
 `max_inflight` 写 `0` 即取消限制（也是默认值）。等待上限是**部署级配置**（`admin_stats.provider_capacity.queue_wait_s`），
 MCP 只读不可写；「谁在排队」看 `admin_stats.provider_capacity.providers`。
 
+### 供应商成本上限与复位示例（M56）
+
+`admin_update_provider` 的 `body.cost_limit_micros` 设置该供应商的**累计成本上限**（我们付给上游的钱，
+单位 = 账本币种微单位；`0` = 不限，默认），`body.cost_period` 选统计周期（`none` / `daily` / `monthly`，
+默认 `none` = 累计自上次复位）。达到上限后该供应商**从候选里被剔除**（自动换下一个候选；全部候选都超限时
+客户端拿到 HTTP 503 `provider_cost_capped`），所以这是一个"会改变路由行为"的字段：
+
+```json
+{"name":"admin_request","arguments":{
+  "name":"admin_update_provider",
+  "params":{"id":3},
+  "body":{"cost_limit_micros":50000000,"cost_period":"monthly"}
+}}
+```
+（`50000000` 微单位 = 50 个账本币种单位。**首次**把上限从 0 改为正数时，起算点自动设为当前时刻，
+不会拿历史成本把这家供应商立刻判超限。）
+
+复位（把起算点挪到当前时刻，**不删除任何计量数据**）——`body.reset_cost=true`：
+
+```json
+{"name":"admin_request","arguments":{
+  "name":"admin_update_provider",
+  "params":{"id":3},
+  "body":{"reset_cost":true}
+}}
+```
+
+读回：`admin_get_provider` / `admin_list_providers` 的行里 `cost_limit_micros` / `cost_period` /
+`cost_window_start` 是配置值，`cost` 是实时读数（有上限时才出现）：
+
+```json
+{"cost_limit_micros":50000000,"cost_period":"monthly","cost_window_start":"2026-09-01T00:00:00Z",
+ "cost":{"limit_micros":50000000,"used_micros":12400000,"period":"monthly",
+         "window_start":"2026-09-01T00:00:00Z","exceeded":false,"currency":"CNY"}}
+```
+
+`used_micros` **就是路由判定用的那个数**（进程内后台每 5 秒按计量表重读；`admin_stats.provider_cost`
+给出 `refresh_s`/`as_of`/`last_error`/`tracked` 与每个有上限供应商的读数）。读数失败时**不阻断流量**
+（保留最后一次成功读数），因此 `used_micros` 与上游侧的账单可能有几秒的时差——它是运营护栏，不是账务凭证。
+**读这些只需要 `admin_read`**，写（含复位）需要 `admin`。
+
 ## 4.5 工具说明标准（新增工具/字段必读）
 
 工具说明（`description` 与 `inputSchema` 的属性说明、`admin_describe` 的 `body_schema`/`example`）
@@ -209,7 +250,7 @@ MCP 只读不可写；「谁在排队」看 `admin_stats.provider_capacity.provi
 | 枚举用 `enumField`、路径参数用 `pathParam` | 取值只写一遍，不靠 `Desc` 复述 | 既有辅助函数 |
 | `Dangerous` 必须有 `ConfirmReason` | 模型要先交代后果 | 既有测试已钉 |
 | 与代码的校验语义一致 | 写入侧 `DisallowUnknownFields` 的文档要 `additionalProperties:false` | 两者写在一起 |
-| **行为型字段要写清"生效语义"** | 只写单位/范围仍不够：agent 要知道写下去会发生什么 | 例：`max_inflight` 必须写明「0=不限（默认）；超出后请求排队等待，等待上限来自部署配置（默认 30s，0=不排队），超时或队列已满 → 该请求重试下一候选，全耗尽返回 429 `provider_busy`」 |
+| **行为型字段要写清"生效语义"** | 只写单位/范围仍不够：agent 要知道写下去会发生什么 | 例：`max_inflight` 必须写明「0=不限（默认）；超出后请求排队等待，等待上限来自部署配置（默认 30s，0=不排队），超时或队列已满 → 该请求重试下一候选，全耗尽返回 429 `provider_busy`」；`cost_limit_micros` 必须写明「单位=账本微单位，0=不限（默认）；达到上限后该供应商从候选里被剔除、自动换下一个候选，全耗尽返回 503 `provider_cost_capped`；首次启用自动起算；`reset_cost` 只挪起算点、不删数据」 |
 | **只存不用的字段不写进 schema** | 写进去等于教 agent 写无效配置 | 描述里标明"当前不生效" |
 
 ### 写错了会怎样

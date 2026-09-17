@@ -89,6 +89,17 @@ func ErrProviderBusy(msg string) *APIError {
 func ErrInsufficientQuota(msg string) *APIError {
 	return newErr(http.StatusPaymentRequired, ErrTypeRateLimit, "billing_hard_limit_reached", msg)
 }
+
+// ErrProviderCostCapped reports that every candidate for the model has reached the cost cap
+// this deployment configured (providers.cost_limit_micros, M56).
+//
+// 503 with its own code, because the two neighbouring answers would both mislead: 502
+// upstream_error sends an operator to look at upstreams that are working fine, and 429 makes a
+// client back off from a limit that only an operator can lift. Nothing about the request was
+// wrong; this deployment has simply spent what it allowed for those upstreams.
+func ErrProviderCostCapped(msg string) *APIError {
+	return newErr(http.StatusServiceUnavailable, ErrTypeAPI, "provider_cost_capped", msg)
+}
 func ErrUnsupported(msg string) *APIError {
 	return newErr(http.StatusBadRequest, ErrTypeUnsupported, "unsupported_parameter", msg)
 }

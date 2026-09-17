@@ -186,6 +186,17 @@ func run() int {
 		"affinity_max_entries", cfg.Routing.SessionAffinityMaxEntries,
 	)
 
+	// Provider cost caps (M56): readings are re-derived from the metering table every
+	// CostRefreshInterval and the router drops any provider that spent its budget. Start seeds
+	// before the first request, so a provider that was already over its cap at boot is never
+	// chosen. A deployment with no capped provider pays nothing for this: the refresher asks
+	// the registry first and issues no query at all.
+	costTracker := runtime.NewCostTracker(db, reg, log)
+	router.SetCostGate(costTracker)
+	stopProviderCosts := costTracker.Start(ctx)
+	defer stopProviderCosts()
+	log.Info("provider cost cap ready", "refresh", runtime.CostRefreshInterval.String())
+
 	verifier := apikey.New(db, apikey.Config{
 		TTL:           cfg.Auth.KeyCacheTTL(),
 		NegativeTTL:   5 * time.Second,
@@ -482,6 +493,7 @@ func run() int {
 		Secrets:       credentialSealer,
 		Prober:        dispatcher,
 		Capacity:      dispatcher,
+		ProviderCost:  costTracker,
 		ReloadHooks: func(ctx context.Context) error {
 			list, err := db.ListHooks(ctx)
 			if err != nil {

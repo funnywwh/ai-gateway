@@ -46,6 +46,8 @@ type fixture struct {
 	// srv is that same instance, for paths a data-plane request cannot reach here (a
 	// billing rejection needs Deps.Billing, which this fixture leaves nil).
 	srv *Server
+	// providerCost is the tracker this fixture wired (M56); tests refresh it themselves.
+	providerCost *runtime.CostTracker
 }
 
 // fixtureOption tunes what newFixture builds, so a test that needs a different provider
@@ -58,6 +60,18 @@ type fixtureSetup struct {
 	maxInflight     int
 	queueWait       time.Duration
 	queueMaxWaiters int
+	// costLimitMicros arms the provider's cost cap (M56) in the fixture's own provider row,
+	// so a test can start from a provider that is already over its budget.
+	costLimitMicros int64
+	costPeriod      string
+}
+
+// withProviderCostCap sets providers.cost_limit_micros / cost_period on the fixture's provider.
+func withProviderCostCap(limitMicros int64, period string) fixtureOption {
+	return func(s *fixtureSetup) {
+		s.costLimitMicros = limitMicros
+		s.costPeriod = period
+	}
 }
 
 // withProviderCeiling sets providers.max_inflight (0 = unlimited) and the echo provider's
@@ -117,6 +131,7 @@ func newFixture(t testing.TB, opts ...fixtureOption) *fixture {
 	provID, err := db.UpsertProvider(ctx, &domain.Provider{
 		Name: "echo", Kind: "testecho", Enabled: true, Priority: 10, Weight: 100,
 		ConfigJSON: setup.providerConfig, MaxInflight: setup.maxInflight,
+		CostLimitMicros: setup.costLimitMicros, CostPeriod: setup.costPeriod,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -156,26 +171,34 @@ func newFixture(t testing.TB, opts ...fixtureOption) *fixture {
 		QueueMaxWaiters: setup.queueMaxWaiters,
 	}, db, reg, nil, bal, nil)
 
+	// The cost cap is wired the way the composition root wires it (M56): one tracker reads the
+	// metering table, the router drops providers over their limit, and the admin API reads the
+	// same numbers back. Tests call Refresh themselves instead of waiting for the ticker.
+	providerCost := runtime.NewCostTracker(db, reg, nil)
+	router.SetCostGate(providerCost)
+
 	verifier := apikey.New(db, apikey.DefaultConfig())
 	mcpService := mcpsrv.New(db, reg, mcpsrv.Config{MaxRows: 100, WindowDays: 30, Currency: "USD"})
 	srv := New(Deps{
-		Config:     &cfg,
-		Registry:   reg,
-		Router:     router,
-		Dispatcher: dispatcher,
-		Capacity:   dispatcher,
-		Verifier:   verifier,
-		Limiter:    quota.New(8),
-		Meter:      usage.New(db),
-		Records:    db,
-		MCP:        mcpService,
-		MCPTokens:  db,
-		Version:    "test",
+		Config:       &cfg,
+		Registry:     reg,
+		Router:       router,
+		Dispatcher:   dispatcher,
+		Capacity:     dispatcher,
+		ProviderCost: providerCost,
+		Verifier:     verifier,
+		Limiter:      quota.New(8),
+		Meter:        usage.New(db),
+		Records:      db,
+		MCP:          mcpService,
+		MCPTokens:    db,
+		Version:      "test",
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
-	return &fixture{server: ts, db: db, cfg: &cfg, key: key, verifier: verifier, registry: reg, handler: srv.Handler(), srv: srv}
+	return &fixture{server: ts, db: db, cfg: &cfg, key: key, verifier: verifier, registry: reg,
+		handler: srv.Handler(), srv: srv, providerCost: providerCost}
 }
 
 const (

@@ -3414,3 +3414,41 @@ sha256 与压缩镜像全部相同），但"曾经不是"可证：M50 随 0.14.1
   发版（升 `VERSION` → tag → 部署 gpt001）仍由 `release-version` skill 单独执行；本机 `:8088` 待宿主
   `make build` + `scripts/local-run.sh restart` 后生效（与 M54 同一条待办）
 
+
+## M56 供应商成本上限与复位（2026-09-17）
+
+设计：`docs/design/m56-provider-cost-cap.md`（§8 差异与实测已回填）；规格：[`docs/routing.md`](routing.md) §4.6、
+[`docs/api-responses.md`](api-responses.md)（503 `provider_cost_capped`）、[`docs/provider-ui.md`](provider-ui.md) §2 第 7 条、
+[`docs/mcp.md`](mcp.md)（后台可写字段示例小节 + §4.5 行为语义标准）。
+
+起因（用户原话）：「供应商成本要能设置上限，可以复位」。口径当场确认：① 按供应商累计**我们付给上游的成本**
+设上限 + 把累计复位（不是成本单价校验）；② 周期每供应商可选（不限/每天/每月）；③ 达到上限后**从路由候选中剔除**。
+
+- [x] 迁移 `0021_provider_cost_cap.sql`：`providers` 三列（`cost_limit_micros`/`cost_period`/`cost_window_start`）
+      + `usage_records(provider_id, created_at)` 索引
+- [x] `internal/domain/provider_cost.go`：`NormalizeCostPeriod`/`ValidCostPeriod`/`ProviderCostWindowStart`
+      （`max(周期起点, 手动复位时刻)`，UTC 零点/月初）/`ProviderCostExceeded`/`CostCapped`
+- [x] `internal/store`：三列读写（含 `costPeriodOrDefault` 单一拼写）、`ProviderCostsSince`（按相同起算点分组、
+      每组一条索引范围扫描、无记录补 0、空入参不发查询）；bootstrap merge 不重置上限（有单测）
+- [x] `internal/runtime/provider_cost.go`：`CostTracker`（5s 后台读数、只跟踪有上限的供应商、无上限零查询、
+      读失败 fail-open + 每分钟最多一条告警、边沿触发日志、`MarkReset` 精确归零、`Stats`/`Status`）；
+      `cmd/aigw` 在启动时 seed 一次再起 ticker，并 `router.SetCostGate(costTracker)`
+- [x] `internal/routing`：`CostGate` 接口 + `SetCostGate`（nil = 不筛选）、`filterRoute`/`buildPinned` 的
+      `cost_cap_reached` 原因；`noCandidatesError` 在"全部原因都是成本上限"时返回
+      `domain.ErrProviderCostCapped`（503 `provider_cost_capped`）
+- [x] `internal/httpapi`：`cost_limit_micros`/`cost_period`/`reset_cost` 字段与校验（负数与非法周期 400）、
+      首次启用自动起算、复位后 `MarkReset` 立即归零、`providerJSON` 三配置字段 + `attachCost` 的 `cost` 块、
+      `/stats` 的 `provider_cost` 块、三个 `aigw_provider_cost_*` 指标、审计记录成本三字段、
+      MCP 两个 provider 写入路由的说明与 body 形状（§4.5 标准）
+- [x] 控制台 `providers.js`：列表「成本(周期内/上限)」列（超限标红 `已超上限`）、详情 kv（上限/周期/本周期已用/
+      起算时刻）、行操作「复位成本」（带确认文案）、新建与编辑表单的上限/周期字段与复位勾选框
+- [x] `internal/httpapi` 端到端：超限 → 503；调高上限与复位**立即**恢复；有第二家时故障转移并核对计量行；
+      指标值；`/stats`；MCP 写入+读回+`admin_describe` 说明断言；管理面全生命周期（含"计量行未被改写"）
+- [x] 文档先行：设计文档 + 5 份规格文档 + README 进度段与文档表，均在编码前落盘并在对话中贴出确认
+- [x] 验收（自动化）：`make test` 干净、`make vet` 干净、`make ui-check` **22 个视图全绿**（新增 `cost` 视图 15 项断言）
+- [x] 实测（真实旧库副本 `data/aigw.db`）：21 个迁移应用、最后 21；既有供应商读回
+      `cost_limit_micros=0 / cost_period="none" / cost_window_start=NULL`（= 不限，行为与升级前一致）；
+      读数查询计划为 `SEARCH usage_records USING INDEX idx_usage_provider_time (provider_id=? AND created_at>?)`
+
+未做（另议）：按「供应商 × 模型」粒度的上限、按 NATIVE 币种累计（多币种相加是错的）、把读数做成账务凭证
+（它刻意是"最多滞后 5 秒的运营护栏"）、给刷新周期加配置项（`runtime.CostRefreshInterval` 是常量）。

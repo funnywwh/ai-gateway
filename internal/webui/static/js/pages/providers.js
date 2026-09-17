@@ -1,5 +1,6 @@
 import { api } from '../api.js';
 import { el, card, table, pagedTable, modal, toast, badge, jsonBlock, formatTime, confirmDialog, withBusy, modalHead, modalBody, modalActions } from '../ui.js';
+import { money, ledgerCurrency } from '../money.js';
 
 const KINDS = ['openai-chat', 'openai-responses', 'testecho'];
 const CONFIG_HINT = JSON.stringify({ base_url: 'https://api.example.com/v1' }, null, 2);
@@ -8,6 +9,22 @@ const CONFIG_HINT = JSON.stringify({ base_url: 'https://api.example.com/v1' }, n
 // guess whether the excess is refused or waits.
 const CAPACITY_HINT = '同时在途的上游调用数；0=不限。超出后请求排队等待（部署配置决定等待上限，默认 30 秒），'
   + '等待超时或队列已满时该请求换下一个候选，全部候选耗尽返回 429 provider_busy。探测/重启不占名额。'
+
+// The cost cap (M56) is a routing switch, not a display preference: reaching it takes the provider
+// out of the candidate list until the operator raises the limit or resets the accumulation. The
+// hints therefore say what the fields *do*, not only their units.
+const COST_PERIOD_OPTIONS = [
+  { value: 'none', label: '不限周期（累计自上次复位）' },
+  { value: 'daily', label: '每天（UTC 零点重新起算）' },
+  { value: 'monthly', label: '每月（UTC 月初重新起算）' },
+];
+function costLimitHint() {
+  return '该供应商累计成本上限（微' + ledgerCurrency() + '，0 = 不限）。达到上限后它不再被选中，'
+    + '请求自动换下一个候选；全部候选都超限时客户端拿到 503 provider_cost_capped。首次设置从现在起算，历史上的花费不会把它立刻判超限。';
+}
+const COST_PERIOD_HINT = '累计口径：不限 = 自上次复位（未复位过则从有记录以来）；每天/每月在 UTC 零点/月初自动重新起算。'
+  + '任何周期下都能「复位成本」。';
+const RESET_COST_HINT = '把起算点设为当前时刻：已用成本立即归零、该供应商立刻恢复被选中。只挪起算点，不修改也不删除任何计量数据。';
 
 // capacityText renders one provider's live gate. A provider with no ceiling has no gate at
 // all, which is not the same statement as "zero in flight", so it is shown as 不限.
@@ -34,6 +51,28 @@ function capacityCell(row) {
   });
 }
 
+// costCell renders one provider's cost cap (M56): the reading the router decides on, against the
+// limit the operator set. A provider without a limit says 不限 rather than "0 / 0" — the gateway
+// is not counting anything for it, and showing a number would suggest otherwise.
+function costCell(row) {
+  if (!row.cost_limit_micros) return el('span', { class: 'muted', text: '不限' });
+  const cost = row.cost || {};
+  const period = costPeriodLabel(row.cost_period);
+  const detail = ['周期：' + period,
+    '已用 ' + money(cost.used_micros || 0),
+    '上限 ' + money(row.cost_limit_micros),
+    cost.window_start ? '起算 ' + formatTime(cost.window_start) : null].filter(Boolean).join('；');
+  const cell = el('span', { title: detail },
+    [el('span', { text: money(cost.used_micros || 0) + ' / ' + money(row.cost_limit_micros) })]);
+  if (cost.exceeded) cell.append(' ', badge('已超上限', 'danger'));
+  return cell;
+}
+
+function costPeriodLabel(value) {
+  const found = COST_PERIOD_OPTIONS.find((opt) => opt.value === (value || 'none'));
+  return found ? found.label : (value || '不限周期');
+}
+
 export async function render({ page, actions, session }) {
   const readonly = session.role !== 'admin';
   const create = el('button', { class: 'btn btn-primary', text: '新建供应商', disabled: readonly });
@@ -49,6 +88,7 @@ export async function render({ page, actions, session }) {
       { key: 'priority', label: '优先级' },
       { key: 'weight', label: '权重' },
       { key: 'capacity', label: '在途/排队', render: (row) => capacityCell(row) },
+      { key: 'cost', label: '成本(周期内/上限)', render: (row) => costCell(row) },
       { key: 'has_credentials', label: '凭据', render: (row) => row.has_credentials
         ? badge((row.credential_keys || []).join(', ') || '已配置', 'ok') : badge('未配置', 'warn') },
       { key: 'last_error', label: '最近错误', render: (row) => row.last_error ? el('span', { class: 'muted', text: row.last_error }) : '—' },
@@ -57,6 +97,11 @@ export async function render({ page, actions, session }) {
     rowActions: (row) => [
       el('button', { class: 'btn', text: '详情', onclick: () => detail(row, () => view.refresh(), readonly) }),
       el('button', { class: 'btn', text: '探测', onclick: (ev) => probe(row, ev.currentTarget, () => view.refresh()) }),
+      // 复位 is what the operator reaches for after raising a budget or starting a new period, so
+      // it sits next to the row rather than inside the edit form.
+      row.cost_limit_micros && !readonly
+        ? el('button', { class: 'btn', text: '复位成本', onclick: () => resetCost(row, () => view.refresh()) })
+        : null,
       readonly ? null : el('button', { class: 'btn btn-danger', text: '删除', onclick: () => remove(row, () => view.refresh()) }),
     ].filter(Boolean),
     load: ({ limit, offset }) => api.get('/providers', { limit, offset }),
@@ -64,7 +109,9 @@ export async function render({ page, actions, session }) {
   });
   page.append(card('模型供应商', view.node, [
     el('span', { class: 'muted', text: '内建类型开箱可用；插件类型填写 plugin:<名称>，凭据加密存储且永不回显。' }),
-    el('span', { class: 'muted', text: '每个类型的全部配置字段与密钥填法见「内建类型说明」或详情页的「配置说明」。' })]));
+    el('span', { class: 'muted', text: '每个类型的全部配置字段与密钥填法见「内建类型说明」或详情页的「配置说明」。' }),
+    el('span', { class: 'muted', text: '「成本(周期内/上限)」是路由判定用的同一个数（每 5 秒按计量表重读）：达到上限后该供应商不再被选中，' +
+      '直到调高上限或点「复位成本」。' })]));
 
   refresh.addEventListener('click', () => view.refresh());
   create.addEventListener('click', () => createProvider({}, () => view.refresh()));
@@ -85,6 +132,10 @@ async function createProvider(preset, reload) {
       { name: 'priority', label: '优先级（越小越先）', type: 'number', value: 100 },
       { name: 'weight', label: '权重', type: 'number', value: 100 },
       { name: 'max_inflight', label: '最大并发（0=不限）', type: 'number', value: 0, hint: CAPACITY_HINT },
+      { name: 'cost_limit_micros', label: '成本上限（微' + ledgerCurrency() + '，0=不限）', type: 'number', value: 0,
+        hint: costLimitHint() },
+      { name: 'cost_period', label: '成本统计周期', type: 'select', options: COST_PERIOD_OPTIONS, value: 'none',
+        hint: COST_PERIOD_HINT },
       { name: 'config', label: '配置（JSON，字段说明见详情页「配置说明」）', type: 'textarea', json: true,
         value: preset.config || CONFIG_HINT },
       { name: 'credentials', label: '凭据（JSON，只写不回显）', type: 'textarea', json: true, value: '{\n  "api_key": ""\n}' },
@@ -118,6 +169,13 @@ async function detail(row, reload, readonly) {
       kv('凭据键', (row.credential_keys || []).join(', ') || '无'),
       kv('冷却至', formatTime(row.cooldown_until)),
       kv('在途/排队', capacityText(row.capacity)),
+      // The cap is shown with the number the router decided on: a provider that is not being
+      // chosen has to be explainable from this page, and "已用 ≥ 上限" is that explanation.
+      kv('成本上限', row.cost_limit_micros ? money(row.cost_limit_micros) + '（' + costPeriodLabel(row.cost_period) + '）' : '不限'),
+      kv('本周期已用', row.cost_limit_micros
+        ? money((row.cost || {}).used_micros || 0) + ((row.cost || {}).exceeded ? '（已超上限，当前不会被选中）' : '')
+        : '—'),
+      kv('成本起算时刻', row.cost_limit_micros ? formatTime((row.cost || {}).window_start || row.cost_window_start) : '—'),
     ]),
     // The mapping decides whether the routes pointing here can be used at all, so it
     // comes before the configuration documentation: a model and a route without this
@@ -457,10 +515,15 @@ async function edit(row, reload) {
       { name: 'priority', label: '优先级', type: 'number', value: row.priority },
       { name: 'weight', label: '权重', type: 'number', value: row.weight },
       { name: 'max_inflight', label: '最大并发（0=不限）', type: 'number', value: row.max_inflight, hint: CAPACITY_HINT },
+      { name: 'cost_limit_micros', label: '成本上限（微' + ledgerCurrency() + '，0=不限）', type: 'number',
+        value: row.cost_limit_micros, hint: costLimitHint() },
+      { name: 'cost_period', label: '成本统计周期', type: 'select', options: COST_PERIOD_OPTIONS,
+        value: row.cost_period || 'none', hint: COST_PERIOD_HINT },
       { name: 'degradation', label: '能力降级策略', type: 'select', options: ['', 'none', 'fail_fast', 'best_effort'], value: row.degradation },
       { name: 'config', label: '配置（JSON，字段说明见详情页「配置说明」）', type: 'textarea', json: true, value: row.config },
       { name: 'credentials', label: '凭据（JSON，留空=保持不变，{} = 清空）', type: 'textarea', json: true, value: '' },
       { name: 'reset_cooldown', label: '清除冷却', type: 'checkbox' },
+      { name: 'reset_cost', label: '复位成本累计', type: 'checkbox', hint: RESET_COST_HINT },
     ],
     onSubmit: async (values) => {
       const payload = { ...values };
@@ -472,6 +535,27 @@ async function edit(row, reload) {
     },
   });
   return result;
+}
+
+// resetCost is 复位 made visible: the operator raises the cap or starts a new period, and the
+// provider has to come back without them wondering what else has to be cleared. The confirm
+// dialog says what a reset does and does not touch, because "成本复位" could plausibly mean
+// "throw the metering rows away" — which it deliberately does not.
+async function resetCost(row, reload) {
+  const cost = row.cost || {};
+  const ok = await confirmDialog('复位成本累计',
+    '把 ' + row.name + ' 的成本统计起算点设为当前时刻：已用 ' + money(cost.used_micros || 0)
+    + ' 立即归零，该供应商立刻恢复被选中。\n\n只挪起算点，不修改也不删除任何计量数据'
+    + '（历史成本仍可在请求日志与账单里查到）。');
+  if (!ok) return;
+  try {
+    const updated = await api.patch('/providers/' + row.id, { reset_cost: true });
+    const used = (updated.cost || {}).used_micros || 0;
+    toast('已复位：本周期已用 ' + money(used), 'ok');
+  } catch (err) {
+    toast(api.errorMessage(err), 'error');
+  }
+  if (reload) await reload();
 }
 
 // probe exercises one provider. A health probe is a real upstream request (the codex

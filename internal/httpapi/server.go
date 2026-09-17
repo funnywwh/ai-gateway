@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/pprof"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -137,6 +138,11 @@ type Deps struct {
 	// Capacity reports the provider concurrency gates (in-flight slots, waiting queues and
 	// the queue policy). A nil port omits the /stats block and the per-provider field.
 	Capacity Capacity
+	// ProviderCost reports the per-provider cost cap readings (M56): what each capped upstream
+	// has spent in its current window. A nil port omits the /stats block and the per-provider
+	// `cost` field — and with it any cost-based filtering, since the router's gate is wired to
+	// the same tracker.
+	ProviderCost ProviderCost
 	// ReloadHooks swaps the in-memory hook set after a hook write.
 	ReloadHooks func(ctx context.Context) error
 	// FX is the live currency table (ledger currency + rates). A nil store means
@@ -716,6 +722,35 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprintf(w, "# HELP aigw_provider_capacity_queue_wait_seconds How long one attempt may wait for a provider concurrency slot (0 disables queueing)%c", lf)
 		_, _ = fmt.Fprintf(w, "# TYPE aigw_provider_capacity_queue_wait_seconds gauge%c", lf)
 		_, _ = fmt.Fprintf(w, "aigw_provider_capacity_queue_wait_seconds %d%c", policy.QueueWaitS, lf)
+	}
+	// Provider cost caps (M56): the reading the router decides on, in ledger micro-units. It is
+	// re-derived from the metering table every refresh_s, so it is a guard rail with a few
+	// seconds of lag rather than a billed total — the console shows the same number.
+	if cost := s.costStats(); len(cost) > 0 {
+		status := runtime.CostStatus{}
+		if s.deps.ProviderCost != nil {
+			status = s.deps.ProviderCost.Status()
+		}
+		for _, gauge := range []struct {
+			name  string
+			help  string
+			value func(runtime.ProviderCostStat) int64
+		}{
+			{"aigw_provider_cost_used_micros", "Ledger micro-units this provider has cost since its window start (refreshed every " + strconv.Itoa(status.IntervalS) + "s)", func(st runtime.ProviderCostStat) int64 { return st.UsedMicros }},
+			{"aigw_provider_cost_limit_micros", "Configured cost cap per provider in ledger micro-units (0 means unlimited)", func(st runtime.ProviderCostStat) int64 { return st.LimitMicros }},
+			{"aigw_provider_cost_exceeded", "1 when the provider reached its cost cap and is excluded from routing", func(st runtime.ProviderCostStat) int64 {
+				if st.Exceeded {
+					return 1
+				}
+				return 0
+			}},
+		} {
+			_, _ = fmt.Fprintf(w, "# HELP %s %s%c", gauge.name, gauge.help, lf)
+			_, _ = fmt.Fprintf(w, "# TYPE %s gauge%c", gauge.name, lf)
+			for id, stat := range cost {
+				_, _ = fmt.Fprintf(w, "%s{target=%q} %d%c", gauge.name, runtime.ProviderKey(id), gauge.value(stat), lf)
+			}
+		}
 	}
 	_ = balances
 }

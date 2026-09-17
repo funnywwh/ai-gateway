@@ -1137,6 +1137,28 @@ const maxInflightDesc = "供应商最大并发：该供应商**同时在途的�
 	"全部候选耗尽返回 HTTP 429 provider_busy（带 Retry-After）。探测/重启等后台动作不占名额。" +
 	"写完后 admin_get_provider / admin_list_providers 的 capacity 字段给出实时 limit/inflight/waiting（读回只需 admin_read）"
 
+// costLimitDesc / costPeriodDesc / resetCostDesc document the provider cost cap (M56) on both
+// the create and the update body. They are shared constants for the same reason maxInflightDesc
+// is: a model reads one of the two endpoints and writes the value, and the *behaviour* (the
+// provider drops out of routing, then 503 provider_cost_capped) is what makes the field usable
+// rather than merely writable.
+const costLimitDesc = "供应商成本上限：该供应商**累计让我们花了多少钱**的上限，单位 = **账本币种微单位**" +
+	"（1 单位 = 1000000），0 = 不限（默认，也是既有供应商的状态）。计入的是计量表按该供应商的成本" +
+	"（含失败尝试：失败一样花钱），与请求日志「成本」列、发票同源。" +
+	"**达到上限后该供应商从路由候选中被剔除**（原因 cost_cap_reached，见 admin_explain_router），" +
+	"请求自动换下一个候选；**全部候选都超限**时客户端拿到 HTTP 503 provider_cost_capped" +
+	"（不是上游故障，重试不会变好）。上限**调高立即生效**；调低/复位最多滞后约 5 秒（读数由进程内后台" +
+	"按计量表周期重读）。**首次**把上限从 0 改为正数时起算点自动设为当前时刻，不会拿历史成本把它立刻判超限。" +
+	"写完后 admin_get_provider / admin_list_providers 的 cost 字段给出 limit_micros/used_micros/exceeded" +
+	"（读回只需 admin_read）"
+const costPeriodDesc = "成本上限的统计周期（配合 cost_limit_micros 使用）：none = 不限周期，" +
+	"累计自上次复位（未复位过则从有记录以来，默认）；daily = 每天 UTC 零点自动重新起算；" +
+	"monthly = 每月 1 日 UTC 零点自动重新起算。任何周期下都可以用 reset_cost 手动提前复位"
+const resetCostDesc = "是否复位成本累计（成本上限，M56）：true = 把本供应商的统计**起算点设为当前时刻**，" +
+	"于是已用成本立即变为 0、该供应商立刻回到路由候选中。**只挪起算点，不修改也不删除任何计量数据**" +
+	"（历史成本仍可在请求日志/账单里查到）。周期为 daily/monthly 时，下一次周期起点会自动越过这次复位，" +
+	"无需再清理"
+
 // providerAdminRoutes covers provider instances, their upstream models and the
 // out-of-band operations (probe, restart, actions, logs).
 func (s *Server) providerAdminRoutes() []adminRoute {
@@ -1173,12 +1195,16 @@ func (s *Server) providerAdminRoutes() []adminRoute {
 				"max_inflight":      prop("integer", maxInflightDesc),
 				"degradation":       prop("string", "能力缺失时的降级策略：none/strip/fail_fast/best_effort"),
 				"reset_cooldown":    prop("boolean", "写完后是否清掉冷却"),
+				"cost_limit_micros": prop("integer", costLimitDesc),
+				"cost_period": map[string]any{"type": "string",
+					"enum": []any{"none", "daily", "monthly"}, "description": costPeriodDesc},
+				"reset_cost": prop("boolean", resetCostDesc),
 			}, "name"),
 		},
 		{
 			Method: "GET", Path: "/admin/api/v1/providers/{id}", Handler: s.handleAdminGetProvider,
 			Name: "admin_get_provider", Group: groupProviders, Role: roleViewer,
-			Summary: "单个供应商详情（配置、字段说明、已配置的凭据字段名、健康与最近错误、实时并发 capacity）",
+			Summary: "单个供应商详情（配置、字段说明、已配置的凭据字段名、健康与最近错误、实时并发 capacity、成本上限读数 cost）",
 			Params:  []adminField{pathParam("id", "供应商数字 id")},
 		},
 		{
@@ -1188,19 +1214,23 @@ func (s *Server) providerAdminRoutes() []adminRoute {
 			Dangerous: true, ConfirmReason: "可覆盖供应商凭据与配置，并会重启该插件进程",
 			Params: []adminField{pathParam("id", "供应商数字 id")},
 			RawBody: objectSchema(map[string]any{
-				"name":           prop("string", "改名（一般不用）"),
-				"kind":           prop("string", "类型"),
-				"display_name":   prop("string", "展示名"),
-				"state_dir":      prop("string", "插件状态目录"),
-				"config":         providerConfigSchema(),
-				"credentials":    providerCredentialsSchema(),
-				"enabled":        prop("boolean", "是否启用"),
-				"draining":       prop("boolean", "是否排空"),
-				"priority":       prop("integer", "优先级"),
-				"weight":         prop("integer", "同层权重"),
-				"max_inflight":   prop("integer", maxInflightDesc),
-				"degradation":    prop("string", "降级策略：none/strip/fail_fast/best_effort"),
-				"reset_cooldown": prop("boolean", "写完后是否清掉冷却"),
+				"name":              prop("string", "改名（一般不用）"),
+				"kind":              prop("string", "类型"),
+				"display_name":      prop("string", "展示名"),
+				"state_dir":         prop("string", "插件状态目录"),
+				"config":            providerConfigSchema(),
+				"credentials":       providerCredentialsSchema(),
+				"enabled":           prop("boolean", "是否启用"),
+				"draining":          prop("boolean", "是否排空"),
+				"priority":          prop("integer", "优先级"),
+				"weight":            prop("integer", "同层权重"),
+				"max_inflight":      prop("integer", maxInflightDesc),
+				"degradation":       prop("string", "降级策略：none/strip/fail_fast/best_effort"),
+				"reset_cooldown":    prop("boolean", "写完后是否清掉冷却"),
+				"cost_limit_micros": prop("integer", costLimitDesc),
+				"cost_period": map[string]any{"type": "string",
+					"enum": []any{"none", "daily", "monthly"}, "description": costPeriodDesc},
+				"reset_cost": prop("boolean", resetCostDesc),
 			}),
 		},
 		{

@@ -162,7 +162,13 @@ func providerJSON(p *domain.Provider, credentialKeys []string) map[string]any {
 		"timeout_overrides": jsonOrNil(p.TimeoutOverrides),
 		"discovered":        jsonOrNil(p.DiscoveredJSON), "health": jsonOrNil(p.HealthJSON),
 		"last_error": p.LastError, "cooldown_until": timeOrNil(p.CooldownUntil),
-		"has_credentials": len(p.CredentialsEnc) > 0, "credential_keys": credentialKeys,
+		// The cost cap's configuration is always reported (a zero limit is a real answer:
+		// "unlimited"), while its live reading is attached separately, and only when there is a
+		// cap (see attachCost).
+		"cost_limit_micros": p.CostLimitMicros,
+		"cost_period":       costPeriodJSON(p.CostPeriod),
+		"cost_window_start": timeOrNil(p.CostWindowStart),
+		"has_credentials":   len(p.CredentialsEnc) > 0, "credential_keys": credentialKeys,
 		"updated_at": p.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 }

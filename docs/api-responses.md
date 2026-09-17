@@ -222,4 +222,5 @@ response.completed      (含完整 response 与 usage)
 | 429 | `rate_limit_error` / `rate_limit_exceeded`（带 `Retry-After` 与 `x-ratelimit-*`） |
 | 429 | `rate_limit_error` / `provider_busy`（**供应商并发上限**：排队超时或队列已满；带 `Retry-After`，**不带** `x-ratelimit-*`——它与你的 Key/标签配额无关，见 `docs/routing.md` §4.5） |
 | 402 | `rate_limit_error` / `billing_hard_limit_reached`（余额/信用额度不足或账户停用） |
+| 503 | `api_error` / `provider_cost_capped`（**供应商成本上限**：该模型的所有候选都达到了 `providers.cost_limit_micros`；不是上游故障，重试不会变好——需要运营者调高上限或复位，见 `docs/routing.md` §4.6） |
 | 502/504 | `api_error` / `upstream_error`、`upstream_timeout` |

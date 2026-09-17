@@ -112,6 +112,8 @@ type adminFixture struct {
 	hookReloads int
 	fxReloads   int
 	fx          *pricing.FXStore
+	// providerCost is the tracker this fixture wired (M56); tests refresh it themselves.
+	providerCost *runtime.CostTracker
 }
 
 func newAdminFixture(t *testing.T) *adminFixture {
@@ -213,6 +215,12 @@ func newAdminFixtureWithout(t *testing.T, unwired string) *adminFixture {
 	}, db, nil)
 
 	verifier := apikey.New(db, apikey.DefaultConfig())
+	// The provider cost cap is wired the way the composition root wires it (M56): one tracker
+	// reads the metering table, the router drops providers over their limit, and these endpoints
+	// read the same numbers back.
+	providerCost := runtime.NewCostTracker(db, reg, nil)
+	router.SetCostGate(providerCost)
+	fixture.providerCost = providerCost
 	deps := Deps{
 		Config:         &cfg,
 		FX:             fxStore,
@@ -221,6 +229,7 @@ func newAdminFixtureWithout(t *testing.T, unwired string) *adminFixture {
 		Router:         router,
 		Dispatcher:     dispatcher,
 		Capacity:       dispatcher,
+		ProviderCost:   providerCost,
 		Verifier:       verifier,
 		InvalidateAll:  verifier.InvalidateAll,
 		Limiter:        quota.New(4),

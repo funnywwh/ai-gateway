@@ -40,6 +40,53 @@ type providerBody struct {
 	MaxInflight      *int            `json:"max_inflight"`
 	Degradation      *string         `json:"degradation"`
 	ResetCooldown    bool            `json:"reset_cooldown"`
+
+	// Provider cost cap (M56).
+	CostLimitMicros *int64  `json:"cost_limit_micros"`
+	CostPeriod      *string `json:"cost_period"`
+	ResetCost       bool    `json:"reset_cost"`
+}
+
+// applyProviderCost folds the cost cap fields (M56) into the provider record.
+//
+// Two of its rules are policy rather than validation, and both exist to make the feature
+// predictable:
+//
+//   - **first enable anchors the window at now**: a provider that has been running for weeks
+//     would otherwise be instantly over a freshly configured cap, so "set a limit" would look
+//     like "take this provider down". An operator who wants the historical spend to count can
+//     reset to a chosen instant later; the console says so.
+//   - **reset moves the window start, nothing else**: no metering row is rewritten or deleted,
+//     so the accumulated cost before the reset simply stops counting and the audit trail keeps
+//     saying exactly what was spent.
+func applyProviderCost(p *domain.Provider, body *providerBody, creating bool) error {
+	if body.CostLimitMicros != nil {
+		if *body.CostLimitMicros < 0 {
+			return domain.ErrInvalidRequest("cost_limit_micros must not be negative (0 means unlimited)")
+		}
+		wasCapped := p.CostCapped()
+		p.CostLimitMicros = *body.CostLimitMicros
+		if !creating && !wasCapped && p.CostCapped() && p.CostWindowStart == nil {
+			now := time.Now().UTC()
+			p.CostWindowStart = &now
+		}
+	} else if creating {
+		p.CostLimitMicros = 0
+	}
+	if body.CostPeriod != nil {
+		period, err := domain.NormalizeCostPeriod(*body.CostPeriod)
+		if err != nil {
+			return domain.ErrInvalidRequest(err.Error())
+		}
+		p.CostPeriod = period
+	} else if creating && p.CostPeriod == "" {
+		p.CostPeriod = domain.CostPeriodNone
+	}
+	if body.ResetCost {
+		now := time.Now().UTC()
+		p.CostWindowStart = &now
+	}
+	return nil
 }
 
 func (s *Server) credentialKeys(p *domain.Provider) []string {
@@ -150,6 +197,9 @@ func (s *Server) applyProviderBody(p *domain.Provider, body *providerBody, creat
 	if body.ResetCooldown {
 		p.CooldownUntil = nil
 	}
+	if err := applyProviderCost(p, body, creating); err != nil {
+		return false, nil, err
+	}
 
 	if len(body.Credentials) > 0 {
 		trimmed := strings.TrimSpace(string(body.Credentials))
@@ -212,9 +262,12 @@ func (s *Server) handleAdminListProviders(w http.ResponseWriter, r *http.Request
 	}
 	out := make([]map[string]any, 0, len(list))
 	capacity := s.capacityStats()
+	costs := s.costStats()
+	currency := s.ledgerCurrency()
 	for _, p := range list {
 		row := providerJSON(p, s.credentialKeys(p))
 		attachCapacity(row, p.ID, capacity)
+		attachCost(row, p, costs, currency)
 		out = append(out, row)
 	}
 	page, err := pageConfig.params(r)
@@ -246,6 +299,7 @@ func (s *Server) handleAdminGetProvider(w http.ResponseWriter, r *http.Request) 
 	}
 	payload := providerDetailJSON(p, s.credentialKeys(p))
 	attachCapacity(payload, p.ID, s.capacityStats())
+	attachCost(payload, p, s.costStats(), s.ledgerCurrency())
 	writeJSON(w, http.StatusOK, payload)
 }
 
@@ -315,7 +369,8 @@ func (s *Server) handleAdminCreateProvider(w http.ResponseWriter, r *http.Reques
 	}
 	s.audit(r.Context(), actor.Username, action, "provider", strconv.FormatInt(id, 10), map[string]any{
 		"name": p.Name, "kind": p.Kind, "enabled": p.Enabled,
-		"credentials_set": len(p.CredentialsEnc) > 0,
+		"credentials_set":   len(p.CredentialsEnc) > 0,
+		"cost_limit_micros": p.CostLimitMicros, "cost_period": p.CostPeriod,
 	}, "ok")
 	s.reload(r.Context(), "provider "+action, false)
 	if restart && !created {
@@ -323,6 +378,7 @@ func (s *Server) handleAdminCreateProvider(w http.ResponseWriter, r *http.Reques
 	}
 	createdPayload := providerDetailJSON(p, s.credentialKeys(p))
 	attachCapacity(createdPayload, p.ID, s.capacityStats())
+	attachCost(createdPayload, p, s.costStats(), s.ledgerCurrency())
 	writeJSON(w, status, createdPayload)
 }
 
@@ -369,13 +425,21 @@ func (s *Server) handleAdminPatchProvider(w http.ResponseWriter, r *http.Request
 	s.audit(r.Context(), actor.Username, "update", "provider", strconv.FormatInt(id, 10), map[string]any{
 		"enabled": p.Enabled, "draining": p.Draining, "priority": p.Priority, "weight": p.Weight,
 		"config_version": p.ConfigVersion, "credentials_set": len(p.CredentialsEnc) > 0,
+		"cost_limit_micros": p.CostLimitMicros, "cost_period": p.CostPeriod, "cost_reset": body.ResetCost,
 	}, "ok")
 	s.reload(r.Context(), "provider updated", false)
 	if restart {
 		s.restartProvider(p)
 	}
+	// The reset is already stored (the window start moved to now), so the tracker can drop its
+	// reading for this provider right away: waiting for the next refresh would show the
+	// operator the old number for up to one interval after they clicked 复位.
+	if body.ResetCost && s.deps.ProviderCost != nil && p.CostWindowStart != nil {
+		s.deps.ProviderCost.MarkReset(p.ID, *p.CostWindowStart)
+	}
 	updated := providerDetailJSON(p, s.credentialKeys(p))
 	attachCapacity(updated, p.ID, s.capacityStats())
+	attachCost(updated, p, s.costStats(), s.ledgerCurrency())
 	writeJSON(w, http.StatusOK, updated)
 }
 

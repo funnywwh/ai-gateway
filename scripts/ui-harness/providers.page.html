@@ -28,6 +28,20 @@ window.fetch = async (url) => {
   // The capture comes from a gateway with no provider ceiling set, so the live gate of a
   // *limited* provider (M44) is synthesized here: it is what the row looks like once an
   // operator sets max_inflight and requests queue behind it.
+  //
+  // The cost cap (M56) is synthesized for the same reason — the capture predates it — and it is
+  // the state the `cost` view exists for: a provider that spent its budget, so its row must read
+  // 「已超上限」 and offer 「复位成本」.
+  const withCostCap = (row) => {
+    row.cost_limit_micros = 50000000;
+    row.cost_period = 'monthly';
+    row.cost_window_start = '2026-09-01T00:00:00Z';
+    row.cost = {
+      limit_micros: 50000000, used_micros: 61200000, period: 'monthly',
+      window_start: '2026-09-01T00:00:00Z', exceeded: true, currency: 'USD',
+    };
+    return row;
+  };
   if (path === '/providers') {
     body = JSON.parse(JSON.stringify(body));
     const limited = (body.data || []).find((row) => row.name === 'deepseek');
@@ -37,8 +51,10 @@ window.fetch = async (url) => {
         limit: 2, inflight: 1, waiting: 3, admitted: 12,
         queue_full: 0, timed_out: 1, cancelled: 0, wait_total_ms: 3450,
       };
+      withCostCap(limited);
     }
   }
+  if (path === '/providers/3') body = withCostCap(JSON.parse(JSON.stringify(body)));
   // A fixture of null stands for a 200 with an empty body, which api.js parses to null.
   if (body === null) return { ok: true, status: 200, text: async () => '' };
   return { ok: true, status: 200, text: async () => JSON.stringify(body) };
@@ -65,6 +81,7 @@ function report(data) {
 </script>
 <script type="module">
 import { render } from '/js/pages/providers.js';
+import { initCurrency } from '/js/money.js';
 
 const view = location.hash.replace('#', '') || 'docs';
 const checks = {};
@@ -299,6 +316,48 @@ try {
     checks.formHint = form.includes('排队') && form.includes('provider_busy');
     const field = document.querySelector('input[name="max_inflight"]');
     checks.formValue = !!field && field.value === '2';
+  }
+
+  // The provider cost cap (M56). Three things have to hold at once, and each of them failed in a
+  // different way in the M44 review of the neighbouring feature: the column exists and shows the
+  // number the router used, a provider over its cap *says so* (otherwise "why is this upstream
+  // not being used" has no answer in the console), and 复位 is a visible button rather than a
+  // field the operator has to interpret.
+  if (view === 'cost') {
+    try { await initCurrency(); } catch (err) { /* money() falls back to the ledger currency */ }
+    checks.listColumn = pageText().includes('成本(周期内/上限)');
+    checks.listHint = pageText().includes('复位成本');
+    const row = rowFor('deepseek');
+    checks.cellText = !!row && row.textContent.includes('61.2')
+      && row.textContent.includes('已超上限');
+    checks.resetButton = !!row
+      && [...row.querySelectorAll('button')].some((b) => b.textContent.trim() === '复位成本');
+    // An uncapped provider must not pretend to be counting: 不限, no badge, no reset button.
+    const plain = rowFor('replay-local');
+    checks.uncappedRow = !!plain && plain.textContent.includes('不限');
+    checks.uncappedRowHasNoReset = !!plain
+      && ![...plain.querySelectorAll('button')].some((b) => b.textContent.trim() === '复位成本');
+
+    if (row) {
+      [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === '详情').click();
+      await settle();
+    }
+    const detail = modalText();
+    checks.detailRow = detail.includes('成本上限') && detail.includes('本周期已用')
+      && detail.includes('成本起算时刻') && detail.includes('已超上限');
+
+    const editBtn = find('编辑');
+    checks.editButton = !!editBtn;
+    if (editBtn) { editBtn.click(); await settle(); }
+    const form = modalText();
+    checks.formLabel = form.includes('成本上限（微');
+    checks.formHint = form.includes('provider_cost_capped') && form.includes('首次');
+    checks.resetHint = form.includes('不修改也不删除任何计量数据');
+    const limit = document.querySelector('input[name="cost_limit_micros"]');
+    checks.formValue = !!limit && limit.value === '50000000';
+    const period = document.querySelector('select[name="cost_period"]');
+    checks.periodOptions = !!period && period.options.length === 3 && period.value === 'monthly';
+    checks.resetCheckbox = !!document.querySelector('input[name="reset_cost"]');
   }
 
   const flags = Object.entries(checks).filter(([, v]) => typeof v === 'boolean');

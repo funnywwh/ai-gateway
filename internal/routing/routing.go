@@ -33,14 +33,31 @@ type Config struct {
 	AffinityMaxEntries int
 }
 
+// CostGate reports whether a provider has spent its configured cost cap (M56). A nil gate
+// means this deployment does not enforce cost caps, which is the default wiring and what keeps
+// the filter out of the way of tests.
+//
+// It is an interface rather than a direct dependency because the implementation reads the
+// metering table, and `internal/routing` plans against the in-memory snapshot only
+// (internal/arch/layering_test.go forbids importing the store from here).
+type CostGate interface {
+	Exceeded(p *domain.Provider, now time.Time) bool
+}
+
 // Router computes candidate lists.
 type Router struct {
-	cfg Config
-	reg *registry.Registry
-	bal *balancer.State
-	mm  *modelmap.Resolver
-	aff *affinityStore
+	cfg   Config
+	reg   *registry.Registry
+	bal   *balancer.State
+	mm    *modelmap.Resolver
+	aff   *affinityStore
+	costs CostGate
 }
+
+// SetCostGate wires the provider cost cap (M56). It is a setter rather than another New
+// parameter because the tracker is built over the same registry, and a nil gate is the correct
+// wiring for every deployment (and test) that does not cap provider spend.
+func (r *Router) SetCostGate(g CostGate) { r.costs = g }
 
 // New builds a router over the given registry and balancer state.
 func New(cfg Config, reg *registry.Registry, state *balancer.State) *Router {
@@ -479,6 +496,12 @@ func (r *Router) filterRoute(
 	if allowed, _ := r.bal.Allow(routeKey(route.ID), now); !allowed {
 		return "circuit_open"
 	}
+	// The provider has spent what the operator allowed it to spend (M56). It is checked with
+	// the other availability filters rather than at dispatch time, so the request moves on to
+	// the next candidate instead of paying for a doomed attempt.
+	if r.costs != nil && r.costs.Exceeded(provider, now) {
+		return "cost_cap_reached"
+	}
 	if pm := snap.ProviderModel(provider.ID, resolved.Canonical); pm == nil || !pm.Enabled {
 		return "not_mapped"
 	}
@@ -514,6 +537,11 @@ func (r *Router) buildPinned(
 	if provider.CooldownUntil != nil && provider.CooldownUntil.After(now) {
 		return nil, "cooldown_until=" + provider.CooldownUntil.UTC().Format(time.RFC3339)
 	}
+	// A pinned provider is a client/operator statement about *which* upstream to use, not an
+	// authorization to spend past the cap this deployment put on it (M56).
+	if r.costs != nil && r.costs.Exceeded(provider, now) {
+		return nil, "cost_cap_reached"
+	}
 	pm := snap.ProviderModel(provider.ID, resolved.Canonical)
 	if pm == nil || !pm.Enabled {
 		return nil, "not_mapped"
@@ -546,6 +574,7 @@ func (r *Router) buildPinned(
 func (r *Router) noCandidatesError(res *Result) error {
 	var notGranted, capability bool
 	var firstCapability string
+	capped := len(res.Excluded) > 0
 	for _, e := range res.Excluded {
 		switch {
 		case e.Reason == "not_granted":
@@ -555,6 +584,9 @@ func (r *Router) noCandidatesError(res *Result) error {
 			if firstCapability == "" {
 				firstCapability = strings.TrimPrefix(e.Reason, "missing_capability:")
 			}
+		}
+		if e.Reason != "cost_cap_reached" {
+			capped = false
 		}
 	}
 	model := ""
@@ -572,6 +604,13 @@ func (r *Router) noCandidatesError(res *Result) error {
 	}
 	if notGranted {
 		return domain.ErrForbidden("model or provider not allowed for this API key: " + model)
+	}
+	// Every candidate was dropped for the same operational reason, so report that reason
+	// instead of the generic "no available provider": an operator reading a 502 goes looking
+	// at the upstreams, while a spent budget is a deployment fact (M56).
+	if capped {
+		return domain.ErrProviderCostCapped("every provider for model " + model +
+			" has reached its cost cap; raise providers.cost_limit_micros or reset the accumulated cost")
 	}
 	return domain.ErrUpstream(502, "no available provider for model "+model)
 }

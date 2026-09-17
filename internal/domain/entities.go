@@ -64,8 +64,16 @@ type Provider struct {
 	Degradation      string
 	CooldownUntil    *time.Time
 	Draining         bool
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	// CostLimitMicros caps what this upstream may cost us before the router stops
+	// choosing it (M56): 0 = unlimited, which is the default. CostPeriod decides when
+	// the accumulation restarts on its own, and CostWindowStart is the last manual
+	// reset (nil = never) — a reset only moves that instant forward, so no metering
+	// row is ever rewritten. See docs/design/m56-provider-cost-cap.md.
+	CostLimitMicros int64
+	CostPeriod      string
+	CostWindowStart *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // ProviderModel maps a public model name to an upstream model name for one provider.

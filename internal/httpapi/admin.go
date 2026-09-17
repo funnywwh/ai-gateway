@@ -1144,6 +1144,11 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 	if capacity := s.capacityBlock(); capacity != nil {
 		payload["provider_capacity"] = capacity
 	}
+	// Provider cost caps (M56): the reader's freshness first, then every capped provider's
+	// reading. Omitted for the same reason as the capacity block above.
+	if cost := s.costBlock(); cost != nil {
+		payload["provider_cost"] = cost
+	}
 	if s.deps.KeyCacheSize != nil {
 		payload["key_cache_entries"] = s.deps.KeyCacheSize()
 	}
