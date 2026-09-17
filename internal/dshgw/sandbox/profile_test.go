@@ -1,0 +1,311 @@
+package sandbox
+
+import (
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// profileFixture builds a deployment layout under a temp dir that mimics the
+// real host: a node installation under <root>/dsh/node, a release under
+// <root>/dsh/releases/v1 with <root>/dsh/current pointing at it, tenant roots
+// under <root>/srv and <root>/state/tenants, and per-tenant config under
+// <root>/etc/dshgw/tenants.
+type profileFixture struct {
+	root   string
+	rt     Runtime
+	alice  Tenant
+	tenant string
+}
+
+func newProfileFixture(t *testing.T) profileFixture {
+	t.Helper()
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, "dsh/node/bin"), 0o755)
+	mustWrite(t, filepath.Join(root, "dsh/node/bin/node"), "#!/bin/sh\n", 0o755)
+	mustMkdir(t, filepath.Join(root, "dsh/releases/v1/lib"), 0o755)
+	mustWrite(t, filepath.Join(root, "dsh/releases/v1/lib/bin.js"), "// dsh\n", 0o644)
+	mustSymlink(t, filepath.Join(root, "dsh/releases/v1"), filepath.Join(root, "dsh/current"))
+	mustMkdir(t, filepath.Join(root, "srv/alice/work"), 0o700)
+	mustMkdir(t, filepath.Join(root, "srv/bob/work"), 0o700)
+	mustMkdir(t, filepath.Join(root, "state/tenants/alice/.dsh"), 0o700)
+	mustMkdir(t, filepath.Join(root, "etc/dshgw/tenants/alice"), 0o750)
+	mustWrite(t, filepath.Join(root, "etc/dshgw/tenants/alice/gateway.key"), "sk-alice\n", 0o640)
+
+	rt := Runtime{
+		NodeBin:          filepath.Join(root, "dsh/node/bin/node"),
+		BinJS:            filepath.Join(root, "dsh/current/lib/bin.js"),
+		CurrentLink:      filepath.Join(root, "dsh/current"),
+		TenantRoot:       filepath.Join(root, "state/tenants"),
+		WorkspaceRoot:    filepath.Join(root, "srv"),
+		TenantConfigRoot: filepath.Join(root, "etc/dshgw/tenants"),
+	}
+	return profileFixture{
+		root: root,
+		rt:   rt,
+		alice: Tenant{
+			Name:       "alice",
+			Workspace:  filepath.Join(root, "srv/alice"),
+			DshHome:    filepath.Join(root, "state/tenants/alice/.dsh"),
+			WorkerPort: 32100,
+		},
+	}
+}
+
+type mount struct {
+	flag string
+	src  string
+	dst  string
+}
+
+// parseMounts splits the profile argv into its mounts, the post-`--` command,
+// and any non-mount flags.
+func parseMounts(t *testing.T, argv []string) (mounts []mount, flags []string, command []string) {
+	t.Helper()
+	i := 0
+	for i < len(argv) {
+		arg := argv[i]
+		switch arg {
+		case "--":
+			return mounts, flags, argv[i+1:]
+		case "--ro-bind", "--ro-bind-try", "--bind", "--bind-try", "--dev-bind", "--dev-bind-try":
+			if i+2 >= len(argv) {
+				t.Fatalf("truncated %s in %v", arg, argv)
+			}
+			mounts = append(mounts, mount{flag: arg, src: argv[i+1], dst: argv[i+2]})
+			i += 3
+		case "--tmpfs", "--dir":
+			if i+1 >= len(argv) {
+				t.Fatalf("truncated %s in %v", arg, argv)
+			}
+			mounts = append(mounts, mount{flag: arg, dst: argv[i+1]})
+			i += 2
+		default:
+			flags = append(flags, arg)
+			i++
+		}
+	}
+	t.Fatalf("profile has no -- separator: %v", argv)
+	return nil, nil, nil
+}
+
+func TestProfileHidesEveryHostTreeExceptRuntimeAndTenantRoots(t *testing.T) {
+	f := newProfileFixture(t)
+	argv, err := Profile(f.rt, f.alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if argv[0] != DefaultBwrapBin {
+		t.Fatalf("bwrap_bin default not applied: %q", argv[0])
+	}
+	mounts, flags, command := parseMounts(t, argv)
+
+	// The tenant's own writable roots, and the private temp area, are the only
+	// writable destinations in the profile.
+	var writable []string
+	for _, m := range mounts {
+		if m.flag == "--bind" || m.flag == "--dev-bind" || m.flag == "--tmpfs" {
+			writable = append(writable, m.dst)
+		}
+	}
+	want := []string{"/home", "/root", "/tmp", "/var", "/srv", "/etc/dshgw", f.alice.Workspace, filepath.Dir(f.alice.DshHome)}
+	if strings.Join(writable, " ") != strings.Join(want, " ") {
+		t.Fatalf("writable/tmpfs mounts drifted:\n got %v\nwant %v", writable, want)
+	}
+
+	// /etc is never exposed as a tree, only as the named runtime files.
+	for _, m := range mounts {
+		if m.dst == "/etc" {
+			t.Fatalf("/etc is mounted wholesale: %+v", m)
+		}
+	}
+	allowedEtc := map[string]bool{
+		"/etc/resolv.conf": true, "/etc/hosts": true, "/etc/nsswitch.conf": true,
+		"/etc/passwd": true, "/etc/group": true, "/etc/localtime": true,
+		"/etc/ssl": true, "/etc/ca-certificates": true,
+	}
+	for _, m := range mounts {
+		if strings.HasPrefix(m.dst, "/etc/") && m.dst != "/etc/dshgw" && !allowedEtc[m.dst] {
+			t.Fatalf("unexpected /etc mount %q", m.dst)
+		}
+	}
+
+	// The loader's and the shell's own directories must be present as real
+	// directories, or nothing dynamically linked can start and no `#!/bin/sh`
+	// script (including Node's default child-process shell) exists.
+	for _, dst := range []string{"/usr", "/lib", "/lib64", "/bin", "/sbin"} {
+		found := false
+		for _, m := range mounts {
+			if (m.flag == "--ro-bind" || m.flag == "--ro-bind-try") && m.dst == dst {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("missing read-only runtime mount %s in %v", dst, mounts)
+		}
+	}
+
+	// The per-tenant configuration directory holds gateway.key and tenant.env.
+	// systemd reads the environment file from the host before the sandbox
+	// exists, so nothing in that directory needs to be mounted — and mounting it
+	// would hand the shared worker account a key it cannot read in the
+	// per-tenant-account mode.
+	for _, m := range mounts {
+		if m.src != "" && (within(f.rt.TenantConfigRoot, m.src) || within(f.rt.TenantConfigRoot, m.dst)) {
+			t.Fatalf("tenant configuration is mounted into the sandbox: %+v", m)
+		}
+	}
+
+	// No host-root passthrough, and no network unshare (the worker dials aigw).
+	for _, m := range mounts {
+		if m.dst == "/" || m.src == "/" {
+			t.Fatalf("profile binds the host root: %+v", m)
+		}
+	}
+	for _, flag := range flags {
+		if flag == "--share-net" || flag == "--unshare-net" {
+			t.Fatalf("network namespace flag %q is not part of the profile", flag)
+		}
+	}
+	if !hasFlag(flags, "--unshare-pid") || !hasFlag(flags, "--die-with-parent") {
+		t.Fatalf("process-view flags missing: %v", flags)
+	}
+
+	// The command is exactly node + dsh launcher, and the dsh release symlink is
+	// bound by its resolved target so the sandbox never contains a dangling
+	// /current link.
+	if len(command) != 2 || command[0] != f.rt.NodeBin || command[1] != f.rt.BinJS {
+		t.Fatalf("unexpected command: %v", command)
+	}
+	resolvedRelease := filepath.Join(f.root, "dsh/releases/v1")
+	var boundRelease, boundNode bool
+	for _, m := range mounts {
+		if m.flag == "--ro-bind" && m.dst == resolvedRelease {
+			boundRelease = true
+		}
+		if m.flag == "--ro-bind" && m.dst == filepath.Join(f.root, "dsh/node") {
+			boundNode = true
+		}
+	}
+	if !boundRelease || !boundNode {
+		t.Fatalf("release/node roots not bound (release=%v node=%v): %v", boundRelease, boundNode, mounts)
+	}
+}
+
+func TestProfileBindsSharedReleaseOnce(t *testing.T) {
+	f := newProfileFixture(t)
+	// A deployment where node and dsh share one tree must not emit two identical
+	// mounts (the second would shadow the first with the same content, but the
+	// profile should stay minimal and reviewable).
+	f.rt.CurrentLink = filepath.Join(f.root, "dsh/node")
+	f.rt.BinJS = filepath.Join(f.root, "dsh/node/lib/bin.js")
+	mustMkdir(t, filepath.Join(f.root, "dsh/node/lib"), 0o755)
+	mustWrite(t, filepath.Join(f.root, "dsh/node/lib/bin.js"), "// dsh\n", 0o644)
+	argv, err := Profile(f.rt, f.alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mounts, _, _ := parseMounts(t, argv)
+	seen := map[string]int{}
+	for _, m := range mounts {
+		if m.flag == "--ro-bind" {
+			seen[m.dst]++
+		}
+	}
+	for dst, count := range seen {
+		if count > 1 {
+			t.Fatalf("duplicate read-only mount of %s (%d)", dst, count)
+		}
+	}
+}
+
+func TestProfileAppendsTenantEnvironmentWithoutShellQuoting(t *testing.T) {
+	f := newProfileFixture(t)
+	f.alice.Environment = []string{"web", "--port", "32100", "--no-open"}
+	argv, err := Profile(f.rt, f.alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, command := parseMounts(t, argv)
+	want := []string{f.rt.NodeBin, f.rt.BinJS, "web", "--port", "32100", "--no-open"}
+	if strings.Join(command, " ") != strings.Join(want, " ") {
+		t.Fatalf("command = %v, want %v", command, want)
+	}
+}
+
+func TestProfileRejectsUnsafeInputs(t *testing.T) {
+	f := newProfileFixture(t)
+	cases := []struct {
+		name   string
+		mutate func(*Runtime, *Tenant)
+	}{
+		{"tenant name with separator", func(_ *Runtime, tn *Tenant) { tn.Name = "../evil" }},
+		{"tenant name with space", func(_ *Runtime, tn *Tenant) { tn.Name = "al ice" }},
+		{"empty tenant name", func(_ *Runtime, tn *Tenant) { tn.Name = "" }},
+		{"workspace is the host root", func(_ *Runtime, tn *Tenant) { tn.Workspace = "/" }},
+		{"workspace outside workspace_root", func(_ *Runtime, tn *Tenant) { tn.Workspace = "/etc" }},
+		{"workspace equals workspace_root", func(rt *Runtime, tn *Tenant) { tn.Workspace = rt.WorkspaceRoot }},
+		{"dsh home outside tenant_root", func(_ *Runtime, tn *Tenant) { tn.DshHome = "/var/lib/other/.dsh" }},
+		{"dsh home is tenant_root itself", func(rt *Runtime, tn *Tenant) { tn.DshHome = filepath.Join(rt.TenantRoot, ".dsh") }},
+		{"relative node bin", func(rt *Runtime, _ *Tenant) { rt.NodeBin = "node" }},
+		{"unclean node bin", func(rt *Runtime, _ *Tenant) { rt.NodeBin = rt.NodeBin + "/../bin/node" }},
+		{"newline in environment", func(_ *Runtime, tn *Tenant) { tn.Environment = []string{"x\ny"} }},
+		{"invalid worker port", func(_ *Runtime, tn *Tenant) { tn.WorkerPort = 70000 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, tn := f.rt, f.alice
+			tc.mutate(&rt, &tn)
+			if _, err := Profile(rt, tn); err == nil {
+				t.Fatal("unsafe profile accepted")
+			}
+		})
+	}
+}
+
+func TestProfileRejectsMissingInstallations(t *testing.T) {
+	f := newProfileFixture(t)
+	rt := f.rt
+	rt.NodeBin = filepath.Join(f.root, "dsh/node/bin/absent")
+	if _, err := Profile(rt, f.alice); err == nil {
+		t.Fatal("profile built for a missing node binary")
+	}
+	rt = f.rt
+	rt.CurrentLink = filepath.Join(f.root, "dsh/absent")
+	if _, err := Profile(rt, f.alice); err == nil {
+		t.Fatal("profile built for a missing release")
+	}
+}
+
+func TestValidateRuntimeRequiresLoaderDirectories(t *testing.T) {
+	f := newProfileFixture(t)
+	if err := ValidateRuntime(f.rt); err != nil {
+		t.Fatalf("real host layout rejected: %v", err)
+	}
+	rt := f.rt
+	rt.BwrapBin = "bwrap"
+	if err := ValidateRuntime(rt); err == nil {
+		t.Fatal("relative bwrap_bin accepted")
+	}
+}
+
+func TestValidateWorkerAccount(t *testing.T) {
+	if err := ValidateWorkerAccount(""); err == nil {
+		t.Fatal("empty worker_user accepted")
+	}
+	if err := ValidateWorkerAccount("root"); err == nil {
+		t.Fatal("root worker_user accepted")
+	}
+	if err := ValidateWorkerAccount("dshgw-definitely-absent-account"); err == nil {
+		t.Fatal("missing worker_user accepted")
+	}
+}
+
+func hasFlag(flags []string, want string) bool {
+	for _, flag := range flags {
+		if flag == want {
+			return true
+		}
+	}
+	return false
+}

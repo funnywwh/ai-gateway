@@ -75,15 +75,37 @@ func managerFixture(t *testing.T) (*Manager, *fakeRunner) {
 	root := t.TempDir()
 	tpl := filepath.Join(root, "template")
 	template(t, tpl)
+	// A complete synthetic dsh installation: the bwrap profile resolves the
+	// release through current_link with EvalSymlinks, so the fixture must look
+	// like the deployed layout instead of pointing at host paths.
+	release := filepath.Join(root, "dsh", "releases", "r1")
+	nodeBin := filepath.Join(root, "dsh", "node", "bin", "node")
+	currentLink := filepath.Join(root, "dsh", "current")
+	for _, dir := range []string{filepath.Join(release, "lib"), filepath.Dir(nodeBin)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(release, "lib", "bin.js"), []byte("// dsh launcher\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nodeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(release, currentLink); err != nil {
+		t.Fatal(err)
+	}
 	cfg := &config.Config{
 		PublicHost: "dsh.test", PortalPort: 32600, TenantPortLo: 32601, TenantPortHi: 32605,
 		WorkerPortLo: 32100, WorkerPortHi: 32105, Listen: "127.0.0.1:3099", AigwBaseURL: "http://aigw",
 		SessionTTL: config.Duration(1), DirectoryPicker: "clamp", PluginBrowserFS: "on", WorkspaceSeed: []string{"work"}, ReservedNames: []string{"login"},
-		Dsh: config.DshRuntime{CurrentLink: "/opt/dsh/current"}, TLS: config.TLSConfig{Certificate: "/cert", CertificateKey: "/key"},
+		Dsh:      config.DshRuntime{NodeBin: nodeBin, BinJS: filepath.Join(release, "lib", "bin.js"), ReleasesRoot: filepath.Join(root, "dsh", "releases"), CurrentLink: currentLink},
+		TLS:      config.TLSConfig{Certificate: "/cert", CertificateKey: "/key"},
 		StateDir: filepath.Join(root, "state"), TenantRoot: filepath.Join(root, "state/tenants"), WorkspaceRoot: filepath.Join(root, "srv"), HandshakeDir: filepath.Join(root, "handshake"),
 		RegistryPath: filepath.Join(root, "registry.json"), KeyMapPath: filepath.Join(root, "keys.map"), SessionPath: filepath.Join(root, "sessions.json"),
 		Deploy: config.DeployConfig{TemplateHome: tpl, PluginPath: "/plugin.js", ConfigPath: filepath.Join(root, "etc/dshgw.yaml"),
 			TenantConfigRoot: filepath.Join(root, "etc/tenants"), BackupDir: filepath.Join(root, "backups"), GatewayGroup: "dshgw", GatewayUnit: "dshgw.service", DshUserPrefix: "dsh-",
+			SystemdDir: filepath.Join(root, "systemd"), WorkerUnit: "dsh-worker@.service",
 			NginxDir: filepath.Join(root, "nginx"), NginxBinary: "nginx", PublicListen: "0.0.0.0"},
 	}
 	for _, path := range []string{cfg.StateDir, filepath.Dir(cfg.Deploy.ConfigPath)} {

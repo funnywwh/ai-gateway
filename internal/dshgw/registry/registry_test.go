@@ -3,6 +3,7 @@ package registry
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,5 +82,53 @@ func TestListeningPorts(t *testing.T) {
 	got := ListeningPorts([]byte("LISTEN 0 4096 127.0.0.1:32100 0.0.0.0:*\nLISTEN 0 10 [::]:32601 [::]:*\n"))
 	if !got[32100] || !got[32601] {
 		t.Fatalf("%v", got)
+	}
+}
+
+// The isolation field arrived after the first deployments, so a registry
+// written before it existed must keep loading and mean the per-tenant-account
+// mode. An unknown value must be rejected instead of silently defaulting.
+func TestIsolationFieldCompatibility(t *testing.T) {
+	dir := t.TempDir()
+	rp := filepath.Join(dir, "registry.json")
+	kp := filepath.Join(dir, "keys.map")
+	legacy := `{
+  "version": 1,
+  "tenants": [
+    {
+      "name": "alice",
+      "uid": 1000,
+      "public_port": 32601,
+      "worker_port": 32100,
+      "key_prefix": "sk-aaaaaaaaa",
+      "dsh_home": "/state/alice/.dsh",
+      "workspace": "/srv/alice",
+      "created_at": "2025-01-01T00:00:00Z",
+      "handshake": "ok"
+    }
+  ]
+}
+`
+	if err := os.WriteFile(rp, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(rp, kp)
+	if err != nil {
+		t.Fatalf("legacy registry without an isolation field was rejected: %v", err)
+	}
+	got, ok := loaded.Get("alice")
+	if !ok {
+		t.Fatal("legacy tenant missing")
+	}
+	if got.Isolation != "" || got.EffectiveIsolation() != IsolationUser {
+		t.Fatalf("legacy tenant isolation = %q / %q, want empty / user", got.Isolation, got.EffectiveIsolation())
+	}
+	// A mode this build does not implement must never be read as the default.
+	unknown := strings.Replace(legacy, `"handshake": "ok"`, `"handshake": "ok", "isolation": "jail"`, 1)
+	if err := os.WriteFile(rp, []byte(unknown), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(rp, kp); err == nil || !strings.Contains(err.Error(), "invalid isolation mode") {
+		t.Fatalf("unknown isolation mode accepted: %v", err)
 	}
 }

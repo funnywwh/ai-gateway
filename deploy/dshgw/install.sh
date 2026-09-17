@@ -65,6 +65,7 @@ install -m 0755 "$ROOT/bin/dshgw" /opt/dshgw/bin/dshgw
 install -m 0644 "$ROOT/cmd/dshgw/plugin/picker-clamp.js" /opt/dshgw/share/dsh-plugin/picker-clamp.js
 install -m 0644 "$ROOT/cmd/dshgw/plugin/picker-clamp.test.mjs" /opt/dshgw/share/dsh-plugin/picker-clamp.test.mjs
 install -m 0644 "$ROOT/deploy/dshgw/dsh-worker@.service" /etc/systemd/system/dsh-worker@.service
+install -m 0644 "$ROOT/deploy/dshgw/dsh-worker-bwrap@.service" /etc/systemd/system/dsh-worker-bwrap@.service
 install -m 0644 "$ROOT/deploy/dshgw/dsh-workers.slice" /etc/systemd/system/dsh-workers.slice
 install -m 0644 "$ROOT/deploy/dshgw/dshgw.service" /etc/systemd/system/dshgw.service
 install -m 0644 "$ROOT/deploy/dshgw/dshgw-admin.service" /etc/systemd/system/dshgw-admin.service

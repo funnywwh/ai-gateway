@@ -246,9 +246,129 @@ python3 /home/winger/work/ai_gateway/scripts/dshgw_host_acceptance.py cleanup \
 新增热载 contract 使用真实一次性 DSH、假 loopback Responses 服务和 dummy Key：同一 session/PID 先观测 A，再经已发布的文件锁原子更新 refs、等待公开 `credentials/reference-updated` 事件，再观测 B。此自动化证明热载协议，不产生真实模型费用，也不替代真实主机的上述检查。
 
 
-## 7. 明确边界
+## 7. 隔离模式：每租户 OS 用户（默认）与 bwrap
 
-- Linux UID/systemd 文件权限是租户安全边界；picker clamp 只是防误操作 UX。Node realpath 后仍有 tenant 自身并发 rename 的 TOCTOU，bind mount 也不表现为 symlink。
+`deploy.isolation` 决定租户 worker 的隔离方式。两种模式**不在同一部署内混用**：新租户一律按当前配置创建，已有租户按需迁移（§7.3）。
+
+|  | `user`（默认，兼容旧行为） | `bwrap` |
+|---|---|---|
+| 每租户 OS 用户 | 是（`dsh-<t>`），真实 UID 边界 | **否**，所有 worker 用共享账号 `worker_user` |
+| worker unit | `dsh-worker@.service`（`User=dsh-%i`，systemd 展开 `%i`） | `dsh-worker-bwrap@.service`（`User=dshgw`，`ExecStart=… sandbox-exec %i`） |
+| 隔离边界 | UID + 文件权限 | bubblewrap mount namespace（空 tmpfs 根，只挂载租户自己的根与只读运行时） |
+| 宿主前提 | 无 | 允许非特权 user namespace，且 `apparmor_restrict_unprivileged_userns=1` |
+
+设计、实测事实与强度取舍见 `docs/design/m57-dshgw-strict-isolation.md`。
+
+### 7.1 配置
+
+```yaml
+deploy:
+  isolation: bwrap              # user（默认）| bwrap
+  worker_user: dshgw            # 可省略，默认取 gateway_user；必须是已存在的非 root 账号
+  bwrap_bin: /usr/bin/bwrap
+  worker_unit_bwrap: dsh-worker-bwrap@.service
+```
+
+### 7.2 安装与切换
+
+```bash
+# 1) 安装（两个 worker unit 都会安装；不启动任何服务）
+sudo env NODE_SOURCE=/home/winger/.local/node-v22.23.1-linux-x64 \
+         DSH_SOURCE=/home/winger/.local/dsh-0.1.2-rc.1 \
+         DSH_VERSION=0.1.2-rc.1 deploy/dshgw/install.sh
+# 2) 编辑 /etc/dshgw/config.yaml，把 deploy.isolation 改成 bwrap
+# 3) 重载 unit 并检查前置条件（bwrap 模式会多出 5 项检查，必须全绿）
+sudo systemctl daemon-reload
+sudo /opt/dshgw/bin/dshgw --config /etc/dshgw/config.yaml doctor
+# 4) 之后 tenant create 直接落在 bwrap 模式；已有租户按 §7.3 迁移
+```
+
+`worker_user` 或 `deploy.dshgw_binary` 改动后必须重装 unit 并再次 `doctor`：bwrap unit 的 `User`/`ExecStart` 是静态文本，`doctor` 的 `worker-unit-bwrap` 会交叉核对 unit 与配置，不一致会明确报错而不是静默以错误身份运行。
+
+### 7.3 已有租户迁移（在线；会停一次该租户的 worker）
+
+```bash
+sudo /opt/dshgw/bin/dshgw --config /etc/dshgw/config.yaml tenant list      # 看 ISOLATION 列
+sudo /opt/dshgw/bin/dshgw --config /etc/dshgw/config.yaml tenant re-isolate --to bwrap alice
+sudo /opt/dshgw/bin/dshgw --config /etc/dshgw/config.yaml tenant re-isolate --to user  alice
+```
+
+迁移顺序：preflight（目标模式账号/运行时/租户叶权限）→ 停旧 unit → `chown -R` 到目标模式账号 →
+更新 registry 的 `isolation` 并落盘 → `daemon-reload` → 启动新 unit → loopback 401 readiness → 恢复 enable 状态。
+任一步失败会回滚：停新 unit、属主改回原账号、registry 恢复、重启原 unit。
+
+两点必须知道：**user→bwrap 之后遗留的 `dsh-<t>` 账号不会被删除**（不可逆且无收益，确认无用后可自行 `userdel`）；
+`bwrap→user` 会为该租户**新建**账号（共享 UID 无法"还回去"）。
+
+### 7.4 doctor 在 bwrap 模式下的前置条件
+
+配置为 bwrap 或任一租户记录为 bwrap 时追加：
+
+| 检查 | 失败含义 |
+|---|---|
+| `bwrap-bin` | 配置的 bubblewrap 不存在或不可执行 |
+| `bwrap-apparmor-userns` | `/proc/sys/kernel/apparmor_restrict_unprivileged_userns` 不是 `1` |
+| `bwrap-sandbox-runtime` | profile 需要的绑定源（bwrap/node/bin.js/release 与 `/usr`、`/usr/lib`、`/usr/lib64`）不可用 |
+| `bwrap-worker-account` | `worker_user` 为空、为 root、或账号不存在 |
+| `worker-unit-bwrap` | unit 缺失，或 `User`/`Group`/`ExecStart` 与配置不一致 |
+| `tenant-<t>-sandbox` | 该租户 profile 已无法构造，或租户叶权限出现 other 位 |
+
+### 7.5 宿主验收（root 终端，单租户）
+
+```bash
+# a) profile 评审：确认没有 "--ro-bind / /" 之类宿主根挂载
+#    （不需要 sudo：启动器按调用者身份运行，unit 里就是共享 worker 账号）
+/opt/dshgw/bin/dshgw --config /etc/dshgw/config.yaml sandbox-exec --print alice | less
+
+# b) 建临时租户并确认没有 per-tenant OS 用户
+sudo /opt/dshgw/bin/dshgw --config /etc/dshgw/config.yaml \
+  tenant create --key-file /root/tcheck.key t-bwrap-check
+getent passwd dsh-t-bwrap-check || echo "OK: 无 per-tenant 账号"
+# worker 必须是 active（若宿主 systemd 拒绝 unit 的加固属性，这里会看到 218/CAPABILITIES）
+systemctl show --property User --property MainPID --property ActiveState --value dsh-worker-bwrap@t-bwrap-check.service
+sudo /opt/dshgw/bin/dshgw --config /etc/dshgw/config.yaml tenant list | grep t-bwrap-check
+
+# c) worker 的 readiness 契约：未认证 /api 必须是 401
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<worker_port>/api
+
+# d) 人工不可见性/可写性确认（在该租户的 dsh 会话终端里执行）
+ls -A /home /root /srv /var /etc          # 期望：空/仅白名单；/etc 无 nginx、无 systemd
+ls /etc/dshgw 2>&1                        # 期望：空目录
+test -e /var/lib/dshgw/registry.json && echo LEAK || echo "OK: gateway state 不可见"
+mkdir -p ~/probe/a/b/c && touch ~/probe/a/b/c/f && echo "OK: workspace 可建子目录可写"
+
+# e) 清理
+sudo /opt/dshgw/bin/dshgw --config /etc/dshgw/config.yaml tenant remove --purge --yes t-bwrap-check
+```
+
+仓库内的自动化只做到真实 bubblewrap + 真实 dsh web 的启动与 401（`make dshgw-sandbox-test`）；上面 d) 的人工确认不能由它替代。
+
+### 7.6 回滚
+
+```bash
+# 单个租户回到 UID 边界模式
+sudo /opt/dshgw/bin/dshgw --config /etc/dshgw/config.yaml tenant re-isolate --to user <t>
+# 整体回到旧模式：把 deploy.isolation 改回 user，逐个迁移，然后复查
+sudo systemctl daemon-reload
+sudo /opt/dshgw/bin/dshgw --config /etc/dshgw/config.yaml doctor
+```
+
+### 7.7 强度与限制（必读）
+
+- bwrap 模式**没有 UID 边界**：隔离来自 namespace 视图（空 tmpfs 根 + 逐路径绑定）、租户叶权限位、
+  AppArmor 对嵌套 namespace 的限制，以及 dsh 内层 sandbox 的组合，而不是内核身份。
+- root 与共享 worker 账号可以进入任何租户的数据；需要"连 root 都不能读租户数据"的场景不应使用本模式。
+- 宿主 `apparmor_restrict_unprivileged_userns=1` 是前置条件，否则租户可在 profile 内再套一层 namespace（`doctor` 会失败）。
+- 内层 dsh sandbox 在本宿主被 AppArmor 拒绝嵌套 bwrap，dsh 会回退 Landlock；实测仍能拦截工作区外写入，
+  但"内外都是 bwrap"在本宿主不成立。
+- 租户自己的 `/etc/dshgw/tenants/<t>` 目录**不挂载进沙箱**：`gateway.key` 与 `tenant.env` 由宿主侧 systemd 读取，
+  租户在沙箱内看不到它们（与 user 模式一致）。
+- 迁移会短暂停 worker（秒级到数十秒），不是零停机操作；请在维护窗口对测试租户先行验证。
+
+## 8. 明确边界
+
+- `user` 模式下 Linux UID/systemd 文件权限是租户安全边界；`bwrap` 模式下边界是 mount namespace 视图
+  （没有 UID 边界，root 与共享 worker 账号可读租户数据，见 §7.7）。picker clamp 只是防误操作 UX。Node realpath 后仍有 tenant 自身并发 rename 的 TOCTOU，bind mount 也不表现为 symlink。
 - tenant agent 可读取自己的 aigw Key；root 与 `dshgw` 账户可冒充租户。
 - workers 共享主机网络 namespace；当前 unit 不声称网络强隔离。
 - Cookie 不按端口隔离。所有 `chat.tirisen.hk` HTTPS 服务都会收到所有 `dshgw_s_*` cookie，因此同 hostname 上的服务与其访问日志必须全部可信。cookie overwrite 可造成跨租户 DoS，但 tenant 绑定阻止数据披露。

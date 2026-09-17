@@ -350,6 +350,11 @@ func (m *Manager) removeLocked(ctx context.Context, t registry.Tenant, purge boo
 	if err := m.validateTenantPaths(t); err != nil {
 		return "", err
 	}
+	// Resolved while the tenant is still registered: after the registry entry
+	// is deleted, unit() would fall back to the deployment default, and a
+	// deployment that switched isolation modes must still dismantle the unit
+	// this tenant actually runs under.
+	unitName := m.unit(t.Name)
 	status, err := m.Status(ctx, t)
 	if err != nil {
 		return "", err
@@ -382,13 +387,13 @@ func (m *Manager) removeLocked(ctx context.Context, t registry.Tenant, purge boo
 			if status.UnitFileState == "enabled-runtime" {
 				args = append(args, "--runtime")
 			}
-			args = append(args, m.unit(t.Name))
+			args = append(args, unitName)
 			if _, restoreErr := m.run(rollbackCtx, "systemctl", args...); restoreErr != nil {
 				err = errors.Join(err, fmt.Errorf("restore worker enablement: %w", restoreErr))
 			}
 		}
 		if status.Active {
-			if _, restoreErr := m.run(rollbackCtx, "systemctl", "start", m.unit(t.Name)); restoreErr != nil {
+			if _, restoreErr := m.run(rollbackCtx, "systemctl", "start", unitName); restoreErr != nil {
 				err = errors.Join(err, fmt.Errorf("restore worker activity: %w", restoreErr))
 			}
 		}
@@ -397,7 +402,7 @@ func (m *Manager) removeLocked(ctx context.Context, t registry.Tenant, purge boo
 	if status.UnitFileState == "enabled-runtime" {
 		disableArgs = append(disableArgs, "--runtime")
 	}
-	disableArgs = append(disableArgs, m.unit(t.Name))
+	disableArgs = append(disableArgs, unitName)
 	if _, err = m.run(ctx, "systemctl", disableArgs...); err != nil {
 		return "", err
 	}
@@ -427,7 +432,12 @@ func (m *Manager) removeLocked(ctx context.Context, t registry.Tenant, purge boo
 	// removed the identity. Do not resurrect routes/start a missing identity.
 	// Preserve the snapshot and data for manual recovery on any failure here.
 	committed = true
-	if _, err = m.run(ctx, "userdel", m.user(t.Name)); err != nil {
+	if t.EffectiveIsolation() == registry.IsolationBwrap {
+		// The bwrap mode never created a per-tenant OS identity — the shared
+		// worker account must survive this tenant — and both unit families are
+		// static systemd templates, so there is no per-tenant artifact to
+		// delete here at all.
+	} else if _, err = m.run(ctx, "userdel", m.user(t.Name)); err != nil {
 		return snapshot, fmt.Errorf("tenant routes removed; user deletion incomplete (data retained): %w", err)
 	}
 	if purge {

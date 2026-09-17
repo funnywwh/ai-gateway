@@ -20,8 +20,13 @@ if command -v systemd-analyze >/dev/null 2>&1; then
   sed "s#/opt/dshgw/bin/dshgw#$ROOT/bin/dshgw#g" "$ROOT/deploy/dshgw/dshgw.service" >"$TMP/units/dshgw.service"
   sed -e "s#/opt/dshgw/bin/dshgw#$ROOT/bin/dshgw#g" -e "s#/opt/dsh/node/bin/node#$NODE#g" \
     "$ROOT/deploy/dshgw/dsh-worker@.service" >"$TMP/units/dsh-worker@.service"
+  # The bwrap isolation unit is installed verbatim (systemd expands %i), so a
+  # placeholder or a typo in it would be a live deployment failure. Parsing it
+  # here is what keeps it from silently rotting.
+  sed -e "s#/opt/dshgw/bin/dshgw#$ROOT/bin/dshgw#g" \
+    "$ROOT/deploy/dshgw/dsh-worker-bwrap@.service" >"$TMP/units/dsh-worker-bwrap@.service"
   cp "$ROOT/deploy/dshgw/dsh-workers.slice" "$TMP/units/"
-  systemd-analyze verify "$TMP/units/dshgw.service" "$TMP/units/dsh-worker@.service" "$TMP/units/dsh-workers.slice" >/dev/null
+  systemd-analyze verify "$TMP/units/dshgw.service" "$TMP/units/dsh-worker@.service" "$TMP/units/dsh-worker-bwrap@.service" "$TMP/units/dsh-workers.slice" >/dev/null
 fi
 cp "$ROOT/deploy/dshgw/config.example.yaml" "$TMP/config.yaml"
 python3 - "$TMP/config.yaml" "$NODE" "$DSH_ROOT" "$TMP" "$ROOT" <<'PY'

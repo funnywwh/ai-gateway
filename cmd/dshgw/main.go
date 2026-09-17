@@ -68,6 +68,8 @@ func execute(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = app.revalidate(ctx, rest[1:])
 	case "capture-url":
 		err = app.captureURL(ctx, rest[1:])
+	case "sandbox-exec":
+		err = app.sandboxExec(rest[1:])
 	case "contract":
 		cancel()
 		err = app.contract(context.Background(), rest[1:])
@@ -103,12 +105,14 @@ func printUsage(w io.Writer) {
 Commands:
   serve                                  run loopback gateway
   admin-serve                            root-only local tenant provisioning channel (UNIX socket; requires admin_socket config)
-  tenant create|list|rotate-key|restart|remove
+  tenant create|list|rotate-key|restart|re-isolate|remove
+  tenant re-isolate --to user|bwrap NAME  switch a tenant's isolation mode
   bind PREFIX TENANT                     bind an additional public key prefix
   login-url [PREFIX]                    print the portal or tenant URL
   sync-models TENANT                     refresh DSH models from aigw
   revalidate [TENANT]                    validate stored tenant key(s)
   capture-url TENANT                     capture exact dsh startup URL
+  sandbox-exec [--print] TENANT          run a tenant worker inside its bubblewrap profile (worker unit ExecStart)
   contract [all|dsh|aigw]                run external integration contracts
   doctor                                 validate deployment invariants
   backup                                 create a mode-0600 backup archive

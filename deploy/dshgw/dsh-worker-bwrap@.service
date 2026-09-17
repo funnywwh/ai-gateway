@@ -1,0 +1,56 @@
+# Worker unit for the bwrap isolation mode: every tenant worker runs as the one
+# shared unprivileged account inside its own bubblewrap mount namespace, and the
+# sandbox profile (mounts, hidden host paths, command) is derived from the
+# root-owned configuration — never from tenant-writable state.
+#
+# The tenant name enters only through %i, so this file is installed verbatim and
+# needs no per-tenant rendering. `dshgw doctor` cross-checks the User/ExecStart
+# lines against deploy.worker_user and deploy.dshgw_binary, so edits here and in
+# /etc/dshgw/config.yaml cannot drift apart silently.
+[Unit]
+Description=DeepSeek Harness worker for tenant %i (bubblewrap isolation)
+After=network-online.target dshgw.service
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=dshgw
+Group=dshgw
+WorkingDirectory=/srv/dsh/%i
+EnvironmentFile=/etc/dshgw/tenants/%i/tenant.env
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/dshgw/bin/dshgw --config /etc/dshgw/config.yaml sandbox-exec %i
+ExecStartPost=+/opt/dshgw/bin/dshgw --config /etc/dshgw/config.yaml capture-url %i ${MAINPID}
+Restart=always
+RestartSec=3
+TimeoutStartSec=45
+TimeoutStopSec=30
+KillMode=mixed
+UMask=0077
+Slice=dsh-workers.slice
+MemoryHigh=1536M
+MemoryMax=2G
+CPUQuota=200%
+TasksMax=512
+# The bubblewrap namespace is the boundary; the service sandbox below stays on
+# for defence in depth. NoNewPrivileges does not prevent the (privileged-free)
+# unprivileged user namespace creation bubblewrap performs.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/srv/dsh/%i /var/lib/dshgw/tenants/%i /var/lib/dshgw/handshake
+
+[Install]
+WantedBy=multi-user.target

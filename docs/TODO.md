@@ -474,3 +474,24 @@
 - [ ] **待人工验证**：在 `:8088` 上做一次"周期"验证（把某供应商设成 `daily`/`monthly`，确认 UTC 零点/月初
       读数自动重新起算；读数最多滞后 5 秒）
 
+
+
+## M57 dshgw 严格租户隔离（bubblewrap 模式，无每租户 OS 用户）
+
+设计：`docs/design/m57-dshgw-strict-isolation.md`（§3 实测事实、§5 doctor 前置条件、§7 差异与取舍）。
+代码、单测、真实 bwrap staging 验收与部署产物已在本仓库完成；下面只列**尚未在宿主执行**的验收项。
+
+- [ ] **待宿主执行（user 模式回归）**：在目标机用现有 `isolation: user` 配置跑一遍
+      `doctor` + 双租户验收脚本，确认本次改动没有改变 UID/权限行为（这是"兼容方案仍可用"的证据）
+- [ ] **待宿主执行（bwrap 模式验收）**：把 `/etc/dshgw/config.yaml` 改为 `isolation: bwrap`
+      并重装 unit 后，按 `deploy/dshgw/README.md` §7.5 执行：`doctor` 全绿、
+      `sandbox-exec --print` 评审 profile、建一个临时租户确认 **不产生 `dsh-<t>` 账号**、
+      worker `MainPID` 的 UID 为共享账号、`/api` 401、门户可登录
+- [ ] **待宿主执行（不可见性人工确认）**：在该临时租户的 dsh 会话里执行
+      `ls /home /root /srv /var /etc`、`ls /etc/dshgw`、访问其它租户路径与 `registry.json`，
+      确认"不存在/为空"而不是"无权限"；再确认可在 workspace 内 `mkdir -p a/b/c` 并写入文件
+- [ ] **待人工确认（迁移与回滚）**：对一个真实租户执行 `tenant re-isolate --to bwrap`，
+      验证数据/Key/端口不变、worker 起来后门户仍可登录；再用 `--to user` 迁回，
+      确认 `dsh-<t>` 账号与属主恢复。**先在维护窗口内的测试租户上做**，不要拿生产租户试
+- [ ] **决策（未做）**：是否为"连 root 都不能读租户数据"的场景引入 per-tenant UID + bwrap 组合模式
+      （即保留 UID 边界同时收窄挂载视图）。当前模式按用户要求放弃 UID 边界，强度结论见设计 §2

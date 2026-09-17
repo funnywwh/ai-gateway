@@ -86,48 +86,65 @@ type DeployConfig struct {
 	GatewayGroup     string `yaml:"gateway_group" json:"gateway_group"`
 	DshUserPrefix    string `yaml:"dsh_user_prefix" json:"dsh_user_prefix"`
 	CorepackBin      string `yaml:"corepack_bin" json:"corepack_bin"`
+	// Isolation selects how a tenant worker is confined: "user" (default) gives
+	// every tenant its own Linux account and therefore a UID boundary; "bwrap"
+	// runs every worker as one shared unprivileged account inside a per-tenant
+	// bubblewrap mount namespace and creates no per-tenant OS user. The two
+	// modes use different worker unit templates and cannot be mixed in one
+	// deployment.
+	Isolation string `yaml:"isolation" json:"isolation"`
+	// WorkerUnitBwrap is the worker unit template used by the bwrap isolation
+	// mode. Defaults to WorkerUnit with "-bwrap" before the "@".
+	WorkerUnitBwrap string `yaml:"worker_unit_bwrap" json:"worker_unit_bwrap"`
+	// WorkerUser runs every worker in the bwrap isolation mode. It must be an
+	// existing unprivileged account; normal practice is to omit it and reuse
+	// GatewayUser rather than create a second service account.
+	WorkerUser string `yaml:"worker_user" json:"worker_user"`
+	// BwrapBin is the bubblewrap executable the sandbox-exec launcher and the
+	// doctor preflight use.
+	BwrapBin string `yaml:"bwrap_bin" json:"bwrap_bin"`
 }
 
 // Config is deliberately independent of aigw's internal configuration types.
 type Config struct {
-	PublicHost      string       `yaml:"public_host" json:"public_host"`
-	PortalPort      int          `yaml:"portal_port" json:"portal_port"`
-	TenantPortLo    int          `yaml:"tenant_port_lo" json:"tenant_port_lo"`
-	TenantPortHi    int          `yaml:"tenant_port_hi" json:"tenant_port_hi"`
-	WorkerPortLo    int          `yaml:"worker_port_lo" json:"worker_port_lo"`
-	WorkerPortHi    int          `yaml:"worker_port_hi" json:"worker_port_hi"`
-	Listen          string       `yaml:"listen" json:"listen"`
-	EdgePortHeader  string       `yaml:"edge_port_header" json:"edge_port_header"`
-	MaxHeaderBytes  int          `yaml:"max_header_bytes" json:"max_header_bytes"`
-	MaxSessions     int          `yaml:"max_sessions" json:"max_sessions"`
-	AigwBaseURL     string       `yaml:"aigw_base_url" json:"aigw_base_url"`
-	ValidateTimeout Duration     `yaml:"validate_timeout" json:"validate_timeout"`
-	SessionTTL      Duration     `yaml:"session_ttl" json:"session_ttl"`
-	KeyRevalidate   string       `yaml:"key_revalidate" json:"key_revalidate"`
-	DSHEnforce      string       `yaml:"dsh_enforce" json:"dsh_enforce"`
+	PublicHost      string   `yaml:"public_host" json:"public_host"`
+	PortalPort      int      `yaml:"portal_port" json:"portal_port"`
+	TenantPortLo    int      `yaml:"tenant_port_lo" json:"tenant_port_lo"`
+	TenantPortHi    int      `yaml:"tenant_port_hi" json:"tenant_port_hi"`
+	WorkerPortLo    int      `yaml:"worker_port_lo" json:"worker_port_lo"`
+	WorkerPortHi    int      `yaml:"worker_port_hi" json:"worker_port_hi"`
+	Listen          string   `yaml:"listen" json:"listen"`
+	EdgePortHeader  string   `yaml:"edge_port_header" json:"edge_port_header"`
+	MaxHeaderBytes  int      `yaml:"max_header_bytes" json:"max_header_bytes"`
+	MaxSessions     int      `yaml:"max_sessions" json:"max_sessions"`
+	AigwBaseURL     string   `yaml:"aigw_base_url" json:"aigw_base_url"`
+	ValidateTimeout Duration `yaml:"validate_timeout" json:"validate_timeout"`
+	SessionTTL      Duration `yaml:"session_ttl" json:"session_ttl"`
+	KeyRevalidate   string   `yaml:"key_revalidate" json:"key_revalidate"`
+	DSHEnforce      string   `yaml:"dsh_enforce" json:"dsh_enforce"`
 	// AdminSocket is the UNIX socket the root admin-serve listens on (M52 provisioning
 	// channel). Empty disables the command: the daemon never starts by accident.
 	AdminSocket string `yaml:"admin_socket" json:"admin_socket"`
 	// AdminAllowedUIDs are the peer UIDs (typically the aigw runtime user) that may talk
 	// to the admin socket. UID 0 is always allowed on the local machine.
-	AdminAllowedUIDs []int `yaml:"admin_allowed_uids" json:"admin_allowed_uids"`
-	LoginRate       RateLimit    `yaml:"login_rate" json:"login_rate"`
-	DirectoryPicker string       `yaml:"directory_picker" json:"directory_picker"`
-	PluginBrowserFS string       `yaml:"plugin_browser_fs" json:"plugin_browser_fs"`
-	WorkspaceSeed   []string     `yaml:"workspace_seed" json:"workspace_seed"`
-	ReservedNames   []string     `yaml:"reserved_names" json:"reserved_names"`
-	Dsh             DshRuntime   `yaml:"dsh" json:"dsh"`
-	TLS             TLSConfig    `yaml:"tls" json:"tls"`
-	Deploy          DeployConfig `yaml:"deploy" json:"deploy"`
-	TenantRoot      string       `yaml:"tenant_root" json:"tenant_root"`
-	WorkspaceRoot   string       `yaml:"workspace_root" json:"workspace_root"`
-	HandshakeDir    string       `yaml:"handshake_dir" json:"handshake_dir"`
-	StateDir        string       `yaml:"state_dir" json:"state_dir"`
-	RegistryPath    string       `yaml:"registry_path" json:"registry_path"`
-	KeyMapPath      string       `yaml:"key_map_path" json:"key_map_path"`
-	SessionPath     string       `yaml:"session_path" json:"session_path"`
-	AuditPath       string       `yaml:"audit_path" json:"audit_path"`
-	ActivityPath    string       `yaml:"activity_path" json:"activity_path"`
+	AdminAllowedUIDs []int        `yaml:"admin_allowed_uids" json:"admin_allowed_uids"`
+	LoginRate        RateLimit    `yaml:"login_rate" json:"login_rate"`
+	DirectoryPicker  string       `yaml:"directory_picker" json:"directory_picker"`
+	PluginBrowserFS  string       `yaml:"plugin_browser_fs" json:"plugin_browser_fs"`
+	WorkspaceSeed    []string     `yaml:"workspace_seed" json:"workspace_seed"`
+	ReservedNames    []string     `yaml:"reserved_names" json:"reserved_names"`
+	Dsh              DshRuntime   `yaml:"dsh" json:"dsh"`
+	TLS              TLSConfig    `yaml:"tls" json:"tls"`
+	Deploy           DeployConfig `yaml:"deploy" json:"deploy"`
+	TenantRoot       string       `yaml:"tenant_root" json:"tenant_root"`
+	WorkspaceRoot    string       `yaml:"workspace_root" json:"workspace_root"`
+	HandshakeDir     string       `yaml:"handshake_dir" json:"handshake_dir"`
+	StateDir         string       `yaml:"state_dir" json:"state_dir"`
+	RegistryPath     string       `yaml:"registry_path" json:"registry_path"`
+	KeyMapPath       string       `yaml:"key_map_path" json:"key_map_path"`
+	SessionPath      string       `yaml:"session_path" json:"session_path"`
+	AuditPath        string       `yaml:"audit_path" json:"audit_path"`
+	ActivityPath     string       `yaml:"activity_path" json:"activity_path"`
 
 	tenantMu    sync.RWMutex
 	tenantPorts map[string]int
@@ -183,6 +200,8 @@ func defaults() Config {
 			GatewayGroup:     "dshgw",
 			DshUserPrefix:    "dsh-",
 			CorepackBin:      "/opt/dsh/node/bin/corepack",
+			Isolation:        IsolationUser,
+			BwrapBin:         "/usr/bin/bwrap",
 		},
 	}
 }
@@ -230,8 +249,18 @@ type file interface {
 }
 
 func (c *Config) applyDerivedDefaults() {
+	// The bwrap mode's shared worker account is optional in configuration: the
+	// documented practice is to reuse the gateway account rather than create a
+	// second service account, and the installed worker unit names that account
+	// literally. Deriving it here keeps one source of truth for the identity.
+	if c.Deploy.WorkerUser == "" {
+		c.Deploy.WorkerUser = c.Deploy.GatewayUser
+	}
 	if c.RegistryPath == "" {
 		c.RegistryPath = filepath.Join(c.StateDir, "registry.json")
+	}
+	if c.Deploy.WorkerUnitBwrap == "" {
+		c.Deploy.WorkerUnitBwrap = strings.Replace(c.Deploy.WorkerUnit, "@.service", "-bwrap@.service", 1)
 	}
 	if c.KeyMapPath == "" {
 		c.KeyMapPath = filepath.Join(c.StateDir, "keys.map")
@@ -385,8 +414,48 @@ func (c *Config) Validate() error {
 	if !strings.HasSuffix(c.Deploy.WorkerUnit, "@.service") || strings.Count(c.Deploy.WorkerUnit, "@") != 1 || !strings.HasSuffix(c.Deploy.GatewayUnit, ".service") || !strings.HasSuffix(c.Deploy.WorkerSlice, ".slice") {
 		return errors.New("deploy worker_unit, gateway_unit and worker_slice have incorrect suffixes")
 	}
+	if _, err := c.IsolationMode(); err != nil {
+		return err
+	}
+	if c.Deploy.Isolation == IsolationBwrap {
+		if !accountNameRE.MatchString(c.Deploy.WorkerUser) || len(c.Deploy.WorkerUser) > 32 {
+			return errors.New("deploy.worker_user must be one existing unprivileged account name when isolation is bwrap")
+		}
+		if !filepath.IsAbs(c.Deploy.BwrapBin) || filepath.Clean(c.Deploy.BwrapBin) != c.Deploy.BwrapBin || strings.ContainsAny(c.Deploy.BwrapBin, " \t\r\n\x00;{}\"'\\$") {
+			return errors.New("deploy.bwrap_bin must be a clean absolute path without shell metacharacters")
+		}
+		if !unitNameRE.MatchString(c.Deploy.WorkerUnitBwrap) || strings.HasPrefix(c.Deploy.WorkerUnitBwrap, "-") ||
+			!strings.HasSuffix(c.Deploy.WorkerUnitBwrap, "@.service") || strings.Count(c.Deploy.WorkerUnitBwrap, "@") != 1 {
+			return errors.New("deploy.worker_unit_bwrap must be a safe systemd template name ending in @.service")
+		}
+		if c.Deploy.WorkerUnitBwrap == c.Deploy.WorkerUnit {
+			return errors.New("deploy.worker_unit_bwrap must differ from worker_unit: the two isolation modes need different unit templates")
+		}
+	}
 	return nil
 }
+
+// IsolationMode validates and returns the configured isolation mode.
+func (c *Config) IsolationMode() (string, error) {
+	switch c.Deploy.Isolation {
+	case "", IsolationUser:
+		return IsolationUser, nil
+	case IsolationBwrap:
+		return IsolationBwrap, nil
+	default:
+		return "", fmt.Errorf("deploy.isolation must be %q or %q", IsolationUser, IsolationBwrap)
+	}
+}
+
+// Isolation modes for tenant workers.
+const (
+	// IsolationUser gives every tenant its own Linux account (UID boundary).
+	IsolationUser = "user"
+	// IsolationBwrap runs every worker as one shared unprivileged account
+	// inside a per-tenant bubblewrap mount namespace, creating no per-tenant
+	// OS user.
+	IsolationBwrap = "bwrap"
+)
 
 func rangesOverlap(aLo, aHi, bLo, bHi int) bool { return aLo <= bHi && bLo <= aHi }
 

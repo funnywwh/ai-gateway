@@ -44,6 +44,27 @@ type Tenant struct {
 	DirectoryPicker  string         `json:"directory_picker,omitempty"`
 	PluginBrowserFS  string         `json:"plugin_browser_fs,omitempty"`
 	ModelsPending    bool           `json:"models_pending,omitempty"`
+	// Isolation records which confinement mode this tenant's worker uses.
+	// Empty means the historical per-tenant-OS-user mode, so registries written
+	// before the field existed keep loading unchanged.
+	Isolation string `json:"isolation,omitempty"`
+}
+
+// Isolation values recorded on a tenant. They mirror config.IsolationUser and
+// config.IsolationBwrap; the registry package keeps its own literals so it
+// stays independent of the configuration package's vocabulary.
+const (
+	IsolationUser  = "user"
+	IsolationBwrap = "bwrap"
+)
+
+// EffectiveIsolation resolves a tenant's mode, treating the empty legacy value
+// as the per-tenant-OS-user mode.
+func (t Tenant) EffectiveIsolation() string {
+	if t.Isolation == "" {
+		return IsolationUser
+	}
+	return t.Isolation
 }
 
 func (t Tenant) Prefixes() []string {
@@ -153,6 +174,9 @@ func validateTenant(t Tenant) error {
 	}
 	if t.Handshake != HandshakePending && t.Handshake != HandshakeOK && t.Handshake != HandshakeFailed {
 		return fmt.Errorf("tenant %s has invalid handshake state", t.Name)
+	}
+	if t.Isolation != "" && t.Isolation != IsolationUser && t.Isolation != IsolationBwrap {
+		return fmt.Errorf("tenant %s has invalid isolation mode %q", t.Name, t.Isolation)
 	}
 	if !validPrefix(t.KeyPrefix) {
 		return fmt.Errorf("tenant %s key prefix must be 12 printable non-space ASCII characters", t.Name)

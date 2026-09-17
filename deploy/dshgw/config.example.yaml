@@ -60,3 +60,15 @@ deploy:
   gateway_group: dshgw
   dsh_user_prefix: dsh-
   corepack_bin: /opt/dsh/node/bin/corepack
+  # 租户隔离模式（M56）：
+  #   user  —— 默认。每租户一个 OS 账号（dsh-<name>），真正的 UID 边界。
+  #   bwrap —— 不创建每租户 OS 用户；所有 worker 以共享的非特权账号
+  #            （worker_user）运行，每个租户在独立的 bubblewrap mount
+  #            namespace 内只能看到自己的 workspace/DSH home，宿主机文件、
+  #            其他租户目录和 /etc/dshgw 敏感配置一律不可见。
+  #            前置条件：宿主机开启 apparmor_restrict_unprivileged_userns=1
+  #            （dshgw doctor 会检查）。两种模式不可在同一部署内混用。
+  isolation: user
+  worker_user: dshgw             # 仅 isolation: bwrap 时使用；建议复用 gateway_user，禁止 root
+  bwrap_bin: /usr/bin/bwrap      # bubblewrap 可执行文件
+  worker_unit_bwrap: dsh-worker-bwrap@.service

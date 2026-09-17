@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/contract"
 	"github.com/winger/ai-gateway/internal/dshgw/proxy"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/winger/ai-gateway/internal/dshgw/sandbox"
 	"github.com/winger/ai-gateway/internal/dshgw/securefile"
 	"github.com/winger/ai-gateway/internal/dshgw/tenancy"
 	"os"
@@ -263,8 +265,10 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 		run  func() error
 	}
 	needBrowserFS := deps.cfg.PluginBrowserFS == "on"
+	bwrapActive := deps.cfg.Deploy.Isolation == config.IsolationBwrap
 	for _, tenant := range deps.reg.List() {
 		needBrowserFS = needBrowserFS || tenant.PluginBrowserFS == "on"
+		bwrapActive = bwrapActive || tenant.EffectiveIsolation() == registry.IsolationBwrap
 	}
 	checks := []check{
 		{"shared-state-traversal", func() error { return checkSharedTraversal(deps.cfg.StateDir) }},
@@ -315,6 +319,18 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 			return err
 		}},
 	}
+	if bwrapActive {
+		// The bwrap isolation mode's preconditions. They are only checked when
+		// the mode is actually in use, so a per-tenant-account deployment is
+		// never blocked by requirements it does not have.
+		checks = append(checks,
+			check{"bwrap-bin", func() error { return executable(deps.cfg.Deploy.BwrapBin) }},
+			check{"bwrap-apparmor-userns", checkAppArmorUserNSRestriction},
+			check{"bwrap-sandbox-runtime", func() error { return sandbox.ValidateRuntime(sandboxRuntimeConfig(deps.cfg)) }},
+			check{"bwrap-worker-account", func() error { return sandbox.ValidateWorkerAccount(deps.cfg.Deploy.WorkerUser) }},
+			check{"worker-unit-bwrap", func() error { return checkBwrapWorkerUnit(deps.cfg) }},
+		)
+	}
 	failures := 0
 	for _, item := range checks {
 		err := item.run()
@@ -338,6 +354,14 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 			{"tenant-" + tenant.Name + "-settings", func() error {
 				return securefile.CheckPermissions(filepath.Join(tenant.DshHome, "settings.yaml"), 0o600)
 			}},
+		}
+		if tenant.EffectiveIsolation() == registry.IsolationBwrap {
+			// Proves the tenant's own profile still builds and that its roots
+			// grant nothing to an unrelated user: in shared-account mode those
+			// permission bits are the second line of defence behind the mounts.
+			tenantChecks = append(tenantChecks, check{"tenant-" + tenant.Name + "-sandbox", func() error {
+				return deps.manager.SandboxProfileReady(tenant)
+			}})
 		}
 		for _, item := range tenantChecks {
 			if err := item.run(); err != nil {

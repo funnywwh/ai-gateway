@@ -20,6 +20,7 @@ import (
 	"github.com/winger/ai-gateway/internal/dshgw/aigw"
 	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/winger/ai-gateway/internal/dshgw/sandbox"
 	"github.com/winger/ai-gateway/internal/dshgw/securefile"
 	"github.com/winger/ai-gateway/internal/dshgw/session"
 )
@@ -61,6 +62,14 @@ type Manager struct {
 	Taken    func(int) bool
 	Probe    func(context.Context, registry.Tenant) error
 	Now      func() time.Time
+	// WorkerAccount validates the shared account a bwrap-mode worker runs as.
+	// Tests inject a stub; production uses sandbox.ValidateWorkerAccount, which
+	// additionally requires the account to exist on the host.
+	WorkerAccount func(string) error
+	// RuntimeCheck validates the host-side bindings a bwrap profile needs.
+	// Tests inject sandbox.ValidateBindings; production uses
+	// sandbox.ValidateRuntime, which also requires the host's linker layout.
+	RuntimeCheck func(sandbox.Runtime) error
 }
 
 func (m *Manager) runner() Runner {
@@ -79,12 +88,51 @@ func (m *Manager) run(ctx context.Context, path string, args ...string) ([]byte,
 	return m.runner().Run(ctx, Command{Path: path, Args: args})
 }
 func (m *Manager) user(name string) string { return m.Config.Deploy.DshUserPrefix + name }
+
+// unit returns the systemd instance a tenant's worker runs as, in that tenant's
+// effective isolation mode. The template follows the tenant's recorded
+// isolation, not only the deployment default: a deployment that switched modes
+// must still stop, restart and remove a tenant with the unit it actually runs
+// under. If the recorded mode cannot be resolved right now (for example the
+// sandbox runtime is mid-upgrade), the recorded mode still selects the template
+// family, so a bwrap tenant is never restarted under the per-user unit.
 func (m *Manager) unit(name string) string {
 	template := m.Config.Deploy.WorkerUnit
+	if tenant, ok := m.Registry.Get(name); ok {
+		if spec, err := m.WorkerSpecFor(tenant); err == nil {
+			template = spec.UnitTemplate
+		} else if tenant.EffectiveIsolation() == registry.IsolationBwrap {
+			template = m.Config.Deploy.WorkerUnitBwrap
+		}
+	} else if m.configuredIsolation() == registry.IsolationBwrap {
+		template = m.Config.Deploy.WorkerUnitBwrap
+	}
 	if template == "" {
 		template = "dsh-worker@.service"
 	}
-	return strings.Replace(template, "@.service", "@"+name+".service", 1)
+	return workerUnitNameFor(template, name)
+}
+
+// configuredIsolation is the deployment default for new tenants, already
+// validated by config loading.
+func (m *Manager) configuredIsolation() string {
+	if m.Config.Deploy.Isolation == config.IsolationBwrap {
+		return registry.IsolationBwrap
+	}
+	return registry.IsolationUser
+}
+
+// workerOwner returns the account that must own a tenant's writable roots. In
+// the per-tenant-account mode that is the tenant's own account; in the shared
+// bwrap mode it is the single worker account.
+func (m *Manager) workerOwner(t registry.Tenant) (string, error) {
+	if t.EffectiveIsolation() != registry.IsolationBwrap {
+		return m.user(t.Name), nil
+	}
+	if err := m.checkWorkerAccount(); err != nil {
+		return "", err
+	}
+	return m.Config.Deploy.WorkerUser, nil
 }
 
 func (m *Manager) WithLifecycleLock(operation func() error) error {
@@ -153,7 +201,7 @@ func (m *Manager) createLocked(ctx context.Context, name, key string, models []s
 	if err != nil {
 		return created, err
 	}
-	created = registry.Tenant{Name: name, PublicPort: pub, WorkerPort: worker, KeyPrefix: key[:12], DshHome: filepath.Join(m.Config.TenantRoot, name, ".dsh"), Workspace: filepath.Join(m.Config.WorkspaceRoot, name), CreatedAt: m.now(), Handshake: registry.HandshakePending, DirectoryPicker: picker, PluginBrowserFS: browser, ModelsPending: len(models) == 0}
+	created = registry.Tenant{Name: name, PublicPort: pub, WorkerPort: worker, KeyPrefix: key[:12], DshHome: filepath.Join(m.Config.TenantRoot, name, ".dsh"), Workspace: filepath.Join(m.Config.WorkspaceRoot, name), CreatedAt: m.now(), Handshake: registry.HandshakePending, DirectoryPicker: picker, PluginBrowserFS: browser, ModelsPending: len(models) == 0, Isolation: m.configuredIsolation()}
 	paths := []string{filepath.Dir(created.DshHome), created.Workspace, filepath.Join(m.Config.Deploy.TenantConfigRoot, name)}
 	handshakePath := filepath.Join(m.Config.HandshakeDir, name+".url")
 	// A removed tenant may deliberately retain its data. Never adopt or clean
@@ -235,11 +283,27 @@ func (m *Manager) createLocked(ctx context.Context, name, key string, models []s
 			return created, err
 		}
 	}
-	if _, err = m.run(ctx, "useradd", "--system", "--user-group", "--no-create-home", "--home-dir", created.Workspace, "--shell", "/usr/sbin/nologin", user); err != nil {
+	owner, err := m.workerOwner(created)
+	if err != nil {
 		return created, err
 	}
-	userCreated = true
-	uidOut, runErr := m.run(ctx, "id", "-u", user)
+	if created.EffectiveIsolation() == registry.IsolationBwrap {
+		// No per-tenant account exists in this mode: one shared unprivileged
+		// account runs every worker, and the per-tenant bubblewrap mount
+		// namespace plus the hosts permission bits are what separate tenants.
+		if _, err = m.run(ctx, "id", "-u", owner); err != nil {
+			return created, err
+		}
+		if err = m.SandboxProfileReady(created); err != nil {
+			return created, err
+		}
+	} else {
+		if _, err = m.run(ctx, "useradd", "--system", "--user-group", "--no-create-home", "--home-dir", created.Workspace, "--shell", "/usr/sbin/nologin", user); err != nil {
+			return created, err
+		}
+		userCreated = true
+	}
+	uidOut, runErr := m.run(ctx, "id", "-u", owner)
 	if runErr != nil {
 		err = runErr
 		return created, err
@@ -264,24 +328,14 @@ func (m *Manager) createLocked(ctx context.Context, name, key string, models []s
 	if err = WriteArtifacts(artifacts); err != nil {
 		return created, err
 	}
-	if _, err = m.run(ctx, "chown", "-R", user+":"+user, filepath.Join(m.Config.TenantRoot, name), created.Workspace); err != nil {
+	if _, err = m.run(ctx, "chown", "-R", owner+":"+owner, filepath.Join(m.Config.TenantRoot, name), created.Workspace); err != nil {
 		return created, err
 	}
 	if _, err = m.run(ctx, "chown", "-R", "root:"+m.Config.Deploy.GatewayGroup, filepath.Join(m.Config.Deploy.TenantConfigRoot, name)); err != nil {
 		return created, err
 	}
-	// Root's ability to read the artifact is not proof that the independent
-	// worker UID can traverse shared parents. Test access as that exact UID
-	// before publishing it or starting systemd; no secret content is printed.
-	for _, probe := range []struct{ flag, path string }{
-		{"-r", filepath.Join(created.DshHome, "settings.yaml")},
-		{"-r", filepath.Join(created.DshHome, ".credentials.yaml")},
-		{"-w", created.DshHome},
-		{"-w", created.Workspace},
-	} {
-		if _, err = m.run(ctx, "runuser", "-u", user, "--", "/usr/bin/test", probe.flag, probe.path); err != nil {
-			return created, fmt.Errorf("worker UID cannot access %s; check shared parent search permissions: %w", probe.path, err)
-		}
+	if err = m.VerifyWorkerAccess(ctx, created); err != nil {
+		return created, err
 	}
 	if err = m.Registry.Put(created); err != nil {
 		return created, err
