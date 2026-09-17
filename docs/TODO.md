@@ -162,6 +162,15 @@
   `/stats` 的 `request_log.batching.backpressure` 在涨，就是队列满了在背压，需要调大
   `batch_queue_bytes` / `batch_max_bytes`，或排查请求体为何变得很大
 
+- [ ] 观察项（2026-09-17，v0.17.0 发布时发现）：**SIGTERM 停机时审计队列在宽限内排不空**。
+  实测日志：`msg="shutting down"` → 15 秒后 `level=WARN msg="graceful shutdown incomplete"
+  err="context deadline exceeded"` + `level=ERROR msg="audit write queue could not be drained"
+  err="store: log writer drain timed out with work left: context deadline exceeded"`（库 5.4 GB，
+  当次由沙箱回收触发 SIGTERM）。现象是**停机慢**而不是丢数据（未排空的行按 M26 的兜底留在队列/重试路径，
+  下次启动的 `batching_*` 指标可核对），但"关服务要等十几秒且仍然超时"本身值得单独看：
+  是 drain 的实现问题，还是宽限期对真实库偏短。判据：在 8088 上发一次 SIGTERM，量 `shutting down`
+  到进程退出的耗时，并核对重启后 `request_log.batching` 的丢弃/重试计数是否为 0
+
 ## M27 请求日志的身份维度与消耗度量
 > 本节已完成的 14 项记录见 `docs/todo_done.md` 的同名小节；下面只列未完成项。
 

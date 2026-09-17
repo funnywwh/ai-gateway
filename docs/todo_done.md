@@ -3468,7 +3468,27 @@ sha256 与压缩镜像全部相同），但"曾经不是"可证：M50 随 0.14.1
 | 构建 | `scripts/release.sh minor` → `ui: minified 37 files 572454 -> 336354 bytes (-41%); gzip 32 files 333993 -> 132850 bytes (-60%)`；`bin/aigw` 21,986,543 B |
 | 部署目标 | **本机 `:8088`**（`/home/winger/work/ai_gateway`，`scripts/local-run.sh`；用户指定，非 gpt001） |
 | 回滚点 | `bin/aigw.prev-0.16.0-9dc4ed2`（从正在运行的 `9dc4ed2` 进程的 `/proc/<pid>/exe` 取出，`-version` 自证 0.16.0；更早还有 `bin/aigw.prev-0.14.0-6bf8dce`、`bin/aigw.prev-running-0.14.0-6dc9082`） |
-| 部署方式 | `make build`（随 release.sh）→ `scripts/local-run.sh restart`（先按 pidfile 优雅停止，再 `setsid` 起新实例，以端口是否被监听为存活判据） |
+| 部署方式 | ①`make build`（随 release.sh）；②`scripts/local-run.sh restart`（先按 pidfile 优雅停止旧实例，再 `setsid` 起新实例）——**这一步在 DSH 会话里做会被沙箱回收**（见下方「部署事故」）；③最终改用 `systemd-run --user --unit=aigw-local`（transient unit）启动，并由 `systemctl --user show -p MainPID` 回写 `data/aigw-local.pid`，使既有脚本的 status/stop/logs 仍可用 |
+
+### 部署事故与修正（重要，值得记住）
+
+第一次部署（17:27）用 `scripts/local-run.sh restart` 在 DSH 沙箱里执行：新实例正常起来并逐项通过验证
+（下表数据都取自它），但 **17:30:05 收到 SIGTERM 并干净退出**——那是 DSH 沙箱被回收时对
+`bwrap --unshare-pid --die-with-parent` 进程树的清理，**不是崩溃**（日志是 `msg="shutting down"`，
+不是 panic）。旧实例也是被这条同一次 `restart` 停掉的，因此 17:30–17:36 之间 `:8088` 处于**不可用**状态。
+
+`scripts/local-run.sh` 头部早就写明「请在普通终端里运行本脚本，不要在 DSH 的命令/后台任务里跑」，这次是
+实证：`setsid` 也留不住（回收有约 3 分钟延迟，所以中途的 status 检查会给出"一切正常"的假象）。
+
+修正：改用 **systemd 用户单元**（`systemd-run --user`，Linger=yes 的用户管理器）。服务不再是沙箱进程树的
+子进程，因此不受 `--die-with-parent` 影响；实测跨工具调用、跨 5 分钟持续存活（远超旧实例被回收的 3 分钟），
+`Active: active (running)`、`MainPID` 可见、`kill -0` 成功。
+
+- 查看：`systemctl --user status aigw-local`；日志：`journalctl --user -u aigw-local` 或 `data/aigw-local.log`
+- 停止：`systemctl --user stop aigw-local`（`Restart=on-failure` 不覆盖 SIGTERM，所以 `scripts/local-run.sh stop`
+  的 `kill <MainPID>` 同样有效，不会被自动拉起）
+- **transient 单元不跨重启**：与改动前的 durability 相同（以前手动起的实例也不跨重启）。若希望开机自启，
+  需要写一份常驻 unit 到 `~/.config/systemd/user/` 并 `enable`——尚未做，待用户决定
 
 ### 验证（缺一不可，全部实测）
 
@@ -3477,8 +3497,10 @@ sha256 与压缩镜像全部相同），但"曾经不是"可证：M50 随 0.14.1
 | `GET /version` | `{"revision":"c8df8b8","ui":"minified","ui_encoding":"gzip","version":"0.17.0"}`（M39 的版本出口；控制台左上角角标读同一个端点，故角标显示 `v0.17.0 c8df8b8`） |
 | `GET /healthz` | `{"revision":"c8df8b8","status":"ok","ui":"minified","ui_encoding":"gzip","version":"0.17.0"}` |
 | `GET /readyz` | HTTP 200 |
-| `local-run.sh status` | `running (pid 1501458) listen=:8088`；`health: … -> HTTP 200`；`console: minified · transfer: gzip` |
+| `local-run.sh status` | `running (pid 1509383) listen=:8088`；`health: … -> HTTP 200`；`console: minified · transfer: gzip`（pid 为 systemd 单元的 MainPID） |
 | 启动日志 | `msg="aigw starting" version=0.17.0 revision=c8df8b8 ui=minified ui_encoding=gzip listen=:8088`；`registry loaded … ready=true`；`msg="provider cost cap ready" refresh=5s`；**本次启动 0 条 `level=ERROR`**（日志里两条历史 ERROR 分别是 09-15 17:39、09-17 11:53 的 settlement 回退，与新实例无关） |
+| 存活（关键） | 起于 17:36:14，跨工具调用与 ≥5 分钟持续 `active (running)`；无 `shutting down`、无 WARN/ERROR。对照：17:27 那次在 ~3 分钟时被沙箱回收 |
+| 数据面/控制面在线 | `/readyz` 200、`/admin/ui/` 200、`/v1/models` 401（未带 Key，说明数据面在线）、`/admin/api/v1/providers` 401（管理面在线） |
 | 迁移 0021（M56） | 线上库（5.4 GB）`schema_migrations` = 21 条、max 21；6 个供应商全部 `cost_limit_micros=0 / cost_period=none / cost_window_start=NULL` —— 即"不限"，行为与升级前一致（没有动任何供应商配置） |
 | 传输层压缩（M55） | 带 `Accept-Encoding: gzip` 取 `/admin/ui/js/pages/providers.js`：`Content-Encoding: gzip`、`Content-Length: 7428`、`Vary: Accept-Encoding`；不带：`Content-Length: 19880`（同一资源，覆盖 M56 新列所在页面） |
 | M56 的指标 | `/metrics` 本次**没有** `aigw_provider_cost_*` 序列——这是设计行为：没有供应商设上限时不发布该块（默认部署零开销），不是回归 |
@@ -3490,3 +3512,9 @@ sha256 与压缩镜像全部相同），但"曾经不是"可证：M50 随 0.14.1
   与"周期自动重新起算"两条仍待人工用管理员会话验证。M56 自身的功能面由自动化验收覆盖
   （`make test`、`make ui-check` 的 `cost` 视图、`internal/httpapi/provider_cost_test.go` 端到端）。
 - 没有部署到 gpt001（本次用户指定只部署本机 `:8088`）。
+- 开机自启：当前是 transient 单元，重启机器后仍需手动起（与改动前同）。是否落一份常驻 unit 并 `enable`
+  待用户决定。
+- 顺带发现（已另立观察项到 `docs/TODO.md`）：SIGTERM 优雅停机时，审计写队列在 15 秒宽限内没排空
+  （`msg="graceful shutdown incomplete" err="context deadline exceeded"` +
+  `level=ERROR msg="audit write queue could not be drained"`）。发生在 5.4 GB 库上、由沙箱回收触发，
+  与 M56 无关，但说明停机路径在真实库上的耗时超出宽限。
