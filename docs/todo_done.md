@@ -3283,3 +3283,11 @@ harness 之所以漏掉它，是因为 fixture 直接给了 `account_count` 字�
 - [x] webui 账号列表 DSH 徽标与“启用 DSH/停用 DSH”按钮（confirmDialog 语义说明停用影响）
 - [x] dshgw `dsh_enforce`（login/interval/per-request）+ 登录/请求期执行点 + nil Authorizer fail-closed + 拒绝缓存
 - [x] 回归：httpapi 新增 authorize/开关矩阵测试；dshgw 新增 7 项执行点测试；`go test ./...`、`go vet`、`make dshgw-verify`、`make dshgw-nginx-test`、UI harness 全部视图、30 项 fake 回归通过
+
+
+## v0.15.0 发布记录（M51+M52，本机 8088）
+
+- 2026-09-17：`scripts/release.sh minor` → 0.15.0，commit/tag `2616022`（含 255d89d M52 与 5180614 M51）。
+- 部署：`scripts/local-run.sh restart` 本机 :8088；`GET /version` 返回 0.15.0/2616022，healthz/readyz 200，启动日志无 ERROR；v1/models 无凭据 401（数据面正常）；dshgw 门户 200；dshgw.service 与 dshgw-admin.service active；dshgw 二进制同版（0.15.0/2616022）。
+- 回滚点：上一运行版本 0.14.1/dev（tag v0.14.1 构建可复现）；本发布未改动 config.yaml 与数据。
+- 遗留：M52 rev2 主机验收（后台启用/停用全流程、新建 Key 免绑定登录）与 DSH 上游限制决策（A/B）仍在 TODO。
