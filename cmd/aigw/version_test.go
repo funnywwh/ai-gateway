@@ -11,28 +11,39 @@ import (
 // build identity that gets written down — which makes this line a contract, not decoration.
 func TestVersionLineNamesTheConsoleShape(t *testing.T) {
 	cases := []struct {
-		shape string
-		want  string
+		shape    string
+		encoding string
+		want     []string
 	}{
-		{"minified", "console minified"},
-		{"source", "console source"},
+		{"minified", "gzip", []string{"console minified", "transfer gzip"}},
+		{"source", "identity", []string{"console source", "transfer identity"}},
 	}
 	for _, tc := range cases {
-		t.Run(tc.shape, func(t *testing.T) {
-			restore := uiAssets
-			uiAssets = tc.shape
-			t.Cleanup(func() { uiAssets = restore })
+		t.Run(tc.shape+"-"+tc.encoding, func(t *testing.T) {
+			restoreAssets, restoreEncoding := uiAssets, uiEncoding
+			uiAssets, uiEncoding = tc.shape, tc.encoding
+			t.Cleanup(func() { uiAssets, uiEncoding = restoreAssets, restoreEncoding })
 
 			got := versionLine()
-			if !strings.Contains(got, tc.want) {
-				t.Errorf("versionLine() = %q, want it to contain %q", got, tc.want)
-			}
-			for _, part := range []string{version, revision, date} {
-				if !strings.Contains(got, part) {
-					t.Errorf("versionLine() = %q, want it to contain %q", got, part)
+			for _, want := range append(tc.want, version, revision, date) {
+				if !strings.Contains(got, want) {
+					t.Errorf("versionLine() = %q, want it to contain %q", got, want)
 				}
 			}
 		})
+	}
+}
+
+// TestVersionLineDefaultEncodingIsIdentity is the second half of "the default cannot
+// overstate the binary": a hand build serves the assets it embedded, uncompressed, and
+// saying "gzip" there would send whoever reads the release record looking for a feature
+// that is not in the file.
+func TestVersionLineDefaultEncodingIsIdentity(t *testing.T) {
+	if uiEncoding != "identity" {
+		t.Fatalf("uiEncoding default = %q, want %q: only `make build` may claim gzip", uiEncoding, "identity")
+	}
+	if got := versionLine(); !strings.Contains(got, "transfer identity") {
+		t.Errorf("versionLine() = %q, want the unset default to read %q", got, "transfer identity")
 	}
 }
 

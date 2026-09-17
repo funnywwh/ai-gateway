@@ -25,7 +25,7 @@
 | D2 | 工具用 **esbuild 的 Go API**（`github.com/evanw/esbuild/pkg/api`），只调 `api.Transform`（**逐文件、不 bundle、不 splitting**） | 逐文件转译保持"同名文件 + 同相对 import 说明符 + 原生 ESM"这一形态，于是 CSP、缓存头、SPA 回落、`base.js` 的挂载推导全部无需改动。**否决** bundle：`router.js` 的 `import(route.module)` 是变量，esbuild 无法静态解析，页面要么丢失、要么必须改成静态导入（丢掉懒加载），收益仅是省掉同源小请求 |
 | D3 | 交由 esbuild 的**局部**重命名，**绝不**碰属性名/字符串 | `--mangle-props` 会改到 `el('button', {class:…})` 这类属性键、`{value:'inherit'}` 这类服务端枚举、以及 DOM id（`#form_`/`#f_`/`#b_` 是模型协议的一部分）。收益有限、风险致命，不做 |
 | D4 | 产物**不进仓库**：`make build` 先把资源压缩到 `.cache/ui-dist/`，再用 **`go build -overlay`** 把它嵌进二进制 | 已实测：`-overlay` 对 `//go:embed` 生效、支持相对路径、多余条目无害，`go test`/`go vet` 不带 overlay 时读的仍是源码。于是**工作区一个字节都不被改写**，`git status` 干净，回滚就是"不带 overlay 再编译一次"。**否决**（用户确认）在仓库里提交 `static-dist/`：多 330 KB 生成代码、每次改前端都要重新生成，且要靠一条测试防漂移 |
-| D5 | **不做**传输层预压缩（.br/.gz + `Content-Encoding`） | 控制台是同源控制面、内网/同机访问，收益远小于它所牵动的面：embed 形态、`Vary` 头、缓存策略、`Accept-Encoding` 协商。用户确认本次不做 |
+| D5 | **不做**传输层预压缩（.br/.gz + `Content-Encoding`） | 控制台是同源控制面、内网/同机访问，收益远小于它所牵动的面：embed 形态、`Vary` 头、缓存策略、`Accept-Encoding` 协商。用户确认本次不做。**→ 已由 M55 实现**（`docs/design/m55-console-transfer-compression.md`：实测 overlay 能把新增文件喂给 `//go:embed`，于是 embed 形态无需改动；协商与 `Vary` 的取舍在该文档 D5/D6 逐条给出） |
 | D6 | 服务层 `embed.go` **逻辑零改动**，只改包注释 | 镜像与源码同名同路径、同为原生 ESM，`Handler()` 的 `fs.Sub`/SPA 回落/`setCacheHeaders`/CSP 全部照旧。改动面越小越好 |
 | D7 | 压缩失败**必须让构建失败**，绝不回落成"悄悄用源码" | 回落的后果是"发出去的是可读代码而 nobody knows"，与本次目的直接相反。宁可 `make build` 红 |
 | D8 | 镜像**原子落盘**（临时目录 → rename），overlay JSON 最后写 | 中断的构建（^C、磁盘满）不能给编译器留下半个镜像——那会编出一个"少几个页面"的控制台 |

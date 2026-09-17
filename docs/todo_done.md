@@ -3354,3 +3354,63 @@ sha256 与压缩镜像全部相同），但"曾经不是"可证：M50 随 0.14.1
 - 未做（保留在 `docs/TODO.md`）：宿主执行 `make build` + `scripts/local-run.sh restart` 让 `:8088` 上的
   `ui` 字段生效（本沙箱与宿主不同 PID namespace，无法向宿主进程发信号）
 
+
+## M55 控制台资源的传输层压缩（gzip sidecar + Content-Encoding 协商，2026-09-17）
+
+设计：`docs/design/m55-console-transfer-compression.md`（§10 实现差异、§11 验收记录已回填）。
+起因：用户要求「添加前端压缩」——实勘发现 M50 的**混淆**压缩早已在线（8088 服务的
+`/admin/ui/js/pages/chat.js` 27,872 B，源码 65,093 B），缺的是**传输层**压缩：带
+`Accept-Encoding: gzip` 请求时响应没有任何 `Content-Encoding`。M50 §2 D5 当时明确缓做的正是这一项。
+
+- [x] `internal/webui/minify`：镜像里为 `.js/.css/.html/.svg` 生成 `<name>.gz` sidecar
+      （`BestCompression`、gzip 头不带 Name/ModTime → 确定性；省不到 256 B 就不写；`Options.Gzip` 可关）
+- [x] sidecar 经**同一条 overlay 通路**进二进制：`//go:embed static` 的目录展开走
+      `fsys.WalkDir → fsys.ReadDir`，而 `fsys.ReadDir` 会把 overlay 里映射到该目录的新文件合并进清单
+      —— 已实测（源目录里不存在的 `static/js/app.js.gz` 出现在 `go list -f '{{.EmbedFiles}}'` 里，且二进制读到它）。
+      于是仓库仍只有一个真值，`git status` 干净，`go test` 读到的仍是源码
+- [x] `cmd/minifyui`：`-gzip`（默认 true）+ 汇总行第二段（`gzip 32 files 330801 -> 131763 bytes (-60%)`）
+      与 overlay 条数；`-gzip=false` 是 A/B 对照入口
+- [x] `internal/webui/encoding.go`：`acceptsGzip`（显式 gzip `q>0`，或未显式列 gzip 时通配 `*` `q>0`）、
+      `hasSidecar`、`contentTypeFor`；Handler 重构出 `handler(root fs.FS)`，压缩分支可被 `fstest.MapFS` 触发
+      （否则 `go test` 永远看不到 `.gz`，这个分支将没有咬合力）
+- [x] 两分支都发 `Vary: Accept-Encoding`（仅在有 sidecar 时）；压缩分支显式覆盖 `Content-Type`
+      （FileServer 只在响应头未设时才按扩展名探测，否则 `.gz` 会被报成 `application/gzip`）；
+      显式设置 `Content-Length`（FileServer 对带 `Content-Encoding` 的响应拒绝设置长度）；
+      `setCacheHeaders(w, path)` 仍用**原始**路径；`AssetCount()` 跳过 `.gz`
+- [x] 生成侧与协商侧的「要不要压」规则**只在一处**（`minify.gzipEligible` + 256 B 阈值）：服务端只认
+      "有没有 sidecar"，不重复阈值，因此两边不会漂移
+- [x] 自述（沿用 M54 模式）：`-X main.uiEncoding`（默认 `identity`，与 `-overlay` 同行设 `gzip`）、
+      `-version` 加 `transfer gzip|identity`、启动日志 `ui_encoding`、`/version` 与 `/healthz` 加
+      `ui_encoding`（空→`unknown`）、`local-run.sh status` 打印 `console: … · transfer: …`
+- [x] 走查：`scripts/ui-harness/server.py` 支持 `UI_HARNESS_GZIP=1`（按 `Accept-Encoding` 发 `.gz`），
+      `run.sh` 在起浏览器前自检（`Content-Encoding: gzip`、压缩后更小、`gzip -dc` 与磁盘文件逐字节相同，
+      否则非 0 退出）——M50 §9 那次"没有咬合力的验证"不能再发生
+- [x] 测试：`minify_test.go`（sidecar 覆盖/解压一致/白名单与阈值边界/overlay 含 sidecar 且 key 不在源码树/
+      确定性含 gz/Gzip=false 复刻 M50 镜像）、`internal/webui/encoding_test.go`（11 种 `Accept-Encoding` 组合、
+      shell 与 SPA 回落协商、HEAD/404、`AssetCount` 不数 `.gz`）、`version_test.go` 扩展
+- [x] **变异验证**：不写 sidecar / overlay 漏 sidecar / `acceptsGzip` 忽略 `q=0` / `Vary` 只加在压缩分支
+      → 各自把对应测试打红（3/3/2/3 条 FAIL）
+
+### 实测
+
+| 检查 | 结果 |
+|---|---|
+| `make ui-dist` | `gzip 32 files 330801 -> 131763 bytes (-60%)`，overlay 67 条（35 改写 + 32 sidecar） |
+| sidecar 正确性 | 32/32 个 `gzip -dc` 后与镜像文件逐字节相同；连续两次生成镜像与 overlay 逐字节相同 |
+| `make build` / `make build-src` | 21,918,362 / 22,016,610 B —— **带 gzip 的发布产物仍比源码版小 98 KB**（混淆省 229 KB > sidecar 占 132 KB） |
+| `-version` | `…console minified, transfer gzip` / `…console source, transfer identity` |
+| 隔离端口 `:8111`/`:8112`（`:8111` 带 sidecar、`:8112` 无） | `/version`、`/healthz` 的 `ui`/`ui_encoding` 分别为 `minified/gzip`、`source/identity`；两实例 `level=ERROR` = 0 |
+| `curl -H 'Accept-Encoding: gzip'` 取 chat.js | 200、`Content-Encoding: gzip`、`Vary: Accept-Encoding`、`Content-Length: 10268`（原 27,872）、`Content-Type: text/javascript; charset=utf-8`；`gzip -dc` 与镜像文件 `cmp` 相同 |
+| 不带 `Accept-Encoding` | `:8111` 回 27,872 B（仍带 `Vary`）；`:8112` 回 65,093 B 且**无 `Vary`**（无 sidecar 时行为与改动前逐字节一致） |
+| `identity` / `gzip;q=0` / `br` / 空 / `br, *;q=1` / `deflate, gzip` | 前四个不发 gzip，后两个发（通配与显式列表各自生效） |
+| HEAD（压缩分支） | 无正文、`Content-Encoding: gzip`、`Content-Length` = 压缩后大小、类型不变 |
+| `/`、SPA 回落、`index.html`(301)、`missing.js`(404)、CSP、`Cache-Control` | 两个实例逐条一致，与改动前相同（shell 低于 256 B 阈值，未压缩） |
+| `UI_STATIC_DIR=镜像 UI_HARNESS_GZIP=1` 走查 | 自检行 `js/app.js 3007 -> 1593 B, Content-Encoding: gzip, Vary: Accept-Encoding`；**21 个视图全绿**，逐视图检查项与源码树基线完全相同。第一次跑时 `form` 报 "no report"（headless firefox 拆页抖动），同模式单视图重跑 78 项全过、整套重跑 21/21 全过 |
+| `go vet ./...` / `go test ./...` | 干净 / 全绿 |
+| 在跑的 `:8088` | 全程未受影响（`/version` 与二进制 sha 不变） |
+
+- [x] 提交：独立 M55 commit（引用设计文档），不改 `VERSION`、不打 tag、不发布
+- 未做：brotli/zstd（需新增依赖，收益约再 15%）、运行期压缩、CDN/边缘压缩、发布 sourcemap。
+  发版（升 `VERSION` → tag → 部署 gpt001）仍由 `release-version` skill 单独执行；本机 `:8088` 待宿主
+  `make build` + `scripts/local-run.sh restart` 后生效（与 M54 同一条待办）
+

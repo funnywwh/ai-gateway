@@ -35,9 +35,15 @@ make ui-check                                    # 同 run.sh（在 Makefile 里
 `UI_STATIC_DIR` 换掉被复制的那份控制台资源（默认 `internal/webui/static`，即源码）：
 
 ```sh
-make ui-dist                                                             # 生成压缩混淆镜像
+make ui-dist                                                             # 生成压缩混淆镜像 + gzip 副本
 UI_STATIC_DIR=$PWD/.cache/ui-dist/static scripts/ui-harness/run.sh       # 对压缩产物跑同一套走查
+# M55：连传输层压缩一起走查（静态服务器按 Accept-Encoding 发 .gz，浏览器必须能跑）
+UI_STATIC_DIR=$PWD/.cache/ui-dist/static UI_HARNESS_GZIP=1 scripts/ui-harness/run.sh
 ```
+
+`UI_HARNESS_GZIP=1` 要求 `UI_STATIC_DIR` 指向**镜像**（源码树没有 `.gz`），脚本在起浏览器之前先自检：
+带 `Accept-Encoding: gzip` 的响应必须带 `Content-Encoding: gzip`、必须比原字节小、且 `gzip -dc` 后与磁盘文件
+逐字节相同——否则直接以非 0 退出。没有这条自检，"压缩模式"很容易变成在未压缩字节上跑一遍而报全绿。
 
 **M50 起这是"压缩没有改变行为"的主要证据**：Go 侧的静态合约测试（`internal/webui/embed_test.go`、
 `internal/webui/tests/*.mjs`）读的是源码，看不到"只有压缩后才发生"的回归；对镜像跑一遍同样的

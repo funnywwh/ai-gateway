@@ -166,6 +166,12 @@ fi
 # `exec` is what makes `$!` the server's own pid: without it the shell forks a subshell for the
 # `cd && python3` list, `$!` names that short-lived subshell, and the kill below hits a dead pid
 # while the real server stays alive holding the port.
+# UI_HARNESS_GZIP=1 makes server.py answer a client that accepts gzip with the ".gz" sidecar,
+# which is what a release build embeds. Set it together with UI_STATIC_DIR pointing at the
+# mirror (make ui-dist leaves it in .cache/ui-dist/static): the source tree has no sidecars, so
+# the mode would silently do nothing there — and a walkthrough that reports "compression changed
+# nothing" without having been compressed is worse than no walkthrough (M50 §9's lesson, again).
+# The self-check below makes that impossible to get wrong quietly.
 (cd "$WORK/site" && exec python3 server.py "$PORT") >"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
 echo "$SERVER_PID" >"$WORK/server.pid"
@@ -184,6 +190,33 @@ if [ "$ready" != 1 ]; then
   echo "the harness server did not start; see $WORK/server.log" >&2
   tail -5 "$WORK/server.log" >&2 2>/dev/null
   exit 1
+fi
+
+# Gzip mode proves itself at the HTTP layer before a browser is involved: the only reason to run
+# this mode is to exercise the compressed path, so "the path was not exercised" must be a failure
+# rather than a green run over uncompressed bytes.
+if [ "${UI_HARNESS_GZIP:-}" = 1 ]; then
+  probe="js/app.js"
+  [ -f "$WORK/site/$probe" ] || { echo "gzip self-check: $probe is missing from $ASSETS" >&2; exit 2; }
+  plain_len=$(curl -s -o /dev/null -w '%{size_download}' "http://127.0.0.1:$PORT/$probe")
+  curl -s -D "$WORK/gzip.headers" -o "$WORK/gzip.body" -H 'Accept-Encoding: gzip' "http://127.0.0.1:$PORT/$probe"
+  gzip_len=$(wc -c <"$WORK/gzip.body")
+  encoding=$(tr -d '\r' <"$WORK/gzip.headers" | awk 'tolower($1)=="content-encoding:"{print $2}')
+  vary=$(tr -d '\r' <"$WORK/gzip.headers" | awk 'tolower($1)=="vary:"{print $2}')
+  problem=""
+  [ "$encoding" = "gzip" ] || problem="Content-Encoding is '${encoding:-<absent>}', want gzip"
+  if [ -z "$problem" ] && ! gzip -dc "$WORK/gzip.body" 2>/dev/null | cmp -s - "$WORK/site/$probe"; then
+    problem="the gzip body does not decompress to $probe; wrong bytes here is a silently broken console"
+  fi
+  if [ -z "$problem" ] && [ "$gzip_len" -ge "$plain_len" ]; then
+    problem="the compressed response ($gzip_len B) is not smaller than the plain one ($plain_len B)"
+  fi
+  if [ -n "$problem" ]; then
+    echo "gzip self-check FAILED: $problem" >&2
+    echo "  assets: $ASSETS — UI_HARNESS_GZIP=1 needs the mirror: make ui-dist, then UI_STATIC_DIR=\$PWD/.cache/ui-dist/static" >&2
+    exit 1
+  fi
+  echo "gzip self-check: $probe $plain_len -> $gzip_len B, Content-Encoding: gzip, Vary: ${vary:-<absent>}"
 fi
 
 for view in $VIEWS; do

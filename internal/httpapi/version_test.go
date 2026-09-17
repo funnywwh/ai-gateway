@@ -11,7 +11,7 @@ import (
 // answers with the build identity, needs no session, and does not depend on the database
 // being open (the fixture has no store at all, which is the point).
 func TestVersionEndpointIsPublicAndComplete(t *testing.T) {
-	s := New(Deps{Version: "1.2.3", Revision: "abc1234", UIAssets: "minified"})
+	s := New(Deps{Version: "1.2.3", Revision: "abc1234", UIAssets: "minified", UIEncoding: "gzip"})
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
@@ -40,6 +40,11 @@ func TestVersionEndpointIsPublicAndComplete(t *testing.T) {
 	if got["ui"] != "minified" {
 		t.Errorf("ui = %v, want minified", got["ui"])
 	}
+	// Same argument as the asset shape, for the transfer encoding: "is this instance
+	// serving compressed bytes?" used to need `curl -D-` and an eye for headers.
+	if got["ui_encoding"] != "gzip" {
+		t.Errorf("ui_encoding = %v, want gzip", got["ui_encoding"])
+	}
 }
 
 // TestVersionDeclaresAnUnknownShapeRatherThanOmittingIt keeps "this deployment is not
@@ -66,13 +71,16 @@ func TestVersionDeclaresAnUnknownShapeRatherThanOmittingIt(t *testing.T) {
 	if value != "unknown" {
 		t.Errorf("ui = %v, want unknown", value)
 	}
+	if encoding, ok := got["ui_encoding"]; !ok || encoding != "unknown" {
+		t.Errorf("ui_encoding = %v (present=%v), want unknown present", encoding, ok)
+	}
 }
 
 // TestHealthzCarriesTheSameBuildIdentity keeps the probe and the dedicated endpoint from
 // drifting: a deployment check reading /healthz must see the same revision an operator
 // reading /version sees. The console shape is part of that identity for the same reason.
 func TestHealthzCarriesTheSameBuildIdentity(t *testing.T) {
-	s := New(Deps{Version: "1.2.3", Revision: "abc1234", UIAssets: "source"})
+	s := New(Deps{Version: "1.2.3", Revision: "abc1234", UIAssets: "source", UIEncoding: "identity"})
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
@@ -91,6 +99,9 @@ func TestHealthzCarriesTheSameBuildIdentity(t *testing.T) {
 	if got["ui"] != "source" {
 		t.Errorf("healthz ui = %v, want source", got["ui"])
 	}
+	if got["ui_encoding"] != "identity" {
+		t.Errorf("healthz ui_encoding = %v, want identity", got["ui_encoding"])
+	}
 
 	// Both endpoints must agree on the shape, not merely each carry some value.
 	vresp, err := http.Get(ts.URL + "/version")
@@ -104,5 +115,8 @@ func TestHealthzCarriesTheSameBuildIdentity(t *testing.T) {
 	}
 	if versionBody["ui"] != got["ui"] {
 		t.Errorf("ui disagrees: /version = %v, /healthz = %v", versionBody["ui"], got["ui"])
+	}
+	if versionBody["ui_encoding"] != got["ui_encoding"] {
+		t.Errorf("ui_encoding disagrees: /version = %v, /healthz = %v", versionBody["ui_encoding"], got["ui_encoding"])
 	}
 }

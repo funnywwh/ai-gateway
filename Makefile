@@ -10,11 +10,13 @@ REVISION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -X main.version=$(VERSION) -X main.revision=$(REVISION) -X main.date=$(DATE)
 
-# The console is embedded minified in a release build. `ui-dist` writes a compressed mirror
-# of internal/webui/static plus an overlay file, and `go build -overlay` then embeds that
-# mirror — so the shipped binary carries stripped, renamed code while the working tree keeps
-# the readable source that the tests and `make ui-check` read. Both live under .cache/,
-# which is ignored by git. See docs/design/m50-frontend-minify.md.
+# The console is embedded minified and pre-compressed in a release build. `ui-dist` writes a
+# compressed mirror of internal/webui/static plus gzip sidecars plus an overlay file, and
+# `go build -overlay` then embeds all of it — so the shipped binary carries stripped,
+# renamed code and can answer a client that asks for gzip, while the working tree keeps the
+# readable source that the tests and `make ui-check` read. Everything generated lives under
+# .cache/, which is ignored by git. See docs/design/m50-frontend-minify.md and
+# docs/design/m55-console-transfer-compression.md.
 UIDIST ?= $(CURDIR)/.cache/ui-dist
 UI_OVERLAY ?= $(UIDIST)/overlay.json
 
@@ -40,13 +42,13 @@ ui-dist:
 	@$(GOENV) go build -trimpath -o $(UIDIST)/minifyui ./cmd/minifyui
 	@$(UIDIST)/minifyui -src internal/webui/static -out $(UIDIST)/static -overlay $(UI_OVERLAY)
 
-# build is the release shape: the console goes in minified. The -X and the -overlay are
-# deliberately on the same line — they are two halves of one fact, and a build that passed
-# one without the other would report a shape it does not carry. See
-# docs/design/m54-console-asset-shape.md.
+# build is the release shape: the console goes in minified and pre-compressed. The -X flags
+# and the -overlay are deliberately on the same line — they are two halves of one fact, and a
+# build that passed one without the other would report a shape it does not carry. See
+# docs/design/m54-console-asset-shape.md and docs/design/m55-console-transfer-compression.md.
 build: version-check ui-dist
 	@mkdir -p bin
-	@$(GOENV) go build -trimpath -ldflags "$(LDFLAGS) -X main.uiAssets=minified" -overlay $(UI_OVERLAY) -o bin/aigw ./cmd/aigw
+	@$(GOENV) go build -trimpath -ldflags "$(LDFLAGS) -X main.uiAssets=minified -X main.uiEncoding=gzip" -overlay $(UI_OVERLAY) -o bin/aigw ./cmd/aigw
 
 # build-src is the same binary with the assets as written: for debugging the console in a
 # form a human can read, or for checking that `ui-dist` changed nothing but the bytes. It
@@ -57,7 +59,7 @@ build: version-check ui-dist
 build-src: version-check
 	@echo "ui: source assets (not minified); wrote bin/aigw-src — bin/aigw is untouched"
 	@mkdir -p bin
-	@$(GOENV) go build -trimpath -ldflags "$(LDFLAGS) -X main.uiAssets=source" -o bin/aigw-src ./cmd/aigw
+	@$(GOENV) go build -trimpath -ldflags "$(LDFLAGS) -X main.uiAssets=source -X main.uiEncoding=identity" -o bin/aigw-src ./cmd/aigw
 
 test:
 	@$(GOENV) go test ./...

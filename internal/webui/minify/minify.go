@@ -16,6 +16,8 @@
 package minify
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +39,13 @@ type Options struct {
 	SourceDir   string // e.g. internal/webui/static
 	OutputDir   string // e.g. .cache/ui-dist/static
 	OverlayPath string // e.g. .cache/ui-dist/overlay.json
+	// Gzip writes a "<name>.gz" sidecar next to every asset worth compressing, so the
+	// server can answer a request with the compressed bytes and a Content-Encoding the
+	// client asked for. It is part of the mirror rather than of the server because that
+	// keeps per-request cost at zero and the compression rule in one auditable place;
+	// see docs/design/m55-console-transfer-compression.md. False keeps the M50 mirror
+	// byte for byte, which is what an A/B comparison wants.
+	Gzip bool
 }
 
 // FileResult is one file's outcome. Changed is false for anything that is not JavaScript
@@ -46,6 +55,9 @@ type FileResult struct {
 	SourceBytes int
 	OutputBytes int
 	Changed     bool
+	// GzipBytes is the size of this file's ".gz" sidecar, or 0 when it has none (below
+	// the saving floor, not a compressible kind, or gzip was switched off).
+	GzipBytes int
 }
 
 // Result summarizes a run so the CLI can print it and the tests can assert on it.
@@ -53,12 +65,38 @@ type Result struct {
 	Files       []FileResult // sorted by Path, so a run is reproducible line for line
 	SourceBytes int
 	OutputBytes int
-	Warnings    []string // esbuild warnings: reported, never fatal
-	Elapsed     time.Duration
+	// GzipFiles counts the ".gz" sidecars, and GzipRaw/GzipBytes are the sizes of the
+	// files that carry one: the numbers on the wire are what the summary reports, so
+	// "the mirror is smaller" and "what a client actually downloads" stay separate facts.
+	GzipFiles int
+	GzipRaw   int
+	GzipBytes int
+	// Sidecars lists the sidecar paths (slash-separated, relative to the mirror root),
+	// sorted. The overlay needs them: the compiler must embed files the source tree does
+	// not contain.
+	Sidecars []string
+	Warnings []string // esbuild warnings: reported, never fatal
+	Elapsed  time.Duration
 }
 
 // Percent returns how much smaller the mirror is, rounded to a whole percent.
 func (r Result) Percent() int { return percentSaved(r.SourceBytes, r.OutputBytes) }
+
+// PercentGzip returns the saving a client sees for the files that carry a sidecar.
+func (r Result) PercentGzip() int { return percentSaved(r.GzipRaw, r.GzipBytes) }
+
+// OverlayEntries counts what the overlay file carries: every rewritten file plus every
+// sidecar. It is derived rather than stored so the number printed by the CLI cannot
+// disagree with what writeOverlay actually wrote.
+func (r Result) OverlayEntries() int {
+	n := len(r.Sidecars)
+	for _, f := range r.Files {
+		if f.Changed {
+			n++
+		}
+	}
+	return n
+}
 
 // PercentOf returns one file's saving, the same way.
 func (r Result) PercentOf(f FileResult) int { return percentSaved(f.SourceBytes, f.OutputBytes) }
@@ -131,7 +169,7 @@ func Run(opts Options) (Result, error) {
 		return res, fmt.Errorf("clear %s: %w", tmp, err)
 	}
 
-	if err := writeMirror(opts.SourceDir, tmp, &res); err != nil {
+	if err := writeMirror(opts.SourceDir, tmp, opts.Gzip, &res); err != nil {
 		_ = os.RemoveAll(tmp)
 		return res, err
 	}
@@ -140,12 +178,13 @@ func Run(opts Options) (Result, error) {
 		return res, err
 	}
 	if opts.OverlayPath != "" {
-		if err := writeOverlay(opts.OverlayPath, opts.SourceDir, opts.OutputDir, res.Files); err != nil {
+		if err := writeOverlay(opts.OverlayPath, opts.SourceDir, opts.OutputDir, res.Files, res.Sidecars); err != nil {
 			return res, err
 		}
 	}
 
 	sort.Slice(res.Files, func(i, j int) bool { return res.Files[i].Path < res.Files[j].Path })
+	sort.Strings(res.Sidecars)
 	res.Elapsed = time.Since(start)
 	return res, nil
 }
@@ -153,7 +192,7 @@ func Run(opts Options) (Result, error) {
 // writeMirror walks the source tree and writes every file into dst, transforming the two
 // kinds this package understands and copying the rest. The 1:1 file set is a contract the
 // tests enforce: a file that silently failed to be copied would 404 in the console.
-func writeMirror(srcDir, dstDir string, res *Result) error {
+func writeMirror(srcDir, dstDir string, gzipOn bool, res *Result) error {
 	return filepath.WalkDir(srcDir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -192,16 +231,72 @@ func writeMirror(srcDir, dstDir string, res *Result) error {
 			return err
 		}
 
-		res.Files = append(res.Files, FileResult{
+		file := FileResult{
 			Path:        filepath.ToSlash(rel),
 			SourceBytes: len(source),
 			OutputBytes: len(output),
 			Changed:     changed,
-		})
+		}
+
+		if gzipOn && gzipEligible(rel) {
+			packed, err := compress(output)
+			if err != nil {
+				return fmt.Errorf("%s: %w", rel, err)
+			}
+			// The floor is what keeps a sidecar from being a pessimisation: below it the
+			// second file costs more (a request that may be made, an entry in the mirror,
+			// a line in the overlay) than the bytes it saves. The server never repeats
+			// this test — it serves a sidecar when one exists.
+			if len(packed) <= len(output)-gzipSavingsFloor {
+				if err := os.WriteFile(target+".gz", packed, 0o644); err != nil {
+					return err
+				}
+				file.GzipBytes = len(packed)
+				res.Sidecars = append(res.Sidecars, file.Path+".gz")
+				res.GzipFiles++
+				res.GzipRaw += len(output)
+				res.GzipBytes += len(packed)
+			}
+		}
+
+		res.Files = append(res.Files, file)
 		res.SourceBytes += len(source)
 		res.OutputBytes += len(output)
 		return nil
 	})
+}
+
+// gzipSavingsFloor is the smallest saving that earns a sidecar.
+const gzipSavingsFloor = 256
+
+// gzipEligible reports whether a file kind may get a sidecar. Text assets only: the
+// console is JavaScript, CSS and an HTML shell plus one SVG logo, and wrapping an
+// already-compressed format (or a binary one) would only spend a request to save nothing.
+// Widen this list deliberately, never by default.
+func gzipEligible(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".js", ".css", ".html", ".svg":
+		return true
+	}
+	return false
+}
+
+// compress returns the gzip encoding of data. The header carries no file name and no
+// modification time, which is what makes two runs byte-identical: the build must be
+// reproducible, and a timestamp inside every asset would break that for no gain.
+func compress(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := zw.Write(data); err != nil {
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // publish swaps the finished mirror into place. The previous tree is moved aside first so
@@ -230,17 +325,39 @@ func publish(tmp, outputDir string) error {
 // writeOverlay records where the mirror differs from the source, in the format
 // `go build -overlay` reads. Only changed files are listed: everything else is already
 // identical, and a shorter list is easier to read when a build goes wrong.
-func writeOverlay(path, srcDir, outDir string, files []FileResult) error {
+//
+// Sidecars get an entry of their own whose *source* path does not exist on disk. That is
+// deliberate and load-bearing: a directory embed pattern is expanded through the overlay
+// filesystem, which merges overlaid entries into the directory listing, so this is what
+// puts "static/js/app.js.gz" in the embedded file set. Without it the server would look
+// for a sidecar that was never embedded. See docs/design/m55-console-transfer-compression.md.
+func writeOverlay(path, srcDir, outDir string, files []FileResult, sidecars []string) error {
 	replace := map[string]string{}
+	abs := func(root, rel string) (string, error) {
+		return filepath.Abs(filepath.Join(root, filepath.FromSlash(rel)))
+	}
 	for _, f := range files {
 		if !f.Changed {
 			continue
 		}
-		source, err := filepath.Abs(filepath.Join(srcDir, filepath.FromSlash(f.Path)))
+		source, err := abs(srcDir, f.Path)
 		if err != nil {
 			return err
 		}
-		output, err := filepath.Abs(filepath.Join(outDir, filepath.FromSlash(f.Path)))
+		output, err := abs(outDir, f.Path)
+		if err != nil {
+			return err
+		}
+		replace[source] = output
+	}
+	for _, rel := range sidecars {
+		// The key is the source path plus ".gz": the file the compiler would look for if
+		// the sidecar lived in the source tree, which is exactly the lookup to redirect.
+		source, err := abs(srcDir, rel)
+		if err != nil {
+			return err
+		}
+		output, err := abs(outDir, rel)
 		if err != nil {
 			return err
 		}

@@ -62,45 +62,63 @@ health() {
 # assets …"）只留在构建者当时的终端上，所以"8088 现在服务的是混淆版还是可读版"这个
 # 问题以前只能靠 `strings bin/aigw | grep -c renderShell` 这种专家手法回答。
 # 解析失败只影响这一行提示，绝不能让 status/start 失败。
-console_shape() {
-  command -v curl >/dev/null 2>&1 || { echo unknown; return 0; }
+# 控制台形态：
+#   ui          = js/css 是否经 esbuild 压缩混淆（M54）
+#   ui_encoding = 是否内嵌了 gzip 预压缩副本、能按 Accept-Encoding 协商（M55）
+# 两者合起来回答"拿到这个实例的人下载到的是什么"。
+console_fields() {
+  command -v curl >/dev/null 2>&1 || { echo "unknown unknown"; return 0; }
   local body
   body="$(curl -s -m 5 "http://127.0.0.1${LISTEN}/version" 2>/dev/null || true)"
-  [[ -n "$body" ]] || { echo unknown; return 0; }
+  [[ -n "$body" ]] || { echo "unknown unknown"; return 0; }
   if command -v python3 >/dev/null 2>&1; then
     printf '%s' "$body" | python3 -c '
 import json, sys
+def field(d, key):
+    v = d.get(key)
+    return v if isinstance(v, str) and v else "unknown"
 try:
     d = json.load(sys.stdin)
 except Exception:
-    print("unknown"); raise SystemExit(0)
-v = d.get("ui")
-print(v if isinstance(v, str) and v else "unknown")' 2>/dev/null || echo unknown
+    print("unknown unknown"); raise SystemExit(0)
+print(field(d, "ui"), field(d, "ui_encoding"))' 2>/dev/null || echo "unknown unknown"
   else
-    printf '%s' "$body" | grep -o '"ui":"[a-z]*"' | cut -d'"' -f4 || echo unknown
+    printf '%s %s\n' \
+      "$(printf '%s' "$body" | grep -o '"ui":"[a-z]*"' | cut -d'"' -f4)" \
+      "$(printf '%s' "$body" | grep -o '"ui_encoding":"[a-z]*"' | cut -d'"' -f4)"
   fi
 }
 
 report_console_shape() {
-  local shape
-  shape="$(console_shape)"
+  local shape encoding
+  read -r shape encoding < <(console_fields)
+  [[ -n "${shape:-}" ]] || shape=unknown
+  [[ -n "${encoding:-}" ]] || encoding=unknown
   case "$shape" in
     minified)
-      echo "console: minified（控制台 js/css 已压缩混淆）"
+      if [[ "$encoding" = gzip ]]; then
+        echo "console: minified · transfer: gzip（js/css 已压缩混淆，且按 Accept-Encoding 发 gzip）"
+      else
+        echo "console: minified · transfer: ${encoding}（已混淆，但客户端拿不到压缩传输）"
+      fi
       ;;
     source)
-      echo "console: source（未混淆！）" >&2
+      echo "console: source（未混淆！）· transfer: ${encoding}" >&2
       cat >&2 <<'EOF'
   这个实例控制台是**源码形态**：任何人拿到嵌入资源都能读到带完整中文注释的前端源码。
-  只有调试控制台时才该这样跑（make build-src 现在写 bin/aigw-src，不会碰 bin/aigw）；
+  只有调试控制台时才该这样跑（make build-src 写 bin/aigw-src，不会碰 bin/aigw）；
   要回到发布形态：
       make build && scripts/local-run.sh restart
 EOF
       ;;
-    *)
-      echo "console: unknown（该二进制没有 ui 字段，早于 M54；不等于未混淆，请按需确认）"
-      ;;
   esac
+  # 形态字段缺失（早于 M54/M55 的二进制）单独说清楚：它不是"未混淆"的同义词。
+  if [[ "$shape" = unknown ]]; then
+    echo "console: unknown（该二进制没有 ui 字段，早于 M54；不等于未混淆，请按需确认）"
+  fi
+  if [[ "$encoding" = unknown ]]; then
+    echo "transfer: unknown（该二进制没有 ui_encoding 字段，早于 M55；不等于没压缩）"
+  fi
 }
 
 do_start() {

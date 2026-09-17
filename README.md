@@ -103,8 +103,11 @@ make dshgw-verify  # 独立 dshgw 测试/构建/契约，不并入 aigw verify
 ```
 
 `make build` 会把 `internal/webui/static/` 压缩成 `.cache/ui-dist/static/`（去注释、去换行、局部标识符重命名，
-体积 −41%），再用 `go build -overlay` 把镜像嵌进二进制——**工作区源码一个字节都不改**，因此 `go test`、
-`internal/webui/tests/*.mjs` 与 `make ui-check` 读的仍是可读源码。详见 `docs/design/m50-frontend-minify.md`。
+体积 −41%），并为值得压缩的资源生成 `.gz` 副本（js/css 合计 332 KB → 131 KB，−60%），再用
+`go build -overlay` 把两者一起嵌进二进制——**工作区源码一个字节都不改**，因此 `go test`、
+`internal/webui/tests/*.mjs` 与 `make ui-check` 读的仍是可读源码。运行期由 `internal/webui` 按
+`Accept-Encoding` 协商：客户端接受 gzip 就发 `.gz` 副本并带 `Content-Encoding: gzip` 与 `Vary`，否则发原字节。
+详见 `docs/design/m50-frontend-minify.md` 与 `docs/design/m55-console-transfer-compression.md`。
 
 ## 运行
 
@@ -121,8 +124,8 @@ make dshgw-verify  # 独立 dshgw 测试/构建/契约，不并入 aigw verify
 |---|---|
 | `POST /v1/responses` | Responses API（流式 / 非流式） |
 | `GET /v1/models` | 可用模型与**对客售价** |
-| `GET /version` | 构建身份：`{"version":"a.b.c","revision":"<短 sha>","ui":"minified|source"}`（公开，带 `base_path` 前缀；`ui` = 控制台资源形态） |
-| `GET /healthz` | 存活探针（同样带 `version`、`revision` 与 `ui`） |
+| `GET /version` | 构建身份：`{"version":"a.b.c","revision":"<短 sha>","ui":"minified|source","ui_encoding":"gzip|identity"}`（公开，带 `base_path` 前缀；`ui` = 控制台是否混淆，`ui_encoding` = 是否按 `Accept-Encoding` 发预压缩副本） |
+| `GET /healthz` | 存活探针（同样带 `version`、`revision`、`ui` 与 `ui_encoding`） |
 | `POST /mcp` | MCP 服务（账户查询 + 按 scope 可执行后台接口，`aigw_mcp_` 令牌） |
 | `bin/aigw mcp-serve --account <name>` | 本地 stdio MCP（11 个只读查询工具） |
 | `bin/aigw mcp-serve --endpoint <完整 MCP URL> --token-env GW_MCP_TOKEN` | stdio 转发到运行中网关，按令牌 scope 提供查询与后台工具（M42） |
@@ -135,7 +138,7 @@ make dshgw-verify  # 独立 dshgw 测试/构建/契约，不并入 aigw verify
 | `scripts/format-smoke.sh` | `response_format` 语义走查：真实二进制 + 假 DeepSeek，逐条读上游收到的请求体（无网、无 key、不花钱） |
 | `scripts/ui-badge-test.mjs`（`make ui-base`） | 左上角版本角标的 node 断言（三行 DOM shim，不需要浏览器）：两格内容、revision 为 `none` 时不显示、端点读不到时不报错 |
 | `scripts/release.sh`（skill `release-version`） | 发版：升 `VERSION`（a.b.c）→ 提交打 tag → `make build`；用法 `scripts/release.sh patch/minor/major` |
-| `make build` / `make ui-dist` | 发布构建：`ui-dist` 生成压缩混淆镜像（`.cache/ui-dist/static` + `overlay.json`），`build` 用它嵌入 `bin/aigw` |
+| `make build` / `make ui-dist` | 发布构建：`ui-dist` 生成压缩混淆镜像 + gzip 副本（`.cache/ui-dist/static` + `overlay.json`），`build` 用它嵌入 `bin/aigw` |
 | `make build-src` | 不混淆构建：写 `bin/aigw-src`，**不碰** `bin/aigw`（源码版实例仅供调试，见 M54） |
 | `make verify` | vet + 全量测试 + 控制台 node 断言 + 构建 |
 

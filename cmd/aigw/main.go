@@ -53,6 +53,12 @@ var (
 	// minified but isn't" impossible to construct. See
 	// docs/design/m54-console-asset-shape.md.
 	uiAssets = "source"
+	// uiEncoding is the transfer encoding the console assets can be served with: "gzip"
+	// when the build embedded the sidecars cmd/minifyui writes (the same `make build` line
+	// that passes -overlay), "identity" otherwise. Same rule as uiAssets, and for the same
+	// reason: the default is the side that cannot overstate what is in the binary. See
+	// docs/design/m55-console-transfer-compression.md.
+	uiEncoding = "identity"
 )
 
 func main() { os.Exit(run()) }
@@ -62,7 +68,8 @@ func main() { os.Exit(run()) }
 // of console assets a release carries — so it is a function with a test, not a string
 // assembled inline at the print site.
 func versionLine() string {
-	return fmt.Sprintf("aigw %s (revision %s, built %s, console %s)", version, revision, date, uiAssets)
+	return fmt.Sprintf("aigw %s (revision %s, built %s, console %s, transfer %s)",
+		version, revision, date, uiAssets, uiEncoding)
 }
 
 func run() int {
@@ -91,6 +98,7 @@ func run() int {
 		"version", version,
 		"revision", revision,
 		"ui", uiAssets,
+		"ui_encoding", uiEncoding,
 		"config", *configPath,
 		"listen", cfg.Server.Listen,
 		"database", cfg.Database.Path,
@@ -514,6 +522,7 @@ func run() int {
 		Version:        version,
 		Revision:       revision,
 		UIAssets:       uiAssets,
+		UIEncoding:     uiEncoding,
 	})
 
 	if auditWriter != nil {

@@ -1,7 +1,10 @@
 package minify
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -25,7 +28,9 @@ func mirror(t *testing.T) (Result, string, string) {
 	outDir := filepath.Join(dir, "static")
 	overlayPath := filepath.Join(dir, "overlay.json")
 
-	res, err := Run(Options{SourceDir: sourceDir, OutputDir: outDir, OverlayPath: overlayPath})
+	// Gzip on, because that is what a release build produces: the contract tests below must
+	// describe the mirror that actually gets embedded, sidecars included.
+	res, err := Run(Options{SourceDir: sourceDir, OutputDir: outDir, OverlayPath: overlayPath, Gzip: true})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -53,20 +58,25 @@ func listFiles(t *testing.T, root string) []string {
 	return files
 }
 
-// TestMirrorCoversEverySourceFile is the first contract: the mirror is a 1:1 image. A file
-// the walk forgot would 404 in the console, and a file that grew would mean esbuild was
-// handed something it should not have been.
+// TestMirrorCoversEverySourceFile is the first contract: the mirror is a 1:1 image, plus
+// exactly the gzip sidecars it reports. A file the walk forgot would 404 in the console, a
+// file that grew would mean esbuild was handed something it should not have been, and a
+// sidecar nobody accounted for would be a second encoding of an asset with no owner.
 func TestMirrorCoversEverySourceFile(t *testing.T) {
 	res, sourceDir, dir := mirror(t)
 	outDir := filepath.Join(dir, "static")
 
-	want := listFiles(t, sourceDir)
+	want := append(listFiles(t, sourceDir), res.Sidecars...)
+	sort.Strings(want)
 	got := listFiles(t, outDir)
 	if strings.Join(want, ",") != strings.Join(got, ",") {
-		t.Fatalf("mirror file set differs\n source: %v\n mirror: %v", want, got)
+		t.Fatalf("mirror file set differs\n source+sidecars: %v\n mirror: %v", want, got)
 	}
-	if len(res.Files) != len(want) {
-		t.Fatalf("Run reported %d files, the tree has %d", len(res.Files), len(want))
+	if len(res.Files) != len(listFiles(t, sourceDir)) {
+		t.Fatalf("Run reported %d files, the tree has %d", len(res.Files), len(listFiles(t, sourceDir)))
+	}
+	if res.GzipFiles == 0 {
+		t.Fatal("no sidecar was written; the gzip half of the mirror is not being exercised")
 	}
 
 	for _, f := range res.Files {
@@ -339,8 +349,25 @@ func TestOverlayPointsAtEveryChangedFile(t *testing.T) {
 			t.Errorf("%s points at %s, which does not exist: %v", f.Path, target, err)
 		}
 	}
-	if changed != len(overlay.Replace) {
-		t.Errorf("the overlay lists %d files, %d were transformed", len(overlay.Replace), changed)
+	for _, rel := range res.Sidecars {
+		// The key is a source path that does not exist on disk, which is the whole trick:
+		// it is how a directory embed pattern learns about a file the source tree never had.
+		key := filepath.Join(wantAbs, filepath.FromSlash(rel))
+		target, listed := overlay.Replace[key]
+		if !listed {
+			t.Errorf("sidecar %s is missing from the overlay; the compiler would not embed it", rel)
+			continue
+		}
+		if _, err := os.Stat(target); err != nil {
+			t.Errorf("sidecar %s points at %s, which does not exist: %v", rel, target, err)
+		}
+		if _, err := os.Stat(key); err == nil {
+			t.Errorf("sidecar key %s exists in the source tree; the mirror must not write there", key)
+		}
+	}
+	if changed+len(res.Sidecars) != len(overlay.Replace) {
+		t.Errorf("the overlay lists %d entries, %d files were transformed and %d sidecars written",
+			len(overlay.Replace), changed, len(res.Sidecars))
 	}
 	// The strings a release must keep are the ones the server contract is written in.
 	keys := readFile(t, filepath.Join(dir, "static", "js", "pages", "keys.js"))
@@ -357,12 +384,13 @@ func TestMirrorIsDeterministicAndReplacesTheOldTree(t *testing.T) {
 	dir := t.TempDir()
 	outDir := filepath.Join(dir, "static")
 
-	opts := Options{SourceDir: sourceDir, OutputDir: outDir, OverlayPath: filepath.Join(dir, "overlay.json")}
+	opts := Options{SourceDir: sourceDir, OutputDir: outDir, OverlayPath: filepath.Join(dir, "overlay.json"), Gzip: true}
 	if _, err := Run(opts); err != nil {
 		t.Fatal(err)
 	}
 	first := listFiles(t, outDir)
 	firstJS := readFile(t, filepath.Join(outDir, "js", "app.js"))
+	firstGz := readFile(t, filepath.Join(outDir, "js", "app.js.gz"))
 
 	// A stale file from an earlier layout must not survive the next run.
 	stale := filepath.Join(outDir, "js", "pages", "removed-page.js")
@@ -381,6 +409,11 @@ func TestMirrorIsDeterministicAndReplacesTheOldTree(t *testing.T) {
 	}
 	if got := readFile(t, filepath.Join(outDir, "js", "app.js")); got != firstJS {
 		t.Error("the same source produced different bytes on the second run")
+	}
+	// A gzip stream may carry a modification time, and a build that stamps one into every
+	// asset is not reproducible. The writer leaves it zeroed; this is what keeps it that way.
+	if got := readFile(t, filepath.Join(outDir, "js", "app.js.gz")); got != firstGz {
+		t.Error("the same source produced different gzip bytes on the second run")
 	}
 	for _, leftover := range []string{outDir + ".tmp", outDir + ".old"} {
 		if matches, _ := filepath.Glob(leftover + "*"); len(matches) > 0 {
@@ -418,6 +451,137 @@ func TestBrokenAssetFailsTheRun(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, "overlay.json")); statErr == nil {
 		t.Error("the failed run wrote an overlay")
+	}
+}
+
+// TestGzipSidecarsAreTheMirrorBytesCompressed is the property the server relies on: it
+// hands the sidecar to a client that asked for gzip, so a sidecar that is not exactly the
+// mirrored asset compressed would serve different JavaScript depending on Accept-Encoding.
+func TestGzipSidecarsAreTheMirrorBytesCompressed(t *testing.T) {
+	res, _, dir := mirror(t)
+	outDir := filepath.Join(dir, "static")
+
+	if len(res.Sidecars) == 0 {
+		t.Fatal("no sidecar was written")
+	}
+	for _, rel := range res.Sidecars {
+		packed, err := os.ReadFile(filepath.Join(outDir, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read sidecar %s: %v", rel, err)
+		}
+		plain, err := os.ReadFile(filepath.Join(outDir, filepath.FromSlash(strings.TrimSuffix(rel, ".gz"))))
+		if err != nil {
+			t.Fatalf("read asset for sidecar %s: %v", rel, err)
+		}
+		zr, err := gzip.NewReader(bytes.NewReader(packed))
+		if err != nil {
+			t.Fatalf("%s is not a gzip stream: %v", rel, err)
+		}
+		got, err := io.ReadAll(zr)
+		if err != nil {
+			t.Fatalf("gunzip %s: %v", rel, err)
+		}
+		if !bytes.Equal(got, plain) {
+			t.Errorf("%s does not decompress to its asset", rel)
+		}
+	}
+	if res.GzipBytes >= res.GzipRaw {
+		t.Errorf("sidecars total %d bytes for %d bytes of assets; compression is not earning its keep",
+			res.GzipBytes, res.GzipRaw)
+	}
+	if res.PercentGzip() < 50 {
+		t.Errorf("gzip saved only %d%%; the design's premise (about -60%%) no longer holds", res.PercentGzip())
+	}
+	// Sorting and counting are reported facts, so they must agree with the tree.
+	if !sort.StringsAreSorted(res.Sidecars) {
+		t.Error("Sidecars is not sorted; the summary line would not be reproducible")
+	}
+}
+
+// TestGzipSkipsWhatIsNotWorthIt pins the two halves of "worth it": only text kinds get a
+// sidecar, and only when the saving clears the floor. Both rules live in one function on
+// purpose — the server never repeats them, it serves a sidecar when one exists.
+func TestGzipSkipsWhatIsNotWorthIt(t *testing.T) {
+	dir := t.TempDir()
+	sourceDir := filepath.Join(dir, "source")
+	writeFile(t, sourceDir, "logo.png", strings.Repeat("\x89PNG", 400)) // already compressed: never
+	writeFile(t, sourceDir, "tiny.js", "export const a = 1;\n")         // below the floor
+	// Text that compresses well, which is what makes a sidecar worth a second file; a file
+	// that is merely big but incompressible would be skipped by the floor, not by its size.
+	writeFile(t, sourceDir, "big.js", "export const payload = \""+strings.Repeat("abcdefghij", 60)+"\";\n")
+	writeFile(t, sourceDir, "shell.html", strings.Repeat("<p>console shell</p>\n", 100)) // html is eligible
+
+	outDir := filepath.Join(dir, "static")
+	res, err := Run(Options{SourceDir: sourceDir, OutputDir: outDir, OverlayPath: "", Gzip: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, rel := range res.Sidecars {
+		got[rel] = true
+	}
+	for _, want := range []string{"big.js.gz", "shell.html.gz"} {
+		if !got[want] {
+			t.Errorf("no sidecar for %s; a large text asset must be compressed", want)
+		}
+	}
+	for _, unwanted := range []string{"logo.png.gz", "tiny.js.gz"} {
+		if got[unwanted] {
+			t.Errorf("%s has a sidecar; it saves too little to be worth a second file", unwanted)
+		}
+	}
+	for _, f := range res.Files {
+		if f.GzipBytes > 0 && f.GzipBytes > f.OutputBytes-gzipSavingsFloor {
+			t.Errorf("%s: sidecar is %d B against %d B of asset, under the floor", f.Path, f.GzipBytes, f.OutputBytes)
+		}
+	}
+}
+
+// TestGzipOffReproducesTheM50Mirror keeps the switch honest: with gzip off the mirror must
+// be byte for byte the one M50 shipped, so "did compression change anything else?" is a
+// question a build can answer instead of a claim someone has to believe.
+func TestGzipOffReproducesTheM50Mirror(t *testing.T) {
+	sourceDir := filepath.Join("..", "static")
+	dir := t.TempDir()
+
+	plainDir := filepath.Join(dir, "plain")
+	packedDir := filepath.Join(dir, "packed")
+	if _, err := Run(Options{SourceDir: sourceDir, OutputDir: plainDir, Gzip: false}); err != nil {
+		t.Fatalf("Run(gzip off): %v", err)
+	}
+	if _, err := Run(Options{SourceDir: sourceDir, OutputDir: packedDir, Gzip: true}); err != nil {
+		t.Fatalf("Run(gzip on): %v", err)
+	}
+
+	for _, rel := range listFiles(t, plainDir) {
+		if strings.HasSuffix(rel, ".gz") {
+			t.Fatalf("gzip off wrote %s", rel)
+		}
+		if readFile(t, filepath.Join(plainDir, filepath.FromSlash(rel))) !=
+			readFile(t, filepath.Join(packedDir, filepath.FromSlash(rel))) {
+			t.Errorf("%s differs between the two runs; gzip changed more than the sidecars", rel)
+		}
+	}
+	sidecars := listFiles(t, packedDir)
+	for _, rel := range sidecars {
+		if !strings.HasSuffix(rel, ".gz") {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(plainDir, filepath.FromSlash(rel))); err == nil {
+			t.Errorf("gzip off produced the sidecar %s", rel)
+		}
+	}
+}
+
+func writeFile(t *testing.T, root, rel, body string) {
+	t.Helper()
+	target := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

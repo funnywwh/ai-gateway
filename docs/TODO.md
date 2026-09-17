@@ -444,3 +444,17 @@
       出现 `ui` 字段（`local-run.sh status` 应打印 `console: minified`）。本沙箱与宿主不同 PID namespace，
       无法向宿主进程发信号；在跑的仍是 `0.16.0/9dc4ed2`（早于 M54），所以现在查 `ui` 会得到 `unknown`
 
+
+## M55 控制台资源的传输层压缩（gzip sidecar + Content-Encoding 协商）
+
+设计：`docs/design/m55-console-transfer-compression.md`（§10 差异、§11 实测已回填）；实现与自动化验收
+完成的条目见 `docs/todo_done.md` 同名小节，下面只列尚未执行项。
+
+- [ ] **待人工执行**（宿主终端）：`make build` + `scripts/local-run.sh restart`，让 `:8088` 同时带上 M54 的
+      `ui` 与 M55 的 `ui_encoding` 字段，并真的按 `Accept-Encoding` 发 gzip
+      （`curl -sD- -o /dev/null -H 'Accept-Encoding: gzip' http://127.0.0.1:8088/admin/ui/js/pages/chat.js`
+      应出现 `Content-Encoding: gzip`，`local-run.sh status` 应打印 `console: minified · transfer: gzip`）。
+      本沙箱与宿主不同 PID namespace，无法向宿主进程发信号
+- [ ] 决策（另立）：是否做 brotli——需新增 Go 依赖，相对 gzip 约再省 15%，但 sidecar 集合与协商表都要翻倍；
+      若边缘/nginx 已能压缩静态资源，该项收益还需重新论证
+

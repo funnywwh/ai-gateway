@@ -182,6 +182,12 @@ type Deps struct {
 	// is the console handler itself: two fields of one struct cannot both be UI.
 	// See docs/design/m54-console-asset-shape.md.
 	UIAssets string
+	// UIEncoding is the transfer encoding the console assets can be served with ("gzip"
+	// when a release build embedded the pre-compressed copies, "identity" otherwise). It
+	// answers, from the running instance, what a plain `curl -D-` used to be the only way to
+	// find out. Empty is reported as "unknown", like UIAssets. See
+	// docs/design/m55-console-transfer-compression.md.
+	UIEncoding string
 }
 
 // uiShape is the ui field as it goes on the wire. An empty value means the caller
@@ -192,6 +198,16 @@ func (s *Server) uiShape() string {
 		return "unknown"
 	}
 	return s.deps.UIAssets
+}
+
+// uiEncodingShape is ui_encoding as it goes on the wire, with the same rule as uiShape: an
+// empty value is reported rather than omitted, so a reader never has to guess whether a
+// missing key means "not compressed" or "older binary".
+func (s *Server) uiEncodingShape() string {
+	if s.deps.UIEncoding == "" {
+		return "unknown"
+	}
+	return s.deps.UIEncoding
 }
 
 // Server wires the HTTP surfaces.
@@ -569,10 +585,11 @@ var errClientGone = errors.New("httpapi: client disconnected")
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":   "ok",
-		"version":  s.deps.Version,
-		"revision": s.deps.Revision,
-		"ui":       s.uiShape(),
+		"status":      "ok",
+		"version":     s.deps.Version,
+		"revision":    s.deps.Revision,
+		"ui":          s.uiShape(),
+		"ui_encoding": s.uiEncodingShape(),
 	})
 }
 
@@ -581,9 +598,10 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 // database is still opening, because that is exactly when an operator asks it.
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":  s.deps.Version,
-		"revision": s.deps.Revision,
-		"ui":       s.uiShape(),
+		"version":     s.deps.Version,
+		"revision":    s.deps.Revision,
+		"ui":          s.uiShape(),
+		"ui_encoding": s.uiEncodingShape(),
 	})
 }
 
