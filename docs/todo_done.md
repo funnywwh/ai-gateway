@@ -3351,8 +3351,9 @@ sha256 与压缩镜像全部相同），但"曾经不是"可证：M50 随 0.14.1
 | `go vet ./...` / `go test ./...` | 干净 / 全绿（48 个包）；在跑的 `8088` 全程未受影响 |
 
 - [x] 提交：独立 M54 commit（引用设计文档），不改 `VERSION`、不打 tag、不发布
-- 未做（保留在 `docs/TODO.md`）：宿主执行 `make build` + `scripts/local-run.sh restart` 让 `:8088` 上的
-  `ui` 字段生效（本沙箱与宿主不同 PID namespace，无法向宿主进程发信号）
+- [x] `:8088` 部署验证（随 v0.17.0 发布完成，2026-09-17 17:27）：`/version` 出现 `"ui":"minified"`，
+      `local-run.sh status` 打印 `console: minified · transfer: gzip`；启动日志
+      `msg="aigw starting" version=0.17.0 revision=c8df8b8 ui=minified ui_encoding=gzip`
 
 
 ## M55 控制台资源的传输层压缩（gzip sidecar + Content-Encoding 协商，2026-09-17）
@@ -3410,9 +3411,12 @@ sha256 与压缩镜像全部相同），但"曾经不是"可证：M50 随 0.14.1
 | 在跑的 `:8088` | 全程未受影响（`/version` 与二进制 sha 不变） |
 
 - [x] 提交：独立 M55 commit（引用设计文档），不改 `VERSION`、不打 tag、不发布
-- 未做：brotli/zstd（需新增依赖，收益约再 15%）、运行期压缩、CDN/边缘压缩、发布 sourcemap。
-  发版（升 `VERSION` → tag → 部署 gpt001）仍由 `release-version` skill 单独执行；本机 `:8088` 待宿主
-  `make build` + `scripts/local-run.sh restart` 后生效（与 M54 同一条待办）
+- [x] `:8088` 部署验证（随 v0.17.0 发布完成，2026-09-17 17:27）：`/version` 带
+      `"ui":"minified","ui_encoding":"gzip"`；带 `Accept-Encoding: gzip` 取
+      `/admin/ui/js/pages/providers.js` 得到 `Content-Encoding: gzip`、`Content-Length: 7428`（不带则 19880）、
+      `Vary: Accept-Encoding`
+- 未做：brotli/zstd（需新增依赖，收益约再 15%）、运行期压缩、CDN/边缘压缩、发布 sourcemap（**保留在
+  `docs/TODO.md`**）。发版（升 `VERSION` → tag → 部署）由 `release-version` skill 单独执行
 
 
 ## M56 供应商成本上限与复位（2026-09-17）
@@ -3452,3 +3456,37 @@ sha256 与压缩镜像全部相同），但"曾经不是"可证：M50 随 0.14.1
 
 未做（另议）：按「供应商 × 模型」粒度的上限、按 NATIVE 币种累计（多币种相加是错的）、把读数做成账务凭证
 （它刻意是"最多滞后 5 秒的运营护栏"）、给刷新周期加配置项（`runtime.CostRefreshInterval` 是常量）。
+
+
+## 发布记录 v0.17.0（2026-09-17）
+
+| 项 | 值 |
+|---|---|
+| 版本号 | `0.17.0`（`0.16.0` → `0.17.0`，**minor**：自 v0.16.0 起三个纯新增里程碑 M54 / M55 / M56，无破坏性变更） |
+| revision | `c8df8b8`（tag `v0.17.0`；`release: v0.17.0` 提交只含 `VERSION`） |
+| 内容 | M54 控制台资源形态自述（`ui`）、M55 控制台资源 gzip 预压缩（`ui_encoding`）、M56 供应商成本上限与复位 |
+| 构建 | `scripts/release.sh minor` → `ui: minified 37 files 572454 -> 336354 bytes (-41%); gzip 32 files 333993 -> 132850 bytes (-60%)`；`bin/aigw` 21,986,543 B |
+| 部署目标 | **本机 `:8088`**（`/home/winger/work/ai_gateway`，`scripts/local-run.sh`；用户指定，非 gpt001） |
+| 回滚点 | `bin/aigw.prev-0.16.0-9dc4ed2`（从正在运行的 `9dc4ed2` 进程的 `/proc/<pid>/exe` 取出，`-version` 自证 0.16.0；更早还有 `bin/aigw.prev-0.14.0-6bf8dce`、`bin/aigw.prev-running-0.14.0-6dc9082`） |
+| 部署方式 | `make build`（随 release.sh）→ `scripts/local-run.sh restart`（先按 pidfile 优雅停止，再 `setsid` 起新实例，以端口是否被监听为存活判据） |
+
+### 验证（缺一不可，全部实测）
+
+| 检查 | 结果 |
+|---|---|
+| `GET /version` | `{"revision":"c8df8b8","ui":"minified","ui_encoding":"gzip","version":"0.17.0"}`（M39 的版本出口；控制台左上角角标读同一个端点，故角标显示 `v0.17.0 c8df8b8`） |
+| `GET /healthz` | `{"revision":"c8df8b8","status":"ok","ui":"minified","ui_encoding":"gzip","version":"0.17.0"}` |
+| `GET /readyz` | HTTP 200 |
+| `local-run.sh status` | `running (pid 1501458) listen=:8088`；`health: … -> HTTP 200`；`console: minified · transfer: gzip` |
+| 启动日志 | `msg="aigw starting" version=0.17.0 revision=c8df8b8 ui=minified ui_encoding=gzip listen=:8088`；`registry loaded … ready=true`；`msg="provider cost cap ready" refresh=5s`；**本次启动 0 条 `level=ERROR`**（日志里两条历史 ERROR 分别是 09-15 17:39、09-17 11:53 的 settlement 回退，与新实例无关） |
+| 迁移 0021（M56） | 线上库（5.4 GB）`schema_migrations` = 21 条、max 21；6 个供应商全部 `cost_limit_micros=0 / cost_period=none / cost_window_start=NULL` —— 即"不限"，行为与升级前一致（没有动任何供应商配置） |
+| 传输层压缩（M55） | 带 `Accept-Encoding: gzip` 取 `/admin/ui/js/pages/providers.js`：`Content-Encoding: gzip`、`Content-Length: 7428`、`Vary: Accept-Encoding`；不带：`Content-Length: 19880`（同一资源，覆盖 M56 新列所在页面） |
+| M56 的指标 | `/metrics` 本次**没有** `aigw_provider_cost_*` 序列——这是设计行为：没有供应商设上限时不发布该块（默认部署零开销），不是回归 |
+| 回归面 | 升级前后 `/version` 的 `version`/`revision` 是唯一变化；`ready=true` 说明 10 模型 / 6 供应商 / 14 路由的配置图完整加载 |
+
+### 未做（保留在 `docs/TODO.md`）
+
+- 没有对线上任何供应商设置成本上限（那是改配置，不是发布的一步）：M56 的"设上限 → 被剔除 → 复位恢复"
+  与"周期自动重新起算"两条仍待人工用管理员会话验证。M56 自身的功能面由自动化验收覆盖
+  （`make test`、`make ui-check` 的 `cost` 视图、`internal/httpapi/provider_cost_test.go` 端到端）。
+- 没有部署到 gpt001（本次用户指定只部署本机 `:8088`）。

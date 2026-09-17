@@ -437,24 +437,15 @@
 
 ## M54 控制台资源形态的运行态自述与部署产物隔离
 
-设计：`docs/design/m54-console-asset-shape.md`（§9 差异、§10 实测已回填）；实现与自动化验收完成的条目见
-`docs/todo_done.md` 同名小节，下面只列尚未执行项。
-
-- [ ] **待人工执行**（宿主终端）：`make build` + `scripts/local-run.sh restart`，让 `:8088` 上的 `/version`
-      出现 `ui` 字段（`local-run.sh status` 应打印 `console: minified`）。本沙箱与宿主不同 PID namespace，
-      无法向宿主进程发信号；在跑的仍是 `0.16.0/9dc4ed2`（早于 M54），所以现在查 `ui` 会得到 `unknown`
+设计：`docs/design/m54-console-asset-shape.md`（§9 差异、§10 实测已回填）；实现、自动化验收与
+`:8088` 部署验证均已完成，条目见 `docs/todo_done.md` 同名小节（含 v0.17.0 发布记录）。本节无未完成项。
 
 
 ## M55 控制台资源的传输层压缩（gzip sidecar + Content-Encoding 协商）
 
-设计：`docs/design/m55-console-transfer-compression.md`（§10 差异、§11 实测已回填）；实现与自动化验收
-完成的条目见 `docs/todo_done.md` 同名小节，下面只列尚未执行项。
+设计：`docs/design/m55-console-transfer-compression.md`（§10 差异、§11 实测已回填）；实现、自动化验收与
+`:8088` 部署验证均已完成，条目见 `docs/todo_done.md` 同名小节（含 v0.17.0 发布记录）。本节未完成项：
 
-- [ ] **待人工执行**（宿主终端）：`make build` + `scripts/local-run.sh restart`，让 `:8088` 同时带上 M54 的
-      `ui` 与 M55 的 `ui_encoding` 字段，并真的按 `Accept-Encoding` 发 gzip
-      （`curl -sD- -o /dev/null -H 'Accept-Encoding: gzip' http://127.0.0.1:8088/admin/ui/js/pages/chat.js`
-      应出现 `Content-Encoding: gzip`，`local-run.sh status` 应打印 `console: minified · transfer: gzip`）。
-      本沙箱与宿主不同 PID namespace，无法向宿主进程发信号
 - [ ] 决策（另立）：是否做 brotli——需新增 Go 依赖，相对 gzip 约再省 15%，但 sidecar 集合与协商表都要翻倍；
       若边缘/nginx 已能压缩静态资源，该项收益还需重新论证
 
@@ -467,14 +458,10 @@
 口径（用户原话「供应商成本要能设置上限，可以复位」当场确认）：按供应商累计**我们付给上游的成本**
 设上限 + 可复位；周期每供应商可选（不限/每天/每月）；达到上限后从**路由候选**中剔除。
 
-- [ ] **待人工执行**（宿主终端）：`make build` + `scripts/local-run.sh restart` 后，在控制台给一个真实供应商
-      设一个极小的上限（例如 `1` 微单位），发一次请求确认它被剔除并落到别家（`/admin/ui/#/requests` 的
-      供应商列能看到换了家）；点「复位成本」后请求恢复；`curl -s http://127.0.0.1:8088/admin/api/v1/stats`
-      （带 Cookie）或 `/metrics` 能看到 `provider_cost` 块与 `aigw_provider_cost_*` 指标。
-      本沙箱与宿主不同 PID namespace，无法向宿主进程发信号
-- [ ] **待人工执行**：在 `:8088` 上做一次"周期"验证（把某供应商设成 `daily`/`monthly`，确认 UTC 零点/月初
+- [ ] **待人工验证**（需要管理员会话 + 真实供应商配置）：在控制台给一个真实供应商设一个极小的上限
+      （例如 `1` 微单位），发一次请求确认它被剔除并落到别家（`/admin/ui/#/requests` 的供应商列能看到换了家）；
+      点「复位成本」后请求恢复。v0.17.0 已部署到 `:8088`（`/version` = `0.17.0/c8df8b8`、迁移 21 已应用、
+      6 个供应商读回 `0/none/NULL` = 不限），但**没有**动线上任何供应商的上限——改配置不是发布的一步
+- [ ] **待人工验证**：在 `:8088` 上做一次"周期"验证（把某供应商设成 `daily`/`monthly`，确认 UTC 零点/月初
       读数自动重新起算；读数最多滞后 5 秒）
-- [ ] 提交：独立 `feat(m56): …` commit（引用设计文档路径），不改 `VERSION`、不打 tag、不发布。
-      **注意**：M55（控制台 gzip 传输压缩）的改动仍在工作区未提交，直接提交会把它一起带上——
-      按「每个里程碑独立提交」应先单独提交 M55（由用户决定）
 
