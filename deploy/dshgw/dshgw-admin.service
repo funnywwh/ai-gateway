@@ -1,0 +1,18 @@
+[Unit]
+Description=dshgw local tenant provisioning channel (M52)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/dshgw/bin/dshgw --config /etc/dshgw/config.yaml admin-serve
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=dshgw
+# This unit runs as root on purpose: it performs the same tenant lifecycle the dshgw CLI
+# does (useradd, systemd units, registry). Its only ingress is the root-owned UNIX socket
+# whose peer UID the binary checks against admin_allowed_uids on every connection.
+NoNewPrivileges=no
+
+[Install]
+WantedBy=multi-user.target

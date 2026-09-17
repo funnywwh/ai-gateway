@@ -113,6 +113,87 @@ func (c *Client) ValidateKey(ctx context.Context, key string) ([]string, error) 
 	return out, nil
 }
 
+// DSHDenial is aigw's definitive 403 answer: the key and its account are valid, but the
+// account is not admitted to the dsh gateway. Reason mirrors aigw's machine-readable cause
+// ("dsh_disabled" = the console toggle, "account_status" = suspended/closed account) so the
+// portal can show an accurate message instead of guessing.
+type DSHDenial struct{ Reason string }
+
+func (e *DSHDenial) Error() string {
+	return "dshgw: dsh access denied (" + e.Reason + ")"
+}
+
+type dshAuthorize struct {
+	Allowed *bool  `json:"allowed"`
+	Reason  string `json:"reason"`
+	Tenant  string `json:"tenant"`
+}
+
+// Authorize asks aigw whether the key's account is opted in to the dsh gateway (M52).
+// HTTP 200 with allowed=true answers the account's tenant name (empty on aigw versions
+// without tenant mapping — the caller falls back to prefix binding). HTTP 403 becomes
+// *DSHDenial. HTTP 401 becomes ErrInvalidKey. Everything else — timeouts, 5xx, malformed
+// bodies — returns an error the caller must treat as "authorization unavailable" and fail
+// closed.
+func (c *Client) Authorize(ctx context.Context, key string) (string, error) {
+	if strings.TrimSpace(key) == "" {
+		return "", ErrInvalidKey
+	}
+	base, err := url.Parse(strings.TrimRight(c.BaseURL, "/"))
+	if err != nil || base.Scheme != "http" && base.Scheme != "https" || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+		return "", errors.New("invalid aigw base URL")
+	}
+	base.Path = strings.TrimRight(base.Path, "/") + "/v1/dshgw/authorize"
+	base.RawQuery = ""
+	base.Fragment = ""
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base.String(), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Accept", "application/json")
+	baseClient := c.httpClient()
+	client := *baseClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("dsh authorize: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return "", ErrInvalidKey
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		denial := &DSHDenial{Reason: "dsh_disabled"}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10+1))
+		if err == nil && len(body) <= 64<<10 {
+			var payload dshAuthorize
+			if json.Unmarshal(body, &payload) == nil && payload.Reason != "" {
+				denial.Reason = payload.Reason
+			}
+		}
+		return "", denial
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", &StatusError{Status: resp.StatusCode}
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (64<<10)+1))
+	if err != nil {
+		return "", err
+	}
+	if len(body) > 64<<10 {
+		return "", errors.New("aigw /v1/dshgw/authorize response exceeds 64 KiB")
+	}
+	var payload dshAuthorize
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", fmt.Errorf("decode /v1/dshgw/authorize: %w", err)
+	}
+	if payload.Allowed == nil || !*payload.Allowed {
+		return "", errors.New("decode /v1/dshgw/authorize: allowed is not true")
+	}
+	return strings.TrimSpace(payload.Tenant), nil
+}
+
 func NormalizeKey(input string) (string, error) {
 	key := strings.TrimSpace(input)
 	if len(key) >= 7 && strings.EqualFold(key[:7], "Bearer ") {

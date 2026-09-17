@@ -104,6 +104,7 @@ type adminFixture struct {
 	server      *httptest.Server
 	api         *Server
 	db          *store.DB
+	dshgwAdmin  *fakeDshgwAdmin
 	reg         *registry.Registry
 	cfg         *config.Config
 	sealer      *fakeSealer
@@ -169,7 +170,8 @@ func newAdminFixtureWithout(t *testing.T, unwired string) *adminFixture {
 	sealer := &fakeSealer{ready: true}
 	prober := &fakeProber{}
 	mcpService := mcpsrv.New(db, reg, mcpsrv.Config{MaxRows: 100, WindowDays: 30, Currency: "USD"})
-	fixture := &adminFixture{db: db, reg: reg, cfg: &cfg, sealer: sealer, prober: prober}
+	dshgwAdmin := &fakeDshgwAdmin{}
+	fixture := &adminFixture{db: db, reg: reg, cfg: &cfg, sealer: sealer, prober: prober, dshgwAdmin: dshgwAdmin}
 
 	// The currency table mirrors the wiring in cmd/aigw: configuration first, then
 	// the console override, and a reload after every settings write.
@@ -210,6 +212,7 @@ func newAdminFixtureWithout(t *testing.T, unwired string) *adminFixture {
 		DatabasePath: cfg.Database.Path, Dir: filepath.Join(t.TempDir(), "backups"),
 	}, db, nil)
 
+	verifier := apikey.New(db, apikey.DefaultConfig())
 	deps := Deps{
 		Config:         &cfg,
 		FX:             fxStore,
@@ -218,7 +221,8 @@ func newAdminFixtureWithout(t *testing.T, unwired string) *adminFixture {
 		Router:         router,
 		Dispatcher:     dispatcher,
 		Capacity:       dispatcher,
-		Verifier:       apikey.New(db, apikey.DefaultConfig()),
+		Verifier:       verifier,
+		InvalidateAll:  verifier.InvalidateAll,
 		Limiter:        quota.New(4),
 		Meter:          usage.New(db),
 		Records:        db,
@@ -243,6 +247,7 @@ func newAdminFixtureWithout(t *testing.T, unwired string) *adminFixture {
 		Codes:          billingService,
 		Reconciliation: billingService,
 		Backups:        backupManager,
+		DshgwAdmin:     dshgwAdmin,
 		Reload: func(ctx context.Context) (any, error) {
 			snap, err := reg.Reload(ctx)
 			if err != nil {

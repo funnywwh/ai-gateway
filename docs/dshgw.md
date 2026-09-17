@@ -56,9 +56,33 @@ kind: "spec"
 | `per-request` | 每次新请求重验租户当前的 `gateway.key`；401 撤销请求所用会话，其它错误返回 503 |
 | `interval:<秒>` | 按租户缓存验证结果至指定间隔；不是即时吊销 |
 
+**账号级 dsh 开关（M52-rev2）**：门户登录在 Key 验证后追加调用 aigw `POST /v1/dshgw/authorize`，
+200 响应携带该账号的**租户名**——账号下所有 Key（含新建）都登录该租户，无需逐 Key 前缀绑定；
+仅当响应无租户名（旧版 aigw）时退回前缀绑定。后台「启用 DSH」按钮经本机 root 守护
+（`dshgw admin-serve`，UNIX socket + 对端 UID 白名单，无 TCP）自动完成铸造 worker Key、
+创建/启动租户；「停用」停止 worker、吊销 worker Key 并保留数据。
+`dsh_enforce` 决定请求期是否复查：
+
+| `dsh_enforce` | 行为 |
+|---|---|
+| `login`（默认） | 仅登录时判定；后台停用后新登录 403"该账号未启用 dsh"，既有会话存活至 TTL/退出 |
+| `interval:<秒>` | 按租户缓存判定；停用后既有会话至多一个间隔内失效 |
+| `per-request` | 每请求判定；停用几乎立即生效 |
+
+`dsh_enforce` 与 `key_revalidate` 正交：前者问"账号可否使用 dsh"，后者验"worker 的模型凭据"。
+判定失败（超时/5xx）一律 503 fail-closed，绝不放行。aigw 后台账号列表的"启用/停用 DSH"
+按钮控制该开关的真值（`accounts.dsh_enabled`）；停用不删除租户数据，重新启用即恢复。
+
 重验使用**租户当前 worker Key**，不保存登录时提交的旧 alias Key。`--keep-old-prefix` 允许仍有效的旧 Key 登录同一租户；它不使旧 Key 成为 worker 的模型凭据。
 
 默认登录限流为每 IP 每分钟 10 次；会话默认上限 10,000，状态文件另有 64 MiB 上限。已建立的 WebSocket 不会被 logout/TTL 追溯关闭，新请求或重连会重新验证。
+
+**已知上游限制（DSH 0.1.2-rc.1）**：dsh Web UI 的“设置/模型与提供方目录”视图只在浏览器地址栏为
+回环（localhost/127.x）时工作——DSH 客户端对非回环页面将设置持久化设计为进程内（不发
+`settings.describe`），模型目录因此显示 "settings are unavailable in this browser"。这与网关无关
+（任何域名反代部署都一样，`--trusted-host` 是 worker 端 /api 的 Host 防护，与此闸门无关）。
+不受影响：会话对话、模型调用（默认模型由 `sync-models` 写入）、工作区目录选择与 browser-fs
+面板（独立插件）。模型与授权管理在 aigw 控制台完成。
 
 ## 4. 代理契约
 

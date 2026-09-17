@@ -139,6 +139,7 @@ func accountJSON(a *domain.Account, nodeIDs []int64, orgs []map[string]any) map[
 		"overdraft_limit_micros":       a.OverdraftLimitMicros,
 		"markup_override_bp":           a.MarkupOverrideBP,
 		"auto_suspend":                 a.AutoSuspend, "auto_resume": a.AutoResume,
+		"dsh_enabled": a.DSHEnabled, "dsh_tenant": a.DshTenant,
 		"inflight_policy_override": a.InflightPolicyOverride,
 		"price_overrides":          jsonOrNil(a.PriceOverridesJSON),
 		"status":                   a.Status, "note": a.Note,

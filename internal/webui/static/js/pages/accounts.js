@@ -33,6 +33,7 @@ export async function render({ page, actions, session }) {
       { key: 'name', label: '名称' },
       { key: 'billing_mode', label: '计费模式' },
       { key: 'status', label: '状态', render: (row) => statusBadge(row.status) },
+      { key: 'dsh_enabled', label: 'DSH', render: (row) => dshCell(row) },
       { key: 'org_nodes', label: '所属组织', render: (row) => orgCell(row) },
       { key: 'tags', label: '标签', render: (row) => (row.tags || []).join(', ') || '—' },
       { key: 'balance_micros', label: '余额', render: (row) => money(row.balance_micros) },
@@ -41,6 +42,10 @@ export async function render({ page, actions, session }) {
     ],
     rowActions: (row) => readonly ? [] : [
       el('button', { class: 'btn', text: '编辑', onclick: () => edit(row, () => view.refresh()) }),
+      el('button', {
+        class: 'btn', text: row.dsh_enabled ? '停用 DSH' : '启用 DSH',
+        onclick: () => toggleDSH(row, () => view.refresh()),
+      }),
     ],
     load: ({ limit, offset }) => api.get('/accounts', { limit, offset, ...orgQuery() }),
     onError: (err) => toast(api.errorMessage(err), 'error'),
@@ -100,6 +105,56 @@ export async function render({ page, actions, session }) {
   });
 
   await Promise.all([loadOrgOptions(), view.refresh()]);
+}
+
+// dshCell renders the account's dsh gateway opt-in (M52). The flag lives on the account row;
+// the toggle button in the row actions flips it via POST /accounts/{id}/dsh.
+function dshCell(row) {
+  if (row.dsh_enabled) return el('span', { class: 'badge', text: '已启用 · ' + (row.dsh_tenant || '?') });
+  if (row.dsh_tenant) return el('span', { class: 'muted', text: '已停用 · ' + row.dsh_tenant });
+  return el('span', { class: 'muted', text: '未启用' });
+}
+
+// toggleDSH drives the account-level dsh gateway lifecycle (M52-rev2).
+// Enabling provisions everything through the local dshgw channel: it mints a dedicated
+// worker key, creates (or starts and re-keys) the tenant and records the mapping, so
+// every key of the account — present and future — can log into that tenant. Disabling
+// stops the worker and revokes the worker keys; workspace and dsh data are kept.
+async function toggleDSH(row, reload) {
+  const enabling = !row.dsh_enabled;
+  if (enabling) {
+    const suggested = row.dsh_tenant || slugFromAccount(row.name);
+    const result = await modal({
+      title: '启用 DSH — ' + row.name,
+      submitLabel: '启用',
+      fields: [
+        { name: 'tenant', label: 'dsh 租户名', value: suggested, required: true,
+          hint: '小写字母/数字/连字符；留空沿用既有映射。将自动创建租户与 worker，账号下所有 Key（含新建）都能登录该租户' },
+      ],
+      onSubmit: (values) => api.post('/accounts/' + row.id + '/dsh', { enabled: true, tenant: values.tenant }),
+    });
+    if (result) { toast('已启用 DSH（租户 ' + (result.tenant || suggested) + '）', 'ok'); await reload(); }
+    return;
+  }
+  const ok = await confirmDialog('停用 DSH',
+    '停用账户 ' + row.name + ' 的 dsh？将停止其 worker 并吊销 worker 专用 Key；' +
+    '新登录被拒绝，既有会话按网关 dsh_enforce 档位失效。工作区与 dsh 数据保留，重新启用即恢复。');
+  if (!ok) return;
+  try {
+    await api.post('/accounts/' + row.id + '/dsh', { enabled: false });
+    toast('已停用 DSH', 'ok');
+    await reload();
+  } catch (err) {
+    toast(api.errorMessage(err), 'error');
+  }
+}
+
+// slugFromAccount mirrors the server's candidate generator so the dialog suggests the
+// same name the server would pick; the server stays the authority on uniqueness.
+function slugFromAccount(name) {
+  let slug = 'dsh-' + String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  if (slug.length > 26) slug = slug.slice(0, 26).replace(/-+$/, '');
+  return /^[a-z][a-z0-9-]{0,25}[a-z]$|^[a-z]$/.test(slug) ? slug : 'dsh-tenant';
 }
 
 // orgCell renders the account's organizations as their label paths, so an operator reads

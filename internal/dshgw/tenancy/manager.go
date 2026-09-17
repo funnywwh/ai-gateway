@@ -450,6 +450,19 @@ func (m *Manager) Restart(ctx context.Context, t registry.Tenant) error {
 	_, err := m.run(ctx, "systemctl", "restart", m.unit(t.Name))
 	return err
 }
+
+// StopWorker halts the tenant's worker without touching its identity, data or unit
+// enablement: the M52 console "disable" keeps everything and just frees the resources.
+func (m *Manager) StopWorker(ctx context.Context, t registry.Tenant) error {
+	_, err := m.run(ctx, "systemctl", "stop", m.unit(t.Name))
+	return err
+}
+
+// StartWorker reverses StopWorker for a tenant that already exists.
+func (m *Manager) StartWorker(ctx context.Context, t registry.Tenant) error {
+	_, err := m.run(ctx, "systemctl", "start", m.unit(t.Name))
+	return err
+}
 func (m *Manager) Enable(ctx context.Context, t registry.Tenant, on bool) error {
 	verb := "disable"
 	if on {

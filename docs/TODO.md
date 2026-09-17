@@ -384,6 +384,17 @@
       于是"某把 Key 设了 `margin_bp: 0`"时，试算器显示 1.0× 而实际按 0 计费。
       影响面：只影响预览数值，不影响计费。修法需要接口新参数（key/tag/account），属接口变更，另开里程碑
 
+## M52 aigw 后台“启用 DSH / 停用 DSH”（账号级 dsh 开关）
+
+设计：`docs/design/m52-dsh-enable.md`（已实现，差异与验收步骤见 §8/§9；完成项已归档 todo_done.md）。
+定位：accounts 增 `dsh_enabled` 真值；新增 `POST /v1/dshgw/authorize`；dshgw 增 `dsh_enforce`
+（login/interval/per-request）执行点；后台账号列表按钮 + 审计。不动 dsh 发行包、不做自动建户。
+
+- [ ] 主机验收（rev2）：root 配置 `admin_socket`/`admin_allowed_uids` 并启动 `dshgw-admin.service`、重启 aigw 与 dshgw 后：后台启用→自动建租户+worker，账号下旧 Key 与新建 Key 均可登录并跳转租户端口；停用→worker 停止、新登录拒绝、内部 Key 吊销、数据保留；重启用→worker 恢复、新 Key 生效；A/B 互不影响；审计无 Key 明文
+- [ ] 浏览器人工走查账号列表 DSH 徽标与启用/停用对话框（租户名预填/可指定）
+- [ ] 决策：DSH 上游限制（域名访问时设置/模型目录视图不可用，上游 0.1.2-rc.1 设计）——A 接受并文档明示（推荐，保持零垫片）或 B 网关注入 __DSH_TRANSPORT__ 垫片（突破 D5，不推荐）；确定后回填规格与用户指引
+- [ ] M52 提交（独立于 M51 commit；发布/版本号决定由用户另议）
+
 ## M51 dshgw 多租户 dsh 网关（写进本仓库、与 aigw / dsh 双向解耦）
 
 设计：`docs/design/m51-dshgw.md`；规格：`docs/dshgw.md`；部署：`deploy/dshgw/README.md`。

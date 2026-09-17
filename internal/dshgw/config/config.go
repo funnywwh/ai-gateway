@@ -104,6 +104,13 @@ type Config struct {
 	ValidateTimeout Duration     `yaml:"validate_timeout" json:"validate_timeout"`
 	SessionTTL      Duration     `yaml:"session_ttl" json:"session_ttl"`
 	KeyRevalidate   string       `yaml:"key_revalidate" json:"key_revalidate"`
+	DSHEnforce      string       `yaml:"dsh_enforce" json:"dsh_enforce"`
+	// AdminSocket is the UNIX socket the root admin-serve listens on (M52 provisioning
+	// channel). Empty disables the command: the daemon never starts by accident.
+	AdminSocket string `yaml:"admin_socket" json:"admin_socket"`
+	// AdminAllowedUIDs are the peer UIDs (typically the aigw runtime user) that may talk
+	// to the admin socket. UID 0 is always allowed on the local machine.
+	AdminAllowedUIDs []int `yaml:"admin_allowed_uids" json:"admin_allowed_uids"`
 	LoginRate       RateLimit    `yaml:"login_rate" json:"login_rate"`
 	DirectoryPicker string       `yaml:"directory_picker" json:"directory_picker"`
 	PluginBrowserFS string       `yaml:"plugin_browser_fs" json:"plugin_browser_fs"`
@@ -143,6 +150,7 @@ func defaults() Config {
 		ValidateTimeout: Duration(5 * time.Second),
 		SessionTTL:      Duration(7 * 24 * time.Hour),
 		KeyRevalidate:   "off",
+		DSHEnforce:      "login",
 		LoginRate:       RateLimit{Requests: 10, Window: Duration(time.Minute)},
 		DirectoryPicker: "clamp",
 		PluginBrowserFS: "on",
@@ -303,6 +311,9 @@ func (c *Config) Validate() error {
 	if _, err := ParseRevalidate(c.KeyRevalidate); err != nil {
 		return err
 	}
+	if _, err := ParseDSHEnforce(c.DSHEnforce); err != nil {
+		return err
+	}
 	if c.LoginRate.Requests < 1 || c.LoginRate.Window.Duration() <= 0 {
 		return errors.New("login_rate requests and window must be positive")
 	}
@@ -401,6 +412,34 @@ func ParseRevalidate(raw string) (RevalidateMode, error) {
 		return RevalidateMode{Interval: time.Duration(n) * time.Second}, nil
 	}
 	return RevalidateMode{}, errors.New(`key_revalidate must be "off", "per-request", or "interval:<seconds>"`)
+}
+
+// DSHEnforceMode is the parsed dsh_enforce setting (M52): when the dshgw proxy consults
+// aigw's /v1/dshgw/authorize beyond the mandatory login-time check. Zero value = login only.
+type DSHEnforceMode struct {
+	PerRequest bool
+	Interval   time.Duration
+}
+
+// ParseDSHEnforce mirrors ParseRevalidate: "login" (default), "per-request", or
+// "interval:<seconds>" for a cached near-immediate revocation. Anything else is a
+// configuration error, so a typo can never silently disable the entitlement check.
+func ParseDSHEnforce(raw string) (DSHEnforceMode, error) {
+	switch raw {
+	case "", "login":
+		return DSHEnforceMode{}, nil
+	case "per-request":
+		return DSHEnforceMode{PerRequest: true}, nil
+	}
+	const prefix = "interval:"
+	if strings.HasPrefix(raw, prefix) {
+		n, err := strconv.ParseInt(strings.TrimPrefix(raw, prefix), 10, 64)
+		if err != nil || n < 1 || n > (1<<63-1)/int64(time.Second) {
+			return DSHEnforceMode{}, errors.New("dsh_enforce interval must be a positive number of seconds")
+		}
+		return DSHEnforceMode{Interval: time.Duration(n) * time.Second}, nil
+	}
+	return DSHEnforceMode{}, errors.New(`dsh_enforce must be "login", "per-request", or "interval:<seconds>"`)
 }
 
 func ValidTenantName(name string) bool { return tenantNameRE.MatchString(name) }

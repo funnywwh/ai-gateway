@@ -113,6 +113,16 @@ func TestNginxTLSProxyIntegration(t *testing.T) {
 			}
 			return []string{"fake-model-never-called"}, nil
 		}))
+
+	p.Authorizer = authorizerFunc(func(_ context.Context, key string) (string, error) {
+		if key == "sk-aaaaaaaaa-nginx-dummy" {
+			return "alice", nil
+		}
+		if key == "sk-bbbbbbbbb-nginx-dummy" {
+			return "bob", nil
+		}
+		return "", aigw.ErrInvalidKey
+	})
 	p.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	upstreamTransport := p.Transport.(*http.Transport)
 	upstreamTransport.DialContext = (&net.Dialer{Timeout: nginxTestTimeout}).DialContext

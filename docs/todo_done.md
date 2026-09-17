@@ -3271,3 +3271,15 @@ harness 之所以漏掉它，是因为 fixture 直接给了 `account_count` 字�
 - [x] gateway更新后真实浏览器 Key B 登录返回302并打开 `https://chat.tirisen.hk:32602/`。
 
 - [x] 门户第二阶段CSP修复与用户最终复验：显式允许registry内租户origin作为form-action重定向目标；用户确认更新后的CSP头及浏览器自动跳转成功。此前“手工可打开32602”不代表自动跳转；最终确认发生于CSP修复部署后。门户保持:32600，不实施/dsh/。增加CSP精确来源无通配符断言，proxy测试通过。
+
+
+## M52 aigw 后台“启用 DSH / 停用 DSH”
+
+- [x] 设计确认：默认 `dsh_enforce: login`、不默认立即撤销既有会话、aigw 先行分两步交付（用户 2026-09-16 确认）
+- [x] 迁移 0019_account_dsh_enabled + domain/store `dsh_enabled` 读写
+- [x] aigw `POST /v1/dshgw/authorize`：Bearer/X-API-Key；suspended/closed 映射 403 `account_status`；停用 403 `dsh_disabled`；401 原样
+- [x] admin `GET/POST /admin/api/v1/accounts/{id}/dsh` + 审计（幂等 no-op 不重复审计）+ 路由表守卫更新（公开路由 10→11）
+- [x] 管理写后 InvalidateAll（账号行被 key verifier 缓存，不清缓存开关一个 TTL 内不生效）
+- [x] webui 账号列表 DSH 徽标与“启用 DSH/停用 DSH”按钮（confirmDialog 语义说明停用影响）
+- [x] dshgw `dsh_enforce`（login/interval/per-request）+ 登录/请求期执行点 + nil Authorizer fail-closed + 拒绝缓存
+- [x] 回归：httpapi 新增 authorize/开关矩阵测试；dshgw 新增 7 项执行点测试；`go test ./...`、`go vet`、`make dshgw-verify`、`make dshgw-nginx-test`、UI harness 全部视图、30 项 fake 回归通过

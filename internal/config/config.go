@@ -37,6 +37,7 @@ type Config struct {
 	Portal         Portal      `yaml:"portal"`
 	RateLimit      RateLimit   `yaml:"ratelimit"`
 	Backup         Backup      `yaml:"backup"`
+	Dshgw          Dshgw       `yaml:"dshgw"`
 	Log            logx.Config `yaml:"log"`
 	CredentialsKey string      `yaml:"credentials_key"`
 	Bootstrap      Bootstrap   `yaml:"bootstrap"`
@@ -371,6 +372,14 @@ type RateLimit struct {
 	Shards int `yaml:"shards"`
 }
 
+// Dshgw configures the optional local channel to the dshgw multi-tenant gateway (M52):
+// the console "启用/停用 DSH" buttons drive tenant lifecycle through a root-owned UNIX
+// socket. An empty socket path disables the buttons (they answer 501).
+type Dshgw struct {
+	// AdminSocket is the dshgw admin-serve socket path. Default /run/dshgw/admin.sock.
+	AdminSocket string `yaml:"admin_socket"`
+}
+
 // Backup configures periodic automatic database backups.
 type Backup struct {
 	Enabled          bool   `yaml:"enabled"`
@@ -510,6 +519,7 @@ type Bootstrap struct {
 // Default returns the built-in configuration (matches config.example.yaml).
 func Default() Config {
 	return Config{
+		Dshgw: Dshgw{AdminSocket: "/run/dshgw/admin.sock"},
 		Server: Server{
 			Listen:       ":8080",
 			ReadTimeoutS: 30,

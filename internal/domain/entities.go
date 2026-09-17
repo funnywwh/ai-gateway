@@ -27,6 +27,13 @@ type Account struct {
 	MarkupOverrideSet      bool
 	AutoSuspend            bool
 	AutoResume             bool
+	// DSHEnabled gates the account's access to the dsh multi-tenant gateway (M52).
+	// The console owns this flag; dshgw consults POST /v1/dshgw/authorize.
+	DSHEnabled bool
+	// DshTenant names the dshgw tenant the account enters once enabled (M52-rev2). All
+	// keys of the account — existing and newly created — log into this tenant; no
+	// per-key prefix binding is required.
+	DshTenant              string
 	InflightPolicyOverride string
 	OverdraftLimitMicros   int64
 	Status                 string

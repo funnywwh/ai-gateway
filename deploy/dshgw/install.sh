@@ -67,6 +67,7 @@ install -m 0644 "$ROOT/cmd/dshgw/plugin/picker-clamp.test.mjs" /opt/dshgw/share/
 install -m 0644 "$ROOT/deploy/dshgw/dsh-worker@.service" /etc/systemd/system/dsh-worker@.service
 install -m 0644 "$ROOT/deploy/dshgw/dsh-workers.slice" /etc/systemd/system/dsh-workers.slice
 install -m 0644 "$ROOT/deploy/dshgw/dshgw.service" /etc/systemd/system/dshgw.service
+install -m 0644 "$ROOT/deploy/dshgw/dshgw-admin.service" /etc/systemd/system/dshgw-admin.service
 install -m 0644 "$ROOT/deploy/dshgw/dshgw.logrotate" /etc/logrotate.d/dshgw
 if [[ ! -e /etc/dshgw/config.yaml ]]; then install -m 0640 -o root -g dshgw "$ROOT/deploy/dshgw/config.example.yaml" /etc/dshgw/config.yaml; fi
 if [[ ! -e /var/lib/dshgw/registry.json ]]; then printf '{"version":1,"tenants":[]}\n' >/var/lib/dshgw/registry.json; chown dshgw:dshgw /var/lib/dshgw/registry.json; chmod 0600 /var/lib/dshgw/registry.json; fi

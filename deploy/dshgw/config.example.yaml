@@ -13,6 +13,10 @@ aigw_base_url: http://192.168.190.86:8088
 validate_timeout: 5s
 session_ttl: 168h
 key_revalidate: off              # off | per-request | interval:<seconds>
+dsh_enforce: login               # login | per-request | interval:<seconds>（M52 账号级 dsh 开关的请求期复查档位）
+# M52 本地 provisioning 通道（dshgw-admin.service 使用；不开 admin-serve 可不配置）：
+admin_socket: /run/dshgw/admin.sock
+admin_allowed_uids: [1000]       # 允许连接的 aigw 运行 UID；UID 0 恒允许
 login_rate:
   requests: 10
   window: 1m

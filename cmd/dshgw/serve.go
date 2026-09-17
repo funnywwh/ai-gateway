@@ -22,6 +22,7 @@ func (c *cli) serve() error {
 	}
 	store := deps.manager.Sessions
 	gateway := proxy.New(deps.cfg, deps.reg, store, handshake.FileSource{Dir: deps.cfg.HandshakeDir}, &handshake.HTTPExchanger{}, deps.validator)
+	gateway.Authorizer = deps.validator
 	gateway.KeySource = proxy.FileKeySource{Root: deps.cfg.Deploy.TenantConfigRoot}
 	gateway.Auditor = &audit.JSONL{Path: deps.cfg.AuditPath}
 	gateway.Activity = &activity.Store{Path: deps.cfg.ActivityPath}

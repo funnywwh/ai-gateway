@@ -53,6 +53,9 @@ func execute(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "serve":
 		cancel()
 		err = app.serve()
+	case "admin-serve":
+		cancel()
+		err = app.adminServe(context.Background())
 	case "tenant":
 		err = app.tenant(ctx, rest[1:])
 	case "bind":
@@ -99,6 +102,7 @@ func printUsage(w io.Writer) {
 
 Commands:
   serve                                  run loopback gateway
+  admin-serve                            root-only local tenant provisioning channel (UNIX socket; requires admin_socket config)
   tenant create|list|rotate-key|restart|remove
   bind PREFIX TENANT                     bind an additional public key prefix
   login-url [PREFIX]                    print the portal or tenant URL

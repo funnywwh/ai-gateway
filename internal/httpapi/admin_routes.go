@@ -1321,6 +1321,24 @@ func (s *Server) billingAdminRoutes() []adminRoute {
 			},
 		},
 		{
+			Method: "GET", Path: "/admin/api/v1/accounts/{id}/dsh", Handler: s.handleAdminGetAccountDSH,
+			Name: "admin_get_account_dsh", Group: groupAccounts, Role: roleViewer,
+			Summary: "查看账户的 dsh 多租户网关启用状态（M52）",
+			Params:  []adminField{pathParam("id", "账户数字 id")},
+		},
+		{
+			Method: "POST", Path: "/admin/api/v1/accounts/{id}/dsh", Handler: s.handleAdminSetAccountDSH,
+			Name: "admin_set_account_dsh", Group: groupAccounts, Role: roleAdmin,
+			Summary:   "启用或停用该账户的 dsh 网关入口（M52）",
+			Dangerous: true, ConfirmReason: "停用后 dsh 门户拒绝该账号新登录，既有会话按 dshgw 的 dsh_enforce 档位失效；启用恢复登录。不影响账户的 Key、余额或 dsh 租户数据",
+			Params: []adminField{pathParam("id", "账户数字 id")},
+			Body: []adminField{
+				bodyRequired("enabled", "boolean", "true=启用 dsh 入口（自动铸造 worker 专用 Key 并建立/启动租户）；false=停用（停止 worker 并吊销 worker Key，数据保留）"),
+				bodyOptional("tenant", "string",
+					"启用时可选指定 dshgw 租户名（须匹配 [a-z][a-z0-9-]{0,25}[a-z]）；留空则沿用既有映射或按账户名自动生成。停用时忽略"),
+			},
+		},
+		{
 			Method: "GET", Path: "/admin/api/v1/accounts/{id}/balance", Handler: s.handleAdminAccountBalance,
 			Name: "admin_account_balance", Group: groupBilling, Role: roleViewer,
 			Summary: "账户余额与信用视图",

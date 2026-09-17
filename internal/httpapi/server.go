@@ -20,6 +20,7 @@ import (
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/ids"
+	"github.com/winger/ai-gateway/internal/localdshgw"
 	"github.com/winger/ai-gateway/internal/pricing"
 	"github.com/winger/ai-gateway/internal/quota"
 	"github.com/winger/ai-gateway/internal/registry"
@@ -68,6 +69,22 @@ type LogRecorder interface {
 // not implement it (or no recorder at all) means reads never need to wait.
 type responseWaiter interface {
 	AwaitResponse(ctx context.Context, id string) error
+}
+
+// KeyStore is the key-writing subset the dshgw provisioning flow needs.
+type KeyStore interface {
+	ListAPIKeys(ctx context.Context, accountID int64) ([]*domain.APIKey, error)
+	UpsertAPIKey(ctx context.Context, k *domain.APIKey) (int64, error)
+}
+
+// DshgwAdminOps is the aigw-side view of the dshgw local provisioning channel. The key
+// arguments travel only over the root-owned local socket and are never logged.
+type DshgwAdminOps interface {
+	CreateTenant(ctx context.Context, name, key string) error
+	StartTenant(ctx context.Context, name string) error
+	StopTenant(ctx context.Context, name string) error
+	SetTenantKey(ctx context.Context, name, key string) error
+	ListTenants(ctx context.Context) ([]localdshgw.TenantInfo, error)
 }
 
 // Deps are the collaborators of the HTTP server.
@@ -130,6 +147,9 @@ type Deps struct {
 	ReloadFX func(ctx context.Context) error
 	// UI serves the embedded management console at /admin/ui/; nil disables it.
 	UI http.Handler
+	// DshgwAdmin drives the dshgw local provisioning channel (M52). nil makes the
+	// console dsh toggle answer 501 instead of pretending to provision.
+	DshgwAdmin DshgwAdminOps
 	// Billing exposes ledger maintenance; Ledger reads balances and history.
 	Billing BillingPort
 	Ledger  LedgerAdmin
@@ -310,6 +330,7 @@ func (s *Server) routes() {
 	s.handle("GET /v1/responses/{id}", s.handleGetResponse)
 	s.handle("DELETE /v1/responses/{id}", s.handleDeleteResponse)
 	s.handle("GET /v1/models", s.handleListModels)
+	s.handle("POST /v1/dshgw/authorize", s.handleDSHGWAuthorize)
 	s.handle("POST /mcp", s.handleMCP)
 
 	// The management surface comes from the declarative table (admin_routes.go):

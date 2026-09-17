@@ -88,7 +88,10 @@ var allowed = map[string][]string{
 		"internal/quota", "internal/registry", "internal/responses", "internal/retention",
 		"internal/routing",
 		"internal/runtime", "internal/secret", "internal/store", "internal/usage", "pkg/pluginapi",
+		"internal/localdshgw",
 	},
+	// M52: the console drives the dshgw provisioning channel through this socket client.
+	"internal/localdshgw": {"internal/domain"},
 }
 
 // forbiddenByRule names the checks that exist because a specific refactor made them true.

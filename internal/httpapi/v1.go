@@ -972,6 +972,41 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, list)
 }
 
+// handleDSHGWAuthorize answers the dshgw portal's per-login (and optional per-request)
+// entitlement check (M52). Authentication reuses the data-plane verifier: 401 for an unknown
+// or inactive key, and a suspended/closed account — which Verify reports as 402 — becomes a
+// 403 denial with reason "account_status" so the gateway can show a real message instead of
+// pretending the auth service is down. A valid but non-opted-in account is denied with
+// reason "dsh_disabled"; that is the state the console's 停用 DSH button sets.
+func (s *Server) handleDSHGWAuthorize(w http.ResponseWriter, r *http.Request) {
+	header := r.Header.Get("Authorization")
+	if header == "" {
+		header = r.Header.Get("X-API-Key")
+	}
+	_, account, err := s.deps.Verifier.Verify(r.Context(), header)
+	if err != nil {
+		if apiErr := toAPIError(err); apiErr.Status == http.StatusPaymentRequired {
+			writeJSON(w, http.StatusForbidden, map[string]any{"allowed": false, "reason": "account_status"})
+			return
+		}
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	if !account.DSHEnabled {
+		writeJSON(w, http.StatusForbidden, map[string]any{"allowed": false, "reason": "dsh_disabled"})
+		return
+	}
+	if account.DshTenant == "" {
+		// Enabled but the console never recorded which tenant to use (rev2 migration not
+		// done): deny rather than let dshgw guess.
+		writeJSON(w, http.StatusForbidden, map[string]any{"allowed": false, "reason": "dsh_tenant_unassigned"})
+		return
+	}
+	// The tenant name is the account's dshgw destination: every key of this account logs
+	// into it, so dshgw no longer needs a per-key prefix binding.
+	writeJSON(w, http.StatusOK, map[string]any{"allowed": true, "tenant": account.DshTenant})
+}
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------

@@ -31,6 +31,12 @@ func (f validatorFunc) ValidateKey(ctx context.Context, key string) ([]string, e
 	return f(ctx, key)
 }
 
+type authorizerFunc func(context.Context, string) (string, error)
+
+func (f authorizerFunc) Authorize(ctx context.Context, key string) (string, error) {
+	return f(ctx, key)
+}
+
 type sourceStub string
 
 func (s sourceStub) TokenURL(string) (string, error) { return string(s), nil }
@@ -70,6 +76,7 @@ func fixture(t *testing.T, worker http.Handler) (*Proxy, registry.Tenant, string
 	}
 	ex := &exchangeStub{value: "fresh"}
 	p := New(cfg, reg, store, sourceStub("http://127.0.0.1:1/?token=x"), ex, validatorFunc(func(context.Context, string) ([]string, error) { return []string{"m"}, nil }))
+	p.Authorizer = authorizerFunc(func(context.Context, string) (string, error) { return "alice", nil })
 	return p, tenant, up.URL, up
 }
 func issue(t *testing.T, p *Proxy, tenant string, upstream *session.Upstream) string {

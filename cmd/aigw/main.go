@@ -22,6 +22,7 @@ import (
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/hook"
 	"github.com/winger/ai-gateway/internal/httpapi"
+	"github.com/winger/ai-gateway/internal/localdshgw"
 	"github.com/winger/ai-gateway/internal/logx"
 	"github.com/winger/ai-gateway/internal/mcpsrv"
 	"github.com/winger/ai-gateway/internal/pluginhost"
@@ -484,6 +485,7 @@ func run() int {
 		InvalidateAll:  verifier.InvalidateAll,
 		KeyCacheSize:   verifier.Size,
 		UI:             webui.Handler(),
+		DshgwAdmin:     &localdshgw.Client{SocketPath: cfg.Dshgw.AdminSocket, Timeout: 5 * time.Minute},
 		Billing:        billingService,
 		Ledger:         billingService,
 		Invoices:       billingService,

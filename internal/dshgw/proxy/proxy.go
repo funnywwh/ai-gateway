@@ -35,6 +35,14 @@ type KeyValidator interface {
 	ValidateKey(context.Context, string) ([]string, error)
 }
 
+// DSHAuthorizer is the account-level entitlement check (M52): aigw answers whether the
+// key's account is opted in to the dsh gateway and which tenant the account uses. An
+// empty tenant name means the aigw side has no mapping yet and the caller falls back to
+// legacy prefix binding. aigw.Client implements it.
+type DSHAuthorizer interface {
+	Authorize(context.Context, string) (string, error)
+}
+
 type Proxy struct {
 	Config          *config.Config
 	Registry        *registry.Registry
@@ -42,6 +50,7 @@ type Proxy struct {
 	HandshakeSource handshake.Source
 	Exchanger       handshake.Exchanger
 	Validator       KeyValidator
+	Authorizer      DSHAuthorizer
 	KeySource       KeySource
 	Transport       http.RoundTripper
 	Logger          *slog.Logger
@@ -55,6 +64,8 @@ type Proxy struct {
 	rates             map[string]*rateBucket
 	revalidateMu      sync.Mutex
 	revalidations     map[string]revalidation
+	dshMu             sync.Mutex
+	dshChecks         map[string]revalidation
 	reloadMu          sync.Mutex
 	lastReload        time.Time
 }
@@ -72,7 +83,7 @@ func New(cfg *config.Config, reg *registry.Registry, sessions session.Store, sou
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.ForceAttemptHTTP2 = false
-	p := &Proxy{Config: cfg, Registry: reg, Sessions: sessions, HandshakeSource: source, Exchanger: exchanger, Validator: validator, Transport: transport, rates: map[string]*rateBucket{}, revalidations: map[string]revalidation{}}
+	p := &Proxy{Config: cfg, Registry: reg, Sessions: sessions, HandshakeSource: source, Exchanger: exchanger, Validator: validator, Transport: transport, rates: map[string]*rateBucket{}, revalidations: map[string]revalidation{}, dshChecks: map[string]revalidation{}}
 	cfg.SetTenantPorts(reg.TenantPorts())
 	return p
 }
@@ -289,15 +300,34 @@ func (p *Proxy) login(w http.ResponseWriter, r *http.Request) {
 		p.renderLogin(w, http.StatusServiceUnavailable, "认证服务暂不可用")
 		return
 	}
-	prefix, err := aigw.KeyPrefix(key)
+	// The account-level entitlement check (M52) runs after the key itself validated.
+	// An enabled account answers its tenant name, so EVERY key of the account — existing
+	// and newly created — logs into that tenant without per-key prefix binding. A denial
+	// is a 403 with an accurate message, never a silent success and never confused with
+	// "aigw is down" (which stays a 503).
+	authTenant, err := p.authorizeDSH(ctx, key)
 	if err != nil {
-		p.renderLogin(w, http.StatusUnauthorized, "Key 无效或已停用")
+		var denial *aigw.DSHDenial
+		switch {
+		case errors.As(err, &denial):
+			reason, message := "dsh disabled", "该账号未启用 dsh"
+			if denial.Reason == "account_status" {
+				reason, message = "account suspended", "账号已停用，无法登录 dsh"
+			}
+			p.audit(r, "", "login_reject", reason, http.StatusForbidden)
+			p.renderLogin(w, http.StatusForbidden, message)
+		case errors.Is(err, aigw.ErrInvalidKey):
+			p.renderLogin(w, http.StatusUnauthorized, "Key 无效或已停用")
+		default:
+			p.log().Warn("dsh authorization check failed", "err", err)
+			p.renderLogin(w, http.StatusServiceUnavailable, "认证服务暂不可用")
+		}
 		return
 	}
-	tenant, ok := p.Registry.ByPrefix(prefix)
-	if !ok {
+	tenant, resolved := p.resolveTenant(authTenant, key)
+	if !resolved {
 		p.audit(r, "", "login_reject", "unbound key prefix", http.StatusForbidden)
-		p.renderLogin(w, http.StatusForbidden, "该 Key 尚未绑定 dsh 租户，请联系管理员执行 tenant create 或 bind")
+		p.renderLogin(w, http.StatusForbidden, "该账号的 dsh 租户尚未就绪，请联系管理员启用或检查租户状态")
 		return
 	}
 	token, err := p.Sessions.Issue(tenant.Name, p.Config.SessionTTL.Duration())
@@ -412,6 +442,20 @@ func (p *Proxy) TenantHandler(t registry.Tenant) http.Handler {
 			}
 			p.log().Warn("tenant key revalidation failed", "tenant", t.Name, "err", err)
 			http.Error(w, "key validation unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if err := p.enforceDSHAccess(r.Context(), t.Name); err != nil {
+			var denial *aigw.DSHDenial
+			if errors.As(err, &denial) {
+				// The account lost its dsh opt-in: revoke this browser session and send
+				// the user back to the portal, the same path an invalid key takes.
+				_ = p.Sessions.Delete(cookie.Value)
+				p.setSessionCookie(w, t.Name, "", true)
+				p.unauthenticated(w, r)
+				return
+			}
+			p.log().Warn("dsh entitlement check failed", "tenant", t.Name, "err", err)
+			http.Error(w, "dsh authorization unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		if err := prepareReplayable(r); err != nil {
@@ -567,6 +611,79 @@ func prepareReplayable(r *http.Request) error {
 	r.ContentLength = int64(len(data))
 	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(data)), nil }
 	return nil
+}
+
+// authorizeDSH runs the mandatory login-time entitlement check (dsh_enforce=login and
+// stricter modes alike). A nil Authorizer is a configuration error and fails closed: the
+// portal answers 503 rather than admitting a login it could not check.
+func (p *Proxy) authorizeDSH(ctx context.Context, key string) (string, error) {
+	if _, err := config.ParseDSHEnforce(p.Config.DSHEnforce); err != nil {
+		return "", err
+	}
+	if p.Authorizer == nil {
+		return "", errors.New("dsh authorization is not configured")
+	}
+	ctx, cancel := context.WithTimeout(ctx, p.Config.ValidateTimeout.Duration())
+	defer cancel()
+	return p.Authorizer.Authorize(ctx, key)
+}
+
+// resolveTenant maps the authorized account onto a dshgw tenant. The account mapping is
+// authoritative; legacy prefix binding only applies when aigw returned no tenant name
+// (older aigw without the mapping, or a deployment that has not enabled the account yet).
+func (p *Proxy) resolveTenant(authTenant, key string) (registry.Tenant, bool) {
+	if authTenant != "" {
+		if t, ok := p.Registry.Get(authTenant); ok {
+			return t, true
+		}
+		return registry.Tenant{}, false
+	}
+	prefix, err := aigw.KeyPrefix(key)
+	if err != nil {
+		return registry.Tenant{}, false
+	}
+	return p.Registry.ByPrefix(prefix)
+}
+
+// enforceDSHAccess is the request-time counterpart for dsh_enforce=per-request and
+// interval:<seconds>. login-only mode (the default) does nothing here: existing sessions
+// stay valid until logout/TTL, which the deployment documents. Denials and errors are
+// cached exactly like key revalidations, so interval mode bounds both the revocation lag
+// and the added aigw traffic.
+func (p *Proxy) enforceDSHAccess(ctx context.Context, tenant string) error {
+	mode, err := config.ParseDSHEnforce(p.Config.DSHEnforce)
+	if err != nil {
+		return err
+	}
+	if !mode.PerRequest && mode.Interval == 0 {
+		return nil
+	}
+	if p.Authorizer == nil {
+		return errors.New("dsh_enforce is enabled but no authorizer is configured")
+	}
+	if p.KeySource == nil {
+		return errors.New("dsh_enforce is enabled but no gateway key source is configured")
+	}
+	sum := sha256.Sum256([]byte(tenant))
+	lock := &p.revalidationLocks[sum[0]]
+	lock.Lock()
+	defer lock.Unlock()
+	p.dshMu.Lock()
+	prior, cached := p.dshChecks[tenant]
+	p.dshMu.Unlock()
+	if !mode.PerRequest && cached && p.now().Sub(prior.Checked) < mode.Interval {
+		return prior.Err
+	}
+	key, err := p.KeySource.Key(tenant)
+	if err == nil {
+		checkCtx, cancel := context.WithTimeout(ctx, p.Config.ValidateTimeout.Duration())
+		_, err = p.Authorizer.Authorize(checkCtx, key)
+		cancel()
+	}
+	p.dshMu.Lock()
+	p.dshChecks[tenant] = revalidation{Checked: p.now(), Valid: err == nil, Err: err}
+	p.dshMu.Unlock()
+	return err
 }
 
 func (p *Proxy) revalidateKey(ctx context.Context, tenant string) error {

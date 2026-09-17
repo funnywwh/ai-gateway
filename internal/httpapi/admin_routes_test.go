@@ -26,6 +26,7 @@ var expectedAdminPatterns = []string{
 	"GET /admin/api/v1/accounts",
 	"GET /admin/api/v1/accounts/{id}/balance",
 	"GET /admin/api/v1/accounts/{id}/credits",
+	"GET /admin/api/v1/accounts/{id}/dsh",
 	"GET /admin/api/v1/accounts/{id}/invoices",
 	"GET /admin/api/v1/accounts/{id}/ledger",
 	"GET /admin/api/v1/accounts/{id}/portal-users",
@@ -72,6 +73,7 @@ var expectedAdminPatterns = []string{
 	"PATCH /admin/api/v1/tags/{id}",
 	"POST /admin/api/v1/accounts",
 	"POST /admin/api/v1/accounts/{id}/credits",
+	"POST /admin/api/v1/accounts/{id}/dsh",
 	"POST /admin/api/v1/accounts/{id}/invoices",
 	"POST /admin/api/v1/accounts/{id}/portal-users",
 	"POST /admin/api/v1/auth/login",
@@ -165,10 +167,10 @@ func TestAdminRoutesAreRegisteredFromTheTable(t *testing.T) {
 			t.Errorf("route %q was not registered on the mux", route.pattern())
 		}
 	}
-	// Public routes: /v1 (5), health+ready+metrics+version (4) and the sandboxed preview
-	// document (1). pprof is off in this fixture, so public patterns are 10 plus the
-	// admin table.
-	if len(s.registered) != len(s.admin)+10 {
+	// Public routes: /v1 (6: models + the dshgw authorize check), health+ready+metrics+version
+	// (4) and the sandboxed preview document (1). pprof is off in this fixture, so public
+	// patterns are 11 plus the admin table.
+	if len(s.registered) != len(s.admin)+11 {
 		t.Errorf("registered %d patterns, expected %d management entries plus 10 public routes",
 			len(s.registered), len(s.admin))
 	}

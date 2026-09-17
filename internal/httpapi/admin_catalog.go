@@ -2,10 +2,13 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -360,6 +363,286 @@ func (s *Server) handleAdminPatchAccount(w http.ResponseWriter, r *http.Request)
 // ---------------------------------------------------------------------------
 // canonical models
 // ---------------------------------------------------------------------------
+
+// handleAdminGetAccountDSH reports the account's dsh gateway opt-in state (M52). The flag
+// lives on the account row; this read is what the console badge and the toggle button render.
+func (s *Server) handleAdminGetAccountDSH(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.adminActor(w, r, false); !ok {
+		return
+	}
+	store, ok := portReady(w, s.deps.Accounts, "account management")
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeAPIError(w, domain.ErrInvalidRequest("invalid account id"))
+		return
+	}
+	a, err := store.GetAccount(r.Context(), id)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account_id": a.ID, "name": a.Name, "enabled": a.DSHEnabled, "status": a.Status,
+		"updated_at": a.UpdatedAt.UTC().Format(time.RFC3339),
+	})
+}
+
+// dshTenantNameRE mirrors dshgw's config.ValidTenantName so a console-provisioned tenant
+// name is always accepted by the daemon without a second guess.
+var dshTenantNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,25}[a-z]$|^[a-z]$`)
+
+// dshTenantSlug derives a tenant name candidate from the account name: ASCII letters and
+// digits survive, everything else collapses to a dash. Names for accounts with no ASCII
+// characters at all fall back to the "dsh-tenant" stem and are made unique by the caller.
+func dshTenantSlug(accountName string) string {
+	var b strings.Builder
+	b.WriteString("dsh-")
+	lastDash := true
+	for _, r := range strings.ToLower(accountName) {
+		switch {
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+		default:
+			if !lastDash {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	name := strings.Trim(b.String(), "-")
+	if len(name) > 26 {
+		name = strings.TrimRight(name[:26], "-")
+	}
+	if !dshTenantNameRE.MatchString(name) {
+		name = "dsh-tenant"
+	}
+	return name
+}
+
+func randomHex4() string {
+	var buf [2]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return fmt.Sprintf("%04x", time.Now().UnixNano()&0xffff)
+	}
+	return hex.EncodeToString(buf[:])
+}
+
+// mintDshgwKey creates the dedicated model credential for a tenant's worker. The plaintext
+// exists exactly once (inside this call) and is never persisted, logged or audited.
+func (s *Server) mintDshgwKey(ctx context.Context, store KeyStore, accountID int64, tenant, actor string) (string, error) {
+	token := ids.APIKey()
+	key := &domain.APIKey{
+		AccountID: accountID, Name: "dshgw-" + tenant + "-" + randomHex4(),
+		KeyPrefix: secret.Prefix(token), KeyHash: secret.Hash(token),
+		RecordInputMode: "inherit", Status: "active", CreatedBy: actor,
+	}
+	if _, err := store.UpsertAPIKey(ctx, key); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// disableDshgwKeys revokes every active dshgw-issued model credential of the account, so a
+// stopped worker could not be driven by a stale key either.
+func (s *Server) disableDshgwKeys(ctx context.Context, store KeyStore, accountID int64, tenant string) (int, error) {
+	keys, err := store.ListAPIKeys(ctx, accountID)
+	if err != nil {
+		return 0, err
+	}
+	prefix := "dshgw-" + tenant
+	revoked := 0
+	for _, k := range keys {
+		if k.Status != "active" || !strings.HasPrefix(k.Name, prefix) {
+			continue
+		}
+		k.Status = "disabled"
+		if _, err := store.UpsertAPIKey(ctx, k); err != nil {
+			return revoked, err
+		}
+		revoked++
+	}
+	return revoked, nil
+}
+
+// handleAdminSetAccountDSH is the console's 启用/停用 DSH button (M52-rev2). Enabling
+// provisions the tenant through the local dshgw channel — mint a dedicated worker key,
+// create (or start and re-key) the tenant, then record the mapping — so every key of the
+// account, present and future, can log into that tenant without any per-key binding or
+// root shell. Disabling stops the worker, revokes the worker keys and flips the flag;
+// workspace and dsh data are kept for a later re-enable. A no-op write answers 200
+// without provisioning again, so double-clicking cannot flood the audit log.
+func (s *Server) handleAdminSetAccountDSH(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.adminActor(w, r, true)
+	if !ok {
+		return
+	}
+	store, ok := portReady(w, s.deps.Accounts, "account management")
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeAPIError(w, domain.ErrInvalidRequest("invalid account id"))
+		return
+	}
+	a, err := store.GetAccount(r.Context(), id)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	var body struct {
+		Enabled *bool   `json:"enabled"`
+		Tenant  *string `json:"tenant"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
+		return
+	}
+	if body.Enabled == nil {
+		writeAPIError(w, domain.ErrInvalidRequest("enabled is required"))
+		return
+	}
+	if *body.Enabled {
+		s.enableAccountDSH(w, r, actor, store, s.deps.AdminStore, a, body.Tenant)
+		return
+	}
+	s.disableAccountDSH(w, r, actor, store, s.deps.AdminStore, a)
+}
+
+func (s *Server) enableAccountDSH(w http.ResponseWriter, r *http.Request, actor *domain.AdminUser, store AccountAdmin, keys AdminStore, a *domain.Account, requested *string) {
+	if s.deps.DshgwAdmin == nil {
+		writeAPIError(w, domain.ErrInternal("dshgw provisioning channel is not configured"))
+		return
+	}
+	if a.Status != "active" {
+		writeAPIError(w, domain.ErrInvalidRequest("suspended or closed accounts cannot enable dsh"))
+		return
+	}
+	tenant := a.DshTenant
+	if requested != nil && strings.TrimSpace(*requested) != "" {
+		tenant = strings.TrimSpace(*requested)
+	}
+	if tenant == "" {
+		tenant = dshTenantSlug(a.Name)
+	}
+	if !dshTenantNameRE.MatchString(tenant) {
+		writeAPIError(w, domain.ErrInvalidRequest(`tenant name must match [a-z][a-z0-9-]{0,25}[a-z]`))
+		return
+	}
+	// One tenant serves exactly one account: refuse names that another account already
+	// claims, and names a manual dshgw tenant occupies (that would silently put this
+	// account's keys into someone else's workspace).
+	existing, err := s.deps.DshgwAdmin.ListTenants(r.Context())
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	existsInDshgw := false
+	for _, info := range existing {
+		if info.Name == tenant {
+			existsInDshgw = true
+			break
+		}
+	}
+	if claims, err := store.ListAccounts(r.Context()); err == nil {
+		for _, other := range claims {
+			if other.ID != a.ID && other.DshTenant == tenant {
+				writeAPIError(w, domain.ErrInvalidRequest("tenant name is already used by another account"))
+				return
+			}
+		}
+	}
+	// Uniqueness among console-created tenants keeps the key names unambiguous too.
+	if !existsInDshgw {
+		for i := 0; i < 32; i++ {
+			candidate := tenant
+			if i > 0 {
+				candidate = fmt.Sprintf("%s-%s", tenant, randomHex4())
+			}
+			taken := false
+			for _, info := range existing {
+				if info.Name == candidate {
+					taken = true
+					break
+				}
+			}
+			if !taken {
+				tenant = candidate
+				break
+			}
+		}
+	}
+	key, err := s.mintDshgwKey(r.Context(), keys, a.ID, tenant, actor.Username)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	if existsInDshgw {
+		// Re-enable (or retry after a half-finished enable): rotate the worker credential
+		// to a fresh key and bring the stopped worker back.
+		if err := s.deps.DshgwAdmin.SetTenantKey(r.Context(), tenant, key); err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		if err := s.deps.DshgwAdmin.StartTenant(r.Context(), tenant); err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+	} else if err := s.deps.DshgwAdmin.CreateTenant(r.Context(), tenant, key); err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	a.DshTenant = tenant
+	a.DSHEnabled = true
+	if _, err := store.UpsertAccount(r.Context(), a); err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	s.audit(r.Context(), actor.Username, "dsh_enable", "account", strconv.FormatInt(a.ID, 10),
+		map[string]any{"enabled": true, "tenant": tenant}, "ok")
+	// The key verifier caches the account row, so a stale cache would keep admitting
+	// (or refusing) dshgw logins for up to one verifier TTL. Account writes follow
+	// the same invalidate-everything rule the PATCH handler uses.
+	s.reload(r.Context(), "account dsh flag updated", true)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account_id": a.ID, "name": a.Name, "enabled": true, "tenant": tenant,
+		"changed": true,
+	})
+}
+
+func (s *Server) disableAccountDSH(w http.ResponseWriter, r *http.Request, actor *domain.AdminUser, store AccountAdmin, keys AdminStore, a *domain.Account) {
+	if a.DSHEnabled && s.deps.DshgwAdmin != nil && a.DshTenant != "" {
+		if err := s.deps.DshgwAdmin.StopTenant(r.Context(), a.DshTenant); err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+	}
+	if a.DshTenant != "" {
+		if _, err := s.disableDshgwKeys(r.Context(), keys, a.ID, a.DshTenant); err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+	}
+	changed := a.DSHEnabled
+	a.DSHEnabled = false
+	if _, err := store.UpsertAccount(r.Context(), a); err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	if changed {
+		s.audit(r.Context(), actor.Username, "dsh_disable", "account", strconv.FormatInt(a.ID, 10),
+			map[string]any{"enabled": false, "tenant": a.DshTenant}, "ok")
+		s.reload(r.Context(), "account dsh flag updated", true)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account_id": a.ID, "name": a.Name, "enabled": false, "tenant": a.DshTenant,
+		"changed": changed,
+	})
+}
 
 func (s *Server) handleAdminListModels(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.adminActor(w, r, false); !ok {
