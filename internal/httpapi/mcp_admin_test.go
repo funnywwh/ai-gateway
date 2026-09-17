@@ -973,3 +973,92 @@ func TestMCPAdminSetsProviderConcurrency(t *testing.T) {
 		t.Fatalf("the gate must follow the write back to unlimited: %+v", stat)
 	}
 }
+
+// An agent asked "which upstream did this model's spend go to" has to be able to answer it
+// through MCP without a new tool: the grouping value and the filter are part of the same
+// auto-derived admin surface, so this pins both the schema an agent plans around and the
+// numbers it reads back (M53).
+func TestMCPAdminStatisticsByProvider(t *testing.T) {
+	f := newAdminFixture(t)
+	f.seedScopedMCPToken(t, testAdminMCPToken, mcpsrv.ScopeAdmin)
+	cheap := seedAdminProvider(t, f, "mcp-cheap")
+	dear := seedAdminProvider(t, f, "mcp-dear")
+
+	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_mcp0001", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "luna", Status: "completed"})
+	seedProviderAttempt(t, f, "req_mcp0001", 1, cheap, 10, 20)
+	seedProviderAttempt(t, f, "req_mcp0001", 2, dear, 90, 180)
+
+	// The description has to carry the counting rule: an agent that sums the buckets' request
+	// counts against the window's total would otherwise read a correct answer as a bug.
+	detail, isError := f.callTool(t, testAdminMCPToken, 1, toolAdminDescribe, `{"name":"admin_request_dimensions"}`)
+	if isError {
+		t.Fatalf("admin_describe failed: %+v", detail)
+	}
+	docs, _ := detail["query"].([]any)
+	fields := map[string]map[string]any{}
+	for _, raw := range docs {
+		field, _ := raw.(map[string]any)
+		name, _ := field["name"].(string)
+		fields[name] = field
+	}
+	groupBy := fields["group_by"]
+	if groupBy == nil {
+		t.Fatalf("admin_request_dimensions must document group_by: %v", fields)
+	}
+	enum, _ := groupBy["enum"].([]any)
+	advertised := make([]string, 0, len(enum))
+	for _, value := range enum {
+		text, _ := value.(string)
+		advertised = append(advertised, text)
+	}
+	if !containsString(enum, "provider") {
+		t.Fatalf("group_by must offer provider: %v", advertised)
+	}
+	if text, _ := groupBy["description"].(string); !strings.Contains(text, "供应商") {
+		t.Errorf("group_by must say provider means 供应商: %v", groupBy)
+	}
+	summary, _ := detail["summary"].(string)
+	if !strings.Contains(summary, "各分组「请求数」之和可能大于窗口总请求数") {
+		t.Errorf("the tool description must state the per-provider counting rule: %v", summary)
+	}
+	filter := fields["provider_id"]
+	if filter == nil {
+		t.Fatalf("admin_request_dimensions must accept provider_id: %v", fields)
+	}
+	if text, _ := filter["description"].(string); !strings.Contains(text, "供应商") {
+		t.Errorf("provider_id must be described, not just listed: %v", filter)
+	}
+
+	// And the read itself: one bucket per provider, each carrying its own cost and name.
+	grouped, isError := f.callTool(t, testAdminMCPToken, 2, toolAdminRequest,
+		`{"name":"admin_request_dimensions","query":{"group_by":"provider","days":1,"sort":"charge"}}`)
+	if isError {
+		t.Fatalf("grouped read failed: %+v", grouped)
+	}
+	body, _ := grouped["body"].(map[string]any)
+	rows, _ := body["rows"].([]any)
+	if len(rows) != 2 {
+		t.Fatalf("provider buckets = %v, want one per provider", rows)
+	}
+	first, _ := rows[0].(map[string]any)
+	if first["key"] != strconv.FormatInt(dear, 10) || first["provider_name"] != "mcp-dear" || first["cost_micros"] != float64(90) {
+		t.Fatalf("first bucket = %v, want the dearest provider with its own cost", first)
+	}
+
+	// The filter is the other half: it selects the requests a provider served.
+	filtered, isError := f.callTool(t, testAdminMCPToken, 3, toolAdminRequest,
+		`{"name":"admin_list_requests","query":{"days":1,"provider_id":`+strconv.FormatInt(cheap, 10)+`}}`)
+	if isError {
+		t.Fatalf("filtered list failed: %+v", filtered)
+	}
+	listBody, _ := filtered["body"].(map[string]any)
+	if listBody["total"] != float64(1) {
+		t.Fatalf("filtered list total = %v, want the one request", listBody["total"])
+	}
+	data, _ := listBody["data"].([]any)
+	row, _ := data[0].(map[string]any)
+	providers, _ := row["providers"].([]any)
+	if len(providers) != 2 {
+		t.Fatalf("the row must list both providers that served it: %v", row["providers"])
+	}
+}

@@ -183,6 +183,10 @@ func dimensionQueryFields() []adminField {
 		queryParam("workspace", "string", "按工作区根路径过滤"),
 		queryParam("session_id", "string", "按会话 id 过滤（显式会话标识优先，缺失时使用 prompt_cache_key）"),
 		queryParam("call_kind", "string", "按调用类型过滤：agent | title"),
+		// The provider filter is not an identity column of the log row: a request that failed
+		// over was served by several providers, so the filter selects requests by their
+		// metering rows (docs/design/m53-request-provider-dimension.md §4).
+		queryParam("provider_id", "integer", "按上游供应商过滤（provider id，见 GET /providers）：选中有该供应商计量行的请求；失败转移的请求会被每一家选中；非数字返回 400"),
 	}
 }
 
@@ -674,7 +678,7 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/requests", Handler: s.handleAdminRequests,
 			Name: "admin_list_requests", Group: groupRequests, Role: roleViewer,
-			Summary: "全部账户的请求日志（跨账户视图，可按账户/API Key、天数与身份维度过滤；带该请求的用户与 Key 名字、token 与成本）",
+			Summary: "全部账户的请求日志（跨账户视图，可按账户/API Key、供应商、天数与身份维度过滤；带该请求的用户与 Key 名字、提供服务的供应商、token 与成本）",
 			Query: append(append(pageRequests.fields(),
 				queryParam("days", "integer", "回溯天数，默认 7，最大 365")),
 				dimensionQueryFields()...),
@@ -686,10 +690,19 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 			// worked around; /requests/prune has the same shape.
 			Method: "GET", Path: "/admin/api/v1/requests/dimensions", Handler: s.handleAdminRequestDimensions,
 			Name: "admin_request_dimensions", Group: groupRequests, Role: roleViewer,
-			Summary: "请求日志的维度统计：按客户端/模型/工作区/会话/调用类型/账户（用户）/API Key 分组；请求数和已计量数按请求去重，token 与成本累计全部上游尝试；默认按最近一次请求时间降序，可分页（total 是分组数）",
+			Summary: "请求日志的维度统计：按客户端/模型/路由到的模型/工作区/会话/调用类型/账户（用户）/API Key/供应商分组；请求数和已计量数按请求去重，token 与成本累计全部上游尝试；默认按最近一次请求时间降序，可分页（total 是分组数）。" +
+				"group_by=provider 的口径与其他维度不同，读数字前必须知道：成本与 token 按计量行归属到实际服务的那家供应商（同一模型的不同供应商各自计价，这正是该分组存在的理由），" +
+				"因此失败转移的请求会在每一家各计一次，各分组「请求数」之和可能大于窗口总请求数，这是设计而非错误；" +
+				"该分组恒读原始计量行（小时汇总按请求预聚合，无法回答供应商），行里额外带 provider_id/provider_name，" +
+				"id 为 0（key 为空）是未计量或供应商未知的桶。带 provider_id 过滤时同样走原始计量行，筛选口径是「请求」：选中有该供应商计量行的请求（见 admin_list_requests）",
 			Query: append(append([]adminField{
 				queryParam("days", "integer", "回溯天数，默认 7，最大 365"),
-				enumField(queryParam("group_by", "string", "分组维度"), append([]string{"client"}, store.RequestLogDimensionNames...)...),
+				enumField(queryParam("group_by", "string",
+					"分组维度。provider（供应商）的口径与其他维度不同，用之前必须知道：成本与 token 按计量行归属到实际服务的那家供应商"+
+						"（同一模型的不同供应商各自计价，这正是该分组存在的理由），失败转移的请求会在每一家各计一次，"+
+						"因此各分组请求数之和可能大于窗口总请求数；该分组恒读原始计量行，行里额外带 provider_id/provider_name，"+
+						"id 为 0（key 为空）表示未计量或供应商未知"),
+					append([]string{"client"}, store.RequestLogDimensionNames...)...),
 				enumField(queryParam("sort", "string",
 					"排序键（均为降序，同数按分组键升序）：last_seen 最近一次请求时间（默认）| requests 请求数 | charge 对客成本（与列表「成本」列同源 charge_micros）"),
 					store.RequestLogDimensionSorts...),

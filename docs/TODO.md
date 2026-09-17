@@ -412,3 +412,25 @@
 - [ ] 备份恢复主机演练与浏览器人工授权本机目录走查（模板供应、client HTTP200、普通 WS426/upgrade101 已自动验证）
 - [ ] 可选：有 C 编译器后运行 CGO_ENABLED=1 go test -race ./internal/dshgw/... ./cmd/dshgw；本机缺 gcc，普通并发回归已通过
 - [~] 收尾与提交：设计/规格状态回填为“已提交（M51，剩余主机验收项见 docs/design/m51-host-acceptance-remaining.md，部分被 M52 方向取代）”；单一 M51 commit 引用设计文档；不升 VERSION、不打 tag、不发布
+
+## M53 请求日志的供应商维度（按供应商统计成本）
+
+设计：`docs/design/m53-request-provider-dimension.md`；规格：`docs/request-log.md` §2/§4。
+起因（用户原话）：「修复同样的模型，不同的供应商，没有办法按供应商统计成本」。
+口径当场澄清并选定：**按计量行归属，谁服务的算谁的**；范围选定「维度统计 + 供应商筛选 +
+列表列 + 详情 + MCP」。实现与自动化验收已完成的条目见 `docs/todo_done.md` 同名小节，
+下面只列尚未验收与观察项。
+
+- [ ] **待人工执行**（宿主终端）：`make build` + `scripts/local-run.sh restart`，硬刷新
+      http://127.0.0.1:8088/admin/ui/#/requests ——确认列表出现「供应商」列（失败转移的行显示两家）、
+      筛选栏出现「全部供应商」、统计卡选「供应商」能按名字 + `#id` 拆出成本，且「请求数」表头
+      写明各分组之和可能大于窗口总数
+
+- [ ] 观察项：`group_by=provider` 与 `provider_id` 过滤**恒走原始扫描**（小时汇总按请求预聚合、
+      不含供应商，汇总的「请求数」也正是 M31 观察项里那个按尝试计数的问题）。大窗口下的耗时未实测；
+      若 p95 超标，需要新建一张按 (hour, request, provider) 聚合的汇总表——与现行 rollup 的请求粒度
+      不同，属独立设计
+
+- [ ] 决策（未做）：不带账号作用域的 MCP 用量工具 `get_usage_breakdown` 是否支持 `group_by=provider`。
+      给客户自己的 MCP token 暴露供应商 id/名字与数据面「不回供应商标识」的立场相冲突，
+      要做先定口径（只给 id？只给平台内部自定义名？）

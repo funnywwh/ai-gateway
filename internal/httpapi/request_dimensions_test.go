@@ -1026,3 +1026,242 @@ func TestAdminDimensionsRollupRetriesAndDiagnostics(t *testing.T) {
 		t.Fatal("disabled flag missing")
 	}
 }
+
+// seedAdminProvider inserts one provider instance and returns its id, so a test can assert
+// the name the API resolves for a provider bucket.
+func seedAdminProvider(t *testing.T, f *adminFixture, name string) int64 {
+	t.Helper()
+	id, err := f.db.UpsertProvider(context.Background(), &domain.Provider{Name: name, Kind: "testecho", Enabled: true})
+	if err != nil {
+		t.Fatalf("seed provider: %v", err)
+	}
+	return id
+}
+
+// seedProviderAttempt writes one metered attempt attributed to a provider. The provider is
+// the fact the request log cannot hold: one request may carry attempts from several, each
+// priced by its own provider mapping.
+func seedProviderAttempt(t *testing.T, f *adminFixture, requestID string, attempt int, providerID, cost, charge int64) {
+	t.Helper()
+	if _, err := f.db.InsertUsage(context.Background(), &domain.UsageRecord{
+		RequestID: requestID, AttemptNo: attempt, AccountID: 1, APIKeyID: 1,
+		Model: "luna", ResolvedModel: "deepseek-flash", ProviderID: providerID,
+		DimensionsJSON: `{"input":100,"output":7}`,
+		CostMicros:     cost, ChargeMicros: charge,
+		Status: "completed", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("insert usage: %v", err)
+	}
+}
+
+// The same model served by two providers is the case this dimension exists for: the model
+// bucket can only show the sum, while each provider bucket keeps what that provider's own
+// price table charged. The buckets carry the provider's name next to the id it grouped by,
+// the same read-time label rule the credential dimensions follow.
+func TestAdminRequestDimensionsGroupByProvider(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+	cheap := seedAdminProvider(t, f, "cheap-upstream")
+	dear := seedAdminProvider(t, f, "dear-upstream")
+
+	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_prov0001", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "luna", Status: "completed"})
+	seedProviderAttempt(t, f, "req_prov0001", 1, cheap, 100, 200)
+	seedProviderAttempt(t, f, "req_prov0001", 2, dear, 250, 500)
+	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_prov0002", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "luna", Status: "completed"})
+	seedProviderAttempt(t, f, "req_prov0002", 1, cheap, 7, 9)
+	// A locally rejected request never reached an upstream, so it belongs to no provider. It
+	// is kept as the unknown bucket instead of vanishing from the window's accounting.
+	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_prov0003", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "luna", Status: "failed"})
+
+	body := decodeJSONBody(t, f.call(t, http.MethodGet,
+		"/admin/api/v1/requests/dimensions?days=1&group_by=provider&limit=10&sort=charge", "", cookie))
+	if body["group_by"] != "provider" {
+		t.Fatalf("group_by = %v", body["group_by"])
+	}
+	if names, _ := body["dimensions"].([]any); !containsString(names, "provider") {
+		t.Fatalf("the endpoint must advertise the provider grouping: %v", body["dimensions"])
+	}
+	if body["total"] != float64(3) {
+		t.Fatalf("total = %v, want three buckets (two providers and the unknown one)", body["total"])
+	}
+	rows, _ := body["rows"].([]any)
+	if len(rows) != 3 {
+		t.Fatalf("provider buckets = %v", rows)
+	}
+	byKey := map[string]map[string]any{}
+	for _, item := range rows {
+		row, _ := item.(map[string]any)
+		byKey[row["key"].(string)] = row
+	}
+	// Ordered by charge descending: the provider that served the expensive attempt is first.
+	if rows[0].(map[string]any)["key"] != strconv.FormatInt(dear, 10) {
+		t.Fatalf("first bucket = %v, want the dearest provider", rows[0])
+	}
+	dearBucket := byKey[strconv.FormatInt(dear, 10)]
+	if dearBucket["provider_name"] != "dear-upstream" || dearBucket["provider_id"] != float64(dear) {
+		t.Fatalf("provider bucket lacks its label: %v", dearBucket)
+	}
+	if dearBucket["cost_micros"] != float64(250) || dearBucket["charge_micros"] != float64(500) ||
+		dearBucket["requests"] != float64(1) || dearBucket["metered"] != float64(1) {
+		t.Fatalf("provider bucket = %v, want its own attempt's money", dearBucket)
+	}
+	cheapBucket := byKey[strconv.FormatInt(cheap, 10)]
+	if cheapBucket["provider_name"] != "cheap-upstream" || cheapBucket["cost_micros"] != float64(107) ||
+		cheapBucket["requests"] != float64(2) {
+		t.Fatalf("provider bucket = %v, want both of its attempts", cheapBucket)
+	}
+	// The unknown bucket keeps the rejected request's count: the key is reported empty, the
+	// same 「未知」 bucket the credential dimensions use.
+	unknown := byKey[""]
+	if unknown["provider_id"] != float64(0) || unknown["requests"] != float64(1) ||
+		unknown["metered"] != float64(0) || unknown["cost_micros"] != float64(0) {
+		t.Fatalf("the unknown provider bucket = %v", unknown)
+	}
+
+	// The model view of the same window is unchanged: the provider grouping attributes money,
+	// it does not move it out of the other dimensions (357 = 100 + 250 + 7).
+	byModel := decodeJSONBody(t, f.call(t, http.MethodGet,
+		"/admin/api/v1/requests/dimensions?days=1&group_by=model&limit=10", "", cookie))
+	modelRow := byModel["rows"].([]any)[0].(map[string]any)
+	if modelRow["cost_micros"] != float64(357) || modelRow["requests"] != float64(3) {
+		t.Fatalf("model bucket = %v, want the window's whole spend", modelRow)
+	}
+}
+
+// The provider filter selects requests by their metering rows, because a request that failed
+// over has no single provider to filter on. The list, its total and the breakdown all have to
+// select the same requests, and a malformed id is refused rather than read as "every
+// provider".
+func TestAdminRequestsFilterByProvider(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+	first := seedAdminProvider(t, f, "first-upstream")
+	second := seedAdminProvider(t, f, "second-upstream")
+
+	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_pf0001", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "m1", Status: "completed"})
+	seedProviderAttempt(t, f, "req_pf0001", 1, first, 10, 20)
+	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_pf0002", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "m2", Status: "completed"})
+	seedProviderAttempt(t, f, "req_pf0002", 1, second, 30, 60)
+	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_pf0003", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "m1", Status: "completed"})
+	seedProviderAttempt(t, f, "req_pf0003", 1, first, 1, 2)
+	seedProviderAttempt(t, f, "req_pf0003", 2, second, 4, 8)
+	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_pf0004", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "m1", Status: "failed"})
+
+	list := decodeJSONBody(t, f.call(t, http.MethodGet,
+		"/admin/api/v1/requests?days=1&limit=10&provider_id="+strconv.FormatInt(first, 10), "", cookie))
+	if list["total"] != float64(2) {
+		t.Fatalf("filtered total = %v, want the two requests %d served", list["total"], first)
+	}
+	rows, _ := list["data"].([]any)
+	if len(rows) != 2 {
+		t.Fatalf("filtered list = %v", rows)
+	}
+	for _, item := range rows {
+		row, _ := item.(map[string]any)
+		providers, _ := row["providers"].([]any)
+		if len(providers) == 0 {
+			t.Fatalf("row %v carries no provider", row["request_id"])
+		}
+		names := map[string]bool{}
+		for _, entry := range providers {
+			provider, _ := entry.(map[string]any)
+			names[provider["name"].(string)] = true
+		}
+		if !names["first-upstream"] {
+			t.Fatalf("row %v providers = %v, want the filter's provider", row["request_id"], providers)
+		}
+	}
+	// The failover row lists both providers, so a page cannot state that one request had one
+	// upstream when it was served by two.
+	failover := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/requests/req_pf0003", "", cookie))
+	providers, _ := failover["providers"].([]any)
+	if len(providers) != 2 {
+		t.Fatalf("failover detail providers = %v, want both", failover["providers"])
+	}
+
+	// The breakdown under the same filter describes the same two requests, split by model:
+	// m1 has two of them (one of which also ran on the second provider).
+	stats := decodeJSONBody(t, f.call(t, http.MethodGet,
+		"/admin/api/v1/requests/dimensions?days=1&group_by=model&limit=10&provider_id="+strconv.FormatInt(first, 10), "", cookie))
+	if stats["total"] != float64(1) {
+		t.Fatalf("filtered model buckets = %v", stats["rows"])
+	}
+	bucket := stats["rows"].([]any)[0].(map[string]any)
+	if bucket["key"] != "m1" || bucket["requests"] != float64(2) || bucket["cost_micros"] != float64(15) {
+		t.Fatalf("filtered model bucket = %v, want both requests and their whole metering", bucket)
+	}
+
+	// Grouped by provider under the same filter: the filter picked requests, the grouping
+	// attributes their money, so the second provider shows up with its attempt on the shared
+	// request.
+	byProvider := decodeJSONBody(t, f.call(t, http.MethodGet,
+		"/admin/api/v1/requests/dimensions?days=1&group_by=provider&limit=10&provider_id="+strconv.FormatInt(first, 10), "", cookie))
+	if byProvider["total"] != float64(2) {
+		t.Fatalf("filtered provider buckets = %v", byProvider["rows"])
+	}
+	for _, item := range byProvider["rows"].([]any) {
+		row, _ := item.(map[string]any)
+		if row["key"] == strconv.FormatInt(second, 10) && row["cost_micros"] != float64(4) {
+			t.Fatalf("second provider under the filter = %v, want its attempt on the shared request", row)
+		}
+	}
+
+	for _, path := range []string{
+		"/admin/api/v1/requests?days=1&provider_id=upstream",
+		"/admin/api/v1/requests/dimensions?days=1&group_by=provider&provider_id=1.5",
+	} {
+		resp := f.call(t, http.MethodGet, path, "", cookie)
+		if resp.StatusCode != http.StatusBadRequest {
+			resp.Body.Close()
+			t.Fatalf("%s: status = %d, want 400", path, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+}
+
+// The provider grouping is answered from the metering rows, which the hourly summaries do not
+// keep: the same read must give the same answer before and after the summaries exist, or a
+// completed hour would report a provider view with no providers in it.
+func TestAdminRequestDimensionsProviderIgnoresRollups(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+	ctx := context.Background()
+	providerID := seedAdminProvider(t, f, "rolled-upstream")
+
+	// Two hours old, so the rollup refresher treats the hour as finished.
+	at := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_rp0001", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "luna", Status: "completed", CreatedAt: at})
+	if _, err := f.db.InsertUsage(ctx, &domain.UsageRecord{
+		RequestID: "req_rp0001", AttemptNo: 1, AccountID: 1, APIKeyID: 1,
+		Model: "luna", ResolvedModel: "luna", ProviderID: providerID,
+		DimensionsJSON: `{"input":5}`, CostMicros: 42, ChargeMicros: 84,
+		Status: "completed", CreatedAt: at,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	read := func() map[string]any {
+		t.Helper()
+		return decodeJSONBody(t, f.call(t, http.MethodGet,
+			"/admin/api/v1/requests/dimensions?days=1&group_by=provider&limit=10", "", cookie))
+	}
+	before := read()
+	if err := f.db.RefreshDimensionRollups(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after := read()
+	readBucket := func(body map[string]any) map[string]any {
+		rows, _ := body["rows"].([]any)
+		if len(rows) != 1 {
+			t.Fatalf("provider buckets = %v, want exactly one", rows)
+		}
+		row, _ := rows[0].(map[string]any)
+		return row
+	}
+	rawBucket, rolledBucket := readBucket(before), readBucket(after)
+	if rawBucket["cost_micros"] != float64(42) || rolledBucket["cost_micros"] != float64(42) {
+		t.Fatalf("provider cost by source: raw %v, rolled %v", rawBucket, rolledBucket)
+	}
+	if rolledBucket["provider_name"] != "rolled-upstream" || rolledBucket["key"] != strconv.FormatInt(providerID, 10) {
+		t.Fatalf("rolled bucket = %v", rolledBucket)
+	}
+}

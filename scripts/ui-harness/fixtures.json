@@ -1013,6 +1013,16 @@
     "api_key_id": 1,
     "api_key_name": "dev-key",
     "api_key_prefix": "sk-gw-981065ae",
+    "providers": [
+     {
+      "id": 1,
+      "name": "replay-local"
+     },
+     {
+      "id": 3,
+      "name": "deepseek"
+     }
+    ],
     "call_kind": "agent",
     "client": "dsh",
     "created_at": "2026-09-11T11:00:00Z",
@@ -1092,7 +1102,8 @@
    "session",
    "call_kind",
    "account",
-   "api_key"
+   "api_key",
+   "provider"
   ],
   "group_by": "model",
   "limit": 20,
@@ -1124,6 +1135,67 @@
    }
   ]
  },
+ "/requests/dimensions?group_by=provider": {
+  "days": 7,
+  "dimensions": [
+   "client",
+   "model",
+   "resolved_model",
+   "workspace",
+   "session",
+   "call_kind",
+   "account",
+   "api_key",
+   "provider"
+  ],
+  "group_by": "provider",
+  "limit": 20,
+  "rows": [
+   {
+    "charge_micros": 7404,
+    "cost_micros": 3702,
+    "first_seen": "2026-09-11T11:00:00Z",
+    "cached_tokens": 2880,
+    "input_tokens": 3600,
+    "key": "3",
+    "last_seen": "2026-09-11T11:30:00Z",
+    "metered": 3,
+    "output_tokens": 102,
+    "provider_id": 3,
+    "provider_name": "deepseek",
+    "reasoning_tokens": 36,
+    "requests": 3
+   },
+   {
+    "charge_micros": 18,
+    "cost_micros": 9,
+    "first_seen": "2026-09-11T11:05:00Z",
+    "input_tokens": 50,
+    "key": "1",
+    "last_seen": "2026-09-11T11:20:00Z",
+    "metered": 1,
+    "output_tokens": 5,
+    "provider_id": 1,
+    "provider_name": "replay-local",
+    "reasoning_tokens": 0,
+    "requests": 2
+   },
+   {
+    "charge_micros": 0,
+    "cost_micros": 0,
+    "first_seen": "2026-09-11T11:05:00Z",
+    "input_tokens": 0,
+    "key": "",
+    "last_seen": "2026-09-11T11:20:00Z",
+    "metered": 0,
+    "output_tokens": 0,
+    "provider_id": 0,
+    "provider_name": "",
+    "reasoning_tokens": 0,
+    "requests": 1
+   }
+  ]
+ },
  "/requests/dimensions?group_by=account": {
   "days": 7,
   "dimensions": [
@@ -1134,7 +1206,8 @@
    "session",
    "call_kind",
    "account",
-   "api_key"
+   "api_key",
+   "provider"
   ],
   "group_by": "account",
   "limit": 20,
@@ -1180,7 +1253,8 @@
    "session",
    "call_kind",
    "account",
-   "api_key"
+   "api_key",
+   "provider"
   ],
   "group_by": "api_key",
   "limit": 20,

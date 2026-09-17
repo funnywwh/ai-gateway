@@ -6,7 +6,7 @@ import { initCurrency, money } from '../money.js';
 const DIMENSIONS = [
   ['account', '用户（账户）'], ['api_key', 'API Key'],
   ['client', '客户端'], ['model', '请求的模型'], ['resolved_model', '路由到的模型'],
-  ['workspace', '工作区'], ['session', '会话'], ['call_kind', '调用类型'],
+  ['provider', '供应商'], ['workspace', '工作区'], ['session', '会话'], ['call_kind', '调用类型'],
 ];
 
 // Sort keys of the statistics table. The keys are the API's sort values; each one has a
@@ -40,6 +40,10 @@ export async function render({ page, actions, session }) {
   // 描述的会是别的行集。Key 下拉跟随账户：选中账户后只列该账户的 Key。
   const accountFilter = el('select', {}, [el('option', { value: '', text: '全部用户' })]);
   const keyFilter = el('select', {}, [el('option', { value: '', text: '全部 API Key' })]);
+  // 供应商筛选：同一模型的不同供应商各自计价，「这家花了多少」是成本问题的一半。筛选走服务端，
+  // 口径是「请求」——选中有该供应商计量行的请求（失败转移的请求会被两家都选中）。
+  const providerFilter = el('select', { title: '按上游供应商筛选：选中有该供应商计量行的请求（失败转移的请求会被每一家选中）' },
+    [el('option', { value: '', text: '全部供应商' })]);
   const sessionFilter = el('input', { placeholder: '会话 id（回车）', style: 'min-width:220px' });
   const workspaceFilter = el('input', { placeholder: '工作区（回车）', style: 'min-width:200px' });
   const refresh = el('button', { class: 'btn', text: '刷新' });
@@ -99,6 +103,7 @@ export async function render({ page, actions, session }) {
     const params = { days: days.value, client: client.value, model: model.value };
     if (accountFilter.value) params.account_id = accountFilter.value;
     if (keyFilter.value) params.api_key_id = keyFilter.value;
+    if (providerFilter.value) params.provider_id = providerFilter.value;
     if (sessionFilter.value.trim()) params.session_id = sessionFilter.value.trim();
     if (workspaceFilter.value.trim()) params.workspace = workspaceFilter.value.trim();
     return params;
@@ -113,6 +118,7 @@ export async function render({ page, actions, session }) {
       { key: 'api_key_id', label: 'API Key', render: (row) => apiKeyCell(row) },
       { key: 'client', label: '客户端', render: (row) => (row.client ? badge(row.client, row.client === 'unknown' ? '' : 'ok') : el('span', { class: 'muted', text: '—' })) },
       { key: 'model', label: '模型', render: (row) => modelCell(row) },
+      { key: 'provider', label: '供应商', render: (row) => providersCell(row) },
       { key: 'reasoning_effort', label: '推理强度', render: (row) => reasoningEffortCell(row) },
       { key: 'workspace', label: '工作区', render: (row) => pathCell(row.workspace) },
       { key: 'session_id', label: '会话', render: (row) => sessionCell(row.session_id) },
@@ -148,7 +154,7 @@ export async function render({ page, actions, session }) {
     STATS_SORTS.map(([value, label]) => el('option', { value, text: label })));
   const statsHost = el('div', { class: 'muted', text: '加载中…' });
   const statsCard = card('维度统计', statsHost, [groupBy, sortBy, el('span', {
-    class: 'muted', text: '按维度汇总请求数、token 与成本；默认按最近一次请求时间降序，工具栏可切请求数/成本；分页器给的是本窗口的分组总数（不是请求总数）；用户与 API Key 是凭据维度（名字由账户/Key 表读时解析，分组按 id），成本与账单同源（计量表）；筛选条件在下方「请求日志」卡片里改',
+    class: 'muted', text: '按维度汇总请求数、token 与成本；默认按最近一次请求时间降序，工具栏可切请求数/成本；分页器给的是本窗口的分组总数（不是请求总数）；用户/API Key/供应商是 id 维度（名字由各自的表读时解析，分组按 id），供应商按计量行归属——同一模型的不同供应商各自计价，失败转移的请求会在每一家各计一次，所以各分组请求数之和可能大于总请求数；成本与账单同源（计量表）；筛选条件在下方「请求日志」卡片里改',
   })]);
   // 这张表是服务端分页的（同 M24 的列表契约），但窗口由本页持有而不是 pagedTable：
   // 表体是手写的（列随分组维度变化），pager() 只负责呈现。
@@ -185,6 +191,9 @@ export async function render({ page, actions, session }) {
 
   function renderStats(payload, rows) {
     const bySession = payload.group_by === 'session';
+    // 供应商分组的「请求数」是「这家服务过的请求数」：失败转移的请求在每一家各计一次，所以各分组
+    // 的请求数之和可能大于窗口总请求数。这一句必须跟着表头走，否则一组比总数还大的数字看起来就是 bug。
+    const byProvider = payload.group_by === 'provider';
     if (!rows.length) {
       statsHost.replaceChildren(el('div', { class: 'muted', text: '该窗口内没有可统计的请求' }));
       return;
@@ -198,7 +207,9 @@ export async function render({ page, actions, session }) {
       },
       {
         label: '请求数', key: 'requests',
-        title: '本窗口内该分组的请求数（排序键之一）；与「已计量」不同时，差额是本地拒绝或写入失败留下的行',
+        title: byProvider
+          ? '本窗口内该供应商服务过的请求数（排序键之一）：成本按计量行归属到实际服务的那家，失败转移的请求会在每一家各计一次，因此各分组之和可能大于窗口总请求数'
+          : '本窗口内该分组的请求数（排序键之一）；与「已计量」不同时，差额是本地拒绝或写入失败留下的行',
       },
       { label: '已计量' },
       { label: '输入 tokens' },
@@ -244,13 +255,19 @@ export async function render({ page, actions, session }) {
     }));
   }
 
-  // groupKeyCell renders one bucket's key. The two credential groupings bucket on ids
-  // (names are mutable labels owned by another table, and api_keys.name is not unique), so
-  // their cells show the name the API resolved plus the id it grouped by — the id is what
-  // a filter needs, the name is what a human reads. An id of 0 is the API's unknown bucket
-  // (historical rows, or rows written without a credential), which the other dimensions
+  // groupKeyCell renders one bucket's key. The two credential groupings (and the provider
+  // one) bucket on ids — names are mutable labels owned by other tables, and api_keys.name is
+  // not unique — so their cells show the name the API resolved plus the id it grouped by: the
+  // id is what a filter needs, the name is what a human reads. An id of 0 is the API's unknown
+  // bucket (historical rows, or rows written without a credential), which the other dimensions
   // spell the same way.
   function groupKeyCell(row, groupColumn) {
+    if (groupColumn === 'provider') {
+      const id = Number(row.provider_id ?? row.key ?? 0) || 0;
+      if (!id) return el('span', { class: 'muted', text: '（未知）' });
+      const label = (row.provider_name || '（无名字）') + ' #' + id;
+      return el('span', { title: label, text: label });
+    }
     if (groupColumn === 'account' || groupColumn === 'api_key') {
       const isAccount = groupColumn === 'account';
       const raw = isAccount ? row.account_id : row.api_key_id;
@@ -316,12 +333,25 @@ export async function render({ page, actions, session }) {
     } catch (err) { /* see above */ }
   }
 
+  // The provider list is the configuration table (/providers), like the account list: the
+  // console's config lists are read whole and sliced server-side. A list that cannot load must
+  // not block the page — the filter simply stays at "all".
+  async function loadProviderOptions() {
+    try {
+      const providers = (await api.get('/providers', { limit: 1000 })).data || [];
+      const current = providerFilter.value;
+      providerFilter.replaceChildren(el('option', { value: '', text: '全部供应商' }),
+        ...providers.map((p) => el('option', { value: p.id, text: (p.name || '（无名字）') + ' #' + p.id })));
+      providerFilter.value = providers.some((p) => String(p.id) === current) ? current : '';
+    } catch (err) { /* a filter list that cannot load must not block the page */ }
+  }
+
   // 统计卡在列表卡之上：它回答「谁在用、用哪个模型、花了多少」，是打开页面先看的问题；
   // 列表回答「具体是哪一条」。筛选栏留在列表卡里（它属于它筛的那张表），两张表共用。
   page.append(statsCard);
   page.append(card('请求日志', view.node, [
-    days, accountFilter, keyFilter, client, model, sessionFilter, workspaceFilter,
-    el('span', { class: 'muted', text: '用户（账户）/API Key 与客户端/模型/推理强度/工作区/会话/标题、token 成本都是独立于正文口径记录的元数据（record_input=off 也记）；用户与 Key 的名字由账户/Key 表读时解析，分组按 id；标题来自会话的标题调用，成本来自计量表，与账单一致；列表底部的「本页汇总」只合计当前页已加载的行（含本页过滤），窗口口径看上方「维度统计」' }),
+    days, accountFilter, keyFilter, providerFilter, client, model, sessionFilter, workspaceFilter,
+    el('span', { class: 'muted', text: '用户（账户）/API Key 与客户端/模型/推理强度/工作区/会话/标题、token 成本都是独立于正文口径记录的元数据（record_input=off 也记）；用户/Key/供应商的名字由各自的表读时解析，分组按 id；供应商按计量行的 provider_id 归属（同一模型的不同供应商各自计价，失败转移的请求会在每一家各计一次）；标题来自会话的标题调用，成本来自计量表，与账单一致；列表底部的「本页汇总」只合计当前页已加载的行（含本页过滤），窗口口径看上方「维度统计」' }),
     hint]));
 
   // Changing any filter restarts both tables at page 1: the rows of the current page belong
@@ -329,6 +359,7 @@ export async function render({ page, actions, session }) {
   days.addEventListener('change', () => { view.reset(); loadStats({ reset: true }); loadModelOptions(); });
   accountFilter.addEventListener('change', () => { view.reset(); loadStats({ reset: true }); loadKeyOptions(); });
   keyFilter.addEventListener('change', () => { view.reset(); loadStats({ reset: true }); });
+  providerFilter.addEventListener('change', () => { view.reset(); loadStats({ reset: true }); });
   client.addEventListener('change', () => { view.reset(); loadStats({ reset: true }); });
   model.addEventListener('change', () => { view.reset(); loadStats({ reset: true }); });
   for (const input of [sessionFilter, workspaceFilter]) {
@@ -342,10 +373,10 @@ export async function render({ page, actions, session }) {
   groupBy.addEventListener('change', () => { loadStats({ reset: true }); });
   sortBy.addEventListener('change', () => { loadStats({ reset: true }); });
   // 「刷新」重新读当前这一页（两张表都保持位置）；清理过期日志会删掉整组，所以回第 1 页。
-  refresh.addEventListener('click', () => { view.refresh(); loadStats(); loadModelOptions(); loadAccountOptions(); });
+  refresh.addEventListener('click', () => { view.refresh(); loadStats(); loadModelOptions(); loadAccountOptions(); loadProviderOptions(); });
   prune.addEventListener('click', () => pruneNow());
   await loadRetention();
-  await Promise.all([view.refresh(), loadStats(), loadModelOptions(), loadAccountOptions()]);
+  await Promise.all([view.refresh(), loadStats(), loadModelOptions(), loadAccountOptions(), loadProviderOptions()]);
 }
 
 function reasoningEffortCell(row) {
@@ -405,6 +436,25 @@ function apiKeyCell(row) {
   const text = row.api_key_name || '（无名字）';
   const title = (row.api_key_prefix ? row.api_key_prefix + ' · ' : '') + 'Key #' + row.api_key_id;
   return el('span', { title, text });
+}
+
+// providersCell renders the upstream providers that metered a request. A request that failed
+// over has more than one, and each of them metered its own attempts — showing only the last
+// one would state that the request ran on a single provider when it did not, which is the
+// difference between "one provider is expensive" and "the failover cost me twice".
+function providersCell(row) {
+  const providers = row.providers || [];
+  if (!providers.length) {
+    // No metering row at all: a locally rejected request never reached an upstream, which is
+    // the same "未计量" the token column says rather than an empty provider.
+    return el('span', { class: 'muted', text: row.usage && row.usage.metered ? '（未知）' : '未计量' });
+  }
+  const label = (p) => (p.id ? (p.name || '（无名字）') + ' #' + p.id : '（未知）');
+  const text = providers.map((p) => (p.id ? (p.name || '#' + p.id) : '（未知）')).join('、');
+  return el('span', {
+    title: providers.map(label).join('、') + (providers.length > 1 ? '（该请求在多个供应商上有计量行：失败转移）' : ''),
+    text,
+  });
 }
 
 // A request with no usage row is "未计量", not zero: a locally rejected request never
@@ -516,7 +566,9 @@ async function detail(requestID) {
 // body: the row keeps this even when record_input is off. The first two fields are the
 // credential dimensions (M30): the account this request is billed to — 「用户」 on this
 // page, the console's 账户 elsewhere — and the API key it authenticated with. Their names
-// are read-time labels; the ids are what the filters take, so both are shown.
+// are read-time labels; the ids are what the filters take, so both are shown. 供应商 (M53) is
+// a third id dimension, and the only one that is one-to-many: a request that failed over was
+// metered by more than one provider, so all of them are listed.
 function identityBlock(row) {
   const owner = row.account_id
     ? (row.account_name || '（无名字）') + ' #' + row.account_id
@@ -524,9 +576,14 @@ function identityBlock(row) {
   const apiKey = row.api_key_id
     ? (row.api_key_name || '（无名字）') + ' #' + row.api_key_id + (row.api_key_prefix ? ' · ' + row.api_key_prefix : '')
     : '—';
+  const providers = row.providers || [];
+  const provider = providers.length
+    ? providers.map((p) => (p.id ? (p.name || '（无名字）') + ' #' + p.id : '（未知）')).join('、')
+    : '—';
   const fields = [
     ['用户（账户）', owner],
     ['API Key', apiKey],
+    ['供应商', provider],
     ['客户端', row.client || '未识别'],
     ['请求的模型', row.model || '—'],
     ['路由到的模型', row.resolved_model || '—'],

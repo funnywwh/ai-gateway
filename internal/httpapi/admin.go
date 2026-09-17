@@ -33,10 +33,15 @@ type AdminStore interface {
 	CountRequestLogs(ctx context.Context, f domain.RequestLogFilter) (int, error)
 	GetRequestLog(ctx context.Context, requestID string) (*domain.RequestLogRecord, error)
 	RequestUsages(ctx context.Context, requestIDs []string) (map[string]*domain.RequestUsage, error)
-	// The two credential dimensions (M30) read their labels from the tables that own
-	// them; the log row keeps only the ids.
+	// RequestProviders names the providers that metered each request. Like the money, it is
+	// one-to-many and owned by the metering table: a request that failed over was served by
+	// more than one provider, so it cannot ride along on the log row.
+	RequestProviders(ctx context.Context, requestIDs []string) (map[string][]int64, error)
+	// The two credential dimensions (M30) and the provider dimension (M53) read their labels
+	// from the tables that own them; the log row keeps only the ids.
 	AccountNames(ctx context.Context, ids []int64) (map[int64]string, error)
 	APIKeyLabels(ctx context.Context, ids []int64) (map[int64]domain.APIKeyLabel, error)
+	ProviderNames(ctx context.Context, ids []int64) (map[int64]string, error)
 	// The dimension breakdown is read as a page of buckets plus the number of buckets the
 	// filters matched, so the console's pager can say "共 N 个分组 · 第 x/y 页".
 	RequestLogDimensionsPage(ctx context.Context, f domain.RequestLogFilter, groupBy, sort string, limit, offset int) (domain.RequestLogDimensionPage, error)
@@ -714,6 +719,26 @@ func (s *Server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
+	// The providers that served each row are a third batched read (one indexed query over the
+	// page's request ids), then one lookup for the names.
+	requestIDs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		requestIDs = append(requestIDs, row.RequestID)
+	}
+	served, err := s.deps.AdminStore.RequestProviders(r.Context(), requestIDs)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	providerIDs := make([]int64, 0, len(rows))
+	for _, ids := range served {
+		providerIDs = append(providerIDs, ids...)
+	}
+	providers, err := s.providerLabels(r.Context(), providerIDs)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
 		key := keys[row.APIKeyID]
@@ -721,7 +746,8 @@ func (s *Server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
 			"request_id": row.RequestID, "account_id": row.AccountID, "api_key_id": row.APIKeyID,
 			"account_name": accounts[row.AccountID],
 			"api_key_name": key.Name, "api_key_prefix": key.Prefix,
-			"endpoint": row.Endpoint, "status": row.Status,
+			"providers": providerPayloads(served[row.RequestID], providers),
+			"endpoint":  row.Endpoint, "status": row.Status,
 			"created_at":     row.CreatedAt.Format(time.RFC3339),
 			"input_recorded": row.RequestJSON != "", "reasoning_recorded": row.ReasoningRecorded,
 			"output_text_recorded": row.OutputTextRecorded, "truncated": row.Truncated,
@@ -764,6 +790,10 @@ func requestLogFilterFromQuery(r *http.Request) (domain.RequestLogFilter, error)
 	}{
 		{"account_id", &filter.AccountID},
 		{"api_key_id", &filter.APIKeyID},
+		// The provider filter is an id like the two credentials above, and it is rejected the
+		// same way when it is not one: silently ignoring a malformed provider id answers "every
+		// provider" to a question that asked for one provider's traffic.
+		{"provider_id", &filter.ProviderID},
 	} {
 		raw := query.Get(id.param)
 		if raw == "" {
@@ -793,6 +823,24 @@ func (s *Server) ownerLabels(ctx context.Context, accountIDs, keyIDs []int64) (m
 		return nil, nil, err
 	}
 	return accounts, keys, nil
+}
+
+// providerLabels resolves provider ids to their names the same way, with the same rule for a
+// missing row: an id whose provider was deleted keeps its id on screen.
+func (s *Server) providerLabels(ctx context.Context, ids []int64) (map[int64]string, error) {
+	return s.deps.AdminStore.ProviderNames(ctx, ids)
+}
+
+// providerPayloads renders the providers that served one request as {id, name} pairs. It is
+// a list rather than single fields because a request that failed over has several, and each
+// of them metered its own attempts — collapsing that to one value would state that the
+// request had one provider when it did not.
+func providerPayloads(ids []int64, names map[int64]string) []map[string]any {
+	out := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, map[string]any{"id": id, "name": names[id]})
+	}
+	return out
 }
 
 // requestUsages loads the page's metered consumption in one query.
@@ -898,15 +946,24 @@ func (s *Server) handleAdminRequestDimensions(w http.ResponseWriter, r *http.Req
 	rows, total := result.Rows, result.Total
 	// The credential groupings bucket on ids; their names are labels read from the tables
 	// that own them, resolved for the buckets actually being returned (never for the whole
-	// window — the aggregate query would have to join per row to do that).
-	var accountIDs, keyIDs []int64
+	// window — the aggregate query would have to join per row to do that). The provider
+	// grouping follows the same rule, for the same reason: a provider is renamed in the
+	// providers table, and a copied name would split one provider into two buckets.
+	var accountIDs, keyIDs, providerIDs []int64
 	switch groupBy {
 	case "account":
 		accountIDs = dimensionGroupIDs(rows)
 	case "api_key":
 		keyIDs = dimensionGroupIDs(rows)
+	case "provider":
+		providerIDs = dimensionGroupIDs(rows)
 	}
 	accounts, keys, err := s.ownerLabels(r.Context(), accountIDs, keyIDs)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	providers, err := s.providerLabels(r.Context(), providerIDs)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
@@ -945,6 +1002,14 @@ func (s *Server) handleAdminRequestDimensions(w http.ResponseWriter, r *http.Req
 				payload["api_key_id"] = id
 				payload["api_key_name"] = keys[id].Name
 				payload["api_key_prefix"] = keys[id].Prefix
+			}
+		case "provider":
+			// A metered request whose provider the gateway could not name (or a request that
+			// never reached an upstream) buckets under 0, which is reported as the empty key —
+			// the same 「未知」 bucket the other dimensions use.
+			if id, err := strconv.ParseInt(row.Key, 10, 64); err == nil {
+				payload["provider_id"] = id
+				payload["provider_name"] = providers[id]
 			}
 		}
 		out = append(out, payload)
@@ -989,12 +1054,25 @@ func (s *Server) handleAdminRequestDetail(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, toAPIError(err))
 		return
 	}
+	// A failed-over request is the case the detail page exists to explain, so the providers
+	// that metered it are part of the answer here too.
+	served, err := s.deps.AdminStore.RequestProviders(r.Context(), []string{row.RequestID})
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	providers, err := s.providerLabels(r.Context(), served[row.RequestID])
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
 	key := keys[row.APIKeyID]
 	payload := map[string]any{
 		"request_id": row.RequestID, "account_id": row.AccountID, "api_key_id": row.APIKeyID,
 		"account_name": accounts[row.AccountID],
 		"api_key_name": key.Name, "api_key_prefix": key.Prefix,
-		"endpoint": row.Endpoint, "status": row.Status,
+		"providers": providerPayloads(served[row.RequestID], providers),
+		"endpoint":  row.Endpoint, "status": row.Status,
 		"created_at":     row.CreatedAt.Format(time.RFC3339),
 		"input":          jsonOrNil(row.RequestJSON),
 		"reasoning":      jsonOrNil(row.ResponseReasoning),

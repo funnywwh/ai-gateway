@@ -351,6 +351,39 @@ try {
     await settle();
     checks.clearingAccountDropsId = !urlsSince(accountMark2).some((u) => u.includes('account_id='));
 
+    // 供应商（M53）：同一模型的不同供应商各自计价，所以成本要能按供应商拆开。列表列读行上的
+    // providers（失败转移的行有两家），筛选下拉读 /providers，统计分组按 id 分组、按名字显示，
+    // id 为 0 的桶（没有计量行）落进「（未知）」。
+    checks.providerColumn = headers().includes('供应商');
+    // 读具体单元格：页面别处的文字（下拉选项里也有供应商名）不能冒充这一列。
+    checks.providerNamesShown = cell(listTable(), requestRow('req_demo0001'), '供应商') === 'replay-local、deepseek';
+    // 没有计量行的请求说「未计量」，与 token 列同一句话——不是「零个供应商」。
+    checks.providerUnmetered = cell(listTable(), requestRow('req_demo0002'), '供应商') === '未计量';
+    const providerSelect = selectByOptionText('全部供应商');
+    checks.providerFilter = !!providerSelect
+      && [...providerSelect.options].some((o) => o.textContent.includes('replay-local'));
+    const providerMark = (window.__urls || []).length;
+    providerSelect.value = '1';
+    providerSelect.dispatchEvent(new Event('change'));
+    await settle();
+    checks.filterSendsProviderId = urlsSince(providerMark).some((u) => u.includes('provider_id=1'));
+    const providerStatsMark = (window.__urls || []).length;
+    groupBySelected('provider');
+    await settle();
+    const providerTable = statsTable();
+    const providerText = providerTable ? providerTable.textContent : '';
+    checks.dimensionProviderNames = providerText.includes('deepseek #3')
+      && providerText.includes('replay-local #1');
+    checks.dimensionProviderUnknown = providerText.includes('（未知）');
+    // 分组口径必须挂在表头上：各供应商请求数之和可能大于窗口总数，这个数字旁边没有解释就是 bug。
+    const providerCountHeader = providerTable
+      ? [...providerTable.querySelectorAll('thead th')].find((th) => th.textContent.includes('请求数'))
+      : null;
+    checks.providerCountRuleStated = !!providerCountHeader
+      && (providerCountHeader.title || '').includes('各分组之和可能大于窗口总请求数');
+    checks.providerStatsRefetched = urlsSince(providerStatsMark)
+      .some((u) => u.includes('/requests/dimensions?'));
+
     // ---- M31：统计卡置顶 + 排序下拉 + 分组分页 ----
     // 卡片顺序按 **DOM** 读：统计卡必须在列表卡之前（按文本出现顺序断言会被页面任意位置的
     // 文字蒙过去）。

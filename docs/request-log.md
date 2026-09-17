@@ -40,13 +40,22 @@
 | `title` | 会话标题 | DSH 的标题响应文本 / Codex 结构化响应的 `title` 字段（兼容纯文本）；**只写在标题调用那一行** |
 | `account_id` / **用户** | 这笔消耗算在哪个账户（租户） | 该请求使用的 API Key 的所属账户；控制台列头写「用户」，详情写「用户（账户）」 |
 | `api_key_id` / **API Key** | 用的是哪个 Key | 该请求的凭据自身（`api_key_id`），服务路径与本地拒绝路径都写 |
+| **供应商**（M53） | 每一次上游尝试分别由哪家服务 | **不在日志行上**：来自计量行的 `usage_records.provider_id`。一个请求可能被多家服务（故障转移），所以它是计量行维度，不是日志列 |
 
 **用户与 API Key 是凭据维度**（M30）：它们不来自请求正文，而是鉴权时已知的事实，因此与其余
 维度一样不受录制口径影响（`record_input=off` 也写），也**不参与 `redact_paths`**——脱敏管的是
 正文解析出来的列，要「让某个 Key 不留痕」，手段是停用该 Key。
 
+**供应商是计量行维度**（M53），与上表其余维度有一条根本区别：日志行只有一行，而一个请求可以有
+多次上游尝试、落在不同供应商上（同一模型的不同供应商各自计价，见 `docs/pricing.md`）。因此
+「供应商」既不能存在 `request_logs` 上，也不能由「最终是谁答的」推断——把一次失败转移的成本算到
+最后成功那家头上，等于把一家的成本搬到另一家。它的口径是**谁服务的算谁的**：按
+`usage_records.provider_id` 归属那一次尝试的 token 与成本。相应地，列表/详情返回的 `providers`
+是 `[{id, name}]` 数组而不是单个字段。
+
 **名字是读时标签**：日志行只存 id，列表/详情/统计里的 `account_name`、`api_key_name`、
-`api_key_prefix` 是查询时从 `accounts` / `api_keys` 现取的（与 token、成本不落列同一条规矩）。
+`api_key_prefix`、`provider_name` 是查询时从 `accounts` / `api_keys` / `providers` 现取的
+（与 token、成本不落列同一条规矩）。
 好处是改名立刻生效、不会把同一个 Key 在统计里裂成两桶；两表都没有硬删除，所以按 id 一定取得到
 名字。`api_keys.name` 不唯一（同一账户可重名），因此**分组按 id**、名字只作显示。
 
@@ -90,20 +99,40 @@ token 口径与计费一致：输入 = `input + input_cache_hit + input_cache_mi
 
 | 端点 | 用途 |
 |---|---|
-| `GET /admin/api/v1/requests` | 分页列表；可按 `account_id`/`api_key_id`/`days` 与六个身份维度过滤；每行含 7 个身份字段、`account_name`/`api_key_name`/`api_key_prefix` 与 `usage` |
-| `GET /admin/api/v1/requests/{id}` | 单条详情：输入/思考/输出（按录制开关）＋身份＋用户与 Key 的名字＋消耗 |
-| `GET /admin/api/v1/requests/dimensions` | 维度统计（**可分页、可排序**）：`group_by=client\|model\|resolved_model\|workspace\|session\|call_kind\|account\|api_key`，汇总请求数、已计量数、token、成本与首次/最近出现时间；`session` 分组额外带标题与工作区，`account`/`api_key` 分组额外带名字（`api_key` 还带前缀）；`sort=last_seen\|requests\|charge`（默认 `last_seen`），`limit`/`offset` 同列表契约，响应 `total` 是**分组数** |
+| `GET /admin/api/v1/requests` | 分页列表；可按 `account_id`/`api_key_id`/`provider_id`/`days` 与六个身份维度过滤；每行含 7 个身份字段、`account_name`/`api_key_name`/`api_key_prefix`、`providers`（`[{id, name}]`，失败转移的行有多项）与 `usage` |
+| `GET /admin/api/v1/requests/{id}` | 单条详情：输入/思考/输出（按录制开关）＋身份＋用户/Key/供应商的名字＋消耗 |
+| `GET /admin/api/v1/requests/dimensions` | 维度统计（**可分页、可排序**）：`group_by=client\|model\|resolved_model\|workspace\|session\|call_kind\|account\|api_key\|provider`，汇总请求数、已计量数、token、成本与首次/最近出现时间；`session` 分组额外带标题与工作区，`account`/`api_key`/`provider` 分组额外带名字（`api_key` 还带前缀）；`sort=last_seen\|requests\|charge`（默认 `last_seen`），`limit`/`offset` 同列表契约，响应 `total` 是**分组数** |
 | `POST /admin/api/v1/requests/prune` | 立即执行保留期清理（admin） |
 
-`account_id`/`api_key_id` 是**精确匹配**的数字过滤；非数字取值返回 400 并指出参数名
+`account_id`/`api_key_id`/`provider_id` 是**精确匹配**的数字过滤；非数字取值返回 400 并指出参数名
 （M30 起，之前是静默忽略——「筛了却返回全部」比报错更难查）。
 
 `account`/`api_key` 分组的 `key` 是**数字 id 的字符串形式**（名字随行返回，因为 `api_keys.name`
 不唯一）；`key` 为空串表示未知桶：`account_id`/`api_key_id` ≤ 0 的历史行或兜底行，
 控制台显示「（未知）」，计数与其他桶一样保留。
 
-MCP 侧：查询工具 `list_requests` / `get_request` 同样返回身份字段与 `api_key_id`/`api_key_name`；
-后台工具 `admin_request_dimensions` 由路由表自动暴露，`group_by` 取值同步扩展。
+### 供应商维度与筛选（M53）
+
+`group_by=provider` 是唯一**口径不同**的分组，读它之前必须知道三件事：
+
+1. **成本按计量行归属**：同一模型在不同供应商上的单价不同，这正是不分组就看不见的那部分。
+   一次失败转移的请求会在每一家各出现一次，**各分组「请求数」之和可能大于窗口总请求数**——
+   这是设计，不是错误。控制台把这句写在「请求数」表头与卡片说明里，API 的 MCP 工具描述同样写明。
+2. **恒读原始计量行**：小时汇总 `request_dimension_rollups` 按请求预聚合（一行一个请求、
+   计量已跨尝试求和），供应商信息在那里已经不存在，因此该分组不走汇总表，而是扫窗口的计量行。
+   带 `provider_id` 过滤时同理（汇总表只有日志列，没有 `request_id` 可关联计量行）。
+   代价是这两种读比走汇总慢，换来的是不会给出「已完成的小时里一个供应商都没有」这种看似合理的错答案。
+3. **`key` 为空串是未计量桶**：本地拒绝的请求没有计量行，因此不属于任何供应商；它按
+   `provider_id=0` 归入未知桶（`provider_id`/`provider_name` 为 0/空），控制台显示「（未知）」。
+   把它丢掉会让供应商视角与请求日志对窗口的大小各说一套。
+
+`provider_id` 过滤的口径是**请求**（与列表一致）：选中有该供应商计量行的请求。所以
+`group_by=provider&provider_id=N` 得到的是「N 服务过的那些请求，再按供应商拆开」——N 自己的桶，
+以及这些请求在别家上留下的尝试。
+
+MCP 侧：查询工具 `list_requests` / `get_request` 同样返回身份字段、`api_key_id`/`api_key_name`
+与 `providers`；后台工具 `admin_request_dimensions` 由路由表自动暴露，`group_by` 与
+`provider_id` 取值同步扩展，其工具描述写明上述第 1 条的计数口径。
 
 维度统计的**排序与分页**（M31）：三种排序键都是**降序**，并以分组键升序兜底（保证分页不重不漏）：
 
@@ -138,11 +167,17 @@ UTC 小时读取八维实际组合的汇总表；当前小时、查询边界、�
 设计、恢复机制和测量方法见 [小时汇总设计](design/request-dimension-rollups.md)。
 
 控制台「请求日志」页：「维度统计」卡在**列表卡之上**（M31），按客户端/模型/工作区/会话/
-用户（账户）/API Key 筛选（筛选栏在下方列表卡内，两张表共用），统计卡工具栏可在三种排序键之间切换
+用户（账户）/API Key/供应商筛选（筛选栏在下方列表卡内，两张表共用），统计卡工具栏可在三种排序键之间切换
 （切换回到第 1 页），表格顶部标出当前排序列（`↓`），底部分页器写「共 N 个分组」以区别于列表分页器的
-「共 N 条」——两个分页器各说各的口径。列表显示身份、用户与 Key、token（入/出）与成本（按展示币种渲染，
+「共 N 条」——两个分页器各说各的口径。列表显示身份、用户与 Key、供应商、token（入/出）与成本（按展示币种渲染，
 换算值带「≈」），列表底部有一行**本页汇总**（M29）。Key 下拉随账户联动（选中账户只列该账户的 Key），
-超过 1000 个 Key 的部署下拉只列前 1000（配置类列表的既有上限），API 过滤对任意 id 仍精确。
+供应商下拉列 `/providers`（名字 + `#id`），超过 1000 个 Key 的部署下拉只列前 1000
+（配置类列表的既有上限），API 过滤对任意 id 仍精确。
+
+供应商的展示口径（M53）：列表「供应商」列显示该请求的**全部**计量供应商（失败转移的行是
+「A、B」，tooltip 写明两家都在这一行上有计量行），没有计量行的行显示「未计量」而不是空白；
+统计卡选「供应商」时行显示「名字 #id」，`id=0` 显示「（未知）」，且「请求数」表头写明各分组之和
+可能大于窗口总数的原因——一组比总数还大的数字，旁边没有这句话看起来就是缺陷。
 
 汇总行的口径（M29）：**只合计当前页已加载的行**（卡片上「本页过滤」生效时就是屏幕上剩下的行），
 tokens 与成本落在它们各自表头列的正下方；未计量的行只计入行数（标签写「已计量 M · 未计量 K」），
@@ -169,11 +204,16 @@ tokens 与成本落在它们各自表头列的正下方；未计量的行只计�
 **已实现（M31）**：维度统计卡置顶；统计表服务端分页（`offset` + 精确分组总数 `total`）与三种排序键
 （默认 `last_seen` 降序，`sort=requests|charge` 可切换），控制台排序下拉、`↓` 标记与「最近一次」列，
 分页器写「共 N 个分组」；计数查询走覆盖/时间索引，不 join 计量表。
+**已实现（M53）**：供应商维度——`group_by=provider`（按 `usage_records.provider_id` 归属成本，
+恒读原始计量行）、`provider_id` 过滤（请求级、走 `EXISTS`）、列表「供应商」列与详情字段
+（`providers` 为数组）、`/providers` 下拉与统计分组、MCP 后台工具同步暴露；口径与取舍见
+`docs/design/m53-request-provider-dimension.md`。
 历史行（迁移 0008 之前）的七列为空，控制台显示「—」，聚合归入「（未知）」桶；
 `account_id`/`api_key_id` ≤ 0 的行归入「（未知）」桶，计数同样保留。
 
 相关设计：`docs/design/m27-request-dimensions.md`、`docs/design/m29-request-log-page-summary.md`、
-`docs/design/m30-request-log-owner-dimensions.md`、`docs/design/m31-request-log-stats-pagination.md`。
+`docs/design/m30-request-log-owner-dimensions.md`、`docs/design/m31-request-log-stats-pagination.md`、
+`docs/design/m53-request-provider-dimension.md`。
 
 Codex 标题辅助请求根据元数据 `turn_trigger=thread_title` 或 user 消息开头的专用任务标题提示词识别为 `call_kind=title`。标题和描述一起返回时仅记录 `title`；损坏的 JSON 对象或缺失标题时留空。标题辅助请求可能使用独立的 `prompt_cache_key`，若携带显式根会话 ID 则归于根会话；没有明确的根会话标识时，已知 Codex 标题模板可通过同账户、Key、工作区内 ±120 秒的唯一首条提示词精确指纹候选关联；候选冲突时恢复独立分组。正文录制关闭/仅元数据、启用脱敏或混合媒体输入时不推断，详见 `session-grouping-fix.md`。历史日志未录制响应正文时不能恢复标题。
 

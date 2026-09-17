@@ -60,19 +60,21 @@ func TestDimensionRollupCountsRequestsAndLateUsage(t *testing.T) {
 }
 
 // The oracle is the original join query, with DISTINCT request counters. It does not
-// share the contribution/rollup implementation, so agreement checks actual semantics.
+// share the contribution/rollup implementation, so agreement checks actual semantics. It
+// resolves the bucket expression itself, exactly like the reference query it drives (the
+// provider dimension's key is spelled differently on the two paths).
 func dimensionOracle(t *testing.T, db *DB, f domain.RequestLogFilter, group, sortKey string, limit, offset int) domain.RequestLogDimensionPage {
 	t.Helper()
-	expression, err := requestLogGroupExpr(group)
-	if err != nil {
-		t.Fatal(err)
-	}
 	order, err := requestLogDimensionSortExpr(sortKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	where, args := requestLogFilter("r.", f)
-	rows, err := db.read.QueryContext(context.Background(), requestLogDimensionsSQL(expression, order, where), append(args, limit, offset)...)
+	query, err := requestLogDimensionsSQL(group, order, where)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.read.QueryContext(context.Background(), query, append(args, limit, offset)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,14 +260,14 @@ func TestDimensionRollupSnapshotAndIndexPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	selected, err := db.selectDimensionSources(ctx, tx, f, time.Now())
+	selected, err := db.selectDimensionSources(ctx, tx, f, time.Now(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(selected.ranges) != 0 || len(selected.generations) != 1 {
 		t.Fatalf("complete hour scans raw: %+v", selected)
 	}
-	source, args := dimensionSourceSQL(selected, f, false)
+	source, args := dimensionSourceSQL(selected, f, false, false)
 	if strings.Contains(source, "usage_records") || strings.Contains(source, "request_logs") {
 		t.Fatal(source)
 	}
@@ -275,7 +277,7 @@ func TestDimensionRollupSnapshotAndIndexPlan(t *testing.T) {
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (`+source+`)`, args...).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("snapshot count: %d %v", count, err)
 	}
-	countSource, countArgs := dimensionSourceSQL(selected, f, true)
+	countSource, countArgs := dimensionSourceSQL(selected, f, true, false)
 	if strings.Contains(countSource, "usage_records") {
 		t.Fatal("count joins usage")
 	}
@@ -283,7 +285,7 @@ func TestDimensionRollupSnapshotAndIndexPlan(t *testing.T) {
 		t.Fatalf("snapshot group count: %d %v", count, err)
 	}
 	tx.Rollback()
-	rawSource, rawArgs := dimensionSourceSQL(dimensionSelection{ranges: [][2]int64{{h.Unix(), h.Unix() + 3599}}}, f, false)
+	rawSource, rawArgs := dimensionSourceSQL(dimensionSelection{ranges: [][2]int64{{h.Unix(), h.Unix() + 3599}}}, f, false, false)
 	rows, err := db.read.QueryContext(ctx, `EXPLAIN QUERY PLAN `+rawSource, rawArgs...)
 	if err != nil {
 		t.Fatal(err)

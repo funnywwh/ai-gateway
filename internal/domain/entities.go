@@ -289,6 +289,17 @@ type RequestLogFilter struct {
 	Workspace     string
 	SessionID     string
 	CallKind      string
+
+	// ProviderID narrows to the requests one upstream provider instance served; 0 means
+	// "every provider".
+	//
+	// It is the one filter that is not an identity column of request_logs: a provider is
+	// named by the metering rows, and one request may be served by several of them
+	// (failover), so no column on the log row could hold the answer. It is therefore an
+	// attempt-grain match — "the request has at least one metered attempt on this provider"
+	// — which is what keeps this filter selecting the same rows in the list, in the totals
+	// and in the breakdown (docs/design/m53-request-provider-dimension.md §4).
+	ProviderID int64
 }
 
 // APIKeyLabel is the read-time label of one API key in the request log's Key dimension:

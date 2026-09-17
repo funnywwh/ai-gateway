@@ -58,6 +58,27 @@ func requestLogFilter(prefix string, f domain.RequestLogFilter) (string, []any) 
 		where += " AND " + prefix + dim.column + " = ?"
 		args = append(args, dim.value)
 	}
+	// The provider filter is the one that needs the metering table: request_logs has no
+	// provider column, because a request that failed over has several. The correlated EXISTS
+	// keeps this a filter on requests (the same rows in the list, the count and the breakdown)
+	// and point-looks-up idx_usage_request once per candidate row.
+	//
+	// The outer column is named through its table rather than left bare, because inside a
+	// correlated subquery an unqualified request_id resolves to the subquery's own table
+	// first: "pu.request_id = request_id" is a tautology that stops filtering altogether, and
+	// SQLite reports nothing — the filter would answer "requests of every provider that
+	// happens to have a metering row" while looking like it works.
+	if f.ProviderID > 0 {
+		outer := prefix + "request_id"
+		if prefix == "" {
+			// The single-table callers (the list page and its count) filter over request_logs
+			// with no alias, which requestLogListSQL and countRows both spell that way.
+			outer = "request_logs.request_id"
+		}
+		where += " AND EXISTS (SELECT 1 FROM usage_records pu WHERE pu.request_id = " +
+			outer + " AND pu.provider_id = ?)"
+		args = append(args, f.ProviderID)
+	}
 	return where, args
 }
 
@@ -219,6 +240,53 @@ func (db *DB) RequestUsages(ctx context.Context, requestIDs []string) (map[strin
 	return out, nil
 }
 
+// RequestProviders returns the upstream providers that metered each request: ascending,
+// deduplicated provider ids keyed by request id. A request with no usage row (a locally
+// rejected one) is simply absent, which is the same statement RequestUsages makes with
+// Metered=false — "no metering row" is not "consumed nothing".
+//
+// It is a second query rather than a column on the page query, for the reason the money
+// columns are: a request can have several attempts on several providers, so the fact is
+// one-to-many and belongs to the metering table. The ids are returned, not names — a name is
+// a mutable label owned by the providers table, and the caller resolves it for the rows in
+// hand (ProviderNames) instead of this query joining it into every page.
+func (db *DB) RequestProviders(ctx context.Context, requestIDs []string) (map[string][]int64, error) {
+	out := map[string][]int64{}
+	ids := make([]string, 0, len(requestIDs))
+	for _, id := range requestIDs {
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := db.read.QueryContext(ctx, `
+SELECT request_id, provider_id FROM usage_records
+WHERE request_id IN (`+idPlaceholders(len(ids))+`)
+GROUP BY request_id, provider_id ORDER BY request_id, provider_id`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: read request providers: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var requestID string
+		var providerID int64
+		if err := rows.Scan(&requestID, &providerID); err != nil {
+			return nil, fmt.Errorf("store: scan request provider: %w", err)
+		}
+		out[requestID] = append(out[requestID], providerID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate request providers: %w", err)
+	}
+	return out, nil
+}
+
 // RequestLogDimensionSorts are the accepted sort keys of the dimension breakdown, the
 // default first. Every one of them is descending and ends with the group key as its
 // tiebreaker: created_at is stamped in whole seconds, so "最近一次" has many ties, and an
@@ -267,29 +335,73 @@ func (db *DB) ListRequestLogDimensionsPage(ctx context.Context, f domain.Request
 // what keeps this an index-only scan — a covering dimension index where the planner picks
 // one, the time index plus a small GROUP BY sort otherwise, but never the table body or the
 // metering table (docs/design/m31-request-log-stats-pagination.md §8).
+//
+// Two things take that shortcut away, and both are recorded in the filters rather than chosen
+// here. group_by=provider takes it because the bucket key itself lives in the metering table,
+// so the joined reference query answers it. A provider filter takes the index-only part of it
+// because the filter is a correlated EXISTS on usage_records, which is what "which provider
+// served this request" costs. Neither changes the bucket set the rows come from: the
+// production count reads the attempt-grain contribution query inside the same snapshot as its
+// rows (RequestLogDimensionsPage), and this path exists for the compatibility probes and the
+// independent comparisons.
 func (db *DB) CountRequestLogDimensionGroups(ctx context.Context, f domain.RequestLogFilter, groupBy string) (int, error) {
-	expression, err := requestLogGroupExpr(groupBy)
+	expression, from, err := requestLogDimensionReference(groupBy, false)
 	if err != nil {
 		return 0, err
 	}
 	where, args := requestLogFilter("r.", f)
 	var total int
-	if err := db.read.QueryRowContext(ctx, requestLogDimensionCountSQL(expression, where), args...).Scan(&total); err != nil {
+	if err := db.read.QueryRowContext(ctx, requestLogDimensionCountSQL(expression, from, where), args...).Scan(&total); err != nil {
 		return 0, fmt.Errorf("store: count request log dimension groups: %w", err)
 	}
 	return total, nil
 }
 
+// requestLogDimensionReference resolves the bucket expression of the direct-join reference
+// queries, together with the FROM clause that expression has to be grouped against. Both
+// carry the r alias; the metering table is joined as u whenever the query needs it.
+//
+// It resolves the expression itself rather than taking one, because the provider dimension's
+// key is spelled differently in the two contexts: the contribution query groups the
+// already-coalesced provider_id its CTE carries, while these queries group the joined metering
+// rows directly, where a request with no metering row still has to land in the provider 0
+// bucket (a request that never reached an upstream was served by no provider).
+//
+// joinUsage is what the caller needs, not a choice: the paged reference sums tokens and money,
+// so it always joins; the bucket count deliberately drops the join (the shortcut documented on
+// CountRequestLogDimensionGroups) and only takes it back for a dimension whose key lives in the
+// metering table.
+func requestLogDimensionReference(groupBy string, joinUsage bool) (expression, from string, err error) {
+	expression, err = requestLogGroupExpr(groupBy)
+	if err != nil {
+		return "", "", err
+	}
+	if providerDimension(groupBy) {
+		expression = `CAST(COALESCE(u.provider_id,0) AS TEXT)`
+		joinUsage = true
+	}
+	from = "request_logs r"
+	if joinUsage {
+		from += " LEFT JOIN usage_records u ON u.request_id = r.request_id"
+	}
+	return expression, from, nil
+}
+
 // requestLogDimensionsSQL retains the direct-join reference query for compatibility
 // probes and independent correctness comparisons against the contribution query.
-func requestLogDimensionsSQL(expression, order, where string) string {
-	prefix, table, workspace := "", "request_logs", "MAX(r.workspace)"
-	if expression == "r.session_id" {
+func requestLogDimensionsSQL(groupBy, order, where string) (string, error) {
+	expression, from, err := requestLogDimensionReference(groupBy, true)
+	if err != nil {
+		return "", err
+	}
+	prefix, workspace := "", "MAX(r.workspace)"
+	if groupBy == "session" {
 		prefix = `WITH session_requests AS (
  SELECT r.*, FIRST_VALUE(r.workspace) OVER (
  PARTITION BY r.session_id ORDER BY (r.workspace<>'') DESC,r.created_at DESC,r.workspace DESC
  ) AS session_workspace FROM request_logs r` + where + `)`
-		table, workspace, where = "session_requests", "MAX(r.session_workspace)", ""
+		from, workspace, where = "session_requests r LEFT JOIN usage_records u ON u.request_id = r.request_id",
+			"MAX(r.session_workspace)", ""
 	}
 	return prefix + fmt.Sprintf(`
 SELECT %s AS group_key, COUNT(DISTINCT r.request_id), COUNT(DISTINCT u.request_id),
@@ -299,29 +411,50 @@ SELECT %s AS group_key, COUNT(DISTINCT r.request_id), COUNT(DISTINCT u.request_i
        COALESCE(SUM(COALESCE(json_extract(u.dimensions_json, '$.output'), 0)), 0),
        COALESCE(SUM(COALESCE(json_extract(u.dimensions_json, '$.reasoning'), 0)), 0),
        COALESCE(SUM(u.cost_micros), 0), COALESCE(SUM(u.charge_micros), 0)
-FROM `+table+` r LEFT JOIN usage_records u ON u.request_id = r.request_id`+where+
-		` GROUP BY group_key ORDER BY `+order+` LIMIT ? OFFSET ?`, expression)
+FROM `+from+where+
+		` GROUP BY group_key ORDER BY `+order+` LIMIT ? OFFSET ?`, expression), nil
 }
 
 // requestLogDimensionCountSQL is the raw bucket count used by rows-only compatibility
 // callers and independent comparisons. The paged API counts its selected contributions
-// in RequestLogDimensionsPage instead, within the same snapshot as the returned rows.
-func requestLogDimensionCountSQL(expression, where string) string {
+// in RequestLogDimensionsPage instead, within the same snapshot as the returned rows. from
+// is the table (and, for the provider dimension, the join) the expression is resolved against.
+func requestLogDimensionCountSQL(expression, from, where string) string {
 	return fmt.Sprintf(`
 SELECT COUNT(*) FROM (
-  SELECT %s AS group_key FROM request_logs r%s GROUP BY group_key
-)`, expression, where)
+  SELECT %s AS group_key FROM %s%s GROUP BY group_key
+)`, expression, from, where)
 }
 
 // RequestLogDimensionNames are the accepted group_by values, in the order the console and
 // MCP describe them.
-var RequestLogDimensionNames = []string{"client", "model", "resolved_model", "workspace", "session", "call_kind", "account", "api_key"}
+//
+// provider is the only one of them that is not an identity column of request_logs: it is
+// read from the metering rows, because one request may be served by several providers and
+// each provider prices its own attempts (see providerDimension).
+var RequestLogDimensionNames = []string{"client", "model", "resolved_model", "workspace", "session", "call_kind", "account", "api_key", "provider"}
+
+// providerDimension reports whether a grouping is answered from the metering rows' provider
+// instead of from the request's identity columns.
+//
+// It is a predicate over the group_by value rather than a property of one expression because
+// the answer changes which source can be read at all: the hourly rollups hold one
+// contribution per request with the metering summed across its attempts, so they cannot say
+// which provider was paid — and the attempt-grain source is what can
+// (docs/design/m53-request-provider-dimension.md §3).
+func providerDimension(groupBy string) bool { return groupBy == "provider" }
 
 // requestLogGroupExpr maps a group_by value onto its column.
 //
 // The two credential dimensions (M30) group on the id cast to text, not on the name: the
 // name lives in another table, is mutable, and is not unique for api_keys. The caller
-// resolves ids to names for the buckets it is about to return.
+// resolves ids to names for the buckets it is about to return. The provider dimension
+// follows the same rule for the same reason.
+//
+// The expression is written against the contributions CTE, which owns a provider_id column
+// only when it was built by providerDimensionSource; grouping by provider against any other
+// source is a programming error the SQLite planner will report (no such column), not a
+// silently wrong answer.
 func requestLogGroupExpr(groupBy string) (string, error) {
 	switch groupBy {
 	case "client", "":
@@ -340,8 +473,10 @@ func requestLogGroupExpr(groupBy string) (string, error) {
 		return "CAST(r.account_id AS TEXT)", nil
 	case "api_key":
 		return "CAST(r.api_key_id AS TEXT)", nil
+	case "provider":
+		return "CAST(r.provider_id AS TEXT)", nil
 	default:
-		return "", fmt.Errorf("store: group_by must be client, model, resolved_model, workspace, session, call_kind, account or api_key")
+		return "", fmt.Errorf("store: group_by must be client, model, resolved_model, workspace, session, call_kind, account, api_key or provider")
 	}
 }
 
@@ -364,6 +499,46 @@ func positiveIDs(ids []int64) []int64 {
 		out = append(out, id)
 	}
 	return out
+}
+
+// ProviderNames resolves provider ids to names for the request log's 供应商 (provider)
+// dimension and for the provider ids on a page of rows: one batched point lookup per page,
+// the same shape as AccountNames.
+//
+// An id with no row is simply absent from the map — a provider may be deleted while the
+// usage rows it metered stay (they are billing records, not configuration), and the caller
+// then shows the id rather than blanking the cell and hiding that a provider served the
+// request.
+func (db *DB) ProviderNames(ctx context.Context, ids []int64) (map[int64]string, error) {
+	out := map[int64]string{}
+	unique := positiveIDs(ids)
+	if len(unique) == 0 {
+		return out, nil
+	}
+	args := make([]any, 0, len(unique))
+	for _, id := range unique {
+		args = append(args, id)
+	}
+	rows, err := db.read.QueryContext(ctx,
+		"SELECT id, name FROM providers WHERE id IN ("+idPlaceholders(len(unique))+")", args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: read provider names: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			id   int64
+			name string
+		)
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, fmt.Errorf("store: scan provider name: %w", err)
+		}
+		out[id] = name
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate provider names: %w", err)
+	}
+	return out, nil
 }
 
 // AccountNames resolves account ids to names for the request log's 用户 (account)

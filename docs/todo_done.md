@@ -3291,3 +3291,29 @@ harness 之所以漏掉它，是因为 fixture 直接给了 `account_count` 字�
 - 部署：`scripts/local-run.sh restart` 本机 :8088；`GET /version` 返回 0.15.0/2616022，healthz/readyz 200，启动日志无 ERROR；v1/models 无凭据 401（数据面正常）；dshgw 门户 200；dshgw.service 与 dshgw-admin.service active；dshgw 二进制同版（0.15.0/2616022）。
 - 回滚点：上一运行版本 0.14.1/dev（tag v0.14.1 构建可复现）；本发布未改动 config.yaml 与数据。
 - 遗留：M52 rev2 主机验收（后台启用/停用全流程、新建 Key 免绑定登录）与 DSH 上游限制决策（A/B）仍在 TODO。
+
+## M53 请求日志的供应商维度（按供应商统计成本，2026-09-17）
+
+设计：`docs/design/m53-request-provider-dimension.md`；规格：`docs/request-log.md` §2/§4/§6。
+
+- [x] 起因核查：写路径本就按供应商归属（每次尝试的 `provider_id` + 该供应商映射的成本规则），
+      缺的是读路径——`RequestLogDimensionNames` 无 provider、日志行无 provider 列、小时汇总也没有。
+- [x] 口径：贡献粒度 (request, provider)，成本/token 归到实际服务的那家；桶「请求数」= 该供应商服务过的
+      请求数，故各桶之和可能大于窗口总数（失败转移在两家各计一次）；未计量请求进 `provider_id=0` 未知桶。
+- [x] store：`providerDimension`/`requestLogGroupExpr("provider")`、`providerDimensionSource`（尝试粒度源，
+      保留 join 以让桶集合正确）、`selectDimensionSources(..., exact)`、`dimensionSourceSQL(..., byProvider)`、
+      参考查询 `requestLogDimensionReference`（probe/独立对照）、`RequestProviders`、`ProviderNames`。
+- [x] 汇总表绕过：`dimensionReadIsExact = providerDimension(groupBy) || f.ProviderID > 0`——汇总按请求预聚合
+      已丢掉供应商，带供应商过滤的查询也没有 `request_id` 可关联；行与总数仍由同一快照、同一源算出。
+- [x] `provider_id` 过滤：请求级相关 `EXISTS`（列表/总数/统计同口径）。外层列显式写 `request_logs.request_id`——
+      裸写会解析到内层别名，令过滤恒真且 SQLite 不报错（已由测试与走查覆盖）。
+- [x] httpapi：`provider_id` 解析（非数字 400）、列表/详情 `providers: [{id, name}]`、统计行
+      `provider_id`/`provider_name`、路由表摘要与 `group_by`/`provider_id` 描述（MCP 工具描述由此生成）。
+- [x] 控制台：分组下拉「供应商」、`/providers` 筛选下拉、列表「供应商」列（失败转移显示两家、未计量行说
+      「未计量」）、统计行「名字 #id」与「（未知）」、详情「供应商」字段、`请求数` 表头与卡片说明写明计数口径。
+- [x] 回归：`provider_dimension_test.go`（两家各计其成本、模型桶不受影响、未计量桶、**汇总建好后仍正确**、
+      筛选三处一致、汇总前后一致、id 升序去重/缺名不造名）；既有独立对照测试在 raw/rolled/dirty/disabled
+      四种模式下覆盖 `provider`；httpapi 三项新测试 + MCP 端到端读回；`internal/webui/embed_test.go` 控制台/服务端
+      维度契约；UI 走查 requests 视图 106 项（含 9 项供应商断言）通过。
+- 未做（见 TODO）：`get_usage_breakdown` 的 provider 分组（涉及上游供应商身份口径）；`group_by=provider`
+  的大窗口实测与专用汇总表。
