@@ -28,6 +28,7 @@
 | M2 | docs/design/m2-plugin-protocol.md | 是 |
 | M49 | docs/design/m49-organization.md + docs/org.md | 是 |
 | M50 | docs/design/m50-frontend-minify.md | 是 |
+| M54 | docs/design/m54-console-asset-shape.md | 是 |
 
 ## 检查项（提交前自检）
 

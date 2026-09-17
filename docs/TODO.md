@@ -434,3 +434,13 @@
 - [ ] 决策（未做）：不带账号作用域的 MCP 用量工具 `get_usage_breakdown` 是否支持 `group_by=provider`。
       给客户自己的 MCP token 暴露供应商 id/名字与数据面「不回供应商标识」的立场相冲突，
       要做先定口径（只给 id？只给平台内部自定义名？）
+
+## M54 控制台资源形态的运行态自述与部署产物隔离
+
+设计：`docs/design/m54-console-asset-shape.md`（§9 差异、§10 实测已回填）；实现与自动化验收完成的条目见
+`docs/todo_done.md` 同名小节，下面只列尚未执行项。
+
+- [ ] **待人工执行**（宿主终端）：`make build` + `scripts/local-run.sh restart`，让 `:8088` 上的 `/version`
+      出现 `ui` 字段（`local-run.sh status` 应打印 `console: minified`）。本沙箱与宿主不同 PID namespace，
+      无法向宿主进程发信号；在跑的仍是 `0.16.0/9dc4ed2`（早于 M54），所以现在查 `ui` 会得到 `unknown`
+

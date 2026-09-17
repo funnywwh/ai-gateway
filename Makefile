@@ -40,17 +40,24 @@ ui-dist:
 	@$(GOENV) go build -trimpath -o $(UIDIST)/minifyui ./cmd/minifyui
 	@$(UIDIST)/minifyui -src internal/webui/static -out $(UIDIST)/static -overlay $(UI_OVERLAY)
 
+# build is the release shape: the console goes in minified. The -X and the -overlay are
+# deliberately on the same line — they are two halves of one fact, and a build that passed
+# one without the other would report a shape it does not carry. See
+# docs/design/m54-console-asset-shape.md.
 build: version-check ui-dist
 	@mkdir -p bin
-	@$(GOENV) go build -trimpath -ldflags "$(LDFLAGS)" -overlay $(UI_OVERLAY) -o bin/aigw ./cmd/aigw
+	@$(GOENV) go build -trimpath -ldflags "$(LDFLAGS) -X main.uiAssets=minified" -overlay $(UI_OVERLAY) -o bin/aigw ./cmd/aigw
 
 # build-src is the same binary with the assets as written: for debugging the console in a
 # form a human can read, or for checking that `ui-dist` changed nothing but the bytes. It
-# says so out loud, because "which shape is in this binary" must never be a guess.
+# writes bin/aigw-src, NOT bin/aigw: the debug build must not be able to replace the
+# artifact that scripts/local-run.sh serves, because "I only wanted to look at the
+# console" followed by a restart is exactly how readable source reached :8088 before
+# (M50 §6). It says which shape it is out loud, because that must never be a guess.
 build-src: version-check
-	@echo "ui: source assets (not minified); use 'make build' for the release shape"
+	@echo "ui: source assets (not minified); wrote bin/aigw-src — bin/aigw is untouched"
 	@mkdir -p bin
-	@$(GOENV) go build -trimpath -ldflags "$(LDFLAGS)" -o bin/aigw ./cmd/aigw
+	@$(GOENV) go build -trimpath -ldflags "$(LDFLAGS) -X main.uiAssets=source" -o bin/aigw-src ./cmd/aigw
 
 test:
 	@$(GOENV) go test ./...

@@ -43,10 +43,14 @@ log:
 YAML
 
 rm -f "$WORK/aigw.db" "$WORK/cookies.txt"
-go build -o bin/aigw ./cmd/aigw
-go build -o bin/loadgen ./cmd/loadgen
+# Both binaries are built into $WORK, never over bin/: this script's gateway carries the
+# console as source (it is a hand build, so `main.uiAssets` keeps its "source" default),
+# and writing that over the deployable bin/aigw was a silent way to put readable console
+# assets on :8088. See docs/design/m54-console-asset-shape.md.
+go build -o "$WORK/aigw" ./cmd/aigw
+go build -o "$WORK/loadgen" ./cmd/loadgen
 
-./bin/aigw --config "$WORK/config.yaml" > "$WORK/server.log" 2>&1 &
+"$WORK/aigw" --config "$WORK/config.yaml" > "$WORK/server.log" 2>&1 &
 SERVER_PID=$!
 trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
 
@@ -85,7 +89,7 @@ conn.commit()
 PY
 
 echo "--- load: concurrency=$CONCURRENCY duration=$DURATION stream=$STREAM"
-./bin/loadgen -url "http://127.0.0.1:$PORT/v1/responses" -key "$KEY" -model echo \
+"$WORK/loadgen" -url "http://127.0.0.1:$PORT/v1/responses" -key "$KEY" -model echo \
   -concurrency "$CONCURRENCY" -duration "$DURATION" -stream "$STREAM" -input "ping"
 
 echo '--- billing writer'

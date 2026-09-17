@@ -3317,3 +3317,40 @@ harness 之所以漏掉它，是因为 fixture 直接给了 `account_count` 字�
       维度契约；UI 走查 requests 视图 106 项（含 9 项供应商断言）通过。
 - 未做（见 TODO）：`get_usage_breakdown` 的 provider 分组（涉及上游供应商身份口径）；`group_by=provider`
   的大窗口实测与专用汇总表。
+
+## M54 控制台资源形态的运行态自述与部署产物隔离（2026-09-17）
+
+设计：`docs/design/m54-console-asset-shape.md`（§9 实现差异、§10 验收记录已回填）。
+起因：用户报告「本机 8088 的前端 js 没有混淆」——实测**复现不出来**（在跑的 `0.16.0/9dc4ed2` 逐文件
+sha256 与压缩镜像全部相同），但"曾经不是"可证：M50 随 0.14.1 才上线的回滚点二进制里 `renderShell`=3。
+真正的问题是**看到可读字节之后没有任何运行态信号能回答为什么**，且两条路径会静默把未混淆版换上 8088。
+
+- [x] 形态由构建期声明承载：`-X main.uiAssets=minified` 与 `-overlay` **写在同一行**（两者无法单方面漂移），
+      代码默认值是响亮的 `source`——"自称已混淆、实际是源码"在构造上不可能
+- [x] `/version`、`/healthz` 新增 `ui` 字段（`minified`/`source`/空→`unknown`，缺字段与 unknown 必须可区分）；
+      启动日志 `aigw starting` 加 `ui`；`aigw -version` 打印 `…, console minified`
+      （`scripts/release.sh` 本就把它写进发布记录 → 每次发版自动留下形态证据）
+- [x] 产物隔离：`make build-src` 改**写 `bin/aigw-src`**（调试构建碰不到部署产物）；`scripts/load.sh` 不再
+      写 `bin/aigw`（压测脚本就地覆盖部署产物是纯粹的事故源），改为在 `$WORK` 下构建并运行
+- [x] `scripts/local-run.sh`：`status` 增 `console: minified|source|unknown`（解析失败只影响这一行，
+      不报错退出）；`start` 在非 minified 时显著告警但不拒绝（源码版实例仍是合法调试用法）
+- [x] `internal/httpapi/version_test.go`：`/version` 与 `/healthz` 的 `ui` 一致 + 空值→`unknown`；
+      `cmd/aigw/version_test.go`（实现差异 §9.2 补写）：`versionLine()` 两种形态 + 默认值必须是 `source`
+- [x] 记录：README 构建小节与「常用入口」表、设计文档 §9/§10 回填
+
+### 实测
+
+| 检查 | 结果 |
+|---|---|
+| `./bin/aigw -version` / `./bin/aigw-src -version` | `…console minified` / `…console source` |
+| `make build-src` 对 `bin/aigw` 的影响 | sha256 与 mtime **逐字节不变** |
+| `strings` 指纹 | 压缩版 `renderShell`=0、`const STATS_SORTS`=0；源码版 3/1；`record_output_text` 两边 21 |
+| 隔离端口 `:8111`/`:8112`（压缩版/源码版，各自空库） | `/version`、`/healthz`、启动日志三处的 `ui` 分别为 `minified`/`source`；状态码逐条相同（含 301/404）；CSP/缓存头照旧；两实例 `level=ERROR` 为 0 |
+| `scripts/local-run.sh status` | `:8111` → `console: minified`；在跑的 `:8088`（早于 M54）→ `console: unknown（…早于 M54…）` 且不报错 |
+| `scripts/load.sh 4 3s`（4663 请求，rps 1554） | 跑完 `bin/aigw` sha256 不变 |
+| `go vet ./...` / `go test ./...` | 干净 / 全绿（48 个包）；在跑的 `8088` 全程未受影响 |
+
+- [x] 提交：独立 M54 commit（引用设计文档），不改 `VERSION`、不打 tag、不发布
+- 未做（保留在 `docs/TODO.md`）：宿主执行 `make build` + `scripts/local-run.sh restart` 让 `:8088` 上的
+  `ui` 字段生效（本沙箱与宿主不同 PID namespace，无法向宿主进程发信号）
+

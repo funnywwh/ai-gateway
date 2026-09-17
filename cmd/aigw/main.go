@@ -45,9 +45,25 @@ var (
 	version  = "dev"
 	revision = "none"
 	date     = "unknown"
+	// uiAssets is the shape of the console assets this binary carries: "minified" when
+	// the build compiled with -overlay against the mirror cmd/minifyui wrote, "source"
+	// otherwise. `make build` sets it on the same line as -overlay, so the declaration
+	// and the overlay cannot drift apart, and the default is the loud side: "minified"
+	// is only ever set by the line that also passes -overlay, which makes "claims to be
+	// minified but isn't" impossible to construct. See
+	// docs/design/m54-console-asset-shape.md.
+	uiAssets = "source"
 )
 
 func main() { os.Exit(run()) }
+
+// versionLine renders the build identity as one line. scripts/release.sh copies this
+// line into the release record, and it is the only place that says out loud which shape
+// of console assets a release carries — so it is a function with a test, not a string
+// assembled inline at the print site.
+func versionLine() string {
+	return fmt.Sprintf("aigw %s (revision %s, built %s, console %s)", version, revision, date, uiAssets)
+}
 
 func run() int {
 	// A subcommand form keeps the local MCP server out of the HTTP binary''s flag space.
@@ -60,7 +76,7 @@ func run() int {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("aigw", version, "(revision "+revision+",", "built "+date+")")
+		fmt.Println(versionLine())
 		return 0
 	}
 
@@ -74,6 +90,7 @@ func run() int {
 	log.Info("aigw starting",
 		"version", version,
 		"revision", revision,
+		"ui", uiAssets,
 		"config", *configPath,
 		"listen", cfg.Server.Listen,
 		"database", cfg.Database.Path,
@@ -496,6 +513,7 @@ func run() int {
 		Log:            log,
 		Version:        version,
 		Revision:       revision,
+		UIAssets:       uiAssets,
 	})
 
 	if auditWriter != nil {

@@ -173,6 +173,25 @@ type Deps struct {
 	// console badge, so an operator can tell what is running without reading logs.
 	Version  string
 	Revision string
+	// UIAssets is the shape of the console assets this binary carries: "minified" for a
+	// release build (compiled with -overlay) or "source" for a hand build. It answers,
+	// from the running instance, the question that used to require
+	// `strings bin/aigw | grep -c renderShell`. Empty is reported as "unknown" rather
+	// than omitted, so a reader can always tell "this deployment is not minified" from
+	// "this binary predates the field". Named UIAssets rather than UI because UI above
+	// is the console handler itself: two fields of one struct cannot both be UI.
+	// See docs/design/m54-console-asset-shape.md.
+	UIAssets string
+}
+
+// uiShape is the ui field as it goes on the wire. An empty value means the caller
+// supplied none (a fixture, an embedding application, a binary older than M54), and
+// saying so out loud is the point: a missing key would be ambiguous.
+func (s *Server) uiShape() string {
+	if s.deps.UIAssets == "" {
+		return "unknown"
+	}
+	return s.deps.UIAssets
 }
 
 // Server wires the HTTP surfaces.
@@ -553,6 +572,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		"status":   "ok",
 		"version":  s.deps.Version,
 		"revision": s.deps.Revision,
+		"ui":       s.uiShape(),
 	})
 }
 
@@ -563,6 +583,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":  s.deps.Version,
 		"revision": s.deps.Revision,
+		"ui":       s.uiShape(),
 	})
 }
 

@@ -4,10 +4,14 @@
 #   scripts/local-run.sh start     启动（端口被占用时拒绝重复启动）
 #   scripts/local-run.sh stop      优雅停止（超时后强杀）
 #   scripts/local-run.sh restart   重启
-#   scripts/local-run.sh status    查看状态与健康检查
+#   scripts/local-run.sh status    查看状态、健康检查与控制台资源形态
 #   scripts/local-run.sh logs      跟踪日志
 #
 # 可通过环境变量覆盖：CONFIG / BIN / LISTEN
+#
+# 关于 BIN：默认是 bin/aigw，即 `make build` 的发布产物（控制台资源已混淆）。
+# 想跑未混淆的调试版请显式指定 BIN=bin/aigw-src —— `make build-src` 只写这个文件，
+# 不再覆盖 bin/aigw（M54；见 docs/design/m54-console-asset-shape.md）。
 #
 # 关于运行位置（重要）：请在普通终端里运行本脚本，不要在 DSH 的命令/后台任务里跑。
 # DSH 每条命令都跑在独立的 `bwrap --unshare-pid --die-with-parent` 沙箱中，沙箱会回收
@@ -54,6 +58,51 @@ health() {
   echo "health: $HEALTH_URL -> HTTP $code"
 }
 
+# 控制台资源形态（M54）：由实例自己回答。构建日志（"ui: minified …" / "ui: source
+# assets …"）只留在构建者当时的终端上，所以"8088 现在服务的是混淆版还是可读版"这个
+# 问题以前只能靠 `strings bin/aigw | grep -c renderShell` 这种专家手法回答。
+# 解析失败只影响这一行提示，绝不能让 status/start 失败。
+console_shape() {
+  command -v curl >/dev/null 2>&1 || { echo unknown; return 0; }
+  local body
+  body="$(curl -s -m 5 "http://127.0.0.1${LISTEN}/version" 2>/dev/null || true)"
+  [[ -n "$body" ]] || { echo unknown; return 0; }
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$body" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("unknown"); raise SystemExit(0)
+v = d.get("ui")
+print(v if isinstance(v, str) and v else "unknown")' 2>/dev/null || echo unknown
+  else
+    printf '%s' "$body" | grep -o '"ui":"[a-z]*"' | cut -d'"' -f4 || echo unknown
+  fi
+}
+
+report_console_shape() {
+  local shape
+  shape="$(console_shape)"
+  case "$shape" in
+    minified)
+      echo "console: minified（控制台 js/css 已压缩混淆）"
+      ;;
+    source)
+      echo "console: source（未混淆！）" >&2
+      cat >&2 <<'EOF'
+  这个实例控制台是**源码形态**：任何人拿到嵌入资源都能读到带完整中文注释的前端源码。
+  只有调试控制台时才该这样跑（make build-src 现在写 bin/aigw-src，不会碰 bin/aigw）；
+  要回到发布形态：
+      make build && scripts/local-run.sh restart
+EOF
+      ;;
+    *)
+      echo "console: unknown（该二进制没有 ui 字段，早于 M54；不等于未混淆，请按需确认）"
+      ;;
+  esac
+}
+
 do_start() {
   if port_busy; then
     echo "端口 $PORT 已被占用，拒绝重复启动（否则新实例只会报 bind: address already in use 然后退出）" >&2
@@ -77,6 +126,7 @@ do_start() {
     echo "started (pid $(cat "$PIDFILE" 2>/dev/null))  listen=$LISTEN"
     echo "log: $LOGFILE"
     health
+    report_console_shape
   else
     echo "启动失败，见 $LOGFILE 末尾：" >&2
     tail -n 20 "$LOGFILE" >&2 || true
@@ -121,6 +171,7 @@ do_status() {
     return 0
   fi
   health
+  report_console_shape
 }
 
 case "${1:-status}" in

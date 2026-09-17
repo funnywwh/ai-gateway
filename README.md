@@ -96,7 +96,7 @@ M39 让「线上跑的是哪个版本」有一个能读的答案：版本号的�
 ```sh
 source scripts/goenv.sh
 make build      # 产出 bin/aigw（控制台资源先压缩混淆，再用 -overlay 嵌入）
-make build-src  # 同上，但不混淆（排查问题/对照用，日志行会写明）
+make build-src  # 产出 bin/aigw-src（不混淆；排查/对照用，且**不覆盖** bin/aigw，见 M54）
 make test       # 单元测试
 make verify     # vet + test + build
 make dshgw-verify  # 独立 dshgw 测试/构建/契约，不并入 aigw verify
@@ -121,8 +121,8 @@ make dshgw-verify  # 独立 dshgw 测试/构建/契约，不并入 aigw verify
 |---|---|
 | `POST /v1/responses` | Responses API（流式 / 非流式） |
 | `GET /v1/models` | 可用模型与**对客售价** |
-| `GET /version` | 构建身份：`{"version":"a.b.c","revision":"<短 sha>"}`（公开，带 `base_path` 前缀） |
-| `GET /healthz` | 存活探针（同样带 `version` 与 `revision`） |
+| `GET /version` | 构建身份：`{"version":"a.b.c","revision":"<短 sha>","ui":"minified|source"}`（公开，带 `base_path` 前缀；`ui` = 控制台资源形态） |
+| `GET /healthz` | 存活探针（同样带 `version`、`revision` 与 `ui`） |
 | `POST /mcp` | MCP 服务（账户查询 + 按 scope 可执行后台接口，`aigw_mcp_` 令牌） |
 | `bin/aigw mcp-serve --account <name>` | 本地 stdio MCP（11 个只读查询工具） |
 | `bin/aigw mcp-serve --endpoint <完整 MCP URL> --token-env GW_MCP_TOKEN` | stdio 转发到运行中网关，按令牌 scope 提供查询与后台工具（M42） |
@@ -136,7 +136,7 @@ make dshgw-verify  # 独立 dshgw 测试/构建/契约，不并入 aigw verify
 | `scripts/ui-badge-test.mjs`（`make ui-base`） | 左上角版本角标的 node 断言（三行 DOM shim，不需要浏览器）：两格内容、revision 为 `none` 时不显示、端点读不到时不报错 |
 | `scripts/release.sh`（skill `release-version`） | 发版：升 `VERSION`（a.b.c）→ 提交打 tag → `make build`；用法 `scripts/release.sh patch/minor/major` |
 | `make build` / `make ui-dist` | 发布构建：`ui-dist` 生成压缩混淆镜像（`.cache/ui-dist/static` + `overlay.json`），`build` 用它嵌入 `bin/aigw` |
-| `make build-src` | 不混淆构建（可读版，排查线上问题用） |
+| `make build-src` | 不混淆构建：写 `bin/aigw-src`，**不碰** `bin/aigw`（源码版实例仅供调试，见 M54） |
 | `make verify` | vet + 全量测试 + 控制台 node 断言 + 构建 |
 
 ## 压测基线（本机 i7-12700K，testecho 供应商）
