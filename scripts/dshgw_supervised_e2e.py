@@ -571,11 +571,6 @@ def check_feishu_login(check: Check, aigw_port: int, proxy_port: int, tenant: st
         return
     key_id = json.loads(body).get("id")
 
-    # Opt the account in and point it at the tenant this acceptance already created. The
-    # console's own button would do this, but it also rotates the tenant's worker key through
-    # the provisioning channel, which this stub-based run does not model.
-    with sqlite3.connect(database) as conn:
-        conn.execute("UPDATE accounts SET dsh_enabled = 1, dsh_tenant = ? WHERE id = ?", (tenant, account_id))
 
     # --- binding, through the console and the consent page --------------------------------
     # One hop: the console's own route (where the admin cookie is scoped) mints the state and
@@ -594,12 +589,25 @@ def check_feishu_login(check: Check, aigw_port: int, proxy_port: int, tenant: st
     status, headers, _ = admin.request("GET", authorize)
     callback = headers.get("location", "")
     status, headers, _ = admin.request("GET", callback)
-    check.require("feishu-bind-callback", status == 303 and "feishu=bound" in headers.get("location", ""),
-                  f"HTTP {status} location={headers.get('location')!r}")
+    bind_location = headers.get("location", "")
+    check.require("feishu-bind-callback", status == 303 and "feishu=bound" in bind_location,
+                  f"HTTP {status} location={bind_location!r}")
+    # Binding also opts the account in to DSH, through the same local provisioning channel the
+    # console's button uses, so the person can sign in immediately.
+    check.require("feishu-bind-enables-dsh", "dsh=enabled" in bind_location, f"location={bind_location!r}")
     with sqlite3.connect(database) as conn:
         bound = conn.execute("SELECT feishu_open_id, feishu_name FROM api_keys WHERE id = ?", (key_id,)).fetchone()
-    check.require("feishu-binding-stored", bound is not None and bound[0] == feishu.open_id,
-                  f"row={bound!r}")
+        account_row = conn.execute("SELECT dsh_enabled, dsh_tenant FROM accounts WHERE id = ?", (account_id,)).fetchone()
+    check.require("feishu-binding-stored", bound is not None and bound[0] == feishu.open_id, f"row={bound!r}")
+    check.require("feishu-account-opted-in", account_row is not None and account_row[0] == 1 and account_row[1],
+                  f"account={account_row!r}")
+    # The tenant the binding created is the one the login will land in, so the rest of this
+    # step follows the URL the binding itself reported.
+    bound_tenant = account_row[1]
+    check.require("feishu-bound-tenant-is-live",
+                  any(t["name"] == bound_tenant
+                      for t in json.loads((database.parent / "registry.json").read_text())["tenants"]),
+                  f"tenant={bound_tenant!r}")
 
     # --- signing in to the portal with that identity --------------------------------------
     # The portal is reached through the front door, on the URL the child itself generates.
@@ -629,12 +637,18 @@ def check_feishu_login(check: Check, aigw_port: int, proxy_port: int, tenant: st
     status, headers, _ = visitor.request("GET", location)
     tenant_location = headers.get("location", "")
     check.require("feishu-login-starts-tenant-session",
-                  status == 302 and tenant_location == f"{portal_base(proxy_port)}/t/{tenant}/",
+                  status == 302 and tenant_location == f"{portal_base(proxy_port)}/t/{bound_tenant}/",
                   f"HTTP {status} location={tenant_location!r}")
-    session = visitor.cookies.get(f"dshgw_s_{tenant}", ("", ""))[0]
+    session = visitor.cookies.get(f"dshgw_s_{bound_tenant}", ("", ""))[0]
     check.require("feishu-session-issued", bool(session), f"cookies={sorted(visitor.cookies)}")
+    # The front proxy keeps its own registry snapshot (reload ~2s), and this tenant was created
+    # by the binding a moment ago, so the first fetch can legitimately answer "unknown tenant".
+    # Waiting for the proxy to catch up is part of the assertion, not a workaround.
+    tenant_ui = wait_for("the front proxy to see the new tenant",
+                         lambda: (visitor.request("GET", tenant_location)[0] == 200),
+                         timeout=30)
     status, _, page = visitor.request("GET", tenant_location)
-    check.require("feishu-tenant-serves-ui", status == 200, f"HTTP {status} body={page[:80]!r}")
+    check.require("feishu-tenant-serves-ui", tenant_ui is True and status == 200, f"HTTP {status} body={page[:80]!r}")
     check.require("feishu-entitlement-rechecked", upstream.authorize_calls > 0,
                   f"POST /v1/dshgw/authorize calls: {upstream.authorize_calls}")
 
@@ -667,7 +681,7 @@ def check_feishu_login(check: Check, aigw_port: int, proxy_port: int, tenant: st
                       status == 403 and "未启用 dsh" in page,
                       f"HTTP {status} body={page[:120]!r}")
         check.require("feishu-revocation-issues-no-session",
-                      f"dshgw_s_{tenant}" not in revoked.cookies, f"cookies={sorted(revoked.cookies)}")
+                      f"dshgw_s_{bound_tenant}" not in revoked.cookies, f"cookies={sorted(revoked.cookies)}")
     finally:
         upstream.deny = False
     # ...and the same identity works again once the upstream allows it, which proves the
@@ -677,7 +691,7 @@ def check_feishu_login(check: Check, aigw_port: int, proxy_port: int, tenant: st
     status, headers, _ = restored.request("GET", headers.get("location", ""))
     status, headers, _ = restored.request("GET", headers.get("location", ""))
     status, headers, _ = restored.request("GET", headers.get("location", ""))
-    check.require("feishu-login-recovers", status == 302 and f"dshgw_s_{tenant}" in restored.cookies,
+    check.require("feishu-login-recovers", status == 302 and f"dshgw_s_{bound_tenant}" in restored.cookies,
                   f"HTTP {status} cookies={sorted(restored.cookies)}")
 
 

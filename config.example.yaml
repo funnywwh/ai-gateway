@@ -267,6 +267,9 @@ feishu:
   callback_url: ""
   scopes: ""                  # empty is right: the open id and the name need no permission
   dsh_login: true             # open the DSH portal login flow (needs the portal URL below)
+  # 绑定成功后自动为该账号启用 DSH（等价于在账户页点一次「启用 DSH」），这样绑完就能登录；
+  # 它只会启用「从未启用过」的账号：被显式停用过的账号保持停用，控制台会提示需手动启用。
+  auto_enable_dsh: true
   portal_url: ""              # DSH portal URL; empty derives it from the dshgw block above
   state_ttl_s: 600            # how long one consent screen may stay open
   ticket_ttl_s: 120           # how long the handoff ticket to dshgw stays valid

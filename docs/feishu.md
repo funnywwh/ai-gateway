@@ -53,6 +53,7 @@ feishu:
   app_secret: "xxxxxxxx"                     # 也可用 GW_FEISHU_APP_SECRET
   callback_url: "http://192.168.190.86:8090/feishu/callback"   # 与飞书后台登记的一致
   dsh_login: true                            # 开放门户登录（false 则只做控制台绑定）
+  auto_enable_dsh: true                      # 绑定成功即启用该账号的 DSH（需 dsh_login 为 true）
   portal_url: ""                             # 空则由下面的 dshgw 块派生
 dshgw:
   enabled: true
@@ -94,6 +95,11 @@ dshgw:
 
 约定与限制：
 
+- **绑定成功即自动启用该账号的 DSH**（`feishu.auto_enable_dsh`，默认开，仅当 `feishu.dsh_login` 也为开时生效）：
+  后台按与「启用 DSH」按钮**完全相同**的流程铸造 worker Key、建/起租户、写映射并审计，因此绑完就能立刻用飞书登录。
+  它**只启用从未启用过的账号**：被显式「停用 DSH」过的账号保持停用（控制台提示"曾被显式停用，如需登录请手动启用"），
+  因为静默撤销管理员刚做的停用比多一次点击糟得多。供应失败**不回滚绑定**（身份与租户是两件事），
+  控制台会提示"绑定已保存，请在账户页重试启用"，完整错误在 aigw 日志里。
 - 绑定只对 **active** 的 Key 开放（停用的 Key 绑定没有意义，接口返回 409）。
 - 换绑是允许的（管理员显式操作），旧 `open_id` 会记进审计。
 - 一个飞书账号不能同时绑两把 Key（数据库唯一索引保证）；一个 Key 也只能有一个飞书账号。
@@ -150,7 +156,8 @@ dshgw:
 | aigw 启动报「callback_url path … does not match …」 | 回调地址的 path 与 base_path 不符 | 改 `callback_url` 或 `server.base_path` |
 | 用户被弹回门户、看不到具体错误 | 登录被拒 | 门户错误页会给出原因码；对应 §5 的几种情况 |
 | 「登录成功又被弹回门户」（dshgw 侧） | dshgw 按 https 发了 Secure cookie，而门户是明文 HTTP | 配 `dshgw.public_scheme: http` |
-| 绑定成功但登录仍被拒 | 该账号未启用 DSH / 租户未分配 | 控制台账号页「启用 DSH」并确认租户名 |
+| 绑定成功但登录仍被拒 | 该账号未启用 DSH / 租户未分配 | 若配置里 `feishu.auto_enable_dsh: false`，绑定不会启用账号 → 控制台账号页点「启用 DSH」；若为 true 则是自动启用失败（控制台会同时提示失败原因，完整错误见 aigw 日志） |
+| 控制台提示「该账号曾被显式停用 DSH，因此未自动启用」 | 有人按过「停用 DSH」（账号有租户映射但开关为关） | 这是有意为之：自动启用不撤销显式停用。要恢复就在账户页手动「启用 DSH」 |
 | aigw 出网受限 | 到不了 `accounts.feishu.cn` / `open.feishu.cn` | 放行出站 HTTPS；绑定/登录会报「不可达」，数据面不受影响 |
 
 相关日志与审计的关键字：`feishu_login_reject`、`feishu_bind_reject`（含 reason：`code_rejected` /

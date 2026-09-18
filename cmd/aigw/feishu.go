@@ -52,6 +52,9 @@ func buildFeishuDeps(cfg *config.Config, log *slog.Logger) (*httpapi.FeishuDeps,
 		DSHLogin:     cfg.Feishu.DSHLogin,
 		PortalURL:    cfg.DSHGWPortalURL(),
 		LoginURL:     cfg.FeishuLoginURL(),
+		// Only meaningful together with the portal login: a binding whose purpose is
+		// identity alone should not silently provision a tenant.
+		AutoEnableDSH: cfg.Feishu.DSHLogin && cfg.Feishu.AutoEnableDSH,
 	}
 	if cfg.Feishu.DSHLogin {
 		ticketKey, err := feishuTicketSecret(cfg)

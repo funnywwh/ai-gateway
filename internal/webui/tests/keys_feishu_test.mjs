@@ -231,6 +231,31 @@ assert.equal(toasts.length, 1);
 assert.match(toasts[0].text, /surprise/, 'an unknown result code must be shown, not swallowed');
 assert.equal(toasts[0].level, 'error');
 
+// Binding also opts the account in to DSH. That outcome travels as its own parameter, so the
+// administrator learns whether the person can sign in yet — including when it deliberately
+// did not happen.
+const dshCases = {
+  enabled: { level: 'ok', match: /已自动启用该账号的 DSH/ },
+  already: { level: 'ok', match: /此前已启用 DSH/ },
+  declined: { level: 'error', match: /曾被显式停用 DSH/ },
+  failed: { level: 'error', match: /自动启用 DSH 失败/ },
+};
+for (const [state, expected] of Object.entries(dshCases)) {
+  toasts.length = 0;
+  await renderPage(new URLSearchParams('feishu=bound&key=7&dsh=' + state + '&tenant=dsh-alice&dsh_reason=boom'));
+  assert.equal(toasts.length, 2, state + ': the identity result and the DSH outcome are both reported');
+  assert.equal(toasts[1].level, expected.level, state + ': wrong level');
+  assert.match(toasts[1].text, expected.match, state + ': wrong message');
+}
+// "off" means the deployment does not do it: silence is correct, not an error.
+toasts.length = 0;
+await renderPage(new URLSearchParams('feishu=bound&key=7&dsh=off'));
+assert.equal(toasts.length, 1, 'dsh=off must not add a second message');
+// An unknown state is surfaced rather than swallowed.
+toasts.length = 0;
+await renderPage(new URLSearchParams('feishu=bound&key=7&dsh=surprise'));
+assert.match(toasts.map((t) => t.text).join(' '), /surprise/, 'an unknown DSH state must be shown');
+
 // Without the parameter nothing is shown at all.
 toasts.length = 0;
 await renderPage();

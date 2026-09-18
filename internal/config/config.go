@@ -502,6 +502,11 @@ type Feishu struct {
 	StateSecret string `yaml:"state_secret"`
 	// DSHLogin opens the DSH portal login flow (M61). It needs PortalURL to be known.
 	DSHLogin bool `yaml:"dsh_login"`
+	// AutoEnableDSH makes a successful binding also opt the key's account in to DSH, so the
+	// person can log in right away instead of waiting for a second, easily forgotten step in
+	// the console. It only ever enables an account that has never been enabled: an account
+	// an administrator explicitly disabled stays disabled, and the console is told so.
+	AutoEnableDSH bool `yaml:"auto_enable_dsh"`
 	// PortalURL is the browser-visible URL of the dshgw portal. Empty derives it from
 	// the dshgw block, which is correct whenever aigw owns that child.
 	PortalURL string `yaml:"portal_url"`
@@ -701,13 +706,14 @@ func Default() Config {
 		Feishu: Feishu{
 			// Default endpoints are the documented ones: the authorization page, the
 			// OAuth v3 token endpoint (v2 is historical) and the user-info API.
-			AuthorizeURL: "https://accounts.feishu.cn/open-apis/authen/v1/authorize",
-			TokenURL:     "https://accounts.feishu.cn/oauth/v3/token",
-			UserInfoURL:  "https://open.feishu.cn/open-apis/authen/v1/user_info",
-			TimeoutS:     5,
-			StateTTLS:    600,
-			TicketTTLS:   120,
-			DSHLogin:     true,
+			AuthorizeURL:  "https://accounts.feishu.cn/open-apis/authen/v1/authorize",
+			TokenURL:      "https://accounts.feishu.cn/oauth/v3/token",
+			UserInfoURL:   "https://open.feishu.cn/open-apis/authen/v1/user_info",
+			TimeoutS:      5,
+			StateTTLS:     600,
+			TicketTTLS:    120,
+			DSHLogin:      true,
+			AutoEnableDSH: true,
 		},
 		Dshgw: Dshgw{
 			PublicHost:   "localhost",

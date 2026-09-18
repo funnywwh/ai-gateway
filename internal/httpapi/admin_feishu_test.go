@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -809,4 +810,180 @@ func TestFeishuTicketCookieFollowsTheScheme(t *testing.T) {
 	if !ticket.Secure {
 		t.Error("an https deployment must mark the ticket cookie Secure")
 	}
+}
+
+// Binding a key now also opts the account in to DSH, so the person can sign in immediately
+// instead of waiting for a second, easily forgotten step. The identity is written either way;
+// these cases pin what happens to the account around it.
+func TestFeishuBindAutoEnablesDSH(t *testing.T) {
+	f := newFeishuFixture(t)
+	f.api.deps.Feishu.AutoEnableDSH = true
+	key := f.seedKey(t)
+
+	state, err := f.states.Sign(feishu.FlowBind, key.ID, adminUser, "nonce-auto-enable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := f.request(t, http.MethodGet, feishuCallbackPath+"?code=c&state="+url.QueryEscape(state), "")
+	location := res.Header.Get("Location")
+	if !strings.Contains(location, "feishu=bound") || !strings.Contains(location, "dsh=enabled") {
+		t.Fatalf("location = %q, want a bound binding that enabled DSH", location)
+	}
+	// The tenant was actually provisioned through the same channel the console's button uses.
+	if len(f.dshgwAdmin.Created) != 1 {
+		t.Fatalf("provisioned tenants = %v, want exactly one", f.dshgwAdmin.Created)
+	}
+	tenant := f.dshgwAdmin.Created[0]
+	if !strings.Contains(location, "tenant="+tenant) {
+		t.Fatalf("location = %q must name the tenant %q", location, tenant)
+	}
+	account, err := f.db.GetAccountByName(context.Background(), "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !account.DSHEnabled || account.DshTenant != tenant {
+		t.Fatalf("account not opted in: enabled=%v tenant=%q", account.DSHEnabled, account.DshTenant)
+	}
+	// The worker credential is minted for that tenant, exactly as the console does it.
+	if len(f.dshgwAdmin.Keys) != 1 || !strings.HasPrefix(f.dshgwAdmin.Keys[0], "sk") {
+		t.Fatalf("worker key = %v", f.dshgwAdmin.Keys)
+	}
+	// And it is audited as an enable, so the account history shows where it came from.
+	entries, err := f.db.ListAudit(context.Background(), 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := false
+	for _, entry := range entries {
+		if entry.Action == "dsh_enable" && strings.Contains(entry.ChangesJSON, tenant) {
+			enabled = true
+		}
+	}
+	if !enabled {
+		t.Fatal("the automatic enable was not audited")
+	}
+
+	// A second key of the same account finds it already enabled and provisions nothing new.
+	// It needs a different Feishu identity: one identity binds exactly one key.
+	second := f.seedSecondKey(t)
+	f.stub.identity = feishu.Identity{OpenID: "ou_bob", UnionID: "on_bob", Name: "李四"}
+	state, err = f.states.Sign(feishu.FlowBind, second, adminUser, "nonce-already")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res = f.request(t, http.MethodGet, feishuCallbackPath+"?code=c&state="+url.QueryEscape(state), "")
+	if got := res.Header.Get("Location"); !strings.Contains(got, "dsh=already") {
+		t.Fatalf("second bind location = %q, want dsh=already", got)
+	}
+	if len(f.dshgwAdmin.Created) != 1 {
+		t.Fatalf("a second tenant was provisioned: %v", f.dshgwAdmin.Created)
+	}
+}
+
+// An account an administrator explicitly disabled stays disabled: silently undoing that on an
+// unrelated binding (someone binding another key) is the kind of surprise that reads as a bug
+// later, so it is reported as declined instead.
+func TestFeishuBindDoesNotOverrideAnExplicitDisable(t *testing.T) {
+	f := newFeishuFixture(t)
+	f.api.deps.Feishu.AutoEnableDSH = true
+	key := f.seedKey(t)
+	account, err := f.db.GetAccountByName(context.Background(), "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	account.DSHEnabled = false
+	account.DshTenant = "dsh-previously"
+	if _, err := f.db.UpsertAccount(context.Background(), account); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := f.states.Sign(feishu.FlowBind, key.ID, adminUser, "nonce-declined")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := f.request(t, http.MethodGet, feishuCallbackPath+"?code=c&state="+url.QueryEscape(state), "")
+	location := res.Header.Get("Location")
+	if !strings.Contains(location, "dsh=declined") {
+		t.Fatalf("location = %q, want dsh=declined", location)
+	}
+	if len(f.dshgwAdmin.Created) != 0 || len(f.dshgwAdmin.Started) != 0 {
+		t.Fatalf("a disabled account was provisioned anyway: created=%v started=%v", f.dshgwAdmin.Created, f.dshgwAdmin.Started)
+	}
+	after, err := f.db.GetAccount(context.Background(), account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.DSHEnabled || after.DshTenant != "dsh-previously" {
+		t.Fatalf("the account was modified: enabled=%v tenant=%q", after.DSHEnabled, after.DshTenant)
+	}
+}
+
+// Provisioning can fail (the local channel is down, no free port, the template is missing).
+// The binding is about identity and stays; the failure is reported so the administrator can
+// retry from the account page with the full error in front of them.
+func TestFeishuBindSurvivesAFailedAutoEnable(t *testing.T) {
+	f := newFeishuFixture(t)
+	f.api.deps.Feishu.AutoEnableDSH = true
+	f.dshgwAdmin.FailWith = errors.New("admin channel unavailable")
+	key := f.seedKey(t)
+
+	state, err := f.states.Sign(feishu.FlowBind, key.ID, adminUser, "nonce-failed-enable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := f.request(t, http.MethodGet, feishuCallbackPath+"?code=c&state="+url.QueryEscape(state), "")
+	location := res.Header.Get("Location")
+	if !strings.Contains(location, "feishu=bound") || !strings.Contains(location, "dsh=failed") {
+		t.Fatalf("location = %q, want a bound binding with a failed enable", location)
+	}
+	bound, err := f.db.GetAPIKeyByID(context.Background(), key.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.FeishuOpenID != "ou_alice" {
+		t.Fatalf("the binding was rolled back on a provisioning failure: %+v", bound)
+	}
+	account, err := f.db.GetAccountByName(context.Background(), "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.DSHEnabled {
+		t.Fatal("a failed provisioning still marked the account enabled")
+	}
+}
+
+// The switch turns the whole automatic step off, for deployments that want binding to be
+// purely about identity.
+func TestFeishuBindAutoEnableCanBeDisabled(t *testing.T) {
+	f := newFeishuFixture(t)
+	f.api.deps.Feishu.AutoEnableDSH = false
+	key := f.seedKey(t)
+
+	state, err := f.states.Sign(feishu.FlowBind, key.ID, adminUser, "nonce-off")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := f.request(t, http.MethodGet, feishuCallbackPath+"?code=c&state="+url.QueryEscape(state), "")
+	if got := res.Header.Get("Location"); !strings.Contains(got, "dsh=off") {
+		t.Fatalf("location = %q, want dsh=off", got)
+	}
+	if len(f.dshgwAdmin.Created) != 0 {
+		t.Fatalf("provisioning ran while the switch was off: %v", f.dshgwAdmin.Created)
+	}
+}
+
+// seedSecondKey adds another key to the fixture's account.
+func (f *feishuFixture) seedSecondKey(t *testing.T) int64 {
+	t.Helper()
+	account, err := f.db.GetAccountByName(context.Background(), "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := f.db.UpsertAPIKey(context.Background(), &domain.APIKey{
+		AccountID: account.ID, Name: "bob-key", KeyPrefix: "sk-gw-feishu2", KeyHash: "hash-2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
 }

@@ -17,6 +17,12 @@ type dshgwChild struct {
 	binary     string
 	configPath string
 	config     dshgwsup.ChildConfig
+	// adminSocket is where THIS parent reaches the child's provisioning channel. It is
+	// derived here rather than left to configuration because the child gets the same value
+	// in its generated file: an operator who never sets dshgw.admin_socket would otherwise
+	// have a console whose 启用/停用 DSH buttons (and the automatic enable a Feishu binding
+	// performs) dial an empty address.
+	adminSocket string
 }
 
 // buildDshgwChild resolves, generates and validates the child's configuration.
@@ -115,7 +121,7 @@ func buildDshgwChild(cfg *config.Config, aigwExecutable string) (*dshgwChild, er
 	if err := child.Validate(); err != nil {
 		return nil, fmt.Errorf("dshgw child configuration: %w", err)
 	}
-	return &dshgwChild{binary: binary, configPath: child.Deploy.ConfigPath, config: child}, nil
+	return &dshgwChild{binary: binary, configPath: child.Deploy.ConfigPath, config: child, adminSocket: adminSocket}, nil
 }
 
 // firstNonEmpty returns the first non-empty value, for defaults that depend on

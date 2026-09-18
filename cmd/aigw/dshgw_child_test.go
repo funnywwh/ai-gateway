@@ -337,3 +337,30 @@ func TestBuildDshgwChildInjectsTheFeishuHandoff(t *testing.T) {
 		t.Fatalf("the generated configuration mentions Feishu while it is off:\n%s", rendered)
 	}
 }
+
+// The parent must dial the same socket it told the child to bind: with an unset
+// dshgw.admin_socket the console's DSH buttons (and the automatic enable a Feishu binding
+// performs) would otherwise dial an empty address and report "missing address".
+func TestBuildDshgwChildDerivesTheAdminSocketForBothSides(t *testing.T) {
+	cfg, aigwBinary := childFixture(t)
+	child, err := buildDshgwChild(cfg, aigwBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(filepath.Dir(cfg.Database.Path), "dshgw")
+	if child.config.AdminSocket != filepath.Join(stateDir, "admin.sock") {
+		t.Fatalf("child admin socket = %q", child.config.AdminSocket)
+	}
+	if child.adminSocket != child.config.AdminSocket {
+		t.Fatalf("the parent would dial %q while the child binds %q", child.adminSocket, child.config.AdminSocket)
+	}
+	// An explicit setting wins on both sides.
+	cfg.Dshgw.AdminSocket = "/run/dshgw/elsewhere.sock"
+	child, err = buildDshgwChild(cfg, aigwBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.adminSocket != "/run/dshgw/elsewhere.sock" || child.config.AdminSocket != "/run/dshgw/elsewhere.sock" {
+		t.Fatalf("explicit socket ignored: parent=%q child=%q", child.adminSocket, child.config.AdminSocket)
+	}
+}

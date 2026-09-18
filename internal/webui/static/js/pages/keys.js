@@ -188,11 +188,38 @@ const FEISHU_RESULTS = {
   error: { level: 'error', text: '绑定失败，请重试；若持续失败请查看 aigw 日志' },
 };
 
+// feishuDSHMessage explains what happened to the account's DSH state during a binding. The
+// binding itself is about identity; this is the part that decides whether the person can sign
+// in yet, so it has to be said out loud rather than left to the account page.
+function feishuDSHMessage(params) {
+  const state = params.get('dsh');
+  if (!state) return null;
+  const tenant = params.get('tenant') || '';
+  const reason = params.get('dsh_reason') || '';
+  switch (state) {
+    case 'enabled':
+      return { level: 'ok', text: '已自动启用该账号的 DSH（租户 ' + (tenant || '?') + '），现在即可用飞书登录' };
+    case 'already':
+      return { level: 'ok', text: '该账号此前已启用 DSH' + (tenant ? '（租户 ' + tenant + '）' : '') };
+    case 'declined':
+      return { level: 'error', text: '该账号曾被显式停用 DSH，因此未自动启用；如需登录请在账户页手动启用' };
+    case 'failed':
+      return { level: 'error', text: '自动启用 DSH 失败' + (reason ? '：' + reason : '') + '；绑定已保存，请在账户页重试启用' };
+    case 'off':
+      return null; // the deployment turned the automatic step off: nothing to report
+    default:
+      return { level: 'error', text: '未知的 DSH 启用结果：' + state };
+  }
+}
+
 function reportFeishuResult(route, navigate, reload) {
-  const result = route && route.params ? route.params.get('feishu') : null;
+  const params = route && route.params ? route.params : null;
+  const result = params ? params.get('feishu') : null;
   if (!result) return;
   const known = FEISHU_RESULTS[result];
   toast(known ? known.text : '飞书操作返回了未知结果：' + result, known ? known.level : 'error');
+  const dsh = params ? feishuDSHMessage(params) : null;
+  if (dsh) toast(dsh.text, dsh.level);
   // The parameter is dropped immediately: this message describes something that already
   // happened, and it must not reappear on every refresh or back navigation.
   if (typeof navigate === 'function') navigate('/keys');

@@ -514,13 +514,31 @@ func (s *Server) handleAdminSetAccountDSH(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) enableAccountDSH(w http.ResponseWriter, r *http.Request, actor *domain.AdminUser, store AccountAdmin, keys AdminStore, a *domain.Account, requested *string) {
-	if s.deps.DshgwAdmin == nil {
-		writeAPIError(w, domain.ErrInternal("dshgw provisioning channel is not configured"))
+	tenant, err := s.provisionAccountDSH(r.Context(), actor.Username, store, keys, a, requested)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account_id": a.ID, "name": a.Name, "enabled": true, "tenant": tenant,
+		"changed": true,
+	})
+}
+
+// provisionAccountDSH turns one account into a working dsh tenant: it mints the worker
+// credential, creates or restarts the tenant on the gateway, and records the mapping.
+//
+// It is separated from the HTTP handler because two features need the same steps — the
+// console's 启用 DSH button and the automatic enable that a Feishu binding performs — and a
+// second implementation would eventually disagree with the first about tenant naming,
+// uniqueness, or what a re-enable does. It returns the tenant name and reports failures as
+// errors instead of writing a response.
+func (s *Server) provisionAccountDSH(ctx context.Context, actor string, store AccountAdmin, keys AdminStore, a *domain.Account, requested *string) (string, error) {
+	if s.deps.DshgwAdmin == nil {
+		return "", domain.ErrInternal("dshgw provisioning channel is not configured")
+	}
 	if a.Status != "active" {
-		writeAPIError(w, domain.ErrInvalidRequest("suspended or closed accounts cannot enable dsh"))
-		return
+		return "", domain.ErrInvalidRequest("suspended or closed accounts cannot enable dsh")
 	}
 	tenant := a.DshTenant
 	if requested != nil && strings.TrimSpace(*requested) != "" {
@@ -530,16 +548,14 @@ func (s *Server) enableAccountDSH(w http.ResponseWriter, r *http.Request, actor 
 		tenant = dshTenantSlug(a.Name)
 	}
 	if !dshTenantNameRE.MatchString(tenant) {
-		writeAPIError(w, domain.ErrInvalidRequest(`tenant name must match [a-z][a-z0-9-]{0,25}[a-z]`))
-		return
+		return "", domain.ErrInvalidRequest(`tenant name must match [a-z][a-z0-9-]{0,25}[a-z]`)
 	}
 	// One tenant serves exactly one account: refuse names that another account already
 	// claims, and names a manual dshgw tenant occupies (that would silently put this
 	// account's keys into someone else's workspace).
-	existing, err := s.deps.DshgwAdmin.ListTenants(r.Context())
+	existing, err := s.deps.DshgwAdmin.ListTenants(ctx)
 	if err != nil {
-		writeAPIError(w, toAPIError(err))
-		return
+		return "", toAPIError(err)
 	}
 	existsInDshgw := false
 	for _, info := range existing {
@@ -548,11 +564,10 @@ func (s *Server) enableAccountDSH(w http.ResponseWriter, r *http.Request, actor 
 			break
 		}
 	}
-	if claims, err := store.ListAccounts(r.Context()); err == nil {
+	if claims, err := store.ListAccounts(ctx); err == nil {
 		for _, other := range claims {
 			if other.ID != a.ID && other.DshTenant == tenant {
-				writeAPIError(w, domain.ErrInvalidRequest("tenant name is already used by another account"))
-				return
+				return "", domain.ErrInvalidRequest("tenant name is already used by another account")
 			}
 		}
 	}
@@ -576,42 +591,34 @@ func (s *Server) enableAccountDSH(w http.ResponseWriter, r *http.Request, actor 
 			}
 		}
 	}
-	key, err := s.mintDshgwKey(r.Context(), keys, a.ID, tenant, actor.Username)
+	key, err := s.mintDshgwKey(ctx, keys, a.ID, tenant, actor)
 	if err != nil {
-		writeAPIError(w, toAPIError(err))
-		return
+		return "", toAPIError(err)
 	}
 	if existsInDshgw {
 		// Re-enable (or retry after a half-finished enable): rotate the worker credential
 		// to a fresh key and bring the stopped worker back.
-		if err := s.deps.DshgwAdmin.SetTenantKey(r.Context(), tenant, key); err != nil {
-			writeAPIError(w, toAPIError(err))
-			return
+		if err := s.deps.DshgwAdmin.SetTenantKey(ctx, tenant, key); err != nil {
+			return "", toAPIError(err)
 		}
-		if err := s.deps.DshgwAdmin.StartTenant(r.Context(), tenant); err != nil {
-			writeAPIError(w, toAPIError(err))
-			return
+		if err := s.deps.DshgwAdmin.StartTenant(ctx, tenant); err != nil {
+			return "", toAPIError(err)
 		}
-	} else if err := s.deps.DshgwAdmin.CreateTenant(r.Context(), tenant, key); err != nil {
-		writeAPIError(w, toAPIError(err))
-		return
+	} else if err := s.deps.DshgwAdmin.CreateTenant(ctx, tenant, key); err != nil {
+		return "", toAPIError(err)
 	}
 	a.DshTenant = tenant
 	a.DSHEnabled = true
-	if _, err := store.UpsertAccount(r.Context(), a); err != nil {
-		writeAPIError(w, toAPIError(err))
-		return
+	if _, err := store.UpsertAccount(ctx, a); err != nil {
+		return "", toAPIError(err)
 	}
-	s.audit(r.Context(), actor.Username, "dsh_enable", "account", strconv.FormatInt(a.ID, 10),
+	s.audit(ctx, actor, "dsh_enable", "account", strconv.FormatInt(a.ID, 10),
 		map[string]any{"enabled": true, "tenant": tenant}, "ok")
 	// The key verifier caches the account row, so a stale cache would keep admitting
 	// (or refusing) dshgw logins for up to one verifier TTL. Account writes follow
 	// the same invalidate-everything rule the PATCH handler uses.
-	s.reload(r.Context(), "account dsh flag updated", true)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"account_id": a.ID, "name": a.Name, "enabled": true, "tenant": tenant,
-		"changed": true,
-	})
+	s.reload(ctx, "account dsh flag updated", true)
+	return tenant, nil
 }
 
 func (s *Server) disableAccountDSH(w http.ResponseWriter, r *http.Request, actor *domain.AdminUser, store AccountAdmin, keys AdminStore, a *domain.Account) {

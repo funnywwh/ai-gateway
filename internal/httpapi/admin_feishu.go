@@ -40,6 +40,11 @@ type FeishuDeps struct {
 	DSHLogin  bool
 	PortalURL string
 	LoginURL  string
+	// AutoEnableDSH makes a successful binding also opt the key's account in to DSH, so the
+	// person can log in immediately instead of waiting for an administrator to press 启用
+	// DSH as a second step. See autoEnableDSHForBinding for what it deliberately refuses to
+	// do.
+	AutoEnableDSH bool
 }
 
 // feishuNoStore marks a Feishu handoff uncacheable. The responses here either redirect the
@@ -244,7 +249,72 @@ func (s *Server) finishFeishuBind(w http.ResponseWriter, r *http.Request, state 
 		"open_id": identity.OpenID, "union_id": identity.UnionID, "name": identity.Name,
 		"previous_open_id": previous,
 	}, "ok")
-	s.redirectConsole(w, r, result, key.ID)
+	// A binding means "this person should be able to get in", so the account is opted in to
+	// DSH here rather than leaving a second step to remember. A failure to provision is
+	// reported to the console but does not undo the binding: who this person is and whether
+	// their tenant is running are two different facts, and only the second one is retryable.
+	dsh := s.autoEnableDSHForBinding(ctx, state.Actor, key)
+	s.redirectConsole(w, r, result, key.ID, dsh)
+}
+
+// dshBindingOutcome is what the console tells the administrator about the account's DSH state
+// after a binding: the identity is written either way, so this only says whether the person
+// can sign in yet.
+type dshBindingOutcome struct {
+	// State is one of "enabled", "already", "declined", "failed", "off".
+	State  string
+	Tenant string
+	// Reason is a short, non-secret explanation for "declined" and "failed".
+	Reason string
+}
+
+// autoEnableDSHForBinding opts the key's account in to DSH when it has never been enabled.
+//
+// It deliberately does NOT touch an account that was enabled and then explicitly disabled
+// (a dsh_tenant with dsh_enabled false): an administrator pressed 停用 for a reason, and
+// silently undoing that on an unrelated binding — someone binding a second key, say — is the
+// kind of surprise that later reads as a bug. That case is reported as "declined" so the
+// console can say exactly what to do.
+func (s *Server) autoEnableDSHForBinding(ctx context.Context, actor string, key *domain.APIKey) dshBindingOutcome {
+	if s.deps.Feishu == nil || !s.deps.Feishu.AutoEnableDSH {
+		return dshBindingOutcome{State: "off"}
+	}
+	account, err := s.deps.AdminStore.GetAccount(ctx, key.AccountID)
+	if err != nil {
+		s.deps.Log.Warn("loading the account of a bound key failed", "err", err, "account", key.AccountID)
+		return dshBindingOutcome{State: "failed", Reason: "账号信息读取失败"}
+	}
+	if account.DSHEnabled {
+		return dshBindingOutcome{State: "already", Tenant: account.DshTenant}
+	}
+	if strings.TrimSpace(account.DshTenant) != "" {
+		return dshBindingOutcome{State: "declined", Tenant: account.DshTenant, Reason: "该账号此前被显式停用"}
+	}
+	if s.deps.DshgwAdmin == nil {
+		return dshBindingOutcome{State: "failed", Reason: "本机 dshgw provisioning 通道未配置"}
+	}
+	accounts, ok := s.deps.Accounts.(AccountAdmin)
+	if !ok || accounts == nil {
+		return dshBindingOutcome{State: "failed", Reason: "账户接口不可用"}
+	}
+	tenant, err := s.provisionAccountDSH(ctx, actor, accounts, s.deps.AdminStore, account, nil)
+	if err != nil {
+		s.deps.Log.Warn("enabling dsh for a bound key failed", "err", err, "account", account.ID)
+		// The reason is truncated: this string travels in a URL and is shown to a person,
+		// while the full error is in the log.
+		return dshBindingOutcome{State: "failed", Reason: truncateReason(err.Error())}
+	}
+	return dshBindingOutcome{State: "enabled", Tenant: tenant}
+}
+
+// truncateReason keeps a failure explanation short enough for a redirect while staying
+// recognisable; the full text is always in the log.
+func truncateReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if len([]rune(reason)) <= 120 {
+		return reason
+	}
+	return string([]rune(reason)[:117]) + "…"
 }
 
 // finishFeishuLogin resolves the identity to an account that may use the DSH gateway and
@@ -531,10 +601,19 @@ func (s *Server) feishuSecureCookie() bool {
 // redirectConsole returns the administrator to the API keys page with a result the page
 // turns into a message. It is a relative redirect, so it keeps whichever origin the
 // administrator is actually using (a port, a front proxy, a path prefix).
-func (s *Server) redirectConsole(w http.ResponseWriter, r *http.Request, result string, keyID int64) {
+func (s *Server) redirectConsole(w http.ResponseWriter, r *http.Request, result string, keyID int64, dsh ...dshBindingOutcome) {
 	target := s.url("/admin/ui/#/keys?feishu=" + url.QueryEscape(result))
 	if keyID > 0 {
 		target += "&key=" + strconv.FormatInt(keyID, 10)
+	}
+	if len(dsh) > 0 && dsh[0].State != "" {
+		target += "&dsh=" + url.QueryEscape(dsh[0].State)
+		if dsh[0].Tenant != "" {
+			target += "&tenant=" + url.QueryEscape(dsh[0].Tenant)
+		}
+		if dsh[0].Reason != "" {
+			target += "&dsh_reason=" + url.QueryEscape(dsh[0].Reason)
+		}
 	}
 	http.Redirect(w, r, target, http.StatusSeeOther)
 }

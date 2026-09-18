@@ -95,7 +95,7 @@ func TestFeishuRejectsBadValues(t *testing.T) {
 			c.Dshgw.PortalPort = 0
 		},
 		"portal not owned and not stated": func(c *Config) { c.Dshgw.Enabled = false },
-		"portal url relative": func(c *Config) { c.Feishu.PortalURL = "portal/" },
+		"portal url relative":             func(c *Config) { c.Feishu.PortalURL = "portal/" },
 	}
 	for name, mutate := range cases {
 		cfg := feishuFixture()

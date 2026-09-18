@@ -3837,3 +3837,22 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 而仓库已到 1.3.0；0.12.3 → 1.3.0 之间包含 M51/M52/M57/M58 的部署形态变更（root/systemd/nginx 生命周期被删、
 `dshgw.*` 与 `feishu.*` 等配置面新增、`/opt/dsh` 运行时与 admin socket 约定），**需要一次带配置与数据迁移的
 独立部署步骤**，不能只换二进制。用户未要求改 gpt001，故本次保持其现状并在此记录差异。
+
+## M62 完成记录（绑定飞书即自动启用 DSH）
+
+设计：`docs/design/m62-feishu-auto-enable-dsh.md`（§6 差异已回填）；规格：`docs/feishu.md`。
+
+- [x] 抽出 `provisionAccountDSH`（租户命名/去重、铸造 worker Key、建或重启租户、写映射、审计、缓存失效），
+      控制台「启用 DSH」按钮与飞书绑定回调共用同一条路径——两份实现迟早会在细节上分歧
+- [x] 绑定回调新增 `autoEnableDSHForBinding`：`enabled`（从未启用→自动启用并返回租户名）/`already`/
+      `declined`（**曾被显式停用则不启用**，避免静默撤销管理员的停用）/`failed`（供应失败但**绑定保留**，
+      原因随回调返回、完整错误进日志）/`off`（开关或 `dsh_login` 关闭）
+- [x] 配置 `feishu.auto_enable_dsh`（默认 true，仅在 `dsh_login` 为 true 时生效）+ 示例配置
+- [x] 控制台：回调新增 `dsh`/`tenant`/`dsh_reason` 参数，分别提示身份结果与 DSH 结果（`off` 不提示）
+- [x] **顺带修掉被本功能暴露的既有缺陷**：监督形态下 aigw 自己不知道子进程 admin socket 的位置
+      （子配置推导出 `<state_dir>/admin.sock`，aigw 侧 `dshgw.admin_socket` 为空），因此控制台的
+      「启用/停用 DSH」按钮在监督形态下一直拨的是一个空地址。现在 `dshgwChild` 带出 `adminSocket`，
+      `cmd/aigw` 优先用它、否则回退配置值，两侧由构造保证一致，并有单测钉住
+- [x] 测试：httpapi 五个结果各一条（含"曾停用不覆盖"与"供应失败不回滚绑定"）、控制台 node 用例、
+      cmd/aigw 的 socket 派生；端到端 47 步全绿——并且**删掉了脚本里原先直接写 `dsh_enabled` 的 SQL**，
+      因为绑定自己完成供应正是本里程碑要证明的事

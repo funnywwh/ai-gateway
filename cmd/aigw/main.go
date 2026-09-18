@@ -63,6 +63,14 @@ var (
 	uiEncoding = "identity"
 )
 
+// dshgwAdminSocket resolves the provisioning socket aigw should dial.
+func dshgwAdminSocket(cfg *config.Config, child *dshgwChild) string {
+	if child != nil && child.adminSocket != "" {
+		return child.adminSocket
+	}
+	return cfg.Dshgw.AdminSocket
+}
+
 func main() { os.Exit(run()) }
 
 // versionLine renders the build identity as one line. scripts/release.sh copies this
@@ -571,10 +579,13 @@ func run() int {
 				verifier.Invalidate(prefix)
 			}
 		},
-		InvalidateAll:  verifier.InvalidateAll,
-		KeyCacheSize:   verifier.Size,
-		UI:             webui.Handler(),
-		DshgwAdmin:     &localdshgw.Client{SocketPath: cfg.Dshgw.AdminSocket, Timeout: 5 * time.Minute},
+		InvalidateAll: verifier.InvalidateAll,
+		KeyCacheSize:  verifier.Size,
+		UI:            webui.Handler(),
+		// The socket path comes from the child description when aigw supervises dshgw (that is
+		// the path the child was told to bind) and from configuration otherwise — the
+		// standalone shape, where the operator's own dshgw owns the socket.
+		DshgwAdmin:     &localdshgw.Client{SocketPath: dshgwAdminSocket(cfg, child), Timeout: 5 * time.Minute},
 		Billing:        billingService,
 		Ledger:         billingService,
 		Invoices:       billingService,
