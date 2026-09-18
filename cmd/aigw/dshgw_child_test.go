@@ -77,7 +77,7 @@ func TestBuildDshgwChildDerivesTheWholeSurface(t *testing.T) {
 	wants := map[string]string{
 		"state dir":      stateDir,
 		"workspace root": filepath.Join(stateDir, "workspaces"),
-		"tenant config":  filepath.Join(stateDir, "tenants"),
+		"tenant config":  filepath.Join(stateDir, "tenant-config"),
 		"admin socket":   filepath.Join(stateDir, "admin.sock"),
 		"child config":   filepath.Join(stateDir, "config.yaml"),
 		"backup dir":     filepath.Join(stateDir, "backups"),

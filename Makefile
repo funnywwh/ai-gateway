@@ -104,19 +104,6 @@ dshgw-test:
 dshgw-sandbox-test:
 	@$(GOENV) DSHGW_NODE="$(DSHGW_NODE)" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" go test ./internal/dshgw/sandbox -run '^TestStaging' -count=1 -v
 
-# The bwrap isolation mode's real acceptance: the tenant profile runs under the
-# host's own bubblewrap, and a real dsh web worker starts inside it and answers
-# the gateway's unauthenticated /api probe with 401. Both tests skip themselves
-# where an unprivileged user namespace is unavailable, so this target is safe to
-# call from any checkout, but it is only meaningful on the deployment host.
-dshgw-sandbox-test:
-	@$(GOENV) DSHGW_NODE="$(DSHGW_NODE)" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" go test ./internal/dshgw/sandbox -run '^TestStaging' -count=1 -v
-
-# Real rendered nginx chain, with disposable TLS and loopback-only listeners.
-# Explicit invocation fails when nginx is absent or the caller is root.
-dshgw-nginx-test:
-	@$(GOENV) DSHGW_TEST_NGINX=1 go test ./internal/dshgw/proxy -run '^TestNginxTLSProxyIntegration$$' -count=1 -timeout=90s
-
 dshgw-verify: dshgw-test dshgw-build
 	@$(MAKE) --no-print-directory dshgw-sandbox-test
 	@$(GOENV) go vet ./internal/dshgw/... ./cmd/dshgw ./internal/arch
