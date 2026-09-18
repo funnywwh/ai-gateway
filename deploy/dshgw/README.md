@@ -257,7 +257,45 @@ sudo scripts/migrate_dshgw_to_supervised.sh --rollback ...        # 做
 计划本身有自动化测试（`scripts/test_dshgw_migration_plan.py`，跑在 `make dshgw-test` 里）：
 它用一份合成的旧部署夹具断言"apply/rollback 的每一项关键步骤都出现在计划里，且 dry-run 不执行任何命令"。
 
-## 9. 安全边界（必读）
+## 9. 可选：单域名 + 路径前缀的入口反代（`gwproxy`）
+
+不想为每个租户开一个端口时，用 `bin/gwproxy` 把三个服务收进**一个域名、一个端口、一张证书**：
+
+```bash
+make gwproxy-build                       # 产出 bin/gwproxy
+bin/gwproxy --config deploy/dshgw/frontproxy.example.yaml
+```
+
+| 路径 | 去向 | 说明 |
+|---|---|---|
+| `/aigw/*` | aigw | **前缀原样转发**：aigw 的 `server.base_path: /aigw` 自己服务前缀，cookie Path 与控制台 URL 自动一致 |
+| `/dshgw/*` | dshgw 门户 | 剥前缀，并按 `portal_port` 补上 Host 与 edge 头（dshgw 两者都校验） |
+| `/t/<tenant>/*` | 该租户的 dsh | 剥 `/t/<tenant>`，按 registry 里的该租户公开端口补 Host 与 edge 头；**会话、账号 DSH 开关、worker 握手仍由 dshgw 负责**，反代不重复实现 |
+| `/` | → `/dshgw/` | 门户是前门 |
+| `/healthz` | 反代自身 | 探针 |
+
+反代只做路由、TLS 与头清洗：Host 不匹配 `public_host` 直接 404；未知租户 404；上游不可达 502；
+租户列表每 `registry_reload` 从 dshgw 的 registry.json 重读，所以控制台新建的租户无需重启反代即可访问。
+
+### 9.1 dsh 的路径前缀：为什么不改 dsh 也能行
+
+`dsh web` 只提供 `--host/--port/--trusted-host/--no-open`，**没有 base-path 选项**。实测它的 shell：
+资源引用是**相对路径**（`./assets/…`），两个 JS bundle 里**没有硬编码 `/api`**（端点由 `import.meta.url`/`baseUrl`
+推导），只有 HTML 里少数**根绝对引用**（`/plugins/??…` 插件 bundle、`href="/"`）。
+
+因此反代只对 `text/html` 做一处很窄的改写：把**标签内**以 `/` 开头的 `href/src/action` 值加上租户前缀。
+正文、注释、相对路径、协议相对 URL（`//host/x`）与已经带前缀的值都不动；`application/json` 等一律不碰。
+实现是"走标签"而不是整串替换，所以正文里恰好出现的 `href="/"` 也不会被改（有测试钉住这两个边界）。
+
+**关于 iframe**（有人会想到的更"省事"的办法）：同源 iframe 解决不了这个问题 —— iframe 里的文档仍然用
+**顶层 origin 的根**解析绝对路径，`/api`、`/plugins/…` 还是会打到 `https://<域名>/api`。iframe 只有在
+**跨 origin** 时才有用（例如 `<iframe src="https://<tenant>.chat.example/">`），那时应用自己就是那个 origin 的根，
+不需要任何改写 —— 代价是需要通配子域证书，且 dshgw 的会话 cookie 得带上 `Domain=.chat.example` 才能进入 iframe。
+两条路都可行：**同域名 + 路径前缀**用上面的窄改写（零 dsh 改动）；**子域 + iframe** 则完全零改写但要动 DNS 与证书。
+
+当前反代走的是前者。如果你更想要子域方案，告诉我，我可以加一个 `tenant_host_suffix` 模式。
+
+## 10. 安全边界（必读）
 
 - **没有 UID 边界**：所有租户 worker 与 aigw 同 UID；隔离来自 bubblewrap mount namespace
   （空 tmpfs 根 + 逐路径绑定 + 只读运行时 + 0700 权限位）与宿主 AppArmor 对嵌套 namespace 的限制。

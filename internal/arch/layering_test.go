@@ -96,6 +96,10 @@ var allowed = map[string][]string{
 	// package deliberately imports no aigw internals, so the coupling stays
 	// "one executable starts another" instead of "one program reaches into another".
 	"internal/dshgwsup": nil,
+	// M58: the optional single-domain front proxy. It is a thin edge on purpose —
+	// routing, header hygiene and TLS — so it depends on nothing but the standard
+	// library and YAML, and never on the services it fronts.
+	"internal/frontproxy": nil,
 }
 
 // forbiddenByRule names the checks that exist because a specific refactor made them true.

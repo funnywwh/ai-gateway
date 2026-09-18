@@ -1,0 +1,31 @@
+# gwproxy：单域名 + 路径前缀的入口反代（可选）
+#
+# 一个公网端口、一张证书、一条防火墙规则，三个服务用路径区分：
+#   /aigw/*           → aigw（前缀原样转发：aigw 自己的 server.base_path 服务它，
+#                        因此它的 cookie Path、重定向与控制台 URL 都自带前缀）
+#   /dshgw/*          → dshgw 门户（剥前缀，并补上 dshgw 路由所需的 Host 与 edge 头）
+#   /t/<tenant>/*     → 该租户的 dsh（剥 /t/<tenant>，同样补 Host 与 edge 头；
+#                        会话、账号开关、worker 握手仍由 dshgw 负责，不重复实现）
+#   /                 → 302 到门户
+#   /healthz          → 反代自身的健康检查
+listen: 127.0.0.1:8443          # 公开监听；对外请在防火墙只放这一个端口
+public_host: chat.tirisen.hk    # 唯一域名；Host 不匹配的请求直接 404
+# 配了证书就是 HTTPS，留空是明文（仅限可信网络）
+# tls:
+#   certificate: /path/fullchain.pem
+#   certificate_key: /path/privkey.pem
+aigw_prefix: /aigw
+aigw_upstream: http://127.0.0.1:8088
+portal_prefix: /dshgw
+portal_upstream: http://127.0.0.1:18099   # dshgw.Listen
+portal_port: 18100                        # dshgw.PortalPort（Host 与 edge 头由它派生）
+tenant_prefix: /t
+tenant_upstream: http://127.0.0.1:18099   # dshgw.Listen（按 edge 头分租户）
+registry_path: /home/winger/.local/share/dshgw/registry.json  # 读租户→公开端口映射
+registry_reload: 2s
+upstream_timeout: 300s
+# dsh 没有 base-path 选项，因此反代对它的 HTML 做一处**很窄**的改写：
+# 只把标签内以 / 开头的 href/src/action 值加上租户前缀（正文、相对路径、
+# 协议相对 URL 与已带前缀的值都不动）。dsh 的资源本来就是相对路径，两个 JS
+# bundle 里也没有硬编码 /api，所以这一处就够了。
+rewrite_tenant_html: true

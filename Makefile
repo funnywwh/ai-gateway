@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) -X main.revision=$(REVISION) -X main.date=
 UIDIST ?= $(CURDIR)/.cache/ui-dist
 UI_OVERLAY ?= $(UIDIST)/overlay.json
 
-.PHONY: all build build-src ui-dist test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check dshgw-build dshgw-test dshgw-verify dshgw-sandbox-test dshgw-supervised-test
+.PHONY: all build build-src ui-dist test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check dshgw-build gwproxy-build dshgw-test dshgw-verify dshgw-sandbox-test dshgw-supervised-test
 
 all: build
 
@@ -86,6 +86,11 @@ tidy:
 # not prerequisites of the existing aigw verify/release path.
 DSHGW_NODE ?= /home/winger/.local/node-v22.23.1-linux-x64/bin/node
 DSHGW_DSH_ROOT ?= /home/winger/.local/dsh-0.1.2-rc.1
+
+# The optional single-domain front proxy (bin/gwproxy): one listener, path prefixes.
+gwproxy-build: version-check
+	@mkdir -p bin
+	@$(GOENV) go build -trimpath -ldflags "$(LDFLAGS)" -o bin/gwproxy ./cmd/gwproxy
 
 dshgw-build: version-check
 	@mkdir -p bin
