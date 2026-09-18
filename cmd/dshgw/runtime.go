@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"github.com/winger/ai-gateway/internal/dshgw/activity"
 	"github.com/winger/ai-gateway/internal/dshgw/aigw"
+	"github.com/winger/ai-gateway/internal/dshgw/audit"
 	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
 	"github.com/winger/ai-gateway/internal/dshgw/securefile"
 	"github.com/winger/ai-gateway/internal/dshgw/session"
+	"github.com/winger/ai-gateway/internal/dshgw/sshworkspace"
 	"github.com/winger/ai-gateway/internal/dshgw/tenancy"
 	"io"
+	"log/slog"
 	"net/http"
 	"os/exec"
 	"path/filepath"
@@ -47,7 +50,51 @@ func (c *cli) loadRuntime(withSessions bool) (*runtimeDeps, error) {
 	// worker starts, so dsh is configured from current grants rather than from
 	// whenever `sync-models` was last run by hand.
 	manager.ModelRefresh = modelRefreshHook(cfg, client, manager, nil)
+	// M64: the same hook every process path needs. A tenant is removed by a *CLI* invocation
+	// as often as from the serving process, and a mount is kernel state: without this hook
+	// such a removal purges the workspace while the mount is still attached, which fails with
+	// a bare EBUSY (and, worse, would walk through a live mount if it did not). Constructing
+	// the service here — a pure struct, no listeners, no polling — keeps both paths honest;
+	// `serve` additionally fails hard when sshfs is missing, while a CLI command that has
+	// nothing to do with ssh only warns.
+	ssh, err := sshWorkspaceService(cfg, manager, nil)
+	if err != nil {
+		return nil, err
+	}
+	manager.SSHWorkspaces = ssh
 	return &runtimeDeps{cfg: cfg, reg: reg, validator: client, manager: manager}, nil
+}
+
+// sshWorkspaceService builds the M64 service when the feature is configured, or returns a nil
+// hook when it is not. The restart callback is the manager's own restart so a new mount can
+// become visible inside the account's sandbox (its profile binds mount points at worker start).
+func sshWorkspaceService(cfg *config.Config, manager *tenancy.Manager, logger *slog.Logger) (tenancy.SSHWorkspaceHook, error) {
+	if !cfg.SSHWorkspaces.Enabled {
+		return nil, nil
+	}
+	restart := func(ctx context.Context, tenant string) error {
+		current, ok := manager.Registry.Get(tenant)
+		if !ok {
+			return fmt.Errorf("unknown tenant %s", tenant)
+		}
+		return manager.Restart(ctx, current)
+	}
+	service, err := sshworkspace.New(sshworkspace.Options{
+		MountSubdir:     cfg.SSHWorkspaces.MountSubdir,
+		SSHBin:          cfg.SSHWorkspaces.SSHBin,
+		SSHFSBin:        cfg.SSHWorkspaces.SSHFSBin,
+		IdentitySource:  cfg.SSHWorkspaces.IdentitySource,
+		IdentityDir:     cfg.SSHWorkspaces.IdentityDir,
+		SSHConfigSource: cfg.SSHWorkspaces.SSHConfigSource,
+		Hosts:           cfg.SSHWorkspaces.Hosts,
+		ConnectTimeout:  cfg.SSHWorkspaces.ConnectTimeout.Duration(),
+		MaxEntries:      cfg.SSHWorkspaces.MaxEntries,
+		SSHFSOptions:    cfg.SSHWorkspaces.SSHFSOptions,
+	}, sshworkspace.NewStore(filepath.Join(cfg.StateDir, "ssh-mounts.json")), restart, &audit.JSONL{Path: cfg.AuditPath}, logger)
+	if err != nil {
+		return nil, fmt.Errorf("ssh workspaces: %w", err)
+	}
+	return service, nil
 }
 func readKey(input io.Reader, keyFile string) (string, error) {
 	var data []byte

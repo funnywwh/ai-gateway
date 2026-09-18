@@ -230,7 +230,9 @@ export function apply(ctx, rawConfig) {
     args.push('-F', sshConfigPath)
     args.push('-i', sshKeyPath)
     args.push('-o', `ConnectTimeout=${Math.ceil(config.connectTimeoutMs / 1000)}`)
-    return [...args, '--', host, 'sh', '-c', script]
+    // ssh joins these with spaces and the remote shell parses the result again, so the script
+    // must arrive as one quoted word (the gateway's own ssh calls do the same).
+    return [...args, '--', host, 'sh', '-c', shellQuote(script)]
   }
 
   const permits = (host) => {
@@ -346,9 +348,11 @@ export function apply(ctx, rawConfig) {
       let truncated = false
       for (const line of output.split('\n')) {
         const raw = line.replace(/\r$/, '')
-        if (raw === '' || raw === '.' || raw === '..' || !raw.endsWith('/')) continue
+        if (!raw.endsWith('/')) continue
+        // The directory marker comes off before the pseudo-entries are recognised: `ls -1ap`
+        // prints "./" and "../" with the same trailing slash as every real directory.
         const name = raw.slice(0, -1)
-        if (name === '') continue
+        if (name === '' || name === '.' || name === '..') continue
         if (entries.length >= config.maxEntries) {
           truncated = true
           break

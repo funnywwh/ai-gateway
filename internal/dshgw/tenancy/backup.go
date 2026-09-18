@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/winger/ai-gateway/internal/dshgw/config"
@@ -378,13 +380,44 @@ func (m *Manager) removeLocked(ctx context.Context, t registry.Tenant, purge boo
 		}
 	}
 	if purge {
-		for _, path := range []string{filepath.Dir(t.DshHome), t.Workspace, filepath.Join(m.Config.Deploy.TenantConfigRoot, t.Name), filepath.Join(m.Config.HandshakeDir, t.Name+".url")} {
-			if removeErr := os.RemoveAll(path); removeErr != nil {
-				return snapshot, removeErr
-			}
+		paths := []string{filepath.Dir(t.DshHome), t.Workspace, filepath.Join(m.Config.Deploy.TenantConfigRoot, t.Name), filepath.Join(m.Config.HandshakeDir, t.Name+".url")}
+		if err = purgeTrees(m.Logger, t.Name, paths); err != nil {
+			return snapshot, err
 		}
 	}
 	return snapshot, nil
+}
+
+// purgeTrees removes every tree of one account, retrying the whole set while the kernel is
+// still refusing a path inside it.
+//
+// M64 put sshfs mounts under a tenant workspace, and a mount lives in the mount namespace of
+// the sandbox that bound it: stopping a worker tears that namespace down asynchronously, and
+// until it is gone the kernel answers EBUSY for the mount point even though the gateway has
+// already detached its own mount. The retry covers the whole set rather than one path,
+// because RemoveAll stops at the first error — retrying a single path would abandon the
+// siblings that had not been reached yet, which for a purge means claiming to delete data
+// that is still there.
+func purgeTrees(logger *slog.Logger, tenant string, paths []string) error {
+	deadline := time.Now().Add(30 * time.Second)
+	for attempt := 1; ; attempt++ {
+		var err error
+		for _, path := range paths {
+			if err = os.RemoveAll(path); err != nil {
+				break
+			}
+		}
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, syscall.EBUSY) || time.Now().After(deadline) {
+			return err
+		}
+		if logger != nil {
+			logger.Warn("waiting for a mount to be released before purging", "tenant", tenant, "attempt", attempt, "err", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 func safeArchivePath(name string) bool {

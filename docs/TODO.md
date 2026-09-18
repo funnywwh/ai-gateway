@@ -609,19 +609,14 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 
 ## M64 aigw 账号的 SSH 工作区（远端目录 → 挂载 → 该账号 DSH 里的工作区）
 
-设计：`docs/design/m64-ssh-workspace.md`（§3 是阶段 0 的实测证据，§13 是差异回填）；
-规格：`docs/dshgw.md` §7b。实现与单测完成的条目见 `docs/todo_done.md` 同名小节，下面只列未完成项。
+设计：`docs/design/m64-ssh-workspace.md`（§3 阶段 0 实测、§13 差异、§14 真机验收与它抓到的四个缺陷）；
+规格：`docs/dshgw.md` §7b。已完成的条目见 `docs/todo_done.md` 同名小节，下面只列未完成项。
 
-- [ ] **前置（需操作者执行）**：宿主装 `sshfs`（`sudo apt install -y sshfs`）。装好后
-      `go test ./internal/dshgw/sshworkspace -run Integration -v` 才会真正跑起来（现在自我跳过）
-- [ ] **真机集成验收**：在上述前置完成后跑该集成测试（loopback 挂载 → `fuse.sshfs` 出现在挂载表 →
-      经挂载读写落到远端 → 幂等重开 → 卸载无残留），并记录结果
-- [ ] **监督形态验收（`aigw-local.service`）**：在 aigw 的 `dshgw.ssh_workspaces` 里启用 →
-      `systemctl --user restart aigw-local.service` → 建/取一个测试账号 → 经门户进该账号 dsh →
-      侧栏「SSH 工作区」→ 建远端目录 → 挂载并打开 → 会话里写文件 → 远端 `cat` 复核 →
-      账号 B 的 dsh 里看不到该挂载点
-- [ ] **跨账号断言（真机）**：用账号 B 的沙箱确认 `<A 的 workspace>/ssh/**` 不存在；
-      并确认 `sshfs` 挂载参数里没有 `allow_other`（两账号同 UID，共享挂载即跨账号可读）
-- [ ] **`sshfs` 缺失时的启动拒绝（真机）**：把 `sshfs_bin` 指到一个不存在的路径，确认 dshgw
-      **拒绝启动**并报出该配置键（不静默降级）
+- [ ] **监督形态真机验收（`aigw-local.service` + 门户）**：在 aigw 的 `dshgw.ssh_workspaces` 里启用 →
+      `systemctl --user restart aigw-local.service` → 经门户进某个账号的 dsh → 侧栏「SSH 工作区」→
+      浏览/新建远端目录 → 挂载并打开 → 会话里写文件 → 远端 `cat` 复核（浏览器动作需人工）
+- [ ] **跨账号不可见（真机断言）**：账号 A 挂载后，账号 B 的沙箱里 `<A 的 workspace>/ssh/**` 不存在；
+      并确认挂载参数里没有 `allow_other`（两账号同 UID，共享挂载即跨账号可读）
+- [ ] **缺 sshfs 时拒绝启动（真机）**：把 `sshfs_bin` 指到不存在的路径 → `serve` 必须拒绝启动并点名该
+      配置键（CLI 命令只告警，这是刻意的差异，见 §14 第 4 条）
 - [ ] **观察项**：FUSE 上 `git status`/`grep` 的耗时基线（文档已声明会慢，但未测量）

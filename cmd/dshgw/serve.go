@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -103,31 +102,15 @@ func (c *cli) serve() error {
 	// them when an account goes away. It is assembled only when configured — a gateway that
 	// does not enable the feature never runs ssh.
 	if deps.cfg.SSHWorkspaces.Enabled {
-		sshService, sshErr := sshworkspace.New(sshworkspace.Options{
-			MountSubdir:     deps.cfg.SSHWorkspaces.MountSubdir,
-			SSHBin:          deps.cfg.SSHWorkspaces.SSHBin,
-			SSHFSBin:        deps.cfg.SSHWorkspaces.SSHFSBin,
-			IdentitySource:  deps.cfg.SSHWorkspaces.IdentitySource,
-			IdentityDir:     deps.cfg.SSHWorkspaces.IdentityDir,
-			SSHConfigSource: deps.cfg.SSHWorkspaces.SSHConfigSource,
-			Hosts:           deps.cfg.SSHWorkspaces.Hosts,
-			ConnectTimeout:  deps.cfg.SSHWorkspaces.ConnectTimeout.Duration(),
-			MaxEntries:      deps.cfg.SSHWorkspaces.MaxEntries,
-			SSHFSOptions:    deps.cfg.SSHWorkspaces.SSHFSOptions,
-		}, sshworkspace.NewStore(filepath.Join(deps.cfg.StateDir, "ssh-mounts.json")), func(restartCtx context.Context, tenant string) error {
-			current, ok := deps.reg.Get(tenant)
-			if !ok {
-				return fmt.Errorf("unknown tenant %s", tenant)
-			}
-			return deps.manager.Restart(restartCtx, current)
-		}, &audit.JSONL{Path: deps.cfg.AuditPath}, slog.Default())
-		if sshErr != nil {
-			return fmt.Errorf("ssh workspaces: %w", sshErr)
+		sshService, ok := deps.manager.SSHWorkspaces.(*sshworkspace.Service)
+		if !ok {
+			return fmt.Errorf("ssh workspaces: the runtime did not assemble the service")
 		}
+		// Here — and only here — a missing sshfs is fatal: this process is the one that will
+		// be asked to mount, and a gateway that cannot mount must not pretend to be ready.
 		if sshErr := sshService.CheckBinaries(); sshErr != nil {
 			return fmt.Errorf("ssh workspaces: %w", sshErr)
 		}
-		deps.manager.SSHWorkspaces = sshService
 		remotes := func() []sshworkspace.Remote {
 			tenants := deps.reg.List()
 			out := make([]sshworkspace.Remote, 0, len(tenants))
@@ -149,6 +132,14 @@ func (c *cli) serve() error {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
+					// The mailbox lives in each account's DSH home, and which accounts exist is
+					// the registry's answer. A tenant created by a separate CLI process (or any
+					// out-of-band registry change) would otherwise be invisible to this loop, so
+					// its requests would sit unanswered until the gateway restarted. Reloading
+					// here is the same read the manager and the proxy already do.
+					if err := deps.reg.Reload(); err != nil {
+						slog.Warn("reloading the registry for ssh workspaces failed", "err", err)
+					}
 					if handled := sshService.PollOnce(ctx, remotes()); handled > 0 {
 						slog.Info("ssh workspace requests handled", "count", handled)
 					}

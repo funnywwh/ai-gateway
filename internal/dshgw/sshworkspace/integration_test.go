@@ -25,6 +25,12 @@ import (
 // failure of the code. The tenant-side half and the browser surface are covered by
 // make dshgw-test and by the operator's acceptance run (docs/dshgw.md §7b).
 func TestIntegrationMountOverLoopback(t *testing.T) {
+	// Explicitly gated: the mount, the ssh server and this test must share one mount
+	// namespace, so it belongs on the gateway host (make dshgw-ssh-integration), not inside
+	// the development sandbox where the loopback sshd lives in another namespace.
+	if os.Getenv("DSHGW_SSH_INTEGRATION") == "" {
+		t.Skip("set DSHGW_SSH_INTEGRATION=1 on the gateway host: make dshgw-ssh-integration")
+	}
 	if _, err := exec.LookPath("sshfs"); err != nil {
 		t.Skip("sshfs is not installed: sudo apt install -y sshfs")
 	}
@@ -60,6 +66,11 @@ func TestIntegrationMountOverLoopback(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(remoteDir, "hello.txt"), []byte("remote content\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The remote has to be able to see the directory that is about to be mounted; if it
+	// cannot, this test is running in a namespace the ssh server does not share.
+	if probe := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=5", "-i", key, "--", "127.0.0.1", "test", "-d", remoteDir); probe.Run() != nil {
+		t.Skipf("the remote cannot see %s: run this on the gateway host, not in a sandbox", remoteDir)
+	}
 	tenant := Remote{
 		Tenant:    "dsh-integration",
 		Workspace: filepath.Join(root, "state", "workspaces", "dsh-integration"),
@@ -76,7 +87,7 @@ func TestIntegrationMountOverLoopback(t *testing.T) {
 		IdentitySource: key,
 		ConnectTimeout: 10 * time.Second,
 		MaxEntries:     100,
-		SSHFSOptions:   []string{"reconnect", "ServerAliveInterval=15", "idle_timeout=30"},
+		SSHFSOptions:   []string{"reconnect", "ServerAliveInterval=15", "ServerAliveCountMax=3", "idmap=user"},
 	}, NewStore(filepath.Join(root, "state", "ssh-mounts.json")), nil, nil,
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {

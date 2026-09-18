@@ -131,7 +131,12 @@ func (o Options) sshArgs(remote Remote, host, script string) []string {
 	if o.ConnectTimeout > 0 {
 		args = append(args, "-o", "ConnectTimeout="+strconv.Itoa(int(o.ConnectTimeout.Seconds())))
 	}
-	return append(args, "--", host, "sh", "-c", script)
+	// ssh joins the command arguments with spaces and hands the result to the remote user's
+	// shell, which parses it again. The script therefore has to arrive already quoted as one
+	// word: passing it raw made the remote `sh -c printf %s "$HOME"` (i.e. $0 = "%s", no
+	// arguments) and every call failed with printf's usage message. Caught by
+	// TestIntegrationMountOverLoopback, not by the fakes, which never re-parse.
+	return append(args, "--", host, "sh", "-c", ShellQuote(script))
 }
 
 // ssh runs one remote shell script.

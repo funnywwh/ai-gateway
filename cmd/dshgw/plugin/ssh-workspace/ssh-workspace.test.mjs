@@ -90,11 +90,12 @@ process.env.DSH_HOME = dshHome
 // The fake ssh answers by the script it was handed, so the plugin's own argument assembly is
 // what is exercised: a script it would never compose simply gets no answer.
 const fakeSSH = `#!/bin/sh
+printf '%s\\n' "$@" > "${root}/ssh-args.txt"
 command="$*"
 case "$command" in
   *'printf %s "$HOME"'*) printf %s /home/remote ;;
   *"pwd -P"*) printf '%s\\n' /srv/app ;;
-  *"ls -1ap"*) printf 'app/\\nlogs/\\n.hidden/\\nreadme.txt\\n' ;;
+  *"ls -1ap"*) printf './\\n../\\napp/\\nlogs/\\n.hidden/\\nreadme.txt\\n' ;;
   *"mkdir --"*) exit 0 ;;
   *) echo "unexpected script: $command" >&2; exit 9 ;;
 esac
@@ -124,9 +125,18 @@ try {
 
   const probe = await call('probe', { host: 'gpt001' })
   equal(probe.value.home, '/home/remote', 'probe reports the remote home')
+  // The remote script reaches the host as one already-quoted word: ssh joins the arguments
+  // and the remote shell parses them again, so a raw script would be re-split (this is what
+  // the fake ssh records below, and what the gateway's own ssh calls do).
+  const captured = (await readFile(join(root, 'ssh-args.txt'), 'utf8')).trim().split('\n')
+  const remoteScript = captured[captured.length - 1]
+  equal(remoteScript.startsWith("'") && remoteScript.endsWith("'"), true,
+    `the remote script must arrive as one quoted word, got ${remoteScript}`)
+  check(remoteScript.includes('printf %s "$HOME"'), 'the quoted word is the very script ssh was handed')
 
   const listing = await call('list', { host: 'gpt001', path: '/srv/app' })
-  deepEqual(listing.value.entries.map((entry) => entry.name), ['app', 'logs'], 'only directories are listed, bounded by maxEntries')
+  deepEqual(listing.value.entries.map((entry) => entry.name), ['app', 'logs'],
+    'only real directories are listed: ".", ".." and files are dropped, and maxEntries bounds it')
   equal(listing.value.truncated, true, 'the bound is reported')
   equal(listing.value.entries[0].path, '/srv/app/app', 'entries carry absolute remote paths')
 

@@ -169,5 +169,33 @@ ssh_workspaces:
    `max_entries`、`sshfs_options`、`disable_auto_remount`（设计里叫 `auto_remount`，实现改成 opt-out，
    因为「默认开启」无法用零值表达）。没有删除任何配置键。
 
-**验收状态**：Go 单测、插件两侧的 JS 断言、`make dshgw-test` 全绿；真机集成测试在 `sshfs` 安装前
-自我跳过（见 `docs/TODO.md` 的 M64 未完成项）。
+## 14. 真机验收与它抓到的四个缺陷（2026-09-18）
+
+`sshfs` 装好后跑了三档真机验收，全部通过：
+
+| 验收 | 命令 | 结果 |
+|---|---|---|
+| 网关侧挂载闭环 | `make dshgw-ssh-integration` | PASS：真实 sshfs 挂载 → 经挂载读远端文件 → 写入落到远端 → 镜像记录 → 幂等重开 → 卸载干净 |
+| 端到端（含沙箱可见性） | `make dshgw-ssh-e2e` | PASS（8 步）：信箱请求被消费 → `fuse.sshfs` 出现在账号 workspace 内 → **挂载与内容在沙箱内可见** → 运维密钥/aigw 配置/现网数据根均不可见 → 删除账号卸载并清干净 |
+| 单元与插件断言 | `make dshgw-test` | PASS（Go 全量 + 71 + 24 条 JS 断言） |
+
+**四个缺陷全部是假执行器/沙箱看不见、只有真机才暴露的**（每一个都补了回归断言）：
+
+1. **ssh 参数拼接**：ssh 把 `host sh -c <script>` 用空格拼成一条命令交给远端 shell 重新解析，脚本必须
+   自带引号。原来传裸脚本 → 远端实际执行 `sh -c printf`（`$0="%s"`）→ 所有调用报 printf 用法错误。
+   Go 与插件两侧都修了（`ShellQuote(script)` / `shellQuote(script)`）。
+2. **`ls -1ap` 的 `./`、`../`**：过滤写在「去掉尾斜杠」之前，于是这两个伪目录被当成子目录列出来。
+   Go 与插件两侧都改成先剥标记再判断。
+3. **运行中的注册表可能是旧的**：`serve` 的信箱轮询按注册表列账号，而账号可能由**另一个 CLI 进程**
+   建出来（或任何带外改动）。轮询前先 `Reload()`（与 manager/proxy 已有的做法一致），否则该账号的
+   请求会一直无人应答直到网关重启。
+4. **拆除竞态 + hook 只装在 serve 进程**：`tenant remove` 常由 CLI 进程执行，它构造的 Manager 原来
+   没有 SSH hook → 从不卸载就 purge → 工作区里还挂着 sshfs，`os.RemoveAll` 报 EBUSY。修法是两层：
+   把服务装配提到共享的 runtime 构造里（CLI 与 serve 共用；只有 serve 对缺 sshfs 硬失败），并在
+   purge 路径上整组重试 + 解挂时以「挂载点能否被移除」为真正判据（挂载表在别的命名空间还有内部引用
+   时会先于目录可用性说谎）。顺带修掉一个更危险的隐含行为：`RemoveAll` 若走进仍然挂着的挂载点，
+   会把**远端文件**删掉 —— 现在卸载确认在 purge 之前。
+
+**验收状态**：Go 单测、插件两侧 JS 断言、`make dshgw-test`、`make dshgw-ssh-integration`、
+`make dshgw-ssh-e2e` 全绿。仍未做的真机项（监督形态 `aigw-local.service` 上的浏览器验收、跨账号
+不可见断言、`sshfs` 缺失时拒绝启动）见 `docs/TODO.md` 的 M64 小节。

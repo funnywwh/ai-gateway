@@ -79,14 +79,14 @@ func (o Options) ListDir(ctx context.Context, run ExecFunc, remote Remote, host,
 	listing := Listing{Path: remotePath, Entries: []Entry{}}
 	for _, line := range strings.Split(out, "\n") {
 		name := strings.TrimRight(line, "\r")
-		if name == "" || name == "." || name == ".." {
-			continue
-		}
 		if !strings.HasSuffix(name, "/") {
 			continue
 		}
+		// The marker comes off first: `ls -1ap` prints "./" and "../" with the same trailing
+		// slash it puts on every directory, so comparing them before trimming let the two
+		// pseudo-entries through as children. Caught by TestIntegrationMountOverLoopback.
 		name = strings.TrimSuffix(name, "/")
-		if name == "" {
+		if name == "" || name == "." || name == ".." {
 			continue
 		}
 		listing.Entries = append(listing.Entries, Entry{

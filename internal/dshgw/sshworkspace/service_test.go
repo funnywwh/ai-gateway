@@ -39,7 +39,7 @@ func newHostFake() *hostFake {
 	return &hostFake{
 		home:      "/home/remote",
 		canonical: "/opt/app",
-		listing:   []string{"app/", "logs/", ".hidden/", "readme.txt"},
+		listing:   []string{"./", "../", "app/", "logs/", ".hidden/", "readme.txt"},
 		mounts:    map[string]string{},
 	}
 }

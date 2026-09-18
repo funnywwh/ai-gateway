@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) -X main.revision=$(REVISION) -X main.date=
 UIDIST ?= $(CURDIR)/.cache/ui-dist
 UI_OVERLAY ?= $(UIDIST)/overlay.json
 
-.PHONY: all build build-src ui-dist test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check dshgw-build gwproxy-build dshgw-test dshgw-verify dshgw-sandbox-test dshgw-supervised-test
+.PHONY: all build build-src ui-dist test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check dshgw-build gwproxy-build dshgw-test dshgw-verify dshgw-sandbox-test dshgw-supervised-test dshgw-ssh-integration dshgw-ssh-e2e
 
 all: build
 
@@ -104,6 +104,21 @@ dshgw-test:
 	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" cmd/dshgw/plugin/ssh-workspace/client.test.mjs
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_dshgw_migration_plan.py
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_decommission_legacy_plan.py
+
+# The ssh-workspace acceptance (M64): a real sshfs mount over loopback, a write through the
+# mount landing on the remote side, and a clean detach. It needs sshfs, a non-interactive
+# loopback ssh, and the ssh server in the same mount namespace — so it runs on the gateway
+# host, never inside the development sandbox (where it skips itself).
+dshgw-ssh-integration:
+	@$(GOENV) DSHGW_SSH_INTEGRATION=1 go test ./internal/dshgw/sshworkspace -run '^TestIntegration' -count=1 -v
+
+# The ssh workspace end-to-end acceptance (M64): a throwaway dshgw in its own state directory
+# and port band, a real sshfs mount created from an account's mailbox request, the proof that
+# the mount is visible INSIDE that account's sandbox, and a clean teardown. Needs the gateway
+# host: bwrap, sshfs, and a non-interactive loopback ssh.
+dshgw-ssh-e2e:
+	@DSHGW_NODE="$(DSHGW_NODE)" DSHGW_BIN_JS="$(DSHGW_DSH_ROOT)/lib/bin.js" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" \
+		PYTHONDONTWRITEBYTECODE=1 python3 scripts/ssh_workspace_e2e.py
 
 # The bwrap isolation mode's real acceptance: the tenant profile runs under the
 # host's own bubblewrap, and a real dsh web worker starts inside it and answers

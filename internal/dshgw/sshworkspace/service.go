@@ -273,9 +273,9 @@ func (s *Service) Close(ctx context.Context, tenant, dshHome, mountpoint string)
 	if record.Tenant != tenant {
 		return false, false, Errorf(CodeForbidden, "%s belongs to another account", mountpoint)
 	}
-	lazy, err = s.options.unmount(ctx, s.exec, mountpoint)
+	lazy, err = s.detach(ctx, mountpoint, 3, 300*time.Millisecond)
 	if err != nil {
-		return false, false, err
+		return lazy, false, err
 	}
 	if _, err := s.store.Remove(mountpoint); err != nil {
 		return lazy, false, err
@@ -291,6 +291,41 @@ func (s *Service) Close(ctx context.Context, tenant, dshHome, mountpoint string)
 	return lazy, restarted, nil
 }
 
+// detach unmounts one mount and waits for it to leave the mount table.
+//
+// The holder is usually the worker's own mount namespace: stopping or restarting a worker
+// tears its sandbox down asynchronously, so a mount can stay attached for a moment after the
+// process that used it is gone. Purging an account while a mount is still attached fails with
+// EBUSY on the mount point — a confusing symptom far from its cause — so this waits, and says
+// what is holding it when the wait runs out.
+func (s *Service) detach(ctx context.Context, mountpoint string, attempts int, delay time.Duration) (bool, error) {
+	lazy := false
+	for attempt := 0; attempt < attempts; attempt++ {
+		detached, err := s.options.unmount(ctx, s.exec, mountpoint)
+		lazy = lazy || detached
+		if err == nil {
+			if fstype, _ := s.mounted(mountpoint); fstype == "" {
+				// The table is not the whole truth: a sandbox that bound this mount keeps an
+				// internal reference until its namespace is gone, and until then the mount
+				// point cannot be removed (EBUSY) even though it no longer shows up here. The
+				// directory is the observable that matches what a purge will actually hit.
+				if removeErr := os.Remove(mountpoint); removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
+					return lazy, nil
+				}
+			}
+		}
+		if attempt < attempts-1 {
+			select {
+			case <-ctx.Done():
+				return lazy, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+	}
+	fstype, _ := s.mounted(mountpoint)
+	return lazy, Errorf(CodeBusy, "%s is still mounted (%s): a session may still hold it open", mountpoint, fstype)
+}
+
 // DropTenant detaches every mount an account owns. It is called when an account is stopped or
 // deleted, where no worker is left to restart.
 func (s *Service) DropTenant(ctx context.Context, tenant string) error {
@@ -300,7 +335,7 @@ func (s *Service) DropTenant(ctx context.Context, tenant string) error {
 	}
 	var failures []string
 	for _, mount := range mounts {
-		if _, unmountErr := s.options.unmount(ctx, s.exec, mount.Mountpoint); unmountErr != nil {
+		if _, unmountErr := s.detach(ctx, mount.Mountpoint, 20, 500*time.Millisecond); unmountErr != nil {
 			failures = append(failures, unmountErr.Error())
 			continue
 		}
@@ -308,7 +343,6 @@ func (s *Service) DropTenant(ctx context.Context, tenant string) error {
 			failures = append(failures, err.Error())
 			continue
 		}
-		_ = os.Remove(mount.Mountpoint)
 		s.record("ssh-mount-drop", tenant, mount.Mountpoint, mount.Host+":"+mount.CanonicalRemote, 200)
 	}
 	if len(failures) > 0 {

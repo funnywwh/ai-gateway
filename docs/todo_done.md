@@ -3986,3 +3986,27 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 
 **未部署 gpt001**：本次按用户要求只部署本机。gpt001 的 `/opt/aigw/aigw` 仍是 2026-09-14 的 0.12.3，
 跨 0.12.3 → 2.0.0 需要一次带配置与数据迁移的独立部署（M51/M52/M57/M58 的形态变更），另立步骤。
+
+## M64 aigw 账号的 SSH 工作区（远端目录 → 挂载 → 该账号 DSH 里的工作区）
+
+设计：`docs/design/m64-ssh-workspace.md`；规格：`docs/dshgw.md` §7b。
+
+- [x] **阶段 0 实测**：沙箱内挂载不可行（无 `/dev/fuse`；宿主 root 未映射使 setuid `fusermount3` 失效；
+      `mount(2)` 对 tmpfs/proc/fuse 恒 EPERM，加 `CAP_SYS_ADMIN` 亦然）→ 定为「租户侧插件管 ssh、
+      网关在沙箱外挂载」，profile 不加设备与 capability
+- [x] `internal/dshgw/sshworkspace`：ssh 原语（execFile、host/路径校验、shQuote）、挂载/卸载（含惰性
+      回退与「挂载点可否移除」判据）、状态记录、文件信箱、密钥 provisioning、账号挂载镜像
+- [x] 挂载点 `<workspace>/<mount_subdir>/<host>/<远端路径>`（clamp 根之内；`allow_other`/`allow_root`
+      被代码丢弃）；profile 为每个活动挂载点追加一次 `--bind-try`
+- [x] 租户侧插件 `cmd/dshgw/plugin/ssh-workspace/`：宿主半（`ctx.connection.rpc` + 信箱 + 用该账号
+      自己的 `id_rsa` 跑 ssh）与浏览器半（手写 `__ModuleLoader__` bundle，注册进
+      `sidebar.footer.action` 与 `shell.overlay` 两个 list 槽）
+- [x] 接线：`render.go` 渲染插件行、`manager`/`backup` 生命周期钩子、`serve` 轮询与启动重挂、
+      **共享 runtime 构造**（CLI 与 serve 都拿到 hook）、监督形态透传（`dshgwsup` + aigw 配置 + 生成器）
+- [x] 测试：Go 单测（含越权矩阵、`allow_root` 回归、profile argv 差异、渲染两态、透传）、插件两侧 JS
+      断言（71 + 24）、`make dshgw-ssh-integration`（真机 sshfs 挂载闭环）、`make dshgw-ssh-e2e`
+      （8 步端到端，含**挂载在租户沙箱内可见**这一决定性证据）
+- [x] 真机抓到的四个缺陷并修复 + 回归断言：ssh 参数拼接（脚本必须自带引号）、`ls -1ap` 的 `./`/`../`、
+      轮询前需 `Reload()` 注册表、拆除竞态（hook 只装 serve 进程 + EBUSY 重试 + 卸载确认先于 purge）
+- [x] 文档：设计文档（含 §14 真机验收）、`docs/dshgw.md` §7b、`docs/deployment-layout.md`、
+      两份示例配置、`docs/TODO.md`
