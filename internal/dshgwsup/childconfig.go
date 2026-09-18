@@ -45,6 +45,8 @@ type Deploy struct {
 	TenantConfigRoot string `yaml:"tenant_config_root"`
 	ConfigPath       string `yaml:"config_path"`
 	BackupDir        string `yaml:"backup_dir"`
+	// PublicListen is where the child binds the portal and tenant public ports.
+	PublicListen string `yaml:"public_listen,omitempty"`
 }
 
 // ChildConfig is the configuration aigw writes for its dshgw child. Only the
@@ -72,7 +74,17 @@ type ChildConfig struct {
 	StateDir        string     `yaml:"state_dir"`
 	WorkspaceRoot   string     `yaml:"workspace_root"`
 	Dsh             DshRuntime `yaml:"dsh"`
-	Deploy          Deploy     `yaml:"deploy"`
+	// TLS is optional: set both paths to serve HTTPS on the edge listeners, leave
+	// them empty for plain HTTP on a trusted network.
+	TLS    *TLSConfig `yaml:"tls,omitempty"`
+	Deploy Deploy     `yaml:"deploy"`
+}
+
+// TLSConfig mirrors the child's own certificate settings: in this shape dshgw
+// terminates TLS itself, because there is no nginx in front of it.
+type TLSConfig struct {
+	Certificate    string `yaml:"certificate"`
+	CertificateKey string `yaml:"certificate_key"`
 }
 
 // Validate rejects inputs the child could only reject later, in a restart loop,

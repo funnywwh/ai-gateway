@@ -61,6 +61,7 @@ func buildDshgwChild(cfg *config.Config, aigwExecutable string) (*dshgwChild, er
 			CurrentLink: dshPath(cfg.Dshgw.CurrentLink, "DSHGW_DSH_ROOT"),
 		},
 		Deploy: dshgwsup.Deploy{
+			PublicListen: strings.TrimSpace(cfg.Dshgw.PublicListen),
 			// Every worker runs as aigw's own account: that is what "no service
 			// account, no root" means, and it keeps the child's file access inside
 			// the account that already owns the state directory.
@@ -71,6 +72,12 @@ func buildDshgwChild(cfg *config.Config, aigwExecutable string) (*dshgwChild, er
 			ConfigPath:       filepath.Join(stateDir, "config.yaml"),
 			BackupDir:        filepath.Join(stateDir, "backups"),
 		},
+	}
+	if cert, key := strings.TrimSpace(cfg.Dshgw.TLSCertificate), strings.TrimSpace(cfg.Dshgw.TLSCertificateKey); cert != "" || key != "" {
+		if cert == "" || key == "" {
+			return nil, errors.New("dshgw.tls_certificate and dshgw.tls_certificate_key must be set together")
+		}
+		child.TLS = &dshgwsup.TLSConfig{Certificate: cert, CertificateKey: key}
 	}
 	if err := child.Validate(); err != nil {
 		return nil, fmt.Errorf("dshgw child configuration: %w", err)

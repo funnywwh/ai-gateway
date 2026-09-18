@@ -60,6 +60,9 @@ dshgw:
   template_home: /home/winger/.local/share/dshgw/template-home
   plugin_path: /opt/dshgw/share/dsh-plugin/picker-clamp.js
   plugin_browser_fs: on         # on 需要准备了 browser-fs 的模板，否则用 off
+  public_listen: 127.0.0.1      # 门户与租户公开端口的绑定地址（默认 loopback）
+  # tls_certificate: /path/fullchain.pem      # 指定证书即在这些端口上启用 HTTPS
+  # tls_certificate_key: /path/privkey.pem
   node_bin: /home/winger/.local/node-v22.23.1-linux-x64/bin/node
   current_link: /home/winger/.local/dsh-0.1.2-rc.1   # bin_js 由它推导
 ```

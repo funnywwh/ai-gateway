@@ -502,8 +502,10 @@
       `dsh-worker@*.service`）迁到新形态。需要：停旧单元 → 迁移 registry/状态到 `dshgw.state_dir`
       → 把 5 个租户在 registry 里标为未停用 → 用新二进制 + 新配置启动 aigw。旧租户的
       `dsh-*` 账号不会自动删除（确认无用后手工 `userdel`）
-- [ ] **公网 TLS 与防火墙**：新形态没有 nginx，租户门户由 dshgw 明文直接监听。需要单独设计
-      （证书终止放哪、是否仍用 nginx 反代、如何隐藏 worker 段端口）
+- [x] 公开面：dshgw 自己绑定门户端口与每个租户公开端口（无 nginx），edge 头由进程内注入且覆盖
+      客户端伪造；`dshgw.tls_certificate` / `tls_certificate_key` 可启用 HTTPS
+- [ ] **对外暴露的剩余决策**：防火墙策略（worker 段端口必须不可达）、是否仍在前面放 nginx 反代、
+      以及主机重启后的常驻方式（当前是用户级 transient 单元，需手动或落一份常驻 unit）
 - [ ] **资源限额**：systemd 的 `MemoryMax`/`CPUQuota`/`TasksMax` 随旧形态消失，需要 cgroup v2 方案
 - [x] 宿主验收脚本：`scripts/dshgw_supervised_e2e.py` + `make dshgw-supervised-test`（17 步：
       aigw 拉起子进程 → 同 UID admin socket → 建户 → bwrap worker → `/api` 401 → 无 per-tenant

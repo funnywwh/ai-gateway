@@ -127,6 +127,10 @@ type AdminServer struct {
 	// created the socket.
 	OwnerUID int
 	Log      logger
+	// OnTenantsChanged runs after an operation that may have changed the set of
+	// tenants or their ports. The edge uses it to rebind listeners: without it a
+	// freshly created tenant would not be reachable until the next reconcile.
+	OnTenantsChanged func()
 }
 
 type logger interface {
@@ -223,9 +227,21 @@ func (s *AdminServer) dispatch(ctx context.Context, req adminRequest) adminRespo
 		}
 		return resp
 	}
+	// Read-only operations cannot change the tenant set; everything else may have
+	// added, removed or moved a tenant's public port.
+	if req.Op != "ping" && req.Op != "tenant-list" {
+		s.notifyChanged()
+	}
 	resp.OK = true
 	resp.Result = result
 	return resp
+}
+
+// notifyChanged tells the edge that the tenant set or its ports may have changed.
+func (s *AdminServer) notifyChanged() {
+	if s.OnTenantsChanged != nil {
+		s.OnTenantsChanged()
+	}
 }
 
 type invalidRequestError struct{ msg string }

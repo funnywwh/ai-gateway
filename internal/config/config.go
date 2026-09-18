@@ -420,6 +420,13 @@ type Dshgw struct {
 	// PluginPath is the directory-picker plugin served to tenant sessions. Empty
 	// keeps the child's own default for the installation it ships with.
 	PluginPath string `yaml:"plugin_path"`
+	// PublicListen is where the child binds the portal and tenant public ports.
+	// Empty means loopback: exposing tenants to a network is an explicit choice.
+	PublicListen string `yaml:"public_listen"`
+	// TLSCertificate/TLSCertificateKey make the child serve HTTPS on those ports.
+	// Empty means plain HTTP, which is only appropriate on a trusted network.
+	TLSCertificate    string `yaml:"tls_certificate"`
+	TLSCertificateKey string `yaml:"tls_certificate_key"`
 	// PluginBrowserFS is the child's default for the browser filesystem plugin:
 	// "on" requires a template prepared with dsh-browser-fs, "off" does not.
 	PluginBrowserFS string `yaml:"plugin_browser_fs"`

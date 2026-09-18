@@ -174,6 +174,40 @@ def http_status(port: int, path: str = "/api", timeout: float = 5.0) -> int:
         return 0
 
 
+def http_probe(port: int, path: str = "/", timeout: float = 5.0) -> tuple[int, str]:
+    """GET one loopback port; returns (status, location). 0 means "nothing bound".
+
+    With no nginx in this shape, dshgw binds the portal port and every tenant's
+    public port itself, so these ports are the user-facing surface.
+    """
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout) as conn:
+            conn.sendall(f"GET {path} HTTP/1.0\r\nHost: localhost:{port}\r\n\r\n".encode())
+            chunks = []
+            while True:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                if len(b"".join(chunks)) > 65536:
+                    break
+    except OSError:
+        return 0, ""
+    raw = b"".join(chunks)
+    header, _, _ = raw.partition(b"\r\n\r\n")
+    lines = header.decode(errors="replace").splitlines()
+    status = 0
+    if lines:
+        parts = lines[0].split()
+        if len(parts) >= 2 and parts[1].isdigit():
+            status = int(parts[1])
+    location = ""
+    for line in lines[1:]:
+        if line.lower().startswith("location:"):
+            location = line.split(":", 1)[1].strip()
+    return status, location
+
+
 def process_children(pid: int) -> list[int]:
     try:
         output = subprocess.run(
@@ -379,6 +413,18 @@ def main() -> int:
                       f"descendants of pid {child_pid}: {len(tree)}")
         owners = {os.stat(f"/proc/{pid}").st_uid for pid in [child_pid, *bwrap_children] if Path(f"/proc/{pid}").exists()}
         check.require("single-unprivileged-uid", owners == {os.getuid()}, f"uids={owners}, expected {{{os.getuid()}}}")
+
+        # The public surface: dshgw binds the portal port and this tenant's public
+        # port itself (no nginx). A session-less tenant request must be sent back to
+        # the portal, and the portal must serve the login page.
+        portal_status, _ = http_probe(ports["portal"])
+        check.require("portal-port-serves-login", portal_status == 200, f"HTTP {portal_status}")
+        tenant_status, location = http_probe(ports["tenant_lo"])
+        check.require(
+            "tenant-port-redirects-to-portal",
+            tenant_status == 302 and f":{ports['portal']}" in location,
+            f"HTTP {tenant_status} location={location!r}",
+        )
 
         calls_before = stub.calls
         stopped = admin_call(admin_socket, {"id": 3, "op": "tenant-stop", "name": tenant})

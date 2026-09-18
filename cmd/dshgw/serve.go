@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
 	"github.com/winger/ai-gateway/internal/dshgw/activity"
 	"github.com/winger/ai-gateway/internal/dshgw/audit"
+	"github.com/winger/ai-gateway/internal/dshgw/edge"
 	"github.com/winger/ai-gateway/internal/dshgw/handshake"
 	"github.com/winger/ai-gateway/internal/dshgw/proxy"
 	"log/slog"
@@ -31,6 +33,18 @@ func (c *cli) serve() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The public surface: with no nginx in this shape, dshgw binds the portal port
+	// and every tenant's public port itself, setting the edge port header the
+	// gateway routes on (exactly what the edge proxy used to do). Reconcile is
+	// idempotent, so it runs at startup and after any lifecycle change.
+	publicEdge := edge.New(deps.cfg, gateway.Dispatch(), slog.Default())
+	if err := publicEdge.Reconcile(deps.reg.List()); err != nil {
+		// A port that cannot be bound is reported, not fatal: the gateway keeps its
+		// loopback listener and the surfaces that did bind keep serving.
+		slog.Error("binding the public surface failed", "err", err)
+	}
+	defer publicEdge.Close()
+
 	// The provisioning channel runs in this process when a socket is configured:
 	// the console's "启用/停用 DSH" buttons need a live lifecycle owner, and in the
 	// supervised shape the running gateway *is* that owner (a standalone CLI
@@ -42,6 +56,11 @@ func (c *cli) serve() error {
 		}
 		defer adminListener.Close()
 		admin := &AdminServer{Ops: managerOps{m: deps.manager, validator: deps.validator, cfg: deps.cfg}, OwnerUID: os.Geteuid()}
+		admin.OnTenantsChanged = func() {
+			if err := publicEdge.Reconcile(deps.reg.List()); err != nil {
+				slog.Error("rebinding the public surface failed", "err", err)
+			}
+		}
 		go func() { <-ctx.Done(); adminListener.Close() }()
 		go admin.Serve(ctx, adminListener)
 		slog.Info("dshgw admin channel listening", "socket", deps.cfg.AdminSocket)

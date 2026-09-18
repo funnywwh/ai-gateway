@@ -58,6 +58,14 @@ type DshRuntime struct {
 	CurrentLink string `yaml:"current_link" json:"current_link"`
 }
 
+// TLSConfig is the certificate the edge serves directly. Empty values mean plain
+// HTTP, which is only appropriate on a trusted network: there is no nginx in this
+// shape to terminate TLS for us.
+type TLSConfig struct {
+	Certificate    string `yaml:"certificate" json:"certificate"`
+	CertificateKey string `yaml:"certificate_key" json:"certificate_key"`
+}
+
 // DeployConfig holds the paths and identities a dshgw instance needs. Everything
 // that described the deleted systemd/nginx/root shape (units, slices, nginx
 // directories, per-tenant account prefixes, TLS for an external edge) is gone:
@@ -78,6 +86,10 @@ type DeployConfig struct {
 	WorkerUser string `yaml:"worker_user" json:"worker_user"`
 	// BwrapBin is the bubblewrap executable the sandbox profile and doctor use.
 	BwrapBin string `yaml:"bwrap_bin" json:"bwrap_bin"`
+	// PublicListen is the address the edge binds the portal and tenant public
+	// ports on. Loopback is the safe default; exposing tenants to a network is an
+	// explicit decision (and needs TLS, see tls:).
+	PublicListen string `yaml:"public_listen" json:"public_listen"`
 }
 
 // Config is deliberately independent of aigw's internal configuration types.
@@ -109,6 +121,7 @@ type Config struct {
 	WorkspaceSeed    []string     `yaml:"workspace_seed" json:"workspace_seed"`
 	ReservedNames    []string     `yaml:"reserved_names" json:"reserved_names"`
 	Dsh              DshRuntime   `yaml:"dsh" json:"dsh"`
+	TLS              TLSConfig    `yaml:"tls" json:"tls"`
 	Deploy           DeployConfig `yaml:"deploy" json:"deploy"`
 	TenantRoot       string       `yaml:"tenant_root" json:"tenant_root"`
 	WorkspaceRoot    string       `yaml:"workspace_root" json:"workspace_root"`
@@ -161,6 +174,7 @@ func defaults() Config {
 			ConfigPath:   DefaultPath,
 			GatewayUser:  "dshgw",
 			BwrapBin:     "/usr/bin/bwrap",
+			PublicListen: "127.0.0.1",
 		},
 	}
 }
@@ -321,6 +335,20 @@ func (c *Config) Validate() error {
 	for _, seed := range c.WorkspaceSeed {
 		if seed == "" || filepath.IsAbs(seed) || filepath.Clean(seed) != seed || seed == "." || strings.HasPrefix(seed, ".."+string(filepath.Separator)) || seed == ".." {
 			return fmt.Errorf("workspace_seed %q must be a clean relative path inside the tenant root", seed)
+		}
+	}
+	if net.ParseIP(c.Deploy.PublicListen) == nil {
+		return errors.New("deploy.public_listen must be one IP address")
+	}
+	if (c.TLS.Certificate == "") != (c.TLS.CertificateKey == "") {
+		return errors.New("tls.certificate and tls.certificate_key must be set together")
+	}
+	for label, value := range map[string]string{"tls.certificate": c.TLS.Certificate, "tls.certificate_key": c.TLS.CertificateKey} {
+		if value == "" {
+			continue
+		}
+		if !filepath.IsAbs(value) || filepath.Clean(value) != value {
+			return fmt.Errorf("%s must be a clean absolute path", label)
 		}
 	}
 	paths := map[string]string{

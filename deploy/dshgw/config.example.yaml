@@ -51,3 +51,9 @@ deploy:
   gateway_user: winger           # 网关自己以谁运行（aigw 的账号）
   worker_user: winger            # 所有租户 worker 以谁运行：必须是已存在的非 root 账号
   bwrap_bin: /usr/bin/bwrap
+  # 门户与租户公开端口的绑定地址。默认 loopback：对外暴露是显式决定（并且需要 TLS）。
+  public_listen: 127.0.0.1
+# 无 nginx 后由 dshgw 自己终止 TLS；两项都留空表示明文（仅限可信网络）。
+# tls:
+#   certificate: /path/fullchain.pem
+#   certificate_key: /path/privkey.pem
