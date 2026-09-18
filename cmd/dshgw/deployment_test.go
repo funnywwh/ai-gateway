@@ -97,7 +97,7 @@ func TestConfigExampleLoadsAsWritten(t *testing.T) {
 func TestServerAndLifecycleUseConfiguredSessionCapacity(t *testing.T) {
 	root := t.TempDir()
 	cfg := filepath.Join(root, "config.yaml")
-	if err := os.WriteFile(cfg, []byte("state_dir: "+filepath.Join(root, "state")+"\nmax_sessions: 1\n"), 0o600); err != nil {
+	if err := os.WriteFile(cfg, []byte("directory_picker: browse\nstate_dir: "+filepath.Join(root, "state")+"\nmax_sessions: 1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	app := &cli{configPath: cfg}
@@ -165,7 +165,8 @@ func TestSandboxExecPrintRendersProfileFromConfiguration(t *testing.T) {
 	}
 	workspace := filepath.Join(root, "srv/alice")
 	configPath := filepath.Join(root, "config.yaml")
-	doc := "state_dir: " + filepath.Join(root, "state") + "\n" +
+	doc := "directory_picker: browse\n" +
+		"state_dir: " + filepath.Join(root, "state") + "\n" +
 		"tenant_root: " + filepath.Join(root, "state/tenants") + "\n" +
 		"workspace_root: " + filepath.Join(root, "srv") + "\n" +
 		"registry_path: " + filepath.Join(root, "registry.json") + "\n" +
@@ -203,7 +204,11 @@ func TestSandboxExecPrintRendersProfileFromConfiguration(t *testing.T) {
 func deploymentConfigIn(t *testing.T, root, extraDeploy string) *config.Config {
 	t.Helper()
 	path := filepath.Join(root, "config.yaml")
+	// directory_picker is pinned to browse because deploy.plugin_path has no default
+	// (M63): a fixture that does not exercise the picker should not have to name a
+	// plugin file that does not exist in its temporary tree.
 	doc := "state_dir: " + filepath.Join(root, "state") + "\n" +
+		"directory_picker: browse\n" +
 		"deploy:\n" + extraDeploy
 	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
 		t.Fatal(err)

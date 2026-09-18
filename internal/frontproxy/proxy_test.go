@@ -332,9 +332,12 @@ func TestConfigRejectsOverlappingPrefixesAndBadUpstreams(t *testing.T) {
 		t.Fatalf("valid configuration rejected: %v", err)
 	}
 	for name, mutate := range map[string]func(*Config){
-		"prefix overlap":    func(c *Config) { c.PortalPrefix = "/aigw/dshgw" },
-		"prefix is root":    func(c *Config) { c.TenantPrefix = "/" },
-		"relative registry": func(c *Config) { c.RegistryPath = "registry.json" },
+		"prefix overlap": func(c *Config) { c.PortalPrefix = "/aigw/dshgw" },
+		"prefix is root": func(c *Config) { c.TenantPrefix = "/" },
+		// A relative registry_path is configuration, not an error: it is resolved against
+		// the deployment root, which is how ./data/dshgw/registry.json works (M63). What
+		// stays rejected is a path that cannot be used as written.
+		"unclean registry": func(c *Config) { c.RegistryPath = "/data/dshgw/../registry.json" },
 		"upstream with path": func(c *Config) {
 			c.AigwUpstream = "http://127.0.0.1:8088/aigw"
 		},
@@ -487,5 +490,51 @@ func TestConfigRejectsUnusableAPIPaths(t *testing.T) {
 		if err := base(mutate); err == nil {
 			t.Errorf("%s accepted", name)
 		}
+	}
+}
+
+// M63: the registry path may be written relatively, and it is resolved against the
+// deployment root — that is how a proxy and the dshgw it fronts agree on one data root
+// (./data/dshgw/registry.json) without either side naming a machine path.
+func TestRelativeRegistryPathResolvesAgainstTheWorkingDirectory(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{
+		Listen: "127.0.0.1:0", PublicHost: "chat.example", RegistryPath: "./data/dshgw/registry.json",
+		AigwUpstream: "http://127.0.0.1:8088", PortalUpstream: "http://127.0.0.1:18100",
+		TenantUpstream: "http://127.0.0.1:18101", PortalPort: 32600,
+	}
+	cfg.applyDefaults()
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(wd, "data", "dshgw", "registry.json"); cfg.RegistryPath != want {
+		t.Fatalf("registry_path = %q, want %q", cfg.RegistryPath, want)
+	}
+	// The unconfigured default is the same path: a proxy in the supervised deployment reads
+	// the registry the child writes.
+	empty := &Config{
+		Listen: "127.0.0.1:0", PublicHost: "chat.example",
+		AigwUpstream: "http://127.0.0.1:8088", PortalUpstream: "http://127.0.0.1:18100",
+		TenantUpstream: "http://127.0.0.1:18101", PortalPort: 32600,
+	}
+	empty.applyDefaults()
+	if err := empty.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if empty.RegistryPath != cfg.RegistryPath {
+		t.Fatalf("default registry_path = %q, want %q", empty.RegistryPath, cfg.RegistryPath)
+	}
+	// Climbing out of the deployment root is refused rather than silently cleaned.
+	outside := &Config{
+		Listen: "127.0.0.1:0", PublicHost: "chat.example", RegistryPath: "./data/../../registry.json",
+		AigwUpstream: "http://127.0.0.1:8088", PortalUpstream: "http://127.0.0.1:18100",
+		TenantUpstream: "http://127.0.0.1:18101", PortalPort: 32600,
+	}
+	outside.applyDefaults()
+	if err := outside.Validate(); err == nil {
+		t.Fatal("a registry_path climbing out of the deployment root was accepted")
 	}
 }

@@ -44,12 +44,12 @@ export DSHGW_DSH_ROOT=/home/winger/.local/dsh-0.1.2-rc.1
 server:
   listen: 127.0.0.1:8088
 database:
-  path: /home/winger/work/ai_gateway/data/aigw-local.db
+  path: ./data/aigw-local.db    # 数据根（M63）：相对路径以部署根为基准
 credentials_key: "<32 字节>"
 dshgw:
   enabled: true                 # aigw 启动时拉起并监督 dshgw
   # binary: ""                  # 默认：aigw 同目录的 dshgw
-  state_dir: /home/winger/.local/share/dshgw
+  # state_dir: ./data/dshgw     # 默认 = <database.path 所在目录>/dshgw
   public_host: localhost
   listen: 127.0.0.1:18099       # dshgw 自己的监听地址（租户门户直接由它服务）
   portal_port: 18100
@@ -57,8 +57,8 @@ dshgw:
   tenant_port_hi: 18199
   worker_port_lo: 18200
   worker_port_hi: 18299
-  template_home: /home/winger/.local/share/dshgw/template-home
-  plugin_path: /opt/dshgw/share/dsh-plugin/picker-clamp.js
+  # template_home: ./data/dshgw/template-home   # 默认 = <state_dir>/template-home
+  plugin_path: ./cmd/dshgw/plugin/picker-clamp.js   # 必填：子进程默认目录选择器是 clamp
   plugin_browser_fs: on         # on 需要准备了 browser-fs 的模板，否则用 off
   public_listen: 127.0.0.1      # 门户与租户公开端口的绑定地址（默认 loopback）
   # tls_certificate: /path/fullchain.pem      # 指定证书即在这些端口上启用 HTTPS
@@ -67,7 +67,11 @@ dshgw:
   current_link: /home/winger/.local/dsh-0.1.2-rc.1   # bin_js 由它推导
 ```
 
-未设置时按 `DSHGW_NODE`/`DSHGW_DSH_ROOT`/`DSHGW_TEMPLATE_HOME` 环境变量兜底。
+路径规则（M63，完整版见 [`docs/deployment-layout.md`](../../docs/deployment-layout.md)）：
+**数据**默认在部署根的 `./data` 之下（`state_dir` 及其派生的 template/tenant/workspace/backup 根），
+相对路径在加载时按进程工作目录归一为绝对路径；**运行时安装**（`node_bin`/`current_link`、
+`bwrap_bin`、TLS 证书）必须是绝对路径，留空则按 `DSHGW_NODE`/`DSHGW_DSH_ROOT`/
+`DSHGW_TEMPLATE_HOME` 环境变量兜底；**配置**（`config.yaml`、`dshgw.yaml`、`gwproxy.yaml`）留在部署根。
 
 准备租户模板（无特权）：
 
@@ -257,6 +261,34 @@ sudo scripts/migrate_dshgw_to_supervised.sh --rollback ...        # 做
 计划本身有自动化测试（`scripts/test_dshgw_migration_plan.py`，跑在 `make dshgw-test` 里）：
 它用一份合成的旧部署夹具断言"apply/rollback 的每一项关键步骤都出现在计划里，且 dry-run 不执行任何命令"。
 
+### 8.1 直接下线旧形态（M63：归档而不是迁移）
+
+不需要旧租户的数据时，用下线脚本：它把三棵目录树、nginx 的 dshgw 转发与旧单元文件**先归档**
+（默认 `data/prev/legacy-dshgw/`），验证归档可读且含 `registry.json` 之后，才停单元、删 nginx 转发、
+删 `/opt/dshgw`、`/etc/dshgw`、`/var/lib/dshgw`。归档是唯一的回滚来源。
+
+```bash
+# 1) 清单 + 计划（不需要 root；归档前不动任何东西）
+scripts/decommission_legacy_dshgw.sh
+
+# 2) 确认后执行（需要 root；在宿主终端里跑）
+sudo scripts/decommission_legacy_dshgw.sh --apply
+
+# 可选：连 per-tenant 账号一并删除（默认不做）
+sudo scripts/decommission_legacy_dshgw.sh --apply --remove-accounts
+```
+
+脚本的 `--old-config`/`--state-dir`/`--nginx-dir` 可指向非默认位置（旧配置里的 `state_dir`、
+`nginx_include_path` 会被读出来）。计划同样有测试：`scripts/test_decommission_legacy_plan.py`
+（跑在 `make dshgw-test` 里），断言"归档 → 停服 → 校验 → 删除"的顺序、归档覆盖面，以及 dry-run 什么都不做。
+
+### 8.2 把已有的 dshgw 状态树搬到数据根里
+
+`scripts/move_dshgw_state.sh --from <旧根> --to <部署根>/data/<名字> [--apply]`：先停 dshgw，
+再搬 `state/`、`template-home/`、`current` 与日志，然后改写 registry 与每租户文件里嵌的绝对路径
+（`registry.json`、`profiles/web/cordis.patch.yml`、`storages/workspace.json`、session 缓存），
+**绝不改写 `workspaces/**`**（那是租户自己的内容）。dry-run 会打印每个将被改写的文件。
+
 ## 9. 可选：单域名 + 路径前缀的入口反代（`gwproxy`）
 
 不想为每个租户开一个端口时，用 `bin/gwproxy` 把三个服务收进**一个域名、一个端口、一张证书**：
@@ -355,7 +387,9 @@ public_scheme: https
 | 验证 dshgw | 用户单元 `dshgw-verify`（enabled），路径模式 | 网关 `127.0.0.1:18299`、门户 `18300`、租户 `18301+`、worker `18400+` | 独立于旧的 `dshgw.service`，同 UID、无 root |
 | 旧 dshgw（root/systemd 形态） | `dshgw.service` + 5 个 worker | `:32600`+ | **未受影响**，仍在运行 |
 
-状态与配置都在 `~/.local/share/dshgw-verify/`（`dshgw.yaml`、`gwproxy.yaml`、`state/`，均为 0600/0700）。
+配置在部署根（`./dshgw.yaml`、`./gwproxy.yaml`，0600），数据在 `./data/dshgw-verify/`
+（`state/`、`template-home/`、日志；state 为 0700、文件 0600）—— M63 之前它们在
+`~/.local/share/dshgw-verify/`，现在都收进单一数据根（见 `docs/deployment-layout.md`）。
 两个单元都是文件单元并 `enabled`，重启机器后自动拉起；日志分别在 `state/../dshgw.log`、`gwproxy.log`。
 
 访问入口：
@@ -415,7 +449,7 @@ worker 照常起来）。给它装一把真实 Key，然后打开门户登录：
 
 ```bash
 printf '%s\n' '{"id":1,"op":"tenant-set-key","name":"dsh-tenant","key":"<你的 aigw Key>"}' \
-  | nc -U ~/.local/share/dshgw-verify/state/admin.sock
+  | nc -U data/dshgw-verify/state/admin.sock
 # 然后浏览器打开 http://192.168.190.86:8090/dshgw/ ，用同一把 Key 登录
 ```
 
@@ -428,7 +462,7 @@ printf '%s\n' '{"id":1,"op":"tenant-set-key","name":"dsh-tenant","key":"<你的 
 ```bash
 systemctl --user disable --now gwproxy-verify dshgw-verify
 rm -f ~/.config/systemd/user/{gwproxy,dshgw}-verify.service
-# 状态目录按需保留：~/.local/share/dshgw-verify
+# 数据目录按需保留：./data/dshgw-verify（配置 ./dshgw.yaml、./gwproxy.yaml 可一并删除）
 ```
 
 ## 11. LAN 用户的"设置/模型"面板（`settings_ui`）

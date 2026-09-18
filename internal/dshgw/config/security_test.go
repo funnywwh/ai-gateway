@@ -24,12 +24,22 @@ func TestRejectMalformedEdgeAndDeploymentConfiguration(t *testing.T) {
 		"deploy:\n  worker_unit: dsh-worker.service\n",
 		"deploy:\n  nginx_include_path: /etc/nginx/conf.d/dshgw/recursive.conf\n",
 		"key_revalidate: interval:9223372036854775807\n",
+		// The clamp picker imports a plugin by absolute file URL; without a path the tenant
+		// profile would carry a file:// URL pointing nowhere (M63).
+		"directory_picker: clamp\n",
 	} {
 		if _, err := Load(writeConfig(t, body)); err == nil {
 			t.Errorf("unsafe config accepted: %s", body)
 		}
 	}
-	if _, err := Load(writeConfig(t, "edge_port_header: X-Tenant-Port\n")); err != nil {
-		t.Fatalf("safe custom header/literal certificate path rejected: %v", err)
+	// A relative plugin path is accepted and resolved against the deployment root: this
+	// repository ships the picker at cmd/dshgw/plugin/picker-clamp.js, and a deployment
+	// should be able to name it without hard-coding its own absolute prefix (M63).
+	if _, err := Load(writeConfig(t, "edge_port_header: X-Tenant-Port\ndeploy:\n  plugin_path: ./cmd/dshgw/plugin/picker-clamp.js\n")); err != nil {
+		t.Fatalf("safe custom header rejected: %v", err)
+	}
+	// The picker that needs no plugin is still a valid configuration without one.
+	if _, err := Load(writeConfig(t, "directory_picker: browse\n")); err != nil {
+		t.Fatalf("browse picker without a plugin path rejected: %v", err)
 	}
 }

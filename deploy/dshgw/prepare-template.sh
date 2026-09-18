@@ -11,7 +11,16 @@ else
 fi
 NODE_DIR=$(dirname "$NODE")
 COREPACK=${DSHGW_COREPACK:-$NODE_DIR/corepack}
-DEST=${DSHGW_TEMPLATE_HOME:-$HOME/.local/share/dshgw/template-home}
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# The template is state, not an installed asset: it lives inside the deployment's single
+# data root (M63). A relative DSHGW_TEMPLATE_HOME (or the default) is resolved against the
+# deployment root rather than the caller's working directory, so the same command works
+# from anywhere.
+DEST=${DSHGW_TEMPLATE_HOME:-$ROOT/data/dshgw/template-home}
+case "$DEST" in
+  /*) ;;
+  *) DEST="$ROOT/${DEST#./}" ;;
+esac
 TEST_MODE=${DSHGW_TEMPLATE_TEST_MODE:-0}
 
 # No root is needed: in the aigw-supervised shape (M58) the template belongs to

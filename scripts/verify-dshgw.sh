@@ -16,6 +16,10 @@ trap cleanup EXIT
 
 bash -n "$ROOT/deploy/dshgw/prepare-template.sh"
 cp "$ROOT/deploy/dshgw/config.example.yaml" "$TMP/config.yaml"
+# The example names its data root relatively (./data/dshgw, M63) and its runtime
+# installation absolutely. This check must not write into the repository's real data root,
+# so both kinds of value are repointed at the temporary tree: the data root becomes
+# $TMP/data, and the picker plugin is read from this checkout.
 python3 - "$TMP/config.yaml" "$NODE" "$DSH_ROOT" "$TMP" "$ROOT" <<'PY'
 from pathlib import Path
 import sys
@@ -26,30 +30,11 @@ tmp = Path(sys.argv[4])
 root = Path(sys.argv[5])
 s = p.read_text()
 replacements = {
-    '/opt/dsh/node/bin/node': str(node),
-    '/opt/dsh/node/bin/corepack': str(node.parent / 'corepack'),
-    '/opt/dsh/current/lib/bin.js': str(dsh / 'lib/bin.js'),
-    '/opt/dsh/releases': str(dsh.parent),
-    '/opt/dsh/current': str(dsh),
-    '/var/lib/dshgw/gateway/sessions.json': str(tmp / 'state/gateway/sessions.json'),
-    '/var/lib/dshgw/gateway/audit.jsonl': str(tmp / 'state/gateway/audit.jsonl'),
-    '/var/lib/dshgw/gateway/activity.json': str(tmp / 'state/gateway/activity.json'),
-    '/var/lib/dshgw/registry.json': str(tmp / 'state/registry.json'),
-    '/var/lib/dshgw/keys.map': str(tmp / 'state/keys.map'),
-    '/var/lib/dshgw/handshake': str(tmp / 'state/handshake'),
-    '/var/lib/dshgw/tenants': str(tmp / 'state/tenants'),
-    '/var/lib/dshgw': str(tmp / 'state'),
-    '/srv/dsh': str(tmp / 'workspaces'),
-    '/etc/dshgw/tenants': str(tmp / 'etc/tenants'),
-    '/etc/dshgw/config.yaml': str(tmp / 'config.yaml'),
-    '/etc/dshgw': str(tmp / 'etc'),
-    '/etc/systemd/system': str(tmp / 'units'),
-    '/etc/nginx/conf.d/dshgw.conf': str(tmp / 'nginx.conf'),
-    '/etc/nginx/conf.d/dshgw': str(tmp / 'nginx'),
-    '/home/winger/backups/dshgw': str(tmp / 'backups'),
-    '/opt/dshgw/share/template-home': str(tmp / 'template-home'),
-    '/opt/dshgw/share/dsh-plugin/picker-clamp.js': str(tmp / 'plugin/picker-clamp.js'),
-    '/opt/dshgw/bin/dshgw': str(root / 'bin/dshgw'),
+    '/home/winger/.local/node-v22.23.1-linux-x64/bin/node': str(node),
+    '/home/winger/.local/dsh-0.1.2-rc.1/lib/bin.js': str(dsh / 'lib/bin.js'),
+    '/home/winger/.local/dsh-0.1.2-rc.1': str(dsh),
+    './data/dshgw': str(tmp / 'data/dshgw'),
+    './cmd/dshgw/plugin/picker-clamp.js': str(root / 'cmd/dshgw/plugin/picker-clamp.js'),
 }
 for old, new in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
     s = s.replace(old, new)

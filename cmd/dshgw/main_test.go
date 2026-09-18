@@ -98,7 +98,9 @@ func TestLoginURLWithoutPrefixPrintsPortal(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.yaml")
 	state := filepath.Join(root, "state")
-	if err := os.WriteFile(configPath, []byte("public_host: portal.example.test\nstate_dir: "+state+"\n"), 0o600); err != nil {
+	// deploy.plugin_path has no default (M63), so a fixture that only needs a portal URL
+	// picks the picker that requires no plugin file.
+	if err := os.WriteFile(configPath, []byte("public_host: portal.example.test\ndirectory_picker: browse\nstate_dir: "+state+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var out, stderr bytes.Buffer
@@ -114,7 +116,7 @@ func TestTenantListJSONIncludesReadOnlyMetadata(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.yaml")
 	state := filepath.Join(root, "state")
-	if err := os.WriteFile(configPath, []byte("public_host: portal.example.test\nstate_dir: "+state+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("public_host: portal.example.test\ndirectory_picker: browse\nstate_dir: "+state+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	created := time.Date(2026, 2, 3, 4, 5, 6, 123456789, time.FixedZone("CST", 8*60*60))
@@ -146,9 +148,11 @@ func TestTenantListJSONIncludesReadOnlyMetadata(t *testing.T) {
 	checks := map[string]string{
 		"name": "alice", "user": "dshgw",
 		"dsh_home": tenant.DshHome, "workspace": tenant.Workspace,
-		"created_at":       created.UTC().Format(time.RFC3339Nano),
-		"handshake_path":   filepath.Join(state, "handshake/alice.url"),
-		"gateway_key_path": filepath.Join(state, "tenants/alice/gateway.key"),
+		"created_at":     created.UTC().Format(time.RFC3339Nano),
+		"handshake_path": filepath.Join(state, "handshake/alice.url"),
+		// tenant-config is a sibling of tenants (M63): sharing the tenant root would put
+		// gateway.key inside the tree the worker binds into the sandbox.
+		"gateway_key_path": filepath.Join(state, "tenant-config/alice/gateway.key"),
 		"aigw_base_url":    "http://192.168.190.86:8088", "key_revalidate": "off",
 		"portal_url": "https://portal.example.test:32600/",
 	}

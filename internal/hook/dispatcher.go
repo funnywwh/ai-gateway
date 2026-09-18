@@ -37,6 +37,11 @@ type Config struct {
 }
 
 // DefaultConfig mirrors the YAML defaults.
+//
+// DeadLetter repeats internal/config's default data root ("./data") literally: this
+// package is a leaf in the layering table and must not import config for a string. A test
+// pins the two together, because a dead-letter file outside the data root is exactly the
+// scattered state M63 removed (see docs/deployment-layout.md).
 func DefaultConfig() Config {
 	return Config{QueueSize: 1024, Workers: 8, Timeout: 5 * time.Second, Retries: 5, DeadLetter: "./data/hooks-dead.jsonl"}
 }

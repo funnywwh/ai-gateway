@@ -32,7 +32,9 @@ portal_upstream: http://127.0.0.1:18099   # dshgw.Listen
 portal_port: 18100                        # dshgw.PortalPort（Host 与 edge 头由它派生）
 tenant_prefix: /t
 tenant_upstream: http://127.0.0.1:18099   # dshgw.Listen（按 edge 头分租户）
-registry_path: /home/winger/.local/share/dshgw/registry.json  # 读租户→公开端口映射
+# 读租户→公开端口映射。默认就是监督形态写的那个位置（<数据根>/dshgw/registry.json）；
+# 相对路径以进程工作目录（部署根）为基准。
+registry_path: ./data/dshgw/registry.json
 # API 数据不缓存：这些路径的响应一律带上 no-store，并且不转发条件请求校验器，
 # 使浏览器/中间缓存无法用旧副本做 304。静态资源不受影响（保留上游的 Cache-Control）。
 # 默认集：/api/ /v1/ /admin/api/ /version /healthz /readyz

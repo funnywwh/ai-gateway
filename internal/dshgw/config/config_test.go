@@ -18,7 +18,11 @@ func writeConfig(t *testing.T, body string) string {
 }
 
 func TestLoadStrictDefaultsAndOrigins(t *testing.T) {
-	p := writeConfig(t, "public_host: dsh.example.test\nstate_dir: "+filepath.Join(t.TempDir(), "state")+"\n")
+	// deploy.plugin_path has no default (M63): the default directory picker is clamp and
+	// the plugin ships with the repository, so a configuration names it.
+	root := t.TempDir()
+	p := writeConfig(t, "public_host: dsh.example.test\nstate_dir: "+filepath.Join(root, "state")+"\n"+
+		"deploy:\n  plugin_path: "+filepath.Join(root, "picker-clamp.js")+"\n")
 	cfg, err := Load(p)
 	if err != nil {
 		t.Fatal(err)

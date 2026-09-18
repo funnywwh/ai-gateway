@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -63,6 +64,17 @@ var (
 	uiEncoding = "identity"
 )
 
+// dataRoot is the directory that holds this deployment's runtime data: the single data
+// root the defaults are derived from (M63). It is the database's directory, resolved to
+// an absolute path, or "" when the configured path has no usable directory.
+func dataRoot(databasePath string) string {
+	abs, err := filepath.Abs(databasePath)
+	if err != nil {
+		return ""
+	}
+	return filepath.Dir(abs)
+}
+
 // dshgwAdminSocket resolves the provisioning socket aigw should dial.
 func dshgwAdminSocket(cfg *config.Config, child *dshgwChild) string {
 	if child != nil && child.adminSocket != "" {
@@ -112,6 +124,11 @@ func run() int {
 		"config", *configPath,
 		"listen", cfg.Server.Listen,
 		"database", cfg.Database.Path,
+		// The data root is derived, not configured: every stateful default hangs off the
+		// directory the database lives in (M63). Printing its resolved absolute form is
+		// how "where did the data go?" stops being a question — a relative default plus
+		// an unexpected working directory used to be invisible until files appeared.
+		"data_dir", dataRoot(cfg.Database.Path),
 	)
 
 	// M58: aigw owns the DSH surface. The child is resolved and validated here —
@@ -144,7 +161,9 @@ func run() int {
 			log.Error("dshgw child is unusable", "err", err)
 			return 1
 		}
-		log.Info("dshgw child configured", "binary", child.binary, "config", child.configPath, "config_changed", changed)
+		// The child's state root is part of the same data root, so it belongs on the line
+		// an operator reads to answer "where does this deployment write?" (M63).
+		log.Info("dshgw child configured", "binary", child.binary, "config", child.configPath, "state_dir", child.config.StateDir, "config_changed", changed)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

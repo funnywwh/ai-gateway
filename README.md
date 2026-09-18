@@ -97,6 +97,7 @@ M39 让「线上跑的是哪个版本」有一个能读的答案：版本号的�
 | `docs/org.md` | 组织架构：多根森林、账号多归属、节点标签被整棵子树继承（授权与限速口径）、删除与移动语义、**可复用树形控件**（侧边栏/工作区两处放置）、排障 | **已实现（M49）** |
 | `docs/dshgw.md` | 多租户 dsh 网关：用 aigw 的 API Key 登录 DeepSeek Harness 浏览器界面、每租户独立 OS 用户与工作区、与 aigw/dsh 双向解耦（HTTP-only 集成 + 契约测试 + 导入闸门）、登录与会话、隔离强度、排障、已知限制 | **实现中（M51，主机验收待执行）** |
 | `docs/feishu.md` | 飞书身份：把 API Key 绑定到飞书账号（控制台绑定/解绑、1:1 唯一性）、用飞书登录 DSH 门户（一次性票据 + 账号级复核）、**飞书后台配置步骤**、隐私与审计口径、错误码排障 | **已实现（M60 绑定 + M61 门户登录；真机验收依赖飞书应用登记）** |
+| `docs/deployment-layout.md` | 部署布局与**单一数据根**：数据/产物/运行时安装三分法、每个默认值的落点、相对路径规则（以部署根为基准）、本机布局、迁移与下线 runbook | **已实现（M63）** |
 
 ## 构建
 
@@ -127,6 +128,12 @@ make dshgw-verify  # 独立 dshgw 测试/构建/契约，不并入 aigw verify
 
 配置项见 `config.example.yaml`；管理控制台在 `http://<listen>/admin/ui/`（首次用 bootstrap 里的管理员账号登录）。
 
+**数据落在哪**：所有运行态数据默认在**部署根**的 `./data` 之下（库、日志、pid、备份、插件状态、dshgw 租户状态），
+配置（`config.yaml`、`dshgw.yaml`、`gwproxy.yaml`）留在部署根，产物在 `bin/` 与 `plugins/`。
+相对路径以进程工作目录为基准，而用户单元的 `WorkingDirectory` 就是部署根；启动日志的
+`data_dir=` 会打印解析后的绝对路径。完整规则、每个键的默认值与迁移/下线步骤见
+[`docs/deployment-layout.md`](docs/deployment-layout.md)。
+
 ## 常用入口
 
 | 命令 / 路径 | 用途 |
@@ -148,6 +155,8 @@ make dshgw-verify  # 独立 dshgw 测试/构建/契约，不并入 aigw verify
 | `scripts/responses-thinking-smoke.sh` | `/responses` 流式思考走查：真实二进制 + 假 DeepSeek `/responses` 上游，断言客户端收到的 SSE 里思考先到、`item_id` 是上游的（无网、无 key、不花钱） |
 | `scripts/ui-badge-test.mjs`（`make ui-base`） | 左上角版本角标的 node 断言（三行 DOM shim，不需要浏览器）：两格内容、revision 为 `none` 时不显示、端点读不到时不报错 |
 | `scripts/release.sh`（skill `release-version`） | 发版：升 `VERSION`（a.b.c）→ 提交打 tag → `make build`；用法 `scripts/release.sh patch/minor/major` |
+| `scripts/move_dshgw_state.sh` | 把 dshgw 的状态树搬进数据根：搬目录 + 改写 registry 与每租户文件里的绝对路径（dry-run 默认，见 `docs/deployment-layout.md` §7） |
+| `scripts/decommission_legacy_dshgw.sh` | 归档并下线旧的 root/systemd dshgw（先归档校验、再停单元与 nginx 转发、最后删三处目录；`--apply` 需 root） |
 | `make build` / `make ui-dist` | 发布构建：`ui-dist` 生成压缩混淆镜像 + gzip 副本（`.cache/ui-dist/static` + `overlay.json`），`build` 用它嵌入 `bin/aigw` |
 | `make build-src` | 不混淆构建：写 `bin/aigw-src`，**不碰** `bin/aigw`（源码版实例仅供调试，见 M54） |
 | `make verify` | vet + 全量测试 + 控制台 node 断言 + 构建 |

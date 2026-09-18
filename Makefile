@@ -101,6 +101,7 @@ dshgw-test:
 	@test -x "$(DSHGW_NODE)" || { echo "dshgw-test: Node missing: $(DSHGW_NODE)" >&2; exit 1; }
 	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" cmd/dshgw/plugin/picker-clamp.test.mjs
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_dshgw_migration_plan.py
+	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_decommission_legacy_plan.py
 
 # The bwrap isolation mode's real acceptance: the tenant profile runs under the
 # host's own bubblewrap, and a real dsh web worker starts inside it and answers

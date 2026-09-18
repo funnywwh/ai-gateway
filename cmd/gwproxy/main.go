@@ -34,7 +34,7 @@ var (
 func main() { os.Exit(run()) }
 
 func run() int {
-	configPath := flag.String("config", "/etc/dshgw/frontproxy.yaml", "path to the proxy configuration")
+	configPath := flag.String("config", "./gwproxy.yaml", "path to the proxy configuration")
 	showVersion := flag.Bool("version", false, "print version information")
 	flag.Parse()
 	if *showVersion {

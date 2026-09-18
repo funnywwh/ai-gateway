@@ -123,6 +123,13 @@ Host 防护）。真正的差异不在上游，而在入口 nginx 是否改写�
   日常入口是同 UID 的 admin socket —— 控制台「启用/停用 DSH」走的就是它；
 - CLI 保留用于离线只读检查与产物生成。
 
+**路径（M63）**：dshgw 的数据默认全在部署根的 `./data` 之下 —— 独立形态 `state_dir: ./data/dshgw`
+（registry、sessions、audit、handshake、tenants、workspaces、template-home、backups 都由它派生），
+监督形态默认 `<database.path 所在目录>/dshgw`。相对路径在加载时按进程工作目录（部署根）归一为绝对路径；
+`node_bin`/`bin_js`/`current_link`/`bwrap_bin` 与 TLS 证书属**运行时安装**，必须是绝对路径（留空读
+`DSHGW_NODE`/`DSHGW_DSH_ROOT`）；`deploy.plugin_path` 没有默认值，`directory_picker: clamp`（默认）
+时必须显式给出，否则配置加载失败。完整口径见 [`docs/deployment-layout.md`](deployment-layout.md)。
+
 ```bash
 # 只读检查与产物（不需要 root）
 dshgw --config <state>/config.yaml doctor                    # 部署不变量：私有权限、运行时、bwrap 前置条件

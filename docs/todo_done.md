@@ -3856,3 +3856,100 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - [x] 测试：httpapi 五个结果各一条（含"曾停用不覆盖"与"供应失败不回滚绑定"）、控制台 node 用例、
       cmd/aigw 的 socket 派生；端到端 47 步全绿——并且**删掉了脚本里原先直接写 `dsh_enabled` 的 SQL**，
       因为绑定自己完成供应正是本里程碑要证明的事
+
+## M63 完成记录（单一数据根：数据默认落在 ./data）
+
+需求原话：「这个部署路径太乱了，数据都应该默认放在 ./data 目录下」。
+设计：`docs/design/m63-data-root.md`；规格：`docs/deployment-layout.md`（新文档，README 文档表已加行）。
+三项用户决策：配置放部署根（与 `config.yaml` 并排）、旧二进制全部归拢 `./data/prev/` 保留、
+遗留 root 形态「直接删除，只留归档」。
+
+### 代码：默认值 + 相对路径归一
+
+- [x] `internal/config`：新增 `DefaultDataDir = "./data"` 与 `dataPath()`，`Default()` 的
+      `database.path`/`plugins.state_dir`/`billing.fallback_file`/`hooks.dead_letter`/`backup.dir`
+      全部由它派生；`plugins.dir` 保持 `./plugins`（产物不是数据）
+- [x] `internal/hook`、`internal/pluginhost` 的默认值保持本地字面量（分层表禁止它们 import
+      `internal/config`），改由新增测试钉住三者指向同一个数据根
+- [x] `internal/dshgw/config`：默认值从 `/var/lib/dshgw`、`/srv/dsh`、`/opt/dshgw/share/*`、
+      `/home/winger/backups/dshgw`、`/etc/dshgw/config.yaml` 改为
+      `./data/dshgw` 及其派生（tenant/workspace/template/backup/tenant-config/admin.sock）；
+      新增 `resolvePaths()`（相对路径按工作目录归一、`..` 拒绝）；`dsh.*` 空值走
+      `DSHGW_NODE`/`DSHGW_DSH_ROOT`；`deploy.plugin_path` 无默认值，`clamp` 时必须显式
+- [x] `internal/frontproxy`：`registry_path` 默认 `./data/dshgw/registry.json`，相对路径归一
+- [x] `cmd/dshgw`/`cmd/gwproxy` 的 `-config` 默认改为 `./dshgw.yaml`、`./gwproxy.yaml`
+- [x] `cmd/aigw`：`stateDir`/`tenant_root`/`workspace_root`/`template_home`/`plugin_path` 统一归一为
+      绝对路径（**修掉一个真缺陷**：默认相对库路径下 `<db 目录>/dshgw` 非绝对，监督形态直接启动失败）；
+      `template_home` 默认 `<state_dir>/template-home`（**修掉隐藏的 `/opt` 回落**）；clamp 缺
+      `plugin_path` 在启动期报错；启动日志新增 `data_dir=`（解析后的数据根）与子进程 `state_dir=`
+- [x] **顺带修掉两个既有缺陷**：① `deploy.tenant_config_root` 默认曾等于 `tenant_root`，
+      那会把 `gateway.key` 放进 worker 会绑进沙箱的那棵树；现为 `<state_dir>/tenant-config`
+      ② `admin_socket` 在独立形态没有默认值，`serve` 只在配置了 socket 时才起供应通道 —— 现在派生
+      `<state_dir>/admin.sock`（与监督形态同一位置）
+- [x] 示例与脚本：`config.example.yaml`（dshgw 段路径说明）、`deploy/dshgw/config.example.yaml`
+      （相对路径、去掉 `/home/winger`）、`deploy/dshgw/frontproxy.example.yaml`、
+      `deploy/dshgw/prepare-template.sh`（模板默认进数据根）、`scripts/verify-dshgw.sh`
+      （改为把相对示例重写进 `$TMP`，不再依赖示例里的机器路径）、`.gitignore` 加 `/dshgw.yaml`、`/gwproxy.yaml`
+
+### 测试
+
+- [x] 新增 `internal/config/dataroot_test.go`：数据路径都在 `./data` 下、`plugins.dir` 不在其内、
+      三个包的默认值一致、`DefaultDataDir` 的字面值
+- [x] 新增 `internal/dshgw/config/dataroot_test.go`：默认全部落在 `<wd>/data/dshgw`、
+      `tenant-config ≠ tenant-root`、相对路径归一（`./data/../dshgw` 被拒）、`DSHGW_*` 兜底、
+      **缺运行时不再是配置错误**（留给 `doctor` 报）
+- [x] `cmd/aigw`：相对库路径 → `<wd>/data/dshgw`，且生成的子配置能被 `dshgw config.Load` 反向解析
+      （这条在改动前必然失败）；空 `plugin_path` 报错点名；`./data/../elsewhere` 被拒
+- [x] `internal/frontproxy`：相对 registry 归一、默认与显式写法一致、`..` 被拒；
+      原来"relative registry accepted"的期望改为"unclean registry rejected"
+- [x] `make verify` 全绿（56 个包 + vet + 控制台 node 断言 + 构建）；
+      `make dshgw-test` 全绿（含既有 migration plan 测试与新增的下线 plan 测试）
+
+### D：旧产物归拢与缓存清理（本机实测）
+
+- [x] `bin/aigw.prev-*`（13 份）、`data/aigw.prev-running-*`（2 份）、仓库根陈旧 `./aigw`
+      → `./data/prev/bin/`（共 317M，全部保留）；`data/prev/README.md` 逐条记录来源、版本自述与回滚命令。
+      仓库根那份 `./aigw` 是**被误提交进 git 的调试构建**（`dev`/源码形态控制台，与 `bin/aigw` 不同），
+      本次从工作树删除并在归档里留名
+- [x] 删空目录 `~/.local/share/dshgw-e2e`
+- [x] `.cache/` 按白名单清理：保留 `gobuild`/`go-build-test`/`gomod`/`ui-dist`（工具链与构建依赖），
+      删掉 163 个一次性探针与界面快照目录 —— **14G → 5.7G，释放 8.4G**
+
+### B：本机验证栈搬进数据根（本机实测）
+
+- [x] 新增 `scripts/move_dshgw_state.sh`（默认 dry-run；拒绝在有进程占用该状态树时搬移）
+- [x] `systemctl --user stop gwproxy-verify dshgw-verify` → 备份两个 unit → 搬 `state/`、
+      `template-home/`、`current`、日志到 `./data/dshgw-verify/`，并改写 **15 个** dshgw 管理的文件里
+      嵌的绝对路径（`registry.json`、每租户 `cordis.patch.yml`、`workspace.json`、session 缓存）；
+      `workspaces/**` 与 `template-home/**` 明确不动，搬完 grep 断言无残留
+- [x] 配置搬到部署根：`./dshgw.yaml`（state 相对、`plugin_path` 相对仓库、session/audit/activity 三项
+      显式保留既有位置 —— 新默认在 `<state>/gateway/`，丢掉会让所有登录会话作废）、
+      `./gwproxy.yaml`（`registry_path: ./data/dshgw-verify/state/registry.json`）；
+      两个 unit 改成 `WorkingDirectory=<部署根>` + `--config ./…` + 日志进数据根；旧目录删除
+- [x] 验收：`doctor` 39 项 OK（仅测试租户 `verify1` 的两项缺失，属既有状态）；
+      门户 `:18300` 200；gwproxy `/version` 200、`/t/<租户>/` 302 到该租户自己的 origin；
+      **5 个 worker（含 4 个真实租户）全部 401**，bwrap 绑定路径已指向新数据根；
+      admin socket 可用（`nc -U data/dshgw-verify/state/admin.sock` 返回 `tenant-list`）
+- [x] `bin/dshgw --config ./dshgw.yaml doctor` 通过后重启 `aigw-local`：`:8088/version` 200、
+      `/admin/ui/` 200、启动日志
+      `aigw starting version=1.3.0 … data_dir=/home/winger/work/ai_gateway/data`，重启后 `level=ERROR` 0 条
+
+### C：遗留 root 形态的下线脚本（待宿主 sudo 执行）
+
+- [x] 新增 `scripts/decommission_legacy_dshgw.sh`（默认 dry-run、`--apply` 需 root）：
+      清单（读旧配置里的 `state_dir`/`registry_path`/`nginx_include_path`）→ 归档三棵树 + 单元文件 +
+      二进制版本 → **校验归档可读且含 registry.json** → 停 8 个单元 → 删 nginx 的 dshgw 转发
+      （`nginx -t` + reload）→ 删 `/opt/dshgw`、`/etc/dshgw`、`/var/lib/dshgw` → 复核；
+      账号删除是独立开关（默认不做）
+- [x] 新增 `scripts/test_decommission_legacy_plan.py`（并入 `make dshgw-test`）：合成夹具断言
+      "归档 → 停服 → 校验 → 删除"的顺序、归档覆盖面（state/etc/nginx/unit 文件）与 dry-run 零执行
+- [x] 本机 dry-run 复核：识别 8 个单元与 `dsh-worker@<dsh-e26q|dsh-tenant|dsh-dshgw-e2e-a/b|m51-e2e-…>`，
+      计划里归档在停服之前、删除在最后；未执行任何更改
+
+### 文档
+
+- [x] 设计文档 `docs/design/m63-data-root.md`、规格文档 `docs/deployment-layout.md`（三分法、默认值表、
+      相对路径规则、本机布局、迁移/下线 runbook、排障表）；README 文档表与「运行」章、`docs/dshgw.md`、
+      `deploy/dshgw/README.md`（§2 路径规则、§8.1 下线、§8.2 搬移、§10 本机布局）、
+      skill `release-version`（gpt001 的数据根规则）同步更新
+- [x] 未发版：`VERSION` 仍 1.3.0；默认值与配置语义有变化，如需对外声明版本按 skill 走 minor（记在 TODO）

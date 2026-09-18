@@ -85,7 +85,9 @@ type Config struct {
 	NoStoreAPIs *bool `yaml:"no_store_apis"`
 	// RegistryPath is dshgw's registry.json, read to learn each tenant's public
 	// port. Reading the same file the gateway reads is what stops the proxy and
-	// the gateway from disagreeing about a tenant's identity.
+	// the gateway from disagreeing about a tenant's identity. The default is the
+	// supervised shape's registry inside the single data root; relative paths are
+	// resolved against the process working directory (the deployment root).
 	RegistryPath string `yaml:"registry_path"`
 	// RegistryReload is how often the registry is re-read. Zero means 2s.
 	RegistryReload Seconds `yaml:"registry_reload"`
@@ -163,6 +165,12 @@ func (c *Config) applyDefaults() {
 	if strings.TrimSpace(c.TenantPrefix) == "" {
 		c.TenantPrefix = "/t"
 	}
+	// The default points into the single data root (M63): the supervised dshgw writes
+	// its registry to <data>/dshgw/registry.json, so an unconfigured proxy in the same
+	// deployment reads it without either side naming a machine path.
+	if strings.TrimSpace(c.RegistryPath) == "" {
+		c.RegistryPath = "./data/dshgw/registry.json"
+	}
 	if c.RegistryReload <= 0 {
 		c.RegistryReload = 2
 	}
@@ -228,7 +236,23 @@ func (c *Config) Validate() error {
 		return errors.New("portal_port must be between 1 and 65535")
 	}
 	if !filepath.IsAbs(c.RegistryPath) {
-		return errors.New("registry_path must be an absolute path")
+		// A relative registry_path is configuration, not an oversight: resolve it against
+		// the deployment root (the process working directory) so ./data/dshgw/registry.json
+		// keeps working while the checks below still see one canonical form. ".." is
+		// refused: a relative path may point deeper into the deployment, not out of it.
+		for _, elem := range strings.Split(filepath.ToSlash(c.RegistryPath), "/") {
+			if elem == ".." {
+				return fmt.Errorf("registry_path %q must not contain \"..\"; use an absolute path to leave the deployment root", c.RegistryPath)
+			}
+		}
+		abs, err := filepath.Abs(c.RegistryPath)
+		if err != nil {
+			return fmt.Errorf("registry_path %q is not usable: %w", c.RegistryPath, err)
+		}
+		c.RegistryPath = abs
+	}
+	if filepath.Clean(c.RegistryPath) != c.RegistryPath {
+		return fmt.Errorf("registry_path must be a clean path (got %q)", c.RegistryPath)
 	}
 	for _, prefix := range c.APIPaths {
 		if !strings.HasPrefix(prefix, "/") || prefix == "/" {

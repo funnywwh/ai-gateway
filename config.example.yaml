@@ -252,6 +252,19 @@ dshgw:
   # default) presumes https in port mode; a plain-HTTP deployment must say "http", or the
   # child issues Secure cookies that the browser silently discards.
   public_scheme: auto         # auto|http|https
+  # Paths (M63, see docs/deployment-layout.md): the child's state defaults to
+  # "<database.path 所在目录>/dshgw" — i.e. ./data/dshgw with the defaults above — and its
+  # template/tenant/workspace/backup roots derive from it. Relative values are resolved
+  # against the deployment root (the unit's WorkingDirectory), so a deployment never has to
+  # write its own absolute prefix; only the dsh runtime is machine-specific.
+  #
+  # state_dir: ./data/dshgw     # optional: unset = <database.path 所在目录>/dshgw
+  # template_home: ./data/dshgw/template-home   # built by deploy/dshgw/prepare-template.sh
+  # plugin_path: ./cmd/dshgw/plugin/picker-clamp.js
+  #   ↑ required while the child's directory_picker is clamp (its default): the picker is a
+  #     plugin the tenant worker imports, and an unset path is refused at startup instead of
+  #     silently falling back to an installation path.
+  # node_bin / current_link: empty reads DSHGW_NODE / DSHGW_DSH_ROOT (runtime installs).
 
 # Feishu (Lark) identity (M60/M61): bind API keys to Feishu accounts, and let those people
 # sign in to the DSH portal without pasting a key. Off by default, and while it is off

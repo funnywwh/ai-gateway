@@ -42,6 +42,11 @@ type Config struct {
 }
 
 // DefaultConfig returns sane defaults (mirrors the YAML defaults).
+//
+// StateDir repeats internal/config's default data root ("./data") literally instead of
+// importing it: this package sits above config in the layering table and must not reach
+// into it for a string. The two are pinned together by a test, because a plugin state
+// directory that disagrees with the configured one is a silent second data root (M63).
 func DefaultConfig() Config {
 	return Config{
 		Dir:                  "./plugins",

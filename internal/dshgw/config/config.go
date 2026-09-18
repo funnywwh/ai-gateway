@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -18,7 +19,18 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const DefaultPath = "/etc/dshgw/config.yaml"
+// DefaultPath is where a standalone `dshgw` looks for its configuration when no
+// -config is given: the deployment root, next to aigw's config.yaml. It used to be
+// /etc/dshgw/config.yaml, which belonged to the deleted root/systemd shape and put the
+// one file an operator edits in a directory the running account cannot write (M63).
+const DefaultPath = "./dshgw.yaml"
+
+// defaultDataRoot is the single runtime data root for the standalone shape. It repeats
+// internal/config's DefaultDataDir literally on purpose: the arch table forbids
+// internal/dshgw/** from importing any other internal package, and a second data root
+// hidden behind a convenience import would be worse than the literal (see
+// docs/deployment-layout.md).
+const defaultDataRoot = "./data"
 
 var tenantNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,25}[a-z0-9]$|^[a-z]$`)
 var edgeHeaderRE = regexp.MustCompile(`(?i)^x-[a-z0-9]+(?:-[a-z0-9]+)*$`)
@@ -252,16 +264,22 @@ func defaults() Config {
 		WorkspaceSeed:       []string{"work"},
 		ReservedNames:       []string{"login", "dshgw"},
 		Dsh: DshRuntime{
-			NodeBin:     "/opt/dsh/node/bin/node",
-			BinJS:       "/opt/dsh/current/lib/bin.js",
-			CurrentLink: "/opt/dsh/current",
+			// Empty means "ask the environment": DSHGW_NODE / DSHGW_DSH_ROOT, the same
+			// rule aigw's supervised shape uses. The old defaults pointed at /opt/dsh,
+			// the layout of the deleted root install, so an unconfigured host silently
+			// got a path that only existed on the machine this repository grew up on.
+			NodeBin:     "",
+			BinJS:       "",
+			CurrentLink: "",
 		},
-		WorkspaceRoot: "/srv/dsh",
-		StateDir:      "/var/lib/dshgw",
+		// Every stateful path below is derived from the data root in applyDerivedDefaults.
+		StateDir: defaultDataRoot + "/dshgw",
 		Deploy: DeployConfig{
-			PluginPath:   "/opt/dshgw/share/dsh-plugin/picker-clamp.js",
-			TemplateHome: "/opt/dshgw/share/template-home",
-			BackupDir:    "/home/winger/backups/dshgw",
+			// No default: the picker plugin ships with the repository
+			// (cmd/dshgw/plugin/picker-clamp.js), so an operator names it — silently
+			// inheriting /opt/dshgw/share/dsh-plugin/picker-clamp.js produced a
+			// file:// URL pointing at a path that may not exist (M63).
+			PluginPath:   "",
 			ConfigPath:   DefaultPath,
 			GatewayUser:  "dshgw",
 			BwrapBin:     "/usr/bin/bwrap",
@@ -298,6 +316,9 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("dshgw config %s: trailing YAML: %w", path, err)
 	}
 	cfg.applyDerivedDefaults()
+	if err := cfg.resolvePaths(); err != nil {
+		return nil, fmt.Errorf("dshgw config %s: %w", path, err)
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("dshgw config %s: %w", path, err)
 	}
@@ -329,13 +350,15 @@ func (c *Config) applyDerivedDefaults() {
 	if c.Deploy.WorkerUser == "" {
 		c.Deploy.WorkerUser = c.Deploy.GatewayUser
 	}
-	// The per-tenant configuration (today: the gateway's copy of the tenant key)
-	// lives under the state directory. It cannot stay at /etc/dshgw/tenants: that
-	// path is root-owned in a host installation, and this shape runs as an
-	// ordinary account. It is still a separate directory from the tenant's own
-	// .dsh so the sandbox never mounts it (see internal/dshgw/sandbox).
+	// The per-tenant configuration (today: the gateway's copy of the tenant key) lives
+	// under the state directory. It cannot stay at /etc/dshgw/tenants: that path is
+	// root-owned in a host installation, and this shape runs as an ordinary account.
+	// It is still a separate directory from the tenant's own .dsh so the sandbox never
+	// mounts it (see internal/dshgw/sandbox) — which is why it must NOT share the tenant
+	// root either: gateway.key inside <tenant_root>/<t> would be inside the tree the
+	// worker binds.
 	if c.Deploy.TenantConfigRoot == "" {
-		c.Deploy.TenantConfigRoot = filepath.Join(c.StateDir, "tenants")
+		c.Deploy.TenantConfigRoot = filepath.Join(c.StateDir, "tenant-config")
 	}
 	if c.RegistryPath == "" {
 		c.RegistryPath = filepath.Join(c.StateDir, "registry.json")
@@ -355,9 +378,104 @@ func (c *Config) applyDerivedDefaults() {
 	if c.HandshakeDir == "" {
 		c.HandshakeDir = filepath.Join(c.StateDir, "handshake")
 	}
+	// The provisioning channel's socket sits beside the state it provisions, at the same
+	// derived location the supervised shape uses (cmd/aigw derives <state>/admin.sock too),
+	// so a standalone deployment and a console talking to it agree without configuration.
+	// Leaving it empty silently disabled the channel: `serve` only binds a socket when one
+	// is configured.
+	if c.AdminSocket == "" {
+		c.AdminSocket = filepath.Join(c.StateDir, "admin.sock")
+	}
 	if c.TenantRoot == "" {
 		c.TenantRoot = filepath.Join(c.StateDir, "tenants")
 	}
+	// The remaining state roots hang off StateDir too, so one directory holds the whole
+	// standalone deployment (M63). TemplateHome is a state directory rather than an
+	// installed asset: prepare-template.sh builds it (with npm) into the data root, and
+	// a default under /opt/dshgw pointed at a layout that no longer exists.
+	if c.WorkspaceRoot == "" {
+		c.WorkspaceRoot = filepath.Join(c.StateDir, "workspaces")
+	}
+	if c.Deploy.TemplateHome == "" {
+		c.Deploy.TemplateHome = filepath.Join(c.StateDir, "template-home")
+	}
+	if c.Deploy.BackupDir == "" {
+		c.Deploy.BackupDir = filepath.Join(c.StateDir, "backups")
+	}
+	// The dsh runtime is an installation, not data: take it from the environment when
+	// the file does not name it, exactly as aigw's supervised shape does through
+	// cmd/aigw/dshgw_child.go. bin_js follows a named release directory.
+	if c.Dsh.NodeBin == "" {
+		c.Dsh.NodeBin = strings.TrimSpace(os.Getenv("DSHGW_NODE"))
+	}
+	if c.Dsh.CurrentLink == "" {
+		c.Dsh.CurrentLink = strings.TrimSpace(os.Getenv("DSHGW_DSH_ROOT"))
+	}
+	if c.Dsh.BinJS == "" && c.Dsh.CurrentLink != "" {
+		c.Dsh.BinJS = filepath.Join(c.Dsh.CurrentLink, "lib", "bin.js")
+	}
+}
+
+// resolvePaths turns every configured path into the absolute form the rest of dshgw
+// works with.
+//
+// Relative paths are resolved against the process working directory — the deployment
+// root, pinned by the user unit's WorkingDirectory and by scripts/local-run.sh's cd —
+// so a configuration may say ./data/dshgw and mean the directory the documentation
+// describes. Validation still rejects unclean paths afterwards: this step must not
+// become a way to smuggle ".." or a newline past the checks below.
+func (c *Config) resolvePaths() error {
+	targets := []struct {
+		label  string
+		target *string
+	}{
+		{"state_dir", &c.StateDir},
+		{"admin_socket", &c.AdminSocket},
+		{"tenant_root", &c.TenantRoot},
+		{"workspace_root", &c.WorkspaceRoot},
+		{"handshake_dir", &c.HandshakeDir},
+		{"registry_path", &c.RegistryPath},
+		{"key_map_path", &c.KeyMapPath},
+		{"session_path", &c.SessionPath},
+		{"audit_path", &c.AuditPath},
+		{"activity_path", &c.ActivityPath},
+		{"dsh.node_bin", &c.Dsh.NodeBin},
+		{"dsh.bin_js", &c.Dsh.BinJS},
+		{"dsh.current_link", &c.Dsh.CurrentLink},
+		{"deploy.plugin_path", &c.Deploy.PluginPath},
+		{"deploy.template_home", &c.Deploy.TemplateHome},
+		{"deploy.backup_dir", &c.Deploy.BackupDir},
+		{"deploy.tenant_config_root", &c.Deploy.TenantConfigRoot},
+		{"deploy.config_path", &c.Deploy.ConfigPath},
+		{"deploy.bwrap_bin", &c.Deploy.BwrapBin},
+	}
+	for _, item := range targets {
+		if *item.target == "" || filepath.IsAbs(*item.target) {
+			continue
+		}
+		// A relative path may point deeper into the deployment, never back out of it:
+		// silently cleaning ".." would let ./data/../elsewhere land outside the data root
+		// that the rest of this file promises. Writing an absolute path is the escape hatch.
+		if hasParentElement(*item.target) {
+			return fmt.Errorf("%s %q must not contain \"..\"; use an absolute path to leave the deployment root", item.label, *item.target)
+		}
+		abs, err := filepath.Abs(*item.target)
+		if err != nil {
+			return fmt.Errorf("%s %q is not a usable relative path: %w", item.label, *item.target, err)
+		}
+		*item.target = abs
+	}
+	return nil
+}
+
+// hasParentElement reports whether any element of a relative path is "..".
+func hasParentElement(path string) bool {
+	for _, elem := range strings.Split(filepath.ToSlash(path), "/") {
+		if elem == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // Validate rejects ambiguous, externally exposed, or overlapping configurations.
@@ -423,6 +541,13 @@ func (c *Config) Validate() error {
 	}
 	if c.DirectoryPicker != "clamp" && c.DirectoryPicker != "browse" {
 		return errors.New(`directory_picker must be "clamp" or "browse"`)
+	}
+	// The clamp picker is a plugin the worker imports by absolute file URL. Without a
+	// path the rendered tenant profile would carry a file:// URL pointing nowhere, and
+	// the failure would surface as a broken directory picker inside a tenant session
+	// instead of a configuration error on the host (M63).
+	if c.DirectoryPicker == "clamp" && strings.TrimSpace(c.Deploy.PluginPath) == "" {
+		return errors.New(`deploy.plugin_path is required when directory_picker is "clamp" (name the picker plugin, e.g. ./cmd/dshgw/plugin/picker-clamp.js)`)
 	}
 	if c.PluginBrowserFS != "on" && c.PluginBrowserFS != "off" {
 		return errors.New(`plugin_browser_fs must be "on" or "off"`)
@@ -511,9 +636,8 @@ func (c *Config) Validate() error {
 	paths := map[string]string{
 		"tenant_root": c.TenantRoot, "workspace_root": c.WorkspaceRoot, "handshake_dir": c.HandshakeDir,
 		"state_dir": c.StateDir, "registry_path": c.RegistryPath, "key_map_path": c.KeyMapPath,
-		"session_path": c.SessionPath, "audit_path": c.AuditPath, "activity_path": c.ActivityPath, "dsh.node_bin": c.Dsh.NodeBin, "dsh.bin_js": c.Dsh.BinJS,
-		"dsh.current_link":          c.Dsh.CurrentLink,
-		"deploy.plugin_path":        c.Deploy.PluginPath,
+		"session_path": c.SessionPath, "audit_path": c.AuditPath, "activity_path": c.ActivityPath,
+		"admin_socket":              c.AdminSocket,
 		"deploy.template_home":      c.Deploy.TemplateHome,
 		"deploy.backup_dir":         c.Deploy.BackupDir,
 		"deploy.tenant_config_root": c.Deploy.TenantConfigRoot,
@@ -521,6 +645,29 @@ func (c *Config) Validate() error {
 		"deploy.bwrap_bin":          c.Deploy.BwrapBin,
 	}
 	for label, p := range paths {
+		if !filepath.IsAbs(p) || filepath.Clean(p) != p {
+			return fmt.Errorf("%s must be a clean absolute path", label)
+		}
+		if strings.ContainsAny(p, "\r\n;{}") {
+			return fmt.Errorf("%s contains unsafe configuration characters", label)
+		}
+	}
+	// These four may legitimately be empty, and each has an owner for that case:
+	//   * the dsh runtime trio — `dshgw doctor` reports dsh-node/dsh-bin-js/dsh-current-symlink
+	//     as failing preconditions, and the contract check refuses an empty runtime. Failing
+	//     at config load instead would turn a diagnosable "not installed yet" into a config
+	//     error, and `doctor` — the command whose job is that diagnosis — could not even run.
+	//   * deploy.plugin_path — only the clamp picker imports it; the check below requires it
+	//     in exactly that case.
+	// A value that IS given must still be a clean absolute path.
+	optional := map[string]string{
+		"dsh.node_bin": c.Dsh.NodeBin, "dsh.bin_js": c.Dsh.BinJS, "dsh.current_link": c.Dsh.CurrentLink,
+		"deploy.plugin_path": c.Deploy.PluginPath,
+	}
+	for label, p := range optional {
+		if p == "" {
+			continue
+		}
 		if !filepath.IsAbs(p) || filepath.Clean(p) != p {
 			return fmt.Errorf("%s must be a clean absolute path", label)
 		}

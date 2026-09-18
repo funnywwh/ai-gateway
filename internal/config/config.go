@@ -700,6 +700,24 @@ type Bootstrap struct {
 	Tags      []BootstrapTag      `yaml:"tags"`
 }
 
+// DefaultDataDir is the single runtime data root (M63): every stateful default below
+// is derived from it through dataPath, so a deployment has exactly one writable data
+// directory and no default names a machine-specific path (/var/lib, /opt, /etc or a
+// home directory). It is relative on purpose: paths are resolved against the process
+// working directory, which both deployment entry points pin to the deployment root
+// (the user unit's WorkingDirectory, and scripts/local-run.sh's cd "$ROOT").
+//
+// Artifacts that are not runtime state — built binaries (bin/) and provider plugins
+// (plugins/) — deliberately stay outside it, and runtime installations (Node, dsh,
+// bwrap, TLS certificates) stay absolute: they describe where something is installed
+// on this machine, not where data lives.
+const DefaultDataDir = "./data"
+
+// dataPath joins one entry of the default data root. filepath.Join is not used
+// because it would clean "./data" into "data", and the leading "./" is part of what
+// the documentation, the log line and the tests read.
+func dataPath(elem string) string { return DefaultDataDir + "/" + elem }
+
 // Default returns the built-in configuration (matches config.example.yaml).
 func Default() Config {
 	return Config{
@@ -730,7 +748,7 @@ func Default() Config {
 			MaxBodyBytes: 10 * 1024 * 1024,
 		},
 		Database: Database{
-			Path:          "./data/aigw.db",
+			Path:          dataPath("aigw.db"),
 			BusyTimeoutMS: 5000,
 			WAL:           true,
 			MaxOpenConns:  16,
@@ -738,7 +756,7 @@ func Default() Config {
 		Auth: Auth{DefaultGrant: "all", KeyCacheTTLS: 30},
 		Plugins: Plugins{
 			Dir:                "./plugins",
-			StateDir:           "./data/plugin-state",
+			StateDir:           dataPath("plugin-state"),
 			StartTimeoutS:      3,
 			PingIntervalS:      15,
 			MaxRestartsPerMin:  5,
@@ -805,7 +823,7 @@ func Default() Config {
 			InvoicePeriod:         "monthly",
 			PeriodStartDay:        1,
 			Timezone:              "UTC",
-			FallbackFile:          "./data/billing-fallback.jsonl",
+			FallbackFile:          dataPath("billing-fallback.jsonl"),
 			ReconcileCron:         "0 3 * * *",
 			WriterBatchSize:       256,
 			WriterFlushMS:         20,
@@ -850,12 +868,12 @@ func Default() Config {
 			ArtifactAllowNetwork:  false,
 			UIBridgeEnabled:       true,
 		},
-		Hooks:     Hooks{QueueSize: 1024, Workers: 8, TimeoutS: 5, Retries: 5, DeadLetter: "./data/hooks-dead.jsonl"},
+		Hooks:     Hooks{QueueSize: 1024, Workers: 8, TimeoutS: 5, Retries: 5, DeadLetter: dataPath("hooks-dead.jsonl")},
 		Portal:    Portal{SessionTTLH: 12, LoginAttempts: 10},
 		RateLimit: RateLimit{Shards: 64},
 		Backup: Backup{
 			Enabled:          true,
-			Dir:              "./data/backups",
+			Dir:              dataPath("backups"),
 			Cron:             "30 3 * * *",
 			RetentionDaily:   7,
 			RetentionWeekly:  4,

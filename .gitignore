@@ -21,6 +21,11 @@ __pycache__/
 # the session secret and credentials_key, so it must never enter git history.
 # Derive your own from config.example.yaml instead.
 /config.yaml
+# The same rule for the two side binaries' configurations (M63: they live at the deployment
+# root, next to config.yaml). dshgw.yaml carries the Feishu ticket secret and this host's dsh
+# runtime paths; gwproxy.yaml names the registry of the deployment it fronts.
+/dshgw.yaml
+/gwproxy.yaml
 
 # built plugin binaries: `make plugin-example` writes bin/aigw-provider-*, and a
 # deployment copies them into plugins/ (the directory the host scans for plugins).

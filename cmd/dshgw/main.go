@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/winger/ai-gateway/internal/dshgw/config"
 )
 
 var (
@@ -30,7 +32,7 @@ func main() { os.Exit(execute(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
 func execute(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("dshgw", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	configPath := flags.String("config", "/etc/dshgw/config.yaml", "path to strict YAML configuration")
+	configPath := flags.String("config", config.DefaultPath, "path to strict YAML configuration")
 	showVersion := flags.Bool("version", false, "print version information")
 	flags.Usage = func() { printUsage(stderr) }
 	if err := flags.Parse(args); err != nil {

@@ -586,3 +586,25 @@
 - [ ] **真机验收**：控制台绑一把从未启用过 DSH 的账号的 Key → 控制台提示"已自动启用（租户 …）"
       且账户页显示已启用 → 直接门户飞书登录进入该租户；再绑一个曾被停用的账号的 Key → 提示
       "曾被显式停用，未自动启用"且账号保持停用
+
+## M63 单一数据根（数据默认落在 ./data）
+
+设计：`docs/design/m63-data-root.md`；规格：`docs/deployment-layout.md`。
+定位：把所有运行态数据的默认值收进**部署根**的 `./data`（aigw 库/日志/pid/备份/插件状态 + dshgw 的
+state/template/tenant/workspace/backup），配置留在部署根，运行时安装（node/dsh/bwrap/证书）保持绝对路径；
+同时把本机验证栈搬进 `./data`、把历史二进制归拢到 `./data/prev`、把遗留 root 形态归档下线。
+实现与自动化验收完成的条目见 `docs/todo_done.md` 同名小节。
+
+- [ ] **待宿主执行**（需要交互式 `sudo`，本会话无法执行）：遗留 root 形态的归档下线
+      `sudo scripts/decommission_legacy_dshgw.sh --apply`（计划已在本机 dry-run 复核：归档 3 棵树 +
+      nginx 转发 + 旧单元文件 → 停 8 个单元 → 校验归档含 `registry.json` → 删 `/opt/dshgw`、`/etc/dshgw`、
+      `/var/lib/dshgw`）。注意它会停掉旧形态里的真实租户 **E26Q**（`dsh_tenant=dsh-e26q`），
+      该租户的数据只留在 `data/prev/legacy-dshgw/`，需要时按归档重建
+- [ ] **可选**：`--remove-accounts`（删 `dsh-*` 账号与家目录）默认不执行，确认无其它用途后再单独跑
+- [ ] **可选（未做）**：把本机独立 dshgw 收进 aigw 监督形态（`dshgw.enabled: true`）。收益是少一个单元、
+      真正"一个部署"；代价是 aigw 每次重启都会带走全部 DSH 会话，故未纳入本次范围
+- [ ] **可选（未做）**：`data/backups` 的保留期策略（当前 12G，主库 5.8G）与 `data/aigw.db`
+      （旧示例库）的去留，另立话题
+- [ ] **待定**：本次未发版（`VERSION` 仍 1.3.0，二进制 revision 与线上相同）。默认值与配置语义有变化
+      （dshgw 默认路径、相对路径可解析、`clamp` 必须有 `plugin_path`），如需对外声明一个版本，
+      按 skill `release-version` 走 minor 并记录

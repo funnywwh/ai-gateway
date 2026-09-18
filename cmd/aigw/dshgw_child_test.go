@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/winger/ai-gateway/internal/config"
+	dshgwconfig "github.com/winger/ai-gateway/internal/dshgw/config"
 	dshgwfeishu "github.com/winger/ai-gateway/internal/dshgw/feishu"
 )
 
@@ -45,6 +46,10 @@ func childFixture(t *testing.T) (*config.Config, string) {
 			Enabled: true, PublicHost: "localhost", Listen: "127.0.0.1:31699",
 			PortalPort: 31000, TenantPortLo: 31001, TenantPortHi: 31299,
 			WorkerPortLo: 31300, WorkerPortHi: 31599,
+			// The picker plugin has no default on purpose (M63): the child's default
+			// directory picker is clamp, and an unset path used to fall through to the
+			// deleted root install's /opt/dshgw path.
+			PluginPath: filepath.Join(root, "cmd/dshgw/plugin/picker-clamp.js"),
 		},
 	}
 	return cfg, aigwBinary
@@ -362,5 +367,89 @@ func TestBuildDshgwChildDerivesTheAdminSocketForBothSides(t *testing.T) {
 	}
 	if child.adminSocket != "/run/dshgw/elsewhere.sock" || child.config.AdminSocket != "/run/dshgw/elsewhere.sock" {
 		t.Fatalf("explicit socket ignored: parent=%q child=%q", child.adminSocket, child.config.AdminSocket)
+	}
+}
+
+// M63: the state root hangs off the database's directory, and the shipped defaults spell
+// that directory relatively (./data). Before this milestone the derived value was rejected
+// as "not absolute", so the supervised shape could not start at all with the default
+// configuration — the child's own validation requires clean absolute paths, so aigw is the
+// side that resolves the deployment's relative data root.
+func TestBuildDshgwChildResolvesTheRelativeDataRoot(t *testing.T) {
+	cfg, aigwBinary := childFixture(t)
+	cfg.Database.Path = "./data/aigw.db"
+	cfg.Dshgw.StateDir = ""
+	cfg.Dshgw.TenantRoot = ""
+	cfg.Dshgw.WorkspaceRoot = ""
+	cfg.Dshgw.TemplateHome = ""
+	// The fixture exports DSHGW_TEMPLATE_HOME; clear it so the derived default is what is
+	// exercised here (the environment still wins when it is set, which is how the
+	// repository's own template script points at a prepared profile).
+	t.Setenv("DSHGW_TEMPLATE_HOME", "")
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantState := filepath.Join(wd, "data", "dshgw")
+
+	child, err := buildDshgwChild(cfg, aigwBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated := child.config
+	checks := map[string]string{
+		"state dir":      generated.StateDir,
+		"tenant root":    generated.TenantRoot,
+		"workspace root": generated.WorkspaceRoot,
+		"template home":  generated.Deploy.TemplateHome,
+		"config path":    child.configPath,
+	}
+	for label, got := range checks {
+		if got != wantState && !strings.HasPrefix(got, wantState+string(filepath.Separator)) {
+			t.Errorf("%s = %q, want it inside %q", label, got, wantState)
+		}
+	}
+	if !filepath.IsAbs(generated.Deploy.TemplateHome) {
+		t.Errorf("template home = %q, want an absolute path: it used to be left empty, which made the child fall back to its own /opt/dshgw default", generated.Deploy.TemplateHome)
+	}
+
+	// Round trip: what aigw renders must be loadable by the child. This is the guard
+	// against "aigw writes a path the child rejects", which is how the relative default
+	// failed before.
+	rendered, err := generated.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "child.yaml")
+	if err := os.WriteFile(path, rendered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dshgwconfig.Load(path); err != nil {
+		t.Fatalf("the generated child configuration does not load: %v", err)
+	}
+}
+
+// The picker plugin has no default: the child's default directory picker is clamp, and an
+// unset path used to fall through to the deleted root install's
+// /opt/dshgw/share/dsh-plugin/picker-clamp.js. A missing value is a startup error naming
+// the setting, not a tenant session with a picker pointing nowhere.
+func TestBuildDshgwChildRequiresThePickerPlugin(t *testing.T) {
+	cfg, aigwBinary := childFixture(t)
+	cfg.Dshgw.PluginPath = ""
+	_, err := buildDshgwChild(cfg, aigwBinary)
+	if err == nil {
+		t.Fatal("an empty dshgw.plugin_path was accepted")
+	}
+	if !strings.Contains(err.Error(), "plugin_path") {
+		t.Fatalf("error does not name the missing setting: %v", err)
+	}
+}
+
+// A relative path may point deeper into the deployment, never back out of it.
+func TestBuildDshgwChildRejectsParentTraversal(t *testing.T) {
+	cfg, aigwBinary := childFixture(t)
+	cfg.Dshgw.StateDir = "./data/../elsewhere"
+	if _, err := buildDshgwChild(cfg, aigwBinary); err == nil {
+		t.Fatal("a state dir climbing out of the deployment root was accepted")
 	}
 }

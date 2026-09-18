@@ -1,9 +1,16 @@
 # dshgw 配置示例（M58 形态：dshgw 是 aigw 的子进程，以同一个非特权账号运行）
 #
 # 两种用法：
-#  1) 由 aigw 生成（推荐）：aigw 在启动 dshgw 前把这份配置写到自己的数据目录，
-#     路径全部指向 aigw 自己的 state/workspace，不需要 root，也不需要 /etc/dshgw；
-#  2) 手工跑 `dshgw serve`（用于调试）：把下面的路径改成当前用户可读写的绝对路径。
+#  1) 由 aigw 生成（推荐）：aigw 在启动 dshgw 前把这份配置写到自己的数据目录
+#     （<aigw 数据根>/dshgw/config.yaml），路径全部由 aigw 解析成绝对路径；
+#  2) 手工跑 `dshgw serve`：默认配置路径是部署根的 ./dshgw.yaml（`-config` 可覆盖）。
+#
+# 关于路径（M63，见 docs/deployment-layout.md）：
+#   * 数据一律落在部署根的 ./data 之下；下面的相对路径以**进程工作目录**为基准，
+#     加载时会归一成绝对路径。要写到别处请写绝对路径（`..` 不允许）。
+#   * 运行时安装（dsh/node、bwrap、TLS 证书）不是数据，必须是绝对路径；留空则读
+#     DSHGW_NODE / DSHGW_DSH_ROOT 环境变量。
+#   * 本示例给出的是"单机部署"值：先用 `dshgw doctor` 看它在你机器上缺什么。
 #
 # 已删除的键（旧 root/systemd/nginx 形态）：deploy.systemd_dir / nginx_dir /
 # nginx_include_path / nginx_binary / dshgw_binary / corepack_bin / worker_unit /
@@ -24,9 +31,9 @@ validate_timeout: 5s
 session_ttl: 168h
 key_revalidate: off              # off | per-request | interval:<seconds>
 dsh_enforce: login               # login | per-request | interval:<seconds>
-# 控制台「启用/停用 DSH」用的本地通道。rootless 形态下它属于当前账号，
-# 因此不再需要 uid 白名单：只允许同 UID 连接。
-admin_socket: /run/user/1000/dshgw/admin.sock
+# 控制台「启用/停用 DSH」用的本地通道默认在 <state_dir>/admin.sock（rootless 形态下它
+# 属于当前账号，只接受同 UID 连接）；想放到别处再显式给出：
+# admin_socket: /run/user/1000/dshgw/admin.sock
 login_rate:
   requests: 10
   window: 1m
@@ -34,20 +41,16 @@ directory_picker: clamp          # clamp | browse
 plugin_browser_fs: on
 workspace_seed: [work]
 reserved_names: [login, dshgw]
-state_dir: /home/winger/.local/share/dshgw
-tenant_root: /home/winger/.local/share/dshgw/tenants
-workspace_root: /home/winger/.local/share/dshgw/workspaces
-handshake_dir: /home/winger/.local/share/dshgw/handshake
+state_dir: ./data/dshgw           # 数据根；下面未写出的 state 路径都由它派生
+# 运行时安装（本机实际位置；也可以用 DSHGW_NODE / DSHGW_DSH_ROOT 环境变量）
 dsh:
   node_bin: /home/winger/.local/node-v22.23.1-linux-x64/bin/node
   bin_js: /home/winger/.local/dsh-0.1.2-rc.1/lib/bin.js
   current_link: /home/winger/.local/dsh-0.1.2-rc.1
 deploy:
-  plugin_path: /home/winger/work/ai_gateway/cmd/dshgw/plugin/picker-clamp.js
-  template_home: /home/winger/.local/share/dshgw/template-home
-  backup_dir: /home/winger/.local/share/dshgw/backups
-  tenant_config_root: /home/winger/.local/share/dshgw/tenant-config
-  config_path: /home/winger/.local/share/dshgw/config.yaml
+  # 目录选择器插件没有默认值：directory_picker 为 clamp 时**必须**给出，否则配置加载失败。
+  # 本仓库自带一份：cmd/dshgw/plugin/picker-clamp.js（相对部署根即可）。
+  plugin_path: ./cmd/dshgw/plugin/picker-clamp.js
   gateway_user: winger           # 网关自己以谁运行（aigw 的账号）
   worker_user: winger            # 所有租户 worker 以谁运行：必须是已存在的非 root 账号
   bwrap_bin: /usr/bin/bwrap

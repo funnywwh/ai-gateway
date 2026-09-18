@@ -66,6 +66,8 @@ ssh gpt001 'set -e
 ```
 
 `/opt/aigw/config.yaml` 与 `/opt/aigw/data/` 不由发布流程改动；发布只换二进制。
+gpt001 的形态正好符合 M63 的规则：**配置在部署根、数据在部署根的 `./data`**（见
+`docs/deployment-layout.md`）。发布时不要顺手改配置里的路径；要搬数据就按那份文档 §7 的 runbook 走。
 
 ### 4. 验证（必做，缺一不可）
 
