@@ -167,7 +167,11 @@ func (m *Manager) createLocked(ctx context.Context, name, key string, models []s
 		return created, err
 	}
 	created = registry.Tenant{Name: name, PublicPort: pub, WorkerPort: worker, KeyPrefix: key[:12], DshHome: filepath.Join(m.Config.TenantRoot, name, ".dsh"), Workspace: filepath.Join(m.Config.WorkspaceRoot, name), CreatedAt: m.now(), Handshake: registry.HandshakePending, DirectoryPicker: picker, PluginBrowserFS: browser, ModelsPending: len(models) == 0, Isolation: registry.IsolationBwrap}
-	paths := []string{filepath.Dir(created.DshHome), created.Workspace, filepath.Join(m.Config.Deploy.TenantConfigRoot, name)}
+	// The tenant's own roots. They are deduplicated because a deployment may point
+	// tenant_config_root and tenant_root at the same directory: the layout is the
+	// operator's business, and creating the same path twice is not an error worth
+	// failing a tenant over.
+	paths := dedupePaths(filepath.Dir(created.DshHome), created.Workspace, filepath.Join(m.Config.Deploy.TenantConfigRoot, name))
 	handshakePath := filepath.Join(m.Config.HandshakeDir, name+".url")
 	// A removed tenant may deliberately retain its data. Never adopt or clean
 	// up an existing destination, including a dangling symlink.
@@ -266,7 +270,7 @@ func (m *Manager) createLocked(ctx context.Context, name, key string, models []s
 		probe = m.probeWorker
 	}
 	if err = probe(ctx, created); err != nil {
-		return created, fmt.Errorf("worker readiness probe: %w", err)
+		return created, fmt.Errorf("worker readiness probe: %w (worker output: %s)", err, m.workers().Output(created.Name))
 	}
 	if err = m.Registry.SetHandshake(name, registry.HandshakeOK); err != nil {
 		return created, err
@@ -367,6 +371,20 @@ func copyTree(src, dst string) error {
 	}
 }
 
+// dedupePaths removes repeated and nested-equal paths, preserving order.
+func dedupePaths(paths ...string) []string {
+	seen := make(map[string]bool, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		out = append(out, path)
+	}
+	return out
+}
+
 func (m *Manager) probeWorker(ctx context.Context, t registry.Tenant) error {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
@@ -409,7 +427,10 @@ func (m *Manager) Restart(ctx context.Context, t registry.Tenant) error {
 	if err := m.workers().Restart(ctx, t); err != nil {
 		return err
 	}
-	return m.ProbeWorker(ctx, t)
+	if err := m.ProbeWorker(ctx, t); err != nil {
+		return fmt.Errorf("worker readiness probe: %w (worker output: %s)", err, m.workers().Output(t.Name))
+	}
+	return nil
 }
 
 // StopWorker stops the worker and records the durable intent, so restarting aigw
@@ -431,7 +452,10 @@ func (m *Manager) StartWorker(ctx context.Context, t registry.Tenant) error {
 	if err := m.startWorker(ctx, t); err != nil {
 		return err
 	}
-	return m.ProbeWorker(ctx, t)
+	if err := m.ProbeWorker(ctx, t); err != nil {
+		return fmt.Errorf("worker readiness probe: %w (worker output: %s)", err, m.workers().Output(t.Name))
+	}
+	return nil
 }
 
 // Enable is the console's durable on/off toggle for one tenant's DSH.
@@ -481,6 +505,29 @@ func (m *Manager) refreshModelsBeforeStart(ctx context.Context, t registry.Tenan
 		return fmt.Errorf("refreshing models for %s before starting its worker: %w", t.Name, err)
 	}
 	return nil
+}
+
+// StartWorkers brings up every tenant the registry says should be running. It is
+// the startup path of the supervised shape: no systemd enablement exists to do it,
+// so dshgw itself restores the tenants that were not suspended.
+//
+// It refreshes each tenant's models first (through the same hook a manual start
+// uses) and reports per-tenant failures instead of stopping at the first one.
+func (m *Manager) StartWorkers(ctx context.Context) error {
+	var failures []error
+	for _, tenant := range m.Registry.List() {
+		if tenant.Suspended {
+			continue
+		}
+		if err := m.startWorker(ctx, tenant); err != nil {
+			failures = append(failures, fmt.Errorf("tenant %s: %w", tenant.Name, err))
+			continue
+		}
+		if err := m.ProbeWorker(ctx, tenant); err != nil {
+			failures = append(failures, fmt.Errorf("tenant %s readiness: %w (worker output: %s)", tenant.Name, err, m.workers().Output(tenant.Name)))
+		}
+	}
+	return errors.Join(failures...)
 }
 
 // setSuspended persists the operator's intent for one tenant.

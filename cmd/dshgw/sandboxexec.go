@@ -88,6 +88,7 @@ func sandboxRuntimeConfig(cfg *config.Config) sandbox.Runtime {
 		TenantRoot:       cfg.TenantRoot,
 		WorkspaceRoot:    cfg.WorkspaceRoot,
 		TenantConfigRoot: cfg.Deploy.TenantConfigRoot,
+		PluginPath:       cfg.Deploy.PluginPath,
 	}
 }
 

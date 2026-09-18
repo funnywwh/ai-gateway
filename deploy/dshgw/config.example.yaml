@@ -41,13 +41,12 @@ handshake_dir: /home/winger/.local/share/dshgw/handshake
 dsh:
   node_bin: /home/winger/.local/node-v22.23.1-linux-x64/bin/node
   bin_js: /home/winger/.local/dsh-0.1.2-rc.1/lib/bin.js
-  releases_root: /home/winger/.local
   current_link: /home/winger/.local/dsh-0.1.2-rc.1
 deploy:
   plugin_path: /home/winger/work/ai_gateway/cmd/dshgw/plugin/picker-clamp.js
   template_home: /home/winger/.local/share/dshgw/template-home
   backup_dir: /home/winger/.local/share/dshgw/backups
-  tenant_config_root: /home/winger/.local/share/dshgw/tenants
+  tenant_config_root: /home/winger/.local/share/dshgw/tenant-config
   config_path: /home/winger/.local/share/dshgw/config.yaml
   gateway_user: winger           # 网关自己以谁运行（aigw 的账号）
   worker_user: winger            # 所有租户 worker 以谁运行：必须是已存在的非 root 账号

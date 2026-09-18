@@ -81,15 +81,20 @@ func (o Options) withDefaults() Options {
 type Supervisor struct {
 	opts Options
 
-	mu       sync.Mutex
-	cmd      *exec.Cmd
-	pid      int
-	ready    bool
-	stopping bool
-	started  bool
-	restarts []time.Time
-	lastErr  error
-	lines    *lineRing
+	mu    sync.Mutex
+	cmd   *exec.Cmd
+	pid   int
+	ready bool
+	// readySignalled records that Start's wait has already been released. It is
+	// deliberately separate from ready: a restarted child reports readiness again,
+	// and closing the same channel twice would panic. Only Start waits, and only
+	// once, so the signal is one-shot while ready stays per-child.
+	readySignalled bool
+	stopping       bool
+	started        bool
+	restarts       []time.Time
+	lastErr        error
+	lines          *lineRing
 
 	done    chan struct{}
 	readyCh chan struct{}
@@ -323,11 +328,12 @@ func (s *Supervisor) isReady() bool {
 
 func (s *Supervisor) markReady() {
 	s.mu.Lock()
-	first := !s.ready
 	s.ready = true
+	alreadySignalled := s.readySignalled
+	s.readySignalled = true
 	readyCh := s.readyCh
 	s.mu.Unlock()
-	if first && readyCh != nil {
+	if !alreadySignalled && readyCh != nil {
 		close(readyCh)
 	}
 }

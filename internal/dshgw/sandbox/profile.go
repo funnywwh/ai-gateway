@@ -61,9 +61,14 @@ type Runtime struct {
 	TenantRoot string
 	// WorkspaceRoot is the parent of every tenant workspace.
 	WorkspaceRoot string
-	// TenantConfigRoot holds per-tenant root-owned config (tenant.env,
-	// gateway.key); only the tenant's own directory is exposed, read-only.
+	// TenantConfigRoot holds per-tenant configuration (the gateway's copy of the
+	// tenant key); it is deliberately NOT mounted.
 	TenantConfigRoot string
+	// PluginPath is the directory-picker plugin the tenant profile imports. It
+	// lives outside every other bound tree, so the sandbox must bind its directory
+	// explicitly — without it dsh fails to boot inside the tenant (the profile's
+	// cordis patch imports this file by absolute path).
+	PluginPath string
 }
 
 // Tenant is the subset of a registry tenant a profile needs.
@@ -131,6 +136,14 @@ func Profile(rt Runtime, t Tenant) ([]string, error) {
 		"--ro-bind-try", "/etc/ssl", "/etc/ssl",
 		"--ro-bind-try", "/etc/ca-certificates", "/etc/ca-certificates",
 	)
+
+	// The directory-picker plugin, read-only. Its whole directory is bound because
+	// the import resolves the file by absolute path and may bring siblings with it.
+	if pluginDir, err := pluginDirectory(rt.PluginPath); err != nil {
+		return nil, err
+	} else if pluginDir != "" {
+		argv = append(argv, "--ro-bind", pluginDir, pluginDir)
+	}
 
 	// The tenant's own roots. The workspace is the writable session root and the
 	// dsh home keeps sessions, storages and the profile cache. The per-tenant
@@ -271,6 +284,34 @@ func ValidateWorkerAccount(userName string) error {
 		return fmt.Errorf("worker_user %q is uid 0", userName)
 	}
 	return nil
+}
+
+// pluginDirectory returns the directory to bind for the picker plugin, or "" when
+// the deployment did not configure one (then the tenant profile cannot reference
+// it either, and dsh boots without the picker).
+//
+// It refuses directories that would undo the sandbox: binding the filesystem root
+// (a plugin path like "/plugin.js") or an ancestor of a hidden tree is exactly the
+// "--ro-bind / /" this profile exists to avoid, so a misconfigured path fails
+// loudly here instead of silently handing the tenant the host.
+func pluginDirectory(configured string) (string, error) {
+	trimmed := strings.TrimSpace(configured)
+	if trimmed == "" {
+		return "", nil
+	}
+	if err := safeAbsolute(trimmed, "deploy.plugin_path"); err != nil {
+		return "", err
+	}
+	dir := filepath.Dir(trimmed)
+	if dir == "/" {
+		return "", fmt.Errorf("deploy.plugin_path %s sits in the filesystem root; binding that directory would expose the whole host", trimmed)
+	}
+	for _, hidden := range hiddenRoots {
+		if dir == hidden || within(dir, hidden) {
+			return "", fmt.Errorf("deploy.plugin_path %s would bind %s, which contains the hidden tree %s", trimmed, dir, hidden)
+		}
+	}
+	return dir, nil
 }
 
 func bwrapBin(configured string) string {

@@ -21,6 +21,7 @@ func (m *Manager) sandboxRuntime() sandbox.Runtime {
 		TenantRoot:       m.Config.TenantRoot,
 		WorkspaceRoot:    m.Config.WorkspaceRoot,
 		TenantConfigRoot: m.Config.Deploy.TenantConfigRoot,
+		PluginPath:       m.Config.Deploy.PluginPath,
 	}
 }
 

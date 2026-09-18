@@ -24,9 +24,9 @@ type Account struct {
 	PriceOverridesJSON        string
 	MarkupOverrideBP          int
 	// MarkupOverrideSet distinguishes "no account override" from "override to 0".
-	MarkupOverrideSet      bool
-	AutoSuspend            bool
-	AutoResume             bool
+	MarkupOverrideSet bool
+	AutoSuspend       bool
+	AutoResume        bool
 	// DSHEnabled gates the account's access to the dsh multi-tenant gateway (M52).
 	// The console owns this flag; dshgw consults POST /v1/dshgw/authorize.
 	DSHEnabled bool

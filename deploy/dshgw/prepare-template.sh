@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NODE=${DSHGW_NODE:-/opt/dsh/node/bin/node}
+NODE=${DSHGW_NODE:-$HOME/.local/node/bin/node}
 if [[ -n ${DSHGW_BIN_JS:-} ]]; then
   DSH_BIN=$DSHGW_BIN_JS
 elif [[ -n ${DSHGW_DSH_ROOT:-} ]]; then
   DSH_BIN="$DSHGW_DSH_ROOT/lib/bin.js"
 else
-  DSH_BIN=/opt/dsh/current/lib/bin.js
+  DSH_BIN=$HOME/.local/dsh/lib/bin.js
 fi
 NODE_DIR=$(dirname "$NODE")
 COREPACK=${DSHGW_COREPACK:-$NODE_DIR/corepack}
-DEST=${DSHGW_TEMPLATE_HOME:-/opt/dshgw/share/template-home}
+DEST=${DSHGW_TEMPLATE_HOME:-$HOME/.local/share/dshgw/template-home}
 TEST_MODE=${DSHGW_TEMPLATE_TEST_MODE:-0}
 
-if [[ ${EUID} -ne 0 ]]; then
-  [[ "$TEST_MODE" == 1 && "$DEST" == /tmp/* ]] || { echo "prepare-template: run as root (or set DSHGW_TEMPLATE_TEST_MODE=1 for a /tmp-only verification)" >&2; exit 1; }
+# No root is needed: in the aigw-supervised shape (M58) the template belongs to
+# the account that runs dshgw, and tenant workers run as that same account. Test
+# mode still pins the destination under /tmp so a verification run can never touch
+# a real template home.
+if [[ "$TEST_MODE" == 1 && "$DEST" != /tmp/* ]]; then
+  echo "prepare-template: DSHGW_TEMPLATE_TEST_MODE=1 requires a /tmp destination" >&2
+  exit 1
 fi
 [[ "$DEST" == /* ]] || { echo "prepare-template: template destination must be absolute" >&2; exit 1; }
 [[ -x "$NODE" ]] || { echo "prepare-template: missing executable Node: $NODE" >&2; exit 1; }

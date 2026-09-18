@@ -152,7 +152,6 @@ func TestFullQueueAppliesBackpressure(t *testing.T) {
 	}
 }
 
-
 func TestStatsReportQueueDepth(t *testing.T) {
 	ctx := context.Background()
 	cfg := config.Default()

@@ -27,21 +27,22 @@ var publicHostRE = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\
 
 // DshRuntime points the child at the dsh release it runs tenant workers from.
 type DshRuntime struct {
-	NodeBin      string `yaml:"node_bin"`
-	BinJS        string `yaml:"bin_js"`
-	ReleasesRoot string `yaml:"releases_root"`
-	CurrentLink  string `yaml:"current_link"`
+	NodeBin     string `yaml:"node_bin"`
+	BinJS       string `yaml:"bin_js"`
+	CurrentLink string `yaml:"current_link"`
 }
 
-// Deploy is the deployment subset aigw must override: the child's defaults point
-// at a root-owned installation (/etc/dshgw, /var/lib/dshgw, /opt/dshgw), which is
-// exactly what a rootless child must not use.
+// Deploy is the deployment subset aigw must override: the child's own defaults
+// point at a root-owned installation (/etc/dshgw, /var/lib/dshgw, /opt/dshgw),
+// which is exactly what a supervised child must not use.
+//
+// There is no isolation field: bubblewrap is the only mode this shape supports,
+// so it is not a setting an operator could get wrong.
 type Deploy struct {
-	Isolation        string `yaml:"isolation"`
 	WorkerUser       string `yaml:"worker_user"`
-	TenantConfigRoot string `yaml:"tenant_config_root"`
+	PluginPath       string `yaml:"plugin_path,omitempty"`
 	TemplateHome     string `yaml:"template_home"`
-	DshgwBinary      string `yaml:"dshgw_binary"`
+	TenantConfigRoot string `yaml:"tenant_config_root"`
 	ConfigPath       string `yaml:"config_path"`
 	BackupDir        string `yaml:"backup_dir"`
 }
@@ -63,11 +64,15 @@ type ChildConfig struct {
 	AigwBaseURL string `yaml:"aigw_base_url"`
 	// AdminSocket is the local provisioning socket the console's DSH buttons use.
 	// In this shape it is owned by the same UID as aigw, not by root.
-	AdminSocket   string     `yaml:"admin_socket"`
-	StateDir      string     `yaml:"state_dir"`
-	WorkspaceRoot string     `yaml:"workspace_root"`
-	Dsh           DshRuntime `yaml:"dsh"`
-	Deploy        Deploy     `yaml:"deploy"`
+	AdminSocket string `yaml:"admin_socket"`
+	// PluginBrowserFS is the child's per-deployment default for the browser
+	// filesystem plugin. Empty keeps the child's own default (on), which requires
+	// a template prepared with the pinned plugin.
+	PluginBrowserFS string     `yaml:"plugin_browser_fs,omitempty"`
+	StateDir        string     `yaml:"state_dir"`
+	WorkspaceRoot   string     `yaml:"workspace_root"`
+	Dsh             DshRuntime `yaml:"dsh"`
+	Deploy          Deploy     `yaml:"deploy"`
 }
 
 // Validate rejects inputs the child could only reject later, in a restart loop,
@@ -125,10 +130,8 @@ func (c ChildConfig) Validate() error {
 		"dshgw.dsh.node_bin":              c.Dsh.NodeBin,
 		"dshgw.dsh.bin_js":                c.Dsh.BinJS,
 		"dshgw.dsh.current_link":          c.Dsh.CurrentLink,
-		"dshgw.dsh.releases_root":         c.Dsh.ReleasesRoot,
 		"dshgw.deploy.tenant_config_root": c.Deploy.TenantConfigRoot,
 		"dshgw.deploy.template_home":      c.Deploy.TemplateHome,
-		"dshgw.deploy.dshgw_binary":       c.Deploy.DshgwBinary,
 		"dshgw.deploy.config_path":        c.Deploy.ConfigPath,
 		"dshgw.deploy.backup_dir":         c.Deploy.BackupDir,
 	} {
@@ -136,11 +139,11 @@ func (c ChildConfig) Validate() error {
 			return err
 		}
 	}
-	if c.Deploy.Isolation != "bwrap" {
-		return fmt.Errorf("dshgw.deploy.isolation must be %q in the aigw-supervised shape: the child runs as aigw's own account, so only the bwrap mount namespace separates tenants", "bwrap")
-	}
 	if strings.TrimSpace(c.Deploy.WorkerUser) == "" {
 		return fmt.Errorf("dshgw.deploy.worker_user must name the account the child runs workers as (aigw's own account in the supervised shape)")
+	}
+	if c.Deploy.WorkerUser == "root" {
+		return fmt.Errorf("dshgw.deploy.worker_user must be unprivileged: a root worker could build a wider namespace instead of living inside the tenant profile")
 	}
 	if c.AigwBaseURL == "" {
 		return fmt.Errorf("dshgw.aigw_base_url must not be empty")

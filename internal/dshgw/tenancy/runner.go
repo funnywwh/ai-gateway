@@ -151,7 +151,10 @@ func (r *WorkerRunner) Start(ctx context.Context, t registry.Tenant) error {
 		proc.finished = true
 		proc.mu.Unlock()
 		close(proc.exited)
-		r.logger().Info("tenant worker exited", "tenant", t.Name, "pid", proc.pid, "err", errText(waitErr))
+		// A worker that died before reporting readiness leaves no other trace: its
+		// output is the diagnosis, so the tail goes to the log at a level an
+		// operator sees without enabling debug.
+		r.logger().Info("tenant worker exited", "tenant", t.Name, "pid", proc.pid, "err", errText(waitErr), "output", proc.outputLog.join(" | "))
 	}()
 
 	r.logger().Info("tenant worker started", "tenant", t.Name, "pid", proc.pid, "workspace", t.Workspace)

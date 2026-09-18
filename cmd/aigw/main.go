@@ -20,6 +20,7 @@ import (
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/creds"
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/dshgwsup"
 	"github.com/winger/ai-gateway/internal/hook"
 	"github.com/winger/ai-gateway/internal/httpapi"
 	"github.com/winger/ai-gateway/internal/localdshgw"
@@ -103,6 +104,39 @@ func run() int {
 		"listen", cfg.Server.Listen,
 		"database", cfg.Database.Path,
 	)
+
+	// M58: aigw owns the DSH surface. The child is resolved and validated here —
+	// before anything is served — so a misconfiguration is a startup failure that
+	// names the setting, not a log line minutes later.
+	var child *dshgwChild
+	var supervisor *dshgwsup.Supervisor
+	if cfg.Dshgw.Enabled {
+		executable, err := os.Executable()
+		if err != nil {
+			log.Error("cannot locate the running aigw executable", "err", err)
+			return 1
+		}
+		child, err = buildDshgwChild(cfg, executable)
+		if err != nil {
+			log.Error("dshgw child configuration is unusable", "err", err)
+			return 2
+		}
+		changed, err := child.prepare()
+		if err != nil {
+			log.Error("writing the dshgw child configuration failed", "err", err)
+			return 1
+		}
+		supervisor, err = dshgwsup.New(dshgwsup.Options{
+			Binary:     child.binary,
+			ConfigPath: child.configPath,
+			Logger:     log,
+		})
+		if err != nil {
+			log.Error("dshgw child is unusable", "err", err)
+			return 1
+		}
+		log.Info("dshgw child configured", "binary", child.binary, "config", child.configPath, "config_changed", changed)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -568,10 +602,26 @@ func run() int {
 		}
 	}()
 
+	// The child starts once aigw is serving: a slow or failing dshgw must not
+	// delay aigw's own readiness, and the design keeps the DSH surface as a
+	// subordinate capability (aigw keeps serving even when DSH is unavailable).
+	if supervisor != nil {
+		go func() {
+			if err := supervisor.Start(ctx); err != nil {
+				log.Error("dshgw child did not start; DSH tenants are unavailable", "err", err)
+			}
+		}()
+	}
+
 	select {
 	case err := <-serverErr:
 		log.Error("http server failed", "err", err)
 		_ = host.StopAll(ctx)
+		if supervisor != nil {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_ = supervisor.Stop(stopCtx)
+			cancel()
+		}
 		return 1
 	case <-ctx.Done():
 	}
@@ -582,6 +632,14 @@ func run() int {
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Warn("graceful shutdown incomplete", "err", err)
+	}
+	// The child dies with aigw (Pdeathsig is the backstop). Stopping it explicitly
+	// lets it take its tenant workers down in order instead of relying on the
+	// kernel to tear the group apart.
+	if supervisor != nil {
+		if err := supervisor.Stop(shutdownCtx); err != nil {
+			log.Warn("stopping the dshgw child failed", "err", err)
+		}
 	}
 	// Drain the audit queue after the server has stopped accepting requests and before
 	// the store closes: everything accepted is written, nothing is left in memory.

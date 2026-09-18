@@ -372,12 +372,57 @@ type RateLimit struct {
 	Shards int `yaml:"shards"`
 }
 
-// Dshgw configures the optional local channel to the dshgw multi-tenant gateway (M52):
-// the console "启用/停用 DSH" buttons drive tenant lifecycle through a root-owned UNIX
-// socket. An empty socket path disables the buttons (they answer 501).
+// Dshgw configures the DSH multi-tenant gateway that aigw owns (M58).
+//
+// Shape: aigw is the long-lived program; dshgw is a sibling executable that aigw
+// starts as its own child with the same UID — no root, no systemd unit, no
+// separate service account — and stops when aigw exits. Every tenant worker is a
+// bubblewrap child of that process.
+//
+// Enabled defaults to false so an existing deployment is unaffected until an
+// operator asks for the child to be supervised.
 type Dshgw struct {
-	// AdminSocket is the dshgw admin-serve socket path. Default /run/dshgw/admin.sock.
+	// AdminSocket is the local provisioning socket the console's "启用/停用 DSH"
+	// buttons use. In this shape it is owned by aigw's own account (same-UID
+	// only); an empty path disables those buttons (they answer 501).
 	AdminSocket string `yaml:"admin_socket"`
+	// Enabled makes aigw start and supervise the child.
+	Enabled bool `yaml:"enabled"`
+	// Binary is the dshgw executable. Empty means "the sibling of the running
+	// aigw", which is what keeps a moved installation from using a stale copy.
+	Binary string `yaml:"binary"`
+	// StateDir holds the child's generated config and its registry/sessions.
+	// Empty means "<directory of database.path>/dshgw".
+	StateDir string `yaml:"state_dir"`
+	// AigwBaseURL is the address the child validates tenant keys against. Empty
+	// means aigw's own loopback listener, which is the normal case; it exists as
+	// an override for tests and for deployments where the child reaches aigw
+	// through something other than the plain listener address.
+	AigwBaseURL string `yaml:"aigw_base_url"`
+	// PublicHost and the port bands describe the tenant-facing surface the child
+	// serves directly (there is no edge proxy in this shape).
+	PublicHost   string `yaml:"public_host"`
+	Listen       string `yaml:"listen"`
+	PortalPort   int    `yaml:"portal_port"`
+	TenantPortLo int    `yaml:"tenant_port_lo"`
+	TenantPortHi int    `yaml:"tenant_port_hi"`
+	WorkerPortLo int    `yaml:"worker_port_lo"`
+	WorkerPortHi int    `yaml:"worker_port_hi"`
+	// DSH runtime the child runs tenant workers from. Empty values fall back to
+	// the DSHGW_NODE and DSHGW_DSH_ROOT environment variables, which is how the
+	// repository's own scripts already describe a locally staged dsh.
+	NodeBin      string `yaml:"node_bin"`
+	BinJS        string `yaml:"bin_js"`
+	ReleasesRoot string `yaml:"releases_root"`
+	CurrentLink  string `yaml:"current_link"`
+	// TemplateHome is the prepared dsh web profile copied into each new tenant.
+	TemplateHome string `yaml:"template_home"`
+	// PluginPath is the directory-picker plugin served to tenant sessions. Empty
+	// keeps the child's own default for the installation it ships with.
+	PluginPath string `yaml:"plugin_path"`
+	// PluginBrowserFS is the child's default for the browser filesystem plugin:
+	// "on" requires a template prepared with dsh-browser-fs, "off" does not.
+	PluginBrowserFS string `yaml:"plugin_browser_fs"`
 }
 
 // Backup configures periodic automatic database backups.
@@ -519,7 +564,15 @@ type Bootstrap struct {
 // Default returns the built-in configuration (matches config.example.yaml).
 func Default() Config {
 	return Config{
-		Dshgw: Dshgw{AdminSocket: "/run/dshgw/admin.sock"},
+		Dshgw: Dshgw{
+			PublicHost:   "localhost",
+			Listen:       "127.0.0.1:31099",
+			PortalPort:   31000,
+			TenantPortLo: 31001,
+			TenantPortHi: 31299,
+			WorkerPortLo: 31300,
+			WorkerPortHi: 31599,
+		},
 		Server: Server{
 			Listen:       ":8080",
 			ReadTimeoutS: 30,

@@ -53,10 +53,9 @@ type RateLimit struct {
 // DshRuntime describes an unpacked dsh release. BinJS is the public launcher
 // contract; CurrentLink is switched by upgrade-dsh.
 type DshRuntime struct {
-	NodeBin      string `yaml:"node_bin" json:"node_bin"`
-	BinJS        string `yaml:"bin_js" json:"bin_js"`
-	ReleasesRoot string `yaml:"releases_root" json:"releases_root"`
-	CurrentLink  string `yaml:"current_link" json:"current_link"`
+	NodeBin     string `yaml:"node_bin" json:"node_bin"`
+	BinJS       string `yaml:"bin_js" json:"bin_js"`
+	CurrentLink string `yaml:"current_link" json:"current_link"`
 }
 
 // DeployConfig holds the paths and identities a dshgw instance needs. Everything
@@ -149,10 +148,9 @@ func defaults() Config {
 		WorkspaceSeed:   []string{"work"},
 		ReservedNames:   []string{"login", "dshgw"},
 		Dsh: DshRuntime{
-			NodeBin:      "/opt/dsh/node/bin/node",
-			BinJS:        "/opt/dsh/current/lib/bin.js",
-			ReleasesRoot: "/opt/dsh/releases",
-			CurrentLink:  "/opt/dsh/current",
+			NodeBin:     "/opt/dsh/node/bin/node",
+			BinJS:       "/opt/dsh/current/lib/bin.js",
+			CurrentLink: "/opt/dsh/current",
 		},
 		WorkspaceRoot: "/srv/dsh",
 		StateDir:      "/var/lib/dshgw",
@@ -329,7 +327,7 @@ func (c *Config) Validate() error {
 		"tenant_root": c.TenantRoot, "workspace_root": c.WorkspaceRoot, "handshake_dir": c.HandshakeDir,
 		"state_dir": c.StateDir, "registry_path": c.RegistryPath, "key_map_path": c.KeyMapPath,
 		"session_path": c.SessionPath, "audit_path": c.AuditPath, "activity_path": c.ActivityPath, "dsh.node_bin": c.Dsh.NodeBin, "dsh.bin_js": c.Dsh.BinJS,
-		"dsh.releases_root": c.Dsh.ReleasesRoot, "dsh.current_link": c.Dsh.CurrentLink,
+		"dsh.current_link":          c.Dsh.CurrentLink,
 		"deploy.plugin_path":        c.Deploy.PluginPath,
 		"deploy.template_home":      c.Deploy.TemplateHome,
 		"deploy.backup_dir":         c.Deploy.BackupDir,

@@ -108,10 +108,10 @@ func managerFixture(t *testing.T) (*Manager, *WorkerRunner, string) {
 		PublicHost: "dsh.test", PortalPort: 32600, TenantPortLo: 32601, TenantPortHi: 32605,
 		WorkerPortLo: 32100, WorkerPortHi: 32105, Listen: "127.0.0.1:3099", AigwBaseURL: "http://aigw",
 		SessionTTL: config.Duration(1), DirectoryPicker: "clamp", PluginBrowserFS: "on", WorkspaceSeed: []string{"work"}, ReservedNames: []string{"login"},
-		Dsh:      config.DshRuntime{NodeBin: nodeBin, BinJS: filepath.Join(release, "lib", "bin.js"), ReleasesRoot: filepath.Join(root, "dsh", "releases"), CurrentLink: currentLink},
+		Dsh:      config.DshRuntime{NodeBin: nodeBin, BinJS: filepath.Join(release, "lib", "bin.js"), CurrentLink: currentLink},
 		StateDir: filepath.Join(root, "state"), TenantRoot: filepath.Join(root, "state/tenants"), WorkspaceRoot: filepath.Join(root, "srv"), HandshakeDir: filepath.Join(root, "handshake"),
 		RegistryPath: filepath.Join(root, "registry.json"), KeyMapPath: filepath.Join(root, "keys.map"), SessionPath: filepath.Join(root, "sessions.json"),
-		Deploy: config.DeployConfig{TemplateHome: tpl, PluginPath: "/plugin.js", ConfigPath: filepath.Join(root, "etc/dshgw.yaml"),
+		Deploy: config.DeployConfig{TemplateHome: tpl, PluginPath: "/opt/dshgw/share/dsh-plugin/picker-clamp.js", ConfigPath: filepath.Join(root, "etc/dshgw.yaml"),
 			TenantConfigRoot: filepath.Join(root, "etc/tenants"), BackupDir: filepath.Join(root, "backups"),
 			WorkerUser: "dshgw", BwrapBin: "/usr/bin/bwrap"},
 	}
