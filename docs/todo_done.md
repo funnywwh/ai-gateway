@@ -3639,3 +3639,26 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - [x] 真浏览器（CDP）打开租户 origin：`<title>DeepSeek Harness`、界面显示模型 `deepseek-flash`、约 15 个 RPC 全 200、**零失败/零异常/零控制台错误**
 - [x] `make verify`、`make dshgw-test`、`make dshgw-supervised-test`（24 步）均为 0
 - [x] 观测到的另一条边界（已知、可诊断）：`public_host` 之外的 host 拼写会让非 GET 请求 403 `origin mismatch`（审计记录 `edge_reject`），例如 `localhost:18302`、`rag-server:18302`；租户必须按 `http://192.168.190.86:18302/` 访问（前门 `:8090/t/<t>/` 也会跳到该地址）
+
+## 发布记录 v1.2.1（2026-09-18，修：aigw 冷启动 34s 造成的登录 503 窗口）
+
+| 项 | 值 |
+|---|---|
+| 版本号 | `1.2.1`（`1.2.0` → `1.2.1`，**patch**：只修缺陷） |
+| revision | `33810c7`（tag `v1.2.1`） |
+| 起因 | 用户报「/dshgw 登录失败：认证服务暂不可用」 |
+| 诊断 | dshgw 的 503 是**正确行为**（aigw 不可达时宁可拒绝登录，也不放行一把无法验证的 Key）。真因是 aigw 重启后有 **34 秒**端口拒绝连接：`15:16:30.660 aigw starting → 15:17:04.762 http server listening`；同机上一次重启只要 1.0s。用户登录发生在 `15:16:34`（dshgw 日志 `source=192.168.140.252`），正好落在窗口内 |
+| 根因 | `logJanitor.Start` 位于启动早期，其第一次保留清理**立即执行**，与该阶段紧随其后的 bootstrap 写入（`UpsertAdminUser`）共用同一个 SQLite 写连接 → 那条写排在清理之后。日志里"backup scheduler started"到"admin user ready"恰好空 34 秒，中间唯一动作就是这条写 |
+| 修复 | ① 显式 `net.Listen` 绑定端口后再启动 janitor（家务活不进启动关键路径），绑定失败如实报为绑定失败；② `scripts/aigw_user_service.sh` 加**就绪门禁**：install/restart 后轮询 `/healthz` 到 200 才算成功（读配置的 listen/base_path，容忍引号与 `":8088"` 无 host 写法）——修补的是我这边的流程缺陷：上次在 aigw 未就绪时报了"部署完成" |
+| 构建 | `scripts/release.sh patch`；另 `make dshgw-build gwproxy-build` |
+| 回滚点 | `bin/aigw.prev-1.2.0-72a929f`（升级前运行中二进制） |
+
+验证（本机实测）：
+
+- [x] **冷启动 34s → 1.0s**：修复后 `15:19:46.545 starting → 15:19:47.535 listening`；部署 1.2.1 全程 **1.7s**（含就绪门禁 "ready after 1s"）
+- [x] `:8088` → `{"version":"1.2.1","revision":"33810c7"}`；healthz 200、readyz 200
+- [x] **登录路径健康**：对门户 origin 用无效 Key 探测 → `401 Key 无效或已停用`（而非 503），证明 aigw 有应答、认证链路通
+- [x] `dshgw listening version=1.2.1 revision=33810c7`；命名入口 `:8090`：`/`→302 `/admin/ui/`、`/admin/ui/` 200、`/dshgw/`→302
+- [x] 租户：门户 `:18300` 200；`dsh-tenant` worker `/api` 401（就绪）
+- [x] 就绪门禁在独立测试实例上验证（带引号/无 host 的 listen 均正确探测），测试单元已清理
+- [x] `make verify`、`make dshgw-test`、`make dshgw-supervised-test`（24 步）均为 0
