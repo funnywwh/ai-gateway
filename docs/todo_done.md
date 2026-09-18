@@ -350,6 +350,30 @@
 
 - [x] 顺手修复：`internal/arch` 分层表缺 M14(1) 新增的 `internal/sessionauth`/`internal/portal`（该里程碑提交后 `make verify` 一直红）
 
+### DeepSeek `/responses` 的流式思考被网关丢掉（2026-09-18，本机 :8088 实测定位）
+
+- [x] 定位：`deepseek` 供应商（provider id=3）2026-09-15 由 `openai-chat` 改成 `openai-responses` 后，
+  DSH 会话 47 条 assistant 消息里**零个 reasoning 块**，而同供应商**非流式**的 `responses.output_json`
+  里思考完整存在（`content:[{type:"reasoning_text"}]`）→ 上游一直在思考，只有流式客户端看不到
+- [x] 根因：DeepSeek 的 `/responses` 发 `response.reasoning_text.delta`（正文语义），
+  `internal/providers/openairesponses/openairesponses.go` 只认 OpenAI 系的 `response.reasoning_summary_text.delta`
+  → 增量一个都没进事件流，宿主组装器因此从不建 reasoning 项
+- [x] 修复：三个事件名并列接受，并把上游 `item_id` 一起带给客户端（M47 的延伸：客户端回灌该条目时靠它；
+  上游不给 id 时仍走兜底生成）
+- [x] 测试：`stream_test.go` 两个新例（三种事件名逐一验「增量第一、文本完整、item_id 是上游的」+ 无 id 兜底）；
+  变异验证（删掉 `response.reasoning_text.delta` 即精确失败）；新增端到端走查
+  `scripts/responses-thinking-smoke.sh`（真实二进制 + 假 `/responses` 上游，断言客户端 SSE 里
+  reasoning 项先 added、思考在正文之前、`item_id` 保持上游的、非流式仍返回 `[reasoning, message]`）
+- [x] 回归：`format-smoke.sh`、`deepseek-smoke.sh`（离线）、`codex-input-fidelity-smoke.sh` 全绿；
+  `go test ./internal/... ./pkg/...`、`go vet`、`gofmt` 干净（`make verify` 通过）
+- [x] 真实 DSH 客户端前后对照（隔离 `DSH_HOME` + headless 跑真实 DSH 二进制，打同一假 `/responses` 上游）：
+  修复前会话里 assistant 块只有 `{text}`（思考整块不存在），修复后 `{reasoning, text}` 且内容为
+  `先看天气`、stdout 打出 `dsh: reasoning:`；对照二进制已删除，临时目录/进程/端口已清理
+- [x] 文档：新增 `docs/deepseek-responses-thinking-stream.md`，更新 `docs/api-providers.md` §5/§8
+  （剩余缺口从三处收敛为两处）、README 脚本表
+- [ ] 未做（明确保留）：`output_tokens_details.reasoning_tokens` 计费维度、思考正文承载字段；
+  **部署未生效**——本机 `:8088` 跑的仍是修复前的进程，需重启（会打断在用的人，未擅自做）
+
 ## M18 控制台展示供应商配置说明（内建 kind 的字段文档）
 - [x] 设计文档 docs/design/m18-provider-config-docs.md + 规格文档 docs/provider-ui.md（先行，已在对话中展示）
 - [x] 内建供应商包各加 `schema.go`：`Schema()`（config + credentials 的 JSON Schema 子集）/ `Note()`（kind 级说明）/ `Template()`（可复制模板）

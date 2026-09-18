@@ -250,6 +250,9 @@ providers:
 
 - **入站**：`reasoning_content`（非流式消息字段 / 流式 delta）→ 思考增量事件，最终落成 `reasoning` 输出项；
   客户端在 SSE 上看到 `response.reasoning_summary_text.delta`。
+  > 同为 DeepSeek 的 `/responses` 上游，思考增量走的是 `response.reasoning_text.delta`（正文语义）；
+  > `openai-responses` 两个名字都认，且把上游的 `item_id` 一起带给客户端
+  > （见 `docs/deepseek-responses-thinking-stream.md`）。
 - **出站**：`replay_reasoning_content=true` 时，历史 `reasoning` 项正文写入其后第一条 assistant 消息的
   `reasoning_content`；**工具轮涉及的全部 assistant 消息都会带上这个键**（有正文用正文、没有用空串），
   因为上游校验的是整段 assistant 侧。上游要求**全量原样回传**，缺失即 400——这是 thinking + tools 多轮的硬约束。
@@ -287,9 +290,14 @@ providers:
 ## 8. 与 `openai-responses` 的分工
 
 - `/chat/completions` → `openai-chat`（本文档）。**接不了 OpenAI Responses API**。
-- `/responses` → `openai-responses`。DeepSeek 也提供 `/responses`（为 Codex 提供），但该内置实现目前有三处缺口未覆盖
-  （`response.reasoning_text.delta` 事件名、`usage.output_tokens_details.reasoning_tokens`、思考正文的承载字段），
-  故 DeepSeek 的推荐接入路径是本文档的 `/chat/completions`。
+- `/responses` → `openai-responses`。DeepSeek 也提供 `/responses`（为 Codex 提供），该内置实现仍有两处缺口
+  （`usage.output_tokens_details.reasoning_tokens`、思考正文的承载字段）。
+  其中**流式思考这一处已于 2026-09-18 修好**：上游的 `response.reasoning_text.delta`（DeepSeek 的方言，
+  正文语义）现在与 `response.reasoning_summary_text.delta`（OpenAI 系的摘要语义）一视同仁地转成
+  `reasoning.delta`，并带上上游的 `item_id`（客户端回灌该条目时靠它，见 M47）。
+  验收见 `scripts/responses-thinking-smoke.sh` 与 `docs/deepseek-responses-thinking-stream.md`。
+  要不要走 `/responses` 仍取决于该部署的计费与上下文口径：`/responses` 的 usage 只有 input/output
+  （思考并进 output），比 `/chat/completions` 少一个 `reasoning` 维度，按 output 费率计费时思考 token 会少收一次。
 
 ## 9. 验收
 

@@ -189,3 +189,62 @@ func TestStreamDoesNotForwardOrdinaryDoneItems(t *testing.T) {
 		}
 	}
 }
+
+// TestStreamRelaysBothReasoningDeltaDialects: the chain of thought reaches the client as a
+// reasoning.delta whichever name the upstream uses. OpenAI streams its summaries as
+// response.reasoning_summary_text.delta; DeepSeek's /responses streams the reasoning content
+// as response.reasoning_text.delta. Accepting only the first made DeepSeek's thinking
+// invisible to streaming clients (DSH, Codex) while the non-streaming body still carried the
+// item, so the loss was silent.
+func TestStreamRelaysBothReasoningDeltaDialects(t *testing.T) {
+	for _, name := range []string{
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_text.delta",
+		"response.reasoning.delta",
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newUpstream(t,
+				`event: `+name+"\n"+`data: {"type":"`+name+`","delta":"let me think","item_id":"rs_upstream"}`,
+				`event: response.output_text.delta`+"\n"+`data: {"type":"response.output_text.delta","delta":"4"}`,
+				`event: response.completed`+"\n"+`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}`,
+			)
+			var events []pluginapi.Event
+			if err := runStream(p, &events); err != nil {
+				t.Fatalf("stream failed: %v", err)
+			}
+			if len(events) < 2 {
+				t.Fatalf("events = %+v, want the chain of thought before the answer", events)
+			}
+			// Order matters: the client renders thinking as a block that must open before
+			// the answer starts, and the assembler keys its reasoning item on this id.
+			if events[0].Type != pluginapi.EventReasoningDelta || events[0].Text != "let me think" {
+				t.Fatalf("first event = %+v, want the reasoning delta", events[0])
+			}
+			if events[0].ItemID != "rs_upstream" {
+				t.Fatalf("reasoning item id = %q, want the upstream's own", events[0].ItemID)
+			}
+			if events[1].Type != pluginapi.EventTextDelta || events[1].Text != "4" {
+				t.Fatalf("second event = %+v, want the answer text", events[1])
+			}
+		})
+	}
+}
+
+// TestStreamKeepsThinkingWithoutAnItemID: an upstream that names no item keeps working — the
+// host mints the id. Only the text is what this provider must never drop.
+func TestStreamKeepsThinkingWithoutAnItemID(t *testing.T) {
+	p := newUpstream(t,
+		`event: response.reasoning_text.delta`+"\n"+`data: {"type":"response.reasoning_text.delta","delta":"thinking"}`,
+		`event: response.completed`+"\n"+`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}`,
+	)
+	var events []pluginapi.Event
+	if err := runStream(p, &events); err != nil {
+		t.Fatalf("stream failed: %v", err)
+	}
+	if events[0].Type != pluginapi.EventReasoningDelta || events[0].Text != "thinking" {
+		t.Fatalf("events = %+v, want the reasoning delta", events)
+	}
+	if events[0].ItemID != "" {
+		t.Fatalf("item id = %q, want it left to the host when the upstream names none", events[0].ItemID)
+	}
+}

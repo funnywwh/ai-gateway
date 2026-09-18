@@ -29,7 +29,7 @@
 ## M17 完善内置供应商（openai-chat）：DeepSeek 适配与思考模式
 > 本节已完成的 15 项记录见 `docs/todo_done.md` 的同名小节；下面只列未完成项。
 
-- [ ] 暂不纳入：内置 `openai-responses` 接 DeepSeek `/responses` 的三处缺口（`response.reasoning_text.delta` 事件名、`output_tokens_details.reasoning_tokens`、思考正文承载字段）
+- [ ] 暂不纳入：内置 `openai-responses` 接 DeepSeek `/responses` 剩余两处缺口（`output_tokens_details.reasoning_tokens` 未映射成 `reasoning` 计费维度、思考正文承载字段）。**第三处（`response.reasoning_text.delta` 事件名）已于 2026-09-18 修好**，见 `docs/deepseek-responses-thinking-stream.md` 与 `scripts/responses-thinking-smoke.sh`
 
 ## M19 面向真实客户端的方言翻译（核心只接受，翻译在 provider 层）
 > 本节已完成的 14 项记录见 `docs/todo_done.md` 的同名小节；下面只列未完成项。

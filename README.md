@@ -144,6 +144,7 @@ make dshgw-verify  # 独立 dshgw 测试/构建/契约，不并入 aigw verify
 | `scripts/verify-m34.sh` | 可交互预览的自查（29 项，真实 HTTP、不产生模型费用、结束自动清理）；`GW_ADMIN_PASSWORD=… scripts/verify-m34.sh` |
 | `scripts/ui-harness/run.sh`（`make ui-check`） | 控制台走查：API 快照 + headless firefox 渲染真实页面并断言（无 node 环境下的 UI 验证手段） |
 | `scripts/format-smoke.sh` | `response_format` 语义走查：真实二进制 + 假 DeepSeek，逐条读上游收到的请求体（无网、无 key、不花钱） |
+| `scripts/responses-thinking-smoke.sh` | `/responses` 流式思考走查：真实二进制 + 假 DeepSeek `/responses` 上游，断言客户端收到的 SSE 里思考先到、`item_id` 是上游的（无网、无 key、不花钱） |
 | `scripts/ui-badge-test.mjs`（`make ui-base`） | 左上角版本角标的 node 断言（三行 DOM shim，不需要浏览器）：两格内容、revision 为 `none` 时不显示、端点读不到时不报错 |
 | `scripts/release.sh`（skill `release-version`） | 发版：升 `VERSION`（a.b.c）→ 提交打 tag → `make build`；用法 `scripts/release.sh patch/minor/major` |
 | `make build` / `make ui-dist` | 发布构建：`ui-dist` 生成压缩混淆镜像 + gzip 副本（`.cache/ui-dist/static` + `overlay.json`），`build` 用它嵌入 `bin/aigw` |

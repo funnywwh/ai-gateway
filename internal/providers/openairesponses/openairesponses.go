@@ -297,8 +297,21 @@ func (p *Provider) Stream(ctx context.Context, req *pluginapi.Request, emit func
 			if err := emit(pluginapi.Event{Type: pluginapi.EventTextDelta, Text: frame.Delta}); err != nil {
 				return err
 			}
-		case "response.reasoning_summary_text.delta", "response.reasoning.delta":
-			if err := emit(pluginapi.Event{Type: pluginapi.EventReasoningDelta, Text: frame.Delta}); err != nil {
+		// The chain of thought arrives under one of two names, and which one is the
+		// upstream's dialect: OpenAI publishes its summaries as
+		// response.reasoning_summary_text.delta, while DeepSeek's /responses streams the
+		// raw reasoning content as response.reasoning_text.delta. Accepting only the
+		// summary family made DeepSeek's thinking invisible to every streaming client
+		// (DSH and Codex both stream), even though the non-streaming path carried it —
+		// the item was in the body, so nothing looked broken on a store=true replay.
+		//
+		// The upstream's own item id travels with the delta: the assembler keys the
+		// reasoning item it opens on it, which is what keeps a client's view of the item
+		// identical to the one a finished item or a stored response carries.
+		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta", "response.reasoning.delta":
+			if err := emit(pluginapi.Event{
+				Type: pluginapi.EventReasoningDelta, ItemID: frame.ItemID, Text: frame.Delta,
+			}); err != nil {
 				return err
 			}
 		case "response.refusal.delta":
