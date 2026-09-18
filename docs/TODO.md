@@ -518,8 +518,12 @@
       实测 `/aigw/version` 经反代拿到真实 aigw 版本、门户 200、租户路径 302 回路径式门户、`POST .../api` 401、
       注入会话后 `/t/verify1/` 200 且资源经前缀可取（423KB bundle）、worker 限额落在
       `dshgw-worker-verify1.scope`；`:8088` 直连与旧 `dshgw.service` 全程未受影响
-- [ ] **浏览器级验证 `/t/<tenant>/`**：真实登录一次（需要可用的 aigw Key）→ dsh UI 在前缀下渲染、
-      WebSocket 101、browser-fs 授权可用；若出现 `/plugins/` 之外的根绝对引用，再补进窄改写
+- [x] **真浏览器验证与结论：dsh UI 必须独占 origin**（headless chromium + CDP 实测）：
+      端口模式下 UI 正常渲染（30 请求全 200、零异常）；路径模式下 shell/资源都 200 但应用自身
+      的 `location.origin` + `/api` 调用落到域名根 → 白屏。结论：路径前缀只适用于门户，
+      无子域名时多租户只能"同一域名 + 每租户一个端口"，域名做前门跳转（`portal_redirect`/`tenant_redirect`）
+- [ ] **剩余可选**：① 若只有一个租户，可把租户放在域名根路径（零改写、单端口）；
+      ② 若要真正做多租户同端口，需要改写 dsh 客户端 bundle（生成物、随升级而变，不推荐）
 - [ ] **对外暴露的剩余决策**：防火墙策略（worker 段端口必须不可达）、是否仍在前面放 nginx 反代
 - [x] **资源限额**：每 worker 一个 systemd 用户 scope（`systemd-run --user --scope -p MemoryMax=…`），
       实测 `memory.max`/`pids.max`/`cpu.max` 全部生效；部署级汇总上限通过

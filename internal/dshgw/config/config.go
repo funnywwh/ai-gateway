@@ -145,6 +145,14 @@ type Config struct {
 	PublicBaseURL    string `yaml:"public_base_url" json:"public_base_url"`
 	TenantPathPrefix string `yaml:"tenant_path_prefix" json:"tenant_path_prefix"`
 	PortalPathPrefix string `yaml:"portal_path_prefix" json:"portal_path_prefix"`
+	// PublicScheme is how browsers actually reach the public surface: "auto"
+	// (default) derives it from public_base_url in path mode and presumes https in
+	// port mode, while "http"/"https" state it explicitly.
+	//
+	// Port mode used to hardcode https in every URL it generated. On a plain-HTTP
+	// deployment that turns every redirect into a request to a port nobody serves,
+	// which looks exactly like "the button does nothing".
+	PublicScheme string `yaml:"public_scheme" json:"public_scheme"`
 	// SessionCookieSecure controls the session cookie's Secure attribute:
 	// "auto" (default) sets it whenever the deployment is actually HTTPS, "always"
 	// and "never" override that.
@@ -189,6 +197,7 @@ func defaults() Config {
 		SessionTTL:          Duration(7 * 24 * time.Hour),
 		KeyRevalidate:       "off",
 		SessionCookieSecure: "auto",
+		PublicScheme:        "auto",
 		DSHEnforce:          "login",
 		LoginRate:           RateLimit{Requests: 10, Window: Duration(time.Minute)},
 		DirectoryPicker:     "clamp",
@@ -387,10 +396,20 @@ func (c *Config) Validate() error {
 	if c.WorkerLimits.MemoryHighBytes > 0 && c.WorkerLimits.MemoryMaxBytes > 0 && c.WorkerLimits.MemoryHighBytes > c.WorkerLimits.MemoryMaxBytes {
 		return errors.New("worker_limits.memory_high_bytes must not exceed memory_max_bytes")
 	}
+	switch c.PublicScheme {
+	case "", "auto", "http", "https":
+	default:
+		return fmt.Errorf("public_scheme must be auto, http or https (got %q)", c.PublicScheme)
+	}
 	switch c.SessionCookieSecure {
 	case "", "auto", "always", "never":
 	default:
 		return fmt.Errorf("session_cookie_secure must be auto, always or never (got %q)", c.SessionCookieSecure)
+	}
+	switch c.PublicScheme {
+	case "", "auto", "http", "https":
+	default:
+		return fmt.Errorf("public_scheme must be auto, http or https (got %q)", c.PublicScheme)
 	}
 	if c.PublicBaseURL != "" {
 		parsed, err := url.Parse(c.PublicBaseURL)
@@ -544,6 +563,18 @@ func (c *Config) TenantOrigin(tenant string) string {
 	return c.OriginForPort(port)
 }
 
+// Scheme is the scheme browsers use to reach this deployment.
+func (c *Config) Scheme() string {
+	switch c.PublicScheme {
+	case "http", "https":
+		return c.PublicScheme
+	}
+	if c.PathMode() && strings.HasPrefix(c.PublicBaseURL, "http://") {
+		return "http"
+	}
+	return "https"
+}
+
 // SecureSessionCookie reports whether the session cookie should carry Secure. A
 // browser refuses to store such a cookie on a plain-HTTP origin, so this must match
 // how clients actually reach the gateway — not how it hopes to be reached.
@@ -554,12 +585,10 @@ func (c *Config) SecureSessionCookie() bool {
 	case "never":
 		return false
 	}
-	if !c.PathMode() {
-		// Port mode predates this switch and has always assumed TLS termination in
-		// front (nginx). "never" is the documented escape hatch for plain HTTP.
-		return true
-	}
-	return strings.HasPrefix(c.PublicBaseURL, "https://")
+	// The cookie has to match how the browser reaches the site, in both modes:
+	// modern browsers refuse to store a Secure cookie on a plain-HTTP origin, so a
+	// mismatch silently discards the session right after a successful login.
+	return c.Scheme() == "https"
 }
 
 // PathMode reports whether public URLs are path-based instead of port-based.
@@ -601,7 +630,7 @@ func (c *Config) SessionCookiePath(tenant string) string {
 
 func (c *Config) OriginForPort(port int) string {
 	if !c.PathMode() {
-		return fmt.Sprintf("https://%s:%d", c.PublicHost, port)
+		return fmt.Sprintf("%s://%s:%d", c.Scheme(), c.PublicHost, port)
 	}
 	if port == c.PortalPort {
 		return c.PublicBaseURL + normalizePathPrefix(c.PortalPathPrefix) + "/"

@@ -278,31 +278,59 @@ bin/gwproxy --config deploy/dshgw/frontproxy.example.yaml
 反代只做路由、TLS 与头清洗：Host 不匹配 `public_host` 直接 404；未知租户 404；上游不可达 502；
 租户列表每 `registry_reload` 从 dshgw 的 registry.json 重读，所以控制台新建的租户无需重启反代即可访问。
 
-### 9.1 没有子域名时的正式配置（路径模式）
+### 9.0 实测纠正：dsh UI **必须有自己的 origin**，路径前缀装不下它
+
+这条是本项目用真浏览器（headless chromium + CDP，抓请求/异常/控制台）测出来的，推翻了早先"路径前缀可以承载 dsh UI"的假设：
+
+- dsh 前端用 **`location.origin`**、**`/api`**、**`/api/remote.mux`** 这些**绝对/根路径**构造请求；
+  **origin 按定义不含路径**，所以在 `https://域名/t/<租户>/` 下，它的 API 调用必然打到 `https://域名/api/…`
+  —— 那里是 aigw，不是租户 → 页面**白屏**。
+- 实测对照（同一租户、同一浏览器）：
+  - **端口模式**（`http://域名:18302/`）：UI 正常渲染（`<title>DeepSeek Harness`、DOM 30KB、
+    "Choose workspace"），约 30 个请求**全 200、零失败、零异常、零控制台错误**；
+  - **路径模式**（`http://域名:8090/t/dsh-tenant/`）：shell 与静态资源都 200（含 3.7MB 插件 bundle），
+    但应用发起的 `GET /api/session` → **404**（落到 aigw），`/api/remote.mux` 被拒——
+    即"HTML 到了、应用起不来"，表现就是白屏。
+- 因此：**路径前缀只适用于门户**（那是我们自己的 HTML）；**租户 UI 必须独占一个 origin**。
+  不能分配子域名时，唯一可行的多租户拓扑是**同一域名 + 每租户一个端口**。
+  另外两条路：① 只有一个租户时把该租户放在域名**根路径**（零改写、单端口）；
+  ② 改写 dsh 的客户端 bundle（`location.origin` / `/api` 字面量）——生成物、随 dsh 升级而变，**不推荐**。
+
+`gwproxy` 因此提供"前门跳转"：域名上的 `/dshgw/` 与 `/t/<租户>/` 会 **302 到该服务自己的端口**，
+浏览器最终落在具备独立 origin 的地址上，dsh UI 正常工作。
+
+### 9.1 没有子域名时的配置（前门跳转 + 每租户一个端口）
 
 反代只是入口；**dshgw 也要知道自己在路径模式下服务**，否则它生成的跳转与会话 cookie 还是按端口：
 
 ```yaml
 dshgw:
   public_host: chat.example
-  public_base_url: https://chat.example   # 打开路径模式；必须与 public_host 同主机
-  tenant_path_prefix: /t                  # 默认 /t
-  portal_path_prefix: /dshgw              # 默认 /dshgw
+  public_scheme: https          # 端口模式下公开 URL 的 scheme（纯 HTTP 部署必须设 http）
+  # 不要设 public_base_url：租户 UI 需要独立 origin（见 §9.0）
 ```
 
-打开后 dshgw 生成的公开 URL 变成 `https://chat.example/t/<tenant>/` 与 `https://chat.example/dshgw/`，
-并且**会话 cookie 的 Path 收窄到该租户的路径**（`/t/<tenant>/`）。这一点在单域名下是安全必需的：
-多个租户共享同一个 origin，如果 cookie 仍是 `Path=/`，浏览器会把 alice 的会话 cookie 一起发给
-`/t/bob/` 的请求 —— 路径就是同一 origin 内区分两个租户会话的唯一依据。**Origin 栅栏仍然生效**：
-路径模式下的期望 Origin 是基础 origin（浏览器不带路径），伪造的异源 Origin 依旧 403。
+```yaml
+# gwproxy：域名只做前门，控制台留在域名根，门户与租户前缀跳到各自端口
+aigw_prefix: /
+root_redirect: /admin/ui/
+portal_prefix: /dshgw
+portal_redirect: true
+portal_port: 18100
+tenant_prefix: /t
+tenant_redirect: true
+public_scheme: https
+```
 
-`public_base_url` 留空即保持默认的端口模式：两种模式共用同一套内部契约（反代仍以 `host:port` +
-edge 头与 dshgw 对话），所以切换只是改配置，不需要重建租户。
+端口模式下每个租户拿到自己的 origin（`https://chat.example:18101/`），会话 cookie 按租户命名、
+`Path=/`，而不同端口就是不同 origin，浏览器天然隔离。域名上的 `/t/<租户>/` 只是前门，
+302 到该租户的端口后一切照旧。
 
-**实测（`make dshgw-supervised-test`，24 步）**：`/dshgw/` 200；`GET /t/<tenant>/` → 302
-到 `/dshgw/`；`POST /t/<tenant>/api`（带 Origin）→ 401。也就是**不需要子域名**即可跑通单域名链路。
+**另外修掉一个同族缺陷**：端口模式过去把公开 URL 的 scheme **写死成 https**。纯 HTTP 部署下
+每次跳转都会指向没人监听的 https 端口，表现同样是"点了没反应"。现在由 `public_scheme`（默认 auto：
+路径模式看 `public_base_url`，端口模式沿用 https）决定，会话 cookie 的 `Secure` 也跟随它。
 
-### 9.2 dsh 的路径前缀：为什么不改 dsh 也能行
+### 9.2 为什么"同源 iframe"解决不了
 
 `dsh web` 只提供 `--host/--port/--trusted-host/--no-open`，**没有 base-path 选项**。实测它的 shell：
 资源引用是**相对路径**（`./assets/…`），两个 JS bundle 里**没有硬编码 `/api`**（端点由 `import.meta.url`/`baseUrl`
@@ -312,13 +340,9 @@ edge 头与 dshgw 对话），所以切换只是改配置，不需要重建租�
 正文、注释、相对路径、协议相对 URL（`//host/x`）与已经带前缀的值都不动；`application/json` 等一律不碰。
 实现是"走标签"而不是整串替换，所以正文里恰好出现的 `href="/"` 也不会被改（有测试钉住这两个边界）。
 
-**关于 iframe**（有人会想到的更"省事"的办法）：同源 iframe 解决不了这个问题 —— iframe 里的文档仍然用
-**顶层 origin 的根**解析绝对路径，`/api`、`/plugins/…` 还是会打到 `https://<域名>/api`。iframe 只有在
-**跨 origin** 时才有用（例如 `<iframe src="https://<tenant>.chat.example/">`），那时应用自己就是那个 origin 的根，
-不需要任何改写 —— 代价是需要通配子域证书，且 dshgw 的会话 cookie 得带上 `Domain=.chat.example` 才能进入 iframe。
-两条路都可行：**同域名 + 路径前缀**用上面的窄改写（零 dsh 改动）；**子域 + iframe** 则完全零改写但要动 DNS 与证书。
-
-当前反代走的是前者。如果你更想要子域方案，告诉我，我可以加一个 `tenant_host_suffix` 模式。
+同源 iframe 不解决问题：iframe 里的文档仍然按**顶层 origin** 解析绝对路径，`/api` 依旧打到域名根。
+跨 origin iframe（`<iframe src="https://<租户>.chat.example/">`）确实零改写，但需要 **子域名**
+（通配 DNS + 通配证书）—— 在"不能分配子域名"的前提下不可用。所以本部署走的是"每租户一个端口"。
 
 ## 10. 本机验证部署（已就绪）
 

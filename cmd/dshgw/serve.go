@@ -37,6 +37,15 @@ func (c *cli) serve() error {
 	// and every tenant's public port itself, setting the edge port header the
 	// gateway routes on (exactly what the edge proxy used to do). Reconcile is
 	// idempotent, so it runs at startup and after any lifecycle change.
+	if deps.cfg.PathMode() {
+		// Measured: dsh's web client builds its API and stream URLs from
+		// location.origin, and an origin never carries a path. Under a path prefix
+		// those requests land on the domain root — served by aigw, not the tenant —
+		// and the UI renders blank. Path mode is therefore for the *portal* (our own
+		// HTML); a tenant needs its own origin, which in practice means its own port.
+		slog.Warn("public_base_url path mode: the dsh UI requires its own origin; tenants render blank unless reached on their own port",
+			"tenant_path_prefix", deps.cfg.TenantPathPrefix)
+	}
 	publicEdge := edge.New(deps.cfg, gateway.Dispatch(), slog.Default())
 	if err := publicEdge.Reconcile(deps.reg.List()); err != nil {
 		// A port that cannot be bound is reported, not fatal: the gateway keeps its

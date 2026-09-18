@@ -66,8 +66,21 @@ func (p *Proxy) Handler() http.Handler {
 		// The specific prefixes win over aigw's, so a root-mounted aigw never
 		// swallows the portal or a tenant.
 		case pathMatches(r.URL.Path, portalPrefix):
+			if p.cfg.PortalRedirect {
+				// /dshgw/login on the domain becomes /login on the portal's origin.
+				rest := strings.TrimPrefix(r.URL.Path, portalPrefix)
+				if rest == "" {
+					rest = "/"
+				}
+				p.redirectTo(w, r, p.cfg.PortalPort, rest)
+				return
+			}
 			p.forwardPortal(w, r, portalPrefix)
 		case pathMatches(r.URL.Path, tenantPrefix):
+			if p.cfg.TenantRedirect {
+				p.redirectTenant(w, r, tenantPrefix)
+				return
+			}
 			p.forwardTenant(w, r, tenantPrefix)
 		case rootMounted(aigwPrefix):
 			if r.URL.Path == "/" && p.cfg.RootRedirect != "" {
@@ -83,6 +96,44 @@ func (p *Proxy) Handler() http.Handler {
 			http.NotFound(w, r)
 		}
 	})
+}
+
+// scheme is the scheme this proxy advertises in redirect targets.
+func (p *Proxy) scheme() string {
+	switch p.cfg.PublicScheme {
+	case "http", "https":
+		return p.cfg.PublicScheme
+	}
+	if p.cfg.TLS.Certificate != "" {
+		return "https"
+	}
+	return "http"
+}
+
+// redirectTo sends the browser to a service's own origin, keeping any sub-path so
+// a deep link still lands on the same page.
+func (p *Proxy) redirectTo(w http.ResponseWriter, r *http.Request, port int, rest string) {
+	target := fmt.Sprintf("%s://%s:%d%s", p.scheme(), p.cfg.PublicHost, port, rest)
+	http.Redirect(w, r, target, http.StatusFound)
+}
+
+// redirectTenant hands /t/<tenant>/... over to that tenant's own port, which is the
+// origin its UI requires.
+func (p *Proxy) redirectTenant(w http.ResponseWriter, r *http.Request, prefix string) {
+	tenant, rest, ok := splitTenantPath(r.URL.Path, prefix)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	port, known := p.tenantPort(tenant)
+	if !known {
+		http.Error(w, "unknown tenant", http.StatusNotFound)
+		return
+	}
+	if rest == "/" {
+		rest = "/"
+	}
+	p.redirectTo(w, r, port, rest)
 }
 
 // forwardAigw passes the prefix through unchanged: aigw's server.base_path serves

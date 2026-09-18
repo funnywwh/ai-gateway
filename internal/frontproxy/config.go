@@ -57,6 +57,20 @@ type Config struct {
 	TenantPrefix string `yaml:"tenant_prefix"`
 	// TenantUpstream is the dshgw listener that fronts the workers (dshgw.Listen).
 	TenantUpstream string `yaml:"tenant_upstream"`
+	// PublicScheme is the scheme the proxy advertises in the URLs it redirects to
+	// ("auto" follows the TLS setting). Redirects exist so one domain can still be
+	// the front door when the services themselves live on their own ports.
+	PublicScheme string `yaml:"public_scheme"`
+	// PortalRedirect/TenantRedirect turn the portal and tenant prefixes into
+	// redirects to the service's own port instead of proxied requests.
+	//
+	// They are the bridge for a deployment that cannot use subdomains *and* cannot
+	// use path prefixes for the UI: the dsh client builds its API and stream URLs
+	// from location.origin, which never carries a path, so the UI must own an
+	// origin — a port. The familiar domain paths then hand the browser over to that
+	// origin instead of pretending to serve it.
+	PortalRedirect bool `yaml:"portal_redirect"`
+	TenantRedirect bool `yaml:"tenant_redirect"`
 	// EdgePortHeader is the header dshgw routes on (dshgw.edge_port_header).
 	// Empty means the project default.
 	EdgePortHeader string `yaml:"edge_port_header"`

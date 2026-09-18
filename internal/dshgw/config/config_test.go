@@ -92,7 +92,8 @@ func TestSecureSessionCookieFollowsTheDeploymentScheme(t *testing.T) {
 		apply     func(*Config)
 		wantSecur bool
 	}{
-		{"port mode default", func(*Config) {}, true},
+		{"port mode default (assumes TLS in front)", func(*Config) {}, true},
+		{"port mode over plain http is not Secure", func(c *Config) { c.PublicScheme = "http" }, false},
 		{"path mode over https", func(c *Config) { c.PublicBaseURL = "https://chat.example" }, true},
 		{"path mode over http", func(c *Config) { c.PublicBaseURL = "http://192.0.2.10:8090" }, false},
 		{"explicit always", func(c *Config) {

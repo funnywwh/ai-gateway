@@ -346,3 +346,32 @@ func TestConfigRejectsOverlappingPrefixesAndBadUpstreams(t *testing.T) {
 		}
 	}
 }
+
+// A deployment that cannot use subdomains and cannot host the UI under a path uses
+// the domain only as a front door: the prefixes redirect to the service's own port,
+// which is the origin the dsh client requires (it builds its API URLs from
+// location.origin, and an origin never carries a path).
+func TestPortalAndTenantRedirectsToTheirOwnOrigins(t *testing.T) {
+	var aigw, portal, tenant upstreams
+	proxy, cfg := fixture(t, &aigw, &portal, &tenant, map[string]int{"alice": 32601})
+	cfg.PortalRedirect = true
+	cfg.TenantRedirect = true
+	cfg.PublicScheme = "http"
+
+	response := request(t, proxy, http.MethodGet, "/dshgw/login", "chat.example:8443", "")
+	if response.StatusCode != http.StatusFound || response.Header.Get("Location") != "http://chat.example:32600/login" {
+		t.Fatalf("portal redirect = %d %q", response.StatusCode, response.Header.Get("Location"))
+	}
+	// A deep link keeps its sub-path, so a bookmarked page still resolves.
+	response = request(t, proxy, http.MethodGet, "/t/alice/settings/profile", "chat.example:8443", "")
+	if response.StatusCode != http.StatusFound || response.Header.Get("Location") != "http://chat.example:32601/settings/profile" {
+		t.Fatalf("tenant redirect = %d %q", response.StatusCode, response.Header.Get("Location"))
+	}
+	if response := request(t, proxy, http.MethodGet, "/t/nobody/", "chat.example:8443", ""); response.StatusCode != 404 {
+		t.Fatalf("unknown tenant = %d, want 404", response.StatusCode)
+	}
+	// Nothing was proxied: the prefix is a hand-off, not a second code path.
+	if len(portal.requests)+len(tenant.requests) != 0 {
+		t.Fatalf("a redirect reached an upstream: portal=%d tenant=%d", len(portal.requests), len(tenant.requests))
+	}
+}
