@@ -79,6 +79,13 @@ func fixture(t *testing.T, worker http.Handler) (*Proxy, registry.Tenant, string
 	p.Authorizer = authorizerFunc(func(context.Context, string) (string, error) { return "alice", nil })
 	return p, tenant, up.URL, up
 }
+
+type adopterFunc func(context.Context, string, string) (bool, error)
+
+func (f adopterFunc) AdoptKey(ctx context.Context, tenant, key string) (bool, error) {
+	return f(ctx, tenant, key)
+}
+
 func issue(t *testing.T, p *Proxy, tenant string, upstream *session.Upstream) string {
 	t.Helper()
 	token, err := p.Sessions.Issue(tenant, time.Hour)
@@ -630,5 +637,42 @@ func TestPathModeUsesPrefixesForURLsCookiesAndFences(t *testing.T) {
 	p.Dispatch().ServeHTTP(foreignRecorder, foreign)
 	if got := foreignRecorder.Result().StatusCode; got != http.StatusForbidden {
 		t.Fatalf("foreign origin accepted: %d", got)
+	}
+}
+
+// Login is the only moment the deployment holds a key it has already proven valid
+// for a tenant. A tenant that never stored one (hand-built, restored, migrated) is
+// configured here — but a provisioning failure must not turn a valid login into a
+// failure: the user gets their session either way.
+func TestLoginAdoptsTheKeyAndSurvivesAdoptionFailure(t *testing.T) {
+	p, _, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer up.Close()
+	var adopted string
+	p.KeyAdopter = adopterFunc(func(_ context.Context, tenant, key string) (bool, error) {
+		adopted = tenant + "|" + key
+		return true, nil
+	})
+	login := func() *http.Response {
+		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("key=sk-aaaaaaaaa-rest"))
+		req.Host = "dsh.test:32600"
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Origin", "https://dsh.test:32600")
+		req.RemoteAddr = "198.51.100.9:1234"
+		recorder := httptest.NewRecorder()
+		p.Dispatch().ServeHTTP(recorder, req)
+		return recorder.Result()
+	}
+	if response := login(); response.StatusCode != http.StatusFound {
+		t.Fatalf("login status = %d", response.StatusCode)
+	}
+	if adopted != "alice|sk-aaaaaaaaa-rest" {
+		t.Fatalf("the login key was not adopted: %q", adopted)
+	}
+
+	p.KeyAdopter = adopterFunc(func(context.Context, string, string) (bool, error) {
+		return false, errors.New("aigw unreachable")
+	})
+	if response := login(); response.StatusCode != http.StatusFound {
+		t.Fatalf("a failed adoption blocked a valid login: %d", response.StatusCode)
 	}
 }

@@ -24,9 +24,14 @@ func (c *cli) serve() error {
 		return err
 	}
 	store := deps.manager.Sessions
+	ops := managerOps{m: deps.manager, validator: deps.validator, cfg: deps.cfg, logger: slog.Default()}
 	gateway := proxy.New(deps.cfg, deps.reg, store, handshake.FileSource{Dir: deps.cfg.HandshakeDir}, &handshake.HTTPExchanger{}, deps.validator)
 	gateway.Authorizer = deps.validator
 	gateway.KeySource = proxy.FileKeySource{Root: deps.cfg.Deploy.TenantConfigRoot}
+	// Login is the one moment the deployment holds a key it has already proven valid
+	// for this tenant: a tenant that never stored one (hand-built, restored, migrated)
+	// is configured here instead of opening dsh with no providers at all.
+	gateway.KeyAdopter = ops
 	gateway.Auditor = &audit.JSONL{Path: deps.cfg.AuditPath}
 	gateway.Activity = &activity.Store{Path: deps.cfg.ActivityPath}
 	server := &http.Server{Addr: deps.cfg.Listen, Handler: gateway.Dispatch(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: deps.cfg.MaxHeaderBytes}
@@ -64,7 +69,7 @@ func (c *cli) serve() error {
 			return fmt.Errorf("admin channel: %w", err)
 		}
 		defer adminListener.Close()
-		admin := &AdminServer{Ops: managerOps{m: deps.manager, validator: deps.validator, cfg: deps.cfg}, OwnerUID: os.Geteuid()}
+		admin := &AdminServer{Ops: ops, OwnerUID: os.Geteuid()}
 		admin.OnTenantsChanged = func() {
 			if err := publicEdge.Reconcile(deps.reg.List()); err != nil {
 				slog.Error("rebinding the public surface failed", "err", err)

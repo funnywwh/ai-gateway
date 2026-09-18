@@ -43,7 +43,8 @@ func modelRefreshHook(cfg *config.Config, validator keyValidator, manager *tenan
 			// Without a stored key there is nothing to ask aigw about. The worker
 			// keeps whatever settings it has; a deployment that keeps keys
 			// elsewhere is not blocked by this.
-			log.Warn("model refresh skipped: no stored tenant key", "tenant", t.Name, "err", err)
+			log.Warn("tenant has no stored key: starting dsh without providers; log in once with a valid key (or run tenant-set-key) to provision it",
+				"tenant", t.Name, "err", err)
 			return nil
 		}
 		models, err := validator.ValidateKey(ctx, key)
@@ -57,6 +58,18 @@ func modelRefreshHook(cfg *config.Config, validator keyValidator, manager *tenan
 			}
 			log.Warn("model refresh skipped: aigw unavailable; starting with the current model list", "tenant", t.Name, "err", err)
 			return nil
+		}
+		// A tenant can reach this point without ever having been provisioned (written
+		// by hand, restored, migrated, or its files deleted). dsh would then start
+		// with no provider and an empty model list — "settings are unavailable in this
+		// browser" — so the files are created here, from this key and the models it
+		// can actually call, before dsh reads them.
+		provisioned, err := manager.EnsureProvisioned(ctx, t, key, models)
+		if err != nil {
+			return fmt.Errorf("provisioning %s before start: %w", t.Name, err)
+		}
+		if provisioned {
+			log.Info("tenant provisioned before worker start", "tenant", t.Name, "models", len(models))
 		}
 		if err := manager.SyncModels(t, models); err != nil {
 			return fmt.Errorf("applying the refreshed model list for %s: %w", t.Name, err)

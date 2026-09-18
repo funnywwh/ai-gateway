@@ -1,8 +1,13 @@
 package tenancy
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/winger/ai-gateway/internal/dshgw/config"
+	"github.com/winger/ai-gateway/internal/dshgw/registry"
 )
 
 func TestScopeWrapperCarriesEveryConfiguredLimit(t *testing.T) {
@@ -57,5 +62,41 @@ func TestApplyLimitsDegradesToNoLimits(t *testing.T) {
 	plain := &WorkerRunner{}
 	if got, scoped := plain.applyLimits("dshgw-worker-alice", argv); scoped || strings.Join(got, " ") != strings.Join(argv, " ") {
 		t.Fatalf("unlimited runner wrapped the worker: %v", got)
+	}
+}
+
+// The sandbox binds the release's resolved directory, so the plugin anchor must be
+// the resolved path too: a deployment that keeps the documented
+// `…/current -> releases/r1` symlink otherwise starts a worker whose every plugin
+// import fails with "Cannot find module".
+func TestWorkerEnvAnchorsThroughAResolvedReleasePath(t *testing.T) {
+	root := t.TempDir()
+	release := filepath.Join(root, "dsh", "releases", "r1")
+	if err := os.MkdirAll(release, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(release, "package.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	current := filepath.Join(root, "dsh", "current")
+	if err := os.Symlink(release, current); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Dsh: config.DshRuntime{CurrentLink: current, NodeBin: "/usr/bin/node"}}
+	tenant := registry.Tenant{Name: "alice", WorkerPort: 32100, DshHome: "/state/alice/.dsh", Workspace: "/srv/alice"}
+
+	var anchor string
+	for _, entry := range workerEnv(cfg, tenant) {
+		if strings.HasPrefix(entry, "DSHGW_DSH_ANCHOR=") {
+			anchor = strings.TrimPrefix(entry, "DSHGW_DSH_ANCHOR=")
+		}
+	}
+	if want := filepath.Join(release, "package.json"); anchor != want {
+		t.Fatalf("anchor = %q, want the resolved release %q", anchor, want)
+	}
+	// A configured path that is not a symlink must be used as-is.
+	plain := &config.Config{Dsh: config.DshRuntime{CurrentLink: release, NodeBin: "/usr/bin/node"}}
+	if got := dshAnchor(plain); got != filepath.Join(release, "package.json") {
+		t.Fatalf("anchor = %q for a plain release path", got)
 	}
 }

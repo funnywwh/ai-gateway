@@ -675,6 +675,85 @@ func (m *Manager) BindPrefix(tenant, prefix string) error {
 	})
 }
 
+// EnsureProvisioned writes the files a tenant's dsh reads at startup when they are
+// missing: settings.yaml (provider + the models this key may use), .credentials.yaml
+// (the key reference), the profile patch, the workspace state and the stored gateway
+// key. It returns true when it created them.
+//
+// Why this has to exist: a tenant can be in the registry without ever having been
+// provisioned — written by hand, restored from a backup, migrated from the previous
+// deployment, or its files deleted. Its worker then starts with no provider at all,
+// which dsh reports as "settings are unavailable in this browser" and an empty model
+// list. Starting dsh for that tenant is exactly the moment the files should appear,
+// built from the key the tenant has and the models aigw says that key can call.
+//
+// An existing settings.yaml is never touched: while a tenant is provisioned its model
+// list belongs to SyncModels, and rewriting it here would fight that path.
+func (m *Manager) EnsureProvisioned(ctx context.Context, t registry.Tenant, key string, models []string) (bool, error) {
+	normalized, err := aigw.NormalizeKey(key)
+	if err != nil {
+		return false, err
+	}
+	provisioned := false
+	err = m.WithLifecycleLock(func() error {
+		current, ok := m.Registry.Get(t.Name)
+		if !ok {
+			return fmt.Errorf("tenant %q not found", t.Name)
+		}
+		if err := m.validateTenantPaths(current); err != nil {
+			return err
+		}
+		settingsPath := filepath.Join(current.DshHome, "settings.yaml")
+		switch _, err := os.Stat(settingsPath); {
+		case err == nil:
+			return nil // already provisioned; SyncModels owns the model list
+		case !errors.Is(err, os.ErrNotExist):
+			return err
+		}
+		// The profile tree is what makes the rendered patch loadable: our plugin and
+		// the picker/client packages are resolved through it. A tenant that lost (or
+		// never had) it would get a patch it cannot import, and dsh would exit on
+		// startup — so the template is installed first, exactly as tenant creation
+		// does, and a template that cannot satisfy the options still fails loudly
+		// instead of producing a worker that dies.
+		if err := ValidateTemplate(m.Config.Deploy.TemplateHome, current.PluginBrowserFS == "on"); err != nil {
+			return fmt.Errorf("cannot provision %s: %w", current.Name, err)
+		}
+		if err := copyProfileTemplate(m.Config.Deploy.TemplateHome, current.DshHome); err != nil {
+			if !strings.Contains(err.Error(), "already exists") {
+				return err
+			}
+		}
+		artifacts, err := RenderTenantArtifacts(m.Config, current, normalized, models, TenantOptions{
+			DirectoryPicker: current.DirectoryPicker,
+			PluginBrowserFS: current.PluginBrowserFS,
+		}, m.now())
+		if err != nil {
+			return err
+		}
+		if err := WriteArtifacts(artifacts); err != nil {
+			return err
+		}
+		// The key's own prefix becomes the tenant's, with the old one kept as a
+		// previous prefix so an existing binding is not silently dropped.
+		if err := m.Registry.RotatePrefix(current.Name, normalized[:12], true); err != nil {
+			return err
+		}
+		updated, _ := m.Registry.Get(current.Name)
+		updated.ModelsPending = len(models) == 0
+		if err := m.Registry.Put(updated); err != nil {
+			return err
+		}
+		if err := m.Registry.Save(); err != nil {
+			return err
+		}
+		provisioned = true
+		return nil
+	})
+	return provisioned, err
+}
+
+// SyncModels updates a provisioned tenant's model list.
 func (m *Manager) SyncModels(t registry.Tenant, models []string) error {
 	return m.WithLifecycleLock(func() error {
 		current, ok := m.Registry.Get(t.Name)

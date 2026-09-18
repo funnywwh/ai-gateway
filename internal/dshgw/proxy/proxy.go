@@ -43,6 +43,15 @@ type DSHAuthorizer interface {
 	Authorize(context.Context, string) (string, error)
 }
 
+// KeyAdopter persists the key a user just proved valid for a tenant that has none,
+// and provisions that tenant. It is implemented by the lifecycle layer: the proxy
+// decides identity, it does not write tenant state itself.
+type KeyAdopter interface {
+	// AdoptKey stores the key when the tenant has a different one, or none, and
+	// reports whether anything changed.
+	AdoptKey(ctx context.Context, tenant, key string) (bool, error)
+}
+
 type Proxy struct {
 	Config          *config.Config
 	Registry        *registry.Registry
@@ -52,6 +61,7 @@ type Proxy struct {
 	Validator       KeyValidator
 	Authorizer      DSHAuthorizer
 	KeySource       KeySource
+	KeyAdopter      KeyAdopter
 	Transport       http.RoundTripper
 	Logger          *slog.Logger
 	Auditor         audit.Sink
@@ -334,6 +344,19 @@ func (p *Proxy) login(w http.ResponseWriter, r *http.Request) {
 		p.audit(r, "", "login_reject", "unbound key prefix", http.StatusForbidden)
 		p.renderLogin(w, http.StatusForbidden, "该账号的 dsh 租户尚未就绪，请联系管理员启用或检查租户状态")
 		return
+	}
+	// A tenant whose key was never stored (built by hand, restored, migrated) has no
+	// provider configuration, so its dsh would open with an empty model list. The
+	// user just proved this key is valid for this tenant, which makes login the one
+	// moment where the deployment can configure it without asking for anything more.
+	// A failure here must not block a valid login: the session is still issued.
+	if p.KeyAdopter != nil {
+		if adopted, err := p.KeyAdopter.AdoptKey(r.Context(), tenant.Name, key); err != nil {
+			p.log().Warn("adopting the login key failed; the tenant keeps its current configuration",
+				"tenant", tenant.Name, "err", err)
+		} else if adopted {
+			p.log().Info("login key adopted for the tenant", "tenant", tenant.Name)
+		}
 	}
 	token, err := p.Sessions.Issue(tenant.Name, p.Config.SessionTTL.Duration())
 	if err != nil {

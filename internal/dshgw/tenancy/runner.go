@@ -450,12 +450,28 @@ func (p *workerProc) err() error {
 // EnvironmentFile. With no unit there is no file: dshgw hands the values to the
 // child directly, so the worker cannot be pointed at another tenant's state by
 // editing a shared environment file.
+// dshAnchor is the package.json plugin resolution is anchored to.
+//
+// It must name a path that exists *inside the sandbox*, and the sandbox binds the
+// release's resolved directory (…/releases/r1), not the `current` symlink that
+// usually points at it. Using the configured path here made `dsh` fail with
+// "Cannot find module …" the moment a deployment kept the documented
+// `/opt/dsh/current` layout, because the anchor resolved through a symlink the
+// sandbox never had. Resolving it keeps the anchor and the mount set consistent.
+func dshAnchor(cfg *config.Config) string {
+	release := cfg.Dsh.CurrentLink
+	if resolved, err := filepath.EvalSymlinks(release); err == nil {
+		release = resolved
+	}
+	return filepath.Join(release, "package.json")
+}
+
 func workerEnv(cfg *config.Config, t registry.Tenant) []string {
 	env := []string{
 		"DSH_PORT=" + fmt.Sprint(t.WorkerPort),
 		"DSH_HOME=" + t.DshHome,
 		"HOME=" + t.Workspace,
-		"DSHGW_DSH_ANCHOR=" + filepath.Join(cfg.Dsh.CurrentLink, "package.json"),
+		"DSHGW_DSH_ANCHOR=" + dshAnchor(cfg),
 		"PATH=" + filepath.Dir(cfg.Dsh.NodeBin) + ":/usr/local/bin:/usr/bin:/bin",
 	}
 	// Keep the operator's own PATH additions (for example a locally installed

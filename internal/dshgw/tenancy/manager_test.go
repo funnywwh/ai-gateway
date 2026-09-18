@@ -164,6 +164,7 @@ func fixtureTenant(t *testing.T, m *Manager, name string, port int) registry.Ten
 	return registry.Tenant{
 		Name: name, WorkerPort: port, UID: os.Geteuid(), Isolation: registry.IsolationBwrap,
 		Workspace: workspace, DshHome: dshHome, PublicPort: port - 100, KeyPrefix: "sk-aaaaaaaaa", CreatedAt: time.Now().UTC(),
+		Handshake: registry.HandshakeOK,
 	}
 }
 
@@ -368,5 +369,103 @@ func TestRotateAndSyncRejectRegistryPathsOutsideConfiguredRoots(t *testing.T) {
 				t.Fatalf("unsafe path changed the worker process: pid %d -> %d", beforePID, after)
 			}
 		})
+	}
+}
+
+// A tenant can be in the registry without ever having been provisioned: written by
+// hand, restored from a backup, or migrated from the previous deployment. Its dsh
+// then has no settings.yaml, which the UI reports as "settings are unavailable in
+// this browser" and an empty model list — so starting that worker has to create the
+// files from the key the tenant has and the models that key can call.
+func TestEnsureProvisionedCreatesMissingArtifactsAndIsIdempotent(t *testing.T) {
+	m, _, _ := managerFixture(t)
+	tenant := fixtureTenant(t, m, "alice", 32100)
+	if err := m.Registry.Put(tenant); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Registry.Save(); err != nil {
+		t.Fatal(err)
+	}
+	settings := filepath.Join(tenant.DshHome, "settings.yaml")
+
+	provisioned, err := m.EnsureProvisioned(context.Background(), tenant, "sk-aaaaaaaaa-rest", []string{"m-a", "m-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !provisioned {
+		t.Fatal("an unprovisioned tenant was reported as already provisioned")
+	}
+	for _, name := range []string{"settings.yaml", ".credentials.yaml"} {
+		if _, err := os.Stat(filepath.Join(tenant.DshHome, name)); err != nil {
+			t.Fatalf("%s was not created: %v", name, err)
+		}
+	}
+	// The profile tree is what makes the rendered patch importable: without it dsh
+	// exits with "plugin tree failed to load" on startup, which is a worse outcome
+	// than the empty settings this provisioning set out to fix.
+	profileManifest := filepath.Join(tenant.DshHome, "profiles", "web", "package.json")
+	if _, err := os.Stat(profileManifest); err != nil {
+		t.Fatalf("the template profile was not installed: %v", err)
+	}
+	gateway := filepath.Join(m.Config.Deploy.TenantConfigRoot, "alice", "gateway.key")
+	key, err := os.ReadFile(gateway)
+	if err != nil {
+		t.Fatalf("gateway key was not stored: %v", err)
+	}
+	if strings.TrimSpace(string(key)) != "sk-aaaaaaaaa-rest" {
+		t.Fatalf("stored key = %q", strings.TrimSpace(string(key)))
+	}
+	// dsh reads its model list from settings.yaml; the models this key may use must be
+	// in there, or the UI shows an empty catalog again.
+	body, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, model := range []string{"m-a", "m-b"} {
+		if !strings.Contains(string(body), model) {
+			t.Errorf("settings.yaml is missing model %q:\n%s", model, body)
+		}
+	}
+	// The key's own prefix becomes authoritative, with the old one kept.
+	updated, _ := m.Registry.Get("alice")
+	if updated.KeyPrefix != "sk-aaaaaaaaa"[:12] && updated.KeyPrefix != "sk-aaaaaaaaa" {
+		t.Fatalf("key prefix = %q", updated.KeyPrefix)
+	}
+	if updated.ModelsPending {
+		t.Error("ModelsPending stayed true although models were configured")
+	}
+
+	// A second call must not touch a provisioned tenant: its model list belongs to
+	// SyncModels from then on.
+	marked := append(body, []byte("# keep\n")...)
+	if err := os.WriteFile(settings, marked, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provisioned, err = m.EnsureProvisioned(context.Background(), tenant, "sk-bbbbbbbbb-other", []string{"m-c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provisioned {
+		t.Fatal("an already provisioned tenant was provisioned again")
+	}
+	after, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(marked) {
+		t.Fatalf("settings.yaml was rewritten by EnsureProvisioned:\n%s", after)
+	}
+}
+
+func TestEnsureProvisionedRequiresAKey(t *testing.T) {
+	m, _, _ := managerFixture(t)
+	tenant := fixtureTenant(t, m, "alice", 32100)
+	if err := m.Registry.Put(tenant); err != nil {
+		t.Fatal(err)
+	}
+	// Without a key there is nothing to configure dsh with; refusing is what keeps
+	// the caller from writing a provider block that can never authenticate.
+	if _, err := m.EnsureProvisioned(context.Background(), tenant, "", []string{"m"}); err == nil {
+		t.Fatal("an empty key was accepted")
 	}
 }

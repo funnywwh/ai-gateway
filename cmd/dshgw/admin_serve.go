@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/winger/ai-gateway/internal/dshgw/aigw"
 	"github.com/winger/ai-gateway/internal/dshgw/config"
+	"github.com/winger/ai-gateway/internal/dshgw/proxy"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
 	"github.com/winger/ai-gateway/internal/dshgw/tenancy"
 )
@@ -42,6 +44,14 @@ type managerOps struct {
 	m         *tenancy.Manager
 	validator *aigw.Client
 	cfg       *config.Config
+	logger    *slog.Logger
+}
+
+func (o managerOps) log() *slog.Logger {
+	if o.logger != nil {
+		return o.logger
+	}
+	return slog.Default()
 }
 
 func (o managerOps) models(ctx context.Context, key string) ([]string, bool, error) {
@@ -91,15 +101,66 @@ func (o managerOps) Stop(ctx context.Context, name string) error {
 }
 
 func (o managerOps) SetKey(ctx context.Context, name, key string) error {
+	return o.applyKey(ctx, name, key, false)
+}
+
+// AdoptKey is the login path: the user just proved this key works for this tenant,
+// so storing it and configuring dsh is exactly what should happen next. It reports
+// whether anything changed, so the caller can log a meaningful line.
+func (o managerOps) AdoptKey(ctx context.Context, name, key string) (bool, error) {
+	if existing, err := (proxy.FileKeySource{Root: o.cfg.Deploy.TenantConfigRoot}).Key(name); err == nil && existing == key {
+		return false, nil
+	}
+	if err := o.applyKey(ctx, name, key, true); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// applyKey stores a tenant key and makes dsh reflect it.
+//
+// Two tenant shapes reach this: a provisioned one (rotate the key and refresh the
+// model list) and one that was never provisioned — built by hand, restored from a
+// backup, or migrated — whose dsh has no settings.yaml at all. The second shape used
+// to fail outright, because the rotate path reads the files it intends to update; it
+// is now created from scratch instead.
+func (o managerOps) applyKey(ctx context.Context, name, key string, restart bool) error {
 	t, ok := o.m.Registry.Get(name)
 	if !ok {
 		return fmt.Errorf("tenant %q not found", name)
 	}
-	models, _, err := o.models(ctx, key)
+	models, empty, err := o.models(ctx, key)
 	if err != nil {
 		return fmt.Errorf("key validation: %w", err)
 	}
-	return o.m.RotateKey(ctx, t, key, models, false)
+	if empty {
+		// dsh would open with an empty provider list. Store the key and let the model
+		// list catch up when the account's grants do, instead of failing the login.
+		o.log().Warn("key currently has no available models; dsh will start without a model list", "tenant", name)
+	}
+	provisioned, err := o.m.EnsureProvisioned(ctx, t, key, models)
+	if err != nil {
+		return err
+	}
+	if !provisioned {
+		if err := o.m.RotateKey(ctx, t, key, models, false); err != nil {
+			return err
+		}
+	}
+	if !restart {
+		return nil
+	}
+	// The running worker read settings.yaml when it started. It has to come up again
+	// for the user to see the models that were just configured.
+	state, err := o.m.Status(ctx, t)
+	if err != nil || !state.Running {
+		return nil
+	}
+	if err := o.m.Restart(ctx, t); err != nil {
+		return fmt.Errorf("restarting %s after configuring its key: %w", name, err)
+	}
+	o.log().Info("tenant restarted with its configured models", "tenant", name, "models", len(models))
+	return nil
 }
 
 func (o managerOps) List() []registry.Tenant { return o.m.Registry.List() }
