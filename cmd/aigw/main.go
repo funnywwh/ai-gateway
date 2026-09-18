@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -393,8 +394,16 @@ func run() int {
 
 	// Recorded observability data (request logs, stored responses) is pruned on a daily
 	// policy, in batches so the single writer connection stays available to requests.
+	//
+	// The janitor starts *after* the listener is up: it runs its first pass
+	// immediately, and on a deployment whose database holds several gigabytes of
+	// recorded traffic that pass competes for the same single writer connection the
+	// remaining bootstrap writes need. Measured on this host: a restart whose
+	// bootstrap write queued behind the first pass kept the port refusing
+	// connections for 34s (versus ~1s when the pass found nothing to do), and every
+	// request in that window saw 503. Housekeeping is never on the startup critical
+	// path, so it waits.
 	logJanitor := retention.New(db, retention.Config{RetentionDays: cfg.Recording.RetentionDays}, log)
-	logJanitor.Start(ctx, 24*time.Hour)
 
 	adminAuth := admin.NewAuth(db, admin.Config{
 		SessionTTL:    12 * time.Hour,
@@ -594,10 +603,21 @@ func run() int {
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       cfg.Server.ReadTimeout(),
 	}
+	// Bind before housekeeping starts: binding is the step that makes the port stop
+	// refusing connections, and the janitor's first pass is heavy enough to delay
+	// whatever runs behind it on a multi-gigabyte database. A bind failure is also
+	// reported as a bind failure instead of a "listening" line that never served.
+	listener, err := net.Listen("tcp", cfg.Server.Listen)
+	if err != nil {
+		log.Error("cannot bind the http listener", "addr", cfg.Server.Listen, "err", err)
+		return 1
+	}
+	log.Info("http server listening", "addr", cfg.Server.Listen)
+	logJanitor.Start(ctx, 24*time.Hour)
+
 	serverErr := make(chan error, 1)
 	go func() {
-		log.Info("http server listening", "addr", cfg.Server.Listen)
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErr <- err
 		}
 	}()

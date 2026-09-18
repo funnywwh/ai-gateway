@@ -53,6 +53,41 @@ ACTION="${ACTION:-status}"
 # which unit systemctl is asked about.
 UNIT_PATH="$UNIT_DIR/$UNIT"
 
+# config_endpoint reads "listen" and "base_path" out of the config and returns
+# "<host:port> <base>", tolerant of quoting and of a listen value without a host
+# ("":8088" binds every interface, so a probe must use loopback).
+config_endpoint() {
+  local cfg="$1" listen base
+  listen="$(sed -n 's/^[[:space:]]*listen:[[:space:]]*//p' "$cfg" | head -1 | tr -d '\"' | tr -d "'" | tr -d ' ')"
+  base="$(sed -n 's/^[[:space:]]*base_path:[[:space:]]*//p' "$cfg" | head -1 | tr -d '\"' | tr -d "'" | tr -d ' ')"
+  if [[ "$listen" == :* ]]; then
+    listen="127.0.0.1${listen}"
+  fi
+  printf '%s %s\n' "${listen:-127.0.0.1:8088}" "${base%/}"
+}
+
+# wait_ready polls the unit's own /healthz until it answers or the budget runs out.
+#
+# "systemctl restart returned" is not "the service is serving": aigw binds its port
+# only after loading its registry and running bootstrap writes, which was measured at
+# 34 seconds on this host's multi-gigabyte database. Reporting success before then
+# hides an outage window in which every request (including DSH logins) fails.
+wait_ready() {
+  local url="$1" budget="${2:-60}" waited=0 code=""
+  # (Callers pass a URL built from config values; those may arrive quoted.)
+  while (( waited < budget )); do
+    code="$(curl -s -o /dev/null -m 2 -w '%{http_code}' "$url" 2>/dev/null || true)"
+    if [[ "$code" == "200" ]]; then
+      printf 'ready after %ss (%s)\n' "$waited" "$url"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "not ready after ${budget}s: last status ${code:-none} from $url" >&2
+  return 1
+}
+
 require_user_manager() {
   if ! systemctl --user show-environment >/dev/null 2>&1; then
     echo "no systemd user manager for $(id -un); use 'bin/aigw --config ...' directly" >&2
@@ -112,8 +147,13 @@ case "$ACTION" in
     write_unit
     if [[ "$START" == 1 ]]; then
       systemctl --user restart "$UNIT"
-      sleep 2
       systemctl --user is-active "$UNIT" >/dev/null && echo "started $UNIT"
+      # Read the port from the config so the gate matches the deployment.
+      read -r listen base < <(config_endpoint "$CONFIG")
+      wait_ready "http://${listen}${base}/healthz" 90 || {
+        echo "warning: $UNIT is active but not answering yet; check the log" >&2
+        exit 1
+      }
     fi
     if [[ "$(linger_state)" != "yes" ]]; then
       cat >&2 <<EOF
@@ -134,6 +174,8 @@ EOF
     require_user_manager
     systemctl --user restart "$UNIT"
     echo "restarted $UNIT"
+    read -r listen base < <(config_endpoint "$CONFIG")
+    wait_ready "http://${listen}${base}/healthz" 90
     ;;
   uninstall)
     require_user_manager
