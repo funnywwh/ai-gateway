@@ -14,11 +14,16 @@
 # archives them. If one of them is a real user, tell them before running --apply.
 #
 # Usage:
-#   sudo scripts/decommission_legacy_dshgw.sh [--apply] [--archive-dir DIR]
-#                                            [--remove-accounts] [--old-config PATH]
+#   sudo scripts/decommission_legacy_dshgw.sh [--apply] [--archive-only]
+#                                            [--archive-dir DIR] [--remove-accounts]
+#                                            [--old-config PATH] [--state-dir DIR]
+#                                            [--etc-dir DIR] [--nginx-dir DIR]
 #
 #   (no --apply)     print the plan: inventory, what gets archived, what gets stopped
 #   --apply          do it (needs root; nothing is deleted before the archive is verified)
+#   --archive-only   take the archive (and verify it) and stop there; needs no root when the
+#                    archive directory is writable. Useful when you want the rollback source
+#                    in hand before touching a running deployment.
 #   --archive-dir    where the archive lands (default <repo>/data/prev/legacy-dshgw)
 #   --remove-accounts
 #                    also delete the per-tenant OS accounts (dsh-<tenant>) and their homes.
@@ -28,11 +33,16 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APPLY=0
+ARCHIVE_ONLY=0
 REMOVE_ACCOUNTS=0
 ARCHIVE_DIR=""
 OLD_CONFIG="/etc/dshgw/config.yaml"
 OLD_STATE=""
 OLD_REGISTRY=""
+OLD_WORKSPACE=""
+OLD_TENANT_ROOT=""
+OLD_TENANT_CONFIG=""
+OLD_BACKUP=""
 OLD_ETC="/etc/dshgw"
 OLD_OPT="/opt/dshgw"
 NGINX_CONF_DIR=""
@@ -41,10 +51,12 @@ UNIT_DIR="/etc/systemd/system"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --apply) APPLY=1; shift ;;
+    --archive-only) ARCHIVE_ONLY=1; shift ;;
     --archive-dir) ARCHIVE_DIR="$2"; shift 2 ;;
     --remove-accounts) REMOVE_ACCOUNTS=1; shift ;;
     --old-config) OLD_CONFIG="$2"; shift 2 ;;
     --state-dir) OLD_STATE="$2"; shift 2 ;;
+    --etc-dir) OLD_ETC="$2"; shift 2 ;;
     --nginx-dir) NGINX_CONF_DIR="$2"; shift 2 ;;
     -h|--help) sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -63,7 +75,7 @@ run()  { if [[ "$APPLY" == 1 ]]; then printf 'RUN   %s\n' "$*"; "$@"; else step 
 # archive is readable without root afterwards.
 TARGET_USER="${SUDO_USER:-$(id -un)}"
 
-if [[ "$APPLY" == 1 && "$(id -u)" != 0 ]]; then
+if [[ "$APPLY" == 1 && "$ARCHIVE_ONLY" != 1 && "$(id -u)" != 0 ]]; then
   fail "--apply needs root (run it as: sudo $0 --apply)"
 fi
 
@@ -84,10 +96,18 @@ try:
     doc = yaml.safe_load(open(sys.argv[1])) or {}
 except Exception:
     raise SystemExit(0)
+deploy = doc.get("deploy") or {}
 out = {
     "state_dir": doc.get("state_dir") or "",
     "registry_path": doc.get("registry_path") or "",
     "nginx_dir": doc.get("nginx_include_path") or doc.get("nginx_dir") or "",
+    # Trees that hold tenant data but live outside the state directory. The script archives
+    # them and does NOT delete them, but leaving them unnamed is how a "decommissioned"
+    # deployment keeps gigabytes of a real user's files nobody remembers.
+    "workspace_root": doc.get("workspace_root") or "",
+    "tenant_root": doc.get("tenant_root") or "",
+    "tenant_config_root": deploy.get("tenant_config_root") or "",
+    "backup_dir": deploy.get("backup_dir") or "",
 }
 for key, value in out.items():
     print(f"{key.upper()}={value}")
@@ -99,6 +119,10 @@ while IFS='=' read -r key value; do
     STATE_DIR) [[ -n "$OLD_STATE" ]] || OLD_STATE="$value" ;;
     REGISTRY_PATH) [[ -n "$value" ]] && OLD_REGISTRY="$value" ;;
     NGINX_DIR) [[ -n "$NGINX_CONF_DIR" ]] || NGINX_CONF_DIR="$value" ;;
+    WORKSPACE_ROOT) [[ -n "$value" ]] && OLD_WORKSPACE="$value" ;;
+    TENANT_ROOT) [[ -n "$value" ]] && OLD_TENANT_ROOT="$value" ;;
+    TENANT_CONFIG_ROOT) [[ -n "$value" ]] && OLD_TENANT_CONFIG="$value" ;;
+    BACKUP_DIR) [[ -n "$value" ]] && OLD_BACKUP="$value" ;;
   esac
 done < <(read_old_config)
 [[ -n "$OLD_STATE" ]] || OLD_STATE="/var/lib/dshgw"
@@ -142,8 +166,10 @@ else
   say "  note: a tenant named the same as one in the surviving deployment is still a DIFFERENT"
   say "        tenant here — two deployments, two registries, two sets of data."
 fi
-info "sizes:"
-for path in "$OLD_STATE" "$OLD_ETC" "$OLD_OPT" "$NGINX_CONF_DIR"; do
+info "sizes (deleted trees first, then the trees this script archives but does NOT delete):"
+for path in "$OLD_STATE" "$OLD_ETC" "$OLD_OPT" "$NGINX_CONF_DIR" \
+            "$OLD_WORKSPACE" "$OLD_TENANT_ROOT" "$OLD_TENANT_CONFIG" "$OLD_BACKUP"; do
+  [[ -n "$path" ]] || continue
   if [[ ! -e "$path" ]]; then
     say "  (absent)	$path"
     continue
@@ -167,7 +193,13 @@ say ""
 archive_tree() {
   local src="$1" name="$2"
   local dest="$ARCHIVE_DIR/$name.tar.gz"
-  [[ -e "$src" ]] || { step "skip $src (absent)"; return 0; }
+  if [[ -z "$src" ]]; then
+    # Empty means the old configuration has not been read (it is root-only), not that the
+    # tree is absent: under sudo the path is known and gets archived.
+    step "skip $name (path unknown without root; run under sudo or pass --state-dir)"
+    return 0
+  fi
+  [[ -e "$src" ]] || { step "skip $name ($src is absent)"; return 0; }
   step "tar -czf $dest -C / ${src#/}"
   if [[ "$APPLY" == 1 ]]; then
     tar -czf "$dest" -C / "${src#/}"
@@ -184,6 +216,27 @@ fi
 archive_tree "$OLD_STATE" "var-lib-dshgw"
 archive_tree "$OLD_ETC" "etc-dshgw"
 archive_tree "$NGINX_CONF_DIR" "nginx-conf-d-dshgw"
+# Data trees that live outside the state directory. They are archived, never deleted: they
+# are outside the three directories this script owns, and a workspace is the tenant's own
+# files. Their names come from the old configuration, so a host that moved them is covered.
+archive_tree "${OLD_WORKSPACE:-}" "srv-dsh-workspaces"
+archive_tree "${OLD_BACKUP:-}" "dshgw-backups"
+
+# The workspace root and the backup directory are reported every time, present or not: an
+# operator who is about to delete a deployment should know exactly what stays behind.
+step "these trees are archived but NOT deleted by this script:"
+for path in "$OLD_WORKSPACE" "$OLD_TENANT_ROOT" "$OLD_TENANT_CONFIG" "$OLD_BACKUP"; do
+  if [[ -z "$path" ]]; then
+    step "  unknown (the old config $OLD_CONFIG is unreadable without root)"
+    continue
+  fi
+  if [[ -e "$path" ]]; then
+    size="$(du -sh "$path" 2>/dev/null | cut -f1 || true)"
+    step "  keep $path ($size)"
+  else
+    step "  (absent) $path"
+  fi
+done
 
 # Unit files and the binary's own identity are small and decisive when reconstructing the old
 # shape later, so they are copied verbatim rather than packed.
@@ -201,21 +254,91 @@ fi
 if [[ "$APPLY" == 1 ]]; then
   # Verification before deletion: each archive must list back, and the registry — the file
   # that names every tenant — must be inside it.
-  for name in var-lib-dshgw etc-dshgw nginx-conf-d-dshgw; do
+  #
+  # Each listing is written to a scratch file and grepped from there rather than piped into
+  # `grep -q`: a pipe would let grep exit on its first match, tar would die of SIGPIPE, and
+  # `set -o pipefail` would then report a *successful* archive as broken — which is exactly
+  # how the first run of this script stopped at the safety check having deleted nothing.
+  listing="$(mktemp)"
+  trap 'rm -f "$listing"' EXIT
+  for name in var-lib-dshgw etc-dshgw nginx-conf-d-dshgw srv-dsh-workspaces dshgw-backups; do
     dest="$ARCHIVE_DIR/$name.tar.gz"
     [[ -f "$dest" ]] || continue
     [[ -s "$dest" ]] || fail "$dest is empty; refusing to delete anything"
-    tar -tzf "$dest" >/dev/null || fail "$dest cannot be read back; refusing to delete anything"
-    info "$name.tar.gz: $(tar -tzf "$dest" | wc -l) entries, $(du -h "$dest" | cut -f1)"
+    tar -tzf "$dest" >"$listing" || fail "$dest cannot be read back; refusing to delete anything"
+    entries="$(wc -l <"$listing")"
+    info "$name.tar.gz: $entries entries, $(du -h "$dest" | cut -f1)"
+    if [[ "$name" == "var-lib-dshgw" && -f "$OLD_REGISTRY" ]]; then
+      # The registry names every tenant; an archive without it is not a rollback source.
+      rel="${OLD_REGISTRY#/}"
+      case "$OLD_REGISTRY" in
+        "$OLD_STATE"/*) grep -qxF "$rel" "$listing" \
+          || fail "the archive does not contain $rel; refusing to delete anything" ;;
+      esac
+    fi
   done
-  if [[ -f "$OLD_REGISTRY" ]]; then
-    # The registry names every tenant; an archive without it is not a rollback source.
-    rel="${OLD_REGISTRY#/}"
-    case "$OLD_REGISTRY" in
-      "$OLD_STATE"/*) tar -tzf "$ARCHIVE_DIR/var-lib-dshgw.tar.gz" | grep -qF "$rel" \
-        || fail "the archive does not contain $rel; refusing to delete anything" ;;
-    esac
+fi
+
+# An index travels with the archive: a rollback source nobody can interpret is not one.
+if [[ "$APPLY" == 1 ]]; then
+  {
+    echo "# 旧 root/systemd dshgw 的归档（M63 下线脚本生成）"
+    echo
+    echo "生成时间：$(date -Is)"
+    echo "归档主机：$(hostname)"
+    echo "旧配置：$OLD_CONFIG"
+    echo "旧二进制：$(cat "$ARCHIVE_DIR/legacy-dshgw.version.txt" 2>/dev/null || echo '未取到')"
+    echo
+    echo "## 内容"
+    echo
+    echo "| 文件 | 内容 | 本脚本是否删除原目录 |"
+    echo "|---|---|---|"
+    echo "| \`var-lib-dshgw.tar.gz\` | 旧 state：registry.json、keys.map、sessions/audit/activity、handshake/、tenants/ | 是（\`$OLD_STATE\`） |"
+    echo "| \`etc-dshgw.tar.gz\` | 旧配置：config.yaml 与 per-tenant config | 是（\`$OLD_ETC\`） |"
+    echo "| \`nginx-conf-d-dshgw.tar.gz\` | nginx 上旧的 dshgw 转发（门户 + 每租户 vhost） | 是（\`$NGINX_CONF_DIR\`） |"
+    echo "| \`srv-dsh-workspaces.tar.gz\` | 旧 workspace 根（租户自己的文件） | **否**（\`${OLD_WORKSPACE:-未配置}\`） |"
+    echo "| \`dshgw-backups.tar.gz\` | 旧备份目录 | **否**（\`${OLD_BACKUP:-未配置}\`） |"
+    echo "| \`units/\` | dshgw.service、dshgw-admin.service、dsh-worker@.service、dsh-workers.slice | 单元文件已删 |"
+    echo "| \`legacy-dshgw.version.txt\` | 旧 dshgw 二进制自报版本 | 二进制随 \`$OLD_OPT\` 删除 |"
+    echo
+    echo "## 旧租户"
+    echo
+    echo '```'
+    python3 - "$OLD_STATE/registry.json" <<'REGISTRYLIST' 2>/dev/null || echo "(registry 不可读：解包 var-lib-dshgw.tar.gz 查看)"
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+if not p.is_file():
+    raise SystemExit(0)
+for t in json.loads(p.read_text()).get("tenants", []):
+    print(f"{t.get('name','?'):<24} public_port={t.get('public_port','?')} uid={t.get('uid','?')} "
+          f"suspended={bool(t.get('suspended'))}")
+REGISTRYLIST
+    echo '```'
+    echo
+    echo "## 回滚"
+    echo
+    echo '```bash'
+    echo "sudo tar -xzf <此目录>/var-lib-dshgw.tar.gz -C /"
+    echo "sudo tar -xzf <此目录>/etc-dshgw.tar.gz -C /"
+    echo "sudo tar -xzf <此目录>/nginx-conf-d-dshgw.tar.gz -C /"
+    echo "sudo cp <此目录>/units/* /etc/systemd/system/"
+    echo "sudo systemctl daemon-reload && sudo systemctl enable --now dshgw dshgw-admin"
+    echo "# per-tenant 单元按 registry 逐个拉起；workspace 与 backups 没有被删除，仍在原处"
+    echo '```'
+  } >"$ARCHIVE_DIR/INDEX.md" 2>/dev/null || true
+  chown "$TARGET_USER:" "$ARCHIVE_DIR/INDEX.md" 2>/dev/null || true
+fi
+
+if [[ "$ARCHIVE_ONLY" == 1 ]]; then
+  say ""
+  if [[ "$APPLY" == 1 ]]; then
+    say "archive-only: 归档已写入 $ARCHIVE_DIR；未停任何单元、未删任何目录。"
+  else
+    say "archive-only (dry-run)：上面列出的是将会归档的内容。"
   fi
+  say "要继续下线，运行：sudo $0 --apply"
+  exit 0
 fi
 
 # ------------------------------------------------------------------- 2) stop the services

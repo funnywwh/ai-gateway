@@ -3945,6 +3945,16 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
       "归档 → 停服 → 校验 → 删除"的顺序、归档覆盖面（state/etc/nginx/unit 文件）与 dry-run 零执行
 - [x] 本机 dry-run 复核：识别 8 个单元与 `dsh-worker@<dsh-e26q|dsh-tenant|dsh-dshgw-e2e-a/b|m51-e2e-…>`，
       计划里归档在停服之前、删除在最后；未执行任何更改
+- [x] **首次 `--apply` 实测暴露脚本自身的一个缺陷（已修）**：归档已经写好（22:33，三份 tar + units + 版本，
+      `var-lib-dshgw.tar.gz` 12922 条目、含 `registry.json`/`keys.map`/`dsh-e26q` 全部文件），但脚本在
+      **安全校验**处退出 1、什么都没删。原因是校验写成 `tar -tzf … | grep -qF …`：`grep -q` 命中即退出 →
+      `tar` 收到 SIGPIPE（退出 141）→ `set -o pipefail` 把**成功的归档**判成失败。修法：把清单落到临时文件再
+      `grep -qxF`（无管道）；并新增 `--archive-only`（只归档+校验、不碰服务）与 `--etc-dir`，
+      让"归档 + 校验"这条真实路径可被非 root 测试执行 —— `scripts/test_decommission_legacy_plan.py`
+      现在真的跑一遍它（旧代码在这条用例下必然失败），补上了"dry-run 测不到校验代码"的盲区
+- [x] 顺带补齐归档覆盖面：旧配置里的 `workspace_root`（本机 `/srv/dsh`）与 `deploy.backup_dir`
+      也进归档，且脚本**不删**它们（租户自有文件），逐条打印"保留"清单；归档目录新增 `INDEX.md`
+      （内容表、旧租户清单、回滚命令）——一份没人能读懂的回滚源等于没有回滚源
 
 ### 文档
 

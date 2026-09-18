@@ -137,8 +137,13 @@ systemctl --user restart aigw-local && curl -s localhost:8088/version
   工具：`scripts/move_dshgw_state.sh`（默认 dry-run）。
 - **下线遗留 root 形态**（`/opt/dshgw` + `/etc/dshgw` + `/var/lib/dshgw` + nginx `conf.d/dshgw`）：
   `scripts/decommission_legacy_dshgw.sh`（默认 dry-run 打印计划，`--apply` 才执行，需要 root）。
-  它会先把三处目录、nginx 配置、旧单元文件归档到 `<部署根>/data/prev/legacy-dshgw/`，
-  再停单元、删 nginx 转发、删目录。**归档是唯一的回滚来源**。
+  它**先归档再删**：`/var/lib/dshgw`、`/etc/dshgw`、nginx 的 `conf.d/dshgw`、旧单元文件，
+  以及旧配置里写明的 workspace 根与备份目录（后两者只归档、**不删除**），归档落在
+  `<部署根>/data/prev/legacy-dshgw/` 并附一份 `INDEX.md`（内容、旧租户清单、回滚命令）；
+  校验每个 tar 都能列回、且 state 归档里含 `registry.json` 之后，才停单元、删 nginx 转发、删三处目录。
+  **归档是唯一的回滚来源**。
+  `--archive-only --apply` 只做归档与校验、不碰任何服务（想在动手前先拿到回滚源时用）；
+  `--etc-dir`/`--state-dir`/`--nginx-dir` 用于非默认位置。
 - **历史二进制**：`./data/prev/bin/` 保存历次回滚点（含根目录那份陈旧 `aigw`），
   `./data/prev/README.md` 记录来源与用途；回滚 = `cp data/prev/bin/<file> bin/aigw` +
   `systemctl --user restart aigw-local`。

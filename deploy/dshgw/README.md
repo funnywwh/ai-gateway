@@ -274,12 +274,18 @@ scripts/decommission_legacy_dshgw.sh
 # 2) 确认后执行（需要 root；在宿主终端里跑）
 sudo scripts/decommission_legacy_dshgw.sh --apply
 
+# 可选：只先取归档与校验，不碰任何服务
+sudo scripts/decommission_legacy_dshgw.sh --archive-only --apply
+
 # 可选：连 per-tenant 账号一并删除（默认不做）
 sudo scripts/decommission_legacy_dshgw.sh --apply --remove-accounts
 ```
 
-脚本的 `--old-config`/`--state-dir`/`--nginx-dir` 可指向非默认位置（旧配置里的 `state_dir`、
-`nginx_include_path` 会被读出来）。计划同样有测试：`scripts/test_decommission_legacy_plan.py`
+归档覆盖面（除三棵被删的树）：旧配置里写明的 `workspace_root` 与 `deploy.backup_dir` 也会被打包，
+但脚本**不删它们**——那是租户自己的文件，删之前必须有人明确决定；运行时会逐条打印"保留"清单。
+`--old-config`/`--state-dir`/`--etc-dir`/`--nginx-dir` 可指向非默认位置（旧配置里的 `state_dir`、
+`registry_path`、`workspace_root`、`nginx_include_path`、`backup_dir` 会被读出来）。
+计划同样有测试：`scripts/test_decommission_legacy_plan.py`
 （跑在 `make dshgw-test` 里），断言"归档 → 停服 → 校验 → 删除"的顺序、归档覆盖面，以及 dry-run 什么都不做。
 
 ### 8.2 把已有的 dshgw 状态树搬到数据根里
