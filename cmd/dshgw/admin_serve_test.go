@@ -144,10 +144,10 @@ func TestAdminServerRejectsForeignPeerUID(t *testing.T) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 	data, _ := json.Marshal(adminRequest{ID: 1, Op: "ping"})
-	if _, err := conn.Write(append(data, '\n')); err != nil {
-		t.Fatal(err)
-	}
-	// The server closes the connection without answering.
+	// The server may refuse and close before this write lands, so a failed write is one of the
+	// expected outcomes here (it is a race, and a flaky assertion about it says nothing about
+	// the guard under test). What matters is that no answer ever comes back.
+	_, _ = conn.Write(append(data, '\n'))
 	if _, err := bufio.NewReader(conn).ReadString('\n'); err == nil {
 		t.Fatal("foreign peer must not receive an answer")
 	}

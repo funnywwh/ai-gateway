@@ -640,3 +640,56 @@ func TestMailboxValidation(t *testing.T) {
 		t.Error("WriteRequest did not stamp CreatedAt")
 	}
 }
+
+// The account may hold an alias list, but not the operator's settings: an IdentityFile line
+// would name a key that does not exist in the account's HOME (its identity is its single key),
+// which ssh reports on every call and which could pick the wrong key for a host.
+func TestEnsureIdentityProvisionsASanitizedAliasConfig(t *testing.T) {
+	dir := t.TempDir()
+	operatorConfig := filepath.Join(dir, "operator-config")
+	source := `Host gpt001
+  HostName gpt001.iotalking.top
+  User root
+  Port 2222
+  IdentityFile ~/keys/gpt001-prod.id_rsa
+  ForwardAgent yes
+
+Host *
+  User nobody
+
+Host aipc
+  HostName 192.168.140.252
+`
+	if err := os.WriteFile(operatorConfig, []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := newTestEnv(t, Options{SSHConfigSource: operatorConfig})
+	if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); err != nil {
+		t.Fatalf("EnsureIdentity: %v", err)
+	}
+	written, err := os.ReadFile(filepath.Join(env.remote.Workspace, ".ssh", "config"))
+	if err != nil {
+		t.Fatalf("reading the provisioned config: %v", err)
+	}
+	text := string(written)
+	for _, want := range []string{"Host gpt001", "HostName gpt001.iotalking.top", "User root", "Port 2222", "Host aipc"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the alias list lacks %q:\n%s", want, text)
+		}
+	}
+	for _, reject := range []string{"IdentityFile", "ForwardAgent", "Host *"} {
+		if strings.Contains(text, reject) {
+			t.Errorf("the alias list carries %q, which belongs to the operator:\n%s", reject, text)
+		}
+	}
+	// A config the account already has is never overwritten (it may have been adjusted).
+	if err := os.WriteFile(filepath.Join(env.remote.Workspace, ".ssh", "config"), []byte("Host mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := os.ReadFile(filepath.Join(env.remote.Workspace, ".ssh", "config")); string(again) != "Host mine\n" {
+		t.Errorf("EnsureIdentity overwrote an existing config: %q", again)
+	}
+}

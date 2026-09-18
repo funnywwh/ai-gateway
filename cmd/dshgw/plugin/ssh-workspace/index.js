@@ -225,10 +225,15 @@ export function apply(ctx, rawConfig) {
   const requestDir = join(dshHome, 'ssh-requests')
   const replyDir = join(dshHome, 'ssh-replies')
 
-  const sshArgs = (host, script) => {
-    const args = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', `UserKnownHostsFile=${knownHostsPath}`]
-    args.push('-F', sshConfigPath)
-    args.push('-i', sshKeyPath)
+  // `-F` and `UserKnownHostsFile` are only passed for files that exist: ssh treats a missing
+  // user config as a fatal error ("Can't open user config file …"), so naming one that was
+  // never provisioned turned every browsing click into that message. The gateway's own ssh
+  // calls guard the same two options.
+  const sshArgs = async (host, script) => {
+    const args = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new']
+    if (await exists(sshDir)) args.push('-o', `UserKnownHostsFile=${knownHostsPath}`)
+    if (await exists(sshConfigPath)) args.push('-F', sshConfigPath)
+    if (await exists(sshKeyPath)) args.push('-i', sshKeyPath)
     args.push('-o', `ConnectTimeout=${Math.ceil(config.connectTimeoutMs / 1000)}`)
     // ssh joins these with spaces and the remote shell parses the result again, so the script
     // must arrive as one quoted word (the gateway's own ssh calls do the same).
@@ -245,7 +250,7 @@ export function apply(ctx, rawConfig) {
 
   const ssh = async (host, script) => {
     permits(host)
-    const result = await runCommand('ssh', sshArgs(host, script), { timeoutMs: config.connectTimeoutMs + 20000 })
+    const result = await runCommand('ssh', await sshArgs(host, script), { timeoutMs: config.connectTimeoutMs + 20000 })
     const error = classifySSH(result)
     if (error !== null) throw error
     return result.stdout

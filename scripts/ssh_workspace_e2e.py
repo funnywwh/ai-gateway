@@ -169,7 +169,10 @@ def config_document(args, root: Path, template_home: Path, aigw_base_url: str) -
         "state_dir": str(root / "state"),
         "dsh": {
             "node_bin": args.node,
-            "bin_js": args.bin_js,
+            # Resolved: the sandbox binds the release directory the launcher resolves to, so a
+            # bin.js reached through the deployment's `current` symlink would be a path the
+            # sandbox does not have (the worker then exits immediately).
+            "bin_js": os.path.realpath(args.bin_js),
             "current_link": args.current_link,
         },
         "deploy": {

@@ -197,6 +197,26 @@ try {
 
   equal((await call('nonsense', {})).error.code, 'ssh/invalid-path', 'an unknown endpoint is refused')
 
+  // An account whose ~/.ssh has only a key must still work: ssh refuses to start when handed a
+  // user config that does not exist ("Can't open user config file …"), which on the live
+  // deployment turned everyBrowse click into that message.
+  await rm(join(home, '.ssh', 'config'))
+  const withoutConfig = await call('probe', { host: 'gpt001' })
+  equal(withoutConfig.ok, true, 'probe works without ~/.ssh/config')
+  const argsWithoutConfig = (await readFile(join(root, 'ssh-args.txt'), 'utf8')).trim().split('\n')
+  equal(argsWithoutConfig.includes('-F'), false, 'a missing ssh config is not named on the command line')
+  const withoutKeyDir = await call('probe', { host: 'gpt001' })
+  equal(withoutKeyDir.ok, true, 'probe still works with an empty ~/.ssh')
+  await rm(join(home, '.ssh'), { recursive: true, force: true })
+  await mkdir(join(home, '.ssh'), { recursive: true })
+  await writeFile(join(home, '.ssh', 'id_rsa'), 'PRIVATE KEY\n', { mode: 0o600 })
+  const bare = await call('probe', { host: 'gpt001' })
+  equal(bare.ok, true, 'probe works with a bare ~/.ssh containing only a key')
+  const bareArgs = (await readFile(join(root, 'ssh-args.txt'), 'utf8')).trim().split('\n')
+  equal(bareArgs.includes('-F'), false, 'no -F is passed when there is no config')
+  equal(bareArgs.includes('UserKnownHostsFile=' + join(home, '.ssh', 'known_hosts')) || bareArgs.some((arg) => arg.startsWith('UserKnownHostsFile=')), true,
+    'known_hosts is still named once the directory exists')
+
   // Configuration is validated at activation: a mount container that would escape the
   // account's workspace must never reach a profile.
   assertions += 1
