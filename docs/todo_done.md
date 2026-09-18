@@ -3708,3 +3708,36 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - [x] `:8088` → `{"version":"1.2.2","revision":"ec13e97"}`；healthz/readyz 200；`dshgw 1.2.2`；`gwproxy 1.2.2`
 - [x] 部署走就绪门禁：`ready after 1s`；租户 worker `/api` 401（就绪）
 - [x] `make verify`、`make dshgw-test`、`make dshgw-supervised-test`（24 步）均为 0
+
+## 发布记录 v1.2.3（2026-09-18，DeepSeek /responses 流式思考）
+
+| 项 | 值 |
+|---|---|
+| 版本号 | `1.2.3`（`1.2.2` → `1.2.3`，**patch**：纯缺陷修复，无对外形状变化） |
+| revision | `5e77a00`（tag `v1.2.3`） |
+| 需求 | 用户要求「发布版本，部署本机 8088」 |
+| 内容 | `openairesponses` 流式分支接受上游的 `response.reasoning_text.delta`（DeepSeek 的 `/responses` 方言），并带上上游 `item_id`。详见 `docs/deepseek-responses-thinking-stream.md` |
+| 构建 | `scripts/release.sh patch` |
+| 回滚点 | `bin/aigw.prev-1.2.2-ec13e97`（**从正在运行的进程 `/proc/<pid>/exe` 直接取出**，可证明就是重启前那个构建） |
+| 部署 | 本机 `:8088` 由用户级 unit `aigw-local.service` 托管（`bin/aigw` + 受监督的 dshgw）；`systemctl --user restart aigw-local.service`，**2 秒就绪**（命令内自带 30s 未就绪自动回滚到 1.2.2） |
+
+验证（真实流量实测，缺一不可）：
+
+- [x] `GET /version` → `{"version":"1.2.3","revision":"5e77a00","ui":"minified","ui_encoding":"gzip"}`（重启前是 `1.2.2`/`ec13e97`）
+- [x] `/healthz`、`/readyz`、`/admin/ui/` → 全部 200
+- [x] 启动日志：`aigw starting version=1.2.3 revision=5e77a00 … listen=:8088`，随后 `http server listening addr=:8088`
+- [x] **修复在真实客户端上生效（本次发布的关键验收）**：本 GUI 自己的 DSH 会话（客户端直连 `:8088`，模型 `deepseek-flash`）
+  在重启前 assistant 块只有 `tool-call`、**零个 reasoning**；重启后 **15:57:55（重启后 2 秒）出现第一个 reasoning 块**，
+  此后每次思考都有完整正文（如 `'Hmm. There are 3 unresolved billing_failures rows…'`）——这正是当初定位缺陷用的那个统计口径
+- [x] 走查脚本：`scripts/responses-thinking-smoke.sh`（新增）、`scripts/format-smoke.sh`、`scripts/deepseek-smoke.sh`、
+  `scripts/codex-input-fidelity-smoke.sh` 全绿；`make verify` 通过
+- [x] 租户侧未中断：`dshgw-verify.service` 仍 active，两个租户 worker 端口（18400/18401）回 401（存活态）
+
+发布期间观察（**既有现象，非本次引入**）：
+
+- [ ] 重启瞬间出现 1 次 `settlement could not be written; falling back to disk`（`store: begin settlement tx: context deadline exceeded`），
+  与 2026-09-15、09-17 记录的是同一形态；兜底文件 `data/billing-fallback.jsonl` 在 15:58:52 被回放
+  （`billing fallback replay finished scanned=1 replayed=1 failed=0`），对应请求 `req_l5ogoa2kfdzeermlog4dwwr7`
+  的 `usage_records` 行（cost 1637、completed）已落库，未丢账
+- [ ] `billing_failures` 里仍有 3 行 `resolved_at IS NULL`（09-15 两行 + 今日 1 行）；回放路径不写 `resolved_at`，
+  属既有记账口径，本次未改。**待办：确认这 3 行是否已被兜底覆盖，或需要一次对账**
