@@ -3662,3 +3662,25 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - [x] 租户：门户 `:18300` 200；`dsh-tenant` worker `/api` 401（就绪）
 - [x] 就绪门禁在独立测试实例上验证（带引号/无 host 的 listen 均正确探测），测试单元已清理
 - [x] `make verify`、`make dshgw-test`、`make dshgw-supervised-test`（24 步）均为 0
+
+## 发布记录 v1.2.2（2026-09-18，API 数据不缓存）
+
+| 项 | 值 |
+|---|---|
+| 版本号 | `1.2.2`（`1.2.1` → `1.2.2`，**patch**） |
+| revision | `ec13e97`（tag `v1.2.2`） |
+| 需求 | 用户要求「gwproxy 不要缓存 aigw、dsh 的 API 请求数据」。上一版误读为"不要缓存租户表"，已**回滚**该改动（未提交即撤销），本次做的是 HTTP 层不缓存 |
+| 事实 | ① gwproxy 自身不存响应，但**转发上游缓存头**，浏览器/中间缓存/前置 nginx 因此可留下某次认证的 API 响应；② dsh 对 `/api` 响应**不给任何缓存指令**（worker 与 dshgw 都没有），无头响应仍可能被共享缓存启发式缓存；③ 当前拓扑 `/t/<租户>/` 是前门跳转，**dsh API 不经过 gwproxy**，所以 dsh 那半必须在 dshgw 做 |
+| 内容 | gwproxy：`api_paths`（默认 `/api/` `/v1/` `/admin/api/` `/version` `/healthz` `/readyz`）+ `no_store_apis`（默认 true），API 响应加 `no-store, no-cache, must-revalidate, max-age=0` + `Pragma` + `Expires`，请求侧**不转发** `If-None-Match`/`If-Modified-Since`，自身 `/healthz` 亦 no-store；dshgw：`no_store_apis` 覆盖租户 `/api`，aigw 侧同名键透传。**刻意保留** `If-Match`/`If-Unmodified-Since`（乐观并发）与静态资源缓存 |
+| 构建 | `scripts/release.sh patch`；另 `make dshgw-build gwproxy-build` |
+| 回滚点 | `bin/aigw.prev-1.2.1-33810c7` |
+
+验证（真实流量实测）：
+
+- [x] `:8090/v1/models`、`/admin/api/v1/accounts`、`/version`、`/healthz` → 全部 `no-store…`
+- [x] 租户 `POST /api/session/modelCatalog`（经 dshgw，租户端口）→ `no-store…`；`GET /`（shell）不加
+- [x] `/admin/ui/app.css` → `public, max-age=300`（**未被强加 no-store**，控制台不会每次重下）
+- [x] 带 `If-None-Match` 的 `/v1/models` → 401（非 304，校验器未转发）
+- [x] `:8088` → `{"version":"1.2.2","revision":"ec13e97"}`；healthz/readyz 200；`dshgw 1.2.2`；`gwproxy 1.2.2`
+- [x] 部署走就绪门禁：`ready after 1s`；租户 worker `/api` 401（就绪）
+- [x] `make verify`、`make dshgw-test`、`make dshgw-supervised-test`（24 步）均为 0
