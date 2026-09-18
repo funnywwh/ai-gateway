@@ -524,6 +524,13 @@
       无子域名时多租户只能"同一域名 + 每租户一个端口"，域名做前门跳转（`portal_redirect`/`tenant_redirect`）
 - [ ] **剩余可选**：① 若只有一个租户，可把租户放在域名根路径（零改写、单端口）；
       ② 若要真正做多租户同端口，需要改写 dsh 客户端 bundle（生成物、随升级而变，不推荐）
+- [x] **查明「设置/模型」面板报错**（实测 + 代码）：dsh 只在 **loopback 页面**启用 host 持久化
+      （`persistence = isLoopback ? "host" : "memory"`），非 loopback 页面该面板必然报
+      "settings are unavailable in this browser"。同租户对照：`127.0.0.1` 页面正常、
+      `192.168.190.86` 页面报错。**模型本身可用**（清单由 dshgw 按账号授权自动配置）。
+      文档见 `deploy/dshgw/README.md` §10（含三条可选应对）
+- [ ] **上游反馈（可选）**：若希望 LAN 页面也能改设置，需要 dsh 提供"受信公网 host 视同 loopback"
+      的开关（客户端 `transport.ownsHost` 目前是留白）——可向上游提需求，而不是本地打补丁
 - [ ] **对外暴露的剩余决策**：防火墙策略（worker 段端口必须不可达）、是否仍在前面放 nginx 反代
 - [x] **资源限额**：每 worker 一个 systemd 用户 scope（`systemd-run --user --scope -p MemoryMax=…`），
       实测 `memory.max`/`pids.max`/`cpu.max` 全部生效；部署级汇总上限通过
