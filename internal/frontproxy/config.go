@@ -38,6 +38,11 @@ type Config struct {
 	// keeps its cookie Path, redirects and console URLs consistent.
 	AigwPrefix   string `yaml:"aigw_prefix"`
 	AigwUpstream string `yaml:"aigw_upstream"`
+	// AigwStripPrefix removes the prefix before forwarding. It is needed when aigw
+	// serves the root (its base_path is exclusive: with a prefix configured, a
+	// request without it is a 404). Set it when aigw must *also* stay reachable
+	// directly on its own port, and leave it off when aigw itself owns the prefix.
+	AigwStripPrefix bool `yaml:"aigw_strip_prefix"`
 	// PortalPrefix/PortalUpstream mount the dshgw portal (login page) under a path.
 	PortalPrefix   string `yaml:"portal_prefix"`
 	PortalUpstream string `yaml:"portal_upstream"`

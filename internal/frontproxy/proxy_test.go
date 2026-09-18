@@ -132,6 +132,35 @@ func TestRoutesSeparateServicesByPrefix(t *testing.T) {
 	}
 }
 
+// A deployment that must keep aigw reachable directly on its own port cannot give
+// aigw a base path (that setting is exclusive: a request without the prefix is a
+// 404). The proxy then strips the prefix itself, and aigw sees the same paths it
+// serves on its port.
+func TestAigwStripPrefixKeepsDirectAccessWorking(t *testing.T) {
+	var aigw, portal, tenant upstreams
+	aigw.body = "aigw"
+	proxy, cfg := fixture(t, &aigw, &portal, &tenant, map[string]int{})
+	cfg.AigwStripPrefix = true
+
+	response := request(t, proxy, http.MethodGet, "/aigw/version", "chat.example:8443", "")
+	if response.StatusCode != 200 {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+	if got := aigw.requests[0].URL.Path; got != "/version" {
+		t.Fatalf("upstream path = %q, want the prefix stripped", got)
+	}
+	if got := aigw.requests[0].URL.RawQuery; got != "" {
+		t.Fatalf("query was rewritten: %q", got)
+	}
+	// The prefix itself maps to the upstream root rather than to an empty path.
+	if response := request(t, proxy, http.MethodGet, "/aigw", "chat.example:8443", ""); response.StatusCode != 200 {
+		t.Fatalf("bare prefix status = %d", response.StatusCode)
+	}
+	if got := aigw.requests[1].URL.Path; got != "/" {
+		t.Fatalf("bare prefix upstream path = %q, want /", got)
+	}
+}
+
 func TestRouterRejectsForeignHostUnknownTenantAndServesHealth(t *testing.T) {
 	var aigw, portal, tenant upstreams
 	proxy, cfg := fixture(t, &aigw, &portal, &tenant, map[string]int{"alice": 32601})

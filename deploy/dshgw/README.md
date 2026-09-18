@@ -319,7 +319,63 @@ edge 头与 dshgw 对话），所以切换只是改配置，不需要重建租�
 
 当前反代走的是前者。如果你更想要子域方案，告诉我，我可以加一个 `tenant_host_suffix` 模式。
 
-## 10. 安全边界（必读）
+## 10. 本机验证部署（已就绪）
+
+本机（`rag-server` / `192.168.190.86`）已按 §9 部署了**验证用**的入口，特点是**完全不动现有 `:8088`**：
+
+| 组件 | 形态 | 端口 | 与线上的关系 |
+|---|---|---|---|
+| 线上 aigw | 用户单元 `aigw-local`（文件单元、enabled） | `:8088` | **保持不变**：反代剥前缀后转发，aigw 配置一字未改 |
+| `gwproxy` | 用户单元 `gwproxy-verify`（enabled） | `0.0.0.0:8090` | 新的公开入口，单域名 + 路径前缀 |
+| 验证 dshgw | 用户单元 `dshgw-verify`（enabled），路径模式 | 网关 `127.0.0.1:18299`、门户 `18300`、租户 `18301+`、worker `18400+` | 独立于旧的 `dshgw.service`，同 UID、无 root |
+| 旧 dshgw（root/systemd 形态） | `dshgw.service` + 5 个 worker | `:32600`+ | **未受影响**，仍在运行 |
+
+状态与配置都在 `~/.local/share/dshgw-verify/`（`dshgw.yaml`、`gwproxy.yaml`、`state/`，均为 0600/0700）。
+两个单元都是文件单元并 `enabled`，重启机器后自动拉起；日志分别在 `state/../dshgw.log`、`gwproxy.log`。
+
+访问入口：
+
+```bash
+http://192.168.190.86:8090/dshgw/        # 门户（登录页）
+http://192.168.190.86:8090/t/verify1/    # 租户 dsh（未登录会 302 回门户路径）
+http://192.168.190.86:8090/aigw/version  # 经反代访问 aigw（前缀被剥掉）
+http://192.168.190.86:8088/version       # 直连 aigw，仍然可用
+```
+
+**实测结果**（本机，2026-09-18）：
+
+- `:8088` 直连 `/version`、`/healthz` 均 200 —— 反代上线没有影响它；
+- `/aigw/version` 经反代返回真实 aigw 的版本 JSON（`{"revision":"ec7b911","version":"0.18.0"}`）；
+- `/dshgw/` 200，登录表单 action 已是 `/dshgw/login`（dshgw 自己按 `public_base_url` 生成）；
+- `GET /t/verify1/` 未登录 → 302 到 `http://192.168.190.86:8090/dshgw/`（**路径式门户，不是 host:port**）；
+- `POST /t/verify1/api`（带 Origin）→ 401；
+- 注入一个临时会话后 `GET /t/verify1/` → **200（24KB 真实 dsh shell）**，HTML 里根绝对引用已被加上前缀
+  （`href="/t/verify1/"`、`src="/t/verify1/plugins/??…"`），相对资源保持 `./assets/…`；
+  经前缀取 `/t/verify1/assets/index-*.js` → **200 / 423038 字节**；会话记录里出现绑定 `127.0.0.1:18400` 的
+  `dsh-auth-…`，即 dshgw→worker 握手成功；
+- worker 是 dshgw 的 bwrap 子进程、与 aigw 同 UID，且限额生效：
+  cgroup `dshgw-worker-verify1.scope`，`memory.max=2147483648`、`pids.max=512`、`cpu.max=200000 100000`；
+- 外部 Host 404、未知租户 404；旧 `dshgw.service` 与 `aigw-local` 均仍 active。
+
+**要真正登录一次**（登录必须用 aigw 认可的 Key，验证租户刻意没有 Key）：
+`tenant-create` 会向 aigw 校验 Key，因此验证租户是直接写 registry 建的（无 Key → 跳过启动前模型同步 →
+worker 照常起来）。给它装一把真实 Key，然后打开门户登录：
+
+```bash
+printf '%s\n' '{"id":1,"op":"tenant-set-key","name":"verify1","key":"<你的 aigw Key>"}' \
+  | nc -U ~/.local/share/dshgw-verify/state/admin.sock
+# 浏览器打开 http://192.168.190.86:8090/dshgw/ ，用同一把 Key 登录
+```
+
+拆掉验证栈（不影响 `:8088` 与旧部署）：
+
+```bash
+systemctl --user disable --now gwproxy-verify dshgw-verify
+rm -f ~/.config/systemd/user/{gwproxy,dshgw}-verify.service
+# 状态目录按需保留：~/.local/share/dshgw-verify
+```
+
+## 11. 安全边界（必读）
 
 - **没有 UID 边界**：所有租户 worker 与 aigw 同 UID；隔离来自 bubblewrap mount namespace
   （空 tmpfs 根 + 逐路径绑定 + 只读运行时 + 0700 权限位）与宿主 AppArmor 对嵌套 namespace 的限制。

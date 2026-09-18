@@ -90,6 +90,12 @@ func (p *Proxy) forwardAigw(w http.ResponseWriter, r *http.Request, prefix strin
 		FlushInterval: -1,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
+			if p.cfg.AigwStripPrefix {
+				pr.Out.URL.Path = strings.TrimPrefix(r.URL.Path, prefix)
+				if pr.Out.URL.Path == "" {
+					pr.Out.URL.Path = "/"
+				}
+			}
 			pr.Out.Host = p.cfg.PublicHost
 			pr.SetXForwarded()
 		},

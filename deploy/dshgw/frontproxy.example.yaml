@@ -16,6 +16,10 @@ public_host: chat.tirisen.hk    # 唯一域名；Host 不匹配的请求直接 4
 #   certificate_key: /path/privkey.pem
 aigw_prefix: /aigw
 aigw_upstream: http://127.0.0.1:8088
+# aigw 的 base_path 是**排他**的：一旦给它配了前缀，不带前缀的请求会被它 404。
+# 因此"既要 :8088 直连可用、又要 /aigw 前缀可用"时不要动 aigw 的配置，
+# 而是让反代剥掉前缀（aigw 收到的路径与它自己端口上服务的完全一致）：
+aigw_strip_prefix: true
 portal_prefix: /dshgw
 portal_upstream: http://127.0.0.1:18099   # dshgw.Listen
 portal_port: 18100                        # dshgw.PortalPort（Host 与 edge 头由它派生）
