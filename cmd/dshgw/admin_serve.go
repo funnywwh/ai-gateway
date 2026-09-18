@@ -105,16 +105,38 @@ func (o managerOps) SetKey(ctx context.Context, name, key string) error {
 }
 
 // AdoptKey is the login path: the user just proved this key works for this tenant,
-// so storing it and configuring dsh is exactly what should happen next. It reports
-// whether anything changed, so the caller can log a meaningful line.
+// so a tenant that has no key at all is configured from it.
+//
+// It deliberately does *not* rotate a tenant that already has one, even when the
+// login used a different key of the same account. A tenant's stored key is the
+// deployment's own configuration, and rewriting it on somebody's login has three
+// costs that are all worse than the convenience: the worker is restarted under
+// whoever is using the tenant right now (their session dies mid-request), the model
+// list can shrink to whatever that particular key is granted, and two people logging
+// in take turns overwriting each other. Rotating a key is an operator action —
+// `tenant-set-key` or the console — not a side effect of logging in.
 func (o managerOps) AdoptKey(ctx context.Context, name, key string) (bool, error) {
-	if existing, err := (proxy.FileKeySource{Root: o.cfg.Deploy.TenantConfigRoot}).Key(name); err == nil && existing == key {
+	stored, err := (proxy.FileKeySource{Root: o.cfg.Deploy.TenantConfigRoot}).Key(name)
+	switch {
+	case err == nil && stored == key:
+		return false, nil
+	case err == nil && stored != "":
+		o.log().Info("login used a different key than the tenant's stored one; leaving the tenant configuration alone",
+			"tenant", name, "stored_prefix", prefixOf(stored), "login_prefix", prefixOf(key))
 		return false, nil
 	}
 	if err := o.applyKey(ctx, name, key, true); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// prefixOf reports a key's recognizable prefix without ever logging the secret.
+func prefixOf(key string) string {
+	if len(key) <= 12 {
+		return "…"
+	}
+	return key[:12] + "…"
 }
 
 // applyKey stores a tenant key and makes dsh reflect it.
