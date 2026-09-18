@@ -1,0 +1,9 @@
+{
+  "name": "dshgw-browser-workspace",
+  "private": true,
+  "type": "module",
+  "description": "Browser File System Access filesystem over authenticated gateway reverse HTTP",
+  "exports": { ".": "./index.js", "./client": "./client.js" },
+  "scripts": { "test": "node --test *.test.mjs" },
+  "dsh": { "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-connection", "@deepseek-ai/dsh-api-workspace-controller", "@deepseek-ai/dsh-client-ui-workspace"] } }
+}
