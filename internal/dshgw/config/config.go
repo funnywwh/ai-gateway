@@ -269,24 +269,30 @@ type Config struct {
 	// application, the secret and the registered redirect URL, and after it has identified
 	// the person it hands over a short-lived signed ticket. Here we only verify that ticket
 	// — which is why enabling this needs no app id, no secret and no second callback URL.
-	Feishu        Feishu        `yaml:"feishu" json:"feishu"`
-	WorkerLimits  WorkerLimits  `yaml:"worker_limits" json:"worker_limits"`
-	TLS           TLSConfig     `yaml:"tls" json:"tls"`
-	Deploy        DeployConfig  `yaml:"deploy" json:"deploy"`
-	SSHWorkspaces SSHWorkspaces `yaml:"ssh_workspaces" json:"ssh_workspaces"`
-	TenantRoot    string        `yaml:"tenant_root" json:"tenant_root"`
-	WorkspaceRoot string        `yaml:"workspace_root" json:"workspace_root"`
-	HandshakeDir  string        `yaml:"handshake_dir" json:"handshake_dir"`
-	StateDir      string        `yaml:"state_dir" json:"state_dir"`
-	RegistryPath  string        `yaml:"registry_path" json:"registry_path"`
-	KeyMapPath    string        `yaml:"key_map_path" json:"key_map_path"`
-	SessionPath   string        `yaml:"session_path" json:"session_path"`
-	AuditPath     string        `yaml:"audit_path" json:"audit_path"`
-	ActivityPath  string        `yaml:"activity_path" json:"activity_path"`
+	Feishu            Feishu            `yaml:"feishu" json:"feishu"`
+	WorkerLimits      WorkerLimits      `yaml:"worker_limits" json:"worker_limits"`
+	TLS               TLSConfig         `yaml:"tls" json:"tls"`
+	Deploy            DeployConfig      `yaml:"deploy" json:"deploy"`
+	SSHWorkspaces     SSHWorkspaces     `yaml:"ssh_workspaces" json:"ssh_workspaces"`
+	BrowserWorkspaces BrowserWorkspaces `yaml:"browser_workspaces" json:"browser_workspaces"`
+	TenantRoot        string            `yaml:"tenant_root" json:"tenant_root"`
+	WorkspaceRoot     string            `yaml:"workspace_root" json:"workspace_root"`
+	HandshakeDir      string            `yaml:"handshake_dir" json:"handshake_dir"`
+	StateDir          string            `yaml:"state_dir" json:"state_dir"`
+	RegistryPath      string            `yaml:"registry_path" json:"registry_path"`
+	KeyMapPath        string            `yaml:"key_map_path" json:"key_map_path"`
+	SessionPath       string            `yaml:"session_path" json:"session_path"`
+	AuditPath         string            `yaml:"audit_path" json:"audit_path"`
+	ActivityPath      string            `yaml:"activity_path" json:"activity_path"`
 
 	tenantMu    sync.RWMutex
 	tenantPorts map[string]int
 	portTenants map[int]string
+}
+
+// BrowserWorkspaces enables browser-backed mounts under the fixed browser subdirectory.
+type BrowserWorkspaces struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
 }
 
 func defaults() Config {
@@ -656,6 +662,19 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateFeishu(); err != nil {
 		return err
+	}
+	if c.BrowserWorkspaces.Enabled {
+		if strings.TrimSpace(c.Deploy.PluginPath) == "" {
+			return errors.New("browser_workspaces.enabled requires deploy.plugin_path")
+		}
+		for _, seed := range c.WorkspaceSeed {
+			if seed == "browser" {
+				return errors.New("browser workspace directory collides with workspace_seed")
+			}
+		}
+		if c.SSHWorkspaces.Enabled && c.SSHWorkspaces.MountSubdir == "browser" {
+			return errors.New("browser workspace directory collides with ssh_workspaces.mount_subdir")
+		}
 	}
 	if err := c.validateSSHWorkspaces(); err != nil {
 		return err

@@ -7,6 +7,7 @@ import (
 	"github.com/winger/ai-gateway/internal/dshgw/activity"
 	"github.com/winger/ai-gateway/internal/dshgw/aigw"
 	"github.com/winger/ai-gateway/internal/dshgw/audit"
+	"github.com/winger/ai-gateway/internal/dshgw/browsermount"
 	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
 	"github.com/winger/ai-gateway/internal/dshgw/securefile"
@@ -62,6 +63,9 @@ func (c *cli) loadRuntime(withSessions bool) (*runtimeDeps, error) {
 		return nil, err
 	}
 	manager.SSHWorkspaces = ssh
+	// CLI processes cannot detach mounts owned by the live browser transport.
+	// Guard even while disabled: a config toggle does not remove existing kernel mounts.
+	manager.BrowserWorkspaces = &browsermount.DetachedGuard{Registry: reg}
 	return &runtimeDeps{cfg: cfg, reg: reg, validator: client, manager: manager}, nil
 }
 

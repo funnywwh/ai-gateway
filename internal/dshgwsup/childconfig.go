@@ -138,13 +138,19 @@ type ChildConfig struct {
 	WorkerLimits WorkerLimits `yaml:"worker_limits,omitempty"`
 	// SSHWorkspaces carries the account-facing ssh workspace feature (M64) into the child's
 	// generated configuration. Nil means the feature is off.
-	SSHWorkspaces *SSHWorkspaces `yaml:"ssh_workspaces,omitempty"`
+	SSHWorkspaces     *SSHWorkspaces     `yaml:"ssh_workspaces,omitempty"`
+	BrowserWorkspaces *BrowserWorkspaces `yaml:"browser_workspaces,omitempty"`
 	// Feishu is the identity handoff the child needs to accept a Feishu sign-in (M61): where
 	// to send a person, and the key that proves the ticket aigw signs is genuine. It is
 	// omitted entirely while the feature is off, so a deployment that does not use Feishu
 	// generates exactly the configuration it did before.
 	Feishu *Feishu `yaml:"feishu,omitempty"`
 	Deploy Deploy  `yaml:"deploy"`
+}
+
+// BrowserWorkspaces carries the optional browser mount switch into the child.
+type BrowserWorkspaces struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // Feishu mirrors the child's own feishu block. The child holds no Feishu credential: aigw

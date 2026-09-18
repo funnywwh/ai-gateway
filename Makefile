@@ -186,3 +186,10 @@ ui-check:
 
 clean:
 	@rm -rf bin $(UIDIST)
+
+# Browser-backed filesystem and tenant integration, without requiring a FUSE host.
+.PHONY: dshgw-browser-test
+dshgw-browser-test:
+	@$(GOENV) go test ./internal/dshgw/browserworkspace ./internal/dshgw/browsermount ./internal/dshgw/config ./internal/dshgw/tenancy ./internal/dshgw/sandbox ./internal/dshgw/proxy ./internal/dshgwsup ./cmd/aigw ./cmd/dshgw
+	@test -x "$(DSHGW_NODE)" || { echo "dshgw-browser-test: Node missing: $(DSHGW_NODE)" >&2; exit 1; }
+	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" --test cmd/dshgw/plugin/browser-workspace/*.test.mjs

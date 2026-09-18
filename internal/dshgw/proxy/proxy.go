@@ -55,16 +55,19 @@ type KeyAdopter interface {
 }
 
 type Proxy struct {
-	Config          *config.Config
-	Registry        *registry.Registry
-	Sessions        session.Store
-	HandshakeSource handshake.Source
-	Exchanger       handshake.Exchanger
-	Validator       KeyValidator
-	Authorizer      DSHAuthorizer
-	KeySource       KeySource
-	KeyAdopter      KeyAdopter
-	Transport       http.RoundTripper
+	Config            *config.Config
+	Registry          *registry.Registry
+	Sessions          session.Store
+	HandshakeSource   handshake.Source
+	Exchanger         handshake.Exchanger
+	Validator         KeyValidator
+	Authorizer        DSHAuthorizer
+	KeySource         KeySource
+	KeyAdopter        KeyAdopter
+	Transport         http.RoundTripper
+	BrowserWorkspaces interface {
+		ServeTenant(http.ResponseWriter, *http.Request, registry.Tenant, string)
+	}
 	// Feishu carries the identity handoff from aigw (M61), or nil when the feature is off.
 	Feishu   *FeishuPortal
 	Logger   *slog.Logger
@@ -538,6 +541,15 @@ func (p *Proxy) TenantHandler(t registry.Tenant) http.Handler {
 			}
 			p.log().Warn("dsh entitlement check failed", "tenant", t.Name, "err", err)
 			http.Error(w, "dsh authorization unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/browser-workspace/") && p.BrowserWorkspaces != nil {
+			if err := p.Sessions.Touch(cookie.Value, p.Config.SessionTTL.Duration()); err != nil {
+				p.unauthenticated(w, r)
+				return
+			}
+			p.setSessionCookie(w, t.Name, cookie.Value, false)
+			p.BrowserWorkspaces.ServeTenant(w, r, t, fmt.Sprintf("%x", sha256.Sum256([]byte(cookie.Value))))
 			return
 		}
 		if err := prepareReplayable(r); err != nil {

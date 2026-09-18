@@ -4,12 +4,15 @@
 package arch_test
 
 import (
+	"bytes"
+	"context"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 const modulePath = "github.com/winger/ai-gateway/"
@@ -134,20 +137,25 @@ type packageInfo struct {
 
 func loadGraph(t *testing.T) []packageInfo {
 	t.Helper()
-	if _, err := exec.LookPath("go"); err != nil {
-		t.Skip("the go tool is not on PATH: skipping the layering check")
-	}
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("cannot locate the test file")
 	}
 	root := filepath.Dir(filepath.Dir(filepath.Dir(thisFile)))
 	format := "{{.ImportPath}}|{{join .Imports \" \"}}"
-	cmd := exec.Command("go", "list", "-f", format, "./...")
+	// All module source packages live under these roots. Add any new source root
+	// here too; ./... also walks deployment data (including huge node_modules).
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", "list", "-f", format,
+		"./cmd/...", "./internal/...", "./pkg/...", "./examples/...")
 	cmd.Dir = root
+	cmd.WaitDelay = 5 * time.Second
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
-		t.Skipf("go list is unavailable here: %v", err)
+		t.Fatalf("go list failed: %v (context: %v)\n%s", err, ctx.Err(), stderr.String())
 	}
 	graph := []packageInfo{}
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
@@ -155,19 +163,20 @@ func loadGraph(t *testing.T) []packageInfo {
 			continue
 		}
 		parts := strings.SplitN(line, "|", 2)
+		if len(parts) != 2 || !strings.HasPrefix(parts[0], modulePath) {
+			t.Fatalf("unexpected go list output: %q", line)
+		}
 		info := packageInfo{path: strings.TrimPrefix(parts[0], modulePath)}
-		if len(parts) == 2 {
-			for _, imported := range strings.Fields(parts[1]) {
-				if strings.HasPrefix(imported, modulePath) {
-					info.imports = append(info.imports, strings.TrimPrefix(imported, modulePath))
-				}
+		for _, imported := range strings.Fields(parts[1]) {
+			if strings.HasPrefix(imported, modulePath) {
+				info.imports = append(info.imports, strings.TrimPrefix(imported, modulePath))
 			}
 		}
 		sort.Strings(info.imports)
 		graph = append(graph, info)
 	}
 	if len(graph) == 0 {
-		t.Skip("no packages were listed")
+		t.Fatal("go list returned no packages")
 	}
 	return graph
 }

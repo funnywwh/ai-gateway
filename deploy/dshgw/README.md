@@ -87,6 +87,23 @@ DSHGW_NODE=... DSHGW_DSH_ROOT=... DSHGW_TEMPLATE_HOME=<上面 template_home 的�
 HOME=$T DSH_HOME=$T "$DSHGW_NODE" "$DSHGW_DSH_ROOT/lib/bin.js" --profile web --dump-config
 ```
 
+### 可选：浏览器本机目录工作区
+
+在 aigw 配置中设置 `dshgw.browser_workspaces.enabled: true`（默认关闭），并部署
+`plugin_path` 同级的完整 `browser-workspace/` 插件目录。网关宿主需要可用 `/dev/fuse`、
+`fusermount3` 与当前账号的用户态挂载权限；客户端需要 HTTPS/localhost 和支持 File System
+Access API 的 Chromium。该功能不会给租户 sandbox 增加 `/dev/fuse` 或 capability。
+
+用户授权的本机目录映射到 `<workspace>/browser/<随机ID>`，服务器命令通过 FUSE 读写，
+不在用户机器执行命令。新增挂载会重启本租户 worker、中断进行中的回合；授权页面须保持连接。
+开启功能时 `browser` 子目录是网关管理的保留命名空间，启动前创建为私有真实目录，在租户沙箱中只读绑定，
+防止命令替换挂载容器或子挂载点；活动 FUSE 子挂载单独读写绑定。租户及全网关备份不包含该子树内容；关闭功能且没有活动挂载
+时，同名普通目录仍正常备份。活动挂载始终排除，应由运行中的网关清理，
+离线 CLI 检测到挂载会拒绝破坏性生命周期操作。
+
+`make dshgw-browser-test` 运行 Go 集成和 Node fake-FSA 测试；真实 FUSE 与浏览器权限链路仍需
+单独验收。部署前请阅读[浏览器 FUSE 工作区设计与限制](../../docs/design/browser-fuse-workspace.md)。
+
 ## 3. 启动与停止
 
 ```bash

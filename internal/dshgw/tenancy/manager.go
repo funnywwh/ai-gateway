@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/winger/ai-gateway/internal/dshgw/aigw"
@@ -64,10 +65,12 @@ type Manager struct {
 	Activity interface{ Delete(string) error }
 	// Workers owns every tenant worker process. M58 replaced systemd units with
 	// direct child processes, so lifecycle operations are process operations.
-	Workers *WorkerRunner
-	Taken   func(int) bool
-	Probe   func(context.Context, registry.Tenant) error
-	Now     func() time.Time
+	// Inject before concurrent use; workersMu protects lazy initialization only.
+	Workers   *WorkerRunner
+	workersMu sync.Mutex
+	Taken     func(int) bool
+	Probe     func(context.Context, registry.Tenant) error
+	Now       func() time.Time
 	// ModelRefresh refreshes one tenant's model list from aigw before its worker
 	// starts. The composition root injects it: tenancy decides *when* a refresh
 	// is mandatory, the CLI owns the aigw client and the key source.
@@ -86,7 +89,14 @@ type Manager struct {
 	// the mount points to bind into a worker, the per-account ssh identity to provision,
 	// and the mounts to detach when an account goes away. Nil disables the feature, which
 	// is what a deployment that does not configure it gets.
-	SSHWorkspaces SSHWorkspaceHook
+	SSHWorkspaces     SSHWorkspaceHook
+	BrowserWorkspaces BrowserWorkspaceHook
+}
+
+// BrowserWorkspaceHook supplies explicit binds and lifecycle cleanup for browser mounts.
+type BrowserWorkspaceHook interface {
+	MountsFor(string) []string
+	DropTenant(context.Context, string) error
 }
 
 // SSHWorkspaceHook is the ssh-workspace surface the tenancy lifecycle depends on. It is an
@@ -122,9 +132,12 @@ func (m *Manager) ensureSSHIdentity(t registry.Tenant) error {
 // workers returns the worker runner, creating it on first use. Tests inject their
 // own runner (with a stand-in profile) instead of starting real sandboxes.
 func (m *Manager) workers() *WorkerRunner {
+	m.workersMu.Lock()
+	defer m.workersMu.Unlock()
 	if m.Workers == nil {
 		m.Workers = &WorkerRunner{
 			Config: m.Config, Profile: m.SandboxProfile, Probe: m.ProbeWorker, Logger: m.Logger,
+			CanStart: m.workerStartAllowed,
 			Limits: WorkerLimits{
 				MemoryHighBytes: m.Config.WorkerLimits.MemoryHighBytes,
 				MemoryMaxBytes:  m.Config.WorkerLimits.MemoryMaxBytes,
@@ -489,7 +502,13 @@ func (m *Manager) StopWorker(ctx context.Context, t registry.Tenant) error {
 	if err := m.setSuspended(t.Name, true); err != nil {
 		return err
 	}
-	return m.workers().Stop(ctx, t)
+	if err := m.workers().Stop(ctx, t); err != nil {
+		return err
+	}
+	if m.BrowserWorkspaces != nil {
+		return m.BrowserWorkspaces.DropTenant(ctx, t.Name)
+	}
+	return nil
 }
 
 // StartWorker clears the durable intent, refreshes the tenant's models and starts
@@ -544,6 +563,11 @@ func (m *Manager) startWorker(ctx context.Context, t registry.Tenant) error {
 	// disabling it reaches accounts that already exist (the artifacts are otherwise written
 	// only at create/rotate time).
 	if warning, err := EnsureSSHWorkspaceRow(m.Config, t); err != nil {
+		return err
+	} else if warning != "" {
+		m.log().Warn(warning)
+	}
+	if warning, err := EnsureBrowserWorkspaceRow(m.Config, t); err != nil {
 		return err
 	} else if warning != "" {
 		m.log().Warn(warning)

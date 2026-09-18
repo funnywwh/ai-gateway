@@ -39,6 +39,9 @@ type WorkerRunner struct {
 	// program, and so the production path stays the single source of truth for
 	// what a sandbox looks like (internal/dshgw/sandbox).
 	Profile func(registry.Tenant) ([]string, error)
+	// CanStart optionally checks current policy under the lifecycle gate before
+	// Profile runs. It must not call lifecycle methods on this runner.
+	CanStart func(registry.Tenant) error
 	// Probe is the readiness check used after a start. The manager already owns
 	// the /api 401 contract; the runner only needs to call it.
 	Probe func(context.Context, registry.Tenant) error
@@ -50,14 +53,22 @@ type WorkerRunner struct {
 	// StopTimeout bounds the graceful wait before a worker is killed.
 	StopTimeout time.Duration
 
-	mu    sync.Mutex
-	procs map[string]*workerProc
+	// lifecycle covers profile construction (which may acquire namespace
+	// resources), spawning and stopping. Observers and output goroutines use mu
+	// instead and never acquire lifecycle. Private transition helpers require it.
+	lifecycle sync.Mutex
+	shutdown  bool // guarded by lifecycle; terminal, unlike StopAll
+	mu        sync.Mutex
+	procs     map[string]*workerProc
 
 	// limitsWarned records that the "limits unavailable" warning was already
 	// emitted, so a deployment without a user manager warns once instead of on
 	// every tenant start.
 	limitsWarned bool
 }
+
+// ErrWorkerRunnerShutdown is returned by Start and Restart after Shutdown.
+var ErrWorkerRunnerShutdown = errors.New("worker runner is shut down")
 
 type workerProc struct {
 	tenant  registry.Tenant
@@ -96,6 +107,35 @@ func (r *WorkerRunner) stopTimeout() time.Duration {
 // 401), because a start that fails readiness must still be able to inspect and
 // stop the process it created.
 func (r *WorkerRunner) Start(ctx context.Context, t registry.Tenant) error {
+	r.lifecycle.Lock()
+	defer r.lifecycle.Unlock()
+	return r.start(ctx, t)
+}
+
+// start requires lifecycle to be held.
+func (r *WorkerRunner) start(ctx context.Context, t registry.Tenant) error {
+	if r.shutdown {
+		return ErrWorkerRunnerShutdown
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if r.CanStart != nil {
+		if err := r.CanStart(t); err != nil {
+			return err
+		}
+	}
+	r.mu.Lock()
+	existing := r.procs[t.Name]
+	r.mu.Unlock()
+	if existing != nil {
+		if existing.isRunning() {
+			return fmt.Errorf("worker for tenant %s is already running (pid %d)", t.Name, existing.pid)
+		}
+		// Keep the previous record until a replacement actually starts, so a
+		// failed profile or spawn does not erase its diagnostic output.
+		r.logger().Info("replacing an exited tenant worker", "tenant", t.Name, "err", errText(existing.err()))
+	}
 	if r.Profile == nil {
 		return errors.New("worker runner has no profile builder")
 	}
@@ -107,31 +147,13 @@ func (r *WorkerRunner) Start(ctx context.Context, t registry.Tenant) error {
 		return errors.New("worker profile is empty")
 	}
 	argv, scoped := r.applyLimits(workerUnitName(t.Name), argv)
-	r.mu.Lock()
-	if r.procs == nil {
-		r.procs = map[string]*workerProc{}
-	}
-	if existing, ok := r.procs[t.Name]; ok {
-		if existing.isRunning() {
-			r.mu.Unlock()
-			return fmt.Errorf("worker for tenant %s is already running (pid %d)", t.Name, existing.pid)
-		}
-		// The previous process exited: its record is replaced, but only now —
-		// keeping it until here is what makes a failed start diagnosable.
-		r.logger().Info("replacing an exited tenant worker", "tenant", t.Name, "err", errText(existing.err()))
-	}
-	proc := &workerProc{tenant: t, exited: make(chan struct{}), outputLog: newLineRing(workerOutputLines)}
-	r.procs[t.Name] = proc
-	r.mu.Unlock()
 
 	// The worker's cwd is its workspace (the same value the systemd unit passed
 	// as WorkingDirectory). Check it here: a missing directory makes exec return
 	// a misleading "no such file or directory" about the *program*.
 	if info, statErr := os.Stat(t.Workspace); statErr != nil {
-		r.forget(t.Name)
 		return fmt.Errorf("tenant %s workspace %s is unusable: %w", t.Name, t.Workspace, statErr)
 	} else if !info.IsDir() {
-		r.forget(t.Name)
 		return fmt.Errorf("tenant %s workspace %s is not a directory", t.Name, t.Workspace)
 	}
 
@@ -144,17 +166,30 @@ func (r *WorkerRunner) Start(ctx context.Context, t registry.Tenant) error {
 		// systemd-run cannot reach the manager that is supposed to apply the limits.
 		cmd.Env = append(cmd.Env, "XDG_RUNTIME_DIR="+userRuntimeDir())
 	}
+	// Profile construction and scope discovery can block. Recheck cancellation
+	// immediately before spawning, not just before acquiring the lifecycle gate.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	pr, pw := io.Pipe()
 	cmd.Stdout, cmd.Stderr = pw, pw
 	if err := cmd.Start(); err != nil {
 		_ = pw.Close()
 		_ = pr.Close()
-		r.forget(t.Name)
 		return fmt.Errorf("start worker for %s: %w", t.Name, err)
 	}
-	proc.cmd = cmd
-	proc.pid = cmd.Process.Pid
-	proc.started = time.Now().UTC()
+	proc := &workerProc{
+		tenant: t, cmd: cmd, pid: cmd.Process.Pid, started: time.Now().UTC(),
+		exited: make(chan struct{}), outputLog: newLineRing(workerOutputLines),
+	}
+	// Publish only a fully initialized process. Status and Running do not take
+	// the lifecycle gate and must never observe a placeholder with a zero PID.
+	r.mu.Lock()
+	if r.procs == nil {
+		r.procs = map[string]*workerProc{}
+	}
+	r.procs[t.Name] = proc
+	r.mu.Unlock()
 	go r.pump(proc, pr)
 
 	go func() {
@@ -214,6 +249,13 @@ func (r *WorkerRunner) applyLimits(unit string, argv []string) ([]string, bool) 
 // process and anything it spawned go together), then SIGKILL if it does not exit
 // in time. Stopping an already-stopped tenant is not an error.
 func (r *WorkerRunner) Stop(ctx context.Context, t registry.Tenant) error {
+	r.lifecycle.Lock()
+	defer r.lifecycle.Unlock()
+	return r.stop(ctx, t)
+}
+
+// stop requires lifecycle to be held.
+func (r *WorkerRunner) stop(ctx context.Context, t registry.Tenant) error {
 	r.mu.Lock()
 	proc, ok := r.procs[t.Name]
 	if ok {
@@ -235,6 +277,7 @@ func (r *WorkerRunner) Stop(ctx context.Context, t registry.Tenant) error {
 			r.logger().Warn("signalling tenant worker failed", "tenant", t.Name, "pid", proc.pid, "err", err)
 		}
 	}
+	var stopErr error
 	select {
 	case <-proc.exited:
 	case <-time.After(r.stopTimeout()):
@@ -251,11 +294,19 @@ func (r *WorkerRunner) Stop(ctx context.Context, t registry.Tenant) error {
 		if proc.pid > 0 {
 			_ = syscall.Kill(-proc.pid, syscall.SIGKILL)
 		}
-		return ctx.Err()
+		// Reap before releasing the lifecycle gate, including on cancellation.
+		// Otherwise a new start could overlap the dying process and shutdown
+		// could release namespace resources while a worker still holds them.
+		select {
+		case <-proc.exited:
+		case <-time.After(5 * time.Second):
+			return errors.Join(ctx.Err(), fmt.Errorf("tenant worker %s survived SIGKILL", t.Name))
+		}
+		stopErr = ctx.Err()
 	}
 	// The handshake file describes a process that no longer exists; leaving it
 	// behind would let the proxy redirect a customer to a dead worker.
-	return r.removeHandshake(t.Name)
+	return errors.Join(stopErr, r.removeHandshake(t.Name))
 }
 
 // removeHandshake deletes the published startup URL for one tenant.
@@ -267,12 +318,20 @@ func (r *WorkerRunner) removeHandshake(name string) error {
 	return nil
 }
 
-// Restart replaces one tenant's worker process.
+// Restart replaces one tenant's worker process as one serialized transition.
 func (r *WorkerRunner) Restart(ctx context.Context, t registry.Tenant) error {
-	if err := r.Stop(ctx, t); err != nil {
+	r.lifecycle.Lock()
+	defer r.lifecycle.Unlock()
+	if r.shutdown {
+		return ErrWorkerRunnerShutdown
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return r.Start(ctx, t)
+	if err := r.stop(ctx, t); err != nil {
+		return err
+	}
+	return r.start(ctx, t)
 }
 
 // WorkerStatus is what the lifecycle commands report about one tenant: a running
@@ -328,20 +387,38 @@ func (r *WorkerRunner) StartAll(ctx context.Context, tenants []registry.Tenant) 
 	return errors.Join(failures...)
 }
 
-// StopAll stops every running worker. Shutdown and the backup snapshot both need
-// a quiet moment, and both used to ask systemd for it.
+// StopAll stops every worker in one serialized transition. It remains reusable:
+// backup snapshots can stop workers and then start them again. Service teardown
+// must use Shutdown instead, to reject subsequent starts and restarts.
 func (r *WorkerRunner) StopAll(ctx context.Context) error {
+	r.lifecycle.Lock()
+	defer r.lifecycle.Unlock()
+	return r.stopAll(ctx)
+}
+
+// Shutdown permanently closes this runner to Start and Restart, then stops all
+// workers. It waits for in-flight lifecycle transitions, so after it returns
+// successfully no worker can retain namespace binds or be launched again.
+// Repeated calls retry cleanup without reopening the runner, even if a previous
+// call failed or its context was canceled.
+func (r *WorkerRunner) Shutdown(ctx context.Context) error {
+	r.lifecycle.Lock()
+	defer r.lifecycle.Unlock()
+	r.shutdown = true
+	return r.stopAll(ctx)
+}
+
+// stopAll requires lifecycle to be held.
+func (r *WorkerRunner) stopAll(ctx context.Context) error {
 	r.mu.Lock()
 	tenants := make([]registry.Tenant, 0, len(r.procs))
 	for _, proc := range r.procs {
-		if proc.isRunning() {
-			tenants = append(tenants, proc.tenant)
-		}
+		tenants = append(tenants, proc.tenant)
 	}
 	r.mu.Unlock()
 	var failures []error
 	for _, t := range tenants {
-		if err := r.Stop(ctx, t); err != nil {
+		if err := r.stop(ctx, t); err != nil {
 			failures = append(failures, fmt.Errorf("tenant %s: %w", t.Name, err))
 		}
 	}

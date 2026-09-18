@@ -48,7 +48,22 @@ func sshWorkspaceRow(cfg *config.Config) map[string]any {
 // whose patch cannot carry the row is reported as a warning rather than a failure: an optional
 // feature must never stop an account from starting. Only a patch file that cannot be read or
 // parsed is an error.
-func EnsureSSHWorkspaceRow(cfg *config.Config, t registry.Tenant) (warning string, err error) {
+func EnsureSSHWorkspaceRow(cfg *config.Config, t registry.Tenant) (string, error) {
+	return ensureWorkspaceRow(t, sshWorkspaceRowID, cfg.SSHWorkspaces.Enabled, sshWorkspaceRow(cfg))
+}
+
+const browserWorkspaceRowID = "browser-workspace"
+
+func browserWorkspaceRow(cfg *config.Config) map[string]any {
+	return map[string]any{"id": browserWorkspaceRowID, "name": pluginFileURL(filepath.Join(filepath.Dir(cfg.Deploy.PluginPath), "browser-workspace", "index.js")), "config": map[string]any{"mountSubdir": "browser"}}
+}
+
+// EnsureBrowserWorkspaceRow refreshes only the plugin row, preserving user workspaces.
+func EnsureBrowserWorkspaceRow(cfg *config.Config, t registry.Tenant) (string, error) {
+	return ensureWorkspaceRow(t, browserWorkspaceRowID, cfg.BrowserWorkspaces.Enabled, browserWorkspaceRow(cfg))
+}
+
+func ensureWorkspaceRow(t registry.Tenant, id string, enabled bool, pluginRow map[string]any) (warning string, err error) {
 	path := filepath.Join(t.DshHome, "profiles", "web", "cordis.patch.yml")
 	data, err := securefile.ReadLimitedRegular(path, 1<<20)
 	if err != nil {
@@ -72,16 +87,16 @@ func EnsureSSHWorkspaceRow(cfg *config.Config, t registry.Tenant) (warning strin
 		}
 		kept := make([]any, 0, len(insert))
 		for _, entry := range insert {
-			if record, ok := entry.(map[string]any); ok && record["id"] == sshWorkspaceRowID {
+			if record, ok := entry.(map[string]any); ok && record["id"] == id {
 				continue
 			}
 			kept = append(kept, entry)
 		}
 		row["insert"] = kept
 	}
-	if !cfg.SSHWorkspaces.Enabled {
+	if !enabled {
 		// Nothing to add: the removal above is the whole point when the feature is off.
-		if !patchMentions(data, sshWorkspaceRowID) {
+		if !patchMentions(data, id) {
 			return "", nil
 		}
 		return "", writePatchRows(path, rows)
@@ -91,7 +106,7 @@ func EnsureSSHWorkspaceRow(cfg *config.Config, t registry.Tenant) (warning strin
 		if _, ok := row["insert"].([]any); !ok {
 			continue
 		}
-		row["insert"] = append(row["insert"].([]any), sshWorkspaceRow(cfg))
+		row["insert"] = append(row["insert"].([]any), pluginRow)
 		placed = true
 		break
 	}
@@ -99,7 +114,7 @@ func EnsureSSHWorkspaceRow(cfg *config.Config, t registry.Tenant) (warning strin
 		// A patch from an older shape has no insert list to add to, and rewriting the file
 		// from scratch would drop whatever else it carries. The account keeps working without
 		// the feature; rotating its key re-renders it.
-		return fmt.Sprintf("tenant %s has a profile patch without an insert list, so the ssh workspace surface was not added; rotate its key to re-render it", t.Name), nil
+		return fmt.Sprintf("tenant %s has a profile patch without an insert list, so the workspace surface was not added; rotate its key to re-render it", t.Name), nil
 	}
 	return "", writePatchRows(path, rows)
 }

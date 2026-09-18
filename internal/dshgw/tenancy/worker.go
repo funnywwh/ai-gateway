@@ -41,6 +41,12 @@ func (m *Manager) sandboxTenant(t registry.Tenant) sandbox.Tenant {
 	if m.SSHWorkspaces != nil {
 		tenant.SSHMounts = m.SSHWorkspaces.MountsFor(t.Name)
 	}
+	if m.Config.BrowserWorkspaces.Enabled {
+		tenant.BrowserMountRoot = filepath.Join(t.Workspace, "browser")
+	}
+	if m.BrowserWorkspaces != nil {
+		tenant.BrowserMounts = m.BrowserWorkspaces.MountsFor(t.Name)
+	}
 	return tenant
 }
 
@@ -73,6 +79,9 @@ func (m *Manager) SandboxProfile(t registry.Tenant) ([]string, error) {
 	if t.EffectiveIsolation() != registry.IsolationBwrap {
 		return nil, fmt.Errorf("tenant %s is not in bwrap isolation", t.Name)
 	}
+	if err := m.prepareBrowserMountRoot(t); err != nil {
+		return nil, err
+	}
 	return sandbox.Profile(m.sandboxRuntime(), m.sandboxTenant(t))
 }
 
@@ -84,6 +93,9 @@ func (m *Manager) SandboxProfile(t registry.Tenant) ([]string, error) {
 // host permission bits are the second line of defence, so a tenant leaf that any
 // local user could walk through is refused here rather than relied on later.
 func (m *Manager) SandboxProfileReady(t registry.Tenant) error {
+	if err := m.prepareBrowserMountRoot(t); err != nil {
+		return err
+	}
 	if err := m.checkWorkerAccount(); err != nil {
 		return err
 	}

@@ -468,7 +468,13 @@ type Dshgw struct {
 	// child mounts the chosen directory inside that account's workspace. Off by default,
 	// because enabling it means this deployment will ssh to remote hosts with a key an
 	// operator placed here.
-	SSHWorkspaces DshgwSSHWorkspaces `yaml:"ssh_workspaces"`
+	SSHWorkspaces     DshgwSSHWorkspaces     `yaml:"ssh_workspaces"`
+	BrowserWorkspaces DshgwBrowserWorkspaces `yaml:"browser_workspaces"`
+}
+
+// DshgwBrowserWorkspaces is disabled by default.
+type DshgwBrowserWorkspaces struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // DshgwSSHWorkspaces configures the child's ssh-workspace feature (M64) from the

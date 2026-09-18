@@ -83,6 +83,10 @@ type Tenant struct {
 	// a mount inside the workspace is invisible to the sandbox unless its own path is bound,
 	// and a mount that appears after the worker started is invisible until it starts again.
 	SSHMounts []string
+	// BrowserMounts are explicitly bound browser-backed mount points.
+	BrowserMounts []string
+	// BrowserMountRoot is gateway-managed and read-only in the tenant namespace.
+	BrowserMountRoot string
 }
 
 // hiddenRoots are host directories replaced by an empty tmpfs, so a stray bind
@@ -171,6 +175,43 @@ func Profile(rt Runtime, t Tenant) ([]string, error) {
 		argv = append(argv, "--bind-try", mount, mount)
 	}
 
+	// Protect the mount container even before the first browser mount exists. A
+	// read-only bind also makes the container a mountpoint, preventing replacement
+	// through the otherwise writable parent workspace. Child binds remain writable.
+	if t.BrowserMountRoot != "" {
+		root := t.BrowserMountRoot
+		if root != filepath.Join(workspace, "browser") {
+			return nil, fmt.Errorf("invalid browser mount root %q", root)
+		}
+		resolved, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			return nil, fmt.Errorf("resolve browser mount root: %w", err)
+		}
+		info, err := os.Lstat(root)
+		if err != nil {
+			return nil, err
+		}
+		if resolved != root || !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+			return nil, fmt.Errorf("browser mount root must be a private canonical directory: %s", root)
+		}
+		argv = append(argv, "--ro-bind", root, root)
+	} else if len(t.BrowserMounts) > 0 {
+		return nil, fmt.Errorf("browser mounts require a protected browser mount root")
+	}
+	for _, mount := range t.BrowserMounts {
+		root := filepath.Join(workspace, "browser")
+		if !filepath.IsAbs(mount) || filepath.Clean(mount) != mount || !within(root, mount) || mount == root {
+			return nil, fmt.Errorf("tenant %s browser mount %s is not inside its browser workspace %s", t.Name, mount, root)
+		}
+		resolved, err := filepath.EvalSymlinks(mount)
+		if err != nil {
+			return nil, fmt.Errorf("resolve browser mount: %w", err)
+		}
+		if resolved != mount {
+			return nil, fmt.Errorf("browser mount %s contains symlinks", mount)
+		}
+		argv = append(argv, "--bind", mount, mount)
+	}
 	// Devices and a private process view. The network namespace is deliberately
 	// shared: the worker must reach aigw.
 	argv = append(argv, "--dev", "/dev", "--proc", "/proc", "--unshare-pid", "--die-with-parent")

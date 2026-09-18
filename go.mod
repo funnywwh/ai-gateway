@@ -4,6 +4,7 @@ go 1.25
 
 require (
 	github.com/evanw/esbuild v0.28.2
+	github.com/hanwen/go-fuse/v2 v2.9.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.44.3
 )

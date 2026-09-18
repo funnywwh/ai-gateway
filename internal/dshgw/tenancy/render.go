@@ -333,6 +333,9 @@ func renderPatch(cfg *config.Config, t registry.Tenant, opt TenantOptions) ([]by
 		// one that was provisioned earlier.
 		rows[1]["insert"] = append(rows[1]["insert"].([]map[string]any), sshWorkspaceRow(cfg))
 	}
+	if cfg.BrowserWorkspaces.Enabled {
+		rows[1]["insert"] = append(rows[1]["insert"].([]map[string]any), browserWorkspaceRow(cfg))
+	}
 	if opt.PluginBrowserFS == "off" {
 		rows = append(rows, map[string]any{"id": "browser-fs", "name": "dsh-browser-fs", "disabled": true})
 	}

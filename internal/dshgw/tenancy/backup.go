@@ -78,7 +78,13 @@ func (m *Manager) backupUnlocked() (string, error) {
 	}
 	// Known tenant data is mandatory, even when its configured parent is
 	// outside state_dir/workspace_root. The writer deduplicates covered roots.
+	var excluded []string
 	for _, tenant := range m.Registry.List() {
+		skip, err := m.browserBackupExclusions(tenant)
+		if err != nil {
+			return "", err
+		}
+		excluded = append(excluded, skip...)
 		if err := m.validateTenantPaths(tenant); err != nil {
 			return "", err
 		}
@@ -87,7 +93,7 @@ func (m *Manager) backupUnlocked() (string, error) {
 			archiveRoot{tenant.Workspace, "tenant-" + tenant.Name + "-workspace", true},
 			archiveRoot{filepath.Join(m.Config.Deploy.TenantConfigRoot, tenant.Name), "tenant-" + tenant.Name + "-config", true})
 	}
-	return writeArchive(destDir, "dshgw-"+stamp+".tar.gz", roots, nil)
+	return writeArchive(destDir, "dshgw-"+stamp+".tar.gz", roots, nil, excluded...)
 }
 
 func (m *Manager) validateTenantPaths(t registry.Tenant) error {
@@ -110,10 +116,48 @@ func (m *Manager) BackupTenant(t registry.Tenant) (string, error) {
 		{filepath.Join(m.Config.Deploy.TenantConfigRoot, t.Name), "tenant-config", true},
 		{filepath.Join(m.Config.HandshakeDir, t.Name+".url"), "handshake.url", false},
 	}
-	return writeArchive(destDir, "tenant-"+t.Name+"-"+stamp+".tar.gz", roots, &t)
+	excluded, err := m.browserBackupExclusions(t)
+	if err != nil {
+		return "", err
+	}
+	return writeArchive(destDir, "tenant-"+t.Name+"-"+stamp+".tar.gz", roots, &t, excluded...)
 }
 
-func writeArchive(destDir, name string, roots []archiveRoot, tenant *registry.Tenant) (path string, err error) {
+// browserBackupExclusions reserves the browser subtree only while enabled. When
+// disabled, ordinary local directories must remain in backups, but live mounts
+// left by a serving process must never be traversed by an offline CLI.
+func (m *Manager) browserBackupExclusions(t registry.Tenant) ([]string, error) {
+	if err := m.validateTenantPaths(t); err != nil {
+		return nil, err
+	}
+	root := filepath.Join(t.Workspace, "browser")
+	if m.Config.BrowserWorkspaces.Enabled {
+		return []string{root}, nil
+	}
+	if m.BrowserWorkspaces == nil {
+		return nil, nil
+	}
+	var paths []string
+	if hook, ok := m.BrowserWorkspaces.(interface {
+		BrowserBackupExclusions(string) ([]string, error)
+	}); ok {
+		var err error
+		paths, err = hook.BrowserBackupExclusions(t.Name)
+		if err != nil {
+			return nil, fmt.Errorf("browser backup exclusions for %s: %w", t.Name, err)
+		}
+	} else {
+		paths = m.BrowserWorkspaces.MountsFor(t.Name)
+	}
+	for _, path := range paths {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path || !pathWithin(root, path) {
+			return nil, fmt.Errorf("invalid browser backup exclusion %q", path)
+		}
+	}
+	return paths, nil
+}
+
+func writeArchive(destDir, name string, roots []archiveRoot, tenant *registry.Tenant, excluded ...string) (path string, err error) {
 	if !filepath.IsAbs(destDir) || filepath.Base(name) != name {
 		return "", errors.New("archive destination must be an absolute directory and a basename")
 	}
@@ -150,7 +194,7 @@ func writeArchive(destDir, name string, roots []archiveRoot, tenant *registry.Te
 	}
 	gz := gzip.NewWriter(tmp)
 	tw := tar.NewWriter(gz)
-	if err = writeArchiveContents(tw, roots, tenant); err != nil {
+	if err = writeArchiveContents(tw, roots, tenant, excluded...); err != nil {
 		_ = tw.Close()
 		_ = gz.Close()
 		return "", err
@@ -192,7 +236,7 @@ func pathWithin(root, path string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func writeArchiveContents(tw *tar.Writer, roots []archiveRoot, tenant *registry.Tenant) error {
+func writeArchiveContents(tw *tar.Writer, roots []archiveRoot, tenant *registry.Tenant, excluded ...string) error {
 	manifest := archiveManifest{Version: 1, Tenant: tenant}
 	var included []archiveRoot
 	// Only a missing optional root is skippable. ENOENT after this preflight
@@ -230,7 +274,7 @@ func writeArchiveContents(tw *tar.Writer, roots []archiveRoot, tenant *registry.
 		manifest.Roots = append(manifest.Roots, source)
 	}
 	for _, root := range included {
-		if err := addArchiveRoot(tw, root.Path, root.Name); err != nil {
+		if err := addArchiveRoot(tw, root.Path, root.Name, excluded...); err != nil {
 			return fmt.Errorf("archive source %s: %w", root.Path, err)
 		}
 	}
@@ -246,8 +290,16 @@ func writeArchiveContents(tw *tar.Writer, roots []archiveRoot, tenant *registry.
 	return err
 }
 
-func addArchiveRoot(tw *tar.Writer, root, name string) error {
+func addArchiveRoot(tw *tar.Writer, root, name string, excluded ...string) error {
 	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		for _, skip := range excluded {
+			if path == skip {
+				if entry != nil && entry.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -348,6 +400,11 @@ func (m *Manager) removeLocked(ctx context.Context, t registry.Tenant, purge boo
 	}()
 	if err = m.workers().Stop(ctx, t); err != nil {
 		return "", err
+	}
+	if m.BrowserWorkspaces != nil {
+		if err = m.BrowserWorkspaces.DropTenant(ctx, t.Name); err != nil {
+			return "", err
+		}
 	}
 	snapshot, err = m.BackupTenant(t)
 	if err != nil {

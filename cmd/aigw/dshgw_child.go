@@ -135,6 +135,9 @@ func buildDshgwChild(cfg *config.Config, aigwExecutable string) (*dshgwChild, er
 	// The child runs ssh, so its own configuration carries the feature; this side only has
 	// to place the paths in the deployment's terms. A relative key path is resolved here,
 	// where the deployment root is known, instead of inside a generated file.
+	if cfg.Dshgw.BrowserWorkspaces.Enabled {
+		child.BrowserWorkspaces = &dshgwsup.BrowserWorkspaces{Enabled: true}
+	}
 	if cfg.Dshgw.SSHWorkspaces.Enabled {
 		ssh := &dshgwsup.SSHWorkspaces{
 			Enabled:            true,

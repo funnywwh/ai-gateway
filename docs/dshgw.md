@@ -238,6 +238,31 @@ feishu:
 启用时若 `sshfs` 不可执行，配置加载即失败（与 `deploy.plugin_path` 同一原则：不静默降级）。
 `sshfs` 上的 `git status`/`grep` 比本地慢，inotify 不生效 —— 远端构建/测试请让会话显式 `ssh` 过去跑。
 
+## 7c. 浏览器本机目录 FUSE 工作区（可选，默认关闭）
+
+与上面的 `dsh-browser-fs` 额外工具不同，本功能把浏览器授权目录挂载为服务器上的真实工作区：
+**命令仍在服务器运行，文件读写通过浏览器落到用户本机**，无需用户安装本地代理。
+
+- 独立 dshgw 设置 `browser_workspaces.enabled: true`；aigw 监督形态设置
+  `dshgw.browser_workspaces.enabled: true`。开启必须配置 `deploy.plugin_path`（监督形态为
+  `dshgw.plugin_path`），其所在目录须包含 `browser-workspace/index.js` 及随附客户端文件。
+- 网关主机需 Linux、可用 `/dev/fuse`、`fusermount3` 与用户态挂载权限；浏览器需支持 File System
+  Access API 的 Chromium，并通过 HTTPS 或受信任 localhost 使用。租户沙箱不增加设备或 capability。
+- 用户明确授权目录后，挂载位于 `<workspace>/browser/<随机ID>`；现有已鉴权租户入口上的同源
+  HTTP 长轮询传递文件请求，不新增监听端口。目录内容可进入模型请求，读写授权应谨慎授予。
+- 挂载后重启该租户 worker 以加入显式 bind，**会中断正在运行的回合**。授权页面必须保持连接；
+  关闭页面、撤销权限、断网会使 I/O 失败。首版不支持自动恢复浏览器句柄，也不承诺完整 POSIX 语义。
+- 开启功能时 `browser` 是网关管理的保留挂载子目录（启动前建立为真实私有目录），在租户沙箱中始终只读绑定，
+  即使尚无活动挂载也不能在其中建目录、替换容器或挂载点；各活动 FUSE 子挂载另外显式读写绑定，内部文件读写不受影响。
+  租户及全网关备份排除该子树；勿将仅存于服务器的重要文件放入其中。
+  关闭功能且没有活动挂载时，同名普通目录仍正常备份；残存活动挂载始终排除。
+  租户停用或删除会清理挂载，普通 worker Restart 不清理。离线 CLI 无权接管活动挂载，
+  检测到挂载时拒绝破坏性操作，应通过运行中的网关处理。
+
+运行 `make dshgw-browser-test` 检查 Go 集成与 Node fake-FSA 契约；这些测试不替代真实浏览器授权和
+内核 FUSE 验收。完整架构、限制与尚待完成的验收见
+[浏览器 FUSE 工作区设计](design/browser-fuse-workspace.md)。
+
 ## 8. 运维与验收
 
 ```bash
