@@ -268,7 +268,8 @@ bin/gwproxy --config deploy/dshgw/frontproxy.example.yaml
 
 | 路径 | 去向 | 说明 |
 |---|---|---|
-| `/aigw/*` | aigw | **前缀原样转发**：aigw 的 `server.base_path: /aigw` 自己服务前缀，cookie Path 与控制台 URL 自动一致 |
+| `/`（兜底） | aigw | **根挂载**：控制台 `/admin/ui/`、`/version`、`/v1/…` 保持原路径；`/` 本身跳转到 `/admin/ui/`（aigw 在根上是 404） |
+| `/aigw/*`（可选挂法） | aigw | 前缀挂载：`aigw_strip_prefix: true` 让反代剥前缀，aigw 收到的路径与直连一致 |
 | `/dshgw/*` | dshgw 门户 | 剥前缀，并按 `portal_port` 补上 Host 与 edge 头（dshgw 两者都校验） |
 | `/t/<tenant>/*` | 该租户的 dsh | 剥 `/t/<tenant>`，按 registry 里的该租户公开端口补 Host 与 edge 头；**会话、账号 DSH 开关、worker 握手仍由 dshgw 负责**，反代不重复实现 |
 | `/` | → `/dshgw/` | 门户是前门 |
@@ -325,7 +326,7 @@ edge 头与 dshgw 对话），所以切换只是改配置，不需要重建租�
 
 | 组件 | 形态 | 端口 | 与线上的关系 |
 |---|---|---|---|
-| 线上 aigw | 用户单元 `aigw-local`（文件单元、enabled） | `:8088` | **保持不变**：反代剥前缀后转发，aigw 配置一字未改 |
+| 线上 aigw | 用户单元 `aigw-local`（文件单元、enabled） | `:8088` | **保持不变**：反代以根挂载转发，aigw 配置一字未改 |
 | `gwproxy` | 用户单元 `gwproxy-verify`（enabled） | `0.0.0.0:8090` | 新的公开入口，单域名 + 路径前缀 |
 | 验证 dshgw | 用户单元 `dshgw-verify`（enabled），路径模式 | 网关 `127.0.0.1:18299`、门户 `18300`、租户 `18301+`、worker `18400+` | 独立于旧的 `dshgw.service`，同 UID、无 root |
 | 旧 dshgw（root/systemd 形态） | `dshgw.service` + 5 个 worker | `:32600`+ | **未受影响**，仍在运行 |
@@ -336,16 +337,22 @@ edge 头与 dshgw 对话），所以切换只是改配置，不需要重建租�
 访问入口：
 
 ```bash
-http://192.168.190.86:8090/dshgw/        # 门户（登录页）
+http://192.168.190.86:8090/              # → 302 到 aigw 控制台
+http://192.168.190.86:8090/admin/ui/     # aigw 后台（控制台）
+http://192.168.190.86:8090/version       # aigw API
+http://192.168.190.86:8090/dshgw/        # dshgw 门户（登录页）
 http://192.168.190.86:8090/t/verify1/    # 租户 dsh（未登录会 302 回门户路径）
-http://192.168.190.86:8090/aigw/version  # 经反代访问 aigw（前缀被剥掉）
 http://192.168.190.86:8088/version       # 直连 aigw，仍然可用
 ```
 
 **实测结果**（本机，2026-09-18）：
 
 - `:8088` 直连 `/version`、`/healthz` 均 200 —— 反代上线没有影响它；
-- `/aigw/version` 经反代返回真实 aigw 的版本 JSON（`{"revision":"ec7b911","version":"0.18.0"}`）；
+- 根挂载的 aigw：`/` → 302 `/admin/ui/`；`/admin/ui/` 200；`/admin/ui` → 301 且**带端口**
+  （`http://192.168.190.86:8090/admin/ui/`，反代保留浏览器 authority，aigw 用它构造绝对跳转）；
+  控制台静态资源 `/admin/ui/app.css`、`/admin/ui/js/app.js`、`/admin/ui/favicon.svg` 均 200；
+  `/version`、`/healthz` 200；`/admin/api/v1/accounts` 401；
+  **控制台响应与直连 `:8088` 逐字节一致**（`/admin/ui/` 669 字节、401 响应体相同）；
 - `/dshgw/` 200，登录表单 action 已是 `/dshgw/login`（dshgw 自己按 `public_base_url` 生成）；
 - `GET /t/verify1/` 未登录 → 302 到 `http://192.168.190.86:8090/dshgw/`（**路径式门户，不是 host:port**）；
 - `POST /t/verify1/api`（带 Origin）→ 401；

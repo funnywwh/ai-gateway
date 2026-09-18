@@ -63,14 +63,21 @@ func (p *Proxy) Handler() http.Handler {
 			return
 		}
 		switch {
-		case pathMatches(r.URL.Path, aigwPrefix):
-			p.forwardAigw(w, r, aigwPrefix)
+		// The specific prefixes win over aigw's, so a root-mounted aigw never
+		// swallows the portal or a tenant.
 		case pathMatches(r.URL.Path, portalPrefix):
 			p.forwardPortal(w, r, portalPrefix)
 		case pathMatches(r.URL.Path, tenantPrefix):
 			p.forwardTenant(w, r, tenantPrefix)
+		case rootMounted(aigwPrefix):
+			if r.URL.Path == "/" && p.cfg.RootRedirect != "" {
+				http.Redirect(w, r, p.cfg.RootRedirect, http.StatusFound)
+				return
+			}
+			p.forwardAigw(w, r, aigwPrefix)
+		case pathMatches(r.URL.Path, aigwPrefix):
+			p.forwardAigw(w, r, aigwPrefix)
 		case r.URL.Path == "/":
-			// The portal is the front door of this deployment.
 			http.Redirect(w, r, portalPrefix+"/", http.StatusFound)
 		default:
 			http.NotFound(w, r)
@@ -90,13 +97,23 @@ func (p *Proxy) forwardAigw(w http.ResponseWriter, r *http.Request, prefix strin
 		FlushInterval: -1,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
-			if p.cfg.AigwStripPrefix {
+			// Stripping a root prefix would eat the leading slash itself, and it is
+			// meaningless anyway: aigw already receives the paths it serves.
+			if p.cfg.AigwStripPrefix && !rootMounted(prefix) {
 				pr.Out.URL.Path = strings.TrimPrefix(r.URL.Path, prefix)
-				if pr.Out.URL.Path == "" {
-					pr.Out.URL.Path = "/"
+				if pr.Out.URL.Path == "" || !strings.HasPrefix(pr.Out.URL.Path, "/") {
+					pr.Out.URL.Path = "/" + strings.TrimPrefix(pr.Out.URL.Path, "/")
 				}
 			}
-			pr.Out.Host = p.cfg.PublicHost
+			// aigw builds absolute redirects from the request Host (its
+			// /admin/ui -> /admin/ui/ 301 does exactly that), so the browser's own
+			// authority is preserved — including the port the proxy listens on. It is
+			// safe to do so because a request for any other host was rejected above.
+			if r.Host != "" {
+				pr.Out.Host = r.Host
+			} else {
+				pr.Out.Host = p.cfg.PublicHost
+			}
 			pr.SetXForwarded()
 		},
 		ErrorHandler: p.upstreamError("aigw"),
@@ -235,6 +252,9 @@ func (p *Proxy) Run(done <-chan struct{}) {
 		}
 	}
 }
+
+// rootMounted reports whether the aigw route is the root fallback.
+func rootMounted(prefix string) bool { return prefix == "/" }
 
 // pathMatches reports whether a request path is inside a route prefix, matching on
 // segment boundaries so /aigw cannot capture /aigw-something.

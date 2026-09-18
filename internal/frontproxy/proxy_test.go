@@ -108,8 +108,11 @@ func TestRoutesSeparateServicesByPrefix(t *testing.T) {
 	if response.StatusCode != 200 || aigw.requests[0].URL.Path != "/aigw/version" {
 		t.Fatalf("aigw route: status=%d path=%s", response.StatusCode, aigw.requests[0].URL.Path)
 	}
-	if got := aigw.requests[0].Host; got != "chat.example" {
-		t.Fatalf("aigw Host = %q, want the public host", got)
+	// aigw builds absolute redirects from the request Host (its own /admin/ui ->
+	// /admin/ui/ 301 does that), so the browser's authority — port included — is what
+	// it must see. A request for any other host never reaches here.
+	if got := aigw.requests[0].Host; got != "chat.example:8443" {
+		t.Fatalf("aigw Host = %q, want the browser's authority", got)
 	}
 
 	// The portal is stripped and must carry dshgw's two routing inputs.
@@ -158,6 +161,78 @@ func TestAigwStripPrefixKeepsDirectAccessWorking(t *testing.T) {
 	}
 	if got := aigw.requests[1].URL.Path; got != "/" {
 		t.Fatalf("bare prefix upstream path = %q, want /", got)
+	}
+}
+
+// Root-mounted aigw: "/" is the fallback for everything the portal and tenant
+// prefixes do not claim, which is what lets /admin/ui/, /version and /v1/... work
+// on the same domain without giving aigw a base path (that setting is exclusive
+// and would break direct access on aigw's own port).
+func TestRootMountedAigwServesConsoleAndKeepsPortalPrefixes(t *testing.T) {
+	var aigw, portal, tenant upstreams
+	aigw.body, portal.body, tenant.body = "aigw", "portal", "tenant"
+	proxy, cfg := fixture(t, &aigw, &portal, &tenant, map[string]int{"alice": 32601})
+	cfg.AigwPrefix = "/"
+	cfg.RootRedirect = "/admin/ui/"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("root-mounted aigw rejected: %v", err)
+	}
+
+	// The console and the API keep their paths: aigw serves them at its root.
+	for _, path := range []string{"/admin/ui/", "/admin/ui/assets/app.js", "/version", "/v1/models"} {
+		response := request(t, proxy, http.MethodGet, path, "chat.example:8443", "")
+		if response.StatusCode != 200 {
+			t.Fatalf("%s status = %d", path, response.StatusCode)
+		}
+	}
+	seen := map[string]bool{}
+	for _, r := range aigw.requests {
+		seen[r.URL.Path] = true
+	}
+	for _, path := range []string{"/admin/ui/", "/admin/ui/assets/app.js", "/version", "/v1/models"} {
+		if !seen[path] {
+			t.Errorf("aigw did not receive %s", path)
+		}
+	}
+
+	// The root itself goes to the console: aigw answers 404 there, and a bare 404 is
+	// a poor front door for a deployment whose console lives one path deeper.
+	root := request(t, proxy, http.MethodGet, "/", "chat.example:8443", "")
+	if root.StatusCode != http.StatusFound || root.Header.Get("Location") != "/admin/ui/" {
+		t.Fatalf("root = %d %q, want a redirect to the console", root.StatusCode, root.Header.Get("Location"))
+	}
+
+	// Specific prefixes still win: a root-mounted aigw must not swallow them.
+	if response := request(t, proxy, http.MethodGet, "/dshgw/", "chat.example:8443", ""); response.StatusCode != 200 {
+		t.Fatalf("portal status = %d", response.StatusCode)
+	}
+	if response := request(t, proxy, http.MethodGet, "/t/alice/", "chat.example:8443", ""); response.StatusCode != 200 {
+		t.Fatalf("tenant status = %d", response.StatusCode)
+	}
+	if !strings.HasSuffix(portal.requests[0].URL.Path, "/") || tenant.requests[0].URL.Path != "/" {
+		t.Fatalf("prefixes were not routed to dshgw: portal=%q tenant=%q",
+			portal.requests[0].URL.Path, tenant.requests[0].URL.Path)
+	}
+}
+
+// Only aigw may be the root fallback: a portal or tenant prefix of "/" would make
+// every other prefix unreachable.
+func TestOnlyAigwMayBeRootMounted(t *testing.T) {
+	for _, mutate := range []func(*Config){
+		func(c *Config) { c.PortalPrefix = "/" },
+		func(c *Config) { c.TenantPrefix = "/" },
+	} {
+		cfg := &Config{
+			Listen: "127.0.0.1:8443", PublicHost: "chat.example",
+			AigwUpstream: "http://127.0.0.1:8088", PortalUpstream: "http://127.0.0.1:18099",
+			TenantUpstream: "http://127.0.0.1:18099", PortalPort: 32600,
+			RegistryPath: "/tmp/registry.json",
+		}
+		mutate(cfg)
+		cfg.applyDefaults()
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("a root-mounted dshgw surface was accepted: %+v", cfg)
+		}
 	}
 }
 

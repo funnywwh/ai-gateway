@@ -38,6 +38,10 @@ type Config struct {
 	// keeps its cookie Path, redirects and console URLs consistent.
 	AigwPrefix   string `yaml:"aigw_prefix"`
 	AigwUpstream string `yaml:"aigw_upstream"`
+	// RootRedirect, when set, sends a request for exactly "/" there. aigw serves
+	// nothing at its root (its console lives at /admin/ui/ and its API under /v1),
+	// so the useful default for a root-mounted deployment is the console.
+	RootRedirect string `yaml:"root_redirect"`
 	// AigwStripPrefix removes the prefix before forwarding. It is needed when aigw
 	// serves the root (its base_path is exclusive: with a prefix configured, a
 	// request without it is a 404). Set it when aigw must *also* stay reachable
@@ -165,6 +169,14 @@ func (c *Config) Validate() error {
 	for label, prefix := range map[string]string{
 		"aigw_prefix": c.AigwPrefix, "portal_prefix": c.PortalPrefix, "tenant_prefix": c.TenantPrefix,
 	} {
+		// "/" is the fallback route, not a prefix that can overlap: it claims
+		// whatever the two specific prefixes do not.
+		if path.Clean("/"+strings.Trim(prefix, "/")) == "/" {
+			if label != "aigw_prefix" {
+				return fmt.Errorf("%s must not be the root path", label)
+			}
+			continue
+		}
 		clean := path.Clean("/" + strings.Trim(prefix, "/"))
 		if clean == "/" {
 			return fmt.Errorf("%s must not be the root path", label)

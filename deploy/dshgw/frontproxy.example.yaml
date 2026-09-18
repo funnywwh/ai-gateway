@@ -1,12 +1,14 @@
 # gwproxy：单域名 + 路径前缀的入口反代（可选）
 #
 # 一个公网端口、一张证书、一条防火墙规则，三个服务用路径区分：
-#   /aigw/*           → aigw（前缀原样转发：aigw 自己的 server.base_path 服务它，
-#                        因此它的 cookie Path、重定向与控制台 URL 都自带前缀）
+#   /                 → aigw（根挂载，默认部署）：控制台 /admin/ui/、/version、/v1/...
+#                        保持原路径；根路径可配置跳转到控制台
+#   /aigw/*           → aigw（另一种挂法：aigw 自己的 server.base_path 服务前缀，
+#                        适用于能接受"直连端口也带前缀"的部署）
 #   /dshgw/*          → dshgw 门户（剥前缀，并补上 dshgw 路由所需的 Host 与 edge 头）
 #   /t/<tenant>/*     → 该租户的 dsh（剥 /t/<tenant>，同样补 Host 与 edge 头；
 #                        会话、账号开关、worker 握手仍由 dshgw 负责，不重复实现）
-#   /                 → 302 到门户
+#   /dshgw/*          → dshgw 门户（登录页）
 #   /healthz          → 反代自身的健康检查
 listen: 127.0.0.1:8443          # 公开监听；对外请在防火墙只放这一个端口
 public_host: chat.tirisen.hk    # 唯一域名；Host 不匹配的请求直接 404
@@ -14,12 +16,17 @@ public_host: chat.tirisen.hk    # 唯一域名；Host 不匹配的请求直接 4
 # tls:
 #   certificate: /path/fullchain.pem
 #   certificate_key: /path/privkey.pem
-aigw_prefix: /aigw
+# 两种挂法二选一：
+#
+# (A) 根挂载（推荐，默认）：aigw 的路径原样转发，控制台就是 <域名>/admin/ui/。
+#     若还要 /aigw/* 也能用，把 aigw_prefix 改成 /aigw 并打开 aigw_strip_prefix
+#     —— 注意 aigw 的 server.base_path 是**排他**的（配了前缀后不带前缀的请求会 404），
+#     所以"保留直连端口"的部署必须让反代剥前缀，而不是去改 aigw。
+aigw_prefix: /
 aigw_upstream: http://127.0.0.1:8088
-# aigw 的 base_path 是**排他**的：一旦给它配了前缀，不带前缀的请求会被它 404。
-# 因此"既要 :8088 直连可用、又要 /aigw 前缀可用"时不要动 aigw 的配置，
-# 而是让反代剥掉前缀（aigw 收到的路径与它自己端口上服务的完全一致）：
-aigw_strip_prefix: true
+# aigw 在自己的根路径上是 404（没有根路由），因此把 / 指到控制台
+# (B) 前缀挂载：aigw_prefix: /aigw + aigw_strip_prefix: true
+#     反代把 /aigw/version 变成 /version 转发，aigw 收到的路径与直连完全一致。
 portal_prefix: /dshgw
 portal_upstream: http://127.0.0.1:18099   # dshgw.Listen
 portal_port: 18100                        # dshgw.PortalPort（Host 与 edge 头由它派生）
