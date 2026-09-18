@@ -3569,3 +3569,28 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
   `deploy/dshgw/README.md` §7，待办清单见 `docs/TODO.md` M57）。本次只做版本发布 + 本机 aigw `:8088` 部署。
 - 没有部署到 gpt001（用户本次指定只部署本机）。
 - 开机自启仍未落地：`aigw-local` 是 transient 单元，重启机器后需手动起（与 v0.17.0 后的状态相同）。
+
+## 发布记录 v1.0.0（2026-09-18，M58）
+
+| 项 | 值 |
+|---|---|
+| 版本号 | `1.0.0`（`0.18.0` → `1.0.0`，**major**） |
+| 档位依据 | 按 `scripts/release.sh` 的档位表与 git 记录判定：本次含两个带 `!` 的破坏性提交（`refactor(m58)!` 删 root/systemd/nginx 生命周期与残留），且**要求运维改配置才能继续跑**——dshgw 配置面换了（`tls`/`systemd_dir`/`nginx_dir`/`isolation`/`admin_allowed_uids`/`releases_root` 被删且会被严格解码拒绝，新增 `dshgw.public_base_url`/`public_scheme`/`worker_limits` 等），CLI 删除 `tenant re-isolate`/`render-nginx`/`upgrade-dsh`，部署形态由 root+systemd+per-tenant OS 用户改为无特权监督子进程。对比 v0.18.0 的发布记录写的是"minor：…无破坏性变更"，本次四项 major 判据全部命中 |
+| revision | `d22f744`（tag `v1.0.0`；`release: v1.0.0` 提交只含 `VERSION`） |
+| 内容 | M58：aigw 拉起并监督同目录 dshgw 子进程（同 UID、无 root、无 systemd、无共享服务账号，随 aigw 退出而停）；worker 为 dshgw 的 bwrap 子进程；每 worker 资源限额（systemd 用户 scope）+ 部署级汇总上限；公开面由 dshgw 自己绑定（无 nginx，TLS 可选）；worker 启动前自动同步模型；用户级常驻单元与开机自启；宿主迁移脚本（apply/rollback + 干跑 + 计划测试）；可选单域名入口反代 `bin/gwproxy`（路径前缀 + 前门跳转）；`scripts/dshgw_supervised_e2e.py` 24 步端到端验收 |
+| 构建 | `scripts/release.sh major` → `ui: minified 37 files 572454 -> 336354 bytes (-41%); gzip 32 files 333993 -> 132850 bytes (-60%)`；`bin/aigw` 22,206,049 B；另 `make dshgw-build gwproxy-build` 产出 `bin/dshgw`/`bin/gwproxy`（同版本 revision，`release.sh` 只构建 aigw） |
+| 部署目标 | **本机 `:8088`**（用户指定 "deploy local … 保持 8088 能用"，非 gpt001） |
+| 回滚点 | `bin/aigw.prev-0.18.0-ec7b911`（升级前正在运行的二进制，从 `/proc/<pid>/exe` 原样抢救——`make build` 已覆盖磁盘文件；`-version` 自证 `0.18.0 (revision ec7b911)`）。更早还有 `bin/aigw.prev-0.17.0-e7e3e25`、`bin/aigw.prev-0.16.0-9dc4ed2`、`bin/aigw.prev-running-0.14.0-6dc9082` |
+
+验证（本机实测）：
+
+- [x] `:8088` 直连（未受发布影响）：`/version` → `{"revision":"d22f744","version":"1.0.0","ui":"minified"}`；`/healthz` 200、`/readyz` 200；本次启动无 `level=ERROR`
+- [x] 启动日志：`aigw starting` … `http server listening addr=:8088`
+- [x] 控制台角标数据源：`admin/ui/js/api.js` 里 `fetch(base + "/version")` → `brand.js` 渲染 `v<version>` + `revision`；该端点经前门返回 `1.0.0/d22f744`（角标本身需管理员登录，本次无口令故未直读像素）
+- [x] 三个二进制版本自证：`aigw 1.0.0`、`dshgw listening version=1.0.0 revision=d22f744`、`front proxy listening addr=0.0.0.0:8090`
+- [x] 域名前门（`http://192.168.190.86:8090`，用户级单元 `gwproxy-verify`）：`/` → 302 `/admin/ui/`；`/admin/ui/` 200；`/version` 200；`/dshgw/` → 302 `http://192.168.190.86:18300/`；`/t/dsh-tenant/` → 302 `http://192.168.190.86:18302/`
+- [x] 每租户一个 origin（当前拓扑：同一域名 + 每租户一个端口）：门户 `:18300` 200；租户 `:18301`/`:18302` 未登录 302 回门户（预期）
+- [x] 旧 root/systemd 部署未受影响：`dshgw.service` active、5 个 `dsh-worker@*` active
+- [x] `make verify`、`make dshgw-test`、`make dshgw-supervised-test`（24 步）均为 0
+
+拓扑决策记录（真浏览器实测，见 `deploy/dshgw/README.md` §9.0）：dsh 前端用 `location.origin` + `/api` + `/api/remote.mux` 构造请求，**origin 不含路径**，因此路径前缀下租户 UI 必然白屏；**多租户只能"同一域名 + 每租户一个端口"**，域名做前门跳转。测试结束后已把验证 dshgw 的 `aigw_base_url` 切回真实 `:8088`，临时桩进程与临时会话均已清除。
