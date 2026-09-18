@@ -368,8 +368,15 @@ func (m *Manager) removeLocked(ctx context.Context, t registry.Tenant, purge boo
 	}
 	// From here on the tenant is gone from the registry: there is no per-tenant OS
 	// identity to delete (M58 never created one) and no edge configuration to
-	// rewrite, so the only remaining step is the optional data purge.
+	// rewrite, so the only remaining steps are the ssh mounts (they are kernel state,
+	// not files, so removing the directories would not detach them) and the optional
+	// data purge.
 	committed = true
+	if m.SSHWorkspaces != nil {
+		if err = m.SSHWorkspaces.DropTenant(ctx, t.Name); err != nil {
+			return snapshot, err
+		}
+	}
 	if purge {
 		for _, path := range []string{filepath.Dir(t.DshHome), t.Workspace, filepath.Join(m.Config.Deploy.TenantConfigRoot, t.Name), filepath.Join(m.Config.HandshakeDir, t.Name+".url")} {
 			if removeErr := os.RemoveAll(path); removeErr != nil {

@@ -100,6 +100,8 @@ dshgw-test:
 	@$(GOENV) DSHGW_NODE="$(DSHGW_NODE)" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" go test ./internal/dshgw/... ./cmd/dshgw ./internal/arch
 	@test -x "$(DSHGW_NODE)" || { echo "dshgw-test: Node missing: $(DSHGW_NODE)" >&2; exit 1; }
 	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" cmd/dshgw/plugin/picker-clamp.test.mjs
+	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" cmd/dshgw/plugin/ssh-workspace/ssh-workspace.test.mjs
+	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" cmd/dshgw/plugin/ssh-workspace/client.test.mjs
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_dshgw_migration_plan.py
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_decommission_legacy_plan.py
 

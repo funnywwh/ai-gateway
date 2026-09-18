@@ -1,0 +1,20 @@
+{
+  "name": "dshgw-ssh-workspace",
+  "private": true,
+  "type": "module",
+  "description": "dshgw tenant-side ssh workspace plugin (M64): remote directory browsing, remote mkdir, and the mount mailbox",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  }
+}

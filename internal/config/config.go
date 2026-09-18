@@ -463,6 +463,35 @@ type Dshgw struct {
 	// PluginBrowserFS is the child's default for the browser filesystem plugin:
 	// "on" requires a template prepared with dsh-browser-fs, "off" does not.
 	PluginBrowserFS string `yaml:"plugin_browser_fs"`
+	// SSHWorkspaces enables ssh workspaces for the accounts this gateway provisions (M64):
+	// an account browses and creates directories on a remote host with its own key, and the
+	// child mounts the chosen directory inside that account's workspace. Off by default,
+	// because enabling it means this deployment will ssh to remote hosts with a key an
+	// operator placed here.
+	SSHWorkspaces DshgwSSHWorkspaces `yaml:"ssh_workspaces"`
+}
+
+// DshgwSSHWorkspaces configures the child's ssh-workspace feature (M64) from the
+// supervised shape's own configuration file.
+//
+// Values are passed through as written and validated by the child, which is the side that
+// runs ssh: a duration is a Go duration string ("10s"), and paths are resolved against the
+// deployment root here so the child never has to guess which directory a relative value
+// meant.
+type DshgwSSHWorkspaces struct {
+	Enabled            bool     `yaml:"enabled"`
+	MountSubdir        string   `yaml:"mount_subdir"`
+	SSHBin             string   `yaml:"ssh_bin"`
+	SSHFSBin           string   `yaml:"sshfs_bin"`
+	IdentitySource     string   `yaml:"identity_source"`
+	IdentityDir        string   `yaml:"identity_dir"`
+	SSHConfigSource    string   `yaml:"ssh_config_source"`
+	Hosts              []string `yaml:"hosts"`
+	ConnectTimeout     string   `yaml:"connect_timeout"`
+	PollInterval       string   `yaml:"poll_interval"`
+	MaxEntries         int      `yaml:"max_entries"`
+	SSHFSOptions       []string `yaml:"sshfs_options"`
+	DisableAutoRemount bool     `yaml:"disable_auto_remount"`
 }
 
 // Feishu is the self-built Feishu (Lark) application aigw uses for identity: one app,

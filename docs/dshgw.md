@@ -197,6 +197,37 @@ feishu:
 不改变服务器工作区、agent cwd 或 bash 执行位置。**已授权文件内容可能进入模型请求**，必须向使用者说明；
 可按部署（或租户）`--browser-fs off` 关闭，此时模板无需 browser-fs。
 
+## 7b. SSH 工作区（M64）
+
+租户在自己的 dsh 里点「SSH 工作区」：选主机（读该账号 `~/.ssh/config` 的别名，也可手输
+`user@host`）→ 浏览远端目录 → 新建远端目录 → 挂载并打开。挂载点是
+`<workspace>/<mount_subdir>/<host>/<远端路径>`（默认 `ssh`），因此它落在该账号的 clamp 根之内，
+可以直接作为一个工作区打开；因为沙箱只绑定本账号的这两棵树，**别的账号看不到也进不去**。
+
+**分工（为什么不是一个纯插件）**：ssh 那一半在租户沙箱内、用**该租户自己的密钥**完成（列目录、
+建目录、探测）；挂载那一半由 dshgw 在沙箱外完成。租户 worker 挂不了：profile 只给最小 `/dev`
+（没有 `/dev/fuse`），且宿主 root 在它的 user namespace 里没有映射，`fusermount3` 的 setuid 因此
+失效 —— 实测连 `tmpfs`/`proc` 的 `mount(2)` 都是 `EPERM`，加 `CAP_SYS_ADMIN` 也一样
+（见 `docs/design/m64-ssh-workspace.md` §3）。代价是**挂载后要重启该账号的 worker**：bubblewrap 的
+`--bind` 不携带子挂载，profile 在启动时为每个活动挂载点追加一次 `--bind-try`，所以挂载/卸载都会让该
+账号的 dsh 重载（进行中的回合会中断，会话日志可 resume）。
+
+| 面 | 是什么 |
+|---|---|
+| 通道 | 该账号 DSH home 里的文件信箱：`<dsh_home>/ssh-requests/<id>.json`（租户写）、`<dsh_home>/ssh-replies/<id>.json`（网关写）。不新增监听端口、不新增令牌 |
+| 挂载记录 | `<state_dir>/ssh-mounts.json`（0600）；同时镜像一份到 `<dsh_home>/ssh-mounts.json`，租户插件靠它区分「真挂载」与镜像布局产生的父目录 |
+| 密钥 | `<workspace>/.ssh/id_rsa`（0600，由 dshgw 从 `identity_source` 或 `identity_dir/<账号>` 拷入，已存在则不覆盖）；`known_hosts`（0600）与可选 `config`（别名清单）同目录 |
+| 隔离增量 | 只为活动挂载点各加一条 `--bind-try <挂载点> <挂载点>`；**不加设备、不加 capability**，M57/M58 口径不变 |
+| sshfs 选项 | 默认 `reconnect, ServerAliveInterval=15, ServerAliveCountMax=3, idmap=user`；`allow_other`/`allow_root` 被代码丢弃（所有 worker 共用一个 uid，共享挂载等于跨账号可读） |
+
+**密钥就是边界**：账号能读到自己的 `id_rsa`（跑 key 的进程就是它自己），所以「这个账号能到哪些主机」
+完全由发给它的密钥决定。按账号限权要用 `identity_dir`（一账号一把）；共用 `identity_source` 等于所有
+账号共享同一身份 —— `hosts` 白名单只是防跑偏，不是安全边界。
+
+**前置**：宿主装 `sshfs`；dshgw 的运行账号能非交互 ssh 到目标主机（无口令 key 或 agent）。
+启用时若 `sshfs` 不可执行，配置加载即失败（与 `deploy.plugin_path` 同一原则：不静默降级）。
+`sshfs` 上的 `git status`/`grep` 比本地慢，inotify 不生效 —— 远端构建/测试请让会话显式 `ssh` 过去跑。
+
 ## 8. 运维与验收
 
 ```bash

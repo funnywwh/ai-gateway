@@ -11,10 +11,12 @@ import (
 	"github.com/winger/ai-gateway/internal/dshgw/feishu"
 	"github.com/winger/ai-gateway/internal/dshgw/handshake"
 	"github.com/winger/ai-gateway/internal/dshgw/proxy"
+	"github.com/winger/ai-gateway/internal/dshgw/sshworkspace"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 )
@@ -94,6 +96,67 @@ func (c *cli) serve() error {
 		go func() { <-ctx.Done(); adminListener.Close() }()
 		go admin.Serve(ctx, adminListener)
 		slog.Info("dshgw admin channel listening", "socket", deps.cfg.AdminSocket)
+	}
+
+	// M64: ssh workspaces. The service owns the mount record and the per-account mailbox;
+	// the manager hook is what makes a worker's profile bind the mounts and what detaches
+	// them when an account goes away. It is assembled only when configured — a gateway that
+	// does not enable the feature never runs ssh.
+	if deps.cfg.SSHWorkspaces.Enabled {
+		sshService, sshErr := sshworkspace.New(sshworkspace.Options{
+			MountSubdir:     deps.cfg.SSHWorkspaces.MountSubdir,
+			SSHBin:          deps.cfg.SSHWorkspaces.SSHBin,
+			SSHFSBin:        deps.cfg.SSHWorkspaces.SSHFSBin,
+			IdentitySource:  deps.cfg.SSHWorkspaces.IdentitySource,
+			IdentityDir:     deps.cfg.SSHWorkspaces.IdentityDir,
+			SSHConfigSource: deps.cfg.SSHWorkspaces.SSHConfigSource,
+			Hosts:           deps.cfg.SSHWorkspaces.Hosts,
+			ConnectTimeout:  deps.cfg.SSHWorkspaces.ConnectTimeout.Duration(),
+			MaxEntries:      deps.cfg.SSHWorkspaces.MaxEntries,
+			SSHFSOptions:    deps.cfg.SSHWorkspaces.SSHFSOptions,
+		}, sshworkspace.NewStore(filepath.Join(deps.cfg.StateDir, "ssh-mounts.json")), func(restartCtx context.Context, tenant string) error {
+			current, ok := deps.reg.Get(tenant)
+			if !ok {
+				return fmt.Errorf("unknown tenant %s", tenant)
+			}
+			return deps.manager.Restart(restartCtx, current)
+		}, &audit.JSONL{Path: deps.cfg.AuditPath}, slog.Default())
+		if sshErr != nil {
+			return fmt.Errorf("ssh workspaces: %w", sshErr)
+		}
+		if sshErr := sshService.CheckBinaries(); sshErr != nil {
+			return fmt.Errorf("ssh workspaces: %w", sshErr)
+		}
+		deps.manager.SSHWorkspaces = sshService
+		remotes := func() []sshworkspace.Remote {
+			tenants := deps.reg.List()
+			out := make([]sshworkspace.Remote, 0, len(tenants))
+			for _, tenant := range tenants {
+				out = append(out, sshworkspace.Remote{Tenant: tenant.Name, Workspace: tenant.Workspace, DshHome: tenant.DshHome})
+			}
+			return out
+		}
+		go func() {
+			if !deps.cfg.SSHWorkspaces.DisableAutoRemount {
+				// Mounts are kernel state: they do not survive this process, so the record
+				// file is re-applied at every start.
+				sshService.Reconcile(ctx, remotes())
+			}
+			ticker := time.NewTicker(deps.cfg.SSHWorkspaces.PollInterval.Duration())
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if handled := sshService.PollOnce(ctx, remotes()); handled > 0 {
+						slog.Info("ssh workspace requests handled", "count", handled)
+					}
+				}
+			}
+		}()
+		slog.Info("ssh workspaces enabled", "mount_subdir", deps.cfg.SSHWorkspaces.MountSubdir,
+			"poll_interval", deps.cfg.SSHWorkspaces.PollInterval.Duration(), "hosts", deps.cfg.SSHWorkspaces.Hosts)
 	}
 
 	// Tenants that are not suspended come back with their gateway: this is what

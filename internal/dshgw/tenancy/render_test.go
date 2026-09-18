@@ -107,3 +107,52 @@ func TestRenderSettingsPreservesOtherProvidersAndDropsEmptyAigw(t *testing.T) {
 		t.Fatalf("empty models rendered invalid provider:\n%s", text)
 	}
 }
+
+// The plugin row is what makes the feature reachable at all: without it the account's dsh has
+// no surface, and with a wrong path dsh fails to boot (the profile imports the file by
+// absolute path).
+func TestRenderPatchAddsTheSSHWorkspacePluginWhenEnabled(t *testing.T) {
+	cfg, tenant := renderFixture(t)
+	disabled, err := RenderTenantArtifacts(cfg, tenant, "sk-secret", []string{"m"}, TenantOptions{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	patchOf := func(arts []Artifact) string {
+		for _, artifact := range arts {
+			if filepath.Base(artifact.Path) == "cordis.patch.yml" {
+				return string(artifact.Data)
+			}
+		}
+		t.Fatal("no patch artifact")
+		return ""
+	}
+	if strings.Contains(patchOf(disabled), "ssh-workspace") {
+		t.Fatalf("a disabled feature rendered a plugin row:\n%s", patchOf(disabled))
+	}
+
+	cfg.SSHWorkspaces.Enabled = true
+	cfg.SSHWorkspaces.MountSubdir = "ssh"
+	cfg.SSHWorkspaces.Hosts = []string{"gpt001"}
+	cfg.SSHWorkspaces.MaxEntries = 25
+	cfg.SSHWorkspaces.ConnectTimeout = config.Duration(9000 * time.Millisecond)
+	enabled, err := RenderTenantArtifacts(cfg, tenant, "sk-secret", []string{"m"}, TenantOptions{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch := patchOf(enabled)
+	// The plugin lives beside the picker plugin, which is the directory the sandbox already
+	// binds read-only.
+	want := "file:///opt/dshgw/share/dsh-plugin/ssh-workspace/index.js"
+	if !strings.Contains(patch, want) {
+		t.Errorf("the patch does not name the ssh workspace plugin %q:\n%s", want, patch)
+	}
+	for _, fragment := range []string{"id: ssh-workspace", "mountSubdir: ssh", "gpt001", "maxEntries: 25", "connectTimeoutMs: 9000"} {
+		if !strings.Contains(patch, fragment) {
+			t.Errorf("the patch lacks %q:\n%s", fragment, patch)
+		}
+	}
+	// The picker keeps working exactly as before: the ssh row is an addition, not a swap.
+	if !strings.Contains(patch, "picker-clamp.js") {
+		t.Errorf("the picker row disappeared:\n%s", patch)
+	}
+}

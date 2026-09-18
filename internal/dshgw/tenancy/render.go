@@ -279,6 +279,30 @@ func renderPatch(cfg *config.Config, t registry.Tenant, opt TenantOptions) ([]by
 			{"id": pickerID + "-ui", "name": "@deepseek-ai/dsh-client-ui-directory-picker-browse"},
 		}},
 	}
+	if cfg.SSHWorkspaces.Enabled {
+		// The account-side half of M64: ssh browsing, remote mkdir, and the mount mailbox.
+		//
+		// One row covers both halves. The file URL is an ordinary loader entry whose package
+		// directory also carries the browser bundle (package.json's dsh.client plus
+		// exports["./client"]), which is how dsh's client-module scan discovers a web plugin
+		// — the same mechanism the shipped directory-picker surface uses.
+		sshPluginURL := (&url.URL{
+			Scheme: "file",
+			Path:   filepath.Join(filepath.Dir(cfg.Deploy.PluginPath), "ssh-workspace", "index.js"),
+		}).String()
+		rows[1]["insert"] = append(rows[1]["insert"].([]map[string]any), map[string]any{
+			"id":   "ssh-workspace",
+			"name": sshPluginURL,
+			"config": map[string]any{
+				// The account's HOME inside the sandbox is its workspace, so the plugin needs
+				// no paths: it mounts under $HOME/<mount_subdir>/… exactly like the gateway.
+				"mountSubdir":      cfg.SSHWorkspaces.MountSubdir,
+				"hosts":            cfg.SSHWorkspaces.Hosts,
+				"maxEntries":       cfg.SSHWorkspaces.MaxEntries,
+				"connectTimeoutMs": int(cfg.SSHWorkspaces.ConnectTimeout.Duration() / time.Millisecond),
+			},
+		})
+	}
 	if opt.PluginBrowserFS == "off" {
 		rows = append(rows, map[string]any{"id": "browser-fs", "name": "dsh-browser-fs", "disabled": true})
 	}

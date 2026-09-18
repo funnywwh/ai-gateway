@@ -78,6 +78,11 @@ type Tenant struct {
 	DshHome     string
 	WorkerPort  int
 	Environment []string
+	// SSHMounts are the sshfs mount points the gateway made inside this tenant's workspace
+	// (M64). Each one is bound explicitly: bubblewrap's --bind does not carry submounts, so
+	// a mount inside the workspace is invisible to the sandbox unless its own path is bound,
+	// and a mount that appears after the worker started is invisible until it starts again.
+	SSHMounts []string
 }
 
 // hiddenRoots are host directories replaced by an empty tmpfs, so a stray bind
@@ -156,6 +161,15 @@ func Profile(rt Runtime, t Tenant) ([]string, error) {
 		"--bind", workspace, workspace,
 		"--bind", filepath.Dir(dshHome), filepath.Dir(dshHome),
 	)
+	// The account's ssh-workspace mounts, one explicit binding each. --bind-try tolerates a
+	// mount point that is not there (a record whose mount has not been re-made yet), and the
+	// containment check above already guarantees none of them leaves the workspace.
+	for _, mount := range t.SSHMounts {
+		if !within(workspace, mount) || mount == workspace {
+			return nil, fmt.Errorf("tenant %s ssh mount %s is not inside its workspace %s", t.Name, mount, workspace)
+		}
+		argv = append(argv, "--bind-try", mount, mount)
+	}
 
 	// Devices and a private process view. The network namespace is deliberately
 	// shared: the worker must reach aigw.

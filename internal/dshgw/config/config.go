@@ -141,6 +141,56 @@ type Feishu struct {
 	TicketSecret string `yaml:"ticket_secret" json:"ticket_secret"`
 }
 
+// SSHWorkspaces configures per-tenant SSH workspaces (M64): an account browses and creates
+// directories on a remote host with its own key, and the gateway mounts the chosen remote
+// directory inside that account's workspace so its dsh can register it as a workspace.
+//
+// The mount happens HERE, outside the tenant sandbox, because a tenant worker cannot mount
+// at all: its bubblewrap profile gives it a minimal /dev (no /dev/fuse) and, since the host's
+// root uid is unmapped inside its user namespace, no working setuid fusermount3 either, so
+// mount(2) is refused whatever capabilities the profile grants (measured; see
+// docs/design/m64-ssh-workspace.md §3). The tenant side keeps the ssh half — listing and
+// creating remote directories — because that is what its own key is for.
+//
+// Off by default: enabling it means this gateway will ssh to remote hosts with a key an
+// operator placed here, which is an explicit decision.
+type SSHWorkspaces struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// MountSubdir is the single path segment under each tenant workspace that holds mounts:
+	// <workspace>/<mount_subdir>/<host>/<remote path>. It must not be hidden (a hidden
+	// container would be invisible in the account's picker) and must not collide with a
+	// workspace seed.
+	MountSubdir string `yaml:"mount_subdir" json:"mount_subdir"`
+	// SSHBin and SSHFSBin default to PATH lookups.
+	SSHBin   string `yaml:"ssh_bin" json:"ssh_bin"`
+	SSHFSBin string `yaml:"sshfs_bin" json:"sshfs_bin"`
+	// IdentitySource is the private key copied into every account that has no key of its own.
+	// It must be a regular 0600 file.
+	IdentitySource string `yaml:"identity_source" json:"identity_source"`
+	// IdentityDir holds per-account keys (<dir>/<account>) and wins over IdentitySource.
+	//
+	// The key IS the boundary of what an account may reach: an account can read its own key,
+	// so one shared key makes every account able to reach everything that key can. Accounts
+	// are scoped differently only by holding different keys.
+	IdentityDir string `yaml:"identity_dir" json:"identity_dir"`
+	// SSHConfigSource is copied to <workspace>/.ssh/config for accounts that have none: the
+	// alias list both the tenant plugin (browsing) and the gateway (mounting) resolve with.
+	SSHConfigSource string `yaml:"ssh_config_source" json:"ssh_config_source"`
+	// Hosts is an optional allow-list for both halves. It is a guard rail, not a boundary:
+	// the key an account holds is what really decides where it may go.
+	Hosts []string `yaml:"hosts" json:"hosts"`
+	// ConnectTimeout bounds every ssh round-trip; PollInterval is how often the gateway
+	// services the tenant mailbox.
+	ConnectTimeout Duration `yaml:"connect_timeout" json:"connect_timeout"`
+	PollInterval   Duration `yaml:"poll_interval" json:"poll_interval"`
+	MaxEntries     int      `yaml:"max_entries" json:"max_entries"`
+	// SSHFSOptions are passed to sshfs -o. allow_other/allow_root are refused by the code:
+	// every tenant worker shares one uid, so a shared mount would be a cross-account read.
+	SSHFSOptions []string `yaml:"sshfs_options" json:"sshfs_options"`
+	// DisableAutoRemount keeps the gateway from re-mounting recorded mounts at startup.
+	DisableAutoRemount bool `yaml:"disable_auto_remount" json:"disable_auto_remount"`
+}
+
 // Config is deliberately independent of aigw's internal configuration types.
 type Config struct {
 	PublicHost      string   `yaml:"public_host" json:"public_host"`
@@ -219,19 +269,20 @@ type Config struct {
 	// application, the secret and the registered redirect URL, and after it has identified
 	// the person it hands over a short-lived signed ticket. Here we only verify that ticket
 	// — which is why enabling this needs no app id, no secret and no second callback URL.
-	Feishu        Feishu       `yaml:"feishu" json:"feishu"`
-	WorkerLimits  WorkerLimits `yaml:"worker_limits" json:"worker_limits"`
-	TLS           TLSConfig    `yaml:"tls" json:"tls"`
-	Deploy        DeployConfig `yaml:"deploy" json:"deploy"`
-	TenantRoot    string       `yaml:"tenant_root" json:"tenant_root"`
-	WorkspaceRoot string       `yaml:"workspace_root" json:"workspace_root"`
-	HandshakeDir  string       `yaml:"handshake_dir" json:"handshake_dir"`
-	StateDir      string       `yaml:"state_dir" json:"state_dir"`
-	RegistryPath  string       `yaml:"registry_path" json:"registry_path"`
-	KeyMapPath    string       `yaml:"key_map_path" json:"key_map_path"`
-	SessionPath   string       `yaml:"session_path" json:"session_path"`
-	AuditPath     string       `yaml:"audit_path" json:"audit_path"`
-	ActivityPath  string       `yaml:"activity_path" json:"activity_path"`
+	Feishu        Feishu        `yaml:"feishu" json:"feishu"`
+	WorkerLimits  WorkerLimits  `yaml:"worker_limits" json:"worker_limits"`
+	TLS           TLSConfig     `yaml:"tls" json:"tls"`
+	Deploy        DeployConfig  `yaml:"deploy" json:"deploy"`
+	SSHWorkspaces SSHWorkspaces `yaml:"ssh_workspaces" json:"ssh_workspaces"`
+	TenantRoot    string        `yaml:"tenant_root" json:"tenant_root"`
+	WorkspaceRoot string        `yaml:"workspace_root" json:"workspace_root"`
+	HandshakeDir  string        `yaml:"handshake_dir" json:"handshake_dir"`
+	StateDir      string        `yaml:"state_dir" json:"state_dir"`
+	RegistryPath  string        `yaml:"registry_path" json:"registry_path"`
+	KeyMapPath    string        `yaml:"key_map_path" json:"key_map_path"`
+	SessionPath   string        `yaml:"session_path" json:"session_path"`
+	AuditPath     string        `yaml:"audit_path" json:"audit_path"`
+	ActivityPath  string        `yaml:"activity_path" json:"activity_path"`
 
 	tenantMu    sync.RWMutex
 	tenantPorts map[string]int
@@ -263,6 +314,16 @@ func defaults() Config {
 		PluginBrowserFS:     "on",
 		WorkspaceSeed:       []string{"work"},
 		ReservedNames:       []string{"login", "dshgw"},
+		SSHWorkspaces: SSHWorkspaces{
+			MountSubdir:    "ssh",
+			ConnectTimeout: Duration(10 * time.Second),
+			PollInterval:   Duration(2 * time.Second),
+			MaxEntries:     1000,
+			// ServerAlive* keeps a dropped link from looking like a healthy mount; idmap=user
+			// maps the remote account onto this one, which is what the tenant expects to see
+			// for the files it creates.
+			SSHFSOptions: []string{"reconnect", "ServerAliveInterval=15", "ServerAliveCountMax=3", "idmap=user"},
+		},
 		Dsh: DshRuntime{
 			// Empty means "ask the environment": DSHGW_NODE / DSHGW_DSH_ROOT, the same
 			// rule aigw's supervised shape uses. The old defaults pointed at /opt/dsh,
@@ -448,6 +509,11 @@ func (c *Config) resolvePaths() error {
 		{"deploy.tenant_config_root", &c.Deploy.TenantConfigRoot},
 		{"deploy.config_path", &c.Deploy.ConfigPath},
 		{"deploy.bwrap_bin", &c.Deploy.BwrapBin},
+		{"ssh_workspaces.ssh_bin", &c.SSHWorkspaces.SSHBin},
+		{"ssh_workspaces.sshfs_bin", &c.SSHWorkspaces.SSHFSBin},
+		{"ssh_workspaces.identity_source", &c.SSHWorkspaces.IdentitySource},
+		{"ssh_workspaces.identity_dir", &c.SSHWorkspaces.IdentityDir},
+		{"ssh_workspaces.ssh_config_source", &c.SSHWorkspaces.SSHConfigSource},
 	}
 	for _, item := range targets {
 		if *item.target == "" || filepath.IsAbs(*item.target) {
@@ -591,6 +657,9 @@ func (c *Config) Validate() error {
 	if err := c.validateFeishu(); err != nil {
 		return err
 	}
+	if err := c.validateSSHWorkspaces(); err != nil {
+		return err
+	}
 	switch c.SettingsUI {
 	case "", "lan", "loopback":
 	default:
@@ -715,6 +784,91 @@ func (c *Config) validateFeishu() error {
 	// confusing runtime symptom into a startup failure.
 	if !strings.HasPrefix(strings.TrimSpace(c.Feishu.AigwLoginURL), "https://") && c.SecureSessionCookie() {
 		return errors.New("feishu is enabled on a plain-HTTP deployment but the session cookie would be Secure: set public_scheme: http (or session_cookie_secure: never)")
+	}
+	return nil
+}
+
+// sshMountSubdirRE is the one shape the mount container may take: a visible single segment.
+var sshMountSubdirRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// sshHostSpecRE mirrors the tenant-facing plugin's rule: an ssh alias or user@host, never
+// something that could be read as an option or a path.
+var sshHostSpecRE = regexp.MustCompile(`^[A-Za-z0-9._@][A-Za-z0-9._@:-]{0,254}$`)
+
+// validateSSHWorkspaces checks the SSH-workspace surface. The mount container is validated
+// even while the feature is off, so a configuration that would break the account's picker is
+// rejected when it is written rather than on the day the feature is switched on.
+func (c *Config) validateSSHWorkspaces() error {
+	ssh := &c.SSHWorkspaces
+	if !sshMountSubdirRE.MatchString(ssh.MountSubdir) {
+		return fmt.Errorf("ssh_workspaces.mount_subdir %q must be one visible path segment", ssh.MountSubdir)
+	}
+	for _, seed := range c.WorkspaceSeed {
+		if seed == ssh.MountSubdir {
+			return fmt.Errorf("ssh_workspaces.mount_subdir %q collides with a workspace_seed name", ssh.MountSubdir)
+		}
+	}
+	if !ssh.Enabled {
+		return nil
+	}
+	if ssh.ConnectTimeout.Duration() <= 0 {
+		return errors.New("ssh_workspaces.connect_timeout must be positive")
+	}
+	if ssh.PollInterval.Duration() <= 0 {
+		return errors.New("ssh_workspaces.poll_interval must be positive")
+	}
+	if ssh.MaxEntries < 1 || ssh.MaxEntries > 100000 {
+		return errors.New("ssh_workspaces.max_entries must be between 1 and 100000")
+	}
+	if strings.TrimSpace(ssh.IdentitySource) == "" && strings.TrimSpace(ssh.IdentityDir) == "" {
+		return errors.New("ssh_workspaces is enabled but names no identity: set identity_source, or identity_dir for one key per account")
+	}
+	if ssh.IdentitySource != "" {
+		info, err := os.Stat(ssh.IdentitySource)
+		if err != nil {
+			return fmt.Errorf("ssh_workspaces.identity_source: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("ssh_workspaces.identity_source must be a regular file")
+		}
+		if info.Mode().Perm()&^0o600 != 0 {
+			return fmt.Errorf("ssh_workspaces.identity_source mode %04o is broader than 0600", info.Mode().Perm())
+		}
+	}
+	if ssh.IdentityDir != "" {
+		info, err := os.Stat(ssh.IdentityDir)
+		if err != nil {
+			return fmt.Errorf("ssh_workspaces.identity_dir: %w", err)
+		}
+		if !info.IsDir() {
+			return errors.New("ssh_workspaces.identity_dir must be a directory holding one key per account")
+		}
+	}
+	if ssh.SSHConfigSource != "" {
+		info, err := os.Stat(ssh.SSHConfigSource)
+		if err != nil {
+			return fmt.Errorf("ssh_workspaces.ssh_config_source: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("ssh_workspaces.ssh_config_source must be a regular file")
+		}
+	}
+	for label, bin := range map[string]string{"ssh_bin": ssh.SSHBin, "sshfs_bin": ssh.SSHFSBin} {
+		if bin == "" {
+			continue
+		}
+		info, err := os.Stat(bin)
+		if err != nil {
+			return fmt.Errorf("ssh_workspaces.%s: %w", label, err)
+		}
+		if info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+			return fmt.Errorf("ssh_workspaces.%s %s is not executable", label, bin)
+		}
+	}
+	for _, host := range ssh.Hosts {
+		if !sshHostSpecRE.MatchString(strings.TrimSpace(host)) {
+			return fmt.Errorf("ssh_workspaces.hosts entry %q is not an ssh alias or user@host", host)
+		}
 	}
 	return nil
 }

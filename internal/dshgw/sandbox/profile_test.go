@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -308,4 +309,44 @@ func hasFlag(flags []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestProfileBindsEverySSHMountInsideTheWorkspace(t *testing.T) {
+	f := newProfileFixture(t)
+	mountpoint := filepath.Join(f.alice.Workspace, "ssh", "gpt001", "opt", "app")
+	if err := os.MkdirAll(mountpoint, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.alice.SSHMounts = []string{mountpoint}
+	argv, err := Profile(f.rt, f.alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mounts, _, _ := parseMounts(t, argv)
+	var found *mount
+	for i := range mounts {
+		if mounts[i].flag == "--bind-try" && mounts[i].dst == mountpoint {
+			found = &mounts[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("no --bind-try for the ssh mount in %v", argv)
+	}
+	if found.src != mountpoint {
+		t.Errorf("ssh mount bound %s -> %s, want the mount point on both sides", found.src, found.dst)
+	}
+	// --bind-try, not --bind: a record whose mount has not been re-made yet must not keep
+	// the whole worker from starting.
+	for _, m := range mounts {
+		if m.flag == "--bind" && m.dst == mountpoint {
+			t.Error("the ssh mount is bound with --bind, which fails when the mount is absent")
+		}
+	}
+
+	// A mount record that points outside the account's workspace is refused outright: the
+	// registry is data, not authority.
+	f.alice.SSHMounts = []string{filepath.Join(f.root, "srv", "bob", "ssh", "gpt001", "opt")}
+	if _, err := Profile(f.rt, f.alice); err == nil {
+		t.Fatal("a mount point outside the workspace was accepted")
+	}
 }

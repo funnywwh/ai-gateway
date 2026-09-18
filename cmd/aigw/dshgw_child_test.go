@@ -453,3 +453,66 @@ func TestBuildDshgwChildRejectsParentTraversal(t *testing.T) {
 		t.Fatal("a state dir climbing out of the deployment root was accepted")
 	}
 }
+
+// The ssh-workspace block is the child's own feature (it is the side that runs ssh), so the
+// supervised shape must carry it across and put its paths in the deployment's terms. A key
+// that is accepted by aigw but never reaches the child would look like a feature that does
+// nothing at all.
+func TestBuildDshgwChildCarriesSSHWorkspaces(t *testing.T) {
+	cfg, aigwBinary := childFixture(t)
+	root := t.TempDir()
+	key := filepath.Join(root, "id_rsa")
+	if err := os.WriteFile(key, []byte("PRIVATE KEY\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Dshgw.SSHWorkspaces = config.DshgwSSHWorkspaces{
+		Enabled:        true,
+		MountSubdir:    "ssh",
+		IdentitySource: "./keys/id_rsa",
+		Hosts:          []string{"gpt001"},
+		ConnectTimeout: "7s",
+		PollInterval:   "1s",
+		MaxEntries:     50,
+		SSHFSOptions:   []string{"reconnect"},
+	}
+	// A relative identity path is resolved against the deployment root here, so the child
+	// never has to guess which directory it meant.
+	working, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(working, "keys"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(filepath.Join(working, "keys"))
+	if err := os.WriteFile(filepath.Join(working, "keys", "id_rsa"), []byte("PRIVATE KEY\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	child, err := buildDshgwChild(cfg, aigwBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssh := child.config.SSHWorkspaces
+	if ssh == nil || !ssh.Enabled {
+		t.Fatal("the ssh workspace block did not reach the child")
+	}
+	if ssh.IdentitySource != filepath.Join(working, "keys", "id_rsa") {
+		t.Errorf("identity_source = %q, want the resolved deployment path", ssh.IdentitySource)
+	}
+	if ssh.ConnectTimeout != "7s" || ssh.PollInterval != "1s" {
+		t.Errorf("durations were rewritten: %q / %q", ssh.ConnectTimeout, ssh.PollInterval)
+	}
+	if ssh.MaxEntries != 50 || len(ssh.Hosts) != 1 || ssh.Hosts[0] != "gpt001" {
+		t.Errorf("ssh workspace values = %+v", ssh)
+	}
+
+	// Disabled means absent: a generated file should not carry a block nobody asked for.
+	cfg.Dshgw.SSHWorkspaces = config.DshgwSSHWorkspaces{}
+	child, err = buildDshgwChild(cfg, aigwBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.config.SSHWorkspaces != nil {
+		t.Errorf("a disabled ssh workspace block was generated: %+v", child.config.SSHWorkspaces)
+	}
+}

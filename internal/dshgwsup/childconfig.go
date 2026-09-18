@@ -64,6 +64,32 @@ type Deploy struct {
 // fields a rootless child must not inherit from dshgw's own defaults are listed:
 // every other path is derived by the child from state_dir, so there is one place
 // (this struct) where the two programs agree about the layout.
+// SSHWorkspaces mirrors the child's own ssh_workspaces block (M64).
+//
+// The supervised shape generates the child's configuration, so a feature the child supports
+// has to be carried across explicitly. The field set is deliberately identical to the
+// child's: one file may name these values, and the child remains the side that validates
+// them (it is the side that runs ssh).
+type SSHWorkspaces struct {
+	Enabled bool `yaml:"enabled"`
+	// MountSubdir is the single segment under each tenant workspace that holds mounts.
+	MountSubdir string `yaml:"mount_subdir,omitempty"`
+	SSHBin      string `yaml:"ssh_bin,omitempty"`
+	SSHFSBin    string `yaml:"sshfs_bin,omitempty"`
+	// IdentitySource is copied into every account that has no key of its own; IdentityDir
+	// holds per-account keys and wins over it.
+	IdentitySource  string   `yaml:"identity_source,omitempty"`
+	IdentityDir     string   `yaml:"identity_dir,omitempty"`
+	SSHConfigSource string   `yaml:"ssh_config_source,omitempty"`
+	Hosts           []string `yaml:"hosts,omitempty"`
+	// Durations are Go duration strings ("10s"); the child parses and bounds them.
+	ConnectTimeout     string   `yaml:"connect_timeout,omitempty"`
+	PollInterval       string   `yaml:"poll_interval,omitempty"`
+	MaxEntries         int      `yaml:"max_entries,omitempty"`
+	SSHFSOptions       []string `yaml:"sshfs_options,omitempty"`
+	DisableAutoRemount bool     `yaml:"disable_auto_remount,omitempty"`
+}
+
 type ChildConfig struct {
 	PublicHost   string `yaml:"public_host"`
 	PortalPort   int    `yaml:"portal_port"`
@@ -110,6 +136,9 @@ type ChildConfig struct {
 	TLS *TLSConfig `yaml:"tls,omitempty"`
 	// WorkerLimits are the per-worker cgroup v2 limits; all zero means unlimited.
 	WorkerLimits WorkerLimits `yaml:"worker_limits,omitempty"`
+	// SSHWorkspaces carries the account-facing ssh workspace feature (M64) into the child's
+	// generated configuration. Nil means the feature is off.
+	SSHWorkspaces *SSHWorkspaces `yaml:"ssh_workspaces,omitempty"`
 	// Feishu is the identity handoff the child needs to accept a Feishu sign-in (M61): where
 	// to send a person, and the key that proves the ticket aigw signs is genuine. It is
 	// omitted entirely while the feature is off, so a deployment that does not use Feishu

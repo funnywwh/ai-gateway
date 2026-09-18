@@ -34,6 +34,9 @@
     billing-fallback.jsonl       billing.fallback_file（结算兜底）
     hooks-dead.jsonl             hooks.dead_letter（hook 死信）
     dshgw/                       监督形态：aigw 生成的子进程配置与租户状态
+      state/ssh-mounts.json      SSH 工作区的挂载记录（M64，0600）
+      state/workspaces/<账号>/ssh/  SSH 工作区挂载点（0700，在该账号 workspace 之内）
+      state/workspaces/<账号>/.ssh/ 该账号的 ssh 身份（id_rsa 0600）与 known_hosts
     dshgw-verify/                本机独立 dshgw 的 state / template-home / 日志
     prev/                        历史归档（回滚二进制、下线形态的归档），非活动数据
 ```

@@ -27,15 +27,21 @@ func (m *Manager) sandboxRuntime() sandbox.Runtime {
 	}
 }
 
-// sandboxTenant is the registry subset a profile needs.
-func sandboxTenant(cfg *config.Config, t registry.Tenant) sandbox.Tenant {
-	return sandbox.Tenant{
+// sandboxTenant is the registry subset a profile needs, including the account's
+// ssh-workspace mounts: the profile binds each of them explicitly, because bubblewrap's
+// --bind does not carry submounts (M64).
+func (m *Manager) sandboxTenant(t registry.Tenant) sandbox.Tenant {
+	tenant := sandbox.Tenant{
 		Name:        t.Name,
 		Workspace:   t.Workspace,
 		DshHome:     t.DshHome,
 		WorkerPort:  t.WorkerPort,
-		Environment: workerArgs(cfg, t),
+		Environment: workerArgs(m.Config, t),
 	}
+	if m.SSHWorkspaces != nil {
+		tenant.SSHMounts = m.SSHWorkspaces.MountsFor(t.Name)
+	}
+	return tenant
 }
 
 // workerArgs is the dsh argv for one worker.
@@ -67,7 +73,7 @@ func (m *Manager) SandboxProfile(t registry.Tenant) ([]string, error) {
 	if t.EffectiveIsolation() != registry.IsolationBwrap {
 		return nil, fmt.Errorf("tenant %s is not in bwrap isolation", t.Name)
 	}
-	return sandbox.Profile(m.sandboxRuntime(), sandboxTenant(m.Config, t))
+	return sandbox.Profile(m.sandboxRuntime(), m.sandboxTenant(t))
 }
 
 // SandboxProfileReady validates everything a tenant needs before its worker

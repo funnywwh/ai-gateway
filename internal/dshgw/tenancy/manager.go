@@ -82,6 +82,31 @@ type Manager struct {
 	// Tests inject sandbox.ValidateBindings; production uses
 	// sandbox.ValidateRuntime, which also requires the host's linker layout.
 	RuntimeCheck func(sandbox.Runtime) error
+	// SSHWorkspaces is the slice of the ssh-workspace service (M64) the lifecycle needs:
+	// the mount points to bind into a worker, the per-account ssh identity to provision,
+	// and the mounts to detach when an account goes away. Nil disables the feature, which
+	// is what a deployment that does not configure it gets.
+	SSHWorkspaces SSHWorkspaceHook
+}
+
+// SSHWorkspaceHook is the ssh-workspace surface the tenancy lifecycle depends on. It is an
+// interface rather than the concrete service so this package stays independent of it (and
+// so the lifecycle tests can hand in a stub).
+type SSHWorkspaceHook interface {
+	// MountsFor lists the mount points to bind for one account.
+	MountsFor(tenant string) []string
+	// EnsureIdentity provisions the account's ssh key when it has none.
+	EnsureIdentity(tenant, workspace, dshHome string) error
+	// DropTenant detaches every mount the account owns.
+	DropTenant(ctx context.Context, tenant string) error
+}
+
+// ensureSSHIdentity provisions one account's ssh material when the feature is on.
+func (m *Manager) ensureSSHIdentity(t registry.Tenant) error {
+	if m.SSHWorkspaces == nil {
+		return nil
+	}
+	return m.SSHWorkspaces.EnsureIdentity(t.Name, t.Workspace, t.DshHome)
 }
 
 // workers returns the worker runner, creating it on first use. Tests inject their
@@ -247,6 +272,12 @@ func (m *Manager) createLocked(ctx context.Context, name, key string, models []s
 		return created, err
 	}
 	if err = copyProfileTemplate(m.Config.Deploy.TemplateHome, created.DshHome); err != nil {
+		return created, err
+	}
+	// The account's ssh identity, so an ssh workspace can be created the first time someone
+	// asks for one. A missing or too-broad key source is a configuration error and fails the
+	// create: a half-provisioned account is what produces "the button does nothing" later.
+	if err = m.ensureSSHIdentity(created); err != nil {
 		return created, err
 	}
 	for _, seed := range m.Config.WorkspaceSeed {
@@ -496,6 +527,9 @@ func (m *Manager) Status(_ context.Context, t registry.Tenant) (WorkerState, err
 // from settings.yaml: a tenant whose key gained or lost models in aigw must see
 // the change when dsh starts, not whenever somebody remembers to run sync-models.
 func (m *Manager) startWorker(ctx context.Context, t registry.Tenant) error {
+	if err := m.ensureSSHIdentity(t); err != nil {
+		return err
+	}
 	if err := m.refreshModelsBeforeStart(ctx, t); err != nil {
 		return err
 	}

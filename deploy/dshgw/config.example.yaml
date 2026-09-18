@@ -74,3 +74,37 @@ feishu:
   aigw_login_url: http://192.168.190.86:8090/feishu/login
   # 必须与 aigw 的 feishu.ticket_secret 相同（aigw 留空时会由 credentials_key 派生并注入本文件）。
   ticket_secret: ""
+
+# SSH 工作区（M64）：租户在自己的 dsh 里浏览/新建远端目录，网关把选中的远端目录挂进该租户的
+# 工作区，于是它可以直接作为一个工作区打开。
+#
+# 分工是刻意这样切的：
+#   * ssh 那一半（列目录、建目录、探测）在租户沙箱内由插件用**该租户自己的密钥**完成；
+#   * 挂载那一半必须由本进程在沙箱外完成 —— 租户沙箱里既没有 /dev/fuse，宿主 root 在它的
+#     user namespace 里也没有映射，所以 setuid 的 fusermount3 同样失效，mount(2) 一定被拒
+#     （实测见 docs/design/m64-ssh-workspace.md §3）。因此 profile 不必新增设备或 capability，
+#     隔离口径不变，只多出「为每个活动挂载点做一次 --bind-try」。
+#
+# 两侧靠该租户 DSH home 里的文件信箱通信（<dsh_home>/ssh-requests|ssh-replies）：
+# 各自只能写自己的目录，所以不需要新端口、也不需要令牌。
+#
+# 密钥就是边界：租户能读自己那份 id_rsa，所以「这个账号能 ssh 到哪些主机」由发给它的密钥
+# 决定。要按账号限权就用 identity_dir（一账号一把）；共用 identity_source 等于所有账号共享
+# 同一身份，hosts 白名单只是防跑偏，不是安全边界。
+#
+# 前置：宿主装 sshfs（sudo apt install -y sshfs），且本进程的运行账号能非交互 ssh 到目标主机。
+ssh_workspaces:
+  enabled: false                  # 打开后：消费信箱、执行挂载、给租户渲染插件行
+  mount_subdir: ssh               # 挂载点前缀：<workspace>/<mount_subdir>/<host>/<远端路径>
+  # ssh_bin: /usr/bin/ssh         # 留空 = 走 PATH
+  # sshfs_bin: /usr/bin/sshfs     # 留空 = 走 PATH（启用时找不到就拒绝启动）
+  # identity_source: /etc/dshgw/ssh/id_rsa        # 所有账号共用一把（0600）
+  # identity_dir: /etc/dshgw/ssh/keys             # 按账号：<dir>/<账号>，优先于 identity_source
+  # ssh_config_source: /etc/dshgw/ssh/config      # 账号没有 ~/.ssh/config 时拷入（别名清单）
+  hosts: []                       # 空 = 允许手输（仍受 host 正则约束）；非空 = 白名单
+  connect_timeout: 10s
+  poll_interval: 2s               # 信箱轮询间隔
+  max_entries: 1000               # 一次远端目录列出的上限
+  sshfs_options: [reconnect, ServerAliveInterval=15, ServerAliveCountMax=3, idmap=user]
+  # allow_other/allow_root 会被代码丢弃：所有租户 worker 共用一个 uid，共享挂载等于跨账号可读。
+  disable_auto_remount: false     # true = 启动时不按记录重挂（挂载是内核状态，不跨进程存活）

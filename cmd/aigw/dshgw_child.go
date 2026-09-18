@@ -132,6 +132,43 @@ func buildDshgwChild(cfg *config.Config, aigwExecutable string) (*dshgwChild, er
 			BackupDir:        filepath.Join(stateDir, "backups"),
 		},
 	}
+	// The child runs ssh, so its own configuration carries the feature; this side only has
+	// to place the paths in the deployment's terms. A relative key path is resolved here,
+	// where the deployment root is known, instead of inside a generated file.
+	if cfg.Dshgw.SSHWorkspaces.Enabled {
+		ssh := &dshgwsup.SSHWorkspaces{
+			Enabled:            true,
+			MountSubdir:        strings.TrimSpace(cfg.Dshgw.SSHWorkspaces.MountSubdir),
+			Hosts:              cfg.Dshgw.SSHWorkspaces.Hosts,
+			ConnectTimeout:     strings.TrimSpace(cfg.Dshgw.SSHWorkspaces.ConnectTimeout),
+			PollInterval:       strings.TrimSpace(cfg.Dshgw.SSHWorkspaces.PollInterval),
+			MaxEntries:         cfg.Dshgw.SSHWorkspaces.MaxEntries,
+			SSHFSOptions:       cfg.Dshgw.SSHWorkspaces.SSHFSOptions,
+			DisableAutoRemount: cfg.Dshgw.SSHWorkspaces.DisableAutoRemount,
+		}
+		for _, path := range []struct {
+			label  string
+			source string
+			target *string
+		}{
+			{"dshgw.ssh_workspaces.identity_source", cfg.Dshgw.SSHWorkspaces.IdentitySource, &ssh.IdentitySource},
+			{"dshgw.ssh_workspaces.identity_dir", cfg.Dshgw.SSHWorkspaces.IdentityDir, &ssh.IdentityDir},
+			{"dshgw.ssh_workspaces.ssh_config_source", cfg.Dshgw.SSHWorkspaces.SSHConfigSource, &ssh.SSHConfigSource},
+			{"dshgw.ssh_workspaces.ssh_bin", cfg.Dshgw.SSHWorkspaces.SSHBin, &ssh.SSHBin},
+			{"dshgw.ssh_workspaces.sshfs_bin", cfg.Dshgw.SSHWorkspaces.SSHFSBin, &ssh.SSHFSBin},
+		} {
+			trimmed := strings.TrimSpace(path.source)
+			if trimmed == "" {
+				continue
+			}
+			resolved, resolveErr := resolveChildPath(path.label, trimmed)
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
+			*path.target = resolved
+		}
+		child.SSHWorkspaces = ssh
+	}
 	if cert, key := strings.TrimSpace(cfg.Dshgw.TLSCertificate), strings.TrimSpace(cfg.Dshgw.TLSCertificateKey); cert != "" || key != "" {
 		if cert == "" || key == "" {
 			return nil, errors.New("dshgw.tls_certificate and dshgw.tls_certificate_key must be set together")
