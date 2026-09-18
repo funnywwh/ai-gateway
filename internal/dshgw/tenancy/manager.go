@@ -101,6 +101,16 @@ type SSHWorkspaceHook interface {
 	DropTenant(ctx context.Context, tenant string) error
 }
 
+// log returns the manager's logger, falling back to the default one. Manager is constructed by
+// several entry points — serve, each CLI command, tests — and not all of them set Logger, so
+// logging must never be the reason a lifecycle step panics.
+func (m *Manager) log() *slog.Logger {
+	if m.Logger != nil {
+		return m.Logger
+	}
+	return slog.Default()
+}
+
 // ensureSSHIdentity provisions one account's ssh material when the feature is on.
 func (m *Manager) ensureSSHIdentity(t registry.Tenant) error {
 	if m.SSHWorkspaces == nil {
@@ -529,6 +539,14 @@ func (m *Manager) Status(_ context.Context, t registry.Tenant) (WorkerState, err
 func (m *Manager) startWorker(ctx context.Context, t registry.Tenant) error {
 	if err := m.ensureSSHIdentity(t); err != nil {
 		return err
+	}
+	// The profile's ssh row follows the feature switch on every start, so enabling or
+	// disabling it reaches accounts that already exist (the artifacts are otherwise written
+	// only at create/rotate time).
+	if warning, err := EnsureSSHWorkspaceRow(m.Config, t); err != nil {
+		return err
+	} else if warning != "" {
+		m.log().Warn(warning)
 	}
 	if err := m.refreshModelsBeforeStart(ctx, t); err != nil {
 		return err

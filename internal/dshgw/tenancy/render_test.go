@@ -2,10 +2,13 @@ package tenancy
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
 	"gopkg.in/yaml.v3"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -154,5 +157,156 @@ func TestRenderPatchAddsTheSSHWorkspacePluginWhenEnabled(t *testing.T) {
 	// The picker keeps working exactly as before: the ssh row is an addition, not a swap.
 	if !strings.Contains(patch, "picker-clamp.js") {
 		t.Errorf("the picker row disappeared:\n%s", patch)
+	}
+}
+
+// Enabling the feature must reach accounts that already exist: the artifacts are otherwise
+// written only at create/rotate time, so without this a switch that is on would show a UI on
+// new tenants and nothing on the ones people actually use. The refresh must touch the patch
+// only — rewriting the artifacts would discard the workspaces someone added in the UI.
+func TestEnsureSSHWorkspaceRowFollowsTheSwitch(t *testing.T) {
+	cfg, tenant := renderFixture(t)
+	arts, err := RenderTenantArtifacts(cfg, tenant, "sk-secret", []string{"m"}, TenantOptions{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteArtifacts(arts); err != nil {
+		t.Fatal(err)
+	}
+	patchPath := filepath.Join(tenant.DshHome, "profiles", "web", "cordis.patch.yml")
+	workspacePath := filepath.Join(tenant.DshHome, "storages", "workspace.json")
+	// A workspace added through the UI is what a careless re-render would destroy.
+	workspaceBefore, err := os.ReadFile(workspacePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(workspacePath, append(workspaceBefore, []byte("\n# ui-added\n")...), 0o600)
+	uiWorkspace, _ := os.ReadFile(workspacePath)
+
+	// Off: the rendered patch has no row, and a refresh is a no-op.
+	if _, err := EnsureSSHWorkspaceRow(cfg, tenant); err != nil {
+		t.Fatalf("refresh with the feature off: %v", err)
+	}
+	if data, _ := os.ReadFile(patchPath); strings.Contains(string(data), "ssh-workspace") {
+		t.Fatalf("a disabled feature added a row:\n%s", data)
+	}
+
+	// On: the row appears on a tenant that was provisioned before the switch existed.
+	cfg.SSHWorkspaces.Enabled = true
+	cfg.SSHWorkspaces.Hosts = []string{"gpt001"}
+	cfg.SSHWorkspaces.MountSubdir = "ssh"
+	if _, err := EnsureSSHWorkspaceRow(cfg, tenant); err != nil {
+		t.Fatalf("refresh with the feature on: %v", err)
+	}
+	patchAfter, err := os.ReadFile(patchPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ssh-workspace", "gpt001", "picker-clamp.js"} {
+		if !strings.Contains(string(patchAfter), want) {
+			t.Errorf("refreshed patch lacks %q:\n%s", want, patchAfter)
+		}
+	}
+	// Refreshing twice must not stack rows.
+	if _, err := EnsureSSHWorkspaceRow(cfg, tenant); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := os.ReadFile(patchPath)
+	if strings.Count(string(again), "ssh-workspace") != strings.Count(string(patchAfter), "ssh-workspace") {
+		t.Errorf("a second refresh stacked rows:\n%s", again)
+	}
+	// A changed configuration propagates.
+	cfg.SSHWorkspaces.Hosts = []string{"aipc"}
+	if _, err := EnsureSSHWorkspaceRow(cfg, tenant); err != nil {
+		t.Fatal(err)
+	}
+	changed, _ := os.ReadFile(patchPath)
+	if strings.Contains(string(changed), "gpt001") || !strings.Contains(string(changed), "aipc") {
+		t.Errorf("the refresh did not carry the new host list:\n%s", changed)
+	}
+	// And the workspaces someone added are untouched.
+	if after, _ := os.ReadFile(workspacePath); string(after) != string(uiWorkspace) {
+		t.Errorf("the refresh rewrote workspace.json:\n%s", after)
+	}
+
+	// Switching it off removes the row again.
+	cfg.SSHWorkspaces.Enabled = false
+	if _, err := EnsureSSHWorkspaceRow(cfg, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(patchPath); strings.Contains(string(data), "ssh-workspace") {
+		t.Errorf("the row survived the switch being turned off:\n%s", data)
+	}
+}
+
+// A tenant whose patch has no insert list (an older shape) is warned about — never blocked:
+// an optional feature must not stop an account from starting.
+func TestEnsureSSHWorkspaceRowReportsAnUnpatchableTenant(t *testing.T) {
+	cfg, tenant := renderFixture(t)
+	cfg.SSHWorkspaces.Enabled = true
+	patchPath := filepath.Join(tenant.DshHome, "profiles", "web", "cordis.patch.yml")
+	if err := os.MkdirAll(filepath.Dir(patchPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(patchPath, []byte("- id: directory-picker\n  disabled: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	warning, err := EnsureSSHWorkspaceRow(cfg, tenant)
+	if err != nil {
+		t.Fatalf("an unpatchable tenant produced an error instead of a warning: %v", err)
+	}
+	if warning == "" {
+		t.Fatal("an unpatchable tenant was accepted silently")
+	}
+	// The caller logs that warning through the manager's own logger, which is nil for several
+	// entry points; a nil logger must never turn a warning into a panic (it did: every worker
+	// start panicked on this host until the live acceptance caught it).
+	bare := &Manager{}
+	bare.log().Warn(warning)
+	// A tenant that was never provisioned is skipped instead: there is nothing to patch yet.
+	other := registry.Tenant{Name: "bob", DshHome: filepath.Join(t.TempDir(), "bob/.dsh")}
+	if warning, err := EnsureSSHWorkspaceRow(cfg, other); err != nil || warning != "" {
+		t.Fatalf("an unprovisioned tenant was not skipped: %q / %v", warning, err)
+	}
+}
+
+// A writer that died while holding the lock must not block an account forever: the lock file
+// records its owner precisely so a later start can tell the difference between "someone is
+// working" and "nobody is coming back". Found on the deployment host, where a crashed gateway
+// left a lock behind and the affected account could no longer start.
+func TestDSHFileLockReclaimsAStaleOwner(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "settings.yaml")
+	lockPath := target + ".lock"
+	// A pid that is certainly gone: start a process and let it exit.
+	dead := exec.Command("true")
+	if err := dead.Start(); err != nil {
+		t.Skipf("cannot start a helper process: %v", err)
+	}
+	pid := dead.Process.Pid
+	_ = dead.Wait()
+	if err := os.WriteFile(lockPath, []byte(fmt.Sprintf("%d\n", pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ran := false
+	if err := withDSHFileLock(target, func() error {
+		ran = true
+		return nil
+	}); err != nil {
+		t.Fatalf("a stale lock was not reclaimed: %v", err)
+	}
+	if !ran {
+		t.Fatal("the operation did not run")
+	}
+	if _, err := os.Stat(lockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the lock survived the operation: %v", err)
+	}
+	// A live owner is respected: this process holds its own lock, so a second attempt must
+	// wait rather than steal it.
+	if err := os.WriteFile(lockPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := withDSHFileLockTimeout(target, 200*time.Millisecond, func() error { return nil }); err == nil {
+		t.Fatal("a lock held by a live process was stolen")
 	}
 }

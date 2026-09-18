@@ -381,7 +381,7 @@ func (m *Manager) removeLocked(ctx context.Context, t registry.Tenant, purge boo
 	}
 	if purge {
 		paths := []string{filepath.Dir(t.DshHome), t.Workspace, filepath.Join(m.Config.Deploy.TenantConfigRoot, t.Name), filepath.Join(m.Config.HandshakeDir, t.Name+".url")}
-		if err = purgeTrees(m.Logger, t.Name, paths); err != nil {
+		if err = purgeTrees(m.log(), t.Name, paths); err != nil {
 			return snapshot, err
 		}
 	}

@@ -13,7 +13,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/winger/ai-gateway/internal/dshgw/config"
@@ -243,8 +245,14 @@ func rotateCredentialsLocked(path, key string) error {
 }
 
 func withDSHFileLock(filename string, operation func() error) error {
+	return withDSHFileLockTimeout(filename, 10*time.Second, operation)
+}
+
+// withDSHFileLockTimeout is withDSHFileLock with an explicit wait, so tests can exercise both
+// outcomes (reclaim a dead owner's lock, respect a live one's) without waiting ten seconds.
+func withDSHFileLockTimeout(filename string, timeout time.Duration, operation func() error) error {
 	lockPath := filename + ".lock"
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(timeout)
 	for {
 		lock, err := securefile.OpenRegular(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
@@ -256,11 +264,51 @@ func withDSHFileLock(filename string, operation func() error) error {
 		if !errors.Is(err, os.ErrExist) {
 			return err
 		}
+		// The lock records its owner for exactly this reason: a writer that died while holding
+		// it (a crash, a panic, a killed process) otherwise leaves a lock nobody will ever
+		// release, and every later start of that account fails with a timeout that says
+		// nothing about the cause. A pid that no longer exists means the lock is stale.
+		if lockOwnerGone(lockPath) {
+			_ = securefile.RemoveFile(lockPath)
+			continue
+		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for dsh writer lock %s", lockPath)
+			return fmt.Errorf("timed out waiting for dsh writer lock %s (held by pid %s)", lockPath, lockOwner(lockPath))
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+}
+
+// lockOwner reads the pid a lock file recorded, or "" when it cannot be read.
+func lockOwner(path string) string {
+	data, err := securefile.ReadLimitedRegular(path, 64)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// lockOwnerGone reports whether a lock file's recorded owner no longer exists.
+//
+// Conservative on purpose: an unreadable or just-created lock (the window between O_EXCL and
+// the pid write) is treated as held, so a race can only make this wait, never steal a lock
+// from a live writer.
+func lockOwnerGone(path string) bool {
+	raw := lockOwner(path)
+	if raw == "" {
+		return false
+	}
+	pid, err := strconv.Atoi(raw)
+	if err != nil || pid <= 1 {
+		return false
+	}
+	err = syscall.Kill(pid, 0)
+	return errors.Is(err, syscall.ESRCH)
+}
+
+// pluginFileURL is the file:// URL one loader row imports.
+func pluginFileURL(path string) string {
+	return (&url.URL{Scheme: "file", Path: path}).String()
 }
 
 func renderPatch(cfg *config.Config, t registry.Tenant, opt TenantOptions) ([]byte, error) {
@@ -280,28 +328,10 @@ func renderPatch(cfg *config.Config, t registry.Tenant, opt TenantOptions) ([]by
 		}},
 	}
 	if cfg.SSHWorkspaces.Enabled {
-		// The account-side half of M64: ssh browsing, remote mkdir, and the mount mailbox.
-		//
-		// One row covers both halves. The file URL is an ordinary loader entry whose package
-		// directory also carries the browser bundle (package.json's dsh.client plus
-		// exports["./client"]), which is how dsh's client-module scan discovers a web plugin
-		// — the same mechanism the shipped directory-picker surface uses.
-		sshPluginURL := (&url.URL{
-			Scheme: "file",
-			Path:   filepath.Join(filepath.Dir(cfg.Deploy.PluginPath), "ssh-workspace", "index.js"),
-		}).String()
-		rows[1]["insert"] = append(rows[1]["insert"].([]map[string]any), map[string]any{
-			"id":   "ssh-workspace",
-			"name": sshPluginURL,
-			"config": map[string]any{
-				// The account's HOME inside the sandbox is its workspace, so the plugin needs
-				// no paths: it mounts under $HOME/<mount_subdir>/… exactly like the gateway.
-				"mountSubdir":      cfg.SSHWorkspaces.MountSubdir,
-				"hosts":            cfg.SSHWorkspaces.Hosts,
-				"maxEntries":       cfg.SSHWorkspaces.MaxEntries,
-				"connectTimeoutMs": int(cfg.SSHWorkspaces.ConnectTimeout.Duration() / time.Millisecond),
-			},
-		})
+		// The account-side half of M64, rendered in the same shape a later refresh writes
+		// (EnsureSSHWorkspaceRow), so an enabled feature looks identical on a new tenant and on
+		// one that was provisioned earlier.
+		rows[1]["insert"] = append(rows[1]["insert"].([]map[string]any), sshWorkspaceRow(cfg))
 	}
 	if opt.PluginBrowserFS == "off" {
 		rows = append(rows, map[string]any{"id": "browser-fs", "name": "dsh-browser-fs", "disabled": true})
