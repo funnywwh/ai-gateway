@@ -153,6 +153,12 @@ type Config struct {
 	// deployment that turns every redirect into a request to a port nobody serves,
 	// which looks exactly like "the button does nothing".
 	PublicScheme string `yaml:"public_scheme" json:"public_scheme"`
+	// NoStoreAPIs forces "do not store" on every API response dshgw returns. It
+	// defaults to true: dsh's API answers carry no cache directives at all, so a
+	// shared cache in front (an nginx, a corporate proxy) or a browser is free to
+	// reuse them — and every one of those answers belongs to one authenticated
+	// tenant, which makes a reused answer a wrong answer.
+	NoStoreAPIs *bool `yaml:"no_store_apis" json:"no_store_apis"`
 	// SettingsUI decides whether a tenant's dsh settings/models panel is usable from
 	// a page the browser does not consider loopback.
 	//
@@ -598,6 +604,10 @@ func (c *Config) TenantOrigin(tenant string) string {
 	}
 	return c.OriginForPort(port)
 }
+
+// StoreAPIData reports whether API responses may be stored by a cache. False is the
+// default and means every API answer leaves with "no-store".
+func (c *Config) StoreAPIData() bool { return c.NoStoreAPIs != nil && !*c.NoStoreAPIs }
 
 // LANSettingsUI reports whether the tenant settings panel is enabled for pages the
 // browser does not treat as loopback.

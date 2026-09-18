@@ -74,6 +74,15 @@ type Config struct {
 	// EdgePortHeader is the header dshgw routes on (dshgw.edge_port_header).
 	// Empty means the project default.
 	EdgePortHeader string `yaml:"edge_port_header"`
+	// APIPaths are the request paths whose data must never be cached by this proxy or
+	// by anything it forwards to (browsers, corporate proxies, an nginx in front).
+	// Matched after the route prefix is stripped, so "/api/" covers a tenant's API and
+	// "/v1/" covers aigw's data plane. Empty means the built-in default set.
+	APIPaths []string `yaml:"api_paths"`
+	// NoStoreAPIs forces "do not store" on responses for those paths. It defaults to
+	// true: an API answer that a cache may reuse is a wrong answer waiting to be
+	// served, and every caller here is authenticated per request anyway.
+	NoStoreAPIs *bool `yaml:"no_store_apis"`
 	// RegistryPath is dshgw's registry.json, read to learn each tenant's public
 	// port. Reading the same file the gateway reads is what stops the proxy and
 	// the gateway from disagreeing about a tenant's identity.
@@ -157,6 +166,13 @@ func (c *Config) applyDefaults() {
 	if c.RegistryReload <= 0 {
 		c.RegistryReload = 2
 	}
+	if len(c.APIPaths) == 0 {
+		// The API surfaces of the services this proxy fronts, plus the status
+		// endpoints: aigw sends no cache headers for /version, /healthz or /readyz, and
+		// a response with no headers may still be cached heuristically by a shared
+		// cache — a stale health check is exactly the thing that hides an outage.
+		c.APIPaths = []string{"/api/", "/v1/", "/admin/api/", "/version", "/healthz", "/readyz"}
+	}
 	if c.UpstreamTimeout <= 0 {
 		c.UpstreamTimeout = 300
 	}
@@ -214,7 +230,33 @@ func (c *Config) Validate() error {
 	if !filepath.IsAbs(c.RegistryPath) {
 		return errors.New("registry_path must be an absolute path")
 	}
+	for _, prefix := range c.APIPaths {
+		if !strings.HasPrefix(prefix, "/") || prefix == "/" {
+			return fmt.Errorf("api_paths entries must be absolute paths and must not be \"/\" (got %q)", prefix)
+		}
+	}
 	return nil
+}
+
+// StoreAPIData reports whether responses for APIPaths may be stored by a cache.
+// False is the default and means every API answer leaves with "no-store".
+func (c *Config) StoreAPIData() bool { return c.NoStoreAPIs != nil && !*c.NoStoreAPIs }
+
+// IsAPIPath reports whether a request path (with any route prefix already stripped,
+// or the public path as a fallback) is one of the API surfaces whose data must not
+// be cached.
+func (c *Config) IsAPIPath(paths ...string) bool {
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		for _, prefix := range c.APIPaths {
+			if path == strings.TrimSuffix(prefix, "/") || strings.HasPrefix(path, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // RewriteHTML reports whether tenant HTML should be prefix-rewritten.

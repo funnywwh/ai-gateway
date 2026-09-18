@@ -822,3 +822,45 @@ func TestShellRequestDropsCompressionAndEncodedBodiesAreLeftAlone(t *testing.T) 
 		t.Fatalf("Content-Encoding was dropped from an untouched body: %q", encoded.Header.Get("Content-Encoding"))
 	}
 }
+
+// dsh sends no cache directives on its API answers, so a shared cache in front (or a
+// browser) may reuse an answer that belongs to one authenticated tenant. dshgw marks
+// those responses uncacheable and leaves the shell and its assets alone.
+func TestTenantAPIDataIsMarkedUncacheable(t *testing.T) {
+	p, tenant, _, up := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer up.Close()
+
+	authority := net.JoinHostPort("127.0.0.1", strconv.Itoa(tenant.WorkerPort))
+	token := issue(t, p, tenant.Name, &session.Upstream{Name: "dsh-auth-test", Value: "held", Authority: authority})
+	call := func(path string) *http.Response {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}"))
+		req.Host = net.JoinHostPort("dsh.test", strconv.Itoa(tenant.PublicPort))
+		req.Header.Set("Cookie", p.Config.SessionCookieName(tenant.Name)+"="+token)
+		req.Header.Set("Origin", "https://dsh.test:"+strconv.Itoa(tenant.PublicPort))
+		req.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		p.Dispatch().ServeHTTP(recorder, req)
+		return recorder.Result()
+	}
+
+	const want = "no-store, no-cache, must-revalidate, max-age=0"
+	for _, path := range []string{"/api/session/list", "/api"} {
+		response := call(path)
+		if got := response.Header.Get("Cache-Control"); got != want {
+			t.Errorf("%s Cache-Control = %q, want %q", path, got, want)
+		}
+		if response.Header.Get("Pragma") != "no-cache" || response.Header.Get("Expires") != "0" {
+			t.Errorf("%s is missing the legacy cache headers", path)
+		}
+	}
+
+	// A deployment that wants upstream caching back can say so.
+	off := false
+	p.Config.NoStoreAPIs = &off
+	if got := call("/api/session/list").Header.Get("Cache-Control"); got != "" {
+		t.Fatalf("no_store_apis=false still marked the response: %q", got)
+	}
+}

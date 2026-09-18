@@ -492,7 +492,28 @@ settings_ui: lan        # 默认：LAN 页面也能用设置/模型（provider �
 > 当时的对照实验只比较了页面 hostname，漏了 `transport.ownsHost` 这条出口。现已按 §11.2 修复，
 > 并在 LAN 页面上实测通过。
 
-## 12. 安全边界（必读）
+## 12. API 数据不缓存
+
+三条路径都**不缓存 API 请求的数据**，因为每个响应都属于某个已认证的租户，被复用就是错的：
+
+| 层 | 覆盖范围 | 做法 |
+|---|---|---|
+| `gwproxy`（入口） | `/api/`、`/v1/`、`/admin/api/`、`/version`、`/healthz`、`/readyz` | 响应加 `Cache-Control: no-store, no-cache, must-revalidate, max-age=0` + `Pragma: no-cache` + `Expires: 0`；请求上的 `If-None-Match`/`If-Modified-Since` **不转发**（防止用旧副本换 304）；自身的 `/healthz` 同样 no-store |
+| `dshgw`（网关） | 租户的 `/api` 与 `/api/…` | 同上。**必须在这一层做**：当前拓扑里 `/t/<租户>/` 是前门跳转，dsh 的 API 流量直接到该租户的端口，不经过 gwproxy；而 dsh 自身对这些响应**不给任何缓存指令** |
+| dshgw 门户 | `/`、`/login`、`/logout` | 本来就带 `Cache-Control: no-store` 与 CSP |
+
+静态资源（`/admin/ui/app.css` 等）**不受影响**，保留上游的 `Cache-Control: public, max-age=300` —— 对它们强加
+no-store 会让控制台每次打开都重新下载。
+
+写侧前置条件（`If-Match`/`If-Unmodified-Since`）**刻意保留**：它们表达的是乐观并发，不是缓存。
+
+配置：`gwproxy` 的 `api_paths` / `no_store_apis`，dshgw 的 `no_store_apis`（aigw 侧同名键透传给子进程）。
+默认全为"不缓存"；显式打开（`no_store_apis: false`）才会允许缓存复用 API 响应。
+
+**实测**（经真实流量）：`:8090/v1/models` → `no-store…`；`:8090/admin/ui/app.css` → `public, max-age=300`（未受影响）；
+租户 `POST /api/session/modelCatalog` → `no-store…`；`GET /`（shell）不加 no-store。
+
+## 13. 安全边界（必读）
 
 - **没有 UID 边界**：所有租户 worker 与 aigw 同 UID；隔离来自 bubblewrap mount namespace
   （空 tmpfs 根 + 逐路径绑定 + 只读运行时 + 0700 权限位）与宿主 AppArmor 对嵌套 namespace 的限制。

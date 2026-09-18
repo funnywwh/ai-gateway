@@ -514,7 +514,7 @@ func (p *Proxy) TenantHandler(t registry.Tenant) http.Handler {
 			return
 		}
 		p.setSessionCookie(w, t.Name, cookie.Value, false)
-		p.reverseProxy(t, cookie.Value).ServeHTTP(w, r)
+		p.reverseProxy(t, cookie.Value, r.URL.Path).ServeHTTP(w, r)
 	})
 }
 func uniqueCookie(r *http.Request, name string) (*http.Cookie, error) {
@@ -800,7 +800,8 @@ func (p *Proxy) ensureUpstream(ctx context.Context, token string, t registry.Ten
 	return record.Upstream, nil
 }
 
-func (p *Proxy) reverseProxy(t registry.Tenant, token string) http.Handler {
+func (p *Proxy) reverseProxy(t registry.Tenant, token, requestPath string) http.Handler {
+	noStore := !p.Config.StoreAPIData() && isAPIPath(requestPath)
 	authority := net.JoinHostPort("127.0.0.1", strconv.Itoa(t.WorkerPort))
 	target := &url.URL{Scheme: "http", Host: authority}
 	rp := &httputil.ReverseProxy{FlushInterval: -1, Transport: &retryTransport{p: p, tenant: t, token: token, base: p.baseTransport()}, Rewrite: func(pr *httputil.ProxyRequest) {
@@ -816,6 +817,9 @@ func (p *Proxy) reverseProxy(t registry.Tenant, token string) http.Handler {
 		stripRequestHeaders(pr.Out.Header)
 	}, ModifyResponse: func(resp *http.Response) error {
 		stripWorkerCookies(resp)
+		if noStore {
+			noStoreHeaders(resp.Header)
+		}
 		if err := p.injectSettingsBootstrap(resp); err != nil {
 			return err
 		}
@@ -936,6 +940,20 @@ func headTagEnd(page string) int {
 		return -1
 	}
 	return start + end + 1
+}
+
+// isAPIPath reports whether a tenant request path is one of dsh's API surfaces. The
+// shell and its assets are excluded on purpose: they are versioned, cacheable and
+// large, while every answer under /api belongs to one authenticated tenant.
+func isAPIPath(path string) bool {
+	return path == "/api" || strings.HasPrefix(path, "/api/")
+}
+
+// noStoreHeaders is the single definition of "uncacheable" this gateway uses.
+func noStoreHeaders(h http.Header) {
+	h.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	h.Set("Pragma", "no-cache")
+	h.Set("Expires", "0")
 }
 
 func stripRequestHeaders(h http.Header) {

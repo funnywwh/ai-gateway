@@ -33,6 +33,11 @@ portal_port: 18100                        # dshgw.PortalPort（Host 与 edge 头
 tenant_prefix: /t
 tenant_upstream: http://127.0.0.1:18099   # dshgw.Listen（按 edge 头分租户）
 registry_path: /home/winger/.local/share/dshgw/registry.json  # 读租户→公开端口映射
+# API 数据不缓存：这些路径的响应一律带上 no-store，并且不转发条件请求校验器，
+# 使浏览器/中间缓存无法用旧副本做 304。静态资源不受影响（保留上游的 Cache-Control）。
+# 默认集：/api/ /v1/ /admin/api/ /version /healthz /readyz
+api_paths: ["/api/", "/v1/", "/admin/api/", "/version", "/healthz", "/readyz"]
+# no_store_apis: true    # 默认即 true；设为 false 才会允许缓存复用 API 响应
 registry_reload: 2s
 upstream_timeout: 300s
 # dsh 没有 base-path 选项，因此反代对它的 HTML 做一处**很窄**的改写：

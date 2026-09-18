@@ -47,6 +47,9 @@ type Deploy struct {
 	TenantConfigRoot string `yaml:"tenant_config_root"`
 	ConfigPath       string `yaml:"config_path"`
 	BackupDir        string `yaml:"backup_dir"`
+	// NoStoreAPIs mirrors the child's own switch: false means API responses may be
+	// stored by a cache. Unset keeps the child's default (never store).
+	NoStoreAPIs *bool `yaml:"no_store_apis,omitempty"`
 	// PublicBaseURL switches the child to single-domain path mode: every public URL
 	// it generates is built from this base plus a path prefix. Empty keeps the
 	// port-based behaviour. It exists because subdomains are not always available.
@@ -68,6 +71,9 @@ type ChildConfig struct {
 	TenantPortHi int    `yaml:"tenant_port_hi"`
 	WorkerPortLo int    `yaml:"worker_port_lo"`
 	WorkerPortHi int    `yaml:"worker_port_hi"`
+	// NoStoreAPIs mirrors the child's own switch: false means API responses may be
+	// stored by a cache. Unset keeps the child's default (never store).
+	NoStoreAPIs *bool `yaml:"no_store_apis,omitempty"`
 	// PublicBaseURL switches the child to single-domain path mode: the public URLs
 	// it generates become "https://host/t/<tenant>/" and "https://host/dshgw/"
 	// instead of host:port origins, and session cookies are scoped to the tenant's

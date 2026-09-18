@@ -427,6 +427,10 @@ type Dshgw struct {
 	// PluginPath is the directory-picker plugin served to tenant sessions. Empty
 	// keeps the child's own default for the installation it ships with.
 	PluginPath string `yaml:"plugin_path"`
+	// NoStoreAPIs controls whether the child marks its API responses uncacheable.
+	// Unset keeps the child's default (never store), which is what a multi-tenant
+	// deployment wants; set it false only to let a cache reuse API answers.
+	NoStoreAPIs *bool `yaml:"no_store_apis"`
 	// PublicBaseURL puts the child in single-domain path mode: public URLs become
 	// "https://host/t/<tenant>/" and "https://host/dshgw/" instead of host:port
 	// origins. Use it when subdomains are not available.

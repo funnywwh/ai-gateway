@@ -53,7 +53,11 @@ func (p *Proxy) Handler() http.Handler {
 	aigwPrefix, portalPrefix, tenantPrefix := p.cfg.NormalizedPrefixes()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" {
+			// The proxy answers this itself, so it cannot inherit the no-store rule the
+			// proxied API paths get: a cached health check is exactly the answer that
+			// hides an outage from whatever is watching.
 			w.Header().Set("Content-Type", "application/json")
+			noStoreHeaders(w.Header())
 			fmt.Fprint(w, `{"status":"ok"}`)
 			return
 		}
@@ -96,6 +100,59 @@ func (p *Proxy) Handler() http.Handler {
 			http.NotFound(w, r)
 		}
 	})
+}
+
+// stripRoutePrefix removes the route prefix from a request path so the API-path test
+// can look at what the upstream will actually serve.
+func stripRoutePrefix(requestPath, prefix string) string {
+	if prefix == "" {
+		return requestPath
+	}
+	stripped := strings.TrimPrefix(requestPath, prefix)
+	if stripped != "" && !strings.HasPrefix(stripped, "/") {
+		stripped = "/" + stripped
+	}
+	return stripped
+}
+
+// cacheValidators are the conditional-request headers a cache uses to answer from
+// its own copy. They are dropped for API requests so a stale copy cannot be
+// revalidated into a 304 and served; the write-side preconditions (If-Match,
+// If-Unmodified-Since) are deliberately left alone, because those express optimistic
+// concurrency rather than caching.
+var cacheValidators = []string{"If-None-Match", "If-Modified-Since"}
+
+func stripCacheValidators(req *http.Request, noStore bool) {
+	if !noStore {
+		return
+	}
+	for _, header := range cacheValidators {
+		req.Header.Del(header)
+	}
+}
+
+// applyNoStore marks an API response as uncacheable.
+//
+// The proxy itself never stores a response, but it used to forward whatever caching
+// headers the upstream sent — which is enough for a browser, a corporate proxy or an
+// nginx in front to keep an authenticated API answer and hand it to the next
+// request. Every caller reaches these paths with its own credentials, so a reused
+// answer is a wrong answer: the response leaves with no-store (plus the two legacy
+// headers older caches still honour).
+func applyNoStore(resp *http.Response, noStore bool) {
+	if !noStore || resp.Header == nil {
+		return
+	}
+	noStoreHeaders(resp.Header)
+}
+
+// noStoreHeaders is the single definition of "uncacheable" this proxy uses, for
+// proxied API responses and for its own answers alike: no-store for caches that
+// follow the current rules, plus the two headers older caches still honour.
+func noStoreHeaders(h http.Header) {
+	h.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	h.Set("Pragma", "no-cache")
+	h.Set("Expires", "0")
 }
 
 // scheme is the scheme this proxy advertises in redirect targets.
@@ -144,8 +201,13 @@ func (p *Proxy) forwardAigw(w http.ResponseWriter, r *http.Request, prefix strin
 		http.Error(w, "misconfigured upstream", http.StatusBadGateway)
 		return
 	}
+	noStore := p.cfg.IsAPIPath(r.URL.Path, stripRoutePrefix(r.URL.Path, prefix))
 	proxy := &httputil.ReverseProxy{
 		FlushInterval: -1,
+		ModifyResponse: func(resp *http.Response) error {
+			applyNoStore(resp, noStore)
+			return nil
+		},
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
 			// Stripping a root prefix would eat the leading slash itself, and it is
@@ -165,6 +227,7 @@ func (p *Proxy) forwardAigw(w http.ResponseWriter, r *http.Request, prefix strin
 			} else {
 				pr.Out.Host = p.cfg.PublicHost
 			}
+			stripCacheValidators(pr.Out, noStore)
 			pr.SetXForwarded()
 		},
 		ErrorHandler: p.upstreamError("aigw"),
@@ -205,6 +268,9 @@ func (p *Proxy) forwardToDshgw(w http.ResponseWriter, r *http.Request, upstream,
 		return
 	}
 	authority := net.JoinHostPort(p.cfg.PublicHost, strconv.Itoa(port))
+	// Both spellings are checked: the public path (tenant traffic keeps its prefix)
+	// and the path the upstream will see (the prefix is stripped on the way in).
+	noStore := p.cfg.IsAPIPath(r.URL.Path, stripRoutePrefix(r.URL.Path, stripPrefix))
 	rewrite := func(pr *httputil.ProxyRequest) {
 		pr.SetURL(target)
 		if stripPrefix != "" {
@@ -215,6 +281,7 @@ func (p *Proxy) forwardToDshgw(w http.ResponseWriter, r *http.Request, upstream,
 		}
 		pr.Out.Host = authority
 		pr.Out.Header.Set(p.edgeHeader(), strconv.Itoa(port))
+		stripCacheValidators(pr.Out, noStore)
 		pr.SetXForwarded()
 	}
 	proxy := &httputil.ReverseProxy{
@@ -222,10 +289,12 @@ func (p *Proxy) forwardToDshgw(w http.ResponseWriter, r *http.Request, upstream,
 		Rewrite:       rewrite,
 		ErrorHandler:  p.upstreamError("dshgw"),
 	}
-	if htmlPrefix != "" && p.cfg.RewriteHTML() {
-		proxy.ModifyResponse = func(resp *http.Response) error {
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		applyNoStore(resp, noStore)
+		if htmlPrefix != "" && p.cfg.RewriteHTML() {
 			return rewriteShellPaths(resp, htmlPrefix)
 		}
+		return nil
 	}
 	proxy.ServeHTTP(w, r)
 }

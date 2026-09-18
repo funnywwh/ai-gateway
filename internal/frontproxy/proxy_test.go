@@ -375,3 +375,117 @@ func TestPortalAndTenantRedirectsToTheirOwnOrigins(t *testing.T) {
 		t.Fatalf("a redirect reached an upstream: portal=%d tenant=%d", len(portal.requests), len(tenant.requests))
 	}
 }
+
+// An API answer reached with a caller's own credentials must never be reusable: the
+// proxy marks those responses no-store, drops conditional-request validators so a
+// stale copy cannot be revalidated into a 304, and leaves static assets alone so the
+// console does not re-download itself on every view.
+func TestAPIDataIsNeverCacheable(t *testing.T) {
+	var aigw, portal, tenant upstreams
+	aigw.ctype, portal.ctype, tenant.ctype = "application/json", "text/html", "application/json"
+	aigw.body, portal.body, tenant.body = `{"v":1}`, "<html></html>", `{"api":true}`
+	proxy, cfg := fixture(t, &aigw, &portal, &tenant, map[string]int{"alice": 32601})
+	_ = cfg
+
+	send := func(path, header string) *http.Response {
+		request, err := http.NewRequest(http.MethodGet, path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Host = "chat.example:8443"
+		if header != "" {
+			request.Header.Set("If-None-Match", header)
+		}
+		recorder := httptest.NewRecorder()
+		proxy.Handler().ServeHTTP(recorder, request)
+		return recorder.Result()
+	}
+
+	// aigw data plane and management API: no-store, and the validator is not
+	// forwarded. The fixture mounts aigw under its configured prefix, and the API test
+	// looks through that prefix — which is exactly the case a root-mounted deployment
+	// exercises with the bare paths.
+	for _, path := range []string{"/aigw/v1/models", "/aigw/admin/api/v1/accounts", "/aigw/version", "/healthz"} {
+		response := send(path, `"stale"`)
+		if got := response.Header.Get("Cache-Control"); got != "no-store, no-cache, must-revalidate, max-age=0" {
+			t.Errorf("%s Cache-Control = %q", path, got)
+		}
+		if response.Header.Get("Pragma") != "no-cache" || response.Header.Get("Expires") != "0" {
+			t.Errorf("%s legacy cache headers missing: %v", path, response.Header)
+		}
+	}
+	for _, seen := range aigw.requests {
+		if seen.Header.Get("If-None-Match") != "" {
+			t.Errorf("aigw saw a cache validator: %q", seen.Header.Get("If-None-Match"))
+		}
+	}
+
+	// The tenant's API is behind a path prefix; the test must look through it.
+	response := send("/t/alice/api/session/list", `"stale"`)
+	if got := response.Header.Get("Cache-Control"); got != "no-store, no-cache, must-revalidate, max-age=0" {
+		t.Errorf("tenant api Cache-Control = %q", got)
+	}
+	if len(tenant.requests) != 1 || tenant.requests[0].Header.Get("If-None-Match") != "" {
+		t.Errorf("tenant upstream saw a cache validator")
+	}
+
+	// Static assets keep the upstream's own caching: forcing no-store on the console
+	// bundle would make every page load refetch it.
+	asset := send("/aigw/admin/ui/app.css", "")
+	if got := asset.Header.Get("Cache-Control"); got != "" {
+		t.Errorf("a static asset was marked %q", got)
+	}
+}
+
+// A deployment that wants upstream caching back can say so explicitly; the default
+// is the safe one.
+func TestAPIPathsAndNoStoreAreConfigurable(t *testing.T) {
+	var aigw, portal, tenant upstreams
+	aigw.ctype = "application/json"
+	proxy, cfg := fixture(t, &aigw, &portal, &tenant, map[string]int{})
+
+	if !cfg.IsAPIPath("/api/x", "/v1/y", "/admin/api/z", "/version", "/healthz", "/readyz") || !cfg.IsAPIPath("/api/") {
+		t.Fatal("the default API surfaces are not recognised")
+	}
+	if cfg.IsAPIPath("/admin/ui/", "/assets/app.css", "/") {
+		t.Fatal("static surfaces were treated as API paths")
+	}
+	if cfg.StoreAPIData() {
+		t.Fatal("the default must be no-store")
+	}
+	off := false
+	cfg.NoStoreAPIs = &off
+	cfg.APIPaths = []string{"/rpc/"}
+	if !cfg.StoreAPIData() {
+		t.Fatal("an explicit opt-in was ignored")
+	}
+	if cfg.IsAPIPath("/v1/models") || !cfg.IsAPIPath("/rpc/call") {
+		t.Fatal("api_paths was not honoured")
+	}
+	_ = proxy
+}
+
+func TestConfigRejectsUnusableAPIPaths(t *testing.T) {
+	base := func(mutate func(*Config)) error {
+		cfg := &Config{
+			Listen: "127.0.0.1:8443", PublicHost: "chat.example",
+			AigwUpstream: "http://127.0.0.1:8088", PortalUpstream: "http://127.0.0.1:18099",
+			TenantUpstream: "http://127.0.0.1:18099", PortalPort: 32600,
+			RegistryPath: "/tmp/registry.json",
+		}
+		mutate(cfg)
+		cfg.applyDefaults()
+		return cfg.Validate()
+	}
+	if err := base(func(*Config) {}); err != nil {
+		t.Fatalf("valid configuration rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*Config){
+		"relative path": func(c *Config) { c.APIPaths = []string{"api/"} },
+		"root path":     func(c *Config) { c.APIPaths = []string{"/"} },
+	} {
+		if err := base(mutate); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}

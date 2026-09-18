@@ -44,6 +44,7 @@ func buildDshgwChild(cfg *config.Config, aigwExecutable string) (*dshgwChild, er
 		PublicHost: cfg.Dshgw.PublicHost,
 		// Single-domain path mode: unset keeps the port-based origins. Trimmed here
 		// so "https://host/" and "https://host" mean the same deployment.
+		NoStoreAPIs:      cfg.Dshgw.NoStoreAPIs,
 		PublicBaseURL:    strings.TrimRight(strings.TrimSpace(cfg.Dshgw.PublicBaseURL), "/"),
 		TenantPathPrefix: strings.TrimSpace(cfg.Dshgw.TenantPathPrefix),
 		PortalPathPrefix: strings.TrimSpace(cfg.Dshgw.PortalPathPrefix),
