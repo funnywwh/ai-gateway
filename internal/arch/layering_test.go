@@ -92,6 +92,10 @@ var allowed = map[string][]string{
 	},
 	// M52: the console drives the dshgw provisioning channel through this socket client.
 	"internal/localdshgw": {"internal/domain"},
+	// M58: aigw supervises its dshgw child across the process boundary only. The
+	// package deliberately imports no aigw internals, so the coupling stays
+	// "one executable starts another" instead of "one program reaches into another".
+	"internal/dshgwsup": nil,
 }
 
 // forbiddenByRule names the checks that exist because a specific refactor made them true.

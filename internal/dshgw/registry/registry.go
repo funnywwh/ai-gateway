@@ -48,6 +48,11 @@ type Tenant struct {
 	// Empty means the historical per-tenant-OS-user mode, so registries written
 	// before the field existed keep loading unchanged.
 	Isolation string `json:"isolation,omitempty"`
+	// Suspended is the durable "the operator asked for this tenant to be down"
+	// state (M52 disable). It replaces systemd unit enablement, which was the
+	// only place the old shape could record that a tenant should not come back
+	// after a restart.
+	Suspended bool `json:"suspended,omitempty"`
 }
 
 // Isolation values recorded on a tenant. They mirror config.IsolationUser and
