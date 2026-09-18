@@ -3953,3 +3953,26 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
       `deploy/dshgw/README.md`（§2 路径规则、§8.1 下线、§8.2 搬移、§10 本机布局）、
       skill `release-version`（gpt001 的数据根规则）同步更新
 - [x] 未发版：`VERSION` 仍 1.3.0；默认值与配置语义有变化，如需对外声明版本按 skill 走 minor（记在 TODO）
+
+### v2.0.0 发布与部署记录（2026-09-18，本机）
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v2.0.0**（`VERSION` 1.3.0 → 2.0.0，tag `v2.0.0` 指向 `3b7628d`）；档位选 major 由用户确认，理由是 M63 改了 dshgw 独立形态的默认语义、且 `clamp` 目录选择器现在必须有 `plugin_path`——沿用默认值的部署要改配置 |
+| 本版内容 | v1.3.0 之后：M62（绑定飞书即自动启用 DSH）+ **M63（单一数据根，见上一节）** |
+| 构建 | `make build dshgw-build gwproxy-build` → `bin/aigw`、`bin/dshgw`、`bin/gwproxy` 均为 `2.0.0 (revision 3b7628d, built 2026-09-18T14:31:07Z)`；控制台资源 minified + gzip（37 文件 578420→339390 B，gzip 32 文件 337029→134182 B） |
+| 部署范围 | **本机**（用户指定"部署本机"）：`aigw-local`(8088)、`dshgw-verify`(18299 网关 / 18300 门户 / 18301+ 租户 / 18400+ worker)、`gwproxy-verify`(8090 前门) 三个用户单元全部重启到 2.0.0 |
+| 回滚点 | `data/prev/bin/{aigw,dshgw,gwproxy}.prev-running-1.3.0-m63-718fd30`（发布前从**运行进程** `/proc/<pid>/exe` 取，因为 `bin/` 已被 `make build` 覆盖）；索引与回滚命令见 `data/prev/README.md` |
+| 流程备注 | 工作树里有一份仍在写的 `docs/design/m64-ssh-workspace.md`（未跟踪），`release.sh` 的"干净树"前置因此拒绝执行；改为**手工执行同样步骤**：只把 `VERSION` 提交进 tag，该文档既不进这次提交也不被移动 |
+
+**验证**（全部实测）：
+
+- `GET /version` → `{"revision":"3b7628d","ui":"minified","ui_encoding":"gzip","version":"2.0.0"}`；`/healthz`、`/readyz`、`/admin/ui/` 均 200
+- 启动日志：`aigw starting version=2.0.0 revision=3b7628d … database=./data/aigw-local.db data_dir=/home/winger/work/ai_gateway/data`；重启后 `level=ERROR` **0 条**
+- `dshgw listening version=2.0.0 revision=3b7628d`，且 `admin channel listening socket=…/data/dshgw-verify/state/admin.sock`（M63 新增的派生默认生效）
+- 5 个租户 worker（含 4 个真实租户）`GET /api` 全部 **401**；门户 `:18300` 200；`gwproxy :8090` 的 `/version` 200、`/dshgw/` 302 到门户、`/t/dsh-colin/` 302 到该租户自己的 origin
+- `bin/dshgw --config ./dshgw.yaml doctor`：39 项 OK（仅测试租户 `verify1` 缺 key/settings 两项，属既有状态）
+- 控制台角标：角标数据源即 `/version`（上面已确认 2.0.0/3b7628d），其渲染逻辑由 `make ui-base` 的 node 断言覆盖；浏览器打开 `http://192.168.190.86:8088/admin/ui/` 或 `:8090/admin/ui/` 即可看到
+
+**未部署 gpt001**：本次按用户要求只部署本机。gpt001 的 `/opt/aigw/aigw` 仍是 2026-09-14 的 0.12.3，
+跨 0.12.3 → 2.0.0 需要一次带配置与数据迁移的独立部署（M51/M52/M57/M58 的形态变更），另立步骤。

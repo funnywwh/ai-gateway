@@ -605,6 +605,4 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
       真正"一个部署"；代价是 aigw 每次重启都会带走全部 DSH 会话，故未纳入本次范围
 - [ ] **可选（未做）**：`data/backups` 的保留期策略（当前 12G，主库 5.8G）与 `data/aigw.db`
       （旧示例库）的去留，另立话题
-- [ ] **待定**：本次未发版（`VERSION` 仍 1.3.0，二进制 revision 与线上相同）。默认值与配置语义有变化
-      （dshgw 默认路径、相对路径可解析、`clamp` 必须有 `plugin_path`），如需对外声明一个版本，
-      按 skill `release-version` 走 minor 并记录
+- [x] ~~待定：本次未发版~~ → 已于 2026-09-18 发 **v2.0.0** 并部署本机（major，用户确认；记录见 `docs/todo_done.md`）
