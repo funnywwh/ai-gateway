@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -674,5 +675,150 @@ func TestLoginAdoptsTheKeyAndSurvivesAdoptionFailure(t *testing.T) {
 	})
 	if response := login(); response.StatusCode != http.StatusFound {
 		t.Fatalf("a failed adoption blocked a valid login: %d", response.StatusCode)
+	}
+}
+
+// dsh's settings/models panel only loads when the client believes the transport owns
+// its host (`transport?.ownsHost`), which a browser never concludes for a LAN host.
+// dshgw fronts the tenant UI, so it declares it — the same patch the pre-existing
+// deployment applied in nginx. The declaration must reach the shell document and
+// nothing else.
+func TestSettingsBootstrapIsInjectedIntoTheShellOnly(t *testing.T) {
+	page := "<!doctype html><html><head><title>DeepSeek Harness</title></head><body><script type=\"module\" src=\"./assets/index.js\"></script></body></html>"
+	p, _, _, up := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, page)
+	}))
+	defer up.Close()
+	tenant, _ := p.Registry.Get("alice")
+	token := issue(t, p, tenant.Name, &session.Upstream{Name: "dsh-auth-test", Value: "held", Authority: net.JoinHostPort("127.0.0.1", itoa(tenant.WorkerPort))})
+
+	fetch := func(path string) string {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Host = net.JoinHostPort("dsh.test", itoa(tenant.PublicPort))
+		req.Header.Set("Cookie", p.Config.SessionCookieName(tenant.Name)+"="+token)
+		req.Header.Set("Origin", "https://dsh.test:"+itoa(tenant.PublicPort))
+		recorder := httptest.NewRecorder()
+		p.Dispatch().ServeHTTP(recorder, req)
+		return recorder.Body.String()
+	}
+	body := fetch("/")
+	if !strings.Contains(body, `__DSH_TRANSPORT__=Object.assign(globalThis.__DSH_TRANSPORT__||{},{ownsHost:true})`) {
+		t.Fatalf("the transport declaration is missing from the shell:\n%s", body)
+	}
+	// It has to run before the shell's own modules, which are deferred but would
+	// still read the transport at import time.
+	if strings.Index(body, "__DSH_TRANSPORT__") > strings.Index(body, `src="./assets/index.js"`) {
+		t.Fatalf("the declaration lands after the shell module:\n%s", body)
+	}
+	// Declaring it twice would be harmless but signals a double pass; the injector
+	// skips a document that already carries the name. (The declaration itself names
+	// the global twice, so the marker counted here is the payload.)
+	if got := strings.Count(body, "ownsHost:true"); got != 1 {
+		t.Fatalf("the declaration appears %d times: %s", got, body)
+	}
+
+	// Turning it off must leave dsh's own gating in place.
+	p.Config.SettingsUI = "loopback"
+	if body := fetch("/"); strings.Contains(body, "__DSH_TRANSPORT__") {
+		t.Fatalf("settings_ui=loopback still injected the declaration:\n%s", body)
+	}
+	p.Config.SettingsUI = "lan"
+}
+
+func TestSettingsBootstrapSkipsNonHTML(t *testing.T) {
+	p, _, _, up := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer up.Close()
+	tenant, _ := p.Registry.Get("alice")
+	token := issue(t, p, tenant.Name, &session.Upstream{Name: "dsh-auth-test", Value: "held", Authority: net.JoinHostPort("127.0.0.1", itoa(tenant.WorkerPort))})
+	req := httptest.NewRequest(http.MethodPost, "/api/session/list", strings.NewReader("{}"))
+	req.Host = net.JoinHostPort("dsh.test", itoa(tenant.PublicPort))
+	req.Header.Set("Cookie", p.Config.SessionCookieName(tenant.Name)+"="+token)
+	req.Header.Set("Origin", "https://dsh.test:"+itoa(tenant.PublicPort))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	p.Dispatch().ServeHTTP(recorder, req)
+	if body := recorder.Body.String(); strings.Contains(body, "__DSH_TRANSPORT__") || body != `{"ok":true}` {
+		t.Fatalf("a JSON response was rewritten: %s", body)
+	}
+}
+
+// The shell is rewritten, so it must reach dshgw uncompressed — splicing into a
+// gzipped body makes the browser fail with ERR_CONTENT_DECODING_FAILED — while
+// subresources keep their compression.
+func TestShellRequestDropsCompressionAndEncodedBodiesAreLeftAlone(t *testing.T) {
+	page := "<!doctype html><html><head><title>t</title></head><body></body></html>"
+	var sawAcceptEncoding string
+	p, _, _, up := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawAcceptEncoding = r.Header.Get("Accept-Encoding")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if r.URL.Path == "/encoded" {
+			w.Header().Set("Content-Encoding", "gzip")
+			_, _ = w.Write([]byte{0x1f, 0x8b, 0x08, 0x00}) // not valid gzip: must not be touched
+			return
+		}
+		_, _ = io.WriteString(w, page)
+	}))
+	defer up.Close()
+	tenant, _ := p.Registry.Get("alice")
+	token := issue(t, p, tenant.Name, &session.Upstream{Name: "dsh-auth-test", Value: "held", Authority: net.JoinHostPort("127.0.0.1", itoa(tenant.WorkerPort))})
+
+	send := func(path, accept, dest string) *http.Response {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Host = net.JoinHostPort("dsh.test", itoa(tenant.PublicPort))
+		req.Header.Set("Cookie", p.Config.SessionCookieName(tenant.Name)+"="+token)
+		req.Header.Set("Origin", "https://dsh.test:"+itoa(tenant.PublicPort))
+		req.Header.Set("Accept", accept)
+		req.Header.Set("Accept-Encoding", "gzip, br")
+		if dest != "" {
+			req.Header.Set("Sec-Fetch-Dest", dest)
+		}
+		recorder := httptest.NewRecorder()
+		p.Dispatch().ServeHTTP(recorder, req)
+		return recorder.Result()
+	}
+
+	response := send("/", "text/html,application/xhtml+xml", "document")
+	// The client advertised "gzip, br"; what must reach dsh is only the transport's
+	// own gzip (which Go decodes transparently). Forwarding "br" verbatim would hand
+	// this proxy a body it cannot decode, and splicing into it corrupts the document.
+	if sawAcceptEncoding != "gzip" {
+		t.Fatalf("shell upstream saw Accept-Encoding %q, want the transport's own gzip", sawAcceptEncoding)
+	}
+	body, _ := io.ReadAll(response.Body)
+	if !strings.Contains(string(body), "ownsHost:true") {
+		t.Fatalf("the shell was not rewritten: %s", body)
+	}
+	if response.Header.Get("ETag") != "" {
+		t.Fatal("a rewritten body kept the upstream ETag")
+	}
+
+	// A subresource keeps the client's own negotiation: only the document is rewritten.
+	send("/assets/index.js", "*/*", "script")
+	if sawAcceptEncoding != "gzip, br" {
+		t.Fatalf("subresource upstream saw Accept-Encoding %q, want it forwarded", sawAcceptEncoding)
+	}
+
+	// A body this proxy cannot decode must be passed through byte for byte. The
+	// transport already hides its own gzip, so the guard is exercised directly with
+	// an encoding Go never negotiates for us (brotli).
+	raw := []byte{0x1b, 0x02, 0x80, 0x00}
+	encoded := &http.Response{
+		Header:        http.Header{"Content-Type": []string{"text/html"}, "Content-Encoding": []string{"br"}},
+		Body:          io.NopCloser(bytes.NewReader(raw)),
+		ContentLength: int64(len(raw)),
+	}
+	if err := p.injectSettingsBootstrap(encoded); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := io.ReadAll(encoded.Body)
+	if !bytes.Equal(after, raw) {
+		t.Fatalf("an undecodable body was modified: %v", after)
+	}
+	if encoded.Header.Get("Content-Encoding") != "br" {
+		t.Fatalf("Content-Encoding was dropped from an untouched body: %q", encoded.Header.Get("Content-Encoding"))
 	}
 }

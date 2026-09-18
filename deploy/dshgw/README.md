@@ -431,7 +431,68 @@ rm -f ~/.config/systemd/user/{gwproxy,dshgw}-verify.service
 # 状态目录按需保留：~/.local/share/dshgw-verify
 ```
 
-## 11. 安全边界（必读）
+## 11. LAN 用户的"设置/模型"面板（`settings_ui`）
+
+### 11.1 为什么默认会失败
+
+dsh 把设置/模型面板挂在**客户端**判定上：
+
+```js
+// @deepseek-ai/dsh-client-ui-settings/lib/client.js
+const persistence = ctx.remote.$host.isLoopback ? "host" : "memory";
+// persistence === "memory" 时镜像的 load()/ensure() 直接返回，view 永远 undefined
+// → 面板报 "settings are unavailable in this browser"
+
+// @deepseek-ai/dsh-client-connection/lib/client.js
+isLoopback: transport?.ownsHost === true || pageLocation === void 0
+            || isLoopbackHostname(pageLocation.hostname)   // localhost / ::1 / 127.0.0.0/8
+```
+
+`pageLocation` 就是浏览器地址栏，所以页面只要不是 loopback 主机名（`192.168.190.86`、`chat.tirisen.hk`
+都算），面板就报错。实测 `--trusted-host` 只作用于**服务端** `/api` 的防 DNS-rebinding 栅栏，
+加上它面板依旧失败；`--host`/`--port` 无关。
+
+### 11.2 dshgw 的开关
+
+`transport?.ownsHost === true` 这条出口正是为"我代理着一个 dsh、并声明它的 host 由我负责"准备的。
+dshgw 就扮演这个角色，因此它在租户 shell 文档里注入一行：
+
+```html
+<script>globalThis.__DSH_TRANSPORT__=Object.assign(globalThis.__DSH_TRANSPORT__||{},{ownsHost:true});</script>
+```
+
+```yaml
+settings_ui: lan        # 默认：LAN 页面也能用设置/模型（provider 与 API key 管理）
+# settings_ui: loopback # 保留 dsh 原行为：只有 loopback 页面可用
+```
+
+实现细节（均有测试）：只改 `text/html`；脚本插在 `<head>` 之后、先于 shell 的模块执行；已带该声明的
+文档不再重复注入；**文档请求不索取压缩**（在 gzip 体上改写会让浏览器报 `ERR_CONTENT_DECODING_FAILED`），
+子资源保持压缩；无法解码的响应体原样放行、绝不改写；改写后清掉上游 `ETag`。
+
+### 11.3 安全权衡
+
+开启它等于**把 dsh 的"只有本机页面可改设置"换成 dshgw 自己的边界**。dshgw 在前面已经拦住了那两类
+混淆代理攻击：Host 必须等于 `public_host`（DNS rebinding 不成立），非安全方法的 `Origin` 必须是该租户
+自己的 origin（跨站请求不成立），且整条链路在租户会话与账号 DSH 开关之后。代价：**任何已登录该租户的人
+都能从 LAN 页面改这个租户自己的 provider 与凭据**（即他自己的 dsh 主目录）。要禁止这一点就设
+`settings_ui: loopback`。
+
+### 11.4 实测对照
+
+| 页面 | `settings_ui: lan` | `settings_ui: loopback` |
+|---|---|---|
+| `http://127.0.0.1:<port>/` | 正常 | 正常 |
+| `http://192.168.190.86:<port>/`（LAN） | **正常**："Models / Enter your API keys to use models from the following providers." | "Loading the provider directory failed: settings are unavailable in this browser" |
+
+本机既有部署 `https://chat.tirisen.hk/dsh/` 之所以能用，也是同一处声明 —— 它注入在自己的 nginx 层
+（那份 `/dsh/` 配置本账号无读权限）。
+
+> 更正历史记录：本项目早先一度把这条报错记为"dsh 自身限制、配置无法绕过"，那是**错的** ——
+> 当时的对照实验只比较了页面 hostname，漏了 `transport.ownsHost` 这条出口。现已按 §11.2 修复，
+> 并在 LAN 页面上实测通过。
+
+## 12. 安全边界（必读）
 
 - **没有 UID 边界**：所有租户 worker 与 aigw 同 UID；隔离来自 bubblewrap mount namespace
   （空 tmpfs 根 + 逐路径绑定 + 只读运行时 + 0700 权限位）与宿主 AppArmor 对嵌套 namespace 的限制。

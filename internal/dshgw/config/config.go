@@ -153,6 +153,21 @@ type Config struct {
 	// deployment that turns every redirect into a request to a port nobody serves,
 	// which looks exactly like "the button does nothing".
 	PublicScheme string `yaml:"public_scheme" json:"public_scheme"`
+	// SettingsUI decides whether a tenant's dsh settings/models panel is usable from
+	// a page the browser does not consider loopback.
+	//
+	// dsh gates that panel on `transport?.ownsHost === true || isLoopback(page)`:
+	// on any non-loopback page the settings scope stays "unavailable", the mirror
+	// never loads, and the panel reports "settings are unavailable in this browser".
+	// dshgw serves the tenant UI, so it can declare the transport it fronts — the
+	// same patch the pre-existing deployment applied in its nginx config.
+	//
+	// "lan" (default) makes the panel work on the public host; "loopback" keeps
+	// dsh's own behaviour. The confused-deputy cases the gate defends against
+	// (DNS rebinding, cross-site requests) are already handled in front of it:
+	// dshgw refuses any Host other than public_host and any unsafe request whose
+	// Origin is not the tenant's own.
+	SettingsUI string `yaml:"settings_ui" json:"settings_ui"`
 	// SessionCookieSecure controls the session cookie's Secure attribute:
 	// "auto" (default) sets it whenever the deployment is actually HTTPS, "always"
 	// and "never" override that.
@@ -197,6 +212,7 @@ func defaults() Config {
 		SessionTTL:          Duration(7 * 24 * time.Hour),
 		KeyRevalidate:       "off",
 		SessionCookieSecure: "auto",
+		SettingsUI:          "lan",
 		PublicScheme:        "auto",
 		DSHEnforce:          "login",
 		LoginRate:           RateLimit{Requests: 10, Window: Duration(time.Minute)},
@@ -396,20 +412,40 @@ func (c *Config) Validate() error {
 	if c.WorkerLimits.MemoryHighBytes > 0 && c.WorkerLimits.MemoryMaxBytes > 0 && c.WorkerLimits.MemoryHighBytes > c.WorkerLimits.MemoryMaxBytes {
 		return errors.New("worker_limits.memory_high_bytes must not exceed memory_max_bytes")
 	}
+	switch c.SettingsUI {
+	case "", "lan", "loopback":
+	default:
+		return fmt.Errorf("settings_ui must be lan or loopback (got %q)", c.SettingsUI)
+	}
 	switch c.PublicScheme {
 	case "", "auto", "http", "https":
 	default:
 		return fmt.Errorf("public_scheme must be auto, http or https (got %q)", c.PublicScheme)
+	}
+	switch c.SettingsUI {
+	case "", "lan", "loopback":
+	default:
+		return fmt.Errorf("settings_ui must be lan or loopback (got %q)", c.SettingsUI)
 	}
 	switch c.SessionCookieSecure {
 	case "", "auto", "always", "never":
 	default:
 		return fmt.Errorf("session_cookie_secure must be auto, always or never (got %q)", c.SessionCookieSecure)
 	}
+	switch c.SettingsUI {
+	case "", "lan", "loopback":
+	default:
+		return fmt.Errorf("settings_ui must be lan or loopback (got %q)", c.SettingsUI)
+	}
 	switch c.PublicScheme {
 	case "", "auto", "http", "https":
 	default:
 		return fmt.Errorf("public_scheme must be auto, http or https (got %q)", c.PublicScheme)
+	}
+	switch c.SettingsUI {
+	case "", "lan", "loopback":
+	default:
+		return fmt.Errorf("settings_ui must be lan or loopback (got %q)", c.SettingsUI)
 	}
 	if c.PublicBaseURL != "" {
 		parsed, err := url.Parse(c.PublicBaseURL)
@@ -562,6 +598,10 @@ func (c *Config) TenantOrigin(tenant string) string {
 	}
 	return c.OriginForPort(port)
 }
+
+// LANSettingsUI reports whether the tenant settings panel is enabled for pages the
+// browser does not treat as loopback.
+func (c *Config) LANSettingsUI() bool { return c.SettingsUI != "loopback" }
 
 // Scheme is the scheme browsers use to reach this deployment.
 func (c *Config) Scheme() string {

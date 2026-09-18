@@ -807,9 +807,18 @@ func (p *Proxy) reverseProxy(t registry.Tenant, token string) http.Handler {
 		pr.SetURL(target)
 		pr.Out.Host = authority
 		pr.Out.Header.Del(p.Config.EdgePortHeader)
+		// The shell document is rewritten below, so it must arrive uncompressed:
+		// rewriting a gzipped body corrupts it (the browser reports
+		// ERR_CONTENT_DECODING_FAILED). Assets keep their compression.
+		if p.Config.LANSettingsUI() && wantsHTMLDocument(pr.In) {
+			pr.Out.Header.Del("Accept-Encoding")
+		}
 		stripRequestHeaders(pr.Out.Header)
 	}, ModifyResponse: func(resp *http.Response) error {
 		stripWorkerCookies(resp)
+		if err := p.injectSettingsBootstrap(resp); err != nil {
+			return err
+		}
 		locations := resp.Header.Values("Location")
 		if len(locations) == 0 {
 			return nil
@@ -834,7 +843,10 @@ func (p *Proxy) reverseProxy(t registry.Tenant, token string) http.Handler {
 			if u.Scheme != "http" || u.Host != authority {
 				return errors.New("worker returned an external redirect")
 			}
-			u.Scheme = "https"
+			// The scheme follows the deployment, not an assumption: a plain-HTTP
+			// deployment that rewrote this to https sent browsers to a port nobody
+			// listens on.
+			u.Scheme = p.Config.Scheme()
 			u.Host = net.JoinHostPort(p.Config.PublicHost, strconv.Itoa(t.PublicPort))
 			resp.Header.Set("Location", u.String())
 		}
@@ -845,6 +857,87 @@ func (p *Proxy) reverseProxy(t registry.Tenant, token string) http.Handler {
 	}}
 	return rp
 }
+
+// settingsBootstrap declares the transport dshgw fronts as owning its host, which is
+// what makes dsh's settings/models panel usable on a non-loopback page. It merges into
+// any pre-existing value instead of replacing it.
+const settingsBootstrap = `<script>globalThis.__DSH_TRANSPORT__=Object.assign(globalThis.__DSH_TRANSPORT__||{},{ownsHost:true});</script>`
+
+// injectSettingsBootstrap adds that declaration to the tenant shell document.
+//
+// Only text/html is touched, the body is read with a bound, and the script goes
+// immediately after <head> so it runs before the shell's own (deferred) modules.
+func (p *Proxy) injectSettingsBootstrap(resp *http.Response) error {
+	if !p.Config.LANSettingsUI() {
+		return nil
+	}
+	if !strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
+		return nil
+	}
+	if encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
+		// A body we cannot decode must not be rewritten: splicing into compressed
+		// bytes produces a document the browser cannot decode at all.
+		p.log().Warn("shell arrived encoded; leaving the settings declaration out", "encoding", encoding)
+		return nil
+	}
+	const limit = 4 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	closeErr := resp.Body.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if int64(len(body)) > limit {
+		resp.Body = io.NopCloser(strings.NewReader(string(body)))
+		return nil
+	}
+	page := string(body)
+	if strings.Contains(page, "__DSH_TRANSPORT__") {
+		// Already declared (a patched build, or a second pass through this proxy).
+		resp.Body = io.NopCloser(strings.NewReader(page))
+		return nil
+	}
+	if index := headTagEnd(page); index >= 0 {
+		page = page[:index] + settingsBootstrap + page[index:]
+	} else {
+		page = settingsBootstrap + page
+	}
+	resp.Body = io.NopCloser(strings.NewReader(page))
+	resp.ContentLength = int64(len(page))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(page)))
+	// The body no longer matches the upstream's validator.
+	resp.Header.Del("ETag")
+	return nil
+}
+
+// wantsHTMLDocument reports whether a request is a browser navigation for the shell
+// (as opposed to a subresource or an API call).
+func wantsHTMLDocument(r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if dest := r.Header.Get("Sec-Fetch-Dest"); dest != "" && dest != "document" && dest != "iframe" {
+		return false
+	}
+	return strings.Contains(r.Header.Get("Accept"), "text/html")
+}
+
+// headTagEnd returns the offset just past the opening <head …> tag, or -1.
+func headTagEnd(page string) int {
+	lower := strings.ToLower(page)
+	start := strings.Index(lower, "<head")
+	if start < 0 {
+		return -1
+	}
+	end := strings.IndexByte(lower[start:], '>')
+	if end < 0 {
+		return -1
+	}
+	return start + end + 1
+}
+
 func stripRequestHeaders(h http.Header) {
 	h.Del("Cookie")
 	h.Del("Origin")
