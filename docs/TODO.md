@@ -475,23 +475,37 @@
       读数自动重新起算；读数最多滞后 5 秒）
 
 
+## M57 dshgw 严格租户隔离（bubblewrap 模式）
 
-## M57 dshgw 严格租户隔离（bubblewrap 模式，无每租户 OS 用户）
+**已由 M58 取代**：隔离机制（bwrap profile、空 tmpfs 根、逐路径绑定）保留并成为唯一模式；
+原来的"user / bwrap 双模式 + `tenant re-isolate` 迁移"随 root 特权面一起删除。
+本节原有待办（user 模式回归、两种模式互迁）不再适用，剩余工作见下面的 M58。
 
-设计：`docs/design/m57-dshgw-strict-isolation.md`（§3 实测事实、§5 doctor 前置条件、§7 差异与取舍）。
-代码、单测、真实 bwrap staging 验收与部署产物已在本仓库完成；下面只列**尚未在宿主执行**的验收项。
+## M58 aigw 监督的 rootless dshgw（同目录、启动时拉起）
 
-- [ ] **待宿主执行（user 模式回归）**：在目标机用现有 `isolation: user` 配置跑一遍
-      `doctor` + 双租户验收脚本，确认本次改动没有改变 UID/权限行为（这是"兼容方案仍可用"的证据）
-- [ ] **待宿主执行（bwrap 模式验收）**：把 `/etc/dshgw/config.yaml` 改为 `isolation: bwrap`
-      并重装 unit 后，按 `deploy/dshgw/README.md` §7.5 执行：`doctor` 全绿、
-      `sandbox-exec --print` 评审 profile、建一个临时租户确认 **不产生 `dsh-<t>` 账号**、
-      worker `MainPID` 的 UID 为共享账号、`/api` 401、门户可登录
-- [ ] **待宿主执行（不可见性人工确认）**：在该临时租户的 dsh 会话里执行
-      `ls /home /root /srv /var /etc`、`ls /etc/dshgw`、访问其它租户路径与 `registry.json`，
-      确认"不存在/为空"而不是"无权限"；再确认可在 workspace 内 `mkdir -p a/b/c` 并写入文件
-- [ ] **待人工确认（迁移与回滚）**：对一个真实租户执行 `tenant re-isolate --to bwrap`，
-      验证数据/Key/端口不变、worker 起来后门户仍可登录；再用 `--to user` 迁回，
-      确认 `dsh-<t>` 账号与属主恢复。**先在维护窗口内的测试租户上做**，不要拿生产租户试
-- [ ] **决策（未做）**：是否为"连 root 都不能读租户数据"的场景引入 per-tenant UID + bwrap 组合模式
-      （即保留 UID 边界同时收窄挂载视图）。当前模式按用户要求放弃 UID 边界，强度结论见设计 §2
+设计：`docs/design/m58-aigw-supervised-dshgw.md`；部署：`deploy/dshgw/README.md`。
+代码、单测、真实 bwrap staging 与本机端到端已完成，**尚未在宿主部署**。
+
+已完成（可复现）：
+
+- [x] aigw 生成子进程配置、按同目录规则拉起 dshgw、等 ready、随自身退出停掉它
+- [x] dshgw 以 bwrap 子进程管理租户 worker（无 systemd、无 per-tenant 账号、无 root）
+- [x] 租户生命周期经同 UID admin socket；`suspended` 取代 systemd enablement；启动时自动恢复未停用租户
+- [x] worker 启动前自动同步租户模型（401/403 拒启；aigw 不可达则告警后用现有清单启动）
+- [x] 删除旧形态：install.sh、6 个 systemd 单元、nginx 渲染、requireRoot、root admin 通道、
+      每租户 OS 用户、`tenant re-isolate`、`upgrade-dsh`、root 宿主验收脚本
+- [x] 本机无特权端到端：建户 → bwrap worker → `/api` 401 → stop/start → aigw 重启自愈 → 停止无残留
+
+未完成：
+
+- [ ] **宿主迁移**：把本机（或目标机）正在跑的旧 systemd 部署（`dshgw.service` + 5 个
+      `dsh-worker@*.service`）迁到新形态。需要：停旧单元 → 迁移 registry/状态到 `dshgw.state_dir`
+      → 把 5 个租户在 registry 里标为未停用 → 用新二进制 + 新配置启动 aigw。旧租户的
+      `dsh-*` 账号不会自动删除（确认无用后手工 `userdel`）
+- [ ] **公网 TLS 与防火墙**：新形态没有 nginx，租户门户由 dshgw 明文直接监听。需要单独设计
+      （证书终止放哪、是否仍用 nginx 反代、如何隐藏 worker 段端口）
+- [ ] **资源限额**：systemd 的 `MemoryMax`/`CPUQuota`/`TasksMax` 随旧形态消失，需要 cgroup v2 方案
+- [ ] **宿主验收脚本重写**：旧的 `dshgw_host_acceptance.py` 基于 UID/cgroup/systemd 断言，已删除；
+      新形态需要一套"无特权 + bwrap 子进程"的宿主验收（可以把本机 e2e 固化成脚本与 make 目标）
+- [ ] **文档收尾**：`docs/design/m51-dshgw.md`、`docs/design/m52-dsh-enable.md` 等历史设计文档
+      仍描述旧形态，需要在文首标注"已被 M58 取代"以免误导（不建议改写历史记录本身）

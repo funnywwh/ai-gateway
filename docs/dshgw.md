@@ -108,38 +108,29 @@ Host 防护）。真正的差异不在上游，而在入口 nginx 是否改写�
 
 ## 5. 管理员命令
 
-全局参数在命令前，子命令选项在位置参数前。完整 Key **只从 stdin 或绝对 mode-0600 文件读取**，不接受 `--key sk-...`：
+**形态（M58）**：aigw 是主程序，dshgw 是它拉起并监督的同目录子进程（同 UID、无 root、无 systemd、
+无共享服务账号）；每个租户 worker 是 dshgw 的 bwrap 子进程。因此：
+
+- **租户生命周期必须由运行中的 dshgw 执行**（单独跑一次 CLI 所启动的 worker 会随该进程退出而死），
+  日常入口是同 UID 的 admin socket —— 控制台「启用/停用 DSH」走的就是它；
+- CLI 保留用于离线只读检查与产物生成。
 
 ```bash
-dshgw --config /etc/dshgw/config.yaml tenant create --key-file /root/alice.key alice
-dshgw --config /etc/dshgw/config.yaml tenant list --json
-dshgw --config /etc/dshgw/config.yaml bind <12字节前缀> alice
-dshgw --config /etc/dshgw/config.yaml login-url                 # 门户 URL
-dshgw --config /etc/dshgw/config.yaml login-url <12字节前缀>
-dshgw --config /etc/dshgw/config.yaml tenant rotate-key --key-file /root/new.key alice
-dshgw --config /etc/dshgw/config.yaml tenant restart alice
-dshgw --config /etc/dshgw/config.yaml tenant re-isolate --to bwrap alice   # 切换隔离模式（§7）
-dshgw --config /etc/dshgw/config.yaml sync-models alice
-dshgw --config /etc/dshgw/config.yaml revalidate alice
-dshgw --config /etc/dshgw/config.yaml doctor
-dshgw --config /etc/dshgw/config.yaml sandbox-exec --print alice           # 只打印 bwrap profile，不执行
-dshgw --config /etc/dshgw/config.yaml contract --key-file /root/alice.key all
-dshgw --config /etc/dshgw/config.yaml render-nginx --reload
-dshgw --config /etc/dshgw/config.yaml backup
-dshgw --config /etc/dshgw/config.yaml tenant remove --purge --yes alice
-dshgw --config /etc/dshgw/config.yaml upgrade-dsh /opt/dsh/releases/<候选目录>
+# 只读检查与产物（不需要 root）
+dshgw --config <state>/config.yaml doctor                    # 部署不变量：私有权限、运行时、bwrap 前置条件
+dshgw --config <state>/config.yaml sandbox-exec --print alice # 打印该租户的 bwrap profile（不执行）
+dshgw --config <state>/config.yaml capture-url alice          # worker 上报的启动 URL
+dshgw --config <state>/config.yaml contract dsh               # 真实 dsh 契约检查
 ```
 
-- 建户、绑定、轮换、删除、备份、nginx 修改等运维命令需 root；`serve` 以专用低权用户 `dshgw` 运行。
-- 租户名显式给出，与 aigw 控制台中的 Key 名无自动派生关系；`dsh-alice` 只是便于识别的命名建议。
-- 空模型清单默认拒绝建户。`--allow-empty-models` 会标记 `models_pending`，不写 DSH 不接受的 `models: []` provider。授权模型后运行 `sync-models`。
-- Key 轮换同时更新 credentials refs、模型 settings、gateway.key 与 registry；保留 `records` 和其它 provider 配置。旧 prefix 默认删除，`--keep-old-prefix` 可无限期保留。
-- 已存在的保留目录或符号链接不能被建户流程覆盖。删除不加 `--purge` 时保留数据；后续不能用同名 `create` 当作“恢复”，应按备份恢复流程处理。
-- 删除前停 worker、生成快照；`--purge` 另需 `--yes`。恢复/清理失败会明确报错，不把部分回滚伪装成成功。
-- `migrate-nginx` 当前是 `render-nginx` 的兼容别名，不编辑 nginxWebUI 数据库。
-- `tenant re-isolate --to user|bwrap` 会停一次该租户的 worker 并 `chown -R` 到目标模式账号，失败自动回滚（§7）。
-- `sandbox-exec` 是 bwrap 模式 worker unit 的 `ExecStart` 启动器，只接受租户名；所有路径来自 root 所有的配置与 registry，租户可写内容不参与决策，启动失败退出码 127。
-- `doctor` 检查路径/模式/属主、运行文件与单元、模板及 nginx 配置；bwrap 模式下另加 bwrap 前置条件与逐租户 profile/权限复核。它不声称可以从 loopback 证明外部防火墙可达，也不代替 `revalidate`、模型调用或资源压测。
+`tenant create/start/stop/rotate-key/remove` 等写操作经 admin socket（JSON 行协议，示例见
+[部署手册](../deploy/dshgw/README.md) §4）。几点约定：
+
+- **worker 启动前自动同步该租户的模型清单**：401/403（Key 失效或账号被禁）拒绝启动，
+  aigw 暂时不可达则告警后用现有清单启动，保证可用性。
+- `tenant-stop` 把"停机"写进 registry（`suspended`），aigw 重启后不会自动拉起；`tenant-start` 清除它。
+- 未停用的租户在 aigw 启动时自动回来；失败逐个上报，不影响其它租户与 aigw 本身。
+- 建户/删除仍会在发布 registry 前做 preflight（模板可用、profile 可构造、目录私有），失败即回滚。
 
 ## 6. 模型与运行配置
 
@@ -151,55 +142,41 @@ dshgw --config /etc/dshgw/config.yaml upgrade-dsh /opt/dsh/releases/<候选目�
 
 ## 7. 隔离、工作区与 browser-fs
 
-`deploy.isolation` 选择两种隔离模式（完整命令与宿主验收见[部署手册 §7](../deploy/dshgw/README.md)，
-设计与实测事实见 `docs/design/m57-dshgw-strict-isolation.md`）：
-
-| 模式 | 边界 | worker 身份 | 每租户 OS 用户 |
-|---|---|---|---|
-| `user`（默认，兼容旧行为） | 每租户独立用户 + 文件权限，跨租户读写由内核拒绝 | `dsh-<t>` | 是 |
-| `bwrap` | 每租户 bubblewrap mount namespace（空 tmpfs 根 + 逐路径绑定） | 共享账号 `worker_user`（默认 = `gateway_user`） | **否** |
-
-`user` 模式各层面：
+形态是**单一模式**：所有租户 worker 与 aigw 同 UID，隔离来自 bubblewrap mount namespace。
 
 | 层面 | 边界 |
 |---|---|
-| UID/文件权限 | 每租户独立用户，`/srv/dsh/<t>` 与租户状态私有；跨租户读写由 OS 拒绝 |
-| systemd | `ProtectHome=tmpfs` 隐藏 `/home`、`/root` 等，`PrivateTmp=yes` 隔离临时目录；运行包必须在 `/opt` 而不是 symlink 回 `/home` |
-| 资源 | 单 worker `MemoryHigh=1536M`、`MemoryMax=2G`、`CPUQuota=200%`、`TasksMax=512`；汇总 slice `MemoryMax=40G` |
-| DirectoryPicker | `clamp` 默认将浏览与新建夹在租户根，realpath 拒绝 symlink 逃逸；`browse` 仅调试，不提供 `off` |
-| 网络 | 共享宿主网络 namespace；不宣称 per-tenant 网络隔离，另加防火墙策略必须兼顾必要的 loopback 通信 |
+| 文件系统视图 | 空 tmpfs 根 + 逐路径绑定：租户只能看到自己的 workspace/`.dsh`、只读运行时（`/usr`、`/bin`、node、dsh release）、目录选择器插件，以及少量 `/etc` 白名单文件 |
+| 宿主树 | `/home`、`/root`、`/tmp`、`/var`、`/srv`、`/etc/dshgw` 为空；其他租户目录**不存在** |
+| 敏感配置 | per-tenant 的 `gateway.key`/`tenant-config` **不挂载**；registry/sessions 不可见 |
+| 可写性 | 仅 workspace 与 `.dsh` 父目录（可建子目录）；`/usr`、`/etc/passwd` 只读 |
+| namespace | `--unshare-pid --die-with-parent`；共享网络；宿主 `apparmor_restrict_unprivileged_userns=1` 时租户不能嵌套 namespace |
+| 纵深防御 | 租户叶 `0700`（`doctor` 逐租户复核）+ dsh 内层 sandbox（本宿主 AppArmor 拒绝嵌套 bwrap，dsh 回退 Landlock） |
 
-`bwrap` 模式各层面（**没有 UID 边界**，是刻意的取舍）：
+**诚实结论**：没有 UID 边界 —— 租户数据属主就是运行 aigw 的账号，任何以该账号运行的进程都能读全部租户的
+凭据；宿主账号的爆炸半径就是边界失守时的地板。需要"连运行时账号都读不到"的场景应改为分账号/分主机部署。
+完整口径见[部署手册 §7](../deploy/dshgw/README.md)与设计文档 `docs/design/m58-aigw-supervised-dshgw.md`。
 
-| 层面 | 边界 |
-|---|---|
-| 文件系统视图 | 租户只能看到自己的 workspace/`.dsh`、只读运行时（`/usr`、`/bin` 等）与少量 `/etc` 白名单文件；bubblewrap 的根是空 tmpfs，没被挂载的东西不存在 |
-| 宿主树 | `/home`、`/root`、`/tmp`、`/var`、`/srv`、`/etc/dshgw` 为空；其他租户目录**不存在**（不是"无权限"） |
-| 敏感配置 | per-tenant 的 `gateway.key`/`tenant.env` **不挂载**，`registry.json`/`sessions.json` 等 gateway 状态不可见 |
-| 可写性 | 仅 workspace 与 `.dsh` 父目录可写（可建子目录）；`/usr`、`/etc/passwd` 等只读 |
-| namespace | `--unshare-pid --die-with-parent`；共享网络（worker 必须连 aigw）；宿主 `apparmor_restrict_unprivileged_userns=1` 时租户不能嵌套 namespace |
-| 纵深防御 | 父目录 `0711` / 租户叶 `0700`（`doctor` 逐租户复核）+ dsh 内层 sandbox（本宿主 AppArmor 拒绝嵌套 bwrap，dsh 回退 Landlock，实测仍拦截工作区外写入） |
+预注册工作区默认是 `<state_dir>/workspaces/<tenant>/work`。目录选择器浏览的是**服务器**的文件系统，
+不是浏览器本机；clamp 只是防误操作，真正边界是 mount namespace。
 
-**诚实结论**：`bwrap` 模式的隔离来自 namespace 视图而不是内核身份，root 与共享 worker 账号可以读租户数据；
-需要"连 root 都不能读"的部署应继续用 `user` 模式。已在运行的主机可以按租户迁移：
-`dshgw tenant re-isolate --to bwrap|user <t>`（会短暂停该租户的 worker，失败自动回滚）。
-
-预注册工作区默认是 `/srv/dsh/<tenant>/work`。目录选择器浏览的是**服务器**的文件系统，不是浏览器本机。clamp 只是防误操作：租户可改自己的 patch，agent 仍可读公开系统文件；真正边界始终是 UID/systemd。realpath 不能解决所有 Node TOCTOU 或 bind mount 情形。
-
-`dsh-browser-fs@0.2.0` 默认开启，模板在供应阶段固定版本与 integrity、复制完整依赖。它另外提供 `browser_fs_list/read/write`，只访问用户在浏览器明确授权的**本机**目录；不改变服务器工作区、agent cwd 或 bash 执行位置。
-
-完整模式需要 Chromium 系浏览器与安全上下文；标签页需保持打开，多设备时由持有授权句柄的浏览器执行。**已授权文件内容可能进入模型请求**，门户和部署方必须向使用者说明；可在建户时 `--browser-fs off`。
+`dsh-browser-fs@0.2.0` 由模板固定版本与 integrity；它只访问用户在浏览器明确授权的**本机**目录，
+不改变服务器工作区、agent cwd 或 bash 执行位置。**已授权文件内容可能进入模型请求**，必须向使用者说明；
+可按部署（或租户）`--browser-fs off` 关闭，此时模板无需 browser-fs。
 
 ## 8. 运维与验收
 
 ```bash
-make dshgw-test
-make dshgw-verify
-make dshgw-sandbox-test   # 真实 bubblewrap + 真实 dsh web 在沙箱内启动并返回 401
+make dshgw-test            # Go 测试（含 sandbox 单测与监督器测试）
+make dshgw-sandbox-test    # 真实 bwrap：宿主隐藏、workspace 可写、真实 dsh web 在沙箱内启动并 401
+make dshgw-verify          # 上述 + 构建 + vet + 真实 dsh 契约 + 模板准备
 ```
 
-独立目标不会拖入原有 aigw `verify`。自动化验收覆盖 Go/import gate、静态构建、真实 DSH 基础契约与 picker、同一 worker 的真实凭据热载（dummy Key/假服务）、临时 browser-fs 模板及 HTTP/WS、systemd unit 解析（含 bwrap unit），以及真实 bubblewrap 下的隔离与真实 dsh web 启动/401（`make dshgw-sandbox-test`，缺 bwrap 或运行时时明确跳过）。它们不能替代 root 主机的两租户 UID、systemd、TLS/防火墙和 10–30 worker 资源验收，也不能替代 bwrap 模式下按部署手册 §7.5 做的不可见性人工确认。精确记录见设计文档 §9；运维分阶段运行 `scripts/dshgw_host_acceptance.py`，只分享 public report，私有 state/CLI 日志不得分享。
+本机实测过的完整链路（无 root、无 systemd、无 per-tenant 账号）：aigw 启动 → 生成子进程配置 →
+拉起同目录 dshgw → 收到 ready → 经 admin socket 建租户 → worker 以 bwrap 子进程起来 →
+`GET /api` 返回 401；`tenant-stop`/`tenant-start` 生效（后者启动前会同步模型）；aigw 重启后
+未停用租户自动回来；停止 aigw 后子进程与 worker 零残留。
 
-备份含完整 Key/upstream cookie，固定 mode 0600，仍需受控存储或额外加密。升级只接受已供应到 releases_root 的候选目录，先备份和运行契约，通过后才切换 current 并恢复原先活跃的 workers；失败先恢复旧 symlink 再回滚 workers。停止中的租户不会被升级流程意外启动。
-
-详细的 owner/mode、恢复步骤、nginx include 管理和 root 验收要求见[部署手册](../deploy/dshgw/README.md)。root 与 dshgw 账户可冒充租户；每个 tenant agent 可读取自己的 API Key。以上均是已知信任边界，而不是隐藏的安全保证。
+这些自动化仍**不能**替代：公网 TLS/防火墙（当前形态没有 nginx，租户门户由 dshgw 明文直接监听）、
+资源压测、真实浏览器授权动作。旧的 root 宿主验收脚本（基于 UID/cgroup/systemd 断言）已随旧形态删除，
+新的宿主验收需要按本形态重写（见 `docs/TODO.md`）。
