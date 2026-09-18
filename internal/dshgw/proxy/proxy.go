@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -461,6 +462,19 @@ func (p *Proxy) setSessionCookie(w http.ResponseWriter, tenant, token string, re
 	})
 }
 
+// sessionCookieNames lists the dshgw session cookies a request carried (names only: the
+// values are credentials and never belong in a log).
+func sessionCookieNames(r *http.Request) []string {
+	names := make([]string, 0, 4)
+	for _, cookie := range r.Cookies() {
+		if strings.HasPrefix(cookie.Name, "dshgw_s_") {
+			names = append(names, cookie.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 func (p *Proxy) TenantHandler(t registry.Tenant) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, err := validateTarget(r); err != nil {
@@ -477,11 +491,27 @@ func (p *Proxy) TenantHandler(t registry.Tenant) http.Handler {
 		}
 		cookie, err := uniqueCookie(r, p.Config.SessionCookieName(t.Name))
 		if err != nil {
+			// A login that "did nothing" looks exactly like this: the browser comes back to
+			// the tenant without the session cookie (a proxy, an extension, a cookie the
+			// browser dropped, or a cookie set for a different host). Naming the case is the
+			// difference between a guess and a diagnosis, so the presence of ANY tenant cookie
+			// is reported alongside the address it came from.
+			p.log().Warn("tenant request without a session cookie",
+				"tenant", t.Name, "source", requestIP(r), "path", r.URL.Path,
+				"cookies", sessionCookieNames(r), "cookie_error", err.Error())
 			p.unauthenticated(w, r)
 			return
 		}
 		record, err := p.Sessions.Get(cookie.Value)
 		if err != nil || record.Tenant != t.Name {
+			reason := "unknown or expired session"
+			if err == nil && record.Tenant != t.Name {
+				// A session for another tenant under this tenant's cookie name: either a
+				// hand-copied cookie or two tenants sharing one browser profile.
+				reason = "session belongs to another tenant"
+			}
+			p.log().Warn("tenant request with an unusable session",
+				"tenant", t.Name, "source", requestIP(r), "path", r.URL.Path, "reason", reason)
 			p.unauthenticated(w, r)
 			return
 		}
