@@ -3616,3 +3616,26 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - [x] 旧 root/systemd 部署未受影响：`dshgw.service` active、5 个 `dsh-worker@*` active
 - [x] **端到端（真浏览器 + CDP，桩 aigw 提供 1 个模型）**：把一个租户退回到"从未 provisioning"状态（删 settings.yaml/gateway.key/profiles）→ 从门户用该租户此前没有的 Key 登录 → 自动补齐产物 → worker 重启 → 界面渲染 `DeepSeek Harness`、workspace `work`、**模型 `verify-model`**，`/api/session/modelCatalog` 200，零失败/零异常/零控制台错误。验证后已把 `aigw_base_url` 切回真实 `:8088`、清除临时会话与桩进程
 - [x] `make verify`、`make dshgw-test`、`make dshgw-supervised-test`（24 步）均为 0
+
+## 发布记录 v1.1.1（2026-09-18，修：登录不再改写已有 Key 的租户）
+
+| 项 | 值 |
+|---|---|
+| 版本号 | `1.1.1`（`1.1.0` → `1.1.1`，**patch**：只修缺陷，无新能力、无配置变更） |
+| revision | `5e64378`（tag `v1.1.1`） |
+| 起因 | 用户反馈「加载提供方目录失败: settings are unavailable in this browser，设置/模型」仍然存在 |
+| 诊断（实测证据） | dshgw 日志显示该租户在 **12:20:01 已用用户真实 Key 成功配置出 6 个模型**（`deepseek-flash`/`deepseek-v4-flash`/`deepseek-v4-pro`/`deepseek-v4.1-flash`/`stealth/union-alpha`/`u2-flash`），且审计里**没有来自用户 IP 的 403**；12:18–12:20 期间 worker 被反复重启（起因是**我自己的桩 Key 测试**触发了采用+重启），其中 12:19:56 还留下 `ERROR dsh reverse proxy failed *net.OpError` —— 用户看到的是那段窗口里加载的页面，并非租户本身不可用 |
+| 根因（设计缺陷） | 任何**不同 Key 的登录**都会采用新 Key、重写 settings/credentials/gateway.key 并**重启 worker**。三条代价都比如今的便利更糟：正在使用租户的人请求会撞上重启（前端随即报 settings 不可用）；模型清单会被"登录者那把 Key 的授权"缩小；同账号两人登录互相覆盖 |
+| 修复 | 只给**完全没有 Key** 的租户采用登录 Key（即"手写/恢复/迁移租户"场景）；已有 Key 时保持不动并记一行日志（输出 Key 前缀，绝不记录 Key 本身）。换 Key 仍是运维动作：`tenant-set-key` 或控制台 |
+| 构建 | `scripts/release.sh patch`；另 `make dshgw-build gwproxy-build`（同版本 revision） |
+| 回滚点 | `bin/aigw.prev-1.1.0-d9ef80d`（升级前运行中二进制，`/proc/<pid>/exe` 原样抢救，自证 `1.1.0 (revision d9ef80d)`） |
+
+部署与验证（本机实测）：
+
+- [x] `:8088` → `{"version":"1.1.1","revision":"5e64378"}`；`/healthz` 200、`/readyz` 200；本次启动 `level=ERROR` **0 行**
+- [x] `dshgw listening version=1.1.1 revision=5e64378`；域名前门 `:8090`：`/`→302 `/admin/ui/`、`/admin/ui/` 200、`/dshgw/`→302、`/t/dsh-tenant/`→302
+- [x] 该租户的 `settings.yaml` **仍有 6 个模型**（修复不触碰已有配置）；worker `/api` 401（就绪）
+- [x] 模型面板依赖的两个 RPC **经网关均为 200**：`POST /api/settings/describe`、`POST /api/credentials/describe`（带正确 `Origin: http://192.168.190.86:18302`）
+- [x] 真浏览器（CDP）打开租户 origin：`<title>DeepSeek Harness`、界面显示模型 `deepseek-flash`、约 15 个 RPC 全 200、**零失败/零异常/零控制台错误**
+- [x] `make verify`、`make dshgw-test`、`make dshgw-supervised-test`（24 步）均为 0
+- [x] 观测到的另一条边界（已知、可诊断）：`public_host` 之外的 host 拼写会让非 GET 请求 403 `origin mismatch`（审计记录 `edge_reject`），例如 `localhost:18302`、`rag-server:18302`；租户必须按 `http://192.168.190.86:18302/` 访问（前门 `:8090/t/<t>/` 也会跳到该地址）
