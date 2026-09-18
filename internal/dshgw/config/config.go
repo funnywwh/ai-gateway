@@ -58,6 +58,15 @@ type DshRuntime struct {
 	CurrentLink string `yaml:"current_link" json:"current_link"`
 }
 
+// PublicBaseURL switches the deployment to single-domain path mode: every public
+// URL dshgw generates (portal redirects, tenant redirects, CSP form-action) is
+// built from this base plus a path prefix instead of from a host:port origin.
+//
+// It exists because subdomains are not always available: with one domain and no
+// wildcard DNS, the only way to give each tenant its own URL space is a path.
+// Empty keeps the port-based behaviour.
+type PublicBaseURL string
+
 // WorkerLimits are the per-worker resources, expressed the way cgroup v2 wants
 // them. Zero means "no limit". They replace the old unit's MemoryHigh/MemoryMax/
 // CPUQuota/TasksMax, which systemd enforced for us.
@@ -124,13 +133,18 @@ type Config struct {
 	AdminSocket string `yaml:"admin_socket" json:"admin_socket"`
 	// AdminAllowedUIDs are the peer UIDs (typically the aigw runtime user) that may talk
 	// to the admin socket. UID 0 is always allowed on the local machine.
-	AdminAllowedUIDs []int        `yaml:"admin_allowed_uids" json:"admin_allowed_uids"`
-	LoginRate        RateLimit    `yaml:"login_rate" json:"login_rate"`
-	DirectoryPicker  string       `yaml:"directory_picker" json:"directory_picker"`
-	PluginBrowserFS  string       `yaml:"plugin_browser_fs" json:"plugin_browser_fs"`
-	WorkspaceSeed    []string     `yaml:"workspace_seed" json:"workspace_seed"`
-	ReservedNames    []string     `yaml:"reserved_names" json:"reserved_names"`
-	Dsh              DshRuntime   `yaml:"dsh" json:"dsh"`
+	AdminAllowedUIDs []int      `yaml:"admin_allowed_uids" json:"admin_allowed_uids"`
+	LoginRate        RateLimit  `yaml:"login_rate" json:"login_rate"`
+	DirectoryPicker  string     `yaml:"directory_picker" json:"directory_picker"`
+	PluginBrowserFS  string     `yaml:"plugin_browser_fs" json:"plugin_browser_fs"`
+	WorkspaceSeed    []string   `yaml:"workspace_seed" json:"workspace_seed"`
+	ReservedNames    []string   `yaml:"reserved_names" json:"reserved_names"`
+	Dsh              DshRuntime `yaml:"dsh" json:"dsh"`
+	// PublicBaseURL/scheme+host of the single public entry (e.g.
+	// "https://chat.example"). Empty means tenants are addressed by port.
+	PublicBaseURL    string       `yaml:"public_base_url" json:"public_base_url"`
+	TenantPathPrefix string       `yaml:"tenant_path_prefix" json:"tenant_path_prefix"`
+	PortalPathPrefix string       `yaml:"portal_path_prefix" json:"portal_path_prefix"`
 	WorkerLimits     WorkerLimits `yaml:"worker_limits" json:"worker_limits"`
 	TLS              TLSConfig    `yaml:"tls" json:"tls"`
 	Deploy           DeployConfig `yaml:"deploy" json:"deploy"`
@@ -233,6 +247,15 @@ type file interface {
 }
 
 func (c *Config) applyDerivedDefaults() {
+	if c.PublicBaseURL != "" {
+		c.PublicBaseURL = strings.TrimRight(strings.TrimSpace(c.PublicBaseURL), "/")
+		if c.TenantPathPrefix == "" {
+			c.TenantPathPrefix = "/t"
+		}
+		if c.PortalPathPrefix == "" {
+			c.PortalPathPrefix = "/dshgw"
+		}
+	}
 	// The bwrap mode's shared worker account is optional in configuration: the
 	// documented practice is to reuse the gateway account rather than create a
 	// second service account, and the installed worker unit names that account
@@ -353,6 +376,19 @@ func (c *Config) Validate() error {
 	}
 	if c.WorkerLimits.MemoryHighBytes > 0 && c.WorkerLimits.MemoryMaxBytes > 0 && c.WorkerLimits.MemoryHighBytes > c.WorkerLimits.MemoryMaxBytes {
 		return errors.New("worker_limits.memory_high_bytes must not exceed memory_max_bytes")
+	}
+	if c.PublicBaseURL != "" {
+		parsed, err := url.Parse(c.PublicBaseURL)
+		if err != nil || parsed.Scheme != "https" && parsed.Scheme != "http" || parsed.Host == "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+			return errors.New("public_base_url must be a scheme://host URL without a path")
+		}
+		tenantPrefix, portalPrefix := normalizePathPrefix(c.TenantPathPrefix), normalizePathPrefix(c.PortalPathPrefix)
+		if tenantPrefix == "/" || portalPrefix == "/" {
+			return errors.New("tenant_path_prefix and portal_path_prefix must not be the root path")
+		}
+		if tenantPrefix == portalPrefix || strings.HasPrefix(tenantPrefix, portalPrefix+"/") || strings.HasPrefix(portalPrefix, tenantPrefix+"/") {
+			return errors.New("tenant_path_prefix and portal_path_prefix must be distinct and must not overlap")
+		}
 	}
 	if net.ParseIP(c.Deploy.PublicListen) == nil {
 		return errors.New("deploy.public_listen must be one IP address")
@@ -481,6 +517,9 @@ func (c *Config) SetTenantPorts(ports map[string]int) {
 }
 
 func (c *Config) TenantOrigin(tenant string) string {
+	if c.PathMode() {
+		return c.PublicBaseURL + normalizePathPrefix(c.TenantPathPrefix) + "/" + tenant + "/"
+	}
 	c.tenantMu.RLock()
 	port, ok := c.tenantPorts[tenant]
 	c.tenantMu.RUnlock()
@@ -490,8 +529,66 @@ func (c *Config) TenantOrigin(tenant string) string {
 	return c.OriginForPort(port)
 }
 
+// PathMode reports whether public URLs are path-based instead of port-based.
+func (c *Config) PathMode() bool { return c.PublicBaseURL != "" }
+
+// PublicOrigin is the origin a browser sends in the Origin header in path mode:
+// an origin never carries a path, so every surface of the single domain shares it.
+func (c *Config) PublicOrigin() string { return c.PublicBaseURL }
+
+// ExpectedOrigin is the Origin value a browser sends for one surface. In path mode
+// that is always the base origin (browsers drop the path); in port mode it is the
+// surface's own origin.
+func (c *Config) ExpectedOrigin(port int) string {
+	if c.PathMode() {
+		return c.PublicOrigin()
+	}
+	return c.OriginForPort(port)
+}
+
+// PortalPath is the public path of the login page: the portal prefix in path mode,
+// the root otherwise.
+func (c *Config) PortalPath() string {
+	if !c.PathMode() {
+		return "/"
+	}
+	return normalizePathPrefix(c.PortalPathPrefix) + "/"
+}
+
+// SessionCookiePath binds a tenant's session cookie to that tenant's path. In path
+// mode every tenant shares one origin, so without this a browser would happily
+// attach alice's cookie to a request for /t/bob/: the cookie's path is the only
+// thing that keeps two tenants' sessions apart inside one origin.
+func (c *Config) SessionCookiePath(tenant string) string {
+	if !c.PathMode() {
+		return "/"
+	}
+	return normalizePathPrefix(c.TenantPathPrefix) + "/" + tenant + "/"
+}
+
 func (c *Config) OriginForPort(port int) string {
-	return fmt.Sprintf("https://%s:%d", c.PublicHost, port)
+	if !c.PathMode() {
+		return fmt.Sprintf("https://%s:%d", c.PublicHost, port)
+	}
+	if port == c.PortalPort {
+		return c.PublicBaseURL + normalizePathPrefix(c.PortalPathPrefix) + "/"
+	}
+	c.tenantMu.RLock()
+	name, known := c.portTenants[port]
+	c.tenantMu.RUnlock()
+	if known {
+		return c.TenantOrigin(name)
+	}
+	return c.PublicBaseURL + "/"
+}
+
+// normalizePathPrefix returns a leading-slash, no-trailing-slash prefix.
+func normalizePathPrefix(prefix string) string {
+	trimmed := "/" + strings.Trim(strings.TrimSpace(prefix), "/")
+	if trimmed == "/" {
+		return "/"
+	}
+	return trimmed
 }
 
 func (c *Config) TenantFromPort(port int) (string, bool) {

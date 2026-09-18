@@ -511,9 +511,11 @@
       aigw(`/aigw`，前缀原样转发)/门户(`/dshgw`)/租户 dsh(`/t/<t>`)；租户映射读 dshgw 的 registry；
       对 dsh HTML 只做标签内根绝对引用的窄改写（dsh 无 base-path 选项，实测其资源为相对路径）。
       单测覆盖路由/拒绝/窄改写/config 校验，并对真实 aigw 端到端验证过 `/aigw/version`
-- [ ] **反代的真实三服务部署与浏览器级验证**：把 `/t/<tenant>/` 在真实浏览器里走一遍
-      （登录 → dsh UI 在 iframe/前缀下可用 → WebSocket 正常），并决定是否还需要
-      `/plugins/` 之外的路径兜底；若最终偏好"零改写"，可改用子域 + iframe 模式
+- [x] **路径模式（不能分配子域名时的方案）**：dshgw 增加 `public_base_url` / `tenant_path_prefix` /
+      `portal_path_prefix`，公开 URL 与会话 cookie Path 都变成路径式；反代 `/dshgw/`、`/t/<t>/` 实测打通
+      （验收 24 步：门户 200、租户路径 302 回门户路径、`POST .../api` 401）
+- [ ] **浏览器级验证 `/t/<tenant>/`**：真实登录一次（需要可用的 aigw Key）→ dsh UI 在前缀下渲染、
+      WebSocket 101、browser-fs 授权可用；若出现 `/plugins/` 之外的根绝对引用，再补进窄改写
 - [ ] **对外暴露的剩余决策**：防火墙策略（worker 段端口必须不可达）、是否仍在前面放 nginx 反代
 - [x] **资源限额**：每 worker 一个 systemd 用户 scope（`systemd-run --user --scope -p MemoryMax=…`），
       实测 `memory.max`/`pids.max`/`cpu.max` 全部生效；部署级汇总上限通过

@@ -40,6 +40,9 @@ from pathlib import Path
 PROBE_TIMEOUT = 60.0
 CHILD_TIMEOUT = 30.0
 
+# The portal port dshgw runs with, needed by the front proxy's routing headers.
+TENANT_PORT_FALLBACK: list[int] = [0]
+
 # Per-worker limits the acceptance configures, then reads back from the kernel.
 # They replace the systemd unit's MemoryMax/TasksMax, which the rootless shape has
 # no unit to enforce.
@@ -181,7 +184,8 @@ def http_status(port: int, path: str = "/api", timeout: float = 5.0) -> int:
         return 0
 
 
-def http_probe(port: int, path: str = "/", timeout: float = 5.0) -> tuple[int, str]:
+def http_probe(port: int, path: str = "/", timeout: float = 5.0, method: str = "GET",
+               origin: str = "") -> tuple[int, str]:
     """GET one loopback port; returns (status, location). 0 means "nothing bound".
 
     With no nginx in this shape, dshgw binds the portal port and every tenant's
@@ -189,7 +193,15 @@ def http_probe(port: int, path: str = "/", timeout: float = 5.0) -> tuple[int, s
     """
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=timeout) as conn:
-            conn.sendall(f"GET {path} HTTP/1.0\r\nHost: localhost:{port}\r\n\r\n".encode())
+            # A browser always sends Origin on an unsafe method, and dshgw's CSRF
+            # fence requires it: omitting it here would test a request no browser
+            # makes, and a 403 would say nothing about the session contract.
+            request = (
+                f"{method} {path} HTTP/1.0\r\nHost: localhost:{port}\r\n"
+                + (f"Origin: {origin}\r\n" if origin else "")
+                + "Content-Length: 0\r\n\r\n"
+            )
+            conn.sendall(request.encode())
             chunks = []
             while True:
                 chunk = conn.recv(65536)
@@ -301,6 +313,9 @@ dshgw:
   template_home: {template}
   plugin_path: {plugin_path}
   plugin_browser_fs: off
+  public_base_url: http://localhost
+  tenant_path_prefix: /t
+  portal_path_prefix: /dshgw
   worker_memory_max_bytes: {memory_max}
   worker_tasks_max: {tasks_max}
   worker_cpu_quota_percent: {cpu_quota}
@@ -314,6 +329,8 @@ def main() -> int:
     parser.add_argument("--dshgw-bin", required=True)
     parser.add_argument("--node", default=os.environ.get("DSHGW_NODE", ""))
     parser.add_argument("--dsh-root", default=os.environ.get("DSHGW_DSH_ROOT", ""))
+    parser.add_argument("--gwproxy-bin", default="bin/gwproxy",
+                        help="front proxy binary for the single-domain path check")
     parser.add_argument("--workdir", default="")
     parser.add_argument("--keep", action="store_true", help="keep the work directory for inspection")
     parser.add_argument("--verbose", action="store_true")
@@ -367,6 +384,7 @@ def main() -> int:
     ports["tenant_hi"] = ports["tenant_lo"] + 20
     ports["worker_hi"] = ports["worker_lo"] + 20
     tenant_worker_port = ports["worker_lo"]
+    TENANT_PORT_FALLBACK[0] = ports["portal"]
 
     stub = StubAigw(models=["e2e-model-a", "e2e-model-b"])
     aigw: subprocess.Popen | None = None
@@ -433,10 +451,14 @@ def main() -> int:
         # the portal, and the portal must serve the login page.
         portal_status, _ = http_probe(ports["portal"])
         check.require("portal-port-serves-login", portal_status == 200, f"HTTP {portal_status}")
+        # The portal is reached either on its port (default mode) or at its path
+        # (single-domain mode): both are correct, and which one appears is decided by
+        # dshgw's public_base_url, not by this test.
         tenant_status, location = http_probe(ports["tenant_lo"])
+        portal_target = f":{ports['portal']}" in location or "/dshgw/" in location
         check.require(
             "tenant-port-redirects-to-portal",
-            tenant_status == 302 and f":{ports['portal']}" in location,
+            tenant_status == 302 and portal_target,
             f"HTTP {tenant_status} location={location!r}",
         )
 
@@ -444,6 +466,12 @@ def main() -> int:
         # configured ceilings. A host that cannot provide one is reported as a
         # skip (the worker still runs), matching the degradation the runner logs.
         cgroup_note = check_worker_limits(check, process_tree(child_pid))
+
+        # Single-domain mode: no subdomains, no ports — the front proxy serves the
+        # portal and the tenant under path prefixes, while dshgw generates the URLs
+        # (redirects, session cookie path) that make those paths work.
+        check_path_mode(check, Path(args.gwproxy_bin).resolve(), state_dir, ports["listen"],
+                        ports["tenant_lo"], tenant, "localhost")
 
         calls_before = stub.calls
         stopped = admin_call(admin_socket, {"id": 3, "op": "tenant-stop", "name": tenant})
@@ -503,6 +531,59 @@ def main() -> int:
         return 1
     print(f"PASS: supervised shape acceptance ({check.passes} steps)")
     return 0
+
+
+def check_path_mode(check: Check, proxy_bin: Path, state_dir: Path, dshgw_listen: int,
+                    tenant_port: int, tenant: str, public_host: str) -> None:
+    """Drive the single-domain path chain: proxy -> dshgw -> worker.
+
+    This is the shape to use when subdomains are not available: one domain, one
+    port, and a path per tenant. It is the only test that proves dshgw's
+    generated URLs agree with the proxy's prefixes.
+    """
+    if not proxy_bin.is_file():
+        check.ok("path-mode-skipped", "gwproxy not built (make gwproxy-build)")
+        return
+    config = state_dir.parent / "gwproxy.yaml"
+    proxy_port = free_port()
+    config.write_text(
+        f"""listen: 127.0.0.1:{proxy_port}
+public_host: {public_host}
+aigw_prefix: /aigw
+aigw_upstream: http://127.0.0.1:1
+portal_prefix: /dshgw
+portal_upstream: http://127.0.0.1:{dshgw_listen}
+portal_port: {TENANT_PORT_FALLBACK[0]}
+tenant_prefix: /t
+tenant_upstream: http://127.0.0.1:{dshgw_listen}
+registry_path: {state_dir}/registry.json
+"""
+    )
+    process = subprocess.Popen([str(proxy_bin), "--config", str(config)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               start_new_session=True)
+    try:
+        started = wait_for("front proxy port", lambda: http_probe(proxy_port)[0] != 0, timeout=15)
+        check.require("path-mode-proxy-up", started is True, f"proxy on {proxy_port}")
+
+        portal_status, _ = http_probe(proxy_port, "/dshgw/")
+        check.require("path-mode-portal", portal_status == 200, f"HTTP {portal_status}")
+
+        # Unauthenticated tenant access must land on the portal *path*, not on a
+        # portal host:port — that redirect is generated by dshgw from public_base_url.
+        status, location = http_probe(proxy_port, f"/t/{tenant}/")
+        check.require("path-mode-tenant-redirects-to-portal-path",
+                      status in (302, 303) and "/dshgw/" in location,
+                      f"HTTP {status} location={location!r}")
+
+        # An unauthenticated GET is a redirect by design; the 401 contract belongs to
+        # non-GET requests (a browser navigation is not a data request).
+        api, _ = http_probe(proxy_port, f"/t/{tenant}/api", method="POST",
+                            origin="http://localhost")
+        check.require("path-mode-tenant-api-401", api == 401, f"HTTP {api}")
+    finally:
+        stop_process(process, check, quiet=True)
+        _ = tenant_port
 
 
 def check_worker_limits(check: Check, descendants: list[int]) -> str:

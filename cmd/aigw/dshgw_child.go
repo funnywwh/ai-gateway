@@ -41,20 +41,29 @@ func buildDshgwChild(cfg *config.Config, aigwExecutable string) (*dshgwChild, er
 		adminSocket = filepath.Join(stateDir, "admin.sock")
 	}
 	child := dshgwsup.ChildConfig{
-		PublicHost:   cfg.Dshgw.PublicHost,
-		PortalPort:   cfg.Dshgw.PortalPort,
-		TenantPortLo: cfg.Dshgw.TenantPortLo,
-		TenantPortHi: cfg.Dshgw.TenantPortHi,
-		WorkerPortLo: cfg.Dshgw.WorkerPortLo,
-		WorkerPortHi: cfg.Dshgw.WorkerPortHi,
-		Listen:       cfg.Dshgw.Listen,
+		PublicHost: cfg.Dshgw.PublicHost,
+		// Single-domain path mode: unset keeps the port-based origins. Trimmed here
+		// so "https://host/" and "https://host" mean the same deployment.
+		PublicBaseURL:    strings.TrimRight(strings.TrimSpace(cfg.Dshgw.PublicBaseURL), "/"),
+		TenantPathPrefix: strings.TrimSpace(cfg.Dshgw.TenantPathPrefix),
+		PortalPathPrefix: strings.TrimSpace(cfg.Dshgw.PortalPathPrefix),
+		PortalPort:       cfg.Dshgw.PortalPort,
+		TenantPortLo:     cfg.Dshgw.TenantPortLo,
+		TenantPortHi:     cfg.Dshgw.TenantPortHi,
+		WorkerPortLo:     cfg.Dshgw.WorkerPortLo,
+		WorkerPortHi:     cfg.Dshgw.WorkerPortHi,
+		Listen:           cfg.Dshgw.Listen,
 		// The child reaches aigw over loopback: it runs on the same host, and the
 		// tenant data plane never needs to leave it.
 		AigwBaseURL:     dshgwAigwBaseURL(cfg),
 		AdminSocket:     adminSocket,
 		PluginBrowserFS: strings.TrimSpace(cfg.Dshgw.PluginBrowserFS),
 		StateDir:        stateDir,
-		WorkspaceRoot:   filepath.Join(stateDir, "workspaces"),
+		// Both roots are overridable so a migration can point the new shape at the
+		// directories the old deployment already filled, and so workspaces can live
+		// on the volume that has the space. Unset keeps the state_dir-derived defaults.
+		TenantRoot:    firstNonEmpty(cfg.Dshgw.TenantRoot, filepath.Join(stateDir, "tenants")),
+		WorkspaceRoot: firstNonEmpty(cfg.Dshgw.WorkspaceRoot, filepath.Join(stateDir, "workspaces")),
 		Dsh: dshgwsup.DshRuntime{
 			NodeBin:     dshPath(cfg.Dshgw.NodeBin, "DSHGW_NODE"),
 			BinJS:       dshBinJS(cfg),

@@ -251,16 +251,21 @@ func (p *Proxy) setPortalHeaders(w http.ResponseWriter) {
 	w.Header().Set("Referrer-Policy", "same-origin")
 }
 
-var loginPage = template.Must(template.New("login").Parse(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>dsh 登录</title><style>body{font:16px system-ui;max-width:34rem;margin:10vh auto;padding:1rem;background:#101318;color:#eef}main{background:#1b2028;padding:2rem;border-radius:12px}input,button{box-sizing:border-box;width:100%;padding:.8rem;margin:.4rem 0}button{cursor:pointer}.error{color:#ff9b9b}.note{color:#bcc6d6;font-size:.9rem}</style></head><body><main><h1>DeepSeek Harness</h1>{{if .Error}}<p class="error">{{.Error}}</p>{{end}}<form method="post" action="/login"><label>aigw API Key<input type="password" name="key" autocomplete="off" spellcheck="false" required></label><button type="submit">登录</button></form><form method="post" action="/logout"><button type="submit">退出此浏览器的全部租户会话</button></form><p class="note">Key 只用于向 aigw 验证身份；browser-fs 默认开启后，只有你在浏览器明确授权的本机目录可被 agent 访问，内容可能进入模型请求。</p></main></body></html>`))
+var loginPage = template.Must(template.New("login").Parse(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>dsh 登录</title><style>body{font:16px system-ui;max-width:34rem;margin:10vh auto;padding:1rem;background:#101318;color:#eef}main{background:#1b2028;padding:2rem;border-radius:12px}input,button{box-sizing:border-box;width:100%;padding:.8rem;margin:.4rem 0}button{cursor:pointer}.error{color:#ff9b9b}.note{color:#bcc6d6;font-size:.9rem}</style></head><body><main><h1>DeepSeek Harness</h1>{{if .Error}}<p class="error">{{.Error}}</p>{{end}}<form method="post" action="{{.PortalPath}}login"><label>aigw API Key<input type="password" name="key" autocomplete="off" spellcheck="false" required></label><button type="submit">登录</button></form><form method="post" action="{{.PortalPath}}logout"><button type="submit">退出此浏览器的全部租户会话</button></form><p class="note">Key 只用于向 aigw 验证身份；browser-fs 默认开启后，只有你在浏览器明确授权的本机目录可被 agent 访问，内容可能进入模型请求。</p></main></body></html>`))
 
 func (p *Proxy) renderLogin(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	_ = loginPage.Execute(w, struct{ Error string }{message})
+	// The form action is built from the portal path so the same page works behind a
+	// path prefix (single-domain mode) and on a portal port (default mode).
+	_ = loginPage.Execute(w, struct {
+		Error      string
+		PortalPath string
+	}{message, p.Config.PortalPath()})
 }
 
 func (p *Proxy) login(w http.ResponseWriter, r *http.Request) {
-	if err := p.checkEdgeOrigin(r, p.Config.OriginForPort(p.Config.PortalPort), false); err != nil {
+	if err := p.checkEdgeOrigin(r, p.Config.ExpectedOrigin(p.Config.PortalPort), false); err != nil {
 		p.audit(r, "", "login_reject", err.Error(), http.StatusForbidden)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
@@ -376,7 +381,7 @@ func (p *Proxy) allowLogin(ip string) bool {
 	return true
 }
 func (p *Proxy) logout(w http.ResponseWriter, r *http.Request) {
-	if err := p.checkEdgeOrigin(r, p.Config.OriginForPort(p.Config.PortalPort), false); err != nil {
+	if err := p.checkEdgeOrigin(r, p.Config.ExpectedOrigin(p.Config.PortalPort), false); err != nil {
 		p.audit(r, "", "logout_reject", err.Error(), http.StatusForbidden)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
@@ -397,7 +402,7 @@ func (p *Proxy) logout(w http.ResponseWriter, r *http.Request) {
 		p.setSessionCookie(w, t.Name, "", true)
 	}
 	p.audit(r, "", "logout_success", "browser sessions revoked", http.StatusSeeOther)
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, p.Config.PortalPath(), http.StatusSeeOther)
 }
 func (p *Proxy) setSessionCookie(w http.ResponseWriter, tenant, token string, remove bool) {
 	maxAge := int(p.Config.SessionTTL.Duration().Seconds())
@@ -406,7 +411,11 @@ func (p *Proxy) setSessionCookie(w http.ResponseWriter, tenant, token string, re
 		maxAge = -1
 		expires = time.Unix(1, 0)
 	}
-	http.SetCookie(w, &http.Cookie{Name: p.Config.SessionCookieName(tenant), Value: token, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: maxAge, Expires: expires})
+	// Path is the tenant's path in single-domain mode: every tenant shares one
+	// origin there, and the cookie's path is what stops alice's session from being
+	// attached to a request for /t/bob/. The removal cookie must carry the same
+	// path, or the browser would keep the old one.
+	http.SetCookie(w, &http.Cookie{Name: p.Config.SessionCookieName(tenant), Value: token, Path: p.Config.SessionCookiePath(tenant), HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: maxAge, Expires: expires})
 }
 
 func (p *Proxy) TenantHandler(t registry.Tenant) http.Handler {
@@ -416,7 +425,7 @@ func (p *Proxy) TenantHandler(t registry.Tenant) http.Handler {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		expected := p.Config.OriginForPort(t.PublicPort)
+		expected := p.Config.ExpectedOrigin(t.PublicPort)
 		if err := p.checkEdgeOrigin(r, expected, isWebSocket(r)); err != nil {
 			p.audit(r, t.Name, "edge_reject", err.Error(), http.StatusForbidden)
 			p.log().Warn("dshgw edge origin rejected", "tenant", t.Name, "origin", safeOrigins(r.Header.Values("Origin")), "reason", err.Error())

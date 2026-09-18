@@ -9,8 +9,10 @@
 package dshgwsup
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -45,6 +47,12 @@ type Deploy struct {
 	TenantConfigRoot string `yaml:"tenant_config_root"`
 	ConfigPath       string `yaml:"config_path"`
 	BackupDir        string `yaml:"backup_dir"`
+	// PublicBaseURL switches the child to single-domain path mode: every public URL
+	// it generates is built from this base plus a path prefix. Empty keeps the
+	// port-based behaviour. It exists because subdomains are not always available.
+	PublicBaseURL    string `yaml:"public_base_url,omitempty"`
+	TenantPathPrefix string `yaml:"tenant_path_prefix,omitempty"`
+	PortalPathPrefix string `yaml:"portal_path_prefix,omitempty"`
 	// PublicListen is where the child binds the portal and tenant public ports.
 	PublicListen string `yaml:"public_listen,omitempty"`
 }
@@ -60,6 +68,14 @@ type ChildConfig struct {
 	TenantPortHi int    `yaml:"tenant_port_hi"`
 	WorkerPortLo int    `yaml:"worker_port_lo"`
 	WorkerPortHi int    `yaml:"worker_port_hi"`
+	// PublicBaseURL switches the child to single-domain path mode: the public URLs
+	// it generates become "https://host/t/<tenant>/" and "https://host/dshgw/"
+	// instead of host:port origins, and session cookies are scoped to the tenant's
+	// path. Empty keeps port mode. It exists because subdomains are not always
+	// available: one domain and no wildcard DNS leaves paths as the only option.
+	PublicBaseURL    string `yaml:"public_base_url,omitempty"`
+	TenantPathPrefix string `yaml:"tenant_path_prefix,omitempty"`
+	PortalPathPrefix string `yaml:"portal_path_prefix,omitempty"`
 	// Listen is the child's own loopback listener (the edge proxies tenant ports
 	// onto it). It must not overlap any of the three port ranges.
 	Listen      string `yaml:"listen"`
@@ -103,6 +119,29 @@ type TLSConfig struct {
 func (c ChildConfig) Validate() error {
 	if !publicHostRE.MatchString(c.PublicHost) {
 		return fmt.Errorf("dshgw.public_host %q must be a lowercase DNS name without scheme, port or path", c.PublicHost)
+	}
+	if c.PublicBaseURL != "" {
+		parsed, err := url.Parse(c.PublicBaseURL)
+		if err != nil || parsed.Host == "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.User != nil {
+			return errors.New("dshgw.public_base_url must be a scheme://host URL without a path")
+		}
+		if parsed.Scheme != "https" && parsed.Scheme != "http" {
+			return fmt.Errorf("dshgw.public_base_url scheme %q must be http or https", parsed.Scheme)
+		}
+		if !strings.EqualFold(parsed.Hostname(), c.PublicHost) {
+			// The Host fence compares a request's host against public_host while the
+			// generated links use this base: if they disagree, every link the gateway
+			// produces is one it then rejects.
+			return fmt.Errorf("dshgw.public_base_url host %q must match public_host %q", parsed.Hostname(), c.PublicHost)
+		}
+		for label, prefix := range map[string]string{"tenant_path_prefix": c.TenantPathPrefix, "portal_path_prefix": c.PortalPathPrefix} {
+			if prefix == "" {
+				continue
+			}
+			if !strings.HasPrefix(prefix, "/") || strings.HasSuffix(prefix, "/") || strings.ContainsAny(prefix, "?# ") {
+				return fmt.Errorf("dshgw.%s %q must start with / and carry no trailing slash", label, prefix)
+			}
+		}
 	}
 	ports := []struct {
 		label string

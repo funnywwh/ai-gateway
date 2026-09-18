@@ -427,6 +427,12 @@ type Dshgw struct {
 	// PluginPath is the directory-picker plugin served to tenant sessions. Empty
 	// keeps the child's own default for the installation it ships with.
 	PluginPath string `yaml:"plugin_path"`
+	// PublicBaseURL puts the child in single-domain path mode: public URLs become
+	// "https://host/t/<tenant>/" and "https://host/dshgw/" instead of host:port
+	// origins. Use it when subdomains are not available.
+	PublicBaseURL    string `yaml:"public_base_url"`
+	TenantPathPrefix string `yaml:"tenant_path_prefix"`
+	PortalPathPrefix string `yaml:"portal_path_prefix"`
 	// PublicListen is where the child binds the portal and tenant public ports.
 	// Empty means loopback: exposing tenants to a network is an explicit choice.
 	PublicListen string `yaml:"public_listen"`

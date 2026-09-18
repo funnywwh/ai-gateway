@@ -96,6 +96,55 @@ func TestBuildDshgwChildDerivesTheWholeSurface(t *testing.T) {
 	}
 }
 
+// The roots, the path-mode switch and the port-mode default are all configuration
+// the deployment reads back from the generated file. A key that is accepted but
+// silently ignored is worse than a rejected one — the migration script and the
+// single-domain proxy both depend on these arriving.
+func TestBuildDshgwChildCarriesRootsAndPathMode(t *testing.T) {
+	cfg, aigwBinary := childFixture(t)
+	cfg.Dshgw.TenantRoot = "/srv/old-state/tenants"
+	cfg.Dshgw.WorkspaceRoot = "/srv/old-state/workspaces"
+	cfg.Dshgw.PublicHost = "chat.example" // the base URL's host must agree with it
+	cfg.Dshgw.PublicBaseURL = "https://chat.example/"
+	cfg.Dshgw.TenantPathPrefix = "/t"
+	cfg.Dshgw.PortalPathPrefix = "/dshgw"
+
+	child, err := buildDshgwChild(cfg, aigwBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated := child.config
+	if generated.TenantRoot != "/srv/old-state/tenants" || generated.WorkspaceRoot != "/srv/old-state/workspaces" {
+		t.Fatalf("configured roots ignored: tenant=%q workspace=%q", generated.TenantRoot, generated.WorkspaceRoot)
+	}
+	// A trailing slash on the base URL would produce "https://host//t/alice/".
+	if generated.PublicBaseURL != "https://chat.example" {
+		t.Fatalf("public base url = %q, want it without a trailing slash", generated.PublicBaseURL)
+	}
+	if generated.TenantPathPrefix != "/t" || generated.PortalPathPrefix != "/dshgw" {
+		t.Fatalf("prefixes = %q / %q", generated.TenantPathPrefix, generated.PortalPathPrefix)
+	}
+
+	// Unset means port mode plus state_dir-derived roots, not empty paths.
+	defaults, err := buildDshgwChild(childFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaults.config.PublicBaseURL != "" {
+		t.Fatalf("path mode enabled by default: %q", defaults.config.PublicBaseURL)
+	}
+	if defaults.config.TenantRoot == "" || defaults.config.WorkspaceRoot == "" {
+		t.Fatalf("default roots are empty: %q / %q", defaults.config.TenantRoot, defaults.config.WorkspaceRoot)
+	}
+
+	// A base URL whose host disagrees with public_host is refused: the generated
+	// links would be rejected by the gateway's own Host fence.
+	cfg.Dshgw.PublicBaseURL = "https://other.example"
+	if _, err := buildDshgwChild(cfg, aigwBinary); err == nil {
+		t.Fatal("a public_base_url with a different host was accepted")
+	}
+}
+
 func TestBuildDshgwChildPrefersExplicitOverridesAndBasePath(t *testing.T) {
 	cfg, aigwBinary := childFixture(t)
 	cfg.Server.BasePath = "/aigw/"

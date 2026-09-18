@@ -557,3 +557,78 @@ func TestAuditOriginSanitization(t *testing.T) {
 		t.Fatalf("origins=%v", got)
 	}
 }
+
+// Single-domain path mode: one origin serves every tenant, so the public URLs, the
+// session cookie's path and the Origin fence all have to be prefix-aware. Without
+// the cookie path in particular, a browser would attach alice's session to a
+// request for bob's path — the same origin would no longer imply the same tenant.
+func TestPathModeUsesPrefixesForURLsCookiesAndFences(t *testing.T) {
+	p, tenant, _, up := fixture(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer up.Close()
+	p.Config.PublicHost = "chat.example"
+	p.Config.PublicBaseURL = "https://chat.example"
+	p.Config.TenantPathPrefix = "/t"
+	p.Config.PortalPathPrefix = "/dshgw"
+	p.Config.SetTenantPorts(map[string]int{tenant.Name: tenant.PublicPort})
+
+	// The login form must post to the portal path, not to the origin root.
+	// The front proxy still presents dshgw's internal contract (host:port plus the
+	// edge port header) — only the *public* URLs it generates become path-based.
+	// Keeping one internal contract is what lets both modes share every code path.
+	page := httptest.NewRecorder()
+	portalRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	portalRequest.Host = "chat.example:32600"
+	p.PortalHandler().ServeHTTP(page, portalRequest)
+	if body := page.Body.String(); !strings.Contains(body, `action="/dshgw/login"`) {
+		t.Fatalf("login form action is not prefix-aware:\n%s", body)
+	}
+
+	// A browser at https://chat.example/dshgw/ sends Origin: https://chat.example —
+	// no path — so that is what the fence must accept.
+	login := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("key=sk-aaaaaaaaa-rest"))
+	login.Host = "chat.example:32600"
+	login.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	login.Header.Set("Origin", "https://chat.example")
+	login.RemoteAddr = "198.51.100.9:1234"
+	loginResponse := httptest.NewRecorder()
+	p.Dispatch().ServeHTTP(loginResponse, login)
+	result := loginResponse.Result()
+	if result.StatusCode != http.StatusFound {
+		t.Fatalf("login status = %d, want 302", result.StatusCode)
+	}
+	if got := result.Header.Get("Location"); got != "https://chat.example/t/alice/" {
+		t.Fatalf("login redirect = %q, want the tenant path", got)
+	}
+	cookies := result.Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("cookies = %#v", cookies)
+	}
+	if got := cookies[0].Path; got != "/t/alice/" {
+		t.Fatalf("session cookie path = %q, want the tenant prefix", got)
+	}
+
+	// The tenant request path itself: the edge header routes it, and the fence
+	// compares the base origin.
+	token := issue(t, p, tenant.Name, nil)
+	tenantRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	tenantRequest.Host = "chat.example:32601"
+	tenantRequest.Header.Set("Cookie", p.Config.SessionCookieName(tenant.Name)+"="+token)
+	tenantRequest.Header.Set("Origin", "https://chat.example")
+	tenantRecorder := httptest.NewRecorder()
+	p.Dispatch().ServeHTTP(tenantRecorder, tenantRequest)
+	if got := tenantRecorder.Result().StatusCode; got == http.StatusForbidden {
+		t.Fatalf("base origin rejected for a tenant request: %d", got)
+	}
+
+	// A foreign origin is still refused: one origin for many tenants must not
+	// become one origin for the whole internet.
+	foreign := httptest.NewRequest(http.MethodGet, "/", nil)
+	foreign.Host = "chat.example:32601"
+	foreign.Header.Set("Cookie", p.Config.SessionCookieName(tenant.Name)+"="+token)
+	foreign.Header.Set("Origin", "https://evil.example")
+	foreignRecorder := httptest.NewRecorder()
+	p.Dispatch().ServeHTTP(foreignRecorder, foreign)
+	if got := foreignRecorder.Result().StatusCode; got != http.StatusForbidden {
+		t.Fatalf("foreign origin accepted: %d", got)
+	}
+}

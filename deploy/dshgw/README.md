@@ -277,7 +277,31 @@ bin/gwproxy --config deploy/dshgw/frontproxy.example.yaml
 反代只做路由、TLS 与头清洗：Host 不匹配 `public_host` 直接 404；未知租户 404；上游不可达 502；
 租户列表每 `registry_reload` 从 dshgw 的 registry.json 重读，所以控制台新建的租户无需重启反代即可访问。
 
-### 9.1 dsh 的路径前缀：为什么不改 dsh 也能行
+### 9.1 没有子域名时的正式配置（路径模式）
+
+反代只是入口；**dshgw 也要知道自己在路径模式下服务**，否则它生成的跳转与会话 cookie 还是按端口：
+
+```yaml
+dshgw:
+  public_host: chat.example
+  public_base_url: https://chat.example   # 打开路径模式；必须与 public_host 同主机
+  tenant_path_prefix: /t                  # 默认 /t
+  portal_path_prefix: /dshgw              # 默认 /dshgw
+```
+
+打开后 dshgw 生成的公开 URL 变成 `https://chat.example/t/<tenant>/` 与 `https://chat.example/dshgw/`，
+并且**会话 cookie 的 Path 收窄到该租户的路径**（`/t/<tenant>/`）。这一点在单域名下是安全必需的：
+多个租户共享同一个 origin，如果 cookie 仍是 `Path=/`，浏览器会把 alice 的会话 cookie 一起发给
+`/t/bob/` 的请求 —— 路径就是同一 origin 内区分两个租户会话的唯一依据。**Origin 栅栏仍然生效**：
+路径模式下的期望 Origin 是基础 origin（浏览器不带路径），伪造的异源 Origin 依旧 403。
+
+`public_base_url` 留空即保持默认的端口模式：两种模式共用同一套内部契约（反代仍以 `host:port` +
+edge 头与 dshgw 对话），所以切换只是改配置，不需要重建租户。
+
+**实测（`make dshgw-supervised-test`，24 步）**：`/dshgw/` 200；`GET /t/<tenant>/` → 302
+到 `/dshgw/`；`POST /t/<tenant>/api`（带 Origin）→ 401。也就是**不需要子域名**即可跑通单域名链路。
+
+### 9.2 dsh 的路径前缀：为什么不改 dsh 也能行
 
 `dsh web` 只提供 `--host/--port/--trusted-host/--no-open`，**没有 base-path 选项**。实测它的 shell：
 资源引用是**相对路径**（`./assets/…`），两个 JS bundle 里**没有硬编码 `/api`**（端点由 `import.meta.url`/`baseUrl`

@@ -153,6 +153,11 @@ dshgw --config <state>/config.yaml contract dsh               # 真实 dsh 契�
 | namespace | `--unshare-pid --die-with-parent`；共享网络；宿主 `apparmor_restrict_unprivileged_userns=1` 时租户不能嵌套 namespace |
 | 纵深防御 | 租户叶 `0700`（`doctor` 逐租户复核）+ dsh 内层 sandbox（本宿主 AppArmor 拒绝嵌套 bwrap，dsh 回退 Landlock） |
 
+**单域名路径模式（可选）**：配置 `public_base_url` 后，租户的 URL 变成
+`https://<域名>/t/<租户>/`，会话 cookie 的 Path 随之收窄到该租户路径 —— 多个租户共享一个 origin 时，
+路径是区分两个租户会话的唯一依据（否则浏览器会把 A 的 cookie 发给 B 的路径）。Origin 栅栏以基础 origin
+为准，异源仍被拒。此模式不需要子域名，配合 `bin/gwproxy` 使用（见部署手册 §9）。
+
 **诚实结论**：没有 UID 边界 —— 租户数据属主就是运行 aigw 的账号，任何以该账号运行的进程都能读全部租户的
 凭据；宿主账号的爆炸半径就是边界失守时的地板。需要"连运行时账号都读不到"的场景应改为分账号/分主机部署。
 完整口径见[部署手册 §7](../deploy/dshgw/README.md)与设计文档 `docs/design/m58-aigw-supervised-dshgw.md`。
