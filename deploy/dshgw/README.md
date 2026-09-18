@@ -89,16 +89,30 @@ HOME=$T DSH_HOME=$T "$DSHGW_NODE" "$DSHGW_DSH_ROOT/lib/bin.js" --profile web --d
 # 前台（调试）：dshgw 子进程由 aigw 拉起，日志在同一个流里
 bin/aigw --config config.yaml
 
-# 用户级常驻单元（推荐）
-systemd-run --user --unit=aigw-local --collect \
-  --property=WorkingDirectory=$PWD --property=Restart=on-failure \
-  --property=StandardOutput=append:$PWD/data/aigw-local.log \
-  --property=StandardError=append:$PWD/data/aigw-local.log \
-  $PWD/bin/aigw --config $PWD/config.yaml
+# 用户级常驻单元（推荐；不需要 root）
+scripts/aigw_user_service.sh install              # 写入 ~/.config/systemd/user/aigw-local.service 并启动
+scripts/aigw_user_service.sh status
+scripts/aigw_user_service.sh restart
+scripts/aigw_user_service.sh uninstall
 
 systemctl --user stop aigw-local     # 停止：子进程与所有租户 worker 一并退出（--die-with-parent 兜底）
-systemctl --user status aigw-local
+journalctl --user -u aigw-local -f   # 或 tail -f data/aigw-local.log
 ```
+
+单元文件由脚本按当前仓库路径生成（`WorkingDirectory`、`ExecStart`、日志追加到 `data/aigw-local.log`），
+`KillMode=mixed` + `TimeoutStopSec=45` 让 dshgw 有机会按序停掉租户 worker，而不是被直接砍掉。
+
+**开机自启需要 linger**（用户级服务默认只在登录会话里跑）：
+
+```bash
+loginctl show-user "$(id -un)" | grep Linger      # 期望 Linger=yes
+sudo loginctl enable-linger "$(id -un)"           # 若为 no：一次性、需要 root/polkit
+```
+
+脚本会检查并明确告诉你这一步（不会假装用户单元本身就能跨重启）。
+注意：systemd 不允许在同名 transient 实例存在时 enable 文件单元；若之前用
+`systemd-run --user --unit=aigw-local` 起过实例，先 `systemctl --user stop aigw-local` 再执行 install
+（实测：切换只造成秒级中断）。
 
 aigw 启动日志里应能看到：
 

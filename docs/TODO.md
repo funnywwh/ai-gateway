@@ -504,8 +504,9 @@
       `dsh-*` 账号不会自动删除（确认无用后手工 `userdel`）
 - [x] 公开面：dshgw 自己绑定门户端口与每个租户公开端口（无 nginx），edge 头由进程内注入且覆盖
       客户端伪造；`dshgw.tls_certificate` / `tls_certificate_key` 可启用 HTTPS
-- [ ] **对外暴露的剩余决策**：防火墙策略（worker 段端口必须不可达）、是否仍在前面放 nginx 反代、
-      以及主机重启后的常驻方式（当前是用户级 transient 单元，需手动或落一份常驻 unit）
+- [x] **开机自启**：`scripts/aigw_user_service.sh` 生成并启用用户级单元 `aigw-local.service`
+      （本机已切换为文件单元、`enabled`、`linger=yes`；实测切换只造成秒级中断）
+- [ ] **对外暴露的剩余决策**：防火墙策略（worker 段端口必须不可达）、是否仍在前面放 nginx 反代
 - [ ] **资源限额**：systemd 的 `MemoryMax`/`CPUQuota`/`TasksMax` 随旧形态消失，需要 cgroup v2 方案
 - [x] 宿主验收脚本：`scripts/dshgw_supervised_e2e.py` + `make dshgw-supervised-test`（17 步：
       aigw 拉起子进程 → 同 UID admin socket → 建户 → bwrap worker → `/api` 401 → 无 per-tenant
