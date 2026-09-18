@@ -3,13 +3,17 @@ package sshworkspace
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/winger/ai-gateway/internal/dshgw/securefile"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -84,25 +88,80 @@ type sshPaths struct {
 	key        string
 	knownHosts string
 	config     string
+	alias      []string
 }
 
-func pathsFor(o Options, remote Remote) sshPaths {
+// privatePath checks every component before following any tenant-controlled path.
+// A symlink (including a dangling one), hard-linked key, or exposed key fails closed.
+func privatePath(workspace, name string) (bool, error) {
+	if !filepath.IsAbs(workspace) || !Within(workspace, name) {
+		return false, fmt.Errorf("identity outside workspace")
+	}
+	current := string(filepath.Separator)
+	for _, part := range strings.Split(strings.TrimPrefix(filepath.Clean(name), string(filepath.Separator)), string(filepath.Separator)) {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return false, fmt.Errorf("symlink in ssh path %s", current)
+		}
+		if current != name && !info.IsDir() {
+			return false, fmt.Errorf("not a directory: %s", current)
+		}
+		if current != name && Within(filepath.Join(workspace, ".ssh"), current) && info.Mode().Perm()&0o077 != 0 {
+			return false, fmt.Errorf("ssh directory must be private: %s", current)
+		}
+		if current == name {
+			if !info.Mode().IsRegular() || info.Mode().Perm()&0o177 != 0 {
+				return false, fmt.Errorf("identity must be a private regular file: %s", name)
+			}
+			if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Nlink != 1 {
+				return false, fmt.Errorf("hard-linked identity: %s", name)
+			}
+		}
+	}
+	return true, nil
+}
+
+func pathsFor(o Options, remote Remote, host string) (sshPaths, error) {
 	dir := filepath.Join(remote.Workspace, ".ssh")
-	paths := sshPaths{
-		key:        filepath.Join(dir, "id_rsa"),
-		knownHosts: filepath.Join(dir, "known_hosts"),
-		config:     filepath.Join(dir, "config"),
+	paths := sshPaths{knownHosts: filepath.Join(dir, "known_hosts"), config: filepath.Join(dir, "config")}
+	digest := sha256.Sum256([]byte(host))
+	for _, candidate := range []string{filepath.Join(dir, "host_keys", fmt.Sprintf("%x", digest), "id_rsa"), filepath.Join(dir, "id_rsa")} {
+		exists, err := privatePath(remote.Workspace, candidate)
+		if err != nil {
+			return paths, Wrap(CodeAuthFailed, "unsafe ssh identity", err)
+		}
+		if exists {
+			paths.key = candidate
+			break
+		}
 	}
-	if !isFile(paths.key) && o.IdentitySource != "" {
-		paths.key = o.IdentitySource
+	if paths.key == "" {
+		return paths, Errorf(CodeAuthFailed, "no ssh identity for %q; upload a host or default key", host)
 	}
-	if !isFile(paths.config) {
-		paths.config = ""
+	// Keep known_hosts account-local even before ssh creates the file. Never fall
+	// back to the gateway operator's HOME when account metadata is absent.
+	for _, name := range []string{paths.config, paths.knownHosts} {
+		info, err := os.Lstat(name)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return paths, Wrap(CodeAuthFailed, "reading ssh metadata", err)
+		}
+		if !info.Mode().IsRegular() {
+			return paths, Errorf(CodeAuthFailed, "unsafe ssh metadata path %s", name)
+		}
 	}
-	if !isFile(paths.knownHosts) {
-		paths.knownHosts = ""
-	}
-	return paths
+	var err error
+	paths.alias, err = aliasOptions(paths, host)
+	return paths, err
 }
 
 func isFile(path string) bool {
@@ -113,17 +172,63 @@ func isFile(path string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
+// aliasOptions deliberately ignores IdentityFile, Include, ProxyCommand and agents.
+// -F /dev/null also excludes the gateway process's global and personal defaults.
+var aliasValueRE = regexp.MustCompile(`^[A-Za-z0-9._][A-Za-z0-9._-]*$`)
+
+func aliasOptions(paths sshPaths, host string) ([]string, error) {
+	target, port, _ := SplitHostSpec(host)
+	alias := target[strings.LastIndex(target, "@")+1:]
+	explicitUser := strings.Contains(target, "@")
+	data, err := securefile.ReadLimitedRegular(paths.config, 64<<10)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, Wrap(CodeHostUnknown, "reading account ssh config", err)
+	}
+	for _, h := range ParseSSHConfig(data) {
+		if h.Name != alias {
+			continue
+		}
+		var options []string
+		if h.HostName != "" {
+			if !aliasValueRE.MatchString(h.HostName) {
+				return nil, Errorf(CodeHostUnknown, "invalid configured HostName")
+			}
+			options = append(options, "HostName="+h.HostName)
+		}
+		if !explicitUser && h.User != "" {
+			if !aliasValueRE.MatchString(h.User) {
+				return nil, Errorf(CodeHostUnknown, "invalid configured User")
+			}
+			options = append(options, "User="+h.User)
+		}
+		if port == 0 && h.invalidPort {
+			return nil, Errorf(CodeHostUnknown, "invalid configured Port")
+		}
+		if port == 0 && h.Port > 0 {
+			options = append(options, "Port="+strconv.Itoa(h.Port))
+		}
+		return options, nil
+	}
+	return nil, nil
+}
+
 // sshArgs assembles one ssh invocation. Nothing here is ever interpolated into a shell: the
 // script is the single quoted-word-safe string the caller built, and the host is validated
 // before it becomes an argument.
 func (o Options) sshArgs(remote Remote, host, script string) []string {
-	paths := pathsFor(o, remote)
-	args := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"}
+	paths, err := pathsFor(o, remote, host)
+	if err != nil {
+		return nil
+	}
+	args := []string{"-F", "/dev/null", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"}
+	for _, opt := range paths.alias {
+		args = append(args, "-o", opt)
+	}
 	if paths.knownHosts != "" {
 		args = append(args, "-o", "UserKnownHostsFile="+paths.knownHosts)
-	}
-	if paths.config != "" {
-		args = append(args, "-F", paths.config)
 	}
 	if paths.key != "" {
 		args = append(args, "-i", paths.key)
@@ -131,17 +236,30 @@ func (o Options) sshArgs(remote Remote, host, script string) []string {
 	if o.ConnectTimeout > 0 {
 		args = append(args, "-o", "ConnectTimeout="+strconv.Itoa(int(o.ConnectTimeout.Seconds())))
 	}
+	// Only the identities this command names are offered, so an operator's agent cannot decide
+	// which key authenticates a tenant's mount.
+	args = append(args, "-o", "IdentityAgent=none", "-o", "IdentitiesOnly=yes")
 	// ssh joins the command arguments with spaces and hands the result to the remote user's
 	// shell, which parses it again. The script therefore has to arrive already quoted as one
 	// word: passing it raw made the remote `sh -c printf %s "$HOME"` (i.e. $0 = "%s", no
 	// arguments) and every call failed with printf's usage message. Caught by
 	// TestIntegrationMountOverLoopback, not by the fakes, which never re-parse.
-	return append(args, "--", host, "sh", "-c", ShellQuote(script))
+	target, port, err := SplitHostSpec(host)
+	if err != nil {
+		return nil
+	}
+	if port > 0 {
+		args = append(args, "-p", strconv.Itoa(port))
+	}
+	return append(args, "--", target, "sh", "-c", ShellQuote(script))
 }
 
 // ssh runs one remote shell script.
 func (o Options) ssh(ctx context.Context, run ExecFunc, remote Remote, host, script string) (string, error) {
 	if err := o.permits(host); err != nil {
+		return "", err
+	}
+	if _, err := pathsFor(o, remote, host); err != nil {
 		return "", err
 	}
 	budget := o.ConnectTimeout
@@ -150,7 +268,11 @@ func (o Options) ssh(ctx context.Context, run ExecFunc, remote Remote, host, scr
 	}
 	callCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	stdout, stderr, err := run(callCtx, o.sshBin(), o.sshArgs(remote, host, script), nil)
+	args := o.sshArgs(remote, host, script)
+	if len(args) == 0 {
+		return "", Errorf(CodeAuthFailed, "ssh identity became unavailable")
+	}
+	stdout, stderr, err := run(callCtx, o.sshBin(), args, nil)
 	if err != nil {
 		return "", classifySSH(stderr, err)
 	}
@@ -175,14 +297,44 @@ func (o Options) sshfsBin() string {
 // introduce it through configuration: the mount must stay usable by the mounting account
 // alone (which is exactly the tenant worker's uid).
 func (o Options) sshfsArgs(remote Remote, host, remotePath, mountpoint string) []string {
-	paths := pathsFor(o, remote)
-	options := []string{}
+	paths, err := pathsFor(o, remote, host)
+	if err != nil {
+		return nil
+	}
+	options := []string{"ssh_command=ssh -F /dev/null"}
+	// sshfs does not forward User as an SSH option (FUSE rejects it). Resolve
+	// the same validated alias values into its destination and dedicated port
+	// flag instead; never interpolate tenant values into ssh_command.
+	target, port, err := SplitHostSpec(host)
+	if err != nil {
+		return nil
+	}
+	user, hostname := "", target
+	if at := strings.LastIndex(target, "@"); at >= 0 {
+		user, hostname = target[:at], target[at+1:]
+	}
+	for _, opt := range paths.alias {
+		name, value, _ := strings.Cut(opt, "=")
+		switch name {
+		case "HostName":
+			hostname = value
+		case "User":
+			user = value
+		case "Port":
+			port, _ = strconv.Atoi(value) // aliasOptions already validated the port.
+		}
+	}
+	target = hostname
+	if user != "" {
+		target = user + "@" + hostname
+	}
 	for _, opt := range o.SSHFSOptions {
 		trimmed := strings.TrimSpace(opt)
 		// allow_other/allow_root would let every account on the host reach this mount —
 		// and every tenant worker shares one uid, so that is exactly the isolation this
 		// feature must not break. Configuration cannot introduce them.
-		if trimmed == "" || strings.Contains(trimmed, "allow_other") || strings.Contains(trimmed, "allow_root") {
+		lower := strings.ToLower(trimmed)
+		if trimmed == "" || strings.ContainsAny(trimmed, ",\n\r") || strings.Contains(lower, "allow_other") || strings.Contains(lower, "allow_root") || strings.HasPrefix(lower, "identity") || strings.HasPrefix(lower, "identities") || strings.HasPrefix(lower, "ssh_command") || strings.HasPrefix(lower, "password") || strings.HasPrefix(lower, "batchmode") || strings.HasPrefix(lower, "preferredauthentications") {
 			continue
 		}
 		options = append(options, trimmed)
@@ -193,15 +345,16 @@ func (o Options) sshfsArgs(remote Remote, host, remotePath, mountpoint string) [
 	if paths.knownHosts != "" {
 		options = append(options, "UserKnownHostsFile="+paths.knownHosts)
 	}
-	if paths.config != "" {
-		options = append(options, "ssh_command=ssh -F "+paths.config)
-	}
-	options = append(options, "StrictHostKeyChecking=accept-new")
+	options = append(options, "StrictHostKeyChecking=accept-new", "BatchMode=yes", "IdentityAgent=none", "IdentitiesOnly=yes")
 	if o.ConnectTimeout > 0 {
 		options = append(options, "ConnectTimeout="+strconv.Itoa(int(o.ConnectTimeout.Seconds())))
 	}
 	args := []string{"-o", strings.Join(options, ",")}
-	return append(args, host+":"+remotePath, mountpoint)
+	if port > 0 {
+		// sshfs has its own -p flag for the ssh port; -o port= would be handed to ssh instead.
+		args = append(args, "-p", strconv.Itoa(port))
+	}
+	return append(args, target+":"+remotePath, mountpoint)
 }
 
 // mountedAt reports the filesystem type mounted exactly at mountpoint, or "" when nothing

@@ -204,7 +204,7 @@ func TestSSHFSArgsNeverAllowOther(t *testing.T) {
 		// must never be able to read another account's remote tree through a shared mount.
 		SSHFSOptions: []string{"reconnect", "allow_other", "allow_root"},
 	}
-	remote := Remote{Tenant: "dsh-a", Workspace: "/state/workspaces/dsh-a", DshHome: "/state/tenants/dsh-a/.dsh"}
+	remote := newTestEnv(t, Options{}).remote
 	args := options.sshfsArgs(remote, "gpt001", "/opt/app", "/state/workspaces/dsh-a/ssh/gpt001/opt/app")
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "allow_other") || strings.Contains(joined, "allow_root") {
@@ -223,7 +223,7 @@ func TestSSHFSArgsNeverAllowOther(t *testing.T) {
 
 func TestSSHArgsAreHardened(t *testing.T) {
 	options := Options{MountSubdir: "ssh", ConnectTimeout: 7_000_000_000}
-	remote := Remote{Tenant: "dsh-a", Workspace: "/state/workspaces/dsh-a", DshHome: "/state/tenants/dsh-a/.dsh"}
+	remote := newTestEnv(t, Options{}).remote
 	args := options.sshArgs(remote, "gpt001", "true")
 	joined := strings.Join(args, " ")
 	for _, want := range []string{"BatchMode=yes", "StrictHostKeyChecking=accept-new", "ConnectTimeout=7", `-- gpt001 sh -c 'true'`} {
@@ -236,9 +236,9 @@ func TestSSHArgsAreHardened(t *testing.T) {
 	if last := args[len(args)-1]; last != ShellQuote("true") || last != "'true'" {
 		t.Errorf("the remote script is not quoted: %q", last)
 	}
-	// The key path falls back to the configured source when the account has none yet.
+	// A configured operator source must never participate in runtime selection.
 	options.IdentitySource = "/etc/dshgw/ssh/id_rsa"
-	if joined := strings.Join(options.sshArgs(remote, "gpt001", "true"), " "); !strings.Contains(joined, "-i /etc/dshgw/ssh/id_rsa") {
-		t.Errorf("ssh arguments %q do not carry the configured identity", joined)
+	if joined := strings.Join(options.sshArgs(remote, "gpt001", "true"), " "); strings.Contains(joined, options.IdentitySource) {
+		t.Errorf("ssh arguments leak the configured source: %q", joined)
 	}
 }

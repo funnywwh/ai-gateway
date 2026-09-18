@@ -138,12 +138,49 @@ func ValidateHostSpec(spec string) error {
 	return nil
 }
 
+// SplitHostSpec separates an optional ":port" suffix from a host spec.
+//
+// It exists because ssh takes the port as a flag ("ssh -p 2222 host"), not as part of the
+// destination: a person who types `gpt001:2222` means the same thing but ssh would look up a
+// host literally named "gpt001:2222". IPv6 literals are not supported yet. The port stays in
+// the recorded spec, so the mount point keeps naming what was asked for.
+func SplitHostSpec(spec string) (target string, port int, err error) {
+	if err := ValidateHostSpec(spec); err != nil {
+		return "", 0, err
+	}
+	if strings.Count(spec, ":") > 1 {
+		return "", 0, Errorf(CodeHostUnknown, "host %q contains multiple colons; IPv6 is not supported", spec)
+	}
+	target = spec
+	index := strings.LastIndex(spec, ":")
+	if index < 0 {
+		return target, 0, nil
+	}
+	rawPort := spec[index+1:]
+	if rawPort == "" {
+		return "", 0, Errorf(CodeHostUnknown, "host %q ends with \":\" but names no port", spec)
+	}
+	parsed, convErr := strconv.Atoi(rawPort)
+	if convErr != nil {
+		return "", 0, Errorf(CodeHostUnknown, "host %q ends with a non-numeric port %q", spec, rawPort)
+	}
+	if parsed < 1 || parsed > 65535 {
+		return "", 0, Errorf(CodeHostUnknown, "host %q names port %d outside 1..65535", spec, parsed)
+	}
+	head := spec[:index]
+	if head == "" {
+		return "", 0, Errorf(CodeHostUnknown, "host %q names no destination before its port", spec)
+	}
+	return head, parsed, nil
+}
+
 // Host is one usable target parsed from an ssh config file.
 type Host struct {
-	Name     string
-	HostName string
-	User     string
-	Port     int
+	Name        string
+	HostName    string
+	User        string
+	Port        int
+	invalidPort bool
 }
 
 // ParseSSHConfig extracts the concrete aliases of one ssh config document.
@@ -160,13 +197,11 @@ func ParseSSHConfig(data []byte) []Host {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		key, value, found := strings.Cut(line, " ")
-		if !found {
-			key, value, found = strings.Cut(line, "\t")
-		}
-		if !found {
+		split := strings.IndexAny(line, " \t=")
+		if split < 0 {
 			continue
 		}
+		key, value := line[:split], strings.TrimLeft(line[split:], " \t=")
 		key = strings.ToLower(strings.TrimSpace(key))
 		value = strings.TrimSpace(stripInlineComment(value))
 		if key == "host" {
@@ -194,9 +229,9 @@ func ParseSSHConfig(data []byte) []Host {
 		case "user":
 			hosts[current].User = value
 		case "port":
-			if port, err := strconv.Atoi(value); err == nil && port > 0 && port < 65536 {
-				hosts[current].Port = port
-			}
+			port, err := strconv.Atoi(value)
+			hosts[current].invalidPort = err != nil || strings.Trim(value, "0123456789") != "" || port < 1 || port > 65535
+			hosts[current].Port = port
 		}
 	}
 	return hosts
@@ -329,7 +364,7 @@ func (o Options) AllowList() []string {
 // is empty or the spec is on it. The list is a guard rail, not a boundary — the key an
 // account holds is what really decides where it may go (see docs/dshgw.md).
 func (o Options) permits(spec string) error {
-	if err := ValidateHostSpec(spec); err != nil {
+	if _, _, err := SplitHostSpec(spec); err != nil {
 		return err
 	}
 	if len(o.Hosts) == 0 {

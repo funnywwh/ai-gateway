@@ -73,7 +73,6 @@ func TestSSHWorkspacesRejectsUnsafeConfiguration(t *testing.T) {
 	missing := filepath.Join(dir, "missing-key")
 
 	for name, body := range map[string]string{
-		"no identity at all":          "ssh_workspaces:\n  enabled: true\n",
 		"world readable key":          "ssh_workspaces:\n  enabled: true\n  identity_source: " + wide + "\n",
 		"missing key":                 "ssh_workspaces:\n  enabled: true\n  identity_source: " + missing + "\n",
 		"identity_dir is a file":      "ssh_workspaces:\n  enabled: true\n  identity_source: " + good + "\n  identity_dir: " + good + "\n",
@@ -125,5 +124,15 @@ func TestSSHWorkspacesDisabledStillValidatesShape(t *testing.T) {
 	}
 	if cfg.SSHWorkspaces.MountSubdir != "ssh" {
 		t.Errorf("mount_subdir = %q, want the default even while disabled", cfg.SSHWorkspaces.MountSubdir)
+	}
+}
+
+func TestSSHWorkspacesAcceptsUserUploadedIdentities(t *testing.T) {
+	cfg, err := Load(writeConfig(t, baseCfg+"ssh_workspaces:\n  enabled: true\n"))
+	if err != nil {
+		t.Fatalf("upload-only configuration rejected: %v", err)
+	}
+	if cfg.SSHWorkspaces.IdentitySource != "" || cfg.SSHWorkspaces.IdentityDir != "" {
+		t.Fatal("unexpected shared key source")
 	}
 }

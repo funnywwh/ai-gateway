@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -53,10 +55,41 @@ func TestIntegrationMountOverLoopback(t *testing.T) {
 	if key == "" || !isFile(key) {
 		t.Skip("no ssh identity to test with: set DSHGW_SSH_TEST_KEY")
 	}
-	probe := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=5", "-i", key, "--", "127.0.0.1", "true")
-	if output, err := probe.CombinedOutput(); err != nil {
-		t.Skipf("non-interactive ssh to 127.0.0.1 is unavailable (%v): %s", err, strings.TrimSpace(string(output)))
+	// Override for a local sshd not listening on the standard port. Tests never
+	// modify sshd configuration or the operator's keys / known_hosts.
+	portText := os.Getenv("DSHGW_SSH_TEST_PORT")
+	if portText == "" {
+		portText = "22"
 	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		t.Fatalf("invalid DSHGW_SSH_TEST_PORT %q", portText)
+	}
+	preflightArgs := []string{"-F", "/dev/null", "-o", "BatchMode=yes", "-o", "IdentityAgent=none", "-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=" + filepath.Join(t.TempDir(), "known_hosts"), "-o", "ConnectTimeout=5", "-p", strconv.Itoa(port), "-i", key, "--", "127.0.0.1"}
+	probe := exec.Command("ssh", append(append([]string{}, preflightArgs...), "true")...)
+	if output, err := probe.CombinedOutput(); err != nil {
+		t.Skipf("non-interactive ssh to 127.0.0.1:%d is unavailable (%v): %s", port, err, strings.TrimSpace(string(output)))
+	}
+	currentUser, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, host   string
+		hostIdentity bool
+	}{
+		{"default-key", "127.0.0.1", false},
+		{"host-key-explicit-port", "127.0.0.1:" + strconv.Itoa(port), true},
+		{"alias-user-hostname-port", "loopback-alias", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			integrationMountOverLoopback(t, key, tc.host, port, tc.hostIdentity, currentUser.Username, preflightArgs)
+		})
+	}
+}
+
+func integrationMountOverLoopback(t *testing.T, key, host string, port int, hostIdentity bool, username string, preflightArgs []string) {
+	t.Helper()
 
 	root := t.TempDir()
 	remoteDir := filepath.Join(root, "remote")
@@ -68,7 +101,7 @@ func TestIntegrationMountOverLoopback(t *testing.T) {
 	}
 	// The remote has to be able to see the directory that is about to be mounted; if it
 	// cannot, this test is running in a namespace the ssh server does not share.
-	if probe := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=5", "-i", key, "--", "127.0.0.1", "test", "-d", remoteDir); probe.Run() != nil {
+	if probe := exec.Command("ssh", append(append([]string{}, preflightArgs...), "test", "-d", remoteDir)...); probe.Run() != nil {
 		t.Skipf("the remote cannot see %s: run this on the gateway host, not in a sandbox", remoteDir)
 	}
 	tenant := Remote{
@@ -93,19 +126,47 @@ func TestIntegrationMountOverLoopback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	if err := service.EnsureIdentity(tenant.Tenant, tenant.Workspace, tenant.DshHome); err != nil {
+		t.Fatal(err)
+	}
+	if port != 22 || host == "loopback-alias" {
+		// Alias coverage must exercise all three values through real ssh AND sshfs.
+		config := "Host 127.0.0.1\n  Port " + strconv.Itoa(port) + "\n"
+		if host == "loopback-alias" {
+			config = "Host loopback-alias\n HostName 127.0.0.1\n User " + username + "\n Port " + strconv.Itoa(port) + "\n"
+		}
+		if err := os.WriteFile(filepath.Join(tenant.Workspace, ".ssh", "config"), []byte(config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if hostIdentity {
+		// Move only the freshly provisioned temporary account copy. The operator key
+		// remains untouched. A broken default proves the explicit host key wins.
+		defaultKey := filepath.Join(tenant.Workspace, ".ssh", "id_rsa")
+		hostPath := hostKey(tenant, host)
+		if err := os.MkdirAll(filepath.Dir(hostPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(defaultKey, hostPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(defaultKey, []byte("INVALID DEFAULT KEY\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
 	// The tenant-facing half is exercised through the same functions the plugin mirrors: the
 	// remote directory must be reachable and listable before anything is mounted.
-	home, err := service.options.Probe(ctx, service.exec, tenant, "127.0.0.1")
+	home, err := service.options.Probe(ctx, service.exec, tenant, host)
 	if err != nil {
 		t.Fatalf("probe: %v", err)
 	}
 	if !strings.HasPrefix(home, "/") {
 		t.Fatalf("probe returned %q", home)
 	}
-	listing, err := service.options.ListDir(ctx, service.exec, tenant, "127.0.0.1", remoteDir)
+	listing, err := service.options.ListDir(ctx, service.exec, tenant, host, remoteDir)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -113,13 +174,16 @@ func TestIntegrationMountOverLoopback(t *testing.T) {
 		t.Fatalf("listing = %+v, want the one subdirectory", listing)
 	}
 
-	mount, _, err := service.Open(ctx, tenant, "127.0.0.1", remoteDir)
+	mount, _, err := service.Open(ctx, tenant, host, remoteDir)
 	if err != nil {
 		t.Fatalf("mount: %v", err)
 	}
 	defer func() {
 		if _, _, closeErr := service.Close(context.WithoutCancel(ctx), tenant.Tenant, tenant.DshHome, mount.Mountpoint); closeErr != nil {
 			t.Errorf("unmount: %v", closeErr)
+		}
+		if fstype, err := mountedAt(mount.Mountpoint); err != nil || fstype != "" {
+			t.Errorf("mount remained after close: %q / %v", fstype, err)
 		}
 	}()
 
@@ -157,7 +221,7 @@ func TestIntegrationMountOverLoopback(t *testing.T) {
 	}
 
 	// Re-opening is idempotent: same mount point, no second sshfs, no extra record.
-	again, _, err := service.Open(ctx, tenant, "127.0.0.1", remoteDir)
+	again, _, err := service.Open(ctx, tenant, host, remoteDir)
 	if err != nil {
 		t.Fatalf("re-open: %v", err)
 	}
@@ -173,7 +237,7 @@ func TestIntegrationMountOverLoopback(t *testing.T) {
 	// mount point itself.
 	for _, dir := range []string{
 		filepath.Join(tenant.Workspace, "ssh"),
-		filepath.Join(tenant.Workspace, "ssh", "127.0.0.1"),
+		filepath.Join(tenant.Workspace, "ssh", host),
 	} {
 		info, err := os.Stat(dir)
 		if err != nil {

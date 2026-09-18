@@ -26,6 +26,18 @@ window.__ModuleLoader__.load({
 
     const RPC_CHANNEL = '/ssh-workspace'
     const POLL_MS = 2000
+    const MAX_KEY_BYTES = 64 * 1024
+    function composeHost(address, username = '', port = '') {
+      const raw = address.trim()
+      if (!raw) throw new Error('请输入主机地址')
+      const m = /^(?:([^@\s:]+)@)?([^@:\s]+)(?::([0-9]+))?$/.exec(raw)
+      if (!m) throw new Error('主机格式无效')
+      const user = username.trim() || m[1] || ''
+      if (user && !/^[^@\s:]+$/.test(user)) throw new Error('用户名无效')
+      const selected = port.trim() || m[3] || ''
+      if (selected && (!/^\d+$/.test(selected) || Number(selected) < 1 || Number(selected) > 65535)) throw new Error('SSH 端口必须为 1..65535')
+      return `${user ? `${user}@` : ''}${m[2]}${selected ? `:${Number(selected)}` : ''}`
+    }
     const CSS = `
 .dshgw-ssh-action { display: flex; align-items: center; gap: 6px; width: 100%; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; padding: 6px 8px; border-radius: 6px; }
 .dshgw-ssh-action:hover { background: rgba(127,127,127,.14); }
@@ -60,6 +72,12 @@ window.__ModuleLoader__.load({
       error: '',
       notice: '',
       host: '',
+      username: '',
+      port: '',
+      composedHost: '',
+      identityStatus: { default: { configured: false }, host: { configured: false }, effective: 'none' },
+      identityScope: 'default',
+      identityKey: '',
       remote: '',
       aliases: [],
       allowList: [],
@@ -127,8 +145,17 @@ window.__ModuleLoader__.load({
         patch({ open: false, notice: '' })
       }
 
+      let hostRevision = 0
+      const currentHost = () => composeHost(state.host, state.username, state.port)
+      const refreshIdentity = async (host = '') => {
+        const rev = ++hostRevision
+        try { const value = await call('identityStatus', host ? { host } : {}); if (rev === hostRevision) patch({ identityStatus: value }) }
+        catch (error) { if (rev === hostRevision) patch({ error: textOf(error) }) }
+      }
       const refreshHosts = async () => {
+        const rev = ++hostRevision
         const value = await call('hosts', {})
+        if (rev !== hostRevision) return
         patch({
           aliases: value.aliases ?? [],
           allowList: value.allowList ?? [],
@@ -137,6 +164,11 @@ window.__ModuleLoader__.load({
           identity: value.identity === true,
           host: state.host || (value.aliases ?? [])[0]?.name || '',
         })
+        const address = state.host || (value.aliases ?? [])[0]?.name || ''
+        if (!address) { await refreshIdentity(); return }
+        const host = composeHost(address, state.username, state.port)
+        patch({ composedHost: host })
+        await refreshIdentity(host)
       }
 
       const refreshMounts = async () => {
@@ -147,7 +179,7 @@ window.__ModuleLoader__.load({
       const probe = async () => {
         patch({ busy: 'probe', error: '', notice: '' })
         try {
-          const value = await call('probe', { host: state.host })
+          const value = await call('probe', { host: currentHost() })
           patch({ busy: '', remoteHome: value.home ?? '', remote: state.remote || value.home || '' })
           if (state.remote || value.home) await browse(state.remote || value.home)
         } catch (error) {
@@ -158,7 +190,7 @@ window.__ModuleLoader__.load({
       const browse = async (path) => {
         patch({ busy: 'list', error: '' })
         try {
-          const value = await call('list', { host: state.host, path })
+          const value = await call('list', { host: currentHost(), path })
           patch({ busy: '', listing: value, remote: value.path })
         } catch (error) {
           patch({ busy: '', error: textOf(error) })
@@ -170,7 +202,7 @@ window.__ModuleLoader__.load({
         if (name === '' || state.listing === null) return
         patch({ busy: 'mkdir', error: '' })
         try {
-          await call('mkdir', { host: state.host, path: state.listing.path, name })
+          await call('mkdir', { host: currentHost(), path: state.listing.path, name })
           patch({ busy: '', newName: '' })
           await browse(state.listing.path)
         } catch (error) {
@@ -178,12 +210,30 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const uploadIdentity = async () => {
+        if (state.identityKey.length > MAX_KEY_BYTES) { patch({ error: '私钥不能超过 64 KiB' }); return }
+        if (!state.identityKey.trim()) return
+        if (!window.confirm('确认上传并替换此范围的 SSH 私钥？')) return
+        if (/ENCRYPTED|BEGIN OPENSSH PRIVATE KEY/.test(state.identityKey) && /ENCRYPTED/.test(state.identityKey)) { patch({ error: '不支持带密码私钥' }); return }
+        const rev = ++hostRevision
+        patch({ busy: 'identity', error: '' })
+        try { const host = state.host.trim() ? currentHost() : ''; const value = await call('identityUpload', { scope: state.identityScope, ...(host ? { host } : {}), privateKey: state.identityKey }); patch({ busy: '', identityKey: '', ...(rev === hostRevision ? { identityStatus: value } : {}) }) }
+        catch (error) { patch({ busy: '', error: textOf(error) }) }
+      }
+      const deleteIdentity = async () => {
+        if (!window.confirm('确认删除此 SSH 私钥？')) return
+        const rev = ++hostRevision
+        patch({ busy: 'identity', error: '' })
+        try { const host = state.host.trim() ? currentHost() : ''; const value = await call('identityDelete', { scope: state.identityScope, ...(host ? { host } : {}) }); patch({ busy: '', ...(rev === hostRevision ? { identityStatus: value } : {}) }) }
+        catch (error) { patch({ busy: '', error: textOf(error) }) }
+      }
+
       // Ask the gateway to mount. Nothing is registered here: the account's dsh is restarted
       // with the new binding, so the dialog waits for the mount to appear and then offers it.
       const requestMount = async () => {
         patch({ busy: 'open', error: '', notice: '' })
         try {
-          const value = await call('open', { host: state.host, remote: state.remote })
+          const value = await call('open', { host: currentHost(), remote: state.remote })
           patch({
             busy: '',
             notice: `已请求挂载 ${value.host}:${value.remote}。网关完成挂载后会重载该账号的 DSH，届时点“打开”即可进入工作区（页面可能需要刷新）。`,
@@ -269,11 +319,24 @@ window.__ModuleLoader__.load({
             list: 'dshgw-ssh-hosts',
             value: current.host,
             placeholder: 'gpt001 或 user@host',
-            onChange: (event) => patch({ host: event.target.value }),
+            onChange: (event) => { patch({ host: event.target.value }); refreshIdentitySafe() },
           }),
           h('datalist', { id: 'dshgw-ssh-hosts', key: 'list' },
             current.aliases.map((alias) => h('option', { key: alias.name, value: alias.name }, alias.hostName || alias.name))),
           h('button', { key: 'probe', type: 'button', disabled: current.busy !== '', onClick: probe }, '探测'),
+        ]))
+        rows.push(h('div', { className: 'dshgw-ssh-row', key: 'login' }, [
+          h('label', { key: 'user-label' }, '用户名'), h('input', { key: 'user', type: 'text', disabled: current.busy !== '', value: current.username, placeholder: '可选', onChange: (e) => { patch({ username: e.target.value }); hostRevision++; refreshIdentitySafe() } }),
+          h('label', { key: 'port-label' }, '端口'), h('input', { key: 'port', type: 'text', disabled: current.busy !== '', value: current.port, placeholder: 'SSH config / 22', onChange: (e) => { patch({ port: e.target.value }); hostRevision++; refreshIdentitySafe() } }),
+        ]))
+        const refreshIdentitySafe = async () => { const rev = ++hostRevision; patch({ listing: null, remoteHome: '', remote: '', identityStatus: { default: { configured: false }, host: { configured: false }, effective: 'none' }, composedHost: '', identityKey: '' }); try { const host = currentHost(); patch({ composedHost: host }); const value = await call('identityStatus', { host }); if (rev === hostRevision) patch({ identityStatus: value }) } catch (error) { if (rev === hostRevision) patch({ error: textOf(error) }) } }
+        rows.push(h('div', { className: 'dshgw-ssh-section', key: 'identity' }, [
+          h('h3', { key: 'title', style: { margin: '0 0 6px', fontSize: '13px' } }, 'SSH 私钥'),
+          h('p', { key: 'status', className: 'dshgw-ssh-muted' }, `绑定主机：${current.composedHost || '（未填写）'}。当前生效：${current.identityStatus.effective || 'none'}；默认 ${current.identityStatus.default?.configured ? '已配置' : '未配置'}${current.identityStatus.default?.fingerprint ? ` (${current.identityStatus.default.fingerprint})` : ''}；主机专用 ${current.identityStatus.host?.configured ? '已配置' : '未配置'}${current.identityStatus.host?.fingerprint ? ` (${current.identityStatus.host.fingerprint})` : ''}`),
+          h('select', { key: 'scope', disabled: current.busy !== '', value: current.identityScope, onChange: (e) => patch({ identityScope: e.target.value, identityKey: '' }) }, [h('option', { key: 'default', value: 'default' }, '账号默认'), h('option', { key: 'host', value: 'host' }, '当前主机专用')]),
+          h('input', { key: 'key', type: 'file', disabled: current.busy !== '', accept: '.pem,.key,id_rsa,id_ed25519', onChange: async (e) => { const f=e.target.files?.[0]; patch({ identityKey: '' }); if (!f) return; if (f.size > MAX_KEY_BYTES) { patch({ error: '私钥不能超过 64 KiB' }); return }; patch({ busy: 'identity' }); try { const text=await f.text(); patch({ busy: '', identityKey: text }) } catch (error) { patch({ busy: '', error: textOf(error) }) } } }),
+          h('button', { key: 'upload', type: 'button', disabled: current.busy !== '' || !current.identityKey, onClick: uploadIdentity }, '上传/替换'),
+          h('button', { key: 'delete', type: 'button', disabled: current.busy !== '' || !(current.identityStatus[current.identityScope]?.configured), onClick: deleteIdentity }, '删除'),
         ]))
         if (current.remoteHome !== '') {
           rows.push(h('p', { className: 'dshgw-ssh-muted', key: 'remote-home' }, `远端 HOME：${current.remoteHome}`))

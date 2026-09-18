@@ -22,7 +22,9 @@
 // generated code.
 
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile, lstat, open, unlink } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join, relative, resolve, sep } from 'node:path'
 
@@ -60,6 +62,7 @@ function readConfig(raw) {
   const hosts = Array.isArray(config.hosts) ? config.hosts.filter((host) => typeof host === 'string' && host.trim() !== '') : []
   for (const host of hosts) {
     if (!HOST_SPEC.test(host.trim())) throw new Error(`ssh-workspace: host ${JSON.stringify(host)} is not an ssh alias or user@host`)
+    checkHostSpec(host.trim())
   }
   const maxEntries = Number.isInteger(config.maxEntries) && config.maxEntries > 0 ? config.maxEntries : MAX_ENTRIES_DEFAULT
   const connectTimeoutMs = Number.isInteger(config.connectTimeoutMs) && config.connectTimeoutMs > 0
@@ -78,7 +81,17 @@ export function checkHostSpec(spec) {
   if (typeof spec !== 'string' || !HOST_SPEC.test(spec) || spec.startsWith('-')) {
     throw failure('ssh/host-unknown', `${JSON.stringify(spec)} is not an ssh alias or user@host`)
   }
+  const parts = spec.split(':')
+  if (parts.length > 2 || (parts.length === 2 && (!/^\d+$/.test(parts[1]) || Number(parts[1]) < 1 || Number(parts[1]) > 65535))) {
+    throw failure('ssh/host-unknown', 'host must have an optional numeric port in 1..65535')
+  }
   return spec
+}
+
+export function splitHostSpec(spec) {
+  checkHostSpec(spec)
+  const [target, port] = spec.split(':')
+  return { target, port: port === undefined ? 0 : Number(port) }
 }
 
 /** Reject a remote path that is not a plain absolute path. */
@@ -139,7 +152,7 @@ export function parseSSHConfig(text) {
       if (cut >= 0) value = value.slice(0, cut).trim()
       if (key === 'hostname') current.hostName = value
       else if (key === 'user') current.user = value
-      else if (/^\d+$/.test(value)) current.port = Number(value)
+      else current.port = /^\d+$/.test(value) && Number(value) >= 1 && Number(value) <= 65535 ? Number(value) : -1
     }
     candidate = null
   }
@@ -225,19 +238,32 @@ export function apply(ctx, rawConfig) {
   const requestDir = join(dshHome, 'ssh-requests')
   const replyDir = join(dshHome, 'ssh-replies')
 
-  // `-F` and `UserKnownHostsFile` are only passed for files that exist: ssh treats a missing
-  // user config as a fatal error ("Can't open user config file …"), so naming one that was
-  // never provisioned turned every browsing click into that message. The gateway's own ssh
-  // calls guard the same two options.
+  // Ignore identity-bearing user/system config; copy only safe alias connection fields.
+  // This prevents IdentityFile and agents from silently adding a second identity.
   const sshArgs = async (host, script) => {
-    const args = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new']
+    const { target, port } = splitHostSpec(host)
+    const identity = await selectedIdentity(host)
+    const args = ['-F', '/dev/null', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'IdentitiesOnly=yes', '-o', 'IdentityAgent=none', '-i', identity]
+    const aliasName = target.slice(target.lastIndexOf('@') + 1)
+    const alias = (await readAliases()).find((entry) => entry.name === aliasName)
+    if (alias?.hostName) {
+      if (!/^[A-Za-z0-9._-]+$/.test(alias.hostName)) throw failure('ssh/host-unknown', 'invalid configured HostName')
+      args.push('-o', `HostName=${alias.hostName}`)
+    }
+    if (alias?.user && !target.includes('@')) {
+      if (!/^[A-Za-z0-9._-]+$/.test(alias.user)) throw failure('ssh/host-unknown', 'invalid configured User')
+      args.push('-o', `User=${alias.user}`)
+    }
+    const effectivePort = port || alias?.port || 0
+    if (effectivePort) {
+      if (!Number.isInteger(effectivePort) || effectivePort < 1 || effectivePort > 65535) throw failure('ssh/host-unknown', 'invalid configured Port')
+      args.push('-p', String(effectivePort))
+    }
     if (await exists(sshDir)) args.push('-o', `UserKnownHostsFile=${knownHostsPath}`)
-    if (await exists(sshConfigPath)) args.push('-F', sshConfigPath)
-    if (await exists(sshKeyPath)) args.push('-i', sshKeyPath)
     args.push('-o', `ConnectTimeout=${Math.ceil(config.connectTimeoutMs / 1000)}`)
     // ssh joins these with spaces and the remote shell parses the result again, so the script
     // must arrive as one quoted word (the gateway's own ssh calls do the same).
-    return [...args, '--', host, 'sh', '-c', shellQuote(script)]
+    return [...args, '--', target, 'sh', '-c', shellQuote(script)]
   }
 
   const permits = (host) => {
@@ -263,6 +289,107 @@ export function apply(ctx, rawConfig) {
     } catch {
       return false
     }
+  }
+
+  const keyFailure = () => failure('ssh/invalid-key', 'identity must be a valid unencrypted private key of at most 64 KiB')
+  const unsafePath = () => failure('ssh/invalid-path', 'identity path must not contain symlinks or non-regular files')
+  const inspect = async (path) => {
+    try { return await lstat(path) } catch (error) {
+      if (error.code === 'ENOENT') return null
+      throw error
+    }
+  }
+  // Check each account-owned component before traversing it. Never follow a key symlink.
+  const keyDirectory = async (host, create = false) => {
+    const parts = [sshDir]
+    if (host !== undefined) parts.push(join(sshDir, 'host_keys'), join(sshDir, 'host_keys', createHash('sha256').update(host, 'utf8').digest('hex')))
+    for (const path of parts) {
+      if (create) {
+        try { await mkdir(path, { mode: 0o700 }) } catch (error) { if (error.code !== 'EEXIST') throw error }
+      }
+      const info = await inspect(path)
+      if (!info) return null
+      if (!info.isDirectory() || info.isSymbolicLink()) throw unsafePath()
+      if (create) {
+        const fd = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+        try { await fd.chmod(0o700) } finally { await fd.close() }
+      }
+    }
+    return parts.at(-1)
+  }
+  const keyPath = async (host, create = false) => {
+    const dir = await keyDirectory(host, create)
+    if (!dir) return null
+    const path = join(dir, 'id_rsa')
+    const info = await inspect(path)
+    if (info && (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)) throw unsafePath()
+    return path
+  }
+  const readKey = async (host) => {
+    const path = await keyPath(host)
+    if (!path || !(await inspect(path))) return null
+    const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    try {
+      const info = await fd.stat()
+      if (!info.isFile() || info.nlink !== 1) throw unsafePath()
+      if (info.size > 65536) throw keyFailure()
+      return await fd.readFile('utf8')
+    } finally { await fd.close() }
+  }
+  const fingerprint = async (privateKey) => {
+    if (typeof privateKey !== 'string' || !privateKey || Buffer.byteLength(privateKey, 'utf8') > 65536) throw keyFailure()
+    await keyDirectory(undefined, true)
+    const temporary = await mkdtemp(join(sshDir, '.identity-'))
+    try {
+      const path = join(temporary, 'key')
+      await writeFile(path, privateKey, { mode: 0o600, flag: 'wx' })
+      const result = await runCommand('ssh-keygen', ['-y', '-P', '', '-f', path])
+      if (result.error) throw keyFailure()
+      const fields = result.stdout.trim().split(/\s+/)
+      if (fields.length < 2 || !/^[A-Za-z0-9+/]+={0,2}$/.test(fields[1])) throw keyFailure()
+      return 'SHA256:' + createHash('sha256').update(Buffer.from(fields[1], 'base64')).digest('base64').replace(/=+$/, '')
+    } finally { await rm(temporary, { recursive: true, force: true }) }
+  }
+  const identityInfo = async (host) => {
+    const key = await readKey(host)
+    return key === null ? { configured: false, fingerprint: '' } : { configured: true, fingerprint: await fingerprint(key) }
+  }
+  const status = async (host) => {
+    if (host !== undefined) permits(host)
+    const defaultInfo = await identityInfo(undefined)
+    const hostInfo = host === undefined ? { configured: false, fingerprint: '' } : await identityInfo(host)
+    return { default: defaultInfo, host: hostInfo, effective: hostInfo.configured ? 'host' : defaultInfo.configured ? 'default' : 'none' }
+  }
+  const selectedIdentity = async (host) => {
+    for (const scopeHost of [host, undefined]) {
+      const path = await keyPath(scopeHost)
+      if (path && await inspect(path)) return path
+    }
+    throw failure('ssh/auth-failed', 'no account SSH identity configured for this host')
+  }
+  const atomicPrivateWrite = async (dir, name, data) => {
+    const target = join(dir, name)
+    const info = await inspect(target)
+    if (info && (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)) throw unsafePath()
+    const temporary = await mkdtemp(join(dir, '.identity-'))
+    try {
+      const staging = join(temporary, 'key')
+      await writeFile(staging, data, { mode: 0o600, flag: 'wx' })
+      await rename(staging, target)
+    } finally { await rm(temporary, { recursive: true, force: true }) }
+  }
+  const identityScope = (payload) => {
+    if (!payload || !['default', 'host'].includes(payload.scope)) throw failure('ssh/invalid-path', 'identity scope must be default or host')
+    if (payload.host !== undefined) permits(payload.host)
+    if (payload.scope === 'host' && payload.host === undefined) throw failure('ssh/host-unknown', 'host scope requires host')
+    return payload.scope === 'host' ? payload.host : undefined
+  }
+  // Serialize mutations so replacement/deletion and their returned status form one operation.
+  let identityQueue = Promise.resolve()
+  const mutateIdentity = (fn) => {
+    const result = identityQueue.then(fn)
+    identityQueue = result.catch(() => {})
+    return result
   }
 
   // The alias list is the account's own ~/.ssh/config (its HOME is its workspace, so this
@@ -327,6 +454,35 @@ export function apply(ctx, rawConfig) {
   }
 
   const handlers = {
+    async identityStatus(payload) {
+      await identityQueue
+      return status(payload?.host)
+    },
+    async identityUpload(payload) {
+      const scopeHost = identityScope(payload)
+      return mutateIdentity(async () => {
+        await fingerprint(payload.privateKey)
+        const dir = await keyDirectory(scopeHost, true)
+        await keyPath(scopeHost)
+        if (scopeHost === undefined) await atomicPrivateWrite(sshDir, 'identity-managed', 'managed\n')
+        await atomicPrivateWrite(dir, 'id_rsa', payload.privateKey)
+        return status(payload.host)
+      })
+    },
+    async identityDelete(payload) {
+      const scopeHost = identityScope(payload)
+      return mutateIdentity(async () => {
+        const path = await keyPath(scopeHost)
+        if (scopeHost === undefined) {
+          await keyDirectory(undefined, true)
+          await atomicPrivateWrite(sshDir, 'identity-managed', 'managed\n')
+        }
+        if (path) {
+          try { await unlink(path) } catch (error) { if (error.code !== 'ENOENT') throw error }
+        }
+        return status(payload.host)
+      })
+    },
     async hosts() {
       return {
         aliases: await readAliases(),
@@ -387,9 +543,6 @@ export function apply(ctx, rawConfig) {
     async open(payload) {
       const host = permits(String(payload?.host ?? ''))
       const remote = checkRemotePath(String(payload?.remote ?? ''))
-      if (!(await exists(sshKeyPath))) {
-        throw failure('ssh/auth-failed', `no ssh identity at ${sshKeyPath}: ask the operator to provision one`)
-      }
       // The remote directory is checked here, where the account's key lives, so the mailbox
       // request the gateway receives is one that can actually succeed.
       await ssh(host, `cd ${shellQuote(remote)} || exit 3\npwd -P`)
@@ -430,7 +583,7 @@ export function apply(ctx, rawConfig) {
   }
 
   ctx.effect(() => ctx.connection.rpc.handle(RPC_CHANNEL, async (endpoint, payload) => {
-    const handler = handlers[endpoint]
+    const handler = typeof endpoint === 'string' && Object.hasOwn(handlers, endpoint) ? handlers[endpoint] : undefined
     if (handler === undefined) return failed(failure('ssh/invalid-path', `unknown endpoint ${JSON.stringify(endpoint)}`))
     try {
       return ok(await handler(payload))

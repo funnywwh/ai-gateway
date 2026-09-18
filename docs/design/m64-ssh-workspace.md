@@ -63,7 +63,7 @@ ssh_workspaces:
   mount_subdir: "ssh"      # 挂载点前缀：<workspace>/<mount_subdir>/<host>/<远端路径>
   ssh_bin: ""              # 默认 PATH 里的 ssh
   sshfs_bin: ""            # 默认 PATH 里的 sshfs（enabled 时必须可执行，否则加载即失败）
-  identity_source: ""      # 默认密钥源（0600）；启用了但为空则拒绝启动
+  identity_source: ""      # 可选初始密钥源（0600）；为空时由账号自行上传
   identity_dir: ""         # 可选：按账号覆盖 <identity_dir>/<账号>
   hosts: []                # 空 = 允许手输（仍受 host 正则约束）；非空 = 白名单
   connect_timeout: 10s
@@ -73,7 +73,7 @@ ssh_workspaces:
   auto_remount: true       # dshgw 启动时按状态文件重挂
 ```
 
-校验（`config_test.go` / `security_test.go`）：`mount_subdir` 必须是单段相对路径（不得含 `/`、`..`）；`enabled` 时 `identity_source`（或账号级 `identity_dir/<账号>`）必须存在且 0600、`sshfs` 必须可执行；`hosts` 每项过 host 正则。
+校验（`config_test.go` / `security_test.go`）：`mount_subdir` 必须是单段相对路径（不得含 `/`、`..`）；`enabled` 时若指定 `identity_source`（或账号级 `identity_dir/<账号>`）则必须存在且 0600；可不指定以允许账号上传。`sshfs` 必须可执行；`hosts` 每项过 host 正则。
 
 ## 6. 控制通道：文件信箱（不新增端口、不新增令牌）
 

@@ -2,7 +2,8 @@
 // key or a real dsh: a fake `ssh` on PATH answers the three remote commands the plugin makes,
 // and the mailbox is an ordinary temporary directory. Run by scripts/dshgw-test.
 import { strict as assert } from 'node:assert'
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile, symlink } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -79,10 +80,22 @@ const root = await mkdtemp(join(tmpdir(), 'dshgw-ssh-'))
 const home = join(root, 'workspace')
 const dshHome = join(root, 'tenants', 'dsh-a', '.dsh')
 const bin = join(root, 'bin')
+// Only ssh is mocked; key validation exercises the system's real ssh-keygen.
+const makeKey = async (name, passphrase = '') => {
+  const path = join(root, name)
+  const result = await plugin.runCommand('ssh-keygen', ['-q', '-t', 'ed25519', '-N', passphrase, '-f', path])
+  assert.equal(result.error, null, result.stderr)
+  return await readFile(path, 'utf8')
+}
+const keyA = await makeKey('key-a')
+const keyB = await makeKey('key-b')
+const encrypted = await makeKey('encrypted', 'secret')
+const publicA = (await readFile(join(root, 'key-a.pub'), 'utf8')).split(' ')[1]
+const fingerprintA = 'SHA256:' + createHash('sha256').update(Buffer.from(publicA, 'base64')).digest('base64').replace(/=+$/, '')
 await mkdir(join(home, '.ssh'), { recursive: true })
 await mkdir(dshHome, { recursive: true })
 await mkdir(bin, { recursive: true })
-await writeFile(join(home, '.ssh', 'id_rsa'), 'PRIVATE KEY\n', { mode: 0o600 })
+await writeFile(join(home, '.ssh', 'id_rsa'), keyA, { mode: 0o600 })
 await writeFile(join(home, '.ssh', 'config'), 'Host gpt001\n  HostName gpt001.example\n  User root\nHost aipc\n  HostName 10.0.0.9\n')
 process.env.HOME = home
 process.env.DSH_HOME = dshHome
@@ -204,16 +217,16 @@ try {
   const withoutConfig = await call('probe', { host: 'gpt001' })
   equal(withoutConfig.ok, true, 'probe works without ~/.ssh/config')
   const argsWithoutConfig = (await readFile(join(root, 'ssh-args.txt'), 'utf8')).trim().split('\n')
-  equal(argsWithoutConfig.includes('-F'), false, 'a missing ssh config is not named on the command line')
+  equal(argsWithoutConfig[argsWithoutConfig.indexOf('-F') + 1], '/dev/null', 'SSH config cannot add identities')
   const withoutKeyDir = await call('probe', { host: 'gpt001' })
   equal(withoutKeyDir.ok, true, 'probe still works with an empty ~/.ssh')
   await rm(join(home, '.ssh'), { recursive: true, force: true })
   await mkdir(join(home, '.ssh'), { recursive: true })
-  await writeFile(join(home, '.ssh', 'id_rsa'), 'PRIVATE KEY\n', { mode: 0o600 })
+  await writeFile(join(home, '.ssh', 'id_rsa'), keyA, { mode: 0o600 })
   const bare = await call('probe', { host: 'gpt001' })
   equal(bare.ok, true, 'probe works with a bare ~/.ssh containing only a key')
   const bareArgs = (await readFile(join(root, 'ssh-args.txt'), 'utf8')).trim().split('\n')
-  equal(bareArgs.includes('-F'), false, 'no -F is passed when there is no config')
+  equal(bareArgs[bareArgs.indexOf('-F') + 1], '/dev/null', 'empty config explicitly selected')
   equal(bareArgs.includes('UserKnownHostsFile=' + join(home, '.ssh', 'known_hosts')) || bareArgs.some((arg) => arg.startsWith('UserKnownHostsFile=')), true,
     'known_hosts is still named once the directory exists')
 
@@ -223,6 +236,112 @@ try {
   assert.throws(() => plugin.apply(applyCtx, { mountSubdir: '../escape' }), /mountSubdir/, 'a traversing mount container is refused')
   assertions += 1
   assert.throws(() => plugin.apply(applyCtx, { hosts: ['-oProxyCommand=x'] }), /not an ssh alias/, 'a hostile allow-list entry is refused')
+
+  // Re-activate without allow-list restrictions to exercise full host specifications.
+  plugin.apply(applyCtx, {})
+  for (const endpoint of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    equal((await call(endpoint, {})).ok, false, 'prototype endpoints cannot execute')
+  }
+  await writeFile(join(home, '.ssh', 'config'), 'Host example.test\n  HostName resolved.example\n  User root\n  Port 2200\n  IdentityFile /unwanted/shared/key\n')
+  const host = 'alice@example.test:2222'
+  deepEqual(plugin.splitHostSpec(host), { target: 'alice@example.test', port: 2222 }, 'port parsed like Go SplitHostSpec')
+  for (const bad of ['host:', 'host:0', 'host:65536', 'host:abc', 'host:22:33', 'host: 22']) {
+    equal((await call('identityStatus', { host: bad })).ok, false, 'invalid port refused')
+  }
+  const absent = { configured: false, fingerprint: '' }
+  const initial = await call('identityStatus', { host })
+  deepEqual(initial.value, { default: { configured: true, fingerprint: fingerprintA }, host: absent, effective: 'default' }, 'existing key fingerprint derived from public key')
+  let result = await call('identityUpload', { scope: 'host', host, privateKey: keyB })
+  equal(result.ok, true, 'host key uploaded')
+  equal(result.value.effective, 'host', 'host key has priority')
+  check(result.value.host.fingerprint !== fingerprintA, 'distinct key has distinct fingerprint')
+  const hostDir = join(home, '.ssh', 'host_keys', createHash('sha256').update(host, 'utf8').digest('hex'))
+  const hostPath = join(hostDir, 'id_rsa')
+  equal(await readFile(hostPath, 'utf8'), keyB, 'full host including user and port determines key path')
+  for (const dir of [join(home, '.ssh'), join(home, '.ssh', 'host_keys'), hostDir]) equal((await stat(dir)).mode & 0o777, 0o700, 'key directories private')
+  equal((await stat(hostPath)).mode & 0o777, 0o600, 'host key private')
+  equal((await call('probe', { host })).ok, true, 'port host connects')
+  let args = (await readFile(join(root, 'ssh-args.txt'), 'utf8')).trim().split('\n')
+  equal(args[args.indexOf('-p') + 1], '2222', 'ssh port uses -p')
+  equal(args[args.indexOf('--') + 1], 'alice@example.test', 'ssh target excludes port')
+  equal(args[args.indexOf('-i') + 1], hostPath, 'host identity explicitly selected')
+  equal(args[args.indexOf('-F') + 1], '/dev/null', 'untrusted IdentityFile config ignored')
+  check(args.includes('HostName=resolved.example'), 'safe alias HostName preserved')
+  equal(args.includes('User=root'), false, 'explicit user takes precedence over alias user')
+  equal((await call('probe', { host: 'example.test' })).ok, true, 'alias default port connects')
+  const aliasArgs = (await readFile(join(root, 'ssh-args.txt'), 'utf8')).trim().split('\n')
+  equal(aliasArgs[aliasArgs.indexOf('-p') + 1], '2200', 'alias port used when no explicit port')
+  check(aliasArgs.includes('User=root'), 'alias user used when no explicit user')
+  for (const invalidPort of ['abc', '0', '65536', '-1', '2.2', '+22']) {
+    await writeFile(join(home, '.ssh', 'config'), `Host example.test\n  Port ${invalidPort}\n`)
+    equal((await call('probe', { host: 'example.test' })).error.code, 'ssh/host-unknown', 'invalid alias port fails without explicit override')
+    equal((await call('probe', { host })).ok, true, 'explicit valid port overrides invalid alias port')
+    const overrideArgs = (await readFile(join(root, 'ssh-args.txt'), 'utf8')).trim().split('\n')
+    equal(overrideArgs[overrideArgs.indexOf('-p') + 1], '2222', 'explicit port remains authoritative')
+  }
+  await rm(join(home, '.ssh', 'config'))
+  check(args.includes('IdentityAgent=none') && args.includes('IdentitiesOnly=yes'), 'agent identities disabled')
+  result = await call('identityUpload', { scope: 'host', host, privateKey: keyA })
+  equal(result.value.host.fingerprint, fingerprintA, 'replacement changes fingerprint')
+  for (const privateKey of ['', 'SECRET INVALID KEY', encrypted, 'x'.repeat(65537), '密'.repeat(22000), null, 42]) {
+    result = await call('identityUpload', { scope: 'host', host, privateKey })
+    equal(result.ok, false, 'invalid, encrypted or oversized keys rejected')
+    equal(result.error.code, 'ssh/invalid-key', 'stable validation failure')
+    check(!JSON.stringify(result).includes('SECRET INVALID KEY'), 'private key not echoed')
+    equal(await readFile(hostPath, 'utf8'), keyA, 'failed upload preserves previous key')
+  }
+  for (const payload of [{}, { scope: '__proto__' }, { scope: 'host' }, { scope: 'host', host: '../escape' }]) {
+    equal((await call('identityDelete', payload)).ok, false, 'invalid mutation inputs rejected')
+  }
+  equal((await call('identityStatus', { host: 'bob@example.test:2222' })).value.host.configured, false, 'user isolates key')
+  equal((await call('identityStatus', { host: 'alice@example.test:2223' })).value.host.configured, false, 'port isolates key')
+  result = await call('identityDelete', { scope: 'default', host })
+  equal(result.value.effective, 'host', 'deleting default preserves host')
+  equal((await stat(join(home, '.ssh', 'identity-managed'))).mode & 0o777, 0o600, 'management marker private')
+  result = await call('identityUpload', { scope: 'default', host, privateKey: keyA })
+  equal(result.value.default.fingerprint, fingerprintA, 'default uploaded with expected fingerprint')
+  result = await call('identityUpload', { scope: 'default', host, privateKey: keyB })
+  equal(result.value.effective, 'host', 'uploading default preserves host priority')
+  check(result.value.default.fingerprint !== fingerprintA, 'default replacement updates fingerprint')
+  result = await call('identityDelete', { scope: 'host', host })
+  equal(result.value.effective, 'default', 'deleting host falls back to default')
+  equal(await readFile(join(home, '.ssh', 'id_rsa'), 'utf8'), keyB, 'host delete preserves default bytes')
+  await call('identityDelete', { scope: 'default' })
+  deepEqual((await call('identityStatus', {})).value, { default: absent, host: absent, effective: 'none' }, 'empty status exact contract')
+  for (const endpoint of ['probe', 'list', 'mkdir', 'open']) {
+    equal((await call(endpoint, { host, path: '/srv', remote: '/srv', name: 'new' })).error.code, 'ssh/auth-failed', 'no identity fails closed')
+  }
+  const outside = join(root, 'outside-key')
+  await writeFile(outside, keyA)
+  await symlink(outside, join(home, '.ssh', 'id_rsa'))
+  for (const endpoint of ['identityStatus', 'identityUpload', 'identityDelete']) {
+    equal((await call(endpoint, { scope: 'default', privateKey: keyB })).ok, false, 'key symlink refused')
+    equal(await readFile(outside, 'utf8'), keyA, 'symlink destination unchanged')
+  }
+  await rm(join(home, '.ssh', 'id_rsa'))
+  await symlink(outside, hostPath)
+  equal((await call('identityDelete', { scope: 'host', host })).ok, false, 'host key symlink deletion refused')
+  equal((await call('probe', { host })).ok, false, 'unsafe dedicated key fails closed')
+  await rm(hostPath)
+  await rm(join(home, '.ssh', 'host_keys'), { recursive: true })
+  await symlink(root, join(home, '.ssh', 'host_keys'))
+  equal((await call('identityUpload', { scope: 'host', host, privateKey: keyA })).ok, false, 'host directory symlink refused')
+  await rm(join(home, '.ssh', 'host_keys'))
+  equal((await readdir(join(home, '.ssh'))).some((name) => name.startsWith('.identity-')), false, 'validation staging files cleaned')
+  await rm(join(home, '.ssh'), { recursive: true })
+  const outsideDir = join(root, 'outside-dir')
+  await mkdir(outsideDir)
+  await symlink(outsideDir, join(home, '.ssh'))
+  equal((await call('identityUpload', { scope: 'default', privateKey: keyA })).ok, false, '.ssh symlink refused')
+  deepEqual(await readdir(outsideDir), [], 'no files written through .ssh symlink')
+  await rm(join(home, '.ssh'))
+  // A second tenant HOME never inherits this account's identity.
+  await call('identityUpload', { scope: 'default', privateKey: keyA })
+  process.env.HOME = join(root, 'second-home')
+  await mkdir(process.env.HOME)
+  plugin.apply(applyCtx, {})
+  deepEqual((await call('identityStatus', { host })).value, { default: absent, host: absent, effective: 'none' }, 'account identities isolated')
+  equal((await call('probe', { host })).error.code, 'ssh/auth-failed', 'second account cannot use first account key')
 
   console.log(`ssh-workspace: ${assertions} assertions passed`)
 } finally {

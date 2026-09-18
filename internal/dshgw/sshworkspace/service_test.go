@@ -162,6 +162,8 @@ func newTestEnv(t *testing.T, options Options) *testEnv {
 	if err := os.MkdirAll(env.remote.DshHome, 0o700); err != nil {
 		t.Fatalf("preparing the tenant home: %v", err)
 	}
+	// Real workers provision before running commands. Invalid sources are tested separately.
+	_ = service.EnsureIdentity(env.remote.Tenant, env.remote.Workspace, env.remote.DshHome)
 	return env
 }
 
@@ -539,13 +541,16 @@ func TestEnsureIdentityPrefersTheAccountKey(t *testing.T) {
 	}
 }
 
-func TestEnsureIdentityRefusesWithoutASource(t *testing.T) {
+func TestEnsureIdentityAllowsWithoutASource(t *testing.T) {
 	env := newTestEnv(t, Options{})
 	// The helper seeds a key source for every other test; this one is about what happens
 	// when a deployment enables the feature and names none.
 	env.service.options.IdentitySource = ""
-	if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); CodeOf(err) != CodeInvalidState {
-		t.Fatalf("code = %q, want %q (%v)", CodeOf(err), CodeInvalidState, err)
+	if err := os.Remove(filepath.Join(env.remote.Workspace, ".ssh", "id_rsa")); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); err != nil {
+		t.Fatal(err)
 	}
 }
 

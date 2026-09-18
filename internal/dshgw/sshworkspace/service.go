@@ -108,11 +108,18 @@ func (s *Service) All() ([]Mount, error) { return s.store.Load() }
 // convenience. A missing identity is reported by the caller that needs it.
 func (s *Service) EnsureIdentity(tenant, workspace, dshHome string) error {
 	dir := filepath.Join(workspace, ".ssh")
+	if _, err := privatePath(workspace, filepath.Join(dir, "id_rsa")); err != nil {
+		return Wrap(CodeInvalidState, "unsafe ssh identity path", err)
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	keyPath := filepath.Join(dir, "id_rsa")
-	if !isFile(keyPath) {
+	_, managedErr := os.Lstat(filepath.Join(dir, "identity-managed"))
+	if managedErr != nil && !os.IsNotExist(managedErr) {
+		return managedErr
+	}
+	if !isFile(keyPath) && os.IsNotExist(managedErr) {
 		source := ""
 		if s.options.IdentityDir != "" {
 			candidate := filepath.Join(s.options.IdentityDir, tenant)
@@ -123,18 +130,17 @@ func (s *Service) EnsureIdentity(tenant, workspace, dshHome string) error {
 		if source == "" {
 			source = s.options.IdentitySource
 		}
-		if source == "" {
-			return Errorf(CodeInvalidState, "no ssh identity for %s: set ssh_workspaces.identity_source or ssh_workspaces.identity_dir/<account>", tenant)
-		}
-		if err := securefile.CheckPermissions(source, 0o600); err != nil {
-			return Wrap(CodeInvalidState, "ssh identity "+source+" must be a regular 0600 file", err)
-		}
-		data, err := securefile.ReadLimitedRegular(source, 64<<10)
-		if err != nil {
-			return Wrap(CodeInvalidState, "reading ssh identity "+source, err)
-		}
-		if err := securefile.WriteAtomic(keyPath, data, 0o600); err != nil {
-			return err
+		if source != "" {
+			if err := securefile.CheckPermissions(source, 0o600); err != nil {
+				return Wrap(CodeInvalidState, "ssh identity "+source+" must be a regular 0600 file", err)
+			}
+			data, err := securefile.ReadLimitedRegular(source, 64<<10)
+			if err != nil {
+				return Wrap(CodeInvalidState, "reading ssh identity "+source, err)
+			}
+			if err := securefile.WriteAtomic(keyPath, data, 0o600); err != nil {
+				return err
+			}
 		}
 	}
 	knownHosts := filepath.Join(dir, "known_hosts")
@@ -154,6 +160,11 @@ func (s *Service) EnsureIdentity(tenant, workspace, dshHome string) error {
 		// this account's HOME (its identity is the single key above), which ssh reports as a
 		// warning on every call and would silently pick the wrong key for a host.
 		if err := securefile.WriteAtomic(configPath, []byte(aliasConfig(data)), 0o644); err != nil {
+			return err
+		}
+	}
+	if !isFile(configPath) {
+		if err := securefile.WriteAtomic(configPath, []byte(aliasConfig(nil)), 0o644); err != nil {
 			return err
 		}
 	}
@@ -524,13 +535,23 @@ func (s *Service) prepareMountpoint(workspace, mountpoint string) error {
 // mount runs sshfs and verifies that something is actually mounted afterwards; a mount that
 // did not take is detached again instead of being recorded as working.
 func (s *Service) mount(ctx context.Context, remote Remote, host, remotePath, mountpoint string) error {
+	if err := s.options.permits(host); err != nil {
+		return err
+	}
+	if _, err := pathsFor(s.options, remote, host); err != nil {
+		return err
+	}
 	budget := s.options.ConnectTimeout
 	if budget <= 0 || budget > sshfsCallBudget {
 		budget = sshfsCallBudget
 	}
 	callCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	_, stderr, err := s.exec(callCtx, s.options.sshfsBin(), s.options.sshfsArgs(remote, host, remotePath, mountpoint), nil)
+	args := s.options.sshfsArgs(remote, host, remotePath, mountpoint)
+	if len(args) == 0 {
+		return Errorf(CodeAuthFailed, "ssh identity became unavailable")
+	}
+	_, stderr, err := s.exec(callCtx, s.options.sshfsBin(), args, nil)
 	if err != nil {
 		if errors.Is(err, exec.ErrNotFound) {
 			return Wrap(CodeSSHFSMissing, "sshfs is not installed", err)

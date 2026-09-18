@@ -820,9 +820,7 @@ func (c *Config) validateSSHWorkspaces() error {
 	if ssh.MaxEntries < 1 || ssh.MaxEntries > 100000 {
 		return errors.New("ssh_workspaces.max_entries must be between 1 and 100000")
 	}
-	if strings.TrimSpace(ssh.IdentitySource) == "" && strings.TrimSpace(ssh.IdentityDir) == "" {
-		return errors.New("ssh_workspaces is enabled but names no identity: set identity_source, or identity_dir for one key per account")
-	}
+	// Key sources are optional: accounts may upload their own identities in the UI.
 	if ssh.IdentitySource != "" {
 		info, err := os.Stat(ssh.IdentitySource)
 		if err != nil {
