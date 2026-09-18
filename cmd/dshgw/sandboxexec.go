@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -43,11 +42,6 @@ func (c *cli) sandboxExec(args []string) error {
 	deps, err := c.loadRuntime(false)
 	if err != nil {
 		return err
-	}
-	if mode, modeErr := deps.cfg.IsolationMode(); modeErr != nil {
-		return modeErr
-	} else if mode != config.IsolationBwrap {
-		return errors.New("sandbox-exec requires deploy.isolation: bwrap")
 	}
 	if err := sandbox.ValidateRuntime(sandboxRuntimeConfig(deps.cfg)); err != nil {
 		return sandboxFailure(err)
@@ -124,44 +118,4 @@ func checkAppArmorUserNSRestriction() error {
 	default:
 		return fmt.Errorf("%s has unusable value %q", appArmorRestrictPath, value)
 	}
-}
-
-// checkBwrapWorkerUnit cross-checks the installed bwrap unit template against
-// the running configuration. The template is installed verbatim by
-// deploy/dshgw/install.sh and carries no placeholders, so config edits and unit
-// edits could otherwise drift apart silently — tenant list would report one
-// worker identity while systemd ran another.
-func checkBwrapWorkerUnit(cfg *config.Config) error {
-	if cfg.Deploy.WorkerUnitBwrap == "" {
-		return errors.New("deploy.worker_unit_bwrap is not configured")
-	}
-	path := filepath.Join(cfg.Deploy.SystemdDir, cfg.Deploy.WorkerUnitBwrap)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	want := map[string]string{
-		"User":      cfg.Deploy.WorkerUser,
-		"Group":     cfg.Deploy.GatewayGroup,
-		"ExecStart": fmt.Sprintf("%s --config %s sandbox-exec %%i", cfg.Deploy.DshgwBinary, cfg.Deploy.ConfigPath),
-	}
-	got := map[string]string{}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		for key := range want {
-			if value, ok := strings.CutPrefix(line, key+"="); ok {
-				got[key] = value
-			}
-		}
-	}
-	for key, expected := range want {
-		value, ok := got[key]
-		if !ok {
-			return fmt.Errorf("%s has no %s= line", path, key)
-		}
-		if value != expected {
-			return fmt.Errorf("%s sets %s=%q but the configuration implies %q; reinstall deploy/dshgw/%s or align /etc/dshgw/config.yaml", path, key, value, expected, cfg.Deploy.WorkerUnitBwrap)
-		}
-	}
-	return nil
 }

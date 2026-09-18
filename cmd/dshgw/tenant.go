@@ -37,9 +37,6 @@ func (c *cli) flagSet(name string) *flag.FlagSet {
 	return fs
 }
 func (c *cli) tenantCreate(ctx context.Context, args []string) error {
-	if err := requireRoot(); err != nil {
-		return err
-	}
 	fs := c.flagSet("tenant create")
 	keyFile := fs.String("key-file", "", "read API key from a mode-0600 absolute file")
 	allowEmpty := fs.Bool("allow-empty-models", false, "create pending tenant when model list is empty")
@@ -154,9 +151,6 @@ func (c *cli) tenantList(ctx context.Context, args []string) error {
 }
 
 func (c *cli) tenantRotate(ctx context.Context, args []string) error {
-	if err := requireRoot(); err != nil {
-		return err
-	}
 	fs := c.flagSet("tenant rotate-key")
 	keyFile := fs.String("key-file", "", "read new API key from file")
 	keepOld := fs.Bool("keep-old-prefix", false, "retain old public prefix as login alias")
@@ -189,9 +183,6 @@ func (c *cli) tenantRotate(ctx context.Context, args []string) error {
 	return nil
 }
 func (c *cli) tenantRestart(ctx context.Context, args []string) error {
-	if err := requireRoot(); err != nil {
-		return err
-	}
 	if len(args) != 1 {
 		return errors.New("usage: dshgw tenant restart NAME")
 	}
@@ -217,9 +208,6 @@ func tenantRemovalError(snapshot string, err error) error {
 }
 
 func (c *cli) tenantRemove(ctx context.Context, args []string) error {
-	if err := requireRoot(); err != nil {
-		return err
-	}
 	fs := c.flagSet("tenant remove")
 	purge := fs.Bool("purge", false, "delete state and workspace after snapshot")
 	yes := fs.Bool("yes", false, "confirm irreversible purge")

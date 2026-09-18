@@ -148,7 +148,7 @@ func TestTenantListJSONIncludesReadOnlyMetadata(t *testing.T) {
 		"dsh_home": tenant.DshHome, "workspace": tenant.Workspace,
 		"created_at":       created.UTC().Format(time.RFC3339Nano),
 		"handshake_path":   filepath.Join(state, "handshake/alice.url"),
-		"gateway_key_path": "/etc/dshgw/tenants/alice/gateway.key",
+		"gateway_key_path": filepath.Join(state, "tenants/alice/gateway.key"),
 		"aigw_base_url":    "http://192.168.190.86:8088", "key_revalidate": "off",
 		"portal_url": "https://portal.example.test:32600/",
 	}

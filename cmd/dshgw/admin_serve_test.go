@@ -46,14 +46,14 @@ func (s *stubOps) SetKey(_ context.Context, name, key string) error {
 }
 func (s *stubOps) List() []registry.Tenant { return s.tenants }
 
-func startTestAdminServer(t *testing.T, ops AdminOps, allowedUIDs []int) (string, func()) {
+func startTestAdminServer(t *testing.T, ops AdminOps, ownerUID int) (string, func()) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "admin.sock")
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &AdminServer{Ops: ops, AllowedUID: allowedUIDs}
+	server := &AdminServer{Ops: ops, OwnerUID: ownerUID}
 	ctx, cancel := context.WithCancel(context.Background())
 	go server.Serve(ctx, ln)
 	return path, func() { cancel(); ln.Close() }
@@ -87,7 +87,7 @@ func adminCall(t *testing.T, path string, req adminRequest) adminResponse {
 
 func TestAdminServerLifecycleOpsAndPeerGate(t *testing.T) {
 	ops := &stubOps{}
-	path, stop := startTestAdminServer(t, ops, []int{os.Geteuid()})
+	path, stop := startTestAdminServer(t, ops, os.Geteuid())
 	defer stop()
 
 	resp := adminCall(t, path, adminRequest{ID: 1, Op: "ping"})
@@ -131,11 +131,11 @@ func TestAdminServerLifecycleOpsAndPeerGate(t *testing.T) {
 }
 
 func TestAdminServerRejectsForeignPeerUID(t *testing.T) {
-	// SO_PEERCRED reports the connecting process's real UID. The test process connects as
-	// itself, so an allowlist that does not contain that UID must be refused before any
-	// protocol byte is read.
+	// SO_PEERCRED reports the connecting process's real UID. The test process
+	// connects as itself, so a socket owned by another account must refuse it
+	// before any protocol byte is read.
 	ops := &stubOps{}
-	path, stop := startTestAdminServer(t, ops, []int{os.Geteuid() + 1})
+	path, stop := startTestAdminServer(t, ops, os.Geteuid()+1)
 	defer stop()
 	conn, err := net.Dial("unix", path)
 	if err != nil {
@@ -162,13 +162,9 @@ func TestListenAdminRequiresConfig(t *testing.T) {
 	if _, err := ListenAdmin(empty); err == nil {
 		t.Fatal("empty socket path must be rejected")
 	}
-	relative := &config.Config{AdminSocket: "admin.sock", AdminAllowedUIDs: []int{os.Geteuid()}}
+	relative := &config.Config{AdminSocket: "admin.sock"}
 	if _, err := ListenAdmin(relative); err == nil {
 		t.Fatal("relative socket path must be rejected")
-	}
-	noUIDs := &config.Config{AdminSocket: filepath.Join(dir, "admin.sock")}
-	if _, err := ListenAdmin(noUIDs); err == nil {
-		t.Fatal("empty uid allowlist must be rejected")
 	}
 	// Real bind: the socket file must exist and be mode 0660 with the single allowed UID
 	// as owner, so the aigw user can connect and nobody else can even find it writable.
@@ -182,7 +178,9 @@ func TestListenAdminRequiresConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o660 {
+	// 0600: the channel admits only the account that owns the socket, so it must
+	// not be reachable by anyone else in the first place.
+	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("socket mode %v", info.Mode().Perm())
 	}
 	if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Uid != uint32(os.Geteuid()) {

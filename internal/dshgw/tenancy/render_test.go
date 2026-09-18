@@ -15,7 +15,7 @@ import (
 func renderFixture(t *testing.T) (*config.Config, registry.Tenant) {
 	t.Helper()
 	root := t.TempDir()
-	cfg := &config.Config{EdgePortHeader: "X-DSHGW-Port", AigwBaseURL: "http://aigw:8088", DirectoryPicker: "clamp", PluginBrowserFS: "on", WorkspaceSeed: []string{"work", "projects"}, Dsh: config.DshRuntime{CurrentLink: "/opt/dsh/current"}, TLS: config.TLSConfig{Certificate: "/cert/full.pem", CertificateKey: "/cert/key.pem"}, Deploy: config.DeployConfig{PluginPath: "/opt/dshgw/share/dsh-plugin/picker-clamp.js", TenantConfigRoot: filepath.Join(root, "etc"), PublicListen: "0.0.0.0"}, PublicHost: "dsh.example", PortalPort: 32600, Listen: "127.0.0.1:3099"}
+	cfg := &config.Config{EdgePortHeader: "X-DSHGW-Port", AigwBaseURL: "http://aigw:8088", DirectoryPicker: "clamp", PluginBrowserFS: "on", WorkspaceSeed: []string{"work", "projects"}, Dsh: config.DshRuntime{CurrentLink: "/opt/dsh/current"}, Deploy: config.DeployConfig{PluginPath: "/opt/dshgw/share/dsh-plugin/picker-clamp.js", TenantConfigRoot: filepath.Join(root, "etc")}, PublicHost: "dsh.example", PortalPort: 32600, Listen: "127.0.0.1:3099"}
 	tenant := registry.Tenant{Name: "alice", WorkerPort: 32100, PublicPort: 32601, DshHome: filepath.Join(root, "state/alice/.dsh"), Workspace: filepath.Join(root, "srv/alice")}
 	return cfg, tenant
 }

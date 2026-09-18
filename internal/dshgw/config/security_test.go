@@ -18,11 +18,9 @@ func TestRejectMalformedEdgeAndDeploymentConfiguration(t *testing.T) {
 		"workspace_root: /\n",
 		"state_dir: /\n",
 		"state_dir: /tmp/../etc\n",
-		"tls:\n  certificate: '/tmp/space cert.pem'\n",
-		"tls:\n  certificate: '/tmp/$variable.pem'\n",
 		"deploy:\n  gateway_user: 'root;bad'\n",
 		"deploy:\n  dsh_user_prefix: prefix-too-long\n",
-		"deploy:\n  worker_unit: ../dsh-worker@.service\n",
+		"deploy:\n  bwrap_bin: ../../usr/bin/bwrap\n",
 		"deploy:\n  worker_unit: dsh-worker.service\n",
 		"deploy:\n  nginx_include_path: /etc/nginx/conf.d/dshgw/recursive.conf\n",
 		"key_revalidate: interval:9223372036854775807\n",
@@ -31,7 +29,7 @@ func TestRejectMalformedEdgeAndDeploymentConfiguration(t *testing.T) {
 			t.Errorf("unsafe config accepted: %s", body)
 		}
 	}
-	if _, err := Load(writeConfig(t, "edge_port_header: X-Tenant-Port\ntls:\n  certificate: /srv/certs/*.example.test/fullchain.pem\n")); err != nil {
+	if _, err := Load(writeConfig(t, "edge_port_header: X-Tenant-Port\n")); err != nil {
 		t.Fatalf("safe custom header/literal certificate path rejected: %v", err)
 	}
 }

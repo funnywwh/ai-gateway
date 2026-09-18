@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) -X main.revision=$(REVISION) -X main.date=
 UIDIST ?= $(CURDIR)/.cache/ui-dist
 UI_OVERLAY ?= $(UIDIST)/overlay.json
 
-.PHONY: all build build-src ui-dist test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check dshgw-build dshgw-test dshgw-verify dshgw-nginx-test dshgw-sandbox-test
+.PHONY: all build build-src ui-dist test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check dshgw-build dshgw-test dshgw-verify dshgw-sandbox-test
 
 all: build
 
@@ -95,8 +95,14 @@ dshgw-test:
 	@$(GOENV) DSHGW_NODE="$(DSHGW_NODE)" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" go test ./internal/dshgw/... ./cmd/dshgw ./internal/arch
 	@test -x "$(DSHGW_NODE)" || { echo "dshgw-test: Node missing: $(DSHGW_NODE)" >&2; exit 1; }
 	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" cmd/dshgw/plugin/picker-clamp.test.mjs
-	@PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_dshgw_host_acceptance.py
-	@PYTHONDONTWRITEBYTECODE=1 DSHGW_NODE="$(DSHGW_NODE)" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" python3 scripts/test_dshgw_host_protocol.py
+
+# The bwrap isolation mode's real acceptance: the tenant profile runs under the
+# host's own bubblewrap, and a real dsh web worker starts inside it and answers
+# the gateway's unauthenticated /api probe with 401. Both tests skip themselves
+# where an unprivileged user namespace is unavailable, so this target is safe to
+# call from any checkout, but it is only meaningful on the deployment host.
+dshgw-sandbox-test:
+	@$(GOENV) DSHGW_NODE="$(DSHGW_NODE)" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" go test ./internal/dshgw/sandbox -run '^TestStaging' -count=1 -v
 
 # The bwrap isolation mode's real acceptance: the tenant profile runs under the
 # host's own bubblewrap, and a real dsh web worker starts inside it and answers
@@ -112,11 +118,6 @@ dshgw-nginx-test:
 	@$(GOENV) DSHGW_TEST_NGINX=1 go test ./internal/dshgw/proxy -run '^TestNginxTLSProxyIntegration$$' -count=1 -timeout=90s
 
 dshgw-verify: dshgw-test dshgw-build
-	@if command -v nginx >/dev/null 2>&1 && [ "$$(id -u)" != 0 ]; then \
-		$(MAKE) --no-print-directory dshgw-nginx-test; \
-	else \
-		echo 'SKIP: real nginx regression needs nginx on PATH and a non-root user (make dshgw-nginx-test)'; \
-	fi
 	@$(MAKE) --no-print-directory dshgw-sandbox-test
 	@$(GOENV) go vet ./internal/dshgw/... ./cmd/dshgw ./internal/arch
 	@DSHGW_NODE="$(DSHGW_NODE)" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" bash scripts/verify-dshgw.sh

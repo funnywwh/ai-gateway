@@ -22,7 +22,6 @@ const DefaultPath = "/etc/dshgw/config.yaml"
 
 var tenantNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,25}[a-z0-9]$|^[a-z]$`)
 var edgeHeaderRE = regexp.MustCompile(`(?i)^x-[a-z0-9]+(?:-[a-z0-9]+)*$`)
-var unitNameRE = regexp.MustCompile(`^[A-Za-z0-9_.@-]+$`)
 var accountNameRE = regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`)
 var publicHostRE = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$`)
 
@@ -60,48 +59,25 @@ type DshRuntime struct {
 	CurrentLink  string `yaml:"current_link" json:"current_link"`
 }
 
-// TLSConfig names the existing certificate reused by host nginx.
-type TLSConfig struct {
-	Certificate    string `yaml:"certificate" json:"certificate"`
-	CertificateKey string `yaml:"certificate_key" json:"certificate_key"`
-}
-
-// DeployConfig contains paths used only by root-operated provisioning commands.
+// DeployConfig holds the paths and identities a dshgw instance needs. Everything
+// that described the deleted systemd/nginx/root shape (units, slices, nginx
+// directories, per-tenant account prefixes, TLS for an external edge) is gone:
+// dshgw now runs as aigw's child, starts tenant workers as its own processes, and
+// owns no host-side service configuration.
 type DeployConfig struct {
-	SystemdDir       string `yaml:"systemd_dir" json:"systemd_dir"`
-	NginxDir         string `yaml:"nginx_dir" json:"nginx_dir"`
-	NginxIncludePath string `yaml:"nginx_include_path" json:"nginx_include_path"`
-	NginxBinary      string `yaml:"nginx_binary" json:"nginx_binary"`
-	DshgwBinary      string `yaml:"dshgw_binary" json:"dshgw_binary"`
 	PluginPath       string `yaml:"plugin_path" json:"plugin_path"`
 	TemplateHome     string `yaml:"template_home" json:"template_home"`
 	BackupDir        string `yaml:"backup_dir" json:"backup_dir"`
-	PublicListen     string `yaml:"public_listen" json:"public_listen"`
-	WorkerUnit       string `yaml:"worker_unit" json:"worker_unit"`
-	GatewayUnit      string `yaml:"gateway_unit" json:"gateway_unit"`
-	WorkerSlice      string `yaml:"worker_slice" json:"worker_slice"`
 	TenantConfigRoot string `yaml:"tenant_config_root" json:"tenant_config_root"`
 	ConfigPath       string `yaml:"config_path" json:"config_path"`
-	GatewayUser      string `yaml:"gateway_user" json:"gateway_user"`
-	GatewayGroup     string `yaml:"gateway_group" json:"gateway_group"`
-	DshUserPrefix    string `yaml:"dsh_user_prefix" json:"dsh_user_prefix"`
-	CorepackBin      string `yaml:"corepack_bin" json:"corepack_bin"`
-	// Isolation selects how a tenant worker is confined: "user" (default) gives
-	// every tenant its own Linux account and therefore a UID boundary; "bwrap"
-	// runs every worker as one shared unprivileged account inside a per-tenant
-	// bubblewrap mount namespace and creates no per-tenant OS user. The two
-	// modes use different worker unit templates and cannot be mixed in one
-	// deployment.
-	Isolation string `yaml:"isolation" json:"isolation"`
-	// WorkerUnitBwrap is the worker unit template used by the bwrap isolation
-	// mode. Defaults to WorkerUnit with "-bwrap" before the "@".
-	WorkerUnitBwrap string `yaml:"worker_unit_bwrap" json:"worker_unit_bwrap"`
-	// WorkerUser runs every worker in the bwrap isolation mode. It must be an
-	// existing unprivileged account; normal practice is to omit it and reuse
-	// GatewayUser rather than create a second service account.
+	// GatewayUser is the account the gateway runs as. It is the default for
+	// WorkerUser so a deployment does not need a second service account.
+	GatewayUser string `yaml:"gateway_user" json:"gateway_user"`
+	// WorkerUser is the unprivileged account every tenant worker runs as. It must
+	// not be root: a root caller could build a wider namespace instead of living
+	// inside the tenant's profile.
 	WorkerUser string `yaml:"worker_user" json:"worker_user"`
-	// BwrapBin is the bubblewrap executable the sandbox-exec launcher and the
-	// doctor preflight use.
+	// BwrapBin is the bubblewrap executable the sandbox profile and doctor use.
 	BwrapBin string `yaml:"bwrap_bin" json:"bwrap_bin"`
 }
 
@@ -134,7 +110,6 @@ type Config struct {
 	WorkspaceSeed    []string     `yaml:"workspace_seed" json:"workspace_seed"`
 	ReservedNames    []string     `yaml:"reserved_names" json:"reserved_names"`
 	Dsh              DshRuntime   `yaml:"dsh" json:"dsh"`
-	TLS              TLSConfig    `yaml:"tls" json:"tls"`
 	Deploy           DeployConfig `yaml:"deploy" json:"deploy"`
 	TenantRoot       string       `yaml:"tenant_root" json:"tenant_root"`
 	WorkspaceRoot    string       `yaml:"workspace_root" json:"workspace_root"`
@@ -182,26 +157,12 @@ func defaults() Config {
 		WorkspaceRoot: "/srv/dsh",
 		StateDir:      "/var/lib/dshgw",
 		Deploy: DeployConfig{
-			SystemdDir:       "/etc/systemd/system",
-			NginxDir:         "/etc/nginx/conf.d/dshgw",
-			NginxIncludePath: "/etc/nginx/conf.d/dshgw.conf",
-			NginxBinary:      "/usr/sbin/nginx",
-			DshgwBinary:      "/opt/dshgw/bin/dshgw",
-			PluginPath:       "/opt/dshgw/share/dsh-plugin/picker-clamp.js",
-			TemplateHome:     "/opt/dshgw/share/template-home",
-			BackupDir:        "/home/winger/backups/dshgw",
-			PublicListen:     "0.0.0.0",
-			WorkerUnit:       "dsh-worker@.service",
-			GatewayUnit:      "dshgw.service",
-			WorkerSlice:      "dsh-workers.slice",
-			TenantConfigRoot: "/etc/dshgw/tenants",
-			ConfigPath:       DefaultPath,
-			GatewayUser:      "dshgw",
-			GatewayGroup:     "dshgw",
-			DshUserPrefix:    "dsh-",
-			CorepackBin:      "/opt/dsh/node/bin/corepack",
-			Isolation:        IsolationUser,
-			BwrapBin:         "/usr/bin/bwrap",
+			PluginPath:   "/opt/dshgw/share/dsh-plugin/picker-clamp.js",
+			TemplateHome: "/opt/dshgw/share/template-home",
+			BackupDir:    "/home/winger/backups/dshgw",
+			ConfigPath:   DefaultPath,
+			GatewayUser:  "dshgw",
+			BwrapBin:     "/usr/bin/bwrap",
 		},
 	}
 }
@@ -256,11 +217,16 @@ func (c *Config) applyDerivedDefaults() {
 	if c.Deploy.WorkerUser == "" {
 		c.Deploy.WorkerUser = c.Deploy.GatewayUser
 	}
+	// The per-tenant configuration (today: the gateway's copy of the tenant key)
+	// lives under the state directory. It cannot stay at /etc/dshgw/tenants: that
+	// path is root-owned in a host installation, and this shape runs as an
+	// ordinary account. It is still a separate directory from the tenant's own
+	// .dsh so the sandbox never mounts it (see internal/dshgw/sandbox).
+	if c.Deploy.TenantConfigRoot == "" {
+		c.Deploy.TenantConfigRoot = filepath.Join(c.StateDir, "tenants")
+	}
 	if c.RegistryPath == "" {
 		c.RegistryPath = filepath.Join(c.StateDir, "registry.json")
-	}
-	if c.Deploy.WorkerUnitBwrap == "" {
-		c.Deploy.WorkerUnitBwrap = strings.Replace(c.Deploy.WorkerUnit, "@.service", "-bwrap@.service", 1)
 	}
 	if c.KeyMapPath == "" {
 		c.KeyMapPath = filepath.Join(c.StateDir, "keys.map")
@@ -326,9 +292,6 @@ func (c *Config) Validate() error {
 	if c.MaxSessions < 1 || c.MaxSessions > 1_000_000 {
 		return errors.New("max_sessions must be between 1 and 1000000")
 	}
-	if net.ParseIP(c.Deploy.PublicListen) == nil {
-		return errors.New("deploy.public_listen must be one IP address")
-	}
 	u, err := url.Parse(c.AigwBaseURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("aigw_base_url must be an absolute http(s) URL without credentials, query, or fragment")
@@ -367,13 +330,12 @@ func (c *Config) Validate() error {
 		"state_dir": c.StateDir, "registry_path": c.RegistryPath, "key_map_path": c.KeyMapPath,
 		"session_path": c.SessionPath, "audit_path": c.AuditPath, "activity_path": c.ActivityPath, "dsh.node_bin": c.Dsh.NodeBin, "dsh.bin_js": c.Dsh.BinJS,
 		"dsh.releases_root": c.Dsh.ReleasesRoot, "dsh.current_link": c.Dsh.CurrentLink,
-		"deploy.systemd_dir": c.Deploy.SystemdDir, "deploy.nginx_dir": c.Deploy.NginxDir,
-		"deploy.nginx_include_path": c.Deploy.NginxIncludePath,
-		"deploy.dshgw_binary":       c.Deploy.DshgwBinary, "deploy.plugin_path": c.Deploy.PluginPath,
-		"deploy.template_home": c.Deploy.TemplateHome, "deploy.backup_dir": c.Deploy.BackupDir,
+		"deploy.plugin_path":        c.Deploy.PluginPath,
+		"deploy.template_home":      c.Deploy.TemplateHome,
+		"deploy.backup_dir":         c.Deploy.BackupDir,
 		"deploy.tenant_config_root": c.Deploy.TenantConfigRoot,
-		"deploy.config_path":        c.Deploy.ConfigPath, "deploy.corepack_bin": c.Deploy.CorepackBin,
-		"deploy.nginx_binary": c.Deploy.NginxBinary,
+		"deploy.config_path":        c.Deploy.ConfigPath,
+		"deploy.bwrap_bin":          c.Deploy.BwrapBin,
 	}
 	for label, p := range paths {
 		if !filepath.IsAbs(p) || filepath.Clean(p) != p {
@@ -383,79 +345,18 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("%s contains unsafe configuration characters", label)
 		}
 	}
-	relInclude, err := filepath.Rel(c.Deploy.NginxDir, c.Deploy.NginxIncludePath)
-	if err != nil {
-		return err
-	}
-	if relInclude == "." || relInclude != ".." && !strings.HasPrefix(relInclude, ".."+string(filepath.Separator)) {
-		return errors.New("deploy.nginx_include_path must be outside the managed nginx_dir")
-	}
-	for label, p := range map[string]string{"tls.certificate": c.TLS.Certificate, "tls.certificate_key": c.TLS.CertificateKey, "deploy.nginx_dir": c.Deploy.NginxDir, "deploy.nginx_include_path": c.Deploy.NginxIncludePath} {
-		if p == "" && strings.HasPrefix(label, "tls.") {
-			continue // Required by render-nginx, not disposable CLI contracts.
-		}
-		if !filepath.IsAbs(p) || strings.ContainsAny(p, " \t\r\n\x00;{}\"'\\$") {
-			return fmt.Errorf("%s is unsafe for nginx configuration", label)
-		}
-	}
 	for label, root := range map[string]string{"tenant_root": c.TenantRoot, "workspace_root": c.WorkspaceRoot, "state_dir": c.StateDir} {
 		if root == "/" {
 			return fmt.Errorf("%s must not be filesystem root", label)
 		}
 	}
-	if !accountNameRE.MatchString(c.Deploy.GatewayUser) || len(c.Deploy.GatewayUser) > 32 || !accountNameRE.MatchString(c.Deploy.GatewayGroup) || len(c.Deploy.GatewayGroup) > 32 || !accountNameRE.MatchString(c.Deploy.DshUserPrefix) || len(c.Deploy.DshUserPrefix) > 5 {
-		return errors.New("deploy OS account names or tenant user prefix are invalid")
-	}
-	for _, unit := range []string{c.Deploy.WorkerUnit, c.Deploy.GatewayUnit, c.Deploy.WorkerSlice} {
-		if !unitNameRE.MatchString(unit) || strings.HasPrefix(unit, "-") {
-			return errors.New("deploy unit names must be safe systemd identifiers")
-		}
-	}
-	if !strings.HasSuffix(c.Deploy.WorkerUnit, "@.service") || strings.Count(c.Deploy.WorkerUnit, "@") != 1 || !strings.HasSuffix(c.Deploy.GatewayUnit, ".service") || !strings.HasSuffix(c.Deploy.WorkerSlice, ".slice") {
-		return errors.New("deploy worker_unit, gateway_unit and worker_slice have incorrect suffixes")
-	}
-	if _, err := c.IsolationMode(); err != nil {
-		return err
-	}
-	if c.Deploy.Isolation == IsolationBwrap {
-		if !accountNameRE.MatchString(c.Deploy.WorkerUser) || len(c.Deploy.WorkerUser) > 32 {
-			return errors.New("deploy.worker_user must be one existing unprivileged account name when isolation is bwrap")
-		}
-		if !filepath.IsAbs(c.Deploy.BwrapBin) || filepath.Clean(c.Deploy.BwrapBin) != c.Deploy.BwrapBin || strings.ContainsAny(c.Deploy.BwrapBin, " \t\r\n\x00;{}\"'\\$") {
-			return errors.New("deploy.bwrap_bin must be a clean absolute path without shell metacharacters")
-		}
-		if !unitNameRE.MatchString(c.Deploy.WorkerUnitBwrap) || strings.HasPrefix(c.Deploy.WorkerUnitBwrap, "-") ||
-			!strings.HasSuffix(c.Deploy.WorkerUnitBwrap, "@.service") || strings.Count(c.Deploy.WorkerUnitBwrap, "@") != 1 {
-			return errors.New("deploy.worker_unit_bwrap must be a safe systemd template name ending in @.service")
-		}
-		if c.Deploy.WorkerUnitBwrap == c.Deploy.WorkerUnit {
-			return errors.New("deploy.worker_unit_bwrap must differ from worker_unit: the two isolation modes need different unit templates")
+	for label, account := range map[string]string{"deploy.gateway_user": c.Deploy.GatewayUser, "deploy.worker_user": c.Deploy.WorkerUser} {
+		if !accountNameRE.MatchString(account) || len(account) > 32 {
+			return fmt.Errorf("%s must be a valid OS account name", label)
 		}
 	}
 	return nil
 }
-
-// IsolationMode validates and returns the configured isolation mode.
-func (c *Config) IsolationMode() (string, error) {
-	switch c.Deploy.Isolation {
-	case "", IsolationUser:
-		return IsolationUser, nil
-	case IsolationBwrap:
-		return IsolationBwrap, nil
-	default:
-		return "", fmt.Errorf("deploy.isolation must be %q or %q", IsolationUser, IsolationBwrap)
-	}
-}
-
-// Isolation modes for tenant workers.
-const (
-	// IsolationUser gives every tenant its own Linux account (UID boundary).
-	IsolationUser = "user"
-	// IsolationBwrap runs every worker as one shared unprivileged account
-	// inside a per-tenant bubblewrap mount namespace, creating no per-tenant
-	// OS user.
-	IsolationBwrap = "bwrap"
-)
 
 func rangesOverlap(aLo, aHi, bLo, bHi int) bool { return aLo <= bHi && bLo <= aHi }
 

@@ -173,7 +173,7 @@ func TestSandboxExecPrintRendersProfileFromConfiguration(t *testing.T) {
 		"dsh:\n  node_bin: " + filepath.Join(root, "dsh/node/bin/node") + "\n" +
 		"  bin_js: " + filepath.Join(root, "dsh/releases/r1/lib/bin.js") + "\n" +
 		"  current_link: " + filepath.Join(root, "dsh/current") + "\n" +
-		"deploy:\n  isolation: bwrap\n  worker_user: " + current.Username + "\n"
+		"deploy:\n  worker_user: " + current.Username + "\n"
 	mustWriteFile(t, configPath, doc, 0o600)
 	registryDoc := fmt.Sprintf(`{"version":1,"tenants":[{"name":"alice","uid":%d,"public_port":32601,"worker_port":32100,`+
 		`"key_prefix":"sk-aaaaaaaaa","dsh_home":%q,"workspace":%q,"created_at":"2025-01-01T00:00:00Z",`+
@@ -204,7 +204,7 @@ func deploymentConfigIn(t *testing.T, root, extraDeploy string) *config.Config {
 	t.Helper()
 	path := filepath.Join(root, "config.yaml")
 	doc := "state_dir: " + filepath.Join(root, "state") + "\n" +
-		"deploy:\n  isolation: bwrap\n" + extraDeploy
+		"deploy:\n" + extraDeploy
 	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
 		t.Fatal(err)
 	}

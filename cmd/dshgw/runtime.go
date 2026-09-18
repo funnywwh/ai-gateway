@@ -13,7 +13,6 @@ import (
 	"github.com/winger/ai-gateway/internal/dshgw/tenancy"
 	"io"
 	"net/http"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -45,12 +44,6 @@ func (c *cli) loadRuntime(withSessions bool) (*runtimeDeps, error) {
 		manager.Sessions = store
 	}
 	return &runtimeDeps{cfg: cfg, reg: reg, validator: client, manager: manager}, nil
-}
-func requireRoot() error {
-	if os.Geteuid() != 0 {
-		return errors.New("this command must run as root")
-	}
-	return nil
 }
 func readKey(input io.Reader, keyFile string) (string, error) {
 	var data []byte

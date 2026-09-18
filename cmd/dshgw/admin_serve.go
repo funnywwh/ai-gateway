@@ -122,9 +122,11 @@ type adminResponse struct {
 
 // AdminServer answers one newline-delimited JSON request per connection.
 type AdminServer struct {
-	Ops        AdminOps
-	AllowedUID []int
-	Log        logger
+	Ops AdminOps
+	// OwnerUID is the only peer UID the channel admits: the account that
+	// created the socket.
+	OwnerUID int
+	Log      logger
 }
 
 type logger interface {
@@ -144,16 +146,13 @@ func (l stdLogger) log(level, msg string, args ...any) {
 func (l stdLogger) Warn(msg string, args ...any) { l.log("WARN", msg, args...) }
 func (l stdLogger) Info(msg string, args ...any) { l.log("INFO", msg, args...) }
 
+// allowed admits only the account that owns the socket — the account dshgw
+// itself runs as. The channel provisions tenants and hands over API keys, so its
+// only ingress is a same-UID UNIX socket: there is no uid allow-list to get wrong
+// and no root-owned socket to defend, because nothing outside this account can
+// reach it.
 func (s *AdminServer) allowed(uid int) bool {
-	if uid == 0 {
-		return true
-	}
-	for _, candidate := range s.AllowedUID {
-		if candidate == uid {
-			return true
-		}
-	}
-	return false
+	return uid == s.OwnerUID
 }
 
 func (s *AdminServer) log() logger {
@@ -324,9 +323,6 @@ func ListenAdmin(cfg *config.Config) (net.Listener, error) {
 	if !filepath.IsAbs(cfg.AdminSocket) {
 		return nil, errors.New("admin_socket must be an absolute path")
 	}
-	if len(cfg.AdminAllowedUIDs) == 0 {
-		return nil, errors.New("admin_allowed_uids must list at least one peer UID (typically the aigw runtime user)")
-	}
 	dir := filepath.Dir(cfg.AdminSocket)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
@@ -339,23 +335,16 @@ func ListenAdmin(cfg *config.Config) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(cfg.AdminSocket, 0o660); err != nil {
+	// 0600: the socket is reachable only by the account that created it, which is
+	// exactly the peer the server admits.
+	if err := os.Chmod(cfg.AdminSocket, 0o600); err != nil {
 		ln.Close()
 		return nil, err
-	}
-	if len(cfg.AdminAllowedUIDs) == 1 {
-		if err := os.Chown(cfg.AdminSocket, cfg.AdminAllowedUIDs[0], -1); err != nil {
-			ln.Close()
-			return nil, err
-		}
 	}
 	return ln, nil
 }
 
 func (c *cli) adminServe(ctx context.Context) error {
-	if err := requireRoot(); err != nil {
-		return err
-	}
 	deps, err := c.loadRuntime(false)
 	if err != nil {
 		return err
@@ -366,10 +355,10 @@ func (c *cli) adminServe(ctx context.Context) error {
 	}
 	defer ln.Close()
 	server := &AdminServer{
-		Ops:        managerOps{m: deps.manager, validator: deps.validator, cfg: deps.cfg},
-		AllowedUID: deps.cfg.AdminAllowedUIDs,
+		Ops:      managerOps{m: deps.manager, validator: deps.validator, cfg: deps.cfg},
+		OwnerUID: os.Geteuid(),
 	}
-	fmt.Fprintf(c.stdout, "dshgw admin channel listening on %s (allowed uids: %v)\n", ln.Addr(), deps.cfg.AdminAllowedUIDs)
+	fmt.Fprintf(c.stdout, "dshgw admin channel listening on %s (owner uid %d only)\n", ln.Addr(), os.Geteuid())
 	// admin-serve is a long-running daemon: the generic 2-minute command timeout does not
 	// apply, the caller passes a context without a deadline.
 	go func() { <-ctx.Done(); ln.Close() }()

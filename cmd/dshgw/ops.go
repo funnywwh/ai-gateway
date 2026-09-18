@@ -17,9 +17,6 @@ import (
 )
 
 func (c *cli) bind(args []string) error {
-	if err := requireRoot(); err != nil {
-		return err
-	}
 	if len(args) != 2 {
 		return errors.New("usage: dshgw bind PREFIX TENANT")
 	}
@@ -64,9 +61,6 @@ func (c *cli) loginURL(args []string) error {
 	return nil
 }
 func (c *cli) syncModels(ctx context.Context, args []string) error {
-	if err := requireRoot(); err != nil {
-		return err
-	}
 	if len(args) != 1 {
 		return errors.New("usage: dshgw sync-models TENANT")
 	}
@@ -93,9 +87,6 @@ func (c *cli) syncModels(ctx context.Context, args []string) error {
 	return nil
 }
 func (c *cli) revalidate(ctx context.Context, args []string) error {
-	if err := requireRoot(); err != nil {
-		return err
-	}
 	if len(args) > 1 {
 		return errors.New("usage: dshgw revalidate [TENANT]")
 	}
@@ -214,9 +205,6 @@ func (c *cli) contract(ctx context.Context, args []string) error {
 	return nil
 }
 func (c *cli) backup(ctx context.Context, args []string) error {
-	if err := requireRoot(); err != nil {
-		return err
-	}
 	if len(args) != 0 {
 		return errors.New("usage: dshgw backup")
 	}

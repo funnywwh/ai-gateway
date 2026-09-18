@@ -14,20 +14,7 @@ cleanup(){
 }
 trap cleanup EXIT
 
-bash -n "$ROOT/deploy/dshgw/install.sh" "$ROOT/deploy/dshgw/prepare-template.sh"
-if command -v systemd-analyze >/dev/null 2>&1; then
-  mkdir -p "$TMP/units"
-  sed "s#/opt/dshgw/bin/dshgw#$ROOT/bin/dshgw#g" "$ROOT/deploy/dshgw/dshgw.service" >"$TMP/units/dshgw.service"
-  sed -e "s#/opt/dshgw/bin/dshgw#$ROOT/bin/dshgw#g" -e "s#/opt/dsh/node/bin/node#$NODE#g" \
-    "$ROOT/deploy/dshgw/dsh-worker@.service" >"$TMP/units/dsh-worker@.service"
-  # The bwrap isolation unit is installed verbatim (systemd expands %i), so a
-  # placeholder or a typo in it would be a live deployment failure. Parsing it
-  # here is what keeps it from silently rotting.
-  sed -e "s#/opt/dshgw/bin/dshgw#$ROOT/bin/dshgw#g" \
-    "$ROOT/deploy/dshgw/dsh-worker-bwrap@.service" >"$TMP/units/dsh-worker-bwrap@.service"
-  cp "$ROOT/deploy/dshgw/dsh-workers.slice" "$TMP/units/"
-  systemd-analyze verify "$TMP/units/dshgw.service" "$TMP/units/dsh-worker@.service" "$TMP/units/dsh-worker-bwrap@.service" "$TMP/units/dsh-workers.slice" >/dev/null
-fi
+bash -n "$ROOT/deploy/dshgw/prepare-template.sh"
 cp "$ROOT/deploy/dshgw/config.example.yaml" "$TMP/config.yaml"
 python3 - "$TMP/config.yaml" "$NODE" "$DSH_ROOT" "$TMP" "$ROOT" <<'PY'
 from pathlib import Path
@@ -44,8 +31,6 @@ replacements = {
     '/opt/dsh/current/lib/bin.js': str(dsh / 'lib/bin.js'),
     '/opt/dsh/releases': str(dsh.parent),
     '/opt/dsh/current': str(dsh),
-    '/home/winger/nginxwebui/.acme.sh/*.tirisen.hk/fullchain.cer': str(tmp / 'tls/fullchain.cer'),
-    '/home/winger/nginxwebui/.acme.sh/*.tirisen.hk/*.tirisen.hk.key': str(tmp / 'tls/certificate.key'),
     '/var/lib/dshgw/gateway/sessions.json': str(tmp / 'state/gateway/sessions.json'),
     '/var/lib/dshgw/gateway/audit.jsonl': str(tmp / 'state/gateway/audit.jsonl'),
     '/var/lib/dshgw/gateway/activity.json': str(tmp / 'state/gateway/activity.json'),
@@ -213,65 +198,3 @@ kill "$template_pid" 2>/dev/null || true
 wait "$template_pid" 2>/dev/null || true
 template_pid=
 echo "temporary template: browser-fs profile, static 200, client 200, plain WS 426, upgraded WS 101; fresh home made no pnpm call"
-
-# Host-mutating acceptance is explicit rather than silently skipped. It is
-# intentionally outside ordinary CI and uses the configured installed paths.
-# Pending host-only coverage: a root run still needs two-tenant UID/filesystem
-# isolation and stopped-key behavior; this disposable test does not claim those.
-if [[ ${DSHGW_E2E_ROOT:-0} == 1 ]]; then
-  [[ ${EUID} -eq 0 ]] || { echo 'DSHGW_E2E_ROOT=1 requires root' >&2; exit 1; }
-  HOST_CONFIG=${DSHGW_CONFIG:-/etc/dshgw/config.yaml}
-  HOST_BIN=${DSHGW_E2E_BIN:-/opt/dshgw/bin/dshgw}
-  KEY_FILE=${DSHGW_E2E_KEY_FILE:-}
-  [[ -x "$HOST_BIN" ]] || { echo "installed dshgw missing: $HOST_BIN" >&2; exit 1; }
-  [[ -n "$KEY_FILE" && -f "$KEY_FILE" ]] || { echo 'DSHGW_E2E_KEY_FILE (mode 0600) is required for host E2E' >&2; exit 1; }
-  "$HOST_BIN" --config "$HOST_CONFIG" doctor
-  "$HOST_BIN" --config "$HOST_CONFIG" contract --key-file "$KEY_FILE" aigw
-
-  tenant="e2e-$(printf '%05d' "$((RANDOM % 100000))")"
-  created=0
-  host_cleanup(){
-    if [[ $created == 1 ]]; then "$HOST_BIN" --config "$HOST_CONFIG" tenant remove --purge --yes "$tenant" >/dev/null || true; fi
-    cleanup
-  }
-  trap host_cleanup EXIT
-  "$HOST_BIN" --config "$HOST_CONFIG" tenant create --key-file "$KEY_FILE" "$tenant"
-  created=1
-  prefix=$(python3 - "$KEY_FILE" <<'PY'
-from pathlib import Path
-import sys
-key=Path(sys.argv[1]).read_text().strip()
-if key.lower().startswith('bearer '): key=key[7:].strip()
-print(key[:12])
-PY
-)
-  tenant_url=$("$HOST_BIN" --config "$HOST_CONFIG" login-url "$prefix")
-  read -r public_host public_port < <(python3 - "$tenant_url" <<'PY'
-from urllib.parse import urlsplit
-import sys
-u=urlsplit(sys.argv[1]); print(u.hostname,u.port)
-PY
-)
-  portal_port=$(awk '$1 == "portal_port:" { print $2; exit }' "$HOST_CONFIG")
-  portal_port=${portal_port:-32600}
-  cookie_jar="$TMP/e2e.cookies"
-  status=$(curl --noproxy '*' --silent --show-error --output /dev/null --write-out '%{http_code}' \
-    --resolve "$public_host:$portal_port:127.0.0.1" --cookie-jar "$cookie_jar" \
-    --header "Origin: https://$public_host:$portal_port" --data-urlencode "key@$KEY_FILE" \
-    "https://$public_host:$portal_port/login")
-  [[ $status == 302 ]] || { echo "portal login returned $status" >&2; exit 1; }
-  grep -q $'\tdshgw_s_' "$cookie_jar" || { echo 'gateway session cookie missing' >&2; exit 1; }
-  if grep -q $'\tdsh-auth-' "$cookie_jar"; then echo 'upstream dsh cookie leaked' >&2; exit 1; fi
-  tenant_headers="$TMP/e2e-tenant.headers"
-  status=$(curl --noproxy '*' --silent --show-error --dump-header "$tenant_headers" --output /dev/null --write-out '%{http_code}' \
-    --resolve "$public_host:$public_port:127.0.0.1" --cookie "$cookie_jar" "$tenant_url")
-  [[ $status == 200 ]] || { echo "tenant UI returned $status (want 200)" >&2; exit 1; }
-  if grep -Eiq '^Set-Cookie:.*dsh-auth-' "$tenant_headers"; then
-    echo 'upstream dsh cookie leaked through tenant edge' >&2
-    exit 1
-  fi
-  [[ $(systemctl show --property User --value "dsh-worker@$tenant.service") == "dsh-$tenant" ]]
-  [[ $(stat -c %U "/srv/dsh/$tenant") == "dsh-$tenant" ]]
-  "$HOST_BIN" --config "$HOST_CONFIG" tenant restart "$tenant"
-  "$HOST_BIN" --config "$HOST_CONFIG" doctor
-fi

@@ -109,13 +109,11 @@ func managerFixture(t *testing.T) (*Manager, *WorkerRunner, string) {
 		WorkerPortLo: 32100, WorkerPortHi: 32105, Listen: "127.0.0.1:3099", AigwBaseURL: "http://aigw",
 		SessionTTL: config.Duration(1), DirectoryPicker: "clamp", PluginBrowserFS: "on", WorkspaceSeed: []string{"work"}, ReservedNames: []string{"login"},
 		Dsh:      config.DshRuntime{NodeBin: nodeBin, BinJS: filepath.Join(release, "lib", "bin.js"), ReleasesRoot: filepath.Join(root, "dsh", "releases"), CurrentLink: currentLink},
-		TLS:      config.TLSConfig{Certificate: "/cert", CertificateKey: "/key"},
 		StateDir: filepath.Join(root, "state"), TenantRoot: filepath.Join(root, "state/tenants"), WorkspaceRoot: filepath.Join(root, "srv"), HandshakeDir: filepath.Join(root, "handshake"),
 		RegistryPath: filepath.Join(root, "registry.json"), KeyMapPath: filepath.Join(root, "keys.map"), SessionPath: filepath.Join(root, "sessions.json"),
 		Deploy: config.DeployConfig{TemplateHome: tpl, PluginPath: "/plugin.js", ConfigPath: filepath.Join(root, "etc/dshgw.yaml"),
-			TenantConfigRoot: filepath.Join(root, "etc/tenants"), BackupDir: filepath.Join(root, "backups"), GatewayGroup: "dshgw",
-			WorkerUser: "dshgw", BwrapBin: "/usr/bin/bwrap",
-			NginxDir: filepath.Join(root, "nginx"), NginxBinary: "nginx", PublicListen: "0.0.0.0"},
+			TenantConfigRoot: filepath.Join(root, "etc/tenants"), BackupDir: filepath.Join(root, "backups"),
+			WorkerUser: "dshgw", BwrapBin: "/usr/bin/bwrap"},
 	}
 	for _, path := range []string{cfg.StateDir, filepath.Dir(cfg.Deploy.ConfigPath), cfg.HandshakeDir} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
