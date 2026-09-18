@@ -1,5 +1,11 @@
 # M51 设计文档：dshgw —— 多租户 dsh 网关（写进本仓库、与 aigw / dsh 双向解耦）
 
+> **已被 M58 取代（部署形态）**：本文记录的 root 安装 + systemd 单元 + 每租户 OS 用户 + nginx 边缘
+> 已从代码中删除；dshgw 现在是 aigw 拉起并监督的同目录子进程（同 UID、无 root、无 systemd、
+> 无共享服务账号），租户 worker 是它的 bubblewrap 子进程。当前形态见
+> `docs/design/m58-aigw-supervised-dshgw.md`、`deploy/dshgw/README.md` 与 `docs/dshgw.md`；
+> 本文保留为历史记录（其中的协议、权限与信任边界的分析仍然有效）。
+
 > 状态：**实现中（M51，双租户主机 baseline 与浏览器登录修复复验已通过；其余主机验收待完成）**。本模块位于 `ai_gateway` 仓库内、与 `cmd/aigw` 平级，
 > **不修改 aigw 的 Go 核心、不修改 dsh 发行包**；aigw 与 dsh 各自可独立升级。
 

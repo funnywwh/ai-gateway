@@ -505,7 +505,18 @@
 - [ ] **公网 TLS 与防火墙**：新形态没有 nginx，租户门户由 dshgw 明文直接监听。需要单独设计
       （证书终止放哪、是否仍用 nginx 反代、如何隐藏 worker 段端口）
 - [ ] **资源限额**：systemd 的 `MemoryMax`/`CPUQuota`/`TasksMax` 随旧形态消失，需要 cgroup v2 方案
-- [ ] **宿主验收脚本重写**：旧的 `dshgw_host_acceptance.py` 基于 UID/cgroup/systemd 断言，已删除；
-      新形态需要一套"无特权 + bwrap 子进程"的宿主验收（可以把本机 e2e 固化成脚本与 make 目标）
-- [ ] **文档收尾**：`docs/design/m51-dshgw.md`、`docs/design/m52-dsh-enable.md` 等历史设计文档
-      仍描述旧形态，需要在文首标注"已被 M58 取代"以免误导（不建议改写历史记录本身）
+- [x] 宿主验收脚本：`scripts/dshgw_supervised_e2e.py` + `make dshgw-supervised-test`（17 步：
+      aigw 拉起子进程 → 同 UID admin socket → 建户 → bwrap worker → `/api` 401 → 无 per-tenant
+      账号 → stop/start（含启动前模型同步）→ aigw 重启自愈 → 停止零残留；缺 bwrap/dsh 时自我跳过）
+- [x] 历史设计文档标注：`m51-dshgw.md`、`m52-dsh-enable.md`、`m51-host-acceptance-remaining.md`
+      文首加"已被 M58 取代（部署形态）"说明，保留历史记录本身
+
+### M58 验收脚本的边界（写清楚，避免被当成"全部验收已过"）
+
+`scripts/dshgw_supervised_e2e.py` 证明的是**本机、单租户、无特权**的那条链路；它**不**声称：
+
+- 公网可达性（TLS/防火墙/端口暴露）——当前形态没有 nginx，证书终止尚未设计；
+- 多租户并发与资源压测（也没有 cgroup 限额可压）；
+- 租户之间的实际越权尝试（跨租户端口/cookie/文件）——这部分由 `internal/dshgw/proxy` 的回归测试
+  与 `make dshgw-sandbox-test` 的宿主隐藏断言覆盖，但都不是"真实浏览器 + 真实网络"的验收；
+- 宿主重启后的自愈（当前是用户级 transient 单元，重启机器需要手动或落一份常驻 unit）。

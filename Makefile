@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) -X main.revision=$(REVISION) -X main.date=
 UIDIST ?= $(CURDIR)/.cache/ui-dist
 UI_OVERLAY ?= $(UIDIST)/overlay.json
 
-.PHONY: all build build-src ui-dist test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check dshgw-build dshgw-test dshgw-verify dshgw-sandbox-test
+.PHONY: all build build-src ui-dist test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check dshgw-build dshgw-test dshgw-verify dshgw-sandbox-test dshgw-supervised-test
 
 all: build
 
@@ -104,8 +104,20 @@ dshgw-test:
 dshgw-sandbox-test:
 	@$(GOENV) DSHGW_NODE="$(DSHGW_NODE)" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" go test ./internal/dshgw/sandbox -run '^TestStaging' -count=1 -v
 
+# The supervised shape's host acceptance (M58): aigw starts its dshgw child, that
+# child runs a bubblewrap tenant worker, and the tenant answers the /api probe with
+# 401 — all as the invoking account, on its own ports and work directory, so it
+# never touches a running deployment. It skips itself when the host lacks bwrap or
+# a staged dsh runtime, and needs bin/aigw next to bin/dshgw.
+dshgw-supervised-test: dshgw-build
+	@if [ ! -x bin/aigw ]; then echo 'SKIP: bin/aigw missing (run make build first)'; exit 0; fi
+	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/dshgw_supervised_e2e.py \
+	  --aigw-bin bin/aigw --dshgw-bin bin/dshgw \
+	  --node "$(DSHGW_NODE)" --dsh-root "$(DSHGW_DSH_ROOT)"
+
 dshgw-verify: dshgw-test dshgw-build
 	@$(MAKE) --no-print-directory dshgw-sandbox-test
+	@$(MAKE) --no-print-directory dshgw-supervised-test
 	@$(GOENV) go vet ./internal/dshgw/... ./cmd/dshgw ./internal/arch
 	@DSHGW_NODE="$(DSHGW_NODE)" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" bash scripts/verify-dshgw.sh
 

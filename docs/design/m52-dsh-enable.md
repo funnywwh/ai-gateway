@@ -1,5 +1,11 @@
 # M52 设计文档：aigw 后台“启用 DSH / 停用 DSH”账号级开关
 
+> **已被 M58 取代（部署形态）**：本文记录的 root 安装 + systemd 单元 + 每租户 OS 用户 + nginx 边缘
+> 已从代码中删除；dshgw 现在是 aigw 拉起并监督的同目录子进程（同 UID、无 root、无 systemd、
+> 无共享服务账号），租户 worker 是它的 bubblewrap 子进程。当前形态见
+> `docs/design/m58-aigw-supervised-dshgw.md`、`deploy/dshgw/README.md` 与 `docs/dshgw.md`；
+> 本文保留为历史记录（其中的协议、权限与信任边界的分析仍然有效）。
+
 > 状态：**已实现（M52-rev2，代码与回归完成；主机验收待执行、未提交）**。
 > 2026-09-16 两轮确认：①默认 `login` 档、停用即停 worker；②按用户要求升级为 **rev2**——启用=账号级授权，账号下所有 Key（含新建）都能登录，且启用/停用全部由后台按钮完成，不经 root CLI。前提：M51 的端口门户 `https://chat.tirisen.hk:32600/`
 > 与已实现 dshgw 保持原样；M51 剩余主机验收与发布被本里程碑取代优先级，M51 未提交改动原样保留。

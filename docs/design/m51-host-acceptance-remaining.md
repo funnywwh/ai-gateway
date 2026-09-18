@@ -1,5 +1,11 @@
 # M51 剩余真实主机验收执行边界（待运维确认）
 
+> **已被 M58 取代（部署形态）**：本文记录的 root 安装 + systemd 单元 + 每租户 OS 用户 + nginx 边缘
+> 已从代码中删除；dshgw 现在是 aigw 拉起并监督的同目录子进程（同 UID、无 root、无 systemd、
+> 无共享服务账号），租户 worker 是它的 bubblewrap 子进程。当前形态见
+> `docs/design/m58-aigw-supervised-dshgw.md`、`deploy/dshgw/README.md` 与 `docs/dshgw.md`；
+> 本文保留为历史记录（其中的协议、权限与信任边界的分析仍然有效）。
+
 门户保持 `https://chat.tirisen.hk:32600/`，租户继续按端口隔离。全部必需验收通过后才允许提交/发布；本文件不是通过报告。
 
 ## 1. 已有证据与缺口
