@@ -76,7 +76,7 @@ dshgw:
 | 位置 | 行为 |
 |---|---|
 | 「飞书」列 | 已绑定显示姓名（悬停显示完整 `open_id`、绑定人、绑定时间）；未绑定显示「未绑定」 |
-| 「绑定飞书」按钮 | 跳飞书授权页；同意后回到本页并提示结果。只有 `role=admin` 能看到 |
+| 「绑定飞书」按钮 | 一步跳到飞书授权页（由 `/admin/api/v1/keys/{id}/feishu/bind` 直接 302，不经任何公开中转）；同意后回到本页并提示结果。只有 `role=admin` 能看到 |
 | 「解绑飞书」按钮 | 已绑定时出现；确认后解绑（幂等） |
 
 结果提示（对应回调的结果码）：
@@ -155,9 +155,9 @@ dshgw:
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/feishu/login?mode=dsh\|bind&key=<id>` | 开始授权（`bind` 需管理员会话；`dsh` 匿名、按 IP 限流） |
+| GET | `/feishu/login` | 开始**门户登录**授权（匿名、按 IP 限流） |
 | GET | `/feishu/callback` | 唯一回调；按 state 里的 flow 分派 |
-| GET | `/admin/api/v1/keys/{id}/feishu/bind` | 控制台入口：302 到上面的 login |
+| GET | `/admin/api/v1/keys/{id}/feishu/bind` | 控制台绑定入口（需管理员会话）：签 state 并直接 302 到飞书授权页 |
 | DELETE | `/admin/api/v1/keys/{id}/feishu` | 解绑（幂等），返回 `{"unbound":bool,"key_id":int}` |
 | GET | `/admin/api/v1/keys` | 每行含 `feishu` 对象（见 M60 设计 §3.2） |
 | GET | `dshgw` 门户 `/login/feishu` | 消费一次性票据，签发 dsh 会话（M61） |

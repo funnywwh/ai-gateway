@@ -256,7 +256,10 @@ class Browser:
     """
 
     def __init__(self) -> None:
-        self.cookies: dict[str, str] = {}
+        # name -> (value, path). The path is not decoration: a cookie scoped to /admin is
+        # NOT sent to /feishu/login, and a harness that ignores this would accept a flow no
+        # browser can complete (it did, once — the bind step lost the admin session).
+        self.cookies: dict[str, tuple[str, str]] = {}
 
     def request(self, method: str, url: str, body: dict | None = None, headers: dict | None = None,
                 origin: str = "") -> tuple[int, dict, str]:
@@ -264,7 +267,8 @@ class Browser:
         parsed = urllib.parse.urlsplit(url)
         host = parsed.hostname or "127.0.0.1"
         port = parsed.port or 80
-        path = parsed.path or "/"
+        request_path = parsed.path or "/"
+        path = request_path
         if parsed.query:
             path += "?" + parsed.query
         sent = dict(headers or {})
@@ -272,7 +276,9 @@ class Browser:
         if body is not None:
             payload = json.dumps(body).encode()
             sent.setdefault("Content-Type", "application/json")
-        cookie_header = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
+        cookie_header = "; ".join(
+            f"{name}={value}" for name, (value, cookie_path) in self.cookies.items()
+            if request_path.startswith(cookie_path))
         if cookie_header:
             sent["Cookie"] = cookie_header
         if origin:
@@ -304,9 +310,13 @@ class Browser:
             name, _, value = line.partition(":")
             key = name.strip().lower()
             if key == "set-cookie":
-                pair = value.strip().split(";", 1)[0]
-                cookie_name, _, cookie_value = pair.partition("=")
-                self.cookies[cookie_name.strip()] = cookie_value.strip()
+                attributes = [part.strip() for part in value.split(";")]
+                cookie_name, _, cookie_value = attributes[0].partition("=")
+                cookie_path = "/"
+                for attribute in attributes[1:]:
+                    if attribute.lower().startswith("path="):
+                        cookie_path = attribute.split("=", 1)[1].strip() or "/"
+                self.cookies[cookie_name.strip()] = (cookie_value.strip(), cookie_path)
                 response_headers.setdefault(key, value.strip())
             else:
                 response_headers[key] = value.strip()
@@ -568,13 +578,12 @@ def check_feishu_login(check: Check, aigw_port: int, proxy_port: int, tenant: st
         conn.execute("UPDATE accounts SET dsh_enabled = 1, dsh_tenant = ? WHERE id = ?", (tenant, account_id))
 
     # --- binding, through the console and the consent page --------------------------------
+    # One hop: the console's own route (where the admin cookie is scoped) mints the state and
+    # sends the browser to Feishu. The harness carries cookie paths, so a second hop through a
+    # public route would fail here exactly as it did in a browser.
     status, headers, _ = admin.request("GET", f"{base}/admin/api/v1/keys/{key_id}/feishu/bind", origin=admin_origin)
-    bind_location = headers.get("location", "")
-    check.require("feishu-bind-entry", status == 302 and "mode=bind" in bind_location,
-                  f"HTTP {status} location={bind_location!r}")
-    status, headers, _ = admin.request("GET", base + bind_location, origin=admin_origin)
     authorize = headers.get("location", "")
-    check.require("feishu-authorize-redirect", status == 302 and authorize.startswith(feishu.base_url),
+    check.require("feishu-bind-entry", status == 302 and authorize.startswith(feishu.base_url),
                   f"HTTP {status} location={authorize!r}")
     parsed = urllib.parse.urlsplit(authorize)
     query = dict(part.split("=", 1) for part in parsed.query.split("&") if "=" in part)
@@ -622,8 +631,8 @@ def check_feishu_login(check: Check, aigw_port: int, proxy_port: int, tenant: st
     check.require("feishu-login-starts-tenant-session",
                   status == 302 and tenant_location == f"{portal_base(proxy_port)}/t/{tenant}/",
                   f"HTTP {status} location={tenant_location!r}")
-    session = visitor.cookies.get(f"dshgw_s_{tenant}", "")
-    check.require("feishu-session-issued", bool(session), f"cookies={list(visitor.cookies)}")
+    session = visitor.cookies.get(f"dshgw_s_{tenant}", ("", ""))[0]
+    check.require("feishu-session-issued", bool(session), f"cookies={sorted(visitor.cookies)}")
     status, _, page = visitor.request("GET", tenant_location)
     check.require("feishu-tenant-serves-ui", status == 200, f"HTTP {status} body={page[:80]!r}")
     check.require("feishu-entitlement-rechecked", upstream.authorize_calls > 0,
@@ -658,7 +667,7 @@ def check_feishu_login(check: Check, aigw_port: int, proxy_port: int, tenant: st
                       status == 403 and "未启用 dsh" in page,
                       f"HTTP {status} body={page[:120]!r}")
         check.require("feishu-revocation-issues-no-session",
-                      f"dshgw_s_{tenant}" not in revoked.cookies, f"cookies={list(revoked.cookies)}")
+                      f"dshgw_s_{tenant}" not in revoked.cookies, f"cookies={sorted(revoked.cookies)}")
     finally:
         upstream.deny = False
     # ...and the same identity works again once the upstream allows it, which proves the
@@ -669,7 +678,7 @@ def check_feishu_login(check: Check, aigw_port: int, proxy_port: int, tenant: st
     status, headers, _ = restored.request("GET", headers.get("location", ""))
     status, headers, _ = restored.request("GET", headers.get("location", ""))
     check.require("feishu-login-recovers", status == 302 and f"dshgw_s_{tenant}" in restored.cookies,
-                  f"HTTP {status} cookies={list(restored.cookies)}")
+                  f"HTTP {status} cookies={sorted(restored.cookies)}")
 
 
 def main() -> int:

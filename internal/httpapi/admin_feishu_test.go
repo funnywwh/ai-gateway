@@ -185,22 +185,18 @@ func TestFeishuBindFlowWritesTheBindingAndTheListShowsIt(t *testing.T) {
 	cookie := f.login(t, adminUser, adminPassword)
 	key := f.seedKey(t)
 
-	// The console's own entry point answers a redirect to the login route.
+	// The console's own entry point goes to the consent page in one hop. It has to: the
+	// administrator's cookie is scoped to /admin, so a second hop through a public route
+	// would arrive without a session (which is exactly what a browser reported as
+	// "missing admin session" before this was fixed).
 	res := f.request(t, http.MethodGet, "/admin/api/v1/keys/1/feishu/bind", cookie)
 	if res.StatusCode != http.StatusFound {
 		t.Fatalf("bind start: status=%d", res.StatusCode)
 	}
-	location := res.Header.Get("Location")
-	if !strings.HasPrefix(location, feishuLoginPath) || !strings.Contains(location, "mode=bind") {
-		t.Fatalf("bind start location = %q", location)
-	}
-
-	// Following it reaches Feishu's authorization page with the parameters it requires.
-	res = f.request(t, http.MethodGet, location, cookie)
-	if res.StatusCode != http.StatusFound {
-		t.Fatalf("authorize redirect: status=%d", res.StatusCode)
-	}
 	authorize := res.Header.Get("Location")
+	if !strings.HasPrefix(authorize, "https://accounts.feishu.cn/open-apis/authen/v1/authorize?") {
+		t.Fatalf("bind start must go straight to the consent page, got %q", authorize)
+	}
 	parsed, err := url.Parse(authorize)
 	if err != nil {
 		t.Fatal(err)
@@ -302,9 +298,10 @@ func TestFeishuBindingRequiresAnAdministrator(t *testing.T) {
 	if res := f.request(t, http.MethodGet, "/admin/api/v1/keys/1/feishu/bind", ""); res.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("anonymous bind start: status=%d, want 401", res.StatusCode)
 	}
-	// A binding flow started without a session cannot even mint a state.
-	if res := f.request(t, http.MethodGet, feishuLoginPath+"?mode=bind&key=1", ""); res.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("anonymous bind state: status=%d, want 401", res.StatusCode)
+	// The public start route serves the portal flow only: a binding has no public entry
+	// point, so asking for one there is simply not a route.
+	if res := f.request(t, http.MethodGet, feishuLoginPath+"?mode=bind&key=1", ""); res.StatusCode != http.StatusNotFound {
+		t.Fatalf("mode=bind on the public route: status=%d, want 404", res.StatusCode)
 	}
 	after, err := f.db.GetAPIKeyByID(context.Background(), key.ID)
 	if err != nil {
@@ -342,6 +339,7 @@ func TestFeishuCallbackRefusesBadStates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_ = key
 	expired, err := f.states.Sign(feishu.FlowBind, key.ID, adminUser, "nonce-2")
 	if err != nil {
 		t.Fatal(err)

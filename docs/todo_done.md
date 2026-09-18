@@ -3802,3 +3802,11 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
       Origin 应取配置里的公开 origin 而不是写死 `http://localhost`
 - [x] 文档：`docs/dshgw.md` §3/§6/§8 增飞书登录（流程、配置两项、验收口径）；
       `deploy/dshgw/config.example.yaml` 增注释块；`docs/feishu.md` §5 写成使用者可照做的流程
+- [x] **真机反馈修复：绑定飞书报「missing admin session」**。原因：控制台按钮先跳到管理 API
+      （管理会话 cookie 的 `Path=/admin`，这一跳正常），再由它 302 到公开的 `/feishu/login?mode=bind`，
+      而浏览器**不会**把 `/admin` 作用域的 cookie 发给公开路由，于是第二跳没有会话，返回 JSON 401。
+      修法：绑定入口自己签 state 并**一步**直达飞书授权页；公开的 `/feishu/login` 只保留匿名登录
+      （`mode=bind` 现在 404）。同时修正端到端脚本的 `Browser`：原先忽略 cookie 的 `Path`，
+      会把浏览器根本走不通的链路判为通过——现在按 Path 作用域发送（改完后该 bug 在脚本里同样会失败）。
+      验证：`go test ./...`、`make ui-base`、`make verify`、`make dshgw-supervised-test`（44 步）全绿，
+      并在本机 8090 上用真实管理会话复跑绑定入口 → 302 直达 `accounts.feishu.cn`。

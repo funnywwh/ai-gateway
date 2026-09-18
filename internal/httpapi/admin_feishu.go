@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -59,9 +58,13 @@ func (s *Server) feishuEnabled() bool {
 // Routes
 // ---------------------------------------------------------------------------
 
-// handleFeishuLogin starts an authorization attempt. It is unauthenticated on purpose for
-// the DSH login flow — any employee may sign in to their own tenant — while the binding
-// flow is gated by the admin session that also mints its state.
+// handleFeishuLogin starts the DSH portal login. It is unauthenticated on purpose — any
+// employee may sign in to their own tenant — and rate limited, because it is the only route
+// that makes an outbound call before anyone is authenticated.
+//
+// Binding is NOT started here: an administrator's session cookie is scoped to "/admin", so a
+// route outside that prefix cannot see it (which is exactly the bug this comment replaces).
+// Binding has its own admin route, which mints its state and goes to Feishu in one hop.
 func (s *Server) handleFeishuLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.feishuEnabled() {
 		http.NotFound(w, r)
@@ -74,35 +77,14 @@ func (s *Server) handleFeishuLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	flow := feishu.FlowDSHLogin
-	keyID := int64(0)
-	actor := ""
-	switch r.URL.Query().Get("mode") {
-	case "", string(feishu.FlowDSHLogin):
-		if !deps.DSHLogin || deps.PortalURL == "" {
-			http.NotFound(w, r)
-			return
-		}
-	case string(feishu.FlowBind):
-		// Binding a key is an administrator action; the session that started it is the
-		// capability, and the callback re-checks the role.
-		user, ok := s.adminActor(w, r, true)
-		if !ok {
-			return
-		}
-		parsed, err := strconv.ParseInt(r.URL.Query().Get("key"), 10, 64)
-		if err != nil || parsed <= 0 {
-			writeAPIError(w, domain.ErrInvalidRequest("key must be the numeric id of an API key"))
-			return
-		}
-		key, err := s.deps.AdminStore.GetAPIKeyByID(r.Context(), parsed)
-		if err != nil {
-			writeAPIError(w, toAPIError(err))
-			return
-		}
-		flow, keyID, actor = feishu.FlowBind, key.ID, user.Username
-	default:
-		writeAPIError(w, domain.ErrInvalidRequest(`mode must be "dsh" or "bind"`))
+	if mode := r.URL.Query().Get("mode"); mode != "" && mode != string(feishu.FlowDSHLogin) {
+		// The only flow with a public entry point is the portal login; a binding starts at
+		// its admin route (`/admin/api/v1/keys/{id}/feishu/bind`).
+		http.NotFound(w, r)
+		return
+	}
+	if !deps.DSHLogin || deps.PortalURL == "" {
+		http.NotFound(w, r)
 		return
 	}
 	if !s.allowFeishuAttempt(w, r) {
@@ -113,12 +95,17 @@ func (s *Server) handleFeishuLogin(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, domain.ErrInternal("cannot start the Feishu flow"))
 		return
 	}
-	state, err := deps.States.Sign(flow, keyID, actor, nonce)
+	state, err := deps.States.Sign(feishu.FlowDSHLogin, 0, "", nonce)
 	if err != nil {
 		writeAPIError(w, domain.ErrInternal("cannot start the Feishu flow"))
 		return
 	}
-	target, err := deps.Client.AuthorizeURLFor(state, deps.RedirectURI)
+	s.redirectToFeishu(w, r, state)
+}
+
+// redirectToFeishu sends the browser to the consent page for a signed state.
+func (s *Server) redirectToFeishu(w http.ResponseWriter, r *http.Request, state string) {
+	target, err := s.deps.Feishu.Client.AuthorizeURLFor(state, s.deps.Feishu.RedirectURI)
 	if err != nil {
 		s.deps.Log.Error("building the Feishu authorization URL failed", "err", err)
 		writeAPIError(w, domain.ErrInternal("the Feishu integration is misconfigured"))
@@ -333,8 +320,12 @@ func (s *Server) finishFeishuLogin(w http.ResponseWriter, r *http.Request, ident
 // Console binding routes
 // ---------------------------------------------------------------------------
 
-// handleAdminBindKeyFeishu starts the binding flow from the console. It answers a redirect
-// rather than JSON because the browser has to visit Feishu itself.
+// handleAdminBindKeyFeishu starts the binding flow from the console.
+//
+// It answers with a redirect to Feishu rather than JSON because the browser has to visit the
+// consent page itself, and it does so in ONE hop: this route is under "/admin" (where the
+// administrator's cookie is scoped) and mints the signed state right here. An earlier version
+// redirected to a public /feishu/login?mode=bind step, which never received that cookie.
 func (s *Server) handleAdminBindKeyFeishu(w http.ResponseWriter, r *http.Request) {
 	if !s.feishuEnabled() {
 		http.NotFound(w, r)
@@ -360,10 +351,18 @@ func (s *Server) handleAdminBindKeyFeishu(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, domain.ErrConflict("bind a Feishu account to an active API key"))
 		return
 	}
-	target := fmt.Sprintf("%s?mode=%s&key=%d", s.deps.Feishu.LoginPath, feishu.FlowBind, key.ID)
+	nonce, err := feishuNonce()
+	if err != nil {
+		writeAPIError(w, domain.ErrInternal("cannot start the Feishu flow"))
+		return
+	}
+	state, err := s.deps.Feishu.States.Sign(feishu.FlowBind, key.ID, user.Username, nonce)
+	if err != nil {
+		writeAPIError(w, domain.ErrInternal("cannot start the Feishu flow"))
+		return
+	}
 	s.audit(r.Context(), user.Username, "feishu_bind_start", "api_key", strconv.FormatInt(key.ID, 10), nil, "ok")
-	feishuNoStore(w.Header())
-	http.Redirect(w, r, target, http.StatusFound)
+	s.redirectToFeishu(w, r, state)
 }
 
 // handleAdminUnbindKeyFeishu clears a key's Feishu identity.

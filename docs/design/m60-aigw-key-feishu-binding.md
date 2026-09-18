@@ -46,9 +46,14 @@ CREATE UNIQUE INDEX idx_api_keys_feishu_open_id ON api_keys(NULLIF(feishu_open_i
 
 ### D4 一个飞书应用、一个回调，两种 flow
 
-`GET /feishu/login` 与 `GET /feishu/callback` 同时服务「控制台绑定」与「DSH 门户登录」（M61），
-靠签名 state 里的 `flow` 分派。取舍：只需在飞书后台登记**一个**重定向 URL，少一处
+`GET /feishu/callback` 同时服务「控制台绑定」与「DSH 门户登录」（M61），靠签名 state 里的 `flow` 分派。
+**发起**则是两条入口：绑定走 `/admin/api/v1/keys/{id}/feishu/bind`（需要管理员会话），登录走
+`/feishu/login`（匿名）。取舍：只需在飞书后台登记**一个**重定向 URL，少一处
 `redirect_uri unmatch`(2000)/20029 的来源；代价是回调里多一个分支。
+
+绑定为什么必须从 `/admin/...` 直接跳飞书，而不是先跳到公开的 `/feishu/login?mode=bind`：
+管理会话 cookie 的 `Path` 是 `/admin`，公开路由收不到它——这正是最初实现在浏览器里报
+「missing admin session」的原因（见 §6.9）。
 
 ### D5 state 自签 + 单次使用，不依赖会话 cookie
 
@@ -103,9 +108,9 @@ nonce 集合在内存中有界（4096）并按 TTL 清理。
 
 | 方法 | 路径 | 鉴权 | 行为 |
 |---|---|---|---|
-| GET | `/feishu/login?mode=dsh\|bind&key=<id>` | `bind` 需 admin 会话；`dsh` 匿名（每 IP 限流） | 签 state → 302 到飞书授权页 |
+| GET | `/feishu/login` | 匿名（每 IP 限流） | 签 `flow=dsh` 的 state → 302 到飞书授权页（门户登录的唯一公开入口） |
 | GET | `/feishu/callback` | 无（state 验签） | 换 token → user_info → 按 flow 分派 |
-| GET | `/admin/api/v1/keys/{id}/feishu/bind` | admin | 校验 Key 存在且 active → 302 到 `/feishu/login?mode=bind&key=<id>` |
+| GET | `/admin/api/v1/keys/{id}/feishu/bind` | admin | 校验 Key 存在且 active → 签 `flow=bind` 的 state → **一步** 302 到飞书授权页 |
 | DELETE | `/admin/api/v1/keys/{id}/feishu` | admin | 解绑，幂等，`{"unbound":bool,"key_id":int}` |
 | GET | `/admin/api/v1/keys` | viewer+ | 每行新增 `feishu` 对象 |
 
@@ -184,6 +189,14 @@ nonce 集合在内存中有界（4096）并按 TTL 清理。
    账户列表改用 `orgQuery()`）。修法是断言**意图**（按 id PATCH、经 splitTags、走 orgQuery）而不是整段
    字面量，且把「不得触及侧边栏」写成结构化检查而不是全文 `/sidebar/` 子串禁止——后者会被一句解释性注释
    绊倒。发现方式：在新 worktree 里跑 HEAD 复现，确认与本次改动无关。
+
+9. **绑定从「两跳」改成「一跳」**（真机反馈驱动）：最初设计里控制台的绑定入口 302 到公开的
+   `/feishu/login?mode=bind&key=…`，由它签 state。但管理会话 cookie 的 `Path=/admin`，浏览器**不会**
+   把它发给 `/feishu/login`，于是第二跳拿到的是「missing admin session」的 JSON（用户点击「绑定飞书」
+   时的实际现象）。现在绑定入口自己签 state 并直接 302 到飞书授权页，公开入口只保留匿名登录。
+   教训同时改进了验收：端到端脚本的 `Browser` 原先忽略 cookie 的 `Path`，会把浏览器根本走不通的
+   链路判为通过——现在它按 Path 作用域发送 cookie（这条修正让同一个 bug 在脚本里也会失败）。
+   单元测试也补了「公开路由不接受 mode=bind（404）」与「绑定入口一步直达授权页」。
 
 ## 7. 测试策略（已实现）
 
