@@ -3,10 +3,12 @@ package tenancy
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
 	"github.com/winger/ai-gateway/internal/dshgw/sandbox"
 )
@@ -26,14 +28,36 @@ func (m *Manager) sandboxRuntime() sandbox.Runtime {
 }
 
 // sandboxTenant is the registry subset a profile needs.
-func sandboxTenant(t registry.Tenant) sandbox.Tenant {
+func sandboxTenant(cfg *config.Config, t registry.Tenant) sandbox.Tenant {
 	return sandbox.Tenant{
 		Name:        t.Name,
 		Workspace:   t.Workspace,
 		DshHome:     t.DshHome,
 		WorkerPort:  t.WorkerPort,
-		Environment: []string{"web", "--port", fmt.Sprintf("%d", t.WorkerPort), "--no-open"},
+		Environment: workerArgs(cfg, t),
 	}
+}
+
+// workerArgs is the dsh argv for one worker.
+//
+// `--trusted-host` names the public authority the worker's /api fence must accept.
+// dsh trusts loopback Host values and any authority declared here; without the
+// declaration a deployment that forwards the browser's authority (or a proxy that
+// does not rewrite Host) gets 403s on every /api call. The port-based deployments
+// this project already runs declare exactly this pair, so it is mirrored here
+// rather than left to each operator to rediscover.
+func workerArgs(cfg *config.Config, t registry.Tenant) []string {
+	args := []string{"web", "--port", fmt.Sprintf("%d", t.WorkerPort), "--no-open"}
+	seen := map[string]bool{}
+	for _, host := range []string{cfg.PublicHost, net.JoinHostPort(cfg.PublicHost, fmt.Sprintf("%d", t.PublicPort))} {
+		host = strings.TrimSpace(host)
+		if host == "" || seen[host] {
+			continue
+		}
+		seen[host] = true
+		args = append(args, "--trusted-host", host)
+	}
+	return args
 }
 
 // SandboxProfile renders the bwrap profile for a tenant. It is the argv the worker
@@ -43,7 +67,7 @@ func (m *Manager) SandboxProfile(t registry.Tenant) ([]string, error) {
 	if t.EffectiveIsolation() != registry.IsolationBwrap {
 		return nil, fmt.Errorf("tenant %s is not in bwrap isolation", t.Name)
 	}
-	return sandbox.Profile(m.sandboxRuntime(), sandboxTenant(t))
+	return sandbox.Profile(m.sandboxRuntime(), sandboxTenant(m.Config, t))
 }
 
 // SandboxProfileReady validates everything a tenant needs before its worker

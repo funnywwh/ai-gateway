@@ -100,3 +100,31 @@ func TestWorkerEnvAnchorsThroughAResolvedReleasePath(t *testing.T) {
 		t.Fatalf("anchor = %q for a plain release path", got)
 	}
 }
+
+// The worker's /api fence trusts loopback and any authority declared with
+// --trusted-host. Deployments in this project already run with that declaration, so
+// the worker argv carries it too — and it must never repeat the same authority twice.
+func TestWorkerArgsDeclareThePublicAuthorityOnce(t *testing.T) {
+	cfg := &config.Config{PublicHost: "chat.example", PortalPort: 18100}
+	tenant := registry.Tenant{Name: "alice", WorkerPort: 18200, PublicPort: 18101}
+	args := workerArgs(cfg, tenant)
+
+	if args[0] != "web" || !strings.Contains(strings.Join(args, " "), "--port 18200") {
+		t.Fatalf("base argv changed: %v", args)
+	}
+	trusted := []string{}
+	for i, arg := range args {
+		if arg == "--trusted-host" && i+1 < len(args) {
+			trusted = append(trusted, args[i+1])
+		}
+	}
+	want := []string{"chat.example", "chat.example:18101"}
+	if strings.Join(trusted, ",") != strings.Join(want, ",") {
+		t.Fatalf("trusted hosts = %v, want %v", trusted, want)
+	}
+	// An empty public host must not produce an empty --trusted-host argument.
+	bare := workerArgs(&config.Config{}, registry.Tenant{Name: "bob", WorkerPort: 18201, PublicPort: 18102})
+	if strings.Contains(strings.Join(bare, " "), "--trusted-host  ") || strings.HasSuffix(strings.Join(bare, " "), "--trusted-host") {
+		t.Fatalf("empty public host produced a dangling flag: %v", bare)
+	}
+}
