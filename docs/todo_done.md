@@ -4010,3 +4010,15 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
       轮询前需 `Reload()` 注册表、拆除竞态（hook 只装 serve 进程 + EBUSY 重试 + 卸载确认先于 purge）
 - [x] 文档：设计文档（含 §14 真机验收）、`docs/dshgw.md` §7b、`docs/deployment-layout.md`、
       两份示例配置、`docs/TODO.md`
+
+
+### M64 发布记录：2026-09-19 v2.1.0（仅本机）
+
+- [x] 用户确认仅更新本机，不操作 gpt001。功能提交 `b73533d`；标签 `v2.1.0` 指向 `15d6875aac943dab0faca10ba9daab58bc5118ba`，VERSION=2.1.0；未推送远程仓库。
+- [x] 内容：SSH 用户名/端口输入，账号默认与主机专用私钥上传、替换、删除及指纹展示；统一身份选择，修复 SSHFS 别名 User 参数兼容问题。
+- [x] `make dshgw-test` 全通过（SSH 后端189/客户端40/picker15断言）；`go test ./cmd/... ./internal/... ./pkg/... ./examples/... ./plugins/...` 通过，plugins 无 Go 包。`go test ./...` 包枚举长期无输出后取消，改用覆盖全部受版本管理 Go 源码的显式目录，避免遍历 data 下远端挂载。真实 SSHFS 默认密钥、主机专用+端口、别名 User/HostName/Port 三个集成用例通过，未跳过。
+- [x] `scripts/release.sh minor`、`make dshgw-build` 构建 aigw/dshgw 2.1.0，revision=15d6875；aigw UI=minified、transfer=gzip。运行进程与构建 SHA256 一致：aigw `96426bb6bf4507d3e74e17110282af3484fae603e5b85ca5aa4f004b8e248caf`，dshgw `bea173f7b6dfba2f0a3dc87da1227c3dbe9dca37fcf9236f2778c38ca677c0b2`。
+- [x] 回滚材料：`data/releases/v2.1.0-before-20260919-013825/` 保存旧 aigw、dshgw、ssh-workspace 插件及 ssh-mounts.json。回滚需停服务、恢复程序/插件、清理失效 SSHFS 端点后启动并验证挂载；不要覆盖运行中的二进制。未修改配置或账号密钥。
+- [x] 本机 aigw-local.service、dshgw-verify.service 已重启并 active。`http://127.0.0.1:8088/version` 返回 2.1.0 / 15d6875；healthz/readyz HTTP 200；`/admin/ui/` 和读取 `/version` 的 `js/api.js` HTTP 200（资源与端点验收，非浏览器视觉验收）。
+- [x] dsh-tenant、dsh-colin、dsh-ranqiliang、dsh-lianchangliang 已认证页面及新版插件均 HTTP 200。原 aipc:/home/winger/ZT20Q 和 winger@192.168.190.123:2222 的 /home/vscode/lagenio_ai_chat_and_image 两处挂载恢复，已确认在账号沙箱内可见。
+- [x] aigw 启动日志无 ERROR；dshgw 重启窗口出现短暂 reverse proxy ERROR，worker ready 后访问验证正常。历史 verify1 缺 key/旧 profile 告警仍存在，未替它创建凭据。未修改当前 3080 Harness GUI。
