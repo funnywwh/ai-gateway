@@ -43,6 +43,10 @@ func (c *cli) loadRuntime(withSessions bool) (*runtimeDeps, error) {
 		}
 		manager.Sessions = store
 	}
+	// The lifecycle refreshes a tenant's model list from aigw right before its
+	// worker starts, so dsh is configured from current grants rather than from
+	// whenever `sync-models` was last run by hand.
+	manager.ModelRefresh = modelRefreshHook(cfg, client, manager, nil)
 	return &runtimeDeps{cfg: cfg, reg: reg, validator: client, manager: manager}, nil
 }
 func readKey(input io.Reader, keyFile string) (string, error) {
