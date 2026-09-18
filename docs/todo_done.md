@@ -3810,3 +3810,30 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
       会把浏览器根本走不通的链路判为通过——现在按 Path 作用域发送（改完后该 bug 在脚本里同样会失败）。
       验证：`go test ./...`、`make ui-base`、`make verify`、`make dshgw-supervised-test`（44 步）全绿，
       并在本机 8090 上用真实管理会话复跑绑定入口 → 302 直达 `accounts.feishu.cn`。
+
+## 发布记录 v1.3.0（2026-09-18，飞书身份：Key 绑定 + DSH 门户登录）
+
+| 项 | 值 |
+|---|---|
+| 版本号 | `1.3.0`（`1.2.3` → `1.3.0`，**minor**：新增对外能力，不改既有形状） |
+| revision | `23a6ea9`（tag `v1.3.0`） |
+| 需求 | 用户要求「发布版本」（承接本时段完成的 M60/M61 飞书功能，以及点击「绑定飞书」报 `missing admin session` 的真机修复） |
+| 内容 | ① M60：`api_keys` 上的飞书身份（`open_id` 1:1 唯一）＋控制台绑定/解绑＋管理 API/MCP 解绑工具；② M61：dshgw 门户「飞书登录」（aigw 出一次性票据、dshgw 验票，dshgw 不持有飞书凭据）；③ 新增配置项 `feishu.*` 与 `dshgw.public_scheme`（后者修补监督形态下明文 HTTP 必现的「Secure cookie 被浏览器丢弃」，即「登录成功又被弹回门户」）；④ 修复绑定流程两跳导致公开路由收不到 `/admin` 作用域会话的问题。设计与差异：`docs/design/m60-aigw-key-feishu-binding.md`、`docs/design/m61-dshgw-feishu-login.md`；规格：`docs/feishu.md` |
+| 构建 | `scripts/release.sh minor` → `aigw 1.3.0 (revision 23a6ea9, console minified, transfer gzip)`；`make dshgw-build` → `dshgw 1.3.0 (revision 23a6ea9)` |
+| 回滚点 | `bin/aigw.prev-1.2.3-3c475f7`（**从正在运行的进程 `/proc/<pid>/exe` 直接取出**，可证明就是重启前那个构建） |
+| 部署 | 本机 `:8088` 由用户级 unit `aigw-local.service` 托管；`systemctl --user restart aigw-local.service`，**2 秒就绪**（命令内自带 30 秒未就绪自动回滚到 1.2.3）。同时重建并重启 `dshgw-verify.service`（门户与租户端口由它提供） |
+
+验证（真实流量实测，缺一不可）：
+
+- [x] `GET /version` → `{"version":"1.3.0","revision":"23a6ea9","ui":"minified","ui_encoding":"gzip"}`（重启前是 `1.2.3`/`3c475f7`）
+- [x] 经操作者实际使用的地址复核（gwproxy 8090）：`http://192.168.190.86:8090/version` 同上 —— 控制台角标取的就是这个端点
+- [x] `/healthz`、`/readyz`、`/admin/ui/` → 全部 200
+- [x] 启动日志：`aigw starting version=1.3.0 revision=23a6ea9 … listen=:8088`，`level=ERROR` 0 条
+- [x] 飞书链路在重启后仍然就绪：日志出现 `feishu identity enabled app_id=cli_… callback=http://192.168.190.86:8090/feishu/callback dsh_login=true portal=http://192.168.190.86:18300`；
+      `GET /feishu/login` → 302 直达 `accounts.feishu.cn`（`client_id`/`redirect_uri` 正确）；门户 `:18300` 页面仍带「飞书登录」按钮
+- [x] `dshgw-verify`、`gwproxy-verify` 两个 unit 均 active
+
+**本次未部署 gpt001**：该主机上的 `/opt/aigw/aigw` 仍是 **2026-09-14 的 0.12.3（revision 44f9de2）**，
+而仓库已到 1.3.0；0.12.3 → 1.3.0 之间包含 M51/M52/M57/M58 的部署形态变更（root/systemd/nginx 生命周期被删、
+`dshgw.*` 与 `feishu.*` 等配置面新增、`/opt/dsh` 运行时与 admin socket 约定），**需要一次带配置与数据迁移的
+独立部署步骤**，不能只换二进制。用户未要求改 gpt001，故本次保持其现状并在此记录差异。
