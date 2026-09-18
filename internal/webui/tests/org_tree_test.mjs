@@ -24,8 +24,12 @@ assert.match(treeSrc, /^import \{ el, clear \} from '\.\/ui\.js';$/m,
   'the tree may only depend on the generic DOM helpers, so any page can reuse it');
 assert.doesNotMatch(treeSrc, /from '\.\/api\.js'/,
   'the tree must not fetch: it receives nodes and reports interactions through callbacks');
-assert.doesNotMatch(treeSrc, /org/i,
-  'the tree must not know about the organization structure at all');
+// The intent is "no organization-specific code or data reaches the control". It used to be
+// spelled /org/i over the whole file, which broke the moment a comment mentioned the word —
+// a comment cannot couple anything. What actually couples it is importing the module, naming
+// its endpoints, or reaching the API, so those are what is refused here.
+assert.doesNotMatch(treeSrc, /org\.js|org\/nodes|org_node/, 'the tree must not reference the organization module or its endpoints');
+assert.doesNotMatch(treeSrc, /\borg[A-Z]/, 'the tree must not carry organization-shaped identifiers');
 for (const option of ['nodes', 'selectedId', 'mode', 'expandDepth', 'collapsible', 'filter',
   'renderLabel', 'renderMeta', 'actions', 'onSelect', 'onToggle', 'onAction']) {
   assert.match(treeSrc, new RegExp('\\b' + option + '\\b'), 'the tree must accept the ' + option + ' option');
@@ -55,7 +59,11 @@ assert.doesNotMatch(treeSrc, /row\.addEventListener\('click'/,
 // 这里断言的是**负向事实**，所以两侧都要钉住：页面不得有侧边栏实例，shell 也不得再提供插槽。
 // 只查页面会把"插槽留着但没人用"当成通过，而那段代码没有任何使用者，正是要清掉的东西。
 assert.doesNotMatch(org, /mode: 'sidebar'/, 'the org page must not mount a second tree in the sidebar');
-assert.doesNotMatch(org, /sidebar/, 'the org page must not touch a sidebar at all');
+// Structural, not prose: the page explains in a comment why the sidebar tree was removed, and a
+// comment cannot mount anything. What would couple it to the shell is using the slot or its
+// element, so that is what is refused.
+assert.doesNotMatch(org, /sidebarSlot|sidebar-slot|querySelector\('\.sidebar|sidebar\.append\(/,
+  'the org page must not touch the sidebar slot or element');
 assert.doesNotMatch(app, /sidebar-slot/, 'the shell slot has no consumer left: it must be gone, not merely unused');
 assert.doesNotMatch(css, /\.sidebar-slot/, 'and so must its CSS');
 // 树控件本身仍然支持两种放置方式（那是最初的需求），由 `tree` harness 视图守：那里把它挂进
@@ -63,13 +71,10 @@ assert.doesNotMatch(css, /\.sidebar-slot/, 'and so must its CSS');
 assert.match(treeSrc, /mode = 'workspace'/, 'the control still defaults to the workspace placement');
 assert.match(treeSrc, /const compact = mode === 'sidebar'/, 'and still supports the compact sidebar placement');
 
-// --- the org page mounts the same control twice and keeps them in step --------------------
+// --- the org page mounts one tree and keeps it in step with the detail panel ---------------
 
-assert.match(org, /mode: 'sidebar'/, 'the org page must mount a compact tree');
 assert.match(org, /mode: 'workspace'/, 'the org page must mount a full tree');
-assert.match(org, /sidebar\.append\(/, 'the compact tree goes into the sidebar slot');
-assert.match(org, /sidebarTree\.setSelected\(id\)/, 'selecting in the page must update the sidebar tree');
-assert.match(org, /mainTree\.setSelected\(id\)/, 'selecting in the sidebar must update the page tree');
+assert.match(org, /mainTree\.setSelected\(id\)/, 'selecting a node must keep the tree highlight in step');
 assert.match(org, /api\.put\('\/org\/nodes\/' \+ node\.id \+ '\/accounts', \{ account_ids: \[\.\.\.checked\] \}\)/,
   'saving members must replace the node\'s member list');
 assert.match(org, /api\.get\('\/org\/nodes'/, 'the tree data comes from the org endpoint');
@@ -151,8 +156,12 @@ assert.match(accounts, /key: 'org_nodes', label: '所属组织'/, 'accounts must
 assert.match(accounts, /api\.get\('\/org\/nodes', \{ limit: 1000 \}\)/, 'the filter options come from the org endpoint');
 assert.match(accounts, /query\.org_node_id = orgFilter\.value/, 'the selected node must reach the query');
 assert.match(accounts, /include_descendants/, 'the filter must expose the descendants switch');
-assert.match(accounts, /api\.get\('\/accounts', \{ limit, offset, \.\.\.query \}\)/,
+// The parameters are spread from orgQuery(), which stays empty until a node is chosen, so an
+// unfiltered list sends the request it always did. Pinning the helper's name keeps the intent
+// (the filter reaches the list) without pinning the shape of the object literal.
+assert.match(accounts, /api\.get\('\/accounts', \{ limit, offset, \.\.\.orgQuery\(\) \}\)/,
   'the account list must send the organization filter');
+assert.match(accounts, /function orgQuery\(\)/, 'the filter parameters must come from one place');
 assert.match(accounts, /name: 'org_node_ids'/, 'the account editor must offer the organization nodes');
 assert.match(accounts, /org_node_ids: splitIDs\(values\.org_node_ids\)/,
   'the editor must send the replacement membership list');

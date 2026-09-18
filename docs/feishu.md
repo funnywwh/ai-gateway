@@ -1,0 +1,166 @@
+---
+description: "飞书身份：把 API Key 绑定到飞书账号（控制台），并让被绑定的人用飞书登录 DSH 门户；飞书后台配置步骤、接口、隐私口径与排障。"
+kind: "spec"
+---
+
+# 飞书身份：API Key 绑定与 DSH 门户登录
+
+> 状态：**绑定/解绑已实现（M60）；DSH 门户飞书登录已实现（M61）**。
+> 设计：[M60 aigw Key 绑定](design/m60-aigw-key-feishu-binding.md)、[M61 dshgw 门户登录](design/m61-dshgw-feishu-login.md)。
+> 部署形态与租户隔离见 [dshgw 多租户网关](dshgw.md)。
+
+## 1. 它解决什么问题
+
+两件事，共用**一个**飞书自建应用：
+
+1. **绑定（控制台）**：管理员在 *API Keys* 页把一把 Key 绑定到一个真实存在的飞书账号。绑定通过飞书授权页完成，
+   因此「这个飞书账号属于你」是被飞书证明过的，而不是手填一个 id。
+2. **登录（DSH 门户）**：被绑定的人打开 DSH 门户点「飞书登录」，直接进入自己的租户，不需要粘贴 API Key。
+
+绑定关系是**一把 Key ↔ 一个飞书账号**（1:1）。Key 属于某个账户，账户上记录着它进入哪个 dsh 租户，
+所以「这个人是谁」→「他该进哪个租户」是一条 aigw 内的查询，不需要在 dshgw 侧再存一份身份表。
+
+**绑定不参与数据面鉴权**：模型调用仍然用 API Key（或租户的 worker Key）。飞书身份只回答「这个人是谁」，
+它决定的是**进哪个租户**，不是能不能调用模型。
+
+## 2. 飞书后台怎么配（一次性）
+
+按顺序做，全部在[飞书开发者后台](https://open.feishu.cn/app)：
+
+1. **创建企业自建应用** → 进入应用详情页 → **凭证与基础信息** 记下 **App ID**（`cli_…`）与 **App Secret**。
+2. **安全设置 → 重定向 URL** 添加**唯一一条**（必须与 `feishu.callback_url` 逐字一致，含 scheme/host/port/path）：
+   ```
+   http://192.168.190.86:8090/feishu/callback
+   ```
+   - 飞书允许 http 与非 443 端口（官方文档的示例就包含 `http://…:188/…`）；`?` 与 `#` 之后的部分不参与匹配。
+   - 列表里没有的地址会跳到失败页 `{code: 2000, message: "redirect_uri unmatch"}` 或 20029。
+   - 用**一个**回调服务两种流程（绑定与登录），它们靠签名 state 里的 flow 区分。
+3. **权限管理**：**一条 scope 都不要申请**。本功能只读 `open_id` 与姓名，飞书文档标注这两个字段无权限要求。
+   也不要申请邮箱/手机号（那是管理员导入的联系方式，非本人实时验证，不适合当登录凭据），
+   不需要 `offline_access`（网关不保存任何飞书令牌）。
+4. **应用发布 → 版本管理与发布 → 创建版本**：填版本号与更新说明 → **可用范围** 选需要的成员 →
+   **申请线上发布** → 等企业管理员在[管理后台](https://feishu.cn/admin) **工作台 → 应用审核** 通过。
+   - 可用范围与权限变更**只有版本发布后才对成员生效**，否则用户登录会报 `20010`。
+   - 管理员可在 **管理后台 → 工作台 → 应用管理 → 该应用「配置」** 里打开**免审**，之后发布立即生效。
+5. 如果开启了**安全设置 → IP 白名单**，把 aigw 所在主机（或该网出口）加入，否则 token 交换会被拒。
+
+## 3. aigw 怎么配
+
+```yaml
+feishu:
+  enabled: true
+  app_id: "cli_xxxxxxxx"
+  app_secret: "xxxxxxxx"                     # 也可用 GW_FEISHU_APP_SECRET
+  callback_url: "http://192.168.190.86:8090/feishu/callback"   # 与飞书后台登记的一致
+  dsh_login: true                            # 开放门户登录（false 则只做控制台绑定）
+  portal_url: ""                             # 空则由下面的 dshgw 块派生
+dshgw:
+  enabled: true
+  public_host: 192.168.190.86
+  portal_port: 18300
+  public_scheme: http                        # 明文 HTTP 部署必须写；否则发 Secure cookie 被浏览器丢弃
+```
+
+要点：
+
+- `callback_url` 的 path 必须是 `<server.base_path>/feishu/callback`；不一致时 aigw **启动即报错**，
+  而不是等用户走完授权页再撞飞书错误页。
+- `login_url`（跳飞书前的中转）与 dshgw 侧的登录入口都由 `callback_url` 的 origin 推导，只有一处要写对。
+- 签名密钥（state / ticket）留空时从 `credentials_key` 派生（按用途分离）；两者都为空且 `enabled=true` 时启动报错。
+- 整套功能默认关闭；关闭时这些字段一个都不读，路由也不注册（访问返回 404），控制台不显示任何飞书元素。
+
+## 4. 控制台怎么用（绑定/解绑）
+
+*API Keys* 页：
+
+| 位置 | 行为 |
+|---|---|
+| 「飞书」列 | 已绑定显示姓名（悬停显示完整 `open_id`、绑定人、绑定时间）；未绑定显示「未绑定」 |
+| 「绑定飞书」按钮 | 跳飞书授权页；同意后回到本页并提示结果。只有 `role=admin` 能看到 |
+| 「解绑飞书」按钮 | 已绑定时出现；确认后解绑（幂等） |
+
+结果提示（对应回调的结果码）：
+
+| 结果码 | 提示 |
+|---|---|
+| `bound` / `replaced` | 已绑定 / 已改绑到新的飞书账号（原绑定同时解除） |
+| `cancelled` | 已取消授权，未做任何改动 |
+| `conflict` | 该飞书账号已绑定到另一把 Key；请先在那把 Key 上解绑 |
+| `rejected` | 操作者已不是管理员，绑定未生效 |
+| `expired` / `invalid` | 授权过期或被重复使用 / 请求无法校验，请重新绑定 |
+| `no_app_permission` | 你在飞书侧没有该应用的使用权限，请联系飞书管理员 |
+| `app_error` | 飞书应用凭据或可用范围有问题：检查 aigw 配置与飞书后台 |
+| `error` | 绑定失败，请重试；持续失败看 aigw 日志 |
+
+约定与限制：
+
+- 绑定只对 **active** 的 Key 开放（停用的 Key 绑定没有意义，接口返回 409）。
+- 换绑是允许的（管理员显式操作），旧 `open_id` 会记进审计。
+- 一个飞书账号不能同时绑两把 Key（数据库唯一索引保证）；一个 Key 也只能有一个飞书账号。
+- 已绑定的 Key 之后被停用/过期，绑定**不会**被清空，只是该身份无法用它登录。
+- 绑定与解绑都写审计（`feishu_bind` / `feishu_bind_reject` / `feishu_unbind`），审计里只有身份与操作者，没有凭据。
+
+## 5. DSH 门户怎么用（飞书登录）
+
+门户登录页在配置了 `feishu` 且 `dsh_login: true` 时多一个「飞书登录」按钮：
+
+```
+门户（dshgw，如 http://host:18300/）点「飞书登录」
+  → http://host:8090/feishu/login            （aigw，匿名，按 IP 限流）
+  → 飞书授权页（扫码或点击同意）
+  → http://host:8090/feishu/callback          （唯一回调：换 token、取 open_id）
+  → 门户 http://host:18300/login/feishu       （dshgw 验票 → 下发会话 → 进租户）
+```
+
+链路要求：
+
+- **未绑定任何 Key 的飞书账号一律拒绝**，门户会说明「尚未绑定，请联系管理员在控制台绑定」。
+- 登录前 aigw 会核对账号状态：`dsh_enabled=false`（控制台「停用 DSH」）、账号 suspended/closed、
+  租户未分配，都在门户给出对应提示，且**不出票**。
+- dshgw 收到票后**再复核一次**「该租户的账号现在仍启用 dsh」（用租户的 worker Key 调
+  `POST /v1/dshgw/authorize`），失败一律 503 而不是放行，因此停用/吊销对飞书登录同样生效。
+- 一次登录凭据是**一次性票据**，默认 120 秒有效、只能兑换一次。门户与 aigw 同主机时票据走
+  host-only cookie（不出现在地址栏）；不同主机时退化为 `?ticket=` 并记录一条 WARN。
+- 已经建立的 dsh 会话不因飞书侧变化而立即失效：吊销语义仍由 `dsh_enforce` / `key_revalidate` /
+  控制台停用按钮负责，飞书登录只负责「进门」。
+
+## 6. 隐私与审计口径
+
+- 存储：Key 行上的 `open_id`（应用内唯一标识）、`union_id`、姓名、绑定时间、绑定人。
+  **不存储**任何飞书令牌、授权码或 App Secret 的副本。
+- 可见性：这些字段只出现在控制台（管理员）与审计；不进请求日志、不进 `/v1/models`、
+  不进任何面向租户的响应。dshgw 不保存 `open_id`（它的审计只记租户与结果）。
+- 审计内容：身份标识与结果码，**不含** code / access_token / state 明文 / app_secret。
+- `open_id` 是**应用内**标识：重建应用（换 App ID）后所有绑定失效，需要重新绑定。
+
+## 7. 排障
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| 授权页报 20029 / `redirect_uri unmatch`(2000) | 回调地址没登记，或与 `callback_url` 不一致 | 逐字复制 `feishu.callback_url` 到飞书后台 |
+| `20010` 用户无应用使用权限 | 应用未发布，或该用户不在可用范围 | 发布版本 / 调整可用范围（或让管理员开免审） |
+| `20003/20004/20065` | 授权码无效、过期（>5 分钟）或已被使用（重复点、双标签页） | 重新点一次「飞书登录」/「绑定飞书」 |
+| `20002` client secret invalid | App Secret 抄错（别把 App ID 当 Secret） | 重新复制；配好前 `enabled: false` 不会碰它 |
+| 20027 授权页报错 | 授权链接带了应用未开通的 scope | 保持 `feishu.scopes` 为空 |
+| aigw 启动报「callback_url path … does not match …」 | 回调地址的 path 与 base_path 不符 | 改 `callback_url` 或 `server.base_path` |
+| 用户被弹回门户、看不到具体错误 | 登录被拒 | 门户错误页会给出原因码；对应 §5 的几种情况 |
+| 「登录成功又被弹回门户」（dshgw 侧） | dshgw 按 https 发了 Secure cookie，而门户是明文 HTTP | 配 `dshgw.public_scheme: http` |
+| 绑定成功但登录仍被拒 | 该账号未启用 DSH / 租户未分配 | 控制台账号页「启用 DSH」并确认租户名 |
+| aigw 出网受限 | 到不了 `accounts.feishu.cn` / `open.feishu.cn` | 放行出站 HTTPS；绑定/登录会报「不可达」，数据面不受影响 |
+
+相关日志与审计的关键字：`feishu_login_reject`、`feishu_bind_reject`（含 reason：`code_rejected` /
+`credentials` / `app_unavailable` / `rate_limited` / `unreachable` / `unbound open id` / `tenant mismatch`）。
+
+## 8. 相关接口
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/feishu/login?mode=dsh\|bind&key=<id>` | 开始授权（`bind` 需管理员会话；`dsh` 匿名、按 IP 限流） |
+| GET | `/feishu/callback` | 唯一回调；按 state 里的 flow 分派 |
+| GET | `/admin/api/v1/keys/{id}/feishu/bind` | 控制台入口：302 到上面的 login |
+| DELETE | `/admin/api/v1/keys/{id}/feishu` | 解绑（幂等），返回 `{"unbound":bool,"key_id":int}` |
+| GET | `/admin/api/v1/keys` | 每行含 `feishu` 对象（见 M60 设计 §3.2） |
+| GET | `dshgw` 门户 `/login/feishu` | 消费一次性票据，签发 dsh 会话（M61） |
+| GET | `dshgw` 门户 `/feishu/error?reason=<code>` | 门户自己的错误页 |
+
+MCP：`admin_unbind_key_feishu`（解绑，admin 角色）；绑定没有 MCP 工具——它需要浏览器完成飞书授权页。

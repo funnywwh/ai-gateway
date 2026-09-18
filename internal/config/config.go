@@ -5,6 +5,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -38,6 +40,7 @@ type Config struct {
 	RateLimit      RateLimit   `yaml:"ratelimit"`
 	Backup         Backup      `yaml:"backup"`
 	Dshgw          Dshgw       `yaml:"dshgw"`
+	Feishu         Feishu      `yaml:"feishu"`
 	Log            logx.Config `yaml:"log"`
 	CredentialsKey string      `yaml:"credentials_key"`
 	Bootstrap      Bootstrap   `yaml:"bootstrap"`
@@ -440,6 +443,12 @@ type Dshgw struct {
 	// PublicListen is where the child binds the portal and tenant public ports.
 	// Empty means loopback: exposing tenants to a network is an explicit choice.
 	PublicListen string `yaml:"public_listen"`
+	// PublicScheme is how browsers actually reach that surface: "auto" (the child's
+	// own default) presumes https in port mode. It is passed through because the
+	// child decides the session cookie's Secure attribute from it, and a browser
+	// silently drops a Secure cookie on a plain-HTTP origin — which presents as
+	// "login succeeded, then back at the portal".
+	PublicScheme string `yaml:"public_scheme"`
 	// TLSCertificate/TLSCertificateKey make the child serve HTTPS on those ports.
 	// Empty means plain HTTP, which is only appropriate on a trusted network.
 	TLSCertificate    string `yaml:"tls_certificate"`
@@ -454,6 +463,100 @@ type Dshgw struct {
 	// PluginBrowserFS is the child's default for the browser filesystem plugin:
 	// "on" requires a template prepared with dsh-browser-fs, "off" does not.
 	PluginBrowserFS string `yaml:"plugin_browser_fs"`
+}
+
+// Feishu is the self-built Feishu (Lark) application aigw uses for identity: one app,
+// one registered redirect URL, and two flows that share it — an administrator binding
+// an API key to a Feishu account from the console, and a person signing in to the DSH
+// portal with Feishu instead of pasting a key.
+//
+// The whole feature is off by default, and while it is off nothing here is read: a
+// deployment that never touches Feishu keeps behaving exactly as before.
+type Feishu struct {
+	Enabled bool `yaml:"enabled"`
+	// AppID and AppSecret come from the Feishu developer console (凭证与基础信息).
+	// The secret must not be logged, echoed in an error page, or stored anywhere else.
+	AppID     string `yaml:"app_id"`
+	AppSecret string `yaml:"app_secret"`
+	// CallbackURL is the absolute URL registered under 安全设置 → 重定向 URL, as the
+	// browser sees it. It is configured rather than derived because aigw cannot know
+	// the origin in front of it (a port, a front proxy, or a path prefix), and a wrong
+	// redirect_uri is a Feishu error page instead of ours. Its path must be
+	// "<base_path>/feishu/callback", which startup also checks.
+	CallbackURL string `yaml:"callback_url"`
+	// The three endpoints are configurable so tests can point them at a local stub; the
+	// defaults are Feishu's documented ones.
+	AuthorizeURL string `yaml:"authorize_url"`
+	TokenURL     string `yaml:"token_url"`
+	UserInfoURL  string `yaml:"userinfo_url"`
+	// Scopes is a space-separated extra scope list. Empty is the right default: the
+	// open id and the display name this feature needs require no permission at all, and
+	// asking for more would show the user a consent screen for data we do not read.
+	Scopes string `yaml:"scopes"`
+	// TimeoutS bounds one call to Feishu.
+	TimeoutS int `yaml:"timeout_s"`
+	// StateTTLS is how long an authorization attempt stays valid between leaving for
+	// Feishu and coming back.
+	StateTTLS int `yaml:"state_ttl_s"`
+	// StateSecret signs that state; empty derives one from credentials_key.
+	StateSecret string `yaml:"state_secret"`
+	// DSHLogin opens the DSH portal login flow (M61). It needs PortalURL to be known.
+	DSHLogin bool `yaml:"dsh_login"`
+	// PortalURL is the browser-visible URL of the dshgw portal. Empty derives it from
+	// the dshgw block, which is correct whenever aigw owns that child.
+	PortalURL string `yaml:"portal_url"`
+	// TicketSecret signs the short-lived ticket aigw hands to dshgw; empty derives one
+	// from credentials_key, and the supervised child receives the derived value in its
+	// generated configuration so the two sides always agree.
+	TicketSecret string `yaml:"ticket_secret"`
+	// TicketTTLS bounds how long that ticket can be redeemed. It is meant to cover one
+	// browser redirect, not to be a session.
+	TicketTTLS int `yaml:"ticket_ttl_s"`
+}
+
+// FeishuLoginURL is the browser-visible entry point of the authorization flow. It is
+// derived from CallbackURL so that a deployment has exactly one public origin to state.
+func (c *Config) FeishuLoginURL() string {
+	base := strings.TrimSuffix(strings.TrimSpace(c.Feishu.CallbackURL), "/feishu/callback")
+	if base == "" {
+		return ""
+	}
+	return base + "/feishu/login"
+}
+
+// DSHGWPortalURL is the browser-visible URL of the dshgw portal login page: the page the
+// DSH login flow returns the browser to. Explicit configuration wins; otherwise it is
+// derived from the dshgw block, mirroring the child's own origin rules (port mode uses
+// public_host:portal_port, path mode uses public_base_url plus the portal prefix).
+func (c *Config) DSHGWPortalURL() string {
+	if explicit := strings.TrimRight(strings.TrimSpace(c.Feishu.PortalURL), "/"); explicit != "" {
+		return explicit
+	}
+	if base := strings.TrimRight(strings.TrimSpace(c.Dshgw.PublicBaseURL), "/"); base != "" {
+		prefix := strings.Trim(c.Dshgw.PortalPathPrefix, "/")
+		if prefix == "" {
+			prefix = "dshgw"
+		}
+		return base + "/" + prefix
+	}
+	host := strings.TrimSpace(c.Dshgw.PublicHost)
+	if host == "" || c.Dshgw.PortalPort == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s://%s:%d", c.DshgwPublicScheme(), host, c.Dshgw.PortalPort)
+}
+
+// DshgwPublicScheme is how browsers reach the child's public surface: "auto" keeps the
+// child's own default (https in port mode), which is what a TLS deployment wants.
+func (c *Config) DshgwPublicScheme() string {
+	switch scheme := strings.TrimSpace(c.Dshgw.PublicScheme); scheme {
+	case "http", "https":
+		return scheme
+	}
+	if base := strings.TrimSpace(c.Dshgw.PublicBaseURL); strings.HasPrefix(base, "http://") {
+		return "http"
+	}
+	return "https"
 }
 
 // Backup configures periodic automatic database backups.
@@ -595,6 +698,17 @@ type Bootstrap struct {
 // Default returns the built-in configuration (matches config.example.yaml).
 func Default() Config {
 	return Config{
+		Feishu: Feishu{
+			// Default endpoints are the documented ones: the authorization page, the
+			// OAuth v3 token endpoint (v2 is historical) and the user-info API.
+			AuthorizeURL: "https://accounts.feishu.cn/open-apis/authen/v1/authorize",
+			TokenURL:     "https://accounts.feishu.cn/oauth/v3/token",
+			UserInfoURL:  "https://open.feishu.cn/open-apis/authen/v1/user_info",
+			TimeoutS:     5,
+			StateTTLS:    600,
+			TicketTTLS:   120,
+			DSHLogin:     true,
+		},
 		Dshgw: Dshgw{
 			PublicHost:   "localhost",
 			Listen:       "127.0.0.1:31099",
@@ -813,6 +927,12 @@ func applyEnv(cfg *Config) error {
 	envStr(&cfg.Server.BasePath, "GW_SERVER_BASE_PATH")
 	envStr(&cfg.Database.Path, "GW_DATABASE_PATH")
 	envStr(&cfg.CredentialsKey, "GW_CREDENTIALS_KEY")
+	envStr(&cfg.Feishu.AppID, "GW_FEISHU_APP_ID")
+	envStr(&cfg.Feishu.AppSecret, "GW_FEISHU_APP_SECRET")
+	envStr(&cfg.Feishu.CallbackURL, "GW_FEISHU_CALLBACK_URL")
+	envStr(&cfg.Feishu.StateSecret, "GW_FEISHU_STATE_SECRET")
+	envStr(&cfg.Feishu.TicketSecret, "GW_FEISHU_TICKET_SECRET")
+	envStr(&cfg.Feishu.PortalURL, "GW_FEISHU_PORTAL_URL")
 	envStr(&cfg.Log.Level, "GW_LOG_LEVEL")
 	envStr(&cfg.Log.Format, "GW_LOG_FORMAT")
 	envStr(&cfg.Plugins.Dir, "GW_PLUGINS_DIR")
@@ -878,12 +998,124 @@ func oneOf(field, value string, allowed ...string) error {
 	return fmt.Errorf("%s must be one of %s (got %q)", field, strings.Join(allowed, "|"), value)
 }
 
+// feishuAppIDRE matches the App ID shape Feishu hands out (cli_ followed by the app's
+// identifier). Checking it here turns a copy/paste mistake into a startup error instead
+// of a 20027/20002 error page during a user's first login.
+var feishuAppIDRE = regexp.MustCompile(`^cli_[A-Za-z0-9]+$`)
+
+// validateFeishu checks the identity block. Everything is checked only while the feature
+// is on: a deployment that does not use Feishu must not be stopped from starting by
+// stale or half-filled values it never reads.
+func (c *Config) validateFeishu() error {
+	if !c.Feishu.Enabled {
+		return nil
+	}
+	if !feishuAppIDRE.MatchString(strings.TrimSpace(c.Feishu.AppID)) {
+		return fmt.Errorf("feishu.app_id must be the application's App ID (cli_…)")
+	}
+	if strings.TrimSpace(c.Feishu.AppSecret) == "" {
+		return fmt.Errorf("feishu.app_secret must be set (it is read from the developer console's 凭证与基础信息)")
+	}
+	for label, raw := range map[string]string{
+		"feishu.callback_url": c.Feishu.CallbackURL,
+	} {
+		// Plain http is legitimate for the callback: it is only the address the browser
+		// is sent back to, and a LAN deployment served over http has no other option
+		// (Feishu accepts http redirect URLs).
+		if err := validateFeishuURL(label, raw, true, false); err != nil {
+			return err
+		}
+	}
+	for label, raw := range map[string]string{
+		"feishu.authorize_url": c.Feishu.AuthorizeURL,
+		"feishu.token_url":     c.Feishu.TokenURL,
+		"feishu.userinfo_url":  c.Feishu.UserInfoURL,
+	} {
+		// These carry the app secret and the user's access token, so https is required
+		// outside a loopback stub.
+		if err := validateFeishuURL(label, raw, true, true); err != nil {
+			return err
+		}
+	}
+	// The callback must be the path aigw actually serves, modulo the mount prefix, which
+	// is checked when the server is built (it knows its own base path there).
+	if !strings.HasSuffix(strings.TrimRight(c.Feishu.CallbackURL, "/"), "/feishu/callback") {
+		return fmt.Errorf("feishu.callback_url must end with /feishu/callback (got %q); register exactly this URL in the Feishu console's 重定向 URL", c.Feishu.CallbackURL)
+	}
+	if c.Feishu.TimeoutS <= 0 || c.Feishu.TimeoutS > 60 {
+		return fmt.Errorf("feishu.timeout_s must be between 1 and 60 (got %d)", c.Feishu.TimeoutS)
+	}
+	if c.Feishu.StateTTLS < 60 || c.Feishu.StateTTLS > 3600 {
+		return fmt.Errorf("feishu.state_ttl_s must be between 60 and 3600 (got %d)", c.Feishu.StateTTLS)
+	}
+	if strings.TrimSpace(c.Feishu.StateSecret) == "" && strings.TrimSpace(c.CredentialsKey) == "" {
+		return fmt.Errorf("feishu.state_secret is empty and credentials_key cannot derive one")
+	}
+	if c.Feishu.DSHLogin {
+		if c.Feishu.TicketTTLS < 30 || c.Feishu.TicketTTLS > 600 {
+			return fmt.Errorf("feishu.ticket_ttl_s must be between 30 and 600 (got %d)", c.Feishu.TicketTTLS)
+		}
+		if strings.TrimSpace(c.Feishu.TicketSecret) == "" && strings.TrimSpace(c.CredentialsKey) == "" {
+			return fmt.Errorf("feishu.ticket_secret is empty and credentials_key cannot derive one")
+		}
+		if c.DSHGWPortalURL() == "" {
+			return fmt.Errorf("feishu.dsh_login is on but the DSH portal URL is unknown: set feishu.portal_url or the dshgw public_host/portal_port block")
+		}
+		if !c.Dshgw.Enabled && strings.TrimSpace(c.Feishu.PortalURL) == "" {
+			// Deriving the portal URL from the dshgw block only makes sense when aigw owns
+			// that child: otherwise the defaults for that block describe no running portal,
+			// and the login would redirect somewhere that does not answer.
+			return fmt.Errorf("feishu.dsh_login is on but dshgw is not supervised by this aigw: set feishu.portal_url explicitly")
+		}
+		if err := validateFeishuURL("feishu.portal_url", c.DSHGWPortalURL(), false, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateFeishuURL rejects anything that could not be used as given. requireHTTPS is set
+// for the endpoints that carry the app secret and the user's access token; the browser
+// redirect targets are allowed to be plain http, which is what a LAN deployment uses.
+func validateFeishuURL(label, raw string, required, requireHTTPS bool) error {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		if required {
+			return fmt.Errorf("%s must not be empty", label)
+		}
+		return nil
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("%s must be an absolute URL without credentials, query or fragment (got %q)", label, raw)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("%s scheme %q must be http or https", label, parsed.Scheme)
+	}
+	if requireHTTPS && parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
+		return fmt.Errorf("%s must use https for %q (plain http is only accepted for a loopback stub)", label, parsed.Hostname())
+	}
+	return nil
+}
+
+// isLoopbackHost reports whether a URL host is a loopback address or localhost.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
 // Validate checks the configuration for obvious misconfiguration.
 func (c *Config) Validate() error {
 	if strings.TrimSpace(c.Server.Listen) == "" {
 		return fmt.Errorf("server.listen must not be empty")
 	}
 	if err := validateBasePath(c.Server.NormalizedBasePath()); err != nil {
+		return err
+	}
+	if err := c.validateFeishu(); err != nil {
 		return err
 	}
 	if strings.TrimSpace(c.Database.Path) == "" {

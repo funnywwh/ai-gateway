@@ -145,6 +145,46 @@ func TestBuildDshgwChildCarriesRootsAndPathMode(t *testing.T) {
 	}
 }
 
+// The public scheme decides the child's session cookie Secure attribute, so failing
+// to pass it through is not cosmetic: on a plain-HTTP deployment the browser drops
+// the cookie and every login looks like "authenticated, then back at the portal".
+func TestBuildDshgwChildCarriesThePublicScheme(t *testing.T) {
+	cfg, aigwBinary := childFixture(t)
+	cfg.Dshgw.PublicScheme = "http"
+	child, err := buildDshgwChild(cfg, aigwBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.config.PublicScheme != "http" {
+		t.Fatalf("public scheme = %q, want the configured http", child.config.PublicScheme)
+	}
+	// Unset stays unset: the child's own "auto" default is what port-mode HTTPS
+	// deployments rely on, and writing "auto" out would only add noise.
+	cfg.Dshgw.PublicScheme = ""
+	child, err = buildDshgwChild(cfg, aigwBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.config.PublicScheme != "" {
+		t.Fatalf("public scheme = %q, want it omitted when unset", child.config.PublicScheme)
+	}
+	rendered, err := child.config.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rendered), "public_scheme") {
+		t.Fatalf("an unset public_scheme still reached the child configuration:\n%s", rendered)
+	}
+	// A scheme that contradicts the base URL is refused before the child restarts
+	// into it.
+	cfg.Dshgw.PublicScheme = "https"
+	cfg.Dshgw.PublicHost = "chat.example"
+	cfg.Dshgw.PublicBaseURL = "http://chat.example"
+	if _, err := buildDshgwChild(cfg, aigwBinary); err == nil {
+		t.Fatal("a public_scheme contradicting public_base_url was accepted")
+	}
+}
+
 func TestBuildDshgwChildPrefersExplicitOverridesAndBasePath(t *testing.T) {
 	cfg, aigwBinary := childFixture(t)
 	cfg.Server.BasePath = "/aigw/"

@@ -127,6 +127,15 @@ func newAdminFixture(t *testing.T) *adminFixture {
 // must pass that refusal through unchanged, so a test needs a way to reach it.
 func newAdminFixtureWithout(t *testing.T, unwired string) *adminFixture {
 	t.Helper()
+	return newAdminFixtureWith(t, unwired, nil)
+}
+
+// newAdminFixtureWith builds the management fixture and lets one test adjust the ports
+// before the server exists. That timing matters: the transport registers its routes (and
+// therefore decides which surfaces exist at all) while it is constructed, so a port wired
+// afterwards would be invisible on the wire.
+func newAdminFixtureWith(t *testing.T, unwired string, mutate func(*Deps)) *adminFixture {
+	t.Helper()
 	ctx := context.Background()
 
 	cfg := config.Default()
@@ -292,6 +301,9 @@ func newAdminFixtureWithout(t *testing.T, unwired string) *adminFixture {
 	// management surface, and a fixture without it would answer 501 (M25).
 	deps.LogJanitor = retention.New(db, retention.Config{RetentionDays: cfg.Recording.RetentionDays}, nil)
 	deps.DimensionRollups = db
+	if mutate != nil {
+		mutate(&deps)
+	}
 	srv := New(deps)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

@@ -48,12 +48,15 @@ func buildDshgwChild(cfg *config.Config, aigwExecutable string) (*dshgwChild, er
 		PublicBaseURL:    strings.TrimRight(strings.TrimSpace(cfg.Dshgw.PublicBaseURL), "/"),
 		TenantPathPrefix: strings.TrimSpace(cfg.Dshgw.TenantPathPrefix),
 		PortalPathPrefix: strings.TrimSpace(cfg.Dshgw.PortalPathPrefix),
-		PortalPort:       cfg.Dshgw.PortalPort,
-		TenantPortLo:     cfg.Dshgw.TenantPortLo,
-		TenantPortHi:     cfg.Dshgw.TenantPortHi,
-		WorkerPortLo:     cfg.Dshgw.WorkerPortLo,
-		WorkerPortHi:     cfg.Dshgw.WorkerPortHi,
-		Listen:           cfg.Dshgw.Listen,
+		// The scheme browsers use: passed through so a plain-HTTP deployment does not
+		// get Secure cookies the browser throws away.
+		PublicScheme: strings.TrimSpace(cfg.Dshgw.PublicScheme),
+		PortalPort:   cfg.Dshgw.PortalPort,
+		TenantPortLo: cfg.Dshgw.TenantPortLo,
+		TenantPortHi: cfg.Dshgw.TenantPortHi,
+		WorkerPortLo: cfg.Dshgw.WorkerPortLo,
+		WorkerPortHi: cfg.Dshgw.WorkerPortHi,
+		Listen:       cfg.Dshgw.Listen,
 		// The child reaches aigw over loopback: it runs on the same host, and the
 		// tenant data plane never needs to leave it.
 		AigwBaseURL:     dshgwAigwBaseURL(cfg),

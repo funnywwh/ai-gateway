@@ -164,7 +164,28 @@ type APIKey struct {
 	LastUsedAt       *time.Time
 	CreatedBy        string
 	CreatedAt        time.Time
+	// Feishu identity bound to this key (M60). Empty open id means unbound. The
+	// identity never authenticates a data-plane request by itself: it only says which
+	// person may enter the DSH portal as this key's account (see docs/feishu.md).
+	FeishuOpenID  string
+	FeishuUnionID string
+	FeishuName    string
+	FeishuBoundAt *time.Time
+	FeishuBoundBy string
 }
+
+// FeishuBinding is the read/write projection of a key's Feishu identity, so callers that
+// only care about the binding do not have to carry a whole APIKey around.
+type FeishuBinding struct {
+	OpenID  string
+	UnionID string
+	Name    string
+	BoundAt time.Time
+	BoundBy string
+}
+
+// Bound reports whether the projection holds an identity.
+func (b FeishuBinding) Bound() bool { return b.OpenID != "" }
 
 // MCPToken authenticates the MCP endpoint. Scope decides whether the token only
 // reads its own account (query) or may also drive the management API

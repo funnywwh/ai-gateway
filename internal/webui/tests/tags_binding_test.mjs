@@ -7,7 +7,10 @@ const keys = await readFile(new URL('../static/js/pages/keys.js', import.meta.ur
 const tags = await readFile(new URL('../static/js/pages/tags.js', import.meta.url), 'utf8');
 
 assert.match(accounts, /key: 'tags', label: '标签'/);
-assert.match(accounts, /api\.patch\('\/accounts\/' \+ row\.id, \{ \.\.\.values, tags: splitTags\(values\.tags\) \}\)/);
+// The account editor gained a second derived field (org membership, M49), so matching the
+// whole object literal would only pin the exact spelling of unrelated code. What this test
+// is here for is that tag editing goes through splitTags on a PATCH by id.
+assert.match(accounts, /api\.patch\('\/accounts\/' \+ row\.id, \{[\s\S]*?\.\.\.values[\s\S]*?tags: splitTags\(values\.tags\)/);
 assert.match(accounts, /所有 API Key 自动继承/);
 assert.match(keys, /key: 'effective_tags', label: '生效标签'/);
 assert.match(keys, /name: 'tags', label: 'Key 标签（逗号分隔）'/);

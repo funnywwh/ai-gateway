@@ -83,13 +83,18 @@ var allowed = map[string][]string{
 	// and the credential store only through ports (Prober, Sealer).
 	"internal/httpapi": {
 		"internal/admin", "internal/apikey", "internal/backup", "internal/billing",
-		"internal/chat", "internal/config", "internal/domain", "internal/ids", "internal/mcpsrv",
+		"internal/chat", "internal/config", "internal/domain", "internal/feishu", "internal/ids",
+		"internal/mcpsrv",
 		"internal/modelmap", "internal/orgtree", "internal/portal", "internal/pricing", "internal/providers",
 		"internal/quota", "internal/registry", "internal/responses", "internal/retention",
 		"internal/routing",
 		"internal/runtime", "internal/secret", "internal/store", "internal/usage", "pkg/pluginapi",
 		"internal/localdshgw",
 	},
+	// M60/M61: the Feishu identity client sits beside the transport instead of inside it,
+	// so the OAuth exchange, the signed state and the ticket are testable on their own. It
+	// is a pure HTTP client — no store, no transport, no session state.
+	"internal/feishu": {"internal/config", "internal/domain"},
 	// M52: the console drives the dshgw provisioning channel through this socket client.
 	"internal/localdshgw": {"internal/domain"},
 	// M58: aigw supervises its dshgw child across the process boundary only. The

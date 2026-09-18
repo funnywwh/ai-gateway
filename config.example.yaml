@@ -240,6 +240,41 @@ log:
   level: info                 # debug|info|warn|error
   format: text                # text|json
 
+# DSH multi-tenant gateway (M58): aigw starts and supervises a sibling `dshgw` process.
+# See docs/dshgw.md; the standalone shape has its own example under deploy/dshgw/.
+dshgw:
+  enabled: false              # true starts the child at startup and stops it when aigw exits
+  # public_host + portal_port are the tenant-facing surface the child binds itself (there is
+  # no nginx in this shape). They also decide the DSH portal URL the Feishu login returns to.
+  public_host: "chat.tirisen.hk"
+  portal_port: 32600
+  # public_scheme is how browsers actually reach that surface. "auto" (the child's own
+  # default) presumes https in port mode; a plain-HTTP deployment must say "http", or the
+  # child issues Secure cookies that the browser silently discards.
+  public_scheme: auto         # auto|http|https
+
+# Feishu (Lark) identity (M60/M61): bind API keys to Feishu accounts, and let those people
+# sign in to the DSH portal without pasting a key. Off by default, and while it is off
+# nothing in this block is read. See docs/feishu.md for the developer-console steps.
+feishu:
+  enabled: false
+  app_id: ""                  # 凭证与基础信息 → App ID (cli_…)
+  app_secret: ""              # 凭证与基础信息 → App Secret; prefer GW_FEISHU_APP_SECRET
+  # The absolute URL registered under 安全设置 → 重定向 URL, exactly as the browser sees it
+  # (this deployment puts aigw behind the front proxy on 8090). Exactly one URL is
+  # registered: it serves both the console binding and the portal login. Its path must be
+  # "<server.base_path>/feishu/callback".
+  callback_url: ""
+  scopes: ""                  # empty is right: the open id and the name need no permission
+  dsh_login: true             # open the DSH portal login flow (needs the portal URL below)
+  portal_url: ""              # DSH portal URL; empty derives it from the dshgw block above
+  state_ttl_s: 600            # how long one consent screen may stay open
+  ticket_ttl_s: 120           # how long the handoff ticket to dshgw stays valid
+  # Signing keys are optional: empty derives a purpose-bound key from credentials_key, and
+  # the supervised dshgw child receives the derived ticket key in its generated config.
+  state_secret: ""
+  ticket_secret: ""
+
 # AES-GCM key for provider credentials at rest; override with GW_CREDENTIALS_KEY in production.
 credentials_key: "change-me-32-byte-encryption-key!!"
 

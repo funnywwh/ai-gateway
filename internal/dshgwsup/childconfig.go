@@ -86,6 +86,14 @@ type ChildConfig struct {
 	// onto it). It must not overlap any of the three port ranges.
 	Listen      string `yaml:"listen"`
 	AigwBaseURL string `yaml:"aigw_base_url"`
+	// PublicScheme is how browsers actually reach the child's public surface:
+	// "auto" (the child's own default) presumes https in port mode, which is wrong
+	// on a plain-HTTP deployment. It matters beyond cosmetics — the child decides
+	// the session cookie's Secure attribute from it, and a browser silently drops a
+	// Secure cookie on an http origin, so a wrong value looks exactly like "login
+	// succeeded and then bounced me back to the portal". The child has always
+	// supported this key; the supervised shape simply never passed it through.
+	PublicScheme string `yaml:"public_scheme,omitempty"`
 	// AdminSocket is the local provisioning socket the console's DSH buttons use.
 	// In this shape it is owned by the same UID as aigw, not by root.
 	AdminSocket string `yaml:"admin_socket"`
@@ -125,6 +133,14 @@ type TLSConfig struct {
 func (c ChildConfig) Validate() error {
 	if !publicHostRE.MatchString(c.PublicHost) {
 		return fmt.Errorf("dshgw.public_host %q must be a lowercase DNS name without scheme, port or path", c.PublicHost)
+	}
+	if c.PublicScheme != "" && c.PublicScheme != "auto" && c.PublicScheme != "http" && c.PublicScheme != "https" {
+		return fmt.Errorf("dshgw.public_scheme %q must be auto, http or https", c.PublicScheme)
+	}
+	if c.PublicScheme == "https" && c.PublicBaseURL != "" && strings.HasPrefix(c.PublicBaseURL, "http://") {
+		// The base URL is what every generated link is built from while the scheme
+		// decides the cookie's Secure attribute: a deployment cannot be both.
+		return fmt.Errorf("dshgw.public_scheme https contradicts public_base_url %q", c.PublicBaseURL)
 	}
 	if c.PublicBaseURL != "" {
 		parsed, err := url.Parse(c.PublicBaseURL)

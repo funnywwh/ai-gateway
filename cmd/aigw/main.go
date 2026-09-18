@@ -501,8 +501,17 @@ func run() int {
 			"queue_bytes", cfg.Recording.BatchQueueBytes)
 	}
 
+	// M60/M61: the Feishu identity integration, or nil when it is off. Built before the
+	// server so a bad callback URL or a missing signing key is a startup failure.
+	feishuDeps, err := buildFeishuDeps(cfg, log)
+	if err != nil {
+		log.Error("feishu identity configuration is unusable", "err", err)
+		return 2
+	}
+
 	api := httpapi.New(httpapi.Deps{
 		Config:           cfg,
+		Feishu:           feishuDeps,
 		FX:               fxStore,
 		ReloadFX:         reloadFX,
 		Registry:         reg,

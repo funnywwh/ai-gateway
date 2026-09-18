@@ -30,6 +30,8 @@
 | M50 | docs/design/m50-frontend-minify.md | 是 |
 | M54 | docs/design/m54-console-asset-shape.md | 是 |
 | M55 | docs/design/m55-console-transfer-compression.md | 是 |
+| M60 | docs/design/m60-aigw-key-feishu-binding.md + docs/feishu.md | 是 |
+| M61 | docs/design/m61-dshgw-feishu-login.md | 是 |
 
 ## 检查项（提交前自检）
 

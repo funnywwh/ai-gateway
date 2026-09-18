@@ -12,6 +12,7 @@ import (
 	"net/http/pprof"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -153,6 +154,11 @@ type Deps struct {
 	ReloadFX func(ctx context.Context) error
 	// UI serves the embedded management console at /admin/ui/; nil disables it.
 	UI http.Handler
+	// Feishu is the identity integration (M60/M61): the OAuth client, the two codecs and
+	// the public URLs the browser must be sent to. A nil port means the feature is off —
+	// its routes answer 404 and the console renders nothing for it, which is what a
+	// deployment that never touches Feishu should see.
+	Feishu *FeishuDeps
 	// DshgwAdmin drives the dshgw local provisioning channel (M52). nil makes the
 	// console dsh toggle answer 501 instead of pretending to provision.
 	DshgwAdmin DshgwAdminOps
@@ -236,6 +242,16 @@ type Server struct {
 	// a failure of that retry is counted here rather than only logged.
 	requestLogWriteFailures atomic.Int64
 	requestLogDropped       atomic.Int64
+	// Feishu attempt limiting: one bucket per source address, guarding the only route that
+	// makes an outbound call before anyone is authenticated.
+	feishuMu    sync.Mutex
+	feishuRates map[string]*feishuRate
+}
+
+// feishuRate is one address's attempt window.
+type feishuRate struct {
+	start time.Time
+	count int
 }
 
 // New builds the HTTP server.
@@ -243,7 +259,7 @@ func New(deps Deps) *Server {
 	if deps.Log == nil {
 		deps.Log = slog.Default()
 	}
-	s := &Server{deps: deps, mux: http.NewServeMux()}
+	s := &Server{deps: deps, mux: http.NewServeMux(), feishuRates: map[string]*feishuRate{}}
 	s.admin = s.adminRoutes()
 	s.adminIndex = newAdminEndpointIndex(s.admin)
 	s.chatSigner = newChatTicketSigner()
@@ -373,6 +389,15 @@ func (s *Server) routes() {
 	s.handle("GET /v1/models", s.handleListModels)
 	s.handle("POST /v1/dshgw/authorize", s.handleDSHGWAuthorize)
 	s.handle("POST /mcp", s.handleMCP)
+
+	// The Feishu identity surface (M60/M61). Two public routes, registered only when the
+	// integration is configured: an unauthenticated start and one callback that serves both
+	// the console's key binding and the DSH portal login, so exactly one redirect URL has to
+	// be registered with Feishu. Without the port the paths simply do not exist.
+	if s.feishuEnabled() {
+		s.handle("GET "+s.deps.Feishu.LoginPath, s.handleFeishuLogin)
+		s.handle("GET "+s.deps.Feishu.CallbackPath, s.handleFeishuCallback)
+	}
 
 	// The management surface comes from the declarative table (admin_routes.go):
 	// one entry per endpoint, carrying both the handler and the MCP metadata, so a

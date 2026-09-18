@@ -16,6 +16,7 @@ import (
 var expectedAdminPatterns = []string{
 	"DELETE /admin/api/v1/backups/{id}",
 	"DELETE /admin/api/v1/hooks/{id}",
+	"DELETE /admin/api/v1/keys/{id}/feishu",
 	"DELETE /admin/api/v1/mcp-tokens/{id}",
 	"DELETE /admin/api/v1/model-mappings/{id}",
 	"DELETE /admin/api/v1/portal-users/{id}",
@@ -42,6 +43,7 @@ var expectedAdminPatterns = []string{
 	"GET /admin/api/v1/invoices",
 	"GET /admin/api/v1/invoices/{id}",
 	"GET /admin/api/v1/keys",
+	"GET /admin/api/v1/keys/{id}/feishu/bind",
 	"GET /admin/api/v1/mcp-tokens",
 	"GET /admin/api/v1/model-mappings",
 	"GET /admin/api/v1/models",

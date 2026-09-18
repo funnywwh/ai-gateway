@@ -611,9 +611,31 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/keys", Handler: s.handleAdminListKeys,
 			Name: "admin_list_keys", Group: groupKeys, Role: roleViewer,
-			Summary: "列出 API Key（自有/账号继承/生效标签、前缀、状态与内容录制开关）",
+			Summary: "列出 API Key（自有/账号继承/生效标签、前缀、状态、内容录制开关与飞书绑定）",
 			Query: append(pageConfig.fields(),
 				queryParam("account_id", "integer", "只看某个账户的 Key，省略表示全部")),
+		},
+		{
+			// The browser leaves for Feishu here, so the answer is a redirect rather than
+			// JSON: an agent cannot complete an interactive consent screen, and a tool that
+			// pretended otherwise would only hand back a URL nobody followed.
+			Method: "GET", Path: "/admin/api/v1/keys/{id}/feishu/bind", Handler: s.handleAdminBindKeyFeishu,
+			Name: "admin_bind_key_feishu", Group: groupKeys, Role: roleAdmin,
+			Summary: "开始把一把 API Key 绑定到飞书账号：返回 302 跳转到飞书授权页，必须在浏览器里打开才能完成",
+			Notes: "绑定证明的是「这个飞书账号属于操作者」：只有走完飞书的授权页才能拿到 open_id，所以没有等价的 JSON 接口。" +
+				"完成后的回调把身份写进该 Key 并回到控制台 API Keys 页；一把 Key 只能绑一个飞书账号，一个飞书账号也只能绑一把 Key。" +
+				"绑定本身不影响数据面鉴权，它只是让该身份可以登录 DSH 门户（见 docs/feishu.md）。",
+			NoTool: "MCP 客户端没有浏览器，302 到飞书授权页没有意义；绑定请在控制台完成，解绑有 admin_unbind_key_feishu 工具",
+			Params: []adminField{pathParam("id", "API Key 的数字 id（见 admin_list_keys）")},
+		},
+		{
+			Method: "DELETE", Path: "/admin/api/v1/keys/{id}/feishu", Handler: s.handleAdminUnbindKeyFeishu,
+			Name: "admin_unbind_key_feishu", Group: groupKeys, Role: roleAdmin,
+			Summary:   `解除一把 API Key 的飞书绑定（幂等；返回 {"unbound":bool,"key_id":int}）`,
+			Dangerous: true, ConfirmReason: "会让绑定的那个人失去用飞书登录 DSH 门户的能力；Key 本身与数据面请求不受影响",
+			Notes: "unbound 为 true 表示确实解除了绑定，false 表示这把 Key 本来就没有绑定（重复调用不报错）。" +
+				"解绑只清空 Key 上的飞书身份：不吊销密钥、不删除账号，也不撤销既有 DSH 会话（会话按自己的 TTL 到期）。",
+			Params: []adminField{pathParam("id", "API Key 的数字 id（见 admin_list_keys）")},
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/keys", Handler: s.handleAdminCreateKey,

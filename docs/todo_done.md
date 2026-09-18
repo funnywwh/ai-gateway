@@ -3741,3 +3741,37 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
   的 `usage_records` 行（cost 1637、completed）已落库，未丢账
 - [ ] `billing_failures` 里仍有 3 行 `resolved_at IS NULL`（09-15 两行 + 今日 1 行）；回放路径不写 `resolved_at`，
   属既有记账口径，本次未改。**待办：确认这 3 行是否已被兜底覆盖，或需要一次对账**
+
+## M60 完成记录（aigw 的 API Key 飞书绑定与解绑）
+
+设计：`docs/design/m60-aigw-key-feishu-binding.md`（§6 差异已回填）；规格：`docs/feishu.md`。
+
+- [x] 迁移 `0022_api_key_feishu_binding.sql`：`api_keys` 增 `feishu_open_id`/`feishu_union_id`/`feishu_name`/
+      `feishu_bound_at`/`feishu_bound_by`，并用表达式唯一索引
+      `NULLIF(feishu_open_id,'')` 保证「一个飞书账号只绑一把 Key」而「未绑定互不冲突」
+- [x] `domain.APIKey` 增五字段 + `FeishuBinding` 只读投影；store 增 `GetAPIKeyByID` /
+      `FindAPIKeyByFeishuOpenID` / `BindAPIKeyFeishu` / `UnbindAPIKeyFeishu`（单列 UPDATE）
+- [x] **绑定不会被整行重写清空**：`UpsertAPIKey`（即 PATCH 路径）不包含飞书列，回归测试
+      `TestAPIKeyFeishuBindingSurvivesARowRewrite` 故意清空结构体字段后写回，绑定仍在
+- [x] `internal/feishu`：OAuth 客户端（换 token + 取 user_info，错误码四类归因、64 KiB 上限、禁重定向、
+      超时、不用环境代理）、签名 state（HMAC + 单次使用 + 过期上界）、票据编解码；登记进 `internal/arch` 分层表
+- [x] `internal/config`：`feishu` 块（enabled/app_id/app_secret/callback_url/endpoints/scopes/timeout/
+      state_ttl/dsh_login/portal_url/ticket_*）+ 校验（应用关闭时不读任何字段；开启时校验 App ID 形状、
+      callback path 与 base_path 一致由服务端构造期再校验、三个 API 端点非回环必须 https）+ `GW_FEISHU_*` 环境覆盖
+- [x] `internal/httpapi`：`GET /feishu/login`（mode=dsh 匿名限流 / mode=bind 需管理员）、
+      `GET /feishu/callback`（唯一回调，按 state 的 flow 分派）、`GET /admin/api/v1/keys/{id}/feishu/bind`、
+      `DELETE /admin/api/v1/keys/{id}/feishu`；`GET /keys` 每行带 `feishu` 对象；审计
+      `feishu_bind`/`feishu_bind_reject`/`feishu_unbind`/`feishu_bind_start`；未配置时路由不注册（404）
+- [x] 控制台 API Keys 页：飞书列（姓名 + 悬停显示 open_id/绑定人/时间）、「绑定飞书」跳转、
+      「解绑飞书」确认后 DELETE、11 个回调结果码的中文提示与参数清除；只读角色不渲染写动作
+- [x] 路由表与 MCP 文档化（`docs/mcp.md` §4.5）：`admin_unbind_key_feishu`（DELETE，Dangerous + ConfirmReason）、
+      `admin_bind_key_feishu`（GET，NoTool：MCP 无浏览器）
+- [x] 测试：store（唯一冲突/幂等/整行重写/列表）、`internal/feishu`（state 篡改过期重放、client 错误归因、
+      授权 URL 参数与转义）、httpapi（角色矩阵、全链路、11 个结果码、state 不可信 → 400 说明页、
+      重放不写入、操作者降权 → rejected、冲突不覆盖、换绑 replaced、限流、cookie/query 票据两种通道、
+      Secure 随 scheme、机密性扫描）、控制台 node 测试 `internal/webui/tests/keys_feishu_test.mjs`
+- [x] **顺带修复两处在 HEAD 上就已失败的 node 测试**（与 M60 无关）：`tags_binding_test.mjs` 与
+      `org_tree_test.mjs` 仍在断言 M49 之前的形状（accounts 页多一个派生字段、组织页已不挂侧边栏树、
+      账户列表改用 `orgQuery()`）。改法：断言意图而非整段字面量；「不得触及侧边栏」写成结构化检查，
+      因为全文 `/sidebar/` 子串禁止会被一句解释性注释绊倒。发现方式：在独立 worktree 里跑 HEAD 复现，
+      确认失败与本次改动无关（否则 `make ui-base`／`make verify` 无法作为本次的验收门槛）

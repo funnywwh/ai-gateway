@@ -24,6 +24,16 @@ type AdminStore interface {
 	GetAccount(ctx context.Context, id int64) (*domain.Account, error)
 	GetAccountByName(ctx context.Context, name string) (*domain.Account, error)
 	ListAPIKeys(ctx context.Context, accountID int64) ([]*domain.APIKey, error)
+	// The Feishu identity of a key has its own read/write path (M60): a binding must be
+	// written by one statement, never as a side effect of rewriting a whole row, and it is
+	// resolved the other way round when someone signs in to the DSH portal.
+	GetAPIKeyByID(ctx context.Context, id int64) (*domain.APIKey, error)
+	FindAPIKeyByFeishuOpenID(ctx context.Context, openID string) (*domain.APIKey, error)
+	BindAPIKeyFeishu(ctx context.Context, id int64, binding domain.FeishuBinding) error
+	UnbindAPIKeyFeishu(ctx context.Context, id int64) (bool, error)
+	// GetAdminUserByUsername re-reads the operator who started a Feishu binding, so a
+	// demotion between starting and finishing it is honoured.
+	GetAdminUserByUsername(ctx context.Context, username string) (*domain.AdminUser, error)
 	// FindAPIKeyByPrefix reports a missing row as (nil, nil): the key importer must tell
 	// "new" from "already here" without the data plane's "unknown prefix is a 401" rule.
 	FindAPIKeyByPrefix(ctx context.Context, prefix string) (*domain.APIKey, error)
@@ -231,6 +241,7 @@ func (s *Server) handleAdminListKeys(w http.ResponseWriter, r *http.Request) {
 			"record_reasoning":   key.RecordReasoning,
 			"record_output_text": key.RecordOutputText,
 			"last_used_at":       timeOrNil(key.LastUsedAt),
+			"feishu":             feishuBindingJSON(key),
 		})
 	}
 	page, err := pageConfig.params(r)

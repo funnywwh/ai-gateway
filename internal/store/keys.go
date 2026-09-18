@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/winger/ai-gateway/internal/domain"
@@ -12,24 +13,28 @@ import (
 
 const apiKeyCols = `id, account_id, name, key_prefix, key_hash, tags_json, grants_json, policy_json,
 	record_input_mode, record_output_text, record_reasoning, status, expires_at, last_used_at,
-	created_by, created_at`
+	created_by, created_at, feishu_open_id, feishu_union_id, feishu_name, feishu_bound_at,
+	feishu_bound_by`
 
 func scanAPIKey(row rowScanner) (*domain.APIKey, error) {
 	var (
 		k                         domain.APIKey
 		recordOutput, recordThink int
 		expiresAt, lastUsedAt     sql.NullInt64
+		feishuBoundAt             sql.NullInt64
 		createdAt                 int64
 	)
 	if err := row.Scan(&k.ID, &k.AccountID, &k.Name, &k.KeyPrefix, &k.KeyHash, &k.TagsJSON,
 		&k.GrantsJSON, &k.PolicyJSON, &k.RecordInputMode, &recordOutput, &recordThink, &k.Status,
-		&expiresAt, &lastUsedAt, &k.CreatedBy, &createdAt); err != nil {
+		&expiresAt, &lastUsedAt, &k.CreatedBy, &createdAt, &k.FeishuOpenID, &k.FeishuUnionID,
+		&k.FeishuName, &feishuBoundAt, &k.FeishuBoundBy); err != nil {
 		return nil, err
 	}
 	k.RecordOutputText = recordOutput != 0
 	k.RecordReasoning = recordThink != 0
 	k.ExpiresAt = timePtrFromNull(expiresAt)
 	k.LastUsedAt = timePtrFromNull(lastUsedAt)
+	k.FeishuBoundAt = timePtrFromNull(feishuBoundAt)
 	k.CreatedAt = timeFromUnix(createdAt)
 	return &k, nil
 }
@@ -158,6 +163,96 @@ WHERE id = ?`, inputMode, boolInt(recordOutputText), boolInt(recordReasoning), i
 		return fmt.Errorf("store: set api key %d recording: %w", id, err)
 	}
 	return nil
+}
+
+// GetAPIKeyByID loads one key row by id. The console's Feishu binding endpoints address
+// keys by id, and a missing row is reported as not-found rather than as an auth failure.
+func (db *DB) GetAPIKeyByID(ctx context.Context, id int64) (*domain.APIKey, error) {
+	row := db.read.QueryRowContext(ctx, "SELECT "+apiKeyCols+" FROM api_keys WHERE id = ?", id)
+	k, err := scanAPIKey(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, domain.ErrNotFound(fmt.Sprintf("api key %d", id))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get api key %d: %w", id, err)
+	}
+	return k, nil
+}
+
+// BindAPIKeyFeishu writes the key's Feishu identity, replacing any previous one.
+//
+// It is deliberately a single-column UPDATE rather than a reuse of UpsertAPIKey: that
+// path rewrites a whole row from a struct, and it is exactly how the per-key recording
+// switches were once silently reverted. A binding must be written by one statement that
+// cannot touch anything else, and upsert must not touch the binding (see the columns it
+// lists). The unique index over NULLIF(feishu_open_id, '') makes "one Feishu identity,
+// one key" a database invariant; the violation is reported as a conflict.
+func (db *DB) BindAPIKeyFeishu(ctx context.Context, id int64, binding domain.FeishuBinding) error {
+	if binding.OpenID == "" {
+		return domain.ErrInvalidRequest("a Feishu binding requires an open_id")
+	}
+	boundAt := binding.BoundAt
+	if boundAt.IsZero() {
+		boundAt = time.Now().UTC()
+	}
+	result, err := db.write.ExecContext(ctx, `
+UPDATE api_keys SET feishu_open_id = ?, feishu_union_id = ?, feishu_name = ?,
+  feishu_bound_at = ?, feishu_bound_by = ?
+WHERE id = ?`,
+		binding.OpenID, binding.UnionID, binding.Name, unix(boundAt), binding.BoundBy, id)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return domain.ErrConflict("this Feishu account is already bound to another API key")
+		}
+		return fmt.Errorf("store: bind api key %d to Feishu: %w", id, err)
+	}
+	// A binding that matched no row would otherwise look like a success, and the console
+	// would report a bound key that does not exist.
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: bind api key %d to Feishu: %w", id, err)
+	}
+	if affected == 0 {
+		if _, err := db.GetAPIKeyByID(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// UnbindAPIKeyFeishu clears the key's Feishu identity and reports whether anything
+// changed, so the caller can answer idempotently instead of guessing.
+func (db *DB) UnbindAPIKeyFeishu(ctx context.Context, id int64) (bool, error) {
+	result, err := db.write.ExecContext(ctx, `
+UPDATE api_keys SET feishu_open_id = '', feishu_union_id = '', feishu_name = '',
+  feishu_bound_at = NULL, feishu_bound_by = ''
+WHERE id = ? AND feishu_open_id <> ''`, id)
+	if err != nil {
+		return false, fmt.Errorf("store: unbind api key %d from Feishu: %w", id, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: unbind api key %d from Feishu: %w", id, err)
+	}
+	return affected > 0, nil
+}
+
+// FindAPIKeyByFeishuOpenID resolves a bound Feishu identity to its key. A missing row is
+// (nil, nil): an unbound person is an ordinary answer on the login path, not an error
+// worth a log line.
+func (db *DB) FindAPIKeyByFeishuOpenID(ctx context.Context, openID string) (*domain.APIKey, error) {
+	if strings.TrimSpace(openID) == "" {
+		return nil, nil
+	}
+	row := db.read.QueryRowContext(ctx, "SELECT "+apiKeyCols+" FROM api_keys WHERE feishu_open_id = ?", openID)
+	k, err := scanAPIKey(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: find api key by Feishu open id: %w", err)
+	}
+	return k, nil
 }
 
 // TouchAPIKey records the last usage timestamp of a key.

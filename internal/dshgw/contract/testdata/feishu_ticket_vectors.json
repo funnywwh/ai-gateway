@@ -1,0 +1,47 @@
+{
+  "_comment": "Shared ticket vectors (M60/M61). aigw signs tickets (internal/feishu) and the DSH gateway verifies them (internal/dshgw/feishu); the two implementations must agree bit for bit, so both tests read this file. Regenerate with: go run ./cmd/gen-feishu-vectors internal/dshgw/contract/testdata/feishu_ticket_vectors.json",
+  "vectors": [
+    {
+      "name": "valid",
+      "secret": "vector-secret-not-for-production",
+      "now": "2025-09-18T12:53:20Z",
+      "wire": "eyJ2IjoxLCJtb2RlIjoiZHNoIiwidGVuYW50IjoiYWxpY2UiLCJrZXlfaWQiOjcsImFjY291bnRfaWQiOjMsIm9wZW5faWQiOiJvdV9hbGljZSIsIm5vbmNlIjoiMDEyMzQ1Njc4OWFiY2RlZiIsImV4cCI6MTc1ODIwMDEyMH0.-9KxF9VwMrZf4CPYM6OcLhGorDH69rT83-cwfeSR5dc"
+    },
+    {
+      "name": "expired",
+      "secret": "vector-secret-not-for-production",
+      "now": "2025-09-18T12:53:20Z",
+      "wire": "eyJ2IjoxLCJtb2RlIjoiZHNoIiwidGVuYW50IjoiYWxpY2UiLCJrZXlfaWQiOjcsImFjY291bnRfaWQiOjMsIm9wZW5faWQiOiJvdV9hbGljZSIsIm5vbmNlIjoiZmVkY2JhOTg3NjU0MzIxMCIsImV4cCI6MTc1ODE5OTk5OX0.jiV0SG0F1opHSEjseq7aHfAuxcWjrE8jwRH8PgLvAlA"
+    },
+    {
+      "name": "future-expiry",
+      "secret": "vector-secret-not-for-production",
+      "now": "2025-09-18T12:53:20Z",
+      "wire": "eyJ2IjoxLCJtb2RlIjoiZHNoIiwidGVuYW50IjoiYWxpY2UiLCJrZXlfaWQiOjcsImFjY291bnRfaWQiOjMsIm9wZW5faWQiOiJvdV9hbGljZSIsIm5vbmNlIjoiYWFhYWJiYmJjY2NjZGRkZCIsImV4cCI6MTc1ODIwMzYwMH0.IrtjXdr2Z_5WrIL7a3EjrZ6P1EQZx9mc8C4JamlRa4E"
+    },
+    {
+      "name": "unknown-mode",
+      "secret": "vector-secret-not-for-production",
+      "now": "2025-09-18T12:53:20Z",
+      "wire": "eyJ2IjoxLCJtb2RlIjoic2Vzc2lvbiIsInRlbmFudCI6ImFsaWNlIiwia2V5X2lkIjo3LCJhY2NvdW50X2lkIjozLCJvcGVuX2lkIjoib3VfYWxpY2UiLCJub25jZSI6IjExMTEyMjIyMzMzMzQ0NDQiLCJleHAiOjE3NTgyMDAwNjB9.HWpHw6UBm3mP3vwrK2e8NFMYNa2-Ygg9lWF6zyxRi3E"
+    },
+    {
+      "name": "wrong-version",
+      "secret": "vector-secret-not-for-production",
+      "now": "2025-09-18T12:53:20Z",
+      "wire": "eyJ2IjoyLCJtb2RlIjoiZHNoIiwidGVuYW50IjoiYWxpY2UiLCJrZXlfaWQiOjcsImFjY291bnRfaWQiOjMsIm9wZW5faWQiOiJvdV9hbGljZSIsIm5vbmNlIjoiNTU1NTY2NjY3Nzc3ODg4OCIsImV4cCI6MTc1ODIwMDA2MH0.1Ys8xAZ8sUzZSmDXF_qAXkiSY9UVRsT9JohOlMuZK2Y"
+    },
+    {
+      "name": "empty-tenant",
+      "secret": "vector-secret-not-for-production",
+      "now": "2025-09-18T12:53:20Z",
+      "wire": "eyJ2IjoxLCJtb2RlIjoiZHNoIiwidGVuYW50IjoiIiwia2V5X2lkIjo3LCJhY2NvdW50X2lkIjozLCJvcGVuX2lkIjoib3VfYWxpY2UiLCJub25jZSI6Ijk5OTlhYWFhYmJiYmNjY2MiLCJleHAiOjE3NTgyMDAwNjB9.xfoL7r1FPO430IYFqV22ZcojbH4wWlBJeP8lcnKauMw"
+    },
+    {
+      "name": "other-key",
+      "secret": "some-other-secret",
+      "now": "2025-09-18T12:53:20Z",
+      "wire": "eyJ2IjoxLCJtb2RlIjoiZHNoIiwidGVuYW50IjoiYWxpY2UiLCJrZXlfaWQiOjcsImFjY291bnRfaWQiOjMsIm9wZW5faWQiOiJvdV9hbGljZSIsIm5vbmNlIjoiZGRkZGVlZWVmZmZmMDAwMCIsImV4cCI6MTc1ODIwMDA2MH0.QAPcPOI8v-vLeFG1XmHwFdt8kk8VeNbcy8KFbgMfLiU"
+    }
+  ]
+}

@@ -551,3 +551,27 @@
 - 租户之间的实际越权尝试（跨租户端口/cookie/文件）——这部分由 `internal/dshgw/proxy` 的回归测试
   与 `make dshgw-sandbox-test` 的宿主隐藏断言覆盖，但都不是"真实浏览器 + 真实网络"的验收；
 - 宿主重启后的自愈（当前是用户级 transient 单元，重启机器需要手动或落一份常驻 unit）。
+
+## M60 aigw 的 API Key 飞书绑定与解绑
+
+设计：`docs/design/m60-aigw-key-feishu-binding.md`（§6 差异已回填）；规格：`docs/feishu.md`。
+定位：`api_keys` 上加飞书身份（`open_id` 1:1 唯一）、控制台 API Keys 页绑定/解绑、管理 API 与 MCP 解绑工具、
+飞书 OAuth（`/feishu/login` + 唯一回调 `/feishu/callback`，两种 flow）；绑定不参与数据面鉴权。
+
+- [ ] **真机验收**（需要飞书自建应用的 app_id/app_secret 与已登记的 `http://192.168.190.86:8090/feishu/callback`）：
+      控制台绑定 → 列表显示姓名 → 对该 Key 做一次「编辑」(PATCH) 后绑定仍在 → 解绑 →
+      同一飞书账号绑第二把 Key 冲突且不覆盖 → 日志与审计中 `grep -cE 'access_token|app_secret'` = 0
+- [ ] **飞书后台输入框是否接受 IP 形式的重定向 URL**（官方文档允许 http 与非 443 端口，但未明确 IP）：
+      先试存；若被拒，回退方案是给 gwproxy 开 TLS（`*.tirisen.hk` 私钥当前账号可读）并把 `callback_url`
+      改成 `https://chat.tirisen.hk:8090/feishu/callback`（只改配置，不改代码）
+
+## M61 dshgw 门户飞书登录（消费 aigw 的票据）
+
+设计：`docs/design/m61-dshgw-feishu-login.md`；规格：`docs/feishu.md` §5。
+定位：aigw 出一次性票据（HMAC），dshgw 验票后下发既有会话 cookie 进租户；dshgw 不持有飞书凭据、
+不注册第二个回调、不需要出站访问飞书。
+
+- [ ] **真机验收**：门户「飞书登录」进入自己租户；未绑定账号被拒并看到明确提示；
+      控制台「停用 DSH」后飞书登录被拒、重新启用恢复；A/B 两账号互不影响
+- [ ] **（可选，后续）客户门户自助绑定**：`internal/portal` 的 portal 用户与 API Key 目前没有绑定关系，
+      要先设计那层关联，才能让使用者自己绑定/解绑而不是找管理员

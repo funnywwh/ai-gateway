@@ -1,4 +1,5 @@
 import { api } from '../api.js';
+import { apiRoot } from '../base.js';
 import { el, card, pagedTable, modal, toast, statusBadge, formatTime, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
 
 // Accepted values mirror config.RecordingInputModes plus "inherit"; internal/webui's
@@ -11,7 +12,7 @@ const INPUT_MODES = [
   { value: 'off', label: 'off：不记录输入' },
 ];
 
-export async function render({ page, actions, session }) {
+export async function render({ page, actions, session, route, navigate }) {
   const readonly = session.role !== 'admin';
   const refresh = el('button', { class: 'btn', text: '刷新' });
   const create = el('button', { class: 'btn btn-primary', text: '新建 Key', disabled: readonly });
@@ -32,11 +33,19 @@ export async function render({ page, actions, session }) {
       { key: 'record_output_text', label: '输出文本', render: (row) => (row.record_output_text ? '已开启' : '关闭') },
       { key: 'record_reasoning', label: '思考文本', render: (row) => (row.record_reasoning ? '已开启' : '关闭') },
       { key: 'policy', label: '配额', render: (row) => el('code', { text: JSON.stringify(row.policy || {}) }) },
+      // The Feishu identity bound to this key (M60): it is what lets its owner sign in to
+      // the DSH portal without pasting a key. Ownership is proven through Feishu itself, so
+      // this column is the only place an operator sees who is behind a key.
+      { key: 'feishu', label: '飞书', render: (row) => feishuCell(row) },
       { key: 'last_used_at', label: '最近使用', render: (row) => formatTime(row.last_used_at) },
     ],
     rowActions: (row) => readonly ? [] : [
       el('button', { class: 'btn', text: '编辑', onclick: () => editKey(row, () => view.refresh()) }),
       el('button', { class: 'btn', text: row.status === 'active' ? '停用' : '启用', onclick: () => toggle(row, () => view.refresh()) }),
+      el('button', { class: 'btn', text: '绑定飞书', onclick: () => bindFeishu(row) }),
+      ...(row.feishu && row.feishu.bound
+        ? [el('button', { class: 'btn btn-danger', text: '解绑飞书', onclick: () => unbindFeishu(row, () => view.refresh()) })]
+        : []),
     ],
     // 账户名来自上面那份完整列表；Key 列表本身由服务端分页。
     load: async ({ limit, offset }) => {
@@ -47,6 +56,11 @@ export async function render({ page, actions, session }) {
     onError: (err) => toast(api.errorMessage(err), 'error'),
   });
   page.append(card('API Keys', view.node, [el('span', { class: 'muted', text: '明文只在创建时显示一次；默认只记录用户输入，思考与最终输出需单独勾选' })]));
+
+  // The binding flow leaves the console for Feishu and comes back here with a result code
+  // in the hash query. Reporting it once and dropping the parameter keeps a page refresh
+  // from repeating a message about something that happened minutes ago.
+  reportFeishuResult(route, navigate, () => view.refresh());
 
   refresh.addEventListener('click', () => view.refresh());
   create.addEventListener('click', async () => {
@@ -120,6 +134,69 @@ async function toggle(row, reload) {
   await api.patch('/keys/' + row.id, { status: next });
   toast('已更新', 'ok');
   await reload();
+}
+
+// feishuCell renders the key's Feishu identity (M60). The open id is shown in full inside
+// the title so an operator comparing two keys can tell them apart, while the cell stays
+// readable: the name is what a person recognises.
+function feishuCell(row) {
+  const feishu = row.feishu || {};
+  if (!feishu.bound) return el('span', { class: 'muted', text: '未绑定' });
+  const label = feishu.name || feishu.open_id || '已绑定';
+  const title = [feishu.open_id, feishu.bound_by ? '由 ' + feishu.bound_by + ' 绑定' : '',
+    feishu.bound_at ? '绑定于 ' + formatTime(feishu.bound_at) : ''].filter(Boolean).join(' · ');
+  return el('span', { class: 'badge', text: label, title });
+}
+
+// bindFeishu leaves the console for the management endpoint, which redirects to Feishu. It
+// is a full navigation rather than fetch: the consent screen belongs to Feishu, and the
+// flow has to end as a top-level page for its state and cookies to be the browser's.
+function bindFeishu(row) {
+  window.location.assign(apiRoot() + '/keys/' + row.id + '/feishu/bind');
+}
+
+async function unbindFeishu(row, reload) {
+  const feishu = row.feishu || {};
+  const who = feishu.name || feishu.open_id || '该飞书账号';
+  const ok = await confirmDialog('解绑飞书',
+    '确认解除 ' + row.name + ' 与 ' + who + ' 的绑定吗？解绑后该账号将无法用飞书登录 DSH 门户；' +
+    'Key 本身不受影响，仍可用于调用模型。');
+  if (!ok) return;
+  try {
+    const result = await api.del('/keys/' + row.id + '/feishu');
+    toast(result && result.unbound ? '已解绑' : '该 Key 本来就没有绑定', 'ok');
+  } catch (err) {
+    toast(api.errorMessage(err), 'error');
+  }
+  await reload();
+}
+
+// feishuResults maps the callback's result code onto what the operator needs to know. The
+// codes are the server's, not free text, so an unexpected one is reported as-is instead of
+// being silently swallowed.
+const FEISHU_RESULTS = {
+  bound: { level: 'ok', text: '已绑定飞书账号' },
+  replaced: { level: 'ok', text: '已改绑到新的飞书账号（原绑定已解除）' },
+  cancelled: { level: 'error', text: '已取消飞书授权，未做任何改动' },
+  conflict: { level: 'error', text: '该飞书账号已绑定到另一把 Key；请先在那把 Key 上解绑' },
+  rejected: { level: 'error', text: '操作者已不是管理员，绑定未生效' },
+  expired: { level: 'error', text: '授权已过期或被重复使用，请重新绑定' },
+  invalid: { level: 'error', text: '授权请求无法校验，请重新绑定' },
+  rate_limited: { level: 'error', text: '操作过于频繁，请稍后再试' },
+  no_app_permission: { level: 'error', text: '你在飞书侧没有该应用的使用权限，请联系飞书管理员' },
+  app_error: { level: 'error', text: '飞书应用凭据或可用范围有问题，请检查 aigw 配置与飞书后台' },
+  error: { level: 'error', text: '绑定失败，请重试；若持续失败请查看 aigw 日志' },
+};
+
+function reportFeishuResult(route, navigate, reload) {
+  const result = route && route.params ? route.params.get('feishu') : null;
+  if (!result) return;
+  const known = FEISHU_RESULTS[result];
+  toast(known ? known.text : '飞书操作返回了未知结果：' + result, known ? known.level : 'error');
+  // The parameter is dropped immediately: this message describes something that already
+  // happened, and it must not reappear on every refresh or back navigation.
+  if (typeof navigate === 'function') navigate('/keys');
+  reload();
 }
 
 function splitTags(value) {
