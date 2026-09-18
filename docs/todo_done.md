@@ -3594,3 +3594,25 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - [x] `make verify`、`make dshgw-test`、`make dshgw-supervised-test`（24 步）均为 0
 
 拓扑决策记录（真浏览器实测，见 `deploy/dshgw/README.md` §9.0）：dsh 前端用 `location.origin` + `/api` + `/api/remote.mux` 构造请求，**origin 不含路径**，因此路径前缀下租户 UI 必然白屏；**多租户只能"同一域名 + 每租户一个端口"**，域名做前门跳转。测试结束后已把验证 dshgw 的 `aigw_base_url` 切回真实 `:8088`，临时桩进程与临时会话均已清除。
+
+## 发布记录 v1.1.0（2026-09-18，M58 后续：启动/登录时自动配置租户模型）
+
+| 项 | 值 |
+|---|---|
+| 版本号 | `1.1.0`（`1.0.0` → `1.1.0`，**minor**：新增对外能力——租户不再需要事先 provisioning，dshgw 在启动 dsh 与用户登录时自动按可用模型配置；无破坏性变更、无配置项删除） |
+| revision | `d9ef80d`（tag `v1.1.0`；`release: v1.1.0` 提交只含 `VERSION`） |
+| 起因 | 用户实测「dsh 登录后：加载提供方目录失败: settings are unavailable in this browser，没有可以用的模型」，并要求「dshgw 启动 dsh 时自动给这个用户配置好他能用的模型」 |
+| 内容 | ① 启动前钩子：有存量 Key 时向 aigw 取该 Key 可用模型，**未 provisioning 的租户在此补齐全部产物**（模板 profile + settings.yaml + .credentials.yaml + patch + workspace + gateway.key），已 provisioning 的一概不动；② 登录时 `KeyAdopter`：租户没有/不同 Key 时用刚验证通过的 Key 落盘并配置，然后重启该 worker，使首次打开 dsh 即有模型（采用失败只告警、不阻断登录）；③ 修 `tenant-set-key` 无法修未 provisioning 租户（rotate 路径读不到待更新文件即报错）；④ 修**插件锚点与沙箱挂载不一致**——沙箱绑定 `current_link` 解析后的目录，而 `DSHGW_DSH_ANCHOR` 用配置里的符号链接路径，任何 `/opt/dsh/current` 式布局的部署在 worker 内每个插件 import 都会 `Cannot find module` |
+| 构建 | `scripts/release.sh minor` → `ui: minified 37 files 572454 -> 336354 bytes (-41%); gzip 32 files 333993 -> 132850 bytes (-60%)`；另 `make dshgw-build gwproxy-build`（同版本 revision） |
+| 部署目标 | **本机 `:8088`** + 域名前门 `:8090`（用户指定保持 8088 能用） |
+| 回滚点 | `bin/aigw.prev-1.0.0-d22f744`（升级前正在运行的二进制，从 `/proc/<pid>/exe` 原样抢救，`-version` 自证 `1.0.0 (revision d22f744)`）；更早：`bin/aigw.prev-0.18.0-ec7b911`、`bin/aigw.prev-0.17.0-e7e3e25` |
+
+验证（本机实测）：
+
+- [x] `:8088` 直连：`/version` → `{"version":"1.1.0","revision":"d9ef80d"}`；`/healthz` 200、`/readyz` 200；本次启动 `level=ERROR` **0 行**
+- [x] 域名前门（`:8090`）：`/` → 302 `/admin/ui/`；`/admin/ui/` 200；`/version` 200（1.1.0/d9ef80d）；`/dshgw/` → 302 `http://192.168.190.86:18300/`；`/t/dsh-tenant/` → 302 `http://192.168.190.86:18302/`
+- [x] 租户 origin：门户 `:18300` 200；`dsh-tenant` 租户 `:18302` 未登录 302 回门户（预期）；worker `/api` 401
+- [x] 版本自证：`dshgw listening version=1.1.0 revision=d9ef80d`；三个单元 `active`（`aigw-local`/`dshgw-verify`/`gwproxy-verify`）
+- [x] 旧 root/systemd 部署未受影响：`dshgw.service` active、5 个 `dsh-worker@*` active
+- [x] **端到端（真浏览器 + CDP，桩 aigw 提供 1 个模型）**：把一个租户退回到"从未 provisioning"状态（删 settings.yaml/gateway.key/profiles）→ 从门户用该租户此前没有的 Key 登录 → 自动补齐产物 → worker 重启 → 界面渲染 `DeepSeek Harness`、workspace `work`、**模型 `verify-model`**，`/api/session/modelCatalog` 200，零失败/零异常/零控制台错误。验证后已把 `aigw_base_url` 切回真实 `:8088`、清除临时会话与桩进程
+- [x] `make verify`、`make dshgw-test`、`make dshgw-supervised-test`（24 步）均为 0
