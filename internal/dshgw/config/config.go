@@ -142,21 +142,30 @@ type Config struct {
 	Dsh              DshRuntime `yaml:"dsh" json:"dsh"`
 	// PublicBaseURL/scheme+host of the single public entry (e.g.
 	// "https://chat.example"). Empty means tenants are addressed by port.
-	PublicBaseURL    string       `yaml:"public_base_url" json:"public_base_url"`
-	TenantPathPrefix string       `yaml:"tenant_path_prefix" json:"tenant_path_prefix"`
-	PortalPathPrefix string       `yaml:"portal_path_prefix" json:"portal_path_prefix"`
-	WorkerLimits     WorkerLimits `yaml:"worker_limits" json:"worker_limits"`
-	TLS              TLSConfig    `yaml:"tls" json:"tls"`
-	Deploy           DeployConfig `yaml:"deploy" json:"deploy"`
-	TenantRoot       string       `yaml:"tenant_root" json:"tenant_root"`
-	WorkspaceRoot    string       `yaml:"workspace_root" json:"workspace_root"`
-	HandshakeDir     string       `yaml:"handshake_dir" json:"handshake_dir"`
-	StateDir         string       `yaml:"state_dir" json:"state_dir"`
-	RegistryPath     string       `yaml:"registry_path" json:"registry_path"`
-	KeyMapPath       string       `yaml:"key_map_path" json:"key_map_path"`
-	SessionPath      string       `yaml:"session_path" json:"session_path"`
-	AuditPath        string       `yaml:"audit_path" json:"audit_path"`
-	ActivityPath     string       `yaml:"activity_path" json:"activity_path"`
+	PublicBaseURL    string `yaml:"public_base_url" json:"public_base_url"`
+	TenantPathPrefix string `yaml:"tenant_path_prefix" json:"tenant_path_prefix"`
+	PortalPathPrefix string `yaml:"portal_path_prefix" json:"portal_path_prefix"`
+	// SessionCookieSecure controls the session cookie's Secure attribute:
+	// "auto" (default) sets it whenever the deployment is actually HTTPS, "always"
+	// and "never" override that.
+	//
+	// It exists because a Secure cookie is *rejected* by browsers on a plain-HTTP
+	// origin (localhost excepted): a deployment served over http:// would issue a
+	// session the browser silently throws away, and the user would land back on the
+	// portal after a successful login instead of inside dsh.
+	SessionCookieSecure string       `yaml:"session_cookie_secure" json:"session_cookie_secure"`
+	WorkerLimits        WorkerLimits `yaml:"worker_limits" json:"worker_limits"`
+	TLS                 TLSConfig    `yaml:"tls" json:"tls"`
+	Deploy              DeployConfig `yaml:"deploy" json:"deploy"`
+	TenantRoot          string       `yaml:"tenant_root" json:"tenant_root"`
+	WorkspaceRoot       string       `yaml:"workspace_root" json:"workspace_root"`
+	HandshakeDir        string       `yaml:"handshake_dir" json:"handshake_dir"`
+	StateDir            string       `yaml:"state_dir" json:"state_dir"`
+	RegistryPath        string       `yaml:"registry_path" json:"registry_path"`
+	KeyMapPath          string       `yaml:"key_map_path" json:"key_map_path"`
+	SessionPath         string       `yaml:"session_path" json:"session_path"`
+	AuditPath           string       `yaml:"audit_path" json:"audit_path"`
+	ActivityPath        string       `yaml:"activity_path" json:"activity_path"`
 
 	tenantMu    sync.RWMutex
 	tenantPorts map[string]int
@@ -165,26 +174,27 @@ type Config struct {
 
 func defaults() Config {
 	return Config{
-		PublicHost:      "chat.tirisen.hk",
-		PortalPort:      32600,
-		TenantPortLo:    32601,
-		TenantPortHi:    32799,
-		WorkerPortLo:    32100,
-		WorkerPortHi:    32299,
-		Listen:          "127.0.0.1:3099",
-		EdgePortHeader:  "X-DSHGW-Port",
-		MaxHeaderBytes:  128 << 10,
-		MaxSessions:     10000,
-		AigwBaseURL:     "http://192.168.190.86:8088",
-		ValidateTimeout: Duration(5 * time.Second),
-		SessionTTL:      Duration(7 * 24 * time.Hour),
-		KeyRevalidate:   "off",
-		DSHEnforce:      "login",
-		LoginRate:       RateLimit{Requests: 10, Window: Duration(time.Minute)},
-		DirectoryPicker: "clamp",
-		PluginBrowserFS: "on",
-		WorkspaceSeed:   []string{"work"},
-		ReservedNames:   []string{"login", "dshgw"},
+		PublicHost:          "chat.tirisen.hk",
+		PortalPort:          32600,
+		TenantPortLo:        32601,
+		TenantPortHi:        32799,
+		WorkerPortLo:        32100,
+		WorkerPortHi:        32299,
+		Listen:              "127.0.0.1:3099",
+		EdgePortHeader:      "X-DSHGW-Port",
+		MaxHeaderBytes:      128 << 10,
+		MaxSessions:         10000,
+		AigwBaseURL:         "http://192.168.190.86:8088",
+		ValidateTimeout:     Duration(5 * time.Second),
+		SessionTTL:          Duration(7 * 24 * time.Hour),
+		KeyRevalidate:       "off",
+		SessionCookieSecure: "auto",
+		DSHEnforce:          "login",
+		LoginRate:           RateLimit{Requests: 10, Window: Duration(time.Minute)},
+		DirectoryPicker:     "clamp",
+		PluginBrowserFS:     "on",
+		WorkspaceSeed:       []string{"work"},
+		ReservedNames:       []string{"login", "dshgw"},
 		Dsh: DshRuntime{
 			NodeBin:     "/opt/dsh/node/bin/node",
 			BinJS:       "/opt/dsh/current/lib/bin.js",
@@ -377,6 +387,11 @@ func (c *Config) Validate() error {
 	if c.WorkerLimits.MemoryHighBytes > 0 && c.WorkerLimits.MemoryMaxBytes > 0 && c.WorkerLimits.MemoryHighBytes > c.WorkerLimits.MemoryMaxBytes {
 		return errors.New("worker_limits.memory_high_bytes must not exceed memory_max_bytes")
 	}
+	switch c.SessionCookieSecure {
+	case "", "auto", "always", "never":
+	default:
+		return fmt.Errorf("session_cookie_secure must be auto, always or never (got %q)", c.SessionCookieSecure)
+	}
 	if c.PublicBaseURL != "" {
 		parsed, err := url.Parse(c.PublicBaseURL)
 		if err != nil || parsed.Scheme != "https" && parsed.Scheme != "http" || parsed.Host == "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
@@ -527,6 +542,24 @@ func (c *Config) TenantOrigin(tenant string) string {
 		return ""
 	}
 	return c.OriginForPort(port)
+}
+
+// SecureSessionCookie reports whether the session cookie should carry Secure. A
+// browser refuses to store such a cookie on a plain-HTTP origin, so this must match
+// how clients actually reach the gateway — not how it hopes to be reached.
+func (c *Config) SecureSessionCookie() bool {
+	switch c.SessionCookieSecure {
+	case "always":
+		return true
+	case "never":
+		return false
+	}
+	if !c.PathMode() {
+		// Port mode predates this switch and has always assumed TLS termination in
+		// front (nginx). "never" is the documented escape hatch for plain HTTP.
+		return true
+	}
+	return strings.HasPrefix(c.PublicBaseURL, "https://")
 }
 
 // PathMode reports whether public URLs are path-based instead of port-based.

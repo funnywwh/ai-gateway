@@ -415,7 +415,17 @@ func (p *Proxy) setSessionCookie(w http.ResponseWriter, tenant, token string, re
 	// origin there, and the cookie's path is what stops alice's session from being
 	// attached to a request for /t/bob/. The removal cookie must carry the same
 	// path, or the browser would keep the old one.
-	http.SetCookie(w, &http.Cookie{Name: p.Config.SessionCookieName(tenant), Value: token, Path: p.Config.SessionCookiePath(tenant), HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, MaxAge: maxAge, Expires: expires})
+	http.SetCookie(w, &http.Cookie{
+		Name: p.Config.SessionCookieName(tenant), Value: token,
+		Path:     p.Config.SessionCookiePath(tenant),
+		HttpOnly: true,
+		// Secure follows the deployment's real scheme: a browser drops a Secure
+		// cookie on a plain-HTTP origin, which turns a successful login into a
+		// silent redirect back to the portal.
+		Secure:   p.Config.SecureSessionCookie(),
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   maxAge, Expires: expires,
+	})
 }
 
 func (p *Proxy) TenantHandler(t registry.Tenant) http.Handler {

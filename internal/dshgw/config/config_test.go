@@ -81,3 +81,40 @@ func TestValidTenantName(t *testing.T) {
 		}
 	}
 }
+
+// A Secure session cookie is rejected by browsers on a plain-HTTP origin, so the
+// attribute has to follow how clients really reach the gateway: a wrong "true"
+// here looks like "login does nothing" — the browser drops the session and the
+// next request lands back on the portal.
+func TestSecureSessionCookieFollowsTheDeploymentScheme(t *testing.T) {
+	cases := []struct {
+		name      string
+		apply     func(*Config)
+		wantSecur bool
+	}{
+		{"port mode default", func(*Config) {}, true},
+		{"path mode over https", func(c *Config) { c.PublicBaseURL = "https://chat.example" }, true},
+		{"path mode over http", func(c *Config) { c.PublicBaseURL = "http://192.0.2.10:8090" }, false},
+		{"explicit always", func(c *Config) {
+			c.PublicBaseURL = "http://192.0.2.10:8090"
+			c.SessionCookieSecure = "always"
+		}, true},
+		{"explicit never", func(c *Config) {
+			c.PublicBaseURL = "https://chat.example"
+			c.SessionCookieSecure = "never"
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{PublicHost: "chat.example", PortalPort: 32600, SessionCookieSecure: "auto"}
+			tc.apply(cfg)
+			if got := cfg.SecureSessionCookie(); got != tc.wantSecur {
+				t.Fatalf("SecureSessionCookie() = %v, want %v", got, tc.wantSecur)
+			}
+		})
+	}
+	bad := &Config{PublicHost: "chat.example", PortalPort: 32600, SessionCookieSecure: "sometimes"}
+	if err := bad.Validate(); err == nil {
+		t.Fatal("an unknown session_cookie_secure value was accepted")
+	}
+}

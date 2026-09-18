@@ -364,15 +364,40 @@ http://192.168.190.86:8088/version       # 直连 aigw，仍然可用
   cgroup `dshgw-worker-verify1.scope`，`memory.max=2147483648`、`pids.max=512`、`cpu.max=200000 100000`；
 - 外部 Host 404、未知租户 404；旧 `dshgw.service` 与 `aigw-local` 均仍 active。
 
-**要真正登录一次**（登录必须用 aigw 认可的 Key，验证租户刻意没有 Key）：
+### 10.1 会话 cookie 的 Secure 属性（纯 HTTP 下必须跟随实际协议）
+
+门户登录成功后会下发会话 cookie。**浏览器会拒绝在纯 HTTP 源上保存 `Secure` cookie**（只有 localhost 例外），
+于是"登录成功 → 跳到租户路径 → 没有 cookie → 又被送回门户"，看起来就像"登录没有任何反应"。
+因此 `session_cookie_secure`（默认 `auto`）按部署的真实协议决定：
+
+| 值 | 行为 |
+|---|---|
+| `auto`（默认） | 路径模式看 `public_base_url` 的 scheme（https 才加 `Secure`）；端口模式保持历史行为（加 `Secure`，假定前面有 TLS 终止） |
+| `always` | 总是加 `Secure`（部署在 TLS 终止之后时用） |
+| `never` | 从不加（纯 HTTP 的端口模式部署用） |
+
+实测（本机纯 HTTP 部署）：修复后登录响应头为
+`Set-Cookie: dshgw_s_dsh-tenant=…; Path=/t/dsh-tenant/; Max-Age=604800; HttpOnly; SameSite=Lax`
+（**无 `Secure`**），带该 cookie 访问 `/t/dsh-tenant/` 返回 200 与真实 dsh shell。
+
+### 10.2 让验证租户真正可用（需要你的一把 Key）
+
+本机验证租户是**直接写 registry** 建的（`tenant-create` 会向 aigw 校验 Key，而部署者没有可用 Key），
+因此它没有 `gateway.key`，也就没有 `<DshHome>/settings.yaml` 与 `.credentials.yaml` —— 登录能进 dsh，
+但 dsh 内部**没有可用的模型 provider**。装一把真实 Key 即可（同时会写入 worker 需要的三个产物）：
+
 `tenant-create` 会向 aigw 校验 Key，因此验证租户是直接写 registry 建的（无 Key → 跳过启动前模型同步 →
 worker 照常起来）。给它装一把真实 Key，然后打开门户登录：
 
 ```bash
-printf '%s\n' '{"id":1,"op":"tenant-set-key","name":"verify1","key":"<你的 aigw Key>"}' \
+printf '%s\n' '{"id":1,"op":"tenant-set-key","name":"dsh-tenant","key":"<你的 aigw Key>"}' \
   | nc -U ~/.local/share/dshgw-verify/state/admin.sock
-# 浏览器打开 http://192.168.190.86:8090/dshgw/ ，用同一把 Key 登录
+# 然后浏览器打开 http://192.168.190.86:8090/dshgw/ ，用同一把 Key 登录
 ```
+
+租户名必须是 **aigw 授权返回的那个**：控制台「启用 DSH」时写入 `accounts.dsh_tenant`，
+门户要求它与 dshgw registry 里的租户名一致，否则报「该账号的 dsh 租户尚未就绪」。
+本机该账号的 `dsh_tenant` 是 `dsh-tenant`，验证 registry 里已按这个名字建了租户。
 
 拆掉验证栈（不影响 `:8088` 与旧部署）：
 
