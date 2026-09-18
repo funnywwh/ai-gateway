@@ -57,3 +57,17 @@ deploy:
 # tls:
 #   certificate: /path/fullchain.pem
 #   certificate_key: /path/privkey.pem
+
+# 飞书登录（M61）：让被绑定的人用飞书进入自己的租户，而不是粘贴 API Key。
+#
+# dshgw 自己不接触飞书：应用、App Secret 与重定向 URL 都属于 aigw，aigw 确认身份后签发一张
+# 一次性票据；这里只验票。因此本块不需要 app_id/app_secret，也不需要第二个回调地址。
+#
+# 监督形态（aigw 拉起本进程）下这两项由 aigw 自动写入生成的配置，运维无需填写；
+# 独立运行 dshgw 时按下面手工填成与 aigw 相同的值。
+feishu:
+  enabled: false
+  # 浏览器可见的 aigw 登录入口（aigw 侧 feishu.callback_url 的 origin + /feishu/login）。
+  aigw_login_url: http://192.168.190.86:8090/feishu/login
+  # 必须与 aigw 的 feishu.ticket_secret 相同（aigw 留空时会由 credentials_key 派生并注入本文件）。
+  ticket_secret: ""

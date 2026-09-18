@@ -111,6 +111,24 @@ type DeployConfig struct {
 	PublicListen string `yaml:"public_listen" json:"public_listen"`
 }
 
+// Feishu is this gateway's side of the identity handoff (M61): where to send a person who
+// wants to sign in with Feishu, and the key that proves the ticket aigw hands back is ours.
+//
+// Both values are normally injected by aigw when it generates this process's configuration
+// (the supervised shape), so an operator has nothing to fill in; a standalone deployment
+// sets them by hand to the same values as its aigw.
+type Feishu struct {
+	// Enabled opens the portal's Feishu login. While it is off the portal shows only the
+	// key form and the login routes do not exist.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// AigwLoginURL is the browser-visible URL of aigw's /feishu/login: the page a person is
+	// sent to before Feishu. It is empty while the feature is off.
+	AigwLoginURL string `yaml:"aigw_login_url" json:"aigw_login_url"`
+	// TicketSecret must equal aigw's feishu.ticket_secret (or the value aigw derives from
+	// its credentials key and injects here).
+	TicketSecret string `yaml:"ticket_secret" json:"ticket_secret"`
+}
+
 // Config is deliberately independent of aigw's internal configuration types.
 type Config struct {
 	PublicHost      string   `yaml:"public_host" json:"public_host"`
@@ -182,19 +200,26 @@ type Config struct {
 	// origin (localhost excepted): a deployment served over http:// would issue a
 	// session the browser silently throws away, and the user would land back on the
 	// portal after a successful login instead of inside dsh.
-	SessionCookieSecure string       `yaml:"session_cookie_secure" json:"session_cookie_secure"`
-	WorkerLimits        WorkerLimits `yaml:"worker_limits" json:"worker_limits"`
-	TLS                 TLSConfig    `yaml:"tls" json:"tls"`
-	Deploy              DeployConfig `yaml:"deploy" json:"deploy"`
-	TenantRoot          string       `yaml:"tenant_root" json:"tenant_root"`
-	WorkspaceRoot       string       `yaml:"workspace_root" json:"workspace_root"`
-	HandshakeDir        string       `yaml:"handshake_dir" json:"handshake_dir"`
-	StateDir            string       `yaml:"state_dir" json:"state_dir"`
-	RegistryPath        string       `yaml:"registry_path" json:"registry_path"`
-	KeyMapPath          string       `yaml:"key_map_path" json:"key_map_path"`
-	SessionPath         string       `yaml:"session_path" json:"session_path"`
-	AuditPath           string       `yaml:"audit_path" json:"audit_path"`
-	ActivityPath        string       `yaml:"activity_path" json:"activity_path"`
+	SessionCookieSecure string `yaml:"session_cookie_secure" json:"session_cookie_secure"`
+	// Feishu enables signing in with a Feishu identity instead of pasting an API key (M61).
+	//
+	// This gateway never talks to Feishu and holds no Feishu credential: aigw owns the
+	// application, the secret and the registered redirect URL, and after it has identified
+	// the person it hands over a short-lived signed ticket. Here we only verify that ticket
+	// — which is why enabling this needs no app id, no secret and no second callback URL.
+	Feishu        Feishu       `yaml:"feishu" json:"feishu"`
+	WorkerLimits  WorkerLimits `yaml:"worker_limits" json:"worker_limits"`
+	TLS           TLSConfig    `yaml:"tls" json:"tls"`
+	Deploy        DeployConfig `yaml:"deploy" json:"deploy"`
+	TenantRoot    string       `yaml:"tenant_root" json:"tenant_root"`
+	WorkspaceRoot string       `yaml:"workspace_root" json:"workspace_root"`
+	HandshakeDir  string       `yaml:"handshake_dir" json:"handshake_dir"`
+	StateDir      string       `yaml:"state_dir" json:"state_dir"`
+	RegistryPath  string       `yaml:"registry_path" json:"registry_path"`
+	KeyMapPath    string       `yaml:"key_map_path" json:"key_map_path"`
+	SessionPath   string       `yaml:"session_path" json:"session_path"`
+	AuditPath     string       `yaml:"audit_path" json:"audit_path"`
+	ActivityPath  string       `yaml:"activity_path" json:"activity_path"`
 
 	tenantMu    sync.RWMutex
 	tenantPorts map[string]int
@@ -438,6 +463,9 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("session_cookie_secure must be auto, always or never (got %q)", c.SessionCookieSecure)
 	}
+	if err := c.validateFeishu(); err != nil {
+		return err
+	}
 	switch c.SettingsUI {
 	case "", "lan", "loopback":
 	default:
@@ -514,6 +542,35 @@ func (c *Config) Validate() error {
 }
 
 func rangesOverlap(aLo, aHi, bLo, bHi int) bool { return aLo <= bHi && bLo <= aHi }
+
+// validateFeishu checks the identity handoff block. As everywhere else in this file, the
+// checks run only while the feature is on: a deployment that does not use Feishu must not be
+// stopped from starting by values it never reads.
+func (c *Config) validateFeishu() error {
+	if !c.Feishu.Enabled {
+		return nil
+	}
+	parsed, err := url.Parse(strings.TrimSpace(c.Feishu.AigwLoginURL))
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("feishu.aigw_login_url must be the absolute URL of aigw's /feishu/login")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("feishu.aigw_login_url scheme %q must be http or https", parsed.Scheme)
+	}
+	if !strings.HasSuffix(parsed.Path, "/feishu/login") {
+		return fmt.Errorf("feishu.aigw_login_url must point at /feishu/login (got %q)", parsed.Path)
+	}
+	if strings.TrimSpace(c.Feishu.TicketSecret) == "" {
+		return errors.New("feishu.ticket_secret must be set: it is what proves a login ticket came from this deployment's aigw")
+	}
+	// A portal that is served over plain HTTP cannot issue a Secure cookie: the browser drops
+	// it and the person lands back on the portal with no error. Saying so here turns a
+	// confusing runtime symptom into a startup failure.
+	if !strings.HasPrefix(strings.TrimSpace(c.Feishu.AigwLoginURL), "https://") && c.SecureSessionCookie() {
+		return errors.New("feishu is enabled on a plain-HTTP deployment but the session cookie would be Secure: set public_scheme: http (or session_cookie_secure: never)")
+	}
+	return nil
+}
 
 // RevalidateMode is the parsed key-revalidation policy.
 type RevalidateMode struct {

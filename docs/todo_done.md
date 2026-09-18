@@ -3775,3 +3775,30 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
       账户列表改用 `orgQuery()`）。改法：断言意图而非整段字面量；「不得触及侧边栏」写成结构化检查，
       因为全文 `/sidebar/` 子串禁止会被一句解释性注释绊倒。发现方式：在独立 worktree 里跑 HEAD 复现，
       确认失败与本次改动无关（否则 `make ui-base`／`make verify` 无法作为本次的验收门槛）
+
+
+## M61 完成记录（dshgw 门户飞书登录，消费 aigw 的票据）
+
+设计：`docs/design/m61-dshgw-feishu-login.md`（§6 差异已回填）；规格：`docs/feishu.md` §5。
+
+- [x] `internal/dshgw/feishu`：验票（签名/版本/mode/必填字段/过期/有效期上界/单次使用，常量时间比较），
+      与 aigw 签名侧**各自实现、共享测试向量**（`internal/dshgw/contract/testdata/feishu_ticket_vectors.json`，
+      七类样本：有效/过期/超前过期/未知 mode/错误版本/缺租户/异密钥），两侧测试都读同一份文件
+- [x] `internal/dshgw/config`：`feishu` 块（enabled / aigw_login_url / ticket_secret）与校验，
+      并直接拒绝「明文 http + 会发 Secure cookie」这种必然表现为「点了没反应」的组合
+- [x] `internal/dshgw/proxy`：门户按钮（仅启用时渲染，Key 表单保留）、`GET <portal>/login/feishu`
+      （cookie 优先、query 回退、两者不一致即拒绝）、`GET <portal>/feishu/error?reason=` 复用登录页渲染；
+      收票后用租户 worker Key 调 `POST /v1/dshgw/authorize` 复核，失败 403/503 且**不发会话**
+- [x] 成功后走与 Key 登录**完全相同**的会话路径（`Sessions.Issue` + `setSessionCookie` + `MarkLogin`），
+      因此 TTL/续期/单域名 path cookie/退出语义都不变；审计 `feishu_login_success`/`feishu_login_reject`
+- [x] `cmd/aigw`：监督形态下把 `aigw_login_url`（由 callback_url 推导）与派生票据密钥写进子进程配置；
+      未启用时 `omitempty`，生成的配置与之前逐字节相同（测试断言文件里不出现 `feishu`）
+- [x] `dshgw doctor` 增 `feishu-login` 检查：票据密钥非空、明文部署与 Secure cookie 不矛盾
+- [x] 端到端验收（`scripts/dshgw_supervised_e2e.py`，45 步全绿，其中飞书 15 步）：真实 aigw+dshgw+bwrap worker+
+      gwproxy+飞书 stub：控制台登录取 Key → 绑定飞书（走 stub 同意页）→ 绑定落库 → 门户点飞书登录 →
+      出票（URL 里不带票）→ 收票 → 进租户 UI(200) → 复核被调用 → 解绑后被拒（未绑定文案）→
+      上游吊销后被拒(403)且不发会话 → 恢复后再次成功。顺带修正该脚本既有的两个假设：
+      `public_base_url` 需带前端端口才能让生成的 URL 可被真正跟随；`path-mode-tenant-api-401` 的
+      Origin 应取配置里的公开 origin 而不是写死 `http://localhost`
+- [x] 文档：`docs/dshgw.md` §3/§6/§8 增飞书登录（流程、配置两项、验收口径）；
+      `deploy/dshgw/config.example.yaml` 增注释块；`docs/feishu.md` §5 写成使用者可照做的流程

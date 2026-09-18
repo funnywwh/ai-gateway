@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/contract"
 	"github.com/winger/ai-gateway/internal/dshgw/proxy"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
@@ -261,6 +262,7 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 		{"bwrap-apparmor-userns", checkAppArmorUserNSRestriction},
 		{"bwrap-sandbox-runtime", func() error { return sandbox.ValidateRuntime(sandboxRuntimeConfig(deps.cfg)) }},
 		{"bwrap-worker-account", func() error { return sandbox.ValidateWorkerAccount(deps.cfg.Deploy.WorkerUser) }},
+		{"feishu-login", func() error { return checkFeishuLogin(deps.cfg) }},
 	}
 	failures := 0
 	for _, item := range checks {
@@ -293,6 +295,25 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 	}
 	if failures > 0 {
 		return fmt.Errorf("doctor found %d failure(s)", failures)
+	}
+	return nil
+}
+
+// checkFeishuLogin reports the two facts an operator cannot see from the outside: whether a
+// ticket secret was actually configured, and whether the scheme this gateway advertises agrees
+// with the cookie it will issue. Both failures otherwise show up as "login did nothing".
+func checkFeishuLogin(cfg *config.Config) error {
+	if !cfg.Feishu.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(cfg.Feishu.TicketSecret) == "" {
+		return errors.New("feishu.ticket_secret is empty: no login ticket could be verified")
+	}
+	if !cfg.SecureSessionCookie() {
+		return nil
+	}
+	if strings.HasPrefix(strings.TrimSpace(cfg.Feishu.AigwLoginURL), "http://") {
+		return errors.New("the deployment advertises plain http but would issue a Secure session cookie: set public_scheme: http")
 	}
 	return nil
 }

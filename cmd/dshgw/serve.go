@@ -8,6 +8,7 @@ import (
 	"github.com/winger/ai-gateway/internal/dshgw/activity"
 	"github.com/winger/ai-gateway/internal/dshgw/audit"
 	"github.com/winger/ai-gateway/internal/dshgw/edge"
+	"github.com/winger/ai-gateway/internal/dshgw/feishu"
 	"github.com/winger/ai-gateway/internal/dshgw/handshake"
 	"github.com/winger/ai-gateway/internal/dshgw/proxy"
 	"log/slog"
@@ -32,6 +33,21 @@ func (c *cli) serve() error {
 	// for this tenant: a tenant that never stored one (hand-built, restored, migrated)
 	// is configured here instead of opening dsh with no providers at all.
 	gateway.KeyAdopter = ops
+	// M61: the Feishu login handoff. dshgw holds no Feishu credential — aigw identified the
+	// person and signed a short-lived ticket, and this side verifies it and then asks the same
+	// entitlement question the key login asks.
+	if deps.cfg.Feishu.Enabled {
+		verifier, err := feishu.New([]byte(deps.cfg.Feishu.TicketSecret))
+		if err != nil {
+			return err
+		}
+		gateway.Feishu = &proxy.FeishuPortal{
+			Enabled:      true,
+			AigwLoginURL: deps.cfg.Feishu.AigwLoginURL,
+			Verifier:     verifier,
+		}
+		slog.Info("feishu login enabled", "aigw_login_url", deps.cfg.Feishu.AigwLoginURL)
+	}
 	gateway.Auditor = &audit.JSONL{Path: deps.cfg.AuditPath}
 	gateway.Activity = &activity.Store{Path: deps.cfg.ActivityPath}
 	server := &http.Server{Addr: deps.cfg.Listen, Handler: gateway.Dispatch(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: deps.cfg.MaxHeaderBytes}

@@ -98,6 +98,20 @@ func buildDshgwChild(cfg *config.Config, aigwExecutable string) (*dshgwChild, er
 		}
 		child.TLS = &dshgwsup.TLSConfig{Certificate: cert, CertificateKey: key}
 	}
+	// The child serves the portal, so it is the side that redeems a Feishu login; it needs the
+	// URL to send people to and the key that proves a ticket came from this aigw. Both are
+	// derived here, which is why enabling Feishu needs no matching edit in the child's file.
+	if cfg.Feishu.Enabled && cfg.Feishu.DSHLogin {
+		secret, err := feishuTicketSecret(cfg)
+		if err != nil {
+			return nil, err
+		}
+		child.Feishu = &dshgwsup.Feishu{
+			Enabled:      true,
+			AigwLoginURL: cfg.FeishuLoginURL(),
+			TicketSecret: string(secret),
+		}
+	}
 	if err := child.Validate(); err != nil {
 		return nil, fmt.Errorf("dshgw child configuration: %w", err)
 	}

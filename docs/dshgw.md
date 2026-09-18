@@ -75,6 +75,14 @@ kind: "spec"
 
 重验使用**租户当前 worker Key**，不保存登录时提交的旧 alias Key。`--keep-old-prefix` 允许仍有效的旧 Key 登录同一租户；它不使旧 Key 成为 worker 的模型凭据。
 
+**飞书登录（M61）**：配置 `feishu.enabled` 后，门户登录页多一个「飞书登录」；点它会把浏览器送到
+aigw 的 `/feishu/login`，由 aigw 完成飞书 OAuth 并**签一张一次性票据**，再送回门户的
+`/login/feishu` 兑换成与 Key 登录**完全相同**的会话。dshgw 不持有任何飞书凭据、不登记第二个回调、
+不需要出站访问飞书——票据密钥与 aigw 入口 URL 在监督形态下由 aigw 注入生成的配置。
+收票时 dshgw 还会用该租户的 worker Key 调 `POST /v1/dshgw/authorize` 复核账号级授权，
+因此控制台「停用 DSH」对飞书登录同样生效，判定失败一律 503（fail-closed）。
+未绑定、账号停用、租户未就绪、票据过期/重放都会在门户给出明确文案。规格见 [docs/feishu.md](feishu.md) §5。
+
 默认登录限流为每 IP 每分钟 10 次；会话默认上限 10,000，状态文件另有 64 MiB 上限。已建立的 WebSocket 不会被 logout/TTL 追溯关闭，新请求或重连会重新验证。
 
 **租户端口“设置/模型”不可用的实证根因（2026-09-17 复核，取代此前“与网关无关”的判断）**：
@@ -138,6 +146,19 @@ dshgw --config <state>/config.yaml contract dsh               # 真实 dsh 契�
 
 生成的 provider 同时带 `compat.supportsStrictMode: true`，使普通 Responses 工具显式发送 `strict: false`，防止某些上游把可选参数（如 `sandbox_permissions`）变成必填；不放宽 DSH 沙箱或审批策略。
 
+飞书登录在**子进程配置**里需要两项（监督形态由 aigw 写入，独立形态手填，见
+`deploy/dshgw/config.example.yaml`）：
+
+```yaml
+feishu:
+  enabled: true
+  aigw_login_url: http://192.168.190.86:8090/feishu/login   # 浏览器可见的 aigw 入口
+  ticket_secret: "…"                                        # 与 aigw 的同一项一致
+```
+
+明文 HTTP 部署必须同时设 `public_scheme: http`：否则 dshgw 会发 `Secure` cookie，浏览器直接丢弃，
+表现成「登录成功又被弹回门户」（`doctor` 会复核这一条）。
+
 多租户上线前必须将 aigw **`auth.default_grant: none`**，再显式授予模型。M51 不会替部署方静默修改 aigw 的授权配置。没有实现 `dshgw usage`，也不持有 aigw 管理/MCP 凭据。
 
 ## 7. 隔离、工作区与 browser-fs
@@ -181,6 +202,9 @@ make dshgw-verify          # 上述 + 构建 + vet + 真实 dsh 契约 + 模板�
 拉起同目录 dshgw → 收到 ready → 经 admin socket 建租户 → worker 以 bwrap 子进程起来 →
 `GET /api` 返回 401；`tenant-stop`/`tenant-start` 生效（后者启动前会同步模型）；aigw 重启后
 未停用租户自动回来；停止 aigw 后子进程与 worker 零残留。
+
+监督形态验收（`make dshgw-supervised-test`）还覆盖飞书链路本身：真实 aigw 与 dshgw、飞书 stub 授权页，
+从门户点「飞书登录」直到进入租户 UI（200），并验证复核被调用、解绑后被拒、上游吊销后被拒、恢复后成功。
 
 这些自动化仍**不能**替代：公网 TLS/防火墙（当前形态没有 nginx，租户门户由 dshgw 明文直接监听）、
 资源压测、真实浏览器授权动作。旧的 root 宿主验收脚本（基于 UID/cgroup/systemd 断言）已随旧形态删除，

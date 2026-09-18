@@ -24,6 +24,7 @@ import (
 	"github.com/winger/ai-gateway/internal/dshgw/aigw"
 	"github.com/winger/ai-gateway/internal/dshgw/audit"
 	"github.com/winger/ai-gateway/internal/dshgw/config"
+	"github.com/winger/ai-gateway/internal/dshgw/feishu"
 	"github.com/winger/ai-gateway/internal/dshgw/handshake"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
 	"github.com/winger/ai-gateway/internal/dshgw/session"
@@ -63,10 +64,12 @@ type Proxy struct {
 	KeySource       KeySource
 	KeyAdopter      KeyAdopter
 	Transport       http.RoundTripper
-	Logger          *slog.Logger
-	Auditor         audit.Sink
-	Activity        activity.Recorder
-	Now             func() time.Time
+	// Feishu carries the identity handoff from aigw (M61), or nil when the feature is off.
+	Feishu   *FeishuPortal
+	Logger   *slog.Logger
+	Auditor  audit.Sink
+	Activity activity.Recorder
+	Now      func() time.Time
 
 	exchangeLocks     [256]sync.Mutex
 	revalidationLocks [256]sync.Mutex
@@ -238,6 +241,12 @@ func (p *Proxy) PortalHandler() http.Handler {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/":
 			p.renderLogin(w, http.StatusOK, "")
+		case r.Method == http.MethodGet && r.URL.Path == "/login/feishu":
+			// The identity handoff from aigw (M61). It carries a short-lived ticket rather
+			// than credentials, so it needs no form and no session.
+			p.feishuLogin(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/feishu/error":
+			p.renderLogin(w, http.StatusUnauthorized, feishuErrorMessage(r.URL.Query().Get("reason")))
 		case r.Method == http.MethodPost && r.URL.Path == "/login":
 			p.login(w, r)
 		case r.Method == http.MethodPost && r.URL.Path == "/logout":
@@ -261,7 +270,7 @@ func (p *Proxy) setPortalHeaders(w http.ResponseWriter) {
 	w.Header().Set("Referrer-Policy", "same-origin")
 }
 
-var loginPage = template.Must(template.New("login").Parse(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>dsh 登录</title><style>body{font:16px system-ui;max-width:34rem;margin:10vh auto;padding:1rem;background:#101318;color:#eef}main{background:#1b2028;padding:2rem;border-radius:12px}input,button{box-sizing:border-box;width:100%;padding:.8rem;margin:.4rem 0}button{cursor:pointer}.error{color:#ff9b9b}.note{color:#bcc6d6;font-size:.9rem}</style></head><body><main><h1>DeepSeek Harness</h1>{{if .Error}}<p class="error">{{.Error}}</p>{{end}}<form method="post" action="{{.PortalPath}}login"><label>aigw API Key<input type="password" name="key" autocomplete="off" spellcheck="false" required></label><button type="submit">登录</button></form><form method="post" action="{{.PortalPath}}logout"><button type="submit">退出此浏览器的全部租户会话</button></form><p class="note">Key 只用于向 aigw 验证身份；browser-fs 默认开启后，只有你在浏览器明确授权的本机目录可被 agent 访问，内容可能进入模型请求。</p></main></body></html>`))
+var loginPage = template.Must(template.New("login").Parse(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>dsh 登录</title><style>body{font:16px system-ui;max-width:34rem;margin:10vh auto;padding:1rem;background:#101318;color:#eef}main{background:#1b2028;padding:2rem;border-radius:12px}input,button{box-sizing:border-box;width:100%;padding:.8rem;margin:.4rem 0}button{cursor:pointer}a.feishu{display:block;box-sizing:border-box;width:100%;padding:.8rem;margin:.4rem 0;text-align:center;background:#3370ff;color:#fff;border-radius:6px;text-decoration:none}.error{color:#ff9b9b}.note{color:#bcc6d6;font-size:.9rem}</style></head><body><main><h1>DeepSeek Harness</h1>{{if .Error}}<p class="error">{{.Error}}</p>{{end}}{{if .FeishuLoginURL}}<p><a class="feishu" href="{{.FeishuLoginURL}}">飞书登录</a></p><p class="note">用飞书登录的账号由管理员在 aigw 控制台绑定；未绑定时请先用下面的 API Key 登录或联系管理员。</p>{{end}}<form method="post" action="{{.PortalPath}}login"><label>aigw API Key<input type="password" name="key" autocomplete="off" spellcheck="false" required></label><button type="submit">登录</button></form><form method="post" action="{{.PortalPath}}logout"><button type="submit">退出此浏览器的全部租户会话</button></form><p class="note">Key 只用于向 aigw 验证身份；browser-fs 默认开启后，只有你在浏览器明确授权的本机目录可被 agent 访问，内容可能进入模型请求。</p></main></body></html>`))
 
 func (p *Proxy) renderLogin(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -269,9 +278,10 @@ func (p *Proxy) renderLogin(w http.ResponseWriter, status int, message string) {
 	// The form action is built from the portal path so the same page works behind a
 	// path prefix (single-domain mode) and on a portal port (default mode).
 	_ = loginPage.Execute(w, struct {
-		Error      string
-		PortalPath string
-	}{message, p.Config.PortalPath()})
+		Error          string
+		PortalPath     string
+		FeishuLoginURL string
+	}{message, p.Config.PortalPath(), p.feishuLoginURL()})
 }
 
 func (p *Proxy) login(w http.ResponseWriter, r *http.Request) {
@@ -1067,4 +1077,17 @@ func cloneForCookie(req *http.Request, u *session.Upstream) *http.Request {
 	out.URL.Scheme = "http"
 	out.URL.Host = u.Authority
 	return out
+}
+
+// FeishuPortal is everything the portal needs to redeem a login ticket from aigw (M61).
+// There is deliberately no client, no app id and no secret here: aigw owns the Feishu
+// application, and this side only verifies what it signed.
+type FeishuPortal struct {
+	// Enabled opens the portal's Feishu login. While it is off the button is not rendered and
+	// the login route does not exist.
+	Enabled bool
+	// AigwLoginURL is where the browser starts: aigw's /feishu/login.
+	AigwLoginURL string
+	// Verifier checks tickets and enforces single use.
+	Verifier *feishu.Verifier
 }

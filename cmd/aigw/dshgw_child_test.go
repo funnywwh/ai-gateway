@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/winger/ai-gateway/internal/config"
+	dshgwfeishu "github.com/winger/ai-gateway/internal/dshgw/feishu"
 )
 
 // childFixture is a configuration that enables the supervised child, with every
@@ -262,5 +263,77 @@ func TestPrepareWritesTheChildConfigOnce(t *testing.T) {
 	}
 	if changed {
 		t.Fatal("identical configuration rewritten")
+	}
+}
+
+// Enabling the Feishu login must hand the child exactly what it needs to redeem a ticket:
+// the URL to send people to, and the key that must match aigw's own signer. Both are derived,
+// so an operator never has to keep two files in sync.
+func TestBuildDshgwChildInjectsTheFeishuHandoff(t *testing.T) {
+	cfg, aigwBinary := childFixture(t)
+	cfg.CredentialsKey = "credentials-key-for-tests"
+	cfg.Feishu.Enabled = true
+	cfg.Feishu.DSHLogin = true
+	cfg.Feishu.AppID = "cli_test"
+	cfg.Feishu.AppSecret = "secret"
+	cfg.Feishu.CallbackURL = "http://192.168.190.86:8090/feishu/callback"
+	// The timeouts and endpoints come from config.Default() in a real deployment (Load starts
+	// there); this fixture builds the struct literally, so it states them.
+	cfg.Feishu.StateTTLS = 600
+	cfg.Feishu.TicketTTLS = 120
+	cfg.Feishu.TimeoutS = 5
+	defaults := config.Default().Feishu
+	cfg.Feishu.AuthorizeURL = defaults.AuthorizeURL
+	cfg.Feishu.TokenURL = defaults.TokenURL
+	cfg.Feishu.UserInfoURL = defaults.UserInfoURL
+
+	child, err := buildDshgwChild(cfg, aigwBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.config.Feishu == nil || !child.config.Feishu.Enabled {
+		t.Fatal("the child was not told to serve Feishu login")
+	}
+	if got, want := child.config.Feishu.AigwLoginURL, "http://192.168.190.86:8090/feishu/login"; got != want {
+		t.Fatalf("aigw_login_url = %q, want %q", got, want)
+	}
+	// The injected secret must be the one aigw signs with, or every login would fail
+	// verification in the child.
+	deps, err := buildFeishuDeps(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, _, err := deps.Tickets.Issue("alice", 7, 3, "ou_alice", "nonce-parity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := dshgwfeishu.New([]byte(child.config.Feishu.TicketSecret))
+	if err != nil {
+		t.Fatalf("the injected secret is unusable by the child: %v", err)
+	}
+	ticket, err := verifier.Verify(wire)
+	if err != nil {
+		t.Fatalf("the child cannot verify a ticket signed by aigw: %v", err)
+	}
+	if ticket.Tenant != "alice" || ticket.OpenID != "ou_alice" {
+		t.Fatalf("ticket decoded differently on the two sides: %+v", ticket)
+	}
+
+	// While the feature is off the block must not appear at all: a deployment that does not
+	// use Feishu generates byte-identical configuration to before.
+	cfg.Feishu.Enabled = false
+	plain, err := buildDshgwChild(cfg, aigwBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.config.Feishu != nil {
+		t.Fatal("a disabled Feishu block still reached the child configuration")
+	}
+	rendered, err := plain.config.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rendered), "feishu") {
+		t.Fatalf("the generated configuration mentions Feishu while it is off:\n%s", rendered)
 	}
 }

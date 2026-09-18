@@ -110,7 +110,22 @@ type ChildConfig struct {
 	TLS *TLSConfig `yaml:"tls,omitempty"`
 	// WorkerLimits are the per-worker cgroup v2 limits; all zero means unlimited.
 	WorkerLimits WorkerLimits `yaml:"worker_limits,omitempty"`
-	Deploy       Deploy       `yaml:"deploy"`
+	// Feishu is the identity handoff the child needs to accept a Feishu sign-in (M61): where
+	// to send a person, and the key that proves the ticket aigw signs is genuine. It is
+	// omitted entirely while the feature is off, so a deployment that does not use Feishu
+	// generates exactly the configuration it did before.
+	Feishu *Feishu `yaml:"feishu,omitempty"`
+	Deploy Deploy  `yaml:"deploy"`
+}
+
+// Feishu mirrors the child's own feishu block. The child holds no Feishu credential: aigw
+// owns the application and the secret, and this secret only authenticates the handoff
+// between the two processes (which is why it travels in this generated file rather than
+// being something an operator has to keep in sync by hand).
+type Feishu struct {
+	Enabled      bool   `yaml:"enabled"`
+	AigwLoginURL string `yaml:"aigw_login_url"`
+	TicketSecret string `yaml:"ticket_secret"`
 }
 
 // WorkerLimits mirrors the child's own per-worker limits.
@@ -136,6 +151,14 @@ func (c ChildConfig) Validate() error {
 	}
 	if c.PublicScheme != "" && c.PublicScheme != "auto" && c.PublicScheme != "http" && c.PublicScheme != "https" {
 		return fmt.Errorf("dshgw.public_scheme %q must be auto, http or https", c.PublicScheme)
+	}
+	if c.Feishu != nil && c.Feishu.Enabled {
+		if !strings.HasSuffix(strings.TrimSpace(c.Feishu.AigwLoginURL), "/feishu/login") {
+			return fmt.Errorf("dshgw.feishu.aigw_login_url must end with /feishu/login (got %q)", c.Feishu.AigwLoginURL)
+		}
+		if strings.TrimSpace(c.Feishu.TicketSecret) == "" {
+			return errors.New("dshgw.feishu.ticket_secret must be set when the child serves Feishu login")
+		}
 	}
 	if c.PublicScheme == "https" && c.PublicBaseURL != "" && strings.HasPrefix(c.PublicBaseURL, "http://") {
 		// The base URL is what every generated link is built from while the scheme

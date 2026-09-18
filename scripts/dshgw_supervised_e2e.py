@@ -97,13 +97,26 @@ class StubAigw:
     refresh that runs before a worker starts.
     """
 
-    def __init__(self, models: list[str]) -> None:
+    def __init__(self, models: list[str], tenant: str = "") -> None:
         self.models = models
         self.calls = 0
         self.port = free_port()
+        # The entitlement answer POST /v1/dshgw/authorize gives, and a switch the acceptance
+        # flips to prove that a revocation between login and redemption is honoured (M61).
+        self.tenant = tenant
+        self.deny = False
+        self.authorize_calls = 0
         stub = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
+            def _json(self, status: int, payload: dict) -> None:
+                body = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_GET(self) -> None:  # noqa: N802 (http.server API)
                 if self.path.rstrip("/") != "/v1/models":
                     self.send_response(404)
@@ -114,12 +127,23 @@ class StubAigw:
                     self.send_response(401)
                     self.end_headers()
                     return
-                body = json.dumps({"data": [{"id": m} for m in stub.models]}).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._json(200, {"data": [{"id": m} for m in stub.models]})
+
+            def do_POST(self) -> None:  # noqa: N802 (http.server API)
+                # What dshgw asks after redeeming a login ticket: may this tenant still use
+                # the gateway? In production this is real aigw answering from the account row.
+                if self.path.rstrip("/") != "/v1/dshgw/authorize":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                stub.authorize_calls += 1
+                if not self.headers.get("Authorization", "").startswith("Bearer "):
+                    self._json(401, {"error": {"message": "missing key"}})
+                    return
+                if stub.deny:
+                    self._json(403, {"allowed": False, "reason": "dsh_disabled"})
+                    return
+                self._json(200, {"allowed": True, "tenant": stub.tenant})
 
             def log_message(self, *args: object) -> None:  # silence the test output
                 return
@@ -137,6 +161,161 @@ class StubAigw:
     @property
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
+
+
+class StubFeishu:
+    """Minimal Feishu: the consent page immediately redirects back with a code.
+
+    The acceptance needs the two server-side calls aigw makes (token exchange and user info)
+    and one browser hop through the authorization page. Everything else — the app id, the
+    secret, the registered redirect URL — is the same shape a real application has.
+    """
+
+    def __init__(self, open_id: str = "ou_e2e", name: str = "E2E 用户") -> None:
+        self.open_id = open_id
+        self.name = name
+        self.port = free_port()
+        self.authorizations = 0
+        stub = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def _json(self, status: int, payload: dict) -> None:
+                body = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self) -> None:  # noqa: N802 (http.server API)
+                path, _, query = self.path.partition("?")
+                if path == "/userinfo":
+                    # aigw asks who this is with the user access token. open_id and the name
+                    # are the only fields this feature reads, and neither needs a scope.
+                    if not self.headers.get("Authorization", "").startswith("Bearer "):
+                        self._json(200, {"code": 20005, "msg": "invalid token"})
+                        return
+                    self._json(200, {"code": 0, "msg": "success", "data": {
+                        "open_id": stub.open_id, "union_id": "on_e2e", "name": stub.name}})
+                    return
+                if path != "/authorize":
+                    self._json(404, {"code": 20001, "msg": "not found"})
+                    return
+                params = dict(part.split("=", 1) for part in query.split("&") if "=" in part)
+                if "redirect_uri" not in params:
+                    self._json(400, {"code": 20001, "msg": "redirect_uri is required"})
+                    return
+                stub.authorizations += 1
+                # The user consents: back to the registered URL with a one-time code. The
+                # redirect target is percent-encoded by whoever built the link.
+                import urllib.parse
+                target = urllib.parse.unquote(params["redirect_uri"])
+                target += ("&" if "?" in target else "?") + "code=e2e-auth-code"
+                if "state" in params:
+                    target += "&state=" + params["state"]
+                self.send_response(302)
+                self.send_header("Location", target)
+                self.end_headers()
+
+            def do_POST(self) -> None:  # noqa: N802 (http.server API)
+                if self.path != "/token":
+                    self._json(404, {"code": 20001, "msg": "not found"})
+                    return
+                length = int(self.headers.get("Content-Length") or 0)
+                form = self.rfile.read(length).decode()
+                if "client_secret=secret" not in form or "grant_type=authorization_code" not in form:
+                    self._json(400, {"code": 20002, "error": "invalid_client"})
+                    return
+                self._json(200, {"code": 0, "access_token": "u-e2e-token", "expires_in": 7200,
+                                 "token_type": "Bearer"})
+
+            def log_message(self, *args: object) -> None:  # silence the test output
+                return
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+
+class Browser:
+    """A tiny cookie-keeping HTTP client that never follows a redirect.
+
+    Every hop of the Feishu handoff is asserted, so following redirects automatically would
+    hide which side produced which Location — and the ticket cookie has to be carried by hand
+    anyway, since that is exactly the mechanism M61 relies on.
+    """
+
+    def __init__(self) -> None:
+        self.cookies: dict[str, str] = {}
+
+    def request(self, method: str, url: str, body: dict | None = None, headers: dict | None = None,
+                origin: str = "") -> tuple[int, dict, str]:
+        import urllib.parse
+        parsed = urllib.parse.urlsplit(url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 80
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+        sent = dict(headers or {})
+        payload = b""
+        if body is not None:
+            payload = json.dumps(body).encode()
+            sent.setdefault("Content-Type", "application/json")
+        cookie_header = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
+        if cookie_header:
+            sent["Cookie"] = cookie_header
+        if origin:
+            sent["Origin"] = origin
+        with socket.create_connection((host, port), timeout=10) as conn:
+            head = f"{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n"
+            head += f"Content-Length: {len(payload)}\r\n"
+            for name, value in sent.items():
+                head += f"{name}: {value}\r\n"
+            conn.sendall(head.encode() + b"\r\n" + payload)
+            chunks = []
+            while True:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                if sum(len(c) for c in chunks) > 1 << 20:
+                    break
+        raw = b"".join(chunks)
+        header, _, body_bytes = raw.partition(b"\r\n\r\n")
+        lines = header.decode(errors="replace").splitlines()
+        status = 0
+        if lines:
+            parts = lines[0].split()
+            if len(parts) >= 2 and parts[1].isdigit():
+                status = int(parts[1])
+        response_headers: dict[str, str] = {}
+        for line in lines[1:]:
+            name, _, value = line.partition(":")
+            key = name.strip().lower()
+            if key == "set-cookie":
+                pair = value.strip().split(";", 1)[0]
+                cookie_name, _, cookie_value = pair.partition("=")
+                self.cookies[cookie_name.strip()] = cookie_value.strip()
+                response_headers.setdefault(key, value.strip())
+            else:
+                response_headers[key] = value.strip()
+        return status, response_headers, body_bytes.decode(errors="replace")
+
+
+def portal_base(proxy_port: int) -> str:
+    """The public origin this acceptance uses: the front proxy on its own port."""
+    return f"http://localhost:{proxy_port}"
 
 
 def admin_call(socket_path: Path, request: dict, timeout: float = 180.0) -> dict:
@@ -288,15 +467,33 @@ def prepare_template(node: str, dsh_root: str, home: Path, check: Check) -> Path
 
 def write_config(path: Path, *, aigw_port: int, stub_url: str, state_dir: Path, template: Path,
                  node: str, dsh_root: str, plugin_path: Path, ports: dict,
-                 memory_max: int, tasks_max: int, cpu_quota: int) -> None:
+                 memory_max: int, tasks_max: int, cpu_quota: int, feishu_url: str,
+                 public_base_url: str) -> None:
     doc = f"""server:
   listen: 127.0.0.1:{aigw_port}
   secret_key: supervised-e2e-secret
 database:
   path: {state_dir}/aigw.db
 credentials_key: "2jGxUI1VPSsMQgx0lbhv5OuGywKnCDUN"
+bootstrap:
+  mode: upsert
+  admin:
+    username: e2e-admin
+    password: e2e-password
 log:
   level: debug
+feishu:
+  enabled: true
+  app_id: cli_e2e
+  app_secret: secret
+  callback_url: http://localhost:{aigw_port}/feishu/callback
+  authorize_url: {feishu_url}/authorize
+  token_url: {feishu_url}/token
+  userinfo_url: {feishu_url}/userinfo
+  dsh_login: true
+  portal_url: ""
+  state_ttl_s: 600
+  ticket_ttl_s: 120
 dshgw:
   enabled: true
   state_dir: {state_dir}
@@ -313,14 +510,166 @@ dshgw:
   template_home: {template}
   plugin_path: {plugin_path}
   plugin_browser_fs: off
-  public_base_url: http://localhost
+  public_base_url: {public_base_url}
   tenant_path_prefix: /t
   portal_path_prefix: /dshgw
+  public_scheme: http
   worker_memory_max_bytes: {memory_max}
   worker_tasks_max: {tasks_max}
   worker_cpu_quota_percent: {cpu_quota}
 """
     path.write_text(doc)
+
+
+def check_feishu_login(check: Check, aigw_port: int, proxy_port: int, tenant: str,
+                       feishu: "StubFeishu", upstream: "StubAigw", database: Path) -> None:
+    """Bind an API key to a Feishu account, then use it to sign in to the portal.
+
+    This is the acceptance for the whole M60/M61 handoff, and it runs the real binaries: aigw
+    performs the OAuth exchange against the stub consent page and mints a ticket, the child
+    verifies that ticket with its injected secret, and the session it issues is the same one a
+    key login produces. The two flags the console normally sets through the DSH provisioning
+    channel (an account being opted in, and which tenant it maps to) are written directly,
+    because that path belongs to the other milestone and would rotate this tenant's worker key
+    against the stub.
+
+    Only the binding and the login are asserted here; the binding's own rules (uniqueness,
+    conflicts, role checks) are covered by the Go tests, which is the right place for them.
+    """
+    import sqlite3
+    import urllib.parse
+
+    admin = Browser()
+    base = f"http://localhost:{aigw_port}"
+    admin_origin = base
+    status, _, _ = admin.request("POST", f"{base}/admin/api/v1/auth/login",
+                                 body={"username": "e2e-admin", "password": "e2e-password"},
+                                 origin=admin_origin)
+    if not check.require("feishu-admin-login", status == 200, f"HTTP {status}"):
+        return
+
+    status, _, body = admin.request("POST", f"{base}/admin/api/v1/accounts",
+                                    body={"name": "e2e-feishu", "billing_mode": "postpaid"},
+                                    origin=admin_origin)
+    if not check.require("feishu-account-created", status in (200, 201), f"HTTP {status} {body[:200]}"):
+        return
+    account_id = json.loads(body).get("id")
+    status, _, body = admin.request("POST", f"{base}/admin/api/v1/keys",
+                                    body={"name": "e2e-feishu-key", "account_id": account_id},
+                                    origin=admin_origin)
+    if not check.require("feishu-key-created", status in (200, 201), f"HTTP {status} {body[:200]}"):
+        return
+    key_id = json.loads(body).get("id")
+
+    # Opt the account in and point it at the tenant this acceptance already created. The
+    # console's own button would do this, but it also rotates the tenant's worker key through
+    # the provisioning channel, which this stub-based run does not model.
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE accounts SET dsh_enabled = 1, dsh_tenant = ? WHERE id = ?", (tenant, account_id))
+
+    # --- binding, through the console and the consent page --------------------------------
+    status, headers, _ = admin.request("GET", f"{base}/admin/api/v1/keys/{key_id}/feishu/bind", origin=admin_origin)
+    bind_location = headers.get("location", "")
+    check.require("feishu-bind-entry", status == 302 and "mode=bind" in bind_location,
+                  f"HTTP {status} location={bind_location!r}")
+    status, headers, _ = admin.request("GET", base + bind_location, origin=admin_origin)
+    authorize = headers.get("location", "")
+    check.require("feishu-authorize-redirect", status == 302 and authorize.startswith(feishu.base_url),
+                  f"HTTP {status} location={authorize!r}")
+    parsed = urllib.parse.urlsplit(authorize)
+    query = dict(part.split("=", 1) for part in parsed.query.split("&") if "=" in part)
+    check.require("feishu-registered-callback",
+                  urllib.parse.unquote(query.get("redirect_uri", "")) == f"http://localhost:{aigw_port}/feishu/callback",
+                  f"redirect_uri={query.get('redirect_uri')!r}")
+    # The consent page sends the browser back with a code.
+    status, headers, _ = admin.request("GET", authorize)
+    callback = headers.get("location", "")
+    status, headers, _ = admin.request("GET", callback)
+    check.require("feishu-bind-callback", status == 303 and "feishu=bound" in headers.get("location", ""),
+                  f"HTTP {status} location={headers.get('location')!r}")
+    with sqlite3.connect(database) as conn:
+        bound = conn.execute("SELECT feishu_open_id, feishu_name FROM api_keys WHERE id = ?", (key_id,)).fetchone()
+    check.require("feishu-binding-stored", bound is not None and bound[0] == feishu.open_id,
+                  f"row={bound!r}")
+
+    # --- signing in to the portal with that identity --------------------------------------
+    # The portal is reached through the front door, on the URL the child itself generates.
+    portal = f"http://localhost:{proxy_port}/dshgw"
+    visitor = Browser()
+    status, _, page = visitor.request("GET", portal + "/")
+    check.require("feishu-portal-offers-login",
+                  status == 200 and "飞书登录" in page and f"http://localhost:{aigw_port}/feishu/login" in page,
+                  f"HTTP {status}")
+
+    status, headers, _ = visitor.request("GET", f"{base}/feishu/login")
+    authorize = headers.get("location", "")
+    if not check.require("feishu-login-authorize", status == 302 and authorize.startswith(feishu.base_url),
+                         f"HTTP {status} location={authorize!r}"):
+        return
+    status, headers, _ = visitor.request("GET", authorize)
+    callback = headers.get("location", "")
+    status, headers, _ = visitor.request("GET", callback)
+    location = headers.get("location", "")
+    check.require("feishu-login-returns-to-portal",
+                  status == 303 and location.startswith(portal + "/login/feishu"),
+                  f"HTTP {status} location={location!r}")
+    # The ticket travelled as a host-only cookie, which is what makes it reach the portal on
+    # its own port; the URL must not carry it.
+    check.require("feishu-ticket-not-in-url", "ticket=" not in location, location)
+
+    status, headers, _ = visitor.request("GET", location)
+    tenant_location = headers.get("location", "")
+    check.require("feishu-login-starts-tenant-session",
+                  status == 302 and tenant_location == f"{portal_base(proxy_port)}/t/{tenant}/",
+                  f"HTTP {status} location={tenant_location!r}")
+    session = visitor.cookies.get(f"dshgw_s_{tenant}", "")
+    check.require("feishu-session-issued", bool(session), f"cookies={list(visitor.cookies)}")
+    status, _, page = visitor.request("GET", tenant_location)
+    check.require("feishu-tenant-serves-ui", status == 200, f"HTTP {status} body={page[:80]!r}")
+    check.require("feishu-entitlement-rechecked", upstream.authorize_calls > 0,
+                  f"POST /v1/dshgw/authorize calls: {upstream.authorize_calls}")
+
+    # --- refusals: unbound, and revoked between issue and redemption ----------------------
+    status, _, _ = admin.request("DELETE", f"{base}/admin/api/v1/keys/{key_id}/feishu", origin=admin_origin)
+    check.require("feishu-unbind", status == 200, f"HTTP {status}")
+    stranger = Browser()
+    status, headers, _ = stranger.request("GET", f"{base}/feishu/login")
+    status, headers, _ = stranger.request("GET", headers.get("location", ""))
+    status, headers, _ = stranger.request("GET", headers.get("location", ""))
+    refusal_target = headers.get("location", "")
+    status, _, page = stranger.request("GET", refusal_target)
+    check.require("feishu-unbound-refused",
+                  "feishu/error?reason=unbound" in refusal_target and "尚未绑定" in page,
+                  f"HTTP {status} location={refusal_target!r} body={page[:120]!r}")
+
+    # Revocation after aigw issued the ticket: the child asks again, and an upstream that says
+    # no must stop the login rather than let it through.
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE api_keys SET feishu_open_id = ?, feishu_name = ? WHERE id = ?",
+                     (feishu.open_id, feishu.name, key_id))
+    upstream.deny = True
+    try:
+        revoked = Browser()
+        status, headers, _ = revoked.request("GET", f"{base}/feishu/login")
+        status, headers, _ = revoked.request("GET", headers.get("location", ""))
+        status, headers, _ = revoked.request("GET", headers.get("location", ""))
+        status, _, page = revoked.request("GET", headers.get("location", ""))
+        check.require("feishu-revocation-refused",
+                      status == 403 and "未启用 dsh" in page,
+                      f"HTTP {status} body={page[:120]!r}")
+        check.require("feishu-revocation-issues-no-session",
+                      f"dshgw_s_{tenant}" not in revoked.cookies, f"cookies={list(revoked.cookies)}")
+    finally:
+        upstream.deny = False
+    # ...and the same identity works again once the upstream allows it, which proves the
+    # refusal above came from the check and not from a broken chain.
+    restored = Browser()
+    status, headers, _ = restored.request("GET", f"{base}/feishu/login")
+    status, headers, _ = restored.request("GET", headers.get("location", ""))
+    status, headers, _ = restored.request("GET", headers.get("location", ""))
+    status, headers, _ = restored.request("GET", headers.get("location", ""))
+    check.require("feishu-login-recovers", status == 302 and f"dshgw_s_{tenant}" in restored.cookies,
+                  f"HTTP {status} cookies={list(restored.cookies)}")
 
 
 def main() -> int:
@@ -386,7 +735,13 @@ def main() -> int:
     tenant_worker_port = ports["worker_lo"]
     TENANT_PORT_FALLBACK[0] = ports["portal"]
 
-    stub = StubAigw(models=["e2e-model-a", "e2e-model-b"])
+    stub = StubAigw(models=["e2e-model-a", "e2e-model-b"], tenant="e2e-supervised")
+    feishu_stub = StubFeishu()
+    aigw_port = free_port()
+    # The front proxy's port is part of the public URLs the child generates, so it is chosen
+    # before the child is configured rather than inside the path-mode step.
+    proxy_port = free_port()
+    public_base_url = f"http://localhost:{proxy_port}"
     aigw: subprocess.Popen | None = None
     aigw_log = None
     tenant = "e2e-supervised"
@@ -394,7 +749,8 @@ def main() -> int:
         template = prepare_template(node, dsh_root, work, check)
         write_config(
             config_path,
-            aigw_port=free_port(),
+            aigw_port=aigw_port,
+            feishu_url=feishu_stub.base_url,
             stub_url=stub.base_url,
             state_dir=state_dir,
             template=template,
@@ -405,8 +761,10 @@ def main() -> int:
             memory_max=MEMORY_MAX_BYTES,
             tasks_max=TASKS_MAX,
             cpu_quota=CPU_QUOTA_PERCENT,
+            public_base_url=public_base_url,
         )
         stub.start()
+        feishu_stub.start()
         aigw_log = log_path.open("wb")
         aigw = subprocess.Popen(
             [str(aigw_bin), "--config", str(config_path)], stdout=aigw_log, stderr=subprocess.STDOUT,
@@ -470,8 +828,14 @@ def main() -> int:
         # Single-domain mode: no subdomains, no ports — the front proxy serves the
         # portal and the tenant under path prefixes, while dshgw generates the URLs
         # (redirects, session cookie path) that make those paths work.
-        check_path_mode(check, Path(args.gwproxy_bin).resolve(), state_dir, ports["listen"],
-                        ports["tenant_lo"], tenant, "localhost")
+        # The Feishu identity chain (M60 + M61) runs against the real binaries while the front
+        # door is up: bind a key through the console and the stub consent page, then sign in to
+        # the portal with it and land inside the tenant.
+        check_path_mode(
+            check, Path(args.gwproxy_bin).resolve(), state_dir, ports["listen"],
+            ports["tenant_lo"], tenant, "localhost", proxy_port, public_base_url,
+            meanwhile=lambda port: check_feishu_login(
+                check, aigw_port, port, tenant, feishu_stub, stub, state_dir / "aigw.db"))
 
         calls_before = stub.calls
         stopped = admin_call(admin_socket, {"id": 3, "op": "tenant-stop", "name": tenant})
@@ -516,6 +880,7 @@ def main() -> int:
         if aigw is not None:
             stop_process(aigw, check, quiet=True)
         stub.stop()
+        feishu_stub.stop()
         if aigw_log is not None:
             aigw_log.close()
         if not args.keep:
@@ -534,7 +899,8 @@ def main() -> int:
 
 
 def check_path_mode(check: Check, proxy_bin: Path, state_dir: Path, dshgw_listen: int,
-                    tenant_port: int, tenant: str, public_host: str) -> None:
+                    tenant_port: int, tenant: str, public_host: str, proxy_port: int,
+                    public_origin: str, meanwhile=None) -> None:
     """Drive the single-domain path chain: proxy -> dshgw -> worker.
 
     This is the shape to use when subdomains are not available: one domain, one
@@ -545,7 +911,6 @@ def check_path_mode(check: Check, proxy_bin: Path, state_dir: Path, dshgw_listen
         check.ok("path-mode-skipped", "gwproxy not built (make gwproxy-build)")
         return
     config = state_dir.parent / "gwproxy.yaml"
-    proxy_port = free_port()
     config.write_text(
         f"""listen: 127.0.0.1:{proxy_port}
 public_host: {public_host}
@@ -579,8 +944,13 @@ registry_path: {state_dir}/registry.json
         # An unauthenticated GET is a redirect by design; the 401 contract belongs to
         # non-GET requests (a browser navigation is not a data request).
         api, _ = http_probe(proxy_port, f"/t/{tenant}/api", method="POST",
-                            origin="http://localhost")
+                            origin=public_origin)
         check.require("path-mode-tenant-api-401", api == 401, f"HTTP {api}")
+
+        # Anything that needs the front door runs here, while it is up: that is how a person
+        # reaches the portal in this deployment.
+        if meanwhile is not None:
+            meanwhile(proxy_port)
     finally:
         stop_process(process, check, quiet=True)
         _ = tenant_port

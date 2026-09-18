@@ -54,7 +54,7 @@ func buildFeishuDeps(cfg *config.Config, log *slog.Logger) (*httpapi.FeishuDeps,
 		LoginURL:     cfg.FeishuLoginURL(),
 	}
 	if cfg.Feishu.DSHLogin {
-		ticketKey, err := feishuSecret(cfg, cfg.Feishu.TicketSecret, "feishu-ticket")
+		ticketKey, err := feishuTicketSecret(cfg)
 		if err != nil {
 			return nil, err
 		}
@@ -72,6 +72,13 @@ func buildFeishuDeps(cfg *config.Config, log *slog.Logger) (*httpapi.FeishuDeps,
 			"portal", deps.PortalURL)
 	}
 	return deps, nil
+}
+
+// feishuTicketSecret is the one value aigw and its dshgw child must agree on: aigw signs the
+// login ticket with it and the child verifies it with its own copy. Deriving it in one place
+// keeps the two sides from drifting when the operator leaves the setting empty.
+func feishuTicketSecret(cfg *config.Config) ([]byte, error) {
+	return feishuSecret(cfg, cfg.Feishu.TicketSecret, "feishu-ticket")
 }
 
 // feishuSecret resolves one signing secret: an explicit value wins, otherwise the
