@@ -7,16 +7,14 @@ import (
 	"flag"
 	"fmt"
 	"github.com/winger/ai-gateway/internal/dshgw/activity"
-	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/tenancy"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
 func (c *cli) tenant(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("tenant requires create, list, rotate-key, restart, re-isolate, or remove")
+		return errors.New("tenant requires create, list, rotate-key, restart, or remove")
 	}
 	switch args[0] {
 	case "create":
@@ -27,8 +25,6 @@ func (c *cli) tenant(ctx context.Context, args []string) error {
 		return c.tenantRotate(ctx, args[1:])
 	case "restart":
 		return c.tenantRestart(ctx, args[1:])
-	case "re-isolate":
-		return c.tenantReisolate(ctx, args[1:])
 	case "remove":
 		return c.tenantRemove(ctx, args[1:])
 	default:
@@ -94,12 +90,16 @@ func (c *cli) tenantList(ctx context.Context, args []string) error {
 		return err
 	}
 	type row struct {
-		Name             string   `json:"name"`
-		PublicPort       int      `json:"public_port"`
-		WorkerPort       int      `json:"worker_port"`
-		KeyPrefix        string   `json:"key_prefix"`
-		Active           bool     `json:"active"`
-		Enabled          bool     `json:"enabled"`
+		Name       string `json:"name"`
+		PublicPort int    `json:"public_port"`
+		WorkerPort int    `json:"worker_port"`
+		KeyPrefix  string `json:"key_prefix"`
+		// Running is the worker *process* state; Suspended is the operator's
+		// durable intent. Both matter: a tenant can be running while suspended
+		// (until the next start) and stopped without being suspended (a crash).
+		Running          bool     `json:"running"`
+		Suspended        bool     `json:"suspended"`
+		PID              int      `json:"pid"`
 		Handshake        string   `json:"handshake"`
 		DirectoryPicker  string   `json:"directory_picker"`
 		BrowserFS        string   `json:"browser_fs"`
@@ -108,7 +108,6 @@ func (c *cli) tenantList(ctx context.Context, args []string) error {
 		UID              int      `json:"uid"`
 		User             string   `json:"user"`
 		Isolation        string   `json:"isolation"`
-		Unit             string   `json:"unit"`
 		DshHome          string   `json:"dsh_home"`
 		Workspace        string   `json:"workspace"`
 		CreatedAt        string   `json:"created_at"`
@@ -117,43 +116,28 @@ func (c *cli) tenantList(ctx context.Context, args []string) error {
 		GatewayKeyPath   string   `json:"gateway_key_path"`
 		AigwBaseURL      string   `json:"aigw_base_url"`
 		KeyRevalidate    string   `json:"key_revalidate"`
-		WorkerSlice      string   `json:"worker_slice"`
 		PortalURL        string   `json:"portal_url"`
 	}
 	rows := []row{}
 	for _, tenant := range deps.reg.List() {
-		isolation := tenant.EffectiveIsolation()
-		// The worker account and unit name come from the same resolution the
-		// lifecycle uses, so `tenant list` cannot drift from what was deployed.
-		spec, specErr := deps.manager.WorkerSpecFor(tenant)
-		user, unit := deps.cfg.Deploy.DshUserPrefix+tenant.Name, workerUnitName(deps.cfg.Deploy.WorkerUnit, tenant.Name)
-		if specErr == nil {
-			user, unit = spec.User, workerUnitName(spec.UnitTemplate, tenant.Name)
-		} else if isolation == config.IsolationBwrap {
-			// The recorded isolation still selects the unit family, so a tenant
-			// whose sandbox spec cannot be resolved right now must not be
-			// reported under the per-user unit it never runs as.
-			user, unit = deps.cfg.Deploy.WorkerUser, workerUnitName(deps.cfg.Deploy.WorkerUnitBwrap, tenant.Name)
-		}
 		item := row{
 			Name: tenant.Name, PublicPort: tenant.PublicPort, WorkerPort: tenant.WorkerPort, KeyPrefix: tenant.KeyPrefix,
-			Active: false, Enabled: false, Handshake: string(tenant.Handshake), DirectoryPicker: tenant.DirectoryPicker,
+			Suspended: tenant.Suspended, Handshake: string(tenant.Handshake), DirectoryPicker: tenant.DirectoryPicker,
 			BrowserFS: tenant.PluginBrowserFS, ModelsPending: tenant.ModelsPending, UID: tenant.UID,
-			User: user, Isolation: isolation, Unit: unit,
+			User: deps.cfg.Deploy.WorkerUser, Isolation: tenant.EffectiveIsolation(),
 			DshHome: tenant.DshHome, Workspace: tenant.Workspace, CreatedAt: tenant.CreatedAt.UTC().Format(time.RFC3339Nano),
 			PreviousPrefixes: append([]string{}, tenant.PreviousPrefixes...),
 			HandshakePath:    filepath.Join(deps.cfg.HandshakeDir, tenant.Name+".url"),
 			GatewayKeyPath:   filepath.Join(deps.cfg.Deploy.TenantConfigRoot, tenant.Name, "gateway.key"),
 			AigwBaseURL:      deps.cfg.AigwBaseURL, KeyRevalidate: deps.cfg.KeyRevalidate,
-			WorkerSlice: deps.cfg.Deploy.WorkerSlice, PortalURL: deps.cfg.WithTrailingSlash(deps.cfg.OriginForPort(deps.cfg.PortalPort)),
+			PortalURL: deps.cfg.WithTrailingSlash(deps.cfg.OriginForPort(deps.cfg.PortalPort)),
 		}
 		if last, lastErr := (&activity.Store{Path: deps.cfg.ActivityPath}).LastLogin(tenant.Name); lastErr == nil && !last.IsZero() {
 			item.LastLogin = last.Format(time.RFC3339)
 		}
 		if !*noStatus {
 			status, _ := deps.manager.Status(ctx, tenant)
-			item.Active = status.Active
-			item.Enabled = status.Enabled
+			item.Running, item.PID = status.Running, status.PID
 		}
 		rows = append(rows, item)
 	}
@@ -162,14 +146,11 @@ func (c *cli) tenantList(ctx context.Context, args []string) error {
 		fmt.Fprintln(c.stdout, string(data))
 		return nil
 	}
-	fmt.Fprintln(c.stdout, "TENANT\tPUBLIC\tWORKER\tPREFIX\tACTIVE\tENABLED\tHANDSHAKE\tPICKER\tBROWSER_FS\tMODELS_PENDING\tISOLATION\tLAST_LOGIN")
+	fmt.Fprintln(c.stdout, "TENANT\tPUBLIC\tWORKER\tPREFIX\tRUNNING\tSUSPENDED\tPID\tHANDSHAKE\tPICKER\tBROWSER_FS\tMODELS_PENDING\tISOLATION\tLAST_LOGIN")
 	for _, item := range rows {
-		fmt.Fprintf(c.stdout, "%s\t%d\t%d\t%s\t%t\t%t\t%s\t%s\t%s\t%t\t%s\t%s\n", item.Name, item.PublicPort, item.WorkerPort, item.KeyPrefix, item.Active, item.Enabled, item.Handshake, item.DirectoryPicker, item.BrowserFS, item.ModelsPending, item.Isolation, item.LastLogin)
+		fmt.Fprintf(c.stdout, "%s\t%d\t%d\t%s\t%t\t%t\t%d\t%s\t%s\t%s\t%t\t%s\t%s\n", item.Name, item.PublicPort, item.WorkerPort, item.KeyPrefix, item.Running, item.Suspended, item.PID, item.Handshake, item.DirectoryPicker, item.BrowserFS, item.ModelsPending, item.Isolation, item.LastLogin)
 	}
 	return nil
-}
-func workerUnitName(template, tenant string) string {
-	return strings.TrimSuffix(template, "@.service") + "@" + tenant + ".service"
 }
 
 func (c *cli) tenantRotate(ctx context.Context, args []string) error {
@@ -233,36 +214,6 @@ func tenantRemovalError(snapshot string, err error) error {
 		return err
 	}
 	return fmt.Errorf("%w (snapshot: %s)", err, snapshot)
-}
-
-// tenantReisolate moves one tenant between the per-tenant-account and the
-// shared-account bubblewrap isolation modes. The target mode is explicit —
-// isolation strength is never changed implicitly by config edits.
-func (c *cli) tenantReisolate(ctx context.Context, args []string) error {
-	if err := requireRoot(); err != nil {
-		return err
-	}
-	fs := c.flagSet("tenant re-isolate")
-	to := fs.String("to", "", "target isolation mode: user or bwrap")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 1 || (*to != config.IsolationUser && *to != config.IsolationBwrap) {
-		return errors.New("usage: dshgw tenant re-isolate --to user|bwrap NAME")
-	}
-	deps, err := c.loadRuntime(false)
-	if err != nil {
-		return err
-	}
-	tenant, err := tenantByName(deps.reg, fs.Arg(0))
-	if err != nil {
-		return err
-	}
-	if err := deps.manager.Reisolate(ctx, tenant, *to); err != nil {
-		return err
-	}
-	fmt.Fprintf(c.stdout, "re-isolated tenant %s to %q isolation\n", tenant.Name, *to)
-	return nil
 }
 
 func (c *cli) tenantRemove(ctx context.Context, args []string) error {

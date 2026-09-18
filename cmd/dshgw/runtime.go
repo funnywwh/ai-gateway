@@ -36,7 +36,7 @@ func (c *cli) loadRuntime(withSessions bool) (*runtimeDeps, error) {
 		return nil, fmt.Errorf("load registry: %w", err)
 	}
 	client := &aigw.Client{BaseURL: cfg.AigwBaseURL, HTTP: &http.Client{Timeout: cfg.ValidateTimeout.Duration()}}
-	manager := &tenancy.Manager{Config: cfg, Registry: reg, Runner: tenancy.ExecRunner{}, Activity: &activity.Store{Path: cfg.ActivityPath}}
+	manager := &tenancy.Manager{Config: cfg, Registry: reg, Activity: &activity.Store{Path: cfg.ActivityPath}}
 	if withSessions {
 		store, err := session.NewFileStoreWithLimit(cfg.SessionPath, cfg.MaxSessions)
 		if err != nil {

@@ -86,35 +86,6 @@ func TestRotateCredentialsPreservesRecords(t *testing.T) {
 		t.Fatalf("%s", data)
 	}
 }
-func TestNginxUsesHostAuthorityAndUpgrade(t *testing.T) {
-	cfg, tenant := renderFixture(t)
-	files, err := RenderNginx(cfg, []registry.Tenant{tenant})
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := string(files["tenant-alice.conf"])
-	for _, want := range []string{"listen 0.0.0.0:32601 ssl", "proxy_pass http://127.0.0.1:3099", "proxy_set_header Host $server_name:$server_port", "proxy_set_header X-DSHGW-Port $server_port", "proxy_buffering off"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("missing %q", want)
-		}
-	}
-	if strings.Contains(body, "proxy_hide_header Set-Cookie") || strings.Contains(body, "proxy_hide_header Set-Cookie2") {
-		t.Fatalf("nginx hides gateway session cookies:\n%s", body)
-	}
-}
-
-func TestNginxIPv6ListenFormatting(t *testing.T) {
-	cfg, tenant := renderFixture(t)
-	cfg.Deploy.PublicListen = "::"
-	files, err := RenderNginx(cfg, []registry.Tenant{tenant})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if body := string(files["tenant-alice.conf"]); !strings.Contains(body, "listen [::]:32601 ssl;") {
-		t.Fatalf("invalid IPv6 listen directive:\n%s", body)
-	}
-}
-
 func TestRenderSettingsPreservesOtherProvidersAndDropsEmptyAigw(t *testing.T) {
 	existing := []byte("custom: keep\nllm-pi-ai:\n  extra: keep\n  providers:\n    other:\n      enabled: true\n    aigw:\n      models: [{id: old}]\nagent-default-model:\n  provider: aigw\n  model: old\n")
 	updated, err := renderSettings(existing, "http://aigw", []string{"new"})

@@ -77,11 +77,6 @@ func execute(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = app.doctor(ctx, rest[1:])
 	case "backup":
 		err = app.backup(ctx, rest[1:])
-	case "render-nginx", "migrate-nginx":
-		err = app.renderNginx(ctx, rest[1:])
-	case "upgrade-dsh":
-		cancel()
-		err = app.upgradeDSH(context.Background(), rest[1:])
 	case "help", "--help", "-h":
 		printUsage(stdout)
 		return 0
@@ -105,19 +100,16 @@ func printUsage(w io.Writer) {
 Commands:
   serve                                  run loopback gateway
   admin-serve                            root-only local tenant provisioning channel (UNIX socket; requires admin_socket config)
-  tenant create|list|rotate-key|restart|re-isolate|remove
-  tenant re-isolate --to user|bwrap NAME  switch a tenant's isolation mode
+  tenant create|list|rotate-key|restart|remove
   bind PREFIX TENANT                     bind an additional public key prefix
   login-url [PREFIX]                    print the portal or tenant URL
   sync-models TENANT                     refresh DSH models from aigw
   revalidate [TENANT]                    validate stored tenant key(s)
-  capture-url TENANT                     capture exact dsh startup URL
+  capture-url TENANT                     print the worker startup URL the runner captured
   sandbox-exec [--print] TENANT          run a tenant worker inside its bubblewrap profile (worker unit ExecStart)
   contract [all|dsh|aigw]                run external integration contracts
   doctor                                 validate deployment invariants
   backup                                 create a mode-0600 backup archive
-  render-nginx [--reload]                reconcile generated nginx files
-  upgrade-dsh CANDIDATE_DIR              contract-gated symlink upgrade
 
 API keys are read from --key-file or standard input and are never accepted as argv values.
 `)

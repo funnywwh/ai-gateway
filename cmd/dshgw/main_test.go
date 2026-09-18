@@ -144,13 +144,13 @@ func TestTenantListJSONIncludesReadOnlyMetadata(t *testing.T) {
 	}
 	row := rows[0]
 	checks := map[string]string{
-		"name": "alice", "user": "dsh-alice", "unit": "dsh-worker@alice.service",
+		"name": "alice", "user": "dshgw",
 		"dsh_home": tenant.DshHome, "workspace": tenant.Workspace,
 		"created_at":       created.UTC().Format(time.RFC3339Nano),
 		"handshake_path":   filepath.Join(state, "handshake/alice.url"),
 		"gateway_key_path": "/etc/dshgw/tenants/alice/gateway.key",
 		"aigw_base_url":    "http://192.168.190.86:8088", "key_revalidate": "off",
-		"worker_slice": "dsh-workers.slice", "portal_url": "https://portal.example.test:32600/",
+		"portal_url": "https://portal.example.test:32600/",
 	}
 	for key, want := range checks {
 		if got, ok := row[key].(string); !ok || got != want {
@@ -159,6 +159,13 @@ func TestTenantListJSONIncludesReadOnlyMetadata(t *testing.T) {
 	}
 	if got, ok := row["uid"].(float64); !ok || got != 4242 {
 		t.Errorf("uid=%#v", row["uid"])
+	}
+	// The shape has no units and no per-tenant accounts: those keys must be gone,
+	// not merely empty, so a stale script cannot read them as "not configured yet".
+	for _, gone := range []string{"unit", "worker_slice", "enabled", "active"} {
+		if _, ok := row[gone]; ok {
+			t.Errorf("tenant list still reports the deleted %q field", gone)
+		}
 	}
 	if got, ok := row["previous_prefixes"].([]any); !ok || len(got) != 1 || got[0] != "sk-bbbbbbbbb" {
 		t.Errorf("previous_prefixes=%#v", row["previous_prefixes"])

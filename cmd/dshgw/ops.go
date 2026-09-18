@@ -5,12 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/contract"
 	"github.com/winger/ai-gateway/internal/dshgw/proxy"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
 	"github.com/winger/ai-gateway/internal/dshgw/sandbox"
-	"github.com/winger/ai-gateway/internal/dshgw/securefile"
 	"github.com/winger/ai-gateway/internal/dshgw/tenancy"
 	"os"
 	"path/filepath"
@@ -132,12 +130,14 @@ func (c *cli) revalidate(ctx context.Context, args []string) error {
 	}
 	return nil
 }
+
+// captureURL prints the startup URL a tenant worker reported. The systemd shape
+// needed MAINPID plus a journalctl scan; the runner reads the URL from the worker
+// process output and publishes it as the handshake file, so this is now a read of
+// that state (useful when the handshake looks stale).
 func (c *cli) captureURL(ctx context.Context, args []string) error {
-	if err := requireRoot(); err != nil {
-		return err
-	}
-	if len(args) < 1 || len(args) > 2 {
-		return errors.New("usage: dshgw capture-url TENANT [MAINPID]")
+	if len(args) != 1 {
+		return errors.New("usage: dshgw capture-url TENANT")
 	}
 	deps, err := c.loadRuntime(false)
 	if err != nil {
@@ -147,13 +147,14 @@ func (c *cli) captureURL(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return deps.manager.CaptureURL(ctx, tenant, func() string {
-		if len(args) == 2 {
-			return args[1]
-		}
-		return ""
-	}())
+	url, err := deps.manager.CaptureURL(ctx, tenant)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(c.stdout, url)
+	return nil
 }
+
 func (c *cli) contract(ctx context.Context, args []string) error {
 	fs := c.flagSet("contract")
 	asJSON := fs.Bool("json", false, "emit JSON report")
@@ -230,28 +231,10 @@ func (c *cli) backup(ctx context.Context, args []string) error {
 	fmt.Fprintln(c.stdout, path)
 	return nil
 }
-func (c *cli) renderNginx(ctx context.Context, args []string) error {
-	if err := requireRoot(); err != nil {
-		return err
-	}
-	fs := c.flagSet("render-nginx")
-	reload := fs.Bool("reload", false, "reload nginx after successful validation")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return errors.New("usage: dshgw render-nginx [--reload]")
-	}
-	deps, err := c.loadRuntime(false)
-	if err != nil {
-		return err
-	}
-	if err := deps.manager.ReconcileNginx(ctx, *reload); err != nil {
-		return err
-	}
-	fmt.Fprintf(c.stdout, "rendered %d tenant nginx server(s)\n", len(deps.reg.List()))
-	return nil
-}
+
+// doctor validates the deployment invariants of the aigw-supervised shape: the
+// filesystem permissions that stand behind the mount namespace, the runtime the
+// sandbox binds, and the bwrap preconditions the host must supply.
 func (c *cli) doctor(ctx context.Context, args []string) error {
 	if len(args) != 0 {
 		return errors.New("usage: dshgw doctor")
@@ -265,29 +248,16 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 		run  func() error
 	}
 	needBrowserFS := deps.cfg.PluginBrowserFS == "on"
-	bwrapActive := deps.cfg.Deploy.Isolation == config.IsolationBwrap
 	for _, tenant := range deps.reg.List() {
 		needBrowserFS = needBrowserFS || tenant.PluginBrowserFS == "on"
-		bwrapActive = bwrapActive || tenant.EffectiveIsolation() == registry.IsolationBwrap
 	}
 	checks := []check{
-		{"shared-state-traversal", func() error { return checkSharedTraversal(deps.cfg.StateDir) }},
-		{"tenant-root-traversal", func() error { return checkSharedTraversal(deps.cfg.TenantRoot) }},
-		{"workspace-root-traversal", func() error { return checkSharedTraversal(deps.cfg.WorkspaceRoot) }},
-		{"config-mode", func() error { return securefile.CheckPermissions(c.configPath, 0o640) }},
-		{"config-owner", func() error { return securefile.CheckOwnership(c.configPath, "root", deps.cfg.Deploy.GatewayGroup) }},
-		{"registry-mode", func() error { return securefile.CheckPermissions(deps.cfg.RegistryPath, 0o600) }},
-		{"registry-owner", func() error {
-			return securefile.CheckOwnership(deps.cfg.RegistryPath, deps.cfg.Deploy.GatewayUser, deps.cfg.Deploy.GatewayGroup)
-		}},
-		{"key-map-mode", func() error { return securefile.CheckPermissions(deps.cfg.KeyMapPath, 0o640) }},
-		{"key-map-owner", func() error {
-			return securefile.CheckOwnership(deps.cfg.KeyMapPath, "root", deps.cfg.Deploy.GatewayGroup)
-		}},
-		{"handshake-dir-mode", func() error { return checkDirectoryPermissions(deps.cfg.HandshakeDir, 0o750) }},
-		{"handshake-dir-owner", func() error {
-			return securefile.CheckOwnership(deps.cfg.HandshakeDir, "root", deps.cfg.Deploy.GatewayGroup)
-		}},
+		{"state-dir-private", func() error { return checkPrivateDirectory(deps.cfg.StateDir) }},
+		{"tenant-root-private", func() error { return checkPrivateDirectory(deps.cfg.TenantRoot) }},
+		{"workspace-root-private", func() error { return checkPrivateDirectory(deps.cfg.WorkspaceRoot) }},
+		{"config-private", func() error { return checkPrivateFile(c.configPath) }},
+		{"registry-private", func() error { return checkPrivateFile(deps.cfg.RegistryPath) }},
+		{"handshake-dir-private", func() error { return checkPrivateDirectory(deps.cfg.HandshakeDir) }},
 		{"dsh-node", func() error { return executable(deps.cfg.Dsh.NodeBin) }},
 		{"dsh-bin-js", func() error { _, err := os.Stat(deps.cfg.Dsh.BinJS); return err }},
 		{"dsh-current-symlink", func() error {
@@ -299,42 +269,14 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 		}},
 		{"dsh-template", func() error { return tenancy.ValidateTemplate(deps.cfg.Deploy.TemplateHome, needBrowserFS) }},
 		{"picker-plugin", func() error { _, err := os.Stat(deps.cfg.Deploy.PluginPath); return err }},
-		{"tls-certificate", func() error { _, err := os.Stat(deps.cfg.TLS.Certificate); return err }},
-		{"tls-key", func() error { _, err := os.Stat(deps.cfg.TLS.CertificateKey); return err }},
-		{"worker-unit", func() error {
-			_, err := os.Stat(filepath.Join(deps.cfg.Deploy.SystemdDir, deps.cfg.Deploy.WorkerUnit))
-			return err
-		}},
-		{"gateway-unit", func() error {
-			_, err := os.Stat(filepath.Join(deps.cfg.Deploy.SystemdDir, deps.cfg.Deploy.GatewayUnit))
-			return err
-		}},
-		{"worker-slice", func() error {
-			_, err := os.Stat(filepath.Join(deps.cfg.Deploy.SystemdDir, deps.cfg.Deploy.WorkerSlice))
-			return err
-		}},
-		{"nginx-include", func() error { return securefile.CheckPermissions(deps.cfg.Deploy.NginxIncludePath, 0o644) }},
-		{"nginx-config", func() error {
-			_, err := tenancy.ExecRunner{}.Run(ctx, tenancy.Command{Path: deps.cfg.Deploy.NginxBinary, Args: []string{"-t"}})
-			return err
-		}},
-	}
-	if bwrapActive {
-		// The bwrap isolation mode's preconditions. They are only checked when
-		// the mode is actually in use, so a per-tenant-account deployment is
-		// never blocked by requirements it does not have.
-		checks = append(checks,
-			check{"bwrap-bin", func() error { return executable(deps.cfg.Deploy.BwrapBin) }},
-			check{"bwrap-apparmor-userns", checkAppArmorUserNSRestriction},
-			check{"bwrap-sandbox-runtime", func() error { return sandbox.ValidateRuntime(sandboxRuntimeConfig(deps.cfg)) }},
-			check{"bwrap-worker-account", func() error { return sandbox.ValidateWorkerAccount(deps.cfg.Deploy.WorkerUser) }},
-			check{"worker-unit-bwrap", func() error { return checkBwrapWorkerUnit(deps.cfg) }},
-		)
+		{"bwrap-bin", func() error { return executable(deps.cfg.Deploy.BwrapBin) }},
+		{"bwrap-apparmor-userns", checkAppArmorUserNSRestriction},
+		{"bwrap-sandbox-runtime", func() error { return sandbox.ValidateRuntime(sandboxRuntimeConfig(deps.cfg)) }},
+		{"bwrap-worker-account", func() error { return sandbox.ValidateWorkerAccount(deps.cfg.Deploy.WorkerUser) }},
 	}
 	failures := 0
 	for _, item := range checks {
-		err := item.run()
-		if err != nil {
+		if err := item.run(); err != nil {
 			failures++
 			fmt.Fprintf(c.stdout, "FAIL\t%s\t%s\n", item.name, err)
 		} else {
@@ -346,22 +288,11 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 		tenantChecks := []check{
 			{"tenant-" + tenant.Name + "-key", func() error { _, err := source.Key(tenant.Name); return err }},
 			{"tenant-" + tenant.Name + "-handshake", func() error {
-				return securefile.CheckPermissions(filepath.Join(deps.cfg.HandshakeDir, tenant.Name+".url"), 0o640)
+				return checkPrivateFile(filepath.Join(deps.cfg.HandshakeDir, tenant.Name+".url"))
 			}},
-			{"tenant-" + tenant.Name + "-credentials", func() error {
-				return securefile.CheckPermissions(filepath.Join(tenant.DshHome, ".credentials.yaml"), 0o600)
-			}},
-			{"tenant-" + tenant.Name + "-settings", func() error {
-				return securefile.CheckPermissions(filepath.Join(tenant.DshHome, "settings.yaml"), 0o600)
-			}},
-		}
-		if tenant.EffectiveIsolation() == registry.IsolationBwrap {
-			// Proves the tenant's own profile still builds and that its roots
-			// grant nothing to an unrelated user: in shared-account mode those
-			// permission bits are the second line of defence behind the mounts.
-			tenantChecks = append(tenantChecks, check{"tenant-" + tenant.Name + "-sandbox", func() error {
-				return deps.manager.SandboxProfileReady(tenant)
-			}})
+			{"tenant-" + tenant.Name + "-credentials", func() error { return checkPrivateFile(filepath.Join(tenant.DshHome, ".credentials.yaml")) }},
+			{"tenant-" + tenant.Name + "-settings", func() error { return checkPrivateFile(filepath.Join(tenant.DshHome, "settings.yaml")) }},
+			{"tenant-" + tenant.Name + "-sandbox", func() error { return deps.manager.SandboxProfileReady(tenant) }},
 		}
 		for _, item := range tenantChecks {
 			if err := item.run(); err != nil {
@@ -377,6 +308,7 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 	}
 	return nil
 }
+
 func executable(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -402,19 +334,36 @@ func checkDirectoryPermissions(path string, allowed os.FileMode) error {
 	return nil
 }
 
-// Shared roots must allow an unrelated worker UID to search them, without
-// allowing group/other writes. Private tenant leaves and secret files remain
-// protected independently; this check never requires gateway group membership.
-func checkSharedTraversal(path string) error {
-	if err := checkDirectoryPermissions(path, 0o755); err != nil {
-		return err
-	}
+// checkPrivateDirectory requires a deployment directory to grant nothing to the
+// group or other classes. Every worker runs as the account that owns these
+// directories, so the strictest mode is also the correct one: the mount namespace
+// is the isolation boundary, and these bits are what keeps an unrelated local user
+// out of tenant data if that boundary ever fails.
+func checkPrivateDirectory(path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
-	if info.Mode().Perm()&0o001 == 0 {
-		return fmt.Errorf("%s lacks search permission for independent tenant UIDs; shared state needs 0751 and tenant root 0711", path)
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", path)
+	}
+	if extra := info.Mode().Perm() & 0o077; extra != 0 {
+		return fmt.Errorf("%s mode %04o grants group or other access; tenant roots must be 0700", path, info.Mode().Perm())
+	}
+	return nil
+}
+
+// checkPrivateFile is checkPrivateDirectory for one file.
+func checkPrivateFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	if extra := info.Mode().Perm() & 0o077; extra != 0 {
+		return fmt.Errorf("%s mode %04o grants group or other access; gateway state must be 0600", path, info.Mode().Perm())
 	}
 	return nil
 }

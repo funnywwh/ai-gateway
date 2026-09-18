@@ -37,46 +37,17 @@ type archiveManifest struct {
 	Tenant  *registry.Tenant `json:"tenant,omitempty"`
 }
 
+// Backup archives the gateway's state.
+//
+// The systemd shape stopped the gateway and every worker before archiving, which
+// made the snapshot quiesced. In the aigw-supervised shape this command runs in a
+// process *separate* from the running dshgw and holds no handle on its children,
+// so the archive is taken live. That is safe to read because registry, sessions
+// and credentials are all replaced atomically — a reader never sees a half-written
+// file — but it is not a point-in-time snapshot of in-flight tenant state. The
+// trade-off is recorded in docs/design/m58-aigw-supervised-dshgw.md.
 func (m *Manager) Backup(ctx context.Context) (path string, err error) {
 	err = m.WithLifecycleLock(func() (backupErr error) {
-		var active []string
-		for _, tenant := range m.Registry.List() {
-			status, statusErr := m.Status(ctx, tenant)
-			if statusErr != nil {
-				return statusErr
-			}
-			if status.Active {
-				active = append(active, m.unit(tenant.Name))
-			}
-		}
-		gateway, statusErr := m.unitStatus(ctx, m.Config.Deploy.GatewayUnit)
-		if statusErr != nil {
-			return statusErr
-		}
-		// Record attempts before running stop: a failed command may already
-		// have stopped the process. Recovery runs even after cancellation.
-		var attempted []string
-		defer func() {
-			restartCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
-			for i := len(attempted) - 1; i >= 0; i-- {
-				if _, restartErr := m.run(restartCtx, "systemctl", "start", attempted[i]); restartErr != nil {
-					backupErr = errors.Join(backupErr, fmt.Errorf("restore unit %s after backup: %w", attempted[i], restartErr))
-				}
-			}
-		}()
-		if gateway.Active {
-			attempted = append(attempted, m.Config.Deploy.GatewayUnit)
-			if _, stopErr := m.run(ctx, "systemctl", "stop", m.Config.Deploy.GatewayUnit); stopErr != nil {
-				return stopErr
-			}
-		}
-		for _, unit := range active {
-			attempted = append(attempted, unit)
-			if _, stopErr := m.run(ctx, "systemctl", "stop", unit); stopErr != nil {
-				return stopErr
-			}
-		}
 		path, backupErr = m.backupUnlocked()
 		return backupErr
 	})
@@ -350,20 +321,6 @@ func (m *Manager) removeLocked(ctx context.Context, t registry.Tenant, purge boo
 	if err := m.validateTenantPaths(t); err != nil {
 		return "", err
 	}
-	// Resolved while the tenant is still registered: after the registry entry
-	// is deleted, unit() would fall back to the deployment default, and a
-	// deployment that switched isolation modes must still dismantle the unit
-	// this tenant actually runs under.
-	unitName := m.unit(t.Name)
-	status, err := m.Status(ctx, t)
-	if err != nil {
-		return "", err
-	}
-	// These are the installation states created by dshgw. Other states (for
-	// example a linked or masked unit) cannot be faithfully restored by enable.
-	if status.UnitFileState != "enabled" && status.UnitFileState != "enabled-runtime" && status.UnitFileState != "disabled" {
-		return "", fmt.Errorf("cannot transactionally remove unit in state %q", status.UnitFileState)
-	}
 	registryRemoved := false
 	committed := false
 	defer func() {
@@ -378,32 +335,16 @@ func (m *Manager) removeLocked(ctx context.Context, t registry.Tenant, purge boo
 			} else if restoreErr := m.Registry.Save(); restoreErr != nil {
 				err = errors.Join(err, fmt.Errorf("restore registry: %w", restoreErr))
 			}
-			if restoreErr := m.InstallNginx(rollbackCtx, true); restoreErr != nil {
-				err = errors.Join(err, fmt.Errorf("restore nginx: %w", restoreErr))
-			}
 		}
-		if status.Enabled {
-			args := []string{"enable"}
-			if status.UnitFileState == "enabled-runtime" {
-				args = append(args, "--runtime")
-			}
-			args = append(args, unitName)
-			if _, restoreErr := m.run(rollbackCtx, "systemctl", args...); restoreErr != nil {
-				err = errors.Join(err, fmt.Errorf("restore worker enablement: %w", restoreErr))
-			}
-		}
-		if status.Active {
-			if _, restoreErr := m.run(rollbackCtx, "systemctl", "start", unitName); restoreErr != nil {
-				err = errors.Join(err, fmt.Errorf("restore worker activity: %w", restoreErr))
+		// A worker that was running before the attempt is started again: removal
+		// must not leave a live tenant down because a later step failed.
+		if !t.Suspended {
+			if restoreErr := m.workers().Start(rollbackCtx, t); restoreErr != nil {
+				err = errors.Join(err, fmt.Errorf("restore worker: %w", restoreErr))
 			}
 		}
 	}()
-	disableArgs := []string{"disable", "--now"}
-	if status.UnitFileState == "enabled-runtime" {
-		disableArgs = append(disableArgs, "--runtime")
-	}
-	disableArgs = append(disableArgs, unitName)
-	if _, err = m.run(ctx, "systemctl", disableArgs...); err != nil {
+	if err = m.workers().Stop(ctx, t); err != nil {
 		return "", err
 	}
 	snapshot, err = m.BackupTenant(t)
@@ -425,21 +366,10 @@ func (m *Manager) removeLocked(ctx context.Context, t registry.Tenant, purge boo
 			return snapshot, err
 		}
 	}
-	if err = m.InstallNginx(ctx, true); err != nil {
-		return snapshot, err
-	}
-	// userdel is not transactional: even a failing command may already have
-	// removed the identity. Do not resurrect routes/start a missing identity.
-	// Preserve the snapshot and data for manual recovery on any failure here.
+	// From here on the tenant is gone from the registry: there is no per-tenant OS
+	// identity to delete (M58 never created one) and no edge configuration to
+	// rewrite, so the only remaining step is the optional data purge.
 	committed = true
-	if t.EffectiveIsolation() == registry.IsolationBwrap {
-		// The bwrap mode never created a per-tenant OS identity — the shared
-		// worker account must survive this tenant — and both unit families are
-		// static systemd templates, so there is no per-tenant artifact to
-		// delete here at all.
-	} else if _, err = m.run(ctx, "userdel", m.user(t.Name)); err != nil {
-		return snapshot, fmt.Errorf("tenant routes removed; user deletion incomplete (data retained): %w", err)
-	}
 	if purge {
 		for _, path := range []string{filepath.Dir(t.DshHome), t.Workspace, filepath.Join(m.Config.Deploy.TenantConfigRoot, t.Name), filepath.Join(m.Config.HandshakeDir, t.Name+".url")} {
 			if removeErr := os.RemoveAll(path); removeErr != nil {
