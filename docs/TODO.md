@@ -507,7 +507,10 @@
 - [x] **开机自启**：`scripts/aigw_user_service.sh` 生成并启用用户级单元 `aigw-local.service`
       （本机已切换为文件单元、`enabled`、`linger=yes`；实测切换只造成秒级中断）
 - [ ] **对外暴露的剩余决策**：防火墙策略（worker 段端口必须不可达）、是否仍在前面放 nginx 反代
-- [ ] **资源限额**：systemd 的 `MemoryMax`/`CPUQuota`/`TasksMax` 随旧形态消失，需要 cgroup v2 方案
+- [x] **资源限额**：每 worker 一个 systemd 用户 scope（`systemd-run --user --scope -p MemoryMax=…`），
+      实测 `memory.max`/`pids.max`/`cpu.max` 全部生效；部署级汇总上限通过
+      `scripts/aigw_user_service.sh --memory-max/--tasks-max/--cpu-quota` 写进单元属性。
+      设计取舍：不用自建子 cgroup —— cgroup v2 的"无内部进程"规则使服务 cgroup 无法下放控制器（本机实测）
 - [x] 宿主验收脚本：`scripts/dshgw_supervised_e2e.py` + `make dshgw-supervised-test`（17 步：
       aigw 拉起子进程 → 同 UID admin socket → 建户 → bwrap worker → `/api` 401 → 无 per-tenant
       账号 → stop/start（含启动前模型同步）→ aigw 重启自愈 → 停止零残留；缺 bwrap/dsh 时自我跳过）

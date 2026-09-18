@@ -88,7 +88,15 @@ type Manager struct {
 // own runner (with a stand-in profile) instead of starting real sandboxes.
 func (m *Manager) workers() *WorkerRunner {
 	if m.Workers == nil {
-		m.Workers = &WorkerRunner{Config: m.Config, Profile: m.SandboxProfile, Probe: m.ProbeWorker, Logger: m.Logger}
+		m.Workers = &WorkerRunner{
+			Config: m.Config, Profile: m.SandboxProfile, Probe: m.ProbeWorker, Logger: m.Logger,
+			Limits: WorkerLimits{
+				MemoryHighBytes: m.Config.WorkerLimits.MemoryHighBytes,
+				MemoryMaxBytes:  m.Config.WorkerLimits.MemoryMaxBytes,
+				TasksMax:        m.Config.WorkerLimits.TasksMax,
+				CPUQuotaPercent: m.Config.WorkerLimits.CPUQuotaPercent,
+			},
+		}
 	}
 	return m.Workers
 }

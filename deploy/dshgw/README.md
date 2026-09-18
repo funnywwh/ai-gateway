@@ -166,7 +166,43 @@ bin/dshgw --config <state_dir>/config.yaml contract dsh                  # 真�
 
 `doctor` 核对以上私有权限、dsh 运行时、bwrap 前置条件，并对每个租户复核 profile 可构造与目录权限。
 
-## 6. 验证
+## 6. 资源限额
+
+旧形态靠 systemd 单元的 `MemoryMax`/`CPUQuota`/`TasksMax` 管住每个 worker；rootless 形态没有单元，
+所以在两层上补回来：
+
+**每 worker（在 aigw 配置的 `dshgw` 段里）**
+
+```yaml
+dshgw:
+  worker_memory_high_bytes: 1610612736   # 0 = 不限
+  worker_memory_max_bytes: 2147483648
+  worker_tasks_max: 512
+  worker_cpu_quota_percent: 200
+```
+
+实现方式是**每个 worker 一个 systemd 用户 scope**（`systemd-run --user --scope --unit=dshgw-worker-<t>
+-p MemoryMax=… -- <bwrap argv>`），不需要 root。
+
+为什么不用 dshgw 自己建子 cgroup：cgroup v2 有一条"无内部进程"规则 —— **含有进程的 cgroup 不能把控制器
+下放给子 cgroup**。systemd 服务自己的 cgroup 里总有主进程，因此 `aigw-local.service` 的
+`cgroup.subtree_control` 在本机实测**根本写不进去**（同一目录下 `mkdir` 可以，写控制器不行）。用户 scope
+没有这个问题：用户管理器拥有被委托的树，由它创建 scope 并设限额，实测生效：
+
+```
+cgroup=…/dshgw-worker-<tenant>.scope  memory.max=2147483648  pids.max=512  cpu.max=200000 100000
+```
+
+**整个部署（单元级汇总上限，替代旧 slice 的 `MemoryMax=40G`）**
+
+```bash
+scripts/aigw_user_service.sh install --memory-max 40G --tasks-max 4096 --cpu-quota 800
+```
+
+降级行为：宿主没有用户管理器（例如把 dshgw 单独跑在没有 systemd 的环境里）时，限额**不可用但 worker 照常启动**，
+并按部署告警一次 —— 缺一条配额不该变成一个起不来的租户。该行为有测试钉住。
+
+## 7. 验证
 
 ```bash
 make dshgw-test            # Go 测试（含 sandbox 单测）
@@ -182,7 +218,7 @@ make dshgw-verify          # 上述 + 构建 + vet + 真实 dsh 契约 + 模板�
 4. `tenant-stop` 后端口关闭；`tenant-start` 前日志出现 `models refreshed before worker start`（模型同步）；
 5. aigw 重启后未停用租户自动回来；停止 aigw 后**子进程与 worker 零残留**。
 
-## 7. 安全边界（必读）
+## 8. 安全边界（必读）
 
 - **没有 UID 边界**：所有租户 worker 与 aigw 同 UID；隔离来自 bubblewrap mount namespace
   （空 tmpfs 根 + 逐路径绑定 + 只读运行时 + 0700 权限位）与宿主 AppArmor 对嵌套 namespace 的限制。
@@ -194,5 +230,4 @@ make dshgw-verify          # 上述 + 构建 + vet + 真实 dsh 契约 + 模板�
   `/var`、`/home`、`/srv` 在租户视角里不存在。
 - 没有 nginx：租户门户由 dshgw 直接监听。公网部署需自行解决 TLS 与防火墙
   （当前默认明文监听；证书终止是下一步的独立设计）。
-- 每 worker 的 systemd 资源限额（`MemoryMax`/`CPUQuota`/`TasksMax`）随 systemd 形态一起消失；
-  需要限额要在上层用 cgroup v2 自行施加。
+- 资源限额见 §6：每 worker 由自己的 systemd 用户 scope 承担（实测生效），部署级汇总上限由单元属性承担。

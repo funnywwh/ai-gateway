@@ -60,6 +60,12 @@ func buildDshgwChild(cfg *config.Config, aigwExecutable string) (*dshgwChild, er
 			BinJS:       dshBinJS(cfg),
 			CurrentLink: dshPath(cfg.Dshgw.CurrentLink, "DSHGW_DSH_ROOT"),
 		},
+		WorkerLimits: dshgwsup.WorkerLimits{
+			MemoryHighBytes: cfg.Dshgw.WorkerMemoryHighBytes,
+			MemoryMaxBytes:  cfg.Dshgw.WorkerMemoryMaxBytes,
+			TasksMax:        cfg.Dshgw.WorkerTasksMax,
+			CPUQuotaPercent: cfg.Dshgw.WorkerCPUQuotaPercent,
+		},
 		Deploy: dshgwsup.Deploy{
 			PublicListen: strings.TrimSpace(cfg.Dshgw.PublicListen),
 			// Every worker runs as aigw's own account: that is what "no service

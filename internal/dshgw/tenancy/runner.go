@@ -42,6 +42,9 @@ type WorkerRunner struct {
 	// Probe is the readiness check used after a start. The manager already owns
 	// the /api 401 contract; the runner only needs to call it.
 	Probe func(context.Context, registry.Tenant) error
+	// Limits are applied to each worker's own cgroup when this host can provide
+	// one; a host that cannot still runs the worker (see CgroupManager).
+	Limits WorkerLimits
 	// Logger receives worker lifecycle events and forwarded output.
 	Logger *slog.Logger
 	// StopTimeout bounds the graceful wait before a worker is killed.
@@ -49,6 +52,11 @@ type WorkerRunner struct {
 
 	mu    sync.Mutex
 	procs map[string]*workerProc
+
+	// limitsWarned records that the "limits unavailable" warning was already
+	// emitted, so a deployment without a user manager warns once instead of on
+	// every tenant start.
+	limitsWarned bool
 }
 
 type workerProc struct {
@@ -98,6 +106,7 @@ func (r *WorkerRunner) Start(ctx context.Context, t registry.Tenant) error {
 	if len(argv) == 0 {
 		return errors.New("worker profile is empty")
 	}
+	argv, scoped := r.applyLimits(workerUnitName(t.Name), argv)
 	r.mu.Lock()
 	if r.procs == nil {
 		r.procs = map[string]*workerProc{}
@@ -130,6 +139,11 @@ func (r *WorkerRunner) Start(ctx context.Context, t registry.Tenant) error {
 	cmd.SysProcAttr = workerProcAttrs()
 	cmd.Dir = t.Workspace
 	cmd.Env = workerEnv(r.Config, t)
+	if scoped {
+		// The wrapper talks to the user manager over this socket; without it
+		// systemd-run cannot reach the manager that is supposed to apply the limits.
+		cmd.Env = append(cmd.Env, "XDG_RUNTIME_DIR="+userRuntimeDir())
+	}
 	pr, pw := io.Pipe()
 	cmd.Stdout, cmd.Stderr = pw, pw
 	if err := cmd.Start(); err != nil {
@@ -168,6 +182,32 @@ func (r *WorkerRunner) Start(ctx context.Context, t registry.Tenant) error {
 	case <-time.After(50 * time.Millisecond):
 		return nil
 	}
+}
+
+// applyLimits wraps the worker argv in its own systemd user scope when limits are
+// configured. A host without a user manager keeps running workers unlimited: a
+// missing quota must never turn into a missing tenant, so this warns once and
+// returns the original argv.
+func (r *WorkerRunner) applyLimits(unit string, argv []string) ([]string, bool) {
+	if r.Limits.empty() {
+		return argv, false
+	}
+	if !userManagerAvailable() {
+		r.mu.Lock()
+		warned := r.limitsWarned
+		r.limitsWarned = true
+		r.mu.Unlock()
+		if !warned {
+			r.logger().Warn("per-worker limits configured but unavailable; workers run unlimited", "reason", errNoLimits.Error())
+		}
+		return argv, false
+	}
+	wrapped, err := scopeWrapper(unit, r.Limits, argv)
+	if err != nil {
+		r.logger().Warn("building the worker scope failed; the worker runs unlimited", "err", err)
+		return argv, false
+	}
+	return wrapped, true
 }
 
 // Stop terminates one tenant worker: SIGTERM to its process group (so the node

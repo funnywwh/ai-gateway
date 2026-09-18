@@ -76,8 +76,18 @@ type ChildConfig struct {
 	Dsh             DshRuntime `yaml:"dsh"`
 	// TLS is optional: set both paths to serve HTTPS on the edge listeners, leave
 	// them empty for plain HTTP on a trusted network.
-	TLS    *TLSConfig `yaml:"tls,omitempty"`
-	Deploy Deploy     `yaml:"deploy"`
+	TLS *TLSConfig `yaml:"tls,omitempty"`
+	// WorkerLimits are the per-worker cgroup v2 limits; all zero means unlimited.
+	WorkerLimits WorkerLimits `yaml:"worker_limits,omitempty"`
+	Deploy       Deploy       `yaml:"deploy"`
+}
+
+// WorkerLimits mirrors the child's own per-worker limits.
+type WorkerLimits struct {
+	MemoryHighBytes int64 `yaml:"memory_high_bytes,omitempty"`
+	MemoryMaxBytes  int64 `yaml:"memory_max_bytes,omitempty"`
+	TasksMax        int   `yaml:"tasks_max,omitempty"`
+	CPUQuotaPercent int   `yaml:"cpu_quota_percent,omitempty"`
 }
 
 // TLSConfig mirrors the child's own certificate settings: in this shape dshgw

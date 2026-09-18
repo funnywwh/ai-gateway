@@ -109,7 +109,10 @@ dshgw-sandbox-test:
 # 401 — all as the invoking account, on its own ports and work directory, so it
 # never touches a running deployment. It skips itself when the host lacks bwrap or
 # a staged dsh runtime, and needs bin/aigw next to bin/dshgw.
-dshgw-supervised-test: dshgw-build
+# Both binaries are prerequisites: this acceptance runs the real aigw, and a stale
+# bin/aigw would silently test an older tree (which is exactly how a missing
+# worker_limits passthrough once went unnoticed here).
+dshgw-supervised-test: build dshgw-build
 	@if [ ! -x bin/aigw ]; then echo 'SKIP: bin/aigw missing (run make build first)'; exit 0; fi
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/dshgw_supervised_e2e.py \
 	  --aigw-bin bin/aigw --dshgw-bin bin/dshgw \

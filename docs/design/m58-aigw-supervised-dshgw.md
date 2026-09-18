@@ -110,12 +110,27 @@ aigw（主程序，当前用户 euid）
 - 文档：本文件 + `docs/dshgw.md`/`deploy/dshgw/README.md` 增补"两种形态"的对照与选择建议；
   `docs/TODO.md` 记录未决项。
 
+## 5b. 资源限额（实测与取舍）
+
+每 worker 的限额不再来自 systemd 单元，而是**每个 worker 一个 systemd 用户 scope**：
+`systemd-run --user --scope --unit=dshgw-worker-<t> -p MemoryMax=… -- <bwrap argv>`。
+本机实测（单位 = 实测值）：scope 内 `memory.max=2147483648`、`pids.max=512`、`cpu.max=200000 100000`
+（即 CPUQuota=200%），进程退出后 scope 自动回收；worker 仍是 dshgw 的后代（scope 包裹现有进程树，
+不把进程改挂到用户管理器下），因此"worker 是网关的子进程"这条性质没有被破坏。
+
+**为什么不自建子 cgroup**：cgroup v2 的"无内部进程"（no internal processes）规则规定，
+含有进程的 cgroup 不能把控制器下放给子 cgroup。systemd 服务的 cgroup 里总有主进程，因此实测
+`aigw-local.service` 的 `cgroup.subtree_control` 写入失败（同目录 `mkdir` 成功、写控制器失败）。
+用户 scope 由用户管理器在委托树上创建，没有这个限制，且不需要 root。
+
+降级：没有用户管理器时限额不可用但 worker 照常启动，并只告警一次（有测试）。
+
 ## 6. 未决项（默认选择，用户可改）
 
 1. **子进程异常退出策略**：默认有限重启（5 分钟内最多 3 次），超限后记录 ERROR 并标记 DSH 不可用，
    aigw 继续提供其余功能（不因 DSH 挂掉而整体退出）。
 2. **租户端口与 TLS**：阶段 3 先用 loopback/无 TLS 的本地形态验证；宿主上的对外 TLS
    仍走 nginx（那一步需要 root 或改用由当前用户持有的证书直连），**另立设计**。
-3. **资源限额**：先放弃 systemd 限额；是否用 cgroup v2 自行施加留待用户决定。
+3. ~~**资源限额**~~：已按 §5b 实现（每 worker 一个用户 scope + 单元级汇总上限）。
 4. **`dshgw` 是否保留独立运行能力**：保留（`dshgw serve` 仍可单独跑），
    以便现有 systemd 部署不改动、两种形态共存。

@@ -40,6 +40,13 @@ from pathlib import Path
 PROBE_TIMEOUT = 60.0
 CHILD_TIMEOUT = 30.0
 
+# Per-worker limits the acceptance configures, then reads back from the kernel.
+# They replace the systemd unit's MemoryMax/TasksMax, which the rootless shape has
+# no unit to enforce.
+MEMORY_MAX_BYTES = 2 * 1024 * 1024 * 1024
+TASKS_MAX = 512
+CPU_QUOTA_PERCENT = 200
+
 
 class Failure(Exception):
     """A failed acceptance step: the message is the report."""
@@ -268,7 +275,8 @@ def prepare_template(node: str, dsh_root: str, home: Path, check: Check) -> Path
 
 
 def write_config(path: Path, *, aigw_port: int, stub_url: str, state_dir: Path, template: Path,
-                 node: str, dsh_root: str, plugin_path: Path, ports: dict) -> None:
+                 node: str, dsh_root: str, plugin_path: Path, ports: dict,
+                 memory_max: int, tasks_max: int, cpu_quota: int) -> None:
     doc = f"""server:
   listen: 127.0.0.1:{aigw_port}
   secret_key: supervised-e2e-secret
@@ -293,6 +301,9 @@ dshgw:
   template_home: {template}
   plugin_path: {plugin_path}
   plugin_browser_fs: off
+  worker_memory_max_bytes: {memory_max}
+  worker_tasks_max: {tasks_max}
+  worker_cpu_quota_percent: {cpu_quota}
 """
     path.write_text(doc)
 
@@ -373,6 +384,9 @@ def main() -> int:
             dsh_root=dsh_root,
             plugin_path=plugin,
             ports=ports,
+            memory_max=MEMORY_MAX_BYTES,
+            tasks_max=TASKS_MAX,
+            cpu_quota=CPU_QUOTA_PERCENT,
         )
         stub.start()
         aigw_log = log_path.open("wb")
@@ -425,6 +439,11 @@ def main() -> int:
             tenant_status == 302 and f":{ports['portal']}" in location,
             f"HTTP {tenant_status} location={location!r}",
         )
+
+        # Resource limits: each worker gets its own cgroup v2 group with the
+        # configured ceilings. A host that cannot provide one is reported as a
+        # skip (the worker still runs), matching the degradation the runner logs.
+        cgroup_note = check_worker_limits(check, process_tree(child_pid))
 
         calls_before = stub.calls
         stopped = admin_call(admin_socket, {"id": 3, "op": "tenant-stop", "name": tenant})
@@ -484,6 +503,45 @@ def main() -> int:
         return 1
     print(f"PASS: supervised shape acceptance ({check.passes} steps)")
     return 0
+
+
+def check_worker_limits(check: Check, descendants: list[int]) -> str:
+    """Read the worker's cgroup back from the kernel and compare with the config."""
+    worker = None
+    for pid in descendants:
+        line = command_line(pid)
+        if "bin.js" in line and "web --port" in line:
+            worker = pid
+    if worker is None:
+        worker = descendants[0] if descendants else None
+    if worker is None:
+        check.fail("worker-cgroup-limits", "no worker process found")
+        return ""
+    try:
+        path = Path(f"/proc/{worker}/cgroup").read_text().splitlines()[0].split("::", 1)[1].strip()
+    except (OSError, IndexError) as exc:
+        check.fail("worker-cgroup-limits", f"cannot read the worker cgroup: {exc}")
+        return ""
+    base = Path("/sys/fs/cgroup") / path.lstrip("/")
+    limits = {}
+    for name in ("memory.max", "pids.max", "cpu.max"):
+        try:
+            limits[name] = (base / name).read_text().strip()
+        except OSError:
+            limits[name] = ""
+    if not any(limits.values()):
+        check.ok("worker-cgroup-limits", f"host has no usable worker cgroup (skipped), cgroup={path}")
+        return path
+    # systemd renders CPUQuota as a "quota period" pair over a 100 ms period.
+    want_cpu = f"{CPU_QUOTA_PERCENT * 1000} 100000"
+    check.require(
+        "worker-cgroup-limits",
+        limits["memory.max"] == str(MEMORY_MAX_BYTES)
+        and limits["pids.max"] == str(TASKS_MAX)
+        and limits["cpu.max"] == want_cpu,
+        f"cgroup={path} memory.max={limits['memory.max']!r} pids.max={limits['pids.max']!r} cpu.max={limits['cpu.max']!r}",
+    )
+    return path
 
 
 def child_pid_of(aigw_pid: int | None, state_dir: Path) -> int | None:

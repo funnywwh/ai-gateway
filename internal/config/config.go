@@ -427,6 +427,13 @@ type Dshgw struct {
 	// Empty means plain HTTP, which is only appropriate on a trusted network.
 	TLSCertificate    string `yaml:"tls_certificate"`
 	TLSCertificateKey string `yaml:"tls_certificate_key"`
+	// Worker memory/task/CPU ceilings, applied per tenant worker through cgroup v2.
+	// Zero means unlimited. They replace the systemd unit's MemoryMax/CPUQuota/
+	// TasksMax, which the rootless shape no longer has.
+	WorkerMemoryHighBytes int64 `yaml:"worker_memory_high_bytes"`
+	WorkerMemoryMaxBytes  int64 `yaml:"worker_memory_max_bytes"`
+	WorkerTasksMax        int   `yaml:"worker_tasks_max"`
+	WorkerCPUQuotaPercent int   `yaml:"worker_cpu_quota_percent"`
 	// PluginBrowserFS is the child's default for the browser filesystem plugin:
 	// "on" requires a template prepared with dsh-browser-fs, "off" does not.
 	PluginBrowserFS string `yaml:"plugin_browser_fs"`

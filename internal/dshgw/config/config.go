@@ -58,6 +58,16 @@ type DshRuntime struct {
 	CurrentLink string `yaml:"current_link" json:"current_link"`
 }
 
+// WorkerLimits are the per-worker resources, expressed the way cgroup v2 wants
+// them. Zero means "no limit". They replace the old unit's MemoryHigh/MemoryMax/
+// CPUQuota/TasksMax, which systemd enforced for us.
+type WorkerLimits struct {
+	MemoryHighBytes int64 `yaml:"memory_high_bytes" json:"memory_high_bytes"`
+	MemoryMaxBytes  int64 `yaml:"memory_max_bytes" json:"memory_max_bytes"`
+	TasksMax        int   `yaml:"tasks_max" json:"tasks_max"`
+	CPUQuotaPercent int   `yaml:"cpu_quota_percent" json:"cpu_quota_percent"`
+}
+
 // TLSConfig is the certificate the edge serves directly. Empty values mean plain
 // HTTP, which is only appropriate on a trusted network: there is no nginx in this
 // shape to terminate TLS for us.
@@ -121,6 +131,7 @@ type Config struct {
 	WorkspaceSeed    []string     `yaml:"workspace_seed" json:"workspace_seed"`
 	ReservedNames    []string     `yaml:"reserved_names" json:"reserved_names"`
 	Dsh              DshRuntime   `yaml:"dsh" json:"dsh"`
+	WorkerLimits     WorkerLimits `yaml:"worker_limits" json:"worker_limits"`
 	TLS              TLSConfig    `yaml:"tls" json:"tls"`
 	Deploy           DeployConfig `yaml:"deploy" json:"deploy"`
 	TenantRoot       string       `yaml:"tenant_root" json:"tenant_root"`
@@ -336,6 +347,12 @@ func (c *Config) Validate() error {
 		if seed == "" || filepath.IsAbs(seed) || filepath.Clean(seed) != seed || seed == "." || strings.HasPrefix(seed, ".."+string(filepath.Separator)) || seed == ".." {
 			return fmt.Errorf("workspace_seed %q must be a clean relative path inside the tenant root", seed)
 		}
+	}
+	if c.WorkerLimits.MemoryHighBytes < 0 || c.WorkerLimits.MemoryMaxBytes < 0 || c.WorkerLimits.TasksMax < 0 || c.WorkerLimits.CPUQuotaPercent < 0 {
+		return errors.New("worker_limits values must not be negative")
+	}
+	if c.WorkerLimits.MemoryHighBytes > 0 && c.WorkerLimits.MemoryMaxBytes > 0 && c.WorkerLimits.MemoryHighBytes > c.WorkerLimits.MemoryMaxBytes {
+		return errors.New("worker_limits.memory_high_bytes must not exceed memory_max_bytes")
 	}
 	if net.ParseIP(c.Deploy.PublicListen) == nil {
 		return errors.New("deploy.public_listen must be one IP address")
