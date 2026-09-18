@@ -218,7 +218,46 @@ make dshgw-verify          # 上述 + 构建 + vet + 真实 dsh 契约 + 模板�
 4. `tenant-stop` 后端口关闭；`tenant-start` 前日志出现 `models refreshed before worker start`（模型同步）；
 5. aigw 重启后未停用租户自动回来；停止 aigw 后**子进程与 worker 零残留**。
 
-## 8. 安全边界（必读）
+## 8. 从旧的 root/systemd 部署迁移
+
+旧的 root 形态（systemd 单元 + 每租户 OS 用户 + nginx）与当前形态并存没有意义，迁移脚本把它换过来：
+
+```bash
+# 1) 先看它打算做什么（不需要 root，什么都不改）
+scripts/migrate_dshgw_to_supervised.sh --dry-run --apply \
+  --old-config /etc/dshgw/config.yaml --old-registry /var/lib/dshgw/registry.json \
+  --aigw-config /path/to/aigw/config.yaml --aigw-user <运行 aigw 的账号>
+
+# 2) 确认后执行（需要 root：要停系统单元、改属主）
+sudo scripts/migrate_dshgw_to_supervised.sh --apply \
+  --old-config /etc/dshgw/config.yaml --old-registry /var/lib/dshgw/registry.json \
+  --aigw-config /path/to/aigw/config.yaml --aigw-user <账号>
+
+# 3) 不满意就回滚（先看计划，再执行）
+scripts/migrate_dshgw_to_supervised.sh --rollback --dry-run ...   # 看
+sudo scripts/migrate_dshgw_to_supervised.sh --rollback ...        # 做
+```
+
+脚本按顺序做这些事（每一步都会先打印）：
+
+1. 备份 registry 与 per-tenant 配置到 `--backup-dir`；
+2. `systemctl disable --now` 所有旧 worker 单元 + `dshgw.service` + `dshgw-admin.service`；
+3. 把 state / workspace / tenant-config 三棵树的属主交给运行 aigw 的账号，并收紧到 `go-rwx`
+   —— 这是唯一较"硬"的一步，备份是它的安全网；
+4. 改写 registry：每个租户标记 `isolation: bwrap`、`uid` 换成该账号、保留 `suspended` 语义；
+5. 在 aigw 配置末尾追加 `dshgw:` 段（若已有该段则只提示你核对，绝不覆盖）；
+6. 以该账号安装并启动用户级单元，然后**逐个租户探测 `/api` 是否回到 401**。
+
+租户数据不搬家：脚本把新形态指向旧形态已经填好的目录（§2 的 `state_dir`/`tenant_root`/`workspace_root`）。
+
+回滚会停掉受监督实例、重新启用旧单元，并**按 registry 把属主逐一改回**（`dsh-<t>` / `root:dshgw`）——
+少了这一步，旧服务会读不到自己的数据，那不叫回滚。旧单元只被 disable、不被删除：确认迁移站得住之后，
+再手工清理 `/opt/dshgw`、`/etc/dshgw` 与 `dsh-*` 账号。
+
+计划本身有自动化测试（`scripts/test_dshgw_migration_plan.py`，跑在 `make dshgw-test` 里）：
+它用一份合成的旧部署夹具断言"apply/rollback 的每一项关键步骤都出现在计划里，且 dry-run 不执行任何命令"。
+
+## 9. 安全边界（必读）
 
 - **没有 UID 边界**：所有租户 worker 与 aigw 同 UID；隔离来自 bubblewrap mount namespace
   （空 tmpfs 根 + 逐路径绑定 + 只读运行时 + 0700 权限位）与宿主 AppArmor 对嵌套 namespace 的限制。

@@ -72,6 +72,7 @@ type ChildConfig struct {
 	// a template prepared with the pinned plugin.
 	PluginBrowserFS string     `yaml:"plugin_browser_fs,omitempty"`
 	StateDir        string     `yaml:"state_dir"`
+	TenantRoot      string     `yaml:"tenant_root,omitempty"`
 	WorkspaceRoot   string     `yaml:"workspace_root"`
 	Dsh             DshRuntime `yaml:"dsh"`
 	// TLS is optional: set both paths to serve HTTPS on the edge listeners, leave

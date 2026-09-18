@@ -498,10 +498,11 @@
 
 未完成：
 
-- [ ] **宿主迁移**：把本机（或目标机）正在跑的旧 systemd 部署（`dshgw.service` + 5 个
-      `dsh-worker@*.service`）迁到新形态。需要：停旧单元 → 迁移 registry/状态到 `dshgw.state_dir`
-      → 把 5 个租户在 registry 里标为未停用 → 用新二进制 + 新配置启动 aigw。旧租户的
-      `dsh-*` 账号不会自动删除（确认无用后手工 `userdel`）
+- [ ] **宿主迁移（脚本已就绪、等待执行窗口）**：`scripts/migrate_dshgw_to_supervised.sh`
+      （`--apply`/`--rollback`，均先 `--dry-run` 审阅；计划有自动化测试）。本机检测到 6 个旧
+      worker 单元 + `dshgw.service`。执行需要 root 与维护窗口：会停这些单元、改三棵目录树的属主、
+      按 registry 改写租户标记，然后逐个租户探测 `/api` 是否恢复。旧单元只 disable 不删除，
+      确认后再手工清理 `/opt/dshgw`、`/etc/dshgw` 与 `dsh-*` 账号
 - [x] 公开面：dshgw 自己绑定门户端口与每个租户公开端口（无 nginx），edge 头由进程内注入且覆盖
       客户端伪造；`dshgw.tls_certificate` / `tls_certificate_key` 可启用 HTTPS
 - [x] **开机自启**：`scripts/aigw_user_service.sh` 生成并启用用户级单元 `aigw-local.service`

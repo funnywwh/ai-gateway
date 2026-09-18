@@ -91,6 +91,17 @@ func buildDshgwChild(cfg *config.Config, aigwExecutable string) (*dshgwChild, er
 	return &dshgwChild{binary: binary, configPath: child.Deploy.ConfigPath, config: child}, nil
 }
 
+// firstNonEmpty returns the first non-empty value, for defaults that depend on
+// another setting.
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // dshgwAigwBaseURL prefers an explicit override and otherwise points the child at
 // aigw's own loopback listener.
 func dshgwAigwBaseURL(cfg *config.Config) string {

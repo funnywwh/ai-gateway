@@ -394,6 +394,13 @@ type Dshgw struct {
 	// StateDir holds the child's generated config and its registry/sessions.
 	// Empty means "<directory of database.path>/dshgw".
 	StateDir string `yaml:"state_dir"`
+	// TenantRoot holds one directory per tenant (with its .dsh state). Empty means
+	// "<state_dir>/tenants". Setting it explicitly is how a migration reuses the
+	// data directory an earlier deployment already populated.
+	TenantRoot string `yaml:"tenant_root"`
+	// WorkspaceRoot holds the tenant workspaces. Empty means
+	// "<state_dir>/workspaces"; operators put it on the volume with the space.
+	WorkspaceRoot string `yaml:"workspace_root"`
 	// AigwBaseURL is the address the child validates tenant keys against. Empty
 	// means aigw's own loopback listener, which is the normal case; it exists as
 	// an override for tests and for deployments where the child reaches aigw
