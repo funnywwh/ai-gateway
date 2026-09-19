@@ -53,6 +53,10 @@ type FeishuDeps struct {
 	// is where that flow returns the browser, and the page a refused attempt is explained on.
 	AdminLogin bool
 	ConsoleURL string
+	// ConsoleTickets mints the one-time handoff used when the console and the callback are
+	// reached under different host names, where a cookie set here could never arrive. Nil
+	// while the console login flow is off.
+	ConsoleTickets *feishu.TicketCodec
 	// AutoEnableDSH makes a successful binding also opt the key's account in to DSH, so the
 	// person can log in immediately instead of waiting for an administrator to press 启用
 	// DSH as a second step. See autoEnableDSHForBinding for what it deliberately refuses to
@@ -387,12 +391,26 @@ func (s *Server) inviteTarget(ctx context.Context, id int64) (*domain.AdminUser,
 	return user, "", true
 }
 
-// issueAdminFeishuSession issues the console cookie for an administrator whose identity was
-// just proven, audits the login and sends the browser into the console.
+// issueAdminFeishuSession hands the just-proven administrator a console session and sends the
+// browser into the console.
+//
+// How it hands it over depends on where the console lives relative to the callback, because a
+// session cookie is scoped to a host name and the callback can only ever run on the origin
+// registered with Feishu:
+//
+//   - same host name (the usual case, and what a deployment without feishu.console_url has):
+//     set the cookie here and redirect, exactly as the password login does;
+//   - different host name (a LAN console with a public callback, say): mint a one-time ticket
+//     and send the browser to the console's own origin to redeem it, which is where the
+//     cookie can be set. This is the console's half of what M61 did for the DSH portal.
 func (s *Server) issueAdminFeishuSession(w http.ResponseWriter, r *http.Request, user *domain.AdminUser, method, openID string) {
 	ctx := r.Context()
 	if s.deps.Admin == nil {
 		writeAPIError(w, domain.ErrUnsupported("the management API is disabled"))
+		return
+	}
+	if s.feishuConsoleNeedsTicket() {
+		s.handOffAdminFeishuTicket(w, r, user, method, openID)
 		return
 	}
 	session, err := s.deps.Admin.IssueSession(ctx, user)
@@ -408,14 +426,147 @@ func (s *Server) issueAdminFeishuSession(w http.ResponseWriter, r *http.Request,
 	http.Redirect(w, r, s.adminConsoleURL(), http.StatusSeeOther)
 }
 
+// handOffAdminFeishuTicket sends the browser to the console with a one-time ticket instead of
+// a cookie. The session is issued when the ticket is redeemed (handleAdminFeishuSession), so
+// the cookie is written by the console's own origin.
+func (s *Server) handOffAdminFeishuTicket(w http.ResponseWriter, r *http.Request, user *domain.AdminUser, method, openID string) {
+	deps := s.deps.Feishu
+	if deps.ConsoleTickets == nil {
+		// A misconfiguration rather than a user error: the deployment says the console lives
+		// elsewhere but was built without the codec that gets the browser there.
+		s.deps.Log.Error("the console login needs a ticket handoff but no ticket codec is configured",
+			"console_url", deps.ConsoleURL)
+		s.renderFeishuAdminStop(w, feishu.FlowAdminLogin, "error")
+		return
+	}
+	nonce, err := feishuNonce()
+	if err != nil {
+		writeAPIError(w, domain.ErrInternal("cannot start the Feishu flow"))
+		return
+	}
+	wire, ticket, err := deps.ConsoleTickets.IssueConsole(user.ID, openID, nonce)
+	if err != nil {
+		s.deps.Log.Error("issuing a console ticket failed", "err", err, "admin_user", user.Username)
+		s.renderFeishuAdminStop(w, feishu.FlowAdminLogin, "error")
+		return
+	}
+	s.audit(r.Context(), user.Username, "login", "admin_user", user.Username, map[string]any{
+		"method": method, "open_id": openID, "handoff": "ticket", "role": user.Role,
+		"expires_at": time.Unix(ticket.Expires, 0).UTC().Format(time.RFC3339),
+	}, "ok")
+	feishuNoStore(w.Header())
+	http.Redirect(w, r, s.consoleTicketURL(wire), http.StatusSeeOther)
+}
+
+// consoleTicketURL is where the callback sends a browser that must be signed in on another
+// host: the console's origin, the redeem path this server serves, and the ticket.
+func (s *Server) consoleTicketURL(ticket string) string {
+	origin := s.consoleOrigin()
+	return origin + s.url("/admin/feishu/session") + "?ticket=" + url.QueryEscape(ticket)
+}
+
+// consoleOrigin is the scheme://host[:port] part of the configured console URL, or empty when
+// the console is served from the callback's own origin.
+func (s *Server) consoleOrigin() string {
+	if s.deps.Feishu == nil {
+		return ""
+	}
+	parsed, err := url.Parse(strings.TrimSpace(s.deps.Feishu.ConsoleURL))
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+// feishuConsoleNeedsTicket reports whether the console is reached under a different host name
+// than the callback. Only the host name matters: cookies ignore the port, so a console on
+// :8088 and a callback on :8090 of the same host still share the session.
+func (s *Server) feishuConsoleNeedsTicket() bool {
+	deps := s.deps.Feishu
+	if deps == nil || deps.ConsoleTickets == nil || strings.TrimSpace(deps.ConsoleURL) == "" {
+		// Without a configured console URL the console is where the callback is.
+		return false
+	}
+	console, err := url.Parse(strings.TrimSpace(deps.ConsoleURL))
+	if err != nil || console.Host == "" {
+		return false
+	}
+	callback, err := url.Parse(strings.TrimSpace(deps.RedirectURI))
+	if err != nil || callback.Host == "" {
+		return false
+	}
+	return !strings.EqualFold(console.Hostname(), callback.Hostname())
+}
+
+// handleAdminFeishuSession redeems a console ticket on the console's own origin and sets the
+// session cookie there. It is public because the browser arriving here has no session yet —
+// the ticket is the capability — and it is single-use, short-lived and bound to one account.
+func (s *Server) handleAdminFeishuSession(w http.ResponseWriter, r *http.Request) {
+	deps := s.deps.Feishu
+	if !s.feishuEnabled() || deps.ConsoleTickets == nil || !deps.AdminLogin {
+		http.NotFound(w, r)
+		return
+	}
+	feishuNoStore(w.Header())
+	raw := r.URL.Query().Get("ticket")
+	ticket, err := deps.ConsoleTickets.VerifyConsoleTicket(raw)
+	if err != nil {
+		s.deps.Log.Warn("a console ticket was refused", "err", err)
+		s.audit(r.Context(), "", "feishu_login_reject", "feishu_callback", "", map[string]any{"reason": "console ticket"}, "denied")
+		s.renderFeishuAdminStop(w, feishu.FlowAdminLogin, feishuTicketReason(err))
+		return
+	}
+	// Single use: the nonce is spent here rather than at the verifier, because this is the
+	// side that consumes the ticket (the callback only mints it).
+	if !s.feishuConsoleTickets.Consume(ticket.Nonce) {
+		s.audit(r.Context(), "", "feishu_login_reject", "admin_user", "", map[string]any{"reason": "console ticket replay"}, "denied")
+		s.renderFeishuAdminStop(w, feishu.FlowAdminLogin, "expired")
+		return
+	}
+	user, err := s.deps.AdminStore.GetAdminUser(r.Context(), ticket.AdminUserID)
+	if err != nil || user.Status != domain.AdminActive {
+		// The account may have been disabled between the consent screen and this redemption;
+		// the ticket proves the identity, never the right to sign in.
+		s.audit(r.Context(), "", "feishu_login_reject", "admin_user", inviteUserID(ticket.AdminUserID),
+			map[string]any{"reason": "account is not active"}, "denied")
+		s.renderFeishuAdminStop(w, feishu.FlowAdminLogin, "disabled")
+		return
+	}
+	session, err := s.deps.Admin.IssueSession(r.Context(), user)
+	if err != nil {
+		s.deps.Log.Error("issuing an administrator session failed", "err", err, "admin_user", user.Username)
+		s.renderFeishuAdminStop(w, feishu.FlowAdminLogin, "error")
+		return
+	}
+	s.setAdminCookie(w, session)
+	s.audit(r.Context(), user.Username, "login", "admin_user", user.Username,
+		map[string]any{"method": "feishu_ticket", "open_id": ticket.OpenID}, "ok")
+	http.Redirect(w, r, s.adminConsolePath(), http.StatusSeeOther)
+}
+
+// feishuTicketReason maps a ticket refusal onto the person-facing vocabulary. An expired
+// ticket and a used one read the same way to them: start again.
+func feishuTicketReason(err error) string {
+	var ticketErr *feishu.TicketError
+	if errors.As(err, &ticketErr) && ticketErr.Reason == "expired" {
+		return "expired"
+	}
+	return "invalid"
+}
+
+// adminConsolePath is the console's path on this server, used for redirects that must stay on
+// the origin the browser is already talking to (redeeming a ticket, for instance). The
+// configured console URL is for the other case: sending the browser to another host.
+func (s *Server) adminConsolePath() string { return s.url("/admin/ui/") }
+
 // adminConsoleURL is where an administrator lands after signing in (or after being told why
 // they could not). The console is served from one mount, and this is the only place that
 // builds its address.
 func (s *Server) adminConsoleURL() string {
-	if s.deps.Feishu != nil && s.deps.Feishu.ConsoleURL != "" {
-		return s.deps.Feishu.ConsoleURL
+	if s.deps.Feishu != nil && strings.TrimSpace(s.deps.Feishu.ConsoleURL) != "" {
+		return strings.TrimSpace(s.deps.Feishu.ConsoleURL)
 	}
-	return s.url("/admin/ui/")
+	return s.adminConsolePath()
 }
 
 // feishuAdminActorStillAdmin re-reads the operator who minted an invitation or started a

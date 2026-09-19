@@ -504,6 +504,10 @@ feishu:
   portal_url: ""
   state_ttl_s: 600
   ticket_ttl_s: 120
+  # Deliberately a different host name than the callback above (127.0.0.1 vs localhost): the
+  # console login then has to cross hosts, which a cookie cannot do. The path this exercises
+  # is the one a LAN console behind a public callback uses in production (M66).
+  console_url: "http://127.0.0.1:{aigw_port}/admin/ui/"
 dshgw:
   enabled: true
   state_dir: {state_dir}
@@ -749,8 +753,17 @@ def check_admin_feishu_login(check: Check, aigw_port: int, feishu: "StubFeishu",
     status, headers, _ = invited.request("GET", authorize)
     status, headers, _ = invited.request("GET", headers.get("location", ""))
     location = headers.get("location", "")
-    check.require("admin-feishu-invite-signs-in", status == 303 and location.endswith("/admin/ui/"),
+    # The console is configured on another host name than the callback, so the callback hands
+    # this browser a one-time ticket instead of a cookie it could never deliver.
+    check.require("admin-feishu-invite-hands-off",
+                  status == 303 and location.startswith(f"http://127.0.0.1:{aigw_port}/admin/feishu/session?ticket="),
                   f"HTTP {status} location={location!r}")
+    check.require("admin-feishu-invite-no-cookie-yet", "aigw_admin" not in invited.cookies,
+                  f"cookies={sorted(invited.cookies)}")
+    # Redeeming it on the console's own origin is what sets the session cookie there.
+    status, headers, _ = invited.request("GET", location)
+    check.require("admin-feishu-invite-redeems", status == 303 and headers.get("location", "") == "/admin/ui/",
+                  f"HTTP {status} location={headers.get('location')!r}")
     check.require("admin-feishu-admin-cookie", "aigw_admin" in invited.cookies,
                   f"cookies={sorted(invited.cookies)}")
     status, _, body = invited.request("GET", f"{base}/admin/api/v1/auth/me")
@@ -778,6 +791,12 @@ def check_admin_feishu_login(check: Check, aigw_port: int, feishu: "StubFeishu",
     status, headers, _ = scanner.request("GET", f"{base}/feishu/login?mode=admin")
     status, headers, _ = scanner.request("GET", headers.get("location", ""))
     status, headers, _ = scanner.request("GET", headers.get("location", ""))
+    handoff = headers.get("location", "")
+    if not check.require("admin-feishu-scan-hands-off",
+                         status == 303 and handoff.startswith(f"http://127.0.0.1:{aigw_port}/admin/feishu/session?ticket="),
+                         f"HTTP {status} location={handoff!r}"):
+        return
+    status, headers, _ = scanner.request("GET", handoff)
     check.require("admin-feishu-scan-login",
                   status == 303 and "aigw_admin" in scanner.cookies,
                   f"HTTP {status} cookies={sorted(scanner.cookies)}")

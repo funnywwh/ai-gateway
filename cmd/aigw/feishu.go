@@ -59,7 +59,10 @@ func buildFeishuDeps(cfg *config.Config, log *slog.Logger) (*httpapi.FeishuDeps,
 		PortalURL:    cfg.DSHGWPortalURL(),
 		LoginURL:     cfg.FeishuLoginURL(),
 		AdminLogin:   cfg.Feishu.AdminLogin,
-		ConsoleURL:   basePath + "/admin/ui/",
+		// The console as the browser reaches it: the configured URL when a deployment states
+		// one (a LAN console behind a public callback), otherwise the console's own path.
+		ConsoleURL: cfg.Feishu.ConsoleURL,
+
 		// Only meaningful together with the portal login: a binding whose purpose is
 		// identity alone should not silently provision a tenant.
 		AutoEnableDSH: cfg.Feishu.DSHLogin && cfg.Feishu.AutoEnableDSH,
@@ -88,6 +91,18 @@ func buildFeishuDeps(cfg *config.Config, log *slog.Logger) (*httpapi.FeishuDeps,
 			return nil, err
 		}
 		deps.Invites = invites
+		// The console's own handoff ticket (M66). It shares the ticket secret when one is
+		// stated — the mode lives inside the signed payload, so the two kinds cannot be
+		// swapped — and otherwise derives a purpose-bound key instead of reusing the child's.
+		consoleTicketKey, err := feishuSecret(cfg, cfg.Feishu.TicketSecret, "feishu-console-ticket")
+		if err != nil {
+			return nil, err
+		}
+		consoleTickets, err := feishu.NewTicketCodec(consoleTicketKey, time.Duration(cfg.Feishu.TicketTTLS)*time.Second)
+		if err != nil {
+			return nil, err
+		}
+		deps.ConsoleTickets = consoleTickets
 	}
 	if log != nil {
 		log.Info("feishu identity enabled",

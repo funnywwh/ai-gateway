@@ -4120,4 +4120,11 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
       `internal/webui` 契约测试、`scripts/ui-harness` 的 `admins` 视图
 - [x] 端到端：`scripts/dshgw_supervised_e2e.py` 新增 `check_admin_feishu_login`（建号 → 邀请 → 另一浏览器
       绑定并登录 → 链接失效 → 扫码入口登录 → 客户身份被拒）
+- [x] **部署当天补的跨主机名交接**（见设计文档 §D9）：会话 cookie 属于主机名，而飞书回调只能跑在
+      登记给飞书的 origin 上；本机部署是「控制台在局域网 `http://192.168.190.86:8088`、回调在公网
+      `https://chat.tirisen.hk/feishu/callback`」，两者不同主机名，回调无法把 cookie 交给控制台。
+      于是补上 M61 给门户做过的同一件事：跨主机名时回调发一张**一次性票据**（新 `TicketModeConsole`，
+      120 秒、单次兑换、绑定一个管理员），浏览器到控制台自己 origin 的 `/admin/feishu/session` 兑换；
+      新增 `feishu.console_url` 说明控制台在浏览器里的地址（`GW_FEISHU_CONSOLE_URL` 可覆盖）。
+      同主机名仍走直接写 cookie 的路径。票据与门户票据同密钥不同 mode，两侧互不接受
 - [ ] 真机验收（手机扫码、真正发一条邀请给同事）见 `docs/TODO.md` M66 小节

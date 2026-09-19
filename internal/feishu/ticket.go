@@ -29,10 +29,25 @@ type Ticket struct {
 	OpenID    string `json:"open_id"`
 	Nonce     string `json:"nonce"`
 	Expires   int64  `json:"exp"`
+	// AdminUserID is the console administrator a console ticket names. It is omitted for a
+	// DSH ticket, so the shared test vectors and the child's verifier see exactly the bytes
+	// they saw before this field existed (M66).
+	AdminUserID int64 `json:"admin_user_id,omitempty"`
 }
 
-// TicketMode is the only mode defined today: a DSH portal login.
-const TicketMode = "dsh"
+// Ticket modes. The mode lives inside the signed payload, and each verifier accepts exactly
+// one of them, so a ticket minted for one purpose cannot be redeemed for the other.
+const (
+	// TicketMode is a DSH portal login: aigw mints it, the dshgw child redeems it.
+	TicketMode = "dsh"
+	// TicketModeConsole is a console administrator login (M66): aigw mints it on its
+	// registered callback origin and redeems it on whatever origin the operator's console is
+	// served from. It exists because a session cookie is scoped to a host name: when the
+	// console and the Feishu callback are reached under different names, the callback can
+	// prove who somebody is but cannot hand that browser a cookie for the console's host.
+	// A one-time ticket in the URL can.
+	TicketModeConsole = "console"
+)
 
 // MaxTicketTTL bounds a ticket's lifetime from the verifier's side. It is deliberately
 // larger than any sane TTL so that a clock-skewed or forged-but-signed far-future expiry
@@ -103,25 +118,64 @@ func (c *TicketCodec) Issue(tenant string, keyID, accountID int64, openID, nonce
 	if strings.TrimSpace(tenant) == "" {
 		return "", Ticket{}, errors.New("feishu: a ticket needs a tenant")
 	}
-	if strings.TrimSpace(openID) == "" {
+	return c.issue(Ticket{
+		Version: 1, Mode: TicketMode, Tenant: tenant, KeyID: keyID, AccountID: accountID, OpenID: openID,
+	}, nonce)
+}
+
+// IssueConsole mints a ticket that lets one browser open the console as one administrator.
+//
+// It is the console's half of the handoff the DSH portal has had since M61: the callback
+// runs on the origin registered with Feishu, and the console may be served under another host
+// name, where a cookie set by the callback would never arrive. The ticket is the capability,
+// it is redeemed once on the console's own origin, and it is what sets the cookie there.
+func (c *TicketCodec) IssueConsole(adminUserID int64, openID, nonce string) (string, Ticket, error) {
+	if adminUserID == 0 {
+		return "", Ticket{}, errors.New("feishu: a console ticket needs an administrator")
+	}
+	return c.issue(Ticket{
+		Version: 1, Mode: TicketModeConsole, AdminUserID: adminUserID, OpenID: openID,
+	}, nonce)
+}
+
+// issue fills in the shared checks and signs one ticket.
+func (c *TicketCodec) issue(ticket Ticket, nonce string) (string, Ticket, error) {
+	if strings.TrimSpace(ticket.OpenID) == "" {
 		return "", Ticket{}, errors.New("feishu: a ticket needs an identity")
 	}
 	if strings.TrimSpace(nonce) == "" {
 		return "", Ticket{}, errors.New("feishu: a ticket needs a nonce")
 	}
-	ticket := Ticket{
-		Version: 1, Mode: TicketMode, Tenant: tenant, KeyID: keyID, AccountID: accountID,
-		OpenID: openID, Nonce: nonce, Expires: c.now().Add(c.TTL).Unix(),
-	}
+	ticket.Nonce = nonce
+	ticket.Expires = c.now().Add(c.TTL).Unix()
 	wire, err := TicketWire(c.Key, ticket)
 	return wire, ticket, err
 }
 
-// VerifyTicket checks a ticket's signature, version, mode and expiry. It deliberately does
-// not track single use: the DSH gateway keeps that set, because it is the side that
+// VerifyTicket checks a DSH ticket's signature, version, mode and expiry. It deliberately
+// does not track single use: the DSH gateway keeps that set, because it is the side that
 // consumes the ticket, and a consumed-ticket set on the issuing side would need a callback
 // to be authoritative.
 func (c *TicketCodec) VerifyTicket(raw string) (Ticket, error) {
+	return c.verify(raw, TicketMode)
+}
+
+// VerifyConsoleTicket is VerifyTicket for the console mode. The two are separate entry points
+// rather than one mode-parameterised call so that neither side can accidentally accept the
+// other's tickets: a DSH ticket presented to the console handler fails on the mode check, and
+// the child's verifier keeps rejecting anything that is not a DSH ticket.
+func (c *TicketCodec) VerifyConsoleTicket(raw string) (Ticket, error) {
+	ticket, err := c.verify(raw, TicketModeConsole)
+	if err != nil {
+		return Ticket{}, err
+	}
+	if ticket.AdminUserID == 0 {
+		return Ticket{}, ticketErr("console ticket without an administrator")
+	}
+	return ticket, nil
+}
+
+func (c *TicketCodec) verify(raw, mode string) (Ticket, error) {
 	var zero Ticket
 	encoded, signature, ok := strings.Cut(strings.TrimSpace(raw), ".")
 	if !ok || encoded == "" || signature == "" {
@@ -141,10 +195,13 @@ func (c *TicketCodec) VerifyTicket(raw string) (Ticket, error) {
 	if ticket.Version != 1 {
 		return zero, ticketErr("unsupported version")
 	}
-	if ticket.Mode != TicketMode {
+	if ticket.Mode != mode {
 		return zero, ticketErr("unknown mode")
 	}
-	if strings.TrimSpace(ticket.Tenant) == "" || strings.TrimSpace(ticket.OpenID) == "" || strings.TrimSpace(ticket.Nonce) == "" {
+	if mode == TicketMode && strings.TrimSpace(ticket.Tenant) == "" {
+		return zero, ticketErr("incomplete ticket")
+	}
+	if strings.TrimSpace(ticket.OpenID) == "" || strings.TrimSpace(ticket.Nonce) == "" {
 		return zero, ticketErr("incomplete ticket")
 	}
 	now := c.now()

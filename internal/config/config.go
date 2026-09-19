@@ -550,6 +550,15 @@ type Feishu struct {
 	// InviteSecret signs those invitation links; empty derives one from credentials_key
 	// under its own purpose, so the invitation key and the state key never coincide.
 	InviteSecret string `yaml:"invite_secret"`
+	// ConsoleURL is the console as the operator's browser reaches it, e.g.
+	// "http://192.168.190.86:8088/admin/ui/". It is the console's answer to PortalURL, and it
+	// exists for one reason: a session cookie belongs to a host name, while the Feishu
+	// callback always runs on the origin registered with Feishu. When the two share a host
+	// name the callback hands the browser its cookie directly; when they do not (a LAN
+	// console and a public callback, say) the callback hands over a one-time ticket and the
+	// console redeems it on its own origin. Empty keeps the relative console path, which is
+	// right whenever the console is served from the callback's host.
+	ConsoleURL string `yaml:"console_url"`
 	// AutoEnableDSH makes a successful binding also opt the key's account in to DSH, so the
 	// person can log in right away instead of waiting for a second, easily forgotten step in
 	// the console. It only ever enables an account that has never been enabled: an account
@@ -1010,6 +1019,7 @@ func applyEnv(cfg *Config) error {
 	envBool(&cfg.Feishu.AdminLogin, "GW_FEISHU_ADMIN_LOGIN")
 	envInt(&cfg.Feishu.InviteTTLS, "GW_FEISHU_INVITE_TTL_S")
 	envStr(&cfg.Feishu.InviteSecret, "GW_FEISHU_INVITE_SECRET")
+	envStr(&cfg.Feishu.ConsoleURL, "GW_FEISHU_CONSOLE_URL")
 	envStr(&cfg.Log.Level, "GW_LOG_LEVEL")
 	envStr(&cfg.Log.Format, "GW_LOG_FORMAT")
 	envStr(&cfg.Plugins.Dir, "GW_PLUGINS_DIR")
@@ -1137,6 +1147,12 @@ func (c *Config) validateFeishu() error {
 		}
 		if strings.TrimSpace(c.Feishu.InviteSecret) == "" && strings.TrimSpace(c.CredentialsKey) == "" {
 			return fmt.Errorf("feishu.invite_secret is empty and credentials_key cannot derive one")
+		}
+		// The console URL is where a login or an invitation returns the browser. A relative
+		// value is what an empty setting means; a stated one must be absolute, because it is
+		// also what tells the callback whether the two hosts differ.
+		if err := validateFeishuURL("feishu.console_url", c.Feishu.ConsoleURL, false, false); err != nil {
+			return err
 		}
 	}
 	if c.Feishu.DSHLogin {

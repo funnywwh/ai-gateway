@@ -102,6 +102,8 @@ func TestFeishuRejectsBadValues(t *testing.T) {
 			c.Feishu.InviteSecret = ""
 			c.CredentialsKey = ""
 		},
+		"console url relative":   func(c *Config) { c.Feishu.ConsoleURL = "admin/ui/" },
+		"console url with query": func(c *Config) { c.Feishu.ConsoleURL = "http://lan:8088/admin/ui/?x=1" },
 	}
 	for name, mutate := range cases {
 		cfg := feishuFixture()
@@ -125,6 +127,12 @@ func TestFeishuAdminLoginIsIndependent(t *testing.T) {
 	}
 	if cfg.Feishu.InviteTTLS != 3600 || !cfg.Feishu.AdminLogin {
 		t.Fatalf("invitation defaults = %d/%v", cfg.Feishu.InviteTTLS, cfg.Feishu.AdminLogin)
+	}
+	// The console URL is optional and may name a different host than the callback: that is
+	// exactly the deployment shape it exists for (a LAN console, a public callback).
+	cfg.Feishu.ConsoleURL = "http://192.168.190.86:8088/admin/ui/"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("an absolute console URL on another host was rejected: %v", err)
 	}
 
 	// With the console login off, a nonsense invitation window is nobody's business.
@@ -207,10 +215,12 @@ func TestFeishuEnvOverrides(t *testing.T) {
 	t.Setenv("GW_FEISHU_ADMIN_LOGIN", "false")
 	t.Setenv("GW_FEISHU_INVITE_TTL_S", "7200")
 	t.Setenv("GW_FEISHU_INVITE_SECRET", "invite-from-env")
+	t.Setenv("GW_FEISHU_CONSOLE_URL", "http://console.example:8088/admin/ui/")
 	if err := applyEnv(&cfg); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Feishu.AdminLogin || cfg.Feishu.InviteTTLS != 7200 || cfg.Feishu.InviteSecret != "invite-from-env" {
+	if cfg.Feishu.AdminLogin || cfg.Feishu.InviteTTLS != 7200 || cfg.Feishu.InviteSecret != "invite-from-env" ||
+		cfg.Feishu.ConsoleURL != "http://console.example:8088/admin/ui/" {
 		t.Fatalf("administrator env overrides not applied: %+v", cfg.Feishu)
 	}
 	if err := cfg.Validate(); err != nil {

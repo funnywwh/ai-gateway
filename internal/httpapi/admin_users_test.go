@@ -820,3 +820,175 @@ func TestAdminUserSurfaceWithFeishuLoginOff(t *testing.T) {
 	}
 	res.Body.Close()
 }
+
+// ---------------------------------------------------------------------------
+// Feishu: the console on another host than the callback
+// ---------------------------------------------------------------------------
+
+// A session cookie belongs to a host name, and the callback can only run on the origin
+// registered with Feishu. When the console is reached under a different name — a LAN console
+// behind a public callback, which is exactly this deployment — the callback hands the browser
+// a one-time ticket instead, and the console's own origin redeems it.
+func TestFeishuAdminLoginHandsOffAcrossHosts(t *testing.T) {
+	f := newFeishuFixtureWithConsole(t, "http://console.test:8088/admin/ui/")
+	ctx := context.Background()
+	if err := f.db.BindAdminUserFeishu(ctx, 2, domain.FeishuBinding{OpenID: "ou_alice"}); err != nil {
+		t.Fatal(err)
+	}
+	f.stub.identity = feishu.Identity{OpenID: "ou_alice", UnionID: "on_alice", Name: "张三"}
+
+	res := consentAndCallback(t, f, adminLoginStart(t, f))
+	if res.StatusCode != http.StatusSeeOther {
+		t.Fatalf("callback: status=%d", res.StatusCode)
+	}
+	location := res.Header.Get("Location")
+	if !strings.HasPrefix(location, "http://console.test:8088/admin/feishu/session?ticket=") {
+		t.Fatalf("callback location = %q, want the console's own origin with a ticket", location)
+	}
+	// The callback must NOT try to set the console's cookie: a cookie for the callback's host
+	// would never reach the console, and one for another host cannot be set from here at all.
+	for _, cookie := range res.Cookies() {
+		if cookie.Name == adminCookieName {
+			t.Fatal("the callback set a console cookie it cannot deliver")
+		}
+	}
+
+	// The console's origin is the same server, reached under whatever name the operator uses,
+	// so the redeem route is served here too. The ticket is the capability and it is spent.
+	ticket := location[strings.Index(location, "ticket=")+len("ticket="):]
+	redeem := f.request(t, http.MethodGet, "/admin/feishu/session?ticket="+url.QueryEscape(ticket), "")
+	if redeem.StatusCode != http.StatusSeeOther || redeem.Header.Get("Location") != "/admin/ui/" {
+		t.Fatalf("redeem: status=%d location=%q", redeem.StatusCode, redeem.Header.Get("Location"))
+	}
+	var session string
+	for _, cookie := range redeem.Cookies() {
+		if cookie.Name == adminCookieName {
+			session = cookie.Value
+		}
+	}
+	if session == "" {
+		t.Fatal("redeeming the ticket did not set the console cookie")
+	}
+	me := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/auth/me", "", session))
+	if me["username"] != "reader" || me["role"] != "viewer" {
+		t.Fatalf("whoami = %+v, want the bound administrator", me)
+	}
+
+	// Single use: the same ticket cannot open a second session (browser history, a shared
+	// URL, a retry all land here).
+	replay := f.request(t, http.MethodGet, "/admin/feishu/session?ticket="+url.QueryEscape(ticket), "")
+	if replay.StatusCode != http.StatusForbidden {
+		t.Fatalf("replayed ticket: status=%d, want 403", replay.StatusCode)
+	}
+	for _, cookie := range replay.Cookies() {
+		if cookie.Name == adminCookieName {
+			t.Fatal("a replayed ticket issued a session")
+		}
+	}
+	replay.Body.Close()
+}
+
+// The ticket route refuses everything that is not a live console ticket, including a ticket
+// minted for the DSH portal (same key, other mode).
+func TestFeishuConsoleTicketRefusals(t *testing.T) {
+	f := newFeishuFixtureWithConsole(t, "http://console.test:8088/admin/ui/")
+	ctx := context.Background()
+	if err := f.db.BindAdminUserFeishu(ctx, 2, domain.FeishuBinding{OpenID: "ou_alice"}); err != nil {
+		t.Fatal(err)
+	}
+	f.stub.identity = feishu.Identity{OpenID: "ou_alice", Name: "张三"}
+	res := consentAndCallback(t, f, adminLoginStart(t, f))
+	location := res.Header.Get("Location")
+	ticket := location[strings.Index(location, "ticket=")+len("ticket="):]
+
+	// A tampered ticket, a DSH ticket, and nothing at all.
+	dsh, _, err := f.tickets.Issue("tenant", 1, 1, "ou_alice", "nonce-dsh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, raw := range map[string]string{
+		"tampered": ticket + "x",
+		"dsh mode": dsh,
+		"empty":    "",
+	} {
+		res := f.request(t, http.MethodGet, "/admin/feishu/session?ticket="+url.QueryEscape(raw), "")
+		if res.StatusCode != http.StatusForbidden {
+			t.Errorf("%s: status=%d, want 403", name, res.StatusCode)
+		}
+		res.Body.Close()
+	}
+
+	// An account disabled between the consent screen and the redemption: the ticket proves the
+	// identity, never the right to sign in.
+	if err := f.db.SetAdminUserStatus(ctx, 2, domain.AdminDisabled); err != nil {
+		t.Fatal(err)
+	}
+	late := f.request(t, http.MethodGet, "/admin/feishu/session?ticket="+url.QueryEscape(ticket), "")
+	if late.StatusCode != http.StatusForbidden {
+		t.Fatalf("ticket for a disabled account: status=%d, want 403", late.StatusCode)
+	}
+	if body := readBody(t, late.Body); !strings.Contains(body, "已被停用") {
+		t.Fatalf("the refusal does not explain itself: %q", body)
+	}
+}
+
+// An invitation redeemed from another host takes the same path, and the invitee ends up
+// signed in on the console's own origin.
+func TestFeishuAdminInviteHandsOffAcrossHosts(t *testing.T) {
+	f := newFeishuFixtureWithConsole(t, "http://console.test:8088/admin/ui/")
+	cookie := f.login(t, adminUser, adminPassword)
+	res := f.call(t, http.MethodPost, "/admin/api/v1/admin-users", `{"username":"invitee","role":"admin"}`, cookie)
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("create: status=%d", res.StatusCode)
+	}
+	link := inviteFor(t, f, cookie, "3")
+	token := strings.TrimPrefix(link, "http://dsh.example:8090"+feishuInvitePath+"?invite=")
+
+	f.stub.identity = feishu.Identity{OpenID: "ou_new", Name: "新管理员"}
+	res = f.request(t, http.MethodGet, feishuInvitePath+"?invite="+url.QueryEscape(token), "")
+	authorize := res.Header.Get("Location")
+	state := stateFrom(t, authorize)
+	res = f.request(t, http.MethodGet, feishuCallbackPath+"?code=the-code&state="+url.QueryEscape(state), "")
+	location := res.Header.Get("Location")
+	if !strings.HasPrefix(location, "http://console.test:8088/admin/feishu/session?ticket=") {
+		t.Fatalf("invitation callback location = %q, want the console's origin with a ticket", location)
+	}
+	ticket := location[strings.Index(location, "ticket=")+len("ticket="):]
+	redeem := f.request(t, http.MethodGet, "/admin/feishu/session?ticket="+url.QueryEscape(ticket), "")
+	var session string
+	for _, c := range redeem.Cookies() {
+		if c.Name == adminCookieName {
+			session = c.Value
+		}
+	}
+	if session == "" {
+		t.Fatalf("redeeming an invitation ticket did not sign the invitee in: status=%d", redeem.StatusCode)
+	}
+	me := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/auth/me", "", session))
+	if me["username"] != "invitee" {
+		t.Fatalf("the invitee signed in as %+v", me)
+	}
+}
+
+// Without a configured console URL nothing changes: the callback sets the cookie directly.
+func TestFeishuAdminLoginKeepsTheCookieWhenHostsMatch(t *testing.T) {
+	f := newFeishuFixtureWithConsole(t, "http://dsh.example:8090/admin/ui/")
+	ctx := context.Background()
+	if err := f.db.BindAdminUserFeishu(ctx, 2, domain.FeishuBinding{OpenID: "ou_alice"}); err != nil {
+		t.Fatal(err)
+	}
+	f.stub.identity = feishu.Identity{OpenID: "ou_alice", Name: "张三"}
+	res := consentAndCallback(t, f, adminLoginStart(t, f))
+	if res.StatusCode != http.StatusSeeOther || res.Header.Get("Location") != "http://dsh.example:8090/admin/ui/" {
+		t.Fatalf("callback: status=%d location=%q", res.StatusCode, res.Header.Get("Location"))
+	}
+	found := false
+	for _, cookie := range res.Cookies() {
+		if cookie.Name == adminCookieName {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("a same-host login must still set the cookie on the callback")
+	}
+}

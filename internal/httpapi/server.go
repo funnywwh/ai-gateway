@@ -21,6 +21,7 @@ import (
 	"github.com/winger/ai-gateway/internal/chat"
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/feishu"
 	"github.com/winger/ai-gateway/internal/ids"
 	"github.com/winger/ai-gateway/internal/localdshgw"
 	"github.com/winger/ai-gateway/internal/pricing"
@@ -250,6 +251,10 @@ type Server struct {
 	// makes an outbound call before anyone is authenticated.
 	feishuMu    sync.Mutex
 	feishuRates map[string]*feishuRate
+	// Consumed console tickets (M66): a ticket that carried an administrator across host
+	// names is worth exactly one session. The set is bounded and pruned by expiry, so losing
+	// it to a restart reopens a window no longer than the ticket TTL.
+	feishuConsoleTickets feishu.ConsumedTickets
 }
 
 // feishuRate is one address's attempt window.
@@ -408,6 +413,12 @@ func (s *Server) routes() {
 		s.handle("GET "+s.deps.Feishu.CallbackPath, s.handleFeishuCallback)
 		if s.deps.Feishu.Invites != nil {
 			s.handle("GET "+s.deps.Feishu.InvitePath, s.handleFeishuInvite)
+		}
+		if s.deps.Feishu.ConsoleTickets != nil {
+			// Where a browser crossing from the callback's host to the console's redeems the
+			// one-time ticket it was handed (M66). Under /admin because that is the console's
+			// own mount; not in the catalogue because it is a browser hop, not an operation.
+			s.handle("GET "+s.url("/admin/feishu/session"), s.handleAdminFeishuSession)
 		}
 	}
 

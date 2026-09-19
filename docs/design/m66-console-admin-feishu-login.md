@@ -88,6 +88,24 @@
 只是隐藏邀请与解绑按钮。登录页是否显示「飞书扫码登录」由一个公开的
 `GET /admin/api/v1/auth/methods` 决定（前端登录前就能问），而不是靠猜配置。
 
+### D9 控制台与回调不同主机名时，用一次性票据交接（部署时才发现）
+
+会话 cookie 属于**主机名**，而飞书回调只能跑在登记给飞书的那个 origin 上。本机部署的形态是
+「控制台在 `http://192.168.190.86:8088`（局域网，前门不对外暴露控制台），回调在
+`https://chat.tirisen.hk/feishu/callback`（公网，手机才够得着）」——两者**不同主机名**：
+回调可以证明「这个人是谁」，却无法把会话 cookie 交给控制台那台主机。设计的 D2/D4 假设了同主机，
+部署当天就撞上了。
+
+补上 M61 给门户做过的同一件事：跨主机名时回调只发一张**一次性票据**
+（`TicketModeConsole`，120 秒、单次兑换、绑定一个管理员账号），把浏览器送到控制台自己 origin 上的
+`/admin/feishu/session?ticket=…`，由那里签发会话。新增 `feishu.console_url`（本部署写
+`http://192.168.190.86:8088/admin/ui/`）说明控制台在浏览器里的地址；同主机名时沿用直接写 cookie 的
+路径（少一跳，且与 M61 的 `feishuSameHost` 口径一致）。
+
+票据与门户票据**同密钥不同 mode**（`dsh` / `console`，mode 在签名载荷里），两侧各只接受自己的 mode，
+因此门户票据不能兑换控制台会话、反之亦然；`admin_user_id` 用 `omitempty`，dsh 票据的字节与 M66 之前
+完全一致（共享向量测试因此不变）。
+
 ## 3. 接口与数据流
 
 ### 3.1 数据（迁移 0023）
@@ -106,6 +124,8 @@
          ├ 没有该身份            → 说明页：尚未绑定，请联系管理员生成邀请链接
          ├ status != active      → 说明页：账号已停用
          └ active → IssueSession → Set-Cookie aigw_admin → 303 /admin/ui/
+                     （控制台与回调不同主机名时改为：签一次性票据 → 303
+                       <console_url 的 origin>/admin/feishu/session?ticket=… → 在那里签发会话）
 ```
 
 ### 3.3 邀请
@@ -144,6 +164,7 @@ feishu:
   admin_login: true      # 控制台允许飞书扫码登录（需先给管理员账号绑定身份）
   invite_ttl_s: 3600     # 管理员邀请链接有效期（300..604800）
   invite_secret: ""      # 邀请令牌签名密钥；空则从 credentials_key 派生（按用途分离）
+  console_url: ""        # 控制台在浏览器里的地址；与回调不同主机名时必填（见 §D9）
 ```
 
 ## 4. 异常与边界
@@ -205,6 +226,11 @@ feishu:
    的 nonce，`Invite` 字段把它带过 OAuth 往返，回调比对一次即可。
 9. **管理员页与飞书解耦**（设计 D8）落到实现上是：页面用 `auth/methods` 的答案决定是否显示
    「邀请链接」「解绑飞书」两个动作，其余动作在 `feishu.enabled=false` 的部署里照常可用。
-10. **端到端脚本新增 `check_admin_feishu_login` 一步**（在既有 `check_feishu_login` 之后跑）：
+11. **部署当天补上了跨主机名交接（见 D9）**：设计假设控制台与回调同主机，本机部署不是。
+    新增 `feishu.console_url`、`TicketModeConsole` 票据与 `GET /admin/feishu/session` 兑换路由；
+    单向约定是「同主机名走 cookie、不同主机名走票据」，与 M61 的门户口径一致。端到端脚本把
+    `console_url` 故意设成 `http://127.0.0.1:<port>/admin/ui/`（回调是 `localhost`），于是每一步
+    真实二进制验收都走票据路径，另有三条单测覆盖拒绝面（篡改、dsh 票据、兑换后账号被停用、重放）。
+12. **端到端脚本新增 `check_admin_feishu_login` 一步**（在既有 `check_feishu_login` 之后跑）：
     建号（无口令）→ 邀请 → 另一个浏览器打开链接 → 绑定并登录 → 同一链接重开提示"已失效" →
     用登录页入口再登一次 → 客户身份被拒。设计里只写了"用真实二进制走完"，这一步就是它。

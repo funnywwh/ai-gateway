@@ -68,12 +68,22 @@ func newFeishuStub(t *testing.T) *feishuStub {
 // composition root wires it.
 type feishuFixture struct {
 	*adminFixture
-	stub   *feishuStub
-	states *feishu.StateCodec
-	now    time.Time
+	stub    *feishuStub
+	states  *feishu.StateCodec
+	tickets *feishu.TicketCodec
+	now     time.Time
 }
 
 func newFeishuFixture(t *testing.T) *feishuFixture {
+	t.Helper()
+	return newFeishuFixtureWithConsole(t, "")
+}
+
+// newFeishuFixtureWithConsole is the same fixture with the console addressed explicitly. An
+// empty console URL means "the console is where the callback is", which is the default and
+// the shape every deployment had before feishu.console_url existed; a stated one on another
+// host is the case the handoff ticket exists for (M66).
+func newFeishuFixtureWithConsole(t *testing.T, consoleURL string) *feishuFixture {
 	t.Helper()
 	stub := newFeishuStub(t)
 	fixture := &feishuFixture{stub: stub, now: time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC)}
@@ -96,6 +106,12 @@ func newFeishuFixture(t *testing.T) *feishuFixture {
 		t.Fatal(err)
 	}
 	invites.Now = func() time.Time { return fixture.now }
+	consoleTickets, err := feishu.NewTicketCodec([]byte("ticket-key"), 2*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consoleTickets.Now = func() time.Time { return fixture.now }
+	fixture.tickets = tickets
 
 	// The identity port is installed before the server is built: the transport decides
 	// which surfaces exist while it is constructed, so a port wired afterwards would not
@@ -119,18 +135,19 @@ func newFeishuFixture(t *testing.T) *feishuFixture {
 				UserInfoURL:  deps.Config.Feishu.UserInfoURL,
 				Timeout:      5 * time.Second,
 			},
-			States:       states,
-			Tickets:      tickets,
-			Invites:      invites,
-			RedirectURI:  deps.Config.Feishu.CallbackURL,
-			LoginPath:    feishuLoginPath,
-			CallbackPath: feishuCallbackPath,
-			InvitePath:   feishuInvitePath,
-			DSHLogin:     true,
-			PortalURL:    feishuPortalURL,
-			LoginURL:     "http://dsh.example:8090" + feishuLoginPath,
-			AdminLogin:   true,
-			ConsoleURL:   "/admin/ui/",
+			States:         states,
+			Tickets:        tickets,
+			Invites:        invites,
+			RedirectURI:    deps.Config.Feishu.CallbackURL,
+			LoginPath:      feishuLoginPath,
+			CallbackPath:   feishuCallbackPath,
+			InvitePath:     feishuInvitePath,
+			DSHLogin:       true,
+			PortalURL:      feishuPortalURL,
+			LoginURL:       "http://dsh.example:8090" + feishuLoginPath,
+			AdminLogin:     true,
+			ConsoleURL:     consoleURL,
+			ConsoleTickets: consoleTickets,
 		}
 	})
 	fixture.stub = stub
