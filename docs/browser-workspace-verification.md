@@ -10,6 +10,57 @@
 - worker 重启后的客户端重连、失败清理重试、持久残留记录与单实例锁。
 - 安全卸载顺序、进程生命周期串行化与 terminal Shutdown。
 
+## 真实 Chromium 端到端挂载验收（2026-09-19）
+
+```sh
+go build -o /tmp/dshgw-e2e ./cmd/dshgw
+python3 scripts/browser_workspace_mount_e2e.py --dshgw /tmp/dshgw-e2e
+```
+
+一次性 dshgw（私有端口 13xxx、私有状态目录、stub aigw）+ 真实 headless Chromium，走完
+「一次点击 → 目录选择 → open → 反向长轮询 → 真实 go-fuse 挂载 → 工作区注册 → activate 重启
+worker → 侧栏已挂载 → 双向 I/O → 卸载 → 删除账号」。实际结果 **PASS：23 步**。
+
+| 证据 | 观测 |
+|---|---|
+| 浏览器侧授权 | 真实 CDP 输入事件：选择器恰好被调用 1 次、参数 `{mode:'readwrite'}`，调用瞬间 `navigator.userActivation.isActive === true` |
+| 唯一被替换的环节 | `showDirectoryPicker` 换成**真实 OPFS `FileSystemDirectoryHandle`**（子目录 `picked`，`queryPermission` = granted）。其后的权限查询、FSA 执行器、反向长轮询、FUSE、sandbox 绑定全是生产路径 |
+| 同源网关契约 | 页面内实测：`open:200, poll:200, respond:200, activate:200 …` |
+| 内核挂载 | `<workspace>/browser/<48hex>` 在 `/proc/self/mounts` 里是 `fuse.browser-workspace`，状态记录 `ready` |
+| 浏览器 → 服务器 | 挂载前由浏览器写入的 `from-browser.txt`，经 FUSE 读回内容一致 |
+| 服务器 → 浏览器 | 宿主写入 `from-host.txt`，浏览器侧 FSA 读回内容一致 |
+| 沙箱内可见 | 用**运行中 worker 自己的 argv**（`/proc/<pid>/cmdline`，不是 CLI 的 `sandbox-exec --print`）执行命令：profile 含 `--bind <mountpoint> <mountpoint>`；沙箱内 `ls` 列出两个文件、`cat` 读到浏览器内容、写入 `from-sandbox.txt` 成功 |
+| 沙箱 → 浏览器 | 沙箱写入的文件在浏览器侧读到 |
+| 沙箱没有变宽 | 操作员的 `~/.ssh`、`aigw/config.yaml`、`data` 在沙箱内不可见 |
+| 卸载 | 再点一次：侧栏「已断开」、内核挂载消失、挂载点被删除、浏览器目录与其文件仍在 |
+| 删除账号 | `tenant remove -purge` 后 workspace 消失 |
+
+**不夸大**：OS 目录选择/授权对话框仍无法自动化——它是唯一被替换的环节，替换物是真实 OPFS 句柄而非
+假对象；未部署或重启在线实例；只证明本机 Linux + 本机 Chromium + 本机 DSH 版本这一组合。
+沙箱内 profile 必须取运行中 worker 的 argv：`sandbox-exec --print` 是另一个进程，它自建的
+browser-mount 服务里没有 share，因此永远看不到活动挂载（先前用它会得出"没有绑定"的错误结论）。
+
+## 端到端验收发现并修复的三个缺陷（2026-09-19）
+
+前两个只有「真实 GUI 里真点一次」才会暴露；第三个连宿主侧 `ls` 都失败。三个都先复现、再修、再回归。
+
+1. **插件缺 `remote` 注入**：`client.js` 只声明 `inject: ['slots','connection','remote.workspace','uiWorkspace']`，
+   代码却读 `ctx.remote.workspace.*`。真实 ctx 是 Cordis 代理，读未声明的父服务直接抛
+   `cannot get property "remote" without inject` → 首次点击立即「挂载失败」，随后 close 卸载。
+   修：补 `'remote'`（与 `dsh-api-workspace-controller` 的 `inject = ["remote","remote.workspace"]` 一致），
+   并在 `ui.test.mjs` 加注入表回归断言——mock ctx 直接交出 `remote` 对象，原先无论如何测不出。
+2. **注册工作区之前必须已经在轮询**：宿主上的 FUSE 挂载会**传播进正在运行的 worker 命名空间**
+   （实测 `/proc/<node pid>/mountinfo` 含 `fuse.browser-workspace`，`master:135`），
+   于是 worker 自己 `workspace.create(path)` 的 realpath 会 stat 该挂载点；而客户端原先在注册成功
+   之后才 `poll()`，没人应答 → 该 stat 阻塞整个 FUSE 超时（实测宿主无 poller 时 stat 15 秒后 ETIMEDOUT）
+   → 10 秒后「挂载失败：workspace registration timed out」。
+   修：把 `void poll(share)` 提到 `createWorkspace` 之前，`ui.test.mjs` 增加 `poll < create` 断言。
+3. **`list` 应答被整条拒绝**：浏览器执行器每个目录项都带 `{name,kind,size,lastModified}`，
+   而 Go 侧 `fs.Entry` 只有 `Name`/`Kind`，而 respond 用 `DisallowUnknownFields` 解码 →
+   应答被丢弃、FUSE readdir 等到超时，宿主与沙箱内 `ls` 都是 `Connection timed out`。
+   修：`Entry` 补 `Size`/`LastModified`。Go 单测用 mock backend（只回 name/kind）、JS 单测不经过
+   网关解码，所以这条只有真实浏览器能暴露。
+
 ## 回归
 
 ```sh
@@ -109,8 +160,13 @@ python3 scripts/browser_workspace_ui_smoke.py \
 
 ## 交付限制
 
-实现与自动化验证完成，功能仍为默认关闭的实验性能力，**未部署或重启在线实例**。
+实现与自动化验证完成，功能仍为默认关闭的实验性能力，**未部署或重启在线实例**（本仓库 `bin/dshgw`
+也仍是修复前的构建；端到端验收用 `go build -o /tmp/dshgw-e2e ./cmd/dshgw` 的产物，以免在线实例
+重启时先拿到半验证的二进制）。
 
-用户环境仍需人工走通 OS 目录选择/授权撤销及真实 DSH 会话操作；不同浏览器和本机文件系统不保证完整 POSIX，尤其 move、原子创建、权限、链接、锁与打开后 unlink。Race detector 未运行：CGO 开启后仍缺 gcc/cc/clang。生命周期之外的 namespace 引用/内核异常可能使同步 go-fuse Unmount 阻塞。
+端到端挂载已由真实 Chromium 证明（见上），但仍有：用户环境需人工走通 OS 目录选择/授权撤销及真实
+DSH 会话操作；不同浏览器和本机文件系统不保证完整 POSIX，尤其 move、原子创建、权限、链接、锁与
+打开后 unlink。Race detector 未运行：CGO 开启后仍缺 gcc/cc/clang。生命周期之外的 namespace
+引用/内核异常可能使同步 go-fuse Unmount 阻塞。
 
 详见 `docs/design/browser-fuse-workspace.md`、`internal/dshgw/browserworkspace/README.md` 与 `cmd/dshgw/plugin/browser-workspace/README.md`。

@@ -47,6 +47,7 @@ deploy:
 - `open` 在 FUSE 挂载前持久化 preparing 记录，成功后原子更新 ready。只记录服务端路径/租户/随机 ID，不持久化 capability 或浏览器句柄。
 - HTTP close 和租约过期：先拒绝新 I/O、从 worker profile 排除路径，再重启并等待旧 namespace 退出，最后卸载 FUSE。
 - **反向通道的 poll 连接就是浏览器侧本身**：net/http 在该连接断开时取消它的 context（页面刷新/关闭/崩溃、客户端在 close 前主动 abort 长轮询），此时立即断开该挂载，而不是等到 60 秒租约到期。晚到的 poll 不会复活已断开的 capability（客户端本来就把 poll 失败当作断线并调用 close）。
+- **注册工作区之前必须已经在 poll**：宿主上的 FUSE 挂载会传播进正在运行的 worker 命名空间（实测 worker 的 mountinfo 里就有 `fuse.browser-workspace`），因此 worker 自己 `workspace.create(path)` 的 realpath 会 stat 这个挂载点。客户端必须在调用注册之前就开始 poll，否则该 stat 阻塞整个 FUSE 超时，表现为「挂载失败：workspace registration timed out」（2026-09-19 真实 Chromium 验收抓到并修复）。
 - **只有仍可服务的挂载才进入 worker profile**：`MountsFor` 与 `Call` 共用同一条存活规则（未断开且租约内）。profile 会解析每个挂载路径、bubblewrap 会 stat 每个 bind 源，所以一个没有浏览器的挂载会阻塞整个 worker 启动（真机实测：解析该路径耗时等于整个 FUSE 超时后失败，bwrap 也以 `Can't get type of source ...` 失败），表现为另一个挂载的 close 报
   `worker restart before close: resolve browser mount: lstat …: connection timed out`，页面显示"清理未确认"。
 - 停用/删除：排除所有挂载，等待竞态 activate，raw stop 再次保证 namespace 释放；不递归调用有 mount hook 的 StopWorker。
@@ -67,7 +68,7 @@ deploy:
 ## 安全与资源边界
 
 1. 句柄不离开浏览器，相对路径在两侧校验，拒绝无效 UTF-8、路径穿越、绝对路径、空段及控制字符。
-2. 启用时 `workspace/browser` 是网关管理的真实私有目录。sandbox 将**容器只读绑定，再把活动子挂载读写绑定**，防止同 UID 租户替换容器制造检查到绑定间的 symlink 竞态。功能关闭时不修改同名普通目录。
+2. 启用时 `workspace/browser` 是网关管理的真实私有目录。sandbox 将**容器只读绑定，再把活动子挂载读写绑定**，防止同 UID 租户替换容器制造检查到绑定间的 symlink 竞态。功能关闭时不修改同名普通目录。只读容器**不足以**让活动挂载可写：宿主挂载会传播进运行中的 worker 命名空间，此时它落在只读容器之下，沙箱内写入报 EROFS——所以 profile 里那条 `--bind <mountpoint> <mountpoint>`（`MountsFor` 只广告仍可服务的挂载）是必需的，且只有 activate 之后重启的 worker 才带它。
 3. FUSE 不使用 allow_other，隔离仍以租户 mount namespace 为界。网关运行账号与宿主同 UID 进程是信任边界，不提供不同 UID 隔离的虚假承诺。
 4. capability 绑定 tenant 和登录会话哈希；token 不进 URL、不入持久记录或日志。
 5. 每租户最多 4 个、全网关最多 128 个挂载，每挂载最多 64 个等待请求；I/O 预算 15 秒、租约 60 秒、HTTP body 上限 2 MiB；目录结果最多 10000 项且 JSON 最多 1 MiB，超限报错而非截断伪造完整目录。

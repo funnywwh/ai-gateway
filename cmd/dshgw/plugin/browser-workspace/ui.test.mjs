@@ -100,6 +100,7 @@ function setup({ activateFails = false, closeFailures = 0, createFailures = 0, p
   client.apply(ctx)
   return {
     events, requests, warnings, styles,
+    inject: () => client.inject,
     click: () => Action().props.onClick(),
     element: () => Action(),
     text: () => textOf(Action()),
@@ -109,6 +110,17 @@ function setup({ activateFails = false, closeFailures = 0, createFailures = 0, p
     dispose: async () => { cleanup(); await tick() },
   }
 }
+test('the plugin declares every service it reads, including the parent of remote.workspace', async () => {
+  // A real DSH ctx is a Cordis proxy: reading a property that is not in `inject` throws
+  // `cannot get property "<name>" without inject`. This mock hands the plugin a finished
+  // `remote` object, so only an explicit check on the declared list can catch the
+  // difference — the live GUI failed with exactly that error on the first click.
+  const ui = setup()
+  assert.ok(ui.inject().includes('remote'), 'ctx.remote is read, so "remote" must be injected')
+  assert.ok(ui.inject().includes('remote.workspace'), 'the workspace namespace must be awaited too')
+  assert.ok(ui.inject().includes('uiWorkspace'))
+  await ui.dispose()
+})
 test('the sidebar entry is one ssh-style row above the ssh workspace, with no consent step', async () => {
   const ui = setup()
   assert.equal(ui.options().name, 'sidebar.footer.action')
@@ -143,6 +155,10 @@ test('one click runs picker/open/poll/activate/reconnect/register/connect, the n
   // The mount point exists from `open` until a teardown removes it, so the
   // workspace is registered before the activation restart, not after it.
   assert.ok(ui.events.indexOf('open') < ui.events.indexOf('create'))
+  // The mount is visible inside the worker's sandbox, so the worker's own
+  // workspace.create() realpath stats the mount point: polling has to be running
+  // first or that stat blocks for the whole FUSE timeout.
+  assert.ok(ui.events.indexOf('poll') < ui.events.indexOf('create'), 'poll must answer before the worker touches the mount')
   assert.ok(ui.events.indexOf('create') < ui.events.indexOf('activate'))
   assert.ok(ui.events.indexOf('poll') < ui.events.indexOf('activate'))
   assert.ok(ui.events.indexOf('create') < ui.events.indexOf('reconnect'))

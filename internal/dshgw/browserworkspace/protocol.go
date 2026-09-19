@@ -34,9 +34,17 @@ type Request struct {
 	Exclusive bool      `json:"exclusive,omitempty"`
 	Truncate  bool      `json:"truncate,omitempty"`
 }
+// Entry is one directory entry of a `list` answer. Size and LastModified are part of the
+// client's answer — its executor reports every entry's metadata — and MUST stay declared:
+// the respond payload is decoded with DisallowUnknownFields, so an undeclared field makes
+// the whole listing answer fail to decode. The browser's reply is then dropped, the
+// pending readdir waits out the FUSE timeout, and every `ls` of a mounted directory fails
+// with ETIMEDOUT. The FUSE adapter itself needs only Name and Kind.
 type Entry struct {
-	Name string `json:"name"`
-	Kind string `json:"kind"`
+	Name         string `json:"name"`
+	Kind         string `json:"kind"`
+	Size         int64  `json:"size,omitempty"`
+	LastModified int64  `json:"lastModified,omitempty"`
 }
 type Value struct {
 	Kind         string  `json:"kind,omitempty"`

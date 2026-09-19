@@ -306,11 +306,17 @@ window.__ModuleLoader__.load({
           if (disposed) { await stop(); return }
           if (!opened.mountpoint) throw failure('EIO', 'invalid open mountpoint')
           show(`挂载中…（${root.name}，worker 将重启）`)
+          // The poll loop must already be answering before ANYTHING asks the worker about
+          // this path. The mount is visible inside the tenant's sandbox (mount propagation
+          // carries it into the running worker namespace), so the worker's own
+          // workspace.create() realpath stats the mount point: with nobody polling, that
+          // stat blocks for the whole FUSE timeout and registration dies as
+          // "workspace registration timed out".
+          void poll(share)
           const workspace = await createWorkspace(share, opened.mountpoint)
           if (!live(share)) return
           try {
             const priorGeneration = ctx.connection.generation.getSnapshot()?.id
-            void poll(share)
             const activated = await call('activate', { token: share.token }, 55000, share.controller.signal)
             if (!live(share)) return
             show('挂载完成；等待 worker 重连…')
@@ -355,6 +361,12 @@ window.__ModuleLoader__.load({
       ctx.effect(() => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'browser-workspace', order: 90, label: '浏览器工作区' }, Action)), 'browser-workspace: sidebar entry')
       ctx.effect(() => () => { disposed = true; void stop(); listeners.clear() }, 'browser-workspace: cleanup')
     }
-    return { inject: ['slots', 'connection', 'remote.workspace', 'uiWorkspace'], apply, createExecutor, checkRelativePath, createTransport, errorOf }
+    // 'remote' AND 'remote.workspace' are both required: Cordis resolves the dotted name
+    // as its own service, but every `ctx.remote.workspace.*` call below first reads the
+    // parent `ctx.remote`, and without 'remote' in this list that read throws
+    // `cannot get property "remote" without inject` inside a real DSH GUI (the same pair
+    // @deepseek-ai/dsh-api-workspace-controller declares). A mocked ctx that hands the
+    // plugin a ready-made `remote` object cannot catch this.
+    return { inject: ['slots', 'connection', 'remote', 'remote.workspace', 'uiWorkspace'], apply, createExecutor, checkRelativePath, createTransport, errorOf }
   },
 })
