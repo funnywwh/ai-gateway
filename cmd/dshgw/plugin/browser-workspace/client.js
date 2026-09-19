@@ -188,7 +188,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
 
     function createTransport(fetcher = window.fetch.bind(window)) {
       return async (endpoint, payload, timeoutMs = 35000, signal) => {
-        if (!['open', 'poll', 'respond', 'close', 'activate'].includes(endpoint)) throw failure('EINVAL', 'invalid endpoint')
+        if (!['open', 'poll', 'respond', 'close', 'activate', 'resume'].includes(endpoint)) throw failure('EINVAL', 'invalid endpoint')
         const controller = new AbortController()
         const abort = () => controller.abort()
         if (signal?.aborted) abort()
@@ -206,6 +206,86 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
         } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort) }
       }
     }
+    // ── the persisted mount record ────────────────────────────────────────────────
+    //
+    // A reload is not an unmount. The gateway keeps the kernel mount and its mount point for
+    // a grace window when the page goes away (the poll connection dying is what starts it),
+    // so the only thing a returning page needs is what the old document knew: the capability
+    // token, and the directory handle it was serving.
+    //
+    // Both survive a reload in the browser — a FileSystemDirectoryHandle stored in
+    // IndexedDB is a REAL handle again in the next document, and a granted 'readwrite'
+    // permission stays granted across the reload and across a new tab (measured in Chromium:
+    // queryPermission returns 'granted' with no user gesture, and read/write both work).
+    //
+    // The record is NOT resumed on load. Recovery happens when the operator clicks the row:
+    // that click is what "打开工作区" means, and it must land on the mount that is already
+    // there instead of building a second one. So the record is only read during boot (to put
+    // the row in its "可恢复" state) and consumed by a click.
+    //
+    // Everything here degrades rather than lies: no IndexedDB, no stored handle, or a
+    // permission the browser wants re-confirmed all leave the mount alone to expire, and the
+    // operator's click is an ordinary mount.
+    const RECORD_DB = 'dshgw-browser-workspace'
+    const RECORD_STORE = 'mounts'
+    // How long the gateway keeps a mount waiting for a page that went away. The page cannot
+    // know this number (it is the gateway's), so it is mirrored here only to decide when a
+    // stored record has gone stale enough to stop advertising a resume that cannot work.
+    const RECONNECT_GRACE_MS = 45000
+
+    function openRecordDB(indexedDB = window.indexedDB) {
+      if (!indexedDB) return Promise.reject(failure('ENOTSUP', 'IndexedDB unavailable'))
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(RECORD_DB, 1)
+        request.onupgradeneeded = () => { request.result.createObjectStore(RECORD_STORE) }
+        request.onsuccess = () => resolve(request.result)
+        request.onerror = () => reject(request.error || failure('EIO', 'IndexedDB open failed'))
+        request.onblocked = () => reject(failure('EIO', 'IndexedDB blocked'))
+      })
+    }
+
+    // The record is keyed by the origin the page is on: one tenant origin owns exactly one
+    // mount at a time, and a record left by a different tenant must never be resumed here
+    // (the gateway would refuse it — the capability is bound to tenant and session — but not
+    // offering it at all is the honest behaviour).
+    function createRecordStore() {
+      const key = () => 'mount:' + window.location.origin
+      const withStore = async (mode, work) => {
+        const db = await openRecordDB()
+        try {
+          return await new Promise((resolve, reject) => {
+            const tx = db.transaction(RECORD_STORE, mode)
+            const request = work(tx.objectStore(RECORD_STORE))
+            tx.oncomplete = () => resolve(request ? request.result : undefined)
+            tx.onerror = () => reject(tx.error || failure('EIO', 'record transaction failed'))
+            tx.onabort = () => reject(tx.error || failure('EIO', 'record transaction aborted'))
+          })
+        } finally { db.close() }
+      }
+      return {
+        load: () => withStore('readonly', store => store.get(key())).catch(() => null),
+        save: record => withStore('readwrite', store => store.put(record, key())).catch(() => undefined),
+        clear: () => withStore('readwrite', store => store.delete(key())).catch(() => undefined),
+      }
+    }
+
+    // What the executor needs to reach the picked directory again in a NEW document. The
+    // permission is asked for explicitly: queryPermission is what a browser answers without a
+    // gesture, and a 'prompt' answer means this page cannot reattach on its own — the row
+    // then offers a fresh mount instead, which does raise the picker inside a real click.
+    async function reopenHandle(handle) {
+      if (!handle || typeof handle.queryPermission !== 'function') return null
+      if (await handle.queryPermission({ mode: 'readwrite' }) === 'granted') return handle
+      return null
+    }
+
+    // A stored record is worth offering only while the gateway could still be holding that
+    // mount. Nothing here decides anything on its own: the click asks the gateway, and its
+    // answer ("unknown directory capability") is what rules a record out.
+    function recordIsFresh(record) {
+      return !!record && typeof record.at === 'number' && Date.now() - record.at < RECONNECT_GRACE_MS
+    }
+
     function apply(ctx) {
       installCSS()
       const call = createTransport()
@@ -216,12 +296,17 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       // status seen large. Nothing here is a consent gate, and nothing here blocks the
       // picker — see `choose` below for why that matters.
       //
-      // Phases: idle | stopping | picking | mounting | activating | mounted | failed. The
-      // phase rides on the row as `data-dshgw-state` so a real browser run can assert it
-      // without reading colours or parsing the note.
+      // Phases: idle | resumable | resuming | stopping | picking | mounting | activating |
+      // mounted | failed. The phase rides on the row as `data-dshgw-state` so a real browser
+      // run can assert it without reading colours or parsing the note.
       let status = { phase: 'idle', text: '' }
       let dialogOpen = false
       let autoCloseTimer = null
+      const records = createRecordStore()
+      // The mount this page found waiting for it: what the previous document was serving,
+      // still mounted on the gateway, with its directory handle still granted here. It is
+      // only ever consumed by a click — see the record comments above.
+      let resumable = null
       const notify = () => { for (const listener of listeners) listener() }
       const setStatus = (phase, text) => { status = { phase, text }; notify() }
       const entryTitle = () => `浏览器工作区：${WARNING}${status.text === '' ? '' : `（当前：${status.text}）`}`
@@ -253,6 +338,9 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
             await call('close', { token: share.token }, 55000)
             if (active === share) active = null
             setStatus('idle', '已断开')
+            // The mount is really gone now, so the record must go too: a later page must not
+            // try to resume a capability this page just destroyed.
+            await records.clear()
             return true
           } catch (error) {
             // Retain capability for an explicit cleanup retry; never fake success.
@@ -262,6 +350,44 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           } finally { share.closing = null }
         })()
         return share.closing
+      }
+      // reconnect keeps this page serving its mount across a failure it can recover from —
+      // the transport, not the mount, is what broke (a dropped connection, a worker restart,
+      // a gateway restart behind a proxy). The gateway holds the mount for its own grace
+      // window, so asking to resume is what turns "已断线，请重新选择目录" into a page that
+      // heals itself, and it needs no reload and no second directory choice.
+      const reconnect = async (share, error) => {
+        if (!live(share)) return false
+        setStatus('resuming', `连接中断（${error.message}），正在重连…`)
+        const deadline = Date.now() + RECONNECT_GRACE_MS - 5000
+        while (live(share) && Date.now() < deadline) {
+          await delay(1000).catch(() => {})
+          if (!live(share)) return false
+          if (share.controller.signal.aborted) return false
+          try {
+            await call('resume', { token: share.token }, 10000)
+            return true
+          } catch (resumeError) {
+            // "unknown directory capability" is the gateway saying this mount is finished:
+            // it expired, or something closed it. Retrying that would loop on a dead
+            // capability for the whole window, so the record goes and the operator is told
+            // the truth.
+            if (resumeError.message === 'unknown directory capability' ||
+                resumeError.message === 'directory revoked') {
+              await records.clear()
+              return false
+            }
+          }
+        }
+        return false
+      }
+      // stash is what makes a reload resumable at all: the capability token and the real
+      // directory handle, kept where only this origin can read them.
+      const stash = async (share, root) => {
+        await records.save({
+          version: 1, token: share.token, id: share.id || null, name: share.name,
+          workspaceId: share.workspaceId || null, handle: root, at: Date.now(),
+        })
       }
       const poll = async share => {
         try {
@@ -279,6 +405,28 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
             if (!result.requests.length) await delay(100, share.controller.signal)
           }
         } catch (error) {
+          if (!live(share)) return
+          if (error.message === 'directory revoked') {
+            // Another page resumed this mount while this one was parked: this page is no
+            // longer its browser side, and it must not fight the page that is.
+            const replaced = share
+            if (active === share) active = null
+            replaced.stopped = true
+            await records.clear()
+            setStatus('failed', '该目录已在另一个页面恢复；请在这个页面重新打开工作区')
+            return
+          }
+          if (await reconnect(share, error)) {
+            // The mount is ours again with the same path and the same worker binding: the
+            // only thing to restore is this page's own serving loop. What the row says about
+            // WHICH mount this is (restored, or mounted fresh) stays as it was — a successful
+            // reconnect is not a new mount.
+            if (live(share) && status.phase === 'resuming') {
+              setStatus('mounted', `已挂载 ${share.name}（读写，已重连）；点击断开`)
+            }
+            await poll(share)
+            return
+          }
           if (live(share) && await stop()) setStatus('failed', `已断线：${error.message}；请重新选择目录`)
         }
       }
@@ -327,15 +475,134 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
         }
         throw failure('ETIMEDOUT', '等待工作区连接超时')
       }
-      // One click, one picker. showDirectoryPicker() needs transient user activation (about
-      // five seconds in Chromium), so it is called synchronously by the click — anything
-      // awaited first, including a consent step of its own, risks "Must be handling a user
-      // gesture". The warning is not a gate: it lives on the row (title) and in the dialog
-      // that this click opens. Opening that dialog is a synchronous store write, so the
-      // picker still runs inside the click's own task.
+      // finishActivation is everything a live mount needs after its capability exists:
+      // registration while the mount point is guaranteed to exist, the activation restart,
+      // the wait for the new worker generation, then the workspace is reported to the GUI.
+      const finishActivation = async (share, root, workspaceId) => {
+        const workspace = workspaceId
+          ? { workspaceId }
+          : await createWorkspace(share, share.mountpoint)
+        if (!live(share)) return null
+        try {
+          const priorGeneration = ctx.connection.generation.getSnapshot()?.id
+          await call('activate', { token: share.token }, 55000, share.controller.signal)
+          if (!live(share)) return null
+          setStatus('activating', '挂载完成；等待 worker 重连…')
+          await awaitReconnect(share, priorGeneration)
+          if (!live(share)) return null
+          try {
+            const renamed = await ctx.remote.workspace.rename({ workspaceId: workspace.workspaceId, title: `本地: ${root.name}` })
+            if (!renamed?.ok) ctx.logger?.warn?.('browser-workspace: workspace rename failed')
+          } catch { ctx.logger?.warn?.('browser-workspace: workspace rename failed') }
+          if (!live(share)) return null
+          await ctx.uiWorkspace.connectWorkspace(workspace.workspaceId)
+          share.workspaceId = workspace.workspaceId
+          share.root = root
+          // The mount is live and registered, which is exactly when a record becomes useful:
+          // from here a reload is recoverable by one click instead of a new mount.
+          await stash(share, root)
+          if (live(share)) {
+            setStatus('mounted', `已挂载 ${root.name}（读写）；点击断开`)
+            if (dialogOpen) scheduleAutoClose()
+          }
+          return workspace
+        } catch (error) {
+          await forgetWorkspace(workspace)
+          throw error
+        }
+      }
+      // resumableMount takes back the mount the previous document left behind. It is called
+      // by a click, from a stored record whose handle this page was already granted at boot —
+      // so it touches no picker and no permission prompt, and the mount it returns to is the
+      // SAME one (same mount point, same worker binding), not a replacement.
+      const resumableMount = async () => {
+        const record = resumable
+        const handle = record.handle
+        const share = {
+          token: record.token, id: record.id, name: record.name, workspaceId: record.workspaceId,
+          root: handle, execute: createExecutor(handle, { writable: true }),
+          controller: new AbortController(), stopped: false, closing: null, seenAt: Date.now(),
+        }
+        setStatus('resuming', `恢复中…（${record.name}）`)
+        try {
+          // Ownership first: until the gateway has handed the mount back, this page is just
+          // another client asking, and a poll sent before that would fail — which the poll
+          // loop would faithfully try to recover from, doubling the handshake.
+          const answer = await call('resume', { token: record.token }, 20000, share.controller.signal)
+          if (disposed) return null
+          if (answer?.mountpoint) share.mountpoint = answer.mountpoint
+          active = share
+          resumable = null
+          // The mount is already mounted and may already be carrying operations the worker
+          // queued while nobody was serving it: the loop answers them from here on.
+          void poll(share)
+          await stash(share, handle)
+          const workspaceId = record.workspaceId || await findWorkspace(share.mountpoint)
+          setStatus('mounted', `已挂载 ${record.name}（读写，已恢复）；点击断开`)
+          if (dialogOpen) scheduleAutoClose()
+          // The workspace is already registered under this path, so there is nothing to
+          // activate and no worker to restart: the operator gets the old workspace back with
+          // its path unchanged. A workspace that cannot be found is reported, not silently
+          // followed by a second registration that would duplicate the entry.
+          if (workspaceId) {
+            share.workspaceId = workspaceId
+            await stash(share, handle)
+            try { await ctx.uiWorkspace.connectWorkspace(workspaceId) }
+            catch (error) { ctx.logger?.warn?.('browser-workspace: reconnecting the restored workspace failed: ' + (error?.message || error)) }
+          } else {
+            ctx.logger?.warn?.('browser-workspace: the restored mount has no workspace entry to reopen')
+          }
+          return share
+        } catch (error) {
+          // The resume request itself failed: nothing on this page owns the token, so there
+          // is no loop to stop — the failure is simply reported to the caller.
+          share.stopped = true
+          throw error
+        }
+      }
+      // findWorkspace locates the GUI's own entry for a path. It exists because the record
+      // may have been written by a document that never learned the id, and registering a
+      // second workspace for the same directory would give the operator two identical rows.
+      const findWorkspace = async path => {
+        try {
+          const listed = await ctx.remote.workspace.list()
+          const items = listed?.value?.workspaces || listed?.workspaces || []
+          const match = items.find(item => item?.path === path)
+          return match?.workspaceId || match?.id || null
+        } catch { return null }
+      }
+      // One click, one decision: stop a live mount, take back the one this page found waiting,
+      // or open the picker. Only the last of those needs transient user activation (about
+      // five seconds in Chromium), which is why it is reached without any await in front of
+      // it — everything that can be known beforehand (the stored record) was read at boot,
+      // and a permission that needs re-confirming takes the picker path rather than a
+      // gesture-less requestPermission. The warning is not a gate: it lives on the row
+      // (title) and in the dialog that this click opens.
       const choose = async () => {
         if (disposed || choosing) return
         if (active) { choosing = true; try { await stop() } finally { choosing = false }; return }
+        // The resumable branch must not await anything before it can fall through to the
+        // picker: showDirectoryPicker needs the click's transient user activation, and one
+        // await of a store or permission query spends it ("Must be handling a user gesture").
+        // That is why the stored handle's permission is resolved once at boot (see the record
+        // lookup effect) instead of here.
+        if (resumable && resumable.ready === true) {
+          choosing = true
+          clearAutoClose()
+          dialogOpen = true
+          try {
+            await resumableMount()
+            return
+          } catch (error) {
+            // Any refusal is the gateway's final word on that capability: forget the record
+            // and fall through to a fresh mount, so the click still does something.
+            resumable = null
+            await records.clear()
+            if (error.name !== 'AbortError') {
+              ctx.logger?.warn?.('browser-workspace: resume refused: ' + (error.message || error))
+            }
+          } finally { choosing = false }
+        }
         if (!window.isSecureContext || !window.showDirectoryPicker) { setStatus('failed', '需要 HTTPS 和支持目录访问的浏览器'); return }
         choosing = true
         clearAutoClose()
@@ -346,7 +613,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           if (disposed) return
           const opened = await call('open', { name: root.name, writable: true })
           if (!opened?.token) throw failure('EIO', 'invalid open handshake')
-          const share = { token: opened.token, name: root.name, execute: createExecutor(root, { writable: true }), controller: new AbortController(), stopped: false, closing: null }
+          const share = { token: opened.token, id: opened.id, name: root.name, mountpoint: opened.mountpoint, root, execute: createExecutor(root, { writable: true }), controller: new AbortController(), stopped: false, closing: null }
           active = share
           if (disposed) { await stop(); return }
           if (!opened.mountpoint) throw failure('EIO', 'invalid open mountpoint')
@@ -358,29 +625,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           // stat blocks for the whole FUSE timeout and registration dies as
           // "workspace registration timed out".
           void poll(share)
-          const workspace = await createWorkspace(share, opened.mountpoint)
-          if (!live(share)) return
-          try {
-            const priorGeneration = ctx.connection.generation.getSnapshot()?.id
-            const activated = await call('activate', { token: share.token }, 55000, share.controller.signal)
-            if (!live(share)) return
-            setStatus('activating', '挂载完成；等待 worker 重连…')
-            await awaitReconnect(share, priorGeneration)
-            if (!live(share)) return
-            try {
-              const renamed = await ctx.remote.workspace.rename({ workspaceId: workspace.workspaceId, title: `本地: ${root.name}` })
-              if (!renamed?.ok) ctx.logger?.warn?.('browser-workspace: workspace rename failed')
-            } catch { ctx.logger?.warn?.('browser-workspace: workspace rename failed') }
-            if (!live(share)) return
-            await ctx.uiWorkspace.connectWorkspace(workspace.workspaceId)
-            if (live(share)) {
-              setStatus('mounted', `已挂载 ${root.name}（读写）；点击断开`)
-              if (dialogOpen) scheduleAutoClose()
-            }
-          } catch (error) {
-            await forgetWorkspace(workspace)
-            throw error
-          }
+          await finishActivation(share, root, null)
         } catch (error) {
           // AbortError is harmless only when the picker was cancelled before open;
           // an activation timeout still requires cleanup of the retained token.
@@ -440,15 +685,42 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
             'aria-live': 'polite',
           }, status.text === '' ? '准备中…' : status.text),
           mounted ? React.createElement('p', { className: 'dshgw-bw-muted', key: 'auto' }, '成功：窗口会自行关闭，不需要手动关闭。') : null,
+          status.phase === 'resumable' ? React.createElement('p', { className: 'dshgw-bw-muted', key: 'resume' }, '点击「恢复」把刷新前挂载的同一个目录接回来（不会重新挂载，也不会重启 worker）。') : null,
           failed ? React.createElement('p', { className: 'dshgw-bw-muted', key: 'retry' }, '修复后可以再点一次侧栏那一行重试。') : null,
-          React.createElement('div', { className: 'dshgw-bw-footer', key: 'footer' },
-            React.createElement('button', { key: 'close', type: 'button', onClick: closeDialog }, '关闭')),
+          React.createElement('div', { className: 'dshgw-bw-footer', key: 'footer' }, [
+            status.phase === 'resumable'
+              ? React.createElement('button', { key: 'resume', type: 'button', onClick: choose }, '恢复')
+              : null,
+            React.createElement('button', { key: 'close', type: 'button', onClick: closeDialog }, '关闭'),
+          ]),
         ]))
       }
+      // What the previous document left behind, read once per page: a mount the gateway is
+      // still holding, with a directory handle this browser has already granted. It only
+      // moves the row into its "可恢复" state — the resume itself is the operator's click.
+      ctx.effect(() => {
+        let cancelled = false
+        records.load().then(record => {
+          if (cancelled || disposed || !recordIsFresh(record)) {
+            if (!cancelled && record) void records.clear()
+            return
+          }
+          return reopenHandle(record.handle).then(handle => {
+            if (cancelled || disposed) return
+            if (!handle) { return records.clear() }
+            resumable = Object.assign({}, record, { handle, ready: true })
+            setStatus('resumable', `刷新前挂载的是 ${record.name}；点击恢复`)
+          })
+        }).catch(error => { ctx.logger?.warn?.('browser-workspace: reading the stored mount failed: ' + (error?.message || error)) })
+        return () => { cancelled = true }
+      }, 'browser-workspace: stored mount lookup')
       // order 90 keeps this row above the ssh-workspace entry (order 100); order 210 keeps
       // this dialog above the ssh-workspace one (200) when both happen to be open.
       ctx.effect(() => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'browser-workspace', order: 90, label: '浏览器工作区' }, Action)), 'browser-workspace: sidebar entry')
       ctx.effect(() => ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'browser-workspace-dialog', order: 210, label: '浏览器工作区' }, Dialog)), 'browser-workspace: mount dialog')
+      // Disposal is a page going away, NOT a decision to unmount: a reload lands here too,
+      // and the whole point of the stored record is that the next document can take this
+      // mount back. So the record is left alone on purpose — only an explicit stop clears it.
       ctx.effect(() => () => { disposed = true; clearAutoClose(); void stop(); listeners.clear() }, 'browser-workspace: cleanup')
     }
     // 'remote' AND 'remote.workspace' are both required: Cordis resolves the dotted name
@@ -457,6 +729,6 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
     // `cannot get property "remote" without inject` inside a real DSH GUI (the same pair
     // @deepseek-ai/dsh-api-workspace-controller declares). A mocked ctx that hands the
     // plugin a ready-made `remote` object cannot catch this.
-    return { inject: ['slots', 'connection', 'remote', 'remote.workspace', 'uiWorkspace'], apply, createExecutor, checkRelativePath, createTransport, errorOf, AUTO_CLOSE_MS }
+    return { inject: ['slots', 'connection', 'remote', 'remote.workspace', 'uiWorkspace'], apply, createExecutor, checkRelativePath, createTransport, errorOf, createRecordStore, reopenHandle, recordIsFresh, AUTO_CLOSE_MS, RECONNECT_GRACE_MS }
   },
 })

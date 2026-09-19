@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) -X main.revision=$(REVISION) -X main.date=
 UIDIST ?= $(CURDIR)/.cache/ui-dist
 UI_OVERLAY ?= $(UIDIST)/overlay.json
 
-.PHONY: all build build-src ui-dist test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check dshgw-build gwproxy-build dshgw-test dshgw-verify dshgw-sandbox-test dshgw-supervised-test dshgw-ssh-integration dshgw-ssh-e2e
+.PHONY: all build build-src ui-dist test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check dshgw-build gwproxy-build dshgw-test dshgw-verify dshgw-sandbox-test dshgw-supervised-test dshgw-ssh-integration dshgw-ssh-e2e dshgw-browser-e2e dshgw-browser-reload-e2e
 
 all: build
 
@@ -191,5 +191,24 @@ clean:
 .PHONY: dshgw-browser-test
 dshgw-browser-test:
 	@$(GOENV) go test ./internal/dshgw/browserworkspace ./internal/dshgw/browsermount ./internal/dshgw/config ./internal/dshgw/tenancy ./internal/dshgw/sandbox ./internal/dshgw/proxy ./internal/dshgwsup ./cmd/aigw ./cmd/dshgw
+
+# The browser workspace acceptance (M65): a throwaway dshgw in its own state directory and
+# port band, a real Chromium whose directory chooser is replaced by a real OPFS handle, a real
+# FUSE mount, real I/O in both directions, and the proof that the mount is visible INSIDE the
+# account's bubblewrap sandbox. Needs the gateway host: /dev/fuse, bwrap, fusermount3,
+# Chromium, the installed dsh runtime and a prepared dsh template.
+dshgw-browser-e2e: dshgw-build
+	@DSHGW_NODE="$(DSHGW_NODE)" DSHGW_BIN_JS="$(DSHGW_DSH_ROOT)/lib/bin.js" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" \
+		PYTHONDONTWRITEBYTECODE=1 python3 scripts/browser_workspace_mount_e2e.py --dshgw bin/dshgw
+
+# What happens to that mount when the page that owns it goes away or its transport breaks:
+# an injected failure of this plugin's own endpoints (recovered in place, no reload and no
+# click), a real reload, and a real closed-tab-then-new-tab — each measured from the host,
+# from inside the sandbox and from the page, and each pinned to the expected outcome:
+#   control alive · reconnect alive · reload dead (until the click) · restore alive · reopen alive
+dshgw-browser-reload-e2e: dshgw-build
+	@DSHGW_NODE="$(DSHGW_NODE)" DSHGW_BIN_JS="$(DSHGW_DSH_ROOT)/lib/bin.js" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" \
+		PYTHONDONTWRITEBYTECODE=1 python3 scripts/browser_workspace_reload_e2e.py --dshgw bin/dshgw \
+		--expect alive --expect-reconnect alive --expect-reload dead --expect-restore alive --expect-reopen alive
 	@test -x "$(DSHGW_NODE)" || { echo "dshgw-browser-test: Node missing: $(DSHGW_NODE)" >&2; exit 1; }
 	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" --test cmd/dshgw/plugin/browser-workspace/*.test.mjs

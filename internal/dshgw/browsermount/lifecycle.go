@@ -58,7 +58,15 @@ func (s *Service) cleanupLocked(sh *share) error {
 	if sh.cleaned {
 		return nil
 	}
+	// Closing the share is what makes it final: serving() goes false, a resume is refused,
+	// and every waiter on done is released. It belongs here, in the one place that runs on
+	// every teardown path (HTTP close, grace expiry, tenant drop, shutdown), because a
+	// disconnect alone no longer ends a mount — it only starts its grace window.
 	sh.mu.Lock()
+	if !sh.closed {
+		sh.closed = true
+		close(sh.done)
+	}
 	mounted, path := sh.mounted, sh.path
 	sh.mu.Unlock()
 	if mounted != nil {
@@ -189,15 +197,29 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	}
 	return s.ReleaseLock()
 }
+
+// expire is the reaper. It closes two kinds of share:
+//
+//   - a share whose browser went away and did not come back within reconnectGrace: the
+//     reload path. The window is what lets a page refresh resume the SAME mount instead of
+//     paying a worker restart and a new mount point for a 300ms reload;
+//   - a share that never disconnected but stopped polling past its lease: a wedged or
+//     silently dead browser side.
+//
+// A share inside its grace window is left alone on purpose: it holds its kernel mount and
+// mount point so the returning page can keep the same path, and it is already excluded from
+// every worker profile (see serving), so waiting costs nothing but the record.
 func (s *Service) expire(ctx context.Context) error {
 	var errs []error
 	for _, sh := range s.snapshot("") {
 		sh.mu.Lock()
-		expired := sh.closed || time.Since(sh.seen) > lease
-		if expired && !sh.closed {
-			sh.closed = true
-			close(sh.done)
-		}
+		disconnected := !sh.disconnectedAt.IsZero()
+		waiting := sh.awaitingResume()
+		// A share that lost its page is reaped when its grace window runs out; one that
+		// still claims a browser is reaped when that browser stops polling past its lease.
+		// Testing the lease for a disconnected share would stretch its lifetime to
+		// grace+lease and delay the worker restart by up to a minute.
+		expired := sh.closed || (!waiting && (disconnected || time.Since(sh.seen) > lease))
 		sh.mu.Unlock()
 		if expired {
 			if err := s.closeContext(ctx, sh, false); err != nil {

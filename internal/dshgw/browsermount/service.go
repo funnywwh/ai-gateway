@@ -22,6 +22,18 @@ import (
 
 const maxBody = 2 << 20
 const lease = 60 * time.Second
+
+// reconnectGrace is how long a mount survives the loss of the page that owns it, so a
+// reload (or a closed-and-reopened tab) can resume the SAME mount instead of tearing it
+// down and rebuilding it. A page reload cancels the poll request, which is the mount's
+// browser side — without a grace window that cancellation is final, and rebuilding costs a
+// worker restart plus a new mount point that DSH's own workspace entry does not know about.
+//
+// The window is deliberately longer than a reload and shorter than an operator would notice
+// as "leaked": a resumed mount is never advertised to a worker start while disconnected, so
+// the window cannot block a worker the way an unanswerable mount would.
+const reconnectGrace = 45 * time.Second
+
 const browserFSName = "dshgw-browser-workspace"
 
 // Mounted.Unmount must release the host mount and wait for its FUSE server.
@@ -62,12 +74,57 @@ type share struct {
 	mounted                  Mounted
 	active, restartAttempted bool
 	closed                   bool
+	// disconnectedAt is when the browser side went away while a reload could still bring it
+	// back. It is what turns a canceled poll from "this mount is finished" into "this mount
+	// is waiting", and it bounds that waiting: past reconnectGrace the mount is closed for
+	// real. Zero means the mount was never disconnected, or its grace has run out.
+	disconnectedAt time.Time
+	// resumed counts the browser sides that took this mount back after a disconnect. It is
+	// evidence for tests and operators: a mount that keeps being resumed is a flapping page.
+	resumed int
+	// revoked marks a share whose browser side was replaced by a resume that took over. It
+	// lasts only for the life of that share: every stale poll/respond from the replaced page
+	// is answered with "revoked" so it stops, and the flag is cleared when the replacing page
+	// starts its own poll loop.
+	revoked bool
+	// polling marks the browser side that is holding this mount's poll connection right now.
+	// It is what a resume must not steal: a page that is still answering owns its mount,
+	// whereas a page whose request the browser never even sent (a dropped connection, a
+	// blocked request, a navigation) has no claim on it — even though the gateway has not
+	// seen that request die yet.
+	polling bool
 	// published means a worker may have consumed this mount via MountsFor, even
 	// without an explicit activation. detached is set only after proven teardown.
 	published, detached, cleaned bool
 	queue                        chan fs.Request
 	pending                      map[string]pendingCall
-	done                         chan struct{}
+	// done is closed exactly once, when the share is torn down for good (cleanupLocked):
+	// it is the "this capability is gone" signal the poll loop waits on.
+	done chan struct{}
+	// abort is replaced by a fresh channel every time the browser side goes away, so
+	// operations already queued for the departed page fail at once instead of hanging until
+	// their own deadline — while operations queued AFTER a resume are unaffected, because
+	// they captured the new channel. Keeping this separate from done is what lets a mount
+	// outlive its page without lying about either fact.
+	abort chan struct{}
+}
+
+// serving is the one liveness rule of the service: the browser behind this share is here
+// now and within its lease, so an operation may be queued for it. Requires sh.mu.
+//
+// A mount waiting to be resumed is NOT serving: it holds its kernel mount and its mount
+// point so the returning page can keep using the same path, but nothing may be queued for
+// it. Binding one into a worker start is the failure this rule exists to prevent (see
+// MountsFor): the profile resolves the path and bubblewrap stats it, so an unanswerable
+// mount blocks the whole worker start for the FUSE timeout.
+func (s *share) serving() bool {
+	return !s.closed && s.disconnectedAt.IsZero() && time.Since(s.seen) <= lease
+}
+
+// awaitingResume reports whether this share is waiting for its browser to come back.
+// Requires sh.mu.
+func (s *share) awaitingResume() bool {
+	return !s.closed && !s.disconnectedAt.IsZero() && time.Since(s.disconnectedAt) <= reconnectGrace
 }
 
 func New(restart func(context.Context, registry.Tenant) error) *Service {
@@ -100,18 +157,19 @@ func randomID() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// serveable reports whether the browser behind this share can still answer an
-// operation. Requires sh.mu.
+// serveable reports whether the browser behind this share can still answer an operation.
+// Requires sh.mu.
 //
-// This is the one liveness rule of the service: Call refuses to queue a request
-// as soon as it is false, so a share that is not serveable must not be bound into
-// a worker either. Binding one is not harmless — the sandbox profile resolves
-// every advertised mount path and bubblewrap stats every bind source, so a mount
-// with no browser behind it blocks for the whole FUSE timeout and then fails the
-// worker start, which surfaces as "worker restart before close" and an
-// unconfirmed cleanup on an unrelated mount (M65 real-host report).
+// This is the one liveness rule of the service: Call refuses to queue a request as soon as
+// it is false, so a share that is not serveable must not be bound into a worker either.
+// Binding one is not harmless — the sandbox profile resolves every advertised mount path
+// and bubblewrap stats every bind source, so a mount with no browser behind it blocks for
+// the whole FUSE timeout and then fails the worker start, which surfaces as "worker restart
+// before close" and an unconfirmed cleanup on an unrelated mount (M65 real-host report).
+// A mount waiting to be resumed is exactly such a mount, so it is excluded from the first
+// moment the page goes away (see serving).
 func (s *share) serveable() bool {
-	return !s.closed && time.Since(s.seen) <= lease
+	return s.serving()
 }
 
 // Call never retries a mutation: a timeout does not prove it was not applied.
@@ -136,6 +194,9 @@ func (s *share) Call(ctx context.Context, req fs.Request) (fs.Response, error) {
 		s.mu.Unlock()
 		return fs.Response{}, errors.New("browser request queue full")
 	}
+	// The abort channel is captured here, not read later: an operation belongs to the
+	// browser side that was here when it was queued.
+	abort := s.abort
 	s.pending[id] = pendingCall{reply: ch, ctx: ctx}
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.pending, id); s.mu.Unlock() }()
@@ -143,7 +204,7 @@ func (s *share) Call(ctx context.Context, req fs.Request) (fs.Response, error) {
 	case s.queue <- req:
 	case <-ctx.Done():
 		return fs.Response{}, ctx.Err()
-	case <-s.done:
+	case <-abort:
 		return fs.Response{}, errors.New("browser disconnected")
 	}
 	select {
@@ -151,7 +212,7 @@ func (s *share) Call(ctx context.Context, req fs.Request) (fs.Response, error) {
 		return r, nil
 	case <-ctx.Done():
 		return fs.Response{}, ctx.Err()
-	case <-s.done:
+	case <-abort:
 		return fs.Response{}, errors.New("browser disconnected")
 	}
 }
@@ -202,7 +263,7 @@ func (s *Service) open(t registry.Tenant, owner, name string, writable bool) (*s
 	if err != nil {
 		return nil, err
 	}
-	sh := &share{id: id, token: token, owner: owner, tenant: t, writable: writable, seen: time.Now(), queue: make(chan fs.Request, 64), pending: make(map[string]pendingCall), done: make(chan struct{})}
+	sh := &share{id: id, token: token, owner: owner, tenant: t, writable: writable, seen: time.Now(), queue: make(chan fs.Request, 64), pending: make(map[string]pendingCall), done: make(chan struct{}), abort: make(chan struct{})}
 	sh.lifecycle.Lock()
 	defer sh.lifecycle.Unlock()
 	s.mu.Lock()
@@ -258,19 +319,122 @@ func (s *Service) open(t registry.Tenant, owner, name string, writable bool) (*s
 	return sh, nil
 }
 func (s *Service) get(token, tenant, owner string) (*share, error) {
+	sh, err := s.capability(token, tenant, owner)
+	if err != nil {
+		return nil, err
+	}
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	if !sh.serving() {
+		return nil, errors.New("directory disconnected")
+	}
+	sh.seen = time.Now()
+	return sh, nil
+}
+
+// capability proves a token names this tenant's and this browser session's share, whatever
+// state that share is in. It is the authorization half of get, split out because resume
+// must accept a share that is not serving yet (that is the whole point of resuming) while
+// staying exactly as strict about who is asking.
+func (s *Service) capability(token, tenant, owner string) (*share, error) {
 	s.mu.Lock()
 	sh := s.shares[token]
 	s.mu.Unlock()
 	if sh == nil || sh.tenant.Name != tenant || sh.owner != owner {
 		return nil, errors.New("unknown directory capability")
 	}
+	return sh, nil
+}
+
+// claimPoll takes the mount's single poll connection for this browser side. Requires sh.mu.
+func (sh *share) claimPoll() bool {
+	if sh.closed || sh.polling {
+		return false
+	}
+	sh.polling = true
+	sh.revoked = false
+	return true
+}
+
+// releasePoll gives the connection back. Requires sh.mu.
+func (sh *share) releasePoll() { sh.polling = false }
+
+// resume hands a waiting mount back to the browser side that owns it. Only a page that
+// already held this capability can call it: token, tenant and owner must all match, and the
+// share must still be inside its grace window.
+//
+// A page that is still holding the poll connection is not asked to give the mount up. A page
+// that is not holding one has no claim, however recently it was seen: its request may never
+// have reached the gateway at all (a dropped connection, a blocked request, a navigation),
+// and "the gateway has not noticed the death yet" must not make its own reconnection fail —
+// which is exactly what happened when a page's transport broke and its own resume was
+// refused as if another page owned the mount.
+func (s *Service) resume(capabilityToken, tenant, owner string) (map[string]any, error) {
+	sh, err := s.capability(capabilityToken, tenant, owner)
+	if err != nil {
+		return nil, err
+	}
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
-	if sh.closed || time.Since(sh.seen) > lease {
+	if sh.closed {
 		return nil, errors.New("directory disconnected")
 	}
+	if sh.polling {
+		return nil, errors.New("directory already served by another page")
+	}
+	if !sh.serving() && !sh.awaitingResume() {
+		// Neither serving nor waiting for a page: the mount is on its way out and must not be
+		// revived halfway through teardown.
+		return nil, errors.New("directory disconnected")
+	}
+	// A poll connection that was still claimed belongs to a browser side that lost its
+	// transport in a way the gateway has not seen die; it is about to be told so. On the
+	// ordinary reload path there is no such connection (the poll died, which is what set the
+	// grace window), and nothing is revoked.
+	if sh.serving() {
+		sh.disconnectedAt = time.Now()
+		sh.revoked = true
+	}
+	sh.resumeLocked()
+	return map[string]any{"id": sh.id, "mountpoint": sh.path, "resumed": sh.resumed}, nil
+}
+
+// resumeLocked takes a mount back for a browser side that has returned — the reloaded page,
+// or a tab that replaced the one that had it. The caller has already proved the capability
+// (token, tenant, owner), so this only restores the one field a disconnect cleared.
+//
+// The mount itself is untouched on purpose: the kernel mount, the mount point and the
+// worker's binding are all still there, which is the whole point of the grace window. After
+// a reload the page keeps the same path, so DSH's own workspace entry (persisted in
+// storages/workspace.json) still points at something real.
+func (sh *share) resumeLocked() {
+	sh.disconnectedAt = time.Time{}
 	sh.seen = time.Now()
-	return sh, nil
+	// A new browser side gets a new abort channel: anything still waiting on the old one
+	// belonged to the page that left and must not be revived by this resume.
+	sh.abort = make(chan struct{})
+	sh.resumed++
+}
+
+// disconnect marks the browser side gone. It is called when the poll connection dies, which
+// is the only honest signal that a page reloaded, closed, crashed or lost its network.
+func (sh *share) disconnect() {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	if sh.closed {
+		return
+	}
+	// The first disconnect starts the grace window; a later one does not extend it, so a
+	// page that flaps cannot keep a mount alive indefinitely.
+	if sh.disconnectedAt.IsZero() {
+		sh.disconnectedAt = time.Now()
+	}
+	select {
+	case <-sh.abort:
+		// Already aborted: this is a second report of the same departure.
+	default:
+		close(sh.abort)
+	}
 }
 
 // MountsFor lists the mount points a worker profile must bind for one tenant.
@@ -288,14 +452,6 @@ func (s *Service) MountsFor(tenant string) []string {
 		sh.mu.Unlock()
 	}
 	return paths
-}
-func (sh *share) disconnect() {
-	sh.mu.Lock()
-	if !sh.closed {
-		sh.closed = true
-		close(sh.done)
-	}
-	sh.mu.Unlock()
 }
 
 type payload struct {
@@ -349,6 +505,9 @@ func (s *Service) dispatch(ctx context.Context, op string, t registry.Tenant, ow
 	}
 	var sh *share
 	var err error
+	if op == "resume" {
+		return s.resume(p.Token, t.Name, owner)
+	}
 	if op == "close" {
 		s.mu.Lock()
 		candidate := s.shares[p.Token]
@@ -383,6 +542,13 @@ func (s *Service) dispatch(ctx context.Context, op string, t registry.Tenant, ow
 	case "heartbeat":
 		return map[string]bool{"alive": true}, nil
 	case "poll":
+		if !sh.claimPoll() {
+			// Another browser side holds this mount's poll connection. That happens when a
+			// stale tab (or a replaced document) tries to serve a capability that has moved
+			// on, and it must not be able to interleave answers with the live page.
+			return nil, errors.New("directory served by another page")
+		}
+		defer sh.releasePoll()
 		timer := time.NewTimer(10 * time.Second)
 		defer timer.Stop()
 		for {
@@ -390,8 +556,14 @@ func (s *Service) dispatch(ctx context.Context, op string, t registry.Tenant, ow
 			case req := <-sh.queue:
 				sh.mu.Lock()
 				pending, exists := sh.pending[req.ID]
-				closed := sh.closed
+				closed, revoked := sh.closed, sh.revoked
 				sh.mu.Unlock()
+				if revoked {
+					// A resume took this mount over while this loop was parked. The capability
+					// is not this page's any more, and saying so is what makes the stale page
+					// stop instead of fighting the live one.
+					return nil, errors.New("directory revoked")
+				}
 				if closed {
 					return nil, errors.New("disconnected")
 				}
@@ -403,21 +575,33 @@ func (s *Service) dispatch(ctx context.Context, op string, t registry.Tenant, ow
 				// The poll request IS the browser side of this mount: net/http
 				// cancels its context when the page's connection goes away
 				// (reload, closed tab, crash, or the client's own abort before a
-				// close). Nothing else can answer this mount's FUSE requests, so
-				// it is disconnected here rather than at the end of the lease:
+				// close). Nothing else can answer this mount's FUSE requests, so it
+				// stops being serveable here rather than at the end of the lease —
 				// until then every worker start would block on it (see serveable).
-				// A poll that arrives afterwards revives nothing — the client
-				// treats a failed poll as a disconnect and closes the mount.
+				//
+				// It is not torn down here: a reload cancels the poll of a page that
+				// is coming back, so the mount waits out reconnectGrace for a resume,
+				// and the reaper closes it when that window passes unused.
 				sh.disconnect()
 				return nil, ctx.Err()
 			case <-sh.done:
 				return nil, errors.New("disconnected")
 			case <-timer.C:
+				sh.mu.Lock()
+				revoked := sh.revoked
+				sh.mu.Unlock()
+				if revoked {
+					return nil, errors.New("directory revoked")
+				}
 				return map[string]any{"requests": []fs.Request{}}, nil
 			}
 		}
 	case "respond":
 		sh.mu.Lock()
+		if sh.revoked {
+			sh.mu.Unlock()
+			return nil, errors.New("directory revoked")
+		}
 		pending, exists := sh.pending[p.ID]
 		if exists {
 			delete(sh.pending, p.ID)

@@ -16,6 +16,7 @@ same-origin credentials; redirects are rejected. Responses are
 | `poll` | `{token}` | `{requests:[{id,op,path,offset?,size?,data?,target?,exclusive?,truncate?}]}` |
 | `respond` | `{token,id,result:{ok,value?,error?}}` | acknowledgement |
 | `activate` | `{token}` | `{mountpoint,id}` after mount/worker restart |
+| `resume` | `{token}` | `{id,mountpoint,resumed}` — takes an existing mount back |
 | `close` | `{token}` | acknowledgement |
 
 The client starts poll **before** activate and continues during worker restart.
@@ -23,12 +24,25 @@ Activate and close use 55-second client timeouts to accommodate a 45-second work
 restart; other requests time out at 35 seconds. Gateway poll must return within
 that deadline. Empty polls are paced at 100ms. No filesystem mutation is replayed.
 
-The poll request *is* the browser side of the mount: the gateway disconnects the
-mount as soon as that connection dies (page reload/close/crash, or this client's
-own abort before close), instead of waiting out the 60-second lease. A mount that
-can no longer be served is also left out of the next worker profile — resolving
-one clientless mount path costs the whole FUSE timeout and fails the worker
-start, which would otherwise surface as an unconfirmed cleanup on another mount.
+The poll request *is* the browser side of the mount. When that connection dies
+(page reload/close/crash, or this client's own abort before close) the mount stops
+being served at once and is **excluded from every worker profile** — resolving one
+clientless mount path costs the whole FUSE timeout and fails the worker start,
+which would otherwise surface as an unconfirmed cleanup on another mount.
+
+It is not torn down at once. The gateway keeps the kernel mount and its mount point
+for a 45-second grace window, during which the same page (or the page that replaced
+it) can take the mount back with `resume` — same path, same worker binding, no
+second mount and no worker restart. Only when that window passes unused does the
+gateway run the old teardown: restart worker, unmount, remove the mount point and
+its record.
+
+`resume` is refused while another browser side holds the mount's poll connection,
+and the replaced side is then told `directory revoked` so it stops instead of
+fighting the live page. Because a request the browser never sent (a blocked or
+dropped connection) leaves the gateway still believing the old poll is alive, the
+client's own reconnect only succeeds once that request has actually ended — one
+retry later, not forever.
 
 Workspace `create(path)` runs BEFORE activation, while the mount point is
 guaranteed to exist: `open` creates that directory and any teardown (page reload,
@@ -44,6 +58,22 @@ services. It then best-effort renames the workspace and invokes
 because it can create a second session. A mount that fails after registration
 forgets that workspace (nothing was connected to it yet), because the gateway
 removes the mount point with the capability.
+
+A transport failure is recovered **in place**: the page asks the gateway to resume,
+keeps serving, and never needs a reload, a click or a second directory choice. Only
+a `resume` the gateway refuses (the capability is gone: `unknown directory
+capability`, or `directory revoked` because another page took it over) ends the
+mount and clears the stored record.
+
+The mount's capability token and its directory handle are kept in IndexedDB, keyed
+by the tenant origin. They are what makes recovery possible after a reload: a
+FileSystemDirectoryHandle stored there is a real handle again in the next document,
+and a granted `readwrite` permission survives the reload (measured in Chromium:
+`queryPermission` returns `granted` with no user gesture, and read/write both work).
+The next document does **not** resume on its own — it reads the record at boot and
+shows "刷新前挂载的是 <dir>；点击恢复", and one click takes the same mount back. A
+record the browser will not re-grant, one older than the grace window, or one the
+gateway refuses is dropped, and that same click falls through to an ordinary mount.
 
 On transport failure or explicit stop, local polling is aborted before requesting
 close. Only a successful close response clears the directory token and displays
