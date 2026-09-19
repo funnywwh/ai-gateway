@@ -90,22 +90,35 @@ Mutation timeout has unknown outcome and must not be blindly retried.
 
 ## User consent and limitations
 
-The sidebar entry is one compact row beside the ssh-workspace one (slot
-`sidebar.footer.action`, order 90, label `浏览器工作区`): an icon, the label and a
-muted state note. **One click is the whole gesture** — it opens the readwrite picker
-synchronously, because `showDirectoryPicker()` needs transient user activation
-(about five seconds in Chromium) and any earlier step, a consent click or a blocking
-`window.confirm()` alike, spends that clock before the picker is reached
-("Must be handling a user gesture").
+The sidebar entry is a compact row above the ssh-workspace row (slot
+`sidebar.footer.action`, order 90, label `浏览器工作区`). The shell renders this list slot
+as a flex row and wraps each registration in a classless `div`; both workspace plugins ship
+a scoped `:has()` rule that changes the shared footer to a column, so the two rows occupy
+separate full-width lines. In the expanded sidebar the row contains an icon, the label and
+a muted state note; in the collapsed rail only the icon remains. The row carries its phase
+as `data-dshgw-state` (`mounted` while a directory is mounted, `failed` after the last
+operation failed, everything else otherwise), which is what the browser tests assert — the
+row itself deliberately has no status dot: the state note and the dialog say it in words.
 
-The warning therefore travels with the row instead of gating the picker: the row's
-tooltip states that the AI can read, modify, rename and delete files in the selected
-directory, that file contents may be sent to the configured AI model provider, and
-that mounting and unmounting restart the account worker and can interrupt running
-tasks or connections. Users should select a dedicated backed-up directory, never
-secrets or credentials. The state note covers mounting, waiting for the worker to
-reconnect, active sharing, disconnect and unconfirmed cleanup with an explicit retry
-action. A secure context and File System Access browser support are still required.
+**One click is the whole gesture** — it opens the readwrite picker synchronously, because
+`showDirectoryPicker()` needs transient user activation (about five seconds in Chromium)
+and any earlier step, a consent click or a blocking `window.confirm()` alike, spends that
+clock before the picker is reached ("Must be handling a user gesture"). After the picker
+returns, the browser row opens a frame-wide status dialog. It reports picking, mounting,
+worker reconnect and the final result. A successful mount shows the green success state and
+automatically closes the dialog after 1.5 seconds; a failure keeps the dialog open with a
+red error until the user closes it. Closing the dialog never cancels an in-flight mount—the
+row continues to report the real state. Cancelling the native picker is not a failure: the
+dialog closes and the row returns to its previous state.
+
+The warning therefore travels with the row and dialog instead of gating the picker: the
+row's tooltip states that the AI can read, modify, rename and delete files in the selected
+directory, that file contents may be sent to the configured AI model provider, and that
+mounting and unmounting restart the account worker and can interrupt running tasks or
+connections. Users should select a dedicated backed-up directory, never secrets or
+credentials. The state note covers mounting, waiting for the worker to reconnect, active
+sharing, disconnect and unconfirmed cleanup with an explicit retry action. A secure
+context and File System Access browser support are still required.
 
 FSA is not a complete POSIX filesystem: hard links, symlinks, chmod, ownership,
 real directory timestamps and reliable external-writer exclusion are unavailable.

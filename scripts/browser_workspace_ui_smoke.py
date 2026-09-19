@@ -48,8 +48,10 @@ LOCAL_CHROME = '/home/winger/.cache/ms-playwright/chromium-1234/chrome-linux64/c
 URL_RE = re.compile(r'https?://(?:127\.0\.0\.1|localhost|\[::1\]):\d+/[^\s\x1b<>\"\']*')
 ANSI_RE = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
 PLUGIN_RE = re.compile(r'browser[-_]workspace|dshgw-browser-workspace|浏览器工作区', re.I)
-# The sidebar row is one compact button like the ssh-workspace one: an icon span, the label
-# 浏览器工作区 and an optional state note. It is matched on the label, not on exact text.
+# The sidebar row is one compact button stacked above the ssh-workspace one: an icon span,
+# the label 浏览器工作区 and an optional state note. It is matched on the label, not on
+# exact text; the row's data-dshgw-state phase attribute is what a real browser run can
+# assert about the status without parsing the note.
 BUTTON = r'''(() => {
   const buttons = [...document.querySelectorAll('button')].filter(
     b => b.textContent.includes('浏览器工作区'));
@@ -62,8 +64,17 @@ BUTTON = r'''(() => {
   const footer = b.closest('[class*="_footerActions"]');
   const sidebar = footer && footer.closest('[class*="_root"]');
   const box = b.getBoundingClientRect();
+  const dialog = document.querySelector('[data-dshgw-dialog="browser-workspace"]');
   return {found:!!sidebar, text:b.textContent.trim(), tag:b.tagName,
     sidebarFooter:!!footer, enabled:!b.disabled,
+    state:b.dataset.dshgwState || null,
+    dialogOpen:!!dialog,
+    dialogText:dialog ? String(dialog.textContent || '').slice(0, 200) : null,
+    // Where the stacking rule has to land: the shell's foot, seen from the row.
+    footerDirection:footer ? getComputedStyle(footer).flexDirection : null,
+    parentChain:(() => { const chain = []; let node = b;
+      while (node && chain.length < 4) { chain.push(node.tagName + '.' + String(node.className || '').slice(0, 40)); node = node.parentElement; }
+      return chain; })(),
     x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2)};
 })()'''
 
@@ -329,12 +340,27 @@ def run(args):
                           'consoleErrors': len(cdp.console_errors),
                           'pluginRelatedErrors': len(related), 'picker': picker,
                           'clickedPoint': hit, 'dismissedDialogs': dismissed,
-                          'buttonAfterCancel': settled.get('text')}
+                          'buttonAfterCancel': settled.get('text'),
+                          'stateAfterCancel': settled.get('state'),
+                          'dialogAfterCancel': settled.get('dialogOpen')}
                 print(json.dumps(result, ensure_ascii=False, indent=2))
                 if picker.get('calls') != 1 or picker.get('active') is not True or picker.get('mode') != 'readwrite':
                     raise RuntimeError('one click did not reach the picker with user activation: %r' % (picker,))
+                # The row carries its own status as a phase attribute; before the click
+                # nothing is mounted, so the phase must be idle.
+                if button.get('state') != 'idle':
+                    raise RuntimeError('the sidebar row does not report an idle phase: %r' % (button,))
+                # The shell's foot is a flex row by default, which would put this row and the
+                # ssh one side by side in half the width each. The stacking rule must have
+                # landed on the shell's own container, not on the wrapper around the row.
+                if button.get('footerDirection') != 'column':
+                    raise RuntimeError('the sidebar foot was not stacked into rows: %r' % (button,))
                 if settled.get('text') != button.get('text') or settled.get('enabled') is not True:
                     raise RuntimeError('cancelling the picker changed the sidebar row: %r' % (settled,))
+                # A cancelled picker mounted nothing and failed at nothing: the mount dialog
+                # it opened must be gone again, and the phase must not have moved.
+                if settled.get('dialogOpen') or settled.get('state') != button.get('state'):
+                    raise RuntimeError('cancelling the picker left the mount dialog up: %r' % (settled,))
                 if cdp.exceptions or cdp.console_errors:
                     raise RuntimeError('the single-click picker raised browser errors')
                 if args.screenshot:
@@ -387,7 +413,7 @@ def main():
         safe = str(error) if type(error) is RuntimeError else type(error).__name__
         print('FAIL: ' + safe, file=sys.stderr)
         return 1
-    print('PASS: real DSH browser-workspace sidebar UI; one click reached the picker with user activation; no backend used; fixtures cleaned')
+    print('PASS: real DSH browser-workspace sidebar UI; the row reports its phase; one click reached the picker with user activation; cancelling it left the row and closed the mount dialog; no backend used; fixtures cleaned')
     return 0
 
 

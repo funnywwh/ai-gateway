@@ -4,6 +4,9 @@ window.__ModuleLoader__.load({
   factory: require => {
     const React = require('react')
     const MAX_BYTES = 1024 * 1024
+    // How long the success dialog stays up before it closes itself. Exported for the unit
+    // test, which fires that one timer by hand instead of sleeping.
+    const AUTO_CLOSE_MS = 1500
     const failure = (code, message) => Object.assign(new Error(message), { code })
     function checkRelativePath(path, allowRoot = true) {
       if (typeof path !== 'string' || new TextEncoder().encode(path).length > 4096 || /[\\:\u0000-\u001f\u007f]/.test(path)) throw failure('EINVAL', 'invalid relative path')
@@ -140,7 +143,7 @@ window.__ModuleLoader__.load({
         return result
       }
     }
-    // One compact sidebar row, styled like the ssh-workspace entry beside it: an icon,
+    // One compact sidebar row, stacked directly above the ssh-workspace entry: an icon,
     // a label, and a muted state note that truncates instead of widening the foot.
     const CSS = `
 .dshgw-bw-action { display: flex; align-items: center; gap: 6px; width: 100%; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; padding: 6px 8px; border-radius: 6px; text-align: left; }
@@ -148,6 +151,26 @@ window.__ModuleLoader__.load({
 .dshgw-bw-action[aria-pressed="true"] .dshgw-bw-label { font-weight: 600; }
 .dshgw-bw-label { flex: none; white-space: nowrap; }
 .dshgw-bw-state { flex: 1 1 auto; min-width: 0; margin-left: 4px; opacity: .65; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dshgw-bw-action-rail .dshgw-bw-label, .dshgw-bw-action-rail .dshgw-bw-state { display: none; }
+.dshgw-bw-backdrop { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.45); z-index: 40; }
+.dshgw-bw-dialog { width: min(520px, 92vw); max-height: 86vh; overflow: auto; background: var(--dsh-bg, #1b1c1f); color: var(--dsh-fg, #e6e6e6); border: 1px solid rgba(127,127,127,.35); border-radius: 10px; padding: 16px 18px; font-size: 13px; line-height: 1.5; }
+.dshgw-bw-dialog h2 { margin: 0 0 4px; font-size: 15px; }
+.dshgw-bw-dialog p.hint { margin: 0 0 12px; opacity: .7; }
+.dshgw-bw-dialog button { background: rgba(127,127,127,.18); color: inherit; border: 1px solid rgba(127,127,127,.35); border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; }
+.dshgw-bw-status { margin: 8px 0; }
+.dshgw-bw-error { border: 1px solid #b3453c; background: rgba(179,69,60,.18); border-radius: 6px; padding: 8px 10px; margin: 8px 0; white-space: pre-wrap; }
+.dshgw-bw-notice { border: 1px solid #3a7d44; background: rgba(58,125,68,.18); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
+.dshgw-bw-muted { opacity: .65; }
+.dshgw-bw-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+/* The shell renders this whole slot as one flex ROW, which leaves two entries sharing a foot
+   that only fits one — so each of them is squeezed to half width. A plugin owns no wrapper
+   element around its own row: the list slot wraps every registration in a classless div, so
+   the shell's container is TWO levels up, and :has() is the only selector that can reach it
+   from here. Both shapes are covered (the direct one too, in case the wrapper ever goes
+   away), and both rows ship this rule, so it holds whichever of the two plugins a deployment
+   enables. */
+div:has(> .dshgw-bw-action), div:has(> div > .dshgw-bw-action),
+div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-direction: column; }
 `
     // What the entry promises before anyone clicks it. The consent step that used to
     // stand in front of the picker is gone (it cost a second click and could burn the
@@ -188,11 +211,29 @@ window.__ModuleLoader__.load({
       const call = createTransport()
       let active = null, disposed = false, choosing = false
       const listeners = new Set()
-      // The row shows one short state note; the tooltip carries the sentence that does not
-      // fit in the sidebar foot. Nothing here is a dialog, and nothing here gates the picker.
-      let note = ''
-      const show = text => { note = text; for (const listener of listeners) listener() }
-      const entryTitle = () => `浏览器工作区：${WARNING}${note === '' ? '' : `（当前：${note}）`}`
+      // One status drives both surfaces: the sidebar row (a short note, with the tooltip
+      // carrying the sentence that does not fit) and the mount dialog, which is the same
+      // status seen large. Nothing here is a consent gate, and nothing here blocks the
+      // picker — see `choose` below for why that matters.
+      //
+      // Phases: idle | stopping | picking | mounting | activating | mounted | failed. The
+      // phase rides on the row as `data-dshgw-state` so a real browser run can assert it
+      // without reading colours or parsing the note.
+      let status = { phase: 'idle', text: '' }
+      let dialogOpen = false
+      let autoCloseTimer = null
+      const notify = () => { for (const listener of listeners) listener() }
+      const setStatus = (phase, text) => { status = { phase, text }; notify() }
+      const entryTitle = () => `浏览器工作区：${WARNING}${status.text === '' ? '' : `（当前：${status.text}）`}`
+      const clearAutoClose = () => { if (autoCloseTimer !== null) { clearTimeout(autoCloseTimer); autoCloseTimer = null } }
+      const closeDialog = () => { clearAutoClose(); dialogOpen = false; notify() }
+      // A person who just watched the mount finish has nothing left to answer, so that one
+      // ending closes the dialog by itself. Every other ending — failure, disconnect,
+      // cancelled picker — is left to the flow or to the person.
+      const scheduleAutoClose = () => {
+        clearAutoClose()
+        autoCloseTimer = setTimeout(() => { autoCloseTimer = null; if (!disposed) { dialogOpen = false; notify() } }, AUTO_CLOSE_MS)
+      }
       const live = share => !disposed && active === share && !share.stopped
       const delay = (ms, signal) => new Promise((resolve, reject) => {
         const aborted = () => { clearTimeout(timer); reject(failure('ECANCELED', 'operation cancelled')) }
@@ -206,16 +247,16 @@ window.__ModuleLoader__.load({
         if (share.closing) return share.closing
         share.stopped = true
         share.controller.abort()
-        show('断开中…（保持页面打开）')
+        setStatus('stopping', '断开中…（保持页面打开）')
         share.closing = (async () => {
           try {
             await call('close', { token: share.token }, 55000)
             if (active === share) active = null
-            show('已断开')
+            setStatus('idle', '已断开')
             return true
           } catch (error) {
             // Retain capability for an explicit cleanup retry; never fake success.
-            show(`清理未确认：${error.message}；点击重试断开，请勿关闭页面`)
+            setStatus('failed', `清理未确认：${error.message}；点击重试断开，请勿关闭页面`)
             ctx.logger?.warn?.('browser-workspace: cleanup unconfirmed; retry close or await gateway lease cleanup')
             return false
           } finally { share.closing = null }
@@ -238,7 +279,7 @@ window.__ModuleLoader__.load({
             if (!result.requests.length) await delay(100, share.controller.signal)
           }
         } catch (error) {
-          if (live(share) && await stop()) show(`已断线：${error.message}；请重新选择目录`)
+          if (live(share) && await stop()) setStatus('failed', `已断线：${error.message}；请重新选择目录`)
         }
       }
       // Register the Workspace while the mount point is GUARANTEED to exist.
@@ -289,13 +330,17 @@ window.__ModuleLoader__.load({
       // One click, one picker. showDirectoryPicker() needs transient user activation (about
       // five seconds in Chromium), so it is called synchronously by the click — anything
       // awaited first, including a consent step of its own, risks "Must be handling a user
-      // gesture". The warning is not a gate: it lives on the row (title) and in every state
-      // note below.
+      // gesture". The warning is not a gate: it lives on the row (title) and in the dialog
+      // that this click opens. Opening that dialog is a synchronous store write, so the
+      // picker still runs inside the click's own task.
       const choose = async () => {
         if (disposed || choosing) return
         if (active) { choosing = true; try { await stop() } finally { choosing = false }; return }
-        if (!window.isSecureContext || !window.showDirectoryPicker) { show('需要 HTTPS 和支持目录访问的浏览器'); return }
+        if (!window.isSecureContext || !window.showDirectoryPicker) { setStatus('failed', '需要 HTTPS 和支持目录访问的浏览器'); return }
         choosing = true
+        clearAutoClose()
+        dialogOpen = true
+        setStatus('picking', '等待选择目录…')
         try {
           const root = await window.showDirectoryPicker({ mode: 'readwrite' })
           if (disposed) return
@@ -305,7 +350,7 @@ window.__ModuleLoader__.load({
           active = share
           if (disposed) { await stop(); return }
           if (!opened.mountpoint) throw failure('EIO', 'invalid open mountpoint')
-          show(`挂载中…（${root.name}，worker 将重启）`)
+          setStatus('mounting', `挂载中…（${root.name}，worker 将重启）`)
           // The poll loop must already be answering before ANYTHING asks the worker about
           // this path. The mount is visible inside the tenant's sandbox (mount propagation
           // carries it into the running worker namespace), so the worker's own
@@ -319,7 +364,7 @@ window.__ModuleLoader__.load({
             const priorGeneration = ctx.connection.generation.getSnapshot()?.id
             const activated = await call('activate', { token: share.token }, 55000, share.controller.signal)
             if (!live(share)) return
-            show('挂载完成；等待 worker 重连…')
+            setStatus('activating', '挂载完成；等待 worker 重连…')
             await awaitReconnect(share, priorGeneration)
             if (!live(share)) return
             try {
@@ -328,7 +373,10 @@ window.__ModuleLoader__.load({
             } catch { ctx.logger?.warn?.('browser-workspace: workspace rename failed') }
             if (!live(share)) return
             await ctx.uiWorkspace.connectWorkspace(workspace.workspaceId)
-            if (live(share)) show(`已挂载 ${root.name}（读写）；点击断开`)
+            if (live(share)) {
+              setStatus('mounted', `已挂载 ${root.name}（读写）；点击断开`)
+              if (dialogOpen) scheduleAutoClose()
+            }
           } catch (error) {
             await forgetWorkspace(workspace)
             throw error
@@ -336,30 +384,72 @@ window.__ModuleLoader__.load({
         } catch (error) {
           // AbortError is harmless only when the picker was cancelled before open;
           // an activation timeout still requires cleanup of the retained token.
-          if (active) { if (await stop()) show(`挂载失败：${error.message || String(error)}`) }
-          else if (error.name !== 'AbortError') show(`挂载失败：${error.message || String(error)}`)
+          if (active) { if (await stop()) setStatus('failed', `挂载失败：${error.message || String(error)}`) }
+          // A cancelled picker changed nothing: no capability, no mount, no failure to
+          // report — the row goes back to exactly what it said before the click.
+          else if (error.name === 'AbortError') { closeDialog(); setStatus('idle', '') }
+          else setStatus('failed', `挂载失败：${error.message || String(error)}`)
         } finally { choosing = false }
       }
-      // The sidebar entry: one row, same shape as the ssh-workspace one above it. The click
-      // is the whole gesture — no consent step, no dialog, no second confirmation.
-      function Action() {
+      // The sidebar entry: one row, stacked directly above the ssh-workspace one. The click
+      // is the whole gesture — no consent step, no second confirmation.
+      function Action({ wide } = {}) {
         const [, update] = React.useState(0)
         React.useEffect(() => { const listener = () => update(n => n + 1); listeners.add(listener); return () => listeners.delete(listener) }, [])
+        // The collapsed rail is one icon column: the text cannot fit there, so it is dropped
+        // and the row's tooltip carries the state instead.
+        const rail = wide === false
         return React.createElement('button', {
           type: 'button',
-          className: 'dshgw-bw-action',
+          className: rail ? 'dshgw-bw-action dshgw-bw-action-rail' : 'dshgw-bw-action',
           title: entryTitle(),
           'aria-pressed': active !== null,
-          'aria-label': note === '' ? '浏览器工作区' : `浏览器工作区：${note}`,
+          'aria-label': status.text === '' ? '浏览器工作区' : `浏览器工作区：${status.text}`,
+          'data-dshgw-state': status.phase,
           onClick: choose,
         },
         React.createElement('span', { 'aria-hidden': 'true' }, '🖥'),
         React.createElement('span', { className: 'dshgw-bw-label' }, '浏览器工作区'),
-        note === '' ? null : React.createElement('span', { className: 'dshgw-bw-state' }, note))
+        status.text === '' ? null : React.createElement('span', { className: 'dshgw-bw-state' }, status.text))
       }
-      // order 90 keeps this row above the ssh-workspace entry (order 100).
+      // The mount dialog: the same status the row carries, large enough to read, in the
+      // frame-wide overlay list slot. It closes itself on success (AUTO_CLOSE_MS) and stays
+      // open on failure until a person dismisses it; dismissing it never cancels the mount,
+      // because the row keeps reporting the real state either way.
+      function Dialog() {
+        const [, update] = React.useState(0)
+        React.useEffect(() => { const listener = () => update(n => n + 1); listeners.add(listener); return () => listeners.delete(listener) }, [])
+        if (!dialogOpen) return null
+        const failed = status.phase === 'failed'
+        const mounted = status.phase === 'mounted'
+        return React.createElement('div', {
+          className: 'dshgw-bw-backdrop',
+          style: { pointerEvents: 'auto' },
+          role: 'dialog',
+          'aria-modal': 'true',
+          'aria-label': '浏览器工作区',
+          'data-dshgw-dialog': 'browser-workspace',
+          onClick: (event) => { if (event.target === event.currentTarget) closeDialog() },
+        }, React.createElement('div', { className: 'dshgw-bw-dialog' }, [
+          React.createElement('h2', { key: 'title' }, '浏览器工作区'),
+          React.createElement('p', { className: 'hint', key: 'hint' }, WARNING),
+          React.createElement('div', {
+            key: 'status',
+            className: failed ? 'dshgw-bw-error' : mounted ? 'dshgw-bw-notice' : 'dshgw-bw-status',
+            role: 'status',
+            'aria-live': 'polite',
+          }, status.text === '' ? '准备中…' : status.text),
+          mounted ? React.createElement('p', { className: 'dshgw-bw-muted', key: 'auto' }, '成功：窗口会自行关闭，不需要手动关闭。') : null,
+          failed ? React.createElement('p', { className: 'dshgw-bw-muted', key: 'retry' }, '修复后可以再点一次侧栏那一行重试。') : null,
+          React.createElement('div', { className: 'dshgw-bw-footer', key: 'footer' },
+            React.createElement('button', { key: 'close', type: 'button', onClick: closeDialog }, '关闭')),
+        ]))
+      }
+      // order 90 keeps this row above the ssh-workspace entry (order 100); order 210 keeps
+      // this dialog above the ssh-workspace one (200) when both happen to be open.
       ctx.effect(() => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'browser-workspace', order: 90, label: '浏览器工作区' }, Action)), 'browser-workspace: sidebar entry')
-      ctx.effect(() => () => { disposed = true; void stop(); listeners.clear() }, 'browser-workspace: cleanup')
+      ctx.effect(() => ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'browser-workspace-dialog', order: 210, label: '浏览器工作区' }, Dialog)), 'browser-workspace: mount dialog')
+      ctx.effect(() => () => { disposed = true; clearAutoClose(); void stop(); listeners.clear() }, 'browser-workspace: cleanup')
     }
     // 'remote' AND 'remote.workspace' are both required: Cordis resolves the dotted name
     // as its own service, but every `ctx.remote.workspace.*` call below first reads the
@@ -367,6 +457,6 @@ window.__ModuleLoader__.load({
     // `cannot get property "remote" without inject` inside a real DSH GUI (the same pair
     // @deepseek-ai/dsh-api-workspace-controller declares). A mocked ctx that hands the
     // plugin a ready-made `remote` object cannot catch this.
-    return { inject: ['slots', 'connection', 'remote', 'remote.workspace', 'uiWorkspace'], apply, createExecutor, checkRelativePath, createTransport, errorOf }
+    return { inject: ['slots', 'connection', 'remote', 'remote.workspace', 'uiWorkspace'], apply, createExecutor, checkRelativePath, createTransport, errorOf, AUTO_CLOSE_MS }
   },
 })

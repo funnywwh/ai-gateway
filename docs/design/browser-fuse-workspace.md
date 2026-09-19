@@ -38,7 +38,7 @@ deploy:
 
 要求：Linux、可用 `/dev/fuse`、`fusermount3`（兼容清理 helper 为 `fusermount`），网关运行账号能用户态挂载；浏览器使用 HTTPS/localhost 且支持 File System Access API。**不会向租户 sandbox 增加 /dev/fuse 或权限能力。**
 
-操作：侧栏「浏览器工作区」→（单击即打开目录选择器，无二次确认）授权目录 → 网关建立 `<workspace>/browser/<random-id>` → 浏览器开始响应文件请求 → activate 验证根并重启该账号 worker → 等待 DSH 连接恢复 → 注册并打开工作区。侧栏行与 ssh 工作区同一形态并排在其上方（`sidebar.footer.action`，order 90 对 100）；风险提示写在行的 tooltip 与状态里，不再作为点击前的确认步骤——目录选择器需要 transient user activation，多一次点击或阻塞对话框都会先耗尽它。
+操作：侧栏「浏览器工作区」→（单击即打开目录选择器，无二次确认）授权目录 → 弹出状态窗口 → 网关建立 `<workspace>/browser/<random-id>` → 浏览器开始响应文件请求 → activate 验证根并重启该账号 worker → 等待 DSH 连接恢复 → 注册并打开工作区。侧栏的浏览器工作区与 SSH 工作区在同一 footer slot 中上下两行（`sidebar.footer.action`，order 90 对 100），浏览器行不用状态点，状态由行注记、`data-dshgw-state` 与状态窗口以文字承载；成功状态窗口约 1.5 秒后自动关闭，失败窗口保留供用户阅读。风险提示写在行的 tooltip、状态窗口与状态里，不再作为点击前的确认步骤——目录选择器需要 transient user activation，多一次点击或阻塞对话框都会先耗尽它。
 
 挂载/卸载可能中断该账号其他正在执行的任务。页面必须保持打开；关闭、断网或撤销权限会导致 I/O 失败，不能把浏览器目录当作永远在线的远程磁盘。重新选择目录会创建新的挂载。
 

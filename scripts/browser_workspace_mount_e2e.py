@@ -230,6 +230,11 @@ def config_document(args, root: Path, template_home: Path, aigw_base_url: str) -
             "worker_user": pwd.getpwuid(os.geteuid()).pw_name,
         },
         "browser_workspaces": {"enabled": True},
+        # Both surfaces are on in the real deployment (dshgw.yaml), and the two sidebar rows
+        # are only a layout question when both exist: this fixture mirrors that shape so the
+        # run can assert the rows are stacked instead of squeezed side by side. No ssh key
+        # is seeded, so the ssh row renders in its "no identity yet" state and is never used.
+        "ssh_workspaces": {"enabled": True, "mount_subdir": "ssh"},
     }
 
 
@@ -272,7 +277,9 @@ PICKER_OVERRIDE = r'''(() => {
   return true;
 })()'''
 
-# The row is one compact button like the ssh-workspace one: icon, label, state note.
+# The row is one compact button stacked above the ssh-workspace one: icon, label, state
+# note. The data-dshgw-state phase attribute is the machine-readable part of the status; the
+# dialog is the mount window that closes itself on success.
 ROW = r'''(() => {
   const buttons = [...document.querySelectorAll('button')].filter(
     b => b.textContent.includes('浏览器工作区'));
@@ -283,8 +290,27 @@ ROW = r'''(() => {
   if (!b) return {found:false};
   const footer = b.closest('[class*="_footerActions"]');
   const box = b.getBoundingClientRect();
+  const dialog = document.querySelector('[data-dshgw-dialog="browser-workspace"]');
   return {found:!!footer, text:b.textContent.trim(), disabled:!!b.disabled,
+    state:b.dataset.dshgwState || null,
+    dialogOpen:!!dialog,
+    dialogText:dialog ? String(dialog.textContent || '').slice(0, 200) : null,
     x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2)};
+})()'''
+
+# The two sidebar rows must be two rows, not two halves of one: the shell renders the whole
+# slot as a flex row, so this is the assertion that the stacking rule actually took effect.
+ROWS = r'''(() => {
+  const rect = el => { const r = el.getBoundingClientRect();
+    return {x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height)} };
+  const bw = document.querySelector('.dshgw-bw-action');
+  const ssh = document.querySelector('.dshgw-ssh-action');
+  if (!bw || !ssh) return {found:false, browser:!!bw, ssh:!!ssh};
+  const a = rect(bw), b = rect(ssh);
+  const footer = bw.closest('[class*="_footerActions"]');
+  return {found:true, browser:a, ssh:b, footer: footer ? rect(footer) : null,
+    stacked: a.y + a.h <= b.y + 1 && Math.abs(a.x - b.x) <= 1 && Math.abs(a.w - b.w) <= 1,
+    overlapX: Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)};
 })()'''
 
 # Where to click: the row itself must be the hit target, or a modal mask would swallow it.
@@ -651,6 +677,17 @@ def main() -> int:
             raise AssertionError("the 浏览器工作区 row never appeared in the tenant GUI")
         note("the 浏览器工作区 row is present and enabled in the real tenant GUI")
 
+        # ── the two sidebar rows are two rows, not two halves of one ─────────────────
+        # The shell renders `sidebar.footer.action` as a flex ROW, so two registrations share
+        # the foot and each is squeezed to half its width. Both plugins ship the rule that
+        # stacks that container; this is the only place that can prove it really applies.
+        rows = wait_for(lambda: (lambda v: v if v.get("found") else None)(cdp.evaluate(ROWS)), 20, "both sidebar rows to render")
+        if not rows.get("stacked"):
+            raise AssertionError(f"the browser and ssh workspace rows are not stacked: {rows}")
+        if rows["browser"]["y"] >= rows["ssh"]["y"]:
+            raise AssertionError(f"the browser workspace row is not above the ssh one: {rows}")
+        note(f"the browser row ({rows['browser']}) sits directly above the ssh row ({rows['ssh']}), same left and width")
+
         # A file the browser owns BEFORE the mount exists: its contents must appear
         # through the FUSE mount, which is what proves the I/O really round-trips.
         wrote = cdp.evaluate(browser_write(BROWSER_FILE, BROWSER_TEXT), await_promise=True)
@@ -664,15 +701,23 @@ def main() -> int:
 
         deadline = time.time() + 180
         row_state = None
+        # The mount dialog has to be observed while the mount runs, and it has to be gone on
+        # its own afterwards: sampling every half second is what catches both.
+        dialog_seen = False
+        dialog_texts = []
         while time.time() < deadline:
             value = cdp.evaluate(ROW)
             text = value.get("text", "") if value.get("found") else ""
+            if value.get("dialogOpen"):
+                dialog_seen = True
+                if value.get("dialogText") not in dialog_texts:
+                    dialog_texts.append(value.get("dialogText"))
             if "已挂载" in text:
                 row_state = value
                 break
             if any(bad in text for bad in ("挂载失败", "需要 HTTPS", "已断线", "清理未确认")):
                 raise AssertionError("the row refused the mount: " + text + " | " + diagnose(cdp, root))
-            time.sleep(2)
+            time.sleep(0.5)
         if row_state is None:
             raise AssertionError("the row never reported 已挂载: " + diagnose(cdp, root))
         picker = cdp.evaluate(PICKER_STATE)
@@ -686,6 +731,21 @@ def main() -> int:
             raise AssertionError(f"the replaced handle is not a real granted FileSystemDirectoryHandle: {picker}")
         note(f"one real click reached the picker once with activation intact ({picker['mode']}, {picker['permission']})")
         note(f"the sidebar row reports: {row_state['text']}")
+        if not dialog_seen:
+            raise AssertionError(f"the mount dialog was never seen while mounting: {dialog_texts}")
+        note("the mount dialog reported progress while mounting, e.g. " + " | ".join(t for t in dialog_texts if t)[:160])
+
+        # ── the row's status phase, and the dialog closing itself ────────────────────
+        if row_state.get("state") != "mounted":
+            raise AssertionError(f"the row does not report the mounted phase: {row_state}")
+        note(f"the row reports the mounted phase (state={row_state['state']})")
+        # Nothing clicks here: the success dialog closes itself. If it did not, its backdrop
+        # would also swallow the second click that detaches the mount later in this run.
+        closed = wait_for(lambda: (lambda v: v if v.get("found") and not v.get("dialogOpen") else None)(cdp.evaluate(ROW)), 15,
+                          "the success dialog to close itself")
+        if closed.get("state") != "mounted":
+            raise AssertionError(f"closing the dialog changed the row's status: {closed}")
+        note("the success dialog closed itself without a click, and the row still reports 已挂载")
         calls = cdp.evaluate("window.__bwFetch") or []
         sequence = [f"{c['url'].split('/')[-1]}:{c['status']}" for c in calls]
         if not any(c.startswith("open:200") for c in sequence) or not any(c.startswith("activate:200") for c in sequence):
@@ -790,7 +850,11 @@ def main() -> int:
         # ── clicking the row again detaches the mount ────────────────────────────────
         point = wait_for(lambda: (lambda p: p if p.get("found") else None)(cdp.evaluate(HIT_POINT)), 15, "the row to be clickable again")
         cdp.click(point["x"], point["y"])
-        wait_for(lambda: (lambda v: v if "已断开" in v.get("text", "") else None)(cdp.evaluate(ROW)), 90, "the row to report 已断开")
+        detached = wait_for(lambda: (lambda v: v if "已断开" in v.get("text", "") else None)(cdp.evaluate(ROW)), 90, "the row to report 已断开")
+        # Disconnected is neither success nor failure: the phase must go back to idle, or
+        # the row would claim a mount that no longer exists.
+        if detached.get("state") != "idle":
+            raise AssertionError(f"the disconnected row still reports a mounted status: {detached}")
         wait_for(lambda: (mount_type(str(mountpoint)) == "") or None, 30, "the kernel to detach the mount")
         wait_for(lambda: (not mountpoint.exists()) or None, 30, "the gateway to remove the mount point")
         survived = cdp.evaluate(browser_read(BROWSER_FILE), await_promise=True)

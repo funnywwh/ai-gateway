@@ -132,6 +132,14 @@ python3 scripts/browser_workspace_ui_smoke.py \
   也不冒充整段授权流程。
 - 临时 DSH/Chromium 进程、profile 和工作目录全部清理，没有改动安装目录或现网配置。
 
+## 用户要求的 UI 形态（2026-09-19）
+
+- 浏览器工作区与 SSH 工作区都注册在 `sidebar.footer.action`；由于 DSH 的 list slot 会给每个注册项包一层无 class 的 `div`，两个插件共同用 `:has(> div > .dshgw-*-action)` 把共享 footer 从横向 flex 改成纵向，浏览器行在上、SSH 行在下。
+- 浏览器行不加状态点，改以行注记与 `data-dshgw-state` 承载状态（`mounted`/`failed`/其余）；SSH 行保持原有外观。
+- 选择目录后使用 `shell.overlay` 显示状态弹窗。成功状态等待约 1.5 秒后自动关闭；失败状态保留弹窗供用户阅读并手动关闭；取消系统 picker 不算失败且恢复点击前状态。
+- `ui.test.mjs` 覆盖两 slot 注册、状态相位、弹窗失败保留与成功自动关闭；真实 `browser_workspace_ui_smoke.py` PASS：真实 Chromium 中 footer computed `flex-direction: column`、一次可信点击仍以 activation 调用 readwrite picker，取消后弹窗关闭且行不变。
+- `browser_workspace_mount_e2e.py` PASS：同时启用 browser/SSH 两个 workspace 行，真实 FUSE 挂载期间观察到状态弹窗，挂载成功时行相位为 `mounted`，弹窗无需点击自行关闭，随后卸载仍成功。
+
 ## 测试发现并修复的关键问题
 
 - **UI 形态（用户要求，2026-09-19）**：侧栏入口原先是"第一次点击出风险文案、第二次点击才开选择器"的按钮，

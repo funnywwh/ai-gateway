@@ -41,6 +41,15 @@ window.__ModuleLoader__.load({
     const CSS = `
 .dshgw-ssh-action { display: flex; align-items: center; gap: 6px; width: 100%; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; padding: 6px 8px; border-radius: 6px; }
 .dshgw-ssh-action:hover { background: rgba(127,127,127,.14); }
+.dshgw-ssh-action-rail .dshgw-ssh-label { display: none; }
+/* The shell renders this whole slot as one flex ROW, which leaves this row and the
+   browser-workspace one sharing a foot that only fits one. A plugin owns no wrapper element
+   around its own row: the list slot wraps every registration in a classless div, so the
+   shell's container is TWO levels up, and :has() is the only selector that can reach it from
+   here. Both shapes are covered, and both rows ship this rule, so it holds whichever of the
+   two plugins a deployment enables. */
+div:has(> .dshgw-bw-action), div:has(> div > .dshgw-bw-action),
+div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-direction: column; }
 .dshgw-ssh-backdrop { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.45); z-index: 40; }
 .dshgw-ssh-dialog { width: min(720px, 92vw); max-height: 86vh; overflow: auto; background: var(--dsh-bg, #1b1c1f); color: var(--dsh-fg, #e6e6e6); border: 1px solid rgba(127,127,127,.35); border-radius: 10px; padding: 16px 18px; font-size: 13px; line-height: 1.5; }
 .dshgw-ssh-dialog h2 { margin: 0 0 4px; font-size: 15px; }
@@ -271,7 +280,7 @@ window.__ModuleLoader__.load({
       let pollTimer = null
 
       /** The sidebar-foot action: the entry point for the whole feature. */
-      function SidebarAction() {
+      function SidebarAction({ wide } = {}) {
         const current = React.useSyncExternalStore
           ? React.useSyncExternalStore((listener) => {
             listeners.add(listener)
@@ -280,7 +289,8 @@ window.__ModuleLoader__.load({
           : state
         return h('button', {
           type: 'button',
-          className: 'dshgw-ssh-action',
+          // The collapsed rail is one icon column: the label cannot fit there.
+          className: wide === false ? 'dshgw-ssh-action dshgw-ssh-action-rail' : 'dshgw-ssh-action',
           title: 'SSH 工作区',
           'aria-pressed': current.open,
           onClick: async () => {

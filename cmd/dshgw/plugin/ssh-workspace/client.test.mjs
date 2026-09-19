@@ -133,6 +133,12 @@ for (const entry of registered) {
 }
 check(styles.length === 1, 'the stylesheet is installed once')
 check(String(styles[0].dataset.pluginCss).startsWith('dshgw-ssh-workspace'), 'the stylesheet is namespaced by plugin')
+// The shell renders `sidebar.footer.action` as one flex row, which would squeeze this row
+// and the browser-workspace one into half the foot each; both plugins ship the rule that
+// stacks the container instead. The list slot wraps every registration in a classless div,
+// so the shell's container is two levels up from the row.
+check(/div:has\(> div > \.dshgw-bw-action\)[\s\S]*div:has\(> div > \.dshgw-ssh-action\)[\s\S]*flex-direction: column/.test(String(styles[0].textContent)),
+  'the stylesheet stacks the shared sidebar foot')
 
 // The dialog is closed until the action is used: rendering it must be a no-op, not a crash.
 const dialog = registered.find((entry) => entry.slot === 'shell.overlay').component
@@ -142,6 +148,9 @@ equal(dialog(), null, 'the dialog renders nothing while closed')
 const action = registered.find((entry) => entry.slot === 'sidebar.footer.action').component
 const element = action()
 equal(element.type, 'button', 'the sidebar entry is a button')
+equal(element.props.className, 'dshgw-ssh-action', 'the expanded sidebar shows the full row')
+// The collapsed rail is one icon column, where the label cannot fit.
+equal(action({ wide: false }).props.className, 'dshgw-ssh-action dshgw-ssh-action-rail', 'the rail drops the label')
 await element.props.onClick()
 deepEqual(calls.map((call) => call.endpoint), ['hosts', 'identityStatus', 'mounts'], 'opening the dialog loads hosts and mounts')
 check(calls.every((call) => call.channel === '/ssh-workspace'), 'every host call uses the plugin channel, not /api')
