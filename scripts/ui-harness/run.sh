@@ -25,7 +25,10 @@ REFRESH=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --views) VIEWS="$2"; shift 2 ;;
+    # Every view name up to the next option, so both spellings in the README work:
+    # `--views docs detail` and `--views "docs detail"`.
+    --views) VIEWS=""; shift
+      while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do VIEWS="${VIEWS:+$VIEWS }$1"; shift; done ;;
     --fixtures) FIXTURES="$2"; shift 2 ;;
     --refresh) REFRESH=1; shift ;;
     -h|--help) sed -n '2,20p' "$0"; exit 0 ;;

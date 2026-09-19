@@ -28,7 +28,7 @@
 
 ```sh
 scripts/ui-harness/run.sh                        # 全部视图
-scripts/ui-harness/run.sh --views "docs detail"  # 只跑指定视图（--views 只吃一个参数，多个视图要引号）
+scripts/ui-harness/run.sh --views docs detail    # 只跑指定视图（--views 后面可以跟多个名字）
 make ui-check                                    # 同 run.sh（在 Makefile 里）
 ```
 

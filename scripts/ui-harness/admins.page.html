@@ -71,7 +71,15 @@ window.fetch = async (url, options) => {
 
   if (path === '/auth/methods' && method === 'GET') {
     if (window.__noFeishu) return ok({ password: true, feishu: { enabled: false } });
-    return ok(fixture('/auth/methods') || { password: true, feishu: { enabled: false } });
+    const methods = fixture('/auth/methods') || { password: true, feishu: { enabled: false } };
+    // __noHint drops the optional hint field, which is the only shape in which "the page
+    // appends an optional node as null" is visible: our own endpoint always sends it.
+    if (window.__noHint && methods.feishu) {
+      const feishu = { ...methods.feishu };
+      delete feishu.hint;
+      return ok({ ...methods, feishu });
+    }
+    return ok(methods);
   }
   // The login view has no session, which is the whole point of it: app.js boots by asking
   // /auth/me, and a 401 is what puts the login card on screen.
@@ -260,6 +268,20 @@ try {
     // 它是整页导航而不是 fetch：渲染（随后点击也一样）都不会去请求那个 OAuth 入口地址。
     checks.feishuLoginNotFetched = (window.__calls || []).every((c) => !c.includes('/feishu/login'));
     checks.methodsAsked = called('GET', '/auth/methods');
+    // hint 是可选的：服务端没给这个字段时，卡片上不能多出一个 "null"（raw append() 会把
+    // null 变成文本节点）。这正是"我们自己的接口永远带着 hint"时看不见的那类 bug，所以
+    // 用另一个查询串再 import 一次 app.js——模块缓存按完整 URL 分键，于是 boot() 重跑一遍，
+    // 页面按一份"没有 hint"的回答重画。
+    window.__noHint = true;
+    await import('/js/app.js?no-hint=1');
+    await settle();
+    checks.noHintNoStrayNull = !appNode.textContent.includes('null');
+    checks.noHintKeepsEntry = !!inApp('飞书扫码登录') && !!inApp('登录')
+      && !!appNode.querySelector('input[autocomplete="username"]');
+    checks.noHintKeepsFormValue = (() => {
+      const box = appNode.querySelector('input[autocomplete="username"]');
+      return !!box && box.value === 'admin';
+    })();
     checks.noUnmatchedRequests = unmatched.length === 0;
     checks.noPageErrors = errors.length === 0;
     checks.sample = { calls: window.__calls || [], unmatched: unmatched.slice() };
