@@ -69,7 +69,14 @@ func (s *Service) ensureRecordDir() error {
 	return nil
 }
 
-type mountRecord struct{ ID, Tenant, Workspace, Path, State string }
+// mountRecord is one durable mount. Persistent marks a mount whose directory key came from
+// the client, which makes the mount point the stable virtual path of that local directory
+// rather than per-mount scratch: startup cleanup must release the mount but leave the empty
+// directory in place, exactly as a disconnect does.
+type mountRecord struct {
+	ID, Tenant, Workspace, Path, State string
+	Persistent                         bool
+}
 
 func (s *Service) recordPath(id string) string { return filepath.Join(s.recordDir, id+".json") }
 func (s *Service) writeRecord(r mountRecord) error {
@@ -151,7 +158,12 @@ func noSymlinkAncestors(path string) bool {
 	}
 }
 func validRecordPath(r mountRecord) bool {
-	if len(r.ID) != 48 || filepath.Base(r.ID) != r.ID {
+	// A client-supplied stable key is 32 hex characters; a mount without one keeps the
+	// original random 48-hex id.
+	if len(r.ID) != 48 && len(r.ID) != 32 {
+		return false
+	}
+	if filepath.Base(r.ID) != r.ID {
 		return false
 	}
 	if _, err := hex.DecodeString(r.ID); err != nil {
@@ -239,9 +251,14 @@ func (s *Service) CleanupStale() error {
 			errs = append(errs, er)
 			continue
 		}
-		if er = removeAbsentOK(r.Path); er != nil {
-			errs = append(errs, er)
-			continue
+		// A stable mount point is released only by an explicit purge: leaving the empty
+		// directory is what keeps the virtual path of that local directory (and the DSH
+		// workspace entry pointing at it) in place across a gateway restart.
+		if !r.Persistent {
+			if er = removeAbsentOK(r.Path); er != nil {
+				errs = append(errs, er)
+				continue
+			}
 		}
 		if er = removeAbsentOK(entry); er != nil {
 			errs = append(errs, er)

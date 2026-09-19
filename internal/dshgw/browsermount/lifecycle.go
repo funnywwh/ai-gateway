@@ -15,8 +15,17 @@ import (
 // binding worker, then unmount. lifecycle serializes activation and all retries.
 // No Service/share mutex is held across callbacks. The lifecycle mutex IS held:
 // restart callbacks must never call DropTenant (manager.Restart does not).
-func (s *Service) close(sh *share) error { return s.closeContext(context.Background(), sh, false) }
-func (s *Service) closeContext(ctx context.Context, sh *share, workerStopped bool) error {
+func (s *Service) close(sh *share) error {
+	return s.closeContext(context.Background(), sh, false, false)
+}
+
+// closeContext tears one mount down. purge releases a stable mount point for good (the
+// operator removed the folder); without it a share mounted with a stable directory key keeps
+// its mount point, because that empty directory IS the virtual path DSH's workspace entry
+// (and the sessions grouped under it) points at, and the next mount of the same key reuses
+// it. A share without a stable key behaves exactly as before: its mount point is per-mount
+// scratch and is always removed.
+func (s *Service) closeContext(ctx context.Context, sh *share, workerStopped, purge bool) error {
 	sh.disconnect()
 	sh.lifecycle.Lock()
 	defer sh.lifecycle.Unlock()
@@ -48,13 +57,13 @@ func (s *Service) closeContext(ctx context.Context, sh *share, workerStopped boo
 		}
 		sh.detached = true
 	}
-	return s.cleanupLocked(sh)
+	return s.cleanupLocked(sh, purge)
 }
 
 // cleanupLocked requires lifecycle and a disconnected share with no namespace
 // references. A failed unmount, directory removal or record removal stays
 // retryable; only fully successful cleanup creates a tombstone.
-func (s *Service) cleanupLocked(sh *share) error {
+func (s *Service) cleanupLocked(sh *share, purge bool) error {
 	if sh.cleaned {
 		return nil
 	}
@@ -67,7 +76,7 @@ func (s *Service) cleanupLocked(sh *share) error {
 		sh.closed = true
 		close(sh.done)
 	}
-	mounted, path := sh.mounted, sh.path
+	mounted, path, persistent := sh.mounted, sh.path, sh.persistent
 	sh.mu.Unlock()
 	if mounted != nil {
 		if err := mounted.Unmount(); err != nil {
@@ -77,7 +86,11 @@ func (s *Service) cleanupLocked(sh *share) error {
 		sh.mounted = nil
 		sh.mu.Unlock()
 	}
-	if path != "" {
+	// A stable mount point is the virtual path of a LOCAL directory: unmounting leaves it
+	// empty and reusable, and removing it would break the workspace entry that maps to it (a
+	// missing path also drops that workspace's sessions from DSH's membership view). Only an
+	// explicit purge, or a share that never had a stable key, releases the directory.
+	if path != "" && (!persistent || purge) {
 		if err := removeAbsentOK(path); err != nil {
 			return fmt.Errorf("remove mount directory: %w", err)
 		}
@@ -108,7 +121,7 @@ func (s *Service) cleanupLocked(sh *share) error {
 		}
 		delete(s.tombstones, oldest)
 	}
-	s.tombstones[sh.token] = tombstone{owner: sh.owner, tenant: sh.tenant.Name, until: now.Add(2 * time.Minute)}
+	s.tombstones[sh.token] = tombstone{owner: sh.owner, tenant: sh.tenant.Name, until: now.Add(2 * time.Minute), path: path, persistent: persistent}
 	return nil
 }
 func removeAbsentOK(path string) error {
@@ -161,7 +174,7 @@ func (s *Service) DropTenant(ctx context.Context, tenant string) error {
 	}
 	var errs []error
 	for _, sh := range all {
-		if err := s.closeContext(ctx, sh, true); err != nil {
+		if err := s.closeContext(ctx, sh, true, false); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -222,7 +235,7 @@ func (s *Service) expire(ctx context.Context) error {
 		expired := sh.closed || (!waiting && (disconnected || time.Since(sh.seen) > lease))
 		sh.mu.Unlock()
 		if expired {
-			if err := s.closeContext(ctx, sh, false); err != nil {
+			if err := s.closeContext(ctx, sh, false, false); err != nil {
 				errs = append(errs, err)
 			}
 		}

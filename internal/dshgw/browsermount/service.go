@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,41 @@ const reconnectGrace = 45 * time.Second
 
 const browserFSName = "dshgw-browser-workspace"
 
+// maxMountsPerTenant bounds how many browser directories one account may have mounted at
+// once. Every mount is one long-poll connection held by the page, one FUSE server and one
+// entry in the worker's bind list, so the bound is what keeps a page from starving its own
+// origin: a browser opens at most six concurrent connections per origin over HTTP/1.1.
+//
+// The limit is deliberately separate from the global share cap: exceeding it is an ordinary
+// user-facing condition ("close one of your directories first"), not a gateway failure, and
+// the client turns the message below into that sentence.
+const maxMountsPerTenant = 4
+
+// errPerAccountMountLimit is returned by open; the client matches this text to explain the
+// limit to the operator in their own words.
+func errPerAccountMountLimit() error {
+	return fmt.Errorf("per-account browser directory limit reached: %d", maxMountsPerTenant)
+}
+
+// directoryKeyRE is the one shape a client-supplied stable directory key may have: 32
+// lowercase hex characters. The key becomes the mount point's basename, so anything that
+// could traverse, hide, or collide with the container itself is refused here rather than
+// sanitised silently.
+var directoryKeyRE = regexp.MustCompile(`^[a-f0-9]{32}$`)
+
+// errDuplicateDirectoryKey is what open answers when a share still holds that key — live, or
+// waiting out its reconnect grace. It is refused instead of mounted twice: two mounts at one
+// path would let two browsers write the same local directory through the kernel at once, and
+// the second FUSE mount would land on a directory that is already a mount point.
+//
+// A stable key is what makes the virtual path a mapping of the LOCAL directory rather than of
+// one mount: the same saved folder always mounts at <workspace>/browser/<key>, so DSH's own
+// workspace entry (which is reused by canonical path) keeps its id, its title and its session
+// membership across disconnect/reconnect, page reloads and gateway restarts.
+func errDuplicateDirectoryKey() error {
+	return errors.New("directory key already mounted for this account")
+}
+
 // Mounted.Unmount must release the host mount and wait for its FUSE server.
 // Callers must first release ALL worker namespace references. We deliberately do
 // not wrap Unmount in disposable timeout goroutines: those leak stuck servers.
@@ -58,6 +94,11 @@ type Service struct {
 type tombstone struct {
 	owner, tenant string
 	until         time.Time
+	// path is the mount point this capability released. A stable mount point outlives its
+	// mount, so the operator deleting a folder AFTER disconnecting it has no live share left
+	// to purge through: the tombstone is what still knows which directory that key owned.
+	path       string
+	persistent bool
 }
 type pendingCall struct {
 	reply chan fs.Response
@@ -74,6 +115,11 @@ type share struct {
 	mounted                  Mounted
 	active, restartAttempted bool
 	closed                   bool
+	// persistent marks a share mounted with a client-supplied stable directory key: its
+	// mount point is the virtual path of that local directory and outlives the mount, so a
+	// disconnect only unmounts and never removes the path DSH's workspace entry points at.
+	// Only an explicit purge (the operator removing the folder) releases it.
+	persistent bool
 	// disconnectedAt is when the browser side went away while a reload could still bring it
 	// back. It is what turns a canceled poll from "this mount is finished" into "this mount
 	// is waiting", and it bounds that waiting: past reconnectGrace the mount is closed for
@@ -218,6 +264,13 @@ func (s *share) Call(ctx context.Context, req fs.Request) (fs.Response, error) {
 }
 
 // prepare creates only new directories under a trusted registry workspace.
+//
+// A stable directory key means the mount point outlives the mount that used it: after a
+// disconnect the same path is mounted again, which is what keeps DSH's workspace entry (and
+// the sessions grouped under it) valid. So an existing path is reused rather than rejected,
+// but only when it is exactly what this function would have created: a private, symlink-free
+// directory inside the private container. A leftover it would have to mount over — a foreign
+// symlink, a wider mode, or files it did not put there — is refused loudly.
 func prepare(workspace, id string) (string, error) {
 	if !filepath.IsAbs(workspace) || filepath.Clean(workspace) != workspace || workspace == "/" {
 		return "", errors.New("invalid workspace")
@@ -247,35 +300,101 @@ func prepare(workspace, id string) (string, error) {
 	}
 	path := filepath.Join(parent, id)
 	if err := os.Mkdir(path, 0700); err != nil {
-		return "", err
+		if !errors.Is(err, os.ErrExist) {
+			return "", err
+		}
+		if err := reusableMountPoint(path); err != nil {
+			return "", err
+		}
 	}
 	return path, nil
 }
+
+// reusableMountPoint accepts the directory a previous mount of the same key left behind.
+func reusableMountPoint(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
+		return fmt.Errorf("browser mount point %s is not a private directory", path)
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return err
+	}
+	// Unmounting a FUSE mount leaves the mount point empty, so anything here was written by
+	// something other than this service — mounting over it would hide it silently.
+	if len(entries) != 0 {
+		return fmt.Errorf("browser mount point %s is not empty", path)
+	}
+	return nil
+}
+
+// openRequest is one `open` handshake. Key is empty only for callers that do not need a
+// stable virtual path (tests, and any older client): then a fresh random id is generated and
+// the mount point is removed again when the mount ends, exactly as before stable keys.
+type openRequest struct {
+	Name     string
+	Writable bool
+	Key      string
+}
+
 func (s *Service) open(t registry.Tenant, owner, name string, writable bool) (*share, error) {
+	return s.openWith(t, owner, openRequest{Name: name, Writable: writable})
+}
+
+func (s *Service) openWith(t registry.Tenant, owner string, req openRequest) (*share, error) {
+	name, writable := req.Name, req.Writable
 	if name == "" || len(name) > 255 || strings.ContainsAny(name, "\x00\n\r") {
 		return nil, errors.New("invalid display name")
 	}
-	id, err := randomID()
-	if err != nil {
-		return nil, err
+	persistent := req.Key != ""
+	var id string
+	if persistent {
+		if !directoryKeyRE.MatchString(req.Key) {
+			return nil, errors.New("invalid directory key")
+		}
+		id = req.Key
+	} else {
+		var err error
+		if id, err = randomID(); err != nil {
+			return nil, err
+		}
 	}
 	token, err := randomID()
 	if err != nil {
 		return nil, err
 	}
-	sh := &share{id: id, token: token, owner: owner, tenant: t, writable: writable, seen: time.Now(), queue: make(chan fs.Request, 64), pending: make(map[string]pendingCall), done: make(chan struct{}), abort: make(chan struct{})}
+	sh := &share{id: id, token: token, owner: owner, tenant: t, writable: writable, persistent: persistent, seen: time.Now(), queue: make(chan fs.Request, 64), pending: make(map[string]pendingCall), done: make(chan struct{}), abort: make(chan struct{})}
 	sh.lifecycle.Lock()
 	defer sh.lifecycle.Unlock()
 	s.mu.Lock()
 	count := 0
 	for _, old := range s.shares {
-		if old.tenant.Name == t.Name {
-			count++
+		if old.tenant.Name != t.Name {
+			continue
 		}
+		// The key is the identity of the LOCAL directory, so a share that still holds it —
+		// serving, or waiting out its grace window — owns that path. Mounting the key again
+		// would stack a second FUSE mount on the same directory.
+		if old.id == id {
+			s.mu.Unlock()
+			return nil, errDuplicateDirectoryKey()
+		}
+		count++
 	}
-	if s.stopping || count >= 4 || len(s.shares) >= 128 {
+	if s.stopping || len(s.shares) >= 128 {
 		s.mu.Unlock()
-		return nil, errors.New("mount limit reached or service stopping")
+		return nil, errors.New("global mount limit reached or service stopping")
+	}
+	// The per-account limit is checked separately because it is a normal, explainable
+	// condition for the person who already has this many directories open, not a gateway
+	// failure. A mount waiting out its reconnect grace still counts: it holds a kernel mount
+	// and a mount point until it is resumed or reaped.
+	if count >= maxMountsPerTenant {
+		s.mu.Unlock()
+		return nil, errPerAccountMountLimit()
 	}
 	s.shares[token] = sh
 	s.mu.Unlock()
@@ -284,7 +403,7 @@ func (s *Service) open(t registry.Tenant, owner, name string, writable bool) (*s
 	sh.path = path
 	sh.mu.Unlock()
 	if err == nil {
-		err = s.writeRecord(mountRecord{ID: id, Tenant: t.Name, Workspace: t.Workspace, Path: path, State: "preparing"})
+		err = s.writeRecord(mountRecord{ID: id, Tenant: t.Name, Workspace: t.Workspace, Path: path, State: "preparing", Persistent: persistent})
 	}
 	if err == nil {
 		sh.mu.Lock()
@@ -299,7 +418,7 @@ func (s *Service) open(t registry.Tenant, owner, name string, writable bool) (*s
 			sh.mounted = mounted
 			sh.mu.Unlock()
 			if err == nil {
-				err = s.writeRecord(mountRecord{ID: id, Tenant: t.Name, Workspace: t.Workspace, Path: path, State: "ready"})
+				err = s.writeRecord(mountRecord{ID: id, Tenant: t.Name, Workspace: t.Workspace, Path: path, State: "ready", Persistent: persistent})
 			}
 		}
 	}
@@ -314,7 +433,7 @@ func (s *Service) open(t registry.Tenant, owner, name string, writable bool) (*s
 	if err != nil {
 		sh.disconnect()
 		// Never published; keep failed rollback in shares and on disk for retry.
-		return nil, errors.Join(err, s.cleanupLocked(sh))
+		return nil, errors.Join(err, s.cleanupLocked(sh, false))
 	}
 	return sh, nil
 }
@@ -454,12 +573,45 @@ func (s *Service) MountsFor(tenant string) []string {
 	return paths
 }
 
+// purgeTombstoned releases the mount point a finished capability left behind. It only ever
+// removes the private directory of a stable key inside this tenant's own browser container,
+// and only while no live share owns it: reusing a key is normal (the same local directory
+// mounted again), and a stale capability must never delete the directory a live mount serves.
+func (s *Service) purgeTombstoned(t registry.Tenant, ts tombstone) error {
+	if !ts.persistent || ts.path == "" {
+		return nil
+	}
+	root := filepath.Join(t.Workspace, "browser")
+	// The path must be a direct child of this tenant's own mount container: a tombstone is
+	// internal state, but it is still not authority to remove an arbitrary directory.
+	if filepath.Dir(ts.path) != root || filepath.Base(ts.path) == "" || len(ts.path) <= len(root) {
+		return errors.New("refusing to purge a mount point outside the browser container")
+	}
+	s.mu.Lock()
+	for _, sh := range s.shares {
+		if sh.tenant.Name == t.Name && sh.id == filepath.Base(ts.path) {
+			s.mu.Unlock()
+			return nil
+		}
+	}
+	s.mu.Unlock()
+	return removeAbsentOK(ts.path)
+}
+
 type payload struct {
 	Token    string      `json:"token"`
 	Name     string      `json:"name"`
 	Writable bool        `json:"writable"`
 	ID       string      `json:"id"`
 	Result   fs.Response `json:"result"`
+	// Key is the client's stable identity of one LOCAL directory: the mount point becomes
+	// <workspace>/browser/<key>, so the same folder always maps to the same virtual path and
+	// DSH's workspace entry for it keeps its id, title and sessions. Absent means a fresh
+	// random id (an older client), whose mount point is removed when the mount ends.
+	Key string `json:"key"`
+	// Purge is the operator removing the folder for good: the mount point and its record are
+	// released instead of kept for the next mount of the same key.
+	Purge bool `json:"purge"`
 }
 
 func (s *Service) ServeTenant(w http.ResponseWriter, r *http.Request, t registry.Tenant, owner string) {
@@ -494,7 +646,7 @@ func (s *Service) dispatch(ctx context.Context, op string, t registry.Tenant, ow
 		return map[string]any{"version": 1, "maxBytes": 1 << 20}, nil
 	}
 	if op == "open" {
-		sh, err := s.open(t, owner, p.Name, p.Writable)
+		sh, err := s.openWith(t, owner, openRequest{Name: p.Name, Writable: p.Writable, Key: p.Key})
 		if err != nil {
 			return nil, err
 		}
@@ -530,6 +682,11 @@ func (s *Service) dispatch(ctx context.Context, op string, t registry.Tenant, ow
 			}
 			s.mu.Unlock()
 			if ok && ts.tenant == t.Name && ts.owner == owner {
+				if p.Purge {
+					if err := s.purgeTombstoned(t, ts); err != nil {
+						return nil, err
+					}
+				}
 				return map[string]bool{"closed": true}, nil
 			}
 		}
@@ -657,7 +814,7 @@ func (s *Service) dispatch(ctx context.Context, op string, t registry.Tenant, ow
 		sh.mu.Unlock()
 		return map[string]string{"id": sh.id, "mountpoint": path}, nil
 	case "close":
-		if err := s.closeContext(ctx, sh, false); err != nil {
+		if err := s.closeContext(ctx, sh, false, p.Purge); err != nil {
 			return nil, err
 		}
 		return map[string]bool{"closed": true}, nil
