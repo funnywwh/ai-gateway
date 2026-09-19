@@ -4022,3 +4022,24 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - [x] 本机 aigw-local.service、dshgw-verify.service 已重启并 active。`http://127.0.0.1:8088/version` 返回 2.1.0 / 15d6875；healthz/readyz HTTP 200；`/admin/ui/` 和读取 `/version` 的 `js/api.js` HTTP 200（资源与端点验收，非浏览器视觉验收）。
 - [x] dsh-tenant、dsh-colin、dsh-ranqiliang、dsh-lianchangliang 已认证页面及新版插件均 HTTP 200。原 aipc:/home/winger/ZT20Q 和 winger@192.168.190.123:2222 的 /home/vscode/lagenio_ai_chat_and_image 两处挂载恢复，已确认在账号沙箱内可见。
 - [x] aigw 启动日志无 ERROR；dshgw 重启窗口出现短暂 reverse proxy ERROR，worker ready 后访问验证正常。历史 verify1 缺 key/旧 profile 告警仍存在，未替它创建凭据。未修改当前 3080 Harness GUI。
+
+### v2.2.1 发布与部署记录（2026-09-19，本机 + gpt001）
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v2.2.1**（`VERSION` 2.2.0 → 2.2.1，tag `v2.2.1` 指向 `77979b4`）；档位 patch：只修缺陷，无对外形状变化 |
+| 本版内容 | ① M65 浏览器工作区的三个挂载缺陷（`0b2fd52`）② 飞书登录回调的跨站 Fetch Metadata 交接（`11223c9`，此前一直只在本机未提交的构建里运行，revision 标记 `f9759f7-feishu-handoff`） |
+| 构建 | `scripts/release.sh patch` + `make dshgw-build gwproxy-build plugin-example`：`bin/{aigw,dshgw,gwproxy}` 均为 `2.2.1 (revision 77979b4)`；控制台 minified + gzip（37 文件 578420→339390 B）；provider 插件重建并刷新到 `plugins/`（`examples/provider-*` 自 v0.12.3 起无改动，行为等价） |
+| 部署范围 | 用户指定「所有重建，重新部署」：本机三单元 + **gpt001**（跨 0.12.3 → 2.2.1） |
+| 回滚点（本机） | `data/prev/bin/{aigw.prev-running-2.2.0-f9759f7-feishu-handoff, dshgw.prev-running-2.2.0-f9759f7, gwproxy.prev-running-2.2.0-f9759f7}`（发布前**正在运行**的构建，从运行进程/构建缓存取，`-version` 自证）；插件回滚点 `plugins/aigw-provider-{codex,replay}.pre-2.2.1-20260919-144854`；索引与回滚命令见 `data/prev/README.md` |
+| 回滚点（gpt001） | `/opt/aigw/aigw.prev-20260919-145116`（0.12.3）、`/opt/aigw/plugins/provider-codex.pre-20260919-145116`、`/opt/aigw/data/aigw.db.pre-2.2.1-20260919-145116`（停服后整库快照） |
+
+**验证**（全部实测）：
+
+- 本机：`GET /version` → `{"revision":"77979b4","ui":"minified","ui_encoding":"gzip","version":"2.2.1"}`；`/healthz`、`/readyz` 200；`aigw-local`/`dshgw-verify`/`gwproxy-verify` 三个单元 active，重启后 `level=ERROR` **0 条**；门户 `:18300` 200、租户 origin 302；`gwproxy :8090` 的 `/version` 200、`/dshgw/` 302；11 个租户 worker 全部 ready
+- 真实 Chromium 走查本机线上租户 GUI：用 `dsh-tenant` 自己的 gateway key 经门户登录 → 进入 `https://chat.tirisen.hk:18302/` → 侧栏「浏览器工作区」行存在、tooltip 带完整风险文案、**JS 异常 0**。**没有点击该行**（点击会重启该账号 worker，属用户任务中断），所以这是"线上插件形态"的验收，不是线上挂载验收
+- 线上租户页面 4 条 console error 全部是既有的无凭据 manifest/CORS 噪声（`<link rel=manifest>` 不带 cookie → 门户 302 → CORS），与本次改动无关
+- gpt001：`https://mnl.iotalking.top/aigw/version` → `2.2.1 / 77979b4`；`/aigw/healthz`、`/aigw/readyz`、`/aigw/admin/ui/` 均 200；`systemctl show aigw` → `NRestarts=0`、`ActiveEnterTimestamp=2026-09-19 14:51:43`；启动日志 `aigw starting version=2.2.1 revision=77979b4`，近 10 分钟 `level=ERROR` **0 条**；管理 API 登录 200、`/auth/me`=admin、`/stats` version=2.2.1、providers 3、keys 17（数据完好）；部署的 `plugins/provider-codex` 就地执行输出 `protocol 1 / name provider-codex / version 0.1.0` 握手
+- 端到端挂载：`scripts/browser_workspace_mount_e2e.py` **PASS 23 步**（发布前用 `go build -o /tmp/dshgw-e2e` 的同一源码验证；本次发布的 `bin/dshgw` 即含这些修复）
+
+**未做/限制**：gpt001 的跨版本部署按"只换二进制"完成——配置解析预检通过（新二进制能解析 `/opt/aigw/config.yaml`，只在写 `/opt/aigw/data` 时因本机权限失败）、迁移脚本全部为纯增量（无 DROP/RENAME，回滚到 0.12.3 不会因 schema 失败）、数据库在停服后整库快照；但**没有**对 gpt001 跑真实 codex 请求探测（避免消耗订阅额度与触发 refresh_token 轮换），插件进程按需启动；仓库未推送远程。
