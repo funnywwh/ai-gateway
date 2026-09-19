@@ -4127,6 +4127,11 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
       120 秒、单次兑换、绑定一个管理员），浏览器到控制台自己 origin 的 `/admin/feishu/session` 兑换；
       新增 `feishu.console_url` 说明控制台在浏览器里的地址（`GW_FEISHU_CONSOLE_URL` 可覆盖）。
       同主机名仍走直接写 cookie 的路径。票据与门户票据同密钥不同 mode，两侧互不接受
+- [x] **升级后的既有部署行为已在本机线上确认**：`bootstrap.admin` 那一行在 `GET /admin/api/v1/admin-users`
+      里带 `bootstrap=true`（role=admin、status=active、未绑飞书），控制台列表按这一位显示徽章与悬停说明；
+      删除它会被拒（用另一个管理员会话删 → 409「this account is recreated from bootstrap.admin on every start;
+      remove it there, or disable it here」，用自己的会话删 → 409「you cannot delete the administrator account
+      you are signed in as」），被拒的写不产生审计行；临时验收账号随后删除，列表回到 1 行
 - [ ] 真机验收（手机扫码、真正发一条邀请给同事）见 `docs/TODO.md` M66 小节
 
 ### v2.5.0 + v2.5.1 发布与部署记录（2026-09-19，本机三单元；gpt001 未部署）

@@ -634,5 +634,15 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
       随后在登出状态下点「飞书扫码登录」再进一次；再把同一链接重开确认提示「已失效」
 - [ ] **真机验收（拒绝面）**：用一个只绑定了 API Key 的飞书账号走控制台登录 → 必须看到「尚未绑定任何
       管理员账号」且拿不到会话；把一个管理员「停用」后确认它已登录的浏览器立刻掉线
-- [ ] **观察项**：既有部署升级后 `bootstrap.admin` 那一行在列表里标 `bootstrap`（不可删除、口令会被重启覆盖），
-      需要在真机上确认提示文案与实际行为一致
+
+## 工具：`make verify` 的 `./...` 会遍历 `./data`
+
+M66 验收期间发现：`make vet` / `make test`（内部是 `go vet ./...` / `go test ./...`）会把工作区的 `./data`
+也走一遍，而 M63 起运行态数据就落在那里（本机是 6.2 GB 库 + 备份，以及 dshgw state 下 GB 级的浏览器工作区
+FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...` 与 `go list ./data/...` 十几分钟不返回
+（进程停在 FUSE 读取上）；因此 `make verify` 在本机等同于挂住。M66 的验收改用显式包模式跑完了等价的
+`go vet` + `go test`（全绿），但 Makefile 本身没动，等确认后再改。
+
+- [ ] 把 Makefile 的 `vet` / `test` / `test-race` 改成显式包模式
+      （`./cmd/... ./internal/... ./pkg/... ./examples/...`），并在注释里写明为什么不用 `./...`；
+      顶层新增含 Go 包的目录时要同步这个列表（当前只有这四个）
