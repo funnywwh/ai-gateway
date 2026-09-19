@@ -4043,3 +4043,23 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - 端到端挂载：`scripts/browser_workspace_mount_e2e.py` **PASS 23 步**（发布前用 `go build -o /tmp/dshgw-e2e` 的同一源码验证；本次发布的 `bin/dshgw` 即含这些修复）
 
 **未做/限制**：gpt001 的跨版本部署按"只换二进制"完成——配置解析预检通过（新二进制能解析 `/opt/aigw/config.yaml`，只在写 `/opt/aigw/data` 时因本机权限失败）、迁移脚本全部为纯增量（无 DROP/RENAME，回滚到 0.12.3 不会因 schema 失败）、数据库在停服后整库快照；但**没有**对 gpt001 跑真实 codex 请求探测（避免消耗订阅额度与触发 refresh_token 轮换），插件进程按需启动；仓库未推送远程。
+
+### v2.3.0 发布与部署记录（2026-09-19，本机三单元；gpt001 未部署）
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v2.3.0**（`VERSION` 2.2.1 → 2.3.0，tag `v2.3.0` 指向 `2306c22`）；档位 minor：新增对外端点 `resume` 与恢复语义，无破坏性变更 |
+| 本版内容 | 浏览器工作区不再「一次刷新即报废」：① 网关给死掉的 poll 一个 45s 宽限期（`reconnectGrace`），期间 `resume` 接回**同一个**内核挂载/挂载点，不重建、不重启 worker；宽限期内立即从所有 worker profile 排除；同一挂载只允许一条 poll 连接，被顶掉的旧页面收到 `directory revoked` ② 插件在 IndexedDB 存能力令牌+目录句柄，页面内断线**自动重连**（无刷新无点击），刷新/换标签页后**点击恢复**同一挂载（不再弹系统目录选择器）③ 见 `docs/browser-workspace-verification.md` 的实测表 |
+| 构建 | `scripts/release.sh minor` → `aigw 2.3.0 (revision 2306c22)`；`make dshgw-build gwproxy-build plugin-example` → `dshgw`/`gwproxy` 均 `2.3.0 (revision 2306c22)`；控制台 minified + gzip（37 文件 578420→339390 B，gzip 337029→134182 B） |
+| 部署范围 | 用户指定「部署本机」：仅本机三单元（`aigw-local`、`dshgw-verify`、`gwproxy-verify`）。**gpt001 未部署**（公网 `mnl.iotalking.top/aigw/version` 仍为 2.2.1 / 77979b4，属预期） |
+| 回滚点 | `data/prev/bin/{aigw,dshgw,gwproxy}.prev-running-2.2.1-77979b4`（发布前**正在运行**的构建，从 `/proc/<pid>/exe` 取；逐个 `-version` 自证 `2.2.1 (revision 77979b4)`）。回滚：`cp data/prev/bin/<file> bin/<name> && systemctl --user restart <unit>` |
+
+**验证**（全部实测）：
+
+- `http://127.0.0.1:8088/version` → `{"revision":"2306c22","ui":"minified","ui_encoding":"gzip","version":"2.3.0"}`；`/healthz`、`/readyz` 200；`/admin/ui/` 200
+- 三单元 `is-active` 均 active、`NRestarts=0`，且各自 `/proc/<pid>/exe` 指向 `bin/{aigw,dshgw,gwproxy}`（即新构建）
+- 门户 `:18300` 根路径（`--resolve chat.tirisen.hk`）200；租户 origin `:18302` 302；重启后 **6 个租户 worker**（dsh-tenant/dsh-colin/dsh-lianchangliang/dsh-ranqiliang/dsh-tenant/verify1）全部 `tenant worker ready`
+- `POST /browser-workspace/hello`（无会话）→ 403：新网关的浏览器工作区端点存在且仍受会话校验保护
+- 发布前用同一源码在一次性 fixture 上跑完三条恢复路径：`scripts/browser_workspace_reload_e2e.py` **PASS**（`control=ALIVE reconnect=ALIVE reload=DEAD restore=ALIVE reopen=ALIVE`，恢复时只调 `resume`、挂载 id/路径不变）；`scripts/browser_workspace_mount_e2e.py` 同源码 PASS；网关单测 + 插件 31 项测试全绿
+
+**未做/限制**：本机没有对**线上租户**做一次真实点击走查（点击侧栏会重启该账号 worker，可能中断正在运行的任务，需用户同意后再做），因此"线上租户形态"的恢复验收只到端点+构建+fixture 级别的证据；gpt001 未部署；仓库未推送远程。发布前 dshgw 日志里仍能看到历史（12:17）的浏览器挂载清理失败重试告警 `browser mount expiry cleanup failed … connection timed out`，属本次改动之前留下的记录（重启时无残留挂载需要 CleanupStale 处理）。
