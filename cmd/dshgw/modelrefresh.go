@@ -17,7 +17,7 @@ import (
 // keyValidator is the part of the aigw client the refresh needs. It is an
 // interface so the policy below is testable without an HTTP server.
 type keyValidator interface {
-	ValidateKey(ctx context.Context, key string) ([]string, error)
+	ValidateKey(ctx context.Context, key string) ([]aigw.Model, error)
 }
 
 // modelRefreshHook builds the function dshgw calls before starting a tenant's

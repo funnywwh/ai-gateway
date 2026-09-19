@@ -309,7 +309,13 @@ func baseDshChecks(rt config.DshRuntime) []Check {
 		{Name: "credentials-schema-and-mode", Required: true, Timeout: 40 * time.Second, Run: func(ctx context.Context) error {
 			live, err := startDshWithSetup(ctx, rt, func(home, _ string) error {
 				credentials := []byte("version: 1\nrefs:\n  AIGW_API_KEY: sk-contract-dummy\nrecords: {}\n")
-				settings := []byte("llm-pi-ai:\n  providers:\n    aigw:\n      apiKeyEnv: AIGW_API_KEY\n      api: openai-responses\n      baseURL: http://127.0.0.1:1/v1\n      models:\n        - id: contract-model\n          name: contract-model\n")
+				// The profile this fixture writes is the one dshgw renders for a tenant (M68),
+				// capability fields included. It matters here rather than in a unit test because
+				// dsh refuses an unserviceable llm-pi-ai section where it is written: a field name
+				// or level spelling this dsh does not accept would leave every tenant's provider
+				// unregistered, and only a real dsh can say so. The `"off"` key is quoted the way
+				// the renderer quotes it — YAML 1.1 parsers read a bare `off` as a boolean.
+				settings := []byte("llm-pi-ai:\n  providers:\n    aigw:\n      apiKeyEnv: AIGW_API_KEY\n      api: openai-responses\n      baseURL: http://127.0.0.1:1/v1\n      maxRequestImageBytes: 7340032\n      models:\n        - id: contract-model\n          name: contract-model\n          contextWindow: 1000000\n          maxTokens: 65536\n          input: [text, image]\n          reasoningEfforts:\n            \"off\": none\n            minimal: minimal\n            low: low\n            medium: medium\n            high: high\n            xhigh: xhigh\n            max: max\n        - id: contract-plain-model\n          name: contract-plain-model\n          reasoningEfforts: false\n")
 				if err := os.WriteFile(filepath.Join(home, ".credentials.yaml"), credentials, 0o600); err != nil {
 					return err
 				}

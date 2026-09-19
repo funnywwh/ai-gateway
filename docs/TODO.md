@@ -650,6 +650,18 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
       点退出回到门户登录页 → 原租户地址要求重新登录，同一浏览器里另一个租户仍在线；顺带看一眼折叠（rail）
       状态下只留图标的观感
 
+## M68 aigw 供应商的模型参数来自 `/v1/models`（能力 / 上下文 / 最大输出 / 图片 / 推理档位）
+
+设计：`docs/design/m68-aigw-model-capabilities.md`；规格：`docs/dshgw.md` §6a、`docs/api-responses.md`、
+`docs/routing.md` §4.1、`docs/api-providers.md` §2。定位：`GET /v1/models` 增补能力字段，dshgw 渲染租户
+`settings.yaml` 时按官方文档字段（`contextWindow`/`maxTokens`/`input`/`reasoningEfforts`）写入。
+
+- [x] 实现与单测（清单见设计文档 §4–§8；已完成记录见 `docs/todo_done.md` 同名小节）
+- [ ] **真机验收（剩下的一步）**：`scripts/local-run.sh restart` 让新二进制生效 → 运行态 `GET /v1/models`
+      带 `name`/`context_window`/`max_output_tokens`/`input_modalities`/`capabilities`/`reasoning`；
+      `bin/dshgw --config dshgw.yaml sync-models <tenant>` 后该租户 settings.yaml 的 aigw 段带参数；
+      浏览器里模型菜单出现推理档位、声明了 `capabilities.image` 的模型能附图片
+
 ## 工具：`make verify` 的 `./...` 会遍历 `./data`
 
 M66 验收期间发现：`make vet` / `make test`（内部是 `go vet ./...` / `go test ./...`）会把工作区的 `./data`

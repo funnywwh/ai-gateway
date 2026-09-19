@@ -4166,6 +4166,40 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
       作为行入口并加单测钉住
 - [ ] 侧栏观感与点「退出」后的浏览器跳转需人工看一眼（本机无浏览器自动化）见 `docs/TODO.md` M67 小节
 
+## M68 aigw 供应商的模型参数来自 `/v1/models`（能力 / 上下文 / 最大输出 / 图片 / 推理档位）
+
+设计：`docs/design/m68-aigw-model-capabilities.md`；规格：`docs/dshgw.md` §6a、`docs/api-responses.md`、
+`docs/routing.md` §4.1、`docs/api-providers.md` §2；真机验收项见 `docs/TODO.md` 同名小节。
+
+需求原话：「实现给 dsh 添加的 aigw 供应商的模型，根据 /v1/models 返回的数据设置模型的推理强度、上下文大小、
+最大输出、是否支持图片，等」＋「根据官方文档配置 aigw 的模型参数」。字段名与语义按 DSH 官方文档
+（`docs/user/guide/providers.md` 与生成的 `config-catalog.md`），事实一律经 `GET /v1/models` 披露。
+
+- [x] **aigw 数据面**：`GET /v1/models` 每项新增 `name`/`context_window`/`max_output_tokens`/
+      `input_modalities`/`capabilities`/`reasoning`（全部 `omitempty`，旧客户端零影响）。
+      `handleListModels` 改用 `Router.Plan`（拿到 canonical 名与已解析的模型级推理策略），
+      新增 `internal/routing/capabilities.go`：`EffectiveCapabilities`（原 `capabilitiesOf` 的导出改名）+
+      `ModelFactsFor`（能力取并集、容量取**已申报值的最小值**、`0`＝未申报且不参与）
+- [x] **图片能力键 `image`**：`featuresOf` 按请求体推导（新增 `responses.Request.HasImageInput`，先按
+      `input_image` 子串预筛再核对内容部分，工具结果里的图片同样算）；`degradation=strip`（默认）只标记降级，
+      `reject` 才过滤候选；`capabilities_override: inherit` 仍是逐模型逃生口
+- [x] **dshgw 侧**：`aigw.Client.ValidateKey` 返回 `[]aigw.Model`（除 id 外逐字段容错解析，一行坏数据不影响
+      Key 校验），签名贯通 tenancy / `cmd/dshgw` / proxy；`tenancy/modelparams.go` 把事实映射成官方字段，
+      `reasoningEfforts` 四态（全 7 档 / `force` 时不写 / `false` / 未知不写），有图片时写路由级
+      `maxRequestImageBytes`（新配置键 `image_request_max_bytes`，默认 7 MiB，低于 aigw 的 10 MiB 体限）
+- [x] 单测：`internal/routing/capabilities_test.go`（并集/最小值/override/未知）、
+      `internal/httpapi/model_capabilities_test.go`（端到端披露 + 图片特性）、
+      `internal/dshgw/aigw/client_test.go`（三态与容错）、`internal/dshgw/tenancy/modelparams_test.go`（四态渲染）、
+      `internal/dshgw/config/config_test.go`（新键默认值与下界）；签名跟改的既有测试一并更新
+- [x] **官方 schema 硬门**：golden `internal/dshgw/tenancy/testdata/aigw-settings.golden.yaml`（Go 逐字节比对）
+      由 `internal/dshgw/tenancy/settings_schema.test.mjs` 用**已安装 dsh 自己的** `Config` schema 校验，
+      含两个负例（`contextWindow: 0`、未知档名），已接入 `make dshgw-test`
+- [x] **真 dsh 契约**：`dshgw contract dsh` 的 settings 夹具换成带能力字段的 provider 段，本机 8/8 通过
+- [x] **控制面可发现性**：MCP/控制台的能力对象 schema 补齐路由实际读取的键（`tools`/`reasoning`/`image`/
+      `json_object`/`json_schema`/`parallel_tools`）；内建 provider 配置 schema 与供应商页提示补 `image`
+- [ ] 真机验收（重启 8088 后 `/v1/models` 实测、`sync-models` 产物、浏览器里的档位入口与图片附件）
+      见 `docs/TODO.md` M68 小节
+
 ### v2.5.0 + v2.5.1 发布与部署记录（2026-09-19，本机三单元；gpt001 未部署）
 
 本版内容：**M66 控制台多管理员与管理员飞书扫码登录**（功能提交 `ba9b74f`；设计

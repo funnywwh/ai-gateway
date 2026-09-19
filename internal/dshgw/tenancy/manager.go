@@ -176,7 +176,7 @@ type CreateOptions struct {
 	Account string
 }
 
-func (m *Manager) Create(ctx context.Context, name, key string, models []string, opt CreateOptions) (created registry.Tenant, err error) {
+func (m *Manager) Create(ctx context.Context, name, key string, models []aigw.Model, opt CreateOptions) (created registry.Tenant, err error) {
 	err = m.WithLifecycleLock(func() error {
 		var createErr error
 		created, createErr = m.createLocked(ctx, name, key, models, opt)
@@ -185,7 +185,7 @@ func (m *Manager) Create(ctx context.Context, name, key string, models []string,
 	return created, err
 }
 
-func (m *Manager) createLocked(ctx context.Context, name, key string, models []string, opt CreateOptions) (created registry.Tenant, err error) {
+func (m *Manager) createLocked(ctx context.Context, name, key string, models []aigw.Model, opt CreateOptions) (created registry.Tenant, err error) {
 	if !config.ValidTenantName(name) {
 		return created, fmt.Errorf("invalid tenant name %q", name)
 	}
@@ -651,7 +651,7 @@ func (m *Manager) setSuspended(name string, suspended bool) error {
 	})
 }
 
-func (m *Manager) RotateKey(ctx context.Context, t registry.Tenant, key string, models []string, keepPrevious bool) error {
+func (m *Manager) RotateKey(ctx context.Context, t registry.Tenant, key string, models []aigw.Model, keepPrevious bool) error {
 	return m.WithLifecycleLock(func() error {
 		current, ok := m.Registry.Get(t.Name)
 		if !ok {
@@ -664,7 +664,7 @@ func (m *Manager) RotateKey(ctx context.Context, t registry.Tenant, key string, 
 	})
 }
 
-func (m *Manager) rotateKeyLocked(ctx context.Context, t registry.Tenant, key string, models []string, keepPrevious bool) (err error) {
+func (m *Manager) rotateKeyLocked(ctx context.Context, t registry.Tenant, key string, models []aigw.Model, keepPrevious bool) (err error) {
 	key, err = aigw.NormalizeKey(key)
 	if err != nil {
 		return err
@@ -727,7 +727,7 @@ func (m *Manager) rotateKeyLocked(ctx context.Context, t registry.Tenant, key st
 			if err = rotateCredentialsLocked(credentialsPath, key); err != nil {
 				return err
 			}
-			if err = updateSettingsLocked(settingsPath, m.Config.AigwBaseURL, models); err != nil {
+			if err = updateSettingsLocked(m.Config, settingsPath, models); err != nil {
 				return err
 			}
 			if err = securefile.WriteAtomic(gatewayPath, []byte(key+"\n"), 0o640); err != nil {
@@ -784,7 +784,7 @@ func (m *Manager) BindPrefix(tenant, prefix string) error {
 //
 // An existing settings.yaml is never touched: while a tenant is provisioned its model
 // list belongs to SyncModels, and rewriting it here would fight that path.
-func (m *Manager) EnsureProvisioned(ctx context.Context, t registry.Tenant, key string, models []string) (bool, error) {
+func (m *Manager) EnsureProvisioned(ctx context.Context, t registry.Tenant, key string, models []aigw.Model) (bool, error) {
 	normalized, err := aigw.NormalizeKey(key)
 	if err != nil {
 		return false, err
@@ -849,7 +849,7 @@ func (m *Manager) EnsureProvisioned(ctx context.Context, t registry.Tenant, key 
 }
 
 // SyncModels updates a provisioned tenant's model list.
-func (m *Manager) SyncModels(t registry.Tenant, models []string) error {
+func (m *Manager) SyncModels(t registry.Tenant, models []aigw.Model) error {
 	return m.WithLifecycleLock(func() error {
 		current, ok := m.Registry.Get(t.Name)
 		if !ok {
@@ -878,7 +878,7 @@ func (m *Manager) SyncModels(t registry.Tenant, models []string) error {
 					err = errors.Join(err, fmt.Errorf("rollback registry: %w", restoreErr))
 				}
 			}()
-			if err = updateSettingsLocked(settingsPath, m.Config.AigwBaseURL, models); err != nil {
+			if err = updateSettingsLocked(m.Config, settingsPath, models); err != nil {
 				return err
 			}
 			updated := current

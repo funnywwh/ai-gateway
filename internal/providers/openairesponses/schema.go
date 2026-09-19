@@ -32,14 +32,14 @@ var configSchema = json.RawMessage(`{
     "timeout_s": {"type": "integer", "default": 120,
       "description": "HTTP 客户端超时（秒）。单次尝试的最终上限仍由路由的 per_attempt_timeout_s 决定。"},
     "models": {"type": "array",
-      "description": "上游模型目录，只能声明不能猜。元素字段：public（对客模型名）、upstream（上游模型名，省略则用 public）、context_window、max_output_tokens、capabilities{stream,tools,reasoning}。",
+      "description": "上游模型目录，只能声明不能猜。元素字段：public（对客模型名）、upstream（上游模型名，省略则用 public）、context_window、max_output_tokens、capabilities{stream,tools,reasoning,image}。",
       "items": {"type": "object", "properties": {
         "public": {"type": "string"},
         "upstream": {"type": "string"},
         "context_window": {"type": "integer"},
         "max_output_tokens": {"type": "integer"},
         "capabilities": {"type": "object",
-          "description": "能力申报决定路由：客户端请求的能力必须被候选声明，否则该候选被过滤。"}
+          "description": "能力申报决定路由：客户端请求的能力必须被候选声明，否则该候选被过滤；带 input_image 的请求要求 image。能力也会被 GET /v1/models 披露给客户端。"}
       }}}
   }
 }`)

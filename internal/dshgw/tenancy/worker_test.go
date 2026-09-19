@@ -72,7 +72,7 @@ func TestSandboxProfileReadyRejectsWorldReadableTenantRoots(t *testing.T) {
 
 func TestCreateStartsWorkerWithoutAnyPerTenantAccount(t *testing.T) {
 	m, runner, _ := managerFixture(t)
-	created, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", []string{"model"}, CreateOptions{})
+	created, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", models("model"), CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestCreateStartsWorkerWithoutAnyPerTenantAccount(t *testing.T) {
 func TestCreateRollsBackWorkerAndDataWhenReadinessFails(t *testing.T) {
 	m, runner, _ := managerFixture(t)
 	m.Probe = func(context.Context, registry.Tenant) error { return errors.New("never ready") }
-	_, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", []string{"model"}, CreateOptions{})
+	_, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", models("model"), CreateOptions{})
 	if err == nil {
 		t.Fatal("create succeeded despite a failing readiness probe")
 	}

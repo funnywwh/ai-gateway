@@ -120,8 +120,11 @@ func unenforcedObjectSchema(desc string) map[string]any {
 	return map[string]any{"type": "object", "description": desc}
 }
 
-// capabilitiesSchema is a provider model's capability declaration. The field names come from
-// pkg/pluginapi.Capabilities; all of them are optional booleans.
+// capabilitiesSchema is a provider model's capability declaration. Two vocabularies share
+// this one object: the provider-level keys of pkg/pluginapi.Capabilities, and the
+// request-feature keys routing matches a request against (`tools`, `reasoning`, `image`, …).
+// All of them are optional booleans, and an omitted key is unknown — which for a request
+// feature means "do not block the candidate", not "unsupported".
 func capabilitiesSchema() map[string]any {
 	return objectDocument(map[string]any{
 		"complete":         boolProp("是否支持非流式补全"),
@@ -132,6 +135,12 @@ func capabilitiesSchema() map[string]any {
 		"usage_delta":      boolProp("用量是否以增量形式上报"),
 		"usage_dimensions": boolProp("是否上报分维度用量（缓存命中/未命中、思考等）"),
 		"needs_login":      boolProp("是否需要交互式登录（如设备码）"),
+		"tools":            boolProp("是否支持工具调用（请求带 function 工具时按它筛候选）"),
+		"reasoning":        boolProp("是否支持思考（请求带 reasoning.effort 时按它筛候选，也是 /v1/models 披露推理档位的依据）"),
+		"image":            boolProp("是否支持图片输入（请求含 input_image 时按它筛候选，也是 /v1/models 的 input_modalities 依据）"),
+		"json_object":      boolProp("是否支持 text.format=json_object"),
+		"json_schema":      boolProp("是否支持 text.format=json_schema"),
+		"parallel_tools":   boolProp("是否支持并行工具调用"),
 	}, false,
 		"能力声明：上游模型支持什么。省略的键按未知处理，模型会按供应商声明的能力参与路由与降级判断。")
 }

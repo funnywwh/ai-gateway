@@ -27,6 +27,10 @@ edge_port_header: X-DSHGW-Port
 max_header_bytes: 131072
 max_sessions: 10000
 aigw_base_url: http://192.168.190.86:8088
+# 租户 dsh 一次请求里允许累积的 base64 图片载荷（M68，默认 7340032 = 7 MiB）。必须低于 aigw 的
+# server.max_body_bytes（默认 10485760）：网关对请求体是有界读取，超限时截断成 JSON 解析错误，
+# 而不是回一句「请求太大」。设了它 dsh 会把最旧的图片换成占位符，请求继续能成。
+# image_request_max_bytes: 7340032
 validate_timeout: 5s
 session_ttl: 168h
 key_revalidate: off              # off | per-request | interval:<seconds>

@@ -190,7 +190,7 @@ func TestCreateRejectsRetainedDestinationsBeforeMutation(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				_, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", []string{"m"}, CreateOptions{})
+				_, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", models("m"), CreateOptions{})
 				if err == nil || !strings.Contains(err.Error(), "already exists") {
 					t.Fatalf("expected preflight refusal, got %v", err)
 				}
@@ -241,11 +241,11 @@ func TestConcurrentManagersAllocateDistinctPorts(t *testing.T) {
 	}
 	results := make(chan result, 2)
 	go func() {
-		tenant, err := first.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", []string{"m"}, CreateOptions{})
+		tenant, err := first.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", models("m"), CreateOptions{})
 		results <- result{tenant, err}
 	}()
 	go func() {
-		tenant, err := second.Create(context.Background(), "bob", "sk-bbbbbbbbb-rest", []string{"m"}, CreateOptions{})
+		tenant, err := second.Create(context.Background(), "bob", "sk-bbbbbbbbb-rest", models("m"), CreateOptions{})
 		results <- result{tenant, err}
 	}()
 	one, two := <-results, <-results
@@ -266,7 +266,7 @@ func TestConcurrentManagersAllocateDistinctPorts(t *testing.T) {
 
 func TestBindPrefixRollsBackWhenDerivedRegistrySaveFails(t *testing.T) {
 	m, _, _ := managerFixture(t)
-	tenant, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", []string{"model"}, CreateOptions{})
+	tenant, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", models("model"), CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func TestBindPrefixRollsBackWhenDerivedRegistrySaveFails(t *testing.T) {
 
 func TestSyncModelsRollsBackSettingsAndRegistryWhenDerivedSaveFails(t *testing.T) {
 	m, _, _ := managerFixture(t)
-	tenant, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", []string{"model"}, CreateOptions{})
+	tenant, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", models("model"), CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +343,7 @@ func TestRotateAndSyncRejectRegistryPathsOutsideConfiguredRoots(t *testing.T) {
 	for _, operation := range []string{"rotate", "sync"} {
 		t.Run(operation, func(t *testing.T) {
 			m, runner, _ := managerFixture(t)
-			tenant, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", []string{"model"}, CreateOptions{})
+			tenant, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", models("model"), CreateOptions{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -356,9 +356,9 @@ func TestRotateAndSyncRejectRegistryPathsOutsideConfiguredRoots(t *testing.T) {
 			}
 			beforePID := runner.Status(tenant).PID
 			if operation == "rotate" {
-				err = m.RotateKey(context.Background(), tenant, "sk-bbbbbbbbb-rest", []string{"model"}, false)
+				err = m.RotateKey(context.Background(), tenant, "sk-bbbbbbbbb-rest", models("model"), false)
 			} else {
-				err = m.SyncModels(tenant, []string{"model"})
+				err = m.SyncModels(tenant, models("model"))
 			}
 			if err == nil || !strings.Contains(err.Error(), "paths do not match configured tenant roots") {
 				t.Fatalf("unsafe registry path accepted: %v", err)
@@ -388,7 +388,7 @@ func TestEnsureProvisionedCreatesMissingArtifactsAndIsIdempotent(t *testing.T) {
 	}
 	settings := filepath.Join(tenant.DshHome, "settings.yaml")
 
-	provisioned, err := m.EnsureProvisioned(context.Background(), tenant, "sk-aaaaaaaaa-rest", []string{"m-a", "m-b"})
+	provisioned, err := m.EnsureProvisioned(context.Background(), tenant, "sk-aaaaaaaaa-rest", models("m-a", "m-b"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +441,7 @@ func TestEnsureProvisionedCreatesMissingArtifactsAndIsIdempotent(t *testing.T) {
 	if err := os.WriteFile(settings, marked, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	provisioned, err = m.EnsureProvisioned(context.Background(), tenant, "sk-bbbbbbbbb-other", []string{"m-c"})
+	provisioned, err = m.EnsureProvisioned(context.Background(), tenant, "sk-bbbbbbbbb-other", models("m-c"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +465,7 @@ func TestEnsureProvisionedRequiresAKey(t *testing.T) {
 	}
 	// Without a key there is nothing to configure dsh with; refusing is what keeps
 	// the caller from writing a provider block that can never authenticate.
-	if _, err := m.EnsureProvisioned(context.Background(), tenant, "", []string{"m"}); err == nil {
+	if _, err := m.EnsureProvisioned(context.Background(), tenant, "", models("m")); err == nil {
 		t.Fatal("an empty key was accepted")
 	}
 }

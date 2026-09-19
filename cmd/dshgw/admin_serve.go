@@ -58,7 +58,7 @@ func (o managerOps) log() *slog.Logger {
 	return slog.Default()
 }
 
-func (o managerOps) models(ctx context.Context, key string) ([]string, bool, error) {
+func (o managerOps) models(ctx context.Context, key string) ([]aigw.Model, bool, error) {
 	models, err := o.validator.ValidateKey(ctx, key)
 	if err != nil {
 		return nil, false, err

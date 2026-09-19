@@ -23,7 +23,7 @@ func (h *browserHook) DropTenant(context.Context, string) error { h.drops++; ret
 
 func TestBrowserWorkspacePatchRefresh(t *testing.T) {
 	cfg, tenant := renderFixture(t)
-	arts, err := RenderTenantArtifacts(cfg, tenant, "sk-secret", []string{"m"}, TenantOptions{}, time.Now())
+	arts, err := RenderTenantArtifacts(cfg, tenant, "sk-secret", models("m"), TenantOptions{}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

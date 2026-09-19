@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/winger/ai-gateway/internal/dshgw/aigw"
 	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/handshake"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
@@ -173,7 +174,7 @@ func TestSettingsDescribeThroughGatewayWithRealWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := New(cfg, reg, store, handshake.FileSource{Dir: cfg.HandshakeDir}, &handshake.HTTPExchanger{},
-		validatorFunc(func(context.Context, string) ([]string, error) { return []string{"deepseek-flash"}, nil }))
+		validatorFunc(func(context.Context, string) ([]aigw.Model, error) { return []aigw.Model{{ID: "deepseek-flash"}}, nil }))
 	p.Authorizer = authorizerFunc(func(context.Context, string) (string, error) { return "alice", nil })
 
 	// The real exchanger needs the worker's exact startup URL; FileSource reads a file per

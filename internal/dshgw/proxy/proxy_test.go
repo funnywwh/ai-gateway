@@ -26,9 +26,9 @@ import (
 	"github.com/winger/ai-gateway/internal/dshgw/session"
 )
 
-type validatorFunc func(context.Context, string) ([]string, error)
+type validatorFunc func(context.Context, string) ([]aigw.Model, error)
 
-func (f validatorFunc) ValidateKey(ctx context.Context, key string) ([]string, error) {
+func (f validatorFunc) ValidateKey(ctx context.Context, key string) ([]aigw.Model, error) {
 	return f(ctx, key)
 }
 
@@ -115,7 +115,7 @@ func fixture(t *testing.T, worker http.Handler) (*Proxy, registry.Tenant, string
 		t.Fatal(err)
 	}
 	ex := &exchangeStub{value: "fresh"}
-	p := New(cfg, reg, store, sourceStub("http://127.0.0.1:1/?token=x"), ex, validatorFunc(func(context.Context, string) ([]string, error) { return []string{"m"}, nil }))
+	p := New(cfg, reg, store, sourceStub("http://127.0.0.1:1/?token=x"), ex, validatorFunc(func(context.Context, string) ([]aigw.Model, error) { return []aigw.Model{{ID: "m"}}, nil }))
 	p.Authorizer = authorizerFunc(func(context.Context, string) (string, error) { return "alice", nil })
 	p.KeySource = FileKeySource{Root: cfg.Deploy.TenantConfigRoot}
 	return p, tenant, up.URL, up
@@ -521,7 +521,7 @@ func TestPerRequestRevalidationRevokesInvalidSession(t *testing.T) {
 	defer upstream.Close()
 	p.Config.KeyRevalidate = "per-request"
 	p.KeySource = keySourceFunc(func(string) (string, error) { return "sk-aaaaaaaaa-rest", nil })
-	p.Validator = validatorFunc(func(context.Context, string) ([]string, error) { return nil, aigw.ErrInvalidKey })
+	p.Validator = validatorFunc(func(context.Context, string) ([]aigw.Model, error) { return nil, aigw.ErrInvalidKey })
 	token := issue(t, p, "alice", nil)
 	req := httptest.NewRequest(http.MethodGet, "/api", nil)
 	req.Host = "dsh.test:32601"
@@ -546,7 +546,7 @@ func TestIntervalRevalidationCachesResult(t *testing.T) {
 	p.Config.KeyRevalidate = "interval:60"
 	p.KeySource = keySourceFunc(func(string) (string, error) { return "sk-aaaaaaaaa-rest", nil })
 	calls := 0
-	p.Validator = validatorFunc(func(context.Context, string) ([]string, error) { calls++; return []string{"m"}, nil })
+	p.Validator = validatorFunc(func(context.Context, string) ([]aigw.Model, error) { calls++; return []aigw.Model{{ID: "m"}}, nil })
 	authority := net.JoinHostPort("127.0.0.1", strconv.Itoa(tenant.WorkerPort))
 	token := issue(t, p, "alice", &session.Upstream{Name: "dsh-auth-test", Value: "held", Authority: authority})
 	for i := 0; i < 2; i++ {

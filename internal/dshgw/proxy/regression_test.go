@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/winger/ai-gateway/internal/dshgw/aigw"
 	"github.com/winger/ai-gateway/internal/dshgw/session"
 )
 
@@ -58,7 +59,7 @@ func TestLoginRequiresOneBodyKeyNotURLKey(t *testing.T) {
 		{"/login", "key=sk-aaaaaaaaa-rest&key=sk-bbbbbbbbb-rest"},
 	} {
 		p, _, _, worker := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-		p.Validator = validatorFunc(func(context.Context, string) ([]string, error) {
+		p.Validator = validatorFunc(func(context.Context, string) ([]aigw.Model, error) {
 			t.Error("ambiguous key reached validator")
 			return nil, nil
 		})

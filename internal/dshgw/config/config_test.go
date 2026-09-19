@@ -73,6 +73,37 @@ func TestValidateSecurityBoundaries(t *testing.T) {
 	}
 }
 
+// The image payload bound is rendered into every tenant profile that serves a vision model
+// (M68), so its default must exist without the operator writing it, an explicit value must
+// win, and a value too small to carry one image must be refused rather than silently
+// pruning every attachment.
+func TestImageRequestMaxBytesDefaultsAndBounds(t *testing.T) {
+	// clamp mode (the default) requires the picker plugin path, as everywhere else.
+	base := "public_host: x.test\ndeploy:\n  plugin_path: " + filepath.Join(t.TempDir(), "picker-clamp.js") + "\n"
+	cfg, err := Load(writeConfig(t, base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ImageRequestMaxBytes != 7<<20 || cfg.EffectiveImageRequestMaxBytes() != 7<<20 {
+		t.Fatalf("default image bound = %d", cfg.ImageRequestMaxBytes)
+	}
+	// A config built by hand (as tests and the renderer's own unit tests do) resolves the
+	// same default through the accessor, so no tenant ever renders dsh's own 20 MiB value.
+	if bare := (&Config{}).EffectiveImageRequestMaxBytes(); bare != 7<<20 {
+		t.Fatalf("unvalidated config resolves %d, want the 7 MiB default", bare)
+	}
+	explicit, err := Load(writeConfig(t, base+"image_request_max_bytes: 3145728\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicit.ImageRequestMaxBytes != 3145728 {
+		t.Fatalf("explicit image bound = %d", explicit.ImageRequestMaxBytes)
+	}
+	if _, err := Load(writeConfig(t, base+"image_request_max_bytes: 1024\n")); err == nil {
+		t.Fatal("an image bound too small to carry one image was accepted")
+	}
+}
+
 func TestValidTenantName(t *testing.T) {
 	for _, ok := range []string{"a", "alice", "team-2"} {
 		if !ValidTenantName(ok) {

@@ -63,9 +63,13 @@ func checkAPIKeyHeader(ctx context.Context, baseURL, key string) error {
 			ids = append(ids, row.ID)
 		}
 	}
+	bearerIDs := make([]string, 0, len(bearer))
+	for _, model := range bearer {
+		bearerIDs = append(bearerIDs, model.ID)
+	}
 	sort.Strings(ids)
-	sort.Strings(bearer)
-	if !reflect.DeepEqual(ids, bearer) {
+	sort.Strings(bearerIDs)
+	if !reflect.DeepEqual(ids, bearerIDs) {
 		return errors.New("Bearer and X-API-Key produced different model lists; retry if model availability changed")
 	}
 	return nil

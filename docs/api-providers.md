@@ -75,9 +75,15 @@ Responses 表面比 chat completions 宽，翻译层负责把宽的那一侧收�
 （行为规格见 `docs/provider-ui.md`，字段说明与代码同源、由 `internal/providers/*/schema.go` 提供）。
 
 `capabilities` 决定路由：客户端请求 `reasoning.effort` 会要求候选具备 `reasoning`；
-`text.format=json_object` 要求 `json_object`，`text.format=json_schema` 要求 `json_schema`（两者独立）。
+`text.format=json_object` 要求 `json_object`，`text.format=json_schema` 要求 `json_schema`（两者独立）；
+**带图片的请求（内容里有 `input_image`）要求 `image`**（M68）。
 因此 DeepSeek 的模型应声明 `{"stream":true,"tools":true,"reasoning":true,"json_object":true}`，
 而**不要**声明 `json_schema`（`/chat/completions` 不支持，声明了会让请求带着降级标记继续打到上游）。
+
+`image` 需要人为判断：网关无法探测上游是否真的读图，所以它是**声明制**——上游确实接受图片输入才声明。
+漏声明时图片请求照常打过去（`strip` 只标记降级），而**错声明**会让客户端把图片附上去、再由上游在消息
+落库之后拒绝。同一份声明也是 `GET /v1/models` 里 `input_modalities` 的依据（见 `docs/api-responses.md`），
+因此它同时决定租户 dsh 里那个模型能不能附图片。
 
 ## 3. DeepSeek 接入（现成片段）
 

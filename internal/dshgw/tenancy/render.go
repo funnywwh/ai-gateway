@@ -12,12 +12,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/winger/ai-gateway/internal/dshgw/aigw"
 	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
 	"github.com/winger/ai-gateway/internal/dshgw/securefile"
@@ -45,7 +45,7 @@ func resolveOptions(cfg *config.Config, opt TenantOptions) TenantOptions {
 	return opt
 }
 
-func RenderTenantArtifacts(cfg *config.Config, t registry.Tenant, key string, models []string, opt TenantOptions, now time.Time) ([]Artifact, error) {
+func RenderTenantArtifacts(cfg *config.Config, t registry.Tenant, key string, models []aigw.Model, opt TenantOptions, now time.Time) ([]Artifact, error) {
 	opt = resolveOptions(cfg, opt)
 	if opt.DirectoryPicker != "clamp" && opt.DirectoryPicker != "browse" {
 		return nil, errors.New("directory picker must be clamp or browse")
@@ -53,7 +53,7 @@ func RenderTenantArtifacts(cfg *config.Config, t registry.Tenant, key string, mo
 	if opt.PluginBrowserFS != "on" && opt.PluginBrowserFS != "off" {
 		return nil, errors.New("plugin_browser_fs must be on or off")
 	}
-	settings, err := renderSettings(nil, cfg.AigwBaseURL, models)
+	settings, err := renderSettings(cfg, nil, models)
 	if err != nil {
 		return nil, err
 	}
@@ -91,10 +91,6 @@ func WriteArtifacts(artifacts []Artifact) error {
 	return nil
 }
 
-type providerModel struct {
-	ID   string `yaml:"id"`
-	Name string `yaml:"name,omitempty"`
-}
 type providerCompat struct {
 	SupportsStrictMode bool `yaml:"supportsStrictMode"`
 }
@@ -105,27 +101,21 @@ type aigwProvider struct {
 	BaseURL   string          `yaml:"baseURL"`
 	Models    []providerModel `yaml:"models"`
 	Compat    providerCompat  `yaml:"compat"`
+	// MaxRequestImageBytes is rendered only when a model on this route accepts images: it is
+	// the bound dsh prunes history against, and without it dsh's own 20 MiB default exceeds
+	// aigw's request body cap (10 MiB by default), where the gateway truncates rather than
+	// refusing with a size it can name (M68).
+	MaxRequestImageBytes int `yaml:"maxRequestImageBytes,omitempty"`
 }
 
-func renderSettings(existing []byte, base string, models []string) ([]byte, error) {
+func renderSettings(cfg *config.Config, existing []byte, models []aigw.Model) ([]byte, error) {
 	root := map[string]any{}
 	if len(existing) > 0 {
 		if err := yaml.Unmarshal(existing, &root); err != nil {
 			return nil, fmt.Errorf("decode existing settings: %w", err)
 		}
 	}
-	unique := append([]string(nil), models...)
-	sort.Strings(unique)
-	out := unique[:0]
-	for _, id := range unique {
-		if id != "" && (len(out) == 0 || out[len(out)-1] != id) {
-			out = append(out, id)
-		}
-	}
-	modelRows := make([]providerModel, 0, len(out))
-	for _, id := range out {
-		modelRows = append(modelRows, providerModel{ID: id, Name: id})
-	}
+	out := dshModels(models)
 	namespace := map[string]any{}
 	if value, exists := root["llm-pi-ai"]; exists {
 		var ok bool
@@ -159,28 +149,36 @@ func renderSettings(existing []byte, base string, models []string) ([]byte, erro
 		}
 		return yaml.Marshal(root)
 	}
-	providers["aigw"] = aigwProvider{APIKeyEnv: "AIGW_API_KEY", API: "openai-responses", BaseURL: strings.TrimRight(base, "/") + "/v1", Models: modelRows, Compat: providerCompat{SupportsStrictMode: true}}
+	provider := aigwProvider{
+		APIKeyEnv: "AIGW_API_KEY", API: "openai-responses",
+		BaseURL: strings.TrimRight(cfg.AigwBaseURL, "/") + "/v1",
+		Models:  out, Compat: providerCompat{SupportsStrictMode: true},
+	}
+	if anyImages(out) {
+		provider.MaxRequestImageBytes = cfg.EffectiveImageRequestMaxBytes()
+	}
+	providers["aigw"] = provider
 	namespace["providers"] = providers
 	root["llm-pi-ai"] = namespace
 	current, exists := root["agent-default-model"].(map[string]any)
 	if !exists || current["provider"] == "aigw" && !containsModel(out, fmt.Sprint(current["model"])) {
-		root["agent-default-model"] = map[string]any{"provider": "aigw", "model": out[0]}
+		root["agent-default-model"] = map[string]any{"provider": "aigw", "model": out[0].ID}
 	}
 	return yaml.Marshal(root)
 }
 
-func containsModel(models []string, want string) bool {
+func containsModel(models []providerModel, want string) bool {
 	for _, model := range models {
-		if model == want {
+		if model.ID == want {
 			return true
 		}
 	}
 	return false
 }
 
-func UpdateSettings(path, base string, models []string) error {
+func UpdateSettings(cfg *config.Config, path string, models []aigw.Model) error {
 	return withDSHFileLock(path, func() error {
-		return updateSettingsLocked(path, base, models)
+		return updateSettingsLocked(cfg, path, models)
 	})
 }
 
@@ -188,14 +186,14 @@ func UpdateSettings(path, base string, models []string) error {
 // Lifecycle operations use this lockless form while holding a larger
 // credentials/settings transaction lock, so rotation cannot observe a
 // half-updated pair of files.
-func updateSettingsLocked(path, base string, models []string) error {
+func updateSettingsLocked(cfg *config.Config, path string, models []aigw.Model) error {
 	var existing []byte
 	if data, err := securefile.ReadLimitedRegular(path, 16<<20); err == nil {
 		existing = data
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	data, err := renderSettings(existing, base, models)
+	data, err := renderSettings(cfg, existing, models)
 	if err != nil {
 		return err
 	}

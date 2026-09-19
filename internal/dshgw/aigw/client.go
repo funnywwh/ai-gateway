@@ -26,12 +26,51 @@ type Client struct {
 	BaseURL string
 	HTTP    *http.Client
 }
+
+// Model is one model aigw advertises for a key, with the facts it discloses about itself
+// (M68). Every field but ID is optional: an older aigw answers only the id, and the zero
+// value then means "not disclosed" rather than "unsupported", so a caller renders exactly
+// what it was told and nothing more.
+type Model struct {
+	// ID is the model name a request names.
+	ID string
+	// Name is the operator-facing display name; "" when aigw disclosed none.
+	Name string
+	// ContextWindow is the declared context capacity; 0 when not disclosed, never a guess.
+	ContextWindow int
+	// MaxOutputTokens is the declared output cap; 0 when not disclosed.
+	MaxOutputTokens int
+	// Images reports that the model accepts image input.
+	Images bool
+	// ReasoningSupported is the disclosed reasoning capability: true when a route declares
+	// it, false when the model's capability set was disclosed without it, and nil when no
+	// capability set was disclosed at all. The three lead to different DSH settings — a
+	// level table, an explicit non-reasoning declaration, or inheritance — so collapsing
+	// them would turn "unknown" into a claim.
+	ReasoningSupported *bool
+	// ReasoningForced reports that the model's reasoning policy overrides whatever effort a
+	// client asks for, which makes a selectable level list a lie.
+	ReasoningForced bool
+}
+
+// modelRow is one entry of the aigw /v1/models reply. Only the id is decoded strictly:
+// every other field is kept raw and read by the tolerant helpers below, so one malformed
+// value cannot fail the key validation that gates a tenant's whole model list.
 type modelRow struct {
-	ID string `json:"id"`
+	ID              string          `json:"id"`
+	Name            json.RawMessage `json:"name"`
+	ContextWindow   json.RawMessage `json:"context_window"`
+	MaxOutputTokens json.RawMessage `json:"max_output_tokens"`
+	InputModalities json.RawMessage `json:"input_modalities"`
+	Capabilities    json.RawMessage `json:"capabilities"`
+	Reasoning       json.RawMessage `json:"reasoning"`
 }
 type modelList struct {
 	Data *[]modelRow `json:"data"`
 }
+
+// modalityImage is the modality that decides whether a model may be sent an image.
+const modalityImage = "image"
 
 var directTransport = func() *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -56,7 +95,7 @@ func (c *Client) httpClient() *http.Client {
 
 // ValidateKey treats HTTP 200, including an empty data list, as authenticated.
 // Only HTTP 401 means the key itself is invalid.
-func (c *Client) ValidateKey(ctx context.Context, key string) ([]string, error) {
+func (c *Client) ValidateKey(ctx context.Context, key string) ([]Model, error) {
 	if strings.TrimSpace(key) == "" {
 		return nil, ErrInvalidKey
 	}
@@ -101,16 +140,111 @@ func (c *Client) ValidateKey(ctx context.Context, key string) ([]string, error) 
 	if payload.Data == nil {
 		return nil, errors.New("decode /v1/models: missing data array")
 	}
-	out := make([]string, 0, len(*payload.Data))
+	out := make([]Model, 0, len(*payload.Data))
 	seen := map[string]bool{}
 	for _, m := range *payload.Data {
 		if m.ID == "" || seen[m.ID] {
 			continue
 		}
 		seen[m.ID] = true
-		out = append(out, m.ID)
+		out = append(out, disclosedModel(m))
 	}
 	return out, nil
+}
+
+// disclosedModel turns one reply row into the facts a caller can render.
+func disclosedModel(row modelRow) Model {
+	model := Model{
+		ID:              row.ID,
+		Name:            disclosedString(row.Name),
+		ContextWindow:   disclosedCount(row.ContextWindow),
+		MaxOutputTokens: disclosedCount(row.MaxOutputTokens),
+	}
+	for _, modality := range disclosedStrings(row.InputModalities) {
+		if modality == modalityImage {
+			model.Images = true
+		}
+	}
+	if capabilities, ok := disclosedCapabilities(row.Capabilities); ok {
+		supported := capabilities["reasoning"]
+		model.ReasoningSupported = &supported
+		// The capability set is the declaration and `input_modalities` is its published
+		// reading; either one saying yes is enough, so a consumer never has to know which of
+		// the two an endpoint chose to fill in.
+		if capabilities[modalityImage] {
+			model.Images = true
+		}
+	}
+	model.ReasoningForced = disclosedReasoningMode(row.Reasoning) == "force"
+	return model
+}
+
+// disclosedString reads an optional string, answering "" for anything else. A display name
+// is presentation only: a number where a string belongs must not fail the model list.
+func disclosedString(raw json.RawMessage) string {
+	var value string
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	return strings.TrimSpace(value)
+}
+
+// disclosedCount reads an optional token count, answering 0 (not disclosed) for anything
+// that is not a positive whole number. Negative and fractional values are upstream nonsense
+// rather than a capacity, and 0 is already this package's word for "unknown".
+func disclosedCount(raw json.RawMessage) int {
+	var value int
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil || value < 1 {
+		return 0
+	}
+	return value
+}
+
+// disclosedStrings reads an optional array of strings, keeping only entries a caller can act
+// on and answering nil for anything else.
+func disclosedStrings(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var values []string
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// disclosedCapabilities reads the optional capability set. The second result separates
+// "declared nothing supported" (an empty or all-false object: known) from "not disclosed"
+// (absent or unreadable), which is the distinction the reasoning level list turns on.
+func disclosedCapabilities(raw json.RawMessage) (map[string]bool, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var caps map[string]bool
+	if err := json.Unmarshal(raw, &caps); err != nil {
+		return nil, false
+	}
+	return caps, true
+}
+
+// disclosedReasoningMode reads the mode of the model's disclosed reasoning policy.
+func disclosedReasoningMode(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var policy struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.Unmarshal(raw, &policy); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(policy.Mode)
 }
 
 // DSHDenial is aigw's definitive 403 answer: the key and its account are valid, but the

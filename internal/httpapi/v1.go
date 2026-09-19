@@ -18,6 +18,7 @@ import (
 	"github.com/winger/ai-gateway/internal/pricing"
 	"github.com/winger/ai-gateway/internal/quota"
 	"github.com/winger/ai-gateway/internal/responses"
+	"github.com/winger/ai-gateway/internal/routing"
 	"github.com/winger/ai-gateway/internal/runtime"
 	"github.com/winger/ai-gateway/internal/usage"
 	"github.com/winger/ai-gateway/pkg/pluginapi"
@@ -941,6 +942,13 @@ func (s *Server) handleDeleteResponse(w http.ResponseWriter, r *http.Request) {
 // GET /v1/models
 // ---------------------------------------------------------------------------
 
+// handleListModels serves GET /v1/models: every model this key may call, with the capability
+// facts the deployment can disclose about it (M68).
+//
+// It plans rather than asking for candidates because the plan carries two things the listing
+// needs and `Candidates` throws away: the canonical name the routes are keyed by (the
+// requested name may be an alias a mapping rule produced) and the model's reasoning policy,
+// already parsed by the same code that applies it to requests.
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	key, _, ok := s.authenticate(w, r)
 	if !ok {
@@ -957,12 +965,21 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		if !granted(grant.Models, model.PublicName) {
 			continue
 		}
-		cands, err := s.deps.Router.Candidates(domain.RouteRequest{Model: model.PublicName, Key: key, Grant: grant})
-		if err != nil || len(cands) == 0 {
+		plan, err := s.deps.Router.Plan(domain.RouteRequest{Model: model.PublicName, Key: key, Grant: grant})
+		if err != nil || len(plan.Candidates) == 0 {
 			continue
 		}
 		entry := responses.Model{
 			ID: model.PublicName, Object: "model", Created: model.CreatedAt.Unix(), OwnedBy: "aigw",
+			Name: model.DisplayName,
+		}
+		facts := routing.ModelFactsFor(snap, plan.Resolved.Canonical, plan.Candidates)
+		entry.ContextWindow = facts.ContextWindow
+		entry.MaxOutputTokens = facts.MaxOutputTokens
+		entry.Capabilities = facts.Capabilities
+		entry.InputModalities = inputModalities(facts)
+		if policy := plan.Reasoning; policy != nil {
+			entry.Reasoning = &responses.ModelReasoning{Mode: policy.Mode, Effort: policy.Effort}
 		}
 		if pricing := salePricing(model.SalePricingJSON, s.deps.Config.Billing); pricing != nil {
 			entry.Pricing = pricing
@@ -970,6 +987,17 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		list.Data = append(list.Data, entry)
 	}
 	writeJSON(w, http.StatusOK, list)
+}
+
+// inputModalities renders the modalities every model certainly carries plus the ones its
+// routes declare. Text is never omitted — nothing can interrogate an endpoint, and
+// under-claiming refuses an image before it is attached while over-claiming sends one the
+// upstream rejects mid-turn (the same asymmetry the dsh adapter documents).
+func inputModalities(facts routing.ModelFacts) []string {
+	if facts.Capabilities["image"] {
+		return []string{"text", "image"}
+	}
+	return []string{"text"}
 }
 
 // handleDSHGWAuthorize answers the dshgw portal's per-login (and optional per-request)
@@ -1229,6 +1257,13 @@ func featuresOf(req *responses.Request) map[string]bool {
 	}
 	if req.Reasoning != nil && req.Reasoning.Effort != "" {
 		features["reasoning"] = true
+	}
+	if req.HasImageInput() {
+		// Declaring the image capability is what lets a route serve one: without this, a
+		// vision request is routed exactly like a text one and the upstream answers it
+		// however it likes — silently ignoring the image, or refusing the request after the
+		// message is already durable (M68).
+		features["image"] = true
 	}
 	if req.Text != nil && len(req.Text.Format) > 0 {
 		// The level decides which capability is required. A provider that serves

@@ -24,7 +24,7 @@ func renderFixture(t *testing.T) (*config.Config, registry.Tenant) {
 }
 func TestTenantArtifactsCredentialsPatchAndWorkspace(t *testing.T) {
 	cfg, tenant := renderFixture(t)
-	arts, err := RenderTenantArtifacts(cfg, tenant, "sk-secret", []string{"z", "a"}, TenantOptions{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	arts, err := RenderTenantArtifacts(cfg, tenant, "sk-secret", models("z", "a"), TenantOptions{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,8 +90,9 @@ func TestRotateCredentialsPreservesRecords(t *testing.T) {
 	}
 }
 func TestRenderSettingsPreservesOtherProvidersAndDropsEmptyAigw(t *testing.T) {
+	cfg, _ := renderFixture(t)
 	existing := []byte("custom: keep\nllm-pi-ai:\n  extra: keep\n  providers:\n    other:\n      enabled: true\n    aigw:\n      models: [{id: old}]\nagent-default-model:\n  provider: aigw\n  model: old\n")
-	updated, err := renderSettings(existing, "http://aigw", []string{"new"})
+	updated, err := renderSettings(cfg, existing, models("new"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +102,7 @@ func TestRenderSettingsPreservesOtherProvidersAndDropsEmptyAigw(t *testing.T) {
 			t.Fatalf("missing %q:\n%s", want, text)
 		}
 	}
-	empty, err := renderSettings(updated, "http://aigw", nil)
+	empty, err := renderSettings(cfg, updated, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +117,7 @@ func TestRenderSettingsPreservesOtherProvidersAndDropsEmptyAigw(t *testing.T) {
 // absolute path).
 func TestRenderPatchAddsTheSSHWorkspacePluginWhenEnabled(t *testing.T) {
 	cfg, tenant := renderFixture(t)
-	disabled, err := RenderTenantArtifacts(cfg, tenant, "sk-secret", []string{"m"}, TenantOptions{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	disabled, err := RenderTenantArtifacts(cfg, tenant, "sk-secret", models("m"), TenantOptions{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +139,7 @@ func TestRenderPatchAddsTheSSHWorkspacePluginWhenEnabled(t *testing.T) {
 	cfg.SSHWorkspaces.Hosts = []string{"gpt001"}
 	cfg.SSHWorkspaces.MaxEntries = 25
 	cfg.SSHWorkspaces.ConnectTimeout = config.Duration(9000 * time.Millisecond)
-	enabled, err := RenderTenantArtifacts(cfg, tenant, "sk-secret", []string{"m"}, TenantOptions{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	enabled, err := RenderTenantArtifacts(cfg, tenant, "sk-secret", models("m"), TenantOptions{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +167,7 @@ func TestRenderPatchAddsTheSSHWorkspacePluginWhenEnabled(t *testing.T) {
 // only — rewriting the artifacts would discard the workspaces someone added in the UI.
 func TestEnsureSSHWorkspaceRowFollowsTheSwitch(t *testing.T) {
 	cfg, tenant := renderFixture(t)
-	arts, err := RenderTenantArtifacts(cfg, tenant, "sk-secret", []string{"m"}, TenantOptions{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	arts, err := RenderTenantArtifacts(cfg, tenant, "sk-secret", models("m"), TenantOptions{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}

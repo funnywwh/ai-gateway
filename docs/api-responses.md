@@ -143,6 +143,27 @@ Codex 的"远端压缩 v2"不是单独的端点，而是**一次普通的 `POST 
 - `GET /v1/models` 的每项可带 `x-gateway-pricing`：**仅对客售价**（按当前命中规则预估）与币种；
   币种是该模型的**售价币种**（模型售价文档里的 `currency`，缺省为账本币种 `billing.currency`，默认 USD）。
   多币种下不同模型的 `currency` 可以不同，客户端按各自币种解读单价。
+- `GET /v1/models` 的每项还可带**能力扩展字段**（M68，全部可选，不声明即省略）：
+
+  | 字段 | 类型 | 语义 |
+  |---|---|---|
+  | `name` | string | 运营侧显示名（`models.display_name`）；没有则省略，客户端用 id |
+  | `context_window` | int ≥ 1 | 该模型**可服务路由中已申报值的最小值**；未申报则省略 |
+  | `max_output_tokens` | int ≥ 1 | 同上（最大输出） |
+  | `input_modalities` | string[] | 恒含 `text`；任一候选声明 `capabilities.image` 才含 `image` |
+  | `capabilities` | object(bool) | 候选**能力键的并集**（true 键）；一个都没声明则省略 |
+  | `reasoning` | object | `{"mode":"default"\|"force","effort":"…"}`，来自模型级推理覆写；未配置则省略 |
+
+  语义由**候选集**决定（`Router.Plan` 的候选 + registry 里的 provider model 声明）：
+  能力取并集，因为声明一个能力正是请求能被路由过去的前提（图片请求只会落到声明了 `image` 的路由）；
+  容量取**最小值**，因为路由按优先级/权重挑候选、不看上下文长度，报最大值等于许下一个某些路由兑现不了的承诺。
+  `0` 一律表示「未申报」，既不参与取最小值也不写入响应——把它当成事实会读成「这个模型没有上下文」。
+  没有任何声明的模型只回 OpenAI 原有字段与 `input_modalities:["text"]`，老客户端行为不变。
+  `reasoning` **不是档位表**：某档是否被上游接受是逐模型实测的事实（见
+  `docs/design/m20-dsh-reasoning-effort.md` §6），网关不假装知道。
+- 带图片的请求（任一条目内容含 `type: input_image`）在路由上要求 `image` 能力：`routing.degradation=strip`（默认）
+  只把它记进 `usage_records.degraded_features` 并回 `X-Gateway-Degraded`，`reject` 才会过滤未声明的候选。
+  逐模型逃生口是既有的 `capabilities_override: inherit`（解析成「能力未知」→ 不拦）。
 
 ## 流式事件序列
 

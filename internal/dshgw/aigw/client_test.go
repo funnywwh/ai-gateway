@@ -95,3 +95,89 @@ func TestNormalizeKey(t *testing.T) {
 		}
 	}
 }
+
+// serveModels answers one /v1/models body and hands back the parsed models.
+func serveModels(t *testing.T, body string) []Model {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	models, err := (&Client{BaseURL: srv.URL, HTTP: srv.Client()}).ValidateKey(context.Background(), "sk-abcdefghijkl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return models
+}
+
+// TestValidateKeyDisclosesModelFacts is the M68 contract on this side: the listing's
+// capability facts survive the trip, and the three meanings of a missing reasoning claim
+// (supports it / declared without it / said nothing) stay distinguishable — DSH renders a
+// different setting for each.
+func TestValidateKeyDisclosesModelFacts(t *testing.T) {
+	models := serveModels(t, `{"object":"list","data":[
+		{"id":"deepseek-flash","name":" DeepSeek Flash ","context_window":1000000,"max_output_tokens":65536,
+		 "input_modalities":["text","image"],"capabilities":{"stream":true,"tools":true,"reasoning":true}},
+		{"id":"u2-flash","input_modalities":["text"],"capabilities":{"stream":true,"tools":true}},
+		{"id":"capability-only-image","capabilities":{"stream":true,"image":true}},
+		{"id":"forced","capabilities":{"reasoning":true},"reasoning":{"mode":"force","effort":"high"}}
+	]}`)
+	byID := map[string]Model{}
+	for _, model := range models {
+		byID[model.ID] = model
+	}
+	if len(models) != 4 {
+		t.Fatalf("models = %+v", models)
+	}
+
+	flash := byID["deepseek-flash"]
+	if flash.Name != "DeepSeek Flash" || flash.ContextWindow != 1000000 || flash.MaxOutputTokens != 65536 {
+		t.Errorf("flash facts = %+v", flash)
+	}
+	if !flash.Images {
+		t.Error("flash must accept images: input_modalities listed image")
+	}
+	if flash.ReasoningSupported == nil || !*flash.ReasoningSupported || flash.ReasoningForced {
+		t.Errorf("flash reasoning = %v forced=%t, want supported and not forced", flash.ReasoningSupported, flash.ReasoningForced)
+	}
+
+	plain := byID["u2-flash"]
+	if plain.Name != "" || plain.ContextWindow != 0 || plain.MaxOutputTokens != 0 || plain.Images {
+		t.Errorf("plain facts = %+v, want nothing disclosed", plain)
+	}
+	if plain.ReasoningSupported == nil || *plain.ReasoningSupported {
+		t.Errorf("u2-flash reasoning = %v, want a disclosed false (declared without reasoning)", plain.ReasoningSupported)
+	}
+
+	// The capability key alone is enough: either spelling of the same fact is read, so a
+	// consumer never has to know which one an endpoint filled in.
+	if !byID["capability-only-image"].Images {
+		t.Error("a model declaring capabilities.image must accept images even without input_modalities")
+	}
+
+	forced := byID["forced"]
+	if forced.ReasoningSupported == nil || !*forced.ReasoningSupported || !forced.ReasoningForced {
+		t.Errorf("forced reasoning = %v forced=%t, want supported and forced", forced.ReasoningSupported, forced.ReasoningForced)
+	}
+}
+
+// An older aigw answers ids only, and a row with a malformed fact loses that fact alone:
+// neither may fail the key validation that gates a tenant's whole model list.
+func TestValidateKeyToleratesMissingAndMalformedFacts(t *testing.T) {
+	models := serveModels(t, `{"object":"list","data":[
+		{"id":"legacy"},
+		{"id":"broken","name":7,"context_window":"1M","max_output_tokens":-5,
+		 "input_modalities":"text","capabilities":"nope","reasoning":42}
+	]}`)
+	if len(models) != 2 {
+		t.Fatalf("models = %+v", models)
+	}
+	for _, model := range models {
+		if model.Name != "" || model.ContextWindow != 0 || model.MaxOutputTokens != 0 || model.Images {
+			t.Errorf("%s = %+v, want nothing disclosed", model.ID, model)
+		}
+		if model.ReasoningSupported != nil || model.ReasoningForced {
+			t.Errorf("%s reasoning = %v forced=%t, want an undisclosed claim", model.ID, model.ReasoningSupported, model.ReasoningForced)
+		}
+	}
+}

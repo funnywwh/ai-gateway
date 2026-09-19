@@ -83,7 +83,7 @@ func TestAccountCardRowNamesTheHostHalfAndShipsAClientBundle(t *testing.T) {
 // behaviour while this one comes and goes.
 func TestEnsureAccountCardRowFollowsTheSwitch(t *testing.T) {
 	cfg, tenant := renderFixture(t)
-	arts, err := RenderTenantArtifacts(cfg, tenant, "sk-secret", []string{"m"}, TenantOptions{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	arts, err := RenderTenantArtifacts(cfg, tenant, "sk-secret", models("m"), TenantOptions{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}

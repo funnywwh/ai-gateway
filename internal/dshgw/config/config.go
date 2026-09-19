@@ -32,6 +32,13 @@ const DefaultPath = "./dshgw.yaml"
 // docs/deployment-layout.md).
 const defaultDataRoot = "./data"
 
+// defaultImageRequestMaxBytes bounds the accumulated base64 image payload a tenant's dsh may
+// put in one request to aigw (M68). 7 MiB of images inside aigw's 10 MiB
+// `server.max_body_bytes` default leaves room for the same request's system prompt, history,
+// tool definitions and JSON — the gateway reads a bounded body, so an oversized request is
+// truncated into a parse error rather than refused with a message about its size.
+const defaultImageRequestMaxBytes = 7 << 20
+
 var tenantNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,25}[a-z0-9]$|^[a-z]$`)
 var edgeHeaderRE = regexp.MustCompile(`(?i)^x-[a-z0-9]+(?:-[a-z0-9]+)*$`)
 var accountNameRE = regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`)
@@ -193,21 +200,28 @@ type SSHWorkspaces struct {
 
 // Config is deliberately independent of aigw's internal configuration types.
 type Config struct {
-	PublicHost      string   `yaml:"public_host" json:"public_host"`
-	PortalPort      int      `yaml:"portal_port" json:"portal_port"`
-	TenantPortLo    int      `yaml:"tenant_port_lo" json:"tenant_port_lo"`
-	TenantPortHi    int      `yaml:"tenant_port_hi" json:"tenant_port_hi"`
-	WorkerPortLo    int      `yaml:"worker_port_lo" json:"worker_port_lo"`
-	WorkerPortHi    int      `yaml:"worker_port_hi" json:"worker_port_hi"`
-	Listen          string   `yaml:"listen" json:"listen"`
-	EdgePortHeader  string   `yaml:"edge_port_header" json:"edge_port_header"`
-	MaxHeaderBytes  int      `yaml:"max_header_bytes" json:"max_header_bytes"`
-	MaxSessions     int      `yaml:"max_sessions" json:"max_sessions"`
-	AigwBaseURL     string   `yaml:"aigw_base_url" json:"aigw_base_url"`
-	ValidateTimeout Duration `yaml:"validate_timeout" json:"validate_timeout"`
-	SessionTTL      Duration `yaml:"session_ttl" json:"session_ttl"`
-	KeyRevalidate   string   `yaml:"key_revalidate" json:"key_revalidate"`
-	DSHEnforce      string   `yaml:"dsh_enforce" json:"dsh_enforce"`
+	PublicHost     string `yaml:"public_host" json:"public_host"`
+	PortalPort     int    `yaml:"portal_port" json:"portal_port"`
+	TenantPortLo   int    `yaml:"tenant_port_lo" json:"tenant_port_lo"`
+	TenantPortHi   int    `yaml:"tenant_port_hi" json:"tenant_port_hi"`
+	WorkerPortLo   int    `yaml:"worker_port_lo" json:"worker_port_lo"`
+	WorkerPortHi   int    `yaml:"worker_port_hi" json:"worker_port_hi"`
+	Listen         string `yaml:"listen" json:"listen"`
+	EdgePortHeader string `yaml:"edge_port_header" json:"edge_port_header"`
+	MaxHeaderBytes int    `yaml:"max_header_bytes" json:"max_header_bytes"`
+	MaxSessions    int    `yaml:"max_sessions" json:"max_sessions"`
+	AigwBaseURL    string `yaml:"aigw_base_url" json:"aigw_base_url"`
+	// ImageRequestMaxBytes is the accumulated base64 image payload a tenant's dsh may put in
+	// one request to aigw, rendered onto the aigw provider route when any of its models
+	// accepts images (M68). It must stay below aigw's own `server.max_body_bytes` (10 MiB by
+	// default): the gateway reads a bounded body, so an oversized request is truncated into a
+	// parse error instead of being refused with a message about its size. dsh prunes the
+	// oldest images to fit, which is why this is a bound it can act on rather than a limit.
+	ImageRequestMaxBytes int      `yaml:"image_request_max_bytes" json:"image_request_max_bytes"`
+	ValidateTimeout      Duration `yaml:"validate_timeout" json:"validate_timeout"`
+	SessionTTL           Duration `yaml:"session_ttl" json:"session_ttl"`
+	KeyRevalidate        string   `yaml:"key_revalidate" json:"key_revalidate"`
+	DSHEnforce           string   `yaml:"dsh_enforce" json:"dsh_enforce"`
 	// AdminSocket is the UNIX socket the root admin-serve listens on (M52 provisioning
 	// channel). Empty disables the command: the daemon never starts by accident.
 	AdminSocket string `yaml:"admin_socket" json:"admin_socket"`
@@ -309,29 +323,30 @@ type AccountCard struct {
 
 func defaults() Config {
 	return Config{
-		PublicHost:          "chat.tirisen.hk",
-		PortalPort:          32600,
-		TenantPortLo:        32601,
-		TenantPortHi:        32799,
-		WorkerPortLo:        32100,
-		WorkerPortHi:        32299,
-		Listen:              "127.0.0.1:3099",
-		EdgePortHeader:      "X-DSHGW-Port",
-		MaxHeaderBytes:      128 << 10,
-		MaxSessions:         10000,
-		AigwBaseURL:         "http://192.168.190.86:8088",
-		ValidateTimeout:     Duration(5 * time.Second),
-		SessionTTL:          Duration(7 * 24 * time.Hour),
-		KeyRevalidate:       "off",
-		SessionCookieSecure: "auto",
-		SettingsUI:          "lan",
-		PublicScheme:        "auto",
-		DSHEnforce:          "login",
-		LoginRate:           RateLimit{Requests: 10, Window: Duration(time.Minute)},
-		DirectoryPicker:     "clamp",
-		PluginBrowserFS:     "on",
-		WorkspaceSeed:       []string{"work"},
-		ReservedNames:       []string{"login", "dshgw"},
+		PublicHost:           "chat.tirisen.hk",
+		PortalPort:           32600,
+		TenantPortLo:         32601,
+		TenantPortHi:         32799,
+		WorkerPortLo:         32100,
+		WorkerPortHi:         32299,
+		Listen:               "127.0.0.1:3099",
+		EdgePortHeader:       "X-DSHGW-Port",
+		MaxHeaderBytes:       128 << 10,
+		MaxSessions:          10000,
+		AigwBaseURL:          "http://192.168.190.86:8088",
+		ImageRequestMaxBytes: defaultImageRequestMaxBytes,
+		ValidateTimeout:      Duration(5 * time.Second),
+		SessionTTL:           Duration(7 * 24 * time.Hour),
+		KeyRevalidate:        "off",
+		SessionCookieSecure:  "auto",
+		SettingsUI:           "lan",
+		PublicScheme:         "auto",
+		DSHEnforce:           "login",
+		LoginRate:            RateLimit{Requests: 10, Window: Duration(time.Minute)},
+		DirectoryPicker:      "clamp",
+		PluginBrowserFS:      "on",
+		WorkspaceSeed:        []string{"work"},
+		ReservedNames:        []string{"login", "dshgw"},
 		SSHWorkspaces: SSHWorkspaces{
 			MountSubdir:    "ssh",
 			ConnectTimeout: Duration(10 * time.Second),
@@ -611,6 +626,12 @@ func (c *Config) Validate() error {
 		return errors.New("aigw_base_url must be an absolute http(s) URL without credentials, query, or fragment")
 	}
 	c.AigwBaseURL = strings.TrimRight(c.AigwBaseURL, "/")
+	if c.ImageRequestMaxBytes == 0 {
+		c.ImageRequestMaxBytes = defaultImageRequestMaxBytes
+	}
+	if c.ImageRequestMaxBytes < 1<<20 {
+		return errors.New("image_request_max_bytes must be at least 1048576 (1 MiB)")
+	}
 	if c.ValidateTimeout.Duration() <= 0 || c.SessionTTL.Duration() <= 0 {
 		return errors.New("validate_timeout and session_ttl must be positive")
 	}
@@ -1005,6 +1026,18 @@ func (c *Config) StoreAPIData() bool { return c.NoStoreAPIs != nil && !*c.NoStor
 // LANSettingsUI reports whether the tenant settings panel is enabled for pages the
 // browser does not treat as loopback.
 func (c *Config) LANSettingsUI() bool { return c.SettingsUI != "loopback" }
+
+// EffectiveImageRequestMaxBytes is the image payload bound a rendered tenant profile
+// carries (M68). Validate resolves it as well, but the renderer must not depend on
+// validation having run: a config built in a test, or one whose field was left out, would
+// otherwise render no bound at all and silently keep dsh's own 20 MiB default — the very
+// value this deployment-wide setting exists to lower.
+func (c *Config) EffectiveImageRequestMaxBytes() int {
+	if c.ImageRequestMaxBytes > 0 {
+		return c.ImageRequestMaxBytes
+	}
+	return defaultImageRequestMaxBytes
+}
 
 // Scheme is the scheme browsers use to reach this deployment.
 func (c *Config) Scheme() string {

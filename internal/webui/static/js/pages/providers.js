@@ -327,7 +327,7 @@ async function modelForm(providerID, pm) {
       { name: 'max_output_tokens', label: '最大输出（token，0 = 未声明）', type: 'number', value: pm ? pm.max_output_tokens : 0 },
       { name: 'capabilities', label: '能力（JSON）', type: 'textarea', rows: 4, json: true,
         value: pm && pm.capabilities ? pm.capabilities : '',
-        hint: '例如 {"stream":true,"tools":true,"reasoning":true}。留空 = 保持原值（新建则未声明），填 null 清空' },
+        hint: '例如 {"stream":true,"tools":true,"reasoning":true,"image":true}（image = 支持图片输入）。留空 = 保持原值（新建则未声明），填 null 清空；声明会被 GET /v1/models 披露给客户端' },
       { name: 'capabilities_override', label: '能力校验', type: 'select', options: ['', 'inherit', 'strip', 'reject'],
         value: pm ? pm.capabilities_override || '' : '', hint: '空 = inherit（按能力表判定）' },
       { name: 'pricing_rules', label: '成本规则（JSON）', type: 'textarea', rows: 8, json: true,

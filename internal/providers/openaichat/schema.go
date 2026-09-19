@@ -36,14 +36,14 @@ var configSchema = json.RawMessage(`{
     "proxy": {"type": "string", "x-advanced": true,
       "description": "出网代理：http://host:port、https://host:port、socks5://host:port（socks5h 同义），或字面量 env 表示跟随 HTTPS_PROXY/NO_PROXY。留空=直连，且**不读**环境变量——这样升级不会改变既有部署的走向；需要带账号密码的代理时把凭据写进 URL（配置明文存储且管理面回显）。代理写错会让供应商构建失败，而不是静默直连，否则症状与「上游不可达」无法区分。"},
     "models": {"type": "array",
-      "description": "上游模型目录，只能声明不能猜。元素字段：public（对客模型名）、upstream（上游模型名，省略则用 public）、context_window、max_output_tokens、capabilities{stream,tools,reasoning}。",
+      "description": "上游模型目录，只能声明不能猜。元素字段：public（对客模型名）、upstream（上游模型名，省略则用 public）、context_window、max_output_tokens、capabilities{stream,tools,reasoning,image}。",
       "items": {"type": "object", "properties": {
         "public": {"type": "string"},
         "upstream": {"type": "string"},
         "context_window": {"type": "integer"},
         "max_output_tokens": {"type": "integer"},
         "capabilities": {"type": "object",
-          "description": "能力申报决定路由：客户端要 reasoning.effort 就要求 reasoning，要 text.format=json_object/json_schema 就要求同名的能力。/chat/completions 不支持 json_schema，别声明它。"}
+          "description": "能力申报决定路由：客户端要 reasoning.effort 就要求 reasoning，要 text.format=json_object/json_schema 就要求同名的能力，带 input_image 就要求 image。/chat/completions 不支持 json_schema，别声明它。能力也会被 GET /v1/models 披露给客户端。"}
       }}},
     "thinking": {"type": "object",
       "description": "思考（思维链）方言。默认一个 thinking 字段都不下发，即通用 OpenAI 兼容行为。",

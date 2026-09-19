@@ -21,7 +21,7 @@ func backupFixture(t *testing.T) (*Manager, *WorkerRunner, registry.Tenant) {
 	t.Helper()
 	m, runner, _ := managerFixture(t)
 	m.Now = func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) }
-	tenant, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", []string{"m"}, CreateOptions{})
+	tenant, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", models("m"), CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestRemoveWithoutPurgeCannotBeDestroyedByRecreate(t *testing.T) {
 	if _, err := m.Remove(context.Background(), tenant, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Create(context.Background(), "alice", "sk-bbbbbbbbb-rest", []string{"m"}, CreateOptions{}); err == nil {
+	if _, err := m.Create(context.Background(), "alice", "sk-bbbbbbbbb-rest", models("m"), CreateOptions{}); err == nil {
 		t.Fatal("recreate adopted retained tenant data")
 	}
 	if data, err := os.ReadFile(filepath.Join(tenant.Workspace, "marker")); err != nil || string(data) != "original" {
@@ -156,7 +156,7 @@ func TestBackupContainsExternalConfiguredPaths(t *testing.T) {
 	if err := os.MkdirAll(m.Config.HandshakeDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	tenant, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", []string{"m"}, CreateOptions{})
+	tenant, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", models("m"), CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

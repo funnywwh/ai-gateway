@@ -62,7 +62,7 @@ func TestBrowserMountRootPreparation(t *testing.T) {
 func TestCreateBrowserTenantPreparesRootBeforeProfile(t *testing.T) {
 	m, _, _ := managerFixture(t)
 	m.Config.BrowserWorkspaces.Enabled = true
-	tenant, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", []string{"m"}, CreateOptions{})
+	tenant, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", models("m"), CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

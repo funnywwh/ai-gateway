@@ -122,7 +122,7 @@ func readKey(input io.Reader, keyFile string) (string, error) {
 	}
 	return aigw.NormalizeKey(string(data))
 }
-func validateKey(ctx context.Context, client *aigw.Client, key string) ([]string, error) {
+func validateKey(ctx context.Context, client *aigw.Client, key string) ([]aigw.Model, error) {
 	checkCtx, cancel := context.WithTimeout(ctx, client.HTTP.Timeout)
 	defer cancel()
 	models, err := client.ValidateKey(checkCtx, key)

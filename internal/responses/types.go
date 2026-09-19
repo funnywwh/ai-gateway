@@ -355,13 +355,50 @@ const (
 )
 
 // Model is the object returned by GET /v1/models.
+//
+// The fields below Pricing are the gateway's capability extension (M68): they carry what a
+// deployment knows about a model, so a client can size its own context budget, offer the
+// reasoning levels the model accepts and refuse an image the model cannot read. Every one of
+// them is optional and additive — a client that reads only the OpenAI fields sees exactly the
+// object it saw before, and an undeclared fact is omitted rather than reported as zero.
 type Model struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"`
 	Created int64  `json:"created"`
 	OwnedBy string `json:"owned_by"`
+	// Name is the operator-facing display name; omitted when the model has none, and the id
+	// stands in for it.
+	Name string `json:"name,omitempty"`
+	// ContextWindow is the smallest context window declared by the routes that may serve this
+	// model; omitted when none declares one. It is a minimum on purpose: the router weighs
+	// candidates by priority and weight and never looks at context length, so the largest
+	// declared window would be a promise some route cannot keep.
+	ContextWindow int `json:"context_window,omitempty"`
+	// MaxOutputTokens is the smallest declared output cap among those routes; omitted when none
+	// declares one.
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
+	// InputModalities lists what the model accepts. Text is always present — every model this
+	// gateway serves carries text — and image appears only when a route declares it, because
+	// declaring it is also what routes an image-bearing request there.
+	InputModalities []string `json:"input_modalities,omitempty"`
+	// Capabilities is the union of the capability keys the routes declare true. Omitted when no
+	// route declares anything, which a client must read as "unknown", not as "nothing".
+	Capabilities map[string]bool `json:"capabilities,omitempty"`
+	// Reasoning discloses the canonical model's reasoning policy when one is configured: the
+	// applied effort and whether it overrides a client's own choice. It is not a level list —
+	// which levels an upstream accepts is a measured fact (see docs/design/m20-dsh-reasoning-effort.md),
+	// so the gateway does not pretend to know it.
+	Reasoning *ModelReasoning `json:"reasoning,omitempty"`
 	// Pricing is the gateway extension: sale prices only, never cost.
 	Pricing *ModelPricing `json:"x-gateway-pricing,omitempty"`
+}
+
+// ModelReasoning is the reasoning policy one model discloses. Mode is `default` (the effort is
+// supplied only when the client sent none) or `force` (it replaces whatever the client asked
+// for), mirroring domain.ModelReasoning.
+type ModelReasoning struct {
+	Mode   string `json:"mode"`
+	Effort string `json:"effort,omitempty"`
 }
 
 // ModelPricing describes the sale price of a model.

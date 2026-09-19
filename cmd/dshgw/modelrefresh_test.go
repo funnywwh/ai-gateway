@@ -20,12 +20,12 @@ import (
 )
 
 type stubValidator struct {
-	models []string
+	models []aigw.Model
 	err    error
 	calls  int
 }
 
-func (s *stubValidator) ValidateKey(context.Context, string) ([]string, error) {
+func (s *stubValidator) ValidateKey(context.Context, string) ([]aigw.Model, error) {
 	s.calls++
 	return s.models, s.err
 }
@@ -93,7 +93,7 @@ func settingsSnapshot(t *testing.T, tenant registry.Tenant) string {
 }
 
 func TestModelRefreshAppliesCurrentGrantsBeforeStart(t *testing.T) {
-	validator := &stubValidator{models: []string{"deepseek-flash", "gpt-5.6-luna"}}
+	validator := &stubValidator{models: []aigw.Model{{ID: "deepseek-flash"}, {ID: "gpt-5.6-luna"}}}
 	hook, _, tenant, _ := refreshFixture(t, validator)
 	before := settingsSnapshot(t, tenant)
 	if err := hook(context.Background(), tenant); err != nil {
@@ -160,7 +160,7 @@ func TestModelRefreshProceedsWhenAigwIsUnavailable(t *testing.T) {
 // No stored key means there is nothing to ask aigw about; the worker keeps what it
 // has instead of being blocked by a key this deployment does not keep.
 func TestModelRefreshSkipsWithoutStoredKey(t *testing.T) {
-	validator := &stubValidator{models: []string{"deepseek-flash"}}
+	validator := &stubValidator{models: []aigw.Model{{ID: "deepseek-flash"}}}
 	hook, cfg, tenant, _ := refreshFixture(t, validator)
 	if err := os.Remove(filepath.Join(cfg.Deploy.TenantConfigRoot, tenant.Name, "gateway.key")); err != nil {
 		t.Fatal(err)

@@ -643,19 +643,10 @@ func checkCapabilities(pm *domain.ProviderModel, features map[string]bool, degra
 	return nil, false, missing
 }
 
+// capabilitiesOf is the in-package spelling of EffectiveCapabilities, which lives in
+// capabilities.go because the model listing discloses the same resolution to clients.
 func capabilitiesOf(pm *domain.ProviderModel) map[string]bool {
-	raw := strings.TrimSpace(pm.CapabilitiesOverride)
-	if raw == "" {
-		raw = strings.TrimSpace(pm.CapabilitiesJSON)
-	}
-	if raw == "" {
-		return nil
-	}
-	var caps map[string]bool
-	if err := json.Unmarshal([]byte(raw), &caps); err != nil || len(caps) == 0 {
-		return nil
-	}
-	return caps
+	return EffectiveCapabilities(pm)
 }
 
 func isReasoning(pm *domain.ProviderModel) bool {

@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -228,6 +229,57 @@ func toolType(raw string) string {
 func (r *Request) HasFunctionTools() bool {
 	for _, tool := range r.Tools {
 		if toolType(tool.Type) == "function" {
+			return true
+		}
+	}
+	return false
+}
+
+// imagePartType is the Responses content-part type carrying an image.
+const imagePartType = "input_image"
+
+// HasImageInput reports whether the request carries an image the upstream must be able to
+// read: a content part of type `input_image` in a message, or in the array-valued output of
+// a tool result (a screenshot a tool handed back is exactly as much an image as one the
+// person attached).
+//
+// This decides the `image` routing feature (M68), so it answers about content parts rather
+// than searching the raw body for the substring: a conversation *quoting* "input_image" in
+// its text must not be treated as carrying one. The substring is still used as a pre-filter
+// because it is free, and text-only traffic is the common case.
+func (r *Request) HasImageInput() bool {
+	if r == nil || len(r.Input) == 0 || !bytes.Contains(r.Input, []byte(imagePartType)) {
+		return false
+	}
+	items, apiErr := r.Items()
+	if apiErr != nil {
+		// Unreadable input is rejected by Validate with a precise message; it must not also
+		// fabricate a capability requirement here.
+		return false
+	}
+	for _, item := range items {
+		if contentHasImagePart(item.Content) || contentHasImagePart(item.OutputContent) {
+			return true
+		}
+	}
+	return false
+}
+
+// contentHasImagePart reports whether one content document (a message's content array or a
+// tool result's output array) holds an image part. A plain string body carries no parts.
+func contentHasImagePart(raw []byte) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return false
+	}
+	var parts []struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(trimmed, &parts); err != nil {
+		return false
+	}
+	for _, part := range parts {
+		if part.Type == imagePartType {
 			return true
 		}
 	}

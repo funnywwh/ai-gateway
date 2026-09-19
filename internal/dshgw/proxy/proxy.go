@@ -35,7 +35,7 @@ import (
 const maxReplayBody = 64 << 20
 
 type KeyValidator interface {
-	ValidateKey(context.Context, string) ([]string, error)
+	ValidateKey(context.Context, string) ([]aigw.Model, error)
 }
 
 // DSHAuthorizer is the account-level entitlement check (M52): aigw answers whether the

@@ -74,6 +74,16 @@ grantedProviders = ∪( key.grants.providers, effectiveTags[].grants.providers )
 | 该模型在此供应商没有映射 | `not_mapped` |
 | 达到该供应商的成本上限（§4.6） | `cost_cap_reached` |
 
+请求特征由请求体推导（`featuresOf`）：`stream`、`tools`（有 function 工具）、`parallel_tools`、
+`reasoning`（带 `reasoning.effort`）、`json_object` / `json_schema`（按 `text.format` 的等级）、
+以及 **`image`**（任一条目内容含 `type: input_image`，包含工具结果里的图片，M68）。
+
+能力字典写在**上游模型**（provider model）的 `capabilities` 里：**省略的键按未知处理，不拦候选**；
+声明为 `false` 的键会让带该特征的请求被剔除（`degradation=reject`）或标记降级（`strip`，默认）。
+`capabilities_override: inherit` 解析成「未知」，因此它是逐模型的逃生口。
+`image` 是 M68 新加的特征：没有它，带图片的请求与纯文本请求走得一模一样，图片要么被上游忽略、
+要么在消息已经落库之后被拒。同一份能力还决定 `GET /v1/models` 披露什么（见 `docs/api-responses.md`）。
+
 ### 4.2 分层与层内策略
 
 1. 按 `route.priority` **升序**分组（小的先用）；模型 policy 的 `provider_order` 可覆盖顺序。

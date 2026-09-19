@@ -153,6 +153,76 @@ dshgw --config <state>/config.yaml contract dsh               # 真实 dsh 契�
 
 生成的 provider 同时带 `compat.supportsStrictMode: true`，使普通 Responses 工具显式发送 `strict: false`，防止某些上游把可选参数（如 `sandbox_permissions`）变成必填；不放宽 DSH 沙箱或审批策略。
 
+### 6a 每个模型带什么参数（M68）
+
+渲染出的每个模型条目按 **DSH 官方文档的字段**填写，事实全部来自 aigw 的 `GET /v1/models`
+（字段表见 [`docs/api-responses.md`](api-responses.md) 的「能力扩展字段」），dshgw 不自己判断能力：
+
+| dsh 字段 | 来自 | 说明 |
+|---|---|---|
+| `name` | `name` | aigw 的显示名；没有则回退 id |
+| `contextWindow` | `context_window` | 该模型可服务路由里**已申报值的最小值**；未申报则整个键不写，dsh 用适配器默认 262144 |
+| `maxTokens` | `max_output_tokens` | 同上（未申报 → 适配器默认 32768）。注意 dsh 的语义：显式写了 `maxTokens` 才成为**每请求默认上限** |
+| `input` | `input_modalities` | 声明了图片才写 `[text, image]`；纯文本省略（按文档回落路由 `defaultInput`，默认 `[text]`） |
+| `reasoningEfforts` | `capabilities.reasoning` + `reasoning.mode` | 见下 |
+
+`reasoningEfforts` 四态（每种对应一句不同的事实，所以不能合并）：
+
+1. 声明支持思考且模型策略不是 `force` → 全 7 档 `{off: none, minimal: minimal, …, max: max}`；
+   `off: none` 让「不选档位」= 显式关思考（M20 实测）。
+2. 声明支持思考但模型策略是 `force` → **不写**：网关会覆盖客户端的选择，给出可选菜单等于说谎；
+   不写之后 dsh 不发 reasoning 参数，由网关强制，行为仍然正确。
+3. 响应里有 `capabilities` 但没有 `reasoning` → `reasoningEfforts: false`（明确的非推理模型）。
+4. 响应里没有 `capabilities`（能力未知）→ 不写，dsh 继承（不把「不知道」谎报成「不支持」）。
+
+已知交互：模型级策略用 `mode: default` 时，一旦声明了档位表，dsh 每次请求都会带显式 effort
+（未选档位时按 `off: none`），网关的 `default` 策略因此不会生效；要强制请用 `mode: force`。
+
+有任一模型带图片时，路由级写 `maxRequestImageBytes`（配置键 `image_request_max_bytes`，默认 7 MiB）：
+dsh 默认 20 MiB 会超过 aigw 的 `server.max_body_bytes`（默认 10 MiB），而网关对请求体是**有界读取**，
+超限时截断成 JSON 解析错误而不是回一句「太大」。设了这个界，dsh 会把最旧的图片换成占位符，请求继续能成。
+
+**权威入口在网关侧**：`provider_models` 的 `capabilities` / `context_window` / `max_output_tokens`
+（控制台「供应商 → 模型映射」，或 MCP `admin_upsert_provider_model`）。`SyncModels` 每次整段重写
+`llm-pi-ai.providers.aigw`，所以**在租户 `settings.yaml` 里手改这一段会在下次同步丢失**。
+
+刷新时机：worker 启动前自动同步、`dshgw sync-models TENANT`、门户登录/换 key；dsh 的 `settings-file`
+有文件监听，改写在下一次请求生效，无需重启。想更准就给 provider model 补声明——网关把 `0`
+一律当「未申报」，不会拿它去覆盖别的路由的真实值。
+
+同一套规则也可以手写进个人 `~/.dsh/settings.yaml`（那不是 dshgw 租户，链路不同）：
+
+```yaml
+llm-pi-ai:
+  providers:
+    aigw:
+      apiKeyEnv: AIGW_API_KEY
+      api: openai-responses
+      baseURL: http://192.168.190.86:8088/v1
+      maxRequestImageBytes: 7340032
+      compat: {supportsStrictMode: true}
+      models:
+        - id: deepseek-flash
+          name: deepseek-flash
+          contextWindow: 1000000
+          maxTokens: 65536
+          input: [text, image]
+          reasoningEfforts:
+            off: none
+            minimal: minimal
+            low: low
+            medium: medium
+            high: high
+            xhigh: xhigh
+            max: max
+        - id: u2-flash
+          name: u2-flash（unisound）
+          reasoningEfforts: false
+```
+
+（`llm-deepseek` 那类直接适配器用 `inputModalities`/`imagePixelBudget`/`imageMaxBytes`；pi-ai 路由用上面的
+`input`，两套字段不通用。）
+
 飞书登录在**子进程配置**里需要两项（监督形态由 aigw 写入，独立形态手填，见
 `deploy/dshgw/config.example.yaml`）：
 
