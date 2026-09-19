@@ -4063,3 +4063,25 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - 发布前用同一源码在一次性 fixture 上跑完三条恢复路径：`scripts/browser_workspace_reload_e2e.py` **PASS**（`control=ALIVE reconnect=ALIVE reload=DEAD restore=ALIVE reopen=ALIVE`，恢复时只调 `resume`、挂载 id/路径不变）；`scripts/browser_workspace_mount_e2e.py` 同源码 PASS；网关单测 + 插件 31 项测试全绿
 
 **未做/限制**：本机没有对**线上租户**做一次真实点击走查（点击侧栏会重启该账号 worker，可能中断正在运行的任务，需用户同意后再做），因此"线上租户形态"的恢复验收只到端点+构建+fixture 级别的证据；gpt001 未部署；仓库未推送远程。发布前 dshgw 日志里仍能看到历史（12:17）的浏览器挂载清理失败重试告警 `browser mount expiry cleanup failed … connection timed out`，属本次改动之前留下的记录（重启时无残留挂载需要 CleanupStale 处理）。
+
+### v2.4.0 发布与部署记录（2026-09-19，本机三单元；gpt001 未部署）
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v2.4.0**（`VERSION` 2.3.0 → 2.4.0，tag `v2.4.0` 指向 `58ef6bf`）；档位 minor：新增「一个账号同时挂载多个本机目录」与**稳定虚拟路径**（同一本机目录永远同一挂载点 ⇒ 同一 DSH 工作区 id/标题/会话），并对旧网关保持可用（客户端降级），无破坏性变更 |
+| 本版内容 | ① 网关：`open` 接受客户端稳定目录 key（挂载点 `<workspace>/browser/<key>`）、同 key 拒绝叠加挂载、幂等复用空挂载点、断开保留空挂载点而 `close{purge:true}` 才释放（tombstone 记住路径）、启动清理对稳定挂载点只卸载不删目录、每租户上限常量 4 ② 客户端：文件夹列表窗口（增/删/连接/断开/打开）、行体自适应点击 + 右侧图标固定打开列表、IndexedDB v2 记录与 v1 采纳、保存 8 个目录上限 ③ 旧网关降级（旧二进制 `DisallowUnknownFields` 拒绝 `key`/`purge` 时改不带它们重试） ④ 真机验收脚本 `browser_workspace_multi_e2e.py` 与探针/几何断言更新 |
+| 构建 | `scripts/release.sh minor` → `aigw 2.4.0 (revision 58ef6bf)`，控制台 minified + gzip（37 文件 578420→339390 B；gzip 337029→134182 B）；`make dshgw-build gwproxy-build plugin-example` → `dshgw`/`gwproxy` 均 `2.4.0 (revision 58ef6bf)`；provider 插件无改动（`plugins/` 工作区干净） |
+| 部署范围 | 用户指定「发布版本，本机部署」：仅本机三单元（`aigw-local`、`dshgw-verify`、`gwproxy-verify`）。**gpt001 未部署**（公网仍为 2.2.1 / 77979b4，属预期） |
+| 回滚点 | `data/prev/bin/{aigw,dshgw,gwproxy}.prev-running-2.3.0-2306c22`（发布前**正在运行**的构建，从 `/proc/<pid>/exe` 取；三个都自报 `2.3.0 (revision 2306c22)`，即 v2.3.0 的发布提交）。回滚：`cp data/prev/bin/<file> bin/<name> && systemctl --user restart <unit>`，索引见 `data/prev/README.md` |
+
+**验证**（全部实测）：
+
+- `http://127.0.0.1:8088/version` → `{"revision":"58ef6bf","ui":"minified","ui_encoding":"gzip","version":"2.4.0"}`；`/healthz`、`/readyz`、`/admin/ui/` 均 200
+- 三单元 `is-active` 均 active、`NRestarts=0`；`/proc/<pid>/exe` 的 SHA256 与 `bin/*` **逐一相同**（aigw `ca6f72b4…`、dshgw `af432922…`、gwproxy `d8707cf8…`）
+- 启动日志：`aigw starting version=2.4.0 revision=58ef6bf`、`dshgw listening version=2.4.0 revision=58ef6bf`，两处 `level=ERROR` **各 0 条**；5 个租户 worker（dsh-tenant/dsh-colin/dsh-lianchangliang/dsh-ranqiliang/verify1）全部 `tenant worker ready`
+- gwproxy（带 `Host: chat.tirisen.hk`）：`/version` → 2.4.0 / 58ef6bf，门户前缀 `/dshgw` → 302，`/admin/ui/` → 200；门户 `:18300` → 200；5 个租户 origin（18301–18305）→ 302（活着、待登录）
+- 浏览器工作区端点存在且仍受会话校验保护：无会话 `POST /browser-workspace/hello` → **403**，无会话 `POST /browser-workspace/open`（带 `key`）→ **403**
+- **线上租户 GUI 实测**（真实 headless Chromium，用 `dsh-tenant` 自己的 gateway key 经门户登录到 `https://chat.tirisen.hk:18302/`）：侧栏行存在（`data-dshgw-state=idle`）、**行右侧文件夹图标存在即新 bundle 已被服务**；用真实鼠标事件点该图标一次 → 打开文件夹列表（0 个目录、按钮 `添加文件夹`/`关闭`），行相位不变；JS 异常 **0**、console error **0**。**没有点击行体**（连接/断开会重启该账号 worker，属用户任务中断）
+- 发布前用同一源码在一次性 fixture 上跑完四条真机验收：`browser_workspace_mount_e2e.py` **PASS 29 步**、`browser_workspace_reload_e2e.py` **PASS**（`control=ALIVE reconnect=ALIVE reload=DEAD restore=ALIVE reopen=ALIVE`）、`browser_workspace_multi_e2e.py` **PASS 22 步**（两个目录并存、逐目录断开/重连/删除、刷新后恢复、DSH 工作区 id 与路径不变）、`browser_workspace_ui_smoke.py` **PASS**；`make dshgw-browser-test` 全绿（网关单测 + 插件 **53 项**）
+
+**未做/限制**：gpt001 未部署（用户只要求本机）；线上租户**没有**做真实挂载验收（点行会重启该账号 worker，需要用户同意后另做），线上证据到「端点 + 新 bundle + 图标开窗 + 无 JS 异常」为止；仓库未推送远程；发布提交只改 `VERSION`，因此真机验收与发布二进制同源（`58ef6bf` 与 `e823087` 的 Go/JS 源码相同）。
