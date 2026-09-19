@@ -48,10 +48,10 @@ LOCAL_CHROME = '/home/winger/.cache/ms-playwright/chromium-1234/chrome-linux64/c
 URL_RE = re.compile(r'https?://(?:127\.0\.0\.1|localhost|\[::1\]):\d+/[^\s\x1b<>\"\']*')
 ANSI_RE = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
 PLUGIN_RE = re.compile(r'browser[-_]workspace|dshgw-browser-workspace|浏览器工作区', re.I)
-# The sidebar row is one compact button stacked above the ssh-workspace one: an icon span,
-# the label 浏览器工作区 and an optional state note. It is matched on the label, not on
-# exact text; the row's data-dshgw-state phase attribute is what a real browser run can
-# assert about the status without parsing the note.
+# The sidebar row is a container with two controls: the row body (icon + label + state note)
+# and the folder icon at its right. It is matched on the label, not on exact text; the row's
+# data-dshgw-state phase attribute is what a real browser run can assert about the status
+# without parsing the note, and the folder window is data-dshgw-dialog="browser-workspace".
 BUTTON = r'''(() => {
   const buttons = [...document.querySelectorAll('button')].filter(
     b => b.textContent.includes('浏览器工作区'));
@@ -63,13 +63,18 @@ BUTTON = r'''(() => {
   // DSH's CSS-module sidebar footer, not an arbitrary matching page string.
   const footer = b.closest('[class*="_footerActions"]');
   const sidebar = footer && footer.closest('[class*="_root"]');
+  const row = b.closest('.dshgw-bw-row') || b;
   const box = b.getBoundingClientRect();
   const dialog = document.querySelector('[data-dshgw-dialog="browser-workspace"]');
   return {found:!!sidebar, text:b.textContent.trim(), tag:b.tagName,
     sidebarFooter:!!footer, enabled:!b.disabled,
-    state:b.dataset.dshgwState || null,
+    state:row.getAttribute('data-dshgw-state') || b.getAttribute('data-dshgw-state') || null,
+    hasRowContainer: row !== b,
+    hasFolderIcon: !!document.querySelector('[data-dshgw-manage="folders"]'),
     dialogOpen:!!dialog,
     dialogText:dialog ? String(dialog.textContent || '').slice(0, 200) : null,
+    folderRows:dialog ? [...dialog.querySelectorAll('[data-dshgw-folder]')].length : 0,
+    dialogButtons:dialog ? [...dialog.querySelectorAll('button')].map(x => String(x.textContent || '').trim()) : [],
     // Where the stacking rule has to land: the shell's foot, seen from the row.
     footerDirection:footer ? getComputedStyle(footer).flexDirection : null,
     parentChain:(() => { const chain = []; let node = b;
@@ -77,6 +82,28 @@ BUTTON = r'''(() => {
       return chain; })(),
     x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2)};
 })()'''
+
+# The folder icon at the row's right, and a button inside the folder window: the icon opens
+# the list (a different gesture from clicking the row), and the window's own buttons are how a
+# person closes it again.
+MANAGE_POINT = r'''(() => {
+  const icon = document.querySelector('[data-dshgw-manage="folders"]');
+  if (!icon) return {found: false, blocker: 'no folder icon'};
+  const box = icon.getBoundingClientRect();
+  const x = box.left + box.width / 2, y = box.top + box.height / 2;
+  const hit = document.elementFromPoint(x, y);
+  if (hit !== icon && !icon.contains(hit)) return {found: false, blocker: hit ? hit.tagName + '.' + String(hit.className || '') : null};
+  return {found: true, x: Math.round(x), y: Math.round(y)};
+})()'''
+
+BW_DIALOG_BUTTON = r'''((label) => {
+  const dialog = document.querySelector('[data-dshgw-dialog="browser-workspace"]');
+  if (!dialog) return {found: false, blocker: 'the folder window is not open'};
+  const button = [...dialog.querySelectorAll('button')].find(b => String(b.textContent || '').trim() === label);
+  if (!button) return {found: false, buttons: [...dialog.querySelectorAll('button')].map(b => String(b.textContent || '').trim())};
+  const box = button.getBoundingClientRect();
+  return {found: true, x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2)};
+})'''
 
 # The OS dialog cannot be driven from here, so the picker is replaced by a spy that records
 # the call — and whether the click's transient user activation was still active at that
@@ -199,6 +226,15 @@ class CDP:
         if 'exceptionDetails' in result:
             raise RuntimeError('dialog inspection raised a JavaScript exception')
         return result.get('result', {}).get('value', {})
+
+    def evaluate(self, expression, await_promise=False):
+        """One page expression, by value. A thrown exception is reported without its text:
+        a page exception can embed URLs and tokens, and this script never prints those."""
+        result = self.call('Runtime.evaluate', {'expression': expression, 'returnByValue': True,
+                                                'awaitPromise': await_promise})
+        if 'exceptionDetails' in result:
+            raise RuntimeError('page JavaScript raised an exception during DOM inspection')
+        return result.get('result', {}).get('value')
 
     def point(self):
         """A point inside the row that the row itself receives, or the blocker at its centre."""
@@ -325,8 +361,37 @@ def run(args):
                     hit = cdp.point()
                 if not hit.get('found'):
                     raise RuntimeError('the sidebar row is covered and cannot be clicked: %r' % (hit,))
+                # The icon at the row's right opens the folder list — a different gesture from
+                # clicking the row, and it must not reach the picker at all.
+                icon = cdp.evaluate(MANAGE_POINT)
+                if not icon.get('found'):
+                    raise RuntimeError('the folder icon is not a hit target of its own: %r' % (icon,))
+                for kind in ('mousePressed', 'mouseReleased'):
+                    cdp.call('Input.dispatchMouseEvent', {'type': kind, 'x': icon['x'],
+                                                          'y': icon['y'], 'button': 'left', 'clickCount': 1})
+                time.sleep(0.4)
+                opened = cdp.button()
+                if not opened.get('dialogOpen') or opened.get('folderRows') != 0:
+                    raise RuntimeError('the folder icon did not open an empty folder list: %r' % (opened,))
+                if '添加文件夹' not in (opened.get('dialogButtons') or []):
+                    raise RuntimeError('the folder window does not offer 添加文件夹: %r' % (opened.get('dialogButtons'),))
+                closed = cdp.evaluate(BW_DIALOG_BUTTON + "('关闭')")
+                if not closed.get('found'):
+                    raise RuntimeError('the folder window has no 关闭 button: %r' % (closed,))
+                for kind in ('mousePressed', 'mouseReleased'):
+                    cdp.call('Input.dispatchMouseEvent', {'type': kind, 'x': closed['x'],
+                                                          'y': closed['y'], 'button': 'left', 'clickCount': 1})
+                time.sleep(0.3)
+                settled_dialog = cdp.button()
+                if settled_dialog.get('dialogOpen'):
+                    raise RuntimeError('the folder window did not close: %r' % (settled_dialog,))
+                if settled_dialog.get('state') != button.get('state'):
+                    raise RuntimeError('opening the folder list changed the row: %r' % (settled_dialog,))
                 # One trusted click must reach the picker, with the click's user activation
                 # still active and without any consent step in front of it.
+                hit = cdp.point()
+                if not hit.get('found'):
+                    raise RuntimeError('the sidebar row is not clickable after the folder window closed: %r' % (hit,))
                 cdp.call('Runtime.evaluate', {'expression': PICKER_SPY, 'returnByValue': True})
                 for kind in ('mousePressed', 'mouseReleased'):
                     cdp.call('Input.dispatchMouseEvent', {'type': kind, 'x': hit['x'],
@@ -413,7 +478,7 @@ def main():
         safe = str(error) if type(error) is RuntimeError else type(error).__name__
         print('FAIL: ' + safe, file=sys.stderr)
         return 1
-    print('PASS: real DSH browser-workspace sidebar UI; the row reports its phase; one click reached the picker with user activation; cancelling it left the row and closed the mount dialog; no backend used; fixtures cleaned')
+    print('PASS: real DSH browser-workspace sidebar UI; the row reports its phase and carries the folder icon; the icon opened the empty folder list and closed again; one click on the row reached the picker with user activation; cancelling it left the row and closed the mount window; no backend used; fixtures cleaned')
     return 0
 
 

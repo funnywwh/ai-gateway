@@ -13,8 +13,9 @@ What this proves, on the gateway host itself, through a real Chromium:
      whole design rests on), reads and writes both work there, and the rest of the
      host stays hidden;
   5. DSH registers the workspace and the row reports 已挂载;
-  6. clicking the row again detaches the mount, removes the mount point, and leaves the
-     browser's own directory intact.
+  6. clicking the row again detaches the mount, keeps the empty mount point as that local
+     directory's stable virtual path, keeps the folder saved, and leaves the browser's own
+     directory intact.
 
 The OS directory chooser is the ONE step no automation can drive (showDirectoryPicker
 needs a real gesture and a system dialog). It is replaced by a REAL
@@ -259,6 +260,11 @@ PICKER_OVERRIDE = r'''(() => {
       response => { record.status = response.status; return response },
       error => { record.status = 'error'; throw error });
   };
+  // Each pick gets the next directory in the queue, so a run that mounts SEVERAL folders
+  // picks several DIFFERENT local directories. The default queue is one directory named
+  // 'picked'; a harness that needs more sets window.__bwPickNames before the first click.
+  window.__bwPicked = [];
+  window.__bwPickNames = null;
   window.showDirectoryPicker = async (options) => {
     const spy = window.__bwPicker;
     spy.calls += 1;
@@ -266,8 +272,12 @@ PICKER_OVERRIDE = r'''(() => {
     spy.active = navigator.userActivation ? navigator.userActivation.isActive : null;
     try {
       const storageRoot = await navigator.storage.getDirectory();
-      const dir = await storageRoot.getDirectoryHandle('picked', {create: true});
+      const names = window.__bwPickNames || ['picked'];
+      const name = names[Math.min(window.__bwPicked.length, names.length - 1)];
+      window.__bwPicked.push(name);
+      const dir = await storageRoot.getDirectoryHandle(name, {create: true});
       spy.name = dir.name;
+      spy.picked = window.__bwPicked.slice();
       spy.kind = dir.kind;
       spy.isHandle = dir instanceof FileSystemDirectoryHandle;
       spy.permission = dir.queryPermission ? await dir.queryPermission({mode: 'readwrite'}) : null;
@@ -277,9 +287,11 @@ PICKER_OVERRIDE = r'''(() => {
   return true;
 })()'''
 
-# The row is one compact button stacked above the ssh-workspace one: icon, label, state
-# note. The data-dshgw-state phase attribute is the machine-readable part of the status; the
-# dialog is the mount window that closes itself on success.
+# The sidebar row is a container holding two controls: the row body (the primary action) and
+# the folder icon at its right. The body's text carries the whole row: the icon, the label
+# 浏览器工作区 and its state note. data-dshgw-state is the machine-readable part of the status
+# and lives on BOTH the container and the body; the window (data-dshgw-dialog) is where the
+# saved folders are listed, each with its own data-dshgw-folder-state.
 ROW = r'''(() => {
   const buttons = [...document.querySelectorAll('button')].filter(
     b => b.textContent.includes('浏览器工作区'));
@@ -288,22 +300,33 @@ ROW = r'''(() => {
     return r.width > 0 && r.height > 0 && b.checkVisibility({checkOpacity:true, checkVisibilityCSS:true});
   });
   if (!b) return {found:false};
+  const row = b.closest('.dshgw-bw-row') || b;
   const footer = b.closest('[class*="_footerActions"]');
   const box = b.getBoundingClientRect();
   const dialog = document.querySelector('[data-dshgw-dialog="browser-workspace"]');
+  const folders = dialog ? [...dialog.querySelectorAll('[data-dshgw-folder]')].map(node => ({
+    key: node.getAttribute('data-dshgw-folder'),
+    state: node.getAttribute('data-dshgw-folder-state'),
+    text: String(node.textContent || '').slice(0, 160),
+    buttons: [...node.querySelectorAll('button')].map(x => String(x.textContent || '').trim()),
+  })) : [];
   return {found:!!footer, text:b.textContent.trim(), disabled:!!b.disabled,
-    state:b.dataset.dshgwState || null,
+    state:row.getAttribute('data-dshgw-state') || b.getAttribute('data-dshgw-state') || null,
+    hasRowContainer: row !== b,
     dialogOpen:!!dialog,
-    dialogText:dialog ? String(dialog.textContent || '').slice(0, 200) : null,
+    dialogText:dialog ? String(dialog.textContent || '').slice(0, 300) : null,
+    dialogButtons:dialog ? [...dialog.querySelectorAll('button')].map(x => String(x.textContent || '').trim()) : [],
+    folders:folders,
     x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2)};
 })()'''
 
 # The two sidebar rows must be two rows, not two halves of one: the shell renders the whole
 # slot as a flex row, so this is the assertion that the stacking rule actually took effect.
+# The browser row is a CONTAINER now, so the container is what has to line up with the ssh row.
 ROWS = r'''(() => {
   const rect = el => { const r = el.getBoundingClientRect();
     return {x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height)} };
-  const bw = document.querySelector('.dshgw-bw-action');
+  const bw = document.querySelector('.dshgw-bw-row') || document.querySelector('.dshgw-bw-action');
   const ssh = document.querySelector('.dshgw-ssh-action');
   if (!bw || !ssh) return {found:false, browser:!!bw, ssh:!!ssh};
   const a = rect(bw), b = rect(ssh);
@@ -311,6 +334,68 @@ ROWS = r'''(() => {
   return {found:true, browser:a, ssh:b, footer: footer ? rect(footer) : null,
     stacked: a.y + a.h <= b.y + 1 && Math.abs(a.x - b.x) <= 1 && Math.abs(a.w - b.w) <= 1,
     overlapX: Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)};
+})()'''
+
+# The folder icon at the row's right: one click opens the folder list. It is a real hit target
+# of its own, which is what makes "click the icon" a different gesture from "click the row".
+MANAGE_POINT = r'''(() => {
+  const icon = document.querySelector('[data-dshgw-manage="folders"]');
+  if (!icon) return {found: false, blocker: 'no folder icon'};
+  const box = icon.getBoundingClientRect();
+  const x = box.left + box.width / 2, y = box.top + box.height / 2;
+  const hit = document.elementFromPoint(x, y);
+  if (hit !== icon && !icon.contains(hit)) return {found: false, blocker: hit ? hit.tagName + '.' + String(hit.className || '') : null};
+  return {found: true, x: Math.round(x), y: Math.round(y), label: String(icon.textContent || '').trim()};
+})()'''
+
+# A row inside the folder list, and the window's own buttons: this is how a real browser run
+# adds, connects, disconnects and deletes a folder the way a person does.
+FOLDER_ACTION_POINT = r'''((name, action) => {
+  const dialog = document.querySelector('[data-dshgw-dialog="browser-workspace"]');
+  if (!dialog) return {found: false, blocker: 'the folder list is not open'};
+  const row = [...dialog.querySelectorAll('[data-dshgw-folder]')].find(
+    node => String(node.textContent || '').includes(name));
+  if (!row) return {found: false, blocker: 'no folder row for ' + name,
+    rows: [...dialog.querySelectorAll('[data-dshgw-folder]')].map(n => n.getAttribute('data-dshgw-folder'))};
+  const button = [...row.querySelectorAll('button')].find(b => String(b.textContent || '').trim() === action);
+  if (!button) return {found: false, blocker: 'no ' + action + ' button',
+    buttons: [...row.querySelectorAll('button')].map(b => String(b.textContent || '').trim())};
+  if (button.disabled) return {found: false, blocker: action + ' is disabled'};
+  const box = button.getBoundingClientRect();
+  return {found: true, x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2)};
+})'''
+
+DLG_BUTTON_POINT = r'''((label) => {
+  const dialog = document.querySelector('[data-dshgw-dialog="browser-workspace"]');
+  if (!dialog) return {found: false, blocker: 'the folder list is not open'};
+  const button = [...dialog.querySelectorAll('button')].find(b => String(b.textContent || '').trim() === label);
+  if (!button) return {found: false, blocker: 'no ' + label + ' button',
+    buttons: [...dialog.querySelectorAll('button')].map(b => String(b.textContent || '').trim())};
+  if (button.disabled) return {found: false, blocker: label + ' is disabled'};
+  const box = button.getBoundingClientRect();
+  return {found: true, x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2)};
+})'''
+
+# The row's own geometry: the folder icon must sit BESIDE the row body — same line, to its
+# right, vertically overlapping it. A stacking rule that also matched the row container turned
+# that container into a column and put the icon under the label, which is exactly the kind of
+# regression a rect comparison catches and a class-name assertion does not.
+ROW_LAYOUT = r'''(() => {
+  const row = document.querySelector('.dshgw-bw-row');
+  if (!row) return {found: false, blocker: 'no row container'};
+  const body = row.querySelector('.dshgw-bw-action');
+  const icon = row.querySelector('.dshgw-bw-manage');
+  if (!body || !icon) return {found: false, blocker: 'the row does not hold both controls'};
+  const rect = el => { const r = el.getBoundingClientRect();
+    return {left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom), w: Math.round(r.width), h: Math.round(r.height)} };
+  const a = rect(body), b = rect(icon);
+  const rowRect = rect(row);
+  const overlapY = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+  return {found: true, body: a, icon: b, row: rowRect,
+    sideBySide: b.left >= a.right - 2 && overlapY >= Math.min(a.h, b.h) / 2,
+    direction: getComputedStyle(row).flexDirection,
+    // The row itself must not be taller than its own body: a column layout is what doubles it.
+    singleLine: rowRect.h <= a.h + 4};
 })()'''
 
 # Where to click: the row itself must be the hit target, or a modal mask would swallow it.
@@ -359,14 +444,14 @@ LOGIN_FORM = r'''(() => {
 PICKER_STATE = 'window.__bwPicker'
 
 
-def browser_write(path: str, text: str) -> str:
+def browser_write(path: str, text: str, directory: str = PICKED) -> str:
     """Write a file through the browser's own FSA handle (what the executor would do)."""
     return (
         "(async () => {"
         " const root = await navigator.storage.getDirectory();"
         # create:true so the pre-mount seed file lands in the same directory the picker
         # will hand to the plugin.
-        f" const dir = await root.getDirectoryHandle({PICKED!r}, {{create: true}});"
+        f" const dir = await root.getDirectoryHandle({directory!r}, {{create: true}});"
         f" const fh = await dir.getFileHandle({path!r}, {{create: true}});"
         " const w = await fh.createWritable();"
         f" await w.write({text!r}); await w.close();"
@@ -375,12 +460,12 @@ def browser_write(path: str, text: str) -> str:
     )
 
 
-def browser_read(path: str) -> str:
+def browser_read(path: str, directory: str = PICKED) -> str:
     """Read a file back through the browser's own FSA handle."""
     return (
         "(async () => {"
         " const root = await navigator.storage.getDirectory();"
-        f" const dir = await root.getDirectoryHandle({PICKED!r});"
+        f" const dir = await root.getDirectoryHandle({directory!r});"
         " const names = [];"
         " for await (const [name] of dir.entries()) names.push(name);"
         " let content = null, error = null;"
@@ -677,6 +762,15 @@ def main() -> int:
             raise AssertionError("the 浏览器工作区 row never appeared in the tenant GUI")
         note("the 浏览器工作区 row is present and enabled in the real tenant GUI")
 
+        # ── the row's own layout: body left, folder icon right, one line ─────────────
+        layout = wait_for(lambda: (lambda v: v if v.get("found") else None)(cdp.evaluate(ROW_LAYOUT)), 20,
+                          "the row's two controls to render")
+        if not layout.get("sideBySide") or not layout.get("singleLine"):
+            raise AssertionError(f"the folder icon is not beside the row body: {layout}")
+        if layout.get("direction") == "column":
+            raise AssertionError(f"the row container was turned into a column: {layout}")
+        note(f"the row keeps one line: body {layout['body']['w']}px wide, folder icon at its right ({layout['icon']['left']} >= {layout['body']['right']})")
+
         # ── the two sidebar rows are two rows, not two halves of one ─────────────────
         # The shell renders `sidebar.footer.action` as a flex ROW, so two registrations share
         # the foot and each is squeezed to half its width. Both plugins ship the rule that
@@ -738,7 +832,7 @@ def main() -> int:
         # ── the row's status phase, and the dialog closing itself ────────────────────
         if row_state.get("state") != "mounted":
             raise AssertionError(f"the row does not report the mounted phase: {row_state}")
-        note(f"the row reports the mounted phase (state={row_state['state']})")
+        note(f"the row reports the mounted phase (state={row_state['state']}, container={row_state.get('hasRowContainer')})")
         # Nothing clicks here: the success dialog closes itself. If it did not, its backdrop
         # would also swallow the second click that detaches the mount later in this run.
         closed = wait_for(lambda: (lambda v: v if v.get("found") and not v.get("dialogOpen") else None)(cdp.evaluate(ROW)), 15,
@@ -851,17 +945,36 @@ def main() -> int:
         point = wait_for(lambda: (lambda p: p if p.get("found") else None)(cdp.evaluate(HIT_POINT)), 15, "the row to be clickable again")
         cdp.click(point["x"], point["y"])
         detached = wait_for(lambda: (lambda v: v if "已断开" in v.get("text", "") else None)(cdp.evaluate(ROW)), 90, "the row to report 已断开")
-        # Disconnected is neither success nor failure: the phase must go back to idle, or
-        # the row would claim a mount that no longer exists.
-        if detached.get("state") != "idle":
+        # Disconnected is neither success nor failure, and it is NOT an uninstall: the row
+        # reports that one folder is saved and offline, and the folder list still holds it.
+        if detached.get("state") not in ("disconnected", "idle"):
             raise AssertionError(f"the disconnected row still reports a mounted status: {detached}")
         wait_for(lambda: (mount_type(str(mountpoint)) == "") or None, 30, "the kernel to detach the mount")
-        wait_for(lambda: (not mountpoint.exists()) or None, 30, "the gateway to remove the mount point")
+        # The mount point itself STAYS: it is the directory's stable virtual path, which is
+        # what keeps DSH's workspace entry (and the sessions it groups) mapped to that local
+        # directory. It must be empty again, and free for the next mount of the same folder.
+        wait_for(lambda: (mountpoint.is_dir() and not any(mountpoint.iterdir())) or None, 30,
+                 "the empty mount point to remain as the stable virtual path")
         survived = cdp.evaluate(browser_read(BROWSER_FILE), await_promise=True)
         if survived.get("content") != BROWSER_TEXT:
             raise AssertionError(f"the browser's own directory did not survive the unmount: {survived}")
-        note("the row reports 已断开, the kernel mount is gone, the mount point is removed")
+        note("the row reports 已断开, the kernel mount is gone, and the empty mount point stays")
         note("the browser's own directory and its files survived the unmount")
+
+        # ── the folder icon opens the list, where the disconnected folder is still saved ───
+        icon = wait_for(lambda: (lambda v: v if v.get("found") else None)(cdp.evaluate(MANAGE_POINT)), 15,
+                        "the folder icon at the row's right to be clickable")
+        cdp.click(icon["x"], icon["y"])
+        listed = wait_for(lambda: (lambda v: v if v.get("dialogOpen") and v.get("folders") else None)(cdp.evaluate(ROW)), 15,
+                          "the folder list to open from the icon")
+        if len(listed["folders"]) != 1:
+            raise AssertionError(f"the folder list does not hold exactly the saved folder: {listed['folders']}")
+        folder = listed["folders"][0]
+        if folder.get("state") != "disconnected" or "连接" not in (folder.get("buttons") or []):
+            raise AssertionError(f"the disconnected folder is not offered a reconnect: {folder}")
+        if "已断开" not in (listed.get("dialogText") or ""):
+            raise AssertionError(f"the list does not report the disconnect: {listed.get('dialogText')}")
+        note(f"the folder icon opened the list; the folder is still saved and offers a reconnect: {folder['text'][:60]!r}")
 
         # ── removing the account purges the rest ─────────────────────────────────────
         removed = run([args.dshgw, "--config", str(config_path), "tenant", "remove", "-purge", "-yes", TENANT], cwd=str(REPO))

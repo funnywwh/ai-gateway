@@ -212,3 +212,12 @@ dshgw-browser-reload-e2e: dshgw-build
 		--expect alive --expect-reconnect alive --expect-reload dead --expect-restore alive --expect-reopen alive
 	@test -x "$(DSHGW_NODE)" || { echo "dshgw-browser-test: Node missing: $(DSHGW_NODE)" >&2; exit 1; }
 	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" --test cmd/dshgw/plugin/browser-workspace/*.test.mjs
+
+# SEVERAL directories at once, and the folder list that manages them: two local directories
+# mounted side by side with independent I/O, one disconnected while the other keeps serving
+# (host and sandbox), the disconnected one reconnected at the SAME stable path and the SAME
+# workspace id, then deleted (its mount point and workspace entry released), and the survivor
+# restored by one click after a page reload.
+dshgw-browser-multi-e2e: dshgw-build
+	@DSHGW_NODE="$(DSHGW_NODE)" DSHGW_BIN_JS="$(DSHGW_DSH_ROOT)/lib/bin.js" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" \
+		PYTHONDONTWRITEBYTECODE=1 python3 scripts/browser_workspace_multi_e2e.py --dshgw bin/dshgw
