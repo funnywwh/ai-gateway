@@ -40,7 +40,36 @@ worker → 侧栏已挂载 → 双向 I/O → 卸载 → 删除账号」。实�
 沙箱内 profile 必须取运行中 worker 的 argv：`sandbox-exec --print` 是另一个进程，它自建的
 browser-mount 服务里没有 share，因此永远看不到活动挂载（先前用它会得出"没有绑定"的错误结论）。
 
-## 端到端验收发现并修复的三个缺陷（2026-09-19）
+## 断线 / 刷新 / 关标签页后的恢复（2026-09-19 实测）
+
+```sh
+go build -o /tmp/dshgw-reload ./cmd/dshgw
+python3 scripts/browser_workspace_reload_e2e.py --dshgw /tmp/dshgw-reload \
+  --expect alive --expect-reconnect alive --expect-reload dead --expect-restore alive --expect-reopen alive
+```
+
+同一套一次性 fixture（私有 13xxx 端口、真实 Chromium、真实 OPFS 句柄、真实 FUSE、真实 bwrap），
+每个阶段都在**宿主**、**账号沙箱内**（运行中 worker 自己的 argv）与**页面**三处各测读+写。
+结果 **PASS：control=ALIVE reconnect=ALIVE reload=DEAD restore=ALIVE reopen=ALIVE**：
+
+| 阶段 | 观测 |
+|---|---|
+| 对照 | 宿主 `WROTE 26 / READ` ✅，沙箱 `rc=0 … WROTE … READ-END` ✅ |
+| **页面内断线（无刷新无点击）** | 注入故障（只屏蔽 `*/browser-workspace/*`）后行自己变成 `resuming`「正在重连」；此窗口内宿主 I/O 是 `HUNG`（无人应答，符合设计）；故障解除后**无需刷新、无需点击**自动回到 `mounted`，宿主/沙箱读写恢复，挂载 id 与路径不变 |
+| **刷新后（点击前）** | 行显示 `resumable`「刷新前挂载的是 picked；点击恢复」；宿主 I/O 为 `EIO`/挂载点已不在，尚不可用 |
+| **一次点击恢复** | 行回到 `mounted`「（读写，已恢复）」；请求序列只含 `resume`，**没有 `open`**（不是新建挂载）；宿主机与沙箱读写恢复；gateway 记录 id/路径与刷新前**完全一致**；浏览器本地目录与文件全程无损 |
+| **关标签页再开新标签页** | 新标签页同样进入 `resumable`；一次点击 `resume` 恢复同一个挂载，三处读写恢复，挂载 id 与路径不变 |
+
+关键前提（真实 Chromium 实测，脚本 `--origin` 探针）：`FileSystemDirectoryHandle` 与已授予的
+`readwrite` 权限跨刷新、跨新标签页都存在，`queryPermission` 无需用户手势即返回 `granted`，读写均可用——
+这是「刷新后点击即可恢复、不必重选目录」的浏览器依据。
+
+**不夸大**：OPFS 句柄仍是唯一被替换的环节（OS 目录对话框无法自动化）；故障注入只屏蔽本插件自己的端点
+（页面级整机 offline 会连 DSH 自己的 WebSocket 一起断，那是另一个场景、且会掩盖被测行为，已放弃该做法）；
+在线实例未部署本改动，需发版后重启 dshgw 才生效。新客户端 + 旧网关会退化为旧行为（旧网关不认 `resume`，
+点击时回落到重新选目录，不报假成功）。
+
+## 端到端验收发现并修复的三个缺陷（2026-09-19）## 端到端验收发现并修复的三个缺陷（2026-09-19）
 
 前两个只有「真实 GUI 里真点一次」才会暴露；第三个连宿主侧 `ls` 都失败。三个都先复现、再修、再回归。
 
@@ -139,6 +168,7 @@ python3 scripts/browser_workspace_ui_smoke.py \
 - 选择目录后使用 `shell.overlay` 显示状态弹窗。成功状态等待约 1.5 秒后自动关闭；失败状态保留弹窗供用户阅读并手动关闭；取消系统 picker 不算失败且恢复点击前状态。
 - `ui.test.mjs` 覆盖两 slot 注册、状态相位、弹窗失败保留与成功自动关闭；真实 `browser_workspace_ui_smoke.py` PASS：真实 Chromium 中 footer computed `flex-direction: column`、一次可信点击仍以 activation 调用 readwrite picker，取消后弹窗关闭且行不变。
 - `browser_workspace_mount_e2e.py` PASS：同时启用 browser/SSH 两个 workspace 行，真实 FUSE 挂载期间观察到状态弹窗，挂载成功时行相位为 `mounted`，弹窗无需点击自行关闭，随后卸载仍成功。
+- `browser_workspace_reload_e2e.py` PASS：页面内断线自动重连（无刷新无点击）、刷新后点击恢复原挂载、关标签页后新标签页点击恢复原挂载，三条路径都由宿主与沙箱读写证实，且挂载 id/路径保持不变；浏览器本地目录与文件全程无损。
 
 ## 测试发现并修复的关键问题
 
