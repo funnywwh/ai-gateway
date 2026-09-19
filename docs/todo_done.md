@@ -4128,3 +4128,27 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
       新增 `feishu.console_url` 说明控制台在浏览器里的地址（`GW_FEISHU_CONSOLE_URL` 可覆盖）。
       同主机名仍走直接写 cookie 的路径。票据与门户票据同密钥不同 mode，两侧互不接受
 - [ ] 真机验收（手机扫码、真正发一条邀请给同事）见 `docs/TODO.md` M66 小节
+
+### v2.5.0 + v2.5.1 发布与部署记录（2026-09-19，本机三单元；gpt001 未部署）
+
+本版内容：**M66 控制台多管理员与管理员飞书扫码登录**（功能提交 `ba9b74f`；设计
+`docs/design/m66-console-admin-feishu-login.md`，规格 `docs/feishu.md` §5b），档位 **minor**
+（新增端点、新配置项、新控制台页面与新的登录方式），外加部署当天补的 **M66.1 跨主机名票据交接**
+（提交 `e29af48`，patch）。gpt001 未部署（用户只要求本机），仅 aigw 一个二进制有变化。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v2.5.0**（`VERSION` 2.4.0 → 2.5.0，tag `v2.5.0` → `65b162e`，内含 M66 功能提交 `ba9b74f`）；**v2.5.1**（tag `v2.5.1` → `64e7922`，内含 M66.1 提交 `e29af48`） |
+| 部署范围 | 本机三单元（`aigw-local`、`dshgw-verify`、`gwproxy-verify`）。只有 aigw 的代码变了，因此**只换并重启了 aigw**；dshgw 与 gwproxy 仍运行发布前那份构建（进程自 20:09 起未重启，代码未变） |
+| 回滚点（二进制） | `data/prev/bin/aigw.prev-running-2.4.0-58ef6bf`（v2.5.0 之前**正在运行**的构建）与 `data/prev/bin/aigw.prev-running-2.5.0-65b162e`（v2.5.1 之前正在运行的构建），都从 `/proc/<pid>/exe` 取并用 `-version` 自证 |
+| 回滚点（数据） | `data/prev/aigw-local.db.pre-2.5.0-20260919-2136`（迁移 0023 之前的整库一致快照，`sqlite3 .backup` 生成，`integrity_check=ok`）。迁移只做 `ALTER TABLE … ADD COLUMN` + 建索引，回滚到 2.4.0 不会因新列失败 |
+| 配置变更（单独一步，记录原因） | `config.yaml` 的 `feishu.console_url: "http://192.168.190.86:8088/admin/ui/"`：本机部署的控制台在局域网、飞书回调在公网 `https://chat.tirisen.hk/feishu/callback`，两者**主机名不同**，会话 cookie 无法跨主机送达，扫码/邀请登录需要一次性票据交接（设计 §D9）。改的是新键，不动任何既有键，发布只换二进制 |
+| 验证（v2.5.1 线上） | `GET /version` → `{"revision":"64e7922","ui":"minified","ui_encoding":"gzip","version":"2.5.1"}`；`/healthz`、`/readyz` 200；`aigw-local`/`dshgw-verify`/`gwproxy-verify` 三个单元 active；启动日志 `aigw starting version=2.5.1 revision=64e7922 … database=./data/aigw-local.db`、`feishu identity enabled … admin_login=true`，重启后 `level=ERROR` **0 条** |
+| 验证（M66 端点） | 公开的 `GET /admin/api/v1/auth/methods` → `feishu.enabled=true` 且给出 `/feishu/login?mode=admin`；`GET /feishu/login?mode=admin` 与公网 `https://chat.tirisen.hk/feishu/login?mode=admin` 都 302 到真实飞书授权页（`redirect_uri=https://chat.tirisen.hk/feishu/callback`，state 里 `flow=admin`）；`/admin/feishu/session?ticket=junk` → 403（兑换路由存在且拒绝垃圾票据）；邀请入口页把浏览器带回的地址是 `http://192.168.190.86:8088/admin/ui/`（证明 `console_url` 生效）；公网 `/feishu/callback` 仍被服务（未知 state → 400 说明页） |
+| 验证（管理面） | 用 bootstrap 管理员登录 → `/auth/me`=admin；`GET /admin/api/v1/admin-users` 显示 `admin`（role=admin、status=active、bootstrap=true、未绑定飞书），迁移 0023 在真实库上生效；当天的验收用临时账号走完「建号（pending）→ 生成邀请链接（公网 origin、3600 秒）→ 打开入口 302 到飞书 → 删除账号」，删除后列表回到 1 行，审计里留下 `create`/`invite`/`delete`（`target_type=admin_user`） |
+| 自动化验收 | `go test ./internal/... ./cmd/...` 全绿；`make ui-check` 全视图通过（含新增 `admins` 70 项、`admins-readonly` 10 项、`login` 9 项）；`make dshgw-supervised-test` **PASS 63 步**，其中 `admin-feishu-*` 13 项走的正是跨主机票据路径（`console_url` 故意设成 `http://127.0.0.1:<port>/admin/ui/`，回调是 `localhost`） |
+
+**未做/限制**：**真机扫码验收尚未执行**（需要用户的手机完成飞书授权，步骤见 `docs/TODO.md` M66）；
+本机控制台与回调不同主机名，操作者必须用 `http://192.168.190.86:8088/admin/ui/`（即 `console_url` 的值）
+打开控制台，扫码完成后浏览器会经一次票据兑换落到该地址；gpt001 未部署（公网 `mnl.iotalking.top/aigw/version`
+仍是 2.2.1）；仓库未推送远程。
