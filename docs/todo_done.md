@@ -4189,3 +4189,27 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 本机控制台与回调不同主机名，操作者必须用 `http://192.168.190.86:8088/admin/ui/`（即 `console_url` 的值）
 打开控制台，扫码完成后浏览器会经一次票据兑换落到该地址；gpt001 未部署（公网 `mnl.iotalking.top/aigw/version`
 仍是 2.2.1）；仓库未推送远程。
+
+### v2.6.0 发布与部署记录（2026-09-20，本机三单元；gpt001 未部署）
+
+本版内容：**M67 租户侧栏的账号行与退出**（功能提交 `a72bd49`；设计
+`docs/design/m67-dshgw-account-card.md`，规格 `docs/dshgw.md` §7d），档位 **minor**
+（authorize 响应新增 `account`/`feishu_name`、新配置项 `account_card`、租户 origin 下新增两个端点、
+注册表新增 `tenants[].account`、新增插件目录）。按用户要求只发本机，gpt001 未部署。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v2.6.0**（`VERSION` 2.5.1 → 2.6.0；release 提交 `530ba5f`，tag `v2.6.0` → `530ba5f`，内含 M67 功能提交 `a72bd49`） |
+| 构建物 | `bin/aigw`（2.6.0，revision 530ba5f，console minified + gzip）与 `bin/dshgw`（2.6.0，revision 530ba5f）；`gwproxy` 本版无代码改动，未重建（线上仍是 2.3.0 / 2306c22） |
+| 部署范围 | 本机三单元：`aigw-local`（换二进制并重启）、`dshgw-verify`（换二进制并重启；租户侧插件 bundle 由 dsh 逐请求读取，刷新页面即生效）、`gwproxy-verify`（未动） |
+| 回滚点（二进制） | `data/prev/bin/aigw.prev-running-2.5.1-64e7922` 与 `data/prev/bin/dshgw.prev-running-2.5.1-64e7922` —— 发布前**正在运行**的那些构建，从 `/proc/<pid>/exe` 取出并用 `-version` 自证（均报 2.5.1 / 64e7922） |
+| 回滚点（数据） | 无需：本版只新增字段（注册表 `account`、authorize 响应字段）与配置键，不改表、不做数据库迁移 |
+| 配置变更 | 无（发布只换二进制）。本机 `dshgw.yaml` 的 `account_card.enabled: true` 是 M67 开发阶段写入的，随本次重启生效；aigw 侧的 `dshgw.account_card.enabled` 只在 aigw 监督 dshgw 的形态下有意义，本机不是该形态，故未加 |
+| 验证（版本与探针） | `GET /version` → `{"revision":"530ba5f","ui":"minified","ui_encoding":"gzip","version":"2.6.0"}`；`/healthz`、`/readyz` 200；三个单元 active；aigw 启动日志无 `level=ERROR` |
+| 验证（M67 全链路，部署后实测） | 门户登录 `POST :18300/login` 302 且下发 `dshgw_s_dsh-colin`；`GET :18303/dshgw/session/` → `{"tenant":"dsh-colin","account":"李智超(colin)","feishu_name":"李智超","name":"李智超"}`；租户页面引用 `dshgw-account-card/client.js`；`POST /dshgw/logout/` → 303 门户登录页；`POST /v1/dshgw/authorize`（worker Key）→ 带 `account`/`feishu_name` |
+| 验证（租户面） | 6 个租户 worker 全部 `worker ready`；既有浏览器会话保留（`sessions.json` 未被清理） |
+| 自动化验收 | `go test ./internal/... ./cmd/... ./pkg/...` 全绿；`make dshgw-test` 全绿（account-card client 51 条断言、ssh-workspace 189+44、picker-clamp 23、迁移/退役 dry-run）；`scripts/verify-dshgw.sh` 全部 PASS |
+
+**未做/限制**：gpt001 未部署（用户只要求本机）；M67 的「浏览器人工确认」一项仍开在 `docs/TODO.md`
+M67 小节——接口面与插件加载已按上表验证，侧栏观感由使用者确认；工作区 `data/` 不纳入版本控制，
+部署物与回滚点都在其中，故本记录是这些路径的唯一书面出处。
