@@ -1,331 +1,227 @@
-// What a page does when its connection dies, and what the NEXT page does with the mount the
+// What a page does when its connection dies, and what the NEXT page does with the folders the
 // previous one left behind. Both are the same mechanism seen from two sides:
 //
 //   · inside one page, a transport failure is recovered in place (resume, keep serving) —
 //     no reload, no second directory choice, no lost mount;
-//   · in a new document (a reload, or a tab that replaced the old one), the stored record
-//     puts the row into "可恢复" and one click takes the SAME mount back — it does not open
+//   · in a new document (a reload, or a tab that replaced the old one), the saved folders
+//     come back with their handles, so one click takes the SAME mount back — it does not open
 //     the picker and it does not rebuild anything.
 //
-// The harness mirrors ui.test.mjs, plus the two browser services this feature needs:
-// IndexedDB (where the capability token and the directory handle live between documents) and
-// window.location.origin (which keys the record).
+// The third thing pinned here is what a DISCONNECT is not: it is not a removal. The folder
+// stays saved, its capability goes, and the workspace mapping (the stable key, and with it the
+// path DSH keys its own workspace entry by) survives.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
-import vm from 'node:vm'
+import { setup, until, fakeHandle, storedFolder, storedFolders, ORIGIN } from './harness.mjs'
 
-const source = await readFile(new URL('./client.js', import.meta.url), 'utf8')
-const tick = () => new Promise(resolve => setImmediate(resolve))
-const textOf = node => {
-  if (node === null || node === undefined || node === false) return ''
-  if (typeof node === 'string' || typeof node === 'number') return String(node)
-  if (Array.isArray(node)) return node.map(textOf).join('')
-  return textOf(node.children)
-}
+const mounted = ui => until(() => ui.rowState() === 'mounted', 'a live mount')
+const state = (ui, wanted) => until(() => ui.rowState() === wanted, wanted)
 
-// A small IndexedDB stand-in. It keeps the two properties the plugin depends on:
-//
-//   · a value written by one document is readable by the next (the fake is shared by the
-//     tests that model exactly that);
-//   · a request's onsuccess runs BEFORE its transaction's oncomplete — the order real
-//     IndexedDB guarantees and the order `withStore` resolves on. A stand-in that fires
-//     oncomplete first makes every read look like "no record" and every write look fine.
-function fakeIndexedDB(initial = {}) {
-  const data = new Map(Object.entries(initial))
-  const request = work => {
-    const handle = { result: undefined, onsuccess: null, onerror: null }
-    setImmediate(() => { handle.result = work(); handle.onsuccess?.() })
-    return handle
-  }
-  return {
-    data,
-    open() {
-      const opening = { result: null, onsuccess: null, onerror: null, onupgradeneeded: null, onblocked: null }
-      setImmediate(() => {
-        opening.result = {
-          objectStoreNames: { contains: () => true },
-          createObjectStore: () => ({}),
-          close() {},
-          transaction() {
-            const tx = { oncomplete: null, onerror: null, onabort: null, error: null }
-            // The transaction completes only once nothing is outstanding. Every request routes
-            // through `tx.done`, which re-checks that count when it finishes.
-            let outstanding = 0
-            const settle = () => { if (outstanding === 0) setImmediate(() => tx.oncomplete?.()) }
-            tx.done = fn => {
-              outstanding += 1
-              setImmediate(() => { fn(); outstanding -= 1; settle() })
-            }
-            tx.objectStore = () => ({
-              get: key => {
-                const handle = { result: undefined, onsuccess: null, onerror: null }
-                tx.done(() => { handle.result = data.get(key); handle.onsuccess?.() })
-                return handle
-              },
-              put: (value, key) => {
-                const handle = { result: key, onsuccess: null, onerror: null }
-                tx.done(() => { data.set(key, value); handle.onsuccess?.() })
-                return handle
-              },
-              delete: key => {
-                const handle = { result: undefined, onsuccess: null, onerror: null }
-                tx.done(() => { data.delete(key); handle.onsuccess?.() })
-                return handle
-              },
-            })
-            return tx
-          },
-        }
-        opening.onsuccess?.()
-      })
-      return opening
-    },
-  }
-}
+test('a page that finds a saved folder offers to restore it, without opening the picker', async () => {
+  const handle = fakeHandle({ name: 'local' })
+  const ui = setup({ stored: storedFolders([storedFolder({ handle, key: 'a'.repeat(32) })]) })
+  await state(ui, 'resumable')
+  // Boot only reads the saved folders: it must not resume anything by itself, because the
+  // mount belongs to a click.
+  assert.equal(ui.state.resumeCalls, 0, 'the page resumed on its own')
+  assert.match(ui.rowText(), /刷新前挂载的是 local；点击恢复/)
+  assert.equal(ui.events.includes('open'), false)
 
-// A directory handle as the browser hands one back in a NEW document: real enough for the
-// executor (the plugin only calls the methods it uses), with the permission answer this test
-// wants to exercise.
-function fakeHandle({ permission = 'granted', onRead } = {}) {
-  return {
-    name: 'local', kind: 'directory',
-    queryPermission: async () => permission,
-    requestPermission: async () => permission,
-    async getDirectoryHandle() { throw Object.assign(new Error('missing'), { name: 'NotFoundError' }) },
-    async getFileHandle() { throw Object.assign(new Error('missing'), { name: 'NotFoundError' }) },
-    async entries() { onRead?.() },
-  }
-}
-
-function setup({
-  record = null,
-  permission = 'granted',
-  resumeRefused = false,
-  pollFails = 0,
-  pollRequests = [{ id: 'request-1', op: 'stat', path: '' }],
-} = {}) {
-  const events = [], requests = [], warnings = [], effects = [], registered = new Map(), pendingEffects = []
-  let client, generation = 1, resumeCalls = 0, pollCount = 0
-  const indexedDB = fakeIndexedDB()
-  let pollFailureBudget = pollFails, countedPolls = 0
-  const pollArmed = pollFails > 0
-  const handle = fakeHandle({ permission })
-  // A real record carries the real handle: that is the whole reason a reload can reattach
-  // without asking for the directory again.
-  const stored = record ? Object.assign({}, record, { handle: record.handle || handle }) : null
-  if (stored) indexedDB.data.set('mount:http://127.0.0.1:13861', stored)
-  const json = value => ({ ok: true, json: async () => ({ ok: true, value }) })
-  const rejection = (code, message) => ({ ok: true, json: async () => ({ ok: false, error: { code, message } }) })
-
-  const window = {
-    isSecureContext: true,
-    location: { origin: 'http://127.0.0.1:13861' },
-    indexedDB,
-    async showDirectoryPicker(options) {
-      events.push('picker')
-      assert.equal(options.mode, 'readwrite')
-      return handle
-    },
-    async fetch(url, options) {
-      const endpoint = url.split('/').at(-1), payload = JSON.parse(options.body)
-      events.push(endpoint)
-      requests.push({ endpoint, payload })
-      if (options.signal.aborted) throw Object.assign(new Error('abort'), { name: 'AbortError' })
-      if (endpoint === 'open') {
-        return json({ token: 'private-token', mountpoint: '/home/account/browser/id', id: 'id' })
-      }
-      if (endpoint === 'activate') {
-        return json({ mountpoint: '/home/account/browser/id', id: 'id' })
-      }
-      if (endpoint === 'resume') {
-        resumeCalls++
-        if (resumeRefused) return rejection('browser/failed', 'unknown directory capability')
-        return json({ id: stored?.id || 'id', mountpoint: stored?.mountpoint || '/home/account/browser/id', resumed: resumeCalls })
-      }
-      if (endpoint === 'poll') {
-        pollCount++
-        const armed = pollArmed && countedPolls++ > 1
-        if (armed && pollFailureBudget-- > 0) throw new Error('gateway HTTP 502')
-        for (const request of pollRequests) events.push('served:' + request.op)
-        // Nothing to serve: the real gateway answers an empty poll (it holds the request for
-        // a few seconds first, which the plugin paces with its own 100ms delay). Answering
-        // immediately — and parking only on the signal — is what keeps the loop able to reach
-        // its next call, which is where a test that wants a transport failure makes it fail.
-        return new Promise((resolve, reject) => {
-          const timer = setTimeout(() => resolve({ requests: [] }), 20)
-          options.signal.addEventListener('abort', () => {
-            clearTimeout(timer)
-            reject(Object.assign(new Error('abort'), { name: 'AbortError' }))
-          }, { once: true })
-        })
-      }
-      if (endpoint === 'respond') { events.push('responded'); return json({ accepted: true }) }
-      if (endpoint === 'close') return json({ closed: true })
-      throw new Error('unexpected endpoint ' + endpoint)
-    },
-    __ModuleLoader__: { load({ factory }) {
-      client = factory(() => ({
-        useState: () => [0, () => {}], useEffect: fn => effects.push(fn()),
-        createElement: (type, props, ...children) => ({ type, props, children }),
-      }))
-    } },
-  }
-  const document = {
-    querySelector: () => null,
-    createElement: () => ({ dataset: {}, textContent: '' }),
-    head: { appendChild: () => {} },
-  }
-  vm.runInNewContext(source, {
-    window, document, TextEncoder, Uint8Array, atob, btoa, AbortController, console,
-    setTimeout, clearTimeout,
-  })
-  const ctx = {
-    logger: { warn: message => warnings.push(message) },
-    connection: { state: { getSnapshot: () => 'connected' }, generation: { getSnapshot: () => ({ id: generation }) }, reconnect() { generation++ } },
-    slots: { inject: (_n, fn) => fn(), register(entry, component) { registered.set(entry.name, { options: entry, component }); return () => {} } },
-    // ctx.effect REGISTERS an effect; it does not run cleanup now. A harness that calls the
-    // callback immediately would run the plugin's cleanup effect during apply(), which sets
-    // `disposed` — and then the boot lookup's own result is thrown away as if the page had
-    // been left. The effects are flushed after apply() instead, in registration order.
-    effect(fn, label) { pendingEffects.push({ fn, label }) },
-    remote: { workspace: {
-      async create({ path }) { events.push('create'); return { ok: true, value: { workspace: { workspaceId: 'workspace', title: 'id' } } } },
-      async rename() { events.push('rename'); return { ok: true } },
-      async delete() { events.push('delete') },
-      async list() { events.push('list'); return { value: { workspaces: stored?.workspaceId ? [{ workspaceId: stored.workspaceId, path: stored.mountpoint }] : [] } } },
-    } },
-    uiWorkspace: { async connectWorkspace(id) { events.push('connect:' + id) } },
-  }
-  client.apply(ctx)
-  for (const { fn, label } of pendingEffects) {
-    const dispose = fn()
-    if (typeof dispose === 'function') effects.push(dispose)
-    if (label?.endsWith('cleanup')) client.__cleanup = dispose
-  }
-  const row = () => registered.get('sidebar.footer.action').component
-  return {
-    events, requests, warnings, indexedDB,
-    inject: () => client.inject,
-    click: () => row()().props.onClick(),
-    text: () => textOf(row()()),
-    state: () => row()().props['data-dshgw-state'],
-    dialogText: () => textOf(registered.get('shell.overlay').component()),
-    resumeCalls: () => resumeCalls,
-    // The stored record, read the way the plugin reads it (a Map is not key-enumerable).
-    record: () => indexedDB.data.get('mount:http://127.0.0.1:13861') || null,
-    pollCount: () => pollCount,
-    dispose: async () => { client.__cleanup?.(); await tick() },
-  }
-}
-
-// Wait for the page to reach a state instead of counting microtasks: the boot path is a
-// chain of IndexedDB and permission promises whose length is not the test's business.
-async function until(predicate, what = 'condition', timeout = 2000) {
-  const deadline = Date.now() + timeout
-  while (Date.now() < deadline) {
-    if (predicate()) return
-    await new Promise(resolve => setTimeout(resolve, 5))
-  }
-  throw new Error('timed out waiting for ' + what)
-}
-
-const storedRecord = (overrides = {}) => Object.assign({
-  version: 1, token: 'private-token', id: 'id', name: 'local',
-  workspaceId: 'workspace', handle: null, at: Date.now(), mountpoint: '/home/account/browser/id',
-}, overrides)
-
-test('a page that finds a stored mount offers to restore it, without opening the picker', async () => {
-  const ui = setup({ record: storedRecord() })
-  await until(() => ui.state() === 'resumable')
-  // Boot only reads the record: it must not resume anything by itself, because the mount
-  // belongs to a click.
-  assert.equal(ui.resumeCalls(), 0, 'the page resumed on its own')
-  assert.match(ui.text(), /点击恢复/)
-
-  await ui.click()
-  await until(() => ui.state() === 'mounted')
-  assert.equal(ui.resumeCalls(), 1)
+  ui.clickRow()
+  await mounted(ui)
+  assert.equal(ui.state.resumeCalls, 1)
   assert.ok(!ui.events.includes('picker'), 'restoring must not ask for a directory again')
   assert.ok(!ui.events.includes('create'), 'restoring must not register a second workspace')
   assert.ok(!ui.events.includes('activate'), 'restoring must not restart the worker')
-  assert.match(ui.text(), /已恢复/)
+  assert.match(ui.rowText(), /已挂载 local（读写，已恢复）；点击断开/)
   // The workspace that the path already had is reopened, not duplicated.
   assert.ok(ui.events.includes('connect:workspace'), 'the restored workspace was not reopened')
   await ui.dispose()
 })
 
-test('a stored record whose permission the browser wants re-confirmed falls back to a fresh mount', async () => {
-  const ui = setup({ record: storedRecord(), permission: 'prompt' })
-  await until(() => ui.indexedDB.data.size === 0, 'the unusable record to be dropped')
-  // Nothing to offer: a page cannot reattach on its own without the grant, and the record is
-  // dropped so the row never advertises a resume that cannot work.
-  assert.equal(ui.state(), 'idle')
+test('a saved folder whose permission the browser wants re-confirmed asks for the directory again', async () => {
+  const handle = fakeHandle({ name: 'local', permission: 'prompt' })
+  const ui = setup({ stored: storedFolders([storedFolder({ handle })]) })
+  await state(ui, 'disconnected')
+  // Nothing to resume on its own, but the FOLDER is not thrown away: it is the mapping, and
+  // the person only has to point at it again.
+  assert.equal(ui.rowText().includes('local'), true)
+  assert.match(ui.rowText(), /已断开 local；点击重新选择目录/)
+  assert.equal(ui.savedFolders().length, 1, 'the saved folder was dropped for a permission prompt')
 
-  await ui.click()
-  await until(() => ui.events.includes('picker'), 'the picker fallback')
-  assert.equal(ui.resumeCalls(), 0)
+  ui.clickRow()
+  await until(() => ui.events.includes('picker'), 'the picker for the re-grant')
+  assert.equal(ui.state.resumeCalls, 0)
   await ui.dispose()
 })
 
-test('a refused resume clears the record and still mounts on the same click', async () => {
-  const ui = setup({ record: storedRecord(), resumeRefused: true })
-  await until(() => ui.state() === 'resumable')
-  await ui.click()
-  await until(() => ui.events.includes('picker'), 'the fresh-mount fallback')
-  assert.equal(ui.resumeCalls(), 1)
-  // "unknown directory capability" is final: the dead record must not survive to be offered
-  // again, and the operator's click must still produce a working mount.
-  assert.equal(ui.record()?.token, 'private-token', 'the fresh mount did not replace the dead record')
-  assert.ok(ui.events.includes('picker'), 'the click did not recover into a fresh mount')
-  assert.equal(ui.state(), 'mounted')
+test('a refused resume still mounts the SAME local directory on the same click', async () => {
+  const handle = fakeHandle({ name: 'local' })
+  const key = 'b'.repeat(32)
+  const ui = setup({
+    stored: storedFolders([storedFolder({ handle, key, mountpoint: `/home/account/browser/${key}` })]),
+    // The gateway's grace window is over: it no longer holds that capability, and the key is
+    // free for the fresh mount the same click has to produce.
+    mountAlive: false,
+    resumeRefusals: ['unknown directory capability'],
+  })
+  await state(ui, 'resumable')
+  ui.clickRow()
+  await mounted(ui)
+  assert.equal(ui.state.resumeCalls, 1)
+  // "unknown directory capability" is final for that capability: the dead token must not
+  // survive, but the folder must — and the fresh mount carries the SAME stable key, so the
+  // virtual path (and with it the workspace entry) is the one this directory already had.
+  const opened = ui.requests.filter(request => request.endpoint === 'open')
+  assert.equal(opened.length, 1)
+  assert.equal(opened[0].payload.key, key)
+  assert.ok(!ui.events.includes('picker'), 'a re-granted handle needs no picker')
+  assert.equal(ui.savedFolders()[0].token !== null, true)
   await ui.dispose()
 })
 
-test('an expired record is not offered at all', async () => {
-  const ui = setup({ record: storedRecord({ at: Date.now() - 10 * 60 * 1000 }) })
-  await until(() => ui.indexedDB.data.size === 0, 'the expired record to be dropped')
-  assert.equal(ui.state(), 'idle')
+test('an expired capability is dropped but the folder stays saved', async () => {
+  const handle = fakeHandle({ name: 'local' })
+  const ui = setup({ stored: storedFolders([storedFolder({ handle, at: Date.now() - 10 * 60 * 1000 })]) })
+  await state(ui, 'disconnected')
+  // The token is not offered — the gateway's grace window is long past — but the folder, its
+  // handle and the mapping survive, so connecting again needs no directory dialog.
+  assert.equal(ui.savedFolders().length, 1)
+  assert.equal(ui.savedFolders()[0].token, null)
+  assert.equal(ui.savedFolders()[0].handle.name, 'local')
   await ui.dispose()
 })
 
 test('a transport failure inside one page reconnects instead of tearing the mount down', async () => {
-  const ui = setup({ record: storedRecord(), pollFails: 1 })
-  await until(() => ui.state() === 'resumable')
-  await ui.click()
-  await until(() => ui.resumeCalls() === 2, 'the in-page reconnect')
+  const handle = fakeHandle({ name: 'local' })
+  const ui = setup({ stored: storedFolders([storedFolder({ handle })]), pollFailures: 1 })
+  await state(ui, 'resumable')
+  ui.clickRow()
+  await mounted(ui)
+  await until(() => ui.state.resumeCalls === 2, 'the in-page reconnect')
   // The poll failed once, the page asked to resume, and it kept serving: no close, no
   // "请重新选择目录", and the mount is still owned by this page.
-  assert.ok(!ui.events.includes('close'), 'a recoverable failure closed the mount')
-  await until(() => ui.state() === 'mounted', 'the row to report a live mount')
-  assert.match(ui.text(), /已重连/)
+  assert.equal(ui.events.includes('close'), false, 'a recoverable failure closed the mount')
+  assert.match(ui.rowText(), /已挂载 local（读写，已重连）；点击断开/)
   await ui.dispose()
 })
 
-test('the first successful mount writes the record the next document needs', async () => {
-  const ui = setup()
-  await tick()
-  assert.equal(ui.state(), 'idle', 'a page with no record must not claim anything to restore')
-  await ui.click()
-
-  await until(() => ui.indexedDB.data.size > 0, 'the record of the new mount')
-  const saved = ui.record()
-  assert.ok(saved, 'the mount did not leave a record')
-  assert.equal(saved.token, 'private-token')
-  assert.equal(saved.name, 'local')
-  assert.ok(saved.handle, 'the record has no directory handle to resume with')
+test('the first successful mount saves the folder the next document needs', async () => {
+  const ui = setup({ pickerDirs: [fakeHandle({ name: 'local' })] })
+  await until(() => ui.rowState() === 'idle', 'the empty page')
+  ui.clickRow()
+  await mounted(ui)
+  const saved = ui.savedFolders()
+  assert.equal(saved.length, 1, 'the mount did not leave a saved folder')
+  assert.match(saved[0].key, /^[a-f0-9]{32}$/, 'the mapping key is what names the mount point')
+  assert.equal(saved[0].name, 'local')
+  assert.equal(saved[0].token !== null, true)
+  assert.ok(saved[0].handle, 'the record has no directory handle to resume with')
+  // The key the record carries is the key the gateway was asked to mount.
+  assert.equal(ui.requests.find(request => request.endpoint === 'open').payload.key, saved[0].key)
   await ui.dispose()
 })
 
-test('an explicit disconnect deletes the record, so no later page offers a dead mount', async () => {
-  const ui = setup({ record: storedRecord() })
-  await until(() => ui.state() === 'resumable')
-  await ui.click()
-  await until(() => ui.state() === 'mounted')
-  assert.ok(ui.indexedDB.data.size > 0)
-  await ui.click()
-  await until(() => ui.state() === 'idle', 'the explicit unmount')
+test('an explicit disconnect keeps the folder and its workspace mapping, dropping only the capability', async () => {
+  const handle = fakeHandle({ name: 'local' })
+  const ui = setup({ stored: storedFolders([storedFolder({ handle })]) })
+  await state(ui, 'resumable')
+  ui.clickRow()
+  await mounted(ui)
+  ui.clickRow()
+  await state(ui, 'disconnected')
   assert.ok(ui.events.includes('close'))
-  assert.equal(ui.indexedDB.data.size, 0, 'the record survived an explicit unmount')
+  const saved = ui.savedFolders()
+  assert.equal(saved.length, 1, 'the disconnected folder was removed')
+  assert.equal(saved[0].token, null, 'the dead capability survived the disconnect')
+  assert.ok(saved[0].handle, 'the directory handle was dropped with the capability')
+  assert.equal(saved[0].key, 'a'.repeat(32), 'the stable mapping key changed')
+  // The workspace entry is NOT deleted: it is the mapping this local directory keeps, and the
+  // mount point at that path stays for the next connect instead of being rebuilt elsewhere.
+  assert.deepEqual(ui.events.filter(event => event.startsWith('delete:')), [])
+  const closes = ui.requests.filter(request => request.endpoint === 'close')
+  assert.equal(closes.length, 1)
+  // A plain disconnect carries no `purge` at all: the gateway keeps the mount point, which is
+  // what keeps the workspace entry (and its sessions) mapped to this local directory.
+  assert.equal(closes[0].payload.purge, undefined, 'a disconnect must not release the virtual path')
+  await ui.dispose()
+})
+
+test('deleting a folder releases the virtual path and the workspace entry', async () => {
+  const handle = fakeHandle({ name: 'local' })
+  const ui = setup({ stored: storedFolders([storedFolder({ handle, workspaceId: 'workspace' })]) })
+  await state(ui, 'resumable')
+  ui.clickRow()
+  await mounted(ui)
+  assert.deepEqual(ui.folderActions('local'), ['打开', '断开', '删除'])
+  ui.clickFolder('local', 'delete')
+  assert.deepEqual(ui.folderActions('local'), ['打开', '断开', '确认删除'], 'deleting needs a second, deliberate click')
+  ui.clickFolder('local', 'confirm-delete')
+  await until(() => ui.folderNames().length === 0, 'the folder to be removed')
+  const closes = ui.requests.filter(request => request.endpoint === 'close')
+  assert.equal(closes.at(-1).payload.purge, true, 'a deletion must release the stable mount point')
+  assert.equal(ui.events.includes('delete:workspace'), true, 'the workspace entry outlived its folder')
+  assert.equal(ui.savedFolders().length, 0, 'the deleted folder is still saved')
+  assert.match(ui.rowText(), /浏览器工作区/, 'the row goes back to plain 浏览器工作区')
+  await ui.dispose()
+})
+
+test('a record written by the previous client version is adopted, key and all', async () => {
+  // v1 kept exactly one mount per origin under `mount:<origin>`, with a random id that named
+  // the mount point. It is adopted as a folder whose stable key IS that id, so the path the
+  // workspace entry already points at is the path the next mount uses.
+  const handle = fakeHandle({ name: 'local' })
+  const legacyKey = 'c'.repeat(48)
+  const ui = setup({
+    legacy: true,
+    stored: {
+      version: 1, token: 'private-token', id: legacyKey, name: 'local', workspaceId: 'workspace',
+      handle, at: Date.now(), mountpoint: `/home/account/browser/${legacyKey}`,
+    },
+  })
+  await state(ui, 'resumable')
+  assert.equal(ui.legacyRecord(), null, 'the v1 record was left behind for another tab to adopt')
+  const saved = ui.savedFolders()
+  assert.equal(saved.length, 1)
+  assert.equal(saved[0].key, legacyKey, 'the adopted folder lost the path its workspace points at')
+  assert.equal(saved[0].token, 'private-token')
+  await ui.dispose()
+})
+
+test('a folder whose gateway mount is gone after the grace window reconnects through open, not resume', async () => {
+  // The page kept the token, the gateway did not keep the mount: the resume is refused and the
+  // click must still produce a working mount instead of a dead end.
+  const handle = fakeHandle({ name: 'local' })
+  const ui = setup({ stored: storedFolders([storedFolder({ handle })]), mountAlive: false, resumeRefusals: ['unknown directory capability', 'unknown directory capability'] })
+  await state(ui, 'resumable')
+  ui.clickRow()
+  await mounted(ui)
+  assert.equal(ui.requests.filter(request => request.endpoint === 'open').length, 1)
+  assert.equal(ui.savedFolders().length, 1)
+  // The folder is mounted, and the record carries the NEW capability rather than the dead one.
+  assert.equal(ui.savedFolders()[0].token !== null, true)
+  assert.equal(ui.savedFolders()[0].mountpoint, `/home/account/browser/${'a'.repeat(32)}`)
+  await ui.dispose()
+})
+
+test('a folder served by another page is reported, never mounted twice', async () => {
+  const handle = fakeHandle({ name: 'local' })
+  const ui = setup({ stored: storedFolders([storedFolder({ handle })]), resumeRefusals: ['directory already served by another page'] })
+  await state(ui, 'resumable')
+  ui.clickRow()
+  await state(ui, 'failed')
+  // Two browsers writing one local directory through two FUSE mounts is the failure this
+  // refusal prevents, so the click must NOT fall back to a fresh mount.
+  assert.equal(ui.requests.filter(request => request.endpoint === 'open').length, 0)
+  assert.match(ui.rowText(), /另一个页面服务/)
+  assert.equal(ui.folderStates()[0], 'elsewhere')
+  await ui.dispose()
+})
+
+test('the origin keys the saved folders, so another tenant never sees them', async () => {
+  const ui = setup({ stored: { version: 2, folders: [] } })
+  await state(ui, 'idle')
+  assert.equal(ui.indexedDB.data.has(`folders:${ORIGIN}`), true)
+  assert.equal(ui.indexedDB.data.has('folders:http://evil.test'), false)
   await ui.dispose()
 })

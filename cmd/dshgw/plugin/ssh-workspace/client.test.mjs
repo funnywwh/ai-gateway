@@ -136,9 +136,13 @@ check(String(styles[0].dataset.pluginCss).startsWith('dshgw-ssh-workspace'), 'th
 // The shell renders `sidebar.footer.action` as one flex row, which would squeeze this row
 // and the browser-workspace one into half the foot each; both plugins ship the rule that
 // stacks the container instead. The list slot wraps every registration in a classless div,
-// so the shell's container is two levels up from the row.
-check(/div:has\(> div > \.dshgw-bw-action\)[\s\S]*div:has\(> div > \.dshgw-ssh-action\)[\s\S]*flex-direction: column/.test(String(styles[0].textContent)),
+// so the shell's container is two levels up from the row. The browser row is matched by its
+// CONTAINER class only: an earlier rule also matched the row's inner action button, which
+// turned that container into a column and put its folder icon under its label.
+check(/div:has\(> div > \.dshgw-bw-row\)[\s\S]*div:has\(> div > \.dshgw-ssh-action\)[\s\S]*flex-direction: column/.test(String(styles[0].textContent)),
   'the stylesheet stacks the shared sidebar foot')
+check(!/> \.dshgw-bw-action/.test(String(styles[0].textContent)),
+  'the rule must not match the browser row container itself')
 
 // The dialog is closed until the action is used: rendering it must be a no-op, not a crash.
 const dialog = registered.find((entry) => entry.slot === 'shell.overlay').component

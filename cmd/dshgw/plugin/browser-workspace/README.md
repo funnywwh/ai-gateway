@@ -4,6 +4,12 @@ The plugin follows `ssh-workspace`'s Cordis/ModuleLoader packaging. `index.js`
 only activates the client package: the **gateway**, not the tenant Node worker,
 owns authenticated reverse HTTP, request queues, FUSE mounts and worker restarts.
 
+One account can have **several local directories** mounted at once. Each one is a *folder*
+here: a saved entry (a stable key, the directory handle it was granted, and the workspace it
+maps to) that is either connected or not. The sidebar row is the entry point — one click does
+the obvious thing — and the icon at its right opens the folder list, where a person adds,
+connects, disconnects and deletes folders.
+
 ## Gateway HTTP contract
 
 All requests are same-origin JSON POSTs to `./browser-workspace/<endpoint>` with
@@ -12,15 +18,34 @@ same-origin credentials; redirects are rejected. Responses are
 
 | Endpoint | Payload | Value |
 | --- | --- | --- |
-| `open` | `{name,writable:true}` | `{token,mountpoint,id}` (mount pending) |
+| `open` | `{name,writable:true,key?}` | `{token,mountpoint,id}` (mount pending) |
 | `poll` | `{token}` | `{requests:[{id,op,path,offset?,size?,data?,target?,exclusive?,truncate?}]}` |
 | `respond` | `{token,id,result:{ok,value?,error?}}` | acknowledgement |
 | `activate` | `{token}` | `{mountpoint,id}` after mount/worker restart |
 | `resume` | `{token}` | `{id,mountpoint,resumed}` — takes an existing mount back |
-| `close` | `{token}` | acknowledgement |
+| `close` | `{token,purge?}` | acknowledgement |
 
-The client starts poll **before** activate and continues during worker restart.
-Activate and close use 55-second client timeouts to accommodate a 45-second worker
+`key` is the folder's **stable directory key**: 32 lowercase hex characters, generated once by
+the client and kept with the folder. The gateway mounts that folder at
+`<workspace>/browser/<key>`, so the same local directory always mounts at the same virtual
+path. A key another share still holds — serving, or waiting out its reconnect grace — is
+refused (`directory key already mounted for this account`) instead of mounted twice; a key
+without one gets a fresh random id (an older client), whose mount point is per-mount scratch.
+
+`purge` on `close` is the operator removing the folder for good: the mount point and its record
+are released instead of kept for the next mount of that key. A plain `close` keeps the empty
+mount point, because that directory *is* the virtual path the account's own workspace entry
+points at.
+
+**A gateway that predates this client** rejects both extra fields outright (its JSON decoder
+runs with `DisallowUnknownFields`), so a page loaded just before a gateway restart would lose
+the ability to mount at all. The client recognises that one answer and degrades instead of
+failing: `open` is retried without the key (the mount works, at the old per-mount path, and a
+warning says so) and a `purge` that is refused falls back to a plain close (an older gateway
+removes every mount point itself). Pages already open keep working across a rolling restart;
+a reload picks up the new bundle and the stable keys.
+
+The client starts poll **before** activate and continues during worker restart. Activate and close use 55-second client timeouts to accommodate a 45-second worker
 restart; other requests time out at 35 seconds. Gateway poll must return within
 that deadline. Empty polls are paced at 100ms. No filesystem mutation is replayed.
 
@@ -34,55 +59,140 @@ It is not torn down at once. The gateway keeps the kernel mount and its mount po
 for a 45-second grace window, during which the same page (or the page that replaced
 it) can take the mount back with `resume` — same path, same worker binding, no
 second mount and no worker restart. Only when that window passes unused does the
-gateway run the old teardown: restart worker, unmount, remove the mount point and
-its record.
+gateway run the old teardown: restart worker, unmount, and remove the record (the
+mount point itself stays for a stable key).
 
 `resume` is refused while another browser side holds the mount's poll connection,
 and the replaced side is then told `directory revoked` so it stops instead of
 fighting the live page. Because a request the browser never sent (a blocked or
 dropped connection) leaves the gateway still believing the old poll is alive, the
 client's own reconnect only succeeds once that request has actually ended — one
-retry later, not forever.
+retry later, not forever. A refusal that means "another page serves this directory"
+is final for the click: the folder is marked as served elsewhere rather than mounted
+again, because two FUSE mounts of one local directory let two browsers write the same
+files at once.
 
 Workspace `create(path)` runs BEFORE activation, while the mount point is
-guaranteed to exist: `open` creates that directory and any teardown (page reload,
-transport failure, disconnect) removes it again, so registering after the
-activation restart raced that removal and failed with `workspace/invalid-path:
-ENOENT realpath`. Registration is idempotent and retried for up to 10 seconds
-(each call bounded to 5 seconds).
+guaranteed to exist: `open` creates or reuses that directory, and registering after
+the activation restart raced the teardown and failed with `workspace/invalid-path:
+ENOENT realpath`. `create` is idempotent **by path**, which is what makes the stable
+key worth having: the same local directory returns the same workspace id, the same
+title and the same sessions, across disconnects, reloads and gateway restarts.
+Registration is retried for up to 10 seconds (each call bounded to 5 seconds), and a
+mount that fails after registering deletes the workspace **only if it created it** —
+an existing workspace is the mapping, and deleting it would throw its sessions away.
 
 After activation the client waits for a fresh connected DSH generation using the
 public `connection.state`, `connection.generation` and `connection.reconnect`
 services. It then best-effort renames the workspace and invokes
 `uiWorkspace.connectWorkspace` once. Session opening is deliberately not retried
-because it can create a second session. A mount that fails after registration
-forgets that workspace (nothing was connected to it yet), because the gateway
-removes the mount point with the capability.
+because it can create a second session.
 
 A transport failure is recovered **in place**: the page asks the gateway to resume,
 keeps serving, and never needs a reload, a click or a second directory choice. Only
 a `resume` the gateway refuses (the capability is gone: `unknown directory
-capability`, or `directory revoked` because another page took it over) ends the
-mount and clears the stored record.
+capability`, or `directory revoked` because another page took it over) ends that
+mount — `unknown directory capability` clears the token and the next click mounts
+the folder again at the SAME path, while `directory revoked` leaves the folder to the
+page that took it over.
 
-The mount's capability token and its directory handle are kept in IndexedDB, keyed
-by the tenant origin. They are what makes recovery possible after a reload: a
-FileSystemDirectoryHandle stored there is a real handle again in the next document,
-and a granted `readwrite` permission survives the reload (measured in Chromium:
-`queryPermission` returns `granted` with no user gesture, and read/write both work).
-The next document does **not** resume on its own — it reads the record at boot and
-shows "刷新前挂载的是 <dir>；点击恢复", and one click takes the same mount back. A
-record the browser will not re-grant, one older than the grace window, or one the
-gateway refuses is dropped, and that same click falls through to an ordinary mount.
+## The saved folder list (IndexedDB)
 
-On transport failure or explicit stop, local polling is aborted before requesting
-close. Only a successful close response clears the directory token and displays
-"disconnected". Cleanup failure preserves the token, displays an unconfirmed
-cleanup warning, and offers retry without selecting/opening a second directory.
-Disposal performs best-effort close and logs unconfirmed cleanup; the gateway
-lease reaper remains necessary when a page disappears before acknowledgement.
-Directory capabilities and handles stay in memory and are never logged. Gateway
-must authenticate each endpoint and validate operation-specific response schemas.
+The list is keyed by the tenant origin and holds one record per folder:
+
+```js
+{ version: 2, key, name, workspaceId, token, mountpoint, at, handle }
+```
+
+* `key` — the stable directory key (32 hex). It names the mount point, so it is the
+  mapping; it never changes for a folder, not even when the directory is re-picked.
+* `handle` — a `FileSystemDirectoryHandle` stored in IndexedDB is a REAL handle again in the
+  next document, and a granted `readwrite` permission survives the reload (measured in
+  Chromium: `queryPermission` returns `granted` with no user gesture, and reads and writes both
+  work). That is what lets a reload reconnect without opening the directory dialog.
+* `token` + `at` — the capability and when it was taken. The token is the perishable part: on
+  boot it is kept only while the gateway could still hold that mount, and dropped otherwise.
+  The FOLDER is never dropped by a stale token — only an explicit deletion removes it.
+* `workspaceId` — kept across a disconnect, because the workspace entry is kept too.
+
+The v2 list lives under a NEW key (`folders:<origin>`); v1 stored exactly one mount under
+`mount:<origin>`. A v1 record is adopted once (its random id becomes the folder's key, so the
+path its workspace entry already points at stays valid) and that key is then removed. Keeping
+the two apart means an older bundle running in another tab cannot clear the v2 list it cannot
+parse.
+
+Each folder is serialised through one chain, so a connect that finishes while a second folder
+is being added cannot overwrite the list the other one just wrote.
+
+## The window, and what a click does
+
+The row's right-hand icon opens the folder list: one row per saved folder (name, state, and
+its own 连接/断开, 打开 and 删除 buttons) plus 添加文件夹 and 关闭. 删除 needs a second,
+deliberate click (确认删除) and never uses `window.confirm`: the picker and the dialog both
+need the click's own task, and a blocking confirm is what this plugin must not put in front of
+them.
+
+The row body is the adaptive one-click gesture:
+
+| Saved folders | A click on the row body |
+| --- | --- |
+| none | opens the readwrite picker and mounts what the person chooses (today's gesture) |
+| exactly one | that folder's connect (resume, or mount) or disconnect |
+| several | opens the folder list — "disconnect which one?" has no obvious answer |
+
+`showDirectoryPicker()` is called **synchronously inside the click** (no await in front of it),
+because it needs transient user activation — about five seconds in Chromium — and any earlier
+step, a consent click or a blocking dialog alike, spends that clock before the picker is
+reached ("Must be handling a user gesture").
+
+The window is a management surface, so it does not close itself; only the row's own one-click
+mount does, 1.5 seconds after a mount succeeds. A failure keeps the window open with the
+reason, and the row keeps reporting the real state either way.
+
+## Folder states
+
+| State | Meaning |
+| --- | --- |
+| `connected` | this page serves that mount right now |
+| `disconnected` | saved and offline; `ready === false` means the grant is gone and connecting will ask for the directory again |
+| `resumable` | the gateway may still hold that mount (`token` fresh) — one click takes it back with `resume`, no worker restart |
+| `connecting` / `disconnecting` | the operation is running (that folder's buttons are disabled) |
+| `error` | the last operation failed; `retry` says whether the retry is a connect or a close |
+| `elsewhere` | another page of this account serves that directory |
+
+The row carries the aggregate phase as `data-dshgw-state` (`idle`, `disconnected`,
+`resumable`, `mounted`, `failed`, or the running operation) and the folder rows carry
+`data-dshgw-folder-state`; both are what the real-browser runs assert, because the row
+deliberately has no status dot — the state note and the window say it in words.
+
+## User consent and limitations
+
+The sidebar entry is a compact row above the ssh-workspace row (slot
+`sidebar.footer.action`, order 90, label `浏览器工作区`). The shell renders this list slot
+as a flex row and wraps each registration in a classless `div`; both workspace plugins ship
+a scoped `:has()` rule that changes the shared footer to a column, so the two rows occupy
+separate full-width lines. The browser row is a container (`.dshgw-bw-row`) holding the row
+body and the folder icon; the collapsed rail keeps one icon and hides the rest.
+
+The warning travels with the row and the window instead of gating the picker: the row's
+tooltip states that the AI can read, modify, rename and delete files in the selected
+directory, that file contents may be sent to the configured AI model provider, and that
+connecting and disconnecting restart the account worker and can interrupt running tasks or
+connections. Users should select a dedicated backed-up directory, never secrets or
+credentials. A secure context and File System Access browser support are still required.
+
+Up to 8 folders may be SAVED per browser profile. How many may be MOUNTED at once is the
+gateway's bound (currently 4 per account, and one long-poll connection per mount from the
+page); exceeding it is reported in the window in words the operator can act on. Deleting a
+folder releases its virtual path and its workspace entry; disconnecting keeps both, which is
+what makes "reconnect" return to the same workspace with the same sessions.
+
+FSA is not a complete POSIX filesystem: hard links, symlinks, chmod, ownership,
+real directory timestamps and reliable external-writer exclusion are unavailable.
+Exclusive creation checks cannot rule out races with external programs. Native
+move availability and atomicity remain browser/platform capabilities. The picker
+and real mount flow require secure-context Chromium integration verification;
+Node tests below use fake handles and do not prove a production kernel mount.
 
 ## Filesystem protocol
 
@@ -118,58 +228,30 @@ updates. Offsets and sizes must fit non-negative JavaScript safe integers.
 DOM failures map to errno-like errors (ENOENT, EACCES, ENOSPC, ENOTEMPTY, etc.).
 Mutation timeout has unknown outcome and must not be blindly retried.
 
-## User consent and limitations
-
-The sidebar entry is a compact row above the ssh-workspace row (slot
-`sidebar.footer.action`, order 90, label `浏览器工作区`). The shell renders this list slot
-as a flex row and wraps each registration in a classless `div`; both workspace plugins ship
-a scoped `:has()` rule that changes the shared footer to a column, so the two rows occupy
-separate full-width lines. In the expanded sidebar the row contains an icon, the label and
-a muted state note; in the collapsed rail only the icon remains. The row carries its phase
-as `data-dshgw-state` (`mounted` while a directory is mounted, `failed` after the last
-operation failed, everything else otherwise), which is what the browser tests assert — the
-row itself deliberately has no status dot: the state note and the dialog say it in words.
-
-**One click is the whole gesture** — it opens the readwrite picker synchronously, because
-`showDirectoryPicker()` needs transient user activation (about five seconds in Chromium)
-and any earlier step, a consent click or a blocking `window.confirm()` alike, spends that
-clock before the picker is reached ("Must be handling a user gesture"). After the picker
-returns, the browser row opens a frame-wide status dialog. It reports picking, mounting,
-worker reconnect and the final result. A successful mount shows the green success state and
-automatically closes the dialog after 1.5 seconds; a failure keeps the dialog open with a
-red error until the user closes it. Closing the dialog never cancels an in-flight mount—the
-row continues to report the real state. Cancelling the native picker is not a failure: the
-dialog closes and the row returns to its previous state.
-
-The warning therefore travels with the row and dialog instead of gating the picker: the
-row's tooltip states that the AI can read, modify, rename and delete files in the selected
-directory, that file contents may be sent to the configured AI model provider, and that
-mounting and unmounting restart the account worker and can interrupt running tasks or
-connections. Users should select a dedicated backed-up directory, never secrets or
-credentials. The state note covers mounting, waiting for the worker to reconnect, active
-sharing, disconnect and unconfirmed cleanup with an explicit retry action. A secure
-context and File System Access browser support are still required.
-
-FSA is not a complete POSIX filesystem: hard links, symlinks, chmod, ownership,
-real directory timestamps and reliable external-writer exclusion are unavailable.
-Exclusive creation checks cannot rule out races with external programs. Native
-move availability and atomicity remain browser/platform capabilities. The picker
-and real mount flow require secure-context Chromium integration verification;
-Node tests below use fake handles and do not prove a production kernel mount.
-
 ## Tests
 
 ```sh
 node --test cmd/dshgw/plugin/browser-workspace/*.test.mjs
 ```
 
-Coverage includes binary roundtrips/offsets/sparse writes, create flags, truncation
-and metadata, serialization, base64/range/JSON-size limits, path escape rejection,
-read-only/revoked permission, typed deletion, rename ENOTSUP, same-origin HTTP and
-timeouts. UI tests execute actual `apply()` against fake React/DSH services and
-cover the complete picker/open/poll/respond/activate/reconnect/register/connect/
-close contract, idempotent create retry, activation failure, cleanup failure and
-retry with retained capability, disposal, and picker cancellation. One test pins the
-sidebar contract (slot, order above the ssh entry, label, single-click row, warning
-on the row) and asserts the picker is invoked synchronously by that click with no
-consent step and no blocking dialog.
+`harness.mjs` is the one fake browser the behaviour tests share: IndexedDB with real request
+ordering, a picker that answers with whichever directories the test queues, a stateful fake
+gateway that hands out one capability per mounted key, and the DSH services the plugin
+injects. On top of it:
+
+- `client.test.mjs`, `limits.test.mjs`, `large-block.test.mjs` — the executor: binary
+  roundtrips/offsets/sparse writes, create flags, truncation, serialization,
+  base64/range/JSON-size limits, path escape rejection, read-only/revoked permission, typed
+  deletion, rename ENOTSUP, same-origin HTTP and timeouts.
+- `ui.test.mjs` — one directory: the row contract (two controls, phases, the stacking rule),
+  the synchronous picker, open → poll → create → activate → reconnect ordering, a failed
+  activation (including "do not delete a workspace this mount did not create"), an
+  unconfirmed cleanup and its retry, disposal, and a cancelled picker changing nothing.
+- `manage.test.mjs` — several directories: adding two, mounting each at its own key, the
+  adaptive row click, disconnecting one while the other keeps serving, reconnecting at the
+  same path and workspace, the two-step deletion, the per-account limit in words, a
+  duplicate directory in the list, and a re-picked directory keeping its key.
+- `reconnect.test.mjs` — what survives a page: offering a stored mount without opening the
+  picker, a withdrawn grant, a refused resume falling back to the same directory, an expired
+  capability that keeps the folder, an in-page reconnect, and a browser tab that serves the
+  directory being reported instead of mounted twice.

@@ -47,8 +47,10 @@ window.__ModuleLoader__.load({
    around its own row: the list slot wraps every registration in a classless div, so the
    shell's container is TWO levels up, and :has() is the only selector that can reach it from
    here. Both shapes are covered, and both rows ship this rule, so it holds whichever of the
-   two plugins a deployment enables. */
-div:has(> .dshgw-bw-action), div:has(> div > .dshgw-bw-action),
+   two plugins a deployment enables. The browser row is a container ('dshgw-bw-row'), matched
+   from outside: matching its inner button as well would turn that container into a column and
+   put its folder icon under the label. */
+div:has(> .dshgw-bw-row), div:has(> div > .dshgw-bw-row),
 div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-direction: column; }
 .dshgw-ssh-backdrop { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.45); z-index: 40; }
 .dshgw-ssh-dialog { width: min(720px, 92vw); max-height: 86vh; overflow: auto; background: var(--dsh-bg, #1b1c1f); color: var(--dsh-fg, #e6e6e6); border: 1px solid rgba(127,127,127,.35); border-radius: 10px; padding: 16px 18px; font-size: 13px; line-height: 1.5; }
