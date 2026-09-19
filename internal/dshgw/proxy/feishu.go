@@ -89,6 +89,9 @@ func (p *Proxy) feishuLogin(w http.ResponseWriter, r *http.Request) {
 		p.renderLogin(w, http.StatusInternalServerError, "无法创建会话")
 		return
 	}
+	// The ticket already proved WHICH Feishu person this is; the name behind it is what the
+	// tenant's sidebar shows, so warm the identity while the browser is redirected (M67).
+	p.identity(r.Context(), tenant)
 	p.setSessionCookie(w, tenant.Name, token, false)
 	p.audit(r, tenant.Name, "feishu_login_success", "authenticated", http.StatusFound)
 	if p.Activity != nil {

@@ -597,14 +597,15 @@ func (s *Server) provisionAccountDSH(ctx context.Context, actor string, store Ac
 	}
 	if existsInDshgw {
 		// Re-enable (or retry after a half-finished enable): rotate the worker credential
-		// to a fresh key and bring the stopped worker back.
-		if err := s.deps.DshgwAdmin.SetTenantKey(ctx, tenant, key); err != nil {
+		// to a fresh key and bring the stopped worker back. The account name travels along
+		// (M67), which is how a tenant provisioned before the field existed picks it up.
+		if err := s.deps.DshgwAdmin.SetTenantKey(ctx, tenant, a.Name, key); err != nil {
 			return "", toAPIError(err)
 		}
 		if err := s.deps.DshgwAdmin.StartTenant(ctx, tenant); err != nil {
 			return "", toAPIError(err)
 		}
-	} else if err := s.deps.DshgwAdmin.CreateTenant(ctx, tenant, key); err != nil {
+	} else if err := s.deps.DshgwAdmin.CreateTenant(ctx, tenant, a.Name, key); err != nil {
 		return "", toAPIError(err)
 	}
 	a.DshTenant = tenant

@@ -21,16 +21,20 @@ import (
 
 type stubOps struct {
 	created []string
-	started []string
-	stopped []string
-	keys    []string
-	tenants []registry.Tenant
+	// accounts records the account label every create/set-key carried (M67), so the
+	// protocol test can pin that it survives the socket hop.
+	accounts []string
+	started  []string
+	stopped  []string
+	keys     []string
+	tenants  []registry.Tenant
 }
 
-func (s *stubOps) Create(_ context.Context, name, key string, _ bool) (registry.Tenant, error) {
+func (s *stubOps) Create(_ context.Context, name, account, key string, _ bool) (registry.Tenant, error) {
 	s.created = append(s.created, name)
+	s.accounts = append(s.accounts, account)
 	s.keys = append(s.keys, key)
-	return registry.Tenant{Name: name, PublicPort: 32601, UID: 1234}, nil
+	return registry.Tenant{Name: name, Account: account, PublicPort: 32601, UID: 1234}, nil
 }
 func (s *stubOps) Start(_ context.Context, name string) error {
 	s.started = append(s.started, name)
@@ -40,7 +44,8 @@ func (s *stubOps) Stop(_ context.Context, name string) error {
 	s.stopped = append(s.stopped, name)
 	return nil
 }
-func (s *stubOps) SetKey(_ context.Context, name, key string) error {
+func (s *stubOps) SetKey(_ context.Context, name, account, key string) error {
+	s.accounts = append(s.accounts, account)
 	s.keys = append(s.keys, key)
 	return nil
 }
@@ -94,12 +99,17 @@ func TestAdminServerLifecycleOpsAndPeerGate(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("ping: %+v", resp)
 	}
-	resp = adminCall(t, path, adminRequest{ID: 2, Op: "tenant-create", Name: "alice", Key: "sk-gw-test-key-000001", AllowEmptyModels: true})
+	resp = adminCall(t, path, adminRequest{ID: 2, Op: "tenant-create", Name: "alice", Account: "李智超(colin)", Key: "sk-gw-test-key-000001", AllowEmptyModels: true})
 	if !resp.OK || resp.Result["name"] != "alice" {
 		t.Fatalf("create: %+v", resp)
 	}
 	if len(ops.created) != 1 || ops.created[0] != "alice" || len(ops.keys) != 1 {
 		t.Fatalf("ops recorded: %+v", ops)
+	}
+	// The account label is display data the tenant's sidebar shows (M67): it must survive the
+	// socket hop unchanged, non-ASCII included.
+	if len(ops.accounts) != 1 || ops.accounts[0] != "李智超(colin)" {
+		t.Fatalf("account label did not cross the channel: %+v", ops.accounts)
 	}
 	resp = adminCall(t, path, adminRequest{ID: 3, Op: "tenant-stop", Name: "alice"})
 	if !resp.OK {
@@ -109,7 +119,7 @@ func TestAdminServerLifecycleOpsAndPeerGate(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("start: %+v", resp)
 	}
-	resp = adminCall(t, path, adminRequest{ID: 5, Op: "tenant-set-key", Name: "alice", Key: "sk-gw-test-key-000002"})
+	resp = adminCall(t, path, adminRequest{ID: 5, Op: "tenant-set-key", Name: "alice", Account: "李智超(colin)", Key: "sk-gw-test-key-000002"})
 	if !resp.OK {
 		t.Fatalf("set-key: %+v", resp)
 	}

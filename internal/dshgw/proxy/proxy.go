@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -83,8 +84,11 @@ type Proxy struct {
 	revalidations     map[string]revalidation
 	dshMu             sync.Mutex
 	dshChecks         map[string]revalidation
-	reloadMu          sync.Mutex
-	lastReload        time.Time
+	// identities caches who each tenant's sidebar shows (M67); see identity.go.
+	identityMu sync.Mutex
+	identities map[string]tenantIdentity
+	reloadMu   sync.Mutex
+	lastReload time.Time
 }
 type rateBucket struct {
 	Start time.Time
@@ -100,7 +104,7 @@ func New(cfg *config.Config, reg *registry.Registry, sessions session.Store, sou
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.ForceAttemptHTTP2 = false
-	p := &Proxy{Config: cfg, Registry: reg, Sessions: sessions, HandshakeSource: source, Exchanger: exchanger, Validator: validator, Transport: transport, rates: map[string]*rateBucket{}, revalidations: map[string]revalidation{}, dshChecks: map[string]revalidation{}}
+	p := &Proxy{Config: cfg, Registry: reg, Sessions: sessions, HandshakeSource: source, Exchanger: exchanger, Validator: validator, Transport: transport, rates: map[string]*rateBucket{}, revalidations: map[string]revalidation{}, dshChecks: map[string]revalidation{}, identities: map[string]tenantIdentity{}}
 	cfg.SetTenantPorts(reg.TenantPorts())
 	return p
 }
@@ -224,6 +228,7 @@ func (p *Proxy) reloadRegistry() error {
 		}
 	}
 	p.revalidateMu.Unlock()
+	p.forgetIdentities(ports)
 	p.lastReload = now
 	return nil
 }
@@ -378,6 +383,10 @@ func (p *Proxy) login(w http.ResponseWriter, r *http.Request) {
 		p.renderLogin(w, http.StatusInternalServerError, "无法创建会话")
 		return
 	}
+	// Resolve who just signed in before sending them on: the tenant's sidebar asks for it as
+	// soon as its page loads, which is one redirect away (M67). Best effort by design — the
+	// login must not fail because a display name could not be looked up.
+	p.identity(r.Context(), tenant)
 	p.setSessionCookie(w, tenant.Name, token, false)
 	p.audit(r, tenant.Name, "login_success", "authenticated", http.StatusFound)
 	if p.Activity != nil {
@@ -492,55 +501,14 @@ func (p *Proxy) TenantHandler(t registry.Tenant) http.Handler {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		cookie, err := uniqueCookie(r, p.Config.SessionCookieName(t.Name))
-		if err != nil {
-			// A login that "did nothing" looks exactly like this: the browser comes back to
-			// the tenant without the session cookie (a proxy, an extension, a cookie the
-			// browser dropped, or a cookie set for a different host). Naming the case is the
-			// difference between a guess and a diagnosis, so the presence of ANY tenant cookie
-			// is reported alongside the address it came from.
-			p.log().Warn("tenant request without a session cookie",
-				"tenant", t.Name, "source", requestIP(r), "path", r.URL.Path,
-				"cookies", sessionCookieNames(r), "cookie_error", err.Error())
-			p.unauthenticated(w, r)
+		cookie, ok := p.tenantSession(w, r, t)
+		if !ok {
 			return
 		}
-		record, err := p.Sessions.Get(cookie.Value)
-		if err != nil || record.Tenant != t.Name {
-			reason := "unknown or expired session"
-			if err == nil && record.Tenant != t.Name {
-				// A session for another tenant under this tenant's cookie name: either a
-				// hand-copied cookie or two tenants sharing one browser profile.
-				reason = "session belongs to another tenant"
-			}
-			p.log().Warn("tenant request with an unusable session",
-				"tenant", t.Name, "source", requestIP(r), "path", r.URL.Path, "reason", reason)
-			p.unauthenticated(w, r)
-			return
-		}
-		if err := p.revalidateKey(r.Context(), t.Name); err != nil {
-			if errors.Is(err, aigw.ErrInvalidKey) {
-				_ = p.Sessions.Delete(cookie.Value)
-				p.setSessionCookie(w, t.Name, "", true)
-				p.unauthenticated(w, r)
-				return
-			}
-			p.log().Warn("tenant key revalidation failed", "tenant", t.Name, "err", err)
-			http.Error(w, "key validation unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		if err := p.enforceDSHAccess(r.Context(), t.Name); err != nil {
-			var denial *aigw.DSHDenial
-			if errors.As(err, &denial) {
-				// The account lost its dsh opt-in: revoke this browser session and send
-				// the user back to the portal, the same path an invalid key takes.
-				_ = p.Sessions.Delete(cookie.Value)
-				p.setSessionCookie(w, t.Name, "", true)
-				p.unauthenticated(w, r)
-				return
-			}
-			p.log().Warn("dsh entitlement check failed", "tenant", t.Name, "err", err)
-			http.Error(w, "dsh authorization unavailable", http.StatusServiceUnavailable)
+		// dshgw's own paths under the tenant's origin (M67): they are served here, not by the
+		// worker, so they are handled before the upstream handshake — a page asking who it is
+		// signed in as must not depend on the worker being up.
+		if p.handleAccountRoute(w, r, t, cookie) {
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/browser-workspace/") && p.BrowserWorkspaces != nil {
@@ -580,6 +548,180 @@ func uniqueCookie(r *http.Request, name string) (*http.Cookie, error) {
 		return nil, http.ErrNoCookie
 	}
 	return found[0], nil
+}
+
+// tenantSession authenticates one tenant-origin request and reports whether the caller may
+// continue, answering the request itself when it may not.
+//
+// It is the whole gate a tenant request passes — the session cookie names a session, the
+// session names this tenant, the tenant's key must still be valid and the account must still
+// be opted in — extracted so the dshgw-owned paths under a tenant's origin (M67: who am I,
+// sign me out) are gated by exactly the same chain as a worker request. A second copy of
+// these checks is how a route eventually ships with one of them missing.
+func (p *Proxy) tenantSession(w http.ResponseWriter, r *http.Request, t registry.Tenant) (*http.Cookie, bool) {
+	cookie, err := uniqueCookie(r, p.Config.SessionCookieName(t.Name))
+	if err != nil {
+		// A login that "did nothing" looks exactly like this: the browser comes back to
+		// the tenant without the session cookie (a proxy, an extension, a cookie the
+		// browser dropped, or a cookie set for a different host). Naming the case is the
+		// difference between a guess and a diagnosis, so the presence of ANY tenant cookie
+		// is reported alongside the address it came from.
+		p.log().Warn("tenant request without a session cookie",
+			"tenant", t.Name, "source", requestIP(r), "path", r.URL.Path,
+			"cookies", sessionCookieNames(r), "cookie_error", err.Error())
+		p.unauthenticated(w, r)
+		return nil, false
+	}
+	record, err := p.Sessions.Get(cookie.Value)
+	if err != nil || record.Tenant != t.Name {
+		reason := "unknown or expired session"
+		if err == nil && record.Tenant != t.Name {
+			// A session for another tenant under this tenant's cookie name: either a
+			// hand-copied cookie or two tenants sharing one browser profile.
+			reason = "session belongs to another tenant"
+		}
+		p.log().Warn("tenant request with an unusable session",
+			"tenant", t.Name, "source", requestIP(r), "path", r.URL.Path, "reason", reason)
+		p.unauthenticated(w, r)
+		return nil, false
+	}
+	if err := p.revalidateKey(r.Context(), t.Name); err != nil {
+		if errors.Is(err, aigw.ErrInvalidKey) {
+			_ = p.Sessions.Delete(cookie.Value)
+			p.setSessionCookie(w, t.Name, "", true)
+			p.unauthenticated(w, r)
+			return nil, false
+		}
+		p.log().Warn("tenant key revalidation failed", "tenant", t.Name, "err", err)
+		http.Error(w, "key validation unavailable", http.StatusServiceUnavailable)
+		return nil, false
+	}
+	if err := p.enforceDSHAccess(r.Context(), t.Name); err != nil {
+		var denial *aigw.DSHDenial
+		if errors.As(err, &denial) {
+			// The account lost its dsh opt-in: revoke this browser session and send
+			// the user back to the portal, the same path an invalid key takes.
+			_ = p.Sessions.Delete(cookie.Value)
+			p.setSessionCookie(w, t.Name, "", true)
+			p.unauthenticated(w, r)
+			return nil, false
+		}
+		p.log().Warn("dsh entitlement check failed", "tenant", t.Name, "err", err)
+		http.Error(w, "dsh authorization unavailable", http.StatusServiceUnavailable)
+		return nil, false
+	}
+	return cookie, true
+}
+
+// accountPathPrefix is this gateway's reserved path namespace under a tenant's origin (M67).
+// The prefix, not the route, is what a request must match to reach the routes below, so an
+// unknown path under it is a 404 here instead of a 404 from the worker — which is the honest
+// answer, since the namespace is ours and never proxied.
+const accountPathPrefix = "/dshgw/"
+
+const (
+	accountSessionPath = "/dshgw/session/"
+	accountLogoutPath  = "/dshgw/logout/"
+)
+
+// accountIdentity is the JSON a tenant page reads to render who is signed in.
+type accountIdentity struct {
+	Authenticated bool   `json:"authenticated"`
+	Tenant        string `json:"tenant"`
+	Account       string `json:"account,omitempty"`
+	FeishuName    string `json:"feishu_name,omitempty"`
+	Name          string `json:"name"`
+}
+
+// accountEnvelope is the same {ok, value} shape the browser-workspace channel answers with,
+// so one client-side helper reads both.
+type accountEnvelope struct {
+	OK    bool             `json:"ok"`
+	Value *accountIdentity `json:"value,omitempty"`
+	Error *accountFailure  `json:"error,omitempty"`
+}
+
+type accountFailure struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// handleAccountRoute serves dshgw's own paths under a tenant's origin and reports whether it
+// answered the request. The tenant's session has already been validated by tenantSession.
+func (p *Proxy) handleAccountRoute(w http.ResponseWriter, r *http.Request, t registry.Tenant, cookie *http.Cookie) bool {
+	if !strings.HasPrefix(r.URL.Path, accountPathPrefix) {
+		return false
+	}
+	if !p.Config.AccountCard.Enabled {
+		// The feature is off: the namespace is not served at all, so an old client gets the
+		// same 404 a fresh one does and cannot render a row nothing backs.
+		http.NotFound(w, r)
+		return true
+	}
+	switch {
+	case r.URL.Path == accountSessionPath:
+		p.sessionIdentity(w, r, t)
+	case r.URL.Path == accountLogoutPath:
+		p.tenantLogout(w, r, t, cookie)
+	default:
+		http.NotFound(w, r)
+	}
+	return true
+}
+
+// sessionIdentity answers who the tenant's page is signed in as. It never touches the worker:
+// the answer comes from this gateway's own session and from aigw, and it is display data, so
+// a name that cannot be resolved arrives as the tenant name rather than as an error.
+func (p *Proxy) sessionIdentity(w http.ResponseWriter, r *http.Request, t registry.Tenant) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	identity := p.identity(r.Context(), t)
+	_ = json.NewEncoder(w).Encode(accountEnvelope{OK: true, Value: &accountIdentity{
+		Authenticated: true,
+		Tenant:        identity.Tenant,
+		Account:       identity.Account,
+		FeishuName:    identity.FeishuName,
+		Name:          identity.Name(),
+	}})
+}
+
+// tenantLogout signs this browser out of THIS tenant and sends it to the portal's login page.
+//
+// Why not the portal's own POST /logout: that route requires an Origin equal to the portal's
+// origin, and a tenant page can only ever send its own tenant origin (in port mode the two
+// are different ports, and the request is rejected). Revoking here, with the same session
+// store, keeps one browser's other tenants signed in — which is what a button in one tenant's
+// sidebar should mean — and the portal is where the person lands, ready to sign in again.
+func (p *Proxy) tenantLogout(w http.ResponseWriter, r *http.Request, t registry.Tenant, cookie *http.Cookie) {
+	target := p.Config.WithTrailingSlash(p.Config.OriginForPort(p.Config.PortalPort))
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		p.audit(r, t.Name, "tenant_logout_reject", "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	// Same fence as every other state-changing tenant request: the origin must be this
+	// tenant's own, so another site cannot sign a person out.
+	if err := p.checkEdgeOrigin(r, p.Config.ExpectedOrigin(t.PublicPort), false); err != nil {
+		p.audit(r, t.Name, "tenant_logout_reject", err.Error(), http.StatusForbidden)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if err := p.Sessions.Delete(cookie.Value); err != nil {
+		p.log().Error("revoking a tenant session failed", "tenant", t.Name, "error_type", fmt.Sprintf("%T", err))
+		p.audit(r, t.Name, "tenant_logout_reject", "revocation failed", http.StatusServiceUnavailable)
+		http.Error(w, "logout unavailable; please retry", http.StatusServiceUnavailable)
+		return
+	}
+	p.setSessionCookie(w, t.Name, "", true)
+	p.audit(r, t.Name, "tenant_logout_success", "session revoked", http.StatusSeeOther)
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, target, http.StatusSeeOther)
 }
 
 func (p *Proxy) unauthenticated(w http.ResponseWriter, r *http.Request) {

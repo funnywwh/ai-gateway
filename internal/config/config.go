@@ -470,10 +470,20 @@ type Dshgw struct {
 	// operator placed here.
 	SSHWorkspaces     DshgwSSHWorkspaces     `yaml:"ssh_workspaces"`
 	BrowserWorkspaces DshgwBrowserWorkspaces `yaml:"browser_workspaces"`
+	// AccountCard is the tenant sidebar's identity row (M67): it shows the signed-in person's
+	// Feishu (or account) name and a 退出 button. Off by default, because it adds two routes
+	// under every tenant's origin. aigw is the side that knows those names, which is why the
+	// switch is configured here and reaches the child as a generated one.
+	AccountCard DshgwAccountCard `yaml:"account_card"`
 }
 
 // DshgwBrowserWorkspaces is disabled by default.
 type DshgwBrowserWorkspaces struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// DshgwAccountCard is disabled by default.
+type DshgwAccountCard struct {
 	Enabled bool `yaml:"enabled"`
 }
 

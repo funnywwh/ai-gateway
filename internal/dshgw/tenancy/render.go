@@ -336,6 +336,11 @@ func renderPatch(cfg *config.Config, t registry.Tenant, opt TenantOptions) ([]by
 	if cfg.BrowserWorkspaces.Enabled {
 		rows[1]["insert"] = append(rows[1]["insert"].([]map[string]any), browserWorkspaceRow(cfg))
 	}
+	if cfg.AccountCard.Enabled {
+		// Last, so the identity row lands under the workspace actions in the sidebar's foot —
+		// the place a person looks for "who am I / sign out" (M67).
+		rows[1]["insert"] = append(rows[1]["insert"].([]map[string]any), accountCardRow(cfg))
+	}
 	if opt.PluginBrowserFS == "off" {
 		rows = append(rows, map[string]any{"id": "browser-fs", "name": "dsh-browser-fs", "disabled": true})
 	}

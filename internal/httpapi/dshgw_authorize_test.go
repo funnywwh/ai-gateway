@@ -113,6 +113,85 @@ func TestDSHGWAuthorizeAllowsOnlyOptedInActiveAccounts(t *testing.T) {
 	}
 }
 
+// M67: the same check names the account it admits, so the tenant sidebar can show who is
+// signed in without a second round trip or a second credential.
+func TestDSHGWAuthorizeNamesTheAccountAndItsFeishuIdentity(t *testing.T) {
+	ctx := context.Background()
+	f := newAdminFixture(t)
+	account, err := f.db.GetAccountByName(ctx, "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The worker key dshgw authenticates with, and — separately — the person's own key,
+	// which is where the Feishu binding lives. That split is the whole reason the lookup
+	// scans the account's keys instead of only the authenticated one.
+	seedDSHGWKey(t, f, account.ID)
+	boundID, err := f.db.UpsertAPIKey(ctx, &domain.APIKey{
+		AccountID: account.ID, Name: "lzhichao@lagenio.com",
+		KeyPrefix: secret.Prefix("sk-user-key-m67-abcdef123456"), KeyHash: secret.Hash("sk-user-key-m67-abcdef123456"),
+		Status: "active", RecordInputMode: "inherit",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No binding yet: the check still admits the account and simply has no display name to
+	// offer, which is what an account whose people never bound Feishu looks like.
+	status, payload := authorizeCall(t, f, "Bearer "+dshgwTestToken)
+	if status != http.StatusForbidden {
+		// dsh is off until the console enables it; the name fields are only asserted on the
+		// admitted answer below.
+		if payload["reason"] != "dsh_disabled" {
+			t.Fatalf("before enable: status=%d payload=%v", status, payload)
+		}
+	}
+	if err := f.db.BindAPIKeyFeishu(ctx, boundID, domain.FeishuBinding{OpenID: "ou_m67", Name: "李智超", BoundBy: "tester"}); err != nil {
+		t.Fatal(err)
+	}
+	if res := enableDSHForTest(t, f, account.ID); res != http.StatusOK {
+		t.Fatalf("enable dsh: status=%d", res)
+	}
+
+	status, payload = authorizeCall(t, f, "Bearer "+dshgwTestToken)
+	if status != http.StatusOK || payload["allowed"] != true {
+		t.Fatalf("authorize: status=%d payload=%v", status, payload)
+	}
+	if payload["account"] != account.Name {
+		t.Fatalf("account=%v, want the account's own name %q", payload["account"], account.Name)
+	}
+	if payload["feishu_name"] != "李智超" {
+		t.Fatalf("feishu_name=%v, want the name bound to a key of the account", payload["feishu_name"])
+	}
+	if payload["tenant"] == nil || payload["tenant"] == "" {
+		t.Fatalf("tenant=%v", payload["tenant"])
+	}
+
+	// Unbound account: the same answer minus the display name — never a refusal, because
+	// who someone is and whether they are admitted are different questions.
+	if _, err := f.db.UnbindAPIKeyFeishu(ctx, boundID); err != nil {
+		t.Fatal(err)
+	}
+	status, payload = authorizeCall(t, f, "Bearer "+dshgwTestToken)
+	if status != http.StatusOK || payload["allowed"] != true {
+		t.Fatalf("after unbind: status=%d payload=%v", status, payload)
+	}
+	if _, present := payload["feishu_name"]; present {
+		t.Fatalf("an unbound account must not answer a Feishu name: %v", payload)
+	}
+	if payload["account"] != account.Name {
+		t.Fatalf("account=%v after unbind", payload["account"])
+	}
+}
+
+// enableDSHForTest turns the account's dsh flag on through the console endpoint (the exact
+// path an administrator takes) and reports the status, so a test never hand-writes the flag.
+func enableDSHForTest(t *testing.T, f *adminFixture, accountID int64) int {
+	t.Helper()
+	cookie := f.login(t, adminUser, adminPassword)
+	res := f.call(t, http.MethodPost, fmt.Sprintf("/admin/api/v1/accounts/%d/dsh", accountID), `{"enabled":true}`, cookie)
+	defer res.Body.Close()
+	return res.StatusCode
+}
+
 func TestAdminAccountDSHFlagEndpoints(t *testing.T) {
 	f := newAdminFixture(t)
 	account, err := f.db.GetAccountByName(context.Background(), "acme")
@@ -201,7 +280,10 @@ func TestAdminAccountDSHFlagEndpoints(t *testing.T) {
 // fakeDshgwAdmin records the provisioning calls without touching a socket. Existing
 // tenants start empty unless a test seeds them.
 type fakeDshgwAdmin struct {
-	Created  []string
+	Created []string
+	// Accounts records the account label each provisioning call carried (M67), so the
+	// console's contract with dshgw is pinned at the call site and not only on the wire.
+	Accounts []string
 	Started  []string
 	Stopped  []string
 	Keys     []string
@@ -209,13 +291,14 @@ type fakeDshgwAdmin struct {
 	FailWith error
 }
 
-func (f *fakeDshgwAdmin) CreateTenant(_ context.Context, name, key string) error {
+func (f *fakeDshgwAdmin) CreateTenant(_ context.Context, name, account, key string) error {
 	if f.FailWith != nil {
 		return f.FailWith
 	}
 	f.Created = append(f.Created, name)
+	f.Accounts = append(f.Accounts, account)
 	f.Keys = append(f.Keys, key)
-	f.Tenants = append(f.Tenants, localdshgw.TenantInfo{Name: name, PublicPort: 32601})
+	f.Tenants = append(f.Tenants, localdshgw.TenantInfo{Name: name, Account: account, PublicPort: 32601})
 	return nil
 }
 func (f *fakeDshgwAdmin) StartTenant(_ context.Context, name string) error {
@@ -229,7 +312,8 @@ func (f *fakeDshgwAdmin) StopTenant(_ context.Context, name string) error {
 	f.Stopped = append(f.Stopped, name)
 	return nil
 }
-func (f *fakeDshgwAdmin) SetTenantKey(_ context.Context, name, key string) error {
+func (f *fakeDshgwAdmin) SetTenantKey(_ context.Context, name, account, key string) error {
+	f.Accounts = append(f.Accounts, account)
 	f.Keys = append(f.Keys, key)
 	return nil
 }
@@ -267,6 +351,11 @@ func TestAdminEnableDSHProvisionsTenantAndMapsAccount(t *testing.T) {
 	}
 	if len(f.dshgwAdmin.Keys) != 1 || !strings.HasPrefix(f.dshgwAdmin.Keys[0], "sk-gw") {
 		t.Fatalf("worker key must be minted: %v", f.dshgwAdmin.Keys)
+	}
+	// The tenant is provisioned with the account's own name (M67): the tenant slug is
+	// "acme" here, and the sidebar shows this label instead of it.
+	if len(f.dshgwAdmin.Accounts) != 1 || f.dshgwAdmin.Accounts[0] != "acme" {
+		t.Fatalf("the account label must reach dshgw with the tenant: %v", f.dshgwAdmin.Accounts)
 	}
 
 	// The authorize answer now carries the tenant: a brand-new key of the same account —

@@ -556,6 +556,9 @@ func run() int {
 		Hooks:            hookDispatcher,
 		Admin:            adminAuth,
 		AdminStore:       db,
+		// The public dshgw authorize check names the account it admits (M67) by reading the
+		// Feishu binding off the account's keys, which is the only place that name lives.
+		KeyStore: db,
 		// The console chat persists conversations, skills and preview payloads in the same
 		// database; the transport builds its service and preview-ticket signer from here.
 		ChatStore: db,

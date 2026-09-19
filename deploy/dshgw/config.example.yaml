@@ -108,3 +108,18 @@ ssh_workspaces:
   sshfs_options: [reconnect, ServerAliveInterval=15, ServerAliveCountMax=3, idmap=user]
   # allow_other/allow_root 会被代码丢弃：所有租户 worker 共用一个 uid，共享挂载等于跨账号可读。
   disable_auto_remount: false     # true = 启动时不按记录重挂（挂载是内核状态，不跨进程存活）
+
+# 侧栏「账号行」（M67）：租户 dsh 的侧栏底部多一行——登录的人叫什么（飞书名，取不到回退账号名，
+# 再回退租户名），以及一个「退出」按钮。退出只撤销**本租户**的会话并把浏览器送回门户登录页，
+# 同一浏览器里其它租户的登录态不受影响。
+#
+# 这一行的两个数据面是网关自己的、挂在**租户 origin** 下的路径：
+#   GET  /dshgw/session/   → {ok, value:{tenant, account, feishu_name, name}}
+#   POST /dshgw/logout/    → 303 到门户登录页（必须带本租户 origin；GET 是 405）
+# 两者都要求该租户自己的会话 cookie，并与 worker 请求走同一道鉴权链（key 复验 + dsh 授权复核）；
+# 本开关关闭时整个 /dshgw/ 命名空间返回 404，客户端那一行也就不出现。
+#
+# 名字来自 aigw（只有它知道飞书绑定），所以监督形态下这个开关由 aigw 生成；独立部署照抄
+# aigw 的 dshgw.account_card.enabled 即可。旧租户的账号名在下次「启用/轮换密钥」时补上。
+account_card:
+  enabled: false                  # 打开后：渲染租户侧插件行 + 提供上面两个端点

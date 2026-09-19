@@ -635,6 +635,21 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 - [ ] **真机验收（拒绝面）**：用一个只绑定了 API Key 的飞书账号走控制台登录 → 必须看到「尚未绑定任何
       管理员账号」且拿不到会话；把一个管理员「停用」后确认它已登录的浏览器立刻掉线
 
+## M67 租户侧栏的账号行与退出
+
+设计：`docs/design/m67-dshgw-account-card.md`；规格：`docs/dshgw.md` §7d。
+定位：租户 dsh 侧栏底部（「SSH 工作区」下面）多一行——飞书名（回退账号名、再回退租户名）与「退出」
+按钮；两个数据面是租户 origin 下的 `GET /dshgw/session/` 与 `POST /dshgw/logout/`，开关是 aigw 的
+`dshgw.account_card.enabled`。实现与单测完成的条目见 `docs/todo_done.md` 同名小节。
+
+- [x] **接口面真机验收**（2026-09-19 本机，逐条记录见 `docs/design/m67-dshgw-account-card.md` §8）：
+      authorize 带 `account`/`feishu_name`；`/dshgw/session/` 200 且 `name` 是飞书名、无 cookie 302；
+      `POST /dshgw/logout/` 跨源 403 / GET 405 / 正确 Origin 303 且会话失效；旧租户经 admin 通道回填账号名；
+      反例（关开关）端点 404、页面无该 bundle
+- [ ] **浏览器人工确认（剩下的一步）**：经门户进自己租户 → 侧栏「SSH 工作区」下面出现「<飞书名> ⏻ 退出」→
+      点退出回到门户登录页 → 原租户地址要求重新登录，同一浏览器里另一个租户仍在线；顺带看一眼折叠（rail）
+      状态下只留图标的观感
+
 ## 工具：`make verify` 的 `./...` 会遍历 `./data`
 
 M66 验收期间发现：`make vet` / `make test`（内部是 `go vet ./...` / `go test ./...`）会把工作区的 `./data`

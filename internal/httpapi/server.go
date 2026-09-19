@@ -85,12 +85,14 @@ type KeyStore interface {
 }
 
 // DshgwAdminOps is the aigw-side view of the dshgw local provisioning channel. The key
-// arguments travel only over the root-owned local socket and are never logged.
+// arguments travel only over the root-owned local socket and are never logged. account is
+// the console's account name for the tenant (M67), which dshgw records so the tenant's
+// sidebar can name the signed-in person.
 type DshgwAdminOps interface {
-	CreateTenant(ctx context.Context, name, key string) error
+	CreateTenant(ctx context.Context, name, account, key string) error
 	StartTenant(ctx context.Context, name string) error
 	StopTenant(ctx context.Context, name string) error
-	SetTenantKey(ctx context.Context, name, key string) error
+	SetTenantKey(ctx context.Context, name, account, key string) error
 	ListTenants(ctx context.Context) ([]localdshgw.TenantInfo, error)
 }
 
@@ -122,6 +124,12 @@ type Deps struct {
 	// Admin enables the management API (session auth + CRUD).
 	Admin      AdminService
 	AdminStore AdminStore
+	// KeyStore is the key read the public dshgw authorize check needs (M67): the Feishu name
+	// a person is recognised by is bound PER KEY, not per account, so naming the account's
+	// identity means listing that account's keys. Unset (an untyped nil, never a typed nil
+	// pointer: a nil *store.DB in this interface would panic) means the check still answers,
+	// just without a Feishu name — a display detail must never fail an authorization.
+	KeyStore KeyStore
 	// ChatStore is the owner-scoped persistence of the console chat. When it is set, the
 	// chat service (and its preview-ticket signer) is built here, so the composition root
 	// only has to hand over the store.

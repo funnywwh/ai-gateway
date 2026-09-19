@@ -1004,7 +1004,46 @@ func (s *Server) handleDSHGWAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	// The tenant name is the account's dshgw destination: every key of this account logs
 	// into it, so dshgw no longer needs a per-key prefix binding.
-	writeJSON(w, http.StatusOK, map[string]any{"allowed": true, "tenant": account.DshTenant})
+	payload := map[string]any{"allowed": true, "tenant": account.DshTenant}
+	// Who this is (M67): dshgw shows the account and, when one of the account's keys carries
+	// a Feishu binding, the person's Feishu name — the name people recognise themselves by
+	// in the dsh interface. Both are display-only additions: the decision above is already
+	// made, so a lookup that fails costs a name, never an admission.
+	if name := strings.TrimSpace(account.Name); name != "" {
+		payload["account"] = name
+	}
+	if name := s.accountFeishuName(r.Context(), account.ID); name != "" {
+		payload["feishu_name"] = name
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+// accountFeishuName reports the Feishu display name bound to any key of one account, or ""
+// when nothing is bound / the lookup failed.
+//
+// Why "any key": the binding is per key (M60) while the identity belongs to the person, and
+// dshgw authenticates with one of the account's keys — usually the dedicated worker key,
+// which is minted without a binding even for an account whose own keys are bound. Refusing
+// to look further would show a name only to accounts that bound the exact worker key, which
+// nobody does.
+func (s *Server) accountFeishuName(ctx context.Context, accountID int64) string {
+	if s.deps.KeyStore == nil || accountID <= 0 {
+		return ""
+	}
+	keys, err := s.deps.KeyStore.ListAPIKeys(ctx, accountID)
+	if err != nil {
+		s.deps.Log.Warn("listing an account's keys for its Feishu name failed", "account", accountID, "err", err)
+		return ""
+	}
+	for _, key := range keys {
+		if key == nil {
+			continue
+		}
+		if name := strings.TrimSpace(key.FeishuName); name != "" {
+			return name
+		}
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------

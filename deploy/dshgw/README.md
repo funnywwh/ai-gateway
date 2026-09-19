@@ -87,6 +87,18 @@ DSHGW_NODE=... DSHGW_DSH_ROOT=... DSHGW_TEMPLATE_HOME=<上面 template_home 的�
 HOME=$T DSH_HOME=$T "$DSHGW_NODE" "$DSHGW_DSH_ROOT/lib/bin.js" --profile web --dump-config
 ```
 
+### 可选：侧栏账号行与退出（M67）
+
+在 aigw 配置中设置 `dshgw.account_card.enabled: true`（默认关闭；独立运行的 dshgw 则写自己的
+`account_card.enabled`），并部署 `plugin_path` 同级的 `account-card/` 插件目录。租户 dsh 侧栏底部会多
+一行：登录者的飞书名（取不到回退账号名、再回退租户名）与「退出」按钮；退出只撤销本租户会话并把浏览器
+送回门户登录页。
+
+这一行的两个数据面由网关在**租户 origin** 下提供：`GET /dshgw/session/` 与 `POST /dshgw/logout/`，
+鉴权与 worker 请求走同一条链；关闭开关时整个 `/dshgw/**` 返回 404。名字来自 aigw（只有它知道飞书绑定），
+并在控制台创建租户/轮换密钥时把账号名写进 dshgw 注册表 —— 旧租户下次启用或轮换时会补上。详见
+`docs/dshgw.md` §7d 与 `docs/design/m67-dshgw-account-card.md`。
+
 ### 可选：浏览器本机目录工作区
 
 在 aigw 配置中设置 `dshgw.browser_workspaces.enabled: true`（默认关闭），并部署

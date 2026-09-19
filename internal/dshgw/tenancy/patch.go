@@ -63,6 +63,33 @@ func EnsureBrowserWorkspaceRow(cfg *config.Config, t registry.Tenant) (string, e
 	return ensureWorkspaceRow(t, browserWorkspaceRowID, cfg.BrowserWorkspaces.Enabled, browserWorkspaceRow(cfg))
 }
 
+const accountCardRowID = "dshgw-account-card"
+
+// accountCardRow builds the loader entry for the sidebar's identity row (M67).
+//
+// It is a browser-only plugin: the row reads dshgw's own /dshgw/session/ and posts to
+// /dshgw/logout/ under the tenant's own origin, so there is nothing for the tenant's node
+// side to do and no config to pass — which half of dshgw's features a tenant may call is the
+// gateway's decision, expressed by account_card.enabled, not the plugin's.
+//
+// The row names index.js, not client.js: a row's `name` is a module the HOST imports, and
+// the browser bundle calls `window.__ModuleLoader__.load` at import time, so pointing a row
+// at it kills the tenant's plugin tree ("window is not defined", measured on a real tenant).
+// client.js is discovered through the package's dsh.client declaration instead — the same
+// dual-face shape the other two workspace plugins use.
+func accountCardRow(cfg *config.Config) map[string]any {
+	return map[string]any{
+		"id":   accountCardRowID,
+		"name": pluginFileURL(filepath.Join(filepath.Dir(cfg.Deploy.PluginPath), "account-card", "index.js")),
+	}
+}
+
+// EnsureAccountCardRow adds or removes that row in one tenant's rendered patch, the same way
+// the ssh and browser rows are kept in step with their switches.
+func EnsureAccountCardRow(cfg *config.Config, t registry.Tenant) (string, error) {
+	return ensureWorkspaceRow(t, accountCardRowID, cfg.AccountCard.Enabled, accountCardRow(cfg))
+}
+
 func ensureWorkspaceRow(t registry.Tenant, id string, enabled bool, pluginRow map[string]any) (warning string, err error) {
 	path := filepath.Join(t.DshHome, "profiles", "web", "cordis.patch.yml")
 	data, err := securefile.ReadLimitedRegular(path, 1<<20)

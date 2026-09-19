@@ -38,6 +38,44 @@ func (f authorizerFunc) Authorize(ctx context.Context, key string) (string, erro
 	return f(ctx, key)
 }
 
+// identityAuthorizer is an authorization client that also names the person (M67): one double
+// answers both halves, exactly as the real aigw client does. calls records how many identity
+// lookups happened, so a test can pin "once per tenant per TTL, not once per request".
+type identityAuthorizer struct {
+	account  string
+	feishu   string
+	failWith error
+	calls    int
+}
+
+func (a *identityAuthorizer) Authorize(context.Context, string) (string, error) {
+	if a.failWith != nil {
+		return "", a.failWith
+	}
+	return "alice", nil
+}
+
+func (a *identityAuthorizer) Identity(context.Context, string) (aigw.Identity, error) {
+	a.calls++
+	if a.failWith != nil {
+		return aigw.Identity{}, a.failWith
+	}
+	return aigw.Identity{Tenant: "alice", Account: a.account, FeishuName: a.feishu}, nil
+}
+
+// writeTenantKey puts a mode-0640 gateway.key where FileKeySource looks for it: the
+// credential the proxy authenticates to aigw with.
+func writeTenantKey(t *testing.T, root, tenant string) {
+	t.Helper()
+	dir := filepath.Join(root, tenant)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "gateway.key"), []byte("sk-gw-tenant-key-0001\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+}
+
 type sourceStub string
 
 func (s sourceStub) TokenURL(string) (string, error) { return string(s), nil }
@@ -62,9 +100,10 @@ func fixture(t *testing.T, worker http.Handler) (*Proxy, registry.Tenant, string
 	_, rawPort, _ := net.SplitHostPort(u.Host)
 	port, _ := strconv.Atoi(rawPort)
 	dir := t.TempDir()
-	cfg := &config.Config{PublicHost: "dsh.test", PortalPort: 32600, TenantPortLo: 32601, TenantPortHi: 32799, WorkerPortLo: port, WorkerPortHi: port, Listen: "127.0.0.1:3099", AigwBaseURL: "http://aigw.test", ValidateTimeout: config.Duration(time.Second), SessionTTL: config.Duration(time.Hour), KeyRevalidate: "off", LoginRate: config.RateLimit{Requests: 10, Window: config.Duration(time.Minute)}, DirectoryPicker: "clamp", PluginBrowserFS: "on", WorkspaceSeed: []string{"work"}, StateDir: dir, TenantRoot: filepath.Join(dir, "tenants"), WorkspaceRoot: filepath.Join(dir, "work"), HandshakeDir: filepath.Join(dir, "handshake"), RegistryPath: filepath.Join(dir, "registry.json"), KeyMapPath: filepath.Join(dir, "keys.map"), SessionPath: filepath.Join(dir, "sessions.json")}
+	cfg := &config.Config{PublicHost: "dsh.test", PortalPort: 32600, TenantPortLo: 32601, TenantPortHi: 32799, WorkerPortLo: port, WorkerPortHi: port, Listen: "127.0.0.1:3099", AigwBaseURL: "http://aigw.test", ValidateTimeout: config.Duration(time.Second), SessionTTL: config.Duration(time.Hour), KeyRevalidate: "off", LoginRate: config.RateLimit{Requests: 10, Window: config.Duration(time.Minute)}, DirectoryPicker: "clamp", PluginBrowserFS: "on", WorkspaceSeed: []string{"work"}, StateDir: dir, TenantRoot: filepath.Join(dir, "tenants"), WorkspaceRoot: filepath.Join(dir, "work"), HandshakeDir: filepath.Join(dir, "handshake"), RegistryPath: filepath.Join(dir, "registry.json"), KeyMapPath: filepath.Join(dir, "keys.map"), SessionPath: filepath.Join(dir, "sessions.json"), Deploy: config.DeployConfig{TenantConfigRoot: filepath.Join(dir, "tenant-config")}, AccountCard: config.AccountCard{Enabled: true}}
+	writeTenantKey(t, cfg.Deploy.TenantConfigRoot, "alice")
 	reg := registry.New(cfg.RegistryPath, cfg.KeyMapPath)
-	tenant := registry.Tenant{Name: "alice", UID: 1001, PublicPort: 32601, WorkerPort: port, KeyPrefix: "sk-aaaaaaaaa", DshHome: "/dsh", Workspace: "/work", CreatedAt: time.Now(), Handshake: registry.HandshakeOK}
+	tenant := registry.Tenant{Name: "alice", UID: 1001, PublicPort: 32601, WorkerPort: port, KeyPrefix: "sk-aaaaaaaaa", DshHome: "/dsh", Workspace: "/work", CreatedAt: time.Now(), Handshake: registry.HandshakeOK, Account: "李智超(colin)"}
 	if err := reg.Put(tenant); err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +117,7 @@ func fixture(t *testing.T, worker http.Handler) (*Proxy, registry.Tenant, string
 	ex := &exchangeStub{value: "fresh"}
 	p := New(cfg, reg, store, sourceStub("http://127.0.0.1:1/?token=x"), ex, validatorFunc(func(context.Context, string) ([]string, error) { return []string{"m"}, nil }))
 	p.Authorizer = authorizerFunc(func(context.Context, string) (string, error) { return "alice", nil })
+	p.KeySource = FileKeySource{Root: cfg.Deploy.TenantConfigRoot}
 	return p, tenant, up.URL, up
 }
 

@@ -44,7 +44,7 @@ kind: "spec"
 
 同一浏览器可同时登录多个租户。把某租户的有效 token 放进另一个租户的 cookie 名不会获得访问权；重复同名 cookie 被拒绝。
 
-退出是门户同源 **`POST /logout`**：撤销当前浏览器携带的各租户会话，并清除 cookie。GET 不改变状态，返回 405。其它浏览器的会话不受影响。
+退出是门户同源 **`POST /logout`**：撤销当前浏览器携带的各租户会话，并清除 cookie。GET 不改变状态，返回 405。其它浏览器的会话不受影响。**只退出一个租户**（租户侧栏那一行的「退出」，M67）走各租户 origin 下的 `POST /dshgw/logout/`，见 §7d。
 
 **门户表单策略（已实现）**：门户使用 `Referrer-Policy: same-origin`，保证原生同源POST可携带Origin，跨源不发送Referer。登录/退出仍严格拒绝null、缺失或跨源Origin。403表示请求被拒，不能当成退出成功。更新后需刷新门户再提交表单。 CSP `form-action` 显式允许门户自身和 registry 中的租户 origins，以允许原生表单登录后跨端口重定向；这不放宽服务端的 Origin 校验。
 
@@ -281,6 +281,26 @@ feishu:
 `make dshgw-browser-multi-e2e`（多目录并存、逐目录断开/重连/删除）。完整架构、限制与实测证据见
 [浏览器 FUSE 工作区设计](design/browser-fuse-workspace.md) 与
 [实现与验证记录](browser-workspace-verification.md)。
+
+## 7d. 侧栏账号行与退出（M67）
+
+租户 dsh 的侧栏底部多一行：左边是登录者的**飞书名**（该账号任一 Key 上的飞书绑定；没有就回退
+**账号名**，再回退**租户名**），右边是**「退出」**按钮。开关是 aigw 的 `dshgw.account_card.enabled`
+（独立部署则在子进程配置里写 `account_card.enabled`），默认关闭；关闭时 `/dshgw/**` 在租户 origin 下
+一律 404，那一行也就不出现 —— 与一个没有网关的普通 dsh 表现一致。
+
+| 面 | 是什么 |
+|---|---|
+| `GET /dshgw/session/` | 该租户 origin 下，`{"ok":true,"value":{"authenticated":true,"tenant":…,"account":…,"feishu_name":…,"name":…}}`；`name` 是上面那条回退链的结果。需要该租户自己的会话 cookie |
+| `POST /dshgw/logout/` | 撤销**本租户**的会话、清 cookie，`303` 到门户登录页。必须带本租户 origin（与其它写请求同一道栅栏）；`GET` 返回 405，不改变状态 |
+| 鉴权 | 与 worker 请求**同一条链**：唯一会话 cookie → 会话归属该租户 → `key_revalidate` → dsh 授权复核。两个端点都在 worker 握手之前处理，所以 worker 没起来也能问「我是谁」 |
+| 名字来源 | aigw `POST /v1/dshgw/authorize` 的 200 响应新增 `account` / `feishu_name`（纯新增字段）。dshgw 按租户缓存 5 分钟，并在登录成功时预热；取不到只降级成租户名，**绝不因此拒绝请求或登录** |
+| 账号名落库 | 控制台创建租户 / 轮换密钥时把 `accounts.name` 随 `tenant-create`/`tenant-set-key` 写入 dshgw 注册表的 `account` 字段（旧租户下次启用或轮换时补上；补不上就显示租户名） |
+| 隔离 | 退出只撤销当前租户的会话，同一浏览器里其它租户保持登录；这一行不引入新的监听端口、令牌或凭据，只是给已有会话多加两条读/写路径 |
+
+**为什么退出不直接跳门户的 `POST /logout`**：门户那条路由要求 `Origin` 精确等于门户 origin，而租户
+页面只能发出自己租户的 origin（端口模式下两者端口不同），请求会被 403。因此退出由网关在租户 origin 下
+执行同一份会话存储的删除；门户只作为落地页。
 
 ## 8. 运维与验收
 

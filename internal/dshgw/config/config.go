@@ -275,6 +275,7 @@ type Config struct {
 	Deploy            DeployConfig      `yaml:"deploy" json:"deploy"`
 	SSHWorkspaces     SSHWorkspaces     `yaml:"ssh_workspaces" json:"ssh_workspaces"`
 	BrowserWorkspaces BrowserWorkspaces `yaml:"browser_workspaces" json:"browser_workspaces"`
+	AccountCard       AccountCard       `yaml:"account_card" json:"account_card"`
 	TenantRoot        string            `yaml:"tenant_root" json:"tenant_root"`
 	WorkspaceRoot     string            `yaml:"workspace_root" json:"workspace_root"`
 	HandshakeDir      string            `yaml:"handshake_dir" json:"handshake_dir"`
@@ -292,6 +293,17 @@ type Config struct {
 
 // BrowserWorkspaces enables browser-backed mounts under the fixed browser subdirectory.
 type BrowserWorkspaces struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+}
+
+// AccountCard renders the sidebar's identity row (M67): who is signed in, and a button that
+// signs them out and returns them to the portal.
+//
+// It needs two things from the gateway rather than from the tenant: the account and Feishu
+// names, which only aigw knows, and the logout, which only the session store can perform.
+// That is why this is a gateway feature with a switch rather than something a plugin could
+// decide on its own — and why flipping it off removes both the row and the routes it calls.
+type AccountCard struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
 }
 
@@ -678,6 +690,12 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateSSHWorkspaces(); err != nil {
 		return err
+	}
+	if c.AccountCard.Enabled && strings.TrimSpace(c.Deploy.PluginPath) == "" {
+		// The row is a client plugin shipped beside the picker (deploy.plugin_path names the
+		// plugin directory's sibling), so without it the switch would turn on two routes and
+		// no visible row — a silent half-configuration.
+		return errors.New("account_card.enabled requires deploy.plugin_path")
 	}
 	switch c.SettingsUI {
 	case "", "lan", "loopback":

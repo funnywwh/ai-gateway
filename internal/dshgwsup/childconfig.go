@@ -140,6 +140,9 @@ type ChildConfig struct {
 	// generated configuration. Nil means the feature is off.
 	SSHWorkspaces     *SSHWorkspaces     `yaml:"ssh_workspaces,omitempty"`
 	BrowserWorkspaces *BrowserWorkspaces `yaml:"browser_workspaces,omitempty"`
+	// AccountCard is the tenant sidebar's identity row (M67): who is signed in, and 退出. Nil
+	// means off, and the child then serves neither the row nor the two routes behind it.
+	AccountCard *AccountCard `yaml:"account_card,omitempty"`
 	// Feishu is the identity handoff the child needs to accept a Feishu sign-in (M61): where
 	// to send a person, and the key that proves the ticket aigw signs is genuine. It is
 	// omitted entirely while the feature is off, so a deployment that does not use Feishu
@@ -150,6 +153,13 @@ type ChildConfig struct {
 
 // BrowserWorkspaces carries the optional browser mount switch into the child.
 type BrowserWorkspaces struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// AccountCard carries the sidebar identity switch into the child (M67). It is a plain switch
+// on purpose: the row reads dshgw's own routes under the tenant's origin, so the child needs
+// no path, no key and no name from this side.
+type AccountCard struct {
 	Enabled bool `yaml:"enabled"`
 }
 

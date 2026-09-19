@@ -246,6 +246,7 @@ func newAdminFixtureWith(t *testing.T, unwired string, mutate func(*Deps)) *admi
 		Records:        db,
 		Admin:          auth,
 		AdminStore:     db,
+		KeyStore:       db,
 		MCP:            mcpService,
 		MCPTokens:      db,
 		Accounts:       db,

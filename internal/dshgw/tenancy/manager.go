@@ -170,6 +170,10 @@ type CreateOptions struct {
 	AllowEmptyModels bool
 	DirectoryPicker  string
 	PluginBrowserFS  string
+	// Account is the aigw account this tenant belongs to (M67), recorded so the tenant's
+	// sidebar can name the person signed in. Empty is accepted: the CLI creates tenants
+	// without an account, and the sidebar falls back to the tenant name.
+	Account string
 }
 
 func (m *Manager) Create(ctx context.Context, name, key string, models []string, opt CreateOptions) (created registry.Tenant, err error) {
@@ -215,6 +219,14 @@ func (m *Manager) createLocked(ctx context.Context, name, key string, models []s
 	if existing, ok := m.Registry.ByPrefix(key[:12]); ok {
 		return created, fmt.Errorf("key prefix already belongs to tenant %q", existing.Name)
 	}
+	account := strings.TrimSpace(opt.Account)
+	if account != "" {
+		// Checked before anything is written: a label that cannot be stored must fail the
+		// create rather than leave a half-provisioned tenant behind.
+		if err := registry.ValidateAccountLabel(account); err != nil {
+			return created, err
+		}
+	}
 	if err := ValidateTemplate(m.Config.Deploy.TemplateHome, browser == "on"); err != nil {
 		return created, err
 	}
@@ -222,7 +234,7 @@ func (m *Manager) createLocked(ctx context.Context, name, key string, models []s
 	if err != nil {
 		return created, err
 	}
-	created = registry.Tenant{Name: name, PublicPort: pub, WorkerPort: worker, KeyPrefix: key[:12], DshHome: filepath.Join(m.Config.TenantRoot, name, ".dsh"), Workspace: filepath.Join(m.Config.WorkspaceRoot, name), CreatedAt: m.now(), Handshake: registry.HandshakePending, DirectoryPicker: picker, PluginBrowserFS: browser, ModelsPending: len(models) == 0, Isolation: registry.IsolationBwrap}
+	created = registry.Tenant{Name: name, PublicPort: pub, WorkerPort: worker, KeyPrefix: key[:12], DshHome: filepath.Join(m.Config.TenantRoot, name, ".dsh"), Workspace: filepath.Join(m.Config.WorkspaceRoot, name), CreatedAt: m.now(), Handshake: registry.HandshakePending, DirectoryPicker: picker, PluginBrowserFS: browser, ModelsPending: len(models) == 0, Isolation: registry.IsolationBwrap, Account: strings.TrimSpace(opt.Account)}
 	// The tenant's own roots. They are deduplicated because a deployment may point
 	// tenant_config_root and tenant_root at the same directory: the layout is the
 	// operator's business, and creating the same path twice is not an error worth
@@ -568,6 +580,13 @@ func (m *Manager) startWorker(ctx context.Context, t registry.Tenant) error {
 		m.log().Warn(warning)
 	}
 	if warning, err := EnsureBrowserWorkspaceRow(m.Config, t); err != nil {
+		return err
+	} else if warning != "" {
+		m.log().Warn(warning)
+	}
+	// The identity row's switch is checked on every start for the same reason: a tenant that
+	// already exists must gain (or lose) the row when the operator flips account_card.
+	if warning, err := EnsureAccountCardRow(m.Config, t); err != nil {
 		return err
 	} else if warning != "" {
 		m.log().Warn(warning)

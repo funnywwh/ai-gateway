@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/securefile"
@@ -53,6 +54,11 @@ type Tenant struct {
 	// only place the old shape could record that a tenant should not come back
 	// after a restart.
 	Suspended bool `json:"suspended,omitempty"`
+	// Account is the aigw account this tenant belongs to (M67), as the console
+	// spells it — the tenant name is only its ASCII slug. Empty on tenants
+	// provisioned before the field existed, and on tenants created by hand with
+	// the CLI; the sidebar then shows the tenant name instead of nothing.
+	Account string `json:"account,omitempty"`
 }
 
 // Isolation values recorded on a tenant. They mirror config.IsolationUser and
@@ -183,6 +189,9 @@ func validateTenant(t Tenant) error {
 	if t.Isolation != "" && t.Isolation != IsolationUser && t.Isolation != IsolationBwrap {
 		return fmt.Errorf("tenant %s has invalid isolation mode %q", t.Name, t.Isolation)
 	}
+	if !validAccountLabel(t.Account) {
+		return fmt.Errorf("tenant %s has an unusable account label %q", t.Name, t.Account)
+	}
 	if !validPrefix(t.KeyPrefix) {
 		return fmt.Errorf("tenant %s key prefix must be 12 printable non-space ASCII characters", t.Name)
 	}
@@ -206,6 +215,33 @@ func validPrefix(prefix string) bool {
 		}
 	}
 	return true
+}
+
+// validAccountLabel bounds the account name a tenant may carry (M67). It is a display
+// string, so the rules are about what can be stored and shown safely rather than about a
+// naming convention: an empty value is legal (an older or hand-made tenant), anything else
+// must be short, UTF-8 clean, and free of control characters — it is rendered in the
+// sidebar, in JSON, and in log lines.
+func validAccountLabel(account string) bool {
+	return ValidateAccountLabel(account) == nil
+}
+
+// ValidateAccountLabel reports why one account label cannot be recorded on a tenant, so a
+// caller can refuse it before it starts provisioning (the create path validates first, then
+// writes). Empty is valid and means "unknown".
+func ValidateAccountLabel(account string) error {
+	if account == "" {
+		return nil
+	}
+	if len(account) > 128 || !utf8.ValidString(account) {
+		return errors.New("account label must be at most 128 bytes of valid UTF-8")
+	}
+	for _, r := range account {
+		if r < 0x20 || r == 0x7f {
+			return errors.New("account label must not contain control characters")
+		}
+	}
+	return nil
 }
 
 func validateUnique(ts map[string]Tenant) error {
@@ -387,6 +423,28 @@ func (r *Registry) SetHandshake(name string, state HandshakeState) error {
 		return fmt.Errorf("tenant %q not found", name)
 	}
 	t.Handshake = state
+	r.tenants[name] = t
+	return nil
+}
+
+// SetAccount records the aigw account a tenant belongs to (M67). An empty label clears it,
+// and an unchanged one is a no-op so the caller can call this on every provisioning touch
+// without rewriting the registry file.
+func (r *Registry) SetAccount(name, account string) error {
+	account = strings.TrimSpace(account)
+	if !validAccountLabel(account) {
+		return fmt.Errorf("account label %q is not usable", account)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, ok := r.tenants[name]
+	if !ok {
+		return fmt.Errorf("tenant %q not found", name)
+	}
+	if t.Account == account {
+		return nil
+	}
+	t.Account = account
 	r.tenants[name] = t
 	return nil
 }

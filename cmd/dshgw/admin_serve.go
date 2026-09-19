@@ -32,11 +32,15 @@ const adminOpTimeout = 5 * time.Minute
 
 // AdminOps is the operational surface the daemon exposes. It is an interface so the
 // protocol/peer-credential layer can be regression-tested without systemd or root.
+//
+// account is the console's account name for the tenant (M67), recorded on the tenant so its
+// sidebar can name the signed-in person. Only Create and SetKey carry it: creating a tenant
+// and rotating its credential are the two moments the console is talking about one account.
 type AdminOps interface {
-	Create(ctx context.Context, name, key string, allowEmptyModels bool) (registry.Tenant, error)
+	Create(ctx context.Context, name, account, key string, allowEmptyModels bool) (registry.Tenant, error)
 	Start(ctx context.Context, name string) error
 	Stop(ctx context.Context, name string) error
-	SetKey(ctx context.Context, name, key string) error
+	SetKey(ctx context.Context, name, account, key string) error
 	List() []registry.Tenant
 }
 
@@ -62,7 +66,7 @@ func (o managerOps) models(ctx context.Context, key string) ([]string, bool, err
 	return models, len(models) == 0, nil
 }
 
-func (o managerOps) Create(ctx context.Context, name, key string, allowEmptyModels bool) (registry.Tenant, error) {
+func (o managerOps) Create(ctx context.Context, name, account, key string, allowEmptyModels bool) (registry.Tenant, error) {
 	models, empty, err := o.models(ctx, key)
 	if err != nil {
 		return registry.Tenant{}, fmt.Errorf("key validation: %w", err)
@@ -81,6 +85,7 @@ func (o managerOps) Create(ctx context.Context, name, key string, allowEmptyMode
 		AllowEmptyModels: empty,
 		DirectoryPicker:  o.cfg.DirectoryPicker,
 		PluginBrowserFS:  o.cfg.PluginBrowserFS,
+		Account:          account,
 	})
 }
 
@@ -100,8 +105,27 @@ func (o managerOps) Stop(ctx context.Context, name string) error {
 	return o.m.StopWorker(ctx, t)
 }
 
-func (o managerOps) SetKey(ctx context.Context, name, key string) error {
-	return o.applyKey(ctx, name, key, false)
+func (o managerOps) SetKey(ctx context.Context, name, account, key string) error {
+	if err := o.applyKey(ctx, name, key, false); err != nil {
+		return err
+	}
+	// A tenant provisioned before M67 has no account label; rotating its credential is the
+	// one console action that names its account, so record it here. Already-labelled tenants
+	// keep theirs unless the console changes it: same account, same label.
+	if strings.TrimSpace(account) == "" {
+		return nil
+	}
+	stored, ok := o.m.Registry.Get(name)
+	if !ok || stored.Account == strings.TrimSpace(account) {
+		return nil
+	}
+	if err := o.m.Registry.SetAccount(name, account); err != nil {
+		return err
+	}
+	if err := o.m.Registry.Save(); err != nil {
+		return fmt.Errorf("recording the tenant's account label: %w", err)
+	}
+	return nil
 }
 
 // AdoptKey is the login path: the user just proved this key works for this tenant,
@@ -191,6 +215,7 @@ type adminRequest struct {
 	ID               int64  `json:"id"`
 	Op               string `json:"op"`
 	Name             string `json:"name"`
+	Account          string `json:"account,omitempty"`
 	Key              string `json:"key"`
 	AllowEmptyModels bool   `json:"allow_empty_models"`
 }
@@ -340,7 +365,7 @@ func (s *AdminServer) runOp(ctx context.Context, req adminRequest) (map[string]a
 		rows := make([]map[string]any, 0, len(tenants))
 		for _, t := range tenants {
 			rows = append(rows, map[string]any{
-				"name": t.Name, "public_port": t.PublicPort, "worker_port": t.WorkerPort,
+				"name": t.Name, "account": t.Account, "public_port": t.PublicPort, "worker_port": t.WorkerPort,
 				"uid": t.UID, "models_pending": t.ModelsPending,
 			})
 		}
@@ -352,7 +377,10 @@ func (s *AdminServer) runOp(ctx context.Context, req adminRequest) (map[string]a
 		if strings.TrimSpace(req.Key) == "" {
 			return nil, invalidRequestError{"key is required"}
 		}
-		t, err := s.Ops.Create(ctx, req.Name, req.Key, req.AllowEmptyModels)
+		if err := registry.ValidateAccountLabel(strings.TrimSpace(req.Account)); err != nil {
+			return nil, invalidRequestError{err.Error()}
+		}
+		t, err := s.Ops.Create(ctx, req.Name, req.Account, req.Key, req.AllowEmptyModels)
 		if err != nil {
 			return nil, err
 		}
@@ -374,7 +402,10 @@ func (s *AdminServer) runOp(ctx context.Context, req adminRequest) (map[string]a
 		if strings.TrimSpace(req.Key) == "" {
 			return nil, invalidRequestError{"key is required"}
 		}
-		return map[string]any{"key_set": req.Name}, s.Ops.SetKey(ctx, req.Name, req.Key)
+		if err := registry.ValidateAccountLabel(strings.TrimSpace(req.Account)); err != nil {
+			return nil, invalidRequestError{err.Error()}
+		}
+		return map[string]any{"key_set": req.Name}, s.Ops.SetKey(ctx, req.Name, req.Account, req.Key)
 	default:
 		return nil, invalidRequestError{"unknown op " + req.Op}
 	}

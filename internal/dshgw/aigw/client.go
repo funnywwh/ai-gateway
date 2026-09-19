@@ -127,6 +127,19 @@ type dshAuthorize struct {
 	Allowed *bool  `json:"allowed"`
 	Reason  string `json:"reason"`
 	Tenant  string `json:"tenant"`
+	// Account and FeishuName name the person this key belongs to (M67). aigw answers them
+	// with the admitted decision; both are display data, so an older aigw simply leaves them
+	// empty and nothing here fails.
+	Account    string `json:"account"`
+	FeishuName string `json:"feishu_name"`
+}
+
+// Identity is who aigw says a key belongs to: the tenant it may enter, and the names the
+// tenant's interface shows for that person (M67).
+type Identity struct {
+	Tenant     string
+	Account    string
+	FeishuName string
 }
 
 // Authorize asks aigw whether the key's account is opted in to the dsh gateway (M52).
@@ -136,19 +149,26 @@ type dshAuthorize struct {
 // bodies — returns an error the caller must treat as "authorization unavailable" and fail
 // closed.
 func (c *Client) Authorize(ctx context.Context, key string) (string, error) {
+	identity, err := c.Identity(ctx, key)
+	return identity.Tenant, err
+}
+
+// Identity is Authorize plus the names (M67). One HTTP call serves both, so a caller that
+// wants to show who is signed in does not pay for a second check.
+func (c *Client) Identity(ctx context.Context, key string) (Identity, error) {
 	if strings.TrimSpace(key) == "" {
-		return "", ErrInvalidKey
+		return Identity{}, ErrInvalidKey
 	}
 	base, err := url.Parse(strings.TrimRight(c.BaseURL, "/"))
 	if err != nil || base.Scheme != "http" && base.Scheme != "https" || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" {
-		return "", errors.New("invalid aigw base URL")
+		return Identity{}, errors.New("invalid aigw base URL")
 	}
 	base.Path = strings.TrimRight(base.Path, "/") + "/v1/dshgw/authorize"
 	base.RawQuery = ""
 	base.Fragment = ""
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base.String(), nil)
 	if err != nil {
-		return "", err
+		return Identity{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Accept", "application/json")
@@ -157,11 +177,11 @@ func (c *Client) Authorize(ctx context.Context, key string) (string, error) {
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("dsh authorize: %w", err)
+		return Identity{}, fmt.Errorf("dsh authorize: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized {
-		return "", ErrInvalidKey
+		return Identity{}, ErrInvalidKey
 	}
 	if resp.StatusCode == http.StatusForbidden {
 		denial := &DSHDenial{Reason: "dsh_disabled"}
@@ -172,26 +192,30 @@ func (c *Client) Authorize(ctx context.Context, key string) (string, error) {
 				denial.Reason = payload.Reason
 			}
 		}
-		return "", denial
+		return Identity{}, denial
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", &StatusError{Status: resp.StatusCode}
+		return Identity{}, &StatusError{Status: resp.StatusCode}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, (64<<10)+1))
 	if err != nil {
-		return "", err
+		return Identity{}, err
 	}
 	if len(body) > 64<<10 {
-		return "", errors.New("aigw /v1/dshgw/authorize response exceeds 64 KiB")
+		return Identity{}, errors.New("aigw /v1/dshgw/authorize response exceeds 64 KiB")
 	}
 	var payload dshAuthorize
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", fmt.Errorf("decode /v1/dshgw/authorize: %w", err)
+		return Identity{}, fmt.Errorf("decode /v1/dshgw/authorize: %w", err)
 	}
 	if payload.Allowed == nil || !*payload.Allowed {
-		return "", errors.New("decode /v1/dshgw/authorize: allowed is not true")
+		return Identity{}, errors.New("decode /v1/dshgw/authorize: allowed is not true")
 	}
-	return strings.TrimSpace(payload.Tenant), nil
+	return Identity{
+		Tenant:     strings.TrimSpace(payload.Tenant),
+		Account:    strings.TrimSpace(payload.Account),
+		FeishuName: strings.TrimSpace(payload.FeishuName),
+	}, nil
 }
 
 func NormalizeKey(input string) (string, error) {

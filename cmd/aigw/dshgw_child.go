@@ -138,6 +138,11 @@ func buildDshgwChild(cfg *config.Config, aigwExecutable string) (*dshgwChild, er
 	if cfg.Dshgw.BrowserWorkspaces.Enabled {
 		child.BrowserWorkspaces = &dshgwsup.BrowserWorkspaces{Enabled: true}
 	}
+	if cfg.Dshgw.AccountCard.Enabled {
+		// The child serves the sidebar row's two routes and renders its plugin; the names the
+		// row shows come from this process, over the authorize call it already makes (M67).
+		child.AccountCard = &dshgwsup.AccountCard{Enabled: true}
+	}
 	if cfg.Dshgw.SSHWorkspaces.Enabled {
 		ssh := &dshgwsup.SSHWorkspaces{
 			Enabled:            true,

@@ -132,3 +132,53 @@ func TestIsolationFieldCompatibility(t *testing.T) {
 		t.Fatalf("unknown isolation mode accepted: %v", err)
 	}
 }
+
+// M67: the account label is what the tenant's sidebar names a signed-in person with. It is
+// optional (tenants predate it and the CLI creates tenants without one), it survives a
+// save/load round trip, and a value that cannot be rendered safely is refused.
+func TestAccountLabelRoundTripAndLimits(t *testing.T) {
+	dir := t.TempDir()
+	rp := filepath.Join(dir, "registry.json")
+	kp := filepath.Join(dir, "keys.map")
+	r := New(rp, kp)
+	alice := tenant("alice", "sk-aaaaaaaaa", 32601, 32100)
+	if err := r.Put(alice); err != nil {
+		t.Fatal(err)
+	}
+	// A tenant recorded without a label is legal and stays that way.
+	if got, _ := r.Get("alice"); got.Account != "" {
+		t.Fatalf("account = %q, want empty", got.Account)
+	}
+	if err := r.SetAccount("alice", "  李智超(colin)  "); err != nil {
+		t.Fatal(err)
+	}
+	// SetAccount trims, so a value from a form does not become a second, unequal label.
+	if got, _ := r.Get("alice"); got.Account != "李智超(colin)" {
+		t.Fatalf("account = %q", got.Account)
+	}
+	if err := r.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(rp, kp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := loaded.Get("alice"); got.Account != "李智超(colin)" {
+		t.Fatalf("account after reload = %q", got.Account)
+	}
+	// Unknown tenants and unusable labels are refusals, not silent writes.
+	if err := r.SetAccount("nobody", "x"); err == nil {
+		t.Fatal("setting an account on a missing tenant must fail")
+	}
+	for _, bad := range []string{"bad\x00label", "line\nbreak", strings.Repeat("x", 129)} {
+		if err := r.SetAccount("alice", bad); err == nil {
+			t.Fatalf("unusable account label %q accepted", bad)
+		}
+	}
+	// The label is validated on the whole record too, not only through SetAccount: a tenant
+	// written by any other path must not carry a value that cannot be rendered.
+	alice.Account = "bad\x1f"
+	if err := r.Put(alice); err == nil {
+		t.Fatal("a tenant carrying a control character in its account label must be refused")
+	}
+}

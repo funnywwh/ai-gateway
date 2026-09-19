@@ -1,0 +1,21 @@
+{
+  "name": "dshgw-account-card",
+  "private": true,
+  "type": "module",
+  "description": "dshgw tenant-side sidebar identity row (M67): who is signed in, and 退出",
+  "exports": {
+    ".": "./client.js",
+    "./client": "./client.js"
+  },
+  "scripts": {
+    "test": "node --test *.test.mjs"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  }
+}

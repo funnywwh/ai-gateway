@@ -278,7 +278,15 @@ dshgw:
   #   connect_timeout: 10s
   #   poll_interval: 2s
   #   max_entries: 1000
-  #   sshfs_options: [reconnect, ServerAliveInterval=15, ServerAliveCountMax=3, idmap=user]
+  # sshfs_options: [reconnect, ServerAliveInterval=15, ServerAliveCountMax=3, idmap=user]
+  #
+  # 侧栏「账号行」（M67）：租户 dsh 侧栏底部显示登录者的飞书名（取不到回退账号名，再回退租户名）
+  # 和一个「退出」按钮；退出只撤销本租户的会话。开关在这里（而非子进程配置里），因为名字只有
+  # 本进程知道：租户配置由本文件生成，打开后子进程同时获得该行与它调用的两个端点
+  # （GET /dshgw/session/、POST /dshgw/logout/，都在租户自己的 origin 下）。旧租户的账号名
+  # 在下一次「启用/轮换密钥」时补写到 dshgw 注册表。
+  # account_card:
+  #   enabled: true
 
 # Feishu (Lark) identity (M60/M61): bind API keys to Feishu accounts, and let those people
 # sign in to the DSH portal without pasting a key. Off by default, and while it is off

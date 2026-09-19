@@ -4134,6 +4134,38 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
       you are signed in as」），被拒的写不产生审计行；临时验收账号随后删除，列表回到 1 行
 - [ ] 真机验收（手机扫码、真正发一条邀请给同事）见 `docs/TODO.md` M66 小节
 
+## M67 租户侧栏的账号行与退出
+
+设计：`docs/design/m67-dshgw-account-card.md`；规格：`docs/dshgw.md` §7d；真机验收项见 `docs/TODO.md` 同名小节。
+
+- [x] **aigw**：`POST /v1/dshgw/authorize` 的 200 响应新增 `account`（`accounts.name`）与 `feishu_name`
+      （该账号**任一** Key 上的飞书绑定，因为 worker Key 本身不带绑定）；两者都是显示数据，查不到只留空、
+      绝不影响 `allowed`。`Deps.KeyStore` 只为这一次读引入
+- [x] **账号名落库**：控制台 `tenant-create` / `tenant-set-key` 把账号名随本地 socket 交给 dshgw，
+      落到注册表 `tenants[].account`（可空、旧 registry.json 照旧加载）；非 ASCII 原样保存并有长度/控制字符校验
+- [x] **dshgw 身份解析**：`internal/dshgw/proxy/identity.go` —— 注册表给租户名、aigw 给账号名与飞书名，
+      按租户缓存 5 分钟、登录成功时预热、租户消失时随注册表重载清理；任一步失败只降级成租户名并记 WARN
+- [x] **两个端点**：租户 origin 下的 `GET /dshgw/session/`（`{ok, value:{authenticated, tenant, account,
+      feishu_name, name}}`）与 `POST /dshgw/logout/`（撤销本租户会话 + 清 cookie → 303 门户登录页）。
+      鉴权复用从 `TenantHandler` 抽出的 `tenantSession()`（同一会话/key 复验/dsh 复核链），且在 worker
+      握手之前处理；功能关闭时整个 `/dshgw/**` 返回 404
+- [x] **浏览器插件** `cmd/dshgw/plugin/account-card/`：`dshgw-account-card`，只装浏览器半边，
+      `sidebar.footer.action` `order: 120`（在 browser 90 / ssh 100 之后）；404 不渲染、读取失败给「重试」、
+      折叠栏只留退出图标、退出是 POST 后跳门户登录页
+- [x] **配置链**：`account_card.enabled`（默认 false）在 aigw → 子进程配置 → dshgw 三处贯通；
+      本机运行时 `dshgw.yaml` 打开；`deploy/dshgw/config.example.yaml` 与 `config.example.yaml` 写明端点、
+      开关与「旧租户下次启用/轮换时回填账号名」
+- [x] 单测：authorize 增开、注册表往返与非法值、admin 协议字段跨 socket、proxy 身份/退出/缓存清理、
+      `account-card/client.test.mjs` 37 条断言；`Makefile` 的 `dshgw-test` 加上该测试
+- [x] **真机验收（接口面，2026-09-19 本机）**：authorize 返回 `account`/`feishu_name`（飞书绑定在**另一个**
+      Key 上）；`GET /dshgw/session/` 200 且 `name=李智超`、无 cookie 302 门户；`POST /dshgw/logout/`
+      跨源 403 / GET 405 / 正确 Origin 303 且会话失效；`account_card.enabled: false` 重启后端点 404、
+      租户页面不再出现该 bundle；租户页面确实加载 `dshgw-account-card/client.js`
+- [x] **真机抓到的缺陷与修复**：加载行原本指向 `client.js`，宿主 import 浏览器 bundle 触发
+      `ReferenceError: window is not defined`，四个租户的 worker 全部起不来；补 `index.js`（host 半边）
+      作为行入口并加单测钉住
+- [ ] 侧栏观感与点「退出」后的浏览器跳转需人工看一眼（本机无浏览器自动化）见 `docs/TODO.md` M67 小节
+
 ### v2.5.0 + v2.5.1 发布与部署记录（2026-09-19，本机三单元；gpt001 未部署）
 
 本版内容：**M66 控制台多管理员与管理员飞书扫码登录**（功能提交 `ba9b74f`；设计
