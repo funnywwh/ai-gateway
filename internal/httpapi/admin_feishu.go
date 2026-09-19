@@ -378,7 +378,7 @@ func (s *Server) finishFeishuLogin(w http.ResponseWriter, r *http.Request, ident
 	// cookie would never arrive.
 	if s.feishuSameHost(deps.PortalURL) {
 		s.setFeishuTicketCookie(w, wire)
-		http.Redirect(w, r, s.trailingSlash(deps.PortalURL)+"login/feishu", http.StatusSeeOther)
+		redirectFeishuHandoff(w, r, deps.RedirectURI, s.trailingSlash(deps.PortalURL)+"login/feishu")
 		return
 	}
 	target := s.trailingSlash(deps.PortalURL) + "login/feishu?ticket=" + url.QueryEscape(wire)
