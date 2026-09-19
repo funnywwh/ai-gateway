@@ -8,6 +8,8 @@
 - 默认关闭配置、独立/监督启动、停用/删除/备份保护。
 - tenant/session capability 绑定、限额、超时、过期队列及迟到响应处理。
 - worker 重启后的客户端重连、失败清理重试、持久残留记录与单实例锁。
+- **多目录**：每账号同时挂载多个本机目录，目录的稳定 key → 固定虚拟路径 → 复用的 DSH 工作区条目；
+  侧栏行右侧图标打开的文件夹列表（添加/连接/断开/打开/删除），断开保留挂载点与工作区、删除才释放二者。
 - 安全卸载顺序、进程生命周期串行化与 terminal Shutdown。
 
 ## 真实 Chromium 端到端挂载验收（2026-09-19）
@@ -32,7 +34,7 @@ worker → 侧栏已挂载 → 双向 I/O → 卸载 → 删除账号」。实�
 | 沙箱内可见 | 用**运行中 worker 自己的 argv**（`/proc/<pid>/cmdline`，不是 CLI 的 `sandbox-exec --print`）执行命令：profile 含 `--bind <mountpoint> <mountpoint>`；沙箱内 `ls` 列出两个文件、`cat` 读到浏览器内容、写入 `from-sandbox.txt` 成功 |
 | 沙箱 → 浏览器 | 沙箱写入的文件在浏览器侧读到 |
 | 沙箱没有变宽 | 操作员的 `~/.ssh`、`aigw/config.yaml`、`data` 在沙箱内不可见 |
-| 卸载 | 再点一次：侧栏「已断开」、内核挂载消失、挂载点被删除、浏览器目录与其文件仍在 |
+| 卸载 | 再点一次：侧栏「已断开」、内核挂载消失、**空挂载点保留**（它是该本机目录的稳定虚拟路径）、浏览器目录与其文件仍在；点行右侧的文件夹图标可看到该目录仍保存在列表里并带「连接」按钮 |
 | 删除账号 | `tenant remove -purge` 后 workspace 消失 |
 
 **不夸大**：OS 目录选择/授权对话框仍无法自动化——它是唯一被替换的环节，替换物是真实 OPFS 句柄而非
@@ -208,3 +210,49 @@ DSH 会话操作；不同浏览器和本机文件系统不保证完整 POSIX，�
 引用/内核异常可能使同步 go-fuse Unmount 阻塞。
 
 详见 `docs/design/browser-fuse-workspace.md`、`internal/dshgw/browserworkspace/README.md` 与 `cmd/dshgw/plugin/browser-workspace/README.md`。
+
+## 多目录与文件夹管理（2026-09-19 实测）
+
+```sh
+go build -o /tmp/dshgw-multi ./cmd/dshgw
+python3 scripts/browser_workspace_multi_e2e.py --dshgw /tmp/dshgw-multi
+```
+
+同一套一次性 fixture（私有 13xxx 端口、真实 Chromium、两个真实 OPFS 目录、真实 FUSE、真实 bwrap），
+全程用**真实鼠标事件**点侧栏行右侧的文件夹图标与列表里的按钮。实际结果 **PASS：22 步**。
+
+| 证据 | 观测 |
+|---|---|
+| 行与图标 | 行容器 256×36，在 ssh 行正上方同一左边界/宽度；容器内行体宽 230px、文件夹图标 24px 且在**同一行右侧**（`icon.left 244 >= body.right 242`，`flexDirection=row`） |
+| 图标是独立手势 | 点图标打开文件夹列表：空列表 + `添加文件夹` + `关闭`，且**没有**触发目录选择器 |
+| 多目录并存 | `添加文件夹` 两次 → 两个不同本机目录各自挂载：`<workspace>/browser/<keyA>`、`<workspace>/browser/<keyB>`，两条网关记录 `State=ready`，两个内核 `fuse.browser-workspace` 挂载 |
+| worker 绑定 | 运行中 worker 自己的 argv 同时包含两个挂载点（`/proc/<pid>/cmdline`） |
+| I/O 独立 | 每个挂载只列出自己那个本机目录：`only-in-a.txt` 只在 A、`only-in-b.txt` 只在 B；宿主与浏览器双向读写都通 |
+| 工作区映射 | DSH 自己的 `storages/workspace.json` 里恰好两条指向 `browser/` 的工作区，标题为 `本地: picked-a` / `本地: picked-b` |
+| **断开一个** | A 的内核挂载消失、网关记录消失；**A 的空挂载点保留**、A 的工作区条目与 id 不变；B 仍挂载，宿主与**账号沙箱内**读写继续正常；重启后的 worker 只绑定 B |
+| **同一个目录重连** | 仍在**同一路径** `browser/<keyA>` 挂载，网关记录的 `ID` 仍是 keyA（`Persistent=true`），**工作区 id 与断开前完全相同**，宿主读写恢复 |
+| **删除** | A 的挂载、挂载点、工作区条目三者一起释放；B 不受影响；再删除 B 后列表为空、无任何残留网关记录 |
+| 刷新后恢复 | 页面刷新后行显示 `resumable`「刷新前挂载的是 picked-b；点击恢复」，在列表里点 `连接` 只发 `resume`：同一路径、同一挂载 id、读写恢复 |
+| 页面无错误 | JS 异常 0、`/browser-workspace/` 请求失败 0 |
+
+三条修复是被这次真机验收逼出来的，记录在这里而不是悄悄改掉：
+
+1. **行布局**：`:has()` 堆叠规则最初也匹配了行容器**内部**的 `.dshgw-bw-action` 按钮，于是容器自己被设成
+   `flex-direction: column`，文件夹图标跑到标签**下面**（行高 62px 而不是 36px）。现在规则只匹配容器类，
+   并且 e2e 增加了矩形几何断言（图标在行体右侧、同一行），类名断言抓不到这类回归。
+2. **删除工作区条目的调用形状**：`ctx.remote.workspace` 是「请求对象」式远端，
+   `delete({workspaceId})`；传裸字符串会被 schema 拒绝而**静默失败**，结果是断开后留下死的
+   「本地: xxx」工作区行。同一个错误也存在于挂载失败时的回滚路径（此前从未被 e2e 走到）。测试 harness
+   现在会拒绝裸 id，避免测试全绿而真机失败。
+3. **删除与 worker 重启的顺序**：先删工作区条目（此时 worker 还活着），再 `close{purge}` 释放挂载；
+   反过来则删除请求会撞上 close 触发的 worker 重启而丢失。
+
+**新旧混版**：客户端会给 `open` 带 `key`、给 `close` 带 `purge`，而**旧网关**（`DisallowUnknownFields`）会整体拒绝这两个请求。
+客户端识别这一种答复并降级：`open` 不带 key 重试（挂载照常，路径是旧的随机 id）、`purge` 被拒则退回普通 close（旧网关本来就每次
+close 都删挂载点）。因此「页面在网关重启前已打开」不会被这次改动打断；刷新后新 bundle 才用上稳定 key。这一点由 Node 测试
+（`legacyGateway` 假网关）覆盖，不是真机实测——本机没有旧二进制可跑。
+
+**不夸大**：OS 目录选择/授权对话框仍无法自动化（唯一被替换的环节，替换物是真实 OPFS 句柄，且这次是两个不同目录）；
+只证明本机 Linux + 本机 Chromium + 本机 DSH 版本这一组合；每账号同时挂载上限仍是网关的 4（本脚本实测 2 个）；
+浏览器侧最多保存 8 个目录由客户端测试覆盖，不是真机实测；「工作区 id 不变」是读 DSH 自己的
+`storages/workspace.json` 得到的，不是从 UI 推断的。

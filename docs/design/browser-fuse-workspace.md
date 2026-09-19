@@ -13,15 +13,15 @@ DSH bash/read/write → sandbox 内的 FUSE 挂载
 
 主要组成：
 - `internal/dshgw/browserworkspace`：FUSE 适配器、协议、errno、inode 与缓存语义。
-- `internal/dshgw/browsermount`：反向请求、挂载生命周期、持久记录及崩溃清理。
-- `cmd/dshgw/plugin/browser-workspace`：客户端目录授权、文件执行器和工作区入口；host 文件用于插件发现。
+- `internal/dshgw/browsermount`：反向请求、多挂载生命周期、稳定目录 key、持久记录及崩溃清理。
+- `cmd/dshgw/plugin/browser-workspace`：客户端目录授权、多目录文件夹列表（增删/连接/断开）、文件执行器和工作区入口；host 文件用于插件发现。
 - dshgw proxy：在既有 Host/Origin、cookie、租户、会话及权限校验后分派管理请求，不依赖 worker 在线。
 
 ## 与初始计划的差别
 
 使用 **HTTP 长轮询**，不是独立 WebSocket upgrade；它承载同样的反向文件操作，复用网关认证且避免新监听端口。不存在 WebSocket 101/426 的虚假验收声明。
 
-本插件独立于旧 `dsh-browser-fs`。后者仍只是额外文件工具，本功能真正注册 FUSE 绝对路径工作区。限制首版采用固定安全上限，不新增所有预想的可调配置项；不实现 IndexedDB 句柄恢复或自动重新授权。
+本插件独立于旧 `dsh-browser-fs`。后者仍只是额外文件工具，本功能真正注册 FUSE 绝对路径工作区。限制首版采用固定安全上限，不新增所有预想的可调配置项。IndexedDB 句柄恢复已实现（2026-09-19）：保存的目录句柄与已授予的 `readwrite` 权限跨刷新/跨标签页有效，刷新后一次点击即可接回同一挂载。
 
 ## 配置与使用
 
@@ -38,9 +38,24 @@ deploy:
 
 要求：Linux、可用 `/dev/fuse`、`fusermount3`（兼容清理 helper 为 `fusermount`），网关运行账号能用户态挂载；浏览器使用 HTTPS/localhost 且支持 File System Access API。**不会向租户 sandbox 增加 /dev/fuse 或权限能力。**
 
-操作：侧栏「浏览器工作区」→（单击即打开目录选择器，无二次确认）授权目录 → 弹出状态窗口 → 网关建立 `<workspace>/browser/<random-id>` → 浏览器开始响应文件请求 → activate 验证根并重启该账号 worker → 等待 DSH 连接恢复 → 注册并打开工作区。侧栏的浏览器工作区与 SSH 工作区在同一 footer slot 中上下两行（`sidebar.footer.action`，order 90 对 100），浏览器行不用状态点，状态由行注记、`data-dshgw-state` 与状态窗口以文字承载；成功状态窗口约 1.5 秒后自动关闭，失败窗口保留供用户阅读。风险提示写在行的 tooltip、状态窗口与状态里，不再作为点击前的确认步骤——目录选择器需要 transient user activation，多一次点击或阻塞对话框都会先耗尽它。
+操作：侧栏「浏览器工作区」这一行有两个控件。**行体**是自适应的一次点击：没有已保存目录时直接弹目录选择器挂载（与最初一致）；恰好一个目录时是那个目录的连接/断开；多个目录时打开文件夹列表（「断哪一个」没有唯一答案）。**行体右侧的文件夹图标**始终打开文件夹列表。
 
-挂载/卸载可能中断该账号其他正在执行的任务。页面必须保持打开；关闭、断网或撤销权限会导致 I/O 失败，不能把浏览器目录当作永远在线的远程磁盘。重新选择目录会创建新的挂载。
+文件夹列表（`data-dshgw-dialog="browser-workspace"`）里每个已保存目录一行：目录名、状态、`连接`/`断开`、`打开`（跳到该目录的工作区会话）与 `删除`（两步确认，不用 `window.confirm`），页脚是 `添加文件夹` 与 `关闭`。窗口是管理界面，不自关；只有行体发起的那次挂载成功后约 1.5 秒自动关闭。侧栏的浏览器工作区与 SSH 工作区仍在同一 footer slot 中上下两行（`sidebar.footer.action`，order 90 对 100），浏览器行是容器 `.dshgw-bw-row`（行体 + 文件夹图标），折叠导轨只留一个图标；状态由行注记、`data-dshgw-state`（行）与 `data-dshgw-folder-state`（每个目录行）以文字承载，不用状态点。风险提示写在行的 tooltip、窗口与状态里，不作为点击前的确认步骤——目录选择器需要 transient user activation，多一次点击或阻塞对话框都会先耗尽它。
+
+连接/断开都会重启该账号的 worker，可能中断其他正在执行的任务。页面必须保持打开；关闭、断网或撤销权限会导致 I/O 失败，不能把浏览器目录当作永远在线的远程磁盘。
+
+## 多目录与稳定虚拟路径（本地目录 ↔ 工作区映射）
+
+一个账号可以同时挂载多个本机目录（网关上限每账号 4 个，见下），每个目录一条独立的 poll 连接、一个独立的内核挂载与一个独立的 DSH 工作区条目。
+
+**挂载点由客户端提供的稳定 key 命名**：`<workspace>/browser/<key>`，key 是保存该目录时生成一次的 32 位十六进制串，存在 IndexedDB 里，重连、刷新、换标签页都不变。这一点是「工作区映射不要因为挂载 id 变化而变化」的实现基础：
+
+- DSH 的工作区注册表按 **canonical path** 复用（`create` 幂等：同路径返回同一实体，不新建），因此固定路径 ⇒ 固定 workspaceId、固定标题、固定会话归属；会话归属还要求路径真实存在（`realpath` + `stat` 成功），所以**断开时挂载点目录保留为空目录**，路径始终有效，会话不会被从工作区成员里过滤掉。删除目录（`close{purge:true}`）才释放该目录并删除对应工作区条目（工作区注册删除只删注册，**保留目录与会话日志**）。
+- 同一 key 被另一条 share 占着（正在服务或在宽限期内）时 `open` 直接拒绝（`directory key already mounted for this account`），绝不叠第二个 FUSE 挂载——两个挂载同一本机目录会让两个浏览器同时写同一份文件。宽限期内的旧记录由 tombstone 携带路径，`purge` 只在该 key 没有活挂载时才会删除目录。
+- 复用已存在的挂载点目录只接受「本服务自己会创建的那种」：私有权限、非符号链接、**空目录**；有残留内容就报错而不是覆盖。
+- 启动清理（`CleanupStale`）对带稳定 key 的记录只卸载、不删目录（记录照旧删除），因此网关重启不会破坏映射。
+
+`open` 未带 key（旧客户端）时仍生成随机 48 位 id，挂载点随挂载结束删除，行为与之前完全一致。
 
 **刷新/断线可以恢复（2026-09-19 起）**：`poll` 长轮询仍是浏览器那一端，但它死掉只意味着「暂时没人服务」，不再等于销毁挂载。网关保留内核挂载与挂载点 45 秒（`reconnectGrace`），期间同一个页面（或替代它的新标签页/新文档）用 `resume` 把**同一个挂载**接回来：同一路径、同一 worker 绑定，不重建、不重启 worker。窗口内没人回来才走原来的清理顺序（重启 worker → 卸载 FUSE → 删挂载点 → 删记录）。
 
@@ -53,7 +68,8 @@ deploy:
 
 ## 生命周期和崩溃恢复
 
-- `open` 在 FUSE 挂载前持久化 preparing 记录，成功后原子更新 ready。只记录服务端路径/租户/随机 ID，不持久化 capability 或浏览器句柄。
+- `open` 在 FUSE 挂载前持久化 preparing 记录，成功后原子更新 ready；带稳定 key 的记录标记 `Persistent`，供启动清理区分「稳定虚拟路径」与「一次性挂载点」。只记录服务端路径/租户/ID，不持久化 capability 或浏览器句柄。
+- 断开（`close`）对稳定 key 只卸载并删除记录，**保留空挂载点目录**；`close{purge:true}`（操作员删除该目录）才连目录一起释放，tombstone 会记住路径，使「先断开、后删除」也能真正释放。
 - HTTP close 和租约过期：先拒绝新 I/O、从 worker profile 排除路径，再重启并等待旧 namespace 退出，最后卸载 FUSE。
 - **反向通道的 poll 连接就是浏览器侧本身**：net/http 在该连接断开时取消它的 context（页面刷新/关闭/崩溃、客户端在 close 前主动 abort 长轮询），此时立即断开该挂载，而不是等到 60 秒租约到期。晚到的 poll 不会复活已断开的 capability（客户端本来就把 poll 失败当作断线并调用 close）。
 - **注册工作区之前必须已经在 poll**：宿主上的 FUSE 挂载会传播进正在运行的 worker 命名空间（实测 worker 的 mountinfo 里就有 `fuse.browser-workspace`），因此 worker 自己 `workspace.create(path)` 的 realpath 会 stat 这个挂载点。客户端必须在调用注册之前就开始 poll，否则该 stat 阻塞整个 FUSE 超时，表现为「挂载失败：workspace registration timed out」（2026-09-19 真实 Chromium 验收抓到并修复）。
@@ -80,12 +96,12 @@ deploy:
 2. 启用时 `workspace/browser` 是网关管理的真实私有目录。sandbox 将**容器只读绑定，再把活动子挂载读写绑定**，防止同 UID 租户替换容器制造检查到绑定间的 symlink 竞态。功能关闭时不修改同名普通目录。只读容器**不足以**让活动挂载可写：宿主挂载会传播进运行中的 worker 命名空间，此时它落在只读容器之下，沙箱内写入报 EROFS——所以 profile 里那条 `--bind <mountpoint> <mountpoint>`（`MountsFor` 只广告仍可服务的挂载）是必需的，且只有 activate 之后重启的 worker 才带它。
 3. FUSE 不使用 allow_other，隔离仍以租户 mount namespace 为界。网关运行账号与宿主同 UID 进程是信任边界，不提供不同 UID 隔离的虚假承诺。
 4. capability 绑定 tenant 和登录会话哈希；token 不进 URL、不入持久记录或日志。
-5. 每租户最多 4 个、全网关最多 128 个挂载，每挂载最多 64 个等待请求；I/O 预算 15 秒、租约 60 秒、HTTP body 上限 2 MiB；目录结果最多 10000 项且 JSON 最多 1 MiB，超限报错而非截断伪造完整目录。
+5. 每租户最多 4 个（`maxMountsPerTenant`，单独报错文案，客户端译成「已达每账号 4 个目录上限」）、全网关最多 128 个挂载，每挂载最多 64 个等待请求；每挂载一条常驻 poll 长轮询，因此同源并发连接数是这个上限的现实依据（HTTP/1.1 每源 6 条）。浏览器侧最多保存 8 个目录（含未连接的）。I/O 预算 15 秒、租约 60 秒、HTTP body 上限 2 MiB；目录结果最多 10000 项且 JSON 最多 1 MiB，超限报错而非截断伪造完整目录。稳定 key 只允许 32 位小写十六进制；空挂载点目录按 key 复用，删除目录才释放。
 6. 已取消的排队请求不再下发，迟到响应丢弃；断线后不依赖内核写回缓存假报成功。poll 连接断开即断开挂载（见"生命周期"），因此不会出现"浏览器已不在、网关仍在等租约"的窗口被 worker 启动撞上。
 7. 全网关/租户备份排除远程浏览器内容；关闭功能时保留同名普通目录的备份。离线 CLI 检测到活动挂载时拒绝递归删除。
 
 ## 验证与交付边界
 
-已通过源码 Go 回归、20 项 JS 测试、真实 FUSE/HTTP/sandbox、活跃 namespace 关闭及崩溃状态清理模拟、Chromium 原生 OPFS 执行器、真实 DSH 插件发现和浏览器侧栏渲染。
+已通过源码 Go 回归、53 项 JS 测试、真实 FUSE/HTTP/sandbox、活跃 namespace 关闭及崩溃状态清理模拟、Chromium 原生 OPFS 执行器、真实 DSH 插件发现和浏览器侧栏渲染，以及多目录真机端到端（两个目录并存、逐目录断开/重连/删除、刷新后恢复）。
 
-具体命令与证据见 `docs/browser-workspace-verification.md`。仍需用户环境验收 OS 目录选择/授权对话框及实际目录兼容性；race detector 因环境缺 C 编译器未运行。未部署当前在线实例，不宣称完整 POSIX 或生产环境全覆盖。
+具体命令与证据见 `docs/browser-workspace-verification.md`（单目录挂载 29 步、断线/刷新恢复、多目录管理 22 步、真实侧栏渲染）。仍需用户环境验收 OS 目录选择/授权对话框及实际目录兼容性；race detector 因环境缺 C 编译器未运行。未部署当前在线实例，不宣称完整 POSIX 或生产环境全覆盖。
