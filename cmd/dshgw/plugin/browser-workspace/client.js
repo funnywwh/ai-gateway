@@ -140,6 +140,29 @@ window.__ModuleLoader__.load({
         return result
       }
     }
+    // One compact sidebar row, styled like the ssh-workspace entry beside it: an icon,
+    // a label, and a muted state note that truncates instead of widening the foot.
+    const CSS = `
+.dshgw-bw-action { display: flex; align-items: center; gap: 6px; width: 100%; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; padding: 6px 8px; border-radius: 6px; text-align: left; }
+.dshgw-bw-action:hover { background: rgba(127,127,127,.14); }
+.dshgw-bw-action[aria-pressed="true"] .dshgw-bw-label { font-weight: 600; }
+.dshgw-bw-label { flex: none; white-space: nowrap; }
+.dshgw-bw-state { flex: 1 1 auto; min-width: 0; margin-left: 4px; opacity: .65; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+`
+    // What the entry promises before anyone clicks it. The consent step that used to
+    // stand in front of the picker is gone (it cost a second click and could burn the
+    // click's transient user activation), so this warning travels with the row instead.
+    const WARNING = '把本机目录挂载成这个账号的真实工作区：AI 可以读取、修改、重命名和删除所选目录中的文件，读取的文件内容可能发送给配置的 AI 模型服务商；挂载和卸载都会重启该账号的 worker，可能中断正在运行的任务或连接。请选择专用目录并先备份，不要选择密钥或敏感目录；挂载期间必须保持此页面打开。'
+
+    /** Install the stylesheet once, namespaced by plugin like every shipped surface. */
+    function installCSS() {
+      if (document.querySelector('style[data-plugin-css="dshgw-browser-workspace/client.css"]') !== null) return
+      const tag = document.createElement('style')
+      tag.dataset.pluginCss = 'dshgw-browser-workspace/client.css'
+      tag.textContent = CSS
+      document.head.appendChild(tag)
+    }
+
     function createTransport(fetcher = window.fetch.bind(window)) {
       return async (endpoint, payload, timeoutMs = 35000, signal) => {
         if (!['open', 'poll', 'respond', 'close', 'activate'].includes(endpoint)) throw failure('EINVAL', 'invalid endpoint')
@@ -161,11 +184,15 @@ window.__ModuleLoader__.load({
       }
     }
     function apply(ctx) {
+      installCSS()
       const call = createTransport()
       let active = null, disposed = false, choosing = false
       const listeners = new Set()
-      let status = '挂载本地目录（读写）'
-      const show = text => { status = text; for (const listener of listeners) listener() }
+      // The row shows one short state note; the tooltip carries the sentence that does not
+      // fit in the sidebar foot. Nothing here is a dialog, and nothing here gates the picker.
+      let note = ''
+      const show = text => { note = text; for (const listener of listeners) listener() }
+      const entryTitle = () => `浏览器工作区：${WARNING}${note === '' ? '' : `（当前：${note}）`}`
       const live = share => !disposed && active === share && !share.stopped
       const delay = (ms, signal) => new Promise((resolve, reject) => {
         const aborted = () => { clearTimeout(timer); reject(failure('ECANCELED', 'operation cancelled')) }
@@ -179,12 +206,12 @@ window.__ModuleLoader__.load({
         if (share.closing) return share.closing
         share.stopped = true
         share.controller.abort()
-        show('正在断开并清理挂载；请保持页面打开')
+        show('断开中…（保持页面打开）')
         share.closing = (async () => {
           try {
             await call('close', { token: share.token }, 55000)
             if (active === share) active = null
-            show('已断开；挂载本地目录（读写）')
+            show('已断开')
             return true
           } catch (error) {
             // Retain capability for an explicit cleanup retry; never fake success.
@@ -214,61 +241,92 @@ window.__ModuleLoader__.load({
           if (live(share) && await stop()) show(`已断线：${error.message}；请重新选择目录`)
         }
       }
-      const register = async (share, path, priorGeneration) => {
-        // ConnectionHandle state/generation/reconnect are public DSH APIs. The
-        // gateway's worker restart completes before the browser wire reconnects.
-        const connection = ctx.connection
-        if (connection.generation.getSnapshot()?.id === priorGeneration || connection.state.getSnapshot() !== 'connected') connection.reconnect()
-        const deadline = Date.now() + 30000
-        let lastError = failure('ETIMEDOUT', '等待工作区连接超时')
+      // Register the Workspace while the mount point is GUARANTEED to exist.
+      //
+      // `open` creates the mount point and any teardown (page reload, transport
+      // failure, disconnect) removes it again, while the activation restart takes
+      // seconds. Registering after that restart raced the teardown and failed with
+      // workspace/invalid-path: ENOENT realpath on a directory that had just been
+      // removed. create(path) is idempotent, unlike opening a new workspace session.
+      const createWorkspace = async (share, path) => {
+        const deadline = Date.now() + 10000
+        let lastError = failure('ETIMEDOUT', 'workspace registration timed out')
         while (live(share) && Date.now() < deadline) {
-          if (connection.state.getSnapshot() === 'connected' && connection.generation.getSnapshot()?.id !== priorGeneration) {
-            let timer
-            try {
-              // create(path) is idempotent, unlike opening a new workspace session.
-              const created = await Promise.race([
-                ctx.remote.workspace.create({ path }),
-                new Promise((_, reject) => { timer = setTimeout(() => reject(failure('ETIMEDOUT', 'workspace registration timed out')), 5000) }),
-              ])
-              if (created?.ok) return created.value.workspace
-              lastError = created?.error || failure('EIO', 'workspace registration failed')
-            } catch (error) { lastError = error }
-            finally { clearTimeout(timer) }
-          }
+          let timer
+          try {
+            const created = await Promise.race([
+              ctx.remote.workspace.create({ path }),
+              new Promise((_, reject) => { timer = setTimeout(() => reject(failure('ETIMEDOUT', 'workspace registration timed out')), 5000) }),
+            ])
+            if (created?.ok) return created.value.workspace
+            lastError = created?.error || failure('EIO', 'workspace registration failed')
+          } catch (error) { lastError = error }
+          finally { clearTimeout(timer) }
           await delay(500, share.controller.signal)
         }
         throw lastError
       }
+      // A failed mount releases its capability, and the gateway then removes the
+      // mount point: the Workspace registered above would point at a directory that
+      // no longer exists. Nothing was connected to it yet, so it is safe to forget.
+      const forgetWorkspace = async workspace => {
+        if (!workspace?.workspaceId) return
+        try { await ctx.remote.workspace.delete(workspace.workspaceId) }
+        catch { ctx.logger?.warn?.('browser-workspace: the failed mount left its workspace behind') }
+      }
+      // ConnectionHandle state/generation/reconnect are public DSH APIs. The
+      // gateway's worker restart completes before the browser wire reconnects.
+      const awaitReconnect = async (share, priorGeneration) => {
+        const connection = ctx.connection
+        if (connection.generation.getSnapshot()?.id === priorGeneration || connection.state.getSnapshot() !== 'connected') connection.reconnect()
+        const deadline = Date.now() + 30000
+        while (live(share) && Date.now() < deadline) {
+          if (connection.state.getSnapshot() === 'connected' && connection.generation.getSnapshot()?.id !== priorGeneration) return
+          await delay(500, share.controller.signal)
+        }
+        throw failure('ETIMEDOUT', '等待工作区连接超时')
+      }
+      // One click, one picker. showDirectoryPicker() needs transient user activation (about
+      // five seconds in Chromium), so it is called synchronously by the click — anything
+      // awaited first, including a consent step of its own, risks "Must be handling a user
+      // gesture". The warning is not a gate: it lives on the row (title) and in every state
+      // note below.
       const choose = async () => {
         if (disposed || choosing) return
         if (active) { choosing = true; try { await stop() } finally { choosing = false }; return }
         if (!window.isSecureContext || !window.showDirectoryPicker) { show('需要 HTTPS 和支持目录访问的浏览器'); return }
-        if (!window.confirm('允许远程 AI 读取、修改、重命名和删除所选目录中的文件；读取的文件内容可能发送给配置的 AI 模型服务商。挂载及卸载会重启账户 worker，可能中断当前任务或连接。请选择专用目录并先备份，不要选择密钥或敏感目录。保持此页面打开；断线会导致远程文件操作失败。是否继续？')) return
         choosing = true
         try {
           const root = await window.showDirectoryPicker({ mode: 'readwrite' })
           if (disposed) return
           const opened = await call('open', { name: root.name, writable: true })
           if (!opened?.token) throw failure('EIO', 'invalid open handshake')
-          const share = { token: opened.token, execute: createExecutor(root, { writable: true }), controller: new AbortController(), stopped: false, closing: null }
+          const share = { token: opened.token, name: root.name, execute: createExecutor(root, { writable: true }), controller: new AbortController(), stopped: false, closing: null }
           active = share
           if (disposed) { await stop(); return }
           if (!opened.mountpoint) throw failure('EIO', 'invalid open mountpoint')
-          const priorGeneration = ctx.connection.generation.getSnapshot()?.id
-          show(`正在挂载 ${root.name} 并重启 worker；请保持页面打开`)
-          void poll(share)
-          const activated = await call('activate', { token: share.token }, 55000, share.controller.signal)
-          if (!live(share)) return
-          show('挂载完成；等待 worker 重新连接并注册工作区')
-          const workspace = await register(share, activated.mountpoint || opened.mountpoint, priorGeneration)
+          show(`挂载中…（${root.name}，worker 将重启）`)
+          const workspace = await createWorkspace(share, opened.mountpoint)
           if (!live(share)) return
           try {
-            const renamed = await ctx.remote.workspace.rename({ workspaceId: workspace.workspaceId, title: `本地: ${root.name}` })
-            if (!renamed?.ok) ctx.logger?.warn?.('browser-workspace: workspace rename failed')
-          } catch { ctx.logger?.warn?.('browser-workspace: workspace rename failed') }
-          if (!live(share)) return
-          await ctx.uiWorkspace.connectWorkspace(workspace.workspaceId)
-          if (live(share)) show(`断开 ${root.name}（读写；保持页面打开）`)
+            const priorGeneration = ctx.connection.generation.getSnapshot()?.id
+            void poll(share)
+            const activated = await call('activate', { token: share.token }, 55000, share.controller.signal)
+            if (!live(share)) return
+            show('挂载完成；等待 worker 重连…')
+            await awaitReconnect(share, priorGeneration)
+            if (!live(share)) return
+            try {
+              const renamed = await ctx.remote.workspace.rename({ workspaceId: workspace.workspaceId, title: `本地: ${root.name}` })
+              if (!renamed?.ok) ctx.logger?.warn?.('browser-workspace: workspace rename failed')
+            } catch { ctx.logger?.warn?.('browser-workspace: workspace rename failed') }
+            if (!live(share)) return
+            await ctx.uiWorkspace.connectWorkspace(workspace.workspaceId)
+            if (live(share)) show(`已挂载 ${root.name}（读写）；点击断开`)
+          } catch (error) {
+            await forgetWorkspace(workspace)
+            throw error
+          }
         } catch (error) {
           // AbortError is harmless only when the picker was cancelled before open;
           // an activation timeout still requires cleanup of the retained token.
@@ -276,12 +334,25 @@ window.__ModuleLoader__.load({
           else if (error.name !== 'AbortError') show(`挂载失败：${error.message || String(error)}`)
         } finally { choosing = false }
       }
+      // The sidebar entry: one row, same shape as the ssh-workspace one above it. The click
+      // is the whole gesture — no consent step, no dialog, no second confirmation.
       function Action() {
         const [, update] = React.useState(0)
         React.useEffect(() => { const listener = () => update(n => n + 1); listeners.add(listener); return () => listeners.delete(listener) }, [])
-        return React.createElement('button', { type: 'button', onClick: choose, title: '文件内容可能发送给 AI 模型；挂载/卸载重启 worker；关闭页面会断开挂载' }, status)
+        return React.createElement('button', {
+          type: 'button',
+          className: 'dshgw-bw-action',
+          title: entryTitle(),
+          'aria-pressed': active !== null,
+          'aria-label': note === '' ? '浏览器工作区' : `浏览器工作区：${note}`,
+          onClick: choose,
+        },
+        React.createElement('span', { 'aria-hidden': 'true' }, '🖥'),
+        React.createElement('span', { className: 'dshgw-bw-label' }, '浏览器工作区'),
+        note === '' ? null : React.createElement('span', { className: 'dshgw-bw-state' }, note))
       }
-      ctx.effect(() => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'browser-workspace', order: 110, label: '本地目录' }, Action)), 'browser-workspace: sidebar entry')
+      // order 90 keeps this row above the ssh-workspace entry (order 100).
+      ctx.effect(() => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'browser-workspace', order: 90, label: '浏览器工作区' }, Action)), 'browser-workspace: sidebar entry')
       ctx.effect(() => () => { disposed = true; void stop(); listeners.clear() }, 'browser-workspace: cleanup')
     }
     return { inject: ['slots', 'connection', 'remote.workspace', 'uiWorkspace'], apply, createExecutor, checkRelativePath, createTransport, errorOf }

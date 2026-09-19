@@ -38,7 +38,7 @@ deploy:
 
 要求：Linux、可用 `/dev/fuse`、`fusermount3`（兼容清理 helper 为 `fusermount`），网关运行账号能用户态挂载；浏览器使用 HTTPS/localhost 且支持 File System Access API。**不会向租户 sandbox 增加 /dev/fuse 或权限能力。**
 
-操作：侧栏「挂载本地目录（读写）」→ 阅读风险并授权目录 → 网关建立 `<workspace>/browser/<random-id>` → 浏览器开始响应文件请求 → activate 验证根并重启该账号 worker → 等待 DSH 连接恢复 → 注册并打开工作区。
+操作：侧栏「浏览器工作区」→（单击即打开目录选择器，无二次确认）授权目录 → 网关建立 `<workspace>/browser/<random-id>` → 浏览器开始响应文件请求 → activate 验证根并重启该账号 worker → 等待 DSH 连接恢复 → 注册并打开工作区。侧栏行与 ssh 工作区同一形态并排在其上方（`sidebar.footer.action`，order 90 对 100）；风险提示写在行的 tooltip 与状态里，不再作为点击前的确认步骤——目录选择器需要 transient user activation，多一次点击或阻塞对话框都会先耗尽它。
 
 挂载/卸载可能中断该账号其他正在执行的任务。页面必须保持打开；关闭、断网或撤销权限会导致 I/O 失败，不能把浏览器目录当作永远在线的远程磁盘。重新选择目录会创建新的挂载。
 
@@ -46,6 +46,9 @@ deploy:
 
 - `open` 在 FUSE 挂载前持久化 preparing 记录，成功后原子更新 ready。只记录服务端路径/租户/随机 ID，不持久化 capability 或浏览器句柄。
 - HTTP close 和租约过期：先拒绝新 I/O、从 worker profile 排除路径，再重启并等待旧 namespace 退出，最后卸载 FUSE。
+- **反向通道的 poll 连接就是浏览器侧本身**：net/http 在该连接断开时取消它的 context（页面刷新/关闭/崩溃、客户端在 close 前主动 abort 长轮询），此时立即断开该挂载，而不是等到 60 秒租约到期。晚到的 poll 不会复活已断开的 capability（客户端本来就把 poll 失败当作断线并调用 close）。
+- **只有仍可服务的挂载才进入 worker profile**：`MountsFor` 与 `Call` 共用同一条存活规则（未断开且租约内）。profile 会解析每个挂载路径、bubblewrap 会 stat 每个 bind 源，所以一个没有浏览器的挂载会阻塞整个 worker 启动（真机实测：解析该路径耗时等于整个 FUSE 超时后失败，bwrap 也以 `Can't get type of source ...` 失败），表现为另一个挂载的 close 报
+  `worker restart before close: resolve browser mount: lstat …: connection timed out`，页面显示"清理未确认"。
 - 停用/删除：排除所有挂载，等待竞态 activate，raw stop 再次保证 namespace 释放；不递归调用有 mount hook 的 StopWorker。
 - 网关退出：停止 reaper、Quiesce 管理操作、等待启动任务、终止 worker runner，最后清理 FUSE。terminal Shutdown 禁止晚到的 Start/Restart。
 - 卸载、目录或记录删除失败会保留重试状态，不伪报成功；成功 close 使用绑定 tenant/owner 的短期 tombstone 支持重试，最多 256 条。
@@ -68,7 +71,7 @@ deploy:
 3. FUSE 不使用 allow_other，隔离仍以租户 mount namespace 为界。网关运行账号与宿主同 UID 进程是信任边界，不提供不同 UID 隔离的虚假承诺。
 4. capability 绑定 tenant 和登录会话哈希；token 不进 URL、不入持久记录或日志。
 5. 每租户最多 4 个、全网关最多 128 个挂载，每挂载最多 64 个等待请求；I/O 预算 15 秒、租约 60 秒、HTTP body 上限 2 MiB；目录结果最多 10000 项且 JSON 最多 1 MiB，超限报错而非截断伪造完整目录。
-6. 已取消的排队请求不再下发，迟到响应丢弃；断线后不依赖内核写回缓存假报成功。
+6. 已取消的排队请求不再下发，迟到响应丢弃；断线后不依赖内核写回缓存假报成功。poll 连接断开即断开挂载（见"生命周期"），因此不会出现"浏览器已不在、网关仍在等租约"的窗口被 worker 启动撞上。
 7. 全网关/租户备份排除远程浏览器内容；关闭功能时保留同名普通目录的备份。离线 CLI 检测到活动挂载时拒绝递归删除。
 
 ## 验证与交付边界

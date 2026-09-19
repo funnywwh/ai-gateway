@@ -28,7 +28,17 @@ try {
   assert.deepEqual(listing.entries.map((x) => x.name), ['.hidden', 'alpha'])
   assert.equal(listing.entries[0].hidden, true)
   assert.equal(listing.truncated, true)
+  // A vanished directory (a browser/SSH mount the gateway tore down) must not break
+  // the dialog: the listing falls back to the nearest existing ancestor inside the root.
+  const gone = await cap.list(join(rootPath, 'zeta', 'gone'))
+  assert.equal(gone.path, join(rootPath, 'zeta'))
+  assert.deepEqual(gone.crumbs.map((x) => x.path), [rootPath, join(rootPath, 'zeta')])
+  const deepGone = await cap.list(join(rootPath, 'gone-a', 'gone-b'))
+  assert.equal(deepGone.path, rootPath)
+  assert.deepEqual(deepGone.entries.map((x) => x.name), ['.hidden', 'alpha'])
+  await assert.rejects(() => cap.createDirectory(join(rootPath, 'gone-a'), 'x'), (e) => e.code === 'directory-create-failed')
   await assert.rejects(() => cap.list('/etc'), (e) => e.code === 'directory-unreadable')
+  await assert.rejects(() => cap.list('/nonexistent-outside-root'), (e) => e.code === 'directory-unreadable')
   await assert.rejects(() => cap.list(join(rootPath, 'escape')), (e) => e.code === 'directory-unreadable')
   await assert.rejects(() => cap.createDirectory(join(rootPath, 'escape'), 'x'), (e) => e.code === 'directory-create-failed')
   assert.equal(await cap.createDirectory(rootPath, 'new'), join(rootPath, 'new'))
@@ -40,7 +50,7 @@ try {
   assert.equal(denied.directoryPicker.capability().kind, 'browse')
   await assert.rejects(() => denied.directoryPicker.capability().list(), (e) => e.code === 'directory-unreadable')
   denied.registry.delete(Clamp)
-  console.log('picker-clamp: 15 assertions passed')
+  console.log('picker-clamp: 23 assertions passed')
 } finally {
   await rm(rootPath, { recursive: true, force: true })
 }

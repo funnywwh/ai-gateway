@@ -121,6 +121,13 @@ func TestBrowserWorkspacePluginRealDSH(t *testing.T) {
 		if !strings.Contains(body, "__ModuleLoader__.load") || !strings.Contains(body, pluginID) || !strings.Contains(body, "showDirectoryPicker") {
 			t.Fatalf("advertised plugin URL %s did not serve the browser workspace ModuleLoader bundle", entry.URL)
 		}
+		// The picker needs transient user activation, so it is opened synchronously by the
+		// single click that asks for it: the served bundle carries the risk warning on the
+		// row itself and no consent step or blocking confirm() in front of the picker.
+		if !strings.Contains(body, "AI 模型服务商") || !strings.Contains(body, "showDirectoryPicker({ mode: 'readwrite' })") ||
+			strings.Contains(body, "window.confirm(") || strings.Contains(body, "再次点击此按钮") {
+			t.Fatalf("advertised plugin URL %s served a picker that is not the single-click, warning-carrying row", entry.URL)
+		}
 		t.Logf("DSH discovered %s and served its advertised bundle %s", pluginID, entry.URL)
 	}
 	if found != 1 {

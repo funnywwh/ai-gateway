@@ -100,6 +100,20 @@ func randomID() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
+// serveable reports whether the browser behind this share can still answer an
+// operation. Requires sh.mu.
+//
+// This is the one liveness rule of the service: Call refuses to queue a request
+// as soon as it is false, so a share that is not serveable must not be bound into
+// a worker either. Binding one is not harmless — the sandbox profile resolves
+// every advertised mount path and bubblewrap stats every bind source, so a mount
+// with no browser behind it blocks for the whole FUSE timeout and then fails the
+// worker start, which surfaces as "worker restart before close" and an
+// unconfirmed cleanup on an unrelated mount (M65 real-host report).
+func (s *share) serveable() bool {
+	return !s.closed && time.Since(s.seen) <= lease
+}
+
 // Call never retries a mutation: a timeout does not prove it was not applied.
 func (s *share) Call(ctx context.Context, req fs.Request) (fs.Response, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -114,7 +128,7 @@ func (s *share) Call(ctx context.Context, req fs.Request) (fs.Response, error) {
 	req.ID = id
 	ch := make(chan fs.Response, 1)
 	s.mu.Lock()
-	if s.closed || time.Since(s.seen) > lease {
+	if !s.serveable() {
 		s.mu.Unlock()
 		return fs.Response{}, errors.New("browser disconnected")
 	}
@@ -258,13 +272,17 @@ func (s *Service) get(token, tenant, owner string) (*share, error) {
 	sh.seen = time.Now()
 	return sh, nil
 }
+
+// MountsFor lists the mount points a worker profile must bind for one tenant.
+// Only serveable mounts are advertised: see serveable for why binding a mount
+// whose browser stopped polling fails the whole worker start.
 func (s *Service) MountsFor(tenant string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var paths []string
 	for _, sh := range s.shares {
 		sh.mu.Lock()
-		if sh.tenant.Name == tenant && sh.published && sh.path != "" && sh.mounted != nil && !sh.closed {
+		if sh.tenant.Name == tenant && sh.published && sh.path != "" && sh.mounted != nil && sh.serveable() {
 			paths = append(paths, sh.path)
 		}
 		sh.mu.Unlock()
@@ -382,6 +400,15 @@ func (s *Service) dispatch(ctx context.Context, op string, t registry.Tenant, ow
 				}
 				return map[string]any{"requests": []fs.Request{req}}, nil
 			case <-ctx.Done():
+				// The poll request IS the browser side of this mount: net/http
+				// cancels its context when the page's connection goes away
+				// (reload, closed tab, crash, or the client's own abort before a
+				// close). Nothing else can answer this mount's FUSE requests, so
+				// it is disconnected here rather than at the end of the lease:
+				// until then every worker start would block on it (see serveable).
+				// A poll that arrives afterwards revives nothing — the client
+				// treats a failed poll as a disconnect and closes the mount.
+				sh.disconnect()
 				return nil, ctx.Err()
 			case <-sh.done:
 				return nil, errors.New("disconnected")

@@ -110,8 +110,43 @@ class PickerClamp extends DirectoryPicker {
     return { name: candidate.name, path: join(parent.display, candidate.name), hidden: candidate.name.startsWith('.') }
   }
 
+  // A directory under the picker root can legitimately vanish: a browser or SSH
+  // mount is torn down when its owner disconnects, and the gateway removes the mount
+  // point with it. The dialog that asked for that directory must still open, so a
+  // listing falls back to the nearest existing ancestor INSIDE the root (the root
+  // always exists) instead of failing the whole listing. The returned value carries
+  // the directory actually listed, so the caller is never told it is somewhere it is
+  // not. createDirectory stays strict: a parent that is gone is a caller mistake.
+  async listTarget(path, signal) {
+    const subject = path ?? this.rootPath
+    this.assertReady('directory-unreadable', subject)
+    if (!fullyQualified(subject)) {
+      throw new DirectoryPickerError('directory-unreadable', subject, `path is not fully qualified: ${subject}`)
+    }
+    const display = resolve(subject)
+    if (!within(this.rootPath, display)) {
+      throw new DirectoryPickerError('directory-unreadable', display, `path is outside picker root ${this.rootPath}: ${display}`)
+    }
+    for (let candidate = display;; candidate = dirname(candidate)) {
+      let canonical
+      try {
+        canonical = await raceAbort(realpath(candidate), signal)
+      } catch (error) {
+        signal?.throwIfAborted()
+        if (candidate === this.rootPath) {
+          throw new DirectoryPickerError('directory-unreadable', display, `cannot resolve ${display}: ${messageOf(error)}`)
+        }
+        continue
+      }
+      if (!within(this.realRoot, canonical)) {
+        throw new DirectoryPickerError('directory-unreadable', display, `path escapes picker root ${this.rootPath}: ${display}`)
+      }
+      return { display: candidate, canonical }
+    }
+  }
+
   async list(path, signal) {
-    const target = await this.checkedTarget(path, 'directory-unreadable', signal)
+    const target = await this.listTarget(path, signal)
     const keep = this.config.maxEntries + 1
     const window = []
     let evicted = false

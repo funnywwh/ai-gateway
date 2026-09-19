@@ -23,6 +23,7 @@ picker, and does not verify consent, mounting, FUSE, or gateway transport.
 """
 
 import argparse
+import base64
 import contextlib
 import json
 import os
@@ -46,10 +47,12 @@ LOCAL_DSH = '/home/winger/.local/dsh-0.1.2-rc.1'
 LOCAL_CHROME = '/home/winger/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome'
 URL_RE = re.compile(r'https?://(?:127\.0\.0\.1|localhost|\[::1\]):\d+/[^\s\x1b<>\"\']*')
 ANSI_RE = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
-PLUGIN_RE = re.compile(r'browser[-_]workspace|dshgw-browser-workspace|挂载本地目录', re.I)
+PLUGIN_RE = re.compile(r'browser[-_]workspace|dshgw-browser-workspace|浏览器工作区', re.I)
+# The sidebar row is one compact button like the ssh-workspace one: an icon span, the label
+# 浏览器工作区 and an optional state note. It is matched on the label, not on exact text.
 BUTTON = r'''(() => {
   const buttons = [...document.querySelectorAll('button')].filter(
-    b => /^挂载本地目录(?:（读写）)?$/.test(b.textContent.trim()));
+    b => b.textContent.includes('浏览器工作区'));
   const b = buttons.find(b => {
     const r = b.getBoundingClientRect();
     return r.width > 0 && r.height > 0 && b.checkVisibility({checkOpacity:true, checkVisibilityCSS:true});
@@ -58,8 +61,70 @@ BUTTON = r'''(() => {
   // DSH's CSS-module sidebar footer, not an arbitrary matching page string.
   const footer = b.closest('[class*="_footerActions"]');
   const sidebar = footer && footer.closest('[class*="_root"]');
+  const box = b.getBoundingClientRect();
   return {found:!!sidebar, text:b.textContent.trim(), tag:b.tagName,
-    sidebarFooter:!!footer, enabled:!b.disabled};
+    sidebarFooter:!!footer, enabled:!b.disabled,
+    x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2)};
+})()'''
+
+# The OS dialog cannot be driven from here, so the picker is replaced by a spy that records
+# the call — and whether the click's transient user activation was still active at that
+# moment, which is exactly what showDirectoryPicker() needs — and then rejects with
+# AbortError, like a person cancelling the dialog. One click must reach it: a consent step
+# or a blocking dialog in front of the picker would spend the activation first.
+PICKER_SPY = r'''(() => {
+  window.__bwPicker = { calls: 0, active: null, mode: null, clicks: 0, target: null };
+  document.addEventListener('click', (event) => {
+    window.__bwPicker.clicks += 1;
+    window.__bwPicker.target = event.target.tagName + ':' + String(event.target.textContent || '').slice(0, 24);
+  }, true);
+  window.showDirectoryPicker = (options) => {
+    window.__bwPicker.calls += 1;
+    window.__bwPicker.active = navigator.userActivation ? navigator.userActivation.isActive : null;
+    window.__bwPicker.mode = options && options.mode;
+    return Promise.reject(Object.assign(new Error('smoke: dialog cancelled'), { name: 'AbortError' }));
+  };
+  return true;
+})()'''
+PICKER_STATE = 'window.__bwPicker'
+
+# DSH's own first-run notice ("Internal Testing Notice") is modal: its mask covers the whole
+# page, sidebar foot included, until the person clicks Continue. A fresh fixture profile has
+# it, so the smoke test dismisses it the same way a person does and only then clicks the row.
+DIALOG_BUTTON = r'''(() => {
+  const mask = document.querySelector('[class*="_mask_"]');
+  const dialog = mask && mask.parentElement;
+  if (!dialog) return {found: false};
+  const buttons = [...dialog.querySelectorAll('button')].filter(b => {
+    const r = b.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  });
+  const button = buttons.find(b => /(later|continue|ok|got it|知道了|继续|关闭|稍后)/i.test(b.textContent.trim()))
+    || (buttons.length === 1 ? buttons[0] : null);
+  if (!button) return {found: false, buttons: buttons.map(b => String(b.textContent || '').slice(0, 24))};
+  const box = button.getBoundingClientRect();
+  return {found: true, label: button.textContent.trim(), x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2)};
+})()'''
+
+# Where to click: the row itself must be the hit target of the point, otherwise a modal mask
+# or another overlay would swallow the click (a human could not click it either).
+HIT_POINT = r'''(() => {
+  const button = [...document.querySelectorAll('button')].find(b => b.textContent.includes('浏览器工作区'));
+  if (!button) return {found: false, blocker: 'no row'};
+  const box = button.getBoundingClientRect();
+  for (let fx = 0.5; fx >= 0.1; fx -= 0.2) {
+    for (let fy = 0.5; fy >= 0.1; fy -= 0.2) {
+      const x = box.left + box.width * fx, y = box.top + box.height * fy;
+      const hit = document.elementFromPoint(x, y);
+      if (hit === button || button.contains(hit)) return {found: true, x: Math.round(x), y: Math.round(y)};
+    }
+  }
+  const blocker = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+  const mask = document.querySelector('[class*="_mask_"]');
+  const dialog = mask && mask.parentElement;
+  return {found: false, blocker: blocker ? blocker.tagName + '.' + String(blocker.className || '') : null,
+    dialogText: dialog ? String(dialog.textContent || '').slice(0, 200) : null,
+    dialogButtons: dialog ? [...dialog.querySelectorAll('button')].map(b => String(b.textContent || '').slice(0, 24)) : null};
 })()'''
 
 
@@ -115,6 +180,20 @@ class CDP:
         result = self.call('Runtime.evaluate', {'expression': BUTTON, 'returnByValue': True})
         if 'exceptionDetails' in result:
             raise RuntimeError('sidebar DOM inspection raised a JavaScript exception')
+        return result.get('result', {}).get('value', {})
+
+    def dialog_button(self):
+        """The visible dismissal button of DSH's own modal notice, if one is open."""
+        result = self.call('Runtime.evaluate', {'expression': DIALOG_BUTTON, 'returnByValue': True})
+        if 'exceptionDetails' in result:
+            raise RuntimeError('dialog inspection raised a JavaScript exception')
+        return result.get('result', {}).get('value', {})
+
+    def point(self):
+        """A point inside the row that the row itself receives, or the blocker at its centre."""
+        result = self.call('Runtime.evaluate', {'expression': HIT_POINT, 'returnByValue': True})
+        if 'exceptionDetails' in result:
+            raise RuntimeError('sidebar hit test raised a JavaScript exception')
         return result.get('result', {}).get('value', {})
 
 
@@ -210,15 +289,59 @@ def run(args):
                 # Do not output raw browser events: URLs/stacks can contain auth tokens.
                 related = [event for event in cdp.exceptions + cdp.console_errors
                            if PLUGIN_RE.search(json.dumps(event, ensure_ascii=False))]
+                if not button.get('found') or found_at is None or time.monotonic() - found_at < 2:
+                    raise RuntimeError('real visible sidebar button 浏览器工作区 did not stabilize')
+                if related or cdp.exceptions:
+                    raise RuntimeError('browser reported plugin-related errors or uncaught JS exceptions')
+                # A fresh profile may open a modal whose mask covers the whole page (including
+                # this row), so dismiss it before clicking and then verify from the DOM that the
+                # row itself — not some overlay — is the hit target of the point we click.
+                # A fresh profile opens DSH's own modals (testing notice, then "add an API
+                # key"); each one's mask covers the sidebar until a person dismisses it.
+                dismissed = []
+                hit = cdp.point()
+                for _ in range(4):
+                    if hit.get('found'):
+                        break
+                    dialog = cdp.dialog_button()
+                    if not dialog.get('found'):
+                        break
+                    for kind in ('mousePressed', 'mouseReleased'):
+                        cdp.call('Input.dispatchMouseEvent', {'type': kind, 'x': dialog['x'],
+                                                              'y': dialog['y'], 'button': 'left', 'clickCount': 1})
+                    dismissed.append(dialog.get('label'))
+                    time.sleep(0.5)
+                    hit = cdp.point()
+                if not hit.get('found'):
+                    raise RuntimeError('the sidebar row is covered and cannot be clicked: %r' % (hit,))
+                # One trusted click must reach the picker, with the click's user activation
+                # still active and without any consent step in front of it.
+                cdp.call('Runtime.evaluate', {'expression': PICKER_SPY, 'returnByValue': True})
+                for kind in ('mousePressed', 'mouseReleased'):
+                    cdp.call('Input.dispatchMouseEvent', {'type': kind, 'x': hit['x'],
+                                                          'y': hit['y'], 'button': 'left', 'clickCount': 1})
+                time.sleep(0.5)
+                picker = cdp.call('Runtime.evaluate', {'expression': PICKER_STATE, 'returnByValue': True})
+                picker = picker.get('result', {}).get('value', {})
+                settled = cdp.button()
                 result = {'button': button, 'pluginScriptURLsObserved': len(cdp.plugin_scripts),
                           'uncaughtJSExceptions': len(cdp.exceptions),
                           'consoleErrors': len(cdp.console_errors),
-                          'pluginRelatedErrors': len(related), 'pickerInvoked': False}
+                          'pluginRelatedErrors': len(related), 'picker': picker,
+                          'clickedPoint': hit, 'dismissedDialogs': dismissed,
+                          'buttonAfterCancel': settled.get('text')}
                 print(json.dumps(result, ensure_ascii=False, indent=2))
-                if not button.get('found') or found_at is None or time.monotonic() - found_at < 2:
-                    raise RuntimeError('real visible sidebar button 挂载本地目录 did not stabilize')
-                if related or cdp.exceptions:
-                    raise RuntimeError('browser reported plugin-related errors or uncaught JS exceptions')
+                if picker.get('calls') != 1 or picker.get('active') is not True or picker.get('mode') != 'readwrite':
+                    raise RuntimeError('one click did not reach the picker with user activation: %r' % (picker,))
+                if settled.get('text') != button.get('text') or settled.get('enabled') is not True:
+                    raise RuntimeError('cancelling the picker changed the sidebar row: %r' % (settled,))
+                if cdp.exceptions or cdp.console_errors:
+                    raise RuntimeError('the single-click picker raised browser errors')
+                if args.screenshot:
+                    # Optional human-review artifact: the fixture page only, never a real session.
+                    shot = cdp.call('Page.captureScreenshot', {'format': 'png'})
+                    Path(args.screenshot).write_bytes(base64.b64decode(shot['data']))
+                    print('screenshot:', args.screenshot)
                 return result
             finally:
                 if cdp:
@@ -241,6 +364,7 @@ def main():
     parser.add_argument('--dsh-root', default=os.environ.get('DSH_ROOT') or LOCAL_DSH)
     parser.add_argument('--chrome', default=os.environ.get('CHROME_BIN') or shutil.which('chromium') or shutil.which('google-chrome') or LOCAL_CHROME)
     parser.add_argument('--timeout', type=float, default=45, help='deadline in seconds per startup/UI phase (default: 45)')
+    parser.add_argument('--screenshot', default='', help='write a PNG of the verified sidebar row here (optional)')
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error('--timeout must be positive')
@@ -263,7 +387,7 @@ def main():
         safe = str(error) if type(error) is RuntimeError else type(error).__name__
         print('FAIL: ' + safe, file=sys.stderr)
         return 1
-    print('PASS: real DSH browser-workspace sidebar UI; no picker/backend used; fixtures cleaned')
+    print('PASS: real DSH browser-workspace sidebar UI; one click reached the picker with user activation; no backend used; fixtures cleaned')
     return 0
 
 
