@@ -19,7 +19,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${UI_HARNESS_WORK:-$ROOT/.cache/ui-harness}"
 PORT="${UI_HARNESS_PORT:-8097}"
-VIEWS="docs detail capacity cost models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand tree org org-readonly org-accounts"
+VIEWS="docs detail capacity cost models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand tree org org-readonly org-accounts admins admins-readonly login"
 FIXTURES="$ROOT/scripts/ui-harness/fixtures.json"
 REFRESH=0
 
@@ -84,6 +84,7 @@ render_page "$ROOT/scripts/ui-harness/bridge_syntax.page.html" "$WORK/site/bridg
 render_page "$ROOT/scripts/ui-harness/brand.page.html" "$WORK/site/brand.html"
 render_page "$ROOT/scripts/ui-harness/tree.page.html" "$WORK/site/tree.html"
 render_page "$ROOT/scripts/ui-harness/org.page.html" "$WORK/site/org.html"
+render_page "$ROOT/scripts/ui-harness/admins.page.html" "$WORK/site/admins.html"
 
 page_for_view() {
   case "$1" in
@@ -103,6 +104,11 @@ page_for_view() {
     # with its two placements plus the account page's organization column and filter.
     tree) echo "tree.html" ;;
     org|org-readonly|org-accounts) echo "org.html" ;;
+    # 控制台管理员（M66）：同一个页面渲染"有飞书"和"没有飞书"的两种部署，只读视图单独一条。
+    admins|admins-readonly) echo "admins.html" ;;
+    # 不是"管理员"页：登录卡片本身（app.js 无会话时渲染成什么样），因为「飞书扫码登录」
+    # 这个入口只在这里、也只在浏览器里看得见。
+    login) echo "admins.html" ;;
     *) echo "harness.html" ;;
   esac
 }

@@ -3,9 +3,12 @@
 // attempt through the browser, and the short-lived ticket that hands a signed-in identity
 // to the DSH gateway.
 //
-// Shape: one application, one registered redirect URL, and two flows that share it —
-// an administrator binding an API key to a Feishu account, and a person signing in to the
-// DSH portal. See docs/feishu.md and docs/design/m60-aigw-key-feishu-binding.md.
+// Shape: one application, one registered redirect URL, and four flows that share it —
+// an administrator binding an API key to a Feishu account, a person signing in to the
+// DSH portal, an administrator signing in to the console, and an invited administrator
+// binding their identity to their account. See docs/feishu.md,
+// docs/design/m60-aigw-key-feishu-binding.md and
+// docs/design/m66-console-admin-feishu-login.md.
 //
 // Nothing here touches the store or the HTTP transport: the package is a client and a
 // pair of codecs, which is what makes the whole flow testable against a local stub.
@@ -34,6 +37,15 @@ const (
 	// FlowDSHLogin signs a person in to the DSH portal. It needs no session: the signed
 	// state is the capability.
 	FlowDSHLogin Flow = "dsh"
+	// FlowAdminLogin signs an administrator in to the management console. Like the portal
+	// login it needs no session, and it carries no target: the identity that comes back
+	// decides which administrator it is (M66).
+	FlowAdminLogin Flow = "admin"
+	// FlowAdminInvite binds a Feishu identity to an administrator account that was created
+	// without a password (M66). It is the only flow that carries both a target account and
+	// an Invite handle, and the handle is what makes an outstanding invitation revocable:
+	// the account row keeps the newest handle, so regenerating the link retires the old one.
+	FlowAdminInvite Flow = "admin_invite"
 )
 
 // State is one authorization attempt. It is signed rather than stored so that a gateway
@@ -44,11 +56,56 @@ type State struct {
 	Flow    Flow   `json:"flow"`
 	Nonce   string `json:"nonce"`
 	Expires int64  `json:"exp"`
-	// KeyID is the key a binding targets; zero for a login flow.
+	// KeyID is the key a binding targets; zero for the other flows.
 	KeyID int64 `json:"key_id,omitempty"`
-	// Actor is the administrator who started a binding, re-checked at the callback: a
-	// demoted or deleted operator must not be able to finish a binding they started.
+	// AdminUserID is the administrator account an invitation targets; zero for the other
+	// flows.
+	AdminUserID int64 `json:"admin_user_id,omitempty"`
+	// Actor is the administrator who started a binding or an invitation, re-checked at the
+	// callback: a demoted or deleted operator must not be able to finish what they started.
 	Actor string `json:"actor,omitempty"`
+	// Invite is the invitation handle the target account must still hold at redemption.
+	// Regenerating an invitation replaces that handle, which is what retires the old link.
+	Invite string `json:"invite,omitempty"`
+}
+
+// Attempt is one authorization attempt as the caller describes it. It is a struct rather
+// than a parameter list because the flows now differ in what they must carry — a key, an
+// administrator account, an invitation handle — and positional arguments would let a
+// caller satisfy the wrong flow's rule by accident.
+type Attempt struct {
+	Flow        Flow
+	KeyID       int64
+	AdminUserID int64
+	Actor       string
+	Nonce       string
+	Invite      string
+}
+
+// validate reports whether the attempt carries everything its flow needs. It is a
+// programming error when it does not, so Sign refuses rather than minting a state that the
+// callback would have to reject.
+func (a Attempt) validate() error {
+	switch a.Flow {
+	case FlowBind:
+		if a.KeyID == 0 {
+			return errors.New("feishu: a binding state needs a key")
+		}
+	case FlowDSHLogin, FlowAdminLogin:
+	case FlowAdminInvite:
+		if a.AdminUserID == 0 {
+			return errors.New("feishu: an invitation state needs an administrator account")
+		}
+		if strings.TrimSpace(a.Invite) == "" {
+			return errors.New("feishu: an invitation state needs an invitation handle")
+		}
+	default:
+		return fmt.Errorf("feishu: unknown flow %q", a.Flow)
+	}
+	if strings.TrimSpace(a.Nonce) == "" {
+		return errors.New("feishu: state nonce must not be empty")
+	}
+	return nil
 }
 
 // StateError describes why a state was refused, in words that are safe to log.
@@ -93,18 +150,19 @@ func (c *StateCodec) now() time.Time {
 	return time.Now().UTC()
 }
 
-// Sign returns the wire form of a fresh state for one flow.
-func (c *StateCodec) Sign(flow Flow, keyID int64, actor, nonce string) (string, error) {
-	if flow != FlowBind && flow != FlowDSHLogin {
-		return "", fmt.Errorf("feishu: unknown flow %q", flow)
+// Sign returns the wire form of a fresh state for one attempt. A state may not outlive the
+// codec's TTL, so the caller that wants a longer-lived value (an invitation link, say) uses
+// a codec built with that TTL rather than stretching this one.
+func (c *StateCodec) Sign(attempt Attempt) (string, error) {
+	if err := attempt.validate(); err != nil {
+		return "", err
 	}
-	if strings.TrimSpace(nonce) == "" {
-		return "", errors.New("feishu: state nonce must not be empty")
+	state := State{
+		Version: 1, Flow: attempt.Flow, Nonce: attempt.Nonce,
+		Expires: c.now().Add(c.TTL).Unix(),
+		KeyID:   attempt.KeyID, AdminUserID: attempt.AdminUserID,
+		Actor: attempt.Actor, Invite: attempt.Invite,
 	}
-	if flow == FlowBind && keyID == 0 {
-		return "", errors.New("feishu: a binding state needs a key")
-	}
-	state := State{Version: 1, Flow: flow, Nonce: nonce, Expires: c.now().Add(c.TTL).Unix(), KeyID: keyID, Actor: actor}
 	payload, err := json.Marshal(state)
 	if err != nil {
 		return "", err
@@ -116,6 +174,19 @@ func (c *StateCodec) Sign(flow Flow, keyID int64, actor, nonce string) (string, 
 // Verify checks a state's signature, expiry and nonce, and marks the nonce used. A state
 // that fails any check is refused, and nothing else about it is trusted afterwards.
 func (c *StateCodec) Verify(raw string) (State, error) {
+	return c.verify(raw, true)
+}
+
+// Peek performs every check Verify does but does not mark the nonce used, so the same value
+// can still be redeemed afterwards. It exists for the one caller that must inspect a state
+// before deciding whether to spend it: the invitation entry point, where a link stays usable
+// until the invitation is actually redeemed (docs/design/m66-console-admin-feishu-login.md
+// §D3). Everything else uses Verify.
+func (c *StateCodec) Peek(raw string) (State, error) {
+	return c.verify(raw, false)
+}
+
+func (c *StateCodec) verify(raw string, consume bool) (State, error) {
 	var zero State
 	encoded, signature, ok := strings.Cut(strings.TrimSpace(raw), ".")
 	if !ok || encoded == "" || signature == "" {
@@ -135,14 +206,11 @@ func (c *StateCodec) Verify(raw string) (State, error) {
 	if state.Version != 1 {
 		return zero, stateErr("unsupported version")
 	}
-	if state.Flow != FlowBind && state.Flow != FlowDSHLogin {
-		return zero, stateErr("unknown flow")
+	if err := checkFlowShape(state); err != nil {
+		return zero, err
 	}
 	if strings.TrimSpace(state.Nonce) == "" {
 		return zero, stateErr("missing nonce")
-	}
-	if state.Flow == FlowBind && state.KeyID == 0 {
-		return zero, stateErr("binding state without a key")
 	}
 	now := c.now()
 	expires := time.Unix(state.Expires, 0).UTC()
@@ -155,15 +223,44 @@ func (c *StateCodec) Verify(raw string) (State, error) {
 	if expires.After(now.Add(c.TTL + time.Minute)) {
 		return zero, stateErr("expiry beyond the configured window")
 	}
-	if !c.consume(state.Nonce, now) {
+	if consume && !c.reserve(state.Nonce, now, true) {
+		return zero, stateErr("replayed")
+	}
+	if !consume && !c.reserve(state.Nonce, now, false) {
+		// Peeking does not spend the state, but it still refuses one that was already spent:
+		// "is this link still good?" must not answer yes for a link that has been redeemed.
 		return zero, stateErr("replayed")
 	}
 	return state, nil
 }
 
-// consume records a nonce and reports whether it was fresh. The set is bounded and pruned
-// on insert: a state only lives for one TTL, so anything older than that can be forgotten.
-func (c *StateCodec) consume(nonce string, now time.Time) bool {
+// checkFlowShape enforces what each flow must carry. A state that names a flow but does not
+// carry that flow's target is refused rather than handed to a handler that would have to
+// guess what it meant.
+func checkFlowShape(state State) error {
+	switch state.Flow {
+	case FlowBind:
+		if state.KeyID == 0 {
+			return stateErr("binding state without a key")
+		}
+	case FlowDSHLogin, FlowAdminLogin:
+	case FlowAdminInvite:
+		if state.AdminUserID == 0 {
+			return stateErr("invitation state without an administrator account")
+		}
+		if strings.TrimSpace(state.Invite) == "" {
+			return stateErr("invitation state without an invitation handle")
+		}
+	default:
+		return stateErr("unknown flow")
+	}
+	return nil
+}
+
+// reserve reports whether a nonce is fresh, and records it when record is set. Peeking asks
+// the same question without recording the answer, so a state inspected by an entry point is
+// still redeemable afterwards (M66's invitation links rely on exactly that).
+func (c *StateCodec) reserve(nonce string, now time.Time, record bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.used == nil {
@@ -171,6 +268,9 @@ func (c *StateCodec) consume(nonce string, now time.Time) bool {
 	}
 	if _, seen := c.used[nonce]; seen {
 		return false
+	}
+	if !record {
+		return true
 	}
 	for key, at := range c.used {
 		if now.Sub(at) >= c.TTL+time.Minute {

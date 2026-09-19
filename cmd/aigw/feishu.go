@@ -21,8 +21,13 @@ func buildFeishuDeps(cfg *config.Config, log *slog.Logger) (*httpapi.FeishuDeps,
 		return nil, nil
 	}
 	basePath := strings.TrimRight(cfg.Server.NormalizedBasePath(), "/")
-	loginPath := basePath + "/feishu/login"
-	callbackPath := basePath + "/feishu/callback"
+	// The three paths this server serves. They are the mux patterns, so they carry no mount
+	// prefix: httpapi strips that prefix before the mux sees the request, which is why the
+	// browser-visible address is built as basePath + path (and what the callback check below
+	// compares against).
+	loginPath := "/feishu/login"
+	callbackPath := "/feishu/callback"
+	invitePath := "/feishu/invite"
 
 	// The configured callback must be the path this server actually serves, including the
 	// mount prefix: a mismatch would send users to a Feishu error page after they consented,
@@ -31,8 +36,8 @@ func buildFeishuDeps(cfg *config.Config, log *slog.Logger) (*httpapi.FeishuDeps,
 	if err != nil {
 		return nil, fmt.Errorf("feishu.callback_url is not a URL: %w", err)
 	}
-	if parsed.Path != callbackPath {
-		return nil, fmt.Errorf("feishu.callback_url path %q does not match the path this server serves (%q); fix the URL or server.base_path", parsed.Path, callbackPath)
+	if parsed.Path != basePath+callbackPath {
+		return nil, fmt.Errorf("feishu.callback_url path %q does not match the path this server serves (%q); fix the URL or server.base_path", parsed.Path, basePath+callbackPath)
 	}
 
 	stateKey, err := feishuSecret(cfg, cfg.Feishu.StateSecret, "feishu-state")
@@ -49,9 +54,12 @@ func buildFeishuDeps(cfg *config.Config, log *slog.Logger) (*httpapi.FeishuDeps,
 		RedirectURI:  cfg.Feishu.CallbackURL,
 		LoginPath:    loginPath,
 		CallbackPath: callbackPath,
+		InvitePath:   invitePath,
 		DSHLogin:     cfg.Feishu.DSHLogin,
 		PortalURL:    cfg.DSHGWPortalURL(),
 		LoginURL:     cfg.FeishuLoginURL(),
+		AdminLogin:   cfg.Feishu.AdminLogin,
+		ConsoleURL:   basePath + "/admin/ui/",
 		// Only meaningful together with the portal login: a binding whose purpose is
 		// identity alone should not silently provision a tenant.
 		AutoEnableDSH: cfg.Feishu.DSHLogin && cfg.Feishu.AutoEnableDSH,
@@ -67,11 +75,26 @@ func buildFeishuDeps(cfg *config.Config, log *slog.Logger) (*httpapi.FeishuDeps,
 		}
 		deps.Tickets = tickets
 	}
+	if cfg.Feishu.AdminLogin {
+		// A separate codec, not a longer TTL on the state codec: an invitation link outlives
+		// one consent screen on purpose, and the purpose-bound key keeps an invitation from
+		// being redeemable as a login state (or the other way round).
+		inviteKey, err := feishuSecret(cfg, cfg.Feishu.InviteSecret, "feishu-admin-invite")
+		if err != nil {
+			return nil, err
+		}
+		invites, err := feishu.NewStateCodec(inviteKey, time.Duration(cfg.Feishu.InviteTTLS)*time.Second)
+		if err != nil {
+			return nil, err
+		}
+		deps.Invites = invites
+	}
 	if log != nil {
 		log.Info("feishu identity enabled",
 			"app_id", cfg.Feishu.AppID,
 			"callback", cfg.Feishu.CallbackURL,
 			"dsh_login", cfg.Feishu.DSHLogin,
+			"admin_login", cfg.Feishu.AdminLogin,
 			"portal", deps.PortalURL)
 	}
 	return deps, nil

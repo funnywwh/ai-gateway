@@ -14,6 +14,8 @@ import (
 // into a checkable claim: dropping an endpoint, renaming a path or forgetting to
 // declare a new one fails the test.
 var expectedAdminPatterns = []string{
+	"DELETE /admin/api/v1/admin-users/{id}",
+	"DELETE /admin/api/v1/admin-users/{id}/feishu",
 	"DELETE /admin/api/v1/backups/{id}",
 	"DELETE /admin/api/v1/hooks/{id}",
 	"DELETE /admin/api/v1/keys/{id}/feishu",
@@ -31,8 +33,10 @@ var expectedAdminPatterns = []string{
 	"GET /admin/api/v1/accounts/{id}/invoices",
 	"GET /admin/api/v1/accounts/{id}/ledger",
 	"GET /admin/api/v1/accounts/{id}/portal-users",
+	"GET /admin/api/v1/admin-users",
 	"GET /admin/api/v1/audit-logs",
 	"GET /admin/api/v1/auth/me",
+	"GET /admin/api/v1/auth/methods",
 	"GET /admin/api/v1/backups",
 	"GET /admin/api/v1/backups/{id}/download",
 	"GET /admin/api/v1/billing/currency",
@@ -66,6 +70,7 @@ var expectedAdminPatterns = []string{
 	"GET /admin/api/v1/stats",
 	"GET /admin/api/v1/tags",
 	"PATCH /admin/api/v1/accounts/{id}",
+	"PATCH /admin/api/v1/admin-users/{id}",
 	"PATCH /admin/api/v1/keys/{id}",
 	"PATCH /admin/api/v1/mcp-tokens/{id}",
 	"PATCH /admin/api/v1/models/{name}",
@@ -78,6 +83,9 @@ var expectedAdminPatterns = []string{
 	"POST /admin/api/v1/accounts/{id}/dsh",
 	"POST /admin/api/v1/accounts/{id}/invoices",
 	"POST /admin/api/v1/accounts/{id}/portal-users",
+	"POST /admin/api/v1/admin-users",
+	"POST /admin/api/v1/admin-users/{id}/invite",
+	"POST /admin/api/v1/admin-users/{id}/password",
 	"POST /admin/api/v1/auth/login",
 	"POST /admin/api/v1/auth/logout",
 	"POST /admin/api/v1/backups",

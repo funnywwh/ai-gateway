@@ -28,7 +28,7 @@
 
 ```sh
 scripts/ui-harness/run.sh                        # 全部视图
-scripts/ui-harness/run.sh --views docs detail    # 只跑指定视图
+scripts/ui-harness/run.sh --views "docs detail"  # 只跑指定视图（--views 只吃一个参数，多个视图要引号）
 make ui-check                                    # 同 run.sh（在 Makefile 里）
 ```
 
@@ -102,6 +102,24 @@ GW_BASE=http://127.0.0.1:8099 GW_COOKIE=... scripts/ui-harness/capture.py       
     所以"保存成员"是否真的落库、删除是否带 `cascade=true`、账户页筛选是否把 `org_node_id` 发到了
     服务端，读的都是**带查询串的原始 URL 与请求体**。`org-readonly` 用 `session.role=viewer` 渲染同一页，
     断言写入口整体消失、成员复选框禁用。
+
+- **M66 起**：`admins.page.html`（管理员页 + 登录卡片），共 3 个视图：
+  - **`#admins`**：stub 里有一份**会变的管理员表**——建号、改角色/状态、重置口令、邀请、解绑、删除
+    都真的改它，所以「刷新之后那一行没了」是对着一个确实少了那行的服务端看的，而不是对着页面自己
+    画过的东西。夹具那四行分别覆盖：已绑定飞书且由 bootstrap 配置重建的管理员、等邀请的 viewer、
+    被停用的账号、以及一个**只有飞书凭据**的管理员（解绑它必须退回 `pending`，这正是 D3/D6 的口径）。
+    断言读的是**发出去的东西**：建号的请求体、PATCH 的角色与状态、邀请/重置/解绑/删除的路径与方法，
+    以及分页器把 `limit`/`offset` 真的发到了服务端（带查询串的原始 URL）。三处只有浏览器看得见的：
+    邀请链接字段**只读且打开即选中**（Ctrl+C 不用鼠标）、停用账号点「邀请链接」显示的是**服务端的
+    原话**（409 而不是前端重写一遍）、以及**同一页再渲染一次"没有飞书"的部署**（D8：邀请与解绑消失，
+    建号/编辑/重置口令/删除照常）。
+  - **`#admins-readonly`**：`session.role=viewer` 渲染同一页，断言写入口整体消失（行内一个按钮都不剩）。
+  - **`#login`**：直接 `import('/js/app.js')`（动态导入，另外两个视图不受它的 `boot()` 影响），stub 对
+    `/auth/me` 回 401，于是渲染出登录卡片：断言「飞书扫码登录」入口在口令表单**下面**、服务端给的
+    `hint` 在屏幕上、口令表单本身一字未改，并且**没有任何请求打到 `/feishu/login`**——那是整页导航的
+    地址（授权页与它的 cookie 是浏览器的事），谁把它改成 fetch，这条就是唯一会红的地方。
+  - stub 对**没有夹具的请求返回 500，并把方法+路径记进 `unmatched`**（`noUnmatchedRequests` 因此失败）：
+    静默回 `{}` 会把"页面调用了一个没人注册的接口"伪装成"服务端没什么可说的"。
 
 ## 前三个坑（改这个 harness 前先读）
 

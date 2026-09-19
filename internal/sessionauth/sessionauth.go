@@ -158,7 +158,21 @@ func (s *Service) Login(ctx context.Context, username, password, clientKey strin
 		return nil, domain.ErrUnauthorized("invalid username or password")
 	}
 	s.clearFailures(clientKey)
+	return s.Issue(ctx, principal)
+}
 
+// Issue mints a session for a principal that something else has already authenticated —
+// today the Feishu identity flow, which proves who somebody is without a password
+// (M66). It is the only other way into the session machinery, so the token shape, the TTL
+// and the "only the hash is stored" rule stay in one place instead of being re-derived by
+// every caller that has an identity in hand.
+//
+// The caller owns the proof: Issue performs no verification of its own and must never be
+// reachable with an unverified principal.
+func (s *Service) Issue(ctx context.Context, principal *Principal) (*Session, error) {
+	if principal == nil || principal.ID == 0 {
+		return nil, domain.ErrUnauthorized("missing principal")
+	}
 	now := s.now()
 	session := &Session{
 		ID:        ids.Session(),

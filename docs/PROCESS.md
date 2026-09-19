@@ -32,6 +32,7 @@
 | M55 | docs/design/m55-console-transfer-compression.md | 是 |
 | M60 | docs/design/m60-aigw-key-feishu-binding.md + docs/feishu.md | 是 |
 | M61 | docs/design/m61-dshgw-feishu-login.md | 是 |
+| M66 | docs/design/m66-console-admin-feishu-login.md + docs/feishu.md | 是 |
 
 ## 检查项（提交前自检）
 

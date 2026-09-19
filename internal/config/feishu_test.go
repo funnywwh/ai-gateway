@@ -96,6 +96,12 @@ func TestFeishuRejectsBadValues(t *testing.T) {
 		},
 		"portal not owned and not stated": func(c *Config) { c.Dshgw.Enabled = false },
 		"portal url relative":             func(c *Config) { c.Feishu.PortalURL = "portal/" },
+		"invite ttl too short":            func(c *Config) { c.Feishu.InviteTTLS = 60 },
+		"invite ttl too long":             func(c *Config) { c.Feishu.InviteTTLS = 604801 },
+		"invite secret and credentials key both empty": func(c *Config) {
+			c.Feishu.InviteSecret = ""
+			c.CredentialsKey = ""
+		},
 	}
 	for name, mutate := range cases {
 		cfg := feishuFixture()
@@ -103,6 +109,31 @@ func TestFeishuRejectsBadValues(t *testing.T) {
 		if err := cfg.Validate(); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// The console login is independent of the portal login: a deployment can offer either, both
+// or neither, and the invitation settings are only read when the console login is on.
+func TestFeishuAdminLoginIsIndependent(t *testing.T) {
+	cfg := feishuFixture()
+	cfg.Feishu.DSHLogin = false
+	cfg.Feishu.TicketSecret = ""
+	cfg.Feishu.TicketTTLS = 0
+	cfg.Feishu.AdminLogin = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("console login without the portal login was rejected: %v", err)
+	}
+	if cfg.Feishu.InviteTTLS != 3600 || !cfg.Feishu.AdminLogin {
+		t.Fatalf("invitation defaults = %d/%v", cfg.Feishu.InviteTTLS, cfg.Feishu.AdminLogin)
+	}
+
+	// With the console login off, a nonsense invitation window is nobody's business.
+	cfg = feishuFixture()
+	cfg.Feishu.AdminLogin = false
+	cfg.Feishu.InviteTTLS = 1
+	cfg.Feishu.InviteSecret = ""
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("a disabled console login was validated: %v", err)
 	}
 }
 
@@ -173,8 +204,14 @@ func TestFeishuEnvOverrides(t *testing.T) {
 	t.Setenv("GW_FEISHU_APP_ID", "cli_fromenv123")
 	t.Setenv("GW_FEISHU_APP_SECRET", "secret-from-env")
 	t.Setenv("GW_FEISHU_CALLBACK_URL", "http://192.168.190.86:8090/feishu/callback")
+	t.Setenv("GW_FEISHU_ADMIN_LOGIN", "false")
+	t.Setenv("GW_FEISHU_INVITE_TTL_S", "7200")
+	t.Setenv("GW_FEISHU_INVITE_SECRET", "invite-from-env")
 	if err := applyEnv(&cfg); err != nil {
 		t.Fatal(err)
+	}
+	if cfg.Feishu.AdminLogin || cfg.Feishu.InviteTTLS != 7200 || cfg.Feishu.InviteSecret != "invite-from-env" {
+		t.Fatalf("administrator env overrides not applied: %+v", cfg.Feishu)
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("env-provided feishu settings were rejected: %v", err)
@@ -198,6 +235,8 @@ func TestFeishuBlockIsDecodableFromYAML(t *testing.T) {
   token_url: http://127.0.0.1:9099/token
   userinfo_url: http://127.0.0.1:9099/userinfo
   dsh_login: false
+  admin_login: true
+  invite_ttl_s: 1800
 dshgw:
   public_host: 192.168.190.86
   portal_port: 18300
@@ -216,5 +255,8 @@ credentials_key: test-credentials-key
 	}
 	if cfg.Dshgw.PublicScheme != "http" {
 		t.Fatalf("dshgw.public_scheme = %q", cfg.Dshgw.PublicScheme)
+	}
+	if !cfg.Feishu.AdminLogin || cfg.Feishu.InviteTTLS != 1800 {
+		t.Fatalf("administrator keys not decoded: %+v", cfg.Feishu)
 	}
 }

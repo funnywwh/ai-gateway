@@ -537,6 +537,19 @@ type Feishu struct {
 	StateSecret string `yaml:"state_secret"`
 	// DSHLogin opens the DSH portal login flow (M61). It needs PortalURL to be known.
 	DSHLogin bool `yaml:"dsh_login"`
+	// AdminLogin opens the console login flow (M66): a person whose Feishu identity is bound
+	// to an administrator account can sign in by scanning the code on Feishu's consent page.
+	// It is harmless when nobody is bound yet — an unbound identity is simply refused — so it
+	// defaults to on, exactly like the portal login.
+	AdminLogin bool `yaml:"admin_login"`
+	// InviteTTLS is how long an administrator invitation link stays usable. It is much
+	// longer than StateTTLS because the link travels through a person (chat, mail) rather
+	// than through one redirect, and it is bounded because the link is an enrollment
+	// credential: whoever opens it first binds their identity to that account.
+	InviteTTLS int `yaml:"invite_ttl_s"`
+	// InviteSecret signs those invitation links; empty derives one from credentials_key
+	// under its own purpose, so the invitation key and the state key never coincide.
+	InviteSecret string `yaml:"invite_secret"`
 	// AutoEnableDSH makes a successful binding also opt the key's account in to DSH, so the
 	// person can log in right away instead of waiting for a second, easily forgotten step in
 	// the console. It only ever enables an account that has never been enabled: an account
@@ -766,6 +779,8 @@ func Default() Config {
 			StateTTLS:     600,
 			TicketTTLS:    120,
 			DSHLogin:      true,
+			AdminLogin:    true,
+			InviteTTLS:    3600,
 			AutoEnableDSH: true,
 		},
 		Dshgw: Dshgw{
@@ -992,6 +1007,9 @@ func applyEnv(cfg *Config) error {
 	envStr(&cfg.Feishu.StateSecret, "GW_FEISHU_STATE_SECRET")
 	envStr(&cfg.Feishu.TicketSecret, "GW_FEISHU_TICKET_SECRET")
 	envStr(&cfg.Feishu.PortalURL, "GW_FEISHU_PORTAL_URL")
+	envBool(&cfg.Feishu.AdminLogin, "GW_FEISHU_ADMIN_LOGIN")
+	envInt(&cfg.Feishu.InviteTTLS, "GW_FEISHU_INVITE_TTL_S")
+	envStr(&cfg.Feishu.InviteSecret, "GW_FEISHU_INVITE_SECRET")
 	envStr(&cfg.Log.Level, "GW_LOG_LEVEL")
 	envStr(&cfg.Log.Format, "GW_LOG_FORMAT")
 	envStr(&cfg.Plugins.Dir, "GW_PLUGINS_DIR")
@@ -1109,6 +1127,17 @@ func (c *Config) validateFeishu() error {
 	}
 	if strings.TrimSpace(c.Feishu.StateSecret) == "" && strings.TrimSpace(c.CredentialsKey) == "" {
 		return fmt.Errorf("feishu.state_secret is empty and credentials_key cannot derive one")
+	}
+	if c.Feishu.AdminLogin {
+		// The invitation window is the part of the console feature that a deployment can get
+		// wrong in a way nobody notices: too short and links expire before the person opens
+		// them, too long and an unredeemed enrollment link stays a live credential.
+		if c.Feishu.InviteTTLS < 300 || c.Feishu.InviteTTLS > 604800 {
+			return fmt.Errorf("feishu.invite_ttl_s must be between 300 and 604800 (got %d)", c.Feishu.InviteTTLS)
+		}
+		if strings.TrimSpace(c.Feishu.InviteSecret) == "" && strings.TrimSpace(c.CredentialsKey) == "" {
+			return fmt.Errorf("feishu.invite_secret is empty and credentials_key cannot derive one")
+		}
 	}
 	if c.Feishu.DSHLogin {
 		if c.Feishu.TicketTTLS < 30 || c.Feishu.TicketTTLS > 600 {

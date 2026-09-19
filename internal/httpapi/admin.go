@@ -34,6 +34,25 @@ type AdminStore interface {
 	// GetAdminUserByUsername re-reads the operator who started a Feishu binding, so a
 	// demotion between starting and finishing it is honoured.
 	GetAdminUserByUsername(ctx context.Context, username string) (*domain.AdminUser, error)
+	// The administration of administrators (M66): the console keeps them in admin_users,
+	// each with a role, a lifecycle state and at most one Feishu identity. The write paths
+	// are column-scoped store methods rather than an upsert, because a role change and a
+	// password reset must not be able to undo each other.
+	ListAdminUsers(ctx context.Context) ([]*domain.AdminUser, error)
+	GetAdminUser(ctx context.Context, id int64) (*domain.AdminUser, error)
+	CreateAdminUser(ctx context.Context, u *domain.AdminUser) (int64, error)
+	UpdateAdminUserRole(ctx context.Context, id int64, role string) error
+	SetAdminUserStatus(ctx context.Context, id int64, status string) error
+	SetAdminUserPassword(ctx context.Context, id int64, hash string) error
+	RotateAdminUserInvite(ctx context.Context, id int64, nonce string) error
+	DeleteAdminUser(ctx context.Context, id int64) error
+	DeleteAdminSessions(ctx context.Context, userID int64) error
+	// ActiveAdminCount is what keeps the console from removing the last administrator who
+	// could undo the removal.
+	ActiveAdminCount(ctx context.Context) (int, error)
+	FindAdminUserByFeishuOpenID(ctx context.Context, openID string) (*domain.AdminUser, error)
+	BindAdminUserFeishu(ctx context.Context, id int64, binding domain.FeishuBinding) error
+	UnbindAdminUserFeishu(ctx context.Context, id int64) (bool, error)
 	// FindAPIKeyByPrefix reports a missing row as (nil, nil): the key importer must tell
 	// "new" from "already here" without the data plane's "unknown prefix is a 401" rule.
 	FindAPIKeyByPrefix(ctx context.Context, prefix string) (*domain.APIKey, error)
@@ -177,15 +196,28 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
+	s.setAdminCookie(w, session)
+	s.audit(r.Context(), session.User.Username, "login", "admin_user", session.User.Username,
+		map[string]any{"method": "password"}, "ok")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"username": session.User.Username, "role": session.User.Role,
+		"expires_at": session.ExpiresAt.Format(time.RFC3339),
+	})
+}
+
+// setAdminCookie hands the browser an administrator session. Both ways in — the password
+// form and a verified Feishu identity — write the cookie through here, so the scope and the
+// flags cannot drift apart: Path keeps it on the console's own subtree, HttpOnly keeps page
+// script out of it, and SameSite=Lax is what lets it arrive on the redirect back from
+// Feishu's consent page.
+func (s *Server) setAdminCookie(w http.ResponseWriter, session *admin.Session) {
+	if session == nil {
+		return
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name: adminCookieName, Value: admin.CookieValue(session),
 		Path: s.url("/admin"), HttpOnly: true, SameSite: http.SameSiteLaxMode,
 		Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds()),
-	})
-	s.audit(r.Context(), session.User.Username, "login", "admin_user", session.User.Username, nil, "ok")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"username": session.User.Username, "role": session.User.Role,
-		"expires_at": session.ExpiresAt.Format(time.RFC3339),
 	})
 }
 

@@ -36,6 +36,10 @@ import (
 // AdminService is the management authentication port.
 type AdminService interface {
 	Login(ctx context.Context, username, password, clientKey string) (*admin.Session, error)
+	// IssueSession mints a session for an administrator authenticated by another means —
+	// today the Feishu identity flow (M66). The caller owns the proof: the identity and the
+	// account's status must already have been verified.
+	IssueSession(ctx context.Context, user *domain.AdminUser) (*admin.Session, error)
 	Authenticate(ctx context.Context, sessionID, token string) (*domain.AdminUser, error)
 	Logout(ctx context.Context, sessionID string) error
 }
@@ -390,13 +394,21 @@ func (s *Server) routes() {
 	s.handle("POST /v1/dshgw/authorize", s.handleDSHGWAuthorize)
 	s.handle("POST /mcp", s.handleMCP)
 
-	// The Feishu identity surface (M60/M61). Two public routes, registered only when the
-	// integration is configured: an unauthenticated start and one callback that serves both
-	// the console's key binding and the DSH portal login, so exactly one redirect URL has to
-	// be registered with Feishu. Without the port the paths simply do not exist.
+	// The Feishu identity surface (M60/M61/M66). Public routes, registered only when the
+	// integration is configured: an unauthenticated start, one callback that serves every
+	// flow (console key binding, DSH portal login, console administrator login and the
+	// invitation entry point), so exactly one redirect URL has to be registered with Feishu.
+	// Without the port the paths simply do not exist.
+	//
+	// The patterns are the served paths WITHOUT the mount prefix, like every other route
+	// here: withBasePath strips the prefix before the mux sees the request. The configured
+	// callback URL does carry it, which is why startup compares the two separately.
 	if s.feishuEnabled() {
 		s.handle("GET "+s.deps.Feishu.LoginPath, s.handleFeishuLogin)
 		s.handle("GET "+s.deps.Feishu.CallbackPath, s.handleFeishuCallback)
+		if s.deps.Feishu.Invites != nil {
+			s.handle("GET "+s.deps.Feishu.InvitePath, s.handleFeishuInvite)
+		}
 	}
 
 	// The management surface comes from the declarative table (admin_routes.go):

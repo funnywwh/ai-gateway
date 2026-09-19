@@ -695,6 +695,105 @@ def check_feishu_login(check: Check, aigw_port: int, proxy_port: int, tenant: st
                   f"HTTP {status} cookies={sorted(restored.cookies)}")
 
 
+def check_admin_feishu_login(check: Check, aigw_port: int, feishu: "StubFeishu", database: Path) -> None:
+    """A console administrator is onboarded by an invitation link and signs in with Feishu (M66).
+
+    This runs the real binaries and the real console API: aigw mints a long-lived invitation
+    link, the invited person follows it through the stub consent page, the identity is written
+    to the administrator row, and that browser comes back holding the console's own session
+    cookie. Then the same deployment is asked for the login-page entry point, and finally a
+    customer identity — one that is bound to an API key and to nothing else — is refused.
+
+    The rule this step exists to prove is the separation of the two identity namespaces: what
+    lets somebody into a DSH tenant must not let them into the management console.
+    """
+    import sqlite3
+    import urllib.parse
+
+    base = f"http://localhost:{aigw_port}"
+    owner = Browser()
+    status, _, _ = owner.request("POST", f"{base}/admin/api/v1/auth/login",
+                                 body={"username": "e2e-admin", "password": "e2e-password"},
+                                 origin=base)
+    if not check.require("admin-feishu-owner-login", status == 200, f"HTTP {status}"):
+        return
+
+    # An account with no password at all: the invitation is the only way in.
+    status, _, body = owner.request("POST", f"{base}/admin/api/v1/admin-users",
+                                    body={"username": "e2e-invited", "role": "admin"}, origin=base)
+    if not check.require("admin-feishu-created", status in (200, 201), f"HTTP {status} {body[:200]}"):
+        return
+    created = json.loads(body)
+    invited_id = created.get("id")
+    check.require("admin-feishu-created-pending", created.get("status") == "pending",
+                  f"created={created!r}")
+
+    status, _, body = owner.request("POST", f"{base}/admin/api/v1/admin-users/{invited_id}/invite",
+                                    body={}, origin=base)
+    link = ""
+    if check.require("admin-feishu-invite", status == 200, f"HTTP {status} {body[:200]}"):
+        link = json.loads(body).get("url", "")
+    if not check.require("admin-feishu-invite-link", link.startswith(base + "/feishu/invite?invite="),
+                         f"url={link!r}"):
+        return
+
+    # The invited person: a browser that has never seen this console.
+    feishu.open_id = "ou_e2e_admin"
+    invited = Browser()
+    status, headers, _ = invited.request("GET", link)
+    authorize = headers.get("location", "")
+    if not check.require("admin-feishu-invite-authorize",
+                         status == 302 and authorize.startswith(feishu.base_url),
+                         f"HTTP {status} location={authorize!r}"):
+        return
+    status, headers, _ = invited.request("GET", authorize)
+    status, headers, _ = invited.request("GET", headers.get("location", ""))
+    location = headers.get("location", "")
+    check.require("admin-feishu-invite-signs-in", status == 303 and location.endswith("/admin/ui/"),
+                  f"HTTP {status} location={location!r}")
+    check.require("admin-feishu-admin-cookie", "aigw_admin" in invited.cookies,
+                  f"cookies={sorted(invited.cookies)}")
+    status, _, body = invited.request("GET", f"{base}/admin/api/v1/auth/me")
+    who = json.loads(body) if status == 200 else {}
+    check.require("admin-feishu-invite-role",
+                  status == 200 and who.get("username") == "e2e-invited" and who.get("role") == "admin",
+                  f"HTTP {status} body={body[:160]!r}")
+    with sqlite3.connect(database) as conn:
+        row = conn.execute("SELECT feishu_open_id, status, invite_nonce FROM admin_users WHERE id = ?",
+                           (invited_id,)).fetchone()
+    check.require("admin-feishu-invite-stored",
+                  row is not None and row[0] == "ou_e2e_admin" and row[1] == "active" and not row[2],
+                  f"row={row!r}")
+
+    # The link is spent: opening it again must not bind anybody else.
+    feishu.open_id = "ou_e2e_stranger"
+    stranger = Browser()
+    status, _, page = stranger.request("GET", link)
+    check.require("admin-feishu-invite-spent", status == 403 and "已失效" in page,
+                  f"HTTP {status} body={page[:160]!r}")
+
+    # The invited administrator can also use the entry point the login page offers.
+    feishu.open_id = "ou_e2e_admin"
+    scanner = Browser()
+    status, headers, _ = scanner.request("GET", f"{base}/feishu/login?mode=admin")
+    status, headers, _ = scanner.request("GET", headers.get("location", ""))
+    status, headers, _ = scanner.request("GET", headers.get("location", ""))
+    check.require("admin-feishu-scan-login",
+                  status == 303 and "aigw_admin" in scanner.cookies,
+                  f"HTTP {status} cookies={sorted(scanner.cookies)}")
+
+    # A customer identity is not an administrator: the key binding that lets it into a tenant
+    # buys nothing here.
+    feishu.open_id = "ou_e2e"
+    customer = Browser()
+    status, headers, _ = customer.request("GET", f"{base}/feishu/login?mode=admin")
+    status, headers, _ = customer.request("GET", headers.get("location", ""))
+    status, _, page = customer.request("GET", headers.get("location", ""))
+    check.require("admin-feishu-customer-refused",
+                  status == 403 and "还没有绑定任何管理员账号" in page and "aigw_admin" not in customer.cookies,
+                  f"HTTP {status} body={page[:160]!r}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--aigw-bin", required=True)
@@ -859,6 +958,10 @@ def main() -> int:
             ports["tenant_lo"], tenant, "localhost", proxy_port, public_base_url,
             meanwhile=lambda port: check_feishu_login(
                 check, aigw_port, port, tenant, feishu_stub, stub, state_dir / "aigw.db"))
+
+        # The console's own Feishu login and its invitation links (M66) run next: they need
+        # the real aigw and its database, and nothing from the front door.
+        check_admin_feishu_login(check, aigw_port, feishu_stub, state_dir / "aigw.db")
 
         calls_before = stub.calls
         stopped = admin_call(admin_socket, {"id": 3, "op": "tenant-stop", "name": tenant})

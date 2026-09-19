@@ -4085,3 +4085,39 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - 发布前用同一源码在一次性 fixture 上跑完四条真机验收：`browser_workspace_mount_e2e.py` **PASS 29 步**、`browser_workspace_reload_e2e.py` **PASS**（`control=ALIVE reconnect=ALIVE reload=DEAD restore=ALIVE reopen=ALIVE`）、`browser_workspace_multi_e2e.py` **PASS 22 步**（两个目录并存、逐目录断开/重连/删除、刷新后恢复、DSH 工作区 id 与路径不变）、`browser_workspace_ui_smoke.py` **PASS**；`make dshgw-browser-test` 全绿（网关单测 + 插件 **53 项**）
 
 **未做/限制**：gpt001 未部署（用户只要求本机）；线上租户**没有**做真实挂载验收（点行会重启该账号 worker，需要用户同意后另做），线上证据到「端点 + 新 bundle + 图标开窗 + 无 JS 异常」为止；仓库未推送远程；发布提交只改 `VERSION`，因此真机验收与发布二进制同源（`58ef6bf` 与 `e823087` 的 Go/JS 源码相同）。
+
+## M66 完成记录（控制台多管理员与管理员飞书扫码登录）
+
+需求原话：「实现多管理员飞书扫码登录，账号可以设置成管理员身份」。
+设计：`docs/design/m66-console-admin-feishu-login.md`（§6 差异已回填）；规格：`docs/feishu.md` §5b。
+
+- [x] 数据：迁移 `0023_admin_user_feishu.sql` 给 `admin_users` 加 `status`（pending/active/disabled）、
+      飞书身份五列与 `invite_nonce`，并在 `NULLIF(feishu_open_id,'')` 上建唯一索引（一个飞书身份最多绑一个管理员）
+- [x] 存储：管理员 CRUD（列级写入，改角色不会顺手改口令）、按 open_id 反查、邀请句柄轮换、
+      绑定（一条 UPDATE 同时写身份 + 清邀请 + 置 active）、解绑（幂等；没有其它凭据的账号退回 pending）；
+      `GetAdminSession` 拒绝非 active 账号，所以**停用在下一次请求就生效**
+- [x] 认证：`sessionauth.Service.Issue` 把"为已认证主体签发会话"抽出来（口令与飞书两条路共用同一套
+      token/TTL/只存哈希规则），`admin.Auth.IssueSession` 供飞书登录使用；`disabled`/`pending` 账号的口令登录必败
+- [x] 飞书：新增 `FlowAdminLogin`（控制台扫码登录，无目标）与 `FlowAdminInvite`（邀请绑定，带目标与邀请句柄）；
+      `Sign` 改为接收 `Attempt` 结构；新增 `Peek`（校验但不消耗）；邀请用**独立密钥的第二套 codec**（长 TTL）
+- [x] 接口：`GET /admin/api/v1/auth/methods`（公开）、`admin-users` 的列出/新建/改角色状态/重置口令/
+      生成邀请链接/解绑飞书/删除共 8 条，全部进管理路由目录（MCP 工具与 `admin_endpoints` 一并生效）；
+      `GET /feishu/invite?invite=…` 为邀请入口（匿名 + 按 IP 限流）
+- [x] 守卫：最后一名 `role=admin & status=active` 不能被降级/停用/删除（409）；不能删除自己；
+      `bootstrap.admin` 重建的那一行不能删除；`pending` 账号不能被"启用"到无法登录的状态
+- [x] 隔离：扫码登录只查 `admin_users.feishu_open_id`，客户 Key 上的飞书绑定永远拿不到控制台会话（有专门用例）
+- [x] 配置：`feishu.admin_login`（默认 true）、`invite_ttl_s`（默认 3600，300..604800）、`invite_secret`
+      （空则按用途从 `credentials_key` 派生）+ `GW_FEISHU_ADMIN_LOGIN` / `_INVITE_TTL_S` / `_INVITE_SECRET`
+- [x] 控制台：登录页多一个「飞书扫码登录」（是否显示由 `auth/methods` 决定，整页跳转到飞书授权页）；
+      新增「管理员」页（列表 / 新建 / 邀请链接 / 编辑角色与状态 / 重置口令 / 解绑 / 删除），
+      与飞书解耦：没有飞书的部署里这一页照常可用
+- [x] **顺带修掉既有缺陷**：`FeishuDeps.LoginPath/CallbackPath` 原本带 `server.base_path` 前缀，而路由模式
+      注册在去前缀后的 mux 上，因此**前缀部署下整个飞书面是 404**。现在三个路径字段都是不带前缀的服务路径，
+      浏览器可见地址由 `base_path + path` 拼出；`TestBasePathServesTheFeishuSurface` 钉住这条
+- [x] 测试：`internal/feishu`（四个 flow 与 Peek 语义）、`internal/store`（CRUD/邀请/绑定/会话状态）、
+      `internal/admin`（IssueSession）、`internal/config`（新键与校验）、`internal/httpapi`（管理员 CRUD 与三类守卫、
+      扫码登录全链路、邀请全链路与冲突/停用/过期/重放、**客户身份不得登录控制台**、前缀部署）、
+      `internal/webui` 契约测试、`scripts/ui-harness` 的 `admins` 视图
+- [x] 端到端：`scripts/dshgw_supervised_e2e.py` 新增 `check_admin_feishu_login`（建号 → 邀请 → 另一浏览器
+      绑定并登录 → 链接失效 → 扫码入口登录 → 客户身份被拒）
+- [ ] 真机验收（手机扫码、真正发一条邀请给同事）见 `docs/TODO.md` M66 小节

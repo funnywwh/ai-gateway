@@ -294,6 +294,12 @@ feishu:
   callback_url: ""
   scopes: ""                  # empty is right: the open id and the name need no permission
   dsh_login: true             # open the DSH portal login flow (needs the portal URL below)
+  # 控制台扫码登录（M66）：管理员账号绑定飞书身份后，可在控制台登录页点「飞书扫码登录」
+  # （二维码由飞书授权页提供）。没有人绑定任何身份时它只会被拒绝，所以默认开着。
+  admin_login: true
+  # 管理员邀请链接的有效期（秒，300..604800）：链接本身就是「把飞书身份绑到某个管理员账号」
+  # 的凭据，所以窗口不能太长；重新生成链接会立即作废上一条。
+  invite_ttl_s: 3600
   # 绑定成功后自动为该账号启用 DSH（等价于在账户页点一次「启用 DSH」），这样绑完就能登录；
   # 它只会启用「从未启用过」的账号：被显式停用过的账号保持停用，控制台会提示需手动启用。
   auto_enable_dsh: true
@@ -304,6 +310,7 @@ feishu:
   # the supervised dshgw child receives the derived ticket key in its generated config.
   state_secret: ""
   ticket_secret: ""
+  invite_secret: ""           # 管理员邀请链接签名密钥；空则从 credentials_key 按用途派生
 
 # AES-GCM key for provider credentials at rest; override with GW_CREDENTIALS_KEY in production.
 credentials_key: "change-me-32-byte-encryption-key!!"

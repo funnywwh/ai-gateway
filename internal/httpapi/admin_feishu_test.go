@@ -19,6 +19,7 @@ import (
 const (
 	feishuCallbackPath = "/feishu/callback"
 	feishuLoginPath    = "/feishu/login"
+	feishuInvitePath   = "/feishu/invite"
 	feishuPortalURL    = "http://dsh.example:18300"
 )
 
@@ -88,6 +89,13 @@ func newFeishuFixture(t *testing.T) *feishuFixture {
 		t.Fatal(err)
 	}
 	tickets.Now = func() time.Time { return fixture.now }
+	// The invitation codec is a second codec on purpose (a link outlives one consent screen),
+	// so the fixture builds one exactly as the composition root does (M66).
+	invites, err := feishu.NewStateCodec([]byte("invite-key"), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invites.Now = func() time.Time { return fixture.now }
 
 	// The identity port is installed before the server is built: the transport decides
 	// which surfaces exist while it is constructed, so a port wired afterwards would not
@@ -102,6 +110,7 @@ func newFeishuFixture(t *testing.T) *feishuFixture {
 		deps.Config.Feishu.TokenURL = stub.server.URL + "/token"
 		deps.Config.Feishu.UserInfoURL = stub.server.URL + "/userinfo"
 		deps.Config.Feishu.PortalURL = feishuPortalURL
+		deps.Config.Feishu.AdminLogin = true
 		deps.Feishu = &FeishuDeps{
 			Client: &feishu.Client{
 				AppID: "cli_test", AppSecret: "secret",
@@ -112,12 +121,16 @@ func newFeishuFixture(t *testing.T) *feishuFixture {
 			},
 			States:       states,
 			Tickets:      tickets,
+			Invites:      invites,
 			RedirectURI:  deps.Config.Feishu.CallbackURL,
 			LoginPath:    feishuLoginPath,
 			CallbackPath: feishuCallbackPath,
+			InvitePath:   feishuInvitePath,
 			DSHLogin:     true,
 			PortalURL:    feishuPortalURL,
 			LoginURL:     "http://dsh.example:8090" + feishuLoginPath,
+			AdminLogin:   true,
+			ConsoleURL:   "/admin/ui/",
 		}
 	})
 	fixture.stub = stub
@@ -336,12 +349,12 @@ func TestFeishuBindRefusesInactiveAndUnknownKeys(t *testing.T) {
 func TestFeishuCallbackRefusesBadStates(t *testing.T) {
 	f := newFeishuFixture(t)
 	key := f.seedKey(t)
-	valid, err := f.states.Sign(feishu.FlowBind, key.ID, adminUser, "nonce-1")
+	valid, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowBind, KeyID: key.ID, Actor: adminUser, Nonce: "nonce-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = key
-	expired, err := f.states.Sign(feishu.FlowBind, key.ID, adminUser, "nonce-2")
+	expired, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowBind, KeyID: key.ID, Actor: adminUser, Nonce: "nonce-2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +387,7 @@ func TestFeishuCallbackRefusesBadStates(t *testing.T) {
 		"cancelled":    {query: "?error=access_denied&state="},
 		"missing code": {query: "?state="},
 	} {
-		fresh, err := f.states.Sign(feishu.FlowBind, key.ID, adminUser, "nonce-"+strings.ReplaceAll(name, " ", "-"))
+		fresh, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowBind, KeyID: key.ID, Actor: adminUser, Nonce: "nonce-" + strings.ReplaceAll(name, " ", "-")})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -388,7 +401,7 @@ func TestFeishuCallbackRefusesBadStates(t *testing.T) {
 	}
 	// A state that was already redeemed cannot be replayed.
 	f.now = time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC)
-	replay, err := f.states.Sign(feishu.FlowBind, key.ID, adminUser, "nonce-3")
+	replay, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowBind, KeyID: key.ID, Actor: adminUser, Nonce: "nonce-3"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +432,7 @@ func TestFeishuCallbackRefusesBadStates(t *testing.T) {
 func TestFeishuCallbackRechecksTheAdministrator(t *testing.T) {
 	f := newFeishuFixture(t)
 	key := f.seedKey(t)
-	state, err := f.states.Sign(feishu.FlowBind, key.ID, adminUser, "nonce-demote")
+	state, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowBind, KeyID: key.ID, Actor: adminUser, Nonce: "nonce-demote"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +479,7 @@ func TestFeishuBindConflictDoesNotOverwrite(t *testing.T) {
 	}
 
 	// The stub answers the same open id for the second attempt.
-	state, err := f.states.Sign(feishu.FlowBind, secondID, adminUser, "nonce-conflict")
+	state, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowBind, KeyID: secondID, Actor: adminUser, Nonce: "nonce-conflict"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +510,7 @@ func TestFeishuRebindReplaces(t *testing.T) {
 	if err := f.db.BindAPIKeyFeishu(context.Background(), key.ID, domain.FeishuBinding{OpenID: "ou_old", Name: "旧"}); err != nil {
 		t.Fatal(err)
 	}
-	state, err := f.states.Sign(feishu.FlowBind, key.ID, adminUser, "nonce-rebind")
+	state, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowBind, KeyID: key.ID, Actor: adminUser, Nonce: "nonce-rebind"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,7 +580,7 @@ func TestFeishuDSHLoginIssuesATicketForTheTenant(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	state, err := f.states.Sign(feishu.FlowDSHLogin, 0, "", "nonce-login")
+	state, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowDSHLogin, Nonce: "nonce-login"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -650,7 +663,7 @@ func TestFeishuDSHLoginRefusals(t *testing.T) {
 		f := newFeishuFixture(t)
 		key := f.seedKey(t)
 		test.setup(t, f, key)
-		state, err := f.states.Sign(feishu.FlowDSHLogin, 0, "", "nonce-"+strings.ReplaceAll(name, " ", "-"))
+		state, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowDSHLogin, Nonce: "nonce-" + strings.ReplaceAll(name, " ", "-")})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -690,7 +703,7 @@ func TestFeishuExchangeFailureIsReported(t *testing.T) {
 	key := f.seedKey(t)
 	f.stub.tokenBody = `{"code":20004,"error":"expired","error_description":"code expired"}`
 
-	state, err := f.states.Sign(feishu.FlowBind, key.ID, adminUser, "nonce-fail")
+	state, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowBind, KeyID: key.ID, Actor: adminUser, Nonce: "nonce-fail"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -713,7 +726,7 @@ func TestFeishuExchangeFailureIsReported(t *testing.T) {
 func TestFeishuCallbackNeverEchoesSecrets(t *testing.T) {
 	f := newFeishuFixture(t)
 	key := f.seedKey(t)
-	state, err := f.states.Sign(feishu.FlowBind, key.ID, adminUser, "nonce-secret")
+	state, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowBind, KeyID: key.ID, Actor: adminUser, Nonce: "nonce-secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -758,7 +771,7 @@ func TestFeishuDSHLoginFallsBackToAQueryTicketAcrossHosts(t *testing.T) {
 	f.bindAndEnable(t, key, true, "alice")
 	f.api.deps.Feishu.PortalURL = "http://portal.example:18300"
 
-	state, err := f.states.Sign(feishu.FlowDSHLogin, 0, "", "nonce-crosshost")
+	state, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowDSHLogin, Nonce: "nonce-crosshost"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -793,7 +806,7 @@ func TestFeishuTicketCookieFollowsTheScheme(t *testing.T) {
 	f.bindAndEnable(t, key, true, "alice")
 	f.api.deps.Feishu.RedirectURI = "https://dsh.example/feishu/callback"
 
-	state, err := f.states.Sign(feishu.FlowDSHLogin, 0, "", "nonce-secure")
+	state, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowDSHLogin, Nonce: "nonce-secure"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -820,7 +833,7 @@ func TestFeishuBindAutoEnablesDSH(t *testing.T) {
 	f.api.deps.Feishu.AutoEnableDSH = true
 	key := f.seedKey(t)
 
-	state, err := f.states.Sign(feishu.FlowBind, key.ID, adminUser, "nonce-auto-enable")
+	state, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowBind, KeyID: key.ID, Actor: adminUser, Nonce: "nonce-auto-enable"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -867,7 +880,7 @@ func TestFeishuBindAutoEnablesDSH(t *testing.T) {
 	// It needs a different Feishu identity: one identity binds exactly one key.
 	second := f.seedSecondKey(t)
 	f.stub.identity = feishu.Identity{OpenID: "ou_bob", UnionID: "on_bob", Name: "李四"}
-	state, err = f.states.Sign(feishu.FlowBind, second, adminUser, "nonce-already")
+	state, err = f.states.Sign(feishu.Attempt{Flow: feishu.FlowBind, KeyID: second, Actor: adminUser, Nonce: "nonce-already"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -897,7 +910,7 @@ func TestFeishuBindDoesNotOverrideAnExplicitDisable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	state, err := f.states.Sign(feishu.FlowBind, key.ID, adminUser, "nonce-declined")
+	state, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowBind, KeyID: key.ID, Actor: adminUser, Nonce: "nonce-declined"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -927,7 +940,7 @@ func TestFeishuBindSurvivesAFailedAutoEnable(t *testing.T) {
 	f.dshgwAdmin.FailWith = errors.New("admin channel unavailable")
 	key := f.seedKey(t)
 
-	state, err := f.states.Sign(feishu.FlowBind, key.ID, adminUser, "nonce-failed-enable")
+	state, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowBind, KeyID: key.ID, Actor: adminUser, Nonce: "nonce-failed-enable"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -959,7 +972,7 @@ func TestFeishuBindAutoEnableCanBeDisabled(t *testing.T) {
 	f.api.deps.Feishu.AutoEnableDSH = false
 	key := f.seedKey(t)
 
-	state, err := f.states.Sign(feishu.FlowBind, key.ID, adminUser, "nonce-off")
+	state, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowBind, KeyID: key.ID, Actor: adminUser, Nonce: "nonce-off"})
 	if err != nil {
 		t.Fatal(err)
 	}

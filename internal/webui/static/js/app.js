@@ -1,4 +1,5 @@
-import { api, me, login, logout, version } from './api.js';
+import { api, me, login, logout, authMethods, version } from './api.js';
+import { serverRoot } from './base.js';
 import { renderBrand } from './brand.js';
 import { el, toast, clear } from './ui.js';
 import { startRouter, renderNav, loadPage, navigate, currentRoute } from './router.js';
@@ -44,13 +45,42 @@ function renderLogin(notice) {
   }
   submit.addEventListener('click', attempt);
   password.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') attempt(); });
-  app.append(el('div', { class: 'login' }, [el('section', { class: 'card' }, [
+  const card = el('section', { class: 'card' }, [
     el('h2', { text: 'AI Gateway 控制台' }),
     el('label', { class: 'field' }, [el('span', { text: '用户名' }), username]),
     el('label', { class: 'field' }, [el('span', { text: '口令' }), password]),
     error, submit,
-  ])]));
+  ]);
+  app.append(el('div', { class: 'login' }, [card]));
   password.focus();
+  renderFeishuEntry(card);
+}
+
+// renderFeishuEntry adds the 「飞书扫码登录」 entry under the password form, and only when
+// this deployment really offers it: /auth/methods is public exactly so the login screen can
+// ask before there is any session. A failure there is silent on purpose — an older server
+// (404) or a network problem leaves the password form, which is the fallback that always
+// works, exactly as it was.
+function renderFeishuEntry(card) {
+  authMethods().then((payload) => {
+    const feishu = payload && payload.feishu;
+    if (!feishu || !feishu.enabled || !feishu.login_url) return;
+    // The screen may already have been replaced (a successful login, a 401 that re-rendered
+    // it): a detached card must not be appended to.
+    if (!card.isConnected) return;
+    const entry = el('button', { class: 'btn', text: feishu.label || '飞书扫码登录' });
+    // A full-page navigation rather than fetch, because the consent screen belongs to
+    // Feishu: the flow has to end as a top-level page for its state and cookies to be the
+    // browser's own (the same idiom as the key binding in pages/keys.js).
+    entry.addEventListener('click', () => { window.location.assign(serverRoot() + feishu.login_url); });
+    // Appended one at a time rather than in a single append() that may carry a null: the DOM
+    // turns null into the text "null", which would leave a stray word under the button on a
+    // server that sends no hint.
+    card.append(el('hr'), entry);
+    if (feishu.hint) card.append(el('div', { class: 'muted', text: feishu.hint }));
+  }).catch(() => {
+    // Nothing to report: the password form above is the fallback and it still works.
+  });
 }
 
 function renderShell() {

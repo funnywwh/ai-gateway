@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"sort"
 
+	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/store"
 )
 
@@ -48,6 +49,10 @@ const (
 	groupMCP       = "mcp"
 	groupHooks     = "hooks"
 	groupSettings  = "settings"
+	// groupAdmins is the administration of administrators (M66). It is separate from
+	// groupSystem because it manages a resource of its own — the accounts that may sign in
+	// to this console at all — rather than the deployment's own authentication plumbing.
+	groupAdmins = "admins"
 	// groupChat lives in admin_chat_routes.go, next to the routes it groups.
 )
 
@@ -577,6 +582,7 @@ func (s *Server) adminRoutes() []adminRoute {
 	out = append(out, s.invoiceAdminRoutes()...)
 	out = append(out, s.backupAdminRoutes()...)
 	out = append(out, s.portalAdminRoutes()...)
+	out = append(out, s.adminUserAdminRoutes()...)
 	out = append(out, s.pricingAdminRoutes()...)
 	out = append(out, s.chatAdminRoutes()...)
 	return out
@@ -602,6 +608,15 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 			Method: "GET", Path: "/admin/api/v1/auth/me", Handler: s.handleAdminMe,
 			Name: "admin_whoami", Group: groupSystem, Role: roleViewer,
 			Summary: "当前调用者的身份与角色（MCP 调用返回 mcp:<令牌名>#<id>）",
+		},
+		{
+			// Public on purpose: the console asks which ways in are available before anybody
+			// has a session, so the login page can render the Feishu entry only when the
+			// deployment actually offers it. The answer is a capability flag, not a secret.
+			Method: "GET", Path: "/admin/api/v1/auth/methods", Handler: s.handleAdminAuthMethods,
+			Name: "admin_auth_methods", Group: groupSystem, Role: roleViewer,
+			Summary: "本部署提供哪些控制台登录方式（口令、飞书扫码入口 URL）",
+			NoTool:  "MCP 客户端用令牌鉴权，登录方式探测对 MCP 没有意义",
 		},
 		{
 			Method: "GET", Path: "/admin/api/v1/stats", Handler: s.handleAdminStats,
@@ -1597,6 +1612,86 @@ func (s *Server) backupAdminRoutes() []adminRoute {
 			Name: "admin_prune_backups", Group: groupBackups, Role: roleAdmin,
 			Summary:   "按保留策略清理过期备份",
 			Dangerous: true, ConfirmReason: "会永久删除超出保留策略的备份文件",
+		},
+	}
+}
+
+// adminUserAdminRoutes covers the console's administrators themselves (M66): the accounts
+// that may sign in to this management console, what each of them may do, and the Feishu
+// identity that lets its owner sign in by scanning a code instead of typing a password.
+func (s *Server) adminUserAdminRoutes() []adminRoute {
+	return []adminRoute{
+		{
+			Method: "GET", Path: "/admin/api/v1/admin-users", Handler: s.handleAdminListAdminUsers,
+			Name: "admin_list_admin_users", Group: groupAdmins, Role: roleViewer,
+			Summary: "列出控制台管理员账号（角色、状态、飞书绑定、是否已发出邀请、是否由 bootstrap 配置重建）",
+			Query:   pageConfig.fields(),
+		},
+		{
+			Method: "POST", Path: "/admin/api/v1/admin-users", Handler: s.handleAdminCreateAdminUser,
+			Name: "admin_create_admin_user", Group: groupAdmins, Role: roleAdmin,
+			Summary:   "新建一个控制台管理员账号（可不带口令，之后用邀请链接激活）",
+			Dangerous: true, ConfirmReason: "会创建一个可以登录管理接口的账号；role=admin 的账号能改这个网关的一切配置",
+			Body: []adminField{
+				bodyRequired("username", "string", "管理员用户名（全局唯一，[A-Za-z0-9._-]，≤64 字符）"),
+				enumField(bodyRequired("role", "string",
+					"角色：admin 可以读写全部管理接口，viewer 只读（由 admin.RequireRole 判定，未知取值一律按只读处理）"),
+					domain.RoleAdmin, domain.RoleViewer),
+				bodyOptional("password", "string", "可选初始口令（≥8 字符）。留空则账号为 pending，只能通过邀请链接绑定飞书后激活；口令登录对这类账号不可用"),
+			},
+			Notes: "新建的账号立即可用（有口令）或等待邀请（无口令）。管理员身份与客户 API Key 的飞书绑定是两个独立命名空间：把某个飞书账号设为管理员，不会影响它作为客户身份的任何绑定。",
+		},
+		{
+			Method: "PATCH", Path: "/admin/api/v1/admin-users/{id}", Handler: s.handleAdminUpdateAdminUser,
+			Name: "admin_update_admin_user", Group: groupAdmins, Role: roleAdmin,
+			Summary:   "修改一个管理员的角色或状态（停用会立即结束其全部会话）",
+			Dangerous: true, ConfirmReason: "降级或停用会立即改变该账号的权限；停用还会立刻注销它已登录的会话",
+			Params: []adminField{pathParam("id", "管理员数字 id（见 admin_list_admin_users）")},
+			Body: []adminField{
+				enumField(bodyOptional("role", "string", "新角色，省略表示不改"), domain.RoleAdmin, domain.RoleViewer),
+				enumField(bodyOptional("status", "string",
+					"新状态：disabled 立即停用并注销会话；active 重新启用（账号必须已有飞书绑定或口令，否则报 409）。省略表示不改"),
+					domain.AdminActive, domain.AdminDisabled),
+			},
+			Notes: "至少提供 role 与 status 之一。部署必须始终保留一个 role=admin 且 status=active 的账号，" +
+				"因此最后一名可用管理员不能被降级或停用（409）。角色每请求现读，改完下一次请求即生效。",
+		},
+		{
+			Method: "POST", Path: "/admin/api/v1/admin-users/{id}/password", Handler: s.handleAdminResetAdminPassword,
+			Name: "admin_reset_admin_password", Group: groupAdmins, Role: roleAdmin,
+			Summary:   "重置一个管理员的口令（新口令只返回一次，并注销其既有会话）",
+			Dangerous: true, ConfirmReason: "旧口令立即失效，该账号已登录的会话全部被注销",
+			Params: []adminField{pathParam("id", "管理员数字 id")},
+			Notes: "口令是兜底登录方式：本功能的主路径是邀请链接 + 飞书扫码登录。被 bootstrap 配置重建的账号" +
+				"（响应 bootstrap=true）重置后会在下次启动被 bootstrap.admin.password 覆盖。",
+		},
+		{
+			Method: "POST", Path: "/admin/api/v1/admin-users/{id}/invite", Handler: s.handleAdminInviteAdminUser,
+			Name: "admin_invite_admin_user", Group: groupAdmins, Role: roleAdmin,
+			Summary:   "生成（或重新生成）一条管理员邀请链接，被邀请人打开后绑定飞书身份并直接进入控制台",
+			Dangerous: true, ConfirmReason: "邀请链接本身就是凭据：谁先打开并完成飞书授权，谁就获得这个管理员账号",
+			Params: []adminField{pathParam("id", "管理员数字 id")},
+			Notes: "链接有效期 feishu.invite_ttl_s（默认 1 小时），只能成功兑换一次，重新生成会立即作废上一条；" +
+				"打开链接的浏览器里登录的飞书账号就是被绑定的身份，所以请在正确的浏览器里打开。账号被停用后链接立即失效。" +
+				"需要 feishu.enabled 与 feishu.admin_login 同时开启，否则返回 501。",
+		},
+		{
+			Method: "DELETE", Path: "/admin/api/v1/admin-users/{id}/feishu", Handler: s.handleAdminUnbindAdminUserFeishu,
+			Name: "admin_unbind_admin_user_feishu", Group: groupAdmins, Role: roleAdmin,
+			Summary:   `解除一个管理员的飞书绑定（幂等；返回 {"unbound":bool,"id":int,"username":string}）`,
+			Dangerous: true, ConfirmReason: "解绑后该账号不能再扫码登录；若它没有口令，账号会退回 pending 并立即失去控制台会话",
+			Params: []adminField{pathParam("id", "管理员数字 id")},
+			Notes: "解绑只清空身份，不删除账号、不改角色、不吊销口令；要用角色或状态收回权限请用 admin_update_admin_user。" +
+				"unbound=false 表示这个账号本来就没有绑定（重复调用不报错）。",
+		},
+		{
+			Method: "DELETE", Path: "/admin/api/v1/admin-users/{id}", Handler: s.handleAdminDeleteAdminUser,
+			Name: "admin_delete_admin_user", Group: groupAdmins, Role: roleAdmin,
+			Summary:   "删除一个管理员账号（连同其会话与控制台问答记录）",
+			Dangerous: true, ConfirmReason: "删除会一并删掉该管理员在控制台的智能问答会话与技能库（外键级联），且无法恢复",
+			Params: []adminField{pathParam("id", "管理员数字 id")},
+			Notes: "不能删除自己当前登录的账号，也不能删除最后一个可用管理员；由 bootstrap.admin 配置重建的账号同样" +
+				"不能删除（下次启动会重新出现），需要时请用「停用」。",
 		},
 	}
 }

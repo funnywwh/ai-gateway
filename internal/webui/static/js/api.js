@@ -124,6 +124,10 @@ export function me() {
   return request('GET', '/auth/me');
 }
 
+// Which ways in this deployment offers. Public: the login screen asks before there is any
+// session, so the Feishu entry is only rendered when the deployment really offers it.
+export function authMethods() { return request('GET', '/auth/methods'); }
+
 // The build identity of the server this console is talking to. It is a public endpoint
 // (no session needed), which is why it is fetched with plain fetch instead of the
 // management request helper: the badge must render on the login screen too, before

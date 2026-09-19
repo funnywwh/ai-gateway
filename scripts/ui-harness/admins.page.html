@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>admins console harness</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<!-- #app is the login screen's mount point: the `login` view imports app.js, which renders
+     either the shell (with a session) or the login card (without one) into it. -->
+<div id="app"></div>
+<div id="actions" class="toolbar"></div>
+<div id="page"></div>
+<div id="modal-root"></div>
+<!-- toast() appends into #toasts, which the console shell provides; without it every
+     confirmation this page shows would be a null dereference instead of a message. -->
+<div id="toasts" class="toasts"></div>
+<script>
+// The 管理员 page against a *changing* server: the fixture list is the initial state, and
+// every write the page makes (create / patch / invite / reset / unbind / delete) is applied
+// to it, so "the table says 已删除" is judged against a server that really lost the row
+// instead of against the page's own optimism.
+//
+// Fixtures are keyed by the endpoint's full path (/admin/api/v1/...); keys without the
+// prefix are accepted too, because the rest of fixtures.json is written that way.
+const FIXTURES = __FIXTURES__;
+
+function fixture(path) {
+  const full = '/admin/api/v1' + path;
+  return FIXTURES[full] !== undefined ? FIXTURES[full] : FIXTURES[path];
+}
+
+function seedAdmins() {
+  const list = fixture('/admin-users') || {};
+  return (list.data || list.items || []).map((row) => ({ ...row }));
+}
+let ADMINS = seedAdmins();
+let NEXT_ID = ADMINS.reduce((max, row) => Math.max(max, Number(row.id) || 0), 0) + 1;
+let INVITE_SEQ = 0;
+let PASSWORD_SEQ = 0;
+window.__admins = () => ADMINS;
+
+// Which ways in this deployment offers, straight from the fixture. `window.__noFeishu`
+// makes the same page render a deployment without Feishu administrator login, which is the
+// one shape the fixture cannot describe twice (M66 §D8).
+function feishuOffered() {
+  if (window.__noFeishu) return false;
+  const methods = fixture('/auth/methods') || {};
+  return !!(methods.feishu && methods.feishu.enabled);
+}
+
+function adminByID(id) { return ADMINS.find((row) => Number(row.id) === Number(id)); }
+
+// Every request this view does not describe lands here and becomes a failing check. A stub
+// that answered `{}` would look like "the server has nothing to say" and would hide exactly
+// the mistake this harness exists to catch (a page calling an endpoint nobody registered).
+const unmatched = [];
+
+window.fetch = async (url, options) => {
+  const target = String(url);
+  const path = target.replace(/^.*\/admin\/api\/v1/, '').split('?')[0];
+  const query = new URLSearchParams(target.split('?')[1] || '');
+  const method = ((options && options.method) || 'GET').toUpperCase();
+  window.__calls = (window.__calls || []).concat([method + ' ' + target]);
+  // The raw URL, query string included: whether the pager's limit/offset actually reach the
+  // server is the part a page can get wrong while still rendering a plausible table.
+  window.__urls = (window.__urls || []).concat([target]);
+  if (options && options.body) window.__sent = (window.__sent || []).concat([{ path, method, body: options.body }]);
+  const ok = (payload, status) => ({ ok: true, status: status || 200, text: async () => JSON.stringify(payload) });
+  const refuse = (status, message) => ({ ok: false, status, text: async () => JSON.stringify({ error: { message } }) });
+
+  if (path === '/auth/methods' && method === 'GET') {
+    if (window.__noFeishu) return ok({ password: true, feishu: { enabled: false } });
+    return ok(fixture('/auth/methods') || { password: true, feishu: { enabled: false } });
+  }
+  // The login view has no session, which is the whole point of it: app.js boots by asking
+  // /auth/me, and a 401 is what puts the login card on screen.
+  if (path === '/auth/me' && method === 'GET') {
+    return refuse(401, 'session required');
+  }
+  if (path === '/admin-users' && method === 'GET') {
+    const limit = Number(query.get('limit') || 20);
+    const offset = Number(query.get('offset') || 0);
+    const windowRows = ADMINS.slice(offset, offset + limit);
+    return ok({
+      data: windowRows, count: windowRows.length, total: ADMINS.length, limit, offset,
+      has_more: offset + windowRows.length < ADMINS.length,
+    });
+  }
+  if (path === '/admin-users' && method === 'POST') {
+    const body = JSON.parse((options && options.body) || '{}');
+    if (ADMINS.some((row) => row.username === body.username)) {
+      return refuse(409, 'administrator ' + body.username + ' already exists');
+    }
+    const row = {
+      id: NEXT_ID, username: body.username, role: body.role,
+      // 没有口令的新账号只能是 pending：这正是"用邀请链接激活"那条路径的起点。
+      status: body.password ? 'active' : 'pending',
+      created_at: new Date().toISOString(), last_login_at: null,
+      has_password: !!body.password, invite_pending: false, feishu: { bound: false }, bootstrap: false,
+    };
+    NEXT_ID += 1;
+    ADMINS = ADMINS.concat([row]);
+    return ok(row, 201);
+  }
+  const inviteMatch = path.match(/^\/admin-users\/(\d+)\/invite$/);
+  if (inviteMatch && method === 'POST') {
+    const row = adminByID(inviteMatch[1]);
+    if (!row) return refuse(404, 'admin user not found');
+    if (!feishuOffered()) return refuse(501, 'Feishu administrator login is not enabled in this deployment');
+    if (row.status === 'disabled') return refuse(409, 'enable this administrator account before inviting it');
+    row.invite_pending = true;
+    INVITE_SEQ += 1;
+    const ttl = 3600;
+    return ok({
+      id: row.id, username: row.username,
+      url: 'https://gw.example.com/feishu/invite?invite=tok_' + row.id + '_' + INVITE_SEQ,
+      expires_at: new Date(Date.now() + ttl * 1000).toISOString(),
+      expires_in_s: ttl,
+      previous_link: 'any earlier invitation link for this account has been retired',
+      note: 'open the link in the browser whose Feishu account should become this administrator; ' +
+        'it works once, and the person is signed in when it succeeds',
+    });
+  }
+  const passwordMatch = path.match(/^\/admin-users\/(\d+)\/password$/);
+  if (passwordMatch && method === 'POST') {
+    const row = adminByID(passwordMatch[1]);
+    if (!row) return refuse(404, 'admin user not found');
+    PASSWORD_SEQ += 1;
+    row.has_password = true;
+    row.invite_pending = false;
+    // 一次性口令让一个 pending 账号第一次有凭据（服务端的 handleAdminResetAdminPassword）。
+    if (row.status === 'pending') row.status = 'active';
+    return ok({
+      id: row.id, username: row.username, password: 'pwd_' + row.id + '_' + PASSWORD_SEQ,
+      sessions_revoked: true, bootstrap: !!row.bootstrap,
+      note: 'this password is shown once; handing it out by chat is what an invitation link avoids',
+    });
+  }
+  const feishuMatch = path.match(/^\/admin-users\/(\d+)\/feishu$/);
+  if (feishuMatch && method === 'DELETE') {
+    const row = adminByID(feishuMatch[1]);
+    if (!row) return refuse(404, 'admin user not found');
+    const wasBound = !!(row.feishu && row.feishu.bound);
+    row.feishu = { bound: false };
+    // 解绑一个只有飞书凭据的账号会让它退回 pending，和停用一样在下一次请求就失去会话。
+    if (wasBound && !row.has_password) row.status = 'pending';
+    return ok({ unbound: wasBound, id: row.id, username: row.username });
+  }
+  const userMatch = path.match(/^\/admin-users\/(\d+)$/);
+  if (userMatch && method === 'PATCH') {
+    const row = adminByID(userMatch[1]);
+    if (!row) return refuse(404, 'admin user not found');
+    const body = JSON.parse((options && options.body) || '{}');
+    if (body.role !== undefined) row.role = body.role;
+    if (body.status !== undefined) row.status = body.status;
+    return ok(row);
+  }
+  if (userMatch && method === 'DELETE') {
+    const row = adminByID(userMatch[1]);
+    if (!row) return refuse(404, 'admin user not found');
+    // 服务端的三条守卫：自己的账号、bootstrap 配置重建的账号、最后一名可用管理员。
+    if (row.username === window.__sessionUsername) {
+      return refuse(409, 'you cannot delete the administrator account you are signed in as');
+    }
+    if (row.bootstrap) {
+      return refuse(409, 'this account is recreated from bootstrap.admin on every start; remove it there, or disable it here');
+    }
+    ADMINS = ADMINS.filter((item) => item.id !== row.id);
+    return ok({ deleted: true, id: row.id, username: row.username });
+  }
+  unmatched.push(method + ' ' + target);
+  return refuse(500, 'the harness has no fixture for ' + method + ' ' + path);
+};
+
+const errors = [];
+window.onerror = (msg) => errors.push('onerror: ' + msg);
+window.onunhandledrejection = (ev) => errors.push('rejection: ' + ev.reason);
+
+function report(data) {
+  data.errors = errors;
+  data.toasts = [...document.querySelectorAll('.toast')].map((n) => n.textContent);
+  const url = '/report?data=' + encodeURIComponent(JSON.stringify(data));
+  try { if (navigator.sendBeacon && navigator.sendBeacon(url)) return; } catch (err) { /* fall through */ }
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url, false);
+    xhr.send();
+  } catch (err) { /* reporting must never break the harness */ }
+}
+</script>
+<script type="module">
+import { render as renderAdmins } from '/js/pages/admins.js';
+
+const view = location.hash.replace('#', '') || 'admins';
+const checks = {};
+const settle = async () => { for (let i = 0; i < 400; i++) await Promise.resolve(); };
+
+const actions = () => document.getElementById('actions');
+const pageNode = () => document.getElementById('page');
+const modalRoot = () => document.getElementById('modal-root');
+const modalText = () => modalRoot().textContent;
+const pageText = () => pageNode().textContent;
+const find = (label) => [...document.querySelectorAll('button')].find((b) => b.textContent.trim() === label);
+const findInModal = (label) => [...modalRoot().querySelectorAll('button')].find((b) => b.textContent.trim() === label);
+const table = () => pageNode().querySelector('table');
+const headers = () => [...table().querySelectorAll('thead th')].map((th) => th.textContent.trim());
+const bodyRows = () => [...table().querySelectorAll('tbody tr')];
+const rowOf = (username) => bodyRows().find((tr) => tr.textContent.includes(username));
+const cellOf = (row, label) => {
+  const index = headers().indexOf(label);
+  return row && index >= 0 && row.children[index] ? row.children[index] : null;
+};
+const cellText = (row, label) => { const node = cellOf(row, label); return node ? node.textContent.trim() : ''; };
+const cellBadge = (row, label) => { const node = cellOf(row, label); return node ? node.querySelector('.badge') : null; };
+const badgeOf = (row, label, text) => {
+  const node = cellOf(row, label);
+  return node ? [...node.querySelectorAll('.badge')].find((b) => b.textContent.trim() === text) : undefined;
+};
+const badgeClass = (row, label) => { const node = cellBadge(row, label); return node ? node.className : ''; };
+const badgeTitle = (badge) => (badge ? badge.getAttribute('title') || '' : '');
+const rowButton = (row, label) => (row ? [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === label) : undefined);
+const clearToasts = () => document.getElementById('toasts').replaceChildren();
+const toastText = () => [...document.querySelectorAll('.toast')].map((n) => n.textContent).join(' | ');
+const sent = (method, suffix) => (window.__sent || []).filter((call) => call.method === method && call.path === suffix).pop();
+const called = (method, suffix) => (window.__calls || []).some((c) => c.startsWith(method + ' ') && c.includes(suffix));
+// Requests without a body (everything the page deletes) never reach window.__sent, so their
+// existence is read from the call list — and compared exactly, or "DELETE /admin-users/4"
+// would be satisfied by the unbind of the same account.
+const calledAt = (method, path) => (window.__calls || []).some((c) => {
+  const rest = c.slice(method.length + 1).replace(/^.*\/admin\/api\/v1/, '').split('?')[0];
+  return rest === path;
+});
+const sentBody = (call) => { try { return JSON.parse(call.body); } catch (err) { return null; } };
+const COLUMNS = 'ID,用户名,角色,状态,飞书,最近登录,创建时间';
+
+try {
+  if (view === 'login') {
+    // 登录页：app.js 一被导入就 boot()，stub 让 /auth/me 回 401，于是渲染出登录卡片——
+    // 这个部署开了飞书管理员登录，所以卡片上必须有那个入口。app.js 用动态 import 就是为了
+    // 让另外两个视图（管理员页）不受它的 boot() 影响。
+    await import('/js/app.js');
+    await settle();
+    const appNode = document.getElementById('app');
+    const inApp = (label) => [...appNode.querySelectorAll('button')].find((b) => b.textContent.trim() === label);
+    const field = appNode.querySelector('input[autocomplete="username"]');
+    checks.passwordFormIntact = !!field && field.value === 'admin'
+      && !!appNode.querySelector('input[type="password"]')
+      && !!inApp('登录')
+      && appNode.textContent.includes('AI Gateway 控制台');
+    checks.feishuEntryShown = !!inApp('飞书扫码登录');
+    checks.feishuHintShown = appNode.textContent.includes('用手机飞书扫描授权页上的二维码');
+    // 入口在口令表单下面（卡片里的先后顺序就是屏幕上的先后顺序）。
+    checks.feishuEntryUnderPasswordForm = (() => {
+      const card = appNode.querySelector('.card');
+      if (!card || !inApp('飞书扫码登录') || !inApp('登录')) return false;
+      const nodes = [...card.children];
+      return nodes.indexOf(inApp('登录')) < nodes.indexOf(inApp('飞书扫码登录'));
+    })();
+    // 它是整页导航而不是 fetch：渲染（随后点击也一样）都不会去请求那个 OAuth 入口地址。
+    checks.feishuLoginNotFetched = (window.__calls || []).every((c) => !c.includes('/feishu/login'));
+    checks.methodsAsked = called('GET', '/auth/methods');
+    checks.noUnmatchedRequests = unmatched.length === 0;
+    checks.noPageErrors = errors.length === 0;
+    checks.sample = { calls: window.__calls || [], unmatched: unmatched.slice() };
+  }
+
+  if (view === 'admins') {
+    window.__sessionUsername = 'admin';
+    const session = { role: 'admin', username: 'admin' };
+    await renderAdmins({ page: pageNode(), actions: actions(), session, route: { path: '/admins' }, navigate: () => {} });
+    await settle();
+
+    // ---- 列表本身 ----
+    checks.columns = headers().slice(0, 7).join(',') === COLUMNS;
+    checks.rowsRendered = bodyRows().length === 4
+      && !!rowOf('admin') && !!rowOf('lisi') && !!rowOf('wangwu') && !!rowOf('zhaoliu');
+    checks.pagerShown = pageText().includes('共 4 条');
+    // 分页窗口是服务端的事：limit/offset 必须真的发出去，而不是只在浏览器里切片。
+    checks.windowSent = (window.__urls || []).some((u) => u.includes('/admin-users?') && u.includes('limit=20') && u.includes('offset=0'));
+    checks.methodsAsked = called('GET', '/auth/methods');
+
+    // ---- 角色与状态：绿色只留给 admin / active ----
+    const adminRow = rowOf('admin');
+    const viewerRow = rowOf('lisi');
+    checks.adminRoleGreen = cellText(adminRow, '角色') === 'admin' && badgeClass(adminRow, '角色').includes('ok');
+    checks.viewerRoleNotGreen = cellText(viewerRow, '角色') === 'viewer' && !badgeClass(viewerRow, '角色').includes('ok');
+    checks.activeStatusGreen = cellText(adminRow, '状态') === 'active' && badgeClass(adminRow, '状态').includes('ok');
+    checks.pendingStatusWarn = cellText(viewerRow, '状态') === 'pending'
+      && badgeClass(viewerRow, '状态').includes('warn') && !badgeClass(viewerRow, '状态').includes('ok');
+    checks.disabledStatusDanger = cellText(rowOf('wangwu'), '状态') === 'disabled'
+      && badgeClass(rowOf('wangwu'), '状态').includes('danger') && !badgeClass(rowOf('wangwu'), '状态').includes('ok');
+
+    // ---- 飞书列：名字给人读，完整身份在 title 里 ----
+    checks.feishuNameShown = cellText(adminRow, '飞书') === '张三';
+    checks.feishuTitleCarriesIdentity = badgeTitle(cellBadge(adminRow, '飞书')).includes('ou_admin0001')
+      && badgeTitle(cellBadge(adminRow, '飞书')).includes('由 admin 绑定')
+      && badgeTitle(cellBadge(adminRow, '飞书')).includes('2026');
+    checks.unboundShown = cellText(rowOf('wangwu'), '飞书') === '未绑定';
+
+    // ---- bootstrap 与「邀请待用」徽章 ----
+    checks.bootstrapBadged = badgeTitle(badgeOf(adminRow, '用户名', 'bootstrap'))
+      .includes('由 bootstrap.admin 配置在启动时创建/重建')
+      && badgeTitle(badgeOf(adminRow, '用户名', 'bootstrap')).includes('口令会在重启时被配置覆盖');
+    checks.invitePendingBadged = badgeTitle(badgeOf(viewerRow, '用户名', '邀请待用')).includes('重新生成');
+    checks.noInviteBadgeWhenNotPending = badgeOf(rowOf('wangwu'), '用户名', '邀请待用') === undefined;
+
+    // ---- 行动作 ----
+    const ownDelete = rowButton(adminRow, '删除');
+    checks.selfDeleteDisabled = !!ownDelete && ownDelete.disabled === true
+      && (ownDelete.getAttribute('title') || '').includes('不能删除自己');
+    const otherDelete = rowButton(rowOf('zhaoliu'), '删除');
+    checks.otherDeleteEnabled = !!otherDelete && otherDelete.disabled === false;
+    checks.inviteOffered = !!rowButton(viewerRow, '邀请链接');
+    checks.unbindOfferedForBoundRow = !!rowButton(rowOf('zhaoliu'), '解绑飞书');
+    checks.noUnbindForUnboundRow = rowButton(rowOf('wangwu'), '解绑飞书') === undefined;
+
+    // ---- 分页器把新的 limit 也发出去 ----
+    const sizeSelect = pageNode().querySelector('.pager select');
+    sizeSelect.value = '50';
+    sizeSelect.dispatchEvent(new Event('change'));
+    await settle();
+    checks.pageSizeSent = (window.__urls || []).some((u) => u.includes('/admin-users?') && u.includes('limit=50') && u.includes('offset=0'));
+
+    // ---- 邀请链接：只读、已选中、说明有效期与「用一次就失效」 ----
+    clearToasts();
+    rowButton(rowOf('zhaoliu'), '邀请链接').click();
+    await settle();
+    const inviteBox = modalRoot().querySelector('.modal input');
+    checks.inviteSent = calledAt('POST', '/admin-users/4/invite');
+    checks.inviteDialogOpen = modalRoot().querySelectorAll('.modal').length === 1;
+    checks.inviteBoxReadonly = !!inviteBox && inviteBox.readOnly === true
+      && (inviteBox.value || '').includes('/feishu/invite?invite=');
+    checks.inviteUrlSelected = !!inviteBox && inviteBox.value.length > 0
+      && inviteBox.selectionStart === 0 && inviteBox.selectionEnd === inviteBox.value.length;
+    checks.inviteValidityStated = modalText().includes('有效期约 1 小时');
+    checks.inviteOneShotStated = modalText().includes('已失效') && modalText().includes('重新生成');
+    checks.inviteServerNoteShown = modalText().includes('it works once');
+    findInModal('我已保存').click();
+    await settle();
+    checks.inviteDialogClosed = modalRoot().querySelectorAll('.modal').length === 0;
+    // 生成之后刷新到了服务端的新状态：这一行现在挂着「邀请待用」。
+    checks.invitePendingAfterInvite = !!badgeOf(rowOf('zhaoliu'), '用户名', '邀请待用');
+
+    // ---- 停用的账号不能邀请：服务端的原话要出现，且不弹对话框 ----
+    clearToasts();
+    rowButton(rowOf('wangwu'), '邀请链接').click();
+    await settle();
+    checks.inviteRefusedForDisabled = toastText().includes('enable this administrator account before inviting it');
+    checks.refusedInviteOpensNoDialog = modalRoot().querySelectorAll('.modal').length === 0;
+
+    // ---- 编辑：pending 的行要显示 pending，保存后服务端状态跟着变 ----
+    clearToasts();
+    rowButton(rowOf('lisi'), '编辑').click();
+    await settle();
+    const editModal = modalRoot().querySelector('.modal');
+    const roleSelect = editModal ? editModal.querySelector('select[name="role"]') : null;
+    const statusSelect = editModal ? editModal.querySelector('select[name="status"]') : null;
+    checks.editPrefillsRow = !!roleSelect && roleSelect.value === 'viewer'
+      && !!statusSelect && statusSelect.value === 'pending'
+      && [...statusSelect.options].map((o) => o.value).join(',') === 'pending,active,disabled';
+    roleSelect.value = 'admin';
+    statusSelect.value = 'disabled';
+    findInModal('保存').click();
+    await settle();
+    const patch = sent('PATCH', '/admin-users/2');
+    checks.editSent = !!patch;
+    checks.editBody = !!patch && JSON.stringify(sentBody(patch)) === JSON.stringify({ role: 'admin', status: 'disabled' });
+    checks.editApplied = cellText(rowOf('lisi'), '角色') === 'admin'
+      && cellText(rowOf('lisi'), '状态') === 'disabled'
+      && badgeClass(rowOf('lisi'), '状态').includes('danger');
+    checks.editToastShown = toastText().includes('已更新 lisi');
+
+    // ---- 重置口令：先确认（说清会注销会话），再显示一次性口令 ----
+    clearToasts();
+    rowButton(rowOf('admin'), '重置口令').click();
+    await settle();
+    checks.resetConfirmsSessions = modalText().includes('这会立即注销该账号已登录的会话')
+      && modalText().includes('新口令只显示这一次');
+    findInModal('确认').click();
+    await settle();
+    checks.resetSent = calledAt('POST', '/admin-users/1/password');
+    const resetBox = modalRoot().querySelector('.modal input');
+    checks.resetShowsOnce = !!resetBox && resetBox.readOnly === true && (resetBox.value || '').startsWith('pwd_');
+    checks.resetWarning = modalText().includes('只显示这一次') && modalText().includes('关闭后无法再次获取');
+    checks.resetSessionsStated = modalText().includes('会话已被注销');
+    // bootstrap 行的口令会在下次启动被配置覆盖，这一句只有它能说。
+    checks.resetBootstrapCaveat = modalText().includes('口令会被配置里的口令覆盖');
+    findInModal('我已保存').click();
+    await settle();
+
+    // ---- 解绑飞书：确认后解绑，行上立刻显示未绑定 ----
+    clearToasts();
+    rowButton(rowOf('zhaoliu'), '解绑飞书').click();
+    await settle();
+    checks.unbindConfirms = modalText().includes('确认解除 zhaoliu 与 李四 的绑定');
+    findInModal('确认').click();
+    await settle();
+    checks.unbindSent = calledAt('DELETE', '/admin-users/4/feishu');
+    checks.unbindToast = toastText().includes('已解绑');
+    checks.unbindApplied = cellText(rowOf('zhaoliu'), '飞书') === '未绑定'
+      && rowButton(rowOf('zhaoliu'), '解绑飞书') === undefined;
+    // 只有飞书凭据的账号解绑后退回 pending（服务端的口径）。
+    checks.unbindDropsToPending = cellText(rowOf('zhaoliu'), '状态') === 'pending';
+
+    // ---- 删除：确认文案必须写明连带删掉的东西 ----
+    clearToasts();
+    rowButton(rowOf('zhaoliu'), '删除').click();
+    await settle();
+    checks.deleteNamesTheCascade = modalText().includes('会一并删除该管理员在控制台的智能问答会话与技能库，且无法恢复');
+    findInModal('确认').click();
+    await settle();
+    checks.deleteSent = calledAt('DELETE', '/admin-users/4');
+    checks.deleteApplied = !rowOf('zhaoliu') && bodyRows().length === 3;
+    checks.deleteToast = toastText().includes('已删除 zhaoliu');
+
+    // ---- 新建管理员：带口令的立即可用，不带口令的是 pending ----
+    clearToasts();
+    find('新建管理员').click();
+    await settle();
+    const createModal = modalRoot().querySelector('.modal');
+    checks.createHints = modalText().includes('[A-Za-z0-9._-]，≤64 字符')
+      && modalText().includes('留空则账号为 pending，需要用邀请链接激活');
+    checks.createDefaultsToAdmin = createModal.querySelector('select[name="role"]').value === 'admin';
+    createModal.querySelector('input[name="username"]').value = 'carol';
+    createModal.querySelector('input[name="password"]').value = 'secret-pass-1';
+    findInModal('创建').click();
+    await settle();
+    const createCall = sent('POST', '/admin-users');
+    checks.createSent = !!createCall;
+    checks.createBody = !!createCall
+      && JSON.stringify(sentBody(createCall)) === JSON.stringify({ username: 'carol', role: 'admin', password: 'secret-pass-1' });
+    checks.createApplied = cellText(rowOf('carol'), '状态') === 'active' && toastText().includes('已创建 carol');
+    // 不留口令：创建出来就是 pending，等邀请链接。
+    clearToasts();
+    find('新建管理员').click();
+    await settle();
+    const secondModal = modalRoot().querySelector('.modal');
+    secondModal.querySelector('input[name="username"]').value = 'dave';
+    secondModal.querySelector('select[name="role"]').value = 'viewer';
+    findInModal('创建').click();
+    await settle();
+    checks.createPendingWhenNoPassword = cellText(rowOf('dave'), '状态') === 'pending'
+      && badgeClass(rowOf('dave'), '状态').includes('warn');
+    checks.createPendingToast = toastText().includes('账号待激活');
+
+    // ---- 部署在页面打开之后把飞书关掉：按钮还在，服务端回 501 ----
+    // 这是 /auth/methods 与邀请接口之间的竞态，也是「501 原样显示服务端消息」唯一能被触发的地方。
+    clearToasts();
+    window.__noFeishu = true;
+    rowButton(rowOf('admin'), '邀请链接').click();
+    await settle();
+    checks.inviteRefusedWhenFeishuTurnedOff = toastText()
+      .includes('Feishu administrator login is not enabled in this deployment');
+    checks.refusedInviteKeepsNoDialog = modalRoot().querySelectorAll('.modal').length === 0;
+    window.__noFeishu = false;
+
+    // ---- D8：没有飞书管理员登录的部署，同一页必须照常可用 ----
+    window.__noFeishu = true;
+    pageNode().replaceChildren();
+    actions().replaceChildren();
+    await renderAdmins({ page: pageNode(), actions: actions(), session, route: { path: '/admins' }, navigate: () => {} });
+    await settle();
+    const noFeishuRow = rowOf('admin');
+    checks.noFeishuHidesInvite = rowButton(noFeishuRow, '邀请链接') === undefined;
+    checks.noFeishuHidesUnbind = rowButton(noFeishuRow, '解绑飞书') === undefined;
+    checks.noFeishuKeepsManagement = !!rowButton(noFeishuRow, '编辑') && !!rowButton(noFeishuRow, '重置口令')
+      && !!rowButton(noFeishuRow, '删除');
+    checks.noFeishuKeepsCreate = !!find('新建管理员') && find('新建管理员').disabled === false;
+    checks.noFeishuTableIntact = headers().slice(0, 7).join(',') === COLUMNS && bodyRows().length === 5;
+
+    checks.noUnmatchedRequests = unmatched.length === 0;
+    checks.noPageErrors = errors.length === 0;
+    checks.sample = {
+      rows: bodyRows().length,
+      urls: (window.__urls || []).slice(-6),
+      toasts: [...document.querySelectorAll('.toast')].map((n) => n.textContent),
+      unmatched: unmatched.slice(),
+    };
+  }
+
+  if (view === 'admins-readonly') {
+    // 只读角色（viewer）拿到同一页：列表照常，写入口整体消失。
+    window.__sessionUsername = 'lisi';
+    await renderAdmins({
+      page: pageNode(), actions: actions(),
+      session: { role: 'viewer', username: 'lisi' }, route: { path: '/admins' }, navigate: () => {},
+    });
+    await settle();
+    checks.tableRendered = bodyRows().length === 4 && headers().slice(0, 7).join(',') === COLUMNS;
+    checks.feishuColumnShown = cellText(rowOf('admin'), '飞书') === '张三';
+    checks.createDisabled = !!find('新建管理员') && find('新建管理员').disabled === true;
+    checks.noRowActions = pageNode().querySelectorAll('tbody button').length === 0;
+    checks.readonlyHintShown = pageText().includes('只读角色');
+    checks.refreshKept = !!find('刷新');
+    checks.methodsAsked = called('GET', '/auth/methods');
+    checks.noUnmatchedRequests = unmatched.length === 0;
+    checks.noPageErrors = errors.length === 0;
+    checks.sample = { rows: bodyRows().length, urls: (window.__urls || []).slice(-3), unmatched: unmatched.slice() };
+  }
+
+  const bad = Object.keys(checks).filter((key) => checks[key] === false);
+  report({
+    view, stage: 'done', strictChecks: true,
+    ok: bad.length === 0 && errors.length === 0 && unmatched.length === 0,
+    failed: bad, checks, errors, urls: window.__urls,
+  });
+} catch (err) {
+  report({
+    view, stage: 'threw', strictChecks: true, ok: false, checks, errors,
+    thrown: String(err && err.stack ? err.stack : err),
+  });
+}
+</script>
+</body>
+</html>

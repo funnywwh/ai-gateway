@@ -27,19 +27,32 @@ type FeishuDeps struct {
 	// Tickets signs the short-lived handoff the DSH gateway redeems (M61). Nil while the
 	// DSH login flow is off.
 	Tickets *feishu.TicketCodec
+	// Invites signs the long-lived administrator invitation links (M66). It is a second
+	// codec rather than a longer TTL on States: an invitation outlives one consent screen by
+	// design, and a purpose-bound key keeps one kind of link from signing the other. Nil
+	// while the console login flow is off, and then the invitation route does not exist.
+	Invites *feishu.StateCodec
 	// RedirectURI is the callback URL exactly as registered in the Feishu console: it is
 	// sent in the authorization redirect and again in the token exchange, and Feishu
 	// refuses the exchange if the two differ.
 	RedirectURI string
-	// LoginPath and CallbackPath are the paths this server serves, with the mount prefix
-	// already applied. They exist so startup can prove RedirectURI points back here.
+	// LoginPath, CallbackPath and InvitePath are the paths this server serves, WITHOUT the
+	// mount prefix: the mux sees a request only after withBasePath has stripped the prefix,
+	// so a pattern written with the prefix would never match (the browser-visible URLs carry
+	// it, and startup compares those against the prefix plus these paths).
 	LoginPath    string
 	CallbackPath string
+	InvitePath   string
 	// DSHLogin opens the DSH portal login flow; PortalURL is where that flow returns the
 	// browser (the dshgw portal), and LoginURL is where the browser starts.
 	DSHLogin  bool
 	PortalURL string
 	LoginURL  string
+	// AdminLogin opens the console login flow (M66): an administrator whose Feishu identity
+	// is bound to an admin_users row signs in by scanning Feishu's consent page. ConsoleURL
+	// is where that flow returns the browser, and the page a refused attempt is explained on.
+	AdminLogin bool
+	ConsoleURL string
 	// AutoEnableDSH makes a successful binding also opt the key's account in to DSH, so the
 	// person can log in immediately instead of waiting for an administrator to press 启用
 	// DSH as a second step. See autoEnableDSHForBinding for what it deliberately refuses to
@@ -63,9 +76,10 @@ func (s *Server) feishuEnabled() bool {
 // Routes
 // ---------------------------------------------------------------------------
 
-// handleFeishuLogin starts the DSH portal login. It is unauthenticated on purpose — any
-// employee may sign in to their own tenant — and rate limited, because it is the only route
-// that makes an outbound call before anyone is authenticated.
+// handleFeishuLogin starts one of the two public login flows. It is unauthenticated on
+// purpose — any employee may sign in to their own tenant, and any administrator may sign in
+// to the console — and rate limited, because it is the route that makes an outbound call
+// before anyone is authenticated.
 //
 // Binding is NOT started here: an administrator's session cookie is scoped to "/admin", so a
 // route outside that prefix cannot see it (which is exactly the bug this comment replaces).
@@ -82,13 +96,24 @@ func (s *Server) handleFeishuLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	if mode := r.URL.Query().Get("mode"); mode != "" && mode != string(feishu.FlowDSHLogin) {
-		// The only flow with a public entry point is the portal login; a binding starts at
-		// its admin route (`/admin/api/v1/keys/{id}/feishu/bind`).
-		http.NotFound(w, r)
-		return
-	}
-	if !deps.DSHLogin || deps.PortalURL == "" {
+	mode := r.URL.Query().Get("mode")
+	attempt := feishu.Attempt{Flow: feishu.FlowDSHLogin}
+	switch mode {
+	case "", string(feishu.FlowDSHLogin):
+		if !deps.DSHLogin || deps.PortalURL == "" {
+			http.NotFound(w, r)
+			return
+		}
+	case string(feishu.FlowAdminLogin):
+		// The console login. It is the only other flow with a public entry point; a key
+		// binding starts at its admin route (`/admin/api/v1/keys/{id}/feishu/bind`) and an
+		// invitation at `/feishu/invite`.
+		if !deps.AdminLogin {
+			http.NotFound(w, r)
+			return
+		}
+		attempt.Flow = feishu.FlowAdminLogin
+	default:
 		http.NotFound(w, r)
 		return
 	}
@@ -100,7 +125,8 @@ func (s *Server) handleFeishuLogin(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, domain.ErrInternal("cannot start the Feishu flow"))
 		return
 	}
-	state, err := deps.States.Sign(feishu.FlowDSHLogin, 0, "", nonce)
+	attempt.Nonce = nonce
+	state, err := deps.States.Sign(attempt)
 	if err != nil {
 		writeAPIError(w, domain.ErrInternal("cannot start the Feishu flow"))
 		return
@@ -121,9 +147,10 @@ func (s *Server) redirectToFeishu(w http.ResponseWriter, r *http.Request, state 
 	http.Redirect(w, r, target, http.StatusFound)
 }
 
-// handleFeishuCallback is the single redirect target for both flows. It carries no session
-// of its own: the signed state proves who started the attempt, and for a binding the actor
-// is re-checked here so a demoted administrator cannot finish what they started.
+// handleFeishuCallback is the single redirect target for every flow. It carries no session
+// of its own: the signed state proves who started the attempt, and for a binding or an
+// invitation the actor is re-checked here so a demoted administrator cannot finish what they
+// started.
 //
 // When the state cannot be trusted the flow is unknown, so the answer is a small page on
 // this server rather than a redirect: guessing a destination would send an administrator to
@@ -143,16 +170,22 @@ func (s *Server) handleFeishuCallback(w http.ResponseWriter, r *http.Request) {
 	if stateErr != nil {
 		reason := feishuReason(stateErr)
 		s.audit(r.Context(), "", "feishu_login_reject", "feishu_callback", "", map[string]any{"reason": reason}, "denied")
-		s.renderFeishuStop(w, http.StatusBadRequest, feishuStateMessage(reason))
+		s.renderFeishuStop(w, http.StatusBadRequest, feishuStateMessage(reason), "")
 		return
 	}
 	flow := state.Flow
 	failFlow := func(result string) {
-		if flow == feishu.FlowBind {
+		switch flow {
+		case feishu.FlowBind:
 			s.redirectConsole(w, r, result, state.KeyID)
-			return
+		case feishu.FlowAdminLogin, feishu.FlowAdminInvite:
+			// Both console flows end on a page of ours: the person is not signed in (or, for
+			// an invitation, may never have seen the console), so there is no page to send
+			// them back to with a hidden reason code.
+			s.renderFeishuAdminStop(w, flow, result)
+		default:
+			s.redirectFeishuError(w, r, result)
 		}
-		s.redirectFeishuError(w, r, result)
 	}
 	if denial := query.Get("error"); denial != "" {
 		// The person declined the consent screen: nothing was written, nothing is broken.
@@ -174,24 +207,252 @@ func (s *Server) handleFeishuCallback(w http.ResponseWriter, r *http.Request) {
 		failFlow(reason)
 		return
 	}
-	if flow == feishu.FlowBind {
+	switch flow {
+	case feishu.FlowBind:
 		s.finishFeishuBind(w, r, state, identity)
+	case feishu.FlowAdminInvite:
+		s.finishFeishuAdminInvite(w, r, state, identity)
+	case feishu.FlowAdminLogin:
+		s.finishFeishuAdminLogin(w, r, identity)
+	default:
+		s.finishFeishuLogin(w, r, identity)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Console administrator login and invitation (M66)
+// ---------------------------------------------------------------------------
+
+// handleFeishuInvite is the entry point of an administrator invitation link. It is public
+// because the person following the link has no session yet — the signed invitation is the
+// capability — and rate limited like the other public entry points.
+//
+// The invitation token is only PEEKED here, never consumed: an invitation link stays usable
+// until it is redeemed, so a person who cancels the consent screen (or opens the link twice)
+// can simply try again. Each visit mints a fresh short-lived state, which is what Feishu's
+// one-time state actually protects.
+func (s *Server) handleFeishuInvite(w http.ResponseWriter, r *http.Request) {
+	deps := s.deps.Feishu
+	if !s.feishuEnabled() || deps.Invites == nil || !deps.AdminLogin {
+		http.NotFound(w, r)
 		return
 	}
-	s.finishFeishuLogin(w, r, identity)
+	feishuNoStore(w.Header())
+	if r.URL.Query().Has("code") || r.URL.Query().Has("state") {
+		// Same rule as the login entry point: an authorization code belongs to the callback.
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if !s.allowFeishuAttempt(w, r) {
+		return
+	}
+	invite, err := deps.Invites.Peek(r.URL.Query().Get("invite"))
+	if err != nil {
+		reason := feishuInviteReason(err)
+		s.audit(r.Context(), "", "feishu_invite_reject", "admin_user", "", map[string]any{"reason": reason}, "denied")
+		s.renderFeishuAdminStop(w, feishu.FlowAdminInvite, reason)
+		return
+	}
+	ctx := r.Context()
+	// The account may have been deleted, disabled or had its invitation regenerated since
+	// the link was minted. All three mean the same thing to the person holding the link.
+	target, reason, ok := s.inviteTarget(ctx, invite.AdminUserID)
+	if !ok || target.InviteNonce != invite.Nonce {
+		if ok {
+			reason = "invite_revoked"
+		}
+		s.audit(ctx, invite.Actor, "feishu_invite_reject", "admin_user", inviteUserID(invite.AdminUserID),
+			map[string]any{"reason": reason}, "denied")
+		s.renderFeishuAdminStop(w, feishu.FlowAdminInvite, reason)
+		return
+	}
+	if !s.feishuAdminActorStillAdmin(ctx, invite.Actor) {
+		s.audit(ctx, invite.Actor, "feishu_invite_reject", "admin_user", inviteUserID(target.ID),
+			map[string]any{"reason": "actor is no longer an administrator"}, "denied")
+		s.renderFeishuAdminStop(w, feishu.FlowAdminInvite, "invite_revoked")
+		return
+	}
+	nonce, err := feishuNonce()
+	if err != nil {
+		writeAPIError(w, domain.ErrInternal("cannot start the Feishu flow"))
+		return
+	}
+	state, err := deps.States.Sign(feishu.Attempt{
+		Flow: feishu.FlowAdminInvite, AdminUserID: target.ID, Actor: invite.Actor,
+		Nonce: nonce, Invite: invite.Nonce,
+	})
+	if err != nil {
+		writeAPIError(w, domain.ErrInternal("cannot start the Feishu flow"))
+		return
+	}
+	s.redirectToFeishu(w, r, state)
 }
+
+// finishFeishuAdminLogin signs an administrator in to the console.
+//
+// The identity is resolved against admin_users, never against the API keys a customer may
+// have bound: an open_id that belongs to a customer is not an administrator, whatever else
+// it is bound to. That separation is the whole point of the flow (M66 §D2).
+func (s *Server) finishFeishuAdminLogin(w http.ResponseWriter, r *http.Request, identity feishu.Identity) {
+	ctx := r.Context()
+	user, err := s.deps.AdminStore.FindAdminUserByFeishuOpenID(ctx, identity.OpenID)
+	if err != nil {
+		s.deps.Log.Error("resolving the Feishu identity failed", "err", err)
+		s.renderFeishuAdminStop(w, feishu.FlowAdminLogin, "error")
+		return
+	}
+	if user == nil {
+		s.audit(ctx, "", "feishu_login_reject", "admin_user", "", map[string]any{"reason": "unbound open id", "open_id": identity.OpenID}, "denied")
+		s.renderFeishuAdminStop(w, feishu.FlowAdminLogin, "unbound")
+		return
+	}
+	if user.Status != domain.AdminActive {
+		s.audit(ctx, "", "feishu_login_reject", "admin_user", user.Username,
+			map[string]any{"reason": "account " + user.Status, "open_id": identity.OpenID}, "denied")
+		s.renderFeishuAdminStop(w, feishu.FlowAdminLogin, "disabled")
+		return
+	}
+	s.issueAdminFeishuSession(w, r, user, "feishu", identity.OpenID)
+}
+
+// finishFeishuAdminInvite binds the identity that just authorized to the account the
+// invitation names, activates it and signs that browser in.
+//
+// The row is re-read and the invitation handle re-compared: between minting the link and
+// redeeming it the account may have been disabled, deleted, or had its invitation
+// regenerated (which is how an operator retires a link that was sent to the wrong person).
+func (s *Server) finishFeishuAdminInvite(w http.ResponseWriter, r *http.Request, state feishu.State, identity feishu.Identity) {
+	ctx := r.Context()
+	target, reason, ok := s.inviteTarget(ctx, state.AdminUserID)
+	if !ok || target.InviteNonce != state.Invite {
+		if ok {
+			reason = "invite_revoked"
+		}
+		s.audit(ctx, state.Actor, "feishu_bind_reject", "admin_user", inviteUserID(state.AdminUserID),
+			map[string]any{"reason": reason, "open_id": identity.OpenID}, "denied")
+		s.renderFeishuAdminStop(w, feishu.FlowAdminInvite, reason)
+		return
+	}
+	if !s.feishuAdminActorStillAdmin(ctx, state.Actor) {
+		s.audit(ctx, state.Actor, "feishu_bind_reject", "admin_user", inviteUserID(target.ID),
+			map[string]any{"reason": "actor is no longer an administrator"}, "denied")
+		s.renderFeishuAdminStop(w, feishu.FlowAdminInvite, "invite_revoked")
+		return
+	}
+	previous := target.FeishuOpenID
+	// The binding, the redeemed invitation and the activation are one statement, so no
+	// window exists in which the account is bound but still unusable (see the store method).
+	if err := s.deps.AdminStore.BindAdminUserFeishu(ctx, target.ID, domain.FeishuBinding{
+		OpenID: identity.OpenID, UnionID: identity.UnionID, Name: identity.Name, BoundBy: "invite:" + state.Actor,
+	}); err != nil {
+		reason := "error"
+		if apiErr := toAPIError(err); apiErr.Status == http.StatusConflict {
+			reason = "conflict"
+		}
+		s.audit(ctx, state.Actor, "feishu_bind_reject", "admin_user", inviteUserID(target.ID),
+			map[string]any{"reason": reason, "open_id": identity.OpenID}, "failed")
+		s.renderFeishuAdminStop(w, feishu.FlowAdminInvite, reason)
+		return
+	}
+	s.audit(ctx, state.Actor, "feishu_bind", "admin_user", inviteUserID(target.ID), map[string]any{
+		"open_id": identity.OpenID, "union_id": identity.UnionID, "name": identity.Name,
+		"previous_open_id": previous, "invited": true,
+	}, "ok")
+	// Re-read: the write above activated the account and is also what the session is for.
+	bound, err := s.deps.AdminStore.GetAdminUser(ctx, target.ID)
+	if err != nil || bound == nil {
+		s.deps.Log.Error("re-reading an invited administrator failed", "err", err, "admin_user", target.ID)
+		s.renderFeishuAdminStop(w, feishu.FlowAdminInvite, "error")
+		return
+	}
+	s.issueAdminFeishuSession(w, r, bound, "feishu_invite", identity.OpenID)
+}
+
+// inviteTarget loads the account an invitation names and says whether the link may still be
+// used. A missing row and a disabled account are both "this link is no longer good" as far as
+// the person holding it is concerned; the reason differs so the page can tell them whether to
+// ask for a new link or to ask why the account was stopped. An unexpected store failure is
+// logged rather than dressed up as a revoked invitation — that one is the operator's problem.
+func (s *Server) inviteTarget(ctx context.Context, id int64) (*domain.AdminUser, string, bool) {
+	user, err := s.deps.AdminStore.GetAdminUser(ctx, id)
+	if err != nil {
+		if toAPIError(err).Status != http.StatusNotFound {
+			s.deps.Log.Error("loading the administrator an invitation names failed", "err", err, "admin_user", id)
+		}
+		return nil, "invite_revoked", false
+	}
+	if user.Status == domain.AdminDisabled {
+		return user, "disabled", false
+	}
+	return user, "", true
+}
+
+// issueAdminFeishuSession issues the console cookie for an administrator whose identity was
+// just proven, audits the login and sends the browser into the console.
+func (s *Server) issueAdminFeishuSession(w http.ResponseWriter, r *http.Request, user *domain.AdminUser, method, openID string) {
+	ctx := r.Context()
+	if s.deps.Admin == nil {
+		writeAPIError(w, domain.ErrUnsupported("the management API is disabled"))
+		return
+	}
+	session, err := s.deps.Admin.IssueSession(ctx, user)
+	if err != nil {
+		s.deps.Log.Error("issuing an administrator session failed", "err", err, "admin_user", user.Username)
+		s.renderFeishuAdminStop(w, feishu.FlowAdminLogin, "error")
+		return
+	}
+	s.setAdminCookie(w, session)
+	s.audit(ctx, user.Username, "login", "admin_user", user.Username,
+		map[string]any{"method": method, "open_id": openID}, "ok")
+	feishuNoStore(w.Header())
+	http.Redirect(w, r, s.adminConsoleURL(), http.StatusSeeOther)
+}
+
+// adminConsoleURL is where an administrator lands after signing in (or after being told why
+// they could not). The console is served from one mount, and this is the only place that
+// builds its address.
+func (s *Server) adminConsoleURL() string {
+	if s.deps.Feishu != nil && s.deps.Feishu.ConsoleURL != "" {
+		return s.deps.Feishu.ConsoleURL
+	}
+	return s.url("/admin/ui/")
+}
+
+// feishuAdminActorStillAdmin re-reads the operator who minted an invitation or started a
+// binding: a demotion or a deletion retires whatever they had started.
+func (s *Server) feishuAdminActorStillAdmin(ctx context.Context, username string) bool {
+	if strings.TrimSpace(username) == "" || s.deps.AdminStore == nil {
+		return false
+	}
+	user, err := s.deps.AdminStore.GetAdminUserByUsername(ctx, username)
+	if err != nil {
+		s.deps.Log.Warn("re-checking the Feishu administrator actor failed", "err", err, "actor", username)
+		return false
+	}
+	return user.Role == domain.RoleAdmin && user.Status == domain.AdminActive
+}
+
+// inviteUserID renders an administrator id for an audit row. An invitation names its target
+// by id, and a deleted account has no username left to report.
+func inviteUserID(id int64) string { return strconv.FormatInt(id, 10) }
 
 // renderFeishuStop explains a callback that could not be attributed to a flow. It is
 // deliberately plain: no script, no styling beyond the browser's, and no values echoed back.
-func (s *Server) renderFeishuStop(w http.ResponseWriter, status int, message string) {
+// target is where the "go back" link points; empty means the console's API keys page, which
+// is where an administrator whose key binding failed wants to be.
+func (s *Server) renderFeishuStop(w http.ResponseWriter, status int, message, target string) {
+	console := s.url("/admin/ui/#/keys")
+	label := "返回控制台 API Keys"
+	if strings.TrimSpace(target) != "" {
+		console, label = target, "返回控制台"
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
-	console := s.url("/admin/ui/#/keys")
 	body := "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">" +
 		"<meta name=\"viewport\" content=\"width=device-width\"><title>飞书登录</title></head><body>" +
 		"<h1>飞书登录未能完成</h1><p>" + message + "</p>" +
-		"<p><a href=\"" + console + "\">返回控制台 API Keys</a></p>" +
+		"<p><a href=\"" + console + "\">" + label + "</a></p>" +
 		"</body></html>"
 	_, _ = io.WriteString(w, body)
 }
@@ -208,12 +469,90 @@ func feishuStateMessage(reason string) string {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Console administrator messages
+// ---------------------------------------------------------------------------
+
+// renderFeishuAdminStop explains a console login or invitation that did not complete. The
+// console flows get their own page rather than a redirect with a reason code: on a login
+// failure there is no console page to return to (the person front of it is not signed in
+// yet), and on an invitation failure the person may never have seen the console at all.
+func (s *Server) renderFeishuAdminStop(w http.ResponseWriter, flow feishu.Flow, reason string) {
+	title := "飞书登录未能完成"
+	message := feishuAdminMessage(reason)
+	if flow == feishu.FlowAdminInvite {
+		title = "管理员邀请未能完成"
+		if reason == "invite_revoked" || reason == "invite_expired" {
+			message += "若你仍需要这个账号，请让管理员重新生成一条邀请链接。"
+		}
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	feishuNoStore(w.Header())
+	w.WriteHeader(http.StatusForbidden)
+	body := "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">" +
+		"<meta name=\"viewport\" content=\"width=device-width\"><title>" + title + "</title></head><body>" +
+		"<h1>" + title + "</h1><p>" + message + "</p>" +
+		"<p><a href=\"" + s.adminConsoleURL() + "\">返回控制台登录</a></p>" +
+		"</body></html>"
+	_, _ = io.WriteString(w, body)
+}
+
+// feishuAdminMessage is the console's vocabulary. It says what happened and who can fix it,
+// and it never repeats anything Feishu told us: a misconfiguration is logged, not shown.
+func feishuAdminMessage(reason string) string {
+	switch reason {
+	case "unbound":
+		return "这个飞书账号还没有绑定任何管理员账号。请联系管理员在控制台「管理员」页生成一条邀请链接。"
+	case "disabled":
+		return "该管理员账号已被停用，无法登录。请联系其他管理员重新启用，或用其他账号登录。"
+	case "cancelled":
+		return "已取消授权，没有做任何改动。可以重新点击「飞书扫码登录」再试一次。"
+	case "expired":
+		return "这次授权已经超时（授权页停留太久）。请回到控制台登录页重新发起。"
+	case "replay", "invalid":
+		return "这次授权请求无法校验（链接不完整、已被使用或被修改）。请重新发起。"
+	case "invite_expired":
+		return "这条邀请链接已经过期。"
+	case "invite_revoked":
+		return "这条邀请链接已失效：它可能已经被使用过，或者管理员重新生成了新的链接。"
+	case "conflict":
+		return "这个飞书账号已经绑定到另一个管理员账号了。请先在那边解绑，或换一个飞书账号。"
+	case "no_app_permission":
+		return "你在飞书侧没有该应用的使用权限，请联系飞书管理员把可用范围加上你。"
+	case "app_error":
+		return "飞书应用凭据或可用范围有问题，请检查网关的 feishu 配置与飞书后台。"
+	case "rate_limited":
+		return "尝试过于频繁，请稍后再试。"
+	default:
+		return "飞书登录未能完成，请重试；若持续失败请联系管理员查看网关日志。"
+	}
+}
+
+// feishuInviteReason maps a refused invitation token onto that vocabulary. An expired link
+// and a retired one are different answers for the person holding it: the first needs the
+// administrator to generate a new one, the second usually means somebody already used it.
+func feishuInviteReason(err error) string {
+	var stateErr *feishu.StateError
+	if errors.As(err, &stateErr) {
+		switch stateErr.Reason {
+		case "expired":
+			return "invite_expired"
+		case "replayed":
+			return "invite_revoked"
+		default:
+			return "invalid"
+		}
+	}
+	return "invalid"
+}
+
 // finishFeishuBind writes the binding the administrator asked for.
 func (s *Server) finishFeishuBind(w http.ResponseWriter, r *http.Request, state feishu.State, identity feishu.Identity) {
 	ctx := r.Context()
 	// The role is re-checked against the live record: a state minted before a demotion or a
 	// deletion must not complete a binding.
-	if !s.feishuActorStillAdmin(ctx, state.Actor) {
+	if !s.feishuAdminActorStillAdmin(ctx, state.Actor) {
 		s.audit(ctx, state.Actor, "feishu_bind_reject", "api_key", strconv.FormatInt(state.KeyID, 10), map[string]any{"reason": "actor is no longer an administrator"}, "denied")
 		s.redirectConsole(w, r, "rejected", state.KeyID)
 		return
@@ -426,7 +765,7 @@ func (s *Server) handleAdminBindKeyFeishu(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, domain.ErrInternal("cannot start the Feishu flow"))
 		return
 	}
-	state, err := s.deps.Feishu.States.Sign(feishu.FlowBind, key.ID, user.Username, nonce)
+	state, err := s.deps.Feishu.States.Sign(feishu.Attempt{Flow: feishu.FlowBind, KeyID: key.ID, Actor: user.Username, Nonce: nonce})
 	if err != nil {
 		writeAPIError(w, domain.ErrInternal("cannot start the Feishu flow"))
 		return
@@ -531,20 +870,6 @@ func (s *Server) allowFeishuAttempt(w http.ResponseWriter, r *http.Request) bool
 	bucket.count++
 	s.feishuMu.Unlock()
 	return true
-}
-
-// feishuActorStillAdmin re-reads the operator's record. A binding started before a
-// demotion must not complete after it.
-func (s *Server) feishuActorStillAdmin(ctx context.Context, username string) bool {
-	if strings.TrimSpace(username) == "" || s.deps.AdminStore == nil {
-		return false
-	}
-	user, err := s.deps.AdminStore.GetAdminUserByUsername(ctx, username)
-	if err != nil {
-		s.deps.Log.Warn("re-checking the Feishu binding actor failed", "err", err)
-		return false
-	}
-	return user.Role == "admin"
 }
 
 // feishuSameHost reports whether the portal shares a hostname with this server, which is

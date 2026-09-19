@@ -145,7 +145,7 @@ func TestFeishuDSHBrowserCallbackCommitsDocumentWithCookie(t *testing.T) {
 	f.bindAndEnable(t, key, true, "alice")
 	f.api.deps.Feishu.RedirectURI = "https://chat.test/feishu/callback"
 	f.api.deps.Feishu.PortalURL = "https://chat.test:18300"
-	state, err := f.states.Sign(feishu.FlowDSHLogin, 0, "", "browser-handoff-success")
+	state, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowDSHLogin, Nonce: "browser-handoff-success"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestFeishuDSHBrowserRefusalsNeverRenderHandoff(t *testing.T) {
 			if name != "unbound" {
 				f.bindAndEnable(t, key, name != "disabled", "alice")
 			}
-			state, err := f.states.Sign(feishu.FlowDSHLogin, 0, "", "browser-refusal")
+			state, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowDSHLogin, Nonce: "browser-refusal"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -214,7 +214,7 @@ func TestFeishuDSHCrossHostBrowserRetainsQueryRedirect(t *testing.T) {
 	f.bindAndEnable(t, key, true, "alice")
 	f.api.deps.Feishu.RedirectURI = "https://chat.test/feishu/callback"
 	f.api.deps.Feishu.PortalURL = "https://other.test:18300"
-	state, err := f.states.Sign(feishu.FlowDSHLogin, 0, "", "cross-host-browser")
+	state, err := f.states.Sign(feishu.Attempt{Flow: feishu.FlowDSHLogin, Nonce: "cross-host-browser"})
 	if err != nil {
 		t.Fatal(err)
 	}

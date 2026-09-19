@@ -14,6 +14,7 @@ import (
 	"github.com/winger/ai-gateway/internal/admin"
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/feishu"
 	"github.com/winger/ai-gateway/internal/store"
 )
 
@@ -130,6 +131,78 @@ func TestBasePathServesEverySurfaceUnderThePrefix(t *testing.T) {
 		if resp.StatusCode != tc.status {
 			t.Errorf("%s %s: status = %d, want %d", tc.method, tc.path, resp.StatusCode, tc.status)
 		}
+	}
+}
+
+// The Feishu surface is mounted like every other route: its patterns are the served paths
+// without the prefix, because withBasePath strips the prefix before the mux sees the
+// request. A pattern written with the prefix — which is what the browser-visible callback
+// URL carries — would never match, so the login entry point would answer 404 in exactly the
+// deployments that run behind a reverse proxy.
+func TestBasePathServesTheFeishuSurface(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.Database = config.Database{
+		Path: filepath.Join(t.TempDir(), "basepath-feishu.db"), BusyTimeoutMS: 2000, WAL: false, MaxOpenConns: 2,
+	}
+	cfg.Server.BasePath = "/aigw"
+	cfg.Feishu.Enabled = true
+	cfg.Feishu.AdminLogin = true
+	cfg.Feishu.CallbackURL = "http://gw.example:8090/aigw/feishu/callback"
+	db, err := store.Open(ctx, cfg.Database)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	states, err := feishu.NewStateCodec([]byte("state-key"), 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invites, err := feishu.NewStateCodec([]byte("invite-key"), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(Deps{
+		Config:     &cfg,
+		AdminStore: db,
+		Feishu: &FeishuDeps{
+			Client: &feishu.Client{
+				AppID: "cli_test", AppSecret: "secret",
+				AuthorizeURL: "https://accounts.feishu.cn/open-apis/authen/v1/authorize",
+			},
+			States:       states,
+			Invites:      invites,
+			RedirectURI:  cfg.Feishu.CallbackURL,
+			LoginPath:    "/feishu/login",
+			CallbackPath: "/feishu/callback",
+			InvitePath:   "/feishu/invite",
+			AdminLogin:   true,
+			ConsoleURL:   "/aigw/admin/ui/",
+		},
+	})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	// The login entry point redirects to the consent page...
+	resp := callBaseWith(t, noRedirectClient(), ts, http.MethodGet, "/aigw/feishu/login?mode=admin", "", "")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("GET /aigw/feishu/login?mode=admin: status = %d, want 302", resp.StatusCode)
+	}
+	// ...and the callback needs a state, so an unknown one is refused with an explanation
+	// rather than a 404: the route exists under the prefix.
+	resp = callBaseWith(t, noRedirectClient(), ts, http.MethodGet, "/aigw/feishu/callback?state=x", "", "")
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound || !strings.Contains(string(body), "飞书登录未能完成") {
+		t.Fatalf("GET /aigw/feishu/callback: status = %d body = %q", resp.StatusCode, body)
+	}
+	// The invitation entry point is part of the same surface.
+	resp = callBaseWith(t, noRedirectClient(), ts, http.MethodGet, "/aigw/feishu/invite?invite=x", "", "")
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("GET /aigw/feishu/invite: status = %d, want the explanation page", resp.StatusCode)
 	}
 }
 

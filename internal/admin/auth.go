@@ -74,6 +74,26 @@ func (a *Auth) Login(ctx context.Context, username, password, clientKey string) 
 	}, nil
 }
 
+// IssueSession mints a session for an administrator that something else has already
+// authenticated — the Feishu identity flow, which proves who somebody is without a
+// password (M66). The caller must have verified the identity and the account's status; this
+// only applies the shared session rules.
+func (a *Auth) IssueSession(ctx context.Context, user *domain.AdminUser) (*Session, error) {
+	if user == nil || user.ID == 0 {
+		return nil, domain.ErrUnauthorized("missing administrator")
+	}
+	session, err := a.service.Issue(ctx, &sessionauth.Principal{
+		ID: user.ID, Username: user.Username, Role: user.Role,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Session{
+		ID: session.ID, Token: session.Token, ExpiresAt: session.ExpiresAt,
+		User: &domain.AdminUser{ID: user.ID, Username: user.Username, Role: user.Role},
+	}, nil
+}
+
 // Authenticate validates a session cookie pair (id + token).
 func (a *Auth) Authenticate(ctx context.Context, sessionID, token string) (*domain.AdminUser, error) {
 	principal, err := a.service.Authenticate(ctx, sessionID, token)
@@ -120,6 +140,14 @@ func (a adminStore) PrincipalByUsername(ctx context.Context, username string) (*
 	user, err := a.store.GetAdminUserByUsername(ctx, username)
 	if err != nil {
 		return nil, "", err
+	}
+	// An account that is not active has no password as far as the login path is concerned:
+	// returning the stored hash would let a disabled administrator sign in, and returning a
+	// distinct error would tell an attacker the account exists. This is also what makes an
+	// invitation-only account (empty hash) impossible to sign in with, and what keeps the
+	// session service from having to know the lifecycle at all.
+	if user.Status != domain.AdminActive {
+		return &sessionauth.Principal{ID: user.ID, Username: user.Username, Role: user.Role}, "", nil
 	}
 	return &sessionauth.Principal{ID: user.ID, Username: user.Username, Role: user.Role}, user.PasswordHash, nil
 }

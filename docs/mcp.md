@@ -72,7 +72,7 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
 
 | 工具 | 入参 | 返回 |
 |---|---|---|
-| `admin_endpoints` | `filter?`（name/path/summary 子串）、`group?`（system/keys/requests/audit/accounts/org/models/providers/billing/backups/portal/pricing/mcp/hooks/settings）、`limit?` | `{count,total,groups,endpoints:[{name,method,path,summary,group,role,params[],query[],has_body,body_fields[],dangerous,tool,reason?}]}`（`body_fields` 是 M40 新增：概览行直接给出请求体的顶层字段名） |
+| `admin_endpoints` | `filter?`（name/path/summary 子串）、`group?`（system/keys/requests/audit/accounts/org/models/providers/billing/backups/portal/admins/pricing/mcp/hooks/settings）、`limit?` | `{count,total,groups,endpoints:[{name,method,path,summary,group,role,params[],query[],has_body,body_fields[],dangerous,tool,reason?}]}`（`body_fields` 是 M40 新增：概览行直接给出请求体的顶层字段名） |
 | `admin_describe` | `name` 或 `names[]` | 该接口的 method/path/摘要/所需角色、路径参数与查询参数说明、**请求体 JSON Schema**、可直接照抄的 `example`、危险接口的 `confirm_reason` |
 | `admin_request` | `name`、`params?`（路径参数）、`query?`（查询参数）、`body?`（JSON 对象）、`confirm?` | `{endpoint,method,path,status,ok,body|text|meta,truncated?}` |
 
@@ -96,7 +96,8 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
   `{data,count,total,limit,offset,has_more}`（`limit` 的默认值与上限逐接口不同，`admin_describe` 会写出来；
   `offset` 必须是 >= 0 的整数，否则 400）。取下一页就是 `offset += count`，`has_more=false` 表示到底。
   账户自助查询工具 `get_ledger` / `list_requests` / `list_invoices` 不在此约定内，仍只有 `limit`。
-- 注册但不暴露的 3 条：`auth/login`、`auth/logout`（Cookie 语义）、`backups/{id}/download`（二进制大文件）。
+- 注册但不暴露的接口：`auth/login`、`auth/logout`、`auth/methods`（都是浏览器 Cookie 语义）、
+  `backups/{id}/download`（二进制大文件），以及整个控制台智能问答组 `chat/*`（按登录账号隔离，令牌没有这种账号）。
   它们仍出现在 `admin_endpoints` 里，`tool=null` 并附原因；调用会被拒并说明。
 - 常见排障路径都在里面：`admin_provider_logs`（插件 stderr）、`admin_test_provider`（真实探测）、
   `admin_explain_router`（为什么这个模型不可用）、`admin_billing_invariants`、`admin_list_audit_logs`。
@@ -116,6 +117,17 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
   账号侧用 `admin_update_account` 的 `body.org_node_ids` 设置该账号的归属（同样是整表替换）。
   **节点上的标签会被整棵子树继承**：挂一个带 `grants` 的标签等于给该子树下所有账号的**全部 API Key** 放权，
   所以这几条路由标记为危险接口、`admin_describe` 会给出 `confirm_reason`。
+
+- **控制台管理员与飞书扫码登录是后台可管理的**（M66，`group=admins`）：`admin_list_admin_users` 列出每个
+  管理员账号（角色 `admin`/`viewer`、状态 `pending`/`active`/`disabled`、飞书绑定、是否已发出邀请、
+  是否由 `bootstrap.admin` 配置重建）；`admin_create_admin_user` 建号（`body.password` 可省略 ——
+  省略即 `pending`，只能用邀请链接激活）；`admin_update_admin_user` 改角色/状态（停用会立即注销该账号
+  已登录的会话）；`admin_reset_admin_password` 发一次性口令并注销会话；`admin_invite_admin_user` 生成
+  **邀请链接**（链接本身就是凭据：谁先打开并完成飞书授权，谁就获得这个账号；重新生成即作废上一条）；
+  `admin_unbind_admin_user_feishu` 解绑身份；`admin_delete_admin_user` 删除账号（连带它的控制台问答记录）。
+  部署始终保留至少一个 `role=admin & status=active` 的账号，因此最后一名不能被降级/停用/删除（409），
+  也不能删除自己或 `bootstrap.admin` 重建的那一行。**客户 API Key 上的飞书绑定不是管理员身份**：
+  扫码登录只按 `admin_users` 里的绑定解析，客户身份永远拿不到控制台会话。
 
 ### 模型级推理强度示例
 

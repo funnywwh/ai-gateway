@@ -5,17 +5,24 @@ kind: "spec"
 
 # 飞书身份：API Key 绑定与 DSH 门户登录
 
-> 状态：**绑定/解绑已实现（M60）；DSH 门户飞书登录已实现（M61）**。
-> 设计：[M60 aigw Key 绑定](design/m60-aigw-key-feishu-binding.md)、[M61 dshgw 门户登录](design/m61-dshgw-feishu-login.md)。
+> 状态：**绑定/解绑已实现（M60）；DSH 门户飞书登录已实现（M61）；控制台多管理员与管理员飞书扫码登录已实现（M66）**。
+> 设计：[M60 aigw Key 绑定](design/m60-aigw-key-feishu-binding.md)、[M61 dshgw 门户登录](design/m61-dshgw-feishu-login.md)、
+> [M66 控制台管理员扫码登录](design/m66-console-admin-feishu-login.md)。
 > 部署形态与租户隔离见 [dshgw 多租户网关](dshgw.md)。
 
 ## 1. 它解决什么问题
 
-两件事，共用**一个**飞书自建应用：
+三件事，共用**一个**飞书自建应用、**一个**回调地址：
 
 1. **绑定（控制台）**：管理员在 *API Keys* 页把一把 Key 绑定到一个真实存在的飞书账号。绑定通过飞书授权页完成，
    因此「这个飞书账号属于你」是被飞书证明过的，而不是手填一个 id。
 2. **登录（DSH 门户）**：被绑定的人打开 DSH 门户点「飞书登录」，直接进入自己的租户，不需要粘贴 API Key。
+3. **登录（管理控制台，M66）**：控制台可以有**多个管理员账号**，每个管理员把自己的飞书身份绑到账号上之后，
+   在控制台登录页点「飞书扫码登录」即可进入——用手机飞书扫授权页上的二维码，或直接点同意（见 §5b）。
+
+**两套身份是分开的命名空间**：`api_keys.feishu_open_id` 决定「进哪个租户」，`admin_users.feishu_open_id`
+决定「能不能进控制台」。同一个飞书账号可以同时是某把 Key 的绑定身份和某个管理员的登录身份，也可以只是其中之一；
+**客户的飞书身份永远拿不到控制台会话**（登录只查 `admin_users`）。
 
 绑定关系是**一把 Key ↔ 一个飞书账号**（1:1）。Key 属于某个账户，账户上记录着它进入哪个 dsh 租户，
 所以「这个人是谁」→「他该进哪个租户」是一条 aigw 内的查询，不需要在 dshgw 侧再存一份身份表。
@@ -53,6 +60,8 @@ feishu:
   app_secret: "xxxxxxxx"                     # 也可用 GW_FEISHU_APP_SECRET
   callback_url: "http://192.168.190.86:8090/feishu/callback"   # 与飞书后台登记的一致
   dsh_login: true                            # 开放门户登录（false 则只做控制台绑定）
+  admin_login: true                          # 开放控制台管理员扫码登录（M66）
+  invite_ttl_s: 3600                         # 管理员邀请链接有效期（300..604800 秒）
   auto_enable_dsh: true                      # 绑定成功即启用该账号的 DSH（需 dsh_login 为 true）
   portal_url: ""                             # 空则由下面的 dshgw 块派生
 dshgw:
@@ -67,7 +76,10 @@ dshgw:
 - `callback_url` 的 path 必须是 `<server.base_path>/feishu/callback`；不一致时 aigw **启动即报错**，
   而不是等用户走完授权页再撞飞书错误页。
 - `login_url`（跳飞书前的中转）与 dshgw 侧的登录入口都由 `callback_url` 的 origin 推导，只有一处要写对。
-- 签名密钥（state / ticket）留空时从 `credentials_key` 派生（按用途分离）；两者都为空且 `enabled=true` 时启动报错。
+- 签名密钥（state / ticket / invite）留空时从 `credentials_key` 派生（按用途分离）；state 与 credentials_key
+  都为空且 `enabled=true` 时启动报错（`admin_login` 开着时邀请密钥同样要有来源）。
+- 回调地址的 path 必须是 `<server.base_path>/feishu/callback`；`base_path` 非空的部署由反向代理带前缀转发，
+  网关内部按去前缀后的路径挂载（`/feishu/login`、`/feishu/callback`、`/feishu/invite`）。
 - 整套功能默认关闭；关闭时这些字段一个都不读，路由也不注册（访问返回 404），控制台不显示任何飞书元素。
 
 ## 4. 控制台怎么用（绑定/解绑）
@@ -130,12 +142,72 @@ dshgw:
 - 已经建立的 dsh 会话不因飞书侧变化而立即失效：吊销语义仍由 `dsh_enforce` / `key_revalidate` /
   控制台停用按钮负责，飞书登录只负责「进门」。
 
+## 5b. 控制台怎么用（多管理员 + 飞书扫码登录）
+
+控制台的 *管理员* 页（`#/admins`，只有 `role=admin` 能改）管理所有能登录这个控制台的账号；
+每个账号有自己的角色与状态，并且（可选）绑一个飞书身份，用来扫码登录。
+
+| 列/按钮 | 行为 |
+|---|---|
+| 角色 | `admin` 可读写全部管理接口；`viewer` 只读（由 `admin.RequireRole` 判定，未知取值一律按只读） |
+| 状态 | `pending`（已建号但没有任何可用凭据）、`active`、`disabled`（立即停用并注销既有会话） |
+| 飞书 | 已绑定显示姓名（悬停显示完整 `open_id`、绑定人、绑定时间）；未绑定显示「未绑定」 |
+| 「邀请链接」 | 生成/重新生成一条邀请链接（见下）；重新生成会立即作废上一条 |
+| 「编辑」 | 改角色 / 停用 / 重新启用 |
+| 「重置口令」 | 发一次性口令（只显示一次）并注销该账号已登录的会话 |
+| 「解绑飞书」 | 清空该账号的飞书身份（幂等）；若它没有口令，账号退回 `pending` 并立即失去控制台会话 |
+| 「删除」 | 删除账号，连带删除它在控制台的智能问答会话与技能库（外键级联）；不能删自己、不能删最后一个可用管理员、不能删 `bootstrap.admin` 重建的那一行 |
+
+### 5b.1 新增一个管理员（邀请链接，不需要口令）
+
+```
+控制台「管理员」页 → 新建管理员（用户名 + 角色，口令留空 → 账号为 pending）
+  → 「邀请链接」→ 得到 https://<回调地址的 origin>/feishu/invite?invite=<签名值>
+  → 把链接发给对方（IM/邮件）
+对方在浏览器打开链接 → 飞书授权页（扫码或点同意）
+  → 回调把「该浏览器里登录的飞书账号」绑定到这个管理员账号，账号自动变为 active
+  → 对方当场进入控制台，cookie 就是控制台的 aigw_admin 会话
+```
+
+约定：
+
+- 链接**只能用成功一次**：兑换成功后账号上的邀请句柄被清空，同一条链接再打开会看到「已失效」。
+- **取消授权不会作废链接**：授权页点取消只是消耗掉这一次的 OAuth state，链接本身仍然有效（重新打开即可重试）；
+  链接只在成功兑换、账号被停用/删除、或管理员重新生成时失效。
+- 有效期 `feishu.invite_ttl_s`（默认 1 小时）；打开链接的**浏览器里登录的飞书账号就是被绑定的身份**，
+  所以请在正确的浏览器/身份下打开（这也是它默认只有 1 小时的原因）。
+- 邀请型账号没有口令，**口令登录对它永远不可用**（库里 `password_hash` 是空串）。要给它一条口令兜底，
+  用「重置口令」。
+- 一个飞书身份最多绑定一个管理员账号（数据库唯一索引）；把它绑到新账号需要先在旧账号上解绑。
+
+### 5b.2 用飞书扫码登录控制台
+
+```
+控制台登录页「飞书扫码登录」 → <base>/feishu/login?mode=admin   （匿名，按 IP 限流）
+  → 飞书授权页（手机扫码，或直接点同意）
+  → <base>/feishu/callback → 查出该 open_id 绑定的管理员账号
+      ├ 没有绑定          → 说明页：尚未绑定，请让管理员生成邀请链接
+      ├ status != active  → 说明页：账号已停用
+      └ active            → 签发 aigw_admin 会话 cookie → 303 进控制台
+```
+
+要点：
+
+- 登录页是否显示这个按钮由 `GET /admin/api/v1/auth/methods` 决定（登录前就能问），
+  所以 `feishu.enabled=false` 或 `admin_login=false` 的部署看不到任何飞书元素。
+- 登录页**不自己画二维码**：二维码是飞书授权页提供的（也可以直接点同意）。网关因此不需要二维码编码器，
+  也没有「桌面等待、手机确认」那条链路——那条链路要额外处理「二维码被别人的手机扫走」的登录 CSRF。
+- 会话与口令登录**完全相同**：同名 cookie、同样的 12 小时 TTL、同样的角色判定。
+- 停用一个账号会立即结束它已登录的会话（不只是下一次登录被拒）。
+
 ## 6. 隐私与审计口径
 
-- 存储：Key 行上的 `open_id`（应用内唯一标识）、`union_id`、姓名、绑定时间、绑定人。
+- 存储：Key 行上的 `open_id`（应用内唯一标识）、`union_id`、姓名、绑定时间、绑定人；管理员行上的同一组字段，
+  外加一个「当前未兑换的邀请句柄」（`invite_nonce`，只用于撤销，不出现在任何接口响应里）。
   **不存储**任何飞书令牌、授权码或 App Secret 的副本。
 - 可见性：这些字段只出现在控制台（管理员）与审计；不进请求日志、不进 `/v1/models`、
   不进任何面向租户的响应。dshgw 不保存 `open_id`（它的审计只记租户与结果）。
+  管理员列表里的 `open_id` 与 Key 行一样对已登录的只读账号可见；`password_hash` 与邀请句柄从不返回。
 - 审计内容：身份标识与结果码，**不含** code / access_token / state 明文 / app_secret。
 - `open_id` 是**应用内**标识：重建应用（换 App ID）后所有绑定失效，需要重新绑定。
 
@@ -154,14 +226,24 @@ dshgw:
 | `20002` client secret invalid | App Secret 抄错（别把 App ID 当 Secret） | 重新复制；配好前 `enabled: false` 不会碰它 |
 | 20027 授权页报错 | 授权链接带了应用未开通的 scope | 保持 `feishu.scopes` 为空 |
 | aigw 启动报「callback_url path … does not match …」 | 回调地址的 path 与 base_path 不符 | 改 `callback_url` 或 `server.base_path` |
+| 登录页没有「飞书扫码登录」 | `feishu.enabled=false`，或 `admin_login=false` | 打开配置（`auth/methods` 会如实回答），改完重启 |
+| 扫码后提示「尚未绑定任何管理员账号」 | 这个飞书账号没有绑到任何 `admin_users` 行（客户 Key 的绑定不算） | 在 *管理员* 页给对应账号生成一条邀请链接，用该身份打开 |
+| 邀请链接打开提示「已失效」 | 已经被兑换过、账号被停用/删除，或管理员重新生成过 | 重新生成一条；确认发给的是正确的人 |
+| 邀请链接提示「已经过期」 | 超过 `feishu.invite_ttl_s`（默认 1 小时） | 重新生成；如果总是不够用，调大这个值（上限 7 天） |
+| 邀请链接提示「已经绑定到另一个管理员账号」 | 该飞书身份已绑在别的管理员上 | 先在那个账号上「解绑飞书」 |
+| 停用管理员后对方仍能操作 | 不可能：停用会立刻注销它的会话；但**改角色**只影响下一次请求 | 若角色改了却仍能写，说明改的是别的账号（列表按 id 排） |
+| 邀请后对方进不去，日志无异常 | 对方在**别的浏览器**打开了链接（绑定的是那个浏览器里的飞书身份） | 让本人重新在自己的浏览器里打开新链接 |
 | 用户被弹回门户、看不到具体错误 | 登录被拒 | 门户错误页会给出原因码；对应 §5 的几种情况 |
 | 「登录成功又被弹回门户」（dshgw 侧） | dshgw 按 https 发了 Secure cookie，而门户是明文 HTTP | 配 `dshgw.public_scheme: http` |
 | 绑定成功但登录仍被拒 | 该账号未启用 DSH / 租户未分配 | 若配置里 `feishu.auto_enable_dsh: false`，绑定不会启用账号 → 控制台账号页点「启用 DSH」；若为 true 则是自动启用失败（控制台会同时提示失败原因，完整错误见 aigw 日志） |
 | 控制台提示「该账号曾被显式停用 DSH，因此未自动启用」 | 有人按过「停用 DSH」（账号有租户映射但开关为关） | 这是有意为之：自动启用不撤销显式停用。要恢复就在账户页手动「启用 DSH」 |
 | aigw 出网受限 | 到不了 `accounts.feishu.cn` / `open.feishu.cn` | 放行出站 HTTPS；绑定/登录会报「不可达」，数据面不受影响 |
 
-相关日志与审计的关键字：`feishu_login_reject`、`feishu_bind_reject`（含 reason：`code_rejected` /
-`credentials` / `app_unavailable` / `rate_limited` / `unreachable` / `unbound open id` / `tenant mismatch`）。
+相关日志与审计的关键字：`feishu_login_reject`、`feishu_bind_reject`、`feishu_invite_reject`（含 reason：
+`code_rejected` / `credentials` / `app_unavailable` / `rate_limited` / `unreachable` / `unbound open id` /
+`tenant mismatch` / `invitation is no longer valid`）；管理员账号自身的写操作审计是
+`create`、`update`、`reset_password`、`invite`、`delete`、`feishu_bind`、`feishu_unbind`（`target_type=admin_user`），
+登录是 `login`（带 `method=password|feishu|feishu_invite`）。
 
 ## 8. 相关接口
 
@@ -172,7 +254,21 @@ dshgw:
 | GET | `/admin/api/v1/keys/{id}/feishu/bind` | 控制台绑定入口（需管理员会话）：签 state 并直接 302 到飞书授权页 |
 | DELETE | `/admin/api/v1/keys/{id}/feishu` | 解绑（幂等），返回 `{"unbound":bool,"key_id":int}` |
 | GET | `/admin/api/v1/keys` | 每行含 `feishu` 对象（见 M60 设计 §3.2） |
+| GET | `/feishu/login?mode=admin` | 开始**控制台管理员登录**授权（匿名、按 IP 限流；M66） |
+| GET | `/feishu/invite?invite=<签名值>` | 管理员**邀请链接**入口：校验邀请后跳到飞书授权页（匿名、按 IP 限流；M66） |
+| GET | `/admin/api/v1/auth/methods` | 公开：本部署提供哪些登录方式与飞书登录入口 URL |
+| GET | `/admin/api/v1/admin-users` | 管理员列表（角色/状态/飞书绑定/邀请待用/是否 bootstrap） |
+| POST | `/admin/api/v1/admin-users` | 新建管理员（可选初始口令；无口令则 pending） |
+| PATCH | `/admin/api/v1/admin-users/{id}` | 改角色 / 停用 / 启用（停用立即注销会话） |
+| POST | `/admin/api/v1/admin-users/{id}/invite` | 生成/重新生成邀请链接（返回 `{url,expires_at,expires_in_s}`） |
+| POST | `/admin/api/v1/admin-users/{id}/password` | 重置口令（一次性返回）并注销既有会话 |
+| DELETE | `/admin/api/v1/admin-users/{id}/feishu` | 解绑该管理员的飞书身份（幂等） |
+| DELETE | `/admin/api/v1/admin-users/{id}` | 删除管理员（连带其控制台问答记录；不能删自己/最后一个/bootstrap 行） |
 | GET | `dshgw` 门户 `/login/feishu` | 消费一次性票据，签发 dsh 会话（M61） |
 | GET | `dshgw` 门户 `/feishu/error?reason=<code>` | 门户自己的错误页 |
 
 MCP：`admin_unbind_key_feishu`（解绑，admin 角色）；绑定没有 MCP 工具——它需要浏览器完成飞书授权页。
+控制台管理员那一组（`admin_list_admin_users` / `admin_create_admin_user` / `admin_update_admin_user` /
+`admin_reset_admin_password` / `admin_invite_admin_user` / `admin_unbind_admin_user_feishu` /
+`admin_delete_admin_user`）都有工具，写操作需要 `confirm=true`；`auth/methods` 注册但不暴露给 MCP
+（浏览器 Cookie 语义）。

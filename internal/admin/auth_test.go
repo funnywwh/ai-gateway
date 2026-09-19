@@ -29,7 +29,9 @@ func newMemStore(t *testing.T, password string) *memStore {
 		t.Fatal(err)
 	}
 	return &memStore{
-		user:     &domain.AdminUser{ID: 1, Username: "admin", PasswordHash: hash, Role: "admin"},
+		user: &domain.AdminUser{
+			ID: 1, Username: "admin", PasswordHash: hash, Role: "admin", Status: domain.AdminActive,
+		},
 		sessions: map[string]sessionRow{},
 	}
 }

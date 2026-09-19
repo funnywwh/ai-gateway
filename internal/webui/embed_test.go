@@ -36,6 +36,7 @@ func TestConsoleAssetsAreEmbedded(t *testing.T) {
 		{"/app.css", http.StatusOK, "--accent", "text/css"},
 		{"/js/app.js", http.StatusOK, "renderShell", "javascript"},
 		{"/js/pages/keys.js", http.StatusOK, "record_output_text", "javascript"},
+		{"/js/pages/admins.js", http.StatusOK, "admin-users", "javascript"},
 		{"/js/pages/chat.js", http.StatusOK, "chat/sessions", "javascript"},
 		{"/js/pages/skills.js", http.StatusOK, "chat/skills", "javascript"},
 		{"/js/pages/chat_artifact.js", http.StatusOK, "allow-scripts", "javascript"},
@@ -73,6 +74,51 @@ func TestConsoleModelRouteEditorIsEmbedded(t *testing.T) {
 	for _, want := range []string{"route-model-filter", "route_provider_", "上游模型名", "保存路由", "api.post('/routes'", "api.patch('/routes/'", "api.del('/routes/'", "reasoning_mode", "reasoning_effort", "推理强度（默认/强制模式生效）", "包括 none", "保留请求的 summary", "上游拒绝请求", "'inherit'", "'default'", "'force'"} {
 		if !strings.Contains(source, want) {
 			t.Errorf("embedded model route editor is missing %q", want)
+		}
+	}
+}
+
+// TestConsoleAdminUsersPageIsEmbedded pins the console half of the M66 contract: the
+// administrators page and the login screen's Feishu entry speak to the paths the server
+// registers, and the sentences an operator has to read before an irreversible action are in
+// the file the browser runs rather than only in a design document.
+//
+// Comments are stripped wherever one could satisfy an assertion on its own (app.js explains
+// why the Feishu entry is a whole-page navigation, admins.js explains the cascade on delete):
+// without that, the prose would keep this test green while the code did nothing.
+func TestConsoleAdminUsersPageIsEmbedded(t *testing.T) {
+	// /auth/methods is written in exactly one place — the api.js wrapper the login screen
+	// calls — so the endpoint is asserted next to that path rather than in its caller.
+	apiSource := stripJSComments(readAsset(t, "/js/api.js"))
+	if !strings.Contains(apiSource, "'/auth/methods'") {
+		t.Error("api.js must ask /auth/methods: it is what tells the console whether this deployment offers Feishu")
+	}
+	// The login screen only offers what the deployment really has, and the click is a full
+	// navigation: the consent page and its cookies belong to the browser, so a fetch here
+	// would leave the operator on a page that never signs anybody in.
+	login := stripJSComments(readAsset(t, "/js/app.js"))
+	for _, want := range []string{"authMethods(", "飞书扫码登录", "window.location.assign", "login_url"} {
+		if !strings.Contains(login, want) {
+			t.Errorf("the login screen is missing %q", want)
+		}
+	}
+	routerSource := readAsset(t, "/js/router.js")
+	for _, want := range []string{"'/admins'", "'./pages/admins.js'"} {
+		if !strings.Contains(routerSource, want) {
+			t.Errorf("the router does not offer %q", want)
+		}
+	}
+	page := stripJSComments(readAsset(t, "/js/pages/admins.js"))
+	for _, want := range []string{
+		"'/admin-users'", "'/invite'", "'/password'", "'/feishu'", "authMethods(",
+		"session.role !== 'admin'",
+		// The two facts an operator cannot discover afterwards: deleting an administrator
+		// takes his console chat library with it, and an invitation link dies on first use.
+		"智能问答会话与技能库", "已失效", "只显示这一次",
+		"由 bootstrap.admin 配置在启动时创建/重建",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the administrators page is missing %q", want)
 		}
 	}
 }
