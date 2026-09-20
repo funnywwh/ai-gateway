@@ -4206,7 +4206,26 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
       `X-Gateway-Degraded: image`、打已声明的 `deepseek-flash` 无该头；再用临时 dshgw state 跑
       `bin/dshgw sync-models`，产出的 settings.yaml 带 `input: [text, image]` + 全 7 档
       `reasoningEfforts` + 路由级 `maxRequestImageBytes`，未声明图片/推理的模型如实省略或写 `false`
-- [ ] 真机验收（重启 8088 后 `/v1/models` 实测、`sync-models` 产物、浏览器里的档位入口与图片附件）
+- [x] **真机验收（2026-09-20 08:53–08:55，本机三单元；浏览器一项留 `docs/TODO.md`）**：
+      `make build`（控制台 minified+gzip，`bin/aigw` 2.6.0 revision `64fd34a`）→ `systemctl --user restart
+      aigw-local.service`，`/healthz` 200、`/version` revision 变 `64fd34a`；`GET /v1/models`
+      六条模型带新字段（deepseek 四条：`context_window: 1000000`/`max_output_tokens: 65536`/
+      `input_modalities: ["text","image"]`/`capabilities{image,reasoning,stream,tools}`；
+      `deepseek-v4.1-flash` 无容量（0/0 未申报）但带图片；`stealth/union-alpha`、`u2-flash` 因
+      `capabilities_override: inherit`＝能力未知，只回 `input_modalities: ["text"]`、不带 `capabilities`）。
+      再 `systemctl --user restart dshgw-verify.service`：四个租户各刷新模型（4/4/4/6 条）并重建 worker，
+      各自 settings.yaml 的 aigw 段都带 `contextWindow`/`maxTokens`/`input: [text, image]`/全 7 档
+      `reasoningEfforts`/路由级 `maxRequestImageBytes: 7340032`，未知能力的模型只写 `id`/`name`；
+      租户自加的 `tirisen` 供应商原样保留。控制台资源（`/admin/ui/js/pages/providers.js`）带新的能力提示
+- [x] **重启期间的 dsh-tenant 插曲（环境问题，非本次改动）**：dsh-tenant 的 SSH 工作区是一条**已死的
+      sshfs 挂载**（sshfs 进程早被回收，挂载点 `Transport endpoint is not connected`），bwrap 因此
+      `exit status 1` 起不来；`fusermount3 -u` 摘掉死挂载后 worker 正常。期间先用 CLI
+      `dshgw tenant restart` 起过一次，但 CLI 退出时 bwrap `--die-with-parent` 把 worker 一起带走
+      （日志里看不到那次的退出）——**长驻进程要由服务自己起**，最后用 `systemctl --user restart
+      dshgw-verify` 让服务接管，五个 worker（18400–18404）全部 ready、四个租户 origin 都回 302。
+      代价：dsh-tenant 的 SSH 工作区目录现在是空的，需要在租户界面里重新选一次该目录（挂载记录仍在
+      `state/ssh-mounts.json`，远端 `aipc:/home/winger/ZT20Q` 实测可达）
+- [ ] 浏览器人工确认（模型菜单的推理档位、给 deepseek 模型附图片、重挂 SSH 工作区）
       见 `docs/TODO.md` M68 小节
 
 ### v2.5.0 + v2.5.1 发布与部署记录（2026-09-19，本机三单元；gpt001 未部署）

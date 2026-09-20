@@ -674,10 +674,15 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
       `bin/dshgw sync-models alice`，产出的 settings.yaml 里四条 deepseek 模型带
       `input: [text, image]` + 全 7 档 `reasoningEfforts`，`gpt-5.6-luna` 等仍只有 `[text]`
       （未声明），`replay` 是 `reasoningEfforts: false`，路由级出现 `maxRequestImageBytes: 7340032`
-- [ ] **真机验收（剩下的一步）**：`scripts/local-run.sh restart` 让新二进制生效 → 运行态 `GET /v1/models`
-      带 `name`/`context_window`/`max_output_tokens`/`input_modalities`/`capabilities`/`reasoning`；
-      `bin/dshgw --config dshgw.yaml sync-models <tenant>` 后该租户 settings.yaml 的 aigw 段带参数；
-      浏览器里模型菜单出现推理档位、deepseek 四个模型能附图片
+- [x] **真机验收（2026-09-20 08:53–08:55，本机三单元）**：`make build` 后 `systemctl --user restart
+      aigw-local` + `dshgw-verify`（`/version` → revision `64fd34a`）→ 运行态 `GET /v1/models` 六条模型
+      带新字段（四条 deepseek：`context_window`/`max_output_tokens`/`input_modalities:["text","image"]`/
+      `capabilities`；`stealth/union-alpha`、`u2-flash` 口径为「能力未知」→ 只回 `input_modalities:["text"]`）；
+      四个真实租户的 settings.yaml 全部落到官方字段（含 `input: [text, image]`、全 7 档、路由级
+      `maxRequestImageBytes: 7340032`），`u2-flash`/`stealth/union-alpha` 只写 `id`/`name`（未知不写），
+      控制台资源里也带了新的能力提示。细节与当时的 dsh-tenant 插曲见 `docs/todo_done.md` 同名小节
+- [ ] **浏览器人工确认（剩下的一步）**：模型菜单里 deepseek 四个模型出现推理档位、能附图片；
+      顺带把 dsh-tenant 的 SSH 工作区重新挂上（见 `docs/todo_done.md` M68 小节的说明）
 
 ## 工具：`make verify` 的 `./...` 会遍历 `./data`
 
