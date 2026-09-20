@@ -693,7 +693,35 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 - [ ] **浏览器人工确认（剩下的一步）**：模型菜单里 deepseek 四个模型出现推理档位、能附图片；
       顺带把 dsh-tenant 的 SSH 工作区重新挂上（见 `docs/todo_done.md` M68 小节的说明）
 
-## 工具：`make verify` 的 `./...` 会遍历 `./data`
+## 缺陷：`dshgw.admin_socket` 与 M63 状态根脱节（2026-09-20 修）
+
+现象：飞书首次登录（绑定了 Key 的账号）在日志里报
+`enabling dsh for a bound key failed err="… dshgw admin channel unavailable at
+/home/winger/.local/share/dshgw-verify/state/admin.sock: dial unix …: connect: no such file or directory"`，
+控制台的「启用/停用 DSH」同理。
+
+根因：M63 把 dshgw 状态根搬进了部署根（`./data/dshgw-verify/state`），但
+`scripts/move_dshgw_state.sh` 的改写范围**只覆盖状态树内部**（`registry.json` + 租户产物，见其
+`targets` 列表与 `$NEW_STATE` 那段自检），而 aigw 侧 `config.yaml` 的 `dshgw.admin_socket` 是树**外**的
+绝对路径，于是它还指着搬家前的 `~/.local/share/…`。`dshgw.enabled: false`（本机是独立 `dshgw-verify`
+单元提供 socket），所以 `cmd/aigw` 不会走「监督形态从 state_dir 推导」那条路，这个显式值就是唯一的来源。
+
+已做（本机）：
+
+- [x] `config.yaml` → `dshgw.admin_socket: /home/winger/work/ai_gateway/data/dshgw-verify/state/admin.sock`
+      （该文件被 gitignore，故在此留痕）；`systemctl --user restart aigw-local.service` 后
+      `aigw-local`/`dshgw-verify`/`gwproxy-verify` 三个单元 active，`/version` 仍是 2.7.0 / `6790dff`，
+      `healthz`/`readyz` 200，重启后 `level=ERROR` 0 条
+- [x] 按真实接线复验：用 `config.Load("config.yaml")` + `dshgwAdminSocket(cfg, nil)` +
+      `internal/localdshgw.Client` 拨号，`ListTenants` 返回 5 个租户（临时测试跑完已删）
+- [x] `cmd/aigw` 新增启动自检 `warnIfAdminSocketMissing`：**仅独立形态**在 socket 缺失/不是 socket 时打
+      `WARN`（点名路径）。监督形态刻意不打——子进程是在 aigw 开始服务**之后**才绑定 socket，
+      那一刻「还没有」是正常态，真失败由 supervisor 自己报
+- [x] `docs/deployment-layout.md` §7 的搬迁清单补上「状态树之外的消费者」，点名 aigw 的这个键
+- [ ] **随下个版本发布**：这条 `WARN` 要等 `bin/aigw` 重建后才在线上生效（本次只改了配置 +
+      重启，未重建二进制——重建会带上未发布的代码却仍标 `6790dff`，反而会污染 `/version` 的版本自证）
+
+
 
 M66 验收期间发现：`make vet` / `make test`（内部是 `go vet ./...` / `go test ./...`）会把工作区的 `./data`
 也走一遍，而 M63 起运行态数据就落在那里（本机是 6.2 GB 库 + 备份，以及 dshgw state 下 GB 级的浏览器工作区

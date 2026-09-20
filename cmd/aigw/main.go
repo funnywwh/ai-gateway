@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -81,6 +82,32 @@ func dshgwAdminSocket(cfg *config.Config, child *dshgwChild) string {
 		return child.adminSocket
 	}
 	return cfg.Dshgw.AdminSocket
+}
+
+// warnIfAdminSocketMissing says out loud that a standalone deployment's provisioning
+// socket is not usable right now.
+//
+// Without this the first symptom is a person's failed Feishu login (M62) or a console
+// button that reports an unavailable channel — minutes or days after the path stopped
+// matching where dshgw actually writes. The supervised shape is exempt on purpose: its
+// child binds the socket only after aigw is already serving, so "not there yet" is the
+// normal state at this point in startup, and the supervisor reports real failures itself.
+func warnIfAdminSocketMissing(log *slog.Logger, socket string, supervised bool) {
+	if supervised || socket == "" {
+		return
+	}
+	info, err := os.Stat(socket)
+	switch {
+	case os.IsNotExist(err):
+		log.Warn("dshgw admin channel is missing; enabling DSH and Feishu auto-enable will fail until it exists",
+			"socket", socket)
+	case err != nil:
+		log.Warn("dshgw admin channel cannot be inspected; enabling DSH and Feishu auto-enable may fail",
+			"socket", socket, "err", err)
+	case info.Mode()&os.ModeSocket == 0:
+		log.Warn("dshgw admin channel path is not a socket; enabling DSH and Feishu auto-enable will fail",
+			"socket", socket, "mode", info.Mode().String())
+	}
 }
 
 func main() { os.Exit(run()) }
@@ -165,6 +192,10 @@ func run() int {
 		// an operator reads to answer "where does this deployment write?" (M63).
 		log.Info("dshgw child configured", "binary", child.binary, "config", child.configPath, "state_dir", child.config.StateDir, "config_changed", changed)
 	}
+	// The standalone shape has no child to bind the socket, so a path that does not resolve
+	// to a live socket is worth one startup line (M63 moved the state root; a stale absolute
+	// path is exactly how this drifts).
+	warnIfAdminSocketMissing(log, dshgwAdminSocket(cfg, child), child != nil)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -138,6 +138,11 @@ systemctl --user restart aigw-local && curl -s localhost:8088/version
   再改配置与单元、启动、逐个租户验收。
   **绝不要改写 `state/workspaces/**`**：那是租户自己的文件。
   工具：`scripts/move_dshgw_state.sh`（默认 dry-run）。
+  **别忘了状态树之外的消费者**：上面的脚本只改写树内部的文件，而 aigw 侧 `config.yaml` 的
+  `dshgw.admin_socket` 指的是 `<state_dir>/admin.sock`（本机为
+  `./data/dshgw-verify/state/admin.sock`）。搬完家它还指着旧前缀时，控制台的「启用/停用 DSH」
+  与飞书首次登录的自动开通都会拨一个空地址（`dshgw admin channel unavailable at …`）；
+  这个值必须跟着 `dshgw.yaml` 的 `state_dir` 一起改（aigw 启动时会为此打一条 `WARN`）。
 - **下线遗留 root 形态**（`/opt/dshgw` + `/etc/dshgw` + `/var/lib/dshgw` + nginx `conf.d/dshgw`）：
   `scripts/decommission_legacy_dshgw.sh`（默认 dry-run 打印计划，`--apply` 才执行，需要 root）。
   它**先归档再删**：`/var/lib/dshgw`、`/etc/dshgw`、nginx 的 `conf.d/dshgw`、旧单元文件，
