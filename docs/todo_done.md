@@ -4336,3 +4336,18 @@ M67 小节——接口面与插件加载已按上表验证，侧栏观感由使�
 排障期间我用纯 HTTP 探过 TLS 端口，dshgw 日志里留下 6 条 `client sent an HTTP request to an HTTPS
 server` 的握手错误（`10:54:50`，无害噪声）。`docs/TODO.md` 里 M68 的「浏览器人工确认」与 M64 的
 sshfs 缺陷仍未关闭。
+
+### 运维修复：worker 启动被上一代 scope 卡死 / sshfs 死挂载（2026-09-20，v2.7.2）
+
+- 版本：v2.7.2（revision 340ed57 + 3a0bee4），回滚点 `bin/dshgw.prev-20260920-145000`。
+- 故障：租户 dsh-tenant 每次启动秒退 `Unit dshgw-worker-dsh-tenant.scope was already loaded`，
+  网关返回 "worker authentication unavailable"；当天 14:50 又复发一次（同一 scope 里 6 个
+  agent 工具调用进程存活，含一个 D 态 `find`）。
+- 修复：scope 名带进程世代序号 + 启动被拒换名重试 + 停止时清空 scope 的 cgroup；
+  FUSE 连接探测与死挂载自愈（Open 换掉死条目、卸载卡死时杀守护进程/写 abort）；
+  惰性卸载回退补上 `-u`（此前 `fusermount3 -z` 单独用从未生效）；
+  MountsFor 跳过没有守护进程的挂载，避免 bwrap 因一个死挂载拒绝整个 profile。
+- 部署：本机 dshgw-verify.service 重启（14:50、14:54 两次）；6 个租户 worker 全部就绪，
+  18301–18306 全部 302，handshake 齐全。
+- 现场处置：dsh-tenant 的死挂载（Findo_Management_Console、ai_gateway）已卸载，
+  ai_gateway 已重新挂载并随 worker 重启进入沙箱；账号再点一次挂载即可恢复 Findo 那个。
