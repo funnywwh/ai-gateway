@@ -4337,9 +4337,11 @@ M67 小节——接口面与插件加载已按上表验证，侧栏观感由使�
 server` 的握手错误（`10:54:50`，无害噪声）。`docs/TODO.md` 里 M68 的「浏览器人工确认」与 M64 的
 sshfs 缺陷仍未关闭。
 
-### 运维修复：worker 启动被上一代 scope 卡死 / sshfs 死挂载（2026-09-20，v2.7.2）
+### 运维修复：worker 启动被上一代 scope 卡死 / sshfs 死挂载（2026-09-20）
 
-- 版本：v2.7.2（revision 340ed57 + 3a0bee4），回滚点 `bin/dshgw.prev-20260920-145000`。
+- 版本：**v2.7.3**（revision `4a2de2d`，正式发版；此前 2.7.2 的 tag 早于补丁提交，
+  只作临时部署用，不再代表线上形态）。回滚点 `bin/dshgw.prev-20260920-145812` /
+  `bin/aigw.prev-20260920-145813`。
 - 故障：租户 dsh-tenant 每次启动秒退 `Unit dshgw-worker-dsh-tenant.scope was already loaded`，
   网关返回 "worker authentication unavailable"；当天 14:50 又复发一次（同一 scope 里 6 个
   agent 工具调用进程存活，含一个 D 态 `find`）。
@@ -4351,3 +4353,9 @@ sshfs 缺陷仍未关闭。
   18301–18306 全部 302，handshake 齐全。
 - 现场处置：dsh-tenant 的死挂载（Findo_Management_Console、ai_gateway）已卸载，
   ai_gateway 已重新挂载并随 worker 重启进入沙箱；账号再点一次挂载即可恢复 Findo 那个。
+
+- 本机部署（v2.7.3，2026-09-20 14:58）：`bin/dshgw` 与 `bin/aigw` 同 revision 构建，
+  `dshgw-verify.service`、`aigw-local.service` 先后重启；`/version` 返回
+  `{"version":"2.7.3","revision":"4a2de2d"}`，`/healthz`、`/readyz` 均 200，
+  控制台 200，dshgw 日志 `listening version=2.7.3 revision=4a2de2d`，
+  6 个租户 worker 全部 ready、18301–18306 全部 302，admin socket ping ok。
