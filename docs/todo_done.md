@@ -4308,3 +4308,31 @@ M67 小节——接口面与插件加载已按上表验证，侧栏观感由使�
 **未做/限制**：gpt001 未部署（用户只要求本机）；M68 的「浏览器人工确认」（模型菜单的推理档位、
 给 deepseek 模型附图片）与 M67 的侧栏观感仍开在 `docs/TODO.md` 对应小节；工作区 `data/` 不纳入版本控制，
 部署物与回滚点都在其中，故本记录是这些路径的唯一书面出处。
+
+### v2.7.1 发布与部署记录（2026-09-20，本机三单元；gpt001 未部署）
+
+本版内容：**aigw 独立形态下 admin socket 不可用时启动即点名告警**（修复提交 `d10caa0`，
+诊断见 `docs/TODO.md` 的「`dshgw.admin_socket` 与 M63 状态根脱节」小节）。档位 **patch**：
+没有新的对外能力，只有一个缺陷修复加上"让同类漂移在启动时就可见"的自检，改动面是
+`cmd/aigw/main.go` 的 `warnIfAdminSocketMissing` + 单测，以及两份文档。按用户要求只发本机。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v2.7.1**（`VERSION` 2.7.0 → 2.7.1；release 提交 `e8e2695`，tag `v2.7.1` → `e8e2695`，内含修复提交 `d10caa0`） |
+| 构建物 | `bin/aigw`（2.7.1，revision `e8e2695`，built 2026-09-20T03:04:15Z，console minified + gzip）。`bin/dshgw`、`bin/gwproxy` 本版无代码改动，未重建（`make build` 只写 `bin/aigw`） |
+| 部署范围 | 三单元里**只有 `aigw-local` 换二进制并重启**（本机的 `bin/aigw` 就是部署根里的那一份，`make build` 直接覆盖它）。`dshgw-verify`（08:59 起）与 `gwproxy-verify`（09-19 20:09 起）**刻意没重启**：本版无它们的改动，而重启 `dshgw-verify` 会踩 M64 那条 sshfs 缺陷 |
+| 回滚点（二进制） | `data/prev/bin/aigw.prev-running-2.7.0-6790dff` —— 发布前**正在运行**的那份构建，`-version` 自证 `2.7.0 (revision 6790dff, built 2026-09-20T00:58:20Z)` |
+| 回滚点（数据） | 无需：无数据库迁移、无 schema 改动 |
+| 配置变更 | **发布流程本身没有碰任何配置**。触发本版的抢修改过 `config.yaml` 的 `dshgw.admin_socket`（M63 前旧路径 → `./data/dshgw-verify/state/admin.sock`），那是发布之前的独立一步，留痕见 `docs/TODO.md` |
+| 验证（版本与探针） | `GET /version` → `{"revision":"e8e2695","ui":"minified","ui_encoding":"gzip","version":"2.7.1"}`；`/healthz`、`/readyz` 200；三个单元 active；`readyz` **2 秒**就绪；重启后 `level=ERROR` **0 条** |
+| 验证（跑的就是这个构建） | `/proc/562211/exe` 与 `bin/aigw` 的 sha256 一致（`6c59b5b2…`）；启动行 `aigw starting version=2.7.1 revision=e8e2695 ui=minified ui_encoding=gzip` |
+| 验证（本版新增的自检） | 启动日志里 `dshgw admin channel` **0 条**：守卫只在独立形态且 socket 缺失/不是 socket 时告警，**静默即证明**配置里那个路径存在且是 socket |
+| 验证（本次修的那条链路，真机） | 修好之后、本版构建之前（11:04:12 CST）有**真实用户登录**打通了原先失败的路：`杨妙`（账号 36，此前 `dsh_enabled=0`、无租户）经飞书首登自动开通成功 → `dsh_enabled=1`/`dsh_tenant=dsh-yangmiao`；dshgw 侧 `11:04:17 tenant worker started`（pid 561926）→ `11:04:18 worker ready port=18405` → `11:04:21 edge listener started port=18306`，`11:04:49–50` 有来自 `192.168.190.222` 的真实浏览器请求落在该租户（`/manifest.webmanifest`）。admin 通道 `tenant-list` 现返回 **6 个**租户 |
+| 验证（控制台角标） | `node scripts/ui-badge-test.mjs` 11 项通过（角标取数的模块接线）；角标在浏览器里读的就是 `serverRoot() + /version`，该端点在线上返回 2.7.1/`e8e2695`；`/admin/ui/` 与 `js/api.js` 均 200 且 `api.js` 内含 `/version`。**未做浏览器视觉确认**（无头环境） |
+| 验证（租户面未受影响） | 6 个 worker scope 全部 running；门户 `18300/` → 200；租户 origin（`18302/`）→ 302 跳门户；gwproxy `8090/version` → 200、`/dshgw/` → 302；aigw `/v1/models` 无 Key → 401（存活） |
+| 自动化验收 | 提交时 `go build`/`go vet`/`go test` 对 `./cmd/... ./internal/... ./pkg/... ./examples/...` 全绿（显式包模式：`./...` 在本机会走进 `./data` 的 FUSE 挂载而挂住，见 `docs/TODO.md`）；发布后用**发布二进制**跑 `scripts/format-smoke.sh`：A 普通请求 200 且上游收到 `response_format = null`、B `json_object` 200 且按需透传、C 非法等级在解析期 400，全部通过 |
+
+**未做/限制**：gpt001 未部署（用户只要求本机）；控制台角标是"资源与端点"级验收，没有浏览器截图；
+排障期间我用纯 HTTP 探过 TLS 端口，dshgw 日志里留下 6 条 `client sent an HTTP request to an HTTPS
+server` 的握手错误（`10:54:50`，无害噪声）。`docs/TODO.md` 里 M68 的「浏览器人工确认」与 M64 的
+sshfs 缺陷仍未关闭。

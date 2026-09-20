@@ -718,8 +718,10 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
       `WARN`（点名路径）。监督形态刻意不打——子进程是在 aigw 开始服务**之后**才绑定 socket，
       那一刻「还没有」是正常态，真失败由 supervisor 自己报
 - [x] `docs/deployment-layout.md` §7 的搬迁清单补上「状态树之外的消费者」，点名 aigw 的这个键
-- [ ] **随下个版本发布**：这条 `WARN` 要等 `bin/aigw` 重建后才在线上生效（本次只改了配置 +
-      重启，未重建二进制——重建会带上未发布的代码却仍标 `6790dff`，反而会污染 `/version` 的版本自证）
+- [x] **已随 v2.7.1 发布（2026-09-20）**：`bin/aigw` 重建并重启后这条 `WARN` 在线上生效——
+      启动日志里 `dshgw admin channel` 0 条（守卫静默即在证明配置的路径存在且是 socket）。
+      发布记录见 `docs/todo_done.md` 的 v2.7.1 小节。当时的取舍也一并记下：抢修时**故意不重建**
+      二进制，否则会带上未发布的代码却仍标 `6790dff`，反而污染 `/version` 的版本自证
 
 
 
