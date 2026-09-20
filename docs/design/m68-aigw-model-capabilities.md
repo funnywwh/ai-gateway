@@ -291,6 +291,10 @@ sed -n '/aigw:/,/agent-default-model:/p' <tenant>/.dsh/settings.yaml
 | 3 | `bin/dshgw --config dshgw.yaml contract dsh`（真 dsh 0.1.2-rc.1 起 web worker） | 8/8 通过，含 `credentials-schema-and-mode`（夹具已换成带能力字段的 provider 段） |
 | 4 | 用已安装 dsh 自己的 `Config` schema 校验渲染结果（`internal/dshgw/tenancy/settings_schema.test.mjs`） | 通过；负例有牙：`contextWindow: 0` 与未知档名都被 schema 拒绝 |
 | 5 | 渲染样例（golden） | `contextWindow: 1000000` / `maxTokens: 65536` / `input: [text, image]` / 7 档 `reasoningEfforts`（`"off": none`）/ `maxRequestImageBytes: 7340032`；未申报的模型只剩 `id`/`name` |
+| 6 | **隔离实例端到端**（用 `bin/aigw-src` + 真实 `config.yaml` 起一次性实例，独立临时库与端口 18099，不动运行态） | `GET /v1/models` 四条 deepseek 模型带 `input_modalities:["text","image"]` + 容量；`gpt-5.6-luna`/`replay` 仍是 `["text"]` |
+| 7 | 图片特性的路由效果（同一隔离实例） | 带 `input_image` 打 `replay`（未声明）→ `X-Gateway-Degraded: image`；打 `deepseek-flash`（已声明）→ 无该头（只在无凭据的临时库上以 `upstream_401` 收尾）；纯文本请求两者都无该头 |
+| 8 | **`bin/dshgw sync-models` 全链路**（临时 dshgw state + 上一步的临时 aigw） | 产出的 settings.yaml：四条 deepseek 模型 `input: [text, image]` + 全 7 档；`gpt-5.6-luna`/`gpt-6-astra` 只有容量无 `input`；`replay`/`replay-slow` 为 `reasoningEfforts: false`；路由级 `maxRequestImageBytes: 7340032`；文件里非 `llm-pi-ai` 的内容原样保留 |
+| 9 | `deepseek` 供应商声明 `image`（文件 + 运行态） | `config.yaml` 的供应商 `config.models[]` 与 bootstrap `models[]` 各四条写全；运行态经管理 API 局部更新四条映射行并逐行读回核对（其余字段未被动到） |
 
 未覆盖（留给 M68 真机验收，见 `docs/TODO.md`）：重启运行中的 8088 实例后，`GET /v1/models` 的实际返回、
 `dshgw sync-models` 写出的租户 settings.yaml，以及浏览器里模型菜单的档位入口与图片附件。

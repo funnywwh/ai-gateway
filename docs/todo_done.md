@@ -4197,6 +4197,15 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - [x] **真 dsh 契约**：`dshgw contract dsh` 的 settings 夹具换成带能力字段的 provider 段，本机 8/8 通过
 - [x] **控制面可发现性**：MCP/控制台的能力对象 schema 补齐路由实际读取的键（`tools`/`reasoning`/`image`/
       `json_object`/`json_schema`/`parallel_tools`）；内建 provider 配置 schema 与供应商页提示补 `image`
+- [x] **deepseek 供应商声明图片能力**（2026-09-20，`config.yaml` 被 gitignore，运行态与文件改动都在
+      `docs/TODO.md` M68 小节留痕）：文件基线两处各四条补 `image: true`（供应商 `config.models[]` 与
+      bootstrap `models[]`）；运行态用管理 API 局部更新四条映射行（其余字段逐行核对未被动到）。
+      未包含 `deepseek-aliyun`（disabled，只存在于运行态）
+- [x] **端到端复验（隔离实例）**：`bin/aigw-src` 一次性实例（临时库 + 端口 18099）→ `/v1/models` 四条
+      deepseek 模型带 `input_modalities:["text","image"]`；带 `input_image` 打未声明图片的 `replay` 得到
+      `X-Gateway-Degraded: image`、打已声明的 `deepseek-flash` 无该头；再用临时 dshgw state 跑
+      `bin/dshgw sync-models`，产出的 settings.yaml 带 `input: [text, image]` + 全 7 档
+      `reasoningEfforts` + 路由级 `maxRequestImageBytes`，未声明图片/推理的模型如实省略或写 `false`
 - [ ] 真机验收（重启 8088 后 `/v1/models` 实测、`sync-models` 产物、浏览器里的档位入口与图片附件）
       见 `docs/TODO.md` M68 小节
 

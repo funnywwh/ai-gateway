@@ -657,10 +657,27 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 `settings.yaml` 时按官方文档字段（`contextWindow`/`maxTokens`/`input`/`reasoningEfforts`）写入。
 
 - [x] 实现与单测（清单见设计文档 §4–§8；已完成记录见 `docs/todo_done.md` 同名小节）
+- [x] **deepseek 供应商声明图片能力**（2026-09-20，`config.yaml` 被 gitignore，故在此留痕）：
+      文件基线两处都写全 —— 供应商 `config.models[]`（插件目录，控制台「刷新发现」用的那份）与
+      bootstrap `models[]`（映射行的新建基线）各四条，`capabilities` 补 `image: true`；
+      运行态用管理 API 逐条局部更新（`POST /admin/api/v1/providers/3/models`，
+      body 只带 `public_model` + `capabilities`，行的 context_window/max_output_tokens/upstream/价格
+      原样保留，整改前后逐行读回核对）：`deepseek-flash` / `deepseek-v4-flash` / `deepseek-v4-pro` /
+      `deepseek-v4.1-flash` 四条现在都是 `{stream,tools,reasoning,image}`。
+      **未包含** `deepseek-aliyun`（id 13，`enabled: false`，只存在于运行态）：它同样有这四个对客名，
+      一旦启用，图片请求在 `strip` 下会被标记降级、在 `reject` 下会被该候选过滤——要启用就先给它补声明
+- [x] **端到端复验（隔离实例，2026-09-20）**：用 `bin/aigw-src` + `config.yaml` 起一个一次性实例
+      （独立临时库/端口 18099，不动运行态），`GET /v1/models` 四条 deepseek 模型都带
+      `context_window: 1000000`/`max_output_tokens: 65536`/`input_modalities: ["text","image"]`；
+      带 `input_image` 的请求打到声明图片的模型**没有** `X-Gateway-Degraded`，打到未声明的 `replay`
+      则有 `X-Gateway-Degraded: image`（文本请求两者都没有）；再用临时 dshgw state 跑
+      `bin/dshgw sync-models alice`，产出的 settings.yaml 里四条 deepseek 模型带
+      `input: [text, image]` + 全 7 档 `reasoningEfforts`，`gpt-5.6-luna` 等仍只有 `[text]`
+      （未声明），`replay` 是 `reasoningEfforts: false`，路由级出现 `maxRequestImageBytes: 7340032`
 - [ ] **真机验收（剩下的一步）**：`scripts/local-run.sh restart` 让新二进制生效 → 运行态 `GET /v1/models`
       带 `name`/`context_window`/`max_output_tokens`/`input_modalities`/`capabilities`/`reasoning`；
       `bin/dshgw --config dshgw.yaml sync-models <tenant>` 后该租户 settings.yaml 的 aigw 段带参数；
-      浏览器里模型菜单出现推理档位、声明了 `capabilities.image` 的模型能附图片
+      浏览器里模型菜单出现推理档位、deepseek 四个模型能附图片
 
 ## 工具：`make verify` 的 `./...` 会遍历 `./data`
 
