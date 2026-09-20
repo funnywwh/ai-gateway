@@ -4275,3 +4275,36 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 **未做/限制**：gpt001 未部署（用户只要求本机）；M67 的「浏览器人工确认」一项仍开在 `docs/TODO.md`
 M67 小节——接口面与插件加载已按上表验证，侧栏观感由使用者确认；工作区 `data/` 不纳入版本控制，
 部署物与回滚点都在其中，故本记录是这些路径的唯一书面出处。
+
+### v2.7.0 发布与部署记录（2026-09-20，本机三单元；gpt001 未部署）
+
+本版内容：**M68 aigw 供应商的模型参数来自 `/v1/models`**（功能提交 `574776d`；设计
+`docs/design/m68-aigw-model-capabilities.md`，规格 `docs/dshgw.md` §6a、`docs/api-responses.md`、
+`docs/routing.md` §4.1、`docs/api-providers.md` §2），档位 **minor**（`GET /v1/models` 新增六个能力字段、
+路由新增 `image` 能力键、dshgw 新增配置项 `image_request_max_bytes`、租户 profile 的模型条目开始带
+`contextWindow`/`maxTokens`/`input`/`reasoningEfforts`）。按用户要求只发本机，gpt001 未部署。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v2.7.0**（`VERSION` 2.6.0 → 2.7.0；release 提交 `6790dff`，tag `v2.7.0` → `6790dff`，内含 M68 功能提交 `574776d` 与两份留痕提交 `64fd34a`/`7f0b50f`） |
+| 构建物 | `bin/aigw`（2.7.0，revision 6790dff，console minified + gzip）与 `bin/dshgw`（2.7.0，revision 6790dff）；`gwproxy` 本版无代码改动，未重建（线上仍是 2.3.0 / 2306c22） |
+| 部署范围 | 本机三单元：`aigw-local`（换二进制并重启）、`dshgw-verify`（换二进制并重启；租户 profile 由 dsh 逐请求读取，重启后各租户 worker 启动前自动 `sync-models`）、`gwproxy-verify`（未动） |
+| 回滚点（二进制） | `data/prev/bin/aigw.prev-running-2.6.0-64fd34a` 与 `data/prev/bin/dshgw.prev-running-2.6.0-64fd34a` —— 发布前**正在运行**的构建，从 `/proc/<pid>/exe` 取出并用 `-version` 自证（前者报 2.6.0/64fd34a；后者报 2.6.0/revision `f943160`，因为它是 07:10 用**尚未提交**的 M68 工作树构建的，`-ldflags -X main.revision` 只反映当时的 HEAD——已实际生效的是 M68 行为） |
+| 回滚点（数据） | 无需：本版只新增响应字段与配置键，不改表、不做数据库迁移 |
+| 配置变更 | 无新增（`image_request_max_bytes` 有默认 7 MiB，本机未显式设置）。发布前的**运行态改动**是给 deepseek 供应商四条映射行声明 `capabilities.image: true`（管理 API 局部更新）＋ `config.yaml` 基线同步，记在 `docs/TODO.md` M68 小节 |
+| 验证（版本与探针） | `GET /version` → `{"revision":"6790dff","ui":"minified","ui_encoding":"gzip","version":"2.7.0"}`；`/healthz`、`/readyz` 200；三个单元 active；两个单元的启动日志无 `level=ERROR` |
+| 验证（M68 全链路，部署后实测） | `GET /v1/models`（真实 Key）六条模型：四条 deepseek 带 `context_window: 1000000`/`max_output_tokens: 65536`/`input_modalities: ["text","image"]`/`capabilities{image,reasoning,stream,tools}`（`deepseek-v4.1-flash` 容量未申报故省略）；`stealth/union-alpha`、`u2-flash` 能力未知（`capabilities_override: inherit`）只回 `["text"]` 且不带 `capabilities`；四个租户的 settings.yaml 全部带官方字段（`input: [text, image]`、全 7 档 `reasoningEfforts`、路由级 `maxRequestImageBytes: 7340032`），未知能力模型只写 `id`/`name` |
+| 验证（租户面） | 5 个 worker（18400–18404）全部 `worker ready`；四个租户 origin 均 302（跳门户登录）、门户 18300 → 200；各租户启动前 `models refreshed`（4/4/4/6 条） |
+| 自动化验收 | `scripts/format-smoke.sh` 对**发布二进制**通过（普通请求不带 `response_format`、`json_object` 按需透传、非法等级在解析期 400）；M68 的全量 `go vet`/`go test`（`./cmd/... ./internal/... ./pkg/... ./examples/...`，59 包）与 `make dshgw-test` 在功能提交时全绿；`dshgw contract dsh`（真 dsh 0.1.2-rc.1）8/8 |
+
+**发布期间撞到的环境缺陷（非本版引入，已开 TODO 项）**：`systemctl --user restart dshgw-verify` 会把
+`sshfs` 进程随单元杀掉、却把 FUSE 挂载条目留在挂载表里（`Transport endpoint is not connected`），
+启动时的 `sshService.Reconcile` 补不上这条死挂载，于是**有活跃 SSH 工作区的 `dsh-tenant` 起不来**
+（`bwrap: Can't get type of source …` → worker `exit status 1`）。两次都用
+`fusermount3 -u <mountpoint>` + 重启 dshgw 救回；修法方向记在 `docs/TODO.md` M64 小节。
+代价：`dsh-tenant` 的 SSH 工作区目录当前为空，需要在该租户界面里重新选一次（挂载记录仍在
+`state/ssh-mounts.json`，远端 `aipc:/home/winger/ZT20Q` 实测可达）。
+
+**未做/限制**：gpt001 未部署（用户只要求本机）；M68 的「浏览器人工确认」（模型菜单的推理档位、
+给 deepseek 模型附图片）与 M67 的侧栏观感仍开在 `docs/TODO.md` 对应小节；工作区 `data/` 不纳入版本控制，
+部署物与回滚点都在其中，故本记录是这些路径的唯一书面出处。
