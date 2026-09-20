@@ -220,13 +220,30 @@ func (s *Service) writeMirror(tenant, dshHome string) error {
 
 // MountsFor lists the mount points the worker profile must bind for one account. A record
 // that cannot be read yields nothing: an unbindable profile is worse than a missing mount.
+//
+// A recorded mount whose sshfs daemon is gone is left out as well. Killing the daemon does
+// not detach the mount, so its entry stays in the mount table and bubblewrap refuses such a
+// source outright ("Can't get type of source …: Transport endpoint is not connected") — which
+// used to take the whole worker down with it, leaving the tenant unreachable with no way back
+// short of an operator. Skipping it starts the worker; the account gets the mount back
+// through Open, which replaces the dead entry.
 func (s *Service) MountsFor(tenant string) []string {
 	mounts, err := s.store.ForTenant(tenant)
 	if err != nil {
 		s.logger.Error("reading the ssh mount record failed", "tenant", tenant, "err", err)
 		return nil
 	}
-	return Mountpoints(mounts)
+	live := make([]Mount, 0, len(mounts))
+	for _, mount := range mounts {
+		if fstype, _ := s.mounted(mount.Mountpoint); fstype != "" && sshfsDaemonFor(mount.Mountpoint) == 0 {
+			s.logger.Warn("an ssh workspace mount has no daemon; leaving it out of the worker's sandbox",
+				"tenant", tenant, "mountpoint", mount.Mountpoint,
+				"detail", "opening it again replaces the dead entry")
+			continue
+		}
+		live = append(live, mount)
+	}
+	return Mountpoints(live)
 }
 
 // Open mounts one remote directory for an account and returns the mount record.

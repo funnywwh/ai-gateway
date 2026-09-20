@@ -440,6 +440,33 @@ func TestOpenReplacesAMountWhoseDaemonDied(t *testing.T) {
 	}
 }
 
+// A recorded mount whose daemon is gone must not reach the worker's sandbox: bubblewrap
+// refuses a dead FUSE source outright, and that failure used to take the whole worker down
+// with it — one dead workspace mount made the account unreachable.
+func TestMountsForSkipsAMountWithoutADaemon(t *testing.T) {
+	env := newTestEnv(t, Options{})
+	ctx := context.Background()
+	mount, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	previous := sshfsDaemonFor
+	defer func() { sshfsDaemonFor = previous }()
+
+	sshfsDaemonFor = func(string) int { return os.Getpid() }
+	if paths := env.service.MountsFor("dsh-colin"); len(paths) != 1 || paths[0] != mount.Mountpoint {
+		t.Fatalf("a served mount was left out of the profile: %v", paths)
+	}
+	sshfsDaemonFor = func(string) int { return 0 }
+	if paths := env.service.MountsFor("dsh-colin"); len(paths) != 0 {
+		t.Fatalf("a mount with no daemon was bound into the profile: %v", paths)
+	}
+	// The record survives: the account gets the mount back by opening it again.
+	if mounts, err := env.service.Mounts("dsh-colin"); err != nil || len(mounts) != 1 {
+		t.Fatalf("mounts = %v err = %v, want the record kept", mounts, err)
+	}
+}
+
 // A live mount is never disturbed by a repeated open, whatever the record says: the
 // connection is what decides.
 func TestOpenLeavesALiveMountAlone(t *testing.T) {

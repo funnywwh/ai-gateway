@@ -163,12 +163,19 @@ func fuseAbortPath(minor int) string {
 
 // sshfsDaemonFor finds the sshfs process serving one mount point.
 //
+// The seam exists because the worker's profile asks it whether a recorded mount is still
+// served: a test has no real daemon to point at, and production must look at the same
+// process table the unmount path uses.
+var sshfsDaemonFor = findSSHFSDaemon
+
+// findSSHFSDaemon finds the sshfs process serving one mount point.
+//
 // The daemon's own argv ends with the mount point — that is the sshfs command line
 // this package builds — so the mount point identifies it exactly, and the process
 // name is checked as well so a recycled PID can never be signalled by mistake. Only
 // processes of this account are examined: /proc/<pid>/cmdline is unreadable for
 // another user's process, and the kill is refused for one.
-func sshfsDaemonFor(mountpoint string) int {
+func findSSHFSDaemon(mountpoint string) int {
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
 		return 0

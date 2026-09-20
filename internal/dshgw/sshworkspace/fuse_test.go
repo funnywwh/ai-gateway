@@ -112,13 +112,13 @@ func TestSSHFSDaemonForMatchesTheMountPointExactly(t *testing.T) {
 		4714: "sshfs",
 	})
 
-	if got := sshfsDaemonFor(mount); got != 4714 {
+	if got := findSSHFSDaemon(mount); got != 4714 {
 		t.Fatalf("daemon for %s = %d, want 4714 (a parent path or a path prefix must not match)", mount, got)
 	}
-	if got := sshfsDaemonFor(other); got != 4712 {
+	if got := findSSHFSDaemon(other); got != 4712 {
 		t.Fatalf("daemon for %s = %d, want 4712", other, got)
 	}
-	if got := sshfsDaemonFor("/srv/nobody"); got != 0 {
+	if got := findSSHFSDaemon("/srv/nobody"); got != 0 {
 		t.Fatalf("an unmounted path reported daemon %d", got)
 	}
 }
