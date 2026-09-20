@@ -260,7 +260,11 @@ func (s *Service) Open(ctx context.Context, remote Remote, host, remotePath stri
 	if existing, found, err := s.store.Find(mountpoint); err != nil {
 		return Mount{}, false, err
 	} else if found {
-		if fstype, _ := s.mounted(mountpoint); fstype != "" {
+		// A recorded mount whose FUSE connection is gone is not a mount: its sshfs daemon
+		// died, every read on it fails with ENOTCONN, and a new mount cannot be made over
+		// the stale entry. Detaching the corpse is what makes a retry possible — without it
+		// the account is stuck with a workspace that can never come back.
+		if fstype, _ := s.mounted(mountpoint); fstype != "" && !s.flushStaleMount(ctx, mountpoint) {
 			return existing, false, nil
 		}
 	}
@@ -328,6 +332,37 @@ func (s *Service) Close(ctx context.Context, tenant, dshHome, mountpoint string)
 	return lazy, restarted, nil
 }
 
+// flushStaleMount detaches a mount whose FUSE connection is gone, and reports whether it
+// did.
+//
+// This is the state a killed or crashed sshfs daemon leaves behind, and it is worse than
+// "not mounted": the entry stays in the mount table, reads on it fail with ENOTCONN, and
+// `sshfs` refuses to mount over it ("failed to access mountpoint … Transport endpoint is
+// not connected"). The record and the entry therefore have to go together before a retry
+// can succeed — and once the daemon is gone, the detach is a plain local unmount that
+// cannot block on an unreachable host.
+func (s *Service) flushStaleMount(ctx context.Context, mountpoint string) bool {
+	if connectionLive(s.mounted, mountpoint) {
+		return false
+	}
+	s.logger.Warn("an ssh workspace mount lost its daemon; detaching the stale entry so it can be mounted again",
+		"mountpoint", mountpoint)
+	if _, err := s.options.unmount(ctx, s.exec, mountpoint); err != nil {
+		s.logger.Error("detaching a stale ssh workspace mount failed", "mountpoint", mountpoint, "err", err)
+		return false
+	}
+	if fstype, _ := s.mounted(mountpoint); fstype != "" {
+		// Lazily detached: the table still lists it for whoever holds it open, but the
+		// account's own record and mount point are free for a new mount.
+		s.logger.Warn("a stale ssh workspace mount was detached lazily", "mountpoint", mountpoint)
+	}
+	if _, err := s.store.Remove(mountpoint); err != nil {
+		s.logger.Error("forgetting a stale ssh workspace mount failed", "mountpoint", mountpoint, "err", err)
+		return false
+	}
+	return true
+}
+
 // detach unmounts one mount and waits for it to leave the mount table.
 //
 // The holder is usually the worker's own mount namespace: stopping or restarting a worker
@@ -335,6 +370,11 @@ func (s *Service) Close(ctx context.Context, tenant, dshHome, mountpoint string)
 // process that used it is gone. Purging an account while a mount is still attached fails with
 // EBUSY on the mount point — a confusing symptom far from its cause — so this waits, and says
 // what is holding it when the wait runs out.
+//
+// A mount that survives every attempt is treated as wedged rather than busy, and the wedge is
+// broken here: see wedgeFuse. A mount left in that state is what keeps a reader inside the
+// tenant's sandbox in an uninterruptible wait, holds the worker's scope open behind it, and
+// turns the next worker start into "worker authentication unavailable".
 func (s *Service) detach(ctx context.Context, mountpoint string, attempts int, delay time.Duration) (bool, error) {
 	lazy := false
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -359,8 +399,64 @@ func (s *Service) detach(ctx context.Context, mountpoint string, attempts int, d
 			}
 		}
 	}
+	if wedged, err := s.breakWedge(ctx, mountpoint); err != nil {
+		return lazy, err
+	} else if wedged {
+		// The connection is aborted and every waiter on it has been released; one more
+		// unmount is what turns that into a detached mount.
+		detached, retryErr := s.options.unmount(ctx, s.exec, mountpoint)
+		lazy = lazy || detached
+		if retryErr == nil {
+			if fstype, _ := s.mounted(mountpoint); fstype == "" {
+				if removeErr := os.Remove(mountpoint); removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
+					return lazy, nil
+				}
+			}
+		}
+	}
 	fstype, _ := s.mounted(mountpoint)
 	return lazy, Errorf(CodeBusy, "%s is still mounted (%s): a session may still hold it open", mountpoint, fstype)
+}
+
+// breakWedge ends a mount that outlived every unmount attempt, and reports whether it
+// did anything.
+//
+// It first stops the sshfs daemon serving the mount: the daemon's file descriptor is
+// what keeps the FUSE connection alive, so killing it fails every pending request — the
+// readers parked inside the tenant's sandbox included — and lets the kernel drop the
+// connection. Only when no daemon can be found does it abort the connection through
+// sysfs, which reaches the same waiters when the daemon itself is the unkillable part.
+func (s *Service) breakWedge(ctx context.Context, mountpoint string) (bool, error) {
+	if fstype, _ := s.mounted(mountpoint); !strings.HasPrefix(fstype, "fuse") {
+		return false, nil
+	}
+	broken := false
+	if killSSHFSDaemon(mountpoint) {
+		s.logger.Warn("an ssh workspace daemon outlived its unmount and was stopped; readers waiting on it are released",
+			"mountpoint", mountpoint)
+		broken = true
+		select {
+		case <-ctx.Done():
+			return broken, ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	if err := fuseAbort(mountpoint); err != nil {
+		if broken {
+			// The daemon is already gone, which is what releases the waiters; the
+			// connection entry failing to abort is worth saying, not worth failing on.
+			s.logger.Warn("aborting the ssh workspace FUSE connection failed", "mountpoint", mountpoint, "err", err)
+		} else {
+			return broken, err
+		}
+	} else {
+		broken = true
+	}
+	if broken {
+		s.logger.Warn("an ssh workspace mount did not detach and its FUSE connection was aborted",
+			"mountpoint", mountpoint, "detail", "pending requests fail now instead of waiting for an unreachable host")
+	}
+	return broken, nil
 }
 
 // DropTenant detaches every mount an account owns. It is called when an account is stopped or

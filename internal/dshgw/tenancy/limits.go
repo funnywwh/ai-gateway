@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 // WorkerLimits are the per-worker resources, replacing the systemd unit's
@@ -23,8 +24,33 @@ func (l WorkerLimits) empty() bool {
 	return l.MemoryHighBytes <= 0 && l.MemoryMaxBytes <= 0 && l.TasksMax <= 0 && l.CPUQuotaPercent <= 0
 }
 
-// workerUnitName is the transient user scope that carries one worker's limits.
-func workerUnitName(tenant string) string { return "dshgw-worker-" + tenant }
+// workerUnitPrefix names the transient user scopes that carry workers' limits.
+const workerUnitPrefix = "dshgw-worker-"
+
+// scopeSerial distinguishes the scopes of one dshgw run. A counter rather than a
+// clock: two launches inside the same second must still get different names, and the
+// counter is what makes the retry path below able to ask for a name that is not the
+// one it just failed to create.
+var scopeSerial atomic.Uint64
+
+// workerUnitName is one worker incarnation's transient user scope.
+//
+// The name carries a serial as well as the tenant, and that suffix is the point: a
+// scope's name is a systemd resource, and systemd refuses to create a unit whose name
+// is already loaded ("Unit … was already loaded or has a fragment file"). A
+// deterministic name therefore makes one worker's leftovers a landmine for the next
+// start of the same tenant — which is exactly what a tool call parked in an
+// uninterruptible FUSE wait produced: its scope could not be collected, so every
+// later start failed instantly and the tenant answered "worker authentication
+// unavailable" until an operator found the scope by hand. With a per-incarnation
+// name, the worst an unkillable leftover can do is keep its own scope alive.
+func workerUnitName(tenant string) string {
+	return fmt.Sprintf("%s%s-%x", workerUnitPrefix, tenant, scopeSerial.Add(1))
+}
+
+// systemdRunBin resolves the systemd-run binary. It is a variable so tests can point
+// the limiter at a stand-in.
+var systemdRunBin = func() (string, error) { return exec.LookPath("systemd-run") }
 
 // scopeWrapper returns the argv that runs one worker inside its own systemd user
 // scope, or nil when limits do not need one.
@@ -41,11 +67,14 @@ func workerUnitName(tenant string) string { return "dshgw-worker-" + tenant }
 // The command stays a descendant of dshgw (a scope wraps an existing process tree
 // rather than re-parenting it into the user manager), which is what keeps the
 // "worker is a child of the gateway" property the rest of the design relies on.
+//
+// The unit name must come from workerUnitName: it is per incarnation, so nothing a
+// previous worker left behind can make systemd refuse this one.
 func scopeWrapper(unit string, limits WorkerLimits, argv []string) ([]string, error) {
 	if limits.empty() {
 		return nil, nil
 	}
-	path, err := exec.LookPath("systemd-run")
+	path, err := systemdRunBin()
 	if err != nil {
 		return nil, fmt.Errorf("systemd-run is unavailable: %w", err)
 	}

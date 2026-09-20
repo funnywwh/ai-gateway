@@ -75,6 +75,11 @@ type workerProc struct {
 	cmd     *exec.Cmd
 	started time.Time
 	pid     int
+	// scope is the systemd user scope this incarnation runs in, and cgroup its
+	// cgroup path (empty when limits are not applied). They are per incarnation
+	// because the scope name is: see workerUnitName.
+	scope  string
+	cgroup string
 
 	mu       sync.Mutex
 	startURL string
@@ -146,7 +151,11 @@ func (r *WorkerRunner) start(ctx context.Context, t registry.Tenant) error {
 	if len(argv) == 0 {
 		return errors.New("worker profile is empty")
 	}
-	argv, scoped := r.applyLimits(workerUnitName(t.Name), argv)
+	// One launch attempt gets its own scope name; the retry below needs a different
+	// one, so the argv is rebuilt per attempt.
+	baseArgv := argv
+	unit := workerUnitName(t.Name)
+	attemptArgv, scoped := r.applyLimits(unit, baseArgv)
 
 	// The worker's cwd is its workspace (the same value the systemd unit passed
 	// as WorkingDirectory). Check it here: a missing directory makes exec return
@@ -157,6 +166,63 @@ func (r *WorkerRunner) start(ctx context.Context, t registry.Tenant) error {
 		return fmt.Errorf("tenant %s workspace %s is not a directory", t.Name, t.Workspace)
 	}
 
+	// Spawning is what can fail for reasons outside the worker: with limits, the
+	// kernel sandbox runs under a transient systemd scope, and creating that unit can
+	// be refused before the worker has done anything at all. A refusal is worth one
+	// immediate retry under a fresh scope name — the retry is what keeps a leftover
+	// from an earlier incarnation from turning into an unavailable tenant.
+	for attempt := 1; attempt <= 2; attempt++ {
+		if attempt == 2 {
+			unit = workerUnitName(t.Name)
+			attemptArgv, _ = r.workerArgv(baseArgv, unit, scoped)
+		}
+		var launched *workerProc
+		launched, err = r.spawn(ctx, t, attemptArgv, unit, scoped)
+		if err == nil {
+			r.logger().Info("tenant worker started", "tenant", t.Name, "pid", launched.pid, "scope", unit, "workspace", t.Workspace)
+			return nil
+		}
+		var immediate *workerStartFailure
+		if attempt == 1 && scoped && errors.As(err, &immediate) {
+			r.logger().Warn("the worker died before it started; retrying it under a fresh scope",
+				"tenant", t.Name, "scope", unit, "err", immediate.errText(), "output", immediate.output)
+			continue
+		}
+		return fmt.Errorf("%w%s", err, scopeHint())
+	}
+	return err
+}
+
+// workerStartFailure is a worker that was spawned and then exited within the start
+// window: the failure is in launching it, not in running it.
+type workerStartFailure struct {
+	err    error
+	output string
+}
+
+func (e *workerStartFailure) Error() string {
+	return fmt.Sprintf("worker exited immediately: %v (output: %s)", e.err, e.output)
+}
+
+func (e *workerStartFailure) Unwrap() error { return e.err }
+
+func (e *workerStartFailure) errText() string { return errText(e.err) }
+
+// scopeHint names the leftover scope to look for when a scoped start fails twice.
+// Without it the operator sees a systemd message that never says which unit is in the
+// way or how to look at it.
+func scopeHint() string {
+	if !userManagerAvailable() {
+		return ""
+	}
+	return fmt.Sprintf(" (the worker runs in %s<tenant>-<id>; inspect leftovers with `systemctl --user list-units '%s*'`)",
+		workerUnitPrefix, workerUnitPrefix)
+}
+
+// spawn starts one worker incarnation and returns once it has survived the start
+// window. A returned workerProc is running and published; a returned error means
+// nothing is left behind.
+func (r *WorkerRunner) spawn(ctx context.Context, t registry.Tenant, argv []string, unit string, scoped bool) (*workerProc, error) {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.SysProcAttr = workerProcAttrs()
 	cmd.Dir = t.Workspace
@@ -169,18 +235,19 @@ func (r *WorkerRunner) start(ctx context.Context, t registry.Tenant) error {
 	// Profile construction and scope discovery can block. Recheck cancellation
 	// immediately before spawning, not just before acquiring the lifecycle gate.
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	pr, pw := io.Pipe()
 	cmd.Stdout, cmd.Stderr = pw, pw
 	if err := cmd.Start(); err != nil {
 		_ = pw.Close()
 		_ = pr.Close()
-		return fmt.Errorf("start worker for %s: %w", t.Name, err)
+		return nil, fmt.Errorf("start worker for %s: %w", t.Name, err)
 	}
 	proc := &workerProc{
 		tenant: t, cmd: cmd, pid: cmd.Process.Pid, started: time.Now().UTC(),
 		exited: make(chan struct{}), outputLog: newLineRing(workerOutputLines),
+		scope: unit, cgroup: "",
 	}
 	// Publish only a fully initialized process. Status and Running do not take
 	// the lifecycle gate and must never observe a placeholder with a zero PID.
@@ -206,23 +273,53 @@ func (r *WorkerRunner) start(ctx context.Context, t registry.Tenant) error {
 		r.logger().Info("tenant worker exited", "tenant", t.Name, "pid", proc.pid, "err", errText(waitErr), "output", proc.outputLog.join(" | "))
 	}()
 
-	r.logger().Info("tenant worker started", "tenant", t.Name, "pid", proc.pid, "workspace", t.Workspace)
 	select {
 	case <-proc.exited:
 		// The process is gone already: report it here rather than letting the
 		// caller discover a dead worker through a readiness timeout.
-		return fmt.Errorf("worker for %s exited immediately: %w", t.Name, proc.err())
+		return nil, &workerStartFailure{err: proc.err(), output: proc.outputLog.join(" | ")}
 	case <-ctx.Done():
-		return ctx.Err()
+		return nil, ctx.Err()
 	case <-time.After(50 * time.Millisecond):
-		return nil
+		proc.cgroup = awaitScopeCgroup(ctx, unit)
+		return proc, nil
 	}
 }
 
+// awaitScopeCgroup waits briefly for the worker's scope to appear in the cgroup tree.
+//
+// The scope's cgroup is the portable handle on everything the worker accounts for, so
+// the stop path wants it — but systemd creates the unit asynchronously, after the
+// wrapper has been spawned. The wait is bounded and never fatal: a scope that cannot
+// be located still stops through systemd itself.
+func awaitScopeCgroup(ctx context.Context, unit string) string {
+	if unit == "" {
+		return ""
+	}
+	deadline := time.Now().Add(750 * time.Millisecond)
+	for {
+		if path := findScopeCgroup(unit); path != "" {
+			return path
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			return ""
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+// workerArgv renders one worker's argv for a launch attempt: the tenant's profile
+// wrapped in the systemd user scope named by unit. Like applyLimits it degrades to
+// the plain argv, which is what scoped=false already recorded for this start.
+func (r *WorkerRunner) workerArgv(argv []string, unit string, scoped bool) ([]string, bool) {
+	if !scoped {
+		return argv, false
+	}
+	return r.applyLimits(unit, argv)
+}
+
 // applyLimits wraps the worker argv in its own systemd user scope when limits are
-// configured. A host without a user manager keeps running workers unlimited: a
-// missing quota must never turn into a missing tenant, so this warns once and
-// returns the original argv.
+// configured.
 func (r *WorkerRunner) applyLimits(unit string, argv []string) ([]string, bool) {
 	if r.Limits.empty() {
 		return argv, false
@@ -269,7 +366,9 @@ func (r *WorkerRunner) stop(ctx context.Context, t registry.Tenant) error {
 	}
 	if !proc.isRunning() {
 		// The process is already gone (crash or previous stop); only the
-		// handshake file may still describe it.
+		// handshake file may still describe it — and, in a scope, whatever the
+		// worker left behind.
+		r.reapScope(t, proc)
 		return r.removeHandshake(t.Name)
 	}
 	if proc.pid > 0 {
@@ -288,6 +387,7 @@ func (r *WorkerRunner) stop(ctx context.Context, t registry.Tenant) error {
 		select {
 		case <-proc.exited:
 		case <-time.After(5 * time.Second):
+			r.reapScope(t, proc)
 			return fmt.Errorf("tenant worker %s survived SIGKILL", t.Name)
 		}
 	case <-ctx.Done():
@@ -300,13 +400,58 @@ func (r *WorkerRunner) stop(ctx context.Context, t registry.Tenant) error {
 		select {
 		case <-proc.exited:
 		case <-time.After(5 * time.Second):
+			r.reapScope(t, proc)
 			return errors.Join(ctx.Err(), fmt.Errorf("tenant worker %s survived SIGKILL", t.Name))
 		}
 		stopErr = ctx.Err()
 	}
+	// The worker process is gone; its scope is what may not be. A tool call the agent
+	// started runs in the worker's cgroup, not in its process group, so SIGTERM for the
+	// worker does not reach it — an sshfs read parked in an uninterruptible wait
+	// outlived its worker in exactly that way, and kept the whole scope loaded.
+	r.reapScope(t, proc)
 	// The handshake file describes a process that no longer exists; leaving it
 	// behind would let the proxy redirect a customer to a dead worker.
 	return errors.Join(stopErr, r.removeHandshake(t.Name))
+}
+
+// reapScope ends everything still accounted to a stopped worker's scope and releases
+// the unit. The worker is already gone when this runs, so whatever is left in the
+// cgroup is a descendant that outlived it: a background job, a detached daemon, or a
+// process the kernel cannot kill yet. None of them may keep the scope — and through
+// it the tenant's name — alive.
+//
+// A process in an uninterruptible wait survives SIGTERM and SIGKILL until its wait
+// ends, so this reports what it could not end instead of pretending the stop was
+// clean. Its scope is left in place: the per-incarnation name means it blocks
+// nothing, and systemd collects it when the process finally exits.
+func (r *WorkerRunner) reapScope(t registry.Tenant, proc *workerProc) {
+	if proc.scope == "" {
+		return
+	}
+	if proc.cgroup == "" {
+		// The scope was not located when the worker started; look once more, since the
+		// cgroup is what makes the difference between ending the leftovers and only
+		// asking systemd to.
+		proc.cgroup = findScopeCgroup(proc.scope)
+	}
+	// systemd's own stop is the first and usually only step; it is also the one that
+	// releases the unit name.
+	if err := stopScope(context.WithoutCancel(context.Background()), proc.scope); err != nil {
+		r.logger().Warn("stopping the worker scope failed", "tenant", t.Name, "scope", proc.scope, "err", err)
+	}
+	if proc.cgroup == "" {
+		return
+	}
+	if leftover := terminateCgroup(context.WithoutCancel(context.Background()), proc.cgroup, 500*time.Millisecond, 3*time.Second); len(leftover) > 0 {
+		r.logger().Warn("processes outlived their worker and could not be stopped",
+			"tenant", t.Name, "scope", proc.scope, "pids", fmt.Sprint(leftover),
+			"detail", "they are parked in an uninterruptible wait; the scope is collected once they exit")
+		return
+	}
+	// The cgroup is empty, so systemd has nothing left to keep: stopping again
+	// removes the unit that the first attempt may have left loaded.
+	_ = stopScope(context.WithoutCancel(context.Background()), proc.scope)
 }
 
 // removeHandshake deletes the published startup URL for one tenant.

@@ -214,8 +214,14 @@ dshgw:
   worker_cpu_quota_percent: 200
 ```
 
-实现方式是**每个 worker 一个 systemd 用户 scope**（`systemd-run --user --scope --unit=dshgw-worker-<t>
--p MemoryMax=… -- <bwrap argv>`），不需要 root。
+实现方式是**每个 worker 一个 systemd 用户 scope**（`systemd-run --user --scope
+--unit=dshgw-worker-<t>-<id> -p MemoryMax=… -- <bwrap argv>`），不需要 root。
+
+scope 名里的 `<id>` 是每个"进程世代"一个的序号，不是租户名本身：**systemd 拒绝创建一个名字已被占用的
+单元**（`Unit … was already loaded or has a fragment file`），所以固定名字会让上一代 worker 的遗留物变成
+下一代启动的地雷。2026-09-20 本机就出过这个故障：一个卡在 D 态的 `find`（遍历 sshfs 挂载）让旧 scope 无法
+回收，之后该租户每次启动都秒退，网关照常返回 `worker authentication unavailable`。现在的行为：每次启动用新
+名字，启动被 systemd 拒绝时自动换名重试一次，并对该 scope 的 cgroup 做收尾（见下一节）。
 
 为什么不用 dshgw 自己建子 cgroup：cgroup v2 有一条"无内部进程"规则 —— **含有进程的 cgroup 不能把控制器
 下放给子 cgroup**。systemd 服务自己的 cgroup 里总有主进程，因此 `aigw-local.service` 的
@@ -223,7 +229,7 @@ dshgw:
 没有这个问题：用户管理器拥有被委托的树，由它创建 scope 并设限额，实测生效：
 
 ```
-cgroup=…/dshgw-worker-<tenant>.scope  memory.max=2147483648  pids.max=512  cpu.max=200000 100000
+cgroup=…/app.slice/dshgw-worker-<tenant>-<id>.scope  memory.max=2147483648  pids.max=512  cpu.max=200000 100000
 ```
 
 **整个部署（单元级汇总上限，替代旧 slice 的 `MemoryMax=40G`）**
@@ -234,6 +240,18 @@ scripts/aigw_user_service.sh install --memory-max 40G --tasks-max 4096 --cpu-quo
 
 降级行为：宿主没有用户管理器（例如把 dshgw 单独跑在没有 systemd 的环境里）时，限额**不可用但 worker 照常启动**，
 并按部署告警一次 —— 缺一条配额不该变成一个起不来的租户。该行为有测试钉住。
+
+**scope 的收尾（2026-09-20 修复）**：worker 的 SIGTERM 只覆盖它自己的进程组，而 agent 的工具调用跑在
+worker 的 cgroup 里、不一定在同一个进程组 —— 一个卡在 FUSE 等待里的进程就是这样活过了 worker，并把
+scope（以及它占的名字）一直挂住。现在停止租户时按顺序做三件事：`systemctl --user stop`、清空该 scope 的
+cgroup（先 TERM 后 KILL，带超时）、再 stop 一次回收单元；杀不掉的进程会被记成告警并留在它自己的 scope 里
+（新名字不阻塞下一次启动）。
+
+**ssh 工作区的死挂载（2026-09-20 修复）**：sshfs 守护进程死掉后，挂载表里的条目还在，读它是 ENOTCONN，
+而 `sshfs` 无法覆盖这个残留条目再挂（`failed to access mountpoint … Transport endpoint is not connected`）。
+现在 `Open` 会先探测该挂载的 FUSE 连接（`/sys/fs/fuse/connections/<id>`，id 由挂载点的 st_dev 解出）：
+连接没了就把残留条目卸载掉、删掉记录，然后真正重新挂载。卸载连续失败时按"卡死"处理 —— 先杀掉服务该挂载
+的 sshfs 进程（它的 fd 一关，所有等待中的请求立刻失败），必要时再写 `abort` 让内核释放等待者。
 
 ## 7. 验证
 

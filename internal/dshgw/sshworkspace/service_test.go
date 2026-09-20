@@ -91,7 +91,9 @@ func (f *hostFake) exec(_ context.Context, name string, args []string, _ []strin
 		return nil, nil, nil
 	case "fusermount3":
 		mountpoint := args[len(args)-1]
-		if args[0] == "-u" && f.unmountErr != nil {
+		// Only the plain detach fails: the lazy retry (-u -z) is what a busy mount is
+		// supposed to answer to (fusermount3 refuses -z without -u).
+		if len(args) > 0 && args[0] == "-u" && (len(args) < 2 || args[1] != "-z") && f.unmountErr != nil {
 			return nil, []byte("Device or resource busy"), f.unmountErr
 		}
 		f.mu.Lock()
@@ -151,6 +153,23 @@ func newTestEnv(t *testing.T, options Options) *testEnv {
 	}
 	service.exec = fake.exec
 	service.mounted = fake.mounted
+	// The FUSE connection probe reads the mount table through the package reader; a fake
+	// table has to be the one it sees, or a live mount in the fixture looks dead.
+	previousMounted := serviceMounted
+	serviceMounted = fake.mounted
+	// A fixture's mount is live unless the test says otherwise: the real sysfs has no
+	// directory for a connection id a fake invented.
+	previousConnDir := fuseConnDir
+	fuseConnDir = func(fuseConn) string {
+		if _, ok := fake.mounts["*"]; ok {
+			return ""
+		}
+		return "/sys/fs/fuse/connections/fixture"
+	}
+	t.Cleanup(func() {
+		serviceMounted = previousMounted
+		fuseConnDir = previousConnDir
+	})
 	service.lookPath = func(file string) (string, error) { return "/usr/bin/" + file, nil }
 	service.now = func() time.Time { return time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC) }
 	env.service = service
@@ -383,6 +402,60 @@ func TestCloseLazyFallback(t *testing.T) {
 	}
 	if !lazy {
 		t.Error("a busy mount must be detached lazily, and say so")
+	}
+}
+
+// A mount whose sshfs daemon is gone is not a mount: reads on it fail with ENOTCONN and a
+// new mount cannot be made over the stale entry, so an account left in that state could
+// never get its workspace back. Opening it again must detach the corpse and mount for real.
+func TestOpenReplacesAMountWhoseDaemonDied(t *testing.T) {
+	env := newTestEnv(t, Options{})
+	ctx := context.Background()
+	first, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	before := env.fake.callCount("sshfs ")
+
+	// The daemon died: the kernel has released its connection, while the mount table still
+	// lists the entry (that is exactly what a killed sshfs leaves behind).
+	previous := fuseConnDir
+	fuseConnDir = func(fuseConn) string { return "" }
+	defer func() { fuseConnDir = previous }()
+
+	if _, restarted, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app"); err != nil {
+		t.Fatalf("Open over a dead mount: %v", err)
+	} else if !restarted {
+		t.Error("a remount must restart the worker, or the sandbox keeps the dead mount bound")
+	}
+	if got := env.fake.callCount("sshfs "); got != before+1 {
+		t.Errorf("sshfs was invoked %d times, want %d (the dead mount must be replaced)", got, before+1)
+	}
+	mounts, err := env.service.Mounts("dsh-colin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mounts) != 1 || mounts[0].Mountpoint != first.Mountpoint {
+		t.Fatalf("mount record after recovery = %+v, want one record for %s", mounts, first.Mountpoint)
+	}
+}
+
+// A live mount is never disturbed by a repeated open, whatever the record says: the
+// connection is what decides.
+func TestOpenLeavesALiveMountAlone(t *testing.T) {
+	env := newTestEnv(t, Options{})
+	ctx := context.Background()
+	if _, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app"); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	before := env.fake.callCount("sshfs ")
+	if _, restarted, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app"); err != nil {
+		t.Fatalf("second Open: %v", err)
+	} else if restarted {
+		t.Error("a live mount must not be remounted")
+	}
+	if got := env.fake.callCount("sshfs "); got != before {
+		t.Errorf("sshfs was invoked %d times, want %d", got, before)
 	}
 }
 

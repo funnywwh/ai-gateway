@@ -113,7 +113,8 @@ aigw（主程序，当前用户 euid）
 ## 5b. 资源限额（实测与取舍）
 
 每 worker 的限额不再来自 systemd 单元，而是**每个 worker 一个 systemd 用户 scope**：
-`systemd-run --user --scope --unit=dshgw-worker-<t> -p MemoryMax=… -- <bwrap argv>`。
+`systemd-run --user --scope --unit=dshgw-worker-<t>-<id> -p MemoryMax=… -- <bwrap argv>`（`<id>` 是每个
+进程世代一个的序号；固定名字会被 systemd 拒绝复用，见 `deploy/dshgw/README.md` 的限额一节）。
 本机实测（单位 = 实测值）：scope 内 `memory.max=2147483648`、`pids.max=512`、`cpu.max=200000 100000`
 （即 CPUQuota=200%），进程退出后 scope 自动回收；worker 仍是 dshgw 的后代（scope 包裹现有进程树，
 不把进程改挂到用户管理器下），因此"worker 是网关的子进程"这条性质没有被破坏。

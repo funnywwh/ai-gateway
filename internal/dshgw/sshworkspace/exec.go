@@ -357,13 +357,34 @@ func (o Options) sshfsArgs(remote Remote, host, remotePath, mountpoint string) [
 	return append(args, target+":"+remotePath, mountpoint)
 }
 
+// serviceMounted is the reader the FUSE connection probe uses. It is a variable for the
+// same reason the service keeps a per-instance one: a test that states the mount table must
+// be able to state it for the probe too.
+var serviceMounted = mountedAt
+
 // mountedAt reports the filesystem type mounted exactly at mountpoint, or "" when nothing
 // is. /proc/self/mounts is read directly instead of shelling out to findmnt: it is always
 // present, and it is the same table findmnt would format.
 func mountedAt(mountpoint string) (string, error) {
+	fstype := ""
+	_ = eachMount(func(fields []string) bool {
+		if len(fields) < 3 || decodeMountField(fields[1]) != mountpoint {
+			return true
+		}
+		fstype = fields[2]
+		return false
+	})
+	return fstype, nil
+}
+
+// eachMount walks one field-split line of /proc/self/mounts at a time. Returning false
+// from visit stops the walk. A table that cannot be read is not an error worth
+// propagating: the callers all treat "no entry" and "no table" the same way, and the
+// table is present on every host this runs on.
+func eachMount(visit func(fields []string) bool) error {
 	file, err := os.Open("/proc/self/mounts")
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
@@ -373,11 +394,11 @@ func mountedAt(mountpoint string) (string, error) {
 		if len(fields) < 3 {
 			continue
 		}
-		if decodeMountField(fields[1]) == mountpoint {
-			return fields[2], nil
+		if !visit(fields) {
+			return nil
 		}
 	}
-	return "", scanner.Err()
+	return scanner.Err()
 }
 
 // decodeMountField undoes the kernel's octal escaping (\040 for a space, \011, \012, \134).
@@ -402,13 +423,30 @@ func decodeMountField(field string) string {
 // unmount detaches one FUSE mount, falling back to a lazy detach when the filesystem is
 // busy (a session inside the account may still hold it open).
 func (o Options) unmount(ctx context.Context, run ExecFunc, mountpoint string) (lazy bool, err error) {
+	return o.detachOnce(ctx, run, mountpoint, false)
+}
+
+// detachOnce is one unmount attempt. force adds fusermount's lazy flag, which detaches a
+// mount that is still in use: the kernel keeps the old superblock for whoever holds it and
+// drops the entry from the mount table, which is what an account whose sandbox still has a
+// mount point bound needs.
+func (o Options) detachOnce(ctx context.Context, run ExecFunc, mountpoint string, force bool) (lazy bool, err error) {
 	callCtx, cancel := context.WithTimeout(ctx, unmountBudget)
 	defer cancel()
-	_, stderr, runErr := run(callCtx, "fusermount3", []string{"-u", mountpoint}, nil)
-	if runErr == nil {
-		return false, nil
+	args := []string{"-u", mountpoint}
+	if force {
+		args = []string{"-u", "-z", mountpoint}
 	}
-	_, lazyStderr, lazyErr := run(callCtx, "fusermount3", []string{"-z", mountpoint}, nil)
+	_, stderr, runErr := run(callCtx, "fusermount3", args, nil)
+	if runErr == nil {
+		return force, nil
+	}
+	if force {
+		return false, Wrap(CodeMountFailed, fmt.Sprintf("unmount %s failed: %s", mountpoint, tail(stderr)), runErr)
+	}
+	// The lazy retry needs -u: `fusermount3 -z` alone is refused ("can only be used with
+	// -u"), so the two-flag form is what actually detaches a busy mount.
+	_, lazyStderr, lazyErr := run(callCtx, "fusermount3", []string{"-u", "-z", mountpoint}, nil)
 	if lazyErr == nil {
 		return true, nil
 	}
