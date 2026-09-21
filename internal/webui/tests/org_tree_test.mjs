@@ -94,8 +94,11 @@ assert.match(org, /state\.membersLoaded = false;/, 'the save button must be re-a
 // 也钉着的一条），页面通过 matcher 传进来；成员过滤直接用 matchesQuery。
 assert.match(org, /import \{ matchesQuery \} from '\.\.\/pinyin\.js'/, 'the org page must use the pinyin matcher');
 assert.match(org, /matcher: matchesQuery/, 'the node tree filter must match pinyin too');
-assert.match(org, /matchesQuery\(account\.name, search\)/, 'the member filter must match pinyin and English');
-assert.match(org, /type: 'search', placeholder: '按账号名过滤（支持拼音/, 'the member filter must say that pinyin works');
+// M72：过滤同时匹配账号名与飞书姓名（组织页的人员行就是账号行）。
+assert.match(org, /matchesPerson\(account, search\)/, 'the member filter must go through the person matcher');
+assert.match(org, /matchesQuery\(account\.name, search\) \|\| \(feishu \? matchesQuery\(feishu, search\) : false\)/,
+  'the person filter must match the account name and the Feishu name');
+assert.match(org, /type: 'search', placeholder: '按账号名或飞书姓名过滤（支持拼音/, 'the member filter must say that pinyin works');
 assert.match(treeSrc, /matcher,/, 'the control must accept a matcher callback');
 assert.doesNotMatch(treeSrc, /import[^;]*pinyin/, 'the control must not depend on the pinyin table itself');
 
@@ -112,7 +115,8 @@ assert.doesNotMatch(css, /\.org-members \{[^}]*border:1px/,
 // 选中置顶：排序必须在每次重绘时按"已勾选"分组，且勾选后立即重绘。
 assert.match(org, /Number\(checked\.has\(right\.id\)\) - Number\(checked\.has\(left\.id\)\)/,
   'checked members must sort before unchecked ones');
-assert.match(org, /checked\.add\(account\.id\); else checked\.delete\(account\.id\);\s*\n\s*paint\(\);/,
+// 勾选在人员行里（personRow），勾完立刻重绘，所以刚勾的账号会立刻置顶。
+assert.match(org, /if \(box\.checked\) checked\.add\(account\.id\); else checked\.delete\(account\.id\);\s*\n\s*repaint\(\);/,
   'ticking a member must repaint, so it lands at the top immediately');
 
 // --- 树的箭头必须是画出来的，不能是文字字形 -----------------------------------------------

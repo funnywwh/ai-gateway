@@ -25,6 +25,11 @@ import (
 // pickPath is the picker's route under the portal path prefix, like every other portal route.
 const pickPath = "login/pick"
 
+// pickTicketCookie is the cookie aigw sets for a Feishu login's pick ticket (M72). It is the same
+// name as the login ticket's because the mode inside the signed payload is what tells the two
+// apart: one cookie name, one reader, no way to confuse them by looking in the wrong place.
+const pickTicketCookie = feishuTicketCookieName
+
 // pickPage is the picker, rendered as plain HTML with no script: the form posts back to the same
 // path and the portal CSP already allows a form action to 'self'. Radio buttons because exactly
 // one key has to be chosen.
@@ -110,16 +115,9 @@ func (p *Proxy) pickHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	wire := strings.TrimSpace(r.URL.Query().Get("ticket"))
-	if r.Method == http.MethodPost {
-		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-		if err := r.ParseForm(); err != nil {
-			p.renderPick(w, http.StatusBadRequest, pickView{Error: "请求格式无效"}, wire)
-			return
-		}
-		wire = strings.TrimSpace(r.PostForm.Get("ticket"))
-	}
-	if wire == "" {
+	wire, err := p.pickTicket(w, r)
+	if err != nil {
+		p.audit(r, "", "feishu_login_reject", "key pick: "+err.Error(), http.StatusForbidden)
 		p.renderLogin(w, http.StatusForbidden, feishuErrorMessage("ticket"))
 		return
 	}
@@ -280,4 +278,47 @@ func (p *Proxy) renderPickFailure(w http.ResponseWriter, r *http.Request, ticket
 		p.audit(r, "", "feishu_login_reject", "key pick: authorization unavailable", http.StatusServiceUnavailable)
 		p.renderLogin(w, http.StatusServiceUnavailable, feishuErrorMessage("unavailable"))
 	}
+}
+
+// pickTicket reads the pick ticket from where the flow left it. Two shapes exist, and both are
+// legitimate: a Feishu login gets it as a host-only cookie (aigw runs the callback and cannot
+// put it anywhere else — cookies are scoped to a host), while a key login's picker is a redirect
+// this process produced, so the ticket is in the URL. The form then carries it in the body.
+//
+// Two different values is a tampered request, not a preference question — the same rule the
+// login ticket follows.
+func (p *Proxy) pickTicket(w http.ResponseWriter, r *http.Request) (string, error) {
+	fromCookie := ""
+	for _, cookie := range r.Cookies() {
+		if cookie.Name == pickTicketCookie && cookie.Value != "" {
+			if fromCookie != "" {
+				return "", errors.New("duplicate pick ticket cookies")
+			}
+			fromCookie = cookie.Value
+		}
+	}
+	fromQuery := strings.TrimSpace(r.URL.Query().Get("ticket"))
+	fromBody := ""
+	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		if err := r.ParseForm(); err != nil {
+			return "", errors.New("malformed form")
+		}
+		fromBody = strings.TrimSpace(r.PostForm.Get("ticket"))
+	}
+	present := []string{}
+	for _, value := range []string{fromCookie, fromQuery, fromBody} {
+		if value != "" {
+			present = append(present, value)
+		}
+	}
+	if len(present) == 0 {
+		return "", errors.New("missing pick ticket")
+	}
+	for _, value := range present[1:] {
+		if value != present[0] {
+			return "", errors.New("pick ticket mismatch")
+		}
+	}
+	return present[0], nil
 }

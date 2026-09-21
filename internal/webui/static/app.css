@@ -396,6 +396,26 @@ textarea.form-input { resize:vertical; min-height:64px; }
 .org-member-name { flex:0 1 auto; min-width:0; overflow-wrap:anywhere; }
 .org-member-id { flex:0 0 auto; }
 
+/* 人员行（M72）：一行是一个账号，展开后是该账号的 Key 列表与逐账号操作。
+   摘要行仍然用 .org-member（勾选框、姓名、id 的既有布局规则都成立），外层多一个可展开的
+   容器；展开区是列表滚动区里的一块内容，所以它自己不需要再滚动。 */
+.org-person { border-bottom:1px solid var(--line); }
+.org-person:last-child { border-bottom:none; }
+.org-person.open { background:rgba(140,170,255,.06); }
+.org-member-toggle { flex:0 0 auto; margin-left:auto; padding:2px 8px; font-size:12px; }
+.org-person-detail { padding:8px 10px 12px 34px; font-size:12.5px; }
+.org-person-facts { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:6px; }
+.org-person-actions { flex-wrap:wrap; gap:6px; }
+.org-person-keys { margin-top:6px; }
+.org-person-keys h4 { margin:6px 0 4px; font-size:13px; }
+.org-person-key { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:3px 0; }
+.org-person-key-name { min-width:8rem; }
+.org-person-key code { font-size:11.5px; color:var(--muted); }
+.org-members-plain .org-member input[type=checkbox] { display:none; }
+.org-unassigned { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:8px; }
+.org-unassigned-list { flex:1 1 100%; }
+.btn-small { padding:2px 8px; font-size:12px; }
+
 /* 工具栏里的行内筛选控件（标签 + 控件/勾选框）。
    不要用 `.field` 做这件事：它是块级布局、文字 span 是 display:block，勾选框与文字会分成两行；
    勾选框还要显式给尺寸，否则同样被全局 width:100% 撑满。 */

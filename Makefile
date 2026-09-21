@@ -161,8 +161,10 @@ ui-base:
 		node internal/webui/tests/requests_test.mjs || exit $$? ; \
 		node internal/webui/tests/tags_binding_test.mjs || exit $$? ; \
 		node internal/webui/tests/org_tree_test.mjs || exit $$? ; \
+		node internal/webui/tests/org_person_list_test.mjs || exit $$? ; \
 		node --experimental-vm-modules internal/webui/tests/keys_feishu_test.mjs || exit $$? ; \
 		node --experimental-vm-modules internal/webui/tests/org_feishu_test.mjs || exit $$? ; \
+		node --experimental-vm-modules internal/webui/tests/account_feishu_test.mjs || exit $$? ; \
 	else \
 		echo "skip: node is not available (the derivation is still covered by make ui-check)" ; \
 	fi

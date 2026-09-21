@@ -352,3 +352,50 @@ func TestKeyLoginOffersThePickerOnlyWhenThereIsAChoice(t *testing.T) {
 		t.Fatalf("single-key location = %q, want %q", got, want)
 	}
 }
+
+// The Feishu path delivers the pick ticket as a cookie rather than in the URL: aigw runs the
+// callback on its own origin and can only hand the browser a cookie for the portal's HOST (a
+// URL would mean putting the ticket in a link the person could forward). The picker therefore has
+// to accept both places, and to reject a request that presents two different ones.
+func TestKeyPickReadsTheTicketFromTheCookie(t *testing.T) {
+	setup := setupPick(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	ticket, err := setup.verifier.SignPick(setup.accountID, "ou_alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodGet, "/login/pick", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "dsh.test:32600"
+	req.AddCookie(&http.Cookie{Name: pickTicketCookie, Value: ticket})
+	recorder := httptest.NewRecorder()
+	setup.proxy.Dispatch().ServeHTTP(recorder, req)
+	res := recorder.Result()
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status = %d, want the picker: %s", res.StatusCode, body)
+	}
+	body, _ := io.ReadAll(res.Body)
+	if !strings.Contains(string(body), `name="ticket" value="`+ticket+`"`) {
+		t.Fatal("the rendered form must carry the ticket it was opened with")
+	}
+
+	// Two different tickets in one request is tampering, not a preference: refused before any
+	// verification, so a mixed-up request cannot spend the real ticket.
+	other, err := setup.verifier.SignPick(setup.accountID, "ou_alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err = http.NewRequest(http.MethodGet, "/login/pick?ticket="+url.QueryEscape(other), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "dsh.test:32600"
+	req.AddCookie(&http.Cookie{Name: pickTicketCookie, Value: ticket})
+	recorder = httptest.NewRecorder()
+	setup.proxy.Dispatch().ServeHTTP(recorder, req)
+	if recorder.Result().StatusCode == http.StatusOK {
+		t.Fatal("a request with two different pick tickets rendered the picker")
+	}
+}

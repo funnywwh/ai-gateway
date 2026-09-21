@@ -27,11 +27,6 @@ type FeishuDeps struct {
 	// Tickets signs the short-lived handoff the DSH gateway redeems (M61). Nil while the
 	// DSH login flow is off.
 	Tickets *feishu.TicketCodec
-	// PickTickets signs the key-pick handoff of a multi-key portal login (M72). It is a second
-	// codec over the same key because the two tickets name different things — a tenant versus
-	// an account — and the mode inside the payload is what keeps one from being redeemed as the
-	// other. Nil while the DSH login flow is off.
-	PickTickets *feishu.TicketCodec
 	// Invites signs the long-lived administrator invitation links (M66). It is a second
 	// codec rather than a longer TTL on States: an invitation outlives one consent screen by
 	// design, and a purpose-bound key keeps one kind of link from signing the other. Nil
@@ -937,12 +932,16 @@ func (s *Server) feishuAccountFromLegacyKeyBinding(ctx context.Context, openID s
 
 // handOffFeishuKeyPick continues a login at the portal's key picker (M72 §"多 Key 选择").
 //
-// The pick ticket names the account instead of a tenant, and the portal renders the choice from
-// it. When the tenant is not provisioned yet the same ticket carries that job too: the portal's
-// authorization call is what creates it, so the picker page doubles as the first-login page.
+// The pick ticket names the ACCOUNT rather than a tenant, and the portal renders the choice from
+// it. aigw signs it because it is the side that proved the identity: the portal's own wait — a
+// key login — cannot reach here at all (there is no Feishu identity involved), so a ticket that
+// says "this account may choose" only ever comes from the callback.
+//
+// The ticket is delivered exactly like a login ticket: as a host-only cookie when the portal
+// shares the callback's host, and in the URL when it does not.
 func (s *Server) handOffFeishuKeyPick(w http.ResponseWriter, r *http.Request, account *domain.Account, identity feishu.Identity) {
 	deps := s.deps.Feishu
-	if deps.PickTickets == nil {
+	if deps.Tickets == nil {
 		// Only reachable in a build whose DSH login flow is off, which the caller already
 		// refuses; answering as unavailable beats a nil dereference.
 		s.redirectFeishuError(w, r, "error")
@@ -953,7 +952,7 @@ func (s *Server) handOffFeishuKeyPick(w http.ResponseWriter, r *http.Request, ac
 		s.redirectFeishuError(w, r, "error")
 		return
 	}
-	wire, ticket, err := deps.PickTickets.IssueKeyPick(account.ID, identity.OpenID, nonce)
+	wire, ticket, err := deps.Tickets.IssueKeyPick(account.ID, identity.OpenID, nonce)
 	if err != nil {
 		s.deps.Log.Error("issuing a key-pick ticket failed", "err", err)
 		s.redirectFeishuError(w, r, "error")
@@ -1271,23 +1270,11 @@ func (s *Server) feishuSameHost(portalURL string) bool {
 	return strings.EqualFold(portal.Hostname(), callback.Hostname())
 }
 
-// setFeishuTicketCookie hands the ticket to the browser. The cookie is host-only (no
-// Domain attribute) so it reaches the portal whatever port it listens on, HttpOnly so page
-// script cannot read it, and short-lived because the ticket is redeemed within one
-// redirect. Secure follows the deployment's real scheme: a browser silently drops a Secure
-// cookie on a plain-HTTP origin.
-func (s *Server) setFeishuTicketCookie(w http.ResponseWriter, ticket string) {
-	maxAge := 120
-	if s.deps.Config != nil && s.deps.Config.Feishu.TicketTTLS > 0 {
-		maxAge = s.deps.Config.Feishu.TicketTTLS
-	}
-	s.setFeishuCookie(w, feishuTicketCookieName, ticket, maxAge)
-}
-
-// setFeishuPickCookie hands over the key-pick ticket (M72). It uses the SAME cookie name as the
-// login ticket on purpose: the portal reads one cookie and tells the two apart by the mode
-// inside the signed payload, so a second name would only be one more thing to get wrong. The
-// lifetime follows pick_ttl_s, which defaults to the login ticket's.
+// setFeishuPickCookie hands the key-pick ticket to the browser (M72). It reuses the login
+// ticket's cookie name on purpose: the portal reads one cookie and tells the two kinds apart by
+// the mode inside the signed payload, so a second name would only be one more thing to get wrong.
+// The lifetime follows pick_ttl_s, which is a separate setting because this ticket covers a form
+// submission rather than a redirect.
 func (s *Server) setFeishuPickCookie(w http.ResponseWriter, ticket string) {
 	maxAge := 120
 	if s.deps.Config != nil {
@@ -1297,6 +1284,19 @@ func (s *Server) setFeishuPickCookie(w http.ResponseWriter, ticket string) {
 		case s.deps.Config.Feishu.TicketTTLS > 0:
 			maxAge = s.deps.Config.Feishu.TicketTTLS
 		}
+	}
+	s.setFeishuCookie(w, feishuTicketCookieName, ticket, maxAge)
+}
+
+// setFeishuTicketCookie hands the ticket to the browser. The cookie is host-only (no
+// Domain attribute) so it reaches the portal whatever port it listens on, HttpOnly so page
+// script cannot read it, and short-lived because the ticket is redeemed within one
+// redirect. Secure follows the deployment's real scheme: a browser silently drops a Secure
+// cookie on a plain-HTTP origin.
+func (s *Server) setFeishuTicketCookie(w http.ResponseWriter, ticket string) {
+	maxAge := 120
+	if s.deps.Config != nil && s.deps.Config.Feishu.TicketTTLS > 0 {
+		maxAge = s.deps.Config.Feishu.TicketTTLS
 	}
 	s.setFeishuCookie(w, feishuTicketCookieName, ticket, maxAge)
 }
