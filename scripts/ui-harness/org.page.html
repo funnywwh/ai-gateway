@@ -213,24 +213,74 @@ try {
     checks.detailShown = pageText().includes('节点详情');
     checks.membersLoaded = !!document.querySelector('.org-member');
 
-    // 成员行的几何：勾选框与账号名必须紧邻且垂直对齐。
+    // 人员列表是一张**多列表格**：表头文案齐全，且不同账号行的同一列必须从同一个 x 开始。
     //
-    // 这里必须量 getBoundingClientRect，不能只看 textContent：这条 bug 的形态是**布局**——
-    // app.css 里全局的 `input, select, textarea { width:100% }` 命中这个没有 class 的
-    // checkbox，把它撑满整行，于是账号名被推到最右边、看起来"没对齐"。文字内容一字不差，
-    // 任何文本断言都会全绿。（与 .plus-skill / .form-radio 是同一条坑，这是第三处。）
+    // 「对齐」只能量几何：文字内容一字不差，一堆换行的徽标（改造前的形态）与一张按列对齐的表
+    // 在 textContent 上完全一样，所以断言必须读 getBoundingClientRect 的 left。
+    const memberTable = document.querySelector('.org-member-table');
+    const headLabels = memberTable
+      ? [...memberTable.querySelectorAll('thead th')].map((th) => th.textContent.trim())
+      : [];
+    checks.memberTableHeader = ['账号', 'DSH', '飞书', 'Key', '所属组织', '操作']
+      .every((label) => headLabels.includes(label));
+    const rowOfPerson = (name) => [...document.querySelectorAll('.org-member')]
+      .find((el) => el.textContent.includes(name));
+    const cellLeft = (name, cls) => {
+      const row = rowOfPerson(name);
+      const cell = row ? row.querySelector('td.' + cls) : null;
+      return cell ? Math.round(cell.getBoundingClientRect().left) : -1;
+    };
+    const columnAligned = (cls) => {
+      const left = cellLeft('acme', cls);
+      const right = cellLeft('root-acct', cls);
+      return left >= 0 && left === right;
+    };
+    checks.memberColumnsAligned = ['c-name', 'c-dsh', 'c-feishu', 'c-keys', 'c-orgs', 'c-ops']
+      .every(columnAligned);
+    // 详情行必须横跨整行（colspan 的 td 宽度约等于表格宽度），否则展开区只占一列。
+    // 隐藏的 <tr> 量出来是 0，所以先真的展开一行、量完再收起来（这一来一回本身也是收起生效的证据）。
+    const rowButtonOf = (label) => {
+      const row = [...document.querySelectorAll('.org-member')].find((el) => el.textContent.includes('acme'));
+      return row ? [...row.querySelectorAll('button')].find((b) => b.textContent === label) : null;
+    };
+    const acmeToggle = rowButtonOf('展开');
+    if (acmeToggle) acmeToggle.click();
+    await settle();
+    checks.memberDetailSpansRow = (() => {
+      const table = document.querySelector('.org-member-table');
+      // 取**展开着**的那一行的详情单元格：表里每个账号都有一格，第一个多半是收起来的。
+      const cell = document.querySelector('.org-person-detail.open td.org-person-detail-cell');
+      if (!table || !cell) return false;
+      return cell.getBoundingClientRect().width >= table.getBoundingClientRect().width - 2;
+    })();
+    const acmeCollapse = rowButtonOf('收起');
+    if (acmeCollapse) acmeCollapse.click();
+    await settle();
+
+    // 成员行的几何：勾选框在自己的列里、不被全局 `input { width:100% }` 撑满，且与账号名垂直对齐。
+    //
+    // 这条坑的形态是**布局**——app.css 里全局的 `input, select, textarea { width:100% }` 命中这个
+    // 没有 class 的 checkbox，把它撑满整列，账号名被推到最右边。文字内容一字不差，任何文本断言都会
+    // 全绿。（与 .plus-skill / .form-radio 是同一条坑，这是第四处：表格化后勾选框换到了自己的列里。）
     const memberRow = document.querySelector('.org-member');
-    const memberBoxEl = memberRow.querySelector('input');
-    const memberNameEl = memberRow.querySelector('span');
-    const boxRect = memberBoxEl.getBoundingClientRect();
-    const nameRect = memberNameEl.getBoundingClientRect();
+    const pickCell = memberRow.querySelector('td.c-pick');
+    const memberBoxEl = pickCell ? pickCell.querySelector('input') : null;
+    const memberNameEl = memberRow.querySelector('.org-member-name');
+    // 量不到就退回一套零值：断言照样判红，但后面的检查项还能跑完（一个 throw 会让整个视图的
+    // 后半段断言全部消失，那时报告只会说"page threw"，看不出究竟哪几条坏了）。
+    const zeroRect = { width: 0, height: 0, left: -1, right: -1, top: 0 };
+    const boxRect = memberBoxEl ? memberBoxEl.getBoundingClientRect() : zeroRect;
+    const nameRect = memberNameEl ? memberNameEl.getBoundingClientRect() : zeroRect;
+    const pickRect = pickCell ? pickCell.getBoundingClientRect() : zeroRect;
     checks.memberCheckboxNotStretched = boxRect.width > 0 && boxRect.width <= 20;
-    checks.memberCheckboxNameGap = (nameRect.left - boxRect.right) >= 0 && (nameRect.left - boxRect.right) <= 12;
+    // 「勾选框紧贴它的列左沿」取代了改造前的「勾选框与名字相距 ≤12px」：跨列之后那个距离由列宽
+    // 决定，不再是"被撑满、名字被推走"的证据，而列对齐由 memberColumnsAligned 守着。
+    checks.memberCheckboxInsidePickCell = boxRect.width > 0 && (boxRect.left - pickRect.left) <= 8;
     checks.memberVerticallyAligned = Math.abs((boxRect.top + boxRect.height / 2) - (nameRect.top + nameRect.height / 2)) <= 2;
     checks.memberRowFitsPanel = memberRow.getBoundingClientRect().width <= document.querySelector('.org-members').getBoundingClientRect().width;
     // 量到的数字放进 sample（runner 唯一豁免的信息项）：断言只说真假，数字才说明"修好了多少"。
     checks.sample = { memberRow: 'box=' + Math.round(boxRect.width) + 'x' + Math.round(boxRect.height)
-      + ' gap=' + Math.round(nameRect.left - boxRect.right)
+      + ' gap=' + Math.round(boxRect.left - pickRect.left)
       + ' dy=' + Math.round(Math.abs((boxRect.top + boxRect.height / 2) - (nameRect.top + nameRect.height / 2))) };
     const memberBox = (name) => {
       const row = [...document.querySelectorAll('.org-member')]
@@ -412,8 +462,8 @@ try {
     unassigned.click();
     await settle();
     checks.unassignedListOpened = document.querySelectorAll('.org-members-plain .org-member').length === 4;
-    checks.unassignedHasNoCheckbox = [...document.querySelectorAll('.org-members-plain .org-member input[type=checkbox]')]
-      .every((box) => box.offsetParent === null);
+    // 未归属列表是同一个表去掉勾选列：整列不渲染，而不是"渲染了再用 CSS 藏起来"。
+    checks.unassignedHasNoCheckbox = document.querySelectorAll('.org-members-plain input[type=checkbox]').length === 0;
 
     // 展开一个账号：请求带 account_id，列表里出现 worker Key 的标注与可操作的 Key。
     const target = rows().find((el) => el.textContent.includes('acme'));
@@ -421,14 +471,59 @@ try {
     expand.click();
     await settle();
     checks.keyRequestScopedToAccount = (window.__calls || []).some((call) => call.includes('/keys?') && call.includes('account_id=1'));
-    const detail = document.querySelector('.org-person-detail');
-    checks.detailOpened = !!detail;
+    // 人员表里每个账号都有自己的详情行，所以断言必须指名道姓地点到 acme（#1）那一行：
+    // 取全页第一个 .org-person-detail 会拿到排序在前、根本没展开的那一行。
+    const detailOf = (id) => document.querySelector('.org-person-detail[data-account-id="' + id + '"]');
+    const detail = detailOf('1');
+    // 「展开」的证据是**看得见**：元素存在不算数（改造前收起之后元素也一直在 DOM 里）。
+    checks.detailOpened = !!detail && detail.getBoundingClientRect().height > 0;
+    // 详情体只能有一份：改造前 refreshDetail() 会把新的 .org-person-detail 塞进旧的里面（自我嵌套、
+    // padding 叠加），所以这条断言同时守着"不嵌套"。
+    checks.detailBodySingle = !!detail && detail.querySelectorAll('.org-person-detail-body').length === 1
+      && detail.querySelectorAll('.org-person-detail').length === 0;
     checks.detailListsKeys = !!detail && detail.textContent.includes('laptop') && detail.textContent.includes('phone');
     checks.workerKeyLabelled = !!detail && detail.textContent.includes('网关自动创建（worker 凭据，不参与选择）');
     checks.detailActions = ['新建 Key', '停用 DSH', '解绑飞书', '分配组织']
       .every((label) => !!detail && [...detail.querySelectorAll('button')].some((b) => b.textContent === label));
     // 停用的 Key 在行内说明状态，而不是看起来一样。
     checks.suspendedKeyShown = !!detail && detail.textContent.includes('suspended');
+
+    // --- 「收起」必须真的收起来 -------------------------------------------------------------
+    //
+    // 用户报障：「点击收起不会收起」。当时 app.css 里 .org-person-detail 只有 padding、**没有**
+    // 默认隐藏的门控，.org-person.open 只改背景色，于是"收起"只是把 open 类摘掉：DOM 还在、
+    // 内容照旧可见。断言必须量几何（rect 高度为 0）而不是查元素是否存在——那个 bug 里元素一直存在。
+    const rowButton = (label) => {
+      const row = rows().find((el) => el.textContent.includes('acme'));
+      return row ? [...row.querySelectorAll('button')].find((b) => b.textContent === label) : null;
+    };
+    const collapse = rowButton('收起');
+    checks.collapseLabelAfterExpand = !!collapse;
+    if (collapse) collapse.click();
+    await settle();
+    const hidden = detailOf('1');
+    checks.detailCollapseHides = !!hidden && hidden.getBoundingClientRect().height === 0;
+    const summaryRow = rows().find((el) => el.textContent.includes('acme'));
+    checks.collapseDropsOpenClass = !!summaryRow && !summaryRow.classList.contains('open');
+    checks.collapseRestoresLabel = !!rowButton('展开');
+    // 再展开一次：内容必须回来（收起不是"把详情删掉"），而且只有一份详情体（刷新时不能自我嵌套）。
+    const again = rowButton('展开');
+    if (again) again.click();
+    await settle();
+    const reopened = detailOf('1');
+    checks.detailReopens = !!reopened && reopened.getBoundingClientRect().height > 0;
+    checks.detailBodySingleAfterReopen = !!reopened
+      && reopened.querySelectorAll('.org-person-detail-body').length === 1
+      && reopened.querySelectorAll('.org-person-detail').length === 0;
+
+    // 勾选任何一行都会重绘整张表：展开中的那一行必须还在（行对象按账号复用），否则"勾一个人就把
+    // 正在看的详情关掉"——这与"收起不生效"是同一类手感问题，只是方向相反。
+    const other = rows().find((el) => el.textContent.includes('李四'));
+    const otherBox = other && other.querySelector('input[type=checkbox]');
+    if (otherBox) otherBox.click();
+    await settle();
+    const survived = detailOf('1');
+    checks.openRowSurvivesRepaint = !!survived && survived.getBoundingClientRect().height > 0 && !!rowButton('收起');
   }
 
   if (view === 'org-readonly') {

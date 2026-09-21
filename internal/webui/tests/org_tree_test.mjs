@@ -107,17 +107,26 @@ assert.match(org, /const memberToolbar = el\('div', \{ class: 'org-member-toolba
   'the filter row must be its own element so it can stay put while the list scrolls');
 assert.match(org, /const memberPanel = el\('div', \{ class: 'org-member-panel' \}, \[memberToolbar, list\]\)/,
   'the panel must hold the fixed toolbar and the scrolling list side by side');
-assert.match(css, /\.org-members \{ max-height:280px; overflow:auto; padding:8px; \}/,
-  'only the list scrolls: the border and the toolbar live on the panel');
+// padding 归零是表格化的前提：表头（thead th）是 sticky 到滚动区顶部的，中间留一条内边距
+// 就会漏出行内容从缝里钻过去。
+assert.match(css, /\.org-members \{ max-height:280px; overflow:auto; padding:0; \}/,
+  'only the list scrolls, and it must start flush so a sticky table header has nothing to leak through');
 assert.doesNotMatch(css, /\.org-members \{[^}]*border:1px/,
   'the scrolling element must not be the bordered panel that also holds the filter');
 
 // 选中置顶：排序必须在每次重绘时按"已勾选"分组，且勾选后立即重绘。
 assert.match(org, /Number\(checked\.has\(right\.id\)\) - Number\(checked\.has\(left\.id\)\)/,
   'checked members must sort before unchecked ones');
-// 勾选在人员行里（personRow），勾完立刻重绘，所以刚勾的账号会立刻置顶。
-assert.match(org, /if \(box\.checked\) checked\.add\(account\.id\); else checked\.delete\(account\.id\);\s*\n\s*repaint\(\);/,
+// 勾选在人员行里，勾完立刻重绘，所以刚勾的账号会立刻置顶。
+assert.match(org, /if \(entry\.box\.checked\) checked\.add\(account\.id\); else checked\.delete\(account\.id\);/,
+  'the checkbox writes into the checked set');
+assert.match(org, /onToggle: \(\) => paint\(\)/,
   'ticking a member must repaint, so it lands at the top immediately');
+// 重绘复用行对象：展开中的行不会被一次勾选/过滤重绘扔掉，也不会因此重新拉一次 Key 列表。
+assert.match(org, /const entries = new Map\(\);/,
+  'rows must be reused across repaints, or an expanded row would collapse on every tick');
+assert.match(org, /state\.open\.has\(account\.id\)/,
+  'the expansion state must survive a rebuild of the table');
 
 // --- 树的箭头必须是画出来的，不能是文字字形 -----------------------------------------------
 //
@@ -146,13 +155,16 @@ assert.match(treeSrc, /\[kids \? arrowIcon\(expanded\) : leafIcon\(\)\]/, 'the t
 // 成员行与工具栏筛选行都必须显式给出勾选框尺寸，且不能用块级的 `.field` 承载行内勾选框。
 assert.match(css, /\.org-member input\[type=checkbox\] \{ flex:0 0 auto; width:16px/,
   'the member checkbox needs an explicit size: the global input{width:100%} rule stretches it');
-assert.match(css, /\.org-member-name \{ flex:0 1 auto; min-width:0/,
-  'a long account name must wrap instead of pushing the id out of the row');
+assert.match(css, /\.org-member-name \{ display:block; min-width:0; overflow-wrap:anywhere; \}/,
+  'a long account name must wrap instead of pushing the id out of its column');
 assert.match(css, /\.filter-check input\[type=checkbox\] \{ flex:0 0 auto; width:16px/,
   'the toolbar filter checkbox needs the same explicit size');
 assert.doesNotMatch(accounts, /class: 'field inline'/,
   "the toolbar filter must not use the block-level .field layout, which puts the checkbox and its text on separate lines");
 assert.match(org, /class: 'org-member-name'/, 'the member name carries its own class so the layout rule is unambiguous');
+assert.match(org, /class: 'org-member-table'/, 'the person list is a table, so its columns can be aligned');
+assert.match(css, /\.org-member-table thead th \{ position:sticky; top:0;/,
+  'the column labels must stay put while the list scrolls: a header that scrolls away is no header');
 
 // --- the accounts page shows and filters by organization ----------------------------------
 

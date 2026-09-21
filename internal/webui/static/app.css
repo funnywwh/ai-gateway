@@ -390,25 +390,53 @@ textarea.form-input { resize:vertical; min-height:64px; }
 .org-member-toolbar { display:flex; align-items:center; gap:8px; padding:8px; border-bottom:1px solid var(--line); }
 .org-member-toolbar input[type=search] { flex:1 1 auto; min-width:0; }
 .org-member-toolbar .muted { flex:0 0 auto; white-space:nowrap; }
-.org-members { max-height:280px; overflow:auto; padding:8px; }
-.org-member { display:flex; align-items:center; gap:8px; padding:4px 2px; font-size:13px; }
+/* 人员列表是**多列表格**：padding 给 0，表头（thead th 是 sticky）才能贴着滚动区顶部，
+   中间不留一条会漏出行内容的缝。空态另给内边距。 */
+.org-members { max-height:280px; overflow:auto; padding:0; }
+.org-members > .empty { padding:10px; }
+.org-member-table { width:100%; border-collapse:collapse; font-size:13px; }
+/* 表头钉在滚动区顶部：列表长到需要滚动时，列名跟着滚走等于没有表头。
+   列宽用百分比做倾向提示（auto 布局），窄屏下靠单元格换行而不是横向溢出。 */
+.org-member-table thead th { position:sticky; top:0; z-index:1; background:var(--panel);
+  text-align:left; font-weight:600; font-size:11.5px; color:var(--muted);
+  padding:6px 8px; border-bottom:1px solid var(--line); }
+.org-member-table td { padding:6px 8px; border-bottom:1px solid var(--line);
+  vertical-align:top; overflow-wrap:anywhere; }
+.org-member-table th.c-pick, .org-member-table td.c-pick { width:44px; }
+.org-member-table th.c-name { width:18%; }
+.org-member-table th.c-dsh { width:26%; }
+.org-member-table th.c-feishu { width:18%; }
+.org-member-table th.c-keys { width:12%; }
+.org-member-table th.c-orgs { width:22%; }
+/* 账号名列里名字与 #id 各占一行：长名字换行，而不是把 id 挤出去。
+   （名字带自己的 class，是因为它既要被布局规则命中，也要被走查按名字收集。） */
+.org-member-name { display:block; min-width:0; overflow-wrap:anywhere; }
+.org-member-id { display:block; font-size:11.5px; }
+.org-member-table td.c-ops { white-space:nowrap; }
+.org-member-table td.empty { padding:14px 10px; text-align:center; }
+.org-member-orgs { display:flex; flex-wrap:wrap; gap:4px; }
+.org-member-orgs .badge { max-width:100%; overflow-wrap:anywhere; }
 /* 成员行的勾选框：全局 `input, select, textarea { width:100% }`（本文件第 89 行）会命中这个
-   没有 class 的 checkbox，把它撑满整行、账号名被挤到最右边——表现就是"勾选框和文字隔太远、
+   没有 class 的 checkbox，把它撑满整列、账号名被挤到最右边——表现就是"勾选框和文字隔太远、
    不对齐"。文字内容一字不差，所以只有量几何才看得出来。与 .plus-skill / .form-radio 是同一条
-   坑，这是第三处：显式给出尺寸并禁止伸缩，名字过长时换行而不是把 id 挤出去。 */
+   坑，这是第四处（表格化后勾选框换到了自己的列里）：显式给出尺寸并禁止伸缩。 */
 .org-member input[type=checkbox] { flex:0 0 auto; width:16px; height:16px; margin:0;
   accent-color:var(--accent); }
-.org-member-name { flex:0 1 auto; min-width:0; overflow-wrap:anywhere; }
-.org-member-id { flex:0 0 auto; }
 
 /* 人员行（M72）：一行是一个账号，展开后是该账号的 Key 列表与逐账号操作。
-   摘要行仍然用 .org-member（勾选框、姓名、id 的既有布局规则都成立），外层多一个可展开的
-   容器；展开区是列表滚动区里的一块内容，所以它自己不需要再滚动。 */
-.org-person { border-bottom:1px solid var(--line); }
-.org-person:last-child { border-bottom:none; }
-.org-person.open { background:rgba(140,170,255,.06); }
-.org-member-toggle { flex:0 0 auto; margin-left:auto; padding:2px 8px; font-size:12px; }
-.org-person-detail { padding:8px 10px 12px 34px; font-size:12.5px; }
+   摘要行仍带 .org-member（勾选框与名字的既有规则都成立），详情是**另一行** <tr>：
+   表格里没有"行内再包一层 div"这回事，所以展开区用 colspan 的单元格承载。 */
+.org-person.open td { background:rgba(140,170,255,.06); }
+.org-member-toggle { padding:2px 8px; font-size:12px; }
+/* 「收起」必须真的收起：详情行默认 display:none，只有 .open 才成为一行。
+   这条门控是用户报障的修复点——改造前 .org-person-detail 只有 padding，收起只是把 open 类摘掉，
+   内容照旧可见（所以"点击收起不会收起"）。 */
+.org-person-detail { display:none; }
+.org-person-detail.open { display:table-row; }
+/* 详情单元格自己不占内边距（.org-member-table td 那条会把 6px 8px 加回来，
+   所以这里用更具体的选择器而不是 !important）。 */
+.org-member-table td.org-person-detail-cell { padding:0; }
+.org-person-detail-body { padding:8px 10px 12px 34px; font-size:12.5px; }
 .org-person-facts { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:6px; }
 .org-person-actions { flex-wrap:wrap; gap:6px; }
 .org-person-keys { margin-top:6px; }

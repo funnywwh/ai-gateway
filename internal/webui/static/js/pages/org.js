@@ -22,6 +22,18 @@ import { openFeishuPersonPicker, unbindAccountFeishu } from './account_feishu.js
 // 分页多选更简单；账号数量超过这个上限时列表会截断，并明确提示去账户页按组织筛选。
 const MEMBER_PICK_LIMIT = 1000;
 
+// 人员（账号）列表的列。表头、详情行的 colspan 与两种模式（可勾选 / 未归属那份只读列表）都从
+// 这一处推出：加一列不会漏掉其中一处，而未归属列表去掉 pick 列是"整列不渲染"而不是用 CSS 藏。
+const MEMBER_COLUMNS = [
+  { key: 'pick', label: '', cls: 'c-pick', pick: true },
+  { key: 'name', label: '账号', cls: 'c-name' },
+  { key: 'dsh', label: 'DSH', cls: 'c-dsh' },
+  { key: 'feishu', label: '飞书', cls: 'c-feishu' },
+  { key: 'keys', label: 'Key', cls: 'c-keys' },
+  { key: 'orgs', label: '所属组织', cls: 'c-orgs' },
+  { key: 'ops', label: '操作', cls: 'c-ops' },
+];
+
 export async function render({ page, actions, session }) {
   const readonly = session.role !== 'admin';
   const refreshBtn = el('button', { class: 'btn', text: '刷新' });
@@ -36,7 +48,14 @@ export async function render({ page, actions, session }) {
   });
   actions.append(refreshBtn, expandAll, collapseAll, createRoot, syncFeishu);
 
-  const state = { nodes: [], selectedId: null, accounts: [], accountsTruncated: false, membersLoaded: false };
+  const state = {
+    nodes: [], selectedId: null, accounts: [], accountsTruncated: false, membersLoaded: false,
+    // 展开中的账号（按 account id）。它跨整表重建活着：勾选、过滤、成员读取完成、甚至切换节点
+    // 都不该把操作员正在看的详情收起来。
+    open: new Set(),
+  };
+  // 当前那张人员表：写操作完成后按 id 就地刷新一行（见 refreshAccount）。
+  let currentTable = null;
 
   const mainTree = tree({
     mode: 'workspace',
@@ -98,6 +117,7 @@ export async function render({ page, actions, session }) {
     const unassigned = state.accounts.filter((account) => !(account.org_node_ids || []).length);
     const node = nodeById(state.selectedId);
     if (!node) {
+      currentTable = null;
       detail.append(card('节点详情', [
         el('div', { class: 'empty', text: '选择左侧的一个节点查看详情' }),
         unassignedRow(unassigned),
@@ -119,7 +139,8 @@ export async function render({ page, actions, session }) {
     const checked = new Set();
     const selectedCount = el('span', { class: 'muted' });
     const searchBox = el('input', { type: 'search', placeholder: '按账号名或飞书姓名过滤（支持拼音，如 zhangsan）…' });
-    const list = el('div', { class: 'org-members' });
+    const table = personTable({ pickable: true, checked, filtering: () => search.trim() !== '', onToggle: () => paint() });
+    const list = table.node;
     // The filter sits in its own row above the scrolling list, so it stays put while the
     // operator scrolls through candidates — a filter that scrolls away is unusable exactly
     // when the list is long enough to need filtering.
@@ -128,11 +149,10 @@ export async function render({ page, actions, session }) {
     let search = '';
     searchBox.addEventListener('input', () => { search = searchBox.value; paint(); });
 
-    // paint renders the person rows. The checkbox means "is a member of THIS node", so it is only
+    // paint lays the person rows out. The checkbox means "is a member of THIS node", so it is only
     // editable while the whole account list is shown: with a search filter on, "保存成员" would
     // replace the node's membership with whatever subset happens to be visible.
     function paint() {
-      list.replaceChildren();
       const filtering = search.trim() !== '';
       const wanted = state.accounts
         .filter((account) => matchesPerson(account, search))
@@ -141,11 +161,7 @@ export async function render({ page, actions, session }) {
         .sort((left, right) => Number(checked.has(right.id)) - Number(checked.has(left.id))
           || left.name.localeCompare(right.name, 'zh-Hans-CN'));
       selectedCount.textContent = checked.size ? '已选 ' + checked.size + ' 个' : '';
-      if (!wanted.length) {
-        list.append(el('div', { class: 'empty', text: state.accounts.length ? '无匹配账号' : '没有可分配的账号' }));
-        return;
-      }
-      for (const account of wanted) list.append(personRow(account, node, checked, paint, filtering));
+      table.render(wanted, state.accounts.length ? '无匹配账号' : '没有可分配的账号', filtering);
     }
 
     const saveMembers = el('button', {
@@ -179,6 +195,7 @@ export async function render({ page, actions, session }) {
         : null,
     ]));
 
+    currentTable = table;
     // Fill the checkbox state from the server once the memberships are known.
     loadMembers(node.id, checked, saveMembers, paint);
   }
@@ -198,51 +215,167 @@ export async function render({ page, actions, session }) {
     toggle.addEventListener('click', () => {
       open = !open;
       box.hidden = !open;
-      if (open && !box.childElementCount) box.append(personList(null, unassigned));
+      if (open && !box.childElementCount) {
+        // No pick column: there is no node to write membership to, so a checkbox would be a lie.
+        const plain = personTable({ pickable: false });
+        plain.render(unassigned, '没有未归属账号');
+        box.append(plain.node);
+      }
     });
     line.append(toggle, el('span', { class: 'muted', text: '不在任何节点下的账号：展开后可用「分配组织」把它们挂到节点上' }), box);
     return line;
   }
 
-  // personRow renders one account: the membership checkbox, what the account is (DSH state, Feishu
-  // identity, key count) and an expander that shows its keys and the operations on them (M72).
-  function personRow(account, node, checked, repaint, filtering) {
-    const box = el('input', { type: 'checkbox', disabled: readonly, title: '加入这个节点' });
-    box.checked = checked.has(account.id);
-    box.addEventListener('change', () => {
-      if (box.checked) checked.add(account.id); else checked.delete(account.id);
-      repaint();
-    });
-    const expand = el('button', { class: 'btn org-member-toggle', text: '展开' });
-    const summary = el('label', { class: 'org-member' }, [
-      box,
-      // The name and id carry their own classes: the row's layout rules key off them, and a
-      // bare <span> would have to be targeted positionally in CSS.
-      el('span', { class: 'org-member-name', text: account.name }),
-      dshBadge(account),
-      feishuBadge(account),
-      keyBadge(account),
-      el('span', { class: 'org-member-id muted', text: '#' + account.id }),
-      expand,
+  // personTable renders the person (account) list as a multi-column table whose rows expand into
+  // that account's detail.
+  //
+  // 为什么是表格：行里原本是"徽标换行排一行"，字段一多就谁也数不清哪一格是谁的；表头 + 定列把
+  // 账号 / DSH / 飞书 / Key / 所属组织 / 操作 摆成一眼可扫的列，也才有了"点这一列的按钮"这种说法。
+  // pickable 决定勾选列**是否存在**（而不是画出来再用 CSS 藏）：未归属视图没有节点可写。
+  //
+  // 行对象按 account id 缓存：重绘（勾选、过滤、成员读取完成）不能把展开中的行扔掉，也不该因此
+  // 重新发一次 /keys；展开态本身存在 state.open 里，跨整表重建（load()、切换节点）也一样活着。
+  function personTable({ pickable, checked = new Set(), filtering = () => false, onToggle = () => {} }) {
+    const columns = MEMBER_COLUMNS.filter((col) => pickable || !col.pick);
+    const tbody = el('tbody');
+    const table = el('table', { class: 'org-member-table' }, [
+      el('thead', {}, [el('tr', {}, columns.map((col) => el('th', { class: col.cls, text: col.label })))]),
+      tbody,
     ]);
-    const container = el('div', { class: 'org-person' }, [summary]);
-    if (filtering && !box.checked) {
-      // A filtered list is a view, not the node's membership: saving from here would drop the
-      // rows the filter hid. Un-ticking a member that is on screen stays allowed — that is a
-      // removal the operator can see, and refusing it would make a filtered list read-only.
-      box.disabled = true;
-      box.title = '过滤时不能再加入成员（列表不完整）：先清空过滤框；已勾选的可以取消';
+    const node = el('div', { class: 'org-members' + (pickable ? '' : ' org-members-plain') }, [table]);
+    const entries = new Map();
+
+    // paintSummary is the one place that fills a row's cells from an account object, so a row that
+    // was refreshed in place (a Key was added, a Feishu identity was bound) cannot keep showing the
+    // numbers it had when it was built.
+    function paintSummary(entry, account) {
+      entry.account = account;
+      entry.cells.name.replaceChildren(
+        el('span', { class: 'org-member-name', text: account.name }),
+        el('span', { class: 'org-member-id muted', text: '#' + account.id }));
+      entry.cells.dsh.replaceChildren(dshBadge(account));
+      entry.cells.feishu.replaceChildren(feishuBadge(account));
+      entry.cells.keys.replaceChildren(keyBadge(account));
+      entry.cells.orgs.replaceChildren(orgsCell(account));
+      entry.box.setAttribute('aria-label', '加入节点：' + account.name);
     }
-    expand.addEventListener('click', async (ev) => {
-      ev.preventDefault();
-      const open = container.classList.toggle('open');
-      expand.textContent = open ? '收起' : '展开';
-      if (open && !container.querySelector('.org-person-detail')) {
-        container.append(await personDetail(account));
+
+    // applyBox keeps the membership checkbox in step with `checked` (the server's answer plus
+    // whatever the operator ticked since) and with the filter rule.
+    function applyBox(entry, isFiltering) {
+      const box = entry.box;
+      box.checked = checked.has(entry.account.id);
+      box.disabled = readonly || (isFiltering && !box.checked);
+      // A filtered list is a view, not the node's membership: saving from here would drop the rows
+      // the filter hid. Un-ticking a member that is on screen stays allowed — that is a removal the
+      // operator can see, and refusing it would make a filtered list read-only.
+      box.title = box.disabled
+        ? (readonly ? '只读角色不能修改成员' : '过滤时不能再加入成员（列表不完整）：先清空过滤框；已勾选的可以取消')
+        : '加入这个节点';
+    }
+
+    function buildRow(account) {
+      const entry = {
+        account, cells: {}, filled: false,
+        box: el('input', { type: 'checkbox', title: '加入这个节点' }),
+        toggle: el('button', { class: 'btn org-member-toggle', type: 'button', text: '展开', 'aria-expanded': 'false' }),
+      };
+      entry.box.addEventListener('change', () => {
+        if (entry.box.checked) checked.add(account.id); else checked.delete(account.id);
+        onToggle();
+      });
+      entry.toggle.addEventListener('click', () => setOpen(entry, !state.open.has(entry.account.id)));
+      entry.cells = {
+        pick: el('td', { class: 'c-pick' }, pickable ? [entry.box] : []),
+        name: el('td', { class: 'c-name' }),
+        dsh: el('td', { class: 'c-dsh' }),
+        feishu: el('td', { class: 'c-feishu' }),
+        keys: el('td', { class: 'c-keys' }),
+        orgs: el('td', { class: 'c-orgs' }),
+        ops: el('td', { class: 'c-ops' }, [entry.toggle]),
+      };
+      // .org-member is kept on the row itself: the harness and the static regression read rows by
+      // that class (and the checkbox/name layout rules key off it), and a row is still a row.
+      entry.row = el('tr', {
+        class: 'org-person org-member',
+        dataset: { accountId: String(account.id) },
+      }, columns.map((col) => entry.cells[col.key]));
+      entry.body = el('div', { class: 'org-person-detail-body' });
+      // 详情行自带 accountId：一张表里每个账号都有一行详情，断言与排障都要能指名道姓地点到某一行。
+      entry.detailRow = el('tr', {
+        class: 'org-person-detail',
+        dataset: { accountId: String(account.id) },
+      }, [el('td', { class: 'org-person-detail-cell', colspan: String(columns.length) }, [entry.body])]);
+      paintSummary(entry, account);
+      return entry;
+    }
+
+    function entryFor(account) {
+      if (!entries.has(account.id)) entries.set(account.id, buildRow(account));
+      return entries.get(account.id);
+    }
+
+    // setOpen is the expander. The detail row carries the `open` class and the summary row carries
+    // it for the highlight; CSS hides a detail row that is not open (that rule is the fix for
+    // "点击收起不会收起" — without it the details stayed visible forever).
+    function setOpen(entry, open) {
+      if (open) state.open.add(entry.account.id); else state.open.delete(entry.account.id);
+      entry.row.classList.toggle('open', open);
+      entry.detailRow.classList.toggle('open', open);
+      entry.toggle.textContent = open ? '收起' : '展开';
+      entry.toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if (open) fillDetail(entry);
+    }
+
+    async function fillDetail(entry) {
+      if (entry.filled) return;
+      entry.filled = true; // 连点两次不能发两次 /keys
+      entry.body.replaceChildren(el('div', { class: 'muted', text: '正在读取该账号的 Key…' }));
+      const account = state.accounts.find((row) => row.id === entry.account.id) || entry.account;
+      const children = await personDetail(account, () => refreshAccount(account.id));
+      // 整表可能已经重绘：这次结果属于一个已经不在页面上的行，写进去只会留下看不见的垃圾。
+      if (!entry.body.isConnected) return;
+      entry.body.replaceChildren(...children);
+    }
+
+    // render lays out exactly the rows it is given (the caller owns filtering and ordering) and
+    // re-applies the checkbox and expansion state to the rows it reuses.
+    function render(accounts, emptyText, isFiltering = filtering()) {
+      tbody.replaceChildren();
+      if (!accounts.length) {
+        tbody.append(el('tr', { class: 'org-member-empty' }, [
+          el('td', { class: 'empty', colspan: String(columns.length), text: emptyText })]));
+        return;
       }
-    });
-    return container;
+      for (const account of accounts) {
+        const entry = entryFor(account);
+        paintSummary(entry, account);
+        applyBox(entry, isFiltering);
+        const open = state.open.has(account.id);
+        entry.row.classList.toggle('open', open);
+        entry.detailRow.classList.toggle('open', open);
+        entry.toggle.textContent = open ? '收起' : '展开';
+        entry.toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        tbody.append(entry.row, entry.detailRow);
+        if (open) fillDetail(entry);
+      }
+    }
+
+    // refreshSummary re-reads one row in place. The actions that cannot change this node's
+    // membership (Key operations, binding a Feishu identity) go through this instead of a full
+    // reload, so the operator is not thrown back to the top of a long list.
+    async function refreshSummary(accountID) {
+      const entry = entries.get(accountID);
+      const account = state.accounts.find((row) => row.id === accountID);
+      if (!entry || !account) return;
+      paintSummary(entry, account);
+      entry.filled = false;
+      if (state.open.has(accountID)) await fillDetail(entry);
+    }
+
+    return { node, render, refreshSummary };
   }
+
   // state.membersLoaded guards the save button until the node's current members are known:
   // saving an empty set before the read lands would clear the department.
   async function loadMembers(nodeID, checked, saveButton, paint) {
@@ -262,12 +395,12 @@ export async function render({ page, actions, session }) {
     paint();
   }
 
-  // personList renders a read-only list of accounts (the unassigned view): no checkboxes, because
-  // there is no node to write membership to.
-  function personList(_node, accounts) {
-    const box = el('div', { class: 'org-members org-members-plain' });
-    for (const account of accounts) box.append(personRow(account, null, new Set(), () => {}, false));
-    return box;
+  // orgsCell answers "where does this account actually live" — the other half of the checkbox
+  // column, which only says "member of the node you selected".
+  function orgsCell(account) {
+    const refs = account.org_nodes || [];
+    if (!refs.length) return el('span', { class: 'muted', text: '未归属' });
+    return el('span', { class: 'org-member-orgs' }, refs.map((ref) => badge(ref.path || ref.name)));
   }
 
   // dshBadge states the account's DSH situation in the three values an operator has to tell apart
@@ -307,41 +440,30 @@ export async function render({ page, actions, session }) {
     ]);
   }
 
-  // personDetail is the expanded half of a person row: the account's own fields, its Key list
-  // (fetched here, per account), and the operations that belong to that account.
-  async function personDetail(account) {
-    const panel = el('div', { class: 'org-person-detail' });
-    panel.append(el('div', { class: 'org-person-facts' }, [
+  // personDetail builds the expanded half of a person row: the account's own fields, its Key list
+  // (fetched here, per account), and the operations that belong to that account. It returns the
+  // nodes to put inside the row's .org-person-detail-body — it does NOT build the row itself, so a
+  // refresh refills the same body instead of nesting a second panel inside the first.
+  async function personDetail(account, refresh) {
+    const facts = el('div', { class: 'org-person-facts' }, [
       el('span', { class: 'muted', text: '状态 ' + (account.status || 'active') }),
       el('span', { class: 'muted', text: '计费 ' + (account.billing_mode || '—') }),
       el('span', { class: 'muted', text: '标签 ' + ((account.tags || []).join(', ') || '—') }),
       el('span', { class: 'muted', text: '组织 ' + ((account.org_node_ids || []).length ? (account.org_nodes || []).map((n) => n.path || n.name).join(' / ') : '未归属') }),
-    ]));
+    ]);
     const actions = el('div', { class: 'toolbar org-person-actions' }, [
-      el('button', { class: 'btn', text: '新建 Key', disabled: readonly, onclick: () => addKey(account, refreshDetail) }),
+      el('button', { class: 'btn', text: '新建 Key', disabled: readonly, onclick: () => addKey(account, refresh) }),
       el('button', {
         class: 'btn', text: account.dsh_enabled ? '停用 DSH' : '启用 DSH', disabled: readonly,
-        onclick: () => toggleDSH(account, refreshDetail),
+        onclick: () => toggleDSH(account, refresh),
       }),
       el('button', {
         class: 'btn', text: (account.feishu && account.feishu.bound) ? '解绑飞书' : '绑定飞书', disabled: readonly,
-        onclick: () => account.feishu && account.feishu.bound ? unbindFeishu(account, refreshDetail) : bindFeishu(account, refreshDetail),
+        onclick: () => account.feishu && account.feishu.bound ? unbindFeishu(account, refresh) : bindFeishu(account, refresh),
       }),
-      el('button', { class: 'btn', text: '分配组织', disabled: readonly, onclick: () => assignOrgs(account, refreshDetail) }),
+      el('button', { class: 'btn', text: '分配组织', disabled: readonly, onclick: () => assignOrgs(account, refresh) }),
     ]);
     const keysBox = el('div', { class: 'org-person-keys' }, [el('div', { class: 'muted', text: '正在读取 Key…' })]);
-    panel.append(actions, keysBox);
-
-    async function refreshDetail() {
-      const fresh = await reloadAccount(account.id);
-      keysBox.replaceChildren();
-      if (!fresh) {
-        keysBox.append(el('div', { class: 'muted', text: '账号信息读取失败' }));
-        return;
-      }
-      panel.replaceChildren();
-      panel.append(await personDetail(fresh));
-    }
 
     try {
       const payload = await api.get('/keys', { account_id: account.id, limit: 100 });
@@ -349,7 +471,7 @@ export async function render({ page, actions, session }) {
       keysBox.replaceChildren();
       if (!keys.length) {
         keysBox.append(el('div', { class: 'muted', text: '这个账号还没有 Key：没有 Key 就无法登录门户（可用「新建 Key」）' }));
-        return panel;
+        return [facts, actions, keysBox];
       }
       keysBox.append(el('h4', { text: 'Key（' + keys.length + '）' }));
       for (const key of keys) {
@@ -361,18 +483,18 @@ export async function render({ page, actions, session }) {
           el('span', { class: 'muted', text: key.last_used_at ? '最近使用 ' + formatTime(key.last_used_at) : '从未使用' }),
           isWorker ? null : el('button', {
             class: 'btn btn-small', text: '编辑', disabled: readonly,
-            onclick: () => editKey(key, refreshDetail),
+            onclick: () => editKey(key, refresh),
           }),
           isWorker ? null : el('button', {
             class: 'btn btn-small', text: key.status === 'active' ? '停用' : '启用', disabled: readonly,
-            onclick: () => toggleKey(key, refreshDetail),
+            onclick: () => toggleKey(key, refresh),
           }),
         ].filter(Boolean)));
       }
     } catch (err) {
       keysBox.replaceChildren(el('div', { class: 'muted', text: api.errorMessage(err) }));
     }
-    return panel;
+    return [facts, actions, keysBox];
   }
 
   // --- 逐账号操作（M72）：组织页的展开行里可用的动作 --------------------------------
@@ -397,7 +519,7 @@ export async function render({ page, actions, session }) {
       try {
         await api.post('/accounts/' + account.id + '/dsh', { enabled: false });
         toast('已停用 DSH', 'ok');
-        await load();
+        await reloadAll();
       } catch (err) {
         toast(api.errorMessage(err), 'error');
       }
@@ -415,24 +537,20 @@ export async function render({ page, actions, session }) {
     });
     if (!result) return;
     toast('已启用 DSH（租户 ' + (result.tenant || suggested) + '）', 'ok');
-    await load();
+    await reloadAll();
   }
 
   // bindFeishu opens the person picker (M72): the administrator chooses who this account is,
   // which is why binding needs no consent screen any more.
   async function bindFeishu(account, refresh) {
     const bound = await openFeishuPersonPicker({ account });
-    if (bound) {
-      await load();
-      await refresh();
-    }
+    // 绑定不改组织归属，所以就地刷新这一行即可（不必把操作员弹回列表顶部）。
+    if (bound) await refresh();
   }
 
   async function unbindFeishu(account, refresh) {
-    if (await unbindAccountFeishu(account)) {
-      await load();
-      await refresh();
-    }
+    // 解绑同样不改归属：就地刷新这一行。
+    if (await unbindAccountFeishu(account)) await refresh();
   }
 
   // assignOrgs replaces the account's organization memberships (the same field the accounts page
@@ -450,19 +568,25 @@ export async function render({ page, actions, session }) {
     });
     if (!result) return;
     toast('组织归属已更新', 'ok');
-    await load();
+    await reloadAll();
     await refresh();
   }
 
-  // reloadAccount re-reads one account so an expanded row shows what the last write produced.
-  async function reloadAccount(id) {
-    try {
-      const payload = await api.get('/accounts', { limit: MEMBER_PICK_LIMIT });
-      return (payload.data || []).find((row) => row.id === id) || null;
-    } catch (err) {
-      toast(api.errorMessage(err), 'error');
-      return null;
-    }
+  // refreshAccount re-reads the accounts and repaints ONE row in place. The actions that cannot
+  // change this node's membership (Key 操作、绑定/解绑飞书) go through it: they must update the
+  // row's own badges without throwing the operator back to the top of a long member list.
+  async function refreshAccount(accountID) {
+    await loadAccounts();
+    if (currentTable) await currentTable.refreshSummary(accountID);
+  }
+
+  // reloadAll re-reads everything. The actions that CAN change the membership (编辑账号、分配组织、
+  // 启停 DSH) must go through it: the checkbox column answers "is a member of this node", and a
+  // repaint that skipped the membership read would keep claiming a membership the server no longer
+  // has — ticking 保存成员 from there would then write it back.
+  async function reloadAll() {
+    await loadAccounts();
+    await load();
   }
 
   function row(label, value) {

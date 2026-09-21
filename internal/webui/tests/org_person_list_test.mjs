@@ -16,8 +16,19 @@ const css = await readFile(new URL('../static/app.css', import.meta.url), 'utf8'
 
 // --- the person row: account facts next to the membership checkbox ---------------------------
 
-assert.match(org, /function personRow\(account, node, checked, repaint, filtering\) \{/,
-  'the person row must be its own function: it carries three different concerns');
+// 人员列表是一张多列表格：列定义只写一处，表头 / colspan / 两种模式都从它推出。
+assert.match(org, /const MEMBER_COLUMNS = \[/, 'the person table columns must be declared once');
+assert.match(org, /function personTable\(\{ pickable, checked = new Set\(\), filtering = \(\) => false, onToggle = \(\) => \{\} \}\) \{/,
+  'the person table must be its own function: it renders the rows, their expansion and their state');
+for (const label of ["'账号'", "'DSH'", "'飞书'", "'Key'", "'所属组织'", "'操作'"]) {
+  assert.ok(org.includes('label: ' + label), 'the table must have a ' + label + ' column');
+}
+assert.match(org, /entry\.row = el\('tr', \{\s*class: 'org-person org-member',\s*dataset: \{ accountId: String\(account\.id\) \},/,
+  'a person row is a table row that still carries .org-member (the row layout rules key off it)');
+assert.match(org, /el\('tr', \{\s*class: 'org-person-detail',\s*dataset: \{ accountId: String\(account\.id\) \},/,
+  'each account gets its own detail row, addressable by account id');
+assert.match(org, /el\('span', \{ class: 'org-member-name', text: account\.name \}\)/,
+  'the row keeps the account name in its own class (the layout rules key off it)');
 assert.match(org, /el\('span', \{ class: 'org-member-name', text: account\.name \}\)/,
   'the row keeps the account name in its own class (the layout rules key off it)');
 for (const badge of ['dshBadge', 'feishuBadge', 'keyBadge']) {
@@ -33,7 +44,11 @@ assert.match(org, /需该账号有可用模型/, 'the model-grant precondition m
 
 // --- expanding a row loads that account's keys, not the whole key list -----------------------
 
-assert.match(org, /container\.classList\.toggle\('open'\)/, 'the expander toggles the container, not the page');
+// 展开/收起：类挂在摘要行与详情行两处，详情行默认隐藏由 CSS 门控（见文末的 CSS 断言）。
+assert.match(org, /entry\.row\.classList\.toggle\('open', open\)/, 'the expander toggles the summary row');
+assert.match(org, /entry\.detailRow\.classList\.toggle\('open', open\)/, 'and the detail row with it');
+assert.match(org, /state\.open\.add\(entry\.account\.id\)/, 'the expansion state lives on the page, not in the DOM alone');
+assert.match(org, /async function fillDetail\(entry\) \{/, 'the detail is filled into the row that is already there');
 assert.match(org, /await api\.get\('\/keys', \{ account_id: account\.id, limit: 100 \}\)/,
   'the expanded row must fetch only this account\'s keys');
 assert.match(org, /const isWorker = String\(key\.name \|\| ''\)\.startsWith\('dshgw-'\)/,
@@ -43,10 +58,10 @@ assert.match(org, /网关自动创建（worker 凭据，不参与选择）/, 'an
 // --- the per-account operations are the ones M72 moved here ---------------------------------
 
 for (const [label, pattern] of [
-  ['新建 Key', /onclick: \(\) => addKey\(account, refreshDetail\)/],
-  ['启用/停用 DSH', /onclick: \(\) => toggleDSH\(account, refreshDetail\)/],
-  ['绑定/解绑飞书', /onclick: \(\) => account\.feishu && account\.feishu\.bound \? unbindFeishu\(account, refreshDetail\) : bindFeishu\(account, refreshDetail\)/],
-  ['分配组织', /onclick: \(\) => assignOrgs\(account, refreshDetail\)/],
+  ['新建 Key', /onclick: \(\) => addKey\(account, refresh\)/],
+  ['启用/停用 DSH', /onclick: \(\) => toggleDSH\(account, refresh\)/],
+  ['绑定/解绑飞书', /onclick: \(\) => account\.feishu && account\.feishu\.bound \? unbindFeishu\(account, refresh\) : bindFeishu\(account, refresh\)/],
+  ['分配组织', /onclick: \(\) => assignOrgs\(account, refresh\)/],
 ]) {
   assert.match(org, pattern, 'the expanded row must offer ' + label);
 }
@@ -55,8 +70,8 @@ assert.match(org, /api\.post\('\/accounts\/' \+ account\.id \+ '\/dsh', \{ enabl
 assert.match(org, /api\.patch\('\/accounts\/' \+ account\.id, \{ org_node_ids: splitList\(values\.org_node_ids\)\.map\(Number\) \}\)/,
   'assigning organizations replaces the membership list');
 assert.match(org, /createKeyForAccount/, 'creating a key goes through the shared, one-time-secret path');
-assert.match(org, /editKey\(key, refreshDetail\)/, 'a key row can be edited from the person row');
-assert.match(org, /toggleKey\(key, refreshDetail\)/, 'a key row can be suspended from the person row');
+assert.match(org, /editKey\(key, refresh\)/, 'a key row can be edited from the person row');
+assert.match(org, /toggleKey\(key, refresh\)/, 'a key row can be suspended from the person row');
 assert.match(org, /openFeishuPersonPicker\(\{ account \}\)/, 'binding opens the person picker');
 assert.match(org, /unbindAccountFeishu\(account\)/, 'unbinding goes through the shared confirmation');
 
@@ -71,7 +86,7 @@ assert.match(actionButtons, /disabled: readonly,/, 'the Feishu and organization 
 
 assert.match(org, /function matchesPerson\(account, search\)/,
   'the person filter must be its own function: it matches two fields');
-assert.match(org, /if \(filtering && !box\.checked\) \{[\s\S]*?box\.disabled = true;[\s\S]*?过滤时不能再加入成员/,
+assert.match(org, /box\.disabled = readonly \|\| \(isFiltering && !box\.checked\);[\s\S]*?过滤时不能再加入成员/,
   'a filtered list must not ADD members (it is not the whole membership), while un-ticking stays possible');
 assert.match(org, /const filtering = search\.trim\(\) !== '';/,
   'the filtering state is derived once per paint');
@@ -83,6 +98,10 @@ assert.match(org, /const unassigned = state\.accounts\.filter\(\(account\) => !\
 assert.match(org, /function unassignedRow\(unassigned\)/, 'and rendered as a row of their own');
 assert.match(org, /未归属账户 ' \+ unassigned\.length \+ ' 个'/, 'the row states how many there are');
 assert.match(org, /org-members-plain/, 'the unassigned list is read-only: there is no node to join');
+// 未归属那份列表**不渲染**勾选列（personTable 的 pickable:false），而不是画出来再用 CSS 藏起来：
+// 没有节点可写时，一个勾选框只会骗人。
+assert.match(org, /personTable\(\{ pickable: false \}\)/,
+  'the unassigned list must drop the membership column, not hide it');
 
 // --- the page loads whole accounts, not name-only rows ---------------------------------------
 
@@ -104,8 +123,16 @@ assert.doesNotMatch(picker, /keys\/' \+ .*feishu\/bind/, 'the retired key-level 
 
 // --- the new markup has styles (a row that renders unstyled is a broken row) ------------------
 
-for (const rule of ['.org-person {', '.org-person-detail {', '.org-member-toggle {', '.org-person-key {', '.org-unassigned {']) {
+for (const rule of ['.org-member-table {', '.org-person.open td {', '.org-person-detail {',
+  '.org-person-detail-body {', '.org-member-toggle {', '.org-person-key {', '.org-unassigned {']) {
   assert.ok(css.includes(rule), 'app.css must style ' + rule);
 }
+
+// 「收起」的门控：详情行默认 display:none，只有 .open 才成为一行。用户报障的根因就是这条规则
+// 从来不存在——收起只是把 open 类摘掉，内容照旧可见。源码一侧把它钉死。
+assert.match(css, /\.org-person-detail \{ display:none; \}/,
+  'a detail row must be hidden until it is opened (this rule IS the fix for 「点击收起不会收起」)');
+assert.match(css, /\.org-person-detail\.open \{ display:table-row; \}/,
+  'and an open detail row must become a table row again');
 
 console.log('org_person_test: 人员行/展开详情/逐账号操作/未归属账户/只读与过滤保护 全部通过');
