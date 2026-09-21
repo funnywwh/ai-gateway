@@ -508,6 +508,26 @@ textarea.form-input { resize:vertical; min-height:64px; }
 .feishu-user-account { display:flex; align-items:center; gap:6px; flex:0 1 auto; min-width:0; }
 .feishu-user-nodes { flex:0 0 auto; }
 .feishu-user-actions { display:flex; gap:6px; flex:0 0 auto; margin-left:auto; }
+/* 「分配组织」弹窗：一棵组织树，每行一个勾选框。 */
+.org-picker-dialog { width:min(760px, 100%); }
+.org-assign-bar { gap:10px; }
+.org-assign-hint { flex:1 1 auto; min-width:0; font-size:11.5px; }
+.org-assign-actions { display:flex; gap:6px; flex:0 0 auto; margin-left:auto; }
+.org-assign-notice { font-size:12.5px; line-height:1.6; padding:6px 8px; border-radius:8px; }
+.org-assign-notice:empty { display:none; }
+.org-assign-notice.warn { background:rgba(214,158,46,.12); border:1px solid rgba(214,158,46,.45); }
+.org-assign-notice.error { background:rgba(214,74,74,.12); border:1px solid rgba(214,74,74,.45); }
+.org-assign-tree { border:1px solid var(--line); border-radius:8px; padding:6px; max-height:46vh; overflow:auto; }
+.org-assign-label { display:flex; align-items:center; gap:8px; min-width:0; }
+/* 行内勾选框：全局 `input { width:100% }` 会把它撑满整行（与 .org-member 同一条坑），必须显式给尺寸。 */
+.org-assign-label input[type=checkbox] { flex:0 0 auto; width:16px; height:16px; margin:0;
+  accent-color:var(--accent); }
+.org-assign-label .tree-label { min-width:0; overflow-wrap:anywhere; }
+/* 表单里的「所属组织」字段：一行路径徽标 + 一个打开勾选树的按钮（不是手填节点 id）。 */
+.org-picked { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.org-picked-list { display:flex; flex-wrap:wrap; gap:4px; min-width:0; }
+/* 人员表工具条右侧的动作组（新建成员 / 保存成员）。 */
+.toolbar-actions { display:flex; gap:8px; flex:0 0 auto; }
 .feishu-picker-dialog { width:min(560px, 100%); }
 .feishu-picker-list { max-height:44vh; overflow:auto; border:1px solid var(--line); border-radius:8px; padding:4px; }
 .feishu-picker-row { display:flex; align-items:center; gap:8px; padding:5px 6px; border-radius:6px; font-size:13px; }

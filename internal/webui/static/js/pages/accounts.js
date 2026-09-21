@@ -1,6 +1,8 @@
 import { api } from '../api.js';
 import { el, card, pagedTable, modal, toast, statusBadge, confirmDialog, formatTime } from '../ui.js';
 import { initCurrency, money, ledgerCurrency } from '../money.js';
+// 账号的创建/编辑（含所属组织勾选树）与组织页共用一份实现，见 account_actions.js。
+import { createAccount, editAccount } from './account_actions.js';
 
 export async function render({ page, actions, session }) {
   const readonly = session.role !== 'admin';
@@ -87,24 +89,10 @@ export async function render({ page, actions, session }) {
   }
 
   create.addEventListener('click', async () => {
-    const result = await modal({
-      title: '新建账户', submitLabel: '创建',
-      fields: [
-        { name: 'name', label: '名称', required: true, hint: '支持邮箱、中文和其他 Unicode 字符；去除首尾空白后最多 64 个字符' },
-        { name: 'billing_mode', label: '计费模式', type: 'select', options: ['prepaid', 'postpaid'] },
-        { name: 'credit_limit_micros', label: '授信上限（微' + ledgerCurrency() + '）', type: 'number' },
-        { name: 'low_balance_threshold_micros', label: '低额告警阈值（微' + ledgerCurrency() + '）', type: 'number' },
-        { name: 'tags', label: '账号标签（逗号分隔）', hint: '所有 API Key 自动继承；留空表示不绑定标签' },
-        { name: 'org_node_ids', label: '组织节点 id（逗号分隔）', hint: '账号可同时属于多个节点；节点上的标签会被该账号下所有 Key 继承' },
-        { name: 'note', label: '备注' },
-      ],
-      onSubmit: (values) => api.post('/accounts', {
-        ...values,
-        tags: splitTags(values.tags),
-        org_node_ids: splitIDs(values.org_node_ids),
-      }),
-    });
-    if (result) { toast('账户已创建', 'ok'); await view.refresh(); }
+    const created = await createAccount({ title: '新建账户', submitLabel: '创建' });
+    if (!created) return;
+    toast('账户已创建', 'ok');
+    await view.refresh();
   });
 
   await Promise.all([loadOrgOptions(), view.refresh()]);
@@ -208,42 +196,13 @@ function orgCell(row) {
 }
 
 async function edit(row, reload) {
-  const result = await modal({
-    title: '编辑账户 ' + row.name,
-    fields: [
-      { name: 'status', label: '状态', type: 'select', options: ['active', 'suspended', 'closed'], value: row.status },
-      { name: 'billing_mode', label: '计费模式', type: 'select', options: ['prepaid', 'postpaid'], value: row.billing_mode },
-      { name: 'credit_limit_micros', label: '授信上限（微' + ledgerCurrency() + '）', type: 'number', value: row.credit_limit_micros },
-      { name: 'low_balance_threshold_micros', label: '低额阈值（微美元）', type: 'number', value: row.low_balance_threshold_micros },
-      { name: 'overdraft_limit_micros', label: '在途透支上限（微' + ledgerCurrency() + '）', type: 'number', value: row.overdraft_limit_micros },
-      { name: 'tags', label: '账号标签（逗号分隔）', hint: '空输入会清空账号标签；所有 Key 会动态继承', value: (row.tags || []).join(', ') },
-      { name: 'org_node_ids', label: '组织节点 id（逗号分隔）',
-        hint: '整表替换：留空即移出全部组织，从节点继承来的标签授权随即失效',
-        value: (row.org_node_ids || []).join(', ') },
-      { name: 'note', label: '备注', value: row.note },
-    ],
-    onSubmit: (values) => api.patch('/accounts/' + row.id, {
-      ...values,
-      tags: splitTags(values.tags),
-      org_node_ids: splitIDs(values.org_node_ids),
-    }),
-  });
-  if (result) { toast('已更新', 'ok'); await reload(); }
+  const updated = await editAccount(row);
+  if (!updated) return;
+  toast('已更新', 'ok');
+  await reload();
 }
 
 function splitTags(value) {
   return (value || '').split(',').map((tag) => tag.trim()).filter(Boolean);
 }
 
-// splitIDs parses the comma-separated node ids into an array. It is always an array (never
-// undefined), because an empty list is a meaningful instruction — "this account belongs to no
-// organization" — and sending nothing would instead mean "leave the memberships alone".
-function splitIDs(value) {
-  return (value || '').split(',')
-    .map((id) => id.trim())
-    .filter(Boolean)
-    .map(Number)
-    .filter((id) => Number.isInteger(id) && id > 0);
-}
-
-export { confirmDialog };

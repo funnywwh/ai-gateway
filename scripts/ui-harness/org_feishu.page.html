@@ -394,6 +394,24 @@ try {
         .filter((call) => call.includes('/org/feishu/directory') && call.includes('departments=')).pop()
         .includes('od_a1');
 
+      // 过滤部门树会重建每一行（连带勾选框）：过滤一次屏幕不能变成"全都没勾"——勾选集合在 state
+      // 里，行是刚建出来的，所以勾选框必须在**建出来的时候**就带上状态（与「分配组织」同一处坑）。
+      find('清空').click();
+      deptBox('市场部').click();
+      const deptFilter = document.querySelector('.feishu-sync-tree .tree-filter');
+      deptFilter.value = 'shichang';
+      deptFilter.dispatchEvent(new Event('input'));
+      await settle();
+      checks.treeFilterKeepsTicked = !!deptBox('市场部') && deptBox('市场部').checked === true;
+      deptFilter.value = '';
+      deptFilter.dispatchEvent(new Event('input'));
+      await settle();
+      checks.treeFilterRestoreKeepsTicked = !!deptBox('市场部') && deptBox('市场部').checked === true;
+      // 把范围恢复成"只勾研发部"（下一段断言二次确认框里的数字，用的是这个范围）。
+      find('清空').click();
+      deptBox('研发部').click();
+      await refresh();
+
       // 「同步」必须二次确认，确认后才发 POST，并把 refresh=true 的重新预览接上。
       find('同步', dialog()).click();
       await settle();

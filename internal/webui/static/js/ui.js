@@ -54,6 +54,25 @@ export function toast(message, kind, options) {
 
 export function spinner() { return el('span', { class: 'spinner', 'aria-hidden': 'true' }); }
 
+// progressLine is "spinner + label + elapsed seconds" as a set of nodes, for a region that has to
+// say "still working" (a dialog reading a slow directory). withBusy is the same thing attached to a
+// button, and it is built on this so the two can never drift apart: a page that ticks in whole
+// seconds while a button ticks in whole seconds is one behaviour, not two.
+//
+// stop() is not optional in practice: the interval keeps the callback alive as long as it runs.
+export function progressLine(label) {
+  const text = document.createTextNode(label + '…');
+  const elapsed = el('span', { text: '' });
+  const started = Date.now();
+  const tick = () => { elapsed.textContent = ' ' + Math.round((Date.now() - started) / 1000) + 's'; };
+  tick();
+  const timer = setInterval(tick, 1000);
+  return {
+    nodes: [spinner(), text, elapsed],
+    stop() { clearInterval(timer); },
+  };
+}
+
 // withBusy runs an async action while showing progress on the button that started
 // it: the button is disabled, its label becomes spinner + text, and the elapsed
 // seconds tick up so a genuinely slow call (a provider probe is a real upstream
@@ -63,18 +82,14 @@ export async function withBusy(button, label, action) {
   if (!button) return action();
   const original = button.textContent;
   const wasDisabled = button.disabled;
-  const elapsed = el('span', { text: '' });
-  const started = Date.now();
-  const tick = () => { elapsed.textContent = ' ' + Math.round((Date.now() - started) / 1000) + 's'; };
+  const line = progressLine(label);
   clear(button);
-  button.append(spinner(), document.createTextNode(label + '…'), elapsed);
+  button.append(...line.nodes);
   button.disabled = true;
-  tick();
-  const timer = setInterval(tick, 1000);
   try {
     return await action();
   } finally {
-    clearInterval(timer);
+    line.stop();
     button.textContent = original;
     button.disabled = wasDisabled;
   }
@@ -198,6 +213,16 @@ export function confirmDialog(title, message) {
 
 function renderField(field) {
   const id = 'f_' + field.name;
+  // 自定义字段：有些值根本不是一个输入框（例如「所属组织」是一行路径徽标 + 一个打开勾选树的按钮）。
+  // 控件由调用方给出，值由 field.get() 取——否则一个没有 <input name=...> 的字段会在 collect() 里被
+  // 静默跳过，于是"整表替换归属"变成"不动归属"，语义正好相反。
+  if (typeof field.render === 'function') {
+    return el('label', { class: 'field' }, [
+      el('span', { text: field.label }),
+      field.render(),
+      field.hint ? el('span', { class: 'muted', text: field.hint }) : null,
+    ]);
+  }
   let input;
   if (field.type === 'textarea') {
     input = el('textarea', { id, name: field.name, placeholder: field.placeholder || '', rows: field.rows || 6 });
@@ -224,6 +249,12 @@ function renderField(field) {
 function collect(fields, body) {
   const values = {};
   for (const field of fields) {
+    // 自定义字段自己交出值（见 renderField）：它没有 [name=...] 节点可查。
+    if (typeof field.get === 'function') {
+      const custom = field.get();
+      if (custom !== undefined) values[field.name] = custom;
+      continue;
+    }
     const node = body.querySelector('[name="' + field.name + '"]');
     if (!node) continue;
     let value;

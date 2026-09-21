@@ -41,8 +41,54 @@ const ORG = {
     { id: 4, parent_id: 1, name: '市场部', path: '总部/市场部', depth: 1, sort_order: 200, note: '', tags: [], account_count: 0 },
     { id: 5, parent_id: null, name: '分公司', path: '分公司', depth: 0, sort_order: 200, note: '', tags: [], account_count: 0 },
   ],
-  members: { 3: [1], 1: [2] },
+  members: {},
 };
+
+const ACCOUNTS = [
+  { id: 1, name: 'acme', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [3], org_nodes: [{ id: 3, name: '平台组', path: '总部/研发部/平台组' }], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
+    dsh_enabled: true, dsh_tenant: 'dsh-acme', feishu: { bound: true, open_id: 'ou_acme', name: '李智超', bound_by: 'admin', bound_at: '2026-09-22T02:00:00Z' }, key_count: 3, active_key_count: 2 },
+  { id: 2, name: 'root-acct', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [1], org_nodes: [{ id: 1, name: '总部', path: '总部' }], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
+    dsh_enabled: false, dsh_tenant: 'dsh-root', dsh_disabled_at: '2026-09-21T10:00:00Z', feishu: { bound: false }, key_count: 1, active_key_count: 0 },
+  // 中文名：拼音过滤与"选中置顶"都要有中文对象才测得出来。
+  { id: 3, name: '张三', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
+    dsh_enabled: false, dsh_effective: true, feishu: { bound: false }, key_count: 0, active_key_count: 0 },
+  { id: 4, name: '李四', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
+    dsh_enabled: false, feishu: { bound: false }, key_count: 1, active_key_count: 1 },
+  // 多音字：长 有 chang/zhang 两读，两种拼法都要能搜到。
+  { id: 5, name: '长伟', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
+    dsh_enabled: false, feishu: { bound: false }, key_count: 0, active_key_count: 0 },
+  // 中英混合：候选串必须同时包含"原样字符"与"拼音"两条路，否则 研发-张三 这类名字
+  // 只有整串照打才搜得到。
+  { id: 6, name: 'dev-张三', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
+    dsh_enabled: false, feishu: { bound: false }, key_count: 0, active_key_count: 0 },
+];
+
+function nodeRef(id) {
+  const node = ORG.nodes.find((n) => n.id === id);
+  return node ? { id: node.id, name: node.name, path: node.path } : null;
+}
+
+// 成员关系从账号侧派生：一个账号属于哪些节点只有一处真相（accounts.org_node_ids），
+// 「这个部门有哪些账号」是它的反向索引。
+function syncMemberships() {
+  for (const key of Object.keys(ORG.members)) delete ORG.members[key];
+  for (const account of ACCOUNTS) {
+    for (const id of account.org_node_ids || []) ORG.members[id] = (ORG.members[id] || []).concat([account.id]);
+  }
+}
+
+function applyAccountPatch(account, body) {
+  for (const field of ['name', 'status', 'billing_mode', 'note', 'credit_limit_micros', 'low_balance_threshold_micros', 'overdraft_limit_micros', 'tags']) {
+    if (body[field] !== undefined) account[field] = body[field];
+  }
+  if (body.org_node_ids !== undefined) {
+    account.org_node_ids = body.org_node_ids.map(Number);
+    account.org_nodes = account.org_node_ids.map(nodeRef).filter(Boolean);
+  }
+  syncMemberships();
+}
+
+syncMemberships();
 
 window.fetch = async (url, options) => {
   const target = String(url);
@@ -58,25 +104,30 @@ window.fetch = async (url, options) => {
   if (path === '/accounts' && method === 'GET') {
     // M72 的字段都在这里：DSH 三态（dsh_enabled / dsh_disabled_at / dsh_effective）、账号级飞书身份、
     // Key 计数。人员行把这三件事各画一个徽标，缺一个字段那条断言就会抓到。
-    const data = [
-      { id: 1, name: 'acme', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [3], org_nodes: [{ id: 3, name: '平台组', path: '总部/研发部/平台组' }], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
-        dsh_enabled: true, dsh_tenant: 'dsh-acme', feishu: { bound: true, open_id: 'ou_acme', name: '李智超', bound_by: 'admin', bound_at: '2026-09-22T02:00:00Z' }, key_count: 3, active_key_count: 2 },
-      { id: 2, name: 'root-acct', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [1], org_nodes: [{ id: 1, name: '总部', path: '总部' }], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
-        dsh_enabled: false, dsh_tenant: 'dsh-root', dsh_disabled_at: '2026-09-21T10:00:00Z', feishu: { bound: false }, key_count: 1, active_key_count: 0 },
-      // 中文名：拼音过滤与"选中置顶"都要有中文对象才测得出来。
-      { id: 3, name: '张三', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
-        dsh_enabled: false, dsh_effective: true, feishu: { bound: false }, key_count: 0, active_key_count: 0 },
-      { id: 4, name: '李四', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
-        dsh_enabled: false, feishu: { bound: false }, key_count: 1, active_key_count: 1 },
-      // 多音字：长 有 chang/zhang 两读，两种拼法都要能搜到。
-      { id: 5, name: '长伟', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
-        dsh_enabled: false, feishu: { bound: false }, key_count: 0, active_key_count: 0 },
-      // 中英混合：候选串必须同时包含"原样字符"与"拼音"两条路，否则 研发-张三 这类名字
-      // 只有整串照打才搜得到。
-      { id: 6, name: 'dev-张三', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
-        dsh_enabled: false, feishu: { bound: false }, key_count: 0, active_key_count: 0 },
-    ];
-    return ok({ data, count: 2, total: 2, limit: 1000, offset: 0, has_more: false });
+    return ok({ data: ACCOUNTS, count: ACCOUNTS.length, total: ACCOUNTS.length, limit: 1000, offset: 0, has_more: false });
+  }
+  // 账号写入真的改这份数据（新建成员 / 编辑 / 分配组织）："页面重载后看得到新归属"才是对着一个
+  // 确实变了的服务端看的，而不是页面自己画的东西。
+  if (path.match(/^\/accounts\/\d+$/) && method === 'PATCH') {
+    const id = Number(path.split('/').pop());
+    const body = JSON.parse(options.body || '{}');
+    const account = ACCOUNTS.find((a) => a.id === id);
+    if (!account) return ok({ error: 'not found' });
+    applyAccountPatch(account, body);
+    return ok(account);
+  }
+  if (path === '/accounts' && method === 'POST') {
+    const body = JSON.parse(options.body || '{}');
+    const account = {
+      id: Math.max(...ACCOUNTS.map((a) => a.id)) + 1, name: body.name, billing_mode: body.billing_mode || 'postpaid',
+      status: 'active', tags: body.tags || [], org_node_ids: [], org_nodes: [],
+      balance_micros: 0, credit_limit_micros: body.credit_limit_micros || 0,
+      low_balance_threshold_micros: body.low_balance_threshold_micros || 0,
+      dsh_enabled: false, feishu: { bound: false }, key_count: 0, active_key_count: 0,
+    };
+    ACCOUNTS.push(account);
+    applyAccountPatch(account, { org_node_ids: body.org_node_ids || [] });
+    return ok(account);
   }
   // The expanded person row asks for that account's keys (M72). The list carries a worker key on
   // purpose: it must be labelled as gateway plumbing rather than offered as a person's key.
@@ -97,9 +148,17 @@ window.fetch = async (url, options) => {
     if (method === 'PUT') {
       const body = JSON.parse(options.body || '{}');
       // The write is reflected in the store, so a reload shows the new membership: that is what
-      // makes "saved" observable rather than merely claimed.
-      ORG.members[nodeID] = (body.account_ids || []).slice();
-      return ok({ id: nodeID, account_ids: ORG.members[nodeID], count: ORG.members[nodeID].length, updated: true });
+      // makes "saved" observable rather than merely claimed. 成员关系由账号的 org_node_ids 派生，
+      // 所以这里改的是账号侧（与真实服务端同一个方向）。
+      const wanted = new Set((body.account_ids || []).map(Number));
+      for (const account of ACCOUNTS) {
+        const has = (account.org_node_ids || []).includes(nodeID);
+        if (wanted.has(account.id) && !has) account.org_node_ids = (account.org_node_ids || []).concat([nodeID]);
+        if (!wanted.has(account.id) && has) account.org_node_ids = account.org_node_ids.filter((id) => id !== nodeID);
+        account.org_nodes = (account.org_node_ids || []).map(nodeRef).filter(Boolean);
+      }
+      syncMemberships();
+      return ok({ id: nodeID, account_ids: ORG.members[nodeID] || [], count: (ORG.members[nodeID] || []).length, updated: true });
     }
     const ids = ORG.members[nodeID] || [];
     return ok({
@@ -143,6 +202,7 @@ window.fetch = async (url, options) => {
   return ok({ data: [] });
 };
 window.__org = ORG;
+window.__accounts = ACCOUNTS;
 
 const errors = [];
 window.onerror = (msg) => errors.push('onerror: ' + msg);
@@ -239,11 +299,10 @@ try {
       .every(columnAligned);
     // 详情行必须横跨整行（colspan 的 td 宽度约等于表格宽度），否则展开区只占一列。
     // 隐藏的 <tr> 量出来是 0，所以先真的展开一行、量完再收起来（这一来一回本身也是收起生效的证据）。
-    const rowButtonOf = (label) => {
+    const acmeToggle = (() => {
       const row = [...document.querySelectorAll('.org-member')].find((el) => el.textContent.includes('acme'));
-      return row ? [...row.querySelectorAll('button')].find((b) => b.textContent === label) : null;
-    };
-    const acmeToggle = rowButtonOf('展开');
+      return row ? [...row.querySelectorAll('button')].find((b) => b.textContent === '展开') : null;
+    })();
     if (acmeToggle) acmeToggle.click();
     await settle();
     checks.memberDetailSpansRow = (() => {
@@ -253,7 +312,10 @@ try {
       if (!table || !cell) return false;
       return cell.getBoundingClientRect().width >= table.getBoundingClientRect().width - 2;
     })();
-    const acmeCollapse = rowButtonOf('收起');
+    const acmeCollapse = (() => {
+      const row = [...document.querySelectorAll('.org-member')].find((el) => el.textContent.includes('acme'));
+      return row ? [...row.querySelectorAll('button')].find((b) => b.textContent === '收起') : null;
+    })();
     if (acmeCollapse) acmeCollapse.click();
     await settle();
 
@@ -400,6 +462,73 @@ try {
     checks.memberBodyIsWholeList = !!body && Array.isArray(body.account_ids) && body.account_ids.length === checkedBefore + (extra ? 1 : 0);
     checks.toastShown = [...document.querySelectorAll('.toast')].some((n) => n.textContent.includes('成员已保存'));
 
+    // --- 新建成员：在节点详情里直接建账号，并立刻成为该节点成员 -------------------------------
+    //
+    // 用户要求："保存成员旁边添加新建成员"。断言读的是**发出去的东西**（POST 的原始 body 带不带
+    // 这个节点的 id），以及建完之后**页面看到的状态**（新账号在成员列表第一行且已勾选）——
+    // 后者只有 stub 真的改了数据才可能为真。
+    // 先制造一处"未保存的勾选"：新建成员不能把它冲掉（否则操作员刚勾的几个人全白勾），也不能顺手
+    // 替人写一次成员表。
+    const pendingRow = [...document.querySelectorAll('.org-member')].find((el) => el.textContent.includes('长伟'));
+    const pendingBox = pendingRow && pendingRow.querySelector('input[type=checkbox]');
+    if (pendingBox) pendingBox.click();
+    await settle();
+    const putsBeforeCreate = (window.__sent || []).filter((call) => call.method === 'PUT').length;
+    const createMemberBtn = find('新建成员');
+    checks.createMemberOffered = !!createMemberBtn && createMemberBtn.disabled === false;
+    checks.createMemberBesideSave = !!createMemberBtn && !!find('保存成员')
+      && !!(createMemberBtn.compareDocumentPosition(find('保存成员')) & Node.DOCUMENT_POSITION_FOLLOWING);
+    // 功能缺失时只让这一组断言红：一个 throw 会让后面所有断言从报告里消失（="看不出哪几条坏了"）。
+    if (createMemberBtn) {
+      createMemberBtn.click();
+      await settle();
+      const memberModal = document.getElementById('modal-root');
+      // 当前选中的节点从详情卡标题读：这个视图前面已经换过节点，把节点名写死在断言里会让它
+      // 在"选中的是哪一个"变化时以错误的理由失败（第一版就是这样）。
+      // 从详情卡的标题元素上取节点名：textContent 里标题和下面的字段是连着的（没有空白），
+      // 用正则从整页文本里切会把「名称…」一起吞进来。
+      const detailHeading = [...document.querySelectorAll('#page h2')]
+        .map((node) => node.textContent).find((text) => text.startsWith('节点详情：')) || '';
+      const selectedNodeName = detailHeading.replace('节点详情：', '');
+      const selectedNode = window.__org.nodes.find((node) => node.name === selectedNodeName);
+      checks.createMemberDialogNamed = !!selectedNode
+        && memberModal.textContent.includes('新建成员 — ' + selectedNode.name);
+      // 所属组织预置为当前节点（显示的是路径），而不是留空让人再选一次。
+      checks.createMemberPrefilledNode = !!selectedNode
+        && memberModal.textContent.includes(selectedNode.path || selectedNode.name);
+      memberModal.querySelector('input[name="name"]').value = 'newbie';
+      [...memberModal.querySelectorAll('button')].find((b) => b.textContent.trim() === '创建').click();
+      await settle();
+      const memberPost = (window.__sent || []).find((call) => call.method === 'POST' && call.path === '/accounts');
+      checks.createMemberPosted = !!memberPost;
+      let memberBody = null;
+      try { memberBody = JSON.parse(memberPost.body); } catch (err) { memberBody = null; }
+      checks.createMemberNamed = !!memberBody && memberBody.name === 'newbie';
+      checks.createMemberCarriesNode = !!memberBody && Array.isArray(memberBody.org_node_ids)
+        && !!selectedNode && memberBody.org_node_ids.join(',') === String(selectedNode.id);
+      // 建完立刻可见、且是**勾上的**：它就是刚被挂到这个节点下的（勾选态来自服务端语义 + 我们
+      // 明确加进去的那一个 id，不是"页面自己觉得它在里面"）。
+      const newMemberRow = () => [...document.querySelectorAll('.org-member')]
+        .find((el) => el.textContent.includes('newbie'));
+      checks.createMemberAppearsChecked = (() => {
+        const row = newMemberRow();
+        const box = row && row.querySelector('input[type=checkbox]');
+        return !!box && box.checked;
+      })();
+      // 「所属组织」列同时说清楚它挂在哪个节点（路径，不是 id）。
+      checks.createMemberShowsNode = (() => {
+        const row = newMemberRow();
+        return !!row && !!selectedNode && row.textContent.includes(selectedNode.path || selectedNode.name);
+      })();
+      // 未保存的勾选不因新建而丢失，也没有替操作员偷偷写一次成员表。
+      checks.createMemberKeptPendingTicks = (() => {
+        const row = [...document.querySelectorAll('.org-member')].find((el) => el.textContent.includes('长伟'));
+        const box = row && row.querySelector('input[type=checkbox]');
+        const puts = (window.__sent || []).filter((call) => call.method === 'PUT').length;
+        return !!box && box.checked && puts === putsBeforeCreate;
+      })();
+    }
+
     // Adding a child node posts with the parent id, and the tree picks the new node up.
     find('子节点').click();
     await settle();
@@ -488,15 +617,122 @@ try {
     // 停用的 Key 在行内说明状态，而不是看起来一样。
     checks.suspendedKeyShown = !!detail && detail.textContent.includes('suspended');
 
+    // --- 人员行「编辑」：账号字段编辑不必再去账户页 -------------------------------------------
+    const rowButton = (label) => {
+      const row = rows().find((el) => el.textContent.includes('acme'));
+      return row ? [...row.querySelectorAll('button')].find((b) => b.textContent === label) : null;
+    };
+    const editBtn = rowButton('编辑');
+    const toggleBtn = rowButton('展开') || rowButton('收起');
+    checks.rowEditOffered = !!editBtn;
+    // 用户要求"展开前面添加一个编辑"：顺序是布局的一部分，用 DOM 顺序证明，而不是靠宽度猜。
+    checks.rowEditBeforeExpand = !!editBtn && !!toggleBtn
+      && !!(editBtn.compareDocumentPosition(toggleBtn) & Node.DOCUMENT_POSITION_FOLLOWING);
+    if (editBtn) {
+      editBtn.click();
+      await settle();
+      const editModal = document.getElementById('modal-root');
+      checks.editDialogNamed = editModal.textContent.includes('编辑账户');
+      // 与账户页同一个编辑表单：状态/计费/标签/所属组织都在，且组织是勾选树字段而不是手填 id。
+      checks.editDialogFields = ['状态', '计费模式', '账号标签', '所属组织'].every((label) => editModal.textContent.includes(label));
+      checks.editDialogHasNoRawIDs = !editModal.textContent.includes('组织节点 id');
+      editModal.querySelector('input[name="tags"]').value = 'vip';
+      [...editModal.querySelectorAll('button')].find((b) => b.textContent.trim() === '保存').click();
+      await settle();
+      const editPatch = (window.__sent || []).filter((call) => call.method === 'PATCH' && call.path === '/accounts/1').pop();
+      checks.editPatched = !!editPatch;
+      let editBody = null;
+      try { editBody = JSON.parse(editPatch.body); } catch (err) { editBody = null; }
+      checks.editSendsTags = !!editBody && Array.isArray(editBody.tags) && editBody.tags.join(',') === 'vip';
+      checks.editAlwaysSendsOrgNodes = !!editBody && Array.isArray(editBody.org_node_ids) && editBody.org_node_ids.join(',') === '3';
+      // 编辑过后页面重载：展开行里的事实跟着变（不是只改了服务端）。标签不显示在摘要行上，
+      // 它在展开区的「标签 …」里——所以断言读那里，而不是硬塞一个"行里应该有 vip"。
+      checks.editReflectedInDetail = (() => {
+        const row = detailOf('1');
+        return !!row && row.textContent.includes('标签 vip');
+      })();
+
+      // --- 分配组织：组织树勾选（每节点独立），整表替换 ------------------------------------------
+      // 「分配组织」在**展开区**里（摘要行上只有 编辑 / 展开），而且行内编辑整表重载过、行对象
+      // 是新的：按钮必须重新从详情行里取。
+      const detailButton = (label) => {
+        const row = detailOf('1');
+        return row ? [...row.querySelectorAll('button')].find((b) => b.textContent === label) : null;
+      };
+      const assignBtn = detailButton('分配组织');
+      if (assignBtn) assignBtn.click();
+      await settle();
+      const pickModal = document.getElementById('modal-root');
+      checks.assignDialogNamed = pickModal.textContent.includes('分配组织 — acme');
+      const treeRowsOf = (root) => [...root.querySelectorAll('.tree-row')];
+      const labelOfRow = (row) => (row.querySelector('.tree-label') || {}).textContent;
+      const pickBoxOf = (name) => {
+        const row = treeRowsOf(pickModal).find((entry) => labelOfRow(entry) === name);
+        return row ? row.querySelector('input[type=checkbox]') : null;
+      };
+      checks.assignTreeRendersNodes = treeRowsOf(pickModal).length === window.__org.nodes.length;
+      // 预勾选按**名字**断言：勾到"第一个复选框"在顺序变化时会为错误的理由通过。
+      checks.assignPrechecksCurrent = (() => {
+        const checked = treeRowsOf(pickModal).filter((row) => {
+          const box = row.querySelector('input[type=checkbox]');
+          return box && box.checked;
+        }).map(labelOfRow).sort();
+        return checked.join(',') === '平台组';
+      })();
+      // 每节点独立：勾父节点不连带子节点（用户选定的语义；节点标签由子树继承，成员不继承）。
+      // 先清空再勾，否则"子节点没被勾上"会被"它本来就是当前归属"掩盖掉——第一版就是这样自欺的。
+      [...pickModal.querySelectorAll('button')].find((b) => b.textContent === '清空').click();
+      await settle();
+      checks.assignClearUnticksAll = ![...pickModal.querySelectorAll('.tree-row input[type=checkbox]')]
+        .some((box) => box.checked);
+      if (pickBoxOf('研发部')) pickBoxOf('研发部').click();
+      await settle();
+      checks.assignIndependentTick = !!pickBoxOf('研发部') && pickBoxOf('研发部').checked
+        && !!pickBoxOf('平台组') && pickBoxOf('平台组').checked === false;
+      // 树里的过滤支持拼音（shichang → 市场部），且过滤只是视图：勾选集合不受它影响。
+      const pickFilter = pickModal.querySelector('input[type=search]');
+      pickFilter.value = 'shichang';
+      pickFilter.dispatchEvent(new Event('input'));
+      await settle();
+      const visibleAfterFilter = treeRowsOf(pickModal).map(labelOfRow);
+      checks.assignPinyinFilter = visibleAfterFilter.includes('市场部') && !visibleAfterFilter.includes('研发部');
+      pickFilter.value = '';
+      pickFilter.dispatchEvent(new Event('input'));
+      await settle();
+      checks.assignFilterKeepsSelection = !!pickBoxOf('研发部') && pickBoxOf('研发部').checked;
+      pickBoxOf('市场部').click();
+      await settle();
+      [...pickModal.querySelectorAll('button')].find((b) => b.textContent.trim() === '保存').click();
+      await settle();
+      const assignPatch = (window.__sent || []).filter((call) => call.method === 'PATCH' && call.path === '/accounts/1').pop();
+      let assignBody = null;
+      try { assignBody = JSON.parse(assignPatch.body); } catch (err) { assignBody = null; }
+      checks.assignBodyIsWholeList = !!assignBody && Array.isArray(assignBody.org_node_ids)
+        && assignBody.org_node_ids.slice().sort((a, b) => a - b).join(',') === '2,4';
+      checks.assignReflectedInRow = (() => {
+        const row = rows().find((el) => el.textContent.includes('acme'));
+        return !!row && row.textContent.includes('总部/市场部');
+      })();
+      // 空选的后果必须看得见（保存 = 移出全部组织），而取消不写任何东西。
+      const patchesBeforeCancel = (window.__sent || []).filter((call) => call.method === 'PATCH' && call.path === '/accounts/1').length;
+      const assignAgain = detailButton('分配组织');
+      if (assignAgain) assignAgain.click();
+      await settle();
+      const pickAgain = document.getElementById('modal-root');
+      [...pickAgain.querySelectorAll('button')].find((b) => b.textContent === '清空').click();
+      await settle();
+      checks.assignEmptyWarns = pickAgain.textContent.includes('未选择任何节点')
+        && pickAgain.textContent.includes('标签授权随即失效');
+      [...pickAgain.querySelectorAll('button')].find((b) => b.textContent === '取消').click();
+      await settle();
+      checks.assignCancelWritesNothing = (window.__sent || []).filter((call) => call.method === 'PATCH' && call.path === '/accounts/1').length === patchesBeforeCancel;
+    }
+
     // --- 「收起」必须真的收起来 -------------------------------------------------------------
     //
     // 用户报障：「点击收起不会收起」。当时 app.css 里 .org-person-detail 只有 padding、**没有**
     // 默认隐藏的门控，.org-person.open 只改背景色，于是"收起"只是把 open 类摘掉：DOM 还在、
     // 内容照旧可见。断言必须量几何（rect 高度为 0）而不是查元素是否存在——那个 bug 里元素一直存在。
-    const rowButton = (label) => {
-      const row = rows().find((el) => el.textContent.includes('acme'));
-      return row ? [...row.querySelectorAll('button')].find((b) => b.textContent === label) : null;
-    };
     const collapse = rowButton('收起');
     checks.collapseLabelAfterExpand = !!collapse;
     if (collapse) collapse.click();
@@ -544,6 +780,31 @@ try {
     checks.readonlyHintShown = pageText().includes('只读角色不能修改');
     checks.membersVisible = !!document.querySelector('.org-member');
     checks.memberCheckboxDisabled = [...document.querySelectorAll('.org-member input')].every((box) => box.disabled);
+    // 只读角色的写入口：新建成员整体不出现（与保存成员同一口径），行内编辑在但点不动。
+    checks.noCreateMember = find('新建成员') === undefined;
+    checks.rowEditDisabled = (() => {
+      const row = document.querySelector('.org-member');
+      const edit = row && [...row.querySelectorAll('button')].find((b) => b.textContent === '编辑');
+      return !!edit && edit.disabled === true;
+    })();
+    // 展开一行：四个账号动作都在，但一个都点不动。
+    const viewerRow = document.querySelector('.org-member');
+    const viewerToggle = viewerRow && [...viewerRow.querySelectorAll('button')].find((b) => b.textContent === '展开');
+    if (viewerToggle) viewerToggle.click();
+    await settle();
+    checks.readonlyDetailActionsDisabled = (() => {
+      // 展开的是**第一行**，所以要按它的 account id 取那一行详情：表里每个账号都有一行，
+      // 取全页第一个会拿到别人那行（空的）。
+      const row = document.querySelector('.org-person-detail[data-account-id="' + viewerRow.dataset.accountId + '"]');
+      // 飞书那颗按钮的文案取决于这个账号有没有绑定（绑定/解绑），所以两种都算。
+      return ['新建 Key', '启用 DSH', '分配组织'].every((label) => {
+        const action = row && [...row.querySelectorAll('button')].find((b) => b.textContent === label);
+        return !!action && action.disabled === true;
+      }) && ['绑定飞书', '解绑飞书'].some((label) => {
+        const action = row && [...row.querySelectorAll('button')].find((b) => b.textContent === label);
+        return !!action && action.disabled === true;
+      });
+    })();
   }
 
   if (view === 'org-accounts') {
@@ -582,6 +843,44 @@ try {
     if (boxes.length) { boxes[0].checked = false; boxes[0].dispatchEvent(new Event('change')); }
     await settle();
     checks.descendantsCanBeDisabled = (window.__calls || []).some((call) => call.includes('include_descendants=false'));
+
+    // --- 账户页的表单也用同一棵勾选树（不再手填节点 id） --------------------------------------
+    const accEditBtn = [...document.querySelectorAll('tbody button')].find((b) => b.textContent.trim() === '编辑');
+    checks.accountEditOffered = !!accEditBtn;
+    if (accEditBtn) {
+      accEditBtn.click();
+      await settle();
+      const root = document.getElementById('modal-root');
+      const editModal = [...root.querySelectorAll('.modal-backdrop')].pop();
+      checks.accountEditHasOrgField = editModal.textContent.includes('所属组织');
+      checks.accountEditHasNoRawIDs = !editModal.textContent.includes('组织节点 id');
+      const openPicker = [...editModal.querySelectorAll('button')].find((b) => b.textContent.includes('分配组织'));
+      checks.accountEditOffersPicker = !!openPicker;
+      if (openPicker) {
+        openPicker.click();
+        await settle();
+        // 后开的那个 backdrop 才是勾选树（账户编辑弹窗还在下面）。
+        const picker = [...document.getElementById('modal-root').querySelectorAll('.modal-backdrop')].pop();
+        checks.accountPickerOpens = picker.textContent.includes('已选') && !!picker.querySelector('.org-assign-tree .tree-row');
+        const hostBox = [...picker.querySelectorAll('.tree-row')]
+          .find((row) => (row.querySelector('.tree-label') || {}).textContent === '总部');
+        if (hostBox) hostBox.querySelector('input[type=checkbox]').click();
+        await settle();
+        [...picker.querySelectorAll('button')].find((b) => b.textContent.trim() === '保存').click();
+        await settle();
+        // 选完回到表单：这一行用路径显示所选节点，而不是 id。
+        const backToForm = [...document.getElementById('modal-root').querySelectorAll('.modal-backdrop')].pop();
+        checks.accountOrgFieldShowsPath = backToForm.textContent.includes('总部')
+          && backToForm.textContent.includes('总部/研发部/平台组');
+        [...backToForm.querySelectorAll('button')].find((b) => b.textContent.trim() === '保存').click();
+        await settle();
+        const accPatch = (window.__sent || []).filter((call) => call.method === 'PATCH' && call.path === '/accounts/1').pop();
+        let accBody = null;
+        try { accBody = JSON.parse(accPatch.body); } catch (err) { accBody = null; }
+        checks.accountEditSendsPickedNodes = !!accBody && Array.isArray(accBody.org_node_ids)
+          && accBody.org_node_ids.slice().sort((a, b) => a - b).join(',') === '1,3';
+      }
+    }
   }
 
   const bad = Object.keys(checks).filter((key) => checks[key] === false);

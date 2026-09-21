@@ -59,16 +59,18 @@ assert.match(org, /网关自动创建（worker 凭据，不参与选择）/, 'an
 
 for (const [label, pattern] of [
   ['新建 Key', /onclick: \(\) => addKey\(account, refresh\)/],
-  ['启用/停用 DSH', /onclick: \(\) => toggleDSH\(account, refresh\)/],
+  ['启用/停用 DSH', /onclick: \(\) => toggleDSH\(account\)/],
   ['绑定/解绑飞书', /onclick: \(\) => account\.feishu && account\.feishu\.bound \? unbindFeishu\(account, refresh\) : bindFeishu\(account, refresh\)/],
-  ['分配组织', /onclick: \(\) => assignOrgs\(account, refresh\)/],
+  ['分配组织', /onclick: \(\) => assignOrgs\(account\)/],
 ]) {
   assert.match(org, pattern, 'the expanded row must offer ' + label);
 }
 assert.match(org, /api\.post\('\/accounts\/' \+ account\.id \+ '\/dsh', \{ enabled: false \}\)/,
   'disabling DSH from the row uses the same endpoint as the accounts page');
-assert.match(org, /api\.patch\('\/accounts\/' \+ account\.id, \{ org_node_ids: splitList\(values\.org_node_ids\)\.map\(Number\) \}\)/,
-  'assigning organizations replaces the membership list');
+assert.match(org, /nodeIds: account\.org_node_ids \|\| \[\]/,
+  'the picker opens on the account\'s current memberships');
+assert.match(org, /onSubmit: \(ids\) => api\.patch\('\/accounts\/' \+ account\.id, \{ org_node_ids: ids \}\)/,
+  'assigning organizations replaces the membership list (整表替换)');
 assert.match(org, /createKeyForAccount/, 'creating a key goes through the shared, one-time-secret path');
 assert.match(org, /editKey\(key, refresh\)/, 'a key row can be edited from the person row');
 assert.match(org, /toggleKey\(key, refresh\)/, 'a key row can be suspended from the person row');
@@ -90,6 +92,19 @@ assert.match(org, /box\.disabled = readonly \|\| \(isFiltering && !box\.checked\
   'a filtered list must not ADD members (it is not the whole membership), while un-ticking stays possible');
 assert.match(org, /const filtering = search\.trim\(\) !== '';/,
   'the filtering state is derived once per paint');
+
+// --- 行内「编辑」与工具条「新建成员」 -----------------------------------------------------------
+
+assert.match(org, /onclick: \(\) => editPerson\(entry\.account\)/,
+  'the person row must offer 编辑 (in front of 展开, so account fields are one click away)');
+assert.match(org, /const updated = await editAccount\(account, \{ title: '编辑账户 ' \+ account\.name \}\)/,
+  'editing goes through the shared account editor');
+assert.match(org, /const created = await createAccount\(\{[\s\S]*?title: '新建成员 — ' \+ node\.name/,
+  '新建成员 opens the same creator, titled for the node');
+assert.match(org, /checked\.add\(created\.id\);/,
+  'the new member joins the node in the same request, so it must be ticked locally too');
+assert.doesNotMatch(org, /reloadAccount\(/,
+  'the old per-account re-read is gone: rows are refreshed through the row they belong to');
 
 // --- the unassigned accounts have a home -----------------------------------------------------
 

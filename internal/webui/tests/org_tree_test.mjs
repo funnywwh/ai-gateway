@@ -13,6 +13,9 @@ import { readFile } from 'node:fs/promises';
 const treeSrc = await readFile(new URL('../static/js/tree.js', import.meta.url), 'utf8');
 const org = await readFile(new URL('../static/js/pages/org.js', import.meta.url), 'utf8');
 const accounts = await readFile(new URL('../static/js/pages/accounts.js', import.meta.url), 'utf8');
+// 账号的创建/编辑（含所属组织的勾选树字段）在本次改动里抽成了共用模块：账户页与组织页都用它。
+const accountActions = await readFile(new URL('../static/js/pages/account_actions.js', import.meta.url), 'utf8');
+const orgAssign = await readFile(new URL('../static/js/pages/org_assign.js', import.meta.url), 'utf8');
 const app = await readFile(new URL('../static/js/app.js', import.meta.url), 'utf8');
 const router = await readFile(new URL('../static/js/router.js', import.meta.url), 'utf8');
 const css = await readFile(new URL('../static/app.css', import.meta.url), 'utf8');
@@ -178,9 +181,28 @@ assert.match(accounts, /include_descendants/, 'the filter must expose the descen
 assert.match(accounts, /api\.get\('\/accounts', \{ limit, offset, \.\.\.orgQuery\(\) \}\)/,
   'the account list must send the organization filter');
 assert.match(accounts, /function orgQuery\(\)/, 'the filter parameters must come from one place');
-assert.match(accounts, /name: 'org_node_ids'/, 'the account editor must offer the organization nodes');
-assert.match(accounts, /org_node_ids: splitIDs\(values\.org_node_ids\)/,
-  'the editor must send the replacement membership list');
+// 手填「组织节点 id（逗号分隔）」已经换成勾选树：账号可同时属于多个节点这件事，靠人记 id 是记不住的。
+assert.match(accountActions, /name: 'org_node_ids'/, 'the account editor must still carry the field');
+assert.doesNotMatch(accounts, /组织节点 id（逗号分隔）/, 'the raw node-id input must be gone');
+assert.match(accountActions, /openOrgPicker\(\{ title: title \|\| '分配组织', nodeIds: state\.refs\.map\(\(ref\) => ref\.id\) \}\)/,
+  'the field opens the shared checkbox tree');
+assert.match(accountActions, /org_node_ids: values\.org_node_ids \|\| \[\]/,
+  'the editor must send the replacement membership list (always an array: empty means "no organization")');
+assert.match(accountActions, /import \{ createAccount, editAccount \} from|export async function createAccount/,
+  'the shared module owns the account forms');
+// 组织页与账户页共用同一份实现：两处入口的字段与落库路径只写一次。
+assert.match(org, /import \{ createAccount, editAccount \} from '\.\/account_actions\.js'/,
+  'the org page must use the shared account forms');
+assert.match(org, /import \{ openOrgPicker \} from '\.\/org_assign\.js'/,
+  'the org page must use the shared organization picker');
+assert.match(org, /orgRefs: \[\{ id: node\.id, name: node\.name, path: node\.path \|\| node\.name \}\]/,
+  'a member created from a node is pre-assigned to that node');
+assert.match(org, /onSubmit: \(ids\) => api\.patch\('\/accounts\/' \+ account\.id, \{ org_node_ids: ids \}\)/,
+  'assigning from the person row replaces the membership list through the picker');
+assert.match(orgAssign, /await onSubmit\(ids\)/,
+  'the picker lets the caller own the write (a form defers it to its own 保存)');
+assert.match(orgAssign, /api\.get\('\/org\/nodes', \{ limit: 1000 \}\)/,
+  'the picker reads the node list itself, so it cannot show a stale tree');
 
 // --- routing ------------------------------------------------------------------------------
 

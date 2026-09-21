@@ -17,6 +17,9 @@ import { openFeishuSync } from './org_feishu.js';
 import { createKeyForAccount, editKey, toggleKey } from './key_actions.js';
 // 账号级飞书绑定：人员弹窗（不是扫码）与解绑。
 import { openFeishuPersonPicker, unbindAccountFeishu } from './account_feishu.js';
+// 账号的创建/编辑与组织归属选择器：与账户页共用同一份实现（fields/权限/落库路径只有一处）。
+import { createAccount, editAccount } from './account_actions.js';
+import { openOrgPicker } from './org_assign.js';
 
 // 成员勾选列表最多拉这么多账号。组织页需要展示"这个部门有哪些账号"，一次拉全量比做一套
 // 分页多选更简单；账号数量超过这个上限时列表会截断，并明确提示去账户页按组织筛选。
@@ -164,6 +167,12 @@ export async function render({ page, actions, session }) {
       table.render(wanted, state.accounts.length ? '无匹配账号' : '没有可分配的账号', filtering);
     }
 
+    // 新建成员：在这个节点下直接建一个账号并把它挂上来。它是"建人"最快的路径（先有部门，再有人）。
+    const createMember = el('button', {
+      class: 'btn', text: '新建成员', disabled: readonly,
+      title: readonly ? '只读角色不能新建成员' : '在这个节点下新建一个账号，并把它加入本节点',
+    });
+    createMember.addEventListener('click', () => addMember(node, checked, paint));
     const saveMembers = el('button', {
       class: 'btn btn-primary', text: '保存成员',
       disabled: readonly || !state.membersLoaded,
@@ -187,7 +196,9 @@ export async function render({ page, actions, session }) {
       el('div', { class: 'toolbar' }, [
         el('h3', { text: '人员（账号）', style: 'margin:0;flex:1' }),
         el('span', { class: 'muted', text: '展开一行可以看到该账号的 Key 列表与飞书身份' }),
-        readonly ? el('span', { class: 'muted', text: '只读角色不能修改' }) : saveMembers]),
+        readonly
+          ? el('span', { class: 'muted', text: '只读角色不能修改' })
+          : el('span', { class: 'toolbar-actions' }, [createMember, saveMembers])]),
       memberPanel,
       unassignedRow(unassigned),
       state.accountsTruncated
@@ -292,7 +303,15 @@ export async function render({ page, actions, session }) {
         feishu: el('td', { class: 'c-feishu' }),
         keys: el('td', { class: 'c-keys' }),
         orgs: el('td', { class: 'c-orgs' }),
-        ops: el('td', { class: 'c-ops' }, [entry.toggle]),
+        ops: el('td', { class: 'c-ops' }, [
+          // 「编辑」在「展开」前面：账号级字段（状态/计费/标签/所属组织）是最常改的，
+          // Key 与飞书那些动作留在展开区里（M72 口径不变）。
+          el('button', {
+            class: 'btn btn-small', type: 'button', text: '编辑', disabled: readonly,
+            onclick: () => editPerson(entry.account),
+          }),
+          entry.toggle,
+        ]),
       };
       // .org-member is kept on the row itself: the harness and the static regression read rows by
       // that class (and the checkbox/name layout rules key off it), and a row is still a row.
@@ -455,13 +474,13 @@ export async function render({ page, actions, session }) {
       el('button', { class: 'btn', text: '新建 Key', disabled: readonly, onclick: () => addKey(account, refresh) }),
       el('button', {
         class: 'btn', text: account.dsh_enabled ? '停用 DSH' : '启用 DSH', disabled: readonly,
-        onclick: () => toggleDSH(account, refresh),
+        onclick: () => toggleDSH(account),
       }),
       el('button', {
         class: 'btn', text: (account.feishu && account.feishu.bound) ? '解绑飞书' : '绑定飞书', disabled: readonly,
         onclick: () => account.feishu && account.feishu.bound ? unbindFeishu(account, refresh) : bindFeishu(account, refresh),
       }),
-      el('button', { class: 'btn', text: '分配组织', disabled: readonly, onclick: () => assignOrgs(account, refresh) }),
+      el('button', { class: 'btn', text: '分配组织', disabled: readonly, onclick: () => assignOrgs(account) }),
     ]);
     const keysBox = el('div', { class: 'org-person-keys' }, [el('div', { class: 'muted', text: '正在读取 Key…' })]);
 
@@ -497,7 +516,43 @@ export async function render({ page, actions, session }) {
     return [facts, actions, keysBox];
   }
 
-  // --- 逐账号操作（M72）：组织页的展开行里可用的动作 --------------------------------
+  // --- 逐账号操作（M72）：人员行与展开行里可用的动作 --------------------------------
+
+  // addMember creates an account and puts it in this node in one step: the membership travels with
+  // the POST (`org_node_ids`), so there is no window where the person exists but belongs nowhere.
+  //
+  // 建完之后**不重新读成员**：那会把操作员还没保存的勾选冲掉（`loadMembers` 会清空并重填 checked），
+  // 而且新账号会一瞬间显示成未勾选——此时按「保存成员」反而把它移出节点。这里只把新账号并进
+  // checked 再重绘：它按「勾选置顶」规则立刻出现在第一行且是勾上的，其余未保存的勾选原样保留。
+  async function addMember(node, checked, repaint) {
+    const created = await createAccount({
+      title: '新建成员 — ' + node.name,
+      submitLabel: '创建',
+      // 所属组织预置当前节点（节点是页面已有的对象，直接给出引用，弹窗里就能显示路径）。
+      orgRefs: [{ id: node.id, name: node.name, path: node.path || node.name }],
+    });
+    if (!created) return;
+    toast('已新建成员 ' + created.name, 'ok');
+    await loadAccounts();
+    if (node.id !== state.selectedId) {
+      // 节点已经被切走了：整页重载，落到新节点的成员表上。
+      await load();
+      return;
+    }
+    checked.add(created.id);
+    repaint();
+  }
+
+  // editPerson edits the account's own fields from the person row. Unlike the Key/Feishu actions it
+  // can change the account's organizations, so it reloads everything and re-reads the memberships:
+  // this row's checkbox claims "member of this node", and that claim has to come from the server.
+  async function editPerson(account) {
+    const updated = await editAccount(account, { title: '编辑账户 ' + account.name });
+    if (!updated) return;
+    toast('已更新', 'ok');
+    await loadAccounts();
+    await load();
+  }
 
   // addKey creates a Key for this account. The plaintext is shown once, which is why the shared
   // creator owns the whole sequence rather than this page rebuilding it.
@@ -509,7 +564,7 @@ export async function render({ page, actions, session }) {
   // toggleDSH flips the account's DSH switch from the person row. It says the same things as the
   // accounts page, because the consequence is the same: disabling stops the worker and records an
   // explicit disable that dshgw.auto_enable will not undo.
-  async function toggleDSH(account, refresh) {
+  async function toggleDSH(account) {
     if (account.dsh_enabled) {
       const ok = await confirmDialog('停用 DSH',
         '停用账号 ' + account.name + ' 的 dsh？将停止其 worker 并吊销 worker 专用 Key；新登录被拒绝，' +
@@ -554,22 +609,18 @@ export async function render({ page, actions, session }) {
   }
 
   // assignOrgs replaces the account's organization memberships (the same field the accounts page
-  // edits). It is how an unassigned account gets a home.
-  async function assignOrgs(account, refresh) {
-    const result = await modal({
+  // edits). It is how an unassigned account gets a home. 勾选树由 org_assign.js 提供，与账户页同源。
+  async function assignOrgs(account) {
+    const picked = await openOrgPicker({
       title: '分配组织 — ' + account.name,
-      submitLabel: '保存',
-      fields: [{
-        name: 'org_node_ids', label: '组织节点 id（逗号分隔）',
-        hint: '整表替换：留空即移出全部组织，从节点继承来的标签授权随即失效',
-        value: (account.org_node_ids || []).join(', '),
-      }],
-      onSubmit: (values) => api.patch('/accounts/' + account.id, { org_node_ids: splitList(values.org_node_ids).map(Number) }),
+      nodeIds: account.org_node_ids || [],
+      // 落库由弹窗负责：节点可能刚被别人删掉（404），错误要留在弹窗里让人改，而不是关掉再报。
+      onSubmit: (ids) => api.patch('/accounts/' + account.id, { org_node_ids: ids }),
     });
-    if (!result) return;
-    toast('组织归属已更新', 'ok');
+    if (!picked) return;
+    toast('组织归属已更新（' + picked.ids.length + ' 个节点）', 'ok');
+    // 归属变了 → 整表重载并重读成员勾选。
     await reloadAll();
-    await refresh();
   }
 
   // refreshAccount re-reads the accounts and repaints ONE row in place. The actions that cannot
