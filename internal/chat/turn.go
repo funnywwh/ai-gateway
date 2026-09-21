@@ -241,12 +241,12 @@ func (s *Service) runTurn(ctx context.Context, session *domain.ChatSession, turn
 			run.status, run.outcome, run.errMsg = domain.ChatMessageFailed, OutcomeFailed, err.Error()
 			break
 		}
-		access := s.accessFor(session, req.Username, role)
+		access := s.accessFor(session, req.Username, role, turn.TurnID)
 
 		stepTools := s.toolSurfaceFor(access)
 		stepReq := Step{
 			Model:           session.Model,
-			Instructions:    systemPrompt(promptContext{skills: skills, cfg: s.cfg}),
+			Instructions:    systemPrompt(promptContext{skills: skills, cfg: s.cfg, webAccess: access.WebAccess}),
 			Items:           append(append([]pluginapi.Item{}, history.items...), run.providerItems...),
 			Tools:           stepTools,
 			PromptCacheKey:  session.ID,
@@ -328,7 +328,7 @@ func (s *Service) runTurn(ctx context.Context, session *domain.ChatSession, turn
 				return run
 			}
 			session = liveSession
-			callAccess := s.accessFor(session, req.Username, liveRole)
+			callAccess := s.accessFor(session, req.Username, liveRole, turn.TurnID)
 			outcome := s.executeToolCall(ctx, callAccess, session, turn, step, call, result)
 			run.toolCalls++
 			run.parts = append(run.parts, domain.ChatPart{
@@ -603,9 +603,12 @@ func (s *Service) currentRole(ctx context.Context, req TurnRequest) (string, err
 	return role, nil
 }
 
-func (s *Service) accessFor(session *domain.ChatSession, username, role string) Access {
+// accessFor renders one session's authority and capabilities for a tool call. turnID is the
+// running turn, which is what a per-turn budget is counted against; it is passed separately
+// because a session outlives any single turn.
+func (s *Service) accessFor(session *domain.ChatSession, username, role, turnID string) Access {
 	if session == nil {
-		return Access{Username: username, Role: role}
+		return Access{Username: username, Role: role, TurnID: turnID}
 	}
 	var tokenID int64
 	if session.MCPTokenID != nil {
@@ -619,6 +622,11 @@ func (s *Service) accessFor(session *domain.ChatSession, username, role string) 
 		SessionID:    session.ID,
 		SessionTitle: session.Title,
 		MCPTokenID:   tokenID,
+		// The deployment's master switch and this session's own switch are both required: the
+		// first says the gateway can reach the internet at all, the second says this
+		// conversation may.
+		WebAccess: s.cfg.WebAccess && session.WebAccess,
+		TurnID:    turnID,
 	}
 }
 

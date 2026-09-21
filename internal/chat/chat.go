@@ -109,6 +109,11 @@ type Config struct {
 	// previews, instructing the model to build submitting forms would only produce buttons
 	// that do nothing.
 	UIBridge bool
+	// WebAccess mirrors chat.web_access.enabled: this deployment has a search backend and a
+	// page fetcher configured. It is only the master switch — a session still has to enable
+	// web access itself (domain.ChatSession.WebAccess), and both are required for the web
+	// tools to appear in the model's tool list at all.
+	WebAccess bool
 }
 
 // Usage is what one model step consumed. Tokens come from the provider's own report; cost
@@ -201,6 +206,13 @@ type Access struct {
 	// a scope captured here, so a revoked or expired token stops the conversation at the
 	// next call. Zero means unbound.
 	MCPTokenID int64
+	// WebAccess is this conversation's own web-access switch, read fresh with the session on
+	// every step. The web tools need no MCP token, so an unbound session with web access on
+	// can still search and read — that is the point of keeping the two capabilities apart.
+	WebAccess bool
+	// TurnID identifies the current turn, so per-turn budgets (the web tool call cap) can be
+	// counted without reaching into the turn loop. It is empty outside a running turn.
+	TurnID string
 }
 
 // Store is the owner-scoped persistence the service needs.
@@ -354,6 +366,11 @@ type SessionInput struct {
 	// decides authority; write_mode is derived from it and is not accepted from a client.
 	MCPTokenID int64
 	SkillIDs   []int64
+	// WebAccess toggles this conversation's web_search / web_fetch tools. Nil means
+	// "unchanged", like every other optional field of this input; a non-nil value is refused
+	// when the deployment has web access switched off, because a session flag that cannot do
+	// anything is worse than an explicit error.
+	WebAccess *bool
 }
 
 // mcpTokenLookup is the optional persistence half of token binding. It is separate from
@@ -447,6 +464,10 @@ func (s *Service) CreateSession(ctx context.Context, ownerID int64, username, ro
 	if err != nil {
 		return nil, err
 	}
+	webAccess, err := s.resolveWebAccess(in.WebAccess, false)
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	tokenID := token.ID
 	session := &domain.ChatSession{
@@ -459,6 +480,7 @@ func (s *Service) CreateSession(ctx context.Context, ownerID int64, username, ro
 		WriteMode:   writeModeFor(token.Scope),
 		MCPTokenID:  &tokenID,
 		SkillIDs:    skills,
+		WebAccess:   webAccess,
 		Status:      "active",
 		CreatedAt:   now,
 		UpdatedAt:   now,
@@ -470,6 +492,20 @@ func (s *Service) CreateSession(ctx context.Context, ownerID int64, username, ro
 		return nil, err
 	}
 	return session, nil
+}
+
+// resolveWebAccess folds a requested web-access value into the effective one. A nil request
+// means "unchanged", and the deployment's master switch is a hard ceiling: a session cannot be
+// switched to a capability this deployment does not have, because a flag that silently does
+// nothing is worse than an error on the form.
+func (s *Service) resolveWebAccess(requested *bool, current bool) (bool, error) {
+	if requested == nil {
+		return current, nil
+	}
+	if *requested && !s.cfg.WebAccess {
+		return false, domain.ErrForbidden("this deployment has not enabled internet access for the console (chat.web_access.enabled)")
+	}
+	return *requested, nil
 }
 
 // UpdateSession edits one conversation. Renaming is the owner's business; changing what
@@ -513,6 +549,15 @@ func (s *Service) UpdateSession(ctx context.Context, ownerID int64, role, id str
 			return nil, err
 		}
 		session.SkillIDs = skills
+	}
+	// Turning internet access on for one conversation asks nothing of the caller's role: the
+	// deployment-level switch is the operator's decision about what this gateway may reach,
+	// and within it the session's own owner decides whether this conversation uses it. The
+	// refusal below is about the switch, not about authority.
+	if webAccess, err := s.resolveWebAccess(in.WebAccess, session.WebAccess); err != nil {
+		return nil, err
+	} else {
+		session.WebAccess = webAccess
 	}
 	if bindingChanged {
 		if err := requireAdmin(role, "change the model, billing key or MCP token of a conversation"); err != nil {

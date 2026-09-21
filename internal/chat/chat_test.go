@@ -1225,3 +1225,85 @@ func isForbidden(err error) bool {
 	}
 	return false
 }
+
+// TestSessionWebAccessIsOffByDefaultAndGatedByTheDeployment pins M73's two-switch rule at the
+// service boundary, which is where a flag that silently does nothing would be introduced.
+func TestSessionWebAccessIsOffByDefaultAndGatedByTheDeployment(t *testing.T) {
+	ctx := context.Background()
+	yes := true
+
+	// Deployment off: the flag is refused rather than stored, on create and on update, because a
+	// conversation that claims a capability this gateway does not have would mislead both the
+	// console and the model.
+	service, store, _, _, session := chatFixture(t, Config{})
+	if _, err := service.UpdateSession(ctx, 1, RoleAdmin, session.ID, SessionInput{WebAccess: &yes}); err == nil {
+		t.Fatal("switching web access on must be refused while the deployment has it off")
+	}
+	if _, err := store.GetChatSession(ctx, session.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	// Nil means unchanged: an unrelated update keeps the stored value.
+	stored, err := service.UpdateSession(ctx, 1, RoleAdmin, session.ID, SessionInput{Title: strPtr("新标题")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.WebAccess {
+		t.Error("web access must default to off")
+	}
+
+	// Deployment on: the session decides, and the value round-trips through the store.
+	on, store, _, _, session := chatFixture(t, Config{WebAccess: true})
+	enabled, err := on.UpdateSession(ctx, 1, RoleAdmin, session.ID, SessionInput{WebAccess: &yes})
+	if err != nil {
+		t.Fatalf("enabling web access: %v", err)
+	}
+	if !enabled.WebAccess {
+		t.Fatal("the switch must be stored")
+	}
+	reloaded, err := store.GetChatSession(ctx, session.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.WebAccess {
+		t.Fatal("the switch must survive a reload")
+	}
+	no := false
+	disabled, err := on.UpdateSession(ctx, 1, RoleAdmin, session.ID, SessionInput{WebAccess: &no})
+	if err != nil {
+		t.Fatalf("disabling web access: %v", err)
+	}
+	if disabled.WebAccess {
+		t.Fatal("the switch must be able to go back off")
+	}
+}
+
+// TestAccessFoldsBothWebSwitches pins what the tool surface and the prompt are handed: web
+// access is on only when the deployment and the session both say so.
+func TestAccessFoldsBothWebSwitches(t *testing.T) {
+	service, _, _, _, session := chatFixture(t, Config{WebAccess: true})
+	for _, tc := range []struct {
+		name          string
+		deploymentOn  bool
+		sessionAccess bool
+		want          bool
+	}{
+		{"both on", true, true, true},
+		{"deployment off", false, true, false},
+		{"session off", true, false, false},
+		{"both off", false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service.cfg.WebAccess = tc.deploymentOn
+			session.WebAccess = tc.sessionAccess
+			access := service.accessFor(session, "admin", RoleAdmin, "turn_1")
+			if access.WebAccess != tc.want {
+				t.Errorf("WebAccess = %v, want %v", access.WebAccess, tc.want)
+			}
+			if access.TurnID != "turn_1" {
+				t.Errorf("TurnID = %q: the per-turn budget needs it", access.TurnID)
+			}
+		})
+	}
+}
+
+func strPtr(s string) *string { return &s }
