@@ -310,7 +310,7 @@ ALTER TABLE chat_sessions ADD COLUMN web_access INTEGER NOT NULL DEFAULT 0;
 - 不做联网调用的计费与配额记账；不做域名黑白名单（只有 `allow_private_hosts`）。
 - 不把检索词写进审计与日志。
 
-## 10. 实现与设计差异
+## 10. 实现与设计差异（已回填）
 
 实现与设计基本一致；下面每一条都是落地时做的选择，写在这里以免后来者以为设计文档漏了。
 
