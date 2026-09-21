@@ -571,6 +571,15 @@ func run() int {
 		return 2
 	}
 
+	// M73: the console's search backend and page fetcher, or nil when the deployment has not
+	// configured internet access. Built before the server so a bad base_url, a missing key or
+	// an unparseable proxy is a start-up failure.
+	webAccess, err := buildWebAccess(cfg, log)
+	if err != nil {
+		log.Error("console web access configuration is unusable", "err", err)
+		return 2
+	}
+
 	api := httpapi.New(httpapi.Deps{
 		Config:           cfg,
 		Feishu:           feishuDeps,
@@ -597,6 +606,8 @@ func run() int {
 		// The console chat persists conversations, skills and preview payloads in the same
 		// database; the transport builds its service and preview-ticket signer from here.
 		ChatStore: db,
+		// The console's web tools need the search client; the transport dispatches them.
+		WebAccess: webAccess,
 		// One narrow port per resource family; the composition root is the only place
 		// that knows a single *store.DB backs all of them.
 		Accounts:      db,

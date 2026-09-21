@@ -50,8 +50,14 @@ func (s *Server) newChatService() ChatService {
 	if !cfg.Enabled {
 		return nil
 	}
+	// The web tools are built from the client the composition root created. A deployment that
+	// never configured a search backend has no client, and then the tools simply do not exist.
+	var web *webTools
+	if s.deps.WebAccess != nil && s.deps.Config != nil {
+		web = newWebTools(s.deps.WebAccess, s.deps.Config.Chat.WebAccess.MaxCallsPerTurn)
+	}
 	return chat.New(cfg, s.deps.ChatStore, &chatRunner{s: s},
-		&chatTools{s: s, token: s.deps.MCPTokens, log: s.deps.Log}, s.deps.Log)
+		&chatTools{s: s, token: s.deps.MCPTokens, log: s.deps.Log, web: web}, s.deps.Log)
 }
 
 // chatConfig maps the gateway configuration onto the chat service's.
@@ -75,6 +81,10 @@ func chatConfig(cfg *config.Config) chat.Config {
 		// switch off; when it is off, the page a form would submit from has no way to talk
 		// back, so the model is not told to build one.
 		UIBridge: cfg.Chat.UIBridgeEnabled,
+		// The master switch for the console's internet access. It reaches the prompt (so a
+		// conversation with web access on is told how to use it) and the session form (which
+		// refuses to switch on a capability this deployment does not have).
+		WebAccess: cfg.Chat.WebAccess.Enabled,
 	}
 }
 
@@ -131,6 +141,9 @@ type chatSessionRequest struct {
 	// this token's scope, so a client cannot claim an authority the token does not carry.
 	MCPTokenID int64   `json:"mcp_token_id"`
 	SkillIDs   []int64 `json:"skill_ids"`
+	// WebAccess turns this conversation's internet access (web_search / web_fetch) on or off.
+	// Omitted means "unchanged"; true is refused when the deployment has not enabled it.
+	WebAccess *bool `json:"web_access"`
 }
 
 func (s *Server) handleAdminChatListSessions(w http.ResponseWriter, r *http.Request) {
@@ -150,11 +163,19 @@ func (s *Server) handleAdminChatListSessions(w http.ResponseWriter, r *http.Requ
 	}
 	rows := make([]map[string]any, 0, len(sessions))
 	for _, session := range sessions {
-		rows = append(rows, chatSessionJSON(session, false))
+		rows = append(rows, s.chatSessionPayload(session, false))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	// The deployment-level web-access facts ride on the list as well as on each row: the console
+	// has to know whether to offer the switch before any conversation exists.
+	available, provider := s.webAccessFacts()
+	payload := map[string]any{
 		"object": "list", "data": rows, "total": total, "limit": page.Limit, "offset": page.Offset,
-	})
+		"web_access_available": available,
+	}
+	if provider != "" {
+		payload["web_access_provider"] = provider
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) handleAdminChatCreateSession(w http.ResponseWriter, r *http.Request) {
@@ -169,6 +190,7 @@ func (s *Server) handleAdminChatCreateSession(w http.ResponseWriter, r *http.Req
 	session, err := s.chat.CreateSession(r.Context(), user.ID, user.Username, user.Role, chat.SessionInput{
 		Title: body.Title, Model: body.Model, AccountID: body.AccountID,
 		APIKeyID: body.APIKeyID, MCPTokenID: body.MCPTokenID, SkillIDs: body.SkillIDs,
+		WebAccess: body.WebAccess,
 	})
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
@@ -176,8 +198,9 @@ func (s *Server) handleAdminChatCreateSession(w http.ResponseWriter, r *http.Req
 	}
 	s.audit(r.Context(), user.Username, "chat.session_create", "chat_session", session.ID,
 		map[string]any{"model": session.Model, "account_id": session.AccountID,
-			"mcp_token_id": session.MCPTokenID, "write_mode": session.WriteMode}, "ok")
-	writeJSON(w, http.StatusCreated, chatSessionJSON(session, true))
+			"mcp_token_id": session.MCPTokenID, "write_mode": session.WriteMode,
+			"web_access": session.WebAccess}, "ok")
+	writeJSON(w, http.StatusCreated, s.chatSessionPayload(session, true))
 }
 
 func (s *Server) handleAdminChatGetSession(w http.ResponseWriter, r *http.Request) {
@@ -190,7 +213,7 @@ func (s *Server) handleAdminChatGetSession(w http.ResponseWriter, r *http.Reques
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	payload := chatSessionJSON(detail.Session, true)
+	payload := s.chatSessionPayload(detail.Session, true)
 	payload["messages"] = chatMessagesJSON(detail.Messages, detail.Usage)
 	payload["tool_calls"] = chatToolCallsJSON(detail.ToolCalls)
 	payload["skills"] = chatSkillsJSON(detail.Skills)
@@ -209,15 +232,20 @@ func (s *Server) handleAdminChatUpdateSession(w http.ResponseWriter, r *http.Req
 	session, err := s.chat.UpdateSession(r.Context(), user.ID, user.Role, r.PathValue("id"), chat.SessionInput{
 		Title: body.Title, Model: body.Model, AccountID: body.AccountID,
 		APIKeyID: body.APIKeyID, MCPTokenID: body.MCPTokenID, SkillIDs: body.SkillIDs,
+		WebAccess: body.WebAccess,
 	})
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
+	// The audit row records the switch and the binding, never a search query or a fetched
+	// URL: those live in the conversation's own tool calls, which is where a reviewer looks
+	// for them (M73 D6).
 	s.audit(r.Context(), user.Username, "chat.session_update", "chat_session", session.ID,
 		map[string]any{"model": session.Model, "account_id": session.AccountID,
-			"mcp_token_id": session.MCPTokenID, "write_mode": session.WriteMode}, "ok")
-	writeJSON(w, http.StatusOK, chatSessionJSON(session, true))
+			"mcp_token_id": session.MCPTokenID, "write_mode": session.WriteMode,
+			"web_access": session.WebAccess}, "ok")
+	writeJSON(w, http.StatusOK, s.chatSessionPayload(session, true))
 }
 
 func (s *Server) handleAdminChatDeleteSession(w http.ResponseWriter, r *http.Request) {
@@ -571,6 +599,22 @@ func (s *Server) handleAdminChatSkillDraft(w http.ResponseWriter, r *http.Reques
 // rendering
 // ---------------------------------------------------------------------------
 
+// chatSessionPayload renders one session for the console.
+//
+// Beyond the session's own fields it carries the two deployment-level facts the console needs to
+// be honest about the web switch: whether this deployment can serve the web tools at all, and
+// which search backend is behind them. No credential and no query text is involved — the
+// provider name is a configuration value the operator already knows.
+func (s *Server) chatSessionPayload(session *domain.ChatSession, detail bool) map[string]any {
+	out := chatSessionJSON(session, detail)
+	available, provider := s.webAccessFacts()
+	out["web_access_available"] = available
+	if provider != "" {
+		out["web_access_provider"] = provider
+	}
+	return out
+}
+
 func chatSessionJSON(session *domain.ChatSession, detail bool) map[string]any {
 	if session == nil {
 		return map[string]any{}
@@ -579,6 +623,7 @@ func chatSessionJSON(session *domain.ChatSession, detail bool) map[string]any {
 		"id": session.ID, "title": session.Title, "model": session.Model,
 		"account_id": session.AccountID, "api_key_id": session.APIKeyID,
 		"write_mode": session.WriteMode, "skill_ids": session.SkillIDs,
+		"web_access":    session.WebAccess,
 		"message_count": session.MessageCount, "status": session.Status,
 		"tokens_in": session.TokensIn, "tokens_out": session.TokensOut,
 		"tokens_reasoning": session.Reasoning, "owner": session.OwnerName,

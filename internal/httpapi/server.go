@@ -32,6 +32,7 @@ import (
 	"github.com/winger/ai-gateway/internal/runtime"
 	"github.com/winger/ai-gateway/internal/store"
 	"github.com/winger/ai-gateway/internal/usage"
+	"github.com/winger/ai-gateway/internal/webaccess"
 )
 
 // AdminService is the management authentication port.
@@ -138,6 +139,11 @@ type Deps struct {
 	ChatStore chat.Store
 	// Chat overrides the built-in chat service (tests drive the handlers with a fake).
 	Chat ChatService
+	// WebAccess is the console's internet access client (M73): the search backend and the page
+	// fetcher behind the web_search / web_fetch tools. The composition root builds it, so a
+	// misconfigured backend fails start-up instead of surfacing as "the model found nothing";
+	// nil means this deployment does not offer the tools at all.
+	WebAccess *webaccess.Client
 	// The resource ports below are one narrow interface per resource family; a nil
 	// port disables just that family with a 501 instead of breaking the server.
 	Accounts      AccountAdmin

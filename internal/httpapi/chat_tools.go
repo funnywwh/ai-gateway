@@ -65,6 +65,9 @@ type chatTools struct {
 	s     *Server
 	token mcpsrv.PrincipalLookup
 	log   *slog.Logger
+	// web is the console's internet access (M73): nil when the deployment has no search
+	// backend configured, in which case the web tools do not exist at all.
+	web *webTools
 }
 
 // principal resolves the token a conversation is bound to, and refuses one that has stopped
@@ -120,11 +123,16 @@ func (t *chatTools) warn(msg string, args ...any) {
 // endpoint would actually accept.
 func (t *chatTools) List(access chat.Access) []chat.Tool {
 	ctx := context.Background()
+	// The web tools are not management tools and need no MCP token, so they are listed
+	// independently of the block below: a conversation that has internet access switched on
+	// keeps searching even when its token was revoked. Everything else still requires the
+	// token, because everything else acts on this gateway.
+	web := t.webToolDefs(access)
 	principal, err := t.principal(ctx, access)
 	if err != nil {
-		// No usable token means no tools, which is the honest answer; the failure itself is
-		// reported when the model tries to call something.
-		return nil
+		// No usable token means no management tools, which is the honest answer; the failure
+		// itself is reported when the model tries to call something.
+		return web
 	}
 	resp, err := t.exchange(ctx, principal, "tools/list", nil)
 	if err != nil {
@@ -174,19 +182,35 @@ func (t *chatTools) List(access chat.Access) []chat.Tool {
 		}
 		out = append(out, chat.Tool{Name: tool.Name, Description: tool.Description, Schema: schema})
 	}
-	return out
+	return append(out, web...)
+}
+
+// webToolDefs renders the web tools for one access context, or nothing when either switch is
+// off. Both are required: the deployment's switch says the gateway has a backend, the session's
+// says this conversation may use it.
+func (t *chatTools) webToolDefs(access chat.Access) []chat.Tool {
+	if !access.WebAccess {
+		return nil
+	}
+	return t.web.webToolDefs()
 }
 
 // Call runs one tool through POST /mcp.
 func (t *chatTools) Call(ctx context.Context, access chat.Access, name string, args map[string]any) (chat.ToolResult, error) {
+	if args == nil {
+		args = map[string]any{}
+	}
+	// Web tools are dispatched before anything else, and before the name rewriting below: they
+	// are not endpoints, so routing them through admin_request would answer "unknown endpoint".
+	// They also need no MCP token, which is the whole point of keeping them separate.
+	if name == toolWebSearch || name == toolWebFetch {
+		return t.callWebTool(ctx, access, name, args), nil
+	}
 	principal, err := t.principal(ctx, access)
 	if err != nil {
 		// A binding problem is an answer the operator needs to see, not a silent failure of
 		// the whole turn.
 		return chat.ToolResult{Value: err.Error(), IsError: true}, nil
-	}
-	if args == nil {
-		args = map[string]any{}
 	}
 	if name == toolCreateSkill {
 		return t.createSkillDraft(access, args)
