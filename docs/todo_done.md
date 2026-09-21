@@ -4825,7 +4825,16 @@ dshgw 审计 `login_key_selected`；`POST /v1/dshgw/authorize` 由 `actor=dshgw-
       （选人弹窗先弹框 + 进度 + 刷新/重试）、`scripts/ui-harness/README.md`（视图数 30、org-bind 与
       M72 后续断言的说明）。
 
-**验证**（自动化，工作区 `/home/winger/work/ai_gateway-orgui`，分支 `feat/org-ui-tables-and-pickers`）：
+**部署**（2026-09-21，本机 `:8088`）：`make build`（控制台资源压缩内嵌）+
+`systemctl --user restart aigw-local.service`；`/version` = `3.2.0` / **`d655c0e`**、`ui: minified`
+`ui_encoding: gzip`，`/admin/ui/` 与 `/healthz` 均 200，`dshgw-verify` active；`Accept-Encoding: gzip`
+取回控制台资源后确认新模块在线（`org.js` 有 `org-member-table`、`org_assign.js` 有 `openOrgPicker`、
+`account_actions.js` 有 `createAccount`）。浏览器需要**硬刷新**（静态资源 `max-age=300`），
+人工走查条目留在 `docs/TODO.md`。
+
+**验证**（自动化，工作区 `/home/winger/work/ai_gateway-orgui`，分支 `feat/org-ui-tables-and-pickers`，
+已 `--ff-only` 合入 `main`：`4e0035f` / `3c46830` / `d655c0e`，合并后主检出复跑 ui-base、go test 与
+organize 六个视图全绿）：
 `make ui-base` 全绿（含新增 `org_assign_test.mjs`）；`scripts/ui-harness/run.sh` 全 **32** 个视图通过（新增 `org-bind`；另两个是 M73 的 `chatWeb`/`chatWebOff`）；
 `go test ./internal/webui/...` 全绿（`pinyin_test.go` 钉的拼音接线与 `embed_test.go` 钉的控制台资源
 都还在）。
