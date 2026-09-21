@@ -386,7 +386,7 @@ def main() -> int:
             raise AssertionError(f"unexpected filesystem type {alias_fstype}")
         if (alias_mountpoint / "marker.txt").read_text(encoding="utf-8") != "from the remote host\n":
             raise AssertionError("reading through the alias mount did not reach the remote file")
-        note(f"an alias from the account's own config ({alias_mountpoint.parent.parent.name}:e2e-seed) mounts the same remote directory")
+        note("an alias from the account's own config (e2e-seed) mounts the same remote directory")
 
         # ── the decisive check: is the mount visible INSIDE the sandbox? ──────────────────
         printed = run([args.dshgw, "--config", str(config_path), "sandbox-exec", "--print", tenant], cwd=str(REPO))
