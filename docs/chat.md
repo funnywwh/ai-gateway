@@ -436,6 +436,14 @@ go test ./internal/mcpsrv/ ./internal/httpapi/     # 工具说明完整性 + 价
 
 `freshness`（时间范围）在 `bing` 上会被忽略，工具结果里会说明。
 
+`bing` 是唯一靠**解析别人页面**的后端，所以它随时可能因为对方改版而失效（真机实测过：页面上
+`<li>` 大量不闭合，按嵌套深度配对会把整页并成一条结果）。要复检它现在还准不准，跑一次联网的
+实况测试——默认跳过，只有显式打开才会出网：
+
+```
+GW_WEBACCESS_LIVE=1 go test ./internal/webaccess/ -run TestLiveSearchAndFetch -v
+```
+
 ### 安全边界（默认值就是安全值）
 
 - **只允许公网 http/https**：内网、回环、链路本地、CGNAT、保留地址与 IPv6 等价地址一律拒绝，

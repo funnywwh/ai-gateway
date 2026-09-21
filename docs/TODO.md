@@ -842,6 +842,9 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
       生产建议 `bocha`（中文，需密钥）或自建 `searxng`（实例需开启 `format: json`）
 - [ ] **给账号补模型授权**（与 M72 同一条）：本部署 `auth.default_grant: none`，控制台账号多数没有
       模型授权，联网问题会因为「没有可用模型」而问不出来——先按 M72 的方式补授权
+- [ ] **`bing` 后端的结构漂移要靠人复检**：它是唯一解析别人页面的后端（本机验收用它，因为免密钥），
+      复检命令是 `GW_WEBACCESS_LIVE=1 go test ./internal/webaccess/ -run TestLiveSearchAndFetch -v`
+      （默认跳过、会真出网）；2026-09-21 首跑就发现"九条结果并成一条"，已修，但下一次改版仍只能靠它发现
 - [ ] 未做（明确记下）：上游原生 `web_search` 透传与「能力降级上报通道」（M19 观察项）；
       多编码（GBK）正文解码；阅读器级正文抽取、PDF/Office 解析、站点爬取、搜索缓存；
       联网调用不计费、不记账、不做域名黑白名单；检索词不落审计与日志（有测试钉住）；

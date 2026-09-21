@@ -68,63 +68,97 @@ func searchBing(ctx context.Context, c *Client, query string, count int, freshne
 	return result, nil
 }
 
-// bingResultBlocks returns the HTML of each organic result. Bing nests <li> elements inside a
-// result (breadcrumbs, related links), so blocks are delimited by the matching </li> rather
-// than by the next opening tag.
+// bingResultBlocks returns the HTML of each organic result.
+//
+// Blocks are delimited by the next *result marker*, never by a matching </li>. This is not a
+// style choice: Bing's result page leaves most of its list items unclosed — a real capture
+// (testdata/bing_search.html, 2026-09-21) has 23 "<li" against 3 "</li>" — and in HTML5 an
+// <li> is closed implicitly by the next one. Counting nesting depth over such a page merges
+// every result into a single block, which is exactly what happened the first time this ran
+// against the live site: nine results came back as one, with the rest of the page as its
+// snippet (see the live test in live_test.go, which is skipped unless GW_WEBACCESS_LIVE=1).
 func bingResultBlocks(body string) []string {
 	lower := strings.ToLower(body)
-	blocks := make([]string, 0, 16)
-	for i := 0; i < len(body); {
-		next := strings.Index(lower[i:], "<li")
+	start, end := bingResultsSpan(lower)
+	if start < 0 {
+		start, end = 0, len(body)
+	}
+	markers := make([]int, 0, 16)
+	for i := start; i < end; {
+		next := strings.Index(lower[i:end], "<li")
 		if next < 0 {
 			break
 		}
-		start := i + next
-		end := tagEnd(body, start)
-		if end < 0 {
+		at := i + next
+		tagClose := tagEnd(body, at)
+		if tagClose < 0 {
 			break
 		}
-		attrs := parseAttributes(body[start+1 : end])
-		if !hasClass(attrs["class"], "b_algo") {
-			i = end + 1
-			continue
+		if hasClass(parseAttributes(body[at+1 : tagClose])["class"], "b_algo") {
+			markers = append(markers, at)
 		}
-		blockEnd := matchingListEnd(lower, end+1)
-		if blockEnd < 0 {
-			blockEnd = len(body)
+		i = tagClose + 1
+	}
+	blocks := make([]string, 0, len(markers))
+	for i, at := range markers {
+		stop := end
+		if i+1 < len(markers) {
+			stop = markers[i+1]
 		}
-		blocks = append(blocks, body[start:blockEnd])
-		i = blockEnd
+		if stop > len(body) {
+			stop = len(body)
+		}
+		blocks = append(blocks, body[at:stop])
 	}
 	return blocks
 }
 
-// matchingListEnd finds the </li> that closes a list item opened before offset, honouring
-// nested <li> elements.
-func matchingListEnd(lower string, offset int) int {
+// bingResultsSpan locates the organic-results list, so the rails and sidebars — which reuse the
+// same result markup — cannot contribute items. Returns -1 when the page has no such list, in
+// which case the whole document is searched.
+func bingResultsSpan(lower string) (int, int) {
+	for i := 0; i < len(lower); {
+		next := strings.Index(lower[i:], "<ol")
+		if next < 0 {
+			return -1, -1
+		}
+		at := i + next
+		tagClose := tagEnd(lower, at)
+		if tagClose < 0 {
+			return -1, -1
+		}
+		attrs := parseAttributes(lower[at+1 : tagClose])
+		if attrs["id"] == "b_results" {
+			return at, olEnd(lower, tagClose+1)
+		}
+		i = tagClose + 1
+	}
+	return -1, -1
+}
+
+// olEnd finds the </ol> closing a list opened before offset, honouring nested lists. Unlike the
+// result items themselves, these containers are closed properly, so counting is safe here.
+func olEnd(lower string, offset int) int {
 	depth := 1
 	for i := offset; i < len(lower); {
-		next := strings.Index(lower[i:], "<li")
-		closeIdx := strings.Index(lower[i:], "</li")
-		if next < 0 && closeIdx < 0 {
-			return -1
-		}
+		open := strings.Index(lower[i:], "<ol")
+		closeIdx := strings.Index(lower[i:], "</ol")
 		switch {
-		case closeIdx >= 0 && (next < 0 || closeIdx < next):
+		case closeIdx >= 0 && (open < 0 || closeIdx < open):
 			depth--
 			i += closeIdx
 			if depth == 0 {
 				return i
 			}
-			i += len("</li")
-		default:
-			// A nested item may still be a self-closing or void-ish tag; treating every "<li"
-			// as an open item is the conservative reading.
+			i += len("</ol")
+		case open >= 0:
 			depth++
-			i += next + len("<li")
+			i += open + len("<ol")
+		default:
+			return len(lower)
 		}
 	}
-	return -1
+	return len(lower)
 }
 
 // hasClass reports whether a class attribute contains one token.
@@ -236,7 +270,14 @@ func bingCite(block string) string {
 		return ""
 	}
 	title := tidyTitle(extractHTML([]byte(block[end+1 : end+closeIdx])).Text)
-	return strings.ReplaceAll(title, " › ", "/")
+	title = strings.ReplaceAll(title, " › ", "/")
+	// A newer layout puts the whole URL in <cite> rather than "host › path" (and truncates it
+	// with an ellipsis when it is long, which is not something to show a model). The host is
+	// what a reader needs here; the full URL is already the item's URL.
+	if parsed, err := url.Parse(title); err == nil && parsed.Host != "" {
+		return parsed.Host
+	}
+	return title
 }
 
 // bingSnippet reads the first paragraph of the block. Bing puts the snippet in a <p> inside

@@ -192,8 +192,10 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (Page, error)
 - `search_tavily.go`：`POST {base|https://api.tavily.com}/search`，Bearer，body
   `{query,max_results,search_depth:"basic",include_answer:false[,time_range]}` → `results[]`。
 - `search_bing.go`：`GET {base|https://cn.bing.com}/search?q=&count=&setlang=zh-CN`，固定桌面 UA、
-  不带 Cookie/Referer，解析 `li.b_algo`（`<h2><a href>`、`<cite>`、`<p>`），并解码
-  `bing.com/ck/a?…&u=a1<base64url>` 形式的重定向 URL。
+  不带 Cookie/Referer，解析 `<ol id="b_results">` 里的 `li.b_algo`（`<h2><a href>`、`<cite>`、`<p>`），
+  并解码 `bing.com/ck/a?…&u=a1<base64url>` 形式的重定向 URL。**结果块的边界是下一个 `b_algo`
+  标记，不是配对的 `</li>`**：真实页面上 `<li` 有 23 个而 `</li>` 只有 3 个，HTML5 里 `<li>`
+  本来就是被下一个隐式闭合的，按嵌套深度配对会把整页并成一条结果（首版就是这么错的，见 §10）。
 - `freshness` 统一词表 `noLimit|oneDay|oneWeek|oneMonth|oneYear`；tavily/searxng 映射到
   `time_range`，bing 忽略并在结果的 `note` 里说明。
 - `extract.go`：`text/html`（及 `application/xhtml+xml`）走抽取器；`text/*`、`application/json`、
@@ -292,7 +294,11 @@ ALTER TABLE chat_sessions ADD COLUMN web_access INTEGER NOT NULL DEFAULT 0;
 - `internal/chat`：提示词联网段的开/关；`Access.WebAccess/TurnID` 透传到 `List`/`Call`。
 - `internal/httpapi`：工具面四组合（部署关；部署开+会话关；部署开+会话开+未绑定；+已绑定）、
   分派优先于 `admin_request` 重写、每轮限额、错误结果不失败本轮、PATCH 往返、审计不含检索词。
-- 界面：`scripts/ui-harness` 新增 `chatWeb` 视图（徽章、PATCH、复选框、工具中文名、hint）。
+- 界面：`scripts/ui-harness` 新增 `chatWeb` / `chatWebOff` 两个视图（徽章、PATCH 只发一个字段、
+  复选框、工具中文名、hint；以及"部署没配后端时连开关都不画"）。
+- 实况测试：`internal/webaccess/live_test.go`，`GW_WEBACCESS_LIVE=1` 才跑，默认跳过。它出去真搜
+  一次再真抓一次，专门盯 fixture 盯不到的东西——`bing` 的结果页今天还是不是这个结构。首版就是
+  在这条测试里暴露的（返回 1 条、snippet 是整页）。
 - 部署自查：`scripts/verify-m73.sh`（默认不产生模型调用；`RUN_TURN=1` 才跑一次真实联网问答）。
 
 ## 8. 依赖
@@ -327,5 +333,7 @@ ALTER TABLE chat_sessions ADD COLUMN web_access INTEGER NOT NULL DEFAULT 0;
 | 9 | `chatTools.Call` 对 web 工具**先于**参数默认化与令牌解析分发；`create_skill` 等不受影响 | web 工具不需要 MCP 令牌（D8），走 `admin_request` 改写会答"未知端点" | 令牌被撤销的会话仍能联网搜索（这是 D8 的本意）；名字不认识的 `web_*` 仍返回可读错误 |
 | 10 | 多做了三件设计里没写的小事：`label.field.field-inline` 的样式、`chatWeb`/`chatWebOff` 两个 harness 视图、`scripts/verify-m73.sh` | 勾选框在既有 `.field` 规则下会被撑成两行；开关"有/没有"两种部署形态必须真的在浏览器里分别断言；服务端那一半需要能在真机上反复验证 | 无行为差异，只是把"看起来对不对"和"服务端对不对"都变成可重复的检查 |
 | 11 | 审计行 `chat.session_create` / `chat.session_update` 增加一个 `web_access` 布尔 | 开关是权限相关动作，值得留痕 | 审计里只有布尔值：没有检索词、没有 URL、没有页面内容（D6） |
+| 12 | 结果块的切分改为"下一个 `b_algo` 标记"，并新增 `live_test.go`（默认跳过） | 设计里说"用 fixture 钉住 bing 的解析"，但 fixture 是**闭合标签**的干净片段，而真实页面有 23 个 `<li` 对 3 个 `</li>`：按嵌套深度配对时九条结果并成一条，整页成了它的 snippet | fixture 换成 2026-09-21 的真实抓取片段（含未闭合标签），并加一条显式断言；这条实况测试成为"对方改版了没有"的探针 |
+| 13 | `Item.Title` / `Item.Snippet` 加上 200 / 320 字的截断（所有后端共用），`<cite>` 是整条 URL 时只留 host | 上面那个缺陷的另一半：snippet 一旦吞掉整页就会原样进入提示词。`bing` 新布局的 `<cite>` 里是完整 URL（还被页面自己截断成 `…`），对模型没有额外信息 | 解析失手最坏只损失一行，不再是整个上下文；`Source` 变成可读的站点名 |
 
 设计里明确不做的（模型侧改写查询、reader-mode 正文抽取、结果缓存、读取 PDF、把联网暴露给 `/mcp` 与外部队列）实现时也没有做。

@@ -154,6 +154,16 @@ func (c *Client) Search(ctx context.Context, query string, count int, freshness 
 // to refuse a runaway prompt before it becomes an HTTP 414.
 const maxQueryRunes = 512
 
+// Bounds on one result's text, applied to every backend's items before they reach the model.
+// An API answers with a teaser, but the HTML backend can only be as precise as the page it
+// reads: when the parse misses, the fallback grabs "the text after the cite", and the first
+// version of it put a whole search page into one snippet — which then travelled into the
+// prompt. A cap makes that failure cost a truncated line instead of the entire context.
+const (
+	maxItemTitleRunes   = 200
+	maxItemSnippetRunes = 320
+)
+
 // normalizeFreshness accepts the shared vocabulary and rejects anything else, because a
 // silently ignored time range would look like "there is no recent news".
 func normalizeFreshness(raw string) (string, error) {
@@ -181,6 +191,8 @@ func dedupeItems(items []Item, limit int) []Item {
 		item.Snippet = strings.TrimSpace(item.Snippet)
 		item.Source = strings.TrimSpace(item.Source)
 		item.Published = strings.TrimSpace(item.Published)
+		item.Title = clipRunes(item.Title, maxItemTitleRunes)
+		item.Snippet = clipRunes(item.Snippet, maxItemSnippetRunes)
 		if item.URL == "" {
 			continue
 		}
@@ -341,6 +353,15 @@ func truncateUTF8(text string, limit int) (string, bool) {
 		cut = cut[:len(cut)-1]
 	}
 	return cut, true
+}
+
+// clipRunes bounds one field of a result. The ellipsis is part of the contract: a snippet that
+// stops mid-sentence without a mark reads like the page said that much and no more.
+func clipRunes(text string, limit int) string {
+	if limit <= 0 || utf8.RuneCountInString(text) <= limit {
+		return text
+	}
+	return string([]rune(text)[:limit]) + "…"
 }
 
 func joinNotes(existing, extra string) string {

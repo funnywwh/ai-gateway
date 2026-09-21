@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // newTestClient builds a client against a local test server. allowPrivate is on because the
@@ -295,6 +296,11 @@ func TestSearchReportsTimeouts(t *testing.T) {
 // TestBingSearchParsesACapturedResultPage pins the fallback backend against a real page
 // captured on 2026-09-21. When Bing changes its markup this test is the alarm, and the failure
 // message says what to do about it.
+//
+// The capture is the *unclosed* shape on purpose: the page has 23 "<li" against 3 "</li>", and
+// the first version of the parser — which walked nesting depth to find the matching </li> —
+// merged all three results into one on this exact page, with the rest of the document as the
+// snippet (found by the live test, not by the older fixture, whose tags happened to be closed).
 func TestBingSearchParsesACapturedResultPage(t *testing.T) {
 	var gotPath, gotQuery string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -305,22 +311,106 @@ func TestBingSearchParsesACapturedResultPage(t *testing.T) {
 	defer server.Close()
 	client := newTestClient(t, Config{Provider: ProviderBing, BaseURL: server.URL})
 
-	result, err := client.Search(context.Background(), "深度求索模型", 3, "")
+	result, err := client.Search(context.Background(), "DeepSeek API 模型价格", 3, "")
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 	if gotPath != "/search" || !strings.Contains(gotQuery, "count=3") || !strings.Contains(gotQuery, "setlang=zh-CN") {
 		t.Errorf("request = %s?%s", gotPath, gotQuery)
 	}
+	// Every result in the list is one item: nothing may merge into its neighbour, which is what
+	// the unclosed-list regression looked like (1 item instead of 3).
 	if len(result.Items) != 3 {
-		t.Fatalf("items = %+v", result.Items)
+		t.Fatalf("items = %d, want 3: %+v", len(result.Items), result.Items)
 	}
-	first := result.Items[0]
-	if first.Title == "" || first.URL != "https://www.deepin.org/" || first.Snippet == "" {
-		t.Errorf("first item = %+v", first)
+	want := []struct{ title, url, source string }{
+		{"杭州深度求索人工智能基础技术研究有限公司_百度百科", "https://baike.baidu.com/item/%E6%9D%AD%E5%B7%9E%E6%B7%B1%E5%BA%A6%E6%B1%82%E7%B4%A2%E4%BA%BA%E5%B7%A5%E6%99%BA%E8%83%BD%E5%9F%BA%E7%A1%80%E6%8A%80%E6%9C%AF%E7%A0%94%E7%A9%B6%E6%9C%89%E9%99%90%E5%85%AC%E5%8F%B8/64541110", "baike.baidu.com"},
+		{"DeepSeek | API Platform", "https://www.deepseek.com/en/platform/", "www.deepseek.com"},
+		{"DeepSeek App", "https://download.deepseek.com/", "download.deepseek.com"},
 	}
-	if first.Source != "https://www.deepin.org" {
-		t.Errorf("source = %q", first.Source)
+	for i, expected := range want {
+		item := result.Items[i]
+		if item.Title != expected.title || item.URL != expected.url {
+			t.Errorf("item %d = %q / %q, want %q / %q", i+1, item.Title, item.URL, expected.title, expected.url)
+		}
+		if item.Snippet == "" {
+			t.Errorf("item %d has no snippet: %+v", i+1, item)
+		}
+		if item.Source != expected.source {
+			t.Errorf("item %d source = %q, want %q", i+1, item.Source, expected.source)
+		}
+	}
+	// A snippet that swallowed the rest of the page is the other half of that regression: the
+	// cap keeps it a teaser whatever the markup does.
+	for i, item := range result.Items {
+		if utf8.RuneCountInString(item.Snippet) > maxItemSnippetRunes+1 {
+			t.Errorf("item %d snippet has %d runes (cap %d)", i+1, utf8.RuneCountInString(item.Snippet), maxItemSnippetRunes)
+		}
+	}
+	if strings.Count(result.Items[0].Snippet, "deepseek.com") > 1 {
+		t.Errorf("item 1 snippet leaked later results: %q", result.Items[0].Snippet)
+	}
+	// The page's own chrome must not become a result.
+	for _, item := range result.Items {
+		if strings.Contains(item.URL, "bing.com") {
+			t.Errorf("a Bing-internal URL was reported as a source: %+v", item)
+		}
+	}
+}
+
+// TestBingSearchSplitsResultsWithUnclosedListItems states the markup rule on its own, so a
+// future rewrite of the parser fails here with the reason instead of only in the fixture test.
+func TestBingSearchSplitsResultsWithUnclosedListItems(t *testing.T) {
+	page := `<ol id="b_results">` +
+		`<li class="b_algo"><h2><a href="https://a.example/">A</a></h2><p>one</p>` +
+		`<ul><li>nested</li></ul>` + // a nested item inside an *unclosed* result
+		`<li class="b_algo"><h2><a href="https://b.example/">B</a></h2>` +
+		`<li class="b_algo"><h2><a href="https://c.example/">C</a></h2><p>three</p>` +
+		`</ol>`
+	blocks := bingResultBlocks(page)
+	if len(blocks) != 3 {
+		t.Fatalf("blocks = %d, want 3: %+v", len(blocks), blocks)
+	}
+	for i, want := range []string{"https://a.example/", "https://b.example/", "https://c.example/"} {
+		item, ok := bingItem(blocks[i])
+		if !ok {
+			t.Fatalf("block %d did not parse: %q", i, blocks[i])
+		}
+		if item.URL != want {
+			t.Errorf("block %d url = %q, want %q", i, item.URL, want)
+		}
+	}
+}
+
+// TestBingResultBlocksStayInsideTheResultsList: the sidebars and the rail reuse the result
+// markup, so the block scan has to be bounded by <ol id="b_results">.
+func TestBingResultBlocksStayInsideTheResultsList(t *testing.T) {
+	page := `<html><body><ol id="b_context"><li class="b_algo"><h2><a href="https://rail.example/">rail</a></h2></li></ol>` +
+		`<ol id="b_results"><li class="b_algo"><h2><a href="https://real.example/">real</a></h2></li></ol>` +
+		`<ol id="b_dynRail"><li class="b_algo"><h2><a href="https://dyn.example/">dyn</a></h2></li></ol></body></html>`
+	blocks := bingResultBlocks(page)
+	if len(blocks) != 1 {
+		t.Fatalf("blocks = %d, want 1: %+v", len(blocks), blocks)
+	}
+	item, ok := bingItem(blocks[0])
+	if !ok || item.URL != "https://real.example/" {
+		t.Errorf("item = %+v (ok=%v)", item, ok)
+	}
+}
+
+// TestClipRunesKeepsASnippetATeaser: the cap is what stops a mis-parse from pouring a page into
+// the prompt, and it must not cut a multi-byte character in half.
+func TestClipRunesKeepsASnippetATeaser(t *testing.T) {
+	long := strings.Repeat("字", maxItemSnippetRunes+50)
+	clipped := clipRunes(long, maxItemSnippetRunes)
+	if utf8.RuneCountInString(clipped) != maxItemSnippetRunes+1 || !strings.HasSuffix(clipped, "…") {
+		t.Errorf("clipped length = %d (tail %q)", utf8.RuneCountInString(clipped), clipped[len(clipped)-6:])
+	}
+	if !utf8.ValidString(clipped) {
+		t.Error("clipping produced invalid UTF-8")
+	}
+	if short := clipRunes("短", maxItemSnippetRunes); short != "短" {
+		t.Errorf("clipRunes changed a short string: %q", short)
 	}
 }
 
