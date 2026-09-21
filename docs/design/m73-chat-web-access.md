@@ -341,6 +341,7 @@ ALTER TABLE chat_sessions ADD COLUMN web_access INTEGER NOT NULL DEFAULT 0;
 | 10 | 多做了三件设计里没写的小事：`label.field.field-inline` 的样式、`chatWeb`/`chatWebOff` 两个 harness 视图、`scripts/verify-m73.sh` | 勾选框在既有 `.field` 规则下会被撑成两行；开关"有/没有"两种部署形态必须真的在浏览器里分别断言；服务端那一半需要能在真机上反复验证 | 无行为差异，只是把"看起来对不对"和"服务端对不对"都变成可重复的检查 |
 | 11 | 审计行 `chat.session_create` / `chat.session_update` 增加一个 `web_access` 布尔 | 开关是权限相关动作，值得留痕 | 审计里只有布尔值：没有检索词、没有 URL、没有页面内容（D6） |
 | 12 | 结果块的切分改为"下一个 `b_algo` 标记"，并新增 `live_test.go`（默认跳过） | 设计里说"用 fixture 钉住 bing 的解析"，但 fixture 是**闭合标签**的干净片段，而真实页面有 23 个 `<li` 对 3 个 `</li>`：按嵌套深度配对时九条结果并成一条，整页成了它的 snippet | fixture 换成 2026-09-21 的真实抓取片段（含未闭合标签），并加一条显式断言；这条实况测试成为"对方改版了没有"的探针 |
+| 13a | 本机 `config.yaml` 打开联网（`provider: bing`）；真机验收走**临时实例**（:8099、共用同一个库）而不是 8088 | 8088 上跑的是旧二进制，且控制台资源内嵌在二进制里，重启只能由人在宿主终端做；而验收又必须在启用联网的实例上做 | 服务端那一半已在真机验证（`scripts/verify-m73.sh` 16 通过 / 0 失败 / 1 跳过，其中 `RUN_TURN=1` 真实一轮由模型自己发起 `web_search` + 两次 `web_fetch` 并带链接作答）；剩下只有控制台里点一下角标的人工走查，见 docs/TODO.md 的 M73 小节 |
 | 13 | `Item.Title` / `Item.Snippet` 加上 200 / 320 字的截断（所有后端共用），`<cite>` 是整条 URL 时只留 host | 上面那个缺陷的另一半：snippet 一旦吞掉整页就会原样进入提示词。`bing` 新布局的 `<cite>` 里是完整 URL（还被页面自己截断成 `…`），对模型没有额外信息 | 解析失手最坏只损失一行，不再是整个上下文；`Source` 变成可读的站点名 |
 
 设计里明确不做的（模型侧改写查询、reader-mode 正文抽取、结果缓存、读取 PDF、把联网暴露给 `/mcp` 与外部队列）实现时也没有做。

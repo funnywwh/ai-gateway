@@ -102,27 +102,33 @@ else
   skip '本部署没有启用联网（chat.web_access.enabled=false）：只验证「关掉时明确拒绝」，其余检查跳过'
 fi
 
-# ── 3. 找一个可计费的账户 + Key（只用现有的，不新建） ─────────────────────────
+# ── 3. 找一个真的能路由模型的账户 + Key（只用现有的，不新建） ────────────────
 echo
-echo "3) 找一个账户与它的 API Key（不新建、不花钱）"
+echo "3) 找一个能路由模型的账户与 API Key（不新建、不花钱）"
+#
+# 「第一个 active Key」是不够的：本机的 admin 账户里，排在前面的 Key 属于没有模型授权的账号
+# （/chat/models 返回空数组），照第一个挑会在第 4 步直接放弃。这里逐个试，直到有 Key 能列出
+# 模型——这只读地翻一遍 /chat/models，不创建任何东西。
 KEYS=$(curl -s -b "$JAR" "$BASE/admin/api/v1/keys?limit=200")
-ACCID=$(printf '%s' "$KEYS" | python3 -c '
+ACCID=""; KEYID=""; MODEL=""
+while read -r acc key; do
+  [ -n "$acc" ] || continue
+  candidate=$(get "$(curl -s -b "$JAR" "$BASE/admin/api/v1/chat/models?account_id=$acc&api_key_id=$key")" "data.0.id")
+  if [ -n "$candidate" ]; then
+    ACCID="$acc"; KEYID="$key"; MODEL="$candidate"
+    break
+  fi
+done < <(printf '%s' "$KEYS" | python3 -c '
 import json,sys
 for row in json.load(sys.stdin).get("data", []):
     if row.get("status") == "active" and row.get("account_id"):
-        print(row["account_id"]); break
+        print(row["account_id"], row["id"])
 ')
-KEYID=$(printf '%s' "$KEYS" | python3 -c '
-import json,sys
-for row in json.load(sys.stdin).get("data", []):
-    if row.get("status") == "active" and row.get("account_id"):
-        print(row["id"]); break
-')
-if [ -z "$ACCID" ] || [ -z "$KEYID" ]; then
-  bad "没有可用的 active Key；请先在控制台建一个账户和 Key"
+if [ -z "$MODEL" ]; then
+  bad "没有任何 active Key 能列出可路由的模型；请先给某个账号授权一个模型"
   exit 1
 fi
-ok "使用账户 #$ACCID 与 Key #$KEYID"
+ok "使用账户 #$ACCID 与 Key #$KEYID（模型 $MODEL）"
 
 # ── 4. 临时令牌与会话 ───────────────────────────────────────────────────────
 echo
@@ -132,12 +138,6 @@ TOKRESP=$(curl -s -b "$JAR" -H 'Content-Type: application/json' \
   "$BASE/admin/api/v1/mcp-tokens")
 TOKID=$(get "$TOKRESP" "id")
 [ -n "$TOKID" ] && ok "临时令牌 #$TOKID（scope=query，只读）" || { bad "令牌签发失败"; exit 1; }
-
-MODEL=$(get "$(curl -s -b "$JAR" "$BASE/admin/api/v1/chat/models?account_id=$ACCID&api_key_id=$KEYID")" "data.0.id")
-if [ -z "$MODEL" ]; then
-  bad "该 Key 没有可路由的模型；请先给它授权一个模型或换一个 Key"
-  exit 1
-fi
 info "使用模型 $MODEL"
 SESSRESP=$(curl -s -b "$JAR" -H 'Content-Type: application/json' \
   -d "{\"title\":\"M73 验证\",\"model\":\"$MODEL\",\"account_id\":$ACCID,\"api_key_id\":$KEYID,\"mcp_token_id\":$TOKID}" \
@@ -223,20 +223,28 @@ if [ "$RUN_TURN" = "1" ]; then
     TURN=$(curl -s -b "$JAR" -H 'Content-Type: application/json' \
       -d "{\"turn_id\":\"m73-$(rand_hex | head -c 12)\",\"content\":\"请联网搜索 deepseek 官方 API 文档里的模型价格页，给出链接和输入价格。\"}" \
       "$BASE/admin/api/v1/chat/sessions/$SID/turns")
-    if printf '%s' "$TURN" | grep -q 'web_search'; then
-      ok "这一轮确实调用了 web_search"
+    # 用 case 而不是 `printf | grep -q`：本脚本开了 pipefail，grep -q 命中后立刻退出会让 printf
+    # 收到 SIGPIPE（退出码 141），于是"找到了"被判成"没找到"——这两个断言第一次跑就是被这个坑
+    # 误报成失败的，而当时这一轮其实搜了也抓了。
+    used=""
+    case "$TURN" in *'"name":"web_search"'*) used="$used web_search";; esac
+    case "$TURN" in *'"name":"web_fetch"'*) used="$used web_fetch";; esac
+    if [ -n "$used" ]; then
+      ok "这一轮真的用了联网工具：$used"
     else
-      bad "这一轮没有看到 web_search（模型可能没去搜，或工具没进工具面）"
+      bad "这一轮没有任何联网工具调用（模型没去搜，或工具没进工具面）"
       info "回答片段：$(printf '%s' "$TURN" | tail -c 300)"
     fi
-    if printf '%s' "$TURN" | grep -Eq 'https?://'; then
-      ok "回答里出现了链接"
-    else
-      bad "回答里没有链接 —— 引用规则可能没进提示"
-    fi
+    case "$TURN" in
+      *'https://'*|*'http://'*) ok "回答里出现了链接";;
+      *) bad "回答里没有链接 —— 引用规则可能没进提示";;
+    esac
     CALLS=$(curl -s -b "$JAR" "$BASE/admin/api/v1/chat/sessions/$SID")
-    printf '%s' "$CALLS" | grep -q '"name":"web_search"' && ok "工具调用已记入会话记录" \
-      || info "会话记录里没有 web_search 条目（控制台仍可人工确认）"
+    case "$CALLS" in
+      *'"name":"web_search"'*|*'"name":"web_fetch"'*)
+        ok "工具调用已记入会话记录（控制台会把它画成工具卡片）";;
+      *) bad "会话记录里没有联网工具调用条目";;
+    esac
   fi
 else
   skip "RUN_TURN=1 才会跑真实提问（会计费并消耗搜索额度）"

@@ -829,19 +829,31 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 ## M73 控制台智能问答的联网能力（`web_search` / `web_fetch`）
 
 设计：`docs/design/m73-chat-web-access.md`；规格：`docs/chat.md` §12（使用、后端选择、安全边界、限额）、
-§9（配置）、§11（排障）；配置清单：`config.example.yaml` 的 `chat.web_access`。
+§9（配置）、§11（排障）；配置清单：`config.example.yaml` 与 `config.yaml` 的 `chat.web_access`。
 用户决策（2026-09-21）：① 四个后端都要（searxng / bocha / tavily / bing）；② 部署级 + 会话级双层开关；
 ③ 搜索 **+ 抓取网页正文**；④ **只给控制台智能问答**，不开放给外部 MCP 客户端。
+用户决策（2026-09-21，验收时追加）：⑤ 本机 `config.yaml` 打开 `chat.web_access`（`provider: bing`，
+免密钥、只适合验证链路）。
 
-- [ ] **人工走查（宿主终端）**：`make build` 后运行中的 8088 仍是旧二进制（控制台资源内嵌在二进制里），
-      需在启动它的终端执行 `./scripts/local-run.sh restart`；随后硬刷新
-      `http://127.0.0.1:8088/admin/ui/#/chat`，打开会话的联网开关，问一个需要外部信息的问题，
-      确认工具卡片（联网搜索 / 抓取网页）与回答里的来源 URL 都对
-- [ ] **本部署联网后端尚未配置**：`config.yaml` 的 `chat.web_access` 还没打开（默认 `enabled: false`）。
-      要真机上跑通，先选一个后端：免密钥用 `provider: bing`（只适合验证链路），
-      生产建议 `bocha`（中文，需密钥）或自建 `searxng`（实例需开启 `format: json`）
-- [ ] **给账号补模型授权**（与 M72 同一条）：本部署 `auth.default_grant: none`，控制台账号多数没有
+真机验收（2026-09-21，临时实例 :8099 跑新二进制、共用同一个 `data/aigw-local.db`）：
+
+- `scripts/verify-m73.sh`：**通过 16 / 失败 0 / 跳过 1**（跳过的那条是"搜索密钥不出现在响应里"，
+  因为 `bing` 本来就不需要密钥；用 bocha/tavily 时把 `GW_CHAT_WEB_API_KEY` 传进去即可验证）。
+  覆盖：部署事实字段、开关往返与落库、"只改标题不会关掉联网"、归属隔离 404。
+- `RUN_TURN=1` 的真实一轮（账户 #4 / Key #8 / `deepseek-flash`）：模型**先 `web_search` 再两次
+  `web_fetch`**，自己抓到了 `api-docs.deepseek.com` 的模型价格页，回答里带中英文两条链接与输入价格表，
+  并主动说明"网页正文只作资料看待"（§12 的第 4 条防注入规则生效）；费用记入请求日志，工具调用记入
+  `chat_tool_calls`（控制台会画成工具卡片）。
+- 部署产物自证：:8099 服务的 `js/pages/chat.js` 里能读到联网角标文案与工具中文名，`app.css` 里有
+  `field-inline` 规则（内嵌资源确属新版本）。
+
+- [ ] **人工走查（宿主终端，需要你来做）**：8088 上跑的还是旧二进制，且控制台资源内嵌在二进制里，
+      所以要在启动它的终端执行 `./scripts/local-run.sh restart`（`config.yaml` 的联网开关已经打开）。
+      随后硬刷新 `http://127.0.0.1:8088/admin/ui/#/chat`，点开会话头部的「联网：已关闭 · 开启」，
+      问一个需要外部信息的问题，确认工具卡片显示「联网搜索 / 抓取网页」、回答里的来源 URL 可点。
+- [ ] **给账号补模型授权**（与 M72 同一条）：本部署 `auth.default_grant: none`，多数控制台账号没有
       模型授权，联网问题会因为「没有可用模型」而问不出来——先按 M72 的方式补授权
+      （验收时用的是账户 #4 的 Key #8，它已授权 deepseek 系列）
 - [ ] **`bing` 后端的结构漂移要靠人复检**：它是唯一解析别人页面的后端（本机验收用它，因为免密钥），
       复检命令是 `GW_WEBACCESS_LIVE=1 go test ./internal/webaccess/ -run TestLiveSearchAndFetch -v`
       （默认跳过、会真出网）；2026-09-21 首跑就发现"九条结果并成一条"，已修，但下一次改版仍只能靠它发现
