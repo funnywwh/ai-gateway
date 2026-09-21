@@ -56,19 +56,40 @@ window.fetch = async (url, options) => {
     return ok({ data: ORG.nodes, count: ORG.nodes.length, total: ORG.nodes.length, limit: 1000, offset: 0, has_more: false });
   }
   if (path === '/accounts' && method === 'GET') {
+    // M72 的字段都在这里：DSH 三态（dsh_enabled / dsh_disabled_at / dsh_effective）、账号级飞书身份、
+    // Key 计数。人员行把这三件事各画一个徽标，缺一个字段那条断言就会抓到。
     const data = [
-      { id: 1, name: 'acme', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [3], org_nodes: [{ id: 3, name: '平台组', path: '总部/研发部/平台组' }], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0 },
-      { id: 2, name: 'root-acct', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [1], org_nodes: [{ id: 1, name: '总部', path: '总部' }], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0 },
+      { id: 1, name: 'acme', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [3], org_nodes: [{ id: 3, name: '平台组', path: '总部/研发部/平台组' }], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
+        dsh_enabled: true, dsh_tenant: 'dsh-acme', feishu: { bound: true, open_id: 'ou_acme', name: '李智超', bound_by: 'admin', bound_at: '2026-09-22T02:00:00Z' }, key_count: 3, active_key_count: 2 },
+      { id: 2, name: 'root-acct', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [1], org_nodes: [{ id: 1, name: '总部', path: '总部' }], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
+        dsh_enabled: false, dsh_tenant: 'dsh-root', dsh_disabled_at: '2026-09-21T10:00:00Z', feishu: { bound: false }, key_count: 1, active_key_count: 0 },
       // 中文名：拼音过滤与"选中置顶"都要有中文对象才测得出来。
-      { id: 3, name: '张三', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0 },
-      { id: 4, name: '李四', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0 },
+      { id: 3, name: '张三', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
+        dsh_enabled: false, dsh_effective: true, feishu: { bound: false }, key_count: 0, active_key_count: 0 },
+      { id: 4, name: '李四', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
+        dsh_enabled: false, feishu: { bound: false }, key_count: 1, active_key_count: 1 },
       // 多音字：长 有 chang/zhang 两读，两种拼法都要能搜到。
-      { id: 5, name: '长伟', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0 },
+      { id: 5, name: '长伟', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
+        dsh_enabled: false, feishu: { bound: false }, key_count: 0, active_key_count: 0 },
       // 中英混合：候选串必须同时包含"原样字符"与"拼音"两条路，否则 研发-张三 这类名字
       // 只有整串照打才搜得到。
-      { id: 6, name: 'dev-张三', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0 },
+      { id: 6, name: 'dev-张三', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
+        dsh_enabled: false, feishu: { bound: false }, key_count: 0, active_key_count: 0 },
     ];
     return ok({ data, count: 2, total: 2, limit: 1000, offset: 0, has_more: false });
+  }
+  // The expanded person row asks for that account's keys (M72). The list carries a worker key on
+  // purpose: it must be labelled as gateway plumbing rather than offered as a person's key.
+  if (path === '/keys' && method === 'GET') {
+    const accountID = Number((target.split('account_id=')[1] || '0').split('&')[0]);
+    if (accountID === 1) {
+      return ok({ data: [
+        { id: 11, account_id: 1, name: 'dshgw-dsh-acme-ab12', key_prefix: 'sk-gw-worker', status: 'active', tags: [], account_tags: [], effective_tags: [], record_input_mode: 'user', policy: {}, last_used_at: '2026-09-22T01:00:00Z', feishu: { bound: false } },
+        { id: 12, account_id: 1, name: 'laptop', key_prefix: 'sk-gw-laptop', status: 'active', tags: [], account_tags: [], effective_tags: [], record_input_mode: 'user', policy: {}, last_used_at: '2026-09-21T09:00:00Z', feishu: { bound: false } },
+        { id: 13, account_id: 1, name: 'phone', key_prefix: 'sk-gw-phone', status: 'suspended', tags: [], account_tags: [], effective_tags: [], record_input_mode: 'user', policy: {}, feishu: { bound: false } },
+      ], count: 3, total: 3, limit: 100, offset: 0, has_more: false });
+    }
+    return ok({ data: [], count: 0, total: 0, limit: 100, offset: 0, has_more: false });
   }
   const memberMatch = path.match(/^\/org\/nodes\/(\d+)\/accounts$/);
   if (memberMatch) {
@@ -267,7 +288,9 @@ try {
     await typeSearch('acme');
     expectNames('englishStillMatches', 'acme', ['acme']);
     await typeSearch('李');
-    expectNames('literalChineseStillMatches', '李', ['李四']);
+    // M72：人员行的过滤同时匹配账号名与飞书姓名，所以 '李' 现在还会命中 acme（它的飞书身份是
+    // 李智超）。这条断言正是这个新行为——按人找人，而不是只能按账号名找。
+    expectNames('literalChineseStillMatches', '李', ['acme', '李四']);
     await typeSearch('dev');
     expectNames('mixedEnglishPart', 'dev', ['dev-张三']);
     await typeSearch('devzs');
@@ -353,6 +376,57 @@ try {
     checks.deleteCascadeInUrl = !!del && del.includes('cascade=true');
     checks.deletedNodeGone = !labels(document.getElementById('page')).includes('研发部');
     checks.unrelatedNodeKept = labels(document.getElementById('page')).includes('市场部') || labels(document.getElementById('page')).includes('分公司');
+  }
+
+  if (view === 'org-person') {
+    // 组织页作为人员/账号主界面（M72）：人员行上的三个徽标、展开后的 Key 列表与逐账号操作。
+    await renderOrg({
+      page: document.getElementById('page'), actions: document.getElementById('actions'),
+      session: { role: 'admin', username: 'admin' }, route: { path: '/org' }, navigate: () => {},
+      sidebar: document.getElementById('sidebar-slot'),
+    });
+    await settle();
+
+    const rows = () => [...document.querySelectorAll('.org-member')];
+    checks.personRows = rows().length === window.__org.members[1].length || rows().length > 0;
+    const rowText = (name) => {
+      const row = rows().find((el) => el.textContent.includes(name));
+      return row ? row.textContent : '';
+    };
+    // 三种 DSH 状态各有一条路径：已启用、管理员显式停用、未启用（但登录即可用）。
+    checks.dshEnabledBadge = rowText('acme').includes('DSH 已启用');
+    checks.dshAdminDisabledBadge = rowText('root-acct').includes('DSH 已停用（管理员）');
+    checks.dshLoginUsableBadge = rowText('张三').includes('DSH 登录即可用');
+    checks.feishuBadge = rowText('acme').includes('飞书：李智超');
+    checks.keyCountBadge = rowText('acme').includes('2 / 3 个 Key');
+    // 多 Key 账号要有提示：门户登录会先让人选一把。提示必须是**看得见的文字**（tooltip 在触屏上
+    // 等于不存在），所以断言行里出现了这句话。
+    const multiKeyRow = rows().find((el) => el.textContent.includes('2 / 3 个 Key'));
+    checks.multiKeyHint = !!multiKeyRow && multiKeyRow.textContent.includes('登录会先选一把 Key');
+
+    // 「未归属账户」合成行：不属于任何节点的账号要有地方可管（这里 fixtures 里是 4 个）。
+    checks.unassignedRow = pageText().includes('未归属账户 4 个');
+    const unassigned = [...document.querySelectorAll('.org-unassigned button')].find((b) => b.textContent.includes('未归属账户'));
+    unassigned.click();
+    await settle();
+    checks.unassignedListOpened = document.querySelectorAll('.org-members-plain .org-member').length === 4;
+    checks.unassignedHasNoCheckbox = [...document.querySelectorAll('.org-members-plain .org-member input[type=checkbox]')]
+      .every((box) => box.offsetParent === null);
+
+    // 展开一个账号：请求带 account_id，列表里出现 worker Key 的标注与可操作的 Key。
+    const target = rows().find((el) => el.textContent.includes('acme'));
+    const expand = [...target.querySelectorAll('button')].find((b) => b.textContent === '展开');
+    expand.click();
+    await settle();
+    checks.keyRequestScopedToAccount = (window.__calls || []).some((call) => call.includes('/keys?') && call.includes('account_id=1'));
+    const detail = document.querySelector('.org-person-detail');
+    checks.detailOpened = !!detail;
+    checks.detailListsKeys = !!detail && detail.textContent.includes('laptop') && detail.textContent.includes('phone');
+    checks.workerKeyLabelled = !!detail && detail.textContent.includes('网关自动创建（worker 凭据，不参与选择）');
+    checks.detailActions = ['新建 Key', '停用 DSH', '解绑飞书', '分配组织']
+      .every((label) => !!detail && [...detail.querySelectorAll('button')].some((b) => b.textContent === label));
+    // 停用的 Key 在行内说明状态，而不是看起来一样。
+    checks.suspendedKeyShown = !!detail && detail.textContent.includes('suspended');
   }
 
   if (view === 'org-readonly') {

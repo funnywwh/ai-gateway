@@ -226,11 +226,12 @@ export async function render({ page, actions, session }) {
       expand,
     ]);
     const container = el('div', { class: 'org-person' }, [summary]);
-    if (filtering) {
+    if (filtering && !box.checked) {
       // A filtered list is a view, not the node's membership: saving from here would drop the
-      // rows the filter hid.
+      // rows the filter hid. Un-ticking a member that is on screen stays allowed — that is a
+      // removal the operator can see, and refusing it would make a filtered list read-only.
       box.disabled = true;
-      box.title = '过滤时不能改成员：清空过滤框后可以勾选';
+      box.title = '过滤时不能再加入成员（列表不完整）：先清空过滤框；已勾选的可以取消';
     }
     expand.addEventListener('click', async (ev) => {
       ev.preventDefault();
@@ -284,12 +285,19 @@ export async function render({ page, actions, session }) {
     return badge('飞书：' + (feishu.name || feishu.open_id), 'ok', feishu.open_id);
   }
 
+  // keyBadge states how many keys the account has and, when more than one is usable, says out
+  // loud that the portal will ask the person to choose: a tooltip alone would hide the one fact
+  // that explains the extra login step.
   function keyBadge(account) {
     const active = account.active_key_count || 0;
     const total = account.key_count || 0;
     if (!total) return el('span', { class: 'muted', text: '0 个 Key' });
-    return badge(active + ' / ' + total + ' 个 Key', active > 1 ? 'warn' : '',
-      active > 1 ? '这个账号有多把可用 Key：门户登录会先让人选一把（只影响登录归属与审计）' : '');
+    const label = active + ' / ' + total + ' 个 Key';
+    if (active <= 1) return badge(label);
+    return el('span', { class: 'org-key-multi' }, [
+      badge(label, 'warn'),
+      el('span', { class: 'muted', text: '登录会先选一把 Key' }),
+    ]);
   }
 
   // personDetail is the expanded half of a person row: the account's own fields, its Key list

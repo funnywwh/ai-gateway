@@ -4660,3 +4660,48 @@ HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退�
 
 **未做/限制**：gpt001 未部署（用户只要求本机）；`host_shares` 保持默认关闭，M71 的宿主目录挂载未在
 真机启用；`dshgw` 二进制仍自报 3.0.1（未重建，非缺陷——它不随 `make build` 产出）。
+
+## M72 完成记录（账号级飞书身份、组织页整合、多 Key 登录选择）
+
+设计：`docs/design/m72-account-feishu-identity.md`（§12 差异已回填）；规格：`docs/feishu.md` §1/§3/§4/§5/§5c.4/§5c.5/§6/§7/§8、
+`docs/org.md` §5、`docs/dshgw.md` §3、`docs/mcp.md` §4。
+提交：`181586c`（设计+规格先行）、`4bcbde1`（keypick 票据）、`8dc558e`（dsh_disabled_at + 启动迁移）、
+`758164e`（aigw 判定/按需建租户/账号级接口）、`1d225c9`（门户 `/login/pick`）、`d9472a8`（控制台整合）。
+
+- [x] 迁移 `0025_account_dsh_auto.sql`：`accounts.dsh_disabled_at`（管理员显式停用 DSH 的时刻）+ domain 字段 +
+      `SetAccountDSHDisabledAt`（`UpsertAccount` 刻意不写该列，普通编辑清不掉它）
+- [x] 配置：`dshgw.auto_enable`（默认 false，`GW_DSHGW_AUTO_ENABLE`）、`feishu.pick_ttl_s`（0 = 跟随票据 TTL，
+      上限 600，`GW_FEISHU_PICK_TTL_S`）；`config.example.yaml` 注释
+- [x] 票据：`TicketModeKeyPick` + `IssueKeyPick`/`VerifyKeyPick`（aigw）与 `SignPick`/`PeekPick`/`VerifyPick`
+      （dshgw 门户）；共享契约向量新增 `keypick` 并带 `mode` 字段，两侧测试新增「模式不可互换」断言
+- [x] aigw 登录判定：`finishFeishuLogin` 改查 `accounts.feishu_open_id`（未命中时保留 Key 级兜底并 WARN）；
+      闸门改 `accountDSHEffective`；多 Key 账号改签 keypick 票据并 303 到门户 `/login/pick`
+- [x] aigw 授权：`/v1/dshgw/authorize` 租户为空且 `auto_enable` 时按需 `provisionAccountDSH(actor="dshgw-auto")`，
+      失败 403 `provision_failed`（登录路径先做模型可用性预检）；响应新增 `keys[]`（active 且未过期、
+      过滤 `dshgw-*` worker Key）与 `account_id`；`feishu_name` 优先账号级（Key 级兜底）
+- [x] 控制台接口：`PUT/DELETE /admin/api/v1/accounts/{id}/feishu`（账号级绑定；重复绑定幂等、换人先释放旧身份、
+      新身份被他人占用 409、不要求人在通讯录里、不顺带改组织归属）；`GET /keys/{id}/feishu/bind` 改
+      400 `unsupported_parameter`（说明替代接口）；`GET /accounts` 与 `GET /org/nodes/{id}/accounts` 增补
+      `feishu/dsh_effective/dsh_disabled_at/key_count/active_key_count`；`POST/DELETE .../dsh` 写/清停用标记
+- [x] M70 合并通道②（按 Key 身份匹配）删除：身份只认账号级；`planFeishuOrg` 少一个入参，
+      `admin_org_feishu_test.go` 六处断言与 `org_feishu.js` 的通道标签同步更新
+- [x] 启动迁移 `MigrateKeyFeishuToAccounts` + `cmd/aigw` 钩子：抄身份到账号、审计带 `from_key_id`、清空 Key 行；
+      账号已绑别人或同账号多把 Key 各绑不同人 → 记为 conflict 并保留（绝不猜）
+- [x] 门户：抽出 `issueTenantSession`（三条登录路径共用）；`/login/pick`（GET 只 peek 票据、POST 消费；
+      提交的 `key_id` 与服务器刚取到的列表比对；审计 `login_key_selected`；选中项不作为租户凭据）
+- [x] 控制台界面：组织页人员行（DSH 三态/飞书身份/Key 计数）+ 展开详情（账号字段、Key 列表、
+      新建/编辑/启停 Key、绑定/解绑飞书、启用/停用 DSH、分配组织）；「未归属账户」合成行；
+      成员勾选在过滤态只允许取消不允许新增；飞书人员选择弹窗（拼音过滤、已占用置灰）；
+      Key 页飞书列改只读「飞书（旧）」并去掉绑定按钮；账户页 DSH 三态 + 飞书 + Key 计数列
+- [x] 抽出 `pages/key_actions.js`（Key 创建含一次性明文、编辑、启停）供两页共用；
+      `internal/webui/embed_test.go` 的录制模式漂移检查改读共用模块
+- [x] 测试：store 迁移四种情形 + `dsh_disabled_at` 存活；httpapi（authorize 的 keys[] 过滤/自动建租户/
+      `provision_failed`、账号级绑定全路径、旧入口废弃、路由表计数）；dshgw（选票签发与验证契约、
+      picker 渲染/选中/伪造 id/重放/外来账号/授权不可用/单 Key 直通/票据来自 cookie）；
+      控制台 `org_person_list_test.mjs`、`account_feishu_test.mjs` 新增并挂进 `make ui-base`
+- [x] 文档：`docs/feishu.md`（§1 口径、§3 配置、§4 选人绑定、§5 闸门、§5c.4 重写、§5c.5 多 Key、§6 威胁模型、
+      §7 排障 9 条、§8 接口表）、`docs/org.md` §5/§6、`docs/dshgw.md` §3、`docs/mcp.md` §4
+
+**验证**（自动化，2026-09-21）：`go vet ./internal/... ./cmd/...` 干净；`go test ./internal/... ./cmd/...` 全绿；
+`make ui-base` 全绿（含两个新测试）；`scripts/ui-harness/run.sh --views org` 52 项通过。
+真机验收（设计 §11 五条）尚未执行，留在 `docs/TODO.md`。
