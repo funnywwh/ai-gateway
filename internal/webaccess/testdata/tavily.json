@@ -1,0 +1,20 @@
+{
+  "query": "deepseek api pricing",
+  "response_time": 1.67,
+  "results": [
+    {
+      "title": "Models & Pricing | DeepSeek API Docs",
+      "url": "https://api-docs.deepseek.com/quick_start/pricing",
+      "content": "Input (cache hit) $0.07 / 1M tokens; output $1.10 / 1M tokens.",
+      "score": 0.97,
+      "published_date": "2026-09-15"
+    },
+    {
+      "title": "A result the backend duplicated",
+      "url": "https://api-docs.deepseek.com/quick_start/pricing/",
+      "content": "Same page with a trailing slash.",
+      "score": 0.61
+    }
+  ],
+  "usage": { "credits": 1 }
+}

@@ -93,6 +93,9 @@ var allowed = map[string][]string{
 		"internal/routing",
 		"internal/runtime", "internal/secret", "internal/store", "internal/usage", "pkg/pluginapi",
 		"internal/localdshgw",
+		// M73: the console's web tools are dispatched from the transport, which is where the
+		// session's switches live.
+		"internal/webaccess",
 	},
 	// M60/M61: the Feishu identity client sits beside the transport instead of inside it,
 	// so the OAuth exchange, the signed state and the ticket are testable on their own. It
@@ -100,6 +103,10 @@ var allowed = map[string][]string{
 	"internal/feishu": {"internal/config", "internal/domain"},
 	// M52: the console drives the dshgw provisioning channel through this socket client.
 	"internal/localdshgw": {"internal/domain"},
+	// M73: console web access (search backends, page extraction, SSRF guard). A leaf on
+	// purpose — it never touches the store, the transport or the chat session state — so
+	// the only shared code it reuses is the proxy URL vocabulary.
+	"internal/webaccess": {"pkg/providerkit"},
 	// M58: aigw supervises its dshgw child across the process boundary only. The
 	// package deliberately imports no aigw internals, so the coupling stays
 	// "one executable starts another" instead of "one program reaches into another".
