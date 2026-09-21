@@ -638,9 +638,16 @@ func (s *Server) provisionAccountDSH(ctx context.Context, actor string, store Ac
 	a.DSHEnabled = true
 	// Enabling clears the "an administrator turned this off" mark (M72): the flag and the mark
 	// together are what dshgw.auto_enable reads, and leaving a stale mark behind would make the
-	// console show 已启用 while the effective answer stayed false.
+	// console say 已启用 while a later disable became sticky again.
+	//
+	// Two writes on purpose: UpsertAccount deliberately does NOT list dsh_disabled_at (an ordinary
+	// account edit, a sync or a billing update must not be able to clear an administrator's
+	// decision), so the mark has its own statement.
 	a.DshDisabledAt = nil
 	if _, err := store.UpsertAccount(ctx, a); err != nil {
+		return "", toAPIError(err)
+	}
+	if err := store.SetAccountDSHDisabledAt(ctx, a.ID, nil); err != nil {
 		return "", toAPIError(err)
 	}
 	s.audit(ctx, actor, "dsh_enable", "account", strconv.FormatInt(a.ID, 10),

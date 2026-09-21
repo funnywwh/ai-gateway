@@ -534,3 +534,53 @@ func TestAdminEnableDSHHonorsRequestedTenantName(t *testing.T) {
 		t.Fatalf("mapping %q", stored.DshTenant)
 	}
 }
+
+// Enabling through the console must clear the explicit-disable mark, or a later 停用 would be
+// sticky for a reason nobody can see: dshgw.auto_enable reads the mark, and a stale one makes the
+// console say 已启用 while the effective answer stays false. The mark needs its own statement
+// (UpsertAccount deliberately does not list that column), which is exactly the kind of thing that
+// silently stops happening.
+func TestAdminEnableDSHClearsTheExplicitDisableMark(t *testing.T) {
+	f := newAdminFixture(t)
+	ctx := context.Background()
+	cookie := f.login(t, adminUser, adminPassword)
+	account, err := f.db.GetAccountByName(ctx, "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := fmt.Sprintf("/admin/api/v1/accounts/%d/dsh", account.ID)
+
+	if res := f.call(t, http.MethodPost, path, `{"enabled":true}`, cookie); res.StatusCode != http.StatusOK {
+		t.Fatalf("enable: status=%d", res.StatusCode)
+	}
+	if res := f.call(t, http.MethodPost, path, `{"enabled":false}`, cookie); res.StatusCode != http.StatusOK {
+		t.Fatalf("disable: status=%d", res.StatusCode)
+	}
+	marked, err := f.db.GetAccount(ctx, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marked.DshDisabledAt == nil {
+		t.Fatal("disabling must record the explicit-disable mark")
+	}
+	if res := f.call(t, http.MethodPost, path, `{"enabled":true}`, cookie); res.StatusCode != http.StatusOK {
+		t.Fatalf("re-enable: status=%d", res.StatusCode)
+	}
+	cleared, err := f.db.GetAccount(ctx, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.DshDisabledAt != nil {
+		t.Fatalf("re-enabling left the mark behind: %+v", cleared.DshDisabledAt)
+	}
+	// The read endpoint reports both facts, which is what the console renders.
+	res := f.call(t, http.MethodGet, path, "", cookie)
+	var payload map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if payload["enabled"] != true || payload["disabled_at"] != nil {
+		t.Fatalf("dsh read = %v", payload)
+	}
+}
