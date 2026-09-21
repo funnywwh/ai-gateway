@@ -378,6 +378,10 @@ def main() -> int:
         folder_a = next(f for f in state["folders"] if DIR_A in f.get("text", ""))
         key_a = folder_a["key"]
         path_a = workspace / "browser" / key_a
+        # The mount point is named after the LOCAL directory: that path is what the operator
+        # reads in DSH's workspace picker and what DSH's own workspace entry is keyed by.
+        if key_a != DIR_A or path_a.name != DIR_A or path_a.parent.name != "browser":
+            raise AssertionError(f"folder A mounted at {path_a} (key {key_a}) instead of at its local directory name {DIR_A!r}")
         e2e.wait_for(lambda: record_for_path(root, path_a), 60, "folder A's gateway record")
         if not e2e.mount_type(str(path_a)).startswith("fuse"):
             raise AssertionError(f"folder A is not a kernel FUSE mount: {e2e.mount_type(str(path_a))}")
@@ -399,6 +403,8 @@ def main() -> int:
             raise AssertionError(f"the folder list does not hold two folders: {state['folders']}")
         key_b = next(key for key in rows_by_key if key != key_a)
         path_b = workspace / "browser" / key_b
+        if key_b != DIR_B or path_b.name != DIR_B:
+            raise AssertionError(f"folder B mounted at {path_b} (key {key_b}) instead of at its local directory name {DIR_B!r}")
         e2e.wait_for(lambda: record_for_path(root, path_b), 60, "folder B's gateway record")
         for path in (path_a, path_b):
             if not e2e.mount_type(str(path)).startswith("fuse"):

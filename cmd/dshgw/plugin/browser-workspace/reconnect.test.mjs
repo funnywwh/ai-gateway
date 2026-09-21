@@ -113,7 +113,7 @@ test('the first successful mount saves the folder the next document needs', asyn
   await mounted(ui)
   const saved = ui.savedFolders()
   assert.equal(saved.length, 1, 'the mount did not leave a saved folder')
-  assert.match(saved[0].key, /^[a-f0-9]{32}$/, 'the mapping key is what names the mount point')
+  assert.equal(saved[0].key, 'local', 'the mapping key is the local directory name, and that is what names the mount point')
   assert.equal(saved[0].name, 'local')
   assert.equal(saved[0].token !== null, true)
   assert.ok(saved[0].handle, 'the record has no directory handle to resume with')

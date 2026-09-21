@@ -38,12 +38,12 @@ async function twoFolders (extra = {}) {
 
 test('the folder icon opens a list, and adding folders mounts each one at its own path', async () => {
   const ui = await twoFolders()
-  // Two saved folders, two capabilities, two mount points — and the mount point is named by
-  // the folder's own stable key rather than by anything per-mount.
+  // Two saved folders, two capabilities, two mount points — and each mount point is named by
+  // the local directory it maps, rather than by anything per-mount or generated.
   const saved = ui.savedFolders()
   assert.equal(saved.length, 2)
   const keys = saved.map(folder => folder.key)
-  for (const key of keys) assert.match(key, /^[a-f0-9]{32}$/)
+  assert.deepEqual([...keys].sort(), ['docs', 'photos'], 'a mount point is the name of the local directory it maps')
   assert.equal(new Set(keys).size, 2, 'two folders must not share one identity')
   assert.equal(new Set(saved.map(folder => folder.mountpoint)).size, 2, 'two folders must not share one mount point')
   for (const folder of saved) assert.equal(folder.mountpoint, `/home/account/browser/${folder.key}`)
@@ -139,8 +139,15 @@ test('deleting one folder purges exactly that folder, leaving the other mounted'
   ui.clickFolder('docs', 'confirm-delete')
   await until(() => ui.folderNames().length === 1, 'the deleted folder to disappear')
   const closes = ui.requests.filter(request => request.endpoint === 'close')
-  assert.equal(closes.at(-1).payload.purge, true, 'deleting a folder must release its virtual path')
-  assert.equal(closes.at(-1).payload.token.includes(docs.slice(0, 4)), true)
+  const purges = closes.filter(request => request.payload.purge === true)
+  // Two releases for the deleted folder, and neither of them names the survivor: the
+  // capability closes with `purge` (its tombstone releases the path), and then the KEY is
+  // released, which is what also cleans a folder whose token had already died with its mount.
+  assert.equal(purges.length, 2, 'deleting a folder must release its virtual path, with and without a capability')
+  assert.equal(purges[0].payload.token.includes(docs.slice(0, 4)), true)
+  assert.equal(purges[0].payload.key, undefined)
+  assert.deepEqual(purges[1].payload, { key: docs, purge: true })
+  assert.equal(closes.some(request => JSON.stringify(request.payload).includes(photos)), false, 'deleting one folder released another')
   assert.equal(ui.savedFolders().length, 1)
   assert.equal(ui.savedFolders()[0].key, photos)
   assert.equal(ui.folderStates()[0], 'connected', 'deleting one folder disconnected another')
@@ -290,6 +297,8 @@ test('a gateway that predates stable directory keys still mounts, without the ke
   await mounted(ui)
   const opens = ui.requests.filter(request => request.endpoint === 'open')
   assert.equal(opens.length, 2, 'the client did not retry the open without a key')
+  // That gateway has no `allocate` either, so the folder mounts under a generated key — the
+  // behaviour this feature always had, and the only one that binary understands.
   assert.match(opens[0].payload.key, /^[a-f0-9]{32}$/)
   assert.equal(opens[1].payload.key, undefined)
   assert.equal(ui.knownWarnings.some(message => message.includes('stable directory keys')), true)
@@ -297,12 +306,110 @@ test('a gateway that predates stable directory keys still mounts, without the ke
   // the old random one.
   assert.equal(ui.savedFolders().length, 1)
   assert.equal(ui.savedFolders()[0].key, opens[0].payload.key)
-  // Deleting it releases the mount through the only close an older gateway understands.
+  // Deleting it releases the mount through the only close an older gateway understands, and the
+  // key release it cannot answer is attempted, reported, and does not block the delete.
   ui.clickManage()
   ui.clickFolder('docs', 'delete')
   ui.clickFolder('docs', 'confirm-delete')
   await until(() => ui.folderNames().length === 0, 'the deleted folder to disappear')
   const closes = ui.requests.filter(request => request.endpoint === 'close')
-  assert.equal(closes.at(-1).payload.purge, undefined, 'a purge was sent to a gateway that cannot take one')
+  assert.equal(closes.some(request => request.payload.token !== undefined && request.payload.purge === true), true, 'the release was attempted with the capability first')
+  assert.equal(closes.some(request => request.payload.token !== undefined && request.payload.purge === undefined), true, 'the release was retried without the field that gateway refuses')
+  assert.deepEqual(closes.at(-1).payload, { key: opens[0].payload.key, purge: true }, 'the release by key was attempted last')
+  assert.equal(ui.knownWarnings.some(message => message.includes('cannot release a mount point by key')), true, 'the unreleasable path was not reported')
+  await ui.dispose()
+})
+
+test('a mount point is named after the local directory, arbitrated once', async () => {
+  // The name is the virtual path, so it is the directory a person picked — and it is asked for
+  // ONCE, before the first mount, because changing it later would move the workspace and leave
+  // the sessions grouped under the old path behind.
+  const ui = setup({ pickerDirs: [fakeHandle({ name: 'aosp' })] })
+  await state(ui, 'idle')
+  ui.clickRow()
+  await mounted(ui)
+  assert.deepEqual(ui.requests.filter(request => request.endpoint === 'allocate').map(request => request.payload.name), ['aosp'])
+  assert.equal(ui.savedFolders()[0].key, 'aosp')
+  assert.equal(ui.savedFolders()[0].mountpoint, '/home/account/browser/aosp')
+  assert.deepEqual(ui.requests.find(request => request.endpoint === 'open').payload, { name: 'aosp', writable: true, key: 'aosp' })
+  // A reconnect keeps that name and never asks for another one: the path is the mapping.
+  ui.clickRow()
+  await state(ui, 'disconnected')
+  ui.clickRow()
+  await mounted(ui)
+  assert.equal(ui.requests.filter(request => request.endpoint === 'allocate').length, 1, 'a reconnect arbitrated the name again')
+  assert.equal(ui.state.keys.has('aosp'), true)
+  await ui.dispose()
+})
+
+test('two local directories with the same name are two mount points, and a name the account already holds is suffixed', async () => {
+  // Nothing about a local directory name is unique inside one account: both of these are
+  // called "work", and the operator must still get two mounts — one path each — because a
+  // shared path would mean one workspace and one session list for two different directories.
+  const ui = setup({ pickerDirs: [fakeHandle({ name: 'work' }), fakeHandle({ name: 'work' })], takenNames: ['docs'] })
+  await state(ui, 'idle')
+  ui.clickManage()
+  ui.clickDialog('添加文件夹')
+  await until(() => ui.folderStates().length === 1 && ui.folderStates()[0] === 'connected', 'the first mount')
+  ui.clickDialog('添加文件夹')
+  await ready(ui)
+  const keys = ui.savedFolders().map(folder => folder.key).sort()
+  assert.deepEqual(keys, ['work', 'work-2'], 'two local directories of the same name share one path')
+  assert.equal(new Set(ui.savedFolders().map(folder => folder.mountpoint)).size, 2)
+  // A name this account already holds comes back suffixed from the gateway, not reused: that
+  // is what the handshake is for (the local list cannot see another device's folders).
+  ui.clickDialog('添加文件夹')
+  await new Promise(resolve => setTimeout(resolve, 30))
+  const third = ui.requests.filter(request => request.endpoint === 'allocate').map(request => request.payload.name)
+  assert.deepEqual(third.slice(0, 2), ['work', 'work-2'])
+  await ui.dispose()
+})
+
+test('a local name that cannot be a directory name still mounts, under a generated key', async () => {
+  // "Never block a mount because of what somebody called their folder": a hidden or padded
+  // local name is not a usable path segment, so the folder falls back to the generated key this
+  // feature always used instead of failing.
+  const ui = setup({ pickerDirs: [fakeHandle({ name: '.secrets' })] })
+  await state(ui, 'idle')
+  ui.clickRow()
+  await mounted(ui)
+  assert.equal(ui.requests.some(request => request.endpoint === 'allocate'), false, 'an unusable name was sent to the gateway anyway')
+  const key = ui.savedFolders()[0].key
+  assert.match(key, /^[a-f0-9]{32}$/)
+  assert.equal(ui.savedFolders()[0].mountpoint, `/home/account/browser/${key}`)
+  await ui.dispose()
+})
+
+test('deleting a folder whose capability is gone releases its path by key', async () => {
+  // The ordinary order after a gateway restart: the mount is gone, the token died with it, and
+  // the saved folder is still there. Without a release by key its empty mount point would stay
+  // in the account's container forever.
+  const handle = fakeHandle({ name: 'docs' })
+  const ui = setup({ stored: storedFolders([storedFolder({ handle, key: 'docs', name: 'docs', token: null, at: 0 })]) })
+  await state(ui, 'disconnected')
+  ui.clickManage()
+  ui.clickFolder('docs', 'delete')
+  ui.clickFolder('docs', 'confirm-delete')
+  await until(() => ui.folderNames().length === 0, 'the deleted folder to disappear')
+  assert.deepEqual(ui.state.purged, ['docs'], 'the mount point was not released by key')
+  assert.equal(ui.state.closeCalls, 0, 'a close with no capability was attempted')
+  await ui.dispose()
+})
+
+test('a refused release keeps the folder and says so instead of reporting a deletion', async () => {
+  // A live mount of that path — another page, another device — is not this page's to remove.
+  const handle = fakeHandle({ name: 'docs' })
+  const ui = setup({
+    stored: storedFolders([storedFolder({ handle, key: 'docs', name: 'docs', token: null, at: 0 })]),
+    purgeRefusals: ['directory is still mounted'],
+  })
+  await state(ui, 'disconnected')
+  ui.clickManage()
+  ui.clickFolder('docs', 'delete')
+  ui.clickFolder('docs', 'confirm-delete')
+  await until(() => ui.folderText('docs').includes('挂载目录未释放'), 'the honest failure')
+  assert.equal(ui.folderNames().length, 1, 'a folder with an unreleased path was reported as deleted')
+  assert.match(ui.folderText('docs'), /该目录仍有活动挂载/)
+  assert.deepEqual(ui.state.purged, [])
   await ui.dispose()
 })

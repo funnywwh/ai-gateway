@@ -130,7 +130,7 @@ func TestFailedCloseRetainsRecordAndChecksOwnerOnRetry(t *testing.T) {
 	if unmounts.Load() != 0 {
 		t.Fatal("unmounted despite live namespace")
 	}
-	if _, err := os.Stat(s.recordPath(sh.id)); err != nil {
+	if _, err := os.Stat(s.recordPath(sh.tenant.Name, sh.id)); err != nil {
 		t.Fatal("lost record", err)
 	}
 	if len(s.MountsFor(tenant.Name)) != 0 {
@@ -143,13 +143,13 @@ func TestFailedCloseRetainsRecordAndChecksOwnerOnRetry(t *testing.T) {
 		t.Fatal("attacker triggered callback")
 	}
 	// Force record removal failure without depending on running as root.
-	if err := os.Remove(s.recordPath(sh.id)); err != nil {
+	if err := os.Remove(s.recordPath(sh.tenant.Name, sh.id)); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(s.recordPath(sh.id), 0700); err != nil {
+	if err := os.Mkdir(s.recordPath(sh.tenant.Name, sh.id), 0700); err != nil {
 		t.Fatal(err)
 	}
-	obstruction := filepath.Join(s.recordPath(sh.id), "keep")
+	obstruction := filepath.Join(s.recordPath(sh.tenant.Name, sh.id), "keep")
 	if err := os.WriteFile(obstruction, []byte("x"), 0600); err != nil {
 		t.Fatal(err)
 	}

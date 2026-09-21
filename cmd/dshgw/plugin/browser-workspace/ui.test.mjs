@@ -109,11 +109,16 @@ test('one click runs picker/open/poll/activate/reconnect/register/connect, the n
   assert.ok(ui.events.indexOf('create') < ui.events.indexOf('reconnect'))
   assert.ok(ui.events.indexOf('reconnect') < ui.events.findIndex(e => e.startsWith('connect:')))
   // The open handshake carried the folder's stable key: the mount point is a mapping of the
-  // LOCAL directory, not of one mount.
+  // LOCAL directory, not of one mount — and the key it carries is that directory's own name,
+  // so the path reads as the directory the person picked.
   const opened = ui.requests.find(request => request.endpoint === 'open')
-  assert.match(opened.payload.key, /^[a-f0-9]{32}$/)
+  assert.equal(opened.payload.key, 'local')
   assert.equal(opened.payload.name, 'local')
   assert.equal(opened.payload.writable, true)
+  // The name was arbitrated with the gateway BEFORE the mount, exactly once: that handshake is
+  // what keeps two local directories of one account from silently becoming one path.
+  assert.deepEqual(ui.requests.filter(request => request.endpoint === 'allocate').map(request => request.payload.name), ['local'])
+  assert.ok(ui.events.indexOf('allocate') < ui.events.indexOf('open'))
   assert.match(ui.rowText(), /已挂载 local（读写）；点击断开/)
   assert.equal(ui.body().props['aria-pressed'], true)
   assert.match(ui.rowTitle(), /当前：已挂载/)

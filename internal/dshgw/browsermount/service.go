@@ -12,10 +12,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	fs "github.com/winger/ai-gateway/internal/dshgw/browserworkspace"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
@@ -53,11 +53,106 @@ func errPerAccountMountLimit() error {
 	return fmt.Errorf("per-account browser directory limit reached: %d", maxMountsPerTenant)
 }
 
-// directoryKeyRE is the one shape a client-supplied stable directory key may have: 32
-// lowercase hex characters. The key becomes the mount point's basename, so anything that
-// could traverse, hide, or collide with the container itself is refused here rather than
-// sanitised silently.
-var directoryKeyRE = regexp.MustCompile(`^[a-f0-9]{32}$`)
+// validDirectoryKey is the one shape a client-supplied stable directory key may have. The key
+// names the mount point, so it must be exactly ONE safe path segment: the LOCAL directory's
+// own name ("aosp", "My Docs"), which is what makes the picker show a name a person
+// recognises, or the 32/48 hex id a client that predates directory names still sends — so an
+// already mapped local directory keeps its path, its workspace entry and its sessions.
+//
+// Anything that could traverse, hide, pad or collide with the container itself is refused
+// here rather than sanitised silently.
+func validDirectoryKey(key string) bool {
+	if key == "" || len(key) > 255 || key == "." || key == ".." {
+		return false
+	}
+	// A hidden or whitespace-padded name is refused rather than trimmed: the mount point must
+	// be exactly what the client asked for and exactly what the operator reads in the picker.
+	if strings.HasPrefix(key, ".") || strings.TrimSpace(key) != key {
+		return false
+	}
+	if strings.ContainsAny(key, `/\`) {
+		return false
+	}
+	for _, r := range key {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// directoryNameSuffixLimit is how many "-N" variants `allocate` tries before it falls back to
+// an opaque tail. A local directory name is not unique inside one account ("Downloads" twice),
+// and every candidate has to stay readable.
+const directoryNameSuffixLimit = 9
+
+// withSuffix appends a disambiguating suffix while keeping the result one segment of at most
+// 255 bytes: a filesystem name limit, and the same bound validDirectoryKey enforces. The base
+// is cut on a rune boundary so a multi-byte name cannot be split into invalid UTF-8.
+func withSuffix(base, suffix string) string {
+	cut := 255 - len(suffix)
+	if cut < 0 {
+		cut = 0
+	}
+	if cut > len(base) {
+		cut = len(base)
+	}
+	// Only a CUT base can split a rune: when nothing has to be dropped, base[:cut] is the whole
+	// name and base[cut] is out of range.
+	for cut > 0 && cut < len(base) && !utf8.RuneStart(base[cut]) {
+		cut--
+	}
+	return base[:cut] + suffix
+}
+
+// allocateName answers one `allocate` handshake: a mount directory name this account no
+// longer holds, derived from the local directory's own name.
+//
+// The arbitration is deliberately advisory rather than a reservation. Identity here is
+// client-owned — the key IS the virtual path of a local directory — so the gateway can only
+// see what it can see: a name whose directory already exists under this account's container
+// (a stable mount point outlives its mount) or that a live share is serving right now. A name
+// is therefore only "taken" once some local directory has actually mounted with it.
+//
+// An unusable proposal still returns a usable key (the legacy random id): refusing here would
+// leave the operator with a folder that can never be mounted because its local name is, for
+// example, hidden or padded. The client reports that degradation itself.
+func (s *Service) allocateName(t registry.Tenant, desired string) string {
+	taken := make(map[string]bool)
+	s.mu.Lock()
+	for _, sh := range s.shares {
+		if sh.tenant.Name == t.Name {
+			taken[sh.id] = true
+		}
+	}
+	s.mu.Unlock()
+	if entries, err := os.ReadDir(filepath.Join(t.Workspace, "browser")); err == nil {
+		for _, e := range entries {
+			taken[e.Name()] = true
+		}
+	}
+	if !validDirectoryKey(desired) {
+		id, err := randomID()
+		if err != nil {
+			return ""
+		}
+		return id
+	}
+	candidates := []string{desired}
+	for n := 2; n <= directoryNameSuffixLimit; n++ {
+		candidates = append(candidates, withSuffix(desired, fmt.Sprintf("-%d", n)))
+	}
+	for _, candidate := range candidates {
+		if !taken[candidate] {
+			return candidate
+		}
+	}
+	var tail [4]byte
+	if _, err := rand.Read(tail[:]); err != nil {
+		return withSuffix(desired, "-"+strings.Repeat("0", 8))
+	}
+	return withSuffix(desired, "-"+hex.EncodeToString(tail[:]))
+}
 
 // errDuplicateDirectoryKey is what open answers when a share still holds that key — live, or
 // waiting out its reconnect grace. It is refused instead of mounted twice: two mounts at one
@@ -67,7 +162,8 @@ var directoryKeyRE = regexp.MustCompile(`^[a-f0-9]{32}$`)
 // A stable key is what makes the virtual path a mapping of the LOCAL directory rather than of
 // one mount: the same saved folder always mounts at <workspace>/browser/<key>, so DSH's own
 // workspace entry (which is reused by canonical path) keeps its id, its title and its session
-// membership across disconnect/reconnect, page reloads and gateway restarts.
+// membership across disconnect/reconnect, page reloads and gateway restarts. The key is the
+// local directory's own name, so that path also reads as the directory a person picked.
 func errDuplicateDirectoryKey() error {
 	return errors.New("directory key already mounted for this account")
 }
@@ -334,6 +430,10 @@ func reusableMountPoint(path string) error {
 // openRequest is one `open` handshake. Key is empty only for callers that do not need a
 // stable virtual path (tests, and any older client): then a fresh random id is generated and
 // the mount point is removed again when the mount ends, exactly as before stable keys.
+//
+// A non-empty Key is the mount directory name the client chose for one local directory —
+// normally that directory's own name, arbitrated once through `allocate` — or the legacy
+// random id an already saved folder still carries.
 type openRequest struct {
 	Name     string
 	Writable bool
@@ -352,7 +452,7 @@ func (s *Service) openWith(t registry.Tenant, owner string, req openRequest) (*s
 	persistent := req.Key != ""
 	var id string
 	if persistent {
-		if !directoryKeyRE.MatchString(req.Key) {
+		if !validDirectoryKey(req.Key) {
 			return nil, errors.New("invalid directory key")
 		}
 		id = req.Key
@@ -598,6 +698,70 @@ func (s *Service) purgeTombstoned(t registry.Tenant, ts tombstone) error {
 	return removeAbsentOK(ts.path)
 }
 
+// purgeByKey releases the mount point one local directory's key names. It is the delete path
+// for a SAVED folder whose capability is long gone: the token died with the mount (a gateway
+// restart, the reconnect grace window, a reaped lease), so the tombstone that would have
+// authorized the purge is gone too, and without this the empty directory would sit in the
+// account's container forever. Reusing a key is normal, so the name must survive exactly what
+// a tombstone purge must survive: a live mount of it, and anything this service could not
+// have created. A directory that is already absent is success, not an error.
+func (s *Service) purgeByKey(t registry.Tenant, key string) (any, error) {
+	if !validDirectoryKey(key) {
+		return nil, errors.New("invalid directory key")
+	}
+	s.mu.Lock()
+	for _, sh := range s.shares {
+		if sh.tenant.Name == t.Name && sh.id == key {
+			s.mu.Unlock()
+			return nil, errors.New("directory is still mounted")
+		}
+	}
+	s.mu.Unlock()
+	root := filepath.Join(t.Workspace, "browser")
+	path := filepath.Join(root, key)
+	if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
+		// No container at all: nothing this service created here, so there is nothing to
+		// release. (A tenant that never mounted has no browser directory.)
+		return s.forgetRecord(t, key)
+	}
+	// The key is one segment (validDirectoryKey), so the path cannot leave the container —
+	// checked anyway, exactly as the tombstone purge does: this is a removal.
+	if filepath.Dir(path) != root || filepath.Base(path) != key || !noSymlinkAncestors(root) {
+		return nil, errors.New("refusing to release a path outside the browser container")
+	}
+	mounted, err := mountInfoPath(path)
+	if err != nil {
+		return nil, err
+	}
+	if mounted {
+		// Unreachable while the live-share check above holds; a mount with no share would be a
+		// leftover the startup cleanup owns, not something to pull out from under a worker.
+		return nil, errors.New("directory is still mounted")
+	}
+	if _, err := os.Lstat(path); err == nil {
+		if err := reusableMountPoint(path); err != nil {
+			return nil, err
+		}
+		if err := removeAbsentOK(path); err != nil {
+			return nil, err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	return s.forgetRecord(t, key)
+}
+
+// forgetRecord drops the record of a released mount. It belongs to the release, not to the
+// directory removal: a record left behind would be replayed by the next startup cleanup.
+func (s *Service) forgetRecord(t registry.Tenant, key string) (any, error) {
+	if s.recordDir != "" {
+		if err := removeAbsentOK(s.recordPath(t.Name, key)); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]bool{"closed": true}, nil
+}
+
 type payload struct {
 	Token    string      `json:"token"`
 	Name     string      `json:"name"`
@@ -606,11 +770,15 @@ type payload struct {
 	Result   fs.Response `json:"result"`
 	// Key is the client's stable identity of one LOCAL directory: the mount point becomes
 	// <workspace>/browser/<key>, so the same folder always maps to the same virtual path and
-	// DSH's workspace entry for it keeps its id, title and sessions. Absent means a fresh
-	// random id (an older client), whose mount point is removed when the mount ends.
+	// DSH's workspace entry for it keeps its id, title and sessions. It is normally the local
+	// directory's own name (see the `allocate` endpoint), and the legacy random id for a
+	// folder saved before directory names. Absent means a fresh random id (an older client),
+	// whose mount point is removed when the mount ends.
 	Key string `json:"key"`
 	// Purge is the operator removing the folder for good: the mount point and its record are
-	// released instead of kept for the next mount of the same key.
+	// released instead of kept for the next mount of the same key. With no token it is a
+	// release by key alone — the capability that proved the mount is gone with the mount, and
+	// the empty directory it left behind must still be releasable.
 	Purge bool `json:"purge"`
 }
 
@@ -645,6 +813,12 @@ func (s *Service) dispatch(ctx context.Context, op string, t registry.Tenant, ow
 	if op == "hello" {
 		return map[string]any{"version": 1, "maxBytes": 1 << 20}, nil
 	}
+	if op == "allocate" {
+		// The client's own step before the first mount of a saved folder: answer with the
+		// mount directory name that folder may own. Read-only on purpose — nothing is created
+		// and nothing is reserved; see allocateName.
+		return map[string]string{"key": s.allocateName(t, p.Name)}, nil
+	}
 	if op == "open" {
 		sh, err := s.openWith(t, owner, openRequest{Name: p.Name, Writable: p.Writable, Key: p.Key})
 		if err != nil {
@@ -657,6 +831,12 @@ func (s *Service) dispatch(ctx context.Context, op string, t registry.Tenant, ow
 	}
 	var sh *share
 	var err error
+	if op == "close" && p.Token == "" && p.Purge && p.Key != "" {
+		// A release by key alone: the operator is deleting a SAVED folder whose capability is
+		// long gone, and the empty mount point it left behind must not stay forever (a stable
+		// mount point is never removed by a disconnect).
+		return s.purgeByKey(t, p.Key)
+	}
 	if op == "resume" {
 		return s.resume(p.Token, t.Name, owner)
 	}

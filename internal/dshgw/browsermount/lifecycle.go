@@ -96,7 +96,7 @@ func (s *Service) cleanupLocked(sh *share, purge bool) error {
 		}
 	}
 	if s.recordDir != "" {
-		if err := removeAbsentOK(s.recordPath(sh.id)); err != nil {
+		if err := removeAbsentOK(s.recordPath(sh.tenant.Name, sh.id)); err != nil {
 			return fmt.Errorf("remove mount record: %w", err)
 		}
 	}

@@ -268,7 +268,7 @@ func TestRealCrashCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	filename := old.recordPath(id)
+	filename := old.recordPath(tenant.Name, id)
 	if err := os.WriteFile(filename, b, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +288,7 @@ func TestRealCrashCleanup(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("stale cleanup exceeded deadline")
 	}
-	if _, err := os.Stat(current.recordPath(sh.id)); !os.IsNotExist(err) {
+	if _, err := os.Stat(current.recordPath(sh.tenant.Name, sh.id)); !os.IsNotExist(err) {
 		t.Fatal("valid stale record remains", err)
 	}
 	if _, err := os.Lstat(filename); err != nil {

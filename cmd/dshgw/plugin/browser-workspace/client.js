@@ -7,11 +7,15 @@
 // and deletes folders.
 //
 // The virtual mapping is what makes this usable rather than merely possible: the mount point
-// is <workspace>/browser/<folder key>, where the key is generated once per saved folder and
-// kept in IndexedDB. The key — not a per-mount random id — is what DSH's own workspace entry
-// is keyed by (the registry reuses a workspace by its canonical path), so reconnecting the
-// same local directory returns the same path, the same workspace id, the same title and the
-// same sessions. See the README for the state machine and the gateway contract.
+// is <workspace>/browser/<folder key>, where the key is the LOCAL directory's own name —
+// arbitrated once, through the gateway's `allocate` handshake, so two local directories of one
+// account do not silently become one path — and kept in IndexedDB. A gateway that cannot name
+// it, or a local name that cannot be a directory name, falls back to a generated id. The key —
+// not a per-mount random id — is what DSH's own workspace entry is keyed by (the registry
+// reuses a workspace by its canonical path), so reconnecting the same local directory returns
+// the same path, the same workspace id, the same title and the same sessions, and the path
+// itself reads as the directory a person picked. See the README for the state machine and the
+// gateway contract.
 window.__ModuleLoader__.load({
   id: 'dshgw-browser-workspace',
   factory: require => {
@@ -221,6 +225,8 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       ['per-account browser directory limit reached', '已达每账号 4 个目录上限：请先断开一个目录'],
       ['global mount limit reached or service stopping', '网关挂载已满或正在停服，请稍后重试'],
       ['directory key already mounted', '该目录在此账号上已有挂载（可能正由另一个页面服务）'],
+      ['directory is still mounted', '该目录仍有活动挂载：请先断开再删除'],
+      ['invalid directory key', '挂载目录名被网关拒绝（可能连到较旧的网关）：请刷新页面重试，或删除该目录后重新添加'],
       ['directory already served by another page', '该目录正在另一个页面服务，请到那个页面使用'],
       ['directory revoked', '该目录已被另一个页面接管，本页已停止服务'],
       ['unknown directory capability', '该挂载已失效，将重新挂载'],
@@ -251,7 +257,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
 
     function createTransport(fetcher = window.fetch.bind(window)) {
       return async (endpoint, payload, timeoutMs = 35000, signal) => {
-        if (!['open', 'poll', 'respond', 'close', 'activate', 'resume'].includes(endpoint)) throw failure('EINVAL', 'invalid endpoint')
+        if (!['open', 'poll', 'respond', 'close', 'activate', 'resume', 'allocate'].includes(endpoint)) throw failure('EINVAL', 'invalid endpoint')
         const controller = new AbortController()
         const abort = () => controller.abort()
         if (signal?.aborted) abort()
@@ -279,8 +285,10 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
     //
     // The stable key is the whole virtual mapping: the gateway mounts the folder at
     // <workspace>/browser/<key>, DSH reuses a workspace by that path, and so reconnecting the
-    // same local directory returns the same workspace id with the same sessions. Nothing here
-    // is resumed automatically: a mount belongs to a click.
+    // same local directory returns the same workspace id with the same sessions. The key is
+    // normally the LOCAL directory's own name, so that path also reads as the directory a
+    // person picked; see claimKey for how it is arbitrated and when it is a generated id
+    // instead. Nothing here is resumed automatically: a mount belongs to a click.
     const RECORD_DB = 'dshgw-browser-workspace'
     const RECORD_STORE = 'mounts'
     const RECORD_VERSION = 2
@@ -381,6 +389,8 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
     // The stable identity of one saved folder: 32 hex characters, generated once and kept with
     // the folder. It names the mount point, so it must stay the same for the lifetime of the
     // folder — that is what keeps the workspace (and its sessions) mapped to this directory.
+    // It is now the FALLBACK for a local directory whose own name cannot be a directory name
+    // or whose gateway does not hand out names; see mountName and claimKey.
     function newKey() {
       const uuid = globalThis.crypto?.randomUUID?.()
       if (typeof uuid === 'string') return uuid.replace(/-/g, '').slice(0, 32).toLowerCase()
@@ -388,6 +398,20 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes)
       else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256)
       return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+    }
+
+    // The mount directory name ONE local directory may own: the directory's own name, cleaned
+    // to the single safe path segment the gateway accepts. '' means this local name cannot be
+    // a directory name (hidden, padded, a control character, too long) and the caller must fall
+    // back to a generated key: a mount is never blocked by what somebody called their folder.
+    function mountName(localName) {
+      const name = typeof localName === 'string' ? localName.trim() : ''
+      if (name === '' || name === '.' || name === '..' || name.startsWith('.')) return ''
+      // 200 bytes, not 255: a name the gateway has to disambiguate still needs room for its
+      // suffix. Bytes, like the filesystem limit this mirrors.
+      if (new TextEncoder().encode(name).length > 200) return ''
+      if (/[/\\\u0000-\u001f\u007f]/.test(name)) return ''
+      return name
     }
 
     function apply(ctx) {
@@ -484,6 +508,49 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       })))
 
       // ── mount lifecycle ────────────────────────────────────────────────────────────
+      // claimKey names one saved folder's mount directory, ONCE, from the local directory's own
+      // name. It is the mount point, so the answer is kept forever: changing it later would move
+      // the path and orphan the workspace (and the sessions grouped under it) that this folder
+      // already has.
+      //
+      // `allocate` is what keeps two local directories of one account from silently becoming
+      // one path: a name whose directory already exists (a kept mount point outlives its mount)
+      // or that a live mount serves comes back suffixed. The step is advisory — identity here
+      // is the client's — so a gateway that does not know it, or an unusable local name, falls
+      // back to the generated key this feature always used. Mounting must never fail over a
+      // name.
+      const claimKey = async desired => {
+        let proposal = desired
+        for (let n = 2; folders.some(folder => folder.key === proposal) && n <= 9; n++) proposal = `${desired}-${n}`
+        try {
+          const answer = await call('allocate', { name: proposal }, 20000)
+          if (typeof answer?.key === 'string' && answer.key !== '') return answer.key
+        } catch (error) {
+          ctx.logger?.warn?.('browser-workspace: the gateway did not name this mount directory (' + (error?.message || error) + '); mounting under a generated key')
+        }
+        return newKey()
+      }
+      // releaseByKey releases a mount point WITHOUT a capability. It is the delete path for a
+      // saved folder whose token died with its mount (a gateway restart, the reconnect grace
+      // window, a reaped lease): a disconnect never removes a stable mount point, so without
+      // this the empty directory would stay in the account's container forever.
+      const releaseByKey = async folder => {
+        if (typeof folder.key !== 'string' || folder.key === '') return
+        try {
+          await call('close', { key: folder.key, purge: true }, 20000)
+        } catch (error) {
+          // A gateway that predates this endpoint answers "unknown directory capability" to a
+          // close with no token, and one that predates the key field refuses the field. Either
+          // way there is nothing more this page can do about that gateway's leftovers; the
+          // delete itself must still succeed.
+          const message = error?.message || String(error)
+          if (message.includes('unknown directory capability') || isUnknownField(error) || message.includes('unknown endpoint')) {
+            ctx.logger?.warn?.('browser-workspace: this gateway cannot release a mount point by key; a leftover mount directory may need manual removal')
+            return
+          }
+          throw error
+        }
+      }
       // disposeShare stops serving one mount locally (no gateway call): the poll loop ends,
       // and everything waiting on it fails at once.
       const dropShare = key => {
@@ -907,6 +974,24 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
             const released = await closeShare(folder, { purge: true })
             if (!released) return false
           }
+          // A saved folder whose token died with its mount (a gateway restart, the grace
+          // window, a reaped lease) has no capability left to close: its empty mount point is
+          // released by KEY, or it would stay in the account's container forever.
+          try {
+            await releaseByKey(folder)
+          } catch (error) {
+            // Never report a folder as removed while its directory is still bound to the
+            // workspace path it was mounted at: the operator keeps the entry and can delete
+            // again (the workspace registration is already gone; this is the path).
+            folder.state = 'error'
+            folder.retry = null
+            folder.error = `挂载目录未释放：${explain(error)}`
+            folder.note = `删除未完成：${explain(error)}；请再点一次删除`
+            await stash()
+            settle()
+            ctx.logger?.warn?.('browser-workspace: the mount point survived the folder deletion: ' + (error?.message || error))
+            return false
+          }
           if (unremoved !== null) {
             // Never report a folder as removed while its workspace row is still there: the
             // operator keeps the entry and can try again (the mount is already released).
@@ -975,6 +1060,14 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           return
         }
         const index = folders.indexOf(folder)
+        // The mount directory is named ONCE per folder, from the local directory's own name.
+        // Re-picking the directory of a SAVED folder (its grant was lost) therefore keeps the
+        // key it already has: that key is the path DSH's workspace entry, and the sessions
+        // grouped under it, point at.
+        if (folder.key === null) {
+          const desired = mountName(folder.name)
+          folder.key = desired === '' ? newKey() : await claimKey(desired)
+        }
         if (index < 0) folders.push(folder)
         await stash()
         await connect(folder)
@@ -1015,7 +1108,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       const addFolder = ({ autoClose = false } = {}) => {
         if (disposed || picking) return
         if (folders.length >= MAX_FOLDERS) { setStatus('failed', `最多保存 ${MAX_FOLDERS} 个目录：请先删除一个`); return }
-        const folder = { key: newKey(), id: null, name: '', handle: null, ready: false, workspaceId: null, token: null, mountpoint: null, at: 0, state: 'disconnected', note: '', error: '', retry: null, busy: null }
+        const folder = { key: null, id: null, name: '', handle: null, ready: false, workspaceId: null, token: null, mountpoint: null, at: 0, state: 'disconnected', note: '', error: '', retry: null, busy: null }
         chooseFolder(folder, { autoClose })
       }
       // ── what a click does ─────────────────────────────────────────────────────────
@@ -1257,6 +1350,6 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
     // `cannot get property "remote" without inject` inside a real DSH GUI (the same pair
     // @deepseek-ai/dsh-api-workspace-controller declares). A mocked ctx that hands the
     // plugin a ready-made `remote` object cannot catch this.
-    return { inject: ['slots', 'connection', 'remote', 'remote.workspace', 'uiWorkspace'], apply, createExecutor, checkRelativePath, createTransport, errorOf, createRecordStore, reopenHandle, recordIsFresh, newKey, MAX_FOLDERS, AUTO_CLOSE_MS, RECONNECT_GRACE_MS }
+    return { inject: ['slots', 'connection', 'remote', 'remote.workspace', 'uiWorkspace'], apply, createExecutor, checkRelativePath, createTransport, errorOf, createRecordStore, reopenHandle, recordIsFresh, newKey, mountName, MAX_FOLDERS, AUTO_CLOSE_MS, RECONNECT_GRACE_MS }
   },
 })

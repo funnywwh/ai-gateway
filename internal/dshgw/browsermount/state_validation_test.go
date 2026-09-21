@@ -36,7 +36,7 @@ func TestCleanupStaleRejectsMaliciousRecords(t *testing.T) {
 			}
 			defer s.ReleaseLock()
 			r := mountRecord{ID: id, Tenant: tenant.Name, Workspace: workspace, Path: path, State: "ready"}
-			filename := s.recordPath(id)
+			filename := s.recordPath(tenant.Name, id)
 			outside := filepath.Join(base, "untouched")
 			if err := os.WriteFile(outside, []byte("sentinel"), 0600); err != nil {
 				t.Fatal(err)
@@ -57,7 +57,7 @@ func TestCleanupStaleRejectsMaliciousRecords(t *testing.T) {
 			case "wrong-path":
 				r.Path = outside
 			case "wrong-filename":
-				filename = s.recordPath(strings.Repeat("b", 48))
+				filename = s.recordPath(tenant.Name, strings.Repeat("b", 48))
 			case "invalid-state":
 				r.State = "other"
 			case "symlink-mountpoint":
@@ -137,7 +137,7 @@ func TestCleanupStaleRetriesRecordWithoutMount(t *testing.T) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("stale empty directory remains", err)
 	}
-	if _, err := os.Stat(s.recordPath(id)); !os.IsNotExist(err) {
+	if _, err := os.Stat(s.recordPath(tenant.Name, id)); !os.IsNotExist(err) {
 		t.Fatal("stale record remains", err)
 	}
 }

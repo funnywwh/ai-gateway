@@ -5,10 +5,11 @@ only activates the client package: the **gateway**, not the tenant Node worker,
 owns authenticated reverse HTTP, request queues, FUSE mounts and worker restarts.
 
 One account can have **several local directories** mounted at once. Each one is a *folder*
-here: a saved entry (a stable key, the directory handle it was granted, and the workspace it
-maps to) that is either connected or not. The sidebar row is the entry point — one click does
-the obvious thing — and the icon at its right opens the folder list, where a person adds,
-connects, disconnects and deletes folders.
+here: a saved entry (a stable key — the local directory's own name, so the mount point reads as
+the directory a person picked — the directory handle it was granted, and the workspace it maps
+to) that is either connected or not. The sidebar row is the entry point — one click does the
+obvious thing — and the icon at its right opens the folder list, where a person adds, connects,
+disconnects and deletes folders.
 
 ## Gateway HTTP contract
 
@@ -18,32 +19,55 @@ same-origin credentials; redirects are rejected. Responses are
 
 | Endpoint | Payload | Value |
 | --- | --- | --- |
+| `allocate` | `{name}` | `{key}` — the mount directory name this local directory may own |
 | `open` | `{name,writable:true,key?}` | `{token,mountpoint,id}` (mount pending) |
 | `poll` | `{token}` | `{requests:[{id,op,path,offset?,size?,data?,target?,exclusive?,truncate?}]}` |
 | `respond` | `{token,id,result:{ok,value?,error?}}` | acknowledgement |
 | `activate` | `{token}` | `{mountpoint,id}` after mount/worker restart |
 | `resume` | `{token}` | `{id,mountpoint,resumed}` — takes an existing mount back |
-| `close` | `{token,purge?}` | acknowledgement |
+| `close` | `{token,purge?}` or `{key,purge:true}` | acknowledgement |
 
-`key` is the folder's **stable directory key**: 32 lowercase hex characters, generated once by
-the client and kept with the folder. The gateway mounts that folder at
-`<workspace>/browser/<key>`, so the same local directory always mounts at the same virtual
-path. A key another share still holds — serving, or waiting out its reconnect grace — is
-refused (`directory key already mounted for this account`) instead of mounted twice; a key
-without one gets a fresh random id (an older client), whose mount point is per-mount scratch.
+`key` is the folder's **stable directory key**: the LOCAL directory's own name (`aosp`,
+`My Docs`), arbitrated once by the client through `allocate` and kept with the folder. The
+gateway mounts that folder at `<workspace>/browser/<key>`, so the same local directory always
+mounts at the same virtual path — and that path reads as the directory a person picked. The key
+must be exactly ONE safe path segment (1..255 bytes, not `.`/`..`, not hidden, no separator, no
+control character, no surrounding whitespace); anything else is refused rather than sanitised.
+A key another share still holds — serving, or waiting out its reconnect grace — is refused
+(`directory key already mounted for this account`) instead of mounted twice. A key the client
+does not send gets a fresh random id (an older client), whose mount point is per-mount scratch.
+
+`allocate` is the client's step before a saved folder's FIRST mount, and it is deliberately
+advisory rather than a reservation: this gateway can only see what it can see. It answers with
+the requested name, or `-2`..`-9` (then an opaque tail) while that name is already a directory
+under the account's container — a stable mount point outlives its mount — or is held by a live
+mount. Identity here is client-owned (the key IS the virtual path), so a name is only "taken"
+once some local directory has actually mounted with it; an unusable proposal is answered with a
+generated id, because a mount must never fail over what somebody called their folder. The
+arbitration covers the case a single browser cannot see: two devices signed into one account,
+each with a local directory called `work`, would otherwise become one path, one workspace and
+one session list. The legacy 32/48-hex ids pass the same key rule, so a folder saved before
+directory names keeps its path, its workspace entry and its sessions.
 
 `purge` on `close` is the operator removing the folder for good: the mount point and its record
 are released instead of kept for the next mount of that key. A plain `close` keeps the empty
 mount point, because that directory *is* the virtual path the account's own workspace entry
-points at.
+points at. `close` with `key` and no `token` is the same release for a folder whose capability
+died with its mount (a gateway restart, the grace window, a reaped lease): without it that empty
+directory would stay in the account's container forever. It removes only a direct, empty,
+private, symlink-free child of the account's own `browser` container, and refuses while any live
+share of that account still holds the key (`directory is still mounted`) — reusing a key is
+normal, and the release must never delete the directory a live mount is serving.
 
-**A gateway that predates this client** rejects both extra fields outright (its JSON decoder
-runs with `DisallowUnknownFields`), so a page loaded just before a gateway restart would lose
-the ability to mount at all. The client recognises that one answer and degrades instead of
-failing: `open` is retried without the key (the mount works, at the old per-mount path, and a
-warning says so) and a `purge` that is refused falls back to a plain close (an older gateway
-removes every mount point itself). Pages already open keep working across a rolling restart;
-a reload picks up the new bundle and the stable keys.
+**A gateway that predates this client** rejects the extra fields outright (its JSON decoder runs
+with `DisallowUnknownFields`) and has no `allocate` endpoint, so a page loaded just before a
+gateway restart would lose the ability to mount at all. The client recognises those answers and
+degrades instead of failing: the folder mounts under a generated key (the behaviour this feature
+always had), `open` is retried without the key if the gateway refuses it, a `purge` that is
+refused falls back to a plain close (an older gateway removes every mount point itself), and a
+key release that gateway cannot answer is reported as a warning without blocking the delete.
+Pages already open keep working across a rolling restart; a reload picks up the new bundle and
+the local directory names.
 
 The client starts poll **before** activate and continues during worker restart. Activate and close use 55-second client timeouts to accommodate a 45-second worker
 restart; other requests time out at 35 seconds. Gateway poll must return within
@@ -104,8 +128,10 @@ The list is keyed by the tenant origin and holds one record per folder:
 { version: 2, key, name, workspaceId, token, mountpoint, at, handle }
 ```
 
-* `key` — the stable directory key (32 hex). It names the mount point, so it is the
-  mapping; it never changes for a folder, not even when the directory is re-picked.
+* `key` — the stable directory key: the local directory's own name. It names the mount point,
+  so it is the mapping; it never changes for a folder, not even when the directory is re-picked.
+  It is generated (32 hex) only when the local name cannot be a directory name or the gateway
+  cannot arbitrate it, and it is the old random id for a folder saved before directory names.
 * `handle` — a `FileSystemDirectoryHandle` stored in IndexedDB is a REAL handle again in the
   next document, and a granted `readwrite` permission survives the reload (measured in
   Chromium: `queryPermission` returns `granted` with no user gesture, and reads and writes both
@@ -184,8 +210,11 @@ credentials. A secure context and File System Access browser support are still r
 Up to 8 folders may be SAVED per browser profile. How many may be MOUNTED at once is the
 gateway's bound (currently 4 per account, and one long-poll connection per mount from the
 page); exceeding it is reported in the window in words the operator can act on. Deleting a
-folder releases its virtual path and its workspace entry; disconnecting keeps both, which is
-what makes "reconnect" return to the same workspace with the same sessions.
+folder releases its virtual path (by capability when it still has one, by key when it does not)
+and its workspace entry; disconnecting keeps both, which is what makes "reconnect" return to
+the same workspace with the same sessions. A deletion is reported as done only when both halves
+really happened: a path that is still mounted elsewhere, or a workspace row that survived,
+keeps the folder in the list with the reason.
 
 FSA is not a complete POSIX filesystem: hard links, symlinks, chmod, ownership,
 real directory timestamps and reliable external-writer exclusion are unavailable.
@@ -236,8 +265,8 @@ node --test cmd/dshgw/plugin/browser-workspace/*.test.mjs
 
 `harness.mjs` is the one fake browser the behaviour tests share: IndexedDB with real request
 ordering, a picker that answers with whichever directories the test queues, a stateful fake
-gateway that hands out one capability per mounted key, and the DSH services the plugin
-injects. On top of it:
+gateway that hands out one capability per mounted key (and arbitrates mount directory names the
+way the real one does), and the DSH services the plugin injects. On top of it:
 
 - `client.test.mjs`, `limits.test.mjs`, `large-block.test.mjs` — the executor: binary
   roundtrips/offsets/sparse writes, create flags, truncation, serialization,
@@ -250,7 +279,10 @@ injects. On top of it:
 - `manage.test.mjs` — several directories: adding two, mounting each at its own key, the
   adaptive row click, disconnecting one while the other keeps serving, reconnecting at the
   same path and workspace, the two-step deletion, the per-account limit in words, a
-  duplicate directory in the list, and a re-picked directory keeping its key.
+  duplicate directory in the list, a re-picked directory keeping its key, the name
+  arbitration (a name the account already holds comes back suffixed, two same-named local
+  directories stay two paths, an unusable local name still mounts), the release by key of a
+  folder whose capability is gone, and a refused release that is reported instead of faked.
 - `reconnect.test.mjs` — what survives a page: offering a stored mount without opening the
   picker, a withdrawn grant, a refused resume falling back to the same directory, an expired
   capability that keeps the folder, an in-page reconnect, and a browser tab that serves the
