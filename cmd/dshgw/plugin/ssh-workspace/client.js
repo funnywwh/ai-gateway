@@ -41,9 +41,15 @@ window.__ModuleLoader__.load({
       if (selected && (!/^\d+$/.test(selected) || Number(selected) < 1 || Number(selected) > 65535)) throw new Error('SSH 端口必须为 1..65535')
       return `${user ? `${user}@` : ''}${m[2]}${selected ? `:${Number(selected)}` : ''}`
     }
+    // Every colour below is a DSH theme token, never a literal. The shell's ThemePresenter
+    // writes the palette onto `body` as custom properties and toggles `body[data-ds-dark-theme]`,
+    // so `--dsw-alias-*` resolves per scheme and this dialog follows 外观 without a reload.
+    // The previous version asked for `--dsh-bg`/`--dsh-fg`, which DSH never defines: both
+    // always fell back to the hardcoded dark pair, which is exactly why 浅色 was ignored.
+    // Each var() keeps a neutral fallback for a host whose theme plugin is not loaded.
     const CSS = `
 .dshgw-ssh-action { display: flex; align-items: center; gap: 6px; width: 100%; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; padding: 6px 8px; border-radius: 6px; }
-.dshgw-ssh-action:hover { background: rgba(127,127,127,.14); }
+.dshgw-ssh-action:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.14)); }
 .dshgw-ssh-action-rail .dshgw-ssh-label { display: none; }
 /* The shell renders this whole slot as one flex ROW, which leaves this row and the
    browser-workspace one sharing a foot that only fits one. A plugin owns no wrapper element
@@ -57,31 +63,47 @@ div:has(> .dshgw-bw-row), div:has(> div > .dshgw-bw-row),
 div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-direction: column; }
 /* flex-start, not center: a dialog that grows and shrinks while someone types must not
    re-centre itself, or the field under the cursor moves. The gutter is reserved for the same
-   reason — a scrollbar appearing changes the content width and re-wraps every line. */
-.dshgw-ssh-backdrop { position: fixed; inset: 0; display: flex; align-items: flex-start; justify-content: center; padding: 5vh 0; background: rgba(0,0,0,.45); z-index: 40; }
-.dshgw-ssh-dialog { width: min(720px, 92vw); max-height: 86vh; overflow: auto; scrollbar-gutter: stable; background: var(--dsh-bg, #1b1c1f); color: var(--dsh-fg, #e6e6e6); border: 1px solid rgba(127,127,127,.35); border-radius: 10px; padding: 16px 18px; font-size: 13px; line-height: 1.5; }
+   reason — a scrollbar appearing changes the content width and re-wraps every line.
+   absolute, not fixed: this entry renders inside the shell's shell.overlay layer, which is
+   itself absolute/inset:0/z-index:20 inside the overflow:hidden frame. A fixed backdrop would
+   escape that frame and ignore its clipping; absolute keeps the dim layer exactly over the
+   app frame the overlay belongs to, and the layer owns the stacking order, so this rule must
+   not compete with its own z-index. */
+.dshgw-ssh-backdrop { position: absolute; inset: 0; display: flex; align-items: flex-start; justify-content: center; padding: 5vh 0; background: var(--dsw-alias-bg-mask-1, rgba(0,0,0,.45)); }
+.dshgw-ssh-dialog { position: relative; width: min(720px, 92vw); max-height: 86vh; overflow: auto; scrollbar-gutter: stable; background: var(--dsw-alias-bg-layer-2, #1b1c1f); color: var(--dsw-alias-label-primary, #e6e6e6); border: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.35)); border-radius: 10px; padding: 16px 18px; font-size: 13px; line-height: 1.5; }
+/* The close button, pinned to the dialog's top-right corner: the panel is the scroll
+   container, so sticky/top:0 keeps the button in view while a long form (host list,
+   identity section, mounts) scrolls under it. The negative margins pull the bar out to the
+   panel's own edge — the panel's padding is symmetric, so the glyph lands in the corner
+   instead of floating inside the content column — and the matching padding plus the panel
+   background give the bar a solid backing, so scrolled content never shows through it. */
+.dshgw-ssh-closebar { position: sticky; top: -16px; z-index: 1; display: flex; justify-content: flex-end; margin: -16px -18px 0; padding: 8px 18px 4px; background: var(--dsw-alias-bg-layer-2, #1b1c1f); }
+.dshgw-ssh-close { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; line-height: 1; font-size: 16px; border-radius: 6px; }
 .dshgw-ssh-dialog h2 { margin: 0 0 4px; font-size: 15px; }
-.dshgw-ssh-dialog p.hint { margin: 0 0 12px; opacity: .7; }
+.dshgw-ssh-dialog p.hint { margin: 0 0 12px; color: var(--dsw-alias-label-secondary, #b8b8b8); }
 .dshgw-ssh-row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
-.dshgw-ssh-row label { min-width: 68px; opacity: .8; }
-.dshgw-ssh-dialog input[type=text] { flex: 1; background: rgba(0,0,0,.25); color: inherit; border: 1px solid rgba(127,127,127,.4); border-radius: 6px; padding: 6px 8px; font: inherit; }
-.dshgw-ssh-dialog button { background: rgba(127,127,127,.18); color: inherit; border: 1px solid rgba(127,127,127,.35); border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; }
+.dshgw-ssh-row label { min-width: 68px; color: var(--dsw-alias-label-secondary, #b8b8b8); }
+.dshgw-ssh-dialog input[type=text] { flex: 1; background: var(--dsw-alias-bg-base, rgba(0,0,0,.25)); color: inherit; border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.4)); border-radius: 6px; padding: 6px 8px; font: inherit; }
+.dshgw-ssh-dialog button { background: var(--dsw-alias-bg-overlay, rgba(127,127,127,.18)); color: inherit; border: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.35)); border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; }
+.dshgw-ssh-dialog button:hover:not([disabled]) { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.28)); }
 .dshgw-ssh-dialog button[disabled] { opacity: .5; cursor: default; }
-.dshgw-ssh-dialog button.primary { background: #2f6feb; border-color: #2f6feb; color: #fff; }
-.dshgw-ssh-list { border: 1px solid rgba(127,127,127,.3); border-radius: 6px; max-height: 220px; overflow: auto; margin: 6px 0; }
-.dshgw-ssh-item { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 4px 8px; border-bottom: 1px solid rgba(127,127,127,.14); }
+.dshgw-ssh-dialog button.primary { background: var(--dsw-alias-button-primary-fill, #2f6feb); border-color: var(--dsw-alias-button-primary-fill, #2f6feb); color: var(--dsw-alias-label-primary-foreground, #fff); }
+.dshgw-ssh-list { border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.3)); border-radius: 6px; max-height: 220px; overflow: auto; margin: 6px 0; }
+.dshgw-ssh-item { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 4px 8px; border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.14)); }
 .dshgw-ssh-item:last-child { border-bottom: 0; }
 .dshgw-ssh-item button { padding: 2px 8px; }
-.dshgw-ssh-crumbs { display: flex; flex-wrap: wrap; gap: 4px; opacity: .85; margin: 4px 0; }
+.dshgw-ssh-crumbs { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
 .dshgw-ssh-crumbs button { padding: 2px 6px; }
-.dshgw-ssh-error { border: 1px solid #b3453c; background: rgba(179,69,60,.18); border-radius: 6px; padding: 8px 10px; margin: 8px 0; white-space: pre-wrap; }
-.dshgw-ssh-notice { border: 1px solid #3a7d44; background: rgba(58,125,68,.18); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
-.dshgw-ssh-muted { opacity: .65; }
+/* Semantic state colours, not literals: the tint is mixed from the token so it lands on the
+   right side of the active palette instead of staying a dark-theme red on a light panel. */
+.dshgw-ssh-error { border: 1px solid var(--dsw-alias-state-error-primary, #b3453c); background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #b3453c) 18%, transparent); border-radius: 6px; padding: 8px 10px; margin: 8px 0; white-space: pre-wrap; }
+.dshgw-ssh-notice { border: 1px solid var(--dsw-alias-state-success-primary, #3a7d44); background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #3a7d44) 18%, transparent); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
+.dshgw-ssh-muted { color: var(--dsw-alias-label-secondary, #b8b8b8); }
 /* Two lines are reserved for the identity status: its text changes length as the host does,
    and a section that grows and shrinks moves everything under it. */
 .dshgw-ssh-status { min-height: 2.8em; overflow-wrap: anywhere; }
 .dshgw-ssh-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
-.dshgw-ssh-section { margin-top: 14px; border-top: 1px solid rgba(127,127,127,.25); padding-top: 10px; }
+.dshgw-ssh-section { margin-top: 14px; border-top: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.25)); padding-top: 10px; }
 `
 
     /** Tiny observable store shared by the two slots (they are separate registrations). */
@@ -260,6 +282,26 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           clearTimeout(identityTimer)
           identityTimer = null
         }
+        detachEscape()
+      }
+
+      // Escape is the third way out, next to the corner button and the backdrop click. The
+      // listener is attached only while the dialog is open — a page-wide keydown that stays
+      // registered would swallow Escape for whatever the person does next — and removing it is
+      // idempotent, so closeDialog can call it from any path and the dispose hook can too.
+      let escapeAttached = false
+      const onEscape = (event) => {
+        if (event.key === 'Escape') closeDialog()
+      }
+      const attachEscape = () => {
+        if (escapeAttached || typeof window.addEventListener !== 'function') return
+        escapeAttached = true
+        window.addEventListener('keydown', onEscape)
+      }
+      const detachEscape = () => {
+        if (!escapeAttached || typeof window.removeEventListener !== 'function') return
+        escapeAttached = false
+        window.removeEventListener('keydown', onEscape)
       }
 
       const probe = async () => {
@@ -428,6 +470,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           'aria-pressed': current.open,
           onClick: async () => {
             patch({ open: true, error: '', notice: '' })
+            attachEscape()
             try {
               await refreshHosts()
               await refreshMounts()
@@ -652,6 +695,18 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
             if (event.target === event.currentTarget) closeDialog()
           },
         }, h('div', { className: 'dshgw-ssh-dialog' }, [
+          // Pinned to the panel's top-right corner (sticky, see the stylesheet): one glance
+          // away from the form, always reachable however far the content scrolls. The bottom
+          // 关闭 stays where it always was — this is an addition, not a replacement.
+          h('div', { className: 'dshgw-ssh-closebar', key: 'closebar' },
+            h('button', {
+              type: 'button',
+              className: 'dshgw-ssh-close',
+              'data-dshgw-close': 'ssh-workspace',
+              'aria-label': '关闭',
+              title: '关闭',
+              onClick: closeDialog,
+            }, '×')),
           h('h2', { key: 'title' }, 'SSH 工作区'),
           h('p', { className: 'hint', key: 'hint' }, current.identity
             ? '用本账号的 ssh 身份浏览远端目录，并把选中的目录挂到本账号的工作区里。挂载由网关执行，完成后该账号的 DSH 会重载。'
@@ -694,6 +749,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
         pollTimer = null
         if (identityTimer !== null) clearTimeout(identityTimer)
         identityTimer = null
+        detachEscape()
       }, 'ssh-workspace: poll cleanup')
 
       ctx.logger?.info?.('ssh-workspace: client surface registered')

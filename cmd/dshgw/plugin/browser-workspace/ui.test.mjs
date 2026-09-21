@@ -272,3 +272,55 @@ test('a browser without the File System Access API fails on the row, and never m
   assert.deepEqual(ui.savedFolders(), [])
   await ui.dispose()
 })
+
+test('the window follows 外观, and the corner button closes it', async () => {
+  const ui = setup({ pickerDirs: [fakeHandle({ name: 'local' })] })
+  const css = ui.styles()[0].textContent
+  // The palette is DSH's, not this plugin's: the shell's ThemePresenter writes --dsw-alias-*
+  // onto `body` and toggles body[data-ds-dark-theme], so a token-only stylesheet is what
+  // makes the window follow the theme. The old one asked for --dsh-bg/--dsh-fg, which DSH
+  // never defines — both always fell back to the hardcoded dark pair, so 浅色 was ignored.
+  assert.doesNotMatch(css, /--dsh-bg|--dsh-fg/, 'the window no longer asks for the nonexistent --dsh-* palette')
+  for (const token of ['--dsw-alias-bg-layer-2', '--dsw-alias-label-primary', '--dsw-alias-bg-mask-1']) {
+    assert.ok(css.includes(token), `the stylesheet uses the theme token ${token}`)
+  }
+  // The dark literals may survive ONLY as a var() fallback for a host without the theme
+  // plugin; as a direct value they would pin the window to dark again.
+  for (const literal of ['#1b1c1f', '#e6e6e6']) {
+    if (!css.includes(literal)) continue
+    assert.match(css, new RegExp('var\\([^)]*' + literal + '\\)'),
+      `${literal} appears only inside a var() fallback`)
+    assert.doesNotMatch(css, new RegExp('(?:^|[;{ ])' + literal + '(?:[; }]|$)', 'm'),
+      `${literal} is never used as a direct value`)
+  }
+  // The overlay layer is absolute/inset:0 inside the overflow:hidden frame; a fixed backdrop
+  // would escape the frame it belongs to, and the layer owns the stacking order.
+  assert.match(css, /\.dshgw-bw-backdrop \{[^}]*position: absolute/,
+    'the backdrop fills the shell overlay layer instead of the viewport')
+  assert.doesNotMatch(css, /\.dshgw-bw-backdrop \{[^}]*position: fixed/,
+    'the backdrop no longer escapes the app frame with position:fixed')
+  assert.doesNotMatch(css, /\.dshgw-bw-backdrop \{[^}]*z-index/,
+    'the backdrop leaves the stacking order to the shell overlay layer')
+  // Pinned to the top-right of the panel, which is the scroll container.
+  assert.match(css, /\.dshgw-bw-closebar \{[^}]*position: sticky/,
+    'the corner close button stays pinned while the window scrolls')
+  assert.match(css, /\.dshgw-bw-closebar \{[^}]*justify-content: flex-end/,
+    'the close bar pins the button to the right edge')
+
+  // The button exists, is accessible, and closes by the same path as the footer button.
+  ui.clickRow()
+  await mounted(ui)
+  assert.equal(ui.dialogOpen(), true, 'the window is open')
+  const button = ui.dialogClose()
+  assert.ok(button !== null, 'the window renders a corner close button')
+  assert.equal(button.type, 'button')
+  assert.equal(button.props['aria-label'], '关闭')
+  assert.equal(button.props.title, '关闭')
+  assert.match(classOf(button), /dshgw-bw-close\b/)
+  assert.ok(ui.dialogButtons().includes('×'), 'the corner close is the × control')
+  assert.equal(ui.keyListenerCount(), 1, 'the open window listens for Escape')
+  ui.pressKey('Escape')
+  assert.equal(ui.dialogOpen(), false, 'Escape closes the window')
+  assert.equal(ui.keyListenerCount(), 0, 'closing removes the Escape listener')
+  await ui.dispose()
+})

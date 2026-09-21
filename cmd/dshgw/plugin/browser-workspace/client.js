@@ -168,36 +168,55 @@ window.__ModuleLoader__.load({
     // action) and the folder icon at its right (the list window). The shell renders this slot
     // as one flex ROW, so the stacking rule at the bottom of this stylesheet is what keeps the
     // browser row and the ssh-workspace row on separate lines.
+    // Every colour below is a DSH theme token, never a literal. The shell's ThemePresenter
+    // writes the palette onto `body` as custom properties and toggles `body[data-ds-dark-theme]`,
+    // so `--dsw-alias-*` resolves per scheme and this window follows 外观 without a reload.
+    // The previous version asked for `--dsh-bg`/`--dsh-fg`, which DSH never defines: both
+    // always fell back to the hardcoded dark pair, which is exactly why 浅色 was ignored.
+    // Each var() keeps a neutral fallback for a host whose theme plugin is not loaded.
     const CSS = `
 .dshgw-bw-row { display: flex; align-items: center; gap: 2px; width: 100%; min-width: 0; }
 .dshgw-bw-action { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; padding: 6px 8px; border-radius: 6px; text-align: left; }
-.dshgw-bw-action:hover { background: rgba(127,127,127,.14); }
+.dshgw-bw-action:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.14)); }
 .dshgw-bw-action[aria-pressed="true"] .dshgw-bw-label { font-weight: 600; }
 .dshgw-bw-label { flex: none; white-space: nowrap; }
-.dshgw-bw-state { flex: 1 1 auto; min-width: 0; margin-left: 4px; opacity: .65; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dshgw-bw-manage { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border: 0; border-radius: 6px; background: none; color: inherit; font: inherit; font-size: 14px; line-height: 1; cursor: pointer; opacity: .7; }
-.dshgw-bw-manage:hover { background: rgba(127,127,127,.18); opacity: 1; }
+.dshgw-bw-state { flex: 1 1 auto; min-width: 0; margin-left: 4px; color: var(--dsw-alias-label-secondary, #b8b8b8); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dshgw-bw-manage { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border: 0; border-radius: 6px; background: none; color: var(--dsw-alias-label-secondary, #b8b8b8); font: inherit; font-size: 14px; line-height: 1; cursor: pointer; }
+.dshgw-bw-manage:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.18)); color: var(--dsw-alias-label-primary, #e6e6e6); }
 .dshgw-bw-row-rail .dshgw-bw-label, .dshgw-bw-row-rail .dshgw-bw-state, .dshgw-bw-row-rail .dshgw-bw-manage { display: none; }
-.dshgw-bw-backdrop { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.45); z-index: 40; }
-.dshgw-bw-dialog { width: min(600px, 92vw); max-height: 86vh; overflow: auto; background: var(--dsh-bg, #1b1c1f); color: var(--dsh-fg, #e6e6e6); border: 1px solid rgba(127,127,127,.35); border-radius: 10px; padding: 16px 18px; font-size: 13px; line-height: 1.5; }
+/* absolute, not fixed, and no z-index: this window renders inside the shell's shell.overlay
+   layer, itself absolute/inset:0/z-index:20 within the overflow:hidden app frame. A fixed
+   backdrop would escape the frame it belongs to; absolute keeps the dim layer over the frame,
+   and the layer owns the stacking order, so competing with its z-index would be wrong. */
+.dshgw-bw-backdrop { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--dsw-alias-bg-mask-1, rgba(0,0,0,.45)); }
+.dshgw-bw-dialog { position: relative; width: min(600px, 92vw); max-height: 86vh; overflow: auto; background: var(--dsw-alias-bg-layer-2, #1b1c1f); color: var(--dsw-alias-label-primary, #e6e6e6); border: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.35)); border-radius: 10px; padding: 16px 18px; font-size: 13px; line-height: 1.5; }
+/* The close button, pinned to the panel's top-right corner. The panel is the scroll container,
+   so sticky/top:0 keeps it in view while the folder list scrolls under it. The negative
+   margins reach the panel's own edge (its padding is symmetric) and the matching padding
+   gives the bar a solid backing over the panel colour, so nothing shows through as it scrolls. */
+.dshgw-bw-closebar { position: sticky; top: -16px; z-index: 1; display: flex; justify-content: flex-end; margin: -16px -18px 0; padding: 8px 18px 4px; background: var(--dsw-alias-bg-layer-2, #1b1c1f); }
+.dshgw-bw-close { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; line-height: 1; font-size: 16px; border-radius: 6px; }
 .dshgw-bw-dialog h2 { margin: 0 0 4px; font-size: 15px; }
-.dshgw-bw-dialog p.hint { margin: 0 0 12px; opacity: .7; }
-.dshgw-bw-dialog button { background: rgba(127,127,127,.18); color: inherit; border: 1px solid rgba(127,127,127,.35); border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; }
+.dshgw-bw-dialog p.hint { margin: 0 0 12px; color: var(--dsw-alias-label-secondary, #b8b8b8); }
+.dshgw-bw-dialog button { background: var(--dsw-alias-bg-overlay, rgba(127,127,127,.18)); color: inherit; border: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.35)); border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; }
+.dshgw-bw-dialog button:hover:not([disabled]) { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.28)); }
 .dshgw-bw-dialog button[disabled] { opacity: .5; cursor: default; }
 .dshgw-bw-status { margin: 8px 0; }
-.dshgw-bw-error { border: 1px solid #b3453c; background: rgba(179,69,60,.18); border-radius: 6px; padding: 8px 10px; margin: 8px 0; white-space: pre-wrap; }
-.dshgw-bw-notice { border: 1px solid #3a7d44; background: rgba(58,125,68,.18); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
-.dshgw-bw-muted { opacity: .65; }
-.dshgw-bw-folders { border: 1px solid rgba(127,127,127,.3); border-radius: 6px; margin: 8px 0; }
-.dshgw-bw-folder { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-bottom: 1px solid rgba(127,127,127,.14); }
+/* Semantic state colours, not literals: the tint is mixed from the token so it lands on the
+   right side of the active palette instead of staying a dark-theme red on a light panel. */
+.dshgw-bw-error { border: 1px solid var(--dsw-alias-state-error-primary, #b3453c); background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #b3453c) 18%, transparent); border-radius: 6px; padding: 8px 10px; margin: 8px 0; white-space: pre-wrap; }
+.dshgw-bw-notice { border: 1px solid var(--dsw-alias-state-success-primary, #3a7d44); background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #3a7d44) 18%, transparent); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
+.dshgw-bw-muted { color: var(--dsw-alias-label-secondary, #b8b8b8); }
+.dshgw-bw-folders { border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.3)); border-radius: 6px; margin: 8px 0; }
+.dshgw-bw-folder { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.14)); }
 .dshgw-bw-folder:last-child { border-bottom: 0; }
 .dshgw-bw-folder-name { min-width: 0; display: flex; flex-direction: column; }
 .dshgw-bw-folder-name > span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dshgw-bw-folder-state { opacity: .65; font-size: 12px; }
+.dshgw-bw-folder-state { color: var(--dsw-alias-label-secondary, #b8b8b8); font-size: 12px; }
 .dshgw-bw-folder-actions { flex: none; display: flex; gap: 6px; }
 .dshgw-bw-folder-actions button { padding: 3px 8px; }
-.dshgw-bw-folder-error { color: #e08078; font-size: 12px; }
-.dshgw-bw-empty { padding: 10px; opacity: .7; }
+.dshgw-bw-folder-error { color: var(--dsw-alias-state-error-primary, #e08078); font-size: 12px; }
+.dshgw-bw-empty { padding: 10px; color: var(--dsw-alias-label-secondary, #b8b8b8); }
 .dshgw-bw-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 /* The shell renders this whole slot as one flex ROW, which leaves two entries sharing a foot
    that only fits one — so each of them is squeezed to half width. A plugin owns no wrapper
@@ -440,11 +459,28 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       const setStatus = (phase, text) => { status = { phase, text }; notify() }
       const entryTitle = () => `浏览器工作区：${WARNING}${status.text === '' ? '' : `（当前：${status.text}）`}`
       const clearAutoClose = () => { if (autoCloseTimer !== null) { clearTimeout(autoCloseTimer); autoCloseTimer = null } }
-      const closeDialog = () => { clearAutoClose(); dialogOpen = false; dialogAutoCloses = false; notify() }
+      // Escape is the third way out, next to the corner button and the backdrop click. The
+      // listener is attached only while the window is open: a page-wide keydown left
+      // registered would swallow Escape for whatever the person does next. Removing it is
+      // idempotent, so closeDialog can call it from any path and dispose can call it too.
+      let escapeAttached = false
+      const onEscape = event => { if (event.key === 'Escape') closeDialog() }
+      const attachEscape = () => {
+        if (escapeAttached || typeof window.addEventListener !== 'function') return
+        escapeAttached = true
+        window.addEventListener('keydown', onEscape)
+      }
+      const detachEscape = () => {
+        if (!escapeAttached || typeof window.removeEventListener !== 'function') return
+        escapeAttached = false
+        window.removeEventListener('keydown', onEscape)
+      }
+      const closeDialog = () => { clearAutoClose(); dialogOpen = false; dialogAutoCloses = false; detachEscape(); notify() }
       const openDialog = ({ autoClose = false } = {}) => {
         clearAutoClose()
         dialogOpen = true
         dialogAutoCloses = autoClose
+        attachEscape()
         notify()
       }
       // A person who just watched the mount finish has nothing left to answer, so that one
@@ -1255,6 +1291,18 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           'data-dshgw-dialog': 'browser-workspace',
           onClick: (event) => { if (event.target === event.currentTarget) closeDialog() },
         }, React.createElement('div', { className: 'dshgw-bw-dialog' }, [
+          // Pinned to the panel's top-right corner (sticky, see the stylesheet): always
+          // reachable however far the folder list scrolls. The footer 关闭 stays where it
+          // always was — this is an addition, not a replacement.
+          React.createElement('div', { className: 'dshgw-bw-closebar', key: 'closebar' },
+            React.createElement('button', {
+              type: 'button',
+              className: 'dshgw-bw-close',
+              'data-dshgw-close': 'browser-workspace',
+              'aria-label': '关闭',
+              title: '关闭',
+              onClick: closeDialog,
+            }, '×')),
           React.createElement('h2', { key: 'title' }, '浏览器工作区'),
           React.createElement('p', { className: 'hint', key: 'hint' }, WARNING),
           React.createElement('div', {
@@ -1327,6 +1375,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       ctx.effect(() => () => {
         disposed = true
         clearAutoClose()
+        detachEscape()
         if (armedTimer !== null) { clearTimeout(armedTimer); armedTimer = null }
         for (const key of [...shares.keys()]) {
           const share = shares.get(key)

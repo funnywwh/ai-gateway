@@ -185,10 +185,15 @@ export function setup (options = {}) {
     handle.name = name
     return handle
   }
+  const keyListeners = {}
   const window = {
     isSecureContext: !noPicker,
     location: { origin: ORIGIN },
     indexedDB,
+    // A minimal keydown bus: the plugin attaches its Escape listener here while the window
+    // is open, so a test can drive that path exactly as a browser would.
+    addEventListener (type, handler) { (keyListeners[type] ||= new Set()).add(handler) },
+    removeEventListener (type, handler) { keyListeners[type]?.delete(handler) },
     confirm (text) { confirmText = text; events.push('confirm'); return true },
     showDirectoryPicker (pickerOptions) {
       events.push('picker')
@@ -421,8 +426,22 @@ export function setup (options = {}) {
     rowPressed: () => body()?.props?.['aria-pressed'] ?? null,
     rowChildren: () => body()?.children ?? [],
     styles: () => styles,
+    keyListenerCount: () => Object.values(keyListeners).reduce((n, set) => n + set.size, 0),
+    pressKey: (key) => {
+      for (const handler of [...(keyListeners.keydown ?? [])]) handler({ key })
+    },
     clickRow: () => body().props.onClick(),
     clickManage: () => manage().props.onClick(),
+    dialogClose: () => {
+      let button = null
+      walk(dialogElement(), node => { if (button === null && node?.props?.['data-dshgw-close'] !== undefined) button = node })
+      return button
+    },
+    clickDialogClose: () => {
+      const button = dialogClose()
+      if (button === null) throw new Error('no corner close button')
+      return button.props.onClick()
+    },
     // window
     dialogElement,
     dialogOpen: () => dialogElement() !== null,

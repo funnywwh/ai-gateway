@@ -416,6 +416,48 @@ check(/\.dshgw-ssh-backdrop \{[^}]*align-items: flex-start/.test(css),
 check(/\.dshgw-ssh-dialog \{[^}]*scrollbar-gutter: stable/.test(css),
   'the scrollbar gutter is reserved, so text does not re-wrap when it appears')
 check(/\.dshgw-ssh-status \{[^}]*min-height/.test(css), 'the identity status line reserves its height')
+
+// ── the dialog follows 外观, and the corner closes it ────────────────────────────────────
+// The palette is DSH's, not this plugin's: the shell's ThemePresenter writes --dsw-alias-*
+// onto `body` and toggles body[data-ds-dark-theme], so a token-only stylesheet is what makes
+// the dialog follow the theme. The old stylesheet asked for --dsh-bg/--dsh-fg, which DSH
+// never defines — both always fell back to the hardcoded dark pair, so 浅色 was ignored.
+check(!/--dsh-bg|--dsh-fg/.test(css), 'the dialog no longer asks for the nonexistent --dsh-* palette')
+// The dark literals may survive ONLY as a var() fallback for a host without the theme
+// plugin; used as a direct value they would pin the dialog to dark again.
+for (const literal of ['#1b1c1f', '#e6e6e6']) {
+  const direct = new RegExp('(?:^|[;{ ])' + literal + '(?:[; }]|$)', 'm')
+  check(!direct.test(css), `${literal} is never a direct value, only a var() fallback`)
+  if (css.includes(literal)) {
+    check(new RegExp('var\\([^)]*' + literal + '\\)').test(css),
+      `${literal} appears only inside a var() fallback`)
+  }
+}
+for (const token of ['--dsw-alias-bg-layer-2', '--dsw-alias-label-primary', '--dsw-alias-bg-mask-1']) {
+  check(css.includes(token), `the stylesheet uses the theme token ${token}`)
+}
+// The overlay layer is absolute/inset:0 inside the overflow:hidden frame, and children opt
+// back into pointer events; a fixed backdrop would escape the frame it belongs to.
+check(/\.dshgw-ssh-backdrop \{[^}]*position: absolute/.test(css),
+  'the backdrop fills the shell overlay layer instead of the viewport')
+check(!/\.dshgw-ssh-backdrop \{[^}]*position: fixed/.test(css),
+  'the backdrop no longer escapes the app frame with position:fixed')
+check(!/\.dshgw-ssh-backdrop \{[^}]*z-index/.test(css),
+  'the backdrop leaves the stacking order to the shell overlay layer')
+// The button is pinned to the top-right of the panel, which is the scroll container.
+check(/\.dshgw-ssh-closebar \{[^}]*position: sticky/.test(css),
+  'the corner close button scrolls with the panel but stays pinned')
+check(/\.dshgw-ssh-closebar \{[^}]*justify-content: flex-end/.test(css),
+  'the close bar pins the button to the right edge')
+
+const closeButton = findNodes(renderDialog(), (node) => node?.props?.['data-dshgw-close'] === 'ssh-workspace')[0]
+check(closeButton !== undefined && closeButton !== null, 'the dialog renders a corner close button')
+equal(closeButton?.type, 'button', 'the corner close is a real button')
+equal(closeButton?.props?.['aria-label'], '关闭', 'the corner close carries an accessible name')
+equal(closeButton?.props?.title, '关闭', 'the corner close has a tooltip')
+check(serialized.includes('dshgw-ssh-closebar'), 'the close bar is part of the rendered dialog')
+equal(closeButton?.props?.onClick, byKey('close').props.onClick,
+  'the corner close and the footer close are the same handler, so both stop the poll and the Esc listener')
 check(String(findNodes(renderDialog(), (node) => node?.props?.key === 'status')[0].props.className).includes('dshgw-ssh-status'),
   'the status line uses the height-reserving class')
 
