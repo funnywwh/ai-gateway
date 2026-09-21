@@ -255,6 +255,42 @@ func (db *DB) FindAPIKeyByFeishuOpenID(ctx context.Context, openID string) (*dom
 	return k, nil
 }
 
+// ListAPIKeyFeishuIdentities returns every bound key as (key, account, identity): the
+// directory sync (M70) reads them all at once — a deployment holds dozens of keys, not
+// thousands — to recognize people that were bound at the key level (M60) before the
+// account-level mapping existed. Unbound keys are simply not in the answer.
+func (db *DB) ListAPIKeyFeishuIdentities(ctx context.Context) ([]domain.KeyFeishuIdentity, error) {
+	rows, err := db.read.QueryContext(ctx, `SELECT id, account_id, feishu_open_id, feishu_union_id,
+		feishu_name, feishu_bound_at, feishu_bound_by FROM api_keys
+		WHERE feishu_open_id <> '' ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list bound api keys: %w", err)
+	}
+	defer rows.Close()
+
+	out := []domain.KeyFeishuIdentity{}
+	for rows.Next() {
+		var (
+			identity domain.KeyFeishuIdentity
+			binding  domain.FeishuBinding
+			boundAt  sql.NullInt64
+		)
+		if err := rows.Scan(&identity.KeyID, &identity.AccountID, &binding.OpenID, &binding.UnionID,
+			&binding.Name, &boundAt, &binding.BoundBy); err != nil {
+			return nil, fmt.Errorf("store: scan bound api key: %w", err)
+		}
+		if boundAt.Valid {
+			binding.BoundAt = timeFromUnix(boundAt.Int64)
+		}
+		identity.Binding = binding
+		out = append(out, identity)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate bound api keys: %w", err)
+	}
+	return out, nil
+}
+
 // TouchAPIKey records the last usage timestamp of a key.
 func (db *DB) TouchAPIKey(ctx context.Context, id int64) error {
 	_, err := db.write.ExecContext(ctx,

@@ -404,3 +404,44 @@ textarea.form-input { resize:vertical; min-height:64px; }
 .filter-check input[type=checkbox] { flex:0 0 auto; width:16px; height:16px; margin:0;
   accent-color:var(--accent); }
 .org-path { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; color:var(--muted); }
+
+/* 「同步飞书」弹窗（M70）：左部门树 + 右人员列表。
+   弹窗比普通对话框宽，因为一屏要看两栏；两侧都各自滚动，头部的统计行与底部的按钮始终可见。 */
+.feishu-sync-dialog { width:min(1080px, 100%); }
+.feishu-sync-head { gap:10px; }
+.feishu-sync-head .feishu-sync-subtitle { flex:1 1 auto; min-width:0; font-size:12.5px; white-space:normal; }
+.feishu-sync-notice { font-size:12.5px; line-height:1.6; padding:8px 10px; border-radius:8px; }
+.feishu-sync-notice:empty { display:none; }
+.feishu-sync-notice.warn { background:rgba(214,158,46,.12); border:1px solid rgba(214,158,46,.45); }
+.feishu-sync-notice.error { background:rgba(214,74,74,.12); border:1px solid rgba(214,74,74,.45); }
+.feishu-sync-layout { display:grid; grid-template-columns: minmax(220px, 320px) minmax(0, 1fr); gap:12px; align-items:start; }
+@media (max-width: 900px) { .feishu-sync-layout { grid-template-columns: minmax(0, 1fr); } }
+/* 两栏各自滚动：部门树长、人员列表也长，共用一个滚动条会让其中一栏永远看不到底。 */
+.feishu-sync-tree { border:1px solid var(--line); border-radius:8px; padding:8px; max-height:56vh; overflow:auto; }
+.feishu-sync-people { border:1px solid var(--line); border-radius:8px; max-height:56vh; overflow:auto; }
+.feishu-people-head { padding:8px 10px; border-bottom:1px solid var(--line); }
+.feishu-people-head h4 { margin:0; font-size:13.5px; }
+.feishu-people-toolbar { display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid var(--line); }
+.feishu-people-toolbar input[type=search] { flex:1 1 auto; min-width:0; }
+.feishu-people-toolbar .muted { flex:0 0 auto; white-space:nowrap; }
+/* 行内勾选框：全局 width:100% 会把它撑满整行（与 .org-member 同一坑），必须显式给尺寸。 */
+.feishu-inline-check { display:flex; align-items:center; gap:6px; font-size:12.5px; flex:0 0 auto; white-space:nowrap; }
+.feishu-inline-check input[type=checkbox] { flex:0 0 auto; width:16px; height:16px; margin:0; accent-color:var(--accent); }
+.feishu-user-list { padding:6px 10px 10px; }
+.feishu-user { display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--line);
+  font-size:13px; flex-wrap:wrap; }
+.feishu-user:last-child { border-bottom:none; }
+.feishu-user-id { display:flex; flex-direction:column; min-width:0; flex:1 1 160px; }
+.feishu-user-name { overflow-wrap:anywhere; }
+.feishu-user-meta { font-size:11.5px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.feishu-user-account { display:flex; align-items:center; gap:6px; flex:0 1 auto; min-width:0; }
+.feishu-user-nodes { flex:0 0 auto; }
+.feishu-user-actions { display:flex; gap:6px; flex:0 0 auto; margin-left:auto; }
+.feishu-picker-dialog { width:min(560px, 100%); }
+.feishu-picker-list { max-height:44vh; overflow:auto; border:1px solid var(--line); border-radius:8px; padding:4px; }
+.feishu-picker-row { display:flex; align-items:center; gap:8px; padding:5px 6px; border-radius:6px; font-size:13px; }
+.feishu-picker-row:hover { background:rgba(127,127,127,.08); }
+.feishu-picker-row.disabled { opacity:.55; }
+.feishu-picker-row input[type=radio] { flex:0 0 auto; width:15px; height:15px; margin:0; accent-color:var(--accent); }
+.feishu-picker-name { flex:0 1 auto; min-width:0; overflow-wrap:anywhere; }
+.feishu-picker-id { flex:0 0 auto; }

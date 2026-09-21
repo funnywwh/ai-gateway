@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>feishu org sync console harness</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">AI Gateway</div>
+    <nav><a href="#/org" class="active">组织架构</a></nav>
+    <div class="sidebar-foot"><span>admin · admin</span></div>
+  </aside>
+  <main class="main">
+    <header class="topbar"><h1>组织架构</h1><div id="actions" class="actions"></div></header>
+    <section id="page" class="page"></section>
+  </main>
+</div>
+<div id="modal-root"></div>
+<div id="toasts" class="toasts"></div>
+<script>
+// 「同步飞书」弹窗（M70）的浏览器验收页：真页面 + 真 CSS，只有 fetch 被换成一个会说飞书
+// 通讯录的桩。
+//
+// 桩里的数据是照**真机形状**编的，因为要断言的正是这些形状：
+//   - 部门是 BFS 序、父在子前（研发部 → 平台组），根节点 "0" 不在部门列表里；
+//   - 人员可以同时属于两个部门（王五在研发部与平台组）；
+//   - 三条匹配通道各有一个样本：人员id（老板）、Key 绑定（赵六→acme）、同名（王五）；
+//   - 未匹配的人（李四）交给操作员决定。
+//
+// 视图：
+//   org-sync           管理员：打开弹窗、同步、创建用户、绑定账号（拼音过滤）
+//   org-sync-readonly  只读角色：按钮禁用
+//   org-sync-nonames   飞书缺数据权限：名称全空 + 明确警告（这是当前部署的真实状态）
+
+const DEPARTMENTS = [
+  { id: 'od_a', parent_id: null, name: '研发部', depth: 0, direct_user_count: 1,
+    local: { node_id: null, matched: '', will_pin: false, name_conflict: false, will_create: true, skipped: false } },
+  { id: 'od_b', parent_id: null, name: '市场部', depth: 0, direct_user_count: 2,
+    local: { node_id: 2, matched: 'name', will_pin: true, name_conflict: false, will_create: false, skipped: false } },
+  { id: 'od_a1', parent_id: 'od_a', name: '平台组', depth: 1, direct_user_count: 2,
+    local: { node_id: null, matched: '', will_pin: false, name_conflict: false, will_create: true, skipped: false } },
+];
+
+const USERS = [
+  { open_id: 'ou_root', union_id: 'on_root', name: '老板', department_ids: [],
+    account: { id: 9, name: '老板', matched_by: 'open_id', needs_bind: false }, join_nodes: [] },
+  { open_id: 'ou_wang', union_id: 'on_wang', name: '王五', department_ids: ['od_a', 'od_a1'],
+    account: { id: 7, name: '王五', matched_by: 'name', needs_bind: true },
+    join_nodes: [{ department_id: 'od_a', name: '研发部', node_id: null, will_create: true }] },
+  { open_id: 'ou_feng', union_id: 'on_feng', name: '冯十', department_ids: ['od_a1'],
+    account: null, join_nodes: [{ department_id: 'od_a1', name: '平台组', node_id: null, will_create: true }] },
+  { open_id: 'ou_zhao', union_id: 'on_zhao', name: '赵六', department_ids: ['od_b'],
+    account: { id: 1, name: 'acme', matched_by: 'api_key', needs_bind: true }, join_nodes: [] },
+  { open_id: 'ou_new', union_id: 'on_new', name: '李四', department_ids: ['od_b'],
+    account: null, join_nodes: [{ department_id: 'od_b', name: '市场部', node_id: 2, will_create: false }] },
+];
+
+const ACCOUNTS = [
+  { id: 1, name: 'acme', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [] },
+  { id: 7, name: '王五', billing_mode: 'prepaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [] },
+  { id: 9, name: '老板', billing_mode: 'prepaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [] },
+  { id: 3, name: '张三', billing_mode: 'prepaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [] },
+  { id: 4, name: '李四', billing_mode: 'prepaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [] },
+  { id: 5, name: '长伟', billing_mode: 'prepaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [] },
+  { id: 6, name: 'dev-张三', billing_mode: 'prepaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [] },
+];
+
+const SYNC_RESULT = {
+  ok: true,
+  stats: { departments: 3, departments_to_create: 3, departments_to_pin: 1, departments_skipped: 0,
+    users: 5, users_matched: 3, users_unmatched: 2, users_already_synced: 1, memberships_to_add: 2 },
+  created_nodes: [
+    { id: 11, name: '研发部', department_id: 'od_a' },
+    { id: 12, name: '平台组', department_id: 'od_a1' },
+  ],
+  linked_users: [
+    { open_id: 'ou_wang', name: '王五', account_id: 7, account_name: '王五', matched_by: 'name', nodes_added: 2, join_node_ids: [11, 12] },
+  ],
+  skipped_departments: [], skipped_users: [], warnings: [],
+};
+
+window.fetch = async (url, options) => {
+  const target = String(url);
+  const path = target.replace(/^.*\/admin\/api\/v1/, '').split('?')[0];
+  const query = target.includes('?') ? target.slice(target.indexOf('?')) : '';
+  const method = (options && options.method) || 'GET';
+  window.__calls = (window.__calls || []).concat([method + ' ' + target]);
+  if (options && options.body) window.__sent = (window.__sent || []).concat([{ path, method, body: options.body, query }]);
+  const ok = (payload) => ({ ok: true, status: 200, text: async () => JSON.stringify(payload) });
+
+  if (path === '/org/nodes' && method === 'GET') {
+    // 本地组织架构先给一个「市场部」：同步预览里它是"同名已存在、将打上部门 id"的那个。
+    const nodes = [{ id: 2, parent_id: null, name: '市场部', path: '市场部', depth: 0, sort_order: 100, note: '', tags: [], account_count: 0 }];
+    return ok({ data: nodes, count: 1, total: 1, limit: 1000, offset: 0, has_more: false });
+  }
+  if (path === '/accounts' && method === 'GET') {
+    return ok({ data: ACCOUNTS, count: ACCOUNTS.length, total: ACCOUNTS.length, limit: 1000, offset: 0, has_more: false });
+  }
+  if (path === '/org/feishu/directory' && method === 'GET') {
+    const names = !window.__noNames;
+    // 缺数据权限时**部门与人员都没有名字**（这是真机的实际形状）：只剩下 id，
+    // 所以界面要么给出警告并让操作员按编号操作，要么就是在骗人。
+    const departments = names ? DEPARTMENTS
+      : DEPARTMENTS.map((department) => ({
+          ...department, name: '',
+          // 没有名字就既不能按名匹配、也不能建节点：本地侧只能是"跳过"。
+          local: { ...department.local, matched: '', will_pin: false, will_create: false, skipped: true },
+        }));
+    return ok({
+      fetched_at: '2026-09-22T08:30:00Z', cached: !query.includes('refresh'), names_available: names,
+      truncated: false, departments,
+      users: USERS.map((person) => names ? person : { ...person, name: '' }),
+      users_truncated: false,
+      stats: names
+        ? { departments: 3, departments_to_create: 2, departments_to_pin: 1, departments_skipped: 0,
+            users: 5, users_matched: 3, users_unmatched: 2, users_already_synced: 1, memberships_to_add: 2 }
+        : { departments: 3, departments_to_create: 0, departments_to_pin: 0, departments_skipped: 3,
+            users: 5, users_matched: 2, users_unmatched: 3, users_already_synced: 1, memberships_to_add: 0 },
+      warnings: names ? [] : ['names_unavailable'],
+    });
+  }
+  if (path === '/org/feishu/sync' && method === 'POST') return ok(SYNC_RESULT);
+  const perUser = path.match(/^\/org\/feishu\/users\/([^/]+)\/account$/);
+  if (perUser) {
+    if (method === 'POST') return ok({ ok: true, account: { id: 8, name: '李四' }, open_id: decodeURIComponent(perUser[1]), org_node_ids: [2], warnings: [] });
+    if (method === 'PUT') return ok({ ok: true, account: { id: 3, name: '张三' }, open_id: decodeURIComponent(perUser[1]), org_node_ids: [], warnings: [] });
+    if (method === 'DELETE') return ok({ ok: true, unbound: true, account_id: 7 });
+  }
+  // 其余（货币表、统计）一律空数组：这个视图只走组织架构页与同步弹窗。
+  return ok({ data: [] });
+};
+
+const errors = [];
+window.onerror = (msg) => errors.push('onerror: ' + msg);
+window.onunhandledrejection = (ev) => errors.push('rejection: ' + ev.reason);
+
+function report(data) {
+  data.errors = errors;
+  data.toasts = [...document.querySelectorAll('.toast')].map((n) => n.textContent);
+  const url = '/report?data=' + encodeURIComponent(JSON.stringify(data));
+  try { if (navigator.sendBeacon && navigator.sendBeacon(url)) return; } catch (err) { /* fall through */ }
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url, false);
+    xhr.send();
+  } catch (err) { /* reporting must never break the harness */ }
+}
+</script>
+<script type="module">
+import { render as renderOrg } from '/js/pages/org.js';
+import { initCurrency } from '/js/money.js';
+
+const view = location.hash.replace('#', '') || 'org-sync';
+const checks = {};
+const settle = async () => { for (let i = 0; i < 400; i++) await Promise.resolve(); };
+const modalRoot = () => document.getElementById('modal-root');
+const find = (label, root) => [...(root || document).querySelectorAll('button')]
+  .find((b) => b.textContent.trim() === label);
+const dialog = () => modalRoot().querySelector('.feishu-sync-dialog');
+const treeLabels = () => [...document.querySelectorAll('.feishu-sync-tree .tree-row .tree-label')]
+  .map((node) => node.textContent);
+const userRows = () => [...document.querySelectorAll('.feishu-user')];
+const userNames = () => userRows().map((row) => row.querySelector('.feishu-user-name').textContent);
+
+async function openOrg(role) {
+  await renderOrg({
+    page: document.getElementById('page'), actions: document.getElementById('actions'),
+    session: { role, username: role === 'admin' ? 'admin' : 'reader' },
+    route: { path: '/org' }, navigate: () => {}, sidebar: document.getElementById('sidebar-slot'),
+  });
+  await settle();
+}
+
+try {
+  try { await initCurrency(); } catch (err) { /* the org page does not need it */ }
+  if (view === 'org-sync-nonames') window.__noNames = true;
+
+  if (view === 'org-sync-readonly') {
+    await openOrg('viewer');
+    const button = find('同步飞书');
+    checks.syncButtonPresent = !!button;
+    checks.syncButtonDisabledForViewer = !!button && button.disabled === true;
+    checks.noDialogOpened = !dialog();
+  } else {
+    await openOrg('admin');
+    const button = find('同步飞书');
+    checks.syncButtonPresent = !!button;
+    checks.syncButtonEnabled = !!button && button.disabled === false;
+
+    // 打开弹窗：先发一次预览请求（不要 refresh），弹窗才画得出来。
+    button.click();
+    await settle();
+    const firstDirectoryCall = (window.__calls || []).find((call) => call.includes('/org/feishu/directory'));
+    checks.directoryRequested = !!firstDirectoryCall;
+    checks.firstLoadUsesCache = !!firstDirectoryCall && !firstDirectoryCall.includes('refresh');
+    checks.dialogOpen = !!dialog();
+    checks.dialogHasBothPanes = !!document.querySelector('.feishu-sync-tree') && !!document.querySelector('.feishu-sync-people');
+
+    // 左栏是飞书部门树：合成根 + 研发部 + 市场部 + 平台组（父在子前）。
+    checks.treeShowsRoot = treeLabels().includes('飞书根组织');
+    const treeText = document.querySelector('.feishu-sync-tree').textContent;
+    checks.treeShowsPeopleCount = treeText.includes('人');
+    if (view === 'org-sync-nonames') {
+      // 没有名字时只能按编号辨认（这正是"缺权限"部署的真实样子）。
+      checks.treeShowsDepartmentIds = ['od_a', 'od_b', 'od_a1'].every((id) => treeLabels().includes(id));
+      checks.treeMarksSkipped = treeText.includes('跳过');
+    } else {
+      checks.treeShowsDepartments = ['研发部', '市场部', '平台组'].every((name) => treeLabels().includes(name));
+      checks.treeShowsCreateMark = treeText.includes('将创建');
+      checks.treeShowsPinMark = treeText.includes('同名节点');
+    }
+
+    if (view === 'org-sync-nonames') {
+      // 缺数据权限：部门/人员没有名字，界面必须直说，而不是画一堆空白行或拿编号当名字。
+      const notice = document.querySelector('.feishu-sync-notice');
+      checks.warningShown = !!notice && notice.textContent.includes('数据权限');
+      checks.warningIsStyled = !!notice && notice.classList.contains('warn');
+      checks.namesMissingButIdsKept = treeLabels().some((label) => label.startsWith('od_'));
+      // 无名部门不会被创建，表头必须说实话（否则操作员会以为同步漏了一堆部门）。
+      checks.headerSaysNothingToCreate = document.querySelector('.feishu-sync-subtitle')
+        .textContent.includes('将创建 0');
+      // 人员行用 open_id 占位，但"创建用户 / 绑定账号"仍在（由人决定）。
+      checks.unmatchedStillActionable = userRows().length > 0;
+    } else {
+      // 根组织选中时，人员列表包含所有部门的人（默认"包含子部门"）。
+      checks.peopleListedForRoot = userNames().length === 5;
+      checks.matchedRowShowsAccount = [...document.querySelectorAll('.feishu-user')]
+        .some((row) => row.textContent.includes('王五') && row.textContent.includes('#7'));
+      checks.matchedRowShowsChannel = [...document.querySelectorAll('.feishu-user')]
+        .some((row) => row.textContent.includes('同名自动合并'));
+      checks.unmatchedRowOffersDecision = [...document.querySelectorAll('.feishu-user')]
+        .filter((row) => row.textContent.includes('未匹配'))
+        .every((row) => !!find('创建用户', row) && !!find('绑定账号', row));
+
+      // 选中「市场部」后只剩该部门的人（赵六、李四），根组织的人不再出现。
+      const marketRow = [...document.querySelectorAll('.feishu-sync-tree .tree-row')]
+        .find((row) => row.querySelector('.tree-label').textContent === '市场部');
+      // The row itself carries the click handler (the label just bubbles into it).
+      marketRow.click();
+      await settle();
+      checks.departmentSelected = !!marketRow.classList.contains('selected')
+        || !!document.querySelector('.feishu-sync-tree .tree-row.selected');
+      // 按集合比较，不按行序：中文名的默认排序是码点序（李 在 杨 之前），
+      // 把期望值写成一种"看起来自然"的顺序，测出来的是排序规则而不是筛选结果。
+      const marketNames = userNames();
+      checks.departmentSelectionFiltersPeople = marketNames.length === 2
+        && marketNames.includes('赵六') && marketNames.includes('李四');
+
+      // 人员过滤框支持拼音：wangwu 能找到 王五（选中根组织看全量）。
+      const rootRow = [...document.querySelectorAll('.feishu-sync-tree .tree-row')]
+        .find((row) => row.querySelector('.tree-label').textContent === '飞书根组织');
+      rootRow.click();
+      await settle();
+      const search = document.querySelector('.feishu-people-toolbar input[type="search"]');
+      search.value = 'wangwu';
+      search.dispatchEvent(new Event('input'));
+      await settle();
+      checks.pinyinFilterInPeopleList = userNames().join(',') === '王五';
+      search.value = '';
+      search.dispatchEvent(new Event('input'));
+      await settle();
+
+      // 「同步」必须二次确认，确认后才发 POST，并把 refresh=true 的重新预览接上。
+      find('同步', dialog()).click();
+      await settle();
+      checks.syncConfirmShown = modalRoot().textContent.includes('执行一次飞书同步');
+      checks.syncConfirmNamesImpact = modalRoot().textContent.includes('标签会被整棵子树继承');
+      find('确认').click();
+      await settle();
+      const syncCall = (window.__calls || []).find((call) => call.startsWith('POST ') && call.includes('/org/feishu/sync'));
+      checks.syncPosted = !!syncCall;
+      checks.syncToast = [...document.querySelectorAll('.toast')].some((node) => node.textContent.includes('同步完成'));
+      checks.reloadedAfterSync = (window.__calls || []).some((call) => call.includes('/org/feishu/directory') && call.includes('refresh=true'));
+
+      // 「创建用户」：手填名字 → POST /org/feishu/users/{open_id}/account。
+      const unmatchedRow = [...document.querySelectorAll('.feishu-user')]
+        .find((row) => row.textContent.includes('李四') && row.textContent.includes('未匹配'));
+      find('创建用户', unmatchedRow).click();
+      await settle();
+      const createInput = modalRoot().querySelector('input[name="name"]');
+      checks.createDialogPrefillsName = !!createInput && createInput.value === '李四';
+      createInput.value = '李四（市场）';
+      find('创建', modalRoot()).click();
+      await settle();
+      const createCall = (window.__sent || []).find((call) => call.method === 'POST' && /\/org\/feishu\/users\/[^/]+\/account$/.test(call.path));
+      checks.createPosted = !!createCall;
+      checks.createPathCarriesOpenId = !!createCall && createCall.path.endsWith('/org/feishu/users/ou_new/account');
+      let createBody = null;
+      try { createBody = JSON.parse(createCall.body); } catch (err) { createBody = null; }
+      checks.createBodyCarriesTypedName = !!createBody && createBody.name === '李四（市场）';
+
+      // 「绑定账号」：嵌套弹窗、拼音过滤、同名候选预选，最后 PUT 账户 id。
+      const pickRow = [...document.querySelectorAll('.feishu-user')]
+        .find((row) => row.textContent.includes('李四') && row.textContent.includes('未匹配'));
+      find('绑定账号', pickRow).click();
+      await settle();
+      const picker = modalRoot().querySelector('.feishu-picker-dialog');
+      checks.pickerOpen = !!picker;
+      checks.pickerListsAccounts = picker.textContent.includes('acme') && picker.textContent.includes('#3');
+      const preselected = picker.querySelector('input[type="radio"]:checked');
+      checks.pickerPreselectsSameName = !!preselected && preselected.closest('.feishu-picker-row').textContent.includes('李四');
+      // 已绑定给别人的账户不可选（acme 的 #1 已被 ou_zhao 占用）。
+      const acmeRow = [...picker.querySelectorAll('.feishu-picker-row')].find((row) => row.textContent.includes('#1'));
+      checks.pickerDisablesTakenAccount = !!acmeRow && acmeRow.querySelector('input').disabled === true
+        && acmeRow.textContent.includes('已绑定其他飞书身份');
+
+      const pickFilter = picker.querySelector('input[type="search"]');
+      pickFilter.value = 'zhangsan';
+      pickFilter.dispatchEvent(new Event('input'));
+      await settle();
+      const filteredNames = [...picker.querySelectorAll('.feishu-picker-row')].map((row) => row.querySelector('.feishu-picker-name').textContent);
+      checks.pickerPinyinFilter = filteredNames.slice().sort().join(',') === 'dev-张三,张三';
+      // 选一个同名之外的候选并绑定。
+      const zhangRow = [...picker.querySelectorAll('.feishu-picker-row')].find((row) => row.querySelector('.feishu-picker-name').textContent === '张三');
+      zhangRow.querySelector('input').click();
+      find('绑定', picker).click();
+      await settle();
+      const bindCall = (window.__sent || []).find((call) => call.method === 'PUT' && /\/org\/feishu\/users\/[^/]+\/account$/.test(call.path));
+      checks.bindPosted = !!bindCall;
+      let bindBody = null;
+      try { bindBody = JSON.parse(bindCall.body); } catch (err) { bindBody = null; }
+      checks.bindBodyCarriesAccountId = !!bindBody && bindBody.account_id === 3;
+      checks.pickerClosed = !modalRoot().querySelector('.feishu-picker-dialog');
+
+      // 「解绑」先确认再 DELETE。
+      const matchedRow = [...document.querySelectorAll('.feishu-user')].find((row) => row.textContent.includes('#7'));
+      find('解绑', matchedRow).click();
+      await settle();
+      checks.unbindConfirmShown = modalRoot().textContent.includes('解除飞书绑定');
+      find('确认').click();
+      await settle();
+      checks.unbindSent = (window.__calls || []).some((call) => call.startsWith('DELETE ') && call.includes('/org/feishu/users/ou_wang/account'));
+      checks.unbindToast = [...document.querySelectorAll('.toast')].some((node) => node.textContent.includes('已解绑'));
+    }
+
+    // 关闭弹窗后组织页会重新加载（同步可能改变了节点的成员数）。
+    const closeButton = dialog() && dialog().querySelector('.modal-close');
+    checks.closeButtonPresent = !!closeButton;
+    const callsBeforeClose = (window.__calls || []).length;
+    closeButton.click();
+    await settle();
+    checks.dialogClosed = !dialog();
+    const reloadedAfterClose = (window.__calls || []).length > callsBeforeClose;
+    if (view === 'org-sync-nonames') {
+      // 这个视图什么都没写（没有可创建的名字、没有可自动合并的人），所以关闭弹窗不该白拉一次组织树。
+      checks.noReloadWithoutChanges = reloadedAfterClose === false;
+    } else {
+      checks.orgReloadedOnClose = reloadedAfterClose === true;
+    }
+
+    checks.sample = { calls: (window.__calls || []).length, sent: (window.__sent || []).length };
+  }
+
+  const bad = Object.keys(checks).filter((key) => checks[key] === false);
+  report({ view, stage: 'done', ok: bad.length === 0, failed: bad, checks, errors, strictChecks: true });
+} catch (err) {
+  report({ view, stage: 'threw', ok: false, checks, strictChecks: true, thrown: String(err && err.stack ? err.stack : err), errors });
+}
+</script>
+</body>
+</html>

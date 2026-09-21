@@ -1080,6 +1080,51 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			},
 		},
 		{
+			Method: "GET", Path: "/admin/api/v1/org/feishu/directory", Handler: s.handleAdminListFeishuDirectory,
+			Name: "admin_list_feishu_directory", Group: groupOrg, Role: roleAdmin,
+			Summary: "读取飞书通讯录（部门树 + 人员），并给出与本地组织节点/账户的合并预览：每个部门标注 已存在/将创建/按名合并，每个人员标注匹配通道（人员id/Key绑定/同名）或未匹配",
+			Query: []adminField{
+				queryParam("refresh", "boolean",
+					"强制重新拉取飞书通讯录。默认结果走 60 秒缓存；任何同步/绑定写操作都会使缓存失效"),
+			},
+		},
+		{
+			Method: "POST", Path: "/admin/api/v1/org/feishu/sync", Handler: s.handleAdminSyncFeishuOrg,
+			Name: "admin_sync_feishu_org", Group: groupOrg, Role: roleAdmin,
+			Summary:   "执行一次飞书通讯录同步：补建缺失部门节点 + 自动合并已匹配人员（写入账户级飞书身份并挂入部门节点）。幂等：重复执行写 0",
+			Dangerous: true, ConfirmReason: "会创建飞书里有而本地没有的组织节点（其名称就是部门名），并把自动匹配上的人员写上飞书身份、挂进其部门对应的节点——节点标签被子树继承，这会即时改变这些账号的生效授权",
+		},
+		{
+			Method: "POST", Path: "/admin/api/v1/org/feishu/users/{open_id}/account", Handler: s.handleAdminCreateAccountFromFeishuUser,
+			Name: "admin_create_account_from_feishu_user", Group: groupOrg, Role: roleAdmin,
+			Summary:   "为某个飞书人员创建本地账户（默认名=飞书姓名可改），写入其飞书身份并挂入其部门节点；同名账户已存在时 409 并建议改用绑定接口",
+			Dangerous: true, ConfirmReason: "会新建一个账户（prepaid、余额 0、启用自动停复），写入该飞书身份，并把账户挂进其部门对应的组织节点",
+			Params:    []adminField{pathParam("open_id", "飞书人员的 open_id（ou_…，admin_list_feishu_directory 的人员列表给出）")},
+			Body: []adminField{
+				bodyOptional("name", "string",
+					"账户名；默认用飞书姓名。通讯录缺名称权限（names_unavailable）时必须手填，否则 400"),
+				bodyOptional("note", "string", "备注"),
+			},
+		},
+		{
+			Method: "PUT", Path: "/admin/api/v1/org/feishu/users/{open_id}/account", Handler: s.handleAdminBindAccountFeishuUser,
+			Name: "admin_bind_account_feishu_user", Group: groupOrg, Role: roleAdmin,
+			Summary:   "把某个飞书人员绑定到指定账户：写入账户级飞书身份（accounts.feishu_*），并顺带把账户挂入其部门节点。不影响 API Key 上的绑定，也不影响门户登录",
+			Dangerous: true, ConfirmReason: "该飞书人员之后的每次同步都会合并到这个账户；一个账户只能绑一个飞书身份（已绑别人时 409）",
+			Params:    []adminField{pathParam("open_id", "飞书人员的 open_id（ou_…）")},
+			Body: []adminField{
+				bodyRequired("account_id", "integer",
+					"要绑定到的账户数字 id（admin_list_accounts 给出）。该账户当前不能已绑定其他飞书身份"),
+			},
+		},
+		{
+			Method: "DELETE", Path: "/admin/api/v1/org/feishu/users/{open_id}/account", Handler: s.handleAdminUnbindAccountFeishuUser,
+			Name: "admin_unbind_account_feishu_user", Group: groupOrg, Role: roleAdmin,
+			Summary:   "解除某个飞书人员与账户的绑定（幂等）。不动 API Key 上的绑定；解除后该人员在下次同步中变回「未匹配」",
+			Dangerous: true, ConfirmReason: "解除账户级飞书身份映射；不影响该账户本身、它的 Key 与任何登录能力",
+			Params:    []adminField{pathParam("open_id", "飞书人员的 open_id（ou_…）")},
+		},
+		{
 			Method: "GET", Path: "/admin/api/v1/mcp-tokens", Handler: s.handleAdminListMCPTokens,
 			Name: "admin_list_mcp_tokens", Group: groupMCP, Role: roleViewer,
 			Summary: "列出 MCP 令牌（前缀、scope、状态、最近使用、过期时间）",

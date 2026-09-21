@@ -140,6 +140,15 @@ var expectedAdminPatterns = []string{
 	"PATCH /admin/api/v1/org/nodes/{id}",
 	"DELETE /admin/api/v1/chat/skills/{id}",
 	"DELETE /admin/api/v1/org/nodes/{id}",
+
+	// Feishu directory sync (M70). The per-person routes are NoTool: an MCP agent cannot
+	// see the Feishu directory, so "create the account for this person" has no meaning
+	// without the dialog that lists the people.
+	"GET /admin/api/v1/org/feishu/directory",
+	"POST /admin/api/v1/org/feishu/sync",
+	"POST /admin/api/v1/org/feishu/users/{open_id}/account",
+	"PUT /admin/api/v1/org/feishu/users/{open_id}/account",
+	"DELETE /admin/api/v1/org/feishu/users/{open_id}/account",
 }
 
 func testServer(t *testing.T) *Server {

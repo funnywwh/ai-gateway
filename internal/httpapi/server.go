@@ -78,10 +78,12 @@ type responseWaiter interface {
 	AwaitResponse(ctx context.Context, id string) error
 }
 
-// KeyStore is the key-writing subset the dshgw provisioning flow needs.
+// KeyStore is the key-writing subset the dshgw provisioning flow needs, plus the one read
+// the directory sync (M70) uses to recognize people bound at the key level (M60).
 type KeyStore interface {
 	ListAPIKeys(ctx context.Context, accountID int64) ([]*domain.APIKey, error)
 	UpsertAPIKey(ctx context.Context, k *domain.APIKey) (int64, error)
+	ListAPIKeyFeishuIdentities(ctx context.Context) ([]domain.KeyFeishuIdentity, error)
 }
 
 // DshgwAdminOps is the aigw-side view of the dshgw local provisioning channel. The key
@@ -259,10 +261,21 @@ type Server struct {
 	// makes an outbound call before anyone is authenticated.
 	feishuMu    sync.Mutex
 	feishuRates map[string]*feishuRate
+	// Directory cache (M70): the Feishu contact walk costs about two calls per department,
+	// so the snapshot is reused for a short window and invalidated by any sync write. The
+	// mutex guards the pointer swap; the entry itself is immutable once published.
+	feishuDirMu    sync.Mutex
+	feishuDirCache *feishuDirectoryEntry
 	// Consumed console tickets (M66): a ticket that carried an administrator across host
 	// names is worth exactly one session. The set is bounded and pruned by expiry, so losing
 	// it to a restart reopens a window no longer than the ticket TTL.
 	feishuConsoleTickets feishu.ConsumedTickets
+}
+
+// feishuDirectoryEntry is one cached snapshot.
+type feishuDirectoryEntry struct {
+	dir       feishu.Directory
+	fetchedAt time.Time
 }
 
 // feishuRate is one address's attempt window.

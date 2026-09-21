@@ -47,7 +47,7 @@ UI_STATIC_DIR=$PWD/.cache/ui-dist/static UI_HARNESS_GZIP=1 scripts/ui-harness/ru
 
 **M50 起这是"压缩没有改变行为"的主要证据**：Go 侧的静态合约测试（`internal/webui/embed_test.go`、
 `internal/webui/tests/*.mjs`）读的是源码，看不到"只有压缩后才发生"的回归；对镜像跑一遍同样的
-18 个视图、比对逐视图检查项，才是端到端的保证。harness 页按绝对路径 import（`/js/pages/chat.js`），
+全部视图（当前 28 个）、比对逐视图检查项，才是端到端的保证。harness 页按绝对路径 import（`/js/pages/chat.js`），
 而压缩保持同名文件与同名导出，所以两者走的是同一条路径。
 
 没有 firefox 或 python3 时脚本**跳过并以 0 退出**（与 `test-race` 的处理方式一致），
@@ -102,6 +102,21 @@ GW_BASE=http://127.0.0.1:8099 GW_COOKIE=... scripts/ui-harness/capture.py       
     所以"保存成员"是否真的落库、删除是否带 `cascade=true`、账户页筛选是否把 `org_node_id` 发到了
     服务端，读的都是**带查询串的原始 URL 与请求体**。`org-readonly` 用 `session.role=viewer` 渲染同一页，
     断言写入口整体消失、成员复选框禁用。
+
+- **M70 起**：`org_feishu.page.html`（组织架构页的「同步飞书」弹窗），共 3 个视图：
+  - **`#org-sync`**：stub 里有一份**照真机形状**编的飞书通讯录（部门 BFS 序、一个人可属两个部门、
+    三条匹配通道各一个样本、一个未匹配的人），断言的是：弹窗打开时读目录**不带** `refresh`
+    （第一次走缓存）、同步按钮先二次确认再 `POST /org/feishu/sync`、确认后重新预览**带** `refresh=true`、
+    人员过滤支持拼音、选中「市场部」后人员列表只剩该部门的人。
+    两个写操作各自断言到**请求体**：「创建用户」`POST /org/feishu/users/ou_new/account` 且 body 是手填的名字；
+    「绑定账号」弹窗里同名候选**预选**、已绑给他人的账户**不可选**（`disabled` + 文案），
+    拼音过滤后选「张三」→ `PUT …/account` 的 body 是 `{"account_id":3}`；「解绑」先确认再 `DELETE`。
+  - **`#org-sync-readonly`**：`session.role=viewer` 渲染同一页，「同步飞书」按钮存在但**禁用**，弹窗打不开。
+  - **`#org-sync-nonames`**：飞书缺「获取部门基础信息/获取用户基本信息」数据权限时（这是本机部署的**真实状态**）
+    名称全空：弹窗顶部必须给出明确警告（不是静默画空白行）、部门用 `od_…` 编号显示、
+    未匹配的人仍然能点「创建用户 / 绑定账号」由人来决定。
+  - 三个视图都用 `strictChecks: true`，所以 checks 里任何非布尔项都算失败（`sample` 除外）。
+
 
 - **M66 起**：`admins.page.html`（管理员页 + 登录卡片），共 3 个视图：
   - **`#admins`**：stub 里有一份**会变的管理员表**——建号、改角色/状态、重置口令、邀请、解绑、删除

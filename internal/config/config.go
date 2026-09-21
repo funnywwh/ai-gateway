@@ -534,6 +534,12 @@ type Feishu struct {
 	AuthorizeURL string `yaml:"authorize_url"`
 	TokenURL     string `yaml:"token_url"`
 	UserInfoURL  string `yaml:"userinfo_url"`
+	// TenantTokenURL and ContactURL serve the contact-directory read of the org sync
+	// (M70) — the tenant access token endpoint and the base of /contact/v3. They follow
+	// the same configurability rule as the three above and are validated to be https
+	// (or http only for an explicit loopback, like the rest).
+	TenantTokenURL string `yaml:"tenant_token_url"`
+	ContactURL     string `yaml:"contact_url"`
 	// Scopes is a space-separated extra scope list. Empty is the right default: the
 	// open id and the display name this feature needs require no permission at all, and
 	// asking for more would show the user a consent screen for data we do not read.
@@ -790,17 +796,20 @@ func Default() Config {
 	return Config{
 		Feishu: Feishu{
 			// Default endpoints are the documented ones: the authorization page, the
-			// OAuth v3 token endpoint (v2 is historical) and the user-info API.
-			AuthorizeURL:  "https://accounts.feishu.cn/open-apis/authen/v1/authorize",
-			TokenURL:      "https://accounts.feishu.cn/oauth/v3/token",
-			UserInfoURL:   "https://open.feishu.cn/open-apis/authen/v1/user_info",
-			TimeoutS:      5,
-			StateTTLS:     600,
-			TicketTTLS:    120,
-			DSHLogin:      true,
-			AdminLogin:    true,
-			InviteTTLS:    3600,
-			AutoEnableDSH: true,
+			// OAuth v3 token endpoint (v2 is historical) and the user-info API. The
+			// tenant token + contact base serve the directory read of the org sync.
+			AuthorizeURL:   "https://accounts.feishu.cn/open-apis/authen/v1/authorize",
+			TokenURL:       "https://accounts.feishu.cn/oauth/v3/token",
+			UserInfoURL:    "https://open.feishu.cn/open-apis/authen/v1/user_info",
+			TenantTokenURL: "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+			ContactURL:     "https://open.feishu.cn/open-apis/contact/v3",
+			TimeoutS:       5,
+			StateTTLS:      600,
+			TicketTTLS:     120,
+			DSHLogin:       true,
+			AdminLogin:     true,
+			InviteTTLS:     3600,
+			AutoEnableDSH:  true,
 		},
 		Dshgw: Dshgw{
 			PublicHost:   "localhost",
@@ -1026,6 +1035,8 @@ func applyEnv(cfg *Config) error {
 	envStr(&cfg.Feishu.StateSecret, "GW_FEISHU_STATE_SECRET")
 	envStr(&cfg.Feishu.TicketSecret, "GW_FEISHU_TICKET_SECRET")
 	envStr(&cfg.Feishu.PortalURL, "GW_FEISHU_PORTAL_URL")
+	envStr(&cfg.Feishu.TenantTokenURL, "GW_FEISHU_TENANT_TOKEN_URL")
+	envStr(&cfg.Feishu.ContactURL, "GW_FEISHU_CONTACT_URL")
 	envBool(&cfg.Feishu.AdminLogin, "GW_FEISHU_ADMIN_LOGIN")
 	envInt(&cfg.Feishu.InviteTTLS, "GW_FEISHU_INVITE_TTL_S")
 	envStr(&cfg.Feishu.InviteSecret, "GW_FEISHU_INVITE_SECRET")
@@ -1124,9 +1135,11 @@ func (c *Config) validateFeishu() error {
 		}
 	}
 	for label, raw := range map[string]string{
-		"feishu.authorize_url": c.Feishu.AuthorizeURL,
-		"feishu.token_url":     c.Feishu.TokenURL,
-		"feishu.userinfo_url":  c.Feishu.UserInfoURL,
+		"feishu.authorize_url":    c.Feishu.AuthorizeURL,
+		"feishu.token_url":        c.Feishu.TokenURL,
+		"feishu.userinfo_url":     c.Feishu.UserInfoURL,
+		"feishu.tenant_token_url": c.Feishu.TenantTokenURL,
+		"feishu.contact_url":      c.Feishu.ContactURL,
 	} {
 		// These carry the app secret and the user's access token, so https is required
 		// outside a loopback stub.

@@ -705,6 +705,49 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
       租户侧栏「退出」→ 回到门户登录页且不再占用 dsh 进程。本机验收都是用 HTTP 客户端跑通的，
       还缺一次真人点界面
 
+## M70 飞书通讯录同步（组织架构页「同步飞书」）
+
+设计：`docs/design/m70-feishu-org-sync.md`（§11 差异已回填）；规格：`docs/feishu.md` §5c、`docs/org.md` §3/§5/§6。
+需求（2026-09-21 用户原话）：「http://192.168.190.86:8088/admin/ui/#/org 右上角添加一个"同步飞书"，
+弹出组织机构树和人员，人员可以有"创建用户""绑定账号"操作，合并时同名合并，人员id相同合并」，
+随后补充「绑定账号时，弹出账号列表，可以拼音过滤」与「自动按人名匹配，不匹配的用户决定」。
+定位：把飞书通讯录（部门树 + 人员）合并进本地的组织节点与账户；一个已确认的「同步」动作 = 补建缺失部门
+节点 + 自动合并已匹配人员，人员身份写在 `accounts.feishu_*`（**只是同步映射，不授予登录能力**：门户登录
+仍按 M60 的 Key 级绑定判定）。
+
+- [x] 迁移 `0024_feishu_directory_links.sql`：`org_nodes.feishu_department_id/feishu_synced_at`、
+      `accounts.feishu_open_id/union_id/name/bound_at/bound_by`，两处 `NULLIF(…, '')` 唯一索引
+- [x] 存储：列级读（`accountCols`/`orgNodeCols`）、`BindAccountFeishu` / `UnbindAccountFeishu` /
+      `FindAccountByFeishuOpenID` / `ListAPIKeyFeishuIdentities` / `SetOrgNodeFeishuDepartment` /
+      `AddAccountOrgNodes`（加性 `INSERT OR IGNORE`）；`UpsertAccount` 与 `UpdateOrgNode` **不写**这些列
+- [x] 飞书客户端 `internal/feishu/directory.go`：tenant token 缓存（提前 60 s、被拒后重取一次一次重试）、
+      部门 BFS 遍历（父先于子，根 `"0"` 只取成员不算部门）、跨部门同人按 open_id 合一、
+      上限（PageSize 50 / MaxDepartments 500 / MaxPages 40）→ `Truncated`、
+      名字全空 → `NamesAvailable=false`（当前部署的真实状态：缺两个数据权限）
+- [x] 配置：`feishu.tenant_token_url` / `feishu.contact_url`（默认即飞书文档地址）+ env
+      `GW_FEISHU_TENANT_TOKEN_URL` / `GW_FEISHU_CONTACT_URL` + https 校验（`config.example.yaml` 已注明）
+- [x] 管理接口 5 条（`admin_list_feishu_directory` / `admin_sync_feishu_org` /
+      `admin_create_account_from_feishu_user` / `admin_bind_account_feishu_user` /
+      `admin_unbind_account_feishu_user`，全部 `role=admin`）：合并规则只写在 `planFeishuOrg` 一处，
+      预览与同步共用同一份计划；同步幂等（第二次 0 写入）；未启用飞书 → 400 `unsupported_parameter`；
+      飞书失败 → 502 + 中文原因
+- [x] 控制台：组织架构页右上角「同步飞书」（只读角色置灰）→ `pages/org_feishu.js` 弹窗
+      （左飞书部门树 + 右人员列表，人员/账号两处都支持拼音过滤；未匹配行给「创建用户」「绑定账号」，
+      已匹配行给「解绑」；缺名称权限时弹窗顶部明确说明并保留按编号的操作）
+- [x] 测试：store（绑定唯一/覆盖/解绑幂等/upsert 不清绑定/打标/加性挂节点）、feishu 目录
+      （翻页、BFS 序、同人合一、token 缓存与一次性重试、上限截断、名称缺失、错误分类）、
+      httpapi（三条匹配通道矩阵、同名先到先得、缺权限时只合并 id 通道、502、409/404/403/未启用）、
+      `internal/webui/tests/org_feishu_test.mjs`（发出去的 URL 与请求体）、ui 夹层三个视图
+- [ ] **真机验收（需要用户在飞书开放平台加两个数据权限后做）**：加「获取部门基础信息」
+      `contact:department.base:readonly` 与「获取用户基本信息」`contact:user.base:readonly` 并**发布新版本**，
+      「通讯录权限范围」覆盖要同步的部门；然后 `make build` → 重启 `aigw-local`，
+      在 `#/org` 点「同步飞书」确认部门名/人名出现，再核对：22 个部门 → 节点、5 个已有 Key 级绑定
+      （M60 绑过的那 5 个账号）自动固化到账户、同名账户（本地账户名与飞书姓名逐字相同的那些）自动合并、
+      第二次同步 0 写入。`FEISHU_LIVE_CONFIG=config.yaml go test ./internal/feishu/ -run TestLiveDirectory -v`
+      是这条验收的探针
+- [ ] 未做：飞书侧的部门改名/删除**不传播**到本地（设计如此：本地节点与账户只能由人来改）；
+      人员离职/停用不自动停账户（飞书 `status` 字段本轮没读）
+
 ## 缺陷：`dshgw.admin_socket` 与 M63 状态根脱节（2026-09-20 修）
 
 现象：飞书首次登录（绑定了 Key 的账号）在日志里报

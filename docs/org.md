@@ -58,6 +58,9 @@ Key 的策略最后生效，所以 Key 永远能覆盖组织与账号层的设�
 | PATCH | `/admin/api/v1/org/nodes/{id}` | `admin_update_org_node` | admin |
 | DELETE | `/admin/api/v1/org/nodes/{id}` | `admin_delete_org_node` | admin |
 | PUT | `/admin/api/v1/org/nodes/{id}/accounts` | `admin_set_org_node_accounts` | admin |
+| GET | `/admin/api/v1/org/feishu/directory` | `admin_list_feishu_directory` | admin |
+| POST | `/admin/api/v1/org/feishu/sync` | `admin_sync_feishu_org` | admin |
+| POST/PUT/DELETE | `/admin/api/v1/org/feishu/users/{open_id}/account` | `admin_create_account_from_feishu_user` / `admin_bind_account_feishu_user` / `admin_unbind_account_feishu_user` | admin |
 | GET | `/admin/api/v1/accounts?org_node_id=&include_descendants=` | `admin_list_accounts` | viewer |
 | POST/PATCH | `/admin/api/v1/accounts`（body `org_node_ids`） | — | admin |
 
@@ -105,6 +108,9 @@ Key 的策略最后生效，所以 Key 永远能覆盖组织与账号层的设�
       `zhangwei` 都能搜到 `长伟`）。节点树的过滤框同样支持。
     - **过滤框固定在列表上方**，不随成员列表滚动；
     - **勾选的成员自动排到最前**（含"已选 N 个"提示），取消勾选即回到原位。
+  - **同步飞书**（右上角，`role=admin`；M70）：弹出飞书组织结构树 + 人员列表，一键「同步」
+    补建缺失部门节点并自动合并已匹配人员；匹配不上的人逐行「创建用户 / 绑定账号」。
+    合并规则、飞书后台需要的权限与排障见 [docs/feishu.md §5c](feishu.md#5c-通讯录同步组织架构页同步飞书m69)。
 - **账户页**：新增「所属组织」列与**按组织筛选**（可选是否包含子节点）；编辑账户时可设置
   `org_node_ids`（逗号分隔的节点 id，整表替换该账号的归属）。
 
@@ -159,3 +165,7 @@ view.refresh(nodes); view.setSelected(id); view.expandAll(); view.collapseAll();
 | 组织树上少了一个节点 | 兄弟重名会让写入 409；检查是否是同名节点建在了同一父节点下 |
 | 删不掉节点 | 它是中间节点，需要 `cascade=true`（控制台会提示将删除整棵子树） |
 | 组织页显示"该部署未启用组织架构" | `Deps.Org` 端口为空（该构建/测试环境未接存储），此时 org 接口回答 400 `unsupported_parameter`（与其它未接线端口一致）；正式部署不会出现 |
+| 「同步飞书」提示部门/人员没有名称 | 飞书应用缺两个只读数据权限；加权限并发布版本，见 [docs/feishu.md §5c](feishu.md#5c-通讯录同步组织架构页同步飞书m69) |
+| 「同步飞书」报错 502 | 飞书侧失败（凭据/权限/网络/限流），弹窗给出中文原因；详细数字码在 aigw 日志 |
+| 同步后有人没被合并 | 名字不完全一致或账户已绑定其它飞书身份：用行内「绑定账号」人工绑定（支持拼音过滤），自动合并绝不覆盖已绑定身份 |
+| 同步建的节点删不掉/不想保留 | 与手工节点一样：`DELETE /org/nodes/{id}?cascade=true`；节点上的 `feishu_department_id` 会随节点一起删除 |

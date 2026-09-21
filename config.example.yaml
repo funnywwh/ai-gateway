@@ -323,6 +323,11 @@ feishu:
   state_secret: ""
   ticket_secret: ""
   invite_secret: ""           # 管理员邀请链接签名密钥；空则从 credentials_key 按用途派生
+  # 通讯录同步（M70，组织架构页「同步飞书」）用的两个端点，默认即飞书文档地址，通常不必写。
+  # 需要 app 有「获取部门基础信息」「获取用户基本信息」两个只读数据权限，否则部门/人员没有名称
+  # （接口仍返回成功）。见 docs/feishu.md §5c。
+  # tenant_token_url: "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+  # contact_url: "https://open.feishu.cn/open-apis/contact/v3"
 
 # AES-GCM key for provider credentials at rest; override with GW_CREDENTIALS_KEY in production.
 credentials_key: "change-me-32-byte-encryption-key!!"

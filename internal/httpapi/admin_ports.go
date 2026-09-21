@@ -20,6 +20,13 @@ type AccountAdmin interface {
 	GetAccountByName(ctx context.Context, name string) (*domain.Account, error)
 	UpsertAccount(ctx context.Context, a *domain.Account) (int64, error)
 	SetAccountStatus(ctx context.Context, id int64, status string) error
+	// BindAccountFeishu / UnbindAccountFeishu / FindAccountByFeishuOpenID are the
+	// directory-sync mapping (M70): which local account a Feishu person is. They never
+	// influence authentication; they exist so a second sync recognizes the same person
+	// after a rename on either side.
+	BindAccountFeishu(ctx context.Context, id int64, binding domain.FeishuBinding) error
+	UnbindAccountFeishu(ctx context.Context, id int64) (bool, error)
+	FindAccountByFeishuOpenID(ctx context.Context, openID string) (*domain.Account, error)
 }
 
 // ProviderAdmin manages upstream provider instances and their model mappings.
@@ -75,6 +82,12 @@ type OrgAdmin interface {
 	ListOrgNodeAccountIDs(ctx context.Context, nodeID int64) ([]int64, error)
 	SetOrgNodeMembers(ctx context.Context, nodeID int64, accountIDs []int64) error
 	SetAccountOrgNodes(ctx context.Context, accountID int64, nodeIDs []int64) error
+	// AddAccountOrgNodes attaches an account to nodes additively (M70): the sync knows the
+	// departments a person belongs to and must not replace the memberships a console set.
+	AddAccountOrgNodes(ctx context.Context, accountID int64, nodeIDs []int64) error
+	// SetOrgNodeFeishuDepartment stamps (or clears, with an empty id) the node's Feishu
+	// department link, so later syncs recognize the node by id instead of by name.
+	SetOrgNodeFeishuDepartment(ctx context.Context, nodeID int64, departmentID string) error
 }
 
 // HookAdmin manages outbound event sinks.

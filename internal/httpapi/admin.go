@@ -31,6 +31,9 @@ type AdminStore interface {
 	FindAPIKeyByFeishuOpenID(ctx context.Context, openID string) (*domain.APIKey, error)
 	BindAPIKeyFeishu(ctx context.Context, id int64, binding domain.FeishuBinding) error
 	UnbindAPIKeyFeishu(ctx context.Context, id int64) (bool, error)
+	// ListAPIKeyFeishuIdentities is the key-level read the directory sync (M70) uses to
+	// recognize people that were bound before an account-level mapping existed (M60).
+	ListAPIKeyFeishuIdentities(ctx context.Context) ([]domain.KeyFeishuIdentity, error)
 	// GetAdminUserByUsername re-reads the operator who started a Feishu binding, so a
 	// demotion between starting and finishing it is honoured.
 	GetAdminUserByUsername(ctx context.Context, username string) (*domain.AdminUser, error)

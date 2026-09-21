@@ -9,6 +9,7 @@ import { api } from '../api.js';
 import { el, card, modal, toast, confirmDialog, badge } from '../ui.js';
 import { tree } from '../tree.js';
 import { matchesQuery } from '../pinyin.js';
+import { openFeishuSync } from './org_feishu.js';
 
 // 成员勾选列表最多拉这么多账号。组织页需要展示"这个部门有哪些账号"，一次拉全量比做一套
 // 分页多选更简单；账号数量超过这个上限时列表会截断，并明确提示去账户页按组织筛选。
@@ -20,7 +21,13 @@ export async function render({ page, actions, session }) {
   const createRoot = el('button', { class: 'btn btn-primary', text: '新建根节点', disabled: readonly });
   const expandAll = el('button', { class: 'btn', text: '展开全部' });
   const collapseAll = el('button', { class: 'btn', text: '折叠全部' });
-  actions.append(refreshBtn, expandAll, collapseAll, createRoot);
+  // 「同步飞书」是管理员动作（它会在飞书上调用 API 并创建节点），只读角色看到的按钮是灰的，
+  // 与「新建根节点」同一口径。
+  const syncFeishu = el('button', {
+    class: 'btn', text: '同步飞书', disabled: readonly,
+    title: readonly ? '只读角色不能同步飞书' : '读取飞书通讯录，按部门与人员合并到本地组织架构',
+  });
+  actions.append(refreshBtn, expandAll, collapseAll, createRoot, syncFeishu);
 
   const state = { nodes: [], selectedId: null, accounts: [], accountsTruncated: false, membersLoaded: false };
 
@@ -55,6 +62,8 @@ export async function render({ page, actions, session }) {
   expandAll.addEventListener('click', () => mainTree.expandAll());
   collapseAll.addEventListener('click', () => mainTree.collapseAll());
   createRoot.addEventListener('click', () => createNode(null));
+  // 同步完成后整页重载：同步会创建节点、改变账号归属，树与成员数都要重新读。
+  syncFeishu.addEventListener('click', () => openFeishuSync({ onDone: (changed) => { if (changed) load(); } }));
 
   function metaFor(node) {
     const parts = [];

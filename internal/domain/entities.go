@@ -40,6 +40,18 @@ type Account struct {
 	Note                   string
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
+
+	// Feishu identity written by the directory sync (M70). It is a sync mapping —
+	// "which local account is this Feishu person" — and never a login capability: the
+	// data plane and the DSH portal resolve identities through api_keys.feishu_open_id
+	// (M60), not through the account. The columns mirror the key-level ones so an audit
+	// line reads the same either way; FeishuBoundBy says who wrote it ("sync" for an
+	// automatic merge, an admin username for a manual binding).
+	FeishuOpenID  string
+	FeishuUnionID string
+	FeishuName    string
+	FeishuBoundAt *time.Time
+	FeishuBoundBy string
 }
 
 // Provider is one upstream provider instance (builtin kind or plugin process).
@@ -186,6 +198,16 @@ type FeishuBinding struct {
 
 // Bound reports whether the projection holds an identity.
 func (b FeishuBinding) Bound() bool { return b.OpenID != "" }
+
+// KeyFeishuIdentity is one API key's bound Feishu identity together with the account that
+// key belongs to. The directory sync (M70) reads them all at once to recognize a Feishu
+// person that was bound at the key level before the account-level mapping existed, and
+// offers to promote that identity onto the account.
+type KeyFeishuIdentity struct {
+	KeyID     int64
+	AccountID int64
+	Binding   FeishuBinding
+}
 
 // MCPToken authenticates the MCP endpoint. Scope decides whether the token only
 // reads its own account (query) or may also drive the management API
