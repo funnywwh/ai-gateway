@@ -275,7 +275,14 @@ export async function render({ page, actions, session }) {
   function dshBadge(account) {
     if (account.dsh_enabled) return badge('DSH 已启用', 'ok', account.dsh_tenant || '');
     if (account.dsh_disabled_at) return badge('DSH 已停用（管理员）', 'warn', '自动启用不会撤销它');
-    if (account.dsh_effective) return badge('DSH 登录即可用', 'ok', '本部署开启了自动启用：首次登录会创建租户');
+    if (account.dsh_effective) {
+      // 自动启用的前提是"该账号在当前网关有可用模型"：worker 凭据没有模型时首登会被
+      // provision_failed 挡下（403），所以这句话必须写在看得见的地方，而不是等人来问。
+      return el('span', { class: 'org-dsh-note' }, [
+        badge('DSH 登录即可用', 'ok'),
+        el('span', { class: 'muted', text: '首次登录自动建租户（需该账号有可用模型）' }),
+      ]);
+    }
     return el('span', { class: 'muted', text: 'DSH 未启用' });
   }
 

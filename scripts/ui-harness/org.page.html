@@ -397,6 +397,8 @@ try {
     checks.dshEnabledBadge = rowText('acme').includes('DSH 已启用');
     checks.dshAdminDisabledBadge = rowText('root-acct').includes('DSH 已停用（管理员）');
     checks.dshLoginUsableBadge = rowText('张三').includes('DSH 登录即可用');
+    // 自动启用的前提（账号要有可用模型）必须写在行里，不能只存在于文档。
+    checks.dshLoginUsableCaveat = rowText('张三').includes('需该账号有可用模型');
     checks.feishuBadge = rowText('acme').includes('飞书：李智超');
     checks.keyCountBadge = rowText('acme').includes('2 / 3 个 Key');
     // 多 Key 账号要有提示：门户登录会先让人选一把。提示必须是**看得见的文字**（tooltip 在触屏上

@@ -27,7 +27,9 @@ for (const badge of ['dshBadge', 'feishuBadge', 'keyBadge']) {
 // administrator, and never enabled (which is what auto_enable turns into "usable at login").
 assert.match(org, /account\.dsh_enabled\) return badge\('DSH 已启用'/, 'an enabled account says so');
 assert.match(org, /account\.dsh_disabled_at\) return badge\('DSH 已停用（管理员）'/, 'an explicit disable is distinguishable');
-assert.match(org, /account\.dsh_effective\) return badge\('DSH 登录即可用'/, 'the auto-enabled case is stated, not implied');
+assert.match(org, /account\.dsh_effective\) \{[\s\S]*?badge\('DSH 登录即可用', 'ok'\)/, 'the auto-enabled case is stated, not implied');
+// 自动启用的前提（账号要有可用模型）必须写在行里：首登失败时人看到的是这条说明，不是文档。
+assert.match(org, /需该账号有可用模型/, 'the model-grant precondition must be visible in the row');
 
 // --- expanding a row loads that account's keys, not the whole key list -----------------------
 
