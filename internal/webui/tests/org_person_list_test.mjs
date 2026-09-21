@@ -130,8 +130,13 @@ assert.match(keyActions, /export async function createKeyForAccount\(account, \{
 assert.match(keyActions, /await api\.patch\('\/keys\/' \+ created\.id, \{[\s\S]*?record_input_mode/,
   'the recording switches are applied right after creation, in one place');
 assert.match(keyActions, /明文只显示这一次/, 'the secret dialog must say the plaintext is shown once');
-assert.match(picker, /api\.get\('\/org\/feishu\/directory'\)/,
-  'the person picker reads the directory (names and current bindings in one call)');
+assert.match(picker, /api\.get\('\/org\/feishu\/directory', refresh \? \{ refresh: 'true' \} : undefined\)/,
+  'the person picker reads the directory (names and current bindings in one call), and only 「刷新」 bypasses its cache');
+// 弹窗必须在读之前就挂上去：读是慢的（冷缓存时走飞书接口），先 await 再建弹窗等于"点了没反应"。
+assert.match(picker, /document\.getElementById\('modal-root'\)\.append\(backdrop\);\s*\n\s*\/\/[^\n]*\n\s*paint\(\);\s*\n\s*load\(false\);/,
+  'the dialog must be on screen before the directory read starts, and the read must not be awaited');
+assert.match(picker, /progressLine\('正在读取飞书通讯录'\)/,
+  'the wait must be visible: a spinner, the sentence and seconds ticking (a tooltip is not visible on a touch screen)');
 assert.match(picker, /api\.put\('\/accounts\/' \+ account\.id \+ '\/feishu'/,
   'and writes the account-level binding route');
 assert.doesNotMatch(picker, /keys\/' \+ .*feishu\/bind/, 'the retired key-level bind route must not be called');

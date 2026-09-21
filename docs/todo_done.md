@@ -4746,3 +4746,86 @@ dshgw 审计 `login_key_selected`；`POST /v1/dshgw/authorize` 由 `actor=dshgw-
 门户登录 403 且不被自动重新启用。验收中抓到并修掉一个真缺陷：重新启用后 `dsh_disabled_at` 仍在库里
 （`UpsertAccount` 不写该列，启用路径漏了单独清它）→ `ce81d06` + 回归测试。
 剩下唯一没验的是"用本人的飞书身份走一次飞书登录"（需要手机），留在 `docs/TODO.md`。
+
+### 修掉组织页人员表与三类弹窗的六处问题（用户反馈，2026-09-21，v3.2.0 上线后）
+
+反馈现场是 `http://192.168.190.86:8088/admin/ui/#/org`（v3.2.0）。用户一次报了六件事，都是"看着能用、
+实际不能用"或"逼人做机器该做的事"：
+
+1. **人员列表要改成多列表格**——原来是"一排徽标换行"，字段一多就分不清哪一格是谁的；
+2. **点「收起」不会收起**；
+3. **「分配组织」要弹出组织部门树勾选**——原来是手填「组织节点 id（逗号分隔）」；
+4. 节点详情「保存成员」旁边**加「新建成员」**；
+5. 人员行「展开」前面**加「编辑」**（账号字段编辑不必再去账户页）；
+6. **绑定飞书加载人员要先弹出框、显示进度**——原来是"点了没反应"。
+
+根因三条，两条是缺陷、一条是设计没跟上用法：
+
+- **「收起」不生效是 CSS 缺门控，不是 JS**：`app.css` 里 `.org-person-detail` 只有 padding，
+  全文件没有"默认隐藏"的规则，`.org-person.open` 只改背景色；而详情 DOM 是**首次展开时才创建**，
+  于是形态正好是"展开看起来生效、收起不生效"（`git log -S` 显示这段 CSS 由 `d9472a8`（M72）一次引入、
+  从未有过隐藏规则，当时的走查只断言 `detailOpened`＝元素存在，所以漏网）。
+- **选人弹窗"读在前、弹在后"**：`account_feishu.js` 先 `await api.get('/org/feishu/directory')`，
+  读成功才建弹窗——冷缓存时那次读要走飞书接口（遍历部门 + 逐人用户信息），几秒到十几秒里屏幕上
+  什么都没有；读失败更连框都没有，只弹一个 toast。
+- **「分配组织」与建号表单让人手打节点 id**：归属本来是"直接挂在哪些节点上"（整表替换），
+  让操作员记 id 既易错又看不出层级。
+
+改动（提交见下面的 commit）：
+
+- [x] `pages/org.js`：人员（账号）列表改成**多列表格**（账号 / DSH / 飞书 / Key / 所属组织 / 操作），
+      表头 sticky、列宽百分比倾向 + 单元格换行（窄屏不横向溢出）；未归属那份只读列表共用同一个表，
+      但**不渲染**勾选列（没有节点可写，画个勾选框只会骗人）。列定义只写一处，表头与详情行 colspan 由它推出。
+- [x] `app.css`：`.org-person-detail{display:none}` + `.org-person-detail.open{display:table-row}`——
+      **这条门控就是「收起」的修复**；详情行改为 `<tr>` + colspan 单元格；顺带修掉刷新时的自我嵌套
+      （`personDetail()` 改为填充传入的详情体，原先 `refreshDetail` 会把新的 `.org-person-detail`
+      塞进旧的里面，padding 叠加、缩进翻倍）。
+- [x] `pages/org.js`：重绘**复用行对象**（按 account id）+ 展开态存在 `state.open`——勾选、过滤、成员
+      读取完成都不会把展开中的行关掉，也不会因此重发 `/keys`；写操作按影响面分流：不改归属的
+      （Key 操作、绑定/解绑飞书）就地刷新那一行，改归属的（编辑、分配组织、启停 DSH）整表重载并重读成员。
+- [x] 新 `pages/org_assign.js`：**组织树勾选**选择器（拼音过滤、显示节点路径消歧、`已选 N/M`、
+      「清空」、空选警告）。语义按用户决定：**每节点独立**——勾父节点不连带勾选子节点（子树继承的是
+      节点**标签**，不是成员）。保存是整表替换（id 升序、永远是数组）；写失败留在弹窗内报错不关窗。
+- [x] 新 `pages/account_actions.js`：账号的创建/编辑（含所属组织字段）由账户页与组织页**共用一份实现**，
+      账户页两份内联表单删掉；`ui.js` 的 `modal()` 增加自定义字段（`render`/`get`）——没有
+      `<input name=…>` 的字段若被静默跳过，"整表替换归属"会变成"不动归属"，语义正好相反。
+- [x] `pages/org.js`：节点详情工具条加**「新建成员」**（在「保存成员」左边）——建号与挂到本节点是
+      **同一个请求**（`POST /accounts` 带 `org_node_ids`），不存在"人建好了但还不属于任何部门"的中间
+      状态；建完只重绘本表、**不重读成员**，操作员未保存的勾选不丢，新账号按「勾选置顶」立刻出现在
+      第一行且已勾选。人员行加**「编辑」**（在「展开」前），走同一个账号表单。
+- [x] `pages/account_feishu.js`：选人弹窗**先弹出、再读通讯录**；读取期间显示进度（`ui.js` 新增
+      `progressLine()`：转圈 + 「正在读取飞书通讯录…」+ **秒数递增**，`withBusy` 也改为基于它实现，
+      同一套观感只有一份实现）；「刷新」按钮走 `refresh=true` 绕过 60 秒缓存（读失败时它就是重试）；
+      通讯录为空 / 缺用户信息权限 / 读失败都**留在弹窗内**说明，取消随时可用。
+- [x] 顺带修掉一处同类坑：树自己在过滤/折叠时会重建行（连带勾选框），勾选框必须在**建出来的时候**就带上
+      状态，否则过滤一次屏幕上变成"全都没勾"而集合里还勾着（`org_assign.js` 修复；「同步飞书」弹窗早就
+      这么做，本次为它补了回归断言）。
+- [x] 测试（**先证伪再修**，三条都实测过红）：
+      - harness `org` 52→65 项（表格表头/列对齐/详情跨行/勾选框落在自己列里、新建成员的预置与
+        POST body 与"建完即勾选"与"未保存勾选不丢"）；
+      - `org-person` 17→45 项（**收起真的收起**、详情只一份不嵌套、展开行在重绘后仍在、行内编辑的
+        按钮顺序与表单字段与 PATCH body、分配组织的预勾选/独立语义/拼音过滤/整表替换 body/空选警告/
+        取消不写）；
+      - `org-accounts` 10→17 项（账户页同一棵勾选树、不再出现"组织节点 id"）；
+      - 新增 `org-bind` 20 项：stub 把目录读**按在手里**，断言"请求还没回来时弹窗已在、进度可见、
+        绑定点不动、取消可用"，放开后断言人员行/置顶/`PUT` body/`refresh=true`/三种失败态；
+      - 新增 `internal/webui/tests/org_assign_test.mjs`（VM 跑真模块）并挂进 `make ui-base`；
+        `account_feishu_test.mjs` 改为"读失败/空目录留在弹窗内"并补"先弹框再读"的悬挂断言；
+        `tags_binding_test.mjs`/`org_tree_test.mjs`/`org_person_list_test.mjs` 的断言目标随实现搬迁，
+        并新增"两页共用 account_actions / org_assign"的守卫。
+      - 实测红记录（改代码前，只加了断言）：
+        `org` 55 项里 6 项红（`memberTableHeader`/`memberColumnsAligned`/`memberDetailSpansRow`/
+        `memberCheckboxNotStretched`/`memberCheckboxInsidePickCell`/`memberVerticallyAligned`）、
+        `org-person` 24 项里 4 项红（**`detailCollapseHides`**/`unassignedHasNoCheckbox`/`detailBodySingle`/
+        `detailBodySingleAfterReopen`）、`org`+`org-person` 各 2 项红（新建成员/行内编辑的入口）、
+        `org-bind` 4 项红（**`bindDialogOpensBeforeDirectory`**/`bindShowsProgress`/`bindExplainsSlowRead`/
+        `bindButtonDisabledWhileLoading`）。
+- [x] 文档：`docs/org.md` §5/§6（人员表格、新建成员、行内编辑、勾选树、账户页表单；顺手修掉两处已过时的
+      描述——"保存成员灰掉"的真实原因现在是搜索框过滤，不再是"选了某个部门"）、`docs/feishu.md` §4
+      （选人弹窗先弹框 + 进度 + 刷新/重试）、`scripts/ui-harness/README.md`（视图数 30、org-bind 与
+      M72 后续断言的说明）。
+
+**验证**（自动化，工作区 `/home/winger/work/ai_gateway-orgui`，分支 `feat/org-ui-tables-and-pickers`）：
+`make ui-base` 全绿（含新增 `org_assign_test.mjs`）；`scripts/ui-harness/run.sh` 全 **32** 个视图通过（新增 `org-bind`；另两个是 M73 的 `chatWeb`/`chatWebOff`）；
+`go test ./internal/webui/...` 全绿（`pinyin_test.go` 钉的拼音接线与 `embed_test.go` 钉的控制台资源
+都还在）。

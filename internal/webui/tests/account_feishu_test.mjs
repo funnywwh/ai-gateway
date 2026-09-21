@@ -49,11 +49,21 @@ function node(tag, attrs = {}, children = []) {
   return el;
 }
 
+// holdDirectory 让这次读挂住不返回：只有把请求按在手里，才能观察到"弹窗已经打开、还在读"那一瞬
+// （读得快时这个状态一帧都不存在，而用户报障的正是这个瞬间"点了没反应"）。
+let holdDirectory = false;
+let releaseDirectory = null;
+
 const api = {
-  async get(path) {
-    calls.push({ method: 'GET', path });
+  async get(path, params) {
+    calls.push({ method: 'GET', path, params });
     if (path === '/org/feishu/directory') {
       if (directoryError) throw new Error(directoryError);
+      if (holdDirectory) {
+        return await new Promise((resolve) => {
+          releaseDirectory = () => { holdDirectory = false; resolve(directory); };
+        });
+      }
       return directory;
     }
     throw new Error('unexpected GET ' + path);
@@ -74,7 +84,14 @@ const ui = {
   modalBody: (children) => node('div', { children: children || [] }),
   modalActions: (children) => node('div', { children: children || [] }),
   withBusy: async (button, _label, fn) => fn(),
+  // 与 ui.js 的真实形状一致：progressLine 返回 { nodes, stop }，withBusy 也是用它实现的。
+  progressLine: (label) => {
+    progressLabels.push(label);
+    return { nodes: [node('span', { class: 'spinner' }), node('span', { text: label + '…' })], stop() { stops.push(label); } };
+  },
 };
+const progressLabels = [];
+const stops = [];
 
 const modalRoot = node('div');
 const context = vm.createContext({
@@ -94,7 +111,7 @@ const module = new vm.SourceTextModule(source, { identifier: sourceURL.href, con
 const linker = async (specifier) => {
   if (specifier === '../api.js') return new vm.SyntheticModule(['api'], function () { this.setExport('api', api); }, { context });
   if (specifier === '../ui.js') return new vm.SyntheticModule(
-    ['el', 'modal', 'toast', 'badge', 'confirmDialog', 'modalHead', 'modalBody', 'modalActions', 'withBusy'],
+    ['el', 'modal', 'toast', 'badge', 'confirmDialog', 'modalHead', 'modalBody', 'modalActions', 'withBusy', 'progressLine'],
     function () {
       for (const [name, value] of Object.entries(ui)) this.setExport(name, value);
     }, { context });
@@ -124,6 +141,40 @@ function collectText(entry, out = []) {
   return out;
 }
 
+// --- 弹窗先出现、通讯录后到（用户报障：加载人员要先弹出框、显示进度） -------------------------
+//
+// 这一段的证据只能来自"请求还按在手里"的那一刻：读得快的时候，"弹窗已开、正在读"这个状态一帧都
+// 不存在，任何在读完成之后做的断言都会全绿——而那正是旧实现的形态（先 await 读、读完才建弹窗，
+// 慢的时候屏幕上什么都没有）。
+const heldCalls = calls.length;
+holdDirectory = true;
+progressLabels.length = 0;
+directory = { names_available: true, users: [{ open_id: 'ou_a', name: '李智超', account: null }] };
+const slowPicker = openFeishuPersonPicker({ account: { id: 7, name: 'acme' } });
+await new Promise((resolve) => setTimeout(resolve, 0));
+{
+  const picker = lastDialog();
+  assert.ok(picker, 'the dialog must exist BEFORE the directory read finishes');
+  assert.ok(progressLabels.includes('正在读取飞书通讯录'),
+    'and it must say it is reading (a spinner + a sentence + seconds, not a silent wait)');
+  assert.equal(findByClass(picker, 'feishu-picker-row').length, 0, 'no rows can exist yet: the read is still out');
+  assert.equal(findButton(picker, '绑定').disabled, true, 'there is nothing to bind yet');
+  assert.equal(findButton(picker, '刷新').disabled, true, 'and the read cannot be started twice');
+  assert.equal(calls[heldCalls].params, undefined, 'the first read uses the server cache');
+}
+releaseDirectory();
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(findByClass(lastDialog(), 'feishu-picker-row').length, 1, 'the rows arrive when the read does');
+assert.ok(stops.includes('正在读取飞书通讯录'), 'the progress line is stopped when the read settles');
+assert.equal(findButton(lastDialog(), '刷新').disabled, false, 'and the read can be repeated');
+press(findButton(lastDialog(), '刷新'));
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(calls.at(-1).params.refresh, 'true',
+  '刷新 bypasses the 60 s cache: somebody added in Feishu five seconds ago has to show up now');
+press(findButton(lastDialog(), '取消'));
+assert.equal(await slowPicker, false);
+directory = null;
+
 // --- the picker reads the directory and offers every person ---------------------------------
 
 directory = {
@@ -137,8 +188,11 @@ directory = {
 calls.length = 0;
 const pickerPromise = openFeishuPersonPicker({ account: { id: 7, name: 'acme' } });
 await new Promise((resolve) => setTimeout(resolve, 0));
-assert.deepEqual(calls[0], { method: 'GET', path: '/org/feishu/directory' },
-  'the picker must read the directory, which is where the person list and the current bindings come from');
+assert.equal(calls[0].method, 'GET', 'the picker must read the directory');
+assert.equal(calls[0].path, '/org/feishu/directory',
+  'the person list and the current bindings come from the directory, not a per-person lookup');
+assert.equal(calls[0].params, undefined,
+  'the first read takes the server cache: refresh=true is for the 刷新 button (and for retrying)');
 
 // 人员列表是弹窗里那个带 class 的容器：测试从它取文本与单选框，而不是猜层级。
 function findByClass(entry, className, out = []) {
@@ -166,6 +220,16 @@ const radios = [];
 assert.equal(radios.length, 3, 'one radio button per person');
 assert.equal(radios.filter((box) => box.disabled).length, 1, 'only the person held by another account is disabled');
 // 关闭弹窗（取消）不写任何东西，并把 false 交给调用方。取消按钮是弹窗里的那个「取消」。
+// press clicks a button whichever way it was wired: the dialog uses onclick attributes for the plain
+// buttons and addEventListener for the one that shows progress (绑定), and a test that only knows the
+// first shape would silently do nothing on the second.
+function press(entry) {
+  if (!entry) return;
+  if (typeof entry.onclick === 'function') { entry.onclick({ currentTarget: entry, target: entry }); return; }
+  const handler = entry.listeners && entry.listeners.click;
+  if (handler) handler({ currentTarget: entry, target: entry, stopPropagation() {} });
+}
+
 function findButton(entry, label) {
   if (!entry) return null;
   if (entry.tag === 'button' && entry.textContent === label) return entry;
@@ -175,7 +239,7 @@ function findButton(entry, label) {
   }
   return null;
 }
-findButton(lastDialog(), '取消').onclick();
+press(findButton(lastDialog(), '取消'));
 assert.equal(await pickerPromise, false, 'closing the picker without choosing reports no binding');
 
 // --- choosing a person writes the account-level route ---------------------------------------
@@ -205,7 +269,7 @@ await new Promise((resolve) => setTimeout(resolve, 0));
   })(picker);
   const confirm = buttons.find((button) => button.textContent === '绑定');
   assert.ok(confirm, 'the picker must offer a 绑定 button');
-  confirm.onclick({ currentTarget: confirm });
+  press(confirm);
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 const write = calls.find((call) => call.method === 'PUT');
@@ -217,22 +281,34 @@ assert.equal(await bindPromise, true);
 assert.ok(bound && bound.open_id === 'ou_a', 'the caller is told who was bound');
 assert.equal(toasts.at(-1).level, 'ok');
 
-// --- a directory failure is reported, and nothing is written --------------------------------
+// --- a directory failure is reported INSIDE the dialog, and nothing is written ---------------
 
 calls.length = 0;
 toasts.length = 0;
 directoryError = '飞书不可达';
-assert.equal(await openFeishuPersonPicker({ account: { id: 7, name: 'acme' } }), false);
-assert.equal(toasts.at(-1).level, 'error');
+const failing = openFeishuPersonPicker({ account: { id: 7, name: 'acme' } });
+await new Promise((resolve) => setTimeout(resolve, 0));
+{
+  const picker = lastDialog();
+  assert.ok(picker, 'a failed read must still leave the dialog on screen');
+  assert.match(collectText(picker).join(' '), /飞书不可达/, 'the server reason is shown in the dialog');
+  assert.match(collectText(picker).join(' '), /刷新/, 'and the dialog offers the retry');
+  assert.equal(findButton(picker, '绑定').disabled, true, 'with nothing to bind, the button stays disabled');
+}
 assert.ok(!calls.some((call) => call.method === 'PUT'), 'a failed read must not write anything');
+press(findButton(lastDialog(), '取消'));
+assert.equal(await failing, false, 'closing a failed picker reports no binding');
 directoryError = null;
 
-// --- an empty directory explains what to fix ------------------------------------------------
+// --- an empty directory explains what to fix (also in the dialog) ----------------------------
 
 toasts.length = 0;
 directory = { names_available: true, users: [] };
-assert.equal(await openFeishuPersonPicker({ account: { id: 7, name: 'acme' } }), false);
-assert.match(toasts.at(-1).text, /权限/, 'an empty directory must point at the data permission');
+const emptyPicker = openFeishuPersonPicker({ account: { id: 7, name: 'acme' } });
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.match(collectText(lastDialog()).join(' '), /权限/, 'an empty directory must point at the data permission');
+press(findButton(lastDialog(), '取消'));
+assert.equal(await emptyPicker, false);
 
 // --- unbinding asks first, is idempotent, and reports honestly ------------------------------
 

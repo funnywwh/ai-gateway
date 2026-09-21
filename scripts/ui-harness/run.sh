@@ -19,7 +19,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${UI_HARNESS_WORK:-$ROOT/.cache/ui-harness}"
 PORT="${UI_HARNESS_PORT:-8097}"
-VIEWS="docs detail capacity cost models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand tree org org-readonly org-person org-accounts org-sync org-sync-readonly org-sync-nonames admins admins-readonly login chatWeb chatWebOff"
+VIEWS="docs detail capacity cost models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand tree org org-readonly org-person org-accounts org-bind org-sync org-sync-readonly org-sync-nonames admins admins-readonly login chatWeb chatWebOff"
 FIXTURES="$ROOT/scripts/ui-harness/fixtures.json"
 REFRESH=0
 
@@ -109,7 +109,7 @@ page_for_view() {
     # The reusable tree control on its own (it needs no API at all), and the organization page
     # with its two placements plus the account page's organization column and filter.
     tree) echo "tree.html" ;;
-    org|org-readonly|org-person|org-accounts) echo "org.html" ;;
+    org|org-readonly|org-person|org-accounts|org-bind) echo "org.html" ;;
     # 飞书通讯录同步弹窗（M70）：管理员 / 只读 / 缺数据权限三种部署，同一个页面。
     org-sync|org-sync-readonly|org-sync-nonames) echo "org-feishu.html" ;;
     # 控制台管理员（M66）：同一个页面渲染"有飞书"和"没有飞书"的两种部署，只读视图单独一条。

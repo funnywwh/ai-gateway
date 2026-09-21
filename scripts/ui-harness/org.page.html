@@ -129,6 +129,31 @@ window.fetch = async (url, options) => {
     applyAccountPatch(account, { org_node_ids: body.org_node_ids || [] });
     return ok(account);
   }
+  // 绑定飞书人员弹窗读的是飞书通讯录。这里可以**悬挂**这次读：只有把请求按在手里，才能观察到
+  // "弹窗已经打开、正在读取"那一瞬间（读得快的时候它一帧都不存在）。fixtures 里三个人分别覆盖
+  // 三条路径：未绑定、已被别人绑定（置灰）、已绑给本账号（可选）。
+  if (path === '/org/feishu/directory' && method === 'GET') {
+    const wantsRefresh = target.includes('refresh=true');
+    const answer = () => ok({
+      names_available: window.__namesAvailable !== false,
+      cached: !wantsRefresh,
+      warnings: [],
+      users: window.__directoryUsers || [
+        { open_id: 'ou_a', name: '李智超', account: null, department_ids: ['od_rd'] },
+        { open_id: 'ou_b', name: '王五', account: { id: 9, name: '老板' }, department_ids: ['od_rd'] },
+        { open_id: 'ou_c', name: '张三', account: { id: 2, name: 'root-acct' }, department_ids: ['od_mkt'] },
+      ],
+    });
+    if (window.__directoryError) {
+      return { ok: false, status: 502, text: async () => JSON.stringify({ error: { message: window.__directoryError, code: 'upstream_error' } }) };
+    }
+    if (window.__holdDirectory) {
+      return new Promise((resolve) => {
+        window.__releaseDirectory = () => { window.__holdDirectory = false; resolve(answer()); };
+      });
+    }
+    return answer();
+  }
   // The expanded person row asks for that account's keys (M72). The list carries a worker key on
   // purpose: it must be labelled as gateway plumbing rather than offered as a person's key.
   if (path === '/keys' && method === 'GET') {
@@ -760,6 +785,127 @@ try {
     await settle();
     const survived = detailOf('1');
     checks.openRowSurvivesRepaint = !!survived && survived.getBoundingClientRect().height > 0 && !!rowButton('收起');
+  }
+
+  if (view === 'org-bind') {
+    // 绑定飞书人员弹窗：**先弹框、再读通讯录**，读取期间显示进度。
+    //
+    // 用户报障的形态是"点了绑定飞书之后什么都不发生"：旧实现先 await 目录读、读成功才建弹窗，
+    // 所以慢的时候屏幕上没有任何东西。断言必须落在"请求还按在手里"的那一刻——读得快时这个状态
+    // 一帧都不存在，只有悬挂响应才看得见。
+    await renderOrg({
+      page: document.getElementById('page'), actions: document.getElementById('actions'),
+      session: { role: 'admin', username: 'admin' }, route: { path: '/org' }, navigate: () => {},
+      sidebar: document.getElementById('sidebar-slot'),
+    });
+    await settle();
+
+    // 用 root-acct（#2）：acme 在夹具里已经绑过飞书，它的按钮是「解绑飞书」——那会弹确认框，
+    // 不是选人弹窗（第一版就是点在了解绑上，于是"弹窗没出现"）。
+    const rowOfPerson = () => [...document.querySelectorAll('.org-member')].find((el) => el.textContent.includes('root-acct'));
+    const detailOf = (id) => document.querySelector('.org-person-detail[data-account-id="' + id + '"]');
+    const detailButton = (label) => {
+      const row = detailOf('2');
+      return row ? [...row.querySelectorAll('button')].find((b) => b.textContent === label) : null;
+    };
+    // 展开要先等一次 settle（详情是异步填进去的），否则按钮还没出现就去点，整个视图直接抛掉。
+    const row = rowOfPerson();
+    const rowToggle = row && [...row.querySelectorAll('button')].find((b) => b.textContent === '展开');
+    if (rowToggle) rowToggle.click();
+    await settle();
+    const bindButton = () => detailButton('绑定飞书') || detailButton('解绑飞书');
+    checks.bindEntryOffered = !!bindButton();
+    const modalText = () => (document.querySelector('#modal-root .feishu-picker-dialog') || {}).textContent || '';
+    const pickerButton = (label) => {
+      const dialog = document.querySelector('#modal-root .feishu-picker-dialog');
+      return dialog ? [...dialog.querySelectorAll('button')].find((b) => b.textContent === label) : null;
+    };
+    const pickerRows = () => [...document.querySelectorAll('#modal-root .feishu-picker-row')];
+
+    // --- 读得慢的时候：弹窗已经在、进度看得见、绑定点不动、取消随时可用 ----------------------
+    window.__holdDirectory = true;
+    if (bindButton()) bindButton().click();
+    await settle();
+    checks.bindDialogOpensBeforeDirectory = !!document.querySelector('#modal-root .feishu-picker-dialog');
+    checks.bindShowsProgress = modalText().includes('正在读取飞书通讯录')
+      && !!document.querySelector('#modal-root .feishu-picker-dialog .spinner');
+    checks.bindExplainsSlowRead = modalText().includes('60 秒内走缓存');
+    checks.bindNoRowsWhileLoading = pickerRows().length === 0;
+    checks.bindButtonDisabledWhileLoading = !!pickerButton('绑定') && pickerButton('绑定').disabled === true;
+    pickerButton('取消').click();
+    await settle();
+    checks.bindCancelAlwaysWorks = !document.querySelector('#modal-root .feishu-picker-dialog')
+      && !!window.__releaseDirectory;
+
+    // --- 放开读：人员列表出来，已绑别人的置灰、已绑本账号的可选 -------------------------------
+    window.__releaseDirectory();
+    await settle();
+    if (bindButton()) bindButton().click();
+    await settle();
+    checks.bindListRenders = pickerRows().length === 3;
+    checks.bindMarksOtherAccount = modalText().includes('已绑定「老板」');
+    checks.bindDisablesTakenPerson = (() => {
+      const row = pickerRows().find((el) => el.textContent.includes('王五'));
+      const box = row && row.querySelector('input[type=radio]');
+      return !!box && box.disabled === true;
+    })();
+    checks.bindMarksOwnAccount = modalText().includes('已绑定本账号');
+
+    // 选一个人绑定：请求体里必须是这个人的 open_id（不是 id 猜测）。
+    const liRow = pickerRows().find((el) => el.textContent.includes('李智超'));
+    if (liRow) {
+      const radio = liRow.querySelector('input[type=radio]');
+      radio.checked = true;
+      radio.dispatchEvent(new Event('change'));
+      await settle();
+    }
+    pickerButton('绑定').click();
+    await settle();
+    const bindPut = (window.__sent || []).filter((call) => call.method === 'PUT' && call.path === '/accounts/2/feishu').pop();
+    let bindBody = null;
+    try { bindBody = JSON.parse(bindPut.body); } catch (err) { bindBody = null; }
+    checks.bindSendsChosenPerson = !!bindBody && bindBody.open_id === 'ou_a';
+    checks.bindClosesAfterWrite = !document.querySelector('#modal-root .feishu-picker-dialog');
+
+    // --- 「刷新」绕过服务端 60 秒缓存（刚在飞书加的人要能立刻看到） ---------------------------
+    if (bindButton()) bindButton().click();
+    await settle();
+    pickerButton('刷新').click();
+    await settle();
+    checks.bindRefreshBypassesCache = (window.__calls || [])
+      .some((call) => call.includes('/org/feishu/directory') && call.includes('refresh=true'));
+    pickerButton('取消').click();
+    await settle();
+
+    // --- 读失败：留在弹窗里说明并可重试（不再"点了没反应"） ---------------------------------
+    window.__directoryError = '飞书不可达';
+    if (bindButton()) bindButton().click();
+    await settle();
+    checks.bindReadFailureStaysInDialog = !!document.querySelector('#modal-root .feishu-picker-dialog');
+    checks.bindReadFailureShowsReason = modalText().includes('飞书不可达');
+    checks.bindReadFailureBlocksWrite = !!pickerButton('绑定') && pickerButton('绑定').disabled === true;
+    checks.bindReadFailureOffersRefresh = !!pickerButton('刷新');
+    pickerButton('取消').click();
+    await settle();
+    window.__directoryError = null;
+
+    // --- 空通讯录 / 缺数据权限：留在弹窗里说清该改什么 ---------------------------------------
+    window.__directoryUsers = [];
+    if (bindButton()) bindButton().click();
+    await settle();
+    checks.bindEmptyDirectoryExplains = modalText().includes('飞书通讯录里没有人员')
+      && modalText().includes('权限');
+    pickerButton('取消').click();
+    await settle();
+
+    window.__directoryUsers = null;
+    window.__namesAvailable = false;
+    if (bindButton()) bindButton().click();
+    await settle();
+    checks.bindNamesUnavailableWarnsInDialog = modalText().includes('缺少用户信息权限');
+    pickerButton('取消').click();
+    await settle();
+    window.__namesAvailable = true;
   }
 
   if (view === 'org-readonly') {
