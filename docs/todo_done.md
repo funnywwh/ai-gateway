@@ -4492,3 +4492,44 @@ v2.9.0（`ad563f2`）先落地，部署当天用真机数据把退出规则从"�
 **未做/限制**：gpt001 未部署；浏览器人工确认（`docs/TODO.md` M69 最后一条）未做——本机验收全部用
 HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退出是无条件停——同一个人另一个窗口的 dsh
 也会被停掉（重新登录即恢复），这是用真机数据换来的选择，理由见设计文档 §9 与 `docs/dshgw.md` §3b。
+
+### v2.10.0 发布与部署记录（2026-09-21，本机 aigw-local；gpt001 未部署）
+
+本版内容：**M70 飞书通讯录同步（组织架构页「同步飞书」）**（功能提交 `cef4ae7`）。档位 **minor**：
+新增 5 条管理端点、2 个配置项（`feishu.tenant_token_url` / `feishu.contact_url`）与一个新的控制台弹窗，
+无破坏性接口变更，配置可原样沿用（两个新键都有默认值，不写即飞书文档地址）。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v2.10.0**（`VERSION` 2.9.1 → 2.10.0；tag `v2.10.0` → `602e6ad`） |
+| 本版内容 | 飞书部门树与人员合并进 `org_nodes` / `accounts`：迁移 `0024_feishu_directory_links.sql`（`org_nodes.feishu_department_id/feishu_synced_at`、`accounts.feishu_open_id/union_id/name/bound_at/bound_by`，两处 `NULLIF(…,'')` 唯一索引）；`internal/feishu/directory.go`（tenant token 缓存 + 部门 BFS 走查）；5 条管理端点（目录预览 / 同步 / 创建用户 / 绑定账号 / 解绑，全部 admin）；`pages/org_feishu.js` 弹窗（左部门树 + 右人员列表，两处拼音过滤；未匹配行给「创建用户 / 绑定账号」，已匹配行给「解绑」）。账户级飞书身份**只是同步映射**，不参与登录判定（门户登录仍按 M60 的 Key 级绑定） |
+| 构建物 | `bin/aigw` 2.10.0 / `602e6ad`（console minified：39 文件 620427→362231 B，gzip 34 文件 359870→143440 B）；`dshgw` 与 `gwproxy` 本版无改动，**未重建、未重启**（gwproxy 的 `/version` 代理 aigw，因此也显示 2.10.0） |
+| 部署范围 | 本机 `aigw-local`（2.9.1 `cef4ae7` → 2.10.0 `602e6ad`，2026-09-21 11:40:33）；`dshgw-verify` / `gwproxy-verify` 未动 |
+| 回滚点 | `data/prev/bin/aigw.prev-running-2.9.1-cef4ae7`（发布前在跑的 2.9.1，`-version` 自证；sha256 `7ea5ec0a…`） |
+| 配置/数据变更 | 无配置改动；迁移 `0024` 已应用（`schema_migrations` 末行为 `0024_feishu_directory_links`，实查 `accounts`/`org_nodes` 新列存在） |
+
+**验证**（全部实测）：
+
+- `GET http://127.0.0.1:8088/version` → `{"revision":"602e6ad","ui":"minified","ui_encoding":"gzip","version":"2.10.0"}`；
+  `healthz=200`、`readyz=200`、`/admin/ui/` 200；`gwproxy :8090/version`（带 `Host: chat.tirisen.hk`）→ 2.10.0 / `602e6ad`
+- 跑的就是新构建：`/proc/<aigw pid>/exe` 与 `bin/aigw` 的 sha256 前 8 位同为 `100050fd`；启动行
+  `aigw starting version=2.10.0 revision=602e6ad ui=minified ui_encoding=gzip`（11:40:33），
+  随后 `http server listening addr=:8088` 与 `feishu identity enabled app_id=cli_aa27b25392f91bdb`；
+  **重启窗口 `level=ERROR` 0 条**
+- 新资产已随压缩包上线：`/admin/ui/js/pages/org_feishu.js` 200（11226 B，含 `openFeishuSync`）、
+  `/admin/ui/js/pages/org.js` 200（已 import 该模块）、`/admin/ui/app.css` 200（含 `.feishu-sync-dialog`）；
+  未认证 `GET /admin/api/v1/org/feishu/directory` → **401**
+- 门户与租户：`https://127.0.0.1:18300/`（`Host: chat.tirisen.hk:18300`）→ 200；租户 18301/18302 → 302（活着、待登录）
+- **M70 真机预览（真实飞书，升级后）**：`GET /admin/api/v1/org/feishu/directory` → 200，
+  22 个部门全部「将创建」、90 人、**13 人自动匹配**（5 人走 `api_key` 通道＝M60 绑过的那 5 个账号，
+  8 人走同名通道）、77 人待操作员决定；首次（未命中缓存）15.4 s，60 秒内重开 1.4 ms
+
+**发布前顺手修的**：真机预览暴露出 `stats.memberships_to_add` 少算"将创建节点上的归属"——
+第一次同步（所有节点都还没建）会显示"新增成员关系 0 条"，恰恰是新增最多的一次；
+改为把 `plannedJoins` 计入后真机显示 **13**（与 13 个匹配人员一致），同步响应的 `stats` 用执行前的计划。
+
+**未做/限制**：**「同步」这个写库动作没有在真机上执行**——它会在线上组织架构里创建 22 个节点、
+给 13 个账户写身份并挂节点，属于操作员的决定，留给用户在控制台点。因此真机证据到"预览正确 + 写路径由
+单测/夹层覆盖"为止，`docs/TODO.md` M70 小节保留了这一条待办。gpt001 未部署（用户只要求本机）。
+另注：本机日志在 11:06/11:08 各有一条 `settlement could not be written; falling back to disk`
+（SQLite 争用超时，当时我正在跑全量测试套件），按设计的磁盘回退生效，与本版无关，重启后为 0 条。

@@ -738,13 +738,15 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
       （翻页、BFS 序、同人合一、token 缓存与一次性重试、上限截断、名称缺失、错误分类）、
       httpapi（三条匹配通道矩阵、同名先到先得、缺权限时只合并 id 通道、502、409/404/403/未启用）、
       `internal/webui/tests/org_feishu_test.mjs`（发出去的 URL 与请求体）、ui 夹层三个视图
-- [ ] **真机验收（需要用户在飞书开放平台加两个数据权限后做）**：加「获取部门基础信息」
-      `contact:department.base:readonly` 与「获取用户基本信息」`contact:user.base:readonly` 并**发布新版本**，
-      「通讯录权限范围」覆盖要同步的部门；然后 `make build` → 重启 `aigw-local`，
-      在 `#/org` 点「同步飞书」确认部门名/人名出现，再核对：22 个部门 → 节点、5 个已有 Key 级绑定
-      （M60 绑过的那 5 个账号）自动固化到账户、同名账户（本地账户名与飞书姓名逐字相同的那些）自动合并、
-      第二次同步 0 写入。`FEISHU_LIVE_CONFIG=config.yaml go test ./internal/feishu/ -run TestLiveDirectory -v`
-      是这条验收的探针
+- [x] **真机预览验收（2026-09-21，v2.10.0 部署后）**：飞书侧的「获取部门基础信息」
+      `contact:department.base:readonly` 与「获取用户基本信息」`contact:user.base:readonly` 已生效
+      （名称可读），`GET /admin/api/v1/org/feishu/directory` 实测 22 个部门 / 90 人 /
+      13 人自动匹配（5 人走 `api_key`、8 人走同名）/ 77 人待决定，首次 15.4 s、60 秒内缓存 1.4 ms；
+      `FEISHU_LIVE_CONFIG=config.yaml go test ./internal/feishu/ -run TestLiveDirectory -v` 可复现这条探针
+- [ ] **真机「同步」由操作员在控制台点击**（本版没有替用户写库）：它会在线上组织架构里创建 22 个节点、
+      给 13 个账户写飞书身份并挂进部门节点。点完要核对：节点层级与部门树一致、5 个 M60 绑过的账号
+      身份固化到账户（Key 上的绑定保持不动）、同名账户被合并、**第二次点同步是 0 写入**。
+      改动前后可对比 `GET /admin/api/v1/org/nodes?limit=1000` 与 `GET /admin/api/v1/accounts`
 - [ ] 未做：飞书侧的部门改名/删除**不传播**到本地（设计如此：本地节点与账户只能由人来改）；
       人员离职/停用不自动停账户（飞书 `status` 字段本轮没读）
 
