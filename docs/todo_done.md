@@ -4589,3 +4589,39 @@ HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退�
   `ssh workspace remounted` 一行」。与 `docs/design/m64-ssh-workspace.md` §13 第 6 条「排障靠
   ssh-mounts.json、审计流与插件日志」是同一件事；修法是一行（把 serve 的 logger 注进去），
   留作下一轮
+
+### v3.0.1 发布与部署记录（2026-09-21，本机 aigw-local；gpt001 未部署）
+
+本版内容：**M70 §12 的同步范围改成父子联动**（功能提交 `bb0929d`）。档位 **patch**：只是既有
+「同步飞书 · 同步范围」的交互修正——勾选/取消父部门连同子部门、半选表示"这一行与它的子树不一致"，
+没有新端点、没有配置项、没有破坏性变更（服务端零改动，范围仍是显式 id 集合）。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v3.0.1**（`VERSION` 3.0.0 → 3.0.1；tag `v3.0.1` → `fa7964f`） |
+| 本版内容 | 部门树复选框按子树联动（勾父连带子、取消父连带清子）；「连同子部门」一次性按钮删除；`indeterminate` 半选表示"该行与自己的子树状态不一致"（勾了父又单独取消子，或只勾子使父成为"为层级补建"）；半选**不进接口**，提交的仍是显式 id 集合 |
+| 构建物 | `bin/aigw` 3.0.1 / `fa7964f`（console minified：39 文件 630859→365922 B，gzip 34 文件 363561→144564 B）；`dshgw` 与 `gwproxy` 本版无改动，**未重建、未重启**（gwproxy 的 `/version` 代理 aigw，因此也显示 3.0.1） |
+| 部署范围 | 本机 `aigw-local`（3.0.0 `f8d20d8` → 3.0.1 `fa7964f`，2026-09-21 14:05:07）；v3.0.0 那次已含 M70 的「选择同步哪些部门」（提交 `67f5587`），本版补上父子联动 |
+| 回滚点 | `data/prev/bin/aigw.prev-running-3.0.0-f8d20d8`（发布前在跑的 3.0.0，`-version` 自证；sha256 `71796bea…`） |
+| 配置/数据变更 | 无配置改动、无新迁移（`0024_feishu_directory_links` 早已应用） |
+
+**验证**（全部实测）：
+
+- `GET http://127.0.0.1:8088/version` → `{"revision":"fa7964f","ui":"minified","ui_encoding":"gzip","version":"3.0.1"}`；
+  `healthz=200`、`readyz=200`、`/admin/ui/` 200；`gwproxy :8090/version`（带 `Host: chat.tirisen.hk`）→ 3.0.1 / `fa7964f`
+- 跑的就是新构建：`/proc/<aigw pid>/exe` 与 `bin/aigw` 的 sha256 前 8 位同为 `2bda027f`；
+  启动行 `aigw starting version=3.0.1 revision=fa7964f ui=minified ui_encoding=gzip`（14:05:07）；
+  **重启窗口 `level=ERROR` 0 条**
+- 新交互真的随压缩包上线：`/admin/ui/js/pages/org_feishu.js` 里同时含联动提示文案与 `indeterminate` 用法
+- 门户与租户：`https://127.0.0.1:18300/`（`Host: chat.tirisen.hk:18300`）→ 200；租户 18301/18302 → 302（活着、待登录）
+- **真机预览（只读，未写库）**：全量 22 个部门 / 90 人、13 人可自动合并、8 人已同步；
+  带 `?departments=<总经办>,0` 时 `departments=1 / departments_selected=2 / users_in_scope=7`、
+  部门标注 `selected/included` 正确、`unknown_department_ids` 为空
+
+**线上现状（顺带核对，本次发布没有替用户写库）**：`org_nodes` 5 个——1 个手工建的节点 + 4 个来自一次
+**按范围**的同步（一个顶层部门 → 其子部门 → 再下一级，父子层级正确、都带 `feishu_department_id`），
+说明"选择部门"已经在真机上被实际使用；账户级飞书身份 8 个（`feishu_bound_by = admin`，即手工
+「绑定账号」写入），`api_keys` 上的 5 个 M60 绑定保持不变。
+
+**未做/限制**：gpt001 未部署（用户只要求本机）；「同步」这个写库动作仍由操作员在控制台点击，
+本版验收只跑了只读预览。
