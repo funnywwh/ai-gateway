@@ -357,7 +357,70 @@ type Chat struct {
 	MaxOutputTokens int `yaml:"max_output_tokens"`
 	// SystemPrompt replaces the built-in instructions when set.
 	SystemPrompt string `yaml:"system_prompt"`
+	// WebAccess gives the console's smart Q&A two extra tools: web_search (a search backend
+	// chosen here) and web_fetch (read one public page). Off by default, and a session must
+	// enable it as well — see ChatWebAccess.
+	WebAccess ChatWebAccess `yaml:"web_access"`
 }
+
+// ChatWebAccess configures the console's internet access (M73).
+//
+// Two switches guard this feature on purpose. Enabled here is the deployment's master switch:
+// with it off, no session can turn the tools on and the console does not even offer the
+// checkbox. With it on, each session still starts with web access off, so an operator enabling
+// the feature does not silently change what an existing conversation can reach.
+//
+// The search backend and the page fetcher share one client, one timeout and one SSRF guard. The
+// API key is a search-provider credential (bocha, tavily): it is never sent anywhere except that
+// provider, and it never reaches the model, the request log or the audit trail.
+type ChatWebAccess struct {
+	Enabled bool `yaml:"enabled"`
+	// Provider selects the search backend: searxng, bocha, tavily or bing. searxng needs a
+	// base_url and no key; bocha and tavily need a key; bing scrapes an HTML result page and
+	// needs neither, at the cost of being the one backend that can break on its own.
+	Provider string `yaml:"provider"`
+	// BaseURL overrides the provider's endpoint. For searxng it is required (the instance is
+	// the operator's own); for the others it exists so a proxy or a mirror can be used.
+	BaseURL string `yaml:"base_url"`
+	// APIKey authenticates the search provider. Prefer GW_CHAT_WEB_API_KEY over writing it
+	// here: a key in YAML is a key in every backup of that file.
+	APIKey string `yaml:"api_key"`
+	// Proxy routes the search call and the page fetch through one proxy. Empty means a direct
+	// connection and explicitly ignores HTTPS_PROXY; the literal "env" opts into the
+	// environment. The proxy address itself is never subject to the SSRF guard — a proxy on
+	// 127.0.0.1 is the normal case.
+	Proxy string `yaml:"proxy"`
+	// TimeoutS bounds one search call or one page fetch.
+	TimeoutS int `yaml:"timeout_s"`
+	// MaxResults caps how many hits one web_search may return, whatever the model asks for.
+	MaxResults int `yaml:"max_results"`
+	// FetchMaxBytes bounds one downloaded page and FetchMaxTextBytes the extracted text
+	// handed to the model; the second is clamped to the first.
+	FetchMaxBytes     int `yaml:"fetch_max_bytes"`
+	FetchMaxTextBytes int `yaml:"fetch_max_text_bytes"`
+	// MaxCallsPerTurn bounds web tool calls per question. Past it, the tools return an
+	// explanation instead of results and the turn continues.
+	MaxCallsPerTurn int `yaml:"max_calls_per_turn"`
+	// AllowPrivateHosts turns the SSRF guard off. It exists for a gateway whose job includes
+	// reading the operator's own intranet; it must never be set "just in case", because with
+	// it on the console can be talked into fetching cloud metadata and management ports.
+	AllowPrivateHosts bool `yaml:"allow_private_hosts"`
+}
+
+// ChatWebAccessProviders lists the backends this build knows. The rule itself lives in
+// internal/webaccess (which owns the adapters); it is restated here because internal/config is
+// a leaf package. TestChatWebAccessProviderListMatchesWebaccess keeps the two in step.
+var ChatWebAccessProviders = []string{"searxng", "bocha", "tavily", "bing"}
+
+// ChatWebAccessDefaults are the values a zero-valued configuration is filled with, repeated
+// from internal/webaccess for the same leaf-package reason.
+const (
+	ChatWebAccessTimeoutS          = 15
+	ChatWebAccessMaxResults        = 6
+	ChatWebAccessFetchMaxBytes     = 1 << 20
+	ChatWebAccessFetchMaxTextBytes = 32 << 10
+	ChatWebAccessMaxCallsPerTurn   = 8
+)
 
 // Portal configures the customer self-service portal (M14). It is off by default: an
 // operator opts in after creating portal users.
@@ -962,6 +1025,18 @@ func Default() Config {
 			ArtifactTicketTTL:     5 * time.Minute,
 			ArtifactAllowNetwork:  false,
 			UIBridgeEnabled:       true,
+			// M73: the console's internet access is off until an operator configures a
+			// backend. Defaulting the provider to bing means enabling the switch alone
+			// produces a working (if unpolished) search instead of a start-up error.
+			WebAccess: ChatWebAccess{
+				Enabled:           false,
+				Provider:          "bing",
+				TimeoutS:          ChatWebAccessTimeoutS,
+				MaxResults:        ChatWebAccessMaxResults,
+				FetchMaxBytes:     ChatWebAccessFetchMaxBytes,
+				FetchMaxTextBytes: ChatWebAccessFetchMaxTextBytes,
+				MaxCallsPerTurn:   ChatWebAccessMaxCallsPerTurn,
+			},
 		},
 		Hooks:     Hooks{QueueSize: 1024, Workers: 8, TimeoutS: 5, Retries: 5, DeadLetter: dataPath("hooks-dead.jsonl")},
 		Portal:    Portal{SessionTTLH: 12, LoginAttempts: 10},
@@ -1068,6 +1143,9 @@ func applyEnv(cfg *Config) error {
 	envStr(&cfg.Bootstrap.Admin.Password, "GW_ADMIN_PASSWORD")
 	envStr(&cfg.Backup.Dir, "GW_BACKUP_DIR")
 	envStr(&cfg.Backup.Cron, "GW_BACKUP_CRON")
+	// The one web-access value worth an environment variable: a search key in the environment
+	// stays out of the YAML file, its backups and its diffs.
+	envStr(&cfg.Chat.WebAccess.APIKey, "GW_CHAT_WEB_API_KEY")
 
 	for _, step := range []error{
 		envBool(&cfg.Backup.Enabled, "GW_BACKUP_ENABLED"),
@@ -1387,6 +1465,11 @@ func (c *Config) Validate() error {
 	if err := validateChat(c); err != nil {
 		return err
 	}
+	// Checked regardless of chat.enabled: a typo in the web-access block must be reported now,
+	// not after the operator turns the console on and finds the tools broken.
+	if err := validateChatWebAccess(c); err != nil {
+		return err
+	}
 	for _, model := range c.Bootstrap.Models {
 		if model.Reasoning != nil {
 			if err := model.Reasoning.Validate(); err != nil {
@@ -1484,6 +1567,113 @@ func validateChat(c *Config) error {
 	}
 	if chat.MaxOutputTokens < 0 {
 		return fmt.Errorf("chat.max_output_tokens must be >= 0 (0 keeps the provider default)")
+	}
+	return nil
+}
+
+// validateChatWebAccess checks the console's internet access block (M73).
+//
+// It runs whenever the block is enabled, even if chat.enabled is false: the two mistakes it
+// catches — a provider that needs a key without one, and a searxng backend without an instance
+// URL — would otherwise surface as "the model cannot find anything" long after the deployment
+// looked healthy. It is also the one place that normalizes the base URL, so the runtime never
+// has to guess whether a trailing slash was written.
+func validateChatWebAccess(c *Config) error {
+	web := &c.Chat.WebAccess
+	web.Provider = strings.ToLower(strings.TrimSpace(web.Provider))
+	web.BaseURL = strings.TrimRight(strings.TrimSpace(web.BaseURL), "/")
+	if !web.Enabled {
+		// A disabled block is not validated field by field (an operator may leave a stale
+		// value behind), but a provider name that does not exist is still a typo worth
+		// reporting before it is enabled.
+		if web.Provider != "" {
+			if err := oneOf("chat.web_access.provider", web.Provider, ChatWebAccessProviders...); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if web.Provider == "" {
+		return fmt.Errorf("chat.web_access.provider is required when web access is enabled (one of %s)",
+			strings.Join(ChatWebAccessProviders, ", "))
+	}
+	if err := oneOf("chat.web_access.provider", web.Provider, ChatWebAccessProviders...); err != nil {
+		return err
+	}
+	switch web.Provider {
+	case "searxng":
+		if web.BaseURL == "" {
+			// Unlike the other backends there is no vendor endpoint to fall back on: the
+			// instance is the operator's own server.
+			return fmt.Errorf("chat.web_access.base_url is required for the searxng provider (for example https://searx.example.com)")
+		}
+	case "bocha", "tavily":
+		if strings.TrimSpace(web.APIKey) == "" {
+			return fmt.Errorf("chat.web_access.api_key is required for the %s provider (or set GW_CHAT_WEB_API_KEY)", web.Provider)
+		}
+	}
+	if web.BaseURL != "" {
+		if err := validateWebAccessURL("chat.web_access.base_url", web.BaseURL); err != nil {
+			return err
+		}
+	}
+	if web.TimeoutS <= 0 {
+		return fmt.Errorf("chat.web_access.timeout_s must be positive")
+	}
+	if web.MaxResults < 1 || web.MaxResults > 20 {
+		return fmt.Errorf("chat.web_access.max_results must be between 1 and 20")
+	}
+	if web.FetchMaxBytes <= 0 {
+		return fmt.Errorf("chat.web_access.fetch_max_bytes must be positive")
+	}
+	if web.FetchMaxTextBytes <= 0 {
+		return fmt.Errorf("chat.web_access.fetch_max_text_bytes must be positive")
+	}
+	if web.FetchMaxTextBytes > web.FetchMaxBytes {
+		return fmt.Errorf("chat.web_access.fetch_max_text_bytes (%d) must not exceed fetch_max_bytes (%d)",
+			web.FetchMaxTextBytes, web.FetchMaxBytes)
+	}
+	if web.MaxCallsPerTurn <= 0 {
+		return fmt.Errorf("chat.web_access.max_calls_per_turn must be positive")
+	}
+	if trimmed := strings.TrimSpace(web.Proxy); trimmed != "" && !strings.EqualFold(trimmed, "env") {
+		parsed, err := url.Parse(trimmed)
+		if err != nil {
+			return fmt.Errorf("chat.web_access.proxy %q is not a valid URL: %w", web.Proxy, err)
+		}
+		if !ChatWebAccessProxySchemes[parsed.Scheme] || parsed.Host == "" {
+			return fmt.Errorf("chat.web_access.proxy %q must be one of %s URLs (or the literal \"env\"); a proxy on 127.0.0.1 is fine here",
+				web.Proxy, strings.Join(ChatWebAccessProxySchemeNames(), ", "))
+		}
+	}
+	return nil
+}
+
+// ChatWebAccessProxySchemes restates providerkit's proxy vocabulary for the leaf config
+// package. TestChatWebAccessProxySchemesMatchProviderkit keeps the two from drifting.
+var ChatWebAccessProxySchemes = map[string]bool{
+	"http": true, "https": true, "socks5": true, "socks5h": true,
+}
+
+// ChatWebAccessProxySchemeNames lists the accepted proxy schemes for error messages.
+func ChatWebAccessProxySchemeNames() []string {
+	return []string{"http", "https", "socks5", "socks5h"}
+}
+
+// validateWebAccessURL accepts the http/https endpoint a backend is reached at. It is
+// deliberately allowed to be a private address: a searxng instance on the operator's own
+// network is a normal deployment, and the SSRF guard governs what the *model* may fetch, not
+// where this deployment's own search backend lives.
+func validateWebAccessURL(field, raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%s %q is not a valid URL: %w", field, raw, err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("%s %q must be an http or https URL", field, raw)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("%s %q has no host", field, raw)
 	}
 	return nil
 }
