@@ -4533,3 +4533,59 @@ HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退�
 单测/夹层覆盖"为止，`docs/TODO.md` M70 小节保留了这一条待办。gpt001 未部署（用户只要求本机）。
 另注：本机日志在 11:06/11:08 各有一条 `settlement could not be written; falling back to disk`
 （SQLite 争用超时，当时我正在跑全量测试套件），按设计的磁盘回退生效，与本版无关，重启后为 0 条。
+
+### v3.0.0 发布与部署记录（2026-09-21，本机 aigw-local + dshgw-verify；gpt001 未部署）
+
+本版内容：**SSH 工作区别名改成「一账号一份」+ 新增「我的主机」**（`1d4921e`），以及
+**输入主机/用户名/端口时对话框不再抖动**（`0650b75`）。档位 **major**：删除配置键
+`ssh_workspaces.ssh_config_source`（本机旧值指向运维自己的 `/home/winger/.ssh/config`），
+旧配置直接拒绝启动并要求改用 `ssh_config_dir` —— 属于「要运维改配置才能继续跑」的破坏性变更；
+同时该键在 aigw 侧（`dshgw.ssh_workspaces.*` 透传）一并改名。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v3.0.0**（`VERSION` 2.10.0 → 3.0.0；tag `v3.0.0` → `f8d20d8`） |
+| 本版内容 | 别名来源改为按账号 `ssh_config_dir/<账号>`（删除全局 `ssh_config_source`，校验拒绝落在本进程账号 `~/.ssh` 里的来源）；`EnsureIdentity` 按账号取种子且仍只写一次；插件新增 `addHost`/`deleteHost`（行级改写本账号 config，删除同时移除 `host_keys/<SHA256(别名)>`，在用挂载拒绝删除）；对话框新增「我的主机」列表；`ssh_config_dir` 在 aigw 监督形态透传改名；`scripts/ssh_config_adopt.sh` + 其 python 测试并入 `make dshgw-test`；输入抖动修复（200ms 防抖、不再清空列表/远端目录/已选私钥、backdrop 顶部对齐 + `scrollbar-gutter`、关窗停轮询）。沙箱 profile 一行未改（无新设备/能力/绑定），M57/M58 口径不变 |
+| 构建物 | `bin/aigw` 3.0.0 / `f8d20d8`（console minified：39 文件 629359→365715 B，gzip 34 文件 363354→144494 B，sha256 `71796bea…`）；`bin/dshgw` 3.0.0 / `f8d20d8`（sha256 `9bb31a97…`）；`gwproxy` 本版无改动，未重建 |
+| 部署范围 | 本机 `aigw-local`（2.10.0 `602e6ad` → 3.0.0 `f8d20d8`，12:21:46）与 `dshgw-verify`（**2.9.1 `b561b0c` → 3.0.0 `f8d20d8`**，12:20:44）；`gwproxy-verify` 未动 |
+| 回滚点 | `data/prev/bin/dshgw.prev-running-2.9.1-b561b0c`（发布前在跑的 dshgw，`--version` 自证）；`data/dshgw-verify/backups/ssh-config-20260921-122011/`（同目录含 `dshgw.yaml.prev` 与 sha256 `34e39cf5…`）；aigw 回滚点见上一条记录（`data/prev/bin/aigw.prev-running-2.10.0-602e6ad` 由上次流程留存，本次未覆盖） |
+| 配置/数据变更 | `dshgw.yaml`：`ssh_config_source: /home/winger/.ssh/config` → `ssh_config_dir: ./data/dshgw-verify/ssh-configs`；新增账号种子目录 `data/dshgw-verify/ssh-configs/<账号>`（6 个，0644，由 `scripts/ssh_config_adopt.sh` 从各账号当时的 `<workspace>/.ssh/config` 收编）；**账号工作区内的 config 一个字节未动**（写一次语义） |
+| 迁移顺序 | 合并 → `ssh_config_adopt.sh --dry-run` → 正式收编 6 个种子 → 改 `dshgw.yaml` → `make build` / `make dshgw-build` → 重启 |
+
+**验证**（全部实测）：
+
+- **旧配置被拒绝**：把 `dshgw.yaml` 的键改回 `ssh_config_source` 后用新二进制跑 `tenant list` →
+  exit code **2**，报错点名 `ssh_config_dir`（"ssh_workspaces.ssh_config_source was removed: … Use
+  ssh_workspaces.ssh_config_dir with one file per account (<dir>/<account>) instead"）
+- **dshgw 跑的是新构建**：`dshgw listening version=3.0.0 revision=f8d20d8`、`ssh workspaces enabled
+  mount_subdir=ssh poll_interval=2s hosts=[]`；`/proc/<pid>/exe` 与 `bin/dshgw` 的 sha256 前 8 位同为
+  `9bb31a97`；重启窗口 ERROR 7 条**全部**是 worker 启动瞬间的 `dsh reverse proxy failed … *net.OpError`
+  （重启前同样存在），无 ssh 相关失败（`ssh remount failed` 0 条）
+- **6 个账号全部就绪**：dsh-colin/18402、dsh-tenant/18401、dsh-ranqiliang/18403、dsh-lianchangliang/18404、
+  dsh-yangmiao/18405、verify1/18400 均 `tenant worker ready`；verify1 仍是历史测试账号（无 gateway.key 的
+  既有告警，未处理）
+- **既有挂载自愈**：`state/ssh-mounts.json` 里 dsh-tenant 的 `aipc:/home/winger` 在重启后由 `Reconcile`
+  重新挂上（`fuse.sshfs` 在挂载表里，sshfs 守护进程的 argv 用的是本版组装方式：`ssh -F /dev/null` +
+  `IdentityFile=<workspace>/.ssh/id_rsa`）
+- **账号 config 未被改写**：6 个 `<workspace>/.ssh/config` 与各自种子 `cmp` 一致，mtime 仍是 09-18/09-20
+  （即网关只读不写）
+- **租户面**：门户 `:18300` 200、租户 18301/18302/18303 → 302（活着待登录）；插件两半都已更新
+  （`client.js` 含「我的主机」、`index.js` 含 `addHost`），租户浏览器下次刷新即生效
+- **本机 aigw**：`GET /version` → `{"revision":"f8d20d8","version":"3.0.0","ui":"minified","ui_encoding":"gzip"}`、
+  `healthz=200`、`readyz=200`、`/admin/ui/` 200；`aigw starting version=3.0.0 revision=f8d20d8`，重启窗口
+  `level=ERROR` **0 条**（日志里 6 条历史 ERROR 都在 09-15/17/18 与 11:06/11:08，与本次无关）
+
+**未做/限制**：
+
+- **gpt001 未部署**（仍是 2.2.1 `77979b4`）：本次只要求本机；gpt001 落后 8 个版本，升级前需要先核对
+  `/opt/aigw/config.yaml` 对新版配置面的兼容性（本次已确认它没有 `ssh_workspaces` 块，所以 ssh 这块
+  不会挡升级），但整包跳跃不在本次范围
+- **「我的主机」浏览器人工验收未做**（需要真人点界面）：添加主机 → 复核 `<workspace>/.ssh/config` →
+  选用并挂载 → 删除（在用被拒/卸载后成功）；`docs/TODO.md` M64 保留了这一条。自动化侧覆盖到
+  插件 248 条 / 客户端 80 条 JS 断言与 e2e 的「按账号种子 + 别名挂载」两步
+- **观察项（本版新发现）**：ssh 工作区服务自身的日志在现网看不到 —— `cmd/dshgw/runtime.go` 用
+  `sshWorkspaceService(cfg, manager, nil)` 构造，`sshworkspace.New` 对 nil logger 落到 `io.Discard`
+  （`serve.go` 也没有再注入）。本次重启就发生了「挂载被 `Reconcile` 成功重挂、但日志里没有
+  `ssh workspace remounted` 一行」。与 `docs/design/m64-ssh-workspace.md` §13 第 6 条「排障靠
+  ssh-mounts.json、审计流与插件日志」是同一件事；修法是一行（把 serve 的 logger 注进去），
+  留作下一轮

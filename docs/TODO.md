@@ -613,10 +613,18 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 §15 别名改成一账号一份 +「我的主机」）；规格：`docs/dshgw.md` §7b。已完成的条目见 `docs/todo_done.md`
 同名小节，下面只列未完成项。
 
-- [ ] **别名改一账号一份：本机部署（代码已就绪，见 §15）**：`scripts/ssh_config_adopt.sh` 收编现有 6 个
-      账号的 `<workspace>/.ssh/config` → `dshgw.yaml` 把 `ssh_config_source` 换成
-      `ssh_config_dir: ./data/dshgw-verify/ssh-configs` → 重建 `bin/dshgw` → 重启 `dshgw-verify.service`
-      → 逐账号裁剪种子并按需重置（改种子 → 删 `<workspace>/.ssh/config` → 重启该账号 worker）
+- [x] **别名改一账号一份：本机部署（2026-09-21，v3.0.0）**：`scripts/ssh_config_adopt.sh` 收编了 6 个
+      账号的 `<workspace>/.ssh/config` → `data/dshgw-verify/ssh-configs/<账号>`；`dshgw.yaml` 的
+      `ssh_config_source` 换成 `ssh_config_dir: ./data/dshgw-verify/ssh-configs`；`bin/dshgw` 重建并在
+      12:20:44 重启 `dshgw-verify`（2.9.1 `b561b0c` → 3.0.0 `f8d20d8`），6 个 worker 全就绪、aipc 挂载被
+      `Reconcile` 重挂、账号 config 一个字节没动（与各自种子 `cmp` 一致）。完整记录见 `docs/todo_done.md`
+      的 v3.0.0 小节；后续仍可逐账号裁剪种子并按需重置（改种子 → 删 `<workspace>/.ssh/config` → 重启该
+      账号 worker）
+- [ ] **观察项（v3.0.0 重启时发现）**：ssh 工作区服务自己的日志在现网是丢掉的 ——
+      `cmd/dshgw/runtime.go` 用 `sshWorkspaceService(cfg, manager, nil)` 构造，`sshworkspace.New` 收到 nil
+      logger 就落到 `io.Discard`，`serve.go` 也没有再注入。现象：本次 `Reconcile` 成功重挂了挂载，日志里
+      却没有 `ssh workspace remounted` 一行。修法是一行（把 serve 的 logger 传进去），与设计文档 §13 第 6 条
+      「排障靠 ssh-mounts.json、审计流与插件日志」是同一件事
 - [ ] **「我的主机」浏览器验收（人工）**：租户 A 添加一台主机 → 复核 A 的 `<workspace>/.ssh/config`
       出现该别名 → 选用它「挂载并打开」→ 删除（在用被拒、卸载后成功）→ 别名与该主机专用私钥都消失；
       租户 B 的列表里看不到 A 的主机
