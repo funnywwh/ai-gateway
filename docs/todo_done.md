@@ -4625,3 +4625,38 @@ HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退�
 
 **未做/限制**：gpt001 未部署（用户只要求本机）；「同步」这个写库动作仍由操作员在控制台点击，
 本版验收只跑了只读预览。
+
+### v3.1.0 发布与部署记录（2026-09-21，本机 aigw-local + dshgw-verify；gpt001 未部署）
+
+本版内容：**M71 宿主目录工作区**（功能提交 `9f0f876`）、两个 ssh-workspace 修复，以及**工作区弹窗
+跟随 DSH 主题 + 右上角固定关闭按钮**（`5000879`）。档位 **minor**：M71 是对外新能力——新增配置项
+`host_shares`、新 `hostshare` 包、新沙箱绑定路径，既有接口形状未变（`host_shares` 默认关闭，不配就
+不生效，因此不构成破坏性变更）。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v3.1.0**（`VERSION` 3.0.1 → 3.1.0；tag `v3.1.0` → `69da1dd`） |
+| 本版内容 | ① M71 宿主目录工作区：`host_shares: {enabled,subdir,shares[{name,path,read_only,tenants}]}`，bwrap 直接 bind，不走 ssh/sshfs/FUSE；校验包含 `tenants` 必填、共享目录与 `state_dir` 不得相交（符号链接解析后比较）、`subdir` 不得与 ssh/workspace_seed 撞名、**默认只读**。② ssh-workspace：空挂载记录写 `[]` 而非 `null`（`b4f2ba5`）；拒绝自嵌套挂载、sshfs 默认多连接（`70a4cd1`）。③ 两个工作区弹窗改为只消费 DSH 主题令牌 `--dsw-alias-*`，浅/深色即时跟随；遮罩由 `position:fixed;z-index:40` 改为 `absolute`（对齐 `shell.overlay` 契约）；右上角加吸顶关闭按钮；补 Esc 关闭 |
+| 构建物 | `bin/aigw` 3.1.0 / `69da1dd`（console minified：39 文件 630859→365922 B，gzip 34 文件 363561→144564 B）；`dshgw` 与 `gwproxy` 本版无 Go 改动，**`dshgw` 未重建**（`make build` 只产出 `bin/aigw`），但**已重启**（见下） |
+| 部署范围 | 本机 `aigw-local`（3.0.1 `fa7964f` → 3.1.0 `69da1dd`，2026-09-21 15:28:08）；`dshgw-verify` 同时重启（2026-09-21 15:30:05），以便租户 worker 重新组装客户端插件包 |
+| 回滚点 | **无 3.0.1 二进制留存**——`make build` 已覆盖 `bin/aigw`，keep-store `data/prev/bin/` 里 aigw 最新只到 3.0.0（`f8d20d8`）。要回 3.0.1 需 `git checkout fa7964f` 后重新构建；回 3.0.0 可直接用 `data/prev/bin/aigw.prev-running-3.0.0-f8d20d8`。本次已把在跑的 3.1.0 归档为 `data/prev/bin/aigw.prev-running-3.1.0-69da1dd`（供下次回滚） |
+| 配置/数据变更 | 无配置改动（`host_shares` 未启用，保持默认关闭）；无新迁移 |
+
+**验证**（全部实测）：
+
+- `GET http://127.0.0.1:8088/version` → `{"revision":"69da1dd","ui":"minified","ui_encoding":"gzip","version":"3.1.0"}`；
+  `healthz=200`、`readyz=200`；`gwproxy :8090/version`（带 `Host: chat.tirisen.hk`）→ 3.1.0 / `69da1dd`
+- 跑的就是新构建：`/proc/<aigw pid>/exe` 与 `bin/aigw` 的 sha256 前 8 位同为 `0df76233`
+- 启动行 `aigw starting version=3.1.0 revision=69da1dd ui=minified ui_encoding=gzip`（15:28:08）；
+  启动窗口内 `level=ERROR` **0 条**；`registry loaded snapshot(models=10 providers=6 routes=16 accounts=30)` 正常
+- 弹窗改动真的随插件包上线：新 worker（15:30:19 起）在其 bwrap 内读到的
+  `browser-workspace/client.js` 含新的 `dshgw-bw-closebar`/`data-dshgw-close`（3 处），
+  `ssh-workspace/client.js` 含 `dshgw-ssh-closebar` 与 `--dsw-alias-*`（18 处）
+- 测试：`ssh-workspace/client.test.mjs` 99 断言（原 80）；`browser-workspace` 7 个测试文件 57 项（原 56），全绿
+
+**发现并记下**：本次发布前我先建了个 `bin/aigw.prev-20260921-152805` 想当回滚点，但它是 `make build`
+**之后**才拷的，内容就是新的 3.1.0——留着会让人误以为能回 3.0.1，已删除。正确顺序是**先备份正在跑的
+`bin/aigw` 再 `make build`**；下次发版按这个顺序做。
+
+**未做/限制**：gpt001 未部署（用户只要求本机）；`host_shares` 保持默认关闭，M71 的宿主目录挂载未在
+真机启用；`dshgw` 二进制仍自报 3.0.1（未重建，非缺陷——它不随 `make build` 产出）。
