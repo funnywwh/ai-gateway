@@ -282,7 +282,9 @@ dshgw:
   #   connect_timeout: 10s
   #   poll_interval: 2s
   #   max_entries: 1000
-  # sshfs_options: [reconnect, ServerAliveInterval=15, ServerAliveCountMax=3, idmap=user]
+  # sshfs_options: [reconnect, ServerAliveInterval=15, ServerAliveCountMax=3, idmap=user, max_conns=4]
+  #   max_conns：一条挂载服务该账号的所有会话，sshfs 默认 1 条连接会把并发会话串成一条队列；
+  #   不写时由代码补 4，写了以这里为准。远端路径包含挂载点（远端=本机）的自嵌套挂载会被拒绝。
   #
   # 侧栏「账号行」（M67）：租户 dsh 侧栏底部显示登录者的飞书名（取不到回退账号名，再回退租户名）
   # 和一个「退出」按钮；退出只撤销本租户的会话。开关在这里（而非子进程配置里），因为名字只有

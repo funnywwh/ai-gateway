@@ -44,6 +44,11 @@ const (
 	commandTailBytes = 400
 )
 
+// defaultMaxConns is how many sftp connections one mount gets when the deployment configures
+// none. sshfs' own default is 1, which makes every session of an account queue behind the
+// slowest reader on the mount (see sshfsArgs).
+const defaultMaxConns = 4
+
 // tail keeps the last bytes of a stream: ssh failures put the reason at the end.
 func tail(data []byte) string {
 	text := strings.TrimSpace(string(data))
@@ -293,21 +298,20 @@ func (o Options) sshfsBin() string {
 	return "sshfs"
 }
 
-// sshfsArgs assembles the mount command. allow_other is never added, and an operator cannot
-// introduce it through configuration: the mount must stay usable by the mounting account
-// alone (which is exactly the tenant worker's uid).
-func (o Options) sshfsArgs(remote Remote, host, remotePath, mountpoint string) []string {
+// sshTarget resolves the account's alias chain into the destination ssh (and sshfs) is handed,
+// plus the port that has to travel as its own flag.
+//
+// sshfs does not forward User as an SSH option (FUSE rejects it). Resolve the same validated
+// alias values into its destination and dedicated port flag instead; never interpolate tenant
+// values into ssh_command.
+func (o Options) sshTarget(remote Remote, host string) (string, int, error) {
 	paths, err := pathsFor(o, remote, host)
 	if err != nil {
-		return nil
+		return "", 0, err
 	}
-	options := []string{"ssh_command=ssh -F /dev/null"}
-	// sshfs does not forward User as an SSH option (FUSE rejects it). Resolve
-	// the same validated alias values into its destination and dedicated port
-	// flag instead; never interpolate tenant values into ssh_command.
 	target, port, err := SplitHostSpec(host)
 	if err != nil {
-		return nil
+		return "", 0, err
 	}
 	user, hostname := "", target
 	if at := strings.LastIndex(target, "@"); at >= 0 {
@@ -328,6 +332,23 @@ func (o Options) sshfsArgs(remote Remote, host, remotePath, mountpoint string) [
 	if user != "" {
 		target = user + "@" + hostname
 	}
+	return target, port, nil
+}
+
+// sshfsArgs assembles the mount command. allow_other is never added, and an operator cannot
+// introduce it through configuration: the mount must stay usable by the mounting account
+// alone (which is exactly the tenant worker's uid).
+func (o Options) sshfsArgs(remote Remote, host, remotePath, mountpoint string) []string {
+	paths, err := pathsFor(o, remote, host)
+	if err != nil {
+		return nil
+	}
+	options := []string{"ssh_command=ssh -F /dev/null"}
+	target, port, err := o.sshTarget(remote, host)
+	if err != nil {
+		return nil
+	}
+	connections := false
 	for _, opt := range o.SSHFSOptions {
 		trimmed := strings.TrimSpace(opt)
 		// allow_other/allow_root would let every account on the host reach this mount —
@@ -337,7 +358,19 @@ func (o Options) sshfsArgs(remote Remote, host, remotePath, mountpoint string) [
 		if trimmed == "" || strings.ContainsAny(trimmed, ",\n\r") || strings.Contains(lower, "allow_other") || strings.Contains(lower, "allow_root") || strings.HasPrefix(lower, "identity") || strings.HasPrefix(lower, "identities") || strings.HasPrefix(lower, "ssh_command") || strings.HasPrefix(lower, "password") || strings.HasPrefix(lower, "batchmode") || strings.HasPrefix(lower, "preferredauthentications") {
 			continue
 		}
+		if strings.HasPrefix(lower, "max_conns") {
+			connections = true
+		}
 		options = append(options, trimmed)
+	}
+	// sshfs defaults to ONE connection per mount, and one mount serves every session of an
+	// account. On a single channel a slow traversal — a recursive scan, a large checkout —
+	// queues every other session's reads behind it, which is what "the workspace got stuck
+	// when several sessions worked at once" looks like from the outside. A few connections
+	// keep one busy session from starving the rest; a deployment that knows better can still
+	// set max_conns itself, and the value is never taken from anywhere but configuration.
+	if !connections {
+		options = append(options, "max_conns="+strconv.Itoa(defaultMaxConns))
 	}
 	if paths.key != "" {
 		options = append(options, "IdentityFile="+paths.key)

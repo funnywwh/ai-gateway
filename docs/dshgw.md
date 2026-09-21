@@ -316,6 +316,19 @@ feishu:
 `<workspace>/<mount_subdir>/<host>/<远端路径>`（默认 `ssh`），因此它落在该账号的 clamp 根之内，
 可以直接作为一个工作区打开；因为沙箱只绑定本账号的这两棵树，**别的账号看不到也进不去**。
 
+**自嵌套挂载会被拒绝（2026-09-21 事故）**：当远端目录是挂载点自己的祖先时，挂载出来的树里包含挂载点
+本身，也就是**挂载包含它自己**。挂载那一刻没有异常，坏在第一个递归读者上：`grep -r`/`find`/工作区索引
+会走进挂载里的那份拷贝，在里面又遇到同一个目录，再往下走，每一步都是这条挂载的一次 sftp 往返；请求在
+一条连接上堆积，直到整条挂载在内核里挂死。实测（本机）：一个会话在工作区根上跑 `grep -rn … .` 之后，
+FUSE 连接上积压 8 个无人应答的请求，3 个进程进入 **D 态**（不可中断等待）—— `grep` 自己（它打开的目录
+句柄已经指向第二层同一个目录）以及之后每一次探测挂载点的 `ls`；D 态忽略信号，`kill -9` 也无效，而一个
+账号的**所有会话共用这一条挂载**，所以它们同时卡住。
+因此网关在挂载前判定并拒绝：**只有当 SSH 目标就是本机**（别名解析出的地址属于本机，或远端 `machine-id`
+与本机相同）**且远端路径是挂载点的祖先**时才拒绝。别的机器上同样的路径字符串是另一个目录，属于正常
+用法，不受影响；本机上不包含工作区的目录（例如 `/home/winger/ZT20Q`、`/tmp`）也照常可挂。判定按
+**设备号 + inode** 比较而不是字符串前缀 —— 本机 `/data/home/winger/work` 与 `/home/winger/work` 是同
+一个 ext4 的两次挂载，字符串比较会漏掉它。错误码 `mount/forbidden`，审计事件 `ssh-mount-refused`。
+
 **分工（为什么不是一个纯插件）**：ssh 那一半在租户沙箱内、用**该租户自己的密钥**完成（列目录、
 建目录、探测）；挂载那一半由 dshgw 在沙箱外完成。租户 worker 挂不了：profile 只给最小 `/dev`
 （没有 `/dev/fuse`），且宿主 root 在它的 user namespace 里没有映射，`fusermount3` 的 setuid 因此
@@ -331,7 +344,7 @@ feishu:
 | 别名清单 | **一账号一份**：`<workspace>/.ssh/config`（0644），初始内容来自 `ssh_config_dir/<账号>` 这份种子；账号自己没有 config 时才写一次，之后归该账号所有（插件增删、也可手改）。**没有全局来源** —— 宿主的 `~/.ssh/config` 不是租户来源（配置校验也会拒绝落在本进程账号 `~/.ssh` 里的 `ssh_config_dir`） |
 | 密钥 | 账号默认：`<workspace>/.ssh/id_rsa`；主机专用：`<workspace>/.ssh/host_keys/<SHA256(host)>/id_rsa`（均 0600）。只选主机专用，否则选账号默认；没有密钥则拒绝连接。`known_hosts` 同目录 |
 | 隔离增量 | 只为活动挂载点各加一条 `--bind-try <挂载点> <挂载点>`；**不加设备、不加 capability**，M57/M58 口径不变 |
-| sshfs 选项 | 默认 `reconnect, ServerAliveInterval=15, ServerAliveCountMax=3, idmap=user`；`allow_other`/`allow_root` 被代码丢弃（所有 worker 共用一个 uid，共享挂载等于跨账号可读） |
+| sshfs 选项 | 默认 `reconnect, ServerAliveInterval=15, ServerAliveCountMax=3, idmap=user, max_conns=4`；配置写了 `max_conns` 则以配置为准；`allow_other`/`allow_root` 被代码丢弃（所有 worker 共用一个 uid，共享挂载等于跨账号可读）。`max_conns` 不是 sshfs 的默认值（它默认 1 条连接）：一条挂载服务该账号的**所有**会话，单通道会让一次慢遍历把其它会话的读全部排在后面 —— 外部看到的就是「多个会话一起卡」 |
 
 **密钥就是边界**：账号能读到自己的 `id_rsa`（跑 key 的进程就是它自己），所以「这个账号能到哪些主机」
 完全由发给它的密钥决定。按账号限权要用 `identity_dir`（一账号一把）；共用 `identity_source` 等于所有

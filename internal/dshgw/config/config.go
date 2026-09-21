@@ -360,8 +360,10 @@ func defaults() Config {
 			MaxEntries:     1000,
 			// ServerAlive* keeps a dropped link from looking like a healthy mount; idmap=user
 			// maps the remote account onto this one, which is what the tenant expects to see
-			// for the files it creates.
-			SSHFSOptions: []string{"reconnect", "ServerAliveInterval=15", "ServerAliveCountMax=3", "idmap=user"},
+			// for the files it creates. max_conns is not sshfs' default of 1: one mount serves
+			// every session of an account, and a single sftp channel makes them queue behind
+			// each other's slowest reader.
+			SSHFSOptions: []string{"reconnect", "ServerAliveInterval=15", "ServerAliveCountMax=3", "idmap=user", "max_conns=4"},
 		},
 		Dsh: DshRuntime{
 			// Empty means "ask the environment": DSHGW_NODE / DSHGW_DSH_ROOT, the same

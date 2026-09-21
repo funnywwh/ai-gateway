@@ -699,6 +699,12 @@ func (s *Service) mount(ctx context.Context, remote Remote, host, remotePath, mo
 	if _, err := pathsFor(s.options, remote, host); err != nil {
 		return err
 	}
+	// The one shape sshfs cannot survive: a source directory that contains its own mount
+	// point. Refused here rather than in Open so that Reconcile — which re-mounts what the
+	// record lists at every gateway start — is covered by the same rule.
+	if err := s.refuseSelfNestedMount(ctx, remote, host, remotePath, mountpoint); err != nil {
+		return err
+	}
 	budget := s.options.ConnectTimeout
 	if budget <= 0 || budget > sshfsCallBudget {
 		budget = sshfsCallBudget

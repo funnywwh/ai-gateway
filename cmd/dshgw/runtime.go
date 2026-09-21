@@ -58,7 +58,11 @@ func (c *cli) loadRuntime(withSessions bool) (*runtimeDeps, error) {
 	// the service here — a pure struct, no listeners, no polling — keeps both paths honest;
 	// `serve` additionally fails hard when sshfs is missing, while a CLI command that has
 	// nothing to do with ssh only warns.
-	ssh, err := sshWorkspaceService(cfg, manager, nil)
+	// The logger, not nil: the service's warnings are the only narrative of a mount it refused
+	// or had to break (a self-nesting source, a wedge it aborted), and nil silently discards
+	// them — the audit stream records the same events, but an operator reads the log first.
+	// slog.Default() is the process logger in every command shape, serve included.
+	ssh, err := sshWorkspaceService(cfg, manager, slog.Default())
 	if err != nil {
 		return nil, err
 	}

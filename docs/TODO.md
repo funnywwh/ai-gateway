@@ -620,11 +620,10 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
       `Reconcile` 重挂、账号 config 一个字节没动（与各自种子 `cmp` 一致）。完整记录见 `docs/todo_done.md`
       的 v3.0.0 小节；后续仍可逐账号裁剪种子并按需重置（改种子 → 删 `<workspace>/.ssh/config` → 重启该
       账号 worker）
-- [ ] **观察项（v3.0.0 重启时发现）**：ssh 工作区服务自己的日志在现网是丢掉的 ——
-      `cmd/dshgw/runtime.go` 用 `sshWorkspaceService(cfg, manager, nil)` 构造，`sshworkspace.New` 收到 nil
-      logger 就落到 `io.Discard`，`serve.go` 也没有再注入。现象：本次 `Reconcile` 成功重挂了挂载，日志里
-      却没有 `ssh workspace remounted` 一行。修法是一行（把 serve 的 logger 传进去），与设计文档 §13 第 6 条
-      「排障靠 ssh-mounts.json、审计流与插件日志」是同一件事
+- [x] **观察项（v3.0.0 重启时发现）**：ssh 工作区服务自己的日志在现网是丢掉的 —— 已于 2026-09-21 修：
+      `cmd/dshgw/runtime.go` 的 `sshWorkspaceService(cfg, manager, slog.Default())`（每个命令形态的进程
+      logger，serve 也在内）。此前 `sshworkspace.New` 收到 nil logger 就落到 `io.Discard`，`Reconcile`
+      成功重挂了挂载日志里却没有一行；本次事故里「拒绝自嵌套挂载」与 `breakWedge` 的告警同样走这条 logger
 - [ ] **「我的主机」浏览器验收（人工）**：租户 A 添加一台主机 → 复核 A 的 `<workspace>/.ssh/config`
       出现该别名 → 选用它「挂载并打开」→ 删除（在用被拒、卸载后成功）→ 别名与该主机专用私钥都消失；
       租户 B 的列表里看不到 A 的主机
@@ -645,6 +644,26 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
       （browsermount 有对等的 `CleanupStale`，ssh 这侧缺）；或者让单元 stop 时先卸挂载（KillMode/顺序问题）。
       另一个操作教训：**别用 CLI `dshgw tenant restart` 起长驻 worker** —— CLI 退出时 bwrap
       `--die-with-parent` 会把 worker 一起带走，且日志里看不到那次退出；长驻 worker 只能由服务自己起
+- [x] **自嵌套挂载（2026-09-21 事故，已修）**：租户 dsh-tenant 挂 `rag-server:/home/winger/work/ai_gateway`
+      （`rag-server` 的 `HostName` 就是本机 `192.168.190.86`），而挂载点
+      `<workspace>/ssh/rag-server/home/winger/work/ai_gateway` 就在这个目录里 —— 挂载树包含挂载点本身。
+      一个会话在工作区根上跑 `grep -rn 扫码\|二维码\|qr … .` 之后：FUSE 连接 `834` 上积压 8 个无人应答
+      请求，`grep`（`/proc/<pid>/fd` 已指向第二层同一目录）、`ls <挂载点>`、`ls <挂载点父目录>` 三个进程进
+      **D 态**（`kill -9` 无效），该租户所有会话同时卡死。现场解救（无需 root）：`echo 1 > /sys/fs/fuse/
+      connections/834/abort`（waiting 8→0，D 态进程立即释放，sshfs 守护进程随之退出）→
+      `fusermount3 -u -z <挂载点>` → 清 `state/ssh-mounts.json` 与该账号 `ssh-mounts.json` 的这条记录
+      （否则下次 `Reconcile` 会把它重挂回来）。**已修**：`internal/dshgw/sshworkspace/selfnest.go` 在
+      `mount()` 里拒绝「远端是本机且远端路径是挂载点祖先」的挂载（按设备号+inode 比较，因此
+      `/data/home/winger/work` 这个同 fs 的第二个挂载点也认得；地址或 `machine-id` 证明「本机」，
+      别的机器上同样路径不受影响，本机上不含工作区的目录照常可挂），错误码 `mount/forbidden`、审计
+      `ssh-mount-refused`；同时 sshfs 默认补 `max_conns=4`（配置可覆盖），一条挂载不再只有一个 sftp 通道。
+- [ ] **未做（本次事故的后续）**：①「宿主目录直挂」——本机目录走 `bwrap --bind`（同一个内核，不需要
+      sshfs），既绕开自嵌套也绕开整类 FUSE 卡死；②**工作期间的挂死看门狗** —— 现有 `fuse.go` 的
+      `breakWedge`（杀守护进程 + sysfs abort）只在卸载路径上跑，正常工作时没有「请求多久没应答」的
+      巡检；③`sshfs -o auto_unmount`（守护进程退出即自动摘挂载）能否免掉上面那条「死挂载条目」缺陷；
+      ④递归工具（`grep -r`/`find`/索引）撞上合法挂载仍然慢，`ssh/` 下给个提示文件或让工具跳过
+- [ ] **观察项（本次事故实测到的反面基线）**：FUSE 上 `git status`/`grep` 的耗时基线仍未测；已知的是
+      自嵌套时不是「慢」而是**永久挂死**（D 态、不可杀）
 
 ## M66 控制台多管理员与管理员飞书扫码登录
 
