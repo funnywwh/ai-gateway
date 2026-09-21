@@ -109,21 +109,27 @@ function textOf(item) {
 const directory = {
   fetched_at: '2026-09-22T08:30:00Z', cached: false, names_available: true, truncated: false,
   departments: [
-    { id: 'od_a', parent_id: null, name: '研发部', depth: 0, direct_user_count: 1, local: { node_id: null, matched: '', will_create: true } },
-    { id: 'od_b', parent_id: null, name: '市场部', depth: 0, direct_user_count: 2, local: { node_id: 2, matched: 'name', will_pin: true } },
+    { id: 'od_a', parent_id: null, name: '研发部', depth: 0, direct_user_count: 1, selected: true, included: true,
+      local: { node_id: null, matched: '', will_create: true } },
+    { id: 'od_b', parent_id: null, name: '市场部', depth: 0, direct_user_count: 2, selected: true, included: true,
+      local: { node_id: 2, matched: 'name', will_pin: true } },
   ],
   users: [
-    { open_id: 'ou_wang', union_id: 'on_wang', name: '王五', department_ids: ['od_a'],
+    { open_id: 'ou_wang', union_id: 'on_wang', name: '王五', department_ids: ['od_a'], in_scope: true,
       account: { id: 7, name: '王五', matched_by: 'name', needs_bind: true },
       join_nodes: [{ department_id: 'od_a', name: '研发部', node_id: null, will_create: true }] },
-    { open_id: 'ou_new', union_id: 'on_new', name: '李四', department_ids: ['od_b'],
+    { open_id: 'ou_new', union_id: 'on_new', name: '李四', department_ids: ['od_b'], in_scope: true,
       account: null, join_nodes: [{ department_id: 'od_b', name: '市场部', node_id: 2, will_create: false }] },
-    { open_id: 'ou_zhao', union_id: 'on_zhao', name: '赵六', department_ids: ['od_b'],
+    { open_id: 'ou_zhao', union_id: 'on_zhao', name: '赵六', department_ids: ['od_b'], in_scope: true,
       account: { id: 1, name: 'acme', matched_by: 'api_key', needs_bind: true }, join_nodes: [] },
   ],
   users_truncated: false,
-  stats: { departments: 2, departments_to_create: 1, departments_to_pin: 1, departments_skipped: 0,
-    users: 3, users_matched: 2, users_unmatched: 1, users_already_synced: 0, memberships_to_add: 1 },
+  selection: [],
+  unknown_department_ids: [],
+  stats: { departments: 2, departments_selected: 2, departments_ancestors: 0,
+    departments_to_create: 1, departments_to_pin: 1, departments_skipped: 0,
+    users: 3, users_in_scope: 3, users_out_of_scope: 0,
+    users_matched: 2, users_unmatched: 1, users_already_synced: 0, memberships_to_add: 1 },
   warnings: [],
 };
 
@@ -229,6 +235,10 @@ const preview = calls.find((call) => call.path === '/org/feishu/directory');
 assert.ok(preview, 'opening the dialog must read the directory');
 assert.equal(preview.method, 'GET');
 assert.equal(preview.params, undefined, 'the first read takes the server cache');
+// …and then it re-reads once with the whole directory selected, which is what makes the
+// numbers in the confirm dialog the server's numbers for that exact scope.
+const seeded = calls.filter((call) => call.path === '/org/feishu/directory').pop();
+assert.match(seeded.params.departments, /^0,od_a,od_b$/, 'every node is in scope by default');
 
 assert.ok(modalRoot.children.length >= 1, 'the dialog is appended to #modal-root');
 const dialog = modalRoot.children[0];
@@ -260,6 +270,8 @@ syncButton.click();
 await settle();
 const sync = calls.find((call) => call.method === 'POST' && call.path === '/org/feishu/sync');
 assert.ok(sync, 'a confirmed 同步 posts to the sync endpoint');
+assert.deepEqual([...sync.body.department_ids].sort(), ['0', 'od_a', 'od_b'],
+  'the sync carries the scope the operator ticked');
 const refreshed = calls.filter((call) => call.path === '/org/feishu/directory').pop();
 // The objects come out of the module's own VM context, so compare fields rather than
 // prototypes.

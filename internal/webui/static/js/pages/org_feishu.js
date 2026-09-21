@@ -37,6 +37,13 @@ export function openFeishuSync({ onDone } = {}) {
     query: '',
     loading: false,
     changed: false,
+    // The departments this run will cover (design §12 D8–D15). Ids, plus the virtual root
+    // "0" for the company-level people. seeded flips once the first payload has been read, so
+    // "everything checked" is the default without racing the read.
+    selection: new Set(),
+    seeded: false,
+    // pending is the debounce handle for "the operator is still clicking checkboxes".
+    pending: null,
   };
 
   const subtitle = el('span', { class: 'muted feishu-sync-subtitle', text: '正在读取飞书通讯录…' });
@@ -66,12 +73,23 @@ export function openFeishuSync({ onDone } = {}) {
 
   const refreshBtn = el('button', { class: 'btn', text: '刷新' });
   const syncBtn = el('button', { class: 'btn btn-primary', text: '同步', disabled: true });
+  const scopeLabel = el('span', { class: 'muted feishu-scope-label' });
+  const selectAllBtn = el('button', { class: 'btn', text: '全选' });
+  const clearBtn = el('button', { class: 'btn', text: '清空' });
+  const withChildrenBtn = el('button', {
+    class: 'btn', text: '连同子部门',
+    title: '把已勾选部门的全部子孙也勾上（一次性动作，不会跟着之后的勾选自动联动）',
+  });
   const close = () => { backdrop.remove(); if (onDone) onDone(state.changed); };
 
   const dialog = el('div', { class: 'modal feishu-sync-dialog' }, [
     modalHead('同步飞书组织架构', close),
     modalBody([
       el('div', { class: 'toolbar feishu-sync-head' }, [subtitle, refreshBtn, syncBtn]),
+      el('div', { class: 'toolbar feishu-scope-bar' }, [
+        el('span', { class: 'muted', text: '同步范围：' }), scopeLabel,
+        el('span', { class: 'feishu-scope-actions' }, [selectAllBtn, clearBtn, withChildrenBtn]),
+      ]),
       notice,
       el('div', { class: 'feishu-sync-layout' }, [treeHost, peopleHost]),
     ]),
@@ -87,7 +105,12 @@ export function openFeishuSync({ onDone } = {}) {
     filterPlaceholder: '过滤部门名（支持拼音）…',
     matcher: matchesQuery,
     emptyText: '飞书通讯录里没有部门',
-    renderLabel: (node) => node.name,
+    // Each row carries its own scope checkbox (design D15): what will be synced is visible on
+    // the row, never implied by the tree's shape. The synthetic root is a checkbox too — it is
+    // the switch for the people who belong to no department.
+    renderLabel: (node) => el('span', { class: 'feishu-dept-label' }, [
+      scopeBox(node), el('span', { class: 'tree-label', text: node.name }),
+    ]),
     renderMeta: (node) => departmentMeta(node),
     onSelect: (node) => { state.selectedDept = node ? node.id : ROOT_ID; renderPeople(); },
   });
@@ -95,6 +118,15 @@ export function openFeishuSync({ onDone } = {}) {
 
   refreshBtn.addEventListener('click', () => load(true));
   syncBtn.addEventListener('click', runSync);
+  selectAllBtn.addEventListener('click', () => {
+    for (const node of treeNodes()) state.selection.add(node.id);
+    applySelection();
+  });
+  clearBtn.addEventListener('click', () => { state.selection.clear(); applySelection(); });
+  withChildrenBtn.addEventListener('click', () => {
+    for (const id of scopeExpandedWithChildren()) state.selection.add(id);
+    applySelection();
+  });
 
   load(false);
 
@@ -105,8 +137,27 @@ export function openFeishuSync({ onDone } = {}) {
     state.loading = true;
     refreshBtn.disabled = true;
     try {
-      const payload = await api.get('/org/feishu/directory', refresh ? { refresh: 'true' } : undefined);
+      const params = {};
+      if (refresh) params.refresh = 'true';
+      // The scope travels with the read: the server's plan (and therefore the numbers in the
+      // confirm dialog) describes exactly the departments that are ticked (design §12). The
+      // directory itself is cached for 60 s, so re-reading on every click is cheap.
+      if (state.seeded) params.departments = scopeIds().join(',');
+      const payload = await api.get('/org/feishu/directory', Object.keys(params).length ? params : undefined);
       state.payload = payload;
+      if (!state.seeded) {
+        // First payload: everything is in scope, so the dialog opens on the M70 behaviour and
+        // the operator narrows it from there.
+        state.seeded = true;
+        for (const node of treeNodes()) state.selection.add(node.id);
+        state.pending = 'reseed';
+      }
+      if (state.pending === 'reseed') {
+        state.pending = null;
+        state.loading = false;
+        refreshBtn.disabled = false;
+        return load(false);
+      }
       render();
     } catch (err) {
       state.payload = null;
@@ -128,8 +179,11 @@ export function openFeishuSync({ onDone } = {}) {
     if (!payload) return;
     const stats = payload.stats || {};
     const cached = payload.cached ? '（60 秒缓存）' : '';
-    subtitle.textContent = '部门 ' + stats.departments + '（将创建 ' + stats.departments_to_create +
-      ' · 同名打标 ' + stats.departments_to_pin + '）· 人员 ' + stats.users +
+    const scope = stats.departments_ancestors
+      ? '（含为层级补建 ' + stats.departments_ancestors + ' 个）' : '';
+    subtitle.textContent = '本次范围：部门 ' + stats.departments + scope +
+      '（将创建 ' + stats.departments_to_create + ' · 同名打标 ' + stats.departments_to_pin +
+      ' · 跳过 ' + stats.departments_skipped + '）· 人员 ' + stats.users_in_scope + '/' + stats.users +
       '（可自动合并 ' + stats.users_matched + ' · 待决定 ' + stats.users_unmatched +
       ' · 已同步 ' + stats.users_already_synced + '）' + cached;
 
@@ -148,10 +202,86 @@ export function openFeishuSync({ onDone } = {}) {
     }
     notice.hidden = notice.textContent === '';
 
+    // The tree is about to rebuild every row (and with it every checkbox), so the registry is
+    // cleared first: a stale entry would be repainted by renderScope for a row that is gone.
+    scopeBoxes.clear();
     mainTree.refresh(treeNodes());
     mainTree.setSelected(state.selectedDept);
-    syncBtn.disabled = false;
+    renderScope();
     renderPeople();
+  }
+
+  // renderScope is the one place that decides whether a sync may start, and it says why not.
+  function renderScope() {
+    for (const [id, box] of scopeBoxes) box.checked = state.selection.has(id);
+    const total = treeNodes().length;
+    const picked = state.selection.size;
+    const unknown = (state.payload && state.payload.unknown_department_ids) || [];
+    scopeLabel.textContent = '已勾选 ' + picked + '/' + total + ' 个节点' +
+      (unknown.length ? '（' + unknown.length + ' 个 id 已不在通讯录里，已忽略：' + unknown.join(', ') + '）' : '');
+    // Nothing ticked means "sync nothing", which is never what the operator wants: the button
+    // says so instead of silently doing nothing (the API answers 400 for that case too).
+    syncBtn.disabled = picked === 0;
+    syncBtn.title = picked === 0 ? '请先勾选要同步的部门（至少一个）' : '';
+  }
+
+  // --- scope helpers ------------------------------------------------------
+
+  // scopeBoxes maps a tree node id to its scope checkbox (rebuilt with the tree).
+  const scopeBoxes = new Map();
+
+  // scopeIds is what travels to the server: the checked department ids, sorted so the
+  // request URL is stable (a stable URL makes the debounce collapse instead of firing twice).
+  function scopeIds() {
+    return [...state.selection].sort();
+  }
+
+  // scopeExpandedWithChildren implements 「连同子部门」 as a one-shot action: it returns the
+  // checked departments plus every descendant, so the operator can see the result as ticked
+  // boxes instead of trusting an invisible rule.
+  function scopeExpandedWithChildren() {
+    const all = treeNodes();
+    const children = new Map();
+    for (const node of all) {
+      const parent = node.parent_id || ROOT_ID;
+      if (!children.has(parent)) children.set(parent, []);
+      children.get(parent).push(node.id);
+    }
+    const out = new Set(state.selection);
+    const queue = [...out];
+    while (queue.length) {
+      const current = queue.shift();
+      for (const child of children.get(current) || []) {
+        if (out.has(child)) continue;
+        out.add(child);
+        queue.push(child);
+      }
+    }
+    return out;
+  }
+
+  // applySelection pushes a changed scope to the server (debounced) and repaints immediately,
+  // so clicking a box feels instant while the authoritative numbers arrive a moment later.
+  function applySelection() {
+    renderScope();
+    renderPeople();
+    if (state.pending) clearTimeout(state.pending);
+    state.pending = setTimeout(() => { state.pending = null; load(false); }, 300);
+  }
+
+  function scopeBox(node) {
+    const box = el('input', { type: 'checkbox', class: 'feishu-dept-check' });
+    box.checked = state.selection.has(node.id);
+    box.addEventListener('click', (ev) => { ev.stopPropagation(); });
+    box.addEventListener('change', () => {
+      if (box.checked) state.selection.add(node.id); else state.selection.delete(node.id);
+      applySelection();
+    });
+    // The boxes are kept so 「全选 / 清空 / 连同子部门」 can repaint them: those actions change
+    // the scope without a tree rebuild, and a checked state that lives only in `state` is
+    // exactly how a checkbox looks ticked while the sync sends something else.
+    scopeBoxes.set(node.id, box);
+    return box;
   }
 
   // treeNodes builds the control's flat node list: a synthetic root for the people who sit
@@ -175,6 +305,10 @@ export function openFeishuSync({ onDone } = {}) {
         name: department.name || department.id,
         depth: (department.depth || 0) + 1,
         user_count: department.direct_user_count || 0,
+        // selected/included come from the server's plan: they are what the row's meta line
+        // reads to say 「为层级补建」 instead of 「将创建」.
+        selected: !!department.selected,
+        included: !!department.included,
         local: department.local || {},
       });
     }
@@ -185,7 +319,8 @@ export function openFeishuSync({ onDone } = {}) {
     const parts = [];
     if (node.user_count) parts.push(node.user_count + ' 人');
     const local = node.local || {};
-    if (node.id === ROOT_ID) parts.push('公司根节点');
+    if (node.id === ROOT_ID) parts.push('公司层人员');
+    else if (node.included && !node.selected) parts.push('为层级补建');
     else if (local.will_create) parts.push('将创建');
     else if (local.name_conflict) parts.push('同名节点已属其它部门');
     else if (local.matched === 'id') parts.push('已关联');
@@ -285,22 +420,40 @@ export function openFeishuSync({ onDone } = {}) {
       );
     }
     cells.push(actions);
-    return el('div', { class: 'feishu-user' }, cells);
+    // A person whose departments are not ticked is not part of this run. Saying so (instead of
+    // showing them as 未匹配) matters: "not now" and "nowhere to put them" are different
+    // problems, and only the second one needs the operator to decide (design D10).
+    const row = el('div', { class: 'feishu-user' + (person.in_scope === false ? ' out-of-scope' : '') }, cells);
+    if (person.in_scope === false) {
+      row.append(el('div', { class: 'feishu-user-scope muted',
+        text: '不在本次同步范围（其部门未勾选）；行内操作不受影响' }));
+    }
+    return row;
   }
 
   // --- writes -------------------------------------------------------------
 
   async function runSync() {
     const stats = state.payload ? state.payload.stats || {} : {};
+    const ids = scopeIds();
+    if (!ids.length) {
+      toast('请先勾选要同步的部门', 'error');
+      return;
+    }
+    const ancestors = stats.departments_ancestors
+      ? '（其中 ' + stats.departments_ancestors + ' 个是勾选部门的上级，为安放子节点一并创建）' : '';
     const ok = await confirmDialog('执行一次飞书同步',
+      '本次范围：已勾选 ' + (stats.departments_selected || 0) + ' 个节点，实际涉及 ' +
+      (stats.departments || 0) + ' 个部门' + ancestors + '。\n\n' +
       '将创建 ' + (stats.departments_to_create || 0) + ' 个组织节点（名称即部门名），' +
-      '并把自动匹配上的 ' + (stats.users_matched || 0) + ' 人写入飞书身份、挂进其部门节点' +
-      '（新增成员关系 ' + (stats.memberships_to_add || 0) + ' 条）。' +
+      '并把范围内的 ' + (stats.users_matched || 0) + ' 人写入飞书身份、挂进其部门节点' +
+      '（新增成员关系 ' + (stats.memberships_to_add || 0) + ' 条）；范围外的 ' +
+      (stats.users_out_of_scope || 0) + ' 人不动。' +
       '组织节点的标签会被整棵子树继承，所以这会立即改变这些账号的生效授权。' +
       '已存在/已匹配的内容不会重复写入，重复点「同步」是安全的。');
     if (!ok) return;
     try {
-      const result = await withBusy(syncBtn, '同步中', () => api.post('/org/feishu/sync'));
+      const result = await withBusy(syncBtn, '同步中', () => api.post('/org/feishu/sync', { department_ids: ids }));
       const created = (result.created_nodes || []).length;
       const linked = (result.linked_users || []).length;
       const skipped = (result.skipped_departments || []).length + (result.skipped_users || []).length;

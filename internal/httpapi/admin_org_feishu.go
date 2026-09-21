@@ -1,9 +1,14 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -129,6 +134,83 @@ func feishuUpstreamError(err error) *domain.APIError {
 // the merge plan
 // ---------------------------------------------------------------------------
 
+// feishuSelection is the set of Feishu department ids the operator chose to sync. A nil
+// set means "everything", which is what an omitted parameter has always meant (M70) and
+// keeps the MCP/script path working unchanged.
+//
+// Selection decides *what gets written this run*, never how people are matched: the
+// same-name claiming stays a property of the whole directory, so picking a subset cannot
+// silently change which account a person merges onto (design D11).
+type feishuSelection struct {
+	ids map[string]bool
+}
+
+func (s feishuSelection) all() bool { return s.ids == nil }
+
+func (s feishuSelection) has(id string) bool { return s.all() || s.ids[id] }
+
+// parseFeishuSelection turns the request's department ids into a selection, dropping ids the
+// directory does not know (a department deleted between preview and sync) and reporting them
+// so the caller can tell the operator instead of failing the whole run (design D14).
+func parseFeishuSelection(raw []string) feishuSelection {
+	if raw == nil {
+		return feishuSelection{}
+	}
+	ids := map[string]bool{}
+	for _, value := range raw {
+		for _, part := range strings.Split(value, ",") {
+			id := strings.TrimSpace(part)
+			if id == "" {
+				continue
+			}
+			if ids[id] {
+				continue
+			}
+			ids[id] = true
+		}
+	}
+	return feishuSelection{ids: ids}
+}
+
+// decodeOptionalJSON decodes a body that may legitimately be absent. The sync endpoint is
+// usable with no body at all (that is the "sync everything" call), so an empty body is not
+// the malformed-JSON error decodeJSON reports.
+func decodeOptionalJSON(r *http.Request, v any) error {
+	if r.Body == nil || r.ContentLength == 0 {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("failed to read the request body")
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(body, v); err != nil {
+		return fmt.Errorf("malformed JSON body")
+	}
+	return nil
+}
+
+// unknownSelectionIDs reports the requested ids that the directory does not contain.
+func unknownSelectionIDs(sel feishuSelection, dir *feishu.Directory) []string {
+	if sel.all() {
+		return nil
+	}
+	known := map[string]bool{feishu.RootDepartmentID: true}
+	for _, dept := range dir.Departments {
+		known[dept.ID] = true
+	}
+	unknown := []string{}
+	for id := range sel.ids {
+		if !known[id] {
+			unknown = append(unknown, id)
+		}
+	}
+	sort.Strings(unknown)
+	return unknown
+}
+
 // feishuDeptPlan is one Feishu department and what the merge would do about it.
 type feishuDeptPlan struct {
 	Dept feishu.Department
@@ -150,6 +232,12 @@ type feishuDeptPlan struct {
 	Skipped       bool
 	DepthExceeded bool
 	NameInvalid   bool
+	// Selected says the operator checked this department; Included says it takes part in
+	// this run — either because it was checked, or because a checked descendant needs it as
+	// its parent (design D9). An included-but-not-selected department contributes its node
+	// and nothing else: its people stay out of scope.
+	Selected bool
+	Included bool
 	// parent links the plan to its parent plan, so creation runs parents-first.
 	parent *feishuDeptPlan
 	// justCreated is set when this very sync created the node; the membership pass uses
@@ -178,6 +266,9 @@ type feishuUserPlan struct {
 	// JoinNodeIDs are the node ids (existing ones) the person is not yet attached to and
 	// would be attached to during the sync; nodes created by the same run are added on top.
 	JoinNodeIDs []int64
+	// InScope says this person takes part in the run: one of their own departments is
+	// selected, or they belong to no department and the virtual root was selected (D8/D10).
+	InScope bool
 	// SkipReason explains a person that looks matchable but must not be auto-merged.
 	SkipReason string
 }
@@ -186,12 +277,15 @@ type feishuOrgPlan struct {
 	Dir         *feishu.Directory
 	Departments []*feishuDeptPlan
 	Users       []*feishuUserPlan
-	byDeptID    map[string]*feishuDeptPlan
+	Selection   feishuSelection
+	// UnknownSelection lists requested ids the directory does not know (D14).
+	UnknownSelection []string
+	byDeptID         map[string]*feishuDeptPlan
 }
 
 // planFeishuOrg computes what a sync would do, from the directory and the four local reads.
 // It is read-only with respect to storage: the preview renders it, the sync executes it.
-func planFeishuOrg(ctx context.Context, dir *feishu.Directory, orgStore OrgAdmin, accountStore AccountAdmin, keyStore KeyStore) (*feishuOrgPlan, error) {
+func planFeishuOrg(ctx context.Context, dir *feishu.Directory, orgStore OrgAdmin, accountStore AccountAdmin, keyStore KeyStore, sel feishuSelection) (*feishuOrgPlan, error) {
 	nodes, err := orgStore.ListOrgNodes(ctx)
 	if err != nil {
 		return nil, err
@@ -209,7 +303,8 @@ func planFeishuOrg(ctx context.Context, dir *feishu.Directory, orgStore OrgAdmin
 		return nil, err
 	}
 
-	plan := &feishuOrgPlan{Dir: dir, byDeptID: map[string]*feishuDeptPlan{}}
+	plan := &feishuOrgPlan{Dir: dir, Selection: sel, UnknownSelection: unknownSelectionIDs(sel, dir),
+		byDeptID: map[string]*feishuDeptPlan{}}
 
 	// --- departments (the directory list is BFS-ordered: parents always come first) ----
 	pinnedByDept := map[string]*domain.OrgNode{}
@@ -270,10 +365,24 @@ func planFeishuOrg(ctx context.Context, dir *feishu.Directory, orgStore OrgAdmin
 				}
 			}
 		}
+		if sel.has(dept.ID) {
+			entry.Selected, entry.Included = true, true
+		}
 		plan.Departments = append(plan.Departments, entry)
 		plan.byDeptID[dept.ID] = entry
 		if dept.Name != "" {
 			plannedBySibling[parentKey+dept.Name] = entry
+		}
+	}
+
+	// A selected department needs its ancestors to exist (a node cannot hang in mid-air), so
+	// they are pulled into the run — node only: their people are not in scope (D9/D10).
+	for _, entry := range plan.Departments {
+		if !entry.Selected {
+			continue
+		}
+		for parent := entry.parent; parent != nil; parent = parent.parent {
+			parent.Included = true
 		}
 	}
 
@@ -312,6 +421,16 @@ func planFeishuOrg(ctx context.Context, dir *feishu.Directory, orgStore OrgAdmin
 			if dept, ok := plan.byDeptID[departmentID]; ok {
 				entry.JoinDepts = append(entry.JoinDepts, dept)
 			}
+			// Scope follows the person's OWN departments (D10): a department pulled in only
+			// as somebody else's parent does not drag its people into the run.
+			if sel.has(departmentID) {
+				entry.InScope = true
+			}
+		}
+		// People Feishu lists directly under the company belong to no department: the
+		// virtual root is the only switch that decides for them (D8).
+		if len(person.DepartmentIDs) == 0 && sel.has(feishu.RootDepartmentID) {
+			entry.InScope = true
 		}
 
 		account := accountsByOpenID[person.OpenID]
@@ -385,11 +504,20 @@ func parentDepth(entry *feishuDeptPlan) int {
 
 // planStats summarizes the plan for the confirm dialog and the sync response.
 type planStats struct {
-	Departments        int `json:"departments"`
-	DepartmentsCreate  int `json:"departments_to_create"`
-	DepartmentsPin     int `json:"departments_to_pin"`
-	DepartmentsSkipped int `json:"departments_skipped"`
+	// Departments is how many departments take part in the run (selected plus the ancestors
+	// they need); DepartmentsSelected is how many the operator actually checked, and
+	// DepartmentsAncestors how many exist only to hold a selected department's place.
+	Departments          int `json:"departments"`
+	DepartmentsSelected  int `json:"departments_selected"`
+	DepartmentsAncestors int `json:"departments_ancestors"`
+	DepartmentsCreate    int `json:"departments_to_create"`
+	DepartmentsPin       int `json:"departments_to_pin"`
+	DepartmentsSkipped   int `json:"departments_skipped"`
+	// The user counters describe the people in scope only; UsersOutOfScope says how many
+	// people the current selection leaves alone.
 	Users              int `json:"users"`
+	UsersInScope       int `json:"users_in_scope"`
+	UsersOutOfScope    int `json:"users_out_of_scope"`
 	UsersMatched       int `json:"users_matched"`
 	UsersUnmatched     int `json:"users_unmatched"`
 	UsersAlreadySynced int `json:"users_already_synced"`
@@ -397,8 +525,24 @@ type planStats struct {
 }
 
 func computePlanStats(plan *feishuOrgPlan) planStats {
-	stats := planStats{Departments: len(plan.Departments), Users: len(plan.Users)}
+	stats := planStats{Users: len(plan.Users)}
+	if !plan.Selection.all() {
+		// Counted from the selection, not from the department rows: the virtual root "0" is a
+		// checkbox in the dialog but is not a department, and a header that said "已选 0 个部门"
+		// while the root is ticked would be a lie.
+		stats.DepartmentsSelected = len(plan.Selection.ids) - len(plan.UnknownSelection)
+		if stats.DepartmentsSelected < 0 {
+			stats.DepartmentsSelected = 0
+		}
+	}
 	for _, dept := range plan.Departments {
+		if !dept.Included {
+			continue
+		}
+		stats.Departments++
+		if !dept.Selected {
+			stats.DepartmentsAncestors++
+		}
 		switch {
 		case dept.WillCreate:
 			stats.DepartmentsCreate++
@@ -409,6 +553,11 @@ func computePlanStats(plan *feishuOrgPlan) planStats {
 		}
 	}
 	for _, user := range plan.Users {
+		if !user.InScope {
+			stats.UsersOutOfScope++
+			continue
+		}
+		stats.UsersInScope++
 		if user.Account == nil {
 			stats.UsersUnmatched++
 			continue
@@ -452,7 +601,8 @@ func (s *Server) handleAdminListFeishuDirectory(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
-	plan, err := planFeishuOrg(r.Context(), dir, gate.Org, gate.Accounts, gate.Keys)
+	selection := parseFeishuSelection(r.URL.Query()["departments"])
+	plan, err := planFeishuOrg(r.Context(), dir, gate.Org, gate.Accounts, gate.Keys, selection)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
@@ -475,6 +625,9 @@ func (s *Server) handleAdminListFeishuDirectory(w http.ResponseWriter, r *http.R
 		departments = append(departments, map[string]any{
 			"id": dept.Dept.ID, "parent_id": parentID, "name": dept.Dept.Name, "depth": dept.Dept.Depth,
 			"direct_user_count": directUsers[dept.Dept.ID],
+			// selected/included are what the dialog's checkboxes and the "为层级补建" marks read.
+			"selected": dept.Selected,
+			"included": dept.Included,
 			"local": map[string]any{
 				"node_id":       jsonNilInt64(dept.NodeID),
 				"matched":       dept.Matched,
@@ -496,6 +649,7 @@ func (s *Server) handleAdminListFeishuDirectory(w http.ResponseWriter, r *http.R
 		entry := map[string]any{
 			"open_id": user.User.OpenID, "union_id": user.User.UnionID, "name": user.User.Name,
 			"department_ids": user.User.DepartmentIDs,
+			"in_scope":       user.InScope,
 			"account":        nil,
 			"join_nodes":     joinNodesJSON(user),
 		}
@@ -517,7 +671,11 @@ func (s *Server) handleAdminListFeishuDirectory(w http.ResponseWriter, r *http.R
 		"users":           users,
 		"users_truncated": usersTruncated,
 		"stats":           computePlanStats(plan),
-		"warnings":        feishuWarnings(dir),
+		"selection":       r.URL.Query()["departments"],
+		// Ids the directory does not know (a department deleted in Feishu, say): reported so
+		// the dialog can drop them from its checkboxes instead of pretending they synced.
+		"unknown_department_ids": plan.UnknownSelection,
+		"warnings":               feishuWarnings(dir),
 	})
 }
 
@@ -699,12 +857,32 @@ func (s *Server) handleAdminSyncFeishuOrg(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	plan, err := planFeishuOrg(r.Context(), dir, gate.Org, gate.Accounts, gate.Keys)
-	if !ok {
+	// Which departments this run covers (design §12). The body is optional: an absent
+	// department_ids keeps the M70 "sync everything" semantics for MCP and scripts, while an
+	// explicit empty list is refused rather than silently doing nothing.
+	var body struct {
+		DepartmentIDs []string `json:"department_ids"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil {
+		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
 		return
 	}
+	selection := parseFeishuSelection(body.DepartmentIDs)
+	if body.DepartmentIDs != nil && len(selection.ids) == 0 {
+		writeAPIError(w, domain.ErrInvalidRequest(
+			"department_ids is empty: pick at least one department, or omit the field to sync every department"))
+		return
+	}
+	plan, err := planFeishuOrg(r.Context(), dir, gate.Org, gate.Accounts, gate.Keys, selection)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
+		return
+	}
+	if !selection.all() && len(plan.UnknownSelection) == len(selection.ids) {
+		// Every id the operator sent is gone from the directory: refreshing the dialog is the
+		// only useful answer (design D14).
+		writeAPIError(w, domain.ErrInvalidRequest(
+			"none of the requested departments exist in the Feishu directory anymore; refresh the dialog and pick again"))
 		return
 	}
 
@@ -741,8 +919,13 @@ func (s *Server) handleAdminSyncFeishuOrg(w http.ResponseWriter, r *http.Request
 	nodesTouched, membersTouched := 0, 0
 
 	// Departments, in BFS order (a plan entry is always appended after its parent, so the
-	// parent's node id exists by the time a child is created under it).
+	// parent's node id exists by the time a child is created under it). Departments outside
+	// the selection are skipped entirely — including the ones that would only be renamed or
+	// pinned by a full run.
 	for _, dept := range plan.Departments {
+		if !dept.Included {
+			continue
+		}
 		switch {
 		case dept.WillCreate:
 			node := &domain.OrgNode{Name: dept.Dept.Name, SortOrder: 100,
@@ -802,7 +985,7 @@ func (s *Server) handleAdminSyncFeishuOrg(w http.ResponseWriter, r *http.Request
 	}
 
 	for _, user := range plan.Users {
-		if user.Account == nil {
+		if user.Account == nil || !user.InScope {
 			continue
 		}
 		joinNodeIDs := append([]int64{}, user.JoinNodeIDs...)
@@ -868,6 +1051,9 @@ func (s *Server) handleAdminSyncFeishuOrg(w http.ResponseWriter, r *http.Request
 	s.audit(ctx, gate.Actor, "sync_feishu", "org", "", map[string]any{
 		"created_nodes": len(createdNodes), "linked_users": len(linkedUsers),
 		"skipped_departments": len(skippedDepartments), "skipped_users": len(skippedUsers),
+		"departments_selected":  plannedStats.DepartmentsSelected,
+		"departments_ancestors": plannedStats.DepartmentsAncestors,
+		"departments_unknown":   len(plan.UnknownSelection),
 	}, "ok")
 
 	if nodesTouched > 0 || membersTouched > 0 {
@@ -881,7 +1067,8 @@ func (s *Server) handleAdminSyncFeishuOrg(w http.ResponseWriter, r *http.Request
 		"ok": true, "stats": plannedStats,
 		"created_nodes": createdNodes, "linked_users": linkedUsers,
 		"skipped_departments": skippedDepartments, "skipped_users": skippedUsers,
-		"warnings": feishuWarnings(dir),
+		"unknown_department_ids": plan.UnknownSelection,
+		"warnings":               feishuWarnings(dir),
 	})
 }
 

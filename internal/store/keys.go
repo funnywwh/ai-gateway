@@ -185,8 +185,9 @@ func (db *DB) GetAPIKeyByID(ctx context.Context, id int64) (*domain.APIKey, erro
 // path rewrites a whole row from a struct, and it is exactly how the per-key recording
 // switches were once silently reverted. A binding must be written by one statement that
 // cannot touch anything else, and upsert must not touch the binding (see the columns it
-// lists). The unique index over NULLIF(feishu_open_id, '') makes "one Feishu identity,
-// one key" a database invariant; the violation is reported as a conflict.
+// lists). The unique index over feishu_open_id (empty values excluded, so unbound keys
+// never collide) makes "one Feishu identity, one key" a database invariant; the violation
+// is reported as a conflict.
 func (db *DB) BindAPIKeyFeishu(ctx context.Context, id int64, binding domain.FeishuBinding) error {
 	if binding.OpenID == "" {
 		return domain.ErrInvalidRequest("a Feishu binding requires an open_id")

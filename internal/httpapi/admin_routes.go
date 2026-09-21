@@ -1086,20 +1086,34 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			Query: []adminField{
 				queryParam("refresh", "boolean",
 					"强制重新拉取飞书通讯录。默认结果走 60 秒缓存；任何同步/绑定写操作都会使缓存失效"),
+				queryParam("departments", "string",
+					"只统计这些飞书部门（open_department_id，逗号分隔或重复传参）的合并结果；"+
+						"可以传虚拟根 \"0\" 表示公司层人员（不属于任何部门的人）。"+
+						"不传 = 全量。每个部门额外返回 selected/included，每个人额外返回 in_scope；"+
+						"stats 只统计范围内的对象。部门 id 在 admin_list_feishu_directory 的 departments[].id"),
 			},
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/org/feishu/sync", Handler: s.handleAdminSyncFeishuOrg,
 			Name: "admin_sync_feishu_org", Group: groupOrg, Role: roleAdmin,
-			Summary:   "执行一次飞书通讯录同步：补建缺失部门节点 + 自动合并已匹配人员（写入账户级飞书身份并挂入部门节点）。幂等：重复执行写 0",
+			Summary:   "执行一次飞书通讯录同步：补建缺失部门节点 + 自动合并已匹配人员（写入账户级飞书身份并挂入部门节点）。可只同步指定部门；幂等：重复执行写 0",
 			Dangerous: true, ConfirmReason: "会创建飞书里有而本地没有的组织节点（其名称就是部门名），并把自动匹配上的人员写上飞书身份、挂进其部门对应的节点——节点标签被子树继承，这会即时改变这些账号的生效授权",
+			Body: []adminField{
+				structuredField("department_ids", "array",
+					"只同步这些飞书部门（open_department_id，见 admin_list_feishu_directory 的 departments[].id）；"+
+						"传虚拟根 \"0\" 表示同时处理公司层人员（不属于任何部门的人）。"+
+						"被选中部门的**上级**即使没选也会补建节点（否则子节点无处安放），但它们的**人员**不在范围内。"+
+						"不传这个字段 = 全量同步（M70 原有行为）；传空数组会 400；目录里不存在的 id 会被丢弃并在 "+
+						"unknown_department_ids 里回报，全都不认识时才 400",
+					arrayOfStrings("飞书部门 id 列表"), []any{"od_a1"}),
+			},
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/org/feishu/users/{open_id}/account", Handler: s.handleAdminCreateAccountFromFeishuUser,
 			Name: "admin_create_account_from_feishu_user", Group: groupOrg, Role: roleAdmin,
 			Summary:   "为某个飞书人员创建本地账户（默认名=飞书姓名可改），写入其飞书身份并挂入其部门节点；同名账户已存在时 409 并建议改用绑定接口",
 			Dangerous: true, ConfirmReason: "会新建一个账户（prepaid、余额 0、启用自动停复），写入该飞书身份，并把账户挂进其部门对应的组织节点",
-			Params:    []adminField{pathParam("open_id", "飞书人员的 open_id（ou_…，admin_list_feishu_directory 的人员列表给出）")},
+			Params: []adminField{pathParam("open_id", "飞书人员的 open_id（ou_…，admin_list_feishu_directory 的人员列表给出）")},
 			Body: []adminField{
 				bodyOptional("name", "string",
 					"账户名；默认用飞书姓名。通讯录缺名称权限（names_unavailable）时必须手填，否则 400"),
@@ -1111,7 +1125,7 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			Name: "admin_bind_account_feishu_user", Group: groupOrg, Role: roleAdmin,
 			Summary:   "把某个飞书人员绑定到指定账户：写入账户级飞书身份（accounts.feishu_*），并顺带把账户挂入其部门节点。不影响 API Key 上的绑定，也不影响门户登录",
 			Dangerous: true, ConfirmReason: "该飞书人员之后的每次同步都会合并到这个账户；一个账户只能绑一个飞书身份（已绑别人时 409）",
-			Params:    []adminField{pathParam("open_id", "飞书人员的 open_id（ou_…）")},
+			Params: []adminField{pathParam("open_id", "飞书人员的 open_id（ou_…）")},
 			Body: []adminField{
 				bodyRequired("account_id", "integer",
 					"要绑定到的账户数字 id（admin_list_accounts 给出）。该账户当前不能已绑定其他飞书身份"),
@@ -1122,7 +1136,7 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			Name: "admin_unbind_account_feishu_user", Group: groupOrg, Role: roleAdmin,
 			Summary:   "解除某个飞书人员与账户的绑定（幂等）。不动 API Key 上的绑定；解除后该人员在下次同步中变回「未匹配」",
 			Dangerous: true, ConfirmReason: "解除账户级飞书身份映射；不影响该账户本身、它的 Key 与任何登录能力",
-			Params:    []adminField{pathParam("open_id", "飞书人员的 open_id（ou_…）")},
+			Params: []adminField{pathParam("open_id", "飞书人员的 open_id（ou_…）")},
 		},
 		{
 			Method: "GET", Path: "/admin/api/v1/mcp-tokens", Handler: s.handleAdminListMCPTokens,

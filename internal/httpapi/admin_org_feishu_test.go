@@ -707,3 +707,234 @@ func TestFeishuAccountBindingDoesNotOpenThePortal(t *testing.T) {
 		t.Fatalf("ou_new resolved to a key: %v %+v", err, found)
 	}
 }
+
+// --- department selection (design §12) -----------------------------------------------
+//
+// The operator may sync a subset. What must hold: only the chosen departments are touched,
+// a chosen department's ancestors are still created (its node needs a place to hang), the
+// people of an un-chosen department are left exactly as they were, and the company-level
+// people follow the virtual root "0" alone.
+
+func nodeNames(t *testing.T, f *orgFeishuFixture) map[string]*domain.OrgNode {
+	t.Helper()
+	nodes, err := f.db.ListOrgNodes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]*domain.OrgNode{}
+	for _, node := range nodes {
+		out[node.Name] = node
+	}
+	return out
+}
+
+// Selecting one department creates that department and nothing else, and merges only its
+// people.
+func TestFeishuSyncHonorsDepartmentSelection(t *testing.T) {
+	f := newOrgFeishuFixture(t)
+	ranID, acmeID, _ := f.seedLocal(t)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	status, payload := f.callJSON(t, http.MethodPost, "/admin/api/v1/org/feishu/sync",
+		`{"department_ids":["od_b"]}`, cookie)
+	if status != http.StatusOK {
+		t.Fatalf("sync status=%d payload=%v", status, payload)
+	}
+	created := payload["created_nodes"].([]any)
+	if len(created) != 1 {
+		t.Fatalf("created nodes = %v, want only 市场部", created)
+	}
+	if name := created[0].(map[string]any)["name"]; name != "市场部" {
+		t.Fatalf("created %v, want 市场部", name)
+	}
+	byName := nodeNames(t, f)
+	if _, ok := byName["研发部"]; ok {
+		t.Fatal("a department outside the selection was created")
+	}
+
+	// 赵六 sits in 市场部: the api_key channel promotes the identity onto acme.
+	acme, err := f.db.GetAccount(context.Background(), acmeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acme.FeishuOpenID != "ou_zhao" {
+		t.Fatalf("the selected department's person was not merged: %+v", acme)
+	}
+	// 王五 sits in 研发部/平台组: untouched, even though a full sync would merge them.
+	ran, err := f.db.GetAccount(context.Background(), ranID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ran.FeishuOpenID != "" || ran.FeishuBoundAt != nil {
+		t.Fatalf("a person outside the selection was merged anyway: %+v", ran)
+	}
+	stats := payload["stats"].(map[string]any)
+	if stats["departments_selected"].(float64) != 1 || stats["departments_ancestors"].(float64) != 0 {
+		t.Fatalf("stats = %v, want one selected department and no ancestors", stats)
+	}
+	if stats["users_out_of_scope"].(float64) != 3 {
+		t.Fatalf("users_out_of_scope = %v, want the three people outside 市场部", stats["users_out_of_scope"])
+	}
+}
+
+// A selected department pulls its ancestors in for the node's sake, but not their people.
+func TestFeishuSyncCreatesAncestorsOfTheSelectionOnly(t *testing.T) {
+	f := newOrgFeishuFixture(t)
+	ranID, acmeID, _ := f.seedLocal(t)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	status, payload := f.callJSON(t, http.MethodPost, "/admin/api/v1/org/feishu/sync",
+		`{"department_ids":["od_a1"]}`, cookie)
+	if status != http.StatusOK {
+		t.Fatalf("sync status=%d payload=%v", status, payload)
+	}
+	byName := nodeNames(t, f)
+	dev, hasDev := byName["研发部"]
+	platform, hasPlatform := byName["平台组"]
+	if !hasDev || !hasPlatform {
+		t.Fatalf("nodes = %v, want 研发部 (ancestor) and 平台组 (selected)", byName)
+	}
+	if platform.ParentID == nil || *platform.ParentID != dev.ID {
+		t.Fatalf("平台组 parent = %v, want 研发部 %d", platform.ParentID, dev.ID)
+	}
+	if _, ok := byName["市场部"]; ok {
+		t.Fatal("an unrelated department was created")
+	}
+	stats := payload["stats"].(map[string]any)
+	if stats["departments_selected"].(float64) != 1 || stats["departments_ancestors"].(float64) != 1 {
+		t.Fatalf("stats = %v, want 1 selected + 1 ancestor", stats)
+	}
+	// 王五 (研发部 + 平台组) is in scope because they belong to a selected department.
+	ran, err := f.db.GetAccount(context.Background(), ranID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ran.FeishuOpenID != "ou_wang" {
+		t.Fatalf("a person of the selected department was not merged: %+v", ran)
+	}
+	// 赵六 (市场部 only) stays untouched: an ancestor is not a scope widening.
+	acme, err := f.db.GetAccount(context.Background(), acmeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acme.FeishuOpenID != "" {
+		t.Fatalf("a person outside the selection was merged: %+v", acme)
+	}
+}
+
+// The company-level people (no department at all) follow the virtual root "0".
+func TestFeishuSyncCompanyLevelPeopleFollowTheRoot(t *testing.T) {
+	f := newOrgFeishuFixture(t)
+	_, _, bossID := f.seedLocal(t)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	_, payload := f.callJSON(t, http.MethodPost, "/admin/api/v1/org/feishu/sync", `{"department_ids":["0"]}`, cookie)
+	stats := payload["stats"].(map[string]any)
+	if stats["departments_selected"].(float64) != 1 || stats["departments"].(float64) != 0 {
+		t.Fatalf("stats = %v, want the root selected but no department node in the run", stats)
+	}
+	if stats["users_in_scope"].(float64) != 1 {
+		t.Fatalf("users_in_scope = %v, want only the company-level person", stats["users_in_scope"])
+	}
+	if got := payload["created_nodes"].([]any); len(got) != 0 {
+		t.Fatalf("the virtual root must not create a node: %v", got)
+	}
+	// 老板 was already in sync, so nothing changed — the point is that they are *in scope*.
+	boss, err := f.db.GetAccount(context.Background(), bossID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boss.FeishuOpenID != "ou_root" || boss.FeishuBoundBy != "sync" {
+		t.Fatalf("the company-level binding was disturbed: %+v", boss)
+	}
+}
+
+// The preview reports the same scope the sync would act on, per department and per person.
+func TestFeishuDirectoryPreviewMarksTheSelection(t *testing.T) {
+	f := newOrgFeishuFixture(t)
+	f.seedLocal(t)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	status, payload := f.callJSON(t, http.MethodGet,
+		"/admin/api/v1/org/feishu/directory?departments=od_b", "", cookie)
+	if status != http.StatusOK {
+		t.Fatalf("preview status=%d payload=%v", status, payload)
+	}
+	stats := payload["stats"].(map[string]any)
+	if stats["departments"].(float64) != 1 || stats["departments_to_create"].(float64) != 1 {
+		t.Fatalf("stats = %v, want only 市场部 in the run", stats)
+	}
+	if stats["users_in_scope"].(float64) != 2 || stats["users_out_of_scope"].(float64) != 3 {
+		t.Fatalf("stats = %v, want two people in scope", stats)
+	}
+	if stats["memberships_to_add"].(float64) != 1 {
+		t.Fatalf("memberships_to_add = %v, want the one in-scope membership", stats["memberships_to_add"])
+	}
+
+	_, marketLocal := departmentLocal(t, payload, "od_b")
+	if marketLocal["will_create"] != true {
+		t.Fatalf("市场部 local = %v", marketLocal)
+	}
+	// The unselected department is reported as unselected and not part of the run.
+	for _, raw := range payload["departments"].([]any) {
+		department := raw.(map[string]any)
+		want := department["id"] == "od_b"
+		if department["selected"] != want {
+			t.Fatalf("department %v selected = %v, want %v", department["id"], department["selected"], want)
+		}
+		if department["included"] != want {
+			t.Fatalf("department %v included = %v, want %v", department["id"], department["included"], want)
+		}
+	}
+	if userMatch(t, payload, "ou_wang")["in_scope"] != false {
+		t.Fatal("a person outside the selection is marked in scope")
+	}
+	if userMatch(t, payload, "ou_zhao")["in_scope"] != true {
+		t.Fatal("a person inside the selection is marked out of scope")
+	}
+
+	// A department id the directory does not know is reported, not silently dropped.
+	status, payload = f.callJSON(t, http.MethodGet,
+		"/admin/api/v1/org/feishu/directory?departments=od_b&departments=od_ghost", "", cookie)
+	if status != http.StatusOK {
+		t.Fatalf("preview status=%d", status)
+	}
+	unknown := payload["unknown_department_ids"].([]any)
+	if len(unknown) != 1 || unknown[0] != "od_ghost" {
+		t.Fatalf("unknown_department_ids = %v, want [od_ghost]", unknown)
+	}
+}
+
+// An empty selection is refused instead of doing nothing quietly, and a selection nobody
+// recognizes is refused too.
+func TestFeishuSyncRefusesEmptyOrUnknownSelection(t *testing.T) {
+	f := newOrgFeishuFixture(t)
+	f.seedLocal(t)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	if status, payload := f.callJSON(t, http.MethodPost, "/admin/api/v1/org/feishu/sync",
+		`{"department_ids":[]}`, cookie); status != http.StatusBadRequest {
+		t.Fatalf("empty selection status=%d payload=%v, want 400", status, payload)
+	}
+	if status, payload := f.callJSON(t, http.MethodPost, "/admin/api/v1/org/feishu/sync",
+		`{"department_ids":["od_ghost"]}`, cookie); status != http.StatusBadRequest {
+		t.Fatalf("unknown selection status=%d payload=%v, want 400", status, payload)
+	}
+	// Nothing was written by either refusal.
+	if nodes, err := f.db.ListOrgNodes(context.Background()); err != nil || len(nodes) != 0 {
+		t.Fatalf("a refused sync wrote nodes: %v %v", nodes, err)
+	}
+
+	// Omitting the body is still "sync everything" (the M70 semantics, and what MCP sends).
+	status, payload := f.callJSON(t, http.MethodPost, "/admin/api/v1/org/feishu/sync", "", cookie)
+	if status != http.StatusOK {
+		t.Fatalf("bodyless sync status=%d payload=%v", status, payload)
+	}
+	if got := len(payload["created_nodes"].([]any)); got != 3 {
+		t.Fatalf("bodyless sync created %d nodes, want all three departments", got)
+	}
+	stats := payload["stats"].(map[string]any)
+	if stats["departments_selected"].(float64) != 0 || stats["departments_ancestors"].(float64) != 0 {
+		t.Fatalf("a full sync must not report a selection: %v", stats)
+	}
+}

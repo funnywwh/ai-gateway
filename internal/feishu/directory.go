@@ -43,11 +43,12 @@ const (
 	directoryMaxPages = 40
 	directoryMaxDepts = 500
 
-	// rootDepartmentID is how Feishu addresses "the company itself": it is the parent of
+	// RootDepartmentID is how Feishu addresses "the company itself": it is the parent of
 	// every top-level department and can hold members of its own. It is walked for its
 	// members but never reported as a department — it has no name and cannot become an
-	// org node.
-	rootDepartmentID = "0"
+	// org node. The sync's department selection uses it as the switch for those
+	// company-level people, who belong to no department at all.
+	RootDepartmentID = "0"
 
 	// tokenExpiryMargin retires a cached tenant access token shortly before Feishu does,
 	// so a sync that starts near the end of a token's life does not fail halfway through.
@@ -357,7 +358,7 @@ func (c *Client) Directory(ctx context.Context, opts DirectoryOptions) (Director
 		name         string
 		depth        int
 	}
-	queue := []pending{{id: rootDepartmentID, depth: -1}}
+	queue := []pending{{id: RootDepartmentID, depth: -1}}
 
 	mergeUser := func(person contactUser, departmentID string) {
 		if strings.TrimSpace(person.OpenID) == "" {
@@ -461,7 +462,7 @@ func (c *Client) Directory(ctx context.Context, opts DirectoryOptions) (Director
 // departmentKey maps the virtual root to "": a department whose parent is the root is a
 // top-level department, and a top-level department has no local parent node.
 func departmentKey(id string) string {
-	if id == rootDepartmentID {
+	if id == RootDepartmentID {
 		return ""
 	}
 	return id

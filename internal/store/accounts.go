@@ -188,7 +188,8 @@ func (db *DB) SetAccountStatus(ctx context.Context, id int64, status string) err
 // owned by the directory sync, so it is written by one statement no other write path can
 // touch — UpsertAccount deliberately does not list the feishu_* columns, which is what keeps
 // a console edit from silently clearing the mapping. The unique index over
-// NULLIF(feishu_open_id, '') makes "one Feishu person, one account" a database invariant.
+// feishu_open_id (empty values excluded, so unbound accounts never collide) makes
+// "one Feishu person, one account" a database invariant.
 func (db *DB) BindAccountFeishu(ctx context.Context, id int64, binding domain.FeishuBinding) error {
 	if binding.OpenID == "" {
 		return domain.ErrInvalidRequest("a Feishu binding requires an open_id")

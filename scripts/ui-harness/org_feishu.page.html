@@ -108,16 +108,52 @@ window.fetch = async (url, options) => {
           // 没有名字就既不能按名匹配、也不能建节点：本地侧只能是"跳过"。
           local: { ...department.local, matched: '', will_pin: false, will_create: false, skipped: true },
         }));
+    // 作用域（设计 §12）：stub 里照服务端的规则算一遍——勾选 + 祖先补建 + 人员按自己的部门判定，
+    // 这样界面断言的"服务端数字"不是写死的常量，而是跟着勾选变的。
+    const params = new URLSearchParams(query.startsWith('?') ? query.slice(1) : '');
+    const requested = params.getAll('departments').join(',').split(',').map((v) => v.trim()).filter(Boolean);
+    const all = requested.length === 0;
+    const selected = new Set(requested);
+    const known = new Set(['0', ...departments.map((d) => d.id)]);
+    const unknown = [...selected].filter((id) => !known.has(id)).sort();
+    const parentOf = new Map(departments.map((d) => [d.id, d.parent_id || '0']));
+    const included = new Set(all ? departments.map((d) => d.id) : [...selected]);
+    for (const id of selected) {
+      for (let parent = parentOf.get(id); parent && parent !== '0'; parent = parentOf.get(parent)) included.add(parent);
+    }
+    const scopedDepartments = departments.map((department) => ({
+      ...department,
+      selected: all || selected.has(department.id),
+      included: all || included.has(department.id),
+    }));
+    const personInScope = (person) => {
+      if (all) return true;
+      if (!person.department_ids.length) return selected.has('0');
+      return person.department_ids.some((id) => selected.has(id));
+    };
+    const users = USERS.map((person) => (names ? person : { ...person, name: '' }))
+      .map((person) => ({ ...person, in_scope: personInScope(person) }));
+    const inScope = users.filter((person) => person.in_scope);
+    const runDepartments = scopedDepartments.filter((department) => department.included);
+    const stats = {
+      departments: runDepartments.length,
+      departments_selected: all ? 0 : [...selected].filter((id) => known.has(id)).length,
+      departments_ancestors: runDepartments.filter((department) => !department.selected).length,
+      departments_to_create: names ? runDepartments.filter((d) => d.local.will_create).length : 0,
+      departments_to_pin: names ? runDepartments.filter((d) => d.local.will_pin).length : 0,
+      departments_skipped: names ? 0 : runDepartments.length,
+      users: users.length,
+      users_in_scope: inScope.length,
+      users_out_of_scope: users.length - inScope.length,
+      users_matched: inScope.filter((person) => person.account).length,
+      users_unmatched: inScope.filter((person) => !person.account).length,
+      users_already_synced: 0,
+      memberships_to_add: names ? inScope.reduce((sum, person) => sum + (person.account ? person.join_nodes.length : 0), 0) : 0,
+    };
     return ok({
       fetched_at: '2026-09-22T08:30:00Z', cached: !query.includes('refresh'), names_available: names,
-      truncated: false, departments,
-      users: USERS.map((person) => names ? person : { ...person, name: '' }),
-      users_truncated: false,
-      stats: names
-        ? { departments: 3, departments_to_create: 2, departments_to_pin: 1, departments_skipped: 0,
-            users: 5, users_matched: 3, users_unmatched: 2, users_already_synced: 1, memberships_to_add: 2 }
-        : { departments: 3, departments_to_create: 0, departments_to_pin: 0, departments_skipped: 3,
-            users: 5, users_matched: 2, users_unmatched: 3, users_already_synced: 1, memberships_to_add: 0 },
+      truncated: false, departments: scopedDepartments, users, users_truncated: false,
+      stats, selection: requested, unknown_department_ids: unknown,
       warnings: names ? [] : ['names_unavailable'],
     });
   }
@@ -163,6 +199,17 @@ const treeLabels = () => [...document.querySelectorAll('.feishu-sync-tree .tree-
   .map((node) => node.textContent);
 const userRows = () => [...document.querySelectorAll('.feishu-user')];
 const userNames = () => userRows().map((row) => row.querySelector('.feishu-user-name').textContent);
+
+const deptRow = (label) => [...document.querySelectorAll('.feishu-sync-tree .tree-row')]
+  .find((row) => row.querySelector('.tree-label').textContent === label);
+const deptBox = (label) => deptRow(label).querySelector('input[type="checkbox"]');
+// 选择变化是防抖 300 ms 后重取预览：断言前必须真等一会儿，settle() 只转微任务。
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const treeRowText = (label) => {
+  const row = [...document.querySelectorAll('.feishu-sync-tree .tree-row')]
+    .find((candidate) => candidate.querySelector('.tree-label').textContent === label);
+  return row ? row.textContent : '';
+};
 
 async function openOrg(role) {
   await renderOrg({
@@ -262,15 +309,83 @@ try {
       search.dispatchEvent(new Event('input'));
       await settle();
 
+      // --- 同步范围（M70 §12：可以选择部门）-------------------------------------
+      //
+      // 这里刻意**不**等待防抖（300 ms）：harness 的浏览器在截图那一刻就退出，任何 setTimeout
+      // 都跑不到。所以断言分两类——勾选的**同步效果**（标签、置灰、祖先标记）看客户端立即重绘，
+      // 服务端数字（范围统计、in_scope）通过在每次改动后点一次「刷新」拿回来；那条请求的 URL
+      // 同时也证明了作用域真的发给了服务端。
+      const scopeLabelEl = () => document.querySelector('.feishu-scope-label');
+      // 「刷新」必须限定在弹窗里找：组织架构页自己也有一个「刷新」，find() 拿的是文档里第一个。
+      const refresh = async () => { find('刷新', dialog()).click(); await settle(); };
+
+      checks.scopeBoxesPerRow = ['飞书根组织', '研发部', '市场部', '平台组']
+        .every((label) => !!deptBox(label));
+      checks.scopeSeededAllChecked = ['飞书根组织', '研发部', '市场部', '平台组']
+        .every((label) => deptBox(label).checked === true);
+      checks.scopeLabelShowsAll = scopeLabelEl().textContent.includes('已勾选 4/4');
+      checks.scopeSecondReadCarriesSelection = (window.__calls || [])
+        .some((call) => call.includes('/org/feishu/directory') && call.includes('departments='));
+
+      // 取消勾选「平台组」与「研发部」：范围外的 3 个人被标出来，服务端数字也跟着变。
+      deptBox('平台组').click();
+      deptBox('研发部').click();
+      checks.scopeLabelFollows = scopeLabelEl().textContent.includes('已勾选 2/4');
+      await refresh();
+      // 范围外的置灰来自服务端的 in_scope（"这次不写"与"未匹配"必须是两件事），所以刷新之后再断言。
+      // 范围 {0, od_b}：公司层 1 人 + 市场部 2 人在范围内，研发部/平台组的 2 人不在。
+      checks.scopeMarksOutOfScopePeople = document.querySelectorAll('.feishu-user.out-of-scope').length === 2;
+      checks.scopeExplainsOutOfScope = [...document.querySelectorAll('.feishu-user-scope')]
+        .every((node) => node.textContent.includes('不在本次同步范围'));
+      const scoped = (window.__calls || [])
+        .filter((call) => call.includes('/org/feishu/directory') && call.includes('departments=')).pop();
+      checks.scopeReadDroppedDepartments = !!scoped && !scoped.includes('od_a');
+      checks.scopeStatsFollow = document.querySelector('.feishu-sync-subtitle').textContent.includes('人员 3/5');
+
+      // 祖先补建：只勾「平台组」时，父部门「研发部」被标成"为层级补建"，但它的人员仍不在范围内。
+      find('清空').click();
+      checks.scopeClearDisablesSync = find('同步').disabled === true
+        && scopeLabelEl().textContent.includes('已勾选 0/4');
+      deptBox('平台组').click();
+      await refresh();
+      checks.ancestorMarked = treeRowText('研发部').includes('为层级补建');
+      checks.ancestorIncludedCount = document.querySelector('.feishu-sync-subtitle').textContent.includes('含为层级补建 1 个');
+      checks.ancestorPeopleOutOfScope = document.querySelectorAll('.feishu-user.out-of-scope').length === 3;
+
+      // 「全选」回到全量；「连同子部门」把已勾选部门的子孙一并勾上（一次性动作）。
+      find('全选').click();
+      checks.selectAllChecksEveryone = ['飞书根组织', '研发部', '市场部', '平台组']
+        .every((label) => deptBox(label).checked === true);
+      await refresh();
+      checks.selectAllRestoresEveryone = document.querySelectorAll('.feishu-user.out-of-scope').length === 0;
+      find('清空').click();
+      deptBox('研发部').click();
+      find('连同子部门').click();
+      checks.withChildrenChecksDescendants = deptBox('平台组').checked === true
+        && deptBox('市场部').checked === false;
+      await refresh();
+      const narrowed = (window.__calls || [])
+        .filter((call) => call.includes('/org/feishu/directory') && call.includes('departments=')).pop();
+      checks.narrowedReadCarriesSubtree = !!narrowed && narrowed.includes('od_a1') && !narrowed.includes('od_b');
+
       // 「同步」必须二次确认，确认后才发 POST，并把 refresh=true 的重新预览接上。
       find('同步', dialog()).click();
       await settle();
       checks.syncConfirmShown = modalRoot().textContent.includes('执行一次飞书同步');
       checks.syncConfirmNamesImpact = modalRoot().textContent.includes('标签会被整棵子树继承');
+      // 确认框里的数字必须是**本次勾选范围**的数字（这正是预览也要带选择的原因）。
+      checks.syncConfirmNamesScope = modalRoot().textContent.includes('本次范围：已勾选 2 个节点');
+      checks.syncConfirmNamesOutOfScope = modalRoot().textContent.includes('范围外的 3 人不动');
       find('确认').click();
       await settle();
       const syncCall = (window.__calls || []).find((call) => call.startsWith('POST ') && call.includes('/org/feishu/sync'));
       checks.syncPosted = !!syncCall;
+      const syncBody = (window.__sent || []).filter((call) => call.path === '/org/feishu/sync').pop();
+      let syncSelection = null;
+      try { syncSelection = JSON.parse(syncBody.body).department_ids; } catch (err) { syncSelection = null; }
+      // 上一步只勾了「研发部 + 平台组」（连同子部门），POST 必须照这个范围发。
+      checks.syncBodyCarriesSelection = Array.isArray(syncSelection)
+        && syncSelection.slice().sort().join(',') === 'od_a,od_a1';
       checks.syncToast = [...document.querySelectorAll('.toast')].some((node) => node.textContent.includes('同步完成'));
       checks.reloadedAfterSync = (window.__calls || []).some((call) => call.includes('/org/feishu/directory') && call.includes('refresh=true'));
 
