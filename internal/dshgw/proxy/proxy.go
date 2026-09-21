@@ -435,26 +435,21 @@ func (p *Proxy) prepareLogin(r *http.Request, tenant registry.Tenant, submittedK
 	}
 }
 
-// stopSignedOutTenants stops the dsh of every tenant whose last session this logout revoked
-// (M69). A tenant that still has a live session anywhere keeps its worker: signing out in one
-// window must not kill a turn somebody is running in another.
+// stopSignedOutTenants stops the dsh of every tenant this logout revoked a session for (M69).
+//
+// It stops unconditionally, and the deployment host is why: a browser that closed its tabs
+// leaves a still-valid session behind for the rest of the TTL, so "nobody is left in this
+// tenant" is not something a session count can answer — the operator's own tenant had sixteen
+// live sessions, most of them days old, which would have kept its dsh running long after signing
+// out. Signing out means the tenant's dsh goes away; a second window of the same person (a tenant
+// is one account) loses it too and reconnects by signing in again.
 func (p *Proxy) stopSignedOutTenants(r *http.Request, tenants []string) {
 	if p.LogoutStop == nil || len(tenants) == 0 {
 		return
 	}
 	for _, name := range tenants {
-		remaining, err := p.Sessions.CountTenant(name)
-		if err != nil {
-			p.log().Error("counting a tenant's remaining sessions failed", "tenant", name, "error_type", fmt.Sprintf("%T", err))
-			continue
-		}
-		if remaining > 0 {
-			p.log().Info("tenant dsh kept running: another session is still signed in", "tenant", name, "sessions", remaining)
-			p.audit(r, name, "logout_worker_kept", "another session is still signed in", http.StatusSeeOther)
-			continue
-		}
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), logoutStopTimeout)
-		err = p.LogoutStop.StopSignedOut(ctx, name)
+		err := p.LogoutStop.StopSignedOut(ctx, name)
 		cancel()
 		if err != nil {
 			// The browser's session is already gone, so the logout itself succeeded; a worker
@@ -463,8 +458,8 @@ func (p *Proxy) stopSignedOutTenants(r *http.Request, tenants []string) {
 			p.audit(r, name, "logout_worker_stop_failed", fmt.Sprintf("%T", err), http.StatusSeeOther)
 			continue
 		}
-		p.log().Info("tenant dsh stopped: its last session signed out", "tenant", name)
-		p.audit(r, name, "logout_worker_stop", "last session signed out", http.StatusSeeOther)
+		p.log().Info("tenant dsh stopped on logout", "tenant", name)
+		p.audit(r, name, "logout_worker_stop", "logout", http.StatusSeeOther)
 	}
 }
 
@@ -505,13 +500,19 @@ func (p *Proxy) logout(w http.ResponseWriter, r *http.Request) {
 	revoked := make([]string, 0, len(tenants))
 	for _, t := range tenants {
 		for _, cookie := range r.Cookies() {
-			if cookie.Name == p.Config.SessionCookieName(t.Name) {
-				if err := p.Sessions.Delete(cookie.Value); err != nil {
-					p.log().Error("revoke browser session failed", "error_type", fmt.Sprintf("%T", err))
-					http.Error(w, "logout unavailable; please retry", http.StatusServiceUnavailable)
-					return
-				}
+			if cookie.Name != p.Config.SessionCookieName(t.Name) {
+				continue
+			}
+			// A tenant counts as signed out only when the session really belonged to it. The
+			// stop below is triggered by this list, and a fabricated cookie name must not be
+			// able to take somebody else's dsh down.
+			if session, err := p.Sessions.Get(cookie.Value); err == nil && session.Tenant == t.Name {
 				revoked = append(revoked, t.Name)
+			}
+			if err := p.Sessions.Delete(cookie.Value); err != nil {
+				p.log().Error("revoke browser session failed", "error_type", fmt.Sprintf("%T", err))
+				http.Error(w, "logout unavailable; please retry", http.StatusServiceUnavailable)
+				return
 			}
 		}
 	}

@@ -4374,8 +4374,12 @@ sshfs 缺陷仍未关闭。
       取模型，不用登录提交的那把）、D3（每次登录同步；失败只告警不阻断登录）、D4（登录确保 worker 在跑，
       已在跑不重启）、D5（退出只在"该租户无其它存活会话"时停；停 worker **不写** `suspended`）、
       D7（平台段为空 = 删平台段、留租户段）、D8（不改 dshgw 重启后的启动策略）、
-      D9（"不碰宿主机 settings"落成可执行断言）
-- [x] `session.Store.CountTenant`（`internal/dshgw/session/session.go`）：未过期会话的按租户计数
+      D9（"不碰宿主机 settings"落成可执行断言）。**D5 在部署当天按真机数据修正为"退出即无条件停
+      worker"**（初版"最后一个会话退出才停"被判无效：`dsh-tenant` 有 16 个存活会话、多数是几天前的，
+      TTL 7 天 → 退出后 dsh 会继续跑几天），并补上"只对这次真的撤销了会话的租户动手"
+      （`Sessions.Get` + 租户匹配），见设计文档 §9 差异表
+- [x] ~~`session.Store.CountTenant`~~：D5 修正后没有消费者，已连同其单测一并删除（不留死接口）；
+      退出改为"这次真的撤销了会话的租户"列表驱动
 - [x] `tenancy.Manager.EnsureRunning`（`internal/dshgw/tenancy/manager.go`）：未跑且未被运维停用则
       `startWorker`（内部先跑模型 hook）+ probe；已在跑返回 `false` 不重启；`suspended` 直接报错不拉起
 - [x] `tenancy.Manager.StopForLogout`：停 worker 但**不写** `suspended`，清理顺序同 `StopWorker`
@@ -4384,16 +4388,17 @@ sshfs 缺陷仍未关闭。
       保留其它 refs 与全部 records；值相同不写；版本非 1 报错。渲染器与轮换改为引用同一常量
 - [x] `proxy.LoginPrepare`（取代 `KeyAdopter` 字段）：门户 Key 登录与飞书登录共用 `p.prepareLogin`；
       失败只告警 + 审计 `login_prepare_failed`，会话照发（`loginPrepareTimeout = 45s`）
-- [x] `proxy.LogoutStop`：门户 `POST /logout` 与租户侧栏 `POST /dshgw/logout/` 在"该租户已无其它
-      存活会话"时调用；有剩余会话则审计 `logout_worker_kept`；停失败审计 `logout_worker_stop_failed`
-      且退出仍 303（`logoutStopTimeout = 30s`）
+- [x] `proxy.LogoutStop`：门户 `POST /logout` 与租户侧栏 `POST /dshgw/logout/` **无条件**停该租户的
+      dsh（审计 `logout_worker_stop`；停失败 `logout_worker_stop_failed`，退出仍 303，
+      `logoutStopTimeout = 30s`）；只对这次真的撤销了会话的租户动手
 - [x] `cmd/dshgw`：新增 `login_prepare.go` 的 `managerOps.PrepareLogin`（采纳无 key 租户的登录 key →
       读存储 worker key → `/v1/models` → `EnsureProvisioned`/`SyncModels` → `EnsureCredentialRef`
       → `EnsureRunning`）与 `StopSignedOut`；`serve.go` 接线 `LoginPrepare`/`LogoutStop`；
       `managerOps.validator` 由 `*aigw.Client` 改为 `keyValidator` 接口以便无 HTTP 测试
-- [x] 单测（新增/改写，见设计文档 §9 列表）：session 计数、凭据引用合并与幂等、`EnsureRunning`
+- [x] 单测（新增/改写，见设计文档 §9 列表）：凭据引用合并与幂等、`EnsureRunning`
       的两条语义与挂起拒绝、`StopForLogout` 不写 suspended + 再登录能起、proxy 两条登录路径都
-      prepare（飞书提交 key 为空）+ 失败不阻断 + 多会话不停 + stopper 报错仍 303 + 租户侧栏退出、
+      prepare（飞书提交 key 为空）+ 失败不阻断 + 有其它会话也照停 + 伪造 cookie 名不停别人的 dsh +
+      stopper 报错仍 303 + 租户侧栏退出、
       `PrepareLogin` 用存储 key/保留租户段/恢复凭据/HOME 不被创建、aigw 失败不改文件、挂起不复活
 - [x] 测试：`go test ./internal/dshgw/... ./cmd/dshgw ./internal/arch` 全绿
 

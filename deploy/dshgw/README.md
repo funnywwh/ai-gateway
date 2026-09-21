@@ -615,9 +615,12 @@ no-store 会让控制台每次打开都重新下载。
 （`<state_dir>/tenant-config/<租户>/gateway.key`）取模型，不是登录时提交的那把 key；
 aigw 不可达或拒绝时**只告警、不阻断登录**，也不会改文件。
 
-**退出即停**：门户 `POST /logout` 或租户侧栏 `POST /dshgw/logout/` 之后，若该租户**已无其它
-存活会话**，则停掉它的 dsh worker（SIGTERM → 超时 SIGKILL，并清理 browser-fs 工作区）；
-还有别的会话在用时保持运行。**停 worker 不写 `suspended`**——那是控制台「启用/停用」的意图，
+**退出即停**：门户 `POST /logout` 或租户侧栏 `POST /dshgw/logout/` 之后，**该租户的 dsh worker 被
+停掉**（SIGTERM → 超时 SIGKILL，并清理 browser-fs 工作区），审计事件 `logout_worker_stop`。
+刻意**不看**"是否还有别的会话"：浏览器关掉标签页后会话在 TTL 内依然有效，按会话数判断等于
+退出后 dsh 还要跑好几天（本机实测某租户 16 个存活会话，多数是几天前的）。代价是同一个人的
+另一个窗口也会失去 dsh，重新登录即可。只对**这次退出真正撤销了会话的租户**动手。
+**停 worker 不写 `suspended`**——那是控制台「启用/停用」的意图，
 写了会让 dshgw 重启后不再拉起这个租户。下次登录会重新同步并把它启动起来（冷启动等待 2–4s，
 登录请求内完成，所以跳转过去就能用）。
 
@@ -628,7 +631,7 @@ aigw 不可达或拒绝时**只告警、不阻断登录**，也不会改文件�
 journalctl --user -u dshgw-verify -n 200 | grep 'prepared for login'
 
 # 谁把 dsh 停掉了：审计事件（门户与租户侧栏都在这里）
-grep -E 'logout_worker_(stop|kept|stop_failed)|login_prepare_failed' \
+grep -E 'logout_worker_(stop|stop_failed)|login_prepare_failed' \
   data/dshgw-verify/state/audit.jsonl | tail
 
 # worker 现在在不在（进程 + worker 端口）
@@ -641,7 +644,8 @@ pgrep -af 'dsh-0.1.2-rc.1/lib/bin.js web' ; ss -ltnp | grep 184
 |---|---|
 | 登录后租户页 502 / 空白 | 该租户的 worker 没起来：看 `prepared for login` 那行是否报错（aigw 不可达、key 被 401、模板缺失），日志里有 `worker output` 片段 |
 | 退出后租户端口仍监听 | 端口始终监听（网关自己的 edge listener），要看的是**worker 进程**是否消失；端口监听不代表 dsh 还在跑 |
-| 退出后 worker 仍在 | 该租户还有别的会话（另一个浏览器/窗口）——审计里是 `logout_worker_kept` |
+| 退出后 worker 仍在 | 看审计 `logout_worker_stop` 是否出现：没有就是停失败（`logout_worker_stop_failed`，日志里有原因），或这次退出没有撤销任何该租户的会话 |
+| 另一个窗口突然 502 | 该租户的 dsh 已被那次退出停掉：重新登录即恢复（这是"退出即停"的既定代价） |
 | 想无条件停 | 用控制台「停用」或 admin 通道 `tenant stop`（会写 `suspended`，重启后也不拉起） |
 | 租户页面把模型/密钥删了 | 下次登录自动恢复平台段；租户自建的 provider 不受影响 |
 

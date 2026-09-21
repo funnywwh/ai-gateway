@@ -113,18 +113,24 @@ kind: "design"
   `POST /v1/dshgw/authorize` 拒掉）。
 - 启动失败不阻断登录（页面会 502，直到下次登录或运维介入），但日志与审计留下原因。
 
-### D5 退出的停 = 只在「该租户没有其它存活会话」时停
+### D5 退出的停 = 该租户的 worker 无条件停掉（2026-09-21 部署当天修正）
 
-- 门户 `POST /logout`：对本浏览器被撤销会话的每个租户逐个判定；
-  租户侧栏 `POST /dshgw/logout/`：只判该租户。
-- 判定依据：session store 新增 `CountTenant(tenant)`（未过期会话计数）。
-- **为什么不无条件停**：同一租户的另一个浏览器/窗口仍在线时，无条件停会杀掉别人正在进行的回合。
-  dshgw 里租户 = 账号（一个人），所以"最后一个人退出才停"才是"用户退出"的正确含义。
-  操作者要无条件停，是 admin 通道的「停用」/`tenant stop`（已有，且带 `suspended` 意图）。
+- 门户 `POST /logout`：对本浏览器被撤销会话的每个租户逐个停；
+  租户侧栏 `POST /dshgw/logout/`：只停该租户。
+- 只对**这次退出真正撤销了会话的租户**动手：判定用 `Sessions.Get(cookie)` 必须成功且
+  `session.Tenant` 等于该租户——否则一个伪造的 cookie 名就能把别人的 dsh 打掉。
+- **为什么不是"最后一个会话退出才停"（初版设计，实现后被真机数据否掉）**：浏览器关掉标签页后
+  会话在 TTL（本机 7 天）内依然有效，所以"这个租户已经没人了"用会话数判不出来。本机实测：
+  `dsh-tenant` 有 **16 个存活会话**、其中 15 个是 09-18～09-20 的旧会话，TTL 还剩 4 天——
+  "最后会话"规则等于用户点完退出后 dsh 还要跑好几天，直接违背需求。
+  代价：同一个人**另一个窗口**的 dsh 也会被停掉（租户 = 账号 = 一个人），那个窗口重新登录即可；
+  这个代价写进了规格（`docs/dshgw.md` §3b）与部署手册（§12b），并在审计里可见。
 - 停的实现：`WorkerRunner.Stop`（SIGTERM → 超时 SIGKILL，含 scope 回收），**不写** `suspended`——
-  写进去会（a）让 dshgw 重启后不再拉起该租户，（b）把租户生命周期与运维的"启用/停用"状态混在一个
-  字段里。清理顺序与 `StopWorker` 一致：先停进程，再 `BrowserWorkspaces.DropTenant`（关掉 browser-fs
-  工作区、卸掉挂载）。
+  写进去会（a）让 dshgw 重启后不再拉起该租户，（b）把租户生命周期与运维的"启用/停用"状态混在
+  一个字段里。清理顺序与 `StopWorker` 一致：先停进程，再 `BrowserWorkspaces.DropTenant`（关掉
+  browser-fs 工作区、卸掉挂载）。
+- 结果：`session.Store.CountTenant` 这个初版为"最后会话"加的方法**没有消费者**，实现里删掉了
+  （不留死接口）。
 
 ### D6 停发生在写响应之前，但有超时上界；停失败不影响退出成功
 
@@ -217,10 +223,10 @@ type LogoutStop interface {
 ```
 校验 Origin / 方法
   → Sessions.Delete(cookie 对应的会话)
-  → 对被撤销会话的每个租户：CountTenant(tenant) == 0 ?
-        ├─ 是 → LogoutStop.StopSignedOut(ctx, tenant)
-        │        → Manager.StopForLogout → Runner.Stop（SIGTERM→SIGKILL）+ BrowserWorkspaces.DropTenant
-        └─ 否 → 保持运行（审计 logout_worker_kept："还有别的会话在用"）
+  → 对"这次真的撤销了会话"的每个租户（Sessions.Get 成功且租户匹配）：
+        LogoutStop.StopSignedOut(ctx, tenant)
+          → Manager.StopForLogout → Runner.Stop（SIGTERM→SIGKILL）+ BrowserWorkspaces.DropTenant
+        （审计 logout_worker_stop；失败则 logout_worker_stop_failed，但不影响退出本身）
   → 清 cookie → 303 回门户
 ```
 
@@ -236,7 +242,7 @@ type LogoutStop interface {
 | 授权模型列表为空 | D7：清空平台段，保留租户段与凭据 ref |
 | `settings.yaml` / `.credentials.yaml` 不存在 | 走现有 `EnsureProvisioned` 从零渲染 |
 | 退出时 worker 本来没跑 / 正在停 | 幂等，不算错误，不写审计失败 |
-| 退出时该租户还有别的存活会话 | 不停 worker，审计 `logout_worker_kept` |
+| 退出时该租户还有别的存活会话 | **仍然停**（D5 修正：会话数判不出"没人了"）；另一个窗口重新登录即恢复 |
 | 退出时停 worker 失败/超时 | 告警 + 审计 `logout_worker_stop_failed`，浏览器仍 303（退出本身成功） |
 | 会话 TTL 自然过期（不是点退出） | 不停 worker（本里程碑只覆盖"点退出"） |
 | dshgw / aigw 重启 | D8：按 registry 拉起未停用租户（既有行为） |
@@ -285,6 +291,7 @@ type LogoutStop interface {
 | 项 | 设计 | 实现 | 原因 |
 |---|---|---|---|
 | `EnsureCredentialRef` 签名 | `EnsureCredentialRef(path, key)` | `EnsureCredentialRef(path, ref, value)` + 常量 `AIGWAPIKeyRef` | 渲染器与轮换里本来就有字面量 `"AIGW_API_KEY"`，抽成常量后三处（渲染、轮换、登录恢复）同源；多一个 ref 参数不增加调用方负担，却让函数名不撒谎 |
+| **退出的停** | "该租户无其它存活会话时停"（D5 初版） | **无条件停**（仍只动"这次真的撤销了会话"的租户） | 部署当天真机数据否掉了初版：`dsh-tenant` 有 16 个存活会话（15 个是几天前的旧会话），"最后会话"规则等于退出后 dsh 还跑好几天。同时补上"伪造 cookie 名不能停别人的 dsh"（`Sessions.Get` + 租户匹配） |
 | `managerOps.validator` 类型 | 未提 | `*aigw.Client` → `keyValidator` 接口 | 登录钩子的策略（用哪把 key 取模型、失败后文件是否原样）必须能在没有 aigw HTTP 服务的情况下测；接口本来就在 `modelrefresh.go` 里为同一目的存在 |
 | 挂起租户 | "不拉起，日志点名" | `EnsureRunning` 返回错误（含 `suspended` 字样），由调用方告警 | 让"跳过"与"失败"在日志里可区分，且不引入第三个返回值 |
 | 超时 | "有上界" | 具名常量 `loginPrepareTimeout = 45s`、`logoutStopTimeout = 30s` | 上界要能被审阅；两个值分别覆盖"冷启动 + probe"与"worker 慢死 + SIGKILL 回收" |
@@ -295,13 +302,13 @@ type LogoutStop interface {
 
 测试（新增，`go test ./internal/dshgw/... ./cmd/dshgw ./internal/arch` 全绿）：
 
-- `session`：`TestCountTenantCountsOnlyLiveSessionsOfThatTenant`（过期与其它租户不计入、撤销后归零、空租户名报错）
 - `tenancy`：`TestEnsureCredentialRefRestoresThePlatformReferenceOnly`（补齐、幂等不写、轮换跟随、版本非 1 报错）、
   `TestEnsureRunningStartsAStoppedTenantAndLeavesARunningOneAlone`、`TestEnsureRunningRefusesASuspendedTenant`、
   `TestStopForLogoutStopsWithoutSuspending`（幂等 + 再登录能起来）
 - `proxy`：`TestLoginPreparesTheTenantAndSurvivesPreparationFailure`、
   `TestFeishuLoginPreparesTheTenantWithoutAKey`（提交 key 为空）、
-  `TestLogoutStopsTheTenantOnlyWhenItsLastSessionLeaves`（多会话不停）、
+  `TestLogoutStopsTheTenantEvenWithOtherLiveSessions`（有过期风险的旧会话也照停）、
+  `TestLogoutLeavesTenantsItDidNotSignOutAlone`（伪造 cookie 名不停别人的 dsh）、
   `TestLogoutSurvivesAWorkerThatWillNotStop`、`TestTenantLogoutStopsTheTenantWhenItsLastSessionLeaves`
 - `cmd/dshgw`：`TestPrepareLoginAppliesThePlatformSliceFromTheStoredKey`（平台段来自存储 key、
   租户段逐键保留、凭据恢复、worker 起来）、`TestPrepareLoginLeavesTheFilesAloneWhenAigwFails`、

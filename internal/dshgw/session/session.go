@@ -50,9 +50,6 @@ type Store interface {
 	ClearUpstream(token string) error
 	ClearUpstreamIf(token string, generation uint64) (bool, error)
 	DeleteTenant(tenant string) error
-	// CountTenant reports how many unexpired sessions one tenant still holds. Logout reads it
-	// to decide whether the last reader left: the tenant's dsh is stopped only then (M69).
-	CountTenant(tenant string) (int, error)
 }
 
 type diskState struct {
@@ -191,30 +188,6 @@ func (s *FileStore) DeleteTenant(tenant string) error {
 		}
 		return dirty, nil
 	})
-}
-
-// CountTenant reports how many unexpired sessions one tenant still holds.
-//
-// Logout is the caller (M69): a tenant whose last session signed out has its dsh stopped, and
-// one that still has a live session anywhere — another window, another browser — keeps it, so
-// that signing out in one tab cannot kill a turn somebody is running in the other.
-func (s *FileStore) CountTenant(tenant string) (int, error) {
-	if tenant == "" {
-		return 0, errors.New("tenant is required")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.reloadLocked(false); err != nil {
-		return 0, err
-	}
-	now := s.now()
-	count := 0
-	for _, record := range s.records {
-		if record.Tenant == tenant && record.ExpiresAt.After(now) {
-			count++
-		}
-	}
-	return count, nil
 }
 
 func (s *FileStore) SetUpstream(token string, upstream *Upstream) error {

@@ -744,10 +744,11 @@ func TestFeishuLoginPreparesTheTenantWithoutAKey(t *testing.T) {
 	}
 }
 
-// Signing out stops the tenant's dsh once nobody is left in it — and leaves it alone while
-// another session of the same tenant is still signed in, which is the difference between
-// "the user signed out" and "somebody's window closed".
-func TestLogoutStopsTheTenantOnlyWhenItsLastSessionLeaves(t *testing.T) {
+// Signing out stops the tenant's dsh, unconditionally — and that is a decision with a reason
+// recorded in the deployment: a closed browser leaves a valid session behind for the rest of the
+// TTL, so waiting for "the last session" is waiting for days (the host's own tenant had sixteen
+// live sessions, most of them days old).
+func TestLogoutStopsTheTenantEvenWithOtherLiveSessions(t *testing.T) {
 	p, _, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer up.Close()
 	tenant, _ := p.Registry.Get("alice")
@@ -756,33 +757,47 @@ func TestLogoutStopsTheTenantOnlyWhenItsLastSessionLeaves(t *testing.T) {
 		stopped = append(stopped, name)
 		return nil
 	})
-	// Two live sessions for the tenant: the first logout must not stop its dsh.
 	token := issue(t, p, tenant.Name, nil)
-	second := issue(t, p, tenant.Name, nil)
-	logout := func(cookie *http.Cookie) int {
-		req := httptest.NewRequest(http.MethodPost, "/logout", nil)
-		req.Host = "dsh.test:32600"
-		req.Header.Set("Origin", "https://dsh.test:32600")
-		req.RemoteAddr = "198.51.100.9:1234"
-		if cookie != nil {
-			req.AddCookie(cookie)
-		}
-		recorder := httptest.NewRecorder()
-		p.Dispatch().ServeHTTP(recorder, req)
-		return recorder.Result().StatusCode
+	// A second live session of the same tenant (an older browser, a second window) must not hold
+	// the worker open.
+	_ = issue(t, p, tenant.Name, nil)
+	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	req.Host = "dsh.test:32600"
+	req.Header.Set("Origin", "https://dsh.test:32600")
+	req.RemoteAddr = "198.51.100.9:1234"
+	req.AddCookie(&http.Cookie{Name: p.Config.SessionCookieName(tenant.Name), Value: token})
+	recorder := httptest.NewRecorder()
+	p.Dispatch().ServeHTTP(recorder, req)
+	if status := recorder.Result().StatusCode; status != http.StatusSeeOther {
+		t.Fatalf("logout status = %d", status)
 	}
-	name := p.Config.SessionCookieName(tenant.Name)
-	if status := logout(&http.Cookie{Name: name, Value: token}); status != http.StatusSeeOther {
+	if len(stopped) != 1 || stopped[0] != tenant.Name {
+		t.Fatalf("logout did not stop the tenant's dsh: %v", stopped)
+	}
+}
+
+// A logout that carries no session for a tenant must not stop that tenant's dsh: only the
+// tenants whose session this request actually revoked are touched.
+func TestLogoutLeavesTenantsItDidNotSignOutAlone(t *testing.T) {
+	p, _, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer up.Close()
+	var stopped []string
+	p.LogoutStop = stopFunc(func(_ context.Context, name string) error {
+		stopped = append(stopped, name)
+		return nil
+	})
+	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	req.Host = "dsh.test:32600"
+	req.Header.Set("Origin", "https://dsh.test:32600")
+	req.RemoteAddr = "198.51.100.9:1234"
+	req.AddCookie(&http.Cookie{Name: p.Config.SessionCookieName("alice"), Value: "not-a-real-token"})
+	recorder := httptest.NewRecorder()
+	p.Dispatch().ServeHTTP(recorder, req)
+	if status := recorder.Result().StatusCode; status != http.StatusSeeOther {
 		t.Fatalf("logout status = %d", status)
 	}
 	if len(stopped) != 0 {
-		t.Fatalf("a tenant with another live session was stopped: %v", stopped)
-	}
-	if status := logout(&http.Cookie{Name: name, Value: second}); status != http.StatusSeeOther {
-		t.Fatalf("second logout status = %d", status)
-	}
-	if len(stopped) != 1 || stopped[0] != tenant.Name {
-		t.Fatalf("the last session did not stop the tenant's dsh: %v", stopped)
+		t.Fatalf("a logout stopped a tenant it did not sign out: %v", stopped)
 	}
 }
 

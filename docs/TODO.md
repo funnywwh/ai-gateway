@@ -703,8 +703,8 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 
 - [ ] **真机验收（本机三单元）**：① 登录后平台段 = aigw 授权模型且租户段（`permission`/`ui-theme`/
       自建 provider）保留；② 手工删掉 `providers.aigw` 与 `refs.AIGW_API_KEY` → 重新登录恢复；
-      ③ 侧栏退出 → 该租户 dsh 进程消失、`suspended` 仍为 false，再登录即回来；④ 两个浏览器同时在线 →
-      一个退出不停（审计 `logout_worker_kept`）、两个都退出才停；⑤ 全程 `~/.dsh/settings.yaml` 不变
+      ③ 侧栏退出 → 该租户 dsh 进程消失、`suspended` 仍为 false，再登录即回来；④ 伪造的 cookie 名
+      不能停别人的 dsh（审计里没有别的租户的 `logout_worker_stop`）；⑤ 全程 `~/.dsh/settings.yaml` 不变
 - [ ] **修回当前线上偏离**：`dsh-tenant` 的 `providers: {}` + `refs: {}`，以及其余四户只剩
       `ui-onboarding` 的 settings.yaml（用一次登录或 `sync-models` 恢复，并在验收记录里留痕）
 - [ ] **浏览器人工确认（剩下的一步）**：门户登录 → 租户页直接可用（无 502/长时间白屏）；
