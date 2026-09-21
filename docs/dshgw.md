@@ -448,6 +448,43 @@ FUSE 连接上积压 8 个无人应答的请求，3 个进程进入 **D 态**（
 页面只能发出自己租户的 origin（端口模式下两者端口不同），请求会被 403。因此退出由网关在租户 origin 下
 执行同一份会话存储的删除；门户只作为落地页。
 
+## 7e. 宿主目录工作区（M71，无 FUSE）
+
+要挂**宿主机自己的目录**时，不要走 SSH 工作区（§7b）：本机目录不需要 ssh，而且 sshfs 恰好在本机这个
+场景最危险 —— 账号的工作区就在被挂目录里面，于是「挂载树包含挂载点自身」，任何递归读者都会一路走进
+自己的拷贝，把整条挂载的请求堆死（2026-09-21 真机事故：FUSE 连接积压 8 个请求、3 个进程进 D 态、
+该账号全部会话同时卡死；网关现在会直接拒绝这种自嵌套挂载）。
+
+宿主目录工作区改用 bubblewrap 直接 bind，**没有 ssh、没有 sshfs、没有 FUSE**：沙箱里
+`<workspace>/<host_shares.subdir>/<name>`（默认 `host`）就是一个普通目录 —— 本地读、inotify 有效、
+不会有不可中断等待。目录由**运维在配置里声明**，租户不能自助添加（SSH 那半有 open/close 信箱请求，
+这里刻意没有：宿主目录不是租户能选的东西）。
+
+| 面 | 是什么 |
+|---|---|
+| 配置 | `host_shares: {enabled, subdir, shares: [{name, path, read_only, tenants}]}`；默认关闭，`subdir` 默认 `host` |
+| 绑定 | 容器先 `--ro-bind <workspace>/<subdir>`（只读，租户不能替换它）；每份共享一条 `--ro-bind-try`（只读）或 `--bind-try`（可写）`<宿主目录> <目标>`。没有内核挂载，也没有卸载动作 |
+| 镜像 | `<dsh_home>/host-shares.json`（0600）：`{version, tenant, subdir, shares:[{name, target, read_only}]}`。**不含宿主路径** —— 名字到宿主目录的映射是运维的配置，不必出现在租户屏幕上 |
+| 生效时机 | worker 启动时绑定，profile 渲染前由网关建好容器与目标（0700）；改配置后重启该账号 worker 生效 |
+| 权限 | **默认只读**：写授权必须显式写 `read_only: false`。可写共享直接写穿到宿主目录（不是拷贝） |
+
+**规则与拒绝**（配置加载即校验，见 `internal/dshgw/config`）：
+
+- `tenants` 必须非空：没有「所有人」这种默认，一份宿主目录的授权要写明给谁。
+- 共享目录与 `state_dir` **必须不相交**（符号链接解析后再比）：`state_dir` 里有每个账号的工作区、`.dsh`、
+  ssh 私钥与会话记录，一份包含它的共享等于把一个账号的数据交给另一个账号。因此
+  `/home/winger/work/ai_gateway`（本机部署根）会被拒 —— 请声明它下面具体那个子目录。
+- `subdir` 不能与 `ssh_workspaces.mount_subdir`、`workspace_seed` 撞名，必须是可见的单段目录名。
+- 宿主目录被删掉：该份共享在 worker 启动时被跳过并记一行日志，不让账号起不来。
+- 目标路径一律在 `<workspace>/<subdir>` 之内（`Profile` 会再校验一次，越界直接拒绝渲染）。
+
+**打开方式**：账号自己的目录选择器（clamp 在 workspace 内）进入 `<workspace>/<subdir>/<name>` 即可作为
+工作区打开；侧栏面板行尚未做，`host-shares.json` 就是给它的数据源。仍然**别对工作区根跑递归
+`grep -r`/`find`**：合法共享不会死锁，但会把同一棵树读两遍（共享里包含工作区时更明显），很慢。
+
+验证：`go test ./internal/dshgw/sandbox -run HostShare` —— 其中 staging 用**真 bwrap**跑出四条断言：
+只读共享可读不可写、可写共享写穿到宿主目录、宿主路径本身在沙箱内不可见、容器条目只列出声明的共享。
+
 ## 8. 运维与验收
 
 ```bash

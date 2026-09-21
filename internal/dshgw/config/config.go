@@ -204,6 +204,52 @@ type SSHWorkspaces struct {
 	DisableAutoRemount bool `yaml:"disable_auto_remount" json:"disable_auto_remount"`
 }
 
+// HostShares are operator-declared host directories bound straight into a tenant's workspace
+// (M71). No ssh, no sshfs, no FUSE: the worker's bubblewrap profile binds the directory at
+// <workspace>/<subdir>/<name>, so it behaves inside the sandbox like any other directory —
+// local reads, working inotify, and none of the uninterruptible-wait failures a FUSE mount can
+// produce (measured 2026-09-21: an sshfs mount of a directory that contains its own mount point
+// hung every session of an account in a D state no signal could break).
+//
+// Why this exists next to ssh_workspaces: an sshfs mount is the right tool for another machine
+// and the wrong one for this host. A host directory needs no network round trip, and the local
+// case is exactly where sshfs is most dangerous — the workspace lives on that same host, so a
+// mount of any ancestor of it contains itself.
+//
+// Operator-only by construction: there is no mailbox request for a share, because a host
+// directory is not the tenant's to choose. Each share names the tenants that may see it, and is
+// read-only unless the deployment says otherwise.
+type HostShares struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Subdir is the single path segment under each tenant workspace that holds the binds. It
+	// must be visible (a hidden container would be invisible in the account's picker), must not
+	// collide with a workspace seed, and must differ from ssh_workspaces.mount_subdir.
+	Subdir string `yaml:"subdir" json:"subdir"`
+	// Shares is the declared list. Order is display order; names are unique.
+	Shares []HostShare `yaml:"shares" json:"shares"`
+}
+
+// HostShare is one declared host directory.
+type HostShare struct {
+	// Name is the path segment the tenant sees: <workspace>/<subdir>/<name>.
+	Name string `yaml:"name" json:"name"`
+	// Path is the host directory. It is resolved through symlinks at load time, and it must be
+	// disjoint from the state directory: a share that contains it would hand every tenant's
+	// workspace, DSH home, key and session file to whoever sees the share.
+	Path string `yaml:"path" json:"path"`
+	// ReadOnly writes nothing back to the host. It is the default (a write grant is an explicit
+	// `read_only: false`) because this is the host's own file system, not a scratch space.
+	ReadOnly *bool `yaml:"read_only" json:"read_only"`
+	// Tenants lists the accounts that may see the share. It must be non-empty when the feature
+	// is enabled: "everyone" is not a safe default for a host directory.
+	Tenants []string `yaml:"tenants" json:"tenants"`
+}
+
+// EffectiveReadOnly reports whether the share is read-only, defaulting to true.
+func (s HostShare) EffectiveReadOnly() bool {
+	return s.ReadOnly == nil || *s.ReadOnly
+}
+
 // Config is deliberately independent of aigw's internal configuration types.
 type Config struct {
 	PublicHost     string `yaml:"public_host" json:"public_host"`
@@ -294,6 +340,7 @@ type Config struct {
 	TLS               TLSConfig         `yaml:"tls" json:"tls"`
 	Deploy            DeployConfig      `yaml:"deploy" json:"deploy"`
 	SSHWorkspaces     SSHWorkspaces     `yaml:"ssh_workspaces" json:"ssh_workspaces"`
+	HostShares        HostShares        `yaml:"host_shares" json:"host_shares"`
 	BrowserWorkspaces BrowserWorkspaces `yaml:"browser_workspaces" json:"browser_workspaces"`
 	AccountCard       AccountCard       `yaml:"account_card" json:"account_card"`
 	TenantRoot        string            `yaml:"tenant_root" json:"tenant_root"`
@@ -365,6 +412,9 @@ func defaults() Config {
 			// each other's slowest reader.
 			SSHFSOptions: []string{"reconnect", "ServerAliveInterval=15", "ServerAliveCountMax=3", "idmap=user", "max_conns=4"},
 		},
+		// Off, and with a container name that does not collide with the ssh one. A share is a
+		// grant over the host's own file system, so it is declared, never inferred.
+		HostShares: HostShares{Subdir: "host"},
 		Dsh: DshRuntime{
 			// Empty means "ask the environment": DSHGW_NODE / DSHGW_DSH_ROOT, the same
 			// rule aigw's supervised shape uses. The old defaults pointed at /opt/dsh,
@@ -747,6 +797,9 @@ func (c *Config) Validate() error {
 	if err := c.validateSSHWorkspaces(); err != nil {
 		return err
 	}
+	if err := c.validateHostShares(); err != nil {
+		return err
+	}
 	if c.AccountCard.Enabled && strings.TrimSpace(c.Deploy.PluginPath) == "" {
 		// The row is a client plugin shipped beside the picker (deploy.plugin_path names the
 		// plugin directory's sibling), so without it the switch would turn on two routes and
@@ -968,6 +1021,105 @@ func (c *Config) validateSSHWorkspaces() error {
 		}
 	}
 	return nil
+}
+
+// hostShareNameRE is the one shape a share name may take: a visible single path segment. A
+// hidden one would be invisible in the account's own picker, and a name with a separator would
+// escape the container.
+var hostShareNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// validateHostShares checks the operator-declared host directories (M71).
+//
+// Two rules carry the weight here. The container must not collide with the ssh one, because
+// both live directly under the tenant workspace and the account's picker treats every level as a
+// directory. And a share must be disjoint from the state directory: that directory holds every
+// tenant's workspace, DSH home, ssh key and session record, so a share that contains it (or sits
+// inside it) would hand one tenant another tenant's data through a bind the sandbox is meant to
+// make private. Everything else — which host directory, read-only or not, which accounts — is
+// the operator's decision, stated explicitly.
+func (c *Config) validateHostShares() error {
+	shares := &c.HostShares
+	if !sshMountSubdirRE.MatchString(shares.Subdir) {
+		return fmt.Errorf("host_shares.subdir %q must be one visible path segment", shares.Subdir)
+	}
+	for _, seed := range c.WorkspaceSeed {
+		if seed == shares.Subdir {
+			return fmt.Errorf("host_shares.subdir %q collides with a workspace_seed name", shares.Subdir)
+		}
+	}
+	if shares.Subdir == c.SSHWorkspaces.MountSubdir {
+		return fmt.Errorf("host_shares.subdir %q collides with ssh_workspaces.mount_subdir", shares.Subdir)
+	}
+	if !shares.Enabled {
+		if len(shares.Shares) > 0 {
+			return errors.New("host_shares.shares is set but host_shares.enabled is not")
+		}
+		return nil
+	}
+	if len(shares.Shares) == 0 {
+		return errors.New("host_shares.enabled requires at least one entry in host_shares.shares")
+	}
+	stateDir, err := filepath.Abs(c.StateDir)
+	if err != nil {
+		return fmt.Errorf("host_shares: resolving state_dir: %w", err)
+	}
+	seen := map[string]bool{}
+	for _, share := range shares.Shares {
+		label := "host_shares.shares[" + share.Name + "]"
+		if !hostShareNameRE.MatchString(share.Name) {
+			return fmt.Errorf("%s: name %q must be one visible path segment", label, share.Name)
+		}
+		if seen[share.Name] {
+			return fmt.Errorf("%s: duplicate share name %q", label, share.Name)
+		}
+		seen[share.Name] = true
+		if len(share.Tenants) == 0 {
+			return fmt.Errorf("%s: tenants must name the accounts that may see it (an empty list is not \"everyone\")", label)
+		}
+		for _, tenant := range share.Tenants {
+			if !ValidTenantName(tenant) {
+				return fmt.Errorf("%s: tenants entry %q is not an account name", label, tenant)
+			}
+		}
+		if strings.TrimSpace(share.Path) == "" || !filepath.IsAbs(share.Path) {
+			return fmt.Errorf("%s: path must be an absolute host directory", label)
+		}
+		// Symlinks are resolved, so the two checks below cannot be walked around with one.
+		resolved, err := filepath.EvalSymlinks(share.Path)
+		if err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		info, err := os.Stat(resolved)
+		if err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s: %s is not a directory", label, resolved)
+		}
+		if resolved == string(filepath.Separator) {
+			return fmt.Errorf("%s: refusing to share the file system root", label)
+		}
+		if withinPath(resolved, stateDir) || withinPath(stateDir, resolved) {
+			return fmt.Errorf("%s: %s overlaps the state directory %s, which holds every account's workspace, DSH home and keys", label, resolved, stateDir)
+		}
+	}
+	return nil
+}
+
+// withinPath reports whether child is root or sits inside it. Both paths are compared as given:
+// callers resolve symlinks first, because a share that reaches the state directory through one
+// is the same exposure.
+func withinPath(root, child string) bool {
+	root = filepath.Clean(root)
+	child = filepath.Clean(child)
+	if root == child {
+		return true
+	}
+	rel, err := filepath.Rel(root, child)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // checkSSHConfigDirOutsideHome refuses a tenant alias source inside the deployment account's

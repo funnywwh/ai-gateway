@@ -41,6 +41,18 @@ func (m *Manager) sandboxTenant(t registry.Tenant) sandbox.Tenant {
 	if m.SSHWorkspaces != nil {
 		tenant.SSHMounts = m.SSHWorkspaces.MountsFor(t.Name)
 	}
+	// The operator-declared host directories (M71). Unlike the ssh mounts these are not kernel
+	// mounts at all: the profile binds them, so the set only changes when the configuration
+	// does (which restarts the workers anyway).
+	if m.HostShares != nil {
+		// An account the deployment did not name gets neither the container nor a bind: an
+		// empty directory in every workspace would be noise, and a bind with nothing in it
+		// would be a claim the account has no share to make.
+		if shares := m.HostShares.SharesFor(t.Name, t.Workspace); len(shares) > 0 {
+			tenant.HostShareRoot = m.HostShares.ContainerFor(t.Workspace)
+			tenant.HostShares = shares
+		}
+	}
 	if m.Config.BrowserWorkspaces.Enabled {
 		tenant.BrowserMountRoot = filepath.Join(t.Workspace, "browser")
 	}

@@ -90,7 +90,20 @@ type Manager struct {
 	// and the mounts to detach when an account goes away. Nil disables the feature, which
 	// is what a deployment that does not configure it gets.
 	SSHWorkspaces     SSHWorkspaceHook
+	HostShares        HostShareHook
 	BrowserWorkspaces BrowserWorkspaceHook
+}
+
+// HostShareHook is the host-share surface the lifecycle needs (M71): the bindings one account's
+// profile carries, and the sandbox paths they need to exist before a worker starts. Nil
+// disables the feature.
+type HostShareHook interface {
+	// ContainerFor is the gateway-managed container inside one account's workspace.
+	ContainerFor(workspace string) string
+	// SharesFor lists the bindings one account's sandbox must carry.
+	SharesFor(tenant, workspace string) []sandbox.HostShare
+	// Ensure creates the container, every target and the account's mirror of the list.
+	Ensure(tenant, workspace, dshHome string) error
 }
 
 // BrowserWorkspaceHook supplies explicit binds and lifecycle cleanup for browser mounts.
@@ -127,6 +140,16 @@ func (m *Manager) ensureSSHIdentity(t registry.Tenant) error {
 		return nil
 	}
 	return m.SSHWorkspaces.EnsureIdentity(t.Name, t.Workspace, t.DshHome)
+}
+
+// ensureHostShares materializes one account's host-share container and targets. It must run
+// before the profile is rendered: the profile binds those paths, and --bind-try silently skips
+// a target that does not exist yet.
+func (m *Manager) ensureHostShares(t registry.Tenant) error {
+	if m.HostShares == nil {
+		return nil
+	}
+	return m.HostShares.Ensure(t.Name, t.Workspace, t.DshHome)
 }
 
 // workers returns the worker runner, creating it on first use. Tests inject their
@@ -313,6 +336,11 @@ func (m *Manager) createLocked(ctx context.Context, name, key string, models []a
 	// asks for one. A missing or too-broad key source is a configuration error and fails the
 	// create: a half-provisioned account is what produces "the button does nothing" later.
 	if err = m.ensureSSHIdentity(created); err != nil {
+		return created, err
+	}
+	// The account's host-share container and targets (M71), for the same reason: the first
+	// worker start must find them, and the profile binds what is in the configuration.
+	if err = m.ensureHostShares(created); err != nil {
 		return created, err
 	}
 	for _, seed := range m.Config.WorkspaceSeed {
@@ -625,6 +653,10 @@ func (m *Manager) Status(_ context.Context, t registry.Tenant) (WorkerState, err
 // the change when dsh starts, not whenever somebody remembers to run sync-models.
 func (m *Manager) startWorker(ctx context.Context, t registry.Tenant) error {
 	if err := m.ensureSSHIdentity(t); err != nil {
+		return err
+	}
+	// The host-share paths exist before the profile that binds them is rendered.
+	if err := m.ensureHostShares(t); err != nil {
 		return err
 	}
 	// The profile's ssh row follows the feature switch on every start, so enabling or

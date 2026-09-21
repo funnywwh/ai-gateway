@@ -657,11 +657,18 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
       `/data/home/winger/work` 这个同 fs 的第二个挂载点也认得；地址或 `machine-id` 证明「本机」，
       别的机器上同样路径不受影响，本机上不含工作区的目录照常可挂），错误码 `mount/forbidden`、审计
       `ssh-mount-refused`；同时 sshfs 默认补 `max_conns=4`（配置可覆盖），一条挂载不再只有一个 sftp 通道。
-- [ ] **未做（本次事故的后续）**：①「宿主目录直挂」——本机目录走 `bwrap --bind`（同一个内核，不需要
-      sshfs），既绕开自嵌套也绕开整类 FUSE 卡死；②**工作期间的挂死看门狗** —— 现有 `fuse.go` 的
-      `breakWedge`（杀守护进程 + sysfs abort）只在卸载路径上跑，正常工作时没有「请求多久没应答」的
-      巡检；③`sshfs -o auto_unmount`（守护进程退出即自动摘挂载）能否免掉上面那条「死挂载条目」缺陷；
-      ④递归工具（`grep -r`/`find`/索引）撞上合法挂载仍然慢，`ssh/` 下给个提示文件或让工具跳过
+- [x] **宿主目录直挂（M71，2026-09-21 已实现）**：要挂本机目录不再走 sshfs —— `host_shares` 配置声明
+      `{name, path, read_only, tenants}`，worker 的 bwrap profile 把宿主目录直接 `--ro-bind-try`/`--bind-try`
+      到 `<workspace>/<subdir>/<name>`（容器先只读绑定），没有内核挂载、没有 FUSE、没有可挂死的东西。
+      默认只读（写授权要显式 `read_only: false`），`tenants` 必填非空，共享目录与 `state_dir` 必须不相交
+      （否则等于把一个账号的工作区/私钥/会话交给另一个账号），配置加载即校验。镜像
+      `<dsh_home>/host-shares.json` 给租户面板用（不含宿主路径）。真机 bwrap staging 验收：
+      只读共享不可写、可写共享写穿宿主、宿主路径在沙箱内不可见。规格 `docs/dshgw.md` §7e。
+      未做：侧栏面板行（当前用目录选择器进 `<workspace>/host/<name>`）。
+- [ ] **未做（本次事故的后续）**：②**工作期间的挂死看门狗** —— 现有 `fuse.go` 的 `breakWedge`（杀守护进程
+      + sysfs abort）只在卸载路径上跑，正常工作时没有「请求多久没应答」的巡检；③`sshfs -o auto_unmount`
+      （守护进程退出即自动摘挂载）能否免掉下面那条「死挂载条目」缺陷；④递归工具（`grep -r`/`find`/索引）
+      撞上合法挂载仍然慢
 - [ ] **观察项（本次事故实测到的反面基线）**：FUSE 上 `git status`/`grep` 的耗时基线仍未测；已知的是
       自嵌套时不是「慢」而是**永久挂死**（D 态、不可杀）
 

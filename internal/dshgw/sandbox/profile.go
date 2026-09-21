@@ -87,6 +87,24 @@ type Tenant struct {
 	BrowserMounts []string
 	// BrowserMountRoot is gateway-managed and read-only in the tenant namespace.
 	BrowserMountRoot string
+	// HostShareRoot is the gateway-managed container of the operator-declared host directories
+	// (<workspace>/<host_shares.subdir>), read-only in the tenant namespace so the container
+	// cannot be replaced through the writable workspace. HostShares is one binding per declared
+	// directory: no mount, no sshfs, nothing that can wedge (M71).
+	HostShareRoot string
+	HostShares    []HostShare
+}
+
+// HostShare is one operator-declared host directory as it appears inside one tenant's sandbox.
+type HostShare struct {
+	// Name is the display name and the last path segment under the container.
+	Name string
+	// Source is the host directory, already resolved through symlinks by config validation.
+	Source string
+	// Target is where the tenant sees it: <workspace>/<host_shares.subdir>/<name>.
+	Target string
+	// ReadOnly decides between --ro-bind and --bind.
+	ReadOnly bool
 }
 
 // hiddenRoots are host directories replaced by an empty tmpfs, so a stray bind
@@ -211,6 +229,51 @@ func Profile(rt Runtime, t Tenant) ([]string, error) {
 			return nil, fmt.Errorf("browser mount %s contains symlinks", mount)
 		}
 		argv = append(argv, "--bind", mount, mount)
+	}
+
+	// Operator-declared host directories (M71), bound straight in: no sshfs, no FUSE, so
+	// nothing here can end up in the uninterruptible wait a wedged mount produces. The
+	// container gets the same read-only protection as the browser root — the parent workspace
+	// is writable, so an unprotected container could be replaced — and each share is bound at
+	// its own path, read-only unless the deployment said otherwise.
+	if t.HostShareRoot != "" {
+		root := t.HostShareRoot
+		if !filepath.IsAbs(root) || filepath.Clean(root) != root || !within(workspace, root) || root == workspace {
+			return nil, fmt.Errorf("tenant %s host share root %s is not inside its workspace %s", t.Name, root, workspace)
+		}
+		resolved, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			return nil, fmt.Errorf("resolve host share root: %w", err)
+		}
+		info, err := os.Lstat(root)
+		if err != nil {
+			return nil, err
+		}
+		if resolved != root || !info.IsDir() {
+			return nil, fmt.Errorf("host share root must be a canonical directory: %s", root)
+		}
+		argv = append(argv, "--ro-bind", root, root)
+	} else if len(t.HostShares) > 0 {
+		return nil, fmt.Errorf("host shares require a protected host share root")
+	}
+	for _, share := range t.HostShares {
+		root := t.HostShareRoot
+		if !filepath.IsAbs(share.Source) || filepath.Clean(share.Source) != share.Source || share.Source == string(filepath.Separator) {
+			return nil, fmt.Errorf("tenant %s host share %s has an unusable source %q", t.Name, share.Name, share.Source)
+		}
+		if !filepath.IsAbs(share.Target) || filepath.Clean(share.Target) != share.Target || !within(root, share.Target) || share.Target == root {
+			return nil, fmt.Errorf("tenant %s host share %s target %s is not inside its host share root %s", t.Name, share.Name, share.Target, root)
+		}
+		// A share that no longer exists is skipped rather than fatal: one directory the
+		// operator removed must not be the reason an account cannot start.
+		if _, err := os.Stat(share.Source); err != nil {
+			continue
+		}
+		flag := "--bind-try"
+		if share.ReadOnly {
+			flag = "--ro-bind-try"
+		}
+		argv = append(argv, flag, share.Source, share.Target)
 	}
 	// Devices and a private process view. The network namespace is deliberately
 	// shared: the worker must reach aigw.
