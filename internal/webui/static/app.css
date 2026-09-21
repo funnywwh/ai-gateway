@@ -91,6 +91,11 @@ input, select, textarea { background:var(--panel-2); color:var(--fg); border:1px
 textarea { min-height:90px; font-family: ui-monospace, Menlo, monospace; font-size:12px; }
 label.field { display:block; margin-bottom:10px; }
 label.field > span { display:block; color:var(--muted); font-size:12px; margin-bottom:4px; }
+/* A field whose label and control are one line — a checkbox with its own sentence, such as the
+   chat's internet-access switch. The rule above stacks the two, which reads as two controls. */
+label.field.field-inline { display:flex; align-items:center; gap:8px; }
+label.field.field-inline > span { display:inline; margin:0; color:var(--fg); font-size:13px; }
+label.field.field-inline > input[type=checkbox] { flex:0 0 auto; width:16px; height:16px; margin:0; accent-color:var(--accent); }
 .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
 .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11.5px;
   border:1px solid var(--line); color:var(--muted); }

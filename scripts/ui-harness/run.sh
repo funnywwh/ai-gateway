@@ -19,7 +19,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${UI_HARNESS_WORK:-$ROOT/.cache/ui-harness}"
 PORT="${UI_HARNESS_PORT:-8097}"
-VIEWS="docs detail capacity cost models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand tree org org-readonly org-person org-accounts org-sync org-sync-readonly org-sync-nonames admins admins-readonly login"
+VIEWS="docs detail capacity cost models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand tree org org-readonly org-person org-accounts org-sync org-sync-readonly org-sync-nonames admins admins-readonly login chatWeb chatWebOff"
 FIXTURES="$ROOT/scripts/ui-harness/fixtures.json"
 REFRESH=0
 
@@ -98,6 +98,8 @@ page_for_view() {
     # noSkills is the same chat page with an empty skill library (the page reads it off the
     # hash): the refusal path needs a page that was empty from its first load.
     chat|noSkills|skills|form) echo "chat.html" ;;
+    # M73：联网开关的两种部署形态（已配置后端 / 未配置），同一个页面靠 hash 区分。
+    chatWeb|chatWebOff) echo "chat.html" ;;
     # Not a console view: the browser's syntax check on the script the server injects into an
     # interactive preview. It shares the fixtures mechanism, so it rides along with the others.
     bridge) echo "bridge_syntax.html" ;;

@@ -92,6 +92,31 @@ const SESSION = {
   tool_calls: [{ id: 'tcall_1', call_id: 'call_1', step: 1, name: 'admin_request', status: 'done', is_error: false, duration_ms: 12, created_at: '2026-09-12T08:00:03Z' }],
 };
 
+// M73：同一个会话，区别是「联网」已开启，并且这一轮真的用了 web_search / web_fetch。它是从
+// SESSION 派生出来的，而不是另写一份——两份 fixture 各自演化，最终会让这个视图测的是它自己的
+// 谎言（而且这个视图要断言的正是"开启后工具卡片怎么显示"）。
+const WEB_SESSION = JSON.parse(JSON.stringify(SESSION));
+WEB_SESSION.web_access = true;
+WEB_SESSION.web_access_available = true;
+WEB_SESSION.web_access_provider = 'bing';
+WEB_SESSION.messages[1].parts.splice(1, 0,
+  {
+    type: 'tool_call', id: 'call_web1', name: 'web_search',
+    arguments: '{"query":"deepseek 价格","freshness":"oneWeek"}',
+    result: '{"provider":"bing","query":"deepseek 价格","count":1,"results":[{"title":"价格页","url":"https://api-docs.deepseek.com/quick_start/pricing","snippet":"输入 0.5 元/百万 token"}]}',
+    is_error: false, status: 'done',
+  },
+  {
+    type: 'tool_call', id: 'call_web2', name: 'web_fetch',
+    arguments: '{"url":"https://api-docs.deepseek.com/quick_start/pricing"}',
+    result: '{"url":"https://api-docs.deepseek.com/quick_start/pricing","final_url":"https://api-docs.deepseek.com/quick_start/pricing","title":"Models & Pricing | DeepSeek API Docs","content":"输入（缓存命中）0.5 元/百万 token","truncated":false,"bytes":4096,"content_type":"text/html"}',
+    is_error: false, status: 'done',
+  });
+WEB_SESSION.tool_calls = SESSION.tool_calls.concat([
+  { id: 'tcall_web1', call_id: 'call_web1', step: 2, name: 'web_search', status: 'done', is_error: false, duration_ms: 320, created_at: '2026-09-12T08:00:04Z' },
+  { id: 'tcall_web2', call_id: 'call_web2', step: 3, name: 'web_fetch', status: 'done', is_error: false, duration_ms: 210, created_at: '2026-09-12T08:00:05Z' },
+]);
+
 const SKILLS = {
   data: [{
     id: 7, name: '成本排查', description: '按账户核对成本与收费',
@@ -187,6 +212,12 @@ window.fetch = async (url, options) => {
   if (path === '/chat/sessions/chat_1' && window.__formSession) {
     return json(window.__formSession);
   }
+  // 只拦 GET：PATCH（改绑令牌、切换联网）必须落到下面那个真正处理写请求的分支，否则这个 stub
+  // 会把"切换成功"变成"返回原值"，而 UI 照实渲染原值——测出来的就是 stub 的谎话。
+  if (path === '/chat/sessions/chat_1' && window.__webSession
+      && (!options || !options.method || options.method === 'GET')) {
+    return json(window.__webSession);
+  }
   if (path === '/chat/sessions/chat_1/artifacts') {
     // Echo the bridge flag the way the server does: the console decides whether the frame is
     // interactive from what it asked for, and the harness must not be able to hide a
@@ -206,12 +237,16 @@ window.fetch = async (url, options) => {
     // 什么都不发」只有在会话真的少了一个技能时才成立；一个把 skill_ids 原样吐回的 stub 会让
     // 那条断言测到的是它自己的谎言。
     const body = JSON.parse(options.body || '{}');
+    const base = window.__webSession || SESSION;
     const bound = MCP_TOKENS.find((t) => t.id === body.mcp_token_id);
     const patched = {
-      ...SESSION,
-      mcp_token_id: body.mcp_token_id === undefined ? SESSION.mcp_token_id : body.mcp_token_id,
+      ...base,
+      mcp_token_id: body.mcp_token_id === undefined ? base.mcp_token_id : body.mcp_token_id,
       write_mode: bound && bound.scope === 'admin' ? 'allow_writes' : 'read_only',
     };
+    // M73：联网开关是会话级的，PATCH 回来的是服务端实际存下的值——UI 必须照它渲染，
+    // 而不是照自己请求的值渲染（部署侧可以拒绝开启）。
+    if (body.web_access !== undefined) patched.web_access = body.web_access;
     if (Array.isArray(body.skill_ids)) {
       patched.skill_ids = body.skill_ids;
       patched.skills = SESSION.skills.filter((s) => body.skill_ids.includes(s.id));
@@ -220,7 +255,15 @@ window.fetch = async (url, options) => {
   }
   if (path === '/chat/sessions/chat_1') return json(SESSION);
   if (path === '/chat/sessions' && options && options.method === 'POST') return json(SESSION);
-  if (path === '/chat/sessions') return json({ object: 'list', data: [SESSION], total: 1, limit: 30, offset: 0, count: 1 });
+  // web_access_available 是**部署级**事实：新建会话对话框要在任何会话存在之前就知道该不该提供
+  // 那个勾选框，所以它挂在列表响应上，而不是只挂在每一行会话里。
+  if (path === '/chat/sessions') {
+    return json({
+      object: 'list', data: [window.__webSession || SESSION], total: 1, limit: 30, offset: 0, count: 1,
+      web_access_available: window.__webOff !== true,
+      web_access_provider: window.__webOff === true ? undefined : 'bing',
+    });
+  }
   if (path === '/chat/skills' && options && (options.method === 'POST' || options.method === 'PATCH')) {
     return json(SKILLS.data[0]);
   }
@@ -1117,6 +1160,91 @@ try {
       await settle();
     } catch (err) {
       checks.formThrew = String(err && err.stack ? String(err.stack).split('\n')[0] : err);
+    }
+  }
+  // M73：控制台联网的两个视图。`chatWeb` 是"部署已配置搜索后端 + 本会话已开启"，
+  // `chatWebOff` 是"部署没配"。两者必须看起来不一样：一个显示开关并允许切换，另一个连开关都
+  // 不该出现——提供一个点了只会报错的按钮，比不提供更糟。
+  if (view === 'chatWeb' || view === 'chatWebOff') {
+    try {
+      if (view === 'chatWeb') window.__webSession = WEB_SESSION;
+      if (view === 'chatWebOff') window.__webOff = true;
+      const destroyWeb = await renderChat({
+        page: pageEl,
+        actions: document.getElementById('actions'),
+        session: { role: 'admin', username: 'admin' },
+        route: { path: '/chat', params: new URLSearchParams('session=chat_1') },
+        navigate: () => {},
+      });
+      await settle();
+
+      const webBadge = () => [...pageEl.querySelectorAll('.chat-header .badge-button')]
+        .find((b) => b.textContent.includes('联网'));
+
+      if (view === 'chatWeb') {
+        const badge = webBadge();
+        checks.webBadgeShown = !!badge && badge.textContent.includes('已开启');
+        checks.webBadgeTone = !!badge && badge.className.includes('ok');
+        // 工具卡片按控制台的名字显示：`web_search` 这三个词对一个不写代码的操作员没有含义。
+        const names = [...pageEl.querySelectorAll('.chat-tool-name')].map((n) => n.textContent);
+        checks.webToolLabels = names.includes('联网搜索') && names.includes('抓取网页');
+        checks.webToolNames = names.join(',');
+        checks.webToolParamsShown = pageText().includes('api-docs.deepseek.com');
+        checks.webComposerHint = ((pageEl.querySelector('.chat-hint') || {}).textContent || '').includes('联网已开启');
+
+        // 开关本身：关闭必须只发这一个字段（PATCH 是"未给即不改"的语义，多发一个字段就可能
+        // 顺手改掉别的设置），并且界面要按服务端返回的值更新。
+        if (badge) {
+          badge.click();
+          await settle();
+          const sent = JSON.parse((window.__sent || {})['/chat/sessions/chat_1'] || '{}');
+          checks.webToggleSendsOnlyTheSwitch = sent.web_access === false && Object.keys(sent).length === 1;
+          checks.webToggleLabelFlips = (() => {
+            const after = webBadge();
+            return !!after && after.textContent.includes('已关闭');
+          })();
+          checks.webToggleToast = document.body.textContent.includes('已关闭联网');
+          checks.webToggleHintCleared =
+            !((pageEl.querySelector('.chat-hint') || {}).textContent || '').includes('联网已开启');
+        }
+
+        // 新建会话：部署有能力时必须提供勾选框，且默认关闭（联网是显式选择，不是默认行为）。
+        find('新建会话').click();
+        await settle();
+        const webDialog = [...document.querySelectorAll('.modal')].pop();
+        const webBox = webDialog ? webDialog.querySelector('input[type=checkbox]') : null;
+        checks.webCreateCheckboxShown = !!webBox;
+        checks.webCreateCheckboxDefaultOff = !!webBox && webBox.checked === false;
+        checks.webCreateHint = !!webDialog && webDialog.textContent.includes('开启后模型可以搜索公网');
+        if (webBox) {
+          webBox.checked = true;
+          const createBtn = [...document.querySelectorAll('.modal-actions button')]
+            .find((b) => b.textContent.trim() === '创建');
+          checks.webCreateButtonPresent = !!createBtn;
+          if (createBtn) {
+            createBtn.click();
+            await settle();
+            const created = JSON.parse((window.__sent || {})['/chat/sessions'] || '{}');
+            checks.webCreateSendsFlag = created.web_access === true;
+          }
+        } else {
+          checks.webCreateDialogOpened = !!webDialog;
+        }
+      } else {
+        // 部署没配搜索后端：既没有开关，也没有勾选框；会话里的工具卡片仍然是它自己的名字
+        // （不会有人以为自己在联网）。
+        checks.webOffNoBadge = !webBadge();
+        find('新建会话').click();
+        await settle();
+        const offDialog = [...document.querySelectorAll('.modal')].pop();
+        checks.webOffDialogOpened = !!offDialog && offDialog.textContent.includes('新建会话');
+        checks.webOffNoCheckbox = !!offDialog && offDialog.querySelector('input[type=checkbox]') === null;
+      }
+
+      if (typeof destroyWeb === 'function') destroyWeb();
+      await settle();
+    } catch (err) {
+      checks.webThrew = String(err && err.stack ? String(err.stack).split('\n')[0] : err);
     }
   }
 } catch (err) {
