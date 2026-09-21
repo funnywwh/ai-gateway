@@ -1,0 +1,13 @@
+-- M72: "all active accounts may use DSH once the deployment turns it on"
+-- (docs/design/m72-account-feishu-identity.md D2).
+--
+-- dsh_enabled cannot answer both questions an operator asks of it. With dshgw.auto_enable
+-- the entitlement becomes
+--
+--     dsh_enabled || (auto_enable && the account was never explicitly disabled)
+--
+-- so the console needs a durable record of "an administrator pressed 停用 DSH", separate
+-- from the flag's current value. NULL means never explicitly disabled — which is exactly the
+-- state every existing row starts in, so a deployment that leaves auto_enable off behaves
+-- as it did before. The flag itself keeps meaning "the last write's physical state".
+ALTER TABLE accounts ADD COLUMN dsh_disabled_at INTEGER;

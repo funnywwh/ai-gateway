@@ -161,11 +161,12 @@ dshgw 登录 → POST /v1/dshgw/authorize
 
 `api_keys.feishu_*` 的 5 条存量绑定（本机实测）在启动时抄到对应账号：
 
-- 账号未绑定 → 写账号级身份 + 审计 `feishu_bind`（`target_type=account`，changes 带 `from_key_id`），
-  然后清空 Key 行；
-- 账号已绑**同一个** open_id → 只清 Key 行；
-- 账号已绑**别人**，或同一账号的两把 Key 绑了不同的人 → 保留 Key 行不动、计数并 `log.Warn`，
-  由管理员在控制台处理（Key 行仍只读可见可解绑）。
+- 账号未绑定 → 写账号级身份 + 审计 `feishu_bind`（`target_type=account`，changes 带 `from_key_id`，
+  由启动钩子在写完后补记），然后清空 Key 行；
+- 账号已绑**同一个** open_id → 只清 Key 行（不重写账号上的绑定人/时间）；
+- 账号已绑**别人**，或同一账号的多把 Key 绑了**不同的人**（后者靠 `BindAPIKeyFeishu` 的唯一索引
+  已经无法新建，但老库可能有）→ 保留 Key 行不动、计入 `conflicts` 并 `log.Warn`，
+  由管理员在控制台处理（Key 行仍只读可见可解绑）；一律**不猜**哪个人才是对的。
 
 迁移后 M70 合并通道②（"某把 Key 的 open_id 相同"）**删除**。理由：账号级身份已存在时它不再提供
 新信息，却会在管理员把某人手工改绑到另一个账号之后，把这个人从旧 Key 数据里"复活"到旧账号上

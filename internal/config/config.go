@@ -475,6 +475,15 @@ type Dshgw struct {
 	// under every tenant's origin. aigw is the side that knows those names, which is why the
 	// switch is configured here and reaches the child as a generated one.
 	AccountCard DshgwAccountCard `yaml:"account_card"`
+	// AutoEnable makes every active account able to use DSH without an operator pressing
+	// 启用 DSH per account (M72): the entitlement becomes
+	//
+	//	dsh_enabled || (auto_enable && the account was never explicitly disabled)
+	//
+	// and the tenant is provisioned on demand at the account's first login. Off by default:
+	// turning it on hands DSH to every active account at once, which is a deployment's
+	// decision rather than an upgrade's.
+	AutoEnable bool `yaml:"auto_enable"`
 }
 
 // DshgwBrowserWorkspaces is disabled by default.
@@ -590,6 +599,11 @@ type Feishu struct {
 	// TicketTTLS bounds how long that ticket can be redeemed. It is meant to cover one
 	// browser redirect, not to be a session.
 	TicketTTLS int `yaml:"ticket_ttl_s"`
+	// PickTTLS bounds the key-pick ticket of a multi-key portal login (M72): the step where
+	// the person chooses which of the account's keys this session is recorded against. It
+	// covers one form submission, so it follows the ticket TTL rather than a session
+	// lifetime. Zero falls back to TicketTTLS.
+	PickTTLS int `yaml:"pick_ttl_s"`
 }
 
 // FeishuLoginURL is the browser-visible entry point of the authorization flow. It is
@@ -806,10 +820,13 @@ func Default() Config {
 			TimeoutS:       5,
 			StateTTLS:      600,
 			TicketTTLS:     120,
-			DSHLogin:       true,
-			AdminLogin:     true,
-			InviteTTLS:     3600,
-			AutoEnableDSH:  true,
+			// Zero means "the key pick lives exactly as long as the login ticket it belongs
+			// to" (M72); naming a value is what a slower deployment would do.
+			PickTTLS:      0,
+			DSHLogin:      true,
+			AdminLogin:    true,
+			InviteTTLS:    3600,
+			AutoEnableDSH: true,
 		},
 		Dshgw: Dshgw{
 			PublicHost:   "localhost",
@@ -1039,6 +1056,7 @@ func applyEnv(cfg *Config) error {
 	envStr(&cfg.Feishu.ContactURL, "GW_FEISHU_CONTACT_URL")
 	envBool(&cfg.Feishu.AdminLogin, "GW_FEISHU_ADMIN_LOGIN")
 	envInt(&cfg.Feishu.InviteTTLS, "GW_FEISHU_INVITE_TTL_S")
+	envInt(&cfg.Feishu.PickTTLS, "GW_FEISHU_PICK_TTL_S")
 	envStr(&cfg.Feishu.InviteSecret, "GW_FEISHU_INVITE_SECRET")
 	envStr(&cfg.Feishu.ConsoleURL, "GW_FEISHU_CONSOLE_URL")
 	envStr(&cfg.Log.Level, "GW_LOG_LEVEL")
@@ -1065,6 +1083,7 @@ func applyEnv(cfg *Config) error {
 		envInt(&cfg.Routing.ProviderQueueMaxWaiters, "GW_ROUTING_PROVIDER_QUEUE_MAX_WAITERS"),
 		envInt(&cfg.Server.ReadTimeoutS, "GW_SERVER_READ_TIMEOUT_S"),
 		envInt(&cfg.RateLimit.Shards, "GW_RATELIMIT_SHARDS"),
+		envBool(&cfg.Dshgw.AutoEnable, "GW_DSHGW_AUTO_ENABLE"),
 	} {
 		if step != nil {
 			return step
@@ -1181,6 +1200,12 @@ func (c *Config) validateFeishu() error {
 	if c.Feishu.DSHLogin {
 		if c.Feishu.TicketTTLS < 30 || c.Feishu.TicketTTLS > 600 {
 			return fmt.Errorf("feishu.ticket_ttl_s must be between 30 and 600 (got %d)", c.Feishu.TicketTTLS)
+		}
+		// Zero means "follow the ticket TTL", which is the right default for the key-pick
+		// step (M72); a stated value is bounded the same way, because it also covers one
+		// form submission rather than a session.
+		if c.Feishu.PickTTLS < 0 || c.Feishu.PickTTLS > 600 {
+			return fmt.Errorf("feishu.pick_ttl_s must be between 0 (follow ticket_ttl_s) and 600 (got %d)", c.Feishu.PickTTLS)
 		}
 		if strings.TrimSpace(c.Feishu.TicketSecret) == "" && strings.TrimSpace(c.CredentialsKey) == "" {
 			return fmt.Errorf("feishu.ticket_secret is empty and credentials_key cannot derive one")

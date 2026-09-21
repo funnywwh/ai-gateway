@@ -227,6 +227,10 @@ func run() int {
 	defer stopDimensionRollups()
 	log.Info("database ready", "path", db.Path())
 
+	// M72: an identity bound at the key level (M60) must be on its account before the portal
+	// asks for it, and the move has to be visible in the log and the audit trail.
+	migrateKeyFeishuBindings(ctx, db, log)
+
 	if res, err := db.Bootstrap(ctx, cfg.Bootstrap, cfg.Plugins.StateDir); err != nil {
 		log.Error("bootstrap failed", "err", err)
 		return 1

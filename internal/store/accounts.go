@@ -18,7 +18,7 @@ type rowScanner interface {
 
 const accountCols = `id, name, tags_json, billing_mode, balance_micros, credit_limit_micros,
 	low_balance_threshold_micros, price_overrides_json, markup_override_bp, markup_override_set,
-	auto_suspend, auto_resume, dsh_enabled, dsh_tenant, inflight_policy_override,
+	auto_suspend, auto_resume, dsh_enabled, dsh_tenant, dsh_disabled_at, inflight_policy_override,
 	overdraft_limit_micros, status, note, created_at, updated_at,
 	feishu_open_id, feishu_union_id, feishu_name, feishu_bound_at, feishu_bound_by`
 
@@ -29,11 +29,12 @@ func scanAccount(row rowScanner) (*domain.Account, error) {
 		dshEnabled              int
 		markupOverrideSet       int
 		createdAt, updatedAt    int64
+		dshDisabledAt           sql.NullInt64
 		feishuBoundAt           sql.NullInt64
 	)
 	if err := row.Scan(&a.ID, &a.Name, &a.TagsJSON, &a.BillingMode, &a.BalanceMicros, &a.CreditLimitMicros,
 		&a.LowBalanceThresholdMicros, &a.PriceOverridesJSON, &a.MarkupOverrideBP, &markupOverrideSet,
-		&autoSuspend, &autoResume, &dshEnabled, &a.DshTenant, &a.InflightPolicyOverride,
+		&autoSuspend, &autoResume, &dshEnabled, &a.DshTenant, &dshDisabledAt, &a.InflightPolicyOverride,
 		&a.OverdraftLimitMicros, &a.Status, &a.Note, &createdAt, &updatedAt,
 		&a.FeishuOpenID, &a.FeishuUnionID, &a.FeishuName, &feishuBoundAt, &a.FeishuBoundBy); err != nil {
 		return nil, err
@@ -44,6 +45,10 @@ func scanAccount(row rowScanner) (*domain.Account, error) {
 	a.DSHEnabled = dshEnabled != 0
 	a.CreatedAt = timeFromUnix(createdAt)
 	a.UpdatedAt = timeFromUnix(updatedAt)
+	if dshDisabledAt.Valid {
+		when := timeFromUnix(dshDisabledAt.Int64)
+		a.DshDisabledAt = &when
+	}
 	if feishuBoundAt.Valid {
 		boundAt := timeFromUnix(feishuBoundAt.Int64)
 		a.FeishuBoundAt = &boundAt
@@ -178,6 +183,34 @@ func (db *DB) SetAccountStatus(ctx context.Context, id int64, status string) err
 		"UPDATE accounts SET status = ?, updated_at = ? WHERE id = ?", status, unix(time.Now()), id)
 	if err != nil {
 		return fmt.Errorf("store: set account %d status: %w", id, err)
+	}
+	return nil
+}
+
+// SetAccountDSHDisabledAt records (or clears) the moment an administrator explicitly turned
+// DSH off for this account (M72).
+//
+// It is a separate statement because UpsertAccount deliberately does not list the column:
+// every ordinary account write — a console edit, the directory sync, a billing update — must
+// leave the administrator's decision alone. Passing nil clears it, which is what 启用 DSH does
+// so that dshgw.auto_enable can take over again.
+func (db *DB) SetAccountDSHDisabledAt(ctx context.Context, id int64, at *time.Time) error {
+	var value any
+	if at != nil && !at.IsZero() {
+		value = unix(*at)
+	}
+	result, err := db.write.ExecContext(ctx, `UPDATE accounts SET dsh_disabled_at = ? WHERE id = ?`, value, id)
+	if err != nil {
+		return fmt.Errorf("store: set account %d dsh disabled_at: %w", id, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: set account %d dsh disabled_at: %w", id, err)
+	}
+	if affected == 0 {
+		if _, err := db.GetAccount(ctx, id); err != nil {
+			return err
+		}
 	}
 	return nil
 }

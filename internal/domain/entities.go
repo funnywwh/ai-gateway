@@ -33,7 +33,12 @@ type Account struct {
 	// DshTenant names the dshgw tenant the account enters once enabled (M52-rev2). All
 	// keys of the account — existing and newly created — log into this tenant; no
 	// per-key prefix binding is required.
-	DshTenant              string
+	DshTenant string
+	// DshDisabledAt is when an administrator explicitly turned DSH off for this account
+	// (M72). Nil means "never explicitly disabled", which is what lets dshgw.auto_enable
+	// hand DSH to every active account while an administrator's 停用 still wins — the two
+	// states dsh_enabled alone cannot tell apart.
+	DshDisabledAt          *time.Time
 	InflightPolicyOverride string
 	OverdraftLimitMicros   int64
 	Status                 string
@@ -41,12 +46,12 @@ type Account struct {
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
 
-	// Feishu identity written by the directory sync (M70). It is a sync mapping —
-	// "which local account is this Feishu person" — and never a login capability: the
-	// data plane and the DSH portal resolve identities through api_keys.feishu_open_id
-	// (M60), not through the account. The columns mirror the key-level ones so an audit
-	// line reads the same either way; FeishuBoundBy says who wrote it ("sync" for an
-	// automatic merge, an admin username for a manual binding).
+	// Feishu identity of the account (M72: this IS the DSH portal login identity; M70 had
+	// written it as a directory-sync mapping only). One Feishu person maps to one account and
+	// back — the database enforces both directions through a unique index — and the columns
+	// mirror the key-level ones from M60 so an audit line reads the same either way.
+	// FeishuBoundBy says who wrote it ("sync" for an automatic merge, an admin username for a
+	// manual binding, "key-migration" for the M72 backfill of a legacy key-level binding).
 	FeishuOpenID  string
 	FeishuUnionID string
 	FeishuName    string
