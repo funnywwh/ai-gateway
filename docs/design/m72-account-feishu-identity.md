@@ -330,18 +330,44 @@ store.Open → MigrateKeyFeishuToAccounts()（D9）→ 计数/冲突日志 → B
 - 无新增外部依赖；飞书侧只需 M70 已有的两个只读通讯录权限（选人弹窗读的是同一份目录）。
 - 部署：`make build` → `systemctl --user restart aigw-local`；`/version` 显示新 revision；
   `/admin/ui/js/pages/org.js` 与 `…/pages/account_feishu.js` 应 200。
-- 打开自动启用：在 `config.yaml` 的 `dshgw` 块加 `auto_enable: true` 后重启（本机默认仍关闭，
-  由操作者决定何时切）。
+- 打开自动启用：**本机已打开**（2026-09-21 用户要求）——`config.yaml` 的 `dshgw.auto_enable: true`
+  （该文件被 gitignore，改动只在机器上），并重建重启了 `bin/aigw` 与 `bin/dshgw`（见 §11）。
+  其他部署照做时注意两点：① 选票的签发与选择页都在 **dshgw** 里，只更新 aigw 会让 Key 登录直接进租户；
+  ② `auth.default_grant: none` 的部署里"能用 DSH"还要求账号**有可用模型**，否则首登 403 `provision_failed`。
 
-## 11. 主机验收（待执行，逐条回填结果）
+## 11. 主机验收（2026-09-21 本机实测，逐条记录）
 
-1. 组织页给一个未绑定账号选一个飞书人员 → 账号行出现飞书名，全程无飞书授权页；
-2. 该人走门户「飞书登录」（`auto_enable: true`）→ 首登即建租户并进入；控制台可见 `dsh_enable` 审计
-   （actor=`dshgw-auto`）；
-3. 控制台「停用 DSH」→ 同一身份再登被拒，且不会被自动重新启用；
-4. 有 2 把 Key 的账号分别走 Key 登录与飞书登录 → 两次都出现选择页；审计里能看到所选 Key 名称；
-5. 升级验证：迁移日志的 `migrated` 数 = 升级前 `api_keys.feishu_open_id <> ''` 的行数（冲突除外），
-   迁移后 `api_keys.feishu_open_id` 为空，账号级身份可正常登录。
+部署：`bin/aigw` 重建为 M72（`9fe3ed9` → 修缺陷后 `ce81d06`）并 `systemctl --user restart aigw-local`；
+`bin/dshgw` 也重建并重启（**门户的选择页在 dshgw 里**，旧二进制不认 `keys[]`，第一次试 Key 登录时
+直接进了租户、没有出现选择页，正是这条把它们区分开的）。回滚点：`data/prev/bin/aigw.prev-running-3.1.0-69da1dd`、
+`data/prev/bin/dshgw.prev-running-3.1.0-69da1dd`。
+
+1. **升级迁移**：启动日志 `legacy key-level Feishu bindings migrated to accounts migrated=0 keys_cleared=5 conflicts=0`
+   —— 5 条 Key 级绑定全部清空（它们对应的账号**本来就绑着同一身份**，所以没有新写入），
+   `select count(*) from api_keys where feishu_open_id<>''` = **0**，账号级身份 21 行。
+2. **Key 登录出现选择页**：用账号 6（练畅亮，4 把可用 Key）新建一把临时 Key 后 `POST /login` →
+   **303 `/login/pick?ticket=…`**（不再直接进租户）；GET 该链接 → 200，页面列出 5 把 Key
+   （`kevin_test`/`Web Chat - ljl_dev`/`terry电脑`/`智天成mac mini`/临时 Key）、**不含** `dshgw-…` worker Key，
+   也不含任何完整明文。
+3. **提交的 Key 不可信**：`key_id=999` → 403 且页面提示「这把 Key 现在不可用」；
+   同一票据再次提交 → 403「已经使用过」；换新票据 `key_id=10` → 302 到租户并下发
+   `dshgw_s_dsh-lianchangliang` 会话 cookie；审计 `login_key_selected` 记 `reason=kevin_test`（Key 名）。
+4. **按需建租户**：账号 98（m51-test-a，激活、无租户）先加一个带模型授权的临时标签，
+   `POST /v1/dshgw/authorize` → 200 `tenant=dsh-m51-test-a`，无需任何后台点击；
+   `registry.json` 出现该租户（端口 18307），审计 `dsh_enable` 的 **actor=`dshgw-auto`**。
+5. **显式停用不被撤销**：控制台「停用 DSH」→ `disabled_at` 有值、`effective=false`；
+   authorize → 403 `dsh_disabled`；门户登录 → 403「该账号未启用 dsh」；**再等再试仍是拒绝**。
+   重新启用 → `disabled_at` 清空、`effective=true`。
+6. **验收顺手抓到一个真缺陷**（已修，`ce81d06`）：重新启用后 `disabled_at` 仍留在库里——
+   `UpsertAccount` 刻意不写该列，所以启用路径必须单独清它。留着的话，下一次「停用」会以
+   看不见的理由变成粘性，控制台显示 已启用 而 `dsh_effective` 仍是 false。已加回归测试
+   `TestAdminEnableDSHClearsTheExplicitDisableMark`。
+7. **仍然需要人做的**：飞书那条真链路（②④ 的飞书侧）要**用本人的飞书身份走一次「飞书登录」**才谈得上验收，
+   本轮只验到"账号级身份是判定真值 + 选择页 + 按需建租户"这些不需要手机的部分。
+
+**验收留下的数据**：账号 98 的租户 `dsh-m51-test-a`（端口 18307，`dsh_enabled=1`）、
+账号 98 的临时 Key 119 与账号 6 的临时 Key 118（都已 `revoked`）、一次 `dsh_disable`/`dsh_enable` 审计。
+标签与 `disabled_at` 已还原。
 
 ## 12. 实现与设计差异
 
