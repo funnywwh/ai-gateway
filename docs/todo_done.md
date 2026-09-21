@@ -4359,3 +4359,37 @@ sshfs 缺陷仍未关闭。
   `{"version":"2.7.3","revision":"4a2de2d"}`，`/healthz`、`/readyz` 均 200，
   控制台 200，dshgw 日志 `listening version=2.7.3 revision=4a2de2d`，
   6 个租户 worker 全部 ready、18301–18306 全部 302，admin socket ping ok。
+
+### v2.8.0 发布与部署记录（2026-09-21，本机 aigw + dshgw；gpt001 未部署）
+
+本版内容：**浏览器工作区挂载目录名用本地目录名（M65）**（功能提交 `dc9d240`）。档位 **minor**：
+新增对外端点 `allocate` 与按 key 释放 `close{key,purge:true}`，挂载目录命名语义变化（新挂载点的
+目录名从随机十六进制 id 变成本地目录名），无破坏性变更——已保存的十六进制目录不改名、不迁移。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v2.8.0**（`VERSION` 2.7.3 → 2.8.0；release 提交 `0fcd129`，tag `v2.8.0` → `0fcd129`，内含功能提交 `dc9d240`） |
+| 本版内容 | 挂载点 `<workspace>/browser/<32 位十六进制>` → `<workspace>/browser/<本地目录名>`；`allocate` 只读握一次手仲裁重名（`-2`…`-9` 再退化不透明尾巴）；key 校验从 `^[a-f0-9]{32}$` 换成"一个安全路径段"（遗留 32/48 hex 用同一规则通过）；删除文件夹总是按 key 释放路径（此前 token 过期后删除会留下空目录）；记录文件 `<ID>.json` → `<租户>.<ID>.json`（读兼容旧名）；旧网关三处降级只记 warning |
+| 构建物 | `bin/aigw`（2.8.0 / `0fcd129`，console minified + gzip：38 文件 595078→348074 B）与 `bin/dshgw`（2.8.0 / `0fcd129`）；`gwproxy` 本版无代码改动，**未重建、未重启**（线上仍是 2.3.0 / 2306c22；它的 `/version` 走代理回 aigw，所以也显示 2.8.0） |
+| 部署范围 | 本机两个单元：`dshgw-verify`（换 `bin/dshgw` 并重启，09:22:20 起）与 `aigw-local`（换 `bin/aigw` 并重启，09:22:43 起）。浏览器工作区插件由 `cmd/dshgw/plugin/` 直接提供（bwrap 只读绑定同一目录，`--ro-bind .../cmd/dshgw/plugin ...`），不需要重建，租户页面刷新即取到新客户端 |
+| 回滚点（二进制） | `data/prev/bin/aigw.prev-running-2.7.3-4a2de2d`（sha256 与发布前 `bin/aigw` 一致）与 `data/prev/bin/dshgw.prev-running-2.7.3-4a2de2d`，从 `/proc/<pid>/exe` 取（`bin/dshgw` 已被当天 e2e 构建覆盖，运行进程持已删除 inode），二者 `-version` 自证 `2.7.3 (revision 4a2de2d)`；回滚命令见 `data/prev/README.md` |
+| 回滚点（插件） | `git checkout v2.7.3 -- cmd/dshgw/plugin/browser-workspace`。只回滚网关二进制也是可用组合：新客户端对旧网关降级（`allocate` → `unknown endpoint` → 退回随机 key；按 key 释放 → `unknown directory capability` → 只 warning），挂载目录名回到随机 id |
+| 配置/数据变更 | 无配置改动、无数据库迁移；浏览器挂载记录文件名改为 `<租户>.<目录名>.json`，读取同时接受旧名，升级后崩溃残留仍能被启动清理 |
+
+**验证**（全部实测）：
+
+- `GET http://127.0.0.1:8088/version` → `{"revision":"0fcd129","ui":"minified","ui_encoding":"gzip","version":"2.8.0"}`；`/healthz`、`/readyz`、`/admin/ui/` 均 200，`js/api.js` 含 `/version`；`node scripts/ui-badge-test.mjs` 11 项通过
+- 跑的就是新构建：`/proc/<aigw pid>/exe` 与 `bin/aigw` sha256 相同（`6f68ef0b…`），`/proc/<dshgw pid>/exe` 与 `bin/dshgw` 相同（`85b9b570…`）；启动行分别为 `aigw starting version=2.8.0 revision=0fcd129` 与 `dshgw listening version=2.8.0 revision=0fcd129`
+- 探针与噪声：`aigw-local` 重启后 `level=ERROR` **0 条**；`dshgw` 重启窗口有 8 条 `dsh reverse proxy failed … *net.OpError`（09:22:21–09:22:28，worker 尚未就绪期间），最后一个 worker ready（09:22:36）之后 **0 条**
+- 租户面：6 个 worker scope 全部 running、`18400–18405` 全部 `worker ready`；门户 `18300`（带 Host）→ 200，`18301–18306` 全部 302；5 份 handshake URL 在 09:22 重新落盘（含 dsh-tenant）。`dsh-tenant` 的 SSH 工作区在重启后完好（`/proc/self/mountinfo` 里 6 条 workspace 内 sshfs 路径），M64 那条"重启杀 sshfs 却留死挂载"没有复发——2.7.3 的自愈修复生效
+- `gwproxy :8090`（带 Host）`/version` → 2.8.0 / `0fcd129`（代理 aigw）
+- `bin/dshgw doctor`：仅 `verify1` 的历史 2 项 FAIL（缺 `gateway.key`、缺 `settings.yaml`，此前记录已注明且未替它造凭据），其余租户全 OK
+- 本版功能的真机验收：`make dshgw-test` 全绿（含新增 Go 用例与 56 个插件 Node 测试）；`make dshgw-browser-e2e` **PASS 29 步**（记录 `Path` 与内核挂载都在 `browser/picked`，页面调用序列 `allocate:200` 在 `open:200` 之前）、`dshgw-browser-multi-e2e` **PASS 22 步**（A/B 挂在 `browser/picked-a`、`browser/picked-b`，删除同时释放挂载/挂载点/工作区）、`dshgw-browser-reload-e2e` PASS（断线与刷新恢复都保持同一路径）。三次都用**同一份源码**构建的临时网关（revision 标注 `dad0c96` = 本版功能提交）+ 真实 Chromium/FUSE/bwrap，细节见 `docs/browser-workspace-verification.md` 新增一节
+
+**未做/限制**：gpt001 未部署（用户只要求本机，公网仍是旧版本）。本机升级后**没有**再用真实租户 key
+复验 `allocate`/按 key 释放：state 里只有 12 字符 key 前缀（拿不到完整 key），portal 用 `sk-verify001`
+登录被拒（verify1 历史缺 key），而点击线上租户的浏览器工作区行会重启该账号 worker。这两条端点的线上
+证据是"同一份源码 + 同一套 e2e"，不是线上租户实测。排障期间我用纯 HTTP 探过 TLS 端口（09:22:07 六条
+`client sent an HTTP request to an HTTPS server`）并试过一次失败的 portal 登录，均为无害噪声。
+已有十六进制挂载点不迁移：要换成目录名就在租户页面删除该目录后重新添加（删除会释放旧路径，
+重新添加拿回目录名；换路径意味着工作区条目重建，旧工作区下 `cwd` 指向旧路径的会话不再归组）。
