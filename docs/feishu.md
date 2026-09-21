@@ -394,7 +394,8 @@ dshgw:
 
 相关日志与审计的关键字：`feishu_login_reject`、`feishu_bind_reject`、`feishu_invite_reject`（含 reason：
 `code_rejected` / `credentials` / `app_unavailable` / `rate_limited` / `unreachable` / `unbound open id` /
-`tenant mismatch` / `invitation is no longer valid`）；门户侧还有 `feishu_dsh_login`、`login_key_selected`
+`tenant mismatch` / `invitation is no longer valid`）；门户侧还有 `feishu_dsh_login`、`login_key_selected`；
+aigw 侧还有 `feishu_key_pick`（多 Key 账号被送去选择页：记 `open_id` 与可用 Key 数量）
 （M72：多 Key 账号选了哪把）与 `feishu_login_reject`（dshgw 的审计，只记租户与结果）；
 管理员账号自身的写操作审计是 `create`、`update`、`reset_password`、`invite`、`delete`、`feishu_bind`、`feishu_unbind`
 （`target_type=admin_user`；账号级绑定用 `target_type=account`），登录是 `login`
