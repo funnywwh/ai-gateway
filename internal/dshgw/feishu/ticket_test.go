@@ -19,6 +19,10 @@ type ticketVector struct {
 	Secret string `json:"secret"`
 	Now    string `json:"now"`
 	Wire   string `json:"wire"`
+	// Mode says which verifier must accept this vector: a DSH ticket and a key-pick ticket
+	// (M72) are redeemed through different entry points, and the file is the shared contract
+	// for both.
+	Mode string `json:"mode"`
 }
 
 func loadVectors(t *testing.T) []ticketVector {
@@ -41,6 +45,16 @@ func loadVectors(t *testing.T) []ticketVector {
 		t.Error("the vector file must say how to regenerate it")
 	}
 	return doc.Vectors
+}
+
+// verifyAccept applies the entry point the vector's mode names. "unknown-mode" is deliberately
+// routed through the DSH verifier: that is where a ticket claiming an unrecognized mode must
+// be refused rather than accepted as "some other kind of ticket".
+func verifyAccept(v *Verifier, vector ticketVector) (Ticket, error) {
+	if vector.Mode == modeKeyPick {
+		return v.VerifyPick(vector.Wire)
+	}
+	return v.Verify(vector.Wire)
 }
 
 // Every vector the signer accepts must verify here, and every one it refuses must be refused
@@ -66,7 +80,7 @@ func TestSharedTicketVectors(t *testing.T) {
 		}
 		verifier.Now = func() time.Time { return now }
 
-		ticket, verifyErr := verifier.Verify(vector.Wire)
+		ticket, verifyErr := verifyAccept(verifier, vector)
 		if reason, rejected := wantRejected[vector.Name]; rejected {
 			var refusal *Error
 			if verifyErr == nil {
@@ -83,14 +97,59 @@ func TestSharedTicketVectors(t *testing.T) {
 			continue
 		}
 		// The payload must survive the trip with every field intact: the portal forwards the
-		// tenant, and the audit records the identity.
-		if ticket.Tenant == "" || ticket.OpenID == "" || ticket.Mode != "dsh" || ticket.Version != 1 {
+		// tenant, the picker forwards the account, and the audit records the identity.
+		if ticket.Mode != vector.Mode || ticket.OpenID == "" || ticket.Version != 1 {
 			t.Errorf("%s: decoded ticket is incomplete: %+v", vector.Name, ticket)
+		}
+		if ticket.Mode == modeDSH && ticket.Tenant == "" {
+			t.Errorf("%s: a DSH ticket without a tenant cannot address a portal", vector.Name)
+		}
+		if ticket.Mode == modeKeyPick && ticket.AccountID == 0 {
+			t.Errorf("%s: a key-pick ticket without an account cannot choose a key", vector.Name)
 		}
 		accepted++
 	}
 	if accepted == 0 {
 		t.Fatal("no valid vector was exercised")
+	}
+}
+
+// The two modes are not interchangeable: a key-pick ticket must not open a portal session, and
+// a DSH ticket must not be redeemable as a key pick. That is the whole reason M72 added an
+// entry point instead of reusing Verify.
+func TestTicketModesAreNotInterchangeable(t *testing.T) {
+	var keyPick, dsh ticketVector
+	for _, vector := range loadVectors(t) {
+		switch vector.Name {
+		case "keypick":
+			keyPick = vector
+		case "valid":
+			dsh = vector
+		}
+	}
+	if keyPick.Wire == "" || dsh.Wire == "" {
+		t.Fatal("the shared vectors must carry one accepted ticket per mode")
+	}
+	for _, tc := range []struct {
+		name   string
+		vector ticketVector
+		accept func(*Verifier, string) (Ticket, error)
+	}{
+		{"a key-pick ticket is not a DSH ticket", keyPick, (*Verifier).Verify},
+		{"a DSH ticket is not a key pick", dsh, (*Verifier).VerifyPick},
+	} {
+		now, err := time.Parse(time.RFC3339, tc.vector.Now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		verifier, err := New([]byte(tc.vector.Secret))
+		if err != nil {
+			t.Fatal(err)
+		}
+		verifier.Now = func() time.Time { return now }
+		if _, err := tc.accept(verifier, tc.vector.Wire); err == nil {
+			t.Errorf("%s: accepted", tc.name)
+		}
 	}
 }
 

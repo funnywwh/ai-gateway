@@ -94,9 +94,29 @@ func (v *Verifier) now() time.Time {
 	return time.Now().UTC()
 }
 
-// Verify checks a ticket's signature, version, mode, expiry and single use, and consumes its
-// nonce on success.
+// modeDSH and modeKeyPick are the ticket modes this verifier accepts. Each entry point below
+// accepts exactly one of them, so a ticket minted for one purpose can never be redeemed for
+// the other (M72 added the second mode for the multi-key selection step).
+const (
+	modeDSH     = "dsh"
+	modeKeyPick = "keypick"
+)
+
+// Verify checks a DSH ticket's signature, version, mode, expiry and single use, and consumes
+// its nonce on success.
 func (v *Verifier) Verify(raw string) (Ticket, error) {
+	return v.verify(raw, modeDSH)
+}
+
+// VerifyPick checks a key-pick ticket (M72): the step between "who you are" and a session,
+// where the gateway asks which of the account's keys this login should be recorded against.
+// It carries an account and no tenant — the picker runs before a tenant is entered — and it is
+// consumed exactly like a DSH ticket, so a picker link is worth one submission.
+func (v *Verifier) VerifyPick(raw string) (Ticket, error) {
+	return v.verify(raw, modeKeyPick)
+}
+
+func (v *Verifier) verify(raw, mode string) (Ticket, error) {
 	var zero Ticket
 	if !v.Enabled() {
 		return zero, ticketErr(reasonUnavailable)
@@ -119,10 +139,18 @@ func (v *Verifier) Verify(raw string) (Ticket, error) {
 	if ticket.Version != 1 {
 		return zero, ticketErr(reasonVersion)
 	}
-	if ticket.Mode != "dsh" {
+	if ticket.Mode != mode {
 		return zero, ticketErr(reasonMode)
 	}
-	if strings.TrimSpace(ticket.Tenant) == "" || strings.TrimSpace(ticket.OpenID) == "" || strings.TrimSpace(ticket.Nonce) == "" {
+	if strings.TrimSpace(ticket.OpenID) == "" || strings.TrimSpace(ticket.Nonce) == "" {
+		return zero, ticketErr(reasonIncomplete)
+	}
+	// Each mode must carry the one thing it is for: a DSH ticket is useless without a tenant,
+	// a key-pick ticket without the account whose keys are being chosen between.
+	if mode == modeDSH && strings.TrimSpace(ticket.Tenant) == "" {
+		return zero, ticketErr(reasonIncomplete)
+	}
+	if mode == modeKeyPick && ticket.AccountID == 0 {
 		return zero, ticketErr(reasonIncomplete)
 	}
 	now := v.now()

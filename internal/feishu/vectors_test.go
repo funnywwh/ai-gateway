@@ -19,6 +19,9 @@ type ticketVector struct {
 	Secret string `json:"secret"`
 	Now    string `json:"now"`
 	Wire   string `json:"wire"`
+	// Mode names the verifier entry point this vector belongs to: DSH tickets and key-pick
+	// tickets (M72) are separate endpoints on both sides of the contract.
+	Mode string `json:"mode"`
 }
 
 func loadVectors(t *testing.T) []ticketVector {
@@ -66,7 +69,7 @@ func TestTicketVectorsAreReproducedAndEnforced(t *testing.T) {
 		}
 		codec.Now = func() time.Time { return now }
 
-		ticket, verifyErr := codec.VerifyTicket(vector.Wire)
+		ticket, verifyErr := acceptVector(codec, vector)
 		if reason, rejected := wantRejected[vector.Name]; rejected {
 			var ticketErr *TicketError
 			if verifyErr == nil {
@@ -90,14 +93,24 @@ func TestTicketVectorsAreReproducedAndEnforced(t *testing.T) {
 		if wire != vector.Wire {
 			t.Errorf("%s: re-encoded ticket differs\n got %s\nwant %s", vector.Name, wire, vector.Wire)
 		}
-		if ticket.Nonce != "0123456789abcdef" {
-			t.Errorf("%s: decoded the wrong ticket: %+v", vector.Name, ticket)
+		if ticket.Mode != vector.Mode {
+			t.Errorf("%s: the mode must survive signing: %+v", vector.Name, ticket)
 		}
 		seenValid = true
 	}
 	if !seenValid {
 		t.Fatal("no valid vector was exercised")
 	}
+}
+
+// acceptVector verifies through the entry point the vector's mode names. "unknown-mode" goes
+// through the DSH verifier on purpose: an unrecognized mode must be refused there, not routed
+// somewhere more permissive.
+func acceptVector(codec *TicketCodec, vector ticketVector) (Ticket, error) {
+	if vector.Mode == TicketModeKeyPick {
+		return codec.VerifyKeyPick(vector.Wire)
+	}
+	return codec.VerifyTicket(vector.Wire)
 }
 
 func asTicketError(err error, target **TicketError) bool {

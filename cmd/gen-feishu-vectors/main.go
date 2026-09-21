@@ -10,20 +10,14 @@ import (
 )
 
 type vector struct {
-	Name        string `json:"name"`
-	Secret      string `json:"secret"`
-	Now         string `json:"now"`
-	Wire        string `json:"wire,omitempty"`
-	Ticket      *struct {
-		Version   int    `json:"v"`
-		Mode      string `json:"mode"`
-		Tenant    string `json:"tenant"`
-		KeyID     int64  `json:"key_id"`
-		AccountID int64  `json:"account_id"`
-		OpenID    string `json:"open_id"`
-		Nonce     string `json:"nonce"`
-		Expires   int64  `json:"exp"`
-	} `json:"ticket,omitempty"`
+	Name   string `json:"name"`
+	Secret string `json:"secret"`
+	Now    string `json:"now"`
+	Wire   string `json:"wire,omitempty"`
+	// Mode names the verifier that must accept this vector: DSH tickets and key-pick tickets
+	// (M72) are checked through different entry points on both sides, so the shared file has
+	// to say which one each vector belongs to.
+	Mode   string `json:"mode,omitempty"`
 	Reason string `json:"reason,omitempty"`
 }
 
@@ -42,7 +36,8 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		out = append(out, vector{Name: name, Secret: string(secret), Now: now.Format(time.RFC3339), Wire: wire})
+		out = append(out, vector{Name: name, Secret: string(secret), Now: now.Format(time.RFC3339),
+			Wire: wire, Mode: t.Mode})
 	}
 	add("valid", feishu.Ticket{Version: 1, Mode: feishu.TicketMode, Tenant: "alice",
 		KeyID: 7, AccountID: 3, OpenID: "ou_alice", Nonce: "0123456789abcdef", Expires: now.Add(120 * time.Second).Unix()})
@@ -56,6 +51,11 @@ func main() {
 		KeyID: 7, AccountID: 3, OpenID: "ou_alice", Nonce: "5555666677778888", Expires: now.Add(60 * time.Second).Unix()})
 	add("empty-tenant", feishu.Ticket{Version: 1, Mode: feishu.TicketMode, Tenant: "",
 		KeyID: 7, AccountID: 3, OpenID: "ou_alice", Nonce: "9999aaaabbbbcccc", Expires: now.Add(60 * time.Second).Unix()})
+	// M72: the key-pick ticket of the multi-key selection step. It names an account and no
+	// tenant, and it is accepted by the other verifier entry point — so this vector is what
+	// proves the two modes cannot be swapped for each other.
+	add("keypick", feishu.Ticket{Version: 1, Mode: feishu.TicketModeKeyPick, Tenant: "",
+		AccountID: 3, OpenID: "ou_alice", Nonce: "c0ffee1234567890", Expires: now.Add(120 * time.Second).Unix()})
 	// A tampered wire: signed with the right key but a payload that was modified after
 	// signing is caught by the signature; this vector is signed with a different key.
 	add("other-key", feishu.Ticket{Version: 1, Mode: feishu.TicketMode, Tenant: "alice",

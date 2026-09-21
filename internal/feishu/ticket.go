@@ -47,6 +47,13 @@ const (
 	// prove who somebody is but cannot hand that browser a cookie for the console's host.
 	// A one-time ticket in the URL can.
 	TicketModeConsole = "console"
+	// TicketModeKeyPick is the multi-key selection step of a portal login (M72). aigw mints
+	// it once it knows WHICH account the browser may enter, and the gateway renders a picker
+	// from it on its own origin: an account whose keys are equivalent for authorization still
+	// needs one named key for the audit trail, and the gateway is the side that owns the
+	// form. It names no tenant — the picker runs before a session exists — which is exactly
+	// why it is a third mode rather than a variant of the DSH ticket.
+	TicketModeKeyPick = "keypick"
 )
 
 // MaxTicketTTL bounds a ticket's lifetime from the verifier's side. It is deliberately
@@ -138,7 +145,22 @@ func (c *TicketCodec) IssueConsole(adminUserID int64, openID, nonce string) (str
 	}, nonce)
 }
 
-// issue fills in the shared checks and signs one ticket.
+// IssueKeyPick mints a ticket for the multi-key selection step of a portal login (M72).
+//
+// It names the account, not a tenant or a key: the browser has proved who it is, and what it
+// still owes the gateway is which of the account's keys this session should be recorded
+// against. The gateway turns it into a form and calls back with the chosen key id, which it
+// validates against the account's live key list — so nothing here is a capability to act as
+// a specific key.
+func (c *TicketCodec) IssueKeyPick(accountID int64, openID, nonce string) (string, Ticket, error) {
+	if accountID == 0 {
+		return "", Ticket{}, errors.New("feishu: a key-pick ticket needs an account")
+	}
+	return c.issue(Ticket{
+		Version: 1, Mode: TicketModeKeyPick, AccountID: accountID, OpenID: openID,
+	}, nonce)
+}
+
 func (c *TicketCodec) issue(ticket Ticket, nonce string) (string, Ticket, error) {
 	if strings.TrimSpace(ticket.OpenID) == "" {
 		return "", Ticket{}, errors.New("feishu: a ticket needs an identity")
@@ -175,6 +197,20 @@ func (c *TicketCodec) VerifyConsoleTicket(raw string) (Ticket, error) {
 	return ticket, nil
 }
 
+// VerifyKeyPick is VerifyTicket for the key-pick mode (M72): aigw's own side of the selection
+// step, used by tests and by any future reader of the picker link. The gateway has its own
+// independent verifier (internal/dshgw/feishu), which is the side that actually redeems it.
+func (c *TicketCodec) VerifyKeyPick(raw string) (Ticket, error) {
+	ticket, err := c.verify(raw, TicketModeKeyPick)
+	if err != nil {
+		return Ticket{}, err
+	}
+	if ticket.AccountID == 0 {
+		return Ticket{}, ticketErr("incomplete ticket")
+	}
+	return ticket, nil
+}
+
 func (c *TicketCodec) verify(raw, mode string) (Ticket, error) {
 	var zero Ticket
 	encoded, signature, ok := strings.Cut(strings.TrimSpace(raw), ".")
@@ -198,7 +234,12 @@ func (c *TicketCodec) verify(raw, mode string) (Ticket, error) {
 	if ticket.Mode != mode {
 		return zero, ticketErr("unknown mode")
 	}
+	// Each mode carries the one thing it is for: a DSH ticket is useless without a tenant,
+	// and a key-pick ticket without the account whose keys are being chosen between.
 	if mode == TicketMode && strings.TrimSpace(ticket.Tenant) == "" {
+		return zero, ticketErr("incomplete ticket")
+	}
+	if mode == TicketModeKeyPick && ticket.AccountID == 0 {
 		return zero, ticketErr("incomplete ticket")
 	}
 	if strings.TrimSpace(ticket.OpenID) == "" || strings.TrimSpace(ticket.Nonce) == "" {
