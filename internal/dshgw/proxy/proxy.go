@@ -46,13 +46,26 @@ type DSHAuthorizer interface {
 	Authorize(context.Context, string) (string, error)
 }
 
-// KeyAdopter persists the key a user just proved valid for a tenant that has none,
-// and provisions that tenant. It is implemented by the lifecycle layer: the proxy
-// decides identity, it does not write tenant state itself.
-type KeyAdopter interface {
-	// AdoptKey stores the key when the tenant has a different one, or none, and
-	// reports whether anything changed.
-	AdoptKey(ctx context.Context, tenant, key string) (bool, error)
+// LoginPrepare is the login moment's lifecycle hook (M69).
+//
+// Every successful login re-applies the platform's slice of a tenant's dsh configuration —
+// the model list its own worker key is granted on aigw, and the credential reference that
+// provider reads — and makes sure the tenant's worker is up, because signing out stops it.
+// It is implemented by the lifecycle layer: the proxy decides identity, it does not write
+// tenant state itself.
+//
+// submittedKey is the key this login presented, or "" for a login that carries none (a Feishu
+// ticket). It is only ever adopted when the tenant has no key at all; the platform slice itself
+// always comes from the tenant's stored worker key.
+type LoginPrepare interface {
+	PrepareLogin(ctx context.Context, tenant, submittedKey string) error
+}
+
+// LogoutStop stops a tenant's dsh once its last session has signed out (M69). The proxy decides
+// *when* (it owns the session store, so it knows whether another window is still signed in); the
+// lifecycle layer decides *how*.
+type LogoutStop interface {
+	StopSignedOut(ctx context.Context, tenant string) error
 }
 
 type Proxy struct {
@@ -64,7 +77,8 @@ type Proxy struct {
 	Validator         KeyValidator
 	Authorizer        DSHAuthorizer
 	KeySource         KeySource
-	KeyAdopter        KeyAdopter
+	LoginPrepare      LoginPrepare
+	LogoutStop        LogoutStop
 	Transport         http.RoundTripper
 	BrowserWorkspaces interface {
 		ServeTenant(http.ResponseWriter, *http.Request, registry.Tenant, string)
@@ -364,19 +378,10 @@ func (p *Proxy) login(w http.ResponseWriter, r *http.Request) {
 		p.renderLogin(w, http.StatusForbidden, "该账号的 dsh 租户尚未就绪，请联系管理员启用或检查租户状态")
 		return
 	}
-	// A tenant whose key was never stored (built by hand, restored, migrated) has no
-	// provider configuration, so its dsh would open with an empty model list. The
-	// user just proved this key is valid for this tenant, which makes login the one
-	// moment where the deployment can configure it without asking for anything more.
-	// A failure here must not block a valid login: the session is still issued.
-	if p.KeyAdopter != nil {
-		if adopted, err := p.KeyAdopter.AdoptKey(r.Context(), tenant.Name, key); err != nil {
-			p.log().Warn("adopting the login key failed; the tenant keeps its current configuration",
-				"tenant", tenant.Name, "err", err)
-		} else if adopted {
-			p.log().Info("login key adopted for the tenant", "tenant", tenant.Name)
-		}
-	}
+	// The login moment owns the tenant's lifecycle (M69): the platform slice of its dsh
+	// configuration is re-applied from aigw on every sign-in, and the worker — stopped when the
+	// last session signed out — is brought back up before the browser is sent to it.
+	p.prepareLogin(r, tenant, key)
 	token, err := p.Sessions.Issue(tenant.Name, p.Config.SessionTTL.Duration())
 	if err != nil {
 		p.log().Error("issue dshgw session failed", "err", err)
@@ -399,6 +404,70 @@ func (p *Proxy) login(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, p.Config.WithTrailingSlash(p.Config.TenantOrigin(tenant.Name)), http.StatusFound)
 }
+
+// loginPrepareTimeout bounds the login-time lifecycle work: an aigw model refresh plus, on a
+// cold tenant, a worker start and its readiness probe. Generous on purpose — the alternative is
+// sending the browser to a worker that is not up yet, which is a 502 the person cannot act on —
+// but bounded, so a wedged worker cannot hold the login request open forever.
+const loginPrepareTimeout = 45 * time.Second
+
+// logoutStopTimeout bounds the logout-time worker stop. The runner signals TERM and escalates to
+// KILL, so this only has to cover a worker that is slow to die.
+const logoutStopTimeout = 30 * time.Second
+
+// prepareLogin runs the login-time lifecycle hook (M69).
+//
+// It is fail-soft on purpose: the person has already proved who they are, so a configuration
+// refresh or a cold start that did not work out must not turn into a refused login. The failure
+// is logged and audited; the tenant's page will report the worker's absence.
+func (p *Proxy) prepareLogin(r *http.Request, tenant registry.Tenant, submittedKey string) {
+	if p.LoginPrepare == nil {
+		return
+	}
+	// The request context dies with the response, and this work deliberately outlives the
+	// browser's patience: a worker left half-started is worse than a slow login.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), loginPrepareTimeout)
+	defer cancel()
+	if err := p.LoginPrepare.PrepareLogin(ctx, tenant.Name, submittedKey); err != nil {
+		p.log().Warn("preparing the tenant for login failed; the session is still issued",
+			"tenant", tenant.Name, "err", err)
+		p.audit(r, tenant.Name, "login_prepare_failed", fmt.Sprintf("%T", err), http.StatusFound)
+	}
+}
+
+// stopSignedOutTenants stops the dsh of every tenant whose last session this logout revoked
+// (M69). A tenant that still has a live session anywhere keeps its worker: signing out in one
+// window must not kill a turn somebody is running in another.
+func (p *Proxy) stopSignedOutTenants(r *http.Request, tenants []string) {
+	if p.LogoutStop == nil || len(tenants) == 0 {
+		return
+	}
+	for _, name := range tenants {
+		remaining, err := p.Sessions.CountTenant(name)
+		if err != nil {
+			p.log().Error("counting a tenant's remaining sessions failed", "tenant", name, "error_type", fmt.Sprintf("%T", err))
+			continue
+		}
+		if remaining > 0 {
+			p.log().Info("tenant dsh kept running: another session is still signed in", "tenant", name, "sessions", remaining)
+			p.audit(r, name, "logout_worker_kept", "another session is still signed in", http.StatusSeeOther)
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), logoutStopTimeout)
+		err = p.LogoutStop.StopSignedOut(ctx, name)
+		cancel()
+		if err != nil {
+			// The browser's session is already gone, so the logout itself succeeded; a worker
+			// that would not die is an operator's problem and is reported as one.
+			p.log().Error("stopping a signed-out tenant's dsh failed", "tenant", name, "error_type", fmt.Sprintf("%T", err))
+			p.audit(r, name, "logout_worker_stop_failed", fmt.Sprintf("%T", err), http.StatusSeeOther)
+			continue
+		}
+		p.log().Info("tenant dsh stopped: its last session signed out", "tenant", name)
+		p.audit(r, name, "logout_worker_stop", "last session signed out", http.StatusSeeOther)
+	}
+}
+
 func (p *Proxy) allowLogin(ip string) bool {
 	p.rateMu.Lock()
 	defer p.rateMu.Unlock()
@@ -433,6 +502,7 @@ func (p *Proxy) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenants := p.Registry.List()
+	revoked := make([]string, 0, len(tenants))
 	for _, t := range tenants {
 		for _, cookie := range r.Cookies() {
 			if cookie.Name == p.Config.SessionCookieName(t.Name) {
@@ -441,9 +511,12 @@ func (p *Proxy) logout(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, "logout unavailable; please retry", http.StatusServiceUnavailable)
 					return
 				}
+				revoked = append(revoked, t.Name)
 			}
 		}
 	}
+	// Signing out stops that tenant's dsh once nobody is left in it (M69).
+	p.stopSignedOutTenants(r, revoked)
 	for _, t := range tenants {
 		p.setSessionCookie(w, t.Name, "", true)
 	}
@@ -718,6 +791,8 @@ func (p *Proxy) tenantLogout(w http.ResponseWriter, r *http.Request, t registry.
 		http.Error(w, "logout unavailable; please retry", http.StatusServiceUnavailable)
 		return
 	}
+	// Signing out of this tenant stops its dsh once nobody is left in it (M69).
+	p.stopSignedOutTenants(r, []string{t.Name})
 	p.setSessionCookie(w, t.Name, "", true)
 	p.audit(r, t.Name, "tenant_logout_success", "session revoked", http.StatusSeeOther)
 	w.Header().Set("Cache-Control", "no-store")

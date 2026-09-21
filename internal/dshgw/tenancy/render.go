@@ -61,7 +61,7 @@ func RenderTenantArtifacts(cfg *config.Config, t registry.Tenant, key string, mo
 		Version int               `yaml:"version"`
 		Refs    map[string]string `yaml:"refs"`
 		Records map[string]any    `yaml:"records"`
-	}{1, map[string]string{"AIGW_API_KEY": key}, map[string]any{}})
+	}{1, map[string]string{AIGWAPIKeyRef: key}, map[string]any{}})
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +150,7 @@ func renderSettings(cfg *config.Config, existing []byte, models []aigw.Model) ([
 		return yaml.Marshal(root)
 	}
 	provider := aigwProvider{
-		APIKeyEnv: "AIGW_API_KEY", API: "openai-responses",
+		APIKeyEnv: AIGWAPIKeyRef, API: "openai-responses",
 		BaseURL: strings.TrimRight(cfg.AigwBaseURL, "/") + "/v1",
 		Models:  out, Compat: providerCompat{SupportsStrictMode: true},
 	}
@@ -200,6 +200,58 @@ func updateSettingsLocked(cfg *config.Config, path string, models []aigw.Model) 
 	return securefile.WriteAtomic(path, data, 0o600)
 }
 
+// AIGWAPIKeyRef is the credential reference the rendered aigw provider reads its key from
+// (`apiKeyEnv`). It is platform-owned: the key belongs to the deployment, not to the tenant.
+const AIGWAPIKeyRef = "AIGW_API_KEY"
+
+// EnsureCredentialRef makes sure a tenant's .credentials.yaml still holds the platform's
+// credential reference, and reports whether it had to write (M69).
+//
+// The file has two owners: dshgw writes `refs` (the platform's key) and dsh writes `records`
+// (browser session grants). A tenant page can therefore end up with the reference removed —
+// observed on this host, where `refs` came back empty while the provider entry was also gone —
+// and nothing else would ever put it back. Only the named reference is touched: every other ref
+// and every record is preserved, and an already-correct value is not rewritten (no mtime churn,
+// no needless lock contention with the tenant's own writer).
+func EnsureCredentialRef(path, ref, value string) (bool, error) {
+	if ref == "" || value == "" {
+		return false, errors.New("credential ref and value are required")
+	}
+	changed := false
+	err := withDSHFileLock(path, func() error {
+		data, err := securefile.ReadLimitedRegular(path, 16<<20)
+		if err != nil {
+			return err
+		}
+		var doc credentialsFile
+		dec := yaml.NewDecoder(strings.NewReader(string(data)))
+		dec.KnownFields(true)
+		if err := dec.Decode(&doc); err != nil {
+			return err
+		}
+		if doc.Version != 1 {
+			return fmt.Errorf("unsupported credentials version %d", doc.Version)
+		}
+		if doc.Refs == nil {
+			doc.Refs = map[string]string{}
+		}
+		if doc.Refs[ref] == value {
+			return nil
+		}
+		doc.Refs[ref] = value
+		next, err := yaml.Marshal(doc)
+		if err != nil {
+			return err
+		}
+		if err := securefile.WriteAtomic(path, next, 0o600); err != nil {
+			return err
+		}
+		changed = true
+		return nil
+	})
+	return changed, err
+}
+
 type credentialsFile struct {
 	Version int               `yaml:"version"`
 	Refs    map[string]string `yaml:"refs"`
@@ -234,7 +286,7 @@ func rotateCredentialsLocked(path, key string) error {
 	if doc.Records == nil {
 		doc.Records = map[string]any{}
 	}
-	doc.Refs["AIGW_API_KEY"] = key
+	doc.Refs[AIGWAPIKeyRef] = key
 	next, err := yaml.Marshal(doc)
 	if err != nil {
 		return err

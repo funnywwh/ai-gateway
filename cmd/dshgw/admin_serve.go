@@ -45,8 +45,11 @@ type AdminOps interface {
 }
 
 type managerOps struct {
-	m         *tenancy.Manager
-	validator *aigw.Client
+	m *tenancy.Manager
+	// validator is the interface, not *aigw.Client: the login hook's policy (which key the
+	// platform slice is built from, and what a failed refresh leaves behind) is decided here and
+	// has to be testable without an HTTP server standing in for aigw.
+	validator keyValidator
 	cfg       *config.Config
 	logger    *slog.Logger
 }

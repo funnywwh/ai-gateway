@@ -4360,6 +4360,43 @@ sshfs 缺陷仍未关闭。
   控制台 200，dshgw 日志 `listening version=2.7.3 revision=4a2de2d`，
   6 个租户 worker 全部 ready、18301–18306 全部 302，admin socket ping ok。
 
+## M69 登录驱动的租户生命周期与「平台段 / 租户段」设置合并
+
+设计：`docs/design/m69-login-lifecycle-and-settings-merge.md`；规格：`docs/dshgw.md` §3b；
+运维说明：`deploy/dshgw/README.md` §12b；未完成项（真机验收/浏览器确认）见 `docs/TODO.md` 同名小节。
+
+需求原话：「dshgw 要合并租户手动设置，平台的模型限制使用平台的，其他用租户的，不要碰宿主机的，
+同步要发生在用户每次登录时，用户点击退出，强制退出 dsh 服务。」
+
+- [x] **设计先行**：设计文档 + 规格（`docs/dshgw.md` §3b）先落盘并贴到对话确认，再写代码；
+      关键决策 D1（归属按「键」不按文件：平台段 = `llm-pi-ai.providers.aigw` + 派生的
+      `agent-default-model` 纠正 + `refs.AIGW_API_KEY`；其余键归租户）、D2（平台段用**存储的 worker key**
+      取模型，不用登录提交的那把）、D3（每次登录同步；失败只告警不阻断登录）、D4（登录确保 worker 在跑，
+      已在跑不重启）、D5（退出只在"该租户无其它存活会话"时停；停 worker **不写** `suspended`）、
+      D7（平台段为空 = 删平台段、留租户段）、D8（不改 dshgw 重启后的启动策略）、
+      D9（"不碰宿主机 settings"落成可执行断言）
+- [x] `session.Store.CountTenant`（`internal/dshgw/session/session.go`）：未过期会话的按租户计数
+- [x] `tenancy.Manager.EnsureRunning`（`internal/dshgw/tenancy/manager.go`）：未跑且未被运维停用则
+      `startWorker`（内部先跑模型 hook）+ probe；已在跑返回 `false` 不重启；`suspended` 直接报错不拉起
+- [x] `tenancy.Manager.StopForLogout`：停 worker 但**不写** `suspended`，清理顺序同 `StopWorker`
+      （先 `Runner.Stop`，再 `BrowserWorkspaces.DropTenant`），幂等
+- [x] `tenancy.EnsureCredentialRef(path, ref, value)` + 常量 `AIGWAPIKeyRef`：恢复平台凭据引用，
+      保留其它 refs 与全部 records；值相同不写；版本非 1 报错。渲染器与轮换改为引用同一常量
+- [x] `proxy.LoginPrepare`（取代 `KeyAdopter` 字段）：门户 Key 登录与飞书登录共用 `p.prepareLogin`；
+      失败只告警 + 审计 `login_prepare_failed`，会话照发（`loginPrepareTimeout = 45s`）
+- [x] `proxy.LogoutStop`：门户 `POST /logout` 与租户侧栏 `POST /dshgw/logout/` 在"该租户已无其它
+      存活会话"时调用；有剩余会话则审计 `logout_worker_kept`；停失败审计 `logout_worker_stop_failed`
+      且退出仍 303（`logoutStopTimeout = 30s`）
+- [x] `cmd/dshgw`：新增 `login_prepare.go` 的 `managerOps.PrepareLogin`（采纳无 key 租户的登录 key →
+      读存储 worker key → `/v1/models` → `EnsureProvisioned`/`SyncModels` → `EnsureCredentialRef`
+      → `EnsureRunning`）与 `StopSignedOut`；`serve.go` 接线 `LoginPrepare`/`LogoutStop`；
+      `managerOps.validator` 由 `*aigw.Client` 改为 `keyValidator` 接口以便无 HTTP 测试
+- [x] 单测（新增/改写，见设计文档 §9 列表）：session 计数、凭据引用合并与幂等、`EnsureRunning`
+      的两条语义与挂起拒绝、`StopForLogout` 不写 suspended + 再登录能起、proxy 两条登录路径都
+      prepare（飞书提交 key 为空）+ 失败不阻断 + 多会话不停 + stopper 报错仍 303 + 租户侧栏退出、
+      `PrepareLogin` 用存储 key/保留租户段/恢复凭据/HOME 不被创建、aigw 失败不改文件、挂起不复活
+- [x] 测试：`go test ./internal/dshgw/... ./cmd/dshgw ./internal/arch` 全绿
+
 ### v2.8.0 发布与部署记录（2026-09-21，本机 aigw + dshgw；gpt001 未部署）
 
 本版内容：**浏览器工作区挂载目录名用本地目录名（M65）**（功能提交 `dc9d240`）。档位 **minor**：

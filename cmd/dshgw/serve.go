@@ -31,8 +31,11 @@ func (c *cli) serve() (serveErr error) {
 	gateway := proxy.New(deps.cfg, deps.reg, store, handshake.FileSource{Dir: deps.cfg.HandshakeDir}, &handshake.HTTPExchanger{}, deps.validator)
 	gateway.Authorizer = deps.validator
 	gateway.KeySource = proxy.FileKeySource{Root: deps.cfg.Deploy.TenantConfigRoot}
-	// Login adopts a credential already proven valid for this tenant.
-	gateway.KeyAdopter = ops
+	// Login is also the tenant's lifecycle moment (M69): every sign-in re-applies the platform
+	// slice of that tenant's dsh configuration and brings its worker up; signing out of the last
+	// session in a tenant stops it.
+	gateway.LoginPrepare = ops
+	gateway.LogoutStop = ops
 	if deps.cfg.Feishu.Enabled {
 		verifier, err := feishu.New([]byte(deps.cfg.Feishu.TicketSecret))
 		if err != nil {

@@ -103,6 +103,36 @@ Host 防护）。真正的差异不在上游，而在入口 nginx 是否改写�
 面板（独立插件）。租户侧模型与授权管理在 aigw 控制台完成；若要租户端口同样可用，见
 `docs/design/m52-dsh-enable.md` 的 A/B 决策。
 
+### 3b. 设置的归属、每次登录同步与退出即停（M69，规格）
+
+> 状态：**已实现（M69）**。设计：[M69](design/m69-login-lifecycle-and-settings-merge.md)；
+> 运维说明与排障：[部署手册 §12b](../deploy/dshgw/README.md)。
+
+**归属按「键」划分，不按文件。** 租户的 `settings.yaml` 与 `.credentials.yaml` 由两方共同写：
+平台（dshgw）与租户自己（dsh 的 settings-file + 租户页面的设置面板）。
+
+| 段 | 谁拥有 | 内容 |
+|---|---|---|
+| 平台段 | dshgw，每次同步重写 | `llm-pi-ai.providers.aigw`（模型清单 = 该租户 worker key 在 aigw 的授权结果）、由它派生的 `agent-default-model` 纠正、`.credentials.yaml` 的 `refs.AIGW_API_KEY` |
+| 租户段 | 租户，dshgw 只原样保留 | 其它 provider（含租户自己的 key 与 `baseURL`）、`llm-deepseek`、`ui-theme`、`permission`、`ui-onboarding`、`agent-default-model` 指向非 aigw provider 时的值、`.credentials.yaml` 的其它 refs 与全部 records |
+
+因此：租户手工增删 aigw 段或删掉 `AIGW_API_KEY`，下一次登录同步会被平台段覆盖回授权结果；
+租户自己的 provider 与界面偏好不受影响。**平台的模型限制始终来自平台的授权结果，不来自租户文件。**
+
+**不碰宿主机的 settings。** dshgw 只写 `state_dir/tenants/<tenant>/.dsh/**`（以及
+`tenant-config/<tenant>/gateway.key`）；操作者自己的 `~/.dsh/settings.yaml` 既不读也不写，
+也不会被当作租户模板。
+
+**同步时机**：建户、`dshgw sync-models <tenant>`、worker 启动前，以及**每次登录**
+（门户 Key 登录与飞书登录）。登录同步用**该租户存储的 worker key**（不是登录提交的那把 key：
+同账号可能有多把 key、授权不同），aigw 不可达或拒绝时只告警、不阻断登录。
+
+**退出即停**：用户点击退出（门户 `POST /logout` 或租户侧栏 `POST /dshgw/logout/`）后，若该租户
+**已无其它存活会话**，则强制停掉该租户的 dsh worker（SIGTERM→超时 SIGKILL），并清理它的
+browser-fs 工作区；该租户还有别的会话在用时保持运行（审计 `logout_worker_kept`）。
+停 worker **不写** `suspended`——那是运维的停用意图，写入会让 dshgw 重启后不再拉起该租户。
+登录时若 worker 没在跑且租户未被运维停用，则先把它启动并就绪再跳转，因此"退出即停、再登录即起"。
+
 ## 4. 代理契约
 
 - 只连接 registry 指定的 `127.0.0.1:<workerPort>`，HTTP `Host` 固定为同一 authority。

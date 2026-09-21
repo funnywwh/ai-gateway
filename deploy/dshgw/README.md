@@ -600,6 +600,51 @@ no-store 会让控制台每次打开都重新下载。
 **实测**（经真实流量）：`:8090/v1/models` → `no-store…`；`:8090/admin/ui/app.css` → `public, max-age=300`（未受影响）；
 租户 `POST /api/session/modelCatalog` → `no-store…`；`GET /`（shell）不加 no-store。
 
+## 12b. 登录同步与退出即停（M69）
+
+租户的 `settings.yaml` 与 `.credentials.yaml` 由**两方**共同写：dshgw（平台段）与租户自己
+（dsh 的 settings-file + 租户页面的设置面板）。归属按**键**划分：
+
+| 段 | 谁拥有 | 内容 |
+|---|---|---|
+| 平台段 | dshgw，每次同步重写 | `llm-pi-ai.providers.aigw`（= 该租户 worker key 在 aigw 的授权模型）、由它派生的 `agent-default-model` 纠正、`refs.AIGW_API_KEY` |
+| 租户段 | 租户，dshgw 只原样保留 | 其它 provider、`llm-deepseek`、`ui-theme`、`permission`、`ui-onboarding`、其它 refs 与全部 records |
+
+**同步时机**：建户、`bin/dshgw sync-models <租户>`、worker 启动前，以及**每次登录**
+（门户 Key 登录与飞书登录）。登录这次用**该租户存储的 worker key**
+（`<state_dir>/tenant-config/<租户>/gateway.key`）取模型，不是登录时提交的那把 key；
+aigw 不可达或拒绝时**只告警、不阻断登录**，也不会改文件。
+
+**退出即停**：门户 `POST /logout` 或租户侧栏 `POST /dshgw/logout/` 之后，若该租户**已无其它
+存活会话**，则停掉它的 dsh worker（SIGTERM → 超时 SIGKILL，并清理 browser-fs 工作区）；
+还有别的会话在用时保持运行。**停 worker 不写 `suspended`**——那是控制台「启用/停用」的意图，
+写了会让 dshgw 重启后不再拉起这个租户。下次登录会重新同步并把它启动起来（冷启动等待 2–4s，
+登录请求内完成，所以跳转过去就能用）。
+
+**排障**：
+
+```bash
+# 登录这次做了些什么（每个租户一行）
+journalctl --user -u dshgw-verify -n 200 | grep 'prepared for login'
+
+# 谁把 dsh 停掉了：审计事件（门户与租户侧栏都在这里）
+grep -E 'logout_worker_(stop|kept|stop_failed)|login_prepare_failed' \
+  data/dshgw-verify/state/audit.jsonl | tail
+
+# worker 现在在不在（进程 + worker 端口）
+pgrep -af 'dsh-0.1.2-rc.1/lib/bin.js web' ; ss -ltnp | grep 184
+```
+
+**常见现象**：
+
+| 现象 | 含义 |
+|---|---|
+| 登录后租户页 502 / 空白 | 该租户的 worker 没起来：看 `prepared for login` 那行是否报错（aigw 不可达、key 被 401、模板缺失），日志里有 `worker output` 片段 |
+| 退出后租户端口仍监听 | 端口始终监听（网关自己的 edge listener），要看的是**worker 进程**是否消失；端口监听不代表 dsh 还在跑 |
+| 退出后 worker 仍在 | 该租户还有别的会话（另一个浏览器/窗口）——审计里是 `logout_worker_kept` |
+| 想无条件停 | 用控制台「停用」或 admin 通道 `tenant stop`（会写 `suspended`，重启后也不拉起） |
+| 租户页面把模型/密钥删了 | 下次登录自动恢复平台段；租户自建的 provider 不受影响 |
+
 ## 13. 安全边界（必读）
 
 - **没有 UID 边界**：所有租户 worker 与 aigw 同 UID；隔离来自 bubblewrap mount namespace

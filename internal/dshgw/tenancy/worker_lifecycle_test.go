@@ -125,3 +125,96 @@ func TestManagerWorkerStartAllowedWithoutRegistry(t *testing.T) {
 		t.Fatalf("nil registry should preserve standalone fixture behavior: %v", err)
 	}
 }
+
+// Signing out stops a tenant's dsh, so signing in has to start it again — before the browser is
+// redirected to it, and without disturbing a worker that is already serving somebody (M69).
+func TestEnsureRunningStartsAStoppedTenantAndLeavesARunningOneAlone(t *testing.T) {
+	m, r, tenant, launches := policyFixture(t)
+	ctx := context.Background()
+
+	started, err := m.EnsureRunning(ctx, tenant)
+	if err != nil {
+		t.Fatalf("EnsureRunning: %v", err)
+	}
+	if !started {
+		t.Fatal("a tenant with no worker was not started")
+	}
+	if len(r.Running()) != 1 {
+		t.Fatalf("running workers = %+v, want the tenant's", r.Running())
+	}
+	first := launchedPIDs(t, launches)
+
+	started, err = m.EnsureRunning(ctx, tenant)
+	if err != nil {
+		t.Fatalf("second EnsureRunning: %v", err)
+	}
+	if started {
+		t.Fatal("a running worker was reported as started")
+	}
+	if second := launchedPIDs(t, launches); len(second) != len(first) {
+		t.Fatalf("a running worker was restarted: %v -> %v", first, second)
+	}
+	// A running worker is left running: the login refresh changes settings.yaml, which dsh
+	// hot-reloads, and restarting would cut off whatever turn it is in.
+	if len(r.Running()) != 1 {
+		t.Fatalf("the worker disappeared: %+v", r.Running())
+	}
+}
+
+// The operator's suspension outranks a user's login: a tenant the deployment turned off is not
+// silently brought back by somebody signing in.
+func TestEnsureRunningRefusesASuspendedTenant(t *testing.T) {
+	m, r, tenant, launches := policyFixture(t)
+	tenant.Suspended = true
+	if err := m.Registry.Put(tenant); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Registry.Save(); err != nil {
+		t.Fatal(err)
+	}
+	started, err := m.EnsureRunning(context.Background(), tenant)
+	if err == nil || !strings.Contains(err.Error(), "suspended") {
+		t.Fatalf("a suspended tenant was started: started=%t err=%v", started, err)
+	}
+	if len(launchedPIDs(t, launches)) != 0 || len(r.Running()) != 0 {
+		t.Fatal("a suspended tenant got a worker")
+	}
+	current, _ := m.Registry.Get(tenant.Name)
+	if !current.Suspended {
+		t.Fatal("the durable suspension was cleared")
+	}
+}
+
+// StopForLogout stops the worker but must never record an operator suspension: that field is
+// the console's on/off intent, and a person signing out is not an operator action.
+func TestStopForLogoutStopsWithoutSuspending(t *testing.T) {
+	m, r, tenant, launches := policyFixture(t)
+	ctx := context.Background()
+	if _, err := m.EnsureRunning(ctx, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.StopForLogout(ctx, tenant); err != nil {
+		t.Fatalf("StopForLogout: %v", err)
+	}
+	if len(r.Running()) != 0 {
+		t.Fatalf("the worker survived the logout: %+v", r.Running())
+	}
+	assertLivePIDs(t, launches, 0)
+	current, ok := m.Registry.Get(tenant.Name)
+	if !ok {
+		t.Fatal("the tenant disappeared from the registry")
+	}
+	if current.Suspended {
+		t.Fatal("a logout recorded an operator suspension")
+	}
+	// Idempotent: a tenant whose worker is already stopped logs out without error.
+	if err := m.StopForLogout(ctx, tenant); err != nil {
+		t.Fatalf("second StopForLogout: %v", err)
+	}
+	// And the tenant can sign in again.
+	started, err := m.EnsureRunning(ctx, tenant)
+	if err != nil || !started {
+		t.Fatalf("signing back in: started=%t err=%v", started, err)
+	}
+	assertLivePIDs(t, launches, 1)
+}

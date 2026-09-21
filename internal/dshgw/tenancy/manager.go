@@ -538,6 +538,62 @@ func (m *Manager) StartWorker(ctx context.Context, t registry.Tenant) error {
 	return nil
 }
 
+// EnsureRunning brings a tenant's worker up when it is not running, and reports whether it
+// started one (M69).
+//
+// Login is the caller: a tenant whose last session signed out has its dsh stopped, so the next
+// sign-in has to bring it back before the browser is redirected to it — otherwise the person
+// lands on a 502 that heals only if somebody else starts the tenant. A worker that is already
+// running is left alone: restarting it would kill whatever turn the tenant is in the middle of,
+// and dsh hot-reloads settings.yaml, which is the only thing a login refresh changes.
+//
+// The operator's suspension is honoured rather than cleared: `suspended` says the deployment
+// turned this tenant off, and a user signing in is not an operator action.
+func (m *Manager) EnsureRunning(ctx context.Context, t registry.Tenant) (bool, error) {
+	current, ok := m.Registry.Get(t.Name)
+	if !ok {
+		return false, fmt.Errorf("tenant %q not found", t.Name)
+	}
+	if current.Suspended {
+		return false, fmt.Errorf("tenant %s is suspended by the operator; not starting its worker", t.Name)
+	}
+	state, err := m.Status(ctx, current)
+	if err != nil {
+		return false, err
+	}
+	if state.Running {
+		return false, nil
+	}
+	if err := m.startWorker(ctx, current); err != nil {
+		return false, err
+	}
+	if err := m.ProbeWorker(ctx, current); err != nil {
+		return true, fmt.Errorf("worker readiness probe: %w (worker output: %s)", err, m.workers().Output(current.Name))
+	}
+	return true, nil
+}
+
+// StopForLogout stops a tenant's worker because its last session signed out (M69).
+//
+// It deliberately does NOT record a suspension. `suspended` is the operator's intent: writing
+// it here would make a person's logout look like an admin action, would stop dshgw from
+// restoring the tenant after a restart, and would leave the console showing "停用" for a tenant
+// nobody meant to disable. The cleanup order matches StopWorker: stop the process, then drop the
+// tenant's browser mounts so a mounted workspace cannot outlive the worker it was bound into.
+func (m *Manager) StopForLogout(ctx context.Context, t registry.Tenant) error {
+	current := t
+	if live, ok := m.Registry.Get(t.Name); ok {
+		current = live
+	}
+	if err := m.workers().Stop(ctx, current); err != nil {
+		return err
+	}
+	if m.BrowserWorkspaces != nil {
+		return m.BrowserWorkspaces.DropTenant(ctx, current.Name)
+	}
+	return nil
+}
+
 // Enable is the console's durable on/off toggle for one tenant's DSH.
 func (m *Manager) Enable(ctx context.Context, t registry.Tenant, on bool) error {
 	if !on {

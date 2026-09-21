@@ -83,6 +83,10 @@ func (p *Proxy) feishuLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Same lifecycle moment as a key login (M69): re-apply the platform slice of this tenant's
+	// dsh configuration and make sure its worker is up. A Feishu login carries no key, so the
+	// platform slice comes from the tenant's stored worker key alone.
+	p.prepareLogin(r, tenant, "")
 	token, err := p.Sessions.Issue(tenant.Name, p.Config.SessionTTL.Duration())
 	if err != nil {
 		p.log().Error("issue dshgw session failed", "tenant", tenant.Name, "err", err)

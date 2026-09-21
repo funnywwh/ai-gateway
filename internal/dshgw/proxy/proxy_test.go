@@ -121,10 +121,16 @@ func fixture(t *testing.T, worker http.Handler) (*Proxy, registry.Tenant, string
 	return p, tenant, up.URL, up
 }
 
-type adopterFunc func(context.Context, string, string) (bool, error)
+type prepareFunc func(context.Context, string, string) error
 
-func (f adopterFunc) AdoptKey(ctx context.Context, tenant, key string) (bool, error) {
-	return f(ctx, tenant, key)
+func (f prepareFunc) PrepareLogin(ctx context.Context, tenant, submittedKey string) error {
+	return f(ctx, tenant, submittedKey)
+}
+
+type stopFunc func(context.Context, string) error
+
+func (f stopFunc) StopSignedOut(ctx context.Context, tenant string) error {
+	return f(ctx, tenant)
 }
 
 func issue(t *testing.T, p *Proxy, tenant string, upstream *session.Upstream) string {
@@ -682,16 +688,17 @@ func TestPathModeUsesPrefixesForURLsCookiesAndFences(t *testing.T) {
 }
 
 // Login is the only moment the deployment holds a key it has already proven valid
-// for a tenant. A tenant that never stored one (hand-built, restored, migrated) is
-// configured here — but a provisioning failure must not turn a valid login into a
-// failure: the user gets their session either way.
-func TestLoginAdoptsTheKeyAndSurvivesAdoptionFailure(t *testing.T) {
+// for a tenant, and (M69) the moment the tenant's platform configuration is re-applied
+// and its worker is brought back up. The proxy's part of that contract is the call and
+// the failure policy: a provisioning failure must not turn a valid login into a failure —
+// the user gets their session either way.
+func TestLoginPreparesTheTenantAndSurvivesPreparationFailure(t *testing.T) {
 	p, _, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer up.Close()
-	var adopted string
-	p.KeyAdopter = adopterFunc(func(_ context.Context, tenant, key string) (bool, error) {
-		adopted = tenant + "|" + key
-		return true, nil
+	var prepared string
+	p.LoginPrepare = prepareFunc(func(_ context.Context, tenant, key string) error {
+		prepared = tenant + "|" + key
+		return nil
 	})
 	login := func() *http.Response {
 		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("key=sk-aaaaaaaaa-rest"))
@@ -706,15 +713,121 @@ func TestLoginAdoptsTheKeyAndSurvivesAdoptionFailure(t *testing.T) {
 	if response := login(); response.StatusCode != http.StatusFound {
 		t.Fatalf("login status = %d", response.StatusCode)
 	}
-	if adopted != "alice|sk-aaaaaaaaa-rest" {
-		t.Fatalf("the login key was not adopted: %q", adopted)
+	if prepared != "alice|sk-aaaaaaaaa-rest" {
+		t.Fatalf("the tenant was not prepared with the login key: %q", prepared)
 	}
 
-	p.KeyAdopter = adopterFunc(func(context.Context, string, string) (bool, error) {
-		return false, errors.New("aigw unreachable")
+	p.LoginPrepare = prepareFunc(func(context.Context, string, string) error {
+		return errors.New("aigw unreachable")
 	})
 	if response := login(); response.StatusCode != http.StatusFound {
-		t.Fatalf("a failed adoption blocked a valid login: %d", response.StatusCode)
+		t.Fatalf("a failed preparation blocked a valid login: %d", response.StatusCode)
+	}
+}
+
+// A Feishu login carries no key: it still prepares the tenant, with an empty submitted key,
+// because the platform slice comes from the tenant's stored worker key.
+func TestFeishuLoginPreparesTheTenantWithoutAKey(t *testing.T) {
+	setup := setupFeishu(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	var prepared, submitted = "unset", "unset"
+	setup.proxy.LoginPrepare = prepareFunc(func(_ context.Context, tenant, key string) error {
+		prepared, submitted = tenant, key
+		return nil
+	})
+	ticket := setup.signer(setup.tenant, time.Minute, "nonce-prepare")
+	response := setup.portalRequest(t, ticket, "")
+	if response.StatusCode != http.StatusFound {
+		t.Fatalf("feishu login status = %d", response.StatusCode)
+	}
+	if prepared != setup.tenant || submitted != "" {
+		t.Fatalf("feishu login prepared %q with submitted key %q", prepared, submitted)
+	}
+}
+
+// Signing out stops the tenant's dsh once nobody is left in it — and leaves it alone while
+// another session of the same tenant is still signed in, which is the difference between
+// "the user signed out" and "somebody's window closed".
+func TestLogoutStopsTheTenantOnlyWhenItsLastSessionLeaves(t *testing.T) {
+	p, _, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer up.Close()
+	tenant, _ := p.Registry.Get("alice")
+	var stopped []string
+	p.LogoutStop = stopFunc(func(_ context.Context, name string) error {
+		stopped = append(stopped, name)
+		return nil
+	})
+	// Two live sessions for the tenant: the first logout must not stop its dsh.
+	token := issue(t, p, tenant.Name, nil)
+	second := issue(t, p, tenant.Name, nil)
+	logout := func(cookie *http.Cookie) int {
+		req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+		req.Host = "dsh.test:32600"
+		req.Header.Set("Origin", "https://dsh.test:32600")
+		req.RemoteAddr = "198.51.100.9:1234"
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		recorder := httptest.NewRecorder()
+		p.Dispatch().ServeHTTP(recorder, req)
+		return recorder.Result().StatusCode
+	}
+	name := p.Config.SessionCookieName(tenant.Name)
+	if status := logout(&http.Cookie{Name: name, Value: token}); status != http.StatusSeeOther {
+		t.Fatalf("logout status = %d", status)
+	}
+	if len(stopped) != 0 {
+		t.Fatalf("a tenant with another live session was stopped: %v", stopped)
+	}
+	if status := logout(&http.Cookie{Name: name, Value: second}); status != http.StatusSeeOther {
+		t.Fatalf("second logout status = %d", status)
+	}
+	if len(stopped) != 1 || stopped[0] != tenant.Name {
+		t.Fatalf("the last session did not stop the tenant's dsh: %v", stopped)
+	}
+}
+
+// A worker that will not die is an operator's problem, not a failed logout: the browser still
+// goes back to the portal.
+func TestLogoutSurvivesAWorkerThatWillNotStop(t *testing.T) {
+	p, _, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer up.Close()
+	tenant, _ := p.Registry.Get("alice")
+	p.LogoutStop = stopFunc(func(context.Context, string) error { return errors.New("SIGKILL survived") })
+	token := issue(t, p, tenant.Name, nil)
+	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	req.Host = "dsh.test:32600"
+	req.Header.Set("Origin", "https://dsh.test:32600")
+	req.RemoteAddr = "198.51.100.9:1234"
+	req.AddCookie(&http.Cookie{Name: p.Config.SessionCookieName(tenant.Name), Value: token})
+	recorder := httptest.NewRecorder()
+	p.Dispatch().ServeHTTP(recorder, req)
+	if status := recorder.Result().StatusCode; status != http.StatusSeeOther {
+		t.Fatalf("logout status = %d", status)
+	}
+}
+
+// The tenant-side logout (the sidebar's account row) stops that tenant's dsh on the same rule.
+func TestTenantLogoutStopsTheTenantWhenItsLastSessionLeaves(t *testing.T) {
+	p, tenant, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer up.Close()
+	var stopped []string
+	p.LogoutStop = stopFunc(func(_ context.Context, name string) error {
+		stopped = append(stopped, name)
+		return nil
+	})
+	p.Config.AccountCard.Enabled = true
+	token := issue(t, p, tenant.Name, &session.Upstream{Name: "dsh-auth-test", Value: "held", Authority: net.JoinHostPort("127.0.0.1", itoa(tenant.WorkerPort))})
+	req := httptest.NewRequest(http.MethodPost, "/dshgw/logout/", nil)
+	req.Host = net.JoinHostPort("dsh.test", itoa(tenant.PublicPort))
+	req.Header.Set("Origin", "https://"+net.JoinHostPort("dsh.test", itoa(tenant.PublicPort)))
+	req.AddCookie(&http.Cookie{Name: p.Config.SessionCookieName(tenant.Name), Value: token})
+	recorder := httptest.NewRecorder()
+	p.Dispatch().ServeHTTP(recorder, req)
+	if status := recorder.Result().StatusCode; status != http.StatusSeeOther {
+		t.Fatalf("tenant logout status = %d", status)
+	}
+	if len(stopped) != 1 || stopped[0] != tenant.Name {
+		t.Fatalf("tenant logout did not stop its dsh: %v", stopped)
 	}
 }
 
