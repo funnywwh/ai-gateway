@@ -4661,6 +4661,35 @@ HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退�
 **未做/限制**：gpt001 未部署（用户只要求本机）；`host_shares` 保持默认关闭，M71 的宿主目录挂载未在
 真机启用；`dshgw` 二进制仍自报 3.0.1（未重建，非缺陷——它不随 `make build` 产出）。
 
+### v3.2.0 发布与部署记录（2026-09-21，本机 aigw-local + dshgw-verify；gpt001 未部署）
+
+本版内容：**M72 账号级飞书身份、组织页整合、多 Key 登录选择**（功能提交 `181586c`…`2c88a1e`，
+见上一小节）。档位 **minor**：账号级飞书身份、门户选 Key 页、按需建租户、组织页成为人员/账号主界面
+都是对外新能力；Key 级绑定退役与 `dshgw.auto_enable` 的语义都写在**配置**里（默认不变），
+所以升二进制本身不改行为——按仓库惯例（M70/M71 同类走 minor）定 minor。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v3.2.0**（`VERSION` 3.1.0 → 3.2.0；tag `v3.2.0` → `67a1d13`） |
+| 本版内容 | ① 飞书身份绑定到**账号**（`accounts.feishu_open_id` 成为门户登录判定真值，`PUT/DELETE /admin/api/v1/accounts/{id}/feishu`），Key 级绑定退役（旧入口回答 400 + 替代路径），启动迁移清空存量；② 门户 Key 登录在账号有 ≥2 把可用 Key 时先出 `/login/pick` 选择页（keypick 票据、PeekPick/VerifyPick、选中只进审计 `login_key_selected`）；③ `dshgw.auto_enable` + `accounts.dsh_disabled_at`：配置开启即所有激活账号可用、首登按需建租户（审计 actor=`dshgw-auto`），「停用 DSH」为显式例外且不被撤销；④ 控制台以组织架构为中心：人员行（DSH 三态/飞书身份/Key 计数）+ 展开详情（Key 列表与逐账号操作）、「未归属账户」合成行、飞书人员选择弹窗（不扫码）；⑤ 迁移 `0025`、M70 的「按 Key 身份」合并通道删除 |
+| 构建物 | `bin/aigw` 3.2.0 / `67a1d13`（console minified：41 文件 655130→377198 B，gzip 36 文件 374837→149760 B）；`bin/dshgw` 3.1.0 / `d9472a8`（**M72 期间单独重建过**：出口选择页在 dshgw 里，`make build` 不产出它） |
+| 部署范围 | 本机 `aigw-local`（3.1.0 `69da1dd` → 3.2.0 `67a1d13`，2026-09-21 17:20:42）；`dshgw-verify` 同日 17:12 已重启（M72 的 dshgw 构建）；`gwproxy-verify` 未动 |
+| 回滚点 | `data/prev/bin/aigw.prev-20260921-172041-ce81d06`（发版前在跑的 M72 二进制）、`data/prev/bin/aigw.prev-running-3.1.0-69da1dd`（M72 之前的版本）、`data/prev/bin/dshgw.prev-running-3.1.0-69da1dd`（M72 之前的 dshgw） |
+| 配置/数据变更 | `config.yaml`（gitignore）新增 `dshgw.auto_enable: true`；数据库迁移 `0025_account_dsh_auto.sql`；启动迁移把 5 条 Key 级飞书绑定搬到账号（`migrated=0 keys_cleared=5 conflicts=0`） |
+
+**验证**（本机实测）：
+
+- `GET /version` → `{"revision":"67a1d13","ui":"minified","ui_encoding":"gzip","version":"3.2.0"}`；
+  `healthz` / `readyz` 200；启动行 `aigw starting version=3.2.0 revision=67a1d13 ui=minified`
+- 本次启动窗口（17:20:42 起）`level=ERROR` **0 条**（日志里 19 条历史 ERROR 全部来自 16:17 的端口争抢事故，与本次无关）
+- 控制台 `GET /admin/ui/` 200、门户登录页 200（`https://chat.tirisen.hk:18300/`）；`bin/aigw` 与正在跑的
+  `/proc/<pid>/exe` 同一文件（17:20 重启后未再改动）
+- 版本自证：`./bin/aigw --version` → `3.2.0 (revision 67a1d13)`，与 tag 指向的提交一致
+
+**未做/限制**：**gpt001 未部署**——本次会话所在环境解析不到该主机（`Could not resolve hostname gpt001`），
+部署步骤没有执行；要发到线上就在能连上 gpt001 的地方按 release 技能第 3 步走（先备份再 install + restart）。
+M72 的真机验收里"用本人飞书身份走一次飞书登录"仍需手机，留在 `docs/TODO.md`。
+
 ## M72 完成记录（账号级飞书身份、组织页整合、多 Key 登录选择）
 
 设计：`docs/design/m72-account-feishu-identity.md`（§12 差异已回填）；规格：`docs/feishu.md` §1/§3/§4/§5/§5c.4/§5c.5/§6/§7/§8、
