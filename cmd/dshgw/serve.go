@@ -21,6 +21,11 @@ import (
 	"github.com/winger/ai-gateway/internal/dshgw/sshworkspace"
 )
 
+// pickTicketTTL bounds the key-pick ticket this process mints for its own key login (M72). The
+// page it leads to is rendered immediately and submitted once, so a couple of minutes is generous
+// while keeping a leaked URL worthless.
+const pickTicketTTL = 2 * time.Minute
+
 func (c *cli) serve() (serveErr error) {
 	deps, err := c.loadRuntime(true)
 	if err != nil {
@@ -41,6 +46,9 @@ func (c *cli) serve() (serveErr error) {
 		if err != nil {
 			return err
 		}
+		// The picker's own ticket (M72) is minted here and redeemed a moment later on the same
+		// origin, so it is deliberately short-lived: it covers one form submission, not a session.
+		verifier.SetIssueTTL(pickTicketTTL)
 		gateway.Feishu = &proxy.FeishuPortal{Enabled: true, AigwLoginURL: deps.cfg.Feishu.AigwLoginURL, Verifier: verifier}
 		slog.Info("feishu login enabled", "aigw_login_url", deps.cfg.Feishu.AigwLoginURL)
 	}

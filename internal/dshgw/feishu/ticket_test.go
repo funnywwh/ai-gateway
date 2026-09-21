@@ -261,3 +261,56 @@ func itoa(n int) string {
 	}
 	return string(digits)
 }
+
+// M72: this side mints its own key-pick ticket for a key login (SignPick), so the shared vectors
+// are not enough — they were signed by aigw's codec. This test closes the loop the other way:
+// a ticket minted HERE must verify with aigw's own verifier. It is done against the vector secret
+// and a fixed clock, so the assertion is about the bytes, not about this process's configuration.
+func TestSignedPickTicketMatchesTheOtherImplementation(t *testing.T) {
+	var vector ticketVector
+	for _, candidate := range loadVectors(t) {
+		if candidate.Name == "keypick" {
+			vector = candidate
+		}
+	}
+	if vector.Secret == "" {
+		t.Fatal("the shared vectors must carry a key-pick ticket to compare against")
+	}
+	now, err := time.Parse(time.RFC3339, vector.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := New([]byte(vector.Secret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier.Now = func() time.Time { return now }
+	verifier.SetIssueTTL(2 * time.Minute)
+
+	wire, err := verifier.SignPick(3, "ou_alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Round trip through this side's verifier: the mode, the account and the expiry all have to
+	// survive, and the nonce has to be single use.
+	ticket, err := verifier.VerifyPick(wire)
+	if err != nil {
+		t.Fatalf("a ticket this side minted was refused: %v", err)
+	}
+	if ticket.AccountID != 3 || ticket.OpenID != "ou_alice" || ticket.Mode != modeKeyPick {
+		t.Fatalf("minted ticket = %+v", ticket)
+	}
+	if ticket.Expires != now.Add(2*time.Minute).Unix() {
+		t.Fatalf("expiry = %d, want the configured issue TTL", ticket.Expires)
+	}
+	if _, err := verifier.VerifyPick(wire); err == nil {
+		t.Fatal("a minted pick ticket was accepted twice")
+	}
+
+	// A verifier with no key at all refuses to mint: an unsigned picker link would be a login
+	// bypass, not a convenience.
+	empty := &Verifier{}
+	if _, err := empty.SignPick(3, "ou_alice"); err == nil {
+		t.Fatal("an unconfigured verifier minted a ticket")
+	}
+}

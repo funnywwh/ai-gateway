@@ -270,6 +270,15 @@ func (p *Proxy) PortalHandler() http.Handler {
 			p.feishuLogin(w, r)
 		case r.Method == http.MethodGet && r.URL.Path == "/feishu/error":
 			p.renderLogin(w, http.StatusUnauthorized, feishuErrorMessage(r.URL.Query().Get("reason")))
+		case r.URL.Path == "/login/pick":
+			// The key picker (M72): a GET renders the choice, a POST performs it. Both read the
+			// one-time pick ticket, which is why they are the same route.
+			if r.Method != http.MethodGet && r.Method != http.MethodPost {
+				w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			p.pickHandler(w, r)
 		case r.Method == http.MethodPost && r.URL.Path == "/login":
 			p.login(w, r)
 		case r.Method == http.MethodPost && r.URL.Path == "/logout":
@@ -378,13 +387,39 @@ func (p *Proxy) login(w http.ResponseWriter, r *http.Request) {
 		p.renderLogin(w, http.StatusForbidden, "该账号的 dsh 租户尚未就绪，请联系管理员启用或检查租户状态")
 		return
 	}
+	// Which key this session is recorded against (M72). Every key of the account enters the same
+	// tenant, so with more than one the person picks — and the pick is what the audit trail
+	// names. The list arrives with the authorize answer that just admitted the key, so the
+	// picker costs no extra round trip.
+	if identity, err := p.aigwIdentity(ctx, key); err == nil && len(identity.Keys) > 1 {
+		p.offerKeyPick(w, r, tenant.Name)
+		return
+	}
 	// The login moment owns the tenant's lifecycle (M69): the platform slice of its dsh
 	// configuration is re-applied from aigw on every sign-in, and the worker — stopped when the
 	// last session signed out — is brought back up before the browser is sent to it.
-	p.prepareLogin(r, tenant, key)
+	p.issueTenantSession(w, r, tenant, key, "login_success", 0, "")
+	if len(models) == 0 {
+		w.Header().Set("X-DSHGW-Warning", "valid key has no currently available models")
+	}
+}
+
+// issueTenantSession is everything that happens after "this browser may enter this tenant":
+// the login-time lifecycle work, the session, the cookie, the identity warm-up, the audit entry
+// and the redirect.
+//
+// It exists because M72 gave the portal a third way in (the key picker). Three copies of this
+// sequence would drift, and the parts that must not drift are exactly the ones a copy loses
+// silently: the audit action, the Set-Cookie flags, and the redirect target.
+//
+// keyID names the key the login is recorded against (0 when there was no choice to make), and
+// keyName is what the audit trail shows. It is audit data, never a credential: the tenant's
+// model credential stays the worker key.
+func (p *Proxy) issueTenantSession(w http.ResponseWriter, r *http.Request, tenant registry.Tenant, submittedKey, action string, keyID int64, keyName string) {
+	p.prepareLogin(r, tenant, submittedKey)
 	token, err := p.Sessions.Issue(tenant.Name, p.Config.SessionTTL.Duration())
 	if err != nil {
-		p.log().Error("issue dshgw session failed", "err", err)
+		p.log().Error("issue dshgw session failed", "tenant", tenant.Name, "err", err)
 		p.renderLogin(w, http.StatusInternalServerError, "无法创建会话")
 		return
 	}
@@ -393,16 +428,28 @@ func (p *Proxy) login(w http.ResponseWriter, r *http.Request) {
 	// login must not fail because a display name could not be looked up.
 	p.identity(r.Context(), tenant)
 	p.setSessionCookie(w, tenant.Name, token, false)
-	p.audit(r, tenant.Name, "login_success", "authenticated", http.StatusFound)
+	p.audit(r, tenant.Name, action, "authenticated", http.StatusFound)
+	if keyID != 0 {
+		p.audit(r, tenant.Name, "login_key_selected", keyName, http.StatusFound)
+	}
 	if p.Activity != nil {
 		if err := p.Activity.MarkLogin(tenant.Name, p.now()); err != nil {
 			p.log().Error("persist login activity failed", "tenant", tenant.Name, "err", err)
 		}
 	}
-	if len(models) == 0 {
-		w.Header().Set("X-DSHGW-Warning", "valid key has no currently available models")
-	}
 	http.Redirect(w, r, p.Config.WithTrailingSlash(p.Config.TenantOrigin(tenant.Name)), http.StatusFound)
+}
+
+// aigwIdentity asks aigw who this key belongs to, including the account's usable keys. It is
+// best effort: the caller has already been admitted, so a failure only costs the picker.
+func (p *Proxy) aigwIdentity(ctx context.Context, key string) (aigw.Identity, error) {
+	namer, ok := p.Authorizer.(AccountNamer)
+	if !ok {
+		return aigw.Identity{}, errors.New("the authorization client cannot name accounts")
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, p.Config.ValidateTimeout.Duration())
+	defer cancel()
+	return namer.Identity(lookupCtx, key)
 }
 
 // loginPrepareTimeout bounds the login-time lifecycle work: an aigw model refresh plus, on a
@@ -1348,6 +1395,7 @@ type FeishuPortal struct {
 	Enabled bool
 	// AigwLoginURL is where the browser starts: aigw's /feishu/login.
 	AigwLoginURL string
-	// Verifier checks tickets and enforces single use.
+	// Verifier checks tickets and enforces single use. It checks both ticket kinds (a login and
+	// a key pick) because the two are told apart by the mode inside the signed payload (M72).
 	Verifier *feishu.Verifier
 }

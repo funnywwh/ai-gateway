@@ -14,8 +14,10 @@ package feishu
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -71,6 +73,9 @@ type Verifier struct {
 	key []byte
 	// Now is injectable for tests.
 	Now func() time.Time
+	// ttl is how long a ticket this side mints stays valid (SignPick). It defaults to the
+	// maximum accepted lifetime; the composition root sets it from the portal's configuration.
+	ttl time.Duration
 
 	consumed map[string]time.Time
 }
@@ -81,7 +86,14 @@ func New(key []byte) (*Verifier, error) {
 	if len(key) == 0 {
 		return nil, errors.New("feishu: ticket secret must not be empty")
 	}
-	return &Verifier{key: append([]byte(nil), key...), consumed: map[string]time.Time{}}, nil
+	return &Verifier{key: append([]byte(nil), key...), ttl: maxTicketTTL, consumed: map[string]time.Time{}}, nil
+}
+
+// SetIssueTTL sets the lifetime of tickets this side mints with SignPick.
+func (v *Verifier) SetIssueTTL(ttl time.Duration) {
+	if v != nil && ttl > 0 && ttl <= maxTicketTTL {
+		v.ttl = ttl
+	}
 }
 
 // Enabled reports whether a verifier is usable.
@@ -105,7 +117,7 @@ const (
 // Verify checks a DSH ticket's signature, version, mode, expiry and single use, and consumes
 // its nonce on success.
 func (v *Verifier) Verify(raw string) (Ticket, error) {
-	return v.verify(raw, modeDSH)
+	return v.verify(raw, modeDSH, true)
 }
 
 // VerifyPick checks a key-pick ticket (M72): the step between "who you are" and a session,
@@ -113,10 +125,18 @@ func (v *Verifier) Verify(raw string) (Ticket, error) {
 // It carries an account and no tenant — the picker runs before a tenant is entered — and it is
 // consumed exactly like a DSH ticket, so a picker link is worth one submission.
 func (v *Verifier) VerifyPick(raw string) (Ticket, error) {
-	return v.verify(raw, modeKeyPick)
+	return v.verify(raw, modeKeyPick, true)
 }
 
-func (v *Verifier) verify(raw, mode string) (Ticket, error) {
+// PeekPick validates a key-pick ticket WITHOUT consuming it (M72). It is what the picker page
+// uses: looking at a form must not spend the ticket, or a refresh — or a browser that prefetches
+// the link — would break the very submission the page exists for. The submission calls
+// VerifyPick, so the nonce is still worth exactly one sign-in.
+func (v *Verifier) PeekPick(raw string) (Ticket, error) {
+	return v.verify(raw, modeKeyPick, false)
+}
+
+func (v *Verifier) verify(raw, mode string, consume bool) (Ticket, error) {
 	var zero Ticket
 	if !v.Enabled() {
 		return zero, ticketErr(reasonUnavailable)
@@ -161,10 +181,46 @@ func (v *Verifier) verify(raw, mode string) (Ticket, error) {
 	if expires.After(now.Add(maxTicketTTL)) {
 		return zero, ticketErr(reasonFuture)
 	}
-	if !v.consume(ticket.Nonce, now) {
+	if consume && !v.consume(ticket.Nonce, now) {
 		return zero, ticketErr(reasonReplayed)
 	}
 	return ticket, nil
+}
+
+// SignPick mints the key-pick ticket this gateway hands to its own browser after a key login
+// (M72).
+//
+// aigw signs the ticket of a Feishu login (it is the side that talked to Feishu), but a key login
+// is decided here: the person pasted a key, this process admitted it, and it is this process that
+// then has to ask which of the account's keys the session belongs to. Signing it locally needs no
+// new secret — the key below is the same one aigw's tickets are verified with, and the mode inside
+// the payload is what keeps the two kinds apart. It is deliberately the same codec, so the
+// independent implementations stay byte-compatible (see the shared vectors).
+func (v *Verifier) SignPick(accountID int64, openID string) (string, error) {
+	if !v.Enabled() {
+		return "", errors.New("feishu: no ticket key is configured")
+	}
+	if accountID == 0 {
+		return "", errors.New("feishu: a key-pick ticket needs an account")
+	}
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	issued := Ticket{
+		Version:   1,
+		Mode:      modeKeyPick,
+		AccountID: accountID,
+		OpenID:    openID,
+		Nonce:     hex.EncodeToString(nonce),
+		Expires:   v.now().Add(v.ttl).Unix(),
+	}
+	payload, err := json.Marshal(issued)
+	if err != nil {
+		return "", err
+	}
+	encoded := base64.RawURLEncoding.EncodeToString(payload)
+	return encoded + "." + v.signature(encoded), nil
 }
 
 func (v *Verifier) signature(encoded string) string {

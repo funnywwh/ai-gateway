@@ -1055,6 +1055,11 @@ func (s *Server) handleDSHGWAuthorize(w http.ResponseWriter, r *http.Request) {
 	// The tenant name is the account's dshgw destination: every key of this account logs
 	// into it, so dshgw no longer needs a per-key prefix binding.
 	payload := map[string]any{"allowed": true, "tenant": tenant}
+	// The account id travels with the answer because the portal needs to match an identity to
+	// its own tenants (M72): a key-pick ticket names an account, and the portal resolves it by
+	// asking aigw about each tenant's worker key. The id is not a secret — the caller already
+	// holds a key of that account — and it saves the portal from parsing key names.
+	payload["account_id"] = account.ID
 	// Who this is (M67): dshgw shows the account and, when the account carries one, the person's
 	// Feishu name — the name people recognise themselves by in the dsh interface. Both are
 	// display-only additions: the decision above is already made, so a lookup that fails costs a
