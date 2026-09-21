@@ -39,8 +39,9 @@ kind: "spec"
 1. 在门户表单中提交一个 Key。可接受裸 Key 或 `Bearer ` 前缀；不接受 URL 中的 Key 或重复表单 Key。
 2. 网关向 aigw `GET /v1/models` 验证：401 表示 Key 无效/停用；200 且 `data: []` 仍是有效身份。超时/不可达/其它状态不冒充“Key 无效”，登录返回 503。
 3. 用 Key 前 12 字节查 **canonical `registry.json`**。没有绑定就拒绝；登录不会自动建立 OS 用户。`keys.map` 是派生的运维索引，不是认证真相。
-4. 门户下发 `dshgw_s_<tenant>`，属性为 `HttpOnly; Secure; SameSite=Lax; Path=/`，然后 302 跳转租户端口。
-5. 服务端仅持久化浏览器 token 的 SHA-256，并保存该会话对应的 worker cookie。默认 TTL 为 7 天；浏览器逐响应续期，服务端落盘按 TTL 的 1%（一分钟至一小时）节流，过期判断不依赖浏览器。
+4. 账号有 **≥2 把可用 Key** 时，先显示选择页（`/login/pick`，M72）再建会话；只有 1 把时直接进入下一步。
+5. 门户下发 `dshgw_s_<tenant>`，属性为 `HttpOnly; Secure; SameSite=Lax; Path=/`，然后 302 跳转租户端口。
+6. 服务端仅持久化浏览器 token 的 SHA-256，并保存该会话对应的 worker cookie。默认 TTL 为 7 天；浏览器逐响应续期，服务端落盘按 TTL 的 1%（一分钟至一小时）节流，过期判断不依赖浏览器。
 
 同一浏览器可同时登录多个租户。把某租户的有效 token 放进另一个租户的 cookie 名不会获得访问权；重复同名 cookie 被拒绝。
 
@@ -73,15 +74,49 @@ kind: "spec"
 判定失败（超时/5xx）一律 503 fail-closed，绝不放行。aigw 后台账号列表的"启用/停用 DSH"
 按钮控制该开关的真值（`accounts.dsh_enabled`）；停用不删除租户数据，重新启用即恢复。
 
+**所有激活账号默认可用（M72，`dshgw.auto_enable`）**：配置 `dshgw.auto_enable: true` 后，判定改为
+
+```
+有效 = accounts.dsh_enabled || (dshgw.auto_enable && accounts.dsh_disabled_at IS NULL)
+```
+
+——「从未启用」的激活账号默认可用，管理员不必逐个点「启用 DSH」；被**显式停用**过的账号
+（`dsh_disabled_at` 非空，由控制台「停用 DSH」写入）保持停用，配置开关不会撤销管理员的决定。
+首次登录时若该账号还没有租户，aigw 在**同一次** `POST /v1/dshgw/authorize` 里按需完成供应
+（铸 `dshgw-*` worker Key → 创建/启动租户 → 写 `dsh_tenant` → 审计 `dsh_enable`，actor=`dshgw-auto`），
+因此"登录即可用"不需要任何后台点击。供应失败回答 `403 {"allowed":false,"reason":"provision_failed"}`
+（fail-closed，下一次登录重试），最常见的原因是该账号在当前网关没有任何可用模型
+（`routing.default_grant: none` 的部署）——此时控制台手动「启用 DSH」同样会被拒并给出原因。
+
+**多 Key 账号先选 Key（M72）**：一个账号下所有 Key 都登录同一个租户，所以 aigw 的 authorize 响应
+额外带该账号的可用 Key 列表（`keys[]`：**active 且未过期、不含 `dshgw-*` worker Key**）。
+门户在**两种登录路径**上都据此分流：
+
+```
+Key 登录：POST /login → 验 Key → authorize → keys[] ≥2 → 签 keypick 票据 → 303 /login/pick（不建会话）
+飞书登录：aigw 回调签 keypick 票据 → 门户 /login/pick
+选择页（GET /login/pick，门户自己的 origin）→ 选一把 → POST /login/pick → 建会话
+```
+
+- `keypick` 票据与登录票据同一密钥、同一 codec，但 mode 不同（两侧验证器按 mode 严格分流），
+  一次性、默认 120 秒（`feishu.pick_ttl_s`）；
+- 选择结果只进审计（`login_key_selected`，记 `key_id`/`key_name`）与本次会话归属：
+  **不改**租户 worker 的模型凭据（`PrepareLogin` 仍以空 key 调用），模型额度始终按账号计算；
+- 提交的 `key_id` 与门户刚取到的列表比对，不在列表内一律拒绝（表单不可信）；
+- 只有 1 把可用 Key 时不出现选择页；0 把时页面提示联系管理员签发。
+
 重验使用**租户当前 worker Key**，不保存登录时提交的旧 alias Key。`--keep-old-prefix` 允许仍有效的旧 Key 登录同一租户；它不使旧 Key 成为 worker 的模型凭据。
 
 **飞书登录（M61）**：配置 `feishu.enabled` 后，门户登录页多一个「飞书登录」；点它会把浏览器送到
 aigw 的 `/feishu/login`，由 aigw 完成飞书 OAuth 并**签一张一次性票据**，再送回门户的
 `/login/feishu` 兑换成与 Key 登录**完全相同**的会话。dshgw 不持有任何飞书凭据、不登记第二个回调、
 不需要出站访问飞书——票据密钥与 aigw 入口 URL 在监督形态下由 aigw 注入生成的配置。
+绑定是**账号级**的（M72：`accounts.feishu_open_id`，由管理员在控制台选人写入，不要求扫码；
+一个账号有 ≥2 把可用 Key 时先经 `/login/pick` 选一把，见上）。
 收票时 dshgw 还会用该租户的 worker Key 调 `POST /v1/dshgw/authorize` 复核账号级授权，
 因此控制台「停用 DSH」对飞书登录同样生效，判定失败一律 503（fail-closed）。
-未绑定、账号停用、租户未就绪、票据过期/重放都会在门户给出明确文案。规格见 [docs/feishu.md](feishu.md) §5。
+未绑定任何账号、账号停用、租户未就绪、票据过期/重放都会在门户给出明确文案。
+规格见 [docs/feishu.md](feishu.md) §5。
 
 默认登录限流为每 IP 每分钟 10 次；会话默认上限 10,000，状态文件另有 64 MiB 上限。已建立的 WebSocket 不会被 logout/TTL 追溯关闭，新请求或重连会重新验证。
 

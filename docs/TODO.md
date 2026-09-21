@@ -798,7 +798,49 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 - [ ] 未做：飞书侧的部门改名/删除**不传播**到本地（设计如此：本地节点与账户只能由人来改）；
       人员离职/停用不自动停账户（飞书 `status` 字段本轮没读）
 
-## 缺陷：`dshgw.admin_socket` 与 M63 状态根脱节（2026-09-20 修）
+## M72 账号级飞书身份、组织页整合、多 Key 登录选择
+
+设计：`docs/design/m72-account-feishu-identity.md`（§12 差异待回填）；
+规格：`docs/feishu.md` §1/§3/§4/§5/§5c.4/§5c.5/§6/§7/§8、`docs/org.md` §5、`docs/dshgw.md` §3。
+需求（2026-09-21 用户原话，五条）：①「Key、账号、组织架构在管理后台界面整合」；②「飞书绑定到账号
+（不再只绑 Key）」；③「只要配置文件开启了 dsh，所有激活账号都能用」；④「绑定飞书不需要扫码，
+弹窗让管理员选择飞书人员」；⑤「dshgw 登录时，账号有多个 Key 就弹选择框」。
+用户四项决策：整合以**组织架构为中心**（人员列表项带账号操作、可展开看详情与 Key 列表）；
+多 Key 弹窗覆盖两种登录路径且**只影响归属与审计**；DSH **默认全开 + 首次登录按需建租户**，
+保留「停用」为显式例外；Key 级扫码绑定**替换**为账号级选人，存量**迁移后清空**。
+
+- [ ] 迁移 `0025_account_dsh_auto.sql`：`accounts.dsh_disabled_at`（管理员显式停用 DSH 的时刻；
+      NULL = 从未被显式停用过，因此可被 `dshgw.auto_enable` 自动启用）
+- [ ] 配置：`dshgw.auto_enable`（默认 false）、`feishu.pick_ttl_s`（默认 120，上限 600）；`config.example.yaml` 注释
+- [ ] 票据：`TicketModeKeyPick`/`IssueKeyPick`/`VerifyKeyPick`（`internal/feishu`）与
+      `VerifyPick`（`internal/dshgw/feishu`）+ 契约向量新增一条 keypick；两侧 mode 严格分流
+- [ ] aigw 登录判定：`finishFeishuLogin` 改查 `accounts.feishu_open_id`（未命中 → `unbound` 新文案）；
+      `accountFeishuName` 优先账号级姓名
+- [ ] aigw 授权：`handleDSHGWAuthorize` 用 `accountDSHEffective`（D2 判定式）、租户为空时按需
+      `provisionAccountDSH(actor="dshgw-auto")`、失败 403 `provision_failed`、响应新增 `keys[]`
+      （active 且未过期、过滤 `dshgw-*`）
+- [ ] 控制台接口：`PUT/DELETE /admin/api/v1/accounts/{id}/feishu`（账号优先绑定，不要求人在通讯录里、
+      不顺带改归属）；`GET /keys/{id}/feishu/bind` 改 410；`GET /accounts` 与
+      `GET /org/nodes/{id}/accounts` 增补 `feishu/dsh_effective/dsh_disabled_at/active_key_count`；
+      `PUT /accounts/{id}/dsh` 写/清 `dsh_disabled_at`；`planFeishuOrg` 删除 Key 级匹配通道②
+- [ ] 门户：`/login/pick`（GET 渲染单选表单 / POST 校验并签发会话）；两条登录路径在 `keys[] ≥2` 时
+      先发 keypick 票据；抽出共用 `issueTenantSession`；审计 `login_key_selected`
+- [ ] 控制台界面：组织页人员列表（账号名 + DSH 三态 + 飞书名 + Key 数，行可展开 → 账号详情 + Key 列表
+      + 新建/启停 Key/绑定飞书/启停 DSH/分配组织）；「未归属账户」合成行；成员勾选仅在"全部账户"下可编辑；
+      飞书人员选择弹窗（拼音过滤，已被他人绑定置灰）；`/keys` 的飞书列改只读、去掉绑定按钮；
+      `/accounts` 的 DSH 三态与飞书列
+- [ ] 启动迁移：`MigrateKeyFeishuToAccounts`（抄到账号 + 审计带 `from_key_id` + 清空 Key 行；冲突保留并 WARN），
+      在 `cmd/aigw` 的 `store.Open` 之后调用
+- [ ] 测试：store 迁移四种情形；httpapi（authorize 自动建租户三种组合、keys[] 过滤、账号级登录单/多 Key
+      分支、410、新路由 200/404/409/403/幂等）；dshgw 票据与 `/login/pick`（跨账号 id、重放、单 Key 直通）；
+      控制台 mjs 两个新文件 + 更新 `keys_feishu_test.mjs`/`org_tree_test.mjs`；ui 夹层新视图 `org-person`
+- [ ] 文档回填：设计文档 §11 真机验收结果、§12 实现与设计差异；`docs/feishu.md` 状态行改"已实现（M72）"；
+      完成的条目搬到 `docs/todo_done.md`
+- [ ] **未做（明确记下）**：选中的 Key 不影响 worker 的模型凭据（用户选 A；要做是另一个里程碑：
+      凭据热更新 + 并发会话冲突 + 额度归属）；`/accounts`、`/keys` 两页保留未合并（组织页是主入口）；
+      飞书侧离职/停用仍不自动停账户（沿用 M70 口径）
+
+
 
 现象：飞书首次登录（绑定了 Key 的账号）在日志里报
 `enabling dsh for a bound key failed err="… dshgw admin channel unavailable at

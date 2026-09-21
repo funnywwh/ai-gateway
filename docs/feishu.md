@@ -1,33 +1,36 @@
 ---
-description: "飞书身份：把 API Key 绑定到飞书账号（控制台），并让被绑定的人用飞书登录 DSH 门户；飞书后台配置步骤、接口、隐私口径与排障。"
+description: "飞书身份：把账号绑定到飞书人员（控制台选人，不扫码），并让该人用飞书登录 DSH 门户；飞书后台配置步骤、接口、隐私口径与排障。"
 kind: "spec"
 ---
 
-# 飞书身份：API Key 绑定与 DSH 门户登录
+# 飞书身份：账号级绑定与 DSH 门户登录
 
-> 状态：**绑定/解绑已实现（M60）；DSH 门户飞书登录已实现（M61）；控制台多管理员与管理员飞书扫码登录已实现（M66）；
-> 通讯录同步（组织架构页「同步飞书」）已实现（M70）**。
+> 状态：**绑定/解绑已实现（M60，Key 级）；DSH 门户飞书登录已实现（M61）；控制台多管理员与管理员飞书扫码登录已实现（M66）；
+> 通讯录同步（组织架构页「同步飞书」）已实现（M70）；绑定改为账号级选人、登录按账号判定的规格见 M72（实现中）**。
 > 设计：[M60 aigw Key 绑定](design/m60-aigw-key-feishu-binding.md)、[M61 dshgw 门户登录](design/m61-dshgw-feishu-login.md)、
-> [M66 控制台管理员扫码登录](design/m66-console-admin-feishu-login.md)、[M70 通讯录同步](design/m70-feishu-org-sync.md)。
+> [M66 控制台管理员扫码登录](design/m66-console-admin-feishu-login.md)、[M70 通讯录同步](design/m70-feishu-org-sync.md)、
+> [M72 账号级飞书身份](design/m72-account-feishu-identity.md)。
 > 部署形态与租户隔离见 [dshgw 多租户网关](dshgw.md)。
 
 ## 1. 它解决什么问题
 
 四件事，共用**一个**飞书自建应用、**一个**回调地址：
 
-1. **绑定（控制台）**：管理员在 *API Keys* 页把一把 Key 绑定到一个真实存在的飞书账号。绑定通过飞书授权页完成，
-   因此「这个飞书账号属于你」是被飞书证明过的，而不是手填一个 id。
-2. **登录（DSH 门户）**：被绑定的人打开 DSH 门户点「飞书登录」，直接进入自己的租户，不需要粘贴 API Key。
+1. **绑定（控制台，M72 改版）**：管理员在控制台**为账号选择飞书人员**——弹出飞书通讯录的人员列表（支持拼音过滤），
+   选中即完成绑定。**不需要扫码**：绑定的语义是"这个飞书身份对应哪个账号"，由管理员指认；身份本身
+   仍由登录时的飞书 OAuth 证明。
+2. **登录（DSH 门户）**：被绑定的人打开 DSH 门户点「飞书登录」，直接进入自己账号的租户，不需要粘贴 API Key。
+   判定真值是**账号级**身份（`accounts.feishu_open_id`）；账号有 ≥2 把可用 Key 时先让他选一把（见 §5c.5）。
 3. **登录（管理控制台，M66）**：控制台可以有**多个管理员账号**，每个管理员把自己的飞书身份绑到账号上之后，
    在控制台登录页点「飞书扫码登录」即可进入——用手机飞书扫授权页上的二维码，或直接点同意（见 §5b）。
 4. **通讯录同步（M70）**：组织架构页右上角「同步飞书」把飞书的部门树与人员拉下来，按「人员 id / 人名」
    自动合并进本地的组织节点与账户；匹配不上的人由操作员逐行「创建用户 / 绑定账号」（见 §5c）。
 
-**两套身份是分开的命名空间**：`api_keys.feishu_open_id` 决定「进哪个租户」，`admin_users.feishu_open_id`
-决定「能不能进控制台」。同一个飞书账号可以同时是某把 Key 的绑定身份和某个管理员的登录身份，也可以只是其中之一；
+**两套身份是分开的命名空间**：`accounts.feishu_open_id` 决定「进哪个租户」，`admin_users.feishu_open_id`
+决定「能不能进控制台」。同一个飞书账号可以同时是某个账户的绑定身份和某个管理员的登录身份，也可以只是其中之一；
 **客户的飞书身份永远拿不到控制台会话**（登录只查 `admin_users`）。
 
-绑定关系是**一把 Key ↔ 一个飞书账号**（1:1）。Key 属于某个账户，账户上记录着它进入哪个 dsh 租户，
+绑定关系是**一个账号 ↔ 一个飞书身份**（1:1，数据库唯一索引）。账号上记录着它进入哪个 dsh 租户，
 所以「这个人是谁」→「他该进哪个租户」是一条 aigw 内的查询，不需要在 dshgw 侧再存一份身份表。
 
 **绑定不参与数据面鉴权**：模型调用仍然用 API Key（或租户的 worker Key）。飞书身份只回答「这个人是谁」，
@@ -70,12 +73,14 @@ feishu:
   invite_ttl_s: 3600                         # 管理员邀请链接有效期（300..604800 秒）
   console_url: ""                            # 控制台在浏览器里的地址；与回调不同主机名时必填（见 §5b.3）
   auto_enable_dsh: true                      # 绑定成功即启用该账号的 DSH（需 dsh_login 为 true）
+  pick_ttl_s: 120                            # 多 Key 选择页票据的有效期（M72，秒；上限 600）
   portal_url: ""                             # 空则由下面的 dshgw 块派生
 dshgw:
   enabled: true
   public_host: 192.168.190.86
   portal_port: 18300
   public_scheme: http                        # 明文 HTTP 部署必须写；否则发 Secure cookie 被浏览器丢弃
+  auto_enable: true                          # M72：激活账号默认可用 DSH，首次登录按需建租户
 ```
 
 要点：
@@ -85,45 +90,40 @@ dshgw:
 - `login_url`（跳飞书前的中转）与 dshgw 侧的登录入口都由 `callback_url` 的 origin 推导，只有一处要写对。
 - 签名密钥（state / ticket / invite）留空时从 `credentials_key` 派生（按用途分离）；state 与 credentials_key
   都为空且 `enabled=true` 时启动报错（`admin_login` 开着时邀请密钥同样要有来源）。
+  多 Key 选择页的票据（M72）复用 `ticket_secret`，**不**新增密钥。
 - 回调地址的 path 必须是 `<server.base_path>/feishu/callback`；`base_path` 非空的部署由反向代理带前缀转发，
   网关内部按去前缀后的路径挂载（`/feishu/login`、`/feishu/callback`、`/feishu/invite`）。
 - 整套功能默认关闭；关闭时这些字段一个都不读，路由也不注册（访问返回 404），控制台不显示任何飞书元素。
+- `dshgw.auto_enable` 是 M72 的"所有激活账号都能用"开关（默认 **false**）。判定的完整口径见
+  [dshgw.md §3](dshgw.md)：`dsh_enabled || (auto_enable && 账号从未被显式停用)`。
 
 ## 4. 控制台怎么用（绑定/解绑）
 
-*API Keys* 页：
+**组织架构页**（`#/org`）是绑定的主入口：展开一个账号（或选中节点后展开人员行），点「绑定飞书」
+弹出**飞书人员选择框**（读同一份通讯录，支持拼音过滤；已被别的账号绑定的人置灰并注明是哪个账号）：
 
 | 位置 | 行为 |
 |---|---|
-| 「飞书」列 | 已绑定显示姓名（悬停显示完整 `open_id`、绑定人、绑定时间）；未绑定显示「未绑定」 |
-| 「绑定飞书」按钮 | 一步跳到飞书授权页（由 `/admin/api/v1/keys/{id}/feishu/bind` 直接 302，不经任何公开中转）；同意后回到本页并提示结果。只有 `role=admin` 能看到 |
-| 「解绑飞书」按钮 | 已绑定时出现；确认后解绑（幂等） |
+| 「绑定飞书」按钮 | 弹人员选择框；选中一个人即写入账号级身份（`PUT /admin/api/v1/accounts/{id}/feishu`）。**没有飞书授权页、没有二维码**。只有 `role=admin` 能看到 |
+| 「解绑飞书」按钮 | 已绑定时出现；确认后解绑（幂等）。解绑会让该人无法再用飞书登录门户 |
+| 「同步飞书」弹窗内 | 反向方向：人员优先。某个人匹配不上时，行内「绑定账号」弹**账号**列表（M70），它同时会把该账号挂进该人的部门节点 |
+| *API Keys* 页的「飞书」列 | **只读**：显示绑到该账号的飞书姓名（悬停显示 `open_id`、绑定人、绑定时间）。Key 级绑定自 M72 起已废弃，这里只用于查看与清理存量 |
 
-结果提示（对应回调的结果码）：
+结果与约定：
 
-| 结果码 | 提示 |
-|---|---|
-| `bound` / `replaced` | 已绑定 / 已改绑到新的飞书账号（原绑定同时解除） |
-| `cancelled` | 已取消授权，未做任何改动 |
-| `conflict` | 该飞书账号已绑定到另一把 Key；请先在那把 Key 上解绑 |
-| `rejected` | 操作者已不是管理员，绑定未生效 |
-| `expired` / `invalid` | 授权过期或被重复使用 / 请求无法校验，请重新绑定 |
-| `no_app_permission` | 你在飞书侧没有该应用的使用权限，请联系飞书管理员 |
-| `app_error` | 飞书应用凭据或可用范围有问题：检查 aigw 配置与飞书后台 |
-| `error` | 绑定失败，请重试；持续失败看 aigw 日志 |
-
-约定与限制：
-
-- **绑定成功即自动启用该账号的 DSH**（`feishu.auto_enable_dsh`，默认开，仅当 `feishu.dsh_login` 也为开时生效）：
-  后台按与「启用 DSH」按钮**完全相同**的流程铸造 worker Key、建/起租户、写映射并审计，因此绑完就能立刻用飞书登录。
-  它**只启用从未启用过的账号**：被显式「停用 DSH」过的账号保持停用（控制台提示"曾被显式停用，如需登录请手动启用"），
-  因为静默撤销管理员刚做的停用比多一次点击糟得多。供应失败**不回滚绑定**（身份与租户是两件事），
-  控制台会提示"绑定已保存，请在账户页重试启用"，完整错误在 aigw 日志里。
-- 绑定只对 **active** 的 Key 开放（停用的 Key 绑定没有意义，接口返回 409）。
-- 换绑是允许的（管理员显式操作），旧 `open_id` 会记进审计。
-- 一个飞书账号不能同时绑两把 Key（数据库唯一索引保证）；一个 Key 也只能有一个飞书账号。
-- 已绑定的 Key 之后被停用/过期，绑定**不会**被清空，只是该身份无法用它登录。
-- 绑定与解绑都写审计（`feishu_bind` / `feishu_bind_reject` / `feishu_unbind`），审计里只有身份与操作者，没有凭据。
+- **Key 级绑定已废弃**：老版控制台在 *API Keys* 页的「绑定飞书」（跳飞书授权页，即"扫码"）现在返回
+  **410 Gone** 并提示改用账号级绑定；`DELETE /admin/api/v1/keys/{id}/feishu` 仍可用（清存量），
+  登录判定不再读它（见 §5c.4）。
+- **绑定不影响数据面**：绑定只决定"这个飞书身份进哪个账号/租户"，不改变任何 Key 的鉴权、额度或日志归属。
+- **绑定是管理员动作，且全量审计**：`feishu_bind` / `feishu_unbind`（`target_type=account`），
+  记 `open_id`、姓名、操作者与（迁移来的）`from_key_id`。语义变化见 §6。
+- **换绑是允许的**（管理员显式操作），旧 `open_id` 记进审计；一个飞书身份只能绑一个账号，
+  一个账号也只能绑一个飞书身份（数据库唯一索引；已绑别人时 409，需先解绑）。
+- **不要求这个人在飞书通讯录里仍存在**：账号级绑定直接写 id 与姓名（不解绑离职者也能被清理），
+  人员弹窗只是"选人"的便利入口。
+- 绑定**不会**自动改动账号的组织归属：归属在组织页显式做（人员优先那条路由是例外，见上表）。
+- 绑定时不再自动启用 DSH：M72 起 DSH 由 `dshgw.auto_enable`（配置）与「启用/停用 DSH」按钮决定，
+  见 §5 与 [dshgw.md §3](dshgw.md)。
 
 ## 5. DSH 门户怎么用（飞书登录）
 
@@ -135,14 +135,19 @@ dshgw:
   → 飞书授权页（扫码或点击同意）
   → http://host:8090/feishu/callback          （唯一回调：换 token、取 open_id）
   → 门户 http://host:18300/login/feishu       （dshgw 验票 → 下发会话 → 进租户）
+     或 http://host:18300/login/pick          （该账号有 ≥2 把可用 Key 时先选一把，见 §5c.5）
 ```
 
 链路要求：
 
-- **未绑定任何 Key 的飞书账号一律拒绝**，门户会说明「尚未绑定，请联系管理员在控制台绑定」。
-- 登录前 aigw 会核对账号状态：`dsh_enabled=false`（控制台「停用 DSH」）、账号 suspended/closed、
+- **判定真值是账号级身份**：回调拿到的 `open_id` 查 `accounts.feishu_open_id`；**未绑定任何账号的飞书身份一律拒绝**，
+  门户会说明「尚未绑定，请联系管理员在控制台组织架构页选择你」。
+- 登录前 aigw 会核对账号状态与 DSH 有效性：账号 suspended/closed、DSH 被停用（见 §5 的"启用/停用"）、
   租户未分配，都在门户给出对应提示，且**不出票**。
-- dshgw 收到票后**再复核一次**「该租户的账号现在仍启用 dsh」（用租户的 worker Key 调
+- **DSH 默认可用性**（M72）：配置 `dshgw.auto_enable: true` 时，**所有激活账号都能用**——
+  首次登录按需创建租户与 worker Key，管理员不必逐个点「启用 DSH」；只有被**显式「停用 DSH」**过的账号
+  保持停用（配置开关不会撤销管理员的停用决定）。
+- dshgw 收到票后**再复核一次**「该账号现在仍启用 dsh」（用租户的 worker Key 调
   `POST /v1/dshgw/authorize`），失败一律 503 而不是放行，因此停用/吊销对飞书登录同样生效。
 - 一次登录凭据是**一次性票据**，默认 120 秒有效、只能兑换一次。门户与 aigw 同主机时票据走
   host-only cookie（不出现在地址栏）；不同主机时退化为 `?ticket=` 并记录一条 WARN。
@@ -299,23 +304,51 @@ dshgw:
 （不传字段 = 全量，兼容脚本与 MCP；传 `"0"` 表示同时处理公司层人员）。目录里已不存在的 id 会被忽略并
 在 `unknown_department_ids` 里回报。
 
-### 5c.4 与登录的关系
+### 5c.4 与登录的关系（M72 起账号级身份就是登录真值）
 
-同步写的 `accounts.feishu_*` 只是**同步映射**（回答「这个飞书的人是哪个账户」），**不**授予任何登录能力；
-DSH 门户扫码登录仍按 M60 的 **Key 级** 绑定（`api_keys.feishu_open_id`）判定。反过来，M60 绑过的身份
-会在同步时被固化到账户上（② 通道），使映射不依赖某把 Key 的存续。
+`accounts.feishu_*` **就是**门户登录判定的真值：
+
+- 回调拿到的 `open_id` 直接查 `accounts.feishu_open_id`（M72）。绑定一个飞书身份到某个账号，等于
+  「允许这个人在 DSH 有效时进入该账号的租户」——所以绑定是**管理员写权限**，语义与审计见 §6。
+- **Key 级绑定（`api_keys.feishu_open_id`，M60）已废弃**：升级时一次性迁移到账号级后清空
+  （账号已绑别人 / 一把 Key 冲突时保留原样并在日志与审计里报告，见
+  [M72 设计](design/m72-account-feishu-identity.md) D9）。Key 行上的身份字段保留**只读**语义：
+  控制台可见、可解绑，登录与同步都不再读它。
+- 因此**同步不再是"固化"而是"绑定"**：M70 同步自动合并到账号时写下的身份，本身就是可登录的身份。
+  同步的三条自动通道里，"按 Key 身份匹配"那条（②）在 M72 后删除——存量已迁移，留着它只会在管理员
+  手工改绑之后把旧映射"复活"。
+
+### 5c.5 一个账号有多把 Key 时先选一把（M72）
+
+账号下所有 Key 都能登录同一个租户，所以"用哪把 Key 登录"不影响进哪个租户。为了让审计与门户侧的归属
+明确，**当账号有 ≥2 把可用 Key 时，两种登录方式都会先显示一个选择页**（`/login/pick`）：
+
+- 可用 Key = 该账号 **active 且未过期** 的 Key，**不含**网关自己铸造的 `dshgw-*` worker Key；
+- 页面只显示 Key 的**名称、前缀、最近使用时间**，不出现任何明文；
+- 选择结果只决定**这次会话归属哪把 Key**（写进审计 `login_key_selected`，记 `key_id`/`key_name`），
+  **不改**租户 worker 的模型凭据：模型额度始终按账号计算；
+- 只有 1 把可用 Key 时不出现这个页面（直接登录）；一把都没有时页面提示"请联系管理员签发"；
+- 选择页的链接是一次性的（默认 120 秒）：后退、双击、转发都会得到"已经使用过了，请重新登录"。
 
 ## 6. 隐私与审计口径
 
-- 存储：Key 行上的 `open_id`（应用内唯一标识）、`union_id`、姓名、绑定时间、绑定人；管理员行上的同一组字段，
-  外加一个「当前未兑换的邀请句柄」（`invite_nonce`，只用于撤销，不出现在任何接口响应里）；
-  M70 起账户行上的同一组身份字段（`accounts.feishu_*`）与组织节点行上的 `feishu_department_id`（仅 id 与同步时间）。
+- 存储：账户行上的 `open_id`（应用内唯一标识）、`union_id`、姓名、绑定时间、绑定人；Key 行上的同一组字段
+  （M60 遗产，M72 起只读）；管理员行上的同一组字段，外加一个「当前未兑换的邀请句柄」
+  （`invite_nonce`，只用于撤销，不出现在任何接口响应里）；组织节点行上的 `feishu_department_id`（仅 id 与同步时间）。
   **不存储**任何飞书令牌、授权码或 App Secret 的副本（`tenant_access_token` 只在内存缓存到过期）。
 - 可见性：这些字段只出现在控制台（管理员）与审计；不进请求日志、不进 `/v1/models`、
   不进任何面向租户的响应。dshgw 不保存 `open_id`（它的审计只记租户与结果）。
-  管理员列表里的 `open_id` 与 Key 行一样对已登录的只读账号可见；`password_hash` 与邀请句柄从不返回。
+  管理员列表里的 `open_id` 与账户行一样对已登录的只读账号可见；`password_hash` 与邀请句柄从不返回。
+  M72 新增的门户审计 `login_key_selected` 只记 Key 的 **id 与名称**，不含 Key 明文或哈希。
 - 审计内容：身份标识与结果码，**不含** code / access_token / state 明文 / app_secret。
 - `open_id` 是**应用内**标识：重建应用（换 App ID）后所有绑定失效，需要重新绑定。
+- **威胁模型（M72 的语义变化）**：绑定从"本人扫码证明"变成"管理员指认"，所以
+  **能改绑定的人 = 能把某个飞书身份登录到任意账号的人**——这是管理员权限（`role=admin`），
+  绑定/解绑全量审计（`feishu_bind` / `feishu_unbind`，`target_type=account`，记 `bound_by`）。
+  登录时"你是这个 open_id"仍由飞书 OAuth 每次重新证明，伪造不了；
+  因此这条链路的信任边界是"控制台管理员"，与"任何人拿到绑定页面就能自助绑定"不是一回事（后者已不存在）。
+- 存量迁移（M72）也走审计：每条迁移来的绑定记 `feishu_bind`，changes 里带 `from_key_id`，
+  因此"这次升级把哪把 Key 的身份搬到了哪个账号"是可回溯的。
 
 ## 7. 排障
 
@@ -344,8 +377,14 @@ DSH 门户扫码登录仍按 M60 的 **Key 级** 绑定（`api_keys.feishu_open_
 | 兑换票据报「已过期」 | 票据 120 秒内没被兑换（浏览器停在中间页、被拦下来的重定向） | 重新扫码；票据一次性，重开旧链接无效 |
 | 用户被弹回门户、看不到具体错误 | 登录被拒 | 门户错误页会给出原因码；对应 §5 的几种情况 |
 | 「登录成功又被弹回门户」（dshgw 侧） | dshgw 按 https 发了 Secure cookie，而门户是明文 HTTP | 配 `dshgw.public_scheme: http` |
-| 绑定成功但登录仍被拒 | 该账号未启用 DSH / 租户未分配 | 若配置里 `feishu.auto_enable_dsh: false`，绑定不会启用账号 → 控制台账号页点「启用 DSH」；若为 true 则是自动启用失败（控制台会同时提示失败原因，完整错误见 aigw 日志） |
-| 控制台提示「该账号曾被显式停用 DSH，因此未自动启用」 | 有人按过「停用 DSH」（账号有租户映射但开关为关） | 这是有意为之：自动启用不撤销显式停用。要恢复就在账户页手动「启用 DSH」 |
+| 「尚未绑定，请联系管理员…」 | 这个飞书身份没有绑到任何**账号**（`accounts.feishu_open_id`） | 控制台组织架构页展开该账号 → 「绑定飞书」→ 在人员列表里选这个人（M72 起绑定在账号上，不再绑 Key） |
+| 绑定时提示「该飞书人员已绑定到另一个账户」 | 一个飞书身份只能绑一个账号（数据库唯一索引） | 先在原账号上「解绑飞书」，或确认要绑的是哪一个人（同名不同人时按 `open_id`／部门区分） |
+| 登录页出现「选择 Key」 | 该账号有 ≥2 把可用 Key（M72） | 正常：选一把即可。选择只影响审计与本次会话归属；想减少这一步就停用多余的 Key |
+| 选择页报「已经使用过了」 | 选择链接是一次性的（后退、双击、转发、超时 120 秒） | 重新点「飞书登录」或重新提交 Key |
+| 「停用 DSH」后又被自动启用 | 不应发生 | `dshgw.auto_enable` 不撤销显式停用（`accounts.dsh_disabled_at` 非空）；若真出现，检查是否有人点了「启用 DSH」，以及该账号是否被别的写入路径清了标记 |
+| 首次登录报「租户尚未就绪」/ `provision_failed` | `dshgw.auto_enable` 关，或自动建租户失败（admin socket 未配、该账号没有可用模型、dshgw 拒绝） | 看 aigw 日志里的具体原因；控制台账号页可手动「启用 DSH」。`default_grant: none` 的部署常见原因是账号没有任何模型授权 |
+| 绑定成功但登录仍被拒（旧版语义） | 该账号未启用 DSH / 租户未分配 | M72 起优先看 `dshgw.auto_enable` 与账号状态；仍不行就在账户页手动「启用 DSH」 |
+| 升级后 Key 行上的飞书绑定不见了 | 正常：M72 的启动迁移把它搬到了账号上（审计里有 `feishu_bind` + `from_key_id`） | 在组织架构页看该账号的飞书列；迁移冲突的行仍在 Key 上（日志 WARN） |
 | 「同步飞书」提示部门/人员没有名称 | 应用缺「获取部门基础信息」「获取用户基本信息」数据权限（接口仍返回 code 0，只是字段为空） | 按 §5c.1 加这两个权限并**发布新版本**；「通讯录权限范围」也要覆盖目标部门 |
 | 「同步飞书」报凭据被拒 / 无权限 / 不可达 | `tenant_access_token` 被拒、通讯录权限未开、出网受限或被限流 | 看返回的具体原因：凭据对不上查 `app_id/app_secret`；无权限按 §5c.1 加权限；不可达放行出站 HTTPS；限流稍后再试（目录有 60 秒缓存） |
 | 同步后有些人没有自动合并 | 名字不完全相同（本地带后缀如 `周八(ba)`），或该账户已绑定另一个飞书身份 | 行内给「绑定账号」人工绑定（同名候选会置顶预选）；绝不会自动覆盖已绑定身份 |
@@ -355,9 +394,11 @@ DSH 门户扫码登录仍按 M60 的 **Key 级** 绑定（`api_keys.feishu_open_
 
 相关日志与审计的关键字：`feishu_login_reject`、`feishu_bind_reject`、`feishu_invite_reject`（含 reason：
 `code_rejected` / `credentials` / `app_unavailable` / `rate_limited` / `unreachable` / `unbound open id` /
-`tenant mismatch` / `invitation is no longer valid`）；管理员账号自身的写操作审计是
-`create`、`update`、`reset_password`、`invite`、`delete`、`feishu_bind`、`feishu_unbind`（`target_type=admin_user`），
-登录是 `login`（带 `method=password|feishu|feishu_invite`）。
+`tenant mismatch` / `invitation is no longer valid`）；门户侧还有 `feishu_dsh_login`、`login_key_selected`
+（M72：多 Key 账号选了哪把）与 `feishu_login_reject`（dshgw 的审计，只记租户与结果）；
+管理员账号自身的写操作审计是 `create`、`update`、`reset_password`、`invite`、`delete`、`feishu_bind`、`feishu_unbind`
+（`target_type=admin_user`；账号级绑定用 `target_type=account`），登录是 `login`
+（带 `method=password|feishu|feishu_invite`）。
 
 ## 8. 相关接口
 
@@ -370,9 +411,12 @@ DSH 门户扫码登录仍按 M60 的 **Key 级** 绑定（`api_keys.feishu_open_
 | DELETE | `/admin/api/v1/org/feishu/users/{open_id}/account` | 解除该飞书人员与账户的绑定（幂等） |
 | GET | `/feishu/login` | 开始**门户登录**授权（匿名、按 IP 限流） |
 | GET | `/feishu/callback` | 唯一回调；按 state 里的 flow 分派 |
-| GET | `/admin/api/v1/keys/{id}/feishu/bind` | 控制台绑定入口（需管理员会话）：签 state 并直接 302 到飞书授权页 |
-| DELETE | `/admin/api/v1/keys/{id}/feishu` | 解绑（幂等），返回 `{"unbound":bool,"key_id":int}` |
-| GET | `/admin/api/v1/keys` | 每行含 `feishu` 对象（见 M60 设计 §3.2） |
+| PUT | `/admin/api/v1/accounts/{id}/feishu` | **账号级绑定**（M72，控制台主路径）：body `{"open_id","union_id","name"}`；一个账号只能绑一个飞书身份（已绑别人 → 409） |
+| DELETE | `/admin/api/v1/accounts/{id}/feishu` | 解除该账号的飞书绑定（M72，幂等） |
+| GET | `/admin/api/v1/keys/{id}/feishu/bind` | **已废弃（M72）**：返回 410，提示改用账号级绑定。原行为是 302 到飞书授权页（"扫码"） |
+| DELETE | `/admin/api/v1/keys/{id}/feishu` | 清理存量 Key 级绑定（幂等），返回 `{"unbound":bool,"key_id":int}`；登录不再读它 |
+| GET | `/admin/api/v1/keys` | 每行含 `feishu` 对象（Key 级遗产，只读呈现） |
+| GET | `/admin/api/v1/accounts` | 每行含 `feishu`（账号级身份）、`dsh_effective`、`key_count`、`active_key_count`（M72） |
 | GET | `/feishu/login?mode=admin` | 开始**控制台管理员登录**授权（匿名、按 IP 限流；M66） |
 | GET | `/feishu/invite?invite=<签名值>` | 管理员**邀请链接**入口：校验邀请后跳到飞书授权页（匿名、按 IP 限流；M66） |
 | GET | `/admin/api/v1/auth/methods` | 公开：本部署提供哪些登录方式与飞书登录入口 URL |
@@ -385,9 +429,12 @@ DSH 门户扫码登录仍按 M60 的 **Key 级** 绑定（`api_keys.feishu_open_
 | DELETE | `/admin/api/v1/admin-users/{id}/feishu` | 解绑该管理员的飞书身份（幂等） |
 | DELETE | `/admin/api/v1/admin-users/{id}` | 删除管理员（连带其控制台问答记录；不能删自己/最后一个/bootstrap 行） |
 | GET | `dshgw` 门户 `/login/feishu` | 消费一次性票据，签发 dsh 会话（M61） |
+| GET/POST | `dshgw` 门户 `/login/pick` | 多 Key 选择页（M72）：GET 渲染 Key 单选表单，POST 提交 `key_id` 并签发会话 |
 | GET | `dshgw` 门户 `/feishu/error?reason=<code>` | 门户自己的错误页 |
+| POST | `dshgw`/aigw 内部 `POST /v1/dshgw/authorize` | dshgw→aigw 的授权判定；M72 起响应多 `keys[]`、多拒绝原因 `provision_failed`（见 [dshgw.md §3](dshgw.md)） |
 
-MCP：`admin_unbind_key_feishu`（解绑，admin 角色）；绑定没有 MCP 工具——它需要浏览器完成飞书授权页。
+MCP：`admin_unbind_key_feishu`（清理存量 Key 级绑定，admin 角色）；绑定没有 MCP 工具——账号级绑定是
+"选人"，走控制台的人员弹窗（选择依据是飞书通讯录，不是可脚本化的 id 猜测）。
 控制台管理员那一组（`admin_list_admin_users` / `admin_create_admin_user` / `admin_update_admin_user` /
 `admin_reset_admin_password` / `admin_invite_admin_user` / `admin_unbind_admin_user_feishu` /
 `admin_delete_admin_user`）都有工具，写操作需要 `confirm=true`；`auth/methods` 注册但不暴露给 MCP
