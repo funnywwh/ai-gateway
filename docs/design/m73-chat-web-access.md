@@ -293,7 +293,14 @@ ALTER TABLE chat_sessions ADD COLUMN web_access INTEGER NOT NULL DEFAULT 0;
 - `internal/store`：迁移后旧库 `web_access=0`、往返写读。
 - `internal/chat`：提示词联网段的开/关；`Access.WebAccess/TurnID` 透传到 `List`/`Call`。
 - `internal/httpapi`：工具面四组合（部署关；部署开+会话关；部署开+会话开+未绑定；+已绑定）、
-  分派优先于 `admin_request` 重写、每轮限额、错误结果不失败本轮、PATCH 往返、审计不含检索词。
+  分派优先于 `admin_request` 重写、每轮限额、错误结果不失败本轮、PATCH 往返，以及一条 D6 的
+  回归：用一句有辨识度的检索词和一个有辨识度的抓取地址调完两个工具后，**审计表里没有任何一条
+  记录带着它们**、请求日志里也没有多出行（这条断言先做过反向验证：人为塞一条带检索词的审计就
+  会失败，不然它可能只是"表是空的"）。
+- **没有自动化的一环**：模型自己发起 `web_search` → 网关执行 → 结果回灌 → 模型引用来源，这整条
+  往返没有测试覆盖——内置的 `testecho` 供应商只会回显文本，不会发工具调用，造一个会发工具调用的
+  fake 供应商超出本里程碑的范围。这一环由 §9 的人工走查覆盖，也是 `scripts/verify-m73.sh` 里
+  `RUN_TURN=1` 那段（真实计费）能补的部分。
 - 界面：`scripts/ui-harness` 新增 `chatWeb` / `chatWebOff` 两个视图（徽章、PATCH 只发一个字段、
   复选框、工具中文名、hint；以及"部署没配后端时连开关都不画"）。
 - 实况测试：`internal/webaccess/live_test.go`，`GW_WEBACCESS_LIVE=1` 才跑，默认跳过。它出去真搜

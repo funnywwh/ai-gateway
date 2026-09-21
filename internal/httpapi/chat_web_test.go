@@ -346,3 +346,57 @@ func toolNames(tools []chat.Tool) map[string]bool {
 	}
 	return out
 }
+
+// TestChatWebToolsLeakNothingIntoAuditOrTheRequestLog pins decision D6: the search term and the
+// page text belong to the conversation's own tool-call record, and to nothing else. The audit
+// trail is read by operators and the request log by billing; neither has any business
+// accumulating what somebody asked a model to look up, which is exactly the kind of thing that
+// gets added later "for debugging" unless a test says no.
+func TestChatWebToolsLeakNothingIntoAuditOrTheRequestLog(t *testing.T) {
+	f := newChatFixture(t)
+	ctx := context.Background()
+	server := webSearchServer(t)
+	// A real conversation is created first so the audit trail is *not empty*: the assertions
+	// below are substring searches over the whole trail, and an empty table would make them pass
+	// for the wrong reason.
+	cookie := f.login(t, "admin")
+	sessionID := f.createSession(t, cookie)
+	tools := &chatTools{web: newWebTools(newWebClient(t, server.URL, true, 6), 8)}
+	access := webAccessWith(chat.Access{
+		OwnerID: 1, Username: "admin", Role: chat.RoleAdmin, SessionID: sessionID, TurnID: "t1",
+	}, nil)
+
+	// A term distinctive enough that a substring search is conclusive, plus a page fetch whose
+	// URL is equally distinctive.
+	const query = "Zx9-只有这条会话该记得"
+	if result, err := tools.Call(ctx, access, toolWebSearch, map[string]any{"query": query}); err != nil || result.IsError {
+		t.Fatalf("web_search: err=%v result=%+v", err, result.Value)
+	}
+	target := server.URL + "/leak-probe"
+	if result, err := tools.Call(ctx, access, toolWebFetch, map[string]any{"url": target}); err != nil || result.IsError {
+		t.Fatalf("web_fetch: err=%v result=%+v", err, result.Value)
+	}
+
+	entries, err := f.db.ListAudit(ctx, 200)
+	if err != nil {
+		t.Fatalf("ListAudit: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no audit rows at all — this test would pass vacuously")
+	}
+	for _, entry := range entries {
+		blob := entry.Action + entry.TargetType + entry.TargetID + entry.ChangesJSON
+		if strings.Contains(blob, query) || strings.Contains(blob, "leak-probe") {
+			t.Errorf("audit entry %d (%s) carries the tool's input: %s", entry.ID, entry.Action, blob)
+		}
+	}
+	// No data-plane traffic at all: the search backend is not a gateway provider, so a web tool
+	// call must never appear as a billed request.
+	logs, err := f.db.ListRequestLogs(ctx, domain.RequestLogFilter{}, 100)
+	if err != nil {
+		t.Fatalf("ListRequestLogs: %v", err)
+	}
+	if len(logs) != 0 {
+		t.Errorf("a web tool call produced %d request-log rows: %+v", len(logs), logs)
+	}
+}
