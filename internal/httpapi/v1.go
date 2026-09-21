@@ -1114,10 +1114,10 @@ func (s *Server) ensureAccountDSHForLogin(ctx context.Context, account *domain.A
 	}
 	fresh, err := accounts.GetAccount(ctx, account.ID)
 	if err != nil {
-		// The provision succeeded, so the login may proceed with what was written on the row.
-		account.DshTenant = tenant
-		account.DSHEnabled = true
-		return account, nil
+		// The provisioning itself succeeded, so the honest answer is a retryable failure rather
+		// than a half-filled account: the caller needs the tenant name to send the browser to,
+		// and the next login finds the tenant already created.
+		return nil, fmt.Errorf("dsh was provisioned as tenant %q but the account could not be re-read: %w", tenant, err)
 	}
 	return fresh, nil
 }
