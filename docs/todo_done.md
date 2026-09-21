@@ -4703,5 +4703,17 @@ HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退�
       §7 排障 9 条、§8 接口表）、`docs/org.md` §5/§6、`docs/dshgw.md` §3、`docs/mcp.md` §4
 
 **验证**（自动化，2026-09-21）：`go vet ./internal/... ./cmd/...` 干净；`go test ./internal/... ./cmd/...` 全绿；
-`make ui-base` 全绿（含两个新测试）；`scripts/ui-harness/run.sh --views org` 52 项通过。
-真机验收（设计 §11 五条）尚未执行，留在 `docs/TODO.md`。
+`make ui-base` 全绿（含两个新测试）；`make dshgw-test` 全绿；`scripts/ui-harness/run.sh` 全 29 个视图通过
+（新增 `org-person` 17 项）。
+
+**部署**（2026-09-21）：`config.yaml` 打开 `dshgw.auto_enable: true`；`bin/aigw` 与 `bin/dshgw` 都重建
+并重启（选择页在 dshgw 里）；回滚点 `data/prev/bin/{aigw,dshgw}.prev-running-3.1.0-69da1dd`；
+线上 `/version` = 3.1.0 / M72 提交。
+
+**真机验收**（本机，逐条记录见设计 §11）：迁移清空 5 条 Key 级绑定且无冲突；Key 登录 303 到 `/login/pick`
+并列出该账号 5 把 Key（不含 worker Key、不含明文）；伪造 id 403、票据重放 403、合法选择建会话并在
+dshgw 审计 `login_key_selected`；`POST /v1/dshgw/authorize` 由 `actor=dshgw-auto` 按需建出
+`dsh-m51-test-a`（registry + 审计 + `dsh_effective` 都对）；「停用 DSH」后 authorize 403、
+门户登录 403 且不被自动重新启用。验收中抓到并修掉一个真缺陷：重新启用后 `dsh_disabled_at` 仍在库里
+（`UpsertAccount` 不写该列，启用路径漏了单独清它）→ `ce81d06` + 回归测试。
+剩下唯一没验的是"用本人的飞书身份走一次飞书登录"（需要手机），留在 `docs/TODO.md`。
