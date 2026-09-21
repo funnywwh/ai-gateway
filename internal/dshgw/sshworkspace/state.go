@@ -78,7 +78,11 @@ func (s *Store) Save(mounts []Mount) error {
 	if mounts == nil {
 		mounts = []Mount{}
 	}
-	sorted := append([]Mount(nil), mounts...)
+	// The copy stays non-nil when the list is empty: appending onto a nil slice returns nil, and
+	// a nil slice marshals as `null` — removing the last mount used to leave `"mounts": null` in
+	// a file an operator reads during an incident, while the account's mirror wrote `[]`. The two
+	// must not disagree about the same fact.
+	sorted := append(make([]Mount, 0, len(mounts)), mounts...)
 	sort.SliceStable(sorted, func(i, j int) bool {
 		if sorted[i].Tenant != sorted[j].Tenant {
 			return sorted[i].Tenant < sorted[j].Tenant
