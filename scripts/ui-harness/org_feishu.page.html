@@ -324,6 +324,9 @@ try {
       checks.scopeSeededAllChecked = ['飞书根组织', '研发部', '市场部', '平台组']
         .every((label) => deptBox(label).checked === true);
       checks.scopeLabelShowsAll = scopeLabelEl().textContent.includes('已勾选 4/4');
+      checks.scopeActionsAreJustSelectAndClear = find('全选') !== undefined && find('清空') !== undefined
+        && find('连同子部门', dialog()) === undefined;
+      checks.scopeHintExplainsCascade = document.querySelector('.feishu-scope-hint').textContent.includes('子部门');
       checks.scopeSecondReadCarriesSelection = (window.__calls || [])
         .some((call) => call.includes('/org/feishu/directory') && call.includes('departments='));
 
@@ -352,21 +355,44 @@ try {
       checks.ancestorIncludedCount = document.querySelector('.feishu-sync-subtitle').textContent.includes('含为层级补建 1 个');
       checks.ancestorPeopleOutOfScope = document.querySelectorAll('.feishu-user.out-of-scope').length === 3;
 
-      // 「全选」回到全量；「连同子部门」把已勾选部门的子孙一并勾上（一次性动作）。
+      // 「全选」回到全量。
       find('全选').click();
       checks.selectAllChecksEveryone = ['飞书根组织', '研发部', '市场部', '平台组']
         .every((label) => deptBox(label).checked === true);
       await refresh();
       checks.selectAllRestoresEveryone = document.querySelectorAll('.feishu-user.out-of-scope').length === 0;
+
+      // --- 父子联动（M70 §12 D15 修订）---------------------------------------
+      // 勾父部门 → 子部门全部勾选；取消 → 子部门全部取消；只取消子部门 → 父部门半选但仍勾选。
       find('清空').click();
       deptBox('研发部').click();
-      find('连同子部门').click();
-      checks.withChildrenChecksDescendants = deptBox('平台组').checked === true
-        && deptBox('市场部').checked === false;
+      checks.cascadeDownChecksChildren = deptBox('平台组').checked === true
+        && deptBox('研发部').checked === true
+        && deptBox('研发部').indeterminate === false;
+      deptBox('研发部').click();
+      checks.cascadeUpClearsChildren = deptBox('平台组').checked === false
+        && deptBox('研发部').checked === false;
+      deptBox('研发部').click();
+      deptBox('平台组').click();
+      checks.partialChildKeepsParentChecked = deptBox('研发部').checked === true;
+      checks.partialChildMarksParentIndeterminate = deptBox('研发部').indeterminate === true;
+      checks.partialScopeLabel = scopeLabelEl().textContent.includes('已勾选 1/4');
+      // 只勾子部门（父部门未勾）同样半选：那一行是"为层级补建"，不是被勾选。
+      find('清空').click();
+      deptBox('平台组').click();
+      checks.ancestorRowIndeterminate = deptBox('研发部').checked === false
+        && deptBox('研发部').indeterminate === true;
+      // 联动后的范围要真的发给服务端：读的 URL 与同步的 body 都按联动结果。
       await refresh();
       const narrowed = (window.__calls || [])
         .filter((call) => call.includes('/org/feishu/directory') && call.includes('departments=')).pop();
-      checks.narrowedReadCarriesSubtree = !!narrowed && narrowed.includes('od_a1') && !narrowed.includes('od_b');
+      checks.cascadeScopeSentToServer = !!narrowed && narrowed.includes('od_a1') && !narrowed.includes('od_a,');
+      find('清空').click();
+      deptBox('研发部').click();
+      await refresh();
+      checks.cascadeReadCarriesSubtree = (window.__calls || [])
+        .filter((call) => call.includes('/org/feishu/directory') && call.includes('departments=')).pop()
+        .includes('od_a1');
 
       // 「同步」必须二次确认，确认后才发 POST，并把 refresh=true 的重新预览接上。
       find('同步', dialog()).click();
@@ -375,6 +401,7 @@ try {
       checks.syncConfirmNamesImpact = modalRoot().textContent.includes('标签会被整棵子树继承');
       // 确认框里的数字必须是**本次勾选范围**的数字（这正是预览也要带选择的原因）。
       checks.syncConfirmNamesScope = modalRoot().textContent.includes('本次范围：已勾选 2 个节点');
+      checks.cascadeScopeInBody = modalRoot().textContent.includes('实际涉及 2 个部门');
       checks.syncConfirmNamesOutOfScope = modalRoot().textContent.includes('范围外的 3 人不动');
       find('确认').click();
       await settle();
@@ -383,7 +410,7 @@ try {
       const syncBody = (window.__sent || []).filter((call) => call.path === '/org/feishu/sync').pop();
       let syncSelection = null;
       try { syncSelection = JSON.parse(syncBody.body).department_ids; } catch (err) { syncSelection = null; }
-      // 上一步只勾了「研发部 + 平台组」（连同子部门），POST 必须照这个范围发。
+      // 上一步只点了「研发部」（联动把「平台组」一起勾上），POST 必须照这个范围发。
       checks.syncBodyCarriesSelection = Array.isArray(syncSelection)
         && syncSelection.slice().sort().join(',') === 'od_a,od_a1';
       checks.syncToast = [...document.querySelectorAll('.toast')].some((node) => node.textContent.includes('同步完成'));

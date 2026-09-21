@@ -409,11 +409,15 @@ textarea.form-input { resize:vertical; min-height:64px; }
    刻意不做"勾父部门自动勾子部门"的隐式联动——作用域必须是看得见的。 */
 .feishu-scope-bar { gap:10px; }
 .feishu-scope-label { flex:0 1 auto; min-width:0; font-size:12.5px; }
+.feishu-scope-hint { flex:0 1 auto; min-width:0; font-size:11.5px; }
 .feishu-scope-actions { display:flex; gap:6px; flex:0 0 auto; margin-left:auto; }
-/* 部门行里的作用域复选框：与标签同排，且不能被全局 `input { width:100% }` 撑满（同 .org-member 的坑）。 */
+/* 部门行里的作用域复选框：与标签同排，且不能被全局 `input { width:100% }` 撑满（同 .org-member 的坑）。
+   半选（indeterminate）表示"这一行与它自己的子树状态不一致"：勾了父部门又单独取消了某个子部门，
+   或只勾了子部门（父部门只为层级补建）——两种情况都要一眼看得出来。 */
 .feishu-dept-label { display:flex; align-items:center; gap:8px; min-width:0; }
 .feishu-dept-label input[type=checkbox] { flex:0 0 auto; width:15px; height:15px; margin:0;
   accent-color:var(--accent); }
+.feishu-dept-label input[type=checkbox]:indeterminate { accent-color:var(--accent); opacity:.85; }
 .feishu-dept-label .tree-label { min-width:0; overflow-wrap:anywhere; }
 /* 范围外的人员：整行置灰，并单独说明"不是未匹配，只是这次不同步"。 */
 .feishu-user.out-of-scope { opacity:.62; }

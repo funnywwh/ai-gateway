@@ -272,6 +272,10 @@ const sync = calls.find((call) => call.method === 'POST' && call.path === '/org/
 assert.ok(sync, 'a confirmed 同步 posts to the sync endpoint');
 assert.deepEqual([...sync.body.department_ids].sort(), ['0', 'od_a', 'od_b'],
   'the sync carries the scope the operator ticked');
+// The parent/child cascade is a console affordance: what travels is the resulting explicit id
+// set, never a "descendants" flag the server would have to re-derive (that is what keeps the
+// preview's numbers and the sync's writes describing the same departments).
+assert.equal(Object.keys(sync.body).join(','), 'department_ids');
 const refreshed = calls.filter((call) => call.path === '/org/feishu/directory').pop();
 // The objects come out of the module's own VM context, so compare fields rather than
 // prototypes.

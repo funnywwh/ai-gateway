@@ -76,10 +76,6 @@ export function openFeishuSync({ onDone } = {}) {
   const scopeLabel = el('span', { class: 'muted feishu-scope-label' });
   const selectAllBtn = el('button', { class: 'btn', text: '全选' });
   const clearBtn = el('button', { class: 'btn', text: '清空' });
-  const withChildrenBtn = el('button', {
-    class: 'btn', text: '连同子部门',
-    title: '把已勾选部门的全部子孙也勾上（一次性动作，不会跟着之后的勾选自动联动）',
-  });
   const close = () => { backdrop.remove(); if (onDone) onDone(state.changed); };
 
   const dialog = el('div', { class: 'modal feishu-sync-dialog' }, [
@@ -88,7 +84,8 @@ export function openFeishuSync({ onDone } = {}) {
       el('div', { class: 'toolbar feishu-sync-head' }, [subtitle, refreshBtn, syncBtn]),
       el('div', { class: 'toolbar feishu-scope-bar' }, [
         el('span', { class: 'muted', text: '同步范围：' }), scopeLabel,
-        el('span', { class: 'feishu-scope-actions' }, [selectAllBtn, clearBtn, withChildrenBtn]),
+        el('span', { class: 'muted feishu-scope-hint', text: '勾选/取消父部门会连同其子部门一起' }),
+        el('span', { class: 'feishu-scope-actions' }, [selectAllBtn, clearBtn]),
       ]),
       notice,
       el('div', { class: 'feishu-sync-layout' }, [treeHost, peopleHost]),
@@ -123,10 +120,6 @@ export function openFeishuSync({ onDone } = {}) {
     applySelection();
   });
   clearBtn.addEventListener('click', () => { state.selection.clear(); applySelection(); });
-  withChildrenBtn.addEventListener('click', () => {
-    for (const id of scopeExpandedWithChildren()) state.selection.add(id);
-    applySelection();
-  });
 
   load(false);
 
@@ -213,7 +206,7 @@ export function openFeishuSync({ onDone } = {}) {
 
   // renderScope is the one place that decides whether a sync may start, and it says why not.
   function renderScope() {
-    for (const [id, box] of scopeBoxes) box.checked = state.selection.has(id);
+    for (const [id, box] of scopeBoxes) applyBoxState(id, box);
     const total = treeNodes().length;
     const picked = state.selection.size;
     const unknown = (state.payload && state.payload.unknown_department_ids) || [];
@@ -236,28 +229,61 @@ export function openFeishuSync({ onDone } = {}) {
     return [...state.selection].sort();
   }
 
-  // scopeExpandedWithChildren implements 「连同子部门」 as a one-shot action: it returns the
-  // checked departments plus every descendant, so the operator can see the result as ticked
-  // boxes instead of trusting an invisible rule.
-  function scopeExpandedWithChildren() {
-    const all = treeNodes();
+  // childrenIndex maps a node to its children. It is rebuilt per call from the tree model:
+  // the dialog never holds a second copy of the hierarchy that could drift from the payload.
+  function childrenIndex() {
     const children = new Map();
-    for (const node of all) {
+    for (const node of treeNodes()) {
       const parent = node.parent_id || ROOT_ID;
       if (!children.has(parent)) children.set(parent, []);
       children.get(parent).push(node.id);
     }
-    const out = new Set(state.selection);
-    const queue = [...out];
+    return children;
+  }
+
+  // subtreeOf is the node plus every descendant. The visited set is not decoration: the
+  // directory is Feishu's, and a cycle there must not hang the console.
+  function subtreeOf(id) {
+    const children = childrenIndex();
+    const seen = new Set([id]);
+    const queue = [id];
     while (queue.length) {
       const current = queue.shift();
       for (const child of children.get(current) || []) {
-        if (out.has(child)) continue;
-        out.add(child);
+        if (seen.has(child)) continue;
+        seen.add(child);
         queue.push(child);
       }
     }
-    return out;
+    return seen;
+  }
+
+  // setSubtree is the rule the operator asked for: ticking a department ticks its whole
+  // subtree, unticking it clears the whole subtree. Cascading on a child works the same way —
+  // "取消" always means "this and everything under it".
+  function setSubtree(id, checked) {
+    for (const target of subtreeOf(id)) {
+      if (checked) state.selection.add(target); else state.selection.delete(target);
+    }
+  }
+
+  // subtreeDiffers reports whether a row and its own subtree disagree — the definition of the
+  // half-checked box. Both directions matter: a checked parent with a cleared child ("I left
+  // that one out") and a cleared parent with a checked child (the ancestor a selection needs
+  // for its hierarchy, D9).
+  function subtreeDiffers(id) {
+    const mine = state.selection.has(id);
+    for (const target of subtreeOf(id)) {
+      if (target !== id && state.selection.has(target) !== mine) return true;
+    }
+    return false;
+  }
+
+  // applyBoxState is the single place that paints a checkbox, used both when a row is created
+  // (a tree that is expanded later must not show a stale box) and when anything repaints.
+  function applyBoxState(id, box) {
+    box.checked = state.selection.has(id);
+    box.indeterminate = subtreeDiffers(id);
   }
 
   // applySelection pushes a changed scope to the server (debounced) and repaints immediately,
@@ -271,15 +297,16 @@ export function openFeishuSync({ onDone } = {}) {
 
   function scopeBox(node) {
     const box = el('input', { type: 'checkbox', class: 'feishu-dept-check' });
-    box.checked = state.selection.has(node.id);
     box.addEventListener('click', (ev) => { ev.stopPropagation(); });
     box.addEventListener('change', () => {
-      if (box.checked) state.selection.add(node.id); else state.selection.delete(node.id);
+      // box.checked is the state the click asked for; the subtree follows it.
+      setSubtree(node.id, box.checked);
       applySelection();
     });
-    // The boxes are kept so 「全选 / 清空 / 连同子部门」 can repaint them: those actions change
-    // the scope without a tree rebuild, and a checked state that lives only in `state` is
-    // exactly how a checkbox looks ticked while the sync sends something else.
+    // The boxes are kept so 「全选 / 清空」 and the cascade itself can repaint them: a scope that
+    // lives only in `state` is exactly how a checkbox looks ticked while the sync sends
+    // something else.
+    applyBoxState(node.id, box);
     scopeBoxes.set(node.id, box);
     return box;
   }
