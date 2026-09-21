@@ -211,8 +211,45 @@ chat:
   ui_bridge_enabled: true
   # 单步回答的 token 上限，0 = 用供应商默认值。
   max_output_tokens: 0
-  # 空 = 使用内置指令（含工具用法、图表规格、HTML 沙箱边界、可交互界面契约）。
+  # 空 = 使用内置指令（含工具用法、图表规格、HTML 沙箱边界、可交互界面契约、联网边界）。
   system_prompt: ""
+  # 联网（M73）：让模型用 web_search 检索公网、用 web_fetch 读网页正文。默认关。
+  #
+  # 两层开关：这里是**部署级**（本部署是否提供联网，只读本文件——故意不做环境变量覆盖，
+  # 免得被误开）；**会话级**开关在会话头部/新建会话时打开，默认关，逐会话落库。
+  # 联网工具不代表任何网关权限（它不走 /mcp、不需要 MCP 令牌），也不计费——它不是模型调用；
+  # 但外部搜索 API 的额度与费用由本部署承担，模型为用上结果多走的模型步数照常计费。
+  web_access:
+    enabled: false
+    # 后端：searxng（免密钥，需实例开启 format: json）/ bocha（中文，需密钥）/
+    # tavily（英文与文档，需密钥）/ bing（免密钥，解析结果页 HTML——结构一变就失效，
+    # 只适合先把链路跑通，不建议生产）。
+    provider: bing
+    # searxng 必填（实例地址，如 http://127.0.0.1:8888）；bing 可覆盖（默认 https://cn.bing.com）；
+    # bocha/tavily 留空用官方地址。
+    base_url: "https://cn.bing.com"
+    # bocha / tavily 必填。明文写在这里会随配置文件落盘，推荐用 GW_CHAT_WEB_API_KEY 注入；
+    # 密钥永远不会被回显到接口、审计或日志里。
+    api_key: ""
+    # 出网代理，语义与供应商的 proxy 完全一致：http://host:port、https://host:port、
+    # socks5://host:port，或字面量 env 表示跟随 HTTPS_PROXY/NO_PROXY。留空=直连，
+    # 且**不读**环境变量（升级不会改变既有部署的走向）。写错会让启动失败，而不是静默直连。
+    proxy: ""
+    # 单次搜索/抓取请求的超时。
+    timeout_s: 15
+    # 单次搜索返回条数上限（1..20）；模型可以要求更少。
+    max_results: 6
+    # 单个页面下载上限与回灌给模型的正文上限（超出即截断并在结果里标注；正文字节数必须
+    # 不大于下载上限，且应小于 chat.max_tool_result_bytes，否则先触发全局截断而看不到标注）。
+    fetch_max_bytes: 1048576
+    fetch_max_text_bytes: 32768
+    # 一轮问答里 search+fetch 合计的调用上限：外部额度不该被模型的循环一次烧掉。
+    # 达到上限时工具会返回说明、本轮照常结束，不会失败。
+    max_calls_per_turn: 8
+    # 是否允许抓取内网地址。默认 false：只允许公网 http/https，拒绝内网/回环/链路本地/
+    # CGNAT/保留地址与非 80、443 端口，重定向与 DNS 重绑定都会重校验。
+    # 打开它 = 允许模型读内网页面（例如内网 wiki），按需开启。
+    allow_private_hosts: false
 
 hooks:
   queue_size: 1024
