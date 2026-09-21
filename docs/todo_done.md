@@ -4401,6 +4401,15 @@ sshfs 缺陷仍未关闭。
       stopper 报错仍 303 + 租户侧栏退出、
       `PrepareLogin` 用存储 key/保留租户段/恢复凭据/HOME 不被创建、aigw 失败不改文件、挂起不复活
 - [x] 测试：`go test ./internal/dshgw/... ./cmd/dshgw ./internal/arch` 全绿
+- [x] **真机验收（2026-09-21 10:22–10:24，本机三单元；逐条见下方 v2.9.1 发布记录）**：
+      登录同步（`models=6 credential_restored=true worker_started=false`）、删掉 `providers.aigw` 与
+      `refs.AIGW_API_KEY` 后重新登录恢复（租户段 `permission`/`ui-onboarding` 原样）、门户退出与
+      租户侧栏退出都停掉 worker（审计 `logout_worker_stop`、`suspended` 仍 false、worker 端口消失）、
+      再登录即起（`worker_started=true`）、伪造 cookie 名不会停别人的 dsh、全程
+      `~/.dsh/settings.yaml` sha256 不变
+- [x] **修回线上偏离**：dshgw 重启时的启动同步恢复了四个租户的平台段（各 4 个模型），
+      `dsh-tenant` 的 `providers: {}` 与 `refs: {}` 由第一次登录恢复（6 个模型 + 凭据引用 + records 保留）；
+      `verify1` 保持历史状态（无 key，doctor 的 2 条已知 FAIL 不变）
 
 ### v2.8.0 发布与部署记录（2026-09-21，本机 aigw + dshgw；gpt001 未部署）
 
@@ -4435,3 +4444,51 @@ sshfs 缺陷仍未关闭。
 `client sent an HTTP request to an HTTPS server`）并试过一次失败的 portal 登录，均为无害噪声。
 已有十六进制挂载点不迁移：要换成目录名就在租户页面删除该目录后重新添加（删除会释放旧路径，
 重新添加拿回目录名；换路径意味着工作区条目重建，旧工作区下 `cwd` 指向旧路径的会话不再归组）。
+
+### v2.9.1 发布与部署记录（2026-09-21，本机 aigw + dshgw；gpt001 未部署）
+
+本版内容：**M69 登录驱动的租户生命周期与「平台段 / 租户段」设置合并**（功能提交 `876f362`，
+修正提交 `d41c631`）。档位 **minor**：新增行为（每次登录同步平台段、退出即停该租户的 dsh、
+登录时把它拉起），无破坏性接口变更、无配置变更。**v2.9.0 与 v2.9.1 是同一功能的两步**：
+v2.9.0（`ad563f2`）先落地，部署当天用真机数据把退出规则从"最后一个会话退出才停"改成"无条件停"
+（`d41c631`），随即发 v2.9.1（`b561b0c`）覆盖部署——本机两次都在 2026-09-21 上午 10:18–10:22。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v2.9.1**（`VERSION` 2.8.0 → 2.9.0 → 2.9.1；tag `v2.9.0` → `ad563f2`、`v2.9.1` → `b561b0c`） |
+| 本版内容 | 平台段（`llm-pi-ai.providers.aigw` + 派生的 `agent-default-model` 纠正 + `refs.AIGW_API_KEY`）每次登录由 dshgw 重写，租户段原样保留；登录用**存储的 worker key** 取模型、失败不阻断登录、并确保 worker 在跑；退出（门户 `POST /logout` 与租户侧栏 `POST /dshgw/logout/`）**无条件**停该租户的 dsh worker 但不写 `suspended`；宿主机 `~/.dsh` 不读不写（有断言） |
+| 构建物 | `bin/aigw` 与 `bin/dshgw`（均 2.9.1 / `b561b0c`；console minified + gzip：38 文件 595078→348074 B）；`gwproxy` 本版无改动，**未重建、未重启**（线上仍是 2.3.0 / 2306c22，它的 `/version` 代理 aigw，所以也显示 2.9.1） |
+| 部署范围 | 本机两个单元：`dshgw-verify`（2.9.0 10:18:54 → 2.9.1 10:22:03）与 `aigw-local`（2.9.0 10:19:16 → 2.9.1 10:22:20） |
+| 回滚点 | `data/prev/bin/aigw.prev-running-2.8.0-0fcd129` / `dshgw.prev-running-2.8.0-0fcd129`（发布前在跑的 2.8.0，取自 `/proc/<pid>/exe`，两者 `-version` 自证 2.8.0）与 `aigw.prev-running-2.9.0-ad563f2` / `dshgw.prev-running-2.9.0-ad563f2`（2.9.0） |
+| 配置/数据变更 | 无配置改动、无数据库迁移；租户 `settings.yaml`/`.credentials.yaml` 由本版逻辑按归属合并（平台段重写、租户段保留） |
+
+**验证**（全部实测）：
+
+- `GET http://127.0.0.1:8088/version` → `{"revision":"b561b0c","ui":"minified","ui_encoding":"gzip","version":"2.9.1"}`；
+  `healthz=200`、`readyz=200`、`/admin/ui/` 200；`gwproxy :8090/version`（带 Host）→ 2.9.1 / `b561b0c`
+- 跑的就是新构建：`/proc/<aigw pid>/exe` 与 `bin/aigw` sha256 相同（`cfbc28dc…`），
+  `/proc/<dshgw pid>/exe` 与 `bin/dshgw` 相同（`34e39cf5…`）；启动行分别为
+  `aigw starting version=2.9.1 revision=b561b0c`（10:22:20）与 `dshgw listening version=2.9.1 revision=b561b0c`（10:22:03）
+- 门户 18300 → 200；租户 18301–18306 全 302（带 `Host: chat.tirisen.hk:<port>`；不带端口的 Host 一律 404，
+  与既有"网关核对 authority"行为一致）；6 个 worker scope 全部 running、`18400–18405` 全部 `worker ready`
+- 噪声：`aigw-local` 重启后 `level=ERROR` **0 条**；`dshgw` 重启窗口有 8 条
+  `dsh reverse proxy failed … *net.OpError`（10:22:03–10:22:12，worker 尚未就绪期间），
+  最后一个 worker ready（10:22:20）之后 **0 条**
+- `bin/dshgw doctor`：仅 `verify1` 的历史 2 项 FAIL（缺 `gateway.key`、缺 `settings.yaml`），其余租户全 OK
+
+**M69 真机验收（同上时间窗）**：
+
+| 用例 | 结果 |
+|---|---|
+| 登录同步（用租户自己的 worker key 走门户 `POST /login`） | 302 + `Set-Cookie dshgw_s_dsh-tenant`；日志 `tenant prepared for login tenant=dsh-tenant models=6 credential_restored=true worker_started=false`；`settings.yaml` 平台段 = aigw 当前 6 条授权模型，租户段 `permission`/`ui-onboarding` 原样 |
+| 反例有牙（手工清空 `providers` 与 `refs`） | 再次登录后平台段与 `refs.AIGW_API_KEY` 都恢复、`records`（browser-session）保留；与"好"快照逐字段比对只差 `agent-default-model`（被清空后按设计落到清单首项 `deepseek-flash`） |
+| 门户退出（`POST /logout`） | 303；审计 `logout_worker_stop dsh-tenant`；日志 `tenant dsh stopped on logout`；`18401` 无监听、worker 进程消失；`registry.json` 的 `suspended` 仍为 `false` |
+| 再登录 | `worker_started=true`，`18401` 恢复监听，`tenant worker ready` |
+| 租户侧栏退出（`POST /dshgw/logout/`，Origin 为该租户端口） | 303 → 门户；审计 `logout_worker_stop` + `tenant_logout_success`；worker 再次停止 |
+| 伪造 cookie 名（对 `dsh-colin` 发一个不存在的 token） | 303 但审计只有 `logout_success`：没有 `logout_worker_stop`，`dsh-colin` 的 worker 照常运行 |
+| 宿主机 settings | 全程 `sha256 ~/.dsh/settings.yaml` = `e4df6b3d…`（mtime 仍是 2026-09-20 16:54） |
+| 修回线上偏离 | 五个真实租户现在都有平台段（4/4/4/6/4 个模型）与 `AIGW_API_KEY` 引用；`verify1` 保持无 key 的历史状态 |
+
+**未做/限制**：gpt001 未部署；浏览器人工确认（`docs/TODO.md` M69 最后一条）未做——本机验收全部用
+HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退出是无条件停——同一个人另一个窗口的 dsh
+也会被停掉（重新登录即恢复），这是用真机数据换来的选择，理由见设计文档 §9 与 `docs/dshgw.md` §3b。

@@ -699,16 +699,11 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 运维说明：`deploy/dshgw/README.md` §12b。
 需求（2026-09-21 用户原话）：dshgw 要合并租户手动设置——平台的模型限制用平台的、其他用租户的、
 不碰宿主机的；同步要在用户每次登录时发生；用户点击退出要强制退出 dsh 服务。
-实现与单测完成的条目见 `docs/todo_done.md` 同名小节。
+实现、单测与真机验收（2026-09-21 本机三单元）的记录见 `docs/todo_done.md` M69 小节与 v2.9.1 发布记录。
 
-- [ ] **真机验收（本机三单元）**：① 登录后平台段 = aigw 授权模型且租户段（`permission`/`ui-theme`/
-      自建 provider）保留；② 手工删掉 `providers.aigw` 与 `refs.AIGW_API_KEY` → 重新登录恢复；
-      ③ 侧栏退出 → 该租户 dsh 进程消失、`suspended` 仍为 false，再登录即回来；④ 伪造的 cookie 名
-      不能停别人的 dsh（审计里没有别的租户的 `logout_worker_stop`）；⑤ 全程 `~/.dsh/settings.yaml` 不变
-- [ ] **修回当前线上偏离**：`dsh-tenant` 的 `providers: {}` + `refs: {}`，以及其余四户只剩
-      `ui-onboarding` 的 settings.yaml（用一次登录或 `sync-models` 恢复，并在验收记录里留痕）
 - [ ] **浏览器人工确认（剩下的一步）**：门户登录 → 租户页直接可用（无 502/长时间白屏）；
-      侧栏退出 → 令牌失效且不再占用 dsh 进程
+      租户侧栏「退出」→ 回到门户登录页且不再占用 dsh 进程。本机验收都是用 HTTP 客户端跑通的，
+      还缺一次真人点界面
 
 ## 缺陷：`dshgw.admin_socket` 与 M63 状态根脱节（2026-09-20 修）
 
