@@ -46,9 +46,13 @@ type Options struct {
 	IdentitySource string
 	// IdentityDir holds per-account keys (<dir>/<tenant>) and wins over IdentitySource.
 	IdentityDir string
-	// SSHConfigSource is copied to <workspace>/.ssh/config for accounts that have none: the
-	// alias list both the plugin (browsing) and the gateway (mounting) resolve hosts with.
-	SSHConfigSource string
+	// SSHConfigDir holds one alias list per account (<dir>/<tenant>), copied to
+	// <workspace>/.ssh/config for accounts that have none. It is the ONLY source of a
+	// tenant's aliases: there is deliberately no host-wide source, because one shared list
+	// is both a leak (every tenant would learn every host the operator knows) and a
+	// coupling (one edit would decide for every tenant). Configuration validation refuses
+	// a directory inside the deployment account's own ~/.ssh for the same reason.
+	SSHConfigDir string
 	// Hosts is an optional allow-list. Empty accepts any syntactically valid host spec.
 	Hosts []string
 	// ConnectTimeout bounds every ssh round-trip the gateway makes.

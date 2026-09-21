@@ -751,7 +751,7 @@ func TestMailboxValidation(t *testing.T) {
 // which ssh reports on every call and which could pick the wrong key for a host.
 func TestEnsureIdentityProvisionsASanitizedAliasConfig(t *testing.T) {
 	dir := t.TempDir()
-	operatorConfig := filepath.Join(dir, "operator-config")
+	operatorConfig := filepath.Join(dir, "dsh-colin")
 	source := `Host gpt001
   HostName gpt001.iotalking.top
   User root
@@ -768,7 +768,7 @@ Host aipc
 	if err := os.WriteFile(operatorConfig, []byte(source), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	env := newTestEnv(t, Options{SSHConfigSource: operatorConfig})
+	env := newTestEnv(t, Options{SSHConfigDir: dir})
 	if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); err != nil {
 		t.Fatalf("EnsureIdentity: %v", err)
 	}

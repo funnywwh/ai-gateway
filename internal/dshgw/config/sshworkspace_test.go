@@ -136,3 +136,121 @@ func TestSSHWorkspacesAcceptsUserUploadedIdentities(t *testing.T) {
 		t.Fatal("unexpected shared key source")
 	}
 }
+
+// The alias source is a directory of per-account files, never a single host-wide file.
+func TestSSHWorkspacesConfigDirIsAPerAccountDirectory(t *testing.T) {
+	dir := t.TempDir()
+	seeds := filepath.Join(dir, "seeds")
+	if err := os.Mkdir(seeds, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(seeds, "dsh-colin"), []byte("Host aipc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(writeConfig(t, baseCfg+"ssh_workspaces:\n  enabled: true\n  ssh_config_dir: "+seeds+"\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SSHWorkspaces.SSHConfigDir != seeds {
+		t.Errorf("ssh_config_dir = %q, want %q", cfg.SSHWorkspaces.SSHConfigDir, seeds)
+	}
+
+	// A relative value resolves against the deployment root, like every other path here.
+	cfg, err = Load(writeConfig(t, baseCfg+"ssh_workspaces:\n  enabled: true\n  ssh_config_dir: .\n"))
+	if err != nil {
+		t.Fatalf("relative ssh_config_dir rejected: %v", err)
+	}
+	if !filepath.IsAbs(cfg.SSHWorkspaces.SSHConfigDir) {
+		t.Errorf("ssh_config_dir %q was not resolved", cfg.SSHWorkspaces.SSHConfigDir)
+	}
+}
+
+func TestSSHWorkspacesRefusesAnUnusableConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	seeds := filepath.Join(dir, "seeds")
+	if err := os.Mkdir(seeds, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wide := filepath.Join(dir, "wide")
+	if err := os.Mkdir(wide, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	// Mkdir is masked by the umask, so the mode has to be forced for the check to be tested.
+	if err := os.Chmod(wide, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "config")
+	if err := os.WriteFile(file, []byte("Host aipc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "absent")
+
+	for name, value := range map[string]string{
+		"missing directory": missing,
+		"a file":            file,
+		"world writable":    wide,
+	} {
+		body := baseCfg + "ssh_workspaces:\n  enabled: true\n  ssh_config_dir: " + value + "\n"
+		if _, err := Load(writeConfig(t, body)); err == nil {
+			t.Errorf("unusable ssh_config_dir accepted: %s", name)
+		}
+	}
+}
+
+// The deployment account's own ~/.ssh is not a tenant source: it is the one directory this
+// feature exists to stop handing out, and a symlink must not be a way around the check.
+func TestSSHWorkspacesRefusesTheDeploymentAccountsOwnSSH(t *testing.T) {
+	home := t.TempDir()
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.Mkdir(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sshDir, "config"), []byte("Host mine\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(sshDir, "seeds")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.Symlink(sshDir, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+
+	for _, value := range []string{sshDir, nested, link} {
+		body := baseCfg + "ssh_workspaces:\n  enabled: true\n  ssh_config_dir: " + value + "\n"
+		_, err := Load(writeConfig(t, body))
+		if err == nil {
+			t.Errorf("ssh_config_dir %s was accepted", value)
+			continue
+		}
+		if !strings.Contains(err.Error(), ".ssh") {
+			t.Errorf("the refusal of %s does not name the reason: %v", value, err)
+		}
+	}
+
+	// A directory of its own, outside that tree, is still accepted.
+	ok := filepath.Join(t.TempDir(), "ssh-configs")
+	if err := os.Mkdir(ok, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(writeConfig(t, baseCfg+"ssh_workspaces:\n  enabled: true\n  ssh_config_dir: "+ok+"\n")); err != nil {
+		t.Errorf("a dedicated ssh_config_dir was refused: %v", err)
+	}
+}
+
+// The removed key must be reported as a rename, not as a strict-decoding failure: what it
+// named is exactly what this version forbids.
+func TestSSHWorkspacesRemovedHostWideSourceNamesItsReplacement(t *testing.T) {
+	body := baseCfg + "ssh_workspaces:\n  enabled: true\n  ssh_config_source: /home/ops/.ssh/config\n"
+	_, err := Load(writeConfig(t, body))
+	if err == nil {
+		t.Fatal("the removed ssh_config_source key was accepted")
+	}
+	for _, want := range []string{"ssh_config_source", "ssh_config_dir"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not mention %q: %v", want, err)
+		}
+	}
+}

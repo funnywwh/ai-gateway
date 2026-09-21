@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/winger/ai-gateway/internal/dshgw/audit"
@@ -100,12 +101,17 @@ func (s *Service) Mounts(tenant string) ([]Mount, error) { return s.store.ForTen
 func (s *Service) All() ([]Mount, error) { return s.store.Load() }
 
 // EnsureIdentity provisions the per-account ssh material under <workspace>/.ssh: the private
-// key (0600), an empty known_hosts to accept new host keys into (0600), and, when a source is
-// configured, the alias list both halves resolve hosts with (0644).
+// key (0600), an empty known_hosts to accept new host keys into (0600), and the account's own
+// alias list (0644), seeded from <ssh_config_dir>/<account> when that account has none yet.
 //
-// Nothing here is overwritten once present: an account's key may have been rotated by hand,
-// and a provisioning step that silently reverts that would be a security bug, not a
-// convenience. A missing identity is reported by the caller that needs it.
+// The alias list is the account's from the moment it exists: the tenant plugin adds and
+// removes entries in it (「我的主机」) and may also edit it by hand. Nothing here is
+// overwritten once present — an account's key may have been rotated by hand, and a
+// provisioning step that silently reverted the alias list would delete hosts the account
+// added. To re-seed one account: replace <ssh_config_dir>/<account>, delete
+// <workspace>/.ssh/config, then restart that account's worker.
+//
+// A missing identity is reported by the caller that needs it.
 func (s *Service) EnsureIdentity(tenant, workspace, dshHome string) error {
 	dir := filepath.Join(workspace, ".ssh")
 	if _, err := privatePath(workspace, filepath.Join(dir, "id_rsa")); err != nil {
@@ -150,21 +156,16 @@ func (s *Service) EnsureIdentity(tenant, workspace, dshHome string) error {
 		}
 	}
 	configPath := filepath.Join(dir, "config")
-	if !isFile(configPath) && s.options.SSHConfigSource != "" && isFile(s.options.SSHConfigSource) {
-		data, err := securefile.ReadLimitedRegular(s.options.SSHConfigSource, 64<<10)
+	if !isFile(configPath) {
+		seed, err := s.seedConfig(tenant)
 		if err != nil {
 			return err
 		}
-		// The account gets the alias list, not the operator's config: only Host/HostName/User/
+		// The account gets the alias list, not the operator's file: only Host/HostName/User/
 		// Port are carried over. An IdentityFile line would name a key that does not exist in
 		// this account's HOME (its identity is the single key above), which ssh reports as a
 		// warning on every call and would silently pick the wrong key for a host.
-		if err := securefile.WriteAtomic(configPath, []byte(aliasConfig(data)), 0o644); err != nil {
-			return err
-		}
-	}
-	if !isFile(configPath) {
-		if err := securefile.WriteAtomic(configPath, []byte(aliasConfig(nil)), 0o644); err != nil {
+		if err := securefile.WriteAtomic(configPath, []byte(aliasConfig(seed)), 0o644); err != nil {
 			return err
 		}
 	}
@@ -173,6 +174,50 @@ func (s *Service) EnsureIdentity(tenant, workspace, dshHome string) error {
 	// the tenant plugin which mirrored paths are real mounts and which are just parent
 	// directories of the mirror layout.
 	return s.writeMirror(tenant, dshHome)
+}
+
+// seedConfig reads one account's alias seed from <ssh_config_dir>/<account>.
+//
+// A missing seed is not an error: the account simply starts with no aliases and can add its
+// own hosts (or type user@host directly). An *unusable* seed is an error, and it is never
+// skipped silently: the file is the operator's statement about which hosts this account may
+// reach, so quietly starting the account with a different list than the configured one would
+// be the wrong failure. The source is reached through securefile, so neither the file nor any
+// ancestor directory may be a symlink, and the size is bounded.
+func (s *Service) seedConfig(tenant string) ([]byte, error) {
+	if s.options.SSHConfigDir == "" {
+		return nil, nil
+	}
+	source := filepath.Join(s.options.SSHConfigDir, tenant)
+	if tenant == "" || !Within(s.options.SSHConfigDir, source) || source == s.options.SSHConfigDir {
+		return nil, Errorf(CodeInvalidState, "ssh config seed for %q would leave %s", tenant, s.options.SSHConfigDir)
+	}
+	info, err := os.Lstat(source)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, Wrap(CodeInvalidState, "reading the ssh config seed "+source, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, Errorf(CodeInvalidState, "ssh config seed %s must be a regular file", source)
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Nlink != 1 {
+		return nil, Errorf(CodeInvalidState, "ssh config seed %s must not be hard linked", source)
+	}
+	// World-writable is the line, not group-writable: every tenant worker already runs as the
+	// deployment account's own uid and group here (permissions are not what separates
+	// accounts — path binding is), while the documented 0644 seed and a plain `cp` under the
+	// usual umask both have to keep working. A file anyone on the host may rewrite must not
+	// decide an account's aliases.
+	if info.Mode().Perm()&0o002 != 0 {
+		return nil, Errorf(CodeInvalidState, "ssh config seed %s mode %04o is world writable", source, info.Mode().Perm())
+	}
+	data, err := securefile.ReadLimitedRegular(source, 64<<10)
+	if err != nil {
+		return nil, Wrap(CodeInvalidState, "reading the ssh config seed "+source, err)
+	}
+	return data, nil
 }
 
 // aliasConfig renders the minimal ssh config a tenant may hold: the aliases an operator

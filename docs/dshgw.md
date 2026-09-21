@@ -310,8 +310,9 @@ feishu:
 
 ## 7b. SSH 工作区（M64）
 
-租户在自己的 dsh 里点「SSH 工作区」：选主机（读该账号 `~/.ssh/config` 的别名，也可手输
-`user@host`，支持独立 SSH 用户名与端口输入）→ 浏览远端目录 → 新建远端目录 → 挂载并打开。挂载点是
+租户在自己的 dsh 里点「SSH 工作区」：在「我的主机」里管理本账号自己的主机（添加即写入本账号
+`~/.ssh/config` 的一条别名，删除即移除），或直接手输 `user@host`（支持独立 SSH 用户名与端口输入）
+→ 浏览远端目录 → 新建远端目录 → 挂载并打开。挂载点是
 `<workspace>/<mount_subdir>/<host>/<远端路径>`（默认 `ssh`），因此它落在该账号的 clamp 根之内，
 可以直接作为一个工作区打开；因为沙箱只绑定本账号的这两棵树，**别的账号看不到也进不去**。
 
@@ -327,7 +328,8 @@ feishu:
 |---|---|
 | 通道 | 该账号 DSH home 里的文件信箱：`<dsh_home>/ssh-requests/<id>.json`（租户写）、`<dsh_home>/ssh-replies/<id>.json`（网关写）。不新增监听端口、不新增令牌 |
 | 挂载记录 | `<state_dir>/ssh-mounts.json`（0600）；同时镜像一份到 `<dsh_home>/ssh-mounts.json`，租户插件靠它区分「真挂载」与镜像布局产生的父目录 |
-| 密钥 | 账号默认：`<workspace>/.ssh/id_rsa`；主机专用：`<workspace>/.ssh/host_keys/<SHA256(host)>/id_rsa`（均 0600）。只选主机专用，否则选账号默认；没有密钥则拒绝连接。`known_hosts` 与可选 `config`（别名清单）同目录 |
+| 别名清单 | **一账号一份**：`<workspace>/.ssh/config`（0644），初始内容来自 `ssh_config_dir/<账号>` 这份种子；账号自己没有 config 时才写一次，之后归该账号所有（插件增删、也可手改）。**没有全局来源** —— 宿主的 `~/.ssh/config` 不是租户来源（配置校验也会拒绝落在本进程账号 `~/.ssh` 里的 `ssh_config_dir`） |
+| 密钥 | 账号默认：`<workspace>/.ssh/id_rsa`；主机专用：`<workspace>/.ssh/host_keys/<SHA256(host)>/id_rsa`（均 0600）。只选主机专用，否则选账号默认；没有密钥则拒绝连接。`known_hosts` 同目录 |
 | 隔离增量 | 只为活动挂载点各加一条 `--bind-try <挂载点> <挂载点>`；**不加设备、不加 capability**，M57/M58 口径不变 |
 | sshfs 选项 | 默认 `reconnect, ServerAliveInterval=15, ServerAliveCountMax=3, idmap=user`；`allow_other`/`allow_root` 被代码丢弃（所有 worker 共用一个 uid，共享挂载等于跨账号可读） |
 
@@ -335,14 +337,36 @@ feishu:
 完全由发给它的密钥决定。按账号限权要用 `identity_dir`（一账号一把）；共用 `identity_source` 等于所有
 账号共享同一身份 —— `hosts` 白名单只是防跑偏，不是安全边界。
 
+### 别名（`.ssh/config`）与「我的主机」
+
+每个账号有一份**自己的** `~/.ssh/config`，网关挂载与沙箱内的插件都只读这一份，因此账号之间不会互相
+影响，也不会碰到宿主（部署账号）的 ssh 配置：
+
+- **初始种子**：`ssh_config_dir/<账号>`（0644，非符号链接、非硬链接、非 world-writable）。账号还没有
+  config 时，网关把它剪成只含 `Host`/`HostName`/`User`/`Port` 的四行块写进工作区；账号已有 config 则
+  **一律不动**（那里面可能有账号自己加的主机与指令）。种子缺失不是错误：账号从「没有别名」开始，可以
+  手输 `user@host` 或自己添加。
+- **「我的主机」**：对话框里列出该账号的全部别名（名称、`[user@]host:port`、私钥状态、是否正被挂载），
+  可以添加与删除。**添加成功后别名立即写进本账号的 config**（同名不覆盖：先删除再加）；**删除即从
+  config 移除该块并删掉这台主机的专用私钥**。带私钥添加时，私钥存在
+  `host_keys/<SHA256(别名)>/id_rsa`，与该别名被选中时网关查找的路径一致。
+- 只改写 `Host`/`HostName`/`User`/`Port`：块内其他指令（例如某个老服务器需要的
+  `HostKeyAlgorithms +ssh-rsa`）与文件里其它内容原样保留；写入是「临时文件 + rename」，不会留下半份。
+- 正在被挂载使用的别名不能删除（挂载记录用的是别名，删了网关下次重挂就解析不到）：先卸载再删。
+- `hosts` 白名单非空时，添加要求「别名」与「解析出的连接标识」都在白名单里。
+- **重置某个账号的别名**：改 `<ssh_config_dir>/<账号>` → 删 `<workspace>/.ssh/config` →
+  `dshgw tenant restart <账号>`（下一次 worker 启动时按种子重新生成）。
+- 本机从旧版本迁移（旧的单一 `ssh_config_source`）用 `scripts/ssh_config_adopt.sh`：把每个账号现有的
+  `<workspace>/.ssh/config` 收编为它的种子，不覆盖已有种子，再按需裁剪。
+
 ### 端口与私钥管理
 
 - 主机地址可填别名、域名、IPv4 或 `user@host:2222`；独立端口输入接受 `1..65535`。留空则沿用别名的 `Port`，否则默认 SSH 端口 22。暂不支持 IPv6 字面量。
 - 在「私钥管理」选择账号默认或当前主机专用，再选择本地私钥文件上传；支持 OpenSSH/RSA/Ed25519 等 `ssh-keygen` 可读取的**无密码私钥**，上限 64 KiB。加密私钥不支持，不要上传服务器 `/etc/ssh/ssh_host_*_key`。
 - 界面只显示配置状态及 SHA256 公钥指纹，不回显私钥；再次上传替换所选范围的密钥，删除需确认。私钥以 0600 明文保存在本账号工作区（目录 0700），生产环境必须使用 HTTPS，备份应按敏感数据保护。
-- 主机专用密钥绑定完整连接标识（包含显式用户名、端口）；别名和实际地址是不同绑定。不同账号即使填写同一主机也不共享上传文件。
+- 主机专用密钥绑定完整连接标识（包含显式用户名、端口）；别名和实际地址是不同绑定（「我的主机」添加的条目绑在**别名**上，因为选中该条目时请求里带的就是别名）。不同账号即使填写同一主机也不共享上传文件。
 - 删除主机密钥后回退账号默认；删除默认后不会在重启时从运维源重新复制（`identity-managed` 标记）。替换/删除不会撤销已经建立的 SSHFS 连接：要立即切换，请先卸载再重新打开，远端撤销授权需移除其 `authorized_keys` 中对应公钥。
-- `identity_source` / `identity_dir` 仅用于初次预置，可以全部留空让用户自行上传；运行连接不会回退到运维共享源或 SSH agent。SSH 配置仅使用具体别名的 `HostName` / `User` / `Port`，不执行 `ProxyCommand`，不加载其中的额外 `IdentityFile`。
+- `identity_source` / `identity_dir` 仅用于初次预置，可以全部留空让用户自行上传；运行连接不会回退到运维共享源或 SSH agent。SSH 配置仅使用具体别名的 `HostName` / `User` / `Port`，不执行 `ProxyCommand`，不加载其中的额外 `IdentityFile`（两侧 ssh 都带 `-F /dev/null`）。
 - 若运维配置了 `hosts` 白名单，需包含完整连接标识（例如 `ubuntu@server:2222`），不能靠改端口绕过。
 
 **前置**：宿主装 `sshfs`，租户环境提供 `ssh` 和 `ssh-keygen`；目标主机已授权所上传私钥对应的公钥。

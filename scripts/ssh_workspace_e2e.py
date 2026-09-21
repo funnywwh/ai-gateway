@@ -188,7 +188,11 @@ def config_document(args, root: Path, template_home: Path, aigw_base_url: str) -
             "enabled": True,
             "mount_subdir": "ssh",
             "identity_source": str(Path(args.identity).expanduser()),
-            "hosts": ["127.0.0.1"],
+            # Per-account alias seeds: the only source of a tenant's aliases. The e2e proves the
+            # alias a request names is resolved from THIS account's file (see the e2e-seed step)
+            # and that the account's own list never picks up another account's seed.
+            "ssh_config_dir": str(root / "ssh-configs"),
+            "hosts": ["127.0.0.1", "e2e-seed"],
             "connect_timeout": "10s",
             "poll_interval": "1s",
             "max_entries": 100,
@@ -263,6 +267,28 @@ def main() -> int:
         config_path.write_text(json.dumps(config_document(args, root, template_home, stub.base_url), indent=2) + "\n", encoding="utf-8")
         config_path.chmod(0o600)
 
+        # Per-account alias seeds. `dsh-other` belongs to an account that does not exist here:
+        # nothing of it may ever reach this account's config.
+        me = pwd.getpwuid(os.geteuid()).pw_name
+        seeds = root / "ssh-configs"
+        seeds.mkdir(parents=True, exist_ok=True)
+        (seeds / tenant).write_text(f"Host e2e-seed\n  HostName 127.0.0.1\n  User {me}\n", encoding="utf-8")
+        (seeds / "dsh-other").write_text("Host other-seed\n  HostName 10.255.255.1\n", encoding="utf-8")
+
+        # The removed host-wide key must be a loud, actionable failure — never a silent
+        # fallback that would hand every account the operator's own ~/.ssh/config again.
+        legacy = config_document(args, root, template_home, stub.base_url)
+        legacy["ssh_workspaces"] = dict(legacy["ssh_workspaces"])
+        legacy["ssh_workspaces"].pop("ssh_config_dir", None)
+        legacy["ssh_workspaces"]["ssh_config_source"] = f"/home/{me}/.ssh/config"
+        legacy_path = root / "legacy.yaml"
+        legacy_path.write_text(json.dumps(legacy, indent=2) + "\n", encoding="utf-8")
+        legacy_path.chmod(0o600)
+        refused = run([args.dshgw, "--config", str(legacy_path), "tenant", "list"], cwd=str(REPO))
+        if refused.returncode == 0 or "ssh_config_dir" not in (refused.stdout + refused.stderr):
+            raise AssertionError(f"a config naming the removed ssh_config_source was accepted: {refused.stdout}{refused.stderr}")
+        note("a configuration that still names ssh_config_source is refused, and the error names ssh_config_dir")
+
         # ── the throwaway gateway ────────────────────────────────────────────────────────
         log = open(root / "dshgw.log", "w", encoding="utf-8")
         server = subprocess.Popen(
@@ -331,6 +357,37 @@ def main() -> int:
             raise AssertionError(f"the account mirror does not name the mount: {mirror}")
         note("the account's mount mirror names exactly this mount")
 
+        # ── the account's own alias list is what a mount is resolved with ────────────────
+        config_text = (workspace / ".ssh" / "config").read_text(encoding="utf-8")
+        if "Host e2e-seed" not in config_text or "127.0.0.1" not in config_text:
+            raise AssertionError(f"the account config was not seeded from ssh_config_dir:\n{config_text}")
+        if "other-seed" in config_text or "10.255.255.1" in config_text:
+            raise AssertionError(f"another account's seed leaked into this account's config:\n{config_text}")
+        note("the account config came from its own seed, and no other account's seed is in it")
+
+        alias_request = {"id": "open-alias", "op": "open", "host": "e2e-seed", "remote": str(remote),
+                         "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        (request_dir / "open-alias.json").write_text(json.dumps(alias_request), encoding="utf-8")
+        (request_dir / "open-alias.json").chmod(0o600)
+
+        def alias_reply() -> dict | None:
+            answer_file = dsh_home / "ssh-replies" / "open-alias.json"
+            if not answer_file.exists():
+                return None
+            document = json.loads(answer_file.read_text(encoding="utf-8"))
+            return document if document.get("ok") is True else None
+
+        alias_answer = wait_for(alias_reply, 90, "the gateway to answer the mount request by alias")
+        alias_mountpoint = Path(alias_answer["mountpoint"])
+        if alias_mountpoint.parts[-1] != mountpoint.parts[-1] or "e2e-seed" not in alias_mountpoint.parts:
+            raise AssertionError(f"the alias mount landed in an unexpected place: {alias_mountpoint}")
+        alias_fstype = wait_for(lambda: mount_type(str(alias_mountpoint)) or None, 10, "the alias mount to appear")
+        if not alias_fstype.startswith("fuse"):
+            raise AssertionError(f"unexpected filesystem type {alias_fstype}")
+        if (alias_mountpoint / "marker.txt").read_text(encoding="utf-8") != "from the remote host\n":
+            raise AssertionError("reading through the alias mount did not reach the remote file")
+        note(f"an alias from the account's own config ({alias_mountpoint.parent.parent.name}:e2e-seed) mounts the same remote directory")
+
         # ── the decisive check: is the mount visible INSIDE the sandbox? ──────────────────
         printed = run([args.dshgw, "--config", str(config_path), "sandbox-exec", "--print", tenant], cwd=str(REPO))
         if printed.returncode != 0:
@@ -342,19 +399,19 @@ def main() -> int:
         # the operator's keys, the gateway's own configuration and the live data root are the
         # three that must not be.
         script = (
-            f"cat {mountpoint}/marker.txt; echo ---; ls -1 {mountpoint}; echo ---; "
+            f"cat {mountpoint}/marker.txt; echo ---; cat {alias_mountpoint}/marker.txt; echo ---; ls -1 {mountpoint}; echo ---; "
             "for probe in /home/%(user)s/.ssh /home/%(user)s/work/ai_gateway/config.yaml "
             "/home/%(user)s/work/ai_gateway/data; do "
             "[ -e \"$probe\" ] && echo \"LEAK $probe\"; done; echo ---; ls -A /home/%(user)s 2>&1"
-        ) % {"user": pwd.getpwuid(os.geteuid()).pw_name}
+        ) % {"user": me}
         inside = run([*argv[: separator + 1], "/bin/sh", "-c", script])
         if inside.returncode != 0:
             raise AssertionError(f"the sandbox run failed: {inside.stdout}{inside.stderr}")
-        if "from the remote host" not in inside.stdout:
-            raise AssertionError(f"the mount is NOT visible inside the sandbox:\n{inside.stdout}{inside.stderr}")
+        if inside.stdout.count("from the remote host") != 2:
+            raise AssertionError(f"a mount is NOT visible inside the sandbox:\n{inside.stdout}{inside.stderr}")
         if "marker.txt" not in inside.stdout:
             raise AssertionError(f"the mount's contents are missing inside the sandbox:\n{inside.stdout}")
-        note("the mount and its contents are visible inside the account's own sandbox")
+        note("both mounts (by address and by this account's alias) and their contents are visible inside the account's own sandbox")
 
         # …and the rest of the host is still hidden, so the new binding widened nothing.
         if "LEAK " in inside.stdout:
@@ -369,6 +426,7 @@ def main() -> int:
         if removed.returncode != 0:
             raise AssertionError(f"tenant remove failed: {removed.stdout}{removed.stderr}")
         wait_for(lambda: (mount_type(str(mountpoint)) == "") or None, 15, "the mount to be detached")
+        wait_for(lambda: (mount_type(str(alias_mountpoint)) == "") or None, 15, "the alias mount to be detached")
         if workspace.exists():
             raise AssertionError(f"the purged workspace survived: {workspace}")
         note("removing the account detached the mount and purged its state")

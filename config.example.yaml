@@ -267,13 +267,17 @@ dshgw:
   # node_bin / current_link: empty reads DSHGW_NODE / DSHGW_DSH_ROOT (runtime installs).
   # SSH 工作区（M64）：租户在自己的 dsh 里浏览/新建远端目录，网关把远端目录挂进该租户的
   # 工作区。子进程配置由本文件生成，因此这里写、子进程用；密钥即边界（按账号发密钥用
-  # identity_dir，共用一把用 identity_source）。前置：宿主装 sshfs，且本进程账号能非交互
-  # ssh 到目标主机。细节与安全口径见 docs/dshgw.md。
+  # identity_dir，共用一把用 identity_source）。别名清单一账号一份（ssh_config_dir/<账号>），
+  # 作为账号自己的 ~/.ssh/config 的初始种子，之后由租户插件（「我的主机」）增删；**没有全局
+  # 来源**，运维自己的 ~/.ssh 也不能作为来源（早期版本的 ssh_config_source 已删除，配置里出现
+  # 该键会直接拒绝启动）。前置：宿主装 sshfs，且本进程账号能非交互 ssh 到目标主机。
+  # 细节与安全口径见 docs/dshgw.md。
   # ssh_workspaces:
   #   enabled: true
   #   mount_subdir: ssh
   #   identity_source: /home/you/.ssh/id_rsa       # 0600
   #   # identity_dir: ./data/dshgw/ssh-keys        # 按账号：<dir>/<账号>
+  #   # ssh_config_dir: ./data/dshgw/ssh-configs   # 按账号：<dir>/<账号>=别名清单（0644）
   #   hosts: [gpt001, aipc]                       # 空 = 允许手输（仍受 host 正则约束）
   #   connect_timeout: 10s
   #   poll_interval: 2s

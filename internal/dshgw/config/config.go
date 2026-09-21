@@ -180,9 +180,15 @@ type SSHWorkspaces struct {
 	// so one shared key makes every account able to reach everything that key can. Accounts
 	// are scoped differently only by holding different keys.
 	IdentityDir string `yaml:"identity_dir" json:"identity_dir"`
-	// SSHConfigSource is copied to <workspace>/.ssh/config for accounts that have none: the
-	// alias list both the tenant plugin (browsing) and the gateway (mounting) resolve with.
-	SSHConfigSource string `yaml:"ssh_config_source" json:"ssh_config_source"`
+	// SSHConfigDir holds one alias list per account (<dir>/<account>), copied to
+	// <workspace>/.ssh/config for accounts that have none.
+	//
+	// There is deliberately no host-wide source: one shared file would hand every tenant the
+	// same host inventory (the deployment account's own ~/.ssh/config names every machine the
+	// operator knows) and make one edit decide for every tenant at once. Each account's list
+	// belongs to that account — the tenant plugin adds and removes entries in it — and a
+	// directory inside the deployment account's own ~/.ssh is refused below.
+	SSHConfigDir string `yaml:"ssh_config_dir" json:"ssh_config_dir"`
 	// Hosts is an optional allow-list for both halves. It is a guard rail, not a boundary:
 	// the key an account holds is what really decides where it may go.
 	Hosts []string `yaml:"hosts" json:"hosts"`
@@ -398,6 +404,12 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg := defaults()
+	// A removed key must be reported as a rename, not as "field not found" from the strict
+	// decoder below: what it named (the deployment account's own ~/.ssh/config) is exactly
+	// what this version forbids, so the error has to say what replaces it.
+	if err := rejectRemovedSSHConfigSource(data); err != nil {
+		return nil, fmt.Errorf("dshgw config %s: %w", path, err)
+	}
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil {
@@ -421,6 +433,27 @@ func Load(path string) (*Config, error) {
 
 // osOpen is split out only to keep the strict decoder easy to unit-test through Load.
 var openConfig = func(path string) (file, error) { return openOSFile(path) }
+
+// rejectRemovedSSHConfigSource reports the one key this feature removed.
+//
+// ssh_config_source was a single file copied into every account, and the deployment pointed
+// it at the operator's own ~/.ssh/config — which gave every tenant the operator's whole host
+// inventory. There is no host-wide source any more: ssh_config_dir holds one file per
+// account. Malformed YAML is left to the strict decoder, which reports it better.
+func rejectRemovedSSHConfigSource(data []byte) error {
+	var legacy struct {
+		SSHWorkspaces struct {
+			SSHConfigSource string `yaml:"ssh_config_source"`
+		} `yaml:"ssh_workspaces"`
+	}
+	if err := yaml.Unmarshal(data, &legacy); err != nil {
+		return nil
+	}
+	if strings.TrimSpace(legacy.SSHWorkspaces.SSHConfigSource) == "" {
+		return nil
+	}
+	return errors.New("ssh_workspaces.ssh_config_source was removed: one host-wide file handed every account the same alias list, and the deployment account's ~/.ssh is never a tenant source. Use ssh_workspaces.ssh_config_dir with one file per account (<dir>/<account>) instead")
+}
 
 type file interface {
 	Read([]byte) (int, error)
@@ -546,7 +579,7 @@ func (c *Config) resolvePaths() error {
 		{"ssh_workspaces.sshfs_bin", &c.SSHWorkspaces.SSHFSBin},
 		{"ssh_workspaces.identity_source", &c.SSHWorkspaces.IdentitySource},
 		{"ssh_workspaces.identity_dir", &c.SSHWorkspaces.IdentityDir},
-		{"ssh_workspaces.ssh_config_source", &c.SSHWorkspaces.SSHConfigSource},
+		{"ssh_workspaces.ssh_config_dir", &c.SSHWorkspaces.SSHConfigDir},
 	}
 	for _, item := range targets {
 		if *item.target == "" || filepath.IsAbs(*item.target) {
@@ -900,13 +933,19 @@ func (c *Config) validateSSHWorkspaces() error {
 			return errors.New("ssh_workspaces.identity_dir must be a directory holding one key per account")
 		}
 	}
-	if ssh.SSHConfigSource != "" {
-		info, err := os.Stat(ssh.SSHConfigSource)
+	if ssh.SSHConfigDir != "" {
+		info, err := os.Stat(ssh.SSHConfigDir)
 		if err != nil {
-			return fmt.Errorf("ssh_workspaces.ssh_config_source: %w", err)
+			return fmt.Errorf("ssh_workspaces.ssh_config_dir: %w", err)
 		}
-		if !info.Mode().IsRegular() {
-			return errors.New("ssh_workspaces.ssh_config_source must be a regular file")
+		if !info.IsDir() {
+			return errors.New("ssh_workspaces.ssh_config_dir must be a directory holding one alias list per account")
+		}
+		if info.Mode().Perm()&0o002 != 0 {
+			return fmt.Errorf("ssh_workspaces.ssh_config_dir mode %04o is world writable", info.Mode().Perm())
+		}
+		if err := checkSSHConfigDirOutsideHome(ssh.SSHConfigDir); err != nil {
+			return err
 		}
 	}
 	for label, bin := range map[string]string{"ssh_bin": ssh.SSHBin, "sshfs_bin": ssh.SSHFSBin} {
@@ -925,6 +964,40 @@ func (c *Config) validateSSHWorkspaces() error {
 		if !sshHostSpecRE.MatchString(strings.TrimSpace(host)) {
 			return fmt.Errorf("ssh_workspaces.hosts entry %q is not an ssh alias or user@host", host)
 		}
+	}
+	return nil
+}
+
+// checkSSHConfigDirOutsideHome refuses a tenant alias source inside the deployment account's
+// own ~/.ssh.
+//
+// The source decides what every tenant's alias list is seeded from, so pointing it at the
+// operator's personal ssh configuration would hand each account the operator's whole host
+// inventory — the coupling this key exists to remove. A directory that merely looks like it
+// lives elsewhere does not qualify: symlinks are resolved before the comparison. Per-account
+// files need no separate check here: they are read through securefile, which refuses a leaf
+// or ancestor symlink outright.
+func checkSSHConfigDirOutsideHome(dir string) error {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		// Nothing to compare against. The remaining checks still apply.
+		return nil
+	}
+	resolvedHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		resolvedHome = home
+	}
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return fmt.Errorf("ssh_workspaces.ssh_config_dir: %w", err)
+	}
+	sshDir := filepath.Join(resolvedHome, ".ssh")
+	rel, err := filepath.Rel(sshDir, resolvedDir)
+	if err != nil {
+		return nil
+	}
+	if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+		return fmt.Errorf("ssh_workspaces.ssh_config_dir %s is inside the deployment account's own %s; the operator's ssh configuration is never a tenant source", dir, sshDir)
 	}
 	return nil
 }

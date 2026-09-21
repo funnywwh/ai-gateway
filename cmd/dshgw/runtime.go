@@ -84,16 +84,16 @@ func sshWorkspaceService(cfg *config.Config, manager *tenancy.Manager, logger *s
 		return manager.Restart(ctx, current)
 	}
 	service, err := sshworkspace.New(sshworkspace.Options{
-		MountSubdir:     cfg.SSHWorkspaces.MountSubdir,
-		SSHBin:          cfg.SSHWorkspaces.SSHBin,
-		SSHFSBin:        cfg.SSHWorkspaces.SSHFSBin,
-		IdentitySource:  cfg.SSHWorkspaces.IdentitySource,
-		IdentityDir:     cfg.SSHWorkspaces.IdentityDir,
-		SSHConfigSource: cfg.SSHWorkspaces.SSHConfigSource,
-		Hosts:           cfg.SSHWorkspaces.Hosts,
-		ConnectTimeout:  cfg.SSHWorkspaces.ConnectTimeout.Duration(),
-		MaxEntries:      cfg.SSHWorkspaces.MaxEntries,
-		SSHFSOptions:    cfg.SSHWorkspaces.SSHFSOptions,
+		MountSubdir:    cfg.SSHWorkspaces.MountSubdir,
+		SSHBin:         cfg.SSHWorkspaces.SSHBin,
+		SSHFSBin:       cfg.SSHWorkspaces.SSHFSBin,
+		IdentitySource: cfg.SSHWorkspaces.IdentitySource,
+		IdentityDir:    cfg.SSHWorkspaces.IdentityDir,
+		SSHConfigDir:   cfg.SSHWorkspaces.SSHConfigDir,
+		Hosts:          cfg.SSHWorkspaces.Hosts,
+		ConnectTimeout: cfg.SSHWorkspaces.ConnectTimeout.Duration(),
+		MaxEntries:     cfg.SSHWorkspaces.MaxEntries,
+		SSHFSOptions:   cfg.SSHWorkspaces.SSHFSOptions,
 	}, sshworkspace.NewStore(filepath.Join(cfg.StateDir, "ssh-mounts.json")), restart, &audit.JSONL{Path: cfg.AuditPath}, logger)
 	if err != nil {
 		return nil, fmt.Errorf("ssh workspaces: %w", err)

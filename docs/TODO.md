@@ -609,9 +609,17 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 
 ## M64 aigw 账号的 SSH 工作区（远端目录 → 挂载 → 该账号 DSH 里的工作区）
 
-设计：`docs/design/m64-ssh-workspace.md`（§3 阶段 0 实测、§13 差异、§14 真机验收与它抓到的四个缺陷）；
-规格：`docs/dshgw.md` §7b。已完成的条目见 `docs/todo_done.md` 同名小节，下面只列未完成项。
+设计：`docs/design/m64-ssh-workspace.md`（§3 阶段 0 实测、§13 差异、§14 真机验收与它抓到的四个缺陷、
+§15 别名改成一账号一份 +「我的主机」）；规格：`docs/dshgw.md` §7b。已完成的条目见 `docs/todo_done.md`
+同名小节，下面只列未完成项。
 
+- [ ] **别名改一账号一份：本机部署（代码已就绪，见 §15）**：`scripts/ssh_config_adopt.sh` 收编现有 6 个
+      账号的 `<workspace>/.ssh/config` → `dshgw.yaml` 把 `ssh_config_source` 换成
+      `ssh_config_dir: ./data/dshgw-verify/ssh-configs` → 重建 `bin/dshgw` → 重启 `dshgw-verify.service`
+      → 逐账号裁剪种子并按需重置（改种子 → 删 `<workspace>/.ssh/config` → 重启该账号 worker）
+- [ ] **「我的主机」浏览器验收（人工）**：租户 A 添加一台主机 → 复核 A 的 `<workspace>/.ssh/config`
+      出现该别名 → 选用它「挂载并打开」→ 删除（在用被拒、卸载后成功）→ 别名与该主机专用私钥都消失；
+      租户 B 的列表里看不到 A 的主机
 - [ ] **监督形态真机验收（`aigw-local.service` + 门户）**：在 aigw 的 `dshgw.ssh_workspaces` 里启用 →
       `systemctl --user restart aigw-local.service` → 经门户进某个账号的 dsh → 侧栏「SSH 工作区」→
       浏览/新建远端目录 → 挂载并打开 → 会话里写文件 → 远端 `cat` 复核（浏览器动作需人工）

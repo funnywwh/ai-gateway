@@ -91,6 +91,11 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       identityKey: '',
       remote: '',
       aliases: [],
+      // 「我的主机」: the account's own alias list, with each entry's key state, plus the form
+      // that adds one. The list comes from the account's ~/.ssh/config, which the account-side
+      // plugin maintains — nothing about it is stored in this browser.
+      entries: [],
+      hostForm: { name: '', hostname: '', user: '', port: '', keyName: '', keyText: '' },
       allowList: [],
       home: '',
       mountSubdir: 'ssh',
@@ -169,6 +174,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
         if (rev !== hostRevision) return
         patch({
           aliases: value.aliases ?? [],
+          entries: value.entries ?? [],
           allowList: value.allowList ?? [],
           home: value.home ?? '',
           mountSubdir: value.mountSubdir ?? 'ssh',
@@ -185,6 +191,16 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       const refreshMounts = async () => {
         const value = await call('mounts', {})
         patch({ mounts: value.mounts ?? [], replies: value.replies ?? [], mirror: value.mirror === true })
+      }
+
+      // The identity lookup behind the 私钥 section: re-query what this account holds for the
+      // current 主机/用户名/端口, and drop anything that belonged to the previous one. It lives
+      // here (not inside the dialog) because the 「我的主机」handlers need it too.
+      const refreshIdentitySafe = async () => {
+        const rev = ++hostRevision
+        patch({ listing: null, remoteHome: '', remote: '', identityStatus: { default: { configured: false }, host: { configured: false }, effective: 'none' }, composedHost: '', identityKey: '' })
+        try { const host = currentHost(); patch({ composedHost: host }); const value = await call('identityStatus', { host }); if (rev === hostRevision) patch({ identityStatus: value }) }
+        catch (error) { if (rev === hostRevision) patch({ error: textOf(error) }) }
       }
 
       const probe = async () => {
@@ -237,6 +253,61 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
         patch({ busy: 'identity', error: '' })
         try { const host = state.host.trim() ? currentHost() : ''; const value = await call('identityDelete', { scope: state.identityScope, ...(host ? { host } : {}) }); patch({ busy: '', ...(rev === hostRevision ? { identityStatus: value } : {}) }) }
         catch (error) { patch({ busy: '', error: textOf(error) }) }
+      }
+
+      // 「我的主机」: add / pick / delete one entry of this account's own alias list.
+      //
+      // Picking an entry clears 用户名 and 端口 on purpose: those two live in the entry's config
+      // block, and composing `user@alias:port` here would name a different connection than the
+      // one the gateway resolves the alias to.
+      const selectHost = async (name) => {
+        patch({ host: name, username: '', port: '', error: '', notice: '' })
+        await refreshIdentitySafe()
+      }
+
+      const clearHostForm = () => patch({ hostForm: { name: '', hostname: '', user: '', port: '', keyName: '', keyText: '' } })
+
+      const addHostEntry = async () => {
+        const form = state.hostForm
+        if (form.hostname.trim() === '') { patch({ error: '请填写主机地址' }); return }
+        patch({ busy: 'host', error: '', notice: '' })
+        try {
+          const entries = await call('addHost', {
+            name: form.name.trim(),
+            hostname: form.hostname.trim(),
+            user: form.user.trim(),
+            port: form.port.trim(),
+            ...(form.keyText ? { privateKey: form.keyText } : {}),
+          })
+          const name = form.name.trim() || form.hostname.trim()
+          patch({
+            busy: '',
+            entries,
+            aliases: entries.map((entry) => ({ name: entry.name, hostName: entry.hostName, user: entry.user, port: entry.port })),
+            notice: `已添加 ${name}：它现在是本账号 ssh config 里的一条别名，可以直接“探测”或“挂载并打开”。`,
+            host: name,
+            username: '',
+            port: '',
+          })
+          clearHostForm()
+          await refreshIdentitySafe()
+        } catch (error) { patch({ busy: '', error: textOf(error) }) }
+      }
+
+      const deleteHostEntry = async (name) => {
+        if (!window.confirm(`确认删除主机 ${name}？它的别名与该主机的专用私钥会一起删除。`)) return
+        patch({ busy: 'host', error: '', notice: '' })
+        try {
+          const entries = await call('deleteHost', { name })
+          patch({
+            busy: '',
+            entries,
+            aliases: entries.map((entry) => ({ name: entry.name, hostName: entry.hostName, user: entry.user, port: entry.port })),
+            notice: `已删除 ${name}。`,
+            ...(state.host.trim() === name ? { host: '', username: '', port: '' } : {}),
+          })
+          if (state.host.trim() === name) await refreshIdentity()
+        } catch (error) { patch({ busy: '', error: textOf(error) }) }
       }
 
       // Ask the gateway to mount. Nothing is registered here: the account's dsh is restarted
@@ -341,7 +412,74 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           h('label', { key: 'user-label' }, '用户名'), h('input', { key: 'user', type: 'text', disabled: current.busy !== '', value: current.username, placeholder: '可选', onChange: (e) => { patch({ username: e.target.value }); hostRevision++; refreshIdentitySafe() } }),
           h('label', { key: 'port-label' }, '端口'), h('input', { key: 'port', type: 'text', disabled: current.busy !== '', value: current.port, placeholder: 'SSH config / 22', onChange: (e) => { patch({ port: e.target.value }); hostRevision++; refreshIdentitySafe() } }),
         ]))
-        const refreshIdentitySafe = async () => { const rev = ++hostRevision; patch({ listing: null, remoteHome: '', remote: '', identityStatus: { default: { configured: false }, host: { configured: false }, effective: 'none' }, composedHost: '', identityKey: '' }); try { const host = currentHost(); patch({ composedHost: host }); const value = await call('identityStatus', { host }); if (rev === hostRevision) patch({ identityStatus: value }) } catch (error) { if (rev === hostRevision) patch({ error: textOf(error) }) } }
+        // 「我的主机」: the account's own alias list. Adding an entry writes it into THIS
+        // account's ~/.ssh/config (which no other account can see), and deleting one removes
+        // the alias together with that host's dedicated key. Picking an entry only fills 主机.
+        const entries = current.entries ?? []
+        const form = current.hostForm
+        const formField = (key, placeholder, extra = {}) => h('input', {
+          key: `entry-${key}`,
+          type: 'text',
+          disabled: current.busy !== '',
+          value: form[key],
+          placeholder,
+          onChange: (event) => patch({ hostForm: { ...form, [key]: event.target.value } }),
+          ...extra,
+        })
+        rows.push(h('div', { className: 'dshgw-ssh-section', key: 'my-hosts' }, [
+          h('h3', { key: 'title', style: { margin: '0 0 6px', fontSize: '13px' } }, `我的主机（${entries.length}）`),
+          h('p', { key: 'hint', className: 'dshgw-ssh-muted' }, '这些是本账号自己的 ssh 别名（存在本账号工作区的 ~/.ssh/config 里）：添加即写入，删除即移除，并一并删掉这台主机的专用私钥。也可以不添加，直接在「主机」里手输 user@host。'),
+          entries.length === 0
+            ? h('p', { key: 'empty', className: 'dshgw-ssh-muted' }, '还没有主机。')
+            : h('div', { className: 'dshgw-ssh-list', key: 'list' }, entries.map((entry) => h('div', { className: 'dshgw-ssh-item', key: entry.name }, [
+              h('span', { key: 'label' }, `${entry.name}`
+                + (entry.hostName !== entry.name || entry.user || entry.port > 0
+                  ? ` · ${entry.user ? `${entry.user}@` : ''}${entry.hostName}${entry.port > 0 ? `:${entry.port}` : ''}`
+                  : '')
+                + (entry.key?.configured === true ? ` · 私钥 ${entry.key.fingerprint || '已配置'}` : '')
+                + (entry.mounted === true ? ' · 已挂载' : '')),
+              h('span', { key: 'actions' }, [
+                h('button', { key: 'use', type: 'button', disabled: current.busy !== '', onClick: () => { selectHost(entry.name).catch(() => {}) } }, '选用'),
+                h('button', { key: 'remove', type: 'button', disabled: current.busy !== '', onClick: () => { deleteHostEntry(entry.name).catch(() => {}) } }, '删除'),
+              ]),
+            ]))),
+          h('div', { className: 'dshgw-ssh-row', key: 'add-1' }, [
+            h('label', { key: 'label' }, '别名'),
+            formField('name', '可选，默认用地址'),
+            h('label', { key: 'label-2' }, '地址'),
+            formField('hostname', 'gpt001 或 10.0.0.5'),
+          ]),
+          h('div', { className: 'dshgw-ssh-row', key: 'add-2' }, [
+            h('label', { key: 'label' }, '用户名'),
+            formField('user', '可选'),
+            h('label', { key: 'label-2' }, '端口'),
+            formField('port', '可选，默认 22'),
+          ]),
+          h('div', { className: 'dshgw-ssh-row', key: 'add-3' }, [
+            h('label', { key: 'label' }, '私钥'),
+            h('input', {
+              key: 'entry-key',
+              type: 'file',
+              disabled: current.busy !== '',
+              accept: '.pem,.key,id_rsa,id_ed25519',
+              onChange: async (event) => {
+                const file = event.target.files?.[0]
+                patch({ hostForm: { ...state.hostForm, keyName: '', keyText: '' } })
+                if (!file) return
+                if (file.size > MAX_KEY_BYTES) { patch({ error: '私钥不能超过 64 KiB' }); return }
+                try { patch({ hostForm: { ...state.hostForm, keyName: file.name, keyText: await file.text() } }) }
+                catch (error) { patch({ error: textOf(error) }) }
+              },
+            }),
+            h('span', { key: 'key-name', className: 'dshgw-ssh-muted' }, form.keyName !== '' ? `已选择 ${form.keyName}` : '可选：这台主机的专用私钥'),
+            h('button', {
+              key: 'add',
+              type: 'button',
+              disabled: current.busy !== '' || form.hostname.trim() === '',
+              onClick: () => { addHostEntry().catch(() => {}) },
+            }, current.busy === 'host' ? '处理中…' : '添加主机'),
+          ]),
+        ]))
         rows.push(h('div', { className: 'dshgw-ssh-section', key: 'identity' }, [
           h('h3', { key: 'title', style: { margin: '0 0 6px', fontSize: '13px' } }, 'SSH 私钥'),
           h('p', { key: 'status', className: 'dshgw-ssh-muted' }, `绑定主机：${current.composedHost || '（未填写）'}。当前生效：${current.identityStatus.effective || 'none'}；默认 ${current.identityStatus.default?.configured ? '已配置' : '未配置'}${current.identityStatus.default?.fingerprint ? ` (${current.identityStatus.default.fingerprint})` : ''}；主机专用 ${current.identityStatus.host?.configured ? '已配置' : '未配置'}${current.identityStatus.host?.fingerprint ? ` (${current.identityStatus.host.fingerprint})` : ''}`),

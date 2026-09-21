@@ -501,7 +501,7 @@ type DshgwSSHWorkspaces struct {
 	SSHFSBin           string   `yaml:"sshfs_bin"`
 	IdentitySource     string   `yaml:"identity_source"`
 	IdentityDir        string   `yaml:"identity_dir"`
-	SSHConfigSource    string   `yaml:"ssh_config_source"`
+	SSHConfigDir       string   `yaml:"ssh_config_dir"`
 	Hosts              []string `yaml:"hosts"`
 	ConnectTimeout     string   `yaml:"connect_timeout"`
 	PollInterval       string   `yaml:"poll_interval"`

@@ -106,6 +106,7 @@ dshgw-test:
 	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" internal/dshgw/tenancy/settings_schema.test.mjs
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_dshgw_migration_plan.py
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_decommission_legacy_plan.py
+	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ssh_config_adopt.py
 
 # The ssh-workspace acceptance (M64): a real sshfs mount over loopback, a write through the
 # mount landing on the remote side, and a clean detach. It needs sshfs, a non-interactive
