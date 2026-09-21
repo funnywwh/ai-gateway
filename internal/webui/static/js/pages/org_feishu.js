@@ -22,9 +22,10 @@ const ACCOUNT_PICK_LIMIT = 1000;
 const ROOT_ID = '0';
 
 // 人员列表里标记的匹配通道。界面用中文，接口用 matched_by 的英文值。
+// M72 起只剩"身份已绑定"与"同名自动合并"两条自动通道：Key 级身份不再参与合并
+// （存量在启动时迁到账户上，残留的行只能由管理员手工解绑，见 docs/feishu.md §5c.4）。
 const CHANNEL_LABEL = {
   open_id: '人员id已绑定',
-  api_key: 'Key 绑定转账户',
   name: '同名自动合并',
   manual: '手工绑定',
 };

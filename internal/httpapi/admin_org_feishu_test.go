@@ -225,11 +225,13 @@ func userMatch(t *testing.T, payload map[string]any, openID string) map[string]a
 	return nil
 }
 
-// The preview reports all three merge channels and leaves the unmatched person to the
-// operator. Nothing is written.
+// The preview reports the automatic merge channels and leaves everyone else to the operator.
+// Nothing is written. (M72 removed the third channel — "a key of this account carries the
+// identity" — so a person whose identity still sits on a key is not merged; their binding is
+// moved onto the account once, at startup, and the preview must not re-derive it.)
 func TestFeishuDirectoryPreviewShowsTheMergeChannels(t *testing.T) {
 	f := newOrgFeishuFixture(t)
-	ranID, acmeID, bossID := f.seedLocal(t)
+	ranID, _, bossID := f.seedLocal(t)
 	cookie := f.login(t, adminUser, adminPassword)
 
 	status, payload := f.callJSON(t, http.MethodGet, "/admin/api/v1/org/feishu/directory", "", cookie)
@@ -258,12 +260,13 @@ func TestFeishuDirectoryPreviewShowsTheMergeChannels(t *testing.T) {
 	if match["id"].(float64) != float64(bossID) || match["matched_by"] != "open_id" || match["needs_bind"] != false {
 		t.Fatalf("老板 match = %v", match)
 	}
-	// Channel ②: a key of acme carries this open id; the identity would be promoted.
-	match = userMatch(t, payload, "ou_zhao")["account"].(map[string]any)
-	if match["id"].(float64) != float64(acmeID) || match["matched_by"] != "api_key" || match["needs_bind"] != true {
-		t.Fatalf("赵六 match = %v", match)
+	// A key-level identity is no longer a merge channel (M72): 赵六 stays unmatched here even
+	// though a key of "acme" still names them, and the key row keeps that binding for an
+	// administrator to act on.
+	if userMatch(t, payload, "ou_zhao")["account"] != nil {
+		t.Fatalf("a key-level identity must not merge any more: %v", userMatch(t, payload, "ou_zhao"))
 	}
-	// Channel ③: exact same name, account unbound.
+	// The same-name channel: an account that carries no identity yet.
 	match = userMatch(t, payload, "ou_wang")["account"].(map[string]any)
 	if match["id"].(float64) != float64(ranID) || match["matched_by"] != "name" || match["needs_bind"] != true {
 		t.Fatalf("王五 match = %v", match)
@@ -319,8 +322,8 @@ func TestFeishuDirectoryPreviewIsCached(t *testing.T) {
 	}
 }
 
-// The sync executes the preview: creates the departments parents-first, promotes the
-// api_key identity, merges the same-name person, and is a no-op the second time.
+// The sync executes the preview: creates the departments parents-first, merges the same-name
+// person, leaves a key-level identity alone (M72), and is a no-op the second time.
 func TestFeishuSyncCreatesNodesAndMergesMatchedPeople(t *testing.T) {
 	f := newOrgFeishuFixture(t)
 	ranID, acmeID, _ := f.seedLocal(t)
@@ -372,13 +375,15 @@ func TestFeishuSyncCreatesNodesAndMergesMatchedPeople(t *testing.T) {
 		t.Fatalf("王五 memberships = %v, want 研发部+平台组", got)
 	}
 
-	// The api_key promotion wrote the identity onto the account and left the key binding.
+	// A key-level identity is left exactly where it is: the sync writes accounts, and the
+	// M72 startup backfill is the only thing that moves a key binding (it has not run in this
+	// test, which is why "acme" is still unbound here).
 	acme, err := f.db.GetAccount(context.Background(), acmeID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if acme.FeishuOpenID != "ou_zhao" || acme.FeishuName != "赵六" {
-		t.Fatalf("acme identity not promoted: %+v", acme)
+	if acme.FeishuOpenID != "" {
+		t.Fatalf("the sync promoted a key-level identity: %+v", acme)
 	}
 	keys, err := f.db.ListAPIKeys(context.Background(), acmeID)
 	if err != nil {
@@ -391,13 +396,13 @@ func TestFeishuSyncCreatesNodesAndMergesMatchedPeople(t *testing.T) {
 		}
 	}
 	if !stillBound {
-		t.Fatal("the key-level binding was removed by the promotion")
+		t.Fatal("the key-level binding must be untouched by a sync")
 	}
 
 	// The already-synced person produced no audit row and no second write.
 	linked := payload["linked_users"].([]any)
-	if len(linked) != 2 {
-		t.Fatalf("linked users = %v, want the two merges (老板 was already in sync)", linked)
+	if len(linked) != 1 {
+		t.Fatalf("linked users = %v, want the one same-name merge (老板 was already in sync)", linked)
 	}
 
 	// Idempotent: the second sync writes nothing.
@@ -460,9 +465,9 @@ func TestFeishuSyncWithoutNamePermissionSkipsNamelessDepartments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The promotion has a name on the key binding itself, which is where it comes from.
-	if acme.FeishuOpenID != "ou_zhao" || acme.FeishuName != "赵六" {
-		t.Fatalf("acme identity not promoted: %+v", acme)
+	// The key-level identity is not a merge channel, with or without names (M72).
+	if acme.FeishuOpenID != "" {
+		t.Fatalf("a key-level identity was merged without a directory name: %+v", acme)
 	}
 	if boss, err := f.db.GetAccount(context.Background(), bossID); err != nil || boss.FeishuOpenID != "ou_root" {
 		t.Fatalf("boss binding disturbed: %v %+v", err, boss)
@@ -752,13 +757,14 @@ func TestFeishuSyncHonorsDepartmentSelection(t *testing.T) {
 		t.Fatal("a department outside the selection was created")
 	}
 
-	// 赵六 sits in 市场部: the api_key channel promotes the identity onto acme.
+	// 赵六 sits in 市场部 but its identity lives on a key: no channel merges it any more (M72),
+	// so the selection has nothing to write for that person.
 	acme, err := f.db.GetAccount(context.Background(), acmeID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if acme.FeishuOpenID != "ou_zhao" {
-		t.Fatalf("the selected department's person was not merged: %+v", acme)
+	if acme.FeishuOpenID != "" {
+		t.Fatalf("a key-level identity was merged by a department selection: %+v", acme)
 	}
 	// 王五 sits in 研发部/平台组: untouched, even though a full sync would merge them.
 	ran, err := f.db.GetAccount(context.Background(), ranID)
@@ -867,8 +873,10 @@ func TestFeishuDirectoryPreviewMarksTheSelection(t *testing.T) {
 	if stats["users_in_scope"].(float64) != 2 || stats["users_out_of_scope"].(float64) != 3 {
 		t.Fatalf("stats = %v, want two people in scope", stats)
 	}
-	if stats["memberships_to_add"].(float64) != 1 {
-		t.Fatalf("memberships_to_add = %v, want the one in-scope membership", stats["memberships_to_add"])
+	if stats["memberships_to_add"].(float64) != 0 {
+		// 市场部's only person (赵六) has no account-level identity, and a key-level one is not a
+		// merge channel any more (M72) — so the run has nothing to attach.
+		t.Fatalf("memberships_to_add = %v, want none", stats["memberships_to_add"])
 	}
 
 	_, marketLocal := departmentLocal(t, payload, "od_b")

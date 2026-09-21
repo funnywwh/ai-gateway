@@ -66,7 +66,7 @@ func (s *Server) handleAdminListAccounts(w http.ResponseWriter, r *http.Request)
 			continue
 		}
 		nodeIDs, refs := orgRefsForAccounts(index, members[a.ID])
-		out = append(out, accountJSON(a, nodeIDs, refs))
+		out = append(out, s.attachAccountOperatorFacts(r, accountJSON(a, nodeIDs, refs), a))
 	}
 	page, err := pageConfig.params(r)
 	if err != nil {
@@ -364,8 +364,30 @@ func (s *Server) handleAdminPatchAccount(w http.ResponseWriter, r *http.Request)
 // canonical models
 // ---------------------------------------------------------------------------
 
+// accountDSHEffective answers "may this account use the DSH gateway" (M72).
+//
+// It is the single implementation of the rule dshgw.auto_enable introduces: an account is
+// entitled when it was explicitly enabled, OR when the deployment opted every active account in
+// and an administrator never pressed 停用. The second half is why the account row carries
+// dsh_disabled_at: without it, auto_enable could not tell "nobody ever enabled this account"
+// from "an administrator turned it off", and would silently undo the latter on every login.
+//
+// DshTenant is deliberately not part of the answer: an entitled account without a tenant is one
+// that still has to be provisioned (see ensureAccountDSHForLogin), not one that is refused.
+func accountDSHEffective(autoEnable bool, a *domain.Account) bool {
+	if a == nil {
+		return false
+	}
+	if a.DSHEnabled {
+		return true
+	}
+	return autoEnable && a.DshDisabledAt == nil
+}
+
 // handleAdminGetAccountDSH reports the account's dsh gateway opt-in state (M52). The flag
 // lives on the account row; this read is what the console badge and the toggle button render.
+// M72 adds the two facts the console needs to explain itself: whether dshgw.auto_enable is
+// currently deciding for this account (effective), and when an administrator last turned it off.
 func (s *Server) handleAdminGetAccountDSH(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.adminActor(w, r, false); !ok {
 		return
@@ -384,9 +406,13 @@ func (s *Server) handleAdminGetAccountDSH(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, toAPIError(err))
 		return
 	}
+	autoEnable := s.deps.Config != nil && s.deps.Config.Dshgw.AutoEnable
 	writeJSON(w, http.StatusOK, map[string]any{
 		"account_id": a.ID, "name": a.Name, "enabled": a.DSHEnabled, "status": a.Status,
-		"updated_at": a.UpdatedAt.UTC().Format(time.RFC3339),
+		"effective": accountDSHEffective(autoEnable, a), "auto_enable": autoEnable,
+		"disabled_at": timeOrNil(a.DshDisabledAt),
+		"dsh_tenant":  a.DshTenant,
+		"updated_at":  a.UpdatedAt.UTC().Format(time.RFC3339),
 	})
 }
 
@@ -610,6 +636,10 @@ func (s *Server) provisionAccountDSH(ctx context.Context, actor string, store Ac
 	}
 	a.DshTenant = tenant
 	a.DSHEnabled = true
+	// Enabling clears the "an administrator turned this off" mark (M72): the flag and the mark
+	// together are what dshgw.auto_enable reads, and leaving a stale mark behind would make the
+	// console show 已启用 while the effective answer stayed false.
+	a.DshDisabledAt = nil
 	if _, err := store.UpsertAccount(ctx, a); err != nil {
 		return "", toAPIError(err)
 	}
@@ -637,18 +667,28 @@ func (s *Server) disableAccountDSH(w http.ResponseWriter, r *http.Request, actor
 	}
 	changed := a.DSHEnabled
 	a.DSHEnabled = false
+	// The mark is what makes this press outlive dshgw.auto_enable (M72): it is written on every
+	// disable, including one that only confirms an account that was already off — an operator
+	// pressing 停用 while auto_enable is on is stating an intention, and the effective answer has
+	// to become false either way.
+	now := time.Now().UTC()
+	a.DshDisabledAt = &now
 	if _, err := store.UpsertAccount(r.Context(), a); err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	if changed {
-		s.audit(r.Context(), actor.Username, "dsh_disable", "account", strconv.FormatInt(a.ID, 10),
-			map[string]any{"enabled": false, "tenant": a.DshTenant}, "ok")
-		s.reload(r.Context(), "account dsh flag updated", true)
+	if err := store.SetAccountDSHDisabledAt(r.Context(), a.ID, &now); err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
 	}
+	// Every press is audited, even one that only confirms an account which was already off:
+	// with auto_enable on, that press is the only record of why the account stays out.
+	s.audit(r.Context(), actor.Username, "dsh_disable", "account", strconv.FormatInt(a.ID, 10),
+		map[string]any{"enabled": false, "tenant": a.DshTenant, "changed": changed}, "ok")
+	s.reload(r.Context(), "account dsh flag updated", true)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"account_id": a.ID, "name": a.Name, "enabled": false, "tenant": a.DshTenant,
-		"changed": changed,
+		"changed": changed, "disabled_at": now.Format(time.RFC3339),
 	})
 }
 

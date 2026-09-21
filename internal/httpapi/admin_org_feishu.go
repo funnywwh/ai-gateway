@@ -285,7 +285,7 @@ type feishuOrgPlan struct {
 
 // planFeishuOrg computes what a sync would do, from the directory and the four local reads.
 // It is read-only with respect to storage: the preview renders it, the sync executes it.
-func planFeishuOrg(ctx context.Context, dir *feishu.Directory, orgStore OrgAdmin, accountStore AccountAdmin, keyStore KeyStore, sel feishuSelection) (*feishuOrgPlan, error) {
+func planFeishuOrg(ctx context.Context, dir *feishu.Directory, orgStore OrgAdmin, accountStore AccountAdmin, sel feishuSelection) (*feishuOrgPlan, error) {
 	nodes, err := orgStore.ListOrgNodes(ctx)
 	if err != nil {
 		return nil, err
@@ -295,10 +295,6 @@ func planFeishuOrg(ctx context.Context, dir *feishu.Directory, orgStore OrgAdmin
 		return nil, err
 	}
 	memberships, err := orgStore.ListOrgMemberships(ctx)
-	if err != nil {
-		return nil, err
-	}
-	identities, err := keyStore.ListAPIKeyFeishuIdentities(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -400,12 +396,6 @@ func planFeishuOrg(ctx context.Context, dir *feishu.Directory, orgStore OrgAdmin
 			accountsByName[name] = append(accountsByName[name], account)
 		}
 	}
-	identitiesByOpenID := map[string]domain.KeyFeishuIdentity{}
-	for _, identity := range identities {
-		if _, seen := identitiesByOpenID[identity.Binding.OpenID]; !seen {
-			identitiesByOpenID[identity.Binding.OpenID] = identity
-		}
-	}
 	membersByAccount := map[int64]map[int64]bool{}
 	for _, m := range memberships {
 		if membersByAccount[m.AccountID] == nil {
@@ -436,13 +426,6 @@ func planFeishuOrg(ctx context.Context, dir *feishu.Directory, orgStore OrgAdmin
 		account := accountsByOpenID[person.OpenID]
 		if account != nil {
 			entry.MatchedBy = "open_id"
-		} else if identity, ok := identitiesByOpenID[person.OpenID]; ok {
-			account = accountsByID[identity.AccountID]
-			entry.MatchedBy = "api_key"
-			if strings.TrimSpace(entry.BindName) == "" {
-				entry.BindName = identity.Binding.Name
-				entry.BindUnionID = identity.Binding.UnionID
-			}
 		} else if dir.NamesAvailable {
 			name := strings.TrimSpace(person.Name)
 			// The same-name merge (D3): only an account that carries no Feishu identity
@@ -602,7 +585,7 @@ func (s *Server) handleAdminListFeishuDirectory(w http.ResponseWriter, r *http.R
 		return
 	}
 	selection := parseFeishuSelection(r.URL.Query()["departments"])
-	plan, err := planFeishuOrg(r.Context(), dir, gate.Org, gate.Accounts, gate.Keys, selection)
+	plan, err := planFeishuOrg(r.Context(), dir, gate.Org, gate.Accounts, selection)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
@@ -873,7 +856,7 @@ func (s *Server) handleAdminSyncFeishuOrg(w http.ResponseWriter, r *http.Request
 			"department_ids is empty: pick at least one department, or omit the field to sync every department"))
 		return
 	}
-	plan, err := planFeishuOrg(r.Context(), dir, gate.Org, gate.Accounts, gate.Keys, selection)
+	plan, err := planFeishuOrg(r.Context(), dir, gate.Org, gate.Accounts, selection)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return

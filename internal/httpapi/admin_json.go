@@ -140,12 +140,72 @@ func accountJSON(a *domain.Account, nodeIDs []int64, orgs []map[string]any) map[
 		"markup_override_bp":           a.MarkupOverrideBP,
 		"auto_suspend":                 a.AutoSuspend, "auto_resume": a.AutoResume,
 		"dsh_enabled": a.DSHEnabled, "dsh_tenant": a.DshTenant,
+		// M72: the console has to be able to show why an account's DSH is off. "enabled" is the
+		// last write's physical state; "disabled_at" is an administrator's explicit 停用, which
+		// dshgw.auto_enable does not undo.
+		"dsh_disabled_at": timeOrNil(a.DshDisabledAt),
+		// The account's Feishu identity is the DSH portal login identity (M72). It travels with
+		// every account row because the console shows it — and binds it — from the organization
+		// page's person list rather than from the key rows.
+		"feishu":                   accountFeishuJSON(a),
 		"inflight_policy_override": a.InflightPolicyOverride,
 		"price_overrides":          jsonOrNil(a.PriceOverridesJSON),
 		"status":                   a.Status, "note": a.Note,
 		"created_at": a.CreatedAt.UTC().Format(time.RFC3339),
 		"updated_at": a.UpdatedAt.UTC().Format(time.RFC3339),
 	}
+}
+
+// accountFeishuJSON is the console's view of an account's Feishu identity. Like the key-level
+// map (feishuBindingJSON) it always has the same shape, so the page never has to guess whether a
+// missing field means "unbound" or "older server".
+func accountFeishuJSON(a *domain.Account) map[string]any {
+	if a == nil || a.FeishuOpenID == "" {
+		return map[string]any{"bound": false}
+	}
+	out := map[string]any{
+		"bound":    true,
+		"open_id":  a.FeishuOpenID,
+		"name":     a.FeishuName,
+		"union_id": a.FeishuUnionID,
+		"bound_by": a.FeishuBoundBy,
+	}
+	if a.FeishuBoundAt != nil {
+		out["bound_at"] = a.FeishuBoundAt.UTC().Format(time.RFC3339)
+	} else {
+		out["bound_at"] = nil
+	}
+	return out
+}
+
+// attachAccountOperatorFacts adds the two things the organization page's person list needs on
+// top of accountJSON (M72): how many usable keys the account has (the login picker appears above
+// one), and whether DSH is effectively on for it — which is not the same question as
+// dsh_enabled whenever dshgw.auto_enable is set.
+//
+// A missing store simply leaves the counts at zero rather than failing the page: the console
+// renders "0 个 Key" and the operator can still see the account.
+func (s *Server) attachAccountOperatorFacts(r *http.Request, payload map[string]any, a *domain.Account) map[string]any {
+	if payload == nil || a == nil {
+		return payload
+	}
+	payload["dsh_effective"] = accountDSHEffective(s.deps.Config != nil && s.deps.Config.Dshgw.AutoEnable, a)
+	if s.deps.KeyStore == nil {
+		return payload
+	}
+	keys, err := s.deps.KeyStore.ListAPIKeys(r.Context(), a.ID)
+	if err != nil {
+		return payload
+	}
+	total := 0
+	for _, key := range keys {
+		if key != nil {
+			total++
+		}
+	}
+	payload["key_count"] = total
+	payload["active_key_count"] = len(s.accountKeyChoices(r.Context(), a.ID))
+	return payload
 }
 
 func providerJSON(p *domain.Provider, credentialKeys []string) map[string]any {

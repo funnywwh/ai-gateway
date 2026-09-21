@@ -1006,6 +1006,14 @@ func inputModalities(facts routing.ModelFacts) []string {
 // 403 denial with reason "account_status" so the gateway can show a real message instead of
 // pretending the auth service is down. A valid but non-opted-in account is denied with
 // reason "dsh_disabled"; that is the state the console's 停用 DSH button sets.
+//
+// M72 adds two answers to the same call:
+//
+//   - an account the deployment opted in wholesale (dshgw.auto_enable) is provisioned on the
+//     spot at its first login, so "all active accounts may use DSH" needs no per-account click;
+//   - the account's usable keys travel with the answer, because the portal asks which one this
+//     session belongs to when there is more than one (the key then names the login in the audit
+//     trail; it never becomes a credential for the tenant's worker).
 func (s *Server) handleDSHGWAuthorize(w http.ResponseWriter, r *http.Request) {
 	header := r.Header.Get("Authorization")
 	if header == "" {
@@ -1020,41 +1028,174 @@ func (s *Server) handleDSHGWAuthorize(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	if !account.DSHEnabled {
+	autoEnable := s.deps.Config != nil && s.deps.Config.Dshgw.AutoEnable
+	if !accountDSHEffective(autoEnable, account) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"allowed": false, "reason": "dsh_disabled"})
 		return
 	}
-	if account.DshTenant == "" {
-		// Enabled but the console never recorded which tenant to use (rev2 migration not
-		// done): deny rather than let dshgw guess.
-		writeJSON(w, http.StatusForbidden, map[string]any{"allowed": false, "reason": "dsh_tenant_unassigned"})
-		return
+	tenant := strings.TrimSpace(account.DshTenant)
+	if tenant == "" {
+		// Entitled but never provisioned. With auto_enable the login itself creates the tenant;
+		// a failure here is a denial the portal can explain ("ask an administrator") rather than
+		// a silent success, and the operator's manual 启用 DSH remains the retry path.
+		if !autoEnable {
+			writeJSON(w, http.StatusForbidden, map[string]any{"allowed": false, "reason": "dsh_tenant_unassigned"})
+			return
+		}
+		provisioned, err := s.ensureAccountDSHForLogin(r.Context(), account)
+		if err != nil {
+			s.deps.Log.Warn("provisioning dsh for an entitled account failed",
+				"account", account.ID, "err", err)
+			writeJSON(w, http.StatusForbidden, map[string]any{"allowed": false, "reason": "provision_failed"})
+			return
+		}
+		account = provisioned
+		tenant = strings.TrimSpace(account.DshTenant)
 	}
 	// The tenant name is the account's dshgw destination: every key of this account logs
 	// into it, so dshgw no longer needs a per-key prefix binding.
-	payload := map[string]any{"allowed": true, "tenant": account.DshTenant}
-	// Who this is (M67): dshgw shows the account and, when one of the account's keys carries
-	// a Feishu binding, the person's Feishu name — the name people recognise themselves by
-	// in the dsh interface. Both are display-only additions: the decision above is already
-	// made, so a lookup that fails costs a name, never an admission.
+	payload := map[string]any{"allowed": true, "tenant": tenant}
+	// Who this is (M67): dshgw shows the account and, when the account carries one, the person's
+	// Feishu name — the name people recognise themselves by in the dsh interface. Both are
+	// display-only additions: the decision above is already made, so a lookup that fails costs a
+	// name, never an admission.
 	if name := strings.TrimSpace(account.Name); name != "" {
 		payload["account"] = name
 	}
 	if name := s.accountFeishuName(r.Context(), account.ID); name != "" {
 		payload["feishu_name"] = name
 	}
+	// The keys the portal may offer for the "which key is this session under" step (M72). An
+	// empty list is a real answer ("this account has no usable key"), and a failure to read it
+	// costs the picker, never the login.
+	if keys := s.accountKeyChoices(r.Context(), account.ID); len(keys) > 0 {
+		payload["keys"] = keys
+	}
 	writeJSON(w, http.StatusOK, payload)
 }
 
-// accountFeishuName reports the Feishu display name bound to any key of one account, or ""
-// when nothing is bound / the lookup failed.
+// ensureAccountDSHForLogin provisions the tenant an entitled account has never had (M72).
 //
-// Why "any key": the binding is per key (M60) while the identity belongs to the person, and
-// dshgw authenticates with one of the account's keys — usually the dedicated worker key,
-// which is minted without a binding even for an account whose own keys are bound. Refusing
-// to look further would show a name only to accounts that bound the exact worker key, which
-// nobody does.
+// It is the login-time counterpart of the console's 启用 DSH button and shares its
+// implementation, precisely so that the on-demand path cannot disagree with the button about
+// tenant naming, uniqueness or what a re-enable does. The actor recorded in the audit trail is
+// "dshgw-auto" rather than a person, because no person was involved.
+//
+// One thing this path adds is a model check before provisioning (and it is why the check lives
+// here rather than inside provisionAccountDSH): the console button's operator can read "grant
+// this account a model and try again", while the person waiting at the login form cannot act on
+// it at all — so the common misconfiguration (`default_grant: none`) has to be caught here, and
+// caught cheaply, before a tenant is created that the gateway would refuse anyway.
+//
+// It re-reads the account under the same call: two logins racing for the same account both
+// provision, and the second one sees the tenant the first wrote (provisionAccountDSH reuses an
+// existing mapping), so the outcome is one tenant either way.
+func (s *Server) ensureAccountDSHForLogin(ctx context.Context, account *domain.Account) (*domain.Account, error) {
+	if s.deps.DshgwAdmin == nil {
+		return nil, domain.ErrInternal("dshgw provisioning channel is not configured")
+	}
+	accounts, ok := s.deps.Accounts.(AccountAdmin)
+	if !ok || accounts == nil {
+		return nil, domain.ErrInternal("account management port is not configured")
+	}
+	if s.deps.Registry != nil && s.deps.Router != nil {
+		if !s.accountHasUsableModel(account) {
+			return nil, domain.ErrInvalidRequest("this account has no available model on this gateway")
+		}
+	}
+	tenant, err := s.provisionAccountDSH(ctx, dshAutoEnableActor, accounts, s.deps.AdminStore, account, nil)
+	if err != nil {
+		return nil, err
+	}
+	fresh, err := accounts.GetAccount(ctx, account.ID)
+	if err != nil {
+		// The provision succeeded, so the login may proceed with what was written on the row.
+		account.DshTenant = tenant
+		account.DSHEnabled = true
+		return account, nil
+	}
+	return fresh, nil
+}
+
+// dshAutoEnableActor names the login-time provisioning in the audit trail. It is deliberately
+// obvious that no person pressed anything.
+const dshAutoEnableActor = "dshgw-auto"
+
+// accountHasUsableModel reports whether the account's future worker key would list any model.
+//
+// It asks the same question the gateway asks (`GET /v1/models` with that key) against the
+// in-memory snapshot: an enabled model the account's tags grant, that still has a route. The
+// worker key is minted with no tags of its own, so the answer is the account's answer — which is
+// why this can be decided before the key exists.
+func (s *Server) accountHasUsableModel(account *domain.Account) bool {
+	snap := s.deps.Registry.Snapshot()
+	if len(snap.Models) == 0 {
+		return false
+	}
+	// The tags of a key are the account's plus the key's own; without a key, the account's
+	// grants are the ceiling, so a snapshot key carrying only the account id is the honest
+	// stand-in for "this account's entitlement".
+	probe := &domain.APIKey{AccountID: account.ID}
+	grant := s.deps.Router.Authorize(probe, s.deps.Router.ResolveTags(snap, probe))
+	for _, model := range snap.Models {
+		if !model.Enabled {
+			continue
+		}
+		if !grant.Models["*"] && !grant.Models[model.PublicName] {
+			continue
+		}
+		if plan, err := s.deps.Router.Plan(domain.RouteRequest{Model: model.PublicName, Key: probe, Grant: grant}); err == nil && len(plan.Candidates) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// accountKeyChoices lists the keys a login may be recorded against (M72): the account's active,
+// unexpired keys, without the gateway's own dshgw-* worker credential — that one is machine
+// plumbing, and offering it would let a person pick the tenant's model key as "their" key.
+func (s *Server) accountKeyChoices(ctx context.Context, accountID int64) []map[string]any {
+	if s.deps.KeyStore == nil || accountID <= 0 {
+		return nil
+	}
+	keys, err := s.deps.KeyStore.ListAPIKeys(ctx, accountID)
+	if err != nil {
+		s.deps.Log.Warn("listing an account's keys for the login picker failed", "account", accountID, "err", err)
+		return nil
+	}
+	now := time.Now().UTC()
+	out := make([]map[string]any, 0, len(keys))
+	for _, key := range keys {
+		if key == nil || key.Status != "active" || strings.HasPrefix(key.Name, "dshgw-") {
+			continue
+		}
+		if key.ExpiresAt != nil && !key.ExpiresAt.After(now) {
+			continue
+		}
+		entry := map[string]any{"id": key.ID, "name": key.Name, "key_prefix": key.KeyPrefix}
+		if key.LastUsedAt != nil {
+			entry["last_used_at"] = key.LastUsedAt.UTC().Format(time.RFC3339)
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// accountFeishuName reports the Feishu display name behind one account, or "" when none is bound.
+//
+// It reads the account-level identity (M72), which is the identity the portal logs in with, and
+// falls back to any key of the account (M60) for a deployment whose startup backfill has not run
+// yet. The fallback is what used to make this name appear at all: the worker key dshgw
+// authenticates with is minted without a binding, so an account-bound-only read would have
+// answered nothing before M72.
 func (s *Server) accountFeishuName(ctx context.Context, accountID int64) string {
+	if s.deps.Accounts != nil && accountID > 0 {
+		if account, err := s.deps.Accounts.GetAccount(ctx, accountID); err == nil && account != nil {
+			if name := strings.TrimSpace(account.FeishuName); name != "" {
+				return name
+			}
+		}
+	}
 	if s.deps.KeyStore == nil || accountID <= 0 {
 		return ""
 	}

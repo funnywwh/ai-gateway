@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -193,9 +194,23 @@ func stateFrom(t *testing.T, location string) string {
 // an anonymous request.
 func (f *feishuFixture) request(t *testing.T, method, path, session string) *http.Response {
 	t.Helper()
-	req, err := http.NewRequest(method, f.server.URL+path, nil)
+	return f.requestBody(t, method, path, "", session)
+}
+
+// requestBody is request() with a JSON body: the account-level binding (M72) is a plain write,
+// so its tests have to send one.
+func (f *feishuFixture) requestBody(t *testing.T, method, path, body, session string) *http.Response {
+	t.Helper()
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, f.server.URL+path, reader)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	if session != "" {
 		req.AddCookie(&http.Cookie{Name: adminCookieName, Value: session})
@@ -209,73 +224,152 @@ func (f *feishuFixture) request(t *testing.T, method, path, session string) *htt
 	return res
 }
 
-// The binding flow end to end: an administrator asks for it, Feishu confirms the identity,
-// and the callback writes it — then the console list shows it.
-func TestFeishuBindFlowWritesTheBindingAndTheListShowsIt(t *testing.T) {
+// The key-level binding flow is retired (M72): the console used to send the browser to Feishu's
+// consent page from here, and now the answer explains where binding went. The route stays
+// registered so an old bookmark or an old console tab is told what to do instead of getting a
+// 404 that reads like a deployment problem.
+func TestFeishuKeyLevelBindStartIsRetired(t *testing.T) {
 	f := newFeishuFixture(t)
 	cookie := f.login(t, adminUser, adminPassword)
-	key := f.seedKey(t)
+	f.seedKey(t)
 
-	// The console's own entry point goes to the consent page in one hop. It has to: the
-	// administrator's cookie is scoped to /admin, so a second hop through a public route
-	// would arrive without a session (which is exactly what a browser reported as
-	// "missing admin session" before this was fixed).
 	res := f.request(t, http.MethodGet, "/admin/api/v1/keys/1/feishu/bind", cookie)
-	if res.StatusCode != http.StatusFound {
-		t.Fatalf("bind start: status=%d", res.StatusCode)
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("retired bind start: status=%d, want 400", res.StatusCode)
 	}
-	authorize := res.Header.Get("Location")
-	if !strings.HasPrefix(authorize, "https://accounts.feishu.cn/open-apis/authen/v1/authorize?") {
-		t.Fatalf("bind start must go straight to the consent page, got %q", authorize)
+	if location := res.Header.Get("Location"); location != "" {
+		t.Fatalf("the retired route must not redirect anywhere, got %q", location)
 	}
-	parsed, err := url.Parse(authorize)
+	body, _ := io.ReadAll(res.Body)
+	if !strings.Contains(string(body), "accounts/{id}/feishu") {
+		t.Fatalf("the refusal must name the replacement: %s", body)
+	}
+	// It is refused for every key, not only an unusable one: the route itself is gone.
+	if res := f.request(t, http.MethodGet, "/admin/api/v1/keys/424242/feishu/bind", cookie); res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("retired bind start on an unknown key: status=%d, want 400", res.StatusCode)
+	}
+}
+
+// The account-level binding is the console's path from M72 on: it writes the identity from the
+// body (the person picker has just read the directory), replaces an earlier identity, refuses a
+// second account claiming the same person, and is an administrator action.
+func TestFeishuAccountLevelBinding(t *testing.T) {
+	f := newFeishuFixture(t)
+	ctx := context.Background()
+	cookie := f.login(t, adminUser, adminPassword)
+	account, err := f.db.GetAccountByName(ctx, "acme")
 	if err != nil {
 		t.Fatal(err)
 	}
-	query := parsed.Query()
-	if query.Get("client_id") != "cli_test" || query.Get("response_type") != "code" {
-		t.Fatalf("authorize URL lacks the required parameters: %s", authorize)
-	}
-	if query.Get("redirect_uri") != "http://dsh.example:8090"+feishuCallbackPath {
-		t.Fatalf("redirect_uri = %q", query.Get("redirect_uri"))
-	}
-	if query.Get("scope") != "" {
-		t.Errorf("the authorize URL asks for scopes that were never configured: %s", authorize)
-	}
+	path := fmt.Sprintf("/admin/api/v1/accounts/%d/feishu", account.ID)
 
-	// The browser comes back with a code and the state it was given.
-	res = f.request(t, http.MethodGet, feishuCallbackPath+"?code=the-code&state="+
-		url.QueryEscape(query.Get("state")), "")
-	if res.StatusCode != http.StatusSeeOther {
-		t.Fatalf("callback: status=%d", res.StatusCode)
+	res := f.requestBody(t, http.MethodPut, path,
+		`{"open_id":"ou_alice","union_id":"on_alice","name":"张三"}`, cookie)
+	var payload map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
 	}
-	if got := res.Header.Get("Location"); !strings.Contains(got, "/admin/ui/#/keys?feishu=bound") {
-		t.Fatalf("callback location = %q, want the console keys page with a result", got)
+	if res.StatusCode != http.StatusOK || payload["result"] != "bound" {
+		t.Fatalf("bind: status=%d payload=%v", res.StatusCode, payload)
 	}
-
-	bound, err := f.db.GetAPIKeyByID(context.Background(), key.ID)
+	stored, err := f.db.GetAccount(ctx, account.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bound.FeishuOpenID != "ou_alice" || bound.FeishuName != "张三" || bound.FeishuBoundBy != adminUser {
-		t.Fatalf("binding not written: %+v", bound)
+	if stored.FeishuOpenID != "ou_alice" || stored.FeishuName != "张三" || stored.FeishuBoundBy != adminUser {
+		t.Fatalf("binding not written: %+v", stored)
 	}
-
-	// The list carries it in a stable shape.
-	res = f.request(t, http.MethodGet, "/admin/api/v1/keys", cookie)
-	var payload struct {
+	// The account list carries it in the same shape the key rows use.
+	res = f.request(t, http.MethodGet, "/admin/api/v1/accounts?limit=10", cookie)
+	var listed struct {
 		Data []struct {
 			Feishu map[string]any `json:"feishu"`
 		} `json:"data"`
 	}
+	if err := json.NewDecoder(res.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Data) != 1 || listed.Data[0].Feishu["bound"] != true || listed.Data[0].Feishu["name"] != "张三" {
+		t.Fatalf("the account list does not carry the identity: %+v", listed.Data)
+	}
+
+	// Rebinding the same person is a no-op that says so; a different person replaces it.
+	res = f.requestBody(t, http.MethodPut, path, `{"open_id":"ou_alice","name":"张三"}`, cookie)
 	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
 		t.Fatal(err)
 	}
-	if len(payload.Data) == 0 || payload.Data[0].Feishu["bound"] != true {
-		t.Fatalf("list does not carry the binding: %+v", payload.Data)
+	if payload["result"] != "bound" {
+		t.Fatalf("rebinding the same person must not read as a replacement: %v", payload)
 	}
-	if payload.Data[0].Feishu["open_id"] != "ou_alice" || payload.Data[0].Feishu["name"] != "张三" {
-		t.Fatalf("list binding shape: %+v", payload.Data[0].Feishu)
+	res = f.requestBody(t, http.MethodPut, path, `{"open_id":"ou_bob","name":"李四"}`, cookie)
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusOK || payload["result"] != "replaced" {
+		t.Fatalf("replacing: status=%d payload=%v", res.StatusCode, payload)
+	}
+	replaced, err := f.db.GetAccount(ctx, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replaced.FeishuOpenID != "ou_bob" || replaced.FeishuName != "李四" {
+		t.Fatalf("replacement did not land: %+v", replaced)
+	}
+	// A second account, created here because two of the assertions below need it: that the old
+	// identity is free again after a replacement, and that a taken identity is refused.
+	otherID, err := f.db.UpsertAccount(ctx, &domain.Account{Name: "second", BillingMode: domain.BillingPrepaid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The old identity must be free again, otherwise it could never be bound elsewhere.
+	res = f.requestBody(t, http.MethodPut, fmt.Sprintf("/admin/api/v1/accounts/%d/feishu", otherID),
+		`{"open_id":"ou_alice"}`, cookie)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("the previous identity stayed claimed: status=%d", res.StatusCode)
+	}
+	// And a person who is already taken by another account is a 409, not a silent steal.
+	res = f.requestBody(t, http.MethodPut, fmt.Sprintf("/admin/api/v1/accounts/%d/feishu", otherID),
+		`{"open_id":"ou_bob"}`, cookie)
+	if res.StatusCode != http.StatusConflict {
+		t.Fatalf("a taken identity: status=%d, want 409", res.StatusCode)
+	}
+
+	// Unbinding is idempotent and only clears the account.
+	res = f.request(t, http.MethodDelete, path, cookie)
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusOK || payload["unbound"] != true {
+		t.Fatalf("unbind: status=%d payload=%v", res.StatusCode, payload)
+	}
+	res = f.request(t, http.MethodDelete, path, cookie)
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["unbound"] != false {
+		t.Fatalf("second unbind: %v", payload)
+	}
+
+	// An empty or missing open id is a 400, not a silent unbind.
+	if res := f.requestBody(t, http.MethodPut, path, `{"name":"张三"}`, cookie); res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("missing open_id: status=%d, want 400", res.StatusCode)
+	}
+	// The person does not have to be in the directory: an offboarded employee must stay
+	// unbindable, and binding writes a row rather than a Feishu lookup.
+	if res := f.requestBody(t, http.MethodPut, path, `{"open_id":"ou_gone","name":"离职者"}`, cookie); res.StatusCode != http.StatusOK {
+		t.Fatalf("binding someone who left: status=%d", res.StatusCode)
+	}
+	// A viewer may look, never change.
+	viewer := f.login(t, "reader", adminPassword)
+	if res := f.requestBody(t, http.MethodPut, path, `{"open_id":"ou_viewer"}`, viewer); res.StatusCode != http.StatusForbidden {
+		t.Fatalf("viewer bind: status=%d, want 403", res.StatusCode)
+	}
+	if res := f.request(t, http.MethodDelete, path, viewer); res.StatusCode != http.StatusForbidden {
+		t.Fatalf("viewer unbind: status=%d, want 403", res.StatusCode)
+	}
+	// Unknown account: 404 rather than a new row.
+	if res := f.requestBody(t, http.MethodPut, "/admin/api/v1/accounts/424242/feishu", `{"open_id":"ou_x"}`, cookie); res.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown account: status=%d, want 404", res.StatusCode)
 	}
 }
 
@@ -340,24 +434,6 @@ func TestFeishuBindingRequiresAnAdministrator(t *testing.T) {
 	}
 	if after.FeishuOpenID != "" {
 		t.Fatalf("a refused request still bound something: %+v", after)
-	}
-}
-
-// A binding may only target a key that can actually be used.
-func TestFeishuBindRefusesInactiveAndUnknownKeys(t *testing.T) {
-	f := newFeishuFixture(t)
-	cookie := f.login(t, adminUser, adminPassword)
-	key := f.seedKey(t)
-
-	key.Status = "disabled"
-	if _, err := f.db.UpsertAPIKey(context.Background(), key); err != nil {
-		t.Fatal(err)
-	}
-	if res := f.request(t, http.MethodGet, "/admin/api/v1/keys/1/feishu/bind", cookie); res.StatusCode != http.StatusConflict {
-		t.Fatalf("disabled key bind: status=%d, want 409", res.StatusCode)
-	}
-	if res := f.request(t, http.MethodGet, "/admin/api/v1/keys/424242/feishu/bind", cookie); res.StatusCode != http.StatusNotFound {
-		t.Fatalf("unknown key bind: status=%d, want 404", res.StatusCode)
 	}
 }
 

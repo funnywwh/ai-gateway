@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/runtime"
@@ -20,13 +21,19 @@ type AccountAdmin interface {
 	GetAccountByName(ctx context.Context, name string) (*domain.Account, error)
 	UpsertAccount(ctx context.Context, a *domain.Account) (int64, error)
 	SetAccountStatus(ctx context.Context, id int64, status string) error
-	// BindAccountFeishu / UnbindAccountFeishu / FindAccountByFeishuOpenID are the
-	// directory-sync mapping (M70): which local account a Feishu person is. They never
-	// influence authentication; they exist so a second sync recognizes the same person
-	// after a rename on either side.
+	// BindAccountFeishu / UnbindAccountFeishu / FindAccountByFeishuOpenID are the account-level
+	// Feishu identity: a directory-sync mapping in M70, and the DSH portal login identity from
+	// M72 on. The unique index over the open id makes "one Feishu person, one account" a
+	// database invariant, and the write is column-scoped so an ordinary account edit cannot
+	// clear an identity.
 	BindAccountFeishu(ctx context.Context, id int64, binding domain.FeishuBinding) error
 	UnbindAccountFeishu(ctx context.Context, id int64) (bool, error)
 	FindAccountByFeishuOpenID(ctx context.Context, openID string) (*domain.Account, error)
+	// SetAccountDSHDisabledAt records (nil clears) the moment an administrator explicitly
+	// turned DSH off for this account (M72). It is a separate statement because UpsertAccount
+	// must not be able to overwrite the mark: dshgw.auto_enable reads it to decide whether an
+	// account that was never enabled is nevertheless entitled.
+	SetAccountDSHDisabledAt(ctx context.Context, id int64, at *time.Time) error
 }
 
 // ProviderAdmin manages upstream provider instances and their model mappings.
