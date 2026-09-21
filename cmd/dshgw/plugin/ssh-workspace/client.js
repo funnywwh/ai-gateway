@@ -26,6 +26,9 @@ window.__ModuleLoader__.load({
 
     const RPC_CHANNEL = '/ssh-workspace'
     const POLL_MS = 2000
+    // Typing in 主机/用户名/端口 re-queries what this account holds for that host. One request
+    // per burst of typing, not one per keystroke — see the debounce below.
+    const IDENTITY_DEBOUNCE_MS = 200
     const MAX_KEY_BYTES = 64 * 1024
     function composeHost(address, username = '', port = '') {
       const raw = address.trim()
@@ -52,8 +55,11 @@ window.__ModuleLoader__.load({
    put its folder icon under the label. */
 div:has(> .dshgw-bw-row), div:has(> div > .dshgw-bw-row),
 div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-direction: column; }
-.dshgw-ssh-backdrop { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.45); z-index: 40; }
-.dshgw-ssh-dialog { width: min(720px, 92vw); max-height: 86vh; overflow: auto; background: var(--dsh-bg, #1b1c1f); color: var(--dsh-fg, #e6e6e6); border: 1px solid rgba(127,127,127,.35); border-radius: 10px; padding: 16px 18px; font-size: 13px; line-height: 1.5; }
+/* flex-start, not center: a dialog that grows and shrinks while someone types must not
+   re-centre itself, or the field under the cursor moves. The gutter is reserved for the same
+   reason — a scrollbar appearing changes the content width and re-wraps every line. */
+.dshgw-ssh-backdrop { position: fixed; inset: 0; display: flex; align-items: flex-start; justify-content: center; padding: 5vh 0; background: rgba(0,0,0,.45); z-index: 40; }
+.dshgw-ssh-dialog { width: min(720px, 92vw); max-height: 86vh; overflow: auto; scrollbar-gutter: stable; background: var(--dsh-bg, #1b1c1f); color: var(--dsh-fg, #e6e6e6); border: 1px solid rgba(127,127,127,.35); border-radius: 10px; padding: 16px 18px; font-size: 13px; line-height: 1.5; }
 .dshgw-ssh-dialog h2 { margin: 0 0 4px; font-size: 15px; }
 .dshgw-ssh-dialog p.hint { margin: 0 0 12px; opacity: .7; }
 .dshgw-ssh-row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
@@ -71,6 +77,9 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
 .dshgw-ssh-error { border: 1px solid #b3453c; background: rgba(179,69,60,.18); border-radius: 6px; padding: 8px 10px; margin: 8px 0; white-space: pre-wrap; }
 .dshgw-ssh-notice { border: 1px solid #3a7d44; background: rgba(58,125,68,.18); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
 .dshgw-ssh-muted { opacity: .65; }
+/* Two lines are reserved for the identity status: its text changes length as the host does,
+   and a section that grows and shrinks moves everything under it. */
+.dshgw-ssh-status { min-height: 2.8em; overflow-wrap: anywhere; }
 .dshgw-ssh-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .dshgw-ssh-section { margin-top: 14px; border-top: 1px solid rgba(127,127,127,.25); padding-top: 10px; }
 `
@@ -102,6 +111,9 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       identity: false,
       remoteHome: '',
       listing: null,
+      // The host 主机 was when the listing was produced: a listing from another host stays on
+      // screen, labelled, instead of being thrown away on the first keystroke.
+      listingHost: '',
       newName: '',
       mounts: [],
       replies: [],
@@ -158,16 +170,14 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           if (renamed.ok !== true) ctx.logger?.warn?.(`ssh-workspace: rename failed: ${textOf(renamed.error)}`)
         }
         await ctx.uiWorkspace.connectWorkspace(workspace.workspaceId)
-        patch({ open: false, notice: '' })
+        closeDialog()
+        patch({ notice: '' })
       }
 
       let hostRevision = 0
+      let identityTimer = null
+      let pollTimer = null
       const currentHost = () => composeHost(state.host, state.username, state.port)
-      const refreshIdentity = async (host = '') => {
-        const rev = ++hostRevision
-        try { const value = await call('identityStatus', host ? { host } : {}); if (rev === hostRevision) patch({ identityStatus: value }) }
-        catch (error) { if (rev === hostRevision) patch({ error: textOf(error) }) }
-      }
       const refreshHosts = async () => {
         const rev = ++hostRevision
         const value = await call('hosts', {})
@@ -181,11 +191,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           identity: value.identity === true,
           host: state.host || (value.aliases ?? [])[0]?.name || '',
         })
-        const address = state.host || (value.aliases ?? [])[0]?.name || ''
-        if (!address) { await refreshIdentity(); return }
-        const host = composeHost(address, state.username, state.port)
-        patch({ composedHost: host })
-        await refreshIdentity(host)
+        await refreshIdentityNow()
       }
 
       const refreshMounts = async () => {
@@ -193,14 +199,67 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
         patch({ mounts: value.mounts ?? [], replies: value.replies ?? [], mirror: value.mirror === true })
       }
 
-      // The identity lookup behind the 私钥 section: re-query what this account holds for the
-      // current 主机/用户名/端口, and drop anything that belonged to the previous one. It lives
-      // here (not inside the dialog) because the 「我的主机」handlers need it too.
-      const refreshIdentitySafe = async () => {
+      // The identity lookup behind the 私钥 section, and the reason this dialog used to jump
+      // while a person typed: it was called from every keystroke and cleared the listing, the
+      // remote path, the composed host, the status and a chosen key file before re-querying.
+      //
+      // Two halves now, and neither of them touches anything else on screen:
+      //   * syncComposedHost composes 「绑定主机」locally, so the field reacts immediately;
+      //   * scheduleIdentityRefresh debounces the round trip (one per burst of typing) and
+      //     leaves the previous status in place until the answer arrives.
+      const syncComposedHost = () => {
+        try { patch({ composedHost: composeHost(state.host, state.username, state.port) }) }
+        catch { patch({ composedHost: '' }) }
+      }
+      const refreshIdentityStatus = async () => {
+        // An empty host asks for the account-wide status, exactly like opening the dialog.
+        let host = ''
+        try { host = state.host.trim() === '' ? '' : currentHost() }
+        catch (error) { patch({ error: textOf(error) }); return }
         const rev = ++hostRevision
-        patch({ listing: null, remoteHome: '', remote: '', identityStatus: { default: { configured: false }, host: { configured: false }, effective: 'none' }, composedHost: '', identityKey: '' })
-        try { const host = currentHost(); patch({ composedHost: host }); const value = await call('identityStatus', { host }); if (rev === hostRevision) patch({ identityStatus: value }) }
-        catch (error) { if (rev === hostRevision) patch({ error: textOf(error) }) }
+        try {
+          const value = await call('identityStatus', host ? { host } : {})
+          if (rev === hostRevision) patch({ identityStatus: value })
+        } catch (error) {
+          if (rev === hostRevision) patch({ error: textOf(error) })
+        }
+      }
+      const scheduleIdentityRefresh = () => {
+        syncComposedHost()
+        if (identityTimer !== null) clearTimeout(identityTimer)
+        identityTimer = setTimeout(() => {
+          identityTimer = null
+          refreshIdentityStatus().catch(() => {})
+        }, IDENTITY_DEBOUNCE_MS)
+      }
+      // An explicit action (选用了某台主机、刚添加完一台、打开了对话框) reads the status at once;
+      // only typing is debounced.
+      const refreshIdentityNow = async () => {
+        syncComposedHost()
+        if (identityTimer !== null) {
+          clearTimeout(identityTimer)
+          identityTimer = null
+        }
+        await refreshIdentityStatus()
+      }
+      // Every edit to 主机/用户名/端口 invalidates answers computed for the previous input.
+      const hostChanged = () => {
+        hostRevision += 1
+        scheduleIdentityRefresh()
+      }
+      // Every way out of the dialog goes through here. The mount poll keeps patching state (and
+      // adding and removing the 已挂载 section) while it runs, so leaving it behind a closed
+      // dialog is both pointless work and a source of layout churn on the way back in.
+      const closeDialog = () => {
+        patch({ open: false })
+        if (pollTimer !== null) {
+          window.clearInterval(pollTimer)
+          pollTimer = null
+        }
+        if (identityTimer !== null) {
+          clearTimeout(identityTimer)
+          identityTimer = null
+        }
       }
 
       const probe = async () => {
@@ -217,8 +276,11 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       const browse = async (path) => {
         patch({ busy: 'list', error: '' })
         try {
-          const value = await call('list', { host: currentHost(), path })
-          patch({ busy: '', listing: value, remote: value.path })
+          const host = currentHost()
+          const value = await call('list', { host, path })
+          // The host is recorded with the listing: changing 主机 afterwards leaves the listing
+          // on screen (labelled) instead of making the dialog collapse and re-centre.
+          patch({ busy: '', listing: value, listingHost: host, remote: value.path })
         } catch (error) {
           patch({ busy: '', error: textOf(error) })
         }
@@ -262,7 +324,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       // one the gateway resolves the alias to.
       const selectHost = async (name) => {
         patch({ host: name, username: '', port: '', error: '', notice: '' })
-        await refreshIdentitySafe()
+        await refreshIdentityNow()
       }
 
       const clearHostForm = () => patch({ hostForm: { name: '', hostname: '', user: '', port: '', keyName: '', keyText: '' } })
@@ -290,7 +352,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
             port: '',
           })
           clearHostForm()
-          await refreshIdentitySafe()
+          await refreshIdentityNow()
         } catch (error) { patch({ busy: '', error: textOf(error) }) }
       }
 
@@ -306,7 +368,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
             notice: `已删除 ${name}。`,
             ...(state.host.trim() === name ? { host: '', username: '', port: '' } : {}),
           })
-          if (state.host.trim() === name) await refreshIdentity()
+          if (state.host.trim() === name) await refreshIdentityNow()
         } catch (error) { patch({ busy: '', error: textOf(error) }) }
       }
 
@@ -349,8 +411,6 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           patch({ error: textOf(error) })
         }
       }
-
-      let pollTimer = null
 
       /** The sidebar-foot action: the entry point for the whole feature. */
       function SidebarAction({ wide } = {}) {
@@ -402,15 +462,15 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
             list: 'dshgw-ssh-hosts',
             value: current.host,
             placeholder: 'gpt001 或 user@host',
-            onChange: (event) => { patch({ host: event.target.value }); refreshIdentitySafe() },
+            onChange: (event) => { patch({ host: event.target.value }); hostChanged() },
           }),
           h('datalist', { id: 'dshgw-ssh-hosts', key: 'list' },
             current.aliases.map((alias) => h('option', { key: alias.name, value: alias.name }, alias.hostName || alias.name))),
           h('button', { key: 'probe', type: 'button', disabled: current.busy !== '', onClick: probe }, '探测'),
         ]))
         rows.push(h('div', { className: 'dshgw-ssh-row', key: 'login' }, [
-          h('label', { key: 'user-label' }, '用户名'), h('input', { key: 'user', type: 'text', disabled: current.busy !== '', value: current.username, placeholder: '可选', onChange: (e) => { patch({ username: e.target.value }); hostRevision++; refreshIdentitySafe() } }),
-          h('label', { key: 'port-label' }, '端口'), h('input', { key: 'port', type: 'text', disabled: current.busy !== '', value: current.port, placeholder: 'SSH config / 22', onChange: (e) => { patch({ port: e.target.value }); hostRevision++; refreshIdentitySafe() } }),
+          h('label', { key: 'user-label' }, '用户名'), h('input', { key: 'user', type: 'text', disabled: current.busy !== '', value: current.username, placeholder: '可选', onChange: (e) => { patch({ username: e.target.value }); hostChanged() } }),
+          h('label', { key: 'port-label' }, '端口'), h('input', { key: 'port', type: 'text', disabled: current.busy !== '', value: current.port, placeholder: 'SSH config / 22', onChange: (e) => { patch({ port: e.target.value }); hostChanged() } }),
         ]))
         // 「我的主机」: the account's own alias list. Adding an entry writes it into THIS
         // account's ~/.ssh/config (which no other account can see), and deleting one removes
@@ -482,7 +542,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
         ]))
         rows.push(h('div', { className: 'dshgw-ssh-section', key: 'identity' }, [
           h('h3', { key: 'title', style: { margin: '0 0 6px', fontSize: '13px' } }, 'SSH 私钥'),
-          h('p', { key: 'status', className: 'dshgw-ssh-muted' }, `绑定主机：${current.composedHost || '（未填写）'}。当前生效：${current.identityStatus.effective || 'none'}；默认 ${current.identityStatus.default?.configured ? '已配置' : '未配置'}${current.identityStatus.default?.fingerprint ? ` (${current.identityStatus.default.fingerprint})` : ''}；主机专用 ${current.identityStatus.host?.configured ? '已配置' : '未配置'}${current.identityStatus.host?.fingerprint ? ` (${current.identityStatus.host.fingerprint})` : ''}`),
+          h('p', { key: 'status', className: 'dshgw-ssh-muted dshgw-ssh-status' }, `绑定主机：${current.composedHost || '（未填写）'}。当前生效：${current.identityStatus.effective || 'none'}；默认 ${current.identityStatus.default?.configured ? '已配置' : '未配置'}${current.identityStatus.default?.fingerprint ? ` (${current.identityStatus.default.fingerprint})` : ''}；主机专用 ${current.identityStatus.host?.configured ? '已配置' : '未配置'}${current.identityStatus.host?.fingerprint ? ` (${current.identityStatus.host.fingerprint})` : ''}`),
           h('select', { key: 'scope', disabled: current.busy !== '', value: current.identityScope, onChange: (e) => patch({ identityScope: e.target.value, identityKey: '' }) }, [h('option', { key: 'default', value: 'default' }, '账号默认'), h('option', { key: 'host', value: 'host' }, '当前主机专用')]),
           h('input', { key: 'key', type: 'file', disabled: current.busy !== '', accept: '.pem,.key,id_rsa,id_ed25519', onChange: async (e) => { const f=e.target.files?.[0]; patch({ identityKey: '' }); if (!f) return; if (f.size > MAX_KEY_BYTES) { patch({ error: '私钥不能超过 64 KiB' }); return }; patch({ busy: 'identity' }); try { const text=await f.text(); patch({ busy: '', identityKey: text }) } catch (error) { patch({ busy: '', error: textOf(error) }) } } }),
           h('button', { key: 'upload', type: 'button', disabled: current.busy !== '' || !current.identityKey, onClick: uploadIdentity }, '上传/替换'),
@@ -511,6 +571,10 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
         }
         if (current.listing !== null) {
           const entries = current.listing.entries ?? []
+          if (current.listingHost !== '' && current.listingHost !== current.composedHost) {
+            rows.push(h('p', { className: 'dshgw-ssh-muted', key: 'listing-stale' },
+              `以下目录来自 ${current.listingHost}：点「浏览」按当前主机刷新。`))
+          }
           rows.push(h('div', { className: 'dshgw-ssh-list', key: 'listing' },
             entries.length === 0
               ? h('div', { className: 'dshgw-ssh-item' }, h('span', { className: 'dshgw-ssh-muted' }, '（没有子目录）'))
@@ -585,7 +649,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           'aria-modal': 'true',
           'aria-label': 'SSH 工作区',
           onClick: (event) => {
-            if (event.target === event.currentTarget) patch({ open: false })
+            if (event.target === event.currentTarget) closeDialog()
           },
         }, h('div', { className: 'dshgw-ssh-dialog' }, [
           h('h2', { key: 'title' }, 'SSH 工作区'),
@@ -598,7 +662,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           mountedSection,
           replySection,
           h('div', { className: 'dshgw-ssh-footer', key: 'footer' }, [
-            h('button', { key: 'close', type: 'button', onClick: () => patch({ open: false }) }, '关闭'),
+            h('button', { key: 'close', type: 'button', onClick: closeDialog }, '关闭'),
             h('button', {
               key: 'open',
               type: 'button',
@@ -628,6 +692,8 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       ctx.effect(() => () => {
         if (pollTimer !== null) window.clearInterval(pollTimer)
         pollTimer = null
+        if (identityTimer !== null) clearTimeout(identityTimer)
+        identityTimer = null
       }, 'ssh-workspace: poll cleanup')
 
       ctx.logger?.info?.('ssh-workspace: client surface registered')

@@ -181,6 +181,9 @@ check(calls.some((call) => call.endpoint === 'identityStatus'), 'opening the dia
 
 
 // ── identity interactions and validation ────────────────────────────────────────────────
+// The account-side plugin is asked about the current host 200 ms after the last keystroke (the
+// bundle's IDENTITY_DEBOUNCE_MS): assertions that read the effect of typing wait it out.
+const DEBOUNCE_SETTLE = 450
 const findNodes = (node, predicate, out = []) => {
   if (!node) return out
   if (Array.isArray(node)) { for (const child of node) findNodes(child, predicate, out); return out }
@@ -214,11 +217,11 @@ await element.props.onClick()
 let host = hostInput()
 check(host && typeof host.props.onChange === 'function', 'host input has a real change handler')
 host.props.onChange({ target: { value: 'alice@example.com' } })
-await new Promise((resolve) => setTimeout(resolve, 0))
+await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_SETTLE))
 equal(statusCalls.at(-1).host, 'alice@example.com', 'identity status uses composed host after host change')
 const port = byKey('port')
 port.props.onChange({ target: { value: '2222' } })
-await new Promise((resolve) => setTimeout(resolve, 0))
+await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_SETTLE))
 equal(statusCalls.at(-1).host, 'alice@example.com:2222', 'identity status includes independent port')
 const keyText = '-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n-----END OPENSSH PRIVATE KEY-----'
 await identityFile().props.onChange({ target: { files: [{ size: keyText.length, text: async () => keyText }] } })
@@ -250,12 +253,13 @@ equal(calls.length, invalidBefore, 'invalid port does not issue probe RPC')
 // No host permits default identity operations and omits host from the payload.
 host.props.onChange({ target: { value: '' } })
 port.props.onChange({ target: { value: '' } })
-await new Promise((resolve) => setTimeout(resolve, 0))
+await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_SETTLE))
 await identityFile().props.onChange({ target: { files: [{ size: 3, text: async () => 'key' }] } })
 await identityUploadButton().props.onClick()
 const noHostUpload = calls.findLast((call) => call.endpoint === 'identityUpload')
 check(noHostUpload && !Object.hasOwn(noHostUpload.payload, 'host'), 'default upload without host omits host')
-// Out-of-order status responses cannot overwrite the newest host.
+// Typing is debounced: one status request per burst, naming the newest host, and a response
+// computed for an older input can never overwrite a newer one.
 const pendingStatus = []
 fakeCtx.connection.rpc.call = async (channel, endpoint, payload) => {
   if (endpoint === 'identityStatus') return new Promise((resolve) => pendingStatus.push({ resolve, payload }))
@@ -263,12 +267,49 @@ fakeCtx.connection.rpc.call = async (channel, endpoint, payload) => {
 }
 host.props.onChange({ target: { value: 'first.example' } })
 host.props.onChange({ target: { value: 'second.example' } })
-check(pendingStatus.length >= 2, 'host changes issue independent status requests')
-pendingStatus.at(-1).resolve({ ok: true, value: { default: { configured: false }, host: { configured: true, fingerprint: 'NEW' }, effective: 'host' } })
+equal(pendingStatus.length, 0, 'typing does not issue a request per keystroke')
+await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_SETTLE))
+equal(pendingStatus.length, 1, 'one status request per burst of typing')
+equal(pendingStatus[0].payload.host, 'second.example', 'the request names the newest host')
+pendingStatus[0].resolve({ ok: true, value: { default: { configured: false }, host: { configured: true, fingerprint: 'NEW' }, effective: 'host' } })
 await new Promise((resolve) => setTimeout(resolve, 0))
-pendingStatus[0].resolve({ ok: true, value: { default: { configured: true, fingerprint: 'OLD' }, host: { configured: false }, effective: 'default' } })
+check(JSON.stringify(renderDialog()).includes('NEW'), 'the answer is shown')
+host.props.onChange({ target: { value: 'third.example' } })
+await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_SETTLE))
+equal(pendingStatus.length, 2, 'a later edit issues its own request once the burst ends')
+pendingStatus[1].resolve({ ok: true, value: { default: { configured: true }, host: { configured: true, fingerprint: 'NEWEST' }, effective: 'host' } })
 await new Promise((resolve) => setTimeout(resolve, 0))
-check(JSON.stringify(renderDialog()).includes('NEW') && !JSON.stringify(renderDialog()).includes('OLD'), 'stale status response cannot overwrite newest host')
+pendingStatus[0].resolve({ ok: true, value: { default: { configured: true, fingerprint: 'STALE' }, host: { configured: false }, effective: 'default' } })
+await new Promise((resolve) => setTimeout(resolve, 0))
+check(JSON.stringify(renderDialog()).includes('NEWEST') && !JSON.stringify(renderDialog()).includes('STALE'), 'a stale status response cannot overwrite a newer one')
+
+// Typing must not throw away what is on screen. This is the jitter that was reported: every
+// keystroke used to clear the listing, the remote path and a chosen key file, and the dialog
+// re-centred itself as the content collapsed.
+const findInput = (placeholder) => findNodes(renderDialog(), (node) => node?.props?.placeholder === placeholder)[0]
+fakeCtx.connection.rpc.call = async (channel, endpoint, payload) => {
+  if (endpoint === 'list') return { ok: true, value: { path: payload.path, entries: [{ name: 'app', path: `${payload.path}/app`, hidden: false }], truncated: false } }
+  if (endpoint === 'identityStatus') return { ok: true, value: { default: { configured: false }, host: { configured: false }, effective: 'none' } }
+  return originalRpc(channel, endpoint, payload)
+}
+const remoteInput = () => findInput('/opt/app')
+const newNameInput = () => findInput('在当前列出的目录下新建')
+remoteInput().props.onChange({ target: { value: '/srv/app' } })
+await findNodes(renderDialog(), (node) => node?.props?.key === 'browse')[0].props.onClick()
+await new Promise((resolve) => setTimeout(resolve, 0))
+check(JSON.stringify(renderDialog()).includes('app/'), 'browsing lists the remote directory')
+await identityFile().props.onChange({ target: { files: [{ size: 3, text: async () => 'key' }] } })
+equal(identityUploadButton().props.disabled, false, 'a chosen key file is ready to upload')
+host.props.onChange({ target: { value: 'typed.example' } })
+await new Promise((resolve) => setTimeout(resolve, 0))
+check(JSON.stringify(renderDialog()).includes('app/'), 'typing a host keeps the listing on screen')
+equal(remoteInput().props.value, '/srv/app', 'typing a host keeps the remote path')
+equal(identityUploadButton().props.disabled, false, 'typing a host keeps the chosen key file')
+check(JSON.stringify(renderDialog()).includes('以下目录来自'), 'the kept listing says which host it came from')
+newNameInput().props.onChange({ target: { value: 'logs' } })
+host.props.onChange({ target: { value: 'typed.example:2222' } })
+await new Promise((resolve) => setTimeout(resolve, 0))
+equal(newNameInput().props.value, 'logs', 'typing a host keeps the new-directory name')
 
 // ── 「我的主机」: the account's own alias list ────────────────────────────────────────────
 // The list comes from the account-side plugin (the config file is the source of truth), so
@@ -365,6 +406,34 @@ byKey('entry-hostname').props.onChange({ target: { value: '10.0.0.8' } })
 await byKey('add').props.onClick()
 await new Promise((resolve) => setTimeout(resolve, 0))
 check(hostSerialized().includes('ssh/alias-exists'), 'a refusal from the account side is reported')
+
+// ── layout stability, and the poll that must not outlive the dialog ──────────────────────
+// Everything below is about what a person sees while using the dialog: nothing may re-centre,
+// re-wrap or re-height under the cursor, and a closed dialog must not keep talking to the host.
+const css = String(styles[0].textContent)
+check(/\.dshgw-ssh-backdrop \{[^}]*align-items: flex-start/.test(css),
+  'the dialog is anchored to the top, so content growth cannot re-centre it')
+check(/\.dshgw-ssh-dialog \{[^}]*scrollbar-gutter: stable/.test(css),
+  'the scrollbar gutter is reserved, so text does not re-wrap when it appears')
+check(/\.dshgw-ssh-status \{[^}]*min-height/.test(css), 'the identity status line reserves its height')
+check(String(findNodes(renderDialog(), (node) => node?.props?.key === 'status')[0].props.className).includes('dshgw-ssh-status'),
+  'the status line uses the height-reserving class')
+
+const intervals = []
+let clearedIntervals = 0
+sandboxWindow.setInterval = (fn, ms) => { intervals.push({ fn, ms }); return 7 }
+sandboxWindow.clearInterval = () => { clearedIntervals += 1; intervals.pop() }
+hostInput().props.onChange({ target: { value: 'poll.example' } })
+findInput('/opt/app').props.onChange({ target: { value: '/srv' } })
+await new Promise((resolve) => setTimeout(resolve, 0))
+await findNodes(renderDialog(), (node) => node?.props?.key === 'open' && node?.props?.className === 'primary')[0].props.onClick()
+await new Promise((resolve) => setTimeout(resolve, 0))
+equal(intervals.length, 1, 'a mount request starts the mount poll')
+await byKey('close').props.onClick()
+await new Promise((resolve) => setTimeout(resolve, 0))
+equal(intervals.length, 0, 'closing the dialog stops the mount poll')
+equal(clearedIntervals, 1, 'closing the dialog clears the interval handle')
+equal(renderDialog(), null, 'the dialog is closed')
 
 
 console.log(`ssh-workspace client: ${assertions} assertions passed`)
