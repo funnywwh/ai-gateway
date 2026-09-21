@@ -69,8 +69,8 @@ assert.match(actionButtons, /disabled: readonly,/, 'the Feishu and organization 
 
 assert.match(org, /function matchesPerson\(account, search\)/,
   'the person filter must be its own function: it matches two fields');
-assert.match(org, /if \(filtering\) \{[\s\S]*?box\.disabled = true;[\s\S]*?过滤时不能改成员/,
-  'a filtered list must not be editable as the node\'s membership');
+assert.match(org, /if \(filtering && !box\.checked\) \{[\s\S]*?box\.disabled = true;[\s\S]*?过滤时不能再加入成员/,
+  'a filtered list must not ADD members (it is not the whole membership), while un-ticking stays possible');
 assert.match(org, /const filtering = search\.trim\(\) !== '';/,
   'the filtering state is derived once per paint');
 
