@@ -93,8 +93,8 @@ deploy/dshgw/dsh-worker-bwrap@.service  静态 %i 模板（systemd-analyze verif
 1. `--tmpfs /home /root /tmp /var /srv /etc/dshgw`；
 2. 只读运行时：`/usr`、`/usr/lib→/lib`、`/usr/lib64→/lib64`、`/bin`、`/sbin`，外加 node 与 dsh release 的目录；
 3. `/etc` 只绑具名文件，外加**唯一一个目录** `alternatives`：`resolv.conf`、`hosts`、`nsswitch.conf`、
-   `passwd`、`group`、`localtime`、`ssl`、`ca-certificates`、`alternatives`。
-   最后一项不是锦上添花：发行版的 `/usr/bin/pager`、`awk`、`which`、`vi` 等全是
+   `passwd`、`group`、`localtime`、`ssl`、`ca-certificates`、`alternatives`、`bash.bashrc`。
+   `alternatives` 不是锦上添花：发行版的 `/usr/bin/pager`、`awk`、`which`、`vi` 等全是
    `-> /etc/alternatives/<name>` 的软链，少了它这些名字在一个"看起来完整"的 `/usr` 里全部悬空，
    而症状离病因很远——这台机器的 git 默认 pager 就是字面量 `pager`（alternatives 包装器名），
    于是交互终端里 `git log` 报 `error: cannot run pager: No such file or directory` +
@@ -106,6 +106,15 @@ deploy/dshgw/dsh-worker-bwrap@.service  静态 %i 模板（systemd-analyze verif
    都会落到被 `--tmpfs /home` 藏起来的宿主家目录上，租户里 `ssh <别名>` 会退化成对别名做 DNS 解析；
    视图只改「名字 → 家目录」一个字段，其余行原样；它落在租户自己的 DSH home 里，是**视图不是边界**
    （租户改写它只能改自己沙箱里的这份映射，挂载与权限都不读它）；
+   `bash.bashrc` 也是**每租户渲染的视图**（`Tenant.BashrcFile` = `<DshHome>/sandbox/bashrc`，0644，
+   由 tenancy 层用 `sandbox.Bashrc` 常量写出，profile 用 `--ro-bind` 严格绑定），理由与 passwd 视图同类：
+   `/etc` 是白名单，宿主的 bash 启动文件不在里面，租户的 `HOME`（workspace）也没有 `~/.bashrc`，于是交互
+   shell 起步时既没有别名、也没有 `LS_COLORS`，`PS1` 还是 bash 的裸默认值——终端彩色能力本身完好
+   （web-tty 给 `TERM=xterm-256color`、`COLORTERM=truecolor`，`tput colors`=256），`ls` 却只输出单色，
+   因为 `ls` 只在被要求时才上色，而这个视图里没有任何东西要求它。绑 `/etc/bash.bashrc` 这个路径是因为
+   发行版 bash 为交互 shell 先读它、再读 `~/.bashrc`（`strace -f -e trace=openat bash -ic true` 可见这次
+   open 与次序），于是一个文件覆盖沙箱里所有 `bash -i`（含面板的 shell），而租户自己写 `~/.bashrc` 依然
+   全量覆盖默认值；非交互 shell 不读它，agent 的 bash 工具（`TERM=dumb`/`NO_COLOR=1`）行为因此不变；
 4. 租户自己的可写根：仅 workspace 与 `.dsh` 的父目录；
    per-tenant 配置目录（`tenant.env`、`gateway.key`）**完全不挂载**——它由宿主侧 systemd 读取，
    挂进去只会把 `gateway.key` 交给共享账号，而 user 模式下租户读不到它；
@@ -170,6 +179,9 @@ staging 用例用**真实 bubblewrap**跑真实 profile argv：
   自己的 workspace PRESENT、其他租户状态与 gateway state MISSING、`/home`/`/root`/`/srv`/`/var` 条目数为 0、
   `/etc` 仅白名单（`/etc/systemd` 不可见、`/etc/dshgw` 为空挂载点）、`passwd`/`resolv.conf` 可读、
   `sh` 存在（`/bin` 绑定生效）、workspace 可写且可建子目录、`/usr` 与 `/etc/passwd` 只读、
+  `/etc/bash.bashrc` 可读且**沙箱里真的 `bash -i` 起来时**它已被 source（`shell-ls-alias` 拿到
+  `ls --color=auto`、`shell-ls-colors` 拿到 `LS_COLORS`）——这是"终端有色"的持久回归证据，
+  宿主没有 bash 时该探针报 `no-bash` 而不是假装通过、
   宿主 sysctl=1 时嵌套 bwrap 必须 `DENIED`。
 - `TestStagingRealDshWebServesInsideSandbox`：真实 node + 真实 dsh release 在 profile 内启动
   `dsh web`，断言 dsh 打印 loopback 启动 URL，且未认证 `GET /api` 返回 **401**（gateway 的 readiness 契约）。

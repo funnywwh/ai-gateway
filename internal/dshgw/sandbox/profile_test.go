@@ -127,6 +127,10 @@ func TestProfileHidesEveryHostTreeExceptRuntimeAndTenantRoots(t *testing.T) {
 		// The alternatives database: /usr/bin/{pager,awk,which,…} are symlinks
 		// into it, so binding it is what keeps those names resolvable.
 		"/etc/alternatives": true,
+		// The interactive-shell startup file: /etc does not carry the host's
+		// bash startup files, so without this one a terminal inside the sandbox
+		// has no aliases, no LS_COLORS and a plain prompt — no colour at all.
+		"/etc/bash.bashrc": true,
 	}
 	for _, m := range mounts {
 		if strings.HasPrefix(m.dst, "/etc/") && m.dst != "/etc/dshgw" && !allowedEtc[m.dst] {
@@ -223,6 +227,44 @@ func TestProfileBindsSharedReleaseOnce(t *testing.T) {
 	}
 }
 
+func TestProfileBindsTheShellStartupFileOnlyWhenItIsRendered(t *testing.T) {
+	f := newProfileFixture(t)
+	// No view, no bind: unlike /etc/passwd there is no host file to fall back to, so the
+	// sandbox simply has no /etc/bash.bashrc — and the profile must not invent one.
+	argv, err := Profile(f.rt, f.alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(argv, " "), "/etc/bash.bashrc") {
+		t.Fatalf("profile binds a shell startup file nobody rendered:\n%s", strings.Join(argv, " "))
+	}
+
+	view := filepath.Join(f.root, "state/sandbox/alice/bashrc")
+	mustMkdir(t, filepath.Dir(view), 0o700)
+	mustWrite(t, view, Bashrc, 0o644)
+	f.alice.BashrcFile = view
+	argv, err = Profile(f.rt, f.alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mounts, _, _ := parseMounts(t, argv)
+	var found *mount
+	for i := range mounts {
+		if mounts[i].dst == "/etc/bash.bashrc" {
+			found = &mounts[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("no /etc/bash.bashrc mount in %v", argv)
+	}
+	// Strict --ro-bind, not --ro-bind-try: the gateway wrote this file moments before the
+	// profile was built, so a skipped bind is a real fault — and it is the colourless
+	// terminal this mount exists to remove.
+	if found.flag != "--ro-bind" || found.src != view {
+		t.Fatalf("/etc/bash.bashrc mounted as %s %s, want --ro-bind %s", found.flag, found.src, view)
+	}
+}
+
 func TestProfileAppendsTenantEnvironmentWithoutShellQuoting(t *testing.T) {
 	f := newProfileFixture(t)
 	f.alice.Environment = []string{"web", "--port", "32100", "--no-open"}
@@ -255,6 +297,8 @@ func TestProfileRejectsUnsafeInputs(t *testing.T) {
 		{"unclean node bin", func(rt *Runtime, _ *Tenant) { rt.NodeBin = rt.NodeBin + "/../bin/node" }},
 		{"newline in environment", func(_ *Runtime, tn *Tenant) { tn.Environment = []string{"x\ny"} }},
 		{"invalid worker port", func(_ *Runtime, tn *Tenant) { tn.WorkerPort = 70000 }},
+		{"relative bashrc view", func(_ *Runtime, tn *Tenant) { tn.BashrcFile = "sandbox/bashrc" }},
+		{"unclean bashrc view", func(_ *Runtime, tn *Tenant) { tn.BashrcFile = tn.DshHome + "/sandbox/../bashrc" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

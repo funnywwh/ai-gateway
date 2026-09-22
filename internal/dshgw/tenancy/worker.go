@@ -101,8 +101,17 @@ func (m *Manager) SandboxProfile(t registry.Tenant) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The interactive-shell startup file is bound by the profile for the same reason the passwd
+	// view is: bubblewrap needs the bind source on disk before it execs, and writing it here is
+	// what heals a copy the tenant deleted. Without it a terminal in the sandbox has no aliases,
+	// no LS_COLORS and bash's bare default prompt — no colour anywhere.
+	bashrc, err := m.prepareTenantBashrc(t)
+	if err != nil {
+		return nil, err
+	}
 	tenant := m.sandboxTenant(t)
 	tenant.PasswdFile = passwd
+	tenant.BashrcFile = bashrc
 	return sandbox.Profile(m.sandboxRuntime(), tenant)
 }
 

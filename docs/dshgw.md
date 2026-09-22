@@ -352,6 +352,14 @@ feishu:
 视图只改「名字 → 家目录」这一个字段，其余条目与宿主一致；它落在租户自己的 DSH home 里，租户改写它也只会改变自己沙箱里的这一份
 视图，profile 不会拿它当挂载或权限的依据（同 `settings.yaml`：视图，不是边界）。
 
+`/etc/bash.bashrc` 同样是**每租户渲染的视图**（`<DshHome>/sandbox/bashrc`，0644，每次渲染 profile 时重写）：
+`/etc` 是白名单，宿主的 bash 启动文件不在其中，租户的 `HOME`（workspace）也没有 `~/.bashrc`，于是交互 shell 起步时
+既没有别名、也没有 `LS_COLORS`，`PS1` 还是 bash 的裸默认值 —— 终端彩色能力完好（web-tty 给 `TERM=xterm-256color`、
+`COLORTERM=truecolor`），但 `ls` 只输出单色，因为 `ls` 只在被要求时才上色。绑在 `/etc/bash.bashrc` 是因为发行版 bash
+为交互 shell 先读它、再读 `~/.bashrc`（`strace -f -e trace=openat bash -ic true` 可见这次 open 与次序），
+所以一个文件覆盖沙箱里所有 `bash -i`（含侧栏「终端」面板的 shell），而租户自己写 `~/.bashrc` 依然全量覆盖默认值；
+非交互 shell（含 agent 的 bash 工具，它刻意注入 `TERM=dumb`/`NO_COLOR=1`）不读它，行为不变。
+
 **单域名路径模式（可选）**：配置 `public_base_url` 后，租户的 URL 变成
 `https://<域名>/t/<租户>/`，会话 cookie 的 Path 随之收窄到该租户路径 —— 多个租户共享一个 origin 时，
 路径是区分两个租户会话的唯一依据（否则浏览器会把 A 的 cookie 发给 B 的路径）。Origin 栅栏以基础 origin
@@ -582,7 +590,7 @@ EBUSY 就惰性 `-u -z`，仍不行就杀掉 sshfs 守护进程 / abort 这条 F
 
 | 面板 | 插件目录 | 做什么 | 边界 |
 |---|---|---|---|
-| 「终端」（侧栏底） | `web-tty/` | 浮动终端，每个标签一个真 PTY（`node-pty` 从 dsh 发行版解析），xterm.js 渲染；面板可拖动/缩放/最大化，`Ctrl+反引号` 开关 | PTY 起在该账号**自己的 bwrap 沙箱**里，能力等同于它的 bash 工具；`cwd`/`cwdRoot` 都钉在它的 workspace |
+| 「终端」（侧栏底） | `web-tty/` | 浮动终端，每个标签一个真 PTY（`node-pty` 从 dsh 发行版解析），xterm.js 渲染；面板可拖动/缩放/最大化，`Ctrl+反引号` 开关 | PTY 起在该账号**自己的 bwrap 沙箱**里，能力等同于它的 bash 工具；`cwd`/`cwdRoot` 都钉在它的 workspace；交互 shell 的默认别名、`LS_COLORS` 与彩色提示符来自每租户渲染的 `/etc/bash.bashrc` 视图（§7） |
 | 「文件」（侧栏底） | `workspace-files/` | 浏览/预览/编辑/上传/下载/改名/删除 | 一切路径夹紧在 `root`（该账号 workspace）内，符号链接越界即拒 |
 | 「变更」（会话主区 View） | `git-diff/` | 左列改动文件、右侧两栏 diff | 只读：没有 stage/checkout/discard，git 一律 `--no-optional-locks`，`.git/index` 字节不变 |
 

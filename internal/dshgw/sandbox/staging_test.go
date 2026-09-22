@@ -97,6 +97,13 @@ func newStagingLayout(t *testing.T, bwrap string) stagingLayout {
 	passwdView := filepath.Join(root, "state/sandbox/alice/passwd")
 	mustWrite(t, passwdView, string(view), 0o644)
 
+	// The interactive-shell startup file a real worker gets, written from the production
+	// constant for the same reason: the profile binds it at /etc/bash.bashrc through a strict
+	// --ro-bind, so the staging run measures the file the worker really carries. It is what
+	// makes `ls` and the prompt coloured inside the sandbox.
+	bashrcView := filepath.Join(root, "state/sandbox/alice/bashrc")
+	mustWrite(t, bashrcView, Bashrc, 0o644)
+
 	probeNode := filepath.Join(root, "dsh/node/bin/node")
 	mustWrite(t, probeNode, stagingProbeScript(bwrap, bobState, gateway, aliceWS, aliceCfg), 0o755)
 
@@ -123,6 +130,7 @@ func newStagingLayout(t *testing.T, bwrap string) stagingLayout {
 			WorkerPort:  32100,
 			Environment: []string{"web", "--port", "32100", "--no-open"},
 			PasswdFile:  passwdView,
+			BashrcFile:  bashrcView,
 		},
 	}
 }
@@ -146,6 +154,14 @@ report etc-entries "$(ls -A /etc 2>/dev/null | tr '\n' ',')"
 report etc-dshgw-entries "$(entries /etc/dshgw)"
 if [ -d /etc/alternatives ]; then report etc-alternatives PRESENT; else report etc-alternatives MISSING; fi
 if [ -x /usr/bin/pager ]; then report pager-resolves yes; else report pager-resolves no; fi
+if [ -r /etc/bash.bashrc ]; then report bashrc-readable yes; else report bashrc-readable no; fi
+if command -v bash >/dev/null 2>&1; then
+  if bash -ic 'alias ls' 2>/dev/null | grep -q -- '--color=auto'; then report shell-ls-alias PRESENT; else report shell-ls-alias MISSING; fi
+  if bash -ic 'declare -p LS_COLORS' 2>/dev/null | grep -q LS_COLORS; then report shell-ls-colors PRESENT; else report shell-ls-colors MISSING; fi
+else
+  report shell-ls-alias no-bash
+  report shell-ls-colors no-bash
+fi
 if [ -e /etc/systemd ]; then report etc-systemd VISIBLE; else report etc-systemd MISSING; fi
 if [ -r /etc/passwd ]; then report passwd readable; else report passwd missing; fi
 home=$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f6)
@@ -217,6 +233,11 @@ func TestStagingSandboxHidesHostAndOtherTenants(t *testing.T) {
 	// it, and a dangling pager is what made an interactive `git log` fail with
 	// "cannot run pager: No such file or directory".
 	allowed["alternatives"] = true
+	// The interactive-shell startup file the gateway renders per tenant is bound
+	// at /etc/bash.bashrc: without it an interactive shell in the sandbox has no
+	// aliases, no LS_COLORS and bash's bare default prompt, so a terminal with
+	// full colour support shows a monochrome `ls` and prompt.
+	allowed["bash.bashrc"] = true
 	for _, entry := range strings.Split(strings.TrimSuffix(facts["etc-entries"], ","), ",") {
 		if entry != "" && !allowed[entry] {
 			t.Errorf("/etc exposes %q, which is not part of the runtime whitelist", entry)
@@ -246,6 +267,21 @@ func TestStagingSandboxHidesHostAndOtherTenants(t *testing.T) {
 				t.Errorf("pager-resolves = %q, want yes: /usr/bin/pager resolves on the host but dangles inside the sandbox", got)
 			}
 		}
+	}
+	// The interactive-shell startup file is bound, and a shell started inside the sandbox really
+	// picks it up: this is the colour the whole file exists for. `bash -i` is what the web
+	// terminal's panel runs, and it is the only thing that reads /etc/bash.bashrc — a shell the
+	// sandbox's /etc whitelist would otherwise leave with no alias for `ls` and no LS_COLORS.
+	// A host without bash reports no-bash, which is a property of the host; anything else but
+	// PRESENT means the bound file was not sourced, which is the regression this pins.
+	if got := facts["bashrc-readable"]; got != "yes" {
+		t.Errorf("bashrc-readable = %q, want yes: the profile binds a rendered startup file at /etc/bash.bashrc", got)
+	}
+	if got := facts["shell-ls-alias"]; got != "PRESENT" && got != "no-bash" {
+		t.Errorf("shell-ls-alias = %q, want PRESENT: an interactive shell in the sandbox did not get `ls --color=auto`", got)
+	}
+	if got := facts["shell-ls-colors"]; got != "PRESENT" && got != "no-bash" {
+		t.Errorf("shell-ls-colors = %q, want PRESENT: an interactive shell in the sandbox did not get LS_COLORS", got)
 	}
 	// A world-writable /var would mean the gateway's own state directory could
 	// reappear; it is a tmpfs like the other hidden trees.

@@ -28,6 +28,10 @@
 //     (RenderPasswd) when the gateway renders one: inside the sandbox HOME is
 //     the workspace, so the host's own passwd entry would send every getpwuid
 //     consumer — OpenSSH first of all — to a home directory the profile hides.
+//     /etc/bash.bashrc is bound as a view too (Bashrc), for the same class of
+//     reason: the shell's own startup files are not in this whitelist, so
+//     without it `bash -i` has no aliases, no LS_COLORS and no coloured prompt,
+//     and a terminal with full colour support shows a monochrome `ls`.
 //
 // This package is deliberately free of filesystem and process side effects: it
 // only computes argv, so the profile can be unit-tested and printed for review.
@@ -105,6 +109,10 @@ type Tenant struct {
 	// workspace (see RenderPasswd). Empty binds the host's /etc/passwd unchanged, which is
 	// what every caller that does not render a view gets.
 	PasswdFile string
+	// BashrcFile is the host path of the generated interactive-shell startup file bound at
+	// /etc/bash.bashrc (see Bashrc). Empty binds nothing at all — the host has no equivalent
+	// to fall back to — which is the sandbox's shape without it: a colourless terminal.
+	BashrcFile string
 }
 
 // HostShare is one operator-declared host directory as it appears inside one tenant's sandbox.
@@ -201,6 +209,18 @@ func Profile(rt Runtime, t Tenant) ([]string, error) {
 		// hosts without it (non-Debian layouts) working unchanged.
 		"--ro-bind-try", "/etc/alternatives", "/etc/alternatives",
 	)
+
+	// The interactive-shell startup file, strictly bound when the gateway rendered one. It is
+	// the shell's counterpart of the passwd view above: /etc is a whitelist, so without it an
+	// interactive shell inside the sandbox has no aliases, no LS_COLORS and bash's bare default
+	// prompt — a terminal that renders colour perfectly (web-tty hands it TERM=xterm-256color
+	// and COLORTERM=truecolor) still shows a monochrome `ls`, because `ls` only colours when
+	// something asks it to. Strict rather than -try: the gateway wrote this file moments before
+	// the argv is built, so its absence is a real fault, and a skipped bind would leave the
+	// tenant with exactly the colourless shell this is here to remove.
+	if t.BashrcFile != "" {
+		argv = append(argv, "--ro-bind", t.BashrcFile, "/etc/bash.bashrc")
+	}
 
 	// The directory-picker plugin, read-only. Its whole directory is bound because
 	// the import resolves the file by absolute path and may bring siblings with it.
@@ -355,6 +375,11 @@ func resolve(rt Runtime, t Tenant) (nodeBin, binJS, nodeRoot, dshRoot, workspace
 	}
 	if t.PasswdFile != "" {
 		if err = safeAbsolute(t.PasswdFile, "passwd_file"); err != nil {
+			return "", "", "", "", "", "", err
+		}
+	}
+	if t.BashrcFile != "" {
+		if err = safeAbsolute(t.BashrcFile, "bashrc_file"); err != nil {
 			return "", "", "", "", "", "", err
 		}
 	}

@@ -936,3 +936,27 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 - [ ] 把 Makefile 的 `vet` / `test` / `test-race` 改成显式包模式
       （`./cmd/... ./internal/... ./pkg/... ./examples/...`），并在注释里写明为什么不用 `./...`；
       顶层新增含 Go 包的目录时要同步这个列表（当前只有这四个）
+
+## 缺陷：租户终端无色（`/etc` 白名单缺交互 shell 启动文件，2026-09-22 修）
+
+现象：侧栏「终端」面板里 `ls` 输出单色，提示符也是 bash 的裸默认值（`bash-5.3$`）。同一台机器上
+`git log`/`vim` 有颜色（它们的颜色不依赖 shell 配置），所以"终端不支持彩色"是错觉。
+
+根因：租户沙箱的 `/etc` 是白名单（bwrap 从空 tmpfs 根起），宿主的 `/etc/bash.bashrc`、`/etc/profile`、
+`/etc/DIR_COLORS` 都不在其中，而租户的 `HOME`（workspace）也没有 `~/.bashrc` —— 交互 shell 起步时既没有
+`alias ls='ls --color=auto'`，也没有 `LS_COLORS`。终端本身彩色能力完好：`TERM=xterm-256color`、
+`COLORTERM=truecolor`、`tput colors`=256，缺的只是"谁去要求程序上色"。证据：`plugin-state/web-tty.trace.jsonl`
+里敲 `ls` 那次 `read` 是 194 B，而真 PTY 实测无色 ≈207 B、有色 ≈330 B。
+
+已做（本机）：
+
+- [x] profile 新增 `Tenant.BashrcFile`：非空时 `--ro-bind … /etc/bash.bashrc`（严格绑定，缺文件即拒启）
+- [x] tenancy 每租户渲染 `<DshHome>/sandbox/bashrc`（0644，每次渲染 profile 时重写），内容是 `sandbox.Bashrc` 常量
+- [x] 单测：sandbox 的内容不变量 / `/etc` 白名单 / 绑定与不绑定；tenancy 的绑定与「每次重渲染」
+- [x] staging 探针新增 `bashrc-readable` / `shell-ls-alias` / `shell-ls-colors`（真实 bwrap 里用 `bash -ic` 验）；
+      本机嵌套 userns 被禁 → 明确 SKIP，需在允许嵌套的宿主上跑 `make dshgw-sandbox-test`
+- [x] 文档：`docs/design/m57-dshgw-strict-isolation.md` §4.1 / §6.1、`docs/dshgw.md` §7 与「终端」插件行
+- [ ] **待宿主执行**（沙箱内换不了二进制、也重启不了 worker）：`make build && make dshgw-build` 后按部署
+      脚本换入 `bin/aigw`/`bin/dshgw` 并重启 aigw（连带重启租户 worker，会结束当时的会话与已开终端）；
+      随后 `dshgw sandbox-exec --print <tenant> | grep bash.bashrc` 应有该绑定，且在「终端」里 `ls` 有色、
+      提示符是绿 `user@host` + 蓝 `cwd`（回归：agent bash 工具里 `ls` 仍无色，因为非交互 shell 不读该文件）
