@@ -99,8 +99,9 @@ func TestLoginURLWithoutPrefixPrintsPortal(t *testing.T) {
 	configPath := filepath.Join(root, "config.yaml")
 	state := filepath.Join(root, "state")
 	// deploy.plugin_path has no default (M63), so a fixture that only needs a portal URL
-	// picks the picker that requires no plugin file.
-	if err := os.WriteFile(configPath, []byte("public_host: portal.example.test\ndirectory_picker: browse\nstate_dir: "+state+"\n"), 0o600); err != nil {
+	// picks the picker that requires no plugin file — and switches off the tenant-side plugins,
+	// which are on by default and ship beside that path (M75).
+	if err := os.WriteFile(configPath, []byte("public_host: portal.example.test\ndirectory_picker: browse\nstate_dir: "+state+"\n"+tenantPluginsOff), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var out, stderr bytes.Buffer
@@ -116,7 +117,7 @@ func TestTenantListJSONIncludesReadOnlyMetadata(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.yaml")
 	state := filepath.Join(root, "state")
-	if err := os.WriteFile(configPath, []byte("public_host: portal.example.test\ndirectory_picker: browse\nstate_dir: "+state+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("public_host: portal.example.test\ndirectory_picker: browse\nstate_dir: "+state+"\n"+tenantPluginsOff), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	created := time.Date(2026, 2, 3, 4, 5, 6, 123456789, time.FixedZone("CST", 8*60*60))

@@ -7,20 +7,23 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/winger/ai-gateway/internal/domain"
 )
 
-const orgNodeCols = "id, parent_id, name, note, tags_json, sort_order, created_at, updated_at"
+const orgNodeCols = "id, parent_id, name, note, tags_json, sort_order, created_at, updated_at, feishu_department_id, feishu_synced_at"
 
 func scanOrgNode(row rowScanner) (*domain.OrgNode, error) {
 	var (
 		n                    domain.OrgNode
 		parentID             sql.NullInt64
 		createdAt, updatedAt int64
+		feishuSyncedAt       sql.NullInt64
 	)
-	if err := row.Scan(&n.ID, &parentID, &n.Name, &n.Note, &n.TagsJSON, &n.SortOrder, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&n.ID, &parentID, &n.Name, &n.Note, &n.TagsJSON, &n.SortOrder, &createdAt, &updatedAt,
+		&n.FeishuDepartmentID, &feishuSyncedAt); err != nil {
 		return nil, err
 	}
 	if parentID.Valid {
@@ -29,6 +32,10 @@ func scanOrgNode(row rowScanner) (*domain.OrgNode, error) {
 	}
 	n.CreatedAt = timeFromUnix(createdAt)
 	n.UpdatedAt = timeFromUnix(updatedAt)
+	if feishuSyncedAt.Valid {
+		syncedAt := timeFromUnix(feishuSyncedAt.Int64)
+		n.FeishuSyncedAt = &syncedAt
+	}
 	return &n, nil
 }
 
@@ -92,9 +99,11 @@ func (db *DB) CreateOrgNode(ctx context.Context, n *domain.OrgNode) (int64, erro
 	n.UpdatedAt = now
 
 	res, err := db.write.ExecContext(ctx, `
-INSERT INTO org_nodes(parent_id, name, note, tags_json, sort_order, created_at, updated_at)
-VALUES(?,?,?,?,?,?,?)`,
-		int64PtrNull(n.ParentID), n.Name, n.Note, n.TagsJSON, n.SortOrder, unix(n.CreatedAt), unix(n.UpdatedAt))
+INSERT INTO org_nodes(parent_id, name, note, tags_json, sort_order, created_at, updated_at,
+  feishu_department_id, feishu_synced_at)
+VALUES(?,?,?,?,?,?,?,?,?)`,
+		int64PtrNull(n.ParentID), n.Name, n.Note, n.TagsJSON, n.SortOrder, unix(n.CreatedAt), unix(n.UpdatedAt),
+		n.FeishuDepartmentID, unixPtr(n.FeishuSyncedAt))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return 0, domain.ErrConflict(siblingNameConflict(n))
@@ -353,6 +362,61 @@ func (db *DB) SetAccountOrgNodes(ctx context.Context, accountID int64, nodeIDs [
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: commit account org write: %w", err)
+	}
+	return nil
+}
+
+// AddAccountOrgNodes attaches an account to nodes additively: memberships the account
+// already holds stay, the named ones are added, duplicates are no-ops.
+//
+// The directory sync (M70) needs exactly this — "this person also belongs to these
+// departments" — and must not keep a second copy of the account's memberships to do a
+// read-modify-write, which is where two consoles could lose an update.
+func (db *DB) AddAccountOrgNodes(ctx context.Context, accountID int64, nodeIDs []int64) error {
+	if _, err := db.GetAccount(ctx, accountID); err != nil {
+		return err
+	}
+	unique, err := db.checkOrgNodesExist(ctx, nodeIDs)
+	if err != nil {
+		return err
+	}
+	now := unix(time.Now())
+	for _, nodeID := range unique {
+		if _, err := db.write.ExecContext(ctx,
+			"INSERT OR IGNORE INTO org_node_accounts(node_id, account_id, created_at) VALUES(?,?,?)",
+			nodeID, accountID, now); err != nil {
+			return fmt.Errorf("store: add account %d to org node %d: %w", accountID, nodeID, err)
+		}
+	}
+	return nil
+}
+
+// SetOrgNodeFeishuDepartment writes (or clears, with an empty id) the node's Feishu
+// department link. Like the account binding it is a single-column UPDATE: UpdateOrgNode
+// deliberately does not list the column, so a console edit of name/parent/tags can never
+// clear the sync relationship.
+func (db *DB) SetOrgNodeFeishuDepartment(ctx context.Context, nodeID int64, departmentID string) error {
+	departmentID = strings.TrimSpace(departmentID)
+	var syncedAt any
+	if departmentID != "" {
+		syncedAt = unix(time.Now())
+	}
+	result, err := db.write.ExecContext(ctx,
+		"UPDATE org_nodes SET feishu_department_id = ?, feishu_synced_at = ? WHERE id = ?",
+		departmentID, syncedAt, nodeID)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return domain.ErrConflict(fmt.Sprintf(
+				"another org node is already linked to Feishu department %s", departmentID))
+		}
+		return fmt.Errorf("store: link org node %d to Feishu: %w", nodeID, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: link org node %d to Feishu: %w", nodeID, err)
+	}
+	if affected == 0 {
+		return domain.ErrNotFound("org node " + strconv.FormatInt(nodeID, 10))
 	}
 	return nil
 }

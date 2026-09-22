@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/runtime"
@@ -20,6 +21,19 @@ type AccountAdmin interface {
 	GetAccountByName(ctx context.Context, name string) (*domain.Account, error)
 	UpsertAccount(ctx context.Context, a *domain.Account) (int64, error)
 	SetAccountStatus(ctx context.Context, id int64, status string) error
+	// BindAccountFeishu / UnbindAccountFeishu / FindAccountByFeishuOpenID are the account-level
+	// Feishu identity: a directory-sync mapping in M70, and the DSH portal login identity from
+	// M72 on. The unique index over the open id makes "one Feishu person, one account" a
+	// database invariant, and the write is column-scoped so an ordinary account edit cannot
+	// clear an identity.
+	BindAccountFeishu(ctx context.Context, id int64, binding domain.FeishuBinding) error
+	UnbindAccountFeishu(ctx context.Context, id int64) (bool, error)
+	FindAccountByFeishuOpenID(ctx context.Context, openID string) (*domain.Account, error)
+	// SetAccountDSHDisabledAt records (nil clears) the moment an administrator explicitly
+	// turned DSH off for this account (M72). It is a separate statement because UpsertAccount
+	// must not be able to overwrite the mark: dshgw.auto_enable reads it to decide whether an
+	// account that was never enabled is nevertheless entitled.
+	SetAccountDSHDisabledAt(ctx context.Context, id int64, at *time.Time) error
 }
 
 // ProviderAdmin manages upstream provider instances and their model mappings.
@@ -75,6 +89,12 @@ type OrgAdmin interface {
 	ListOrgNodeAccountIDs(ctx context.Context, nodeID int64) ([]int64, error)
 	SetOrgNodeMembers(ctx context.Context, nodeID int64, accountIDs []int64) error
 	SetAccountOrgNodes(ctx context.Context, accountID int64, nodeIDs []int64) error
+	// AddAccountOrgNodes attaches an account to nodes additively (M70): the sync knows the
+	// departments a person belongs to and must not replace the memberships a console set.
+	AddAccountOrgNodes(ctx context.Context, accountID int64, nodeIDs []int64) error
+	// SetOrgNodeFeishuDepartment stamps (or clears, with an empty id) the node's Feishu
+	// department link, so later syncs recognize the node by id instead of by name.
+	SetOrgNodeFeishuDepartment(ctx context.Context, nodeID int64, departmentID string) error
 }
 
 // HookAdmin manages outbound event sinks.

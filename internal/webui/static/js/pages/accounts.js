@@ -1,6 +1,8 @@
 import { api } from '../api.js';
-import { el, card, pagedTable, modal, toast, statusBadge, confirmDialog } from '../ui.js';
+import { el, card, pagedTable, modal, toast, statusBadge, confirmDialog, formatTime } from '../ui.js';
 import { initCurrency, money, ledgerCurrency } from '../money.js';
+// 账号的创建/编辑（含所属组织勾选树）与组织页共用一份实现，见 account_actions.js。
+import { createAccount, editAccount } from './account_actions.js';
 
 export async function render({ page, actions, session }) {
   const readonly = session.role !== 'admin';
@@ -34,6 +36,8 @@ export async function render({ page, actions, session }) {
       { key: 'billing_mode', label: '计费模式' },
       { key: 'status', label: '状态', render: (row) => statusBadge(row.status) },
       { key: 'dsh_enabled', label: 'DSH', render: (row) => dshCell(row) },
+      { key: 'feishu', label: '飞书', render: (row) => feishuCell(row) },
+      { key: 'key_count', label: 'Key', render: (row) => keyCountCell(row) },
       { key: 'org_nodes', label: '所属组织', render: (row) => orgCell(row) },
       { key: 'tags', label: '标签', render: (row) => (row.tags || []).join(', ') || '—' },
       { key: 'balance_micros', label: '余额', render: (row) => money(row.balance_micros) },
@@ -53,7 +57,8 @@ export async function render({ page, actions, session }) {
   page.append(
     filterBox,
     card('账户', view.node, [
-      el('span', { class: 'muted', text: '余额只能通过账本变动；标签会被账号下所有 API Key 继承，组织节点的标签同样被整棵子树继承' })]));
+      el('span', { class: 'muted', text: '余额只能通过账本变动；标签会被账号下所有 API Key 继承，组织节点的标签同样被整棵子树继承' }),
+      el('span', { class: 'muted', text: '逐人操作（Key 列表、绑定飞书、启用/停用 DSH）在组织架构页展开账号即可；本页是跨组织的总览' })]));
 
   function applyOrgFilter() {
     query.org_node_id = orgFilter.value;
@@ -84,35 +89,57 @@ export async function render({ page, actions, session }) {
   }
 
   create.addEventListener('click', async () => {
-    const result = await modal({
-      title: '新建账户', submitLabel: '创建',
-      fields: [
-        { name: 'name', label: '名称', required: true, hint: '支持邮箱、中文和其他 Unicode 字符；去除首尾空白后最多 64 个字符' },
-        { name: 'billing_mode', label: '计费模式', type: 'select', options: ['prepaid', 'postpaid'] },
-        { name: 'credit_limit_micros', label: '授信上限（微' + ledgerCurrency() + '）', type: 'number' },
-        { name: 'low_balance_threshold_micros', label: '低额告警阈值（微' + ledgerCurrency() + '）', type: 'number' },
-        { name: 'tags', label: '账号标签（逗号分隔）', hint: '所有 API Key 自动继承；留空表示不绑定标签' },
-        { name: 'org_node_ids', label: '组织节点 id（逗号分隔）', hint: '账号可同时属于多个节点；节点上的标签会被该账号下所有 Key 继承' },
-        { name: 'note', label: '备注' },
-      ],
-      onSubmit: (values) => api.post('/accounts', {
-        ...values,
-        tags: splitTags(values.tags),
-        org_node_ids: splitIDs(values.org_node_ids),
-      }),
-    });
-    if (result) { toast('账户已创建', 'ok'); await view.refresh(); }
+    const created = await createAccount({ title: '新建账户', submitLabel: '创建' });
+    if (!created) return;
+    toast('账户已创建', 'ok');
+    await view.refresh();
   });
 
   await Promise.all([loadOrgOptions(), view.refresh()]);
 }
 
-// dshCell renders the account's dsh gateway opt-in (M52). The flag lives on the account row;
-// the toggle button in the row actions flips it via POST /accounts/{id}/dsh.
+// dshCell renders the account's dsh gateway opt-in (M52) with the distinction M72 introduced.
+// There are three states an operator has to be able to tell apart, and the row carries all three:
+//
+//   * 已启用          — dsh_enabled, a tenant exists;
+//   * 已停用（管理员） — an administrator pressed 停用; dshgw.auto_enable does NOT undo it;
+//   * 未启用          — never enabled, which is the state auto_enable turns into "usable at
+//                       first login" (the server decides; this page only reports).
 function dshCell(row) {
   if (row.dsh_enabled) return el('span', { class: 'badge', text: '已启用 · ' + (row.dsh_tenant || '?') });
-  if (row.dsh_tenant) return el('span', { class: 'muted', text: '已停用 · ' + row.dsh_tenant });
-  return el('span', { class: 'muted', text: '未启用' });
+  if (row.dsh_disabled_at) {
+    return el('span', {
+      class: 'badge warn', title: '管理员于 ' + formatTime(row.dsh_disabled_at) + ' 显式停用；自动启用不会撤销它',
+      text: '已停用（管理员）' + (row.dsh_tenant ? ' · ' + row.dsh_tenant : ''),
+    });
+  }
+  if (row.dsh_effective) {
+    return el('span', { class: 'badge', title: '本部署开启了自动启用：该账号首次登录时会自动创建租户', text: '未启用（登录即可用）' });
+  }
+  return el('span', { class: 'muted', text: row.dsh_tenant ? '未启用 · ' + row.dsh_tenant : '未启用' });
+}
+
+// feishuCell shows the account's Feishu identity (M72): it is the portal login identity, so an
+// operator looking at an account needs to see whether anybody can sign in as it.
+function feishuCell(row) {
+  const feishu = row.feishu || {};
+  if (!feishu.bound) return el('span', { class: 'muted', text: '未绑定' });
+  const title = [feishu.open_id, feishu.bound_by ? '由 ' + feishu.bound_by + ' 绑定' : '',
+    feishu.bound_at ? '绑定于 ' + formatTime(feishu.bound_at) : '',
+    '在组织架构页展开该账号可以改绑'].filter(Boolean).join(' · ');
+  return el('span', { class: 'badge', text: feishu.name || feishu.open_id || '已绑定', title });
+}
+
+// keyCountCell answers "how many keys can this account log in with" — the number that decides
+// whether the portal will ask the person to pick one (M72).
+function keyCountCell(row) {
+  const total = row.key_count || 0;
+  const active = row.active_key_count || 0;
+  if (!total) return el('span', { class: 'muted', text: '0' });
+  return el('span', {
+    class: 'badge', title: active > 1 ? '门户登录会先让这个人选一把 Key（只影响登录归属与审计）' : '',
+    text: active + ' / ' + total,
+  });
 }
 
 // toggleDSH drives the account-level dsh gateway lifecycle (M52-rev2).
@@ -123,22 +150,29 @@ function dshCell(row) {
 async function toggleDSH(row, reload) {
   const enabling = !row.dsh_enabled;
   if (enabling) {
-    const suggested = row.dsh_tenant || slugFromAccount(row.name);
+    // 已有映射优先，否则用服务端下发的规则名（M74）。规则（`dsh-<账号拼音>-<账号ID>`）只有服务端那一份
+    // 实现：页面预填它给出的值，而不是自己再拼一遍。
+    const suggested = row.dsh_tenant || row.dsh_tenant_suggested || '';
     const result = await modal({
       title: '启用 DSH — ' + row.name,
       submitLabel: '启用',
       fields: [
-        { name: 'tenant', label: 'dsh 租户名', value: suggested, required: true,
-          hint: '小写字母/数字/连字符；留空沿用既有映射。将自动创建租户与 worker，账号下所有 Key（含新建）都能登录该租户' },
+        { name: 'tenant', label: 'dsh 租户名', value: suggested,
+          hint: '小写字母/数字/连字符；留空则沿用既有映射，或按账号名自动生成（例：陈景峰 / 10 → ' +
+            'dsh-chenjingfeng-10）。将自动创建租户与 worker，账号下所有 Key（含新建）都能登录该租户；' +
+            '已存在的租户名不会被改动' },
       ],
-      onSubmit: (values) => api.post('/accounts/' + row.id + '/dsh', { enabled: true, tenant: values.tenant }),
+      onSubmit: (values) => api.post('/accounts/' + row.id + '/dsh', {
+        enabled: true, ...(values.tenant ? { tenant: values.tenant } : {}),
+      }),
     });
     if (result) { toast('已启用 DSH（租户 ' + (result.tenant || suggested) + '）', 'ok'); await reload(); }
     return;
   }
   const ok = await confirmDialog('停用 DSH',
     '停用账户 ' + row.name + ' 的 dsh？将停止其 worker 并吊销 worker 专用 Key；' +
-    '新登录被拒绝，既有会话按网关 dsh_enforce 档位失效。工作区与 dsh 数据保留，重新启用即恢复。');
+    '新登录被拒绝，既有会话按网关 dsh_enforce 档位失效。工作区与 dsh 数据保留，重新启用即恢复。\n' +
+    '这是「显式停用」：即使本部署开启了「所有激活账号默认可用 DSH」，也不会在下次登录时自动重新启用它。');
   if (!ok) return;
   try {
     await api.post('/accounts/' + row.id + '/dsh', { enabled: false });
@@ -149,13 +183,8 @@ async function toggleDSH(row, reload) {
   }
 }
 
-// slugFromAccount mirrors the server's candidate generator so the dialog suggests the
-// same name the server would pick; the server stays the authority on uniqueness.
-function slugFromAccount(name) {
-  let slug = 'dsh-' + String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  if (slug.length > 26) slug = slug.slice(0, 26).replace(/-+$/, '');
-  return /^[a-z][a-z0-9-]{0,25}[a-z]$|^[a-z]$/.test(slug) ? slug : 'dsh-tenant';
-}
+// The dialog's suggestion used to be computed here (slugFromAccount). Since M74 the server derives it
+// and ships it as dsh_tenant_suggested, so the rule has exactly one implementation.
 
 // orgCell renders the account's organizations as their label paths, so an operator reads
 // 总部/研发部 instead of a pair of ids.
@@ -166,42 +195,13 @@ function orgCell(row) {
 }
 
 async function edit(row, reload) {
-  const result = await modal({
-    title: '编辑账户 ' + row.name,
-    fields: [
-      { name: 'status', label: '状态', type: 'select', options: ['active', 'suspended', 'closed'], value: row.status },
-      { name: 'billing_mode', label: '计费模式', type: 'select', options: ['prepaid', 'postpaid'], value: row.billing_mode },
-      { name: 'credit_limit_micros', label: '授信上限（微' + ledgerCurrency() + '）', type: 'number', value: row.credit_limit_micros },
-      { name: 'low_balance_threshold_micros', label: '低额阈值（微美元）', type: 'number', value: row.low_balance_threshold_micros },
-      { name: 'overdraft_limit_micros', label: '在途透支上限（微' + ledgerCurrency() + '）', type: 'number', value: row.overdraft_limit_micros },
-      { name: 'tags', label: '账号标签（逗号分隔）', hint: '空输入会清空账号标签；所有 Key 会动态继承', value: (row.tags || []).join(', ') },
-      { name: 'org_node_ids', label: '组织节点 id（逗号分隔）',
-        hint: '整表替换：留空即移出全部组织，从节点继承来的标签授权随即失效',
-        value: (row.org_node_ids || []).join(', ') },
-      { name: 'note', label: '备注', value: row.note },
-    ],
-    onSubmit: (values) => api.patch('/accounts/' + row.id, {
-      ...values,
-      tags: splitTags(values.tags),
-      org_node_ids: splitIDs(values.org_node_ids),
-    }),
-  });
-  if (result) { toast('已更新', 'ok'); await reload(); }
+  const updated = await editAccount(row);
+  if (!updated) return;
+  toast('已更新', 'ok');
+  await reload();
 }
 
 function splitTags(value) {
   return (value || '').split(',').map((tag) => tag.trim()).filter(Boolean);
 }
 
-// splitIDs parses the comma-separated node ids into an array. It is always an array (never
-// undefined), because an empty list is a meaningful instruction — "this account belongs to no
-// organization" — and sending nothing would instead mean "leave the memberships alone".
-function splitIDs(value) {
-  return (value || '').split(',')
-    .map((id) => id.trim())
-    .filter(Boolean)
-    .map(Number)
-    .filter((id) => Number.isInteger(id) && id > 0);
-}
-
-export { confirmDialog };

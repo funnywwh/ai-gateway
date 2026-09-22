@@ -264,6 +264,22 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 		{"bwrap-worker-account", func() error { return sandbox.ValidateWorkerAccount(deps.cfg.Deploy.WorkerUser) }},
 		{"feishu-login", func() error { return checkFeishuLogin(deps.cfg) }},
 	}
+	// The tenant-side web plugins (M75) ship beside the picker plugin, and only an enabled one is
+	// checked: a deployment that switched a plugin off is not broken by not having deployed it.
+	for _, plugin := range []struct {
+		dir     string
+		enabled bool
+	}{
+		{dir: "web-tty", enabled: deps.cfg.TenantPlugins.WebTTY.Enabled},
+		{dir: "workspace-files", enabled: deps.cfg.TenantPlugins.WorkspaceFiles.Enabled},
+		{dir: "git-diff", enabled: deps.cfg.TenantPlugins.GitDiff.Enabled},
+	} {
+		if !plugin.enabled {
+			continue
+		}
+		path := filepath.Join(filepath.Dir(deps.cfg.Deploy.PluginPath), plugin.dir, "index.js")
+		checks = append(checks, check{name: plugin.dir + "-plugin", run: func() error { _, err := os.Stat(path); return err }})
+	}
 	failures := 0
 	for _, item := range checks {
 		if err := item.run(); err != nil {

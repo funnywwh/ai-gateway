@@ -256,3 +256,57 @@ close 都删挂载点）。因此「页面在网关重启前已打开」不会�
 只证明本机 Linux + 本机 Chromium + 本机 DSH 版本这一组合；每账号同时挂载上限仍是网关的 4（本脚本实测 2 个）；
 浏览器侧最多保存 8 个目录由客户端测试覆盖，不是真机实测；「工作区 id 不变」是读 DSH 自己的
 `storages/workspace.json` 得到的，不是从 UI 推断的。
+
+## 挂载目录名改用本地目录名（2026-09-21 实测）
+
+改动前每个挂载点是 `<workspace>/browser/<32 位十六进制>`：目录名是随机 key，选择工作区目录时只能看到一串十六进制。
+改动后挂载点是 `<workspace>/browser/<本地目录名>`（例如 `browser/picked-a`、`browser/aosp`），路径本身就说明是哪个本机目录。
+
+- **key 的形状**：一个安全路径段（1..255 字节、非 `.`/`..`、非隐藏、无分隔符、无控制字符、无首尾空白），
+  遗留的 32/48 位十六进制 id 用同一条规则接受——已保存过的目录不改名、不迁移、路径/工作区/会话分组都不变。
+- **命名仲裁**：新增只读 `allocate`，客户端在某个目录**首次挂载前**问一次名字，网关对已被本账号占用的名字
+  回 `-2`…`-9`（再退化为不透明尾巴）。身份仍是客户端的（key 就是虚拟路径），所以仲裁是建议性的：它只能看到
+  「容器里已存在的目录」（稳定挂载点比挂载活得久）和「正在服务的活动挂载」。名字不可用（隐藏/首尾空白等）或网关不认识
+  `allocate` 时回退到原来的随机 key，挂载永不因目录名字失败。
+- **按 key 释放**：`close {key,purge:true}`（无 token）释放「本账号 `browser/` 下、空的、私有的、无活动挂载」的目录。
+  此前只有带 token 的 close 才能清路径，token 过期后再删除文件夹，空目录就永久留在容器里。
+- **记录文件**：`<stateDir>/browser-mounts/<ID>.json` → `<租户>.<ID>.json`（目录名不再全局唯一），
+  读取时同时接受旧文件名，所以升级后崩溃残留仍会被启动清理。
+
+```sh
+make dshgw-test                     # Go 全量 + 插件 Node 测试 + 迁移计划
+make dshgw-browser-e2e              # 单目录真机
+make dshgw-browser-multi-e2e        # 多目录真机
+make dshgw-browser-reload-e2e       # 断线/刷新/换标签页真机
+```
+
+| 证据 | 观测 |
+|---|---|
+| Go + Node 单元/契约 | `make dshgw-test` 全绿（含 `internal/dshgw/browsermount` 新增的 key 形状、`allocate` 仲裁、按 key 释放、记录文件按账号命名）；插件 56 个 Node 测试全绿 |
+| 单目录真机（29 步 PASS） | 页面同源调用序列里 `allocate:200` 在 `open:200` **之前**；记录 `Path` = `<workspace>/browser/picked`，内核 `fuse.browser-workspace` 就在该路径；沙箱内可见同一路径；断开后空挂载点保留、目录仍在列表里 |
+| 多目录真机（22 步 PASS） | A、B 分别挂在 `browser/picked-a`、`browser/picked-b`（页面记录的 `key` 等于本机目录名）；DSH 侧恰好两条工作区；删除 A 同时释放挂载、挂载点、工作区条目，B 不受影响；再删 B 后无残留记录 |
+| 断线/刷新真机 PASS | 页面内断线自动重连、刷新后一次点击 `resume`、关标签页后新标签页一次点击 `resume`：都是**同一路径** `browser/picked`、同一挂载 id，只发 `resume` 不发 `open` |
+| 混版降级 | 客户端会给 `open` 带 key、给 `close` 带 `purge`/`key`，旧网关整体拒绝字段或没有 `allocate`：客户端退回随机 key 挂载（路径照旧可用），被拒的按 key 释放只记一条 warning、不阻断删除。由 Node harness 的 `legacyGateway`/`unnamedGateway` 覆盖，**不是真机实测**（本机没有旧二进制可跑） |
+| 未由真机覆盖 | 「无 capability 的按 key 释放」只有 Go 单测与 Node harness（真机删除路径都还带着 token）；跨设备同名目录的 `-2` 后缀只有 Go 单测与 Node harness；记录文件新命名的启动清理兼容只有 Go 单测 |
+
+**不夸大**：以上真机结论只针对本机 Linux + 本机 Chromium + 本机 DSH 版本；已存在的十六进制挂载点**不迁移**
+（要换成目录名就在列表里删除后重新添加——删除会释放旧路径，重新添加会拿回目录名；换路径意味着 DSH 工作区条目重建，
+旧工作区下 `cwd` 指向旧路径的会话不再归组）；无记录的空目录不做启动清扫（网关无法区分「孤儿」与「客户端仍持有的映射」）。
+
+## M76：退出即强制卸载 + 最后强杀 dsh（2026-09-22）
+
+设计：`docs/design/m76-dsh-exit-force-teardown.md`。这一节只记与浏览器挂载有关的证据；SSH 侧的
+`DetachTenant`/`Restore` 与现网自愈记录见 `docs/todo_done.md` 的 M76 小节。
+
+| 证据 | 观测 |
+|---|---|
+| **本机现场（改动的触发点）** | `.../workspaces/dsh-tenant/browser/ZT20Q` 自 14:36:32 起 `fusermount3: failed to unmount … Device or resource busy`，reaper 每 5 秒重试、刷到 15:32 仍在刷（600+ 条）；该账号 15:14/15:23/15:24 三次退出的审计都是 `logout_worker_stop_failed`（`reason=*fmt.wrapError`），而同秒日志是 `tenant worker exited … signal: terminated` ⇒ dsh 停了、失败的是卸载 |
+| **卡死的真因（e2e 复现）** | go-fuse `Server.Unmount()` 在 `fusermount3 -u` 之后等自己的 serve loop，而 serve loop 只在内核释放连接时结束 ⇒ 挂载被持有（活着的 worker 沙箱 / 另一个挂载命名空间）时它**永不返回**。改前的 e2e 里：`POST /dshgw/logout/` 120s 无响应，`SIGQUIT` 栈显示退出请求与**整个 reaper** 都停在 `fuse.(*Server).Unmount → sync.WaitGroup.Wait`，worker 仍在跑、两个挂载都还挂着 |
+| 修好后的真机 e2e（`make dshgw-logout-e2e`，PASS **12 步**） | 一次性实例里同时挂上真浏览器目录 FUSE（`activate` 把它 bind 进沙箱 ⇒ 优雅卸载必然失败）与真 sshfs → `POST /dshgw/logout/` **1.58s** 返回 → 两个挂载都离开 `/proc/self/mounts` → worker 端口关闭 → 审计 `logout_mount_detach`（"2 mount(s) detached"）+ `logout_worker_stop`，无 `logout_worker_stop_failed`/`logout_mount_leftover` → ssh 记录保留 → 重新登录 sshfs 在同一路径重挂 |
+| Go 单测 | `browsermount`：优雅失败→强制成功→清理完成、**优雅永久阻塞→1s 有界升级**（`TestABlockingUnmountIsBoundedAndForced`）、强制也失败→记录保留、`final` 的 share 不被 `expire` 重启、停 worker 失败不再跳过卸载；`browserworkspace`：阶梯四分支 + 真机忙挂载 `TestRealFUSEForceUnmountTakesABusyMount`（PASS） |
+| 本机现网 | `make dshgw-build` → 重启 `dshgw-verify`（16:18:01，revision `01d454b`）后：`browser-workspace` 残留挂载 **0**、`browser mount expiry cleanup failed` **0** 条、`logout_worker_stop_failed` **0** 条，8 个租户 worker 全部 ready，三个单元 active |
+| 未由真机覆盖 | 真人点侧栏「退出」（需用户会话，见 `docs/TODO.md` M76）；「另一个挂载命名空间持有副本」的真机复现（本机无独立的 busy-holder 手段，Go 用例用 cwd 钉住挂载点覆盖同一分支，现网 snap 命名空间那次的现场证据见设计文档 §2.1） |
+
+**不夸大**：强制卸载保证的是**我方挂载表条目消失、挂载点可复用**；别的挂载命名空间里那份副本由内核管到
+那个进程退出（设计文档 §5 已声明）。退出瞬间正在写入浏览器目录的内容可能丢——这与 M69「退出即无条件停
+dsh」的既有取舍一致，本次不改变它。

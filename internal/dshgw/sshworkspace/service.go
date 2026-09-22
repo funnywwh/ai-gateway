@@ -10,9 +10,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/winger/ai-gateway/internal/dshgw/audit"
@@ -100,12 +102,28 @@ func (s *Service) Mounts(tenant string) ([]Mount, error) { return s.store.ForTen
 func (s *Service) All() ([]Mount, error) { return s.store.Load() }
 
 // EnsureIdentity provisions the per-account ssh material under <workspace>/.ssh: the private
-// key (0600), an empty known_hosts to accept new host keys into (0600), and, when a source is
-// configured, the alias list both halves resolve hosts with (0644).
+// key (0600, from <identity_dir>/<account> when the operator provisioned one), an empty
+// known_hosts to accept new host keys into (0600), and the account's own alias list (0644),
+// seeded from <ssh_config_dir>/<account> when that account has none yet.
 //
-// Nothing here is overwritten once present: an account's key may have been rotated by hand,
-// and a provisioning step that silently reverts that would be a security bug, not a
-// convenience. A missing identity is reported by the caller that needs it.
+// There is no shared key source: a key that several accounts hold is a key that scopes them
+// all the same, and a deployment that pointed one at the operator's own identity gave every
+// account the operator's personal key. An account without a key of its own simply has none —
+// the caller that needs one reports it, and the account can upload its own from the UI.
+//
+// The alias list is the account's from the moment it exists: the tenant plugin adds and
+// removes entries in it (「我的主机」) and may also edit it by hand. Nothing here is
+// overwritten once present — an account's key may have been rotated by hand, and a
+// provisioning step that silently reverted the alias list would delete hosts the account
+// added. To re-seed one account: replace <ssh_config_dir>/<account>, delete
+// <workspace>/.ssh/config, then restart that account's worker.
+//
+// The `identity-managed` marker means "this account's identity is not the gateway's to
+// create": while it exists nothing is copied in, whatever identity_dir holds. It is written
+// by the tenant's own upload and by scripts/dshgw_ssh_identity.sh when reclaiming a key that
+// was handed out by mistake.
+//
+// A missing identity is reported by the caller that needs it.
 func (s *Service) EnsureIdentity(tenant, workspace, dshHome string) error {
 	dir := filepath.Join(workspace, ".ssh")
 	if _, err := privatePath(workspace, filepath.Join(dir, "id_rsa")); err != nil {
@@ -119,18 +137,9 @@ func (s *Service) EnsureIdentity(tenant, workspace, dshHome string) error {
 	if managedErr != nil && !os.IsNotExist(managedErr) {
 		return managedErr
 	}
-	if !isFile(keyPath) && os.IsNotExist(managedErr) {
-		source := ""
-		if s.options.IdentityDir != "" {
-			candidate := filepath.Join(s.options.IdentityDir, tenant)
-			if isFile(candidate) {
-				source = candidate
-			}
-		}
-		if source == "" {
-			source = s.options.IdentitySource
-		}
-		if source != "" {
+	if !isFile(keyPath) && os.IsNotExist(managedErr) && s.options.IdentityDir != "" && tenant != "" {
+		source := filepath.Join(s.options.IdentityDir, tenant)
+		if isFile(source) {
 			if err := securefile.CheckPermissions(source, 0o600); err != nil {
 				return Wrap(CodeInvalidState, "ssh identity "+source+" must be a regular 0600 file", err)
 			}
@@ -141,6 +150,10 @@ func (s *Service) EnsureIdentity(tenant, workspace, dshHome string) error {
 			if err := securefile.WriteAtomic(keyPath, data, 0o600); err != nil {
 				return err
 			}
+			// Audited because it answers the question this feature was misconfigured into:
+			// where did this account's key come from?
+			s.logger.Info("seeded an account ssh identity from the per-account key directory",
+				"tenant", tenant, "source", source)
 		}
 	}
 	knownHosts := filepath.Join(dir, "known_hosts")
@@ -150,21 +163,16 @@ func (s *Service) EnsureIdentity(tenant, workspace, dshHome string) error {
 		}
 	}
 	configPath := filepath.Join(dir, "config")
-	if !isFile(configPath) && s.options.SSHConfigSource != "" && isFile(s.options.SSHConfigSource) {
-		data, err := securefile.ReadLimitedRegular(s.options.SSHConfigSource, 64<<10)
+	if !isFile(configPath) {
+		seed, err := s.seedConfig(tenant)
 		if err != nil {
 			return err
 		}
-		// The account gets the alias list, not the operator's config: only Host/HostName/User/
+		// The account gets the alias list, not the operator's file: only Host/HostName/User/
 		// Port are carried over. An IdentityFile line would name a key that does not exist in
 		// this account's HOME (its identity is the single key above), which ssh reports as a
 		// warning on every call and would silently pick the wrong key for a host.
-		if err := securefile.WriteAtomic(configPath, []byte(aliasConfig(data)), 0o644); err != nil {
-			return err
-		}
-	}
-	if !isFile(configPath) {
-		if err := securefile.WriteAtomic(configPath, []byte(aliasConfig(nil)), 0o644); err != nil {
+		if err := securefile.WriteAtomic(configPath, []byte(aliasConfig(seed)), 0o644); err != nil {
 			return err
 		}
 	}
@@ -173,6 +181,50 @@ func (s *Service) EnsureIdentity(tenant, workspace, dshHome string) error {
 	// the tenant plugin which mirrored paths are real mounts and which are just parent
 	// directories of the mirror layout.
 	return s.writeMirror(tenant, dshHome)
+}
+
+// seedConfig reads one account's alias seed from <ssh_config_dir>/<account>.
+//
+// A missing seed is not an error: the account simply starts with no aliases and can add its
+// own hosts (or type user@host directly). An *unusable* seed is an error, and it is never
+// skipped silently: the file is the operator's statement about which hosts this account may
+// reach, so quietly starting the account with a different list than the configured one would
+// be the wrong failure. The source is reached through securefile, so neither the file nor any
+// ancestor directory may be a symlink, and the size is bounded.
+func (s *Service) seedConfig(tenant string) ([]byte, error) {
+	if s.options.SSHConfigDir == "" {
+		return nil, nil
+	}
+	source := filepath.Join(s.options.SSHConfigDir, tenant)
+	if tenant == "" || !Within(s.options.SSHConfigDir, source) || source == s.options.SSHConfigDir {
+		return nil, Errorf(CodeInvalidState, "ssh config seed for %q would leave %s", tenant, s.options.SSHConfigDir)
+	}
+	info, err := os.Lstat(source)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, Wrap(CodeInvalidState, "reading the ssh config seed "+source, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, Errorf(CodeInvalidState, "ssh config seed %s must be a regular file", source)
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Nlink != 1 {
+		return nil, Errorf(CodeInvalidState, "ssh config seed %s must not be hard linked", source)
+	}
+	// World-writable is the line, not group-writable: every tenant worker already runs as the
+	// deployment account's own uid and group here (permissions are not what separates
+	// accounts — path binding is), while the documented 0644 seed and a plain `cp` under the
+	// usual umask both have to keep working. A file anyone on the host may rewrite must not
+	// decide an account's aliases.
+	if info.Mode().Perm()&0o002 != 0 {
+		return nil, Errorf(CodeInvalidState, "ssh config seed %s mode %04o is world writable", source, info.Mode().Perm())
+	}
+	data, err := securefile.ReadLimitedRegular(source, 64<<10)
+	if err != nil {
+		return nil, Wrap(CodeInvalidState, "reading the ssh config seed "+source, err)
+	}
+	return data, nil
 }
 
 // aliasConfig renders the minimal ssh config a tenant may hold: the aliases an operator
@@ -393,19 +445,37 @@ func (s *Service) flushStaleMount(ctx context.Context, mountpoint string) bool {
 // tenant's sandbox in an uninterruptible wait, holds the worker's scope open behind it, and
 // turns the next worker start into "worker authentication unavailable".
 func (s *Service) detach(ctx context.Context, mountpoint string, attempts int, delay time.Duration) (bool, error) {
+	return s.detachKeeping(ctx, mountpoint, attempts, delay, false)
+}
+
+// detachKeeping is detach with a choice about the mount point directory. Purging removes it (the
+// mount it served is released), while the logout path keeps it: that directory is where the
+// account's own workspace entry points, and the next sign-in mounts onto it again (M76).
+func (s *Service) detachKeeping(ctx context.Context, mountpoint string, attempts int, delay time.Duration, keepMountpoint bool) (bool, error) {
+	release := func() (bool, bool) {
+		fstype, _ := s.mounted(mountpoint)
+		if fstype != "" {
+			return false, false
+		}
+		if keepMountpoint {
+			return true, true
+		}
+		// The table is not the whole truth: a sandbox that bound this mount keeps an internal
+		// reference until its namespace is gone, and until then the mount point cannot be
+		// removed (EBUSY) even though it no longer shows up here. The directory is the
+		// observable that matches what a purge will actually hit.
+		if removeErr := os.Remove(mountpoint); removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
+			return true, true
+		}
+		return false, true
+	}
 	lazy := false
 	for attempt := 0; attempt < attempts; attempt++ {
 		detached, err := s.options.unmount(ctx, s.exec, mountpoint)
 		lazy = lazy || detached
 		if err == nil {
-			if fstype, _ := s.mounted(mountpoint); fstype == "" {
-				// The table is not the whole truth: a sandbox that bound this mount keeps an
-				// internal reference until its namespace is gone, and until then the mount
-				// point cannot be removed (EBUSY) even though it no longer shows up here. The
-				// directory is the observable that matches what a purge will actually hit.
-				if removeErr := os.Remove(mountpoint); removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
-					return lazy, nil
-				}
+			if done, _ := release(); done {
+				return lazy, nil
 			}
 		}
 		if attempt < attempts-1 {
@@ -424,10 +494,8 @@ func (s *Service) detach(ctx context.Context, mountpoint string, attempts int, d
 		detached, retryErr := s.options.unmount(ctx, s.exec, mountpoint)
 		lazy = lazy || detached
 		if retryErr == nil {
-			if fstype, _ := s.mounted(mountpoint); fstype == "" {
-				if removeErr := os.Remove(mountpoint); removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
-					return lazy, nil
-				}
+			if done, _ := release(); done {
+				return lazy, nil
 			}
 		}
 	}
@@ -474,6 +542,63 @@ func (s *Service) breakWedge(ctx context.Context, mountpoint string) (bool, erro
 			"mountpoint", mountpoint, "detail", "pending requests fail now instead of waiting for an unreachable host")
 	}
 	return broken, nil
+}
+
+// AttachedMounts lists the mount points of this account that the mount table reports as
+// attached right now — records without a mount are not one, which is what makes it the honest
+// answer for "did the logout really detach everything".
+func (s *Service) AttachedMounts(tenant string) []string {
+	mounts, err := s.store.ForTenant(tenant)
+	if err != nil {
+		s.logger.Error("reading the ssh mount record failed", "tenant", tenant, "err", err)
+		return nil
+	}
+	var paths []string
+	for _, mount := range mounts {
+		if fstype, _ := s.mounted(mount.Mountpoint); fstype != "" {
+			paths = append(paths, mount.Mountpoint)
+		}
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+// DetachTenant detaches every mount an account owns but KEEPS its records (M76).
+//
+// This is the logout half of the mount lifecycle: a signed-out account must not keep an sshfs
+// daemon and a kernel mount alive, while the next sign-in puts the same paths back (Restore).
+// The record file, the account's mirror and the mount point directories are therefore left
+// exactly as they are — the mount is the thing that goes away, not the account's configuration,
+// and the workspace entry the account sees does not change.
+//
+// It does not restart the worker: the caller (the logout path) detaches first and stops the
+// tenant's dsh last, so a restart would only bring back a process that is about to be killed.
+func (s *Service) DetachTenant(ctx context.Context, tenant string) error {
+	mounts, err := s.store.ForTenant(tenant)
+	if err != nil {
+		return err
+	}
+	var failures []string
+	for _, mount := range mounts {
+		if fstype, _ := s.mounted(mount.Mountpoint); fstype == "" {
+			continue
+		}
+		lazy, unmountErr := s.detachKeeping(ctx, mount.Mountpoint, 6, 250*time.Millisecond, true)
+		if unmountErr != nil {
+			failures = append(failures, unmountErr.Error())
+			s.record("ssh-mount-detach", tenant, mount.Mountpoint, "failed: "+mount.Host+":"+mount.CanonicalRemote, 500)
+			continue
+		}
+		detail := mount.Host + ":" + mount.CanonicalRemote
+		if lazy {
+			detail += " (lazy detach)"
+		}
+		s.record("ssh-mount-detach", tenant, mount.Mountpoint, detail, 200)
+	}
+	if len(failures) > 0 {
+		return Errorf(CodeMountFailed, "detaching %s: %s", tenant, strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 // DropTenant detaches every mount an account owns. It is called when an account is stopped or
@@ -525,19 +650,7 @@ func (s *Service) Reconcile(ctx context.Context, remotes []Remote) {
 		if !ok {
 			continue
 		}
-		if fstype, _ := mountedAt(mount.Mountpoint); fstype != "" {
-			continue
-		}
-		if err := s.prepareMountpoint(remote.Workspace, mount.Mountpoint); err != nil {
-			s.logger.Error("ssh remount failed", "tenant", mount.Tenant, "mountpoint", mount.Mountpoint, "err", err)
-			continue
-		}
-		if err := s.mount(ctx, remote, mount.Host, mount.CanonicalRemote, mount.Mountpoint); err != nil {
-			s.logger.Error("ssh remount failed", "tenant", mount.Tenant, "mountpoint", mount.Mountpoint, "err", err)
-			continue
-		}
-		s.logger.Info("ssh workspace remounted", "tenant", mount.Tenant, "mountpoint", mount.Mountpoint)
-		s.record("ssh-mount-remount", mount.Tenant, mount.Mountpoint, mount.Host+":"+mount.CanonicalRemote, 200)
+		s.remount(ctx, remote, mount, "ssh-mount-remount")
 	}
 	// The mirror is refreshed for every account, mounted or not: it is what the account's
 	// plugin reads to tell a mount from a parent directory.
@@ -546,6 +659,83 @@ func (s *Service) Reconcile(ctx context.Context, remotes []Remote) {
 			s.logger.Error("writing the account mount mirror failed", "tenant", remote.Tenant, "err", err)
 		}
 	}
+}
+
+// Restore re-mounts the recorded mounts of one account that are not attached (M76). It is the
+// login half of DetachTenant: the records survived the logout, so the account gets its
+// workspaces back without another click.
+//
+// It is called by the login path BEFORE the worker starts, because a worker's profile binds the
+// mount points that exist when it starts: restoring afterwards would leave the sandbox with the
+// empty mount point until the next restart. Failures are returned so the caller can log and
+// audit them; the login itself must not fail because a remote host is unreachable.
+func (s *Service) Restore(ctx context.Context, tenant, workspace, dshHome string) error {
+	if err := s.CheckBinaries(); err != nil {
+		return err
+	}
+	mounts, err := s.store.ForTenant(tenant)
+	if err != nil {
+		return err
+	}
+	remote := Remote{Tenant: tenant, Workspace: workspace, DshHome: dshHome}
+	var failures []string
+	for _, mount := range mounts {
+		if err := s.remount(ctx, remote, mount, "ssh-mount-restore"); err != nil {
+			failures = append(failures, err.Error())
+		}
+	}
+	if err := s.writeMirror(tenant, dshHome); err != nil {
+		s.logger.Error("writing the account mount mirror failed", "tenant", tenant, "err", err)
+	}
+	if len(failures) > 0 {
+		return Errorf(CodeMountFailed, "restoring %s: %s", tenant, strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+// remount re-attaches one recorded mount that is not attached, and reports why it could not.
+// It is the shared body of Reconcile (whole deployment) and Restore (one account at login).
+//
+// A recorded mount whose FUSE connection is GONE is repaired rather than skipped: its entry is
+// still in the mount table (that is what a killed or crashed sshfs leaves behind), a new mount
+// cannot be made over it, and every read on it fails with ENOTCONN — so without this the account
+// keeps a dead workspace for as long as nobody removes the entry by hand. This is the defect
+// docs/TODO.md recorded under M64 ("启动/Reconcile 对已记录的挂载点做一次探测，ENOTCONN 的先
+// fusermount3 -z 再重挂"), and login-time Restore is the natural place to fix it.
+func (s *Service) remount(ctx context.Context, remote Remote, mount Mount, event string) error {
+	if fstype, _ := s.mounted(mount.Mountpoint); fstype != "" {
+		// A recorded mount with no sshfs daemon is dead: the daemon is what holds the FUSE
+		// connection, and killing it leaves the entry in the mount table while every read fails
+		// with ENOTCONN and no new mount can be made over it. This is the same rule MountsFor
+		// uses to keep such a path out of a worker profile. The connection probe cannot answer
+		// this one: on a dead mount the stat that names the connection fails, and "no device
+		// number" is not the same as "no connection".
+		if sshfsDaemonFor(mount.Mountpoint) != 0 {
+			return nil
+		}
+		s.logger.Warn("a recorded ssh workspace mount lost its daemon; replacing it",
+			"tenant", mount.Tenant, "mountpoint", mount.Mountpoint)
+		// detachKeeping, not flushStaleMount: the record and the mount point are what the account
+		// keeps, and only the dead kernel entry has to go before a new mount can be made.
+		if _, err := s.detachKeeping(ctx, mount.Mountpoint, 3, 250*time.Millisecond, true); err != nil {
+			s.record(event, mount.Tenant, mount.Mountpoint, "dead mount not detached", 500)
+			return err
+		}
+	}
+	detail := mount.Host + ":" + mount.CanonicalRemote
+	if err := s.prepareMountpoint(remote.Workspace, mount.Mountpoint); err != nil {
+		s.logger.Error("ssh remount failed", "tenant", mount.Tenant, "mountpoint", mount.Mountpoint, "err", err)
+		s.record(event, mount.Tenant, mount.Mountpoint, "failed: "+detail, 500)
+		return err
+	}
+	if err := s.mount(ctx, remote, mount.Host, mount.CanonicalRemote, mount.Mountpoint); err != nil {
+		s.logger.Error("ssh remount failed", "tenant", mount.Tenant, "mountpoint", mount.Mountpoint, "err", err)
+		s.record(event, mount.Tenant, mount.Mountpoint, "failed: "+detail, 500)
+		return err
+	}
+	s.logger.Info("ssh workspace remounted", "tenant", mount.Tenant, "mountpoint", mount.Mountpoint)
+	s.record(event, mount.Tenant, mount.Mountpoint, detail, 200)
+	return nil
 }
 
 // PollOnce services the mailbox of every running account and returns how many requests it
@@ -652,6 +842,12 @@ func (s *Service) mount(ctx context.Context, remote Remote, host, remotePath, mo
 		return err
 	}
 	if _, err := pathsFor(s.options, remote, host); err != nil {
+		return err
+	}
+	// The one shape sshfs cannot survive: a source directory that contains its own mount
+	// point. Refused here rather than in Open so that Reconcile — which re-mounts what the
+	// record lists at every gateway start — is covered by the same rule.
+	if err := s.refuseSelfNestedMount(ctx, remote, host, remotePath, mountpoint); err != nil {
 		return err
 	}
 	budget := s.options.ConnectTimeout

@@ -22,7 +22,7 @@ func TestDefaultsLiveUnderTheDataRoot(t *testing.T) {
 	}
 	// directory_picker: browse keeps this fixture independent of the picker plugin, which
 	// has no default (see TestClampRequiresPluginPath).
-	if _, err := f.WriteString("directory_picker: browse\n"); err != nil {
+	if _, err := f.WriteString("directory_picker: browse\n" + tenantPluginsOffDoc); err != nil {
 		t.Fatal(err)
 	}
 	f.Close()
@@ -70,7 +70,7 @@ func TestRelativePathsResolveAgainstTheWorkingDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := writeConfig(t, "directory_picker: browse\nstate_dir: ./data/dshgw\n")
+	path := writeConfig(t, "directory_picker: browse\n"+tenantPluginsOffDoc+"state_dir: ./data/dshgw\n")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +82,7 @@ func TestRelativePathsResolveAgainstTheWorkingDirectory(t *testing.T) {
 		t.Fatalf("registry_path = %q, want %q", cfg.RegistryPath, want)
 	}
 	// Resolution must not become a way past the cleanliness checks.
-	if _, err := Load(writeConfig(t, "directory_picker: browse\nstate_dir: ./data/../dshgw\n")); err == nil {
+	if _, err := Load(writeConfig(t, "directory_picker: browse\n"+tenantPluginsOffDoc+"state_dir: ./data/../dshgw\n")); err == nil {
 		t.Fatal("a relative path containing .. was cleaned instead of rejected")
 	}
 }
@@ -94,7 +94,7 @@ func TestRuntimePathsFallBackToTheEnvironment(t *testing.T) {
 	t.Setenv("DSHGW_NODE", release+"/node/bin/node")
 	t.Setenv("DSHGW_DSH_ROOT", release)
 
-	cfg, err := Load(writeConfig(t, "directory_picker: browse\n"))
+	cfg, err := Load(writeConfig(t, "directory_picker: browse\n"+tenantPluginsOffDoc))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestRuntimePathsFallBackToTheEnvironment(t *testing.T) {
 func TestMissingRuntimeIsADoctorFindingNotAConfigError(t *testing.T) {
 	t.Setenv("DSHGW_NODE", "")
 	t.Setenv("DSHGW_DSH_ROOT", "")
-	cfg, err := Load(writeConfig(t, "directory_picker: browse\n"))
+	cfg, err := Load(writeConfig(t, "directory_picker: browse\n"+tenantPluginsOffDoc))
 	if err != nil {
 		t.Fatalf("a configuration without a dsh runtime was rejected: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestMissingRuntimeIsADoctorFindingNotAConfigError(t *testing.T) {
 		t.Fatalf("runtime invented from nothing: %+v", cfg.Dsh)
 	}
 	// A value that IS given still has to be clean and absolute.
-	if _, err := Load(writeConfig(t, "directory_picker: browse\ndsh:\n  node_bin: relative/node\n")); err != nil {
+	if _, err := Load(writeConfig(t, "directory_picker: browse\n"+tenantPluginsOffDoc+"dsh:\n  node_bin: relative/node\n")); err != nil {
 		t.Fatalf("a relative runtime path is configuration, not an error: %v", err)
 	}
 }

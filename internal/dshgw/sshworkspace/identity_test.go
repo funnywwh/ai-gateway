@@ -70,7 +70,10 @@ func TestHostIdentityPriorityAndIsolation(t *testing.T) {
 			t.Fatalf("paths(%s): %+v %v", tc.host, paths, err)
 		}
 	}
-	if _, err := pathsFor(Options{IdentitySource: defaultKey}, b, host); CodeOf(err) != CodeAuthFailed {
+	// Nothing outside this account's own workspace is ever a key source, whatever the
+	// deployment configured: another account's key — or a directory an earlier version copied
+	// every account's key out of — is not reachable from here.
+	if _, err := pathsFor(Options{IdentityDir: filepath.Dir(defaultKey)}, b, host); CodeOf(err) != CodeAuthFailed {
 		t.Fatalf("cross-account fallback: %v", err)
 	}
 	if err := os.Remove(defaultKey); err != nil {
@@ -266,7 +269,6 @@ func TestEnsureIdentityRejectsSymlinkDefault(t *testing.T) {
 
 func TestKeylessInitializationCreatesMetadata(t *testing.T) {
 	env := newTestEnv(t, Options{})
-	env.service.options.IdentitySource = ""
 	env.service.options.IdentityDir = ""
 	dir := filepath.Join(env.remote.Workspace, ".ssh")
 	if err := os.RemoveAll(dir); err != nil {

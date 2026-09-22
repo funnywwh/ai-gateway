@@ -311,3 +311,61 @@ func TestDSHFileLockReclaimsAStaleOwner(t *testing.T) {
 		t.Fatal("a lock held by a live process was stolen")
 	}
 }
+
+// The platform credential reference is restored at login, and only that reference: the file's
+// other refs and every record belong to the tenant (dsh writes browser-session grants there).
+// Observed on the deployment host: a tenant page had removed both the provider entry and the
+// reference, and nothing else would ever have put them back.
+func TestEnsureCredentialRefRestoresThePlatformReferenceOnly(t *testing.T) {
+	p := filepath.Join(t.TempDir(), ".credentials.yaml")
+	if err := os.WriteFile(p, []byte("version: 1\nrefs:\n  OTHER_KEY: tenant-owned\nrecords:\n  client-connection/browser-session:\n    kind: grant\n    payload:\n      secret: keep-me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := EnsureCredentialRef(p, AIGWAPIKeyRef, "sk-platform-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("a missing platform reference was not reported as a change")
+	}
+	data, _ := os.ReadFile(p)
+	text := string(data)
+	for _, want := range []string{"AIGW_API_KEY: sk-platform-key", "OTHER_KEY: tenant-owned", "secret: keep-me"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q after the restore:\n%s", want, text)
+		}
+	}
+
+	// Idempotent: an already-correct reference must not be rewritten, so the file's mtime does
+	// not churn and the tenant's own writer is not fought over for nothing.
+	info, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err = EnsureCredentialRef(p, AIGWAPIKeyRef, "sk-platform-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("an up-to-date reference was rewritten")
+	}
+	after, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(info.ModTime()) {
+		t.Fatalf("the file was rewritten anyway: %v -> %v", info.ModTime(), after.ModTime())
+	}
+
+	// A different key is the operator rotating the credential; the reference follows it.
+	if changed, err = EnsureCredentialRef(p, AIGWAPIKeyRef, "sk-rotated"); err != nil || !changed {
+		t.Fatalf("rotation: changed=%t err=%v", changed, err)
+	}
+	// An unsupported document version is refused rather than silently rewritten.
+	if err := os.WriteFile(p, []byte("version: 2\nrefs: {}\nrecords: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureCredentialRef(p, AIGWAPIKeyRef, "sk-platform-key"); err == nil {
+		t.Fatal("an unsupported credentials version was accepted")
+	}
+}

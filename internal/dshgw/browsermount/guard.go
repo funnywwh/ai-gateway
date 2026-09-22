@@ -19,6 +19,17 @@ import (
 type DetachedGuard struct{ Registry *registry.Registry }
 
 func (g *DetachedGuard) MountsFor(string) []string { return nil }
+
+// AttachedMounts refuses to guess: this process does not own the browser connection, so it
+// cannot tell an attached mount from a stale entry, and DetachTenant below is where it says so.
+func (g *DetachedGuard) AttachedMounts(string) []string { return nil }
+
+// DetachTenant is the logout half for a process that does not own the mounts (M76). The offline
+// guard's whole point is that only the serving process may touch a live mount, so this is the
+// same refusal as DropTenant.
+func (g *DetachedGuard) DetachTenant(ctx context.Context, tenant string) error {
+	return g.DropTenant(ctx, tenant)
+}
 func (g *DetachedGuard) DropTenant(_ context.Context, tenant string) error {
 	excluded, err := g.BrowserBackupExclusions(tenant)
 	if err != nil {

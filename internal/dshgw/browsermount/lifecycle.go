@@ -41,10 +41,14 @@ func (s *Service) closeContext(ctx context.Context, sh *share, workerStopped, pu
 		return errors.New("service stopping; cleanup deferred to shutdown")
 	}
 	sh.mu.Lock()
-	published := sh.published
+	published, final := sh.published, sh.final
 	sh.mu.Unlock()
 	if !sh.detached && published {
-		if !workerStopped {
+		// A share the caller marked final (logout, tenant drop, shutdown) has no worker left to
+		// release a namespace for: restarting one would bring a signed-out account's dsh back to
+		// life just to unmount its mount. The forced detach below does not need the namespace
+		// gone, so the mount is taken out of the table either way.
+		if !workerStopped && !final {
 			if s.restart == nil {
 				return errors.New("worker teardown unavailable; mount retained")
 			}
@@ -58,6 +62,35 @@ func (s *Service) closeContext(ctx context.Context, sh *share, workerStopped, pu
 		sh.detached = true
 	}
 	return s.cleanupLocked(sh, purge)
+}
+
+// gracefulUnmountBudget bounds the graceful unmount attempt (M76).
+//
+// go-fuse's Server.Unmount runs `fusermount3 -u` and then WAITS FOR ITS SERVE LOOP, and the serve
+// loop ends only when the kernel releases the FUSE connection — which is exactly what does not
+// happen while something else holds the mount. On a mount that refuses to detach, then, Unmount
+// does not fail: it never returns. Measured on the gateway host (2026-09-22): a logout request and
+// the whole reaper sat in go-fuse's WaitGroup.Wait with a worker still running and two mounts
+// attached, and the person's 退出 never came back. The bound is what turns that into an error the
+// forced ladder can act on; the abandoned attempt's goroutine returns by itself once the connection
+// is released (the abort in the ladder is what releases it).
+const gracefulUnmountBudget = time.Second
+
+// errUnmountSlow reports a graceful unmount that neither succeeded nor failed inside its budget.
+var errUnmountSlow = errors.New("unmount did not finish in time")
+
+// unmountGracefully runs Mounted.Unmount under a deadline, because it can block forever.
+func unmountGracefully(mounted Mounted, budget time.Duration) error {
+	done := make(chan error, 1)
+	go func() { done <- mounted.Unmount() }()
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		return errUnmountSlow
+	}
 }
 
 // cleanupLocked requires lifecycle and a disconnected share with no namespace
@@ -79,8 +112,22 @@ func (s *Service) cleanupLocked(sh *share, purge bool) error {
 	mounted, path, persistent := sh.mounted, sh.path, sh.persistent
 	sh.mu.Unlock()
 	if mounted != nil {
-		if err := mounted.Unmount(); err != nil {
-			return fmt.Errorf("unmount %s: %w", path, err)
+		err := unmountGracefully(mounted, gracefulUnmountBudget)
+		if err != nil {
+			// The graceful path is go-fuse's Server.Unmount, which runs `fusermount3 -u`. It
+			// cannot take a mount something else holds — a sandbox that outlived its worker, or
+			// a foreign mount namespace that received a copy by propagation (measured on the
+			// deployment host: a snap's private namespace). Retrying that call is what the
+			// reaper did for an hour on 2026-09-22, so escalate once to the forced ladder:
+			// fusermount's lazy flag, then aborting the FUSE connection, then one last attempt.
+			if forceErr := s.forceDetach(path); forceErr != nil {
+				return fmt.Errorf("unmount %s: %w (forced detach: %v)", path, err, forceErr)
+			}
+			if errors.Is(err, errUnmountSlow) {
+				slog.Warn("a browser mount did not unmount in time; it was force-detached",
+					"mountpoint", path, "budget", gracefulUnmountBudget.String(),
+					"detail", "go-fuse's Unmount waits for its serve loop, which ends only when the kernel releases the connection")
+			}
 		}
 		sh.mu.Lock()
 		sh.mounted = nil
@@ -96,7 +143,7 @@ func (s *Service) cleanupLocked(sh *share, purge bool) error {
 		}
 	}
 	if s.recordDir != "" {
-		if err := removeAbsentOK(s.recordPath(sh.id)); err != nil {
+		if err := removeAbsentOK(s.recordPath(sh.tenant.Name, sh.id)); err != nil {
 			return fmt.Errorf("remove mount record: %w", err)
 		}
 	}
@@ -152,9 +199,36 @@ func (s *Service) snapshot(tenant string) []*share {
 // Without SetStopWorker, the caller must itself guarantee stopped namespaces and
 // no in-flight starts (useful for standalone mounts/tests only).
 func (s *Service) DropTenant(ctx context.Context, tenant string) error {
-	all := s.snapshot(tenant)
+	return s.teardownShares(ctx, s.snapshot(tenant), true)
+}
+
+// DetachTenant is the logout half of DropTenant (M76): every mount this account owns is
+// excluded from worker profiles and force-detached, but no worker is started or stopped here —
+// the logout path detaches first and stops the tenant's dsh LAST, which is what makes a dsh
+// parked in a FUSE request die quickly instead of burning its whole stop timeout. A share that
+// cannot be detached stays retryable and is reported, never restarted into existence.
+//
+// It is idempotent: a tenant with no mounts detaches nothing and returns nil.
+func (s *Service) DetachTenant(ctx context.Context, tenant string) error {
+	return s.teardownShares(ctx, s.snapshot(tenant), false)
+}
+
+// teardownShares is the one teardown sequence: mark every share final, disconnect them, wait
+// out in-flight activations, optionally stop the binding workers, then close each share (which
+// unmounts, forcing its way through a mount the graceful path cannot take).
+//
+// A failure to stop a binding worker no longer skips the cleanup: the forced detach does not
+// need that namespace to be gone, and leaving mounts behind because an unrelated step failed is
+// exactly the behaviour M76 replaces (the pre-M76 code returned early, so a failed worker stop
+// left every mount mounted).
+func (s *Service) teardownShares(ctx context.Context, all []*share, stopBindingWorkers bool) error {
 	tenants := make(map[string]registry.Tenant)
 	for _, sh := range all {
+		sh.mu.Lock()
+		// final: this share's binding worker is gone for good, so a later reaper pass retries the
+		// detach but never restarts a worker to release a namespace for it.
+		sh.final = true
+		sh.mu.Unlock()
 		sh.disconnect()
 		tenants[sh.tenant.Name] = sh.tenant
 	}
@@ -162,17 +236,17 @@ func (s *Service) DropTenant(ctx context.Context, tenant string) error {
 		sh.lifecycle.Lock()
 		sh.lifecycle.Unlock()
 	}
-	if s.stopWorker != nil {
+	var errs []error
+	if stopBindingWorkers && s.stopWorker != nil {
 		for _, t := range tenants {
 			stopCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 			err := s.stopWorker(stopCtx, t)
 			cancel()
 			if err != nil {
-				return fmt.Errorf("stop worker before drop: %w", err)
+				errs = append(errs, fmt.Errorf("stop worker before drop: %w", err))
 			}
 		}
 	}
-	var errs []error
 	for _, sh := range all {
 		if err := s.closeContext(ctx, sh, true, false); err != nil {
 			errs = append(errs, err)

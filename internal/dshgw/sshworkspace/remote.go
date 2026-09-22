@@ -57,6 +57,21 @@ func (o Options) Canonical(ctx context.Context, run ExecFunc, remote Remote, hos
 	return canonical, nil
 }
 
+// MachineID reports the remote host's machine id, or "" when the remote has none to report.
+//
+// It answers exactly one question: is this ssh target the gateway host itself? A path string
+// cannot answer that — the same path names a different directory on another machine — and the
+// answer decides whether mounting that path would make the mount contain its own mount point
+// (see selfnest.go). A host without /etc/machine-id reports nothing, and the caller falls back
+// to comparing addresses.
+func (o Options) MachineID(ctx context.Context, run ExecFunc, remote Remote, host string) (string, error) {
+	out, err := o.ssh(ctx, run, remote, host, "cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null || true")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // ListDir lists the child directories of one remote directory.
 //
 // `ls -1ap` is the portable primitive here (GNU, busybox and BSD all accept it), and the

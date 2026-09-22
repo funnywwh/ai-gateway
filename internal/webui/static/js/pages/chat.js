@@ -145,6 +145,10 @@ export async function render({ page, actions, session, route }) {
     session: null,
     messages: [],
     skills: [],
+    // M73: whether this deployment has a search backend configured. Read from the session list
+    // (or any session payload), and used to decide whether the UI offers the switch at all.
+    webAccessAvailable: false,
+    webAccessProvider: '', 
     models: [],
     accounts: [],
     keys: [],
@@ -223,6 +227,11 @@ export async function render({ page, actions, session, route }) {
     try {
       const payload = await api.get('/chat/sessions', { limit: 50 });
       state.sessions = payload.data || [];
+      // Whether this deployment offers internet access at all is a property of the deployment,
+      // not of one conversation, so it is read here and reused by the create dialog (which may
+      // run before any conversation exists).
+      state.webAccessAvailable = !!payload.web_access_available;
+      state.webAccessProvider = payload.web_access_provider || '';
     } catch (err) {
       state.sessions = [];
       toast(api.errorMessage(err), 'error');
@@ -269,6 +278,9 @@ export async function render({ page, actions, session, route }) {
       return;
     }
     state.messages = state.session.messages || [];
+    if (typeof state.session.web_access_available === 'boolean') {
+      state.webAccessAvailable = state.session.web_access_available;
+    }
     state.tools = new Map();
     for (const call of state.session.tool_calls || []) state.tools.set(call.call_id, call);
     // state.notice is deliberately kept: a "stopped" or "truncated" note from the turn that
@@ -362,6 +374,19 @@ export async function render({ page, actions, session, route }) {
     const tokenSelect = el('select', {});
     const tokenHint = el('p', { class: 'muted' });
     const status = el('div', { class: 'muted' });
+    // M73: internet access is opt-in per conversation, and its default is off. The checkbox
+    // exists only when this deployment has a search backend (web_access_available comes from
+    // /chat/sessions), so the form never offers a switch the server would refuse.
+    const webAccessAvailable = !!state.webAccessAvailable;
+    const webAccessBox = el('input', { type: 'checkbox' });
+    const webAccessRow = el('label', { class: 'field field-inline' }, [
+      webAccessBox,
+      el('span', { text: '开启联网（web_search 搜索公网 / web_fetch 抓取页面）' }),
+    ]);
+    const webAccessHint = el('p', {
+      class: 'muted',
+      text: '开启后模型可以搜索公网并抓取页面，用来回答需要最新信息的问题；每步模型调用仍照常计费，网页额度由部署的后端承担。',
+    });
 
     async function loadKeys() {
       clear(keySelect);
@@ -443,6 +468,8 @@ export async function render({ page, actions, session, route }) {
         el('label', { class: 'field' }, [el('span', { text: '模型' }), modelSelect]),
         el('label', { class: 'field' }, [el('span', { text: 'MCP 令牌（决定本会话能做什么）' }), tokenSelect]),
         tokenHint,
+        webAccessAvailable ? webAccessRow : null,
+        webAccessAvailable ? webAccessHint : null,
         el('p', { class: 'muted', text: '智能问答就是一个 MCP 客户端：工具面与可执行范围完全来自所选令牌的 scope，令牌被撤销或过期后本会话立即失效。每一步模型调用仍按所选 API Key 正常计费，并出现在「请求日志」里（客户端记为 console，正文不记录）。' }),
         status,
       ]),
@@ -461,6 +488,7 @@ export async function render({ page, actions, session, route }) {
                 account_id: Number(accountSelect.value),
                 api_key_id: Number(keySelect.value),
                 mcp_token_id: Number(tokenSelect.value),
+                web_access: webAccessAvailable && webAccessBox.checked,
               });
               backdrop.remove();
               await loadSessions();
@@ -532,7 +560,11 @@ export async function render({ page, actions, session, route }) {
         : '未绑定 MCP 令牌 · 点击绑定',
       title: s.mcp_token_id
         ? '本会话的权限来自该令牌；撤销或让它过期后，下一次工具调用会立即失效。点击可换成别的令牌。'
-        : '这个会话没有绑定令牌，因此不能调用任何工具（技能只能被读到，执行不了）。点击绑定一个令牌即可恢复。',
+        : (s.web_access
+          // M73 made this sentence partly false: the web tools need no token at all, so an
+          // unbound conversation with internet access on can still search and read.
+          ? '这个会话没有绑定令牌，因此不能调用后台管理工具（联网搜索与网页抓取不受影响，仍可用）。点击绑定一个令牌即可恢复管理能力。'
+          : '这个会话没有绑定令牌，因此不能调用任何工具（技能只能被读到，执行不了）。点击绑定一个令牌即可恢复。'),
     });
     tokenBadge.addEventListener('click', () => {
       rebindToken().catch((err) => { toast(api.errorMessage(err), 'error'); });
@@ -542,6 +574,10 @@ export async function render({ page, actions, session, route }) {
       el('div', { class: 'chat-header-title', text: s.title || '未命名会话' }),
       el('div', { class: 'chat-header-meta', text: s.model + ' · 账户 #' + s.account_id + ' · Key #' + s.api_key_id }),
       tokenBadge,
+      // The switch is shown only where the deployment can honour it: offering a button that
+      // always answers "this deployment has not enabled internet access" is worse than not
+      // offering it.
+      s.web_access_available ? webAccessBadge(s) : null,
     ]);
     const chips = el('div', { class: 'chat-chips' });
     for (const skill of state.session.skills || []) {
@@ -596,7 +632,46 @@ export async function render({ page, actions, session, route }) {
   }
 
   function toolDisplayName(name) {
-    return name === 'create_skill' ? '创建技能' : (name === 'update_session_title' ? '更新会话标题' : name);
+    if (name === 'create_skill') return '创建技能';
+    if (name === 'update_session_title') return '更新会话标题';
+    // M73: the console's own internet access. They are labelled like the management tools so a
+    // reader can tell at a glance which calls left this deployment.
+    if (name === 'web_search') return '联网搜索';
+    if (name === 'web_fetch') return '抓取网页';
+    return name;
+  }
+
+  // webAccessBadge renders the session's internet-access switch. It is a control rather than a
+  // label for the same reason the token badge is: whether this conversation may reach the public
+  // web is the operator's decision, and it is taken per conversation.
+  function webAccessBadge(s) {
+    const on = !!s.web_access;
+    const badge = el('button', {
+      class: 'badge badge-button ' + (on ? 'ok' : ''),
+      text: on ? '联网：已开启 · 关闭' : '联网：已关闭 · 开启',
+      title: on
+        ? '本会话可以用 web_search 搜索公网、用 web_fetch 抓取公网页面（本轮有调用次数上限）。点击关闭。'
+        : '本会话没有联网工具。点击开启后，下一次提问起模型可以搜索公网并抓取页面（每步模型调用仍照常计费）。',
+    });
+    badge.addEventListener('click', () => { toggleWebAccess(!on); });
+    return badge;
+  }
+
+  // toggleWebAccess persists the switch and reports what the server actually stored: the
+  // deployment can refuse to switch it on, and then the button must stay off.
+  async function toggleWebAccess(next) {
+    if (!state.session) return;
+    try {
+      const updated = await api.patch('/chat/sessions/' + encodeURIComponent(state.session.id),
+        { web_access: next });
+      state.session.web_access = updated.web_access;
+      renderMain();
+      toast(updated.web_access
+        ? '已开启联网：下一次提问起可以使用联网搜索与网页抓取'
+        : '已关闭联网：本会话不再调用联网工具', 'ok');
+    } catch (err) {
+      toast(api.errorMessage(err), 'error');
+    }
   }
 
   function skillDraftFromResult(result) {
@@ -894,7 +969,12 @@ export async function render({ page, actions, session, route }) {
 
   function composerHint() {
     const billing = '每步模型调用都按所选 Key 计费';
-    return sessionSkillNames().length ? billing + '；文本留空时按已加载的技能执行' : billing;
+    const parts = [billing];
+    if (sessionSkillNames().length) parts.push('文本留空时按已加载的技能执行');
+    if (state.session && state.session.web_access && state.session.web_access_available) {
+      parts.push('联网已开启：模型可搜索公网与抓取页面');
+    }
+    return parts.join('；');
   }
 
   function renderComposer() {

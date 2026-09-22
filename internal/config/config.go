@@ -357,7 +357,70 @@ type Chat struct {
 	MaxOutputTokens int `yaml:"max_output_tokens"`
 	// SystemPrompt replaces the built-in instructions when set.
 	SystemPrompt string `yaml:"system_prompt"`
+	// WebAccess gives the console's smart Q&A two extra tools: web_search (a search backend
+	// chosen here) and web_fetch (read one public page). Off by default, and a session must
+	// enable it as well — see ChatWebAccess.
+	WebAccess ChatWebAccess `yaml:"web_access"`
 }
+
+// ChatWebAccess configures the console's internet access (M73).
+//
+// Two switches guard this feature on purpose. Enabled here is the deployment's master switch:
+// with it off, no session can turn the tools on and the console does not even offer the
+// checkbox. With it on, each session still starts with web access off, so an operator enabling
+// the feature does not silently change what an existing conversation can reach.
+//
+// The search backend and the page fetcher share one client, one timeout and one SSRF guard. The
+// API key is a search-provider credential (bocha, tavily): it is never sent anywhere except that
+// provider, and it never reaches the model, the request log or the audit trail.
+type ChatWebAccess struct {
+	Enabled bool `yaml:"enabled"`
+	// Provider selects the search backend: searxng, bocha, tavily or bing. searxng needs a
+	// base_url and no key; bocha and tavily need a key; bing scrapes an HTML result page and
+	// needs neither, at the cost of being the one backend that can break on its own.
+	Provider string `yaml:"provider"`
+	// BaseURL overrides the provider's endpoint. For searxng it is required (the instance is
+	// the operator's own); for the others it exists so a proxy or a mirror can be used.
+	BaseURL string `yaml:"base_url"`
+	// APIKey authenticates the search provider. Prefer GW_CHAT_WEB_API_KEY over writing it
+	// here: a key in YAML is a key in every backup of that file.
+	APIKey string `yaml:"api_key"`
+	// Proxy routes the search call and the page fetch through one proxy. Empty means a direct
+	// connection and explicitly ignores HTTPS_PROXY; the literal "env" opts into the
+	// environment. The proxy address itself is never subject to the SSRF guard — a proxy on
+	// 127.0.0.1 is the normal case.
+	Proxy string `yaml:"proxy"`
+	// TimeoutS bounds one search call or one page fetch.
+	TimeoutS int `yaml:"timeout_s"`
+	// MaxResults caps how many hits one web_search may return, whatever the model asks for.
+	MaxResults int `yaml:"max_results"`
+	// FetchMaxBytes bounds one downloaded page and FetchMaxTextBytes the extracted text
+	// handed to the model; the second is clamped to the first.
+	FetchMaxBytes     int `yaml:"fetch_max_bytes"`
+	FetchMaxTextBytes int `yaml:"fetch_max_text_bytes"`
+	// MaxCallsPerTurn bounds web tool calls per question. Past it, the tools return an
+	// explanation instead of results and the turn continues.
+	MaxCallsPerTurn int `yaml:"max_calls_per_turn"`
+	// AllowPrivateHosts turns the SSRF guard off. It exists for a gateway whose job includes
+	// reading the operator's own intranet; it must never be set "just in case", because with
+	// it on the console can be talked into fetching cloud metadata and management ports.
+	AllowPrivateHosts bool `yaml:"allow_private_hosts"`
+}
+
+// ChatWebAccessProviders lists the backends this build knows. The rule itself lives in
+// internal/webaccess (which owns the adapters); it is restated here because internal/config is
+// a leaf package. TestChatWebAccessProviderListMatchesWebaccess keeps the two in step.
+var ChatWebAccessProviders = []string{"searxng", "bocha", "tavily", "bing"}
+
+// ChatWebAccessDefaults are the values a zero-valued configuration is filled with, repeated
+// from internal/webaccess for the same leaf-package reason.
+const (
+	ChatWebAccessTimeoutS          = 15
+	ChatWebAccessMaxResults        = 6
+	ChatWebAccessFetchMaxBytes     = 1 << 20
+	ChatWebAccessFetchMaxTextBytes = 32 << 10
+	ChatWebAccessMaxCallsPerTurn   = 8
+)
 
 // Portal configures the customer self-service portal (M14). It is off by default: an
 // operator opts in after creating portal users.
@@ -475,6 +538,21 @@ type Dshgw struct {
 	// under every tenant's origin. aigw is the side that knows those names, which is why the
 	// switch is configured here and reaches the child as a generated one.
 	AccountCard DshgwAccountCard `yaml:"account_card"`
+	// TenantPlugins are the tenant-side web plugins the child installs for every account (M75):
+	// the terminal, the workspace file manager and the read-only git change review. ON by
+	// default — the point of the feature is that an account's dsh has them without anybody
+	// editing that account's profile. The plugin files are deployed beside the child's
+	// plugin_path; this block only decides which rows are rendered.
+	TenantPlugins DshgwTenantPlugins `yaml:"tenant_plugins"`
+	// AutoEnable makes every active account able to use DSH without an operator pressing
+	// 启用 DSH per account (M72): the entitlement becomes
+	//
+	//	dsh_enabled || (auto_enable && the account was never explicitly disabled)
+	//
+	// and the tenant is provisioned on demand at the account's first login. Off by default:
+	// turning it on hands DSH to every active account at once, which is a deployment's
+	// decision rather than an upgrade's.
+	AutoEnable bool `yaml:"auto_enable"`
 }
 
 // DshgwBrowserWorkspaces is disabled by default.
@@ -484,6 +562,24 @@ type DshgwBrowserWorkspaces struct {
 
 // DshgwAccountCard is disabled by default.
 type DshgwAccountCard struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// DshgwTenantPlugins decides which tenant-side web plugins the child renders (M75). All three
+// default to ON, so a deployment that says nothing gets them — and a deployment that wants a
+// narrower surface has to say so explicitly, which is how the child's generated configuration is
+// written even when everything here is off.
+type DshgwTenantPlugins struct {
+	WebTTY         DshgwPluginSwitch `yaml:"web_tty"`
+	WorkspaceFiles DshgwPluginSwitch `yaml:"workspace_files"`
+	GitDiff        DshgwPluginSwitch `yaml:"git_diff"`
+	// RootLabel is the label the two workspace-scoped panels show for their root. Empty means
+	// the child's own default, 工作区.
+	RootLabel string `yaml:"root_label"`
+}
+
+// DshgwPluginSwitch is one tenant-side plugin's enabled flag.
+type DshgwPluginSwitch struct {
 	Enabled bool `yaml:"enabled"`
 }
 
@@ -499,9 +595,8 @@ type DshgwSSHWorkspaces struct {
 	MountSubdir        string   `yaml:"mount_subdir"`
 	SSHBin             string   `yaml:"ssh_bin"`
 	SSHFSBin           string   `yaml:"sshfs_bin"`
-	IdentitySource     string   `yaml:"identity_source"`
 	IdentityDir        string   `yaml:"identity_dir"`
-	SSHConfigSource    string   `yaml:"ssh_config_source"`
+	SSHConfigDir       string   `yaml:"ssh_config_dir"`
 	Hosts              []string `yaml:"hosts"`
 	ConnectTimeout     string   `yaml:"connect_timeout"`
 	PollInterval       string   `yaml:"poll_interval"`
@@ -534,6 +629,12 @@ type Feishu struct {
 	AuthorizeURL string `yaml:"authorize_url"`
 	TokenURL     string `yaml:"token_url"`
 	UserInfoURL  string `yaml:"userinfo_url"`
+	// TenantTokenURL and ContactURL serve the contact-directory read of the org sync
+	// (M70) — the tenant access token endpoint and the base of /contact/v3. They follow
+	// the same configurability rule as the three above and are validated to be https
+	// (or http only for an explicit loopback, like the rest).
+	TenantTokenURL string `yaml:"tenant_token_url"`
+	ContactURL     string `yaml:"contact_url"`
 	// Scopes is a space-separated extra scope list. Empty is the right default: the
 	// open id and the display name this feature needs require no permission at all, and
 	// asking for more would show the user a consent screen for data we do not read.
@@ -584,6 +685,11 @@ type Feishu struct {
 	// TicketTTLS bounds how long that ticket can be redeemed. It is meant to cover one
 	// browser redirect, not to be a session.
 	TicketTTLS int `yaml:"ticket_ttl_s"`
+	// PickTTLS bounds the key-pick ticket of a multi-key portal login (M72): the step where
+	// the person chooses which of the account's keys this session is recorded against. It
+	// covers one form submission, so it follows the ticket TTL rather than a session
+	// lifetime. Zero falls back to TicketTTLS.
+	PickTTLS int `yaml:"pick_ttl_s"`
 }
 
 // FeishuLoginURL is the browser-visible entry point of the authorization flow. It is
@@ -790,13 +896,19 @@ func Default() Config {
 	return Config{
 		Feishu: Feishu{
 			// Default endpoints are the documented ones: the authorization page, the
-			// OAuth v3 token endpoint (v2 is historical) and the user-info API.
-			AuthorizeURL:  "https://accounts.feishu.cn/open-apis/authen/v1/authorize",
-			TokenURL:      "https://accounts.feishu.cn/oauth/v3/token",
-			UserInfoURL:   "https://open.feishu.cn/open-apis/authen/v1/user_info",
-			TimeoutS:      5,
-			StateTTLS:     600,
-			TicketTTLS:    120,
+			// OAuth v3 token endpoint (v2 is historical) and the user-info API. The
+			// tenant token + contact base serve the directory read of the org sync.
+			AuthorizeURL:   "https://accounts.feishu.cn/open-apis/authen/v1/authorize",
+			TokenURL:       "https://accounts.feishu.cn/oauth/v3/token",
+			UserInfoURL:    "https://open.feishu.cn/open-apis/authen/v1/user_info",
+			TenantTokenURL: "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+			ContactURL:     "https://open.feishu.cn/open-apis/contact/v3",
+			TimeoutS:       5,
+			StateTTLS:      600,
+			TicketTTLS:     120,
+			// Zero means "the key pick lives exactly as long as the login ticket it belongs
+			// to" (M72); naming a value is what a slower deployment would do.
+			PickTTLS:      0,
 			DSHLogin:      true,
 			AdminLogin:    true,
 			InviteTTLS:    3600,
@@ -810,6 +922,14 @@ func Default() Config {
 			TenantPortHi: 31299,
 			WorkerPortLo: 31300,
 			WorkerPortHi: 31599,
+			// On by default (M75), matching the child's own defaults: the generated child
+			// configuration always states these switches, so an operator who writes
+			// `enabled: false` here must not have the child's default turn it back on.
+			TenantPlugins: DshgwTenantPlugins{
+				WebTTY:         DshgwPluginSwitch{Enabled: true},
+				WorkspaceFiles: DshgwPluginSwitch{Enabled: true},
+				GitDiff:        DshgwPluginSwitch{Enabled: true},
+			},
 		},
 		Server: Server{
 			Listen:       ":8080",
@@ -936,6 +1056,18 @@ func Default() Config {
 			ArtifactTicketTTL:     5 * time.Minute,
 			ArtifactAllowNetwork:  false,
 			UIBridgeEnabled:       true,
+			// M73: the console's internet access is off until an operator configures a
+			// backend. Defaulting the provider to bing means enabling the switch alone
+			// produces a working (if unpolished) search instead of a start-up error.
+			WebAccess: ChatWebAccess{
+				Enabled:           false,
+				Provider:          "bing",
+				TimeoutS:          ChatWebAccessTimeoutS,
+				MaxResults:        ChatWebAccessMaxResults,
+				FetchMaxBytes:     ChatWebAccessFetchMaxBytes,
+				FetchMaxTextBytes: ChatWebAccessFetchMaxTextBytes,
+				MaxCallsPerTurn:   ChatWebAccessMaxCallsPerTurn,
+			},
 		},
 		Hooks:     Hooks{QueueSize: 1024, Workers: 8, TimeoutS: 5, Retries: 5, DeadLetter: dataPath("hooks-dead.jsonl")},
 		Portal:    Portal{SessionTTLH: 12, LoginAttempts: 10},
@@ -1026,8 +1158,11 @@ func applyEnv(cfg *Config) error {
 	envStr(&cfg.Feishu.StateSecret, "GW_FEISHU_STATE_SECRET")
 	envStr(&cfg.Feishu.TicketSecret, "GW_FEISHU_TICKET_SECRET")
 	envStr(&cfg.Feishu.PortalURL, "GW_FEISHU_PORTAL_URL")
+	envStr(&cfg.Feishu.TenantTokenURL, "GW_FEISHU_TENANT_TOKEN_URL")
+	envStr(&cfg.Feishu.ContactURL, "GW_FEISHU_CONTACT_URL")
 	envBool(&cfg.Feishu.AdminLogin, "GW_FEISHU_ADMIN_LOGIN")
 	envInt(&cfg.Feishu.InviteTTLS, "GW_FEISHU_INVITE_TTL_S")
+	envInt(&cfg.Feishu.PickTTLS, "GW_FEISHU_PICK_TTL_S")
 	envStr(&cfg.Feishu.InviteSecret, "GW_FEISHU_INVITE_SECRET")
 	envStr(&cfg.Feishu.ConsoleURL, "GW_FEISHU_CONSOLE_URL")
 	envStr(&cfg.Log.Level, "GW_LOG_LEVEL")
@@ -1039,6 +1174,9 @@ func applyEnv(cfg *Config) error {
 	envStr(&cfg.Bootstrap.Admin.Password, "GW_ADMIN_PASSWORD")
 	envStr(&cfg.Backup.Dir, "GW_BACKUP_DIR")
 	envStr(&cfg.Backup.Cron, "GW_BACKUP_CRON")
+	// The one web-access value worth an environment variable: a search key in the environment
+	// stays out of the YAML file, its backups and its diffs.
+	envStr(&cfg.Chat.WebAccess.APIKey, "GW_CHAT_WEB_API_KEY")
 
 	for _, step := range []error{
 		envBool(&cfg.Backup.Enabled, "GW_BACKUP_ENABLED"),
@@ -1054,6 +1192,7 @@ func applyEnv(cfg *Config) error {
 		envInt(&cfg.Routing.ProviderQueueMaxWaiters, "GW_ROUTING_PROVIDER_QUEUE_MAX_WAITERS"),
 		envInt(&cfg.Server.ReadTimeoutS, "GW_SERVER_READ_TIMEOUT_S"),
 		envInt(&cfg.RateLimit.Shards, "GW_RATELIMIT_SHARDS"),
+		envBool(&cfg.Dshgw.AutoEnable, "GW_DSHGW_AUTO_ENABLE"),
 	} {
 		if step != nil {
 			return step
@@ -1124,9 +1263,11 @@ func (c *Config) validateFeishu() error {
 		}
 	}
 	for label, raw := range map[string]string{
-		"feishu.authorize_url": c.Feishu.AuthorizeURL,
-		"feishu.token_url":     c.Feishu.TokenURL,
-		"feishu.userinfo_url":  c.Feishu.UserInfoURL,
+		"feishu.authorize_url":    c.Feishu.AuthorizeURL,
+		"feishu.token_url":        c.Feishu.TokenURL,
+		"feishu.userinfo_url":     c.Feishu.UserInfoURL,
+		"feishu.tenant_token_url": c.Feishu.TenantTokenURL,
+		"feishu.contact_url":      c.Feishu.ContactURL,
 	} {
 		// These carry the app secret and the user's access token, so https is required
 		// outside a loopback stub.
@@ -1168,6 +1309,12 @@ func (c *Config) validateFeishu() error {
 	if c.Feishu.DSHLogin {
 		if c.Feishu.TicketTTLS < 30 || c.Feishu.TicketTTLS > 600 {
 			return fmt.Errorf("feishu.ticket_ttl_s must be between 30 and 600 (got %d)", c.Feishu.TicketTTLS)
+		}
+		// Zero means "follow the ticket TTL", which is the right default for the key-pick
+		// step (M72); a stated value is bounded the same way, because it also covers one
+		// form submission rather than a session.
+		if c.Feishu.PickTTLS < 0 || c.Feishu.PickTTLS > 600 {
+			return fmt.Errorf("feishu.pick_ttl_s must be between 0 (follow ticket_ttl_s) and 600 (got %d)", c.Feishu.PickTTLS)
 		}
 		if strings.TrimSpace(c.Feishu.TicketSecret) == "" && strings.TrimSpace(c.CredentialsKey) == "" {
 			return fmt.Errorf("feishu.ticket_secret is empty and credentials_key cannot derive one")
@@ -1349,6 +1496,11 @@ func (c *Config) Validate() error {
 	if err := validateChat(c); err != nil {
 		return err
 	}
+	// Checked regardless of chat.enabled: a typo in the web-access block must be reported now,
+	// not after the operator turns the console on and finds the tools broken.
+	if err := validateChatWebAccess(c); err != nil {
+		return err
+	}
 	for _, model := range c.Bootstrap.Models {
 		if model.Reasoning != nil {
 			if err := model.Reasoning.Validate(); err != nil {
@@ -1446,6 +1598,113 @@ func validateChat(c *Config) error {
 	}
 	if chat.MaxOutputTokens < 0 {
 		return fmt.Errorf("chat.max_output_tokens must be >= 0 (0 keeps the provider default)")
+	}
+	return nil
+}
+
+// validateChatWebAccess checks the console's internet access block (M73).
+//
+// It runs whenever the block is enabled, even if chat.enabled is false: the two mistakes it
+// catches — a provider that needs a key without one, and a searxng backend without an instance
+// URL — would otherwise surface as "the model cannot find anything" long after the deployment
+// looked healthy. It is also the one place that normalizes the base URL, so the runtime never
+// has to guess whether a trailing slash was written.
+func validateChatWebAccess(c *Config) error {
+	web := &c.Chat.WebAccess
+	web.Provider = strings.ToLower(strings.TrimSpace(web.Provider))
+	web.BaseURL = strings.TrimRight(strings.TrimSpace(web.BaseURL), "/")
+	if !web.Enabled {
+		// A disabled block is not validated field by field (an operator may leave a stale
+		// value behind), but a provider name that does not exist is still a typo worth
+		// reporting before it is enabled.
+		if web.Provider != "" {
+			if err := oneOf("chat.web_access.provider", web.Provider, ChatWebAccessProviders...); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if web.Provider == "" {
+		return fmt.Errorf("chat.web_access.provider is required when web access is enabled (one of %s)",
+			strings.Join(ChatWebAccessProviders, ", "))
+	}
+	if err := oneOf("chat.web_access.provider", web.Provider, ChatWebAccessProviders...); err != nil {
+		return err
+	}
+	switch web.Provider {
+	case "searxng":
+		if web.BaseURL == "" {
+			// Unlike the other backends there is no vendor endpoint to fall back on: the
+			// instance is the operator's own server.
+			return fmt.Errorf("chat.web_access.base_url is required for the searxng provider (for example https://searx.example.com)")
+		}
+	case "bocha", "tavily":
+		if strings.TrimSpace(web.APIKey) == "" {
+			return fmt.Errorf("chat.web_access.api_key is required for the %s provider (or set GW_CHAT_WEB_API_KEY)", web.Provider)
+		}
+	}
+	if web.BaseURL != "" {
+		if err := validateWebAccessURL("chat.web_access.base_url", web.BaseURL); err != nil {
+			return err
+		}
+	}
+	if web.TimeoutS <= 0 {
+		return fmt.Errorf("chat.web_access.timeout_s must be positive")
+	}
+	if web.MaxResults < 1 || web.MaxResults > 20 {
+		return fmt.Errorf("chat.web_access.max_results must be between 1 and 20")
+	}
+	if web.FetchMaxBytes <= 0 {
+		return fmt.Errorf("chat.web_access.fetch_max_bytes must be positive")
+	}
+	if web.FetchMaxTextBytes <= 0 {
+		return fmt.Errorf("chat.web_access.fetch_max_text_bytes must be positive")
+	}
+	if web.FetchMaxTextBytes > web.FetchMaxBytes {
+		return fmt.Errorf("chat.web_access.fetch_max_text_bytes (%d) must not exceed fetch_max_bytes (%d)",
+			web.FetchMaxTextBytes, web.FetchMaxBytes)
+	}
+	if web.MaxCallsPerTurn <= 0 {
+		return fmt.Errorf("chat.web_access.max_calls_per_turn must be positive")
+	}
+	if trimmed := strings.TrimSpace(web.Proxy); trimmed != "" && !strings.EqualFold(trimmed, "env") {
+		parsed, err := url.Parse(trimmed)
+		if err != nil {
+			return fmt.Errorf("chat.web_access.proxy %q is not a valid URL: %w", web.Proxy, err)
+		}
+		if !ChatWebAccessProxySchemes[parsed.Scheme] || parsed.Host == "" {
+			return fmt.Errorf("chat.web_access.proxy %q must be one of %s URLs (or the literal \"env\"); a proxy on 127.0.0.1 is fine here",
+				web.Proxy, strings.Join(ChatWebAccessProxySchemeNames(), ", "))
+		}
+	}
+	return nil
+}
+
+// ChatWebAccessProxySchemes restates providerkit's proxy vocabulary for the leaf config
+// package. TestChatWebAccessProxySchemesMatchProviderkit keeps the two from drifting.
+var ChatWebAccessProxySchemes = map[string]bool{
+	"http": true, "https": true, "socks5": true, "socks5h": true,
+}
+
+// ChatWebAccessProxySchemeNames lists the accepted proxy schemes for error messages.
+func ChatWebAccessProxySchemeNames() []string {
+	return []string{"http", "https", "socks5", "socks5h"}
+}
+
+// validateWebAccessURL accepts the http/https endpoint a backend is reached at. It is
+// deliberately allowed to be a private address: a searxng instance on the operator's own
+// network is a normal deployment, and the SSRF guard governs what the *model* may fetch, not
+// where this deployment's own search backend lives.
+func validateWebAccessURL(field, raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%s %q is not a valid URL: %w", field, raw, err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("%s %q must be an http or https URL", field, raw)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("%s %q has no host", field, raw)
 	}
 	return nil
 }

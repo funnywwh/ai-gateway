@@ -81,7 +81,7 @@ func TestStableKeyKeepsTheSameVirtualPathAcrossMounts(t *testing.T) {
 	}
 	// Nothing is mounted there any more, so there is nothing left for startup cleanup: the
 	// record goes, the directory stays.
-	if _, err := os.Stat(s.recordPath(stableKeyA)); !os.IsNotExist(err) {
+	if _, err := os.Stat(s.recordPath(tenant.Name, stableKeyA)); !os.IsNotExist(err) {
 		t.Fatalf("record of a closed mount remains: %v", err)
 	}
 	second, err := s.openWith(tenant, "owner", openRequest{Name: "docs", Writable: true, Key: stableKeyA})
@@ -150,7 +150,7 @@ func TestPurgeReleasesTheStableMountPoint(t *testing.T) {
 	if _, err := os.Stat(sh.path); !os.IsNotExist(err) {
 		t.Fatalf("purged mount point remains: %v", err)
 	}
-	if _, err := os.Stat(s.recordPath(stableKeyA)); !os.IsNotExist(err) {
+	if _, err := os.Stat(s.recordPath(tenant.Name, stableKeyA)); !os.IsNotExist(err) {
 		t.Fatalf("purged mount record remains: %v", err)
 	}
 	// A share without a stable key keeps the original behaviour: its mount point was
@@ -168,16 +168,17 @@ func TestPurgeReleasesTheStableMountPoint(t *testing.T) {
 	}
 }
 
-// The key becomes a directory name, so its shape is validated instead of sanitised.
+// The key becomes a directory name, so its shape is validated instead of sanitised. The legacy
+// 32/48 hex ids pass the same rule (see TestDirectoryKeys), so a folder saved before directory
+// names keeps its path; what is refused here is anything that is not exactly one safe segment.
 func TestInvalidDirectoryKeyIsRefused(t *testing.T) {
 	s, tenant, _ := stableFixture(t)
 	for _, key := range []string{
-		"..", "../../etc", "/absolute", stableKeyA + "a", stableKeyA[:31],
-		"0123456789ABCDEF0123456789ABCDEF", "0123456789abcdef0123456789abcdeg",
-		"0123456789abcdef0123456789abcde/", "0123456789abcdef0123456789abcde\x00",
+		"..", ".", "../etc", "/absolute", "nested/name", `back\slash`, ".hidden",
+		" padded", "padded ", "new\nline", "nul\x00", "delete\x7f", strings.Repeat("a", 256),
 	} {
-		if _, err := s.openWith(tenant, "owner", openRequest{Name: "docs", Writable: true, Key: key}); err == nil {
-			t.Fatalf("invalid directory key %q was accepted", key)
+		if _, err := s.openWith(tenant, "owner", openRequest{Name: "docs", Writable: true, Key: key}); err == nil || !strings.Contains(err.Error(), "invalid directory key") {
+			t.Fatalf("invalid directory key %q was accepted: %v", key, err)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(tenant.Workspace, "browser")); !os.IsNotExist(err) && err != nil {
@@ -318,7 +319,7 @@ func TestCleanupStaleKeepsAStableMountPoint(t *testing.T) {
 	if info, err := os.Stat(path); err != nil || !info.IsDir() {
 		t.Fatalf("a stable mount point was removed by startup cleanup: %v", err)
 	}
-	if _, err := os.Stat(s.recordPath(stableKeyA)); !os.IsNotExist(err) {
+	if _, err := os.Stat(s.recordPath(tenant.Name, stableKeyA)); !os.IsNotExist(err) {
 		t.Fatalf("the stale record was kept: %v", err)
 	}
 	// The kept directory is immediately reusable by the next mount of that key.

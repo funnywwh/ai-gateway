@@ -97,7 +97,7 @@ func TestConfigExampleLoadsAsWritten(t *testing.T) {
 func TestServerAndLifecycleUseConfiguredSessionCapacity(t *testing.T) {
 	root := t.TempDir()
 	cfg := filepath.Join(root, "config.yaml")
-	if err := os.WriteFile(cfg, []byte("directory_picker: browse\nstate_dir: "+filepath.Join(root, "state")+"\nmax_sessions: 1\n"), 0o600); err != nil {
+	if err := os.WriteFile(cfg, []byte("directory_picker: browse\nstate_dir: "+filepath.Join(root, "state")+"\nmax_sessions: 1\n"+tenantPluginsOff), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	app := &cli{configPath: cfg}
@@ -166,6 +166,7 @@ func TestSandboxExecPrintRendersProfileFromConfiguration(t *testing.T) {
 	workspace := filepath.Join(root, "srv/alice")
 	configPath := filepath.Join(root, "config.yaml")
 	doc := "directory_picker: browse\n" +
+		tenantPluginsOff +
 		"state_dir: " + filepath.Join(root, "state") + "\n" +
 		"tenant_root: " + filepath.Join(root, "state/tenants") + "\n" +
 		"workspace_root: " + filepath.Join(root, "srv") + "\n" +
@@ -201,6 +202,12 @@ func TestSandboxExecPrintRendersProfileFromConfiguration(t *testing.T) {
 
 // deploymentConfigIn writes a configuration the supervised shape expects under
 // root, with extraDeploy appended to the deploy block.
+// tenantPluginsOff is the fixture sentence that keeps a configuration free of plugin files: the
+// picker that needs none, and the tenant-side plugins switched off. They are on by default because
+// they ship beside deploy.plugin_path (M75), so a fixture that does not exercise them — and has no
+// plugin directory in its temporary tree — has to say so.
+const tenantPluginsOff = "tenant_plugins:\n  web_tty:\n    enabled: false\n  workspace_files:\n    enabled: false\n  git_diff:\n    enabled: false\n"
+
 func deploymentConfigIn(t *testing.T, root, extraDeploy string) *config.Config {
 	t.Helper()
 	path := filepath.Join(root, "config.yaml")
@@ -209,6 +216,7 @@ func deploymentConfigIn(t *testing.T, root, extraDeploy string) *config.Config {
 	// plugin file that does not exist in its temporary tree.
 	doc := "state_dir: " + filepath.Join(root, "state") + "\n" +
 		"directory_picker: browse\n" +
+		tenantPluginsOff +
 		"deploy:\n" + extraDeploy
 	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
 		t.Fatal(err)

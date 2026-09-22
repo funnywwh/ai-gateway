@@ -104,8 +104,17 @@ dshgw-test:
 	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" cmd/dshgw/plugin/ssh-workspace/client.test.mjs
 	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" cmd/dshgw/plugin/account-card/client.test.mjs
 	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" internal/dshgw/tenancy/settings_schema.test.mjs
+# The three tenant-side plugins every account gets (M75). web-tty needs the anchor the runner gives
+# a real worker, because that is where its node-pty comes from — without it the host test would be
+# testing a plugin that cannot resolve its PTY, which is not the plugin a tenant runs.
+	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" DSHGW_DSH_ANCHOR="$(DSHGW_DSH_ROOT)/package.json" \
+		"$(DSHGW_NODE)" --test cmd/dshgw/plugin/web-tty/test/*.test.mjs
+	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" --test cmd/dshgw/plugin/workspace-files/test/*.test.mjs
+	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" --test cmd/dshgw/plugin/git-diff/test/*.test.mjs
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_dshgw_migration_plan.py
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_decommission_legacy_plan.py
+	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ssh_config_adopt.py
+	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_dshgw_ssh_identity.py
 
 # The ssh-workspace acceptance (M64): a real sshfs mount over loopback, a write through the
 # mount landing on the remote side, and a clean detach. It needs sshfs, a non-interactive
@@ -121,6 +130,19 @@ dshgw-ssh-integration:
 dshgw-ssh-e2e:
 	@DSHGW_NODE="$(DSHGW_NODE)" DSHGW_BIN_JS="$(DSHGW_DSH_ROOT)/lib/bin.js" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" \
 		PYTHONDONTWRITEBYTECODE=1 python3 scripts/ssh_workspace_e2e.py
+
+# The logout acceptance (M76): "dsh 点击退出按钮后，强制 umount 使用挂载文件系统，最后强制退出 dsh".
+# A throwaway dshgw with both mount kinds attached at once — a real browser-directory FUSE mount
+# (driven by a stand-in for the browser side of the poll protocol, so no Chromium is needed) bound
+# into the account's sandbox, and a real sshfs mount — then POST /dshgw/logout/ (the sidebar's 退出):
+# both mounts leave the kernel table, the dsh's worker port closes, the audit records the detach and
+# the verified stop, and the next sign-in puts the ssh workspace back at the same path. Needs the
+# gateway host: /dev/fuse, fusermount3, bwrap, sshfs, a non-interactive loopback ssh, and a prepared
+# dsh template. The busy/unmount-EBUSY half of the force ladder is pinned by the Go test
+# TestRealFUSEForceUnmountTakesABusyMount (BROWSERWORKSPACE_FUSE_TEST=1).
+dshgw-logout-e2e: dshgw-build
+	@DSHGW_NODE="$(DSHGW_NODE)" DSHGW_BIN_JS="$(DSHGW_DSH_ROOT)/lib/bin.js" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" \
+		PYTHONDONTWRITEBYTECODE=1 python3 scripts/dshgw_logout_teardown_e2e.py --dshgw bin/dshgw
 
 # The bwrap isolation mode's real acceptance: the tenant profile runs under the
 # host's own bubblewrap, and a real dsh web worker starts inside it and answers
@@ -160,7 +182,12 @@ ui-base:
 		node internal/webui/tests/requests_test.mjs || exit $$? ; \
 		node internal/webui/tests/tags_binding_test.mjs || exit $$? ; \
 		node internal/webui/tests/org_tree_test.mjs || exit $$? ; \
+		node internal/webui/tests/org_person_list_test.mjs || exit $$? ; \
+		node internal/webui/tests/tenant_name_test.mjs || exit $$? ; \
+		node --experimental-vm-modules internal/webui/tests/org_assign_test.mjs || exit $$? ; \
 		node --experimental-vm-modules internal/webui/tests/keys_feishu_test.mjs || exit $$? ; \
+		node --experimental-vm-modules internal/webui/tests/org_feishu_test.mjs || exit $$? ; \
+		node --experimental-vm-modules internal/webui/tests/account_feishu_test.mjs || exit $$? ; \
 	else \
 		echo "skip: node is not available (the derivation is still covered by make ui-check)" ; \
 	fi

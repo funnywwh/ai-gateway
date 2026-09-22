@@ -2,6 +2,20 @@
 
 > 状态：**设计（阶段 0 实测已完成，结论：不做沙箱内挂载，改由 dshgw 在沙箱外挂载）**。
 > 规格文档：`docs/dshgw.md`（新增一节）、`docs/deployment-layout.md`（新增 `.ssh/` 与 `ssh/`）。
+>
+> **2026-09-22 追补**：本文里的 `identity_source`（一把共享密钥灌给所有账号）**已删除**。本机曾把它
+> 指向部署账号自己的 `~/.ssh/id_rsa`，8 个租户各拿到一份宿主私钥副本，而该密钥就在本机
+> `authorized_keys` 里 ⇒ 租户可从沙箱 ssh 回宿主成为部署账号。现在唯一的预置来源是
+> `identity_dir/<账号>`（一账号一把），该键出现即拒绝启动；`identity_dir` 与 `ssh_config_dir`
+> 一样不得落在本进程账号的 `~/.ssh` 内。下文凡提 `identity_source` 处均按此口径理解（保留原文以
+> 记录当时的设计），处置流程见 `docs/dshgw.md` §7b「共享密钥事故的处置」。
+>
+> **2026-09-22 追补（M76，挂载的生命周期）**：点「退出」时该账号的 sshfs 挂载会被**强制卸载**
+> （`DetachTenant`：优雅 → `-u -z` → 杀守护进程/abort 后重试），**记录、镜像与挂载点目录保留**；
+> **下次登录按记录自动重挂**（`Restore`，在启动 worker 之前，`cmd/dshgw/login_prepare.go` 的
+> `PrepareLogin` 里），因此"退出卸载、再登录挂回"。设计见
+> [M76](m76-dsh-exit-force-teardown.md)；上文 §「挂载后的重启代价」与"挂载不随退出消失"的隐含假设
+> 按这一条理解。
 
 ## 1. 需求与定位
 
@@ -199,3 +213,39 @@ ssh_workspaces:
 **验收状态**：Go 单测、插件两侧 JS 断言、`make dshgw-test`、`make dshgw-ssh-integration`、
 `make dshgw-ssh-e2e` 全绿。仍未做的真机项（监督形态 `aigw-local.service` 上的浏览器验收、跨账号
 不可见断言、`sshfs` 缺失时拒绝启动）见 `docs/TODO.md` 的 M64 小节。
+
+## 15. 别名清单改成「一账号一份」+「我的主机」（2026-09-21）
+
+**动机**：设计里的 `ssh_config_source` 是**一个**文件，本机部署把它指向运维自己的
+`/home/winger/.ssh/config`（`dshgw.yaml:49`）。后果有两层：每个租户的工作区里都落了一整份运维认识的
+主机清单（内网 IP、用户名、云主机入口），而且所有租户的别名完全相同 —— 一处改动等于替所有账号决定。
+本次把「一个全局文件」换成「一账号一份」，并把这份文件交给账号自己维护。
+
+**改动**
+
+1. **配置面**：`ssh_workspaces.ssh_config_source` **删除**，新增 `ssh_workspaces.ssh_config_dir`
+   （`<dir>/<账号>` 是那份账号的别名清单）。旧键在加载时被显式识别并报错点名替代键，不做静默忽略；
+   `ssh_config_dir` 必须是目录、非 world-writable，且解析后不得落在本进程账号自己的 `~/.ssh` 里
+   （只查 config 来源：`identity_source` 仍是运维的共享密钥，不在本次范围）。
+2. **Provisioning**（`EnsureIdentity`）：种子从 `<ssh_config_dir>/<账号>` 读，仍然只在账号**还没有**
+   config 时写一次 —— 账号一旦有 config 就归它自己，插件会往里加主机，运维要重置就「改种子 → 删
+   `<workspace>/.ssh/config` → `dshgw tenant restart <账号>`」。种子必须是普通文件、非符号链接、非硬
+   链接、非 world-writable，否则报错而不是静默跳过（种子是运维对该账号可达主机的声明）。
+3. **「我的主机」**（插件 + 对话框）：新增 `addHost` / `deleteHost` 两个端点，对话框新增一个列表区。
+   添加成功后把 `Host <别名>` + `HostName`/`User`/`Port` 写进**本账号**的 config；删除同时移除该块与
+   `host_keys/<SHA256(别名)>`。只改这四个字段，块内其它指令与文件其余字节原样保留；写入是临时文件 +
+   rename；同名不覆盖（先删再加）；正被挂载使用的别名拒绝删除；`hosts` 白名单非空时要求别名与连接
+   标识都在白名单内。
+4. **迁移**：新增 `scripts/ssh_config_adopt.sh`（+ `scripts/test_ssh_config_adopt.py`）：把每个账号现有
+   的 `<workspace>/.ssh/config` 复制成它的种子，已存在不覆盖，不碰账号工作区。
+
+**不变的部分（刻意）**：config 仍住在租户工作区、仍由该账号可写，网关读取时仍只取
+`HostName`/`User`/`Port` 并用同一套正则校验；两侧 ssh/sshfs 仍然 `-F /dev/null`；**沙箱 profile 一行
+没改** —— 没有新设备、没有新 capability、没有新的绑定，M57/M58 的隔离口径与 §9 完全不变。
+租户之间仍然靠「只绑本账号的树」隔离，不靠 Unix 权限（所有 worker 共用一个 uid）。
+
+**测试**：`internal/dshgw/config` 的 `ssh_config_dir` 解析/校验/旧键报错矩阵；`sshworkspace` 新增
+`config_source_test.go`（按账号取种子、跨账号不串、写一次、非法种子报错，以及**诱饵测试**：把 `HOME`
+指向含 `.ssh/config`（`Host decoy`）的临时目录，断言租户 config 里永不出现它）；插件 248 条与客户端
+61 条 JS 断言覆盖校验、行级增删、私钥绑定、拒绝路径；`ssh_workspace_e2e.py` 增加「按账号种子生成
+config」「别的账号的种子不出现」「用别名挂载并读回远端文件」「旧键被拒绝」四步。

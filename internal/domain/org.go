@@ -21,6 +21,15 @@ type OrgNode struct {
 	SortOrder int
 	CreatedAt time.Time
 	UpdatedAt time.Time
+
+	// FeishuDepartmentID is the open_department_id this node was created from or merged
+	// with by the directory sync (M70). The first sync matches by sibling name and stamps
+	// the id; every later sync then recognizes the node by id, so a department survives a
+	// rename on either side. Empty means "not linked". Written only by the sync paths —
+	// a console PATCH of the node must never clear it.
+	FeishuDepartmentID string
+	// FeishuSyncedAt records when that link was last written. Display/audit only.
+	FeishuSyncedAt *time.Time
 }
 
 // ParentIDValue returns the node's parent as a plain value, with 0 meaning "no parent".

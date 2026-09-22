@@ -1,0 +1,37 @@
+{
+  "code": 200,
+  "log_id": "d71841ad20095f61",
+  "msg": null,
+  "data": {
+    "_type": "SearchResponse",
+    "queryContext": { "originalQuery": "深度求索 价格" },
+    "webPages": {
+      "webSearchUrl": "",
+      "totalEstimatedMatches": 8912791,
+      "someResultsRemoved": true,
+      "value": [
+        {
+          "id": null,
+          "name": "DeepSeek 开放平台价格页",
+          "url": "https://platform.deepseek.com/api-docs/pricing",
+          "displayUrl": "https://platform.deepseek.com/api-docs/pricing",
+          "snippet": "简短描述",
+          "summary": "长文本摘要：deepseek-chat 输入 0.5 元/百万 token，输出 8 元/百万 token。",
+          "siteName": "DeepSeek 开放平台",
+          "datePublished": "2026-09-18T00:00:00+08:00",
+          "dateLastCrawled": "2026-09-18T00:00:00Z"
+        },
+        {
+          "id": null,
+          "name": "第三方评测",
+          "url": "https://example.com/review",
+          "snippet": "只有短描述时用它",
+          "siteName": "Example",
+          "datePublished": ""
+        }
+      ]
+    },
+    "images": { "value": [] },
+    "videos": null
+  }
+}

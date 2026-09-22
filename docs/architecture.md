@@ -56,6 +56,7 @@
 | `internal/billing/*` | 计价、账本、在途、账单、对账、充值 | M11/M12 |
 | `internal/backup` | 一致点备份、保留、恢复 | M16 |
 | `internal/retention` | 录制数据（请求日志/存储响应）的保留期清理（叶子包，端口注入） | M25 |
+| `internal/webaccess` | 控制台联网：搜索后端适配（searxng/bocha/tavily/bing）、网页正文抽取、SSRF 防护（叶子包，零内部依赖） | M73 |
 
 ## 可替换扩展点（SPI）
 

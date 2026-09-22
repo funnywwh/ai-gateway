@@ -19,8 +19,14 @@ type ChatSession struct {
 	// read fresh on every tool call, so revoking the token ends the conversation's ability
 	// immediately rather than leaving a snapshot of authority behind. Nil means unbound —
 	// a session created before token binding existed, which can call nothing until rebound.
-	MCPTokenID   *int64
-	SkillIDs     []int64
+	MCPTokenID *int64
+	SkillIDs   []int64
+	// WebAccess is this conversation's own switch for the web_search / web_fetch tools (M73).
+	// It is off by default and per session on purpose: a deployment that turns internet access
+	// on must not silently change what an existing conversation can reach. It is not derived
+	// from MCPTokenID — the web tools need no token at all — but the deployment's master
+	// switch (chat.web_access.enabled) still has to be on for the tools to exist.
+	WebAccess    bool
 	Status       string // active
 	MessageCount int
 	TokensIn     int

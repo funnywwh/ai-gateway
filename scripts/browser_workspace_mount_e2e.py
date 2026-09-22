@@ -862,6 +862,11 @@ def main() -> int:
         mountpoint = Path(document["Path"])
         if workspace not in mountpoint.parents:
             raise AssertionError(f"{mountpoint} is not inside {workspace}")
+        # The mount point is named after the LOCAL directory the browser picked: that path is
+        # what the operator reads in DSH's workspace picker, and DSH's own workspace entry is
+        # keyed by it. A generated id here would be the pre-directory-name behaviour.
+        if mountpoint.parent.name != "browser" or mountpoint.name != PICKED:
+            raise AssertionError(f"mount point {mountpoint} is not the browser's own directory name {PICKED!r}")
         fstype = wait_for(lambda: mount_type(str(mountpoint)) or None, 15, "the mount to appear in the kernel table")
         if not fstype.startswith("fuse"):
             raise AssertionError(f"unexpected filesystem type {fstype}")

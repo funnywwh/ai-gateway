@@ -211,8 +211,45 @@ chat:
   ui_bridge_enabled: true
   # 单步回答的 token 上限，0 = 用供应商默认值。
   max_output_tokens: 0
-  # 空 = 使用内置指令（含工具用法、图表规格、HTML 沙箱边界、可交互界面契约）。
+  # 空 = 使用内置指令（含工具用法、图表规格、HTML 沙箱边界、可交互界面契约、联网边界）。
   system_prompt: ""
+  # 联网（M73）：让模型用 web_search 检索公网、用 web_fetch 读网页正文。默认关。
+  #
+  # 两层开关：这里是**部署级**（本部署是否提供联网，只读本文件——故意不做环境变量覆盖，
+  # 免得被误开）；**会话级**开关在会话头部/新建会话时打开，默认关，逐会话落库。
+  # 联网工具不代表任何网关权限（它不走 /mcp、不需要 MCP 令牌），也不计费——它不是模型调用；
+  # 但外部搜索 API 的额度与费用由本部署承担，模型为用上结果多走的模型步数照常计费。
+  web_access:
+    enabled: false
+    # 后端：searxng（免密钥，需实例开启 format: json）/ bocha（中文，需密钥）/
+    # tavily（英文与文档，需密钥）/ bing（免密钥，解析结果页 HTML——结构一变就失效，
+    # 只适合先把链路跑通，不建议生产）。
+    provider: bing
+    # searxng 必填（实例地址，如 http://127.0.0.1:8888）；bing 可覆盖（默认 https://cn.bing.com）；
+    # bocha/tavily 留空用官方地址。
+    base_url: "https://cn.bing.com"
+    # bocha / tavily 必填。明文写在这里会随配置文件落盘，推荐用 GW_CHAT_WEB_API_KEY 注入；
+    # 密钥永远不会被回显到接口、审计或日志里。
+    api_key: ""
+    # 出网代理，语义与供应商的 proxy 完全一致：http://host:port、https://host:port、
+    # socks5://host:port，或字面量 env 表示跟随 HTTPS_PROXY/NO_PROXY。留空=直连，
+    # 且**不读**环境变量（升级不会改变既有部署的走向）。写错会让启动失败，而不是静默直连。
+    proxy: ""
+    # 单次搜索/抓取请求的超时。
+    timeout_s: 15
+    # 单次搜索返回条数上限（1..20）；模型可以要求更少。
+    max_results: 6
+    # 单个页面下载上限与回灌给模型的正文上限（超出即截断并在结果里标注；正文字节数必须
+    # 不大于下载上限，且应小于 chat.max_tool_result_bytes，否则先触发全局截断而看不到标注）。
+    fetch_max_bytes: 1048576
+    fetch_max_text_bytes: 32768
+    # 一轮问答里 search+fetch 合计的调用上限：外部额度不该被模型的循环一次烧掉。
+    # 达到上限时工具会返回说明、本轮照常结束，不会失败。
+    max_calls_per_turn: 8
+    # 是否允许抓取内网地址。默认 false：只允许公网 http/https，拒绝内网/回环/链路本地/
+    # CGNAT/保留地址与非 80、443 端口，重定向与 DNS 重绑定都会重校验。
+    # 打开它 = 允许模型读内网页面（例如内网 wiki），按需开启。
+    allow_private_hosts: false
 
 hooks:
   queue_size: 1024
@@ -266,19 +303,37 @@ dshgw:
   #     silently falling back to an installation path.
   # node_bin / current_link: empty reads DSHGW_NODE / DSHGW_DSH_ROOT (runtime installs).
   # SSH 工作区（M64）：租户在自己的 dsh 里浏览/新建远端目录，网关把远端目录挂进该租户的
-  # 工作区。子进程配置由本文件生成，因此这里写、子进程用；密钥即边界（按账号发密钥用
-  # identity_dir，共用一把用 identity_source）。前置：宿主装 sshfs，且本进程账号能非交互
-  # ssh 到目标主机。细节与安全口径见 docs/dshgw.md。
+  # 工作区。子进程配置由本文件生成，因此这里写、子进程用；密钥即边界，且**一账号一把**
+  # （identity_dir/<账号>，或让账号自己在界面上传）。别名清单一账号一份（ssh_config_dir/<账号>），
+  # 作为账号自己的 ~/.ssh/config 的初始种子，之后由租户插件（「我的主机」）增删；**没有全局
+  # 来源**，运维自己的 ~/.ssh 也不能作为来源（早期的共享来源键 ssh_config_source 与
+  # identity_source 均已删除，配置里出现任一都会直接拒绝启动）。前置：宿主装 sshfs，且本进程
+  # 账号能非交互 ssh 到目标主机。
+  # 细节与安全口径见 docs/dshgw.md。
   # ssh_workspaces:
   #   enabled: true
   #   mount_subdir: ssh
-  #   identity_source: /home/you/.ssh/id_rsa       # 0600
-  #   # identity_dir: ./data/dshgw/ssh-keys        # 按账号：<dir>/<账号>
+  #   # identity_dir: ./data/dshgw/ssh-keys        # 按账号：<dir>/<账号>（0600），一账号一把
+  #   # ssh_config_dir: ./data/dshgw/ssh-configs   # 按账号：<dir>/<账号>=别名清单（0644）
   #   hosts: [gpt001, aipc]                       # 空 = 允许手输（仍受 host 正则约束）
   #   connect_timeout: 10s
   #   poll_interval: 2s
   #   max_entries: 1000
-  # sshfs_options: [reconnect, ServerAliveInterval=15, ServerAliveCountMax=3, idmap=user]
+  # sshfs_options: [reconnect, ServerAliveInterval=15, ServerAliveCountMax=3, idmap=user, max_conns=4]
+  #   max_conns：一条挂载服务该账号的所有会话，sshfs 默认 1 条连接会把并发会话串成一条队列；
+  #   不写时由代码补 4，写了以这里为准。远端路径包含挂载点（远端=本机）的自嵌套挂载会被拒绝。
+  #
+  # 宿主目录工作区（M71，无 FUSE）：把**本机**目录直接 bind 进租户沙箱，不走 sshfs。要挂本机目录就用
+  # 这个，不要用 ssh_workspaces（本机目录是账号工作区的祖先时，sshfs 挂载会包含挂载点自身，递归读者
+  # 会把整条挂载挂死，见 docs/dshgw.md §7b/§7e）。默认关闭；只有运维能声明，租户不能自助添加。
+  # host_shares:
+  #   enabled: true
+  #   subdir: host                                # <workspace>/<subdir>/<name>，沙箱内只读容器
+  #   shares:
+  #     - name: docs                            # 可见单段名（不能含 / ），租户看到的就是这个名字
+  #       path: /srv/handbook                   # 宿主绝对路径；与 state_dir 不相交（否则拒绝启动）
+  #       read_only: true                       # 默认只读；写授权要显式写 false（直接写穿宿主目录）
+  #       tenants: [dsh-colin]                  # 必填非空：没有「所有人」这种默认
   #
   # 侧栏「账号行」（M67）：租户 dsh 侧栏底部显示登录者的飞书名（取不到回退账号名，再回退租户名）
   # 和一个「退出」按钮；退出只撤销本租户的会话。开关在这里（而非子进程配置里），因为名字只有
@@ -287,6 +342,24 @@ dshgw:
   # 在下一次「启用/轮换密钥」时补写到 dshgw 注册表。
   # account_card:
   #   enabled: true
+  #
+  # 租户侧 web 插件（M75）：每个账号的 dsh 默认就带三块面板 —— 终端（web-tty，真正的 PTY，
+  # 跑在该账号自己的沙箱里）、工作区文件（workspace-files，只有 root 子树可写，逐路径夹紧）、
+  # 变更（git-diff，只读地看仓库改动）。**三个都默认开启**：这三个插件按「开箱即用」交付，
+  # 想看更窄的面就显式关掉某一项。开关写在这里（而非子进程配置里）是因为行渲染、插件目录位置
+  # 和每账号状态路径都由网关决定；生成子进程配置时这三项**总是**被写下去，所以这里写 false
+  # 不会被子的默认值翻回来。
+  # 前置：把三个插件目录部署到子进程 plugin_path 同级的 web-tty/、workspace-files/、git-diff/
+  # （仓库里的 ./cmd/dshgw/plugin/ 已经是这个形状），`dshgw doctor` 会逐个检查；开着但没部署
+  # 时建户/轮换会直接失败，既有租户启动则只丢掉那一行并告警。
+  # 运行期状态按账号隔离：<该账号 DSH home>/plugin-state/{web-tty,workspace-files}.trace.jsonl
+  # 与 git-diff.{trace.jsonl,cache.json} —— 共享目录里不留任何状态，扫描缓存也不跨账号。
+  # 细节见 docs/dshgw.md §7f 与 docs/design/m75-tenant-plugins.md。
+  # tenant_plugins:
+  #   web_tty: { enabled: true }
+  #   workspace_files: { enabled: true }
+  #   git_diff: { enabled: true }
+  #   root_label: 工作区            # 两个工作区面板对 root 的显示名；留空即此默认值
 
 # Feishu (Lark) identity (M60/M61): bind API keys to Feishu accounts, and let those people
 # sign in to the DSH portal without pasting a key. Off by default, and while it is off
@@ -323,6 +396,11 @@ feishu:
   state_secret: ""
   ticket_secret: ""
   invite_secret: ""           # 管理员邀请链接签名密钥；空则从 credentials_key 按用途派生
+  # 通讯录同步（M70，组织架构页「同步飞书」）用的两个端点，默认即飞书文档地址，通常不必写。
+  # 需要 app 有「获取部门基础信息」「获取用户基本信息」两个只读数据权限，否则部门/人员没有名称
+  # （接口仍返回成功）。见 docs/feishu.md §5c。
+  # tenant_token_url: "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+  # contact_url: "https://open.feishu.cn/open-apis/contact/v3"
 
 # AES-GCM key for provider credentials at rest; override with GW_CREDENTIALS_KEY in production.
 credentials_key: "change-me-32-byte-encryption-key!!"

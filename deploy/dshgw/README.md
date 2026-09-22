@@ -116,6 +116,43 @@ Access API 的 Chromium。该功能不会给租户 sandbox 增加 `/dev/fuse` �
 `make dshgw-browser-test` 运行 Go 集成和 Node fake-FSA 测试；真实 FUSE 与浏览器权限链路仍需
 单独验收。部署前请阅读[浏览器 FUSE 工作区设计与限制](../../docs/design/browser-fuse-workspace.md)。
 
+### 默认开启：租户侧 web 插件（M75）
+
+每个账号的 dsh 开箱即带三块面板，**不需要**逐租户配置：
+
+| 面板 | `plugin_path` 同级目录 | 边界 |
+|---|---|---|
+| 「终端」（侧栏底） | `web-tty/` | 真 PTY（node-pty 从 dsh 发行版解析），跑在该账号自己的 bwrap 沙箱里 |
+| 「文件」（侧栏底） | `workspace-files/` | 一切路径夹紧在该账号 workspace 内 |
+| 「变更」（会话主区 View） | `git-diff/` | 只读；`--no-optional-locks`，不动 `.git/index` |
+
+**部署动作只有一条**：把仓库里 `cmd/dshgw/plugin/{web-tty,workspace-files,git-diff}/` 三个目录
+按原样放到 `deploy.plugin_path` 所在目录（与 `picker-clamp.js`、`account-card/`、`browser-workspace/` 同级）。
+本机部署根下的相对 `plugin_path`（`./cmd/dshgw/plugin/picker-clamp.js`）已经天然满足这一点，无需额外步骤。
+
+开关（独立形态写 `dshgw.yaml`，监督形态写 aigw 配置的 `dshgw.tenant_plugins`，三个都默认 `true`）：
+
+```yaml
+tenant_plugins:
+  web_tty:         { enabled: true }
+  workspace_files: { enabled: true }
+  git_diff:        { enabled: true }
+  root_label: 工作区        # 两个工作区面板对 root 的显示名；留空即此默认值
+```
+
+- **前置检查**：`dshgw --config <cfg> doctor` 会逐个体检（`web-tty-plugin` / `workspace-files-plugin` /
+  `git-diff-plugin`）。开着但没部署时：**建户/轮换密钥直接失败**（错误里带缺失路径），既有租户启动只丢掉
+  那一行并写 warning —— 一行指向不存在的模块会让整棵插件树加载失败，所以宁可少一行，不可给一行坏行。
+- **升级注意**：这三个插件默认开，所以 `directory_picker: browse` 且**没有** `deploy.plugin_path` 的
+  老配置现在会在加载期被拒（它没有插件目录可放这三个插件）。二选一：命名一个 `plugin_path` 目录并部署
+  三个插件目录，或把上面三项显式关掉。
+- **运行期状态按账号隔离**，落在该账号自己的 DSH home 下：`<DshHome>/plugin-state/{web-tty.trace.jsonl,
+  workspace-files.trace.jsonl, git-diff.trace.jsonl, git-diff.cache.json}`。共享插件目录（生产可能
+  root 拥有）里不留任何状态，git-diff 的扫描缓存也不跨账号共享。目录由插件首次写入时创建。
+- **重启代价**：翻转开关只改 profile 的行，已存在的租户在**下次 worker 启动**时生效；那会中断进行中的回合。
+
+细节与失败模式见 `docs/dshgw.md` §7f 与 `docs/design/m75-tenant-plugins.md`。
+
 ## 3. 启动与停止
 
 ```bash
@@ -599,6 +636,55 @@ no-store 会让控制台每次打开都重新下载。
 
 **实测**（经真实流量）：`:8090/v1/models` → `no-store…`；`:8090/admin/ui/app.css` → `public, max-age=300`（未受影响）；
 租户 `POST /api/session/modelCatalog` → `no-store…`；`GET /`（shell）不加 no-store。
+
+## 12b. 登录同步与退出即停（M69）
+
+租户的 `settings.yaml` 与 `.credentials.yaml` 由**两方**共同写：dshgw（平台段）与租户自己
+（dsh 的 settings-file + 租户页面的设置面板）。归属按**键**划分：
+
+| 段 | 谁拥有 | 内容 |
+|---|---|---|
+| 平台段 | dshgw，每次同步重写 | `llm-pi-ai.providers.aigw`（= 该租户 worker key 在 aigw 的授权模型）、由它派生的 `agent-default-model` 纠正、`refs.AIGW_API_KEY` |
+| 租户段 | 租户，dshgw 只原样保留 | 其它 provider、`llm-deepseek`、`ui-theme`、`permission`、`ui-onboarding`、其它 refs 与全部 records |
+
+**同步时机**：建户、`bin/dshgw sync-models <租户>`、worker 启动前，以及**每次登录**
+（门户 Key 登录与飞书登录）。登录这次用**该租户存储的 worker key**
+（`<state_dir>/tenant-config/<租户>/gateway.key`）取模型，不是登录时提交的那把 key；
+aigw 不可达或拒绝时**只告警、不阻断登录**，也不会改文件。
+
+**退出即停**：门户 `POST /logout` 或租户侧栏 `POST /dshgw/logout/` 之后，**该租户的 dsh worker 被
+停掉**（SIGTERM → 超时 SIGKILL，并清理 browser-fs 工作区），审计事件 `logout_worker_stop`。
+刻意**不看**"是否还有别的会话"：浏览器关掉标签页后会话在 TTL 内依然有效，按会话数判断等于
+退出后 dsh 还要跑好几天（本机实测某租户 16 个存活会话，多数是几天前的）。代价是同一个人的
+另一个窗口也会失去 dsh，重新登录即可。只对**这次退出真正撤销了会话的租户**动手。
+**停 worker 不写 `suspended`**——那是控制台「启用/停用」的意图，
+写了会让 dshgw 重启后不再拉起这个租户。下次登录会重新同步并把它启动起来（冷启动等待 2–4s，
+登录请求内完成，所以跳转过去就能用）。
+
+**排障**：
+
+```bash
+# 登录这次做了些什么（每个租户一行）
+journalctl --user -u dshgw-verify -n 200 | grep 'prepared for login'
+
+# 谁把 dsh 停掉了：审计事件（门户与租户侧栏都在这里）
+grep -E 'logout_worker_(stop|stop_failed)|login_prepare_failed' \
+  data/dshgw-verify/state/audit.jsonl | tail
+
+# worker 现在在不在（进程 + worker 端口）
+pgrep -af 'dsh-0.1.2-rc.1/lib/bin.js web' ; ss -ltnp | grep 184
+```
+
+**常见现象**：
+
+| 现象 | 含义 |
+|---|---|
+| 登录后租户页 502 / 空白 | 该租户的 worker 没起来：看 `prepared for login` 那行是否报错（aigw 不可达、key 被 401、模板缺失），日志里有 `worker output` 片段 |
+| 退出后租户端口仍监听 | 端口始终监听（网关自己的 edge listener），要看的是**worker 进程**是否消失；端口监听不代表 dsh 还在跑 |
+| 退出后 worker 仍在 | 看审计 `logout_worker_stop` 是否出现：没有就是停失败（`logout_worker_stop_failed`，日志里有原因），或这次退出没有撤销任何该租户的会话 |
+| 另一个窗口突然 502 | 该租户的 dsh 已被那次退出停掉：重新登录即恢复（这是"退出即停"的既定代价） |
+| 想无条件停 | 用控制台「停用」或 admin 通道 `tenant stop`（会写 `suspended`，重启后也不拉起） |
+| 租户页面把模型/密钥删了 | 下次登录自动恢复平台段；租户自建的 provider 不受影响 |
 
 ## 13. 安全边界（必读）
 

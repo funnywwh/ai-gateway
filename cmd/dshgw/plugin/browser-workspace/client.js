@@ -7,11 +7,15 @@
 // and deletes folders.
 //
 // The virtual mapping is what makes this usable rather than merely possible: the mount point
-// is <workspace>/browser/<folder key>, where the key is generated once per saved folder and
-// kept in IndexedDB. The key — not a per-mount random id — is what DSH's own workspace entry
-// is keyed by (the registry reuses a workspace by its canonical path), so reconnecting the
-// same local directory returns the same path, the same workspace id, the same title and the
-// same sessions. See the README for the state machine and the gateway contract.
+// is <workspace>/browser/<folder key>, where the key is the LOCAL directory's own name —
+// arbitrated once, through the gateway's `allocate` handshake, so two local directories of one
+// account do not silently become one path — and kept in IndexedDB. A gateway that cannot name
+// it, or a local name that cannot be a directory name, falls back to a generated id. The key —
+// not a per-mount random id — is what DSH's own workspace entry is keyed by (the registry
+// reuses a workspace by its canonical path), so reconnecting the same local directory returns
+// the same path, the same workspace id, the same title and the same sessions, and the path
+// itself reads as the directory a person picked. See the README for the state machine and the
+// gateway contract.
 window.__ModuleLoader__.load({
   id: 'dshgw-browser-workspace',
   factory: require => {
@@ -164,36 +168,55 @@ window.__ModuleLoader__.load({
     // action) and the folder icon at its right (the list window). The shell renders this slot
     // as one flex ROW, so the stacking rule at the bottom of this stylesheet is what keeps the
     // browser row and the ssh-workspace row on separate lines.
+    // Every colour below is a DSH theme token, never a literal. The shell's ThemePresenter
+    // writes the palette onto `body` as custom properties and toggles `body[data-ds-dark-theme]`,
+    // so `--dsw-alias-*` resolves per scheme and this window follows 外观 without a reload.
+    // The previous version asked for `--dsh-bg`/`--dsh-fg`, which DSH never defines: both
+    // always fell back to the hardcoded dark pair, which is exactly why 浅色 was ignored.
+    // Each var() keeps a neutral fallback for a host whose theme plugin is not loaded.
     const CSS = `
 .dshgw-bw-row { display: flex; align-items: center; gap: 2px; width: 100%; min-width: 0; }
 .dshgw-bw-action { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; padding: 6px 8px; border-radius: 6px; text-align: left; }
-.dshgw-bw-action:hover { background: rgba(127,127,127,.14); }
+.dshgw-bw-action:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.14)); }
 .dshgw-bw-action[aria-pressed="true"] .dshgw-bw-label { font-weight: 600; }
 .dshgw-bw-label { flex: none; white-space: nowrap; }
-.dshgw-bw-state { flex: 1 1 auto; min-width: 0; margin-left: 4px; opacity: .65; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dshgw-bw-manage { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border: 0; border-radius: 6px; background: none; color: inherit; font: inherit; font-size: 14px; line-height: 1; cursor: pointer; opacity: .7; }
-.dshgw-bw-manage:hover { background: rgba(127,127,127,.18); opacity: 1; }
+.dshgw-bw-state { flex: 1 1 auto; min-width: 0; margin-left: 4px; color: var(--dsw-alias-label-secondary, #b8b8b8); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dshgw-bw-manage { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border: 0; border-radius: 6px; background: none; color: var(--dsw-alias-label-secondary, #b8b8b8); font: inherit; font-size: 14px; line-height: 1; cursor: pointer; }
+.dshgw-bw-manage:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.18)); color: var(--dsw-alias-label-primary, #e6e6e6); }
 .dshgw-bw-row-rail .dshgw-bw-label, .dshgw-bw-row-rail .dshgw-bw-state, .dshgw-bw-row-rail .dshgw-bw-manage { display: none; }
-.dshgw-bw-backdrop { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.45); z-index: 40; }
-.dshgw-bw-dialog { width: min(600px, 92vw); max-height: 86vh; overflow: auto; background: var(--dsh-bg, #1b1c1f); color: var(--dsh-fg, #e6e6e6); border: 1px solid rgba(127,127,127,.35); border-radius: 10px; padding: 16px 18px; font-size: 13px; line-height: 1.5; }
+/* absolute, not fixed, and no z-index: this window renders inside the shell's shell.overlay
+   layer, itself absolute/inset:0/z-index:20 within the overflow:hidden app frame. A fixed
+   backdrop would escape the frame it belongs to; absolute keeps the dim layer over the frame,
+   and the layer owns the stacking order, so competing with its z-index would be wrong. */
+.dshgw-bw-backdrop { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--dsw-alias-bg-mask-1, rgba(0,0,0,.45)); }
+.dshgw-bw-dialog { position: relative; width: min(600px, 92vw); max-height: 86vh; overflow: auto; background: var(--dsw-alias-bg-layer-2, #1b1c1f); color: var(--dsw-alias-label-primary, #e6e6e6); border: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.35)); border-radius: 10px; padding: 16px 18px; font-size: 13px; line-height: 1.5; }
+/* The close button, pinned to the panel's top-right corner. The panel is the scroll container,
+   so sticky/top:0 keeps it in view while the folder list scrolls under it. The negative
+   margins reach the panel's own edge (its padding is symmetric) and the matching padding
+   gives the bar a solid backing over the panel colour, so nothing shows through as it scrolls. */
+.dshgw-bw-closebar { position: sticky; top: -16px; z-index: 1; display: flex; justify-content: flex-end; margin: -16px -18px 0; padding: 8px 18px 4px; background: var(--dsw-alias-bg-layer-2, #1b1c1f); }
+.dshgw-bw-close { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; line-height: 1; font-size: 16px; border-radius: 6px; }
 .dshgw-bw-dialog h2 { margin: 0 0 4px; font-size: 15px; }
-.dshgw-bw-dialog p.hint { margin: 0 0 12px; opacity: .7; }
-.dshgw-bw-dialog button { background: rgba(127,127,127,.18); color: inherit; border: 1px solid rgba(127,127,127,.35); border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; }
+.dshgw-bw-dialog p.hint { margin: 0 0 12px; color: var(--dsw-alias-label-secondary, #b8b8b8); }
+.dshgw-bw-dialog button { background: var(--dsw-alias-bg-overlay, rgba(127,127,127,.18)); color: inherit; border: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.35)); border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; }
+.dshgw-bw-dialog button:hover:not([disabled]) { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.28)); }
 .dshgw-bw-dialog button[disabled] { opacity: .5; cursor: default; }
 .dshgw-bw-status { margin: 8px 0; }
-.dshgw-bw-error { border: 1px solid #b3453c; background: rgba(179,69,60,.18); border-radius: 6px; padding: 8px 10px; margin: 8px 0; white-space: pre-wrap; }
-.dshgw-bw-notice { border: 1px solid #3a7d44; background: rgba(58,125,68,.18); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
-.dshgw-bw-muted { opacity: .65; }
-.dshgw-bw-folders { border: 1px solid rgba(127,127,127,.3); border-radius: 6px; margin: 8px 0; }
-.dshgw-bw-folder { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-bottom: 1px solid rgba(127,127,127,.14); }
+/* Semantic state colours, not literals: the tint is mixed from the token so it lands on the
+   right side of the active palette instead of staying a dark-theme red on a light panel. */
+.dshgw-bw-error { border: 1px solid var(--dsw-alias-state-error-primary, #b3453c); background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #b3453c) 18%, transparent); border-radius: 6px; padding: 8px 10px; margin: 8px 0; white-space: pre-wrap; }
+.dshgw-bw-notice { border: 1px solid var(--dsw-alias-state-success-primary, #3a7d44); background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #3a7d44) 18%, transparent); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
+.dshgw-bw-muted { color: var(--dsw-alias-label-secondary, #b8b8b8); }
+.dshgw-bw-folders { border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.3)); border-radius: 6px; margin: 8px 0; }
+.dshgw-bw-folder { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.14)); }
 .dshgw-bw-folder:last-child { border-bottom: 0; }
 .dshgw-bw-folder-name { min-width: 0; display: flex; flex-direction: column; }
 .dshgw-bw-folder-name > span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dshgw-bw-folder-state { opacity: .65; font-size: 12px; }
+.dshgw-bw-folder-state { color: var(--dsw-alias-label-secondary, #b8b8b8); font-size: 12px; }
 .dshgw-bw-folder-actions { flex: none; display: flex; gap: 6px; }
 .dshgw-bw-folder-actions button { padding: 3px 8px; }
-.dshgw-bw-folder-error { color: #e08078; font-size: 12px; }
-.dshgw-bw-empty { padding: 10px; opacity: .7; }
+.dshgw-bw-folder-error { color: var(--dsw-alias-state-error-primary, #e08078); font-size: 12px; }
+.dshgw-bw-empty { padding: 10px; color: var(--dsw-alias-label-secondary, #b8b8b8); }
 .dshgw-bw-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 /* The shell renders this whole slot as one flex ROW, which leaves two entries sharing a foot
    that only fits one — so each of them is squeezed to half width. A plugin owns no wrapper
@@ -221,6 +244,8 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       ['per-account browser directory limit reached', '已达每账号 4 个目录上限：请先断开一个目录'],
       ['global mount limit reached or service stopping', '网关挂载已满或正在停服，请稍后重试'],
       ['directory key already mounted', '该目录在此账号上已有挂载（可能正由另一个页面服务）'],
+      ['directory is still mounted', '该目录仍有活动挂载：请先断开再删除'],
+      ['invalid directory key', '挂载目录名被网关拒绝（可能连到较旧的网关）：请刷新页面重试，或删除该目录后重新添加'],
       ['directory already served by another page', '该目录正在另一个页面服务，请到那个页面使用'],
       ['directory revoked', '该目录已被另一个页面接管，本页已停止服务'],
       ['unknown directory capability', '该挂载已失效，将重新挂载'],
@@ -251,7 +276,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
 
     function createTransport(fetcher = window.fetch.bind(window)) {
       return async (endpoint, payload, timeoutMs = 35000, signal) => {
-        if (!['open', 'poll', 'respond', 'close', 'activate', 'resume'].includes(endpoint)) throw failure('EINVAL', 'invalid endpoint')
+        if (!['open', 'poll', 'respond', 'close', 'activate', 'resume', 'allocate'].includes(endpoint)) throw failure('EINVAL', 'invalid endpoint')
         const controller = new AbortController()
         const abort = () => controller.abort()
         if (signal?.aborted) abort()
@@ -279,8 +304,10 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
     //
     // The stable key is the whole virtual mapping: the gateway mounts the folder at
     // <workspace>/browser/<key>, DSH reuses a workspace by that path, and so reconnecting the
-    // same local directory returns the same workspace id with the same sessions. Nothing here
-    // is resumed automatically: a mount belongs to a click.
+    // same local directory returns the same workspace id with the same sessions. The key is
+    // normally the LOCAL directory's own name, so that path also reads as the directory a
+    // person picked; see claimKey for how it is arbitrated and when it is a generated id
+    // instead. Nothing here is resumed automatically: a mount belongs to a click.
     const RECORD_DB = 'dshgw-browser-workspace'
     const RECORD_STORE = 'mounts'
     const RECORD_VERSION = 2
@@ -381,6 +408,8 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
     // The stable identity of one saved folder: 32 hex characters, generated once and kept with
     // the folder. It names the mount point, so it must stay the same for the lifetime of the
     // folder — that is what keeps the workspace (and its sessions) mapped to this directory.
+    // It is now the FALLBACK for a local directory whose own name cannot be a directory name
+    // or whose gateway does not hand out names; see mountName and claimKey.
     function newKey() {
       const uuid = globalThis.crypto?.randomUUID?.()
       if (typeof uuid === 'string') return uuid.replace(/-/g, '').slice(0, 32).toLowerCase()
@@ -388,6 +417,20 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes)
       else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256)
       return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')
+    }
+
+    // The mount directory name ONE local directory may own: the directory's own name, cleaned
+    // to the single safe path segment the gateway accepts. '' means this local name cannot be
+    // a directory name (hidden, padded, a control character, too long) and the caller must fall
+    // back to a generated key: a mount is never blocked by what somebody called their folder.
+    function mountName(localName) {
+      const name = typeof localName === 'string' ? localName.trim() : ''
+      if (name === '' || name === '.' || name === '..' || name.startsWith('.')) return ''
+      // 200 bytes, not 255: a name the gateway has to disambiguate still needs room for its
+      // suffix. Bytes, like the filesystem limit this mirrors.
+      if (new TextEncoder().encode(name).length > 200) return ''
+      if (/[/\\\u0000-\u001f\u007f]/.test(name)) return ''
+      return name
     }
 
     function apply(ctx) {
@@ -416,11 +459,28 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       const setStatus = (phase, text) => { status = { phase, text }; notify() }
       const entryTitle = () => `浏览器工作区：${WARNING}${status.text === '' ? '' : `（当前：${status.text}）`}`
       const clearAutoClose = () => { if (autoCloseTimer !== null) { clearTimeout(autoCloseTimer); autoCloseTimer = null } }
-      const closeDialog = () => { clearAutoClose(); dialogOpen = false; dialogAutoCloses = false; notify() }
+      // Escape is the third way out, next to the corner button and the backdrop click. The
+      // listener is attached only while the window is open: a page-wide keydown left
+      // registered would swallow Escape for whatever the person does next. Removing it is
+      // idempotent, so closeDialog can call it from any path and dispose can call it too.
+      let escapeAttached = false
+      const onEscape = event => { if (event.key === 'Escape') closeDialog() }
+      const attachEscape = () => {
+        if (escapeAttached || typeof window.addEventListener !== 'function') return
+        escapeAttached = true
+        window.addEventListener('keydown', onEscape)
+      }
+      const detachEscape = () => {
+        if (!escapeAttached || typeof window.removeEventListener !== 'function') return
+        escapeAttached = false
+        window.removeEventListener('keydown', onEscape)
+      }
+      const closeDialog = () => { clearAutoClose(); dialogOpen = false; dialogAutoCloses = false; detachEscape(); notify() }
       const openDialog = ({ autoClose = false } = {}) => {
         clearAutoClose()
         dialogOpen = true
         dialogAutoCloses = autoClose
+        attachEscape()
         notify()
       }
       // A person who just watched the mount finish has nothing left to answer, so that one
@@ -484,6 +544,49 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       })))
 
       // ── mount lifecycle ────────────────────────────────────────────────────────────
+      // claimKey names one saved folder's mount directory, ONCE, from the local directory's own
+      // name. It is the mount point, so the answer is kept forever: changing it later would move
+      // the path and orphan the workspace (and the sessions grouped under it) that this folder
+      // already has.
+      //
+      // `allocate` is what keeps two local directories of one account from silently becoming
+      // one path: a name whose directory already exists (a kept mount point outlives its mount)
+      // or that a live mount serves comes back suffixed. The step is advisory — identity here
+      // is the client's — so a gateway that does not know it, or an unusable local name, falls
+      // back to the generated key this feature always used. Mounting must never fail over a
+      // name.
+      const claimKey = async desired => {
+        let proposal = desired
+        for (let n = 2; folders.some(folder => folder.key === proposal) && n <= 9; n++) proposal = `${desired}-${n}`
+        try {
+          const answer = await call('allocate', { name: proposal }, 20000)
+          if (typeof answer?.key === 'string' && answer.key !== '') return answer.key
+        } catch (error) {
+          ctx.logger?.warn?.('browser-workspace: the gateway did not name this mount directory (' + (error?.message || error) + '); mounting under a generated key')
+        }
+        return newKey()
+      }
+      // releaseByKey releases a mount point WITHOUT a capability. It is the delete path for a
+      // saved folder whose token died with its mount (a gateway restart, the reconnect grace
+      // window, a reaped lease): a disconnect never removes a stable mount point, so without
+      // this the empty directory would stay in the account's container forever.
+      const releaseByKey = async folder => {
+        if (typeof folder.key !== 'string' || folder.key === '') return
+        try {
+          await call('close', { key: folder.key, purge: true }, 20000)
+        } catch (error) {
+          // A gateway that predates this endpoint answers "unknown directory capability" to a
+          // close with no token, and one that predates the key field refuses the field. Either
+          // way there is nothing more this page can do about that gateway's leftovers; the
+          // delete itself must still succeed.
+          const message = error?.message || String(error)
+          if (message.includes('unknown directory capability') || isUnknownField(error) || message.includes('unknown endpoint')) {
+            ctx.logger?.warn?.('browser-workspace: this gateway cannot release a mount point by key; a leftover mount directory may need manual removal')
+            return
+          }
+          throw error
+        }
+      }
       // disposeShare stops serving one mount locally (no gateway call): the poll loop ends,
       // and everything waiting on it fails at once.
       const dropShare = key => {
@@ -907,6 +1010,24 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
             const released = await closeShare(folder, { purge: true })
             if (!released) return false
           }
+          // A saved folder whose token died with its mount (a gateway restart, the grace
+          // window, a reaped lease) has no capability left to close: its empty mount point is
+          // released by KEY, or it would stay in the account's container forever.
+          try {
+            await releaseByKey(folder)
+          } catch (error) {
+            // Never report a folder as removed while its directory is still bound to the
+            // workspace path it was mounted at: the operator keeps the entry and can delete
+            // again (the workspace registration is already gone; this is the path).
+            folder.state = 'error'
+            folder.retry = null
+            folder.error = `挂载目录未释放：${explain(error)}`
+            folder.note = `删除未完成：${explain(error)}；请再点一次删除`
+            await stash()
+            settle()
+            ctx.logger?.warn?.('browser-workspace: the mount point survived the folder deletion: ' + (error?.message || error))
+            return false
+          }
           if (unremoved !== null) {
             // Never report a folder as removed while its workspace row is still there: the
             // operator keeps the entry and can try again (the mount is already released).
@@ -975,6 +1096,14 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           return
         }
         const index = folders.indexOf(folder)
+        // The mount directory is named ONCE per folder, from the local directory's own name.
+        // Re-picking the directory of a SAVED folder (its grant was lost) therefore keeps the
+        // key it already has: that key is the path DSH's workspace entry, and the sessions
+        // grouped under it, point at.
+        if (folder.key === null) {
+          const desired = mountName(folder.name)
+          folder.key = desired === '' ? newKey() : await claimKey(desired)
+        }
         if (index < 0) folders.push(folder)
         await stash()
         await connect(folder)
@@ -1015,7 +1144,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       const addFolder = ({ autoClose = false } = {}) => {
         if (disposed || picking) return
         if (folders.length >= MAX_FOLDERS) { setStatus('failed', `最多保存 ${MAX_FOLDERS} 个目录：请先删除一个`); return }
-        const folder = { key: newKey(), id: null, name: '', handle: null, ready: false, workspaceId: null, token: null, mountpoint: null, at: 0, state: 'disconnected', note: '', error: '', retry: null, busy: null }
+        const folder = { key: null, id: null, name: '', handle: null, ready: false, workspaceId: null, token: null, mountpoint: null, at: 0, state: 'disconnected', note: '', error: '', retry: null, busy: null }
         chooseFolder(folder, { autoClose })
       }
       // ── what a click does ─────────────────────────────────────────────────────────
@@ -1162,6 +1291,18 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           'data-dshgw-dialog': 'browser-workspace',
           onClick: (event) => { if (event.target === event.currentTarget) closeDialog() },
         }, React.createElement('div', { className: 'dshgw-bw-dialog' }, [
+          // Pinned to the panel's top-right corner (sticky, see the stylesheet): always
+          // reachable however far the folder list scrolls. The footer 关闭 stays where it
+          // always was — this is an addition, not a replacement.
+          React.createElement('div', { className: 'dshgw-bw-closebar', key: 'closebar' },
+            React.createElement('button', {
+              type: 'button',
+              className: 'dshgw-bw-close',
+              'data-dshgw-close': 'browser-workspace',
+              'aria-label': '关闭',
+              title: '关闭',
+              onClick: closeDialog,
+            }, '×')),
           React.createElement('h2', { key: 'title' }, '浏览器工作区'),
           React.createElement('p', { className: 'hint', key: 'hint' }, WARNING),
           React.createElement('div', {
@@ -1234,6 +1375,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       ctx.effect(() => () => {
         disposed = true
         clearAutoClose()
+        detachEscape()
         if (armedTimer !== null) { clearTimeout(armedTimer); armedTimer = null }
         for (const key of [...shares.keys()]) {
           const share = shares.get(key)
@@ -1257,6 +1399,6 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
     // `cannot get property "remote" without inject` inside a real DSH GUI (the same pair
     // @deepseek-ai/dsh-api-workspace-controller declares). A mocked ctx that hands the
     // plugin a ready-made `remote` object cannot catch this.
-    return { inject: ['slots', 'connection', 'remote', 'remote.workspace', 'uiWorkspace'], apply, createExecutor, checkRelativePath, createTransport, errorOf, createRecordStore, reopenHandle, recordIsFresh, newKey, MAX_FOLDERS, AUTO_CLOSE_MS, RECONNECT_GRACE_MS }
+    return { inject: ['slots', 'connection', 'remote', 'remote.workspace', 'uiWorkspace'], apply, createExecutor, checkRelativePath, createTransport, errorOf, createRecordStore, reopenHandle, recordIsFresh, newKey, mountName, MAX_FOLDERS, AUTO_CLOSE_MS, RECONNECT_GRACE_MS }
   },
 })

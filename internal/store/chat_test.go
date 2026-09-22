@@ -373,3 +373,47 @@ func TestChatAdminRoleAndSessionLookup(t *testing.T) {
 		t.Fatal("a logged-out session still resolved")
 	}
 }
+
+// TestChatSessionWebAccessPersists pins the M73 column: the console's per-conversation switch
+// has to survive a restart, and an existing row (created before the column existed) has to read
+// back as "off" rather than as a surprise.
+func TestChatSessionWebAccessPersists(t *testing.T) {
+	db, alice, _ := chatStoreFixture(t)
+	ctx := context.Background()
+	session := newChatSession(t, db, alice, "chat_web")
+	if session.WebAccess {
+		t.Fatal("a new conversation must start with web access off")
+	}
+
+	session.WebAccess = true
+	if err := db.UpdateChatSession(ctx, session); err != nil {
+		t.Fatalf("update session: %v", err)
+	}
+	reloaded, err := db.GetChatSession(ctx, "chat_web", alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.WebAccess {
+		t.Fatal("the switch did not survive the round trip")
+	}
+
+	// A session created with the switch already on keeps it, and listing returns it too.
+	second := &domain.ChatSession{
+		ID: "chat_web2", OwnerUserID: alice, OwnerName: "alice", Model: "m",
+		AccountID: 1, APIKeyID: 2, WriteMode: domain.ChatWriteModeReadOnly, Status: "active", WebAccess: true,
+	}
+	if err := db.CreateChatSession(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	rows, _, err := db.ListChatSessions(ctx, alice, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, row := range rows {
+		seen[row.ID] = row.WebAccess
+	}
+	if !seen["chat_web"] || !seen["chat_web2"] {
+		t.Fatalf("listed switches = %v", seen)
+	}
+}

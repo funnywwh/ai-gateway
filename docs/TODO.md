@@ -609,9 +609,24 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 
 ## M64 aigw 账号的 SSH 工作区（远端目录 → 挂载 → 该账号 DSH 里的工作区）
 
-设计：`docs/design/m64-ssh-workspace.md`（§3 阶段 0 实测、§13 差异、§14 真机验收与它抓到的四个缺陷）；
-规格：`docs/dshgw.md` §7b。已完成的条目见 `docs/todo_done.md` 同名小节，下面只列未完成项。
+设计：`docs/design/m64-ssh-workspace.md`（§3 阶段 0 实测、§13 差异、§14 真机验收与它抓到的四个缺陷、
+§15 别名改成一账号一份 +「我的主机」）；规格：`docs/dshgw.md` §7b。已完成的条目见 `docs/todo_done.md`
+同名小节，下面只列未完成项。
 
+- [x] **别名改一账号一份：本机部署（2026-09-21，v3.0.0）**：`scripts/ssh_config_adopt.sh` 收编了 6 个
+      账号的 `<workspace>/.ssh/config` → `data/dshgw-verify/ssh-configs/<账号>`；`dshgw.yaml` 的
+      `ssh_config_source` 换成 `ssh_config_dir: ./data/dshgw-verify/ssh-configs`；`bin/dshgw` 重建并在
+      12:20:44 重启 `dshgw-verify`（2.9.1 `b561b0c` → 3.0.0 `f8d20d8`），6 个 worker 全就绪、aipc 挂载被
+      `Reconcile` 重挂、账号 config 一个字节没动（与各自种子 `cmp` 一致）。完整记录见 `docs/todo_done.md`
+      的 v3.0.0 小节；后续仍可逐账号裁剪种子并按需重置（改种子 → 删 `<workspace>/.ssh/config` → 重启该
+      账号 worker）
+- [x] **观察项（v3.0.0 重启时发现）**：ssh 工作区服务自己的日志在现网是丢掉的 —— 已于 2026-09-21 修：
+      `cmd/dshgw/runtime.go` 的 `sshWorkspaceService(cfg, manager, slog.Default())`（每个命令形态的进程
+      logger，serve 也在内）。此前 `sshworkspace.New` 收到 nil logger 就落到 `io.Discard`，`Reconcile`
+      成功重挂了挂载日志里却没有一行；本次事故里「拒绝自嵌套挂载」与 `breakWedge` 的告警同样走这条 logger
+- [ ] **「我的主机」浏览器验收（人工）**：租户 A 添加一台主机 → 复核 A 的 `<workspace>/.ssh/config`
+      出现该别名 → 选用它「挂载并打开」→ 删除（在用被拒、卸载后成功）→ 别名与该主机专用私钥都消失；
+      租户 B 的列表里看不到 A 的主机
 - [ ] **监督形态真机验收（`aigw-local.service` + 门户）**：在 aigw 的 `dshgw.ssh_workspaces` 里启用 →
       `systemctl --user restart aigw-local.service` → 经门户进某个账号的 dsh → 侧栏「SSH 工作区」→
       浏览/新建远端目录 → 挂载并打开 → 会话里写文件 → 远端 `cat` 复核（浏览器动作需人工）
@@ -620,15 +635,37 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 - [ ] **缺 sshfs 时拒绝启动（真机）**：把 `sshfs_bin` 指到不存在的路径 → `serve` 必须拒绝启动并点名该
       配置键（CLI 命令只告警，这是刻意的差异，见 §14 第 4 条）
 - [ ] **观察项**：FUSE 上 `git status`/`grep` 的耗时基线（文档已声明会慢，但未测量）
-- [ ] **缺陷（2026-09-20 发布 M68 时两次撞到）**：`systemctl --user restart dshgw-verify` 会把 `sshfs`
-      进程随单元一起杀掉，但 **FUSE 挂载条目留在挂载表里**（`Transport endpoint is not connected`）；
-      启动时的 `sshService.Reconcile` 补不上这条死挂载，于是**有活跃 SSH 工作区的租户起不来**：
-      `bwrap: Can't get type of source …/ssh/…: Transport endpoint is not connected` → worker `exit status 1`。
-      现场恢复：`fusermount3 -u <mountpoint>` + 重启 dshgw（本次发布就是这么救回来的）。
-      修法方向：启动/`Reconcile` 前对**已记录**的挂载点做一次探测，ENOTCONN 的先 `fusermount3 -z` 再重挂
-      （browsermount 有对等的 `CleanupStale`，ssh 这侧缺）；或者让单元 stop 时先卸挂载（KillMode/顺序问题）。
-      另一个操作教训：**别用 CLI `dshgw tenant restart` 起长驻 worker** —— CLI 退出时 bwrap
-      `--die-with-parent` 会把 worker 一起带走，且日志里看不到那次退出；长驻 worker 只能由服务自己起
+- [x] **缺陷（2026-09-20 发布 M68 时两次撞到）：死挂载条目** —— **已由 M76 修**（`Restore`/`Reconcile`
+      对已记录的挂载点按"守护进程是否还在"探测，死条目先摘掉再重挂，记录与挂载点保留；本机现网 2026-09-22
+      重启时实测自愈）。原文与操作教训已归档到 `docs/todo_done.md` 的 M76 小节
+
+- [x] **自嵌套挂载（2026-09-21 事故，已修）**：租户 dsh-tenant 挂 `rag-server:/home/winger/work/ai_gateway`
+      （`rag-server` 的 `HostName` 就是本机 `192.168.190.86`），而挂载点
+      `<workspace>/ssh/rag-server/home/winger/work/ai_gateway` 就在这个目录里 —— 挂载树包含挂载点本身。
+      一个会话在工作区根上跑 `grep -rn 扫码\|二维码\|qr … .` 之后：FUSE 连接 `834` 上积压 8 个无人应答
+      请求，`grep`（`/proc/<pid>/fd` 已指向第二层同一目录）、`ls <挂载点>`、`ls <挂载点父目录>` 三个进程进
+      **D 态**（`kill -9` 无效），该租户所有会话同时卡死。现场解救（无需 root）：`echo 1 > /sys/fs/fuse/
+      connections/834/abort`（waiting 8→0，D 态进程立即释放，sshfs 守护进程随之退出）→
+      `fusermount3 -u -z <挂载点>` → 清 `state/ssh-mounts.json` 与该账号 `ssh-mounts.json` 的这条记录
+      （否则下次 `Reconcile` 会把它重挂回来）。**已修**：`internal/dshgw/sshworkspace/selfnest.go` 在
+      `mount()` 里拒绝「远端是本机且远端路径是挂载点祖先」的挂载（按设备号+inode 比较，因此
+      `/data/home/winger/work` 这个同 fs 的第二个挂载点也认得；地址或 `machine-id` 证明「本机」，
+      别的机器上同样路径不受影响，本机上不含工作区的目录照常可挂），错误码 `mount/forbidden`、审计
+      `ssh-mount-refused`；同时 sshfs 默认补 `max_conns=4`（配置可覆盖），一条挂载不再只有一个 sftp 通道。
+- [x] **宿主目录直挂（M71，2026-09-21 已实现）**：要挂本机目录不再走 sshfs —— `host_shares` 配置声明
+      `{name, path, read_only, tenants}`，worker 的 bwrap profile 把宿主目录直接 `--ro-bind-try`/`--bind-try`
+      到 `<workspace>/<subdir>/<name>`（容器先只读绑定），没有内核挂载、没有 FUSE、没有可挂死的东西。
+      默认只读（写授权要显式 `read_only: false`），`tenants` 必填非空，共享目录与 `state_dir` 必须不相交
+      （否则等于把一个账号的工作区/私钥/会话交给另一个账号），配置加载即校验。镜像
+      `<dsh_home>/host-shares.json` 给租户面板用（不含宿主路径）。真机 bwrap staging 验收：
+      只读共享不可写、可写共享写穿宿主、宿主路径在沙箱内不可见。规格 `docs/dshgw.md` §7e。
+      未做：侧栏面板行（当前用目录选择器进 `<workspace>/host/<name>`）。
+- [ ] **未做（本次事故的后续）**：②**工作期间的挂死看门狗** —— 现有 `fuse.go` 的 `breakWedge`（杀守护进程
+      + sysfs abort）只在卸载路径上跑，正常工作时没有「请求多久没应答」的巡检；③`sshfs -o auto_unmount`
+      （守护进程退出即自动摘挂载）能否免掉下面那条「死挂载条目」缺陷；④递归工具（`grep -r`/`find`/索引）
+      撞上合法挂载仍然慢
+- [ ] **观察项（本次事故实测到的反面基线）**：FUSE 上 `git status`/`grep` 的耗时基线仍未测；已知的是
+      自嵌套时不是「慢」而是**永久挂死**（D 态、不可杀）
 
 ## M66 控制台多管理员与管理员飞书扫码登录
 
@@ -693,6 +730,171 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 - [ ] **浏览器人工确认（剩下的一步）**：模型菜单里 deepseek 四个模型出现推理档位、能附图片；
       顺带把 dsh-tenant 的 SSH 工作区重新挂上（见 `docs/todo_done.md` M68 小节的说明）
 
+## M69 登录驱动的租户生命周期与「平台段 / 租户段」设置合并
+
+设计：`docs/design/m69-login-lifecycle-and-settings-merge.md`；规格：`docs/dshgw.md` §3b；
+运维说明：`deploy/dshgw/README.md` §12b。
+需求（2026-09-21 用户原话）：dshgw 要合并租户手动设置——平台的模型限制用平台的、其他用租户的、
+不碰宿主机的；同步要在用户每次登录时发生；用户点击退出要强制退出 dsh 服务。
+实现、单测与真机验收（2026-09-21 本机三单元）的记录见 `docs/todo_done.md` M69 小节与 v2.9.1 发布记录。
+
+- [ ] **浏览器人工确认（剩下的一步）**：门户登录 → 租户页直接可用（无 502/长时间白屏）；
+      租户侧栏「退出」→ 回到门户登录页且不再占用 dsh 进程。本机验收都是用 HTTP 客户端跑通的，
+      还缺一次真人点界面
+
+## M70 飞书通讯录同步（组织架构页「同步飞书」）
+
+设计：`docs/design/m70-feishu-org-sync.md`（§11 差异已回填）；规格：`docs/feishu.md` §5c、`docs/org.md` §3/§5/§6。
+需求（2026-09-21 用户原话）：「http://192.168.190.86:8088/admin/ui/#/org 右上角添加一个"同步飞书"，
+弹出组织机构树和人员，人员可以有"创建用户""绑定账号"操作，合并时同名合并，人员id相同合并」，
+随后补充「绑定账号时，弹出账号列表，可以拼音过滤」与「自动按人名匹配，不匹配的用户决定」。
+定位：把飞书通讯录（部门树 + 人员）合并进本地的组织节点与账户；一个已确认的「同步」动作 = 补建缺失部门
+节点 + 自动合并已匹配人员，人员身份写在 `accounts.feishu_*`（**只是同步映射，不授予登录能力**：门户登录
+仍按 M60 的 Key 级绑定判定）。
+
+- [x] 迁移 `0024_feishu_directory_links.sql`：`org_nodes.feishu_department_id/feishu_synced_at`、
+      `accounts.feishu_open_id/union_id/name/bound_at/bound_by`，两处 `NULLIF(…, '')` 唯一索引
+- [x] 存储：列级读（`accountCols`/`orgNodeCols`）、`BindAccountFeishu` / `UnbindAccountFeishu` /
+      `FindAccountByFeishuOpenID` / `ListAPIKeyFeishuIdentities` / `SetOrgNodeFeishuDepartment` /
+      `AddAccountOrgNodes`（加性 `INSERT OR IGNORE`）；`UpsertAccount` 与 `UpdateOrgNode` **不写**这些列
+- [x] 飞书客户端 `internal/feishu/directory.go`：tenant token 缓存（提前 60 s、被拒后重取一次一次重试）、
+      部门 BFS 遍历（父先于子，根 `"0"` 只取成员不算部门）、跨部门同人按 open_id 合一、
+      上限（PageSize 50 / MaxDepartments 500 / MaxPages 40）→ `Truncated`、
+      名字全空 → `NamesAvailable=false`（当前部署的真实状态：缺两个数据权限）
+- [x] 配置：`feishu.tenant_token_url` / `feishu.contact_url`（默认即飞书文档地址）+ env
+      `GW_FEISHU_TENANT_TOKEN_URL` / `GW_FEISHU_CONTACT_URL` + https 校验（`config.example.yaml` 已注明）
+- [x] 管理接口 5 条（`admin_list_feishu_directory` / `admin_sync_feishu_org` /
+      `admin_create_account_from_feishu_user` / `admin_bind_account_feishu_user` /
+      `admin_unbind_account_feishu_user`，全部 `role=admin`）：合并规则只写在 `planFeishuOrg` 一处，
+      预览与同步共用同一份计划；同步幂等（第二次 0 写入）；未启用飞书 → 400 `unsupported_parameter`；
+      飞书失败 → 502 + 中文原因
+- [x] 控制台：组织架构页右上角「同步飞书」（只读角色置灰）→ `pages/org_feishu.js` 弹窗
+      （左飞书部门树 + 右人员列表，人员/账号两处都支持拼音过滤；未匹配行给「创建用户」「绑定账号」，
+      已匹配行给「解绑」；缺名称权限时弹窗顶部明确说明并保留按编号的操作）
+- [x] 测试：store（绑定唯一/覆盖/解绑幂等/upsert 不清绑定/打标/加性挂节点）、feishu 目录
+      （翻页、BFS 序、同人合一、token 缓存与一次性重试、上限截断、名称缺失、错误分类）、
+      httpapi（三条匹配通道矩阵、同名先到先得、缺权限时只合并 id 通道、502、409/404/403/未启用）、
+      `internal/webui/tests/org_feishu_test.mjs`（发出去的 URL 与请求体）、ui 夹层三个视图
+- [x] **真机预览验收（2026-09-21，v2.10.0 部署后）**：飞书侧的「获取部门基础信息」
+      `contact:department.base:readonly` 与「获取用户基本信息」`contact:user.base:readonly` 已生效
+      （名称可读），`GET /admin/api/v1/org/feishu/directory` 实测 22 个部门 / 90 人 /
+      13 人自动匹配（5 人走 `api_key`、8 人走同名）/ 77 人待决定，首次 15.4 s、60 秒内缓存 1.4 ms；
+      `FEISHU_LIVE_CONFIG=config.yaml go test ./internal/feishu/ -run TestLiveDirectory -v` 可复现这条探针
+- [ ] **真机「同步」由操作员在控制台点击**（本版没有替用户写库）：它会在线上组织架构里创建 22 个节点、
+      给 13 个账户写飞书身份并挂进部门节点。点完要核对：节点层级与部门树一致、5 个 M60 绑过的账号
+      身份固化到账户（Key 上的绑定保持不动）、同名账户被合并、**第二次点同步是 0 写入**。
+      改动前后可对比 `GET /admin/api/v1/org/nodes?limit=1000` 与 `GET /admin/api/v1/accounts`
+- [x] **可选择同步哪些部门（2026-09-21 追加，设计 §12）**：部门树每行一个作用域复选框（含合成根
+      「飞书根组织」＝公司层人员），**勾选/取消父部门连同整棵子树一起**（半选表示"这一行与子树不一致"，
+      半选不进接口）、另有「全选 / 清空」；
+      勾选部门的**上级**自动补建（标「为层级补建」，其人员不在范围内）；人员按**自己的部门**判定范围，
+      范围外的行置灰并注明原因；预览与同步都带范围（`departments=` / `department_ids`），
+      因此确认框里的数字恒等于服务端计划；空选 400、未知 id 忽略并回报；不传 = 全量（兼容 MCP/脚本）
+- [ ] 未做：飞书侧的部门改名/删除**不传播**到本地（设计如此：本地节点与账户只能由人来改）；
+      人员离职/停用不自动停账户（飞书 `status` 字段本轮没读）
+
+## M72 账号级飞书身份、组织页整合、多 Key 登录选择
+
+设计：`docs/design/m72-account-feishu-identity.md`（§11 真机验收记录、§12 差异已回填）；
+规格：`docs/feishu.md` §1/§3/§4/§5/§5c.4/§5c.5/§6/§7/§8、`docs/org.md` §5、`docs/dshgw.md` §3、`docs/mcp.md` §4。
+需求（2026-09-21 用户原话，五条）：①「Key、账号、组织架构在管理后台界面整合」；②「飞书绑定到账号
+（不再只绑 Key）」；③「只要配置文件开启了 dsh，所有激活账号都能用」；④「绑定飞书不需要扫码，
+弹窗让管理员选择飞书人员」；⑤「dshgw 登录时，账号有多个 Key 就弹选择框」。
+用户四项决策：整合以**组织架构为中心**（人员列表项带账号操作、可展开看详情与 Key 列表）；
+多 Key 弹窗覆盖两种登录路径且**只影响归属与审计**；DSH **默认全开 + 首次登录按需建租户**，
+保留「停用」为显式例外；Key 级扫码绑定**替换**为账号级选人，存量**迁移后清空**。
+**已部署并完成本机验收（2026-09-21，逐条记录见设计 §11）**；代码实现与自动化验收见 `docs/todo_done.md` 同名小节。
+
+- [ ] **人工走查（用户反馈后的六处界面改动）**：已 `make build` 并重启 `aigw-local`（控制台资源内嵌在
+      二进制里），`/version` = `d655c0e`、新资源已在线；剩浏览器侧**硬刷新**（静态资源 `max-age=300`）
+      `http://192.168.190.86:8088/admin/ui/#/org`，逐条确认：人员列表是多列表格且列对齐；展开后点「收起」
+      真的收起；「分配组织」弹出组织树勾选（勾父不连带子）；节点详情「新建成员」建完立刻在成员列表里；
+      人员行「编辑」能改账号字段；「绑定飞书」点下去先看到弹窗与读取进度。自动化证据见 `docs/todo_done.md`
+      的「修掉组织页人员表与三类弹窗的六处问题」小节
+
+- [ ] **唯一剩下的验收：飞书真链路走一次**（需要本人的手机/飞书身份）：在飞书里点一次「飞书登录」，
+      确认落进本人账号的租户、侧栏显示飞书名；再在控制台把该账号「停用 DSH」，确认同一身份再登被拒
+      （自动化侧已验到"账号级身份是判定真值 + 选择页 + 按需建租户 + 显式停用不被撤销"这些不需要手机的部分）
+- [ ] **部署后续（本机已做，其他环境照做）**：`config.yaml` 的 `dshgw` 块加 `auto_enable: true`（**本机已打开**）；
+      `bin/aigw` 与 `bin/dshgw` 都要重建并重启（选择页在 dshgw 里，只更新 aigw 会让 Key 登录直接进租户）；
+      回滚点 `data/prev/bin/{aigw,dshgw}.prev-running-3.1.0-69da1dd`。
+      **版本号仍是 3.1.0 而 revision 是 M72 的提交**——下次发版按 `release-version` 技能正常升版本即可
+- [ ] **给账号补模型授权**（现在是"所有激活账号都能用 DSH"的实际瓶颈）：本部署 `auth.default_grant: none`，
+      多数账号没有标签/节点授权，首登会以 403 `provision_failed` 被拒（门户与控制台都会说明原因）。
+      控制台组织页的人员行现在直接写着「需该账号有可用模型」；批量补授权建议用组织节点标签或账号标签
+- [ ] 未做（明确记下）：选中的 Key 不影响 worker 的模型凭据（用户选 A；要做是另一个里程碑：
+      凭据热更新 + 并发会话冲突 + 额度归属）；`/accounts`、`/keys` 两页保留未合并（组织页是主入口）；
+      飞书侧离职/停用仍不自动停账户（沿用 M70 口径）；`GET /org/nodes/{id}/accounts` 的 Key 计数
+      是每账号一次本地读（账号数上千时应改成聚合查询，见设计 §12 第 12 条）；
+      验收留下一个测试租户 `dsh-m51-test-a`（账号 98，端口 18307）与两把已吊销的临时 Key（118/119）
+
+## M73 控制台智能问答的联网能力（`web_search` / `web_fetch`）
+
+设计：`docs/design/m73-chat-web-access.md`；规格：`docs/chat.md` §12（使用、后端选择、安全边界、限额）、
+§9（配置）、§11（排障）；配置清单：`config.example.yaml` 与 `config.yaml` 的 `chat.web_access`。
+用户决策（2026-09-21）：① 四个后端都要（searxng / bocha / tavily / bing）；② 部署级 + 会话级双层开关；
+③ 搜索 **+ 抓取网页正文**；④ **只给控制台智能问答**，不开放给外部 MCP 客户端。
+用户决策（2026-09-21，验收时追加）：⑤ 本机 `config.yaml` 打开 `chat.web_access`（`provider: bing`，
+免密钥、只适合验证链路）。
+
+真机验收（2026-09-21，临时实例 :8099 跑新二进制、共用同一个 `data/aigw-local.db`）：
+
+- `scripts/verify-m73.sh`：**通过 16 / 失败 0 / 跳过 1**（跳过的那条是"搜索密钥不出现在响应里"，
+  因为 `bing` 本来就不需要密钥；用 bocha/tavily 时把 `GW_CHAT_WEB_API_KEY` 传进去即可验证）。
+  覆盖：部署事实字段、开关往返与落库、"只改标题不会关掉联网"、归属隔离 404。
+- `RUN_TURN=1` 的真实一轮（账户 #4 / Key #8 / `deepseek-flash`）：模型**先 `web_search` 再两次
+  `web_fetch`**，自己抓到了 `api-docs.deepseek.com` 的模型价格页，回答里带中英文两条链接与输入价格表，
+  并主动说明"网页正文只作资料看待"（§12 的第 4 条防注入规则生效）；费用记入请求日志，工具调用记入
+  `chat_tool_calls`（控制台会画成工具卡片）。
+- 部署产物自证：:8099 服务的 `js/pages/chat.js` 里能读到联网角标文案与工具中文名，`app.css` 里有
+  `field-inline` 规则（内嵌资源确属新版本）。
+
+- [ ] **人工走查（宿主终端，需要你来做）**：8088 上跑的还是旧二进制，且控制台资源内嵌在二进制里，
+      所以要在启动它的终端执行 `./scripts/local-run.sh restart`（`config.yaml` 的联网开关已经打开）。
+      随后硬刷新 `http://127.0.0.1:8088/admin/ui/#/chat`，点开会话头部的「联网：已关闭 · 开启」，
+      问一个需要外部信息的问题，确认工具卡片显示「联网搜索 / 抓取网页」、回答里的来源 URL 可点。
+- [ ] **给账号补模型授权**（与 M72 同一条）：本部署 `auth.default_grant: none`，多数控制台账号没有
+      模型授权，联网问题会因为「没有可用模型」而问不出来——先按 M72 的方式补授权
+      （验收时用的是账户 #4 的 Key #8，它已授权 deepseek 系列）
+- [ ] **`bing` 后端的结构漂移要靠人复检**：它是唯一解析别人页面的后端（本机验收用它，因为免密钥），
+      复检命令是 `GW_WEBACCESS_LIVE=1 go test ./internal/webaccess/ -run TestLiveSearchAndFetch -v`
+      （默认跳过、会真出网）；2026-09-21 首跑就发现"九条结果并成一条"，已修，但下一次改版仍只能靠它发现
+- [ ] 未做（明确记下）：上游原生 `web_search` 透传与「能力降级上报通道」（M19 观察项）；
+      多编码（GBK）正文解码；阅读器级正文抽取、PDF/Office 解析、站点爬取、搜索缓存；
+      联网调用不计费、不记账、不做域名黑白名单；检索词不落审计与日志（有测试钉住）；
+      配置了出网代理时，IP 级 SSRF 校验退化为本地预解析（可达范围由代理决定）
+
+## M74 租户名自动用 `dsh-<账号拼音>-<账号ID>`
+
+设计：`docs/design/m74-tenant-name-from-account.md`；规格：`docs/dshgw.md` §3（账号级 dsh 开关）、
+`docs/org.md` §拼音表。用户原话：「租户名自动用 `dsh-<账号>` 格式」（确认口径：`dsh-账号拼音-id`，
+弹窗预填但**仍可手改**）。
+定位：租户名候选只有服务端一份实现（`dshTenantNameForAccount`，拼音来自 `internal/pinyin` 的生成表，
+与控制台过滤用**同一张** blob）；控制台弹窗预填账号行下发的 `dsh_tenant_suggested`，删掉两页各自的
+`slugFromAccount`；中文名不再退化成共享的 `dsh-tenant`。已有映射与显式请求名仍然优先，**不重命名**
+任何既有租户；控制台的租户名正则改为与 dshgw 的 `ValidTenantName` 逐字符相同（因此现在允许以数字结尾）。
+
+- [ ] **真机/浏览器人工走查**：本机 `:8088` 跑的是旧二进制，需 `./scripts/local-run.sh restart` 后对某个
+      未启用的中文名账号点「启用 DSH」，确认①预填 `dsh-<拼音>-<id>`；②启用后徽标与审计
+      `dsh_enable.tenant` 一致；③`data/dshgw-verify/state/admin.sock` 的 `tenant-list` 里能看到该租户
+- [ ] 决策（本里程碑明确不做）：是否给历史租户名做一次性"改名/补 ID"。改名等于换租户——旧租户数据
+      （dsh 主目录、工作区）留在旧名字下，且需要挪目录才能继续用；要做就另开里程碑
+
+## M76 点「退出」后强制卸载挂载文件系统，最后强制退出 dsh
+
+设计：`docs/design/m76-dsh-exit-force-teardown.md`；规格：`docs/dshgw.md` §3b / §7b / §7d。
+用户原话（2026-09-22）：「dsh 点击退出按钮后，强制 umount 使用挂载文件系统，最后强制退出 dsh」。
+定位：退出顺序改为**排除 → 强制卸载（浏览器 FUSE + sshfs）→ 最后强杀 dsh worker**；浏览器侧补强制阶梯
+（限时优雅卸载 → `-u -z` 惰性摘除 → abort FUSE 连接 → 重试），SSH 侧退出新增 `DetachTenant`（保留记录）
+与登录 `Restore`（自动重挂），顺带修掉 M64 记的死挂载缺陷；失败不再短路，也不再只记错误类型。
+实现、单测、e2e 与现网验收的记录见 `docs/todo_done.md` 同名小节。
+
+- [ ] **浏览器人工确认（只剩这一步）**：经门户进某个租户 → 侧栏点「⏻ 退出」→ 回到门户登录页；
+      随后断言该账号 `/proc/self/mounts` 无挂载、`ps` 无它的 worker、`ss` 无它的 worker 端口、
+      `data/dshgw-verify/state/audit.jsonl` 出现 `logout_mount_detach` + `logout_worker_stop`
+      （无 `logout_worker_stop_failed` / `logout_mount_leftover`），再登录一次确认 worker 与 SSH 工作区
+      挂载都回来。本机验收与 e2e 都是 HTTP 客户端/脚本跑的，没有真人点界面；需要用户自己的会话
+
 ## 缺陷：`dshgw.admin_socket` 与 M63 状态根脱节（2026-09-20 修）
 
 现象：飞书首次登录（绑定了 Key 的账号）在日志里报
@@ -723,7 +925,7 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
       发布记录见 `docs/todo_done.md` 的 v2.7.1 小节。当时的取舍也一并记下：抢修时**故意不重建**
       二进制，否则会带上未发布的代码却仍标 `6790dff`，反而污染 `/version` 的版本自证
 
-
+## M66 的 make verify 在本机会挂住
 
 M66 验收期间发现：`make vet` / `make test`（内部是 `go vet ./...` / `go test ./...`）会把工作区的 `./data`
 也走一遍，而 M63 起运行态数据就落在那里（本机是 6.2 GB 库 + 备份，以及 dshgw state 下 GB 级的浏览器工作区

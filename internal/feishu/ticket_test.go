@@ -128,3 +128,35 @@ func signRawTicket(t *testing.T, codec *TicketCodec, ticket Ticket) string {
 	}
 	return wire
 }
+
+// M72: the gateway signs its own key-pick ticket for a key login, and aigw's codec has to accept
+// it — the two sides share one secret and one wire format, so a divergence here would show up as
+// "unknown mode" at a person's login. The shared vectors cover the format; this covers the minting
+// side that has no vector (aigw never mints this ticket in production).
+func TestKeyPickTicketRoundTrip(t *testing.T) {
+	codec, now := consoleCodec(t)
+	wire, ticket, err := codec.IssueKeyPick(42, "ou_alice", "nonce-pick-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket.Mode != TicketModeKeyPick || ticket.AccountID != 42 || ticket.OpenID != "ou_alice" {
+		t.Fatalf("issued ticket = %+v", ticket)
+	}
+	if ticket.Tenant != "" || ticket.KeyID != 0 || ticket.AdminUserID != 0 {
+		t.Fatalf("a key-pick ticket carries another flow's fields: %+v", ticket)
+	}
+	verified, err := codec.VerifyKeyPick(wire)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if verified.AccountID != 42 || verified.Expires != now.Add(2*time.Minute).Unix() {
+		t.Fatalf("verified ticket = %+v", verified)
+	}
+	// A key-pick ticket is not a DSH ticket, and the other way round.
+	if _, err := codec.VerifyTicket(wire); err == nil {
+		t.Fatal("a key-pick ticket was accepted as a DSH ticket")
+	}
+	if _, _, err := codec.IssueKeyPick(0, "ou_alice", "nonce-pick-2"); err == nil {
+		t.Fatal("a key-pick ticket without an account was issued")
+	}
+}

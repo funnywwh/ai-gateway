@@ -807,8 +807,15 @@ func truncateReason(reason string) string {
 	return string([]rune(reason)[:117]) + "…"
 }
 
-// finishFeishuLogin resolves the identity to an account that may use the DSH gateway and
-// hands the browser a short-lived ticket for that tenant.
+// finishFeishuLogin resolves the identity to an account that may use the DSH gateway and hands
+// the browser a short-lived ticket — for the tenant, or for the key picker when the account has
+// more than one usable key.
+//
+// Since M72 the identity is the ACCOUNT's (accounts.feishu_open_id): the binding says which
+// account a Feishu person is, the OAuth exchange just proved which person this browser is, and
+// the account's DSH entitlement decides whether they may enter. The key-level lookup is a
+// pre-migration fallback for a deployment whose startup backfill did not run: without it, an
+// upgrade would lock people out until an operator finished the move by hand.
 func (s *Server) finishFeishuLogin(w http.ResponseWriter, r *http.Request, identity feishu.Identity) {
 	ctx := r.Context()
 	deps := s.deps.Feishu
@@ -816,51 +823,80 @@ func (s *Server) finishFeishuLogin(w http.ResponseWriter, r *http.Request, ident
 		http.NotFound(w, r)
 		return
 	}
-	key, err := s.deps.AdminStore.FindAPIKeyByFeishuOpenID(ctx, identity.OpenID)
+	account, err := s.deps.AdminStore.FindAccountByFeishuOpenID(ctx, identity.OpenID)
 	if err != nil {
 		s.deps.Log.Error("resolving the Feishu identity failed", "err", err)
 		s.redirectFeishuError(w, r, "error")
 		return
 	}
-	if key == nil {
-		s.audit(ctx, "", "feishu_login_reject", "api_key", "", map[string]any{"reason": "unbound open id", "open_id": identity.OpenID}, "denied")
+	if account == nil {
+		account, err = s.feishuAccountFromLegacyKeyBinding(ctx, identity.OpenID)
+		if err != nil {
+			s.deps.Log.Error("resolving the Feishu identity through its key binding failed", "err", err)
+			s.redirectFeishuError(w, r, "error")
+			return
+		}
+	}
+	if account == nil {
+		s.audit(ctx, "", "feishu_login_reject", "account", "", map[string]any{"reason": "unbound open id", "open_id": identity.OpenID}, "denied")
 		s.redirectFeishuError(w, r, "unbound")
 		return
 	}
-	account, err := s.deps.AdminStore.GetAccount(ctx, key.AccountID)
-	if err != nil {
-		s.deps.Log.Error("loading the account of a bound key failed", "err", err, "account", key.AccountID)
-		s.redirectFeishuError(w, r, "error")
-		return
-	}
+	autoEnable := s.deps.Config != nil && s.deps.Config.Dshgw.AutoEnable
 	switch {
 	case account.Status != "" && account.Status != "active":
 		// Suspended or closed: the identity is fine, the account is not.
 		s.audit(ctx, "", "feishu_login_reject", "account", account.Name, map[string]any{"reason": "account " + account.Status, "open_id": identity.OpenID}, "denied")
 		s.redirectFeishuError(w, r, "account_status")
 		return
-	case !account.DSHEnabled:
+	case !accountDSHEffective(autoEnable, account):
 		s.audit(ctx, "", "feishu_login_reject", "account", account.Name, map[string]any{"reason": "dsh disabled", "open_id": identity.OpenID}, "denied")
 		s.redirectFeishuError(w, r, "dsh_disabled")
 		return
-	case strings.TrimSpace(account.DshTenant) == "":
+	}
+	// From here the tenant has to exist. With auto_enable an entitled account without one is
+	// provisioned by the portal's own authorization call a moment later (dshgw asks aigw before
+	// it issues a session), so this path only has to refuse the case the deployment did not opt
+	// into: an account whose DSH was enabled by hand but whose tenant was never recorded.
+	tenant := strings.TrimSpace(account.DshTenant)
+	if tenant == "" && !autoEnable {
 		s.audit(ctx, "", "feishu_login_reject", "account", account.Name, map[string]any{"reason": "tenant unassigned", "open_id": identity.OpenID}, "denied")
 		s.redirectFeishuError(w, r, "tenant_missing")
 		return
+	}
+
+	// Which key this session is recorded against (M72): with more than one usable key the person
+	// chooses, and the choice travels back through the portal. The picker is a separate ticket
+	// because it names an account rather than a tenant, and the portal is the side that owns the
+	// form. 0/1 keys keep the single-step login of M61.
+	keys := s.accountKeyChoices(ctx, account.ID)
+	if len(keys) > 1 || tenant == "" {
+		// tenant == "" (auto-provisioning at the portal) also goes through the picker: it is a
+		// page the portal already owns, so the first login of an account needs no special case
+		// there, and the key it picks is the tenant's own worker key when there is nothing else.
+		s.handOffFeishuKeyPick(w, r, account, identity)
+		return
+	}
+	keyID := int64(0)
+	if len(keys) == 1 {
+		if id, ok := keys[0]["id"].(int64); ok {
+			keyID = id
+		}
 	}
 	nonce, err := feishuNonce()
 	if err != nil {
 		s.redirectFeishuError(w, r, "error")
 		return
 	}
-	wire, ticket, err := deps.Tickets.Issue(account.DshTenant, key.ID, account.ID, identity.OpenID, nonce)
+	wire, ticket, err := deps.Tickets.Issue(tenant, keyID, account.ID, identity.OpenID, nonce)
 	if err != nil {
 		s.deps.Log.Error("issuing a DSH login ticket failed", "err", err)
 		s.redirectFeishuError(w, r, "error")
 		return
 	}
 	s.audit(ctx, "", "feishu_dsh_login", "account", account.Name, map[string]any{
-		"tenant": account.DshTenant, "open_id": identity.OpenID, "expires_at": time.Unix(ticket.Expires, 0).UTC().Format(time.RFC3339),
+		"tenant": tenant, "open_id": identity.OpenID, "key_id": keyID,
+		"expires_at": time.Unix(ticket.Expires, 0).UTC().Format(time.RFC3339),
 	}, "ok")
 	// The ticket travels as a host-only cookie, which is what makes it reach the portal on
 	// its own port: cookies are scoped to a host, not to a port. A deployment whose portal
@@ -876,53 +912,90 @@ func (s *Server) finishFeishuLogin(w http.ResponseWriter, r *http.Request, ident
 	http.Redirect(w, r, target, http.StatusSeeOther)
 }
 
+// feishuAccountFromLegacyKeyBinding resolves an identity that is still bound to a key (M60) to
+// that key's account. It exists so an upgrade in which the startup backfill did not run — or was
+// interrupted — does not lock people out of a portal they could use yesterday. The binding stays
+// on the key; nothing is written here, and the next start migrates it for real.
+func (s *Server) feishuAccountFromLegacyKeyBinding(ctx context.Context, openID string) (*domain.Account, error) {
+	key, err := s.deps.AdminStore.FindAPIKeyByFeishuOpenID(ctx, openID)
+	if err != nil || key == nil {
+		return nil, err
+	}
+	s.deps.Log.Warn("a Feishu identity was still bound at the key level; the account-level binding is missing",
+		"key", key.ID, "account", key.AccountID)
+	account, err := s.deps.AdminStore.GetAccount(ctx, key.AccountID)
+	if err != nil {
+		return nil, err
+	}
+	return account, nil
+}
+
+// handOffFeishuKeyPick continues a login at the portal's key picker (M72 §"多 Key 选择").
+//
+// The pick ticket names the ACCOUNT rather than a tenant, and the portal renders the choice from
+// it. aigw signs it because it is the side that proved the identity: the portal's own wait — a
+// key login — cannot reach here at all (there is no Feishu identity involved), so a ticket that
+// says "this account may choose" only ever comes from the callback.
+//
+// The ticket is delivered exactly like a login ticket: as a host-only cookie when the portal
+// shares the callback's host, and in the URL when it does not.
+func (s *Server) handOffFeishuKeyPick(w http.ResponseWriter, r *http.Request, account *domain.Account, identity feishu.Identity) {
+	deps := s.deps.Feishu
+	if deps.Tickets == nil {
+		// Only reachable in a build whose DSH login flow is off, which the caller already
+		// refuses; answering as unavailable beats a nil dereference.
+		s.redirectFeishuError(w, r, "error")
+		return
+	}
+	nonce, err := feishuNonce()
+	if err != nil {
+		s.redirectFeishuError(w, r, "error")
+		return
+	}
+	wire, ticket, err := deps.Tickets.IssueKeyPick(account.ID, identity.OpenID, nonce)
+	if err != nil {
+		s.deps.Log.Error("issuing a key-pick ticket failed", "err", err)
+		s.redirectFeishuError(w, r, "error")
+		return
+	}
+	s.audit(r.Context(), "", "feishu_key_pick", "account", account.Name, map[string]any{
+		"open_id": identity.OpenID, "keys": len(s.accountKeyChoices(r.Context(), account.ID)),
+		"expires_at": time.Unix(ticket.Expires, 0).UTC().Format(time.RFC3339),
+	}, "ok")
+	if s.feishuSameHost(deps.PortalURL) {
+		s.setFeishuPickCookie(w, wire)
+		redirectFeishuHandoff(w, r, deps.RedirectURI, s.trailingSlash(deps.PortalURL)+"login/pick")
+		return
+	}
+	target := s.trailingSlash(deps.PortalURL) + "login/pick?ticket=" + url.QueryEscape(wire)
+	s.deps.Log.Warn("the DSH portal is on another host; the key-pick ticket travels in the URL", "portal", deps.PortalURL)
+	http.Redirect(w, r, target, http.StatusSeeOther)
+}
+
 // ---------------------------------------------------------------------------
 // Console binding routes
 // ---------------------------------------------------------------------------
 
-// handleAdminBindKeyFeishu starts the binding flow from the console.
+// handleAdminBindKeyFeishu is the retired key-level binding entry point (M60 → M72).
 //
-// It answers with a redirect to Feishu rather than JSON because the browser has to visit the
-// consent page itself, and it does so in ONE hop: this route is under "/admin" (where the
-// administrator's cookie is scoped) and mints the signed state right here. An earlier version
-// redirected to a public /feishu/login?mode=bind step, which never received that cookie.
+// It used to sign a state and send the browser to Feishu's consent page — the "扫码绑定" that
+// M72 replaces with an administrator picking a person from the directory. The route stays
+// registered so that a bookmarked link, an old console tab or a script gets an explanation
+// instead of a bare 404. The answer is `unsupported_parameter` (400) rather than 410 for the
+// same reason M70 used it for "this deployment has no Feishu": this repository has one shape for
+// "the request is understood and will not be served", and a second code for the same situation
+// is one more thing for a client to learn.
 func (s *Server) handleAdminBindKeyFeishu(w http.ResponseWriter, r *http.Request) {
 	if !s.feishuEnabled() {
 		http.NotFound(w, r)
 		return
 	}
-	user, ok := s.adminActor(w, r, true)
-	if !ok {
+	if _, ok := s.adminActor(w, r, true); !ok {
 		return
 	}
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
-		writeAPIError(w, domain.ErrInvalidRequest("invalid key id"))
-		return
-	}
-	key, err := s.deps.AdminStore.GetAPIKeyByID(r.Context(), id)
-	if err != nil {
-		writeAPIError(w, toAPIError(err))
-		return
-	}
-	if key.Status != "" && key.Status != "active" {
-		// A disabled key cannot be used, so binding an identity to it would only create a
-		// login that always fails.
-		writeAPIError(w, domain.ErrConflict("bind a Feishu account to an active API key"))
-		return
-	}
-	nonce, err := feishuNonce()
-	if err != nil {
-		writeAPIError(w, domain.ErrInternal("cannot start the Feishu flow"))
-		return
-	}
-	state, err := s.deps.Feishu.States.Sign(feishu.Attempt{Flow: feishu.FlowBind, KeyID: key.ID, Actor: user.Username, Nonce: nonce})
-	if err != nil {
-		writeAPIError(w, domain.ErrInternal("cannot start the Feishu flow"))
-		return
-	}
-	s.audit(r.Context(), user.Username, "feishu_bind_start", "api_key", strconv.FormatInt(key.ID, 10), nil, "ok")
-	s.redirectToFeishu(w, r, state)
+	writeAPIError(w, domain.ErrUnsupported(
+		"binding a Feishu identity to an API key is retired: bind it to the account instead "+
+			"(PUT /admin/api/v1/accounts/{id}/feishu, or the organization page's 绑定飞书 button)"))
 }
 
 // handleAdminUnbindKeyFeishu clears a key's Feishu identity.
@@ -956,6 +1029,166 @@ func (s *Server) handleAdminUnbindKeyFeishu(w http.ResponseWriter, r *http.Reque
 			map[string]any{"open_id": previous}, "ok")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"unbound": changed, "key_id": key.ID})
+}
+
+// ---------------------------------------------------------------------------
+// Account-level binding routes (M72)
+// ---------------------------------------------------------------------------
+
+// handleAdminBindAccountFeishu writes a Feishu identity onto an account: this is what the
+// organization page's 绑定飞书 button calls after the administrator picked a person.
+//
+// It takes the identity as a body rather than looking the person up in the directory, for three
+// reasons: the console has just read the directory and already knows the name; a person who left
+// the company must still be bindable-by-id (and, more importantly, unbindable); and a lookup here
+// would make binding depend on Feishu being reachable, which is not needed to write a row.
+//
+// It deliberately does NOT touch the account's organization membership. The M70 person-first
+// route (PUT /org/feishu/users/{open_id}/account) also links the person's departments; an
+// administrator binding one account from the person list is doing one thing, and silently
+// changing what its keys are authorized for is the kind of side effect this repository keeps out
+// of write paths. Assigning the account to a node is its own action on the same page.
+func (s *Server) handleAdminBindAccountFeishu(w http.ResponseWriter, r *http.Request) {
+	if !s.feishuEnabled() {
+		writeAPIError(w, domain.ErrUnsupported("feishu is not enabled on this deployment"))
+		return
+	}
+	actor, ok := s.adminActor(w, r, true)
+	if !ok {
+		return
+	}
+	store, ok := portReady(w, s.deps.Accounts, "account management")
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeAPIError(w, domain.ErrInvalidRequest("invalid account id"))
+		return
+	}
+	account, err := store.GetAccount(r.Context(), id)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	var body struct {
+		OpenID  string `json:"open_id"`
+		UnionID string `json:"union_id"`
+		Name    string `json:"name"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
+		return
+	}
+	openID := strings.TrimSpace(body.OpenID)
+	if openID == "" {
+		writeAPIError(w, domain.ErrInvalidRequest("open_id is required (the person's ou_… id from the directory)").WithParam("open_id"))
+		return
+	}
+	previous := account.FeishuOpenID
+	if previous != "" && previous != openID {
+		// Rebinding an account that already carries someone else: allowed (an administrator
+		// correcting a person list is exactly what this route is for), and the write below has
+		// to succeed — the unique index only stops a second Claimant, not a first one.
+		if err := s.releaseFeishuIdentity(r.Context(), store, previous); err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+	}
+	if err := store.BindAccountFeishu(r.Context(), account.ID, domain.FeishuBinding{
+		OpenID: openID, UnionID: strings.TrimSpace(body.UnionID), Name: strings.TrimSpace(body.Name),
+		BoundBy: actor.Username,
+	}); err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	result := "bound"
+	if previous != "" && previous != openID {
+		// Only a DIFFERENT person is a replacement: re-binding the same identity (a double
+		// click, or opening the picker again and pressing 绑定) is the same binding, and
+		// reporting it as a change would tell an operator something happened that did not.
+		result = "replaced"
+	}
+	s.audit(r.Context(), actor.Username, "feishu_bind", "account", strconv.FormatInt(account.ID, 10), map[string]any{
+		"open_id": openID, "name": strings.TrimSpace(body.Name), "previous_open_id": previous,
+		"matched_by": "manual",
+	}, "ok")
+	s.invalidateFeishuDirectory()
+	// The identity is what the portal logs in with, so a binding changes who may enter: the
+	// verifier caches account rows, and a stale row would keep refusing (or admitting) the
+	// previous person for one TTL.
+	s.reload(r.Context(), "account feishu binding updated", true)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": result,
+		"account": map[string]any{"id": account.ID, "name": account.Name},
+		"feishu":  accountFeishuJSON(&domain.Account{FeishuOpenID: openID, FeishuName: strings.TrimSpace(body.Name)}),
+	})
+}
+
+// releaseFeishuIdentity frees a Feishu identity that is still attached to whatever account an
+// earlier write put it on, so a replacement can claim it.
+//
+// It exists because the unique index is per identity and enforced at insert time: rebinding an
+// account to a different person would otherwise collide, not with its own old value, but with
+// the account the new person is currently on (usually none — yet "usually" is not a rule).
+// A failure to clear the old holder is reported rather than ignored: the binding below would
+// fail anyway, and a vague conflict is harder to act on than "this identity is on account #7".
+func (s *Server) releaseFeishuIdentity(ctx context.Context, store AccountAdmin, openID string) error {
+	if strings.TrimSpace(openID) == "" {
+		return nil
+	}
+	holder, err := store.FindAccountByFeishuOpenID(ctx, openID)
+	if err != nil || holder == nil {
+		return err
+	}
+	changed, err := store.UnbindAccountFeishu(ctx, holder.ID)
+	if err != nil {
+		return err
+	}
+	if changed {
+		s.audit(ctx, "binding-replacement", "feishu_unbind", "account", strconv.FormatInt(holder.ID, 10),
+			map[string]any{"open_id": openID, "reason": "replaced by another binding"}, "ok")
+	}
+	return nil
+}
+
+// handleAdminUnbindAccountFeishu clears an account's Feishu identity and reports whether
+// anything changed, so the console can answer idempotently instead of guessing.
+func (s *Server) handleAdminUnbindAccountFeishu(w http.ResponseWriter, r *http.Request) {
+	if !s.feishuEnabled() {
+		writeAPIError(w, domain.ErrUnsupported("feishu is not enabled on this deployment"))
+		return
+	}
+	actor, ok := s.adminActor(w, r, true)
+	if !ok {
+		return
+	}
+	store, ok := portReady(w, s.deps.Accounts, "account management")
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeAPIError(w, domain.ErrInvalidRequest("invalid account id"))
+		return
+	}
+	account, err := store.GetAccount(r.Context(), id)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	previous := account.FeishuOpenID
+	changed, err := store.UnbindAccountFeishu(r.Context(), account.ID)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	if changed {
+		s.audit(r.Context(), actor.Username, "feishu_unbind", "account", strconv.FormatInt(account.ID, 10),
+			map[string]any{"open_id": previous, "account_name": account.Name}, "ok")
+		s.reload(r.Context(), "account feishu binding updated", true)
+	}
+	s.invalidateFeishuDirectory()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "unbound": changed, "account_id": account.ID})
 }
 
 // feishuBindingJSON is the console's view of a key's Feishu identity. It always has the
@@ -1037,6 +1270,24 @@ func (s *Server) feishuSameHost(portalURL string) bool {
 	return strings.EqualFold(portal.Hostname(), callback.Hostname())
 }
 
+// setFeishuPickCookie hands the key-pick ticket to the browser (M72). It reuses the login
+// ticket's cookie name on purpose: the portal reads one cookie and tells the two kinds apart by
+// the mode inside the signed payload, so a second name would only be one more thing to get wrong.
+// The lifetime follows pick_ttl_s, which is a separate setting because this ticket covers a form
+// submission rather than a redirect.
+func (s *Server) setFeishuPickCookie(w http.ResponseWriter, ticket string) {
+	maxAge := 120
+	if s.deps.Config != nil {
+		switch {
+		case s.deps.Config.Feishu.PickTTLS > 0:
+			maxAge = s.deps.Config.Feishu.PickTTLS
+		case s.deps.Config.Feishu.TicketTTLS > 0:
+			maxAge = s.deps.Config.Feishu.TicketTTLS
+		}
+	}
+	s.setFeishuCookie(w, feishuTicketCookieName, ticket, maxAge)
+}
+
 // setFeishuTicketCookie hands the ticket to the browser. The cookie is host-only (no
 // Domain attribute) so it reaches the portal whatever port it listens on, HttpOnly so page
 // script cannot read it, and short-lived because the ticket is redeemed within one
@@ -1047,9 +1298,13 @@ func (s *Server) setFeishuTicketCookie(w http.ResponseWriter, ticket string) {
 	if s.deps.Config != nil && s.deps.Config.Feishu.TicketTTLS > 0 {
 		maxAge = s.deps.Config.Feishu.TicketTTLS
 	}
+	s.setFeishuCookie(w, feishuTicketCookieName, ticket, maxAge)
+}
+
+func (s *Server) setFeishuCookie(w http.ResponseWriter, name, value string, maxAge int) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     feishuTicketCookieName,
-		Value:    ticket,
+		Name:     name,
+		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   s.feishuSecureCookie(),

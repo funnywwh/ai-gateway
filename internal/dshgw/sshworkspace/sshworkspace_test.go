@@ -236,9 +236,28 @@ func TestSSHArgsAreHardened(t *testing.T) {
 	if last := args[len(args)-1]; last != ShellQuote("true") || last != "'true'" {
 		t.Errorf("the remote script is not quoted: %q", last)
 	}
-	// A configured operator source must never participate in runtime selection.
-	options.IdentitySource = "/etc/dshgw/ssh/id_rsa"
-	if joined := strings.Join(options.sshArgs(remote, "gpt001", "true"), " "); strings.Contains(joined, options.IdentitySource) {
-		t.Errorf("ssh arguments leak the configured source: %q", joined)
+	// Every key path ssh is given lives inside this account's own workspace. That is what makes
+	// a key the boundary of what an account reaches: nothing selected at runtime can come from
+	// the operator's HOME or another account, whatever the deployment configured.
+	if keyArg := args[indexOf(args, "-i")+1]; !Within(remote.Workspace, keyArg) {
+		t.Errorf("ssh is pointed at a key outside the account workspace: %q", keyArg)
 	}
+	options.IdentityDir = "/etc/dshgw/ssh/keys"
+	joined = strings.Join(options.sshArgs(remote, "gpt001", "true"), " ")
+	if !strings.Contains(joined, filepath.Join(remote.Workspace, ".ssh", "id_rsa")) {
+		t.Errorf("ssh arguments do not name the account's own key: %q", joined)
+	}
+	if strings.Contains(joined, options.IdentityDir) {
+		t.Errorf("ssh arguments leak the configured key directory: %q", joined)
+	}
+}
+
+// indexOf reports the position of one argument, so a test can read the value after a flag.
+func indexOf(args []string, flag string) int {
+	for i, arg := range args {
+		if arg == flag {
+			return i
+		}
+	}
+	return -1
 }

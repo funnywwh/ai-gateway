@@ -143,6 +143,16 @@ func buildDshgwChild(cfg *config.Config, aigwExecutable string) (*dshgwChild, er
 		// row shows come from this process, over the authorize call it already makes (M67).
 		child.AccountCard = &dshgwsup.AccountCard{Enabled: true}
 	}
+	// The tenant-side web plugins (M75) are written unconditionally, including when a switch is
+	// off: the child's own defaults for them are ON, so staying silent would quietly turn an
+	// operator's "off" back on. The plugin files sit beside the child's plugin_path, which this
+	// side already places.
+	child.TenantPlugins = &dshgwsup.TenantPlugins{
+		WebTTY:         dshgwsup.PluginSwitch{Enabled: cfg.Dshgw.TenantPlugins.WebTTY.Enabled},
+		WorkspaceFiles: dshgwsup.PluginSwitch{Enabled: cfg.Dshgw.TenantPlugins.WorkspaceFiles.Enabled},
+		GitDiff:        dshgwsup.PluginSwitch{Enabled: cfg.Dshgw.TenantPlugins.GitDiff.Enabled},
+		RootLabel:      strings.TrimSpace(cfg.Dshgw.TenantPlugins.RootLabel),
+	}
 	if cfg.Dshgw.SSHWorkspaces.Enabled {
 		ssh := &dshgwsup.SSHWorkspaces{
 			Enabled:            true,
@@ -159,9 +169,8 @@ func buildDshgwChild(cfg *config.Config, aigwExecutable string) (*dshgwChild, er
 			source string
 			target *string
 		}{
-			{"dshgw.ssh_workspaces.identity_source", cfg.Dshgw.SSHWorkspaces.IdentitySource, &ssh.IdentitySource},
 			{"dshgw.ssh_workspaces.identity_dir", cfg.Dshgw.SSHWorkspaces.IdentityDir, &ssh.IdentityDir},
-			{"dshgw.ssh_workspaces.ssh_config_source", cfg.Dshgw.SSHWorkspaces.SSHConfigSource, &ssh.SSHConfigSource},
+			{"dshgw.ssh_workspaces.ssh_config_dir", cfg.Dshgw.SSHWorkspaces.SSHConfigDir, &ssh.SSHConfigDir},
 			{"dshgw.ssh_workspaces.ssh_bin", cfg.Dshgw.SSHWorkspaces.SSHBin, &ssh.SSHBin},
 			{"dshgw.ssh_workspaces.sshfs_bin", cfg.Dshgw.SSHWorkspaces.SSHFSBin, &ssh.SSHFSBin},
 		} {

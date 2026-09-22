@@ -36,8 +36,12 @@
     dshgw/                       监督形态：aigw 生成的子进程配置与租户状态
       state/ssh-mounts.json      SSH 工作区的挂载记录（M64，0600）
       state/workspaces/<账号>/ssh/  SSH 工作区挂载点（0700，在该账号 workspace 之内）
-      state/workspaces/<账号>/.ssh/ 该账号的 ssh 身份（id_rsa 0600）与 known_hosts
+      state/workspaces/<账号>/.ssh/ 该账号的 ssh 身份（id_rsa 0600）、known_hosts 与别名清单 config（0644）；
+                                  另有可选的 identity-managed（0600）：表示该身份归账号自己管，网关不再种密钥
+      ssh-configs/<账号>         该账号别名清单的**初始种子**（运维资产，0644；由 ssh_config_dir 指定）
     dshgw-verify/                本机独立 dshgw 的 state / template-home / 日志
+      ssh-configs/<账号>         同上（本机形态的种子目录，`scripts/ssh_config_adopt.sh` 默认写入这里）
+      ssh-keys/<账号>            该账号密钥的预置来源（运维资产，0600；由 identity_dir 指定，一账号一把）
     prev/                        历史归档（回滚二进制、下线形态的归档），非活动数据
 ```
 

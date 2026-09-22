@@ -29,6 +29,10 @@ var allowed = map[string][]string{
 	"internal/arch":     nil,
 	"internal/creds":    nil,
 	"internal/webui":    nil,
+	// The pinyin table is data plus one lookup: a leaf, so both the transport (naming a tenant after
+	// an account, M74) and anything after it can read the same generated table the console filters
+	// with, without either of them owning a second copy.
+	"internal/pinyin": nil,
 	// The console minifier is a build tool: it reads the console's source tree and writes a
 	// compressed mirror plus a `go build -overlay` file. The console itself never imports it
 	// (internal/webui stays a leaf); its only importer is cmd/minifyui.
@@ -88,11 +92,14 @@ var allowed = map[string][]string{
 		"internal/admin", "internal/apikey", "internal/backup", "internal/billing",
 		"internal/chat", "internal/config", "internal/domain", "internal/feishu", "internal/ids",
 		"internal/mcpsrv",
-		"internal/modelmap", "internal/orgtree", "internal/portal", "internal/pricing", "internal/providers",
+		"internal/modelmap", "internal/orgtree", "internal/pinyin", "internal/portal", "internal/pricing", "internal/providers",
 		"internal/quota", "internal/registry", "internal/responses", "internal/retention",
 		"internal/routing",
 		"internal/runtime", "internal/secret", "internal/store", "internal/usage", "pkg/pluginapi",
 		"internal/localdshgw",
+		// M73: the console's web tools are dispatched from the transport, which is where the
+		// session's switches live.
+		"internal/webaccess",
 	},
 	// M60/M61: the Feishu identity client sits beside the transport instead of inside it,
 	// so the OAuth exchange, the signed state and the ticket are testable on their own. It
@@ -100,6 +107,10 @@ var allowed = map[string][]string{
 	"internal/feishu": {"internal/config", "internal/domain"},
 	// M52: the console drives the dshgw provisioning channel through this socket client.
 	"internal/localdshgw": {"internal/domain"},
+	// M73: console web access (search backends, page extraction, SSRF guard). A leaf on
+	// purpose — it never touches the store, the transport or the chat session state — so
+	// the only shared code it reuses is the proxy URL vocabulary.
+	"internal/webaccess": {"pkg/providerkit"},
 	// M58: aigw supervises its dshgw child across the process boundary only. The
 	// package deliberately imports no aigw internals, so the coupling stays
 	// "one executable starts another" instead of "one program reaches into another".

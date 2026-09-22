@@ -185,8 +185,9 @@ func (db *DB) GetAPIKeyByID(ctx context.Context, id int64) (*domain.APIKey, erro
 // path rewrites a whole row from a struct, and it is exactly how the per-key recording
 // switches were once silently reverted. A binding must be written by one statement that
 // cannot touch anything else, and upsert must not touch the binding (see the columns it
-// lists). The unique index over NULLIF(feishu_open_id, '') makes "one Feishu identity,
-// one key" a database invariant; the violation is reported as a conflict.
+// lists). The unique index over feishu_open_id (empty values excluded, so unbound keys
+// never collide) makes "one Feishu identity, one key" a database invariant; the violation
+// is reported as a conflict.
 func (db *DB) BindAPIKeyFeishu(ctx context.Context, id int64, binding domain.FeishuBinding) error {
 	if binding.OpenID == "" {
 		return domain.ErrInvalidRequest("a Feishu binding requires an open_id")
@@ -253,6 +254,42 @@ func (db *DB) FindAPIKeyByFeishuOpenID(ctx context.Context, openID string) (*dom
 		return nil, fmt.Errorf("store: find api key by Feishu open id: %w", err)
 	}
 	return k, nil
+}
+
+// ListAPIKeyFeishuIdentities returns every bound key as (key, account, identity): the
+// directory sync (M70) reads them all at once — a deployment holds dozens of keys, not
+// thousands — to recognize people that were bound at the key level (M60) before the
+// account-level mapping existed. Unbound keys are simply not in the answer.
+func (db *DB) ListAPIKeyFeishuIdentities(ctx context.Context) ([]domain.KeyFeishuIdentity, error) {
+	rows, err := db.read.QueryContext(ctx, `SELECT id, account_id, feishu_open_id, feishu_union_id,
+		feishu_name, feishu_bound_at, feishu_bound_by FROM api_keys
+		WHERE feishu_open_id <> '' ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list bound api keys: %w", err)
+	}
+	defer rows.Close()
+
+	out := []domain.KeyFeishuIdentity{}
+	for rows.Next() {
+		var (
+			identity domain.KeyFeishuIdentity
+			binding  domain.FeishuBinding
+			boundAt  sql.NullInt64
+		)
+		if err := rows.Scan(&identity.KeyID, &identity.AccountID, &binding.OpenID, &binding.UnionID,
+			&binding.Name, &boundAt, &binding.BoundBy); err != nil {
+			return nil, fmt.Errorf("store: scan bound api key: %w", err)
+		}
+		if boundAt.Valid {
+			binding.BoundAt = timeFromUnix(boundAt.Int64)
+		}
+		identity.Binding = binding
+		out = append(out, identity)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate bound api keys: %w", err)
+	}
+	return out, nil
 }
 
 // TouchAPIKey records the last usage timestamp of a key.

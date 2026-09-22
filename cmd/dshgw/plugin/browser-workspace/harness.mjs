@@ -140,13 +140,21 @@ export function storedFolder (overrides = {}) {
  * @param options.pollIdleMs    how long an empty poll parks before answering
  * @param options.pollFailures  the first N polls of an ALREADY established mount fail (the
  *                              transport breaking under a live mount, not during the mount)
+ * @param options.takenNames    mount directory names another local directory of this account
+ *                              already owns (the fake gateway suffixes a proposal that hits one)
+ * @param options.allocated     the exact key `allocate` answers with, instead of arbitrating
+ * @param options.unnamedGateway a gateway that predates mount directory names: it has no
+ *                              `allocate` endpoint at all, so the client must fall back to a
+ *                              generated key and still mount
+ * @param options.purgeRefusals gateway messages `close {key,purge}` answers with, in order (a
+ *                              live mount, a directory this service did not create)
  */
 export function setup (options = {}) {
   const {
     stored = null, legacy = false, legacyGateway = false, mountAlive = true, pickerDirs = [], permission = 'granted', noPicker = false,
     mountLimit = 8, openRefusals = [], activateFails = false, closeFailures = 0, resumeRefusals = [],
     createFailures = 0, deleteFailures = 0, created = true, pollRequests = [{ id: 'request-1', op: 'stat', path: '' }],
-    pollIdleMs = 20, pollFailures = 0,
+    pollIdleMs = 20, pollFailures = 0, takenNames = [], allocated = null, unnamedGateway = false, purgeRefusals = [],
   } = options
   const events = [], requests = [], warnings = [], registered = new Map(), pendingEffects = []
   const state = {
@@ -154,7 +162,8 @@ export function setup (options = {}) {
     keys: new Map(),        // key -> token (one live mount per key)
     polled: new Set(),
     openCalls: 0, resumeCalls: 0, closeCalls: 0, closed: 0, pollFailures,
-    openRefusals: [...openRefusals], resumeRefusals: [...resumeRefusals],
+    allocateCalls: 0, purgeCalls: 0, purged: [], takenNames: [...takenNames],
+    openRefusals: [...openRefusals], resumeRefusals: [...resumeRefusals], purgeRefusals: [...purgeRefusals],
     createFailures, deleteFailures, closeFailures, generation: 1,
   }
   const indexedDB = fakeIndexedDB()
@@ -176,10 +185,15 @@ export function setup (options = {}) {
     handle.name = name
     return handle
   }
+  const keyListeners = {}
   const window = {
     isSecureContext: !noPicker,
     location: { origin: ORIGIN },
     indexedDB,
+    // A minimal keydown bus: the plugin attaches its Escape listener here while the window
+    // is open, so a test can drive that path exactly as a browser would.
+    addEventListener (type, handler) { (keyListeners[type] ||= new Set()).add(handler) },
+    removeEventListener (type, handler) { keyListeners[type]?.delete(handler) },
     confirm (text) { confirmText = text; events.push('confirm'); return true },
     showDirectoryPicker (pickerOptions) {
       events.push('picker')
@@ -202,6 +216,23 @@ export function setup (options = {}) {
         const known = ['token', 'name', 'writable', 'id', 'result']
         const unknown = Object.keys(payload).find(key => !known.includes(key))
         if (unknown !== undefined) return rejection('browser/failed', `json: unknown field ${JSON.stringify(unknown)}`)
+      }
+      if (endpoint === 'allocate') {
+        state.allocateCalls += 1
+        // A gateway that predates mount directory names has no such endpoint, and one that
+        // predates the client's own fields would refuse the request outright.
+        if (unnamedGateway || legacyGateway) return rejection('browser/failed', 'unknown endpoint')
+        if (allocated !== null) return ok({ key: allocated })
+        const desired = typeof payload.name === 'string' ? payload.name : ''
+        // The real gateway's arbitration, in miniature: the first free "<name>"/"<name>-N" for
+        // this account, where taken means a name the test declared or a live mount holds; an
+        // unusable proposal is answered with a generated id rather than a refusal.
+        if (desired === '') return ok({ key: 'f'.repeat(48) })
+        const taken = name => state.takenNames.includes(name) || [...state.mounts.values()].some(mount => mount.key === name)
+        let answer = desired
+        for (let n = 2; taken(answer) && n <= 9; n++) answer = `${desired}-${n}`
+        if (taken(answer)) answer = desired + '-0123abcd'
+        return ok({ key: answer })
       }
       if (endpoint === 'open') {
         state.openCalls += 1
@@ -249,6 +280,14 @@ export function setup (options = {}) {
         return ok({ mountpoint: known?.mountpoint, id: known?.key })
       }
       if (endpoint === 'close') {
+        if (!payload.token) {
+          // Releasing a mount point by KEY: the delete path of a folder whose capability died
+          // with its mount, so there is no token left to close through.
+          state.purgeCalls += 1
+          if (state.purgeRefusals.length) return rejection('browser/failed', state.purgeRefusals.shift())
+          if (payload.purge && typeof payload.key === 'string') state.purged.push(payload.key)
+          return ok({ closed: true })
+        }
         state.closeCalls += 1
         if (state.closed++ < state.closeFailures) throw new Error('temporary close failure')
         const known = state.mounts.get(payload.token)
@@ -387,8 +426,22 @@ export function setup (options = {}) {
     rowPressed: () => body()?.props?.['aria-pressed'] ?? null,
     rowChildren: () => body()?.children ?? [],
     styles: () => styles,
+    keyListenerCount: () => Object.values(keyListeners).reduce((n, set) => n + set.size, 0),
+    pressKey: (key) => {
+      for (const handler of [...(keyListeners.keydown ?? [])]) handler({ key })
+    },
     clickRow: () => body().props.onClick(),
     clickManage: () => manage().props.onClick(),
+    dialogClose: () => {
+      let button = null
+      walk(dialogElement(), node => { if (button === null && node?.props?.['data-dshgw-close'] !== undefined) button = node })
+      return button
+    },
+    clickDialogClose: () => {
+      const button = dialogClose()
+      if (button === null) throw new Error('no corner close button')
+      return button.props.onClick()
+    },
     // window
     dialogElement,
     dialogOpen: () => dialogElement() !== null,

@@ -19,7 +19,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${UI_HARNESS_WORK:-$ROOT/.cache/ui-harness}"
 PORT="${UI_HARNESS_PORT:-8097}"
-VIEWS="docs detail capacity cost models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand tree org org-readonly org-accounts admins admins-readonly login"
+VIEWS="docs detail capacity cost models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand tree org org-readonly org-person org-accounts org-bind org-sync org-sync-readonly org-sync-nonames admins admins-readonly login chatWeb chatWebOff"
 FIXTURES="$ROOT/scripts/ui-harness/fixtures.json"
 REFRESH=0
 
@@ -87,6 +87,7 @@ render_page "$ROOT/scripts/ui-harness/bridge_syntax.page.html" "$WORK/site/bridg
 render_page "$ROOT/scripts/ui-harness/brand.page.html" "$WORK/site/brand.html"
 render_page "$ROOT/scripts/ui-harness/tree.page.html" "$WORK/site/tree.html"
 render_page "$ROOT/scripts/ui-harness/org.page.html" "$WORK/site/org.html"
+render_page "$ROOT/scripts/ui-harness/org_feishu.page.html" "$WORK/site/org-feishu.html"
 render_page "$ROOT/scripts/ui-harness/admins.page.html" "$WORK/site/admins.html"
 
 page_for_view() {
@@ -97,6 +98,8 @@ page_for_view() {
     # noSkills is the same chat page with an empty skill library (the page reads it off the
     # hash): the refusal path needs a page that was empty from its first load.
     chat|noSkills|skills|form) echo "chat.html" ;;
+    # M73：联网开关的两种部署形态（已配置后端 / 未配置），同一个页面靠 hash 区分。
+    chatWeb|chatWebOff) echo "chat.html" ;;
     # Not a console view: the browser's syntax check on the script the server injects into an
     # interactive preview. It shares the fixtures mechanism, so it rides along with the others.
     bridge) echo "bridge_syntax.html" ;;
@@ -106,7 +109,9 @@ page_for_view() {
     # The reusable tree control on its own (it needs no API at all), and the organization page
     # with its two placements plus the account page's organization column and filter.
     tree) echo "tree.html" ;;
-    org|org-readonly|org-accounts) echo "org.html" ;;
+    org|org-readonly|org-person|org-accounts|org-bind) echo "org.html" ;;
+    # 飞书通讯录同步弹窗（M70）：管理员 / 只读 / 缺数据权限三种部署，同一个页面。
+    org-sync|org-sync-readonly|org-sync-nonames) echo "org-feishu.html" ;;
     # 控制台管理员（M66）：同一个页面渲染"有飞书"和"没有飞书"的两种部署，只读视图单独一条。
     admins|admins-readonly) echo "admins.html" ;;
     # 不是"管理员"页：登录卡片本身（app.js 无会话时渲染成什么样），因为「飞书扫码登录」

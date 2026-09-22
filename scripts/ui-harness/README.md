@@ -47,7 +47,7 @@ UI_STATIC_DIR=$PWD/.cache/ui-dist/static UI_HARNESS_GZIP=1 scripts/ui-harness/ru
 
 **M50 起这是"压缩没有改变行为"的主要证据**：Go 侧的静态合约测试（`internal/webui/embed_test.go`、
 `internal/webui/tests/*.mjs`）读的是源码，看不到"只有压缩后才发生"的回归；对镜像跑一遍同样的
-18 个视图、比对逐视图检查项，才是端到端的保证。harness 页按绝对路径 import（`/js/pages/chat.js`），
+全部视图（当前 32 个）、比对逐视图检查项，才是端到端的保证。harness 页按绝对路径 import（`/js/pages/chat.js`），
 而压缩保持同名文件与同名导出，所以两者走的是同一条路径。
 
 没有 firefox 或 python3 时脚本**跳过并以 0 退出**（与 `test-race` 的处理方式一致），
@@ -98,10 +98,37 @@ GW_BASE=http://127.0.0.1:8099 GW_COOKIE=... scripts/ui-harness/capture.py       
     **成环数据不挂死**。断言读的是**可见行**（`visibleIds` 由标签文本推出），因为「折叠是否真的少画了行」
     只有对着 DOM 才看得出来。
   - `#org` / `#org-readonly` / `#org-accounts`：stub 里有一份**会变的**组织树（写操作会改它），
+    账号夹具同样是**会变的**（新建成员/编辑/分配组织都真的改它，成员关系由账号侧派生），
     并断言组织树**只出现在工作区**（页面不得挂侧边栏实例、shell 不得再提供 `.sidebar-slot` 插槽），
     所以"保存成员"是否真的落库、删除是否带 `cascade=true`、账户页筛选是否把 `org_node_id` 发到了
     服务端，读的都是**带查询串的原始 URL 与请求体**。`org-readonly` 用 `session.role=viewer` 渲染同一页，
     断言写入口整体消失、成员复选框禁用。
+  - **M72 后续（用户反馈的人员表与三类弹窗）**：`#org` 断言人员列表是**多列表格**（表头文案、不同行的
+    同一列左沿 x 必须相等、详情行横跨整行、勾选框落在自己的列里且没被全局 `input{width:100%}` 撑满）、
+    「新建成员」在建号请求里就带上当前节点 id 且建完立刻出现在第一行并已勾选；`#org-person` 断言
+    「收起」真的收起、「编辑」在「展开」前面且 PATCH 的 body 正确、「分配组织」弹窗里当前归属按名字
+    预勾选、**勾父节点不连带勾子节点**、拼音过滤、整表替换的 body 与空选警告；`#org-accounts` 断言账户页
+    的新建/编辑表单用的是同一棵勾选树（不再手填节点 id）；`#org-bind` 断言选人弹窗**先弹出、再读通讯录**，
+    读取期间显示进度、失败/空目录/缺权限都在框内说明。
+  - **M74（租户名预填）**：`#org-person` 展开一个未启用 DSH 的账号后点「启用 DSH」，断言弹窗里的租户名
+    输入框初值等于该账号行下发的 `dsh_tenant_suggested`，且提示里写明了规则例子（`dsh-chenjingfeng-10`）。
+    这里钉的是「页面预填服务端给的字段」这条接线；**规则本身**（`dsh-<账号拼音>-<账号ID>`）由 Go 测试
+    （`internal/httpapi`、`internal/pinyin`）负责，harness 喂的是 fixture 里的固定值。
+
+- **M70 起**：`org_feishu.page.html`（组织架构页的「同步飞书」弹窗），共 3 个视图：
+  - **`#org-sync`**：stub 里有一份**照真机形状**编的飞书通讯录（部门 BFS 序、一个人可属两个部门、
+    三条匹配通道各一个样本、一个未匹配的人），断言的是：弹窗打开时读目录**不带** `refresh`
+    （第一次走缓存）、同步按钮先二次确认再 `POST /org/feishu/sync`、确认后重新预览**带** `refresh=true`、
+    人员过滤支持拼音、选中「市场部」后人员列表只剩该部门的人。
+    两个写操作各自断言到**请求体**：「创建用户」`POST /org/feishu/users/ou_new/account` 且 body 是手填的名字；
+    「绑定账号」弹窗里同名候选**预选**、已绑给他人的账户**不可选**（`disabled` + 文案），
+    拼音过滤后选「张三」→ `PUT …/account` 的 body 是 `{"account_id":3}`；「解绑」先确认再 `DELETE`。
+  - **`#org-sync-readonly`**：`session.role=viewer` 渲染同一页，「同步飞书」按钮存在但**禁用**，弹窗打不开。
+  - **`#org-sync-nonames`**：飞书缺「获取部门基础信息/获取用户基本信息」数据权限时（这是本机部署的**真实状态**）
+    名称全空：弹窗顶部必须给出明确警告（不是静默画空白行）、部门用 `od_…` 编号显示、
+    未匹配的人仍然能点「创建用户 / 绑定账号」由人来决定。
+  - 三个视图都用 `strictChecks: true`，所以 checks 里任何非布尔项都算失败（`sample` 除外）。
+
 
 - **M66 起**：`admins.page.html`（管理员页 + 登录卡片），共 3 个视图：
   - **`#admins`**：stub 里有一份**会变的管理员表**——建号、改角色/状态、重置口令、邀请、解绑、删除

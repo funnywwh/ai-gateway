@@ -9,7 +9,7 @@ func TestBrowserWorkspacesSwitch(t *testing.T) {
 	}{
 		{"default", baseCfg, false, false},
 		{"enabled", baseCfg + "browser_workspaces:\n  enabled: true\n", true, false},
-		{"requires plugin", "directory_picker: browse\nbrowser_workspaces:\n  enabled: true\n", true, true},
+		{"requires plugin", "directory_picker: browse\n" + tenantPluginsOffDoc + "browser_workspaces:\n  enabled: true\n", true, true},
 		{"seed collision", baseCfg + "browser_workspaces:\n  enabled: true\nworkspace_seed: [browser]\n", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -266,14 +266,34 @@ type dshAuthorize struct {
 	// empty and nothing here fails.
 	Account    string `json:"account"`
 	FeishuName string `json:"feishu_name"`
+	// AccountID is the account the key belongs to (M72). The portal uses it to match a key-pick
+	// ticket's account against the tenants it serves; an older aigw leaves it zero, which the
+	// picker treats as "cannot resolve".
+	AccountID int64 `json:"account_id"`
+	// Keys are the account's usable keys (M72): when there is more than one, the portal asks
+	// which one this session should be recorded against. An older aigw does not answer the
+	// field at all, which the picker treats as "no choice to offer" rather than an error.
+	Keys []KeyRef `json:"keys"`
 }
 
-// Identity is who aigw says a key belongs to: the tenant it may enter, and the names the
-// tenant's interface shows for that person (M67).
+// KeyRef is one of an account's keys as the portal may show it: an id, a name and a prefix.
+// It never carries key material — the picker only needs something a person recognises, and the
+// portal validates the submitted id against the freshly fetched list rather than trusting it.
+type KeyRef struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	KeyPrefix  string `json:"key_prefix"`
+	LastUsedAt string `json:"last_used_at"`
+}
+
+// Identity is who aigw says a key belongs to: the tenant it may enter, the account and names
+// the tenant's interface shows (M67), and the keys a login may be recorded against (M72).
 type Identity struct {
 	Tenant     string
 	Account    string
 	FeishuName string
+	AccountID  int64
+	Keys       []KeyRef
 }
 
 // Authorize asks aigw whether the key's account is opted in to the dsh gateway (M52).
@@ -349,6 +369,8 @@ func (c *Client) Identity(ctx context.Context, key string) (Identity, error) {
 		Tenant:     strings.TrimSpace(payload.Tenant),
 		Account:    strings.TrimSpace(payload.Account),
 		FeishuName: strings.TrimSpace(payload.FeishuName),
+		AccountID:  payload.AccountID,
+		Keys:       payload.Keys,
 	}, nil
 }
 

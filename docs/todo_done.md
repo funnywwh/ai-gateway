@@ -4359,3 +4359,799 @@ sshfs 缺陷仍未关闭。
   `{"version":"2.7.3","revision":"4a2de2d"}`，`/healthz`、`/readyz` 均 200，
   控制台 200，dshgw 日志 `listening version=2.7.3 revision=4a2de2d`，
   6 个租户 worker 全部 ready、18301–18306 全部 302，admin socket ping ok。
+
+## M69 登录驱动的租户生命周期与「平台段 / 租户段」设置合并
+
+设计：`docs/design/m69-login-lifecycle-and-settings-merge.md`；规格：`docs/dshgw.md` §3b；
+运维说明：`deploy/dshgw/README.md` §12b；未完成项（真机验收/浏览器确认）见 `docs/TODO.md` 同名小节。
+
+需求原话：「dshgw 要合并租户手动设置，平台的模型限制使用平台的，其他用租户的，不要碰宿主机的，
+同步要发生在用户每次登录时，用户点击退出，强制退出 dsh 服务。」
+
+- [x] **设计先行**：设计文档 + 规格（`docs/dshgw.md` §3b）先落盘并贴到对话确认，再写代码；
+      关键决策 D1（归属按「键」不按文件：平台段 = `llm-pi-ai.providers.aigw` + 派生的
+      `agent-default-model` 纠正 + `refs.AIGW_API_KEY`；其余键归租户）、D2（平台段用**存储的 worker key**
+      取模型，不用登录提交的那把）、D3（每次登录同步；失败只告警不阻断登录）、D4（登录确保 worker 在跑，
+      已在跑不重启）、D5（退出只在"该租户无其它存活会话"时停；停 worker **不写** `suspended`）、
+      D7（平台段为空 = 删平台段、留租户段）、D8（不改 dshgw 重启后的启动策略）、
+      D9（"不碰宿主机 settings"落成可执行断言）。**D5 在部署当天按真机数据修正为"退出即无条件停
+      worker"**（初版"最后一个会话退出才停"被判无效：`dsh-tenant` 有 16 个存活会话、多数是几天前的，
+      TTL 7 天 → 退出后 dsh 会继续跑几天），并补上"只对这次真的撤销了会话的租户动手"
+      （`Sessions.Get` + 租户匹配），见设计文档 §9 差异表
+- [x] ~~`session.Store.CountTenant`~~：D5 修正后没有消费者，已连同其单测一并删除（不留死接口）；
+      退出改为"这次真的撤销了会话的租户"列表驱动
+- [x] `tenancy.Manager.EnsureRunning`（`internal/dshgw/tenancy/manager.go`）：未跑且未被运维停用则
+      `startWorker`（内部先跑模型 hook）+ probe；已在跑返回 `false` 不重启；`suspended` 直接报错不拉起
+- [x] `tenancy.Manager.StopForLogout`：停 worker 但**不写** `suspended`，清理顺序同 `StopWorker`
+      （先 `Runner.Stop`，再 `BrowserWorkspaces.DropTenant`），幂等
+- [x] `tenancy.EnsureCredentialRef(path, ref, value)` + 常量 `AIGWAPIKeyRef`：恢复平台凭据引用，
+      保留其它 refs 与全部 records；值相同不写；版本非 1 报错。渲染器与轮换改为引用同一常量
+- [x] `proxy.LoginPrepare`（取代 `KeyAdopter` 字段）：门户 Key 登录与飞书登录共用 `p.prepareLogin`；
+      失败只告警 + 审计 `login_prepare_failed`，会话照发（`loginPrepareTimeout = 45s`）
+- [x] `proxy.LogoutStop`：门户 `POST /logout` 与租户侧栏 `POST /dshgw/logout/` **无条件**停该租户的
+      dsh（审计 `logout_worker_stop`；停失败 `logout_worker_stop_failed`，退出仍 303，
+      `logoutStopTimeout = 30s`）；只对这次真的撤销了会话的租户动手
+- [x] `cmd/dshgw`：新增 `login_prepare.go` 的 `managerOps.PrepareLogin`（采纳无 key 租户的登录 key →
+      读存储 worker key → `/v1/models` → `EnsureProvisioned`/`SyncModels` → `EnsureCredentialRef`
+      → `EnsureRunning`）与 `StopSignedOut`；`serve.go` 接线 `LoginPrepare`/`LogoutStop`；
+      `managerOps.validator` 由 `*aigw.Client` 改为 `keyValidator` 接口以便无 HTTP 测试
+- [x] 单测（新增/改写，见设计文档 §9 列表）：凭据引用合并与幂等、`EnsureRunning`
+      的两条语义与挂起拒绝、`StopForLogout` 不写 suspended + 再登录能起、proxy 两条登录路径都
+      prepare（飞书提交 key 为空）+ 失败不阻断 + 有其它会话也照停 + 伪造 cookie 名不停别人的 dsh +
+      stopper 报错仍 303 + 租户侧栏退出、
+      `PrepareLogin` 用存储 key/保留租户段/恢复凭据/HOME 不被创建、aigw 失败不改文件、挂起不复活
+- [x] 测试：`go test ./internal/dshgw/... ./cmd/dshgw ./internal/arch` 全绿
+- [x] **真机验收（2026-09-21 10:22–10:24，本机三单元；逐条见下方 v2.9.1 发布记录）**：
+      登录同步（`models=6 credential_restored=true worker_started=false`）、删掉 `providers.aigw` 与
+      `refs.AIGW_API_KEY` 后重新登录恢复（租户段 `permission`/`ui-onboarding` 原样）、门户退出与
+      租户侧栏退出都停掉 worker（审计 `logout_worker_stop`、`suspended` 仍 false、worker 端口消失）、
+      再登录即起（`worker_started=true`）、伪造 cookie 名不会停别人的 dsh、全程
+      `~/.dsh/settings.yaml` sha256 不变
+- [x] **修回线上偏离**：dshgw 重启时的启动同步恢复了四个租户的平台段（各 4 个模型），
+      `dsh-tenant` 的 `providers: {}` 与 `refs: {}` 由第一次登录恢复（6 个模型 + 凭据引用 + records 保留）；
+      `verify1` 保持历史状态（无 key，doctor 的 2 条已知 FAIL 不变）
+
+### v2.8.0 发布与部署记录（2026-09-21，本机 aigw + dshgw；gpt001 未部署）
+
+本版内容：**浏览器工作区挂载目录名用本地目录名（M65）**（功能提交 `dc9d240`）。档位 **minor**：
+新增对外端点 `allocate` 与按 key 释放 `close{key,purge:true}`，挂载目录命名语义变化（新挂载点的
+目录名从随机十六进制 id 变成本地目录名），无破坏性变更——已保存的十六进制目录不改名、不迁移。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v2.8.0**（`VERSION` 2.7.3 → 2.8.0；release 提交 `0fcd129`，tag `v2.8.0` → `0fcd129`，内含功能提交 `dc9d240`） |
+| 本版内容 | 挂载点 `<workspace>/browser/<32 位十六进制>` → `<workspace>/browser/<本地目录名>`；`allocate` 只读握一次手仲裁重名（`-2`…`-9` 再退化不透明尾巴）；key 校验从 `^[a-f0-9]{32}$` 换成"一个安全路径段"（遗留 32/48 hex 用同一规则通过）；删除文件夹总是按 key 释放路径（此前 token 过期后删除会留下空目录）；记录文件 `<ID>.json` → `<租户>.<ID>.json`（读兼容旧名）；旧网关三处降级只记 warning |
+| 构建物 | `bin/aigw`（2.8.0 / `0fcd129`，console minified + gzip：38 文件 595078→348074 B）与 `bin/dshgw`（2.8.0 / `0fcd129`）；`gwproxy` 本版无代码改动，**未重建、未重启**（线上仍是 2.3.0 / 2306c22；它的 `/version` 走代理回 aigw，所以也显示 2.8.0） |
+| 部署范围 | 本机两个单元：`dshgw-verify`（换 `bin/dshgw` 并重启，09:22:20 起）与 `aigw-local`（换 `bin/aigw` 并重启，09:22:43 起）。浏览器工作区插件由 `cmd/dshgw/plugin/` 直接提供（bwrap 只读绑定同一目录，`--ro-bind .../cmd/dshgw/plugin ...`），不需要重建，租户页面刷新即取到新客户端 |
+| 回滚点（二进制） | `data/prev/bin/aigw.prev-running-2.7.3-4a2de2d`（sha256 与发布前 `bin/aigw` 一致）与 `data/prev/bin/dshgw.prev-running-2.7.3-4a2de2d`，从 `/proc/<pid>/exe` 取（`bin/dshgw` 已被当天 e2e 构建覆盖，运行进程持已删除 inode），二者 `-version` 自证 `2.7.3 (revision 4a2de2d)`；回滚命令见 `data/prev/README.md` |
+| 回滚点（插件） | `git checkout v2.7.3 -- cmd/dshgw/plugin/browser-workspace`。只回滚网关二进制也是可用组合：新客户端对旧网关降级（`allocate` → `unknown endpoint` → 退回随机 key；按 key 释放 → `unknown directory capability` → 只 warning），挂载目录名回到随机 id |
+| 配置/数据变更 | 无配置改动、无数据库迁移；浏览器挂载记录文件名改为 `<租户>.<目录名>.json`，读取同时接受旧名，升级后崩溃残留仍能被启动清理 |
+
+**验证**（全部实测）：
+
+- `GET http://127.0.0.1:8088/version` → `{"revision":"0fcd129","ui":"minified","ui_encoding":"gzip","version":"2.8.0"}`；`/healthz`、`/readyz`、`/admin/ui/` 均 200，`js/api.js` 含 `/version`；`node scripts/ui-badge-test.mjs` 11 项通过
+- 跑的就是新构建：`/proc/<aigw pid>/exe` 与 `bin/aigw` sha256 相同（`6f68ef0b…`），`/proc/<dshgw pid>/exe` 与 `bin/dshgw` 相同（`85b9b570…`）；启动行分别为 `aigw starting version=2.8.0 revision=0fcd129` 与 `dshgw listening version=2.8.0 revision=0fcd129`
+- 探针与噪声：`aigw-local` 重启后 `level=ERROR` **0 条**；`dshgw` 重启窗口有 8 条 `dsh reverse proxy failed … *net.OpError`（09:22:21–09:22:28，worker 尚未就绪期间），最后一个 worker ready（09:22:36）之后 **0 条**
+- 租户面：6 个 worker scope 全部 running、`18400–18405` 全部 `worker ready`；门户 `18300`（带 Host）→ 200，`18301–18306` 全部 302；5 份 handshake URL 在 09:22 重新落盘（含 dsh-tenant）。`dsh-tenant` 的 SSH 工作区在重启后完好（`/proc/self/mountinfo` 里 6 条 workspace 内 sshfs 路径），M64 那条"重启杀 sshfs 却留死挂载"没有复发——2.7.3 的自愈修复生效
+- `gwproxy :8090`（带 Host）`/version` → 2.8.0 / `0fcd129`（代理 aigw）
+- `bin/dshgw doctor`：仅 `verify1` 的历史 2 项 FAIL（缺 `gateway.key`、缺 `settings.yaml`，此前记录已注明且未替它造凭据），其余租户全 OK
+- 本版功能的真机验收：`make dshgw-test` 全绿（含新增 Go 用例与 56 个插件 Node 测试）；`make dshgw-browser-e2e` **PASS 29 步**（记录 `Path` 与内核挂载都在 `browser/picked`，页面调用序列 `allocate:200` 在 `open:200` 之前）、`dshgw-browser-multi-e2e` **PASS 22 步**（A/B 挂在 `browser/picked-a`、`browser/picked-b`，删除同时释放挂载/挂载点/工作区）、`dshgw-browser-reload-e2e` PASS（断线与刷新恢复都保持同一路径）。三次都用**同一份源码**构建的临时网关（revision 标注 `dad0c96` = 本版功能提交）+ 真实 Chromium/FUSE/bwrap，细节见 `docs/browser-workspace-verification.md` 新增一节
+
+**未做/限制**：gpt001 未部署（用户只要求本机，公网仍是旧版本）。本机升级后**没有**再用真实租户 key
+复验 `allocate`/按 key 释放：state 里只有 12 字符 key 前缀（拿不到完整 key），portal 用 `sk-verify001`
+登录被拒（verify1 历史缺 key），而点击线上租户的浏览器工作区行会重启该账号 worker。这两条端点的线上
+证据是"同一份源码 + 同一套 e2e"，不是线上租户实测。排障期间我用纯 HTTP 探过 TLS 端口（09:22:07 六条
+`client sent an HTTP request to an HTTPS server`）并试过一次失败的 portal 登录，均为无害噪声。
+已有十六进制挂载点不迁移：要换成目录名就在租户页面删除该目录后重新添加（删除会释放旧路径，
+重新添加拿回目录名；换路径意味着工作区条目重建，旧工作区下 `cwd` 指向旧路径的会话不再归组）。
+
+### v2.9.1 发布与部署记录（2026-09-21，本机 aigw + dshgw；gpt001 未部署）
+
+本版内容：**M69 登录驱动的租户生命周期与「平台段 / 租户段」设置合并**（功能提交 `876f362`，
+修正提交 `d41c631`）。档位 **minor**：新增行为（每次登录同步平台段、退出即停该租户的 dsh、
+登录时把它拉起），无破坏性接口变更、无配置变更。**v2.9.0 与 v2.9.1 是同一功能的两步**：
+v2.9.0（`ad563f2`）先落地，部署当天用真机数据把退出规则从"最后一个会话退出才停"改成"无条件停"
+（`d41c631`），随即发 v2.9.1（`b561b0c`）覆盖部署——本机两次都在 2026-09-21 上午 10:18–10:22。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v2.9.1**（`VERSION` 2.8.0 → 2.9.0 → 2.9.1；tag `v2.9.0` → `ad563f2`、`v2.9.1` → `b561b0c`） |
+| 本版内容 | 平台段（`llm-pi-ai.providers.aigw` + 派生的 `agent-default-model` 纠正 + `refs.AIGW_API_KEY`）每次登录由 dshgw 重写，租户段原样保留；登录用**存储的 worker key** 取模型、失败不阻断登录、并确保 worker 在跑；退出（门户 `POST /logout` 与租户侧栏 `POST /dshgw/logout/`）**无条件**停该租户的 dsh worker 但不写 `suspended`；宿主机 `~/.dsh` 不读不写（有断言） |
+| 构建物 | `bin/aigw` 与 `bin/dshgw`（均 2.9.1 / `b561b0c`；console minified + gzip：38 文件 595078→348074 B）；`gwproxy` 本版无改动，**未重建、未重启**（线上仍是 2.3.0 / 2306c22，它的 `/version` 代理 aigw，所以也显示 2.9.1） |
+| 部署范围 | 本机两个单元：`dshgw-verify`（2.9.0 10:18:54 → 2.9.1 10:22:03）与 `aigw-local`（2.9.0 10:19:16 → 2.9.1 10:22:20） |
+| 回滚点 | `data/prev/bin/aigw.prev-running-2.8.0-0fcd129` / `dshgw.prev-running-2.8.0-0fcd129`（发布前在跑的 2.8.0，取自 `/proc/<pid>/exe`，两者 `-version` 自证 2.8.0）与 `aigw.prev-running-2.9.0-ad563f2` / `dshgw.prev-running-2.9.0-ad563f2`（2.9.0） |
+| 配置/数据变更 | 无配置改动、无数据库迁移；租户 `settings.yaml`/`.credentials.yaml` 由本版逻辑按归属合并（平台段重写、租户段保留） |
+
+**验证**（全部实测）：
+
+- `GET http://127.0.0.1:8088/version` → `{"revision":"b561b0c","ui":"minified","ui_encoding":"gzip","version":"2.9.1"}`；
+  `healthz=200`、`readyz=200`、`/admin/ui/` 200；`gwproxy :8090/version`（带 Host）→ 2.9.1 / `b561b0c`
+- 跑的就是新构建：`/proc/<aigw pid>/exe` 与 `bin/aigw` sha256 相同（`cfbc28dc…`），
+  `/proc/<dshgw pid>/exe` 与 `bin/dshgw` 相同（`34e39cf5…`）；启动行分别为
+  `aigw starting version=2.9.1 revision=b561b0c`（10:22:20）与 `dshgw listening version=2.9.1 revision=b561b0c`（10:22:03）
+- 门户 18300 → 200；租户 18301–18306 全 302（带 `Host: chat.tirisen.hk:<port>`；不带端口的 Host 一律 404，
+  与既有"网关核对 authority"行为一致）；6 个 worker scope 全部 running、`18400–18405` 全部 `worker ready`
+- 噪声：`aigw-local` 重启后 `level=ERROR` **0 条**；`dshgw` 重启窗口有 8 条
+  `dsh reverse proxy failed … *net.OpError`（10:22:03–10:22:12，worker 尚未就绪期间），
+  最后一个 worker ready（10:22:20）之后 **0 条**
+- `bin/dshgw doctor`：仅 `verify1` 的历史 2 项 FAIL（缺 `gateway.key`、缺 `settings.yaml`），其余租户全 OK
+
+**M69 真机验收（同上时间窗）**：
+
+| 用例 | 结果 |
+|---|---|
+| 登录同步（用租户自己的 worker key 走门户 `POST /login`） | 302 + `Set-Cookie dshgw_s_dsh-tenant`；日志 `tenant prepared for login tenant=dsh-tenant models=6 credential_restored=true worker_started=false`；`settings.yaml` 平台段 = aigw 当前 6 条授权模型，租户段 `permission`/`ui-onboarding` 原样 |
+| 反例有牙（手工清空 `providers` 与 `refs`） | 再次登录后平台段与 `refs.AIGW_API_KEY` 都恢复、`records`（browser-session）保留；与"好"快照逐字段比对只差 `agent-default-model`（被清空后按设计落到清单首项 `deepseek-flash`） |
+| 门户退出（`POST /logout`） | 303；审计 `logout_worker_stop dsh-tenant`；日志 `tenant dsh stopped on logout`；`18401` 无监听、worker 进程消失；`registry.json` 的 `suspended` 仍为 `false` |
+| 再登录 | `worker_started=true`，`18401` 恢复监听，`tenant worker ready` |
+| 租户侧栏退出（`POST /dshgw/logout/`，Origin 为该租户端口） | 303 → 门户；审计 `logout_worker_stop` + `tenant_logout_success`；worker 再次停止 |
+| 伪造 cookie 名（对 `dsh-colin` 发一个不存在的 token） | 303 但审计只有 `logout_success`：没有 `logout_worker_stop`，`dsh-colin` 的 worker 照常运行 |
+| 宿主机 settings | 全程 `sha256 ~/.dsh/settings.yaml` = `e4df6b3d…`（mtime 仍是 2026-09-20 16:54） |
+| 修回线上偏离 | 五个真实租户现在都有平台段（4/4/4/6/4 个模型）与 `AIGW_API_KEY` 引用；`verify1` 保持无 key 的历史状态 |
+
+**未做/限制**：gpt001 未部署；浏览器人工确认（`docs/TODO.md` M69 最后一条）未做——本机验收全部用
+HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退出是无条件停——同一个人另一个窗口的 dsh
+也会被停掉（重新登录即恢复），这是用真机数据换来的选择，理由见设计文档 §9 与 `docs/dshgw.md` §3b。
+
+### v2.10.0 发布与部署记录（2026-09-21，本机 aigw-local；gpt001 未部署）
+
+本版内容：**M70 飞书通讯录同步（组织架构页「同步飞书」）**（功能提交 `cef4ae7`）。档位 **minor**：
+新增 5 条管理端点、2 个配置项（`feishu.tenant_token_url` / `feishu.contact_url`）与一个新的控制台弹窗，
+无破坏性接口变更，配置可原样沿用（两个新键都有默认值，不写即飞书文档地址）。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v2.10.0**（`VERSION` 2.9.1 → 2.10.0；tag `v2.10.0` → `602e6ad`） |
+| 本版内容 | 飞书部门树与人员合并进 `org_nodes` / `accounts`：迁移 `0024_feishu_directory_links.sql`（`org_nodes.feishu_department_id/feishu_synced_at`、`accounts.feishu_open_id/union_id/name/bound_at/bound_by`，两处 `NULLIF(…,'')` 唯一索引）；`internal/feishu/directory.go`（tenant token 缓存 + 部门 BFS 走查）；5 条管理端点（目录预览 / 同步 / 创建用户 / 绑定账号 / 解绑，全部 admin）；`pages/org_feishu.js` 弹窗（左部门树 + 右人员列表，两处拼音过滤；未匹配行给「创建用户 / 绑定账号」，已匹配行给「解绑」）。账户级飞书身份**只是同步映射**，不参与登录判定（门户登录仍按 M60 的 Key 级绑定） |
+| 构建物 | `bin/aigw` 2.10.0 / `602e6ad`（console minified：39 文件 620427→362231 B，gzip 34 文件 359870→143440 B）；`dshgw` 与 `gwproxy` 本版无改动，**未重建、未重启**（gwproxy 的 `/version` 代理 aigw，因此也显示 2.10.0） |
+| 部署范围 | 本机 `aigw-local`（2.9.1 `cef4ae7` → 2.10.0 `602e6ad`，2026-09-21 11:40:33）；`dshgw-verify` / `gwproxy-verify` 未动 |
+| 回滚点 | `data/prev/bin/aigw.prev-running-2.9.1-cef4ae7`（发布前在跑的 2.9.1，`-version` 自证；sha256 `7ea5ec0a…`） |
+| 配置/数据变更 | 无配置改动；迁移 `0024` 已应用（`schema_migrations` 末行为 `0024_feishu_directory_links`，实查 `accounts`/`org_nodes` 新列存在） |
+
+**验证**（全部实测）：
+
+- `GET http://127.0.0.1:8088/version` → `{"revision":"602e6ad","ui":"minified","ui_encoding":"gzip","version":"2.10.0"}`；
+  `healthz=200`、`readyz=200`、`/admin/ui/` 200；`gwproxy :8090/version`（带 `Host: chat.tirisen.hk`）→ 2.10.0 / `602e6ad`
+- 跑的就是新构建：`/proc/<aigw pid>/exe` 与 `bin/aigw` 的 sha256 前 8 位同为 `100050fd`；启动行
+  `aigw starting version=2.10.0 revision=602e6ad ui=minified ui_encoding=gzip`（11:40:33），
+  随后 `http server listening addr=:8088` 与 `feishu identity enabled app_id=cli_aa27b25392f91bdb`；
+  **重启窗口 `level=ERROR` 0 条**
+- 新资产已随压缩包上线：`/admin/ui/js/pages/org_feishu.js` 200（11226 B，含 `openFeishuSync`）、
+  `/admin/ui/js/pages/org.js` 200（已 import 该模块）、`/admin/ui/app.css` 200（含 `.feishu-sync-dialog`）；
+  未认证 `GET /admin/api/v1/org/feishu/directory` → **401**
+- 门户与租户：`https://127.0.0.1:18300/`（`Host: chat.tirisen.hk:18300`）→ 200；租户 18301/18302 → 302（活着、待登录）
+- **M70 真机预览（真实飞书，升级后）**：`GET /admin/api/v1/org/feishu/directory` → 200，
+  22 个部门全部「将创建」、90 人、**13 人自动匹配**（5 人走 `api_key` 通道＝M60 绑过的那 5 个账号，
+  8 人走同名通道）、77 人待操作员决定；首次（未命中缓存）15.4 s，60 秒内重开 1.4 ms
+
+**发布前顺手修的**：真机预览暴露出 `stats.memberships_to_add` 少算"将创建节点上的归属"——
+第一次同步（所有节点都还没建）会显示"新增成员关系 0 条"，恰恰是新增最多的一次；
+改为把 `plannedJoins` 计入后真机显示 **13**（与 13 个匹配人员一致），同步响应的 `stats` 用执行前的计划。
+
+**未做/限制**：**「同步」这个写库动作没有在真机上执行**——它会在线上组织架构里创建 22 个节点、
+给 13 个账户写身份并挂节点，属于操作员的决定，留给用户在控制台点。因此真机证据到"预览正确 + 写路径由
+单测/夹层覆盖"为止，`docs/TODO.md` M70 小节保留了这一条待办。gpt001 未部署（用户只要求本机）。
+另注：本机日志在 11:06/11:08 各有一条 `settlement could not be written; falling back to disk`
+（SQLite 争用超时，当时我正在跑全量测试套件），按设计的磁盘回退生效，与本版无关，重启后为 0 条。
+
+### v3.0.0 发布与部署记录（2026-09-21，本机 aigw-local + dshgw-verify；gpt001 未部署）
+
+本版内容：**SSH 工作区别名改成「一账号一份」+ 新增「我的主机」**（`1d4921e`），以及
+**输入主机/用户名/端口时对话框不再抖动**（`0650b75`）。档位 **major**：删除配置键
+`ssh_workspaces.ssh_config_source`（本机旧值指向运维自己的 `/home/winger/.ssh/config`），
+旧配置直接拒绝启动并要求改用 `ssh_config_dir` —— 属于「要运维改配置才能继续跑」的破坏性变更；
+同时该键在 aigw 侧（`dshgw.ssh_workspaces.*` 透传）一并改名。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v3.0.0**（`VERSION` 2.10.0 → 3.0.0；tag `v3.0.0` → `f8d20d8`） |
+| 本版内容 | 别名来源改为按账号 `ssh_config_dir/<账号>`（删除全局 `ssh_config_source`，校验拒绝落在本进程账号 `~/.ssh` 里的来源）；`EnsureIdentity` 按账号取种子且仍只写一次；插件新增 `addHost`/`deleteHost`（行级改写本账号 config，删除同时移除 `host_keys/<SHA256(别名)>`，在用挂载拒绝删除）；对话框新增「我的主机」列表；`ssh_config_dir` 在 aigw 监督形态透传改名；`scripts/ssh_config_adopt.sh` + 其 python 测试并入 `make dshgw-test`；输入抖动修复（200ms 防抖、不再清空列表/远端目录/已选私钥、backdrop 顶部对齐 + `scrollbar-gutter`、关窗停轮询）。沙箱 profile 一行未改（无新设备/能力/绑定），M57/M58 口径不变 |
+| 构建物 | `bin/aigw` 3.0.0 / `f8d20d8`（console minified：39 文件 629359→365715 B，gzip 34 文件 363354→144494 B，sha256 `71796bea…`）；`bin/dshgw` 3.0.0 / `f8d20d8`（sha256 `9bb31a97…`）；`gwproxy` 本版无改动，未重建 |
+| 部署范围 | 本机 `aigw-local`（2.10.0 `602e6ad` → 3.0.0 `f8d20d8`，12:21:46）与 `dshgw-verify`（**2.9.1 `b561b0c` → 3.0.0 `f8d20d8`**，12:20:44）；`gwproxy-verify` 未动 |
+| 回滚点 | `data/prev/bin/dshgw.prev-running-2.9.1-b561b0c`（发布前在跑的 dshgw，`--version` 自证）；`data/dshgw-verify/backups/ssh-config-20260921-122011/`（同目录含 `dshgw.yaml.prev` 与 sha256 `34e39cf5…`）；aigw 回滚点见上一条记录（`data/prev/bin/aigw.prev-running-2.10.0-602e6ad` 由上次流程留存，本次未覆盖） |
+| 配置/数据变更 | `dshgw.yaml`：`ssh_config_source: /home/winger/.ssh/config` → `ssh_config_dir: ./data/dshgw-verify/ssh-configs`；新增账号种子目录 `data/dshgw-verify/ssh-configs/<账号>`（6 个，0644，由 `scripts/ssh_config_adopt.sh` 从各账号当时的 `<workspace>/.ssh/config` 收编）；**账号工作区内的 config 一个字节未动**（写一次语义） |
+| 迁移顺序 | 合并 → `ssh_config_adopt.sh --dry-run` → 正式收编 6 个种子 → 改 `dshgw.yaml` → `make build` / `make dshgw-build` → 重启 |
+
+**验证**（全部实测）：
+
+- **旧配置被拒绝**：把 `dshgw.yaml` 的键改回 `ssh_config_source` 后用新二进制跑 `tenant list` →
+  exit code **2**，报错点名 `ssh_config_dir`（"ssh_workspaces.ssh_config_source was removed: … Use
+  ssh_workspaces.ssh_config_dir with one file per account (<dir>/<account>) instead"）
+- **dshgw 跑的是新构建**：`dshgw listening version=3.0.0 revision=f8d20d8`、`ssh workspaces enabled
+  mount_subdir=ssh poll_interval=2s hosts=[]`；`/proc/<pid>/exe` 与 `bin/dshgw` 的 sha256 前 8 位同为
+  `9bb31a97`；重启窗口 ERROR 7 条**全部**是 worker 启动瞬间的 `dsh reverse proxy failed … *net.OpError`
+  （重启前同样存在），无 ssh 相关失败（`ssh remount failed` 0 条）
+- **6 个账号全部就绪**：dsh-colin/18402、dsh-tenant/18401、dsh-ranqiliang/18403、dsh-lianchangliang/18404、
+  dsh-yangmiao/18405、verify1/18400 均 `tenant worker ready`；verify1 仍是历史测试账号（无 gateway.key 的
+  既有告警，未处理）
+- **既有挂载自愈**：`state/ssh-mounts.json` 里 dsh-tenant 的 `aipc:/home/winger` 在重启后由 `Reconcile`
+  重新挂上（`fuse.sshfs` 在挂载表里，sshfs 守护进程的 argv 用的是本版组装方式：`ssh -F /dev/null` +
+  `IdentityFile=<workspace>/.ssh/id_rsa`）
+- **账号 config 未被改写**：6 个 `<workspace>/.ssh/config` 与各自种子 `cmp` 一致，mtime 仍是 09-18/09-20
+  （即网关只读不写）
+- **租户面**：门户 `:18300` 200、租户 18301/18302/18303 → 302（活着待登录）；插件两半都已更新
+  （`client.js` 含「我的主机」、`index.js` 含 `addHost`），租户浏览器下次刷新即生效
+- **本机 aigw**：`GET /version` → `{"revision":"f8d20d8","version":"3.0.0","ui":"minified","ui_encoding":"gzip"}`、
+  `healthz=200`、`readyz=200`、`/admin/ui/` 200；`aigw starting version=3.0.0 revision=f8d20d8`，重启窗口
+  `level=ERROR` **0 条**（日志里 6 条历史 ERROR 都在 09-15/17/18 与 11:06/11:08，与本次无关）
+
+**未做/限制**：
+
+- **gpt001 未部署**（仍是 2.2.1 `77979b4`）：本次只要求本机；gpt001 落后 8 个版本，升级前需要先核对
+  `/opt/aigw/config.yaml` 对新版配置面的兼容性（本次已确认它没有 `ssh_workspaces` 块，所以 ssh 这块
+  不会挡升级），但整包跳跃不在本次范围
+- **「我的主机」浏览器人工验收未做**（需要真人点界面）：添加主机 → 复核 `<workspace>/.ssh/config` →
+  选用并挂载 → 删除（在用被拒/卸载后成功）；`docs/TODO.md` M64 保留了这一条。自动化侧覆盖到
+  插件 248 条 / 客户端 80 条 JS 断言与 e2e 的「按账号种子 + 别名挂载」两步
+- **观察项（本版新发现）**：ssh 工作区服务自身的日志在现网看不到 —— `cmd/dshgw/runtime.go` 用
+  `sshWorkspaceService(cfg, manager, nil)` 构造，`sshworkspace.New` 对 nil logger 落到 `io.Discard`
+  （`serve.go` 也没有再注入）。本次重启就发生了「挂载被 `Reconcile` 成功重挂、但日志里没有
+  `ssh workspace remounted` 一行」。与 `docs/design/m64-ssh-workspace.md` §13 第 6 条「排障靠
+  ssh-mounts.json、审计流与插件日志」是同一件事；修法是一行（把 serve 的 logger 注进去），
+  留作下一轮
+
+### v3.0.1 发布与部署记录（2026-09-21，本机 aigw-local；gpt001 未部署）
+
+本版内容：**M70 §12 的同步范围改成父子联动**（功能提交 `bb0929d`）。档位 **patch**：只是既有
+「同步飞书 · 同步范围」的交互修正——勾选/取消父部门连同子部门、半选表示"这一行与它的子树不一致"，
+没有新端点、没有配置项、没有破坏性变更（服务端零改动，范围仍是显式 id 集合）。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v3.0.1**（`VERSION` 3.0.0 → 3.0.1；tag `v3.0.1` → `fa7964f`） |
+| 本版内容 | 部门树复选框按子树联动（勾父连带子、取消父连带清子）；「连同子部门」一次性按钮删除；`indeterminate` 半选表示"该行与自己的子树状态不一致"（勾了父又单独取消子，或只勾子使父成为"为层级补建"）；半选**不进接口**，提交的仍是显式 id 集合 |
+| 构建物 | `bin/aigw` 3.0.1 / `fa7964f`（console minified：39 文件 630859→365922 B，gzip 34 文件 363561→144564 B）；`dshgw` 与 `gwproxy` 本版无改动，**未重建、未重启**（gwproxy 的 `/version` 代理 aigw，因此也显示 3.0.1） |
+| 部署范围 | 本机 `aigw-local`（3.0.0 `f8d20d8` → 3.0.1 `fa7964f`，2026-09-21 14:05:07）；v3.0.0 那次已含 M70 的「选择同步哪些部门」（提交 `67f5587`），本版补上父子联动 |
+| 回滚点 | `data/prev/bin/aigw.prev-running-3.0.0-f8d20d8`（发布前在跑的 3.0.0，`-version` 自证；sha256 `71796bea…`） |
+| 配置/数据变更 | 无配置改动、无新迁移（`0024_feishu_directory_links` 早已应用） |
+
+**验证**（全部实测）：
+
+- `GET http://127.0.0.1:8088/version` → `{"revision":"fa7964f","ui":"minified","ui_encoding":"gzip","version":"3.0.1"}`；
+  `healthz=200`、`readyz=200`、`/admin/ui/` 200；`gwproxy :8090/version`（带 `Host: chat.tirisen.hk`）→ 3.0.1 / `fa7964f`
+- 跑的就是新构建：`/proc/<aigw pid>/exe` 与 `bin/aigw` 的 sha256 前 8 位同为 `2bda027f`；
+  启动行 `aigw starting version=3.0.1 revision=fa7964f ui=minified ui_encoding=gzip`（14:05:07）；
+  **重启窗口 `level=ERROR` 0 条**
+- 新交互真的随压缩包上线：`/admin/ui/js/pages/org_feishu.js` 里同时含联动提示文案与 `indeterminate` 用法
+- 门户与租户：`https://127.0.0.1:18300/`（`Host: chat.tirisen.hk:18300`）→ 200；租户 18301/18302 → 302（活着、待登录）
+- **真机预览（只读，未写库）**：全量 22 个部门 / 90 人、13 人可自动合并、8 人已同步；
+  带 `?departments=<总经办>,0` 时 `departments=1 / departments_selected=2 / users_in_scope=7`、
+  部门标注 `selected/included` 正确、`unknown_department_ids` 为空
+
+**线上现状（顺带核对，本次发布没有替用户写库）**：`org_nodes` 5 个——1 个手工建的节点 + 4 个来自一次
+**按范围**的同步（一个顶层部门 → 其子部门 → 再下一级，父子层级正确、都带 `feishu_department_id`），
+说明"选择部门"已经在真机上被实际使用；账户级飞书身份 8 个（`feishu_bound_by = admin`，即手工
+「绑定账号」写入），`api_keys` 上的 5 个 M60 绑定保持不变。
+
+**未做/限制**：gpt001 未部署（用户只要求本机）；「同步」这个写库动作仍由操作员在控制台点击，
+本版验收只跑了只读预览。
+
+### v3.1.0 发布与部署记录（2026-09-21，本机 aigw-local + dshgw-verify；gpt001 未部署）
+
+本版内容：**M71 宿主目录工作区**（功能提交 `9f0f876`）、两个 ssh-workspace 修复，以及**工作区弹窗
+跟随 DSH 主题 + 右上角固定关闭按钮**（`5000879`）。档位 **minor**：M71 是对外新能力——新增配置项
+`host_shares`、新 `hostshare` 包、新沙箱绑定路径，既有接口形状未变（`host_shares` 默认关闭，不配就
+不生效，因此不构成破坏性变更）。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v3.1.0**（`VERSION` 3.0.1 → 3.1.0；tag `v3.1.0` → `69da1dd`） |
+| 本版内容 | ① M71 宿主目录工作区：`host_shares: {enabled,subdir,shares[{name,path,read_only,tenants}]}`，bwrap 直接 bind，不走 ssh/sshfs/FUSE；校验包含 `tenants` 必填、共享目录与 `state_dir` 不得相交（符号链接解析后比较）、`subdir` 不得与 ssh/workspace_seed 撞名、**默认只读**。② ssh-workspace：空挂载记录写 `[]` 而非 `null`（`b4f2ba5`）；拒绝自嵌套挂载、sshfs 默认多连接（`70a4cd1`）。③ 两个工作区弹窗改为只消费 DSH 主题令牌 `--dsw-alias-*`，浅/深色即时跟随；遮罩由 `position:fixed;z-index:40` 改为 `absolute`（对齐 `shell.overlay` 契约）；右上角加吸顶关闭按钮；补 Esc 关闭 |
+| 构建物 | `bin/aigw` 3.1.0 / `69da1dd`（console minified：39 文件 630859→365922 B，gzip 34 文件 363561→144564 B）；`dshgw` 与 `gwproxy` 本版无 Go 改动，**`dshgw` 未重建**（`make build` 只产出 `bin/aigw`），但**已重启**（见下） |
+| 部署范围 | 本机 `aigw-local`（3.0.1 `fa7964f` → 3.1.0 `69da1dd`，2026-09-21 15:28:08）；`dshgw-verify` 同时重启（2026-09-21 15:30:05），以便租户 worker 重新组装客户端插件包 |
+| 回滚点 | **无 3.0.1 二进制留存**——`make build` 已覆盖 `bin/aigw`，keep-store `data/prev/bin/` 里 aigw 最新只到 3.0.0（`f8d20d8`）。要回 3.0.1 需 `git checkout fa7964f` 后重新构建；回 3.0.0 可直接用 `data/prev/bin/aigw.prev-running-3.0.0-f8d20d8`。本次已把在跑的 3.1.0 归档为 `data/prev/bin/aigw.prev-running-3.1.0-69da1dd`（供下次回滚） |
+| 配置/数据变更 | 无配置改动（`host_shares` 未启用，保持默认关闭）；无新迁移 |
+
+**验证**（全部实测）：
+
+- `GET http://127.0.0.1:8088/version` → `{"revision":"69da1dd","ui":"minified","ui_encoding":"gzip","version":"3.1.0"}`；
+  `healthz=200`、`readyz=200`；`gwproxy :8090/version`（带 `Host: chat.tirisen.hk`）→ 3.1.0 / `69da1dd`
+- 跑的就是新构建：`/proc/<aigw pid>/exe` 与 `bin/aigw` 的 sha256 前 8 位同为 `0df76233`
+- 启动行 `aigw starting version=3.1.0 revision=69da1dd ui=minified ui_encoding=gzip`（15:28:08）；
+  启动窗口内 `level=ERROR` **0 条**；`registry loaded snapshot(models=10 providers=6 routes=16 accounts=30)` 正常
+- 弹窗改动真的随插件包上线：新 worker（15:30:19 起）在其 bwrap 内读到的
+  `browser-workspace/client.js` 含新的 `dshgw-bw-closebar`/`data-dshgw-close`（3 处），
+  `ssh-workspace/client.js` 含 `dshgw-ssh-closebar` 与 `--dsw-alias-*`（18 处）
+- 测试：`ssh-workspace/client.test.mjs` 99 断言（原 80）；`browser-workspace` 7 个测试文件 57 项（原 56），全绿
+
+**发现并记下**：本次发布前我先建了个 `bin/aigw.prev-20260921-152805` 想当回滚点，但它是 `make build`
+**之后**才拷的，内容就是新的 3.1.0——留着会让人误以为能回 3.0.1，已删除。正确顺序是**先备份正在跑的
+`bin/aigw` 再 `make build`**；下次发版按这个顺序做。
+
+**未做/限制**：gpt001 未部署（用户只要求本机）；`host_shares` 保持默认关闭，M71 的宿主目录挂载未在
+真机启用；`dshgw` 二进制仍自报 3.0.1（未重建，非缺陷——它不随 `make build` 产出）。
+
+### v3.2.0 发布与部署记录（2026-09-21，本机 aigw-local + dshgw-verify；gpt001 未部署）
+
+本版内容：**M72 账号级飞书身份、组织页整合、多 Key 登录选择**（功能提交 `181586c`…`2c88a1e`，
+见上一小节）。档位 **minor**：账号级飞书身份、门户选 Key 页、按需建租户、组织页成为人员/账号主界面
+都是对外新能力；Key 级绑定退役与 `dshgw.auto_enable` 的语义都写在**配置**里（默认不变），
+所以升二进制本身不改行为——按仓库惯例（M70/M71 同类走 minor）定 minor。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v3.2.0**（`VERSION` 3.1.0 → 3.2.0；tag `v3.2.0` → `67a1d13`） |
+| 本版内容 | ① 飞书身份绑定到**账号**（`accounts.feishu_open_id` 成为门户登录判定真值，`PUT/DELETE /admin/api/v1/accounts/{id}/feishu`），Key 级绑定退役（旧入口回答 400 + 替代路径），启动迁移清空存量；② 门户 Key 登录在账号有 ≥2 把可用 Key 时先出 `/login/pick` 选择页（keypick 票据、PeekPick/VerifyPick、选中只进审计 `login_key_selected`）；③ `dshgw.auto_enable` + `accounts.dsh_disabled_at`：配置开启即所有激活账号可用、首登按需建租户（审计 actor=`dshgw-auto`），「停用 DSH」为显式例外且不被撤销；④ 控制台以组织架构为中心：人员行（DSH 三态/飞书身份/Key 计数）+ 展开详情（Key 列表与逐账号操作）、「未归属账户」合成行、飞书人员选择弹窗（不扫码）；⑤ 迁移 `0025`、M70 的「按 Key 身份」合并通道删除 |
+| 构建物 | `bin/aigw` 3.2.0 / `67a1d13`（console minified：41 文件 655130→377198 B，gzip 36 文件 374837→149760 B）；`bin/dshgw` 3.1.0 / `d9472a8`（**M72 期间单独重建过**：出口选择页在 dshgw 里，`make build` 不产出它） |
+| 部署范围 | 本机 `aigw-local`（3.1.0 `69da1dd` → 3.2.0 `67a1d13`，2026-09-21 17:20:42）；`dshgw-verify` 同日 17:12 已重启（M72 的 dshgw 构建）；`gwproxy-verify` 未动 |
+| 回滚点 | `data/prev/bin/aigw.prev-20260921-172041-ce81d06`（发版前在跑的 M72 二进制）、`data/prev/bin/aigw.prev-running-3.1.0-69da1dd`（M72 之前的版本）、`data/prev/bin/dshgw.prev-running-3.1.0-69da1dd`（M72 之前的 dshgw） |
+| 配置/数据变更 | `config.yaml`（gitignore）新增 `dshgw.auto_enable: true`；数据库迁移 `0025_account_dsh_auto.sql`；启动迁移把 5 条 Key 级飞书绑定搬到账号（`migrated=0 keys_cleared=5 conflicts=0`） |
+
+**验证**（本机实测）：
+
+- `GET /version` → `{"revision":"67a1d13","ui":"minified","ui_encoding":"gzip","version":"3.2.0"}`；
+  `healthz` / `readyz` 200；启动行 `aigw starting version=3.2.0 revision=67a1d13 ui=minified`
+- 本次启动窗口（17:20:42 起）`level=ERROR` **0 条**（日志里 19 条历史 ERROR 全部来自 16:17 的端口争抢事故，与本次无关）
+- 控制台 `GET /admin/ui/` 200、门户登录页 200（`https://chat.tirisen.hk:18300/`）；`bin/aigw` 与正在跑的
+  `/proc/<pid>/exe` 同一文件（17:20 重启后未再改动）
+- 版本自证：`./bin/aigw --version` → `3.2.0 (revision 67a1d13)`，与 tag 指向的提交一致
+
+**未做/限制**：**gpt001 未部署**——本次会话所在环境解析不到该主机（`Could not resolve hostname gpt001`），
+部署步骤没有执行；要发到线上就在能连上 gpt001 的地方按 release 技能第 3 步走（先备份再 install + restart）。
+M72 的真机验收里"用本人飞书身份走一次飞书登录"仍需手机，留在 `docs/TODO.md`。
+
+## M72 完成记录（账号级飞书身份、组织页整合、多 Key 登录选择）
+
+设计：`docs/design/m72-account-feishu-identity.md`（§12 差异已回填）；规格：`docs/feishu.md` §1/§3/§4/§5/§5c.4/§5c.5/§6/§7/§8、
+`docs/org.md` §5、`docs/dshgw.md` §3、`docs/mcp.md` §4。
+提交：`181586c`（设计+规格先行）、`4bcbde1`（keypick 票据）、`8dc558e`（dsh_disabled_at + 启动迁移）、
+`758164e`（aigw 判定/按需建租户/账号级接口）、`1d225c9`（门户 `/login/pick`）、`d9472a8`（控制台整合）。
+
+- [x] 迁移 `0025_account_dsh_auto.sql`：`accounts.dsh_disabled_at`（管理员显式停用 DSH 的时刻）+ domain 字段 +
+      `SetAccountDSHDisabledAt`（`UpsertAccount` 刻意不写该列，普通编辑清不掉它）
+- [x] 配置：`dshgw.auto_enable`（默认 false，`GW_DSHGW_AUTO_ENABLE`）、`feishu.pick_ttl_s`（0 = 跟随票据 TTL，
+      上限 600，`GW_FEISHU_PICK_TTL_S`）；`config.example.yaml` 注释
+- [x] 票据：`TicketModeKeyPick` + `IssueKeyPick`/`VerifyKeyPick`（aigw）与 `SignPick`/`PeekPick`/`VerifyPick`
+      （dshgw 门户）；共享契约向量新增 `keypick` 并带 `mode` 字段，两侧测试新增「模式不可互换」断言
+- [x] aigw 登录判定：`finishFeishuLogin` 改查 `accounts.feishu_open_id`（未命中时保留 Key 级兜底并 WARN）；
+      闸门改 `accountDSHEffective`；多 Key 账号改签 keypick 票据并 303 到门户 `/login/pick`
+- [x] aigw 授权：`/v1/dshgw/authorize` 租户为空且 `auto_enable` 时按需 `provisionAccountDSH(actor="dshgw-auto")`，
+      失败 403 `provision_failed`（登录路径先做模型可用性预检）；响应新增 `keys[]`（active 且未过期、
+      过滤 `dshgw-*` worker Key）与 `account_id`；`feishu_name` 优先账号级（Key 级兜底）
+- [x] 控制台接口：`PUT/DELETE /admin/api/v1/accounts/{id}/feishu`（账号级绑定；重复绑定幂等、换人先释放旧身份、
+      新身份被他人占用 409、不要求人在通讯录里、不顺带改组织归属）；`GET /keys/{id}/feishu/bind` 改
+      400 `unsupported_parameter`（说明替代接口）；`GET /accounts` 与 `GET /org/nodes/{id}/accounts` 增补
+      `feishu/dsh_effective/dsh_disabled_at/key_count/active_key_count`；`POST/DELETE .../dsh` 写/清停用标记
+- [x] M70 合并通道②（按 Key 身份匹配）删除：身份只认账号级；`planFeishuOrg` 少一个入参，
+      `admin_org_feishu_test.go` 六处断言与 `org_feishu.js` 的通道标签同步更新
+- [x] 启动迁移 `MigrateKeyFeishuToAccounts` + `cmd/aigw` 钩子：抄身份到账号、审计带 `from_key_id`、清空 Key 行；
+      账号已绑别人或同账号多把 Key 各绑不同人 → 记为 conflict 并保留（绝不猜）
+- [x] 门户：抽出 `issueTenantSession`（三条登录路径共用）；`/login/pick`（GET 只 peek 票据、POST 消费；
+      提交的 `key_id` 与服务器刚取到的列表比对；审计 `login_key_selected`；选中项不作为租户凭据）
+- [x] 控制台界面：组织页人员行（DSH 三态/飞书身份/Key 计数）+ 展开详情（账号字段、Key 列表、
+      新建/编辑/启停 Key、绑定/解绑飞书、启用/停用 DSH、分配组织）；「未归属账户」合成行；
+      成员勾选在过滤态只允许取消不允许新增；飞书人员选择弹窗（拼音过滤、已占用置灰）；
+      Key 页飞书列改只读「飞书（旧）」并去掉绑定按钮；账户页 DSH 三态 + 飞书 + Key 计数列
+- [x] 抽出 `pages/key_actions.js`（Key 创建含一次性明文、编辑、启停）供两页共用；
+      `internal/webui/embed_test.go` 的录制模式漂移检查改读共用模块
+- [x] 测试：store 迁移四种情形 + `dsh_disabled_at` 存活；httpapi（authorize 的 keys[] 过滤/自动建租户/
+      `provision_failed`、账号级绑定全路径、旧入口废弃、路由表计数）；dshgw（选票签发与验证契约、
+      picker 渲染/选中/伪造 id/重放/外来账号/授权不可用/单 Key 直通/票据来自 cookie）；
+      控制台 `org_person_list_test.mjs`、`account_feishu_test.mjs` 新增并挂进 `make ui-base`
+- [x] 文档：`docs/feishu.md`（§1 口径、§3 配置、§4 选人绑定、§5 闸门、§5c.4 重写、§5c.5 多 Key、§6 威胁模型、
+      §7 排障 9 条、§8 接口表）、`docs/org.md` §5/§6、`docs/dshgw.md` §3、`docs/mcp.md` §4
+
+**验证**（自动化，2026-09-21）：`go vet ./internal/... ./cmd/...` 干净；`go test ./internal/... ./cmd/...` 全绿；
+`make ui-base` 全绿（含两个新测试）；`make dshgw-test` 全绿；`scripts/ui-harness/run.sh` 全 29 个视图通过
+（新增 `org-person` 17 项）。
+
+**部署**（2026-09-21）：`config.yaml` 打开 `dshgw.auto_enable: true`；`bin/aigw` 与 `bin/dshgw` 都重建
+并重启（选择页在 dshgw 里）；回滚点 `data/prev/bin/{aigw,dshgw}.prev-running-3.1.0-69da1dd`；
+线上 `/version` = 3.1.0 / M72 提交。
+
+**真机验收**（本机，逐条记录见设计 §11）：迁移清空 5 条 Key 级绑定且无冲突；Key 登录 303 到 `/login/pick`
+并列出该账号 5 把 Key（不含 worker Key、不含明文）；伪造 id 403、票据重放 403、合法选择建会话并在
+dshgw 审计 `login_key_selected`；`POST /v1/dshgw/authorize` 由 `actor=dshgw-auto` 按需建出
+`dsh-m51-test-a`（registry + 审计 + `dsh_effective` 都对）；「停用 DSH」后 authorize 403、
+门户登录 403 且不被自动重新启用。验收中抓到并修掉一个真缺陷：重新启用后 `dsh_disabled_at` 仍在库里
+（`UpsertAccount` 不写该列，启用路径漏了单独清它）→ `ce81d06` + 回归测试。
+剩下唯一没验的是"用本人的飞书身份走一次飞书登录"（需要手机），留在 `docs/TODO.md`。
+
+### 修掉组织页人员表与三类弹窗的六处问题（用户反馈，2026-09-21，v3.2.0 上线后）
+
+反馈现场是 `http://192.168.190.86:8088/admin/ui/#/org`（v3.2.0）。用户一次报了六件事，都是"看着能用、
+实际不能用"或"逼人做机器该做的事"：
+
+1. **人员列表要改成多列表格**——原来是"一排徽标换行"，字段一多就分不清哪一格是谁的；
+2. **点「收起」不会收起**；
+3. **「分配组织」要弹出组织部门树勾选**——原来是手填「组织节点 id（逗号分隔）」；
+4. 节点详情「保存成员」旁边**加「新建成员」**；
+5. 人员行「展开」前面**加「编辑」**（账号字段编辑不必再去账户页）；
+6. **绑定飞书加载人员要先弹出框、显示进度**——原来是"点了没反应"。
+
+根因三条，两条是缺陷、一条是设计没跟上用法：
+
+- **「收起」不生效是 CSS 缺门控，不是 JS**：`app.css` 里 `.org-person-detail` 只有 padding，
+  全文件没有"默认隐藏"的规则，`.org-person.open` 只改背景色；而详情 DOM 是**首次展开时才创建**，
+  于是形态正好是"展开看起来生效、收起不生效"（`git log -S` 显示这段 CSS 由 `d9472a8`（M72）一次引入、
+  从未有过隐藏规则，当时的走查只断言 `detailOpened`＝元素存在，所以漏网）。
+- **选人弹窗"读在前、弹在后"**：`account_feishu.js` 先 `await api.get('/org/feishu/directory')`，
+  读成功才建弹窗——冷缓存时那次读要走飞书接口（遍历部门 + 逐人用户信息），几秒到十几秒里屏幕上
+  什么都没有；读失败更连框都没有，只弹一个 toast。
+- **「分配组织」与建号表单让人手打节点 id**：归属本来是"直接挂在哪些节点上"（整表替换），
+  让操作员记 id 既易错又看不出层级。
+
+改动（提交见下面的 commit）：
+
+- [x] `pages/org.js`：人员（账号）列表改成**多列表格**（账号 / DSH / 飞书 / Key / 所属组织 / 操作），
+      表头 sticky、列宽百分比倾向 + 单元格换行（窄屏不横向溢出）；未归属那份只读列表共用同一个表，
+      但**不渲染**勾选列（没有节点可写，画个勾选框只会骗人）。列定义只写一处，表头与详情行 colspan 由它推出。
+- [x] `app.css`：`.org-person-detail{display:none}` + `.org-person-detail.open{display:table-row}`——
+      **这条门控就是「收起」的修复**；详情行改为 `<tr>` + colspan 单元格；顺带修掉刷新时的自我嵌套
+      （`personDetail()` 改为填充传入的详情体，原先 `refreshDetail` 会把新的 `.org-person-detail`
+      塞进旧的里面，padding 叠加、缩进翻倍）。
+- [x] `pages/org.js`：重绘**复用行对象**（按 account id）+ 展开态存在 `state.open`——勾选、过滤、成员
+      读取完成都不会把展开中的行关掉，也不会因此重发 `/keys`；写操作按影响面分流：不改归属的
+      （Key 操作、绑定/解绑飞书）就地刷新那一行，改归属的（编辑、分配组织、启停 DSH）整表重载并重读成员。
+- [x] 新 `pages/org_assign.js`：**组织树勾选**选择器（拼音过滤、显示节点路径消歧、`已选 N/M`、
+      「清空」、空选警告）。语义按用户决定：**每节点独立**——勾父节点不连带勾选子节点（子树继承的是
+      节点**标签**，不是成员）。保存是整表替换（id 升序、永远是数组）；写失败留在弹窗内报错不关窗。
+- [x] 新 `pages/account_actions.js`：账号的创建/编辑（含所属组织字段）由账户页与组织页**共用一份实现**，
+      账户页两份内联表单删掉；`ui.js` 的 `modal()` 增加自定义字段（`render`/`get`）——没有
+      `<input name=…>` 的字段若被静默跳过，"整表替换归属"会变成"不动归属"，语义正好相反。
+- [x] `pages/org.js`：节点详情工具条加**「新建成员」**（在「保存成员」左边）——建号与挂到本节点是
+      **同一个请求**（`POST /accounts` 带 `org_node_ids`），不存在"人建好了但还不属于任何部门"的中间
+      状态；建完只重绘本表、**不重读成员**，操作员未保存的勾选不丢，新账号按「勾选置顶」立刻出现在
+      第一行且已勾选。人员行加**「编辑」**（在「展开」前），走同一个账号表单。
+- [x] `pages/account_feishu.js`：选人弹窗**先弹出、再读通讯录**；读取期间显示进度（`ui.js` 新增
+      `progressLine()`：转圈 + 「正在读取飞书通讯录…」+ **秒数递增**，`withBusy` 也改为基于它实现，
+      同一套观感只有一份实现）；「刷新」按钮走 `refresh=true` 绕过 60 秒缓存（读失败时它就是重试）；
+      通讯录为空 / 缺用户信息权限 / 读失败都**留在弹窗内**说明，取消随时可用。
+- [x] 顺带修掉一处同类坑：树自己在过滤/折叠时会重建行（连带勾选框），勾选框必须在**建出来的时候**就带上
+      状态，否则过滤一次屏幕上变成"全都没勾"而集合里还勾着（`org_assign.js` 修复；「同步飞书」弹窗早就
+      这么做，本次为它补了回归断言）。
+- [x] 测试（**先证伪再修**，三条都实测过红）：
+      - harness `org` 52→65 项（表格表头/列对齐/详情跨行/勾选框落在自己列里、新建成员的预置与
+        POST body 与"建完即勾选"与"未保存勾选不丢"）；
+      - `org-person` 17→45 项（**收起真的收起**、详情只一份不嵌套、展开行在重绘后仍在、行内编辑的
+        按钮顺序与表单字段与 PATCH body、分配组织的预勾选/独立语义/拼音过滤/整表替换 body/空选警告/
+        取消不写）；
+      - `org-accounts` 10→17 项（账户页同一棵勾选树、不再出现"组织节点 id"）；
+      - 新增 `org-bind` 20 项：stub 把目录读**按在手里**，断言"请求还没回来时弹窗已在、进度可见、
+        绑定点不动、取消可用"，放开后断言人员行/置顶/`PUT` body/`refresh=true`/三种失败态；
+      - 新增 `internal/webui/tests/org_assign_test.mjs`（VM 跑真模块）并挂进 `make ui-base`；
+        `account_feishu_test.mjs` 改为"读失败/空目录留在弹窗内"并补"先弹框再读"的悬挂断言；
+        `tags_binding_test.mjs`/`org_tree_test.mjs`/`org_person_list_test.mjs` 的断言目标随实现搬迁，
+        并新增"两页共用 account_actions / org_assign"的守卫。
+      - 实测红记录（改代码前，只加了断言）：
+        `org` 55 项里 6 项红（`memberTableHeader`/`memberColumnsAligned`/`memberDetailSpansRow`/
+        `memberCheckboxNotStretched`/`memberCheckboxInsidePickCell`/`memberVerticallyAligned`）、
+        `org-person` 24 项里 4 项红（**`detailCollapseHides`**/`unassignedHasNoCheckbox`/`detailBodySingle`/
+        `detailBodySingleAfterReopen`）、`org`+`org-person` 各 2 项红（新建成员/行内编辑的入口）、
+        `org-bind` 4 项红（**`bindDialogOpensBeforeDirectory`**/`bindShowsProgress`/`bindExplainsSlowRead`/
+        `bindButtonDisabledWhileLoading`）。
+- [x] 文档：`docs/org.md` §5/§6（人员表格、新建成员、行内编辑、勾选树、账户页表单；顺手修掉两处已过时的
+      描述——"保存成员灰掉"的真实原因现在是搜索框过滤，不再是"选了某个部门"）、`docs/feishu.md` §4
+      （选人弹窗先弹框 + 进度 + 刷新/重试）、`scripts/ui-harness/README.md`（视图数 30、org-bind 与
+      M72 后续断言的说明）。
+
+**部署**（2026-09-21，本机 `:8088`）：`make build`（控制台资源压缩内嵌）+
+`systemctl --user restart aigw-local.service`；`/version` = `3.2.0` / **`d655c0e`**、`ui: minified`
+`ui_encoding: gzip`，`/admin/ui/` 与 `/healthz` 均 200，`dshgw-verify` active；`Accept-Encoding: gzip`
+取回控制台资源后确认新模块在线（`org.js` 有 `org-member-table`、`org_assign.js` 有 `openOrgPicker`、
+`account_actions.js` 有 `createAccount`）。浏览器需要**硬刷新**（静态资源 `max-age=300`），
+人工走查条目留在 `docs/TODO.md`。
+
+**验证**（自动化，工作区 `/home/winger/work/ai_gateway-orgui`，分支 `feat/org-ui-tables-and-pickers`，
+已 `--ff-only` 合入 `main`：`4e0035f` / `3c46830` / `d655c0e`，合并后主检出复跑 ui-base、go test 与
+organize 六个视图全绿）：
+`make ui-base` 全绿（含新增 `org_assign_test.mjs`）；`scripts/ui-harness/run.sh` 全 **32** 个视图通过（新增 `org-bind`；另两个是 M73 的 `chatWeb`/`chatWebOff`）；
+`go test ./internal/webui/...` 全绿（`pinyin_test.go` 钉的拼音接线与 `embed_test.go` 钉的控制台资源
+都还在）。
+
+## M74 完成记录（租户名自动用 `dsh-<账号拼音>-<账号ID>`）
+
+设计：`docs/design/m74-tenant-name-from-account.md`（含 §8 实现与设计差异、§9 验证）。
+用户原话：「租户名自动用 `dsh-<账号>` 格式」；对话中确认口径为 `dsh-账号拼音-id`，且**弹窗预填但仍可手改**。
+未完成项（真机/浏览器人工走查、历史租户改名决策）留在 `docs/TODO.md` 的 M74 小节。
+
+- [x] **规则只有一份实现**：`internal/httpapi/admin_catalog.go` 的 `dshTenantNameForAccount` ——
+      `dsh-` + 账号名的拼音/ASCII slug + `-` + `accounts.id`。中文名按拼音取**首读音**（陈景峰 →
+      `dsh-chenjingfeng-10`、杨妙 → `dsh-yangmiao-36`、长伟 → `dsh-zhangwei-<id>`），ASCII 原样保留
+      （`李智超(colin)` → `dsh-lizhichao-colin-8`、`E26Q` → `dsh-e26q-30`），无字母的名字回退
+      `dsh-tenant-<id>`。ID 让同音重名（两个张伟）天然不重；超长名按**整音节**截断、**ID 永不截断**
+      （正数 int64 最多 19 位 → 拼音预算恒 ≥3，名字恒在 `^[a-z][a-z0-9-]{0,25}[a-z0-9]$` 内）。
+- [x] **拼音表两处消费者、一个出处**：`scripts/gen-pinyin.py` 现在同时输出既有的
+      `internal/webui/static/js/pinyin.js` 与新的 `internal/pinyin/table_gen.go`（同一 blob、同一
+      SHA-256 头注释）；`pinyin.js` 本次只改了两行头注释（旧说法"ü 写成 v"与数据不符，已改正——
+      实际是 NFD 把变音符号也剥掉了，女 → `nu`，全表没有 `v`）。新叶子包 `internal/pinyin`
+      （`FirstReading`）+ arch 分层表两处登记。
+- [x] **控制台不再自己拼名字**：`accounts.js` / `org.js` 各删掉一份 `slugFromAccount`，改为
+      `dsh_tenant || dsh_tenant_suggested`；两个 JSON 端点（`/accounts`、`/org/nodes/{id}/accounts`）
+      新增只读字段 `dsh_tenant_suggested`。弹窗 hint 写出规则例子与"已存在的租户名不会被改动"。
+- [x] **控制台的租户名正则改为与 dshgw 逐字符相同**（`^[a-z][a-z0-9-]{0,25}[a-z0-9]$|^[a-z]$`）：
+      旧表达式要求以字母结尾（注释却自称 mirrors dshgw），生成名以 ID 结尾会被控制台自己 400。
+- [x] 测试：`internal/pinyin`（与 `pinyin.js` 的 `READINGS` **逐字节相等**、行数 20992、读音抽样、
+      每个首读音都在 `[a-z]+` 内）；`internal/httpapi/admin_dsh_tenant_name_test.go`（12 例规则表、
+      与 `config.ValidTenantName` 交叉断言、Math.MaxInt64、飞书自动开通同名、既有映射粘住、
+      显式名优先、以数字结尾被接受、两个端点都带新字段）；`internal/webui/tests/tenant_name_test.mjs`
+      （文本守卫，已挂进 `make ui-base`）；harness `org-person` 45→48 项。
+- [x] 规格与流程文档：`docs/dshgw.md` §3（规则、优先级、不重命名）、`docs/design/m52-dsh-enable.md`
+      （两处老化描述）、`docs/org.md` §拼音表（两个消费者 + ü 的实情）、`README.md` 文档表、
+      `scripts/ui-harness/README.md`（M74 断言）。
+- [x] 验证：`go vet` + `go test`（四棵显式树）全绿；`make ui-base` 全绿；`make build`（控制台压缩内嵌）
+      通过；`scripts/ui-harness/run.sh` **全 32 个视图通过**（`org-person` 48 项），并对压缩镜像
+      （`UI_STATIC_DIR=.cache/ui-dist/static`）复跑 `org-person`/`org`/`org-accounts` 通过。
+
+## 安全处置：dshgw 租户共用宿主 `id_rsa`（2026-09-22，本机 `dshgw-verify`）
+
+用户原话：「我发现一个严重的问题，dshgw的租户都在使用宿主winger的id_rsa」。
+
+**事故与实测证据**：`dshgw.yaml` 的 `ssh_workspaces.identity_source` 指向部署账号自己的
+`/home/winger/.ssh/id_rsa`，`EnsureIdentity` 把它**逐字节复制**给每个「没有密钥」的账号——8 个租户
+工作区的 `<workspace>/.ssh/id_rsa` 哈希全为 `0bdc634b…`（等于宿主私钥）。该密钥的公钥就在**本机**
+`~/.ssh/authorized_keys` 里，本机 sshd 监听 `0.0.0.0:22`，租户沙箱不 `--unshare-net`（`/home` 被
+tmpfs 覆盖，所以租户读不到宿主的真实 `~/.ssh`，读到的是工作区里那份**同一把密钥**）⇒ 任何租户都能从
+沙箱内 ssh 回宿主、成为部署账号（`uid=1000(winger)`，属 `sudo,docker,lxd` 组），进而读遍所有租户
+工作区与密钥、`config.yaml` 里的 aigw 密钥、`state/admin.sock` 这个 provisioning 通道。处置前实测：
+`ssh -i <租户工作区密钥> winger@127.0.0.1 'id'` **成功**返回 `uid=1000(winger)`。该密钥同时可登录
+**11 台**主机：aipc、android-build、dell-server、email-test、findo-test、gpt001(root)、gptjp、mnl、
+suyuan-sz、sz-test、us-test。审计里还留着 `dsh-tenant` 曾请求挂载 `rag-server:/home/winger/work/ai_gateway`
+（被自嵌套规则以 403 拒绝）。别名种子同样是宿主主机清单的副本（21 个别名，含内网 IP、跳板机
+`192.168.190.123:2222`、autodl 节点与用户名/端口）。**范围仅本机 `dshgw-verify`**：gpt001 的
+`aigw.service` 与本机 `aigw-local` 的配置里都没有 `ssh_workspaces` 块（已 ssh 核对），
+`find data -path "*workspaces*/.ssh/id_rsa"` 也只有这 8 个。
+
+- [x] **A 止血**：新增 `scripts/dshgw_ssh_identity.sh purge-shared`（默认只打印计划，`--apply` 才动手；
+      `ssh-mounts.json` 还有挂载时拒绝执行）。停 `dshgw-verify` → 删除 8/8 副本并写下
+      `identity-managed`（现有二进制随即再也无法回灌，marker 判据在 `service.go:124`）→ 启服；
+      **新代码启动后 0 个密钥被重建**。复查时发现第二处暴露并补进脚本：`dsh-tenant` 的**主机专用**
+      密钥 `host_keys/26667bd…/id_rsa` 也是同一把（仅差一个结尾换行，摘要不同、**指纹相同**），
+      所以匹配改为「摘要 or **公钥指纹**」，扫描范围扩到 `.ssh/id_rsa` + `.ssh/host_keys/*/id_rsa`；
+      按指纹重扫全库：0 处残留。
+- [x] **B 删除共享密钥能力**：`ssh_workspaces.identity_source` 从 child 侧（`internal/dshgw/config`、
+      `sshworkspace`、`cmd/dshgw/runtime.go`）、aigw 侧（`internal/config`、`cmd/aigw/dshgw_child.go`、
+      `internal/dshgwsup`）、示例与文档中**整体删除**；`Load` 里新增 `rejectRemovedIdentitySource`，
+      旧键出现即拒绝启动并点名 `identity_dir`（与既有的 `ssh_config_source` 处理同构）。同时把
+      「不得落在部署账号 `~/.ssh` 内」的检查从 `ssh_config_dir` 扩到 `identity_dir`
+      （`checkOutsideDeploymentSSH`）。`EnsureIdentity` 现在只从 `identity_dir/<账号>` 取，
+      没有共享来源，账号可以完全没有密钥。
+- [x] **C 轮换宿主密钥**：新增 `scripts/rotate_operator_ssh_key.sh`（默认 dry-run）。逐主机「先加新
+      公钥 → **验证通过** → 才删旧公钥 → 复测旧密钥被拒」，11 台 + **本机**（`winger@127.0.0.1`，
+      即逃逸路径）全部完成：`retired …: refused` / `current …: accepted` 逐台打印。旧密钥归档
+      `~/keys/id_rsa.revoked-20260922-105659`（附 `.hosts` 清单），各远端留
+      `authorized_keys.pre-rotation-20260922-105659`，本机同样留备份。新密钥
+      `SHA256:tiWQ6NYd… winger@rag-server-20260922-105659`（4096 RSA，就地替换，`~/.ssh/config` 里
+      指向 `~/.ssh/id_rsa` 的条目无需改动）。旧密钥 `SHA256:1zL/6wt8…` 现已在全部 11 台与本机失效。
+- [x] **D 一账号一把**：`provision` 子命令（拒绝安装与被撤销密钥相同的密钥、拒绝一号两用；**不重启
+      worker**，直接把同一份字节写进 `<workspace>/.ssh/id_rsa`，因为重启会打断在线会话，而这就是
+      `EnsureIdentity` 本会做的那次写入）。6 个真实账号各生成一把独立 ed25519：dsh-colin、
+      dsh-chengjinfeng、dsh-lianchangliang、dsh-ranqiliang、dsh-yangmiao、dsh-tenant（指纹互不相同、
+      均 ≠ 被撤销密钥）；`verify1`、`dsh-m51-test-a` 为测试账号，保持无密钥。按用户决定**仅**
+      `dsh-tenant` 被授权到 aipc / dell-server / android-build（逐台追加并**用租户自己的密钥+自己的
+      config 复验**）；其余 5 个「有密钥但任何主机都不可达」。**本机（rag-server / 192.168.190.86）
+      不对任何租户授权。**
+- [x] **E 别名种子收口**：`trim-seeds` 子命令按「种子里出现过的别名 = 运维清单」算出每个账号
+      **自己添加**的别名，把种子与活动 `<workspace>/.ssh/config` 同时改写（各留
+      `.pre-trim-*` 快照，并落下 `.operator-inventory-*` 记录）。结果：21 个运维别名全部移除，
+      只有 `dsh-tenant` 自己的 `rag-server` 保留；随后按授权决定把它的别名表重写为
+      aipc / dell-server / android-build（与它被授权的远端一致，`rag-server` 这个指向网关主机的
+      别名已移除，快照可还原）。
+- [x] 测试：`internal/dshgw/config`（新增「旧键被拒且点名 `identity_dir`」与「`identity_dir` 落在
+      `~/.ssh` 内被拒」；清掉 `identity_source` 夹具）；`internal/dshgw/sshworkspace`（新的
+      `TestEnsureIdentityNeverInventsAKeyWithoutASource`：无来源的账号**不生成**密钥、但
+      `known_hosts`/`config` 照常预置、`Open` 报 `ssh/auth-failed`；`pathsFor`/`sshArgs` 断言改为
+      「密钥路径必在账号工作区内，绝不指向运维 HOME」）；`cmd/aigw`（转发用例改 `identity_dir`）。
+      新增 `scripts/test_dshgw_ssh_identity.py`（**83** 条断言：只删指纹/摘要命中的密钥、per-host
+      副本按指纹命中、marker 语义、mounts 非空时拒绝、`provision` 拒绝被撤销密钥与一号两用、
+      账号自有密钥不被覆盖、`trim-seeds` 只留自己添加的别名），已挂进 `make dshgw-test`。
+- [x] 验证：`go build ./...`、`go vet` 全绿，`make dshgw-test` 全绿（各包 + 插件 248/99/51 +
+      python 计划脚本，含新增 83 条）；`scripts/ssh_workspace_e2e.py` **12 步 PASS**（含「仍写
+      `identity_source` 的配置被拒且错误点名 `identity_dir`」「运维密钥/配置/数据根在租户沙箱内不可见」、
+      `identity_dir` 预置的密钥真的挂载成功）。事后复测：等于被撤销密钥的文件 **0** 个；
+      旧密钥访问 gpt001 / 本机 **被拒**；任选三个租户的密钥访问 `winger@127.0.0.1` **被拒**；
+      `dsh-tenant` 的密钥在 aipc / dell-server / android-build **可用**、在 gpt001 与网关主机被拒；
+      删掉无来源账号的 marker 后重启 worker，**不生成**密钥（共享来源确已消失）。
+- [ ] 遗留（不在本次范围）：用户另有这把密钥的副本（其他机器/脚本），需自行换成新密钥——旧副本已在
+      11 台 + 本机全面失效；**aipc 的 `~/.ssh/id_rsa` 仍是那把被撤销的密钥**（本次按用户要求为它补出了
+      `~/.ssh/id_rsa.pub`，指纹 `1zL/6wt8…`，**不得再授权到任何地方**；aipc 现在出站 ssh 全部不可用，
+      正确做法是在 aipc 上现生成一把新密钥就地替换）；`ssh_workspaces.hosts` 白名单目前为空
+      （可写任意 `user@host`），是否收紧待定；`aigw doctor` 报 `verify1` 缺 `gateway.key` 与
+      `settings.yaml`，是 9-18 起就存在的历史漂移，与本次无关。
+
+---
+
+## M75 把 dsh-tenant 的 3 个插件纳入项目并默认下发（终端 / 工作区文件 / 变更）
+
+需求原话：「将 dsh-tenant 的 3 个插件加入项目，并让 dsh 默认安装启动」。设计文档：
+`docs/design/m75-tenant-plugins.md`；规格：`docs/dshgw.md` §7f；部署：`deploy/dshgw/README.md`。
+
+- [x] **源码入库**：`web-tty`（终端，真 PTY + xterm.js）、`workspace-files`（工作区文件管理器）、
+      `git-diff`（只读变更审阅）三个插件从 `data/dshgw-verify/state/tenants/dsh-tenant/.dsh/plugins/`
+      收编到 `cmd/dshgw/plugin/`，与既有三个网关插件同构（`index.js` 宿主半 + `client.js` 浏览器半 +
+      `package.json` 的 `dsh.client` + `test/*.test.mjs`）。此前它们**只存在于这一个租户**的 DSH home 里，
+      全仓库（internal/cmd/docs/Makefile）grep 三个名字零命中；运行期 `trace.jsonl` 不进仓库。
+- [x] **默认安装启动**：`tenant_plugins.{web_tty,workspace_files,git_diff}.enabled` **默认全开**，
+      由网关渲染进每个租户的 `profiles/web/cordis.patch.yml`（建户/轮换时 `renderPatch`，每次 worker 启动
+      时 `EnsureTenantPlugins` 按开关增删刷新），行 id 沿用租户手写的 `dshgw-web-tty` /
+      `dshgw-workspace-files` / `dshgw-git-diff`。插件目录放 `deploy.plugin_path` 同级（该目录沙箱内只读绑定，
+      **零沙箱改动**）；关掉即移除该行。
+- [x] **运行期状态按账号隔离**：三行都带 `traceFile`（git-diff 另有 `cacheFile`），落在
+      `<DshHome>/plugin-state/`。共享插件目录在生产可能 root 拥有、写不进去，而一份共享的 git-diff 扫描缓存
+      会把一个账号的仓库路径喂给另一个账号。插件新增的能力只有：`readConfig` 接受绝对 `traceFile`/`cacheFile`
+      （不给就仍写自己目录，保住 out-of-tree 用法），`createTracer` 写前 `mkdir -p`（以租户账号身份建目录，
+      属主才正确）；`web-tty` 顺带导出 `readConfig`，与另外两个一致。
+- [x] **配置面与校验**：`internal/dshgw/config`（独立形态）+ `internal/config` & `internal/dshgwsup` &
+      `cmd/aigw/dshgw_child.go`（监督形态）三层同名；任一开启而 `deploy.plugin_path` 为空 → 加载失败；
+      监督形态**总是**把该块写进生成的子进程配置（子进程默认是开，父进程沉默会把 `false` 翻回去，有测试钉住）。
+      数值旋钮不重复暴露（租户 patch 里原先写的正是插件自身默认值），只加 `root_label`。
+- [x] **未部署的插件不渲染行**：建户/轮换密钥时**报错**（错误里带缺失路径），既有租户启动时**跳过并 warning**
+      —— 一行指向不存在的模块会让整棵插件树加载失败，所以宁可少一行，不可给一行坏行。`dshgw doctor` 新增
+      `web-tty-plugin` / `workspace-files-plugin` / `git-diff-plugin` 三条体检。
+- [x] **测试**：`internal/dshgw/config/tenant_plugins_test.go`（默认全开、逐项关、`root_label`、缺
+      `plugin_path` 报错、全关时不再要求）、`internal/dshgw/tenancy/tenant_plugins_test.go`（三个包两半齐备、
+      行命名为 `index.js`、`root`/`cwd` 是该租户 workspace、状态按租户且不落在插件目录、开关翻转与幂等、
+      未部署时建户报错而启动只告警）、`cmd/aigw/dshgw_child_test.go`（开关原样过河，全关也写块）；三个插件的
+      JS 测试（14+18+33）挂进 `make dshgw-test`，web-tty 的测试改用临时目录 traceFile（不再往仓库写运行期
+      文件），`.gitignore` 兜底 `cmd/dshgw/plugin/*/{trace.jsonl,cache.json}`。既有夹具按新口径修：默认开 ⇒
+      「browse picker + 无 plugin_path」这种没有插件目录的配置必须显式关掉三项（`security_test.go`、
+      `dataroot_test.go`、`browserworkspace_test.go`、`cmd/dshgw/{deployment,main}_test.go`）。
+- [x] **本机现网下发**（`dshgw-verify.service`，8 个租户）：先把 `dsh-tenant` 手写的用户级 patch 备份成
+      `.pre-m75-20260922-153912` 并删掉三段 insert（留注释说明改由网关渲染；同 id 两处行会重复注册 RPC 通道），
+      再 `make dshgw-build` + 重启单元（~12s，全部租户 worker 依次回来；`dsh-tenant` 的 ssh/browser 挂载按
+      既有逻辑重建，浏览器挂载清理仍报 `fusermount3 … Device or resource busy`，是既有现象）。
+- [x] **验收证据**：7 个已开通租户的 profile patch **全部**含三行（`verify1` 例外，见遗留）；7 个租户的
+      `plugin-state/` 各出现 3 个 trace 文件，其中 `web-tty` 的 `activated` 记录 `nodePty=1.2.0-beta.15`、
+      `cwd=<该租户 workspace>`，`workspace-files`/`git-diff` 的 `root` 也各自指向该租户 workspace；
+      共享目录 `cmd/dshgw/plugin/` 内**没有**任何 `trace.jsonl`/`cache.json`；`dshgw doctor` 三条新检查 OK；
+      浏览器面：租户 shell HTML 的客户端插件注册表列出 `dshgw-web-tty` / `dshgw-workspace-files` /
+      `dshgw-git-diff` 三个 client 模块，逐个取回 HTTP 200（529252 / 64643 / 55529 字节，均含
+      `__ModuleLoader__.load`）。回归：`make dshgw-test` 全绿；`make dshgw-verify` 的 Go 测试、真实 bwrap
+      `TestStaging*`（宿主隐藏、跨租户不可见、真 dsh web 在沙箱内起服务）全过，`scripts/dshgw_supervised_e2e.py`
+      **52 步 PASS**（含 `tenant-create`：受监督形态生成的子配置带 `tenant_plugins` 三段，租户 patch 三行齐全、
+      每租户状态路径正确）。
+- [ ] 遗留（**与本次无关的既有漂移**）：`scripts/dshgw_supervised_e2e.py` 的飞书段落 13 步失败，起点是
+      `feishu-bind-entry` 期望 302 而实际 400 —— Key 级绑定 `GET /admin/api/v1/keys/{id}/feishu/bind` 已在
+      M72（提交 758164e，2026-09-21）改为恒返回 400 并提示「bind it to the account instead」，e2e 仍在测
+      已退休的旧入口；该脚本没有分组过滤，需要按账号级接口（`PUT /admin/api/v1/accounts/{id}/feishu`）重写
+      这一段。另：`verify1` 是历史遗留租户，其 profile patch 仍是模板占位（`[]`，没有 insert 列表），
+      `EnsureTenantPlugins` 按既有口径只告警不改写（rotate-key 可重建），`dshgw doctor` 报它缺 `gateway.key` /
+      `settings.yaml` 也是 9-18 起的历史漂移；`dsh-tenant` 的旧 `.dsh/plugins/{web-tty,workspace-files,git-diff}`
+      影子副本本轮**保留**（回滚用），确认稳定后可删。
+
+## M76 点「退出」后强制卸载挂载文件系统，最后强制退出 dsh
+
+设计：`docs/design/m76-dsh-exit-force-teardown.md`；规格：`docs/dshgw.md` §3b / §7b / §7d。
+用户原话（2026-09-22）：「dsh 点击退出按钮后，强制 umount 使用挂载文件系统，最后强制退出 dsh」。
+触发原由（本机实测）：`dsh-tenant` 的浏览器挂载 `browser/ZT20Q` 自 14:36 起 `fusermount3 … Device or
+resource busy`，reaper 每 5 秒重试一次、刷了一小时；该账号 15:14/15:23/15:24 三次退出全部审计
+`logout_worker_stop_failed`（`reason=*fmt.wrapError`），而同一秒的日志显示 dsh **已经停了**——失败的是
+随后那一步卸载；sshfs 挂载则从来没有被退出碰过。
+
+- [x] 设计文档 `docs/design/m76-dsh-exit-force-teardown.md`（先落盘并展示，含 D1–D9、接口签名、数据流、
+      异常边界、测试策略、实现与设计差异）+ 规格文档 `docs/dshgw.md` §3b/§7b/§7d + 四个设计文档追补
+      （browser-fuse-workspace / m64 / m67 / m69）。
+- [x] `internal/dshgw/fusekernel`：宿主 FUSE 探测收敛（挂载表读取与转义解码、minor 解码、sysfs abort、
+      守护进程查找、`fusermount3 -u [-z]` 阶梯），`sshworkspace` 与 `browserworkspace` 共用一份实现；
+      ssh 侧原有测试缝（`procRoot`/`sysfsFuse`/`statDevice`/`serviceMounted`/`fuseConnDir`）原样保留。
+      单测：挂载表解码、设备号解码、abort 写入、连接存活、守护进程精确匹配、卸载阶梯两条分支、
+      缺 fusermount3 的报错。
+- [x] `browserworkspace.ForceUnmount` 强制阶梯（`fusermount3 -u -z` → abort 这条 FUSE 连接 → 再 `-u -z`，
+      以挂载表为准）；单测覆盖四个分支；**真机用例** `TestRealFUSEForceUnmountTakesABusyMount`
+      （子进程 cwd 钉在挂载点里 ⇒ 优雅卸载必然 EBUSY ⇒ 强制阶梯成功，挂载表条目消失）PASS。
+- [x] **本次的第一原因（设计时没想到，实测抓到）**：go-fuse `Server.Unmount()` 跑完 `fusermount3 -u` 后要等
+      自己的 serve loop，而 serve loop 只在内核释放 FUSE 连接时结束 ⇒ 挂载被持有（活着的 worker 沙箱／另一个
+      挂载命名空间）时它**永不返回**。现场 e2e 复现：退出请求与**整个 reaper** 一起卡在 `WaitGroup.Wait`，
+      worker 还在跑、两个挂载都还挂着（这正是用户说的"点了退出没反应"）。修法：优雅卸载限时
+      `gracefulUnmountBudget = 1s`（超时返回 `errUnmountSlow` + WARN），再由强制阶梯接管；被放弃的那次
+      `Unmount` 的 goroutine 在 abort 释放连接后自己返回。单测 `TestABlockingUnmountIsBoundedAndForced`。
+- [x] `browsermount`：可注入的 `detach` 缝（默认 `browserworkspace.ForceUnmount`）、`share.final`
+      （退出/停用/删除后 reaper 只重试卸载，**不再为收挂载重启一个已退出的租户的 dsh**）、
+      `DetachTenant`（退出半边：不碰 worker）与 `DropTenant`（先 `stopWorker` 再 detach）分离、
+      `CleanupStale` 复用同一阶梯。单测：优雅失败→强制成功→清理完成、优雅永久阻塞→有界升级、
+      强制也失败→记录保留+错误上抛、`final` 的 share 不被 `expire` 重启、停 worker 失败**不再跳过**卸载。
+- [x] `sshworkspace`：`DetachTenant`（退出卸载但**保留记录/镜像/挂载点**，审计 `ssh-mount-detach`）、
+      `Restore`（登录重挂，`Reconcile` 抽出 `remount` 共用）、`detachKeeping(..., keepMountpoint)`。
+      单测：detach 保留一切且不重启 worker、卸载不了时如实报错、Restore 重挂同一路径且对活挂载是 no-op。
+- [x] **顺带修掉 M64 记的死挂载缺陷**：已记录但 FUSE 连接已断（守护进程没了）的挂载点原先在
+      `Reconcile`/`Restore` 里被跳过，账号会一直留着读不了的死工作区。现在先按**守护进程是否存在**
+      （与 `MountsFor` 同一条规则）判定、摘掉死条目再重挂，记录与挂载点保留。单测
+      `TestRestoreReplacesADeadMount`；**本机现网实测**（见下）。
+- [x] `tenancy.Manager.StopForLogout` 按 M76 重排：排除 → 浏览器卸载（≤15s）→ SSH 卸载（≤15s）→
+      **最后**强杀 worker（≤30s）→ 校验 `WorkerStopped`；任何一步失败都不再短路，聚合成
+      `LogoutResult{MountsDetached, MountsLeftover, WorkerStopped}`。新增钩子方法 `DetachTenant`/`AttachedMounts`
+      （browser）与 `DetachTenant`/`AttachedMounts`/`Restore`（ssh），`DetachedGuard` 同步。
+      单测：调用顺序（挂载先、worker 最后，且卸载时 worker 仍活着）、失败仍继续、计数与残留清单。
+- [x] `proxy`：`LogoutStop` 返回 `LogoutResult`；新增审计 `logout_mount_detach` / `logout_mount_leftover` /
+      `logout_worker_stop_skipped`，`logout_worker_stop_failed` 的 `reason` 改为**错误正文（截断 512B）**
+      而非类型名；`logoutStopTimeout` 30s→**55s**，门户一次退出多租户整体预算 **150s**；
+      `WorkerStopped=false` 时不写成功审计。单测：审计行与正文、未校验的停不记为成功。
+- [x] `cmd/dshgw.PrepareLogin`：在 `EnsureRunning` **之前**调 `Restore`（先重挂再起 worker，profile 才能绑到
+      活挂载），失败 fail-soft（审计 `login_mount_restore_failed`），worker 已在跑时不静默重启
+      （审计 `ssh_mount_restore_deferred`）；`managerOps` 增 `auditor`（serve/admin-serve 都接上审计文件）。
+      单测：重挂先于起 worker、失败仍登录成功且审计、已在跑的 worker 不被替换且记 deferred。
+- [x] **单测与目标全绿**：`make dshgw-test`（Go 全量 + 插件 Node 测试 + 迁移脚本，exit 0）、
+      `make dshgw-browser-test`（9 个目标包 OK）、`make dshgw-ssh-integration`（真机 sshfs；含挂载 → detach →
+      Restore 重挂）、`BROWSERWORKSPACE_FUSE_TEST=1 go test ./internal/dshgw/browserworkspace -run TestRealFUSE`
+      （真 FUSE 忙挂载强制卸载）PASS、`go vet ./internal/dshgw/... ./cmd/dshgw` 干净。
+- [x] 新验收脚本 `scripts/dshgw_logout_teardown_e2e.py` + `make dshgw-logout-e2e`（一次性实例、自带
+      state/端口段 13097/13650-13849/13300-13499，不碰现网）：同时挂上**真浏览器目录 FUSE**（协议由脚本内
+      小型 stand-in 驱动，不需要 Chromium，且 `activate` 把它 bind 进沙箱 ⇒ 优雅卸载必然失败）与**真 sshfs**，
+      然后 `POST /dshgw/logout/`。**实测 PASS 12 步**：退出 **1.58s** 返回；两个挂载都离开内核挂载表；
+      worker 端口关闭；审计 `logout_mount_detach`（"2 mount(s) detached"）+ `logout_worker_stop`，无
+      `logout_worker_stop_failed`/`logout_mount_leftover`；ssh 记录与挂载点保留；**重新登录后 sshfs 在同一
+      路径重挂**并能读到远端文件。
+- [x] **本机现网（`dshgw-verify.service`，8 个租户）**：`make dshgw-build` → 重启单元（16:18:01，revision
+      **01d454b**）→ 8 个租户 worker 全部 ready、三个单元 active、17 个公开监听在、
+      `browser-workspace` 残留挂载 **0** 个、重启后 `browser mount expiry cleanup failed` **0** 条、
+      `logout_worker_stop_failed` **0** 条；并且**现网那个死 sshfs 挂载自动被修好**：日志
+      `WARN a recorded ssh workspace mount lost its daemon; replacing it` → `INFO ssh workspace remounted`
+      （审计 `ssh-mount-remount`），`.../dsh-tenant/ssh/aipc/home/winger/ZT20Q` 从
+      `ls: Transport endpoint is not connected` 变成可读（列出 Android.bp/Makefile/a-ztc 等）。
+      顺带确认这本身就是 M64 那条缺陷的机理：**重启单元会杀掉 sshfs 守护进程、FUSE 条目却留在表里**，
+      以前要人工 `fusermount3 -u` + 再重启，现在每次启动由 `Reconcile` 自动修好。
+      现场恢复（14:36 起卡住的浏览器挂载）在重启前已由页面断开自行摘除并停止刷屏，本次未再手工干预。
+- [x] **第一版判据的修正（01d454b）**：现网第一次重启（16:15）暴露第一版"连接探测"判据不成立——
+      死挂载的 `stat` 直接 ENOTCONN ⇒ 读不出设备号被当成"不是 FUSE 挂载" ⇒ `ConnectionLive` 返回 true ⇒
+      死挂载仍被跳过（日志只有 `MountsFor` 的 `leaving it out of the worker's sandbox`）。改为按
+      **守护进程是否存在**判定（与 `MountsFor` 同一规则），测试把该缝显式化；现网 16:18 重启复验自愈。
+- [x] 修正 M75 归档里那句"浏览器挂载清理仍报 `fusermount3 … Device or resource busy`，是既有现象"：
+      它是本次的第一原因（限时优雅卸载 + 强制阶梯缺失），M76 起不再复现。
+- [ ] 遗留（**只剩人工一步**）：用真实浏览器在租户侧栏点一次「退出」（本机验收与 e2e 都是 HTTP 客户端/
+      脚本跑的，没有真人点界面）；需要用户的账号会话，因此留给用户确认：点后应回到门户登录页、
+      `/proc/self/mounts` 无该账号挂载、`ps` 无该账号 worker、审计出现 `logout_mount_detach` +
+      `logout_worker_stop`。
+
+### 归档：M64 的「死挂载条目」缺陷（原文，2026-09-22 由 M76 修）
+
+- [ ] **缺陷（2026-09-20 发布 M68 时两次撞到）**：`systemctl --user restart dshgw-verify` 会把 `sshfs`
+      进程随单元一起杀掉，但 **FUSE 挂载条目留在挂载表里**（`Transport endpoint is not connected`）；
+      启动时的 `sshService.Reconcile` 补不上这条死挂载，于是**有活跃 SSH 工作区的租户起不来**：
+      `bwrap: Can't get type of source …/ssh/…: Transport endpoint is not connected` → worker `exit status 1`。
+      现场恢复：`fusermount3 -u <mountpoint>` + 重启 dshgw（本次发布就是这么救回来的）。
+      修法方向：启动/`Reconcile` 前对**已记录**的挂载点做一次探测，ENOTCONN 的先 `fusermount3 -z` 再重挂
+      （browsermount 有对等的 `CleanupStale`，ssh 这侧缺）；或者让单元 stop 时先卸挂载（KillMode/顺序问题）。
+      另一个操作教训：**别用 CLI `dshgw tenant restart` 起长驻 worker** —— CLI 退出时 bwrap
+      `--die-with-parent` 会把 worker 一起带走，且日志里看不到那次退出；长驻 worker 只能由服务自己起
+
+> **M76 的修法**：`sshworkspace.remount`（`Reconcile` 启动时与 `Restore` 登录时共用）不再"表里有条目就跳过"，
+> 而是按**守护进程是否存在**（与 `MountsFor` 同一条规则）判定死挂载，先 `detachKeeping` 摘掉死条目
+> （保留记录与挂载点）再重挂。本机现网 2026-09-22 16:16 重启实测：`WARN a recorded ssh workspace mount lost
+> its daemon; replacing it` → `INFO ssh workspace remounted`，`.../dsh-tenant/ssh/aipc/home/winger/ZT20Q`
+> 从 `Transport endpoint is not connected` 变成可读。
+
+### v4.0.0 发布与部署记录（2026-09-22，本机 aigw-local + dshgw-verify；gpt001 未部署）
+
+本版内容（v3.2.0 之后未发布的 4 组改动）：**M74 租户名自动用 `dsh-<账号拼音>-<账号ID>`**（`8191c4e`，
+另含控制台绑定飞书弹窗的先弹后读 `d655c0e`）、**删除共享 SSH 密钥来源 `identity_source` + 安全处置**
+（`7d34e2c`）、**M75 租户侧三个插件入库并默认下发**（web-tty / workspace-files / git-diff，`cdde9ee`）、
+**M76 退出即强制卸载（浏览器 FUSE + sshfs）并最后强杀 dsh**（`cbfdc01`…`8cfffaa`）。
+档位 **major（3.2.0 → 4.0.0）**：`7d34e2c` **删除配置键 `ssh_workspaces.identity_source`**，
+旧配置里出现该键会直接拒绝启动（`internal/dshgw/config/config.go:581`），属于「要运维改配置才能继续跑」的
+破坏性变更——与 v3.0.0 删除 `ssh_config_source` 时判 major 的规则一致；其余三组是新能力（minor 量级）。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v4.0.0**（`VERSION` 3.2.0 → 4.0.0；tag `v4.0.0` → `24acbf4`，即 `release: v4.0.0` 提交） |
+| 本版内容 | ① M74：控制台「启用 DSH」预填 `dsh-<账号拼音>-<账号ID>`（仍可手改），控制台租户名正则与 dshgw 的 `ValidTenantName` 逐字符相同；② `identity_source` 删除（一账号一把密钥，配置里出现即拒绝启动；同时 `rotate_operator_ssh_key.sh` / `dshgw_ssh_identity.sh` 收口）；③ M75：`tenant_plugins` 三个租户插件默认下发（`deploy.plugin_path` 必填），`cmd/dshgw/plugin/{web-tty,workspace-files,git-diff}` 入库；④ M76：退出顺序改为排除 → 强制卸载（浏览器 FUSE 强制阶梯含限时优雅卸载 1s + `-u -z` + abort；sshfs `DetachTenant` 保留记录）→ 最后强杀 dsh，失败不再短路，审计新增 `logout_mount_detach`/`logout_mount_leftover` 且失败原因记正文；新增 `internal/dshgw/fusekernel`；`Restore` 登录重挂并顺带修掉 M64 的死挂载缺陷 |
+| 构建物 | `bin/aigw` 4.0.0 / `24acbf4`（console minified：43 文件 690896→390038 B，gzip 38 文件 387677→154682 B）；`bin/dshgw` 4.0.0 / `24acbf4`；`gwproxy` 本版无改动（`cmd/gwproxy`+`internal/frontproxy` 自 `58ef6bf` 起无提交），**未重建**，仍是 2.4.0 / `58ef6bf` |
+| 部署范围 | 本机 `aigw-local`（3.2.0 `d655c0e` → 4.0.0 `24acbf4`，16:25:08）、`dshgw-verify`（3.2.0 `01d454b` → 4.0.0 `24acbf4`，16:25:17）；`gwproxy-verify` 未动（仍 active） |
+| 回滚点 | `data/prev/bin/aigw.prev-3.2.0-7d34e2c`（发版前在盘上的 aigw：v3.2.0 + M74 + 共享密钥处置，本次发布前拷入）、`data/prev/bin/dshgw.prev-running-3.2.0-01d454b`（发布前在跑的 dshgw，`--version` 自证）、`data/prev/bin/gwproxy.prev-running-2.4.0-58ef6bf`（既有）。**注意**：本次拷 aigw 时覆盖了原有的 `aigw.prev-running-3.2.0-d655c0e` 这一份（点名过程见下），若要回滚到 `d655c0e` 那个更早的点，用 `git checkout d655c0e` + `VERSION=3.2.0 make build` 重建即可 |
+| 配置/数据变更 | 无（发布只换二进制）。`dshgw.yaml` 里 `identity_source` 早已删除（只剩注释），`config.yaml` 未改；M75 需要的 `deploy.plugin_path` 现网已配置 |
+
+**过程留痕（一次小失误，写清楚以便复核）**：拍回滚点时把"发版前在盘上的 aigw"（`7d34e2c`）`cp` 到了
+`data/prev/bin/aigw.prev-running-3.2.0-d655c0e` 这个**已被占用**的名字上，覆盖了那份更早的回滚二进制，
+随后才把副本改名成 `aigw.prev-3.2.0-7d34e2c`。影响：v3.2.0/`d655c0e` 那个 artifact 不再在 `data/prev/bin`
+里（代码可从 `d655c0e` 重建）；本次回滚目标（`7d34e2c`）不受影响，且它比 `d655c0e` 多含共享密钥处置，
+作为回滚点更合适。
+
+**验证**（本机实测）：
+
+- `GET /version` → `{"revision":"24acbf4","ui":"minified","ui_encoding":"gzip","version":"4.0.0"}`（发布前是 3.2.0 / `d655c0e`）；
+  `healthz=200`、`readyz=200`；`data/aigw-local.log` 里 `aigw starting version=4.0.0 revision=24acbf4 ui=minified
+  ui_encoding=gzip`，重启后 `level=ERROR` **0 条**（bootstrap/registry/routing/billing/backup/飞书/联网全部就绪，
+  `http server listening addr=:8088`）。
+- 控制台角标（资源面证据）：`/admin/ui/js/brand.js` 200（467 B，含 `AI Gateway` 且读 `version`），它读的就是
+  上面那个端点 ⇒ 角标渲染 `AI Gateway  v4.0.0  24acbf4`；`scripts/ui-base-test.mjs` **10 checks passed**、
+  `scripts/ui-badge-test.mjs` **11 checks passed**（用 `/home/winger/.local/node-v22.23.1-linux-x64/bin/node`）。
+- `dshgw-verify`：日志 `dshgw listening version=4.0.0 revision=24acbf4`、`ssh workspaces enabled`；重启后
+  **8 个租户 worker 全部 ready**、19 个公开/门户端口在监听、`browser-workspace` 残留挂载 **0** 个、
+  `browser mount expiry cleanup failed` **0** 条、`dsh-tenant` 的 SSH 工作区可读（`ZT20Q` 列出 Android.bp 等）。
+  重启瞬间有 4 条 `ERROR dsh reverse proxy failed tenant=dsh-tenant error_type=*net.OpError`——那是租户页面在
+  worker 重启窗口里的在途请求，15:39 那次重启同样有 5 条，是既有现象，不是本版引入。
+- 发布前回归：`make dshgw-test`（86 个包 ok，exit 0）、`make dshgw-browser-test`、`make dshgw-ssh-integration`、
+  真机 FUSE 用例 `TestRealFUSEForceUnmountTakesABusyMount`、`go vet ./internal/dshgw/... ./cmd/dshgw` 全绿；
+  发布脚本自带 `version-check` + ui-dist 混淆（43 文件 -44%；gzip -60%）。
+  `make verify` 未跑：本机 `go test ./...` 会走进 `./data`（含 6 GB 库与 GB 级浏览器工作区）而挂住，
+  这是 M66 小节记录的既有现象，本次按仓库惯例用显式包目标替代。
+- **未做**：gpt001 未部署（用户要求本机）；M76 的「真人点一次退出」仍需用户会话（见 `docs/TODO.md` M76）。

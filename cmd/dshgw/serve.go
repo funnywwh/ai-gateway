@@ -21,23 +21,34 @@ import (
 	"github.com/winger/ai-gateway/internal/dshgw/sshworkspace"
 )
 
+// pickTicketTTL bounds the key-pick ticket this process mints for its own key login (M72). The
+// page it leads to is rendered immediately and submitted once, so a couple of minutes is generous
+// while keeping a leaked URL worthless.
+const pickTicketTTL = 2 * time.Minute
+
 func (c *cli) serve() (serveErr error) {
 	deps, err := c.loadRuntime(true)
 	if err != nil {
 		return err
 	}
 	store := deps.manager.Sessions
-	ops := managerOps{m: deps.manager, validator: deps.validator, cfg: deps.cfg, logger: slog.Default()}
+	ops := managerOps{m: deps.manager, validator: deps.validator, cfg: deps.cfg, logger: slog.Default(), auditor: &audit.JSONL{Path: deps.cfg.AuditPath}}
 	gateway := proxy.New(deps.cfg, deps.reg, store, handshake.FileSource{Dir: deps.cfg.HandshakeDir}, &handshake.HTTPExchanger{}, deps.validator)
 	gateway.Authorizer = deps.validator
 	gateway.KeySource = proxy.FileKeySource{Root: deps.cfg.Deploy.TenantConfigRoot}
-	// Login adopts a credential already proven valid for this tenant.
-	gateway.KeyAdopter = ops
+	// Login is also the tenant's lifecycle moment (M69): every sign-in re-applies the platform
+	// slice of that tenant's dsh configuration and brings its worker up; signing out of the last
+	// session in a tenant stops it.
+	gateway.LoginPrepare = ops
+	gateway.LogoutStop = ops
 	if deps.cfg.Feishu.Enabled {
 		verifier, err := feishu.New([]byte(deps.cfg.Feishu.TicketSecret))
 		if err != nil {
 			return err
 		}
+		// The picker's own ticket (M72) is minted here and redeemed a moment later on the same
+		// origin, so it is deliberately short-lived: it covers one form submission, not a session.
+		verifier.SetIssueTTL(pickTicketTTL)
 		gateway.Feishu = &proxy.FeishuPortal{Enabled: true, AigwLoginURL: deps.cfg.Feishu.AigwLoginURL, Verifier: verifier}
 		slog.Info("feishu login enabled", "aigw_login_url", deps.cfg.Feishu.AigwLoginURL)
 	}

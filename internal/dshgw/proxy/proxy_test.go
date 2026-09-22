@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/winger/ai-gateway/internal/dshgw/aigw"
+	"github.com/winger/ai-gateway/internal/dshgw/audit"
 	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
 	"github.com/winger/ai-gateway/internal/dshgw/session"
@@ -121,10 +122,22 @@ func fixture(t *testing.T, worker http.Handler) (*Proxy, registry.Tenant, string
 	return p, tenant, up.URL, up
 }
 
-type adopterFunc func(context.Context, string, string) (bool, error)
+type prepareFunc func(context.Context, string, string) error
 
-func (f adopterFunc) AdoptKey(ctx context.Context, tenant, key string) (bool, error) {
-	return f(ctx, tenant, key)
+func (f prepareFunc) PrepareLogin(ctx context.Context, tenant, submittedKey string) error {
+	return f(ctx, tenant, submittedKey)
+}
+
+type stopFunc func(context.Context, string) (LogoutResult, error)
+
+func (f stopFunc) StopSignedOut(ctx context.Context, tenant string) (LogoutResult, error) {
+	return f(ctx, tenant)
+}
+
+// stopReporting is a LogoutStop that answers with a fixed result: the tests that care about what
+// the teardown reported (mounts taken, mounts left, worker verified) use it.
+func stopReporting(result LogoutResult, err error) LogoutStop {
+	return stopFunc(func(context.Context, string) (LogoutResult, error) { return result, err })
 }
 
 func issue(t *testing.T, p *Proxy, tenant string, upstream *session.Upstream) string {
@@ -682,16 +695,17 @@ func TestPathModeUsesPrefixesForURLsCookiesAndFences(t *testing.T) {
 }
 
 // Login is the only moment the deployment holds a key it has already proven valid
-// for a tenant. A tenant that never stored one (hand-built, restored, migrated) is
-// configured here — but a provisioning failure must not turn a valid login into a
-// failure: the user gets their session either way.
-func TestLoginAdoptsTheKeyAndSurvivesAdoptionFailure(t *testing.T) {
+// for a tenant, and (M69) the moment the tenant's platform configuration is re-applied
+// and its worker is brought back up. The proxy's part of that contract is the call and
+// the failure policy: a provisioning failure must not turn a valid login into a failure —
+// the user gets their session either way.
+func TestLoginPreparesTheTenantAndSurvivesPreparationFailure(t *testing.T) {
 	p, _, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer up.Close()
-	var adopted string
-	p.KeyAdopter = adopterFunc(func(_ context.Context, tenant, key string) (bool, error) {
-		adopted = tenant + "|" + key
-		return true, nil
+	var prepared string
+	p.LoginPrepare = prepareFunc(func(_ context.Context, tenant, key string) error {
+		prepared = tenant + "|" + key
+		return nil
 	})
 	login := func() *http.Response {
 		req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("key=sk-aaaaaaaaa-rest"))
@@ -706,15 +720,138 @@ func TestLoginAdoptsTheKeyAndSurvivesAdoptionFailure(t *testing.T) {
 	if response := login(); response.StatusCode != http.StatusFound {
 		t.Fatalf("login status = %d", response.StatusCode)
 	}
-	if adopted != "alice|sk-aaaaaaaaa-rest" {
-		t.Fatalf("the login key was not adopted: %q", adopted)
+	if prepared != "alice|sk-aaaaaaaaa-rest" {
+		t.Fatalf("the tenant was not prepared with the login key: %q", prepared)
 	}
 
-	p.KeyAdopter = adopterFunc(func(context.Context, string, string) (bool, error) {
-		return false, errors.New("aigw unreachable")
+	p.LoginPrepare = prepareFunc(func(context.Context, string, string) error {
+		return errors.New("aigw unreachable")
 	})
 	if response := login(); response.StatusCode != http.StatusFound {
-		t.Fatalf("a failed adoption blocked a valid login: %d", response.StatusCode)
+		t.Fatalf("a failed preparation blocked a valid login: %d", response.StatusCode)
+	}
+}
+
+// A Feishu login carries no key: it still prepares the tenant, with an empty submitted key,
+// because the platform slice comes from the tenant's stored worker key.
+func TestFeishuLoginPreparesTheTenantWithoutAKey(t *testing.T) {
+	setup := setupFeishu(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	var prepared, submitted = "unset", "unset"
+	setup.proxy.LoginPrepare = prepareFunc(func(_ context.Context, tenant, key string) error {
+		prepared, submitted = tenant, key
+		return nil
+	})
+	ticket := setup.signer(setup.tenant, time.Minute, "nonce-prepare")
+	response := setup.portalRequest(t, ticket, "")
+	if response.StatusCode != http.StatusFound {
+		t.Fatalf("feishu login status = %d", response.StatusCode)
+	}
+	if prepared != setup.tenant || submitted != "" {
+		t.Fatalf("feishu login prepared %q with submitted key %q", prepared, submitted)
+	}
+}
+
+// Signing out stops the tenant's dsh, unconditionally — and that is a decision with a reason
+// recorded in the deployment: a closed browser leaves a valid session behind for the rest of the
+// TTL, so waiting for "the last session" is waiting for days (the host's own tenant had sixteen
+// live sessions, most of them days old).
+func TestLogoutStopsTheTenantEvenWithOtherLiveSessions(t *testing.T) {
+	p, _, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer up.Close()
+	tenant, _ := p.Registry.Get("alice")
+	var stopped []string
+	p.LogoutStop = stopFunc(func(_ context.Context, name string) (LogoutResult, error) {
+		stopped = append(stopped, name)
+		return LogoutResult{WorkerStopped: true}, nil
+	})
+	token := issue(t, p, tenant.Name, nil)
+	// A second live session of the same tenant (an older browser, a second window) must not hold
+	// the worker open.
+	_ = issue(t, p, tenant.Name, nil)
+	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	req.Host = "dsh.test:32600"
+	req.Header.Set("Origin", "https://dsh.test:32600")
+	req.RemoteAddr = "198.51.100.9:1234"
+	req.AddCookie(&http.Cookie{Name: p.Config.SessionCookieName(tenant.Name), Value: token})
+	recorder := httptest.NewRecorder()
+	p.Dispatch().ServeHTTP(recorder, req)
+	if status := recorder.Result().StatusCode; status != http.StatusSeeOther {
+		t.Fatalf("logout status = %d", status)
+	}
+	if len(stopped) != 1 || stopped[0] != tenant.Name {
+		t.Fatalf("logout did not stop the tenant's dsh: %v", stopped)
+	}
+}
+
+// A logout that carries no session for a tenant must not stop that tenant's dsh: only the
+// tenants whose session this request actually revoked are touched.
+func TestLogoutLeavesTenantsItDidNotSignOutAlone(t *testing.T) {
+	p, _, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer up.Close()
+	var stopped []string
+	p.LogoutStop = stopFunc(func(_ context.Context, name string) (LogoutResult, error) {
+		stopped = append(stopped, name)
+		return LogoutResult{WorkerStopped: true}, nil
+	})
+	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	req.Host = "dsh.test:32600"
+	req.Header.Set("Origin", "https://dsh.test:32600")
+	req.RemoteAddr = "198.51.100.9:1234"
+	req.AddCookie(&http.Cookie{Name: p.Config.SessionCookieName("alice"), Value: "not-a-real-token"})
+	recorder := httptest.NewRecorder()
+	p.Dispatch().ServeHTTP(recorder, req)
+	if status := recorder.Result().StatusCode; status != http.StatusSeeOther {
+		t.Fatalf("logout status = %d", status)
+	}
+	if len(stopped) != 0 {
+		t.Fatalf("a logout stopped a tenant it did not sign out: %v", stopped)
+	}
+}
+
+// A worker that will not die is an operator's problem, not a failed logout: the browser still
+// goes back to the portal.
+func TestLogoutSurvivesAWorkerThatWillNotStop(t *testing.T) {
+	p, _, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer up.Close()
+	tenant, _ := p.Registry.Get("alice")
+	p.LogoutStop = stopFunc(func(context.Context, string) (LogoutResult, error) {
+		return LogoutResult{WorkerStopped: true}, errors.New("SIGKILL survived")
+	})
+	token := issue(t, p, tenant.Name, nil)
+	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+	req.Host = "dsh.test:32600"
+	req.Header.Set("Origin", "https://dsh.test:32600")
+	req.RemoteAddr = "198.51.100.9:1234"
+	req.AddCookie(&http.Cookie{Name: p.Config.SessionCookieName(tenant.Name), Value: token})
+	recorder := httptest.NewRecorder()
+	p.Dispatch().ServeHTTP(recorder, req)
+	if status := recorder.Result().StatusCode; status != http.StatusSeeOther {
+		t.Fatalf("logout status = %d", status)
+	}
+}
+
+// The tenant-side logout (the sidebar's account row) stops that tenant's dsh on the same rule.
+func TestTenantLogoutStopsTheTenantWhenItsLastSessionLeaves(t *testing.T) {
+	p, tenant, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer up.Close()
+	var stopped []string
+	p.LogoutStop = stopFunc(func(_ context.Context, name string) (LogoutResult, error) {
+		stopped = append(stopped, name)
+		return LogoutResult{WorkerStopped: true}, nil
+	})
+	p.Config.AccountCard.Enabled = true
+	token := issue(t, p, tenant.Name, &session.Upstream{Name: "dsh-auth-test", Value: "held", Authority: net.JoinHostPort("127.0.0.1", itoa(tenant.WorkerPort))})
+	req := httptest.NewRequest(http.MethodPost, "/dshgw/logout/", nil)
+	req.Host = net.JoinHostPort("dsh.test", itoa(tenant.PublicPort))
+	req.Header.Set("Origin", "https://"+net.JoinHostPort("dsh.test", itoa(tenant.PublicPort)))
+	req.AddCookie(&http.Cookie{Name: p.Config.SessionCookieName(tenant.Name), Value: token})
+	recorder := httptest.NewRecorder()
+	p.Dispatch().ServeHTTP(recorder, req)
+	if status := recorder.Result().StatusCode; status != http.StatusSeeOther {
+		t.Fatalf("tenant logout status = %d", status)
+	}
+	if len(stopped) != 1 || stopped[0] != tenant.Name {
+		t.Fatalf("tenant logout did not stop its dsh: %v", stopped)
 	}
 }
 
@@ -902,5 +1039,97 @@ func TestTenantAPIDataIsMarkedUncacheable(t *testing.T) {
 	p.Config.NoStoreAPIs = &off
 	if got := call("/api/session/list").Header.Get("Cache-Control"); got != "" {
 		t.Fatalf("no_store_apis=false still marked the response: %q", got)
+	}
+}
+
+// recordingSink collects the audit events one test produced.
+type recordingSink struct {
+	mu     sync.Mutex
+	events []audit.Event
+}
+
+func (s *recordingSink) Write(event audit.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, event)
+	return nil
+}
+
+func (s *recordingSink) reasonOf(kind string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, event := range s.events {
+		if event.Kind == kind {
+			return event.Reason, true
+		}
+	}
+	return "", false
+}
+
+// M76: the audit has to say what the teardown did — how many mounts went away, which ones stayed,
+// and WHY a step failed. The pre-M76 line recorded the Go error type (`*fmt.wrapError`), which is
+// what made the incident of 2026-09-22 impossible to diagnose from the audit file.
+func TestLogoutAuditsWhatTheTeardownDid(t *testing.T) {
+	p, tenant, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer up.Close()
+	sink := &recordingSink{}
+	p.Auditor = sink
+	p.Config.AccountCard.Enabled = true
+	leftover := filepath.Join(t.TempDir(), "browser", "stuck")
+	p.LogoutStop = stopReporting(LogoutResult{MountsDetached: 2, MountsLeftover: []string{leftover}},
+		errors.New("browser mounts: unmount "+leftover+": Device or resource busy"))
+
+	token := issue(t, p, tenant.Name, &session.Upstream{Name: "dsh-auth-test", Value: "held", Authority: net.JoinHostPort("127.0.0.1", itoa(tenant.WorkerPort))})
+	req := httptest.NewRequest(http.MethodPost, "/dshgw/logout/", nil)
+	req.Host = net.JoinHostPort("dsh.test", itoa(tenant.PublicPort))
+	req.Header.Set("Origin", "https://"+net.JoinHostPort("dsh.test", itoa(tenant.PublicPort)))
+	req.AddCookie(&http.Cookie{Name: p.Config.SessionCookieName(tenant.Name), Value: token})
+	recorder := httptest.NewRecorder()
+	p.Dispatch().ServeHTTP(recorder, req)
+	if status := recorder.Result().StatusCode; status != http.StatusSeeOther {
+		t.Fatalf("tenant logout status = %d", status)
+	}
+	if reason, ok := sink.reasonOf("logout_mount_detach"); !ok || reason != "2 mount(s) detached" {
+		t.Fatalf("logout_mount_detach = %q ok=%v", reason, ok)
+	}
+	if reason, ok := sink.reasonOf("logout_mount_leftover"); !ok || reason != leftover {
+		t.Fatalf("logout_mount_leftover = %q ok=%v, want %s", reason, ok, leftover)
+	}
+	reason, ok := sink.reasonOf("logout_worker_stop_failed")
+	if !ok {
+		t.Fatal("a teardown that failed was not audited")
+	}
+	if !strings.Contains(reason, "Device or resource busy") {
+		t.Fatalf("the audit reason hides the failure: %q", reason)
+	}
+	if strings.HasPrefix(reason, "*") {
+		t.Fatalf("the audit reason is still an error type: %q", reason)
+	}
+	if _, ok := sink.reasonOf("logout_worker_stop"); ok {
+		t.Fatal("a teardown that failed was also audited as success")
+	}
+}
+
+// A teardown that reports success without verifying the worker is gone is not a success: the
+// audit says so instead of claiming the dsh stopped.
+func TestLogoutRequiresTheWorkerStopToBeVerified(t *testing.T) {
+	p, tenant, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer up.Close()
+	sink := &recordingSink{}
+	p.Auditor = sink
+	p.Config.AccountCard.Enabled = true
+	p.LogoutStop = stopReporting(LogoutResult{MountsDetached: 1, WorkerStopped: false}, nil)
+	token := issue(t, p, tenant.Name, &session.Upstream{Name: "dsh-auth-test", Value: "held", Authority: net.JoinHostPort("127.0.0.1", itoa(tenant.WorkerPort))})
+	req := httptest.NewRequest(http.MethodPost, "/dshgw/logout/", nil)
+	req.Host = net.JoinHostPort("dsh.test", itoa(tenant.PublicPort))
+	req.Header.Set("Origin", "https://"+net.JoinHostPort("dsh.test", itoa(tenant.PublicPort)))
+	req.AddCookie(&http.Cookie{Name: p.Config.SessionCookieName(tenant.Name), Value: token})
+	recorder := httptest.NewRecorder()
+	p.Dispatch().ServeHTTP(recorder, req)
+	if _, ok := sink.reasonOf("logout_worker_stop"); ok {
+		t.Fatal("an unverified teardown was audited as a stopped dsh")
+	}
+	if reason, ok := sink.reasonOf("logout_worker_stop_failed"); !ok || reason != "worker state not verified" {
+		t.Fatalf("logout_worker_stop_failed = %q ok=%v", reason, ok)
 	}
 }

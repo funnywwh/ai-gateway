@@ -2,17 +2,13 @@ package browsermount
 
 import (
 	"bufio"
-	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 )
 
 // AcquireLock serializes startup cleanup and instance lifetime. Configure state,
@@ -78,7 +74,20 @@ type mountRecord struct {
 	Persistent                         bool
 }
 
-func (s *Service) recordPath(id string) string { return filepath.Join(s.recordDir, id+".json") }
+// recordPath names the record file. The account is part of the FILE NAME because the key is
+// now normally the local directory's own name: "Downloads" is unique inside one account but
+// not across the gateway, and a shared file name would let one account's mount overwrite
+// another's record. Tenant names are [a-z][a-z0-9-]*, so the first dot is unambiguous.
+func (s *Service) recordPath(tenant, id string) string {
+	return filepath.Join(s.recordDir, tenant+"."+id+".json")
+}
+
+// recordFileName accepts both the current "<tenant>.<id>.json" and the "<id>.json" written
+// before a key could be a directory name. The record CONTENT is validated either way, so
+// refusing the older name would only leave an upgraded gateway's stale mount uncleanable.
+func recordFileName(name string, r mountRecord) bool {
+	return name == r.Tenant+"."+r.ID+".json" || name == r.ID+".json"
+}
 func (s *Service) writeRecord(r mountRecord) error {
 	if s.recordDir == "" {
 		return nil
@@ -106,7 +115,7 @@ func (s *Service) writeRecord(r mountRecord) error {
 		err = closeErr
 	}
 	if err == nil {
-		err = os.Rename(name, s.recordPath(r.ID))
+		err = os.Rename(name, s.recordPath(r.Tenant, r.ID))
 	}
 	if err == nil {
 		err = syncDirectory(s.recordDir)
@@ -158,15 +167,10 @@ func noSymlinkAncestors(path string) bool {
 	}
 }
 func validRecordPath(r mountRecord) bool {
-	// A client-supplied stable key is 32 hex characters; a mount without one keeps the
-	// original random 48-hex id.
-	if len(r.ID) != 48 && len(r.ID) != 32 {
-		return false
-	}
-	if filepath.Base(r.ID) != r.ID {
-		return false
-	}
-	if _, err := hex.DecodeString(r.ID); err != nil {
+	// The id is one safe path segment: the local directory's own name, or the 32/48 hex id a
+	// client that predates directory names still sends. Base is checked again here because a
+	// record is a file this process must be able to trust after a crash.
+	if !validDirectoryKey(r.ID) || filepath.Base(r.ID) != r.ID {
 		return false
 	}
 	if r.Tenant == "" || (r.State != "preparing" && r.State != "ready") {
@@ -212,7 +216,7 @@ func (s *Service) CleanupStale() error {
 			continue
 		}
 		var r mountRecord
-		if json.Unmarshal(b, &r) != nil || !validRecordPath(r) || e.Name() != r.ID+".json" {
+		if json.Unmarshal(b, &r) != nil || !validRecordPath(r) || !recordFileName(e.Name(), r) {
 			reject()
 			continue
 		}
@@ -231,14 +235,12 @@ func (s *Service) CleanupStale() error {
 			continue
 		}
 		if mounted {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			er = exec.CommandContext(ctx, "fusermount3", "-u", "-z", r.Path).Run()
-			if er != nil {
-				er = exec.CommandContext(ctx, "fusermount", "-u", "-z", r.Path).Run()
-			}
-			cancel()
-			if er != nil {
-				errs = append(errs, fmt.Errorf("unmount %s: %w", r.Path, er))
+			// The same forced ladder the live teardown uses (M76): a lazy detach, and an abort of
+			// the FUSE connection when even that does not remove the entry. Startup is exactly
+			// where a mount held by a foreign namespace is found still attached, so a plain
+			// `-u -z` here would leave the mount (and the record) behind on every restart.
+			if err := s.forceDetach(r.Path); err != nil {
+				errs = append(errs, err)
 				continue
 			}
 		}

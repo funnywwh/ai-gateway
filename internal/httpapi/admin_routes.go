@@ -631,17 +631,46 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 				queryParam("account_id", "integer", "只看某个账户的 Key，省略表示全部")),
 		},
 		{
-			// The browser leaves for Feishu here, so the answer is a redirect rather than
-			// JSON: an agent cannot complete an interactive consent screen, and a tool that
-			// pretended otherwise would only hand back a URL nobody followed.
+			// The browser used to leave for Feishu here, so the answer was a redirect rather
+			// than JSON. M72 retired the route: binding is now an administrator choosing a
+			// person for an account, and that needs no consent screen.
 			Method: "GET", Path: "/admin/api/v1/keys/{id}/feishu/bind", Handler: s.handleAdminBindKeyFeishu,
 			Name: "admin_bind_key_feishu", Group: groupKeys, Role: roleAdmin,
-			Summary: "开始把一把 API Key 绑定到飞书账号：返回 302 跳转到飞书授权页，必须在浏览器里打开才能完成",
-			Notes: "绑定证明的是「这个飞书账号属于操作者」：只有走完飞书的授权页才能拿到 open_id，所以没有等价的 JSON 接口。" +
-				"完成后的回调把身份写进该 Key 并回到控制台 API Keys 页；一把 Key 只能绑一个飞书账号，一个飞书账号也只能绑一把 Key。" +
-				"绑定本身不影响数据面鉴权，它只是让该身份可以登录 DSH 门户（见 docs/feishu.md）。",
-			NoTool: "MCP 客户端没有浏览器，302 到飞书授权页没有意义；绑定请在控制台完成，解绑有 admin_unbind_key_feishu 工具",
+			Summary: "**已废弃（M72）**：回答 400 `unsupported_parameter`，并指出替代接口 `PUT /admin/api/v1/accounts/{id}/feishu`",
+			Notes: "Key 级飞书绑定自 M72 起被账号级身份取代（docs/design/m72-account-feishu-identity.md D8）：" +
+				"DSH 门户登录判定读 `accounts.feishu_open_id`，Key 上的身份字段只剩只读展示与清理用途。" +
+				"这条路由仍然注册，是为了让旧书签、旧控制台标签页或脚本拿到一句解释而不是 404。" +
+				"绑定请在控制台组织架构页对账号操作（人员弹窗，不扫码）。",
+			NoTool: "MCP 不暴露：该路由已废弃；账号级绑定在控制台用人员弹窗完成（选择依据是飞书通讯录）",
 			Params: []adminField{pathParam("id", "API Key 的数字 id（见 admin_list_keys）")},
+		},
+		{
+			Method: "PUT", Path: "/admin/api/v1/accounts/{id}/feishu", Handler: s.handleAdminBindAccountFeishu,
+			Name: "admin_bind_account_feishu", Group: groupAccounts, Role: roleAdmin,
+			Summary: "把某个飞书身份绑定到账户（M72，账号级身份就是 DSH 门户登录身份）",
+			Notes: "身份以 body 给出而不是由服务端查通讯录：控制台刚从通讯录拿到姓名，离职者也要能被绑定/解绑，" +
+				"而且写一行数据不该依赖飞书可达。**不改变账户的组织归属**（那是同一页上的另一个动作，" +
+				"按人员优先的 M70 路由 `PUT /org/feishu/users/{open_id}/account` 才会顺带挂部门节点）。" +
+				"一个账户只能绑一个飞书身份，一个身份也只能属于一个账户（数据库唯一索引）。" +
+				"绑定不参与数据面鉴权：它只决定该身份能用飞书登录哪个账户的 DSH 租户。",
+			Dangerous: true, ConfirmReason: "该飞书身份之后可以用飞书登录这个账户的 DSH 租户（在该账户 DSH 有效时）；解绑即失去该能力",
+			Params: []adminField{pathParam("id", "账户数字 id（admin_list_accounts 给出）")},
+			Body: []adminField{
+				bodyRequired("open_id", "string",
+					"飞书人员的 open_id（ou_…）。来自 `admin_list_feishu_directory` 的人员列表；"+
+						"不校验该人是否仍在通讯录里（离职者也要能被清理）"),
+				bodyOptional("union_id", "string", "飞书 union_id（on_…）；仅展示与审计用"),
+				bodyOptional("name", "string", "飞书姓名；控制台列表显示的就是它，留空表示不记录姓名"),
+			},
+		},
+		{
+			Method: "DELETE", Path: "/admin/api/v1/accounts/{id}/feishu", Handler: s.handleAdminUnbindAccountFeishu,
+			Name: "admin_unbind_account_feishu", Group: groupAccounts, Role: roleAdmin,
+			Summary:   `解除账户的飞书身份（M72，幂等；返回 {"unbound":bool,"account_id":int}）`,
+			Dangerous: true, ConfirmReason: "该飞书身份将无法再用飞书登录 DSH 门户（Key 与数据面请求不受影响）",
+			Notes: "unbound=true 表示确实解除了，false 表示这个账户本来就没绑（重复调用不报错）。" +
+				"只清空 `accounts.feishu_*`：不动账户下任何 Key 上的历史身份字段，也不撤销既有 DSH 会话（按各自 TTL 到期）。",
+			Params: []adminField{pathParam("id", "账户数字 id")},
 		},
 		{
 			Method: "DELETE", Path: "/admin/api/v1/keys/{id}/feishu", Handler: s.handleAdminUnbindKeyFeishu,
@@ -786,7 +815,11 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/accounts", Handler: s.handleAdminListAccounts,
 			Name: "admin_list_accounts", Group: groupAccounts, Role: roleViewer,
-			Summary: "列出全部账户（计费模式、状态、标签、所属组织、授信与低余额阈值）",
+			Summary: "列出全部账户（计费模式、状态、标签、所属组织、授信与低余额阈值、DSH 有效状态、飞书身份与 Key 计数）",
+			Notes: "每行额外给出 M72 的三个字段：`dsh_disabled_at`（管理员显式「停用 DSH」的时刻，null = 从未被显式停用）、" +
+				"`dsh_effective`（部署开启 `dshgw.auto_enable` 时，这个账户现在是否真的能用 DSH）、" +
+				"`feishu`（账号级飞书身份，`{bound,open_id,name,union_id,bound_by,bound_at}`，形状与 Key 行的同名字段一致）、" +
+				"`key_count` / `active_key_count`（全部 Key 数 / 可用 Key 数；后者 ≥2 时门户登录会先让用户选一把）。",
 			Query: append(pageConfig.fields(),
 				queryParam("org_node_id", "integer",
 					"只看某个组织节点下的账户（默认连同子节点，见 include_descendants）；不传则不按组织过滤。节点 id 来自 admin_list_org_nodes"),
@@ -1078,6 +1111,65 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 						"任意一个 id 不存在会 404，且不会改动已有成员。账号可以同时属于多个节点",
 					idArraySchema(), []any{}),
 			},
+		},
+		{
+			Method: "GET", Path: "/admin/api/v1/org/feishu/directory", Handler: s.handleAdminListFeishuDirectory,
+			Name: "admin_list_feishu_directory", Group: groupOrg, Role: roleAdmin,
+			Summary: "读取飞书通讯录（部门树 + 人员），并给出与本地组织节点/账户的合并预览：每个部门标注 已存在/将创建/按名合并，每个人员标注匹配通道（人员id/Key绑定/同名）或未匹配",
+			Query: []adminField{
+				queryParam("refresh", "boolean",
+					"强制重新拉取飞书通讯录。默认结果走 60 秒缓存；任何同步/绑定写操作都会使缓存失效"),
+				queryParam("departments", "string",
+					"只统计这些飞书部门（open_department_id，逗号分隔或重复传参）的合并结果；"+
+						"可以传虚拟根 \"0\" 表示公司层人员（不属于任何部门的人）。"+
+						"不传 = 全量。每个部门额外返回 selected/included，每个人额外返回 in_scope；"+
+						"stats 只统计范围内的对象。部门 id 在 admin_list_feishu_directory 的 departments[].id"),
+			},
+		},
+		{
+			Method: "POST", Path: "/admin/api/v1/org/feishu/sync", Handler: s.handleAdminSyncFeishuOrg,
+			Name: "admin_sync_feishu_org", Group: groupOrg, Role: roleAdmin,
+			Summary:   "执行一次飞书通讯录同步：补建缺失部门节点 + 自动合并已匹配人员（写入账户级飞书身份并挂入部门节点）。可只同步指定部门；幂等：重复执行写 0",
+			Dangerous: true, ConfirmReason: "会创建飞书里有而本地没有的组织节点（其名称就是部门名），并把自动匹配上的人员写上飞书身份、挂进其部门对应的节点——节点标签被子树继承，这会即时改变这些账号的生效授权",
+			Body: []adminField{
+				structuredField("department_ids", "array",
+					"只同步这些飞书部门（open_department_id，见 admin_list_feishu_directory 的 departments[].id）；"+
+						"传虚拟根 \"0\" 表示同时处理公司层人员（不属于任何部门的人）。"+
+						"被选中部门的**上级**即使没选也会补建节点（否则子节点无处安放），但它们的**人员**不在范围内。"+
+						"不传这个字段 = 全量同步（M70 原有行为）；传空数组会 400；目录里不存在的 id 会被丢弃并在 "+
+						"unknown_department_ids 里回报，全都不认识时才 400",
+					arrayOfStrings("飞书部门 id 列表"), []any{"od_a1"}),
+			},
+		},
+		{
+			Method: "POST", Path: "/admin/api/v1/org/feishu/users/{open_id}/account", Handler: s.handleAdminCreateAccountFromFeishuUser,
+			Name: "admin_create_account_from_feishu_user", Group: groupOrg, Role: roleAdmin,
+			Summary:   "为某个飞书人员创建本地账户（默认名=飞书姓名可改），写入其飞书身份并挂入其部门节点；同名账户已存在时 409 并建议改用绑定接口",
+			Dangerous: true, ConfirmReason: "会新建一个账户（prepaid、余额 0、启用自动停复），写入该飞书身份，并把账户挂进其部门对应的组织节点",
+			Params: []adminField{pathParam("open_id", "飞书人员的 open_id（ou_…，admin_list_feishu_directory 的人员列表给出）")},
+			Body: []adminField{
+				bodyOptional("name", "string",
+					"账户名；默认用飞书姓名。通讯录缺名称权限（names_unavailable）时必须手填，否则 400"),
+				bodyOptional("note", "string", "备注"),
+			},
+		},
+		{
+			Method: "PUT", Path: "/admin/api/v1/org/feishu/users/{open_id}/account", Handler: s.handleAdminBindAccountFeishuUser,
+			Name: "admin_bind_account_feishu_user", Group: groupOrg, Role: roleAdmin,
+			Summary:   "把某个飞书人员绑定到指定账户：写入账户级飞书身份（accounts.feishu_*），并顺带把账户挂入其部门节点。不影响 API Key 上的绑定，也不影响门户登录",
+			Dangerous: true, ConfirmReason: "该飞书人员之后的每次同步都会合并到这个账户；一个账户只能绑一个飞书身份（已绑别人时 409）",
+			Params: []adminField{pathParam("open_id", "飞书人员的 open_id（ou_…）")},
+			Body: []adminField{
+				bodyRequired("account_id", "integer",
+					"要绑定到的账户数字 id（admin_list_accounts 给出）。该账户当前不能已绑定其他飞书身份"),
+			},
+		},
+		{
+			Method: "DELETE", Path: "/admin/api/v1/org/feishu/users/{open_id}/account", Handler: s.handleAdminUnbindAccountFeishuUser,
+			Name: "admin_unbind_account_feishu_user", Group: groupOrg, Role: roleAdmin,
+			Summary:   "解除某个飞书人员与账户的绑定（幂等）。不动 API Key 上的绑定；解除后该人员在下次同步中变回「未匹配」",
+			Dangerous: true, ConfirmReason: "解除账户级飞书身份映射；不影响该账户本身、它的 Key 与任何登录能力",
+			Params: []adminField{pathParam("open_id", "飞书人员的 open_id（ou_…）")},
 		},
 		{
 			Method: "GET", Path: "/admin/api/v1/mcp-tokens", Handler: s.handleAdminListMCPTokens,
@@ -1403,17 +1495,23 @@ func (s *Server) billingAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/accounts/{id}/dsh", Handler: s.handleAdminGetAccountDSH,
 			Name: "admin_get_account_dsh", Group: groupAccounts, Role: roleViewer,
-			Summary: "查看账户的 dsh 多租户网关启用状态（M52）",
-			Params:  []adminField{pathParam("id", "账户数字 id")},
+			Summary: "查看账户的 dsh 多租户网关启用状态（M52）与自动启用下的有效状态（M72）",
+			Notes: "`enabled` 是最后一次写入的物理状态；`effective` 是现在真实的答案——" +
+				"部署开启 `dshgw.auto_enable` 时，从未被显式停用过的激活账户也算有效（`dsh_disabled_at` 为 null）。" +
+				"`auto_enable` 回报本部署的开关，`disabled_at` 是管理员上次显式「停用 DSH」的时刻。",
+			Params: []adminField{pathParam("id", "账户数字 id")},
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/accounts/{id}/dsh", Handler: s.handleAdminSetAccountDSH,
 			Name: "admin_set_account_dsh", Group: groupAccounts, Role: roleAdmin,
-			Summary:   "启用或停用该账户的 dsh 网关入口（M52）",
+			Summary:   "启用或停用该账户的 dsh 网关入口（M52；停用同时记为「显式停用」，M72 的自动启用不会撤销它）",
 			Dangerous: true, ConfirmReason: "停用后 dsh 门户拒绝该账号新登录，既有会话按 dshgw 的 dsh_enforce 档位失效；启用恢复登录。不影响账户的 Key、余额或 dsh 租户数据",
+			Notes: "`enabled=false` 会写上 `dsh_disabled_at`：即使部署开着 `dshgw.auto_enable`（所有激活账号默认可用），" +
+				"这个账户也不会在下次登录时被自动启用——要恢复必须显式 `enabled=true`，它会清掉该标记。" +
+				"`enabled=true` 需要账户下至少有一个可用模型，否则 dshgw 会拒绝创建租户。",
 			Params: []adminField{pathParam("id", "账户数字 id")},
 			Body: []adminField{
-				bodyRequired("enabled", "boolean", "true=启用 dsh 入口（自动铸造 worker 专用 Key 并建立/启动租户）；false=停用（停止 worker 并吊销 worker Key，数据保留）"),
+				bodyRequired("enabled", "boolean", "true=启用 dsh 入口（自动铸造 worker 专用 Key 并建立/启动租户，同时清除「显式停用」标记）；false=停用（停止 worker 并吊销 worker Key，数据保留，并记录显式停用时刻）"),
 				bodyOptional("tenant", "string",
 					"启用时可选指定 dshgw 租户名（须匹配 [a-z][a-z0-9-]{0,25}[a-z]）；留空则沿用既有映射或按账户名自动生成。停用时忽略"),
 			},

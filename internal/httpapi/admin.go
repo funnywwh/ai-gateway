@@ -31,6 +31,13 @@ type AdminStore interface {
 	FindAPIKeyByFeishuOpenID(ctx context.Context, openID string) (*domain.APIKey, error)
 	BindAPIKeyFeishu(ctx context.Context, id int64, binding domain.FeishuBinding) error
 	UnbindAPIKeyFeishu(ctx context.Context, id int64) (bool, error)
+	// ListAPIKeyFeishuIdentities is the key-level read the M72 startup backfill uses to move
+	// pre-M72 bindings onto their accounts.
+	ListAPIKeyFeishuIdentities(ctx context.Context) ([]domain.KeyFeishuIdentity, error)
+	// FindAccountByFeishuOpenID is how the DSH portal login resolves an identity from M72 on:
+	// the binding belongs to the account. The key-level read above stays as the fallback for a
+	// deployment whose backfill has not run yet.
+	FindAccountByFeishuOpenID(ctx context.Context, openID string) (*domain.Account, error)
 	// GetAdminUserByUsername re-reads the operator who started a Feishu binding, so a
 	// demotion between starting and finishing it is honoured.
 	GetAdminUserByUsername(ctx context.Context, username string) (*domain.AdminUser, error)

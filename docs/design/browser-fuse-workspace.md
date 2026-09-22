@@ -71,6 +71,19 @@ deploy:
 - `open` 在 FUSE 挂载前持久化 preparing 记录，成功后原子更新 ready；带稳定 key 的记录标记 `Persistent`，供启动清理区分「稳定虚拟路径」与「一次性挂载点」。只记录服务端路径/租户/ID，不持久化 capability 或浏览器句柄。
 - 断开（`close`）对稳定 key 只卸载并删除记录，**保留空挂载点目录**；`close{purge:true}`（操作员删除该目录）才连目录一起释放，tombstone 会记住路径，使「先断开、后删除」也能真正释放。
 - HTTP close 和租约过期：先拒绝新 I/O、从 worker profile 排除路径，再重启并等待旧 namespace 退出，最后卸载 FUSE。
+- **卸载的强制阶梯（M76）**：`cleanupLocked` 先走 go-fuse 的优雅卸载，**但它有 1s 上限**：`Server.Unmount()`
+  跑完 `fusermount3 -u` 后要等自己的 serve loop 结束，而 serve loop 只在内核释放这条 FUSE 连接时才结束——
+  挂载被别的命名空间（或活着的 worker 沙箱）持有时它**永远不返回**。实测（2026-09-22 本机 e2e）：退出请求与
+  整个 reaper 一起卡在 `WaitGroup.Wait` 上。超时后升级为 `browserworkspace.ForceUnmount`
+  （`fusermount3 -u -z` 惰性摘除 → abort 这条 FUSE 连接 → 再 `-u -z`），被放弃的那次 `Unmount` 的 goroutine
+  在连接被 abort 释放后自己返回。
+  触发场景是实测到的：挂载被**另一个挂载命名空间**（本机是某个 snap 的私有 ns，`shared` 传播把挂载复制了进去）
+  持有，普通 `umount` 永远 EBUSY，reaper 每 5 秒重试同一次必然失败的调用（本机 2026-09-22 连续刷了一小时）。
+  保证的是**我方挂载表条目消失、挂载点可复用**；别的命名空间里那份副本由内核管到那个进程退出。
+- **退出（点「退出」）按 M76 的顺序**：排除 → 强制卸载（本挂载 + sshfs）→ **最后**强杀 dsh worker。
+  这是唯一允许"worker 还活着就先卸载"的路径，因此走上面那条强制阶梯（惰性 detach 不需要命名空间先释放）；
+  其余路径（HTTP close、租约过期、停用、Shutdown）继续沿用"先释放 namespace 再卸载"的不变式。
+  退出路径同时给 share 打 `final`：**不再为了收挂载而重启 worker**（`expire` 的 restart 分支对它是死的）。
 - **反向通道的 poll 连接就是浏览器侧本身**：net/http 在该连接断开时取消它的 context（页面刷新/关闭/崩溃、客户端在 close 前主动 abort 长轮询），此时立即断开该挂载，而不是等到 60 秒租约到期。晚到的 poll 不会复活已断开的 capability（客户端本来就把 poll 失败当作断线并调用 close）。
 - **注册工作区之前必须已经在 poll**：宿主上的 FUSE 挂载会传播进正在运行的 worker 命名空间（实测 worker 的 mountinfo 里就有 `fuse.browser-workspace`），因此 worker 自己 `workspace.create(path)` 的 realpath 会 stat 这个挂载点。客户端必须在调用注册之前就开始 poll，否则该 stat 阻塞整个 FUSE 超时，表现为「挂载失败：workspace registration timed out」（2026-09-19 真实 Chromium 验收抓到并修复）。
 - **只有仍可服务的挂载才进入 worker profile**：`MountsFor` 与 `Call` 共用同一条存活规则（未断开且租约内）。profile 会解析每个挂载路径、bubblewrap 会 stat 每个 bind 源，所以一个没有浏览器的挂载会阻塞整个 worker 启动（真机实测：解析该路径耗时等于整个 FUSE 超时后失败，bwrap 也以 `Can't get type of source ...` 失败），表现为另一个挂载的 close 报

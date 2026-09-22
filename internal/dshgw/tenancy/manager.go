@@ -90,13 +90,33 @@ type Manager struct {
 	// and the mounts to detach when an account goes away. Nil disables the feature, which
 	// is what a deployment that does not configure it gets.
 	SSHWorkspaces     SSHWorkspaceHook
+	HostShares        HostShareHook
 	BrowserWorkspaces BrowserWorkspaceHook
+}
+
+// HostShareHook is the host-share surface the lifecycle needs (M71): the bindings one account's
+// profile carries, and the sandbox paths they need to exist before a worker starts. Nil
+// disables the feature.
+type HostShareHook interface {
+	// ContainerFor is the gateway-managed container inside one account's workspace.
+	ContainerFor(workspace string) string
+	// SharesFor lists the bindings one account's sandbox must carry.
+	SharesFor(tenant, workspace string) []sandbox.HostShare
+	// Ensure creates the container, every target and the account's mirror of the list.
+	Ensure(tenant, workspace, dshHome string) error
 }
 
 // BrowserWorkspaceHook supplies explicit binds and lifecycle cleanup for browser mounts.
 type BrowserWorkspaceHook interface {
 	MountsFor(string) []string
 	DropTenant(context.Context, string) error
+	// DetachTenant is the logout half (M76): this account's mounts are excluded from every
+	// worker profile and forced out of the mount table, and no worker is started or stopped for
+	// them — the logout path stops the tenant's dsh LAST.
+	DetachTenant(context.Context, string) error
+	// AttachedMounts lists what is still attached right now, so a teardown can report what it
+	// took and what it could not.
+	AttachedMounts(string) []string
 }
 
 // SSHWorkspaceHook is the ssh-workspace surface the tenancy lifecycle depends on. It is an
@@ -109,7 +129,33 @@ type SSHWorkspaceHook interface {
 	EnsureIdentity(tenant, workspace, dshHome string) error
 	// DropTenant detaches every mount the account owns.
 	DropTenant(ctx context.Context, tenant string) error
+	// DetachTenant is the logout half (M76): the account's mounts are detached while its records,
+	// its mirror and its mount points stay, so the next sign-in can put them back.
+	DetachTenant(ctx context.Context, tenant string) error
+	// AttachedMounts lists what is still attached right now.
+	AttachedMounts(tenant string) []string
+	// Restore re-mounts the account's recorded mounts that are not attached. Login calls it
+	// BEFORE the worker starts, because a worker's profile binds the mount points that exist
+	// when it starts.
+	Restore(ctx context.Context, tenant, workspace, dshHome string) error
 }
+
+// LogoutResult is what one tenant's logout teardown did (M76). The proxy audits it, so it says
+// what an operator would ask afterwards: how many mounts went away, which ones did not, and
+// whether the dsh itself is really gone.
+type LogoutResult struct {
+	MountsDetached int
+	MountsLeftover []string
+	WorkerStopped  bool
+}
+
+// The teardown budgets of a logout. The mounts go first and the worker LAST (M76), so each
+// phase gets its own bound: a remote or a wedged FUSE must not eat the time the worker stop
+// needs, and the whole sequence stays well inside the proxy's response budget.
+const (
+	logoutMountBudget = 15 * time.Second
+	logoutStopBudget  = 30 * time.Second
+)
 
 // log returns the manager's logger, falling back to the default one. Manager is constructed by
 // several entry points — serve, each CLI command, tests — and not all of them set Logger, so
@@ -127,6 +173,16 @@ func (m *Manager) ensureSSHIdentity(t registry.Tenant) error {
 		return nil
 	}
 	return m.SSHWorkspaces.EnsureIdentity(t.Name, t.Workspace, t.DshHome)
+}
+
+// ensureHostShares materializes one account's host-share container and targets. It must run
+// before the profile is rendered: the profile binds those paths, and --bind-try silently skips
+// a target that does not exist yet.
+func (m *Manager) ensureHostShares(t registry.Tenant) error {
+	if m.HostShares == nil {
+		return nil
+	}
+	return m.HostShares.Ensure(t.Name, t.Workspace, t.DshHome)
 }
 
 // workers returns the worker runner, creating it on first use. Tests inject their
@@ -313,6 +369,11 @@ func (m *Manager) createLocked(ctx context.Context, name, key string, models []a
 	// asks for one. A missing or too-broad key source is a configuration error and fails the
 	// create: a half-provisioned account is what produces "the button does nothing" later.
 	if err = m.ensureSSHIdentity(created); err != nil {
+		return created, err
+	}
+	// The account's host-share container and targets (M71), for the same reason: the first
+	// worker start must find them, and the profile binds what is in the configuration.
+	if err = m.ensureHostShares(created); err != nil {
 		return created, err
 	}
 	for _, seed := range m.Config.WorkspaceSeed {
@@ -538,6 +599,100 @@ func (m *Manager) StartWorker(ctx context.Context, t registry.Tenant) error {
 	return nil
 }
 
+// EnsureRunning brings a tenant's worker up when it is not running, and reports whether it
+// started one (M69).
+//
+// Login is the caller: a tenant whose last session signed out has its dsh stopped, so the next
+// sign-in has to bring it back before the browser is redirected to it — otherwise the person
+// lands on a 502 that heals only if somebody else starts the tenant. A worker that is already
+// running is left alone: restarting it would kill whatever turn the tenant is in the middle of,
+// and dsh hot-reloads settings.yaml, which is the only thing a login refresh changes.
+//
+// The operator's suspension is honoured rather than cleared: `suspended` says the deployment
+// turned this tenant off, and a user signing in is not an operator action.
+func (m *Manager) EnsureRunning(ctx context.Context, t registry.Tenant) (bool, error) {
+	current, ok := m.Registry.Get(t.Name)
+	if !ok {
+		return false, fmt.Errorf("tenant %q not found", t.Name)
+	}
+	if current.Suspended {
+		return false, fmt.Errorf("tenant %s is suspended by the operator; not starting its worker", t.Name)
+	}
+	state, err := m.Status(ctx, current)
+	if err != nil {
+		return false, err
+	}
+	if state.Running {
+		return false, nil
+	}
+	if err := m.startWorker(ctx, current); err != nil {
+		return false, err
+	}
+	if err := m.ProbeWorker(ctx, current); err != nil {
+		return true, fmt.Errorf("worker readiness probe: %w (worker output: %s)", err, m.workers().Output(current.Name))
+	}
+	return true, nil
+}
+
+// StopForLogout stops a tenant's dsh because its last session signed out (M69, sequenced by M76).
+//
+// The order is the point of M76, and it is what the person clicking 退出 asked for: exclude and
+// FORCE-DETACH the account's mounts (browser directory mounts and ssh workspaces), and only THEN
+// force-stop its dsh. Detaching first is what makes a dsh parked in a FUSE request die quickly
+// instead of burning its whole stop timeout, and it is safe because the forced ladder (lazy
+// detach, then aborting the connection) does not need the worker's namespace to be gone.
+//
+// It deliberately does NOT record an operator suspension, and it no longer short-circuits: every
+// phase runs, failures are aggregated, and the result says what was left behind. Before M76 a
+// failed worker stop returned early and left every mount mounted (2026-09-22: three logouts in a
+// row audited as failures while the dsh itself had already exited).
+func (m *Manager) StopForLogout(ctx context.Context, t registry.Tenant) (LogoutResult, error) {
+	current := t
+	if live, ok := m.Registry.Get(t.Name); ok {
+		current = live
+	}
+	var result LogoutResult
+	var errs []error
+	// detach runs one mount service's forced detach and folds its outcome into the result: what
+	// was attached before, what is attached after, and what could not be taken.
+	detach := func(label string, attached func() []string, run func(context.Context) error) {
+		before := attached()
+		detachCtx, cancel := context.WithTimeout(ctx, logoutMountBudget)
+		err := run(detachCtx)
+		cancel()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", label, err))
+		}
+		leftover := attached()
+		result.MountsLeftover = append(result.MountsLeftover, leftover...)
+		if gone := len(before) - len(leftover); gone > 0 {
+			result.MountsDetached += gone
+		}
+	}
+	if m.BrowserWorkspaces != nil {
+		detach("browser mounts",
+			func() []string { return m.BrowserWorkspaces.AttachedMounts(current.Name) },
+			func(ctx context.Context) error { return m.BrowserWorkspaces.DetachTenant(ctx, current.Name) })
+	}
+	if m.SSHWorkspaces != nil {
+		detach("ssh workspaces",
+			func() []string { return m.SSHWorkspaces.AttachedMounts(current.Name) },
+			func(ctx context.Context) error { return m.SSHWorkspaces.DetachTenant(ctx, current.Name) })
+	}
+	// LAST: the dsh itself. The runner signals TERM, escalates to SIGKILL and reaps the worker's
+	// scope, so this is the force-exit the person asked for, and it is verified rather than
+	// assumed.
+	stopCtx, cancel := context.WithTimeout(ctx, logoutStopBudget)
+	err := m.workers().Stop(stopCtx, current)
+	cancel()
+	if err != nil {
+		errs = append(errs, fmt.Errorf("stopping %s: %w", current.Name, err))
+	} else if state, statusErr := m.Status(ctx, current); statusErr == nil && !state.Running {
+		result.WorkerStopped = true
+	}
+	return result, errors.Join(errs...)
+}
+
 // Enable is the console's durable on/off toggle for one tenant's DSH.
 func (m *Manager) Enable(ctx context.Context, t registry.Tenant, on bool) error {
 	if !on {
@@ -571,6 +726,10 @@ func (m *Manager) startWorker(ctx context.Context, t registry.Tenant) error {
 	if err := m.ensureSSHIdentity(t); err != nil {
 		return err
 	}
+	// The host-share paths exist before the profile that binds them is rendered.
+	if err := m.ensureHostShares(t); err != nil {
+		return err
+	}
 	// The profile's ssh row follows the feature switch on every start, so enabling or
 	// disabling it reaches accounts that already exist (the artifacts are otherwise written
 	// only at create/rotate time).
@@ -590,6 +749,15 @@ func (m *Manager) startWorker(ctx context.Context, t registry.Tenant) error {
 		return err
 	} else if warning != "" {
 		m.log().Warn(warning)
+	}
+	// The tenant-side web plugins (M75): same rule again, for three rows at once. An enabled but
+	// undeployed plugin warns and loses its row instead of stopping the account.
+	if warnings, err := EnsureTenantPlugins(m.Config, t); err != nil {
+		return err
+	} else {
+		for _, warning := range warnings {
+			m.log().Warn(warning)
+		}
 	}
 	if err := m.refreshModelsBeforeStart(ctx, t); err != nil {
 		return err

@@ -171,18 +171,26 @@ type SSHWorkspaces struct {
 	// SSHBin and SSHFSBin default to PATH lookups.
 	SSHBin   string `yaml:"ssh_bin" json:"ssh_bin"`
 	SSHFSBin string `yaml:"sshfs_bin" json:"sshfs_bin"`
-	// IdentitySource is the private key copied into every account that has no key of its own.
-	// It must be a regular 0600 file.
-	IdentitySource string `yaml:"identity_source" json:"identity_source"`
-	// IdentityDir holds per-account keys (<dir>/<account>) and wins over IdentitySource.
+	// IdentityDir holds per-account keys (<dir>/<account>), copied into an account that has no
+	// key of its own yet.
 	//
 	// The key IS the boundary of what an account may reach: an account can read its own key,
-	// so one shared key makes every account able to reach everything that key can. Accounts
-	// are scoped differently only by holding different keys.
+	// so one shared key makes every account able to reach everything that key can. There is
+	// therefore no shared source any more (see rejectRemovedIdentitySource): a deployment that
+	// pointed one at the operator's own ~/.ssh/id_rsa handed every tenant the operator's
+	// personal key, which is also the key that opens the gateway host itself. Accounts are
+	// scoped differently only by holding different keys, and a directory inside the deployment
+	// account's own ~/.ssh is refused below.
 	IdentityDir string `yaml:"identity_dir" json:"identity_dir"`
-	// SSHConfigSource is copied to <workspace>/.ssh/config for accounts that have none: the
-	// alias list both the tenant plugin (browsing) and the gateway (mounting) resolve with.
-	SSHConfigSource string `yaml:"ssh_config_source" json:"ssh_config_source"`
+	// SSHConfigDir holds one alias list per account (<dir>/<account>), copied to
+	// <workspace>/.ssh/config for accounts that have none.
+	//
+	// There is deliberately no host-wide source: one shared file would hand every tenant the
+	// same host inventory (the deployment account's own ~/.ssh/config names every machine the
+	// operator knows) and make one edit decide for every tenant at once. Each account's list
+	// belongs to that account — the tenant plugin adds and removes entries in it — and a
+	// directory inside the deployment account's own ~/.ssh is refused below.
+	SSHConfigDir string `yaml:"ssh_config_dir" json:"ssh_config_dir"`
 	// Hosts is an optional allow-list for both halves. It is a guard rail, not a boundary:
 	// the key an account holds is what really decides where it may go.
 	Hosts []string `yaml:"hosts" json:"hosts"`
@@ -196,6 +204,52 @@ type SSHWorkspaces struct {
 	SSHFSOptions []string `yaml:"sshfs_options" json:"sshfs_options"`
 	// DisableAutoRemount keeps the gateway from re-mounting recorded mounts at startup.
 	DisableAutoRemount bool `yaml:"disable_auto_remount" json:"disable_auto_remount"`
+}
+
+// HostShares are operator-declared host directories bound straight into a tenant's workspace
+// (M71). No ssh, no sshfs, no FUSE: the worker's bubblewrap profile binds the directory at
+// <workspace>/<subdir>/<name>, so it behaves inside the sandbox like any other directory —
+// local reads, working inotify, and none of the uninterruptible-wait failures a FUSE mount can
+// produce (measured 2026-09-21: an sshfs mount of a directory that contains its own mount point
+// hung every session of an account in a D state no signal could break).
+//
+// Why this exists next to ssh_workspaces: an sshfs mount is the right tool for another machine
+// and the wrong one for this host. A host directory needs no network round trip, and the local
+// case is exactly where sshfs is most dangerous — the workspace lives on that same host, so a
+// mount of any ancestor of it contains itself.
+//
+// Operator-only by construction: there is no mailbox request for a share, because a host
+// directory is not the tenant's to choose. Each share names the tenants that may see it, and is
+// read-only unless the deployment says otherwise.
+type HostShares struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Subdir is the single path segment under each tenant workspace that holds the binds. It
+	// must be visible (a hidden container would be invisible in the account's picker), must not
+	// collide with a workspace seed, and must differ from ssh_workspaces.mount_subdir.
+	Subdir string `yaml:"subdir" json:"subdir"`
+	// Shares is the declared list. Order is display order; names are unique.
+	Shares []HostShare `yaml:"shares" json:"shares"`
+}
+
+// HostShare is one declared host directory.
+type HostShare struct {
+	// Name is the path segment the tenant sees: <workspace>/<subdir>/<name>.
+	Name string `yaml:"name" json:"name"`
+	// Path is the host directory. It is resolved through symlinks at load time, and it must be
+	// disjoint from the state directory: a share that contains it would hand every tenant's
+	// workspace, DSH home, key and session file to whoever sees the share.
+	Path string `yaml:"path" json:"path"`
+	// ReadOnly writes nothing back to the host. It is the default (a write grant is an explicit
+	// `read_only: false`) because this is the host's own file system, not a scratch space.
+	ReadOnly *bool `yaml:"read_only" json:"read_only"`
+	// Tenants lists the accounts that may see the share. It must be non-empty when the feature
+	// is enabled: "everyone" is not a safe default for a host directory.
+	Tenants []string `yaml:"tenants" json:"tenants"`
+}
+
+// EffectiveReadOnly reports whether the share is read-only, defaulting to true.
+func (s HostShare) EffectiveReadOnly() bool {
+	return s.ReadOnly == nil || *s.ReadOnly
 }
 
 // Config is deliberately independent of aigw's internal configuration types.
@@ -288,8 +342,10 @@ type Config struct {
 	TLS               TLSConfig         `yaml:"tls" json:"tls"`
 	Deploy            DeployConfig      `yaml:"deploy" json:"deploy"`
 	SSHWorkspaces     SSHWorkspaces     `yaml:"ssh_workspaces" json:"ssh_workspaces"`
+	HostShares        HostShares        `yaml:"host_shares" json:"host_shares"`
 	BrowserWorkspaces BrowserWorkspaces `yaml:"browser_workspaces" json:"browser_workspaces"`
 	AccountCard       AccountCard       `yaml:"account_card" json:"account_card"`
+	TenantPlugins     TenantPlugins     `yaml:"tenant_plugins" json:"tenant_plugins"`
 	TenantRoot        string            `yaml:"tenant_root" json:"tenant_root"`
 	WorkspaceRoot     string            `yaml:"workspace_root" json:"workspace_root"`
 	HandshakeDir      string            `yaml:"handshake_dir" json:"handshake_dir"`
@@ -320,6 +376,41 @@ type BrowserWorkspaces struct {
 type AccountCard struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
 }
+
+// TenantPlugins are the tenant-side web plugins every account's dsh is given by default (M75):
+// the interactive terminal, the workspace file manager, and the read-only git change review.
+//
+// Why these are gateway features with switches rather than something each tenant adds for itself:
+// the rows go into the profile the gateway owns, the plugin directories ship beside
+// deploy.plugin_path, and one installed copy serves every account — so which panels a tenant sees,
+// and where their per-tenant state is written, is the gateway's decision, not the tenant's.
+//
+// All three are ON by default: "installed and running out of the box" is the whole point. Turning
+// one off removes its row from every tenant's profile (and from the next start of every worker);
+// the plugin files stay where they are.
+type TenantPlugins struct {
+	WebTTY         PluginSwitch `yaml:"web_tty" json:"web_tty"`
+	WorkspaceFiles PluginSwitch `yaml:"workspace_files" json:"workspace_files"`
+	GitDiff        PluginSwitch `yaml:"git_diff" json:"git_diff"`
+	// RootLabel is the label the two workspace-scoped panels show for their clamp root. Empty
+	// means the default, 工作区 — the workspace directory is named after the account, which is
+	// not what the panel should call itself.
+	RootLabel string `yaml:"root_label" json:"root_label"`
+}
+
+// PluginSwitch is one tenant-side plugin's enabled flag.
+type PluginSwitch struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+}
+
+// AnyEnabled reports whether at least one tenant-side plugin is rendered.
+func (p TenantPlugins) AnyEnabled() bool {
+	return p.WebTTY.Enabled || p.WorkspaceFiles.Enabled || p.GitDiff.Enabled
+}
+
+// DefaultPluginRootLabel is what the workspace-scoped panels call their root when the operator
+// says nothing.
+const DefaultPluginRootLabel = "工作区"
 
 func defaults() Config {
 	return Config{
@@ -354,8 +445,22 @@ func defaults() Config {
 			MaxEntries:     1000,
 			// ServerAlive* keeps a dropped link from looking like a healthy mount; idmap=user
 			// maps the remote account onto this one, which is what the tenant expects to see
-			// for the files it creates.
-			SSHFSOptions: []string{"reconnect", "ServerAliveInterval=15", "ServerAliveCountMax=3", "idmap=user"},
+			// for the files it creates. max_conns is not sshfs' default of 1: one mount serves
+			// every session of an account, and a single sftp channel makes them queue behind
+			// each other's slowest reader.
+			SSHFSOptions: []string{"reconnect", "ServerAliveInterval=15", "ServerAliveCountMax=3", "idmap=user", "max_conns=4"},
+		},
+		// Off, and with a container name that does not collide with the ssh one. A share is a
+		// grant over the host's own file system, so it is declared, never inferred.
+		HostShares: HostShares{Subdir: "host"},
+		// On by default (M75): a tenant's dsh gets the terminal, the workspace file manager and
+		// the git change review without anybody editing that tenant's profile by hand. The
+		// plugin directories sit beside deploy.plugin_path, which the sandbox already binds.
+		TenantPlugins: TenantPlugins{
+			WebTTY:         PluginSwitch{Enabled: true},
+			WorkspaceFiles: PluginSwitch{Enabled: true},
+			GitDiff:        PluginSwitch{Enabled: true},
+			RootLabel:      DefaultPluginRootLabel,
 		},
 		Dsh: DshRuntime{
 			// Empty means "ask the environment": DSHGW_NODE / DSHGW_DSH_ROOT, the same
@@ -398,6 +503,15 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg := defaults()
+	// A removed key must be reported as a rename, not as "field not found" from the strict
+	// decoder below: what it named (the deployment account's own ~/.ssh/config) is exactly
+	// what this version forbids, so the error has to say what replaces it.
+	if err := rejectRemovedSSHConfigSource(data); err != nil {
+		return nil, fmt.Errorf("dshgw config %s: %w", path, err)
+	}
+	if err := rejectRemovedIdentitySource(data); err != nil {
+		return nil, fmt.Errorf("dshgw config %s: %w", path, err)
+	}
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil {
@@ -421,6 +535,51 @@ func Load(path string) (*Config, error) {
 
 // osOpen is split out only to keep the strict decoder easy to unit-test through Load.
 var openConfig = func(path string) (file, error) { return openOSFile(path) }
+
+// rejectRemovedSSHConfigSource reports the one key this feature removed.
+//
+// ssh_config_source was a single file copied into every account, and the deployment pointed
+// it at the operator's own ~/.ssh/config — which gave every tenant the operator's whole host
+// inventory. There is no host-wide source any more: ssh_config_dir holds one file per
+// account. Malformed YAML is left to the strict decoder, which reports it better.
+func rejectRemovedSSHConfigSource(data []byte) error {
+	var legacy struct {
+		SSHWorkspaces struct {
+			SSHConfigSource string `yaml:"ssh_config_source"`
+		} `yaml:"ssh_workspaces"`
+	}
+	if err := yaml.Unmarshal(data, &legacy); err != nil {
+		return nil
+	}
+	if strings.TrimSpace(legacy.SSHWorkspaces.SSHConfigSource) == "" {
+		return nil
+	}
+	return errors.New("ssh_workspaces.ssh_config_source was removed: one host-wide file handed every account the same alias list, and the deployment account's ~/.ssh is never a tenant source. Use ssh_workspaces.ssh_config_dir with one file per account (<dir>/<account>) instead")
+}
+
+// rejectRemovedIdentitySource reports the other key this feature removed.
+//
+// identity_source was one private key copied into every account that had none. In this
+// deployment it was pointed at the deployment account's own ~/.ssh/id_rsa, so every tenant
+// held a byte-identical copy of the operator's personal key — a key that is authorised on the
+// gateway host itself, which made "a tenant can read its own key" a way out of the tenant
+// sandbox and into the deployment account. Nothing replaces "one key for everyone": the source
+// of a tenant identity is either the account's own upload or identity_dir/<account>, one key
+// per account. Malformed YAML is left to the strict decoder, which reports it better.
+func rejectRemovedIdentitySource(data []byte) error {
+	var legacy struct {
+		SSHWorkspaces struct {
+			IdentitySource string `yaml:"identity_source"`
+		} `yaml:"ssh_workspaces"`
+	}
+	if err := yaml.Unmarshal(data, &legacy); err != nil {
+		return nil
+	}
+	if strings.TrimSpace(legacy.SSHWorkspaces.IdentitySource) == "" {
+		return nil
+	}
+	return errors.New("ssh_workspaces.identity_source was removed: one shared key made every account reach everything that key could reach, and a deployment that pointed it at the operator's own ~/.ssh/id_rsa gave every tenant the operator's personal key. Use ssh_workspaces.identity_dir with one key per account (<dir>/<account>), or leave both empty and let each account upload its own identity")
+}
 
 type file interface {
 	Read([]byte) (int, error)
@@ -544,9 +703,8 @@ func (c *Config) resolvePaths() error {
 		{"deploy.bwrap_bin", &c.Deploy.BwrapBin},
 		{"ssh_workspaces.ssh_bin", &c.SSHWorkspaces.SSHBin},
 		{"ssh_workspaces.sshfs_bin", &c.SSHWorkspaces.SSHFSBin},
-		{"ssh_workspaces.identity_source", &c.SSHWorkspaces.IdentitySource},
 		{"ssh_workspaces.identity_dir", &c.SSHWorkspaces.IdentityDir},
-		{"ssh_workspaces.ssh_config_source", &c.SSHWorkspaces.SSHConfigSource},
+		{"ssh_workspaces.ssh_config_dir", &c.SSHWorkspaces.SSHConfigDir},
 	}
 	for _, item := range targets {
 		if *item.target == "" || filepath.IsAbs(*item.target) {
@@ -712,11 +870,21 @@ func (c *Config) Validate() error {
 	if err := c.validateSSHWorkspaces(); err != nil {
 		return err
 	}
+	if err := c.validateHostShares(); err != nil {
+		return err
+	}
 	if c.AccountCard.Enabled && strings.TrimSpace(c.Deploy.PluginPath) == "" {
 		// The row is a client plugin shipped beside the picker (deploy.plugin_path names the
 		// plugin directory's sibling), so without it the switch would turn on two routes and
 		// no visible row — a silent half-configuration.
 		return errors.New("account_card.enabled requires deploy.plugin_path")
+	}
+	if c.TenantPlugins.AnyEnabled() && strings.TrimSpace(c.Deploy.PluginPath) == "" {
+		// Same reason: the plugin directories are deployed beside deploy.plugin_path, and the
+		// rows name files inside them. Whether those files are actually there is the doctor's
+		// check (cmd/dshgw/ops.go) and the create-time preflight in the tenancy layer, not a
+		// load-time filesystem test.
+		return errors.New("tenant_plugins requires deploy.plugin_path (the plugin directories ship beside it)")
 	}
 	switch c.SettingsUI {
 	case "", "lan", "loopback":
@@ -879,18 +1047,6 @@ func (c *Config) validateSSHWorkspaces() error {
 		return errors.New("ssh_workspaces.max_entries must be between 1 and 100000")
 	}
 	// Key sources are optional: accounts may upload their own identities in the UI.
-	if ssh.IdentitySource != "" {
-		info, err := os.Stat(ssh.IdentitySource)
-		if err != nil {
-			return fmt.Errorf("ssh_workspaces.identity_source: %w", err)
-		}
-		if !info.Mode().IsRegular() {
-			return errors.New("ssh_workspaces.identity_source must be a regular file")
-		}
-		if info.Mode().Perm()&^0o600 != 0 {
-			return fmt.Errorf("ssh_workspaces.identity_source mode %04o is broader than 0600", info.Mode().Perm())
-		}
-	}
 	if ssh.IdentityDir != "" {
 		info, err := os.Stat(ssh.IdentityDir)
 		if err != nil {
@@ -899,14 +1055,23 @@ func (c *Config) validateSSHWorkspaces() error {
 		if !info.IsDir() {
 			return errors.New("ssh_workspaces.identity_dir must be a directory holding one key per account")
 		}
-	}
-	if ssh.SSHConfigSource != "" {
-		info, err := os.Stat(ssh.SSHConfigSource)
-		if err != nil {
-			return fmt.Errorf("ssh_workspaces.ssh_config_source: %w", err)
+		if err := checkOutsideDeploymentSSH("ssh_workspaces.identity_dir", ssh.IdentityDir); err != nil {
+			return err
 		}
-		if !info.Mode().IsRegular() {
-			return errors.New("ssh_workspaces.ssh_config_source must be a regular file")
+	}
+	if ssh.SSHConfigDir != "" {
+		info, err := os.Stat(ssh.SSHConfigDir)
+		if err != nil {
+			return fmt.Errorf("ssh_workspaces.ssh_config_dir: %w", err)
+		}
+		if !info.IsDir() {
+			return errors.New("ssh_workspaces.ssh_config_dir must be a directory holding one alias list per account")
+		}
+		if info.Mode().Perm()&0o002 != 0 {
+			return fmt.Errorf("ssh_workspaces.ssh_config_dir mode %04o is world writable", info.Mode().Perm())
+		}
+		if err := checkOutsideDeploymentSSH("ssh_workspaces.ssh_config_dir", ssh.SSHConfigDir); err != nil {
+			return err
 		}
 	}
 	for label, bin := range map[string]string{"ssh_bin": ssh.SSHBin, "sshfs_bin": ssh.SSHFSBin} {
@@ -925,6 +1090,140 @@ func (c *Config) validateSSHWorkspaces() error {
 		if !sshHostSpecRE.MatchString(strings.TrimSpace(host)) {
 			return fmt.Errorf("ssh_workspaces.hosts entry %q is not an ssh alias or user@host", host)
 		}
+	}
+	return nil
+}
+
+// hostShareNameRE is the one shape a share name may take: a visible single path segment. A
+// hidden one would be invisible in the account's own picker, and a name with a separator would
+// escape the container.
+var hostShareNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// validateHostShares checks the operator-declared host directories (M71).
+//
+// Two rules carry the weight here. The container must not collide with the ssh one, because
+// both live directly under the tenant workspace and the account's picker treats every level as a
+// directory. And a share must be disjoint from the state directory: that directory holds every
+// tenant's workspace, DSH home, ssh key and session record, so a share that contains it (or sits
+// inside it) would hand one tenant another tenant's data through a bind the sandbox is meant to
+// make private. Everything else — which host directory, read-only or not, which accounts — is
+// the operator's decision, stated explicitly.
+func (c *Config) validateHostShares() error {
+	shares := &c.HostShares
+	if !sshMountSubdirRE.MatchString(shares.Subdir) {
+		return fmt.Errorf("host_shares.subdir %q must be one visible path segment", shares.Subdir)
+	}
+	for _, seed := range c.WorkspaceSeed {
+		if seed == shares.Subdir {
+			return fmt.Errorf("host_shares.subdir %q collides with a workspace_seed name", shares.Subdir)
+		}
+	}
+	if shares.Subdir == c.SSHWorkspaces.MountSubdir {
+		return fmt.Errorf("host_shares.subdir %q collides with ssh_workspaces.mount_subdir", shares.Subdir)
+	}
+	if !shares.Enabled {
+		if len(shares.Shares) > 0 {
+			return errors.New("host_shares.shares is set but host_shares.enabled is not")
+		}
+		return nil
+	}
+	if len(shares.Shares) == 0 {
+		return errors.New("host_shares.enabled requires at least one entry in host_shares.shares")
+	}
+	stateDir, err := filepath.Abs(c.StateDir)
+	if err != nil {
+		return fmt.Errorf("host_shares: resolving state_dir: %w", err)
+	}
+	seen := map[string]bool{}
+	for _, share := range shares.Shares {
+		label := "host_shares.shares[" + share.Name + "]"
+		if !hostShareNameRE.MatchString(share.Name) {
+			return fmt.Errorf("%s: name %q must be one visible path segment", label, share.Name)
+		}
+		if seen[share.Name] {
+			return fmt.Errorf("%s: duplicate share name %q", label, share.Name)
+		}
+		seen[share.Name] = true
+		if len(share.Tenants) == 0 {
+			return fmt.Errorf("%s: tenants must name the accounts that may see it (an empty list is not \"everyone\")", label)
+		}
+		for _, tenant := range share.Tenants {
+			if !ValidTenantName(tenant) {
+				return fmt.Errorf("%s: tenants entry %q is not an account name", label, tenant)
+			}
+		}
+		if strings.TrimSpace(share.Path) == "" || !filepath.IsAbs(share.Path) {
+			return fmt.Errorf("%s: path must be an absolute host directory", label)
+		}
+		// Symlinks are resolved, so the two checks below cannot be walked around with one.
+		resolved, err := filepath.EvalSymlinks(share.Path)
+		if err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		info, err := os.Stat(resolved)
+		if err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s: %s is not a directory", label, resolved)
+		}
+		if resolved == string(filepath.Separator) {
+			return fmt.Errorf("%s: refusing to share the file system root", label)
+		}
+		if withinPath(resolved, stateDir) || withinPath(stateDir, resolved) {
+			return fmt.Errorf("%s: %s overlaps the state directory %s, which holds every account's workspace, DSH home and keys", label, resolved, stateDir)
+		}
+	}
+	return nil
+}
+
+// withinPath reports whether child is root or sits inside it. Both paths are compared as given:
+// callers resolve symlinks first, because a share that reaches the state directory through one
+// is the same exposure.
+func withinPath(root, child string) bool {
+	root = filepath.Clean(root)
+	child = filepath.Clean(child)
+	if root == child {
+		return true
+	}
+	rel, err := filepath.Rel(root, child)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// checkOutsideDeploymentSSH refuses a tenant source inside the deployment account's own ~/.ssh.
+//
+// Both keys it guards decide what every tenant gets from the operator: ssh_config_dir decides
+// each account's alias list, identity_dir decides its key. Pointing either at the operator's
+// personal ssh directory would hand every account the operator's own configuration or key
+// material — the coupling these keys exist to remove, and the exact shape of the incident that
+// removed identity_source. A directory that merely looks like it lives elsewhere does not
+// qualify: symlinks are resolved before the comparison. Per-account files need no separate
+// check here: they are read through securefile, which refuses a leaf or ancestor symlink
+// outright.
+func checkOutsideDeploymentSSH(label, dir string) error {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		// Nothing to compare against. The remaining checks still apply.
+		return nil
+	}
+	resolvedHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		resolvedHome = home
+	}
+	resolvedDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return fmt.Errorf("%s: %w", label, err)
+	}
+	sshDir := filepath.Join(resolvedHome, ".ssh")
+	rel, err := filepath.Rel(sshDir, resolvedDir)
+	if err != nil {
+		return nil
+	}
+	if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+		return fmt.Errorf("%s %s is inside the deployment account's own %s; the operator's ssh directory is never a tenant source", label, dir, sshDir)
 	}
 	return nil
 }

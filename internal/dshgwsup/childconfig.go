@@ -76,12 +76,14 @@ type SSHWorkspaces struct {
 	MountSubdir string `yaml:"mount_subdir,omitempty"`
 	SSHBin      string `yaml:"ssh_bin,omitempty"`
 	SSHFSBin    string `yaml:"sshfs_bin,omitempty"`
-	// IdentitySource is copied into every account that has no key of its own; IdentityDir
-	// holds per-account keys and wins over it.
-	IdentitySource  string   `yaml:"identity_source,omitempty"`
-	IdentityDir     string   `yaml:"identity_dir,omitempty"`
-	SSHConfigSource string   `yaml:"ssh_config_source,omitempty"`
-	Hosts           []string `yaml:"hosts,omitempty"`
+	// IdentityDir holds one key per account (<dir>/<account>). There is no shared key source:
+	// one key for every account scopes them all the same, and this deployment ran with that key
+	// pointed at the operator's own identity. SSHConfigDir holds one alias list per account
+	// (<dir>/<account>): no host-wide source either, so no tenant inherits another's hosts and
+	// none inherits the deployment account's own ~/.ssh/config.
+	IdentityDir  string   `yaml:"identity_dir,omitempty"`
+	SSHConfigDir string   `yaml:"ssh_config_dir,omitempty"`
+	Hosts        []string `yaml:"hosts,omitempty"`
 	// Durations are Go duration strings ("10s"); the child parses and bounds them.
 	ConnectTimeout     string   `yaml:"connect_timeout,omitempty"`
 	PollInterval       string   `yaml:"poll_interval,omitempty"`
@@ -143,6 +145,10 @@ type ChildConfig struct {
 	// AccountCard is the tenant sidebar's identity row (M67): who is signed in, and 退出. Nil
 	// means off, and the child then serves neither the row nor the two routes behind it.
 	AccountCard *AccountCard `yaml:"account_card,omitempty"`
+	// TenantPlugins carries the tenant-side web plugin switches (M75) into the child. Unlike the
+	// blocks above it is written even when every switch is off: the child's own defaults for these
+	// plugins are ON, so silence from this side would turn an operator's "off" back on.
+	TenantPlugins *TenantPlugins `yaml:"tenant_plugins,omitempty"`
 	// Feishu is the identity handoff the child needs to accept a Feishu sign-in (M61): where
 	// to send a person, and the key that proves the ticket aigw signs is genuine. It is
 	// omitted entirely while the feature is off, so a deployment that does not use Feishu
@@ -160,6 +166,22 @@ type BrowserWorkspaces struct {
 // on purpose: the row reads dshgw's own routes under the tenant's origin, so the child needs
 // no path, no key and no name from this side.
 type AccountCard struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// TenantPlugins carries the tenant-side web plugin switches into the child (M75): the terminal,
+// the workspace file manager and the git change review. Each is a plain switch — the plugin files
+// are found beside the child's own deploy.plugin_path, and their per-tenant state paths are
+// derived from each account's DSH home.
+type TenantPlugins struct {
+	WebTTY         PluginSwitch `yaml:"web_tty"`
+	WorkspaceFiles PluginSwitch `yaml:"workspace_files"`
+	GitDiff        PluginSwitch `yaml:"git_diff"`
+	RootLabel      string       `yaml:"root_label,omitempty"`
+}
+
+// PluginSwitch is one tenant-side plugin's enabled flag.
+type PluginSwitch struct {
 	Enabled bool `yaml:"enabled"`
 }
 

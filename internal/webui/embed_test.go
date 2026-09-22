@@ -140,16 +140,22 @@ func TestConsoleSendsCSP(t *testing.T) {
 // TestConsoleRecordingModesMatchTheServer pins the per-key recording select to the values
 // the server accepts. The console used to offer "meta" while the backend only understood
 // "metadata", so the choice was stored as an unknown mode and silently ignored.
+//
+// The select lives in the shared key-actions module since M72 (the organization page creates keys
+// too), so both files are read: the one that defines the modes and the one that uses them.
 func TestConsoleRecordingModesMatchTheServer(t *testing.T) {
 	srv := httptest.NewServer(Handler())
 	defer srv.Close()
-	resp, err := http.Get(srv.URL + "/js/pages/keys.js")
-	if err != nil {
-		t.Fatal(err)
+	source := ""
+	for _, path := range []string{"/js/pages/key_actions.js", "/js/pages/keys.js"} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		source += string(body)
 	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	source := string(body)
 
 	want := append([]string{"inherit"}, config.RecordingInputModes...)
 	for _, mode := range want {

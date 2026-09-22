@@ -162,11 +162,11 @@ POST /admin/api/v1/accounts/{id}/dsh        body {"enabled":true|false}
 ### aigw 侧
 
 - 迁移 0020：`accounts.dsh_tenant`。
-- `POST /admin/api/v1/accounts/{id}/dsh` 启用流程：租户名（请求指定 > 既有映射 > `dsh-<账号 slug>` 自动生成并去重）→ 铸造内部 Key → 不存在则 create / 已存在则 set-key+start → 写 `dsh_tenant`+`dsh_enabled` → 审计（含租户名、不含 Key）→ InvalidateAll。
+- `POST /admin/api/v1/accounts/{id}/dsh` 启用流程：租户名（请求指定 > 既有映射 > 按账号自动生成，M74 起为 `dsh-<账号拼音>-<账号ID>`，见 [M74](m74-tenant-name-from-account.md)）→ 铸造内部 Key → 不存在则 create / 已存在则 set-key+start → 写 `dsh_tenant`+`dsh_enabled` → 审计（含租户名、不含 Key）→ InvalidateAll。
 - 停用流程：`tenant-stop` → 吊销 `dshgw-<tenant>` 前缀的 active Key → `dsh_enabled=0`（保留映射供重启用）→ 审计。
 - 失败一致性：provisioning 失败不改账号标记，可重试；suspended/closed 账号拒绝启用。
 - `GET /v1/dshgw/authorize`：200 带 `tenant`；启用但未指定租户 → 403 `dsh_tenant_unassigned`。
-- UI：启用为模态框（可填租户名，预填 slug），停用为确认框；列表徽标显示租户名。
+- UI：启用为模态框（可填租户名，M74 起预填服务端下发的 `dsh_tenant_suggested`），停用为确认框；列表徽标显示租户名。
 
 ### 新分层
 

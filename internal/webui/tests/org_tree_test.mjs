@@ -13,6 +13,9 @@ import { readFile } from 'node:fs/promises';
 const treeSrc = await readFile(new URL('../static/js/tree.js', import.meta.url), 'utf8');
 const org = await readFile(new URL('../static/js/pages/org.js', import.meta.url), 'utf8');
 const accounts = await readFile(new URL('../static/js/pages/accounts.js', import.meta.url), 'utf8');
+// 账号的创建/编辑（含所属组织的勾选树字段）在本次改动里抽成了共用模块：账户页与组织页都用它。
+const accountActions = await readFile(new URL('../static/js/pages/account_actions.js', import.meta.url), 'utf8');
+const orgAssign = await readFile(new URL('../static/js/pages/org_assign.js', import.meta.url), 'utf8');
 const app = await readFile(new URL('../static/js/app.js', import.meta.url), 'utf8');
 const router = await readFile(new URL('../static/js/router.js', import.meta.url), 'utf8');
 const css = await readFile(new URL('../static/app.css', import.meta.url), 'utf8');
@@ -94,8 +97,11 @@ assert.match(org, /state\.membersLoaded = false;/, 'the save button must be re-a
 // 也钉着的一条），页面通过 matcher 传进来；成员过滤直接用 matchesQuery。
 assert.match(org, /import \{ matchesQuery \} from '\.\.\/pinyin\.js'/, 'the org page must use the pinyin matcher');
 assert.match(org, /matcher: matchesQuery/, 'the node tree filter must match pinyin too');
-assert.match(org, /matchesQuery\(account\.name, search\)/, 'the member filter must match pinyin and English');
-assert.match(org, /type: 'search', placeholder: '按账号名过滤（支持拼音/, 'the member filter must say that pinyin works');
+// M72：过滤同时匹配账号名与飞书姓名（组织页的人员行就是账号行）。
+assert.match(org, /matchesPerson\(account, search\)/, 'the member filter must go through the person matcher');
+assert.match(org, /matchesQuery\(account\.name, search\) \|\| \(feishu \? matchesQuery\(feishu, search\) : false\)/,
+  'the person filter must match the account name and the Feishu name');
+assert.match(org, /type: 'search', placeholder: '按账号名或飞书姓名过滤（支持拼音/, 'the member filter must say that pinyin works');
 assert.match(treeSrc, /matcher,/, 'the control must accept a matcher callback');
 assert.doesNotMatch(treeSrc, /import[^;]*pinyin/, 'the control must not depend on the pinyin table itself');
 
@@ -104,16 +110,26 @@ assert.match(org, /const memberToolbar = el\('div', \{ class: 'org-member-toolba
   'the filter row must be its own element so it can stay put while the list scrolls');
 assert.match(org, /const memberPanel = el\('div', \{ class: 'org-member-panel' \}, \[memberToolbar, list\]\)/,
   'the panel must hold the fixed toolbar and the scrolling list side by side');
-assert.match(css, /\.org-members \{ max-height:280px; overflow:auto; padding:8px; \}/,
-  'only the list scrolls: the border and the toolbar live on the panel');
+// padding 归零是表格化的前提：表头（thead th）是 sticky 到滚动区顶部的，中间留一条内边距
+// 就会漏出行内容从缝里钻过去。
+assert.match(css, /\.org-members \{ max-height:280px; overflow:auto; padding:0; \}/,
+  'only the list scrolls, and it must start flush so a sticky table header has nothing to leak through');
 assert.doesNotMatch(css, /\.org-members \{[^}]*border:1px/,
   'the scrolling element must not be the bordered panel that also holds the filter');
 
 // 选中置顶：排序必须在每次重绘时按"已勾选"分组，且勾选后立即重绘。
 assert.match(org, /Number\(checked\.has\(right\.id\)\) - Number\(checked\.has\(left\.id\)\)/,
   'checked members must sort before unchecked ones');
-assert.match(org, /checked\.add\(account\.id\); else checked\.delete\(account\.id\);\s*\n\s*paint\(\);/,
+// 勾选在人员行里，勾完立刻重绘，所以刚勾的账号会立刻置顶。
+assert.match(org, /if \(entry\.box\.checked\) checked\.add\(account\.id\); else checked\.delete\(account\.id\);/,
+  'the checkbox writes into the checked set');
+assert.match(org, /onToggle: \(\) => paint\(\)/,
   'ticking a member must repaint, so it lands at the top immediately');
+// 重绘复用行对象：展开中的行不会被一次勾选/过滤重绘扔掉，也不会因此重新拉一次 Key 列表。
+assert.match(org, /const entries = new Map\(\);/,
+  'rows must be reused across repaints, or an expanded row would collapse on every tick');
+assert.match(org, /state\.open\.has\(account\.id\)/,
+  'the expansion state must survive a rebuild of the table');
 
 // --- 树的箭头必须是画出来的，不能是文字字形 -----------------------------------------------
 //
@@ -142,13 +158,16 @@ assert.match(treeSrc, /\[kids \? arrowIcon\(expanded\) : leafIcon\(\)\]/, 'the t
 // 成员行与工具栏筛选行都必须显式给出勾选框尺寸，且不能用块级的 `.field` 承载行内勾选框。
 assert.match(css, /\.org-member input\[type=checkbox\] \{ flex:0 0 auto; width:16px/,
   'the member checkbox needs an explicit size: the global input{width:100%} rule stretches it');
-assert.match(css, /\.org-member-name \{ flex:0 1 auto; min-width:0/,
-  'a long account name must wrap instead of pushing the id out of the row');
+assert.match(css, /\.org-member-name \{ display:block; min-width:0; overflow-wrap:anywhere; \}/,
+  'a long account name must wrap instead of pushing the id out of its column');
 assert.match(css, /\.filter-check input\[type=checkbox\] \{ flex:0 0 auto; width:16px/,
   'the toolbar filter checkbox needs the same explicit size');
 assert.doesNotMatch(accounts, /class: 'field inline'/,
   "the toolbar filter must not use the block-level .field layout, which puts the checkbox and its text on separate lines");
 assert.match(org, /class: 'org-member-name'/, 'the member name carries its own class so the layout rule is unambiguous');
+assert.match(org, /class: 'org-member-table'/, 'the person list is a table, so its columns can be aligned');
+assert.match(css, /\.org-member-table thead th \{ position:sticky; top:0;/,
+  'the column labels must stay put while the list scrolls: a header that scrolls away is no header');
 
 // --- the accounts page shows and filters by organization ----------------------------------
 
@@ -162,9 +181,28 @@ assert.match(accounts, /include_descendants/, 'the filter must expose the descen
 assert.match(accounts, /api\.get\('\/accounts', \{ limit, offset, \.\.\.orgQuery\(\) \}\)/,
   'the account list must send the organization filter');
 assert.match(accounts, /function orgQuery\(\)/, 'the filter parameters must come from one place');
-assert.match(accounts, /name: 'org_node_ids'/, 'the account editor must offer the organization nodes');
-assert.match(accounts, /org_node_ids: splitIDs\(values\.org_node_ids\)/,
-  'the editor must send the replacement membership list');
+// 手填「组织节点 id（逗号分隔）」已经换成勾选树：账号可同时属于多个节点这件事，靠人记 id 是记不住的。
+assert.match(accountActions, /name: 'org_node_ids'/, 'the account editor must still carry the field');
+assert.doesNotMatch(accounts, /组织节点 id（逗号分隔）/, 'the raw node-id input must be gone');
+assert.match(accountActions, /openOrgPicker\(\{ title: title \|\| '分配组织', nodeIds: state\.refs\.map\(\(ref\) => ref\.id\) \}\)/,
+  'the field opens the shared checkbox tree');
+assert.match(accountActions, /org_node_ids: values\.org_node_ids \|\| \[\]/,
+  'the editor must send the replacement membership list (always an array: empty means "no organization")');
+assert.match(accountActions, /import \{ createAccount, editAccount \} from|export async function createAccount/,
+  'the shared module owns the account forms');
+// 组织页与账户页共用同一份实现：两处入口的字段与落库路径只写一次。
+assert.match(org, /import \{ createAccount, editAccount \} from '\.\/account_actions\.js'/,
+  'the org page must use the shared account forms');
+assert.match(org, /import \{ openOrgPicker \} from '\.\/org_assign\.js'/,
+  'the org page must use the shared organization picker');
+assert.match(org, /orgRefs: \[\{ id: node\.id, name: node\.name, path: node\.path \|\| node\.name \}\]/,
+  'a member created from a node is pre-assigned to that node');
+assert.match(org, /onSubmit: \(ids\) => api\.patch\('\/accounts\/' \+ account\.id, \{ org_node_ids: ids \}\)/,
+  'assigning from the person row replaces the membership list through the picker');
+assert.match(orgAssign, /await onSubmit\(ids\)/,
+  'the picker lets the caller own the write (a form defers it to its own 保存)');
+assert.match(orgAssign, /api\.get\('\/org\/nodes', \{ limit: 1000 \}\)/,
+  'the picker reads the node list itself, so it cannot show a stale tree');
 
 // --- routing ------------------------------------------------------------------------------
 

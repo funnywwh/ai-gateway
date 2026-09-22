@@ -1,0 +1,1156 @@
+// Browser half of dshgw-workspace-files: a workspace file manager panel inside the dsh web shell.
+//
+// Prebuilt by hand, like every out-of-tree surface in this deployment: the installation ships no
+// bundler and dsh serves a client plugin's ./client file byte for byte. build-client.mjs copies
+// this file into client.js, because this half needs nothing vendored — React comes from the
+// shell's frozen module table and every file operation is one RPC call on the authenticated
+// channel the host half registers.
+//
+// Transport: `ctx.connection.rpc.call` per intent. File bytes cross as bounded base64 chunks
+// (readChunk / writeChunk), so a 30 MiB download is a loop of small authenticated POSTs whose
+// memory high-water mark is one chunk on either side, and progress is observable per chunk.
+
+;(function () {
+  window.__ModuleLoader__.load({
+    id: 'dshgw-workspace-files',
+    factory: (require) => {
+      // The wrapper every shipped bundle uses: the page's loader hands the factory a CommonJS
+      // style `require`, and it must return `module.exports`.
+      var module = { exports: {} }
+      var exports = module.exports
+      const React = require('react')
+      const h = React.createElement
+      const { useCallback, useEffect, useRef, useState } = React
+
+      /** Required services: the slot registry and the authenticated browser RPC carrier. */
+      const inject = ['slots', 'connection']
+
+      const RPC_CHANNEL = '/dshgw-workspace-files'
+      const STORAGE_LAYOUT = 'dshgw-workspace-files:layout'
+      const STORAGE_PREFS = 'dshgw-workspace-files:prefs'
+      const STORAGE_VERSION = 1
+      /** Bytes moved per RPC call in either direction. */
+      const CHUNK_BYTES = 512 * 1024
+      /** Refuse a single transfer past this size; the host also clamps. */
+      const MAX_TRANSFER_BYTES = 2 * 1024 * 1024 * 1024
+      const MIN_W = 460
+      const MIN_H = 280
+      const EDGE = 12
+      const NOTICE_MS = 4000
+
+      const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif', 'ico', 'svg'])
+      const MEDIA_MIME = {
+        mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime', m4v: 'video/x-m4v', mkv: 'video/x-matroska',
+        mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', flac: 'audio/flac',
+        pdf: 'application/pdf',
+      }
+
+      /** One flat stylesheet; every rule is scoped to this plugin's `dshgw-wsf-` prefix. */
+      const CSS = `
+.dshgw-wsf-panel { position: absolute; display: flex; flex-direction: column; min-width: ${MIN_W}px; min-height: ${MIN_H}px;
+  background: var(--dsw-alias-bg-layer-2, #1b1c1f); color: var(--dsw-alias-label-primary, #e6e6e6);
+  border: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.35)); border-radius: 10px;
+  box-shadow: 0 14px 44px rgba(0,0,0,.5); overflow: hidden; z-index: 31; font-size: 12px; }
+.dshgw-wsf-head { display: flex; align-items: center; gap: 6px; padding: 3px 6px; flex: none;
+  background: var(--dsw-alias-bg-overlay, rgba(127,127,127,.12)); border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24)); }
+.dshgw-wsf-grip { display: flex; align-items: center; gap: 6px; cursor: move; user-select: none; flex: none; }
+.dshgw-wsf-title { font-weight: 600; opacity: .85; }
+.dshgw-wsf-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; direction: rtl; text-align: left; }
+.dshgw-wsf-tools { display: flex; align-items: center; gap: 2px; flex: none; }
+.dshgw-wsf-btn { display: inline-flex; align-items: center; justify-content: center; height: 22px; padding: 0 7px;
+  background: none; border: 0; border-radius: 5px; color: inherit; font: inherit; cursor: pointer; opacity: .8; white-space: nowrap; }
+.dshgw-wsf-btn:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.28)); opacity: 1; }
+.dshgw-wsf-btn[disabled] { opacity: .35; cursor: default; }
+.dshgw-wsf-btn[data-active="true"] { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.28)); opacity: 1; }
+.dshgw-wsf-btn[data-danger="true"] { color: var(--dsw-alias-state-error-primary, #d4695c); }
+.dshgw-wsf-bar { display: flex; align-items: center; gap: 6px; padding: 3px 6px; flex: none;
+  border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.2)); }
+.dshgw-wsf-crumbs { display: flex; align-items: center; gap: 1px; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; }
+.dshgw-wsf-crumb { border: 0; background: none; color: inherit; font: inherit; padding: 2px 5px; border-radius: 4px; cursor: pointer; opacity: .85; }
+.dshgw-wsf-crumb:hover { background: rgba(127,127,127,.18); opacity: 1; }
+.dshgw-wsf-sep { opacity: .35; padding: 0 1px; }
+.dshgw-wsf-input { background: var(--dsw-alias-bg-base, rgba(0,0,0,.22)); color: inherit; font: inherit;
+  border: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.35)); border-radius: 5px; padding: 2px 6px; outline: none; }
+.dshgw-wsf-input:focus { border-color: var(--dsw-alias-brand-primary, #4a86f7); }
+.dshgw-wsf-search { width: 132px; flex: none; }
+.dshgw-wsf-body { flex: 1; min-height: 0; overflow: auto; position: relative; }
+.dshgw-wsf-grid { display: grid; grid-template-columns: 44px minmax(0, 1fr) 84px 132px 118px; align-items: center; gap: 6px; padding: 3px 8px; }
+.dshgw-wsf-head-row { position: sticky; top: 0; z-index: 1; background: var(--dsw-alias-bg-layer-2, #1b1c1f);
+  border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.2)); font-size: 11px; opacity: .75; }
+.dshgw-wsf-sort { border: 0; background: none; color: inherit; font: inherit; cursor: pointer; padding: 0; opacity: .8; text-align: left; }
+.dshgw-wsf-sort:hover { opacity: 1; }
+.dshgw-wsf-row { border-radius: 5px; cursor: default; }
+.dshgw-wsf-row:hover { background: rgba(127,127,127,.14); }
+.dshgw-wsf-row[data-selected="true"] { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.24)); }
+.dshgw-wsf-badge { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px; opacity: .7;
+  text-align: center; padding: 1px 0; border-radius: 4px; background: rgba(127,127,127,.16); overflow: hidden; }
+.dshgw-wsf-badge[data-kind="dir"] { background: rgba(97,175,239,.22); opacity: .95; }
+.dshgw-wsf-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshgw-wsf-name[data-kind="dir"] { cursor: pointer; }
+.dshgw-wsf-sub { font-size: 11px; opacity: .6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshgw-wsf-actions { display: flex; gap: 2px; justify-content: flex-end; opacity: 0; }
+.dshgw-wsf-row:hover .dshgw-wsf-actions, .dshgw-wsf-row[data-selected="true"] .dshgw-wsf-actions { opacity: 1; }
+.dshgw-wsf-action { border: 0; background: none; color: inherit; font: inherit; font-size: 11px; cursor: pointer;
+  padding: 1px 5px; border-radius: 4px; opacity: .75; }
+.dshgw-wsf-action:hover { background: rgba(127,127,127,.24); opacity: 1; }
+.dshgw-wsf-empty { padding: 22px 12px; text-align: center; opacity: .55; }
+.dshgw-wsf-note { padding: 6px 10px; font-size: 11px; opacity: .8; }
+.dshgw-wsf-error { color: var(--dsw-alias-state-error-primary, #d4695c); }
+.dshgw-wsf-ok { color: var(--dsw-alias-state-success-primary, #6aa84f); }
+.dshgw-wsf-foot { display: flex; align-items: center; gap: 8px; flex: none; padding: 2px 8px; font-size: 11px;
+  border-top: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24)); opacity: .8; }
+.dshgw-wsf-foot-grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .7;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.dshgw-wsf-transfer { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.dshgw-wsf-bar-track { width: 90px; height: 5px; border-radius: 3px; background: rgba(127,127,127,.28); overflow: hidden; }
+.dshgw-wsf-bar-fill { height: 100%; background: var(--dsw-alias-brand-primary, #4a86f7); }
+.dshgw-wsf-overlay { position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,.42); }
+.dshgw-wsf-dialog { width: min(420px, 88%); background: var(--dsw-alias-bg-layer-2, #1b1c1f);
+  border: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.35)); border-radius: 9px; padding: 12px; display: flex; flex-direction: column; gap: 9px;
+  box-shadow: 0 10px 32px rgba(0,0,0,.45); }
+.dshgw-wsf-dialog-title { font-weight: 600; }
+.dshgw-wsf-dialog-text { opacity: .8; line-height: 1.5; word-break: break-all; }
+.dshgw-wsf-dialog-row { display: flex; justify-content: flex-end; gap: 6px; }
+.dshgw-wsf-primary { background: var(--dsw-alias-brand-primary, #4a86f7); color: #fff; border: 0; border-radius: 5px;
+  padding: 4px 12px; font: inherit; cursor: pointer; }
+.dshgw-wsf-primary[disabled] { opacity: .5; cursor: default; }
+.dshgw-wsf-ghost { background: none; border: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.35)); border-radius: 5px;
+  color: inherit; padding: 4px 12px; font: inherit; cursor: pointer; }
+.dshgw-wsf-viewer { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.dshgw-wsf-viewer-head { display: flex; align-items: center; gap: 6px; padding: 3px 6px; flex: none;
+  border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.2)); }
+.dshgw-wsf-viewer-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshgw-wsf-viewer-meta { font-size: 11px; opacity: .6; flex: none; }
+.dshgw-wsf-editor { flex: 1; min-height: 0; width: 100%; box-sizing: border-box; resize: none; border: 0; outline: none;
+  background: var(--dsw-alias-bg-base, rgba(0,0,0,.22)); color: inherit; padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.5; white-space: pre; }
+.dshgw-wsf-media { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 8px; overflow: auto; }
+.dshgw-wsf-media img, .dshgw-wsf-media video { max-width: 100%; max-height: 100%; }
+.dshgw-wsf-media audio { width: 100%; }
+.dshgw-wsf-results { border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.2)); }
+.dshgw-wsf-results-head { display: flex; align-items: center; gap: 6px; padding: 3px 8px; font-size: 11px; opacity: .8; }
+.dshgw-wsf-sx { position: absolute; top: 0; right: 0; bottom: 0; width: 5px; cursor: ew-resize; }
+.dshgw-wsf-sy { position: absolute; left: 0; right: 0; bottom: 0; height: 5px; cursor: ns-resize; }
+.dshgw-wsf-sz { position: absolute; right: 2px; bottom: 2px; width: 16px; height: 16px; cursor: nwse-resize; opacity: .5; }
+.dshgw-wsf-entry { display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 8px; border-radius: 6px;
+  background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.dshgw-wsf-entry:hover { background: rgba(127,127,127,.14); }
+.dshgw-wsf-entry-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .85; }
+.dshgw-wsf-entry-icon { flex: none; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; opacity: .8; }
+/* The collapsed sidebar is one narrow icon column: the label cannot fit, so it is dropped. */
+.dshgw-wsf-entry-rail .dshgw-wsf-entry-label { display: none; }
+.dshgw-wsf-entry-rail { padding: 6px 0; justify-content: center; }
+`
+
+      /** Install the one stylesheet this plugin owns. */
+      function installCSS() {
+        if (document.querySelector('style[data-plugin-css="dshgw-workspace-files/client.css"]') !== null) return
+        const tag = document.createElement('style')
+        tag.dataset.pluginCss = 'dshgw-workspace-files/client.css'
+        tag.textContent = CSS
+        document.head.appendChild(tag)
+      }
+
+      // ---- small pure helpers ----------------------------------------------------------------
+
+      /** Human size for a byte count. */
+      function formatSize(bytes) {
+        if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes <= 0) return ''
+        const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+        let value = bytes
+        let unit = 0
+        while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1 }
+        return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`
+      }
+
+      /** Local `MM-DD HH:MM` for one timestamp. */
+      function formatTime(ms) {
+        if (typeof ms !== 'number' || !Number.isFinite(ms)) return ''
+        const date = new Date(ms)
+        const pad = (value) => String(value).padStart(2, '0')
+        return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+      }
+
+      /** Lowercase extension without the dot. */
+      function extensionOf(name) {
+        const cut = name.lastIndexOf('.')
+        if (cut <= 0 || cut === name.length - 1) return ''
+        return name.slice(cut + 1).toLowerCase()
+      }
+
+      /** The badge shown in the first column. */
+      function badgeOf(entry) {
+        if (entry.kind === 'dir') return 'DIR'
+        if (entry.kind === 'broken') return '断链'
+        const ext = extensionOf(entry.name)
+        return ext === '' ? 'FILE' : ext.slice(0, 4).toUpperCase()
+      }
+
+      /** MIME type for a download or a preview. */
+      function mimeOf(name) {
+        const ext = extensionOf(name)
+        if (MEDIA_MIME[ext] !== undefined) return MEDIA_MIME[ext]
+        if (ext === 'svg') return 'image/svg+xml'
+        if (IMAGE_EXT.has(ext)) return `image/${ext === 'jpg' ? 'jpeg' : ext}`
+        if (ext === 'json') return 'application/json'
+        if (ext === 'txt' || ext === 'md' || ext === 'log' || ext === 'csv') return 'text/plain;charset=utf-8'
+        return 'application/octet-stream'
+      }
+
+      /** Join one directory path with one child name, in the host's POSIX-relative vocabulary. */
+      function joinPath(parent, name) {
+        return parent === '' ? name : `${parent}/${name}`
+      }
+
+      /** The parent of one relative path, or null at the root. */
+      function parentOf(path) {
+        if (path === '') return null
+        const cut = path.lastIndexOf('/')
+        return cut === -1 ? '' : path.slice(0, cut)
+      }
+
+      /** `''` root plus every intermediate path, for the breadcrumb. */
+      function crumbsOf(path) {
+        const crumbs = [{ label: '工作区', path: '' }]
+        if (path === '') return crumbs
+        const segments = path.split('/')
+        let walked = ''
+        for (const segment of segments) {
+          walked = joinPath(walked, segment)
+          crumbs.push({ label: segment, path: walked })
+        }
+        return crumbs
+      }
+
+      /**
+       * Base64 of one byte array.
+       *
+       * The byte window is chunked because a single `String.fromCharCode(...bytes)` on a 500 KiB
+       * chunk would blow the argument list. The local is deliberately NOT named `window`: a
+       * same-named `const` here shadows the global inside this function's whole body and turns the
+       * `window.btoa` call below into a temporal-dead-zone error at runtime.
+       */
+      function bytesToBase64(bytes) {
+        let binary = ''
+        const step = 0x8000
+        for (let index = 0; index < bytes.length; index += step) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(index, index + step))
+        }
+        return window.btoa(binary)
+      }
+
+      /** Bytes of one base64 string. */
+      function base64ToBytes(text) {
+        const binary = window.atob(text)
+        const bytes = new Uint8Array(binary.length)
+        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+        return bytes
+      }
+
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+      // ---- persistence -----------------------------------------------------------------------
+
+      function loadJSON(key, fallback) {
+        try {
+          const raw = window.localStorage.getItem(key)
+          if (raw === null) return fallback
+          const parsed = JSON.parse(raw)
+          return parsed !== null && typeof parsed === 'object' ? parsed : fallback
+        } catch {
+          return fallback
+        }
+      }
+
+      function saveJSON(key, value) {
+        try {
+          window.localStorage.setItem(key, JSON.stringify(value))
+        } catch {
+          // A blocked localStorage only costs the remembered geometry.
+        }
+      }
+
+      function loadLayout() {
+        const fallback = { open: false, x: null, y: null, w: 760, h: 460, maximized: false }
+        const raw = loadJSON(STORAGE_LAYOUT, null)
+        if (raw === null || raw.version !== STORAGE_VERSION) return fallback
+        const number = (value, keep) => (typeof value === 'number' && Number.isFinite(value) ? value : keep)
+        return {
+          open: raw.open === true,
+          maximized: raw.maximized === true,
+          x: raw.x === null || raw.x === undefined ? null : number(raw.x, null),
+          y: raw.y === null || raw.y === undefined ? null : number(raw.y, null),
+          w: Math.max(MIN_W, number(raw.w, fallback.w)),
+          h: Math.max(MIN_H, number(raw.h, fallback.h)),
+        }
+      }
+
+      function loadPrefs() {
+        const fallback = { path: '', showHidden: false, sortKey: 'name', sortDir: 1 }
+        const raw = loadJSON(STORAGE_PREFS, null)
+        if (raw === null || raw.version !== STORAGE_VERSION) return fallback
+        return {
+          path: typeof raw.path === 'string' ? raw.path : '',
+          showHidden: raw.showHidden === true,
+          sortKey: raw.sortKey === 'size' || raw.sortKey === 'mtime' ? raw.sortKey : 'name',
+          sortDir: raw.sortDir === -1 ? -1 : 1,
+        }
+      }
+
+      /** The plugin body. */
+      function apply(ctx) {
+        installCSS()
+
+        /**
+         * One RPC call, unwrapped. A host failure arrives as `{ok:false,error}` and is thrown as an
+         * Error carrying the host's code, so callers branch on codes instead of parsing messages.
+         */
+        const call = async (endpoint, payload, signal) => {
+          const result = await ctx.connection.rpc.call(RPC_CHANNEL, endpoint, payload, signal)
+          if (result === null || typeof result !== 'object' || result.ok !== true) {
+            const error = (result !== null && typeof result === 'object' && result.error) || null
+            const failure = new Error(error === null ? '文件服务没有响应' : String(error.message))
+            failure.code = error === null ? 'transport' : String(error.code)
+            failure.details = error?.details ?? {}
+            throw failure
+          }
+          return result.value
+        }
+
+        // ---- shared panel state ----------------------------------------------------------
+        let state = {
+          layout: loadLayout(),
+          prefs: loadPrefs(),
+          info: null,
+          listing: null,
+          loading: false,
+          error: '',
+          notice: '',
+          viewer: null,
+          dialog: null,
+          transfer: null,
+          search: { query: '', busy: false, results: null, error: '' },
+          selected: null,
+        }
+        const listeners = new Set()
+        let noticeTimer = null
+
+        const notify = () => {
+          for (const listener of [...listeners]) {
+            try {
+              listener(state)
+            } catch (error) {
+              ctx.logger?.warn?.(`workspace-files: listener failed: ${error?.message ?? error}`)
+            }
+          }
+        }
+        const setState = (patch) => { state = { ...state, ...patch }; notify() }
+        const setUI = (patch) => setState(patch)
+
+        /** Show a transient status line instead of a modal. */
+        const notifyUser = (text, tone = 'ok') => {
+          if (noticeTimer !== null) clearTimeout(noticeTimer)
+          setState({ notice: text, noticeTone: tone })
+          noticeTimer = setTimeout(() => {
+            noticeTimer = null
+            setState({ notice: '' })
+          }, NOTICE_MS)
+        }
+
+        const saveLayout = (patch) => {
+          const layout = { ...state.layout, ...patch }
+          setState({ layout })
+          saveJSON(STORAGE_LAYOUT, { version: STORAGE_VERSION, ...layout })
+        }
+
+        const savePrefs = (patch) => {
+          const prefs = { ...state.prefs, ...patch }
+          setState({ prefs })
+          saveJSON(STORAGE_PREFS, { version: STORAGE_VERSION, ...prefs })
+        }
+
+        /** Release the object URL a preview holds, if any. */
+        const releaseViewer = (viewer) => {
+          if (viewer !== null && typeof viewer.url === 'string' && viewer.url !== '') {
+            try { window.URL.revokeObjectURL(viewer.url) } catch { /* already gone */ }
+          }
+        }
+
+        // ---- operations ------------------------------------------------------------------
+
+        /** Load one directory into the list view. */
+        const openPath = async (path, { keepViewer = false, keepSelection = false } = {}) => {
+          if (!keepViewer) releaseViewer(state.viewer)
+          setState({
+            loading: true,
+            error: '',
+            selected: keepSelection ? state.selected : null,
+            ...(keepViewer ? {} : { viewer: null }),
+          })
+          try {
+            const listing = await call('list', { path: path ?? '', showHidden: state.prefs.showHidden === true })
+            setState({ listing, loading: false, error: '' })
+            savePrefs({ path: listing.path })
+          } catch (error) {
+            setState({ loading: false, error: `${error?.message ?? error}` })
+          }
+        }
+
+        /**
+         * The chunk size every transfer uses.
+         *
+         * The host is the authority: `hello` reports its configured limit, and a client that asked
+         * for more than that would have every call refused. 512 KiB is only the ceiling and the
+         * fallback for the window before `hello` has answered.
+         */
+        const chunkBytes = () => {
+          const host = state.info?.limits?.chunkBytes
+          return typeof host === 'number' && Number.isFinite(host) && host > 0 ? Math.min(host, CHUNK_BYTES) : CHUNK_BYTES
+        }
+
+        /** Read a whole file through bounded chunks, reporting progress through `onProgress`. */
+        const readAll = async (entry, onProgress) => {
+          const parts = []
+          let offset = 0
+          let size = entry.size
+          for (;;) {
+            const page = await call('readChunk', { path: entry.path, offset, length: chunkBytes() })
+            size = page.size
+            if (size > MAX_TRANSFER_BYTES) throw new Error(`${formatSize(size)} 超过单次传输上限`)
+            const bytes = base64ToBytes(page.bytes)
+            if (bytes.length > 0) parts.push(bytes)
+            offset = page.offset + bytes.length
+            if (typeof onProgress === 'function') onProgress(offset, size)
+            if (page.eof || bytes.length === 0 || offset >= size) break
+          }
+          return { blob: new Blob(parts, { type: mimeOf(entry.name) }), size: parts.reduce((total, part) => total + part.length, 0) }
+        }
+
+        /** Hand one blob to the browser's download machinery. */
+        const saveBlob = (blob, name) => {
+          const url = window.URL.createObjectURL(blob)
+          const link = document.createElement('a')
+          link.href = url
+          link.download = name
+          link.rel = 'noopener'
+          document.body.appendChild(link)
+          link.click()
+          link.remove()
+          setTimeout(() => { try { window.URL.revokeObjectURL(url) } catch { /* already gone */ } }, 60_000)
+        }
+
+        /** Download one file to the user's disk. */
+        const download = async (entry) => {
+          // Only a *running* transfer blocks the next one: a finished or failed transfer stays on
+          // screen for a moment, and refusing to start while it is there would feel like a dead button.
+          if (state.transfer?.state === 'running') return
+          setState({ transfer: { kind: 'download', name: entry.name, loaded: 0, total: entry.size, state: 'running', error: '' } })
+          try {
+            const { blob, size } = await readAll(entry, (loaded, total) => {
+              setState({ transfer: { kind: 'download', name: entry.name, loaded, total, state: 'running', error: '' } })
+            })
+            saveBlob(blob, entry.name)
+            setState({ transfer: { kind: 'download', name: entry.name, loaded: size, total: size, state: 'done', error: '' } })
+            notifyUser(`已下载 ${entry.name}（${formatSize(size)}）`)
+            setTimeout(() => { if (state.transfer?.state === 'done') setState({ transfer: null }) }, 2500)
+          } catch (error) {
+            setState({ transfer: { kind: 'download', name: entry.name, loaded: 0, total: entry.size, state: 'failed', error: `${error?.message ?? error}` } })
+            notifyUser(`下载失败：${error?.message ?? error}`, 'error')
+          }
+        }
+
+        /** Open one file in the panel's viewer: text in an editor, images/media as a blob preview. */
+        const openFile = async (entry) => {
+          releaseViewer(state.viewer)
+          const ext = extensionOf(entry.name)
+          const preview = IMAGE_EXT.has(ext) ? 'image' : MEDIA_MIME[ext] !== undefined ? 'media' : null
+          setState({ viewer: { path: entry.path, name: entry.name, mode: 'loading', size: entry.size, mtimeMs: entry.mtimeMs, text: '', original: '', url: '', error: '', errorCode: '', dirty: false }, error: '', selected: entry.path })
+          if (preview !== null) {
+            try {
+              const { blob } = await readAll(entry, (loaded, total) => {
+                setState({ viewer: { ...state.viewer, loaded, total } })
+              })
+              if (state.viewer === null || state.viewer.path !== entry.path) return
+              setState({ viewer: { ...state.viewer, mode: preview, url: window.URL.createObjectURL(blob), loaded: entry.size, total: entry.size } })
+            } catch (error) {
+              if (state.viewer === null || state.viewer.path !== entry.path) return
+              setState({ viewer: { ...state.viewer, mode: 'binary', error: `${error?.message ?? error}`, errorCode: error?.code ?? '' } })
+            }
+            return
+          }
+          try {
+            const page = await call('readText', { path: entry.path })
+            if (state.viewer === null || state.viewer.path !== entry.path) return
+            setState({
+              viewer: {
+                ...state.viewer,
+                mode: 'text',
+                text: page.text,
+                original: page.text,
+                size: page.size,
+                mtimeMs: page.mtimeMs,
+                dirty: false,
+                error: '',
+              },
+            })
+          } catch (error) {
+            if (state.viewer === null || state.viewer.path !== entry.path) return
+            setState({ viewer: { ...state.viewer, mode: 'binary', error: `${error?.message ?? error}`, errorCode: error?.code ?? '' } })
+          }
+        }
+
+        /** Save the viewer's text back to its file, refusing to clobber a newer version. */
+        const saveViewer = async () => {
+          const viewer = state.viewer
+          if (viewer === null || viewer.mode !== 'text') return
+          setState({ viewer: { ...viewer, saving: true, error: '' } })
+          try {
+            const result = await call('writeText', { path: viewer.path, text: viewer.text, expectedMtimeMs: viewer.mtimeMs })
+            setState({
+              viewer: { ...state.viewer, saving: false, original: state.viewer.text, dirty: false, mtimeMs: result.mtimeMs, size: result.size },
+            })
+            notifyUser(`已保存 ${viewer.name}（${formatSize(result.size)}）`)
+            await openPath(state.listing?.path ?? state.prefs.path, { keepViewer: true })
+          } catch (error) {
+            setState({ viewer: { ...state.viewer, saving: false, error: `${error?.message ?? error}` } })
+          }
+        }
+
+        /** Upload one File through bounded chunks, truncating the target on the first chunk. */
+        const uploadFile = async (file) => {
+          if (file.size > MAX_TRANSFER_BYTES) throw new Error(`${file.name} 超过单次上传上限 ${formatSize(MAX_TRANSFER_BYTES)}`)
+          const base = state.listing?.path ?? state.prefs.path
+          const target = joinPath(base, file.name)
+          const existed = (state.listing?.entries ?? []).some((entry) => entry.name === file.name)
+          let offset = 0
+          setState({ transfer: { kind: 'upload', name: file.name, loaded: 0, total: file.size, state: 'running', error: '' } })
+          if (file.size === 0) {
+            await call('writeChunk', { path: target, offset: 0, data: '' })
+          }
+          while (offset < file.size) {
+            const slice = file.slice(offset, offset + chunkBytes())
+            const buffer = await slice.arrayBuffer()
+            await call('writeChunk', { path: target, offset, data: bytesToBase64(new Uint8Array(buffer)) })
+            offset += buffer.byteLength
+            setState({ transfer: { kind: 'upload', name: file.name, loaded: offset, total: file.size, state: 'running', error: '' } })
+          }
+          return { name: file.name, size: file.size, existed }
+        }
+
+        /** Upload a batch, then reload the directory once. */
+        const uploadFiles = async (files) => {
+          if (state.transfer?.state === 'running' || files.length === 0) return
+          const results = []
+          for (const file of files) {
+            try {
+              results.push(await uploadFile(file))
+            } catch (error) {
+              setState({ transfer: { kind: 'upload', name: file.name, loaded: 0, total: file.size, state: 'failed', error: `${error?.message ?? error}` } })
+              notifyUser(`上传失败：${error?.message ?? error}`, 'error')
+              break
+            }
+          }
+          const done = results.length
+          if (done > 0) {
+            const overwritten = results.filter((result) => result.existed).length
+            setState({ transfer: { kind: 'upload', name: results[done - 1].name, loaded: results[done - 1].size, total: results[done - 1].size, state: 'done', error: '' } })
+            notifyUser(`已上传 ${done} 个文件${overwritten > 0 ? `，覆盖 ${overwritten} 个同名文件` : ''}`)
+            setTimeout(() => { if (state.transfer?.state === 'done') setState({ transfer: null }) }, 2500)
+            await openPath(state.listing?.path ?? state.prefs.path, { keepSelection: true })
+          }
+        }
+
+        // ---- dialogs ---------------------------------------------------------------------
+
+        const openDialog = (dialog) => setState({ dialog: { value: '', busy: false, error: '', ...dialog } })
+        const closeDialog = () => setState({ dialog: null })
+
+        /** Commit the open dialog: the only path that mutates, and it always reloads afterwards. */
+        const submitDialog = async () => {
+          const dialog = state.dialog
+          if (dialog === null || dialog.busy === true) return
+          const base = state.listing?.path ?? state.prefs.path
+          setState({ dialog: { ...dialog, busy: true, error: '' } })
+          try {
+            if (dialog.kind === 'mkdir') {
+              await call('mkdir', { path: base, name: dialog.value })
+              notifyUser(`已创建文件夹 ${dialog.value}`)
+            } else if (dialog.kind === 'rename') {
+              await call('rename', { path: dialog.path, name: dialog.value })
+              notifyUser(`已重命名为 ${dialog.value}`)
+              if (state.viewer?.path === dialog.path) {
+                releaseViewer(state.viewer)
+                setState({ viewer: null })
+              }
+            } else if (dialog.kind === 'remove') {
+              await call('remove', { path: dialog.path, recursive: dialog.recursive === true })
+              notifyUser(`已删除 ${dialog.path}`)
+              if (state.viewer?.path === dialog.path) {
+                releaseViewer(state.viewer)
+                setState({ viewer: null })
+              }
+            }
+            closeDialog()
+            await openPath(base, { keepViewer: state.viewer !== null && dialog.kind !== 'rename' && dialog.kind !== 'remove' })
+          } catch (error) {
+            setState({ dialog: { ...state.dialog, busy: false, error: `${error?.message ?? error}` } })
+          }
+        }
+
+        const askRemove = (entry) => openDialog({
+          kind: 'remove',
+          title: `删除 ${entry.kind === 'dir' ? '文件夹' : '文件'}`,
+          message: entry.kind === 'dir'
+            ? `「${entry.name}」及其全部内容将被永久删除，此操作无法撤销。`
+            : `「${entry.name}」将被永久删除，此操作无法撤销。`,
+          confirmLabel: '删除',
+          danger: true,
+          path: entry.path,
+          recursive: entry.kind === 'dir',
+        })
+
+        const askRename = (entry) => openDialog({
+          kind: 'rename',
+          title: '重命名',
+          message: `重命名「${entry.name}」`,
+          confirmLabel: '重命名',
+          path: entry.path,
+          value: entry.name,
+        })
+
+        const askMkdir = () => openDialog({ kind: 'mkdir', title: '新建文件夹', message: '在当前目录下创建新文件夹', confirmLabel: '创建' })
+
+        // ---- search ----------------------------------------------------------------------
+
+        /** Search names under the workspace; the query is debounced by the header input. */
+        const runSearch = async (query) => {
+          const needle = query.trim()
+          if (needle === '') {
+            setState({ search: { query: '', busy: false, results: null, error: '' } })
+            return
+          }
+          setState({ search: { query, busy: true, results: state.search.results, error: '' } })
+          try {
+            const found = await call('find', { query: needle, showHidden: state.prefs.showHidden === true })
+            if (state.search.query !== query) return
+            setState({ search: { query, busy: false, results: found, error: '' } })
+          } catch (error) {
+            setState({ search: { query, busy: false, results: null, error: `${error?.message ?? error}` } })
+          }
+        }
+
+        /** Open a search hit: a directory opens itself, a file opens its directory and viewer. */
+        const openHit = async (entry) => {
+          if (entry.kind === 'dir') {
+            await openPath(entry.path)
+            return
+          }
+          const parent = parentOf(entry.path)
+          await openPath(parent ?? '')
+          const fresh = (state.listing?.entries ?? []).find((candidate) => candidate.path === entry.path)
+          if (fresh !== undefined) await openFile(fresh)
+          else await openFile(entry)
+        }
+
+        // ---- sorting ---------------------------------------------------------------------
+
+        /** Sort one listing client-side; directories always lead. */
+        const sortEntries = (entries) => {
+          const { sortKey, sortDir } = state.prefs
+          const factor = sortDir === -1 ? -1 : 1
+          return [...entries].sort((left, right) => {
+            const leftDir = left.kind === 'dir' ? 0 : 1
+            const rightDir = right.kind === 'dir' ? 0 : 1
+            if (leftDir !== rightDir) return leftDir - rightDir
+            if (sortKey === 'size') return (left.size - right.size) * factor
+            if (sortKey === 'mtime') return (left.mtimeMs - right.mtimeMs) * factor
+            return left.name.localeCompare(right.name, 'zh-Hans-CN', { numeric: true, sensitivity: 'base' }) * factor
+          })
+        }
+
+        const cycleSort = (key) => {
+          const { sortKey, sortDir } = state.prefs
+          if (sortKey === key) savePrefs({ sortDir: sortDir === 1 ? -1 : 1 })
+          else savePrefs({ sortKey: key, sortDir: 1 })
+        }
+
+        // ---- panel chrome ----------------------------------------------------------------
+
+        /** Keep a panel that was restored inside the viewport of a window that has since shrunk. */
+        const clampLayout = () => {
+          const layout = state.layout
+          const maxW = Math.max(MIN_W, document.documentElement.clientWidth - EDGE * 2)
+          const maxH = Math.max(MIN_H, document.documentElement.clientHeight - EDGE * 2)
+          const w = Math.min(layout.w, maxW)
+          const h = Math.min(layout.h, maxH)
+          if (w !== layout.w || h !== layout.h) saveLayout({ w, h })
+        }
+
+        const show = () => saveLayout({ open: true })
+        const toggle = () => (state.layout.open ? saveLayout({ open: false }) : show())
+
+        /** The panel: header, breadcrumb bar, body (list or viewer), footer. */
+        function Panel() {
+          const [snapshot, setSnapshot] = useState(state)
+          const fileInputRef = useRef(null)
+          const searchTimerRef = useRef(null)
+          const searchRef = useRef(null)
+
+          useEffect(() => {
+            const listener = (next) => setSnapshot(next)
+            listeners.add(listener)
+            return () => listeners.delete(listener)
+          }, [])
+
+          const { layout, prefs, listing, loading, error, notice, noticeTone, viewer, dialog, transfer, search, selected } = snapshot
+          const displayPath = prefs.path
+
+          // Load the current directory the first time the panel is shown, and re-clamp on resize.
+          useEffect(() => {
+            if (!layout.open) return undefined
+            clampLayout()
+            if (state.listing === null && state.loading === false) void openPath(state.prefs.path)
+            const onWindowResize = () => clampLayout()
+            window.addEventListener('resize', onWindowResize)
+            return () => window.removeEventListener('resize', onWindowResize)
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+          }, [layout.open])
+
+          // Keyboard: Escape closes the dialog (then the viewer), Ctrl/Cmd+S saves the editor.
+          useEffect(() => {
+            const onKey = (event) => {
+              if (event.key === 'Escape') {
+                if (state.dialog !== null) { closeDialog(); event.preventDefault(); return }
+                if (state.viewer !== null) { releaseViewer(state.viewer); setState({ viewer: null }); event.preventDefault(); return }
+                if (state.layout.maximized) { saveLayout({ maximized: false }); event.preventDefault() }
+                return
+              }
+              if ((event.ctrlKey || event.metaKey) && (event.key === 's' || event.key === 'S')) {
+                if (state.viewer?.mode === 'text') { event.preventDefault(); void saveViewer() }
+              }
+            }
+            window.addEventListener('keydown', onKey)
+            return () => window.removeEventListener('keydown', onKey)
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+          }, [])
+
+          useEffect(() => () => {
+            if (searchTimerRef.current !== null) clearTimeout(searchTimerRef.current)
+            if (noticeTimer !== null) clearTimeout(noticeTimer)
+          }, [])
+
+          /** Pointer drag: `mode` is move, east, south or both. */
+          const beginDrag = useCallback((event, mode) => {
+            if (event.button !== 0) return
+            event.preventDefault()
+            const startX = event.clientX
+            const startY = event.clientY
+            const origin = { ...state.layout }
+            const frameW = document.documentElement.clientWidth
+            const frameH = document.documentElement.clientHeight
+            const baseX = origin.x ?? frameW - origin.w - EDGE
+            const baseY = origin.y ?? frameH - origin.h - EDGE
+            const move = (moveEvent) => {
+              const dx = moveEvent.clientX - startX
+              const dy = moveEvent.clientY - startY
+              const next = { ...state.layout }
+              if (mode === 'move' || mode === 'both') {
+                next.x = Math.max(0, Math.min(frameW - 80, baseX + dx))
+                next.y = Math.max(0, Math.min(frameH - 40, baseY + dy))
+              }
+              if (mode === 'east' || mode === 'both') next.w = Math.max(MIN_W, Math.min(frameW - EDGE, origin.w + dx))
+              if (mode === 'south' || mode === 'both') next.h = Math.max(MIN_H, Math.min(frameH - EDGE, origin.h + dy))
+              saveLayout(next)
+            }
+            const stop = () => {
+              window.removeEventListener('pointermove', move)
+              window.removeEventListener('pointerup', stop)
+            }
+            window.addEventListener('pointermove', move)
+            window.addEventListener('pointerup', stop)
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+          }, [])
+
+          if (!layout.open) return null
+
+          const frameW = document.documentElement.clientWidth
+          const frameH = document.documentElement.clientHeight
+          const style = layout.maximized
+            ? { left: `${EDGE}px`, top: `${EDGE}px`, width: `${frameW - EDGE * 2}px`, height: `${frameH - EDGE * 2}px` }
+            : {
+                left: `${layout.x ?? frameW - layout.w - EDGE}px`,
+                top: `${layout.y ?? frameH - layout.h - EDGE}px`,
+                width: `${layout.w}px`,
+                height: `${layout.h}px`,
+              }
+
+          // ---- header ------------------------------------------------------------------
+          const head = h('div', { key: 'head', className: 'dshgw-wsf-head' }, [
+            h('div', { key: 'grip', className: 'dshgw-wsf-grip', onPointerDown: (event) => beginDrag(event, 'move'), title: '拖动' }, [
+              h('span', { key: 'title', className: 'dshgw-wsf-title' }, '文件'),
+            ]),
+            h('span', { key: 'path', className: 'dshgw-wsf-path', title: listing?.absolute ?? snapshot.info?.root ?? '' },
+              listing?.absolute ?? snapshot.info?.root ?? ''),
+            h('div', { key: 'tools', className: 'dshgw-wsf-tools' }, [
+              h('button', {
+                key: 'max', type: 'button', className: 'dshgw-wsf-btn', title: layout.maximized ? '还原' : '最大化',
+                'aria-label': layout.maximized ? '还原面板' : '最大化面板',
+                onClick: () => saveLayout({ maximized: !layout.maximized }),
+              }, layout.maximized ? '❐' : '⛶'),
+              h('button', {
+                key: 'close', type: 'button', className: 'dshgw-wsf-btn', title: '收起面板', 'aria-label': '收起文件面板',
+                onClick: () => saveLayout({ open: false }),
+              }, '×'),
+            ]),
+          ])
+
+          // ---- breadcrumb + toolbar ----------------------------------------------------
+          const crumbs = crumbsOf(displayPath).map((crumb, index) => [
+            index > 0 ? h('span', { key: `sep-${crumb.path}`, className: 'dshgw-wsf-sep' }, '/') : null,
+            h('button', {
+              key: `crumb-${crumb.path}`,
+              type: 'button',
+              className: 'dshgw-wsf-crumb',
+              title: crumb.path === '' ? '工作区根目录' : crumb.path,
+              onClick: () => { void openPath(crumb.path) },
+            }, crumb.label === '' ? '工作区' : crumb.label),
+          ])
+
+          const bar = h('div', { key: 'bar', className: 'dshgw-wsf-bar' }, [
+            h('button', {
+              key: 'up', type: 'button', className: 'dshgw-wsf-btn', title: '上一级', 'aria-label': '上一级',
+              disabled: displayPath === '', onClick: () => { void openPath(parentOf(displayPath) ?? '') },
+            }, '↑ 上级'),
+            h('button', {
+              key: 'root', type: 'button', className: 'dshgw-wsf-btn', title: '回到工作区根目录', 'aria-label': '回到工作区根目录',
+              disabled: displayPath === '', onClick: () => { void openPath('') },
+            }, '⌂ 根'),
+            h('button', {
+              key: 'reload', type: 'button', className: 'dshgw-wsf-btn', title: '刷新', 'aria-label': '刷新',
+              disabled: loading, onClick: () => { void openPath(displayPath, { keepViewer: viewer !== null }) },
+            }, loading ? '…' : '⟳ 刷新'),
+            h('div', { key: 'crumbs', className: 'dshgw-wsf-crumbs' }, crumbs),
+            h('button', {
+              key: 'hidden', type: 'button', className: 'dshgw-wsf-btn', 'data-active': String(prefs.showHidden === true),
+              title: prefs.showHidden ? '隐藏点文件' : '显示点文件', 'aria-label': '切换隐藏文件显示',
+              onClick: () => {
+                savePrefs({ showHidden: prefs.showHidden !== true })
+                void openPath(state.prefs.path, { keepViewer: true })
+              },
+            }, '· 隐藏'),
+            h('button', {
+              key: 'mkdir', type: 'button', className: 'dshgw-wsf-btn', title: '新建文件夹', 'aria-label': '新建文件夹',
+              disabled: snapshot.info?.readOnly === true, onClick: () => askMkdir(),
+            }, '＋ 文件夹'),
+            h('button', {
+              key: 'upload', type: 'button', className: 'dshgw-wsf-btn', title: '上传文件', 'aria-label': '上传文件',
+              disabled: snapshot.info?.readOnly === true, onClick: () => fileInputRef.current?.click(),
+            }, '⇧ 上传'),
+            h('input', {
+              key: 'search', ref: searchRef, className: 'dshgw-wsf-input dshgw-wsf-search', type: 'search',
+              placeholder: '搜索文件名…', defaultValue: search.query, 'aria-label': '搜索文件名',
+              onChange: (event) => {
+                const value = event.target.value
+                if (searchTimerRef.current !== null) clearTimeout(searchTimerRef.current)
+                searchTimerRef.current = setTimeout(() => {
+                  searchTimerRef.current = null
+                  void runSearch(value)
+                }, 300)
+              },
+              onKeyDown: (event) => {
+                if (event.key === 'Escape') { event.target.value = ''; void runSearch('') }
+              },
+            }),
+            h('input', {
+              key: 'files', ref: fileInputRef, type: 'file', multiple: true, style: { display: 'none' },
+              onChange: (event) => {
+                const files = [...(event.target.files ?? [])]
+                event.target.value = ''
+                if (files.length > 0) void uploadFiles(files)
+              },
+            }),
+          ])
+
+          // ---- search results ----------------------------------------------------------
+          const hits = search.results === null ? [] : search.results.matches.slice(0, 200)
+          const resultRows = hits.map((entry) => h('div', {
+            key: `hit-${entry.path}`,
+            className: 'dshgw-wsf-grid dshgw-wsf-row',
+            title: entry.path,
+            onDoubleClick: () => { void openHit(entry) },
+          }, [
+            h('span', { key: 'badge', className: 'dshgw-wsf-badge', 'data-kind': entry.kind }, badgeOf(entry)),
+            h('span', { key: 'name', className: 'dshgw-wsf-name', 'data-kind': entry.kind, onClick: () => { void openHit(entry) } }, entry.name),
+            h('span', { key: 'dir', className: 'dshgw-wsf-sub' }, parentOf(entry.path) ?? ''),
+            h('span', { key: 'size', className: 'dshgw-wsf-sub' }, entry.kind === 'dir' ? '' : formatSize(entry.size)),
+            h('span', { key: 'actions', className: 'dshgw-wsf-actions' }, h('button', {
+              key: 'open', type: 'button', className: 'dshgw-wsf-action',
+              onClick: (event) => { event.stopPropagation(); void openHit(entry) },
+            }, '打开')),
+          ]))
+
+          const resultsPanel = search.results === null && !search.busy && search.error === '' ? null : h('div', { key: 'results', className: 'dshgw-wsf-results' }, [
+            h('div', { key: 'rhead', className: 'dshgw-wsf-results-head' }, [
+              h('span', { key: 'label' }, search.busy ? '搜索中…' : `搜索 “${search.query}” 命中 ${search.results?.matches.length ?? 0} 项${search.results?.truncated === true ? '（已截断）' : ''}`),
+              search.error === '' ? null : h('span', { key: 'err', className: 'dshgw-wsf-error' }, search.error),
+              h('button', {
+                key: 'close', type: 'button', className: 'dshgw-wsf-action',
+                onClick: () => { if (searchRef.current !== null) searchRef.current.value = ''; void runSearch('') },
+              }, '清除'),
+            ]),
+            ...resultRows,
+          ])
+
+          // ---- rows --------------------------------------------------------------------
+          const entries = listing === null ? [] : sortEntries(listing.entries)
+          const sortMark = (key) => (prefs.sortKey === key ? (prefs.sortDir === -1 ? ' ↓' : ' ↑') : '')
+
+          const headRow = h('div', { key: 'headrow', className: 'dshgw-wsf-grid dshgw-wsf-head-row' }, [
+            h('span', { key: 'b', className: 'dshgw-wsf-sub' }, '类型'),
+            h('button', { key: 'n', type: 'button', className: 'dshgw-wsf-sort', onClick: () => cycleSort('name') }, `名称${sortMark('name')}`),
+            h('button', { key: 's', type: 'button', className: 'dshgw-wsf-sort', onClick: () => cycleSort('size') }, `大小${sortMark('size')}`),
+            h('button', { key: 'm', type: 'button', className: 'dshgw-wsf-sort', onClick: () => cycleSort('mtime') }, `修改时间${sortMark('mtime')}`),
+            h('span', { key: 'a', className: 'dshgw-wsf-sub', style: { textAlign: 'right' } }, '操作'),
+          ])
+
+          const rows = entries.map((entry) => {
+            const isDir = entry.kind === 'dir'
+            const actions = [
+              h('button', {
+                key: 'open', type: 'button', className: 'dshgw-wsf-action', title: isDir ? '打开文件夹' : '查看/编辑',
+                onClick: (event) => { event.stopPropagation(); if (isDir) void openPath(entry.path); else void openFile(entry) },
+              }, isDir ? '打开' : '查看'),
+              isDir ? null : h('button', {
+                key: 'dl', type: 'button', className: 'dshgw-wsf-action', title: '下载',
+                onClick: (event) => { event.stopPropagation(); void download(entry) },
+              }, '下载'),
+              h('button', {
+                key: 'rn', type: 'button', className: 'dshgw-wsf-action', title: '重命名',
+                disabled: snapshot.info?.readOnly === true,
+                onClick: (event) => { event.stopPropagation(); askRename(entry) },
+              }, '重命名'),
+              h('button', {
+                key: 'rm', type: 'button', className: 'dshgw-wsf-action', 'data-danger': 'true', title: '删除',
+                disabled: snapshot.info?.readOnly === true,
+                onClick: (event) => { event.stopPropagation(); askRemove(entry) },
+              }, '删除'),
+            ]
+            return h('div', {
+              key: entry.path,
+              className: 'dshgw-wsf-grid dshgw-wsf-row',
+              'data-selected': String(selected === entry.path),
+              title: `${entry.path}${entry.symlink ? '（符号链接）' : ''}${entry.outside === true ? '（指向工作区之外）' : ''}`,
+              onClick: () => setUI({ selected: entry.path }),
+              onDoubleClick: () => { if (isDir) void openPath(entry.path); else void openFile(entry) },
+            }, [
+              h('span', { key: 'badge', className: 'dshgw-wsf-badge', 'data-kind': entry.kind }, badgeOf(entry)),
+              h('span', { key: 'name', className: 'dshgw-wsf-name', 'data-kind': entry.kind,
+                onClick: (event) => { if (isDir) { event.stopPropagation(); void openPath(entry.path) } },
+              }, [
+                entry.name,
+                entry.symlink ? h('span', { key: 'link', className: 'dshgw-wsf-sub' }, ' ↗') : null,
+                entry.outside === true ? h('span', { key: 'out', className: 'dshgw-wsf-sub' }, ' 外部') : null,
+              ]),
+              h('span', { key: 'size', className: 'dshgw-wsf-sub' }, isDir ? '' : formatSize(entry.size)),
+              h('span', { key: 'mtime', className: 'dshgw-wsf-sub' }, formatTime(entry.mtimeMs)),
+              h('span', { key: 'actions', className: 'dshgw-wsf-actions' }, actions),
+            ])
+          })
+
+          const listBody = h('div', { key: 'list', className: 'dshgw-wsf-body' }, [
+            headRow,
+            ...rows,
+            loading && listing === null ? h('div', { key: 'loading', className: 'dshgw-wsf-empty' }, '载入中…') : null,
+            !loading && entries.length === 0 ? h('div', { key: 'empty', className: 'dshgw-wsf-empty' }, '这个目录是空的') : null,
+            listing?.truncated === true
+              ? h('div', { key: 'trunc', className: 'dshgw-wsf-note' }, `只显示前 ${entries.length} 项（共 ${listing.total} 项）`)
+              : null,
+          ])
+
+          // ---- viewer ------------------------------------------------------------------
+          const viewerHeader = viewer === null ? null : h('div', { key: 'vhead', className: 'dshgw-wsf-viewer-head' }, [
+            h('button', {
+              key: 'back', type: 'button', className: 'dshgw-wsf-btn', title: '返回目录',
+              onClick: () => { releaseViewer(state.viewer); setState({ viewer: null }) },
+            }, '← 返回'),
+            h('span', { key: 'name', className: 'dshgw-wsf-viewer-name', title: viewer.path }, viewer.name),
+            h('span', { key: 'meta', className: 'dshgw-wsf-viewer-meta' }, `${formatSize(viewer.size)} ${formatTime(viewer.mtimeMs)}${viewer.mode === 'text' && viewer.dirty ? ' · 已修改' : ''}`),
+            viewer.mode === 'text'
+              ? h('button', {
+                  key: 'save', type: 'button', className: 'dshgw-wsf-btn', title: '保存 (Ctrl+S)',
+                  disabled: viewer.dirty !== true || viewer.saving === true || snapshot.info?.readOnly === true,
+                  onClick: () => { void saveViewer() },
+                }, viewer.saving === true ? '保存中…' : '保存')
+              : null,
+            viewer.mode === 'binary' || viewer.mode === 'image' || viewer.mode === 'media'
+              ? h('button', {
+                  key: 'dl', type: 'button', className: 'dshgw-wsf-btn', title: '下载',
+                  onClick: () => { const entry = (state.listing?.entries ?? []).find((item) => item.path === viewer.path); if (entry !== undefined) void download(entry) },
+                }, '下载')
+              : null,
+          ])
+
+          const viewerBody = viewer === null ? null : h('div', { key: 'viewer', className: 'dshgw-wsf-viewer' }, [
+            viewerHeader,
+            viewer.mode === 'loading'
+              ? h('div', { key: 'note', className: 'dshgw-wsf-note' }, viewer.total > 0 && viewer.loaded > 0
+                  ? `加载预览… ${formatSize(viewer.loaded)} / ${formatSize(viewer.total)}`
+                  : '加载预览…')
+              : null,
+            viewer.mode === 'text'
+              ? h('textarea', {
+                  key: 'editor', className: 'dshgw-wsf-editor', spellCheck: false, value: viewer.text,
+                  'aria-label': `编辑 ${viewer.name}`,
+                  onChange: (event) => setState({ viewer: { ...state.viewer, text: event.target.value, dirty: event.target.value !== state.viewer.original } }),
+                })
+              : null,
+            viewer.mode === 'image'
+              ? h('div', { key: 'image', className: 'dshgw-wsf-media' }, h('img', { src: viewer.url, alt: viewer.name }))
+              : null,
+            viewer.mode === 'media'
+              ? h('div', { key: 'media', className: 'dshgw-wsf-media' }, extensionOf(viewer.name) === 'pdf'
+                  ? h('iframe', { src: viewer.url, title: viewer.name, style: { width: '100%', height: '100%', border: 0 } })
+                  : (MEDIA_MIME[extensionOf(viewer.name)] ?? '').startsWith('audio')
+                    ? h('audio', { src: viewer.url, controls: true })
+                    : h('video', { src: viewer.url, controls: true }))
+              : null,
+            viewer.mode === 'binary'
+              ? h('div', { key: 'binary', className: 'dshgw-wsf-empty' }, [
+                  h('div', { key: 'msg' }, '这个文件不能在面板里预览。'),
+                  viewer.error === '' ? null : h('div', { key: 'err', className: 'dshgw-wsf-sub' }, viewer.error),
+                ])
+              : null,
+            viewer.error !== '' && viewer.mode === 'text' ? h('div', { key: 'err', className: 'dshgw-wsf-note dshgw-wsf-error' }, viewer.error) : null,
+          ])
+
+          // ---- dialog ------------------------------------------------------------------
+          const dialogNode = dialog === null ? null : h('div', {
+            key: 'dialog',
+            className: 'dshgw-wsf-overlay',
+            onPointerDown: (event) => { if (event.target === event.currentTarget && dialog.busy !== true) closeDialog() },
+          }, h('div', { className: 'dshgw-wsf-dialog' }, [
+            h('div', { key: 'title', className: 'dshgw-wsf-dialog-title' }, dialog.title),
+            dialog.message === undefined ? null : h('div', { key: 'msg', className: 'dshgw-wsf-dialog-text' }, dialog.message),
+            dialog.kind === 'remove'
+              ? null
+              : h('input', {
+                  key: 'value', className: 'dshgw-wsf-input', value: dialog.value, autoFocus: true,
+                  'aria-label': dialog.title, placeholder: dialog.kind === 'mkdir' ? '文件夹名称' : '新名称',
+                  onChange: (event) => setState({ dialog: { ...state.dialog, value: event.target.value } }),
+                  onKeyDown: (event) => {
+                    if (event.key === 'Enter') { event.preventDefault(); void submitDialog() }
+                  },
+                }),
+            dialog.error === '' ? null : h('div', { key: 'err', className: 'dshgw-wsf-dialog-text dshgw-wsf-error' }, dialog.error),
+            h('div', { key: 'row', className: 'dshgw-wsf-dialog-row' }, [
+              h('button', { key: 'cancel', type: 'button', className: 'dshgw-wsf-ghost', disabled: dialog.busy === true, onClick: () => closeDialog() }, '取消'),
+              h('button', {
+                key: 'ok', type: 'button',
+                className: dialog.danger === true ? 'dshgw-wsf-primary dshgw-wsf-btn-danger' : 'dshgw-wsf-primary',
+                style: dialog.danger === true ? { background: 'var(--dsw-alias-state-error-primary, #b3453c)' } : undefined,
+                disabled: dialog.busy === true || (dialog.kind !== 'remove' && String(dialog.value ?? '').trim() === ''),
+                onClick: () => { void submitDialog() },
+              }, dialog.busy === true ? '处理中…' : dialog.confirmLabel ?? '确定'),
+            ]),
+          ]))
+
+          // ---- footer ------------------------------------------------------------------
+          const transferNode = transfer === null ? null : h('span', { key: 'transfer', className: 'dshgw-wsf-transfer' }, [
+            h('span', { key: 'label' }, `${transfer.kind === 'upload' ? '上传' : '下载'} ${transfer.name}`),
+            h('span', { key: 'track', className: 'dshgw-wsf-bar-track' },
+              h('span', { key: 'fill', className: 'dshgw-wsf-bar-fill', style: { width: `${transfer.total > 0 ? Math.min(100, Math.round((transfer.loaded / transfer.total) * 100)) : 0}%` } })),
+            h('span', { key: 'pct' }, transfer.state === 'failed' ? '失败' : transfer.state === 'done' ? '完成' : `${formatSize(transfer.loaded)} / ${formatSize(transfer.total)}`),
+            transfer.error === '' ? null : h('span', { key: 'err', className: 'dshgw-wsf-error' }, transfer.error),
+          ])
+
+          const foot = h('div', { key: 'foot', className: 'dshgw-wsf-foot' }, [
+            h('span', { key: 'count' }, listing === null ? '—' : `${listing.total} 项${listing.hidden > 0 ? `（${listing.hidden} 个隐藏）` : ''}`),
+            transferNode,
+            notice === '' ? null : h('span', { key: 'notice', className: noticeTone === 'error' ? 'dshgw-wsf-error' : 'dshgw-wsf-ok' }, notice),
+            error === '' ? null : h('span', { key: 'error', className: 'dshgw-wsf-error' }, `错误：${error}`),
+            h('span', { key: 'grow', className: 'dshgw-wsf-foot-grow' }, snapshot.info === null ? '' : `${snapshot.info.root}${snapshot.info.readOnly === true ? '（只读）' : ''}`),
+          ])
+
+          return h('div', {
+            className: 'dshgw-wsf-panel',
+            style,
+            role: 'region',
+            'aria-label': '文件',
+            onDragOver: (event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy' },
+            onDrop: (event) => {
+              event.preventDefault()
+              const files = [...(event.dataTransfer?.files ?? [])]
+              if (files.length > 0) void uploadFiles(files)
+            },
+          }, [
+            head,
+            bar,
+            viewer !== null ? viewerBody : h('div', { key: 'stack', style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } }, [
+              resultsPanel,
+              listBody,
+            ]),
+            foot,
+            dialogNode,
+            h('div', { key: 'sx', className: 'dshgw-wsf-sx', onPointerDown: (event) => beginDrag(event, 'east') }),
+            h('div', { key: 'sy', className: 'dshgw-wsf-sy', onPointerDown: (event) => beginDrag(event, 'south') }),
+            h('div', { key: 'sz', className: 'dshgw-wsf-sz', onPointerDown: (event) => beginDrag(event, 'both'), title: '拖动调整大小' }, '◢'),
+          ])
+        }
+
+        /** Sidebar entry: the panel's only always-visible affordance. */
+        function Entry(props) {
+          const [snapshot, setSnapshot] = useState(state)
+          useEffect(() => {
+            const listener = (next) => setSnapshot(next)
+            listeners.add(listener)
+            return () => listeners.delete(listener)
+          }, [])
+          // The sidebar hands every footer action a `wide` flag; `false` is the collapsed icon rail.
+          const wide = props?.wide !== false
+          const count = snapshot.listing === null ? null : snapshot.listing.total
+          return h('button', {
+            type: 'button',
+            className: wide ? 'dshgw-wsf-entry' : 'dshgw-wsf-entry dshgw-wsf-entry-rail',
+            title: snapshot.layout.open ? '收起文件面板' : '打开文件面板',
+            'aria-label': '文件',
+            onClick: () => toggle(),
+          }, [
+            h('span', { key: 'icon', className: 'dshgw-wsf-entry-icon', 'aria-hidden': 'true' }, '▤'),
+            wide ? h('span', { key: 'label', className: 'dshgw-wsf-entry-label' }, count === null ? '文件' : `文件 (${count})`) : null,
+          ])
+        }
+
+        ctx.effect(() => ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
+          name: 'sidebar.footer.action',
+          id: 'dshgw-workspace-files-entry',
+          order: 120,
+          label: '文件',
+        }, Entry)), 'workspace-files: sidebar entry')
+
+        ctx.effect(() => ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+          name: 'shell.overlay',
+          id: 'dshgw-workspace-files-panel',
+          order: 220,
+          label: '文件',
+        }, Panel)), 'workspace-files: file panel')
+
+        // Ask the host what it activated: the only console-free proof the two halves met, and the
+        // root/read-only facts the toolbar needs before the panel is ever opened.
+        void call('hello').then((info) => {
+          setState({ info })
+          ctx.logger?.info?.(`workspace-files: client ready (root ${info.root}${info.readOnly ? ', read-only' : ''})`)
+        }).catch((failure) => {
+          ctx.logger?.warn?.(`workspace-files: host half unreachable: ${failure?.message ?? failure}`)
+        })
+
+        ctx.logger?.info?.('workspace-files: client surface registered')
+      }
+
+      exports.apply = apply
+      exports.inject = inject
+      return module.exports
+    },
+  })
+})()

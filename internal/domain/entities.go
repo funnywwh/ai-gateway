@@ -33,13 +33,30 @@ type Account struct {
 	// DshTenant names the dshgw tenant the account enters once enabled (M52-rev2). All
 	// keys of the account — existing and newly created — log into this tenant; no
 	// per-key prefix binding is required.
-	DshTenant              string
+	DshTenant string
+	// DshDisabledAt is when an administrator explicitly turned DSH off for this account
+	// (M72). Nil means "never explicitly disabled", which is what lets dshgw.auto_enable
+	// hand DSH to every active account while an administrator's 停用 still wins — the two
+	// states dsh_enabled alone cannot tell apart.
+	DshDisabledAt          *time.Time
 	InflightPolicyOverride string
 	OverdraftLimitMicros   int64
 	Status                 string
 	Note                   string
 	CreatedAt              time.Time
 	UpdatedAt              time.Time
+
+	// Feishu identity of the account (M72: this IS the DSH portal login identity; M70 had
+	// written it as a directory-sync mapping only). One Feishu person maps to one account and
+	// back — the database enforces both directions through a unique index — and the columns
+	// mirror the key-level ones from M60 so an audit line reads the same either way.
+	// FeishuBoundBy says who wrote it ("sync" for an automatic merge, an admin username for a
+	// manual binding, "key-migration" for the M72 backfill of a legacy key-level binding).
+	FeishuOpenID  string
+	FeishuUnionID string
+	FeishuName    string
+	FeishuBoundAt *time.Time
+	FeishuBoundBy string
 }
 
 // Provider is one upstream provider instance (builtin kind or plugin process).
@@ -186,6 +203,16 @@ type FeishuBinding struct {
 
 // Bound reports whether the projection holds an identity.
 func (b FeishuBinding) Bound() bool { return b.OpenID != "" }
+
+// KeyFeishuIdentity is one API key's bound Feishu identity together with the account that
+// key belongs to. The directory sync (M70) reads them all at once to recognize a Feishu
+// person that was bound at the key level before the account-level mapping existed, and
+// offers to promote that identity onto the account.
+type KeyFeishuIdentity struct {
+	KeyID     int64
+	AccountID int64
+	Binding   FeishuBinding
+}
 
 // MCPToken authenticates the MCP endpoint. Scope decides whether the token only
 // reads its own account (query) or may also drive the management API

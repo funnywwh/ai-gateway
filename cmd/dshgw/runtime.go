@@ -9,6 +9,7 @@ import (
 	"github.com/winger/ai-gateway/internal/dshgw/audit"
 	"github.com/winger/ai-gateway/internal/dshgw/browsermount"
 	"github.com/winger/ai-gateway/internal/dshgw/config"
+	"github.com/winger/ai-gateway/internal/dshgw/hostshare"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
 	"github.com/winger/ai-gateway/internal/dshgw/securefile"
 	"github.com/winger/ai-gateway/internal/dshgw/session"
@@ -58,15 +59,53 @@ func (c *cli) loadRuntime(withSessions bool) (*runtimeDeps, error) {
 	// the service here — a pure struct, no listeners, no polling — keeps both paths honest;
 	// `serve` additionally fails hard when sshfs is missing, while a CLI command that has
 	// nothing to do with ssh only warns.
-	ssh, err := sshWorkspaceService(cfg, manager, nil)
+	// The logger, not nil: the service's warnings are the only narrative of a mount it refused
+	// or had to break (a self-nesting source, a wedge it aborted), and nil silently discards
+	// them — the audit stream records the same events, but an operator reads the log first.
+	// slog.Default() is the process logger in every command shape, serve included.
+	ssh, err := sshWorkspaceService(cfg, manager, slog.Default())
 	if err != nil {
 		return nil, err
 	}
 	manager.SSHWorkspaces = ssh
+	// M71: the operator-declared host directories. No binaries, no polling, no kernel mounts —
+	// the service only resolves configuration into bindings and materializes their sandbox
+	// paths, so it is built unconditionally and stays nil when nothing is declared.
+	shares, err := hostShareService(cfg, slog.Default())
+	if err != nil {
+		return nil, err
+	}
+	manager.HostShares = shares
 	// CLI processes cannot detach mounts owned by the live browser transport.
 	// Guard even while disabled: a config toggle does not remove existing kernel mounts.
 	manager.BrowserWorkspaces = &browsermount.DetachedGuard{Registry: reg}
 	return &runtimeDeps{cfg: cfg, reg: reg, validator: client, manager: manager}, nil
+}
+
+// hostShareService builds the M71 service from the deployment's declarations, or returns a nil
+// hook when none are configured. It never fails for a missing share: config validation already
+// refused a path that is not a directory, and a directory that disappears later is skipped at
+// worker start rather than taking the whole gateway down.
+func hostShareService(cfg *config.Config, logger *slog.Logger) (tenancy.HostShareHook, error) {
+	if !cfg.HostShares.Enabled || len(cfg.HostShares.Shares) == 0 {
+		return nil, nil
+	}
+	declarations := make([]hostshare.Declaration, 0, len(cfg.HostShares.Shares))
+	for _, share := range cfg.HostShares.Shares {
+		source := share.Path
+		// The bind uses the resolved path, so a symlinked declaration cannot become a second
+		// path to something the validation did not look at.
+		if resolved, err := filepath.EvalSymlinks(share.Path); err == nil {
+			source = resolved
+		}
+		declarations = append(declarations, hostshare.Declaration{
+			Name:     share.Name,
+			Source:   source,
+			ReadOnly: share.EffectiveReadOnly(),
+			Tenants:  share.Tenants,
+		})
+	}
+	return hostshare.New(hostshare.Options{Subdir: cfg.HostShares.Subdir, Declarations: declarations}, logger)
 }
 
 // sshWorkspaceService builds the M64 service when the feature is configured, or returns a nil
@@ -84,16 +123,15 @@ func sshWorkspaceService(cfg *config.Config, manager *tenancy.Manager, logger *s
 		return manager.Restart(ctx, current)
 	}
 	service, err := sshworkspace.New(sshworkspace.Options{
-		MountSubdir:     cfg.SSHWorkspaces.MountSubdir,
-		SSHBin:          cfg.SSHWorkspaces.SSHBin,
-		SSHFSBin:        cfg.SSHWorkspaces.SSHFSBin,
-		IdentitySource:  cfg.SSHWorkspaces.IdentitySource,
-		IdentityDir:     cfg.SSHWorkspaces.IdentityDir,
-		SSHConfigSource: cfg.SSHWorkspaces.SSHConfigSource,
-		Hosts:           cfg.SSHWorkspaces.Hosts,
-		ConnectTimeout:  cfg.SSHWorkspaces.ConnectTimeout.Duration(),
-		MaxEntries:      cfg.SSHWorkspaces.MaxEntries,
-		SSHFSOptions:    cfg.SSHWorkspaces.SSHFSOptions,
+		MountSubdir:    cfg.SSHWorkspaces.MountSubdir,
+		SSHBin:         cfg.SSHWorkspaces.SSHBin,
+		SSHFSBin:       cfg.SSHWorkspaces.SSHFSBin,
+		IdentityDir:    cfg.SSHWorkspaces.IdentityDir,
+		SSHConfigDir:   cfg.SSHWorkspaces.SSHConfigDir,
+		Hosts:          cfg.SSHWorkspaces.Hosts,
+		ConnectTimeout: cfg.SSHWorkspaces.ConnectTimeout.Duration(),
+		MaxEntries:     cfg.SSHWorkspaces.MaxEntries,
+		SSHFSOptions:   cfg.SSHWorkspaces.SSHFSOptions,
 	}, sshworkspace.NewStore(filepath.Join(cfg.StateDir, "ssh-mounts.json")), restart, &audit.JSONL{Path: cfg.AuditPath}, logger)
 	if err != nil {
 		return nil, fmt.Errorf("ssh workspaces: %w", err)

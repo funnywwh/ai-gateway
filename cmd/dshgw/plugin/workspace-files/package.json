@@ -1,0 +1,24 @@
+{
+  "name": "dshgw-workspace-files",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Workspace file manager panel for the dsh web GUI: browse, preview, edit, upload, download, rename and delete inside one clamped workspace root, over dsh's own authenticated RPC channel",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js"
+  },
+  "scripts": {
+    "build": "node build-client.mjs",
+    "test": "node --test --test-force-exit test/*.test.mjs"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ]
+    }
+  }
+}

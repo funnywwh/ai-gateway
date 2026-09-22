@@ -82,7 +82,7 @@ func TestDisconnectKeepsTheMountWaitingForAReload(t *testing.T) {
 	if m.closed {
 		t.Fatal("the kernel mount was released before the grace window passed")
 	}
-	if s.recordPath(sh.id) == "" {
+	if s.recordPath(sh.tenant.Name, sh.id) == "" {
 		t.Fatal("no record path")
 	}
 	if _, err := s.dispatch(context.Background(), "close", tenant, "owner", payload{Token: sh.token}); err != nil {

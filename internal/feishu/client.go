@@ -63,14 +63,23 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("feishu %s: %s", e.Kind, e.Message)
 }
 
-// Client performs the two server-side calls of the authorization code flow.
+// Client performs the two server-side calls of the authorization code flow plus the
+// contact-directory reads of the org sync (M70, see directory.go).
 type Client struct {
 	AppID        string
 	AppSecret    string
 	AuthorizeURL string
 	TokenURL     string
 	UserInfoURL  string
-	Scopes       []string
+	// TenantTokenURL and ContactURL serve the directory read. Empty means the documented
+	// production endpoints (DefaultTenantTokenURL/DefaultContactURL); they are configurable
+	// so tests can point them at a stub server.
+	TenantTokenURL string
+	ContactURL     string
+	Scopes         []string
+	// token caches the tenant access token between directory calls. It lives in memory
+	// only — like every Feishu token in this package, it is never persisted.
+	token tenantToken
 	// HTTP is injectable for tests. It never follows redirects and never carries a jar:
 	// the only cookies in this flow belong to the browser.
 	HTTP    *http.Client
@@ -89,13 +98,15 @@ var directTransport = func() *http.Transport {
 // New builds a client from the configuration block.
 func New(cfg config.Feishu) *Client {
 	return &Client{
-		AppID:        strings.TrimSpace(cfg.AppID),
-		AppSecret:    strings.TrimSpace(cfg.AppSecret),
-		AuthorizeURL: strings.TrimSpace(cfg.AuthorizeURL),
-		TokenURL:     strings.TrimSpace(cfg.TokenURL),
-		UserInfoURL:  strings.TrimSpace(cfg.UserInfoURL),
-		Scopes:       strings.Fields(cfg.Scopes),
-		Timeout:      time.Duration(cfg.TimeoutS) * time.Second,
+		AppID:          strings.TrimSpace(cfg.AppID),
+		AppSecret:      strings.TrimSpace(cfg.AppSecret),
+		AuthorizeURL:   strings.TrimSpace(cfg.AuthorizeURL),
+		TokenURL:       strings.TrimSpace(cfg.TokenURL),
+		UserInfoURL:    strings.TrimSpace(cfg.UserInfoURL),
+		TenantTokenURL: strings.TrimSpace(cfg.TenantTokenURL),
+		ContactURL:     strings.TrimSpace(cfg.ContactURL),
+		Scopes:         strings.Fields(cfg.Scopes),
+		Timeout:        time.Duration(cfg.TimeoutS) * time.Second,
 	}
 }
 

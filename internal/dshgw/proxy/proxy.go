@@ -46,13 +46,40 @@ type DSHAuthorizer interface {
 	Authorize(context.Context, string) (string, error)
 }
 
-// KeyAdopter persists the key a user just proved valid for a tenant that has none,
-// and provisions that tenant. It is implemented by the lifecycle layer: the proxy
-// decides identity, it does not write tenant state itself.
-type KeyAdopter interface {
-	// AdoptKey stores the key when the tenant has a different one, or none, and
-	// reports whether anything changed.
-	AdoptKey(ctx context.Context, tenant, key string) (bool, error)
+// LoginPrepare is the login moment's lifecycle hook (M69).
+//
+// Every successful login re-applies the platform's slice of a tenant's dsh configuration —
+// the model list its own worker key is granted on aigw, and the credential reference that
+// provider reads — and makes sure the tenant's worker is up, because signing out stops it.
+// It is implemented by the lifecycle layer: the proxy decides identity, it does not write
+// tenant state itself.
+//
+// submittedKey is the key this login presented, or "" for a login that carries none (a Feishu
+// ticket). It is only ever adopted when the tenant has no key at all; the platform slice itself
+// always comes from the tenant's stored worker key.
+type LoginPrepare interface {
+	PrepareLogin(ctx context.Context, tenant, submittedKey string) error
+}
+
+// LogoutResult is what one tenant's logout teardown did (M76). The proxy audits it, because
+// "signed out but a mount stayed mounted, and here is which one" is exactly what an operator has
+// to be able to answer afterwards — the pre-M76 audit recorded a failure without saying what
+// failed.
+type LogoutResult struct {
+	// MountsDetached counts the mounts that left the kernel mount table (browser directory mounts
+	// and ssh workspaces together).
+	MountsDetached int
+	// MountsLeftover names the mount points that are still attached.
+	MountsLeftover []string
+	// WorkerStopped is true only when the teardown verified the tenant's dsh is gone.
+	WorkerStopped bool
+}
+
+// LogoutStop tears a tenant's dsh (and its mounts) down once its last session has signed out
+// (M69, sequenced by M76). The proxy decides *when* (it owns the session store, so it knows
+// whether another window is still signed in); the lifecycle layer decides *how*.
+type LogoutStop interface {
+	StopSignedOut(ctx context.Context, tenant string) (LogoutResult, error)
 }
 
 type Proxy struct {
@@ -64,7 +91,8 @@ type Proxy struct {
 	Validator         KeyValidator
 	Authorizer        DSHAuthorizer
 	KeySource         KeySource
-	KeyAdopter        KeyAdopter
+	LoginPrepare      LoginPrepare
+	LogoutStop        LogoutStop
 	Transport         http.RoundTripper
 	BrowserWorkspaces interface {
 		ServeTenant(http.ResponseWriter, *http.Request, registry.Tenant, string)
@@ -256,6 +284,15 @@ func (p *Proxy) PortalHandler() http.Handler {
 			p.feishuLogin(w, r)
 		case r.Method == http.MethodGet && r.URL.Path == "/feishu/error":
 			p.renderLogin(w, http.StatusUnauthorized, feishuErrorMessage(r.URL.Query().Get("reason")))
+		case r.URL.Path == "/login/pick":
+			// The key picker (M72): a GET renders the choice, a POST performs it. Both read the
+			// one-time pick ticket, which is why they are the same route.
+			if r.Method != http.MethodGet && r.Method != http.MethodPost {
+				w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			p.pickHandler(w, r)
 		case r.Method == http.MethodPost && r.URL.Path == "/login":
 			p.login(w, r)
 		case r.Method == http.MethodPost && r.URL.Path == "/logout":
@@ -364,22 +401,39 @@ func (p *Proxy) login(w http.ResponseWriter, r *http.Request) {
 		p.renderLogin(w, http.StatusForbidden, "该账号的 dsh 租户尚未就绪，请联系管理员启用或检查租户状态")
 		return
 	}
-	// A tenant whose key was never stored (built by hand, restored, migrated) has no
-	// provider configuration, so its dsh would open with an empty model list. The
-	// user just proved this key is valid for this tenant, which makes login the one
-	// moment where the deployment can configure it without asking for anything more.
-	// A failure here must not block a valid login: the session is still issued.
-	if p.KeyAdopter != nil {
-		if adopted, err := p.KeyAdopter.AdoptKey(r.Context(), tenant.Name, key); err != nil {
-			p.log().Warn("adopting the login key failed; the tenant keeps its current configuration",
-				"tenant", tenant.Name, "err", err)
-		} else if adopted {
-			p.log().Info("login key adopted for the tenant", "tenant", tenant.Name)
-		}
+	// Which key this session is recorded against (M72). Every key of the account enters the same
+	// tenant, so with more than one the person picks — and the pick is what the audit trail
+	// names. The list arrives with the authorize answer that just admitted the key, so the
+	// picker costs no extra round trip.
+	if identity, err := p.aigwIdentity(ctx, key); err == nil && len(identity.Keys) > 1 {
+		p.offerKeyPick(w, r, tenant.Name)
+		return
 	}
+	// The login moment owns the tenant's lifecycle (M69): the platform slice of its dsh
+	// configuration is re-applied from aigw on every sign-in, and the worker — stopped when the
+	// last session signed out — is brought back up before the browser is sent to it.
+	p.issueTenantSession(w, r, tenant, key, "login_success", 0, "")
+	if len(models) == 0 {
+		w.Header().Set("X-DSHGW-Warning", "valid key has no currently available models")
+	}
+}
+
+// issueTenantSession is everything that happens after "this browser may enter this tenant":
+// the login-time lifecycle work, the session, the cookie, the identity warm-up, the audit entry
+// and the redirect.
+//
+// It exists because M72 gave the portal a third way in (the key picker). Three copies of this
+// sequence would drift, and the parts that must not drift are exactly the ones a copy loses
+// silently: the audit action, the Set-Cookie flags, and the redirect target.
+//
+// keyID names the key the login is recorded against (0 when there was no choice to make), and
+// keyName is what the audit trail shows. It is audit data, never a credential: the tenant's
+// model credential stays the worker key.
+func (p *Proxy) issueTenantSession(w http.ResponseWriter, r *http.Request, tenant registry.Tenant, submittedKey, action string, keyID int64, keyName string) {
+	p.prepareLogin(r, tenant, submittedKey)
 	token, err := p.Sessions.Issue(tenant.Name, p.Config.SessionTTL.Duration())
 	if err != nil {
-		p.log().Error("issue dshgw session failed", "err", err)
+		p.log().Error("issue dshgw session failed", "tenant", tenant.Name, "err", err)
 		p.renderLogin(w, http.StatusInternalServerError, "无法创建会话")
 		return
 	}
@@ -388,17 +442,133 @@ func (p *Proxy) login(w http.ResponseWriter, r *http.Request) {
 	// login must not fail because a display name could not be looked up.
 	p.identity(r.Context(), tenant)
 	p.setSessionCookie(w, tenant.Name, token, false)
-	p.audit(r, tenant.Name, "login_success", "authenticated", http.StatusFound)
+	p.audit(r, tenant.Name, action, "authenticated", http.StatusFound)
+	if keyID != 0 {
+		p.audit(r, tenant.Name, "login_key_selected", keyName, http.StatusFound)
+	}
 	if p.Activity != nil {
 		if err := p.Activity.MarkLogin(tenant.Name, p.now()); err != nil {
 			p.log().Error("persist login activity failed", "tenant", tenant.Name, "err", err)
 		}
 	}
-	if len(models) == 0 {
-		w.Header().Set("X-DSHGW-Warning", "valid key has no currently available models")
-	}
 	http.Redirect(w, r, p.Config.WithTrailingSlash(p.Config.TenantOrigin(tenant.Name)), http.StatusFound)
 }
+
+// aigwIdentity asks aigw who this key belongs to, including the account's usable keys. It is
+// best effort: the caller has already been admitted, so a failure only costs the picker.
+func (p *Proxy) aigwIdentity(ctx context.Context, key string) (aigw.Identity, error) {
+	namer, ok := p.Authorizer.(AccountNamer)
+	if !ok {
+		return aigw.Identity{}, errors.New("the authorization client cannot name accounts")
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, p.Config.ValidateTimeout.Duration())
+	defer cancel()
+	return namer.Identity(lookupCtx, key)
+}
+
+// loginPrepareTimeout bounds the login-time lifecycle work: an aigw model refresh plus, on a
+// cold tenant, a worker start and its readiness probe. Generous on purpose — the alternative is
+// sending the browser to a worker that is not up yet, which is a 502 the person cannot act on —
+// but bounded, so a wedged worker cannot hold the login request open forever.
+const loginPrepareTimeout = 45 * time.Second
+
+// logoutStopTimeout bounds one tenant's logout teardown: the mounts are force-detached first and
+// the dsh is stopped LAST (M76), so this has to cover both — two mount phases of at most 15s each
+// plus the runner's TERM (20s) with its escalation to KILL, with room to spare.
+const logoutStopTimeout = 55 * time.Second
+
+// logoutTotalTimeout bounds the whole portal logout when it revokes several tenants' sessions in
+// one request. Without it a browser signed into eight tenants could hold the request for eight
+// minutes; past this budget the remaining tenants are reported as skipped (`logout_worker_stop_skipped`)
+// and the next sign-in (or the operator) deals with them.
+const logoutTotalTimeout = 150 * time.Second
+
+// prepareLogin runs the login-time lifecycle hook (M69).
+//
+// It is fail-soft on purpose: the person has already proved who they are, so a configuration
+// refresh or a cold start that did not work out must not turn into a refused login. The failure
+// is logged and audited; the tenant's page will report the worker's absence.
+func (p *Proxy) prepareLogin(r *http.Request, tenant registry.Tenant, submittedKey string) {
+	if p.LoginPrepare == nil {
+		return
+	}
+	// The request context dies with the response, and this work deliberately outlives the
+	// browser's patience: a worker left half-started is worse than a slow login.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), loginPrepareTimeout)
+	defer cancel()
+	if err := p.LoginPrepare.PrepareLogin(ctx, tenant.Name, submittedKey); err != nil {
+		p.log().Warn("preparing the tenant for login failed; the session is still issued",
+			"tenant", tenant.Name, "err", err)
+		p.audit(r, tenant.Name, "login_prepare_failed", truncateReason(err.Error()), http.StatusFound)
+	}
+}
+
+// stopSignedOutTenants tears down the dsh of every tenant this logout revoked a session for (M69,
+// sequenced by M76: mounts first, dsh last).
+//
+// It stops unconditionally, and the deployment host is why: a browser that closed its tabs
+// leaves a still-valid session behind for the rest of the TTL, so "nobody is left in this
+// tenant" is not something a session count can answer — the operator's own tenant had sixteen
+// live sessions, most of them days old, which would have kept its dsh running long after signing
+// out. Signing out means the tenant's dsh goes away; a second window of the same person (a tenant
+// is one account) loses it too and reconnects by signing in again.
+//
+// Every step is audited with its outcome, including the reason a step failed: the audit line used
+// to record only the Go error type, which is what made the 2026-09-22 incident (three logouts
+// reporting failure while the dsh itself had already exited) impossible to diagnose from the log.
+func (p *Proxy) stopSignedOutTenants(r *http.Request, tenants []string) {
+	if p.LogoutStop == nil || len(tenants) == 0 {
+		return
+	}
+	deadline := p.now().Add(logoutTotalTimeout)
+	for _, name := range tenants {
+		budget := logoutStopTimeout
+		if left := deadline.Sub(p.now()); left < budget {
+			if left <= 0 {
+				p.log().Warn("skipping a signed-out tenant's teardown: the logout budget is spent", "tenant", name)
+				p.audit(r, name, "logout_worker_stop_skipped", "logout budget spent", http.StatusSeeOther)
+				continue
+			}
+			budget = left
+		}
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), budget)
+		result, err := p.LogoutStop.StopSignedOut(ctx, name)
+		cancel()
+		if result.MountsDetached > 0 {
+			p.audit(r, name, "logout_mount_detach", fmt.Sprintf("%d mount(s) detached", result.MountsDetached), http.StatusSeeOther)
+		}
+		for _, path := range result.MountsLeftover {
+			p.log().Error("a mount outlived a signed-out tenant", "tenant", name, "mountpoint", path)
+			p.audit(r, name, "logout_mount_leftover", truncateReason(path), http.StatusSeeOther)
+		}
+		if err != nil {
+			// The browser's session is already gone, so the logout itself succeeded; a mount or a
+			// worker that would not go away is an operator's problem and is reported as one, with
+			// the reason rather than its type.
+			p.log().Error("tearing down a signed-out tenant failed", "tenant", name, "err", err)
+			p.audit(r, name, "logout_worker_stop_failed", truncateReason(err.Error()), http.StatusSeeOther)
+			continue
+		}
+		if !result.WorkerStopped {
+			p.log().Warn("the signed-out tenant's dsh could not be verified as stopped", "tenant", name)
+			p.audit(r, name, "logout_worker_stop_failed", "worker state not verified", http.StatusSeeOther)
+			continue
+		}
+		p.log().Info("tenant dsh stopped on logout", "tenant", name, "mounts_detached", result.MountsDetached)
+		p.audit(r, name, "logout_worker_stop", "logout", http.StatusSeeOther)
+	}
+}
+
+// truncateReason bounds what goes into an audit line: the file is append-only and read by people,
+// and a FUSE or ssh failure message can carry a lot of output.
+func truncateReason(reason string) string {
+	const limit = 512
+	if len(reason) <= limit {
+		return reason
+	}
+	return reason[:limit] + "…"
+}
+
 func (p *Proxy) allowLogin(ip string) bool {
 	p.rateMu.Lock()
 	defer p.rateMu.Unlock()
@@ -433,17 +603,27 @@ func (p *Proxy) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tenants := p.Registry.List()
+	revoked := make([]string, 0, len(tenants))
 	for _, t := range tenants {
 		for _, cookie := range r.Cookies() {
-			if cookie.Name == p.Config.SessionCookieName(t.Name) {
-				if err := p.Sessions.Delete(cookie.Value); err != nil {
-					p.log().Error("revoke browser session failed", "error_type", fmt.Sprintf("%T", err))
-					http.Error(w, "logout unavailable; please retry", http.StatusServiceUnavailable)
-					return
-				}
+			if cookie.Name != p.Config.SessionCookieName(t.Name) {
+				continue
+			}
+			// A tenant counts as signed out only when the session really belonged to it. The
+			// stop below is triggered by this list, and a fabricated cookie name must not be
+			// able to take somebody else's dsh down.
+			if session, err := p.Sessions.Get(cookie.Value); err == nil && session.Tenant == t.Name {
+				revoked = append(revoked, t.Name)
+			}
+			if err := p.Sessions.Delete(cookie.Value); err != nil {
+				p.log().Error("revoke browser session failed", "error_type", fmt.Sprintf("%T", err))
+				http.Error(w, "logout unavailable; please retry", http.StatusServiceUnavailable)
+				return
 			}
 		}
 	}
+	// Signing out stops that tenant's dsh once nobody is left in it (M69).
+	p.stopSignedOutTenants(r, revoked)
 	for _, t := range tenants {
 		p.setSessionCookie(w, t.Name, "", true)
 	}
@@ -718,6 +898,8 @@ func (p *Proxy) tenantLogout(w http.ResponseWriter, r *http.Request, t registry.
 		http.Error(w, "logout unavailable; please retry", http.StatusServiceUnavailable)
 		return
 	}
+	// Signing out of this tenant stops its dsh once nobody is left in it (M69).
+	p.stopSignedOutTenants(r, []string{t.Name})
 	p.setSessionCookie(w, t.Name, "", true)
 	p.audit(r, t.Name, "tenant_logout_success", "session revoked", http.StatusSeeOther)
 	w.Header().Set("Cache-Control", "no-store")
@@ -1272,6 +1454,7 @@ type FeishuPortal struct {
 	Enabled bool
 	// AigwLoginURL is where the browser starts: aigw's /feishu/login.
 	AigwLoginURL string
-	// Verifier checks tickets and enforces single use.
+	// Verifier checks tickets and enforces single use. It checks both ticket kinds (a login and
+	// a key pick) because the two are told apart by the mode inside the signed payload (M72).
 	Verifier *feishu.Verifier
 }

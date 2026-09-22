@@ -38,8 +38,15 @@ func TestRejectMalformedEdgeAndDeploymentConfiguration(t *testing.T) {
 	if _, err := Load(writeConfig(t, "edge_port_header: X-Tenant-Port\ndeploy:\n  plugin_path: ./cmd/dshgw/plugin/picker-clamp.js\n")); err != nil {
 		t.Fatalf("safe custom header rejected: %v", err)
 	}
-	// The picker that needs no plugin is still a valid configuration without one.
-	if _, err := Load(writeConfig(t, "directory_picker: browse\n")); err != nil {
-		t.Fatalf("browse picker without a plugin path rejected: %v", err)
+	// The picker that needs no plugin is still a valid configuration without one — provided the
+	// tenant-side plugins, whose rows name files beside deploy.plugin_path, are switched off
+	// (M75). This is the whole shape of a deployment that ships no plugin directory at all.
+	if _, err := Load(writeConfig(t, "directory_picker: browse\ntenant_plugins:\n  web_tty:\n    enabled: false\n  workspace_files:\n    enabled: false\n  git_diff:\n    enabled: false\n")); err != nil {
+		t.Fatalf("browse picker with the tenant plugins off rejected: %v", err)
+	}
+	// The same configuration with those plugins left at their default (on) is refused rather than
+	// started: their rows would point at a directory this deployment does not have.
+	if _, err := Load(writeConfig(t, "directory_picker: browse\n")); err == nil {
+		t.Error("a deployment with no plugin directory accepted the default-on tenant plugins")
 	}
 }

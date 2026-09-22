@@ -126,8 +126,19 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
   **邀请链接**（链接本身就是凭据：谁先打开并完成飞书授权，谁就获得这个账号；重新生成即作废上一条）；
   `admin_unbind_admin_user_feishu` 解绑身份；`admin_delete_admin_user` 删除账号（连带它的控制台问答记录）。
   部署始终保留至少一个 `role=admin & status=active` 的账号，因此最后一名不能被降级/停用/删除（409），
-  也不能删除自己或 `bootstrap.admin` 重建的那一行。**客户 API Key 上的飞书绑定不是管理员身份**：
+  也不能删除自己或 `bootstrap.admin` 重建的那一行。**客户侧的飞书身份不是管理员身份**：
   扫码登录只按 `admin_users` 里的绑定解析，客户身份永远拿不到控制台会话。
+
+- **客户的飞书身份绑定在账号上**（M72，`group=accounts`）：`admin_bind_account_feishu` 把一个飞书身份
+  （`body.open_id` 必填，`union_id`/`name` 可选）写到某个账号上，`admin_unbind_account_feishu` 解除
+  （幂等）。这个身份**就是 DSH 门户的登录身份**：一个账号一个身份，一个身份只能属于一个账号（数据库
+  唯一索引；已被别的账号占用时 409），所以它是 `role=admin` 的危险接口、全量审计。
+  `admin_list_accounts` 每行带 `feishu`（`{bound,open_id,name,union_id,bound_by,bound_at}`）、
+  `dsh_effective`、`dsh_disabled_at`、`key_count`、`active_key_count`；`admin_set_account_dsh` 的
+  `enabled=false` 会记下「管理员显式停用」（`dshgw.auto_enable` 不会撤销它），`enabled=true` 会清掉该标记。
+  另外两条**已废弃**：`admin_bind_key_feishu`（Key 级绑定入口，现回答 400 `unsupported_parameter` 并指出
+  替代接口）与 `admin_unbind_key_feishu`（仍可用，只用于清理升级前的历史绑定）。新绑定不要再用它们 ——
+  绑定是"选人"，而人只在飞书通讯录里（`admin_list_feishu_directory`）。
 
 ### 模型级推理强度示例
 

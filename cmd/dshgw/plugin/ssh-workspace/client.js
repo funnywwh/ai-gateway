@@ -26,6 +26,9 @@ window.__ModuleLoader__.load({
 
     const RPC_CHANNEL = '/ssh-workspace'
     const POLL_MS = 2000
+    // Typing in 主机/用户名/端口 re-queries what this account holds for that host. One request
+    // per burst of typing, not one per keystroke — see the debounce below.
+    const IDENTITY_DEBOUNCE_MS = 200
     const MAX_KEY_BYTES = 64 * 1024
     function composeHost(address, username = '', port = '') {
       const raw = address.trim()
@@ -38,9 +41,15 @@ window.__ModuleLoader__.load({
       if (selected && (!/^\d+$/.test(selected) || Number(selected) < 1 || Number(selected) > 65535)) throw new Error('SSH 端口必须为 1..65535')
       return `${user ? `${user}@` : ''}${m[2]}${selected ? `:${Number(selected)}` : ''}`
     }
+    // Every colour below is a DSH theme token, never a literal. The shell's ThemePresenter
+    // writes the palette onto `body` as custom properties and toggles `body[data-ds-dark-theme]`,
+    // so `--dsw-alias-*` resolves per scheme and this dialog follows 外观 without a reload.
+    // The previous version asked for `--dsh-bg`/`--dsh-fg`, which DSH never defines: both
+    // always fell back to the hardcoded dark pair, which is exactly why 浅色 was ignored.
+    // Each var() keeps a neutral fallback for a host whose theme plugin is not loaded.
     const CSS = `
 .dshgw-ssh-action { display: flex; align-items: center; gap: 6px; width: 100%; background: none; border: 0; color: inherit; font: inherit; cursor: pointer; padding: 6px 8px; border-radius: 6px; }
-.dshgw-ssh-action:hover { background: rgba(127,127,127,.14); }
+.dshgw-ssh-action:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.14)); }
 .dshgw-ssh-action-rail .dshgw-ssh-label { display: none; }
 /* The shell renders this whole slot as one flex ROW, which leaves this row and the
    browser-workspace one sharing a foot that only fits one. A plugin owns no wrapper element
@@ -52,27 +61,49 @@ window.__ModuleLoader__.load({
    put its folder icon under the label. */
 div:has(> .dshgw-bw-row), div:has(> div > .dshgw-bw-row),
 div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-direction: column; }
-.dshgw-ssh-backdrop { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.45); z-index: 40; }
-.dshgw-ssh-dialog { width: min(720px, 92vw); max-height: 86vh; overflow: auto; background: var(--dsh-bg, #1b1c1f); color: var(--dsh-fg, #e6e6e6); border: 1px solid rgba(127,127,127,.35); border-radius: 10px; padding: 16px 18px; font-size: 13px; line-height: 1.5; }
+/* flex-start, not center: a dialog that grows and shrinks while someone types must not
+   re-centre itself, or the field under the cursor moves. The gutter is reserved for the same
+   reason — a scrollbar appearing changes the content width and re-wraps every line.
+   absolute, not fixed: this entry renders inside the shell's shell.overlay layer, which is
+   itself absolute/inset:0/z-index:20 inside the overflow:hidden frame. A fixed backdrop would
+   escape that frame and ignore its clipping; absolute keeps the dim layer exactly over the
+   app frame the overlay belongs to, and the layer owns the stacking order, so this rule must
+   not compete with its own z-index. */
+.dshgw-ssh-backdrop { position: absolute; inset: 0; display: flex; align-items: flex-start; justify-content: center; padding: 5vh 0; background: var(--dsw-alias-bg-mask-1, rgba(0,0,0,.45)); }
+.dshgw-ssh-dialog { position: relative; width: min(720px, 92vw); max-height: 86vh; overflow: auto; scrollbar-gutter: stable; background: var(--dsw-alias-bg-layer-2, #1b1c1f); color: var(--dsw-alias-label-primary, #e6e6e6); border: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.35)); border-radius: 10px; padding: 16px 18px; font-size: 13px; line-height: 1.5; }
+/* The close button, pinned to the dialog's top-right corner: the panel is the scroll
+   container, so sticky/top:0 keeps the button in view while a long form (host list,
+   identity section, mounts) scrolls under it. The negative margins pull the bar out to the
+   panel's own edge — the panel's padding is symmetric, so the glyph lands in the corner
+   instead of floating inside the content column — and the matching padding plus the panel
+   background give the bar a solid backing, so scrolled content never shows through it. */
+.dshgw-ssh-closebar { position: sticky; top: -16px; z-index: 1; display: flex; justify-content: flex-end; margin: -16px -18px 0; padding: 8px 18px 4px; background: var(--dsw-alias-bg-layer-2, #1b1c1f); }
+.dshgw-ssh-close { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; line-height: 1; font-size: 16px; border-radius: 6px; }
 .dshgw-ssh-dialog h2 { margin: 0 0 4px; font-size: 15px; }
-.dshgw-ssh-dialog p.hint { margin: 0 0 12px; opacity: .7; }
+.dshgw-ssh-dialog p.hint { margin: 0 0 12px; color: var(--dsw-alias-label-secondary, #b8b8b8); }
 .dshgw-ssh-row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
-.dshgw-ssh-row label { min-width: 68px; opacity: .8; }
-.dshgw-ssh-dialog input[type=text] { flex: 1; background: rgba(0,0,0,.25); color: inherit; border: 1px solid rgba(127,127,127,.4); border-radius: 6px; padding: 6px 8px; font: inherit; }
-.dshgw-ssh-dialog button { background: rgba(127,127,127,.18); color: inherit; border: 1px solid rgba(127,127,127,.35); border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; }
+.dshgw-ssh-row label { min-width: 68px; color: var(--dsw-alias-label-secondary, #b8b8b8); }
+.dshgw-ssh-dialog input[type=text] { flex: 1; background: var(--dsw-alias-bg-base, rgba(0,0,0,.25)); color: inherit; border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.4)); border-radius: 6px; padding: 6px 8px; font: inherit; }
+.dshgw-ssh-dialog button { background: var(--dsw-alias-bg-overlay, rgba(127,127,127,.18)); color: inherit; border: 1px solid var(--dsw-alias-border-l3, rgba(127,127,127,.35)); border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; }
+.dshgw-ssh-dialog button:hover:not([disabled]) { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.28)); }
 .dshgw-ssh-dialog button[disabled] { opacity: .5; cursor: default; }
-.dshgw-ssh-dialog button.primary { background: #2f6feb; border-color: #2f6feb; color: #fff; }
-.dshgw-ssh-list { border: 1px solid rgba(127,127,127,.3); border-radius: 6px; max-height: 220px; overflow: auto; margin: 6px 0; }
-.dshgw-ssh-item { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 4px 8px; border-bottom: 1px solid rgba(127,127,127,.14); }
+.dshgw-ssh-dialog button.primary { background: var(--dsw-alias-button-primary-fill, #2f6feb); border-color: var(--dsw-alias-button-primary-fill, #2f6feb); color: var(--dsw-alias-label-primary-foreground, #fff); }
+.dshgw-ssh-list { border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.3)); border-radius: 6px; max-height: 220px; overflow: auto; margin: 6px 0; }
+.dshgw-ssh-item { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 4px 8px; border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.14)); }
 .dshgw-ssh-item:last-child { border-bottom: 0; }
 .dshgw-ssh-item button { padding: 2px 8px; }
-.dshgw-ssh-crumbs { display: flex; flex-wrap: wrap; gap: 4px; opacity: .85; margin: 4px 0; }
+.dshgw-ssh-crumbs { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
 .dshgw-ssh-crumbs button { padding: 2px 6px; }
-.dshgw-ssh-error { border: 1px solid #b3453c; background: rgba(179,69,60,.18); border-radius: 6px; padding: 8px 10px; margin: 8px 0; white-space: pre-wrap; }
-.dshgw-ssh-notice { border: 1px solid #3a7d44; background: rgba(58,125,68,.18); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
-.dshgw-ssh-muted { opacity: .65; }
+/* Semantic state colours, not literals: the tint is mixed from the token so it lands on the
+   right side of the active palette instead of staying a dark-theme red on a light panel. */
+.dshgw-ssh-error { border: 1px solid var(--dsw-alias-state-error-primary, #b3453c); background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #b3453c) 18%, transparent); border-radius: 6px; padding: 8px 10px; margin: 8px 0; white-space: pre-wrap; }
+.dshgw-ssh-notice { border: 1px solid var(--dsw-alias-state-success-primary, #3a7d44); background: color-mix(in srgb, var(--dsw-alias-state-success-primary, #3a7d44) 18%, transparent); border-radius: 6px; padding: 8px 10px; margin: 8px 0; }
+.dshgw-ssh-muted { color: var(--dsw-alias-label-secondary, #b8b8b8); }
+/* Two lines are reserved for the identity status: its text changes length as the host does,
+   and a section that grows and shrinks moves everything under it. */
+.dshgw-ssh-status { min-height: 2.8em; overflow-wrap: anywhere; }
 .dshgw-ssh-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
-.dshgw-ssh-section { margin-top: 14px; border-top: 1px solid rgba(127,127,127,.25); padding-top: 10px; }
+.dshgw-ssh-section { margin-top: 14px; border-top: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.25)); padding-top: 10px; }
 `
 
     /** Tiny observable store shared by the two slots (they are separate registrations). */
@@ -91,12 +122,20 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       identityKey: '',
       remote: '',
       aliases: [],
+      // 「我的主机」: the account's own alias list, with each entry's key state, plus the form
+      // that adds one. The list comes from the account's ~/.ssh/config, which the account-side
+      // plugin maintains — nothing about it is stored in this browser.
+      entries: [],
+      hostForm: { name: '', hostname: '', user: '', port: '', keyName: '', keyText: '' },
       allowList: [],
       home: '',
       mountSubdir: 'ssh',
       identity: false,
       remoteHome: '',
       listing: null,
+      // The host 主机 was when the listing was produced: a listing from another host stays on
+      // screen, labelled, instead of being thrown away on the first keystroke.
+      listingHost: '',
       newName: '',
       mounts: [],
       replies: [],
@@ -153,38 +192,116 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           if (renamed.ok !== true) ctx.logger?.warn?.(`ssh-workspace: rename failed: ${textOf(renamed.error)}`)
         }
         await ctx.uiWorkspace.connectWorkspace(workspace.workspaceId)
-        patch({ open: false, notice: '' })
+        closeDialog()
+        patch({ notice: '' })
       }
 
       let hostRevision = 0
+      let identityTimer = null
+      let pollTimer = null
       const currentHost = () => composeHost(state.host, state.username, state.port)
-      const refreshIdentity = async (host = '') => {
-        const rev = ++hostRevision
-        try { const value = await call('identityStatus', host ? { host } : {}); if (rev === hostRevision) patch({ identityStatus: value }) }
-        catch (error) { if (rev === hostRevision) patch({ error: textOf(error) }) }
-      }
       const refreshHosts = async () => {
         const rev = ++hostRevision
         const value = await call('hosts', {})
         if (rev !== hostRevision) return
         patch({
           aliases: value.aliases ?? [],
+          entries: value.entries ?? [],
           allowList: value.allowList ?? [],
           home: value.home ?? '',
           mountSubdir: value.mountSubdir ?? 'ssh',
           identity: value.identity === true,
           host: state.host || (value.aliases ?? [])[0]?.name || '',
         })
-        const address = state.host || (value.aliases ?? [])[0]?.name || ''
-        if (!address) { await refreshIdentity(); return }
-        const host = composeHost(address, state.username, state.port)
-        patch({ composedHost: host })
-        await refreshIdentity(host)
+        await refreshIdentityNow()
       }
 
       const refreshMounts = async () => {
         const value = await call('mounts', {})
         patch({ mounts: value.mounts ?? [], replies: value.replies ?? [], mirror: value.mirror === true })
+      }
+
+      // The identity lookup behind the 私钥 section, and the reason this dialog used to jump
+      // while a person typed: it was called from every keystroke and cleared the listing, the
+      // remote path, the composed host, the status and a chosen key file before re-querying.
+      //
+      // Two halves now, and neither of them touches anything else on screen:
+      //   * syncComposedHost composes 「绑定主机」locally, so the field reacts immediately;
+      //   * scheduleIdentityRefresh debounces the round trip (one per burst of typing) and
+      //     leaves the previous status in place until the answer arrives.
+      const syncComposedHost = () => {
+        try { patch({ composedHost: composeHost(state.host, state.username, state.port) }) }
+        catch { patch({ composedHost: '' }) }
+      }
+      const refreshIdentityStatus = async () => {
+        // An empty host asks for the account-wide status, exactly like opening the dialog.
+        let host = ''
+        try { host = state.host.trim() === '' ? '' : currentHost() }
+        catch (error) { patch({ error: textOf(error) }); return }
+        const rev = ++hostRevision
+        try {
+          const value = await call('identityStatus', host ? { host } : {})
+          if (rev === hostRevision) patch({ identityStatus: value })
+        } catch (error) {
+          if (rev === hostRevision) patch({ error: textOf(error) })
+        }
+      }
+      const scheduleIdentityRefresh = () => {
+        syncComposedHost()
+        if (identityTimer !== null) clearTimeout(identityTimer)
+        identityTimer = setTimeout(() => {
+          identityTimer = null
+          refreshIdentityStatus().catch(() => {})
+        }, IDENTITY_DEBOUNCE_MS)
+      }
+      // An explicit action (选用了某台主机、刚添加完一台、打开了对话框) reads the status at once;
+      // only typing is debounced.
+      const refreshIdentityNow = async () => {
+        syncComposedHost()
+        if (identityTimer !== null) {
+          clearTimeout(identityTimer)
+          identityTimer = null
+        }
+        await refreshIdentityStatus()
+      }
+      // Every edit to 主机/用户名/端口 invalidates answers computed for the previous input.
+      const hostChanged = () => {
+        hostRevision += 1
+        scheduleIdentityRefresh()
+      }
+      // Every way out of the dialog goes through here. The mount poll keeps patching state (and
+      // adding and removing the 已挂载 section) while it runs, so leaving it behind a closed
+      // dialog is both pointless work and a source of layout churn on the way back in.
+      const closeDialog = () => {
+        patch({ open: false })
+        if (pollTimer !== null) {
+          window.clearInterval(pollTimer)
+          pollTimer = null
+        }
+        if (identityTimer !== null) {
+          clearTimeout(identityTimer)
+          identityTimer = null
+        }
+        detachEscape()
+      }
+
+      // Escape is the third way out, next to the corner button and the backdrop click. The
+      // listener is attached only while the dialog is open — a page-wide keydown that stays
+      // registered would swallow Escape for whatever the person does next — and removing it is
+      // idempotent, so closeDialog can call it from any path and the dispose hook can too.
+      let escapeAttached = false
+      const onEscape = (event) => {
+        if (event.key === 'Escape') closeDialog()
+      }
+      const attachEscape = () => {
+        if (escapeAttached || typeof window.addEventListener !== 'function') return
+        escapeAttached = true
+        window.addEventListener('keydown', onEscape)
+      }
+      const detachEscape = () => {
+        if (!escapeAttached || typeof window.removeEventListener !== 'function') return
+        escapeAttached = false
+        window.removeEventListener('keydown', onEscape)
       }
 
       const probe = async () => {
@@ -201,8 +318,11 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       const browse = async (path) => {
         patch({ busy: 'list', error: '' })
         try {
-          const value = await call('list', { host: currentHost(), path })
-          patch({ busy: '', listing: value, remote: value.path })
+          const host = currentHost()
+          const value = await call('list', { host, path })
+          // The host is recorded with the listing: changing 主机 afterwards leaves the listing
+          // on screen (labelled) instead of making the dialog collapse and re-centre.
+          patch({ busy: '', listing: value, listingHost: host, remote: value.path })
         } catch (error) {
           patch({ busy: '', error: textOf(error) })
         }
@@ -237,6 +357,61 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
         patch({ busy: 'identity', error: '' })
         try { const host = state.host.trim() ? currentHost() : ''; const value = await call('identityDelete', { scope: state.identityScope, ...(host ? { host } : {}) }); patch({ busy: '', ...(rev === hostRevision ? { identityStatus: value } : {}) }) }
         catch (error) { patch({ busy: '', error: textOf(error) }) }
+      }
+
+      // 「我的主机」: add / pick / delete one entry of this account's own alias list.
+      //
+      // Picking an entry clears 用户名 and 端口 on purpose: those two live in the entry's config
+      // block, and composing `user@alias:port` here would name a different connection than the
+      // one the gateway resolves the alias to.
+      const selectHost = async (name) => {
+        patch({ host: name, username: '', port: '', error: '', notice: '' })
+        await refreshIdentityNow()
+      }
+
+      const clearHostForm = () => patch({ hostForm: { name: '', hostname: '', user: '', port: '', keyName: '', keyText: '' } })
+
+      const addHostEntry = async () => {
+        const form = state.hostForm
+        if (form.hostname.trim() === '') { patch({ error: '请填写主机地址' }); return }
+        patch({ busy: 'host', error: '', notice: '' })
+        try {
+          const entries = await call('addHost', {
+            name: form.name.trim(),
+            hostname: form.hostname.trim(),
+            user: form.user.trim(),
+            port: form.port.trim(),
+            ...(form.keyText ? { privateKey: form.keyText } : {}),
+          })
+          const name = form.name.trim() || form.hostname.trim()
+          patch({
+            busy: '',
+            entries,
+            aliases: entries.map((entry) => ({ name: entry.name, hostName: entry.hostName, user: entry.user, port: entry.port })),
+            notice: `已添加 ${name}：它现在是本账号 ssh config 里的一条别名，可以直接“探测”或“挂载并打开”。`,
+            host: name,
+            username: '',
+            port: '',
+          })
+          clearHostForm()
+          await refreshIdentityNow()
+        } catch (error) { patch({ busy: '', error: textOf(error) }) }
+      }
+
+      const deleteHostEntry = async (name) => {
+        if (!window.confirm(`确认删除主机 ${name}？它的别名与该主机的专用私钥会一起删除。`)) return
+        patch({ busy: 'host', error: '', notice: '' })
+        try {
+          const entries = await call('deleteHost', { name })
+          patch({
+            busy: '',
+            entries,
+            aliases: entries.map((entry) => ({ name: entry.name, hostName: entry.hostName, user: entry.user, port: entry.port })),
+            notice: `已删除 ${name}。`,
+            ...(state.host.trim() === name ? { host: '', username: '', port: '' } : {}),
+          })
+          if (state.host.trim() === name) await refreshIdentityNow()
+        } catch (error) { patch({ busy: '', error: textOf(error) }) }
       }
 
       // Ask the gateway to mount. Nothing is registered here: the account's dsh is restarted
@@ -279,8 +454,6 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
         }
       }
 
-      let pollTimer = null
-
       /** The sidebar-foot action: the entry point for the whole feature. */
       function SidebarAction({ wide } = {}) {
         const current = React.useSyncExternalStore
@@ -297,6 +470,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           'aria-pressed': current.open,
           onClick: async () => {
             patch({ open: true, error: '', notice: '' })
+            attachEscape()
             try {
               await refreshHosts()
               await refreshMounts()
@@ -331,20 +505,87 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
             list: 'dshgw-ssh-hosts',
             value: current.host,
             placeholder: 'gpt001 或 user@host',
-            onChange: (event) => { patch({ host: event.target.value }); refreshIdentitySafe() },
+            onChange: (event) => { patch({ host: event.target.value }); hostChanged() },
           }),
           h('datalist', { id: 'dshgw-ssh-hosts', key: 'list' },
             current.aliases.map((alias) => h('option', { key: alias.name, value: alias.name }, alias.hostName || alias.name))),
           h('button', { key: 'probe', type: 'button', disabled: current.busy !== '', onClick: probe }, '探测'),
         ]))
         rows.push(h('div', { className: 'dshgw-ssh-row', key: 'login' }, [
-          h('label', { key: 'user-label' }, '用户名'), h('input', { key: 'user', type: 'text', disabled: current.busy !== '', value: current.username, placeholder: '可选', onChange: (e) => { patch({ username: e.target.value }); hostRevision++; refreshIdentitySafe() } }),
-          h('label', { key: 'port-label' }, '端口'), h('input', { key: 'port', type: 'text', disabled: current.busy !== '', value: current.port, placeholder: 'SSH config / 22', onChange: (e) => { patch({ port: e.target.value }); hostRevision++; refreshIdentitySafe() } }),
+          h('label', { key: 'user-label' }, '用户名'), h('input', { key: 'user', type: 'text', disabled: current.busy !== '', value: current.username, placeholder: '可选', onChange: (e) => { patch({ username: e.target.value }); hostChanged() } }),
+          h('label', { key: 'port-label' }, '端口'), h('input', { key: 'port', type: 'text', disabled: current.busy !== '', value: current.port, placeholder: 'SSH config / 22', onChange: (e) => { patch({ port: e.target.value }); hostChanged() } }),
         ]))
-        const refreshIdentitySafe = async () => { const rev = ++hostRevision; patch({ listing: null, remoteHome: '', remote: '', identityStatus: { default: { configured: false }, host: { configured: false }, effective: 'none' }, composedHost: '', identityKey: '' }); try { const host = currentHost(); patch({ composedHost: host }); const value = await call('identityStatus', { host }); if (rev === hostRevision) patch({ identityStatus: value }) } catch (error) { if (rev === hostRevision) patch({ error: textOf(error) }) } }
+        // 「我的主机」: the account's own alias list. Adding an entry writes it into THIS
+        // account's ~/.ssh/config (which no other account can see), and deleting one removes
+        // the alias together with that host's dedicated key. Picking an entry only fills 主机.
+        const entries = current.entries ?? []
+        const form = current.hostForm
+        const formField = (key, placeholder, extra = {}) => h('input', {
+          key: `entry-${key}`,
+          type: 'text',
+          disabled: current.busy !== '',
+          value: form[key],
+          placeholder,
+          onChange: (event) => patch({ hostForm: { ...form, [key]: event.target.value } }),
+          ...extra,
+        })
+        rows.push(h('div', { className: 'dshgw-ssh-section', key: 'my-hosts' }, [
+          h('h3', { key: 'title', style: { margin: '0 0 6px', fontSize: '13px' } }, `我的主机（${entries.length}）`),
+          h('p', { key: 'hint', className: 'dshgw-ssh-muted' }, '这些是本账号自己的 ssh 别名（存在本账号工作区的 ~/.ssh/config 里）：添加即写入，删除即移除，并一并删掉这台主机的专用私钥。也可以不添加，直接在「主机」里手输 user@host。'),
+          entries.length === 0
+            ? h('p', { key: 'empty', className: 'dshgw-ssh-muted' }, '还没有主机。')
+            : h('div', { className: 'dshgw-ssh-list', key: 'list' }, entries.map((entry) => h('div', { className: 'dshgw-ssh-item', key: entry.name }, [
+              h('span', { key: 'label' }, `${entry.name}`
+                + (entry.hostName !== entry.name || entry.user || entry.port > 0
+                  ? ` · ${entry.user ? `${entry.user}@` : ''}${entry.hostName}${entry.port > 0 ? `:${entry.port}` : ''}`
+                  : '')
+                + (entry.key?.configured === true ? ` · 私钥 ${entry.key.fingerprint || '已配置'}` : '')
+                + (entry.mounted === true ? ' · 已挂载' : '')),
+              h('span', { key: 'actions' }, [
+                h('button', { key: 'use', type: 'button', disabled: current.busy !== '', onClick: () => { selectHost(entry.name).catch(() => {}) } }, '选用'),
+                h('button', { key: 'remove', type: 'button', disabled: current.busy !== '', onClick: () => { deleteHostEntry(entry.name).catch(() => {}) } }, '删除'),
+              ]),
+            ]))),
+          h('div', { className: 'dshgw-ssh-row', key: 'add-1' }, [
+            h('label', { key: 'label' }, '别名'),
+            formField('name', '可选，默认用地址'),
+            h('label', { key: 'label-2' }, '地址'),
+            formField('hostname', 'gpt001 或 10.0.0.5'),
+          ]),
+          h('div', { className: 'dshgw-ssh-row', key: 'add-2' }, [
+            h('label', { key: 'label' }, '用户名'),
+            formField('user', '可选'),
+            h('label', { key: 'label-2' }, '端口'),
+            formField('port', '可选，默认 22'),
+          ]),
+          h('div', { className: 'dshgw-ssh-row', key: 'add-3' }, [
+            h('label', { key: 'label' }, '私钥'),
+            h('input', {
+              key: 'entry-key',
+              type: 'file',
+              disabled: current.busy !== '',
+              accept: '.pem,.key,id_rsa,id_ed25519',
+              onChange: async (event) => {
+                const file = event.target.files?.[0]
+                patch({ hostForm: { ...state.hostForm, keyName: '', keyText: '' } })
+                if (!file) return
+                if (file.size > MAX_KEY_BYTES) { patch({ error: '私钥不能超过 64 KiB' }); return }
+                try { patch({ hostForm: { ...state.hostForm, keyName: file.name, keyText: await file.text() } }) }
+                catch (error) { patch({ error: textOf(error) }) }
+              },
+            }),
+            h('span', { key: 'key-name', className: 'dshgw-ssh-muted' }, form.keyName !== '' ? `已选择 ${form.keyName}` : '可选：这台主机的专用私钥'),
+            h('button', {
+              key: 'add',
+              type: 'button',
+              disabled: current.busy !== '' || form.hostname.trim() === '',
+              onClick: () => { addHostEntry().catch(() => {}) },
+            }, current.busy === 'host' ? '处理中…' : '添加主机'),
+          ]),
+        ]))
         rows.push(h('div', { className: 'dshgw-ssh-section', key: 'identity' }, [
           h('h3', { key: 'title', style: { margin: '0 0 6px', fontSize: '13px' } }, 'SSH 私钥'),
-          h('p', { key: 'status', className: 'dshgw-ssh-muted' }, `绑定主机：${current.composedHost || '（未填写）'}。当前生效：${current.identityStatus.effective || 'none'}；默认 ${current.identityStatus.default?.configured ? '已配置' : '未配置'}${current.identityStatus.default?.fingerprint ? ` (${current.identityStatus.default.fingerprint})` : ''}；主机专用 ${current.identityStatus.host?.configured ? '已配置' : '未配置'}${current.identityStatus.host?.fingerprint ? ` (${current.identityStatus.host.fingerprint})` : ''}`),
+          h('p', { key: 'status', className: 'dshgw-ssh-muted dshgw-ssh-status' }, `绑定主机：${current.composedHost || '（未填写）'}。当前生效：${current.identityStatus.effective || 'none'}；默认 ${current.identityStatus.default?.configured ? '已配置' : '未配置'}${current.identityStatus.default?.fingerprint ? ` (${current.identityStatus.default.fingerprint})` : ''}；主机专用 ${current.identityStatus.host?.configured ? '已配置' : '未配置'}${current.identityStatus.host?.fingerprint ? ` (${current.identityStatus.host.fingerprint})` : ''}`),
           h('select', { key: 'scope', disabled: current.busy !== '', value: current.identityScope, onChange: (e) => patch({ identityScope: e.target.value, identityKey: '' }) }, [h('option', { key: 'default', value: 'default' }, '账号默认'), h('option', { key: 'host', value: 'host' }, '当前主机专用')]),
           h('input', { key: 'key', type: 'file', disabled: current.busy !== '', accept: '.pem,.key,id_rsa,id_ed25519', onChange: async (e) => { const f=e.target.files?.[0]; patch({ identityKey: '' }); if (!f) return; if (f.size > MAX_KEY_BYTES) { patch({ error: '私钥不能超过 64 KiB' }); return }; patch({ busy: 'identity' }); try { const text=await f.text(); patch({ busy: '', identityKey: text }) } catch (error) { patch({ busy: '', error: textOf(error) }) } } }),
           h('button', { key: 'upload', type: 'button', disabled: current.busy !== '' || !current.identityKey, onClick: uploadIdentity }, '上传/替换'),
@@ -373,6 +614,10 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
         }
         if (current.listing !== null) {
           const entries = current.listing.entries ?? []
+          if (current.listingHost !== '' && current.listingHost !== current.composedHost) {
+            rows.push(h('p', { className: 'dshgw-ssh-muted', key: 'listing-stale' },
+              `以下目录来自 ${current.listingHost}：点「浏览」按当前主机刷新。`))
+          }
           rows.push(h('div', { className: 'dshgw-ssh-list', key: 'listing' },
             entries.length === 0
               ? h('div', { className: 'dshgw-ssh-item' }, h('span', { className: 'dshgw-ssh-muted' }, '（没有子目录）'))
@@ -447,9 +692,21 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           'aria-modal': 'true',
           'aria-label': 'SSH 工作区',
           onClick: (event) => {
-            if (event.target === event.currentTarget) patch({ open: false })
+            if (event.target === event.currentTarget) closeDialog()
           },
         }, h('div', { className: 'dshgw-ssh-dialog' }, [
+          // Pinned to the panel's top-right corner (sticky, see the stylesheet): one glance
+          // away from the form, always reachable however far the content scrolls. The bottom
+          // 关闭 stays where it always was — this is an addition, not a replacement.
+          h('div', { className: 'dshgw-ssh-closebar', key: 'closebar' },
+            h('button', {
+              type: 'button',
+              className: 'dshgw-ssh-close',
+              'data-dshgw-close': 'ssh-workspace',
+              'aria-label': '关闭',
+              title: '关闭',
+              onClick: closeDialog,
+            }, '×')),
           h('h2', { key: 'title' }, 'SSH 工作区'),
           h('p', { className: 'hint', key: 'hint' }, current.identity
             ? '用本账号的 ssh 身份浏览远端目录，并把选中的目录挂到本账号的工作区里。挂载由网关执行，完成后该账号的 DSH 会重载。'
@@ -460,7 +717,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
           mountedSection,
           replySection,
           h('div', { className: 'dshgw-ssh-footer', key: 'footer' }, [
-            h('button', { key: 'close', type: 'button', onClick: () => patch({ open: false }) }, '关闭'),
+            h('button', { key: 'close', type: 'button', onClick: closeDialog }, '关闭'),
             h('button', {
               key: 'open',
               type: 'button',
@@ -490,6 +747,9 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
       ctx.effect(() => () => {
         if (pollTimer !== null) window.clearInterval(pollTimer)
         pollTimer = null
+        if (identityTimer !== null) clearTimeout(identityTimer)
+        identityTimer = null
+        detachEscape()
       }, 'ssh-workspace: poll cleanup')
 
       ctx.logger?.info?.('ssh-workspace: client surface registered')
