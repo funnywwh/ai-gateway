@@ -150,13 +150,17 @@ function keyCountCell(row) {
 async function toggleDSH(row, reload) {
   const enabling = !row.dsh_enabled;
   if (enabling) {
-    const suggested = row.dsh_tenant || slugFromAccount(row.name);
+    // 已有映射优先，否则用服务端下发的规则名（M74）。规则（`dsh-<账号拼音>-<账号ID>`）只有服务端那一份
+    // 实现：页面预填它给出的值，而不是自己再拼一遍。
+    const suggested = row.dsh_tenant || row.dsh_tenant_suggested || '';
     const result = await modal({
       title: '启用 DSH — ' + row.name,
       submitLabel: '启用',
       fields: [
         { name: 'tenant', label: 'dsh 租户名', value: suggested,
-          hint: '小写字母/数字/连字符；留空则沿用既有映射或按账号名自动生成。将自动创建租户与 worker，账号下所有 Key（含新建）都能登录该租户' },
+          hint: '小写字母/数字/连字符；留空则沿用既有映射，或按账号名自动生成（例：陈景峰 / 10 → ' +
+            'dsh-chenjingfeng-10）。将自动创建租户与 worker，账号下所有 Key（含新建）都能登录该租户；' +
+            '已存在的租户名不会被改动' },
       ],
       onSubmit: (values) => api.post('/accounts/' + row.id + '/dsh', {
         enabled: true, ...(values.tenant ? { tenant: values.tenant } : {}),
@@ -179,13 +183,8 @@ async function toggleDSH(row, reload) {
   }
 }
 
-// slugFromAccount mirrors the server's candidate generator so the dialog suggests the
-// same name the server would pick; the server stays the authority on uniqueness.
-function slugFromAccount(name) {
-  let slug = 'dsh-' + String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  if (slug.length > 26) slug = slug.slice(0, 26).replace(/-+$/, '');
-  return /^[a-z][a-z0-9-]{0,25}[a-z]$|^[a-z]$/.test(slug) ? slug : 'dsh-tenant';
-}
+// The dialog's suggestion used to be computed here (slugFromAccount). Since M74 the server derives it
+// and ships it as dsh_tenant_suggested, so the rule has exactly one implementation.
 
 // orgCell renders the account's organizations as their label paths, so an operator reads
 // 总部/研发部 instead of a pair of ids.

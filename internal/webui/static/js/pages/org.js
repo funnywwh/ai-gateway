@@ -580,12 +580,15 @@ export async function render({ page, actions, session }) {
       }
       return;
     }
-    const suggested = account.dsh_tenant || slugFromAccount(account.name);
+    // 预填的两个来源：已有映射优先（`dsh_tenant`，让人一眼看到这次启用不会改名），否则用服务端下发的
+    // 规则名（M74：`dsh-<账号拼音>-<账号ID>`）。页面不自己拼名字——规则只有服务端那一份实现。
+    const suggested = account.dsh_tenant || account.dsh_tenant_suggested || '';
     const result = await modal({
       title: '启用 DSH — ' + account.name,
       submitLabel: '启用',
       fields: [{ name: 'tenant', label: 'dsh 租户名', value: suggested,
-        hint: '小写字母/数字/连字符；留空则沿用既有映射或按账号名自动生成' }],
+        hint: '小写字母/数字/连字符；留空则沿用既有映射，或按账号名自动生成（' +
+          '例：陈景峰 / 10 → dsh-chenjingfeng-10）。已存在的租户名不会被改动' }],
       onSubmit: (values) => api.post('/accounts/' + account.id + '/dsh', {
         enabled: true, ...(values.tenant ? { tenant: values.tenant } : {}),
       }),
@@ -749,12 +752,4 @@ function matchesPerson(account, search) {
 
 function splitList(value) {
   return (value || '').split(',').map((item) => item.trim()).filter(Boolean);
-}
-
-// slugFromAccount mirrors the server's tenant-name candidate so the dialog suggests the same name
-// the server would pick; the server stays the authority on uniqueness.
-function slugFromAccount(name) {
-  let slug = 'dsh-' + String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  if (slug.length > 26) slug = slug.slice(0, 26).replace(/-+$/, '');
-  return /^[a-z][a-z0-9-]{0,25}[a-z]$|^[a-z]$/.test(slug) ? slug : 'dsh-tenant';
 }

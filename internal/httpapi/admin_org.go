@@ -339,6 +339,9 @@ func (s *Server) handleAdminListOrgNodeAccounts(w http.ResponseWriter, r *http.R
 			// request per row.
 			entry["dsh_enabled"] = account.DSHEnabled
 			entry["dsh_tenant"] = account.DshTenant
+			// The person row is where DSH is enabled from (M72), so the dialog's pre-filled tenant
+			// name comes with it (M74) — same field, same value as the account list's.
+			entry["dsh_tenant_suggested"] = dshTenantNameForAccount(account)
 			entry["dsh_disabled_at"] = timeOrNil(account.DshDisabledAt)
 			entry["dsh_effective"] = accountDSHEffective(s.deps.Config != nil && s.deps.Config.Dshgw.AutoEnable, account)
 			entry["feishu"] = accountFeishuJSON(account)

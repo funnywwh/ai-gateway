@@ -110,6 +110,10 @@ GW_BASE=http://127.0.0.1:8099 GW_COOKIE=... scripts/ui-harness/capture.py       
     预勾选、**勾父节点不连带勾子节点**、拼音过滤、整表替换的 body 与空选警告；`#org-accounts` 断言账户页
     的新建/编辑表单用的是同一棵勾选树（不再手填节点 id）；`#org-bind` 断言选人弹窗**先弹出、再读通讯录**，
     读取期间显示进度、失败/空目录/缺权限都在框内说明。
+  - **M74（租户名预填）**：`#org-person` 展开一个未启用 DSH 的账号后点「启用 DSH」，断言弹窗里的租户名
+    输入框初值等于该账号行下发的 `dsh_tenant_suggested`，且提示里写明了规则例子（`dsh-chenjingfeng-10`）。
+    这里钉的是「页面预填服务端给的字段」这条接线；**规则本身**（`dsh-<账号拼音>-<账号ID>`）由 Go 测试
+    （`internal/httpapi`、`internal/pinyin`）负责，harness 喂的是 fixture 里的固定值。
 
 - **M70 起**：`org_feishu.page.html`（组织架构页的「同步飞书」弹窗），共 3 个视图：
   - **`#org-sync`**：stub 里有一份**照真机形状**编的飞书通讯录（部门 BFS 序、一个人可属两个部门、

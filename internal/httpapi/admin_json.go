@@ -140,6 +140,11 @@ func accountJSON(a *domain.Account, nodeIDs []int64, orgs []map[string]any) map[
 		"markup_override_bp":           a.MarkupOverrideBP,
 		"auto_suspend":                 a.AutoSuspend, "auto_resume": a.AutoResume,
 		"dsh_enabled": a.DSHEnabled, "dsh_tenant": a.DshTenant,
+		// M74: the name this account would get if an operator enabled DSH without typing one. It
+		// travels with the row so the console's dialog pre-fills the rule's answer instead of
+		// re-deriving it — one implementation, and the same one the automatic enable uses. A stored
+		// dsh_tenant still wins in the dialog: a name is never changed behind an operator's back.
+		"dsh_tenant_suggested": dshTenantNameForAccount(a),
 		// M72: the console has to be able to show why an account's DSH is off. "enabled" is the
 		// last write's physical state; "disabled_at" is an administrator's explicit 停用, which
 		// dshgw.auto_enable does not undo.

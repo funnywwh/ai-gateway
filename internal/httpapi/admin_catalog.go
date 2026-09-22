@@ -19,6 +19,7 @@ import (
 	"github.com/winger/ai-gateway/internal/ids"
 	"github.com/winger/ai-gateway/internal/mcpsrv"
 	"github.com/winger/ai-gateway/internal/orgtree"
+	"github.com/winger/ai-gateway/internal/pinyin"
 	"github.com/winger/ai-gateway/internal/pricing"
 	"github.com/winger/ai-gateway/internal/secret"
 )
@@ -416,37 +417,94 @@ func (s *Server) handleAdminGetAccountDSH(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// dshTenantNameRE mirrors dshgw's config.ValidTenantName so a console-provisioned tenant
-// name is always accepted by the daemon without a second guess.
-var dshTenantNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,25}[a-z]$|^[a-z]$`)
+// dshTenantNameRE is dshgw's own tenant-name grammar, character for character
+// (internal/dshgw/config.ValidTenantName): a console-provisioned name is then accepted by the daemon
+// without a second guess, and the same expression decides what an operator may type. It used to be a
+// stricter copy (a trailing letter was required) while claiming to mirror the daemon — which M74 hit
+// immediately, because a generated name ends in the account id.
+var dshTenantNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,25}[a-z0-9]$|^[a-z]$`)
 
-// dshTenantSlug derives a tenant name candidate from the account name: ASCII letters and
-// digits survive, everything else collapses to a dash. Names for accounts with no ASCII
-// characters at all fall back to the "dsh-tenant" stem and are made unique by the caller.
-func dshTenantSlug(accountName string) string {
-	var b strings.Builder
-	b.WriteString("dsh-")
+// dshTenantNameMax is the longest name dshTenantNameRE accepts: [a-z] + {0,25} + [a-z0-9].
+const dshTenantNameMax = 27
+
+// dshTenantNamePrefix and dshTenantFallbackStem are the two fixed parts of a generated name.
+const (
+	dshTenantNamePrefix   = "dsh-"
+	dshTenantFallbackStem = "tenant"
+)
+
+// dshTenantNameForAccount derives the tenant name an account gets when nobody supplies one (M74):
+// "dsh-" + the account name's pinyin/ASCII slug + "-" + the account id.
+//
+// 陈景峰/10 becomes dsh-chenjingfeng-10, 杨妙/36 becomes dsh-yangmiao-36, an account called
+// "李智超(colin)" becomes dsh-lizhichao-colin-8. Before this the slug kept ASCII only, so every
+// Chinese-named account collapsed into the same shared stem (dsh-tenant) and operators typed the
+// pinyin by hand.
+//
+// The id is what makes the name unique — two accounts may legitimately be called 张伟 — and it is
+// also why it is never truncated: the readable stem gives way first, at a syllable boundary.
+//
+// This is the only implementation of the rule. The console pre-fills its dialog with the value the
+// server hands it (dsh_tenant_suggested) rather than re-deriving it, and the automatic enable a
+// Feishu login triggers goes through this same function, so all three paths agree.
+func dshTenantNameForAccount(a *domain.Account) string {
+	suffix := "-" + strconv.FormatInt(a.ID, 10)
+	// How many characters the readable stem may use. A positive int64 id is at most 19 digits, so
+	// this budget is never below 3 and the name below always fits the grammar.
+	budget := dshTenantNameMax - len(dshTenantNamePrefix) - len(suffix)
+	stem := fitTenantStem(dshAccountSlugUnits(a.Name), budget)
+	if stem == "" || !dshTenantNameRE.MatchString(dshTenantNamePrefix+stem+suffix) {
+		// An account whose name has no letters at all (punctuation, emoji, a script outside the
+		// pinyin table) keeps the stem the pre-M74 rule fell back to; the id still separates it from
+		// every other such account.
+		stem = fitTenantStem(dshAccountSlugUnits(dshTenantFallbackStem), budget)
+	}
+	return dshTenantNamePrefix + stem + suffix
+}
+
+// dshAccountSlugUnits turns an account name into the readable part of a tenant name, one unit per
+// source character: ASCII letters and digits survive as themselves, CJK characters become their
+// pinyin reading, and everything else becomes a single "-" separator (never a leading one, never two
+// in a row). Units rather than a finished string because truncation has to cut between syllables: a
+// name shortened in the middle of "chenjingfeng" would read as a different, wrong name.
+func dshAccountSlugUnits(name string) []string {
+	units := make([]string, 0, len(name))
 	lastDash := true
-	for _, r := range strings.ToLower(accountName) {
-		switch {
-		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
-			b.WriteRune(r)
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			units = append(units, string(r))
 			lastDash = false
-		default:
-			if !lastDash {
-				b.WriteByte('-')
-				lastDash = true
-			}
+			continue
+		}
+		if reading := pinyin.FirstReading(r); reading != "" {
+			units = append(units, reading)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			units = append(units, "-")
+			lastDash = true
 		}
 	}
-	name := strings.Trim(b.String(), "-")
-	if len(name) > 26 {
-		name = strings.TrimRight(name[:26], "-")
+	if n := len(units); n > 0 && units[n-1] == "-" {
+		units = units[:n-1]
 	}
-	if !dshTenantNameRE.MatchString(name) {
-		name = "dsh-tenant"
+	return units
+}
+
+// fitTenantStem joins as many whole units as fit into budget characters and drops what does not,
+// including a separator left dangling at the cut.
+func fitTenantStem(units []string, budget int) string {
+	used := 0
+	end := 0
+	for i, unit := range units {
+		if used+len(unit) > budget {
+			break
+		}
+		used += len(unit)
+		end = i + 1
 	}
-	return name
+	return strings.Trim(strings.Join(units[:end], ""), "-")
 }
 
 func randomHex4() string {
@@ -571,7 +629,7 @@ func (s *Server) provisionAccountDSH(ctx context.Context, actor string, store Ac
 		tenant = strings.TrimSpace(*requested)
 	}
 	if tenant == "" {
-		tenant = dshTenantSlug(a.Name)
+		tenant = dshTenantNameForAccount(a)
 	}
 	if !dshTenantNameRE.MatchString(tenant) {
 		return "", domain.ErrInvalidRequest(`tenant name must match [a-z][a-z0-9-]{0,25}[a-z]`)

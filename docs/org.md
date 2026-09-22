@@ -162,7 +162,11 @@ python3 scripts/gen-pinyin.py --source FILE   # 或用本地副本
 - 控制台是**零构建**的原生 ES 模块，不能 import npm 包，所以表必须是仓库里的文件；
 - **覆盖范围**：CJK 统一汉字基本区 U+4E00–U+9FFF。表外字符（生僻字/扩展区）**不做拼音匹配**，
   只按字面子串匹配——这是有意的取舍，不是静默失败；
-- 声调已剥离、ü 写作 v（操作员打的是 `zhangsan`，不会打 `zhāngsān`）；
+- 声调与变音符号一并剥离，所以 **ü 落在 u 上**（女 → `nu`，与 路 同串；表里没有 `v`）；
+  操作员打的是 `zhangsan`，不会打 `zhāngsān`；
+- 这张表还有第二个消费者：租户名的自动生成（M74，`dsh-<账号拼音>-<账号ID>`）读的是**同一张表**，
+  由生成脚本同时输出 `internal/webui/static/js/pinyin.js` 与 `internal/pinyin/table_gen.go` 两份，
+  两边的 blob 由 `internal/pinyin` 的测试断言逐字节相等；
 - 树形控件本身**不依赖**这张表：拼音匹配是由调用方通过 `matcher` 注入的能力，所以任何一个用
   这棵树的地方都不必被迫背上 137KB 的表。
 

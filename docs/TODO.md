@@ -869,6 +869,22 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
       联网调用不计费、不记账、不做域名黑白名单；检索词不落审计与日志（有测试钉住）；
       配置了出网代理时，IP 级 SSRF 校验退化为本地预解析（可达范围由代理决定）
 
+## M74 租户名自动用 `dsh-<账号拼音>-<账号ID>`
+
+设计：`docs/design/m74-tenant-name-from-account.md`；规格：`docs/dshgw.md` §3（账号级 dsh 开关）、
+`docs/org.md` §拼音表。用户原话：「租户名自动用 `dsh-<账号>` 格式」（确认口径：`dsh-账号拼音-id`，
+弹窗预填但**仍可手改**）。
+定位：租户名候选只有服务端一份实现（`dshTenantNameForAccount`，拼音来自 `internal/pinyin` 的生成表，
+与控制台过滤用**同一张** blob）；控制台弹窗预填账号行下发的 `dsh_tenant_suggested`，删掉两页各自的
+`slugFromAccount`；中文名不再退化成共享的 `dsh-tenant`。已有映射与显式请求名仍然优先，**不重命名**
+任何既有租户；控制台的租户名正则改为与 dshgw 的 `ValidTenantName` 逐字符相同（因此现在允许以数字结尾）。
+
+- [ ] **真机/浏览器人工走查**：本机 `:8088` 跑的是旧二进制，需 `./scripts/local-run.sh restart` 后对某个
+      未启用的中文名账号点「启用 DSH」，确认①预填 `dsh-<拼音>-<id>`；②启用后徽标与审计
+      `dsh_enable.tenant` 一致；③`data/dshgw-verify/state/admin.sock` 的 `tenant-list` 里能看到该租户
+- [ ] 决策（本里程碑明确不做）：是否给历史租户名做一次性"改名/补 ID"。改名等于换租户——旧租户数据
+      （dsh 主目录、工作区）留在旧名字下，且需要挪目录才能继续用；要做就另开里程碑
+
 ## 缺陷：`dshgw.admin_socket` 与 M63 状态根脱节（2026-09-20 修）
 
 现象：飞书首次登录（绑定了 Key 的账号）在日志里报

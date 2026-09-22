@@ -50,10 +50,11 @@ const ACCOUNTS = [
   { id: 2, name: 'root-acct', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [1], org_nodes: [{ id: 1, name: '总部', path: '总部' }], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
     dsh_enabled: false, dsh_tenant: 'dsh-root', dsh_disabled_at: '2026-09-21T10:00:00Z', feishu: { bound: false }, key_count: 1, active_key_count: 0 },
   // 中文名：拼音过滤与"选中置顶"都要有中文对象才测得出来。
+  // dsh_tenant_suggested 是服务端算好的租户名候选（M74）：弹窗预填它，页面自己不算名字。
   { id: 3, name: '张三', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
-    dsh_enabled: false, dsh_effective: true, feishu: { bound: false }, key_count: 0, active_key_count: 0 },
+    dsh_enabled: false, dsh_effective: true, dsh_tenant_suggested: 'dsh-zhangsan-3', feishu: { bound: false }, key_count: 0, active_key_count: 0 },
   { id: 4, name: '李四', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
-    dsh_enabled: false, feishu: { bound: false }, key_count: 1, active_key_count: 1 },
+    dsh_enabled: false, dsh_tenant_suggested: 'dsh-lisi-4', feishu: { bound: false }, key_count: 1, active_key_count: 1 },
   // 多音字：长 有 chang/zhang 两读，两种拼法都要能搜到。
   { id: 5, name: '长伟', billing_mode: 'postpaid', status: 'active', tags: [], org_node_ids: [], org_nodes: [], balance_micros: 0, credit_limit_micros: 0, low_balance_threshold_micros: 0,
     dsh_enabled: false, feishu: { bound: false }, key_count: 0, active_key_count: 0 },
@@ -785,6 +786,29 @@ try {
     await settle();
     const survived = detailOf('1');
     checks.openRowSurvivesRepaint = !!survived && survived.getBoundingClientRect().height > 0 && !!rowButton('收起');
+
+    // --- 启用 DSH 的租户名预填（M74）----------------------------------------------------------
+    // 规则（dsh-<账号拼音>-<账号ID>）由服务端算好随人员行下发，页面只负责预填它。所以这里断言的是
+    // 「输入框初值 == 行里那个字段」；拼音规则本身由 Go 测试钉住（harness 喂的是 fixture）。
+    const zhangsan = rows().find((el) => el.textContent.includes('张三'));
+    const zhangsanExpand = zhangsan && [...zhangsan.querySelectorAll('button')].find((b) => b.textContent === '展开');
+    if (zhangsanExpand) zhangsanExpand.click();
+    await settle();
+    const zhangsanDetail = detailOf('3');
+    const enableBtn = zhangsanDetail && [...zhangsanDetail.querySelectorAll('button')].find((b) => b.textContent === '启用 DSH');
+    checks.enableDialogOffered = !!enableBtn;
+    if (enableBtn) {
+      enableBtn.click();
+      await settle();
+      const dshModal = document.getElementById('modal-root');
+      const tenantField = dshModal.querySelector('input[name="tenant"]');
+      checks.enableDialogPrefillsSuggested = !!tenantField && tenantField.value === 'dsh-zhangsan-3';
+      // 提示要写出规则与例子，否则预填出来的名字看起来像随手编的。
+      checks.enableDialogExplainsTheRule = dshModal.textContent.includes('dsh-chenjingfeng-10');
+      const cancel = [...dshModal.querySelectorAll('button')].find((b) => b.textContent === '取消');
+      if (cancel) cancel.click();
+      await settle();
+    }
   }
 
   if (view === 'org-bind') {

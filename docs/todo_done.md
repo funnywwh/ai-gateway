@@ -4838,3 +4838,37 @@ organize 六个视图全绿）：
 `make ui-base` 全绿（含新增 `org_assign_test.mjs`）；`scripts/ui-harness/run.sh` 全 **32** 个视图通过（新增 `org-bind`；另两个是 M73 的 `chatWeb`/`chatWebOff`）；
 `go test ./internal/webui/...` 全绿（`pinyin_test.go` 钉的拼音接线与 `embed_test.go` 钉的控制台资源
 都还在）。
+
+## M74 完成记录（租户名自动用 `dsh-<账号拼音>-<账号ID>`）
+
+设计：`docs/design/m74-tenant-name-from-account.md`（含 §8 实现与设计差异、§9 验证）。
+用户原话：「租户名自动用 `dsh-<账号>` 格式」；对话中确认口径为 `dsh-账号拼音-id`，且**弹窗预填但仍可手改**。
+未完成项（真机/浏览器人工走查、历史租户改名决策）留在 `docs/TODO.md` 的 M74 小节。
+
+- [x] **规则只有一份实现**：`internal/httpapi/admin_catalog.go` 的 `dshTenantNameForAccount` ——
+      `dsh-` + 账号名的拼音/ASCII slug + `-` + `accounts.id`。中文名按拼音取**首读音**（陈景峰 →
+      `dsh-chenjingfeng-10`、杨妙 → `dsh-yangmiao-36`、长伟 → `dsh-zhangwei-<id>`），ASCII 原样保留
+      （`李智超(colin)` → `dsh-lizhichao-colin-8`、`E26Q` → `dsh-e26q-30`），无字母的名字回退
+      `dsh-tenant-<id>`。ID 让同音重名（两个张伟）天然不重；超长名按**整音节**截断、**ID 永不截断**
+      （正数 int64 最多 19 位 → 拼音预算恒 ≥3，名字恒在 `^[a-z][a-z0-9-]{0,25}[a-z0-9]$` 内）。
+- [x] **拼音表两处消费者、一个出处**：`scripts/gen-pinyin.py` 现在同时输出既有的
+      `internal/webui/static/js/pinyin.js` 与新的 `internal/pinyin/table_gen.go`（同一 blob、同一
+      SHA-256 头注释）；`pinyin.js` 本次只改了两行头注释（旧说法"ü 写成 v"与数据不符，已改正——
+      实际是 NFD 把变音符号也剥掉了，女 → `nu`，全表没有 `v`）。新叶子包 `internal/pinyin`
+      （`FirstReading`）+ arch 分层表两处登记。
+- [x] **控制台不再自己拼名字**：`accounts.js` / `org.js` 各删掉一份 `slugFromAccount`，改为
+      `dsh_tenant || dsh_tenant_suggested`；两个 JSON 端点（`/accounts`、`/org/nodes/{id}/accounts`）
+      新增只读字段 `dsh_tenant_suggested`。弹窗 hint 写出规则例子与"已存在的租户名不会被改动"。
+- [x] **控制台的租户名正则改为与 dshgw 逐字符相同**（`^[a-z][a-z0-9-]{0,25}[a-z0-9]$|^[a-z]$`）：
+      旧表达式要求以字母结尾（注释却自称 mirrors dshgw），生成名以 ID 结尾会被控制台自己 400。
+- [x] 测试：`internal/pinyin`（与 `pinyin.js` 的 `READINGS` **逐字节相等**、行数 20992、读音抽样、
+      每个首读音都在 `[a-z]+` 内）；`internal/httpapi/admin_dsh_tenant_name_test.go`（12 例规则表、
+      与 `config.ValidTenantName` 交叉断言、Math.MaxInt64、飞书自动开通同名、既有映射粘住、
+      显式名优先、以数字结尾被接受、两个端点都带新字段）；`internal/webui/tests/tenant_name_test.mjs`
+      （文本守卫，已挂进 `make ui-base`）；harness `org-person` 45→48 项。
+- [x] 规格与流程文档：`docs/dshgw.md` §3（规则、优先级、不重命名）、`docs/design/m52-dsh-enable.md`
+      （两处老化描述）、`docs/org.md` §拼音表（两个消费者 + ü 的实情）、`README.md` 文档表、
+      `scripts/ui-harness/README.md`（M74 断言）。
+- [x] 验证：`go vet` + `go test`（四棵显式树）全绿；`make ui-base` 全绿；`make build`（控制台压缩内嵌）
+      通过；`scripts/ui-harness/run.sh` **全 32 个视图通过**（`org-person` 48 项），并对压缩镜像
+      （`UI_STATIC_DIR=.cache/ui-dist/static`）复跑 `org-person`/`org`/`org-accounts` 通过。

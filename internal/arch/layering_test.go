@@ -29,6 +29,10 @@ var allowed = map[string][]string{
 	"internal/arch":     nil,
 	"internal/creds":    nil,
 	"internal/webui":    nil,
+	// The pinyin table is data plus one lookup: a leaf, so both the transport (naming a tenant after
+	// an account, M74) and anything after it can read the same generated table the console filters
+	// with, without either of them owning a second copy.
+	"internal/pinyin": nil,
 	// The console minifier is a build tool: it reads the console's source tree and writes a
 	// compressed mirror plus a `go build -overlay` file. The console itself never imports it
 	// (internal/webui stays a leaf); its only importer is cmd/minifyui.
@@ -88,7 +92,7 @@ var allowed = map[string][]string{
 		"internal/admin", "internal/apikey", "internal/backup", "internal/billing",
 		"internal/chat", "internal/config", "internal/domain", "internal/feishu", "internal/ids",
 		"internal/mcpsrv",
-		"internal/modelmap", "internal/orgtree", "internal/portal", "internal/pricing", "internal/providers",
+		"internal/modelmap", "internal/orgtree", "internal/pinyin", "internal/portal", "internal/pricing", "internal/providers",
 		"internal/quota", "internal/registry", "internal/responses", "internal/retention",
 		"internal/routing",
 		"internal/runtime", "internal/secret", "internal/store", "internal/usage", "pkg/pluginapi",

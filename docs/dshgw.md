@@ -62,6 +62,16 @@ kind: "spec"
 仅当响应无租户名（旧版 aigw）时退回前缀绑定。后台「启用 DSH」按钮经本机 root 守护
 （`dshgw admin-serve`，UNIX socket + 对端 UID 白名单，无 TCP）自动完成铸造 worker Key、
 创建/启动租户；「停用」停止 worker、吊销 worker Key 并保留数据。
+
+**租户名的自动生成规则（M74）**：`dsh-<账号名拼音>-<账号ID>` —— 陈景峰 / 10 →
+`dsh-chenjingfeng-10`，杨妙 / 36 → `dsh-yangmiao-36`，`李智超(colin)` / 8 →
+`dsh-lizhichao-colin-8`。规则只有一处实现（aigw 的 `dshTenantNameForAccount`）：控制台弹窗**预填**
+服务端下发的 `dsh_tenant_suggested`（仍可手改），飞书首登的自动开通走同一个函数，两条入口因此给出
+同一个名字。中文名取拼音表里的**首读音**（多音字 长 → zhang），ID 让同音同名（两个张伟）天然不重；
+名字超过 dshgw 的 27 字符上限时**先截断拼音、保留 ID**，且截断落在音节边界。
+**既有映射与显式请求名仍然优先**：规则只作用于"没有映射且没人指定"的账号，**不重命名**任何既有租户
+（`dsh-tenant`、`dsh-colin` 这类老名字保持原样）。
+
 `dsh_enforce` 决定请求期是否复查：
 
 | `dsh_enforce` | 行为 |
