@@ -77,6 +77,13 @@ func TestHostSharesRefusals(t *testing.T) {
 	if err := os.Symlink(state, link); err != nil {
 		t.Fatal(err)
 	}
+	// The "exists but is not a directory" sample is created here instead of borrowed from the
+	// host (a borrowed /etc/hostname answers "no such file" inside a tenant sandbox, where /etc
+	// is a named whitelist, and the assertion below would then fail for the wrong reason).
+	file := filepath.Join(dir, "shared-file")
+	if err := os.WriteFile(file, []byte("not a directory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	for _, tc := range []struct {
 		name string
@@ -130,7 +137,7 @@ func TestHostSharesRefusals(t *testing.T) {
 		},
 		{
 			name: "a path that is not a directory",
-			body: "  enabled: true\n  shares:\n    - name: docs\n      path: /etc/hostname\n      tenants: [dsh-colin]\n",
+			body: "  enabled: true\n  shares:\n    - name: docs\n      path: " + file + "\n      tenants: [dsh-colin]\n",
 			want: "is not a directory",
 		},
 		{
