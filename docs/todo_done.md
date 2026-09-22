@@ -5303,3 +5303,53 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
   `dshgw-verify` 的启动行。需要时在宿主执行
   `grep -E "aigw starting|level=ERROR" /home/winger/work/ai_gateway/data/aigw-local.log | tail -5`
   与 `journalctl --user -u dshgw-verify --since "-5min" | grep -E "dshgw listening|level=ERROR"` 补两行。
+
+### v4.1.1 发布与部署记录（2026-09-22，本机 aigw-local 8088 已升级；dshgw-verify 重启待人工择时）
+
+本版内容（v4.1.0 之后 2 个提交）：**沙箱补挂交互 shell 启动文件 `/etc/bash.bashrc`**（`8176f8e`：租户终端
+`ls` 无色、提示符是 bash 裸默认值，根因是 profile 的 `/etc` 白名单里没有宿主 bash 启动文件、租户 `HOME`
+也没有 `~/.bashrc`）、**三个租户插件无参 RPC 信封缺 `payload`**（`2bf5483`：变更页报
+`invalid client-request message`）。档位 **patch（4.1.0 → 4.1.1）**：两处都是缺陷修复，**没有配置键增删**、
+没有接口形状变化。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v4.1.1**（`VERSION` 4.1.0 → 4.1.1；release 提交 `6f68aeb`，tag `v4.1.1`；两者已推 `origin/main` 与 `v4.1.1`） |
+| 构建物 | `bin/aigw` 4.1.1 / `6f68aeb`（console minified：43 文件 691497→390038 B，gzip 38 文件 387677→154683 B——本版前端无改动），sha256 `a528dcd493477d06712e2f31125684a6972258905f729a02249db8301610cdae`；`bin/dshgw` 4.1.1 / `6f68aeb`，sha256 `4a5926c76811cf8517772e0e337db236c642874087272d45df9374de79cb53d1`；`gwproxy` 本版无改动，**未重建、未重启** |
+| 部署范围 | 本机 `aigw-local`（8088）：4.1.0 / `52796d4` → 4.1.1 / `6f68aeb`；盘上 `bin/dshgw` 也已换成 4.1.1，但 `dshgw-verify`（门户 18300 / 网关 18299 / 租户 18301+ / worker 18400+）**进程仍是旧版**，重启后生效（见下"待人工"） |
+| 部署方式 | **本次 ssh 到宿主可行**（`ssh rag-server` → uid 1000 + `systemctl --user` 可达，与 v4.1.0 记录里"`Permission denied`"不同），因此换二进制、拍回滚点、重启 8088 由发布会话自己完成；脚本 `deploy-aigw-4.1.1.sh`（工作区根，未入 git）按影响面分段：`--check-profile`（只渲染 profile）→ 默认 A 段（换两份二进制 + 只重启 `aigw-local`，不碰任何租户 worker）→ `--with-dshgw` B 段（重启 `dshgw-verify`，会重启**所有**租户 worker 含本次会话，故默认不跑，留给人工择时） |
+| 回滚点 | `data/prev/bin/aigw.prev-running-4.1.0-52796d4`（23287946 B）、`data/prev/bin/dshgw.prev-running-4.1.0-52796d4`（16025298 B）；同名不同内容时另起名字，绝不覆盖历史。回滚 = `cp -p` 回这两个文件 + `systemctl --user restart aigw-local`（脚本在门禁失败时会自动做，并对 aigw 再验一次 `/healthz`） |
+| 配置/数据变更 | 无：`config.yaml`、`dshgw.yaml`、`data/`（除 `data/prev/bin` 回滚点）未动 |
+
+**部署脚本先演练、再真跑**：`deploy-aigw-4.1.1.sh` 在假部署根 + 桩 `systemctl` + 桩 HTTP（同一端口上先答新版本、
+再答旧版本）上跑过 4 条路径——A 段成功（回滚点命名 → `.new`+`mv` 换入 → 门禁通过 → exit 0）、
+`/version` 不刷新 → 自动装回旧 aigw + 再验 `/healthz` 恢复 → exit 1、A+B 成功、B 段门禁失败 → **两份二进制一起
+回滚** + 两个单元各重启一次 → exit 1。四条路径都验证了盘上二进制回到期望的那一版。
+
+**验证**（本机实测）：
+
+- `GET /version` → `{"revision":"6f68aeb","ui":"minified","ui_encoding":"gzip","version":"4.1.1"}`：回环
+  `http://127.0.0.1:8088/version` 与局域网 `http://192.168.190.86:8088/version` 同值。
+- 探针：`healthz` 200、`readyz` 200、`/admin/ui/` 200、`/admin/ui/js/brand.js` 200（其逻辑就是读 `/version`
+  渲染角标）⇒ 控制台角标应为 `AI Gateway v4.1.1 6f68aeb`。
+- 启动日志（宿主 `data/aigw-local.log`）：`time=2026-09-22T20:47:59.797+08:00 level=INFO msg="aigw starting"
+  version=4.1.1 revision=6f68aeb ui=minified ui_encoding=gzip config=/home/winger/work/ai_gateway/config.yaml
+  listen=:8088`；本条之后没有新的 `level=ERROR`（文件里 17:47 那条 settlement 超时是上一次重启之前的旧记录）。
+- **沙箱补挂的 profile 面证据（重启前就能拿）**：用新 dshgw 渲染 profile（`sandbox-exec --print dsh-tenant`），
+  argv 里出现 `--ro-bind …/state/tenants/dsh-tenant/.dsh/sandbox/bashrc /etc/bash.bashrc`；渲染出的视图
+  在本会话沙箱里可见（`<DshHome>/sandbox/bashrc`，0644、1623 B，含 `alias ls='ls --color=auto'`、
+  `eval "$(dircolors -b)"`、彩色 `PS1`）。即：二进制与视图都已就位，只差 `dshgw-verify` 重启让 worker
+  按新 profile 起。
+- 发布前回归：`gofmt`/`go vet` 干净、`go build ./...` 通过、`go test ./internal/dshgw/... ./cmd/dshgw ./internal/arch`
+  全绿（21 个包，exit 0）、`make dshgw-test` exit 0（88 ok / 0 fail）。
+- **踩到并绕过一个坑**：`dshgw.yaml` 用相对路径（`identity_dir: ./data/dshgw-verify/ssh-keys`），从 ssh（cwd=`$HOME`）
+  直接调 dshgw 会解析到 `/home/winger/data/...` 并报 `stat … no such file or directory`；单元里靠
+  `WorkingDirectory=/home/winger/work/ai_gateway` 才对。部署脚本因此先 `cd "$ROOT"`。
+
+**待人工（会重启所有租户 worker，因此不由发布会话自触发）**：
+
+- [ ] `bash /home/winger/work/ai_gateway/data/dshgw-verify/state/workspaces/dsh-tenant/deploy-aigw-4.1.1.sh --with-dshgw`
+      —— 重启 `dshgw-verify`（B 段，60s 门禁；失败会自动把两份二进制回滚并重启两个单元）。它会结束所有租户
+      DSH 会话（含发起部署的那个），会话历史保留、可继续。
+- [ ] 重启后肉眼验收：侧栏「终端」里 `ls` 出彩色、提示符是绿 `user@host` + 蓝 `cwd`；回归项：agent 的 bash
+      工具里 `ls` 仍无色（非交互 shell 不读 `/etc/bash.bashrc`），`git log` 分页仍正常。

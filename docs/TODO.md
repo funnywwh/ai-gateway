@@ -956,7 +956,11 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 - [x] staging 探针新增 `bashrc-readable` / `shell-ls-alias` / `shell-ls-colors`（真实 bwrap 里用 `bash -ic` 验）；
       本机嵌套 userns 被禁 → 明确 SKIP，需在允许嵌套的宿主上跑 `make dshgw-sandbox-test`
 - [x] 文档：`docs/design/m57-dshgw-strict-isolation.md` §4.1 / §6.1、`docs/dshgw.md` §7 与「终端」插件行
-- [ ] **待宿主执行**（沙箱内换不了二进制、也重启不了 worker）：`make build && make dshgw-build` 后按部署
-      脚本换入 `bin/aigw`/`bin/dshgw` 并重启 aigw（连带重启租户 worker，会结束当时的会话与已开终端）；
-      随后 `dshgw sandbox-exec --print <tenant> | grep bash.bashrc` 应有该绑定，且在「终端」里 `ls` 有色、
-      提示符是绿 `user@host` + 蓝 `cwd`（回归：agent bash 工具里 `ls` 仍无色，因为非交互 shell 不读该文件）
+- [x] **发布并升级 8088（2026-09-22）**：`VERSION` 4.1.0 → 4.1.1（`6f68aeb`，tag `v4.1.1`），
+      `bin/aigw`/`bin/dshgw` 已换进宿主部署根并重启 `aigw-local`——`/version` 4.1.1/`6f68aeb`、
+      `healthz`/`readyz`/`/admin/ui/` 200、启动行 `aigw starting version=4.1.1 revision=6f68aeb`。
+      回滚点 `data/prev/bin/*.prev-running-4.1.0-52796d4`。详见 `docs/todo_done.md` 的 v4.1.1 小节
+- [ ] **待人工择时（会重启所有租户 worker，含发起部署的会话）**：
+      `bash /home/winger/work/ai_gateway/data/dshgw-verify/state/workspaces/dsh-tenant/deploy-aigw-4.1.1.sh --with-dshgw`
+      —— 重启 `dshgw-verify` 让租户 worker 按新 profile 起（`/etc/bash.bashrc` 随之挂入）；随后在「终端」里确认
+      `ls` 有色、提示符是绿 `user@host` + 蓝 `cwd`（回归：agent bash 工具里 `ls` 仍无色、`git log` 分页正常）
