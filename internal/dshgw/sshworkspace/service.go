@@ -101,8 +101,14 @@ func (s *Service) Mounts(tenant string) ([]Mount, error) { return s.store.ForTen
 func (s *Service) All() ([]Mount, error) { return s.store.Load() }
 
 // EnsureIdentity provisions the per-account ssh material under <workspace>/.ssh: the private
-// key (0600), an empty known_hosts to accept new host keys into (0600), and the account's own
-// alias list (0644), seeded from <ssh_config_dir>/<account> when that account has none yet.
+// key (0600, from <identity_dir>/<account> when the operator provisioned one), an empty
+// known_hosts to accept new host keys into (0600), and the account's own alias list (0644),
+// seeded from <ssh_config_dir>/<account> when that account has none yet.
+//
+// There is no shared key source: a key that several accounts hold is a key that scopes them
+// all the same, and a deployment that pointed one at the operator's own identity gave every
+// account the operator's personal key. An account without a key of its own simply has none —
+// the caller that needs one reports it, and the account can upload its own from the UI.
 //
 // The alias list is the account's from the moment it exists: the tenant plugin adds and
 // removes entries in it (「我的主机」) and may also edit it by hand. Nothing here is
@@ -110,6 +116,11 @@ func (s *Service) All() ([]Mount, error) { return s.store.Load() }
 // provisioning step that silently reverted the alias list would delete hosts the account
 // added. To re-seed one account: replace <ssh_config_dir>/<account>, delete
 // <workspace>/.ssh/config, then restart that account's worker.
+//
+// The `identity-managed` marker means "this account's identity is not the gateway's to
+// create": while it exists nothing is copied in, whatever identity_dir holds. It is written
+// by the tenant's own upload and by scripts/dshgw_ssh_identity.sh when reclaiming a key that
+// was handed out by mistake.
 //
 // A missing identity is reported by the caller that needs it.
 func (s *Service) EnsureIdentity(tenant, workspace, dshHome string) error {
@@ -125,18 +136,9 @@ func (s *Service) EnsureIdentity(tenant, workspace, dshHome string) error {
 	if managedErr != nil && !os.IsNotExist(managedErr) {
 		return managedErr
 	}
-	if !isFile(keyPath) && os.IsNotExist(managedErr) {
-		source := ""
-		if s.options.IdentityDir != "" {
-			candidate := filepath.Join(s.options.IdentityDir, tenant)
-			if isFile(candidate) {
-				source = candidate
-			}
-		}
-		if source == "" {
-			source = s.options.IdentitySource
-		}
-		if source != "" {
+	if !isFile(keyPath) && os.IsNotExist(managedErr) && s.options.IdentityDir != "" && tenant != "" {
+		source := filepath.Join(s.options.IdentityDir, tenant)
+		if isFile(source) {
 			if err := securefile.CheckPermissions(source, 0o600); err != nil {
 				return Wrap(CodeInvalidState, "ssh identity "+source+" must be a regular 0600 file", err)
 			}
@@ -147,6 +149,10 @@ func (s *Service) EnsureIdentity(tenant, workspace, dshHome string) error {
 			if err := securefile.WriteAtomic(keyPath, data, 0o600); err != nil {
 				return err
 			}
+			// Audited because it answers the question this feature was misconfigured into:
+			// where did this account's key come from?
+			s.logger.Info("seeded an account ssh identity from the per-account key directory",
+				"tenant", tenant, "source", source)
 		}
 	}
 	knownHosts := filepath.Join(dir, "known_hosts")

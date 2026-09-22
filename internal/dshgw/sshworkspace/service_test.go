@@ -136,12 +136,17 @@ func newTestEnv(t *testing.T, options Options) *testEnv {
 	if len(options.SSHFSOptions) == 0 {
 		options.SSHFSOptions = []string{"reconnect"}
 	}
-	if options.IdentitySource == "" {
-		key := filepath.Join(root, "operator-id_rsa")
-		if err := os.WriteFile(key, []byte("PRIVATE KEY\n"), 0o600); err != nil {
+	if options.IdentityDir == "" {
+		// One key per account: the fixture prepares THIS account's key the way an operator
+		// would, under <dir>/<account>. There is no shared source to fall back to.
+		keys := filepath.Join(root, "ssh-keys")
+		if err := os.MkdirAll(keys, 0o700); err != nil {
+			t.Fatalf("preparing the key directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(keys, "dsh-colin"), []byte("PRIVATE KEY\n"), 0o600); err != nil {
 			t.Fatalf("writing the test key: %v", err)
 		}
-		options.IdentitySource = key
+		options.IdentityDir = keys
 	}
 	env := &testEnv{fake: fake, root: root}
 	service, err := New(options, NewStore(filepath.Join(root, "ssh-mounts.json")), func(_ context.Context, tenant string) error {
@@ -641,26 +646,43 @@ func TestEnsureIdentityPrefersTheAccountKey(t *testing.T) {
 	}
 }
 
-func TestEnsureIdentityAllowsWithoutASource(t *testing.T) {
+func TestEnsureIdentityNeverInventsAKeyWithoutASource(t *testing.T) {
 	env := newTestEnv(t, Options{})
-	// The helper seeds a key source for every other test; this one is about what happens
-	// when a deployment enables the feature and names none.
-	env.service.options.IdentitySource = ""
-	if err := os.Remove(filepath.Join(env.remote.Workspace, ".ssh", "id_rsa")); err != nil {
+	// The helper seeds a per-account directory for every other test; this one is about what
+	// happens when a deployment enables the feature and names none — and about the property
+	// that matters most here: an account with no key of its own stays without one. There is no
+	// shared key to fall back to, by design.
+	env.service.options.IdentityDir = ""
+	keyPath := filepath.Join(env.remote.Workspace, ".ssh", "id_rsa")
+	if err := os.Remove(keyPath); err != nil {
 		t.Fatal(err)
 	}
 	if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := os.Lstat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("an account without a key source got one anyway: %v", err)
+	}
+	// The rest of the account's ssh material is still provisioned: the account can upload its
+	// own identity and connect without another provisioning round.
+	for _, name := range []string{"known_hosts", "config"} {
+		if !isFile(filepath.Join(env.remote.Workspace, ".ssh", name)) {
+			t.Errorf("%s was not provisioned for a keyless account", name)
+		}
+	}
+	// And a mount reports the missing identity as an authentication failure, which is what the
+	// tenant's plugin shows as "this account has no ssh identity yet".
+	if _, _, err := env.service.Open(context.Background(), env.remote, "gpt001", "/opt/app"); CodeOf(err) != CodeAuthFailed {
+		t.Fatalf("Open without an identity: code = %q (%v)", CodeOf(err), err)
+	}
 }
 
-func TestEnsureIdentityRefusesAWorldReadableKey(t *testing.T) {
+func TestEnsureIdentityRefusesAWorldReadableAccountKey(t *testing.T) {
 	directory := t.TempDir()
-	key := filepath.Join(directory, "wide-key")
-	if err := os.WriteFile(key, []byte("PRIVATE KEY\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "dsh-colin"), []byte("PRIVATE KEY\n"), 0o644); err != nil {
 		t.Fatalf("writing the key: %v", err)
 	}
-	env := newTestEnv(t, Options{IdentitySource: key})
+	env := newTestEnv(t, Options{IdentityDir: directory})
 	if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); CodeOf(err) != CodeInvalidState {
 		t.Fatalf("code = %q, want %q (%v)", CodeOf(err), CodeInvalidState, err)
 	}

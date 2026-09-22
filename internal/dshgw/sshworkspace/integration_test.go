@@ -113,11 +113,27 @@ func integrationMountOverLoopback(t *testing.T, key, host string, port int, host
 		t.Fatal(err)
 	}
 
+	// One key per account: the operator's own key is only ever read to be handed to THIS
+	// account as that account's key, under identity_dir/<account>. The gateway has no shared
+	// key source any more — a deployment that had one handed every tenant the operator's own
+	// identity, which is the incident this shape exists to prevent.
+	keys := filepath.Join(root, "ssh-keys")
+	if err := os.MkdirAll(keys, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(keys, tenant.Tenant), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	service, err := New(Options{
 		MountSubdir:    "ssh",
 		SSHBin:         "ssh",
 		SSHFSBin:       "sshfs",
-		IdentitySource: key,
+		IdentityDir:    keys,
 		ConnectTimeout: 10 * time.Second,
 		MaxEntries:     100,
 		SSHFSOptions:   []string{"reconnect", "ServerAliveInterval=15", "ServerAliveCountMax=3", "idmap=user"},

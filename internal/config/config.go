@@ -571,7 +571,6 @@ type DshgwSSHWorkspaces struct {
 	MountSubdir        string   `yaml:"mount_subdir"`
 	SSHBin             string   `yaml:"ssh_bin"`
 	SSHFSBin           string   `yaml:"sshfs_bin"`
-	IdentitySource     string   `yaml:"identity_source"`
 	IdentityDir        string   `yaml:"identity_dir"`
 	SSHConfigDir       string   `yaml:"ssh_config_dir"`
 	Hosts              []string `yaml:"hosts"`

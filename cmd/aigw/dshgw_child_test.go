@@ -460,22 +460,17 @@ func TestBuildDshgwChildRejectsParentTraversal(t *testing.T) {
 // nothing at all.
 func TestBuildDshgwChildCarriesSSHWorkspaces(t *testing.T) {
 	cfg, aigwBinary := childFixture(t)
-	root := t.TempDir()
-	key := filepath.Join(root, "id_rsa")
-	if err := os.WriteFile(key, []byte("PRIVATE KEY\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	cfg.Dshgw.SSHWorkspaces = config.DshgwSSHWorkspaces{
 		Enabled:        true,
 		MountSubdir:    "ssh",
-		IdentitySource: "./keys/id_rsa",
+		IdentityDir:    "./keys",
 		Hosts:          []string{"gpt001"},
 		ConnectTimeout: "7s",
 		PollInterval:   "1s",
 		MaxEntries:     50,
 		SSHFSOptions:   []string{"reconnect"},
 	}
-	// A relative identity path is resolved against the deployment root here, so the child
+	// A relative key directory is resolved against the deployment root here, so the child
 	// never has to guess which directory it meant.
 	working, err := os.Getwd()
 	if err != nil {
@@ -485,7 +480,7 @@ func TestBuildDshgwChildCarriesSSHWorkspaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(filepath.Join(working, "keys"))
-	if err := os.WriteFile(filepath.Join(working, "keys", "id_rsa"), []byte("PRIVATE KEY\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(working, "keys", "dsh-colin"), []byte("PRIVATE KEY\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	child, err := buildDshgwChild(cfg, aigwBinary)
@@ -496,8 +491,8 @@ func TestBuildDshgwChildCarriesSSHWorkspaces(t *testing.T) {
 	if ssh == nil || !ssh.Enabled {
 		t.Fatal("the ssh workspace block did not reach the child")
 	}
-	if ssh.IdentitySource != filepath.Join(working, "keys", "id_rsa") {
-		t.Errorf("identity_source = %q, want the resolved deployment path", ssh.IdentitySource)
+	if ssh.IdentityDir != filepath.Join(working, "keys") {
+		t.Errorf("identity_dir = %q, want the resolved deployment path", ssh.IdentityDir)
 	}
 	if ssh.ConnectTimeout != "7s" || ssh.PollInterval != "1s" {
 		t.Errorf("durations were rewritten: %q / %q", ssh.ConnectTimeout, ssh.PollInterval)

@@ -42,9 +42,15 @@ type Options struct {
 	// SSHBin and SSHFSBin are absolute paths or bare names resolved through PATH.
 	SSHBin   string
 	SSHFSBin string
-	// IdentitySource is the private key copied into accounts that have no account-level key.
-	IdentitySource string
-	// IdentityDir holds per-account keys (<dir>/<tenant>) and wins over IdentitySource.
+	// IdentityDir holds per-account keys (<dir>/<tenant>), copied into accounts that have no
+	// key of their own yet.
+	//
+	// There is deliberately no shared key source. A key is the boundary of what an account can
+	// reach — the account's own ssh runs with it, so an account can read it — which makes one
+	// shared key mean every account can reach everything that key can. A deployment that
+	// pointed such a key at the operator's own identity handed all of them the operator's
+	// personal key, and this deployment's workers all share one uid, so the copy was also a way
+	// out of the sandbox. One key per account is the only supported shape.
 	IdentityDir string
 	// SSHConfigDir holds one alias list per account (<dir>/<tenant>), copied to
 	// <workspace>/.ssh/config for accounts that have none. It is the ONLY source of a

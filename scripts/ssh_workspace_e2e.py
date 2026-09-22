@@ -187,7 +187,10 @@ def config_document(args, root: Path, template_home: Path, aigw_base_url: str) -
         "ssh_workspaces": {
             "enabled": True,
             "mount_subdir": "ssh",
-            "identity_source": str(Path(args.identity).expanduser()),
+            # One key per account. There is no shared key source any more (identity_source was
+            # removed after a deployment pointed it at the operator's own identity), so the
+            # throwaway key is written as THIS account's key under identity_dir.
+            "identity_dir": str(root / "ssh-keys"),
             # Per-account alias seeds: the only source of a tenant's aliases. The e2e proves the
             # alias a request names is resolved from THIS account's file (see the e2e-seed step)
             # and that the account's own list never picks up another account's seed.
@@ -275,19 +278,29 @@ def main() -> int:
         (seeds / tenant).write_text(f"Host e2e-seed\n  HostName 127.0.0.1\n  User {me}\n", encoding="utf-8")
         (seeds / "dsh-other").write_text("Host other-seed\n  HostName 10.255.255.1\n", encoding="utf-8")
 
-        # The removed host-wide key must be a loud, actionable failure — never a silent
-        # fallback that would hand every account the operator's own ~/.ssh/config again.
-        legacy = config_document(args, root, template_home, stub.base_url)
-        legacy["ssh_workspaces"] = dict(legacy["ssh_workspaces"])
-        legacy["ssh_workspaces"].pop("ssh_config_dir", None)
-        legacy["ssh_workspaces"]["ssh_config_source"] = f"/home/{me}/.ssh/config"
-        legacy_path = root / "legacy.yaml"
-        legacy_path.write_text(json.dumps(legacy, indent=2) + "\n", encoding="utf-8")
-        legacy_path.chmod(0o600)
-        refused = run([args.dshgw, "--config", str(legacy_path), "tenant", "list"], cwd=str(REPO))
-        if refused.returncode == 0 or "ssh_config_dir" not in (refused.stdout + refused.stderr):
-            raise AssertionError(f"a config naming the removed ssh_config_source was accepted: {refused.stdout}{refused.stderr}")
-        note("a configuration that still names ssh_config_source is refused, and the error names ssh_config_dir")
+        # This account's own key, one key per account: the gateway copies it in because the
+        # account has none yet. Held separately from the seeds above so the acceptance keeps
+        # proving that the identity and the alias list are independent sources.
+        keys = root / "ssh-keys"
+        keys.mkdir(parents=True, exist_ok=True)
+        keys.chmod(0o700)
+        (keys / tenant).write_bytes(identity.read_bytes())
+        (keys / tenant).chmod(0o600)
+
+        # Both removed host-wide keys must be a loud, actionable failure — never a silent
+        # fallback that would hand every account the operator's own ~/.ssh/config or key again.
+        for removed, replacement in (("ssh_config_source", "ssh_config_dir"), ("identity_source", "identity_dir")):
+            legacy = config_document(args, root, template_home, stub.base_url)
+            legacy["ssh_workspaces"] = dict(legacy["ssh_workspaces"])
+            legacy["ssh_workspaces"].pop(replacement, None)
+            legacy["ssh_workspaces"][removed] = f"/home/{me}/.ssh/{'config' if removed == 'ssh_config_source' else 'id_rsa'}"
+            legacy_path = root / f"legacy-{removed}.yaml"
+            legacy_path.write_text(json.dumps(legacy, indent=2) + "\n", encoding="utf-8")
+            legacy_path.chmod(0o600)
+            refused = run([args.dshgw, "--config", str(legacy_path), "tenant", "list"], cwd=str(REPO))
+            if refused.returncode == 0 or replacement not in (refused.stdout + refused.stderr):
+                raise AssertionError(f"a config naming the removed {removed} was accepted: {refused.stdout}{refused.stderr}")
+            note(f"a configuration that still names {removed} is refused, and the error names {replacement}")
 
         # ── the throwaway gateway ────────────────────────────────────────────────────────
         log = open(root / "dshgw.log", "w", encoding="utf-8")

@@ -126,7 +126,6 @@ func sshWorkspaceService(cfg *config.Config, manager *tenancy.Manager, logger *s
 		MountSubdir:    cfg.SSHWorkspaces.MountSubdir,
 		SSHBin:         cfg.SSHWorkspaces.SSHBin,
 		SSHFSBin:       cfg.SSHWorkspaces.SSHFSBin,
-		IdentitySource: cfg.SSHWorkspaces.IdentitySource,
 		IdentityDir:    cfg.SSHWorkspaces.IdentityDir,
 		SSHConfigDir:   cfg.SSHWorkspaces.SSHConfigDir,
 		Hosts:          cfg.SSHWorkspaces.Hosts,

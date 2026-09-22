@@ -392,8 +392,12 @@ FUSE 连接上积压 8 个无人应答的请求，3 个进程进入 **D 态**（
 | sshfs 选项 | 默认 `reconnect, ServerAliveInterval=15, ServerAliveCountMax=3, idmap=user, max_conns=4`；配置写了 `max_conns` 则以配置为准；`allow_other`/`allow_root` 被代码丢弃（所有 worker 共用一个 uid，共享挂载等于跨账号可读）。`max_conns` 不是 sshfs 的默认值（它默认 1 条连接）：一条挂载服务该账号的**所有**会话，单通道会让一次慢遍历把其它会话的读全部排在后面 —— 外部看到的就是「多个会话一起卡」 |
 
 **密钥就是边界**：账号能读到自己的 `id_rsa`（跑 key 的进程就是它自己），所以「这个账号能到哪些主机」
-完全由发给它的密钥决定。按账号限权要用 `identity_dir`（一账号一把）；共用 `identity_source` 等于所有
-账号共享同一身份 —— `hosts` 白名单只是防跑偏，不是安全边界。
+完全由发给它的密钥决定。因此**一账号一把**是唯一的形状：来源只有运维预置的 `identity_dir/<账号>`
+和账号自己上传两条路。**没有共享密钥来源** —— 早期版本有一个 `identity_source`（一把密钥灌给所有
+账号），本机曾把它指向部署账号自己的 `~/.ssh/id_rsa`，结果是 8 个租户各拿到一份运维私钥的副本，
+而该密钥就在本机 `authorized_keys` 里：租户可以从沙箱内 `ssh` 回宿主，直接变成部署账号（2026-09-22
+事故，处置记录见本节末）。该键已删除，配置里出现会直接拒绝启动；`identity_dir` 也不允许落在本进程
+账号的 `~/.ssh` 里。`hosts` 白名单只是防跑偏，不是安全边界。
 
 ### 别名（`.ssh/config`）与「我的主机」
 
@@ -428,7 +432,8 @@ FUSE 连接上积压 8 个无人应答的请求，3 个进程进入 **D 态**（
 - 界面只显示配置状态及 SHA256 公钥指纹，不回显私钥；再次上传替换所选范围的密钥，删除需确认。私钥以 0600 明文保存在本账号工作区（目录 0700），生产环境必须使用 HTTPS，备份应按敏感数据保护。
 - 主机专用密钥绑定完整连接标识（包含显式用户名、端口）；别名和实际地址是不同绑定（「我的主机」添加的条目绑在**别名**上，因为选中该条目时请求里带的就是别名）。不同账号即使填写同一主机也不共享上传文件。
 - 删除主机密钥后回退账号默认；删除默认后不会在重启时从运维源重新复制（`identity-managed` 标记）。替换/删除不会撤销已经建立的 SSHFS 连接：要立即切换，请先卸载再重新打开，远端撤销授权需移除其 `authorized_keys` 中对应公钥。
-- `identity_source` / `identity_dir` 仅用于初次预置，可以全部留空让用户自行上传；运行连接不会回退到运维共享源或 SSH agent。SSH 配置仅使用具体别名的 `HostName` / `User` / `Port`，不执行 `ProxyCommand`，不加载其中的额外 `IdentityFile`（两侧 ssh 都带 `-F /dev/null`）。
+- 密钥来源只有两个：运维预置 `identity_dir/<账号>`（只在账号没有密钥且没有 `identity-managed` 标记时复制一次）、账号自己在界面上传。**共享密钥能力已删除**（旧键 `identity_source`，写了会直接拒绝启动）；两处都留空是合法配置，此时账号从「没有身份」开始，插件会提示它上传。运行连接不会回退到运维的共享源或 SSH agent。SSH 配置仅使用具体别名的 `HostName` / `User` / `Port`，不执行 `ProxyCommand`，不加载其中的额外 `IdentityFile`（两侧 ssh 都带 `-F /dev/null`）。
+- **共享密钥事故的处置**（2026-09-22，本机 `dshgw-verify`）：`scripts/dshgw_ssh_identity.sh purge-shared` 扫过每个账号私钥可能存在的两处 —— `<workspace>/.ssh/id_rsa`（账号默认）与 `<workspace>/.ssh/host_keys/<SHA256(host)>/id_rsa`（主机专用）—— 按**公钥指纹**（不是逐字节）匹配被撤销的密钥，删除命中的副本，并在删掉账号默认密钥时写下 `identity-managed`（默认只打印计划，`--apply` 才动手；`ssh-mounts.json` 还有挂载时拒绝执行）。按指纹匹配是必需的：本机有一份主机专用副本与原文件仅差一个结尾换行，摘要不同、密钥相同。随后 `scripts/rotate_operator_ssh_key.sh` 轮换被泄露的宿主密钥（生成新密钥 → 逐主机先加新公钥并验证、再从远端 `authorized_keys` 移除旧公钥 → 本机同样处理 → 就地替换密钥文件），最后 `scripts/dshgw_ssh_identity.sh provision --tenant <账号> --key <私钥>` 为每个账号装上自己的密钥（该脚本拒绝安装与被撤销密钥相同的密钥），并把同一份字节写进该账号自己的 `<workspace>/.ssh/id_rsa`（不重启 worker，因此不打断正在进行的会话）。远端 `authorized_keys` 必须自己加：账号拿到的密钥在远端被授权之前，它到不了那台主机。别名种子可用 `trim-seeds` 收口：只保留账号自己添加过的别名（种子与活动 config 同时改写并各留快照）。
 - 若运维配置了 `hosts` 白名单，需包含完整连接标识（例如 `ubuntu@server:2222`），不能靠改端口绕过。
 
 **前置**：宿主装 `sshfs`，租户环境提供 `ssh` 和 `ssh-keygen`；目标主机已授权所上传私钥对应的公钥。

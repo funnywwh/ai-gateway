@@ -4872,3 +4872,79 @@ organize 六个视图全绿）：
 - [x] 验证：`go vet` + `go test`（四棵显式树）全绿；`make ui-base` 全绿；`make build`（控制台压缩内嵌）
       通过；`scripts/ui-harness/run.sh` **全 32 个视图通过**（`org-person` 48 项），并对压缩镜像
       （`UI_STATIC_DIR=.cache/ui-dist/static`）复跑 `org-person`/`org`/`org-accounts` 通过。
+
+## 安全处置：dshgw 租户共用宿主 `id_rsa`（2026-09-22，本机 `dshgw-verify`）
+
+用户原话：「我发现一个严重的问题，dshgw的租户都在使用宿主winger的id_rsa」。
+
+**事故与实测证据**：`dshgw.yaml` 的 `ssh_workspaces.identity_source` 指向部署账号自己的
+`/home/winger/.ssh/id_rsa`，`EnsureIdentity` 把它**逐字节复制**给每个「没有密钥」的账号——8 个租户
+工作区的 `<workspace>/.ssh/id_rsa` 哈希全为 `0bdc634b…`（等于宿主私钥）。该密钥的公钥就在**本机**
+`~/.ssh/authorized_keys` 里，本机 sshd 监听 `0.0.0.0:22`，租户沙箱不 `--unshare-net`（`/home` 被
+tmpfs 覆盖，所以租户读不到宿主的真实 `~/.ssh`，读到的是工作区里那份**同一把密钥**）⇒ 任何租户都能从
+沙箱内 ssh 回宿主、成为部署账号（`uid=1000(winger)`，属 `sudo,docker,lxd` 组），进而读遍所有租户
+工作区与密钥、`config.yaml` 里的 aigw 密钥、`state/admin.sock` 这个 provisioning 通道。处置前实测：
+`ssh -i <租户工作区密钥> winger@127.0.0.1 'id'` **成功**返回 `uid=1000(winger)`。该密钥同时可登录
+**11 台**主机：aipc、android-build、dell-server、email-test、findo-test、gpt001(root)、gptjp、mnl、
+suyuan-sz、sz-test、us-test。审计里还留着 `dsh-tenant` 曾请求挂载 `rag-server:/home/winger/work/ai_gateway`
+（被自嵌套规则以 403 拒绝）。别名种子同样是宿主主机清单的副本（21 个别名，含内网 IP、跳板机
+`192.168.190.123:2222`、autodl 节点与用户名/端口）。**范围仅本机 `dshgw-verify`**：gpt001 的
+`aigw.service` 与本机 `aigw-local` 的配置里都没有 `ssh_workspaces` 块（已 ssh 核对），
+`find data -path "*workspaces*/.ssh/id_rsa"` 也只有这 8 个。
+
+- [x] **A 止血**：新增 `scripts/dshgw_ssh_identity.sh purge-shared`（默认只打印计划，`--apply` 才动手；
+      `ssh-mounts.json` 还有挂载时拒绝执行）。停 `dshgw-verify` → 删除 8/8 副本并写下
+      `identity-managed`（现有二进制随即再也无法回灌，marker 判据在 `service.go:124`）→ 启服；
+      **新代码启动后 0 个密钥被重建**。复查时发现第二处暴露并补进脚本：`dsh-tenant` 的**主机专用**
+      密钥 `host_keys/26667bd…/id_rsa` 也是同一把（仅差一个结尾换行，摘要不同、**指纹相同**），
+      所以匹配改为「摘要 or **公钥指纹**」，扫描范围扩到 `.ssh/id_rsa` + `.ssh/host_keys/*/id_rsa`；
+      按指纹重扫全库：0 处残留。
+- [x] **B 删除共享密钥能力**：`ssh_workspaces.identity_source` 从 child 侧（`internal/dshgw/config`、
+      `sshworkspace`、`cmd/dshgw/runtime.go`）、aigw 侧（`internal/config`、`cmd/aigw/dshgw_child.go`、
+      `internal/dshgwsup`）、示例与文档中**整体删除**；`Load` 里新增 `rejectRemovedIdentitySource`，
+      旧键出现即拒绝启动并点名 `identity_dir`（与既有的 `ssh_config_source` 处理同构）。同时把
+      「不得落在部署账号 `~/.ssh` 内」的检查从 `ssh_config_dir` 扩到 `identity_dir`
+      （`checkOutsideDeploymentSSH`）。`EnsureIdentity` 现在只从 `identity_dir/<账号>` 取，
+      没有共享来源，账号可以完全没有密钥。
+- [x] **C 轮换宿主密钥**：新增 `scripts/rotate_operator_ssh_key.sh`（默认 dry-run）。逐主机「先加新
+      公钥 → **验证通过** → 才删旧公钥 → 复测旧密钥被拒」，11 台 + **本机**（`winger@127.0.0.1`，
+      即逃逸路径）全部完成：`retired …: refused` / `current …: accepted` 逐台打印。旧密钥归档
+      `~/keys/id_rsa.revoked-20260922-105659`（附 `.hosts` 清单），各远端留
+      `authorized_keys.pre-rotation-20260922-105659`，本机同样留备份。新密钥
+      `SHA256:tiWQ6NYd… winger@rag-server-20260922-105659`（4096 RSA，就地替换，`~/.ssh/config` 里
+      指向 `~/.ssh/id_rsa` 的条目无需改动）。旧密钥 `SHA256:1zL/6wt8…` 现已在全部 11 台与本机失效。
+- [x] **D 一账号一把**：`provision` 子命令（拒绝安装与被撤销密钥相同的密钥、拒绝一号两用；**不重启
+      worker**，直接把同一份字节写进 `<workspace>/.ssh/id_rsa`，因为重启会打断在线会话，而这就是
+      `EnsureIdentity` 本会做的那次写入）。6 个真实账号各生成一把独立 ed25519：dsh-colin、
+      dsh-chengjinfeng、dsh-lianchangliang、dsh-ranqiliang、dsh-yangmiao、dsh-tenant（指纹互不相同、
+      均 ≠ 被撤销密钥）；`verify1`、`dsh-m51-test-a` 为测试账号，保持无密钥。按用户决定**仅**
+      `dsh-tenant` 被授权到 aipc / dell-server / android-build（逐台追加并**用租户自己的密钥+自己的
+      config 复验**）；其余 5 个「有密钥但任何主机都不可达」。**本机（rag-server / 192.168.190.86）
+      不对任何租户授权。**
+- [x] **E 别名种子收口**：`trim-seeds` 子命令按「种子里出现过的别名 = 运维清单」算出每个账号
+      **自己添加**的别名，把种子与活动 `<workspace>/.ssh/config` 同时改写（各留
+      `.pre-trim-*` 快照，并落下 `.operator-inventory-*` 记录）。结果：21 个运维别名全部移除，
+      只有 `dsh-tenant` 自己的 `rag-server` 保留；随后按授权决定把它的别名表重写为
+      aipc / dell-server / android-build（与它被授权的远端一致，`rag-server` 这个指向网关主机的
+      别名已移除，快照可还原）。
+- [x] 测试：`internal/dshgw/config`（新增「旧键被拒且点名 `identity_dir`」与「`identity_dir` 落在
+      `~/.ssh` 内被拒」；清掉 `identity_source` 夹具）；`internal/dshgw/sshworkspace`（新的
+      `TestEnsureIdentityNeverInventsAKeyWithoutASource`：无来源的账号**不生成**密钥、但
+      `known_hosts`/`config` 照常预置、`Open` 报 `ssh/auth-failed`；`pathsFor`/`sshArgs` 断言改为
+      「密钥路径必在账号工作区内，绝不指向运维 HOME」）；`cmd/aigw`（转发用例改 `identity_dir`）。
+      新增 `scripts/test_dshgw_ssh_identity.py`（**83** 条断言：只删指纹/摘要命中的密钥、per-host
+      副本按指纹命中、marker 语义、mounts 非空时拒绝、`provision` 拒绝被撤销密钥与一号两用、
+      账号自有密钥不被覆盖、`trim-seeds` 只留自己添加的别名），已挂进 `make dshgw-test`。
+- [x] 验证：`go build ./...`、`go vet` 全绿，`make dshgw-test` 全绿（各包 + 插件 248/99/51 +
+      python 计划脚本，含新增 83 条）；`scripts/ssh_workspace_e2e.py` **12 步 PASS**（含「仍写
+      `identity_source` 的配置被拒且错误点名 `identity_dir`」「运维密钥/配置/数据根在租户沙箱内不可见」、
+      `identity_dir` 预置的密钥真的挂载成功）。事后复测：等于被撤销密钥的文件 **0** 个；
+      旧密钥访问 gpt001 / 本机 **被拒**；任选三个租户的密钥访问 `winger@127.0.0.1` **被拒**；
+      `dsh-tenant` 的密钥在 aipc / dell-server / android-build **可用**、在 gpt001 与网关主机被拒；
+      删掉无来源账号的 marker 后重启 worker，**不生成**密钥（共享来源确已消失）。
+- [ ] 遗留（不在本次范围）：用户另有这把密钥的副本（其他机器/脚本），需自行换成新密钥——旧副本已在
+      11 台 + 本机全面失效；**aipc 的 `~/.ssh/id_rsa` 仍是那把被撤销的密钥**（本次按用户要求为它补出了
+      `~/.ssh/id_rsa.pub`，指纹 `1zL/6wt8…`，**不得再授权到任何地方**；aipc 现在出站 ssh 全部不可用，
+      正确做法是在 aipc 上现生成一把新密钥就地替换）；`ssh_workspaces.hosts` 白名单目前为空
+      （可写任意 `user@host`），是否收紧待定；`aigw doctor` 报 `verify1` 缺 `gateway.key` 与
+      `settings.yaml`，是 9-18 起就存在的历史漂移，与本次无关。

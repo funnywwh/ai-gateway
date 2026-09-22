@@ -159,7 +159,6 @@ func buildDshgwChild(cfg *config.Config, aigwExecutable string) (*dshgwChild, er
 			source string
 			target *string
 		}{
-			{"dshgw.ssh_workspaces.identity_source", cfg.Dshgw.SSHWorkspaces.IdentitySource, &ssh.IdentitySource},
 			{"dshgw.ssh_workspaces.identity_dir", cfg.Dshgw.SSHWorkspaces.IdentityDir, &ssh.IdentityDir},
 			{"dshgw.ssh_workspaces.ssh_config_dir", cfg.Dshgw.SSHWorkspaces.SSHConfigDir, &ssh.SSHConfigDir},
 			{"dshgw.ssh_workspaces.ssh_bin", cfg.Dshgw.SSHWorkspaces.SSHBin, &ssh.SSHBin},

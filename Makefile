@@ -107,6 +107,7 @@ dshgw-test:
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_dshgw_migration_plan.py
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_decommission_legacy_plan.py
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ssh_config_adopt.py
+	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_dshgw_ssh_identity.py
 
 # The ssh-workspace acceptance (M64): a real sshfs mount over loopback, a write through the
 # mount landing on the remote side, and a clean detach. It needs sshfs, a non-interactive
