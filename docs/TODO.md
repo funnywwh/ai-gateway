@@ -6,29 +6,6 @@
 
 > 已完成项已拆到 `docs/todo_done.md`：**勾选后就把该条（连同缩进子条目）搬到那边**，整节做完搬整节；本文件只留 `[ ]` / `[~]` 与各节引言。
 
-## v4.1.0 已发布、部署动作待宿主执行
-
-- [ ] **换入 v4.1.0 二进制并重启两个用户单元**（发布会话在 dshgw 租户沙箱里，做不了这一步：部署根
-      `/home/winger/work/ai_gateway` 没挂进沙箱——沙箱里那几个目录是 bwrap 造的空壳，写进去的东西不会出现在宿主上；
-      没有 `/run/user/1000` 所以 `systemctl --user` 连不上；PID namespace 里看不到宿主进程，无法向 8088 发信号；
-      ssh 到宿主（`127.0.0.1` / `192.168.190.86`）是 `Permission denied`）。宿主终端一条命令：
-
-      ```bash
-      bash /home/winger/work/ai_gateway/data/dshgw-verify/state/workspaces/dsh-tenant/deploy-aigw-4.1.0.sh
-      ```
-
-      脚本（已在假部署根 + 桩 aigw 上演练过成功路径、`/version` 不刷新、dshgw 端口无响应三条路径）：
-      前置检查（版本自证 `4.1.0/52796d4`）→ 拍回滚点
-      `data/prev/bin/{aigw,dshgw}.prev-running-4.0.0-24acbf4`（重名不覆盖，另起名字）→
-      换 `bin/{aigw,dshgw}`（`.new` + `mv`）→ 重启 `aigw-local` 与 `dshgw-verify` → 60s 就绪门禁
-      （`/healthz` 200 **且** `/version` 已是 `4.1.0/52796d4` **且** dshgw 端口 18300/18299 有 HTTP 响应）→
-      失败自动装回旧版并再验。`config.yaml` 与 `data/`（除回滚点）不动。
-      **注意**：重启 `dshgw-verify` 会重启所有租户 worker，包括发布这个版本的 DSH 会话所在的那个（会话历史保留，
-      本轮对话会被打断）。
-- [ ] **部署后回填发布记录**到 `docs/todo_done.md`：填 `部署范围`、回滚点、`/version` 与 `healthz/readyz`、
-      `aigw-local.log` 的 `aigw starting` 与 `level=ERROR` 计数、控制台角标（`/admin/ui/` 的 `brand.js` 读的
-      就是 `/version`）。
-
 ## M7 Hooks 与录制
 > 本节已完成的 8 项记录见 `docs/todo_done.md` 的同名小节；下面只列未完成项。
 

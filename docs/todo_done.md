@@ -5204,3 +5204,49 @@ resource busy`，reaper 每 5 秒重试一次、刷了一小时；该账号 15:1
   `make verify` 未跑：本机 `go test ./...` 会走进 `./data`（含 6 GB 库与 GB 级浏览器工作区）而挂住，
   这是 M66 小节记录的既有现象，本次按仓库惯例用显式包目标替代。
 - **未做**：gpt001 未部署（用户要求本机）；M76 的「真人点一次退出」仍需用户会话（见 `docs/TODO.md` M76）。
+
+### v4.1.0 发布与部署记录（2026-09-22，本机 aigw-local + dshgw-verify；gpt001 未部署）
+
+本版内容（v4.0.0 之后未发布的 5 个提交）：**每租户渲染 `/etc/passwd` 视图**（`0b3e36b`：沙箱里 `getpwuid` 的
+home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名做 DNS 解析"）、**沙箱补挂 `/etc/alternatives`**
+（`2e48637`，修交互终端分页）、**组织树子节点缩进 14px→22px**（`d14d0a4`，用户反馈）、host_shares 测试样本自建
+（`20c06d4`，仅测试）、把 v4.0.0 部署记录合进主干（`3dee721` / 合并提交 `9938e6a`）。
+档位 **minor（4.0.0 → 4.1.0）**：`/etc/passwd` 视图是新增对外能力；**没有配置键增删**（`internal/dshgw/config`
+本版无改动），旧配置继续可用，因此不是 major。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v4.1.0**（`VERSION` 4.0.0 → 4.1.0；release 提交 `52796d4`，tag `v4.1.0`；记录提交 `8b99735`；两者已推 `origin/main` 与 `v4.1.0`） |
+| 构建物 | `bin/aigw` 4.1.0 / `52796d4`（console minified：43 文件 691497→390038 B，gzip 38 文件 387677→154683 B），sha256 `fed4a452c199555d9a026a7fbc258936d0aa729fdc7bdeef7daed81c5bc7d4d5`；`bin/dshgw` 4.1.0 / `52796d4`，sha256 `055b36dd9e36124b7330fc7abd79d70d392e46605a3331d03b966414473e978d`；`gwproxy` 本版无改动（`cmd/gwproxy` + `internal/frontproxy` 自 `58ef6bf` 起无提交），**未重建、未重启** |
+| 部署范围 | 本机 `aigw-local`（8088）与 `dshgw-verify`（门户 18300 / 网关 18299 / 租户 18301+ / worker 18400+）：4.0.0 / `24acbf4` → 4.1.0 / `52796d4`；`gwproxy-verify`（8090）未动 |
+| 部署方式 | **本次发布会话跑在 dshgw 租户沙箱里（cgroup `dshgw-worker-dsh-tenant-12.scope`，PID 1 = bwrap），换二进制 + 重启单元在沙箱里做不到**：部署根没挂进沙箱（那几层目录是 bwrap 造的空壳，写进去不会到宿主）、没有 `/run/user/1000` 所以 `systemctl --user` 连不上、PID namespace 看不到 8088 进程（无法发信号）、ssh 到宿主（`127.0.0.1` / `192.168.190.86`）是 `Permission denied`。因此按 `docs/TODO.md` 的既有约定交给**操作者在宿主终端执行** `deploy-aigw-4.1.0.sh`（工作区里，未入 git） |
+| 回滚点 | 脚本换入前把盘上二进制拷到 `data/prev/bin/*.prev-running-<版本>-<revision>`（同名不同内容则另起名字，**绝不覆盖**历史——v4.0.0 小节记录的那次覆盖失误就是这么防的）。aigw 那份即 `data/prev/bin/aigw.prev-running-4.0.0-24acbf4` |
+| 配置/数据变更 | 无（发布只换二进制）：`config.yaml`、`data/`（除回滚点目录）未动 |
+
+**部署脚本先演练、再真跑**：`deploy-aigw-4.1.0.sh` 在假部署根 + 桩 systemctl + 桩 aigw 上跑过 6 条路径——
+成功（回滚点命名 → `.new`+`mv` 换入 → 60s 就绪门禁 → exit 0）、回滚点同名同内容沿用、同名不同内容另起名字、
+`/version` 不刷新 → 自动回滚、dshgw 端口无响应 → 自动回滚、`ExecStart` 指向别处 → 动手前即拒绝（部署根零改动）。
+三条失败路径都验证了盘上二进制确实回到旧版。
+
+**验证**（本机实测）：
+
+- `GET /version` → `{"revision":"52796d4","ui":"minified","ui_encoding":"gzip","version":"4.1.0"}`；
+  `healthz` 200、`readyz` 200、`/admin/ui/` 200；局域网 `http://192.168.190.86:8088/version` 同样是 4.1.0 / `52796d4`
+  （与操作者控制台入口同源）。
+- 控制台角标（资源面证据）：`/admin/ui/js/brand.js` 200，其逻辑就是读 `/version` 后渲染
+  `AI Gateway · v<version> · <revision>` ⇒ 角标为 `AI Gateway v4.1.0 52796d4`；`scripts/ui-base-test.mjs`
+  **10 checks passed**、`scripts/ui-badge-test.mjs` **11 checks passed**。
+- **本版两处 dshgw 修复在真实租户沙箱里生效**（比端点更强的证据——本次会话本身就跑在 `dsh-tenant` 里）：
+  沙箱内 `/etc/passwd` 的当前账号行是 `winger:x:1000:1000:winger:<workspace>:/bin/bash`，
+  `python3 -c 'pwd.getpwuid(os.getuid()).pw_dir'` == `$HOME` == `…/state/workspaces/dsh-tenant`
+  （换版本前这里指向宿主 `/home/winger`，正是 `ssh <别名>` 找不到 `~/.ssh/config` 的原因）；
+  `/etc/alternatives` 已挂入（分页修复随之生效）；租户 `~/.ssh/config` 的 4 个别名现在落在 `getpwuid` 指向的那个目录里。
+- dshgw 面：门户 18300 → 400、网关 18299 → 404（与换版本前逐项一致，都是"进程在听"）、本会话 worker 端口
+  18401 → 401，重启后会话正常继续（会话历史保留）。
+- gwproxy 面：8090 未动，仍只服务自己的路由（`/admin/ui/`、`/version` 404 与本版无关）。
+- 发布前回归：`go vet` + `go test ./internal/dshgw/... ./cmd/dshgw ./internal/arch` 全绿（21 个包，exit 0）；
+  node：`internal/webui/tests/org_tree_test.mjs` 通过。
+- **未拿到（沙箱外，需操作者终端）**：宿主 `data/aigw-local.log` 的 `aigw starting` 与 `level=ERROR` 计数、
+  `dshgw-verify` 的启动行。需要时在宿主执行
+  `grep -E "aigw starting|level=ERROR" /home/winger/work/ai_gateway/data/aigw-local.log | tail -5`
+  与 `journalctl --user -u dshgw-verify --since "-5min" | grep -E "dshgw listening|level=ERROR"` 补两行。
