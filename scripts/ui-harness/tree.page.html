@@ -140,8 +140,8 @@ try {
   checks.leafArrowIsInert = leafArrow.classList.contains('leaf');
   // 箭头换成 SVG 后，箭头列必须仍然是等宽的：同一深度的父节点（有箭头）与叶子（圆点）
   // 的标签要从同一个 x 开始，否则整棵树的标签会参差不齐。
-  const labelLeft = (name) => {
-    const row = rowsOf(mainTree.node).find((r) => r.querySelector('.tree-label').textContent === name);
+  const labelLeft = (name, root = mainTree.node) => {
+    const row = rowsOf(root).find((r) => r.querySelector('.tree-label').textContent === name);
     return row.querySelector('.tree-label').getBoundingClientRect().left;
   };
   // 研发部 / 市场部 同为 depth 1，前者有子节点、后者是叶子。
@@ -150,8 +150,17 @@ try {
   checks.arrowIsSized = arrowRect.width > 0 && arrowRect.width <= 12 && Math.abs(arrowRect.width - arrowRect.height) <= 1;
 
   // Indentation is depth, and both placements indent the same way.
-  checks.sidebarIndent = indentOf(sidebarTree.node, '研发部') - indentOf(sidebarTree.node, '总部') === 14;
-  checks.workspaceIndent = indentOf(mainTree.node, '平台组') - indentOf(mainTree.node, '研发部') === 14;
+  //
+  // 每层缩进 22px：现场反馈「组织架构树控件子节点要缩进」，而原值 14px 在一行 13.5px 字号下差不多
+  // 只有一个汉字宽，层级读不出来，看起来就像没缩进。
+  checks.sidebarIndent = indentOf(sidebarTree.node, '研发部') - indentOf(sidebarTree.node, '总部') === 22;
+  checks.workspaceIndent = indentOf(mainTree.node, '平台组') - indentOf(mainTree.node, '研发部') === 22;
+  // 上面两条读的是行内样式里的数字，所以还要量**真实几何**：标签的 x 必须按每层 22px 右移，容差
+  // 1px。只断样式挡不住"CSS 用 padding 简写或另一条 padding-left 把行内样式顶掉"——那种情况下
+  // 上面两条照样全绿，而屏幕上没有缩进。
+  checks.workspaceIndentShiftsLabels = Math.abs((labelLeft('平台组') - labelLeft('研发部')) - 22) <= 1;
+  checks.sidebarIndentShiftsLabels =
+    Math.abs((labelLeft('研发部', sidebarTree.node) - labelLeft('总部', sidebarTree.node)) - 22) <= 1;
 
   // --- the mode difference is density and secondary information only --------
   checks.sidebarHidesMeta = !sidebarTree.node.querySelector('.tree-meta') && !sidebarTree.node.querySelector('.tree-actions');

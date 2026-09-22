@@ -285,10 +285,18 @@ try {
     checks.pageShowsDeep = labels(document.getElementById('page')).includes('平台组');
     // Sibling order comes from the server (sort_order), and the hierarchy is indented.
     checks.rootOrder = labels(document.getElementById('page')).slice(0, 1).join(',') === '总部';
+    // 每层缩进 22px（现场反馈「组织架构树控件子节点要缩进」：原值 14px 在一行 13.5px 字号下差不多
+    // 只有一个汉字宽，层级读不出来）。这里同时钉行内样式与**真实几何**：只钉样式挡不住"某条 CSS
+    // 把行内 padding 顶掉"这类回归，而屏幕上就是没有缩进。
     checks.indent = (() => {
       const parent = rowOf(document.getElementById('page'), '研发部');
       const child = rowOf(document.getElementById('page'), '平台组');
-      return parseInt(child.style.paddingLeft, 10) - parseInt(parent.style.paddingLeft, 10) === 14;
+      return parseInt(child.style.paddingLeft, 10) - parseInt(parent.style.paddingLeft, 10) === 22;
+    })();
+    checks.indentShiftsLabels = (() => {
+      const labelLeftOf = (name) => rowOf(document.getElementById('page'), name)
+        .querySelector('.tree-label').getBoundingClientRect().left;
+      return Math.abs((labelLeftOf('平台组') - labelLeftOf('研发部')) - 22) <= 1;
     })();
     checks.tagsShown = pageText().includes('vip');
     checks.accountCountShown = pageText().includes('1 个账号');

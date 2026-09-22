@@ -2992,6 +2992,55 @@ readiness 判据 `curl` 没带 `-f`，一个残留的、正从已删目录应答
       "工具栏不得用 `.field inline`"，从源码一侧守住根因
 - [x] `make ui-check` 21 个视图全绿（org 37 项、org-accounts 10 项）、`make verify` 全绿
 
+### 组织树子节点缩进加大到 22px（用户反馈：组织架构树控件子节点要缩进）
+
+反馈现场是上线后的控制台。这一条先要说清一件事：**缩进本来就有** —— `tree.js` 的 `INDENT` 是
+14px，行的左内边距一直按 `8 + depth * INDENT` 铺开。问题在这个数字本身：14px 在 13.5px 字号下
+差不多只有一个汉字宽，再配上箭头列与 6px 的间距，层级读不出来，看起来就像"子节点没有缩进"。
+所以改法是把这**一个常量**提到 22px，而不是新加一条缩进路径（比如 CSS 里再补一份 `padding-left`）。
+
+22px 这个数是被**列宽**顶住的：组织树列最宽 320px（`app.css` 的 `.org-layout` 首列
+`minmax(240px, 320px)`），行里除节点名之外还有 meta（`N 个账号 · 标签`）与三个行内操作按钮
+（子节点/编辑/删除），而 `internal/orgtree` 的 `MaxDepth` 是 16。标签是 `flex:1 1 auto;
+min-width:0`，放不下就只剩省略号（不换行、不撑破卡片）——要再往上调，先看那一列的宽。
+
+一颗常量，三处树一起变：组织页的主树（`pages/org.js`）、「分配组织」勾选树
+（`pages/org_assign.js`）、飞书同步弹窗的部门树（`pages/org_feishu.js`）。`sidebar` 与 `workspace`
+两处放置也共用它——设计上两者的差别只有密度与次要信息，缩进不属于差别。
+
+- [x] `tree.js`：`const INDENT = 14` → `22`，并在常量上方写清反馈原话、为什么 14px 不够、
+      为什么停在 22px（列宽与深层节点名的取舍）
+- [x] `scripts/ui-harness/tree.page.html`：两处期望值 14 → 22；`labelLeft()` 加 root 参数，新增两条
+      **几何**断言 `workspaceIndentShiftsLabels` / `sidebarIndentShiftsLabels` —— 标签的 x 必须按每层
+      22px 右移（容差 1px），两种放置各量一次
+- [x] `scripts/ui-harness/org.page.html`：期望值 14 → 22，并补一条 `indentShiftsLabels` 量真实几何
+- [x] **先证伪再修**：先在 `org_tree_test.mjs` 加上"每层 22px"的静态钉，跑在**未改动**的 tree.js 上
+      实测为红（`AssertionError: 14 !== 22`），改常量后转绿
+- [x] 静态回归 `org_tree_test.mjs`：钉住缩进只能来自那一个具名常量、行内样式必须是"基准 + 深度 ×
+      缩进"的形状；并把两个走查页里的期望值与 `INDENT` **跨文件比对**——本工作区没有能跑的浏览器
+      （`/usr/bin/firefox` 是 snap 空壳，`run.sh` 挑到它以后表现为每个视图 "no report"），走查页里
+      写死的期望值平时根本执行不到，改常量时最容易漏
+- [x] 为什么只钉样式不够：`indentOf()` 读的是**行内样式里的数字**，一条 CSS 规则（`padding` 简写或
+      另一条 `padding-left`）就能把它顶掉而断言照样全绿——而屏幕上没有缩进。`getBoundingClientRect`
+      量的是同一屏上真实的 x，所以两个走查视图都补了几何断言
+- [x] 实测（headless Chromium 跑同一批走查页；先在 288px 行宽下量标签的 x）：第 0/1/2/3 层
+      **28 / 42 / 56 / 70**（14px/层）→ **28 / 50 / 72 / 94**（22px/层），逐层正好 22px
+- [x] 先证伪再修（浏览器侧）：把常量改回 14 再跑同一批走查页，`tree` 视图的
+      `sidebarIndent`/`workspaceIndent`/`workspaceIndentShiftsLabels`/`sidebarIndentShiftsLabels`
+      与 `org` 的 `indent`/`indentShiftsLabels` **六项一起转红**；改回 22 后 6 项全绿
+      （tree 59 项、org 66 项）
+- 顺带量到一条**既存**问题（不是这次引入，这次也没让它变差）：`.tree-row` 是 flex，`.tree-label`
+  是 `flex:1 1 auto; min-width:0`，所以一行同时有 meta 与三个行内按钮时，节点名会被压到 **0 宽**
+  （实测行宽 286px、meta 106px、按钮 140px → label=0、`truncated=true`；同一屏上没有 meta 的行
+  label=98px）。14px 与 22px 都是 0——第 0 层与缩进无关，深层"挤不出来"的结论在改前就成立。
+  **修法要单独定**（行内按钮改成悬停/选中才显示，或加宽组织树列，或 meta 只留账号数），
+  所以这次没塞进来；量到的数字留在这里当作下次的起点
+- [x] `make ui-base` 全绿（11 个 node 脚本：base/badge/requests/tags/org_tree/org_person/tenant_name/
+      org_assign/keys_feishu/org_feishu/account_feishu）
+- 未做（本工作区做不到，需在有浏览器与 Go 的机器上补）：`make verify`——本沙箱没有 Go 工具链；
+  浏览器侧这次是用 Chrome-for-Testing 的 headless shell 手跑的同一批走查页（`scripts/ui-harness/run.sh`
+  只认 firefox，而这台机器的 `/usr/bin/firefox` 是 snap 空壳），所以 `make ui-check` 本身没跑
+
 ### M49 验收记录（2026-09-15）
 
 #### 性能：改前 / 改后实测（12th Gen i7-12700K，`-count=3`）

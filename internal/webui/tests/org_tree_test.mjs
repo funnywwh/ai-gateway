@@ -209,4 +209,31 @@ assert.match(orgAssign, /api\.get\('\/org\/nodes', \{ limit: 1000 \}\)/,
 assert.match(router, /path: '\/org', title: '组织架构', module: '\.\/pages\/org\.js'/,
   'the org page needs a route');
 
+// --- 子节点必须缩进：每层 22px ------------------------------------------------------------
+//
+// 反馈现场是上线后的控制台，原话：「组织架构树控件子节点要缩进」。缩进本来就有——tree.js 的
+// `INDENT` 是 14px，行的左内边距按 `8 + depth * INDENT` 铺开；问题是 14px 在 13.5px 字号下
+// 差不多只有一个汉字宽，层级读不出来，看起来就像没缩进。所以改法是把这**一个常量**提到 22px，
+// 而不是新加一条缩进路径。
+//
+// 这里钉两件事。第一是缩进的来源：必须是那一个具名常量，行内样式保持"基准 + 深度 × 缩进"的
+// 形状——多出一条缩进路径（CSS 再补一份 padding-left，或按模式各算一套）会让几何不可推。
+// 第二是**走查期望值与它同步**：`scripts/ui-harness/*.page.html` 里写死的期望值在"没有能跑的
+// 浏览器"的地方（本工作区就是这样：/usr/bin/firefox 是 snap 空壳，跑起来只有 "no report"）
+// 没人会执行到，改常量时最容易漏掉，而漏掉的表现是走查报红、看起来像刚改坏了。
+// 走查侧真正量的东西是几何，见 tree.page.html 的 `workspaceIndentShiftsLabels` /
+// `sidebarIndentShiftsLabels` 与 org.page.html 的 `indentShiftsLabels`。
+const INDENT_WANT = 22;
+const indentDecl = treeSrc.match(/const INDENT = (\d+);/);
+assert.ok(indentDecl, '每层缩进必须由一个具名常量声明');
+assert.equal(Number(indentDecl[1]), INDENT_WANT,
+  '每层缩进必须是 ' + INDENT_WANT + 'px：14px 在一行 13.5px 字号下读不出层级（现场反馈「子节点要缩进」）');
+assert.match(treeSrc, /padding-left:' \+ \(8 \+ depth \* INDENT\)/,
+  '行的左内边距必须是"基准 + 深度 × 缩进"，缩进不能另开一条路径（CSS 再补一份会让几何不可推）');
+for (const harnessPage of ['tree.page.html', 'org.page.html']) {
+  const harnessSrc = await readFile(new URL('../../../scripts/ui-harness/' + harnessPage, import.meta.url), 'utf8');
+  assert.match(harnessSrc, new RegExp('=== ' + INDENT_WANT + '\\b'),
+    harnessPage + ' 的走查期望值必须与 tree.js 的 INDENT 相等，否则改常量时走查会静默失守');
+}
+
 console.log('Organization structure UI checks passed.');

@@ -22,7 +22,12 @@
 
 import { el, clear } from './ui.js';
 
-const INDENT = 14;
+// 每一层的缩进像素。原来 14px——现场反馈「组织架构树控件子节点要缩进」：14px 在 13.5px 字号下
+// 差不多只有一个汉字宽，层级读不出来，看起来就像没缩进。22px 是"一眼看得出层级"、又不至于把深层
+// 节点名提前挤成省略号的位置：组织树列最宽 320px，行里还有 meta（N 个账号 · 标签）与三个操作
+// 按钮，而 internal/orgtree 允许 16 层。要再调大先看那一列的宽——标签是 `flex:1 1 auto;
+// min-width:0`，放不下只剩省略号，既不换行也不会撑破卡片。
+const INDENT = 22;
 
 export function tree({
   nodes = [],
