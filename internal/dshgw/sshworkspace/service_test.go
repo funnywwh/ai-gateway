@@ -919,7 +919,12 @@ func TestRestoreRemountsWhatLogoutDetached(t *testing.T) {
 	if fstype, _ := env.service.mounted(mount.Mountpoint); fstype == "" {
 		t.Fatalf("%s was not remounted", mount.Mountpoint)
 	}
-	// A second Restore is a no-op: the mount is already there.
+	// A second Restore is a no-op: the mount is there and its daemon serves it (the daemon is
+	// what holds the FUSE connection, so its presence is the liveness signal).
+	live := func(string) int { return 4242 }
+	previousDaemon := sshfsDaemonFor
+	sshfsDaemonFor = live
+	defer func() { sshfsDaemonFor = previousDaemon }()
 	if err := env.service.Restore(ctx, env.remote.Tenant, env.remote.Workspace, env.remote.DshHome); err != nil {
 		t.Fatalf("second Restore: %v", err)
 	}
@@ -942,9 +947,10 @@ func TestRestoreReplacesADeadMount(t *testing.T) {
 	before := env.fake.callCount("sshfs ")
 
 	// The daemon died: the kernel released its connection while the entry stays in the table.
-	previous := fuseConnDir
-	fuseConnDir = func(fuseConn) string { return "" }
-	defer func() { fuseConnDir = previous }()
+	dead := func(string) int { return 0 }
+	previousDaemon := sshfsDaemonFor
+	sshfsDaemonFor = dead
+	defer func() { sshfsDaemonFor = previousDaemon }()
 
 	if err := env.service.Restore(ctx, env.remote.Tenant, env.remote.Workspace, env.remote.DshHome); err != nil {
 		t.Fatalf("Restore: %v", err)

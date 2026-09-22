@@ -704,7 +704,13 @@ func (s *Service) Restore(ctx context.Context, tenant, workspace, dshHome string
 // fusermount3 -z 再重挂"), and login-time Restore is the natural place to fix it.
 func (s *Service) remount(ctx context.Context, remote Remote, mount Mount, event string) error {
 	if fstype, _ := s.mounted(mount.Mountpoint); fstype != "" {
-		if connectionLive(s.mounted, mount.Mountpoint) {
+		// A recorded mount with no sshfs daemon is dead: the daemon is what holds the FUSE
+		// connection, and killing it leaves the entry in the mount table while every read fails
+		// with ENOTCONN and no new mount can be made over it. This is the same rule MountsFor
+		// uses to keep such a path out of a worker profile. The connection probe cannot answer
+		// this one: on a dead mount the stat that names the connection fails, and "no device
+		// number" is not the same as "no connection".
+		if sshfsDaemonFor(mount.Mountpoint) != 0 {
 			return nil
 		}
 		s.logger.Warn("a recorded ssh workspace mount lost its daemon; replacing it",
