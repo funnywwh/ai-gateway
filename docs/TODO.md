@@ -635,15 +635,10 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 - [ ] **缺 sshfs 时拒绝启动（真机）**：把 `sshfs_bin` 指到不存在的路径 → `serve` 必须拒绝启动并点名该
       配置键（CLI 命令只告警，这是刻意的差异，见 §14 第 4 条）
 - [ ] **观察项**：FUSE 上 `git status`/`grep` 的耗时基线（文档已声明会慢，但未测量）
-- [ ] **缺陷（2026-09-20 发布 M68 时两次撞到）**：`systemctl --user restart dshgw-verify` 会把 `sshfs`
-      进程随单元一起杀掉，但 **FUSE 挂载条目留在挂载表里**（`Transport endpoint is not connected`）；
-      启动时的 `sshService.Reconcile` 补不上这条死挂载，于是**有活跃 SSH 工作区的租户起不来**：
-      `bwrap: Can't get type of source …/ssh/…: Transport endpoint is not connected` → worker `exit status 1`。
-      现场恢复：`fusermount3 -u <mountpoint>` + 重启 dshgw（本次发布就是这么救回来的）。
-      修法方向：启动/`Reconcile` 前对**已记录**的挂载点做一次探测，ENOTCONN 的先 `fusermount3 -z` 再重挂
-      （browsermount 有对等的 `CleanupStale`，ssh 这侧缺）；或者让单元 stop 时先卸挂载（KillMode/顺序问题）。
-      另一个操作教训：**别用 CLI `dshgw tenant restart` 起长驻 worker** —— CLI 退出时 bwrap
-      `--die-with-parent` 会把 worker 一起带走，且日志里看不到那次退出；长驻 worker 只能由服务自己起
+- [x] **缺陷（2026-09-20 发布 M68 时两次撞到）：死挂载条目** —— **已由 M76 修**（`Restore`/`Reconcile`
+      对已记录的挂载点按"守护进程是否还在"探测，死条目先摘掉再重挂，记录与挂载点保留；本机现网 2026-09-22
+      重启时实测自愈）。原文与操作教训已归档到 `docs/todo_done.md` 的 M76 小节
+
 - [x] **自嵌套挂载（2026-09-21 事故，已修）**：租户 dsh-tenant 挂 `rag-server:/home/winger/work/ai_gateway`
       （`rag-server` 的 `HostName` 就是本机 `192.168.190.86`），而挂载点
       `<workspace>/ssh/rag-server/home/winger/work/ai_gateway` 就在这个目录里 —— 挂载树包含挂载点本身。
@@ -887,35 +882,18 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 
 ## M76 点「退出」后强制卸载挂载文件系统，最后强制退出 dsh
 
-设计：`docs/design/m76-dsh-exit-force-teardown.md`；规格：`docs/dshgw.md` §3b / §7b / §7d。用户原话
-（2026-09-22）：「dsh 点击退出按钮后，强制 umount 使用挂载文件系统，最后强制退出 dsh」。
+设计：`docs/design/m76-dsh-exit-force-teardown.md`；规格：`docs/dshgw.md` §3b / §7b / §7d。
+用户原话（2026-09-22）：「dsh 点击退出按钮后，强制 umount 使用挂载文件系统，最后强制退出 dsh」。
 定位：退出顺序改为**排除 → 强制卸载（浏览器 FUSE + sshfs）→ 最后强杀 dsh worker**；浏览器侧补强制阶梯
-（`-u -z` 惰性摘除 → abort FUSE 连接 → 重试），SSH 侧退出新增 `DetachTenant`（保留记录）与登录
-`Restore`（自动重挂）；失败不再短路，也不再只记错误类型。触发原由见设计文档 §2.1 的本机实测。
+（限时优雅卸载 → `-u -z` 惰性摘除 → abort FUSE 连接 → 重试），SSH 侧退出新增 `DetachTenant`（保留记录）
+与登录 `Restore`（自动重挂），顺带修掉 M64 记的死挂载缺陷；失败不再短路，也不再只记错误类型。
+实现、单测、e2e 与现网验收的记录见 `docs/todo_done.md` 同名小节。
 
-- [ ] 设计文档与规格文档先落盘并展示（`docs/design/m76-*.md` + `docs/dshgw.md`）
-- [ ] `internal/dshgw/fusekernel`：宿主 FUSE 探测收敛（挂载表、minor、abort、守护进程查找），
-      `sshworkspace` 改为调用它，fixture 测试随之搬迁
-- [ ] `browserworkspace.ForceUnmount` 强制阶梯 + 单测；真机用例（子进程钉住挂载点 ⇒ 优雅卸载必然
-      EBUSY ⇒ 强制阶梯成功）
-- [ ] `browsermount`：`detach` 缝、`share.final`、`DetachTenant`、`cleanupLocked` 升级（含
-      **优雅卸载限时 1s**：go-fuse 的 `Unmount()` 在挂载卸不动时会永远等自己的 serve loop，实测它让退出
-      请求与整个 reaper 卡死）、`CleanupStale` 复用同一阶梯（含"优雅失败 → 强制成功 → 清理完成"、
-      "优雅永久阻塞 → 有界升级"与"final 不再被 expire 重启"用例）
-- [ ] `sshworkspace`：`DetachTenant`（保留记录/镜像/挂载点）与 `Restore`（登录重挂），
-      真机 sshfs 用例覆盖"挂载 → detach → 重挂同一路径"；`Restore`/`Reconcile` 顺带修掉 M64 记的
-      **死挂载**缺陷（FUSE 连接已断的已记录挂载点，原先被跳过 ⇒ 账号一直留着读不了的死工作区；
-      现在先探测、摘掉死条目再重挂，记录与挂载点保留）
-- [ ] `tenancy.StopForLogout` 重排 + `LogoutResult`；`proxy` 新签名、审计与 55s/150s 预算；
-      `cmd/dshgw.PrepareLogin` 插入 `Restore`（先重挂后起 worker）
-- [ ] 单测全绿：`make dshgw-browser-test`、`make dshgw-test`、`make dshgw-ssh-integration`
-- [ ] 新增 `scripts/dshgw_logout_teardown_e2e.py` 与 `make dshgw-logout-e2e`（一次性实例：真浏览器目录
-      挂载 → 钉忙 → 退出 → 断言挂载表/进程/端口/审计 → 重新登录断言 worker 与 SSH 挂载都回来）
-- [ ] 本机现网验收（需重启 `dshgw-verify`，会短暂带走全部租户会话）：真实点一次「退出」，证据 =
-      `/proc/self/mounts` 无残留、`ps` 无 worker、`ss` 无 worker 端口、审计出现 `logout_mount_detach`
-      且无 `logout_worker_stop_failed`、日志不再刷 `browser mount expiry cleanup failed`
-- [ ] 现场恢复（可与实现并行）：`fusermount3 -u -z .../workspaces/dsh-tenant/browser/ZT20Q` 摘掉
-      2026-09-22 14:36 起卡住的挂载，确认 reaper 告警停止
+- [ ] **浏览器人工确认（只剩这一步）**：经门户进某个租户 → 侧栏点「⏻ 退出」→ 回到门户登录页；
+      随后断言该账号 `/proc/self/mounts` 无挂载、`ps` 无它的 worker、`ss` 无它的 worker 端口、
+      `data/dshgw-verify/state/audit.jsonl` 出现 `logout_mount_detach` + `logout_worker_stop`
+      （无 `logout_worker_stop_failed` / `logout_mount_leftover`），再登录一次确认 worker 与 SSH 工作区
+      挂载都回来。本机验收与 e2e 都是 HTTP 客户端/脚本跑的，没有真人点界面；需要用户自己的会话
 
 ## 缺陷：`dshgw.admin_socket` 与 M63 状态根脱节（2026-09-20 修）
 

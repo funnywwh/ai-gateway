@@ -5008,3 +5008,97 @@ suyuan-sz、sz-test、us-test。审计里还留着 `dsh-tenant` 曾请求挂载 
       `EnsureTenantPlugins` 按既有口径只告警不改写（rotate-key 可重建），`dshgw doctor` 报它缺 `gateway.key` /
       `settings.yaml` 也是 9-18 起的历史漂移；`dsh-tenant` 的旧 `.dsh/plugins/{web-tty,workspace-files,git-diff}`
       影子副本本轮**保留**（回滚用），确认稳定后可删。
+
+## M76 点「退出」后强制卸载挂载文件系统，最后强制退出 dsh
+
+设计：`docs/design/m76-dsh-exit-force-teardown.md`；规格：`docs/dshgw.md` §3b / §7b / §7d。
+用户原话（2026-09-22）：「dsh 点击退出按钮后，强制 umount 使用挂载文件系统，最后强制退出 dsh」。
+触发原由（本机实测）：`dsh-tenant` 的浏览器挂载 `browser/ZT20Q` 自 14:36 起 `fusermount3 … Device or
+resource busy`，reaper 每 5 秒重试一次、刷了一小时；该账号 15:14/15:23/15:24 三次退出全部审计
+`logout_worker_stop_failed`（`reason=*fmt.wrapError`），而同一秒的日志显示 dsh **已经停了**——失败的是
+随后那一步卸载；sshfs 挂载则从来没有被退出碰过。
+
+- [x] 设计文档 `docs/design/m76-dsh-exit-force-teardown.md`（先落盘并展示，含 D1–D9、接口签名、数据流、
+      异常边界、测试策略、实现与设计差异）+ 规格文档 `docs/dshgw.md` §3b/§7b/§7d + 四个设计文档追补
+      （browser-fuse-workspace / m64 / m67 / m69）。
+- [x] `internal/dshgw/fusekernel`：宿主 FUSE 探测收敛（挂载表读取与转义解码、minor 解码、sysfs abort、
+      守护进程查找、`fusermount3 -u [-z]` 阶梯），`sshworkspace` 与 `browserworkspace` 共用一份实现；
+      ssh 侧原有测试缝（`procRoot`/`sysfsFuse`/`statDevice`/`serviceMounted`/`fuseConnDir`）原样保留。
+      单测：挂载表解码、设备号解码、abort 写入、连接存活、守护进程精确匹配、卸载阶梯两条分支、
+      缺 fusermount3 的报错。
+- [x] `browserworkspace.ForceUnmount` 强制阶梯（`fusermount3 -u -z` → abort 这条 FUSE 连接 → 再 `-u -z`，
+      以挂载表为准）；单测覆盖四个分支；**真机用例** `TestRealFUSEForceUnmountTakesABusyMount`
+      （子进程 cwd 钉在挂载点里 ⇒ 优雅卸载必然 EBUSY ⇒ 强制阶梯成功，挂载表条目消失）PASS。
+- [x] **本次的第一原因（设计时没想到，实测抓到）**：go-fuse `Server.Unmount()` 跑完 `fusermount3 -u` 后要等
+      自己的 serve loop，而 serve loop 只在内核释放 FUSE 连接时结束 ⇒ 挂载被持有（活着的 worker 沙箱／另一个
+      挂载命名空间）时它**永不返回**。现场 e2e 复现：退出请求与**整个 reaper** 一起卡在 `WaitGroup.Wait`，
+      worker 还在跑、两个挂载都还挂着（这正是用户说的"点了退出没反应"）。修法：优雅卸载限时
+      `gracefulUnmountBudget = 1s`（超时返回 `errUnmountSlow` + WARN），再由强制阶梯接管；被放弃的那次
+      `Unmount` 的 goroutine 在 abort 释放连接后自己返回。单测 `TestABlockingUnmountIsBoundedAndForced`。
+- [x] `browsermount`：可注入的 `detach` 缝（默认 `browserworkspace.ForceUnmount`）、`share.final`
+      （退出/停用/删除后 reaper 只重试卸载，**不再为收挂载重启一个已退出的租户的 dsh**）、
+      `DetachTenant`（退出半边：不碰 worker）与 `DropTenant`（先 `stopWorker` 再 detach）分离、
+      `CleanupStale` 复用同一阶梯。单测：优雅失败→强制成功→清理完成、优雅永久阻塞→有界升级、
+      强制也失败→记录保留+错误上抛、`final` 的 share 不被 `expire` 重启、停 worker 失败**不再跳过**卸载。
+- [x] `sshworkspace`：`DetachTenant`（退出卸载但**保留记录/镜像/挂载点**，审计 `ssh-mount-detach`）、
+      `Restore`（登录重挂，`Reconcile` 抽出 `remount` 共用）、`detachKeeping(..., keepMountpoint)`。
+      单测：detach 保留一切且不重启 worker、卸载不了时如实报错、Restore 重挂同一路径且对活挂载是 no-op。
+- [x] **顺带修掉 M64 记的死挂载缺陷**：已记录但 FUSE 连接已断（守护进程没了）的挂载点原先在
+      `Reconcile`/`Restore` 里被跳过，账号会一直留着读不了的死工作区。现在先按**守护进程是否存在**
+      （与 `MountsFor` 同一条规则）判定、摘掉死条目再重挂，记录与挂载点保留。单测
+      `TestRestoreReplacesADeadMount`；**本机现网实测**（见下）。
+- [x] `tenancy.Manager.StopForLogout` 按 M76 重排：排除 → 浏览器卸载（≤15s）→ SSH 卸载（≤15s）→
+      **最后**强杀 worker（≤30s）→ 校验 `WorkerStopped`；任何一步失败都不再短路，聚合成
+      `LogoutResult{MountsDetached, MountsLeftover, WorkerStopped}`。新增钩子方法 `DetachTenant`/`AttachedMounts`
+      （browser）与 `DetachTenant`/`AttachedMounts`/`Restore`（ssh），`DetachedGuard` 同步。
+      单测：调用顺序（挂载先、worker 最后，且卸载时 worker 仍活着）、失败仍继续、计数与残留清单。
+- [x] `proxy`：`LogoutStop` 返回 `LogoutResult`；新增审计 `logout_mount_detach` / `logout_mount_leftover` /
+      `logout_worker_stop_skipped`，`logout_worker_stop_failed` 的 `reason` 改为**错误正文（截断 512B）**
+      而非类型名；`logoutStopTimeout` 30s→**55s**，门户一次退出多租户整体预算 **150s**；
+      `WorkerStopped=false` 时不写成功审计。单测：审计行与正文、未校验的停不记为成功。
+- [x] `cmd/dshgw.PrepareLogin`：在 `EnsureRunning` **之前**调 `Restore`（先重挂再起 worker，profile 才能绑到
+      活挂载），失败 fail-soft（审计 `login_mount_restore_failed`），worker 已在跑时不静默重启
+      （审计 `ssh_mount_restore_deferred`）；`managerOps` 增 `auditor`（serve/admin-serve 都接上审计文件）。
+      单测：重挂先于起 worker、失败仍登录成功且审计、已在跑的 worker 不被替换且记 deferred。
+- [x] **单测与目标全绿**：`make dshgw-test`（Go 全量 + 插件 Node 测试 + 迁移脚本，exit 0）、
+      `make dshgw-browser-test`（9 个目标包 OK）、`make dshgw-ssh-integration`（真机 sshfs；含挂载 → detach →
+      Restore 重挂）、`BROWSERWORKSPACE_FUSE_TEST=1 go test ./internal/dshgw/browserworkspace -run TestRealFUSE`
+      （真 FUSE 忙挂载强制卸载）PASS、`go vet ./internal/dshgw/... ./cmd/dshgw` 干净。
+- [x] 新验收脚本 `scripts/dshgw_logout_teardown_e2e.py` + `make dshgw-logout-e2e`（一次性实例、自带
+      state/端口段 13097/13650-13849/13300-13499，不碰现网）：同时挂上**真浏览器目录 FUSE**（协议由脚本内
+      小型 stand-in 驱动，不需要 Chromium，且 `activate` 把它 bind 进沙箱 ⇒ 优雅卸载必然失败）与**真 sshfs**，
+      然后 `POST /dshgw/logout/`。**实测 PASS 12 步**：退出 **1.58s** 返回；两个挂载都离开内核挂载表；
+      worker 端口关闭；审计 `logout_mount_detach`（"2 mount(s) detached"）+ `logout_worker_stop`，无
+      `logout_worker_stop_failed`/`logout_mount_leftover`；ssh 记录与挂载点保留；**重新登录后 sshfs 在同一
+      路径重挂**并能读到远端文件。
+- [x] **本机现网（`dshgw-verify.service`，8 个租户）**：`make dshgw-build` → 重启单元（16:16:31，revision
+      **f5b1720**）→ 全部租户 worker 依次 ready、17 个公开监听在、`browser-workspace` 残留挂载 **0** 个、
+      重启后 `browser mount expiry cleanup failed` **0** 条、`logout_worker_stop_failed` **0** 条；
+      并且**现网那个死 sshfs 挂载自动被修好**：日志 `WARN a recorded ssh workspace mount lost its daemon;
+      replacing it` → `INFO ssh workspace remounted`，`.../dsh-tenant/ssh/aipc/home/winger/ZT20Q` 从
+      `ls: Transport endpoint is not connected` 变成可读（列出 Android.bp/Makefile/a-ztc 等）。
+      现场恢复（14:36 起卡住的浏览器挂载）在重启前已由页面断开自行摘除并停止刷屏，本次未再手工干预。
+- [x] 修正 M75 归档里那句"浏览器挂载清理仍报 `fusermount3 … Device or resource busy`，是既有现象"：
+      它是本次的第一原因（限时优雅卸载 + 强制阶梯缺失），M76 起不再复现。
+- [ ] 遗留（**只剩人工一步**）：用真实浏览器在租户侧栏点一次「退出」（本机验收与 e2e 都是 HTTP 客户端/
+      脚本跑的，没有真人点界面）；需要用户的账号会话，因此留给用户确认：点后应回到门户登录页、
+      `/proc/self/mounts` 无该账号挂载、`ps` 无该账号 worker、审计出现 `logout_mount_detach` +
+      `logout_worker_stop`。
+
+### 归档：M64 的「死挂载条目」缺陷（原文，2026-09-22 由 M76 修）
+
+- [ ] **缺陷（2026-09-20 发布 M68 时两次撞到）**：`systemctl --user restart dshgw-verify` 会把 `sshfs`
+      进程随单元一起杀掉，但 **FUSE 挂载条目留在挂载表里**（`Transport endpoint is not connected`）；
+      启动时的 `sshService.Reconcile` 补不上这条死挂载，于是**有活跃 SSH 工作区的租户起不来**：
+      `bwrap: Can't get type of source …/ssh/…: Transport endpoint is not connected` → worker `exit status 1`。
+      现场恢复：`fusermount3 -u <mountpoint>` + 重启 dshgw（本次发布就是这么救回来的）。
+      修法方向：启动/`Reconcile` 前对**已记录**的挂载点做一次探测，ENOTCONN 的先 `fusermount3 -z` 再重挂
+      （browsermount 有对等的 `CleanupStale`，ssh 这侧缺）；或者让单元 stop 时先卸挂载（KillMode/顺序问题）。
+      另一个操作教训：**别用 CLI `dshgw tenant restart` 起长驻 worker** —— CLI 退出时 bwrap
+      `--die-with-parent` 会把 worker 一起带走，且日志里看不到那次退出；长驻 worker 只能由服务自己起
+
+> **M76 的修法**：`sshworkspace.remount`（`Reconcile` 启动时与 `Restore` 登录时共用）不再"表里有条目就跳过"，
+> 而是按**守护进程是否存在**（与 `MountsFor` 同一条规则）判定死挂载，先 `detachKeeping` 摘掉死条目
+> （保留记录与挂载点）再重挂。本机现网 2026-09-22 16:16 重启实测：`WARN a recorded ssh workspace mount lost
+> its daemon; replacing it` → `INFO ssh workspace remounted`，`.../dsh-tenant/ssh/aipc/home/winger/ZT20Q`
+> 从 `Transport endpoint is not connected` 变成可读。

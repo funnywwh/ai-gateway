@@ -292,3 +292,21 @@ make dshgw-browser-reload-e2e       # 断线/刷新/换标签页真机
 **不夸大**：以上真机结论只针对本机 Linux + 本机 Chromium + 本机 DSH 版本；已存在的十六进制挂载点**不迁移**
 （要换成目录名就在列表里删除后重新添加——删除会释放旧路径，重新添加会拿回目录名；换路径意味着 DSH 工作区条目重建，
 旧工作区下 `cwd` 指向旧路径的会话不再归组）；无记录的空目录不做启动清扫（网关无法区分「孤儿」与「客户端仍持有的映射」）。
+
+## M76：退出即强制卸载 + 最后强杀 dsh（2026-09-22）
+
+设计：`docs/design/m76-dsh-exit-force-teardown.md`。这一节只记与浏览器挂载有关的证据；SSH 侧的
+`DetachTenant`/`Restore` 与现网自愈记录见 `docs/todo_done.md` 的 M76 小节。
+
+| 证据 | 观测 |
+|---|---|
+| **本机现场（改动的触发点）** | `.../workspaces/dsh-tenant/browser/ZT20Q` 自 14:36:32 起 `fusermount3: failed to unmount … Device or resource busy`，reaper 每 5 秒重试、刷到 15:32 仍在刷（600+ 条）；该账号 15:14/15:23/15:24 三次退出的审计都是 `logout_worker_stop_failed`（`reason=*fmt.wrapError`），而同秒日志是 `tenant worker exited … signal: terminated` ⇒ dsh 停了、失败的是卸载 |
+| **卡死的真因（e2e 复现）** | go-fuse `Server.Unmount()` 在 `fusermount3 -u` 之后等自己的 serve loop，而 serve loop 只在内核释放连接时结束 ⇒ 挂载被持有（活着的 worker 沙箱 / 另一个挂载命名空间）时它**永不返回**。改前的 e2e 里：`POST /dshgw/logout/` 120s 无响应，`SIGQUIT` 栈显示退出请求与**整个 reaper** 都停在 `fuse.(*Server).Unmount → sync.WaitGroup.Wait`，worker 仍在跑、两个挂载都还挂着 |
+| 修好后的真机 e2e（`make dshgw-logout-e2e`，PASS **12 步**） | 一次性实例里同时挂上真浏览器目录 FUSE（`activate` 把它 bind 进沙箱 ⇒ 优雅卸载必然失败）与真 sshfs → `POST /dshgw/logout/` **1.58s** 返回 → 两个挂载都离开 `/proc/self/mounts` → worker 端口关闭 → 审计 `logout_mount_detach`（"2 mount(s) detached"）+ `logout_worker_stop`，无 `logout_worker_stop_failed`/`logout_mount_leftover` → ssh 记录保留 → 重新登录 sshfs 在同一路径重挂 |
+| Go 单测 | `browsermount`：优雅失败→强制成功→清理完成、**优雅永久阻塞→1s 有界升级**（`TestABlockingUnmountIsBoundedAndForced`）、强制也失败→记录保留、`final` 的 share 不被 `expire` 重启、停 worker 失败不再跳过卸载；`browserworkspace`：阶梯四分支 + 真机忙挂载 `TestRealFUSEForceUnmountTakesABusyMount`（PASS） |
+| 本机现网 | `make dshgw-build` → 重启 `dshgw-verify`（16:16:31，revision `f5b1720`）后：`browser-workspace` 残留挂载 **0**、`browser mount expiry cleanup failed` **0** 条、`logout_worker_stop_failed` **0** 条，8 个租户 worker 全部 ready |
+| 未由真机覆盖 | 真人点侧栏「退出」（需用户会话，见 `docs/TODO.md` M76）；「另一个挂载命名空间持有副本」的真机复现（本机无独立的 busy-holder 手段，Go 用例用 cwd 钉住挂载点覆盖同一分支，现网 snap 命名空间那次的现场证据见设计文档 §2.1） |
+
+**不夸大**：强制卸载保证的是**我方挂载表条目消失、挂载点可复用**；别的挂载命名空间里那份副本由内核管到
+那个进程退出（设计文档 §5 已声明）。退出瞬间正在写入浏览器目录的内容可能丢——这与 M69「退出即无条件停
+dsh」的既有取舍一致，本次不改变它。
