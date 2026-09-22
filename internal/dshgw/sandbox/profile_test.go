@@ -124,6 +124,9 @@ func TestProfileHidesEveryHostTreeExceptRuntimeAndTenantRoots(t *testing.T) {
 		"/etc/resolv.conf": true, "/etc/hosts": true, "/etc/nsswitch.conf": true,
 		"/etc/passwd": true, "/etc/group": true, "/etc/localtime": true,
 		"/etc/ssl": true, "/etc/ca-certificates": true,
+		// The alternatives database: /usr/bin/{pager,awk,which,…} are symlinks
+		// into it, so binding it is what keeps those names resolvable.
+		"/etc/alternatives": true,
 	}
 	for _, m := range mounts {
 		if strings.HasPrefix(m.dst, "/etc/") && m.dst != "/etc/dshgw" && !allowedEtc[m.dst] {

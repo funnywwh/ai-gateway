@@ -20,7 +20,11 @@
 //     Node's default child-process shell do not exist inside the sandbox.
 //   - /etc is not bound as a tree: only the named files the runtime reads are
 //     mounted, so nginx, systemd, ssh and the gateway's own key directory
-//     never appear in the tenant's view.
+//     never appear in the tenant's view. /etc/alternatives is the one directory
+//     bound back, because the distro's /usr/bin/{pager,awk,which,vi,…} are
+//     symlinks into it: leaving it out makes those names dangle inside the
+//     sandbox, and an ordinary interactive `git log` then dies with "cannot run
+//     pager: No such file or directory".
 //
 // This package is deliberately free of filesystem and process side effects: it
 // only computes argv, so the profile can be unit-tested and printed for review.
@@ -144,6 +148,19 @@ func Profile(rt Runtime, t Tenant) ([]string, error) {
 		"--ro-bind-try", "/etc/localtime", "/etc/localtime",
 		"--ro-bind-try", "/etc/ssl", "/etc/ssl",
 		"--ro-bind-try", "/etc/ca-certificates", "/etc/ca-certificates",
+		// The alternatives database is the one /etc *directory* that is bound
+		// back, and it is not decoration: the distro's /usr/bin/pager, awk,
+		// which, vi and friends are symlinks to /etc/alternatives/<name>, so
+		// without this bind they exist as dangling links inside an otherwise
+		// complete /usr. The symptom is far from the cause: git's default pager
+		// is the literal name `pager` (the alternatives wrapper) on these hosts,
+		// so an interactive `git log` on a tty fails with "cannot run pager: No
+		// such file or directory" plus "fatal: unable to execute pager 'pager'"
+		// while the same command piped through a non-tty works. The directory
+		// holds nothing but symlinks into paths the profile already mounts, so it
+		// adds no host data a reader of /usr could not infer; --ro-bind-try keeps
+		// hosts without it (non-Debian layouts) working unchanged.
+		"--ro-bind-try", "/etc/alternatives", "/etc/alternatives",
 	)
 
 	// The directory-picker plugin, read-only. Its whole directory is bound because

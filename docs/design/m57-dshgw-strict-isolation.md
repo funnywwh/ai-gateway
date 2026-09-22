@@ -92,7 +92,14 @@ deploy/dshgw/dsh-worker-bwrap@.service  静态 %i 模板（systemd-analyze verif
 
 1. `--tmpfs /home /root /tmp /var /srv /etc/dshgw`；
 2. 只读运行时：`/usr`、`/usr/lib→/lib`、`/usr/lib64→/lib64`、`/bin`、`/sbin`，外加 node 与 dsh release 的目录；
-3. `/etc` 只绑具名文件：`resolv.conf`、`hosts`、`nsswitch.conf`、`passwd`、`group`、`localtime`、`ssl`、`ca-certificates`；
+3. `/etc` 只绑具名文件，外加**唯一一个目录** `alternatives`：`resolv.conf`、`hosts`、`nsswitch.conf`、
+   `passwd`、`group`、`localtime`、`ssl`、`ca-certificates`、`alternatives`。
+   最后一项不是锦上添花：发行版的 `/usr/bin/pager`、`awk`、`which`、`vi` 等全是
+   `-> /etc/alternatives/<name>` 的软链，少了它这些名字在一个"看起来完整"的 `/usr` 里全部悬空，
+   而症状离病因很远——这台机器的 git 默认 pager 就是字面量 `pager`（alternatives 包装器名），
+   于是交互终端里 `git log` 报 `error: cannot run pager: No such file or directory` +
+   `fatal: unable to execute pager 'pager'`，管道给非 tty 却正常；
+   该目录只含指向已绑定 `/usr` 路径的软链，不额外暴露宿主数据；用 `--ro-bind-try` 保持非 Debian 宿主不变；
 4. 租户自己的可写根：仅 workspace 与 `.dsh` 的父目录；
    per-tenant 配置目录（`tenant.env`、`gateway.key`）**完全不挂载**——它由宿主侧 systemd 读取，
    挂进去只会把 `gateway.key` 交给共享账号，而 user 模式下租户读不到它；

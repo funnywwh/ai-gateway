@@ -123,6 +123,8 @@ report host-srv-entries "$(entries /srv)"
 report host-var-entries "$(entries /var)"
 report etc-entries "$(ls -A /etc 2>/dev/null | tr '\n' ',')"
 report etc-dshgw-entries "$(entries /etc/dshgw)"
+if [ -d /etc/alternatives ]; then report etc-alternatives PRESENT; else report etc-alternatives MISSING; fi
+if [ -x /usr/bin/pager ]; then report pager-resolves yes; else report pager-resolves no; fi
 if [ -e /etc/systemd ]; then report etc-systemd VISIBLE; else report etc-systemd MISSING; fi
 if [ -r /etc/passwd ]; then report passwd readable; else report passwd missing; fi
 if [ -r /etc/resolv.conf ]; then report resolv-conf readable; else report resolv-conf missing; fi
@@ -187,6 +189,11 @@ func TestStagingSandboxHidesHostAndOtherTenants(t *testing.T) {
 		"group": true, "localtime": true, "ssl": true, "ca-certificates": true,
 		"dshgw": true,
 	}
+	// The alternatives database is bound back on purpose, so it is part of the
+	// whitelist too: the distro's /usr/bin/{pager,awk,which,…} are symlinks into
+	// it, and a dangling pager is what made an interactive `git log` fail with
+	// "cannot run pager: No such file or directory".
+	allowed["alternatives"] = true
 	for _, entry := range strings.Split(strings.TrimSuffix(facts["etc-entries"], ","), ",") {
 		if entry != "" && !allowed[entry] {
 			t.Errorf("/etc exposes %q, which is not part of the runtime whitelist", entry)
@@ -194,6 +201,21 @@ func TestStagingSandboxHidesHostAndOtherTenants(t *testing.T) {
 	}
 	if got := facts["etc-dshgw-entries"]; got != "0" {
 		t.Errorf("/etc/dshgw holds %s entries, want an empty mount point", got)
+	}
+	// The alternatives database is the one /etc directory bound back, because the
+	// distro's tool names are symlinks into it: a dangling /usr/bin/pager is what
+	// turned an interactive `git log` into "cannot run pager: No such file or
+	// directory". Whether the directory exists is a property of the host, so the
+	// expectation follows the host rather than demanding one answer.
+	if _, err := os.Stat("/etc/alternatives"); err == nil {
+		if got := facts["etc-alternatives"]; got != "PRESENT" {
+			t.Errorf("etc-alternatives = %q, want PRESENT: the host has /etc/alternatives but the sandbox does not", got)
+		}
+		if _, err := os.Stat("/etc/alternatives/pager"); err == nil {
+			if got := facts["pager-resolves"]; got != "yes" {
+				t.Errorf("pager-resolves = %q, want yes: /usr/bin/pager resolves on the host but dangles inside the sandbox", got)
+			}
+		}
 	}
 	// A world-writable /var would mean the gateway's own state directory could
 	// reappear; it is a tmpfs like the other hidden trees.
