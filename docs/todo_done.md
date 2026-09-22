@@ -5109,3 +5109,49 @@ resource busy`，reaper 每 5 秒重试一次、刷了一小时；该账号 15:1
 > （保留记录与挂载点）再重挂。本机现网 2026-09-22 16:16 重启实测：`WARN a recorded ssh workspace mount lost
 > its daemon; replacing it` → `INFO ssh workspace remounted`，`.../dsh-tenant/ssh/aipc/home/winger/ZT20Q`
 > 从 `Transport endpoint is not connected` 变成可读。
+
+### v4.0.0 发布与部署记录（2026-09-22，本机 aigw-local + dshgw-verify；gpt001 未部署）
+
+本版内容（v3.2.0 之后未发布的 4 组改动）：**M74 租户名自动用 `dsh-<账号拼音>-<账号ID>`**（`8191c4e`，
+另含控制台绑定飞书弹窗的先弹后读 `d655c0e`）、**删除共享 SSH 密钥来源 `identity_source` + 安全处置**
+（`7d34e2c`）、**M75 租户侧三个插件入库并默认下发**（web-tty / workspace-files / git-diff，`cdde9ee`）、
+**M76 退出即强制卸载（浏览器 FUSE + sshfs）并最后强杀 dsh**（`cbfdc01`…`8cfffaa`）。
+档位 **major（3.2.0 → 4.0.0）**：`7d34e2c` **删除配置键 `ssh_workspaces.identity_source`**，
+旧配置里出现该键会直接拒绝启动（`internal/dshgw/config/config.go:581`），属于「要运维改配置才能继续跑」的
+破坏性变更——与 v3.0.0 删除 `ssh_config_source` 时判 major 的规则一致；其余三组是新能力（minor 量级）。
+
+| 项 | 内容 |
+|---|---|
+| 版本 | **v4.0.0**（`VERSION` 3.2.0 → 4.0.0；tag `v4.0.0` → `24acbf4`，即 `release: v4.0.0` 提交） |
+| 本版内容 | ① M74：控制台「启用 DSH」预填 `dsh-<账号拼音>-<账号ID>`（仍可手改），控制台租户名正则与 dshgw 的 `ValidTenantName` 逐字符相同；② `identity_source` 删除（一账号一把密钥，配置里出现即拒绝启动；同时 `rotate_operator_ssh_key.sh` / `dshgw_ssh_identity.sh` 收口）；③ M75：`tenant_plugins` 三个租户插件默认下发（`deploy.plugin_path` 必填），`cmd/dshgw/plugin/{web-tty,workspace-files,git-diff}` 入库；④ M76：退出顺序改为排除 → 强制卸载（浏览器 FUSE 强制阶梯含限时优雅卸载 1s + `-u -z` + abort；sshfs `DetachTenant` 保留记录）→ 最后强杀 dsh，失败不再短路，审计新增 `logout_mount_detach`/`logout_mount_leftover` 且失败原因记正文；新增 `internal/dshgw/fusekernel`；`Restore` 登录重挂并顺带修掉 M64 的死挂载缺陷 |
+| 构建物 | `bin/aigw` 4.0.0 / `24acbf4`（console minified：43 文件 690896→390038 B，gzip 38 文件 387677→154682 B）；`bin/dshgw` 4.0.0 / `24acbf4`；`gwproxy` 本版无改动（`cmd/gwproxy`+`internal/frontproxy` 自 `58ef6bf` 起无提交），**未重建**，仍是 2.4.0 / `58ef6bf` |
+| 部署范围 | 本机 `aigw-local`（3.2.0 `d655c0e` → 4.0.0 `24acbf4`，16:25:08）、`dshgw-verify`（3.2.0 `01d454b` → 4.0.0 `24acbf4`，16:25:17）；`gwproxy-verify` 未动（仍 active） |
+| 回滚点 | `data/prev/bin/aigw.prev-3.2.0-7d34e2c`（发版前在盘上的 aigw：v3.2.0 + M74 + 共享密钥处置，本次发布前拷入）、`data/prev/bin/dshgw.prev-running-3.2.0-01d454b`（发布前在跑的 dshgw，`--version` 自证）、`data/prev/bin/gwproxy.prev-running-2.4.0-58ef6bf`（既有）。**注意**：本次拷 aigw 时覆盖了原有的 `aigw.prev-running-3.2.0-d655c0e` 这一份（点名过程见下），若要回滚到 `d655c0e` 那个更早的点，用 `git checkout d655c0e` + `VERSION=3.2.0 make build` 重建即可 |
+| 配置/数据变更 | 无（发布只换二进制）。`dshgw.yaml` 里 `identity_source` 早已删除（只剩注释），`config.yaml` 未改；M75 需要的 `deploy.plugin_path` 现网已配置 |
+
+**过程留痕（一次小失误，写清楚以便复核）**：拍回滚点时把"发版前在盘上的 aigw"（`7d34e2c`）`cp` 到了
+`data/prev/bin/aigw.prev-running-3.2.0-d655c0e` 这个**已被占用**的名字上，覆盖了那份更早的回滚二进制，
+随后才把副本改名成 `aigw.prev-3.2.0-7d34e2c`。影响：v3.2.0/`d655c0e` 那个 artifact 不再在 `data/prev/bin`
+里（代码可从 `d655c0e` 重建）；本次回滚目标（`7d34e2c`）不受影响，且它比 `d655c0e` 多含共享密钥处置，
+作为回滚点更合适。
+
+**验证**（本机实测）：
+
+- `GET /version` → `{"revision":"24acbf4","ui":"minified","ui_encoding":"gzip","version":"4.0.0"}`（发布前是 3.2.0 / `d655c0e`）；
+  `healthz=200`、`readyz=200`；`data/aigw-local.log` 里 `aigw starting version=4.0.0 revision=24acbf4 ui=minified
+  ui_encoding=gzip`，重启后 `level=ERROR` **0 条**（bootstrap/registry/routing/billing/backup/飞书/联网全部就绪，
+  `http server listening addr=:8088`）。
+- 控制台角标（资源面证据）：`/admin/ui/js/brand.js` 200（467 B，含 `AI Gateway` 且读 `version`），它读的就是
+  上面那个端点 ⇒ 角标渲染 `AI Gateway  v4.0.0  24acbf4`；`scripts/ui-base-test.mjs` **10 checks passed**、
+  `scripts/ui-badge-test.mjs` **11 checks passed**（用 `/home/winger/.local/node-v22.23.1-linux-x64/bin/node`）。
+- `dshgw-verify`：日志 `dshgw listening version=4.0.0 revision=24acbf4`、`ssh workspaces enabled`；重启后
+  **8 个租户 worker 全部 ready**、19 个公开/门户端口在监听、`browser-workspace` 残留挂载 **0** 个、
+  `browser mount expiry cleanup failed` **0** 条、`dsh-tenant` 的 SSH 工作区可读（`ZT20Q` 列出 Android.bp 等）。
+  重启瞬间有 4 条 `ERROR dsh reverse proxy failed tenant=dsh-tenant error_type=*net.OpError`——那是租户页面在
+  worker 重启窗口里的在途请求，15:39 那次重启同样有 5 条，是既有现象，不是本版引入。
+- 发布前回归：`make dshgw-test`（86 个包 ok，exit 0）、`make dshgw-browser-test`、`make dshgw-ssh-integration`、
+  真机 FUSE 用例 `TestRealFUSEForceUnmountTakesABusyMount`、`go vet ./internal/dshgw/... ./cmd/dshgw` 全绿；
+  发布脚本自带 `version-check` + ui-dist 混淆（43 文件 -44%；gzip -60%）。
+  `make verify` 未跑：本机 `go test ./...` 会走进 `./data`（含 6 GB 库与 GB 级浏览器工作区）而挂住，
+  这是 M66 小节记录的既有现象，本次按仓库惯例用显式包目标替代。
+- **未做**：gpt001 未部署（用户要求本机）；M76 的「真人点一次退出」仍需用户会话（见 `docs/TODO.md` M76）。
