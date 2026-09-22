@@ -24,7 +24,10 @@
 //     bound back, because the distro's /usr/bin/{pager,awk,which,vi,…} are
 //     symlinks into it: leaving it out makes those names dangle inside the
 //     sandbox, and an ordinary interactive `git log` then dies with "cannot run
-//     pager: No such file or directory".
+//     pager: No such file or directory". /etc/passwd is bound as a *view*
+//     (RenderPasswd) when the gateway renders one: inside the sandbox HOME is
+//     the workspace, so the host's own passwd entry would send every getpwuid
+//     consumer — OpenSSH first of all — to a home directory the profile hides.
 //
 // This package is deliberately free of filesystem and process side effects: it
 // only computes argv, so the profile can be unit-tested and printed for review.
@@ -97,6 +100,11 @@ type Tenant struct {
 	// directory: no mount, no sshfs, nothing that can wedge (M71).
 	HostShareRoot string
 	HostShares    []HostShare
+	// PasswdFile is the host path of the generated passwd view bound at /etc/passwd: the
+	// host's own file with the worker account's home directory rewritten to this tenant's
+	// workspace (see RenderPasswd). Empty binds the host's /etc/passwd unchanged, which is
+	// what every caller that does not render a view gets.
+	PasswdFile string
 }
 
 // HostShare is one operator-declared host directory as it appears inside one tenant's sandbox.
@@ -156,12 +164,25 @@ func Profile(rt Runtime, t Tenant) ([]string, error) {
 	// /etc is not a bound tree: only the handful of entries the runtime
 	// genuinely reads (name resolution, getpwuid, TLS trust, time zone) is
 	// mounted, so nginx, systemd and the gateway's own configuration stay
-	// invisible.
+	// invisible. The passwd entry is the tenant's *view* (PasswdFile) when the
+	// gateway rendered one: inside the sandbox HOME is the workspace while the
+	// host's passwd still names the deployment account's own home, and every
+	// getpwuid consumer — OpenSSH above all, which resolves ~ from passwd and
+	// not from $HOME — would otherwise look in a directory the profile hides.
+	passwd := "/etc/passwd"
+	// A rendered view is bound strictly: the gateway wrote it moments ago, so its absence at
+	// exec time is a real fault, and a skipped bind would leave the sandbox with no /etc/passwd
+	// at all — the exact disagreement this view exists to remove.
+	passwdFlag := "--ro-bind-try"
+	if t.PasswdFile != "" {
+		passwd = t.PasswdFile
+		passwdFlag = "--ro-bind"
+	}
 	argv = append(argv,
 		"--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf",
 		"--ro-bind-try", "/etc/hosts", "/etc/hosts",
 		"--ro-bind-try", "/etc/nsswitch.conf", "/etc/nsswitch.conf",
-		"--ro-bind-try", "/etc/passwd", "/etc/passwd",
+		passwdFlag, passwd, "/etc/passwd",
 		"--ro-bind-try", "/etc/group", "/etc/group",
 		"--ro-bind-try", "/etc/localtime", "/etc/localtime",
 		"--ro-bind-try", "/etc/ssl", "/etc/ssl",
@@ -330,6 +351,11 @@ func resolve(rt Runtime, t Tenant) (nodeBin, binJS, nodeRoot, dshRoot, workspace
 	for _, entry := range t.Environment {
 		if entry == "" || strings.ContainsAny(entry, "\x00\n\r") {
 			return "", "", "", "", "", "", fmt.Errorf("tenant %s has an unusable argv entry %q", t.Name, entry)
+		}
+	}
+	if t.PasswdFile != "" {
+		if err = safeAbsolute(t.PasswdFile, "passwd_file"); err != nil {
+			return "", "", "", "", "", "", err
 		}
 	}
 	// A registry record is data, not authority: even a tampered registry.json

@@ -94,7 +94,16 @@ func (m *Manager) SandboxProfile(t registry.Tenant) ([]string, error) {
 	if err := m.prepareBrowserMountRoot(t); err != nil {
 		return nil, err
 	}
-	return sandbox.Profile(m.sandboxRuntime(), m.sandboxTenant(t))
+	// The passwd view is rendered here rather than once at provisioning time: the account's
+	// home entry is host state that an operator can change under a running deployment, and
+	// bubblewrap needs the bind source on disk before it execs.
+	passwd, err := m.prepareTenantPasswd(t)
+	if err != nil {
+		return nil, err
+	}
+	tenant := m.sandboxTenant(t)
+	tenant.PasswdFile = passwd
+	return sandbox.Profile(m.sandboxRuntime(), tenant)
 }
 
 // SandboxProfileReady validates everything a tenant needs before its worker

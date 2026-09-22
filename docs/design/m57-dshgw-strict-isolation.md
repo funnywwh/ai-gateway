@@ -100,6 +100,12 @@ deploy/dshgw/dsh-worker-bwrap@.service  静态 %i 模板（systemd-analyze verif
    于是交互终端里 `git log` 报 `error: cannot run pager: No such file or directory` +
    `fatal: unable to execute pager 'pager'`，管道给非 tty 却正常；
    该目录只含指向已绑定 `/usr` 路径的软链，不额外暴露宿主数据；用 `--ro-bind-try` 保持非 Debian 宿主不变；
+   注意 `passwd` 绑的**不是宿主原件而是每租户渲染的视图**（`Tenant.PasswdFile` = `<DshHome>/sandbox/passwd`，
+   由 tenancy 层用 `sandbox.RenderPasswd` 把本账号的 home 改写成 workspace）——沙箱里 `HOME` 是 workspace，
+   而 OpenSSH 用 `getpwuid()` 而不是 `$HOME` 展开 `~`，不渲染视图时 `~/.ssh/config`/`known_hosts`/默认私钥
+   都会落到被 `--tmpfs /home` 藏起来的宿主家目录上，租户里 `ssh <别名>` 会退化成对别名做 DNS 解析；
+   视图只改「名字 → 家目录」一个字段，其余行原样；它落在租户自己的 DSH home 里，是**视图不是边界**
+   （租户改写它只能改自己沙箱里的这份映射，挂载与权限都不读它）；
 4. 租户自己的可写根：仅 workspace 与 `.dsh` 的父目录；
    per-tenant 配置目录（`tenant.env`、`gateway.key`）**完全不挂载**——它由宿主侧 systemd 读取，
    挂进去只会把 `gateway.key` 交给共享账号，而 user 模式下租户读不到它；

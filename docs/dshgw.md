@@ -226,7 +226,7 @@ serve loop，实测正是它让退出请求与 reaper 一起卡死），失败�
 ```bash
 # 只读检查与产物（不需要 root）
 dshgw --config <state>/config.yaml doctor                    # 部署不变量：私有权限、运行时、bwrap 前置条件
-dshgw --config <state>/config.yaml sandbox-exec --print alice # 打印该租户的 bwrap profile（不执行）
+dshgw --config <state>/config.yaml sandbox-exec --print alice # 打印该租户的 bwrap profile（不执行；渲染时仍会准备宿主侧输入：browser 挂载根与 passwd 视图）
 dshgw --config <state>/config.yaml capture-url alice          # worker 上报的启动 URL
 dshgw --config <state>/config.yaml contract dsh               # 真实 dsh 契约检查
 ```
@@ -344,6 +344,14 @@ feishu:
 | namespace | `--unshare-pid --die-with-parent`；共享网络；宿主 `apparmor_restrict_unprivileged_userns=1` 时租户不能嵌套 namespace |
 | 纵深防御 | 租户叶 `0700`（`doctor` 逐租户复核）+ dsh 内层 sandbox（本宿主 AppArmor 拒绝嵌套 bwrap，dsh 回退 Landlock） |
 
+`/etc/passwd` 绑的不是宿主原件，而是**每租户渲染的视图**（`<DshHome>/sandbox/passwd`，0644，每次渲染 profile 时重写）：
+沙箱里 `HOME` 是 workspace（runner 导出 `HOME=<workspace>`），而宿主 passwd 里本账号的 home 仍指向部署账号自己的家目录
+—— 那个目录正好被 profile 的 `--tmpfs /home` 藏掉了。**OpenSSH 展开 `~` 用的是 `getpwuid()`，不是 `$HOME`**，所以不渲染视图时
+`~/.ssh/config`、`known_hosts`、默认私钥全都会落到那个被藏起来的目录上：网关写进 `<workspace>/.ssh/config` 的别名看不见，
+`ssh <别名>` 退化成"把别名当主机名做 DNS 解析"（`Could not resolve hostname aipc: Temporary failure in name resolution`）。
+视图只改「名字 → 家目录」这一个字段，其余条目与宿主一致；它落在租户自己的 DSH home 里，租户改写它也只会改变自己沙箱里的这一份
+视图，profile 不会拿它当挂载或权限的依据（同 `settings.yaml`：视图，不是边界）。
+
 **单域名路径模式（可选）**：配置 `public_base_url` 后，租户的 URL 变成
 `https://<域名>/t/<租户>/`，会话 cookie 的 Path 随之收窄到该租户路径 —— 多个租户共享一个 origin 时，
 路径是区分两个租户会话的唯一依据（否则浏览器会把 A 的 cookie 发给 B 的路径）。Origin 栅栏以基础 origin
@@ -445,6 +453,11 @@ EBUSY 就惰性 `-u -z`，仍不行就杀掉 sshfs 守护进程 / abort 这条 F
   重新居中。
 - 本机从旧版本迁移（旧的单一 `ssh_config_source`）用 `scripts/ssh_config_adopt.sh`：把每个账号现有的
   `<workspace>/.ssh/config` 收编为它的种子，不覆盖已有种子，再按需裁剪。
+- **沙箱内直接 `ssh <别名>` 也能用**：靠的是每租户的 `/etc/passwd` 视图（见 §7）让 `getpwuid()` 与 `HOME` 都指向 workspace。
+  在这之前的现象是 `ssh: Could not resolve hostname <别名>: Temporary failure in name resolution` —— OpenSSH 找的是
+  `/home/<部署账号>/.ssh/config`（被 profile 藏掉的那个家目录）而不是 `<workspace>/.ssh/config`，于是别名根本没被读到。
+  网关自己的 ssh 调用（`core.sshCommand = ssh -F <workspace>/.ssh/config -i <workspace>/.ssh/id_rsa`、sshfs 挂载）一直都显式带 `-F`，
+  所以它们从来不受影响；这条视图补的是"租户手敲 `ssh 别名`"这条路。
 
 ### 端口与私钥管理
 

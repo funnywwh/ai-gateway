@@ -85,6 +85,10 @@ type Manager struct {
 	// Tests inject sandbox.ValidateBindings; production uses
 	// sandbox.ValidateRuntime, which also requires the host's linker layout.
 	RuntimeCheck func(sandbox.Runtime) error
+	// HostPasswd reads the host passwd file a tenant's view is rendered from.
+	// Tests inject a fixed file so provisioning never depends on the accounts a
+	// machine happens to have; production reads /etc/passwd.
+	HostPasswd func() ([]byte, error)
 	// SSHWorkspaces is the slice of the ssh-workspace service (M64) the lifecycle needs:
 	// the mount points to bind into a worker, the per-account ssh identity to provision,
 	// and the mounts to detach when an account goes away. Nil disables the feature, which

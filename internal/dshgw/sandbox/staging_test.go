@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -77,6 +78,25 @@ func newStagingLayout(t *testing.T, bwrap string) stagingLayout {
 	mustWrite(t, filepath.Join(aliceCfg, "tenant.env"), "DSH_PORT=32100\n", 0o640)
 	mustWrite(t, filepath.Join(gateway, "registry.json"), "{\"tenants\":[\"alice\",\"bob\"]}\n", 0o600)
 
+	// The passwd view a real worker gets: the host's own file with the account this test runs as
+	// pointing at Alice's workspace. It is rendered with the production function rather than
+	// hand-written, so the staging run measures the bind a worker really carries, and it is what
+	// makes getpwuid agree with HOME inside the sandbox (OpenSSH resolves ~ from passwd).
+	hostPasswd, err := os.ReadFile("/etc/passwd")
+	if err != nil {
+		t.Skipf("%s (%v)", stagingSkipReason, err)
+	}
+	current, err := user.Current()
+	if err != nil {
+		t.Skipf("%s (%v)", stagingSkipReason, err)
+	}
+	view, err := RenderPasswd(hostPasswd, current.Username, aliceWS)
+	if err != nil {
+		t.Skipf("%s (%v)", stagingSkipReason, err)
+	}
+	passwdView := filepath.Join(root, "state/sandbox/alice/passwd")
+	mustWrite(t, passwdView, string(view), 0o644)
+
 	probeNode := filepath.Join(root, "dsh/node/bin/node")
 	mustWrite(t, probeNode, stagingProbeScript(bwrap, bobState, gateway, aliceWS, aliceCfg), 0o755)
 
@@ -102,6 +122,7 @@ func newStagingLayout(t *testing.T, bwrap string) stagingLayout {
 			DshHome:     aliceHome,
 			WorkerPort:  32100,
 			Environment: []string{"web", "--port", "32100", "--no-open"},
+			PasswdFile:  passwdView,
 		},
 	}
 }
@@ -127,6 +148,8 @@ if [ -d /etc/alternatives ]; then report etc-alternatives PRESENT; else report e
 if [ -x /usr/bin/pager ]; then report pager-resolves yes; else report pager-resolves no; fi
 if [ -e /etc/systemd ]; then report etc-systemd VISIBLE; else report etc-systemd MISSING; fi
 if [ -r /etc/passwd ]; then report passwd readable; else report passwd missing; fi
+home=$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f6)
+if [ -n "$home" ]; then report passwd-home "$home"; else report passwd-home unknown; fi
 if [ -r /etc/resolv.conf ]; then report resolv-conf readable; else report resolv-conf missing; fi
 if command -v sh >/dev/null 2>&1; then report shell found; else report shell missing; fi
 if touch %[4]q/write-probe 2>/dev/null; then report workspace-write ok; else report workspace-write failed; fi
@@ -201,6 +224,13 @@ func TestStagingSandboxHidesHostAndOtherTenants(t *testing.T) {
 	}
 	if got := facts["etc-dshgw-entries"]; got != "0" {
 		t.Errorf("/etc/dshgw holds %s entries, want an empty mount point", got)
+	}
+	// getpwuid inside the sandbox must name the tenant workspace. The host's own /etc/passwd
+	// would send every home-directory lookup — OpenSSH's ~/.ssh/config, known_hosts and default
+	// identity above all — to a path this profile hides, which is how `ssh <alias>` turned into
+	// a DNS lookup of the alias name.
+	if got := facts["passwd-home"]; got != "unknown" && got != layout.alice.Workspace {
+		t.Errorf("passwd-home = %q, want the tenant workspace %q", got, layout.alice.Workspace)
 	}
 	// The alternatives database is the one /etc directory bound back, because the
 	// distro's tool names are symlinks into it: a dangling /usr/bin/pager is what

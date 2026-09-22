@@ -146,6 +146,11 @@ func managerFixture(t *testing.T) (*Manager, *WorkerRunner, string) {
 		},
 		RuntimeCheck: sandbox.ValidateBindings,
 		Probe:        func(context.Context, registry.Tenant) error { return nil },
+		// The synthetic deployment runs as an account this machine does not have, so the
+		// per-tenant passwd view is rendered from this file instead of /etc/passwd.
+		HostPasswd: func() ([]byte, error) {
+			return []byte("root:x:0:0:root:/root:/bin/sh\ndshgw:x:1001:1001::/home/dshgw:/bin/sh\n"), nil
+		},
 	}
 	return m, runner, root
 }

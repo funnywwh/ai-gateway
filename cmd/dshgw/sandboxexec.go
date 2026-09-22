@@ -23,7 +23,10 @@ const sandboxFailureExit = 127
 // as the shared unprivileged worker account, and it takes the tenant name only.
 // Everything else — the bubblewrap binary, node, the dsh release, every mount
 // point — is derived from the root-owned configuration and the registry. Nothing
-// the tenant can write is consulted, so a tenant cannot widen its own profile.
+// the tenant can write decides a mount, so a tenant cannot widen its own profile.
+// (The profile does bind one file the account can rewrite — the passwd view the
+// gateway renders into its own DSH home, tenancy/passwd.go — and that only changes
+// the name → home mapping inside that account's sandbox.)
 //
 // There is deliberately no root requirement: the unit's User= is the shared
 // worker account, so requiring root here would make every bwrap worker fail to
@@ -61,7 +64,10 @@ func (c *cli) sandboxExec(args []string) error {
 		return sandboxFailure(err)
 	}
 	if *printOnly {
-		// Printed for review and for the acceptance tests; never executed.
+		// Printed for review and for the acceptance tests; never executed. Rendering a profile
+		// has already prepared the host-side inputs a real start needs (the browser mount root
+		// and the per-tenant passwd view), because the printed argv names them and a review that
+		// could not see them would be reviewing a different profile than the one that runs.
 		fmt.Fprintln(c.stdout, strings.Join(argv, "\n"))
 		return nil
 	}
