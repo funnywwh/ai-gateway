@@ -33,6 +33,12 @@ __pycache__/
 # The previous /plugins/*.bin pattern never matched the real names.
 /plugins/
 
+# runtime files of the tenant-side web plugins (M75). They normally live in each account's DSH
+# home — the row names a per-tenant path — so anything appearing here came from a row without a
+# traceFile (an out-of-tree run) or an interrupted test run, and must never be committed.
+cmd/dshgw/plugin/*/trace.jsonl
+cmd/dshgw/plugin/*/cache.json
+
 # editors
 .idea/
 .vscode/

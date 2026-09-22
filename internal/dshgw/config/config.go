@@ -345,6 +345,7 @@ type Config struct {
 	HostShares        HostShares        `yaml:"host_shares" json:"host_shares"`
 	BrowserWorkspaces BrowserWorkspaces `yaml:"browser_workspaces" json:"browser_workspaces"`
 	AccountCard       AccountCard       `yaml:"account_card" json:"account_card"`
+	TenantPlugins     TenantPlugins     `yaml:"tenant_plugins" json:"tenant_plugins"`
 	TenantRoot        string            `yaml:"tenant_root" json:"tenant_root"`
 	WorkspaceRoot     string            `yaml:"workspace_root" json:"workspace_root"`
 	HandshakeDir      string            `yaml:"handshake_dir" json:"handshake_dir"`
@@ -375,6 +376,41 @@ type BrowserWorkspaces struct {
 type AccountCard struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
 }
+
+// TenantPlugins are the tenant-side web plugins every account's dsh is given by default (M75):
+// the interactive terminal, the workspace file manager, and the read-only git change review.
+//
+// Why these are gateway features with switches rather than something each tenant adds for itself:
+// the rows go into the profile the gateway owns, the plugin directories ship beside
+// deploy.plugin_path, and one installed copy serves every account — so which panels a tenant sees,
+// and where their per-tenant state is written, is the gateway's decision, not the tenant's.
+//
+// All three are ON by default: "installed and running out of the box" is the whole point. Turning
+// one off removes its row from every tenant's profile (and from the next start of every worker);
+// the plugin files stay where they are.
+type TenantPlugins struct {
+	WebTTY         PluginSwitch `yaml:"web_tty" json:"web_tty"`
+	WorkspaceFiles PluginSwitch `yaml:"workspace_files" json:"workspace_files"`
+	GitDiff        PluginSwitch `yaml:"git_diff" json:"git_diff"`
+	// RootLabel is the label the two workspace-scoped panels show for their clamp root. Empty
+	// means the default, 工作区 — the workspace directory is named after the account, which is
+	// not what the panel should call itself.
+	RootLabel string `yaml:"root_label" json:"root_label"`
+}
+
+// PluginSwitch is one tenant-side plugin's enabled flag.
+type PluginSwitch struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+}
+
+// AnyEnabled reports whether at least one tenant-side plugin is rendered.
+func (p TenantPlugins) AnyEnabled() bool {
+	return p.WebTTY.Enabled || p.WorkspaceFiles.Enabled || p.GitDiff.Enabled
+}
+
+// DefaultPluginRootLabel is what the workspace-scoped panels call their root when the operator
+// says nothing.
+const DefaultPluginRootLabel = "工作区"
 
 func defaults() Config {
 	return Config{
@@ -417,6 +453,15 @@ func defaults() Config {
 		// Off, and with a container name that does not collide with the ssh one. A share is a
 		// grant over the host's own file system, so it is declared, never inferred.
 		HostShares: HostShares{Subdir: "host"},
+		// On by default (M75): a tenant's dsh gets the terminal, the workspace file manager and
+		// the git change review without anybody editing that tenant's profile by hand. The
+		// plugin directories sit beside deploy.plugin_path, which the sandbox already binds.
+		TenantPlugins: TenantPlugins{
+			WebTTY:         PluginSwitch{Enabled: true},
+			WorkspaceFiles: PluginSwitch{Enabled: true},
+			GitDiff:        PluginSwitch{Enabled: true},
+			RootLabel:      DefaultPluginRootLabel,
+		},
 		Dsh: DshRuntime{
 			// Empty means "ask the environment": DSHGW_NODE / DSHGW_DSH_ROOT, the same
 			// rule aigw's supervised shape uses. The old defaults pointed at /opt/dsh,
@@ -833,6 +878,13 @@ func (c *Config) Validate() error {
 		// plugin directory's sibling), so without it the switch would turn on two routes and
 		// no visible row — a silent half-configuration.
 		return errors.New("account_card.enabled requires deploy.plugin_path")
+	}
+	if c.TenantPlugins.AnyEnabled() && strings.TrimSpace(c.Deploy.PluginPath) == "" {
+		// Same reason: the plugin directories are deployed beside deploy.plugin_path, and the
+		// rows name files inside them. Whether those files are actually there is the doctor's
+		// check (cmd/dshgw/ops.go) and the create-time preflight in the tenancy layer, not a
+		// load-time filesystem test.
+		return errors.New("tenant_plugins requires deploy.plugin_path (the plugin directories ship beside it)")
 	}
 	switch c.SettingsUI {
 	case "", "lan", "loopback":

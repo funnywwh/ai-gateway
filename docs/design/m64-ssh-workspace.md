@@ -9,6 +9,13 @@
 > `identity_dir/<账号>`（一账号一把），该键出现即拒绝启动；`identity_dir` 与 `ssh_config_dir`
 > 一样不得落在本进程账号的 `~/.ssh` 内。下文凡提 `identity_source` 处均按此口径理解（保留原文以
 > 记录当时的设计），处置流程见 `docs/dshgw.md` §7b「共享密钥事故的处置」。
+>
+> **2026-09-22 追补（M76，挂载的生命周期）**：点「退出」时该账号的 sshfs 挂载会被**强制卸载**
+> （`DetachTenant`：优雅 → `-u -z` → 杀守护进程/abort 后重试），**记录、镜像与挂载点目录保留**；
+> **下次登录按记录自动重挂**（`Restore`，在启动 worker 之前，`cmd/dshgw/login_prepare.go` 的
+> `PrepareLogin` 里），因此"退出卸载、再登录挂回"。设计见
+> [M76](m76-dsh-exit-force-teardown.md)；上文 §「挂载后的重启代价」与"挂载不随退出消失"的隐含假设
+> 按这一条理解。
 
 ## 1. 需求与定位
 

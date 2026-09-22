@@ -391,6 +391,16 @@ func renderPatch(cfg *config.Config, t registry.Tenant, opt TenantOptions) ([]by
 		// the place a person looks for "who am I / sign out" (M67).
 		rows[1]["insert"] = append(rows[1]["insert"].([]map[string]any), accountCardRow(cfg))
 	}
+	// The tenant-side web plugins (M75). Undeployed but enabled is an error rather than a skipped
+	// row: this is the create/rotate path, where a bad deployment must be named, not rendered into
+	// a profile whose row would cost the account its whole plugin tree at start.
+	tenantRows, err := tenantPluginRows(cfg, t)
+	if err != nil {
+		return nil, err
+	}
+	if len(tenantRows) > 0 {
+		rows[1]["insert"] = append(rows[1]["insert"].([]map[string]any), tenantRows...)
+	}
 	if opt.PluginBrowserFS == "off" {
 		rows = append(rows, map[string]any{"id": "browser-fs", "name": "dsh-browser-fs", "disabled": true})
 	}

@@ -342,6 +342,24 @@ dshgw:
   # 在下一次「启用/轮换密钥」时补写到 dshgw 注册表。
   # account_card:
   #   enabled: true
+  #
+  # 租户侧 web 插件（M75）：每个账号的 dsh 默认就带三块面板 —— 终端（web-tty，真正的 PTY，
+  # 跑在该账号自己的沙箱里）、工作区文件（workspace-files，只有 root 子树可写，逐路径夹紧）、
+  # 变更（git-diff，只读地看仓库改动）。**三个都默认开启**：这三个插件按「开箱即用」交付，
+  # 想看更窄的面就显式关掉某一项。开关写在这里（而非子进程配置里）是因为行渲染、插件目录位置
+  # 和每账号状态路径都由网关决定；生成子进程配置时这三项**总是**被写下去，所以这里写 false
+  # 不会被子的默认值翻回来。
+  # 前置：把三个插件目录部署到子进程 plugin_path 同级的 web-tty/、workspace-files/、git-diff/
+  # （仓库里的 ./cmd/dshgw/plugin/ 已经是这个形状），`dshgw doctor` 会逐个检查；开着但没部署
+  # 时建户/轮换会直接失败，既有租户启动则只丢掉那一行并告警。
+  # 运行期状态按账号隔离：<该账号 DSH home>/plugin-state/{web-tty,workspace-files}.trace.jsonl
+  # 与 git-diff.{trace.jsonl,cache.json} —— 共享目录里不留任何状态，扫描缓存也不跨账号。
+  # 细节见 docs/dshgw.md §7f 与 docs/design/m75-tenant-plugins.md。
+  # tenant_plugins:
+  #   web_tty: { enabled: true }
+  #   workspace_files: { enabled: true }
+  #   git_diff: { enabled: true }
+  #   root_label: 工作区            # 两个工作区面板对 root 的显示名；留空即此默认值
 
 # Feishu (Lark) identity (M60/M61): bind API keys to Feishu accounts, and let those people
 # sign in to the DSH portal without pasting a key. Off by default, and while it is off

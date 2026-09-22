@@ -679,6 +679,15 @@ func (m *Manager) startWorker(ctx context.Context, t registry.Tenant) error {
 	} else if warning != "" {
 		m.log().Warn(warning)
 	}
+	// The tenant-side web plugins (M75): same rule again, for three rows at once. An enabled but
+	// undeployed plugin warns and loses its row instead of stopping the account.
+	if warnings, err := EnsureTenantPlugins(m.Config, t); err != nil {
+		return err
+	} else {
+		for _, warning := range warnings {
+			m.log().Warn(warning)
+		}
+	}
 	if err := m.refreshModelsBeforeStart(ctx, t); err != nil {
 		return err
 	}

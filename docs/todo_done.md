@@ -4948,3 +4948,63 @@ suyuan-sz、sz-test、us-test。审计里还留着 `dsh-tenant` 曾请求挂载 
       正确做法是在 aipc 上现生成一把新密钥就地替换）；`ssh_workspaces.hosts` 白名单目前为空
       （可写任意 `user@host`），是否收紧待定；`aigw doctor` 报 `verify1` 缺 `gateway.key` 与
       `settings.yaml`，是 9-18 起就存在的历史漂移，与本次无关。
+
+---
+
+## M75 把 dsh-tenant 的 3 个插件纳入项目并默认下发（终端 / 工作区文件 / 变更）
+
+需求原话：「将 dsh-tenant 的 3 个插件加入项目，并让 dsh 默认安装启动」。设计文档：
+`docs/design/m75-tenant-plugins.md`；规格：`docs/dshgw.md` §7f；部署：`deploy/dshgw/README.md`。
+
+- [x] **源码入库**：`web-tty`（终端，真 PTY + xterm.js）、`workspace-files`（工作区文件管理器）、
+      `git-diff`（只读变更审阅）三个插件从 `data/dshgw-verify/state/tenants/dsh-tenant/.dsh/plugins/`
+      收编到 `cmd/dshgw/plugin/`，与既有三个网关插件同构（`index.js` 宿主半 + `client.js` 浏览器半 +
+      `package.json` 的 `dsh.client` + `test/*.test.mjs`）。此前它们**只存在于这一个租户**的 DSH home 里，
+      全仓库（internal/cmd/docs/Makefile）grep 三个名字零命中；运行期 `trace.jsonl` 不进仓库。
+- [x] **默认安装启动**：`tenant_plugins.{web_tty,workspace_files,git_diff}.enabled` **默认全开**，
+      由网关渲染进每个租户的 `profiles/web/cordis.patch.yml`（建户/轮换时 `renderPatch`，每次 worker 启动
+      时 `EnsureTenantPlugins` 按开关增删刷新），行 id 沿用租户手写的 `dshgw-web-tty` /
+      `dshgw-workspace-files` / `dshgw-git-diff`。插件目录放 `deploy.plugin_path` 同级（该目录沙箱内只读绑定，
+      **零沙箱改动**）；关掉即移除该行。
+- [x] **运行期状态按账号隔离**：三行都带 `traceFile`（git-diff 另有 `cacheFile`），落在
+      `<DshHome>/plugin-state/`。共享插件目录在生产可能 root 拥有、写不进去，而一份共享的 git-diff 扫描缓存
+      会把一个账号的仓库路径喂给另一个账号。插件新增的能力只有：`readConfig` 接受绝对 `traceFile`/`cacheFile`
+      （不给就仍写自己目录，保住 out-of-tree 用法），`createTracer` 写前 `mkdir -p`（以租户账号身份建目录，
+      属主才正确）；`web-tty` 顺带导出 `readConfig`，与另外两个一致。
+- [x] **配置面与校验**：`internal/dshgw/config`（独立形态）+ `internal/config` & `internal/dshgwsup` &
+      `cmd/aigw/dshgw_child.go`（监督形态）三层同名；任一开启而 `deploy.plugin_path` 为空 → 加载失败；
+      监督形态**总是**把该块写进生成的子进程配置（子进程默认是开，父进程沉默会把 `false` 翻回去，有测试钉住）。
+      数值旋钮不重复暴露（租户 patch 里原先写的正是插件自身默认值），只加 `root_label`。
+- [x] **未部署的插件不渲染行**：建户/轮换密钥时**报错**（错误里带缺失路径），既有租户启动时**跳过并 warning**
+      —— 一行指向不存在的模块会让整棵插件树加载失败，所以宁可少一行，不可给一行坏行。`dshgw doctor` 新增
+      `web-tty-plugin` / `workspace-files-plugin` / `git-diff-plugin` 三条体检。
+- [x] **测试**：`internal/dshgw/config/tenant_plugins_test.go`（默认全开、逐项关、`root_label`、缺
+      `plugin_path` 报错、全关时不再要求）、`internal/dshgw/tenancy/tenant_plugins_test.go`（三个包两半齐备、
+      行命名为 `index.js`、`root`/`cwd` 是该租户 workspace、状态按租户且不落在插件目录、开关翻转与幂等、
+      未部署时建户报错而启动只告警）、`cmd/aigw/dshgw_child_test.go`（开关原样过河，全关也写块）；三个插件的
+      JS 测试（14+18+33）挂进 `make dshgw-test`，web-tty 的测试改用临时目录 traceFile（不再往仓库写运行期
+      文件），`.gitignore` 兜底 `cmd/dshgw/plugin/*/{trace.jsonl,cache.json}`。既有夹具按新口径修：默认开 ⇒
+      「browse picker + 无 plugin_path」这种没有插件目录的配置必须显式关掉三项（`security_test.go`、
+      `dataroot_test.go`、`browserworkspace_test.go`、`cmd/dshgw/{deployment,main}_test.go`）。
+- [x] **本机现网下发**（`dshgw-verify.service`，8 个租户）：先把 `dsh-tenant` 手写的用户级 patch 备份成
+      `.pre-m75-20260922-153912` 并删掉三段 insert（留注释说明改由网关渲染；同 id 两处行会重复注册 RPC 通道），
+      再 `make dshgw-build` + 重启单元（~12s，全部租户 worker 依次回来；`dsh-tenant` 的 ssh/browser 挂载按
+      既有逻辑重建，浏览器挂载清理仍报 `fusermount3 … Device or resource busy`，是既有现象）。
+- [x] **验收证据**：7 个已开通租户的 profile patch **全部**含三行（`verify1` 例外，见遗留）；7 个租户的
+      `plugin-state/` 各出现 3 个 trace 文件，其中 `web-tty` 的 `activated` 记录 `nodePty=1.2.0-beta.15`、
+      `cwd=<该租户 workspace>`，`workspace-files`/`git-diff` 的 `root` 也各自指向该租户 workspace；
+      共享目录 `cmd/dshgw/plugin/` 内**没有**任何 `trace.jsonl`/`cache.json`；`dshgw doctor` 三条新检查 OK；
+      浏览器面：租户 shell HTML 的客户端插件注册表列出 `dshgw-web-tty` / `dshgw-workspace-files` /
+      `dshgw-git-diff` 三个 client 模块，逐个取回 HTTP 200（529252 / 64643 / 55529 字节，均含
+      `__ModuleLoader__.load`）。回归：`make dshgw-test` 全绿；`make dshgw-verify` 的 Go 测试、真实 bwrap
+      `TestStaging*`（宿主隐藏、跨租户不可见、真 dsh web 在沙箱内起服务）全过，`scripts/dshgw_supervised_e2e.py`
+      **52 步 PASS**（含 `tenant-create`：受监督形态生成的子配置带 `tenant_plugins` 三段，租户 patch 三行齐全、
+      每租户状态路径正确）。
+- [ ] 遗留（**与本次无关的既有漂移**）：`scripts/dshgw_supervised_e2e.py` 的飞书段落 13 步失败，起点是
+      `feishu-bind-entry` 期望 302 而实际 400 —— Key 级绑定 `GET /admin/api/v1/keys/{id}/feishu/bind` 已在
+      M72（提交 758164e，2026-09-21）改为恒返回 400 并提示「bind it to the account instead」，e2e 仍在测
+      已退休的旧入口；该脚本没有分组过滤，需要按账号级接口（`PUT /admin/api/v1/accounts/{id}/feishu`）重写
+      这一段。另：`verify1` 是历史遗留租户，其 profile patch 仍是模板占位（`[]`，没有 insert 列表），
+      `EnsureTenantPlugins` 按既有口径只告警不改写（rotate-key 可重建），`dshgw doctor` 报它缺 `gateway.key` /
+      `settings.yaml` 也是 9-18 起的历史漂移；`dsh-tenant` 的旧 `.dsh/plugins/{web-tty,workspace-files,git-diff}`
+      影子副本本轮**保留**（回滚用），确认稳定后可删。

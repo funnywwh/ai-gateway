@@ -511,3 +511,45 @@ func TestBuildDshgwChildCarriesSSHWorkspaces(t *testing.T) {
 		t.Errorf("a disabled ssh workspace block was generated: %+v", child.config.SSHWorkspaces)
 	}
 }
+
+// M75: unlike the blocks above, the tenant-side plugin switches are written even when they are all
+// off. The child's own defaults for them are ON, so a parent that stayed silent after an operator
+// wrote `enabled: false` would have the child quietly turn the plugin back on — the one failure
+// mode of a default-on switch that crosses a process boundary.
+func TestBuildDshgwChildCarriesTheTenantPluginSwitches(t *testing.T) {
+	cfg, aigwBinary := childFixture(t)
+	cfg.Dshgw.TenantPlugins = config.DshgwTenantPlugins{
+		WebTTY:         config.DshgwPluginSwitch{Enabled: false},
+		WorkspaceFiles: config.DshgwPluginSwitch{Enabled: true},
+		GitDiff:        config.DshgwPluginSwitch{Enabled: false},
+		RootLabel:      "工作区",
+	}
+	child, err := buildDshgwChild(cfg, aigwBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugins := child.config.TenantPlugins
+	if plugins == nil {
+		t.Fatal("the tenant plugin block did not reach the child")
+	}
+	if plugins.WebTTY.Enabled || !plugins.WorkspaceFiles.Enabled || plugins.GitDiff.Enabled {
+		t.Fatalf("switches did not travel as written: %+v", plugins)
+	}
+	if plugins.RootLabel != "工作区" {
+		t.Fatalf("root_label = %q", plugins.RootLabel)
+	}
+
+	// Every switch off still generates the block: silence would mean "on" on the child's side.
+	cfg.Dshgw.TenantPlugins = config.DshgwTenantPlugins{}
+	child, err = buildDshgwChild(cfg, aigwBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plugins = child.config.TenantPlugins
+	if plugins == nil {
+		t.Fatal("an all-off block must still be written, or the child's own defaults turn it back on")
+	}
+	if plugins.WebTTY.Enabled || plugins.WorkspaceFiles.Enabled || plugins.GitDiff.Enabled {
+		t.Fatalf("the child would enable a plugin nobody asked for: %+v", plugins)
+	}
+}

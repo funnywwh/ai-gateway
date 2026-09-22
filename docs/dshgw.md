@@ -172,11 +172,23 @@ Host 防护）。真正的差异不在上游，而在入口 nginx 是否改写�
 （门户 Key 登录与飞书登录）。登录同步用**该租户存储的 worker key**（不是登录提交的那把 key：
 同账号可能有多把 key、授权不同），aigw 不可达或拒绝时只告警、不阻断登录。
 
-**退出即停**：用户点击退出（门户 `POST /logout` 或租户侧栏 `POST /dshgw/logout/`）后，**该租户的
-dsh worker 被强制停掉**（SIGTERM→超时 SIGKILL），并清理它的 browser-fs 工作区；审计事件
-`logout_worker_stop`。只对**这次退出真正撤销了会话的租户**动手（伪造的 cookie 名不能让别人的 dsh 掉线）。
+**退出即停、退出即卸载（M69 + M76）**：用户点击退出（门户 `POST /logout` 或租户侧栏
+`POST /dshgw/logout/`）后按固定顺序做完三件事：①该账号的挂载**不再进入任何 worker profile 并拒绝新 I/O**；
+②**强制卸载**它的浏览器本机目录挂载（FUSE）与 SSH 工作区挂载（sshfs）；③**最后强制停掉它的 dsh worker**
+（SIGTERM→超时 SIGKILL→scope 回收）并校验进程确实不在跑。审计事件：`logout_mount_detach`（数量）、
+`logout_mount_leftover`（没能摘掉的挂载点与原因）、`logout_worker_stop`（校验通过才写）、
+`logout_worker_stop_failed`（`reason` 记错误正文，不再是类型名）。
+只对**这次退出真正撤销了会话的租户**动手（伪造的 cookie 名不能让别人的 dsh 掉线）。
 停 worker **不写** `suspended`——那是运维的停用意图，写入会让 dshgw 重启后不再拉起该租户。
-登录时若 worker 没在跑且租户未被运维停用，则先把它启动并就绪再跳转，因此"退出即停、再登录即起"。
+登录时若 worker 没在跑且租户未被运维停用，则先把它的 SSH 工作区挂载按记录**重挂**、再启动 worker
+并就绪后才跳转，因此"退出即卸载即停、再登录即起即挂回"。
+
+**强制卸载能到哪一步**：先试优雅卸载，失败（例如挂载被另一个挂载命名空间持有 → `EBUSY`）就
+`fusermount3 -u -z` 惰性摘除，再不行就 abort 这条 FUSE 连接后重试。**保证的是我方挂载表里不再有该条目、
+挂载点可复用**；**不保证**别的挂载命名空间（宿主上某个 snap、别的持有者）里那份副本立刻消失——
+那份由内核管到那个进程退出（边界声明见 [M76 设计](design/m76-dsh-exit-force-teardown.md) §5）。
+一次退出最多等 `logoutStopTimeout`（55s：两段卸载各 ≤15s、停 dsh ≤30s）；门户一次退出多个租户时
+整体预算 150s，超出的租户记 `logout_worker_stop_skipped`，由下一次登录或运维处理。
 
 > 为什么不是"最后一个会话退出才停"：浏览器关掉标签页后，它的会话在 TTL 内仍然有效，所以
 > "这个租户已经没人了"用会话数根本判不出来——本机实测某租户有 16 个存活会话，多数是几天前的。
@@ -382,6 +394,14 @@ FUSE 连接上积压 8 个无人应答的请求，3 个进程进入 **D 态**（
 `--bind` 不携带子挂载，profile 在启动时为每个活动挂载点追加一次 `--bind-try`，所以挂载/卸载都会让该
 账号的 dsh 重载（进行中的回合会中断，会话日志可 resume）。
 
+**退出卸载、登录重挂（M76）**：用户点「退出」时，该账号的 sshfs 挂载被**强制卸载**（先优雅卸载，
+EBUSY 就惰性 `-u -z`，仍不行就杀掉 sshfs 守护进程 / abort 这条 FUSE 连接后重试），但**挂载记录、
+镜像文件与挂载点目录都保留**：远端目录仍留在该账号的「SSH 工作区」列表里，工作区条目与会话归属不变。
+**下次登录时网关按记录自动重挂**（`Restore`，在启动 worker 之前），因此"退出卸载、再登录挂回"。
+若某次重挂失败，登录仍然成功（fail-soft，审计 `login_mount_restore_failed`）；若登录时该账号 worker
+已经在跑，网关**不会为挂载重启它**（不打断进行中的回合），该挂载在下次 worker 启动时进入沙箱，
+用户也可以在「SSH 工作区」里再点一次「连接」（那条路本来就会重启 worker）。
+
 | 面 | 是什么 |
 |---|---|
 | 通道 | 该账号 DSH home 里的文件信箱：`<dsh_home>/ssh-requests/<id>.json`（租户写）、`<dsh_home>/ssh-replies/<id>.json`（网关写）。不新增监听端口、不新增令牌 |
@@ -494,6 +514,12 @@ FUSE 连接上积压 8 个无人应答的请求，3 个进程进入 **D 态**（
 | 账号名落库 | 控制台创建租户 / 轮换密钥时把 `accounts.name` 随 `tenant-create`/`tenant-set-key` 写入 dshgw 注册表的 `account` 字段（旧租户下次启用或轮换时补上；补不上就显示租户名） |
 | 隔离 | 退出只撤销当前租户的会话，同一浏览器里其它租户保持登录；这一行不引入新的监听端口、令牌或凭据，只是给已有会话多加两条读/写路径 |
 
+**点「退出」后要等多久（M76）**：网关在这个 POST 里**同步**做完"强制卸载该账号的挂载 → 最后强制停掉
+它的 dsh"才回答 303，所以按钮上的「退出中…」覆盖整个过程。正常情况在 1 秒内返回；最坏 55s（两段卸载
+各 ≤15s、停 dsh ≤30s），失败的部分记审计、下一次登录或运维接手，不会让退出本身失败（会话已经撤销）。
+这条路由也是**唯一**允许"worker 还活着就先卸载"的路径（顺序与取舍见
+[M76 设计](design/m76-dsh-exit-force-teardown.md) §3 D1/D2）。
+
 **为什么退出不直接跳门户的 `POST /logout`**：门户那条路由要求 `Origin` 精确等于门户 origin，而租户
 页面只能发出自己租户的 origin（端口模式下两者端口不同），请求会被 403。因此退出由网关在租户 origin 下
 执行同一份会话存储的删除；门户只作为落地页。
@@ -534,6 +560,49 @@ FUSE 连接上积压 8 个无人应答的请求，3 个进程进入 **D 态**（
 
 验证：`go test ./internal/dshgw/sandbox -run HostShare` —— 其中 staging 用**真 bwrap**跑出四条断言：
 只读共享可读不可写、可写共享写穿到宿主目录、宿主路径本身在沙箱内不可见、容器条目只列出声明的共享。
+
+## 7f. 租户侧 web 插件（M75，默认开启）
+
+每个账号的 dsh 默认就带三块面板，都由网关渲染进该租户的 profile，插件文件放在 `deploy.plugin_path`
+同级的三个目录里（该目录已被只读绑进租户沙箱，因此不需要任何新的绑定、设备或 capability）：
+
+| 面板 | 插件目录 | 做什么 | 边界 |
+|---|---|---|---|
+| 「终端」（侧栏底） | `web-tty/` | 浮动终端，每个标签一个真 PTY（`node-pty` 从 dsh 发行版解析），xterm.js 渲染；面板可拖动/缩放/最大化，`Ctrl+反引号` 开关 | PTY 起在该账号**自己的 bwrap 沙箱**里，能力等同于它的 bash 工具；`cwd`/`cwdRoot` 都钉在它的 workspace |
+| 「文件」（侧栏底） | `workspace-files/` | 浏览/预览/编辑/上传/下载/改名/删除 | 一切路径夹紧在 `root`（该账号 workspace）内，符号链接越界即拒 |
+| 「变更」（会话主区 View） | `git-diff/` | 左列改动文件、右侧两栏 diff | 只读：没有 stage/checkout/discard，git 一律 `--no-optional-locks`，`.git/index` 字节不变 |
+
+**开关**（三个都默认 `true`；关掉即从每个租户的 profile 移除该行，既有租户在下次 worker 启动时生效）：
+
+```yaml
+tenant_plugins:            # 独立形态：dshgw.yaml；监督形态：aigw config.yaml 的 dshgw.tenant_plugins
+  web_tty:         { enabled: true }
+  workspace_files: { enabled: true }
+  git_diff:        { enabled: true }
+  root_label: 工作区        # 两个工作区面板对 root 的显示名；留空即此默认值
+```
+
+**前置**：三个插件目录要在 `plugin_path` 同级（仓库里的 `./cmd/dshgw/plugin/` 已是这个形状；生产部署见
+[部署手册](../deploy/dshgw/README.md)）。`dshgw doctor` 会逐个体检（`web-tty-plugin`、`workspace-files-plugin`、
+`git-diff-plugin`）。开着但没部署时：**建户/轮换密钥直接失败**并给出缺失路径，既有租户启动只丢掉那一行
+并写一条 warning —— 一个行指向不存在的模块会让整棵插件树加载失败，所以宁可少一行，不可给一行坏行。
+`directory_picker: browse` 且没有 `plugin_path` 的老配置因此在加载期被拒：要么命名一个插件目录，要么把
+这三项显式关掉（**升级注意**）。
+
+**运行期状态按账号隔离**，全部落在该账号自己的 DSH home 下（插件目录是共享的，生产中可能 root 拥有、
+不可写）：
+
+```
+<DshHome>/plugin-state/web-tty.trace.jsonl
+<DshHome>/plugin-state/workspace-files.trace.jsonl
+<DshHome>/plugin-state/git-diff.trace.jsonl
+<DshHome>/plugin-state/git-diff.cache.json      # 扫描缓存（含仓库路径）—— 绝不跨账号共享
+```
+
+目录由插件在首次写入时创建（它以租户账号身份运行，只有它能在自己 home 下建出属主正确的目录）。
+关掉一个插件只移除行，插件文件留在原地。三块面板都走 `ctx.connection.rpc`（租户 origin 下、既有鉴权链），
+不新增端口、令牌或凭据。细节、决策依据与失败模式见
+[docs/design/m75-tenant-plugins.md](design/m75-tenant-plugins.md)。
 
 ## 8. 运维与验收
 

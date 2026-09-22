@@ -885,6 +885,34 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 - [ ] 决策（本里程碑明确不做）：是否给历史租户名做一次性"改名/补 ID"。改名等于换租户——旧租户数据
       （dsh 主目录、工作区）留在旧名字下，且需要挪目录才能继续用；要做就另开里程碑
 
+## M76 点「退出」后强制卸载挂载文件系统，最后强制退出 dsh
+
+设计：`docs/design/m76-dsh-exit-force-teardown.md`；规格：`docs/dshgw.md` §3b / §7b / §7d。用户原话
+（2026-09-22）：「dsh 点击退出按钮后，强制 umount 使用挂载文件系统，最后强制退出 dsh」。
+定位：退出顺序改为**排除 → 强制卸载（浏览器 FUSE + sshfs）→ 最后强杀 dsh worker**；浏览器侧补强制阶梯
+（`-u -z` 惰性摘除 → abort FUSE 连接 → 重试），SSH 侧退出新增 `DetachTenant`（保留记录）与登录
+`Restore`（自动重挂）；失败不再短路，也不再只记错误类型。触发原由见设计文档 §2.1 的本机实测。
+
+- [ ] 设计文档与规格文档先落盘并展示（`docs/design/m76-*.md` + `docs/dshgw.md`）
+- [ ] `internal/dshgw/fusekernel`：宿主 FUSE 探测收敛（挂载表、minor、abort、守护进程查找），
+      `sshworkspace` 改为调用它，fixture 测试随之搬迁
+- [ ] `browserworkspace.ForceUnmount` 强制阶梯 + 单测；真机用例（子进程钉住挂载点 ⇒ 优雅卸载必然
+      EBUSY ⇒ 强制阶梯成功）
+- [ ] `browsermount`：`detach` 缝、`share.final`、`DetachTenant`、`cleanupLocked` 升级、
+      `CleanupStale` 复用同一阶梯（含"优雅失败 → 强制成功 → 清理完成"与"final 不再被 expire 重启"用例）
+- [ ] `sshworkspace`：`DetachTenant`（保留记录/镜像/挂载点）与 `Restore`（登录重挂），
+      真机 sshfs 用例覆盖"挂载 → detach → 重挂同一路径"
+- [ ] `tenancy.StopForLogout` 重排 + `LogoutResult`；`proxy` 新签名、审计与 55s/150s 预算；
+      `cmd/dshgw.PrepareLogin` 插入 `Restore`（先重挂后起 worker）
+- [ ] 单测全绿：`make dshgw-browser-test`、`make dshgw-test`、`make dshgw-ssh-integration`
+- [ ] 新增 `scripts/dshgw_logout_teardown_e2e.py` 与 `make dshgw-logout-e2e`（一次性实例：真浏览器目录
+      挂载 → 钉忙 → 退出 → 断言挂载表/进程/端口/审计 → 重新登录断言 worker 与 SSH 挂载都回来）
+- [ ] 本机现网验收（需重启 `dshgw-verify`，会短暂带走全部租户会话）：真实点一次「退出」，证据 =
+      `/proc/self/mounts` 无残留、`ps` 无 worker、`ss` 无 worker 端口、审计出现 `logout_mount_detach`
+      且无 `logout_worker_stop_failed`、日志不再刷 `browser mount expiry cleanup failed`
+- [ ] 现场恢复（可与实现并行）：`fusermount3 -u -z .../workspaces/dsh-tenant/browser/ZT20Q` 摘掉
+      2026-09-22 14:36 起卡住的挂载，确认 reaper 告警停止
+
 ## 缺陷：`dshgw.admin_socket` 与 M63 状态根脱节（2026-09-20 修）
 
 现象：飞书首次登录（绑定了 Key 的账号）在日志里报

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
@@ -171,4 +172,169 @@ func writePatchRows(path string, rows []map[string]any) error {
 		return err
 	}
 	return securefile.WriteAtomic(path, data, 0o600)
+}
+
+// The three tenant-side web plugins every account gets by default (M75). The row ids are the ones
+// the accounts that carried these plugins by hand already used, so the gateway taking over the
+// wiring changes nothing about what the browser half registers.
+const (
+	webTTYRowID         = "dshgw-web-tty"
+	workspaceFilesRowID = "dshgw-workspace-files"
+	gitDiffRowID        = "dshgw-git-diff"
+)
+
+// tenantPlugin is one shipped plugin: the directory name beside deploy.plugin_path, the loader row
+// id, the current switch, and how its row is built.
+type tenantPlugin struct {
+	dir     string
+	id      string
+	enabled bool
+	row     func(cfg *config.Config, t registry.Tenant) map[string]any
+}
+
+// tenantPlugins lists them in the order their rows appear in the profile.
+func tenantPlugins(cfg *config.Config) []tenantPlugin {
+	return []tenantPlugin{
+		{dir: "web-tty", id: webTTYRowID, enabled: cfg.TenantPlugins.WebTTY.Enabled, row: webTTYRow},
+		{dir: "workspace-files", id: workspaceFilesRowID, enabled: cfg.TenantPlugins.WorkspaceFiles.Enabled, row: workspaceFilesRow},
+		{dir: "git-diff", id: gitDiffRowID, enabled: cfg.TenantPlugins.GitDiff.Enabled, row: gitDiffRow},
+	}
+}
+
+// tenantPluginURL is the file URL of one plugin's host half, beside the picker plugin.
+func tenantPluginURL(cfg *config.Config, dir string) string {
+	return pluginFileURL(filepath.Join(filepath.Dir(cfg.Deploy.PluginPath), dir, "index.js"))
+}
+
+// tenantPluginState is one plugin's per-tenant runtime file inside the account's own DSH home.
+//
+// Not next to the module: the installed copy is shared by every account, so a trace there would
+// mix accounts together, and git-diff's scan cache would hand one account's repository paths to
+// another. The DSH home is bound writable into the account's sandbox, which is where these files
+// have to be written from — the plugin creates the directory itself, as the account that owns it.
+func tenantPluginState(t registry.Tenant, name string) string {
+	return filepath.Join(t.DshHome, "plugin-state", name)
+}
+
+// pluginRootLabel is the label the workspace-scoped panels show for their root.
+func pluginRootLabel(cfg *config.Config) string {
+	if label := strings.TrimSpace(cfg.TenantPlugins.RootLabel); label != "" {
+		return label
+	}
+	return config.DefaultPluginRootLabel
+}
+
+// webTTYRow builds the terminal panel's row.
+//
+// `cwd`/`cwdRoot` are named rather than left to the plugin's own default of the process working
+// directory: the account's workspace is what a terminal inside its dsh should open in, and the
+// bound is what the browser half may ask for instead.
+func webTTYRow(cfg *config.Config, t registry.Tenant) map[string]any {
+	return map[string]any{
+		"id":   webTTYRowID,
+		"name": tenantPluginURL(cfg, "web-tty"),
+		"config": map[string]any{
+			"cwd":       t.Workspace,
+			"cwdRoot":   t.Workspace,
+			"traceFile": tenantPluginState(t, "web-tty.trace.jsonl"),
+			"trace":     true,
+		},
+	}
+}
+
+// workspaceFilesRow builds the workspace file manager's row, clamped to the account's workspace.
+func workspaceFilesRow(cfg *config.Config, t registry.Tenant) map[string]any {
+	return map[string]any{
+		"id":   workspaceFilesRowID,
+		"name": tenantPluginURL(cfg, "workspace-files"),
+		"config": map[string]any{
+			"root":      t.Workspace,
+			"rootLabel": pluginRootLabel(cfg),
+			"traceFile": tenantPluginState(t, "workspace-files.trace.jsonl"),
+			"trace":     true,
+		},
+	}
+}
+
+// gitDiffRow builds the read-only change review's row: the same clamped root, plus a cache file of
+// its own — the scan cache holds repository paths, so it may not be shared between accounts.
+func gitDiffRow(cfg *config.Config, t registry.Tenant) map[string]any {
+	return map[string]any{
+		"id":   gitDiffRowID,
+		"name": tenantPluginURL(cfg, "git-diff"),
+		"config": map[string]any{
+			"root":      t.Workspace,
+			"rootLabel": pluginRootLabel(cfg),
+			"traceFile": tenantPluginState(t, "git-diff.trace.jsonl"),
+			"cacheFile": tenantPluginState(t, "git-diff.cache.json"),
+			"trace":     true,
+		},
+	}
+}
+
+// tenantPluginInstalled reports whether one plugin's package is deployed beside the picker plugin,
+// and names the exact path when it is not.
+//
+// Why this is checked at all: a row whose module cannot be imported costs the account its whole
+// plugin tree, not just that one panel (measured on a real tenant, M67). So an enabled plugin that
+// was never deployed is refused at create time (renderPatch) and skipped with a warning at start
+// time — never rendered as a row pointing at nothing.
+func tenantPluginInstalled(cfg *config.Config, dir string) error {
+	path := filepath.Join(filepath.Dir(cfg.Deploy.PluginPath), dir, "index.js")
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("plugin %s is enabled but %s cannot be read: %w", dir, path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("plugin %s is enabled but %s is not a regular file", dir, path)
+	}
+	return nil
+}
+
+// tenantPluginRows builds the rows of every enabled and deployed tenant-side plugin, in order.
+//
+// A missing plugin is an error here rather than a skipped row: this runs while a tenant is being
+// created or its key rotated, which is the moment to tell the operator that the deployment is not
+// what the configuration claims (the same rule deploy.plugin_path itself follows).
+func tenantPluginRows(cfg *config.Config, t registry.Tenant) ([]map[string]any, error) {
+	rows := make([]map[string]any, 0, 3)
+	for _, plugin := range tenantPlugins(cfg) {
+		if !plugin.enabled {
+			continue
+		}
+		if err := tenantPluginInstalled(cfg, plugin.dir); err != nil {
+			return nil, err
+		}
+		rows = append(rows, plugin.row(cfg, t))
+	}
+	return rows, nil
+}
+
+// EnsureTenantPlugins makes one tenant's rendered profile patch match the current tenant_plugins
+// switches: each enabled plugin's row appears (and is refreshed when its configuration changes),
+// and each disabled — or no longer deployed — plugin's row is removed.
+//
+// Run on every worker start for the same reason the ssh, browser and account-card rows are: the
+// patch is otherwise written only at create/rotate time, so flipping a switch would silently reach
+// new accounts only. A plugin that is switched on but not deployed is reported as a warning and
+// treated as off, so a half-finished deployment cannot stop an account from starting.
+func EnsureTenantPlugins(cfg *config.Config, t registry.Tenant) ([]string, error) {
+	var warnings []string
+	for _, plugin := range tenantPlugins(cfg) {
+		enabled := plugin.enabled
+		if enabled {
+			if err := tenantPluginInstalled(cfg, plugin.dir); err != nil {
+				warnings = append(warnings, fmt.Sprintf("%v; the row was removed so the account keeps starting", err))
+				enabled = false
+			}
+		}
+		warning, err := ensureWorkspaceRow(t, plugin.id, enabled, plugin.row(cfg, t))
+		if err != nil {
+			return warnings, err
+		}
+		if warning != "" {
+			warnings = append(warnings, warning)
+		}
+	}
+	return warnings, nil
 }

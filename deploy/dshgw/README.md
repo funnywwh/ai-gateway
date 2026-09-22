@@ -116,6 +116,43 @@ Access API 的 Chromium。该功能不会给租户 sandbox 增加 `/dev/fuse` �
 `make dshgw-browser-test` 运行 Go 集成和 Node fake-FSA 测试；真实 FUSE 与浏览器权限链路仍需
 单独验收。部署前请阅读[浏览器 FUSE 工作区设计与限制](../../docs/design/browser-fuse-workspace.md)。
 
+### 默认开启：租户侧 web 插件（M75）
+
+每个账号的 dsh 开箱即带三块面板，**不需要**逐租户配置：
+
+| 面板 | `plugin_path` 同级目录 | 边界 |
+|---|---|---|
+| 「终端」（侧栏底） | `web-tty/` | 真 PTY（node-pty 从 dsh 发行版解析），跑在该账号自己的 bwrap 沙箱里 |
+| 「文件」（侧栏底） | `workspace-files/` | 一切路径夹紧在该账号 workspace 内 |
+| 「变更」（会话主区 View） | `git-diff/` | 只读；`--no-optional-locks`，不动 `.git/index` |
+
+**部署动作只有一条**：把仓库里 `cmd/dshgw/plugin/{web-tty,workspace-files,git-diff}/` 三个目录
+按原样放到 `deploy.plugin_path` 所在目录（与 `picker-clamp.js`、`account-card/`、`browser-workspace/` 同级）。
+本机部署根下的相对 `plugin_path`（`./cmd/dshgw/plugin/picker-clamp.js`）已经天然满足这一点，无需额外步骤。
+
+开关（独立形态写 `dshgw.yaml`，监督形态写 aigw 配置的 `dshgw.tenant_plugins`，三个都默认 `true`）：
+
+```yaml
+tenant_plugins:
+  web_tty:         { enabled: true }
+  workspace_files: { enabled: true }
+  git_diff:        { enabled: true }
+  root_label: 工作区        # 两个工作区面板对 root 的显示名；留空即此默认值
+```
+
+- **前置检查**：`dshgw --config <cfg> doctor` 会逐个体检（`web-tty-plugin` / `workspace-files-plugin` /
+  `git-diff-plugin`）。开着但没部署时：**建户/轮换密钥直接失败**（错误里带缺失路径），既有租户启动只丢掉
+  那一行并写 warning —— 一行指向不存在的模块会让整棵插件树加载失败，所以宁可少一行，不可给一行坏行。
+- **升级注意**：这三个插件默认开，所以 `directory_picker: browse` 且**没有** `deploy.plugin_path` 的
+  老配置现在会在加载期被拒（它没有插件目录可放这三个插件）。二选一：命名一个 `plugin_path` 目录并部署
+  三个插件目录，或把上面三项显式关掉。
+- **运行期状态按账号隔离**，落在该账号自己的 DSH home 下：`<DshHome>/plugin-state/{web-tty.trace.jsonl,
+  workspace-files.trace.jsonl, git-diff.trace.jsonl, git-diff.cache.json}`。共享插件目录（生产可能
+  root 拥有）里不留任何状态，git-diff 的扫描缓存也不跨账号共享。目录由插件首次写入时创建。
+- **重启代价**：翻转开关只改 profile 的行，已存在的租户在**下次 worker 启动**时生效；那会中断进行中的回合。
+
+细节与失败模式见 `docs/dshgw.md` §7f 与 `docs/design/m75-tenant-plugins.md`。
+
 ## 3. 启动与停止
 
 ```bash

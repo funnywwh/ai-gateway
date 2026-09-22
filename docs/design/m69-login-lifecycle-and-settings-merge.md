@@ -132,10 +132,21 @@ kind: "design"
 - 结果：`session.Store.CountTenant` 这个初版为"最后会话"加的方法**没有消费者**，实现里删掉了
   （不留死接口）。
 
+> **2026-09-22 追补（M76 修正上面的清理顺序）**：真机发现"先停进程、再卸载"在挂载卸不动时会把挂载留在
+> 内核里——本机 `dsh-tenant/browser/ZT20Q` 连续一小时 `EBUSY` 重试刷屏，三次退出全记
+> `logout_worker_stop_failed`（dsh 其实已经停了），`DropTenant` 的失败还会**短路**掉后续步骤，而 sshfs
+> 挂载从来没被碰过。顺序改为**排除 → 强制卸载（浏览器 FUSE + sshfs）→ 最后强杀 dsh**，失败不再短路，
+> 详见 [M76](m76-dsh-exit-force-teardown.md)。其余口径（无条件停、只动真的撤销了会话的租户、不写
+> `suspended`）不变。
+
 ### D6 停发生在写响应之前，但有超时上界；停失败不影响退出成功
 
 退出请求最坏会等到 `Runner.StopTimeout`（默认 20s）+ SIGKILL 后 5s 回收；正常情况 dsh 在 1s 内退出。
 停失败只告警 + 审计（`logout_worker_stop_failed`），浏览器仍拿到 303 回门户。
+
+> **2026-09-22 追补（M76）**：上界随"先卸载后停"变成 `logoutStopTimeout = 55s`（两段卸载各 ≤15s、
+> 停 dsh ≤30s）；门户一次退出多租户另加 150s 整体预算（超出者审计 `logout_worker_stop_skipped`）。
+> 审计的 `reason` 由错误**类型**改为错误**正文**（本次现场就是因为只记 `*fmt.wrapError` 而查不下去）。
 
 ### D7 平台段为空（该 key 在 aigw 没有任何模型）= 平台段为空
 

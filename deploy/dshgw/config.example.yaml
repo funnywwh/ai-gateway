@@ -136,3 +136,31 @@ ssh_workspaces:
 # aigw 的 dshgw.account_card.enabled 即可。旧租户的账号名在下次「启用/轮换密钥」时补上。
 account_card:
   enabled: false                  # 打开后：渲染租户侧插件行 + 提供上面两个端点
+
+# 租户侧 web 插件（M75）：每个账号的 dsh 默认就带三块面板——
+#   web-tty          终端：真正的 PTY（node-pty 从 dsh 发行版解析），跑在该账号自己的 bwrap 沙箱里
+#   workspace-files  工作区文件：浏览/预览/编辑/上传/下载/改名/删除，全部夹紧在 root 子树内
+#   git-diff         变更：只读地看仓库改动（两栏 diff，永不改 .git/index）
+#
+# **三个都默认开启**（这就是本块存在的意义：账号不必有人手改它的 profile）。想看更窄的面就显式关：
+# 关掉即从每个租户的 profile 里移除该行（已存在的租户在下次 worker 启动时生效）。
+#
+# 前置：三个插件目录要部署在 plugin_path 同级的 web-tty/、workspace-files/、git-diff/ 下
+# （仓库里的 ./cmd/dshgw/plugin/ 已是这个形状）；`dshgw doctor` 逐个检查。开着但没部署时：
+# 建户/轮换密钥直接失败（会把路径说清楚），既有租户启动只丢那一行并写 warning —— 一个可选面板
+# 不该让账号起不来。
+#
+# 运行期状态按账号隔离，落在该账号自己的 DSH home：
+#   <DshHome>/plugin-state/{web-tty.trace.jsonl, workspace-files.trace.jsonl,
+#                           git-diff.trace.jsonl, git-diff.cache.json}
+# 插件目录（共享、可能 root 拥有）里不留任何状态，git-diff 的扫描缓存也不跨账号共享。
+# root_label 是两个工作区面板对 root 的显示名（留空 = 工作区）；其余数值旋钮用插件自身默认值。
+# 细节见 docs/dshgw.md §7f 与 docs/design/m75-tenant-plugins.md。
+tenant_plugins:
+  web_tty:
+    enabled: true
+  workspace_files:
+    enabled: true
+  git_diff:
+    enabled: true
+  # root_label: 工作区

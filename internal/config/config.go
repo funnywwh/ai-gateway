@@ -538,6 +538,12 @@ type Dshgw struct {
 	// under every tenant's origin. aigw is the side that knows those names, which is why the
 	// switch is configured here and reaches the child as a generated one.
 	AccountCard DshgwAccountCard `yaml:"account_card"`
+	// TenantPlugins are the tenant-side web plugins the child installs for every account (M75):
+	// the terminal, the workspace file manager and the read-only git change review. ON by
+	// default — the point of the feature is that an account's dsh has them without anybody
+	// editing that account's profile. The plugin files are deployed beside the child's
+	// plugin_path; this block only decides which rows are rendered.
+	TenantPlugins DshgwTenantPlugins `yaml:"tenant_plugins"`
 	// AutoEnable makes every active account able to use DSH without an operator pressing
 	// 启用 DSH per account (M72): the entitlement becomes
 	//
@@ -556,6 +562,24 @@ type DshgwBrowserWorkspaces struct {
 
 // DshgwAccountCard is disabled by default.
 type DshgwAccountCard struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// DshgwTenantPlugins decides which tenant-side web plugins the child renders (M75). All three
+// default to ON, so a deployment that says nothing gets them — and a deployment that wants a
+// narrower surface has to say so explicitly, which is how the child's generated configuration is
+// written even when everything here is off.
+type DshgwTenantPlugins struct {
+	WebTTY         DshgwPluginSwitch `yaml:"web_tty"`
+	WorkspaceFiles DshgwPluginSwitch `yaml:"workspace_files"`
+	GitDiff        DshgwPluginSwitch `yaml:"git_diff"`
+	// RootLabel is the label the two workspace-scoped panels show for their root. Empty means
+	// the child's own default, 工作区.
+	RootLabel string `yaml:"root_label"`
+}
+
+// DshgwPluginSwitch is one tenant-side plugin's enabled flag.
+type DshgwPluginSwitch struct {
 	Enabled bool `yaml:"enabled"`
 }
 
@@ -898,6 +922,14 @@ func Default() Config {
 			TenantPortHi: 31299,
 			WorkerPortLo: 31300,
 			WorkerPortHi: 31599,
+			// On by default (M75), matching the child's own defaults: the generated child
+			// configuration always states these switches, so an operator who writes
+			// `enabled: false` here must not have the child's default turn it back on.
+			TenantPlugins: DshgwTenantPlugins{
+				WebTTY:         DshgwPluginSwitch{Enabled: true},
+				WorkspaceFiles: DshgwPluginSwitch{Enabled: true},
+				GitDiff:        DshgwPluginSwitch{Enabled: true},
+			},
 		},
 		Server: Server{
 			Listen:       ":8080",

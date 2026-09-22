@@ -104,6 +104,13 @@ dshgw-test:
 	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" cmd/dshgw/plugin/ssh-workspace/client.test.mjs
 	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" cmd/dshgw/plugin/account-card/client.test.mjs
 	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" internal/dshgw/tenancy/settings_schema.test.mjs
+# The three tenant-side plugins every account gets (M75). web-tty needs the anchor the runner gives
+# a real worker, because that is where its node-pty comes from — without it the host test would be
+# testing a plugin that cannot resolve its PTY, which is not the plugin a tenant runs.
+	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" DSHGW_DSH_ANCHOR="$(DSHGW_DSH_ROOT)/package.json" \
+		"$(DSHGW_NODE)" --test cmd/dshgw/plugin/web-tty/test/*.test.mjs
+	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" --test cmd/dshgw/plugin/workspace-files/test/*.test.mjs
+	@DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" "$(DSHGW_NODE)" --test cmd/dshgw/plugin/git-diff/test/*.test.mjs
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_dshgw_migration_plan.py
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_decommission_legacy_plan.py
 	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_ssh_config_adopt.py
