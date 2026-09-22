@@ -5071,13 +5071,20 @@ resource busy`，reaper 每 5 秒重试一次、刷了一小时；该账号 15:1
       worker 端口关闭；审计 `logout_mount_detach`（"2 mount(s) detached"）+ `logout_worker_stop`，无
       `logout_worker_stop_failed`/`logout_mount_leftover`；ssh 记录与挂载点保留；**重新登录后 sshfs 在同一
       路径重挂**并能读到远端文件。
-- [x] **本机现网（`dshgw-verify.service`，8 个租户）**：`make dshgw-build` → 重启单元（16:16:31，revision
-      **f5b1720**）→ 全部租户 worker 依次 ready、17 个公开监听在、`browser-workspace` 残留挂载 **0** 个、
-      重启后 `browser mount expiry cleanup failed` **0** 条、`logout_worker_stop_failed` **0** 条；
-      并且**现网那个死 sshfs 挂载自动被修好**：日志 `WARN a recorded ssh workspace mount lost its daemon;
-      replacing it` → `INFO ssh workspace remounted`，`.../dsh-tenant/ssh/aipc/home/winger/ZT20Q` 从
+- [x] **本机现网（`dshgw-verify.service`，8 个租户）**：`make dshgw-build` → 重启单元（16:18:01，revision
+      **01d454b**）→ 8 个租户 worker 全部 ready、三个单元 active、17 个公开监听在、
+      `browser-workspace` 残留挂载 **0** 个、重启后 `browser mount expiry cleanup failed` **0** 条、
+      `logout_worker_stop_failed` **0** 条；并且**现网那个死 sshfs 挂载自动被修好**：日志
+      `WARN a recorded ssh workspace mount lost its daemon; replacing it` → `INFO ssh workspace remounted`
+      （审计 `ssh-mount-remount`），`.../dsh-tenant/ssh/aipc/home/winger/ZT20Q` 从
       `ls: Transport endpoint is not connected` 变成可读（列出 Android.bp/Makefile/a-ztc 等）。
+      顺带确认这本身就是 M64 那条缺陷的机理：**重启单元会杀掉 sshfs 守护进程、FUSE 条目却留在表里**，
+      以前要人工 `fusermount3 -u` + 再重启，现在每次启动由 `Reconcile` 自动修好。
       现场恢复（14:36 起卡住的浏览器挂载）在重启前已由页面断开自行摘除并停止刷屏，本次未再手工干预。
+- [x] **第一版判据的修正（01d454b）**：现网第一次重启（16:15）暴露第一版"连接探测"判据不成立——
+      死挂载的 `stat` 直接 ENOTCONN ⇒ 读不出设备号被当成"不是 FUSE 挂载" ⇒ `ConnectionLive` 返回 true ⇒
+      死挂载仍被跳过（日志只有 `MountsFor` 的 `leaving it out of the worker's sandbox`）。改为按
+      **守护进程是否存在**判定（与 `MountsFor` 同一规则），测试把该缝显式化；现网 16:18 重启复验自愈。
 - [x] 修正 M75 归档里那句"浏览器挂载清理仍报 `fusermount3 … Device or resource busy`，是既有现象"：
       它是本次的第一原因（限时优雅卸载 + 强制阶梯缺失），M76 起不再复现。
 - [ ] 遗留（**只剩人工一步**）：用真实浏览器在租户侧栏点一次「退出」（本机验收与 e2e 都是 HTTP 客户端/

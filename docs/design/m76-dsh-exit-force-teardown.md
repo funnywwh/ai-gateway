@@ -307,3 +307,10 @@ type LogoutStop interface{ StopSignedOut(ctx context.Context, tenant string) (Lo
    这样这份验收不依赖浏览器自动化，同时仍然走真 FUSE 挂载、真 profile 绑定与真卸载路径。
 7. **`audit_path` 必须显式配置**：默认审计文件是 `state/gateway/audit.jsonl`，
    而现网 `dshgw.yaml` 写的是 `state/audit.jsonl`；脚本按现网口径显式设置，避免断言读错文件。
+8. **死挂载的判据是"守护进程还在不在"，不是"连接探测"**（现网第一次重启暴露）：`fusekernel.ConnectionAt`
+   靠 `stat(mountpoint)` 拿设备号，而死挂载的 stat 直接 ENOTCONN，于是"读不出设备号"被当成"不是 FUSE 挂载"，
+   `ConnectionLive` 返回 true，死挂载仍被跳过。改为 `sshfsDaemonFor(mp) != 0` 才算活（与 `MountsFor` 同一规则，
+   守护进程就是持有连接的那个进程）。两次现网重启（16:15 失败 → 16:18 自愈）都记在 `docs/todo_done.md`。
+9. **本机现网部署过程中发现一个"二进制与 revision 自证"的坑**：第一次重启用的二进制构建于 `f5b1720`，
+   而"按守护进程判定"这一修法是之后才提交的——即运行的是未提交的代码却标着已提交的 revision。
+   本机随后补提交（`01d454b`）并重建、再重启一次，使线上 `--version` 与实际代码一致（M74 记录过同类教训）。

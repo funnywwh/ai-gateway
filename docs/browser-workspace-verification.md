@@ -304,7 +304,7 @@ make dshgw-browser-reload-e2e       # 断线/刷新/换标签页真机
 | **卡死的真因（e2e 复现）** | go-fuse `Server.Unmount()` 在 `fusermount3 -u` 之后等自己的 serve loop，而 serve loop 只在内核释放连接时结束 ⇒ 挂载被持有（活着的 worker 沙箱 / 另一个挂载命名空间）时它**永不返回**。改前的 e2e 里：`POST /dshgw/logout/` 120s 无响应，`SIGQUIT` 栈显示退出请求与**整个 reaper** 都停在 `fuse.(*Server).Unmount → sync.WaitGroup.Wait`，worker 仍在跑、两个挂载都还挂着 |
 | 修好后的真机 e2e（`make dshgw-logout-e2e`，PASS **12 步**） | 一次性实例里同时挂上真浏览器目录 FUSE（`activate` 把它 bind 进沙箱 ⇒ 优雅卸载必然失败）与真 sshfs → `POST /dshgw/logout/` **1.58s** 返回 → 两个挂载都离开 `/proc/self/mounts` → worker 端口关闭 → 审计 `logout_mount_detach`（"2 mount(s) detached"）+ `logout_worker_stop`，无 `logout_worker_stop_failed`/`logout_mount_leftover` → ssh 记录保留 → 重新登录 sshfs 在同一路径重挂 |
 | Go 单测 | `browsermount`：优雅失败→强制成功→清理完成、**优雅永久阻塞→1s 有界升级**（`TestABlockingUnmountIsBoundedAndForced`）、强制也失败→记录保留、`final` 的 share 不被 `expire` 重启、停 worker 失败不再跳过卸载；`browserworkspace`：阶梯四分支 + 真机忙挂载 `TestRealFUSEForceUnmountTakesABusyMount`（PASS） |
-| 本机现网 | `make dshgw-build` → 重启 `dshgw-verify`（16:16:31，revision `f5b1720`）后：`browser-workspace` 残留挂载 **0**、`browser mount expiry cleanup failed` **0** 条、`logout_worker_stop_failed` **0** 条，8 个租户 worker 全部 ready |
+| 本机现网 | `make dshgw-build` → 重启 `dshgw-verify`（16:18:01，revision `01d454b`）后：`browser-workspace` 残留挂载 **0**、`browser mount expiry cleanup failed` **0** 条、`logout_worker_stop_failed` **0** 条，8 个租户 worker 全部 ready，三个单元 active |
 | 未由真机覆盖 | 真人点侧栏「退出」（需用户会话，见 `docs/TODO.md` M76）；「另一个挂载命名空间持有副本」的真机复现（本机无独立的 busy-holder 手段，Go 用例用 cwd 钉住挂载点覆盖同一分支，现网 snap 命名空间那次的现场证据见设计文档 §2.1） |
 
 **不夸大**：强制卸载保证的是**我方挂载表条目消失、挂载点可复用**；别的挂载命名空间里那份副本由内核管到
