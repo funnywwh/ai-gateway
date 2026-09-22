@@ -2,16 +2,13 @@ package browsermount
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 )
 
 // AcquireLock serializes startup cleanup and instance lifetime. Configure state,
@@ -238,14 +235,12 @@ func (s *Service) CleanupStale() error {
 			continue
 		}
 		if mounted {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			er = exec.CommandContext(ctx, "fusermount3", "-u", "-z", r.Path).Run()
-			if er != nil {
-				er = exec.CommandContext(ctx, "fusermount", "-u", "-z", r.Path).Run()
-			}
-			cancel()
-			if er != nil {
-				errs = append(errs, fmt.Errorf("unmount %s: %w", r.Path, er))
+			// The same forced ladder the live teardown uses (M76): a lazy detach, and an abort of
+			// the FUSE connection when even that does not remove the entry. Startup is exactly
+			// where a mount held by a foreign namespace is found still attached, so a plain
+			// `-u -z` here would leave the mount (and the record) behind on every restart.
+			if err := s.forceDetach(r.Path); err != nil {
+				errs = append(errs, err)
 				continue
 			}
 		}

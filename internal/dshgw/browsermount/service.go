@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -177,6 +178,10 @@ type Service struct {
 	mu     sync.Mutex
 	shares map[string]*share
 	mount  MountFunc
+	// detach is the forced detach used when the graceful unmount cannot remove the mount from
+	// the table (M76). It is a field so tests drive the escalation without a real mount;
+	// production uses browserworkspace's ForceUnmount ladder.
+	detach func(path string) error
 	// restart must synchronously destroy the previous namespace before returning
 	// success; it must not call DropTenant. MountsFor is safe inside this callback.
 	restart    func(context.Context, registry.Tenant) error
@@ -216,6 +221,12 @@ type share struct {
 	// disconnect only unmounts and never removes the path DSH's workspace entry points at.
 	// Only an explicit purge (the operator removing the folder) releases it.
 	persistent bool
+	// final marks a share whose teardown is owned by a caller that has already excluded it for
+	// good (logout, tenant drop, shutdown): a reaper pass may retry the detach, but nothing may
+	// ever restart a worker to release a namespace for it (M76). Without it, a logout whose
+	// detach failed would have its dsh started again by the next expiry tick, which is what the
+	// deployment host showed on 2026-09-22.
+	final bool
 	// disconnectedAt is when the browser side went away while a reload could still bring it
 	// back. It is what turns a canceled poll from "this mount is finished" into "this mount
 	// is waiting", and it bounds that waiting: past reconnectGrace the mount is closed for
@@ -273,7 +284,7 @@ func New(restart func(context.Context, registry.Tenant) error) *Service {
 	return NewWithMount(restart, func(path string, b fs.Backend) (Mounted, error) { return fs.MountFS(path, b) })
 }
 func NewWithMount(restart func(context.Context, registry.Tenant) error, mount MountFunc) *Service {
-	return &Service{shares: make(map[string]*share), tombstones: make(map[string]tombstone), mount: mount, restart: restart}
+	return &Service{shares: make(map[string]*share), tombstones: make(map[string]tombstone), mount: mount, restart: restart, detach: fs.ForceUnmount}
 }
 func NewWithState(restart func(context.Context, registry.Tenant) error, mount MountFunc, stateDir string) *Service {
 	if mount == nil {
@@ -282,6 +293,19 @@ func NewWithState(restart func(context.Context, registry.Tenant) error, mount Mo
 	s := NewWithMount(restart, mount)
 	s.recordDir = filepath.Join(stateDir, "browser-mounts")
 	return s
+}
+
+// SetForceDetach overrides the forced detach (M76). Configure before serving; a test uses it to
+// state what a mount the graceful path cannot take answers to.
+func (s *Service) SetForceDetach(detach func(path string) error) { s.detach = detach }
+
+// forceDetach runs the forced detach, or reports that the deployment has none (a Service built
+// by hand in a test rather than through a constructor).
+func (s *Service) forceDetach(path string) error {
+	if s.detach == nil {
+		return errors.New("forced detach unavailable")
+	}
+	return s.detach(path)
 }
 func (s *Service) SetRegistry(r *registry.Registry) { s.registry = r }
 
@@ -659,6 +683,25 @@ func (sh *share) disconnect() {
 // MountsFor lists the mount points a worker profile must bind for one tenant.
 // Only serveable mounts are advertised: see serveable for why binding a mount
 // whose browser stopped polling fails the whole worker start.
+// AttachedMounts lists the mount points this account currently has ATTACHED, whatever state
+// their share is in — including one whose teardown failed. It is what tells an operator (and the
+// logout audit) how many mounts a teardown really took, which MountsFor cannot: MountsFor answers
+// "what may a starting worker bind", and a share mid-teardown is deliberately not in it.
+func (s *Service) AttachedMounts(tenant string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var paths []string
+	for _, sh := range s.shares {
+		sh.mu.Lock()
+		if sh.tenant.Name == tenant && sh.mounted != nil && sh.path != "" {
+			paths = append(paths, sh.path)
+		}
+		sh.mu.Unlock()
+	}
+	sort.Strings(paths)
+	return paths
+}
+
 func (s *Service) MountsFor(tenant string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

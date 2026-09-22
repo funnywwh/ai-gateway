@@ -16,10 +16,20 @@ import (
 type browserHook struct {
 	mounts []string
 	drops  int
+	// detaches counts the logout-style teardowns (M76), which must not stop a worker.
+	detaches int
+	leftover []string
+	detachEr error
 }
 
 func (h *browserHook) MountsFor(string) []string                { return h.mounts }
 func (h *browserHook) DropTenant(context.Context, string) error { h.drops++; return nil }
+func (h *browserHook) AttachedMounts(string) []string           { return h.leftover }
+func (h *browserHook) DetachTenant(context.Context, string) error {
+	h.detaches++
+	h.leftover = nil
+	return h.detachEr
+}
 
 func TestBrowserWorkspacePatchRefresh(t *testing.T) {
 	cfg, tenant := renderFixture(t)

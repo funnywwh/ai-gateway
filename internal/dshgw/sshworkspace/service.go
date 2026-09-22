@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -444,19 +445,37 @@ func (s *Service) flushStaleMount(ctx context.Context, mountpoint string) bool {
 // tenant's sandbox in an uninterruptible wait, holds the worker's scope open behind it, and
 // turns the next worker start into "worker authentication unavailable".
 func (s *Service) detach(ctx context.Context, mountpoint string, attempts int, delay time.Duration) (bool, error) {
+	return s.detachKeeping(ctx, mountpoint, attempts, delay, false)
+}
+
+// detachKeeping is detach with a choice about the mount point directory. Purging removes it (the
+// mount it served is released), while the logout path keeps it: that directory is where the
+// account's own workspace entry points, and the next sign-in mounts onto it again (M76).
+func (s *Service) detachKeeping(ctx context.Context, mountpoint string, attempts int, delay time.Duration, keepMountpoint bool) (bool, error) {
+	release := func() (bool, bool) {
+		fstype, _ := s.mounted(mountpoint)
+		if fstype != "" {
+			return false, false
+		}
+		if keepMountpoint {
+			return true, true
+		}
+		// The table is not the whole truth: a sandbox that bound this mount keeps an internal
+		// reference until its namespace is gone, and until then the mount point cannot be
+		// removed (EBUSY) even though it no longer shows up here. The directory is the
+		// observable that matches what a purge will actually hit.
+		if removeErr := os.Remove(mountpoint); removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
+			return true, true
+		}
+		return false, true
+	}
 	lazy := false
 	for attempt := 0; attempt < attempts; attempt++ {
 		detached, err := s.options.unmount(ctx, s.exec, mountpoint)
 		lazy = lazy || detached
 		if err == nil {
-			if fstype, _ := s.mounted(mountpoint); fstype == "" {
-				// The table is not the whole truth: a sandbox that bound this mount keeps an
-				// internal reference until its namespace is gone, and until then the mount
-				// point cannot be removed (EBUSY) even though it no longer shows up here. The
-				// directory is the observable that matches what a purge will actually hit.
-				if removeErr := os.Remove(mountpoint); removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
-					return lazy, nil
-				}
+			if done, _ := release(); done {
+				return lazy, nil
 			}
 		}
 		if attempt < attempts-1 {
@@ -475,10 +494,8 @@ func (s *Service) detach(ctx context.Context, mountpoint string, attempts int, d
 		detached, retryErr := s.options.unmount(ctx, s.exec, mountpoint)
 		lazy = lazy || detached
 		if retryErr == nil {
-			if fstype, _ := s.mounted(mountpoint); fstype == "" {
-				if removeErr := os.Remove(mountpoint); removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
-					return lazy, nil
-				}
+			if done, _ := release(); done {
+				return lazy, nil
 			}
 		}
 	}
@@ -525,6 +542,63 @@ func (s *Service) breakWedge(ctx context.Context, mountpoint string) (bool, erro
 			"mountpoint", mountpoint, "detail", "pending requests fail now instead of waiting for an unreachable host")
 	}
 	return broken, nil
+}
+
+// AttachedMounts lists the mount points of this account that the mount table reports as
+// attached right now — records without a mount are not one, which is what makes it the honest
+// answer for "did the logout really detach everything".
+func (s *Service) AttachedMounts(tenant string) []string {
+	mounts, err := s.store.ForTenant(tenant)
+	if err != nil {
+		s.logger.Error("reading the ssh mount record failed", "tenant", tenant, "err", err)
+		return nil
+	}
+	var paths []string
+	for _, mount := range mounts {
+		if fstype, _ := s.mounted(mount.Mountpoint); fstype != "" {
+			paths = append(paths, mount.Mountpoint)
+		}
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+// DetachTenant detaches every mount an account owns but KEEPS its records (M76).
+//
+// This is the logout half of the mount lifecycle: a signed-out account must not keep an sshfs
+// daemon and a kernel mount alive, while the next sign-in puts the same paths back (Restore).
+// The record file, the account's mirror and the mount point directories are therefore left
+// exactly as they are — the mount is the thing that goes away, not the account's configuration,
+// and the workspace entry the account sees does not change.
+//
+// It does not restart the worker: the caller (the logout path) detaches first and stops the
+// tenant's dsh last, so a restart would only bring back a process that is about to be killed.
+func (s *Service) DetachTenant(ctx context.Context, tenant string) error {
+	mounts, err := s.store.ForTenant(tenant)
+	if err != nil {
+		return err
+	}
+	var failures []string
+	for _, mount := range mounts {
+		if fstype, _ := s.mounted(mount.Mountpoint); fstype == "" {
+			continue
+		}
+		lazy, unmountErr := s.detachKeeping(ctx, mount.Mountpoint, 6, 250*time.Millisecond, true)
+		if unmountErr != nil {
+			failures = append(failures, unmountErr.Error())
+			s.record("ssh-mount-detach", tenant, mount.Mountpoint, "failed: "+mount.Host+":"+mount.CanonicalRemote, 500)
+			continue
+		}
+		detail := mount.Host + ":" + mount.CanonicalRemote
+		if lazy {
+			detail += " (lazy detach)"
+		}
+		s.record("ssh-mount-detach", tenant, mount.Mountpoint, detail, 200)
+	}
+	if len(failures) > 0 {
+		return Errorf(CodeMountFailed, "detaching %s: %s", tenant, strings.Join(failures, "; "))
+	}
+	return nil
 }
 
 // DropTenant detaches every mount an account owns. It is called when an account is stopped or
@@ -576,19 +650,7 @@ func (s *Service) Reconcile(ctx context.Context, remotes []Remote) {
 		if !ok {
 			continue
 		}
-		if fstype, _ := mountedAt(mount.Mountpoint); fstype != "" {
-			continue
-		}
-		if err := s.prepareMountpoint(remote.Workspace, mount.Mountpoint); err != nil {
-			s.logger.Error("ssh remount failed", "tenant", mount.Tenant, "mountpoint", mount.Mountpoint, "err", err)
-			continue
-		}
-		if err := s.mount(ctx, remote, mount.Host, mount.CanonicalRemote, mount.Mountpoint); err != nil {
-			s.logger.Error("ssh remount failed", "tenant", mount.Tenant, "mountpoint", mount.Mountpoint, "err", err)
-			continue
-		}
-		s.logger.Info("ssh workspace remounted", "tenant", mount.Tenant, "mountpoint", mount.Mountpoint)
-		s.record("ssh-mount-remount", mount.Tenant, mount.Mountpoint, mount.Host+":"+mount.CanonicalRemote, 200)
+		s.remount(ctx, remote, mount, "ssh-mount-remount")
 	}
 	// The mirror is refreshed for every account, mounted or not: it is what the account's
 	// plugin reads to tell a mount from a parent directory.
@@ -597,6 +659,77 @@ func (s *Service) Reconcile(ctx context.Context, remotes []Remote) {
 			s.logger.Error("writing the account mount mirror failed", "tenant", remote.Tenant, "err", err)
 		}
 	}
+}
+
+// Restore re-mounts the recorded mounts of one account that are not attached (M76). It is the
+// login half of DetachTenant: the records survived the logout, so the account gets its
+// workspaces back without another click.
+//
+// It is called by the login path BEFORE the worker starts, because a worker's profile binds the
+// mount points that exist when it starts: restoring afterwards would leave the sandbox with the
+// empty mount point until the next restart. Failures are returned so the caller can log and
+// audit them; the login itself must not fail because a remote host is unreachable.
+func (s *Service) Restore(ctx context.Context, tenant, workspace, dshHome string) error {
+	if err := s.CheckBinaries(); err != nil {
+		return err
+	}
+	mounts, err := s.store.ForTenant(tenant)
+	if err != nil {
+		return err
+	}
+	remote := Remote{Tenant: tenant, Workspace: workspace, DshHome: dshHome}
+	var failures []string
+	for _, mount := range mounts {
+		if err := s.remount(ctx, remote, mount, "ssh-mount-restore"); err != nil {
+			failures = append(failures, err.Error())
+		}
+	}
+	if err := s.writeMirror(tenant, dshHome); err != nil {
+		s.logger.Error("writing the account mount mirror failed", "tenant", tenant, "err", err)
+	}
+	if len(failures) > 0 {
+		return Errorf(CodeMountFailed, "restoring %s: %s", tenant, strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+// remount re-attaches one recorded mount that is not attached, and reports why it could not.
+// It is the shared body of Reconcile (whole deployment) and Restore (one account at login).
+//
+// A recorded mount whose FUSE connection is GONE is repaired rather than skipped: its entry is
+// still in the mount table (that is what a killed or crashed sshfs leaves behind), a new mount
+// cannot be made over it, and every read on it fails with ENOTCONN — so without this the account
+// keeps a dead workspace for as long as nobody removes the entry by hand. This is the defect
+// docs/TODO.md recorded under M64 ("启动/Reconcile 对已记录的挂载点做一次探测，ENOTCONN 的先
+// fusermount3 -z 再重挂"), and login-time Restore is the natural place to fix it.
+func (s *Service) remount(ctx context.Context, remote Remote, mount Mount, event string) error {
+	if fstype, _ := s.mounted(mount.Mountpoint); fstype != "" {
+		if connectionLive(s.mounted, mount.Mountpoint) {
+			return nil
+		}
+		s.logger.Warn("a recorded ssh workspace mount lost its daemon; replacing it",
+			"tenant", mount.Tenant, "mountpoint", mount.Mountpoint)
+		// detachKeeping, not flushStaleMount: the record and the mount point are what the account
+		// keeps, and only the dead kernel entry has to go before a new mount can be made.
+		if _, err := s.detachKeeping(ctx, mount.Mountpoint, 3, 250*time.Millisecond, true); err != nil {
+			s.record(event, mount.Tenant, mount.Mountpoint, "dead mount not detached", 500)
+			return err
+		}
+	}
+	detail := mount.Host + ":" + mount.CanonicalRemote
+	if err := s.prepareMountpoint(remote.Workspace, mount.Mountpoint); err != nil {
+		s.logger.Error("ssh remount failed", "tenant", mount.Tenant, "mountpoint", mount.Mountpoint, "err", err)
+		s.record(event, mount.Tenant, mount.Mountpoint, "failed: "+detail, 500)
+		return err
+	}
+	if err := s.mount(ctx, remote, mount.Host, mount.CanonicalRemote, mount.Mountpoint); err != nil {
+		s.logger.Error("ssh remount failed", "tenant", mount.Tenant, "mountpoint", mount.Mountpoint, "err", err)
+		s.record(event, mount.Tenant, mount.Mountpoint, "failed: "+detail, 500)
+		return err
+	}
+	s.logger.Info("ssh workspace remounted", "tenant", mount.Tenant, "mountpoint", mount.Mountpoint)
+	s.record(event, mount.Tenant, mount.Mountpoint, detail, 200)
+	return nil
 }
 
 // PollOnce services the mailbox of every running account and returns how many requests it

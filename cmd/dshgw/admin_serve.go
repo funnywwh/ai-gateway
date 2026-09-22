@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/winger/ai-gateway/internal/dshgw/aigw"
+	"github.com/winger/ai-gateway/internal/dshgw/audit"
 	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/proxy"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
@@ -52,6 +53,9 @@ type managerOps struct {
 	validator keyValidator
 	cfg       *config.Config
 	logger    *slog.Logger
+	// auditor records the lifecycle outcomes an operator has to be able to look up afterwards
+	// (M76: a login that could not re-mount an account's ssh workspaces). Nil silences it.
+	auditor audit.Sink
 }
 
 func (o managerOps) log() *slog.Logger {
@@ -488,7 +492,7 @@ func (c *cli) adminServe(ctx context.Context) error {
 	}
 	defer ln.Close()
 	server := &AdminServer{
-		Ops:      managerOps{m: deps.manager, validator: deps.validator, cfg: deps.cfg},
+		Ops:      managerOps{m: deps.manager, validator: deps.validator, cfg: deps.cfg, auditor: &audit.JSONL{Path: deps.cfg.AuditPath}},
 		OwnerUID: os.Geteuid(),
 	}
 	fmt.Fprintf(c.stdout, "dshgw admin channel listening on %s (owner uid %d only)\n", ln.Addr(), os.Geteuid())

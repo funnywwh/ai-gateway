@@ -110,6 +110,13 @@ type HostShareHook interface {
 type BrowserWorkspaceHook interface {
 	MountsFor(string) []string
 	DropTenant(context.Context, string) error
+	// DetachTenant is the logout half (M76): this account's mounts are excluded from every
+	// worker profile and forced out of the mount table, and no worker is started or stopped for
+	// them — the logout path stops the tenant's dsh LAST.
+	DetachTenant(context.Context, string) error
+	// AttachedMounts lists what is still attached right now, so a teardown can report what it
+	// took and what it could not.
+	AttachedMounts(string) []string
 }
 
 // SSHWorkspaceHook is the ssh-workspace surface the tenancy lifecycle depends on. It is an
@@ -122,7 +129,33 @@ type SSHWorkspaceHook interface {
 	EnsureIdentity(tenant, workspace, dshHome string) error
 	// DropTenant detaches every mount the account owns.
 	DropTenant(ctx context.Context, tenant string) error
+	// DetachTenant is the logout half (M76): the account's mounts are detached while its records,
+	// its mirror and its mount points stay, so the next sign-in can put them back.
+	DetachTenant(ctx context.Context, tenant string) error
+	// AttachedMounts lists what is still attached right now.
+	AttachedMounts(tenant string) []string
+	// Restore re-mounts the account's recorded mounts that are not attached. Login calls it
+	// BEFORE the worker starts, because a worker's profile binds the mount points that exist
+	// when it starts.
+	Restore(ctx context.Context, tenant, workspace, dshHome string) error
 }
+
+// LogoutResult is what one tenant's logout teardown did (M76). The proxy audits it, so it says
+// what an operator would ask afterwards: how many mounts went away, which ones did not, and
+// whether the dsh itself is really gone.
+type LogoutResult struct {
+	MountsDetached int
+	MountsLeftover []string
+	WorkerStopped  bool
+}
+
+// The teardown budgets of a logout. The mounts go first and the worker LAST (M76), so each
+// phase gets its own bound: a remote or a wedged FUSE must not eat the time the worker stop
+// needs, and the whole sequence stays well inside the proxy's response budget.
+const (
+	logoutMountBudget = 15 * time.Second
+	logoutStopBudget  = 30 * time.Second
+)
 
 // log returns the manager's logger, falling back to the default one. Manager is constructed by
 // several entry points — serve, each CLI command, tests — and not all of them set Logger, so
@@ -601,25 +634,63 @@ func (m *Manager) EnsureRunning(ctx context.Context, t registry.Tenant) (bool, e
 	return true, nil
 }
 
-// StopForLogout stops a tenant's worker because its last session signed out (M69).
+// StopForLogout stops a tenant's dsh because its last session signed out (M69, sequenced by M76).
 //
-// It deliberately does NOT record a suspension. `suspended` is the operator's intent: writing
-// it here would make a person's logout look like an admin action, would stop dshgw from
-// restoring the tenant after a restart, and would leave the console showing "停用" for a tenant
-// nobody meant to disable. The cleanup order matches StopWorker: stop the process, then drop the
-// tenant's browser mounts so a mounted workspace cannot outlive the worker it was bound into.
-func (m *Manager) StopForLogout(ctx context.Context, t registry.Tenant) error {
+// The order is the point of M76, and it is what the person clicking 退出 asked for: exclude and
+// FORCE-DETACH the account's mounts (browser directory mounts and ssh workspaces), and only THEN
+// force-stop its dsh. Detaching first is what makes a dsh parked in a FUSE request die quickly
+// instead of burning its whole stop timeout, and it is safe because the forced ladder (lazy
+// detach, then aborting the connection) does not need the worker's namespace to be gone.
+//
+// It deliberately does NOT record an operator suspension, and it no longer short-circuits: every
+// phase runs, failures are aggregated, and the result says what was left behind. Before M76 a
+// failed worker stop returned early and left every mount mounted (2026-09-22: three logouts in a
+// row audited as failures while the dsh itself had already exited).
+func (m *Manager) StopForLogout(ctx context.Context, t registry.Tenant) (LogoutResult, error) {
 	current := t
 	if live, ok := m.Registry.Get(t.Name); ok {
 		current = live
 	}
-	if err := m.workers().Stop(ctx, current); err != nil {
-		return err
+	var result LogoutResult
+	var errs []error
+	// detach runs one mount service's forced detach and folds its outcome into the result: what
+	// was attached before, what is attached after, and what could not be taken.
+	detach := func(label string, attached func() []string, run func(context.Context) error) {
+		before := attached()
+		detachCtx, cancel := context.WithTimeout(ctx, logoutMountBudget)
+		err := run(detachCtx)
+		cancel()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", label, err))
+		}
+		leftover := attached()
+		result.MountsLeftover = append(result.MountsLeftover, leftover...)
+		if gone := len(before) - len(leftover); gone > 0 {
+			result.MountsDetached += gone
+		}
 	}
 	if m.BrowserWorkspaces != nil {
-		return m.BrowserWorkspaces.DropTenant(ctx, current.Name)
+		detach("browser mounts",
+			func() []string { return m.BrowserWorkspaces.AttachedMounts(current.Name) },
+			func(ctx context.Context) error { return m.BrowserWorkspaces.DetachTenant(ctx, current.Name) })
 	}
-	return nil
+	if m.SSHWorkspaces != nil {
+		detach("ssh workspaces",
+			func() []string { return m.SSHWorkspaces.AttachedMounts(current.Name) },
+			func(ctx context.Context) error { return m.SSHWorkspaces.DetachTenant(ctx, current.Name) })
+	}
+	// LAST: the dsh itself. The runner signals TERM, escalates to SIGKILL and reaps the worker's
+	// scope, so this is the force-exit the person asked for, and it is verified rather than
+	// assumed.
+	stopCtx, cancel := context.WithTimeout(ctx, logoutStopBudget)
+	err := m.workers().Stop(stopCtx, current)
+	cancel()
+	if err != nil {
+		errs = append(errs, fmt.Errorf("stopping %s: %w", current.Name, err))
+	} else if state, statusErr := m.Status(ctx, current); statusErr == nil && !state.Running {
+		result.WorkerStopped = true
+	}
+	return result, errors.Join(errs...)
 }
 
 // Enable is the console's durable on/off toggle for one tenant's DSH.

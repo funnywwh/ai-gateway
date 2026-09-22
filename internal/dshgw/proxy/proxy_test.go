@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/winger/ai-gateway/internal/dshgw/aigw"
+	"github.com/winger/ai-gateway/internal/dshgw/audit"
 	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
 	"github.com/winger/ai-gateway/internal/dshgw/session"
@@ -127,10 +128,16 @@ func (f prepareFunc) PrepareLogin(ctx context.Context, tenant, submittedKey stri
 	return f(ctx, tenant, submittedKey)
 }
 
-type stopFunc func(context.Context, string) error
+type stopFunc func(context.Context, string) (LogoutResult, error)
 
-func (f stopFunc) StopSignedOut(ctx context.Context, tenant string) error {
+func (f stopFunc) StopSignedOut(ctx context.Context, tenant string) (LogoutResult, error) {
 	return f(ctx, tenant)
+}
+
+// stopReporting is a LogoutStop that answers with a fixed result: the tests that care about what
+// the teardown reported (mounts taken, mounts left, worker verified) use it.
+func stopReporting(result LogoutResult, err error) LogoutStop {
+	return stopFunc(func(context.Context, string) (LogoutResult, error) { return result, err })
 }
 
 func issue(t *testing.T, p *Proxy, tenant string, upstream *session.Upstream) string {
@@ -753,9 +760,9 @@ func TestLogoutStopsTheTenantEvenWithOtherLiveSessions(t *testing.T) {
 	defer up.Close()
 	tenant, _ := p.Registry.Get("alice")
 	var stopped []string
-	p.LogoutStop = stopFunc(func(_ context.Context, name string) error {
+	p.LogoutStop = stopFunc(func(_ context.Context, name string) (LogoutResult, error) {
 		stopped = append(stopped, name)
-		return nil
+		return LogoutResult{WorkerStopped: true}, nil
 	})
 	token := issue(t, p, tenant.Name, nil)
 	// A second live session of the same tenant (an older browser, a second window) must not hold
@@ -782,9 +789,9 @@ func TestLogoutLeavesTenantsItDidNotSignOutAlone(t *testing.T) {
 	p, _, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer up.Close()
 	var stopped []string
-	p.LogoutStop = stopFunc(func(_ context.Context, name string) error {
+	p.LogoutStop = stopFunc(func(_ context.Context, name string) (LogoutResult, error) {
 		stopped = append(stopped, name)
-		return nil
+		return LogoutResult{WorkerStopped: true}, nil
 	})
 	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
 	req.Host = "dsh.test:32600"
@@ -807,7 +814,9 @@ func TestLogoutSurvivesAWorkerThatWillNotStop(t *testing.T) {
 	p, _, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer up.Close()
 	tenant, _ := p.Registry.Get("alice")
-	p.LogoutStop = stopFunc(func(context.Context, string) error { return errors.New("SIGKILL survived") })
+	p.LogoutStop = stopFunc(func(context.Context, string) (LogoutResult, error) {
+		return LogoutResult{WorkerStopped: true}, errors.New("SIGKILL survived")
+	})
 	token := issue(t, p, tenant.Name, nil)
 	req := httptest.NewRequest(http.MethodPost, "/logout", nil)
 	req.Host = "dsh.test:32600"
@@ -826,9 +835,9 @@ func TestTenantLogoutStopsTheTenantWhenItsLastSessionLeaves(t *testing.T) {
 	p, tenant, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer up.Close()
 	var stopped []string
-	p.LogoutStop = stopFunc(func(_ context.Context, name string) error {
+	p.LogoutStop = stopFunc(func(_ context.Context, name string) (LogoutResult, error) {
 		stopped = append(stopped, name)
-		return nil
+		return LogoutResult{WorkerStopped: true}, nil
 	})
 	p.Config.AccountCard.Enabled = true
 	token := issue(t, p, tenant.Name, &session.Upstream{Name: "dsh-auth-test", Value: "held", Authority: net.JoinHostPort("127.0.0.1", itoa(tenant.WorkerPort))})
@@ -1030,5 +1039,97 @@ func TestTenantAPIDataIsMarkedUncacheable(t *testing.T) {
 	p.Config.NoStoreAPIs = &off
 	if got := call("/api/session/list").Header.Get("Cache-Control"); got != "" {
 		t.Fatalf("no_store_apis=false still marked the response: %q", got)
+	}
+}
+
+// recordingSink collects the audit events one test produced.
+type recordingSink struct {
+	mu     sync.Mutex
+	events []audit.Event
+}
+
+func (s *recordingSink) Write(event audit.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, event)
+	return nil
+}
+
+func (s *recordingSink) reasonOf(kind string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, event := range s.events {
+		if event.Kind == kind {
+			return event.Reason, true
+		}
+	}
+	return "", false
+}
+
+// M76: the audit has to say what the teardown did — how many mounts went away, which ones stayed,
+// and WHY a step failed. The pre-M76 line recorded the Go error type (`*fmt.wrapError`), which is
+// what made the incident of 2026-09-22 impossible to diagnose from the audit file.
+func TestLogoutAuditsWhatTheTeardownDid(t *testing.T) {
+	p, tenant, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer up.Close()
+	sink := &recordingSink{}
+	p.Auditor = sink
+	p.Config.AccountCard.Enabled = true
+	leftover := filepath.Join(t.TempDir(), "browser", "stuck")
+	p.LogoutStop = stopReporting(LogoutResult{MountsDetached: 2, MountsLeftover: []string{leftover}},
+		errors.New("browser mounts: unmount "+leftover+": Device or resource busy"))
+
+	token := issue(t, p, tenant.Name, &session.Upstream{Name: "dsh-auth-test", Value: "held", Authority: net.JoinHostPort("127.0.0.1", itoa(tenant.WorkerPort))})
+	req := httptest.NewRequest(http.MethodPost, "/dshgw/logout/", nil)
+	req.Host = net.JoinHostPort("dsh.test", itoa(tenant.PublicPort))
+	req.Header.Set("Origin", "https://"+net.JoinHostPort("dsh.test", itoa(tenant.PublicPort)))
+	req.AddCookie(&http.Cookie{Name: p.Config.SessionCookieName(tenant.Name), Value: token})
+	recorder := httptest.NewRecorder()
+	p.Dispatch().ServeHTTP(recorder, req)
+	if status := recorder.Result().StatusCode; status != http.StatusSeeOther {
+		t.Fatalf("tenant logout status = %d", status)
+	}
+	if reason, ok := sink.reasonOf("logout_mount_detach"); !ok || reason != "2 mount(s) detached" {
+		t.Fatalf("logout_mount_detach = %q ok=%v", reason, ok)
+	}
+	if reason, ok := sink.reasonOf("logout_mount_leftover"); !ok || reason != leftover {
+		t.Fatalf("logout_mount_leftover = %q ok=%v, want %s", reason, ok, leftover)
+	}
+	reason, ok := sink.reasonOf("logout_worker_stop_failed")
+	if !ok {
+		t.Fatal("a teardown that failed was not audited")
+	}
+	if !strings.Contains(reason, "Device or resource busy") {
+		t.Fatalf("the audit reason hides the failure: %q", reason)
+	}
+	if strings.HasPrefix(reason, "*") {
+		t.Fatalf("the audit reason is still an error type: %q", reason)
+	}
+	if _, ok := sink.reasonOf("logout_worker_stop"); ok {
+		t.Fatal("a teardown that failed was also audited as success")
+	}
+}
+
+// A teardown that reports success without verifying the worker is gone is not a success: the
+// audit says so instead of claiming the dsh stopped.
+func TestLogoutRequiresTheWorkerStopToBeVerified(t *testing.T) {
+	p, tenant, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer up.Close()
+	sink := &recordingSink{}
+	p.Auditor = sink
+	p.Config.AccountCard.Enabled = true
+	p.LogoutStop = stopReporting(LogoutResult{MountsDetached: 1, WorkerStopped: false}, nil)
+	token := issue(t, p, tenant.Name, &session.Upstream{Name: "dsh-auth-test", Value: "held", Authority: net.JoinHostPort("127.0.0.1", itoa(tenant.WorkerPort))})
+	req := httptest.NewRequest(http.MethodPost, "/dshgw/logout/", nil)
+	req.Host = net.JoinHostPort("dsh.test", itoa(tenant.PublicPort))
+	req.Header.Set("Origin", "https://"+net.JoinHostPort("dsh.test", itoa(tenant.PublicPort)))
+	req.AddCookie(&http.Cookie{Name: p.Config.SessionCookieName(tenant.Name), Value: token})
+	recorder := httptest.NewRecorder()
+	p.Dispatch().ServeHTTP(recorder, req)
+	if _, ok := sink.reasonOf("logout_worker_stop"); ok {
+		t.Fatal("an unverified teardown was audited as a stopped dsh")
+	}
+	if reason, ok := sink.reasonOf("logout_worker_stop_failed"); !ok || reason != "worker state not verified" {
+		t.Fatalf("logout_worker_stop_failed = %q ok=%v", reason, ok)
 	}
 }

@@ -2,6 +2,7 @@ package tenancy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -193,8 +194,12 @@ func TestStopForLogoutStopsWithoutSuspending(t *testing.T) {
 	if _, err := m.EnsureRunning(ctx, tenant); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.StopForLogout(ctx, tenant); err != nil {
+	result, err := m.StopForLogout(ctx, tenant)
+	if err != nil {
 		t.Fatalf("StopForLogout: %v", err)
+	}
+	if !result.WorkerStopped {
+		t.Fatal("StopForLogout did not verify the worker is gone")
 	}
 	if len(r.Running()) != 0 {
 		t.Fatalf("the worker survived the logout: %+v", r.Running())
@@ -208,7 +213,7 @@ func TestStopForLogoutStopsWithoutSuspending(t *testing.T) {
 		t.Fatal("a logout recorded an operator suspension")
 	}
 	// Idempotent: a tenant whose worker is already stopped logs out without error.
-	if err := m.StopForLogout(ctx, tenant); err != nil {
+	if _, err := m.StopForLogout(ctx, tenant); err != nil {
 		t.Fatalf("second StopForLogout: %v", err)
 	}
 	// And the tenant can sign in again.
@@ -217,4 +222,124 @@ func TestStopForLogoutStopsWithoutSuspending(t *testing.T) {
 		t.Fatalf("signing back in: started=%t err=%v", started, err)
 	}
 	assertLivePIDs(t, launches, 1)
+}
+
+// M76's order, which is the whole point of the milestone: the mounts are force-detached FIRST and
+// the dsh is force-stopped LAST. The observable that pins it is the worker's own state during the
+// detach — the mounts must go while the dsh it was running for is still alive — plus the worker
+// being gone by the time the teardown returns.
+func TestStopForLogoutDetachesMountsBeforeStoppingTheWorker(t *testing.T) {
+	var order []string
+	m, r, tenant, _ := policyFixture(t)
+	watching := &orderedBrowserHook{order: &order, attached: []string{filepath.Join(tenant.Workspace, "browser", "local")}}
+	ssh := &orderedSSHHook{order: &order, attached: []string{filepath.Join(tenant.Workspace, "ssh", "aipc", "home")}}
+	watching.duringDetach = func() {
+		if len(r.Running()) == 0 {
+			t.Error("the mounts were detached after the worker was already stopped")
+		}
+	}
+	m.BrowserWorkspaces = watching
+	m.SSHWorkspaces = ssh
+	if _, err := m.EnsureRunning(context.Background(), tenant); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Running()) != 1 {
+		t.Fatal("the fixture has no running worker to log out of")
+	}
+	order = nil
+
+	result, err := m.StopForLogout(context.Background(), tenant)
+	if err != nil {
+		t.Fatalf("StopForLogout: %v", err)
+	}
+	if len(order) != 2 || order[0] != "browser-detach" || order[1] != "ssh-detach" {
+		t.Fatalf("order = %v, want both mount services detached", order)
+	}
+	if len(r.Running()) != 0 {
+		t.Fatalf("the worker survived the logout: %+v", r.Running())
+	}
+	// Two mounts were attached before and none after: the browser hook reports one, the ssh hook
+	// one, and both are gone once their detach ran.
+	if result.MountsDetached != 2 {
+		t.Fatalf("MountsDetached = %d, want 2", result.MountsDetached)
+	}
+	if len(result.MountsLeftover) != 0 {
+		t.Fatalf("MountsLeftover = %v, want none", result.MountsLeftover)
+	}
+	if !result.WorkerStopped {
+		t.Fatal("the worker stop was not verified")
+	}
+}
+
+// A mount that could not be detached is reported, and the dsh is still force-stopped: leaving a
+// dsh running because an unrelated mount failed is the behaviour M76 removes.
+func TestStopForLogoutReportsLeftoversAndStillStops(t *testing.T) {
+	var order []string
+	m, r, tenant, _ := policyFixture(t)
+	leftover := filepath.Join(tenant.Workspace, "browser", "stuck")
+	browser := &orderedBrowserHook{order: &order, attached: []string{leftover}, detachErr: errors.New("still mounted")}
+	m.BrowserWorkspaces = browser
+	if _, err := m.EnsureRunning(context.Background(), tenant); err != nil {
+		t.Fatal(err)
+	}
+	result, err := m.StopForLogout(context.Background(), tenant)
+	if err == nil {
+		t.Fatal("a mount that stayed attached was reported as a clean teardown")
+	}
+	if !strings.Contains(err.Error(), "still mounted") {
+		t.Fatalf("the error does not carry the failure: %v", err)
+	}
+	if len(result.MountsLeftover) != 1 || result.MountsLeftover[0] != leftover {
+		t.Fatalf("leftover = %v, want %s", result.MountsLeftover, leftover)
+	}
+	if !result.WorkerStopped {
+		t.Fatal("the dsh stayed running because a mount could not be detached")
+	}
+	if len(r.Running()) != 0 {
+		t.Fatalf("the worker survived the logout: %+v", r.Running())
+	}
+}
+
+// orderedBrowserHook records the order of the lifecycle calls and can hold a mount back.
+type orderedBrowserHook struct {
+	order *[]string
+	// attached is what this account has mounted now; a failed detach leaves it in place, which is
+	// what the teardown reports as a leftover.
+	attached  []string
+	detachErr error
+	// duringDetach runs inside the detach, where a test can observe the worker's state.
+	duringDetach func()
+}
+
+func (h *orderedBrowserHook) MountsFor(string) []string { return nil }
+func (h *orderedBrowserHook) DropTenant(context.Context, string) error {
+	*h.order = append(*h.order, "browser-drop")
+	return nil
+}
+func (h *orderedBrowserHook) AttachedMounts(string) []string { return h.attached }
+func (h *orderedBrowserHook) DetachTenant(context.Context, string) error {
+	*h.order = append(*h.order, "browser-detach")
+	if h.duringDetach != nil {
+		h.duringDetach()
+	}
+	if h.detachErr == nil {
+		h.attached = nil
+	}
+	return h.detachErr
+}
+
+type orderedSSHHook struct {
+	order    *[]string
+	attached []string
+}
+
+func (h *orderedSSHHook) MountsFor(string) []string                             { return nil }
+func (h *orderedSSHHook) EnsureIdentity(string, string, string) error           { return nil }
+func (h *orderedSSHHook) DropTenant(context.Context, string) error              { return nil }
+func (h *orderedSSHHook) AttachedMounts(string) []string                        { return h.attached }
+func (h *orderedSSHHook) Restore(context.Context, string, string, string) error { return nil }
+func (h *orderedSSHHook) DetachTenant(context.Context, string) error {
+	*h.order = append(*h.order, "ssh-detach")
+	h.attached = nil
+	return nil
 }

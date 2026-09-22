@@ -131,6 +131,19 @@ dshgw-ssh-e2e:
 	@DSHGW_NODE="$(DSHGW_NODE)" DSHGW_BIN_JS="$(DSHGW_DSH_ROOT)/lib/bin.js" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" \
 		PYTHONDONTWRITEBYTECODE=1 python3 scripts/ssh_workspace_e2e.py
 
+# The logout acceptance (M76): "dsh 点击退出按钮后，强制 umount 使用挂载文件系统，最后强制退出 dsh".
+# A throwaway dshgw with both mount kinds attached at once — a real browser-directory FUSE mount
+# (driven by a stand-in for the browser side of the poll protocol, so no Chromium is needed) bound
+# into the account's sandbox, and a real sshfs mount — then POST /dshgw/logout/ (the sidebar's 退出):
+# both mounts leave the kernel table, the dsh's worker port closes, the audit records the detach and
+# the verified stop, and the next sign-in puts the ssh workspace back at the same path. Needs the
+# gateway host: /dev/fuse, fusermount3, bwrap, sshfs, a non-interactive loopback ssh, and a prepared
+# dsh template. The busy/unmount-EBUSY half of the force ladder is pinned by the Go test
+# TestRealFUSEForceUnmountTakesABusyMount (BROWSERWORKSPACE_FUSE_TEST=1).
+dshgw-logout-e2e: dshgw-build
+	@DSHGW_NODE="$(DSHGW_NODE)" DSHGW_BIN_JS="$(DSHGW_DSH_ROOT)/lib/bin.js" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" \
+		PYTHONDONTWRITEBYTECODE=1 python3 scripts/dshgw_logout_teardown_e2e.py --dshgw bin/dshgw
+
 # The bwrap isolation mode's real acceptance: the tenant profile runs under the
 # host's own bubblewrap, and a real dsh web worker starts inside it and answers
 # the gateway's unauthenticated /api probe with 401. Both tests skip themselves

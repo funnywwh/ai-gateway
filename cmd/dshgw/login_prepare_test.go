@@ -9,10 +9,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/winger/ai-gateway/internal/dshgw/aigw"
+	"github.com/winger/ai-gateway/internal/dshgw/audit"
 	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
 	"github.com/winger/ai-gateway/internal/dshgw/tenancy"
@@ -273,8 +275,12 @@ func TestStopSignedOutStopsWithoutSuspending(t *testing.T) {
 	if err := fixture.ops.PrepareLogin(ctx, "alice", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.ops.StopSignedOut(ctx, "alice"); err != nil {
+	result, err := fixture.ops.StopSignedOut(ctx, "alice")
+	if err != nil {
 		t.Fatalf("StopSignedOut: %v", err)
+	}
+	if !result.WorkerStopped {
+		t.Fatal("StopSignedOut did not verify the worker is gone")
 	}
 	if running := fixture.runner.Running(); len(running) != 0 {
 		t.Fatalf("the worker outlived the logout: %+v", running)
@@ -301,5 +307,134 @@ func TestPrepareLoginReportsAMissingStoredKey(t *testing.T) {
 	err := fixture.ops.PrepareLogin(context.Background(), "alice", "")
 	if err == nil || !strings.Contains(err.Error(), "stored key") {
 		t.Fatalf("a missing stored key was not reported: %v", err)
+	}
+}
+
+// loginMountHook is the ssh-workspace slice the login path uses (M76). It records the order of
+// the calls and reports what the account has attached, so a test can prove that the remount
+// happens BEFORE the worker starts — the worker's profile binds the mount points that exist when
+// it starts, so the other order would leave the account looking at empty directories.
+type loginMountHook struct {
+	order         []string
+	attached      []string
+	restoreErr    error
+	duringRestore func()
+}
+
+func (h *loginMountHook) MountsFor(string) []string                   { return nil }
+func (h *loginMountHook) EnsureIdentity(string, string, string) error { return nil }
+func (h *loginMountHook) DropTenant(context.Context, string) error    { return nil }
+func (h *loginMountHook) DetachTenant(context.Context, string) error  { return nil }
+func (h *loginMountHook) AttachedMounts(string) []string              { return h.attached }
+func (h *loginMountHook) Restore(context.Context, string, string, string) error {
+	h.order = append(h.order, "restore")
+	if h.duringRestore != nil {
+		h.duringRestore()
+	}
+	if h.restoreErr != nil {
+		return h.restoreErr
+	}
+	if len(h.attached) == 0 {
+		h.attached = []string{"/srv/state/workspaces/alice/ssh/aipc/home"}
+	}
+	return nil
+}
+
+type auditRecorder struct {
+	mu     sync.Mutex
+	events []audit.Event
+}
+
+func (s *auditRecorder) Write(event audit.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, event)
+	return nil
+}
+
+func (s *auditRecorder) kinds() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kinds := make([]string, 0, len(s.events))
+	for _, event := range s.events {
+		kinds = append(kinds, event.Kind)
+	}
+	return kinds
+}
+
+// Signing out detached the account's ssh workspaces, so signing in has to put them back — and
+// before the worker starts, because a running worker keeps the profile it started with.
+func TestPrepareLoginRemountsBeforeStartingTheWorker(t *testing.T) {
+	fixture := newLoginHarness(t, &recordingValidator{models: []aigw.Model{{ID: "deepseek-flash"}}})
+	ctx := context.Background()
+	// The account's mount was detached by an earlier logout.
+	hook := &loginMountHook{attached: []string{}}
+	hook.duringRestore = func() {
+		if running := fixture.runner.Running(); len(running) != 0 {
+			t.Error("the mounts were restored after the worker started; its profile would not bind them")
+		}
+	}
+	fixture.manager.SSHWorkspaces = hook
+
+	if err := fixture.ops.PrepareLogin(ctx, "alice", ""); err != nil {
+		t.Fatalf("PrepareLogin: %v", err)
+	}
+	if len(hook.order) != 1 || hook.order[0] != "restore" {
+		t.Fatalf("mount calls = %v, want one restore", hook.order)
+	}
+	if running := fixture.runner.Running(); len(running) != 1 {
+		t.Fatalf("the worker was not started: %+v", running)
+	}
+}
+
+// A mount that cannot come back is reported and audited, and it never costs the person their
+// login: the worker still starts, and the page tells them what is missing.
+func TestPrepareLoginSurvivesAMountThatCannotComeBack(t *testing.T) {
+	fixture := newLoginHarness(t, &recordingValidator{models: []aigw.Model{{ID: "deepseek-flash"}}})
+	sink := &auditRecorder{}
+	fixture.ops.auditor = sink
+	hook := &loginMountHook{restoreErr: errors.New("ssh: connect to host aipc port 22: Connection refused")}
+	fixture.manager.SSHWorkspaces = hook
+
+	if err := fixture.ops.PrepareLogin(context.Background(), "alice", ""); err != nil {
+		t.Fatalf("a failed remount must not fail the login: %v", err)
+	}
+	if running := fixture.runner.Running(); len(running) != 1 {
+		t.Fatalf("the worker was not started: %+v", running)
+	}
+	kinds := sink.kinds()
+	if len(kinds) != 1 || kinds[0] != "login_mount_restore_failed" {
+		t.Fatalf("audit events = %v, want one login_mount_restore_failed", kinds)
+	}
+}
+
+// A worker that is already running keeps its profile: the restored mount is announced as deferred
+// instead of silently restarting a worker that may be in the middle of a turn (M69 D4).
+func TestPrepareLoginDefersAMountThatTheRunningWorkerCannotSee(t *testing.T) {
+	fixture := newLoginHarness(t, &recordingValidator{models: []aigw.Model{{ID: "deepseek-flash"}}})
+	ctx := context.Background()
+	sink := &auditRecorder{}
+	fixture.ops.auditor = sink
+	// A worker that is already serving somebody: the login hook leaves it alone.
+	if started, err := fixture.manager.EnsureRunning(ctx, fixture.tenant); err != nil || !started {
+		t.Fatalf("preparing a running worker: started=%t err=%v", started, err)
+	}
+	hook := &loginMountHook{}
+	fixture.manager.SSHWorkspaces = hook
+
+	if err := fixture.ops.PrepareLogin(ctx, "alice", ""); err != nil {
+		t.Fatalf("PrepareLogin: %v", err)
+	}
+	if running := fixture.runner.Running(); len(running) != 1 {
+		t.Fatalf("the already-running worker was replaced: %+v", running)
+	}
+	deferred := false
+	for _, kind := range sink.kinds() {
+		if kind == "ssh_mount_restore_deferred" {
+			deferred = true
+		}
+	}
+	if !deferred {
+		t.Fatalf("audit events = %v, want ssh_mount_restore_deferred", sink.kinds())
 	}
 }

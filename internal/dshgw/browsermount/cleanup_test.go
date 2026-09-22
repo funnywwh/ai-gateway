@@ -250,7 +250,7 @@ func TestConcurrentCloseAndQuiesceDoNotRestartAfterStop(t *testing.T) {
 }
 
 func TestUnmountFailureRetriesWithoutRestart(t *testing.T) {
-	var unmounts, restarts atomic.Int32
+	var unmounts, restarts, forced atomic.Int32
 	s := NewWithMount(func(context.Context, registry.Tenant) error { restarts.Add(1); return nil }, func(string, fs.Backend) (Mounted, error) {
 		return checkedMount{func() error {
 			if unmounts.Add(1) == 1 {
@@ -259,6 +259,9 @@ func TestUnmountFailureRetriesWithoutRestart(t *testing.T) {
 			return nil
 		}}, nil
 	})
+	// The graceful unmount fails AND the forced ladder cannot take the mount either (M76): the
+	// share stays retryable and the worker is not restarted for it.
+	s.SetForceDetach(func(string) error { forced.Add(1); return errors.New("still busy") })
 	tenant := registry.Tenant{Name: "alice", Workspace: t.TempDir()}
 	sh, err := s.open(tenant, "owner", "dir", true)
 	if err != nil {
@@ -270,10 +273,94 @@ func TestUnmountFailureRetriesWithoutRestart(t *testing.T) {
 	if _, ok := s.tombstones[sh.token]; ok {
 		t.Fatal("false tombstone")
 	}
+	if forced.Load() != 1 {
+		t.Fatalf("the forced detach ran %d times, want one escalation", forced.Load())
+	}
 	if err := s.close(sh); err != nil {
 		t.Fatal(err)
 	}
 	if unmounts.Load() != 2 || restarts.Load() != 1 {
 		t.Fatal("incorrect retry stages")
+	}
+	// The retry that succeeded must not escalate again.
+	if forced.Load() != 1 {
+		t.Fatalf("the forced detach ran %d times, want no escalation once the unmount worked", forced.Load())
+	}
+}
+
+// The shape the deployment host produced (2026-09-22): the graceful unmount answers EBUSY
+// because another mount namespace holds the mount, and the forced ladder is what takes it out
+// of the table. Before M76 the same call was retried every five seconds, forever.
+func TestUnmountFailureEscalatesToTheForcedDetach(t *testing.T) {
+	var forced atomic.Int32
+	tenant := registry.Tenant{Name: "alice", Workspace: t.TempDir()}
+	s := NewWithMount(func(context.Context, registry.Tenant) error { return nil }, func(string, fs.Backend) (Mounted, error) {
+		return checkedMount{func() error { return errors.New("Device or resource busy") }}, nil
+	})
+	var unmounted atomic.Bool
+	s.SetForceDetach(func(path string) error {
+		forced.Add(1)
+		unmounted.Store(true)
+		return nil
+	})
+	sh, err := s.open(tenant, "owner", "dir", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.close(sh); err != nil {
+		t.Fatalf("the forced detach did not finish the cleanup: %v", err)
+	}
+	if forced.Load() != 1 || !unmounted.Load() {
+		t.Fatalf("forced detach ran %d times (unmounted=%v)", forced.Load(), unmounted.Load())
+	}
+	if _, ok := s.shares[sh.token]; ok {
+		t.Fatal("a detached share is still tracked")
+	}
+	if _, err := os.Stat(s.recordPath(tenant.Name, sh.id)); !os.IsNotExist(err) {
+		t.Fatalf("the record survived a forced detach: %v", err)
+	}
+}
+
+// go-fuse's Unmount can block forever (it waits for its serve loop, which ends only when the
+// kernel releases the connection). That is what wedged the logout request AND the reaper on
+// 2026-09-22, and it is why the graceful attempt is bounded and the forced ladder runs anyway.
+func TestABlockingUnmountIsBoundedAndForced(t *testing.T) {
+	var forced atomic.Int32
+	blocked := make(chan struct{})
+	tenant := registry.Tenant{Name: "alice", Workspace: t.TempDir()}
+	s := NewWithMount(func(context.Context, registry.Tenant) error { return nil }, func(string, fs.Backend) (Mounted, error) {
+		return checkedMount{func() error {
+			<-blocked // never returns while the test runs
+			return nil
+		}}, nil
+	})
+	s.SetForceDetach(func(string) error {
+		forced.Add(1)
+		close(blocked) // the abort is what releases the parked unmount
+		return nil
+	})
+	sh, err := s.open(tenant, "owner", "dir", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	started := time.Now()
+	go func() { done <- s.close(sh) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the forced detach did not finish the cleanup: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the close hung on a blocking unmount instead of forcing its way out")
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("the bounded attempt took %s", elapsed)
+	}
+	if forced.Load() != 1 {
+		t.Fatalf("forced detach ran %d times, want one", forced.Load())
+	}
+	if _, ok := s.shares[sh.token]; ok {
+		t.Fatal("a detached share is still tracked")
 	}
 }

@@ -61,11 +61,25 @@ type LoginPrepare interface {
 	PrepareLogin(ctx context.Context, tenant, submittedKey string) error
 }
 
-// LogoutStop stops a tenant's dsh once its last session has signed out (M69). The proxy decides
-// *when* (it owns the session store, so it knows whether another window is still signed in); the
-// lifecycle layer decides *how*.
+// LogoutResult is what one tenant's logout teardown did (M76). The proxy audits it, because
+// "signed out but a mount stayed mounted, and here is which one" is exactly what an operator has
+// to be able to answer afterwards — the pre-M76 audit recorded a failure without saying what
+// failed.
+type LogoutResult struct {
+	// MountsDetached counts the mounts that left the kernel mount table (browser directory mounts
+	// and ssh workspaces together).
+	MountsDetached int
+	// MountsLeftover names the mount points that are still attached.
+	MountsLeftover []string
+	// WorkerStopped is true only when the teardown verified the tenant's dsh is gone.
+	WorkerStopped bool
+}
+
+// LogoutStop tears a tenant's dsh (and its mounts) down once its last session has signed out
+// (M69, sequenced by M76). The proxy decides *when* (it owns the session store, so it knows
+// whether another window is still signed in); the lifecycle layer decides *how*.
 type LogoutStop interface {
-	StopSignedOut(ctx context.Context, tenant string) error
+	StopSignedOut(ctx context.Context, tenant string) (LogoutResult, error)
 }
 
 type Proxy struct {
@@ -458,9 +472,16 @@ func (p *Proxy) aigwIdentity(ctx context.Context, key string) (aigw.Identity, er
 // but bounded, so a wedged worker cannot hold the login request open forever.
 const loginPrepareTimeout = 45 * time.Second
 
-// logoutStopTimeout bounds the logout-time worker stop. The runner signals TERM and escalates to
-// KILL, so this only has to cover a worker that is slow to die.
-const logoutStopTimeout = 30 * time.Second
+// logoutStopTimeout bounds one tenant's logout teardown: the mounts are force-detached first and
+// the dsh is stopped LAST (M76), so this has to cover both — two mount phases of at most 15s each
+// plus the runner's TERM (20s) with its escalation to KILL, with room to spare.
+const logoutStopTimeout = 55 * time.Second
+
+// logoutTotalTimeout bounds the whole portal logout when it revokes several tenants' sessions in
+// one request. Without it a browser signed into eight tenants could hold the request for eight
+// minutes; past this budget the remaining tenants are reported as skipped (`logout_worker_stop_skipped`)
+// and the next sign-in (or the operator) deals with them.
+const logoutTotalTimeout = 150 * time.Second
 
 // prepareLogin runs the login-time lifecycle hook (M69).
 //
@@ -478,11 +499,12 @@ func (p *Proxy) prepareLogin(r *http.Request, tenant registry.Tenant, submittedK
 	if err := p.LoginPrepare.PrepareLogin(ctx, tenant.Name, submittedKey); err != nil {
 		p.log().Warn("preparing the tenant for login failed; the session is still issued",
 			"tenant", tenant.Name, "err", err)
-		p.audit(r, tenant.Name, "login_prepare_failed", fmt.Sprintf("%T", err), http.StatusFound)
+		p.audit(r, tenant.Name, "login_prepare_failed", truncateReason(err.Error()), http.StatusFound)
 	}
 }
 
-// stopSignedOutTenants stops the dsh of every tenant this logout revoked a session for (M69).
+// stopSignedOutTenants tears down the dsh of every tenant this logout revoked a session for (M69,
+// sequenced by M76: mounts first, dsh last).
 //
 // It stops unconditionally, and the deployment host is why: a browser that closed its tabs
 // leaves a still-valid session behind for the rest of the TTL, so "nobody is left in this
@@ -490,24 +512,61 @@ func (p *Proxy) prepareLogin(r *http.Request, tenant registry.Tenant, submittedK
 // live sessions, most of them days old, which would have kept its dsh running long after signing
 // out. Signing out means the tenant's dsh goes away; a second window of the same person (a tenant
 // is one account) loses it too and reconnects by signing in again.
+//
+// Every step is audited with its outcome, including the reason a step failed: the audit line used
+// to record only the Go error type, which is what made the 2026-09-22 incident (three logouts
+// reporting failure while the dsh itself had already exited) impossible to diagnose from the log.
 func (p *Proxy) stopSignedOutTenants(r *http.Request, tenants []string) {
 	if p.LogoutStop == nil || len(tenants) == 0 {
 		return
 	}
+	deadline := p.now().Add(logoutTotalTimeout)
 	for _, name := range tenants {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), logoutStopTimeout)
-		err := p.LogoutStop.StopSignedOut(ctx, name)
+		budget := logoutStopTimeout
+		if left := deadline.Sub(p.now()); left < budget {
+			if left <= 0 {
+				p.log().Warn("skipping a signed-out tenant's teardown: the logout budget is spent", "tenant", name)
+				p.audit(r, name, "logout_worker_stop_skipped", "logout budget spent", http.StatusSeeOther)
+				continue
+			}
+			budget = left
+		}
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), budget)
+		result, err := p.LogoutStop.StopSignedOut(ctx, name)
 		cancel()
+		if result.MountsDetached > 0 {
+			p.audit(r, name, "logout_mount_detach", fmt.Sprintf("%d mount(s) detached", result.MountsDetached), http.StatusSeeOther)
+		}
+		for _, path := range result.MountsLeftover {
+			p.log().Error("a mount outlived a signed-out tenant", "tenant", name, "mountpoint", path)
+			p.audit(r, name, "logout_mount_leftover", truncateReason(path), http.StatusSeeOther)
+		}
 		if err != nil {
-			// The browser's session is already gone, so the logout itself succeeded; a worker
-			// that would not die is an operator's problem and is reported as one.
-			p.log().Error("stopping a signed-out tenant's dsh failed", "tenant", name, "error_type", fmt.Sprintf("%T", err))
-			p.audit(r, name, "logout_worker_stop_failed", fmt.Sprintf("%T", err), http.StatusSeeOther)
+			// The browser's session is already gone, so the logout itself succeeded; a mount or a
+			// worker that would not go away is an operator's problem and is reported as one, with
+			// the reason rather than its type.
+			p.log().Error("tearing down a signed-out tenant failed", "tenant", name, "err", err)
+			p.audit(r, name, "logout_worker_stop_failed", truncateReason(err.Error()), http.StatusSeeOther)
 			continue
 		}
-		p.log().Info("tenant dsh stopped on logout", "tenant", name)
+		if !result.WorkerStopped {
+			p.log().Warn("the signed-out tenant's dsh could not be verified as stopped", "tenant", name)
+			p.audit(r, name, "logout_worker_stop_failed", "worker state not verified", http.StatusSeeOther)
+			continue
+		}
+		p.log().Info("tenant dsh stopped on logout", "tenant", name, "mounts_detached", result.MountsDetached)
 		p.audit(r, name, "logout_worker_stop", "logout", http.StatusSeeOther)
 	}
+}
+
+// truncateReason bounds what goes into an audit line: the file is append-only and read by people,
+// and a FUSE or ssh failure message can carry a lot of output.
+func truncateReason(reason string) string {
+	const limit = 512
+	if len(reason) <= limit {
+		return reason
+	}
+	return reason[:limit] + "…"
 }
 
 func (p *Proxy) allowLogin(ip string) bool {

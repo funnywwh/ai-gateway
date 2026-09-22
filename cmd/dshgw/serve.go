@@ -32,7 +32,7 @@ func (c *cli) serve() (serveErr error) {
 		return err
 	}
 	store := deps.manager.Sessions
-	ops := managerOps{m: deps.manager, validator: deps.validator, cfg: deps.cfg, logger: slog.Default()}
+	ops := managerOps{m: deps.manager, validator: deps.validator, cfg: deps.cfg, logger: slog.Default(), auditor: &audit.JSONL{Path: deps.cfg.AuditPath}}
 	gateway := proxy.New(deps.cfg, deps.reg, store, handshake.FileSource{Dir: deps.cfg.HandshakeDir}, &handshake.HTTPExchanger{}, deps.validator)
 	gateway.Authorizer = deps.validator
 	gateway.KeySource = proxy.FileKeySource{Root: deps.cfg.Deploy.TenantConfigRoot}

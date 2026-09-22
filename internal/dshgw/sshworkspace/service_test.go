@@ -28,8 +28,10 @@ type hostFake struct {
 	sshErr    error
 	sshStderr []byte
 	sshfsErr  error
-	// unmountErr makes "fusermount3 -u" fail so the lazy fallback is exercised.
-	unmountErr error
+	// unmountErr makes "fusermount3 -u" fail so the lazy fallback is exercised; unmountLazyErr
+	// makes the lazy retry fail too, which is a mount nothing can detach.
+	unmountErr     error
+	unmountLazyErr error
 	// mounts is the fake mount table: mount point -> filesystem type.
 	mounts map[string]string
 	calls  []string
@@ -93,8 +95,12 @@ func (f *hostFake) exec(_ context.Context, name string, args []string, _ []strin
 		mountpoint := args[len(args)-1]
 		// Only the plain detach fails: the lazy retry (-u -z) is what a busy mount is
 		// supposed to answer to (fusermount3 refuses -z without -u).
-		if len(args) > 0 && args[0] == "-u" && (len(args) < 2 || args[1] != "-z") && f.unmountErr != nil {
+		lazy := len(args) > 1 && args[1] == "-z"
+		if len(args) > 0 && args[0] == "-u" && !lazy && f.unmountErr != nil {
 			return nil, []byte("Device or resource busy"), f.unmountErr
+		}
+		if lazy && f.unmountLazyErr != nil {
+			return nil, []byte("Device or resource busy"), f.unmountLazyErr
 		}
 		f.mu.Lock()
 		delete(f.mounts, mountpoint)
@@ -818,5 +824,141 @@ Host aipc
 	}
 	if again, _ := os.ReadFile(filepath.Join(env.remote.Workspace, ".ssh", "config")); string(again) != "Host mine\n" {
 		t.Errorf("EnsureIdentity overwrote an existing config: %q", again)
+	}
+}
+
+// Logout detaches the mounts but keeps the account's configuration: the records, the mirror the
+// plugin reads and the mount point directories all stay, so the next sign-in puts the same paths
+// back (M76).
+func TestDetachTenantUnmountsAndKeepsEverything(t *testing.T) {
+	env := newTestEnv(t, Options{})
+	ctx := context.Background()
+	mount, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	restarts := len(env.restarts)
+
+	if err := env.service.DetachTenant(ctx, "dsh-colin"); err != nil {
+		t.Fatalf("DetachTenant: %v", err)
+	}
+	if fstype, _ := env.service.mounted(mount.Mountpoint); fstype != "" {
+		t.Errorf("%s is still mounted as %s", mount.Mountpoint, fstype)
+	}
+	if mounts, _ := env.service.Mounts("dsh-colin"); len(mounts) != 1 {
+		t.Errorf("mounts after DetachTenant = %+v, want the record kept", mounts)
+	}
+	if _, statErr := os.Stat(mount.Mountpoint); statErr != nil {
+		t.Errorf("the mount point was removed; the account's workspace entry points at it: %v", statErr)
+	}
+	mirror, err := os.ReadFile(filepath.Join(env.remote.DshHome, "ssh-mounts.json"))
+	if err != nil {
+		t.Fatalf("reading the mirror: %v", err)
+	}
+	if !strings.Contains(string(mirror), mount.Mountpoint) {
+		t.Errorf("the mirror no longer lists the mount:\n%s", mirror)
+	}
+	if len(env.restarts) != restarts {
+		t.Errorf("DetachTenant restarted the worker %v times; the logout path stops it itself",
+			env.restarts[restarts:])
+	}
+	// Idempotent: a second logout with nothing attached is not an error.
+	if err := env.service.DetachTenant(ctx, "dsh-colin"); err != nil {
+		t.Fatalf("second DetachTenant: %v", err)
+	}
+}
+
+// A detach that cannot take the mount is reported, and the record stays so the next attempt
+// (or the next login) can try again.
+func TestDetachTenantReportsAMountItCannotTake(t *testing.T) {
+	env := newTestEnv(t, Options{})
+	ctx := context.Background()
+	mount, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// The mount is wedged: neither the ordinary nor the lazy unmount works, and breakWedge has
+	// nothing to kill here — the detach has to report the mount instead of claiming success.
+	env.fake.unmountErr = errors.New("exit status 1")
+	env.fake.unmountLazyErr = errors.New("exit status 1")
+	previous := fuseConnDir
+	fuseConnDir = func(fuseConn) string { return "" }
+	defer func() { fuseConnDir = previous }()
+	err = env.service.DetachTenant(ctx, "dsh-colin")
+	if err == nil {
+		t.Fatal("a mount that would not detach was reported as detached")
+	}
+	if CodeOf(err) != CodeMountFailed {
+		t.Errorf("code = %q, want %q (%v)", CodeOf(err), CodeMountFailed, err)
+	}
+	if mounts, _ := env.service.Mounts("dsh-colin"); len(mounts) != 1 || mounts[0].Mountpoint != mount.Mountpoint {
+		t.Errorf("the record was dropped although the mount stayed: %+v", mounts)
+	}
+}
+
+// Restore is the login half: it re-mounts what a logout detached, at the same mount point, and
+// does not touch what is already mounted.
+func TestRestoreRemountsWhatLogoutDetached(t *testing.T) {
+	env := newTestEnv(t, Options{})
+	ctx := context.Background()
+	mount, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := env.service.DetachTenant(ctx, "dsh-colin"); err != nil {
+		t.Fatalf("DetachTenant: %v", err)
+	}
+	before := env.fake.callCount("sshfs ")
+
+	if err := env.service.Restore(ctx, env.remote.Tenant, env.remote.Workspace, env.remote.DshHome); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if got := env.fake.callCount("sshfs "); got != before+1 {
+		t.Fatalf("sshfs ran %d times, want one remount", got-before)
+	}
+	if fstype, _ := env.service.mounted(mount.Mountpoint); fstype == "" {
+		t.Fatalf("%s was not remounted", mount.Mountpoint)
+	}
+	// A second Restore is a no-op: the mount is already there.
+	if err := env.service.Restore(ctx, env.remote.Tenant, env.remote.Workspace, env.remote.DshHome); err != nil {
+		t.Fatalf("second Restore: %v", err)
+	}
+	if got := env.fake.callCount("sshfs "); got != before+1 {
+		t.Fatalf("Restore mounted %d times over a live mount", got-before)
+	}
+}
+
+// A recorded mount whose daemon died leaves an entry in the mount table that cannot be mounted
+// over and fails every read with ENOTCONN. Restore (login) and Reconcile (startup) both repair it
+// instead of skipping it, so the account does not keep a dead workspace (M76; the defect was
+// recorded under M64 in docs/TODO.md).
+func TestRestoreReplacesADeadMount(t *testing.T) {
+	env := newTestEnv(t, Options{})
+	ctx := context.Background()
+	mount, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	before := env.fake.callCount("sshfs ")
+
+	// The daemon died: the kernel released its connection while the entry stays in the table.
+	previous := fuseConnDir
+	fuseConnDir = func(fuseConn) string { return "" }
+	defer func() { fuseConnDir = previous }()
+
+	if err := env.service.Restore(ctx, env.remote.Tenant, env.remote.Workspace, env.remote.DshHome); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if got := env.fake.callCount("sshfs "); got != before+1 {
+		t.Fatalf("sshfs ran %d times, want the dead mount replaced once", got-before)
+	}
+	if got := env.fake.callCount("fusermount3 -u"); got == 0 {
+		t.Fatal("the dead entry was left in the mount table")
+	}
+	if fstype, _ := env.service.mounted(mount.Mountpoint); fstype == "" {
+		t.Fatalf("%s was not remounted over the dead entry", mount.Mountpoint)
+	}
+	if mounts, _ := env.service.Mounts("dsh-colin"); len(mounts) != 1 {
+		t.Fatalf("mounts = %+v, want the one record kept", mounts)
 	}
 }

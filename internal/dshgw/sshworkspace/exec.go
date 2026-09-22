@@ -1,11 +1,11 @@
 package sshworkspace
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/winger/ai-gateway/internal/dshgw/fusekernel"
 	"github.com/winger/ai-gateway/internal/dshgw/securefile"
 	"os"
 	"os/exec"
@@ -396,92 +396,28 @@ func (o Options) sshfsArgs(remote Remote, host, remotePath, mountpoint string) [
 var serviceMounted = mountedAt
 
 // mountedAt reports the filesystem type mounted exactly at mountpoint, or "" when nothing
-// is. /proc/self/mounts is read directly instead of shelling out to findmnt: it is always
-// present, and it is the same table findmnt would format.
+// is. The mount table itself is read by internal/dshgw/fusekernel, which the browser workspace
+// uses too (M76): one implementation of the host facts, two services.
 func mountedAt(mountpoint string) (string, error) {
-	fstype := ""
-	_ = eachMount(func(fields []string) bool {
-		if len(fields) < 3 || decodeMountField(fields[1]) != mountpoint {
-			return true
-		}
-		fstype = fields[2]
-		return false
-	})
-	return fstype, nil
-}
-
-// eachMount walks one field-split line of /proc/self/mounts at a time. Returning false
-// from visit stops the walk. A table that cannot be read is not an error worth
-// propagating: the callers all treat "no entry" and "no table" the same way, and the
-// table is present on every host this runs on.
-func eachMount(visit func(fields []string) bool) error {
-	file, err := os.Open("/proc/self/mounts")
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 3 {
-			continue
-		}
-		if !visit(fields) {
-			return nil
-		}
-	}
-	return scanner.Err()
-}
-
-// decodeMountField undoes the kernel's octal escaping (\040 for a space, \011, \012, \134).
-func decodeMountField(field string) string {
-	if !strings.Contains(field, `\`) {
-		return field
-	}
-	var out strings.Builder
-	for i := 0; i < len(field); i++ {
-		if field[i] == '\\' && i+3 < len(field) {
-			if value, err := strconv.ParseUint(field[i+1:i+4], 8, 8); err == nil {
-				out.WriteByte(byte(value))
-				i += 3
-				continue
-			}
-		}
-		out.WriteByte(field[i])
-	}
-	return out.String()
+	return fusekernel.MountedAt(procRoot, mountpoint)
 }
 
 // unmount detaches one FUSE mount, falling back to a lazy detach when the filesystem is
 // busy (a session inside the account may still hold it open).
 func (o Options) unmount(ctx context.Context, run ExecFunc, mountpoint string) (lazy bool, err error) {
-	return o.detachOnce(ctx, run, mountpoint, false)
-}
-
-// detachOnce is one unmount attempt. force adds fusermount's lazy flag, which detaches a
-// mount that is still in use: the kernel keeps the old superblock for whoever holds it and
-// drops the entry from the mount table, which is what an account whose sandbox still has a
-// mount point bound needs.
-func (o Options) detachOnce(ctx context.Context, run ExecFunc, mountpoint string, force bool) (lazy bool, err error) {
 	callCtx, cancel := context.WithTimeout(ctx, unmountBudget)
 	defer cancel()
-	args := []string{"-u", mountpoint}
-	if force {
-		args = []string{"-u", "-z", mountpoint}
+	lazy, err = fusekernel.Unmount(callCtx, func(callCtx context.Context, name string, args []string) ([]byte, []byte, error) {
+		return run(callCtx, name, args, nil)
+	}, mountpoint)
+	if err != nil {
+		return lazy, Wrap(CodeMountFailed, err.Error(), err)
 	}
-	_, stderr, runErr := run(callCtx, "fusermount3", args, nil)
-	if runErr == nil {
-		return force, nil
-	}
-	if force {
-		return false, Wrap(CodeMountFailed, fmt.Sprintf("unmount %s failed: %s", mountpoint, tail(stderr)), runErr)
-	}
-	// The lazy retry needs -u: `fusermount3 -z` alone is refused ("can only be used with
-	// -u"), so the two-flag form is what actually detaches a busy mount.
-	_, lazyStderr, lazyErr := run(callCtx, "fusermount3", []string{"-u", "-z", mountpoint}, nil)
-	if lazyErr == nil {
-		return true, nil
-	}
-	return false, Wrap(CodeMountFailed, fmt.Sprintf("unmount %s failed: %s / %s", mountpoint, tail(stderr), tail(lazyStderr)), runErr)
+	return lazy, nil
+}
+
+// decodeMountField undoes the kernel's octal escaping (\040 for a space, \011, \012, \134).
+// The reader itself lives in internal/dshgw/fusekernel (M76).
+func decodeMountField(field string) string {
+	return fusekernel.DecodeMountField(field)
 }
