@@ -53,10 +53,11 @@
 
 | 缺口 | 位置 | 现象 |
 |---|---|---|
-| 浏览器挂载只有优雅卸载一条路 | `browsermount/lifecycle.go:81`（`mounted.Unmount()`） | `go-fuse Server.Unmount()` 失败即返回错误，没有 `-u -z`、没有 sysfs abort；reaper 只能每 5 秒重试同一个必然失败的调用 |
-| SSH 挂载在退出时根本没被调用 | `tenancy/manager.go:611 StopForLogout` | 只 drop 浏览器挂载；sshfs 挂载留到下一次 `Reconcile` / 手工断开 |
+| 浏览器挂载只有优雅卸载一条路 | `browsermount/lifecycle.go`（`mounted.Unmount()`） | `go-fuse Server.Unmount()` 失败即返回错误，没有 `-u -z`、没有 sysfs abort；reaper 只能每 5 秒重试同一个必然失败的调用 |
+| **优雅卸载会永久阻塞（M76 实现期实测，本次的第一原因）** | `go-fuse@v2.9.0/fuse/server.go:145` | `Server.Unmount()` 跑完 `fusermount3 -u` 之后要 **等它的 serve loop 结束**，而 serve loop 只在**内核释放这条 FUSE 连接**时才结束——挂载被别人持有时它既没成功也没失败，**永远不返回**。实测（本次 e2e，worker 仍活着且挂载已 bind 进沙箱）：退出请求与**整个 reaper** 一起卡在 `WaitGroup.Wait` 上，落库只留下 worker 还在跑、两个挂载都还挂着 ⇒ 用户看到的正是"点了退出没反应、挂载还在"。原代码把升级到强制卸载写在 `Unmount()` 返回之后，而它根本不会返回 |
+| SSH 挂载在退出时根本没被调用 | `tenancy/manager.go StopForLogout` | 只 drop 浏览器挂载；sshfs 挂载留到下一次 `Reconcile` / 手工断开 |
 | 卸载失败会短路掉后续清理 | `StopForLogout` 的 `return err` | `workers().Stop` 报错就直接返回，挂载清理整段不执行 |
-| 失败后仍可能被"为收挂载而重启 worker" | `browsermount/lifecycle.go:46 closeContext` | `expire` 走 `workerStopped=false`，`!sh.detached` 时会 `restart`，把已退出的租户的 dsh 又拉起来（现场日志里 15:15/15:22 多次 `signal: terminated`） |
+| 失败后仍可能被"为收挂载而重启 worker" | `browsermount/lifecycle.go closeContext` | `expire` 走 `workerStopped=false`，`!sh.detached` 时会 `restart`，把已退出的租户的 dsh 又拉起来 |
 | 失败原因不可诊断 | `proxy.go` 审计 | `reason` 记的是错误**类型** |
 | 顺序 | `StopForLogout` | 先停 dsh 再卸载；dsh 停在 FUSE 请求里时要把 20s StopTimeout 熬完 |
 
@@ -86,6 +87,13 @@ KILL；先把挂载摘掉/中止连接会让它的 I/O 立刻失败，随后的 
 "dsh 停了但挂载留着、还要每 5 秒重试"的反面。
 
 ### D2 浏览器挂载的强制阶梯（新 `browserworkspace.ForceUnmount`）
+
+优雅卸载必须**先被限时**，否则阶梯永远不会被走到：`Mounted.Unmount()` 用 `unmountGracefully`
+包成有界调用（预算 `gracefulUnmountBudget = 1s`），超时返回 `errUnmountSlow` 并记 WARN，
+然后才进阶梯。被放弃的那次 `Unmount` 的 goroutine 会在**连接被释放后自己返回**——阶梯里的
+abort 正是释放它的动作。这条改动推翻了 `browsermount` 原来"绝不把 Unmount 包进超时 goroutine"
+的注释：那句话是在"Unmount 一定会返回"的假设下写的，而实测它**可以永不返回**；两害相权，
+一个会自己结束的 goroutine 远好过一个卡死的 reaper 与一个永不回答的退出请求。
 
 ```go
 // ForceUnmount detaches one browser-workspace mount even when the graceful path cannot:
@@ -255,12 +263,15 @@ type LogoutStop interface{ StopSignedOut(ctx context.Context, tenant string) (Lo
 
 - `browserworkspace` 集成测试新增用例：真 FUSE 挂载 + 子进程把 cwd 钉在挂载点里（让优雅卸载必然
   EBUSY）→ `ForceUnmount` 成功且挂载表条目消失。
+- `browsermount` 单测新增：优雅卸载**永久阻塞**时，清理在有界预算内升级到强制卸载并完成
+  （`TestABlockingUnmountIsBoundedAndForced`）。
 - `make dshgw-ssh-integration` 增：挂载 → 退出式 detach → `Restore` 重挂同一路径。
 - 新增 `scripts/dshgw_logout_teardown_e2e.py`（一次性实例、自带 state/端口段，不碰现网
-  `data/dshgw-verify`）：真浏览器目录挂载（OPFS 句柄，复用 `browser_workspace_mount_e2e.py` 的插桩）
-  → 把挂载点钉忙 → `POST /dshgw/logout/` → 断言挂载表无残留、worker 进程与端口消失、审计出现
-  `logout_mount_detach` 且无 `logout_worker_stop_failed`、reaper 不再刷失败 → 重新登录断言 worker
-  起得来、SSH 挂载回到同一路径。
+  `data/dshgw-verify`）：真浏览器目录挂载（协议由脚本内的小型 stand-in 驱动，不需要 Chromium）
+  + 真 sshfs 挂载，浏览器挂载**已 bind 进沙箱**（即优雅卸载必然失败的形状）→
+  `POST /dshgw/logout/` → 断言两个挂载都离开挂载表、worker 端口关闭、审计出现
+  `logout_mount_detach` + `logout_worker_stop` 且无失败行 → 重新登录断言 ssh 挂载回到同一路径。
+  **实测（2026-09-22 本机）：PASS 12 步，退出请求 1.58s 返回**。
 - 本机现网：重建 `bin/dshgw` → 重启 `dshgw-verify`（会短暂带走全部租户会话）→ 真实点一次「退出」，
   证据 = `/proc/self/mounts`、`ps`、`ss`、`state/audit.jsonl`、日志。
 
@@ -274,4 +285,25 @@ type LogoutStop interface{ StopSignedOut(ctx context.Context, tenant string) (Lo
 
 ## 8. 实现与设计差异
 
-（实现完成后回填。）
+1. **多了一条设计时没想到的原因**：go-fuse 的 `Server.Unmount()` 在挂载卸不动时会**永远阻塞**
+   （§2.2 第 2 行的实测）。因此 D2 从"失败后升级"变成"**限时 1s 后升级**"，
+   `browsermount` 里"绝不把 Unmount 包进超时 goroutine"的旧注释被这条事实推翻并改写（更详细的
+   理由写在 `gracefulUnmountBudget` 的注释里）。这是本次修复里最要紧的一条：没有它，强制阶梯
+   永远不会被执行到。
+2. **`AttachedMounts`（挂载点清单）是新增的钩子方法**，设计里没写：`MountsFor` 回答的是"worker 启动
+   可以 bind 什么"，一个正在拆除中的 share 故意不在里面，因此它数不出"卸载前有几个、卸载后还剩几个"。
+   `LogoutResult` 的计数与残留清单都基于它。
+3. **`fusekernel` 用参数化的宿主事实函数**（`MountedAt(procRoot, path)`、`ConnectionLive(..., connDir, ...)`）
+   而不是一个带全局缝的结构体：`sshworkspace` 的测试缝（`procRoot`/`sysfsFuse`/`statDevice`/
+   `serviceMounted`/`fuseConnDir`）因此原样保留，只有实现搬了家，测试改动接近零。
+4. **`share.final` 的作用范围比设计写的窄**：它只在"share 已发布但还没 detached"时才改变行为
+   （`closeContext` 的 restart 分支）。实测中那一个小时的 EBUSY 刷屏并不是它造成的（那是限时卸载缺失
+   导致的），所以文档把它记成"关掉我们确知的那条重启路径"，不夸大成根因。
+5. **SSH 侧新增 `detachKeeping(..., keepMountpoint)`**：原 `detach` 会在成功时删掉空的挂载点目录
+   （`Close`/purge 要的行为），而退出必须保留它（账号的工作区条目指着它）。这是设计里"保留挂载点目录"
+   落到代码时多出来的一个参数。
+6. **验收脚本不需要 Chromium**：设计里写"复用 `browser_workspace_mount_e2e.py` 的插桩"，
+   实现改成脚本内一个约 80 行的 poll 协议 stand-in（`BrowserSide`），支持 `stat`/`list`/`read`/`flush`。
+   这样这份验收不依赖浏览器自动化，同时仍然走真 FUSE 挂载、真 profile 绑定与真卸载路径。
+7. **`audit_path` 必须显式配置**：默认审计文件是 `state/gateway/audit.jsonl`，
+   而现网 `dshgw.yaml` 写的是 `state/audit.jsonl`；脚本按现网口径显式设置，避免断言读错文件。

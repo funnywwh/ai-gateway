@@ -71,8 +71,12 @@ deploy:
 - `open` 在 FUSE 挂载前持久化 preparing 记录，成功后原子更新 ready；带稳定 key 的记录标记 `Persistent`，供启动清理区分「稳定虚拟路径」与「一次性挂载点」。只记录服务端路径/租户/ID，不持久化 capability 或浏览器句柄。
 - 断开（`close`）对稳定 key 只卸载并删除记录，**保留空挂载点目录**；`close{purge:true}`（操作员删除该目录）才连目录一起释放，tombstone 会记住路径，使「先断开、后删除」也能真正释放。
 - HTTP close 和租约过期：先拒绝新 I/O、从 worker profile 排除路径，再重启并等待旧 namespace 退出，最后卸载 FUSE。
-- **卸载的强制阶梯（M76）**：`cleanupLocked` 先走 go-fuse 的优雅卸载；失败且挂载表里仍在该条目时，升级为
-  `browserworkspace.ForceUnmount`（`fusermount3 -u -z` 惰性摘除 → abort 这条 FUSE 连接 → 再 `-u -z`）。
+- **卸载的强制阶梯（M76）**：`cleanupLocked` 先走 go-fuse 的优雅卸载，**但它有 1s 上限**：`Server.Unmount()`
+  跑完 `fusermount3 -u` 后要等自己的 serve loop 结束，而 serve loop 只在内核释放这条 FUSE 连接时才结束——
+  挂载被别的命名空间（或活着的 worker 沙箱）持有时它**永远不返回**。实测（2026-09-22 本机 e2e）：退出请求与
+  整个 reaper 一起卡在 `WaitGroup.Wait` 上。超时后升级为 `browserworkspace.ForceUnmount`
+  （`fusermount3 -u -z` 惰性摘除 → abort 这条 FUSE 连接 → 再 `-u -z`），被放弃的那次 `Unmount` 的 goroutine
+  在连接被 abort 释放后自己返回。
   触发场景是实测到的：挂载被**另一个挂载命名空间**（本机是某个 snap 的私有 ns，`shared` 传播把挂载复制了进去）
   持有，普通 `umount` 永远 EBUSY，reaper 每 5 秒重试同一次必然失败的调用（本机 2026-09-22 连续刷了一小时）。
   保证的是**我方挂载表条目消失、挂载点可复用**；别的命名空间里那份副本由内核管到那个进程退出。

@@ -898,10 +898,14 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
       `sshworkspace` 改为调用它，fixture 测试随之搬迁
 - [ ] `browserworkspace.ForceUnmount` 强制阶梯 + 单测；真机用例（子进程钉住挂载点 ⇒ 优雅卸载必然
       EBUSY ⇒ 强制阶梯成功）
-- [ ] `browsermount`：`detach` 缝、`share.final`、`DetachTenant`、`cleanupLocked` 升级、
-      `CleanupStale` 复用同一阶梯（含"优雅失败 → 强制成功 → 清理完成"与"final 不再被 expire 重启"用例）
+- [ ] `browsermount`：`detach` 缝、`share.final`、`DetachTenant`、`cleanupLocked` 升级（含
+      **优雅卸载限时 1s**：go-fuse 的 `Unmount()` 在挂载卸不动时会永远等自己的 serve loop，实测它让退出
+      请求与整个 reaper 卡死）、`CleanupStale` 复用同一阶梯（含"优雅失败 → 强制成功 → 清理完成"、
+      "优雅永久阻塞 → 有界升级"与"final 不再被 expire 重启"用例）
 - [ ] `sshworkspace`：`DetachTenant`（保留记录/镜像/挂载点）与 `Restore`（登录重挂），
-      真机 sshfs 用例覆盖"挂载 → detach → 重挂同一路径"
+      真机 sshfs 用例覆盖"挂载 → detach → 重挂同一路径"；`Restore`/`Reconcile` 顺带修掉 M64 记的
+      **死挂载**缺陷（FUSE 连接已断的已记录挂载点，原先被跳过 ⇒ 账号一直留着读不了的死工作区；
+      现在先探测、摘掉死条目再重挂，记录与挂载点保留）
 - [ ] `tenancy.StopForLogout` 重排 + `LogoutResult`；`proxy` 新签名、审计与 55s/150s 预算；
       `cmd/dshgw.PrepareLogin` 插入 `Restore`（先重挂后起 worker）
 - [ ] 单测全绿：`make dshgw-browser-test`、`make dshgw-test`、`make dshgw-ssh-integration`
