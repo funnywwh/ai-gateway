@@ -313,6 +313,15 @@ async function loadClient(renderer, host) {
       rpc: {
         call: async (channel, endpoint, payload, signal) => {
           assert.equal(channel, '/dshgw-web-tty', 'the plugin must use its own channel')
+          // `payload` is a required key on the wire even for an endpoint that takes no arguments: the
+          // shell serializes the body with JSON.stringify (which drops `payload: undefined`) and the
+          // host validates it with zod 4, where the schema's `payload: z.unknown()` is not optional —
+          // so a missing key is rejected as "invalid client-request message" before the endpoint runs.
+          // Same guard as git-diff's client test, which is where that field failure is written down.
+          assert.ok(
+            Object.hasOwn(JSON.parse(JSON.stringify({ payload })), 'payload'),
+            `${endpoint}: the RPC envelope must carry a payload key (see git-diff/test/client.test.mjs)`,
+          )
           calls.push({ endpoint, payload })
           return await host.call(endpoint, payload, signal)
         },

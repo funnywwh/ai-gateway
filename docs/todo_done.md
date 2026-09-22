@@ -5058,6 +5058,59 @@ suyuan-sz、sz-test、us-test。审计里还留着 `dsh-tenant` 曾请求挂载 
       `settings.yaml` 也是 9-18 起的历史漂移；`dsh-tenant` 的旧 `.dsh/plugins/{web-tty,workspace-files,git-diff}`
       影子副本本轮**保留**（回滚用），确认稳定后可删。
 
+### 修掉三个租户插件共同的「无 payload 信封」（现场反馈：变更页报 invalid client-request message）
+
+现场反馈：「变更 插件报错，并提示在工作区里没有找到 git 仓库」。`变更` 页上只有一行红字
+`invalid client-request message`，然后是空态「在工作区里没有找到 git 仓库」——看起来像"这里没有仓库"，
+但仓库一直在 `work/ai-gateway`，是**面板的握手根本没被 host 接受**。
+
+根因既不在 git 也不在 host：
+
+- 客户端的握手是 `call('hello')`，**没有传 payload**；shell 用
+  `JSON.stringify({ type:'client-request', rpcId, method, payload })` 组信封，`payload: undefined`
+  在序列化时**整个键消失**；
+- host 的信封校验是
+  `z.object({ type: z.literal('client-request'), rpcId: z.string(), method: z.string(), payload: z.unknown() })`
+  （`dsh-client-connection` 从 `zod` 导入，本机装的是 **4.5.4**），而 zod 4 里 `z.unknown()` 这个键**不是**
+  optional——实测 `payload: z.unknown()` + 缺键 = `invalid_type: expected nonoptional, received undefined`。
+  于是整条请求在进入端点之前就被拒，回的就是那行红字。
+- `hello` 正是"这个工作区有哪些仓库"的握手，所以 `变更` 页只剩空态；仓库发现本身没问题。
+
+**为什么 33 条客户端测试全绿而线上面板是坏的**：三个插件的 client 测试都把 `(endpoint, payload)`
+**直接**转给宿主半（stub 里就是 `host.call(endpoint, payload)`），而丢键发生在**序列化**那一刻——
+stub 永远看不见。缺的是一道"按线上字节"的断言，不是覆盖率。
+
+**三处同一缺陷**（都是 `hello`，都没有 payload）：
+
+| 插件 | 形态 | 现场表现 |
+|---|---|---|
+| `git-diff` | `await call('hello')` | 面板直接报红字，然后空态（本次反馈） |
+| `workspace-files` | `void call('hello')` | **静默降级**：拒绝只进 logger（`host half unreachable`），面板拿不到 host 报的 root/只读事实 |
+| `web-tty` | `void call('hello')` | 同形（本次顺带发现，未收到现场反馈） |
+
+- [x] 三个 `client.src.js` 的 `call()` 统一 `payload ?? {}`，并把理由写在那个唯一入口上（无参端点不必
+      各自记得传 `{}`，下一个人也不会再踩）；`node build-client.mjs` 重建三份 `client.js`
+- [x] `git-diff/test/client.test.mjs`：新增 `wireEnvelopeViolation()`——把 shell 的信封**重新
+      `JSON.stringify` 一遍**再断言 `payload` 键在，并挂进 stub 的每一次调用（覆盖本文件所有用例）；
+      另加一条具名回归测试，失败信息直接写「host rejects the whole envelope」
+- [x] `workspace-files/test/client.test.mjs`：同一道 guard + 一条具名回归测试；该测试还记录 panel 的
+      logger 行，断言"**不能**出现 `host half unreachable`"——这正是它那种静默失败的可观测差异
+- [x] `web-tty/test/client.test.mjs`：同一道 guard（值断言 + 指向 git-diff 的说明）
+- [x] `git-diff/README.md` 的 Transport 一条写清这条信封规则（三处代码注释都指向它）
+- [x] **先证伪再修**：把重建后的 `client.js` 里的 `payload ?? {}` 临时改回 `payload`（只动构建产物，
+      源码不动）——`git-diff` 34 项里 **7 条红**，具名测试报 `hello: the wire body has no \`payload\` key
+      — JSON.stringify drops payload:undefined and the host rejects the whole envelope…`；
+      `workspace-files` 19 项里 **3 条红**（同一句原因）。改回后两套全绿。只加 guard、不修源码时
+      `workspace-files` 是 16/18——**第二处是真的**，不是预防性的
+- [x] 验证数字：`git-diff` **34/34**、`workspace-files` **19/19**（改前 18 项：16 过 2 红）；
+      `web-tty` 6 项 **2 过 4 红，与改动前的基线逐条一致**（本沙箱没有 `node-pty`：`client.test.mjs`
+      文件级 `Cannot find module 'node-pty'`、`session.test.mjs` 同、host 两条 PTY 用例失败），与本次改动
+      无关；web-tty 的 guard 在本沙箱因此**执行不到**，现场（有 node-pty）才会跑
+- 未做（本沙箱做不到）：**运行中的那份插件目录改不动**——`<部署根>/cmd/dshgw/plugin/` 在租户沙箱里是
+  只读绑定，所以线上 GUI 的端到端确认要等你把三份新 `client.js`（连同 `client.src.js`）同步进
+  `deploy.plugin_path` 并刷新页面；host 半没动，不需要重启网关。改完的现象应该是：`变更` 页直接列出仓库，
+  不再有红字与「没有找到 git 仓库」
+
 ## M76 点「退出」后强制卸载挂载文件系统，最后强制退出 dsh
 
 设计：`docs/design/m76-dsh-exit-force-teardown.md`；规格：`docs/dshgw.md` §3b / §7b / §7d。

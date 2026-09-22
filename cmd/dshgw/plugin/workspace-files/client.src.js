@@ -306,9 +306,16 @@
         /**
          * One RPC call, unwrapped. A host failure arrives as `{ok:false,error}` and is thrown as an
          * Error carrying the host's code, so callers branch on codes instead of parsing messages.
+         *
+         * `payload ?? {}` keeps the envelope valid for an endpoint that takes no arguments — the
+         * argument-less `hello` below is one. The shell serializes the body with JSON.stringify
+         * (which drops `payload: undefined`) and the host's schema keeps `payload` non-optional on
+         * this installation's zod 4, so a missing key is rejected as "invalid client-request message"
+         * before the endpoint runs. The field failure and the regression test that pins it are in
+         * `cmd/dshgw/plugin/git-diff/` (client.src.js and test/client.test.mjs).
          */
         const call = async (endpoint, payload, signal) => {
-          const result = await ctx.connection.rpc.call(RPC_CHANNEL, endpoint, payload, signal)
+          const result = await ctx.connection.rpc.call(RPC_CHANNEL, endpoint, payload ?? {}, signal)
           if (result === null || typeof result !== 'object' || result.ok !== true) {
             const error = (result !== null && typeof result === 'object' && result.error) || null
             const failure = new Error(error === null ? '文件服务没有响应' : String(error.message))

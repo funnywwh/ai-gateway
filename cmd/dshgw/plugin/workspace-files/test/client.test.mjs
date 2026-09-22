@@ -291,8 +291,17 @@ async function loadClient(renderer, host) {
   })
   const registrations = new Map()
   const calls = []
+  const wireViolations = []
+  // The panel reports its own reachability through the logger (`client ready (root …)` on a good
+  // handshake, `host half unreachable: …` when it fails), so the log is the observable difference for
+  // the silent failure the wire test below pins.
+  const logs = []
   const ctx = {
-    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    logger: {
+      info: (message) => { logs.push(['info', String(message)]) },
+      warn: (message) => { logs.push(['warn', String(message)]) },
+      error: (message) => { logs.push(['error', String(message)]) },
+    },
     effect: (callback) => { const dispose = callback(); return typeof dispose === 'function' ? dispose : () => {} },
     slots: {
       inject: (name, callback) => { callback(); return () => {} },
@@ -302,6 +311,21 @@ async function loadClient(renderer, host) {
       rpc: {
         call: async (channel, endpoint, payload) => {
           assert.equal(channel, RPC_CHANNEL, 'the plugin must use its own channel')
+          // `payload` is a required key on the wire even for an endpoint that takes no arguments: the
+          // shell serializes the body with JSON.stringify (which drops `payload: undefined`) and the
+          // host validates it with zod 4, where the schema's `payload: z.unknown()` is not optional —
+          // so a missing key is rejected as "invalid client-request message" before the endpoint runs.
+          // Same guard as git-diff's client test, which is where that field failure is written down.
+          const violation = Object.hasOwn(JSON.parse(JSON.stringify({ payload })), 'payload')
+            ? null
+            : `${endpoint}: the wire body has no \`payload\` key — JSON.stringify drops payload:undefined and the ` +
+              'host rejects the whole envelope ("invalid client-request message": zod 4 keeps z.unknown() non-optional)'
+          if (violation !== null) {
+            // Record as well as throw: the panel swallows this into its logger, so the wire test below is
+            // what names the reason in the test output.
+            wireViolations.push(violation)
+            throw new Error(`invalid client-request message — ${violation}`)
+          }
           calls.push({ endpoint, payload })
           return await host.call(endpoint, payload)
         },
@@ -311,7 +335,7 @@ async function loadClient(renderer, host) {
   exportsObject.apply(ctx)
   assert.deepEqual(Array.from(exportsObject.inject), ['slots', 'connection'])
   await flush(renderer, 4)
-  return { registration, registrations, calls, ctx, globals, exportsObject }
+  return { registration, registrations, calls, logs, wireViolations, ctx, globals, exportsObject }
 }
 
 /** Open the panel through its sidebar row and wait for the first listing. */
@@ -365,6 +389,46 @@ test('client bundle: registers its channel, both slots, and self-identifies agai
     assert.ok(client.globals.styleTags.length > 0, 'the bundle installs its stylesheet')
     const hello = client.calls.find((call) => call.endpoint === 'hello')
     assert.ok(hello !== undefined, 'the panel announces itself with hello()')
+  } finally {
+    renderer.render(null)
+    await host.dispose()
+    client.globals.restore()
+  }
+})
+
+// Regression, found by adding the same guard git-diff needed: this panel's handshake was payload-less
+// too, and here it degraded **silently** — `call('hello')` is fired as `void … .catch()`, so the
+// rejection only reached the logger ("host half unreachable") while the toolbar never got the
+// root/read-only facts the host did report. The cause is the envelope, not the host: JSON.stringify
+// drops `payload: undefined`, and the host's schema keeps `payload` non-optional on this installation's
+// zod 4, so the request is refused as "invalid client-request message" before the endpoint runs. The
+// field writeup lives in `cmd/dshgw/plugin/git-diff/test/client.test.mjs`.
+test('client bundle: the handshake is a wire-valid envelope, so the host answers it', async () => {
+  const renderer = createRenderer()
+  const host = await startHost()
+  const client = await loadClient(renderer, host)
+  try {
+    assert.deepEqual(
+      client.wireViolations,
+      [],
+      `every RPC request must serialize to a valid envelope:\n  ${client.wireViolations.join('\n  ')}`,
+    )
+    const hello = client.calls.find((call) => call.endpoint === 'hello')
+    assert.ok(hello !== undefined, 'the panel announces itself with hello()')
+    assert.ok(
+      Object.hasOwn(JSON.parse(JSON.stringify({ payload: hello.payload })), 'payload'),
+      'the handshake must send a payload ({} is enough): the host rejects an envelope without the key',
+    )
+    // What the operator sees when this breaks is not an error dialog but a panel that behaves as if
+    // the host never introduced itself, so the test watches the two log lines that differ.
+    assert.ok(
+      client.logs.some(([level, message]) => level === 'info' && /client ready \(root /.test(message)),
+      'a good handshake logs the root it reached',
+    )
+    assert.ok(
+      !client.logs.some(([level, message]) => level === 'warn' && /host half unreachable/.test(message)),
+      'the panel must not report the host as unreachable (that is what the missing payload key caused)',
+    )
   } finally {
     renderer.render(null)
     await host.dispose()

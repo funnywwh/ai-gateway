@@ -2,7 +2,7 @@
  * xterm.js 6.0.0 (MIT)                 sha256:98d0973151aff299
  * @xterm/addon-fit 0.11.0 (MIT)        sha256:4df3789fa7bff5d5
  * xterm.css                            sha256:854a7c0fb70e8b1a
- * client.src.js                        sha256:88992a262e5a7e22
+ * client.src.js                        sha256:81c19258ae646be9
  */
 
 ;(function () { var module, exports, define;
@@ -194,9 +194,16 @@ window.__ModuleLoader__.load({
       /**
        * One RPC call, unwrapped. `signal` is optional and only used by the long-polling read,
        * so that a disposed panel stops holding a request open on the host.
+       *
+       * `payload ?? {}` keeps the envelope valid for an endpoint that takes no arguments — the
+       * argument-less `hello` below is one. The shell serializes the body with JSON.stringify
+       * (which drops `payload: undefined`) and the host's schema keeps `payload` non-optional on
+       * this installation's zod 4, so a missing key is rejected as "invalid client-request message"
+       * before the endpoint runs. The field failure and the regression test that pins it are in
+       * `cmd/dshgw/plugin/git-diff/` (client.src.js and test/client.test.mjs).
        */
       const call = async (endpoint, payload, signal) => {
-        const result = await ctx.connection.rpc.call(RPC_CHANNEL, endpoint, payload, signal)
+        const result = await ctx.connection.rpc.call(RPC_CHANNEL, endpoint, payload ?? {}, signal)
         if (result === null || typeof result !== 'object' || result.ok !== true) {
           const error = (result !== null && typeof result === 'object' && result.error) || null
           const failure = new Error(error === null ? 'the terminal service did not answer' : String(error.message))

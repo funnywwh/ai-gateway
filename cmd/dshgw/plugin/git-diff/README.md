@@ -111,7 +111,13 @@ browser (client.js)                             tenant node process (index.js)
 
 - **Transport**: `ctx.connection.rpc.call` — the same authenticated, same-origin channel the shipped
   ssh/browser-workspace plugins and the other `dshgw-*` plugins use. No websocket, no extra port, no
-  second authentication story, no route of this plugin's own.
+  second authentication story, no route of this plugin's own. One envelope rule is load-bearing: the
+  shell builds the body with `JSON.stringify`, so a payload of `undefined` loses **the whole key**, and
+  the host's schema keeps `payload` non-optional (`payload: z.unknown()`, zod 4) — it then answers
+  `invalid client-request message` without ever calling the endpoint. Every call therefore passes
+  `payload ?? {}`, the argument-less `hello` included; `test/client.test.mjs` pins that on the
+  serialized bytes, because a stub that hands `(endpoint, payload)` straight to the host half cannot
+  see a key that serialization removed.
 - **The scan is a job, not a request.** `scanStart` returns immediately with the plan; the browser polls
   `scanStatus` once a second and renders whatever has arrived. One job runs at a time: a second start
   returns the running job instead of racing it, and `force` cancels first.

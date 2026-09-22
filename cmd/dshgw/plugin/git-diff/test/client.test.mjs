@@ -288,6 +288,41 @@ async function makeHost() {
   }
 }
 
+/**
+ * The wire body is what the host validates, and the shell builds it as
+ * `JSON.stringify({ type: 'client-request', rpcId, method, payload })`.
+ *
+ * The host's envelope schema (dsh-client-connection) is
+ *
+ *   z.object({ type: z.literal('client-request'), rpcId: z.string(), method: z.string(), payload: z.unknown() })
+ *
+ * and this installation's zod is 4.x, where a `z.unknown()` key is **not optional**: a body without
+ * `payload` fails with `invalid_type: expected nonoptional, received undefined`, and the host answers
+ * `{ ok: false, error: { code: 'gateway/bad-request', message: 'invalid client-request message' } }`
+ * — before the endpoint runs. `JSON.stringify` drops every key whose value is `undefined`, so
+ * `call('hello')` used to arrive without one, and the 变更 tab showed that error plus its empty state
+ * ("在工作区里没有找到 git 仓库"): the boot handshake is what lists the repositories.
+ *
+ * The stub below forwards `(endpoint, payload)` straight to the host half, which is exactly why it
+ * cannot see this — the key is lost in serialization, not in the call. So the guard re-serializes the
+ * envelope on every call, which covers every test in this file.
+ *
+ * Returns the violation text, or null when the envelope is acceptable; the stub records it as well as
+ * throwing, so the wire test can name the reason while the test that made the call still fails.
+ */
+function wireEnvelopeViolation(endpoint, payload) {
+  const body = JSON.parse(JSON.stringify({ type: 'client-request', rpcId: 'test-rpc-id', method: endpoint, payload }))
+  if (body.type !== 'client-request') return `${endpoint}: the envelope type must survive serialization`
+  if (typeof body.rpcId !== 'string') return `${endpoint}: rpcId must serialize as a string`
+  if (typeof body.method !== 'string') return `${endpoint}: method must serialize as a string`
+  if (!Object.hasOwn(body, 'payload')) {
+    return `${endpoint}: the wire body has no \`payload\` key — JSON.stringify drops payload:undefined and the ` +
+      'host rejects the whole envelope ("invalid client-request message": zod 4 keeps z.unknown() non-optional). ' +
+      'Pass {} — or let call() default it — for an endpoint that takes no arguments.'
+  }
+  return null
+}
+
 /** Load the built bundle and materialize its factory the way the shell's loader does. */
 async function loadClient(renderer, host) {
   const globals = installGlobals()
@@ -300,6 +335,7 @@ async function loadClient(renderer, host) {
   })
   const registrations = new Map()
   const calls = []
+  const wireViolations = []
   const ctx = {
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     effect: (callback) => { const dispose = callback(); return typeof dispose === 'function' ? dispose : () => {} },
@@ -311,6 +347,13 @@ async function loadClient(renderer, host) {
       rpc: {
         call: async (channel, endpoint, payload) => {
           assert.equal(channel, RPC_CHANNEL, 'the plugin must use its own channel')
+          const violation = wireEnvelopeViolation(endpoint, payload)
+          if (violation !== null) {
+            // Throw the way the host would answer, so the plugin paints the same failure the GUI showed,
+            // and record it so the wire test below can report the reason instead of the symptom.
+            wireViolations.push(violation)
+            throw new Error(`invalid client-request message — ${violation}`)
+          }
           calls.push({ endpoint, payload })
           return await host.call(endpoint, payload)
         },
@@ -320,7 +363,7 @@ async function loadClient(renderer, host) {
   exportsObject.apply(ctx)
   assert.deepEqual(Array.from(exportsObject.inject), ['slots', 'connection'])
   await flush(renderer, 4)
-  return { registration, registrations, calls, ctx, globals, exportsObject }
+  return { registration, registrations, calls, wireViolations, ctx, globals, exportsObject }
 }
 
 /** Let queued promises, timers and re-renders settle. */
@@ -439,6 +482,52 @@ test('client: the diff parser turns unified text into hunks, rows and paired cel
   } finally {
     await host.dispose()
     renderer.render(null)
+    client.globals.restore()
+  }
+})
+
+// ---- the wire envelope -----------------------------------------------------------------------
+
+// Regression for the reported failure: the 变更 tab showed one red line, `invalid client-request
+// message`, and then its empty state, 「在工作区里没有找到 git 仓库」. That reads like "there is no
+// repository here", but the repository was fine — the handshake never reached the host.
+//
+// The cause is in neither git nor the host: the client's handshake `call('hello')` passed no payload,
+// and the shell builds the body as `JSON.stringify({..., payload})`, where `payload: undefined` makes
+// the **whole key disappear**. The host's envelope schema declares `payload: z.unknown()`, which on
+// this machine's zod 4 is *not* optional, so the request was rejected
+// (`invalid_type: expected nonoptional, received undefined`) before the endpoint ran. `hello` is what
+// lists the repositories, so the panel had nothing left to paint.
+//
+// The assertion is made on the **serialized** bytes, because that is where the key is lost: a stub
+// that hands `(endpoint, payload)` straight to the host half can never see this — which is how seven
+// client tests stayed green while the shipped panel was broken.
+test('client: every RPC request survives the wire envelope, handshake included', { skip }, async () => {
+  const renderer = createRenderer()
+  const host = await makeHost()
+  const client = await loadClient(renderer, host)
+  const view = client.registrations.get('conversation.view').component
+  try {
+    renderer.renderComponent(view)
+    await flush(renderer, 12)
+
+    assert.deepEqual(
+      client.wireViolations,
+      [],
+      `every RPC request must serialize to a valid envelope:\n  ${client.wireViolations.join('\n  ')}`,
+    )
+    const handshake = client.calls.find((call) => call.endpoint === 'hello')
+    assert.ok(handshake !== undefined, 'the view announces itself with hello()')
+    assert.ok(
+      Object.hasOwn(JSON.parse(JSON.stringify({ payload: handshake.payload })), 'payload'),
+      'the handshake must send a payload ({} is enough): the host rejects an envelope without the key',
+    )
+    // The handshake comes first, which is why it is also the call that decides whether the panel can
+    // paint anything at all: it is what lists the repositories.
+    assert.equal(client.calls[0].endpoint, 'hello', 'the view announces itself before it asks for anything else')
+  } finally {
+    renderer.render(null)
+    await host.dispose()
     client.globals.restore()
   }
 })
