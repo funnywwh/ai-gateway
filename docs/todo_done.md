@@ -6021,3 +6021,26 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
       （压缩镜像 + overlay）成功。（`internal/runtime` 那条并发计时断言在并行跑 ui-base 时会偶发失败，
       单独复跑两次均通过 —— 是负载敏感，不是本次改动。）
 - [x] **提交**：单一 M82 提交（提交信息引用设计文档路径），随后合并到 `main`。
+
+### v4.3.1 发布记录（M82：`user` 档只留最后一条合格 user 消息的纯文本，2026-09-23，部署到 rag-server 与 gptjp）
+
+> 需求原话（连续三轮）：「>=100个字符的user消息就不用保持了」/「只保持排在最后面的<=100字符的user消息」/
+> 「之保持文本内容，不需要Json格式」/「如果后台设置保留全部时，不受这个限制」。
+> 档位 **patch**：同一功能（输入录制口径）的修正，但**有两处行为变更**必须写明——
+> ① 正文由**JSON 文档**变成**纯文本**（任何解析过 `input` 对象的消费者都要改）；
+> ② 默认档从「每条 user 消息截断到前 100 字符」变成「只留最后一条、且必须短于 100 字符，否则不留」。
+> 「保留全部」= **`full` 档**（整份原样正文，不受任何阈值限制），这一点写进了控制台档位文案与 MCP 工具说明。
+
+| 项 | 值 |
+|---|---|
+| 版本 | **v4.3.1**（`VERSION` 4.3.0 → 4.3.1；release 提交 `91075fb`，tag `v4.3.1`；**未推 `origin`**，origin/main 仍停在 `a57e2a3`） |
+| 构建物 | `bin/aigw` **4.3.1 / `91075fb`**，23,528,039 B，sha256 `84282965a427e8e0b7d8c47bd28c9e1dd499aad5f93003c7b85326830ccf71c6`（console minified：44 文件 728861→408527 B，gzip 39 文件 406166→161824 B） |
+| 部署范围 | ① **rag-server**（`192.168.190.86`，`systemctl --user`）：`aigw-local` 4.3.0/`dccf435` → **4.3.1/`91075fb`**；② **gptjp**（`47.91.16.118`，root，`aigw.service`，`/opt/aigw`）：4.3.0/`dccf435` → **4.3.1/`91075fb`**。本次**不动 dshgw**（本改动只在 aigw 侧：`internal/responses` + 读侧），`dshgw-verify` 的待重启事项仍单列 |
+| 回滚点 | rag-server：`bin/aigw.prev-4.3.0-dccf435`（sha `c78074ea…`）；gptjp：`/opt/aigw/aigw.prev-4.3.0-dccf435`（同 sha）。回滚 = `cp -p` 回该文件 + 重启对应单元，`/version` 随之后退到 `4.3.0/dccf435` |
+| 部署方式 | 与 v4.3.0 相同：`.new` 上传 → 双向核对 sha256（`84282965…`）→ 远端 `-version` 自证 → 拍回滚点 → `install` 换入 → 重启 → 门禁（`/version`、`healthz`、`readyz`、控制台资源）。两台 `config.yaml`/`data/` 未动 |
+| schema | **无迁移**（M82 只用既有 TEXT 列）：两台仍是 **27** |
+| 验证（两台） | `/version` 均为 `{"revision":"91075fb","version":"4.3.1"}`（gptjp 另在 `https://gpt.lagenio.xyz/aigw/version` 与 `https://gpt.tirisen.hk/aigw/version` 三处一致）；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200；启动日志 `aigw starting version=4.3.1 revision=91075fb`（rag-server 14:55:17、gptjp 14:57:37）。gptjp 重启后 `level=ERROR` 0 条；rag-server 1 条，即下述既有 settlement 噪声 |
+| 验证（M82 真机行级证据，rag-server） | 升级后新写 14 行（只读解析、**未打印任何用户正文**）：**12 行是纯文本、0 行含结构痕迹**（不含 `{`/`"input"`/`omitted`/`max_chars`）、最长 **18 字符**（阈值 100 要求 <100），**2 行为空**（末条超长或无 user 消息）。全库计数：M81 期间的 406 行仍带 `input_truncated`、更早的 40810 行仍是 JSON 文档 —— **一行都没回填**；新形状的纯文本行 26 行。行内数值相等（「正文恰为最后一条 user 消息」）由 `internal/httpapi` 的端到端测试钉住：`row.RequestJSON == question` |
+| 配置/数据变更 | **无**：rag-server 的 `recording:` 段仍只有 `record_input: user` + `retention_days: 30`（未设 `input_max_chars` ⇒ 默认 100）；gptjp 无 `recording:` 段 ⇒ 全默认。要「保留全部」无需改配置：在该 Key 上切 `full` 即可 |
+| 未做（待人工） | ① 真浏览器 `make ui-check`（M82 新增三条 `#requests` 回放断言：未保留 / 未录制 / 历史截断行）与压缩镜像走查；② 线上 MCP `get_request` 冒烟：本会话没有可用的 MCP 令牌（令牌只存哈希），两种形状（纯文本行 → string、`full`/历史行 → object）由 `internal/mcpsrv` 测试覆盖；③ `dshgw-verify` 重启（盘上 4.3.0，进程仍 4.1.1）；④ `origin` 未推 |
+| 既有噪声（非本次引入） | rag-server 升级后仍有 1 条 `settlement could not be written; falling back to disk — store: begin settlement tx: context deadline exceeded`（启动期写连接争用，当天累计 15+ 条），全部由 `billing fallback replay … failed=0` 自动补回，无丢账；信号与 v4.1.1/v4.3.0 期间完全一致 |
