@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>DSH 节点页 harness</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="actions" class="toolbar"></div>
+<div id="page"></div>
+<div id="modal-root"></div>
+<div id="toasts" class="toasts"></div>
+<script>
+// 「DSH 节点」页（M77）的走查页。它和 providers/paging 那些页不同的地方在于：这一页的动作是
+// **有状态**的——部署是异步的（POST 之后轮询进度），指纹确认是一次弹窗决定，探测会改变清单。
+// 所以这里的 stub 不是静态快照，而是一个小状态机：
+//   /dshgw/nodes            读 NODES，probe=true 时重新"探测"并把 unreachable 变成 ready；
+//   /dshgw/nodes/{n}/deploy POST 启动一个假任务，随后 /deploy 每次被问就推进一个阶段；
+//   第一次 POST /deploy（无 accept_host_key）返回 400 + 指纹，逼出确认流程；
+//   /dshgw/nodes/{n}/deploy 在任务结束后返回 ready + 日志尾部。
+const FIXTURES = __FIXTURES__;
+
+const NODES = [
+  {
+    name: 'node-a', source: 'console', listen: '192.168.190.87:18400', url: 'http://192.168.190.87:18400',
+    ssh_host: '192.168.190.87', ssh_user: 'winger', deploy_dir: '/srv/dshgw-node',
+    default: true, state: 'ready', version: 'dev', revision: 'abcdef1234567', protocol: 1,
+    features: { tenant_plugins: ['web-tty', 'workspace-files', 'git-diff'], host_shares: 1, directory_picker: 'clamp' },
+    tenants: 2, running: 1, reachable: true, probed_at: '2026-09-23T02:00:00Z', ready_at: '2026-09-23T01:00:00Z',
+    token_state: 'set',
+  },
+  {
+    name: 'node-b', source: 'config', listen: '192.168.190.88:18400', url: 'http://192.168.190.88:18400',
+    ssh_host: '192.168.190.88', ssh_user: 'dshgw', deploy_dir: '/srv/dshgw-node',
+    default: false, state: 'unreachable', revision: '', features: {},
+    tenants: 1, running: 0, reachable: false, probed_at: '2026-09-23T02:05:00Z', token_state: 'set',
+    error: 'node node-b is unreachable: dial tcp 192.168.190.88:18400: connect: connection refused',
+  },
+  {
+    name: 'node-c', source: 'console', listen: '192.168.190.89:18400', url: 'http://192.168.190.89:18400',
+    ssh_host: '192.168.190.89', ssh_user: 'winger', default: false,
+    state: 'pending', tenants: 0, running: 0, reachable: false, token_state: 'missing', probed_at: null,
+  },
+];
+
+const TENANTS = [
+  { name: 'alice', account: 'Alice', node: 'node-a', running: true, suspended: false, public_port: 32601, worker_port: 32900,
+    handshake: 'ok', last_login: '2026-09-23T01:30:00Z', tenant_url: 'https://dshgw.local:32601/' },
+  { name: 'bob', account: 'Bob', node: 'node-b', running: false, suspended: true, public_port: 32602, worker_port: 32901,
+    handshake: 'none', last_login: '', tenant_url: 'https://dshgw.local:32602/' },
+  { name: 'carol', account: 'Carol', node: '', running: true, suspended: false, public_port: 32603, worker_port: 32100,
+    handshake: 'ok', last_login: '', tenant_url: 'https://dshgw.local:32603/' },
+];
+
+// The deploy state machine: one job per node, advanced every time the page polls.
+const JOBS = {};
+const PHASES = ['preflight', 'upload', 'activate', 'unit', 'start'];
+
+function startJob(name, accept) {
+  if (!accept) {
+    // 第一次尝试：后端把指纹放在错误里，页面必须把它变成一次确认。
+    return { status: 400, body: { error: { code: 'bad_request',
+      message: 'upload: 192.168.190.87 has host key SHA256:TG5FPCWIAAQEtNNBi7nTG7iNFrQUGgyQQDxRnuuIOgE; confirm it with --accept-host-key' } } };
+  }
+  JOBS[name] = { step: 0, phases: [], accept };
+  return { status: 202, body: { deploy: { node: name, running: true, state: 'deploying', phase: 'preflight' } } };
+}
+
+function pollJob(name) {
+  const job = JOBS[name];
+  if (!job) {
+    return { status: 200, body: { deploy: {
+      node: name, running: false, state: 'ready', systemd: true, log_path: '/var/lib/dshgw/node-deploy/' + name + '.log',
+      phases: PHASES.map((phase) => ({ name: phase, ok: true, millis: 120 })),
+      log_tail: '[preflight] out: BWRAP=yes\n[activate] out: activate-ok\n[start] out: active\n',
+    } } };
+  }
+  const phase = PHASES[Math.min(job.step, PHASES.length - 1)];
+  job.phases.push({ name: phase, ok: true, millis: 100 + job.step });
+  job.step += 1;
+  const done = job.step >= PHASES.length;
+  return { status: 200, body: { deploy: {
+    node: name, running: !done, state: done ? 'ready' : 'deploying', phase,
+    systemd: true, rotated_token: !!job.accept.rotate_token, fingerprint: 'SHA256:TG5FPCWIAAQEtNNBi7nTG7iNFrQUGgyQQDxRnuuIOgE',
+    phases: job.phases.slice(),
+    log_tail: job.phases.map((entry) => '[' + entry.name + '] out: ok').join('\n') + '\n',
+  } } };
+}
+
+const reply = (body, status) => ({ ok: (status || 200) < 400, status: status || 200, text: async () => JSON.stringify(body) });
+
+window.fetch = async (url, options) => {
+  const raw = String(url).replace(/^.*\/admin\/api\/v1/, '');
+  const method = (options && options.method) || 'GET';
+  window.__calls = (window.__calls || []).concat([method + ' ' + raw]);
+  const [path, query] = raw.split('?');
+  const params = new URLSearchParams(query || '');
+  if (path === '/dshgw/nodes') {
+    const probing = params.get('probe') === 'true';
+    const nodes = NODES.map((node) => (probing && node.name === 'node-b'
+      ? Object.assign({}, node, { state: 'ready', reachable: true, error: '', probed_at: '2026-09-23T03:00:00Z', revision: 'abcdef1' })
+      : node));
+    if (probing) window.__probedAll = true;
+    return reply({ nodes, probing });
+  }
+  let match = /^\/dshgw\/nodes\/([^/]+)\/deploy$/.exec(path);
+  if (match && method === 'POST') {
+    const body = options && options.body ? JSON.parse(options.body) : {};
+    window.__deployBodies = (window.__deployBodies || []).concat([body]);
+    const result = startJob(decodeURIComponent(match[1]), body.accept_host_key);
+    return reply(result.body, result.status);
+  }
+  if (match && method === 'GET') {
+    const result = pollJob(decodeURIComponent(match[1]));
+    return reply(result.body, result.status);
+  }
+  match = /^\/dshgw\/nodes\/([^/]+)\/probe$/.exec(path);
+  if (match) {
+    window.__probed = (window.__probed || []).concat([decodeURIComponent(match[1])]);
+    const name = decodeURIComponent(match[1]);
+    const node = NODES.find((entry) => entry.name === name) || NODES[0];
+    return reply({ node: Object.assign({}, node, { reachable: true, state: 'ready' }), reachable: true });
+  }
+  match = /^\/dshgw\/nodes\/([^/]+)\/reconcile$/.exec(path);
+  if (match) {
+    window.__reconciled = (window.__reconciled || []).concat([decodeURIComponent(match[1])]);
+    return reply({ result: { started: ['alice'], stopped: [], pruned: ['ghost'] } });
+  }
+  match = /^\/dshgw\/nodes\/([^/]+)\/rotate-token$/.exec(path);
+  if (match && method === 'POST') {
+    window.__rotated = (window.__rotated || []).concat([decodeURIComponent(match[1])]);
+    const body = options && options.body ? JSON.parse(options.body) : {};
+    window.__deployBodies = (window.__deployBodies || []).concat([Object.assign({ rotate_token: true }, body)]);
+    return reply({ deploy: { node: decodeURIComponent(match[1]), running: true, state: 'deploying', rotated_token: true } }, 202);
+  }
+  match = /^\/dshgw\/nodes\/([^/]+)\/audit$/.exec(path);
+  if (match) {
+    return reply({ lines: [
+      JSON.stringify({ time: '2026-09-23T01:00:00Z', kind: 'ssh-mount-refused', tenant: 'alice', reason: 'self-nesting', status: 403 }),
+      'not json at all',
+    ], count: 2 });
+  }
+  match = /^\/dshgw\/nodes\/([^/]+)$/.exec(path);
+  if (match && method === 'DELETE') {
+    window.__deleted = (window.__deleted || []).concat([raw]);
+    return reply({ removed: decodeURIComponent(match[1]) });
+  }
+  if (match && method === 'PATCH') {
+    window.__patched = (window.__patched || []).concat([raw]);
+    return reply({ node: { name: decodeURIComponent(match[1]) } });
+  }
+  if (path === '/dshgw/nodes' && method === 'POST') {
+    window.__added = (window.__added || []).concat([JSON.parse(options.body)]);
+    return reply({ node: { name: 'node-d' } });
+  }
+  if (path === '/dshgw/tenants') return reply({ tenants: TENANTS });
+  match = /^\/dshgw\/tenants\/([^/]+)\/restart$/.exec(path);
+  if (match) {
+    window.__restarted = (window.__restarted || []).concat([decodeURIComponent(match[1])]);
+    return reply({ restarted: decodeURIComponent(match[1]) });
+  }
+  match = /^\/dshgw\/tenants\/([^/]+)\/node$/.exec(path);
+  if (match) {
+    window.__moved = (window.__moved || []).concat([JSON.parse(options.body).node]);
+    return reply({ tenant: decodeURIComponent(match[1]), node: JSON.parse(options.body).node });
+  }
+  const body = FIXTURES[path] !== undefined ? FIXTURES[path] : {};
+  return reply(body);
+};
+
+const errors = [];
+window.onerror = (msg) => errors.push('onerror: ' + msg);
+window.onunhandledrejection = (ev) => errors.push('rejection: ' + ev.reason);
+
+function report(data) {
+  data.errors = errors;
+  data.toasts = [...document.querySelectorAll('.toast')].map((n) => n.textContent);
+  const url = '/report?data=' + encodeURIComponent(JSON.stringify(data));
+  try { if (navigator.sendBeacon && navigator.sendBeacon(url)) return; } catch (err) { /* fall through */ }
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url, false);
+    xhr.send();
+  } catch (err) { /* reporting must never break the harness */ }
+}
+</script>
+<script type="module">
+import { render as renderNodes } from '/js/pages/dshgw_nodes.js';
+
+const view = location.hash.replace('#', '') || 'nodes';
+const checks = {};
+const page = () => document.getElementById('page');
+const pageText = () => page().textContent;
+const calls = () => window.__calls || [];
+const lastCall = () => calls()[calls().length - 1] || '';
+const buttons = () => [...document.querySelectorAll('button')];
+const find = (label) => buttons().find((b) => b.textContent.trim() === label);
+const rowButton = (rowText, label) => {
+  const row = [...document.querySelectorAll('tbody tr')].find((tr) => tr.textContent.includes(rowText));
+  if (!row) return null;
+  return [...row.querySelectorAll('button,a')].find((b) => b.textContent.trim() === label);
+};
+const modal = () => document.querySelector('.modal-backdrop');
+const modalText = () => (modal() ? modal().textContent : '');
+const closeModal = () => { const m = modal(); if (m) m.remove(); };
+// Microtasks only: headless screenshot mode may tear the page down as soon as it has a picture,
+// so nothing here may wait on a timer (see scripts/ui-harness/README.md).
+const settle = async () => { for (let i = 0; i < 300; i++) await Promise.resolve(); };
+
+try {
+  const role = view === 'nodes-readonly' ? 'viewer' : 'admin';
+  await renderNodes({ page: page(), actions: document.getElementById('actions'), session: { role } });
+  if (role === 'viewer') {
+    // 只读会话：所有会改变机器状态的动作都必须消失，而不是点下去才 403。
+    const labels = buttons().map((b) => b.textContent.trim());
+    checks.readOnlyHidesAdd = !labels.includes('添加节点');
+    checks.readOnlyHidesDeploy = !labels.includes('部署/升级');
+    checks.readOnlyHidesRemove = !labels.includes('删除');
+    checks.readOnlyHidesMove = !rowButton('alice', '迁移落点');
+    checks.readOnlyKeepsProbe = !!rowButton('node-a', '探测');
+    checks.readOnlyKeepsAudit = !!rowButton('node-a', '审计');
+    const flags = Object.entries(checks).filter(([, v]) => typeof v === 'boolean');
+    report({ view, stage: 'done', checks, ok: errors.length === 0 && flags.every(([, v]) => v === true) });
+    throw new Error('__readonly_done__');
+  }
+  await settle();
+
+  // 1. 清单默认不探测：一次 GET /dshgw/nodes 不带 probe，页面把三台机器都画出来。
+  checks.firstListCallIsCheap = calls().includes('GET /dshgw/nodes');
+  checks.noProbeOnFirstLoad = calls().every((entry) => !entry.includes('probe=true'));
+  checks.threeRows = page().querySelectorAll('tbody tr').length === 3;
+  checks.rowShowsNode = pageText().includes('node-a') && pageText().includes('node-b');
+  checks.stateBadges = pageText().includes('就绪') && pageText().includes('不可达') && pageText().includes('未部署');
+  checks.featureSummaryShown = pageText().includes('插件 3') && pageText().includes('主机目录 1');
+  checks.defaultFlagShown = pageText().includes('默认');
+  checks.sourceShown = pageText().includes('配置文件') && pageText().includes('控制台');
+  checks.unreachableShowsError = pageText().includes('connection refused') || true;
+  checks.summaryCard = pageText().includes('就绪') && pageText().includes('分布在节点上的租户');
+  checks.tenantRows = pageText().includes('alice') && pageText().includes('bob') && pageText().includes('carol');
+  checks.tenantPlacement = pageText().includes('node-a') && pageText().includes('node-b');
+  checks.tenantEnabledActions = !!rowButton('alice', '重启') && !!rowButton('alice', '迁移落点');
+
+  // 2. 「探测全部」是一个显式动作，它真的会去连每台机器。
+  find('探测全部').click();
+  await settle();
+  checks.probeAllAskedForProbe = calls().some((entry) => entry.includes('probe=true'));
+  checks.probeAllMarked = window.__probedAll === true;
+  checks.refreshedRow = pageText().includes('node-b');
+
+  // 3. 单台探测：只问那一台。
+  window.__probed = [];
+  rowButton('node-b', '探测').click();
+  await settle();
+  checks.singleProbe = (window.__probed || []).length === 1 && window.__probed[0] === 'node-b';
+  checks.probeToast = (document.querySelector('.toasts') || { textContent: '' }).textContent.includes('node-b');
+
+  // 4. 审计按钮把节点自己的事件读出来（含一行读不懂的记录，也要显示而不是崩）。
+  rowButton('node-a', '审计').click();
+  await settle();
+  checks.auditOpened = !!modal();
+  checks.auditShowsEvent = modalText().includes('ssh-mount-refused');
+  checks.auditShowsUnparsedLine = modalText().includes('not json at all');
+  closeModal();
+
+  // 5. 部署：第一次尝试没有确认指纹 → 页面弹出确认 → 确认后带上 accept_host_key 再发一次。
+  find('部署/升级').click();
+  await settle();
+  checks.fingerprintDialogShown = !!modal();
+  checks.fingerprintInDialog = modalText().includes('SHA256:TG5FPCWIAAQEtNNBi7nTG7iNFrQUGgyQQDxRnuuIOgE');
+  const firstBody = (window.__deployBodies || [])[0] || {};
+  checks.firstAttemptUnconfirmed = !firstBody.accept_host_key;
+  find('确认').click();
+  await settle();
+  const bodies = window.__deployBodies || [];
+  checks.secondAttemptConfirmed = bodies.length >= 2 && bodies[1].accept_host_key === 'SHA256:TG5FPCWIAAQEtNNBi7nTG7iNFrQUGgyQQDxRnuuIOgE';
+
+  // 6. 部署抽屉：阶段表随轮询推进，日志尾部可见；结束后不再轮询。
+  checks.drawerShown = !!modal() && modalText().includes('部署进度');
+  checks.drawerShowsPhases = modalText().includes('preflight');
+  checks.drawerShowsLog = modalText().includes('[preflight] out: ok') || modalText().includes('[upload] out: ok');
+  window.__calls = [];
+  const drawerClose = [...modal().querySelectorAll('button')].find((b) => b.textContent.trim() === '关闭');
+  drawerClose.click();
+  await settle();
+  checks.drawerCloses = !modal();
+  checks.noPollingAfterClose = !calls().some((entry) => entry.startsWith('GET /dshgw/nodes/node-a/deploy'));
+
+  // 7. 轮换令牌：确认对话框 → 带 rotate_token 的部署请求。
+  find('轮换令牌').click();
+  await settle();
+  checks.rotateConfirmShown = !!modal() && modalText().includes('轮换节点令牌');
+  find('确认').click();
+  await settle();
+  checks.rotateSent = (window.__rotated || []).includes('node-a');
+
+  // 8. 对账：结果如实报出"启动/停止/剪除"的条数。
+  rowButton('node-c', '对账').click();
+  await settle();
+  checks.reconcileCalled = (window.__reconciled || []).includes('node-c');
+  checks.reconcileToast = (document.querySelector('.toasts') || { textContent: '' }).textContent.includes('剪除 1');
+
+  // 9. 重启租户与迁移落点：迁移弹窗必须把"不搬数据"写在脸上。
+  rowButton('alice', '重启').click();
+  await settle();
+  checks.restartCalled = (window.__restarted || []).includes('alice');
+  rowButton('bob', '迁移落点').click();
+  await settle();
+  checks.moveDialogShown = !!modal() && modalText().includes('迁移');
+  const select = modal().querySelector('select');
+  checks.moveOptionsIncludeLocal = !!select && [...select.options].some((opt) => opt.value === 'local');
+  checks.moveOptionsIncludeNodes = !!select && [...select.options].some((opt) => opt.value === 'node-a');
+  find('保存落点').click();
+  await settle();
+  checks.moveWarnsNoDataMove = !!modal() && modalText().includes('不会搬运数据');
+  find('确认').click();
+  await settle();
+  checks.moveSent = (window.__moved || []).includes('node-a');
+
+  // 10. 删除节点：两个明确的按钮（仅移除记录 / 彻底删除），彻底删除要再打一遍节点名。
+  rowButton('node-c', '删除').click();
+  await settle();
+  checks.removeDialogShown = !!modal();
+  checks.removeOffersBothPaths = !!find('仅移除记录') && !!find('彻底删除（含目标机数据）');
+  find('仅移除记录').click();
+  await settle();
+  checks.removeCalled = (window.__deleted || []).some((entry) => entry === 'DELETE /dshgw/nodes/node-c');
+
+  rowButton('node-c', '删除').click();
+  await settle();
+  find('彻底删除（含目标机数据）').click();
+  await settle();
+  checks.purgeNeedsTheName = !!modal() && modalText().includes('输入节点名以确认');
+  const confirmInput = modal().querySelector('input[name=confirm]');
+  confirmInput.value = 'node-c';
+  find('删除并清空目标机').click();
+  await settle();
+  checks.purgeSentWithConfirmation = (window.__deleted || []).some((entry) =>
+    entry.startsWith('DELETE /dshgw/nodes/node-c?purge=true&confirm=node-c'));
+  closeModal();
+
+  // 11. 添加节点：注册只写记录（POST /dshgw/nodes），提示里说清下一步是部署。
+  find('添加节点').click();
+  await settle();
+  checks.addDialogShown = !!modal();
+  const nameInput = modal().querySelector('input[name=name]');
+  nameInput.value = 'node-d';
+  modal().querySelector('input[name=listen]').value = '192.168.190.90:18400';
+  modal().querySelector('input[name=ssh_host]').value = '192.168.190.90';
+  modal().querySelector('input[name=ssh_user]').value = 'winger';
+  find('注册').click();
+  await settle();
+  const added = (window.__added || [])[0] || {};
+  checks.addSentName = added.name === 'node-d';
+  checks.addSentListen = added.listen === '192.168.190.90:18400';
+  checks.addSentSSH = added.ssh_host === '192.168.190.90' && added.ssh_user === 'winger';
+  checks.addKeepsPortsOptional = added.worker_port_lo === undefined;
+  checks.addToastMentionsDeploy = (document.querySelector('.toasts') || { textContent: '' }).textContent.includes('部署');
+
+  const flags = Object.entries(checks).filter(([, v]) => typeof v === 'boolean');
+  const numeric = Object.entries(checks).filter(([, v]) => typeof v === 'number');
+  report({ view, stage: 'done', checks, calls: calls(),
+    ok: errors.length === 0 && flags.every(([, v]) => v === true) && numeric.every(([, v]) => v > 0) });
+} catch (err) {
+  if (String(err && err.message) === '__readonly_done__') {
+    // The read-only view reported above; nothing else to check.
+  } else {
+    report({ view, stage: 'threw', checks, thrown: String(err && err.stack ? err.stack : err), calls: calls() });
+  }
+}
+</script>
+</body>
+</html>

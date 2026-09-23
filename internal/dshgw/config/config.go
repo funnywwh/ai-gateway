@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/winger/ai-gateway/internal/dshgw/securefile"
 )
 
 // DefaultPath is where a standalone `dshgw` looks for its configuration when no
@@ -102,6 +104,184 @@ type WorkerLimits struct {
 type TLSConfig struct {
 	Certificate    string `yaml:"certificate" json:"certificate"`
 	CertificateKey string `yaml:"certificate_key" json:"certificate_key"`
+}
+
+// LocalNodeName is the control plane's own machine in the node vocabulary (M77).
+//
+// A tenant whose registry entry names this node (or names nothing at all, which is how every
+// registry written before this field existed reads) runs its worker in this very process, i.e.
+// exactly the single-machine behaviour of M58. The name is reserved: no configured or
+// console-registered node may claim it.
+const LocalNodeName = "local"
+
+// nodeNameRE is the one shape a node name may take. It matches the tenant-name shape on
+// purpose: node names travel in registry entries, in configuration and in log lines next to
+// tenant names, and a second convention would only invite confusion about which is which.
+var nodeNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,25}$`)
+
+// Node is one worker node the control plane may place tenants on (M77, static list).
+//
+// Two sources of node truth exist and they are merged, never ranked: this list in the
+// configuration ("the machines the operator promises are always there"), and the records
+// dshgw persists in <state_dir>/nodes.json (what the console's "DSH node" page registers and
+// deploys). A name that appears in both is a configuration error rather than a silent
+// precedence rule, because the two sources carry different URLs and tokens and either
+// resolution would be a guess about which machine the operator meant.
+type Node struct {
+	Name string `yaml:"name" json:"name"`
+	// URL is the node agent's base address: http://host:port, no path and no query. It is
+	// what the control plane dials for both control operations and tenant traffic.
+	URL string `yaml:"url" json:"url"`
+	// Token is the shared secret the node agent accepts, or TokenFile names a mode-0600 file
+	// holding it. Exactly one of the two must be set. A file is the better choice: the secret
+	// then never appears in a configuration file, in a backup of it, or in a diff.
+	Token     string `yaml:"token" json:"token,omitempty"`
+	TokenFile string `yaml:"token_file" json:"token_file,omitempty"`
+}
+
+// NodeSelf marks this process as a worker node (M77): `dshgw node serve` refuses to start
+// without it, and the control-plane commands refuse to run with it. Both directions matter —
+// a node configuration used as a control plane would open a portal nobody meant to open, and
+// a control-plane configuration used as a node would silently serve nothing.
+type NodeSelf struct {
+	Name string `yaml:"name" json:"name"`
+	// Listen is the address the node agent binds. It must be explicit: the control channel is
+	// plaintext HTTP with a shared token in v1, and this listener is equivalent to full access
+	// to every tenant on the machine, so "bind everything" must never be reachable by leaving
+	// a value out (an empty or wildcard address is refused).
+	Listen string `yaml:"listen" json:"listen"`
+	// Token/TokenFile carry the same secret as the control plane's entry for this node.
+	Token     string `yaml:"token" json:"token,omitempty"`
+	TokenFile string `yaml:"token_file" json:"token_file,omitempty"`
+}
+
+// ValidNodeName reports whether a node name is usable. "local" is reserved for the control
+// plane's own machine.
+func ValidNodeName(name string) bool { return name != LocalNodeName && nodeNameRE.MatchString(name) }
+
+// IsLocalNodeName reports whether a node reference means "the machine running this process".
+// The empty string is the historical value — every registry written before M77 has it — and
+// keeps the meaning it always had, so the two spellings are one concept, not two.
+func IsLocalNodeName(name string) bool {
+	trimmed := strings.TrimSpace(name)
+	return trimmed == "" || trimmed == LocalNodeName
+}
+
+// ValidNodeRef reports whether a value read out of stored state (a registry entry) is a
+// usable node reference: local, or a well-formed node name. Whether that name is *defined*
+// is a question only the process with a configuration can answer (registry.ValidateNodes).
+func ValidNodeRef(name string) bool {
+	return IsLocalNodeName(name) || nodeNameRE.MatchString(name)
+}
+
+// NodeMode reports whether this configuration describes a worker node.
+func (c *Config) NodeMode() bool { return strings.TrimSpace(c.Node.Name) != "" }
+
+// IsLocalNode reports whether a tenant's node reference means "this machine".
+func (c *Config) IsLocalNode(name string) bool { return IsLocalNodeName(name) }
+
+// DefaultNodeName is the node a new tenant lands on when nobody names one. Empty means the
+// control plane's own machine, so a single-machine deployment needs no configuration at all.
+func (c *Config) DefaultNodeName() string {
+	if trimmed := strings.TrimSpace(c.DefaultNode); trimmed != "" {
+		return trimmed
+	}
+	return LocalNodeName
+}
+
+// NodeByName looks a statically configured node up by name.
+func (c *Config) NodeByName(name string) (Node, bool) {
+	for _, n := range c.Nodes {
+		if n.Name == name {
+			return n, true
+		}
+	}
+	return Node{}, false
+}
+
+// NodeStorePath is where the console-managed node records live (M77). It is derived from the
+// data root like every other piece of control-plane state, so one directory still holds the
+// whole deployment.
+func (c *Config) NodeStorePath() string { return filepath.Join(c.StateDir, "nodes.json") }
+
+// NodeSSHDir holds one directory per node with that node's deployment key and pinned host key.
+func (c *Config) NodeSSHDir() string { return filepath.Join(c.StateDir, "node-ssh") }
+
+// NodeDeployLogDir holds one bounded deployment log per node.
+func (c *Config) NodeDeployLogDir() string { return filepath.Join(c.StateDir, "node-deploy") }
+
+// NodeToken resolves the shared secret for one node: the inline value, or the contents of
+// TokenFile. The file is read through the hardened reader (no symlink leaf, mode 0600), so a
+// token file that anyone else could read is a configuration failure rather than a silent
+// downgrade of the control channel.
+func (c *Config) NodeToken(n Node) (string, error) {
+	if inline := strings.TrimSpace(n.Token); inline != "" {
+		return inline, nil
+	}
+	if strings.TrimSpace(n.TokenFile) == "" {
+		return "", errors.New("node has neither token nor token_file")
+	}
+	if err := securefile.CheckPermissions(n.TokenFile, 0o600); err != nil {
+		return "", fmt.Errorf("node %s token file: %w", n.Name, err)
+	}
+	data, err := securefile.ReadLimitedRegular(n.TokenFile, 4096)
+	if err != nil {
+		return "", fmt.Errorf("node %s token file: %w", n.Name, err)
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", fmt.Errorf("node %s token file %s is empty", n.Name, n.TokenFile)
+	}
+	if strings.ContainsAny(token, " \t\r\n") {
+		return "", fmt.Errorf("node %s token file %s must hold one whitespace-free token", n.Name, n.TokenFile)
+	}
+	return token, nil
+}
+
+// NodeSelfToken is NodeToken for the node-mode block.
+func (c *Config) NodeSelfToken() (string, error) {
+	return c.NodeToken(Node{Name: c.Node.Name, Token: c.Node.Token, TokenFile: c.Node.TokenFile})
+}
+
+// nodeTokenSource validates the "exactly one of token/token_file" rule. required says whether
+// the pair must name a secret at all: the nodes[] entries always must, while the node-mode
+// block is checked only when the node is configured (which is the same condition, but the
+// error messages differ enough to be worth the parameter).
+func nodeTokenSource(label, token, tokenFile string, required bool) error {
+	hasToken := strings.TrimSpace(token) != ""
+	hasFile := strings.TrimSpace(tokenFile) != ""
+	if hasToken && hasFile {
+		return fmt.Errorf("%s must set either token or token_file, not both", label)
+	}
+	if !hasToken && !hasFile {
+		if required {
+			return fmt.Errorf("%s must set token or token_file", label)
+		}
+		return nil
+	}
+	if hasFile {
+		path := strings.TrimSpace(tokenFile)
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return fmt.Errorf("%s must be a clean absolute path", label)
+		}
+	}
+	return nil
+}
+
+// ValidateNodeURL is the single implementation of the node address rule, shared by
+// configuration loading and the console-managed node store (internal/dshgw/nodestore): a node
+// address is an http:// base URL with no path, query, fragment or credentials.
+func ValidateNodeURL(label, raw string) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme != "http" || parsed.Host == "" || parsed.Path != "" && parsed.Path != "/" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+		return fmt.Errorf("%s must be an http:// URL without a path (got %q)", label, raw)
+	}
+	return nil
+}
+
+// ValidateNodeTokenSource is the exported form of the token/token_file rule above.
+func ValidateNodeTokenSource(label, token, tokenFile string, required bool) error {
+	return nodeTokenSource(label, token, tokenFile, required)
 }
 
 // DeployConfig holds the paths and identities a dshgw instance needs. Everything
@@ -356,6 +536,16 @@ type Config struct {
 	AuditPath         string            `yaml:"audit_path" json:"audit_path"`
 	ActivityPath      string            `yaml:"activity_path" json:"activity_path"`
 
+	// Nodes is the control plane's static worker-node list (M77). Empty keeps the deployment
+	// single-machine: every tenant runs here, and none of the node machinery is reachable.
+	Nodes []Node `yaml:"nodes" json:"nodes,omitempty"`
+	// DefaultNode is where a new tenant is placed when nobody names a node. Empty means
+	// "local" (this machine), which is also what a single-machine deployment wants.
+	DefaultNode string `yaml:"default_node" json:"default_node,omitempty"`
+	// Node marks this process as a worker node (M77). It is a distinct mode, not a setting:
+	// `dshgw node serve` requires it and the control-plane commands refuse it.
+	Node NodeSelf `yaml:"node" json:"node"`
+
 	tenantMu    sync.RWMutex
 	tenantPorts map[string]int
 	portTenants map[int]string
@@ -471,8 +661,10 @@ func defaults() Config {
 			BinJS:       "",
 			CurrentLink: "",
 		},
-		// Every stateful path below is derived from the data root in applyDerivedDefaults.
-		StateDir: defaultDataRoot + "/dshgw",
+		// Every stateful path below is derived from the data root in applyDerivedDefaults,
+		// which also picks the node-mode default: a worker node keeps its data in its own
+		// root so a node and a control plane may share one machine without sharing state.
+		StateDir: "",
 		Deploy: DeployConfig{
 			// No default: the picker plugin ships with the repository
 			// (cmd/dshgw/plugin/picker-clamp.js), so an operator names it — silently
@@ -587,6 +779,17 @@ type file interface {
 }
 
 func (c *Config) applyDerivedDefaults() {
+	// The data root comes first: every other derived path hangs off it. A worker node (M77)
+	// defaults to its own root rather than the control plane's, because the two are different
+	// roles with different state and a node placed on the same machine as a control plane
+	// (a legitimate single-host test layout) must not write into it.
+	if c.StateDir == "" {
+		if c.NodeMode() {
+			c.StateDir = defaultDataRoot + "/dshgw-node"
+		} else {
+			c.StateDir = defaultDataRoot + "/dshgw"
+		}
+	}
 	if c.PublicBaseURL != "" {
 		c.PublicBaseURL = strings.TrimRight(strings.TrimSpace(c.PublicBaseURL), "/")
 		if c.TenantPathPrefix == "" {
@@ -705,6 +908,17 @@ func (c *Config) resolvePaths() error {
 		{"ssh_workspaces.sshfs_bin", &c.SSHWorkspaces.SSHFSBin},
 		{"ssh_workspaces.identity_dir", &c.SSHWorkspaces.IdentityDir},
 		{"ssh_workspaces.ssh_config_dir", &c.SSHWorkspaces.SSHConfigDir},
+		{"node.token_file", &c.Node.TokenFile},
+	}
+	// A static node's token file is a path like any other: relative to the deployment root,
+	// clean, and never allowed to climb out of it with "..". The console-managed node records
+	// (nodes.json) are resolved by the node store instead, and are always absolute by the time
+	// they land there.
+	for i := range c.Nodes {
+		targets = append(targets, struct {
+			label  string
+			target *string
+		}{fmt.Sprintf("nodes[%d].token_file", i), &c.Nodes[i].TokenFile})
 	}
 	for _, item := range targets {
 		if *item.target == "" || filepath.IsAbs(*item.target) {
@@ -979,6 +1193,94 @@ func (c *Config) Validate() error {
 		if !accountNameRE.MatchString(account) || len(account) > 32 {
 			return fmt.Errorf("%s must be a valid OS account name", label)
 		}
+	}
+	if err := c.validateNodes(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateNodes checks the multi-machine surface (M77). A configuration that names no node
+// takes the single-machine path through every branch below, which is what keeps an existing
+// deployment byte-identical in behaviour.
+//
+// The worker-node block is checked first: an operator who copied a control-plane configuration
+// and added a `node:` block should read "a worker node must not configure nodes" rather than a
+// complaint about one of the node entries that block makes irrelevant.
+func (c *Config) validateNodes() error {
+	if c.NodeMode() {
+		return c.validateNodeSelf()
+	}
+	return c.validateNodeList()
+}
+
+// validateNodeSelf validates the worker-node block and refuses the control plane's own keys.
+func (c *Config) validateNodeSelf() error {
+	if len(c.Nodes) > 0 || strings.TrimSpace(c.DefaultNode) != "" {
+		return errors.New("a worker node must not configure nodes/default_node: those describe the control plane's node list")
+	}
+	name := strings.TrimSpace(c.Node.Name)
+	if name != c.Node.Name || !ValidNodeName(name) {
+		return fmt.Errorf("node.name must match %s and must not be %q", nodeNameRE.String(), LocalNodeName)
+	}
+	if err := nodeTokenSource("node", c.Node.Token, c.Node.TokenFile, true); err != nil {
+		return err
+	}
+	listen := strings.TrimSpace(c.Node.Listen)
+	if listen == "" {
+		return errors.New("node.listen is required: the node agent needs an explicit address to bind")
+	}
+	host, rawPort, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("node.listen must be host:port: %w", err)
+	}
+	if strings.TrimSpace(host) == "" {
+		return errors.New("node.listen must name the interface to bind, not a bare port")
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		return errors.New("node.listen must not be a wildcard address: this listener is full access to every tenant on this machine, so bind the LAN interface the control plane reaches")
+	}
+	port, err := strconv.Atoi(rawPort)
+	if err != nil || port < 1 || port > 65535 {
+		return errors.New("node.listen must contain a numeric port between 1 and 65535")
+	}
+	if port >= c.WorkerPortLo && port <= c.WorkerPortHi {
+		return errors.New("node.listen must not fall inside the worker port range")
+	}
+	if port >= c.TenantPortLo && port <= c.TenantPortHi || port == c.PortalPort {
+		return errors.New("node.listen must not fall inside the public portal/tenant port range")
+	}
+	// A node's worker reaches aigw directly for model traffic; without the base URL the
+	// generated settings would point nowhere, and the failure would only surface inside a
+	// tenant session.
+	if strings.TrimSpace(c.AigwBaseURL) == "" {
+		return errors.New("aigw_base_url is required on a worker node")
+	}
+	return nil
+}
+
+// validateNodeList validates the control plane's static node list.
+func (c *Config) validateNodeList() error {
+	seen := make(map[string]bool, len(c.Nodes))
+	for i, n := range c.Nodes {
+		label := fmt.Sprintf("nodes[%d]", i)
+		name := strings.TrimSpace(n.Name)
+		if name != n.Name || !ValidNodeName(name) {
+			return fmt.Errorf("%s.name must match %s and must not be %q", label, nodeNameRE.String(), LocalNodeName)
+		}
+		if seen[name] {
+			return fmt.Errorf("nodes[%d].name %q appears twice", i, name)
+		}
+		seen[name] = true
+		if err := ValidateNodeURL(label+".url", n.URL); err != nil {
+			return err
+		}
+		if err := nodeTokenSource(label, n.Token, n.TokenFile, true); err != nil {
+			return err
+		}
+	}
+	if def := strings.TrimSpace(c.DefaultNode); def != "" && !IsLocalNodeName(def) && !seen[def] {
+		return fmt.Errorf("default_node %q is not defined in nodes", def)
 	}
 	return nil
 }

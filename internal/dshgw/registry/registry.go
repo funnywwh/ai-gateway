@@ -59,6 +59,11 @@ type Tenant struct {
 	// provisioned before the field existed, and on tenants created by hand with
 	// the CLI; the sidebar then shows the tenant name instead of nothing.
 	Account string `json:"account,omitempty"`
+	// Node names the worker node this tenant's dsh runs on (M77). Empty is the
+	// historical value and means "this machine", exactly like the literal "local": a
+	// registry written before the field existed therefore keeps working with no
+	// migration, and a single-machine deployment never sets it.
+	Node string `json:"node,omitempty"`
 }
 
 // Isolation values recorded on a tenant. They mirror config.IsolationUser and
@@ -97,6 +102,10 @@ type Registry struct {
 	path       string
 	keyMapPath string
 	tenants    map[string]Tenant
+	// nodesKnown, when installed, answers whether a non-empty Node value names a node this
+	// deployment defines. It is nil in registries that never talk to nodes (the unit tests,
+	// the offline CLI paths) and installed by the process that has a configuration.
+	nodesKnown func(string) bool
 }
 
 func New(path, keyMapPath string) *Registry {
@@ -192,8 +201,16 @@ func validateTenant(t Tenant) error {
 	if !validAccountLabel(t.Account) {
 		return fmt.Errorf("tenant %s has an unusable account label %q", t.Name, t.Account)
 	}
-	if !validPrefix(t.KeyPrefix) {
-		return fmt.Errorf("tenant %s key prefix must be 12 printable non-space ASCII characters", t.Name)
+	if !config.ValidNodeRef(t.Node) {
+		return fmt.Errorf("tenant %s names an invalid node %q", t.Name, t.Node)
+	}
+	// A record may carry no key prefix at all (M77): a worker node's allocation table says which
+	// tenants this machine hosts, while the key prefix — which key logs into which tenant — is
+	// bound in the control plane's registry. Requiring one here would force a node to invent a
+	// prefix for a tenant it adopted, and the invented value would collide with the uniqueness
+	// rule below. Everything else about the record is still validated.
+	if t.KeyPrefix != "" && !validPrefix(t.KeyPrefix) {
+		return fmt.Errorf("tenant %s key prefix must be empty or 12 printable non-space ASCII characters", t.Name)
 	}
 	seen := map[string]bool{t.KeyPrefix: true}
 	for _, prefix := range t.PreviousPrefixes {
@@ -314,6 +331,9 @@ func (r *Registry) Put(t Tenant) error {
 	if err := validateTenant(t); err != nil {
 		return err
 	}
+	if err := r.checkNodeKnown(t.Node, t.Name); err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	next := clone(r.tenants)
@@ -323,6 +343,174 @@ func (r *Registry) Put(t Tenant) error {
 	}
 	r.tenants = next
 	return nil
+}
+
+// ValidateNodes installs the node-name check and immediately applies it to the current
+// snapshot (M77).
+//
+// It is installed after Load rather than inside it because the registry deliberately knows
+// nothing about configuration: `dshgw tenant list` on an offline copy, and every registry
+// unit test, run without a node list and must not fail on a name they cannot resolve. The
+// process that does have a configuration calls this once at startup, which turns "a tenant
+// names a node this deployment does not define" into a startup failure instead of a tenant
+// whose traffic can never be delivered.
+func (r *Registry) ValidateNodes(ok func(string) bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, t := range r.tenants {
+		if config.IsLocalNodeName(t.Node) {
+			continue
+		}
+		if ok == nil || !ok(t.Node) {
+			return fmt.Errorf("tenant %s is placed on node %q, which this deployment does not define", t.Name, t.Node)
+		}
+	}
+	r.nodesKnown = ok
+	return nil
+}
+
+// checkNodeKnown applies the installed node check (if any) to one value.
+func (r *Registry) checkNodeKnown(node, tenant string) error {
+	if config.IsLocalNodeName(node) {
+		return nil
+	}
+	r.mu.RLock()
+	ok := r.nodesKnown
+	r.mu.RUnlock()
+	if ok == nil {
+		return nil
+	}
+	if !ok(node) {
+		return fmt.Errorf("tenant %s: node %q is not defined by this deployment", tenant, node)
+	}
+	return nil
+}
+
+// TenantsForNode lists the tenants placed on one node, in name order. The empty name and
+// "local" both select the tenants that run in this process.
+func (r *Registry) TenantsForNode(node string) []Tenant {
+	local := config.IsLocalNodeName(node)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]Tenant, 0, len(r.tenants))
+	for _, t := range r.tenants {
+		if config.IsLocalNodeName(t.Node) != local {
+			continue
+		}
+		if !local && t.Node != node {
+			continue
+		}
+		out = append(out, copyTenant(t))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// SetNode records a tenant's placement. It deliberately does not move any data: the caller
+// (the guarded `tenant set-node`) is responsible for refusing a move whose data is not
+// already on the target machine.
+func (r *Registry) SetNode(name, node string) error {
+	if !config.ValidNodeRef(node) {
+		return fmt.Errorf("invalid node name %q", node)
+	}
+	if err := r.checkNodeKnown(node, name); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, ok := r.tenants[name]
+	if !ok {
+		return fmt.Errorf("tenant %q not found", name)
+	}
+	next := clone(r.tenants)
+	t.Node = node
+	next[name] = t
+	r.tenants = next
+	return nil
+}
+
+// SetWorkerPort rewrites a tenant's recorded worker port. Reconciliation uses it when a node
+// reports that it re-allocated the port for one of its tenants (a node restart may do that):
+// the recorded port is what the control plane puts in the Host it presents to the worker, so
+// a stale value makes every request fail until the registry catches up.
+func (r *Registry) SetWorkerPort(name string, port int) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("invalid worker port %d", port)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, ok := r.tenants[name]
+	if !ok {
+		return fmt.Errorf("tenant %q not found", name)
+	}
+	if t.WorkerPort == port {
+		return nil
+	}
+	next := clone(r.tenants)
+	t.WorkerPort = port
+	next[name] = t
+	r.tenants = next
+	return nil
+}
+
+// SetPlacement rewrites the fields a worker node owns for one tenant (M77): its worker port and
+// the two paths inside that node's data root.
+//
+// The control plane records what the node reports rather than deciding it, because those three
+// values are properties of the node's machine (a free port there, its own data root). A stale
+// worker port is not cosmetic: it is what the control plane puts in the Host authority it
+// presents to the worker, so a mismatch makes every request fail until the registry catches up.
+func (r *Registry) SetPlacement(name string, workerPort int, dshHome, workspace string) error {
+	if workerPort < 1 || workerPort > 65535 {
+		return fmt.Errorf("invalid worker port %d", workerPort)
+	}
+	if !filepath.IsAbs(dshHome) || filepath.Clean(dshHome) != dshHome {
+		return fmt.Errorf("dsh home %q must be a clean absolute path", dshHome)
+	}
+	if !filepath.IsAbs(workspace) || filepath.Clean(workspace) != workspace {
+		return fmt.Errorf("workspace %q must be a clean absolute path", workspace)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, ok := r.tenants[name]
+	if !ok {
+		return fmt.Errorf("tenant %q not found", name)
+	}
+	if t.WorkerPort == workerPort && t.DshHome == dshHome && t.Workspace == workspace {
+		return nil
+	}
+	next := clone(r.tenants)
+	t.WorkerPort, t.DshHome, t.Workspace = workerPort, dshHome, workspace
+	next[name] = t
+	r.tenants = next
+	return nil
+}
+
+// AssignWorkerPort picks a free port from the configured worker band (M77).
+//
+// A worker node allocates its own worker port: the band describes that machine's free ports, and
+// the control plane has no way to know them. It mirrors AssignPorts' contract — registry entries
+// and the injected "is something listening" check both make a port unavailable.
+func (r *Registry) AssignWorkerPort(cfg *config.Config, taken func(int) bool) (int, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	used := make(map[int]bool, len(r.tenants))
+	for _, t := range r.tenants {
+		used[t.WorkerPort] = true
+	}
+	if cfg.WorkerPortLo < 1 || cfg.WorkerPortHi > 65535 || cfg.WorkerPortLo > cfg.WorkerPortHi {
+		return 0, errors.New("worker port range is invalid")
+	}
+	for port := cfg.WorkerPortLo; port <= cfg.WorkerPortHi; port++ {
+		if used[port] {
+			continue
+		}
+		if taken != nil && taken(port) {
+			continue
+		}
+		return port, nil
+	}
+	return 0, fmt.Errorf("no free worker port in %d-%d", cfg.WorkerPortLo, cfg.WorkerPortHi)
 }
 
 func (r *Registry) Delete(name string) {

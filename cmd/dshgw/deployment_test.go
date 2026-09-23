@@ -94,6 +94,45 @@ func TestConfigExampleLoadsAsWritten(t *testing.T) {
 	}
 }
 
+// The worker-node example (M77) must load as written for the same reason: it is copied onto a
+// machine nobody is watching, and a strict-decoder complaint there is discovered at install
+// time by an operator who has no idea which key is wrong.
+func TestNodeExampleLoadsAsWritten(t *testing.T) {
+	example := deploymentFile(t, "node.example.yaml")
+	path := filepath.Join(t.TempDir(), "dshgw-node.yaml")
+	if err := os.WriteFile(path, []byte(example), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("node.example.yaml does not load: %v", err)
+	}
+	if !cfg.NodeMode() {
+		t.Fatal("node.example.yaml must describe a worker node (its node: block is the switch)")
+	}
+	if cfg.Node.Name == "" || cfg.Node.Listen == "" {
+		t.Fatalf("the example must name the node and the address it binds: %+v", cfg.Node)
+	}
+	// The example names a token file rather than an inline token (the secret belongs in a
+	// 0600 file). It does not exist on a machine that has not been deployed yet, so resolution
+	// fails — and that failure has to name the file, which is the operator's next step.
+	if cfg.Node.TokenFile == "" && cfg.Node.Token == "" {
+		t.Fatal("the example must name a token source")
+	}
+	if token, err := cfg.NodeSelfToken(); err == nil {
+		t.Fatalf("a token file that does not exist yet must not resolve to a usable token (%q)", token)
+	} else if !strings.Contains(err.Error(), cfg.Node.TokenFile) {
+		t.Fatalf("the error must name the file to create: %v", err)
+	}
+	// A node carries none of the control plane's own surface.
+	if len(cfg.Nodes) != 0 || cfg.DefaultNode != "" {
+		t.Fatalf("a node example must not configure the control plane's node list: %+v", cfg.Nodes)
+	}
+	if cfg.AigwBaseURL == "" {
+		t.Fatal("a node needs aigw_base_url: its workers call aigw directly")
+	}
+}
+
 func TestServerAndLifecycleUseConfiguredSessionCapacity(t *testing.T) {
 	root := t.TempDir()
 	cfg := filepath.Join(root, "config.yaml")

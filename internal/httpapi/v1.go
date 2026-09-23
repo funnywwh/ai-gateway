@@ -1108,7 +1108,7 @@ func (s *Server) ensureAccountDSHForLogin(ctx context.Context, account *domain.A
 			return nil, domain.ErrInvalidRequest("this account has no available model on this gateway")
 		}
 	}
-	tenant, err := s.provisionAccountDSH(ctx, dshAutoEnableActor, accounts, s.deps.AdminStore, account, nil)
+	tenant, err := s.provisionAccountDSH(ctx, dshAutoEnableActor, accounts, s.deps.AdminStore, account, nil, nil)
 	if err != nil {
 		return nil, err
 	}

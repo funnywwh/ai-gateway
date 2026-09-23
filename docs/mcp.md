@@ -72,7 +72,7 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
 
 | 工具 | 入参 | 返回 |
 |---|---|---|
-| `admin_endpoints` | `filter?`（name/path/summary 子串）、`group?`（system/keys/requests/audit/accounts/org/models/providers/billing/backups/portal/admins/pricing/mcp/hooks/settings）、`limit?` | `{count,total,groups,endpoints:[{name,method,path,summary,group,role,params[],query[],has_body,body_fields[],dangerous,tool,reason?}]}`（`body_fields` 是 M40 新增：概览行直接给出请求体的顶层字段名） |
+| `admin_endpoints` | `filter?`（name/path/summary 子串）、`group?`（system/keys/requests/audit/accounts/org/models/providers/billing/backups/portal/admins/pricing/mcp/hooks/settings/dshgw）、`limit?` | `{count,total,groups,endpoints:[{name,method,path,summary,group,role,params[],query[],has_body,body_fields[],dangerous,tool,reason?}]}`（`body_fields` 是 M40 新增：概览行直接给出请求体的顶层字段名） |
 | `admin_describe` | `name` 或 `names[]` | 该接口的 method/path/摘要/所需角色、路径参数与查询参数说明、**请求体 JSON Schema**、可直接照抄的 `example`、危险接口的 `confirm_reason` |
 | `admin_request` | `name`、`params?`（路径参数）、`query?`（查询参数）、`body?`（JSON 对象）、`confirm?` | `{endpoint,method,path,status,ok,body|text|meta,truncated?}` |
 
@@ -128,6 +128,21 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
   部署始终保留至少一个 `role=admin & status=active` 的账号，因此最后一名不能被降级/停用/删除（409），
   也不能删除自己或 `bootstrap.admin` 重建的那一行。**客户侧的飞书身份不是管理员身份**：
   扫码登录只按 `admin_users` 里的绑定解析，客户身份永远拿不到控制台会话。
+
+- **多机 DSH 的节点与租户放置是后台可管理的**（M77，`group=dshgw`）：`admin_list_dshgw_nodes` 列出节点
+  （名称、监听地址、状态 `pending|deploying|ready|failed|unreachable`、阶段、版本与 revision、协议版本、
+  承载租户数与运行 worker 数、漂移提示）以及新租户缺省节点（`default_node`）与 dshgw 管理通道状态；
+  `admin_create_dshgw_node` 登记一个节点（名称、监听地址、SSH 主机/端口/用户、私钥来源、部署目录、
+  端口段与 `host_shares` 等覆盖项；**接口只回 SHA256 指纹，不回显私钥**）、`admin_update_dshgw_node` 改记录、
+  `admin_delete_dshgw_node` 删除记录（默认**保留**远端数据，`body.purge=true` 才删）、
+  `admin_deploy_dshgw_node` 就是**一键经 SSH 部署/升级**（异步作业：返回阶段，配 `admin_describe` 里的
+  日志尾部字段轮询），另有 `admin_probe_dshgw_node`（立即探测）、`admin_reconcile_dshgw_node`
+  （推送权威租户分配表并修正漂移）、`admin_rotate_dshgw_node_token`（轮换节点令牌并重新部署）。
+  租户侧：`admin_list_dshgw_tenants`（分页 + `node` 过滤，含 worker 状态与 `models_pending`）、
+  `admin_start_dshgw_tenant` / `admin_stop_dshgw_tenant` / `admin_restart_dshgw_tenant`、
+  `admin_move_dshgw_tenant`（改放置；受守卫：租户已停 + 目标节点就绪 + 目标机已有数据）。
+  危险接口的 `confirm_reason` 写明后果（升级会重启该节点上运行中的租户；停用不改数据；删除默认不碰远端）。
+  细节见 [docs/dshgw.md](dshgw.md) §8。
 
 - **客户的飞书身份绑定在账号上**（M72，`group=accounts`）：`admin_bind_account_feishu` 把一个飞书身份
   （`body.open_id` 必填，`union_id`/`name` 可选）写到某个账号上，`admin_unbind_account_feishu` 解除

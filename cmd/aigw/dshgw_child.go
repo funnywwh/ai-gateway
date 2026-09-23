@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 
@@ -309,12 +310,22 @@ func resolveChildPath(label, path string) (string, error) {
 // currentAccount is the account every tenant worker runs as. It is resolved here
 // rather than configured so it cannot silently disagree with the process that
 // actually spawns the workers.
+//
+// The order matters: the environment first (it is what a service manager exports), then the
+// account database, and only then the numeric id. The numeric id is never a valid value — dshgw's
+// configuration validator requires an account *name* — so it is the last resort that makes the
+// failure name the setting instead of silently generating a child configuration the child refuses.
 func currentAccount() string {
 	if user := strings.TrimSpace(os.Getenv("USER")); user != "" {
 		return user
 	}
 	if user := strings.TrimSpace(os.Getenv("LOGNAME")); user != "" {
 		return user
+	}
+	// A process started without USER/LOGNAME (a sandbox, a stripped service environment) still
+	// knows which account it is: ask the account database before falling back to a number.
+	if current, err := user.Current(); err == nil && strings.TrimSpace(current.Username) != "" {
+		return strings.TrimSpace(current.Username)
 	}
 	return fmt.Sprintf("%d", os.Geteuid())
 }

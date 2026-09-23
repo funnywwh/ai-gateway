@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) -X main.revision=$(REVISION) -X main.date=
 UIDIST ?= $(CURDIR)/.cache/ui-dist
 UI_OVERLAY ?= $(UIDIST)/overlay.json
 
-.PHONY: all build build-src ui-dist test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check dshgw-build gwproxy-build dshgw-test dshgw-verify dshgw-sandbox-test dshgw-supervised-test dshgw-ssh-integration dshgw-ssh-e2e dshgw-browser-e2e dshgw-browser-reload-e2e
+.PHONY: all build build-src ui-dist test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check dshgw-build gwproxy-build dshgw-test dshgw-node-test dshgw-node-e2e dshgw-node-deploy-e2e dshgw-verify dshgw-sandbox-test dshgw-supervised-test dshgw-ssh-integration dshgw-ssh-e2e dshgw-browser-e2e dshgw-browser-reload-e2e
 
 all: build
 
@@ -95,6 +95,36 @@ gwproxy-build: version-check
 dshgw-build: version-check
 	@mkdir -p bin
 	@$(GOENV) go build -trimpath -ldflags "$(LDFLAGS)" -o bin/dshgw ./cmd/dshgw
+
+# The multi-machine unit surface (M77). It is a subset of dshgw-test, kept as its own target
+# because it is the loop used while working on node behaviour: the protocol, the node record
+# store, the control plane's client, the node agent's listener, and the configuration and
+# registry fields that carry a tenant's placement.
+dshgw-node-test:
+	@$(GOENV) go test ./internal/dshgw/nodeproto ./internal/dshgw/nodestore ./internal/dshgw/nodeclient \
+		./internal/dshgw/nodeserve ./internal/dshgw/nodeops ./internal/dshgw/nodeplane ./internal/dshgw/nodeup \
+		./internal/dshgw/nodedep ./internal/dshgw/nodeaudit ./internal/dshgw/audit ./internal/dshgw/nodeitest \
+		./internal/dshgw/tenancy \
+		./internal/dshgw/proxy ./internal/dshgw/config \
+		./internal/dshgw/registry ./cmd/dshgw
+
+# The multi-machine acceptance (M77): one control plane, one worker node and a real tenant, run as
+# two processes on one machine (two addresses, two state roots) with a stub aigw. It needs the
+# gateway host — bubblewrap, the dsh runtime, Node — and inside a tenant sandbox it skips itself
+# with the reason, exactly like dshgw-sandbox-test. `--passthrough-bwrap` swaps the sandbox for a
+# stand-in so the protocol and process path can still be exercised where namespaces are forbidden.
+dshgw-node-e2e: dshgw-build
+	@DSHGW_NODE="$(DSHGW_NODE)" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" PYTHONDONTWRITEBYTECODE=1 \
+		python3 scripts/dshgw_node_e2e.py
+
+# The SSH one-click deploy acceptance (M77): register a node, deploy it over a real ssh connection
+# to loopback (fingerprint gate, payload upload, unit, start, verify), create a tenant on it and
+# serve it through the control plane, upgrade it, rotate its token and purge it. The target is this
+# machine reached over ssh — one host, two roles — and everything the deploy writes lives under
+# .cache/node-deploy-e2e (a path both this shell and the ssh session see).
+dshgw-node-deploy-e2e: dshgw-build
+	@DSHGW_NODE="$(DSHGW_NODE)" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" PYTHONDONTWRITEBYTECODE=1 \
+		python3 scripts/dshgw_node_deploy_e2e.py $(DSHGW_NODE_DEPLOY_E2E_ARGS)
 
 dshgw-test:
 	@$(GOENV) DSHGW_NODE="$(DSHGW_NODE)" DSHGW_DSH_ROOT="$(DSHGW_DSH_ROOT)" go test ./internal/dshgw/... ./cmd/dshgw ./internal/arch
@@ -184,10 +214,12 @@ ui-base:
 		node internal/webui/tests/org_tree_test.mjs || exit $$? ; \
 		node internal/webui/tests/org_person_list_test.mjs || exit $$? ; \
 		node internal/webui/tests/tenant_name_test.mjs || exit $$? ; \
+		node internal/webui/tests/dshgw_nodes_wiring_test.mjs || exit $$? ; \
 		node --experimental-vm-modules internal/webui/tests/org_assign_test.mjs || exit $$? ; \
 		node --experimental-vm-modules internal/webui/tests/keys_feishu_test.mjs || exit $$? ; \
 		node --experimental-vm-modules internal/webui/tests/org_feishu_test.mjs || exit $$? ; \
 		node --experimental-vm-modules internal/webui/tests/account_feishu_test.mjs || exit $$? ; \
+		node --experimental-vm-modules internal/webui/tests/dshgw_nodes_test.mjs || exit $$? ; \
 	else \
 		echo "skip: node is not available (the derivation is still covered by make ui-check)" ; \
 	fi

@@ -93,10 +93,35 @@ type KeyStore interface {
 // sidebar can name the signed-in person.
 type DshgwAdminOps interface {
 	CreateTenant(ctx context.Context, name, account, key string) error
+	// CreateTenantIn places a new tenant on a named worker node (M77); an empty node means the
+	// control plane's own machine.
+	CreateTenantIn(ctx context.Context, name, account, key, node string) error
 	StartTenant(ctx context.Context, name string) error
 	StopTenant(ctx context.Context, name string) error
+	RestartTenant(ctx context.Context, name string) error
 	SetTenantKey(ctx context.Context, name, account, key string) error
+	// SetTenantNode records a tenant's placement (the guarded migration, M77).
+	SetTenantNode(ctx context.Context, tenant, node string) error
 	ListTenants(ctx context.Context) ([]localdshgw.TenantInfo, error)
+}
+
+// DshgwNodeOps is the node-management half of the dshgw admin channel (M77): the inventory, the
+// registration, the ssh deploy and the per-node operations the console's「DSH 节点」page drives.
+//
+// It is a separate interface from DshgwAdminOps so a deployment whose console has no node
+// management (or a test that only cares about tenants) can leave it nil, and the routes then answer
+// 503 with the same wording as the rest of the console's "this half is not wired" cases.
+type DshgwNodeOps interface {
+	ListNodes(ctx context.Context, probe bool) ([]localdshgw.NodeView, error)
+	AddNode(ctx context.Context, spec localdshgw.NodeSpec) (localdshgw.NodeView, error)
+	UpdateNode(ctx context.Context, spec localdshgw.NodeSpec) (localdshgw.NodeView, error)
+	RemoveNode(ctx context.Context, name string, purge bool) error
+	DeployNode(ctx context.Context, name string, opts localdshgw.DeployOptions) (localdshgw.DeployStatus, error)
+	RotateNodeToken(ctx context.Context, name string, opts localdshgw.DeployOptions) (localdshgw.DeployStatus, error)
+	NodeDeployStatus(ctx context.Context, name string) (localdshgw.DeployStatus, error)
+	ProbeNode(ctx context.Context, name string) (localdshgw.NodeView, error)
+	ReconcileNode(ctx context.Context, name string) (localdshgw.ReconcileResult, error)
+	NodeAudit(ctx context.Context, name string, lines int) ([]string, error)
 }
 
 // Deps are the collaborators of the HTTP server.
@@ -183,6 +208,10 @@ type Deps struct {
 	// DshgwAdmin drives the dshgw local provisioning channel (M52). nil makes the
 	// console dsh toggle answer 501 instead of pretending to provision.
 	DshgwAdmin DshgwAdminOps
+	// DshgwNodes is the node-management half of that channel (M77). nil makes the
+	// /admin/api/v1/dshgw/** node routes answer 503; the tenant routes keep working, because a
+	// single-machine deployment has no nodes and every tenant lives here.
+	DshgwNodes DshgwNodeOps
 	// Billing exposes ledger maintenance; Ledger reads balances and history.
 	Billing BillingPort
 	Ledger  LedgerAdmin

@@ -17,6 +17,8 @@ import (
 	"github.com/winger/ai-gateway/internal/dshgw/edge"
 	"github.com/winger/ai-gateway/internal/dshgw/feishu"
 	"github.com/winger/ai-gateway/internal/dshgw/handshake"
+	"github.com/winger/ai-gateway/internal/dshgw/nodeaudit"
+	"github.com/winger/ai-gateway/internal/dshgw/nodeup"
 	"github.com/winger/ai-gateway/internal/dshgw/proxy"
 	"github.com/winger/ai-gateway/internal/dshgw/sshworkspace"
 )
@@ -31,9 +33,18 @@ func (c *cli) serve() (serveErr error) {
 	if err != nil {
 		return err
 	}
+	// M77: a worker node is not a control plane. Running this command on a node configuration
+	// would bind the portal and the tenant port band on a machine that serves no tenant of its
+	// own, so it fails with the command the file actually wants.
+	if deps.cfg.NodeMode() {
+		return errors.New("this configuration has a node: block: run `dshgw node serve` on this machine, or remove the block to run it as a control plane")
+	}
 	store := deps.manager.Sessions
-	ops := managerOps{m: deps.manager, validator: deps.validator, cfg: deps.cfg, logger: slog.Default(), auditor: &audit.JSONL{Path: deps.cfg.AuditPath}}
+	ops := managerOps{m: deps.manager, deps: deps, validator: deps.validator, cfg: deps.cfg, logger: slog.Default(), auditor: &audit.JSONL{Path: deps.cfg.AuditPath}}
 	gateway := proxy.New(deps.cfg, deps.reg, store, handshake.FileSource{Dir: deps.cfg.HandshakeDir}, &handshake.HTTPExchanger{}, deps.validator)
+	// M77: tenants placed on worker nodes get their traffic forwarded there. A single-machine
+	// deployment passes an empty client set, and every tenant stays local.
+	gateway.Nodes = nodeup.New(deps.cfg, deps.manager.Nodes, slog.Default())
 	gateway.Authorizer = deps.validator
 	gateway.KeySource = proxy.FileKeySource{Root: deps.cfg.Deploy.TenantConfigRoot}
 	// Login is also the tenant's lifecycle moment (M69): every sign-in re-applies the platform
@@ -151,12 +162,43 @@ func (c *cli) serve() (serveErr error) {
 		slog.Info("ssh workspaces enabled", "mount_subdir", deps.cfg.SSHWorkspaces.MountSubdir, "poll_interval", deps.cfg.SSHWorkspaces.PollInterval.Duration(), "hosts", deps.cfg.SSHWorkspaces.Hosts)
 	}
 
+	// M77: the nodes' own security events (a refused ssh mount, a logout that had to break a mount)
+	// are pulled into this gateway's audit file, tagged with the node they happened on, so an
+	// operator reads one stream. The cursor is persisted per node, so a restart resumes.
+	if deps.manager.Nodes.Len() > 0 {
+		merger := nodeaudit.New(deps.manager.Nodes, deps.nodes, &audit.JSONL{Path: deps.cfg.AuditPath}, slog.Default())
+		go merger.Run(ctx)
+	}
+
+	// M77: a tenant that appears while this process is running must become reachable. The console
+	// creates tenants through the admin socket (which reconciles the public surface directly), but
+	// the CLI is a separate process: without this, a CLI-created tenant would be recorded, running
+	// on its node, and still unreachable on its public port until the gateway restarted. Watching
+	// the registry file is enough — the file is replaced atomically, and a handful of tenants make
+	// re-reading it cheap compared with a poll that ignores whether anything changed.
+	go watchRegistry(ctx, deps, publicEdge)
+
 	started := make(chan struct{})
 	startupDone = started
 	go func() {
 		defer close(started)
 		if err := deps.manager.StartWorkers(ctx); err != nil {
 			slog.Error("starting tenant workers failed", "err", err)
+		}
+		// M77: the local workers are up; now make the nodes agree with this registry. Two things
+		// are repaired here — a node that restarted and re-allocated worker ports while this
+		// process was down (the control plane's recorded port is what the handshake's Host
+		// authority is built from), and tenants whose worker state drifted from their intent.
+		//
+		// This runs after the workers so the local tenants are already serving while a slow or
+		// unreachable node is being retried: one broken machine must not delay the gateway's own
+		// tenants by a single request.
+		if deps.manager.Nodes.Len() > 0 {
+			if err := deps.manager.ReconcileAll(ctx); err != nil {
+				slog.Error("reconciling worker nodes failed", "err", err)
+			} else {
+				slog.Info("worker nodes reconciled", "nodes", deps.manager.Nodes.Names())
+			}
 		}
 	}()
 	result := make(chan error, 1)
@@ -174,5 +216,59 @@ func (c *cli) serve() (serveErr error) {
 		shutdown, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		return server.Shutdown(shutdown)
+	}
+}
+
+// watchRegistry reconciles the public surface when the registry file changes underneath a running
+// gateway (M77).
+//
+// The alternative — telling operators "restart the gateway after creating a tenant" — is exactly
+// the kind of undocumented step that turns into a support question, and the console's own path
+// only covers tenants created through the admin socket.
+func watchRegistry(ctx context.Context, deps *runtimeDeps, publicEdge *edge.Edge) {
+	const interval = 2 * time.Second
+	var lastMod time.Time
+	var lastSize int64
+	if info, err := os.Stat(deps.cfg.RegistryPath); err == nil {
+		lastMod, lastSize = info.ModTime(), info.Size()
+	}
+	// The node store changes when a node is deployed, rotated or registered. The clients already in
+	// memory must follow, or a deploy made through this gateway would leave its own tenant traffic
+	// presenting a secret the node no longer accepts.
+	lastNodeMod, lastNodeSize := nodeStoreFingerprint(deps.cfg)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		nodeMod, nodeSize := nodeStoreFingerprint(deps.cfg)
+		if !nodeMod.Equal(lastNodeMod) || nodeSize != lastNodeSize {
+			lastNodeMod, lastNodeSize = nodeMod, nodeSize
+			if err := refreshNodeClients(deps.cfg, deps.nodes, deps.manager.Nodes); err != nil {
+				slog.Error("refreshing the node clients failed", "err", err)
+			} else {
+				slog.Info("node store changed; node clients refreshed")
+			}
+		}
+		info, err := os.Stat(deps.cfg.RegistryPath)
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Equal(lastMod) && info.Size() == lastSize {
+			continue
+		}
+		lastMod, lastSize = info.ModTime(), info.Size()
+		if err := deps.reg.Reload(); err != nil {
+			slog.Warn("reloading a changed registry failed", "err", err)
+			continue
+		}
+		if err := publicEdge.Reconcile(deps.reg.List()); err != nil {
+			slog.Error("reconciling the public surface after a registry change failed", "err", err)
+			continue
+		}
+		slog.Info("registry changed; public surface reconciled", "tenants", len(deps.reg.List()))
 	}
 }

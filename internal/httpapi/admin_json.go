@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -181,6 +182,38 @@ func accountFeishuJSON(a *domain.Account) map[string]any {
 		out["bound_at"] = nil
 	}
 	return out
+}
+
+// attachDshPlacements adds `dsh_node` to account payloads (M77): the worker node each account's
+// DSH tenant runs on, joined from dshgw's own registry rather than copied into the database.
+//
+// One call per list answer, and a failure is not an error: the accounts page must render even
+// when the dshgw channel is down, so the field is simply absent and the console shows "—". An
+// empty value means the control plane's own machine (the historical placement).
+func (s *Server) attachDshPlacements(ctx context.Context, payloads []map[string]any) {
+	if s.deps.DshgwAdmin == nil || len(payloads) == 0 {
+		return
+	}
+	tenants, err := s.deps.DshgwAdmin.ListTenants(ctx)
+	if err != nil {
+		return
+	}
+	placement := make(map[string]string, len(tenants))
+	for _, tenant := range tenants {
+		placement[tenant.Name] = tenant.Node
+	}
+	for _, payload := range payloads {
+		if payload == nil {
+			continue
+		}
+		name, _ := payload["dsh_tenant"].(string)
+		if name == "" {
+			continue
+		}
+		if node, ok := placement[name]; ok {
+			payload["dsh_node"] = node
+		}
+	}
 }
 
 // attachAccountOperatorFacts adds the two things the organization page's person list needs on

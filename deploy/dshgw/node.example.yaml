@@ -1,0 +1,126 @@
+# dshgw 工作节点配置示例（M77：局域网多机分布式运行）
+#
+# 用法：把这份文件放到**目标机器**上（一键部署会写在 <node.deploy.dir>/dshgw-node.yaml），
+# 然后用节点模式启动：
+#
+#   dshgw --config /srv/dshgw-node/dshgw-node.yaml node doctor   # 逐项自检（不需要 root）
+#   dshgw --config /srv/dshgw-node/dshgw-node.yaml node serve    # 前台运行（常驻用 systemd 用户单元）
+#
+# 与控制面的关系（完整口径见 docs/dshgw.md §8 与 docs/design/m77-dshgw-multi-node.md）：
+#   * 控制面（一台）跑 dshgw serve：门户、租户公开端口、会话、租户表、审计、aigw 交互；
+#   * 节点（N 台，本文件）只跑该机器上承载租户的 dsh worker 与租户侧服务；
+#   * **worker 端口只在回环**（dsh 拒绝 --host 0.0.0.0），本进程是这台机器唯一的 LAN 面；
+#   * 控制面往本机 worker 转发时强制 Host: 127.0.0.1:<worker_port>，所以 dsh 的 cookie 与
+#     /api 栅栏语义不变（不需要两侧同步任何会话密钥）；
+#   * 租户的 workspace/.dsh/ssh 私钥都在**本机**磁盘上；控制面只记录路径。
+#
+# 安全前提（必读）：node.listen 是**明文 HTTP + 共享令牌**的内部面，等价于该机器上全部租户
+# 数据的完全访问权。必须绑内网接口、用防火墙把来源限制到控制面，令牌文件保持 0600。
+# 控制通道 TLS 尚未实现（配置位预留）。
+
+# ── 节点身份（这一段是节点模式的开关：没有它，`node serve` 不会启动）────────────────
+node:
+  name: node-a                    # 必须与控制面记录（nodes.json / config.yaml 的 nodes[]）同名
+  # 监听地址：必须**显式写出具体地址**（内网 IP 或主机名）；0.0.0.0 与空值会被拒绝。
+  listen: 192.168.190.87:18400
+  # 与控制面共享的令牌：32 字节随机的 base64url。推荐用文件（一键部署生成 0600 文件）：
+  token_file: /srv/dshgw-node/node-a.token
+  # 也可以直接写在这里（令牌会出现在配置文件里，注意备份与权限）：
+  # token: "<32 字节随机令牌的 base64url>"
+
+# ── 本机数据根（节点自己的一套，与控制面互不共享）──────────────────────────────
+state_dir: /srv/dshgw-node/state      # registry.json（分配表）/handshake/tenants/tenant-config/backups 都由它派生
+tenant_root: /srv/dshgw-node/state/tenants
+workspace_root: /srv/dshgw-node/workspaces
+
+# ── worker 端口段（回环；本机未被占用的段）─────────────────────────────────────
+worker_port_lo: 32100
+worker_port_hi: 32299
+
+# ── 与 aigw 的关系 ────────────────────────────────────────────────────────────
+# worker 直连 aigw 发模型请求（不经过控制面），节点启动/同步模型时也要读它。
+aigw_base_url: http://192.168.190.86:8088
+# 注意：租户的模型授权与计费仍在 aigw 侧；本机只承载执行。
+
+# ── 运行时安装与产物（绝对路径；一键部署会推送 bin/plugins/template-home）────────
+dsh:
+  node_bin: /home/winger/.local/node-v22.23.1-linux-x64/bin/node
+  bin_js: /home/winger/.local/dsh-0.1.2-rc.1/lib/bin.js
+  current_link: /home/winger/.local/dsh-0.1.2-rc.1
+deploy:
+  # 目录选择器插件没有默认值：directory_picker 为 clamp（默认）时必须给出，否则配置加载失败。
+  # 一键部署推送的目录里它位于 plugins/picker-clamp.js。
+  plugin_path: /srv/dshgw-node/plugins/picker-clamp.js
+  template_home: /srv/dshgw-node/template-home
+  backup_dir: /srv/dshgw-node/backups
+  bwrap_bin: /usr/bin/bwrap
+  # 谁起 worker 谁生效：worker 以本机这个非 root 账号运行（与运行本进程的账号一致即可）。
+  worker_user: winger
+  gateway_user: winger
+
+# ── 与单机形态一致的租户侧行为 ────────────────────────────────────────────────
+directory_picker: clamp           # clamp | browse
+plugin_browser_fs: on
+workspace_seed: [work]
+worker_limits:                    # 0 = 不限；本机资源上限由节点自己承担
+  memory_high_bytes: 0
+  memory_max_bytes: 0
+  tasks_max: 0
+  cpu_quota_percent: 0
+
+# 租户侧三块面板（M75）：默认全开；关掉即从每个租户的 profile 移除那一行。
+tenant_plugins:
+  web_tty:
+    enabled: true
+  workspace_files:
+    enabled: true
+  git_diff:
+    enabled: true
+
+# 侧栏账号行与退出（M67）：本机需要渲染这一行时打开；
+# 名字来自 aigw（只有它知道飞书绑定），因此由控制面按同一开关下发。
+account_card:
+  enabled: false
+
+# SSH 工作区（M64）：挂载由**本机**完成（内核挂载属于执行机器），需要 sshfs 与 /dev/fuse；
+# 一账号一把密钥（identity_dir/<账号>，或账号自己在界面上传）。
+ssh_workspaces:
+  enabled: false
+  mount_subdir: ssh
+  # identity_dir: /srv/dshgw-node/ssh-keys
+  # ssh_config_dir: /srv/dshgw-node/ssh-configs
+  hosts: []
+  connect_timeout: 10s
+  poll_interval: 2s
+
+# 浏览器本机目录 FUSE 工作区（M65，可选）：需要 /dev/fuse + fusermount3 + Chromium 浏览器。
+browser_workspaces:
+  enabled: false
+
+# 宿主目录共享（M71，可选）：**按机器独立声明**（每台节点自己有哪些宿主目录），
+# 因此这里的内容不会从控制面照抄；一键部署时用节点记录里的覆盖项写入。
+host_shares:
+  enabled: false
+  subdir: host
+  shares: []
+  # shares:
+  #   - name: data
+  #     path: /data
+  #     read_only: true
+  #     tenants: [dsh-tenant]
+
+# ── 节点模式不使用的键（写了会被忽略或拒绝）────────────────────────────────────
+# public_host / portal_port / tenant_port_lo / tenant_port_hi / listen / tls / feishu /
+# session_path / activity_path / admin_socket / key_revalidate / dsh_enforce / login_rate /
+# default_node / nodes
+#
+# 这些都属于**控制面**：节点没有门户、没有公开租户端口、没有浏览器会话，也不暴露 admin socket。
+# 控制面侧的对应配置（写它的 config.yaml 或 dshgw.yaml）：
+#
+#   dshgw:
+#     enabled: true
+#     default_node: local                 # 新租户缺省落在哪台（local = 控制面本机）
+#     nodes:                              # 静态/引导清单；控制台添加的节点存在 <state_dir>/nodes.json
+#       - name: node-a
+#         url: http://192.168.190.87:18400
+#         token_file: ./data/dshgw/nodes/node-a.token

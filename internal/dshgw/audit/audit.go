@@ -13,15 +13,19 @@ import (
 )
 
 type Event struct {
-	Time     time.Time `json:"time"`
-	Kind     string    `json:"kind"`
-	Tenant   string    `json:"tenant,omitempty"`
-	RemoteIP string    `json:"remote_ip,omitempty"`
-	Method   string    `json:"method,omitempty"`
-	Path     string    `json:"path,omitempty"`
-	Origin   []string  `json:"origin,omitempty"`
-	Reason   string    `json:"reason"`
-	Status   int       `json:"status"`
+	Time   time.Time `json:"time"`
+	Kind   string    `json:"kind"`
+	Tenant string    `json:"tenant,omitempty"`
+	// Node names the worker node the event happened on (M77). Empty means the control plane's own
+	// machine. Events from a node are pulled into this stream so an operator reads one file; the
+	// tag is what keeps them attributable.
+	Node     string   `json:"node,omitempty"`
+	RemoteIP string   `json:"remote_ip,omitempty"`
+	Method   string   `json:"method,omitempty"`
+	Path     string   `json:"path,omitempty"`
+	Origin   []string `json:"origin,omitempty"`
+	Reason   string   `json:"reason"`
+	Status   int      `json:"status"`
 }
 type Sink interface{ Write(Event) error }
 type JSONL struct {

@@ -69,6 +69,9 @@ func (s *Server) handleAdminListAccounts(w http.ResponseWriter, r *http.Request)
 		nodeIDs, refs := orgRefsForAccounts(index, members[a.ID])
 		out = append(out, s.attachAccountOperatorFacts(r, accountJSON(a, nodeIDs, refs), a))
 	}
+	// The placement is joined from dshgw once per answer (M77): the console shows which machine
+	// each account's tenant runs on, and the accounts page must not make one socket call per row.
+	s.attachDshPlacements(r.Context(), out)
 	page, err := pageConfig.params(r)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
@@ -581,6 +584,7 @@ func (s *Server) handleAdminSetAccountDSH(w http.ResponseWriter, r *http.Request
 	var body struct {
 		Enabled *bool   `json:"enabled"`
 		Tenant  *string `json:"tenant"`
+		Node    *string `json:"node"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
@@ -591,14 +595,14 @@ func (s *Server) handleAdminSetAccountDSH(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if *body.Enabled {
-		s.enableAccountDSH(w, r, actor, store, s.deps.AdminStore, a, body.Tenant)
+		s.enableAccountDSH(w, r, actor, store, s.deps.AdminStore, a, body.Tenant, body.Node)
 		return
 	}
 	s.disableAccountDSH(w, r, actor, store, s.deps.AdminStore, a)
 }
 
-func (s *Server) enableAccountDSH(w http.ResponseWriter, r *http.Request, actor *domain.AdminUser, store AccountAdmin, keys AdminStore, a *domain.Account, requested *string) {
-	tenant, err := s.provisionAccountDSH(r.Context(), actor.Username, store, keys, a, requested)
+func (s *Server) enableAccountDSH(w http.ResponseWriter, r *http.Request, actor *domain.AdminUser, store AccountAdmin, keys AdminStore, a *domain.Account, requested, node *string) {
+	tenant, err := s.provisionAccountDSH(r.Context(), actor.Username, store, keys, a, requested, node)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
@@ -612,12 +616,21 @@ func (s *Server) enableAccountDSH(w http.ResponseWriter, r *http.Request, actor 
 // provisionAccountDSH turns one account into a working dsh tenant: it mints the worker
 // credential, creates or restarts the tenant on the gateway, and records the mapping.
 //
+// dshPlacement reads the requested placement (M77): an empty value means the deployment's default
+// node, which the console shows in the dialog so an operator never guesses.
+func dshPlacement(node *string) string {
+	if node == nil {
+		return ""
+	}
+	return strings.TrimSpace(*node)
+}
+
 // It is separated from the HTTP handler because two features need the same steps — the
 // console's 启用 DSH button and the automatic enable that a Feishu binding performs — and a
 // second implementation would eventually disagree with the first about tenant naming,
 // uniqueness, or what a re-enable does. It returns the tenant name and reports failures as
 // errors instead of writing a response.
-func (s *Server) provisionAccountDSH(ctx context.Context, actor string, store AccountAdmin, keys AdminStore, a *domain.Account, requested *string) (string, error) {
+func (s *Server) provisionAccountDSH(ctx context.Context, actor string, store AccountAdmin, keys AdminStore, a *domain.Account, requested *string, node *string) (string, error) {
 	if s.deps.DshgwAdmin == nil {
 		return "", domain.ErrInternal("dshgw provisioning channel is not configured")
 	}
@@ -689,7 +702,7 @@ func (s *Server) provisionAccountDSH(ctx context.Context, actor string, store Ac
 		if err := s.deps.DshgwAdmin.StartTenant(ctx, tenant); err != nil {
 			return "", toAPIError(err)
 		}
-	} else if err := s.deps.DshgwAdmin.CreateTenant(ctx, tenant, a.Name, key); err != nil {
+	} else if err := s.deps.DshgwAdmin.CreateTenantIn(ctx, tenant, a.Name, key, dshPlacement(node)); err != nil {
 		return "", toAPIError(err)
 	}
 	a.DshTenant = tenant

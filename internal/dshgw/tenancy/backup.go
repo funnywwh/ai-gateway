@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/winger/ai-gateway/internal/dshgw/config"
+	"github.com/winger/ai-gateway/internal/dshgw/nodeproto"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
 	"github.com/winger/ai-gateway/internal/dshgw/securefile"
 )
@@ -359,6 +360,20 @@ func addArchiveRoot(tw *tar.Writer, root, name string, excluded ...string) error
 // Remove snapshots first, then removes the routing entry and system identity.
 // purge only controls whether the snapshotted data directories are deleted.
 func (m *Manager) Remove(ctx context.Context, t registry.Tenant, purge bool) (snapshot string, err error) {
+	if client, err := m.remoteFor(t); err != nil {
+		return "", err
+	} else if client != nil {
+		// The node removes its own copy (snapshotting first when purging); this side drops the
+		// registry entry and the credential copy it kept for revalidation and the key picker.
+		snapshot, removeErr := client.TenantRemove(ctx, nodeproto.TenantRemoveRequest{Name: t.Name, Purge: purge})
+		if removeErr != nil {
+			return snapshot, removeErr
+		}
+		if err := m.forgetRemoteTenant(t.Name); err != nil {
+			return snapshot, err
+		}
+		return snapshot, nil
+	}
 	err = m.WithLifecycleLock(func() error {
 		current, ok := m.Registry.Get(t.Name)
 		if !ok {

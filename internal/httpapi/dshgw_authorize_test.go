@@ -289,6 +289,28 @@ type fakeDshgwAdmin struct {
 	Keys     []string
 	Tenants  []localdshgw.TenantInfo
 	FailWith error
+	// M77: the placement a creation carried, and the node operations the console drove.
+	nodes     []string
+	restarted []string
+	moved     []string
+}
+
+func (f *fakeDshgwAdmin) CreateTenantIn(ctx context.Context, name, account, key, node string) error {
+	if err := f.CreateTenant(ctx, name, account, key); err != nil {
+		return err
+	}
+	f.nodes = append(f.nodes, node)
+	return nil
+}
+
+func (f *fakeDshgwAdmin) RestartTenant(_ context.Context, name string) error {
+	f.restarted = append(f.restarted, name)
+	return nil
+}
+
+func (f *fakeDshgwAdmin) SetTenantNode(_ context.Context, tenant, node string) error {
+	f.moved = append(f.moved, tenant+"->"+node)
+	return nil
 }
 
 func (f *fakeDshgwAdmin) CreateTenant(_ context.Context, name, account, key string) error {

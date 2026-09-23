@@ -41,13 +41,27 @@ kind: "spec"
 按顺序做，全部在[飞书开发者后台](https://open.feishu.cn/app)：
 
 1. **创建企业自建应用** → 进入应用详情页 → **凭证与基础信息** 记下 **App ID**（`cli_…`）与 **App Secret**。
-2. **安全设置 → 重定向 URL** 添加**唯一一条**（必须与 `feishu.callback_url` 逐字一致，含 scheme/host/port/path）：
-   ```
-   http://192.168.190.86:8090/feishu/callback
-   ```
+2. **安全设置 → 重定向 URL**：登记**本应用要服务的每一个部署**的回调地址。列表**可以有多条**，
+   但每个部署自己的 `feishu.callback_url` 必须与其中**某一条**逐字一致（含 scheme/host/port/path）——
+   OAuth 的 `redirect_uri` 永远是这条配置值，**不是**从请求 Host 推导的（`feishu.DSHLoginURL`/`LoginURL`
+   都由它派生），所以「同一个应用服务多个域名」的正确做法是：把每个域名的回调都登记进来，
+   每个部署写自己那条；没登记的那条域名点登录会在同意页撞 20029。
+   当前已登记清单（`APP_ID=cli_aa27b25392f91bdb`）：
+
+   | 部署 | 回调地址 | 角色 |
+   |---|---|---|
+   | rag-server `:8088`（`chat.tirisen.hk`） | `https://chat.tirisen.hk/feishu/callback` | 生效（该部署 `GW_FEISHU_CALLBACK_URL`） |
+   | rag-server `:8088`（局域网） | `http://192.168.190.86:8090/feishu/callback` | 局域网入口 |
+   | gptjp（`gpt.tirisen.hk`） | `https://gpt.tirisen.hk/aigw/feishu/callback` | 生效（该部署 `feishu.callback_url`） |
+   | gptjp（`gpt.lagenio.xyz`） | `https://gpt.lagenio.xyz/aigw/feishu/callback` | 别名入口（同一实例；登记后可在白名单内换用） |
+
    - 飞书允许 http 与非 443 端口（官方文档的示例就包含 `http://…:188/…`）；`?` 与 `#` 之后的部分不参与匹配。
    - 列表里没有的地址会跳到失败页 `{code: 2000, message: "redirect_uri unmatch"}` 或 20029。
    - 用**一个**回调服务两种流程（绑定与登录），它们靠签名 state 里的 flow 区分。
+   - 判定登记状态不必开浏览器：授权页对已登记的 `redirect_uri` 会 302 到 `passport.feishu.cn`，
+     对未登记的直接 200 + 20029（`?`/`#` 之后不参与匹配，所以加个 `_=` 参数也不影响判定）。
+     工作区里的 `data/dshgw-verify/state/workspaces/dsh-tenant/feishu-callback-check.sh` 把这条判据做成了脚本
+     （`bash feishu-callback-check.sh` 打印上面这张清单的逐条状态；`APP_ID=cli_xxx` 可换应用）。
 3. **权限管理**：**登录/绑定一条 scope 都不要申请**。本功能只读 `open_id` 与姓名，飞书文档标注这两个字段无权限要求。
    也不要申请邮箱/手机号（那是管理员导入的联系方式，非本人实时验证，不适合当登录凭据），
    不需要 `offline_access`（网关不保存任何飞书令牌）。

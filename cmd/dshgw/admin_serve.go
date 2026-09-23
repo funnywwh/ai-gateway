@@ -18,6 +18,7 @@ import (
 	"github.com/winger/ai-gateway/internal/dshgw/aigw"
 	"github.com/winger/ai-gateway/internal/dshgw/audit"
 	"github.com/winger/ai-gateway/internal/dshgw/config"
+	"github.com/winger/ai-gateway/internal/dshgw/nodeproto"
 	"github.com/winger/ai-gateway/internal/dshgw/proxy"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
 	"github.com/winger/ai-gateway/internal/dshgw/tenancy"
@@ -38,15 +39,36 @@ const adminOpTimeout = 5 * time.Minute
 // sidebar can name the signed-in person. Only Create and SetKey carry it: creating a tenant
 // and rotating its credential are the two moments the console is talking about one account.
 type AdminOps interface {
-	Create(ctx context.Context, name, account, key string, allowEmptyModels bool) (registry.Tenant, error)
+	Create(ctx context.Context, name, account, key, node string, allowEmptyModels bool) (registry.Tenant, error)
 	Start(ctx context.Context, name string) error
 	Stop(ctx context.Context, name string) error
+	Restart(ctx context.Context, name string) error
 	SetKey(ctx context.Context, name, account, key string) error
 	List() []registry.Tenant
+	// ListTenants is the same set with the runtime facts a console page needs (running state, the
+	// node a tenant lives on, when somebody last logged in).
+	ListTenants(ctx context.Context) ([]TenantRow, error)
+	// SetNode records a tenant's placement (the guarded migration, M77).
+	SetNode(ctx context.Context, tenant, node string) error
+	// The node surface (M77).
+	ListNodes(ctx context.Context, probe bool) ([]NodeView, error)
+	AddNode(ctx context.Context, spec NodeSpec) (NodeView, error)
+	UpdateNode(ctx context.Context, spec NodeSpec) (NodeView, error)
+	RemoveNode(ctx context.Context, name string, purge bool) error
+	DeployNode(ctx context.Context, name string, opts DeployOptions) (DeployStatus, error)
+	NodeDeployStatus(ctx context.Context, name string) (DeployStatus, error)
+	ProbeNode(ctx context.Context, name string) (NodeView, error)
+	ReconcileNode(ctx context.Context, name string) (nodeproto.ReconcileResult, error)
+	NodeAudit(ctx context.Context, name string, lines int) ([]string, error)
 }
 
 type managerOps struct {
 	m *tenancy.Manager
+	// deps carries the shared node surface (M77): the same implementation the CLI uses.
+	deps *runtimeDeps
+	// onTenantsChanged is how a node change (a registration, a removal, a placement) tells the
+	// admin server that the tenant set or its ports may have moved. Nil in tests.
+	onTenantsChanged func()
 	// validator is the interface, not *aigw.Client: the login hook's policy (which key the
 	// platform slice is built from, and what a failed refresh leaves behind) is decided here and
 	// has to be testable without an HTTP server standing in for aigw.
@@ -73,7 +95,75 @@ func (o managerOps) models(ctx context.Context, key string) ([]aigw.Model, bool,
 	return models, len(models) == 0, nil
 }
 
-func (o managerOps) Create(ctx context.Context, name, account, key string, allowEmptyModels bool) (registry.Tenant, error) {
+func (o managerOps) Restart(ctx context.Context, name string) error {
+	t, ok := o.m.Registry.Get(name)
+	if !ok {
+		return fmt.Errorf("tenant %q not found", name)
+	}
+	return o.m.Restart(ctx, t)
+}
+
+// SetNode records a tenant's placement, with the guards that keep a migration honest.
+func (o managerOps) SetNode(ctx context.Context, tenant, node string) error {
+	return o.nodeAdmin().SetNode(ctx, tenant, node)
+}
+
+// nodeAdmin is the shared node surface; a managerOps without one (a test) reports that plainly.
+func (o managerOps) nodeAdmin() *nodeAdmin {
+	return o.deps.nodeAdmin
+}
+
+func (o managerOps) ListNodes(ctx context.Context, probe bool) ([]NodeView, error) {
+	return o.nodeAdmin().List(ctx, probe)
+}
+
+func (o managerOps) AddNode(ctx context.Context, spec NodeSpec) (NodeView, error) {
+	view, err := o.nodeAdmin().Add(ctx, spec)
+	if err == nil && o.onTenantsChanged != nil {
+		o.onTenantsChanged()
+	}
+	return view, err
+}
+
+func (o managerOps) UpdateNode(ctx context.Context, spec NodeSpec) (NodeView, error) {
+	view, err := o.nodeAdmin().Update(ctx, spec)
+	if err == nil && o.onTenantsChanged != nil {
+		o.onTenantsChanged()
+	}
+	return view, err
+}
+
+func (o managerOps) RemoveNode(ctx context.Context, name string, purge bool) error {
+	if err := o.nodeAdmin().Remove(ctx, name, purge); err != nil {
+		return err
+	}
+	if o.onTenantsChanged != nil {
+		o.onTenantsChanged()
+	}
+	return nil
+}
+
+func (o managerOps) DeployNode(ctx context.Context, name string, opts DeployOptions) (DeployStatus, error) {
+	return o.nodeAdmin().StartDeploy(ctx, name, opts)
+}
+
+func (o managerOps) NodeDeployStatus(_ context.Context, name string) (DeployStatus, error) {
+	return o.nodeAdmin().DeployStatus(name), nil
+}
+
+func (o managerOps) ProbeNode(ctx context.Context, name string) (NodeView, error) {
+	return o.nodeAdmin().Probe(ctx, name)
+}
+
+func (o managerOps) ReconcileNode(ctx context.Context, name string) (nodeproto.ReconcileResult, error) {
+	return o.nodeAdmin().Reconcile(ctx, name)
+}
+
+func (o managerOps) NodeAudit(ctx context.Context, name string, lines int) ([]string, error) {
+	return o.nodeAdmin().Audit(ctx, name, lines)
+}
+
+func (o managerOps) Create(ctx context.Context, name, account, key, node string, allowEmptyModels bool) (registry.Tenant, error) {
 	models, empty, err := o.models(ctx, key)
 	if err != nil {
 		return registry.Tenant{}, fmt.Errorf("key validation: %w", err)
@@ -93,6 +183,7 @@ func (o managerOps) Create(ctx context.Context, name, account, key string, allow
 		DirectoryPicker:  o.cfg.DirectoryPicker,
 		PluginBrowserFS:  o.cfg.PluginBrowserFS,
 		Account:          account,
+		Node:             node,
 	})
 }
 
@@ -218,6 +309,10 @@ func (o managerOps) applyKey(ctx context.Context, name, key string, restart bool
 
 func (o managerOps) List() []registry.Tenant { return o.m.Registry.List() }
 
+func (o managerOps) ListTenants(ctx context.Context) ([]TenantRow, error) {
+	return tenantRows(ctx, o.deps, true), nil
+}
+
 type adminRequest struct {
 	ID               int64  `json:"id"`
 	Op               string `json:"op"`
@@ -225,6 +320,15 @@ type adminRequest struct {
 	Account          string `json:"account,omitempty"`
 	Key              string `json:"key"`
 	AllowEmptyModels bool   `json:"allow_empty_models"`
+
+	// M77: the node surface. Node is a node name (a tenant's placement, a node operation), Spec the
+	// registration an add/update carries, Deploy the switches of a deploy.
+	Node   string         `json:"node,omitempty"`
+	Spec   *NodeSpec      `json:"spec,omitempty"`
+	Deploy *DeployOptions `json:"deploy,omitempty"`
+	Purge  bool           `json:"purge,omitempty"`
+	Probe  bool           `json:"probe,omitempty"`
+	Lines  int            `json:"lines,omitempty"`
 }
 
 type adminResponse struct {
@@ -344,7 +448,7 @@ func (s *AdminServer) dispatch(ctx context.Context, req adminRequest) adminRespo
 	}
 	// Read-only operations cannot change the tenant set; everything else may have
 	// added, removed or moved a tenant's public port.
-	if req.Op != "ping" && req.Op != "tenant-list" {
+	if req.Op != "ping" && req.Op != "tenant-list" && req.Op != "node-list" && req.Op != "node-deploy-status" && req.Op != "node-audit" {
 		s.notifyChanged()
 	}
 	resp.OK = true
@@ -368,13 +472,9 @@ func (s *AdminServer) runOp(ctx context.Context, req adminRequest) (map[string]a
 	case "ping":
 		return map[string]any{"ok": true}, nil
 	case "tenant-list":
-		tenants := s.Ops.List()
-		rows := make([]map[string]any, 0, len(tenants))
-		for _, t := range tenants {
-			rows = append(rows, map[string]any{
-				"name": t.Name, "account": t.Account, "public_port": t.PublicPort, "worker_port": t.WorkerPort,
-				"uid": t.UID, "models_pending": t.ModelsPending,
-			})
+		rows, err := s.Ops.ListTenants(ctx)
+		if err != nil {
+			return nil, err
 		}
 		return map[string]any{"tenants": rows}, nil
 	case "tenant-create":
@@ -387,11 +487,11 @@ func (s *AdminServer) runOp(ctx context.Context, req adminRequest) (map[string]a
 		if err := registry.ValidateAccountLabel(strings.TrimSpace(req.Account)); err != nil {
 			return nil, invalidRequestError{err.Error()}
 		}
-		t, err := s.Ops.Create(ctx, req.Name, req.Account, req.Key, req.AllowEmptyModels)
+		t, err := s.Ops.Create(ctx, req.Name, req.Account, req.Key, req.Node, req.AllowEmptyModels)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"name": t.Name, "public_port": t.PublicPort, "uid": t.UID}, nil
+		return map[string]any{"name": t.Name, "public_port": t.PublicPort, "uid": t.UID, "node": t.Node}, nil
 	case "tenant-start":
 		if err := validOpName(req.Name); err != nil {
 			return nil, err
@@ -402,6 +502,111 @@ func (s *AdminServer) runOp(ctx context.Context, req adminRequest) (map[string]a
 			return nil, err
 		}
 		return map[string]any{"stopped": req.Name}, s.Ops.Stop(ctx, req.Name)
+	case "node-list":
+		views, err := s.Ops.ListNodes(ctx, req.Probe)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"nodes": views}, nil
+	case "node-add":
+		if req.Spec == nil {
+			return nil, invalidRequestError{"spec is required"}
+		}
+		if strings.TrimSpace(req.Spec.Name) == "" {
+			req.Spec.Name = strings.TrimSpace(req.Name)
+		}
+		view, err := s.Ops.AddNode(ctx, *req.Spec)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"node": view}, nil
+	case "node-update":
+		if req.Spec == nil {
+			return nil, invalidRequestError{"spec is required"}
+		}
+		if strings.TrimSpace(req.Spec.Name) == "" {
+			req.Spec.Name = strings.TrimSpace(req.Name)
+		}
+		view, err := s.Ops.UpdateNode(ctx, *req.Spec)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"node": view}, nil
+	case "node-remove":
+		if err := validOpName(req.Name); err != nil {
+			return nil, err
+		}
+		if err := s.Ops.RemoveNode(ctx, req.Name, req.Purge); err != nil {
+			return nil, err
+		}
+		return map[string]any{"removed": req.Name, "purged": req.Purge}, nil
+	case "node-deploy", "node-rotate-token":
+		if err := validOpName(req.Name); err != nil {
+			return nil, err
+		}
+		opts := DeployOptions{}
+		if req.Deploy != nil {
+			opts = *req.Deploy
+		}
+		if req.Op == "node-rotate-token" {
+			opts.RotateToken = true
+		}
+		status, err := s.Ops.DeployNode(ctx, req.Name, opts)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"deploy": status}, nil
+	case "node-deploy-status":
+		if err := validOpName(req.Name); err != nil {
+			return nil, err
+		}
+		status, err := s.Ops.NodeDeployStatus(ctx, req.Name)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"deploy": status}, nil
+	case "node-probe":
+		if err := validOpName(req.Name); err != nil {
+			return nil, err
+		}
+		view, err := s.Ops.ProbeNode(ctx, req.Name)
+		if err != nil {
+			// The view still carries what the node said; the caller decides whether an unreachable
+			// node is an error (the console shows it as a state, the CLI exits non-zero).
+			return map[string]any{"node": view, "reachable": false, "error": err.Error()}, nil
+		}
+		return map[string]any{"node": view, "reachable": true}, nil
+	case "node-reconcile":
+		if err := validOpName(req.Name); err != nil {
+			return nil, err
+		}
+		result, err := s.Ops.ReconcileNode(ctx, req.Name)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"result": result}, nil
+	case "node-audit":
+		if err := validOpName(req.Name); err != nil {
+			return nil, err
+		}
+		lines, err := s.Ops.NodeAudit(ctx, req.Name, req.Lines)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"lines": lines}, nil
+	case "tenant-restart":
+		if err := validOpName(req.Name); err != nil {
+			return nil, err
+		}
+		return map[string]any{"restarted": req.Name}, s.Ops.Restart(ctx, req.Name)
+	case "tenant-set-node":
+		if err := validOpName(req.Name); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(req.Node) == "" {
+			return nil, invalidRequestError{"node is required"}
+		}
+		return map[string]any{"tenant": req.Name, "node": req.Node}, s.Ops.SetNode(ctx, req.Name, req.Node)
 	case "tenant-set-key":
 		if err := validOpName(req.Name); err != nil {
 			return nil, err
@@ -492,7 +697,7 @@ func (c *cli) adminServe(ctx context.Context) error {
 	}
 	defer ln.Close()
 	server := &AdminServer{
-		Ops:      managerOps{m: deps.manager, validator: deps.validator, cfg: deps.cfg, auditor: &audit.JSONL{Path: deps.cfg.AuditPath}},
+		Ops:      managerOps{m: deps.manager, deps: deps, validator: deps.validator, cfg: deps.cfg, auditor: &audit.JSONL{Path: deps.cfg.AuditPath}},
 		OwnerUID: os.Geteuid(),
 	}
 	fmt.Fprintf(c.stdout, "dshgw admin channel listening on %s (owner uid %d only)\n", ln.Addr(), os.Geteuid())

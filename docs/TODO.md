@@ -964,3 +964,32 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       `bash /home/winger/work/ai_gateway/data/dshgw-verify/state/workspaces/dsh-tenant/deploy-aigw-4.1.1.sh --with-dshgw`
       —— 重启 `dshgw-verify` 让租户 worker 按新 profile 起（`/etc/bash.bashrc` 随之挂入）；随后在「终端」里确认
       `ls` 有色、提示符是绿 `user@host` + 蓝 `cwd`（回归：agent bash 工具里 `ls` 仍无色、`git log` 分页正常）
+
+## M77 dshgw 多机分布式运行（控制面 + 工作节点 + 控制台节点管理 + SSH 一键部署）
+
+> 设计：`docs/design/m77-dshgw-multi-node.md`；规格：`docs/dshgw.md` §8、`deploy/dshgw/README.md` §14/§15、
+> `docs/deployment-layout.md` §2/§4.4、`docs/mcp.md`（`group=dshgw`）；样例：`deploy/dshgw/node.example.yaml`。
+> 定位：控制面（`dshgw serve`，仍由 aigw 监督）独占门户/公开端口/会话/租户表/审计；租户 dsh worker 可分布到
+> 局域网多台工作节点（`dshgw node serve`，同一份二进制）。**不配 `nodes:` 时行为与今天逐字节等价。**
+> 需求原话：「实现dshgw 可以在局域网内的多台机器分布式运行」+「节点管理没有管理后台webui」+「后台支持一键通过ssh部署」。
+
+> P1（协议与节点模式骨架）、P2（生命周期分派、节点分配表与对账）、P3（数据面：转发、握手委托与失败语义）、
+> P1–P7 已完成，记录见 `docs/todo_done.md` 的 M77 小节；下面只列 M77 收尾与待宿主执行的项。
+> P7（控制台「DSH 节点」页、账户页节点列与启用弹窗落点选择、harness 与 UI 测试）已完成，
+> 记录见 `docs/todo_done.md` 的 M77 小节。**P1–P7 全部完成。**
+- [ ] 回归（M77 全量收尾）：`make dshgw-test dshgw-sandbox-test dshgw-supervised-test`、`go vet ./...`、导入闸门
+      （已完成：全仓 `go test ./internal/... ./cmd/...`、`make dshgw-node-test`、`make ui-base`、
+      `make ui-dist`、两个验收脚本）
+- [ ] **待宿主执行（UI 走查）**：`make ui-check`（需要真 firefox；本会话沙箱里 `/usr/bin/firefox` 是 snap 包装器，
+      脚本已改成带原因跳过）。`make ui-dist` 之后按 README 对压缩镜像再跑一遍同一套视图。
+- [ ] **待宿主执行（控制台实机走查）**：重建 `bin/aigw` 并重启 `aigw-local`，在真实 `:8088` 上走查
+      「DSH 节点」页的七种状态、一次真实的一键部署（含首次指纹确认）与一次租户迁移
+- [ ] **待宿主执行（真机 bwrap 版验收一组）**：本会话沙箱禁非特权用户 namespace，因此
+      `make dshgw-node-e2e`（多机，已用 `--passthrough-bwrap` 跑过 35 步）、`make dshgw-sandbox-test`
+      （按设计 SKIP 并打印原因）、`make dshgw-supervised-test`（M58 监督形态，tenant-create 因 bwrap 失败）
+      三者都需要在允许 `bwrap --unshare-pid` 的宿主上各跑一次真机版
+- [ ] 观察项（真实部署前的运维提醒）：`admin_socket` 有 UNIX 路径 108 字节上限，深层 state_dir 会让
+      `serve` 起不来（本阶段验收脚本因此把它指到 /tmp）；可在配置校验里提前报错，但不在 M77 范围
+- [ ] 实测记录回填：每请求 +1 跳 LAN 的 p50/p99 增量、流式无缓冲区证据、64 MiB 体与 WS 直通、
+      一次部署耗时与载荷大小、节点/控制面重启恢复时间（写进设计文档 §11 与 `docs/dshgw.md` §8）
+- [ ] 收尾：单一 M77 提交（提交信息引用设计文档路径）

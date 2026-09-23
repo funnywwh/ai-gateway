@@ -360,6 +360,29 @@ dshgw:
   #   workspace_files: { enabled: true }
   #   git_diff: { enabled: true }
   #   root_label: 工作区            # 两个工作区面板对 root 的显示名；留空即此默认值
+  #
+  # 多机分布式运行（M77，规格见 docs/dshgw.md §8、docs/design/m77-dshgw-multi-node.md）：
+  # 控制面（本进程拉起的子进程）独占门户/公开端口/会话/租户表/审计，租户的 dsh worker 可以分布到
+  # 局域网其它机器（工作节点，用同一份 bin/dshgw 的 `node serve` 模式跑）。不配 nodes 时行为与
+  # 今天完全一致（所有租户在本机）。
+  #   * 节点清单的真值是 dshgw 的节点状态（<state_dir>/nodes.json）：控制台「DSH 节点」页可以
+  #     **一键经 SSH 部署**新节点、升级、探测、对账、迁移租户；下面这份 nodes 是"永远在"的静态清单，
+  #     与状态清单合并 —— 配置说了算的是身份（url + token），控制台补充部署信息（SSH 目标、
+  #     部署路径、部署状态与日志），所以"配置里声明 + 控制台按部署"是正当用法。
+  #   * 每个节点需要：bwrap、Node + dsh release、模板与插件目录（默认由控制面推送）、
+  #     启用 SSH/浏览器工作区时的 sshfs/fusermount3；worker 端口只在节点回环。
+  #   * 节点监听面是内网明文 HTTP + 每节点令牌，等价于该节点上全部租户数据的完全访问权：
+  #     必须绑内网接口并把来源限制到控制面主机；令牌优先用 token_file（0600）。
+  # default_node: local           # 新租户缺省落在哪台；local = 控制面本机（默认）
+  # nodes:
+  #   - name: node-a              # ^[a-z][a-z0-9-]{0,25}$；"local" 保留
+  #     url: http://192.168.190.87:18400        # 该节点 dshgw-node.yaml 的 node.listen
+  #     token_file: ./data/dshgw/nodes/node-a.token
+  #   - name: node-b
+  #     url: http://192.168.190.88:18400
+  #     token: "<32 字节随机令牌的 base64url>"  # 也可直接写字面量（注意备份与权限）
+  # 一键 SSH 部署用到的私钥与指纹固定在子进程的状态里：<state_dir>/node-ssh/<节点>/{id_ed25519,known_hosts}
+  # （id_ed25519 0600；控制台永不回显私钥，只给 SHA256 指纹）。
 
 # Feishu (Lark) identity (M60/M61): bind API keys to Feishu accounts, and let those people
 # sign in to the DSH portal without pasting a key. Off by default, and while it is off

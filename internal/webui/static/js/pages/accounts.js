@@ -36,6 +36,8 @@ export async function render({ page, actions, session }) {
       { key: 'billing_mode', label: '计费模式' },
       { key: 'status', label: '状态', render: (row) => statusBadge(row.status) },
       { key: 'dsh_enabled', label: 'DSH', render: (row) => dshCell(row) },
+      // 节点列（M77）：这个账户的租户跑在哪台机器上。「—」= 没启用 DSH；「本机」= 控制面自己。
+      { key: 'dsh_node', label: '节点', render: (row) => dshNodeCell(row) },
       { key: 'feishu', label: '飞书', render: (row) => feishuCell(row) },
       { key: 'key_count', label: 'Key', render: (row) => keyCountCell(row) },
       { key: 'org_nodes', label: '所属组织', render: (row) => orgCell(row) },
@@ -142,6 +144,17 @@ function keyCountCell(row) {
   });
 }
 
+// dshNodeCell 是账户的落点列：只有启用了 DSH 才有意义，未启用显示 "—"（而不是空，让人以为是
+// 服务端漏了字段）。值来自 dshgw 的租户记录（服务端每次列出账户时 join 一次）。
+export function dshNodeCell(row) {
+  if (!row || !row.dsh_enabled) return el('span', { class: 'muted', text: '—' });
+  const node = row.dsh_node;
+  if (!node || node === 'local') {
+    return el('span', { class: 'badge', text: '本机', title: '租户运行在控制面自己这台机器上' });
+  }
+  return el('span', { class: 'badge', text: node, title: '租户运行在工作节点 ' + node });
+}
+
 // toggleDSH drives the account-level dsh gateway lifecycle (M52-rev2).
 // Enabling provisions everything through the local dshgw channel: it mints a dedicated
 // worker key, creates (or starts and re-keys) the tenant and records the mapping, so
@@ -150,6 +163,18 @@ function keyCountCell(row) {
 async function toggleDSH(row, reload) {
   const enabling = !row.dsh_enabled;
   if (enabling) {
+    // M77：新租户可选落点。节点清单取一次，失败就退回"本机/默认"而不是让启用流程整个失败——
+    // 单机部署里 /dshgw/nodes 是空的，这正是最常见的合法情形。
+    let placements = [];
+    try {
+      const payload = await api.get('/dshgw/nodes');
+      placements = (payload.nodes || []).map((node) => ({
+        value: node.name,
+        label: node.name + (node.reachable === false ? '（不可达）' : node.state === 'ready' ? '' : '（' + node.state + '）'),
+      }));
+    } catch (err) {
+      placements = [];
+    }
     // 已有映射优先，否则用服务端下发的规则名（M74）。规则（`dsh-<账号拼音>-<账号ID>`）只有服务端那一份
     // 实现：页面预填它给出的值，而不是自己再拼一遍。
     const suggested = row.dsh_tenant || row.dsh_tenant_suggested || '';
@@ -161,9 +186,16 @@ async function toggleDSH(row, reload) {
           hint: '小写字母/数字/连字符；留空则沿用既有映射，或按账号名自动生成（例：陈景峰 / 10 → ' +
             'dsh-chenjingfeng-10）。将自动创建租户与 worker，账号下所有 Key（含新建）都能登录该租户；' +
             '已存在的租户名不会被改动' },
+        ...(placements.length > 0 ? [{
+          name: 'node', label: '运行节点', type: 'select', value: 'local',
+          options: [{ value: 'local', label: '本机 / 部署默认' }].concat(placements),
+          hint: '只在创建租户时生效；换机器要停租户、搬数据，再用「DSH 节点」页的迁移',
+        }] : []),
       ],
       onSubmit: (values) => api.post('/accounts/' + row.id + '/dsh', {
-        enabled: true, ...(values.tenant ? { tenant: values.tenant } : {}),
+        enabled: true,
+        ...(values.tenant ? { tenant: values.tenant } : {}),
+        ...(values.node && values.node !== 'local' ? { node: values.node } : {}),
       }),
     });
     if (result) { toast('已启用 DSH（租户 ' + (result.tenant || suggested) + '）', 'ok'); await reload(); }

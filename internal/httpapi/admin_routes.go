@@ -54,6 +54,9 @@ const (
 	// to this console at all — rather than the deployment's own authentication plumbing.
 	groupAdmins = "admins"
 	// groupChat lives in admin_chat_routes.go, next to the routes it groups.
+	// groupDshgw is the multi-machine node surface (M77): the worker-node inventory, the
+	// registration and the ssh deploy, plus the two tenant operations the 节点 page needs.
+	groupDshgw = "dshgw"
 )
 
 // adminField documents one path parameter, query parameter or body field.
@@ -585,6 +588,7 @@ func (s *Server) adminRoutes() []adminRoute {
 	out = append(out, s.adminUserAdminRoutes()...)
 	out = append(out, s.pricingAdminRoutes()...)
 	out = append(out, s.chatAdminRoutes()...)
+	out = append(out, s.dshgwAdminRoutes()...)
 	return out
 }
 
@@ -1514,6 +1518,9 @@ func (s *Server) billingAdminRoutes() []adminRoute {
 				bodyRequired("enabled", "boolean", "true=启用 dsh 入口（自动铸造 worker 专用 Key 并建立/启动租户，同时清除「显式停用」标记）；false=停用（停止 worker 并吊销 worker Key，数据保留，并记录显式停用时刻）"),
 				bodyOptional("tenant", "string",
 					"启用时可选指定 dshgw 租户名（须匹配 [a-z][a-z0-9-]{0,25}[a-z]）；留空则沿用既有映射或按账户名自动生成。停用时忽略"),
+				bodyOptional("node", "string",
+					"启用时指定这个租户跑在哪台工作节点（M77 的节点名；`local` 或留空=控制面本机/默认节点）。"+
+						"只在创建租户时生效：已经存在的租户要换机器用 `POST /admin/api/v1/dshgw/tenants/{name}/node`（并自己搬运数据）"),
 			},
 		},
 		{

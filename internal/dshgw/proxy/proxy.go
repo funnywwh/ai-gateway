@@ -28,6 +28,7 @@ import (
 	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/feishu"
 	"github.com/winger/ai-gateway/internal/dshgw/handshake"
+	"github.com/winger/ai-gateway/internal/dshgw/nodeproto"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
 	"github.com/winger/ai-gateway/internal/dshgw/session"
 )
@@ -82,6 +83,33 @@ type LogoutStop interface {
 	StopSignedOut(ctx context.Context, tenant string) (LogoutResult, error)
 }
 
+// NodeRef is where one tenant's worker listens, as the node it runs on describes it (M77).
+type NodeRef struct {
+	// Name is the node's name: it appears in logs, audits and operator-facing messages.
+	Name string
+	// BaseURL is the node agent's address (http://host:port), and Token the shared secret every
+	// request to it carries.
+	BaseURL string
+	Token   string
+}
+
+// NodeUpstream is the proxy's view of the worker nodes (M77).
+//
+// Nil means this deployment is single-machine. A tenant recorded on a node then has nowhere to
+// go, and the proxy refuses it rather than falling back to loopback: serving a machine nobody
+// believes in is worse than a clear error.
+type NodeUpstream interface {
+	// NodeFor returns the node a tenant runs on, or ok=false when it runs in this process.
+	NodeFor(t registry.Tenant) (NodeRef, bool)
+	// Handshake asks the node to exchange its worker's startup token for the upstream cookie,
+	// against the authority the control plane will present on every forwarded request.
+	Handshake(ctx context.Context, t registry.Tenant, authority string) (*session.Upstream, error)
+	// ServesBrowserWorkspaces reports whether this process answers /browser-workspace/ for that
+	// tenant. False for a remote tenant: its FUSE mount lives on the node, so the long poll has
+	// to be forwarded there.
+	ServesBrowserWorkspaces(t registry.Tenant) bool
+}
+
 type Proxy struct {
 	Config            *config.Config
 	Registry          *registry.Registry
@@ -97,6 +125,8 @@ type Proxy struct {
 	BrowserWorkspaces interface {
 		ServeTenant(http.ResponseWriter, *http.Request, registry.Tenant, string)
 	}
+	// Nodes is the multi-machine seam (M77); nil keeps every tenant local.
+	Nodes NodeUpstream
 	// Feishu carries the identity handoff from aigw (M61), or nil when the feature is off.
 	Feishu   *FeishuPortal
 	Logger   *slog.Logger
@@ -691,13 +721,24 @@ func (p *Proxy) TenantHandler(t registry.Tenant) http.Handler {
 		if p.handleAccountRoute(w, r, t, cookie) {
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/browser-workspace/") && p.BrowserWorkspaces != nil {
+		ref, remote, err := p.remoteFor(t)
+		if err != nil {
+			p.log().Error("tenant placement is unusable", "tenant", t.Name, "node", t.Node, "err", err)
+			p.audit(r, t.Name, "node_unknown", err.Error(), http.StatusServiceUnavailable)
+			http.Error(w, "this tenant's node is not available", http.StatusServiceUnavailable)
+			return
+		}
+		browserSession := fmt.Sprintf("%x", sha256.Sum256([]byte(cookie.Value)))
+		// A browser workspace's long poll is answered by the process that owns the FUSE mount. For
+		// a remote tenant that is the node, so the path is forwarded instead of intercepted — and
+		// the session digest goes with it, because the browser's own cookie never leaves here.
+		if strings.HasPrefix(r.URL.Path, "/browser-workspace/") && p.BrowserWorkspaces != nil && !remote {
 			if err := p.Sessions.Touch(cookie.Value, p.Config.SessionTTL.Duration()); err != nil {
 				p.unauthenticated(w, r)
 				return
 			}
 			p.setSessionCookie(w, t.Name, cookie.Value, false)
-			p.BrowserWorkspaces.ServeTenant(w, r, t, fmt.Sprintf("%x", sha256.Sum256([]byte(cookie.Value))))
+			p.BrowserWorkspaces.ServeTenant(w, r, t, browserSession)
 			return
 		}
 		if err := prepareReplayable(r); err != nil {
@@ -705,7 +746,21 @@ func (p *Proxy) TenantHandler(t registry.Tenant) http.Handler {
 			return
 		}
 		if _, err := p.ensureUpstream(r.Context(), cookie.Value, t); err != nil {
-			p.log().Error("dsh handshake failed", "tenant", t.Name, "err", err)
+			p.log().Error("dsh handshake failed", "tenant", t.Name, "node", t.Node, "err", err)
+			if remote && nodeproto.IsCode(err, nodeproto.CodeUnreachable) {
+				// The node is the upstream here, so "unreachable" is a gateway-side outage, not a
+				// broken worker: 503 with the node named, and an audit line an operator can find.
+				p.audit(r, t.Name, "node_unreachable", err.Error(), http.StatusServiceUnavailable)
+				http.Error(w, "this tenant's node is unreachable", http.StatusServiceUnavailable)
+				return
+			}
+			// A node that refuses because its worker is gone is the same situation as a dead local
+			// worker, and gets the same answer.
+			if remote && nodeproto.IsCode(err, nodeproto.CodeWorkerNotRunning) {
+				p.audit(r, t.Name, "worker_not_running", err.Error(), http.StatusServiceUnavailable)
+				http.Error(w, "this tenant's worker is not running on its node", http.StatusServiceUnavailable)
+				return
+			}
 			http.Error(w, "worker authentication unavailable", http.StatusBadGateway)
 			return
 		}
@@ -714,7 +769,7 @@ func (p *Proxy) TenantHandler(t registry.Tenant) http.Handler {
 			return
 		}
 		p.setSessionCookie(w, t.Name, cookie.Value, false)
-		p.reverseProxy(t, cookie.Value, r.URL.Path).ServeHTTP(w, r)
+		p.reverseProxy(t, cookie.Value, r.URL.Path, ref, remote, browserSession).ServeHTTP(w, r)
 	})
 }
 func uniqueCookie(r *http.Request, name string) (*http.Cookie, error) {
@@ -1134,6 +1189,46 @@ func (p *Proxy) revalidateKey(ctx context.Context, tenant string) error {
 	return err
 }
 
+// remoteFor reports where a tenant's worker runs. A tenant whose placement this process cannot
+// resolve is refused here, once, rather than being sent to a loopback port that is not serving it.
+func (p *Proxy) remoteFor(t registry.Tenant) (NodeRef, bool, error) {
+	if p.Config.IsLocalNode(t.Node) {
+		return NodeRef{}, false, nil
+	}
+	if p.Nodes == nil {
+		return NodeRef{}, false, fmt.Errorf("tenant %s runs on node %s, but this process has no node clients", t.Name, t.Node)
+	}
+	ref, ok := p.Nodes.NodeFor(t)
+	if !ok {
+		return NodeRef{}, false, fmt.Errorf("tenant %s runs on node %s, which this deployment does not define", t.Name, t.Node)
+	}
+	return ref, true, nil
+}
+
+// nodeRefusal carries a node's refusal of a tenant request out of ModifyResponse and into
+// ErrorHandler, which is the only place a ReverseProxy lets us write our own answer.
+type nodeRefusal struct {
+	code   string
+	status int
+}
+
+func (r *nodeRefusal) Error() string { return "node refused the request: " + r.code }
+
+// nodeRefusalMessage is what the browser is told. The node's own wording names machines and
+// internals; the operator gets that in the log and the audit line instead.
+func nodeRefusalMessage(code string) (int, string) {
+	switch code {
+	case nodeproto.CodeWorkerNotRunning:
+		return http.StatusServiceUnavailable, "the tenant's worker is not running on its node; please retry shortly"
+	case nodeproto.CodeTenantUnknown:
+		return http.StatusNotFound, "unknown tenant"
+	case nodeproto.CodeNotImplemented:
+		return http.StatusServiceUnavailable, "this node does not support that path yet"
+	default:
+		return http.StatusServiceUnavailable, "the tenant's node refused the request"
+	}
+}
+
 func (p *Proxy) ensureUpstream(ctx context.Context, token string, t registry.Tenant) (*session.Upstream, error) {
 	record, err := p.Sessions.Get(token)
 	if err != nil {
@@ -1155,11 +1250,21 @@ func (p *Proxy) ensureUpstream(ctx context.Context, token string, t registry.Ten
 	if record.Upstream != nil && record.Upstream.Authority == authority && (record.Upstream.ExpiresAt.IsZero() || record.Upstream.ExpiresAt.After(p.now())) {
 		return record.Upstream, nil
 	}
-	raw, err := p.HandshakeSource.TokenURL(t.Name)
-	if err != nil {
-		return nil, err
+	var upstream *session.Upstream
+	if _, remote, remoteErr := p.remoteFor(t); remoteErr != nil {
+		return nil, remoteErr
+	} else if remote {
+		// The token file and the loopback socket are on the node, so the node handshakes; it must
+		// use the authority this control plane will present on every forwarded request.
+		upstream, err = p.Nodes.Handshake(ctx, t, authority)
+	} else {
+		var raw string
+		raw, err = p.HandshakeSource.TokenURL(t.Name)
+		if err != nil {
+			return nil, err
+		}
+		upstream, err = p.Exchanger.Exchange(ctx, raw, authority)
 	}
-	upstream, err := p.Exchanger.Exchange(ctx, raw, authority)
 	if err != nil {
 		return nil, err
 	}
@@ -1176,13 +1281,48 @@ func (p *Proxy) ensureUpstream(ctx context.Context, token string, t registry.Ten
 	return record.Upstream, nil
 }
 
-func (p *Proxy) reverseProxy(t registry.Tenant, token, requestPath string) http.Handler {
+// isNodeTransportFailure reports whether an error from the node hop is a connection-level failure
+// (dial, reset, timeout) rather than something the node said. A node's own refusal arrives as a
+// response, so anything here means the machine did not answer.
+func isNodeTransportFailure(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var opErr *net.OpError
+	return errors.As(err, &opErr)
+}
+
+func (p *Proxy) reverseProxy(t registry.Tenant, token, requestPath string, ref NodeRef, remote bool, browserSession string) http.Handler {
 	noStore := !p.Config.StoreAPIData() && isAPIPath(requestPath)
 	authority := net.JoinHostPort("127.0.0.1", strconv.Itoa(t.WorkerPort))
 	target := &url.URL{Scheme: "http", Host: authority}
-	rp := &httputil.ReverseProxy{FlushInterval: -1, Transport: &retryTransport{p: p, tenant: t, token: token, base: p.baseTransport()}, Rewrite: func(pr *httputil.ProxyRequest) {
-		pr.SetURL(target)
-		pr.Out.Host = authority
+	if remote {
+		// The node is the upstream: the request is addressed at it, and the worker's loopback
+		// authority is presented by the node on the final hop (which is what keeps dsh's
+		// authority-bound cookie valid without either side sharing a key).
+		if parsed, err := url.Parse(ref.BaseURL); err == nil {
+			target = parsed
+		}
+	}
+	var refusal *nodeRefusal
+	rp := &httputil.ReverseProxy{FlushInterval: -1, Transport: &retryTransport{p: p, tenant: t, token: token, base: p.baseTransport(), node: nodeForTransport(ref, remote), browserSession: browserSession}, Rewrite: func(pr *httputil.ProxyRequest) {
+		if remote {
+			// Path prefixing preserves the tenant's own path (and its escaping) exactly: the node
+			// strips the prefix again before it talks to the worker.
+			pr.Out.URL.Scheme = target.Scheme
+			pr.Out.URL.Host = target.Host
+			pr.Out.URL.Path = nodeproto.TenantPath + strings.TrimPrefix(pr.In.URL.Path, "/")
+			if pr.In.URL.RawPath != "" {
+				pr.Out.URL.RawPath = nodeproto.TenantPath + strings.TrimPrefix(pr.In.URL.RawPath, "/")
+			} else {
+				pr.Out.URL.RawPath = ""
+			}
+			pr.Out.Host = target.Host
+		} else {
+			pr.SetURL(target)
+			pr.Out.Host = authority
+		}
 		pr.Out.Header.Del(p.Config.EdgePortHeader)
 		// The shell document is rewritten below, so it must arrive uncompressed:
 		// rewriting a gzipped body corrupts it (the browser reports
@@ -1191,7 +1331,36 @@ func (p *Proxy) reverseProxy(t registry.Tenant, token, requestPath string) http.
 			pr.Out.Header.Del("Accept-Encoding")
 		}
 		stripRequestHeaders(pr.Out.Header)
+		// Node headers go on AFTER the strip: they are ours. Everything the browser labelled with
+		// our protocol's namespace goes first — Set would overwrite the values we write anyway, but
+		// a header we do not set on this path (the browser-session digest, on a non-poll request)
+		// would otherwise be the browser's.
+		if remote {
+			stripNodeHeaders(pr.Out.Header)
+			pr.Out.Header.Set(nodeproto.HeaderTenant, t.Name)
+			pr.Out.Header.Set(nodeproto.HeaderProtocol, nodeproto.ProtocolHeaderValue)
+			pr.Out.Header.Set("Authorization", "Bearer "+ref.Token)
+			if browserSession != "" {
+				pr.Out.Header.Set(nodeproto.HeaderBrowserSession, browserSession)
+			}
+		}
 	}, ModifyResponse: func(resp *http.Response) error {
+		// Read the node's refusal code first, then take the whole namespace off the response: the
+		// browser must not see these headers, and a worker must not be able to inject one that
+		// this control plane would read as the node's word.
+		refusalCode := ""
+		if remote {
+			refusalCode = strings.TrimSpace(resp.Header.Get(nodeproto.HeaderError))
+			stripNodeHeaders(resp.Header)
+		}
+		if refusalCode != "" {
+			// A node-side refusal: drop its wording (it names machines and internals) and answer
+			// from here, where the operator's log and audit live.
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			_ = resp.Body.Close()
+			refusal = &nodeRefusal{code: refusalCode, status: resp.StatusCode}
+			return refusal
+		}
 		stripWorkerCookies(resp)
 		if noStore {
 			noStoreHeaders(resp.Header)
@@ -1232,7 +1401,25 @@ func (p *Proxy) reverseProxy(t registry.Tenant, token, requestPath string) http.
 		}
 		return nil
 	}, ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-		p.log().Error("dsh reverse proxy failed", "tenant", t.Name, "error_type", fmt.Sprintf("%T", err))
+		var sentinel *nodeRefusal
+		if errors.As(err, &sentinel) {
+			status, message := nodeRefusalMessage(sentinel.code)
+			p.log().Error("node refused a tenant request", "tenant", t.Name, "node", ref.Name, "code", sentinel.code, "status", status)
+			p.audit(r, t.Name, "node_refusal_"+sentinel.code, sentinel.code, status)
+			http.Error(w, message, status)
+			return
+		}
+		// A remote tenant's upstream is our own node agent, so failing to reach it is a
+		// gateway-side outage (503), not "the upstream broke" (502). This is the path a cached
+		// handshake takes: the session still holds a live cookie, so no control call happens
+		// before the dial, and the failure only shows up here.
+		if remote && isNodeTransportFailure(err) {
+			p.log().Error("tenant node is unreachable", "tenant", t.Name, "node", ref.Name, "err", err)
+			p.audit(r, t.Name, "node_unreachable", err.Error(), http.StatusServiceUnavailable)
+			http.Error(w, "this tenant's node is unreachable", http.StatusServiceUnavailable)
+			return
+		}
+		p.log().Error("dsh reverse proxy failed", "tenant", t.Name, "node", ref.Name, "error_type", fmt.Sprintf("%T", err))
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 	}}
 	return rp
@@ -1332,6 +1519,17 @@ func noStoreHeaders(h http.Header) {
 	h.Set("Expires", "0")
 }
 
+// stripNodeHeaders removes every header in the node protocol's namespace. It is applied to the
+// outbound request (so a browser's own X-Dshgw-* can never be mistaken for ours) and to the
+// inbound response (so a worker cannot speak the node's error channel).
+func stripNodeHeaders(h http.Header) {
+	for key := range h {
+		if strings.HasPrefix(http.CanonicalHeaderKey(key), "X-Dshgw-") {
+			h.Del(key)
+		}
+	}
+}
+
 func stripRequestHeaders(h http.Header) {
 	h.Del("Cookie")
 	h.Del("Origin")
@@ -1350,6 +1548,42 @@ type retryTransport struct {
 	tenant registry.Tenant
 	token  string
 	base   http.RoundTripper
+	// node is non-nil for a tenant that runs on a worker node: then the request is addressed at
+	// the node and only the worker credential has to be (re)injected.
+	node           *NodeRef
+	browserSession string
+}
+
+// nodeForTransport returns the node reference for a remote tenant, or nil for a local one.
+func nodeForTransport(ref NodeRef, remote bool) *NodeRef {
+	if !remote {
+		return nil
+	}
+	return &ref
+}
+
+// decorate injects the worker credential into an outbound request.
+//
+// For a local tenant that also means pointing the request at the worker's loopback authority
+// (cloneForCookie). For a remote tenant the URL stays where it is — on the node — and the node
+// presents the loopback authority itself; rewriting it here would send another machine's traffic
+// to this machine's loopback port.
+func (t *retryTransport) decorate(req *http.Request, upstream *session.Upstream) *http.Request {
+	if t.node == nil {
+		return cloneForCookie(req, upstream)
+	}
+	out := req.Clone(req.Context())
+	out.Header = req.Header.Clone()
+	stripRequestHeaders(out.Header)
+	stripNodeHeaders(out.Header)
+	out.Header.Set("Cookie", (&http.Cookie{Name: upstream.Name, Value: upstream.Value}).String())
+	out.Header.Set("Authorization", "Bearer "+t.node.Token)
+	out.Header.Set(nodeproto.HeaderTenant, t.tenant.Name)
+	out.Header.Set(nodeproto.HeaderProtocol, nodeproto.ProtocolHeaderValue)
+	if t.browserSession != "" {
+		out.Header.Set(nodeproto.HeaderBrowserSession, t.browserSession)
+	}
+	return out
 }
 
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -1357,7 +1591,7 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	first := cloneForCookie(req, upstream)
+	first := t.decorate(req, upstream)
 	resp, err := t.base.RoundTrip(first)
 	if err != nil {
 		return nil, err
@@ -1379,7 +1613,7 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	retry := cloneForCookie(req, next)
+	retry := t.decorate(req, next)
 	if req.GetBody != nil {
 		retry.Body, err = req.GetBody()
 		if err != nil {

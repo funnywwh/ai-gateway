@@ -10,6 +10,8 @@ import (
 	"github.com/winger/ai-gateway/internal/dshgw/browsermount"
 	"github.com/winger/ai-gateway/internal/dshgw/config"
 	"github.com/winger/ai-gateway/internal/dshgw/hostshare"
+	"github.com/winger/ai-gateway/internal/dshgw/nodeclient"
+	"github.com/winger/ai-gateway/internal/dshgw/nodestore"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
 	"github.com/winger/ai-gateway/internal/dshgw/securefile"
 	"github.com/winger/ai-gateway/internal/dshgw/session"
@@ -18,9 +20,11 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type runtimeDeps struct {
@@ -28,6 +32,19 @@ type runtimeDeps struct {
 	reg       *registry.Registry
 	validator *aigw.Client
 	manager   *tenancy.Manager
+	// nodes is the control plane's node records (M77) and nodeView the merged view of the
+	// static configuration list plus those records. Both stay empty on a worker node and in a
+	// single-machine deployment that declares nothing.
+	nodes    *nodestore.Store
+	nodeView []nodestore.Node
+	// nodeAdmin is the shared node surface (M77): one implementation for the CLI, the admin
+	// channel and (through it) the console, including the single-flight deploy jobs.
+	nodeAdmin *nodeAdmin
+}
+
+// nodeViewNamed looks one node up in the merged node view (M77).
+func (d *runtimeDeps) nodeViewNamed(name string) (nodestore.Node, bool) {
+	return nodestore.Find(d.nodeView, name)
 }
 
 func (c *cli) loadRuntime(withSessions bool) (*runtimeDeps, error) {
@@ -39,8 +56,38 @@ func (c *cli) loadRuntime(withSessions bool) (*runtimeDeps, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load registry: %w", err)
 	}
+	// M77. A worker node keeps its own allocation table, so every record in it is local by
+	// definition: a record naming a remote node cannot be honoured from inside a node (the
+	// lifecycle layer would try to reach a node from a node). A control plane instead checks
+	// its tenants against the merged node view built below, where "an unknown node" is a
+	// startup failure rather than a tenant whose every request fails without a hint.
+	store := nodestore.New(cfg.NodeStorePath())
+	var view []nodestore.Node
+	var nodeClients *nodeclient.Set
+	if cfg.NodeMode() {
+		if err := reg.ValidateNodes(func(string) bool { return false }); err != nil {
+			return nil, err
+		}
+	} else {
+		loaded, err := nodestore.Load(cfg.NodeStorePath())
+		if err != nil {
+			return nil, fmt.Errorf("load node store: %w", err)
+		}
+		merged, err := loaded.View(cfg.Nodes)
+		if err != nil {
+			return nil, err
+		}
+		if err := reg.ValidateNodes(nodestore.NamesKnown(merged)); err != nil {
+			return nil, err
+		}
+		built, err := nodeClientsFor(cfg, merged)
+		if err != nil {
+			return nil, err
+		}
+		store, view, nodeClients = loaded, merged, built
+	}
 	client := &aigw.Client{BaseURL: cfg.AigwBaseURL, HTTP: &http.Client{Timeout: cfg.ValidateTimeout.Duration()}}
-	manager := &tenancy.Manager{Config: cfg, Registry: reg, Activity: &activity.Store{Path: cfg.ActivityPath}}
+	manager := &tenancy.Manager{Config: cfg, Registry: reg, Activity: &activity.Store{Path: cfg.ActivityPath}, Nodes: nodeClients}
 	if withSessions {
 		store, err := session.NewFileStoreWithLimit(cfg.SessionPath, cfg.MaxSessions)
 		if err != nil {
@@ -79,7 +126,9 @@ func (c *cli) loadRuntime(withSessions bool) (*runtimeDeps, error) {
 	// CLI processes cannot detach mounts owned by the live browser transport.
 	// Guard even while disabled: a config toggle does not remove existing kernel mounts.
 	manager.BrowserWorkspaces = &browsermount.DetachedGuard{Registry: reg}
-	return &runtimeDeps{cfg: cfg, reg: reg, validator: client, manager: manager}, nil
+	deps := &runtimeDeps{cfg: cfg, reg: reg, validator: client, manager: manager, nodes: store, nodeView: view}
+	deps.nodeAdmin = newNodeAdmin(deps, version, revision)
+	return deps, nil
 }
 
 // hostShareService builds the M71 service from the deployment's declarations, or returns a nil
@@ -195,4 +244,63 @@ func cleanPrefix(raw string) (string, error) {
 		}
 	}
 	return prefix, nil
+}
+
+// nodeClientsFor builds one client per node from the merged node view (configuration + records).
+//
+// The token is resolved here: from the record, from a 0600 file the record names, or — for a node
+// that has been registered but not deployed — missing entirely, which is legal and simply means
+// every call to it is refused until the deploy installs one.
+func nodeClientsFor(cfg *config.Config, nodes []nodestore.Node) (*nodeclient.Set, error) {
+	specs := make([]nodeclient.Spec, 0, len(nodes))
+	for _, node := range nodes {
+		token := ""
+		switch {
+		case strings.TrimSpace(node.Token) != "":
+			token = strings.TrimSpace(node.Token)
+		case strings.TrimSpace(node.TokenFile) != "":
+			// An operator who keeps the secret in a file on the control plane: a file that is not
+			// there is a configuration error the gateway must report, not paper over.
+			resolved, err := cfg.NodeToken(config.Node{Name: node.Name, Token: node.Token, TokenFile: node.TokenFile})
+			if err != nil {
+				return nil, err
+			}
+			token = resolved
+		default:
+		}
+		specs = append(specs, nodeclient.Spec{Name: node.Name, BaseURL: node.URL, Token: token})
+	}
+	return nodeclient.NewSet(specs)
+}
+
+// nodeStoreFingerprint is what the serve loop compares to notice that the node store changed
+// underneath it (a deploy, a rotation, a console registration).
+func nodeStoreFingerprint(cfg *config.Config) (time.Time, int64) {
+	info, err := os.Stat(cfg.NodeStorePath())
+	if err != nil {
+		return time.Time{}, -1
+	}
+	return info.ModTime(), info.Size()
+}
+
+// refreshNodeClients re-reads the node store and updates the running gateway's clients.
+//
+// Without it a deploy or a rotation made through this gateway's own admin channel (the console's
+// button) would not reach the clients already in memory, and every tenant on that node would fail
+// until a restart — the one thing a "one-click" button must not require.
+func refreshNodeClients(cfg *config.Config, store *nodestore.Store, clients *nodeclient.Set) error {
+	nodes, err := store.View(cfg.Nodes)
+	if err != nil {
+		return err
+	}
+	fresh, err := nodeClientsFor(cfg, nodes)
+	if err != nil {
+		return err
+	}
+	specs := make([]nodeclient.Spec, 0, fresh.Len())
+	fresh.Each(func(client *nodeclient.Client) {
+		specs = append(specs, nodeclient.Spec{Name: client.Name, BaseURL: client.BaseAddress(), Token: client.Secret()})
+	})
+	clients.Refresh(specs)
+	return nil
 }

@@ -22,6 +22,7 @@ export const routes = [
   { path: '/requests', title: '请求日志', module: './pages/requests.js', group: '可观测' },
   { path: '/hooks', title: 'Hooks', module: './pages/hooks.js', group: '可观测' },
   { path: '/audit', title: '审计日志', module: './pages/audit.js', group: '可观测' },
+  { path: '/dsh-nodes', title: 'DSH 节点', module: './pages/dshgw_nodes.js', group: '运维' },
   { path: '/backups', title: '备份', module: './pages/backups.js', group: '运维' },
   { path: '/settings', title: '设置', module: './pages/settings.js', group: '运维' },
 ];

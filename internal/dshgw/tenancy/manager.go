@@ -20,6 +20,8 @@ import (
 
 	"github.com/winger/ai-gateway/internal/dshgw/aigw"
 	"github.com/winger/ai-gateway/internal/dshgw/config"
+	"github.com/winger/ai-gateway/internal/dshgw/nodeclient"
+	"github.com/winger/ai-gateway/internal/dshgw/nodeproto"
 	"github.com/winger/ai-gateway/internal/dshgw/registry"
 	"github.com/winger/ai-gateway/internal/dshgw/sandbox"
 	"github.com/winger/ai-gateway/internal/dshgw/securefile"
@@ -96,6 +98,10 @@ type Manager struct {
 	SSHWorkspaces     SSHWorkspaceHook
 	HostShares        HostShareHook
 	BrowserWorkspaces BrowserWorkspaceHook
+	// Nodes are the worker nodes this control plane may place tenants on (M77). Nil (or empty)
+	// means "this machine only": every tenant must be local, which is exactly the
+	// single-machine deployment's behaviour.
+	Nodes *nodeclient.Set
 }
 
 // HostShareHook is the host-share surface the lifecycle needs (M71): the bindings one account's
@@ -234,6 +240,22 @@ type CreateOptions struct {
 	// sidebar can name the person signed in. Empty is accepted: the CLI creates tenants
 	// without an account, and the sidebar falls back to the tenant name.
 	Account string
+	// Node is where the tenant's worker runs (M77). Empty or "local" provisions it here; any
+	// other name is a worker node, and this manager then provisions it over the control channel
+	// (the control plane decides the identity and the public port, the node decides its own
+	// paths and worker port).
+	Node string
+	// PublicPort pins the public port instead of allocating one. The control plane sets it when
+	// it asks a node to create a tenant — it owns the public surface, so the node must not pick.
+	PublicPort int
+	// WorkerPort pins the worker port instead of allocating one. A node uses it when it re-creates
+	// a tenant whose port it already recorded, which keeps the handshake authority stable.
+	WorkerPort int
+	// NoKeyPrefix records the tenant without binding its key prefix (M77). A worker node's
+	// allocation table maps tenants to workers; which key logs into which tenant is bound in the
+	// control plane's registry, and a second copy here would both duplicate that decision and make
+	// the node refuse a rotation the control plane already made.
+	NoKeyPrefix bool
 }
 
 func (m *Manager) Create(ctx context.Context, name, key string, models []aigw.Model, opt CreateOptions) (created registry.Tenant, err error) {
@@ -248,6 +270,9 @@ func (m *Manager) Create(ctx context.Context, name, key string, models []aigw.Mo
 func (m *Manager) createLocked(ctx context.Context, name, key string, models []aigw.Model, opt CreateOptions) (created registry.Tenant, err error) {
 	if !config.ValidTenantName(name) {
 		return created, fmt.Errorf("invalid tenant name %q", name)
+	}
+	if !m.Config.IsLocalNode(opt.Node) {
+		return m.createRemote(ctx, name, key, models, opt)
 	}
 	if m.Config.IsReservedTenant(name) {
 		return created, fmt.Errorf("tenant name %q is reserved", name)
@@ -276,8 +301,10 @@ func (m *Manager) createLocked(ctx context.Context, name, key string, models []a
 	if browser != "on" && browser != "off" {
 		return created, fmt.Errorf("invalid browser-fs mode %q", browser)
 	}
-	if existing, ok := m.Registry.ByPrefix(key[:12]); ok {
-		return created, fmt.Errorf("key prefix already belongs to tenant %q", existing.Name)
+	if !opt.NoKeyPrefix {
+		if existing, ok := m.Registry.ByPrefix(key[:12]); ok {
+			return created, fmt.Errorf("key prefix already belongs to tenant %q", existing.Name)
+		}
 	}
 	account := strings.TrimSpace(opt.Account)
 	if account != "" {
@@ -290,11 +317,32 @@ func (m *Manager) createLocked(ctx context.Context, name, key string, models []a
 	if err := ValidateTemplate(m.Config.Deploy.TemplateHome, browser == "on"); err != nil {
 		return created, err
 	}
-	pub, worker, err := m.Registry.AssignPorts(m.Config, m.Taken)
-	if err != nil {
-		return created, err
+	// Ports (M77): either side may be pinned, and each is then not allocated at all. A node
+	// always pins the public port (the control plane owns that surface) and usually lets this
+	// machine pick the worker port; the control plane pins nothing and picks both.
+	pub, worker := opt.PublicPort, opt.WorkerPort
+	if worker == 0 {
+		allocated, allocErr := m.Registry.AssignWorkerPort(m.Config, m.Taken)
+		if allocErr != nil {
+			return created, allocErr
+		}
+		worker = allocated
 	}
-	created = registry.Tenant{Name: name, PublicPort: pub, WorkerPort: worker, KeyPrefix: key[:12], DshHome: filepath.Join(m.Config.TenantRoot, name, ".dsh"), Workspace: filepath.Join(m.Config.WorkspaceRoot, name), CreatedAt: m.now(), Handshake: registry.HandshakePending, DirectoryPicker: picker, PluginBrowserFS: browser, ModelsPending: len(models) == 0, Isolation: registry.IsolationBwrap, Account: strings.TrimSpace(opt.Account)}
+	if pub == 0 {
+		allocated, _, allocErr := m.Registry.AssignPorts(m.Config, m.Taken)
+		if allocErr != nil {
+			return created, allocErr
+		}
+		pub = allocated
+	}
+	if pub < 1 || pub > 65535 || worker < 1 || worker > 65535 || pub == worker {
+		return created, fmt.Errorf("create %s: unusable port pair (public %d, worker %d)", name, pub, worker)
+	}
+	prefix := key[:12]
+	if opt.NoKeyPrefix {
+		prefix = ""
+	}
+	created = registry.Tenant{Name: name, PublicPort: pub, WorkerPort: worker, KeyPrefix: prefix, Node: opt.Node, DshHome: filepath.Join(m.Config.TenantRoot, name, ".dsh"), Workspace: filepath.Join(m.Config.WorkspaceRoot, name), CreatedAt: m.now(), Handshake: registry.HandshakePending, DirectoryPicker: picker, PluginBrowserFS: browser, ModelsPending: len(models) == 0, Isolation: registry.IsolationBwrap, Account: strings.TrimSpace(opt.Account)}
 	// The tenant's own roots. They are deduplicated because a deployment may point
 	// tenant_config_root and tenant_root at the same directory: the layout is the
 	// operator's business, and creating the same path twice is not an error worth
@@ -363,6 +411,14 @@ func (m *Manager) createLocked(ctx context.Context, name, key string, models []a
 		}
 	}
 	created.UID = os.Geteuid()
+	// The account's host-share container and targets (M71) BEFORE the profile is rendered: the
+	// profile binds the container read-only and then each share inside it, and a bind source that
+	// does not exist yet is a rendering failure, not a missing optional row. (`startWorker` has
+	// always done this in the right order; create did not, so creating a tenant in a deployment
+	// that declares host shares failed outright.)
+	if err = m.ensureHostShares(created); err != nil {
+		return created, err
+	}
 	if err = m.SandboxProfileReady(created); err != nil {
 		return created, err
 	}
@@ -373,11 +429,6 @@ func (m *Manager) createLocked(ctx context.Context, name, key string, models []a
 	// asks for one. A missing or too-broad key source is a configuration error and fails the
 	// create: a half-provisioned account is what produces "the button does nothing" later.
 	if err = m.ensureSSHIdentity(created); err != nil {
-		return created, err
-	}
-	// The account's host-share container and targets (M71), for the same reason: the first
-	// worker start must find them, and the profile binds what is in the configuration.
-	if err = m.ensureHostShares(created); err != nil {
 		return created, err
 	}
 	for _, seed := range m.Config.WorkspaceSeed {
@@ -555,6 +606,20 @@ func (m *Manager) probeWorker(ctx context.Context, t registry.Tenant) error {
 	return last
 }
 func (m *Manager) ProbeWorker(ctx context.Context, t registry.Tenant) error {
+	if client, err := m.remoteFor(t); err != nil {
+		return err
+	} else if client != nil {
+		// A remote probe is one question: is the worker running on that machine? The node's
+		// own /api 401 contract is its business, and it already applies it when it starts one.
+		state, stateErr := client.TenantState(ctx, t.Name)
+		if stateErr != nil {
+			return stateErr
+		}
+		if !state.Running {
+			return fmt.Errorf("worker is not running on node %s", client.Name)
+		}
+		return nil
+	}
 	if m.Probe != nil {
 		return m.Probe(ctx, t)
 	}
@@ -563,6 +628,11 @@ func (m *Manager) ProbeWorker(ctx context.Context, t registry.Tenant) error {
 
 // Restart replaces the tenant's worker process in place.
 func (m *Manager) Restart(ctx context.Context, t registry.Tenant) error {
+	if client, err := m.remoteFor(t); err != nil {
+		return err
+	} else if client != nil {
+		return remoteTenantOp(ctx, client, "tenant-restart", t.Name)
+	}
 	if err := m.workers().Restart(ctx, t); err != nil {
 		return err
 	}
@@ -576,6 +646,18 @@ func (m *Manager) Restart(ctx context.Context, t registry.Tenant) error {
 // does not bring back a tenant the operator turned off. The old shape stored that
 // intent in a systemd unit's enablement; M58 stores it in the registry.
 func (m *Manager) StopWorker(ctx context.Context, t registry.Tenant) error {
+	if client, err := m.remoteFor(t); err != nil {
+		return err
+	} else if client != nil {
+		// The intent is recorded HERE first, exactly as the local path does: suspension is the
+		// operator's decision, and the control plane is where it is decided (the node honors the
+		// copy it is sent). Recording it before the RPC means an unreachable node still leaves the
+		// decision made — the next reconcile applies it, instead of losing it.
+		if err := m.setSuspended(t.Name, true); err != nil {
+			return err
+		}
+		return remoteTenantOp(ctx, client, "tenant-stop", t.Name)
+	}
 	if err := m.setSuspended(t.Name, true); err != nil {
 		return err
 	}
@@ -591,6 +673,16 @@ func (m *Manager) StopWorker(ctx context.Context, t registry.Tenant) error {
 // StartWorker clears the durable intent, refreshes the tenant's models and starts
 // the process.
 func (m *Manager) StartWorker(ctx context.Context, t registry.Tenant) error {
+	if client, err := m.remoteFor(t); err != nil {
+		return err
+	} else if client != nil {
+		// Same order as the local path: clear the durable intent, then start. A node that cannot be
+		// reached therefore still gets the intent applied by the next reconcile.
+		if err := m.setSuspended(t.Name, false); err != nil {
+			return err
+		}
+		return remoteTenantOp(ctx, client, "tenant-start", t.Name)
+	}
 	if err := m.setSuspended(t.Name, false); err != nil {
 		return err
 	}
@@ -615,6 +707,15 @@ func (m *Manager) StartWorker(ctx context.Context, t registry.Tenant) error {
 // The operator's suspension is honoured rather than cleared: `suspended` says the deployment
 // turned this tenant off, and a user signing in is not an operator action.
 func (m *Manager) EnsureRunning(ctx context.Context, t registry.Tenant) (bool, error) {
+	if client, err := m.remoteFor(t); err != nil {
+		return false, err
+	} else if client != nil {
+		started, runErr := client.TenantEnsureRunning(ctx, t.Name)
+		if runErr != nil {
+			return started, runErr
+		}
+		return started, nil
+	}
 	current, ok := m.Registry.Get(t.Name)
 	if !ok {
 		return false, fmt.Errorf("tenant %q not found", t.Name)
@@ -651,6 +752,21 @@ func (m *Manager) EnsureRunning(ctx context.Context, t registry.Tenant) (bool, e
 // failed worker stop returned early and left every mount mounted (2026-09-22: three logouts in a
 // row audited as failures while the dsh itself had already exited).
 func (m *Manager) StopForLogout(ctx context.Context, t registry.Tenant) (LogoutResult, error) {
+	if client, err := m.remoteFor(t); err != nil {
+		return LogoutResult{}, err
+	} else if client != nil {
+		// The mounts and the worker are both on that machine, so the whole ordered teardown runs
+		// there and this side records what it reports.
+		remote, remoteErr := client.TenantLogoutStop(ctx, t.Name)
+		if remoteErr != nil {
+			return LogoutResult{}, remoteErr
+		}
+		return LogoutResult{
+			MountsDetached: remote.MountsDetached,
+			MountsLeftover: remote.MountsLeftover,
+			WorkerStopped:  remote.WorkerStopped,
+		}, nil
+	}
 	current := t
 	if live, ok := m.Registry.Get(t.Name); ok {
 		current = live
@@ -698,6 +814,17 @@ func (m *Manager) StopForLogout(ctx context.Context, t registry.Tenant) (LogoutR
 }
 
 // Enable is the console's durable on/off toggle for one tenant's DSH.
+// SetSuspended records the operator's durable intent for one tenant without touching its worker
+// (M77).
+//
+// Reconciliation needs exactly this: it decides the worker transitions itself (start what should
+// run, stop what should not), and doing them through StartWorker/StopWorker would both duplicate
+// the transitions and clear the flag it just set. The control plane never calls this for a remote
+// tenant — it changes suspension through StopWorker/StartWorker, which dispatch to the node.
+func (m *Manager) SetSuspended(_ context.Context, name string, suspended bool) error {
+	return m.setSuspended(name, suspended)
+}
+
 func (m *Manager) Enable(ctx context.Context, t registry.Tenant, on bool) error {
 	if !on {
 		return m.StopWorker(ctx, t)
@@ -706,7 +833,20 @@ func (m *Manager) Enable(ctx context.Context, t registry.Tenant, on bool) error 
 }
 
 // Status reports the worker process and the recorded operator intent.
-func (m *Manager) Status(_ context.Context, t registry.Tenant) (WorkerState, error) {
+func (m *Manager) Status(ctx context.Context, t registry.Tenant) (WorkerState, error) {
+	if client, err := m.remoteFor(t); err != nil {
+		return WorkerState{}, err
+	} else if client != nil {
+		state, stateErr := client.TenantState(ctx, t.Name)
+		if stateErr != nil {
+			return WorkerState{}, stateErr
+		}
+		detail := ""
+		if !state.Running {
+			detail = "stopped on node " + client.Name
+		}
+		return WorkerState{Running: state.Running, Suspended: state.Suspended, PID: state.PID, Detail: detail}, nil
+	}
 	current := t
 	if live, ok := m.Registry.Get(t.Name); ok {
 		current = live
@@ -824,6 +964,15 @@ func (m *Manager) setSuspended(name string, suspended bool) error {
 }
 
 func (m *Manager) RotateKey(ctx context.Context, t registry.Tenant, key string, models []aigw.Model, keepPrevious bool) error {
+	if client, err := m.remoteFor(t); err != nil {
+		return err
+	} else if client != nil {
+		normalized, keyErr := aigw.NormalizeKey(key)
+		if keyErr != nil {
+			return keyErr
+		}
+		return m.rotateRemote(ctx, client, t, normalized, models, keepPrevious)
+	}
 	return m.WithLifecycleLock(func() error {
 		current, ok := m.Registry.Get(t.Name)
 		if !ok {
@@ -905,10 +1054,17 @@ func (m *Manager) rotateKeyLocked(ctx context.Context, t registry.Tenant, key st
 			if err = securefile.WriteAtomic(gatewayPath, []byte(key+"\n"), 0o640); err != nil {
 				return err
 			}
-			if err = m.Registry.RotatePrefix(t.Name, key[:12], keepPrevious); err != nil {
-				return err
+			// Binding the new prefix is the control plane's job. A record that carries no prefix is
+			// a worker node's allocation entry (M77): the node holds the credential because its
+			// worker calls aigw, but "which key is this tenant" is decided in the registry that owns
+			// keys. Binding one here would duplicate that decision and reject the control plane's
+			// next rotation as a duplicate.
+			if t.KeyPrefix != "" {
+				if err = m.Registry.RotatePrefix(t.Name, key[:12], keepPrevious); err != nil {
+					return err
+				}
+				rotatedRegistry = true
 			}
-			rotatedRegistry = true
 			updated, _ := m.Registry.Get(t.Name)
 			updated.ModelsPending = len(models) == 0
 			if err = m.Registry.Put(updated); err != nil {
@@ -957,6 +1113,20 @@ func (m *Manager) BindPrefix(tenant, prefix string) error {
 // An existing settings.yaml is never touched: while a tenant is provisioned its model
 // list belongs to SyncModels, and rewriting it here would fight that path.
 func (m *Manager) EnsureProvisioned(ctx context.Context, t registry.Tenant, key string, models []aigw.Model) (bool, error) {
+	if client, err := m.remoteFor(t); err != nil {
+		return false, err
+	} else if client != nil {
+		// The files belong to the node's copy of the tenant. The op is idempotent: it writes what
+		// is missing and leaves an existing settings.yaml to SyncModels, exactly like this side.
+		request := nodeproto.TenantEnsureProvisionedRequest{
+			Name: t.Name, Key: key, Models: nodeproto.ModelsToSpec(models),
+		}
+		var result nodeproto.TenantEnsureProvisionedResult
+		if err := client.Call(ctx, "tenant-ensure-provisioned", request, &result); err != nil {
+			return false, fmt.Errorf("node %s: provision tenant: %w", client.Name, err)
+		}
+		return result.Provisioned, nil
+	}
 	normalized, err := aigw.NormalizeKey(key)
 	if err != nil {
 		return false, err
@@ -1003,8 +1173,14 @@ func (m *Manager) EnsureProvisioned(ctx context.Context, t registry.Tenant, key 
 		}
 		// The key's own prefix becomes the tenant's, with the old one kept as a
 		// previous prefix so an existing binding is not silently dropped.
-		if err := m.Registry.RotatePrefix(current.Name, normalized[:12], true); err != nil {
-			return err
+		//
+		// Only for a record that already carries a prefix: an unbound record is a worker node's
+		// allocation entry (M77), where binding a prefix would duplicate the control plane's
+		// decision about which key logs into this tenant.
+		if current.KeyPrefix != "" {
+			if err := m.Registry.RotatePrefix(current.Name, normalized[:12], true); err != nil {
+				return err
+			}
 		}
 		updated, _ := m.Registry.Get(current.Name)
 		updated.ModelsPending = len(models) == 0
@@ -1022,6 +1198,18 @@ func (m *Manager) EnsureProvisioned(ctx context.Context, t registry.Tenant, key 
 
 // SyncModels updates a provisioned tenant's model list.
 func (m *Manager) SyncModels(t registry.Tenant, models []aigw.Model) error {
+	// A remote tenant's settings.yaml lives on its node, so the list is applied there. The call
+	// has no context of its own because every caller (create, login, the CLI) reaches it through a
+	// path that already bounded the request; the node client applies its own timeout.
+	if client, err := m.remoteFor(t); err != nil {
+		return err
+	} else if client != nil {
+		request := nodeproto.TenantSyncModelsRequest{Name: t.Name, Models: nodeproto.ModelsToSpec(models)}
+		if err := client.TenantSyncModels(context.Background(), request); err != nil {
+			return fmt.Errorf("node %s: sync models: %w", client.Name, err)
+		}
+		return nil
+	}
 	return m.WithLifecycleLock(func() error {
 		current, ok := m.Registry.Get(t.Name)
 		if !ok {
@@ -1071,7 +1259,14 @@ var startupURLRE = regexp.MustCompile(`(?m)^dsh web: (http://127\.0\.0\.1:([0-9]
 // CaptureURL returns the startup URL a tenant worker printed. The runner reads it
 // from the child's own output (M58), which replaced the journalctl scan the
 // systemd shape needed.
-func (m *Manager) CaptureURL(_ context.Context, t registry.Tenant) (string, error) {
+func (m *Manager) CaptureURL(ctx context.Context, t registry.Tenant) (string, error) {
+	if client, err := m.remoteFor(t); err != nil {
+		return "", err
+	} else if client != nil {
+		// The URL carries the worker's one-shot token, so it is a credential beyond the node's
+		// token: it crosses the control channel and is printed only when an operator asks.
+		return client.TenantCaptureURL(ctx, t.Name)
+	}
 	url, ok := m.workers().StartURL(t.Name)
 	if !ok {
 		return "", fmt.Errorf("worker for %s has not reported a startup URL", t.Name)

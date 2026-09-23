@@ -39,10 +39,28 @@
       state/workspaces/<账号>/.ssh/ 该账号的 ssh 身份（id_rsa 0600）、known_hosts 与别名清单 config（0644）；
                                   另有可选的 identity-managed（0600）：表示该身份归账号自己管，网关不再种密钥
       ssh-configs/<账号>         该账号别名清单的**初始种子**（运维资产，0644；由 ssh_config_dir 指定）
+      nodes.json                 多机形态（M77）：控制面登记的节点（0600；含令牌与部署状态）
+      node-ssh/<节点>/           多机形态：该节点的部署私钥（id_ed25519 0600）与固定指纹（known_hosts）
+      node-deploy/<节点>.log     多机形态：一键部署的分阶段日志（有界；管理面只暴露尾部）
     dshgw-verify/                本机独立 dshgw 的 state / template-home / 日志
       ssh-configs/<账号>         同上（本机形态的种子目录，`scripts/ssh_config_adopt.sh` 默认写入这里）
       ssh-keys/<账号>            该账号密钥的预置来源（运维资产，0600；由 identity_dir 指定，一账号一把）
     prev/                        历史归档（回滚二进制、下线形态的归档），非活动数据
+```
+
+多机形态（M77）在**工作节点机器**上另有一棵自己独立的根，默认即目标机上的部署根
+（一键部署写在 `node.deploy.dir` 指定的目录，示例用 `/srv/dshgw-node`）：
+
+```
+<srv/dshgw-node>/                # 节点机器的部署根（在目标机本地盘上，与控制面互不共享）
+  dshgw-node.yaml                # 该节点的配置（一键部署生成，或运维手写）
+  node-a.token                   # 节点令牌（0600；位置由 node.token_file 指定）
+  bin/dshgw                      # 该节点的二进制（与控制面同版本同 revision）
+  plugins/                       # picker-clamp.js 与三块租户插件（一键部署推送）
+  template-home/                 # 该节点自己的租户模板（默认由控制面推送，或本机 prepare-template.sh 产出）
+  state/                         # state_dir：registry.json（该机分配表）、handshake/、tenants/、tenant-config/、backups/
+  workspaces/                    # workspace_root：该节点承载租户的工作区
+  .prev/                         # 上一版本（一键部署回滚用）
 ```
 
 ## 3. 相对路径规则
@@ -102,6 +120,26 @@
 |---|---|
 | `-config` | `./gwproxy.yaml` |
 | `registry_path` | `./data/dshgw/registry.json`（指向 dshgw 的 registry；相对路径同样以工作目录为基准） |
+
+### 4.4 工作节点（`dshgw-node.yaml`，M77）
+
+节点机器上的默认值与上面同一套派生规则（同一份配置类型），**只有 `node:` 段与运行时安装路径是本机特有的**：
+
+| 配置键 | 默认值 / 要求 |
+|---|---|
+| `-config` | `./dshgw-node.yaml`（一键部署写在 `node.deploy.dir` 里） |
+| `node.name` / `node.listen` / `node.token_file` | **必填**；名字必须与控制面记录一致，`listen` 必须显式地址（拒绝 `0.0.0.0` 与空值） |
+| `state_dir` | `./data/dshgw-node`（一键部署写 `<deploy.dir>/state`） |
+| `tenant_root` / `workspace_root` | `<state_dir>/{tenants,workspaces}` |
+| `registry_path` / `key_map_path` | `<state_dir>/{registry.json,keys.map}`（该节点的**分配表**，由控制面推送） |
+| `handshake_dir` | `<state_dir>/handshake` |
+| `deploy.template_home` / `template_home` | `<state_dir>/template-home`（一键部署推送，或本机 `prepare-template.sh` 产出） |
+| `deploy.plugin_path` | **无默认值**（与独立形态同一门禁） |
+| `dsh.node_bin` / `bin_js` / `current_link`、`deploy.bwrap_bin` | 本机绝对路径（运行时安装，预检逐项校验） |
+| `worker_port_lo` / `worker_port_hi` | 由节点记录给出；必须是本机未被占用的段 |
+| `aigw_base_url` | **必填**（worker 直连 aigw 取模型，不经过控制面） |
+| `admin_socket`、门户/公开端口、会话、飞书 | 节点模式**不使用**（不绑定门户与公开端口，不写会话） |
+
 
 ## 5. 本机布局实例
 

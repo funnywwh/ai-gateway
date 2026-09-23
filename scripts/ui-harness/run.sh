@@ -19,7 +19,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${UI_HARNESS_WORK:-$ROOT/.cache/ui-harness}"
 PORT="${UI_HARNESS_PORT:-8097}"
-VIEWS="docs detail capacity cost models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand tree org org-readonly org-person org-accounts org-bind org-sync org-sync-readonly org-sync-nonames admins admins-readonly login chatWeb chatWebOff"
+VIEWS="docs detail capacity cost models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand tree org org-readonly org-person org-accounts org-bind org-sync org-sync-readonly org-sync-nonames admins admins-readonly login chatWeb chatWebOff nodes nodes-readonly"
 FIXTURES="$ROOT/scripts/ui-harness/fixtures.json"
 REFRESH=0
 
@@ -48,6 +48,16 @@ for candidate in /snap/firefox/current/usr/lib/firefox/firefox /usr/lib/firefox/
   if command -v "$candidate" >/dev/null 2>&1; then FIREFOX="$candidate"; break; fi
 done
 [ -n "$FIREFOX" ] || { echo "skip: no firefox binary found (set one on PATH to run the UI harness)"; exit 0; }
+
+# The snap wrapper is not a browser: it prints "Command '/usr/bin/firefox' requires the firefox snap
+# to be installed" and exits 0 without loading anything, which made every view report "no report"
+# with an empty server log — a failure mode that looks like a broken page. Ask it once and skip
+# with a reason instead (M77 found this on a host where the snap is absent but the wrapper is not).
+if ! "$FIREFOX" --version 2>&1 | grep -q "Mozilla Firefox"; then
+  echo "skip: $FIREFOX is not a usable browser (the snap wrapper cannot run here)"
+  echo "      install firefox (or point FIREFOX at a real binary) to run the UI harness"
+  exit 0
+fi
 
 if [ "$REFRESH" = 1 ]; then
   command -v curl >/dev/null 2>&1 || { echo "--refresh needs curl" >&2; exit 2; }
@@ -89,6 +99,7 @@ render_page "$ROOT/scripts/ui-harness/tree.page.html" "$WORK/site/tree.html"
 render_page "$ROOT/scripts/ui-harness/org.page.html" "$WORK/site/org.html"
 render_page "$ROOT/scripts/ui-harness/org_feishu.page.html" "$WORK/site/org-feishu.html"
 render_page "$ROOT/scripts/ui-harness/admins.page.html" "$WORK/site/admins.html"
+render_page "$ROOT/scripts/ui-harness/dshgw_nodes.page.html" "$WORK/site/dshgw-nodes.html"
 
 page_for_view() {
   case "$1" in
@@ -114,6 +125,8 @@ page_for_view() {
     org-sync|org-sync-readonly|org-sync-nonames) echo "org-feishu.html" ;;
     # 控制台管理员（M66）：同一个页面渲染"有飞书"和"没有飞书"的两种部署，只读视图单独一条。
     admins|admins-readonly) echo "admins.html" ;;
+    # DSH 节点页（M77）：同一个页面渲染管理员与只读两种会话（只读会话不该出现任何动作按钮）。
+    nodes|nodes-readonly) echo "dshgw-nodes.html" ;;
     # 不是"管理员"页：登录卡片本身（app.js 无会话时渲染成什么样），因为「飞书扫码登录」
     # 这个入口只在这里、也只在浏览器里看得见。
     login) echo "admins.html" ;;

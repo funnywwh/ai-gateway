@@ -21,8 +21,12 @@ import (
 // accepted by every operation.
 type Ops interface {
 	CreateTenant(ctx context.Context, name, account, key string) error
+	// CreateTenantIn provisions a tenant on a named worker node (M77); an empty node means this
+	// machine.
+	CreateTenantIn(ctx context.Context, name, account, key, node string) error
 	StartTenant(ctx context.Context, name string) error
 	StopTenant(ctx context.Context, name string) error
+	RestartTenant(ctx context.Context, name string) error
 	SetTenantKey(ctx context.Context, name, account, key string) error
 	ListTenants(ctx context.Context) ([]TenantInfo, error)
 }
@@ -34,6 +38,15 @@ type TenantInfo struct {
 	WorkerPort    int    `json:"worker_port"`
 	UID           int    `json:"uid"`
 	ModelsPending bool   `json:"models_pending"`
+	// M77: where this tenant's worker runs and what it is doing.
+	Node      string `json:"node,omitempty"`
+	Running   bool   `json:"running"`
+	Suspended bool   `json:"suspended"`
+	Handshake string `json:"handshake,omitempty"`
+	LastLogin string `json:"last_login,omitempty"`
+	PortalURL string `json:"portal_url,omitempty"`
+	TenantURL string `json:"tenant_url,omitempty"`
+	KeyPrefix string `json:"key_prefix,omitempty"`
 }
 
 type Client struct {
@@ -50,6 +63,14 @@ type request struct {
 	Account          string `json:"account,omitempty"`
 	Key              string `json:"key,omitempty"`
 	AllowEmptyModels bool   `json:"allow_empty_models"`
+
+	// M77: the node surface.
+	Node   string         `json:"node,omitempty"`
+	Spec   *NodeSpec      `json:"spec,omitempty"`
+	Deploy *DeployOptions `json:"deploy,omitempty"`
+	Purge  bool           `json:"purge,omitempty"`
+	Probe  bool           `json:"probe,omitempty"`
+	Lines  int            `json:"lines,omitempty"`
 }
 
 type response struct {
@@ -67,7 +88,12 @@ func (c *Client) timeout() time.Duration {
 	return 5 * time.Minute
 }
 
-func (c *Client) call(ctx context.Context, op, name, account, key string, allowEmpty bool) (map[string]any, error) {
+func (c *Client) call(ctx context.Context, op, name, account, key string, allowEmpty bool, node string) (map[string]any, error) {
+	return c.send(ctx, request{ID: 1, Op: op, Name: name, Account: account, Key: key, AllowEmptyModels: allowEmpty, Node: node})
+}
+
+// send is the one place a request is written and an answer read.
+func (c *Client) send(ctx context.Context, req request) (map[string]any, error) {
 	dialer := net.Dialer{}
 	conn, err := dialer.DialContext(ctx, "unix", c.SocketPath)
 	if err != nil {
@@ -79,7 +105,7 @@ func (c *Client) call(ctx context.Context, op, name, account, key string, allowE
 		deadline = dl
 	}
 	_ = conn.SetDeadline(deadline)
-	data, err := json.Marshal(request{ID: 1, Op: op, Name: name, Account: account, Key: key, AllowEmptyModels: allowEmpty})
+	data, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
@@ -108,26 +134,26 @@ func (c *Client) CreateTenant(ctx context.Context, name, account, key string) er
 	// a dsh UI that cannot load its provider settings. The console surfaces the daemon's
 	// error and the admin fixes the account's model grants first (default_grant: none
 	// makes this the common case, not the exception).
-	_, err := c.call(ctx, "tenant-create", name, account, key, false)
+	_, err := c.call(ctx, "tenant-create", name, account, key, false, "")
 	return err
 }
 func (c *Client) StartTenant(ctx context.Context, name string) error {
-	_, err := c.call(ctx, "tenant-start", name, "", "", false)
+	_, err := c.call(ctx, "tenant-start", name, "", "", false, "")
 	return err
 }
 func (c *Client) StopTenant(ctx context.Context, name string) error {
-	_, err := c.call(ctx, "tenant-stop", name, "", "", false)
+	_, err := c.call(ctx, "tenant-stop", name, "", "", false, "")
 	return err
 }
 
 // SetTenantKey rotates a tenant's worker credential and, when the tenant has no account
 // label yet, records one (that is how a tenant provisioned before M67 picks its account up).
 func (c *Client) SetTenantKey(ctx context.Context, name, account, key string) error {
-	_, err := c.call(ctx, "tenant-set-key", name, account, key, false)
+	_, err := c.call(ctx, "tenant-set-key", name, account, key, false, "")
 	return err
 }
 func (c *Client) ListTenants(ctx context.Context) ([]TenantInfo, error) {
-	result, err := c.call(ctx, "tenant-list", "", "", "", false)
+	result, err := c.call(ctx, "tenant-list", "", "", "", false, "")
 	if err != nil {
 		return nil, err
 	}
@@ -156,6 +182,30 @@ func (c *Client) ListTenants(ctx context.Context) ([]TenantInfo, error) {
 		}
 		if v, ok := m["models_pending"].(bool); ok {
 			info.ModelsPending = v
+		}
+		if v, ok := m["node"].(string); ok {
+			info.Node = v
+		}
+		if v, ok := m["key_prefix"].(string); ok {
+			info.KeyPrefix = v
+		}
+		if v, ok := m["handshake"].(string); ok {
+			info.Handshake = v
+		}
+		if v, ok := m["last_login"].(string); ok {
+			info.LastLogin = v
+		}
+		if v, ok := m["portal_url"].(string); ok {
+			info.PortalURL = v
+		}
+		if v, ok := m["tenant_url"].(string); ok {
+			info.TenantURL = v
+		}
+		if v, ok := m["running"].(bool); ok {
+			info.Running = v
+		}
+		if v, ok := m["suspended"].(bool); ok {
+			info.Suspended = v
 		}
 		out = append(out, info)
 	}

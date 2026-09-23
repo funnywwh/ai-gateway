@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -425,7 +426,7 @@ func TestBuildDshgwChildResolvesTheRelativeDataRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := dshgwconfig.Load(path); err != nil {
-		t.Fatalf("the generated child configuration does not load: %v", err)
+		t.Fatalf("the generated child configuration does not load: %v\n--- rendered ---\n%s", err, rendered)
 	}
 }
 
@@ -551,5 +552,22 @@ func TestBuildDshgwChildCarriesTheTenantPluginSwitches(t *testing.T) {
 	}
 	if plugins.WebTTY.Enabled || plugins.WorkspaceFiles.Enabled || plugins.GitDiff.Enabled {
 		t.Fatalf("the child would enable a plugin nobody asked for: %+v", plugins)
+	}
+}
+
+// TestCurrentAccountNeverFallsBackToAUid pins the fallback: a numeric worker_user is rejected by
+// dshgw's own configuration validator, so a process started without USER/LOGNAME (a sandbox, a
+// stripped service environment) must still name a real account — otherwise aigw writes a child
+// configuration the child cannot load, and the failure surfaces as a dshgw startup error far from
+// its cause.
+func TestCurrentAccountNeverFallsBackToAUid(t *testing.T) {
+	t.Setenv("USER", "")
+	t.Setenv("LOGNAME", "")
+	account := currentAccount()
+	if account == "" {
+		t.Fatal("currentAccount returned nothing")
+	}
+	if _, err := strconv.Atoi(account); err == nil {
+		t.Fatalf("currentAccount fell back to a numeric id (%s), which dshgw rejects as worker_user", account)
 	}
 }

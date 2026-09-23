@@ -60,6 +60,8 @@ func execute(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		err = app.adminServe(context.Background())
 	case "tenant":
 		err = app.tenant(ctx, rest[1:])
+	case "node":
+		err = app.node(ctx, rest[1:])
 	case "bind":
 		err = app.bind(rest[1:])
 	case "login-url":
@@ -103,6 +105,14 @@ Commands:
   serve                                  run loopback gateway
   admin-serve                            root-only local tenant provisioning channel (UNIX socket; requires admin_socket config)
   tenant create|list|rotate-key|restart|remove
+  node serve                             run this machine as a worker node (needs a node: config block)
+  node doctor                            check what a worker node must have before hosting tenants
+  node status                            print this node's tenants and worker state (local state only)
+  node add|update|remove NAME            register/edit/forget a worker node on the control plane
+  node deploy NAME                       install or upgrade that node over ssh (one idempotent sequence)
+  node rotate-token NAME                 replace a node's shared secret on both sides
+  node list|probe|reconcile NAME          inventory, health check, authoritative tenant list
+  node audit NAME [LINES]                print a node's recent security events
   bind PREFIX TENANT                     bind an additional public key prefix
   login-url [PREFIX]                    print the portal or tenant URL
   sync-models TENANT                     refresh DSH models from aigw

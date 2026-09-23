@@ -290,6 +290,13 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 		}
 	}
 	for _, tenant := range deps.reg.List() {
+		// M77: a tenant placed on a worker node keeps its data and its sandbox there, so every one
+		// of these local checks would report a failure about the wrong machine. The node's own
+		// `dshgw node doctor` is the check that means something for it.
+		if !deps.cfg.IsLocalNode(tenant.Node) {
+			fmt.Fprintf(c.stdout, "SKIP\ttenant-%s\truns on node %s (run `dshgw node doctor` there)\n", tenant.Name, tenant.Node)
+			continue
+		}
 		source := proxy.FileKeySource{Root: deps.cfg.Deploy.TenantConfigRoot}
 		tenantChecks := []check{
 			{"tenant-" + tenant.Name + "-key", func() error { _, err := source.Key(tenant.Name); return err }},

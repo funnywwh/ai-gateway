@@ -5353,3 +5353,351 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
       DSH 会话（含发起部署的那个），会话历史保留、可继续。
 - [ ] 重启后肉眼验收：侧栏「终端」里 `ls` 出彩色、提示符是绿 `user@host` + 蓝 `cwd`；回归项：agent 的 bash
       工具里 `ls` 仍无色（非交互 shell 不读 `/etc/bash.bashrc`），`git log` 分页仍正常。
+
+## M77 多机分布式运行（进行中：P1 已落地）
+
+设计 `docs/design/m77-dshgw-multi-node.md`、规格 `docs/dshgw.md` §8、部署手册 §14/§15、
+样例 `deploy/dshgw/node.example.yaml`、`docs/deployment-layout.md` §2/§4.4、`docs/mcp.md`（`group=dshgw`）。
+需求原话：「实现dshgw 可以在局域网内的多台机器分布式运行」+「节点管理没有管理后台webui」+「后台支持一键通过ssh部署」。
+
+### P1 协议与节点模式骨架（2026-09-23）
+
+- [x] **文档先行**：设计文档 + 四份规格/部署文档 + 节点配置样例 + 两份示例配置的合并规则（配置=身份、
+      状态=部署信息），均在对话中展示并确认后开工。
+- [x] `internal/dshgw/nodeproto`：协议常量（`Version=1`、`/node/v1/{health,control,tenant}`）、
+      `Authorization: Bearer` + `X-Dshgw-Protocol`/`X-Dshgw-Tenant`/`X-Dshgw-Browser-Session`、
+      `{ok,value,error:{code,message}}` 信封、7 个稳定错误码、`TokenMatches`（对两侧取 SHA-256 后常数时间比较）、
+      体积上限（控制 1 MiB / 租户转发 64 MiB，与 proxy 的回放上限一致）。
+- [x] `internal/dshgw/nodestore`：`<state_dir>/nodes.json`（0600、flock+原子替换）保存节点记录
+      （身份 + SSH 目标 + 部署路径/覆盖项 + 状态/日志路径），`View(static)` 实现合并规则，`NamesKnown`/`Resolve`/
+      `DefaultNode` 供运行期与注册表校验；旧文件缺失即空存储（单机零配置）。
+- [x] `internal/dshgw/nodeclient`：健康探测与 `Probe`（校验协议版本与节点自报名称）、
+      `Call`/`Ping`/`Status`，把拨号失败/超时/401/404/426/信封错误分别映射成稳定错误码并带上节点名。
+- [x] `internal/dshgw/nodeserve`：节点侧唯一 LAN 面监听——**令牌闸门先于任何路由与查找**（未授权者连路径是否存在
+      都问不出来）、协议头不符 426、`/health` 与 `status` op 共用一份自述、未实现的 op 回 501（而非 404，
+      便于区分"节点版本旧"与"地址写错"）、租户转发占位（P3 接入）、`Serve` 支持 ctx 取消优雅停机。
+- [x] `internal/dshgw/config`：`nodes[]`/`default_node`/`node{}` 三块配置与六类校验（名字形状与保留名、
+      URL 形状、令牌来源二选一且文件 0600、`default_node` 必须已定义、节点监听地址必须显式且不落在端口段内、
+      节点模式不得带控制面清单）；节点模式数据根默认 `./data/dshgw-node`（与控制面同机也不共享状态）；
+      `NodeStorePath`/`NodeSSHDir`/`NodeDeployLogDir` 三个派生路径。
+- [x] `internal/dshgw/registry`：`Tenant.Node` 字段（空 = 本机，旧 `registry.json` 零迁移）、
+      `TenantsForNode`/`SetNode`/`SetWorkerPort`、可注入的 `ValidateNodes`（先加载后安装：离线 CLI 与单测不需要节点清单，
+      进程装配后把"租户落在未定义节点上"变成启动失败）。
+- [x] `cmd/dshgw`：`node serve`（节点代理：单监听 + 按本地分配表启动 worker + SIGTERM 优雅停机）、
+      `node doctor`（19 项前置检查：沙箱运行时、模板/插件、端口段、令牌、linger、sshfs/fuse 按开关）、
+      `node status`（本地视图，控制面不在也能看）；`serve` 遇到节点配置直接拒绝并指出正确命令。
+- [x] `make dshgw-node-test` 目标（新包 + config/registry/cmd 子集）。
+- [x] **实测（本机）**：`go test ./internal/dshgw/... ./cmd/dshgw ./internal/arch` 全绿（24 包）、`go vet` 干净；
+      `dshgw node doctor` 对一份新建节点配置逐项报出缺失项（目录 0700、配置 0600、模板、current_link 符号链接等）；
+      `node serve` 实测 `GET /node/v1/health` 200（带身份）、无令牌 401、`X-Dshgw-Protocol: 2` → 426、
+      `/nope` → 404 `node_protocol_mismatch`、未注册 op → 501 `not_implemented`、`status` op 与 `/health`
+      给出同一份自述、SIGTERM 后进程零残留；`serve` 用同一份配置报
+      「this configuration has a node: block: run `dshgw node serve`…」。
+
+### P2 生命周期分派与节点分配表（2026-09-23）
+
+- [x] `tenancy.Manager.Nodes *nodeclient.Set` + `internal/dshgw/tenancy/remote.go`：**每个生命周期方法在本地实现
+      之前先问一次 `remoteFor`**（`Create`/`StartWorker`/`StopWorker`/`Restart`/`Status`/`ProbeWorker`/
+      `EnsureRunning`/`SyncModels`/`CaptureURL`/`EnsureProvisioned`/`RotateKey`/`StopForLogout`/`Remove`/
+      `Enable`/`SandboxProfile(Ready)`），远程租户各变成一条 RPC；`SandboxProfile` 对远程租户明确报
+      「在节点上渲染」。分派同时处理两件容易漏的事：**`StopWorker`/`StartWorker` 先在控制面写下
+      停用/启用意图再发 RPC**（否则对账会把停用租户拉起来——集成测试抓到的真实缺陷），以及
+      `Remove` 之后清掉控制面自己的凭据副本与注册表行。
+- [x] 远程建户（`createRemote`）：控制面决定身份与公开端口，节点用**自己的路径与 worker 端口**建户并回报，
+      控制面照单记录（`registry.SetPlacement`）+ 写本地 `gateway.key` 副本；失败补偿（节点上 `tenant-remove`）。
+- [x] 节点侧 `internal/dshgw/nodeops`：14 个处理器（status/reconcile/tenant-create/adopt/start/stop/restart/
+      remove/set-key/sync-models/ensure-running/ensure-provisioned/capture-url/logout-stop）；**协议码由处理器
+      自己先判**（未知租户 404、请求不全 400），管理器随后失败的一律 internal 且带原文。
+- [x] 节点本地分配表：`registry.AssignWorkerPort`（节点自己挑 worker 端口）、`SetPlacement`、
+      `Put` 允许**无 key 前缀**的记录（前缀属于控制面），旋转/补齐**不再给无前缀记录绑前缀**；
+      `dshgw node serve` 启动时按本表恢复 worker（节点重启即恢复）。
+- [x] `adopt`（迁移收尾）：数据不在即拒绝并给出要拷到的路径；登记后不启 worker（由显式 `tenant start` 或下一次
+      对账接手）；`Manager.AdoptOnNode` 覆盖远程与「搬回控制面本机」两条路。
+- [x] 对账（`reconcile`）：控制面推权威列表（身份 + 停用意图），节点采纳身份、**自己说了算 worker 端口与路径**并
+      回报；未供应的租户如实报「本机没有」；`prune` 时先停 worker 再删记录（**数据永不删**）；控制面把节点回报的
+      端口/路径写回注册表并在日志里列出漂移项。控制面启动时（`serve`）自动对全部节点跑一次。
+- [x] CLI：`tenant create --node`、`tenant list` 增 `NODE` 列、`tenant start|stop`、`tenant set-node`（守卫：
+      已停 + 节点已定义 + 数据已在目标机）、`node list|probe|reconcile [NAME]`；`doctor` 跳过远程租户并指向节点自检。
+- [x] 测试：`tenancy/remote_test.go`（假节点逐条断言**每个方法的 RPC 名与顺序**、本地租户零网络、未知节点拒绝、
+      远程建户失败无残留、`reconcile` 采纳与漂移、`adopt` 守卫、不可达映射）、`nodeops/ops_test.go`（14 个处理器、
+      建户用控制面的公开端口 + 自己的 worker 端口、停用持久、对账采纳/剪枝/不复活、adopt 无数据即拒、
+      无前缀记录可存可取）、`registry/nodes_test.go` 增分配器/placement/无前缀往返、
+      `internal/dshgw/nodeitest`（控制面与节点**两侧真实 HTTP 互通**的集成测试：建户/启停/节点重启恢复/对账修端口/
+      停用不复活/协议携带模型与凭据）。
+- [x] **本机实测（两个真实二进制 + 真实 dsh worker）**：`scripts/dshgw_node_e2e.py`（新增，`make dshgw-node-e2e`）
+      18 步全过——建户落在 node-a 并跑起真实 `dsh web`（pid 可见）、控制面自身状态根无租户数据、
+      停/启到节点且意图持久、**停掉节点代理后其 worker 一并消失、重启后在同一 worker 端口恢复**、
+      对账把控制面里被改错的 worker 端口修回、停用租户跨重启与对账都不复活、删除保留节点数据而清掉控制面凭据副本。
+      注：本会话沙箱禁止嵌套 namespace，故该次运行用 `--passthrough-bwrap`（把沙箱换成直通替身，
+      **只证明协议与进程路径，不证明沙箱**）；真机 sandbox 版需在允许 bwrap 的宿主上跑，已记入 TODO。
+- [x] 回归：`go test ./internal/dshgw/... ./cmd/dshgw ./internal/arch` 全绿（25 包）、`go vet` 干净、`gofmt` 干净、
+      `make dshgw-node-test` 通过。
+
+### P3 数据面：租户流量经控制面转发到节点（2026-09-23）
+
+- [x] `proxy.NodeUpstream`（`NodeFor`/`Handshake`/`ServesBrowserWorkspaces`）+ `internal/dshgw/nodeup`
+      实现（控制面的节点视图：本地/远程判定、节点 token、握手 RPC 与 authority 校验）。
+      **未定义节点与「无节点客户端」都 fail-closed**（503「本租户节点不可用」），绝不回落 loopback。
+- [x] 转发路径：远程租户的请求被重新指向节点（URL 前缀 `/node/v1/tenant/`，Path 与 RawPath 同步裁剪，
+      query 原样），带上 `X-Dshgw-Tenant`/`X-Dshgw-Protocol`/节点令牌与 worker cookie；
+      **`X-Dshgw-*` 命名空间先整体剥掉再写我们的值**（浏览器伪造的头进不了节点），响应侧同样剥掉
+      （worker 不能冒充节点的错误通道）。
+- [x] 握手委托：节点读自己的 handshake 文件在本地完成 303+Set-Cookie 并回传 `{name,value,authority,expires_at}`；
+      控制面校验 authority 必须等于 `127.0.0.1:<worker_port>`（否则 cookie 用不了却看不出来），
+      仍存入同一个 session store，因此 401 重握手、cookie 捕获与轮换逻辑全部复用。
+      `retryTransport` 为远程租户改为「只重注入 worker 凭据、不改目标地址」（`cloneForCookie` 会把 URL
+      改回本机 loopback，这正是多机下最危险的隐含假设）。
+- [x] 失败语义：节点拒绝（响应里的 `X-Dshgw-Error`）→ 控制面自己的 503/404 文案（**不回显节点的内部措辞**，
+      审计记 `node_refusal_<code>`）；节点连不上 → **503 `node_unreachable`（不是 502）**，两条路径都覆盖
+      （握手期与「已缓存 cookie 只走传输」的请求期）；worker 未运行 → 503 `worker_not_running`；门户/登录不受影响。
+- [x] 节点侧 `internal/dshgw/nodeplane`：唯一 LAN 面之后的第二段——恢复租户自己的路径（含转义）、
+      未登记 404、worker 未运行 503、向 `127.0.0.1:<worker_port>` 转发并**强制 Host 为该 authority**
+      （这就是 dsh 的 authority 绑定 cookie 跨机器仍然有效的原因）、剥离控制通道头、保留 worker cookie、
+      WS/流式直通（`FlushInterval=-1`）。
+- [x] `/browser-workspace/**`：本地租户仍由本进程的 FUSE 服务应答；远程租户**转发到节点**并把
+      `X-Dshgw-Browser-Session`（浏览器会话摘要）带过去——浏览器 cookie 本身永不离开控制面。
+- [x] **顺带修掉一个真实缺口**：`serve` 现在**监视 registry 文件**，外部 CLI 建户后 2 秒内自动重绑公开端口
+      （此前 CLI 建出来的租户在网关重启前不可达，而控制台走 admin socket 才会触发重绑）。
+- [x] 测试：`proxy/remote_test.go`（转发目标/头不变量/握手委托与 401 重试/节点拒绝文案/两条 503 路径/
+      fail-closed/浏览器工作区归属/流式不缓冲/错误分类）、`nodeplane/plane_test.go`（authority 与路径恢复、
+      转义保留、未登记与未运行拒绝、worker 不能冒充错误通道、WS 直通、挂载归属）、`nodeup/upstream_test.go`
+      （本地/远程/未定义判定、authority 不匹配拒绝、空凭据拒绝、拒绝与不可达分类）、`nodeops` 的 handshake 处理器。
+- [x] **本机实测**：`scripts/dshgw_node_e2e.py --passthrough-bwrap` **30 步全过**，其中数据面 12 步：
+      门户登录拿到会话 → 租户页经控制面转发到节点 worker 返回 200、worker cookie 不出现在浏览器、
+      伪造 `X-Dshgw-Tenant`/`X-Dshgw-Protocol`/`Authorization` 被忽略、worker 停止后 503 且文案是网关自己的、
+      节点代理被杀后 **503（不是 502）**、门户始终可用、节点回来后自动重握手恢复 200。
+      真机 sandbox 版仍需在允许 bwrap 的宿主上跑（已记 TODO）。
+- [x] 回归：`go test ./internal/dshgw/... ./cmd/dshgw ./internal/arch` 全绿、`go vet` 与 `gofmt` 干净。
+
+### P4 节点侧服务面与节点审计（2026-09-23）
+
+- [x] `dshgw node serve` 现在装配**租户侧全部服务**（不是只跑 worker）：browser 目录 FUSE 工作区
+      （`browsermount` 服务 + lock + 清理残留 + reaper 独立 ctx + 注入 `plane.Browser`）、ssh 工作区
+      （`CheckBinaries` fail-fast + 按记录重挂 + 信箱轮询）、host_shares 与租户插件仍走既有的 manager 钩子
+      （profile 渲染层）。**装配顺序与序停机与 `serve` 一致**：browser 服务必须在 worker 启动前就位
+      （profile 绑的是启动时存在的挂载点），停机顺序是「停止收请求 → 唤醒/等 reaper → drain → 停 worker →
+      清理挂载」，复用 `shutdownBrowserWorkspaces`。
+- [x] `nodeproto.Features`（ssh_workspaces / browser_workspaces / ssh_mounts / host_shares / tenant_plugins /
+      directory_picker / plugin_browser_fs）随 health/status 上报，`dshgw node list` 与（P6/P7）控制台据此
+      说明「哪台机器能提供什么」，而不是让运维靠失败去发现某台机器没有 FUSE 运行时。
+- [x] **节点审计并入单一审计流**（设计 D7 的承诺）：节点事件按字节游标经 `audit-tail` op 被控制面拉取，
+      写入控制面自己的 `audit.jsonl` 并打上 `node` 标签（`audit.Event.Node` 新增字段）；游标持久化在
+      `<state>/nodes.json`（**配置声明的节点也会为游标建一条空记录**，否则每次重启会重复导入或整段跳过）；
+      首次接触「从当前末尾开始」而不是导入节点全部历史；文件被轮转/变小按 `dropped` 如实报告；半个结尾行留到下次读；
+      解析不了的行记成 `node_audit_unreadable` 事件而不是静默丢弃。`dshgw node reconcile`/`serve` 启动即拉一次，
+      之后每 30 秒一轮；`dshgw node audit <节点> [行数]` 可直接看某节点的最近事件（不推进游标）。
+- [x] **抓并修掉两个真实缺陷**（都是本机多机验收跑出来的）：
+      ① 建租户时 `ensureHostShares` 排在 `SandboxProfileReady` **之后**，而 profile 要绑定 host share 容器并
+      `EvalSymlinks` 它 —— 于是**任何声明了 `host_shares` 的部署建租户都会失败**（M71 只做了 staging 探针，
+      没覆盖建户路径）。已把两者调换顺序 + 加回归测试（本地路径同样受益）。
+      ② 配置声明的节点没有 store 记录 → 游标无处可存、审计永远合并不进来（见上）。
+- [x] 测试：`nodeops` 的 `audit-tail`（首次从末尾开始、游标推进、`Last` 读尾部不推进游标、文件轮转报 dropped、
+      半行不服务、文件不存在为空）、`nodeaudit`（打标签、推进游标、不可读行可见、坏节点不拖累好节点、
+      写失败不推进游标、ctx 取消退出）、`nodestore`（配置节点的游标记录 + 身份仍由配置决定）、
+      `tenancy` 的 host-share 建户回归。
+- [x] **本机实测**：`scripts/dshgw_node_e2e.py --passthrough-bwrap` 由 30 步扩到 **35 步全过**，新增 5 步：
+      节点在租户 profile 里渲染三块租户插件、节点在租户工作区物化 host share 目标、
+      `node list` 报出该节点能提供什么（`tenant_plugins`/`host_shares`/picker/browser-fs）、
+      节点审计事件经游标并入控制面审计流并带 `node` 标签、`dshgw node audit node-a` 能读到它。
+- [x] 回归：`make dshgw-node-test`（15 包）、`go test ./internal/dshgw/... ./cmd/dshgw ./internal/arch`、
+      `go vet`、`gofmt` 全绿。
+
+### P5 SSH 一键部署（2026-09-23）
+
+- [x] `internal/dshgw/nodedep`：六个阶段（preflight → upload → activate → unit → start/verify）的**幂等**部署序列，
+      每个远程动作都走同一个 `ExecFunc` 缝（系统 `ssh`，payload 以 tar 走 stdin），因此不需要 sftp/rsync/第二个登录，
+      也因此在没有第二台机器时就能端到端测试。
+      关键性质两条：**绝不触碰节点的 state 目录**（租户/工作区/注册表在 `<dir>/state`，升级不动它）；**失败即回滚**
+      （`.prev` 保存上一份 binaries/plugins/config/unit，回滚后重启旧版本，回滚本身失败也会如实上报）。
+- [x] 安全面：`-F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes`、专用 per-node `known_hosts`
+      （`GlobalsFromKnownHostsFile=/dev/null`）、`StrictHostKeyChecking` 只可能是 `accept-new`（首次）或 `yes`
+      （指纹已固定），**永不 `no`**；首次部署**停在指纹确认门**并报出 SHA256（本地 `ssh-keygen -lf` 读我们自己的
+      known_hosts），确认后才上传；已固定指纹的节点拒绝另一个指纹的确认；私钥路径不存在会在连接前就明确报错。
+- [x] 载荷：控制面自己的 `bin/dshgw`（两端版本/revision 一致，verify 阶段核对）、插件目录（picker + 三块租户插件）、
+      已备好的模板（`--prepare-template-on-node` 时改为节点自己制备，需 Corepack）、生成的节点配置与用户单元、
+      令牌、VERSION/REVISION。**不打包 Node/dsh release 与系统包**：预检逐项校验，缺什么说什么，
+      `--with-packages`（默认关、需 passwordless sudo）只装缺的 apt 包。
+- [x] 令牌模型修正（**这是本阶段抓到的真实缺陷**）：节点记录里 `TokenFile` 曾被当成「目标机上的路径」使用，
+      于是 `loadRuntime` 会在控制面上读一个不存在的文件并把整个网关启动打挂。现在明确分成两件事：
+      `Deploy.TokenPath` = **目标机上的**令牌文件；`Token`（或 `TokenFile`）= 控制面自己的副本。
+      并且**令牌归属由部署决定**：预检回传目标机令牌文件的 SHA256（不是令牌本身），与控制面记录不一致或记录为空
+      就轮换，一致才保留 —— 这条规则消掉了「节点有令牌、控制面没有」这类只能靠重启修复的错配。
+- [x] 运行期一致性：`nodeclient.Set.Refresh` + `serve` 监视 `nodes.json`，部署/轮换后**运行中的网关立刻换用新令牌**
+      （否则控制台按钮部署完的节点要等重启才可用）；`node deploy`/`rotate-token` 的校验探针用**从记录现读**的
+      客户端，而不是进程启动时的快照。
+- [x] 人机接口：`node add|update|remove|deploy|rotate-token`（选项在前、名字在后，沿用仓库惯例）、
+      有界部署日志 `<state>/node-deploy/<node>.log`（1 MiB 轮转一次，API/CLI 只读尾部 64 KiB）、
+      `--json` 输出每个阶段的结果；`remove` 守卫（仍承载租户即拒绝）、`remove --purge --yes` 才停节点并删除
+      部署产物（含 `.prev` 与 unit）——`purge` 现在真的什么都不留。
+- [x] 无 systemd 用户管理器时的退化：安装 unit 文件（便于以后启用）并 `setsid nohup` 启动，结果里明确写
+      「重启机器不会自动拉起」；**并且**处理了「user manager 接受了 unit 却没运行」这一真实形态（容器、无 linger 的
+      ssh 会话）：start 阶段先探活，systemd 路径不通就自动改用 detached 启动并如实报告。
+- [x] 测试：`nodedep/runner_test.go` 用一个**模拟远端**（把远程脚本在本地目录树里真跑一遍）覆盖：
+      装机与激活的最终状态、升级保留 state 与 `.prev`、失败阶段回滚（含 `.prev` 清理）、预检拒绝未准备好的机器、
+      指纹门（未确认/不匹配/已固定）、无 user manager 的退化、生成配置能被严格加载、`SSHArgs` 的安全性断言、
+      `shellQuote`、部署日志有界与轮转、purge 清空。
+- [x] **真机实测**：`scripts/dshgw_node_deploy_e2e.py`（`make dshgw-node-deploy-e2e`）**17 步全过**——
+      经**真实 ssh**（loopback 上的本机当目标）注册节点 → 首次部署停在指纹门 → 确认后六个阶段全 OK
+      （systemd 用户单元监督）→ 节点以控制面同一 revision 应答 → `node list` 报出它可以提供的插件 →
+      在它上面建租户并**经控制面登录到租户页 200** → 再部署一次（升级）保留租户数据与令牌 →
+      `rotate-token` 换密钥后仍可达 → 仍承载租户时 `node remove` 被拒 → `remove --purge` 停掉并清空目标。
+      验收根目录放在工作区（`.cache/node-deploy-e2e`）：**沙箱的 `/tmp` 是私有 tmpfs**，而 ssh 会话在宿主上，
+      只有工作区这条 bind 挂载在两边是同一个目录（这也是本阶段踩到并写进脚本注释的坑）。
+- [x] 回归：`make dshgw-node-test`（17 包）、`go test ./internal/dshgw/... ./cmd/dshgw ./internal/arch`、
+      `go vet`、`gofmt` 全绿；`scripts/dshgw_node_e2e.py`（多机 35 步）在 P5 改动后仍全过。
+
+### P6 管理面（admin socket + aigw 路由）（2026-09-23）
+
+- [x] **dshgw 侧**：`cmd/dshgw/nodeadmin.go` 把节点操作收敛成**一份实现**（CLI 与管理通道共用）：
+      `List/Add/Update/Remove/StartDeploy/DeployStatus/Probe/Reconcile/Audit/SetNode/StoreSSHKey`，
+      加**单飞部署任务**（`map[node]*deployJob`：同一节点已有部署在跑时拒绝而不是排队——「同时装两次」从来不是运维的本意），
+      任务把阶段表、耗时、日志尾部、指纹与最终状态记在记录里，控制台与 CLI 看的是同一份。
+      `cmd/dshgw/nodedeploy.go` 因此瘦成「flag → NodeSpec/DeployOptions」的适配层；CLI 的 `node deploy`
+      现在也走任务，并**边跑边打印阶段**。
+- [x] **admin socket 新协议面**（`cmd/dshgw/admin_serve.go`）：`node-list`（默认**不探测**，`probe=true` 才走局域网）、
+      `node-add`/`node-update`/`node-remove`（`purge`）、`node-deploy`/`node-rotate-token`（**异步**，返回任务状态）、
+      `node-deploy-status`、`node-probe`、`node-reconcile`、`node-audit`、`tenant-restart`、`tenant-set-node`；
+      `tenant-create` 增加 `node` 落点；`tenant-list` 行富化成 `TenantRow`（落点、运行/停用、握手、最后登录、
+      两个 URL），与 CLI 的 `tenant list` **共用同一个类型**——只在一边显示的字段，运维会以为它不存在。
+      只读 op（`node-list`/`node-deploy-status`/`node-audit`）不触发公开面重建。
+- [x] **`internal/localdshgw`**：节点面客户端（`ListNodes/AddNode/UpdateNode/RemoveNode/DeployNode/RotateNodeToken/
+      `NodeDeployStatus/ProbeNode/ReconcileNode/NodeAudit`）+ `CreateTenantIn`/`RestartTenant`/`SetTenantNode`，
+      结果用「重新 marshal/unmarshal 到强类型」解码（缺字段即报错，而不是静默零值）。`TenantInfo` 带上落点与新字段。
+- [x] **aigw 路由** `/admin/api/v1/dshgw/**`（12 个端点，`group=dshgw`，全部带 MCP 字段文档）：
+      节点清单/注册/修改/删除/部署/部署进度/轮换令牌/对账/节点审计，以及租户 `restart` 与 `node`（落点）。
+      语义要点写进文档：**清单默认不探活**（页面刷新不该变成对机群的负载）；**部署是异步的**（202 + 进度端点）；
+      **purge 需要 `confirm=<节点名>`**；**改落点不搬数据**（数据在旧机器磁盘上，接口文档明说先停、先拷、再改）。
+      两个接口是分开的：`DshgwAdminOps`（租户）与 `DshgwNodeOps`（节点），后者未接线时报
+      「dshgw node management channel is not configured」（单机部署就是这样，租户功能照旧）。
+- [x] **启用 DSH 弹窗可选落点**：`POST /admin/api/v1/accounts/{id}/dsh` 增加可选 `node`，贯通到
+      `CreateTenantIn`；重新启用既有租户不会重复建租户（落点只在**创建**时生效，换机器走显式迁移接口）。
+- [x] **顺带修掉一个真实缺陷**：`cmd/aigw` 的 `currentAccount()` 在 `USER`/`LOGNAME` 都没有时回退成**数字 uid**，
+      而 dshgw 的配置校验要求 `deploy.worker_user` 是**账号名**——于是 aigw 会写出一份子进程load不了的配置，
+      报错离病因很远。现在回退顺序是 环境变量 → 账号数据库 → 数字（并加测试钉住「绝不回退成数字」）。
+      这个缺陷是在无 `USER` 的环境里跑全量测试时暴露的（本会话沙箱正是如此）。
+- [x] 测试：`cmd/dshgw/admin_serve_test.go`（节点 op 过 socket 的参数保真、只读 op 不触发重建、参数校验拒绝非法名）；
+      `internal/localdshgw/client_test.go`（**协议往返**：每个节点 op 的线上字段名与解码，daemon 报错透传，
+      套接字缺失报出路径，缺字段报错）；`internal/httpapi/dshgw_nodes_test.go`（清单默认不探活/probe=true、
+      注册必填校验、PATCH 只改传了的字段、purge 需确认、部署 202 与进度、审计行数上限、租户重启/迁移、
+      未接线的 503、viewer 只读不可写、daemon 错误原样透传、启用弹窗的落点）。
+      路由守卫同步更新（141 条、query 参数必须声明在 Query）。
+- [x] 回归：全仓 `go test ./internal/... ./cmd/...`（含 `USER`/`LOGNAME` 未设置的环境）、`go vet ./...`、`gofmt` 全绿；
+      `make dshgw-node-test`；两个验收脚本在 P6 重构后仍全过（多机 35 步、SSH 部署 17 步）。
+
+### v4.1.1 部署到 gptjp（`gpt.lagenio.xyz` / `gpt.tirisen.hk`）+ 打开飞书身份（2026-09-23）
+
+> 需求原话：「将 v4.1.1 部署到 gptjp 的 https://gpt.lagenio.xyz/aigw 并用 rag-server 8088 实例的飞书配置参数设置，
+> https://gpt.tirisen.hk/aigw 同样同一个实例，告诉所有飞书的 callback」。
+> 决策（用户确认）：**不改代码**，只把回调登记进飞书应用白名单；主回调取 `gpt.tirisen.hk`。
+> 驱动脚本：`~/deploy-aigw-4.1.1-gptjp.sh`（阶段化：preflight/artifact/backup/config/dryrun/switch/verify/rollback），
+> 全过程日志 `~/deploy-gptjp-4.1.1.log`；回调登记探测器 `~/feishu-callback-check.sh`
+> （均在沙箱租户工作区 `data/dshgw-verify/state/workspaces/dsh-tenant/` 下）。
+
+- [x] 目标机现状（升级前）：gptjp（`47.91.16.118`，root）`/opt/aigw` + 系统单元 `aigw.service`
+      （`WorkingDirectory=/opt/aigw`、`:8088`、`server.base_path: /aigw`），版本 **0.12.3 / `44f9de2`**，
+      二进制 sha256 `1fde3a62…`、配置 sha256 `d9b78f7f…`（与 9/14 记录一致）；DB schema 停在 `0017`，
+      5 个供应商（3×`plugin:provider-codex`、`deepseek`、`azure`）/ 24 账号 / 41 key / 19 模型 / 4 标签。
+      **两个域名早已由同一台 nginx（nginxWebUI，`/home/nginxWebUI/nginx.conf`）的 `location ^~ /aigw/`
+      转发到 `127.0.0.1:8088`**，所以「同一个实例」这次**不需要改 nginx**。
+- [x] 构建物复用而非重建：直接用工作区 `bin/aigw`（`aigw 4.1.1 (revision 6f68aeb, built 2026-09-22T12:42:53Z,
+      console minified, transfer gzip)`，sha256 `a528dcd4…`）——它与 rag-server:8088 线上正在运行的那份
+      **逐字节相同**，所以 gptjp 与 8088 跑的是同一个已验收产物；`VERSION`/tag 未动（这不是发版）。
+      远端 `aigw.new --version` 与 sha256 双向核对一致后才继续。
+- [x] 回滚点（切换前拍下）：`/opt/aigw/aigw.prev-20260923-105204`（0.12.3）、
+      `/opt/aigw/config.yaml.pre-feishu-20260923-105204`、
+      `/opt/aigw/data/aigw.db.pre-4.1.1-20260923-105204`（python `sqlite3.backup()`，因目标机没有 sqlite3 CLI；
+      `pragma integrity_check` = ok、schema 17）；另存 `/opt/aigw/pre-upgrade-snapshot.json`（供应商健康/计数基线）。
+- [x] 配置变更**只在末尾追加一段**（其余行一字未动）：`feishu.enabled/app_id/app_secret/callback_url/admin_login`
+      + `dsh_login: false`（本机没有 dshgw 门户；`dsh_login: true` 会让配置校验要求 `portal_url`）。
+      `app_id`/`app_secret` 取自 rag-server 8088 实例（`cli_aa27b25392f91bdb`）；`app_secret` 经 ssh 管道 +
+      临时文件注入、写后即删、不进 argv，文件模式保持 `0600`。配置 sha256：`d9b78f7f…` → `3518c3e4…`。
+- [x] **迁移预演**（`/opt/aigw/dryrun-4.1.1-<ts>/`，端口 `127.0.0.1:18099`，全部断言通过）：
+      DB 副本 → `4.1.1/6f68aeb` 起得来、`max(schema_migrations)` 17→**26**、
+      `registry loaded summary="models=19 providers=5 provider_models=53 routes=47 tags=4 accounts=24" ready=true`、
+      `healthz`/`admin/ui` 200、`readyz` 200、`level=ERROR` 0 条，并打印
+      `feishu identity enabled … callback=https://gpt.tirisen.hk/aigw/feishu/callback dsh_login=false admin_login=true`。
+      **安全前提**：副本里把 3 个 codex 插件供应商的 `credentials_enc` 置空、`plugins.state_dir` 指向空目录——
+      codex 的活跃刷新令牌只存在于生产的 `data/plugin-state/*/session.json`，预演因此**不可能**去刷新/轮换生产令牌。
+- [x] 切换与门禁：`install aigw.new → systemctl restart aigw`；`/aigw/version` 变 `4.1.1/6f68aeb`、
+      `healthz`/`readyz`/`admin/ui` 全 200。**过程留痕**：第一次门禁因脚本自身的匹配写法有误（`/version` 的 JSON
+      字段顺序是 `revision` 在前、`version` 在后，而断言把两者连写）**误判失败并自动回滚到 0.12.3**——
+      回滚路径按设计生效（二进制 + 配置一起还原，重启后 `/version` 回到 `0.12.3/44f9de2`）；修好断言后重跑门禁通过。
+      这一段同时证明「门禁真的能拦住」和「失败会自动退回旧版本」。
+- [x] 线上验收：本地 `localhost:8088/aigw/version` 与公网 `https://gpt.tirisen.hk/aigw/version`、
+      `https://gpt.lagenio.xyz/aigw/version` **均为 `4.1.1 / 6f68aeb`**（两个域名同一实例）；
+      `healthz` 两域名均 200；启动日志 `aigw starting version=4.1.1 revision=6f68aeb`、`level=ERROR` 0 条；
+      供应商逐条对比升级前快照**无变化**（5 个仍在、health/`last_error` 未退化），计数 24/41/5/19/4 不变。
+- [x] **真实流量探针（升级后逐个 `POST /aigw/admin/api/v1/providers/{id}/test`，管理口令取自 `.admin-password`）**：
+      5 个供应商全部 `ok: true`——3 个 codex **插件**供应商各起了一个真实插件进程
+      （日志 `plugin started instance=… kind=plugin:provider-codex version=0.1.0 pid=…`；实测延迟 12.1s / 2.1s / 20.6s），
+      `deepseek` 201ms、`azure` 881ms，健康记录随之刷新到 `2026-09-23T02:57Z`。
+      这条同时证明**插件 ABI 兼容**（协议仍为 1）与升级没有打断真实的 codex 上游链路。
+      **控制台入口也就位**：公开的 `GET /aigw/admin/api/v1/auth/methods` 在两个域名都返回
+      `{"feishu":{"enabled":true,"label":"飞书扫码登录","login_url":"/feishu/login?mode=admin"},"password":true}`，
+      即登录页已出现「飞书扫码登录」，口令登录照旧。
+- [x] 飞书路由：`GET /aigw/feishu/login?mode=admin` → **302** 到 `accounts.feishu.cn`，`redirect_uri` 正是
+      `https://gpt.tirisen.hk/aigw/feishu/callback`；`/aigw/feishu/callback`（无 `code`）→ 400；
+      **`/aigw/feishu/login`（不带 `mode`，即门户流程）→ 404 是设计如此**（本部署 `dsh_login: false`，
+      没有 dshgw 门户）；两个域名经 nginx 都是 302。
+- [x] 飞书侧可达性：从 gptjp 用该应用取 `tenant_access_token` 返回 `{"code":0,…}`（0.38s）→
+      无 IP 白名单/出网阻塞。
+- [x] **飞书后台回调登记（该配置没有 API，必须由应用管理员在浏览器做）**：应用 `cli_aa27b25392f91bdb` →
+      **安全设置 → 重定向 URL** 添加 `https://gpt.tirisen.hk/aigw/feishu/callback`（gptjp 生效那条）
+      与 `https://gpt.lagenio.xyz/aigw/feishu/callback`（别名域名）。登记前两条探测均为
+      `20029 redirect_uri unmatch`（连 `http`、末尾带 `/`、`:443`、丢 `/aigw`、带 `?x=1` 等 15 个变体一并扫过，全 20029）；
+      **用户已在飞书后台登记完成**，复验四条全绿：
+      `chat.tirisen.hk/feishu/callback` ✅ / `192.168.190.86:8090/feishu/callback` ✅ /
+      `gpt.tirisen.hk/aigw/feishu/callback` ✅ / `gpt.lagenio.xyz/aigw/feishu/callback` ✅。
+      再做了一次**端到端接受性检查**：从两个域名的 `GET /aigw/feishu/login?mode=admin` 取出网关自己发出的
+      `redirect_uri`，直接请求该授权地址——返回 **302 到 `passport.feishu.cn` 登录页**（而不是 20029 失败页），
+      即用户点「飞书扫码登录」会被正常送到扫码页。剩下的只是人工验收：控制台
+      `https://gpt.tirisen.hk/aigw/admin/ui/` 用现有 `admin` 口令登录 → 管理员页生成邀请链接 →
+      浏览器打开完成飞书绑定 → 试「飞书扫码登录」（**尚未做，需要操作者本人**）。
+- [x] 文档：`docs/feishu.md` §2 第 2 步从「添加唯一一条」改写为**多条目白名单**，并补上四个部署/域名的
+      登记清单与「授权页 302 vs 20029」这条免浏览器判据（探测器脚本见工作区）。本次文档改动**未提交**——
+      工作树正处于 M77 未提交状态，`git add docs/todo_done.md` 会把 M77 的进行中记录一并带入。
+- [x] 明确未做：不改代码（未加回调白名单机制）、不改 nginx/nginxWebUI、不在 gptjp 起 dshgw/门户、
+      不动 sub2api 及其容器、不动 rag-server:8088 的配置（只读它的飞书参数）、不重建 codex 插件
+      （`git log v0.12.3..v4.1.1 -- pkg/pluginapi examples/provider-codex` 无提交，插件协议仍为 1）。
+
+### P7 控制台 WebUI：DSH 节点页（2026-09-23）
+
+- [x] **新页 `internal/webui/static/js/pages/dshgw_nodes.js`（路由 `/dsh-nodes`，运维组）**：
+      三张卡——「工作节点」清单（状态徽标、来源=配置文件/控制台、地址、目标机、版本、租户数、**能力摘要**、最近探测）、
+      「DSH 租户与落点」表（账户、节点、运行/停用、端口、握手、最后登录，行内「重启」「迁移落点」「打开」）、
+      以及概览统计（节点/就绪/异常/分布租户/本机租户）。
+      行为与后端约定一致：**清单默认不探测**（探测是显式按钮「探测全部」或行内「探测」）；
+      **部署异步**（POST 之后打开进度抽屉，每 1.5 秒轮询阶段表 + 日志尾部，关闭即停表）；
+      **指纹门**：首次部署被后端拒绝时，页面把错误里的 SHA256 变成一次确认弹窗，确认后带上
+      `accept_host_key` 重发；**purge 要再打一遍节点名**；**迁移落点明说"不会搬运数据"**；
+      只读会话保住可见的只读动作（探测/审计/部署进度），去掉一切会 403 的写动作。
+- [x] **账户页**：新增「节点」列（未启用 DSH 显示 "—"，本机显示「本机」徽标，远程显示节点名）；
+      启用 DSH 弹窗新增「运行节点」选择（候选来自 `/dshgw/nodes`，失败就退回"本机/部署默认"，
+      因为单机部署正是最常见的合法情形）。
+- [x] **服务端**：`attachDshPlacements` 在账户列表里**一次性** join dshgw 的租户落点（每行一次 socket 调用
+      是不行的）；dshgw 侧不可用时不写该字段并照常渲染页面。
+- [x] **测试**：
+      `internal/webui/tests/dshgw_nodes_test.mjs`（`--experimental-vm-modules`，在 VM 里真实运行页面模块 + DOM 替身）：
+      清单默认不探测/探测是显式动作（`probe=true` 只在点击后出现）、单台探测指名道姓、
+      部署「拒绝→指纹确认→带指纹重发」的顺序、进度抽屉的阶段表与日志尾部、
+      **运行中不谎报监督方式、结束后才写 systemd/detached**、轮换令牌的确认与请求、
+      对账报出"启动/停止/剪除"条数、删除的两种按钮与误输入不执行、
+      迁移弹窗的候选落点与"不搬数据"提示、注册只写记录（空字段不发送、布尔与数字类型正确）、
+      只读会话无写动作、以及四个纯函数（状态文案/能力摘要/阶段表/监督方式）。
+      `internal/webui/tests/dshgw_nodes_wiring_test.mjs`（静态接线断言）：路由已挂、清单接口只在需要时 probe、
+      部署/轮换/迁移/删除的请求形状、账户页的节点列与弹窗选择、harness 视图已注册。
+      两者都已接进 `make ui-base`。
+- [x] **UI harness**：新增 `scripts/ui-harness/dshgw_nodes.page.html`（**有状态** stub：`/dshgw/nodes` 会真的
+      "探测"，部署是一个每轮询推进一个阶段的假任务，首次 POST 故意回 400 + 指纹）+ views `nodes` / `nodes-readonly`。
+- [x] **顺带修掉一个真实缺陷**：没有真 firefox 的机器上 `/usr/bin/firefox` 是 snap 包装器——它打印一句提示后
+      退出 0、什么都不加载，于是**每个视图都报 "no report" 且服务端日志为空**，看起来像页面坏了。
+      `scripts/ui-harness/run.sh` 现在先问一次 `--version`，不可用就**带原因跳过**（本会话沙箱正是这种环境）。
+- [x] 验证：`make ui-dist`（压缩镜像 44 文件 -44%，页面在其中且仍可解析）、`make ui-base`（含两个新测试，
+      全部通过退出码 0）、两个验收脚本依旧全过。
+- [x] **发布形态的资产实测**：`make build`（压缩 + gzip overlay）后起一个一次性 aigw 实例探页面：
+      `/admin/ui/` 200、`/admin/ui/js/router.js` 含 `/dsh-nodes` 路由、`/admin/ui/js/pages/dshgw_nodes.js`
+      200 且是**压缩镜像那份**（13614 B）、`accounts.js` 含 `dshNodeCell`、
+      `/admin/admin/api/v1/dshgw/nodes` 401（路由已注册且受会话保护）。
+- [x] `make ui-check` 在本沙箱**无法运行**（无可用 firefox），已按上面那条改成带原因跳过，
+      真机复跑记在 `docs/TODO.md`；真机 bwrap 版验收一组（多机 e2e / sandbox-test / supervised-test）
+      同样记在那里。

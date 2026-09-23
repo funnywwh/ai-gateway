@@ -699,3 +699,132 @@ pgrep -af 'dsh-0.1.2-rc.1/lib/bin.js web' ; ss -ltnp | grep 184
 - 没有 nginx：租户门户由 dshgw 直接监听。公网部署需自行解决 TLS 与防火墙
   （当前默认明文监听；证书终止是下一步的独立设计）。
 - 资源限额见 §6：每 worker 由自己的 systemd 用户 scope 承担（实测生效），部署级汇总上限由单元属性承担。
+
+---
+
+# 多机分布式运行（M77）
+
+> 状态：**规格（M77，待实现）**。设计：[docs/design/m77-dshgw-multi-node.md](../../docs/design/m77-dshgw-multi-node.md)；
+> 使用者规格：[docs/dshgw.md](../../docs/dshgw.md) §8；数据布局：[docs/deployment-layout.md](../../docs/deployment-layout.md) §2/§4.4。
+>
+> 本节描述的是**目标行为**（"怎么做"的目标版本）：控制面把租户 worker 分布到局域网多台机器上，
+> 节点管理（含一键 SSH 部署）在 aigw 控制台的「DSH 节点」页完成。不配置节点时，部署与今天完全一致。
+
+## 14. 工作节点
+
+### 14.1 形态
+
+| 角色 | 进程 | 说明 |
+|---|---|---|
+| 控制面 | `dshgw serve`（仍由 aigw 监督，§3） | 门户、公开端口、会话、租户表、审计、aigw 交互 |
+| 工作节点 | `dshgw node serve`（同一份 `bin/dshgw`） | 该机器上承载租户的 dsh worker（bwrap）、SSH 工作区、浏览器目录 FUSE 工作区、`host_shares`、三块租户插件 |
+
+**worker 端口只在节点回环**（`dsh web` 拒绝 `--host 0.0.0.0`）；节点上的网关代理是唯一 LAN 面组件，
+它向本机 worker 转发时把 `Host` 强制成 `127.0.0.1:<workerPort>`，因此 dsh 的 cookie 与 `/api` 栅栏
+语义不变（细节见设计文档 D5/D6）。
+
+### 14.2 一键部署（控制台，推荐）
+
+控制台 →「DSH 节点」→「添加节点」填表（名称、SSH 主机/端口/用户、私钥、部署目录、监听地址、
+worker 端口段、功能开关与 `host_shares` 覆盖）→ 点「部署」。控制面（dshgw）经 SSH 完成：
+
+1. **预检**：SSH 连通性 + 首次主机指纹确认；`bwrap`/`sshfs`/`fusermount3`/`node`/`dsh` 是否存在；
+   目录可写；监听端口与 worker 端口段未被占用；`systemctl --user` 与 linger 状态。
+2. **上传**：`bin/dshgw`（与控制面同版本同 revision）+ 插件目录 + 已备好的模板 → `<部署目录>`
+   （原子替换，上一版留 `.prev/`）。
+3. **配置**：生成 `dshgw-node.yaml` 与节点令牌（写节点 `token_file`，0600；控制面记同一令牌）。
+4. **单元**：写 `~/.config/systemd/user/dshgw-node.service`、`daemon-reload`、`enable`、`restart`。
+5. **启动与校验**：等 `/node/v1/health` 就绪；核对节点自述名称/协议/revision；对已有租户做一次
+   `/api` 401 探针。
+
+失败即停在对应阶段并给出日志尾部；已有可用版本时自动回滚到 `.prev`。**同一个按钮再点一次就是升级**，
+升级会重启该节点上运行中的租户（页面会先警告）。
+
+### 14.3 手工等价步骤（一键部署不可用时）
+
+```bash
+# —— 在目标机器上 ——
+# 1) 目录与产物
+sudo mkdir -p /srv/dshgw-node && sudo chown "$(id -un)":"$(id -gn)" /srv/dshgw-node
+install -D -m 0755 <控制面的 bin/dshgw> /srv/dshgw-node/bin/dshgw
+cp -a <控制面的插件目录>/. /srv/dshgw-node/plugins/
+cp -a <控制面的 template-home> /srv/dshgw-node/template-home
+# 2) 令牌与控制面一致（0600）
+umask 077; openssl rand -base64 32 | tr -d '\n' > /srv/dshgw-node/node-a.token
+# 3) 配置（样例：deploy/dshgw/node.example.yaml）
+cp deploy/dshgw/node.example.yaml /srv/dshgw-node/dshgw-node.yaml   # 改 name/listen/路径/端口段/aigw_base_url
+# 4) 前置自检（会逐项报告缺失的运行时与权限）
+/srv/dshgw-node/bin/dshgw --config /srv/dshgw-node/dshgw-node.yaml node doctor
+# 5) 用户单元（与 §3 的 aigw/dshgw 同一套做法）
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/dshgw-node.service <<'EOF'
+[Unit]
+Description=dshgw worker node
+[Service]
+WorkingDirectory=/srv/dshgw-node
+ExecStart=/srv/dshgw-node/bin/dshgw --config /srv/dshgw-node/dshgw-node.yaml node serve
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=default.target
+EOF
+systemctl --user daemon-reload && systemctl --user enable --now dshgw-node
+loginctl show-user "$(id -un)" | grep Linger     # 期望 Linger=yes；不是则 sudo loginctl enable-linger "$(id -un)"
+# 6) 健康（控制面会看到的那个端点）
+curl -s -H "Authorization: Bearer $(cat /srv/dshgw-node/node-a.token)" \
+  http://127.0.0.1:18400/node/v1/health
+```
+
+```bash
+# —— 在控制面 ——
+# 7) 登记（url/token 与上面一致；控制台同样能做这件事）
+bin/dshgw --config ./dshgw.yaml node add node-a --url http://192.168.190.87:18400 \
+  --token-file ./data/dshgw/nodes/node-a.token
+bin/dshgw --config ./dshgw.yaml node probe node-a      # 期望 ready + 同版本 revision
+bin/dshgw --config ./dshgw.yaml tenant create --node node-a <租户> --key-file <key文件>
+```
+
+### 14.4 节点机器需要什么
+
+| 项 | 说明 |
+|---|---|
+| `bwrap` | 运行时安装（`deploy.bwrap_bin`）；预检缺即失败 |
+| Node + dsh release | `dsh.node_bin`/`bin_js`/`current_link` 绝对路径；不与控制面共享 |
+| 模板与插件 | 默认由控制面推送；`--prepare-template-on-node` 时可让节点自己制备（需 Corepack + 网络） |
+| `sshfs` / `fusermount3` / `/dev/fuse` | 只在启用 SSH 工作区 / 浏览器目录工作区时需要 |
+| 网络 | 到控制面（LAN）与到 aigw（worker 直连，模型流量不经过控制面） |
+| 端口 | `node.listen`（LAN）、`worker_port_lo..hi`（回环） |
+
+## 15. 节点运维、安全与排障
+
+### 15.1 安全前提（必读）
+
+- 控制通道 v1 是**内网明文 HTTP + 每节点独立令牌**：该监听面等价于「该节点上全部租户数据的完全访问权」。
+  必须①绑内网接口（`node.listen` 拒绝 `0.0.0.0` 与空值）；②用防火墙把来源限制到控制面主机；
+  ③令牌文件 0600（优先 `token_file`，不要让令牌进配置文件与聊天记录）。**控制通道 TLS 尚未实现。**
+- 控制面侧的部署私钥（`data/dshgw/node-ssh/<节点>/id_ed25519`，0600）等价于目标机器上的部署权限：
+  只有运维能读；控制台接口与日志**永不回显私钥**（只给 SHA256 指纹，与租户私钥面板同一口径，见
+  [docs/dshgw.md](../../docs/dshgw.md) §7b「端口与私钥管理」）。
+- 主机指纹固定（`known_hosts` 在同一个目录）：首次部署由操作者确认指纹；**永不** `StrictHostKeyChecking=no`。
+- 租户的模型流量由 worker 直连 aigw；控制面只处理浏览器 ↔ 租户的会话流量与节点控制流量。
+
+### 15.2 迁移租户到另一台节点（停机迁移）
+
+见 [docs/dshgw.md](../../docs/dshgw.md) §8.3：停租户 → `rsync` 该租户的 `tenants/<租户>` 与
+`workspaces/<租户>` 到目标节点（保持路径与属主）→ `dshgw tenant set-node <租户> <节点>`（受守卫：
+已停 + 目标节点就绪 + 数据已存在）→ `tenant start`。控制台的「迁移到…」走同一条命令。
+
+### 15.3 排障
+
+| 现象 | 处置 |
+|---|---|
+| 控制台「DSH 节点」页报管理通道不可用 | dshgw 没在跑或 `dshgw.admin_socket` 指错：`systemctl --user status aigw-local`、看 aigw 日志的 `dshgw` 行 |
+| 节点状态「不可达」 | `curl -H "Authorization: Bearer <token>" http://<节点>:<端口>/node/v1/health`；再 `systemctl --user status dshgw-node`（SSH 上去看） |
+| 节点状态「协议不匹配」 | 两侧二进制版本不同：对节点再点一次「部署」（控制台），或 `dshgw node deploy <节点>` |
+| 部署停在 `preflight` | 页面/日志给出确切缺失项（`bwrap`、`node`、`dsh bin.js`、目录权限、端口占用、指纹未确认、linger） |
+| 部署停在 `unit` | 目标机没有可用的 `systemd --user`：看 `loginctl show-user <user> \| grep Linger`；给出的一次性命令需要 root |
+| 租户 503 `node_unreachable` | 节点或网络故障：门户/登录不受影响；恢复后会话自动重握手 |
+| 租户 503 `worker_not_running` | 节点可达但 worker 未运行：页面「启动」；管理员停用的租户要先「启用 DSH」 |
+| 控制台显示「漂移」 | 点「对账」（`dshgw node reconcile <节点>`）；`doctor` 也会报出差异 |
+| 节点重启后租户要重新握手一次 | 正常：worker cookie 已失效，下一次请求重握手一次即恢复；连不上看节点日志 |
+| 备份 | 控制面 `dshgw backup` 覆盖控制面状态；节点侧由节点自己 `backup` 落到节点 `backup_dir`，跨机归档由运维负责 |

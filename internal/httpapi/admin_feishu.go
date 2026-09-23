@@ -787,7 +787,7 @@ func (s *Server) autoEnableDSHForBinding(ctx context.Context, actor string, key 
 	if !ok || accounts == nil {
 		return dshBindingOutcome{State: "failed", Reason: "账户接口不可用"}
 	}
-	tenant, err := s.provisionAccountDSH(ctx, actor, accounts, s.deps.AdminStore, account, nil)
+	tenant, err := s.provisionAccountDSH(ctx, actor, accounts, s.deps.AdminStore, account, nil, nil)
 	if err != nil {
 		s.deps.Log.Warn("enabling dsh for a bound key failed", "err", err, "account", account.ID)
 		// The reason is truncated: this string travels in a URL and is shown to a person,

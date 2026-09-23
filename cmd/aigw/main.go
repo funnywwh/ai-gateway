@@ -580,6 +580,10 @@ func run() int {
 		return 2
 	}
 
+	// One client for both halves of the dshgw channel (M77): tenant provisioning and node
+	// management speak the same newline-JSON protocol over the same local socket.
+	dshgwClient := &localdshgw.Client{SocketPath: dshgwAdminSocket(cfg, child), Timeout: 5 * time.Minute}
+
 	api := httpapi.New(httpapi.Deps{
 		Config:           cfg,
 		Feishu:           feishuDeps,
@@ -653,7 +657,13 @@ func run() int {
 		// The socket path comes from the child description when aigw supervises dshgw (that is
 		// the path the child was told to bind) and from configuration otherwise — the
 		// standalone shape, where the operator's own dshgw owns the socket.
-		DshgwAdmin:     &localdshgw.Client{SocketPath: dshgwAdminSocket(cfg, child), Timeout: 5 * time.Minute},
+		//
+		// One client serves both halves (M77): the tenant provisioning ops and the node
+		// management ops speak the same newline-JSON protocol on the same socket. A deploy gets a
+		// longer timeout than a tenant operation because it starts a job and waits for the
+		// acknowledgement, not for the install.
+		DshgwAdmin:     dshgwClient,
+		DshgwNodes:     dshgwClient,
 		Billing:        billingService,
 		Ledger:         billingService,
 		Invoices:       billingService,

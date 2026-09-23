@@ -88,6 +88,13 @@ func workerArgs(cfg *config.Config, t registry.Tenant) []string {
 // runner spawns, so provisioning, the runner and the acceptance tests all describe
 // the same sandbox.
 func (m *Manager) SandboxProfile(t registry.Tenant) ([]string, error) {
+	if client, err := m.remoteFor(t); err != nil {
+		return nil, err
+	} else if client != nil {
+		// A profile is rendered from the machine's own paths and runtime, so it only exists on the
+		// node. Saying that plainly beats rendering a plausible profile for the wrong host.
+		return nil, fmt.Errorf("tenant %s runs on node %s: render its profile on that machine (`dshgw sandbox-exec --print %s`)", t.Name, client.Name, t.Name)
+	}
 	if t.EffectiveIsolation() != registry.IsolationBwrap {
 		return nil, fmt.Errorf("tenant %s is not in bwrap isolation", t.Name)
 	}
@@ -123,6 +130,11 @@ func (m *Manager) SandboxProfile(t registry.Tenant) ([]string, error) {
 // host permission bits are the second line of defence, so a tenant leaf that any
 // local user could walk through is refused here rather than relied on later.
 func (m *Manager) SandboxProfileReady(t registry.Tenant) error {
+	if client, err := m.remoteFor(t); err != nil {
+		return err
+	} else if client != nil {
+		return fmt.Errorf("tenant %s runs on node %s: its sandbox is checked on that machine", t.Name, client.Name)
+	}
 	if err := m.prepareBrowserMountRoot(t); err != nil {
 		return err
 	}
