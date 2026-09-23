@@ -35,6 +35,10 @@ type billingFixture struct {
 	db      *store.DB
 	service *billing.Service
 	account *domain.Account
+	// routeID is the route the seeded model resolves to. It is kept because the attempt the
+	// gateway meters has to name it: "which route did this request take" is a recorded fact
+	// (M78), not something a reader can re-derive from today's configuration.
+	routeID int64
 }
 
 // newBillingFixture wires the request path with billing enabled: the account is a
@@ -112,10 +116,11 @@ func newBillingFixtureWith(t *testing.T, balanceMicros int64, tune func(*config.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.UpsertRoute(ctx, &domain.Route{
+	routeID, err := db.UpsertRoute(ctx, &domain.Route{
 		ModelID: modelID, ProviderID: providerID, UpstreamModel: "priced-echo",
 		Priority: 10, Weight: 100, Enabled: true,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.UpsertTag(ctx, &domain.Tag{Name: "free", GrantsJSON: grantsAll, Priority: 10}); err != nil {
@@ -151,7 +156,7 @@ func newBillingFixtureWith(t *testing.T, balanceMicros int64, tune func(*config.
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return &billingFixture{server: ts, db: db, service: service, account: account}
+	return &billingFixture{server: ts, db: db, service: service, account: account, routeID: routeID}
 }
 
 func (f *billingFixture) call(t *testing.T, body string) *http.Response {
@@ -221,6 +226,13 @@ func TestRequestIsPricedAndCharged(t *testing.T) {
 	}
 	if snapshot["cost_rule"] == nil {
 		t.Fatalf("the snapshot must inline the matched cost rule: %v", snapshot)
+	}
+	// The same row is what the console reads to draw the route path (M78): the route the
+	// request went through and the upstream model name that was actually sent. Both are
+	// snapshots — the routes table can be edited afterwards and history must not move.
+	if record.RouteID != f.routeID || record.UpstreamModel != "priced-echo" {
+		t.Fatalf("routing facts = route %d / upstream %q, want route %d and the configured upstream model",
+			record.RouteID, record.UpstreamModel, f.routeID)
 	}
 
 	balance, err := f.service.Balance(ctx, f.account.ID)
@@ -330,10 +342,11 @@ func newAbortFixture(t *testing.T) *billingFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.UpsertRoute(ctx, &domain.Route{
+	routeID, err := db.UpsertRoute(ctx, &domain.Route{
 		ModelID: modelID, ProviderID: providerID, UpstreamModel: "greedy-echo",
 		Priority: 10, Weight: 100, Enabled: true,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -358,7 +371,7 @@ func newAbortFixture(t *testing.T) *billingFixture {
 	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return &billingFixture{server: ts, db: db, service: service, account: account}
+	return &billingFixture{server: ts, db: db, service: service, account: account, routeID: routeID}
 }
 
 func TestStreamingAbortChargesOnlyUpToTheDecisionPoint(t *testing.T) {

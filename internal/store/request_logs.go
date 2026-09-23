@@ -13,8 +13,8 @@ import (
 const requestLogColumns = `id, request_id, api_key_id, account_id, endpoint, request_json,
        response_reasoning, response_text, reasoning_recorded, output_text_recorded,
        request_bytes, response_bytes, truncated, record_input_mode, record_reasoning,
-       record_output_text, status, created_at, client, model, resolved_model, reasoning_effort,
-       workspace, session_id, call_kind, title`
+       record_output_text, status, created_at, client, model, resolved_model, matched_rule,
+       reasoning_effort, workspace, session_id, call_kind, title`
 
 // requestLogFilter builds the WHERE clause shared by every request-log read. prefix is the
 // table alias the columns carry ("" for the single-table queries, "r." when the query
@@ -139,7 +139,8 @@ func scanRequestLog(row rowScanner) (*domain.RequestLogRecord, error) {
 		&rec.RequestJSON, &rec.ResponseReasoning, &rec.ResponseText, &reasoningRecorded,
 		&outputRecorded, &rec.RequestBytes, &rec.ResponseBytes, &truncate, &rec.RecordInputMode,
 		&reasoningFlag, &outputFlag, &rec.Status, &createdAt, &rec.Client, &rec.Model,
-		&rec.ResolvedModel, &rec.ReasoningEffort, &rec.Workspace, &rec.SessionID, &rec.CallKind, &rec.Title); err != nil {
+		&rec.ResolvedModel, &rec.MatchedRule, &rec.ReasoningEffort, &rec.Workspace,
+		&rec.SessionID, &rec.CallKind, &rec.Title); err != nil {
 		return nil, fmt.Errorf("store: scan request log: %w", err)
 	}
 	rec.ReasoningRecorded = reasoningRecorded != 0
@@ -240,18 +241,19 @@ func (db *DB) RequestUsages(ctx context.Context, requestIDs []string) (map[strin
 	return out, nil
 }
 
-// RequestProviders returns the upstream providers that metered each request: ascending,
-// deduplicated provider ids keyed by request id. A request with no usage row (a locally
+// RequestAttempts returns every metered upstream attempt of each request, ordered by
+// attempt_no — which is the order they were tried in. A request with no usage row (a locally
 // rejected one) is simply absent, which is the same statement RequestUsages makes with
 // Metered=false — "no metering row" is not "consumed nothing".
 //
-// It is a second query rather than a column on the page query, for the reason the money
+// It is a second query rather than columns on the page query, for the reason the money
 // columns are: a request can have several attempts on several providers, so the fact is
-// one-to-many and belongs to the metering table. The ids are returned, not names — a name is
-// a mutable label owned by the providers table, and the caller resolves it for the rows in
-// hand (ProviderNames) instead of this query joining it into every page.
-func (db *DB) RequestProviders(ctx context.Context, requestIDs []string) (map[string][]int64, error) {
-	out := map[string][]int64{}
+// one-to-many and belongs to the metering table (docs/design/m78-request-log-route-path.md).
+// Provider names are not joined in: a name is a mutable label owned by the providers table,
+// and the caller resolves it for the rows in hand (ProviderNames). The providers that served
+// a request are this result deduplicated by provider id, in the order they were first tried.
+func (db *DB) RequestAttempts(ctx context.Context, requestIDs []string) (map[string][]domain.RequestAttempt, error) {
+	out := map[string][]domain.RequestAttempt{}
 	ids := make([]string, 0, len(requestIDs))
 	for _, id := range requestIDs {
 		if id != "" {
@@ -266,23 +268,31 @@ func (db *DB) RequestProviders(ctx context.Context, requestIDs []string) (map[st
 		args = append(args, id)
 	}
 	rows, err := db.read.QueryContext(ctx, `
-SELECT request_id, provider_id FROM usage_records
-WHERE request_id IN (`+idPlaceholders(len(ids))+`)
-GROUP BY request_id, provider_id ORDER BY request_id, provider_id`, args...)
+SELECT request_id, attempt_no, provider_id, route_id, upstream_model, status, error_code,
+       terminated_reason, latency_ms, ttft_ms, cost_micros, charge_micros, created_at
+FROM usage_records WHERE request_id IN (`+idPlaceholders(len(ids))+`)
+ORDER BY request_id, attempt_no`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("store: read request providers: %w", err)
+		return nil, fmt.Errorf("store: read request attempts: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var requestID string
-		var providerID int64
-		if err := rows.Scan(&requestID, &providerID); err != nil {
-			return nil, fmt.Errorf("store: scan request provider: %w", err)
+		var (
+			requestID string
+			attempt   domain.RequestAttempt
+			createdAt int64
+		)
+		if err := rows.Scan(&requestID, &attempt.AttemptNo, &attempt.ProviderID, &attempt.RouteID,
+			&attempt.UpstreamModel, &attempt.Status, &attempt.ErrorCode, &attempt.TerminatedReason,
+			&attempt.LatencyMS, &attempt.TTFTMS, &attempt.CostMicros, &attempt.ChargeMicros,
+			&createdAt); err != nil {
+			return nil, fmt.Errorf("store: scan request attempt: %w", err)
 		}
-		out[requestID] = append(out[requestID], providerID)
+		attempt.CreatedAt = timeFromUnix(createdAt)
+		out[requestID] = append(out[requestID], attempt)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: iterate request providers: %w", err)
+		return nil, fmt.Errorf("store: iterate request attempts: %w", err)
 	}
 	return out, nil
 }

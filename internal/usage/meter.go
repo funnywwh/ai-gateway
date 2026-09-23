@@ -33,13 +33,18 @@ func (m *Meter) SetClock(now func() time.Time) { m.now = now }
 
 // Attempt is one metered upstream call (successful or not).
 type Attempt struct {
-	RequestID        string
-	AttemptNo        int
-	AccountID        int64
-	APIKeyID         int64
-	Model            string
-	ResolvedModel    string
-	ProviderID       int64
+	RequestID     string
+	AttemptNo     int
+	AccountID     int64
+	APIKeyID      int64
+	Model         string
+	ResolvedModel string
+	ProviderID    int64
+	// RouteID is the route this attempt went through; UpstreamModel is the model name the
+	// provider adapter was handed. Both are recorded per attempt, because a request can fail
+	// over and a later attempt may run on another route with another upstream model.
+	RouteID          int64
+	UpstreamModel    string
 	Dimensions       map[string]int64
 	Estimated        bool
 	OvershootCost    int64
@@ -98,6 +103,8 @@ func (m *Meter) Build(a *Attempt) (*domain.UsageRecord, error) {
 		Model:            a.Model,
 		ResolvedModel:    a.ResolvedModel,
 		ProviderID:       a.ProviderID,
+		RouteID:          a.RouteID,
+		UpstreamModel:    a.UpstreamModel,
 		DimensionsJSON:   string(dimsJSON),
 		OvershootCost:    a.OvershootCost,
 		LatencyMS:        a.LatencyMS,

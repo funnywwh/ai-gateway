@@ -29,6 +29,7 @@ func TestRecordWritesEveryField(t *testing.T) {
 	rec, err := m.Record(context.Background(), &Attempt{
 		RequestID: "req_1", AttemptNo: 2, AccountID: 7, APIKeyID: 3,
 		Model: "gpt-x", ResolvedModel: "gpt-x", ProviderID: 10,
+		RouteID: 42, UpstreamModel: "gpt-x-upstream",
 		Dimensions:       map[string]int64{"input_cache_hit": 80, "input_cache_miss": 20, "output": 5},
 		Estimated:        false,
 		OvershootCost:    1234,
@@ -63,6 +64,11 @@ func TestRecordWritesEveryField(t *testing.T) {
 	}
 	if rec.OvershootCost != 1234 || rec.AttemptNo != 2 {
 		t.Fatalf("record mismatch: %+v", rec)
+	}
+	// The route and the upstream model name are the per-attempt half of "where did this request
+	// go" (M78); they travel with the money because that is where the attempt grain lives.
+	if rec.RouteID != 42 || rec.UpstreamModel != "gpt-x-upstream" {
+		t.Fatalf("routing facts lost: route=%d upstream=%q", rec.RouteID, rec.UpstreamModel)
 	}
 }
 

@@ -1097,6 +1097,38 @@
     "api_key_id": 1,
     "api_key_name": "dev-key",
     "api_key_prefix": "sk-gw-981065ae",
+    "attempts": [
+     {
+      "attempt_no": 1,
+      "charge_micros": 0,
+      "cost_micros": 12,
+      "created_at": "2026-09-11T11:00:03Z",
+      "error_code": "upstream_400",
+      "latency_ms": 300,
+      "provider_id": 1,
+      "provider_name": "replay-local",
+      "route_id": 12,
+      "status": "failed",
+      "terminated_reason": "upstream_error",
+      "ttft_ms": 0,
+      "upstream_model": "deepseek-chat"
+     },
+     {
+      "attempt_no": 2,
+      "charge_micros": 2468,
+      "cost_micros": 1234,
+      "created_at": "2026-09-11T11:00:04Z",
+      "error_code": "",
+      "latency_ms": 900,
+      "provider_id": 3,
+      "provider_name": "deepseek",
+      "route_id": 13,
+      "status": "completed",
+      "terminated_reason": "completed",
+      "ttft_ms": 120,
+      "upstream_model": "deepseek-v3"
+     }
+    ],
     "providers": [
      {
       "id": 1,
@@ -1112,6 +1144,7 @@
     "created_at": "2026-09-11T11:00:00Z",
     "endpoint": "/v1/responses",
     "input_recorded": true,
+    "matched_rule": "mapping:prefix:deepseek-",
     "model": "deepseek-flash",
     "output_text_recorded": false,
     "reasoning_recorded": false,
@@ -1123,7 +1156,7 @@
     "title": "",
     "truncated": false,
     "usage": {
-     "attempts": 1,
+     "attempts": 2,
      "cached_tokens": 960,
      "charge_micros": 2468,
      "cost_micros": 1234,
@@ -1390,6 +1423,38 @@
   "api_key_id": 1,
   "api_key_name": "dev-key",
   "api_key_prefix": "sk-gw-981065ae",
+  "attempts": [
+   {
+    "attempt_no": 1,
+    "charge_micros": 0,
+    "cost_micros": 12,
+    "created_at": "2026-09-11T11:00:03Z",
+    "error_code": "upstream_400",
+    "latency_ms": 300,
+    "provider_id": 1,
+    "provider_name": "replay-local",
+    "route_id": 12,
+    "status": "failed",
+    "terminated_reason": "upstream_error",
+    "ttft_ms": 0,
+    "upstream_model": "deepseek-chat"
+   },
+   {
+    "attempt_no": 2,
+    "charge_micros": 2468,
+    "cost_micros": 1234,
+    "created_at": "2026-09-11T11:00:04Z",
+    "error_code": "",
+    "latency_ms": 900,
+    "provider_id": 3,
+    "provider_name": "deepseek",
+    "route_id": 13,
+    "status": "completed",
+    "terminated_reason": "completed",
+    "ttft_ms": 120,
+    "upstream_model": "deepseek-v3"
+   }
+  ],
   "call_kind": "agent",
   "client": "dsh",
   "created_at": "2026-09-11T11:00:00Z",
@@ -1416,6 +1481,7 @@
    "request_bytes": 483
   },
   "input_recorded": true,
+  "matched_rule": "mapping:prefix:deepseek-",
   "model": "deepseek-flash",
   "output": null,
   "output_text_recorded": false,
@@ -1430,7 +1496,7 @@
   "title": "",
   "truncated": false,
   "usage": {
-   "attempts": 1,
+   "attempts": 2,
    "cached_tokens": 960,
    "charge_micros": 2468,
    "cost_micros": 1234,

@@ -281,32 +281,52 @@ func reflectEqualPage(a, b domain.RequestLogDimensionPage) bool {
 	return true
 }
 
-// The page needs the provider ids of its rows to name them, and the names come from the
-// providers table as read-time labels. A provider that was deleted after it metered traffic
-// is simply absent from the map: the usage rows are billing records and outlive the
-// configuration, so the caller keeps the id instead of blanking the cell.
-func TestRequestProvidersAndNames(t *testing.T) {
+// The page needs the attempts of its rows to name the providers and to draw the route path,
+// and the names come from the providers table as read-time labels. A provider that was deleted
+// after it metered traffic is simply absent from the map: the usage rows are billing records
+// and outlive the configuration, so the caller keeps the id instead of blanking the cell.
+func TestRequestAttemptsAndNames(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	cheap := seedProvider(t, db, "cheap-upstream")
 	dear := seedProvider(t, db, "dear-upstream")
 	seedDimensionRow(t, db, &domain.RequestLogRecord{RequestID: "r1"})
 	seedProviderUsage(t, db, "r1", 1, dear, 5, 6)
-	seedProviderUsage(t, db, "r1", 2, cheap, 5, 6)
+	seedRouteAttempt(t, db, "r1", 2, cheap, 77, "deepseek-chat")
 	seedDimensionRow(t, db, &domain.RequestLogRecord{RequestID: "r2"})
+	// A row metered before migration 0027 knows neither the route nor the upstream model; it
+	// must come back as the zero value rather than being dropped from the path.
+	seedDimensionRow(t, db, &domain.RequestLogRecord{RequestID: "r3"})
+	seedProviderUsage(t, db, "r3", 1, dear, 5, 6)
 
-	providers, err := db.RequestProviders(ctx, []string{"r1", "r2", "missing", ""})
+	attempts, err := db.RequestAttempts(ctx, []string{"r1", "r2", "r3", "missing", ""})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []int64{cheap, dear}
-	if len(providers["r1"]) != 2 || providers["r1"][0] != want[0] || providers["r1"][1] != want[1] {
-		t.Fatalf("r1 providers = %v, want ascending and deduplicated %v", providers["r1"], want)
+	path := attempts["r1"]
+	want := []int64{dear, cheap}
+	if len(path) != 2 {
+		t.Fatalf("r1 attempts = %v, want both hops", path)
 	}
-	if _, ok := providers["r2"]; ok {
-		t.Fatal("a request with no metering row must have no provider, not an empty entry")
+	// The order is the order they were tried, which is what makes the list a route path.
+	for i, attempt := range path {
+		if attempt.AttemptNo != i+1 || attempt.ProviderID != want[i] {
+			t.Fatalf("r1 attempt %d = %+v, want attempt_no %d on provider %d", i, attempt, i+1, want[i])
+		}
 	}
-	if _, ok := providers["missing"]; ok {
+	if path[1].RouteID != 77 || path[1].UpstreamModel != "deepseek-chat" {
+		t.Fatalf("r1 second hop = %+v, want the recorded route 77 and upstream model", path[1])
+	}
+	if path[1].Status != "completed" || path[1].CostMicros != 12 {
+		t.Fatalf("r1 second hop result = %+v, want the metered result carried through", path[1])
+	}
+	if len(attempts["r3"]) != 1 || attempts["r3"][0].RouteID != 0 || attempts["r3"][0].UpstreamModel != "" {
+		t.Fatalf("a pre-M78 attempt = %+v, want zero route and empty upstream model", attempts["r3"])
+	}
+	if _, ok := attempts["r2"]; ok {
+		t.Fatal("a request with no metering row must have no attempt, not an empty entry")
+	}
+	if _, ok := attempts["missing"]; ok {
 		t.Fatal("an unknown id must stay absent")
 	}
 
@@ -319,6 +339,22 @@ func TestRequestProvidersAndNames(t *testing.T) {
 	}
 	if _, ok := names[4242]; ok {
 		t.Fatal("an id with no row must stay absent so the caller can show the id")
+	}
+}
+
+// seedRouteAttempt writes one metered attempt that knows its route, the way the data plane
+// records it (M78). routeID 0 and an empty upstream model are the pre-migration shape.
+func seedRouteAttempt(t *testing.T, db *DB, requestID string, attempt int, providerID, routeID int64, upstream string) {
+	t.Helper()
+	if _, err := db.InsertUsage(context.Background(), &domain.UsageRecord{
+		RequestID: requestID, AttemptNo: attempt, AccountID: 1, APIKeyID: 1,
+		Model: "m", ResolvedModel: "m", ProviderID: providerID,
+		RouteID: routeID, UpstreamModel: upstream,
+		DimensionsJSON: `{"input":10,"output":5}`,
+		CostMicros:     12, ChargeMicros: 24,
+		Status: "completed", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("insert usage: %v", err)
 	}
 }
 

@@ -166,14 +166,18 @@ func TestProviderCostCapFailsOverToAnotherProvider(t *testing.T) {
 	requestID := resp.Header.Get("x-request-id")
 	resp.Body.Close()
 
-	// Whose money was it? The metering row answers, and it must name the backup provider only.
-	providers, err := f.db.RequestProviders(ctx, []string{requestID})
+	// Whose money was it? The metering rows answer, and they must name the backup provider only.
+	attempts, err := f.db.RequestAttempts(ctx, []string{requestID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := providers[requestID]
-	if len(got) != 1 || got[0] != backup {
-		t.Fatalf("served by %v, want only provider %d (the capped one is %d)", got, backup, primaryID)
+	got := attempts[requestID]
+	if len(got) != 1 || got[0].ProviderID != backup {
+		t.Fatalf("served by %+v, want only provider %d (the capped one is %d)", got, backup, primaryID)
+	}
+	// The same row is where the route path comes from, so the hop must name a real route.
+	if got[0].RouteID == 0 || got[0].UpstreamModel == "" {
+		t.Fatalf("attempt = %+v, want the route and upstream model the data plane recorded", got[0])
 	}
 }
 

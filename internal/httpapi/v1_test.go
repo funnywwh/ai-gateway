@@ -581,6 +581,13 @@ func TestRecordingSwitchesAreIndependent(t *testing.T) {
 	if log.ReasoningRecorded || log.ResponseReasoning != "" {
 		t.Fatalf("thinking text must NOT be recorded by default: %+v", log)
 	}
+	// Where the request went is identity metadata, not content: the canonical model and the
+	// mapping rule that produced it are recorded even here, under the default input policy
+	// (M78). "echo-model" is a public model name, so the rule that matched is the model itself.
+	if log.ResolvedModel != "echo-model" || log.MatchedRule != "model:echo-model" {
+		t.Fatalf("routing identity = %q via %q, want the canonical model and its rule",
+			log.ResolvedModel, log.MatchedRule)
+	}
 
 	// The output-text switch is per key; switching to full keeps the whole body. The two
 	// channels stay independent of each other. The admin API invalidates the verification

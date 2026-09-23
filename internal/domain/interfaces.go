@@ -51,14 +51,19 @@ type Store interface {
 
 // UsageRecord is one metered upstream attempt (successful or not).
 type UsageRecord struct {
-	ID               int64
-	RequestID        string
-	AttemptNo        int
-	AccountID        int64
-	APIKeyID         int64
-	Model            string
-	ResolvedModel    string
-	ProviderID       int64
+	ID            int64
+	RequestID     string
+	AttemptNo     int
+	AccountID     int64
+	APIKeyID      int64
+	Model         string
+	ResolvedModel string
+	ProviderID    int64
+	// RouteID is the route this attempt was selected through, and UpstreamModel is the
+	// model name that was actually sent upstream (a snapshot, not a read-time join: the
+	// routes table is editable configuration, while what was sent is a fact).
+	RouteID          int64
+	UpstreamModel    string
 	DimensionsJSON   string
 	CostMicros       int64
 	ChargeMicros     int64

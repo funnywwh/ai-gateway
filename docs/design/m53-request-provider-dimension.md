@@ -122,3 +122,17 @@ M30 的 `account_id`/`api_key_id` 能落在 `request_logs` 上，是因为**一�
   计量行是计费记录，不随配置删除，所以 id 永远有值。
 - **大窗口下 `group_by=provider` 的耗时**未实测；与 M27 的观察项合并看待，若 p95 超标再考虑
   为供应商单独建小时汇总（那需要另一张按 (request, provider) 聚合的表，与现行 rollup 的请求粒度不同）。
+
+## 8. 后续实现差异（M78）
+
+M78 把「供应商」变成了同一份计量事实的一种读法，两处签名随之变化（口径不变）：
+
+- `store.RequestProviders`（返回 `map[string][]int64`，按 provider id 升序去重）被
+  `store.RequestAttempts`（返回 `map[string][]domain.RequestAttempt`，按 `attempt_no` 升序）取代：
+  列表/详情一次查询同时供 `providers` 与 `attempts` 使用，`providers` 由 `attempts` 去重得出，
+  顺序是**首次尝试顺序**而不是 id 升序——两者读起来才是同一个故事（这一条是本机构建时对显示顺序的
+  唯一行为变化）。
+- 计量行新增 `route_id`/`upstream_model`（迁移 0027），所以 §6 里那条 `RequestProviders` 升序去重的
+  断言改成了 `RequestAttempts` 的顺序与字段断言；`ProviderNames` 的规则不变。
+- §7 最后一条关于「不回供应商标识」的立场不变：M78 只扩展**管理面**（列表/详情/后台工具描述），
+  MCP 账户自助查询工具仍然不暴露供应商与路由。

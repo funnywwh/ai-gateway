@@ -59,6 +59,9 @@
 | `account_id` / **用户** | 这笔消耗算在哪个账户（租户） | 该请求使用的 API Key 的所属账户；控制台列头写「用户」，详情写「用户（账户）」 |
 | `api_key_id` / **API Key** | 用的是哪个 Key | 该请求的凭据自身（`api_key_id`），服务路径与本地拒绝路径都写 |
 | **供应商**（M53） | 每一次上游尝试分别由哪家服务 | **不在日志行上**：来自计量行的 `usage_records.provider_id`。一个请求可能被多家服务（故障转移），所以它是计量行维度，不是日志列 |
+| **上游模型**（M78） | 那一次尝试真正发给上游的模型名 | **不在日志行上**：计量行的 `usage_records.upstream_model`，**写时快照**（路由是可编辑的配置，历史不随配置漂移） |
+| **路由路线**（M78） | 每一跳走的是哪条路由、结果如何 | **不在日志行上**：计量行的 `route_id` + 该次尝试的结果（`status`/`error_code`/延迟/成本），按 `attempt_no` 排序；一个请求可以有多跳 |
+| **映射规则**（M78） | 请求的模型经哪条映射规则变成规范模型 | 日志行的 `matched_rule`：`model:<public>` / `mapping:<kind>:<pattern>` / `alias:<x>` / `fallback:<y>`；本地拒绝的请求为空（它没有走到模型） |
 
 **用户与 API Key 是凭据维度**（M30）：它们不来自请求正文，而是鉴权时已知的事实，因此与其余
 维度一样不受录制口径影响（`record_input=off` 也写），也**不参与 `redact_paths`**——脱敏管的是
@@ -76,6 +79,17 @@
 （与 token、成本不落列同一条规矩）。
 好处是改名立刻生效、不会把同一个 Key 在统计里裂成两桶；两表都没有硬删除，所以按 id 一定取得到
 名字。`api_keys.name` 不唯一（同一账户可重名），因此**分组按 id**、名字只作显示。
+
+**路由路线是计量行维度**（M78），与供应商同一条理由、同一张表：一次请求可以有多次上游尝试，
+所以「走了哪条路由、发给哪家的哪个上游模型名」是**一对多**的事实，不能压进日志行，也不能由
+「最后成功的那一跳」代表（失败那跳的成本与路线都真实存在）。它与供应商的关系是**同一份事实的
+两种读法**：`providers` 是这些尝试里出现过的供应商集合（按首次尝试顺序去重），`attempts` 是它们
+的**顺序与结果**（`route_id`、`upstream_model`、`status`、`error_code`、延迟、成本）。
+
+两个快照字段的含义要分清：`route_id` 与 `upstream_model` 记的是**当时**选了哪条路由、发了哪个
+模型名，读时不 join `routes` 表——路由可以被编辑、也可以随供应商删除而消失，历史不该跟着变。
+因此路由被删后界面只显示 `#<id>`（可在「模型与路由」页对照），上游模型仍是当时的字符串。
+迁移 0027 之前写下的计量行这两个字段是 `0`/`''`，界面显示「（未知路由）」与「—」，不回填。
 
 识别是**结构性**的：只看请求里该出现的位置（顶层 `instructions`、首条 developer 消息、以
 `<environment_context>` 开头的消息……），不做全文匹配——实测本机库里 265 行含 `Codex CLI`
@@ -117,8 +131,8 @@ token 口径与计费一致：输入 = `input + input_cache_hit + input_cache_mi
 
 | 端点 | 用途 |
 |---|---|
-| `GET /admin/api/v1/requests` | 分页列表；可按 `account_id`/`api_key_id`/`provider_id`/`days` 与六个身份维度过滤；每行含 7 个身份字段、`account_name`/`api_key_name`/`api_key_prefix`、`providers`（`[{id, name}]`，失败转移的行有多项）与 `usage` |
-| `GET /admin/api/v1/requests/{id}` | 单条详情：输入/思考/输出（按录制开关）＋身份＋用户/Key/供应商的名字＋消耗 |
+| `GET /admin/api/v1/requests` | 分页列表；可按 `account_id`/`api_key_id`/`provider_id`/`days` 与六个身份维度过滤；每行含 7 个身份字段、`matched_rule`、`account_name`/`api_key_name`/`api_key_prefix`、`providers`（`[{id, name}]`，失败转移的行有多项，按首次尝试顺序）、`attempts`（每次上游尝试的 `route_id`/`provider_id`/`provider_name`/`upstream_model`/`status`/`error_code`/`terminated_reason`/`latency_ms`/`ttft_ms`/`cost_micros`/`charge_micros`/`created_at`，按 `attempt_no` 升序）与 `usage` |
+| `GET /admin/api/v1/requests/{id}` | 单条详情：输入/思考/输出（按录制开关）＋身份＋`matched_rule`＋用户/Key/供应商的名字＋同上的 `attempts`（路由路线）＋消耗 |
 | `GET /admin/api/v1/requests/dimensions` | 维度统计（**可分页、可排序**）：`group_by=client\|model\|resolved_model\|workspace\|session\|call_kind\|account\|api_key\|provider`，汇总请求数、已计量数、token、成本与首次/最近出现时间；`session` 分组额外带标题与工作区，`account`/`api_key`/`provider` 分组额外带名字（`api_key` 还带前缀）；`sort=last_seen\|requests\|charge`（默认 `last_seen`），`limit`/`offset` 同列表契约，响应 `total` 是**分组数** |
 | `POST /admin/api/v1/requests/prune` | 立即执行保留期清理（admin） |
 
@@ -128,6 +142,25 @@ token 口径与计费一致：输入 = `input + input_cache_hit + input_cache_mi
 `account`/`api_key` 分组的 `key` 是**数字 id 的字符串形式**（名字随行返回，因为 `api_keys.name`
 不唯一）；`key` 为空串表示未知桶：`account_id`/`api_key_id` ≤ 0 的历史行或兜底行，
 控制台显示「（未知）」，计数与其他桶一样保留。
+
+### 路由路线（M78）
+
+列表与详情都返回 `attempts`，同一份数据在两处读：「上游模型」列取其中去重后的模型名（按尝试顺序
+用 ` → ` 连接，失败转移的行会有两个），「路由路线」列把每一跳写成 `<路由 #id> <供应商><结果标记>`
+（`✓` = `completed`，`✗ <error_code>` = `failed`，其他状态显示状态名）。详情另给一行模型解析链：
+`请求的模型 →[matched_rule]→ 路由到的模型`，随后每次尝试一行（route id、供应商 #id、上游模型、
+status、错误码、结束原因、延迟、首字延迟、成本与对客）。
+
+口径与边界：
+
+1. **顺序即路线**：`attempts` 按 `attempt_no` 升序，正是网关尝试的顺序；`providers` 由它去重得到，
+   所以两个字段读起来是同一个故事（谁先被试、结果如何）。
+2. **没有计量行就没有路线**：本地拒绝（余额不足、账户停用等）的请求从未到达上游，`attempts` 为空，
+   控制台显示「无上游尝试」而不是「一跳空白」或 `#0`；`matched_rule` 与 `resolved_model` 同为 `''`。
+3. **快照不随配置变**：`route_id`/`upstream_model` 是当时写下的值（见 §2），`matched_rule` 同理——
+   路由与映射规则改过之后再看旧日志，答案仍是当时那一跳。
+4. **独立于正文录制**：路线与规则是路由事实，`record_input=off` 也记，也不在 `recording.redact_paths`
+   的作用范围内（同 `resolved_model`）。
 
 ### 供应商维度与筛选（M53）
 
@@ -197,6 +230,13 @@ UTC 小时读取八维实际组合的汇总表；当前小时、查询边界、�
 统计卡选「供应商」时行显示「名字 #id」，`id=0` 显示「（未知）」，且「请求数」表头写明各分组之和
 可能大于窗口总数的原因——一组比总数还大的数字，旁边没有这句话看起来就是缺陷。
 
+路由路线的展示口径（M78）：列表在「供应商」之后新增「上游模型」与「路由路线」两列。前者按尝试
+顺序列出真正发出去的上游模型名（`a → b`，tooltip 逐行给出每次尝试的模型与供应商），后者把每一跳
+写成「`#路由id` 供应商 + 结果标记」（`✓` 成功 / `✗ <错误码>` 失败 / 其他状态显示状态名），
+tooltip 给出每次尝试的全部字段并提示路由 id 可在「模型与路由」页对照；没有计量行的行显示
+「未计量」与「无上游尝试」，迁移前的行显示「—」与「（未知路由）」。详情在身份块里补「上游模型」
+与「映射规则」，并新增「路由路线」区块（首行模型解析链，其后每次尝试一行）。
+
 汇总行的口径（M29）：**只合计当前页已加载的行**（卡片上「本页过滤」生效时就是屏幕上剩下的行），
 tokens 与成本落在它们各自表头列的正下方；未计量的行只计入行数（标签写「已计量 M · 未计量 K」），
 两格显示「未计量」而不是 0。它**不是**筛选窗口的合计——窗口口径看「维度统计」卡
@@ -226,12 +266,18 @@ tokens 与成本落在它们各自表头列的正下方；未计量的行只计�
 恒读原始计量行）、`provider_id` 过滤（请求级、走 `EXISTS`）、列表「供应商」列与详情字段
 （`providers` 为数组）、`/providers` 下拉与统计分组、MCP 后台工具同步暴露；口径与取舍见
 `docs/design/m53-request-provider-dimension.md`。
+**已实现（M78）**：路由路线——计量行新增 `route_id`/`upstream_model`（迁移 0027，写时快照）、
+日志行新增 `matched_rule`；列表/详情返回 `attempts`（按尝试顺序的完整路线）、`providers` 改由它
+去重得出（顺序变为「首次尝试」）、控制台新增「上游模型」「路由路线」两列与详情「路由路线」区块、
+后台工具描述同步；`RequestProviders` 由 `RequestAttempts` 取代。设计与取舍见
+`docs/design/m78-request-log-route-path.md`。
 历史行（迁移 0008 之前）的七列为空，控制台显示「—」，聚合归入「（未知）」桶；
-`account_id`/`api_key_id` ≤ 0 的行归入「（未知）」桶，计数同样保留。
+`account_id`/`api_key_id` ≤ 0 的行归入「（未知）」桶，计数同样保留；迁移 0027 之前的计量行
+`route_id`/`upstream_model` 为空，控制台显示「（未知路由）」与「—」，同样不回填。
 
 相关设计：`docs/design/m27-request-dimensions.md`、`docs/design/m29-request-log-page-summary.md`、
 `docs/design/m30-request-log-owner-dimensions.md`、`docs/design/m31-request-log-stats-pagination.md`、
-`docs/design/m53-request-provider-dimension.md`。
+`docs/design/m53-request-provider-dimension.md`、`docs/design/m78-request-log-route-path.md`。
 
 Codex 标题辅助请求根据元数据 `turn_trigger=thread_title` 或 user 消息开头的专用任务标题提示词识别为 `call_kind=title`。标题和描述一起返回时仅记录 `title`；损坏的 JSON 对象或缺失标题时留空。标题辅助请求可能使用独立的 `prompt_cache_key`，若携带显式根会话 ID 则归于根会话；没有明确的根会话标识时，已知 Codex 标题模板可通过同账户、Key、工作区内 ±120 秒的唯一首条提示词精确指纹候选关联；候选冲突时恢复独立分组。正文录制关闭/仅元数据、启用脱敏或混合媒体输入时不推断，详见 `session-grouping-fix.md`。历史日志未录制响应正文时不能恢复标题。
 

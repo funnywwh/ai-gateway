@@ -235,9 +235,9 @@ func (db *DB) GetBalance(ctx context.Context, accountID int64) (int64, error) {
 }
 
 const usageCols = `id, request_id, attempt_no, account_id, api_key_id, model, resolved_model,
-	provider_id, dimensions_json, cost_micros, charge_micros, overshoot_cost_micros,
-	pricing_snapshot_json, latency_ms, ttft_ms, status, error_code, degraded_features_json,
-	usage_source, terminated_reason, created_at`
+	provider_id, route_id, upstream_model, dimensions_json, cost_micros, charge_micros,
+	overshoot_cost_micros, pricing_snapshot_json, latency_ms, ttft_ms, status, error_code,
+	degraded_features_json, usage_source, terminated_reason, created_at`
 
 // InsertUsage appends one metered upstream attempt.
 func (db *DB) InsertUsage(ctx context.Context, rec *domain.UsageRecord) (int64, error) {
@@ -252,13 +252,14 @@ func (db *DB) InsertUsage(ctx context.Context, rec *domain.UsageRecord) (int64, 
 	}
 	res, err := db.write.ExecContext(ctx, `
 INSERT INTO usage_records(request_id, attempt_no, account_id, api_key_id, model, resolved_model,
-  provider_id, dimensions_json, cost_micros, charge_micros, overshoot_cost_micros,
-  pricing_snapshot_json, latency_ms, ttft_ms, status, error_code, degraded_features_json,
-  usage_source, terminated_reason, created_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  provider_id, route_id, upstream_model, dimensions_json, cost_micros, charge_micros,
+  overshoot_cost_micros, pricing_snapshot_json, latency_ms, ttft_ms, status, error_code,
+  degraded_features_json, usage_source, terminated_reason, created_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		rec.RequestID, rec.AttemptNo, rec.AccountID, rec.APIKeyID, rec.Model, rec.ResolvedModel,
-		rec.ProviderID, rec.DimensionsJSON, rec.CostMicros, rec.ChargeMicros, rec.OvershootCost,
-		rec.PricingSnapshot, rec.LatencyMS, rec.TTFTMS, rec.Status, rec.ErrorCode,
+		rec.ProviderID, rec.RouteID, rec.UpstreamModel, rec.DimensionsJSON, rec.CostMicros,
+		rec.ChargeMicros, rec.OvershootCost, rec.PricingSnapshot, rec.LatencyMS,
+		rec.TTFTMS, rec.Status, rec.ErrorCode,
 		rec.DegradedFeatures, rec.UsageSource, rec.TerminatedReason, unix(rec.CreatedAt))
 	if err != nil {
 		return 0, fmt.Errorf("store: insert usage record: %w", err)
@@ -302,7 +303,8 @@ func (db *DB) ListUsage(ctx context.Context, accountID int64, from, to time.Time
 			createdAt int64
 		)
 		if err := rows.Scan(&r.ID, &r.RequestID, &r.AttemptNo, &r.AccountID, &r.APIKeyID,
-			&r.Model, &r.ResolvedModel, &r.ProviderID, &r.DimensionsJSON, &r.CostMicros,
+			&r.Model, &r.ResolvedModel, &r.ProviderID, &r.RouteID, &r.UpstreamModel,
+			&r.DimensionsJSON, &r.CostMicros,
 			&r.ChargeMicros, &r.OvershootCost, &r.PricingSnapshot, &r.LatencyMS, &r.TTFTMS,
 			&r.Status, &r.ErrorCode, &r.DegradedFeatures, &r.UsageSource, &r.TerminatedReason,
 			&createdAt); err != nil {

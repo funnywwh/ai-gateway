@@ -119,6 +119,8 @@ export async function render({ page, actions, session }) {
       { key: 'client', label: '客户端', render: (row) => (row.client ? badge(row.client, row.client === 'unknown' ? '' : 'ok') : el('span', { class: 'muted', text: '—' })) },
       { key: 'model', label: '模型', render: (row) => modelCell(row) },
       { key: 'provider', label: '供应商', render: (row) => providersCell(row) },
+      { key: 'upstream_model', label: '上游模型', render: (row) => upstreamModelsCell(row) },
+      { key: 'route', label: '路由路线', render: (row) => routePathCell(row) },
       { key: 'reasoning_effort', label: '推理强度', render: (row) => reasoningEffortCell(row) },
       { key: 'workspace', label: '工作区', render: (row) => pathCell(row.workspace) },
       { key: 'session_id', label: '会话', render: (row) => sessionCell(row.session_id) },
@@ -351,7 +353,7 @@ export async function render({ page, actions, session }) {
   page.append(statsCard);
   page.append(card('请求日志', view.node, [
     days, accountFilter, keyFilter, providerFilter, client, model, sessionFilter, workspaceFilter,
-    el('span', { class: 'muted', text: '用户（账户）/API Key 与客户端/模型/推理强度/工作区/会话/标题、token 成本都是独立于正文口径记录的元数据（record_input=off 也记）；用户/Key/供应商的名字由各自的表读时解析，分组按 id；供应商按计量行的 provider_id 归属（同一模型的不同供应商各自计价，失败转移的请求会在每一家各计一次）；标题来自会话的标题调用，成本来自计量表，与账单一致；列表底部的「本页汇总」只合计当前页已加载的行（含本页过滤），窗口口径看上方「维度统计」' }),
+    el('span', { class: 'muted', text: '用户（账户）/API Key 与客户端/模型/推理强度/工作区/会话/标题、token 成本都是独立于正文口径记录的元数据（record_input=off 也记）；用户/Key/供应商的名字由各自的表读时解析，分组按 id；供应商按计量行的 provider_id 归属（同一模型的不同供应商各自计价，失败转移的请求会在每一家各计一次）；「上游模型」与「路由路线」也来自计量行——一次请求可以失败转移，所以那里是每次尝试一行：路线逐跳写「路由 #id 供应商 结果」，最后成功的那一跳带 ✓（失败带 ✗ 与错误码），上游模型是当时真正发出去的名字（路由可被编辑或删除，这里记的是快照，不随配置变化）；本地拒绝的请求没有计量行，显示「未计量」与「无上游尝试」，与「消耗为 0」不是一句话；标题来自会话的标题调用，成本来自计量表，与账单一致；列表底部的「本页汇总」只合计当前页已加载的行（含本页过滤），窗口口径看上方「维度统计」' }),
     hint]));
 
   // Changing any filter restarts both tables at page 1: the rows of the current page belong
@@ -451,8 +453,109 @@ function providersCell(row) {
   }
   const label = (p) => (p.id ? (p.name || '（无名字）') + ' #' + p.id : '（未知）');
   const text = providers.map((p) => (p.id ? (p.name || '#' + p.id) : '（未知）')).join('、');
+  // The attempts name the upstream model each provider was asked for, which is what makes the
+  // provider list and the route path read as the same story.
+  const attempts = attemptsOf(row);
   return el('span', {
-    title: providers.map(label).join('、') + (providers.length > 1 ? '（该请求在多个供应商上有计量行：失败转移）' : ''),
+    title: providers.map(label).join('、') + (providers.length > 1 ? '（该请求在多个供应商上有计量行：失败转移）' : '')
+      + (attempts.length ? '\n' + attempts.map(attemptLine).join('\n') : ''),
+    text,
+  });
+}
+
+// attemptsOf returns the metered upstream attempts of one row, in the order they were tried.
+// They come from usage_records (one row per attempt, M78); an empty list means the request has
+// no metering row at all — a locally rejected request, which never reached an upstream.
+function attemptsOf(row) {
+  return Array.isArray(row.attempts) ? row.attempts : [];
+}
+
+// attemptProviderLabel is the provider as the 供应商 column writes it: the name, or the id when
+// the provider row is gone. attemptProviderNames is the tooltip form, which carries both.
+function attemptProviderLabel(attempt) {
+  if (!attempt.provider_id) return '（未知）';
+  return attempt.provider_name || '#' + attempt.provider_id;
+}
+
+function attemptProviderNames(attempt) {
+  if (!attempt.provider_id) return '（未知）';
+  return (attempt.provider_name || '（无名字）') + ' #' + attempt.provider_id;
+}
+
+// attemptRoute renders the route an attempt went through. 0 is a row metered before migration
+// 0027, which did not record a route: it is reported as unknown rather than as "route #0".
+function attemptRoute(attempt) {
+  return attempt.route_id > 0 ? '#' + attempt.route_id : '（未知路由）';
+}
+
+// attemptMark is the one-character outcome of a hop in the 路由路线 column. The tooltip carries
+// the detail; the mark is what makes a failover visible at a glance.
+function attemptMark(attempt) {
+  if (attempt.status === 'completed') return ' ✓';
+  if (attempt.status === 'failed') return ' ✗' + (attempt.error_code ? ' ' + attempt.error_code : '');
+  return attempt.status ? ' · ' + attempt.status : '';
+}
+
+// attemptLine is one line of the route-path tooltip: everything the row knows about one attempt.
+function attemptLine(attempt, index) {
+  const parts = [
+    (index + 1) + '. 路由 ' + attemptRoute(attempt),
+    '供应商 ' + attemptProviderNames(attempt),
+    '上游模型 ' + (attempt.upstream_model || '—'),
+    attempt.status || '（无状态）',
+  ];
+  // The cell's mark already carries the code for a failed hop; the tooltip spells it out for
+  // every hop, because it is the line an operator copies into a bug report.
+  if (attempt.error_code) parts.push('错误码 ' + attempt.error_code);
+  if (attempt.terminated_reason) parts.push('结束原因 ' + attempt.terminated_reason);
+  parts.push(attempt.latency_ms + ' ms');
+  if (attempt.ttft_ms) parts.push('首字 ' + attempt.ttft_ms + ' ms');
+  parts.push('成本 ' + money(attempt.cost_micros || 0) + ' / 对客 ' + money(attempt.charge_micros || 0));
+  return parts.join(' · ');
+}
+
+// upstreamModelsCell renders the model name(s) actually sent upstream. A request that failed
+// over can have been asked for different names on different providers, so all of them are
+// listed in the order they were tried; a name recorded before migration 0027 is simply absent
+// and says so rather than pretending the request had no upstream model.
+function upstreamModelsCell(row) {
+  const attempts = attemptsOf(row);
+  if (!attempts.length) {
+    return el('span', {
+      class: 'muted', text: row.usage && row.usage.metered ? '（未知）' : '未计量',
+      title: '该请求没有计量行（本地拒绝的请求按设计不写 usage），因此没有上游模型',
+    });
+  }
+  const models = [];
+  for (const attempt of attempts) {
+    if (attempt.upstream_model && !models.includes(attempt.upstream_model)) models.push(attempt.upstream_model);
+  }
+  if (!models.length) {
+    return el('span', { class: 'muted', text: '—', title: '迁移 0027 之前的计量行没有记录上游模型，无法回填' });
+  }
+  return el('span', {
+    title: '每一次上游尝试实际发出的模型名（按尝试顺序）：\n' + attempts.map(attemptLine).join('\n'),
+    text: models.join(' → '),
+  });
+}
+
+// routePathCell renders 路由路线: one hop per metered attempt, in the order they were tried, so
+// "which route did this request take" is answered by the row itself. A request with no metering
+// row has no route path at all — it never reached an upstream — and says that instead of
+// showing a single hop that never happened.
+function routePathCell(row) {
+  const attempts = attemptsOf(row);
+  if (!attempts.length) {
+    return el('span', {
+      class: 'muted', text: '无上游尝试',
+      title: '该请求没有计量行（本地拒绝或准入失败），没有到达上游，因此没有路由路线',
+    });
+  }
+  const text = attempts.map((attempt) =>
+    attemptRoute(attempt) + ' ' + attemptProviderLabel(attempt) + attemptMark(attempt)).join(' → ');
+  return el('span', {
+    title: attempts.map(attemptLine).join('\n')
+      + '\n路由 id 可在「模型与路由」页对照（路由可被编辑或删除，这里记的是当时的 id 与上游模型名）',
     text,
   });
 }
@@ -560,6 +663,7 @@ async function detail(requestID) {
     modalBody([
       el('div', { class: 'muted', text: row.endpoint + ' · ' + formatTime(row.created_at) + ' · HTTP ' + row.status }),
       identityBlock(row),
+      routeBlock(row),
       usageBlock(usage),
       // The size of the request is recorded even when its content is not, so a
       // "未录制" panel can still say how big the request was.
@@ -582,7 +686,9 @@ async function detail(requestID) {
 // page, the console's 账户 elsewhere — and the API key it authenticated with. Their names
 // are read-time labels; the ids are what the filters take, so both are shown. 供应商 (M53) is
 // a third id dimension, and the only one that is one-to-many: a request that failed over was
-// metered by more than one provider, so all of them are listed.
+// metered by more than one provider, so all of them are listed. 上游模型 (M78) and 映射规则
+// (M78) name the other half of "where did this request go": the model name that was actually
+// sent upstream, and the mapping rule that turned the requested model into the canonical one.
 function identityBlock(row) {
   const owner = row.account_id
     ? (row.account_name || '（无名字）') + ' #' + row.account_id
@@ -594,12 +700,18 @@ function identityBlock(row) {
   const provider = providers.length
     ? providers.map((p) => (p.id ? (p.name || '（无名字）') + ' #' + p.id : '（未知）')).join('、')
     : '—';
+  const models = [];
+  for (const attempt of attemptsOf(row)) {
+    if (attempt.upstream_model && !models.includes(attempt.upstream_model)) models.push(attempt.upstream_model);
+  }
   const fields = [
     ['用户（账户）', owner],
     ['API Key', apiKey],
     ['供应商', provider],
+    ['上游模型', models.length ? models.join(' → ') : (attemptsOf(row).length ? '—' : '未计量')],
     ['客户端', row.client || '未识别'],
     ['请求的模型', row.model || '—'],
+    ['映射规则', row.matched_rule || '—'],
     ['路由到的模型', row.resolved_model || '—'],
     ['推理强度', row.reasoning_effort || '—'],
     ['工作区', row.workspace || '—'],
@@ -609,6 +721,30 @@ function identityBlock(row) {
   ];
   return el('div', { class: 'muted' }, fields.map(([label, value]) =>
     el('div', {}, [el('strong', { text: label + '：' }), el('span', { text: String(value) })])));
+}
+
+// routeBlock is the detail page's answer to "which route did this request take". The header
+// line is the model resolution (requested → mapping rule → canonical); each following line is
+// one metered upstream attempt, in the order they were tried, because a failover is exactly
+// what an operator opens a failed request to understand. A request with no metering row never
+// reached an upstream, so it has no route path — that is said out loud rather than shown as an
+// empty list, which would read like a rendering bug.
+function routeBlock(row) {
+  const attempts = attemptsOf(row);
+  const header = [];
+  if (row.model || row.resolved_model) {
+    const rule = row.matched_rule ? ' →[' + row.matched_rule + ']→ ' : ' → ';
+    header.push(el('div', { class: 'muted' }, [
+      el('strong', { text: '模型解析：' }),
+      el('span', { text: (row.model || '—') + rule + (row.resolved_model || '—') }),
+    ]));
+  }
+  const lines = attempts.map((attempt, index) =>
+    el('div', { class: 'muted', text: attemptLine(attempt, index) }));
+  const body = attempts.length
+    ? lines
+    : [el('div', { class: 'muted', text: '无上游尝试：该请求没有计量行（本地拒绝或准入失败），没有到达上游，因此没有路由路线' })];
+  return el('div', {}, [el('h4', { text: '路由路线' }), ...header, ...body]);
 }
 
 function usageBlock(usage) {

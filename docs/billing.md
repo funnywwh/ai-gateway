@@ -7,7 +7,7 @@
 
 ## 1. 计量（L1）
 
-- **每次实际出网尝试**写一行 `usage_records`（含失败尝试：`status`、`error_code`、`terminated_reason`、`overshoot_cost_micros`）。
+- **每次实际出网尝试**写一行 `usage_records`（含失败尝试：`status`、`error_code`、`terminated_reason`、`overshoot_cost_micros`；以及这次尝试走的路由与上游模型名 `route_id`/`upstream_model`，M78）。
 - **本地拒绝（未出网）不写用量**，只写 `request_logs` + 审计 + hook `request.denied`。
 - usage 来源优先级：上游最终 usage > 流中 `usage.delta` 累计 > 字符估算（`usage_source=estimated`）> `unavailable`。
 - 取整规则：每维度 `fee = ceil(quantity × unit_price_micros / scale)`，token 类 `scale = 1e6`，计数类 `scale = 1`；

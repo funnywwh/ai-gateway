@@ -26,7 +26,8 @@ func (db *DB) ListUsageAsc(ctx context.Context, accountID int64) ([]*domain.Usag
 			createdAt int64
 		)
 		if err := rows.Scan(&r.ID, &r.RequestID, &r.AttemptNo, &r.AccountID, &r.APIKeyID,
-			&r.Model, &r.ResolvedModel, &r.ProviderID, &r.DimensionsJSON, &r.CostMicros,
+			&r.Model, &r.ResolvedModel, &r.ProviderID, &r.RouteID, &r.UpstreamModel,
+			&r.DimensionsJSON, &r.CostMicros,
 			&r.ChargeMicros, &r.OvershootCost, &r.PricingSnapshot, &r.LatencyMS, &r.TTFTMS,
 			&r.Status, &r.ErrorCode, &r.DegradedFeatures, &r.UsageSource, &r.TerminatedReason,
 			&createdAt); err != nil {

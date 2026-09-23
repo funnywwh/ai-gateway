@@ -5890,3 +5890,69 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
       overlay 二进制）成功写出 `bin/aigw`。沙箱里 Go 走工作区自带工具链 `.cache/go`
       （`scripts/goenv.sh` 指向的 `$HOME/sdk/go` 在此不存在），命令用 `PATH="$PWD/.cache/go/bin:$PATH" make …`。
 - [x] 提交：单一 M81 提交（提交信息引用设计文档路径），并合并回 `main`。
+
+## M78 请求日志的路由路线（供应商 / 上游模型 / 路由 id）（2026-09-23）
+
+> 设计：`docs/design/m78-request-log-route-path.md`；规格：`docs/request-log.md`（§2/§4/§6）。
+> 需求原话：「请求日志 详情/列表 里要添加 provider，upstream_model，路由路线」。
+> 一句话：列表的「供应商」旁多了「上游模型」与「路由路线」两列，详情多了「路由路线」区块，
+> 管理 API 返回 `attempts`（按尝试顺序的完整路线）与 `matched_rule`。
+
+### 结论与口径
+
+- **一对多的事实放计量行**：`route_id`/`upstream_model` 落在 `usage_records`（一次请求可失败转移到
+  多家，压进日志行无论取哪一跳都会篡改历史），与 M53 拒绝 `request_logs.provider_id` 同一条理由；
+  **存快照**而非读时 join `routes`（路由是可编辑、可删除的配置，历史不该跟着变）。
+- **`matched_rule` 落在 `request_logs`**：请求级事实（一个请求只有一条命中规则），与 `resolved_model`
+  同规矩——身份元数据、`record_input=off` 也记、不参与 `redact_paths`、本地拒绝为空。
+- **`providers` 与 `attempts` 是同一份事实的两种读法**：前者是去重后的供应商集合（顺序改为
+  **首次尝试顺序**，这是本次唯一的显示行为变化），后者是顺序与结果。
+- **明确不做**：不新增 `group_by=route|upstream_model` 维度或筛选参数；MCP 账户自助查询工具仍不暴露
+  供应商与路由（管理面事实，M53 同样的立场）；不回填历史行。
+
+### 实现
+
+- [x] 迁移 `0027_request_route_identity.sql`：`usage_records.route_id`/`upstream_model`、
+      `request_logs.matched_rule`（身份列，`ON CONFLICT` 不刷新，骨架行重试不得抹掉首写值）
+- [x] 写入：`usage.Attempt`/`domain.UsageRecord` 新字段 → `Meter.Build` → `InsertUsage` 与
+      `SettleBatch`（`INSERT OR IGNORE`，重放保留首写值）；`usageCols` 扩列并同步
+      `ListUsage`/`ListUsageAsc` 两个 scanner；`persist` 改收 `*domain.ResolvedModel`
+      （`inputRecord` 增加 `Rule`），`recordContent` 落 `matched_rule`
+- [x] 读：`store.RequestAttempts` 取代 `RequestProviders`（一次查询供两个字段用，按 `attempt_no` 升序）；
+      `domain.RequestAttempt` 新类型；列表/详情 payload 增加 `attempts`/`matched_rule`，
+      `providers` 由 `attempts` 去重导出；`admin_list_requests`/`admin_get_request` 的工具描述同步
+- [x] 控制台（`requests.js`）：列表新增「上游模型」「路由路线」两列（插在「供应商」之后），详情新增
+      「路由路线」区块（首行模型解析链，其后每次尝试一行）与身份块的「上游模型」「映射规则」，
+      卡片说明补口径；tooltip 逐次尝试给出 route id/供应商/上游模型/状态/错误码/结束原因/延迟/首字/成本
+- [x] 文档：设计 `docs/design/m78-request-log-route-path.md`（含「实现与设计差异」回填）、
+      `docs/request-log.md`（§2 四行、§4「路由路线（M78）」小节、§6 状态）、`docs/billing.md`（计量行
+      新增两列）、`docs/design/m53-request-provider-dimension.md` §8（`RequestProviders` → `RequestAttempts`
+      的实现差异）、`README.md` 文档表状态补 M53（既有遗漏）与 M78
+
+### 验证
+
+- [x] `go build ./...` / `go vet ./...` / `gofmt`（只格式化本次触碰的文件）通过
+- [x] `go test ./...`：`internal/store`、`internal/usage`、`internal/httpapi`（68s）、`internal/mcpsrv`、
+      `internal/webui` 全过。新增/扩展的断言：`TestRequestAttemptsAndNames`（顺序/字段/未知/迁移前行）、
+      `TestRequestLogConflictKeepsIdentity`（身份列含 `matched_rule` 不被骨架行抹掉）、
+      `TestRecordWritesEveryField`（RouteID/UpstreamModel）、`TestRequestIsPricedAndCharged`
+      （真实请求端到端：计量行 `route_id` = 播种的 route、`upstream_model` = 路由配置名）、
+      `TestRecordingSwitchesAreIndependent`（`resolved_model` 与 `matched_rule` 在默认录制口径下仍记录）、
+      `TestAdminRequestsFilterByProvider`（`attempts` 两跳字段与顺序、`providers` 顺序、`matched_rule`）、
+      admin MCP 失败转移行的两跳断言
+- [x] `node internal/webui/tests/requests_test.mjs`：新增两个单元格的四种形态（失败转移两跳、未计量、
+      迁移前行、失败跳带错误码）与两列位置、详情标签的源码断言
+- [x] **浏览器走查（真跑，不是跳过）**：本会话沙箱里下载官方 Firefox 156.0.1（linux64）解到
+      worktree 的 `.cache/`（PATH 上那个 `/usr/bin/firefox` 是 snap 壳子，会失败），随后
+      `bash scripts/ui-harness/run.sh --views requests` → `[ok] requests: 116 checks`（M53 时是 106 项，
+      本次新增 6 项：两列表头、两列单元格文本、未计量行的两句话、详情区块），全量视图 → `all views passed`；
+      渲染文本与夹具一致：`replay-local、deepseek` / `deepseek-chat → deepseek-v3` /
+      `#12 replay-local ✗ upstream_400 → #13 deepseek ✓`
+- [x] `make build`（lib 形态：minify + gzip 内嵌）通过
+
+### 未做 / 待宿主执行
+
+- [ ] **控制台实机走查**：`make build` 后重启本机 `aigw-local`，在真实 `:8088` 上确认两列出现、
+      一条失败转移请求能看到两跳与映射规则、迁移前的旧日志显示「（未知路由）」与「—」
+- [ ] 观察项：`group_by=provider` 的大窗口耗时与本次新增的 `RequestAttempts`（每页一次点查）未做
+      压测；请求数上限由候选数决定，暂不需要分页 `attempts`

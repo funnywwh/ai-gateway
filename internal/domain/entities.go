@@ -288,6 +288,12 @@ type RequestLogRecord struct {
 	// ResolvedModel is empty.
 	Model         string
 	ResolvedModel string
+	// MatchedRule names the mapping rule that turned the requested model into ResolvedModel
+	// (model:<public> / mapping:<kind>:<pattern> / alias:<x> / fallback:<y>). Overlapping
+	// patterns make "which rule fired" unanswerable after the fact, so the request records
+	// it. It follows resolved_model's rule: identity metadata, recorded even when content
+	// recording is off, and empty for a locally rejected request (which never reached a model).
+	MatchedRule string
 	// ReasoningEffort is the effort on the canonical provider request after the
 	// model-level policy has been applied. Empty means no effort was applied.
 	ReasoningEffort string
@@ -321,6 +327,29 @@ type RequestUsage struct {
 	LatencyMS       int
 	TTFTMS          int
 	Metered         bool
+}
+
+// RequestAttempt is one metered upstream attempt of a recorded request: which route the
+// gateway selected, which provider served it, which upstream model name it sent, and how
+// that attempt ended. It is the per-attempt half of "which route did this request take",
+// read from usage_records because a request can fail over between providers — the log row
+// holds one request, and that fact is one-to-many (see docs/design/m78-request-log-route-path.md).
+//
+// ProviderName is not here: a name is a mutable label owned by the providers table, so the
+// caller resolves it for the attempts in hand, exactly as it does for the provider payloads.
+type RequestAttempt struct {
+	AttemptNo        int
+	ProviderID       int64
+	RouteID          int64
+	UpstreamModel    string
+	Status           string
+	ErrorCode        string
+	TerminatedReason string
+	LatencyMS        int
+	TTFTMS           int
+	CostMicros       int64
+	ChargeMicros     int64
+	CreatedAt        time.Time
 }
 
 // RequestLogFilter selects recorded requests for every read path (the console's page, its

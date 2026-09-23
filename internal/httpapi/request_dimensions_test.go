@@ -1038,14 +1038,16 @@ func seedAdminProvider(t *testing.T, f *adminFixture, name string) int64 {
 	return id
 }
 
-// seedProviderAttempt writes one metered attempt attributed to a provider. The provider is
-// the fact the request log cannot hold: one request may carry attempts from several, each
-// priced by its own provider mapping.
-func seedProviderAttempt(t *testing.T, f *adminFixture, requestID string, attempt int, providerID, cost, charge int64) {
+// seedProviderAttempt writes one metered attempt attributed to a provider, through a route
+// and with the upstream model name the data plane records (M78). The provider is the fact the
+// request log cannot hold: one request may carry attempts from several, each priced by its own
+// provider mapping and each with its own route and upstream model.
+func seedProviderAttempt(t *testing.T, f *adminFixture, requestID string, attempt int, providerID, cost, charge, routeID int64, upstreamModel string) {
 	t.Helper()
 	if _, err := f.db.InsertUsage(context.Background(), &domain.UsageRecord{
 		RequestID: requestID, AttemptNo: attempt, AccountID: 1, APIKeyID: 1,
 		Model: "luna", ResolvedModel: "deepseek-flash", ProviderID: providerID,
+		RouteID: routeID, UpstreamModel: upstreamModel,
 		DimensionsJSON: `{"input":100,"output":7}`,
 		CostMicros:     cost, ChargeMicros: charge,
 		Status: "completed", CreatedAt: time.Now().UTC(),
@@ -1065,10 +1067,10 @@ func TestAdminRequestDimensionsGroupByProvider(t *testing.T) {
 	dear := seedAdminProvider(t, f, "dear-upstream")
 
 	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_prov0001", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "luna", Status: "completed"})
-	seedProviderAttempt(t, f, "req_prov0001", 1, cheap, 100, 200)
-	seedProviderAttempt(t, f, "req_prov0001", 2, dear, 250, 500)
+	seedProviderAttempt(t, f, "req_prov0001", 1, cheap, 100, 200, 101, "cheap-model")
+	seedProviderAttempt(t, f, "req_prov0001", 2, dear, 250, 500, 201, "dear-model")
 	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_prov0002", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "luna", Status: "completed"})
-	seedProviderAttempt(t, f, "req_prov0002", 1, cheap, 7, 9)
+	seedProviderAttempt(t, f, "req_prov0002", 1, cheap, 7, 9, 102, "cheap-model")
 	// A locally rejected request never reached an upstream, so it belongs to no provider. It
 	// is kept as the unknown bucket instead of vanishing from the window's accounting.
 	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_prov0003", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "luna", Status: "failed"})
@@ -1139,12 +1141,12 @@ func TestAdminRequestsFilterByProvider(t *testing.T) {
 	second := seedAdminProvider(t, f, "second-upstream")
 
 	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_pf0001", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "m1", Status: "completed"})
-	seedProviderAttempt(t, f, "req_pf0001", 1, first, 10, 20)
+	seedProviderAttempt(t, f, "req_pf0001", 1, first, 10, 20, 11, "first-model")
 	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_pf0002", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "m2", Status: "completed"})
-	seedProviderAttempt(t, f, "req_pf0002", 1, second, 30, 60)
-	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_pf0003", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "m1", Status: "completed"})
-	seedProviderAttempt(t, f, "req_pf0003", 1, first, 1, 2)
-	seedProviderAttempt(t, f, "req_pf0003", 2, second, 4, 8)
+	seedProviderAttempt(t, f, "req_pf0002", 1, second, 30, 60, 21, "second-model")
+	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_pf0003", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "m1", Status: "completed", ResolvedModel: "m1-canonical", MatchedRule: "mapping:glob:*"})
+	seedProviderAttempt(t, f, "req_pf0003", 1, first, 1, 2, 12, "first-model")
+	seedProviderAttempt(t, f, "req_pf0003", 2, second, 4, 8, 22, "second-model")
 	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_pf0004", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "m1", Status: "failed"})
 
 	list := decodeJSONBody(t, f.call(t, http.MethodGet,
@@ -1177,6 +1179,42 @@ func TestAdminRequestsFilterByProvider(t *testing.T) {
 	providers, _ := failover["providers"].([]any)
 	if len(providers) != 2 {
 		t.Fatalf("failover detail providers = %v, want both", failover["providers"])
+	}
+	// 供应商 is the same fact as the route path with the order dropped; the path is what says
+	// which route each hop went through, which upstream model it sent and how it ended (M78).
+	firstProvider, _ := providers[0].(map[string]any)
+	if firstProvider["name"] != "first-upstream" {
+		t.Fatalf("providers = %v, want the order they were first tried in", providers)
+	}
+	hops, _ := failover["attempts"].([]any)
+	if len(hops) != 2 {
+		t.Fatalf("failover detail attempts = %v, want both hops", failover["attempts"])
+	}
+	for i, want := range []struct {
+		route    float64
+		upstream string
+		provider string
+	}{{12, "first-model", "first-upstream"}, {22, "second-model", "second-upstream"}} {
+		hop, _ := hops[i].(map[string]any)
+		if hop["attempt_no"] != float64(i+1) || hop["route_id"] != want.route ||
+			hop["upstream_model"] != want.upstream || hop["provider_name"] != want.provider {
+			t.Fatalf("hop %d = %v, want attempt_no %d on route %v with %s at %s",
+				i, hop, i+1, want.route, want.upstream, want.provider)
+		}
+	}
+	// Which mapping rule produced the canonical model is the other half of "where did it go":
+	// the log row carries it, and an empty value is reserved for a request that never resolved
+	// a model at all.
+	if failover["matched_rule"] != "mapping:glob:*" || failover["resolved_model"] != "m1-canonical" {
+		t.Fatalf("failover resolution = %v / %v, want the rule and the canonical model",
+			failover["matched_rule"], failover["resolved_model"])
+	}
+	// The list carries the same path, so the console's new columns do not need a second call.
+	for _, item := range rows {
+		row, _ := item.(map[string]any)
+		if path, _ := row["attempts"].([]any); len(path) == 0 {
+			t.Fatalf("list row %v carries no attempts", row["request_id"])
+		}
 	}
 
 	// The breakdown under the same filter describes the same two requests, split by model:

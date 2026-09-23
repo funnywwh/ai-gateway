@@ -384,6 +384,19 @@ try {
     checks.providerStatsRefetched = urlsSince(providerStatsMark)
       .some((u) => u.includes('/requests/dimensions?'));
 
+    // ---- M78：上游模型 / 路由路线 ----
+    // 两列都读计量行（一次请求一行日志、每次尝试一行计量），所以「谁服务」与「走了哪条路由」
+    // 是同一份事实的两种读法：供应商列给集合，路线列给顺序与结果。迁移之前的行 route_id=0，
+    // 显示「（未知路由）」/「—」而不是 #0 或空白。
+    checks.upstreamColumn = headers().includes('上游模型');
+    checks.routeColumn = headers().includes('路由路线');
+    checks.upstreamModelsShown = cell(listTable(), requestRow('req_demo0001'), '上游模型') === 'deepseek-chat → deepseek-v3';
+    checks.upstreamModelsUnmetered = cell(listTable(), requestRow('req_demo0002'), '上游模型') === '未计量';
+    // 失败转移的两跳：第一次被上游 400 拒绝（✗ 带错误码），第二次成功（✓）。
+    checks.routePathShown = cell(listTable(), requestRow('req_demo0001'), '路由路线')
+      === '#12 replay-local ✗ upstream_400 → #13 deepseek ✓';
+    checks.routePathUnmetered = cell(listTable(), requestRow('req_demo0002'), '路由路线') === '无上游尝试';
+
     // ---- M31：统计卡置顶 + 排序下拉 + 分组分页 ----
     // 卡片顺序按 **DOM** 读：统计卡必须在列表卡之前（按文本出现顺序断言会被页面任意位置的
     // 文字蒙过去）。
@@ -482,6 +495,13 @@ try {
     // 凭据维度在详情里带名字与 id：名字给人读，id 是筛选参数。
     checks.detailOwner = t.includes('用户（账户）：') && t.includes('API Key：') && t.includes('acme #1') && t.includes('dev-key #1');
     checks.detailUsage = t.includes('输入 tokens：') && t.includes('对客：');
+    // 详情也要回答「走的是哪条路由」：身份块给上游模型与命中的映射规则，路线区块逐次尝试
+    // 一行（route id、供应商、上游模型、结果），首行是模型解析链。
+    checks.detailUpstreamField = t.includes('上游模型：deepseek-chat → deepseek-v3');
+    checks.detailMatchedRule = t.includes('映射规则：mapping:prefix:deepseek-');
+    checks.detailRouteHeader = t.includes('路由路线') && t.includes('模型解析：deepseek-flash →[mapping:prefix:deepseek-]→ deepseek-flash');
+    checks.detailRouteHops = t.includes('1. 路由 #12 · 供应商 replay-local #1 · 上游模型 deepseek-chat · failed')
+      && t.includes('2. 路由 #13 · 供应商 deepseek #3 · 上游模型 deepseek-v3 · completed');
     const detailCached = () => [...modal().querySelectorAll('strong')]
       .find((n) => n.textContent === '缓存 tokens（已包含在输入中）：')?.nextElementSibling?.textContent;
     checks.cachedDetailNonzero = detailCached() === '960';

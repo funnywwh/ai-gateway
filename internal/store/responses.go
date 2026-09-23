@@ -143,20 +143,20 @@ func requestLogArgs(rec *domain.RequestLogRecord) ([]any, error) {
 		boolInt(rec.OutputTextRecorded), rec.RequestBytes, rec.ResponseBytes, boolInt(rec.Truncated),
 		rec.RecordInputMode, boolInt(rec.RecordReasoning), boolInt(rec.RecordOutputText),
 		rec.Status, unix(rec.CreatedAt), rec.Client, rec.Model, rec.ResolvedModel,
-		rec.ReasoningEffort, rec.Workspace, rec.SessionID, rec.CallKind, rec.Title,
+		rec.MatchedRule, rec.ReasoningEffort, rec.Workspace, rec.SessionID, rec.CallKind, rec.Title,
 	}, nil
 }
 
 // The identity columns are inserted but never refreshed on conflict: a second write of the
 // same request id (the content-free skeleton retry) must not blank the identity the first
-// write captured.
+// write captured. matched_rule is one of them — the retry carries no routing decision.
 const putRequestLogSQL = `
 INSERT INTO request_logs(request_id, api_key_id, account_id, endpoint, request_json,
   response_reasoning, response_text, reasoning_recorded, output_text_recorded,
   request_bytes, response_bytes, truncated, record_input_mode, record_reasoning,
-  record_output_text, status, created_at, client, model, resolved_model, reasoning_effort,
-  workspace, session_id, call_kind, title)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  record_output_text, status, created_at, client, model, resolved_model, matched_rule,
+  reasoning_effort, workspace, session_id, call_kind, title)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(request_id) DO UPDATE SET
   response_reasoning = excluded.response_reasoning,
   response_text = excluded.response_text,

@@ -73,10 +73,12 @@ type AdminStore interface {
 	CountRequestLogs(ctx context.Context, f domain.RequestLogFilter) (int, error)
 	GetRequestLog(ctx context.Context, requestID string) (*domain.RequestLogRecord, error)
 	RequestUsages(ctx context.Context, requestIDs []string) (map[string]*domain.RequestUsage, error)
-	// RequestProviders names the providers that metered each request. Like the money, it is
-	// one-to-many and owned by the metering table: a request that failed over was served by
-	// more than one provider, so it cannot ride along on the log row.
-	RequestProviders(ctx context.Context, requestIDs []string) (map[string][]int64, error)
+	// RequestAttempts lists every metered upstream attempt of each request, which is what
+	// makes "which route did this request take" answerable: like the money, it is
+	// one-to-many and owned by the metering table (a request that failed over has several),
+	// so it cannot ride along on the log row. The providers that served a request are this
+	// result deduplicated, in the order they were first tried.
+	RequestAttempts(ctx context.Context, requestIDs []string) (map[string][]domain.RequestAttempt, error)
 	// The two credential dimensions (M30) and the provider dimension (M53) read their labels
 	// from the tables that own them; the log row keeps only the ids.
 	AccountNames(ctx context.Context, ids []int64) (map[int64]string, error)
@@ -781,20 +783,20 @@ func (s *Server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	// The providers that served each row are a third batched read (one indexed query over the
-	// page's request ids), then one lookup for the names.
+	// The attempts that served each row are a third batched read (one indexed query over the
+	// page's request ids), then one lookup for the provider names.
 	requestIDs := make([]string, 0, len(rows))
 	for _, row := range rows {
 		requestIDs = append(requestIDs, row.RequestID)
 	}
-	served, err := s.deps.AdminStore.RequestProviders(r.Context(), requestIDs)
+	attempts, err := s.deps.AdminStore.RequestAttempts(r.Context(), requestIDs)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
 	providerIDs := make([]int64, 0, len(rows))
-	for _, ids := range served {
-		providerIDs = append(providerIDs, ids...)
+	for _, list := range attempts {
+		providerIDs = append(providerIDs, attemptProviderIDs(list)...)
 	}
 	providers, err := s.providerLabels(r.Context(), providerIDs)
 	if err != nil {
@@ -808,13 +810,15 @@ func (s *Server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
 			"request_id": row.RequestID, "account_id": row.AccountID, "api_key_id": row.APIKeyID,
 			"account_name": accounts[row.AccountID],
 			"api_key_name": key.Name, "api_key_prefix": key.Prefix,
-			"providers": providerPayloads(served[row.RequestID], providers),
+			"providers": providerPayloads(attemptProviderIDs(attempts[row.RequestID]), providers),
+			"attempts":  attemptPayloads(attempts[row.RequestID], providers),
 			"endpoint":  row.Endpoint, "status": row.Status,
 			"created_at":     row.CreatedAt.Format(time.RFC3339),
 			"input_recorded": row.RequestJSON != "", "reasoning_recorded": row.ReasoningRecorded,
 			"output_text_recorded": row.OutputTextRecorded, "truncated": row.Truncated,
 			"request_bytes": row.RequestBytes,
 			"client":        row.Client, "model": row.Model, "resolved_model": row.ResolvedModel,
+			"matched_rule":     row.MatchedRule,
 			"reasoning_effort": row.ReasoningEffort,
 			"workspace":        row.Workspace, "session_id": row.SessionID, "call_kind": row.CallKind,
 			"title": row.Title,
@@ -893,14 +897,51 @@ func (s *Server) providerLabels(ctx context.Context, ids []int64) (map[int64]str
 	return s.deps.AdminStore.ProviderNames(ctx, ids)
 }
 
-// providerPayloads renders the providers that served one request as {id, name} pairs. It is
-// a list rather than single fields because a request that failed over has several, and each
-// of them metered its own attempts — collapsing that to one value would state that the
-// request had one provider when it did not.
+// attemptProviderIDs lists the providers that served a request, deduplicated and in the
+// order they were first tried. A request that failed over has several, and each of them
+// metered its own attempts — collapsing that to one value would state that the request had
+// one provider when it did not.
+func attemptProviderIDs(attempts []domain.RequestAttempt) []int64 {
+	out := make([]int64, 0, len(attempts))
+	seen := map[int64]bool{}
+	for _, attempt := range attempts {
+		if seen[attempt.ProviderID] {
+			continue
+		}
+		seen[attempt.ProviderID] = true
+		out = append(out, attempt.ProviderID)
+	}
+	return out
+}
+
+// providerPayloads renders those providers as {id, name} pairs. The order is the order of
+// attemptProviderIDs (who was tried first), so the list and the route path read the same way.
 func providerPayloads(ids []int64, names map[int64]string) []map[string]any {
 	out := make([]map[string]any, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, map[string]any{"id": id, "name": names[id]})
+	}
+	return out
+}
+
+// attemptPayloads renders the route path of one request: one object per metered upstream
+// attempt, in the order they were tried. route_id and upstream_model are the snapshots the
+// gateway recorded at the time (a route can be edited or deleted afterwards, and a request
+// that failed over may have run on another route with another upstream model name), so the
+// path stays a statement about what happened rather than about today's configuration.
+func attemptPayloads(attempts []domain.RequestAttempt, names map[int64]string) []map[string]any {
+	out := make([]map[string]any, 0, len(attempts))
+	for _, attempt := range attempts {
+		out = append(out, map[string]any{
+			"attempt_no": attempt.AttemptNo, "route_id": attempt.RouteID,
+			"provider_id": attempt.ProviderID, "provider_name": names[attempt.ProviderID],
+			"upstream_model": attempt.UpstreamModel,
+			"status":         attempt.Status, "error_code": attempt.ErrorCode,
+			"terminated_reason": attempt.TerminatedReason,
+			"latency_ms":        attempt.LatencyMS, "ttft_ms": attempt.TTFTMS,
+			"cost_micros": attempt.CostMicros, "charge_micros": attempt.ChargeMicros,
+			"created_at": attempt.CreatedAt.Format(time.RFC3339),
+		})
 	}
 	return out
 }
@@ -1116,14 +1157,15 @@ func (s *Server) handleAdminRequestDetail(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	// A failed-over request is the case the detail page exists to explain, so the providers
-	// that metered it are part of the answer here too.
-	served, err := s.deps.AdminStore.RequestProviders(r.Context(), []string{row.RequestID})
+	// A failed-over request is the case the detail page exists to explain, so the attempt
+	// path that metered it is part of the answer here too.
+	attempts, err := s.deps.AdminStore.RequestAttempts(r.Context(), []string{row.RequestID})
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	providers, err := s.providerLabels(r.Context(), served[row.RequestID])
+	path := attempts[row.RequestID]
+	providers, err := s.providerLabels(r.Context(), attemptProviderIDs(path))
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
@@ -1133,7 +1175,8 @@ func (s *Server) handleAdminRequestDetail(w http.ResponseWriter, r *http.Request
 		"request_id": row.RequestID, "account_id": row.AccountID, "api_key_id": row.APIKeyID,
 		"account_name": accounts[row.AccountID],
 		"api_key_name": key.Name, "api_key_prefix": key.Prefix,
-		"providers": providerPayloads(served[row.RequestID], providers),
+		"providers": providerPayloads(attemptProviderIDs(path), providers),
+		"attempts":  attemptPayloads(path, providers),
 		"endpoint":  row.Endpoint, "status": row.Status,
 		"created_at":     row.CreatedAt.Format(time.RFC3339),
 		"input":          jsonOrNil(row.RequestJSON),
@@ -1143,6 +1186,7 @@ func (s *Server) handleAdminRequestDetail(w http.ResponseWriter, r *http.Request
 		"output_text_recorded": row.OutputTextRecorded, "truncated": row.Truncated,
 		"request_bytes": row.RequestBytes, "response_bytes": row.ResponseBytes,
 		"client": row.Client, "model": row.Model, "resolved_model": row.ResolvedModel,
+		"matched_rule":     row.MatchedRule,
 		"reasoning_effort": row.ReasoningEffort,
 		"workspace":        row.Workspace, "session_id": row.SessionID, "call_kind": row.CallKind,
 		"title": row.Title,

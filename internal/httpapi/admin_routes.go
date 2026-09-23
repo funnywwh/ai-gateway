@@ -786,7 +786,7 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/requests", Handler: s.handleAdminRequests,
 			Name: "admin_list_requests", Group: groupRequests, Role: roleViewer,
-			Summary: "全部账户的请求日志（跨账户视图，可按账户/API Key、供应商、天数与身份维度过滤；带该请求的用户与 Key 名字、提供服务的供应商、token 与成本）",
+			Summary: "全部账户的请求日志（跨账户视图，可按账户/API Key、供应商、天数与身份维度过滤；带该请求的用户与 Key 名字、提供服务的供应商、路由到的模型与命中的映射规则、每次上游尝试的路由与上游模型（attempts：失败转移的行有多跳）、token 与成本）",
 			Query: append(append(pageRequests.fields(),
 				queryParam("days", "integer", "回溯天数，默认 7，最大 365")),
 				dimensionQueryFields()...),
@@ -819,7 +819,7 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/requests/{id}", Handler: s.handleAdminRequestDetail,
 			Name: "admin_get_request", Group: groupRequests, Role: roleViewer,
-			Summary: "单条请求详情（输入/思考/输出，按录制开关决定是否可见；含身份维度、用户与 API Key 名字、token/成本）",
+			Summary: "单条请求详情（输入/思考/输出，按录制开关决定是否可见；含身份维度、用户与 API Key 名字、命中的映射规则、每次上游尝试的路由/供应商/上游模型/结果、token/成本）",
 			Params:  []adminField{pathParam("id", "请求 id（x-request-id）")},
 		},
 		{

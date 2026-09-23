@@ -985,8 +985,8 @@ func TestMCPAdminStatisticsByProvider(t *testing.T) {
 	dear := seedAdminProvider(t, f, "mcp-dear")
 
 	seedIdentityRow(t, f, &domain.RequestLogRecord{RequestID: "req_mcp0001", AccountID: 1, APIKeyID: 1, Client: "dsh", Model: "luna", Status: "completed"})
-	seedProviderAttempt(t, f, "req_mcp0001", 1, cheap, 10, 20)
-	seedProviderAttempt(t, f, "req_mcp0001", 2, dear, 90, 180)
+	seedProviderAttempt(t, f, "req_mcp0001", 1, cheap, 10, 20, 11, "mcp-cheap-model")
+	seedProviderAttempt(t, f, "req_mcp0001", 2, dear, 90, 180, 22, "mcp-dear-model")
 
 	// The description has to carry the counting rule: an agent that sums the buckets' request
 	// counts against the window's total would otherwise read a correct answer as a bug.
@@ -1060,6 +1060,18 @@ func TestMCPAdminStatisticsByProvider(t *testing.T) {
 	providers, _ := row["providers"].([]any)
 	if len(providers) != 2 {
 		t.Fatalf("the row must list both providers that served it: %v", row["providers"])
+	}
+	// The route path is the same fact with its order and outcome: two hops, tried in order,
+	// each naming the route and the upstream model it sent (M78).
+	attempts, _ := row["attempts"].([]any)
+	if len(attempts) != 2 {
+		t.Fatalf("the row must carry both hops of the route path: %v", row["attempts"])
+	}
+	for i, item := range attempts {
+		hop, _ := item.(map[string]any)
+		if hop["attempt_no"] != float64(i+1) || hop["route_id"] == float64(0) || hop["upstream_model"] == "" {
+			t.Fatalf("hop %d = %v, want attempt_no %d with a route and an upstream model", i, hop, i+1)
+		}
 	}
 }
 

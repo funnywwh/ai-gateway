@@ -351,7 +351,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Stream {
 			_, _ = assembler.Fail(payload)
-			s.persist(ctx, key, account, req, plan.Resolved.Canonical, 0, assembler, "failed", clientHintFromRequest(r), reasoningEffort)
+			s.persist(ctx, key, account, req, plan.Resolved, 0, assembler, "failed", clientHintFromRequest(r), reasoningEffort)
 		} else {
 			writeAPIError(w, toAPIError(lastErr))
 		}
@@ -374,7 +374,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 			}
 			if req.Stream {
 				_, _ = assembler.Fail(payload)
-				s.persist(ctx, key, account, req, plan.Resolved.Canonical, providerID, assembler, "failed", clientHintFromRequest(r), reasoningEffort)
+				s.persist(ctx, key, account, req, plan.Resolved, providerID, assembler, "failed", clientHintFromRequest(r), reasoningEffort)
 			} else {
 				writeAPIError(w, domain.ErrUpstream(http.StatusBadGateway, payload.Message))
 			}
@@ -436,7 +436,7 @@ func (s *Server) handleCreateResponse(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 	}
 
-	s.persist(ctx, key, account, req, canonical, providerID, assembler, status, clientHintFromRequest(r), reasoningEffort)
+	s.persist(ctx, key, account, req, plan.Resolved, providerID, assembler, status, clientHintFromRequest(r), reasoningEffort)
 	ticket.Settle(totalTokens(assembler.Usage()))
 	_ = startedAt
 }
@@ -513,6 +513,8 @@ func (s *Server) recordAttempt(
 		Model:            req.Model,
 		ResolvedModel:    resolved.Canonical,
 		ProviderID:       cand.ProviderID,
+		RouteID:          cand.RouteID,
+		UpstreamModel:    cand.UpstreamModel,
 		Dimensions:       dims,
 		Estimated:        estimated,
 		LatencyMS:        latencyMS,
@@ -581,7 +583,7 @@ func (s *Server) persist(
 	key *domain.APIKey,
 	account *domain.Account,
 	req *responses.Request,
-	canonical string,
+	resolved *domain.ResolvedModel,
 	providerID int64,
 	assembler *responses.Assembler,
 	status string,
@@ -613,7 +615,10 @@ func (s *Server) persist(
 	input := s.recordInput(auditCtx, key, req, clientHint)
 	// The routed model is only known once routing succeeded; a locally rejected request
 	// keeps the empty value, which is the honest answer for "it never reached a model".
-	input.Resolved = canonical
+	input.Resolved = resolved.Canonical
+	// Which mapping rule produced that model is part of the answer to "where did this
+	// request go": overlapping patterns make it unanswerable after the fact (M78).
+	input.Rule = resolved.MatchedRule
 
 	var storedResp *domain.ResponseRecord
 	// Console steps already send store:false; the guard keeps a stored copy out of the
@@ -624,7 +629,7 @@ func (s *Server) persist(
 			ID:           assembler.ID(),
 			APIKeyID:     key.ID,
 			AccountID:    account.ID,
-			Model:        canonical,
+			Model:        resolved.Canonical,
 			ProviderID:   providerID,
 			Status:       status,
 			RequestJSON:  input.Payload,
@@ -666,7 +671,7 @@ func (s *Server) persist(
 			"response_id": assembler.ID(),
 			"account":     accountName,
 			"api_key":     key.Name,
-			"model":       canonical,
+			"model":       resolved.Canonical,
 			"status":      status,
 			"usage":       assembler.Usage().Dimensions,
 		}
@@ -685,7 +690,7 @@ func (s *Server) persist(
 				"response_id": assembler.ID(),
 				"account":     accountName,
 				"api_key":     key.Name,
-				"model":       canonical,
+				"model":       resolved.Canonical,
 				"status":      status,
 				"usage":       assembler.Usage().Dimensions,
 				// The input is the same document the request log stores, under the same
@@ -718,6 +723,7 @@ type inputRecord struct {
 	Dims     responses.Dimensions // client / workspace / session / call_kind
 	Model    string               // the model the client asked for (billed dimension)
 	Resolved string               // the model routing picked; set by persist
+	Rule     string               // the mapping rule that picked it; set by persist
 }
 
 // recordInput applies the input channel of the recording policy to one request.
@@ -823,6 +829,7 @@ func (s *Server) recordContent(
 		Client:           input.Dims.Client,
 		Model:            input.Model,
 		ResolvedModel:    input.Resolved,
+		MatchedRule:      input.Rule,
 		ReasoningEffort:  s.redactDimension("reasoning_effort", s.redactDimension("reasoning.effort", reasoningEffort)),
 		Workspace:        input.Dims.Workspace,
 		SessionID:        input.Dims.SessionID,

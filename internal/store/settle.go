@@ -67,12 +67,13 @@ func (db *DB) SettleBatch(ctx context.Context, inputs []*SettlementInput) (int, 
 
 		res, err := db.stmts.execInTx(ctx, db.write, tx, `
 INSERT OR IGNORE INTO usage_records(request_id, attempt_no, account_id, api_key_id, model, resolved_model,
-  provider_id, dimensions_json, cost_micros, charge_micros, overshoot_cost_micros,
-  pricing_snapshot_json, latency_ms, ttft_ms, status, error_code, degraded_features_json,
-  usage_source, terminated_reason, created_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  provider_id, route_id, upstream_model, dimensions_json, cost_micros, charge_micros,
+  overshoot_cost_micros, pricing_snapshot_json, latency_ms, ttft_ms, status, error_code,
+  degraded_features_json, usage_source, terminated_reason, created_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			usage.RequestID, usage.AttemptNo, usage.AccountID, usage.APIKeyID, usage.Model,
-			usage.ResolvedModel, usage.ProviderID, usage.DimensionsJSON, usage.CostMicros,
+			usage.ResolvedModel, usage.ProviderID, usage.RouteID, usage.UpstreamModel,
+			usage.DimensionsJSON, usage.CostMicros,
 			usage.ChargeMicros, usage.OvershootCost, usage.PricingSnapshot, usage.LatencyMS,
 			usage.TTFTMS, usage.Status, usage.ErrorCode, usage.DegradedFeatures, usage.UsageSource,
 			usage.TerminatedReason, unix(usage.CreatedAt))

@@ -71,13 +71,15 @@ func TestRequestLogIdentityRoundTrip(t *testing.T) {
 }
 
 // A second write of the same request id (the skeleton retry) must not blank the identity
-// the first write captured.
+// the first write captured. The mapping rule that produced the canonical model is one of
+// those identity columns (M78): the retry carries no routing decision to re-derive it from.
 func TestRequestLogConflictKeepsIdentity(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	seedDimensionRow(t, db, &domain.RequestLogRecord{
 		RequestID: "req_identity2", AccountID: 1, APIKeyID: 1, Status: "completed",
 		Client: "dsh", Model: "luna", Workspace: "/w/a", SessionID: "session-abc",
+		ResolvedModel: "gpt-5.6-luna", MatchedRule: "mapping:prefix:gpt-",
 	})
 	// The skeleton fallback: same request, content stripped, no identity computed again.
 	if err := db.PutRequestLog(ctx, &domain.RequestLogRecord{
@@ -95,6 +97,9 @@ func TestRequestLogConflictKeepsIdentity(t *testing.T) {
 	}
 	if got.Client != "dsh" || got.Model != "luna" || got.SessionID != "session-abc" {
 		t.Fatalf("the conflict update must not blank the identity: %+v", got)
+	}
+	if got.ResolvedModel != "gpt-5.6-luna" || got.MatchedRule != "mapping:prefix:gpt-" {
+		t.Fatalf("the conflict update must not blank the routing identity: %+v", got)
 	}
 }
 
