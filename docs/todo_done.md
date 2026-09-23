@@ -6108,3 +6108,23 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 - [x] **验收**：`go vet ./...`（除 M79 遗留 copylocks）无输出、`go test -count=1 ./...` 全绿、
       `make ui-base` 全绿、`make build` 成功。
 - [x] **发版**：v4.3.3（patch），部署 rag-server + gptjp，记录见本文件「v4.3.3 发布记录」。
+
+### v4.3.3 发布记录（M83：输入档只留「人说的话」，2026-09-23，部署到 rag-server 与 gptjp）
+
+> 需求原话：「dsh 发送的请求，一直是空的，你上去看看日志 rag-server 8088」。档位 **patch**，
+> 但含两处**行为变更**：① 判定依据从「长度 ≤N」换成**样板标记**（真实提问常常比短的样板长、比长的样板短）；
+> ② `recording.input_max_chars` 默认 **100 → 2000**（角色从判定器变成防呆上限）。正文形状未变（纯文本），
+> 所以 MCP 的 string/object 判定、详情接口的 `record_input_mode`、`/stats` 都没动。
+
+| 项 | 值 |
+|---|---|
+| 版本 | **v4.3.3**（`VERSION` 4.3.2 → 4.3.3；release 提交 `438daee`，tag `v4.3.3`） |
+| 构建物 | `bin/aigw` **4.3.3 / `438daee`**，23,529,027 B，sha256 `4017c2bf154d27eacbebcbaf1a175279ba534df54676bb0b7ffb3f12468eac23`（console minified：44 文件 728868→408515 B，gzip 39 文件 406154→161825 B） |
+| 部署范围 | rag-server `aigw-local` 与 gptjp `aigw.service`：4.3.2/`0b9b629` → **4.3.3/`438daee`**；本次不动 dshgw |
+| 回滚点 | rag-server：`bin/aigw.prev-4.3.2-0b9b629`；gptjp：`/opt/aigw/aigw.prev-4.3.2-0b9b629`（两台 sha 均 `65a4c7d6dac3756bb91c9fa771db9fa569fcacff78a8c917a6f648be0bb02981`） |
+| schema | **无迁移**（仍 27） |
+| 验证（两台） | `/version` 均为 `{"revision":"438daee","version":"4.3.3"}`（gptjp 另在 `https://gpt.lagenio.xyz/aigw/version` 一致）；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200；gptjp 重启后 `level=ERROR` 0 条 |
+| 验证（现场回归，rag-server） | **升级前**：key 127 阈值生效后 71 行 **71 空**。**升级后**：该租户最近 **12 行全部非空**，长度 303 / 117 字符，且逐行检查**不以任何样板标记开头** ⇒ 落库的是「人说的话」。检查脚本只读长度与开头标记，**未打印任何用户正文** |
+| 配置/数据变更 | 无（两台 `config.yaml` 未动；`input_max_chars` 两台都没显式设过，所以生效的就是新默认 2000） |
+| 未做（待人工） | ① 真浏览器 `make ui-check`（「未保留」文案已改成「只有样板或超长用户消息」）；② 线上 MCP 冒烟无令牌（两种形状由 `internal/mcpsrv` 测试覆盖）；③ `dshgw-verify` 重启（盘上 4.3.0、进程仍 4.1.1）；④ gptjp 仍无 `user` 档流量 |
+| 已知噪声 | `internal/runtime` 与 `pkg/pluginapi` 各有一条负载敏感的计时断言在整仓测试并发跑时会偶发失败（各自单独复跑 2–3 次通过，与本改动无关）；M79 遗留的 `go vet` copylocks 未动 |
