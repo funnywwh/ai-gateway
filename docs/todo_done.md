@@ -5701,3 +5701,68 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 - [x] `make ui-check` 在本沙箱**无法运行**（无可用 firefox），已按上面那条改成带原因跳过，
       真机复跑记在 `docs/TODO.md`；真机 bwrap 版验收一组（多机 e2e / sandbox-test / supervised-test）
       同样记在那里。
+
+## 组织树没有缩进：控制台 CSP 丢弃行内 style 属性（2026-09-23）
+
+> 现场：用户在控制台（`:8088/admin/ui/#/org`）就截图提问「为什么这个组织树没有缩进？」——根节点的展开
+> 箭头与子级、孙级行的左边缘完全对齐，层与层 0 偏移（根级与子级箭头同在 x≈33，子级与孙级标签都从
+> x≈50 起）。`d14d0a4`（缩进 14px→22px，随 v4.1.0/v4.1.1 上线）**已经在线上跑**，所以"再加大一点"
+> 这条路从一开始就不会有变化：丢的不是距离，是整条样式。
+
+- [x] **根因**：控制台的响应头是 `default-src 'self'; img-src 'self' data:; style-src 'self';
+      script-src 'self'; connect-src 'self'; frame-ancestors 'none'`。style **属性**归 `style-src-attr`
+      管（没有它时回落到 `style-src`）：没有 `'unsafe-inline'`，浏览器就把"把 style 当属性写"的声明
+      **整条丢弃**——DOM 里 row 上写着 `style="padding-left:52px"`，而 `getComputedStyle(row).paddingLeft`
+      是 `0px`。tree.js 的缩进正是写成 `style: 'padding-left:' + …`，由 `ui.js` 的 `el()` 用 setAttribute
+      落地。**CSSOM 写入（`node.style.cssText` / `element.style.x =` / `setProperty`）不在 `style-src`
+      的检查范围内**，是严格 CSP 下唯一还能用的行内样式通道。
+- [x] **真机证据（宿主 Chromium + 控制台原样的 CSP 头，跑的正是控制台自己的 `tree.js`/`ui.js`）**：
+      未改前：三层行的 `style` 属性是 padding-left:8/30/52px，`getComputedStyle` 全是 **0px**，
+      标签左边缘 37/37/37px；只把 `el()` 的写法换成 CSSOM 后：8/30/52px 生效，标签 45/67/89px（每层 22px）。
+      同一条策略下的最小对照：markup 里的 style 属性 → 0px、`setAttribute` 写 style → 0px、
+      内联 `<style>` 元素 → 0px、`element.style.paddingLeft=` → 22px。
+- [x] **为什么所有检查都是绿的**（这才是这个 bug 值得记一笔的地方）：
+      ① `scripts/ui-harness/server.py` 只发 `Cache-Control` 等头，**从不发 CSP** —— `tree.page.html` 的
+      `workspaceIndentShiftsLabels` 这类几何断言跑在"没有策略"的世界里，量到的东西永远成立；
+      ② `org_tree_test.mjs` 只钉 `INDENT=22` 与 harness 期望值，两处都看不见 CSP；
+      ③ m50 的压缩冒烟只断言"`/admin/ui/` 仍带 CSP"这个字符串，没有任何自动化在真实策略下渲染过页面；
+      ④ 本机 `make ui-check` 还会**整轮跳过**（snap 候选存在但不可用，见下）。
+- [x] **影响面不止这棵树**：控制台源码里 **26 处 `style:`** 全部被同一条策略丢掉——弹窗
+      `width:min(900/1000px)` 回落到 `.modal` 的 680px、requests/settings/pricing 输入框的 `max-width`、
+      定价 `.stat` 的高亮边框、各卡片标题的 `margin:0;flex:1`（用户那张截图里"组织架构"下面的说明被挤到
+      第二行、行距偏大，就是同一个原因）。树的缩进只是最显眼的那一处。
+- [x] **改动**：`internal/webui/static/js/ui.js` 的 `el()` 新增
+      `else if (key === 'style') node.style.cssText = value;` —— 一行修全部 26 处，严格 CSP 不动；
+      `tree.js` 的缩进行与 `docs/org.md` §「可复用树形控件」加了这条约束的说明。
+      **否决**了给 `style-src` 加 `'unsafe-inline'`（等于为控制台重新打开一类注入面，与关闭按钮 ✕、
+      展开箭头字形那两课的取舍相反）。
+- [x] **回归保护（三层，缺一层就能再犯）**：
+      ① `internal/webui/tests/style_csp_test.mjs`（已接进 `make ui-base`）钉源码不变式：`el()` 必须走
+      CSSOM、`static/js/**` 里不许再出现写 style 属性的代码、策略里不许出现 `'unsafe-inline'`、
+      harness 的 `CONSOLE_CSP` 副本必须与控制台的**逐字相同**、`csp` 页面不得有内联脚本/样式，
+      以及 `csp` 视图确实挂在 `run.sh` 的清单里（"加了断言但没人执行"是同一类失效）；
+      ② harness 新视图 **`csp`**（`scripts/ui-harness/csp.page.html` + `csp.js`）：唯一由 `server.py`
+      带着**控制台真实策略**送出的页面（`CONSOLE_CSP` 只发给 `/csp.html`，其余页有内联脚本、在这条策略下
+      会被整页拦掉）。它先自检 `styleAttributeIsBlocked`（属性写法必须被丢弃——证明这一页真在那条策略下，
+      将来谁把 `'unsafe-inline'` 加进策略它会立刻变红），再量几何：`computedIndentBase/PerLevel`
+      （8/30/52px、每层 22px）、`labelsShiftPerLevel`（标签 x 按层右移）、`inlineWidthApplies`
+      （弹窗宽度：`.modal` 的 CSS 是 680px、行内把它放到 900px —— 这条证明修的是 `el()` 这条通路，
+      而不是"恰好把这棵树的缩进补回来了"），反面判据 `noZeroIndent`（属性在、计算值全 0 = 事故现场）；
+      ③ `org_tree_test.mjs` 的"期望值与 INDENT 同步"循环把 `csp.js` 一起纳入。
+- [x] **变异验证**：把 `el()` 那行改回属性写法 → `csp` 视图 `ok=false`，翻红的正是
+      `computedIndentBase/PerLevel`、`labelsShiftPerLevel`、`noZeroIndent`、`inlineWidthApplies`，
+      而 `styleAttributeIsBlocked` 与 `attributeCarriesIndent` 仍为真（"属性在、样式没生效"这个签名被
+      完整复现）；①里三个变异（删掉 CSSOM 分支、篡改 harness 的策略副本、给控制台策略加
+      `'unsafe-inline'`）各自被对应断言咬住并以非 0 退出。
+- [x] **顺带修掉 harness 的"假跳过"**：`run.sh` 选浏览器原本是"第一个存在的就停 + 版本不过就整轮跳过"，
+      在本机表现为：`/snap/firefox/current/...` 存在但 `unshare(CLONE_NEWPID)` EPERM → 被选 →
+      版本探测失败 → 整轮跳过，而 PATH 上的 `firefox` 156.0 是能跑的、从来没被试过。现在逐个候选**试版本**，
+      一个都没有时把每个候选被拒的原因打印出来（"跳过"不该读起来像"通过"）。
+- [x] **验证**：`make ui-base` 全过（含新测试）；`node internal/webui/tests/*.mjs` 全过；
+      `go test ./internal/webui/...` 全过；修完 run.sh 后 `make ui-check` 在本机**真的能跑**：
+      `--views csp` → `[ok] csp: 9 checks`，全量 33 个视图 → `all views passed`（`tree` 视图 59 项
+      缩进/箭头/键盘断言全过，说明 CSSOM 改动没有改变无 CSP 环境下的既有行为）。
+- [ ] **未做：没有发版** —— 线上 `:8088`（`v4.1.1/6f68aeb`）跑的仍是旧 `ui.js`，所以**此刻线上组织树
+      依然没有缩进**，要等下一次发版才可见（`ui.js` 带 `max-age=300`，发版后浏览器最多 5 分钟换到新 JS，
+      急可强刷）。另记一条本次未动的观察：`tree({nodes})` 这个构造参数其实一直被忽略（必须 `refresh(nodes)`
+      才渲染，现有调用方都调了），注释与行为不符。

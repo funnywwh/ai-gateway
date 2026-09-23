@@ -11,6 +11,15 @@ export function el(tag, attrs, children) {
       else if (key === 'html') node.innerHTML = value;
       else if (key === 'dataset') Object.assign(node.dataset, value);
       else if (key.startsWith('on') && typeof value === 'function') node.addEventListener(key.slice(2), value);
+      // `style` 必须走 CSSOM，不能当属性写（即不走 setAttribute）。控制台的 CSP 是
+      // `style-src 'self'`（没有 'unsafe-inline'），而 style **属性**归 style-src-attr 管（回落到
+      // style-src）：声明会被浏览器**整条丢弃**——属性还留在 DOM 里，计算值却全是默认值，于是
+      // "代码看着对、屏幕上没效果"。现场事故就是组织树的缩进：每一层的 padding-left 都是 0，而 DOM
+      // 里明明写着 padding-left:52px，14→22 那次"加大缩进"因此毫无肉眼变化。
+      // CSSOM 写入不在 style-src 的检查范围内（样式主体归 app.css，行内只留必需的那几处），是严格
+      // CSP 下唯一还能用的行内样式通道；internal/webui/tests/style_csp_test.mjs 钉着这一行与"控制台
+      // 里不许再出现 style 属性"，scripts/ui-harness 的 `csp` 视图则在真实策略下量几何。
+      else if (key === 'style') node.style.cssText = value;
       else if (value === true) node.setAttribute(key, '');
       else node.setAttribute(key, value);
     }

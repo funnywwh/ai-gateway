@@ -205,10 +205,15 @@ dshgw-verify: dshgw-test dshgw-build
 # The console derives its mount prefix from its own module URL, so one build serves both
 # `/admin/ui/` and `/aigw/admin/ui/`. That derivation is a pure function, which is why it
 # can be pinned by node instead of a browser (no node here means skip, like test-race).
+#
+# style_csp_test.mjs rides along for the same reason: "控制台的行内样式必须走 CSSOM" 是一条源码
+# 不变式（CSP 的 style-src 'self' 会丢弃 style 属性），不需要浏览器就能钉住，而真机几何由
+# scripts/ui-harness 的 `csp` 视图负责。
 ui-base:
 	@if command -v node >/dev/null 2>&1; then \
 		node scripts/ui-base-test.mjs ; \
 		node scripts/ui-badge-test.mjs ; \
+		node internal/webui/tests/style_csp_test.mjs || exit $$? ; \
 		node internal/webui/tests/requests_test.mjs || exit $$? ; \
 		node internal/webui/tests/tags_binding_test.mjs || exit $$? ; \
 		node internal/webui/tests/org_tree_test.mjs || exit $$? ; \

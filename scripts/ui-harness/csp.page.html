@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>CSP harness — 控制台真实策略下的渲染</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="page"></div>
+<div id="modal-root"></div>
+<div id="toasts" class="toasts"></div>
+<!--
+  这一页由 server.py 用控制台真实的 Content-Security-Policy 头送出，所以它**故意**没有任何
+  内联脚本、内联样式与 style 属性：那些东西在这条策略下本来就会被拦掉，写进来只会让视图以
+  "no report" 失败（看起来像页面坏了，其实是策略生效了）。脚本走同源外部模块，script-src 'self' 放行。
+  断言与理由都在 /csp.js 与 README 的 `csp` 视图一节。
+-->
+<script type="module" src="/csp.js"></script>
+</body>
+</html>

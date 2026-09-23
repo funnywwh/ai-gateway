@@ -19,7 +19,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${UI_HARNESS_WORK:-$ROOT/.cache/ui-harness}"
 PORT="${UI_HARNESS_PORT:-8097}"
-VIEWS="docs detail capacity cost models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand tree org org-readonly org-person org-accounts org-bind org-sync org-sync-readonly org-sync-nonames admins admins-readonly login chatWeb chatWebOff nodes nodes-readonly"
+VIEWS="docs detail capacity cost models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand tree csp org org-readonly org-person org-accounts org-bind org-sync org-sync-readonly org-sync-nonames admins admins-readonly login chatWeb chatWebOff nodes nodes-readonly"
 FIXTURES="$ROOT/scripts/ui-harness/fixtures.json"
 REFRESH=0
 
@@ -39,23 +39,29 @@ done
 command -v python3 >/dev/null 2>&1 || { echo "skip: python3 is not available"; exit 0; }
 
 FIREFOX=""
-# Order matters: on this host /usr/bin/firefox is the snap wrapper, which refuses to start
-# with a read-only $HOME ("cannot create user data directory") and then loads no page at
-# all — the run looks like "every view failed" with an empty server log. The snap's real
-# binary works once HOME and XDG_RUNTIME_DIR point somewhere writable, which is arranged
-# below.
+REJECTED=""
+# 顺序有意义：/snap/firefox/current 下的真二进制在受限会话里 `unshare(CLONE_NEWPID)` 会 EPERM，
+# 而 PATH 上的 `firefox` 是能跑的 —— 所以这里**逐个候选试版本**，而不是"第一个存在的就停"。
+#
+# 原来就是"第一个存在的就停 + 版本不过就整体跳过"，在这台机器上表现为：snap 那个存在 → 被选 → 版本探测
+# 失败 → 整轮走查以 "not a usable browser" 跳过（一个看起来像"没装浏览器"的绿），而 PATH 上那个能跑的
+# 从来没被试过。跳过前把每个候选的原因打出来，免得"跳过"读起来像"通过"。
+#
+# 另一条老教训（M77）：snap 壳子在 snap 缺失时会**退出 0 且什么都不加载**，那时每个视图都是
+# "no report" 而服务端日志是空的——一个看起来像"页面坏了"的失败。所以候选必须真答出 Mozilla 版本。
 for candidate in /snap/firefox/current/usr/lib/firefox/firefox /usr/lib/firefox/firefox firefox; do
-  if command -v "$candidate" >/dev/null 2>&1; then FIREFOX="$candidate"; break; fi
+  if ! command -v "$candidate" >/dev/null 2>&1; then
+    REJECTED="$REJECTED
+  $candidate: not found"
+    continue
+  fi
+  if "$candidate" --version 2>/dev/null | grep -q "Mozilla Firefox"; then FIREFOX="$candidate"; break; fi
+  REJECTED="$REJECTED
+  $candidate: not a usable browser (did not answer a Mozilla version)"
 done
-[ -n "$FIREFOX" ] || { echo "skip: no firefox binary found (set one on PATH to run the UI harness)"; exit 0; }
-
-# The snap wrapper is not a browser: it prints "Command '/usr/bin/firefox' requires the firefox snap
-# to be installed" and exits 0 without loading anything, which made every view report "no report"
-# with an empty server log — a failure mode that looks like a broken page. Ask it once and skip
-# with a reason instead (M77 found this on a host where the snap is absent but the wrapper is not).
-if ! "$FIREFOX" --version 2>&1 | grep -q "Mozilla Firefox"; then
-  echo "skip: $FIREFOX is not a usable browser (the snap wrapper cannot run here)"
-  echo "      install firefox (or point FIREFOX at a real binary) to run the UI harness"
+if [ -z "$FIREFOX" ]; then
+  echo "skip: no usable firefox found (put one on PATH to run the UI harness)"
+  printf '%s\n' "$REJECTED"
   exit 0
 fi
 
@@ -100,6 +106,11 @@ render_page "$ROOT/scripts/ui-harness/org.page.html" "$WORK/site/org.html"
 render_page "$ROOT/scripts/ui-harness/org_feishu.page.html" "$WORK/site/org-feishu.html"
 render_page "$ROOT/scripts/ui-harness/admins.page.html" "$WORK/site/admins.html"
 render_page "$ROOT/scripts/ui-harness/dshgw_nodes.page.html" "$WORK/site/dshgw-nodes.html"
+# `csp` 视图不走 render_page.py：它没有夹具可嵌（树控件不需要任何接口），而且它**不能**有内联
+# 脚本——那一页由 server.py 带着控制台真实的 CSP 送出，内联脚本在这条策略下会被拦掉。它由一页
+# 静态 HTML 加一个同源外部模块组成，后者是 script-src 'self' 唯一放行的形式。
+cp "$ROOT/scripts/ui-harness/csp.page.html" "$WORK/site/csp.html"
+cp "$ROOT/scripts/ui-harness/csp.js" "$WORK/site/csp.js"
 
 page_for_view() {
   case "$1" in
@@ -120,6 +131,10 @@ page_for_view() {
     # The reusable tree control on its own (it needs no API at all), and the organization page
     # with its two placements plus the account page's organization column and filter.
     tree) echo "tree.html" ;;
+    # 不是控制台页面：控制台**真实 CSP** 之下的行内样式（server.py 只给这一页发策略头）。
+    # harness 以前从不发 CSP，于是"线上因为 style-src 'self' 丢掉 style 属性、缩进归零"这件事
+    # 在走查里看不见——这一页就是那条判据，见 /csp.js 与 README 的 `csp` 视图一节。
+    csp) echo "csp.html" ;;
     org|org-readonly|org-person|org-accounts|org-bind) echo "org.html" ;;
     # 飞书通讯录同步弹窗（M70）：管理员 / 只读 / 缺数据权限三种部署，同一个页面。
     org-sync|org-sync-readonly|org-sync-nonames) echo "org-feishu.html" ;;

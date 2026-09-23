@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Static server for the console harness.
 
-It serves the console's assets the way the binary does, with two deliberate differences:
+It serves the console's assets the way the binary does, with three deliberate differences:
 
 * every response is `no-store`. The console sends `max-age=300` for its immutable assets,
   which is right in production and wrong here — a harness that runs yesterday's JavaScript
@@ -15,12 +15,27 @@ It serves the console's assets the way the binary does, with two deliberate diff
   "compression changed nothing" without anything having been compressed. See
   docs/design/m55-console-transfer-compression.md.
 
+* `/csp.html` (the `csp` view) is sent with the console's own Content-Security-Policy, and
+  every other page is not. Until that view existed the harness had no CSP at all, which is
+  exactly how a console-wide breakage stayed invisible: `style-src 'self'` makes browsers
+  discard style **attributes**, so the tree's indentation (`style="padding-left:…"`) was
+  zero in production while the harness — with no policy to enforce — measured the indent
+  and reported green. A console whose pages carry inline scripts (all the other harness
+  pages do) cannot run under this policy; the `csp` view is therefore a page with no inline
+  script or style, only a same-origin module.
+
 Usage: server.py <port>
 """
 import http.server
 import os
 import socketserver
 import sys
+
+#: The console's policy, byte for byte. internal/webui/embed.go is the source of truth (the
+#: header it sets on the shell and on every `.html` asset), and
+#: internal/webui/tests/style_csp_test.mjs pins the two copies equal — a harness measuring
+#: another policy than the deployed one is worse than no harness, because it reports green.
+CONSOLE_CSP = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'"
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -52,6 +67,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def end_headers(self):
         self.send_header("Cache-Control", "no-store, must-revalidate")
+        # 只有 `csp` 视图那一页带策略：其余 harness 页有内联脚本/样式，在这条策略下会被整页拦掉，
+        # 而报告发不出来时视图只会以 "no report" 失败（看起来像页面坏了，其实是策略在生效）。
+        if self.path.split("?", 1)[0] == "/csp.html":
+            self.send_header("Content-Security-Policy", CONSOLE_CSP)
         # A response that could have been answered two ways says so in both branches —
         # the compressed one above, and this one through the isfile check below — or a
         # shared cache could hand gzip to a client that never asked for it.

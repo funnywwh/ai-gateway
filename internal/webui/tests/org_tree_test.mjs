@@ -230,10 +230,13 @@ assert.equal(Number(indentDecl[1]), INDENT_WANT,
   '每层缩进必须是 ' + INDENT_WANT + 'px：14px 在一行 13.5px 字号下读不出层级（现场反馈「子节点要缩进」）');
 assert.match(treeSrc, /padding-left:' \+ \(8 \+ depth \* INDENT\)/,
   '行的左内边距必须是"基准 + 深度 × 缩进"，缩进不能另开一条路径（CSS 再补一份会让几何不可推）');
-for (const harnessPage of ['tree.page.html', 'org.page.html']) {
+for (const harnessPage of ['tree.page.html', 'org.page.html', 'csp.js']) {
   const harnessSrc = await readFile(new URL('../../../scripts/ui-harness/' + harnessPage, import.meta.url), 'utf8');
   assert.match(harnessSrc, new RegExp('=== ' + INDENT_WANT + '\\b'),
     harnessPage + ' 的走查期望值必须与 tree.js 的 INDENT 相等，否则改常量时走查会静默失守');
 }
+// `csp.js` 是 `csp` 视图的断言（控制台真实 CSP 之下量几何），它与上面两页一样写死了 22：那次
+// 14→22 的改动之所以在线上毫无变化，是 style 属性被 CSP 整条丢弃（见 style_csp_test.mjs），
+// 所以这条常量同步在真实策略下比在没有策略的 harness 页里更要紧。
 
 console.log('Organization structure UI checks passed.');

@@ -47,11 +47,14 @@ UI_STATIC_DIR=$PWD/.cache/ui-dist/static UI_HARNESS_GZIP=1 scripts/ui-harness/ru
 
 **M50 起这是"压缩没有改变行为"的主要证据**：Go 侧的静态合约测试（`internal/webui/embed_test.go`、
 `internal/webui/tests/*.mjs`）读的是源码，看不到"只有压缩后才发生"的回归；对镜像跑一遍同样的
-全部视图（当前 32 个）、比对逐视图检查项，才是端到端的保证。harness 页按绝对路径 import（`/js/pages/chat.js`），
+全部视图（当前 33 个）、比对逐视图检查项，才是端到端的保证。harness 页按绝对路径 import（`/js/pages/chat.js`），
 而压缩保持同名文件与同名导出，所以两者走的是同一条路径。
 
 没有 firefox 或 python3 时脚本**跳过并以 0 退出**（与 `test-race` 的处理方式一致），
-所以可以放心挂在 CI/verify 流程里。
+所以可以放心挂在 CI/verify 流程里。候选浏览器是**逐个试版本**的（`/snap/firefox/...` 在受限会话里
+`unshare` 会 EPERM，而 PATH 上的 `firefox` 可跑）：没有一个可用时，跳过信息里会列出每个候选被拒的原因——
+只挑"第一个存在的"会让你在一个能跑的浏览器就摆在那儿的机器上，每次都以"没装浏览器"跳过。
+**注意"跳过"不等于"通过"**：本机这份 harness 曾经整年不执行，正好掩盖了下面那条 `csp` 视图要防的事故。
 
 快照来自真实网关，可用 `--refresh` 重取（需要管理会话）：
 
@@ -114,6 +117,28 @@ GW_BASE=http://127.0.0.1:8099 GW_COOKIE=... scripts/ui-harness/capture.py       
     输入框初值等于该账号行下发的 `dsh_tenant_suggested`，且提示里写明了规则例子（`dsh-chenjingfeng-10`）。
     这里钉的是「页面预填服务端给的字段」这条接线；**规则本身**（`dsh-<账号拼音>-<账号ID>`）由 Go 测试
     （`internal/httpapi`、`internal/pinyin`）负责，harness 喂的是 fixture 里的固定值。
+
+- **2026-09-23 起**：`csp.page.html` + `csp.js`，视图 `csp`（1 个视图，**不需要快照**）：
+  - 它是**唯一**由 `server.py` 带着**控制台真实 CSP** 送出的页面（`/csp.html`，见 server.py 的
+    `CONSOLE_CSP`）。其余 harness 页都带内联脚本/样式，在那条策略下会被整页拦掉、报告发不出来，
+    只会以 "no report" 失败——所以在加这个视图之前，**harness 根本没有 CSP**。
+  - 因此它不能有内联脚本，脚本走同源外部模块 `/csp.js`（`script-src 'self'` 唯一放行的形式）；
+    `style_csp_test.mjs` 静态钉着"这一页没有内联脚本/样式与 style 属性"。
+  - 它守的是一条**真实事故**：控制台 CSP 是 `style-src 'self'`，style **属性**归 `style-src-attr` 管
+    （回落到 `style-src`），没有 `'unsafe-inline'` 就被浏览器**整条丢弃**——组织树的缩进写作
+    `style="padding-left:…"`，于是线上每一层的 `padding-left` 都是 `0px`，而 DOM 里明明写着
+    `padding-left:52px`（用户原话：「为什么这个组织树没有缩进？」）。**旧 harness 对此全绿**：
+    它在没有策略的世界里量几何，量到的东西永远成立。修法（`el()` 的 `style` 键改走 CSSOM
+    `node.style.cssText`）见 `docs/todo_done.md`「组织树没有缩进」。
+  - 断言分两类，缺一类就会退化成"看着在查、其实查不到"：**自检** `styleAttributeIsBlocked`
+    （属性写法必须被丢弃，证明这一页确实在那条策略下；将来谁把 `'unsafe-inline'` 加进策略，它会立刻变红），
+    以及**几何** `computedIndentBase` / `computedIndentPerLevel` / `labelsShiftPerLevel`
+    （三层 8/30/52px、每层 22px、标签 x 按层右移）＋ `inlineWidthApplies`（弹窗宽度：`.modal` 的 CSS 是
+    680px，行内把它放到 900px，证明修的是 `el()` 这条通路而不是"恰好把这棵树的缩进补回来了"）；
+    反面判据 `noZeroIndent` 就是事故现场的样子（属性在、计算值全 0）。
+  - 变异验证：把 `el()` 那行改回属性写法，本视图 `ok=false`，正是 `computedIndent*` /
+    `labelsShiftPerLevel` / `noZeroIndent` / `inlineWidthApplies` 五项翻红，而 `styleAttributeIsBlocked`
+    与 `attributeCarriesIndent` 仍为真——"属性在、样式没生效"这个签名被完整复现。
 
 - **M70 起**：`org_feishu.page.html`（组织架构页的「同步飞书」弹窗），共 3 个视图：
   - **`#org-sync`**：stub 里有一份**照真机形状**编的飞书通讯录（部门 BFS 序、一个人可属两个部门、

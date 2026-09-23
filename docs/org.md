@@ -193,6 +193,13 @@ view.refresh(nodes); view.setSelected(id); view.expandAll(); view.collapseAll();
 
 两处放置方式的差别**只有密度与元信息展示**，数据结构与交互完全一致。
 
+**缩进的实现有一处硬约束**：每层 22px 的缩进是行内样式，而控制台的 CSP 是 `style-src 'self'`
+（无 `'unsafe-inline'`）——浏览器会丢弃 style **属性**，所以这段样式必须由 `el()` 走 CSSOM
+（`node.style.cssText`）写入，不能退回 `setAttribute`。症状极其隐蔽：DOM 里 row 上写着
+`style="padding-left:52px"`，`getComputedStyle(row).paddingLeft` 却是 `0px`，整棵树贴着左边缘。
+约束由 `internal/webui/tests/style_csp_test.mjs`（源码不变式）与 harness 的 `csp` 视图（真实策略下量几何）
+一起守住，见 `docs/todo_done.md`「组织树没有缩进」。
+
 ## 6. 排障
 
 | 症状 | 原因与处理 |
@@ -202,6 +209,7 @@ view.refresh(nodes); view.setSelected(id); view.expandAll(); view.collapseAll();
 | 明明没有标签却能用全部模型 | 该凭据**没有任何**生效授权，回落到 `default_grant` 通配。给节点/账号/Key 补上正确的标签名，或把 `routing.default_grant` 设为 `none` |
 | 组织树上少了一个节点 | 兄弟重名会让写入 409；检查是否是同名节点建在了同一父节点下 |
 | 删不掉节点 | 它是中间节点，需要 `cascade=true`（控制台会提示将删除整棵子树） |
+| 组织树每层都贴着左边缘（"没有缩进"） | 行内样式被控制台 CSP 丢弃了：控制台是 `style-src 'self'`，浏览器会丢掉 style **属性**（DOM 里写着 `padding-left:52px`，计算值是 `0px`）。行内样式必须走 CSSOM，即 `ui.js` 的 `el()` 的 `style` 键；排查时看 `getComputedStyle(row).paddingLeft`，不要看 `row.style`/属性。见 `docs/todo_done.md`「组织树没有缩进」 |
 | 组织页显示"该部署未启用组织架构" | `Deps.Org` 端口为空（该构建/测试环境未接存储），此时 org 接口回答 400 `unsupported_parameter`（与其它未接线端口一致）；正式部署不会出现 |
 | 「同步飞书」提示部门/人员没有名称 | 飞书应用缺两个只读数据权限；加权限并发布版本，见 [docs/feishu.md §5c](feishu.md#5c-通讯录同步组织架构页同步飞书m70) |
 | 「同步飞书」报错 502 | 飞书侧失败（凭据/权限/网络/限流），弹窗给出中文原因；详细数字码在 aigw 日志 |

@@ -980,8 +980,11 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 - [ ] 回归（M77 全量收尾）：`make dshgw-test dshgw-sandbox-test dshgw-supervised-test`、`go vet ./...`、导入闸门
       （已完成：全仓 `go test ./internal/... ./cmd/...`、`make dshgw-node-test`、`make ui-base`、
       `make ui-dist`、两个验收脚本）
-- [ ] **待宿主执行（UI 走查）**：`make ui-check`（需要真 firefox；本会话沙箱里 `/usr/bin/firefox` 是 snap 包装器，
-      脚本已改成带原因跳过）。`make ui-dist` 之后按 README 对压缩镜像再跑一遍同一套视图。
+- [ ] **待宿主执行（UI 走查）**：`make ui-check`（需要真 firefox）。2026-09-23 起 `run.sh` 改成
+      **逐个候选试版本**后，本机已经能自己跑（`/snap/firefox/...` 在受限会话里 unshare EPERM，PATH 上的
+      `firefox` 156.0 可用）：`--views csp` 与全量 33 视图都已跑过并全绿，见 `docs/todo_done.md`
+      「组织树没有缩进」。**仍未做**：`make ui-dist` 之后按 README 对**压缩镜像**再跑一遍同一套视图
+      （UI_STATIC_DIR；顺带 UI_HARNESS_GZIP=1 走一遍传输层压缩）。
 - [ ] **待宿主执行（控制台实机走查）**：重建 `bin/aigw` 并重启 `aigw-local`，在真实 `:8088` 上走查
       「DSH 节点」页的七种状态、一次真实的一键部署（含首次指纹确认）与一次租户迁移
 - [ ] **待宿主执行（真机 bwrap 版验收一组）**：本会话沙箱禁非特权用户 namespace，因此
@@ -993,3 +996,16 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 - [ ] 实测记录回填：每请求 +1 跳 LAN 的 p50/p99 增量、流式无缓冲区证据、64 MiB 体与 WS 直通、
       一次部署耗时与载荷大小、节点/控制面重启恢复时间（写进设计文档 §11 与 `docs/dshgw.md` §8）
 - [ ] 收尾：单一 M77 提交（提交信息引用设计文档路径）
+
+## 待发版：控制台行内样式（CSP）修复（2026-09-23）
+
+> 现场与根因见 `docs/todo_done.md`「组织树没有缩进：控制台 CSP 丢弃行内 style 属性」。
+> 一句话：控制台 `style-src 'self'` 丢弃 style **属性**，组织树的缩进（以及另外 25 处行内样式）
+> 在线上等于不存在；修法是 `ui.js` 的 `el()` 改走 CSSOM，**尚未发版**。
+
+- [ ] **发版部署**：按 `release-version` 流程升 `VERSION`、提交打 tag、构建、部署到本机 `aigw-local`
+      与 `gpt001`，然后用 `/version` 与后台角标确认线上是新的 `ui.js`
+- [ ] **发版后复验（必须在真实浏览器里看一次）**：打开 `:8088/admin/ui/#/org`，确认组织树每层缩进
+      22px（子节点明显右移）；再开一个 `wide` 弹窗（例如供应商新建/请求详情）确认它的宽度从 680px
+      变成 900px —— 后者是"修的是 `el()` 这条通路"的旁证
+- [ ] 未纳入本次范围（观察项）：`tree({nodes})` 构造参数被忽略，必须 `refresh(nodes)` 才渲染

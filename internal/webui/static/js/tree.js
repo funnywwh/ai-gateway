@@ -241,6 +241,9 @@ export function tree({
       'aria-expanded': kids ? String(expanded) : null,
       tabindex: String(String(focusId) === String(id) ? 0 : -1),
       dataset: { id: String(id) },
+      // 这一段由 el() 走 CSSOM 写入（见 ui.js 的 `key === 'style'` 分支）：控制台 CSP 的
+      // `style-src 'self'` 会丢弃"把 style 当属性写"的声明，缩进会整层消失——现场反馈
+      // 「组织树没有缩进」就是这条声明被丢掉，而 DOM 里它一直在。
       style: 'padding-left:' + (8 + depth * INDENT) + 'px',
     }, [
       toggle,
