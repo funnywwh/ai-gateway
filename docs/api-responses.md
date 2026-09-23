@@ -38,8 +38,8 @@
 - **计量**：只有**实际出网**的尝试才写 `usage_records`；本地拒绝（401/402/403/404/429/400 未出网）
   只写 `request_logs`、审计与 hook，**不计费**。其中**限速拒绝（本地滑动窗口 429）不写 `request_logs`**
   ——它在准入之前就返回了；计费与配额拒绝（402，`RejectAs429` 时 429）走 `rejectForQuota`，
-  会写一行请求日志（同样受录制策略与脱敏约束；`record_input=user` 时同样受
-  `recording.input_max_chars` 每条 user 消息的字符上限约束）。**进入尝试循环之后**失败的尝试一律写一行
+  会写一行请求日志（同样受录制策略与脱敏约束；`record_input=user` 时同样只留最后一条短于
+  `recording.input_max_chars` 的 user 消息的纯文本）。**进入尝试循环之后**失败的尝试一律写一行
   `status=failed` 的用量行（`usage_source=unavailable`、零 token、**零费用**）——包括还没出网的失败
   （插件启动失败、**供应商并发排队超时/队列已满**），它们与成功尝试一样按 attempt 计数，便于在请求日志里
   看到"在谁那里失败、失败了几次"。`latency_ms` / `ttft_ms` **不含**供应商并发排队时长（M44）。

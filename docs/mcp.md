@@ -45,7 +45,7 @@
 | 6 | `list_invoices` / `get_invoice` | `limit` / `id` | 账单与明细 |
 | 7 | `get_models` | — | 该账户可用模型与**对客售价**（`currency` 为该模型的售价币种，缺省账本币种） |
 | 8 | `list_requests` | `period, limit` | 请求列表（含录制标记、身份维度与 `api_key_id`/`api_key_name`） |
-| 9 | `get_request` | `request_id` | 该请求**输入文本**（脱敏后）；思考与最终输出按开关返回；含它用的是哪个 Key（`api_key_id`/`api_key_name`） |
+| 9 | `get_request` | `request_id` | 该请求**输入文本**（脱敏后；`user` 档是最后一条 user 消息的**纯文本**，`full` 档是整份原样正文）；思考与最终输出按开关返回；含它用的是哪个 Key（`api_key_id`/`api_key_name`） |
 | 10 | `get_usage_breakdown` / `get_rate_limits` | — | 分组统计 / 当前限额与已用。`configured_limits` 读的是**扁平**策略字段（与实际生效路径同一解析器）；`monthly_*` 只解析不执行，会在 `not_enforced` 里列出；读不懂的字段进 `ignored_policy_fields`。标签策略在生效时合并，此处不合并 |
 
 返回为结构化 JSON；金额同时给出可读值与 micros 原始值，并附口径说明（时间范围、聚合方式、币种）。
@@ -358,18 +358,20 @@ created_by,expires_at,last_used_at,feishu},account:{id,name,status,tags,dsh_enab
 
 | 字段 | 默认 | 返回条件 |
 |---|---|---|
-| 输入文本 | **记录用户输入**（`record_input=user`，脱敏） | 默认可见；返回的是录制文档（用户消息 + `omitted` 计数 + `request_bytes`），系统指令、工具定义与工具输出不落正文；`record_input=off` 时返回"不可用"说明 |
+| 输入文本 | **记录用户输入**（`record_input=user`，脱敏） | 默认可见；返回的是**最后一条 user 消息的纯文本**（不是结构化文档），且只有它短于 `recording.input_max_chars` 时才有；系统指令、工具定义与工具输出、图片都不落库；`record_input=off` 时返回"不可用"说明 |
 | 思考文本 | **不记录**（`record_reasoning=false`） | 仅当该 Key 勾选"保存思考文本" |
 | 最终输出文本 | **不记录**（`record_output_text=false`） | 仅当该 Key 勾选"保存最终输出文本" |
 
 未录制时返回 `{"reasoning_recorded":false}` 及原因说明，**不会**用空字符串冒充内容。
 脱敏：始终剔除 `Authorization`/密钥字段，并按 `recording.redact_paths` 移除指定路径。
 
-**输入文本的形状与上限**：`user` 档返回的文档里，每条 user 消息最多保留前
-`recording.input_max_chars` 个字符（默认 100，`0` = 不限）；被截断时文档带
-`input_max_chars` 与 `input_truncated=true`，消息里的非文本部分（图片等）不落库、只在 `omitted`
-里计数（`over_cap` 表示因超上限未落库的文本 part）。因此**不要**把 `input` 当成提问全文：
-它是有意收窄过的视图，`request_bytes` 才是这次请求的真实体积。
+**输入文本的形状（M82）**：`user` 档的日志正文是**一段纯文本**——`get_request` 的 `input` 因此是一个
+**JSON 字符串**（`full` 档与历史行仍是对象，工具按内容是否合法 JSON 自行返回两种形状）。
+规则：只保留**最后一条** user 消息，且它必须**短于** `recording.input_max_chars`（默认 100 字符，
+恰好 100 视为超限）；超限、content 读不懂、或本次请求没有 user 消息 → 该行没有正文
+（`input_recorded=false`），工具会给出"不可用"的原因说明。**日志里看不出"为什么没有输入"**，
+要看完整内容只能把该 Key 的输入录制切成 `full`（保留全部：整份原样 JSON 正文，不受任何阈值限制）。
+因此**不要**把 `input` 当成提问全文，`request_bytes` 才是这次请求的真实体积。
 
 ## 7. 实现要点
 

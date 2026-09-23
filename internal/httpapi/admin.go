@@ -1184,7 +1184,11 @@ func (s *Server) handleAdminRequestDetail(w http.ResponseWriter, r *http.Request
 		"output":         jsonOrNil(row.ResponseText),
 		"input_recorded": row.RequestJSON != "", "reasoning_recorded": row.ReasoningRecorded,
 		"output_text_recorded": row.OutputTextRecorded, "truncated": row.Truncated,
-		"request_bytes": row.RequestBytes, "response_bytes": row.ResponseBytes,
+		// The recording policy this row was written under. Under the default "user" policy an
+		// empty input can mean "there was nothing to keep" as well as "recording was off", so
+		// the console needs the mode to say which — the row itself has no body to tell.
+		"record_input_mode": row.RecordInputMode,
+		"request_bytes":     row.RequestBytes, "response_bytes": row.ResponseBytes,
 		"client": row.Client, "model": row.Model, "resolved_model": row.ResolvedModel,
 		"matched_rule":     row.MatchedRule,
 		"reasoning_effort": row.ReasoningEffort,

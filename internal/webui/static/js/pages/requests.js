@@ -627,18 +627,30 @@ function formatTokens(value) {
   return n.toLocaleString('en-US');
 }
 
-// inputPanelTitle is the heading of the detail dialog's input panel. The default policy
-// stores only the head of each user message (M81), and a cut question is indistinguishable
-// from a short one by looking at the text — so the cap is stated in the heading. Without
-// this line an operator reading a 100-character "question" would have no way to know the
-// client sent more.
+// inputPanelTitle is the heading of the detail dialog's input panel.
+//
+// The default policy records plain text: the LAST user message, and only while it was shorter
+// than the deployment's threshold (M82). So there are three states to tell apart, and the text
+// alone cannot tell them apart — an empty panel may mean "nothing was kept" or "recording is
+// off", and a grey "未录制" on a row whose policy is `user` would be a lie about the wrong
+// thing. The row's `record_input_mode` is what separates them.
+//
+// A row written between M81 and M82 holds the old JSON document instead; for those the old
+// heading ("已截断：…前 N 字符") is still the honest description, so that branch stays.
 function inputPanelTitle(row) {
-  if (!row.input_recorded) return '输入（未录制）';
-  const doc = row.input || {};
-  if (!doc.input_truncated) return '输入';
-  return doc.input_max_chars
-    ? '输入（已截断：每条用户消息只留前 ' + doc.input_max_chars + ' 字符）'
-    : '输入（已截断）';
+  if (row.input_recorded) {
+    const doc = row.input;
+    if (doc && typeof doc === 'object' && doc.input_truncated) {
+      return doc.input_max_chars
+        ? '输入（已截断：每条用户消息只留前 ' + doc.input_max_chars + ' 字符）'
+        : '输入（已截断）';
+    }
+    return '输入';
+  }
+  if (row.record_input_mode === 'user') {
+    return '输入（未保留：最后一条用户消息为空或超过上限）';
+  }
+  return '输入（未录制）';
 }
 
 async function detail(requestID) {

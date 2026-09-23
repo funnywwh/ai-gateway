@@ -3,219 +3,130 @@ package responses
 import (
 	"encoding/json"
 	"strings"
-
-	"github.com/winger/ai-gateway/pkg/pluginapi"
 )
 
-// unreadableContentKey tallies a user message whose content this package cannot read (an
-// object, null, malformed JSON). Such content is dropped whole rather than stored: the
-// point of the default policy is to bound what a log row carries, and content nobody can
-// bound is exactly what must not be stored.
-const unreadableContentKey = "message:user:content"
-
-// UserInput is the recorded payload of the default input policy
-// (recording.record_input=user): what the user wrote, plus a summary of everything the
-// client sent that the gateway deliberately does not store.
+// UserInputText returns the text the default input policy (recording.record_input=user)
+// records for this request: the LAST user message, verbatim, and only when that message is
+// strictly shorter than maxChars. Anything else yields "" and the row is written without a
+// body.
 //
-// The default used to be the whole request body. In an agent loop that body is not the
-// user's input: one real request carried 67 input items, of which 2 were user messages —
-// the rest were tool definitions and function_call_output items holding whole file
-// contents. Storing that by default turned the request log into a second copy of every
-// file an agent read, and made "input" mean something the operator never chose.
+// Why only the last message, and why only a short one (M82):
 //
-// Since M81 the user's own messages are bounded too: each one keeps at most maxChars
-// characters (see UserInputDocument). MaxChars and Truncated describe that cap, because a
-// truncated question and a short one are otherwise indistinguishable in the record.
-type UserInput struct {
-	Model   string           `json:"model,omitempty"`
-	Input   []pluginapi.Item `json:"input"`
-	Omitted map[string]int   `json:"omitted,omitempty"`
-	Bytes   int              `json:"request_bytes,omitempty"`
-	// MaxChars is the per-message character cap this document was built under; absent when
-	// there was none (recording.input_max_chars=0, i.e. the pre-M81 behaviour).
-	MaxChars int `json:"input_max_chars,omitempty"`
-	// Truncated reports that at least one user message was cut at the cap.
-	Truncated bool `json:"input_truncated,omitempty"`
-}
-
-// UserInputDocument builds that document. bodyBytes is the serialized size of the whole
-// request, which the caller already has; it is recorded so a reader can still tell a
-// 200-byte prompt from a 200 KB one without the body being kept.
+//   - In an agent loop the request body is not the user's input. One real request carried 67
+//     input items, of which 2 were user messages — the rest were tool definitions and
+//     function_call_output items holding whole file contents. Recording all of them turned
+//     the request log into a second copy of every file an agent read (M23).
+//   - Of the user messages, the last one is the one a human just wrote: a DSH turn looks like
+//     [813-character runtime-context snapshot][78-character prompt]. The earlier ones are
+//     boilerplate, and keeping them buries the prompt in noise.
+//   - A long message is not recorded at all rather than truncated (M81 kept the first 100
+//     characters, which made a 1000-character question indistinguishable from a 100-character
+//     one — a "full question" that was really a head). Keep it whole or do not keep it.
+//   - The payload is plain text, not a JSON document (M82): the structure — items, parts,
+//     omission tallies, thresholds — was noise for the person reading the log and for an agent
+//     calling get_request. What is left is the one thing worth having.
 //
-// maxChars is recording.input_max_chars as the deployment resolved it, and it applies to
-// EACH kept user message. Per message rather than per document is deliberate: a DSH request
-// usually carries 2-3 user messages and the first one is a runtime-context snapshot, so a
-// shared budget would spend itself on that boilerplate and hide the prompt the operator is
-// looking for. 0 (or less) means no cap: the whole message, which is what M23 shipped.
-func (r *Request) UserInputDocument(bodyBytes, maxChars int) (*UserInput, error) {
+// Want everything? Switching the key to recording.record_input=full keeps the whole request
+// body verbatim, JSON and all, and is deliberately exempt from every rule above.
+//
+// maxChars is recording.input_max_chars: a message must be STRICTLY shorter than it to be kept
+// (exactly 100 characters is dropped). 0 means no filter at all: every user message's text is
+// kept, in order, joined by newlines — still text only, never the tool definitions or images.
+func (r *Request) UserInputText(maxChars int) (string, error) {
 	items, apiErr := r.Items()
 	if apiErr != nil {
-		return nil, apiErr
+		return "", apiErr
 	}
-	doc := &UserInput{
-		Model:   r.Model,
-		Input:   []pluginapi.Item{},
-		Omitted: map[string]int{},
-		Bytes:   bodyBytes,
-	}
-	if maxChars > 0 {
-		doc.MaxChars = maxChars
-	}
+	// Only the user's own messages: developer instructions, tool definitions, tool calls and
+	// their outputs, earlier assistant turns and compaction items are what this policy exists
+	// to leave out.
+	msgs := make([]recordedUserMessage, 0, len(items))
 	for _, item := range items {
-		if item.Type == "message" && item.Role == "user" {
-			content, dropped, truncated := clampUserMessage(item.Content, maxChars)
-			if truncated {
-				doc.Truncated = true
-			}
-			for key, count := range dropped {
-				doc.Omitted[key] += count
-			}
-			item.Content = content
-			doc.Input = append(doc.Input, item)
+		if item.Type != "message" || item.Role != "user" {
 			continue
 		}
-		doc.Omitted[omittedKey(item)]++
+		text, runes, readable := userMessageText(item.Content)
+		msgs = append(msgs, recordedUserMessage{text: text, runes: runes, readable: readable})
 	}
-	if len(r.Tools) > 0 {
-		doc.Omitted["tools"] = len(r.Tools)
+	if len(msgs) == 0 {
+		return "", nil
 	}
-	if strings.TrimSpace(r.Instructions) != "" {
-		doc.Omitted["instructions"] = 1
+	if maxChars <= 0 {
+		kept := make([]string, 0, len(msgs))
+		for _, msg := range msgs {
+			if msg.readable {
+				kept = append(kept, msg.text)
+			}
+		}
+		return strings.Join(kept, "\n"), nil
 	}
-	if len(doc.Omitted) == 0 {
-		doc.Omitted = nil
+	last := msgs[len(msgs)-1]
+	if !last.readable || last.runes >= maxChars {
+		return "", nil
 	}
-	return doc, nil
+	return last.text, nil
 }
 
-// clampUserMessage bounds one user message's content to budget characters, the cap the
-// default input policy applies per message (M81). It returns the rewritten content, the
-// tally of what was dropped, and whether any text was cut.
+// recordedUserMessage is one user message reduced to what the recording policy decides on: its text,
+// how many characters that text is, and whether the content could be read at all.
+type recordedUserMessage struct {
+	text     string
+	runes    int
+	readable bool
+}
+
+// userMessageText flattens one user message to text and reports its length in characters.
 //
-// The budget is shared by every text part of the message, in order: "at most N characters
-// per user message" only holds if it holds across the parts. A text part that does not fit
-// at all is dropped and counted as over_cap rather than stored empty — an empty text part
-// reads like the client sent nothing, which is a different fact.
+// Content is either a plain string (the shape the gateway itself synthesizes for
+// `"input":"…"`) or an array of typed parts (the shape both clients send). A text part's
+// "text" field is content; anything else in the array — an image, a file, a part type from a
+// newer protocol — is content this package will not guess at and is left out. Content of a
+// shape nobody can read (an object, malformed JSON) is reported as unreadable: it cannot be
+// measured, so it cannot be bounded, so it is not recorded.
 //
-// Non-text parts (images, files, anything a newer protocol adds) are dropped and counted by
-// type: the cap is a bound on what the log carries, and a base64 image would blow through it
-// while adding nothing an operator can read.
-func clampUserMessage(content json.RawMessage, budget int) (json.RawMessage, map[string]int, bool) {
-	if budget <= 0 || len(content) == 0 {
-		return content, nil, false
+// The length counted is the length of the text this function returns, so the message that
+// gets stored is exactly the message that passed the threshold. Multiple text parts are
+// joined by a newline, and those separators count like any other character.
+func userMessageText(content json.RawMessage) (string, int, bool) {
+	raw := strings.TrimSpace(string(content))
+	if raw == "" || raw == "null" {
+		return "", 0, true
 	}
-	trimmed := strings.TrimSpace(string(content))
-	if trimmed == "" || trimmed == "null" {
-		return content, nil, false
-	}
-	switch trimmed[0] {
-	case '"':
+	if !strings.HasPrefix(raw, "[") {
 		var text string
-		if err := json.Unmarshal(content, &text); err != nil {
-			return nil, map[string]int{unreadableContentKey: 1}, false
+		if err := json.Unmarshal([]byte(raw), &text); err != nil {
+			return "", 0, false
 		}
-		kept, _, cut := takeText(text, budget)
-		encoded, err := json.Marshal(kept)
-		if err != nil {
-			return nil, map[string]int{unreadableContentKey: 1}, false
-		}
-		return encoded, nil, cut
-	case '[':
-		return clampContentParts(content, budget)
+		return text, len([]rune(text)), true
 	}
-	return nil, map[string]int{unreadableContentKey: 1}, false
-}
-
-// clampContentParts applies one message's budget across its content parts.
-func clampContentParts(content json.RawMessage, budget int) (json.RawMessage, map[string]int, bool) {
 	var parts []map[string]json.RawMessage
-	if err := json.Unmarshal(content, &parts); err != nil {
-		return nil, map[string]int{unreadableContentKey: 1}, false
+	if err := json.Unmarshal([]byte(raw), &parts); err != nil {
+		return "", 0, false
 	}
-	remaining := budget
-	truncated := false
-	dropped := map[string]int{}
-	kept := make([]map[string]json.RawMessage, 0, len(parts))
+	texts := make([]string, 0, len(parts))
 	for _, part := range parts {
-		partType := jsonString(part["type"])
-		if !textPart(partType) {
-			dropped[partTypeKey(partType)]++
-			continue
-		}
-		rawText, hasText := part["text"]
-		if !hasText {
-			// Nothing to bound: a text part with no text field is kept as it arrived.
-			kept = append(kept, part)
+		if !textPart(jsonString(part["type"])) {
 			continue
 		}
 		var text string
-		if err := json.Unmarshal(rawText, &text); err != nil {
-			dropped[partTypeKey(partType)]++
+		if err := json.Unmarshal(part["text"], &text); err != nil {
 			continue
 		}
-		piece, used, cut := takeText(text, remaining)
-		remaining -= used
-		if cut {
-			truncated = true
-		}
-		if text != "" && piece == "" {
-			// The whole part fell outside the cap.
-			dropped["over_cap"]++
-			continue
-		}
-		encoded, err := json.Marshal(piece)
-		if err != nil {
-			dropped[partTypeKey(partType)]++
-			continue
-		}
-		part["text"] = encoded
-		kept = append(kept, part)
+		texts = append(texts, text)
 	}
-	encoded, err := json.Marshal(kept)
-	if err != nil {
-		return nil, map[string]int{unreadableContentKey: 1}, false
-	}
-	return encoded, dropped, truncated
+	joined := strings.Join(texts, "\n")
+	return joined, len([]rune(joined)), true
 }
 
-// takeText keeps at most budget characters of text and reports how many it kept, so the
-// caller can spend the rest of a message's budget on later parts.
-//
-// Characters, not bytes: the cap is specified in characters (recording.input_max_chars) and
-// the traffic here is mostly Chinese, where 100 bytes would be ~33 characters. Cutting on a
-// rune boundary is also what keeps invalid UTF-8 out of the database. The kept prefix is
-// returned verbatim — no trimming — because "the first N characters" is the whole promise.
-func takeText(text string, budget int) (kept string, used int, cut bool) {
-	if budget <= 0 {
-		return "", 0, text != ""
-	}
-	runes := []rune(text)
-	if len(runes) <= budget {
-		return text, len(runes), false
-	}
-	return string(runes[:budget]), budget, true
-}
-
-// textPart reports whether a content part carries text this package can bound. These are
-// the two carriers the clients actually send (see itemText and TitlePromptFingerprint);
-// every other part type — an image, a file, something a newer protocol added — is content
-// the gateway will not guess at, so it is dropped and counted instead.
+// textPart reports whether a content part carries text this package records. These are the
+// two carriers the clients actually send (see itemText and TitlePromptFingerprint); every
+// other part type — an image, a file, something a newer protocol added — is left out.
 func textPart(partType string) bool {
 	switch strings.TrimSpace(partType) {
 	case "input_text", "text":
 		return true
 	}
 	return false
-}
-
-// partTypeKey names a dropped content part in the tally, falling back to "unknown" for a
-// part with no usable type (the same word omittedKey uses for items).
-func partTypeKey(partType string) string {
-	partType = strings.TrimSpace(partType)
-	if partType == "" {
-		return "unknown"
-	}
-	return partType
 }
 
 // jsonString reads a JSON string out of a raw field, "" when the field is absent or is not
@@ -229,18 +140,4 @@ func jsonString(raw json.RawMessage) string {
 		return ""
 	}
 	return value
-}
-
-// omittedKey names one dropped item in the document's tally: by type, and for messages
-// by role too, because "one assistant turn" and "one developer instruction" are
-// different diagnoses.
-func omittedKey(item pluginapi.Item) string {
-	itemType := strings.TrimSpace(item.Type)
-	if itemType == "" {
-		itemType = "unknown"
-	}
-	if itemType == "message" && item.Role != "" {
-		return itemType + ":" + item.Role
-	}
-	return itemType
 }

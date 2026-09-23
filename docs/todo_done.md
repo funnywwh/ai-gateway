@@ -5987,3 +5987,37 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 未做（待人工） | ① `dshgw-verify` 重启：会重启**所有**租户 worker（含发起部署的会话），本次只换盘上二进制；② gptjp 已经 ~5 天没有非控制台流量（最近 12 行是控制台问答，服务端按设计强制 `off`；最近一条 `mode=user` 的行在 2026-09-18），所以 `input_max_chars` 要等它下一次 user 档请求才会出现在它的日志里；③ 真浏览器 `make ui-check`（含 M81 新增的截断提示断言）与 CSP 修复的线上复验（`:8088/admin/ui/#/org` 组织树缩进 22px、`wide` 弹窗 900px）仍需在宿主浏览器里做一次 |
 | 既有噪声（非本次引入） | rag-server 的 `settlement could not be written; falling back to disk — store: begin settlement tx: context deadline exceeded`：12:07–12:28 有 4 条（**早于**本次重启），重启后 14:11:34 又 1 条（启动期写连接争用），当天共 **15 条**；全部走 `billing fallback` 落盘并由 `billing fallback replay finished scanned=1 replayed=1 failed=0`（14:12:13）自动补回，**没有丢账**（当天 replay 成功 38 次）——签名与 4.1.1 运行期一致，与 M78/M81 无关。另外 main 上还有 M79 遗留的 `go vet` copylocks（`internal/dshgw/config/sandboxview_test.go:76/92/105`），本次未动 |
 
+
+## M82 `user` 档只留最后一条合格 user 消息的纯文本
+> 设计文档 `docs/design/m82-user-input-tail-only-text.md`。取代 M81（「每条 user 消息截断到前 100 字符」）。
+> 需求原话（连续三轮）：`>=100个字符的user消息就不用保持了` / `只保持排在最后面的<=100字符的user消息` /
+> `之保持文本内容，不需要Json格式` / `如果后台设置保留全部时，不受这个限制`。
+
+- [x] **录制口径**：`Request.UserInputText(maxChars)` 返回**最后一条** user 消息的纯文本，且只有它
+      **严格短于** `recording.input_max_chars`（默认 100）时才返回；末条超长、content 读不懂（对象/坏 JSON）、
+      或本次请求没有 user 消息 → 返回空串（行照写，`request_bytes` 列照记）。删掉 M81 的整套 JSON 文档机制
+      （`UserInput`/`UserInputDocument`/`omitted`/`input_truncated`/`over_cap`/`clampUserMessage`/`takeText`）。
+- [x] **`full` = 保留全部**：整份请求正文原样 JSON，**不受**阈值、不受「只留最后一条」、不受「纯文本」三条
+      限制，仍只受 `recording.max_bytes`；控制台档位文案、`admin_routes` 字段说明、MCP 工具说明与
+      `docs/request-log.md` 都写明「要保留全部就切 full」。
+- [x] **`N = 0` = 不过滤**：全部 user 消息的文本按顺序换行拼接（仍只是文本）；负值启动报错（不变）。
+- [x] **读侧**：管理 API 详情新增 `record_input_mode`（读时镜像日志行已有的列），`/stats` 去掉
+      `input_max_chars`（M81 的阈值回显，属「除文本外都不要」）；MCP `get_request` 的 `input` 改为
+      「内容合法 JSON 才用 `json.RawMessage`，否则作字符串」——裸文本塞进 `RawMessage` 会让
+      `json.Marshal` 报错、整条 JSON-RPC 响应坏掉；`input_unavailable_reason` 文案同时覆盖
+      「策略是 user 但没东西可留」（原来的文案只会说「录制关了」，那是错的）。
+- [x] **控制台**：`inputPanelTitle` 三态（有正文 / 策略为 user 但未保留 / 未录制）+ M81 历史行的旧文案；
+      `key_actions.js` 的 `full` 档改成「保留全部（整份请求正文，不受长度阈值影响）」，`keys.js` 提示语同步。
+- [x] **测试**：`internal/responses` 13 例（末条决定、恰好 100 丢弃 / 99 保留、不截断、多 part 换行连接、
+      图片不落库、不可读为空、无 user 消息为空、`0` 拼全部、字符串简写/字符串 content、UTF-8）；
+      `internal/httpapi`（默认档正文**恰好**是提问文本、末条超长 → 空正文且 `request_bytes>0`、
+      `full` 保留整份且 `truncated=false`、`/stats` 不再有该字段、详情带 `record_input_mode`；
+      另外改了 M27 身份测试与「开关独立」测试里过时的断言）；`internal/mcpsrv`（string/object 两形状）；
+      `internal/webui/tests/requests_test.mjs`（8 条标题断言）；harness 三次回放。
+- [x] **文档**：新设计文档 + 规格（`docs/request-log.md` §1 重写、`config.example.yaml`、`docs/mcp.md` §6 与
+      工具表、`docs/api-responses.md`、`README.md` 里程碑叙述与文档表）+ M81/M23 设计文档的取代注记。
+- [x] **验收（沙箱内）**：`go vet ./...` 除 M79 遗留的 `internal/dshgw/config/sandboxview_test.go` copylocks
+      外无输出；`go test -count=1 ./...` 全绿；`make ui-base` 全绿（node v22 真跑）；`make build`
+      （压缩镜像 + overlay）成功。（`internal/runtime` 那条并发计时断言在并行跑 ui-base 时会偶发失败，
+      单独复跑两次均通过 —— 是负载敏感，不是本次改动。）
+- [x] **提交**：单一 M82 提交（提交信息引用设计文档路径），随后合并到 `main`。

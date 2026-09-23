@@ -777,7 +777,7 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 				enumField(bodyOptional("status", "string", "状态"), "active", "disabled"),
 				bodyOptional("record_reasoning", "boolean", "是否保存思考文本"),
 				bodyOptional("record_output_text", "boolean", "是否保存最终输出文本"),
-				enumField(bodyOptional("record_input_mode", "string", "输入文本录制级别：user 只记用户输入（默认，单条消息超出 recording.input_max_chars 的部分不落库），full 整份请求正文（不受该上限影响），metadata 只记元数据，off 不记"), "inherit", "user", "full", "metadata", "off"),
+				enumField(bodyOptional("record_input_mode", "string", "输入文本录制级别：user 只记用户输入（默认，只保留最后一条、且短于 recording.input_max_chars 的 user 消息的纯文本；末条超长或无末条则不留正文），full 保留全部（整份请求正文，不受该阈值限制），metadata 只记元数据，off 不记"), "inherit", "user", "full", "metadata", "off"),
 				exampleField(schemaField(bodyOptional("policy", "object",
 					"限速与配额策略，字段与创建 Key 完全相同（见本参数 schema）；省略则不改，写 null 表示清空"),
 					policySchema()), keyPolicyExample()),

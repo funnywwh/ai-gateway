@@ -253,8 +253,10 @@ func (s *Service) queryTools() []queryTool {
 				"用在「这条请求到底发了什么」的追问上（先 list_requests 拿到 id）。" +
 				"request_id 必填且必须来自 list_requests，不要自己编 id（没有可省略的参数）。" +
 				"跨账户的 id 一律返回「找不到」，这是权限不是缺失。" +
-				"输入文本按录制策略收窄：默认每条用户消息只留开头若干字符（被截断时 input 里带 " +
-				"input_max_chars 与 input_truncated），工具定义、工具输出与消息里的图片不落库、只在 omitted 里计数。" +
+				"输入文本按录制策略收窄：默认（record_input=user）只保留【最后一条】user 消息的**纯文本**，" +
+				"而且它必须短于部署配的字符阈值（默认 100，恰好 100 也算超限）——因此 input 通常是字符串；" +
+				"末条超长、content 读不懂或这次请求没有 user 消息时 input_recorded=false（日志里看不出具体原因）。" +
+				"要完整内容只能把该 Key 的输入录制切成 full（保留全部：整份原样正文，不受阈值限制，此时 input 是对象）。" +
 				"所以别把 input 当提问全文，request_bytes 才是这次请求的真实体积。" +
 				"返回：request_id、endpoint、status、created_at、api_key_id/api_key_name，以及 input/reasoning/output_text 三项" +
 				"（各自配 input_recorded/reasoning_recorded/output_text_recorded；未录制时给出 *_unavailable_reason 说明原因，不会用空串冒充内容）。",
@@ -616,11 +618,21 @@ func (s *Service) getRequest(ctx context.Context, accountID int64, args map[stri
 		"api_key_name": s.apiKeyNames(ctx, accountID)[row.APIKeyID],
 	}
 	if row.RequestJSON != "" {
-		out["input"] = json.RawMessage(row.RequestJSON)
+		// The stored body is plain text under the default policy and a JSON document under
+		// "full" (and in rows written before M82). Wrapping plain text in json.RawMessage
+		// would make encoding the whole JSON-RPC response fail, so the shape is decided by
+		// what the body actually is.
+		if json.Valid([]byte(row.RequestJSON)) {
+			out["input"] = json.RawMessage(row.RequestJSON)
+		} else {
+			out["input"] = row.RequestJSON
+		}
 		out["input_recorded"] = true
 	} else {
 		out["input_recorded"] = false
-		out["input_unavailable_reason"] = "input recording is disabled for this API key"
+		out["input_unavailable_reason"] = "no input was recorded for this request: " +
+			"recording is off for this API key, or the default policy had nothing to keep " +
+			"(the last user message was empty or longer than the configured limit)"
 	}
 	if row.ReasoningRecorded && row.ResponseReasoning != "" {
 		out["reasoning"] = row.ResponseReasoning

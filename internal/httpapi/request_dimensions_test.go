@@ -87,13 +87,15 @@ func TestRequestLogRecordsDSHIdentity(t *testing.T) {
 	if row.CallKind != "agent" {
 		t.Fatalf("call_kind = %q, want agent", row.CallKind)
 	}
-	// The identity is recorded under the default "user" policy, where the developer
-	// message and everything else but the user's own words are dropped from the body.
-	if row.RequestJSON == "" {
-		t.Fatal("the user input is still recorded under the default policy")
+	// The identity is recorded under the default "user" policy; the body is not. In this body
+	// the LAST user message is the runtime-context snapshot (330 characters), and since M82 a
+	// message that long is kept whole or not at all — so nothing is kept. The identity is the
+	// part that must survive the recording policy, which is what this test is about.
+	if row.RequestJSON != "" {
+		t.Fatalf("a last message over the threshold must leave no body: %q", row.RequestJSON)
 	}
-	if strings.Contains(row.RequestJSON, "You are an AI agent powered by DeepSeek Harness") {
-		t.Fatalf("the default policy must not store the system prompt: %q", row.RequestJSON)
+	if row.RecordInputMode != "user" {
+		t.Fatalf("record_input_mode = %q, want the resolved default", row.RecordInputMode)
 	}
 }
 

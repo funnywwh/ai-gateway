@@ -714,10 +714,13 @@ type inputRecord struct {
 	TitleFingerprint string
 	StartedAt        time.Time
 	Mode             string // full|user|metadata|off
-	Payload          string // the stored document ("" for metadata and off)
-	Bytes            int    // serialized size of the whole request body
-	// Truncated reports that the payload hit a cap: the per-message character cap (M81) or
-	// recording.max_bytes, which bounds every mode including "full".
+	// Payload is the stored body: the last user message's plain text under "user" (empty when
+	// there is none to keep), the whole request body verbatim under "full", and empty under
+	// "metadata"/"off" — which is why an empty payload does not by itself mean "off".
+	Payload string
+	Bytes   int // serialized size of the whole request body
+	// Truncated reports that recording.max_bytes cut the payload. Since M82 that is the only
+	// source: the per-message character cap is gone (a message is now kept whole or not at all).
 	Truncated bool
 
 	Dims     responses.Dimensions // client / workspace / session / call_kind
@@ -730,11 +733,12 @@ type inputRecord struct {
 //
 // Three channels are recorded independently: this one decides what happens to the
 // client's request, and recordContent decides what happens to the model's thinking and
-// final text. The default here is "user": only the user's own input is stored — each user
-// message cut at recording.input_max_chars characters (M81) — with a tally of what was left
-// out. "full" keeps the whole body for the times when an upstream 400 has to be diagnosed
-// against the exact bytes the client sent, which is why the character cap does not apply to
-// it. Both content modes still end at recording.max_bytes.
+// final text. The default here is "user": the row keeps the LAST user message's plain text,
+// and only when that message is shorter than recording.input_max_chars (M82) — no JSON
+// document, no omission tallies, no truncated "head" that reads like a while question.
+// "full" is the escape hatch that keeps everything: the whole request body verbatim, JSON
+// and all, for the times when an upstream 400 has to be diagnosed against the exact bytes the
+// client sent. Both content modes still end at recording.max_bytes.
 func (s *Server) recordInput(ctx context.Context, key *domain.APIKey, req *responses.Request, clientHint string) inputRecord {
 	cfg := s.deps.Config.Recording
 	rec := inputRecord{Mode: cfg.InputModeFor(key.RecordInputMode), StartedAt: time.Now().UTC()}
@@ -761,29 +765,46 @@ func (s *Server) recordInput(ctx context.Context, key *domain.APIKey, req *respo
 	rec.Bytes = len(raw)
 	switch rec.Mode {
 	case "full":
-		rec.Payload = string(raw)
+		rec.Payload = redact(string(raw), cfg.RedactPaths)
 	case "user":
-		doc, err := req.UserInputDocument(len(raw), cfg.InputMaxChars)
+		text, err := req.UserInputText(cfg.InputMaxChars)
 		if err != nil {
-			// The request parsed, so this cannot normally happen; if it ever does, a row
-			// with the envelope and no body still beats no row at all — the operator has
-			// to be able to see that the request happened.
+			// The request parsed, so this cannot normally happen; if it ever does, the row
+			// is still written without a body — the operator has to be able to see that the
+			// request happened.
 			if s.deps.Log != nil {
-				s.deps.Log.Warn("building the recorded input document failed",
+				s.deps.Log.Warn("reading the user's input failed",
 					"err", err, "request_id", requestIDFrom(ctx))
 			}
-			rec.Payload = string(mustJSON(map[string]any{"model": req.Model, "request_bytes": len(raw)}))
-		} else {
-			rec.Payload = string(mustJSON(doc))
+			text = ""
 		}
+		rec.Payload = redactInputText(text, cfg.RedactPaths)
 	}
 
-	rec.Payload = redact(rec.Payload, cfg.RedactPaths)
 	if limit := s.recordingLimit(); len(rec.Payload) > limit {
 		rec.Payload = truncate(rec.Payload, limit)
 		rec.Truncated = true
 	}
 	return rec
+}
+
+// redactInputText applies recording.redact_paths to the one payload that is not JSON.
+//
+// The path list is a JSON-path vocabulary, and under the default policy the payload is plain
+// text — there is nothing to walk. But "input" is the path an operator writes when they mean
+// "do not keep the input", and silently ignoring that would quietly undo a protection someone
+// configured, so that one path is still honoured. Every other path keeps applying to the
+// identity columns, which is where the paths that matter (workspace, session_id, …) live.
+func redactInputText(text string, paths []string) string {
+	if text == "" {
+		return text
+	}
+	for _, path := range paths {
+		if strings.TrimSpace(path) == "input" {
+			return ""
+		}
+	}
+	return text
 }
 
 // recordingLimit is recording.max_bytes with the same default the config ships.

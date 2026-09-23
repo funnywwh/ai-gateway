@@ -14,31 +14,34 @@
 
 | 通道 | 开关 | 默认 | 内容 |
 |---|---|---|---|
-| 输入 | `recording.record_input`（可被 Key 覆盖） | `user` | `full` 整份正文 / `user` 只留用户自己写的输入 / `metadata` 不落正文 / `off` 不落正文 |
-| 输入字符上限 | `recording.input_max_chars` | 100 | `user` 档**每条** user 消息保留的字符数；`0` = 不限 |
+| 输入 | `recording.record_input`（可被 Key 覆盖） | `user` | `full` 整份正文（**保留全部**）/ `user` 只留最后一条用户输入的**纯文本** / `metadata` 不落正文 / `off` 不落正文 |
+| 输入长度阈值 | `recording.input_max_chars` | 100 | `user` 档只保留**短于**它的最后一条 user 消息；`0` = 不过滤（全部 user 消息文本拼接） |
 | 思考文本 | `recording.record_reasoning`（可被 Key 覆盖） | 关 | 模型的思考文本 |
 | 最终输出 | `recording.record_output_text`（可被 Key 覆盖） | 关 | 模型的最终回答 |
 | 会话标题 | `recording.record_title` | **开** | 标题调用产出的会话标题 |
 
-`record_input=user`（默认）只保留用户自己写的 user 消息，系统/开发者指令、工具定义、工具调用与
-工具输出、历史 assistant 轮次只留 `omitted` 计数与 `request_bytes`。
+`record_input=user`（默认）只保留用户自己写的输入，而且**只保留最后一条 user 消息的纯文本**：
+系统/开发者指令、工具定义、工具调用与工具输出、历史 assistant 轮次、压缩历史、以及消息里的图片
+**都不落库**（M82 起连计数也不留）。
 
-**字符上限（M81）**：`user` 档下每条 user 消息最多保留前 `recording.input_max_chars` 个字符
-（默认 100，按字符计、中文算 1 个；`0` = 不限，即 M81 之前的行为）。超出部分丢弃，文档里
-`input_truncated=true` 并带上生效的 `input_max_chars`，操作者能看到问题开头、看不到后面的文字。
-几条边界：
+**输入口径（M82）**：`request_json` 就是**一段纯文本**——不是 JSON 文档、没有 `type`/`role`/`content`
+结构、没有计数与阈值字段。规则：
 
-- **按条计，不是整份合计**：DSH 一个请求里通常 2–3 条 user 消息，第一条常是 runtime context 样板；
-  按条计才不会让样板把真正的问题挤掉。上界因此是「消息条数 × 上限」。
-- **一条消息里的多个文本 part 共享这份预算**（按顺序递减）；预算用尽后没进来的 part 计
-  `omitted["over_cap"]`。
-- **user 消息里的非文本部分（`input_image` 等）不落库**，只按 part 类型计进 `omitted`
-  （`omitted["input_image"]=1`）——base64 图片不再进请求日志。
-- content 形状读不懂（对象、非法 JSON）时整段不落库并计 `omitted["message:user:content"]`；
-  请求日志本身照写。`null` 或缺省的 content 原样保留——里面本来就没有内容，没什么可截的。
-- `full` / `metadata` / `off` 三档不受本上限影响（`full` 仍只受 `recording.max_bytes`），
-  控制台智能问答流量服务端强制 `off`，同样不受影响。
-- 历史行不重写、不回填：升级前写的行仍带完整 user 消息，读侧只多不少。
+- **只留最后一条** user 消息；它必须**短于** `recording.input_max_chars`（默认 100，按字符计、中文算 1）。
+  恰好 100 字符 → 丢弃；99 → 保留。
+- 保留就**整条原样保留**（多条文本 part 用换行连接），不再截断——日志里不会出现「看起来完整、其实是前 100
+  字符」的假头。
+- 末条 ≥ 阈值、末条 content 读不懂、或这次请求根本没有 user 消息 → 该行正文为**空**；
+  行本身照写（状态、体积、身份维度都在）。因此 `input_recorded=false` 且该行 `record_input_mode=user`
+  的含义是「策略要记，但没有可保留的用户输入」——**看不出具体原因**（这是有意的收窄）。
+- `recording.input_max_chars: 0` = **不过滤**：把所有 user 消息的文本按顺序换行拼接成一段（仍然只是文本）。
+- **要保留全部（原样字节）就把该 Key 的输入录制切成 `full`**：该档存整份请求正文的 JSON，含工具定义、
+  工具输出、系统指令与图片，**不受**上述阈值、不受「只留最后一条」、不受「纯文本」三条限制，
+  仍只受 `recording.max_bytes` 兜底。`metadata`/`off` 不落正文；控制台智能问答流量服务端强制 `off`。
+- `recording.redact_paths` 管的是身份列；纯文本没有 JSON 路径可指，因此**唯一的兼容规则**是：
+  路径列表里出现 `input`（历史上就是「不要留输入」的意思）→ 正文清空。
+- 历史行不重写、不回填：M23–M81 期间写的行是 JSON 文档（M81 的还可能带 `input_truncated`/`over_cap`），
+  控制台与 MCP 对新旧两种形状都能读。
 
 **身份维度不受上表影响**（M27）：客户端、模型、工作区、会话、调用类型、标题这七列是元数据，
 只要该请求写了日志行就一并记录——包括 `record_input=off`（那一行只有身份、没有正文）。

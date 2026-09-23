@@ -48,7 +48,7 @@ export async function render({ page, actions, session }) {
     onError: (err) => toast(api.errorMessage(err), 'error'),
   });
   page.append(card('API Keys', view.node, [
-    el('span', { class: 'muted', text: '明文只在创建时显示一次；默认只记录用户输入（长消息按上限截断，非文本附件与工具内容不落库），思考与最终输出需单独勾选' }),
+    el('span', { class: 'muted', text: '明文只在创建时显示一次；默认只记录用户输入（只保留最后一条不超过上限的消息文本；要保留全部请把该 Key 的输入录制切成 full），思考与最终输出需单独勾选' }),
     el('span', { class: 'muted', text: '飞书身份已改为绑定在账号上（组织架构页展开账号 → 「绑定飞书」）；这里的「飞书（旧）」列只用于查看与清理升级前的 Key 级绑定' })]));
 
   refresh.addEventListener('click', () => view.refresh());

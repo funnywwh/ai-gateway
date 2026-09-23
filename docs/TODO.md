@@ -1082,3 +1082,13 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       迁移 0027 之前的旧日志显示「（未知路由）」与「—」而不是报错或 0
 - [ ] 观察项：`RequestAttempts` 是每页一次 `request_id IN (…)` 点查，未做大窗口压测；一个请求的
       `attempts` 条数由候选数决定，暂不需要对它分页
+
+## M82 `user` 档只留最后一条合格 user 消息的纯文本
+> 设计文档 `docs/design/m82-user-input-tail-only-text.md`（取代 M81 的「每条截断前 100 字符」）。
+> 本节已完成的 9 项记录见 `docs/todo_done.md` 的同名小节；下面只列未完成项。
+
+- [ ] **待宿主执行（真浏览器走查）**：`make ui-check` —— 本会话沙箱里 `/usr/bin/firefox` 是 snap 包装器
+      （答不出 Mozilla 版本），脚本按设计带原因跳过。`#requests` 视图新增三条回放断言（未保留 / 未录制 /
+      历史截断行），压缩镜像（`UI_STATIC_DIR` + `UI_HARNESS_GZIP=1`）同样待宿主
+- [ ] **待安排**：随 v4.3.1 发版并部署 rag-server + gptjp 的线上验证（见 `docs/todo_done.md` 的
+      v4.3.1 发布记录）；`dshgw-verify` 的待重启事项仍单列在 M77/M79 小节

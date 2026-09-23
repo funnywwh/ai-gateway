@@ -561,16 +561,17 @@ func TestRecordingSwitchesAreIndependent(t *testing.T) {
 	if log.RecordInputMode != "user" {
 		t.Fatalf("record_input_mode = %q, want the resolved default user", log.RecordInputMode)
 	}
-	if !strings.Contains(log.RequestJSON, "ping") {
-		t.Fatalf("the user's own input must be recorded by default: %q", log.RequestJSON)
+	// The body is the last user message's text, verbatim and nothing else: this body's last
+	// user message is "ping", and since M82 there is no document around it (no input[], no
+	// omission tallies, no request_bytes field).
+	if log.RequestJSON != "ping" {
+		t.Fatalf("the user's own input must be the whole body: %q", log.RequestJSON)
 	}
-	for _, forbidden := range []string{"ZZ_TOOL_OUTPUT_SECRET", "SYSTEM INSTRUCTION", "an earlier answer", "/etc/shadow"} {
+	for _, forbidden := range []string{"ZZ_TOOL_OUTPUT_SECRET", "SYSTEM INSTRUCTION", "an earlier answer", "/etc/shadow",
+		"{", "omitted", "function_call_output", "request_bytes"} {
 		if strings.Contains(log.RequestJSON, forbidden) {
-			t.Fatalf("only user input may be recorded by default, found %q in %q", forbidden, log.RequestJSON)
+			t.Fatalf("the recorded body leaked %q: %q", forbidden, log.RequestJSON)
 		}
-	}
-	if !strings.Contains(log.RequestJSON, `"function_call_output":1`) || !strings.Contains(log.RequestJSON, `"tools":1`) {
-		t.Fatalf("the record must tally what was left out: %q", log.RequestJSON)
 	}
 	if log.RequestBytes <= 0 {
 		t.Fatalf("request_bytes must still report how big the request was: %+v", log)
@@ -613,19 +614,18 @@ func TestRecordingSwitchesAreIndependent(t *testing.T) {
 	}
 }
 
-// TestDefaultPolicyCapsEachUserMessage is the M81 rule end to end on the shipped default
-// (the fixture runs on config.Default() and the key is "inherit", i.e. the case an operator
-// never chose): every user message in the log keeps its first 100 characters, and the tail
-// of a long question never reaches the database. "full" is the exception, because its whole
-// purpose is the client's exact bytes.
-func TestDefaultPolicyCapsEachUserMessage(t *testing.T) {
+// TestDefaultPolicyKeepsOnlyTheLastShortUserMessage is the M82 rule end to end on the shipped
+// default (the fixture runs on config.Default() and the key is "inherit", i.e. the case an
+// operator never chose): the row keeps the LAST user message's plain text, and only while that
+// message is shorter than the threshold. A message that long is kept whole or not at all — no
+// truncated head — and "full" is the escape hatch that keeps everything.
+func TestDefaultPolicyKeepsOnlyTheLastShortUserMessage(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
-	// Two user messages, the shape a DSH turn really has: a runtime-context snapshot first,
-	// then the question. Both are longer than the cap.
+	// The shape a DSH turn really has: a long runtime-context snapshot, then the question.
 	boilerplate := "Current runtime context. " + strings.Repeat("context filler ", 20)
-	question := "请把请求日志的输入上限改成" + strings.Repeat("截断", 60) + "ZZ_PAST_THE_CAP"
+	question := "请把请求日志的输入口径改成只留最后一条"
 	body := `{"model":"echo-model","input":[` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"` + boilerplate + `"}]},` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"` + question + `"}]}]}`
@@ -642,43 +642,50 @@ func TestDefaultPolicyCapsEachUserMessage(t *testing.T) {
 	if row.RecordInputMode != "user" {
 		t.Fatalf("record_input_mode = %q, want the resolved default", row.RecordInputMode)
 	}
-	if !strings.Contains(row.RequestJSON, `"input_max_chars":100`) ||
-		!strings.Contains(row.RequestJSON, `"input_truncated":true`) {
-		t.Fatalf("the row must say the input was capped at 100: %q", row.RequestJSON)
+	if row.RequestJSON != question {
+		t.Fatalf("the body must be the last user message's text, got %q", row.RequestJSON)
 	}
-	if strings.Contains(row.RequestJSON, "ZZ_PAST_THE_CAP") {
-		t.Fatalf("text past the cap reached the log: %q", row.RequestJSON)
-	}
-	boilerplateHead := string([]rune(boilerplate)[:100])
-	questionHead := string([]rune(question)[:100])
-	for _, head := range []string{boilerplateHead, questionHead} {
-		if !strings.Contains(row.RequestJSON, head) {
-			t.Fatalf("the head of a user message must survive: %q not in %q", head, row.RequestJSON)
-		}
-	}
-	// The cap is per message: a shared budget would have been spent on the boilerplate and
-	// the question's head would be missing above.
-	if row.RequestBytes <= len(questionHead)*2 {
+	if row.RequestBytes <= 0 {
 		t.Fatalf("request_bytes must still report the real request size: %+v", row)
 	}
 
-	// A key switched to full is diagnosing an upstream 400 against the client's exact
-	// bytes, so the character cap must not touch it.
+	// A last message at or over the threshold leaves NO body: the old behaviour kept its first
+	// 100 characters, which read like a complete question.
+	long := strings.Repeat("长", 100) + "ZZ_PAST_THE_THRESHOLD"
+	longBody := `{"model":"echo-model","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"` + question + `"}]},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"` + long + `"}]}]}`
+	respLong := f.do(t, "POST", "/v1/responses", longBody, nil)
+	respLong.Body.Close()
+	rowLong, err := f.db.GetRequestLog(ctx, respLong.Header.Get("x-request-id"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rowLong.RequestJSON != "" {
+		t.Fatalf("an over-threshold last message must leave no body: %q", rowLong.RequestJSON)
+	}
+	if rowLong.RequestBytes <= 0 {
+		t.Fatalf("the size is still recorded even when the body is not: %+v", rowLong)
+	}
+
+	// A key switched to full keeps EVERYTHING: the whole body, both user messages included,
+	// and none of this policy applies to it.
 	if err := f.db.SetAPIKeyRecording(ctx, f.key.ID, false, false, "full"); err != nil {
 		t.Fatal(err)
 	}
 	f.verifier.Invalidate(secret.Prefix(testToken))
-	resp2 := f.do(t, "POST", "/v1/responses", body, nil)
+	resp2 := f.do(t, "POST", "/v1/responses", longBody, nil)
 	resp2.Body.Close()
 	row2, err := f.db.GetRequestLog(ctx, resp2.Header.Get("x-request-id"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(row2.RequestJSON, "ZZ_PAST_THE_CAP") {
-		t.Fatalf(`full mode must keep the client's exact bytes: %q`, row2.RequestJSON)
+	if !strings.Contains(row2.RequestJSON, "ZZ_PAST_THE_THRESHOLD") ||
+		!strings.Contains(row2.RequestJSON, question) {
+		t.Fatalf(`full must keep the whole body, including both messages: %q`, row2.RequestJSON)
 	}
-	if strings.Contains(row2.RequestJSON, "input_truncated") {
-		t.Fatalf("full mode must not be capped: %q", row2.RequestJSON)
+	if row2.Truncated {
+		t.Fatalf("full kept everything; nothing should be truncated: %+v", row2)
 	}
 }
 

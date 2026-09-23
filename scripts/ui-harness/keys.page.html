@@ -510,30 +510,54 @@ try {
     await settle();
     checks.closeDismisses = modal().querySelectorAll('.modal, .modal-backdrop').length === 0;
 
-    // The default policy keeps only the head of each user message (M81). A capped record is
-    // replayed in place, the way the cached-token cases above replay an older payload: the
-    // dialog must say the input was cut, because the text alone cannot.
-    const cappedRow = FIXTURES['/requests/req_demo0001'];
-    const savedInput = cappedRow.input;
+    // The input panel has to tell three states apart (M82): a body that was kept, a row whose
+    // policy wanted an input but had nothing to keep, and a row that was not recorded at all.
+    // The empty panel looks the same in the last two, so the row's recording mode decides —
+    // each state is replayed in place, the way the cached-token cases below replay an older
+    // payload.
+    const replayRow = FIXTURES['/requests/req_demo0001'];
+    const savedInput = replayRow.input;
+    const savedRecorded = replayRow.input_recorded;
+    const savedMode = replayRow.record_input_mode;
     try {
-      cappedRow.input = { ...savedInput, input_max_chars: 100, input_truncated: true };
+      // 1) Nothing kept, but the policy is the input policy: "not recorded" would be a lie.
+      replayRow.input = null;
+      replayRow.input_recorded = false;
+      replayRow.record_input_mode = 'user';
       find('详情').click();
       await settle();
-      checks.truncatedInputDisclosed = modalText().includes('输入（已截断：每条用户消息只留前 100 字符）');
+      checks.nothingKeptExplained = modalText().includes('输入（未保留：最后一条用户消息为空或超过上限）');
       closeButton().click();
       await settle();
-      // The same document without the flag must not claim a truncation that did not happen.
-      cappedRow.input = { ...savedInput, input_max_chars: 100 };
+
+      // 2) Recording off: the same empty panel, a different fact.
+      replayRow.record_input_mode = 'off';
       find('详情').click();
       await settle();
-      checks.untruncatedInputStaysPlain = modalText().includes('输入')
-        && !modalText().includes('已截断');
+      checks.recordingOffStaysPlain = modalText().includes('输入（未录制）')
+        && !modalText().includes('未保留');
+      closeButton().click();
+      await settle();
+
+      // 3) A row written between M81 and M82 still holds the truncated JSON document, and the
+      // old wording is the honest description of it.
+      replayRow.input = { input: [{ content: [{ text: 'ping from m23' }] }], input_max_chars: 100, input_truncated: true };
+      replayRow.input_recorded = true;
+      replayRow.record_input_mode = 'user';
+      find('详情').click();
+      await settle();
+      checks.legacyTruncatedRowStillSaysSo = modalText().includes('输入（已截断：每条用户消息只留前 100 字符）');
       closeButton().click();
       await settle();
     } finally {
-      cappedRow.input = savedInput;
+      replayRow.input = savedInput;
+      replayRow.input_recorded = savedRecorded;
+      // The captured snapshot may predate the field entirely: restore "absent", not "undefined".
+      if (savedMode === undefined) delete replayRow.record_input_mode;
+      else replayRow.record_input_mode = savedMode;
     }
-    checks.inputFixturesRestored = cappedRow.input === savedInput;
+    checks.inputFixturesRestored = replayRow.input === savedInput
+      && replayRow.input_recorded === savedRecorded && replayRow.record_input_mode === savedMode;
 
     // Replay an older metered payload without the optional cache dimension, then an
     // unmetered detail. Restore fixtures so the existing refresh regression stays intact.

@@ -124,18 +124,13 @@ func (s *Server) SetRecordingFailureHandler(install func(func(*domain.RequestLog
 	})
 }
 
-// requestLogStats reports the write health of the request log plus the retention and
-// recording policies, for /stats and the console.
+// requestLogStats reports the write health of the request log plus the retention policy,
+// for /stats and the console.
 func (s *Server) requestLogStats(ctx context.Context) map[string]any {
 	stats := map[string]any{
 		"write_failures": s.requestLogWriteFailures.Load(),
 		"dropped":        s.requestLogDropped.Load(),
 		"retention_days": s.deps.Config.Recording.RetentionDays,
-		// What the default input policy keeps of one user message (M81). It is read here
-		// because it is otherwise invisible: a truncated question in the log looks exactly
-		// like a short one, and "is this deployment capping at 100 or 0?" has to be
-		// answerable from the running process rather than from the config file.
-		"input_max_chars": s.deps.Config.Recording.InputMaxChars,
 	}
 	if rec := s.deps.LogRecorder; rec != nil {
 		stats["batching"] = rec.Stats()

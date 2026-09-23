@@ -1453,10 +1453,11 @@ func TestPruneRequestsEndpointAndStats(t *testing.T) {
 	if _, ok := block["dropped"]; !ok {
 		t.Fatalf("the console needs the drop counter too: %v", block)
 	}
-	// The per-message character cap of the default input policy (M81) is otherwise
-	// invisible: a row written under it looks exactly like a short question.
-	if block["input_max_chars"] != float64(100) {
-		t.Fatalf("input_max_chars = %v, want the configured 100", block["input_max_chars"])
+	// M82 removed the per-message character cap, and with it this stats field: the default
+	// policy now keeps the last user message whole or not at all, so there is no threshold to
+	// report. The field reappearing would mean a knob came back with it.
+	if _, ok := block["input_max_chars"]; ok {
+		t.Fatalf("the recording threshold is no longer a policy knob: %v", block)
 	}
 
 	// Session stickiness is part of the routing state an operator has to be able to see
