@@ -4,12 +4,19 @@
 #
 #   scripts/official-pricing.sh                      # 干跑：登录（只读）→ 列目录 → 逐行取价 → 打印计划
 #   scripts/official-pricing.sh --apply              # 真正写入（并在写完后读回核对、试算、体检）
+#   scripts/official-pricing.sh --plan-out FILE      # 只把定价计划导出成 JSON（不登录、不写入）
 #   GW_BASE=https://gpt.lagenio.xyz/aigw scripts/official-pricing.sh --apply
 #
+# `--plan-out` 是给「补齐缺失的供应商模型」那类步骤用的（scripts/codex-add-models.py）：新建的
+# 行必须**当场**带上成本价，不能先建行、再等本脚本补价——那中间有一段时间是按 0 成本计费的。
+# 导出的 JSON 就是本脚本下面那张表的原文，所以价格只在这一处维护。
+#
 # 环境变量：GW_BASE（默认 http://127.0.0.1:8088；实例带 base_path 时要把前缀写进去，
-#          例如 gptjp 的 /aigw）、GW_ADMIN_USER / GW_ADMIN_PASS
-#          （默认取自 config.yaml 的 bootstrap.admin；gptjp 的 config 里没有 bootstrap，
-#           密码在 /opt/aigw/.admin-password，用环境变量传）。
+#          例如 gptjp 的 /aigw）、GW_ADMIN_USER / GW_ADMIN_PASS、CONFIG
+#          （凭据默认取自 $CONFIG 的 bootstrap.admin；CONFIG 默认是「仓库根/config.yaml」，
+#           脚本被拷到部署根下（如 /opt/aigw/official-pricing.sh）时 ROOT 推算到 /opt，
+#           这时会自动改用「与脚本同目录的 config.yaml」，也可以显式给
+#           CONFIG=/opt/aigw/config.yaml 或直接传 /opt/aigw/.admin-password 的内容）。
 #
 # 与 scripts/deepseek-official-pricing.sh、scripts/codex-official-pricing.sh 的关系：
 # 那两个脚本各自写死一家供应商、一份价格表，只覆盖它当时知道的两个模型 id。本脚本是
@@ -55,16 +62,23 @@
 #   费率时按 `output` 计价（internal/pricing/engine.go 的 dimensionFallbacks）。再写一条
 #   反而会重复计费；DeepSeek 那边 reasoning 本来就含在 output 里。
 #
-# ── 价格来源（2026-09-14 抓取）──────────────────────────────────────────────
+# ── 价格来源（2026-09-23 抓取；初版 2026-09-14）──────────────────────────────
 #
 # 本机出网访问 openai.com / developers.openai.com / platform.openai.com 一律被 Cloudflare
-# 403，但 **gptjp（8.211.157.165）能取到官方定价页**，所以下面的 OpenAI 数字是**从官方页面
-# 的定价表里逐条读出来的**（页面把每张表的 JSON 内嵌在 Astro island 的 props 属性里），
+# 403，但 **gptjp（gpt.lagenio.xyz，47.91.16.118）能取到官方定价页**，所以下面的 OpenAI 数字是
+# **从官方页面的定价表里逐条读出来的**（页面把每张表的 JSON 内嵌在 Astro island 的 props 属性里），
 # 不是二手转述。复核命令见文件末尾。
+#
+# 页面的计价档位是一个切换器：Standard / Batch / Flex / Fast mode。本次核对的四张表恰好是
+# Standard、Batch、Flex、Fast——Batch 与 Flex 比 Standard 便宜一半，Fast mode 是 Standard 的
+# 2×（矩阵里 gpt-6-astra 10/1/12.5/50 → Batch·Flex 5/0.5/6.25/25 → Fast 20/2/25/100）。
+# **本脚本一律用 Standard**：现网规则集都按 Standard 写，客户端也没有按 tier 分流。
 #
 #   https://developers.openai.com/api/docs/pricing （Standard 档，USD / 百万 tokens）
 #     模型                      输入   缓存命中  缓存写入  输出    |  >272K 输入：输入/缓存 2×、输出 1.5×
 #     gpt-6-astra               10      1       12.5     50     |  20 / 2 / 25 / 75
+#     gpt-6-sol                  2      0.2      2.5     10     |   4 / 0.4 / 5 / 15
+#     gpt-6-luna                 0.1    0.01     0.125    0.5   |   0.2 / 0.02 / 0.25 / 0.75
 #     gpt-5.6-sol                4      0.4      5       20     |   8 / 0.8 / 10 / 30
 #     gpt-5.6-terra              2      0.2      2.5     12     |   4 / 0.4 / 5 / 18
 #     gpt-5.6-luna               0.2    0.02     0.25     1.2   |   0.4 / 0.04 / 0.5 / 1.8
@@ -100,15 +114,42 @@
 #     「9/14 12:00 起回落 Flash 价」写，已被官方公告推翻）。
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 GW_BASE="${GW_BASE:-http://127.0.0.1:8088}"
 APPLY=0
-[ "${1:-}" = "--apply" ] && APPLY=1
+PLAN_OUT=""
+case "${1:-}" in
+  "") ;;
+  --apply) APPLY=1 ;;
+  --plan-out)
+    PLAN_OUT="${2:-}"
+    [ -n "$PLAN_OUT" ] || { echo "--plan-out 需要一个文件路径：--plan-out /tmp/plan.json" >&2; exit 2; }
+    ;;
+  *) echo "未知参数：$1（可用：--apply / --plan-out FILE）" >&2; exit 2 ;;
+esac
 
 CONFIG="${CONFIG:-$ROOT/config.yaml}"
-GW_ADMIN_USER="${GW_ADMIN_USER:-$(awk '/^  admin:/{f=1} f&&/username:/{print $2; exit}' "$CONFIG" 2>/dev/null | tr -d '"')}"
-GW_ADMIN_PASS="${GW_ADMIN_PASS:-$(awk '/^  admin:/{f=1} f&&/password:/{print $2; exit}' "$CONFIG" 2>/dev/null | tr -d '"')}"
-[ -n "$GW_ADMIN_USER" ] && [ -n "$GW_ADMIN_PASS" ] || { echo "缺少管理员凭据（GW_ADMIN_USER/GW_ADMIN_PASS）" >&2; exit 1; }
+# 部署形态（脚本与 config.yaml 同目录，例如 /opt/aigw/official-pricing.sh）里上面那个默认值会
+# 算到 /opt/config.yaml：找不到就改用「与脚本同目录的 config.yaml」。
+if [ ! -f "$CONFIG" ] && [ -f "$SCRIPT_DIR/config.yaml" ]; then
+  CONFIG="$SCRIPT_DIR/config.yaml"
+fi
+# 管理员凭据：环境变量优先；缺省从 config.yaml 的 bootstrap.admin 读（gptjp 的那份里就是这个段）。
+# 没有 config.yaml（例如只跑 --plan-out，或把脚本拿到没部署的机器上）不算错误：下面的检查会
+# 给出可读的提示，而不是让 `set -e` 在这里以一个 awk 的退出码收场。
+if [ -z "${GW_ADMIN_USER:-}" ] && [ -f "$CONFIG" ]; then
+  GW_ADMIN_USER="$(awk '/^  admin:/{f=1} f&&/username:/{print $2; exit}' "$CONFIG" 2>/dev/null | tr -d '"' || true)"
+fi
+if [ -z "${GW_ADMIN_PASS:-}" ] && [ -f "$CONFIG" ]; then
+  GW_ADMIN_PASS="$(awk '/^  admin:/{f=1} f&&/password:/{print $2; exit}' "$CONFIG" 2>/dev/null | tr -d '"' || true)"
+fi
+GW_ADMIN_USER="${GW_ADMIN_USER:-}"
+GW_ADMIN_PASS="${GW_ADMIN_PASS:-}"
+# --plan-out 不登录：它只把下面的价格表导出，供补模型的步骤复用同一份规则。
+if [ -z "$PLAN_OUT" ]; then
+  [ -n "$GW_ADMIN_USER" ] && [ -n "$GW_ADMIN_PASS" ] || { echo "缺少管理员凭据（GW_ADMIN_USER/GW_ADMIN_PASS 或 config.yaml 的 bootstrap.admin）" >&2; exit 1; }
+fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -195,6 +236,14 @@ plan.update(deepseek(
 plan.update(openai_text("gpt-6-astra",
     "OpenAI 官方标准价 $10 输入 / $1 缓存命中 / $12.50 缓存写入 / $50 输出（每百万 tokens）",
     10.00, 1.00, 50.00))
+# GPT-6 Sol / Luna：2026-09-23 官方定价页上与 Astra 同表的三兄弟（页面脚注只点名 Sol 与 Luna 的
+# EU 数据驻留档位）。两者都有 >272K 的长上下文档，倍数与既有一致（输入/缓存 2×、输出 1.5×）。
+plan.update(openai_text("gpt-6-sol",
+    "OpenAI 官方标准价 $2 输入 / $0.20 缓存命中 / $2.50 缓存写入 / $10 输出（每百万 tokens）",
+    2.00, 0.20, 10.00))
+plan.update(openai_text("gpt-6-luna",
+    "OpenAI 官方标准价 $0.10 输入 / $0.01 缓存命中 / $0.125 缓存写入 / $0.50 输出（每百万 tokens）",
+    0.10, 0.01, 0.50))
 plan.update(openai_text("gpt-5.6-sol",
     "OpenAI 官方标准价 $4 输入 / $0.40 缓存命中 / $5 缓存写入 / $20 输出（每百万 tokens；促销价至少到 2026-11-21）",
     4.00, 0.40, 20.00))
@@ -279,7 +328,10 @@ for name, ruleset in plan.items():
         assert r["input_cache_miss"] >= r["input_cache_hit"] >= 0, f"{name}/{rule['id']}：缓存命中价不该高于未命中价"
 
 # 长上下文档：官方口径是输入/缓存 2×、输出 1.5×，且边界必须是「>272K」。
-LONG = ("gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+# gpt-6 三兄弟（astra / sol / luna）与 gpt-5.6 三兄弟（sol / terra / luna）一样，官方 Short/Long
+# 两列的分档倍数完全相同，所以边界沿用同一读数（页面把 Long context 的 tooltip 交给客户端渲染，
+# 静态 HTML 里只有「<272K context length」这种模型名后缀，故以初版记录的「>272K input tokens」为准）。
+LONG = ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
 for name in LONG:
     rules = plan[name]["rules"]
     assert len(rules) == 2, f"{name}：长上下文档缺失"
@@ -315,6 +367,16 @@ for name in ("gpt-4o-audio-preview", "gpt-4o-realtime-preview"):
 
 print("\n自检通过：catch-all / 裸 input / 缓存折扣 / 长上下文 2× 与 1.5× / 分时半价 / 图像音频档位一致。")
 PY
+
+# ── 只导出计划 ──────────────────────────────────────────────────────────────
+# 给 scripts/codex-add-models.py 用：新建供应商模型行时必须当场带上这里的规则，导出的就是上面
+# 那张表的原文（不重新算、不手抄），所以以后调价只需改上面的 python 块。
+if [ -n "$PLAN_OUT" ]; then
+  cp "$PLAN" "$PLAN_OUT"
+  echo
+  echo "定价计划已导出：$PLAN_OUT（未登录、未写入任何东西）"
+  exit 0
+fi
 
 code="$(curl -s -m 10 -c "$COOKIE" -o "$WORK/login.json" -w '%{http_code}' \
   -X POST "$GW_BASE/admin/api/v1/auth/login" -H 'Content-Type: application/json' \

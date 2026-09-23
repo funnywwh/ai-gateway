@@ -6167,3 +6167,26 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 幂等 | 幂等键是 `kind:ref_id` 且**全局唯一**，所以 ref 必须带账户：`topup-20260923-100usd-<account_id>`。⚠️ 首次尝试用了一个共享 ref（`…-100usd-all`），结果只有第一个账户入账、其余 109 次被当重放跳过（该次 `applied=false`、`balance_after=0` 正是证据）；发现后改成逐账户 ref 重做，并按「余额已达 100 USD 就跳过」保证不重复入账 |
 | 核对 | 只读 SQLite：`balance_micros=100000000` 的账户 110 个、余额 0 的账户 0 个；唯一的非零偏差是自检账户 `zz-rebuild-selftest` 的 **-215 微美元**（它自己那 2 次真实探测请求的计费，closed 账户，不影响用户） |
 | 含义 | 账户 `billing_mode` 仍是 `postpaid`，正余额就是可用额度：请求按对客价（跟随成本侧官方价）从余额扣减，扣完即 `402 billing_hard_limit_reached`（自检时就复现过这条路径） |
+
+### gptjp：所有 plugin:provider-codex 补 gpt-6-sol / gpt-6-luna 并按官方价计费（2026-09-23）
+
+> 需求原话：「pgptjp上的aigw给所有plugin:provider-codex 添加 gpt-6-sol,gpt-6-luna,并使用官方价格」。
+> 「pgptjp」在本环境解析不到（ssh 别名、known_hosts、会话记录、仓库文档四处都没有这个名字），
+> 按用户确认的目标机执行：**gptjp**（本环境唯一可达、且确实有 `plugin:provider-codex` 的实例）。
+
+| 项 | 值 |
+|---|---|
+| 目标实例 | gptjp（`47.91.16.118`，`gpt.lagenio.xyz` / `gpt.tirisen.hk`，root，`/opt/aigw`，`aigw.service`，`:8088`，`base_path: /aigw`）。执行时线上 **4.3.3 / `438daee`**（本次不动二进制），schema 27 |
+| 四个 codex 供应商 | `1 lzhichao-lagenio-3-expiry`、`3 lizhichao-wisskys-3-expiry`、`5 liuhui-wisskys-8-expiry`、`7 codex-zhuyecheng`（7 此前 0 行模型、只有 1 条路由） |
+| 官方价（Standard 档，2026-09-23 从 gptjp 抓官方定价页读出） | `gpt-6-sol` **2 / 0.2 / 2.5 / 10**（>272K 长档 4 / 0.4 / 5 / 15）；`gpt-6-luna` **0.1 / 0.01 / 0.125 / 0.5**（长档 0.2 / 0.02 / 0.25 / 0.75），USD/百万 tokens（输入/缓存命中/缓存写入/输出）。同一张表还有 Batch 与 Flex（0.5×）与 Fast mode（2×）档，按现网口径取 **Standard** |
+| 先探测再写（上游可用性） | 直连 `chatgpt.com/backend-api/codex/responses`（`stream:true`、prompt `hi`、用各账号自己的会话）：**4 个账号 × 2 个模型 = 8/8 HTTP 200**。目录端点不可信（这类账号返回 `{"models":[]}`），所以按 `examples/provider-codex/README.md` 的口径真发一次 |
+| 改动（仓库） | `scripts/official-pricing.sh`：价格表加两个模型（带 long-context 规则，并进 `LONG` 自检）、文件头补官方价两行与档位说明、**新增 `--plan-out FILE`**（导出的就是那张表的原文，杜绝第二处手抄价）、顺手修一处部署形态 bug（脚本拷到部署根下时 `ROOT` 会算成 `/opt`，读不到 `config.yaml`）。新增 `scripts/codex-add-models.py`（默认干跑；按 kind 找供应商 → 目录项 → 供应商模型行 → config.models → 路由，`--apply` 后逐项读回核对） |
+| 写入（实例） | **8 行 `provider_models`**（id 304–311，`public==upstream`、enabled、capabilities `{stream,tools,reasoning}`、**建行即带官方价**，不存在「有行无价」窗口）+ **2 个对客模型目录项**（id 23/24）+ **8 条路由**（id 281–288，prio/weight 100）+ 4 个供应商的 `config.models` 各追加 2 条（提交整份 config ⇒ 插件进程被停、下次请求懒启动） |
+| 计数变化 | 模型 22→**24**、上游模型 58→**66**、路由 66→**74**、成本侧定价目标 58→**66**（解析失败 0、`missing_rates` 无） |
+| 定价核对 | `official-pricing.sh --apply`：全 **57** 行逐行读回与计划一致 + 体检 0 解析失败；`/pricing/simulate` **9/9 与官方价逐位相等**：sol 标准档 200K+1M=**$10.40**、长档 300K+1M=**$16.20**、边界 272000 走标准档（$0.544）/272001 走长档；luna 标准 $0.52、长档 $0.81、边界 272000=$0.0272、缓存命中档 $0.502（标准）/ $0.006（长档） |
+| 路由核对 | `router/explain`：8 个「模型 × codex 供应商」组合**各有 1 个候选**；`azure` / `deepseek` / `deepseek-dianshang` 对新模型都是 **0 候选**（没被误授权到别的供应商） |
+| 端到端（真实请求） | 临时 key（账户 1，grants=4 个 codex 供应商）→ `GET /v1/models` 含两模型（19 个）→ `POST /v1/responses` 流式两模型均 **200 + `response.completed`**（回答「1+1=2。」）；计费 `cost_micros`：sol **130**（= 15 输入×2 + 10 输出×10，与官方价逐位相等）、luna **7**（= 15×0.1 + 10×0.5 = 6.5，引擎进位到整微美元）；`charge_micros == cost_micros`（默认加价 1.0×）；两条请求分别落在 `codex-zhuyecheng`(route 281) 与 `lizhichao-wisskys-3-expiry`(route 286)。用完把 key **停用**（`PATCH /admin/api/v1/keys/156`；key 没有 DELETE 接口） |
+| 供应商健康 | 改完 config 后逐个真实探测 **4/4 ok**（latency 2.0 / 1.9 / 11.2 / 2.2 s），日志有对应 `plugin started`；`/version` 仍 4.3.3、`healthz`/`readyz` 200、`NRestarts=0`、本次窗口 `level=ERROR` **0 条** |
+| 回滚点 | DB 一致快照 `/opt/aigw/data/backups/aigw-20260923-100328.db`（quick_check=ok，1,413,120 B，sha256 `57ad4c25837997e5c0625f44e2e8673de95cf53b200913aef9b47ca4d52c1fe3`，库内 22 模型/58 上游模型/66 路由）；改动前快照 `/opt/aigw/pre-gpt6-20260923-180305/`（providers、models、routes 与 4 个供应商的 config + 模型行）；旧脚本 `/opt/aigw/official-pricing.sh.pre-gpt6-20260923-180305`。**外科回滚**＝删那 8 行与 8 条路由、按快照 PATCH 回 4 个供应商 config |
+| 未做 / 边界 | ① **标签授权没有动**：3 个标签仍只授权 `azure`/`deepseek`，所以客户流量现在**仍然到不了 codex 供应商**（要给某个人群用，得另改标签或 key 的 grants）；② 只补这两个模型，没顺手补齐 `codex-zhuyecheng` 其余 15 个模型、也没删它的孤立行；③ 不动 azure/deepseek、不写售价侧（兜底 `cost_follow`×1.0 已等于官方价）、不发版（无 Go 改动） |
+| 前提与假设 | 长上下文边界沿用仓库既有读数「输入 >272K」（`gte:272001`）：官方页只给 Short/Long 两列的费率（输入/缓存 2×、输出 1.5×），边界文字由客户端渲染、静态页里查不到；`context_window`/`max_output_tokens` 与同供应商现有 codex 行一致保持 **0**；这两个 id 走 ChatGPT 订阅后端属**影子成本**（README 的免责声明不变） |
