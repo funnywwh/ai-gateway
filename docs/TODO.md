@@ -997,18 +997,19 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       一次部署耗时与载荷大小、节点/控制面重启恢复时间（写进设计文档 §11 与 `docs/dshgw.md` §8）
 - [ ] 收尾：单一 M77 提交（提交信息引用设计文档路径）
 
-## 待发版：控制台行内样式（CSP）修复（2026-09-23）
+## 控制台行内样式（CSP）修复（2026-09-23）
 
 > 现场与根因见 `docs/todo_done.md`「组织树没有缩进：控制台 CSP 丢弃行内 style 属性」。
 > 一句话：控制台 `style-src 'self'` 丢弃 style **属性**，组织树的缩进（以及另外 25 处行内样式）
-> 在线上等于不存在；修法是 `ui.js` 的 `el()` 改走 CSSOM，**尚未发版**。
+> 在线上等于不存在；修法是 `ui.js` 的 `el()` 改走 CSSOM。
+> **已随 v4.3.0（`dccf435`）发版并部署到 rag-server（`aigw-local`）与 gptjp（`aigw.service`）**，
+> 见 `docs/todo_done.md` 的「v4.3.0 发布记录」；下面只剩线上复验与观察项。
 
-- [ ] **发版部署**：按 `release-version` 流程升 `VERSION`、提交打 tag、构建、部署到本机 `aigw-local`
-      与 `gpt001`，然后用 `/version` 与后台角标确认线上是新的 `ui.js`
 - [ ] **发版后复验（必须在真实浏览器里看一次）**：打开 `:8088/admin/ui/#/org`，确认组织树每层缩进
       22px（子节点明显右移）；再开一个 `wide` 弹窗（例如供应商新建/请求详情）确认它的宽度从 680px
       变成 900px —— 后者是"修的是 `el()` 这条通路"的旁证
 - [ ] 未纳入本次范围（观察项）：`tree({nodes})` 构造参数被忽略，必须 `refresh(nodes)` 才渲染
+
 ## M79 沙箱内工作区短路径视图
 
 > 设计：`docs/design/m79-sandbox-workspace-view.md`；规格：`docs/dshgw.md` §7a、`docs/deployment-layout.md` §4.2/§4.4。

@@ -5709,6 +5709,12 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 > x≈50 起）。`d14d0a4`（缩进 14px→22px，随 v4.1.0/v4.1.1 上线）**已经在线上跑**，所以"再加大一点"
 > 这条路从一开始就不会有变化：丢的不是距离，是整条样式。
 
+- [x] **发版部署（2026-09-23，本次补做）**：修随 **v4.3.0**（release 提交 `dccf435`，tag `v4.3.0`）第一次上
+      线上——部署到 **rag-server**（`aigw-local`：4.1.1/`6f68aeb` → 4.3.0/`dccf435`）与 **gptjp**
+      （`aigw.service`：同一版本），两台 `admin/ui/js/brand.js` 均 200 ⇒ 控制台角标应为
+      `AI Gateway v4.3.0 dccf435`。完整记录（回滚点、探针、schema 27、M81 行级证据）见本文件
+      「v4.3.0 发布记录」。**仍未做**：真实浏览器复验（组织树缩进 22px、`wide` 弹窗 900px），
+      记在 `docs/TODO.md` 的同名小节。
 - [x] **根因**：控制台的响应头是 `default-src 'self'; img-src 'self' data:; style-src 'self';
       script-src 'self'; connect-src 'self'; frame-ancestors 'none'`。style **属性**归 `style-src-attr`
       管（没有它时回落到 `style-src`）：没有 `'unsafe-inline'`，浏览器就把"把 style 当属性写"的声明
@@ -5956,3 +5962,28 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
       一条失败转移请求能看到两跳与映射规则、迁移前的旧日志显示「（未知路由）」与「—」
 - [ ] 观察项：`group_by=provider` 的大窗口耗时与本次新增的 `RequestAttempts`（每页一次点查）未做
       压测；请求数上限由候选数决定，暂不需要分页 `attempts`
+
+### v4.3.0 发布记录（M78 + M80 + M81 + 控制台 CSP 修复，2026-09-23，部署到 rag-server 与 gptjp）
+
+> 需求原话：「发布版本，部署到rag-server和gptjp」。
+> 档位 **minor**：自 v4.2.0 起是三个纯新增里程碑（M78 请求日志的路由路线、M80 API Key 批量导入与按 Key
+> 查账户、M81 `user` 档每条用户消息字符上限）加一个控制台缺陷修复（`el()` 改走 CSSOM，修严格 CSP 丢弃
+> 行内 style）；**没有接口形状破坏**，两台线上只换二进制、`config.yaml` 一字未动即可继续跑。
+> M81 有一处**默认口径变化**（`record_input=user` 现在每条 user 消息最多留前 100 字符），需要原样正文时
+> 把该 Key 切 `full`，或把 `recording.input_max_chars` 设 `0` 回到旧行为。
+
+| 项 | 值 |
+|---|---|
+| 版本 | **v4.3.0**（`VERSION` 4.2.0 → 4.3.0；release 提交 `dccf435`，tag `v4.3.0`；**未推 `origin`**——`origin/main` 仍停在 `a57e2a3`，v4.2.0 之后都没推） |
+| 构建物 | `bin/aigw` **4.3.0 / `dccf435`**，23,529,508 B，sha256 `c78074ead4a0fc22f222f184c1225c9557adbedd1a98681f7d9359583904d030`（console minified：44 文件 728097→408321 B，gzip 39 文件 405960→161739 B）；`bin/dshgw` **4.3.0 / `dccf435`**，16,863,126 B，sha256 `16d721995c7406df6c7fec6d5c57b5ba313b53ec26346b7922fe2a643dcfb126` |
+| 部署范围 | ① **rag-server**（`192.168.190.86`，uid `winger`，`systemctl --user`）：`aigw-local` 4.1.1/`6f68aeb` → **4.3.0/`dccf435`**（`/home/winger/work/ai_gateway/bin/aigw`）；盘上 `bin/dshgw` 同步换成 4.3.0，但 `dshgw-verify` **进程未重启**（留给人工择时）。② **gptjp**（`47.91.16.118`，root，系统单元 `aigw.service`，`/opt/aigw`，`base_path: /aigw`）：4.1.1/`6f68aeb` → **4.3.0/`dccf435`** |
+| 部署方式 | 都是「先落 `.new` → 双向核对 sha256 → 远端 `-version` 自证 → 拍回滚点 → 换入 → 重启 → 门禁」。rag-server：`scp bin/aigw rag-server:…/bin/aigw.new`（sha 匹配 `c78074ea…`）→ `cp -p bin/aigw bin/aigw.prev-4.1.1-6f68aeb` → `install -m 0755 aigw.new aigw` → `systemctl --user restart aigw-local`；gptjp：同样四步 + `systemctl restart aigw`。`config.yaml`/`data/` 未改 |
+| 回滚点 | rag-server：`bin/aigw.prev-4.1.1-6f68aeb`（sha `a528dcd493477d06712e2f31125684a6972258905f729a02249db8301610cdae`，就是 v4.1.1 构建物）、`bin/dshgw.prev-4.1.1-6f68aeb`；gptjp：`/opt/aigw/aigw.prev-4.1.1-6f68aeb`（同 `a528dcd4…`）。回滚 = `cp -p` 回该文件 + 重启对应单元（rag-server `systemctl --user restart aigw-local`、gptjp `systemctl restart aigw`），版本号随之退回 `4.1.1/6f68aeb` |
+| schema 迁移 | 两台都自动完成 **26 → 27**（M78 的 `0027_request_route_identity.sql`：请求日志/计量行带上路由身份） |
+| 验证（rag-server） | `/version` 回环与局域网均 `{"revision":"dccf435","version":"4.3.0"}`；`healthz`/`readyz`/`admin/ui/`/`admin/ui/js/brand.js` 全 200；`data/aigw-local.log` 里 `aigw starting version=4.3.0 revision=dccf435 config=/home/winger/work/ai_gateway/config.yaml listen=:8088`（14:11:13），重启后无新 `level=ERROR` |
+| 验证（gptjp） | 本机 `localhost:8088/aigw/version` 与公网 `https://gpt.lagenio.xyz/aigw/version`、`https://gpt.tirisen.hk/aigw/version` 三处同为 `4.3.0/dccf435`；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200；`journalctl -u aigw` 启动行 `version=4.3.0 revision=dccf435`（14:13:41），4 分钟内 `level=ERROR` 0 条 |
+| 验证（M81 真机行级证据，rag-server） | 重启后新写的行：`record_input_mode=user`、`input_max_chars=100`、`input_truncated=true`，**每条 user 消息字符数从 813/851/390/333 降到 100**，并出现 `omitted["over_cap"]=1`（某条消息的后续文本 part 整段落在上限之外）；重启**之前**的历史行仍是 `input_max_chars` 缺省（不回填）。核对方式：只读打开 `data/aigw-local.db` 逐行解析 `request_json`（未打印任何用户正文） |
+| 配置/数据变更 | **无**。rag-server 的 `recording:` 段只有 `record_input: user` 与 `retention_days: 30`，没有 `input_max_chars` ⇒ 走默认 100；gptjp 连 `recording:` 段都没有 ⇒ 全默认，且 41 把 Key 全是 `inherit` ⇒ 解析为 `user` 档 |
+| 未做（待人工） | ① `dshgw-verify` 重启：会重启**所有**租户 worker（含发起部署的会话），本次只换盘上二进制；② gptjp 已经 ~5 天没有非控制台流量（最近 12 行是控制台问答，服务端按设计强制 `off`；最近一条 `mode=user` 的行在 2026-09-18），所以 `input_max_chars` 要等它下一次 user 档请求才会出现在它的日志里；③ 真浏览器 `make ui-check`（含 M81 新增的截断提示断言）与 CSP 修复的线上复验（`:8088/admin/ui/#/org` 组织树缩进 22px、`wide` 弹窗 900px）仍需在宿主浏览器里做一次 |
+| 既有噪声（非本次引入） | rag-server `data/aigw-local.log` 里 12:07–12:28 有 4 条 `settlement could not be written; falling back to disk … context deadline exceeded`，**早于**本次重启（14:11），属 v4.1.1 运行期的老问题；main 上另有 M79 遗留的 `go vet` copylocks（`internal/dshgw/config/sandboxview_test.go:76/92/105`），本次未动 |
+
