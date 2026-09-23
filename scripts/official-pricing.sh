@@ -213,6 +213,13 @@ plan.update(openai_text("gpt-5.4",
     "OpenAI 官方标准价 $2.50 输入 / $0.25 缓存命中 / $15 输出（每百万 tokens，<272K 上下文档；"
     "官方未公布 >272K 的费率，故本规则集没有长上下文档）",
     2.50, 0.25, 15.00, long_ok=False))
+# gpt-4o（现行 gpt-4o-2024-08-06 档）：官方 $2.50 输入 / $1.25 缓存命中 / $10 输出（每百万 tokens），
+# 没有长上下文档位。补这一条是因为 gptjp 的 azure 供应商（sub2api 账号 10「ChatGPT 官 key」）真的部署了
+# gpt-4o 且已用真实请求验证，而本表原先没有裸 `gpt-4o` 这个 upstream id（缺失会让整批写入中止）。
+plan.update(openai_text("gpt-4o",
+    "OpenAI 官方标准价 $2.50 输入 / $1.25 缓存命中 / $10 输出（每百万 tokens，<272K 上下文档；"
+    "官方未公布 >272K 的费率，故本规则集没有长上下文档）",
+    2.50, 1.25, 10.00, long_ok=False))
 
 # ── 图像模型：output 按图像输出价，input 按文本输入价 ─────────────────────────
 def image_model(model_id, text_in, cached_text_in, image_in, cached_image_in, image_out, note=""):

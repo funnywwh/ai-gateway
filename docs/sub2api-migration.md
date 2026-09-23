@@ -144,3 +144,114 @@ python3 /opt/aigw/sub2api_migrate.py report
   （补完必须真实请求验证一次），要么提前通知用户改名。
 - **分组语义损失**：源系统里指向「未迁入 aigw 的账号」的分组（例如 apikey 型 deepseek 账号）
   在这边没有对应标签；这些 key 会按 §3 落到已有标签，若需要保留它们的原路由，得先建对应标签。
+
+## 9. 整库重建（全量重导）：gptjp，2026-09-23
+
+§1–§8 是**增量**迁移（按 `users.notes` 挑一批人，往已有实例里加）。这一节是**整库重建**：
+把目标实例清成空库，再从 sub2api 全量重导，使它成为源系统的镜像。
+
+> 工具：`scripts/sub2api-reimport.py`（服务器上放 `/opt/aigw/sub2api_reimport.py`，0700）。
+> 与 §1 的工具同一条保密纪律：前缀与哈希由源库 SQL 现算（从不 `SELECT key`），供应商凭据只在
+> 进程内与 0600 临时文件里出现（写完即碎），所有打印/异常都过 `redact()`，报告里没有密钥材料。
+
+### 9.1 子命令与执行顺序
+
+```sh
+python3 /opt/aigw/sub2api_reimport.py inventory   # 只读：两侧盘点、人群映射、前缀冲突、模型覆盖、断言
+python3 /opt/aigw/sub2api_reimport.py snapshot    # 回滚点 + 重建素材（DB/config 备份 + rebuild-export-*.json）
+python3 /opt/aigw/sub2api_reimport.py wipe        # 换空库（config 补 bootstrap.admin → 停服 → 移走 db → 起服 → 断言空）
+python3 /opt/aigw/sub2api_reimport.py providers   # 按源上游账号建供应商（凭据经 0600 文件）
+python3 /opt/aigw/sub2api_reimport.py models      # 恢复对客模型/上游模型/路由 + azure 部署发现与补齐
+python3 /opt/aigw/sub2api_reimport.py tags        # 三个标签与授权
+python3 /opt/aigw/sub2api_reimport.py accounts    # 建账户 + 导入 key（含前缀冲突重签、替换密钥重导）
+python3 /opt/aigw/sub2api_reimport.py selftest    # 三标签各一次真实请求 + 逐模型探测 + 负向 401
+python3 /opt/aigw/sub2api_reimport.py verify      # 逐把比 prefix/hash、生效标签、分桶计数
+python3 /opt/aigw/sub2api_reimport.py report      # 写 sub2api-reimport-<ts>.json（0600）
+```
+
+除 `wipe` 外都可反复跑（账户按名 upsert、key 按前缀 upsert）；`wipe` 发现库内还有业务数据时会拒绝，
+除非显式 `--force`。`repair-prefix --keep-source-key N [--disable-key M]` 用于前缀归属纠偏（见 §9.4）。
+
+### 9.2 人群 → 标签（先分组后备注，可复算）
+
+| 标签 | 判定 | grants |
+|---|---|---|
+| `E26Q` | 有活跃 key 属于分组 20 | `providers:[azure]`、`models:["*"]` |
+| `智天成` | 否则 `notes='智天成'` | `providers:[deepseek]`、`models:["*"]` |
+| `电商` | 其余 | `providers:[azure]`、`models:["*"]` |
+
+标签写在**账户级**（key 继承），一个账户恰好一个标签。2026-09-23 那次的结果：账户 20 / 88 / 2。
+
+### 9.3 供应商映射（源账号被软删就不建）
+
+| 源账号 | provider | kind |
+|---|---|---|
+| 2 / 3 / 9 | `lzhichao-lagenio-3-expiry` / `lizhichao-wisskys-3-expiry` / `liuhui-wisskys-8-expiry` | `plugin:provider-codex` |
+| 6 | `codex-zhuyecheng` | `plugin:provider-codex` |
+| 7 / 8 | `deepseek` / `deepseek-dianshang` | `openai-chat` |
+| 10 | `azure` | `openai-responses` |
+
+四条口径：
+
+1. **供应商名只允许 `[A-Za-z0-9._-]`**（网关校验），所以「deepseek电商」落名 `deepseek-dianshang`。
+2. **codex 供应商建而不接流量**：本次没有任何标签授权它们，因此不会触发 OAuth 刷新、也就不会把
+   sub2api 手里那份正在使用的 `refresh_token` 抢掉。要启用必须两步：先给供应商补上游模型+路由，
+   再把 provider 加进某个标签的 grants —— 并先确认 sub2api 侧已停用该账号（同一个 ChatGPT 账号
+   只有一方能刷新）。
+3. `antigravity`（platform=antigravity，Google Cloud Code 系）没有对应 kind，**不建**。
+4. **不调用** `POST /providers/{id}/actions/set_token`：不给任何 OAuth 凭据做主动刷新。
+
+### 9.4 前缀冲突：保留「实例原本持有的那一把」
+
+12 字符前缀是数据面查找入口且唯一。冲突时保留谁**不能**按「最近使用」拍脑袋：要保留**这台实例
+在换库前就持有该前缀的那把**（生产里正在用的），否则等于让一个真实客户端掉线。换库后目标库是空的，
+所以判定必须看 `snapshot` 产出的 `rebuild-export-*.json`（里面有换库前的 key→账户快照）。
+
+gptjp 本次：`sk-f69aeca55` 同时属于源 key `#24`（E26Q）与 `#51`（郑晓婷），实例原本持有者是郑晓婷
+⇒ 保留 `#51`，`#24` 不导入。E26Q 那一边**不需要新的明文**：它在 9/14 就拿到过这把 key 的替换密钥
+（`/opt/aigw/data/E26Q-reissue-key.txt`，0600），重建时把它**原样重导**即可，客户端不用改配置。
+脚本误判过一次（换库后按「最近使用」选了 `#24`），用 `repair-prefix --keep-source-key 51 --disable-key 128`
+纠偏，并把这次误判的成因写进 `plan_reissues` 的注释里。
+
+### 9.5 azure：部署以**真实请求**为准（本次最大的运维结论）
+
+azure 供应商没有可用的部署目录接口：`POST /providers/{id}/models/refresh` 返回空，`GET <base_url>/models`
+给的是 Azure AI Foundry 的**模型市场目录**（430 条，与本资源的部署无关），`/openai/deployments` 已下线。
+所以「这个部署到底存不存在」只能用真实请求去证。`selftest` 按证据分三类：
+
+| 证据 | 处理 |
+|---|---|
+| HTTP 200 | 可用 |
+| `upstream_404 · The API deployment for this resource does not exist` | 部署不存在 → 路由 `enabled=false`，写进报告 |
+| `upstream_400 · The requested operation is unsupported` | 探测方式不适用（图像模型不接受文本请求）→ 保持开启，记为「未证实」 |
+
+2026-09-23 gptjp 的 azure（源账号 10「azure ChatGPT官key」）实测结果：
+
+- **可用**：`gpt-5.6-sol`、`gpt-5.6-luna`、`gpt-5.6-terra`、`gpt-4o`；另 `gpt-image-1.5`、`gpt-image-2`
+  的上游不是 404 而是 400（探测方式不适用），保持开启。
+- **不可用（部署不存在，路由已停用、上游模型行已删）**：`gpt-5.5`、`gpt-6-astra`、`gpt-5.4`、
+  `gpt-5.4-mini`、`gpt-image-1`、`deepseek-v4-flash`、`deepseek-v4-pro`。
+- ⚠️ 电商人群近 30 天用量最高的两个名字 `gpt-5.5`（12,158 次）与 `gpt-6-astra`（3,152 次）**在这台
+  azure 上服务不了**。要么在 azure 资源里补这两个部署，要么把 `deepseek`（或某个 codex 供应商）
+  也加进「电商」标签的 grants。
+
+### 9.6 清库的连带与唯一登录方式
+
+`wipe` 会把 `request_logs` / `usage_records` / `ledger_entries` / 控制台问答 / MCP 令牌一起清掉，
+并且**这些都不在 sub2api 侧**。两条必须做的事：
+
+1. `config.yaml` 会追加 `bootstrap.admin`（口令沿用 `/opt/aigw/.admin-password`，文件保持 0600）——
+   没有它清库后无人能登录管理接口。gptjp 原本没有 `bootstrap` 段，本次是新增的。
+2. **MCP 令牌要在控制台重新签发**（明文只显示一次，不在对话/文件里出现），并更新到对应客户端。
+
+### 9.7 回滚
+
+```sh
+systemctl stop aigw
+cp -p /opt/aigw/data/aigw.db.pre-rebuild-<ts> /opt/aigw/data/aigw.db   # 并删掉 -wal/-shm
+systemctl start aigw
+```
+
+`config.yaml.pre-rebuild-<ts>` 用于配置回滚；`data/plugin-state/` 全程未动，所以 codex 供应商的
+令牌链不受影响。不做逐条反向删除（网关没有删除账户/key 的路由）。
+

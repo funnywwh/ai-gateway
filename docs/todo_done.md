@@ -6128,3 +6128,29 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 配置/数据变更 | 无（两台 `config.yaml` 未动；`input_max_chars` 两台都没显式设过，所以生效的就是新默认 2000） |
 | 未做（待人工） | ① 真浏览器 `make ui-check`（「未保留」文案已改成「只有样板或超长用户消息」）；② 线上 MCP 冒烟无令牌（两种形状由 `internal/mcpsrv` 测试覆盖）；③ `dshgw-verify` 重启（盘上 4.3.0、进程仍 4.1.1）；④ gptjp 仍无 `user` 档流量 |
 | 已知噪声 | `internal/runtime` 与 `pkg/pluginapi` 各有一条负载敏感的计时断言在整仓测试并发跑时会偶发失败（各自单独复跑 2–3 次通过，与本改动无关）；M79 遗留的 `go vet` copylocks 未动 |
+
+## gptjp aigw 整库重建：从同机 sub2api 全量重导（2026-09-23）
+
+> 需求原话：「帮我清空gptjp 的 aigw实例的数据库,从同机上的sub2api,重新导入所有账户,key,model,供应商azure」，
+> 中途更正标签口径：「添加『电商』、『智天成』、『E26Q』三个标签，智天成 只走deepseek供应商，『电商』『E26Q』走 azure」。
+> 运行手册见 `docs/sub2api-migration.md` §9。
+
+| 项 | 值 |
+|---|---|
+| 目标实例 | gptjp（`47.91.16.118`，root，`/opt/aigw`，`aigw.service`，`:8088`，`base_path: /aigw`）。执行时线上已是 **4.3.3 / `438daee`**（16:26 由 M83 发版部署，本次不动二进制），schema 27 |
+| 工具 | 新增 `scripts/sub2api-reimport.py`（1,772 行；sha256 `9f19e971a8bd5652750c479cc3302aeb24a2884a4b9f992d8a3d2c9ba3467a4e`），部署 `/opt/aigw/sub2api_reimport.py`（0700，与仓库副本逐字节一致）；子命令 `inventory/snapshot/wipe/providers/models/tags/accounts/selftest/verify/report/repair-prefix` |
+| 源数据集（执行时） | 存活用户 **110**、其活跃 key **128** 把（另有 7 把已删/非 active 排除）；**7** 个未软删的上游账号（1 LibbyGPT、4 funnywwh、5 antigravity、11 azure #2 已被源库软删，故不建） |
+| 人群 → 标签 | `E26Q`＝有活跃 key 属分组 20（2 人/9 把）→ `[azure]`；`智天成`＝`notes='智天成'`（20 人/26 把）→ `[deepseek]`；其余 `电商`（88 人/93 把）→ `[azure]`；标签写在账户级 |
+| 清库前基线 | 24 账户 / 41 key / 5 供应商 / 19 模型 / 53 上游模型 / 47 路由 / 4 标签；`request_logs` 1977、`usage_records` 1945、`ledger_entries` 998、`mcp_tokens` 2 个 active |
+| 回滚点 | `/opt/aigw/data/aigw.db.pre-rebuild-20260923-171836`（在线 sqlite3.backup，0600，quick_check=ok）、`…-171844`（换库时移走的现库）、`/opt/aigw/config.yaml.pre-rebuild-20260923-171836`（0600）；`data/plugin-state/` **全程未动** |
+| 清库 | `config.yaml` 追加 `bootstrap.admin`（口令沿用 `.admin-password`；gptjp 原本没有 `bootstrap` 段）→ 停服 → 移走 `aigw.db` → 起服。断言：`accounts/api_keys/providers/models/provider_models/routes/tags = 0`、`admin_users=1`、schema=27、`/version` 4.3.3 |
+| 重建结果 | **7 供应商**（3×`plugin:provider-codex`、`codex-zhuyecheng`、`deepseek`、`deepseek-dianshang`、`azure`）/ **22 模型** / 58 上游模型 / 61 路由 / **3 标签** / **111 账户**（110 + 自检）/ **132 key**（128 活跃 + 3 把自检停用 + 1 把误签停用） |
+| 供应商口径 | 供应商名只允许 `[A-Za-z0-9._-]`，故「deepseek电商」落名 `deepseek-dianshang`；`antigravity` 无对应 kind 不建；**不调用** `set_token`，不为任何 OAuth 凭据做主动刷新；codex 供应商**建而不接流量**（无标签授权）⇒ 不会把 sub2api 正在用的 ChatGPT `refresh_token` 抢掉 |
+| 前缀冲突 | `sk-f69aeca55` 同属源 key `#24`(E26Q) 与 `#51`(郑晓婷)。按「保留实例原本持有的那把」保留 `#51`（郑晓婷客户端不受影响）；`#24` 不导入；E26Q 用它 9/14 拿到的替换密钥（`E26Q-reissue-key.txt`，0600）**原样重导**（aigw key #129），客户端零改动。**过程留痕**：换库后目标库为空，脚本按「最近使用」误选了 `#24`，用 `repair-prefix --keep-source-key 51 --disable-key 128` 纠偏；`plan_reissues` 已改为优先看 `rebuild-export-*.json` 的换库前快照并注明成因 |
+| azure 可用性（核心结论） | 该资源**没有部署目录接口**（`models/refresh` 返空、`GET /models` 是 Foundry 市场目录 430 条、`/openai/deployments` 已下线）⇒ 只能靠真实请求判定。**可用**：`gpt-5.6-sol`、`gpt-5.6-luna`、`gpt-5.6-terra`、`gpt-4o`；`gpt-image-1.5`/`gpt-image-2` 非 404 而是 400（探测方式不适用）保持开启。**部署不存在**（`upstream_404`，路由已停用、上游模型行已删）：`gpt-5.5`、`gpt-6-astra`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-image-1`、`deepseek-v4-flash`、`deepseek-v4-pro` |
+| 定价 | `scripts/official-pricing.sh --apply`（GW_BASE=`/aigw`）：写入 **49** 行并逐行读回核对、`/pricing/simulate` 7 个用例全过、`/pricing/targets` 无缺费率维度。该脚本的价格表原先没有裸 `gpt-4o` 这个 upstream id（缺它会整批中止），本次补上其官方价条目（$2.50 输入 / $1.25 缓存命中 / $10 输出，每百万 tokens） |
+| 验证（结构与授权） | `verify` 全绿：128 把逐把比 prefix/hash、状态 active、`created_by` 是导入标记、账户挂对、**每把恰好一个生效标签**、标签集合=3 个、grants 指向的供应商存在且启用；分桶 智天成=26 / 电商=93 / E26Q=8（#24 未导入，故比源少 1） |
+| 验证（功能，真实请求） | `selftest`：智天成 → `deepseek-flash` **200**、电商 → `gpt-5.6-sol` **200**、E26Q → `gpt-5.6-sol` **200**；azure 逐模型真实探测 12 个（结论见上）；负向「把 12 字符前缀当 bearer」3/3 **401**；`/version` 4.3.3、`healthz`/`readyz`/`admin/ui/`/`admin/ui/js/brand.js` 全 200 |
+| 保密 | 全部打印与异常过 `redact()`；凭据只经 0600 临时文件（写完即碎）；`journalctl -u aigw` 与全部报告 JSON 扫 `sk-[A-Za-z0-9_-]{16,}` **命中 0**；明文密钥从未出现在终端、文件（除 9/14 那把 E26Q 替换密钥的存量文件）或本记录里 |
+| 未做（待人工/待你决定） | ① **MCP 令牌**要在控制台重新签发并更新客户端（明文只显示一次）；② **模型名口径变化**：智天成用户现在只能走 `deepseek-flash`/`deepseek-v4-flash`/`deepseek-v4-pro`/`deepseek-v4.1-flash`（他们近 30 天 99% 的请求是 `gpt-5.6-sol`/`gpt-6-astra`，这些名字会 403），需通知；③ **电商高频模型缺部署**：`gpt-5.5`（12,158 次/30d）与 `gpt-6-astra`（3,152 次）在这台 azure 上服务不了 —— 要么在 azure 补部署，要么把它们也授权给别的供应商 |
+| 未做（不在本次范围） | 不改 sub2api 任何数据（源 key 照旧可用，双跑）；不改 nginx；不动 `dshgw`；不发版（无 Go 代码改动） |
