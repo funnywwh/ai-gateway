@@ -116,6 +116,27 @@ Access API 的 Chromium。该功能不会给租户 sandbox 增加 `/dev/fuse` �
 `make dshgw-browser-test` 运行 Go 集成和 Node fake-FSA 测试；真实 FUSE 与浏览器权限链路仍需
 单独验收。部署前请阅读[浏览器 FUSE 工作区设计与限制](../../docs/design/browser-fuse-workspace.md)。
 
+### 可选：沙箱内工作区短路径（M79）
+
+在 dshgw 配置里设 `deploy.sandbox_workspace: /workspace`（独立形态写 `dshgw.yaml`，监督形态写 aigw 配置的
+`dshgw.sandbox_workspace`），然后重启 dshgw —— 注意这会重启**所有**租户 worker，包括发起操作的会话。
+
+效果：每个租户的工作区在沙箱里多一个短路径视图。`HOME`/`~`、目录选择器的根、侧栏「终端」的 cwd、「文件」与
+「变更」面板的 root、预注册工作区都变成 `/workspace`；新开的会话路径与提示符随之变短。已存在的租户不轮转
+密钥也能生效（worker 启动时会刷新 picker 行），但**只有新会话**才用短路径。宿主长路径仍然绑定，网关自己的
+状态（registry、dsh 已写下的会话记录、备份根）不受影响，以长路径登记的老工作区照旧能打开。
+
+校验发生在**加载期**：非绝对 / 非 clean / `/`、隐藏根（`/home`、`/root`、`/tmp`、`/var`、`/srv`、`/etc/dshgw`）、
+运行时树（`/usr`、`/etc`、`/bin`、`/sbin`、`/lib`、`/lib64`、`/proc`、`/dev`），以及与 `state_dir`/`tenant_root`/
+`workspace_root`/插件目录互相包含的值都会被拒绝。渲染结果可以直接审阅：
+
+```bash
+bin/dshgw --config ./dshgw.yaml sandbox-exec --print <租户> | grep -E 'workspace|chdir'
+```
+
+应能看到 `--bind <workspace> /workspace` 与 `--chdir /workspace`。留空即关闭，行为与开启前逐字节一致；
+细节与边界见[设计文档](../../docs/design/m79-sandbox-workspace-view.md)。
+
 ### 默认开启：租户侧 web 插件（M75）
 
 每个账号的 dsh 开箱即带三块面板，**不需要**逐租户配置：

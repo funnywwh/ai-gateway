@@ -54,6 +54,10 @@ deploy:
   template_home: /srv/dshgw-node/template-home
   backup_dir: /srv/dshgw-node/backups
   bwrap_bin: /usr/bin/bwrap
+  # 工作区在租户沙箱里的短路径（M79）。profile 由**承载租户的那台机器**渲染，所以这个值写在各节点
+  # 自己的配置里；多节点部署给同一路径（例如 /workspace）租户体验才一致。
+  # 留空 = 只有宿主长路径一个视图；详见 deploy/dshgw/config.example.yaml 的同名键说明。
+  sandbox_workspace: /workspace
   # 谁起 worker 谁生效：worker 以本机这个非 root 账号运行（与运行本进程的账号一致即可）。
   worker_user: winger
   gateway_user: winger

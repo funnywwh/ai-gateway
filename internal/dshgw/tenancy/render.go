@@ -362,20 +362,11 @@ func pluginFileURL(path string) string {
 }
 
 func renderPatch(cfg *config.Config, t registry.Tenant, opt TenantOptions) ([]byte, error) {
-	pickerName := "@deepseek-ai/dsh-host-directory-picker-browse"
-	pickerID := "picker-browse"
-	picker := map[string]any{"id": pickerID, "name": pickerName}
-	if opt.DirectoryPicker == "clamp" {
-		pickerID = "picker-clamp"
-		pickerURL := (&url.URL{Scheme: "file", Path: cfg.Deploy.PluginPath}).String()
-		picker = map[string]any{"id": pickerID, "name": pickerURL, "config": map[string]any{"root": t.Workspace}}
-	}
 	rows := []map[string]any{
 		{"id": "directory-picker", "name": "@deepseek-ai/dsh-host-directory-picker-auto", "disabled": true},
-		{"insert": []map[string]any{
-			picker,
-			{"id": pickerID + "-ui", "name": "@deepseek-ai/dsh-client-ui-directory-picker-browse"},
-		}},
+		// The same pair EnsureDirectoryPickerRow refreshes on every worker start, so a tenant
+		// created now and one provisioned earlier describe the picker identically.
+		{"insert": pickerRows(cfg, t, opt.DirectoryPicker)},
 	}
 	if cfg.SSHWorkspaces.Enabled {
 		// The account-side half of M64, rendered in the same shape a later refresh writes
@@ -438,7 +429,10 @@ func renderWorkspace(cfg *config.Config, t registry.Tenant, now time.Time) ([]by
 	doc.Tables.Workspaces = map[string]workspaceRecord{}
 	stamp := now.UTC().Format(time.RFC3339Nano)
 	for _, seed := range cfg.WorkspaceSeed {
-		target := filepath.Join(t.Workspace, seed)
+		// Seeded workspaces are the ones a fresh account opens first, so they are rendered at the
+		// workspace's sandbox view too (M79): a seed pointing at the host path would make the
+		// account's first session print the long path the view exists to remove.
+		target := filepath.Join(sandboxWorkspacePath(cfg, t), seed)
 		sum := sha256.Sum256([]byte(target))
 		id := "dshgw-" + hex.EncodeToString(sum[:12])
 		doc.Global.WorkspaceIDs = append(doc.Global.WorkspaceIDs, id)

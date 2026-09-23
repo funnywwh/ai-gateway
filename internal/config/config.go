@@ -493,6 +493,14 @@ type Dshgw struct {
 	// PluginPath is the directory-picker plugin served to tenant sessions. Empty
 	// keeps the child's own default for the installation it ships with.
 	PluginPath string `yaml:"plugin_path"`
+	// SandboxWorkspace is the short path every tenant's workspace is also visible at inside its
+	// sandbox (M79), e.g. "/workspace". Empty keeps the child's single-view shape: the workspace
+	// is reachable only at its host path, which is what HOME and the passwd view name.
+	//
+	// It is passed through to the generated child configuration rather than interpreted here:
+	// the child renders the bwrap profile and validates the value against its own state layout,
+	// while aigw only owns the deployment root this key is written in.
+	SandboxWorkspace string `yaml:"sandbox_workspace"`
 	// NoStoreAPIs controls whether the child marks its API responses uncacheable.
 	// Unset keeps the child's default (never store), which is what a multi-tenant
 	// deployment wants; set it false only to let a cache reuse API answers.

@@ -27,16 +27,39 @@ func (m *Manager) sandboxRuntime() sandbox.Runtime {
 	}
 }
 
+// sandboxWorkspaceView is the configured short view of a tenant workspace, empty when the
+// deployment does not name one. The profile distinguishes the two: empty means "the workspace has
+// one view", a value means "also bind it there".
+func sandboxWorkspaceView(cfg *config.Config) string {
+	return strings.TrimSpace(cfg.Deploy.SandboxWorkspace)
+}
+
+// sandboxWorkspacePath is the path a tenant's own dsh should use for its workspace: the configured
+// view when the deployment names one (deploy.sandbox_workspace, M79) and the host path otherwise.
+//
+// Every tenant-visible rendering goes through here — HOME, the passwd view, the picker root, the
+// terminal's cwd, the file manager's and the change review's roots, the seeded workspaces — so one
+// setting moves all of them, and each keeps naming a path that exists inside the sandbox (the
+// profile binds the workspace at both). The gateway's own state (registry records, mount records,
+// the backup roots) keeps the host path: it is read on the host, where the view does not exist.
+func sandboxWorkspacePath(cfg *config.Config, t registry.Tenant) string {
+	if view := sandboxWorkspaceView(cfg); view != "" {
+		return view
+	}
+	return t.Workspace
+}
+
 // sandboxTenant is the registry subset a profile needs, including the account's
 // ssh-workspace mounts: the profile binds each of them explicitly, because bubblewrap's
 // --bind does not carry submounts (M64).
 func (m *Manager) sandboxTenant(t registry.Tenant) sandbox.Tenant {
 	tenant := sandbox.Tenant{
-		Name:        t.Name,
-		Workspace:   t.Workspace,
-		DshHome:     t.DshHome,
-		WorkerPort:  t.WorkerPort,
-		Environment: workerArgs(m.Config, t),
+		Name:          t.Name,
+		Workspace:     t.Workspace,
+		DshHome:       t.DshHome,
+		WorkspaceView: sandboxWorkspaceView(m.Config),
+		WorkerPort:    t.WorkerPort,
+		Environment:   workerArgs(m.Config, t),
 	}
 	if m.SSHWorkspaces != nil {
 		tenant.SSHMounts = m.SSHWorkspaces.MountsFor(t.Name)

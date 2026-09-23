@@ -397,3 +397,140 @@ func TestProfileBindsEverySSHMountInsideTheWorkspace(t *testing.T) {
 		t.Fatal("a mount point outside the workspace was accepted")
 	}
 }
+
+// M79: a deployment may name a short path for the workspace (deploy.sandbox_workspace). The
+// workspace is then bound twice — the host path the gateway's own state already names, and the
+// view a tenant reads — and every mount inside it is mirrored, because bubblewrap's --bind does
+// not carry submounts.
+func TestProfileWorkspaceViewBindsBothPathsAndMirrorsItsMounts(t *testing.T) {
+	f := newProfileFixture(t)
+	browserRoot := filepath.Join(f.alice.Workspace, "browser")
+	picked := filepath.Join(browserRoot, "peer")
+	mustMkdir(t, picked, 0o700)
+	shareRoot := filepath.Join(f.alice.Workspace, "host-shares")
+	mustMkdir(t, shareRoot, 0o700)
+	shareSource := filepath.Join(f.root, "operator-data")
+	mustMkdir(t, shareSource, 0o755)
+	sshMount := filepath.Join(f.alice.Workspace, "ssh", "gpt001", "opt", "app")
+	mustMkdir(t, sshMount, 0o700)
+
+	alice := f.alice
+	alice.WorkspaceView = "/workspace"
+	alice.BrowserMountRoot = browserRoot
+	alice.BrowserMounts = []string{picked}
+	alice.HostShareRoot = shareRoot
+	alice.HostShares = []HostShare{{
+		Name: "data", Source: shareSource, Target: filepath.Join(shareRoot, "data"), ReadOnly: true,
+	}}
+	alice.SSHMounts = []string{sshMount}
+
+	argv, err := Profile(f.rt, alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mounts, flags, _ := parseMounts(t, argv)
+	byDestination := map[string]mount{}
+	for _, m := range mounts {
+		byDestination[m.dst] = m
+	}
+	for _, want := range []struct {
+		label string
+		flag  string
+		src   string
+		dst   string
+	}{
+		{"the host workspace path", "--bind", alice.Workspace, alice.Workspace},
+		{"the workspace view", "--bind", alice.Workspace, "/workspace"},
+		{"the browser container", "--ro-bind", browserRoot, browserRoot},
+		{"the mirrored browser container", "--ro-bind", browserRoot, "/workspace/browser"},
+		{"a browser pick", "--bind", picked, picked},
+		{"the mirrored browser pick", "--bind", picked, "/workspace/browser/peer"},
+		{"the host share container", "--ro-bind", shareRoot, shareRoot},
+		{"the mirrored host share container", "--ro-bind", shareRoot, "/workspace/host-shares"},
+		{"an operator host share", "--ro-bind-try", shareSource, filepath.Join(shareRoot, "data")},
+		{"the mirrored host share", "--ro-bind-try", shareSource, "/workspace/host-shares/data"},
+		{"an ssh mount", "--bind-try", sshMount, sshMount},
+		{"the mirrored ssh mount", "--bind-try", sshMount, "/workspace/ssh/gpt001/opt/app"},
+	} {
+		got, ok := byDestination[want.dst]
+		if !ok {
+			t.Errorf("%s is not mounted at %s:\n%v", want.label, want.dst, argv)
+			continue
+		}
+		if got.flag != want.flag || got.src != want.src {
+			t.Errorf("%s: %s %s -> %s, want %s %s", want.label, got.flag, got.src, got.dst, want.flag, want.src)
+		}
+	}
+	// The process starts in the view: without --chdir the worker's own cwd — and everything a
+	// fresh dsh derives from a process cwd — would still print the long path.
+	if !hasFlag(flags, "--chdir") {
+		t.Fatalf("a configured view does not change the working directory:\n%v", argv)
+	}
+	for i, flag := range flags {
+		if flag == "--chdir" && (i+1 >= len(flags) || flags[i+1] != "/workspace") {
+			t.Fatalf("--chdir does not name the view:\n%v", argv)
+		}
+	}
+}
+
+// Without a configured view the profile keeps the single-view shape every deployment had before
+// M79: no second bind, no --chdir, nothing that names a path the host does not have.
+func TestProfileWithoutAWorkspaceViewKeepsTheSingleView(t *testing.T) {
+	f := newProfileFixture(t)
+	argv, err := Profile(f.rt, f.alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, arg := range argv {
+		if strings.Contains(arg, "/workspace") {
+			t.Fatalf("an unconfigured profile names a view path (%q):\n%v", arg, argv)
+		}
+		if arg == "--chdir" {
+			t.Fatalf("an unconfigured profile changes the working directory:\n%v", argv)
+		}
+	}
+}
+
+func TestValidateWorkspaceView(t *testing.T) {
+	for _, value := range []string{
+		"/",                                                    // the filesystem root: the whole sandbox would be the workspace
+		"/home", "/root", "/tmp", "/var", "/srv", "/etc/dshgw", // the hidden roots themselves
+		"/home/winger/workspace", // inside one: the bind would put a tree back into it
+		"/etc/passwd",            // a file the profile mounts for itself
+		"/usr", "/usr/local/ws", "/bin", "/lib64", "/proc/ws", "/dev/ws",
+		"workspace", "./workspace", // relative
+		"/workspace/",      // not clean
+		"/workspace/../ws", // not clean either
+		" /workspace",      // leading space: not the argv element an operator thinks it is
+		"/workspace\n/etc", // a newline can never reach an argv element
+	} {
+		if err := ValidateWorkspaceView(value); err == nil {
+			t.Errorf("ValidateWorkspaceView(%q) accepted an unusable view", value)
+		}
+	}
+	for _, value := range []string{"", "/workspace", "/ws", "/dsh-view/work"} {
+		if err := ValidateWorkspaceView(value); err != nil {
+			t.Errorf("ValidateWorkspaceView(%q) rejected a usable view: %v", value, err)
+		}
+	}
+}
+
+// The view is deployment configuration, but a profile that mounted the workspace onto its own
+// runtime would be unusable in a way that blames bubblewrap. The collisions only a profile can
+// see (its node root and its dsh release) are refused here; the rest is refused at load time.
+func TestProfileRejectsWorkspaceViewsThatOverlapWhatItMounts(t *testing.T) {
+	f := newProfileFixture(t)
+	for _, view := range []string{
+		f.alice.Workspace,                        // the workspace itself
+		filepath.Join(f.alice.Workspace, "view"), // inside it
+		filepath.Dir(f.alice.Workspace),          // an ancestor: the bind would move the whole tree
+		filepath.Join(f.root, "dsh/node"),        // the node runtime
+		filepath.Join(f.root, "dsh/releases/v1"), // the dsh release
+	} {
+		alice := f.alice
+		alice.WorkspaceView = view
+		if _, err := Profile(f.rt, alice); err == nil {
+			t.Errorf("workspace view %s was accepted", view)
+		}
+	}
+}

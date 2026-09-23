@@ -903,6 +903,15 @@ func (m *Manager) startWorker(ctx context.Context, t registry.Tenant) error {
 			m.log().Warn(warning)
 		}
 	}
+	// The directory-picker row carries the root a person picks workspaces under, so it follows
+	// the workspace view (M79) on every start as well: this row is what decides the path a new
+	// session runs in, and a tenant that already exists must gain the short root without its
+	// artifacts being re-rendered (which would discard the workspaces added in the UI).
+	if warning, err := EnsureDirectoryPickerRow(m.Config, t); err != nil {
+		return err
+	} else if warning != "" {
+		m.log().Warn(warning)
+	}
 	if err := m.refreshModelsBeforeStart(ctx, t); err != nil {
 		return err
 	}

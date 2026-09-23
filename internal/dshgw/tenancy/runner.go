@@ -692,7 +692,12 @@ func workerEnv(cfg *config.Config, t registry.Tenant) []string {
 	env := []string{
 		"DSH_PORT=" + fmt.Sprint(t.WorkerPort),
 		"DSH_HOME=" + t.DshHome,
-		"HOME=" + t.Workspace,
+		// HOME is the workspace, and with a configured workspace view it is the short path: this
+		// is what makes `~` both the workspace and short, for the shell, for node's os.homedir()
+		// and for every tool that expands it. The passwd view (prepareTenantPasswd) is rendered
+		// from the same value, so getpwuid and $HOME keep agreeing — which is the property the
+		// view exists to maintain.
+		"HOME=" + sandboxWorkspacePath(cfg, t),
 		"DSHGW_DSH_ANCHOR=" + dshAnchor(cfg),
 		"PATH=" + filepath.Dir(cfg.Dsh.NodeBin) + ":/usr/local/bin:/usr/bin:/bin",
 	}

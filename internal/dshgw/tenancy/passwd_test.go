@@ -67,6 +67,33 @@ func TestSandboxProfileRefusesAViewWithoutAWorkerAccount(t *testing.T) {
 	}
 }
 
+// With a configured workspace view (M79) the passwd view names the view, because that is what
+// HOME names: the two have to agree, or every getpwuid consumer — OpenSSH above all — looks for
+// the account's home in a path this sandbox does not have.
+func TestPasswdViewNamesTheConfiguredWorkspaceView(t *testing.T) {
+	m, _, _ := managerFixture(t)
+	tenant := fixtureTenant(t, m, "alice", 32100)
+	m.Config.Deploy.SandboxWorkspace = "/workspace"
+	argv, err := m.SandboxProfile(tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if joined := strings.Join(argv, " "); !strings.Contains(joined, "--bind "+tenant.Workspace+" /workspace") {
+		t.Fatalf("the profile does not bind the workspace view:\n%s", joined)
+	}
+	view := tenantPasswdFile(tenant.DshHome)
+	data, err := os.ReadFile(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "dshgw:x:1001:1001::/workspace:/bin/sh"; !strings.Contains(string(data), want) {
+		t.Fatalf("passwd view does not name the view:\n%s", data)
+	}
+	if strings.Contains(string(data), tenant.Workspace) {
+		t.Fatalf("the host workspace path survived the view:\n%s", data)
+	}
+}
+
 func TestSandboxProfileRerendersThePasswdViewEveryBuild(t *testing.T) {
 	// The workspace path is fixed in the registry, but the host's own entry is not: re-rendering
 	// on every build is what keeps the view in step after an operator re-homes the account.

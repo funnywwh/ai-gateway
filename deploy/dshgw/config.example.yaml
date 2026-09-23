@@ -58,6 +58,13 @@ deploy:
   gateway_user: winger           # 网关自己以谁运行（aigw 的账号）
   worker_user: winger            # 所有租户 worker 以谁运行：必须是已存在的非 root 账号
   bwrap_bin: /usr/bin/bwrap
+  # 工作区在租户沙箱里的短路径（M79）。留空 = 只有宿主长路径一个视图（HOME 与 /etc/passwd 视图都用它）。
+  # 设成 /workspace 时：工作区同时绑在长路径与短路径上，HOME/~、目录选择器、终端、文件管理器与变更
+  # 审阅都以短路径为准，新会话的路径与提示符随之变短；长路径保留绑定，因为网关自己的状态
+  # （registry、dsh 已写下的会话/工作区记录）仍然用它。该值不需要宿主上存在（bwrap 在空 tmpfs 根里
+  # 自己造），但不能是 /、/usr 之类运行时树、/home 之类被隐藏的根，也不能与 state_dir / tenant_root /
+  # workspace_root / 插件目录互相包含 —— 那些在加载期就会被拒绝。
+  sandbox_workspace: /workspace
   # 门户与租户公开端口的绑定地址。默认 loopback：对外暴露是显式决定（并且需要 TLS）。
   public_listen: 127.0.0.1
 # 无 nginx 后由 dshgw 自己终止 TLS；两项都留空表示明文（仅限可信网络）。

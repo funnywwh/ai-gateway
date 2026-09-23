@@ -91,23 +91,45 @@ func EnsureAccountCardRow(cfg *config.Config, t registry.Tenant) (string, error)
 	return ensureWorkspaceRow(t, accountCardRowID, cfg.AccountCard.Enabled, accountCardRow(cfg))
 }
 
-func ensureWorkspaceRow(t registry.Tenant, id string, enabled bool, pluginRow map[string]any) (warning string, err error) {
-	path := filepath.Join(t.DshHome, "profiles", "web", "cordis.patch.yml")
+// patchPath is one tenant's rendered dsh profile patch.
+func patchPath(t registry.Tenant) string {
+	return filepath.Join(t.DshHome, "profiles", "web", "cordis.patch.yml")
+}
+
+// readPatchRows loads it. A tenant that was never provisioned has no patch at all — including no
+// profiles directory — which every caller treats as "nothing to do" rather than a fault, so the
+// second result says whether there was a file to work on.
+func readPatchRows(t registry.Tenant) (rows []map[string]any, provisioned bool, err error) {
+	path := patchPath(t)
 	data, err := securefile.ReadLimitedRegular(path, 1<<20)
 	if err != nil {
-		// A tenant that was never provisioned has no patch at all — including no profiles
-		// directory, which is why this unwraps rather than testing the concrete error.
 		if errors.Is(err, os.ErrNotExist) {
-			return "", nil
+			return nil, false, nil
 		}
-		return "", err
+		return nil, false, err
 	}
-	var rows []map[string]any
 	if err := yaml.Unmarshal(data, &rows); err != nil {
-		return "", fmt.Errorf("parse %s: %w", path, err)
+		return nil, false, fmt.Errorf("parse %s: %w", path, err)
 	}
-	// Drop every ssh row that is there now, so a configuration change (a new mount subdir, a
-	// changed host list) propagates instead of being ignored on account of "already present".
+	return rows, true, nil
+}
+
+// anySlice widens rows for a list that came out of yaml.Unmarshal, which yields []any.
+func anySlice(rows []map[string]any) []any {
+	out := make([]any, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row)
+	}
+	return out
+}
+
+// dropPatchIDs removes every entry carrying one of these ids, in every insert list, so a
+// configuration change propagates instead of being ignored on account of "already present".
+func dropPatchIDs(rows []map[string]any, ids ...string) {
+	drop := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		drop[id] = true
+	}
 	for _, row := range rows {
 		insert, ok := row["insert"].([]any)
 		if !ok {
@@ -115,42 +137,22 @@ func ensureWorkspaceRow(t registry.Tenant, id string, enabled bool, pluginRow ma
 		}
 		kept := make([]any, 0, len(insert))
 		for _, entry := range insert {
-			if record, ok := entry.(map[string]any); ok && record["id"] == id {
-				continue
+			if record, ok := entry.(map[string]any); ok {
+				if id, _ := record["id"].(string); drop[id] {
+					continue
+				}
 			}
 			kept = append(kept, entry)
 		}
 		row["insert"] = kept
 	}
-	if !enabled {
-		// Nothing to add: the removal above is the whole point when the feature is off.
-		if !patchMentions(data, id) {
-			return "", nil
-		}
-		return "", writePatchRows(path, rows)
-	}
-	placed := false
-	for _, row := range rows {
-		if _, ok := row["insert"].([]any); !ok {
-			continue
-		}
-		row["insert"] = append(row["insert"].([]any), pluginRow)
-		placed = true
-		break
-	}
-	if !placed {
-		// A patch from an older shape has no insert list to add to, and rewriting the file
-		// from scratch would drop whatever else it carries. The account keeps working without
-		// the feature; rotating its key re-renders it.
-		return fmt.Sprintf("tenant %s has a profile patch without an insert list, so the workspace surface was not added; rotate its key to re-render it", t.Name), nil
-	}
-	return "", writePatchRows(path, rows)
 }
 
-func patchMentions(data []byte, id string) bool {
-	var rows []map[string]any
-	if err := yaml.Unmarshal(data, &rows); err != nil {
-		return false
+// patchMentionsID reports whether any insert list carries one of these ids.
+func patchMentionsID(rows []map[string]any, ids ...string) bool {
+	mentioned := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		mentioned[id] = true
 	}
 	for _, row := range rows {
 		insert, ok := row["insert"].([]any)
@@ -158,12 +160,116 @@ func patchMentions(data []byte, id string) bool {
 			continue
 		}
 		for _, entry := range insert {
-			if record, ok := entry.(map[string]any); ok && record["id"] == id {
+			record, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			if id, _ := record["id"].(string); mentioned[id] {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// appendPatchRows adds rows to the first insert list, reporting false for a patch from an older
+// shape that has no insert list at all: rewriting such a file from scratch would drop whatever
+// else it carries, so the caller warns instead and rotating the key re-renders it.
+func appendPatchRows(rows []map[string]any, newRows ...map[string]any) bool {
+	for _, row := range rows {
+		if _, ok := row["insert"].([]any); !ok {
+			continue
+		}
+		row["insert"] = append(row["insert"].([]any), anySlice(newRows)...)
+		return true
+	}
+	return false
+}
+
+// prependPatchRows is appendPatchRows at the head of the list, for the rows whose position is
+// part of what they are: the picker row pairs the host half with the browser half that renders it.
+func prependPatchRows(rows []map[string]any, newRows ...map[string]any) bool {
+	for _, row := range rows {
+		insert, ok := row["insert"].([]any)
+		if !ok {
+			continue
+		}
+		row["insert"] = append(anySlice(newRows), insert...)
+		return true
+	}
+	return false
+}
+
+// Directory-picker row ids. The mode decides which host half a tenant's profile carries, and the
+// ids are the ones dsh's own picker seams register under (M63).
+const (
+	pickerClampID  = "picker-clamp"
+	pickerBrowseID = "picker-browse"
+)
+
+// pickerRows is the pair a tenant profile carries: the directory-picker host half and the browser
+// half that renders it.
+//
+// With directory_picker "clamp" the host half is this deployment's plugin, and its root decides
+// which directories a person may add as a workspace — so that root is the workspace as the sandbox
+// sees it (M79). The picker is where a session's own path is chosen, which makes it the one place
+// where leaving the long host path would put every new session straight back on it.
+func pickerRows(cfg *config.Config, t registry.Tenant, mode string) []map[string]any {
+	id := pickerBrowseID
+	host := map[string]any{"id": id, "name": "@deepseek-ai/dsh-host-directory-picker-browse"}
+	if mode == "clamp" {
+		id = pickerClampID
+		host = map[string]any{"id": id, "name": pluginFileURL(cfg.Deploy.PluginPath), "config": map[string]any{"root": sandboxWorkspacePath(cfg, t)}}
+	}
+	return []map[string]any{
+		host,
+		{"id": id + "-ui", "name": "@deepseek-ai/dsh-client-ui-directory-picker-browse"},
+	}
+}
+
+// EnsureDirectoryPickerRow keeps one tenant's directory-picker row pointing at the current root.
+//
+// Why it exists: the picker row is otherwise written only when a tenant is created or its
+// credentials rotate, so a deployment that starts naming a workspace view would keep offering the
+// long host path to every account that already exists. Only the picker pair is touched here:
+// re-rendering the artifacts would rewrite workspace.json and discard the workspaces a person
+// added in the UI, and the ssh, browser, account-card and tenant-plugin rows have their own
+// refresh paths.
+//
+// A tenant that has no patch yet is left alone (it was never provisioned), and a patch without an
+// insert list is a warning rather than an error: a convenience must never stop an account from
+// starting, and rotating that tenant's key re-renders the file.
+func EnsureDirectoryPickerRow(cfg *config.Config, t registry.Tenant) (warning string, err error) {
+	rows, provisioned, err := readPatchRows(t)
+	if err != nil || !provisioned {
+		return "", err
+	}
+	dropPatchIDs(rows, pickerClampID, pickerBrowseID, pickerClampID+"-ui", pickerBrowseID+"-ui")
+	if !prependPatchRows(rows, pickerRows(cfg, t, cfg.DirectoryPicker)...) {
+		return fmt.Sprintf("tenant %s has a profile patch without an insert list, so its directory picker still roots at %s; rotate its key to re-render the profile", t.Name, t.Workspace), nil
+	}
+	return "", writePatchRows(patchPath(t), rows)
+}
+
+func ensureWorkspaceRow(t registry.Tenant, id string, enabled bool, pluginRow map[string]any) (warning string, err error) {
+	rows, provisioned, err := readPatchRows(t)
+	if err != nil || !provisioned {
+		return "", err
+	}
+	// Asked before the drop: a row that was never there must not make this rewrite the file.
+	mentioned := patchMentionsID(rows, id)
+	dropPatchIDs(rows, id)
+	if !enabled {
+		// Nothing to add: the removal above is the whole point when the feature is off.
+		if !mentioned {
+			return "", nil
+		}
+		return "", writePatchRows(patchPath(t), rows)
+	}
+	if !appendPatchRows(rows, pluginRow) {
+		return fmt.Sprintf("tenant %s has a profile patch without an insert list, so the workspace surface was not added; rotate its key to re-render it", t.Name), nil
+	}
+	return "", writePatchRows(patchPath(t), rows)
 }
 
 func writePatchRows(path string, rows []map[string]any) error {
@@ -228,14 +334,17 @@ func pluginRootLabel(cfg *config.Config) string {
 //
 // `cwd`/`cwdRoot` are named rather than left to the plugin's own default of the process working
 // directory: the account's workspace is what a terminal inside its dsh should open in, and the
-// bound is what the browser half may ask for instead.
+// bound is what the browser half may ask for instead. The path is the sandbox's view of the
+// workspace (M79), because this row is read inside the sandbox: the host path exists there too,
+// but a terminal that opens at the long host path is exactly what the view removes.
 func webTTYRow(cfg *config.Config, t registry.Tenant) map[string]any {
+	workspace := sandboxWorkspacePath(cfg, t)
 	return map[string]any{
 		"id":   webTTYRowID,
 		"name": tenantPluginURL(cfg, "web-tty"),
 		"config": map[string]any{
-			"cwd":       t.Workspace,
-			"cwdRoot":   t.Workspace,
+			"cwd":       workspace,
+			"cwdRoot":   workspace,
 			"traceFile": tenantPluginState(t, "web-tty.trace.jsonl"),
 			"trace":     true,
 		},
@@ -248,7 +357,7 @@ func workspaceFilesRow(cfg *config.Config, t registry.Tenant) map[string]any {
 		"id":   workspaceFilesRowID,
 		"name": tenantPluginURL(cfg, "workspace-files"),
 		"config": map[string]any{
-			"root":      t.Workspace,
+			"root":      sandboxWorkspacePath(cfg, t),
 			"rootLabel": pluginRootLabel(cfg),
 			"traceFile": tenantPluginState(t, "workspace-files.trace.jsonl"),
 			"trace":     true,
@@ -263,7 +372,7 @@ func gitDiffRow(cfg *config.Config, t registry.Tenant) map[string]any {
 		"id":   gitDiffRowID,
 		"name": tenantPluginURL(cfg, "git-diff"),
 		"config": map[string]any{
-			"root":      t.Workspace,
+			"root":      sandboxWorkspacePath(cfg, t),
 			"rootLabel": pluginRootLabel(cfg),
 			"traceFile": tenantPluginState(t, "git-diff.trace.jsonl"),
 			"cacheFile": tenantPluginState(t, "git-diff.cache.json"),

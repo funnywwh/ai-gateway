@@ -18,6 +18,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/winger/ai-gateway/internal/dshgw/sandbox"
 	"github.com/winger/ai-gateway/internal/dshgw/securefile"
 )
 
@@ -304,6 +305,20 @@ type DeployConfig struct {
 	WorkerUser string `yaml:"worker_user" json:"worker_user"`
 	// BwrapBin is the bubblewrap executable the sandbox profile and doctor use.
 	BwrapBin string `yaml:"bwrap_bin" json:"bwrap_bin"`
+	// SandboxWorkspace is the short path every tenant's workspace is ALSO visible at inside its
+	// sandbox, e.g. "/workspace" (M79). Empty (the default) keeps the single-view shape.
+	//
+	// Why it exists: the workspace is the sandbox's HOME, and its host path is a deployment
+	// path — on this machine 60-odd characters of state_dir — so every `pwd`, prompt, picker
+	// breadcrumb and tool call a person reads carries that prefix. The view is a bind of the
+	// same directory, not a symlink: getcwd() reports the path a process was started with, and
+	// only a real mount point survives that resolution. The host path stays bound, because the
+	// gateway's own state (registry records, the session storages dsh already wrote, workspaces
+	// a person added in the UI) names it.
+	//
+	// It needs nothing on the host: bubblewrap starts from an empty tmpfs root, and the profile
+	// binds the workspace onto this path. What it must not name is enforced in Validate.
+	SandboxWorkspace string `yaml:"sandbox_workspace" json:"sandbox_workspace"`
 	// PublicListen is the address the edge binds the portal and tenant public
 	// ports on. Loopback is the safe default; exposing tenants to a network is an
 	// explicit decision (and needs TLS, see tls:).
@@ -1039,6 +1054,9 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("workspace_seed %q must be a clean relative path inside the tenant root", seed)
 		}
 	}
+	if err := c.validateSandboxWorkspace(); err != nil {
+		return err
+	}
 	if c.WorkerLimits.MemoryHighBytes < 0 || c.WorkerLimits.MemoryMaxBytes < 0 || c.WorkerLimits.TasksMax < 0 || c.WorkerLimits.CPUQuotaPercent < 0 {
 		return errors.New("worker_limits values must not be negative")
 	}
@@ -1474,6 +1492,42 @@ func (c *Config) validateHostShares() error {
 		}
 		if withinPath(resolved, stateDir) || withinPath(stateDir, resolved) {
 			return fmt.Errorf("%s: %s overlaps the state directory %s, which holds every account's workspace, DSH home and keys", label, resolved, stateDir)
+		}
+	}
+	return nil
+}
+
+// validateSandboxWorkspace checks the optional short view of every tenant's workspace (M79).
+//
+// The view is a path bubblewrap creates inside the sandbox's own empty tmpfs root, so it needs
+// nothing on the host — which is why every rule here is about what it must NOT name. The
+// runtime and hidden trees belong to the sandbox package (it is the side that builds the argv,
+// and it re-checks them); what is added here is the deployment's own paths, the ones only this
+// file knows: a view that overlapped the state root or a tenant's workspace would either shadow
+// gateway state or bind the workspace twice, in the wrong place.
+func (c *Config) validateSandboxWorkspace() error {
+	view := strings.TrimSpace(c.Deploy.SandboxWorkspace)
+	if view == "" {
+		return nil
+	}
+	if err := sandbox.ValidateWorkspaceView(view); err != nil {
+		return err
+	}
+	pluginDir := ""
+	if configured := strings.TrimSpace(c.Deploy.PluginPath); configured != "" {
+		pluginDir = filepath.Dir(configured)
+	}
+	for _, clash := range []struct{ path, label string }{
+		{c.WorkspaceRoot, "workspace_root"},
+		{c.TenantRoot, "tenant_root"},
+		{c.StateDir, "state_dir"},
+		{pluginDir, "the plugin directory"},
+	} {
+		if strings.TrimSpace(clash.path) == "" {
+			continue
+		}
+		if withinPath(clash.path, view) || withinPath(view, clash.path) {
+			return fmt.Errorf("deploy.sandbox_workspace %s must not overlap %s %s", view, clash.label, clash.path)
 		}
 	}
 	return nil

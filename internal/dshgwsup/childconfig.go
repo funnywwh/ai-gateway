@@ -47,6 +47,11 @@ type Deploy struct {
 	TenantConfigRoot string `yaml:"tenant_config_root"`
 	ConfigPath       string `yaml:"config_path"`
 	BackupDir        string `yaml:"backup_dir"`
+	// SandboxWorkspace is the short path each tenant's workspace is also visible at inside its
+	// sandbox (M79), e.g. "/workspace". It is carried across because the child is the side that
+	// builds the bwrap profile and validates the value against its own state layout; aigw only
+	// knows the deployment named one. Empty keeps the child's single-view shape.
+	SandboxWorkspace string `yaml:"sandbox_workspace,omitempty"`
 	// NoStoreAPIs mirrors the child's own switch: false means API responses may be
 	// stored by a cache. Unset keeps the child's default (never store).
 	NoStoreAPIs *bool `yaml:"no_store_apis,omitempty"`
