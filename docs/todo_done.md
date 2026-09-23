@@ -6180,7 +6180,7 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 四个 codex 供应商 | `1 lzhichao-lagenio-3-expiry`、`3 lizhichao-wisskys-3-expiry`、`5 liuhui-wisskys-8-expiry`、`7 codex-zhuyecheng`（7 此前 0 行模型、只有 1 条路由） |
 | 官方价（Standard 档，2026-09-23 从 gptjp 抓官方定价页读出） | `gpt-6-sol` **2 / 0.2 / 2.5 / 10**（>272K 长档 4 / 0.4 / 5 / 15）；`gpt-6-luna` **0.1 / 0.01 / 0.125 / 0.5**（长档 0.2 / 0.02 / 0.25 / 0.75），USD/百万 tokens（输入/缓存命中/缓存写入/输出）。同一张表还有 Batch 与 Flex（0.5×）与 Fast mode（2×）档，按现网口径取 **Standard** |
 | 先探测再写（上游可用性） | 直连 `chatgpt.com/backend-api/codex/responses`（`stream:true`、prompt `hi`、用各账号自己的会话）：**4 个账号 × 2 个模型 = 8/8 HTTP 200**。目录端点不可信（这类账号返回 `{"models":[]}`），所以按 `examples/provider-codex/README.md` 的口径真发一次 |
-| 改动（仓库） | `scripts/official-pricing.sh`：价格表加两个模型（带 long-context 规则，并进 `LONG` 自检）、文件头补官方价两行与档位说明、**新增 `--plan-out FILE`**（导出的就是那张表的原文，杜绝第二处手抄价）、顺手修一处部署形态 bug（脚本拷到部署根下时 `ROOT` 会算成 `/opt`，读不到 `config.yaml`）。新增 `scripts/codex-add-models.py`（默认干跑；按 kind 找供应商 → 目录项 → 供应商模型行 → config.models → 路由，`--apply` 后逐项读回核对） |
+| 改动（仓库） | `scripts/official-pricing.sh`：价格表加两个模型（带 long-context 规则，并进 `LONG` 自检）、文件头补官方价两行与档位说明、**新增 `--plan-out FILE`**（导出的就是那张表的原文，杜绝第二处手抄价）、顺手修一处部署形态 bug（脚本拷到部署根下时 `ROOT` 会算成 `/opt`，读不到 `config.yaml`）。新增 `scripts/codex-add-models.py`（默认干跑；按 kind 找供应商 → 目录项 → 供应商模型行 → config.models → 路由，`--apply` 后逐项读回核对；下一节改名为 `scripts/add-provider-models.py`） |
 | 写入（实例） | **8 行 `provider_models`**（id 304–311，`public==upstream`、enabled、capabilities `{stream,tools,reasoning}`、**建行即带官方价**，不存在「有行无价」窗口）+ **2 个对客模型目录项**（id 23/24）+ **8 条路由**（id 281–288，prio/weight 100）+ 4 个供应商的 `config.models` 各追加 2 条（提交整份 config ⇒ 插件进程被停、下次请求懒启动） |
 | 计数变化 | 模型 22→**24**、上游模型 58→**66**、路由 66→**74**、成本侧定价目标 58→**66**（解析失败 0、`missing_rates` 无） |
 | 定价核对 | `official-pricing.sh --apply`：全 **57** 行逐行读回与计划一致 + 体检 0 解析失败；`/pricing/simulate` **9/9 与官方价逐位相等**：sol 标准档 200K+1M=**$10.40**、长档 300K+1M=**$16.20**、边界 272000 走标准档（$0.544）/272001 走长档；luna 标准 $0.52、长档 $0.81、边界 272000=$0.0272、缓存命中档 $0.502（标准）/ $0.006（长档） |
@@ -6190,3 +6190,23 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 回滚点 | DB 一致快照 `/opt/aigw/data/backups/aigw-20260923-100328.db`（quick_check=ok，1,413,120 B，sha256 `57ad4c25837997e5c0625f44e2e8673de95cf53b200913aef9b47ca4d52c1fe3`，库内 22 模型/58 上游模型/66 路由）；改动前快照 `/opt/aigw/pre-gpt6-20260923-180305/`（providers、models、routes 与 4 个供应商的 config + 模型行）；旧脚本 `/opt/aigw/official-pricing.sh.pre-gpt6-20260923-180305`。**外科回滚**＝删那 8 行与 8 条路由、按快照 PATCH 回 4 个供应商 config |
 | 未做 / 边界 | ① **标签授权没有动**：3 个标签仍只授权 `azure`/`deepseek`，所以客户流量现在**仍然到不了 codex 供应商**（要给某个人群用，得另改标签或 key 的 grants）；② 只补这两个模型，没顺手补齐 `codex-zhuyecheng` 其余 15 个模型、也没删它的孤立行；③ 不动 azure/deepseek、不写售价侧（兜底 `cost_follow`×1.0 已等于官方价）、不发版（无 Go 改动） |
 | 前提与假设 | 长上下文边界沿用仓库既有读数「输入 >272K」（`gte:272001`）：官方页只给 Short/Long 两列的费率（输入/缓存 2×、输出 1.5×），边界文字由客户端渲染、静态页里查不到；`context_window`/`max_output_tokens` 与同供应商现有 codex 行一致保持 **0**；这两个 id 走 ChatGPT 订阅后端属**影子成本**（README 的免责声明不变） |
+
+### gptjp：azure 供应商加 gpt-6-luna（gpt-6-sol 在该资源上没有部署）（2026-09-23）
+
+> 需求原话：「把新加的模型添加到azure供应商」。执行前发现 azure 上**已经有**这两条路由
+> （id 289/290，10:18:39/10:18:43 UTC 由控制台 admin 建），但**没有对应的供应商模型行**——
+> 按 `internal/routing/routing.go` 的判定（`pm == nil || !pm.Enabled` ⇒ `not_mapped`）
+> 这两条路由等于没接上：`/v1/models` 里看不到模型，请求也走不到 azure。
+
+| 项 | 值 |
+|---|---|
+| 先探上游（azure 没有可用目录接口） | 新增 `scripts/probe-azure-models.py`：真发一次 `POST <base_url>/responses`。结果 **gpt-6-luna → HTTP 200**（有部署）、**gpt-6-sol → HTTP 404 `DeploymentNotFound`**（没有部署）；对照组 gpt-5.6-sol 200（证明探针与密钥有效）、gpt-6-astra 404（与 9/23 重建时的结论一致）。资源：`https://admin-1025-resource.services.ai.azure.com/openai/v1` |
+| 写入 | azure 加 **gpt-6-luna** 供应商模型行（id 369：`upstream=gpt-6-luna`、enabled、capabilities `{stream,tools,reasoning}`、官方价两条规则（标准 + >272K）、prio/weight 100、`context_window`/`max_output_tokens` 0——与该供应商其它行一致）。控制台既有的路由 289 由 `not_mapped` 变为可路由，**不需要新建路由** |
+| gpt-6-sol（关键差别） | **不写行**：上游没有这个部署，写了只会在请求时 404。既有的路由 **290 停用**，与同供应商 `gpt-6-astra` / `gpt-6` / `gpt-5.4` / `gpt-image-1` 的「没有部署就留一条停用路由」处理一致。等 Azure/Foundry 上把 `gpt-6-sol` 部署建出来（名字要与请求的模型名一致），重跑 `add-provider-models.py --provider azure --models gpt-6-sol` 会自动补行**并启用**这条路由 |
+| 脚本改名与扩展 | `scripts/codex-add-models.py` → **`scripts/add-provider-models.py`**：`--kind` 选一类供应商（默认仍是 `plugin:provider-codex`）或 `--provider NAME[,NAME]` 选具体供应商；builtin 供应商（azure/deepseek…）没有 `config.models` 那一步，干跑表里显示 `(不适用)` |
+| 定价 | `official-pricing.sh --apply`：全 **58** 行逐行读回与计划一致；成本侧目标 **67** 个、解析失败 0、缺费率维度无；`/pricing/simulate` gpt-6-luna 200K+1M = **$0.52**（官方价） |
+| 路由核对 | `router/explain`：gpt-6-luna @azure = **1 个候选**；gpt-6-sol @azure = 0，原因 `not_mapped` |
+| 端到端（真实请求） | 账户 1（标签 `智天成`+`电商` ⇒ 授权 deepseek+azure，与电商/E26Q 人群同一套授权）的临时 key：`/v1/models`（11 个）**有** gpt-6-luna、**没有** gpt-6-sol；gpt-6-luna **HTTP 200**、attempt 落在 **azure**（route 289），`cost_micros=18`（= 15 输入×0.1 + 32 输出×0.5 = 17.5 进位，与官方价一致）；gpt-6-sol **403 `permission_denied`**（该人群拿不到它）。临时 key 用完停用 |
+| 影响 | 电商/E26Q（azure 授权）人群**现在能用 gpt-6-luna**；**gpt-6-sol 他们仍然用不了**——要么在 azure 资源上建 gpt-6-sol 部署，要么给相应标签加 codex 供应商授权（后者会改变「codex 供应商不接流量」的既定口径，需你决定） |
+| 健康 | 本次窗口 `level=ERROR` **0 条**；`/version` 仍 4.3.3、`NRestarts=0`（只写库，不动二进制与配置） |
+| 回滚 | `DELETE /admin/api/v1/provider-models/369` + `PATCH /admin/api/v1/routes/290 {"enabled":true}` 即回到执行前状态（两条路由本来就在，是控制台建的）；脚本改动见同日的 git 提交 |

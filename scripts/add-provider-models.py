@@ -1,30 +1,42 @@
 #!/usr/bin/env python3
-"""codex-add-models: 给实例上**每一个** plugin:provider-codex 供应商补齐指定模型。
+"""add-provider-models: 给实例上**一批**供应商补齐指定模型（目录项 + 供应商模型行 + 路由）。
 
-    python3 codex-add-models.py                       # 干跑：打印动作表，不写任何东西
-    python3 codex-add-models.py --apply               # 写入（目录项 + 供应商模型行 + 路由 [+ 插件配置]）
-    GW_BASE=http://127.0.0.1:8088/aigw python3 codex-add-models.py --apply
+    python3 add-provider-models.py                     # 干跑：全部 plugin:provider-codex，默认两个模型
+    python3 add-provider-models.py --apply             # 写入
+    python3 add-provider-models.py --provider azure    # 只动 azure（builtin 供应商，没有插件配置那一步）
+    GW_BASE=http://127.0.0.1:8088/aigw python3 add-provider-models.py --apply
+
+选供应商的两种方式（二选一）：
+  * `--kind`（默认 `plugin:provider-codex`）：按 kind 选**全部**匹配的供应商；
+  * `--provider NAME[,NAME]`：按名字选，忽略 kind；名字不存在直接报错。
 
 环境变量：
-  GW_BASE                默认 http://127.0.0.1:8088（实例带 base_path 时要把前缀写进去，如 gptjp 的 /aigw）
-  GW_ADMIN_USER/PASS     缺省从 config.yaml 的 bootstrap.admin 读
-  GW_ADMIN_PASSWORD_FILE 直接给一份口令文件（gptjp 用 /opt/aigw/.admin-password）
-  MODELS                 逗号分隔的模型 id，默认 gpt-6-sol,gpt-6-luna
+  GW_BASE                 默认 http://127.0.0.1:8088（实例带 base_path 时要把前缀写进去，如 gptjp 的 /aigw）
+  GW_ADMIN_USER/PASS      缺省从 config.yaml 的 bootstrap.admin 读
+  GW_ADMIN_PASSWORD_FILE  直接给一份口令文件（gptjp 用 /opt/aigw/.admin-password）
+  MODELS                  逗号分隔的模型 id，默认 gpt-6-sol,gpt-6-luna
+  GW_KINDS / GW_PROVIDERS 与 --kind / --provider 等价
 
 为什么需要它：scripts/official-pricing.sh 只给**已经存在**的供应商模型行写官方价，它不建行。
 而「对客模型在目录里、路由也在、却漏了供应商模型行」正是 /v1/models 里看不到模型的经典成因
-（internal/routing/routing.go 的 filterRoute 判 not_mapped）。所以补模型要做三件事：对客模型目录项、
-供应商模型行、路由；而**行必须当场带上成本价**——先建行再补价，中间那段时间是按 0 成本计费的。
+（internal/routing/routing.go 判 not_mapped：`pm == nil || !pm.Enabled` 都算没映射，所以**光有路由
+是不生效的**）。所以补模型要做三件事：对客模型目录项、供应商模型行、路由；而**行必须当场带上
+成本价**——先建行再补价，中间那段时间是按 0 成本计费的。
 
 价格不在本脚本里维护：它调用 `official-pricing.sh --plan-out`（或读 --plan-file）拿到那张表的
 原文，这里只有「把规则搬进请求体」的逻辑。调价只需改 official-pricing.sh 一处。
 
+**上游得真有这个东西**（否则写出来的行会在请求时 404）：codex 那种订阅后端可以直接发一次请求探；
+azure/Foundry 这类**没有可用目录接口**的供应商请先跑 `scripts/probe-azure-models.py`（真发一次
+POST /responses，200 才算部署存在），确认了再跑本脚本。
+
 本脚本刻意不猜外来的东西：
-  * 只有 kind 恰好是 plugin:provider-codex 的供应商会被改（按名字认供应商的脚本到处都是坑）；
+  * 只动 `--kind` / `--provider` 选中的供应商；
   * 已存在的行若 upstream_model 非空且与要补的模型不一致，报错并整批中止，不覆盖；
-  * 供应商插件配置（config.models）只在缺条目时追加，且提交的是**读回来的整份 config**
+  * 插件供应商的 config.models 只在缺条目时追加，且提交的是**读回来的整份 config**
     （config 是整体替换，不是部分更新）；改它会让插件进程被停掉、下次请求懒启动
-    （internal/runtime/probe.go 的 Dispatcher.Restart），所以输出里显式提示，--skip-config 可跳过。
+    （internal/runtime/probe.go 的 Dispatcher.Restart），所以输出里显式提示，--skip-config 可跳过；
+    builtin 供应商（kind 不以 `plugin:` 开头）没有这一步。
 """
 import argparse
 import http.cookiejar
@@ -37,8 +49,10 @@ import tempfile
 import urllib.error
 import urllib.request
 
-CODEX_KIND = "plugin:provider-codex"
+DEFAULT_KIND = "plugin:provider-codex"
 DEFAULT_MODELS = "gpt-6-sol,gpt-6-luna"
+# plugin: 前缀的供应商才有 config.models 这一步；builtin（azure/deepseek/…）只有行与路由。
+PLUGIN_KIND_PREFIX = "plugin:"
 # 与 examples/provider-codex 现有条目一致：codex 后端支持流式、工具与 reasoning。
 CAPABILITIES = {"stream": True, "tools": True, "reasoning": True}
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -55,7 +69,7 @@ def redact(text) -> str:
 
 
 def die(message: str) -> None:
-    sys.exit("codex-add-models: " + redact(message))
+    sys.exit("add-provider-models: " + redact(message))
 
 
 def note(message: str) -> None:
@@ -132,7 +146,7 @@ def load_plan(plan_file: str, models: list[str]) -> dict:
     """
     tmp = ""
     if not plan_file:
-        # 仓库布局是 <根>/scripts/<两个脚本>；部署形态（/opt/aigw/codex-add-models.py）里两个脚本同目录。
+        # 仓库布局是 <根>/scripts/<两个脚本>；部署形态（/opt/aigw/<脚本>）里两个脚本同目录。
         candidates = [os.path.join(ROOT, "scripts", "official-pricing.sh"),
                       os.path.join(SCRIPT_DIR, "official-pricing.sh")]
         script = next((path for path in candidates if os.path.exists(path)), "")
@@ -167,9 +181,10 @@ def load_plan(plan_file: str, models: list[str]) -> dict:
     return plan
 
 
-def decide(row: dict | None, cfg_ids: set, route: dict | None, model: str, ruleset: dict) -> dict:
+def decide(row: dict | None, cfg_ids: set, route: dict | None, model: str, ruleset: dict,
+           plugin: bool = True) -> dict:
     """一个 (供应商, 模型) 的动作。只判断，不写；main 里两条分支（干跑 / 写入）共用它。"""
-    action = {"row": "create", "row_id": 0, "changes": [], "config": "ok",
+    action = {"row": "create", "row_id": 0, "changes": [], "config": "n/a" if not plugin else "ok",
               "route": "ok", "route_id": 0, "fatal": ""}
     if row is not None:
         upstream = row.get("upstream_model") or ""
@@ -186,7 +201,7 @@ def decide(row: dict | None, cfg_ids: set, route: dict | None, model: str, rules
             if not row.get("enabled"):
                 action["changes"].append("启用")
             action["row"] = "update" if action["changes"] else "ok"
-    if model not in cfg_ids:
+    if plugin and model not in cfg_ids:
         action["config"] = "append"
     if route is not None:
         action["route_id"] = route.get("id", 0)
@@ -233,8 +248,25 @@ def read_password(args) -> str:
 
 def row_label(action: dict, skipped_config: bool) -> tuple[str, str]:
     row_text = action["row"] + (f"（{'/'.join(action['changes'])}）" if action["changes"] else "")
-    config_text = "(跳过)" if skipped_config else action["config"]
+    if action["config"] == "n/a":
+        config_text = "(不适用)"
+    elif skipped_config:
+        config_text = "(跳过)"
+    else:
+        config_text = action["config"]
     return row_text, config_text
+
+
+def select_providers(gw: "Gateway", kinds: list[str], names: list[str]) -> list[dict]:
+    """给了名字就按名字选（忽略 kind，名字缺失即报错）；否则按 kind 选全部匹配的。"""
+    all_providers = gw.list_all("/admin/api/v1/providers")
+    if names:
+        by_name = {p.get("name"): p for p in all_providers}
+        missing = [n for n in names if n not in by_name]
+        if missing:
+            die("实例上没有这些供应商：" + "、".join(missing))
+        return [by_name[n] for n in names]
+    return [p for p in all_providers if p.get("kind") in kinds]
 
 
 def main() -> int:
@@ -243,18 +275,24 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="真正写入（缺省只干跑）")
     parser.add_argument("--models", default=os.environ.get("MODELS", DEFAULT_MODELS),
                         help=f"逗号分隔的模型 id（默认 {DEFAULT_MODELS}）")
+    parser.add_argument("--kind", default=os.environ.get("GW_KINDS", DEFAULT_KIND),
+                        help=f"逗号分隔的供应商 kind（默认 {DEFAULT_KIND}）；给了 --provider 时忽略")
+    parser.add_argument("--provider", default=os.environ.get("GW_PROVIDERS", ""),
+                        help="逗号分隔的供应商名字；只动这些（按名字选，忽略 kind）")
     parser.add_argument("--plan-file", default=os.environ.get("GW_PLAN_FILE", ""),
                         help="official-pricing.sh --plan-out 导出的定价计划 JSON")
     parser.add_argument("--base", default=os.environ.get("GW_BASE", "http://127.0.0.1:8088"))
     parser.add_argument("--password-file", default=os.environ.get("GW_ADMIN_PASSWORD_FILE", ""))
     parser.add_argument("--config", default=default_config())
     parser.add_argument("--skip-config", action="store_true",
-                        help="不碰供应商插件配置（config.models）：跳过插件进程重启")
+                        help="不碰插件配置（config.models）：跳过插件进程重启")
     args = parser.parse_args()
 
     models = [m.strip() for m in args.models.split(",") if m.strip()]
     if not models:
         die("没有要补的模型（--models/MODELS 为空）")
+    kinds = [k.strip() for k in args.kind.split(",") if k.strip()]
+    names = [n.strip() for n in args.provider.split(",") if n.strip()]
 
     plan = load_plan(args.plan_file, models)
     note(f"定价计划：{len(plan)} 个上游模型；本次要补：{', '.join(models)}")
@@ -263,11 +301,16 @@ def main() -> int:
     gw.login()
     note(f"已登录 {args.base}")
 
-    providers = [p for p in gw.list_all("/admin/api/v1/providers") if p.get("kind") == CODEX_KIND]
+    providers = select_providers(gw, kinds, names)
     if not providers:
-        die("实例上没有任何 plugin:provider-codex 供应商")
-    note("codex 供应商 " + str(len(providers)) + " 个：" +
-         "、".join(f"{p['id']} {p['name']}" for p in providers))
+        die(f"实例上没有任何 kind 为 {','.join(kinds)} 的供应商")
+    note("目标供应商 " + str(len(providers)) + " 个：" +
+         "、".join(f"{p['id']} {p['name']}（{p['kind']}）" for p in providers))
+    plugin_ids = {p["id"] for p in providers
+                  if str(p.get("kind") or "").startswith(PLUGIN_KIND_PREFIX)}
+    builtin = [f"{p['id']} {p['name']}" for p in providers if p["id"] not in plugin_ids]
+    if builtin and not args.skip_config:
+        note("  （builtin 供应商没有 config.models 这一步，只写行与路由：" + "、".join(builtin) + "）")
 
     catalog = {m.get("public_name") for m in gw.list_all("/admin/api/v1/models")}
     routes = gw.list_all("/admin/api/v1/routes")
@@ -277,6 +320,7 @@ def main() -> int:
     fatal: list[str] = []
     for provider in providers:
         pid = provider["id"]
+        plugin = pid in plugin_ids
         detail = gw.call("GET", f"/admin/api/v1/providers/{pid}")
         detail = detail.get("data", detail)
         config = detail.get("config") or {}
@@ -286,8 +330,8 @@ def main() -> int:
         for model in models:
             route = next((r for r in routes
                           if r.get("model") == model and r.get("provider") == provider["name"]), None)
-            action = decide(rows.get(model), cfg_ids, route, model, plan[model])
-            action.update({"provider_id": pid, "provider_name": provider["name"],
+            action = decide(rows.get(model), cfg_ids, route, model, plan[model], plugin)
+            action.update({"provider_id": pid, "provider_name": provider["name"], "plugin": plugin,
                            "model": model, "config_obj": config, "config_ids": cfg_ids})
             if action["fatal"]:
                 fatal.append(action["fatal"])
@@ -301,7 +345,8 @@ def main() -> int:
         note(f"{head:30s} {action['model']:12s} {row_text:26s} {config_text:8s} {action['route']}")
     if catalog_missing:
         note(f"对客模型目录：需新建 {', '.join(catalog_missing)}")
-    touched = sorted({a["provider_name"] for a in work if a["config"] != "ok"})
+    touched = sorted({a["provider_name"] for a in work
+                      if a["plugin"] and a["config"] != "ok"})
     if touched and not args.skip_config:
         note(f"注意：{len(touched)} 个供应商的插件配置会被改写（提交整份 config），"
              f"其插件进程会被停掉、下次请求懒启动：{'、'.join(touched)}")
@@ -338,7 +383,7 @@ def main() -> int:
             note(f"  provider {pid} {model}：已更新（{'/'.join(action['changes'])}）")
 
     if not args.skip_config:
-        for pid in sorted({a["provider_id"] for a in work}):
+        for pid in sorted({a["provider_id"] for a in work if a["plugin"]}):
             changed = [a for a in work if a["provider_id"] == pid and a["config"] != "ok"]
             if not changed:
                 continue
@@ -363,7 +408,6 @@ def main() -> int:
         elif action["route"] == "enable":
             gw.call("PATCH", f"/admin/api/v1/routes/{action['route_id']}", {"enabled": True})
             note(f"  provider {action['provider_id']} {action['model']}：路由 {action['route_id']} 已启用")
-
     # ── 读回核对 ────────────────────────────────────────────────────────────
     note("")
     note("读回核对…")
@@ -394,7 +438,7 @@ def main() -> int:
                 problems.append("行未启用")
             if row.get("pricing_rules") != plan[model]:
                 problems.append("规则与定价计划不一致")
-            if not args.skip_config and model not in cfg_ids:
+            if pid in plugin_ids and not args.skip_config and model not in cfg_ids:
                 problems.append("config.models 里没有它")
             route = next((r for r in routes
                           if r.get("model") == model and r.get("provider") == provider["name"]), None)
@@ -419,4 +463,4 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except GatewayError as exc:  # 管理接口的错误是可读的，不必把栈打给运维看
-        sys.exit("codex-add-models: " + redact(exc))
+        sys.exit("add-provider-models: " + redact(exc))
