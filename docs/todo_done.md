@@ -5701,3 +5701,48 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 - [x] `make ui-check` 在本沙箱**无法运行**（无可用 firefox），已按上面那条改成带原因跳过，
       真机复跑记在 `docs/TODO.md`；真机 bwrap 版验收一组（多机 e2e / sandbox-test / supervised-test）
       同样记在那里。
+
+## M79 沙箱内工作区短路径视图（完成记录）
+
+> 设计：`docs/design/m79-sandbox-workspace-view.md`；规格：`docs/dshgw.md` §7a、`docs/deployment-layout.md` §4.2/§4.4、
+> `deploy/dshgw/README.md` §2；样例：`config.example.yaml`、`deploy/dshgw/{config,node}.example.yaml`。
+> 需求原话：「实现 `~` 就等于 `/home/winger/work/ai_gateway/data/dshgw-verify/state/workspaces/dsh-tenant` 呢？
+> 并在沙箱里缩短路径」。**默认关闭**：`deploy.sandbox_workspace` 留空时 argv/HOME/passwd 视图/渲染产物与之前逐字节一致
+> （单测里有这条回归断言）。
+
+- [x] 配置键 `deploy.sandbox_workspace`（例如 `/workspace`）：工作区在沙箱里绑**两次** —— 宿主长路径（保留，
+  网关自己的状态仍用它）与短路径视图；并在 `--` 之前追加 `--chdir <view>`，让 worker 进程 cwd 也落在视图上
+  （`getcwd()` 走挂载树，软链骗不过 `process.cwd()`，所以必须是真挂载点）
+- [x] **镜像子挂载**：bwrap `--bind` 不递归，browser 容器与挂载、`host_shares` 容器与每条 share、ssh 工作区在
+  视图下逐条再生成一份（flag 完全一致），容器类的只读保护同样镜像 —— 否则短路径下它们只是空目录，
+  而且容器可被替换
+- [x] 租户可见渲染统一走 `tenancy.sandboxWorkspacePath(cfg, t)`：`HOME`、`/etc/passwd` 家目录字段（必须与 HOME
+  一致，否则 getpwuid 与 $HOME 分叉）、picker clamp root（决定新会话跑在哪条路径上）、终端 `cwd`/`cwdRoot`、
+  文件管理器与变更审阅 `root`、`workspace_seed` 路径；宿主侧状态（registry、ssh-mounts、browser 记录、备份根）不动
+- [x] **已存在租户重启即生效**：新增 `EnsureDirectoryPickerRow`（把 picker 行构造抽成 `pickerRows`，与
+  `renderPatch` 共用），在 `startWorker` 里与 ssh/browser/account-card/tenant-plugins 一样每次启动刷新；
+  只改 patch 的那一对行，**不**重渲染 artifacts（那会重写 `workspace.json`、丢掉用户加的工作区）
+- [x] 加载期校验（`config.validateSandboxWorkspace` + `sandbox.ValidateWorkspaceView`）：拒绝非绝对/非 clean/`/`、
+  隐藏根（`/home`、`/root`、`/tmp`、`/var`、`/srv`、`/etc/dshgw`）、运行时树（`/usr`、`/etc`、`/bin`、`/sbin`、
+  `/lib`、`/lib64`、`/proc`、`/dev`），以及与 `state_dir`/`tenant_root`/`workspace_root`/插件目录互相包含的值；
+  profile 侧再拒绝与 node/dsh release、工作区本身重叠的值
+- [x] 监督形态透传：`internal/config` 的 `dshgw.sandbox_workspace` → `cmd/aigw/dshgw_child.go` →
+  `dshgwsup.ChildConfig.Deploy.SandboxWorkspace`（该结构体注释写明"子进程支持的能力必须显式带过去"）；
+  多节点（M77）由**承载租户的节点**各写同一短路径
+- [x] 单测：`sandbox`（视图绑定 + 逐条镜像 + flag 一致 + `--chdir` + 校验表 + 未配置时的基线回归）、
+  `config`（加载/默认/隐藏根与运行时树/与部署路径重叠）、`tenancy`（HOME、passwd 家目录、三类插件行、种子路径、
+  picker 刷新与幂等/模式切换/无 patch 跳过/无 insert list 只告警）、`cmd/dshgw`（`sandbox-exec --print` 打出视图绑定）、
+  `dshgwsup`/`cmd/aigw`（透传字段进入生成的子配置）
+- [x] 回归：`make dshgw-test` 全绿（Go 全量 + 5 组插件 Node 测试 + 4 个 python 计划/身份测试）、
+  `gofmt` 与 `go vet ./internal/dshgw/... ./cmd/dshgw ./internal/dshgwsup ./internal/config ./cmd/aigw` 干净
+
+### v4.2.0 发布记录（M77 + M79，2026-09-23，本机 dshgw-verify 待宿主重启生效）
+
+| 项 | 值 |
+|---|---|
+| 版本 | **v4.2.0**（`VERSION` 4.1.1 → 4.2.0，minor：M77 多机分布式运行 + 本次可选配置键；release 提交 `ecb4d03`，tag `v4.2.0`，未推 `origin`） |
+| 构建物 | `bin/dshgw` 4.2.0 / `ecb4d03`；`bin/aigw` 4.2.0 / `ecb4d03`（console minified 44 文件 718063→404574 B，gzip 39 文件 402213→160467 B）。本次**只换 dshgw**：aigw 侧只多了透传字段，静态面与本特性无关 |
+| 部署范围 | 本机 `dshgw-verify`（门户 18300 / 网关 18299 / 租户 18301+ / worker 18400+）：换 `bin/dshgw` + 幂等给 `$ROOT/dshgw.yaml` 的 `deploy:` 加 `sandbox_workspace: /workspace` + 重启单元。重启会重启**所有**租户 worker（含发起部署的会话），因此留给人工择时 |
+| 部署脚本 | 工作区根 `deploy-aigw-4.2.0.sh`（未入 git）：`--check-profile` 只渲染并打印绑定 → 默认段幂等加键（带 `.bak`）+ `.new`+`mv` 换二进制 + 重启 + 60s 就绪门禁 + 打印每个 worker argv 里是否出现 `/workspace`；门禁失败装回旧二进制与旧 `dshgw.yaml` 再重启 |
+| 回滚 | 还原 `$ROOT/dshgw.yaml.bak-*`（或删键）+ 装回 `$ROOT/data/prev/bin/` 的上一个 `dshgw` + 重启 `dshgw-verify`；删键即回到今天的行为 |
+| 待人工 | ① 宿主执行 `deploy-aigw-4.2.0.sh`（含重启）；② 重启后在**新会话**里确认 `pwd`/`echo $HOME` 是 `/workspace`、`ls ~` 是工作区内容、选择器/终端/文件面板根是 `/workspace`、旧会话仍可打开；③ 允许 `bwrap --unshare-pid` 的宿主上跑真机版 `make dshgw-sandbox-test`（本会话沙箱禁非特权 userns，只跑了单测） |
