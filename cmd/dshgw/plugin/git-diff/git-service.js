@@ -106,6 +106,15 @@ const KILL_GRACE_MS = 5000
 /** How long a timed-out git process may take to die before we stop waiting for it. */
 const TIMEOUT_GRACE_MS = 10000
 
+/** How long one directory's repository discovery is reused before it is walked again. */
+const DISCOVERY_TTL_MS = 30_000
+/** How many discovery bases may be cached at once; a page can visit several session workspaces. */
+const DISCOVERY_ROOT_MAX = 8
+/** How long one session workspace's resolved scope (work tree or plain directory) is reused. */
+const SCOPE_TTL_MS = 30_000
+/** How many resolved session workspaces are kept; `rev-parse` must not run on every RPC call. */
+const SCOPE_CACHE_MAX = 64
+
 /**
  * Run one git command and collect everything it wrote.
  *
@@ -491,9 +500,14 @@ function jobSnapshot(job) {
 /**
  * The service behind every endpoint.
  *
- * State is deliberately tiny: a discovery cache, a per-repo metadata cache, one running-or-finished
- * scan job per repository, and the last completed scan of each repository (also written to
- * `cache.json`, so a browser refresh — or a server restart — still paints a list immediately).
+ * State is deliberately tiny: one scope cache (which git work tree a session workspace belongs to),
+ * a per-root discovery cache, a per-repo metadata cache, one running-or-finished scan job per
+ * repository, and the last completed scan of each repository (also written to `cache.json`, so a
+ * browser refresh — or a server restart — still paints a list immediately).
+ *
+ * `root` is the clamp and the fallback, never necessarily the place work happens: every call names
+ * the session workspace it came from, and `scopeOf` turns that into the git work tree the panel
+ * should be showing (see its own doc comment).
  */
 export class GitService {
   constructor(options) {
@@ -507,17 +521,25 @@ export class GitService {
     this.gitAvailable = false
     this.repoCache = new Map()
     this.metaCache = new Map()
-    this.discovery = { at: 0, repos: null }
+    // Discovery is keyed by the base it walked: the account workspace root and every session
+    // workspace are different questions with different answers, and one shared slot would hand one
+    // session's repository list to the next.
+    this.discovery = new Map()
+    // Session workspace -> resolved scope. `rev-parse` is cheap but not free, and the browser asks
+    // on every call.
+    this.scopeCache = new Map()
     this.jobs = new Map()
     this.results = new Map()
     this.jobCounter = 0
   }
 
   /**
-   * Resolve the root, detect git, and load the previous scan cache.
+   * Resolve the clamp, detect git, and load the previous scan cache.
    *
-   * A root that cannot be resolved is an assembly error and fails activation loudly, exactly like
-   * the workspace-files plugin: a surface that can never answer should not pretend to serve.
+   * `options.root` is the account workspace: the boundary every repository and diff path is clamped
+   * to, and the scope of any call that names no session workspace. A root that cannot be resolved is
+   * an assembly error and fails activation loudly, exactly like the workspace-files plugin: a
+   * surface that can never answer should not pretend to serve.
    */
   static async create(options) {
     let root
@@ -544,11 +566,13 @@ export class GitService {
   }
 
   /** The numbers the browser adopts: it never asks for more than these. */
-  hello() {
+  hello(root = this.root, anchor = 'fallback', workspace = null) {
     return {
       version: this.limits.version,
-      root: this.root,
+      root,
       rootLabel: this.rootLabel,
+      anchor,
+      workspace,
       git: { available: this.gitAvailable, version: this.gitVersion },
       repo: this.pinnedRepo ?? null,
       untracked: this.limits.untrackedDefault === true,
@@ -564,19 +588,108 @@ export class GitService {
   }
 
   /**
-   * Resolve one repository path and clamp it to the root.
+   * Resolve one call's scope: which git work tree the session workspace it came from belongs to.
+   *
+   * The browser is the only half that knows which session a View belongs to, so it names that
+   * session's workspace on every call; this turns the name into the panel's scope:
+   *
+   *   * `anchor: 'repo'`      — `workspace` is inside a work tree (itself, a subdirectory, a linked
+   *                             worktree, an sshfs mount); the scope is that work tree, named by
+   *                             git's own `rev-parse --show-toplevel` rather than by guessing where
+   *                             a `.git` might live.
+   *   * `anchor: 'workspace'` — git says this directory is in no work tree (this deployment's
+   *                             `…/work` and account root are exactly that): the scope is the
+   *                             workspace itself, i.e. "discover the repositories underneath it".
+   *                             Nothing here tries to infer a repository from the session's recorded
+   *                             tool activity: that is a guess, and a wrong one whenever the session
+   *                             worked outside its own workspace.
+   *   * `anchor: 'fallback'`  — nothing usable was named (no workspace, missing, outside the clamp):
+   *                             the configured root, which is what every call did before M86.
+   *
+   * The clamp is unchanged and stays the account workspace: a named workspace may only ever narrow
+   * the scope, never move it outside `config.root`.
+   */
+  async scopeOf(workspace) {
+    const requested = typeof workspace === 'string' ? workspace.trim() : ''
+    if (requested === '' || requested.includes('\0')) {
+      return { workspace: null, root: this.root, anchor: 'fallback', reason: 'blank' }
+    }
+    const cached = this.scopeCache.get(requested)
+    if (cached !== undefined && Date.now() - cached.at < SCOPE_TTL_MS) return cached.value
+    const value = await this.resolveScope(requested)
+    this.scopeCache.set(requested, { at: Date.now(), value })
+    while (this.scopeCache.size > SCOPE_CACHE_MAX) this.scopeCache.delete(this.scopeCache.keys().next().value)
+    // Only the interesting half is traced: a resolved work tree is the normal case, while the two
+    // others are what a person looks for when the panel is not showing what they expect.
+    if (value.anchor !== 'repo') {
+      this.trace('scope', { workspace: value.workspace, root: value.root, anchor: value.anchor, reason: value.reason })
+    }
+    return value
+  }
+
+  /** The resolved half of {@link scopeOf}, without the cache. */
+  async resolveScope(requested) {
+    let real
+    try {
+      real = await realpath(isAbsolute(requested) ? resolve(requested) : resolve(this.root, requested))
+    } catch {
+      return { workspace: null, root: this.root, anchor: 'fallback', reason: 'not-found' }
+    }
+    if (!isInside(this.root, real)) return { workspace: null, root: this.root, anchor: 'fallback', reason: 'outside-root' }
+    const info = await stat(real).catch(() => null)
+    if (info === null || !info.isDirectory()) {
+      return { workspace: null, root: this.root, anchor: 'fallback', reason: 'not-a-directory' }
+    }
+    const top = await this.gitWorkTree(real)
+    if (top === null) return { workspace: real, root: real, anchor: 'workspace', reason: 'not-a-repo' }
+    // A work tree whose top is above the clamp (a workspace that happens to live inside a larger
+    // repository) is not ours to show: fall back to the workspace's own subtree instead of
+    // widening the plugin's readable range.
+    if (!isInside(this.root, top)) return { workspace: real, root: real, anchor: 'workspace', reason: 'top-outside-root' }
+    return { workspace: real, root: top, anchor: 'repo', reason: null }
+  }
+
+  /**
+   * git's own answer to "which work tree is this directory in", or null.
+   *
+   * `rev-parse --show-toplevel` covers everything a `.git` walk would have to re-implement: the
+   * repository root, any subdirectory of it, a `.git` *file* (linked worktree, submodule), and a
+   * checkout living on a network mount. Failure is normal and expected — this deployment has whole
+   * workspaces (`…/work`, the account root) that are parents of repositories rather than inside
+   * one — so it answers null instead of throwing.
+   */
+  async gitWorkTree(dir) {
+    let result
+    try {
+      result = await runGit({ cwd: dir, args: ['rev-parse', '--show-toplevel'], timeoutMs: 10_000, maxBytes: 64 * 1024 })
+    } catch {
+      return null
+    }
+    if (result.code !== 0) return null
+    const text = result.stdout.toString('utf8').trim()
+    if (text === '') return null
+    try {
+      return await realpath(text)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Resolve one repository path and clamp it to the account workspace.
    *
    * The clamp is the security boundary of this plugin: a repository — and therefore every diff it
    * can serve — must live under `config.root`, so the panel can never read a git object from
-   * outside the tenant's workspace, however the request was phrased.
+   * outside the tenant's workspace, however the request was phrased. `root` is only the base a
+   * relative path is resolved against (the call's scope), never a relaxation of that boundary.
    */
-  async resolveRepo(input) {
+  async resolveRepo(input, { root = this.root } = {}) {
     if (typeof input !== 'string' || input.trim() === '') {
       throw fail(CODES.notARepo, '没有指定仓库路径', { repo: input ?? null })
     }
     const raw = input.trim()
     if (raw.includes('\0')) throw fail(CODES.unsupportedPath, '仓库路径不合法')
-    const absolute = isAbsolute(raw) ? resolve(raw) : resolve(this.root, raw)
+    const absolute = isAbsolute(raw) ? resolve(raw) : resolve(root, raw)
     let real
     try {
       real = await realpath(absolute)
@@ -589,33 +702,39 @@ export class GitService {
     if (!existsSync(join(real, '.git'))) {
       throw fail(CODES.notARepo, `${raw} 不是 git 仓库`, { repo: real })
     }
-    const cached = this.repoCache.get(real)
+    // Keyed by scope as well as path: `rel` is relative to the scope the repository was found in,
+    // and the same repository discovered from two session workspaces has two correct answers.
+    const key = `${root}\0${real}`
+    const cached = this.repoCache.get(key)
     if (cached !== undefined) return cached
-    const descriptor = repoDescriptor(this.root, real)
-    this.repoCache.set(real, descriptor)
+    const descriptor = repoDescriptor(root, real)
+    this.repoCache.set(key, descriptor)
     return descriptor
   }
 
   /**
-   * Discover git work trees under the root, breadth-first, newest-and-shallowest first.
+   * Discover git work trees under one base, breadth-first, newest-and-shallowest first.
    *
-   * The walk stops at a repository instead of descending into it: this is what keeps discovery
-   * cheap next to a 26 GiB checkout, because the moment `.git` is seen the whole AOSP tree behind
-   * it — hundreds of thousands of directories — is out of scope. Dot-directories and
-   * `node_modules`/`out` are skipped for the same reason, and both the depth and the visited
-   * count are capped so an unexpected workspace cannot turn discovery into a crawl.
+   * `root` is the caller's scope: the git work tree of its session, or the session workspace when
+   * git says that workspace is in no work tree at all. The walk stops at a repository instead of
+   * descending into it: this is what keeps discovery cheap next to a 26 GiB checkout, because the
+   * moment `.git` is seen the whole AOSP tree behind it — hundreds of thousands of directories — is
+   * out of scope. Dot-directories and `node_modules`/`out` are skipped for the same reason, and
+   * both the depth and the visited count are capped so an unexpected workspace cannot turn
+   * discovery into a crawl.
    */
-  async discover({ refresh = false } = {}) {
+  async discover({ root = this.root, refresh = false } = {}) {
     const now = Date.now()
-    if (!refresh && this.discovery.repos !== null && now - this.discovery.at < 30_000) return this.discovery.repos
+    const cached = this.discovery.get(root)
+    if (!refresh && cached !== undefined && now - cached.at < DISCOVERY_TTL_MS) return cached.repos
     if (this.pinnedRepo !== undefined) {
       const repos = [this.pinnedRepo]
-      this.discovery = { at: now, repos }
+      this.rememberDiscovery(root, now, repos)
       return repos
     }
     const repos = []
     const found = new Set()
-    const queue = [{ dir: this.root, depth: 0 }]
+    const queue = [{ dir: root, depth: 0 }]
     let visited = 0
     while (queue.length > 0 && visited < this.limits.maxRepoCandidates) {
       const { dir, depth } = queue.shift()
@@ -629,7 +748,7 @@ export class GitService {
       if (entries.some((entry) => entry.name === '.git')) {
         if (!found.has(dir)) {
           found.add(dir)
-          repos.push(repoDescriptor(this.root, dir))
+          repos.push(repoDescriptor(root, dir))
         }
         continue
       }
@@ -646,9 +765,26 @@ export class GitService {
       || left.rel.length - right.rel.length
       || left.rel.localeCompare(right.rel)
     ))
-    this.discovery = { at: now, repos }
-    this.trace('discover', { root: this.root, repos: repos.map((repo) => repo.rel), visited })
+    this.rememberDiscovery(root, now, repos)
+    this.trace('discover', { root, repos: repos.map((repo) => repo.rel), visited })
     return repos
+  }
+
+  /** Remember one base's discovery, evicting the oldest base when the cache is full. */
+  rememberDiscovery(root, at, repos) {
+    this.discovery.delete(root)
+    this.discovery.set(root, { at, repos })
+    while (this.discovery.size > DISCOVERY_ROOT_MAX) this.discovery.delete(this.discovery.keys().next().value)
+  }
+
+  /** When one base's repository list was last walked, or null. */
+  discoveryAt(root) {
+    return this.discovery.get(root)?.at ?? null
+  }
+
+  /** Every base this service has discovered under, oldest first. */
+  discoveryRoots() {
+    return [...this.discovery.keys()]
   }
 
   /** Branch/HEAD facts for one repository, cached for a few seconds. */

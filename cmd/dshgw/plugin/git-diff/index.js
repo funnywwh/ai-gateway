@@ -17,7 +17,11 @@
 //     host tests assert that `.git/index` is byte-identical after a full scan.
 //   * Everything is clamped to one root: `config.root` (default: the process working directory,
 //     which is the tenant's workspace). Repositories and diff paths are both resolved through
-//     realpath and required to stay inside it. See git-service.js.
+//     realpath and required to stay inside it. That root is the boundary and the fallback, not
+//     necessarily what the panel shows: every call names the current session's workspace, and
+//     git-service.js decides which git work tree that means (its own `rev-parse --show-toplevel`,
+//     the workspace itself when git says it is in no work tree, or this root when nothing usable
+//     was named). See `scopeOf`.
 
 import { appendFileSync, mkdirSync, statSync, truncateSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
@@ -48,7 +52,7 @@ export const inject = ['connection']
 
 const RPC_CHANNEL = '/dshgw-git-diff'
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url))
-const VERSION = '0.1.0'
+const VERSION = '0.2.0'
 const TRACE_FILE = join(PLUGIN_DIR, 'trace.jsonl')
 const TRACE_MAX_BYTES = 262_144
 const CACHE_FILE = join(PLUGIN_DIR, 'cache.json')
@@ -196,7 +200,7 @@ export async function apply(ctx, rawConfig) {
     cachedRepos: [...service.results.keys()].map((path) => path.replace(`${service.root}/`, '')),
     pid: process.pid,
   })
-  log(`ready: channel ${RPC_CHANNEL}, root ${service.root}, git ${service.gitVersion ?? '不可用'}`)
+  log(`ready: channel ${RPC_CHANNEL}, root ${service.root}（夹紧/回退）, git ${service.gitVersion ?? '不可用'}`)
 }
 
 /** Exported for the tests: the same coded failure the endpoints throw. */

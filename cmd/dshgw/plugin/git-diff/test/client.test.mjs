@@ -746,6 +746,143 @@ test('client: a binary file says so, and a deleted file leaves the right column 
   }
 })
 
+// ---- the session scope (M86: the panel follows the session's git work tree) -------------------
+
+/** The standard props a session-scoped View receives, as far as this panel reads them. */
+function sessionProps(workspace, sessionId = 'session-under-test') {
+  const list = { byId: { [sessionId]: { sessionId, cwd: workspace } } }
+  return { sessionId, useSessions: (selector) => selector(list) }
+}
+
+/** The option labels of the repository picker, in order. */
+function repoOptions(tree) {
+  const select = find(tree, withClass('dshgw-gd-select'))
+  return select === null ? [] : select.children.map((option) => textOf(option))
+}
+
+test('client: every call names the current session’s workspace', { skip }, async () => {
+  const renderer = createRenderer()
+  const host = await makeHost()
+  const client = await loadClient(renderer, host)
+  const view = client.registrations.get('conversation.view').component
+  try {
+    renderer.renderComponent(view, sessionProps(host.repo))
+    await flush(renderer, 12)
+
+    assert.equal(client.calls[0].endpoint, 'hello', 'the handshake still comes first')
+    assert.equal(client.calls[0].payload.workspace, host.repo, 'the handshake names the session workspace')
+    for (const call of client.calls) {
+      if (call.endpoint === 'scanStatus' || call.endpoint === 'scanCancel') continue
+      assert.equal(call.payload.workspace, host.repo, `${call.endpoint} must carry the session workspace`)
+    }
+    const tree = renderer.renderComponent(view, sessionProps(host.repo))
+    assert.deepEqual(repoOptions(tree), ['repo'], 'scoped to the repository itself, so its own name, not work/repo')
+  } finally {
+    renderer.render(null)
+    await host.dispose()
+    client.globals.restore()
+  }
+})
+
+test('client: without session props nothing names a workspace (the pre-M86 call shape)', { skip }, async () => {
+  const renderer = createRenderer()
+  const host = await makeHost()
+  const client = await loadClient(renderer, host)
+  const view = client.registrations.get('conversation.view').component
+  try {
+    renderer.renderComponent(view)
+    await flush(renderer, 12)
+    assert.ok(client.calls.length > 0)
+    for (const call of client.calls) {
+      assert.equal(Object.hasOwn(call.payload, 'workspace'), false, `${call.endpoint} must not invent a workspace`)
+    }
+    const tree = renderer.renderComponent(view)
+    assert.deepEqual(repoOptions(tree), ['work/repo'], 'the configured root still lists its repositories')
+  } finally {
+    renderer.render(null)
+    await host.dispose()
+    client.globals.restore()
+  }
+})
+
+test('client: moving to another session workspace drops the previous panel and bootstraps again', { skip }, async () => {
+  const renderer = createRenderer()
+  const host = await makeHost()
+  const client = await loadClient(renderer, host)
+  const view = client.registrations.get('conversation.view').component
+  try {
+    renderer.renderComponent(view, sessionProps(host.root))
+    await flush(renderer, 12)
+    const before = renderer.renderComponent(view, sessionProps(host.root))
+    assert.deepEqual(repoOptions(before), ['work/repo'], 'the parent directory shows the repository beneath it')
+    assert.ok(textOf(before).includes('当前会话不在某个 git 工作区里'), 'and says that is what it is showing')
+
+    renderer.renderComponent(view, sessionProps(host.repo))
+    await flush(renderer, 12)
+    const after = renderer.renderComponent(view, sessionProps(host.repo))
+    assert.deepEqual(repoOptions(after), ['repo'], 'the new scope replaced the old repository list')
+    assert.equal(textOf(after).includes('当前会话不在某个 git 工作区里'), false)
+    const handshakes = client.calls.filter((call) => call.endpoint === 'hello')
+    assert.ok(handshakes.length >= 2, 'the panel bootstraps once per workspace')
+    assert.equal(handshakes.at(-1).payload.workspace, host.repo)
+  } finally {
+    renderer.render(null)
+    await host.dispose()
+    client.globals.restore()
+  }
+})
+
+test('client: a workspace in no work tree offers the repositories beneath it instead of picking one', { skip }, async () => {
+  const renderer = createRenderer()
+  const host = await makeHost()
+  const client = await loadClient(renderer, host)
+  const view = client.registrations.get('conversation.view').component
+  try {
+    let tree = renderer.renderComponent(view, sessionProps(host.root))
+    await flush(renderer, 12)
+    tree = renderer.renderComponent(view, sessionProps(host.root))
+    assert.ok(find(tree, withClass('dshgw-gd-scope-note')) !== null, 'the panel labels the scope it is in')
+    assert.ok(textOf(tree).includes('该目录下的仓库'))
+    assert.ok(textOf(tree).includes('当前会话不在某个 git 工作区里'))
+    assert.ok(textOf(tree).includes('repo'), 'the repositories it found are listed by name')
+    assert.equal(client.calls.some((call) => call.endpoint === 'scanStart'), false, 'nothing is selected, so nothing is scanned')
+
+    clickText(tree, 'repo')
+    await flush(renderer, 12)
+    tree = renderer.renderComponent(view, sessionProps(host.root))
+    assert.ok(
+      client.calls.some((call) => call.endpoint === 'status' && call.payload.repo === host.repo),
+      'clicking a name opens that repository',
+    )
+    assert.equal(textOf(tree).includes('当前会话不在某个 git 工作区里'), false, 'the picker is replaced by the repository')
+    assert.deepEqual(repoOptions(tree), ['work/repo'], 'and the parent directory is what names it')
+  } finally {
+    renderer.render(null)
+    await host.dispose()
+    client.globals.restore()
+  }
+})
+
+test('client: an unusable session workspace says so and falls back to the account workspace', { skip }, async () => {
+  const renderer = createRenderer()
+  const host = await makeHost()
+  const client = await loadClient(renderer, host)
+  const view = client.registrations.get('conversation.view').component
+  const gone = join(host.root, 'gone')
+  try {
+    renderer.renderComponent(view, sessionProps(gone))
+    await flush(renderer, 12)
+    const settled = renderer.renderComponent(view, sessionProps(gone))
+    assert.ok(textOf(settled).includes('已回退到账号工作区'), 'the fallback is disclosed')
+    assert.ok(textOf(settled).includes('目录不存在'))
+    assert.deepEqual(repoOptions(settled), ['work/repo'], 'and the configured root is what is being shown')
+  } finally {
+    renderer.render(null)
+    await host.dispose()
+    client.globals.restore()
+  }
+})
+
 test('client: cancel stops the scan and the status line says so', { skip }, async () => {
   const renderer = createRenderer()
   const host = await makeHost()

@@ -137,7 +137,7 @@ bin/dshgw --config ./dshgw.yaml sandbox-exec --print <租户> | grep -E 'workspa
 应能看到 `--bind <workspace> /workspace` 与 `--chdir /workspace`。留空即关闭，行为与开启前逐字节一致；
 细节与边界见[设计文档](../../docs/design/m79-sandbox-workspace-view.md)。
 
-### 默认开启：租户侧 web 插件（M75）
+### 默认开启：租户侧 web 插件（M75；「变更」的作用域见 M86）
 
 每个账号的 dsh 开箱即带三块面板，**不需要**逐租户配置：
 
@@ -145,11 +145,21 @@ bin/dshgw --config ./dshgw.yaml sandbox-exec --print <租户> | grep -E 'workspa
 |---|---|---|
 | 「终端」（侧栏底） | `web-tty/` | 真 PTY（node-pty 从 dsh 发行版解析），跑在该账号自己的 bwrap 沙箱里 |
 | 「文件」（侧栏底） | `workspace-files/` | 一切路径夹紧在该账号 workspace 内 |
-| 「变更」（会话主区 View） | `git-diff/` | 只读；`--no-optional-locks`，不动 `.git/index` |
+| 「变更」（会话主区 View） | `git-diff/` | 只读；`--no-optional-locks`，不动 `.git/index`；**作用域跟随当前会话的 git 工作区**（M86：宿主用 `rev-parse --show-toplevel` 判定，判不出就只列该目录下的仓库并标注，夹紧仍是该账号 workspace） |
 
 **部署动作只有一条**：把仓库里 `cmd/dshgw/plugin/{web-tty,workspace-files,git-diff}/` 三个目录
 按原样放到 `deploy.plugin_path` 所在目录（与 `picker-clamp.js`、`account-card/`、`browser-workspace/` 同级）。
 本机部署根下的相对 `plugin_path`（`./cmd/dshgw/plugin/picker-clamp.js`）已经天然满足这一点，无需额外步骤。
+
+**升级时注意宿主半与浏览器半的生效方式不同**（M86 起）：只改 `client.js`/`client.src.js` 时，同步文件后
+浏览器刷新即可；改了 `index.js`/`git-service.js`/`rpc-handlers.js`（宿主半）则必须让每个租户的 dsh worker
+重启一次 —— 宿主模块走 Node 的 ESM 缓存，不重启不重载。影响面最小的是只重启一个租户：
+
+```bash
+printf '%s\n' '{"id":1,"op":"tenant-restart","name":"<租户>"}' | nc -U <部署根>/data/<部署名>/state/admin.sock
+```
+
+（会中断该租户正在进行的回合；`systemctl --user restart dshgw-verify.service` 则重启所有租户。）
 
 开关（独立形态写 `dshgw.yaml`，监督形态写 aigw 配置的 `dshgw.tenant_plugins`，三个都默认 `true`）：
 

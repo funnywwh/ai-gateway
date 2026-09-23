@@ -250,6 +250,217 @@ test('resolveRepo: refuses a repository outside the root, a missing path, and a 
   }
 })
 
+// ---- the scope: which git work tree a session workspace belongs to (M86) ----------------------
+
+/** One account workspace with a repository, a nested repository, and a plain directory above both. */
+async function makeScopedWorld() {
+  const root = await mkdtemp(join(tmpdir(), 'gd-scope-'))
+  const init = async (dir, files) => {
+    await mkdir(dir, { recursive: true })
+    git(dir, ['init', '-q', '.'])
+    git(dir, ['config', 'user.email', 'test@example.com'])
+    git(dir, ['config', 'user.name', 'Test'])
+    for (const [name, body] of Object.entries(files)) {
+      await mkdir(dirname(join(dir, name)), { recursive: true })
+      await writeFile(join(dir, name), body)
+    }
+    git(dir, ['add', '-A'])
+    git(dir, ['commit', '-qm', 'init'])
+  }
+  const repo = join(root, 'repo')
+  await init(repo, { 'keep.txt': 'one\n', 'src/inner.txt': 'inner\n' })
+  const holding = join(root, 'holding')
+  await mkdir(holding, { recursive: true })
+  await writeFile(join(holding, 'README.md'), 'plain directory\n')
+  await init(join(holding, 'nested'), { 'nested.txt': 'nested\n' })
+  return { root, repo, holding, nested: join(holding, 'nested') }
+}
+
+test('scope: a session workspace that is a repository scopes to that work tree', { skip }, async () => {
+  const world = await makeScopedWorld()
+  const service = await makeService(world)
+  try {
+    const scope = await service.scopeOf(world.repo)
+    assert.equal(scope.anchor, 'repo', 'the workspace itself is the work tree')
+    assert.equal(scope.root, world.repo)
+    assert.equal(scope.workspace, world.repo)
+    assert.equal(scope.reason, null)
+
+    const repos = await service.discover({ root: scope.root })
+    assert.deepEqual(repos.map((repo) => ({ rel: repo.rel, label: repo.label })), [{ rel: '.', label: 'repo' }])
+  } finally {
+    await rm(world.root, { recursive: true, force: true })
+  }
+})
+
+test('scope: a subdirectory of a repository scopes to the enclosing work tree', { skip }, async () => {
+  const world = await makeScopedWorld()
+  const service = await makeService(world)
+  try {
+    const scope = await service.scopeOf(join(world.repo, 'src'))
+    assert.equal(scope.anchor, 'repo', 'git answers for the work tree, not for the directory')
+    assert.equal(scope.root, world.repo)
+    assert.equal(scope.workspace, join(world.repo, 'src'))
+
+    const repos = await service.discover({ root: scope.root })
+    assert.deepEqual(repos.map((repo) => repo.rel), ['.'], 'the scope is the repository itself')
+  } finally {
+    await rm(world.root, { recursive: true, force: true })
+  }
+})
+
+test('scope: a directory that is in no work tree stays itself (its repositories are not a work tree)', { skip }, async () => {
+  const world = await makeScopedWorld()
+  const service = await makeService(world)
+  try {
+    const scope = await service.scopeOf(world.holding)
+    assert.equal(scope.anchor, 'workspace', 'git says this directory is in no repository')
+    assert.equal(scope.root, world.holding)
+    assert.equal(scope.reason, 'not-a-repo')
+
+    const repos = await service.discover({ root: scope.root })
+    assert.deepEqual(repos.map((repo) => repo.rel), ['nested'])
+  } finally {
+    await rm(world.root, { recursive: true, force: true })
+  }
+})
+
+test('scope: an unusable workspace falls back to the configured root', { skip }, async () => {
+  const world = await makeScopedWorld()
+  const outside = await mkdtemp(join(tmpdir(), 'gd-scope-out-'))
+  const service = await makeService(world)
+  try {
+    assert.deepEqual(
+      await service.scopeOf(undefined),
+      { workspace: null, root: world.root, anchor: 'fallback', reason: 'blank' },
+      'no workspace named is the pre-M86 call shape',
+    )
+    assert.equal((await service.scopeOf('')).reason, 'blank')
+    assert.equal((await service.scopeOf('\0')).reason, 'blank')
+    assert.equal((await service.scopeOf(join(world.root, 'gone'))).reason, 'not-found')
+    assert.equal((await service.scopeOf(outside)).reason, 'outside-root')
+    assert.equal((await service.scopeOf(join(world.repo, 'keep.txt'))).reason, 'not-a-directory')
+    for (const requested of [undefined, join(world.root, 'gone'), outside, join(world.repo, 'keep.txt')]) {
+      const scope = await service.scopeOf(requested)
+      assert.equal(scope.root, world.root, 'every rejected workspace uses the clamp root')
+      assert.equal(scope.anchor, 'fallback')
+      assert.equal(scope.workspace, null)
+    }
+  } finally {
+    await rm(world.root, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
+  }
+})
+
+test('scope: a work tree whose top is outside the clamp does not become the scope', { skip }, async () => {
+  // The account workspace sits inside a larger repository: git would answer with the outer work
+  // tree, which is not this plugin's to read — the workspace's own subtree is the answer instead.
+  const outer = await mkdtemp(join(tmpdir(), 'gd-outer-'))
+  git(outer, ['init', '-q', '.'])
+  git(outer, ['config', 'user.email', 'test@example.com'])
+  git(outer, ['config', 'user.name', 'Test'])
+  const account = join(outer, 'workspaces', 'tenant')
+  await mkdir(account, { recursive: true })
+  await writeFile(join(account, 'app.txt'), 'app\n')
+  git(outer, ['add', '-A'])
+  git(outer, ['commit', '-qm', 'init'])
+  const service = await makeService({ root: account })
+  try {
+    const scope = await service.scopeOf(account)
+    assert.equal(scope.anchor, 'workspace')
+    assert.equal(scope.reason, 'top-outside-root')
+    assert.equal(scope.root, account)
+  } finally {
+    await rm(outer, { recursive: true, force: true })
+  }
+})
+
+test('scope: a linked worktree (`.git` is a file) is still found by git', { skip }, async () => {
+  const world = await makeScopedWorld()
+  const linked = join(world.root, 'linked')
+  git(world.repo, ['worktree', 'add', '-q', linked, '-b', 'linked-branch'])
+  const service = await makeService(world)
+  try {
+    assert.equal(existsSync(join(linked, '.git')), true)
+    assert.match(await readFile(join(linked, '.git'), 'utf8'), /^gitdir:/, 'a linked worktree carries a .git file')
+    const scope = await service.scopeOf(linked)
+    assert.equal(scope.anchor, 'repo')
+    assert.equal(scope.root, linked)
+  } finally {
+    await rm(world.root, { recursive: true, force: true })
+  }
+})
+
+test('scope: one repository reported from two scopes carries the matching relative path', { skip }, async () => {
+  const world = await makeScopedWorld()
+  const service = await makeService(world)
+  try {
+    const fromAccount = await service.resolveRepo(world.repo, { root: world.root })
+    assert.equal(fromAccount.rel, 'repo', 'the account root sees it as a child directory')
+    const fromRepo = await service.resolveRepo(world.repo, { root: world.repo })
+    assert.equal(fromRepo.rel, '.', 'its own work tree sees it as the root')
+
+    // A relative path is resolved against the scope (and then clamped to the account workspace).
+    const byName = await service.resolveRepo('nested', { root: world.holding })
+    assert.equal(byName.path, world.nested)
+  } finally {
+    await rm(world.root, { recursive: true, force: true })
+  }
+})
+
+test('scope: discovery is remembered per scope, and every answer names the scope it used', { skip }, async () => {
+  const world = await makeScopedWorld()
+  const service = await makeService(world)
+  const { dispatch } = createHandlers({ service, config: { ...LIMITS }, trace: () => {}, log: () => {} })
+  try {
+    const scoped = await dispatch('repos', { workspace: world.repo })
+    assert.equal(scoped.anchor, 'repo')
+    assert.deepEqual(scoped.repos.map((repo) => repo.rel), ['.'])
+    assert.equal(scoped.root, world.repo)
+
+    const holding = await dispatch('repos', { workspace: world.holding })
+    assert.equal(holding.anchor, 'workspace')
+    assert.equal(holding.reason, 'not-a-repo')
+    assert.deepEqual(holding.repos.map((repo) => repo.rel), ['nested'])
+
+    const again = await dispatch('repos', { workspace: world.repo })
+    assert.deepEqual(again.repos.map((repo) => repo.rel), ['.'], 'the first scope did not pick up the second one’s list')
+    assert.deepEqual(service.discoveryRoots().sort(), [world.holding, world.repo].sort())
+
+    const plain = await dispatch('hello', {})
+    assert.equal(plain.root, world.root)
+    assert.equal(plain.anchor, 'fallback')
+    assert.equal(plain.workspace, null)
+    assert.equal(plain.reason, 'blank')
+
+    const hello = await dispatch('hello', { workspace: join(world.repo, 'src') })
+    assert.equal(hello.root, world.repo)
+    assert.equal(hello.anchor, 'repo')
+    assert.equal(hello.workspace, join(world.repo, 'src'))
+
+    const status = await dispatch('status', { workspace: world.repo, repo: world.repo })
+    assert.equal(status.repo.rel, '.')
+  } finally {
+    await rm(world.root, { recursive: true, force: true })
+  }
+})
+
+test('scope: one workspace is resolved once, not once per call', { skip }, async () => {
+  const world = await makeScopedWorld()
+  const service = await makeService(world)
+  try {
+    assert.equal((await service.scopeOf(world.repo)).anchor, 'repo')
+    // Remove the very evidence git would need: a second resolution would now answer "workspace".
+    await rm(join(world.repo, '.git'), { recursive: true, force: true })
+    const cached = await service.scopeOf(world.repo)
+    assert.equal(cached.anchor, 'repo', 'the answer is cached for this workspace, so no git process per call')
+    assert.equal(service.scopeCache.size, 1)
+    assert.equal((await service.scopeOf(join(world.root, 'gone'))).anchor, 'fallback', 'a workspace that is gone falls back')
+  } finally {
+    await rm(world.root, { recursive: true, force: true })
+  }
+})
+
 // ---- the fast half: index-level change sets -------------------------------------------------
 
 test('stagedChanges: reports the staged set only, with A/M/D statuses', { skip }, async () => {

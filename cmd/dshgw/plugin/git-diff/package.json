@@ -1,6 +1,6 @@
 {
   "name": "dshgw-git-diff",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Read-only git change review panel for the dsh web GUI: a «变更» View in the session's main area, left the changed-file list and right a two-column side-by-side diff, over dsh's own authenticated RPC channel",

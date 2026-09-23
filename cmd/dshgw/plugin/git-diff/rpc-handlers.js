@@ -22,20 +22,49 @@ export function createHandlers({
   service, config, trace = () => {}, log = () => {},
   fail = defaultFail, messageOf = defaultMessageOf,
 }) {
-  /** Resolve the repository every repository-scoped endpoint needs. */
-  const repoOf = async (payload) => {
+  /**
+   * Resolve the scope every repository-scoped endpoint works in.
+   *
+   * The browser names the current session's workspace on every call because the RPC channel carries
+   * no session identity; the host decides what that means (its git work tree, the directory itself
+   * when git says it is in no work tree, or the configured root when nothing usable was named).
+   */
+  const scopeOf = async (payload) => await service.scopeOf(payload?.workspace)
+
+  /** The scope plus the repository the call names, both resolved and clamped. */
+  const targetsOf = async (payload) => {
+    const scope = await scopeOf(payload)
     const target = payload?.repo ?? service.pinnedRepo?.path ?? null
-    return await service.resolveRepo(target)
+    return { scope, repo: await service.resolveRepo(target, { root: scope.root }) }
   }
 
+  /** Resolve the repository every repository-scoped endpoint needs. */
+  const repoOf = async (payload) => (await targetsOf(payload)).repo
+
   const handlers = {
-    hello() {
-      return { ...service.hello(), pinnedRepo: service.pinnedRepo ?? null }
+    async hello(payload) {
+      const scope = await scopeOf(payload)
+      return {
+        ...service.hello(scope.root, scope.anchor, scope.workspace),
+        pinnedRepo: service.pinnedRepo ?? null,
+        root: scope.root,
+        workspace: scope.workspace,
+        anchor: scope.anchor,
+        reason: scope.reason ?? null,
+      }
     },
 
     async repos(payload) {
-      const repos = await service.discover({ refresh: payload?.refresh === true })
-      return { repos, cachedAt: service.discovery.at }
+      const scope = await scopeOf(payload)
+      const repos = await service.discover({ root: scope.root, refresh: payload?.refresh === true })
+      return {
+        repos,
+        cachedAt: service.discoveryAt(scope.root),
+        root: scope.root,
+        workspace: scope.workspace,
+        anchor: scope.anchor,
+        reason: scope.reason ?? null,
+      }
     },
 
     async status(payload) {
@@ -85,9 +114,16 @@ export function createHandlers({
         pluginDir: config.pluginDir,
         traceFile: config.trace === false ? null : config.traceFile,
         git: { available: service.gitAvailable, version: service.gitVersion },
+        // The clamp and the fallback; the scope of a call lives in that call's `scope` trace line.
         root: service.root,
+        roots: service.discoveryRoots(),
+        scopeCache: [...service.scopeCache.entries()].map(([workspace, entry]) => ({
+          workspace,
+          root: entry.value.root,
+          anchor: entry.value.anchor,
+        })),
         pinnedRepo: service.pinnedRepo ?? null,
-        repos: service.discovery.repos,
+        repos: [...service.discovery.values()].flatMap((entry) => entry.repos.map((repo) => repo.path)),
         jobs: [...service.jobs.values()].map((job) => ({ id: job.id, state: job.state, files: job.files.length, chunks: job.plan.length })),
         cachedRepos: [...service.results.keys()],
         calls: counts,

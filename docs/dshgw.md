@@ -402,7 +402,7 @@ feishu:
 | `$HOME`、`~` | 短路径（`workerEnv` 导出 `HOME=<view>`；未配置时 = 宿主 workspace 路径） |
 | `/etc/passwd` 的家目录字段 | 同一个值 —— 两者必须一致，否则 `getpwuid()` 与 `$HOME` 又会分叉 |
 | 目录选择器（`picker-clamp`）的 root | 短路径。选择器决定"会话跑在哪条路径上"，所以它才是让新会话真的变短的那一环 |
-| 「终端」`cwd`/`cwdRoot`、文件管理器与变更审阅的 `root` | 短路径（这三个插件在沙箱**内**解析路径） |
+| 「终端」`cwd`/`cwdRoot`、文件管理器与变更审阅的 `root` | 短路径（这三个插件在沙箱**内**解析路径）。变更面板的**作用域**也是短路径：会话工作区落在短路径上，它的 git 工作区判定自然也在同一视图内；M79 之前创建的老会话仍带长路径 cwd，夹紧会拒绝它并回退到 `root`（M86，见 §7f） |
 | 预注册工作区（`workspace_seed`） | 短路径 + 种子目录名（只影响新建/重新轮转的租户） |
 
 **为什么是绑定而不是符号链接**：进程的工作目录由 `getcwd()` 报告，它走的是挂载树，而不是"你进来的那个符号
@@ -635,7 +635,7 @@ EBUSY 就惰性 `-u -z`，仍不行就杀掉 sshfs 守护进程 / abort 这条 F
 |---|---|---|---|
 | 「终端」（侧栏底） | `web-tty/` | 浮动终端，每个标签一个真 PTY（`node-pty` 从 dsh 发行版解析），xterm.js 渲染；面板可拖动/缩放/最大化，`Ctrl+反引号` 开关 | PTY 起在该账号**自己的 bwrap 沙箱**里，能力等同于它的 bash 工具；`cwd`/`cwdRoot` 都钉在它的 workspace；交互 shell 的默认别名、`LS_COLORS` 与彩色提示符来自每租户渲染的 `/etc/bash.bashrc` 视图（§7） |
 | 「文件」（侧栏底） | `workspace-files/` | 浏览/预览/编辑/上传/下载/改名/删除 | 一切路径夹紧在 `root`（该账号 workspace）内，符号链接越界即拒 |
-| 「变更」（会话主区 View） | `git-diff/` | 左列改动文件、右侧两栏 diff | 只读：没有 stage/checkout/discard，git 一律 `--no-optional-locks`，`.git/index` 字节不变 |
+| 「变更」（会话主区 View） | `git-diff/` | 左列改动文件、右侧两栏 diff | 只读：没有 stage/checkout/discard，git 一律 `--no-optional-locks`，`.git/index` 字节不变。**作用域跟随当前会话的 git 工作区**（M86）：浏览器每次调用报会话工作区，宿主用 git 自己的 `rev-parse --show-toplevel` 判定（仓库根 / 仓库子目录 / `.git` 文件的 linked worktree / sshfs 挂载上的仓库都认）；git 说"不在任何工作区里"就只列该目录下的仓库并如实标注，判不出则回退到行里的 `root`。**夹紧边界始终是该账号 workspace**（会话只能收窄作用域，不能放宽） |
 
 **开关**（三个都默认 `true`；关掉即从每个租户的 profile 移除该行，既有租户在下次 worker 启动时生效）：
 

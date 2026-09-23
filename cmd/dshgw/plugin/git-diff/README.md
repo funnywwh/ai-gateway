@@ -4,6 +4,13 @@ A read-only git change review surface inside the dsh web GUI: a **变更** View 
 area (beside 对话 and 轨迹), the changed files down the left, and a **two-column side-by-side diff** on
 the right for whichever file you click.
 
+Since M86 the View follows the **session's own git work tree**: the browser names the current
+session's workspace on every call, and the host asks git which work tree that directory is in
+(`rev-parse --show-toplevel`). A session in a repository — or in any directory inside one — shows that
+repository; a session in a directory that is in no work tree shows the repositories underneath it and
+says so instead of pretending one of them is "the" workspace. The account workspace remains the clamp:
+nothing outside it is ever read.
+
 This plugin is out-of-tree in the sense that matters: the published distributions ship no git
 review, and everything third-party on npm targets the 0.1.5/0.1.6 client generation — the same
 reason `dshgw-workspace-files` and `dshgw-web-tty` exist in this deployment. It composes the feature
@@ -19,6 +26,10 @@ own patch instead.
 
 - Adds a **变更** tab to the session's main area. The tab mounts only while it is selected, so nothing
   polls while you are reading the conversation.
+- **Scopes itself to the session's git work tree.** The View reads the current session's `cwd` from
+  the shell's session feed and names it on every RPC call; the host resolves it with git itself. The
+  scope label beside the title always states which promise is being kept — the repository's name, or
+  **该目录下的仓库** when the session's directory is in no work tree, or an explicit fallback warning.
 - **Changed files on the left**: one row per path, with a status badge (`M`/`A`/`D`/`?`), the
   directory in a lighter tone and the file name in a brighter one, a `已暂存` / `未跟踪` tag where it
   applies, plus filter chips, a free-text path filter, and a running count per side.
@@ -40,12 +51,16 @@ own patch instead.
   environment sets `GIT_OPTIONAL_LOCKS=0`, so git neither refreshes nor locks `.git/index`. There is no
   stage/unstage/discard/commit endpoint. `host.test.mjs` asserts that the index's bytes, size and mtime
   survive a full scan plus every diff side.
-- **It never leaves the workspace.** `config.root` is both the discovery base and the clamp: repository
-  paths are resolved through `realpath` and must live under it, and each diff path is rejected if it is
-  absolute, contains `..`, a backslash or a NUL, or resolves — symlink included — outside the
-  repository. Every path reaches git after `--`, so a name that looks like an option is data.
+- **It never leaves the workspace.** `config.root` is the clamp: repository paths are resolved through
+  `realpath` and must live under it, and each diff path is rejected if it is absolute, contains `..`,
+  a backslash or a NUL, or resolves — symlink included — outside the repository. Every path reaches git
+  after `--`, so a name that looks like an option is data. A session may *narrow* the scope (its own
+  git work tree), never widen it.
 - **It never guesses.** The panel shows git's own diff text; the browser half parses it and nothing
   else. There is no second diff implementation that could disagree with `git diff` on the command line.
+  The scope is decided the same way: git's `rev-parse --show-toplevel` answers "which work tree is this
+  directory in", and when git says "none" the panel says so instead of inferring a repository from the
+  session's tool history (a guess that is wrong exactly when a session worked somewhere else).
 
 ## Why this design: the workspace is a network filesystem
 
@@ -102,12 +117,26 @@ committed yet.
 ```
 browser (client.js)                             tenant node process (index.js)
   View  in conversation.view id 'git-diff'        ctx.connection.rpc.handle('/dshgw-git-diff')
-    left  changed-file list  <-- incremental ---    rpc-handlers.js: hello/repos/status/scanStart/
-    right two-column diff    <-- unified text ---     scanStatus/scanCancel/diff/diag
-        |                                           git-service.js: one clamp, one scan job,
-        |  POST /dshgw-git-diff/<endpoint>            in-memory results + cache.json
-        `--------------------------------------->   git, read-only, over the sshfs mount
+    props.sessionId + useSessions                   rpc-handlers.js: hello/repos/status/scanStart/
+      -> the session's workspace, on every call       scanStatus/scanCancel/diff/diag
+        |                                           git-service.js: scopeOf (git work tree) + one
+        |  POST /dshgw-git-diff/<endpoint>            clamp, one scan job per repository, in-memory
+        `------{ workspace, repo, ... }---------->    results + cache.json
+                                                    git, read-only, over the sshfs mount
 ```
+
+- **One scope per call, resolved by git.** Every repository-scoped endpoint carries `workspace`: the
+  current session's directory, which the browser half reads from the shell's own session feed
+  (`useSessions((s) => s.byId[sessionId]?.cwd)`). The host clamps it to `config.root`, then runs
+  `git -C <workspace> rev-parse --show-toplevel` — the same read-only plumbing the rest of the plugin
+  uses — and answers with `{ root, workspace, anchor, reason }`: `anchor: 'repo'` means the scope is
+  that work tree, `'workspace'` means git says the directory is in none (so the panel lists the
+  repositories beneath it and labels itself **该目录下的仓库**), `'fallback'` means nothing usable was
+  named and the configured root is being used, which is what every call did before M86. One
+  resolution per workspace is cached for 30 s, so a poll loop never spawns git per request.
+- **Moving between sessions is a fresh panel.** This half's state is per page, not per View mount, so
+  a different session workspace clears the repository list, rows, open diff and scan (cancelling a
+  running one) and bootstraps again; answers from the previous scope that arrive late are discarded.
 
 - **Transport**: `ctx.connection.rpc.call` — the same authenticated, same-origin channel the shipped
   ssh/browser-workspace plugins and the other `dshgw-*` plugins use. No websocket, no extra port, no
@@ -143,10 +172,10 @@ browser (client.js)                             tenant node process (index.js)
 | `client.src.js` | browser half, hand-written |
 | `build-client.mjs` | stamps `client.src.js` into `client.js` (nothing is vendored) |
 | `client.js` | **generated** — the file dsh serves; edit `client.src.js` and rebuild |
-| `trace.jsonl` | append-only diagnostics (activation, discovery, plan, per-chunk failures, every diff) |
+| `trace.jsonl` | append-only diagnostics (activation, scope resolutions, discovery, plan, per-chunk failures, every diff) |
 | `cache.json` | the last completed scan of each repository, so a refresh paints at once |
-| `test/host.test.mjs` | 24 tests: helpers, config, discovery, the clamp, scans, diffs, the read-only guarantee |
-| `test/client.test.mjs` | 8 tests: the diff parser, then the built bundle driven against the real host half |
+| `test/host.test.mjs` | 34 tests: helpers, config, discovery, the scope resolution, the clamp, scans, diffs, the read-only guarantee |
+| `test/client.test.mjs` | 14 tests: the diff parser, the session scope, then the built bundle driven against the real host half |
 
 The bundle declares no top-level bindings, because dsh concatenates several plugin bundles into one
 script scope; React comes from the shell's frozen module table, so the client half requires only `react`
@@ -203,10 +232,10 @@ inside a `limits` object (`limits.maxFiles`, …) instead of as a flat key.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `root` | `process.cwd()` (the tenant workspace) | The discovery base **and** the clamp; resolved through `realpath` at activation, and a root that does not exist fails activation loudly |
+| `root` | `process.cwd()` (the tenant workspace) | The **clamp** and the **fallback scope**: every repository and diff path must resolve inside it, and a call that names no usable session workspace is served from it (resolved through `realpath` at activation; a root that does not exist fails activation loudly) |
 | `rootLabel` | the root's basename | How the root is labelled |
-| `repo` | unset | Pin one work tree instead of discovering; it must still live under `root` |
-| `maxRepoDepth` | `6` | How deep the discovery walk looks for a `.git` |
+| `repo` | unset | Pin one work tree instead of discovering; it must still live under `root`. A pin wins over the session scope — this row is not used by the gateway |
+| `maxRepoDepth` | `6` | How deep the discovery walk looks for a `.git` (only when the scope is a plain directory) |
 | `maxRepoCandidates` | `400` | Directories the discovery walk may visit in total |
 | `chunkTimeoutMs` | `90000` | Budget for one chunk; a chunk that exceeds it is marked and skipped |
 | `chunkTargetFiles` | `25000` | Roughly how many tracked files one chunk may cover, since each chunk re-reads the index; `0` scans one directory per chunk |
@@ -222,44 +251,76 @@ inside a `limits` object (`limits.maxFiles`, …) instead of as a flat key.
 
 ## Endpoints
 
+Every repository-scoped endpoint takes an optional `workspace` — the caller's session workspace. It
+may narrow the scope to that directory's git work tree; it can never move the scope outside
+`config.root`, and an unusable value answers with `anchor: 'fallback'` and the configured root.
+
 | Endpoint | Payload | Value |
 |---|---|---|
-| `hello` | — | `{version, root, rootLabel, git:{available,version}, repo, untracked, autoScan, limits}` |
-| `repos` | `{refresh?}` | `{repos:[{path,rel,label,writable}], cachedAt}` — one entry per work tree, writable ones first |
-| `status` | `{repo}` | `{repo, meta:{head,short,subject,branch,detached,unborn}, staged[], scan, files[], total}` — always fast (index level + cache) |
-| `scanStart` | `{repo, scopes?, includeUntracked?, includeStaged?, force?}` | the job snapshot: `{jobId, state, plan[], chunksDone, chunksTotal, files[], total, truncated}` |
+| `hello` | `{workspace?}` | `{version, root, rootLabel, anchor, workspace, reason, git:{available,version}, repo, pinnedRepo, untracked, autoScan, limits}` |
+| `repos` | `{workspace?, refresh?}` | `{repos:[{path,rel,label,writable}], cachedAt, root, workspace, anchor, reason}` — one entry per work tree, writable ones first |
+| `status` | `{workspace?, repo}` | `{repo, meta:{head,short,subject,branch,detached,unborn}, staged[], scan, files[], total}` — always fast (index level + cache) |
+| `scanStart` | `{workspace?, repo, scopes?, includeUntracked?, includeStaged?, force?}` | the job snapshot: `{jobId, state, plan[], chunksDone, chunksTotal, files[], total, truncated}` |
 | `scanStatus` | `{jobId?}` | the same snapshot, at any point during the run |
 | `scanCancel` | `{jobId?}` | the cancelled snapshot; the child is signalled and its slot freed |
-| `diff` | `{repo, path, side, context?}` | `{path, side, oldLabel, newLabel, unified, binary, empty, truncated, stats:{additions,deletions}}` |
-| `diag` | — | version, pid, node, git, root, pinned repo, discovered repos, live jobs, cached repositories, per-endpoint call counts |
+| `diff` | `{workspace?, repo, path, side, context?}` | `{path, side, oldLabel, newLabel, unified, binary, empty, truncated, stats:{additions,deletions}}` |
+| `diag` | — | version, pid, node, git, root (the clamp), roots (every discovery base), scopeCache, pinned repo, discovered repos, live jobs, cached repositories, per-endpoint call counts |
+
+`anchor` is `'repo'` (the scope is the session workspace's git work tree), `'workspace'` (git says the
+workspace is in no work tree, so the scope is the directory itself) or `'fallback'` (the configured
+root; `reason` then says why: `blank`, `not-found`, `outside-root`, `not-a-directory`,
+`not-a-repo`, `top-outside-root`).
 
 ## Verify
 
 ```sh
 cd $DSH_HOME/plugins/git-diff
 npm run build        # regenerate client.js after editing client.src.js
-npm test             # 32 tests: host half against real repositories, then the built bundle end to end
-tail -n 20 trace.jsonl   # activation, discovery, plan, per-chunk failures, every diff
+npm test             # 48 tests: host half against real repositories, then the built bundle end to end
+tail -n 20 trace.jsonl   # activation, scope resolutions, discovery, plan, per-chunk failures, every diff
 ```
 
 Two of those tests exist to keep the two hard-won properties from regressing: the index-immutability
 test (which would catch a return to the porcelain's index refresh) and the replaced-inode test (which
-would catch a return to full `checkStat`).
+would catch a return to full `checkStat`). Four more pin the scope: a repository, a repository
+subdirectory, a directory in no work tree, and an unusable workspace each resolve the way git says.
 
 `npm test` needs no browser and no network: the host tests build temporary git repositories on a real
 filesystem (skipped with a clear message if `git` is missing), and the client tests mount the real
 `client.js` with a stubbed DOM and a stub React against the real endpoint table, driving
 open → staged list → scan → click a file → two-column diff → switch comparison → filter → rescan →
-cancel.
+cancel, plus a session-workspace switch that must clear the previous panel.
 
-In the GUI after a refresh: the main area gains a **变更** tab. On this tenant it opens on
-`ssh/aipc/home/winger/ZT20Q` (the writable mount; the read-only `browser/ZT20Q` mirror of the same tree
-is listed after it and marked 只读), shows the staged set at once, and starts a chunked scan that fills
-the list in from the cheap end. `trace.jsonl` gains `{"event":"discover"}`, `{"event":"plan"}` and
+In the GUI after a refresh: the main area gains a **变更** tab, scoped to the session you are in. A
+session opened in a repository shows that repository alone (the label beside 变更 is its name); a
+session opened in a parent directory (this tenant has `…/work` next to `…/work/ai-gateway`) shows
+**该目录下的仓库** with the repositories listed and one click away instead of silently picking one. On
+the AOSP tenant, a session in the ssh mount opens the same tree it always did — the writable
+`ssh/aipc/...` view rather than the read-only `browser/` mirror — while a session in the repository
+no longer lists its siblings. `trace.jsonl` gains `{"event":"discover"}` with the scope as `root`,
+`{"event":"scope"}` whenever the anchor is not a work tree, `{"event":"plan"}` and
 `{"event":"scan-start"}`, then one `scan-end` with the per-chunk timings.
 
 ## Known limitations
 
+- **The scope is the session's workspace, not its history.** A session whose workspace is not inside a
+  work tree (this deployment's `…/work`, or an account workspace root that is a parent of
+  repositories) shows the repositories beneath it and labels them as such; the panel does not try to
+  deduce which of them the session touched. Sessions in this deployment rarely leave traces that would
+  make that deduction honest: of one sampled `…/work` session's 67 tool calls, every one was `bash`
+  (nothing in DSH records the files a shell command wrote), and it worked in `/tmp/ssh-probe2` — outside
+  the account workspace altogether. Sessions in a repository, by contrast, matched their work tree in
+  every path reference measured (595 of 595 across three sessions), which is why the cwd → `git
+  rev-parse --show-toplevel` rule is the one implemented.
+- **A session with no `cwd`** (or a shell that hands the View no session) leaves the panel on the
+  configured root — the pre-M86 behaviour, with no scope label.
+- **A work tree whose top is above the account workspace** (a workspace that happens to live inside a
+  larger repository) is not shown as the scope: the panel stays on the workspace's own subtree rather
+  than reading a repository that extends beyond the clamp.
+- **M79 short paths**: the scope follows the session's workspace as recorded, and long/short paths are
+  two bind-mount views, not one canonical path. A session created before `deploy.sandbox_workspace`
+  was enabled still carries the long path, which is outside the short-path clamp, so the panel falls
+  back to the account workspace and says so.
 - **A full scan of this repository takes minutes, not seconds.** 805,368 files must be stat-ed over the
   network; there is no way around that except scoping the scan, which is why 扫描范围 exists and why the
   chunks are ordered cheapest-first and cancellable.

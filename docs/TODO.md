@@ -1130,3 +1130,33 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 - [ ] **观察项（非阻塞）**：整段回放让每次提问的输入 token 随会话增长（22 轮的小会话已到 7.5K 输入）。
       线上若开始出现「本会话历史已超出该模型的上下文上限」的失败，说明到了该给该部署设窗口、换大上下文模型、
       或做历史摘要压缩（压缩是另一个里程碑，本次明确不做）
+## M86 「变更」插件跟随当前会话的 git 工作区
+> 需求原话：「变更 插件 应该和当前会话的工作区关联」→「跟随当前会话的 git 工作区」→
+> 「不能准确的到当前会话对应的 git 工作区吗？」。设计：`docs/design/m86-session-worktree-scope.md`；
+> 规格：`docs/dshgw.md` §7f、`deploy/dshgw/README.md`「默认开启：租户侧 web 插件」、
+> `cmd/dshgw/plugin/git-diff/README.md`。零 Go 改动（行渲染与 `tenant_plugins` 开关不变）。
+
+- [x] 宿主半 `git-service.js`：新增 `scopeOf(workspace)`（夹紧 → `git -C <W> rev-parse --show-toplevel` →
+      判不出就退「该目录」），发现缓存改 per-root（30s/8 条），`resolveRepo` 增加按作用域的 `root` 与
+      新的缓存键，`hello`/`diag` 报 `root`/`anchor`/`roots`
+- [x] `rpc-handlers.js`：仓库作用域端点统一先解析作用域并回传 `{root, workspace, anchor, reason}`；
+      `index.js` VERSION 0.1.0 → 0.2.0（`package.json` 同步），激活日志标明 root 是夹紧/回退根
+- [x] 浏览器半 `client.src.js` → `client.js`：从 `props.sessionId` + `useSessions(...cwd)` 取会话工作区，
+      每次调用带上；换工作区即清空并重新引导（generation 守卫丢弃迟到响应、取消旧扫描）；
+      仓库记忆改按工作区存（`repoByWorkspace`，v1 旧值丢弃）；作用域标注（仓库名 / 该目录下的仓库 /
+      回退告警）与「不在 git 工作区里」的空态 + 可点仓库名
+- [x] 测试：宿主 +9（仓库/子目录/非工作区目录/四种回退/top 在夹紧之外/`.git` 文件的 linked worktree/
+      两作用域的 `rel`/按根发现缓存与 `hello` 口径/一次解析的缓存），客户端 +5（每次调用带工作区、
+      无 props 时不带、换工作区重新引导、非工作区目录不自动选仓库且可点选、回退提示）；
+      `npm test` **48/48**（基线 34 + 新增 14），`node build-client.mjs` 重建 `client.js`
+- [x] 文档：设计文档、插件 README（作用域/接口/限制/验证）、`docs/dshgw.md` §7a/§7f、
+      `deploy/dshgw/README.md`（含宿主半改动需重启 worker 的口径）
+- [ ] **待宿主执行（部署 + 线上验收）**：把 `cmd/dshgw/plugin/git-diff/` 同步到
+      `/home/winger/work/ai_gateway/cmd/dshgw/plugin/git-diff/`（沙箱内该目录只读），
+      `cmp` 确认后按租户重启 worker：
+      `printf '%s\n' '{"id":1,"op":"tenant-restart","name":"dsh-tenant"}' |
+      nc -U /home/winger/work/ai_gateway/data/dshgw-verify/state/admin.sock`，再刷新页面
+- [ ] **待宿主执行（真浏览器走查）**：① 本会话（workspace=`…/work/ai-gateway`）打开「变更」只看到
+      `ai-gateway` 一个仓库；② 会话开在仓库子目录时仍是该仓库；③ workspace=`…/work` 的会话显示
+      「该目录下的仓库」且不自动选中；④ 老会话（M79 之前的长路径 cwd）显示回退提示；
+      ⑤ `plugin-state/git-diff.trace.jsonl` 出现 `version=0.2.0` 与作用域事件
