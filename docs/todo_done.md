@@ -5810,3 +5810,46 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 部署脚本 | 工作区根 `deploy-aigw-4.2.0.sh`（未入 git）：`--check-profile` 只渲染并打印绑定 → 默认段幂等加键（带 `.bak`）+ `.new`+`mv` 换二进制 + 重启 + 60s 就绪门禁 + 打印每个 worker argv 里是否出现 `/workspace`；门禁失败装回旧二进制与旧 `dshgw.yaml` 再重启 |
 | 回滚 | 还原 `$ROOT/dshgw.yaml.bak-*`（或删键）+ 装回 `$ROOT/data/prev/bin/` 的上一个 `dshgw` + 重启 `dshgw-verify`；删键即回到今天的行为 |
 | 待人工 | ① 宿主执行 `deploy-aigw-4.2.0.sh`（含重启）；② 重启后在**新会话**里确认 `pwd`/`echo $HOME` 是 `/workspace`、`ls ~` 是工作区内容、选择器/终端/文件面板根是 `/workspace`、旧会话仍可打开；③ 允许 `bwrap --unshare-pid` 的宿主上跑真机版 `make dshgw-sandbox-test`（本会话沙箱禁非特权 userns，只跑了单测） |
+
+## M80 API Key 批量导入与按 Key 查账户（2026-09-23）
+
+> 需求原话：「实现 mcp 导入自定 apikey admin 接口，实现通过 apikey 查询账户的 admin 接口，mcp 客户端要能调用」。
+> 设计：`docs/design/m80-key-batch-import-and-lookup.md`；规格：`docs/mcp.md` §4（示例）/§5（明文口径）/§8（限制）、
+> `docs/sub2api-migration.md` §4.5。
+>
+> 里程碑编号：本项开工时仓库里已有两条并行分支占了 **M78**（`m78-request-log-route-path`）与
+> **M79**（`feat/m79-sandbox-workspace-view`），故本里程碑顺延为 M80。
+
+- [x] **接口 1：批量导入** `POST /admin/api/v1/keys/import-batch`（`admin_import_keys`，`Role: admin`，
+      `Dangerous` + `ConfirmReason`）。每项凭据二选一：**明文** `api_key`（网关自己算前缀与 SHA-256）
+      或 M43 的 `key_prefix`+`key_hash`（明文不进网关）；两种形式可混批。上限 200 项/次，`dry_run` 只演练。
+- [x] **整批原子**：先全量校验（name、凭据二选一、账户存在、标签存在、policy 严格解析、status、expires_at、
+      批内前缀去重、与既有行冲突），通过后才 `store.UpsertAPIKeys` 单事务写入；任一项失败即整体拒绝并点名
+      `keys[i].<字段>`（`error.param` 形如 `keys[1].api_key`），**一行都不写、一条审计都不写**。
+- [x] **明文护栏**：`secret.Normalize` 后必须可打印 ASCII、无空白、长度 16–512。16 = `secret.PrefixLen+4`：
+      `secret.Prefix` 对短于 12 字符的 key 会返回整把，前缀列会因此存下整把密钥（明文泄漏到列表页）。明文不落库、
+      不返回、不进审计；审计行只记 `{name, account_id, key_prefix, created, batch:true, credential:"plaintext"|"hash", tags_set, status}`。
+- [x] **接口 2：归属查询** `POST /admin/api/v1/keys/lookup`（`admin_lookup_key`，`Role: viewer`，非危险）。
+      给明文（`matched:"hash"`，常量时间比对）或 12 字符前缀（`matched:"prefix"`），回答 `key` 与 `account`
+      两个对象；未命中 `{found:false,reason:"unknown_prefix"}`，哈希不匹配 `{found:false,reason:"hash_mismatch"}`
+      **不回显命中的行**；只报归属与状态，不做鉴权判定（`status`/`expires_at` 如实报告）。用 POST 是为了
+      不让明文进 URL。
+- [x] **MCP 可调（零 MCP 代码改动）**：两条路由进 `internal/httpapi/admin_routes.go` 的同一张真源表，即自动出现在
+      `admin_endpoints`、可由 `admin_describe` 给出 schema/示例、由 `admin_request` 执行（导入需 `confirm=true`
+      且 scope=admin；查询 scope=admin_read 即可）。`internal/mcpsrv` 未改。
+- [x] **实现**：`internal/httpapi/admin_keys.go`（两个 handler + `plaintextCredential`/`lookupPlaintext`/
+      `locateBatchError` 等）、`internal/httpapi/admin_field_schemas.go`（`keysBatchSchema`/`keysBatchExample`）、
+      `internal/httpapi/admin_routes.go`（两条路由 + 字段形状）、`internal/httpapi/admin.go`（`AdminStore` 增
+      `UpsertAPIKeys`；抽出 `importedPrefix` 供查询复用）、`internal/store/keys.go`（`UpsertAPIKeys` 单事务 +
+      单条/批量共用 `upsertAPIKeySQL`）。
+- [x] **测试**：`internal/httpapi/admin_keys_test.go`（20 个用例/子用例：明文与哈希与混批可用性、响应/审计/库内
+      无密钥材料、9 类原子性失败表、明文形状表、幂等重跑、dry_run、**负缓存失效**（先 401 → 导入 → 立即 200）、
+      viewer 403、lookup 的命中/前缀/未命中/哈希不匹配/disabled/过期/形状表、viewer 可查）、
+      `internal/store/keys_batch_test.go`（单事务原子性与 id 复用）、`internal/httpapi/mcp_admin_test.go`
+      （MCP 桥：目录暴露、describe 完整、无 confirm 被拒、scope=admin 可导入且导入的 key 立即可用、
+      scope=admin_read 只能查不能导）、`internal/httpapi/admin_routes_test.go`（`expectedAdminPatterns` 增两条）。
+- [x] **文档**：设计文档、`docs/mcp.md`（§4 新增「Key 批量导入与归属查询示例（M80）」、§5 明文口径、§8 两条限制、
+      路由计数 86 → 143）、`docs/sub2api-migration.md` §4.5（批量化与逐把对账）、README 文档表两行、
+      `docs/TODO.md` 的 M80 小节（未完成项：控制台 UI、主机走查、发版）。
+- [x] **验证（worktree 内）**：`go build ./...`、`go vet ./...`、`go test ./...` 全绿；`go test ./internal/httpapi/
+      ./internal/store/ ./internal/mcpsrv/` 亦全绿。本提交不升 `VERSION`、不部署。

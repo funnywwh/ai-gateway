@@ -67,7 +67,7 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
 
 ## 4. 后台工具：渐进披露的三个入口（scope ≠ query 时出现）
 
-刻意**不是**"每个接口一个工具"：管理面有 86 条路由，一次性塞进客户端上下文既昂贵又难发现。
+刻意**不是**"每个接口一个工具"：管理面有 143 条路由，一次性塞进客户端上下文既昂贵又难发现。
 代之以三个入口，模型先看概要、再查用法、最后执行：
 
 | 工具 | 入参 | 返回 |
@@ -254,6 +254,40 @@ MCP 只读不可写；「谁在排队」看 `admin_stats.provider_capacity.provi
 （保留最后一次成功读数），因此 `used_micros` 与上游侧的账单可能有几秒的时差——它是运营护栏，不是账务凭证。
 **读这些只需要 `admin_read`**，写（含复位）需要 `admin`。
 
+### Key 批量导入与归属查询示例（M80）
+
+两个入口，都随路由表自动出现在 `admin_endpoints` 里（`group=keys`）：`admin_import_keys`（危险接口，
+需要 `confirm:true` 且令牌 scope=admin）与 `admin_lookup_key`（只读，`admin_read` 就够）。
+
+**批量导入**：每项凭据二选一——`api_key`（**明文**，网关自己算前缀与 SHA-256）或 `key_prefix`+`key_hash`
+（与 `admin_import_key` 相同的迁移形式，明文不进网关）；两种形式可以混在同一批：
+
+```json
+{"name":"admin_request","arguments":{
+  "name":"admin_import_keys","confirm":true,
+  "body":{"keys":[
+    {"name":"laptop","account":"acme","api_key":"sk-live-…"},
+    {"name":"phone","account_id":4,"key_prefix":"sk-live-abcd","key_hash":"<64 位 hex>","tags":["blue"]}
+  ]}
+}}
+```
+返回：`{dry_run,total,created,updated,keys:[{index,id?,name,account_id,key_prefix,status,created,tags}]}`。
+**整批原子**：任何一项校验失败或前缀被别人占用（409）就整体拒绝，错误点名 `keys[i].<字段>`
+（`error.param` 形如 `"keys[1].api_key"`），一行都不写。先演练用 `"dry_run":true`：同样校验、同样报错，
+但**不写库、不写审计**。上限 200 项/次。
+
+**归属查询**：给明文或 12 字符前缀，回答"这把 key 是谁的"：
+
+```json
+{"name":"admin_request","arguments":{"name":"admin_lookup_key","body":{"api_key":"sk-live-…"}}}
+```
+返回：`{found,matched:"hash"|"prefix",key:{id,name,key_prefix,status,tags,account_tags,effective_tags,
+created_by,expires_at,last_used_at,feishu},account:{id,name,status,tags,dsh_enabled,dsh_tenant,feishu}}`；
+未命中 `{found:false,reason:"unknown_prefix"}`，明文与哈希不匹配
+`{found:false,reason:"hash_mismatch"}`（**不回显命中的那一行**；要按标识查询请改用 `key_prefix`，
+前缀本来就在 `admin_list_keys` 里可见）。它**不做鉴权判定**：`status`/`expires_at` 如实报告，
+"能不能用"仍由数据面决定。用 POST + body 而不是 GET + query，是为了不让明文进 URL。
+
 ## 4.5 工具说明标准（新增工具/字段必读）
 
 工具说明（`description` 与 `inputSchema` 的属性说明、`admin_describe` 的 `body_schema`/`example`）
@@ -318,6 +352,7 @@ MCP 只读不可写；「谁在排队」看 `admin_stats.provider_capacity.provi
 - **失败即失败**：HTTP ≥400 的调用以 MCP `isError: true` 返回，正文里带原始状态码与错误体；
   端口未接线（如未配置 Prober）时同样透传 handler 自己的错误。
 - 令牌吊销/过期立即 401；`query` 令牌调用后台工具与"未知工具"同样处理，避免探测管理面结构。
+- **明文只在写入那一刻存在**（M80）：`admin_import_keys` 的 `api_key` 形式会让明文经过网关进程，但网关只写它的前 12 字符与 SHA-256 —— 明文不落库、不回显、不进审计（审计行里只有前缀，`changes` 记录的是 `credential:"plaintext"` 这个标签）。调用方那一侧无法由网关保证：明文会成为 MCP 客户端与模型上下文的一部分；在控制台智能问答里调用时，它还会按该会话绑定的 Key 的输入录制策略进入请求日志。因此**迁移/批量搬运仍推荐 `key_prefix`+`key_hash` 形式**（或单条 `admin_import_key`），`api_key` 形式留给"客户端不改 key"的自定义值场景。
 
 ## 6. 内容可见性（与录制策略联动）
 
@@ -350,6 +385,8 @@ MCP 只读不可写；「谁在排队」看 `admin_stats.provider_capacity.provi
   （`admin_update_provider` 的 `max_inflight`）。排队状态在进程内，多实例部署各自计数。
 - 后台工具**不按账户作用域**：`admin_read`/`admin` 令牌是网关级凭据。
 - 单接口一个 MCP 工具的形态不做（有意为之，见第 4 节）。
+- `admin_import_keys` 一次最多 200 项：更大的搬运要分多次调用（每批一次事务、一份错误报告）。
+- 批内**没有部分成功**：一项不合格整批拒绝。这样调用方永远不必理解"半成品"状态，代价是一把坏 key 会挡住整批。
 - 控制台聊天要求 `mcp.enabled` 与 `mcp.admin_tools` 均为 `true`：它走的就是 `/mcp`，
   MCP 关掉了聊天也就没有工具可用。
 - 会话只能绑定**已存在**的令牌，且只按 id 引用：明文只在签发时出现一次，聊天不持有它，

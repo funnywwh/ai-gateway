@@ -101,8 +101,66 @@ func (db *DB) ListAPIKeys(ctx context.Context, accountID int64) ([]*domain.APIKe
 	return out, nil
 }
 
+// upsertAPIKeySQL writes one key row. It is shared by the single and the batch path so the
+// two cannot drift in which columns they write or which conflict clause they rely on.
+const upsertAPIKeySQL = `
+INSERT INTO api_keys(account_id, name, key_prefix, key_hash, tags_json, grants_json, policy_json,
+  record_input_mode, record_output_text, record_reasoning, status, expires_at, last_used_at, created_by, created_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(key_prefix) DO UPDATE SET
+  account_id = excluded.account_id,
+  name = excluded.name,
+  key_hash = excluded.key_hash,
+  tags_json = excluded.tags_json,
+  grants_json = excluded.grants_json,
+  policy_json = excluded.policy_json,
+  record_input_mode = excluded.record_input_mode,
+  record_output_text = excluded.record_output_text,
+  record_reasoning = excluded.record_reasoning,
+  status = excluded.status,
+  expires_at = excluded.expires_at`
+
+// keyWriter is the subset of *sql.DB and *sql.Tx the key upsert needs.
+type keyWriter interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // UpsertAPIKey inserts a new key or updates an existing one (matched by key_prefix).
 func (db *DB) UpsertAPIKey(ctx context.Context, k *domain.APIKey) (int64, error) {
+	return upsertAPIKeyWith(ctx, db.write, k)
+}
+
+// UpsertAPIKeys writes a batch of keys in one transaction: either every row lands or none
+// does. It is the write half of the batch import (M80), which validates the whole batch
+// before calling this — an error here means the database refused a row the checker accepted,
+// and a half-applied batch would leave the caller guessing which keys are live.
+func (db *DB) UpsertAPIKeys(ctx context.Context, keys []*domain.APIKey) ([]int64, error) {
+	ids := make([]int64, 0, len(keys))
+	if len(keys) == 0 {
+		return ids, nil
+	}
+	tx, err := db.write.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("store: begin api key batch tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, k := range keys {
+		id, err := upsertAPIKeyWith(ctx, tx, k)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: commit api key batch: %w", err)
+	}
+	return ids, nil
+}
+
+// upsertAPIKeyWith writes one key row through the given writer.
+func upsertAPIKeyWith(ctx context.Context, w keyWriter, k *domain.APIKey) (int64, error) {
 	if k == nil || k.KeyPrefix == "" || k.KeyHash == "" {
 		return 0, domain.ErrInvalidRequest("api key prefix and hash are required")
 	}
@@ -120,22 +178,7 @@ func (db *DB) UpsertAPIKey(ctx context.Context, k *domain.APIKey) (int64, error)
 		k.RecordInputMode = "inherit"
 	}
 
-	if _, err := db.write.ExecContext(ctx, `
-INSERT INTO api_keys(account_id, name, key_prefix, key_hash, tags_json, grants_json, policy_json,
-  record_input_mode, record_output_text, record_reasoning, status, expires_at, last_used_at, created_by, created_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(key_prefix) DO UPDATE SET
-  account_id = excluded.account_id,
-  name = excluded.name,
-  key_hash = excluded.key_hash,
-  tags_json = excluded.tags_json,
-  grants_json = excluded.grants_json,
-  policy_json = excluded.policy_json,
-  record_input_mode = excluded.record_input_mode,
-  record_output_text = excluded.record_output_text,
-  record_reasoning = excluded.record_reasoning,
-  status = excluded.status,
-  expires_at = excluded.expires_at`,
+	if _, err := w.ExecContext(ctx, upsertAPIKeySQL,
 		k.AccountID, k.Name, k.KeyPrefix, k.KeyHash, k.TagsJSON, k.GrantsJSON, k.PolicyJSON,
 		k.RecordInputMode, boolInt(k.RecordOutputText), boolInt(k.RecordReasoning), k.Status,
 		unixPtr(k.ExpiresAt), unixPtr(k.LastUsedAt), k.CreatedBy, unix(k.CreatedAt)); err != nil {
@@ -143,7 +186,7 @@ ON CONFLICT(key_prefix) DO UPDATE SET
 	}
 
 	var id int64
-	if err := db.write.QueryRowContext(ctx, "SELECT id FROM api_keys WHERE key_prefix = ?", k.KeyPrefix).Scan(&id); err != nil {
+	if err := w.QueryRowContext(ctx, "SELECT id FROM api_keys WHERE key_prefix = ?", k.KeyPrefix).Scan(&id); err != nil {
 		return 0, fmt.Errorf("store: resolve api key id: %w", err)
 	}
 	k.ID = id

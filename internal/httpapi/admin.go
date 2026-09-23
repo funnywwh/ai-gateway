@@ -64,6 +64,10 @@ type AdminStore interface {
 	// "new" from "already here" without the data plane's "unknown prefix is a 401" rule.
 	FindAPIKeyByPrefix(ctx context.Context, prefix string) (*domain.APIKey, error)
 	UpsertAPIKey(ctx context.Context, k *domain.APIKey) (int64, error)
+	// UpsertAPIKeys writes a whole batch in one transaction (M80). The batch import validates
+	// every item first, so an error here means the database refused a row the checker
+	// accepted; a half-applied batch would leave the operator guessing which keys are live.
+	UpsertAPIKeys(ctx context.Context, keys []*domain.APIKey) ([]int64, error)
 	ListRequestLogs(ctx context.Context, f domain.RequestLogFilter, limit int) ([]*domain.RequestLogRecord, error)
 	ListRequestLogsPage(ctx context.Context, f domain.RequestLogFilter, limit, offset int) ([]*domain.RequestLogRecord, error)
 	CountRequestLogs(ctx context.Context, f domain.RequestLogFilter) (int, error)
@@ -516,17 +520,9 @@ func (s *Server) handleAdminImportKey(w http.ResponseWriter, r *http.Request) {
 // can ever match. The hash is the hex SHA-256 the verifier compares against, so accepting
 // anything else would store a key that cannot authenticate.
 func importedCredential(prefix, hash string) (string, string, *domain.APIError) {
-	prefix = strings.TrimSpace(prefix)
-	if len(prefix) != secret.PrefixLen {
-		return "", "", domain.ErrInvalidRequest(fmt.Sprintf(
-			"key_prefix must be exactly %d characters (the length the gateway indexes by)",
-			secret.PrefixLen)).WithParam("key_prefix")
-	}
-	for _, c := range []byte(prefix) {
-		if c < 0x21 || c > 0x7e {
-			return "", "", domain.ErrInvalidRequest(
-				"key_prefix must be printable ASCII without whitespace").WithParam("key_prefix")
-		}
+	prefix, apiErr := importedPrefix(prefix)
+	if apiErr != nil {
+		return "", "", apiErr
 	}
 	hash = strings.ToLower(strings.TrimSpace(hash))
 	if len(hash) != 64 {
@@ -540,6 +536,22 @@ func importedCredential(prefix, hash string) (string, string, *domain.APIError) 
 		}
 	}
 	return prefix, hash, nil
+}
+
+// importedPrefix validates the lookup half of a credential on its own. The batch import
+// (M80) and the ownership lookup need exactly this rule without a hash beside it, and the
+// prefix is also the console-visible identifier of a key, so the rule lives in one place.
+func importedPrefix(prefix string) (string, *domain.APIError) {
+	prefix = strings.TrimSpace(prefix)
+	if len(prefix) != secret.PrefixLen {
+		return "", domain.ErrInvalidRequest(fmt.Sprintf(
+			"key_prefix must be exactly %d characters (the length the gateway indexes by)",
+			secret.PrefixLen)).WithParam("key_prefix")
+	}
+	if apiErr := requirePrintable(prefix, "key_prefix"); apiErr != nil {
+		return "", apiErr
+	}
+	return prefix, nil
 }
 
 // unknownTagName reports the first tag name that does not exist.

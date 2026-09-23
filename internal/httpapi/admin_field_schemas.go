@@ -1,5 +1,7 @@
 package httpapi
 
+import "strings"
+
 // This file documents the small structured documents the management API accepts beyond the
 // pricing rule sets (see admin_pricing_schema.go).
 //
@@ -109,6 +111,56 @@ func grantsSchema(subject string) map[string]any {
 // grantsExample is the "everything" grant, which is what an empty grant means by default.
 func grantsExample() map[string]any {
 	return map[string]any{"models": []any{"*"}, "providers": []any{"*"}}
+}
+
+// keysBatchSchema is the shape of the batch-import list (M80).
+//
+// The credential is "one of api_key, or key_prefix together with key_hash", which flat JSON
+// Schema's `required` cannot express: a list naming both forms at once would mark the
+// example — and every real call — invalid. So `required` names only the name, and the rule
+// is stated in the description where an agent reads it. `additionalProperties` is left open
+// on purpose: the batch body is decoded with encoding/json, so an unknown item field is
+// ignored rather than rejected, and a schema claiming otherwise would be a lie.
+func keysBatchSchema() map[string]any {
+	item := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name":       prop("string", "Key 名称，必填"),
+			"account_id": prop("integer", "所属账户的数字 id（与 account 二选一）"),
+			"account":    prop("string", "所属账户名（与 account_id 二选一）"),
+			"api_key": prop("string", "**明文**自定义 Key（与 key_prefix+key_hash 二选一）：网关只写它的前 12 字符与 "+
+				"SHA-256，明文不落库、不返回、不进审计。必须是可打印 ASCII、无空白、长度 16–512；短于 13 会被拒"+
+				"（否则前缀列会存下整把密钥）"),
+			"key_prefix": prop("string", "明文的前 12 个字符（与 api_key 二选一；给了它必须同时给 key_hash）："+
+				"迁移用，明文全程不进网关"),
+			"key_hash": prop("string", "同一明文的 SHA-256 十六进制（64 位，小写；与 key_prefix 成对出现）"),
+			"tags":     arrayOfStrings("Key 自有标签名数组；每个名字必须已存在，否则整批 400（不存在的名字会被解析丢弃，授权随即回落到默认通配）"),
+			"grants":   grantsSchema("Key"),
+			"policy":   policySchema(),
+			"status": stringEnumProp("导入后的状态，省略为 active；disabled 表示先记录、暂不使用",
+				"active", "disabled"),
+			"expires_at": prop("string", "RFC3339 过期时间，省略表示不过期"),
+		},
+		"required": []string{"name"},
+	}
+	return map[string]any{
+		"type": "array", "items": item,
+		"description": "1–200 项（超出 400）。每项：name 必填；凭据二选一（api_key 或 key_prefix+key_hash）；" +
+			"账户二选一（account_id 或 account，账户必须存在）。**整批原子**：任何一项校验失败或前缀冲突（409）" +
+			"都整体拒绝并点名 keys[i].<字段>，一行都不写；修好后重跑是幂等的（同前缀同哈希 → created=false）。" +
+			"未声明的字段会被忽略（与控制台其余接口一致）",
+	}
+}
+
+// keysBatchExample is a writable example: one plaintext-form item (the BYO case) and one
+// hash-form item (the migration case), because the two forms are what an agent has to choose
+// between. The api_key is long enough for the 16-character floor and is not a real key.
+func keysBatchExample() []any {
+	return []any{
+		map[string]any{"name": "laptop", "account": "acme", "api_key": "sk-custom-6f0d2c1b9a4e7f3d8c5a1b2e"},
+		map[string]any{"name": "phone", "account_id": 4, "key_prefix": "sk-live-abcd",
+			"key_hash": strings.Repeat("a", 64), "tags": []any{"blue"}, "status": "active"},
+	}
 }
 
 // unenforcedObjectSchema documents a field the API stores but no code reads.

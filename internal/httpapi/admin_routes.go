@@ -729,6 +729,44 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 			},
 		},
 		{
+			Method: "POST", Path: "/admin/api/v1/keys/import-batch", Handler: s.handleAdminImportKeys,
+			Name: "admin_import_keys", Group: groupKeys, Role: roleAdmin,
+			Summary:   "一次导入多把 Key（≤200）：每项给明文 api_key（网关自己算前缀与 SHA-256）或库里已生效的 key_prefix+key_hash；整批校验通过才写入",
+			Dangerous: true, ConfirmReason: "会把一批已存在的密钥接入网关：知道其中任何一把明文的人立刻可以消费额度",
+			Notes: "两个用途：① 自定义值（BYO）——调用方手里是明文，客户端不必改配置；② 迁移——给 key_prefix+key_hash，" +
+				"明文全程不进网关（docs/sub2api-migration.md）。两种形式可以混在同一批。" +
+				"**整批原子**：任何一项校验失败或前缀被别人的 key 占用（409）就整体拒绝，错误点名 keys[i].<字段>，" +
+				"一行都不写；修好后重跑是幂等的（同前缀同哈希 → created=false）。" +
+				"明文形式会让明文经过网关进程、MCP 客户端与模型上下文；控制台智能问答里调用时，它还会按该会话绑定的 Key 的" +
+				"输入录制策略落进请求日志，所以迁移/大批量仍推荐哈希形式（或走单条 admin_import_key）。" +
+				"明文不落库、不返回、不进审计；dry_run=true 只校验与判定，不写库、不写审计。",
+			Body: []adminField{
+				exampleField(schemaField(bodyRequired("keys", "array",
+					"要导入的 Key 列表，1–200 项；每项含 name、账户（account_id 或 account）、凭据（api_key 或 "+
+						"key_prefix+key_hash，二选一）以及可选的 tags/grants/policy/status/expires_at。字段形状与"+
+						"「整批原子」的失败语义见本参数 schema 的 description"),
+					keysBatchSchema()), keysBatchExample()),
+				bodyOptional("dry_run", "boolean",
+					"true 只做校验与冲突判定：不写库、不写审计、不重新加载；响应里的 created/updated 表示真实调用会发生什么。默认 false"),
+			},
+		},
+		{
+			Method: "POST", Path: "/admin/api/v1/keys/lookup", Handler: s.handleAdminLookupKey,
+			Name: "admin_lookup_key", Group: groupKeys, Role: roleViewer,
+			Summary: "按 Key 查归属：给明文 api_key（或 12 字符 key_prefix）回答它属于哪个账户、状态如何；找不到或哈希不匹配时以 found=false 回答",
+			Notes: "用 POST 而不是 GET+query，是为了不让明文进 URL（浏览器历史、反向代理日志）。" +
+				"两个字段二选一：api_key（网关算前缀后常量时间比对 SHA-256）或 key_prefix（前缀本来就在 admin_list_keys 里可见）。" +
+				"未命中返回 reason=unknown_prefix；哈希不匹配返回 reason=hash_mismatch 且**不回显命中的行**（要按标识查就用 key_prefix）。" +
+				"它只回答归属与状态，**不做鉴权判定**：status/expires_at 如实报告，能不能用由数据面 verifier 决定。",
+			Body: []adminField{
+				bodyOptional("api_key", "string",
+					"要查的明文 Key（与 key_prefix 二选一）。网关只用它算前缀与 SHA-256，不回显、不落库、不进审计；"+
+						"必须是可打印 ASCII 且无空白，最长 512 字符"),
+				bodyOptional("key_prefix", "string",
+					"要查的前缀（与 api_key 二选一）：恰好 12 个字符，就是 admin_list_keys 里的 key_prefix，本身不是秘密"),
+			},
+		},
+		{
 			Method: "PATCH", Path: "/admin/api/v1/keys/{id}", Handler: s.handleAdminPatchKey,
 			Name: "admin_update_key", Group: groupKeys, Role: roleAdmin,
 			Summary:   "改 Key 的标签、状态、配额策略与内容录制开关（输入/思考/最终输出）",

@@ -1043,3 +1043,19 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       显示长度是次要问题）；若要一起变短，需要把这些网关侧记录里的路径按视图映射渲染
 - [ ] 观察项：picker-clamp 用 `realpath` 校验，工作区内"指向长路径的符号链接"会被判为根外而拒绝（已知边界，
       文档已写明）
+
+## M80 API Key 批量导入与按 Key 查账户
+
+> 需求原话：「实现 mcp 导入自定 apikey admin 接口，实现通过 apikey 查询账户的 admin 接口，mcp 客户端要能调用」。
+> 设计：`docs/design/m80-key-batch-import-and-lookup.md`；规格：`docs/mcp.md` §4「Key 批量导入与归属查询示例（M80）」、
+> `docs/sub2api-migration.md` §4.5。
+
+> 代码、路由表、测试与文档已完成，记录见 `docs/todo_done.md` 的 M80 小节；下面只列未完成项。
+
+- [ ] 控制台 UI（本里程碑明确不做）：API Keys 页加「导入自定义 Key」与「按 Key 查归属」两个入口
+- [ ] **待宿主执行（主机走查）**：在真实 `:8088` 上用 admin scope 的 MCP 令牌按 `docs/mcp.md` §4 的三段式走一遍
+      （`dry_run` → 真导入 → `lookup`），并抽查明文不落任何日志：`grep -E 'sk-[A-Za-z0-9_-]{20,}'`
+      搜 aigw 日志与 `request_logs` 的正文（控制台智能问答路径按会话绑定 Key 的输入录制策略落正文）
+- [ ] 待宿主执行（可选）：拿一批真实迁移 key（哈希形式）跑一次 200 项批量，核对 `created/updated` 计数与
+      逐把 `admin_lookup_key` 的归属
+- [ ] 发版：随下一个版本发布（本提交不升 `VERSION`、不部署）

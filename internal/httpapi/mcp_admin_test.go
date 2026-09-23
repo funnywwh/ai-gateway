@@ -1062,3 +1062,116 @@ func TestMCPAdminStatisticsByProvider(t *testing.T) {
 		t.Fatalf("the row must list both providers that served it: %v", row["providers"])
 	}
 }
+
+// M80's two key endpoints reach an agent through the same three-tool bridge as the rest of the
+// management surface, because the route table is the only thing that decides what an agent can
+// call. What this test adds over the handler tests is the boundary: the bridge's confirm gate,
+// its scope gate, and the fact that a plaintext key travelling as a tool argument still does not
+// come back out (neither in the result nor in what the catalogue advertises).
+func TestMCPCanImportAndLookUpKeys(t *testing.T) {
+	f := newAdminFixture(t)
+	f.seedScopedMCPToken(t, testAdminMCPToken, mcpsrv.ScopeAdmin)
+	f.seedScopedMCPToken(t, testReadMCPToken, mcpsrv.ScopeAdminRead)
+
+	overview, isError := f.callTool(t, testAdminMCPToken, 1, toolAdminEndpoints, `{"group":"keys","limit":200}`)
+	if isError {
+		t.Fatalf("admin_endpoints failed: %+v", overview)
+	}
+	endpoints, _ := overview["endpoints"].([]any)
+	seen := map[string]map[string]any{}
+	for _, raw := range endpoints {
+		row, _ := raw.(map[string]any)
+		name, _ := row["name"].(string)
+		if name == "admin_import_keys" || name == "admin_lookup_key" {
+			seen[name] = row
+		}
+	}
+	for _, name := range []string{"admin_import_keys", "admin_lookup_key"} {
+		row := seen[name]
+		if row == nil {
+			t.Fatalf("the catalogue does not list %s: %+v", name, overview)
+		}
+		if row["tool"] != name {
+			t.Fatalf("%s is registered but not exposed to MCP: %+v", name, row)
+		}
+	}
+	if seen["admin_import_keys"]["dangerous"] != true {
+		t.Errorf("the batch import must be flagged dangerous: %+v", seen["admin_import_keys"])
+	}
+	if seen["admin_lookup_key"]["dangerous"] != false {
+		t.Errorf("the lookup is a read and must not need confirmation: %+v", seen["admin_lookup_key"])
+	}
+
+	detail, isError := f.callTool(t, testAdminMCPToken, 2, toolAdminDescribe, `{"name":"admin_import_keys"}`)
+	if isError {
+		t.Fatalf("admin_describe failed: %+v", detail)
+	}
+	if detail["body_schema"] == nil || detail["example"] == nil || detail["confirm_reason"] == nil {
+		t.Fatalf("the batch import must be described completely: %+v", detail)
+	}
+
+	token := "sk-live-mcp-0123456789abcdef"
+	importArgs := func(confirm bool) string {
+		prefix := ""
+		if confirm {
+			prefix = `"confirm":true,`
+		}
+		return `{"name":"admin_import_keys",` + prefix +
+			`"body":{"keys":[{"name":"mcp-laptop","account":"acme","api_key":"` + token + `"}]}}`
+	}
+
+	refused, refusedErr := f.callTool(t, testAdminMCPToken, 3, toolAdminRequest, importArgs(false))
+	if !refusedErr || !strings.Contains(fmt.Sprint(refused["error_text"]), "confirm") {
+		t.Fatalf("a destructive call without confirm must be refused: %+v", refused)
+	}
+	if got := len(storedKeys(t, f)); got != 0 {
+		t.Fatalf("the refused call still wrote %d keys", got)
+	}
+
+	imported, isError := f.callTool(t, testAdminMCPToken, 4, toolAdminRequest, importArgs(true))
+	if isError {
+		t.Fatalf("importing through MCP failed: %+v", imported)
+	}
+	if imported["ok"] != true || imported["status"].(float64) != http.StatusOK {
+		t.Fatalf("unexpected import result: %+v", imported)
+	}
+	importBody, _ := imported["body"].(map[string]any)
+	if importBody["created"] != float64(1) {
+		t.Fatalf("import result = %+v", importBody)
+	}
+	encoded, err := json.Marshal(imported)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), token) || strings.Contains(string(encoded), secret.Hash(token)) {
+		t.Fatalf("the MCP result leaked key material: %s", encoded)
+	}
+	resp := bearerCall(t, f, token)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the key imported over MCP does not authenticate: status = %d", resp.StatusCode)
+	}
+
+	// A read-only token may ask whose key this is, and may not import one.
+	looked, isError := f.callTool(t, testReadMCPToken, 5, toolAdminRequest,
+		`{"name":"admin_lookup_key","body":{"api_key":"`+token+`"}}`)
+	if isError {
+		t.Fatalf("admin_read must be able to look a key up: %+v", looked)
+	}
+	lookBody, _ := looked["body"].(map[string]any)
+	if lookBody["found"] != true {
+		t.Fatalf("lookup result = %+v", lookBody)
+	}
+	account, _ := lookBody["account"].(map[string]any)
+	if account["name"] != "acme" {
+		t.Fatalf("the lookup must name the owning account: %+v", lookBody)
+	}
+
+	denied, deniedErr := f.callTool(t, testReadMCPToken, 6, toolAdminRequest, importArgs(true))
+	if !deniedErr || !strings.Contains(fmt.Sprint(denied["error_text"]), "scope=admin") {
+		t.Fatalf("admin_read must not import keys: %+v", denied)
+	}
+	if got := len(storedKeys(t, f)); got != 1 {
+		t.Fatalf("the refused import changed the table: %d rows", got)
+	}
+}

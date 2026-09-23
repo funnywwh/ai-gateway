@@ -76,6 +76,31 @@ python3 /opt/aigw/sub2api_migrate.py report
 `--gateway` / `--password-file` / `--psql` / `--notes` 可覆盖默认值；`--only-user <id>` 与
 `--limit <n>` 用于分批；任何 `apply` 之前都会重跑一次 §2 的断言。
 
+## 4.5 批量化与归属核对（M80）
+
+一次迁移原来是"31 把 key 就是 31 次调用"（M43 有意如此）。M80 起可以一批提交（上限 200 项/次）：
+
+```json
+{"name":"admin_request","arguments":{"name":"admin_import_keys","confirm":true,
+ "body":{"keys":[{"name":"lzhichao@lagenio.com","account":"acme",
+                  "key_prefix":"sk-62e1a0b4c","key_hash":"<64 位 hex>","tags":["蓝精灵3"]}]}}}
+```
+
+三条与单条导入一致的性质值得重申：
+
+1. **迁移仍用哈希形式**：`apply` 搬的就是 `key_prefix`+`key_hash` 两个非秘密值，明文留在源库进程内。
+   批量接口虽然也接受明文 `api_key`（给"客户端不改 key"的自定义值场景用），但迁移**不要**用它——
+   那等于把明文送进网关进程与调用链，见 `docs/mcp.md` §5。
+2. **整批原子**：任何一项失败（未知账户、未知标签、前缀被别人的 key 占用、哈希格式错）就整体拒绝，
+   错误点名 `keys[i]`，一行都不写；修好后重跑是幂等的（同前缀同哈希 → `created:false`）。
+3. **先 `dry_run`**：`"dry_run":true` 用同一套校验与冲突判定回报"会发生什么"，不写库、不写审计，
+   适合在真正 `apply` 之前拿一次预演结论。
+
+逐把对账用 `admin_lookup_key`（`POST /admin/api/v1/keys/lookup`）：给明文或 12 字符前缀，回答
+`key`（含 `tags`/`effective_tags`/`created_by`/`status`/`expires_at`）与 `account`（含 `dsh_tenant`）
+两个对象；未命中返回 `found:false`。只读接口，`admin_read` 令牌就够——迁移报告里可以拿它复核
+"这把 key 落在谁的账户上、生效标签是不是预期"。
+
 ## 5. 迁移后必须做的验证
 
 | 层 | 做法 | 通过标准 |
