@@ -614,12 +614,12 @@ func TestRecordingSwitchesAreIndependent(t *testing.T) {
 	}
 }
 
-// TestDefaultPolicyKeepsOnlyTheLastShortUserMessage is the M82 rule end to end on the shipped
+// TestDefaultPolicyRecordsTheNewestMessageThatFits is the M82 rule end to end on the shipped
 // default (the fixture runs on config.Default() and the key is "inherit", i.e. the case an
-// operator never chose): the row keeps the LAST user message's plain text, and only while that
-// message is shorter than the threshold. A message that long is kept whole or not at all — no
-// truncated head — and "full" is the escape hatch that keeps everything.
-func TestDefaultPolicyKeepsOnlyTheLastShortUserMessage(t *testing.T) {
+// operator never chose): the row keeps the newest user message that both carries text and is
+// at most the threshold long. Empty and oversized messages are stepped over rather than
+// truncating them or ending the search, and "full" is the escape hatch that keeps everything.
+func TestDefaultPolicyRecordsTheNewestMessageThatFits(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
@@ -643,14 +643,27 @@ func TestDefaultPolicyKeepsOnlyTheLastShortUserMessage(t *testing.T) {
 		t.Fatalf("record_input_mode = %q, want the resolved default", row.RecordInputMode)
 	}
 	if row.RequestJSON != question {
-		t.Fatalf("the body must be the last user message's text, got %q", row.RequestJSON)
+		t.Fatalf("the body must be the newest message that fits, got %q", row.RequestJSON)
 	}
 	if row.RequestBytes <= 0 {
 		t.Fatalf("request_bytes must still report the real request size: %+v", row)
 	}
 
-	// A last message at or over the threshold leaves NO body: the old behaviour kept its first
-	// 100 characters, which read like a complete question.
+	// A whitespace-only message is not text: the search steps back over it (v4.3.2). Clients
+	// end turns like this, and the row used to lose its body because of it.
+	blankBody := body[:len(body)-2] + `,{"type":"message","role":"user","content":[{"type":"input_text","text":"   "}]}]}`
+	respBlank := f.do(t, "POST", "/v1/responses", blankBody, nil)
+	respBlank.Body.Close()
+	rowBlank, err := f.db.GetRequestLog(ctx, respBlank.Header.Get("x-request-id"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rowBlank.RequestJSON != question {
+		t.Fatalf("a blank trailing message must not cost the row its body, got %q", rowBlank.RequestJSON)
+	}
+
+	// An oversized message is stepped over as well, so a turn that ends with a pasted file
+	// still records the question before it.
 	long := strings.Repeat("长", 100) + "ZZ_PAST_THE_THRESHOLD"
 	longBody := `{"model":"echo-model","input":[` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"` + question + `"}]},` +
@@ -661,11 +674,25 @@ func TestDefaultPolicyKeepsOnlyTheLastShortUserMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rowLong.RequestJSON != "" {
-		t.Fatalf("an over-threshold last message must leave no body: %q", rowLong.RequestJSON)
+	if rowLong.RequestJSON != question {
+		t.Fatalf("an oversized message must be skipped in favour of one that fits: %q", rowLong.RequestJSON)
 	}
-	if rowLong.RequestBytes <= 0 {
-		t.Fatalf("the size is still recorded even when the body is not: %+v", rowLong)
+
+	// Nothing qualifies at all: the row keeps its identity and its size, but no body.
+	noneBody := `{"model":"echo-model","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"   "}]},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"` + long + `"}]}]}`
+	respNone := f.do(t, "POST", "/v1/responses", noneBody, nil)
+	respNone.Body.Close()
+	rowNone, err := f.db.GetRequestLog(ctx, respNone.Header.Get("x-request-id"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rowNone.RequestJSON != "" {
+		t.Fatalf("no qualifying message must leave no body: %q", rowNone.RequestJSON)
+	}
+	if rowNone.RequestBytes <= 0 {
+		t.Fatalf("the size is still recorded even when the body is not: %+v", rowNone)
 	}
 
 	// A key switched to full keeps EVERYTHING: the whole body, both user messages included,

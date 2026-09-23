@@ -226,14 +226,15 @@ type Recording struct {
 	RecordTitle bool `yaml:"record_title"`
 	MaxBytes    int  `yaml:"max_bytes"`
 	// InputMaxChars is the length threshold of the default input policy (record_input=user,
-	// M82): the row keeps the LAST user message's plain text, and only when that message is
-	// STRICTLY shorter than this. A longer message is not truncated into something that reads
-	// like a whole question — the row simply carries no body. The last message is the one a
-	// human just wrote (a DSH turn is a runtime-context snapshot followed by the prompt), which
-	// is why the earlier ones are dropped regardless of their length. 0 means no filter at all:
-	// every user message's text is kept, joined by newlines. Only this channel is subject to
-	// the threshold: "full" is the mode that keeps the client's exact bytes for diagnosing an
-	// upstream 400, and it is deliberately exempt from all of it.
+	// M82): the row keeps the newest user message that carries text and is at most this many
+	// characters long (the boundary is <=, so a message of exactly this length is kept).
+	// Messages that are empty or too long are not recorded, and neither ends the search — a
+	// turn often ends with a runtime-context snapshot, an empty continuation or a pasted file,
+	// and the row should still get the last thing a human actually said. A message is never
+	// truncated into something that reads like a whole question. 0 means no length filter at
+	// all: every text-carrying user message is kept, joined by newlines. Only this channel is
+	// subject to the threshold: "full" is the mode that keeps the client's exact bytes for
+	// diagnosing an upstream 400, and it is deliberately exempt from all of it.
 	InputMaxChars int `yaml:"input_max_chars"`
 	// RetentionDays is how long recorded content lives: request logs older than the
 	// window are pruned daily, and a stored response expires with it. 0 disables cleanup.
@@ -1480,10 +1481,10 @@ func (c *Config) Validate() error {
 	if err := oneOf("recording.record_input", c.Recording.RecordInput, RecordingInputModes...); err != nil {
 		return err
 	}
-	// 0 switches the length filter off (every user message's text is kept); a negative
+	// 0 switches the length filter off (every text-carrying user message is kept); a negative
 	// threshold is a typo, not a policy.
 	if c.Recording.InputMaxChars < 0 {
-		return fmt.Errorf("recording.input_max_chars must be >= 0 (0 keeps every user message)")
+		return fmt.Errorf("recording.input_max_chars must be >= 0 (0 keeps every user message that carries text)")
 	}
 	// 0 switches retention off (nothing is pruned, stored responses never expire);
 	// a negative window is a typo, not a policy.

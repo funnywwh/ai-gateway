@@ -44,10 +44,10 @@ assert.equal(
   inputPanelTitle({ input_recorded: true, input: { input: [], model: 'replay' } }),
   '输入',
 );
-// Nothing kept, and the row says the policy was the input policy: that is not "not recorded".
+// Nothing qualified, and the row says the policy was the input policy: that is not "not recorded".
 assert.equal(
   inputPanelTitle({ input_recorded: false, record_input_mode: 'user' }),
-  '输入（未保留：最后一条用户消息为空或超过上限）',
+  '输入（未保留：没有不超过上限的用户消息）',
 );
 // Recording off (or metadata-only): the panel really is "not recorded".
 assert.equal(inputPanelTitle({ input_recorded: false, record_input_mode: 'off' }), '输入（未录制）');

@@ -629,11 +629,11 @@ function formatTokens(value) {
 
 // inputPanelTitle is the heading of the detail dialog's input panel.
 //
-// The default policy records plain text: the LAST user message, and only while it was shorter
-// than the deployment's threshold (M82). So there are three states to tell apart, and the text
-// alone cannot tell them apart — an empty panel may mean "nothing was kept" or "recording is
-// off", and a grey "未录制" on a row whose policy is `user` would be a lie about the wrong
-// thing. The row's `record_input_mode` is what separates them.
+// The default policy records plain text: the newest user message that carries text and fits the
+// deployment's threshold (M82, revised in v4.3.2). So there are three states to tell apart, and
+// the text alone cannot tell them apart — an empty panel may mean "no message qualified" or
+// "recording is off", and a grey "未录制" on a row whose policy is `user` would be a lie about
+// the wrong thing. The row's `record_input_mode` is what separates them.
 //
 // A row written between M81 and M82 holds the old JSON document instead; for those the old
 // heading ("已截断：…前 N 字符") is still the honest description, so that branch stays.
@@ -648,7 +648,7 @@ function inputPanelTitle(row) {
     return '输入';
   }
   if (row.record_input_mode === 'user') {
-    return '输入（未保留：最后一条用户消息为空或超过上限）';
+    return '输入（未保留：没有不超过上限的用户消息）';
   }
   return '输入（未录制）';
 }

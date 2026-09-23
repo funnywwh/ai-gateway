@@ -6044,3 +6044,21 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 配置/数据变更 | **无**：rag-server 的 `recording:` 段仍只有 `record_input: user` + `retention_days: 30`（未设 `input_max_chars` ⇒ 默认 100）；gptjp 无 `recording:` 段 ⇒ 全默认。要「保留全部」无需改配置：在该 Key 上切 `full` 即可 |
 | 未做（待人工） | ① 真浏览器 `make ui-check`（M82 新增三条 `#requests` 回放断言：未保留 / 未录制 / 历史截断行）与压缩镜像走查；② 线上 MCP `get_request` 冒烟：本会话没有可用的 MCP 令牌（令牌只存哈希），两种形状（纯文本行 → string、`full`/历史行 → object）由 `internal/mcpsrv` 测试覆盖；③ `dshgw-verify` 重启（盘上 4.3.0，进程仍 4.1.1）；④ `origin` 未推 |
 | 既有噪声（非本次引入） | rag-server 升级后仍有 1 条 `settlement could not be written; falling back to disk — store: begin settlement tx: context deadline exceeded`（启动期写连接争用，当天累计 15+ 条），全部由 `billing fallback replay … failed=0` 自动补回，无丢账；信号与 v4.1.1/v4.3.0 期间完全一致 |
+
+## M82.1 修订：往回找「最新一条有文本且不超过上限」的 user 消息（v4.3.2，2026-09-23）
+> 需求原话：「现在是不是保持最后一条不为空的<=100的user消息？」——随后确认：跳过空的、恰好 100 保留、
+> 末条超长时继续往前找。设计文档 `docs/design/m82-user-input-tail-only-text.md` 的「M82.1 修订」节。
+
+- [x] **口径**：从末尾往回找，取第一条「有文本（`strings.TrimSpace` 后非空）且字符数 `<= recording.input_max_chars`」
+      的 user 消息；空消息（空文本/纯空白/只有图片/读不懂）与超长消息都跳过；一条都不合格 → 正文为空。
+      `carriesText()` 把「有文本」的判断收在一处，`N = 0` 的不过滤路径也用它（不再拼出空行）。
+- [x] **边界**：恰好 100 **保留**（`<=`），101 跳过并回退取前一条（测试各钉一条）。
+- [x] **测试**：`internal/responses` 新增/改写 6 组（跳过 5 种空消息形态、末条超长回退、一条都不合格、
+      边界两侧、`N=0` 跳过空消息、取最新一条合适的）；`internal/httpapi` 端到端断言改为「取最新一条合适的」
+      并补空白末条与「全不合格」；M27 身份测试改为断言回退到的短消息（原先断言正文为空）。
+- [x] **文案/文档**：控制台「未保留：没有不超过上限的用户消息」（含 node 断言与 harness 断言）；
+      `docs/request-log.md`、`config.example.yaml`、`docs/mcp.md`、`README.md`、`internal/config`、
+      `internal/httpapi`（v1 注释、字段说明）、`internal/mcpsrv` 说明同步。
+- [x] **验收**：`go vet ./...`（除 M79 遗留 copylocks）无输出、`go test -count=1 ./...` 全绿、
+      `make ui-base` 全绿、`make build` 成功。
+- [x] **发版**：v4.3.2（patch），部署 rag-server + gptjp，记录见本文件「v4.3.2 发布记录」。

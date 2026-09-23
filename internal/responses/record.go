@@ -6,19 +6,24 @@ import (
 )
 
 // UserInputText returns the text the default input policy (recording.record_input=user)
-// records for this request: the LAST user message, verbatim, and only when that message is
-// strictly shorter than maxChars. Anything else yields "" and the row is written without a
-// body.
+// records for this request, or "" when there is nothing worth keeping.
 //
-// Why only the last message, and why only a short one (M82):
+// The rule (M82, revised in v4.3.2): walk the user messages from the end and keep the newest
+// one that is BOTH readable text and at most maxChars characters. Messages that are empty or
+// too long are stepped over rather than ending the search — the row gets the newest message
+// that actually says something, instead of nothing at all.
+//
+// Why this shape:
 //
 //   - In an agent loop the request body is not the user's input. One real request carried 67
 //     input items, of which 2 were user messages — the rest were tool definitions and
 //     function_call_output items holding whole file contents. Recording all of them turned
 //     the request log into a second copy of every file an agent read (M23).
-//   - Of the user messages, the last one is the one a human just wrote: a DSH turn looks like
-//     [813-character runtime-context snapshot][78-character prompt]. The earlier ones are
-//     boilerplate, and keeping them buries the prompt in noise.
+//   - The message worth having sits at the end: a DSH turn looks like
+//     [813-character runtime-context snapshot][78-character prompt].
+//   - Clients also end turns with messages that carry nothing usable — an empty continuation,
+//     a tool-result-only turn, a whitespace-only string. Taking the literal last message made
+//     those rows bodyless, which is why the search now steps back over them.
 //   - A long message is not recorded at all rather than truncated (M81 kept the first 100
 //     characters, which made a 1000-character question indistinguishable from a 100-character
 //     one — a "full question" that was really a head). Keep it whole or do not keep it.
@@ -29,9 +34,9 @@ import (
 // Want everything? Switching the key to recording.record_input=full keeps the whole request
 // body verbatim, JSON and all, and is deliberately exempt from every rule above.
 //
-// maxChars is recording.input_max_chars: a message must be STRICTLY shorter than it to be kept
-// (exactly 100 characters is dropped). 0 means no filter at all: every user message's text is
-// kept, in order, joined by newlines — still text only, never the tool definitions or images.
+// maxChars is recording.input_max_chars: a message of exactly that many characters is kept
+// (the boundary is <=). 0 means no length filter: every message that carries text is kept, in
+// order, joined by newlines — still text only, never the tool definitions or images.
 func (r *Request) UserInputText(maxChars int) (string, error) {
 	items, apiErr := r.Items()
 	if apiErr != nil {
@@ -54,17 +59,24 @@ func (r *Request) UserInputText(maxChars int) (string, error) {
 	if maxChars <= 0 {
 		kept := make([]string, 0, len(msgs))
 		for _, msg := range msgs {
-			if msg.readable {
+			if msg.carriesText() {
 				kept = append(kept, msg.text)
 			}
 		}
 		return strings.Join(kept, "\n"), nil
 	}
-	last := msgs[len(msgs)-1]
-	if !last.readable || last.runes >= maxChars {
-		return "", nil
+	// Newest first: the first message that carries text and fits is the one to record.
+	// Stepping back matters — agent clients end a turn with a message that is empty (a
+	// tool-result-only turn) or oversized (a whole file pasted in), and neither should cost
+	// the row its body when an earlier message still says something useful.
+	for i := len(msgs) - 1; i >= 0; i-- {
+		msg := msgs[i]
+		if !msg.carriesText() || msg.runes > maxChars {
+			continue
+		}
+		return msg.text, nil
 	}
-	return last.text, nil
+	return "", nil
 }
 
 // recordedUserMessage is one user message reduced to what the recording policy decides on: its text,
@@ -73,6 +85,16 @@ type recordedUserMessage struct {
 	text     string
 	runes    int
 	readable bool
+}
+
+// carriesText reports whether this message says anything worth recording. A message can be
+// present and still carry nothing: an empty or whitespace-only string, an array whose only
+// parts are images or files, or content this package cannot read at all. Those are stepped
+// over rather than stored, because a log row holding "   " is indistinguishable to a reader
+// from a row holding nothing — and because they are how agent clients end a turn that had no
+// human input in it.
+func (m recordedUserMessage) carriesText() bool {
+	return m.readable && strings.TrimSpace(m.text) != ""
 }
 
 // userMessageText flattens one user message to text and reports its length in characters.

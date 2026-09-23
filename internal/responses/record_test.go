@@ -51,28 +51,80 @@ func TestUserInputTextKeepsTheLastShortMessage(t *testing.T) {
 	}
 }
 
-// The threshold is strict: exactly maxChars is dropped, one character less is kept. This is
-// the boundary most easily misread as <=, so it is pinned here.
-func TestUserInputTextDropsAMessageAtTheThreshold(t *testing.T) {
+// The boundary is <=: a message of exactly maxChars is kept, one character more is not. This
+// is the boundary most easily misread, so it is pinned here.
+func TestUserInputTextKeepsAMessageAtTheThreshold(t *testing.T) {
 	exactly := strings.Repeat("问", 100)
 	req := parseBody(t, `{"model":"m","input":[`+userItem("earlier")+`,`+userItem(exactly)+`]}`)
 	got, err := req.UserInputText(100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "" {
-		t.Fatalf("a %d-character last message must not be recorded, got %q",
+	if got != exactly {
+		t.Fatalf("a %d-character message must be kept at the threshold, got %q",
 			len([]rune(exactly)), got)
 	}
 
-	justUnder := strings.Repeat("问", 99)
-	req = parseBody(t, `{"model":"m","input":[`+userItem("earlier")+`,`+userItem(justUnder)+`]}`)
+	tooLong := strings.Repeat("问", 101)
+	req = parseBody(t, `{"model":"m","input":[`+userItem("earlier")+`,`+userItem(tooLong)+`]}`)
 	got, err = req.UserInputText(100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != justUnder {
-		t.Fatalf("a 99-character message must be kept verbatim, got %q", got)
+	// The 101-character message is skipped, so the row falls back to the earlier one.
+	if got != "earlier" {
+		t.Fatalf("a 101-character message must be skipped in favour of an earlier one, got %q", got)
+	}
+}
+
+// A message that carries no text is not what a log row should hold, and it does not end the
+// search either: agent clients end turns with empty continuations and tool-result-only
+// messages, and the row should still get the last thing that was actually said.
+func TestUserInputTextSkipsMessagesWithoutText(t *testing.T) {
+	for name, empty := range map[string]string{
+		"empty array":      `{"type":"message","role":"user","content":[]}`,
+		"blank string":     `{"type":"message","role":"user","content":"   "}`,
+		"image only":       `{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,ZZ"}]}`,
+		"unreadable":       `{"type":"message","role":"user","content":{"nested":"ZZUNREADABLE"}}`,
+		"empty text parts": `{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := parseBody(t, `{"model":"m","input":[`+userItem("the real question")+`,`+empty+`]}`)
+			got, err := req.UserInputText(100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != "the real question" {
+				t.Fatalf("recorded %q, want the earlier message with text", got)
+			}
+		})
+	}
+
+	// Nothing carries text at all: the row gets no body, and that is not an error.
+	req := parseBody(t, `{"model":"m","input":[`+
+		`{"type":"message","role":"user","content":"   "},`+
+		`{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,ZZ"}]}]}`)
+	got, err := req.UserInputText(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("recorded %q, want nothing", got)
+	}
+}
+
+// An oversized message is skipped too, so a row whose turn ended with a pasted file still
+// keeps the newest message that fits.
+func TestUserInputTextFallsBackPastAnOversizedMessage(t *testing.T) {
+	question := "为什么构建这么慢？"
+	req := parseBody(t, `{"model":"m","input":[`+
+		userItem(question)+`,`+userItem(strings.Repeat("x", 400))+`]}`)
+	got, err := req.UserInputText(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != question {
+		t.Fatalf("recorded %q, want the newest message that fits", got)
 	}
 }
 
@@ -126,8 +178,10 @@ func TestUserInputTextLeavesOutNonTextParts(t *testing.T) {
 	}
 }
 
-// Content nobody can read cannot be measured, so it is not recorded — and the row is still
-// written (the caller stores an empty body).
+// Content nobody can read cannot be measured, so it is not recorded. When it is the only user
+// message the row is written without a body (the caller stores an empty string); when an
+// earlier message carries text, that message is what the row gets — see
+// TestUserInputTextSkipsMessagesWithoutText.
 func TestUserInputTextLeavesOutUnreadableContent(t *testing.T) {
 	req := parseBody(t, `{"model":"m","input":[{"type":"message","role":"user","content":{"nested":"ZZUNREADABLE"}}]}`)
 	got, err := req.UserInputText(100)
@@ -163,10 +217,11 @@ func TestUserInputTextWithoutAThresholdKeepsEveryMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The image-only message contributes empty text, so the join leaves a blank line.
-	want := "first\n" + long + "\n\nlast"
+	// Messages that carry no text are skipped rather than joined as empty strings: a blank
+	// line in the middle of the recorded text would read like the user sent a blank turn.
+	want := "first\n" + long + "\nlast"
 	if got != want {
-		t.Fatalf("recorded %q, want every message joined", got)
+		t.Fatalf("recorded %q, want every text-carrying message joined", got)
 	}
 }
 
@@ -195,17 +250,18 @@ func TestUserInputTextAcceptsStringContent(t *testing.T) {
 	}
 }
 
-// Only the LAST message decides: an earlier short message does not rescue a request whose
-// last message is too long, and a long earlier message does not disqualify a short last one.
-func TestUserInputTextOnlyTheLastMessageDecides(t *testing.T) {
+// The search takes the newest message that fits, not the first one it sees: a long message at
+// the end does not disqualify an earlier short one (that is the v4.3.2 correction).
+func TestUserInputTextTakesTheNewestMessageThatFits(t *testing.T) {
+	fits := strings.Repeat("a", 20)
 	req := parseBody(t, `{"model":"m","input":[`+
-		userItem(strings.Repeat("a", 20))+`,`+userItem(strings.Repeat("b", 300))+`]}`)
+		userItem(fits)+`,`+userItem(strings.Repeat("b", 300))+`,`+userItem("   ")+`]}`)
 	got, err := req.UserInputText(100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "" {
-		t.Fatalf("a long LAST message must leave no body, got %d characters", len([]rune(got)))
+	if got != fits {
+		t.Fatalf("recorded %q, want the newest message that fits", got)
 	}
 }
 

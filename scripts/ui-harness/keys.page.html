@@ -520,13 +520,13 @@ try {
     const savedRecorded = replayRow.input_recorded;
     const savedMode = replayRow.record_input_mode;
     try {
-      // 1) Nothing kept, but the policy is the input policy: "not recorded" would be a lie.
+      // 1) Nothing qualified, but the policy is the input policy: "not recorded" would be a lie.
       replayRow.input = null;
       replayRow.input_recorded = false;
       replayRow.record_input_mode = 'user';
       find('详情').click();
       await settle();
-      checks.nothingKeptExplained = modalText().includes('输入（未保留：最后一条用户消息为空或超过上限）');
+      checks.nothingKeptExplained = modalText().includes('输入（未保留：没有不超过上限的用户消息）');
       closeButton().click();
       await settle();
 

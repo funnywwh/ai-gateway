@@ -1092,3 +1092,9 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       历史截断行），压缩镜像（`UI_STATIC_DIR` + `UI_HARNESS_GZIP=1`）同样待宿主
 - [ ] **待安排**：随 v4.3.1 发版并部署 rag-server + gptjp 的线上验证（见 `docs/todo_done.md` 的
       v4.3.1 发布记录）；`dshgw-verify` 的待重启事项仍单列在 M77/M79 小节
+
+## M82.1 修订：往回找「最新一条有文本且不超过上限」的 user 消息（v4.3.2）
+> 设计文档见 `docs/design/m82-user-input-tail-only-text.md` 的「M82.1 修订」节。
+
+- [ ] **待宿主执行（真浏览器走查）**：`make ui-check` 的 `#requests` 视图（「未保留」文案已改）
+- [ ] **待安排**：随 v4.3.2 发版并部署 rag-server + gptjp 的线上验证（见 `docs/todo_done.md`）

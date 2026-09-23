@@ -733,9 +733,10 @@ type inputRecord struct {
 //
 // Three channels are recorded independently: this one decides what happens to the
 // client's request, and recordContent decides what happens to the model's thinking and
-// final text. The default here is "user": the row keeps the LAST user message's plain text,
-// and only when that message is shorter than recording.input_max_chars (M82) — no JSON
-// document, no omission tallies, no truncated "head" that reads like a while question.
+// final text. The default here is "user": the row keeps the newest user message that carries
+// text and fits recording.input_max_chars (M82; empty and oversized messages are stepped over)
+// — no JSON document, no omission tallies, no truncated "head" that reads like a whole
+// question.
 // "full" is the escape hatch that keeps everything: the whole request body verbatim, JSON
 // and all, for the times when an upstream 400 has to be diagnosed against the exact bytes the
 // client sent. Both content modes still end at recording.max_bytes.

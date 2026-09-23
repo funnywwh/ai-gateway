@@ -87,12 +87,12 @@ func TestRequestLogRecordsDSHIdentity(t *testing.T) {
 	if row.CallKind != "agent" {
 		t.Fatalf("call_kind = %q, want agent", row.CallKind)
 	}
-	// The identity is recorded under the default "user" policy; the body is not. In this body
-	// the LAST user message is the runtime-context snapshot (330 characters), and since M82 a
-	// message that long is kept whole or not at all — so nothing is kept. The identity is the
-	// part that must survive the recording policy, which is what this test is about.
-	if row.RequestJSON != "" {
-		t.Fatalf("a last message over the threshold must leave no body: %q", row.RequestJSON)
+	// Under the default "user" policy the body is the newest user message that fits the
+	// threshold. In this body the trailing message is a 330-character runtime-context snapshot,
+	// which is skipped, so what lands in the row is the short message before it. The identity
+	// columns are what must survive the recording policy — that is what this test is about.
+	if row.RequestJSON != "重构请求日志" {
+		t.Fatalf("the newest message that fits must be the body, got %q", row.RequestJSON)
 	}
 	if row.RecordInputMode != "user" {
 		t.Fatalf("record_input_mode = %q, want the resolved default", row.RecordInputMode)
