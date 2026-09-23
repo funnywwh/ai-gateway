@@ -28,10 +28,10 @@ func TestDefaultIsValid(t *testing.T) {
 	if cfg.Recording.RecordReasoning || cfg.Recording.RecordOutputText {
 		t.Errorf("thinking/final-output recording must default to off")
 	}
-	// 100 characters per user message: the default policy keeps each user message's head
-	// rather than the whole question (M81).
-	if cfg.Recording.InputMaxChars != 100 {
-		t.Errorf("input_max_chars default = %d, want 100", cfg.Recording.InputMaxChars)
+	// The bound is a sanity limit, not the discriminator that picks the recorded message: a
+	// human prompt is routinely longer than the clients' boilerplate blocks (M83).
+	if cfg.Recording.InputMaxChars != 2000 {
+		t.Errorf("input_max_chars default = %d, want 2000", cfg.Recording.InputMaxChars)
 	}
 	if cfg.Recording.RetentionDays != 30 {
 		t.Errorf("retention default = %d, want 30 days", cfg.Recording.RetentionDays)
@@ -256,7 +256,7 @@ func TestLoadKeepsExplicitZeroInputCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Recording.InputMaxChars != 0 {
-		t.Fatalf("input_max_chars = %d, want 0 (unlimited)", cfg.Recording.InputMaxChars)
+		t.Fatalf("input_max_chars = %d, want 0 (no length bound)", cfg.Recording.InputMaxChars)
 	}
 	if cfg.Recording.RecordInput != "user" {
 		t.Fatalf("record_input = %q, want the default user", cfg.Recording.RecordInput)
@@ -266,8 +266,8 @@ func TestLoadKeepsExplicitZeroInputCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Recording.InputMaxChars != 100 {
-		t.Fatalf("absent input_max_chars = %d, want the 100 default", loaded.Recording.InputMaxChars)
+	if loaded.Recording.InputMaxChars != 2000 {
+		t.Fatalf("absent input_max_chars = %d, want the 2000 default", loaded.Recording.InputMaxChars)
 	}
 }
 

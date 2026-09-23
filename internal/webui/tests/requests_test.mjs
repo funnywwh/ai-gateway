@@ -47,7 +47,7 @@ assert.equal(
 // Nothing qualified, and the row says the policy was the input policy: that is not "not recorded".
 assert.equal(
   inputPanelTitle({ input_recorded: false, record_input_mode: 'user' }),
-  '输入（未保留：没有不超过上限的用户消息）',
+  '输入（未保留：只有样板或超长用户消息）',
 );
 // Recording off (or metadata-only): the panel really is "not recorded".
 assert.equal(inputPanelTitle({ input_recorded: false, record_input_mode: 'off' }), '输入（未录制）');

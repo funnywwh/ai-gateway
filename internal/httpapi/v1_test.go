@@ -217,6 +217,35 @@ const (
 		`],"tools":[{"type":"function","name":"read","parameters":{"type":"object"}}]}`
 )
 
+// postAndLog posts one /v1/responses request the way a real client does — draining the body —
+// and waits for its request log row.
+//
+// Draining matters: the handler records the row after it has written the response, so a test that
+// closes the body without reading can look for the row while the handler is still finishing (with
+// a large echoed response that window is wide enough to lose the race). Waiting matters for the
+// same reason: the row is written in the same goroutine, just after the last response byte.
+func (f *fixture) postAndLog(t testing.TB, body string) *domain.RequestLogRecord {
+	t.Helper()
+	resp := f.do(t, "POST", "/v1/responses", body, nil)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("request failed: %d", resp.StatusCode)
+	}
+	requestID := resp.Header.Get("x-request-id")
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		rec, err := f.db.GetRequestLog(context.Background(), requestID)
+		if err == nil {
+			return rec
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("request log %s never appeared: %v", requestID, err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func (f *fixture) do(t testing.TB, method, path, body string, headers map[string]string) *http.Response {
 	t.Helper()
 	var reader io.Reader
@@ -614,11 +643,12 @@ func TestRecordingSwitchesAreIndependent(t *testing.T) {
 	}
 }
 
-// TestDefaultPolicyRecordsTheNewestMessageThatFits is the M82 rule end to end on the shipped
+// TestDefaultPolicyRecordsTheNewestMessageThatFits is the M82/M83 rule end to end on the shipped
 // default (the fixture runs on config.Default() and the key is "inherit", i.e. the case an
-// operator never chose): the row keeps the newest user message that both carries text and is
-// at most the threshold long. Empty and oversized messages are stepped over rather than
-// truncating them or ending the search, and "full" is the escape hatch that keeps everything.
+// operator never chose): the row keeps the newest user message that carries text, is not client
+// boilerplate, and fits the sanity bound. Boilerplate, empty and oversized messages are stepped
+// over rather than truncating them or ending the search, and "full" is the escape hatch that
+// keeps everything.
 func TestDefaultPolicyRecordsTheNewestMessageThatFits(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -630,15 +660,7 @@ func TestDefaultPolicyRecordsTheNewestMessageThatFits(t *testing.T) {
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"` + boilerplate + `"}]},` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"` + question + `"}]}]}`
 
-	resp := f.do(t, "POST", "/v1/responses", body, nil)
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("request failed: %d", resp.StatusCode)
-	}
-	row, err := f.db.GetRequestLog(ctx, resp.Header.Get("x-request-id"))
-	if err != nil {
-		t.Fatalf("request log missing: %v", err)
-	}
+	row := f.postAndLog(t, body)
 	if row.RecordInputMode != "user" {
 		t.Fatalf("record_input_mode = %q, want the resolved default", row.RecordInputMode)
 	}
@@ -652,47 +674,50 @@ func TestDefaultPolicyRecordsTheNewestMessageThatFits(t *testing.T) {
 	// A whitespace-only message is not text: the search steps back over it (v4.3.2). Clients
 	// end turns like this, and the row used to lose its body because of it.
 	blankBody := body[:len(body)-2] + `,{"type":"message","role":"user","content":[{"type":"input_text","text":"   "}]}]}`
-	respBlank := f.do(t, "POST", "/v1/responses", blankBody, nil)
-	respBlank.Body.Close()
-	rowBlank, err := f.db.GetRequestLog(ctx, respBlank.Header.Get("x-request-id"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rowBlank.RequestJSON != question {
-		t.Fatalf("a blank trailing message must not cost the row its body, got %q", rowBlank.RequestJSON)
+	if got := f.postAndLog(t, blankBody).RequestJSON; got != question {
+		t.Fatalf("a blank trailing message must not cost the row its body, got %q", got)
 	}
 
-	// An oversized message is stepped over as well, so a turn that ends with a pasted file
+	// The length bound is a sanity limit (2000 by default), NOT the discriminator. This is the
+	// browser DSH deployment that reported "every request is empty": its questions were 117–521
+	// characters and its runtime snapshot 542 — every message over the old 100-character bound,
+	// while the marker is what tells the snapshot from the question.
+	longQuestion := strings.Repeat("为", 117)
+	longBodyWithBoilerplate := `{"model":"echo-model","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"` + longQuestion + `"}]},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"` + boilerplate + `"}]}]}`
+	if got := f.postAndLog(t, longBodyWithBoilerplate).RequestJSON; got != longQuestion {
+		t.Fatalf("a 117-character question must be recorded even though boilerplate follows it: %q", got)
+	}
+
+	// A message past the sanity bound is stepped over, so a turn that ends with a pasted file
 	// still records the question before it.
-	long := strings.Repeat("长", 100) + "ZZ_PAST_THE_THRESHOLD"
+	long := strings.Repeat("长", 2500) + "ZZ_PAST_THE_THRESHOLD"
 	longBody := `{"model":"echo-model","input":[` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"` + question + `"}]},` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"` + long + `"}]}]}`
-	respLong := f.do(t, "POST", "/v1/responses", longBody, nil)
-	respLong.Body.Close()
-	rowLong, err := f.db.GetRequestLog(ctx, respLong.Header.Get("x-request-id"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rowLong.RequestJSON != question {
-		t.Fatalf("an oversized message must be skipped in favour of one that fits: %q", rowLong.RequestJSON)
+	if got := f.postAndLog(t, longBody).RequestJSON; got != question {
+		t.Fatalf("a pasted file must be skipped in favour of the prompt before it: %q", got)
 	}
 
 	// Nothing qualifies at all: the row keeps its identity and its size, but no body.
 	noneBody := `{"model":"echo-model","input":[` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"   "}]},` +
 		`{"type":"message","role":"user","content":[{"type":"input_text","text":"` + long + `"}]}]}`
-	respNone := f.do(t, "POST", "/v1/responses", noneBody, nil)
-	respNone.Body.Close()
-	rowNone, err := f.db.GetRequestLog(ctx, respNone.Header.Get("x-request-id"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	rowNone := f.postAndLog(t, noneBody)
 	if rowNone.RequestJSON != "" {
 		t.Fatalf("no qualifying message must leave no body: %q", rowNone.RequestJSON)
 	}
 	if rowNone.RequestBytes <= 0 {
 		t.Fatalf("the size is still recorded even when the body is not: %+v", rowNone)
+	}
+
+	// Boilerplate-only traffic is the case that used to look like "DSH sends nothing": the only
+	// user message is the runtime-context snapshot, so there is no body — and no body is right.
+	onlyBoilerplate := `{"model":"echo-model","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"` + boilerplate + `"}]}]}`
+	if got := f.postAndLog(t, onlyBoilerplate).RequestJSON; got != "" {
+		t.Fatalf("boilerplate alone must not be recorded as the user's words: %q", got)
 	}
 
 	// A key switched to full keeps EVERYTHING: the whole body, both user messages included,
@@ -701,12 +726,7 @@ func TestDefaultPolicyRecordsTheNewestMessageThatFits(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.verifier.Invalidate(secret.Prefix(testToken))
-	resp2 := f.do(t, "POST", "/v1/responses", longBody, nil)
-	resp2.Body.Close()
-	row2, err := f.db.GetRequestLog(ctx, resp2.Header.Get("x-request-id"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	row2 := f.postAndLog(t, longBody)
 	if !strings.Contains(row2.RequestJSON, "ZZ_PAST_THE_THRESHOLD") ||
 		!strings.Contains(row2.RequestJSON, question) {
 		t.Fatalf(`full must keep the whole body, including both messages: %q`, row2.RequestJSON)

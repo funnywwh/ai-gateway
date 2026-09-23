@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -278,5 +279,106 @@ func TestUserInputTextIsValidUTF8(t *testing.T) {
 	}
 	if len([]rune(got)) != 60 || len(got) != 180 {
 		t.Fatalf("recorded %d characters / %d bytes, want 60 / 180", len([]rune(got)), len(got))
+	}
+}
+
+// userItemJSON renders one user message item whose text needs JSON escaping (newlines, quotes).
+func userItemJSON(t *testing.T, text string) string {
+	t.Helper()
+	raw, err := json.Marshal(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return `{"type":"message","role":"user","content":[{"type":"input_text","text":` + string(raw) + `}]}`
+}
+
+// The case that made this rule: a real prompt is often LONGER than a short boilerplate block and
+// shorter than a long one, so the markers — not the length — have to decide. This is the shape a
+// browser DSH session sent when every one of its rows came out empty: a 542-character runtime
+// context snapshot LAST, and a 117-character question before it (M83).
+func TestUserInputTextSkipsBoilerplateAndKeepsTheHumanMessage(t *testing.T) {
+	question := strings.Repeat("问", 117)
+	runtime := dshRuntimePrefix + " " + strings.Repeat("context. ", 50) // boilerplate, ~540 chars
+	req := parseBody(t, `{"model":"m","input":[`+userItemJSON(t, question)+`,`+userItemJSON(t, runtime)+`]}`)
+
+	// The bound is the shipped default: both messages are within it, so only the marker can tell
+	// them apart. If the marker were ignored, the runtime snapshot would be what got recorded.
+	got, err := req.UserInputText(2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != question {
+		t.Fatalf("recorded %d characters, want the 117-character question (boilerplate skipped)",
+			len([]rune(got)))
+	}
+}
+
+// Every client's scaffolding is skipped, whichever marker it uses.
+func TestUserInputTextRecognisesEachClientsBoilerplate(t *testing.T) {
+	for name, boilerplate := range map[string]string{
+		"DSH runtime context":     dshRuntimePrefix + " This snapshot supersedes earlier ones.",
+		"DSH system prompt":       dshDeveloperPrefix + "\n\nThe checkout is at /x.",
+		"Codex environment block": codexEnvContextTag + "\n  <cwd>/repo</cwd>\n</environment_context>",
+		"Codex instructions":      codexInstructionPrefix + ", a terminal-based coding assistant.",
+		"system reminder":         "<system-reminder>\nCurrent runtime context …\n</system-reminder>",
+		"skills block":            "<skills_instructions>\n## Skills\n</skills_instructions>",
+		"DSH title call":          dshTitleUserPrefix + `["hello"]`,
+		"Codex title call":        codexTitleUserPrefix + "\n\nUser prompt:\nfix this",
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := parseBody(t, `{"model":"m","input":[`+
+				userItemJSON(t, "真正的问题")+`,`+userItemJSON(t, boilerplate)+`]}`)
+			got, err := req.UserInputText(2000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != "真正的问题" {
+				t.Fatalf("recorded %q, want the human message before the boilerplate", got)
+			}
+		})
+	}
+}
+
+// A human message beyond the sanity bound is skipped like any other miss, and the search keeps
+// going backwards: a pasted file must not become the body, and an older prompt still must.
+func TestUserInputTextSkipsABeyondBoundHumanMessage(t *testing.T) {
+	older := "先解决构建问题"
+	huge := strings.Repeat("x", 2500)
+	req := parseBody(t, `{"model":"m","input":[`+
+		userItemJSON(t, older)+`,`+userItemJSON(t, huge)+`,`+userItemJSON(t, dshRuntimePrefix+" boilerplate")+`]}`)
+	got, err := req.UserInputText(2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != older {
+		t.Fatalf("recorded %d characters, want the older prompt", len([]rune(got)))
+	}
+}
+
+// Boilerplate is never stored, not even with the length bound switched off.
+func TestUserInputTextSkipsBoilerplateWithoutABound(t *testing.T) {
+	req := parseBody(t, `{"model":"m","input":[`+
+		userItemJSON(t, "first question")+`,`+userItemJSON(t, dshRuntimePrefix+" boilerplate")+`,`+
+		userItemJSON(t, "second question")+`]}`)
+	got, err := req.UserInputText(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "first question\nsecond question" {
+		t.Fatalf("recorded %q, want both human messages and no boilerplate", got)
+	}
+}
+
+// A message that merely CONTAINS a marker (a human quoting the runtime context line) is not
+// boilerplate: only the opening decides.
+func TestUserInputTextOnlyTheOpeningDecides(t *testing.T) {
+	mentioning := "为什么日志里会出现 " + dshRuntimePrefix + " 这一行？"
+	req := parseBody(t, `{"model":"m","input":[`+userItemJSON(t, mentioning)+`]}`)
+	got, err := req.UserInputText(2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != mentioning {
+		t.Fatalf("recorded %q, want the message that merely mentions the marker", got)
 	}
 }

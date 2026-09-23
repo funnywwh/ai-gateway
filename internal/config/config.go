@@ -225,15 +225,17 @@ type Recording struct {
 	// switch and is on by default; it is only ever written on the title call's own row.
 	RecordTitle bool `yaml:"record_title"`
 	MaxBytes    int  `yaml:"max_bytes"`
-	// InputMaxChars is the length threshold of the default input policy (record_input=user,
-	// M82): the row keeps the newest user message that carries text and is at most this many
-	// characters long (the boundary is <=, so a message of exactly this length is kept).
-	// Messages that are empty or too long are not recorded, and neither ends the search — a
-	// turn often ends with a runtime-context snapshot, an empty continuation or a pasted file,
-	// and the row should still get the last thing a human actually said. A message is never
-	// truncated into something that reads like a whole question. 0 means no length filter at
-	// all: every text-carrying user message is kept, joined by newlines. Only this channel is
-	// subject to the threshold: "full" is the mode that keeps the client's exact bytes for
+	// InputMaxChars is the SANITY BOUND of the default input policy (record_input=user, M83):
+	// the row keeps the newest user message that carries text, is not client boilerplate, and
+	// is at most this many characters long (the boundary is <=). What decides is the boilerplate
+	// markers — a runtime-context snapshot, an environment block, the agent's own system prompt,
+	// the injected skill/reminder blocks and the machine-generated title prompts are skipped
+	// whatever their length — because a real prompt can be longer than one and shorter than
+	// another (see internal/responses/record.go). This bound only stops a pasted file from
+	// becoming the row's body. Messages that fail any condition do not end the search: the row
+	// still gets the newest thing a human actually wrote. A message is never truncated into
+	// something that reads like a whole question. 0 means no length bound at all. Only this
+	// channel is subject to it: "full" is the mode that keeps the client's exact bytes for
 	// diagnosing an upstream 400, and it is deliberately exempt from all of it.
 	InputMaxChars int `yaml:"input_max_chars"`
 	// RetentionDays is how long recorded content lives: request logs older than the
@@ -1046,10 +1048,12 @@ func Default() Config {
 			// metadata about the session rather than the user's own content.
 			RecordTitle: true,
 			MaxBytes:    1048576,
-			// 100 characters per user message: enough to recognise the question (and read
-			// a short one whole), small enough that the log is no longer a second copy of
-			// the conversation.
-			InputMaxChars:          100,
+			// A sanity bound, not the discriminator: boilerplate is filtered by marker, and a
+			// human's prompt is routinely longer than a short marker-ed block (a real
+			// deployment had 117–521 character questions next to a 542-character runtime
+			// snapshot). 2000 characters is about a page of prose — far more than any prompt,
+			// small enough that a pasted file does not become the log's body.
+			InputMaxChars:          2000,
 			RetentionDays:          30,
 			DimensionRollupEnabled: true,
 			QueueSize:              16384,
@@ -1481,10 +1485,10 @@ func (c *Config) Validate() error {
 	if err := oneOf("recording.record_input", c.Recording.RecordInput, RecordingInputModes...); err != nil {
 		return err
 	}
-	// 0 switches the length filter off (every text-carrying user message is kept); a negative
-	// threshold is a typo, not a policy.
+	// 0 switches the length bound off (boilerplate is still skipped); a negative bound is a
+	// typo, not a policy.
 	if c.Recording.InputMaxChars < 0 {
-		return fmt.Errorf("recording.input_max_chars must be >= 0 (0 keeps every user message that carries text)")
+		return fmt.Errorf("recording.input_max_chars must be >= 0 (0 removes the length bound)")
 	}
 	// 0 switches retention off (nothing is pruned, stored responses never expire);
 	// a negative window is a typo, not a policy.

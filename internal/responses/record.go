@@ -8,25 +8,31 @@ import (
 // UserInputText returns the text the default input policy (recording.record_input=user)
 // records for this request, or "" when there is nothing worth keeping.
 //
-// The rule (M82, revised in v4.3.2): walk the user messages from the end and keep the newest
-// one that is BOTH readable text and at most maxChars characters. Messages that are empty or
-// too long are stepped over rather than ending the search — the row gets the newest message
-// that actually says something, instead of nothing at all.
+// The rule (M82, revised in v4.3.2 and again in M83): walk the user messages from the end and
+// keep the newest one that (a) carries readable text, (b) is NOT client boilerplate, and
+// (c) is at most maxChars characters. Messages that fail any of those are stepped over rather
+// than ending the search, so the row gets the newest thing a human actually wrote.
 //
-// Why this shape:
+// Why each condition:
 //
 //   - In an agent loop the request body is not the user's input. One real request carried 67
 //     input items, of which 2 were user messages — the rest were tool definitions and
 //     function_call_output items holding whole file contents. Recording all of them turned
 //     the request log into a second copy of every file an agent read (M23).
-//   - The message worth having sits at the end: a DSH turn looks like
-//     [813-character runtime-context snapshot][78-character prompt].
-//   - Clients also end turns with messages that carry nothing usable — an empty continuation,
-//     a tool-result-only turn, a whitespace-only string. Taking the literal last message made
-//     those rows bodyless, which is why the search now steps back over them.
-//   - A long message is not recorded at all rather than truncated (M81 kept the first 100
-//     characters, which made a 1000-character question indistinguishable from a 100-character
-//     one — a "full question" that was really a head). Keep it whole or do not keep it.
+//   - Most of the user messages are the client talking to itself: a DSH turn is
+//     [Current runtime context. … (542 chars)][the question (117 chars)], and a browser DSH
+//     session replays its own system prompt in the same list. Those are boilerplate (see
+//     boilerplatePrefixes) and are skipped — including when they are the last message, which
+//     is the normal case.
+//   - Length alone cannot make that distinction, which is what M82/M82.1 got wrong: a real
+//     prompt can be longer than a short boilerplate block and shorter than a long one. With a
+//     100-character rule, one deployment's every request (prompts of 117–521 characters, next
+//     to a 542-character runtime snapshot) recorded nothing at all — see the M83 notes in
+//     docs/request-log.md. Hence: markers decide, and the length threshold is only a sanity
+//     bound (default 2000) so a pasted file does not become the log's body.
+//   - A long message is not truncated (M81 kept the first 100 characters, which made a
+//     1000-character question indistinguishable from a 100-character one — a "full question"
+//     that was really a head). Keep it whole or do not keep it.
 //   - The payload is plain text, not a JSON document (M82): the structure — items, parts,
 //     omission tallies, thresholds — was noise for the person reading the log and for an agent
 //     calling get_request. What is left is the one thing worth having.
@@ -35,8 +41,10 @@ import (
 // body verbatim, JSON and all, and is deliberately exempt from every rule above.
 //
 // maxChars is recording.input_max_chars: a message of exactly that many characters is kept
-// (the boundary is <=). 0 means no length filter: every message that carries text is kept, in
-// order, joined by newlines — still text only, never the tool definitions or images.
+// (the boundary is <=). 0 means no length filter — every non-boilerplate message that carries
+// text is kept, in order, joined by newlines; boilerplate is skipped either way, because
+// storing the agent's own scaffolding as if it were the user's words is exactly what this
+// policy exists to prevent.
 func (r *Request) UserInputText(maxChars int) (string, error) {
 	items, apiErr := r.Items()
 	if apiErr != nil {
@@ -51,7 +59,9 @@ func (r *Request) UserInputText(maxChars int) (string, error) {
 			continue
 		}
 		text, runes, readable := userMessageText(item.Content)
-		msgs = append(msgs, recordedUserMessage{text: text, runes: runes, readable: readable})
+		msgs = append(msgs, recordedUserMessage{
+			text: text, runes: runes, readable: readable, boilerplate: boilerplateText(text),
+		})
 	}
 	if len(msgs) == 0 {
 		return "", nil
@@ -59,19 +69,19 @@ func (r *Request) UserInputText(maxChars int) (string, error) {
 	if maxChars <= 0 {
 		kept := make([]string, 0, len(msgs))
 		for _, msg := range msgs {
-			if msg.carriesText() {
+			if msg.carriesText() && !msg.boilerplate {
 				kept = append(kept, msg.text)
 			}
 		}
 		return strings.Join(kept, "\n"), nil
 	}
-	// Newest first: the first message that carries text and fits is the one to record.
-	// Stepping back matters — agent clients end a turn with a message that is empty (a
-	// tool-result-only turn) or oversized (a whole file pasted in), and neither should cost
-	// the row its body when an earlier message still says something useful.
+	// Newest first: the first message that a human actually wrote is the one to record.
+	// Stepping back matters — agent clients end a turn with boilerplate (a runtime-context
+	// snapshot), nothing at all (a tool-result-only turn) or an oversized paste, and none of
+	// those should cost the row its body when an earlier message still says something useful.
 	for i := len(msgs) - 1; i >= 0; i-- {
 		msg := msgs[i]
-		if !msg.carriesText() || msg.runes > maxChars {
+		if !msg.carriesText() || msg.runes > maxChars || msg.boilerplate {
 			continue
 		}
 		return msg.text, nil
@@ -85,6 +95,46 @@ type recordedUserMessage struct {
 	text     string
 	runes    int
 	readable bool
+	// boilerplate marks a message the client generated rather than wrote: DSH's runtime-context
+	// snapshot, Codex's environment block, either agent's own system prompt, the injected
+	// skill/reminder blocks, and the machine-generated title calls.
+	boilerplate bool
+}
+
+// boilerplatePrefixes are the openings that mark a user message as client-generated rather
+// than human. They come from the same vocabulary the identity extractor uses (dimensions.go):
+// DSH's runtime-context snapshot and its system prompt, Codex's environment block and its
+// instructions, the injected skill/reminder blocks, and the two machine-generated title
+// prompts. A message that opens with one of these is the agent scaffolding talking to itself.
+//
+// This list is why the length threshold is not the whole story: a real prompt can easily be
+// longer than the boilerplate around it (a 117-character question next to a 542-character
+// runtime snapshot), so length alone cannot tell them apart — the marker can.
+var boilerplatePrefixes = []string{
+	dshRuntimePrefix,
+	codexEnvContextTag,
+	dshDeveloperPrefix,
+	codexInstructionPrefix,
+	dshTitleUserPrefix,
+	codexTitleUserPrefix,
+	dshTitleSystemPrefix,
+	"<system-reminder>",
+	"<skills_instructions>",
+}
+
+// boilerplateText reports whether a message is client scaffolding. The check is on the opening
+// of the message, because that is where every one of these clients puts its tag.
+func boilerplateText(text string) bool {
+	trimmed := strings.TrimLeft(text, " \t\r\n")
+	if trimmed == "" {
+		return false
+	}
+	for _, prefix := range boilerplatePrefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // carriesText reports whether this message says anything worth recording. A message can be

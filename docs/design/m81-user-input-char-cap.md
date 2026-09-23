@@ -5,9 +5,9 @@
 > `docs/mcp.md`（内容可见性）、`docs/api-responses.md`（拒绝路径同样受录制约束）、
 > `README.md`（里程碑叙述与文档表）、`docs/TODO.md`（M81 清单）。
 > 里程碑编号：M78（请求日志的路由路线）、M79（沙箱工作区视图）、M80（Key 批量导入）已由并行工作区占用，
-> **已被 M82 取代**：『每条 user 消息截断到前 100 字符』改为『只保留最新一条有文本且不超过阈值的 user
-> 消息的纯文本』（正文不再是 JSON 文档；v4.3.2 起空消息与超长消息会被跳过），见
-> `docs/design/m82-user-input-tail-only-text.md`。
+> **已被 M82/M83 取代**：『每条 user 消息截断到前 100 字符』→『只保留最新一条「人说的话」的纯文本』
+> （M83 起样板按标记跳过，长度只作防呆上限），见 `docs/design/m82-user-input-tail-only-text.md` 与
+> `docs/design/m83-user-input-human-only.md`。
 > 因此本工作编号 **M81**。
 
 ## 目标

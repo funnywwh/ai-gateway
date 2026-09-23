@@ -1098,3 +1098,9 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 
 - [ ] **待宿主执行（真浏览器走查）**：`make ui-check` 的 `#requests` 视图（「未保留」文案已改）
 - [ ] **待安排**：随 v4.3.2 发版并部署 rag-server + gptjp 的线上验证（见 `docs/todo_done.md`）
+
+## M83 输入档只留「人说的话」（样板按标记跳过）
+> 设计文档 `docs/design/m83-user-input-human-only.md`。现场：某浏览器 DSH 租户 14:11 后 71 行请求日志全空。
+
+- [ ] **待宿主执行（真浏览器走查）**：`make ui-check`（「未保留」文案已改成「只有样板或超长用户消息」）
+- [ ] **待安排**：随 v4.3.3 发版并部署 rag-server + gptjp，并确认该租户的行恢复有正文（见 `docs/todo_done.md`）

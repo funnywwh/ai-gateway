@@ -526,7 +526,7 @@ try {
       replayRow.record_input_mode = 'user';
       find('详情').click();
       await settle();
-      checks.nothingKeptExplained = modalText().includes('输入（未保留：没有不超过上限的用户消息）');
+      checks.nothingKeptExplained = modalText().includes('输入（未保留：只有样板或超长用户消息）');
       closeButton().click();
       await settle();
 

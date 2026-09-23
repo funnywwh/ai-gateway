@@ -253,10 +253,10 @@ func (s *Service) queryTools() []queryTool {
 				"用在「这条请求到底发了什么」的追问上（先 list_requests 拿到 id）。" +
 				"request_id 必填且必须来自 list_requests，不要自己编 id（没有可省略的参数）。" +
 				"跨账户的 id 一律返回「找不到」，这是权限不是缺失。" +
-				"输入文本按录制策略收窄：默认（record_input=user）只保留【最新一条合格】user 消息的**纯文本**——" +
-				"从末尾往回找，取第一条有文本且不超过部署配的字符阈值（默认 100，恰好 100 保留）的消息；" +
-				"空消息（空白/仅图片/读不懂）与超长消息都跳过，因此 input 通常是字符串；" +
-				"一条都不符合时 input_recorded=false（日志里看不出具体原因）。" +
+				"输入文本按录制策略收窄：默认（record_input=user）只保留【最新一条人说的话】的**纯文本**——" +
+				"从末尾往回找，跳过客户端样板（runtime context / environment_context / system-reminder / " +
+				"skills / agent 自己的系统提示 / 标题调用的提示词）与空消息，取第一条有文本且不超过部署配的" +
+				"防呆上限（默认 2000 字符）的消息；一条都没有时 input_recorded=false（日志里看不出具体原因）。" +
 				"要完整内容只能把该 Key 的输入录制切成 full（保留全部：整份原样正文，不受阈值限制，此时 input 是对象）。" +
 				"所以别把 input 当提问全文，request_bytes 才是这次请求的真实体积。" +
 				"返回：request_id、endpoint、status、created_at、api_key_id/api_key_name，以及 input/reasoning/output_text 三项" +

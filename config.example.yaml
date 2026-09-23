@@ -114,9 +114,11 @@ billing:
 
 recording:
   # 输入通道四档（可在控制台按 Key 覆盖）：
-  #   user     - 只记用户自己写的输入（默认）：只保留【最新一条合格】user 消息的**纯文本**，
-  #              合格 = 有文本（去空白后非空）且不超过 input_max_chars；从末尾往回找，
-  #              空的与超长的都跳过；一条都不符合 → 该行正文为空。
+  #   user     - 只记用户自己写的输入（默认）：只保留【最新一条「人说的话」】的**纯文本**。
+  #              从末尾往回找，跳过客户端样板（以 "Current runtime context."、<environment_context>、
+  #              两个 agent 自己的系统提示、<system-reminder>、<skills_instructions>、标题提示词
+  #              开头的消息）与空消息，取第一条不超过 input_max_chars 的消息；
+  #              一条都没有 → 该行正文为空。
   #              系统指令、工具定义、工具调用与工具输出、历史 assistant 轮次、以及消息里的图片
   #              都不落库（M82 起连计数也不留，正文就是一段文本，不是 JSON 文档）
   #   full     - 保留全部：整份请求正文（排障用，也是「上游 400 要看客户端原样字节」的出口）——
@@ -131,12 +133,11 @@ recording:
   # 手段是停用该 Key。名字（account_name / api_key_name）是查询时从账户/Key 表现取的，日志行
   # 只存 id。
   record_input: user
-  # user 档的长度阈值（M82）：一条 user 消息不超过 N 个字符（按字符算，中文算 1 个；恰好 N 保留）才算合格，
-  # 保留的是整条文本（不再截断）。从末尾往回找最新一条合格的消息；空消息与超长消息跳过，一条都没有 →
-  # 该行不落正文。
-  # 0 = 不过滤：把所有有文本的 user 消息按顺序换行拼接成一段存下（仍然只是文本）。
+  # user 档的长度【上限】（M83）：它只是防呆——真实提问常常比短的样板长、比长的样板短，所以是不是样板
+  # 由上面的标记判定，长度只用来挡住「整份文件粘贴」这类超大消息。恰好 N 个字符也保留（按字符算，中文算 1 个）。
+  # 0 = 不限长度（样板仍然跳过）：把所有非样板且带文本的 user 消息按顺序换行拼接成一段存下。
   # full 档不受本开关影响；要看原样字节/全部内容就把该 Key 切成 full。
-  input_max_chars: 100
+  input_max_chars: 2000
   record_reasoning: false     # "save thinking text" checkbox - off by default, per key
   record_output_text: false   # "save final output text" checkbox - off by default, per key
   # 会话标题（M27）：客户端的标题调用产出的标题，记在那一行请求日志上。它是会话级元数据而不是

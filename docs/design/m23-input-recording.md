@@ -4,7 +4,7 @@
 > 规格同步：`docs/api-responses.md`（限速维度）、`docs/mcp.md`（内容可见性、限额工具）、
 > `config.example.yaml`（`recording.record_input`）、`docs/TODO.md`（M23 清单）。
 > **后续修订**：`user` 档不再原样保留 user 消息——M81 起先收成「每条消息前 100 字符」，M82 再收成
-> 「只保留最新一条有文本、且不超过 `recording.input_max_chars`（默认 100）的 user 消息的**纯文本**」；
+> 「只保留最新一条「人说的话」的**纯文本**」（M83：样板按标记跳过，`input_max_chars` 默认 2000，只作防呆）；
 > 非文本 part、系统指令、工具内容一概不落库，连计数也不留。要保留全部就把该 Key 切 `full`。
 > 见 `docs/design/m82-user-input-tail-only-text.md`。
 
