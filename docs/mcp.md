@@ -365,6 +365,12 @@ created_by,expires_at,last_used_at,feishu},account:{id,name,status,tags,dsh_enab
 未录制时返回 `{"reasoning_recorded":false}` 及原因说明，**不会**用空字符串冒充内容。
 脱敏：始终剔除 `Authorization`/密钥字段，并按 `recording.redact_paths` 移除指定路径。
 
+**输入文本的形状与上限**：`user` 档返回的文档里，每条 user 消息最多保留前
+`recording.input_max_chars` 个字符（默认 100，`0` = 不限）；被截断时文档带
+`input_max_chars` 与 `input_truncated=true`，消息里的非文本部分（图片等）不落库、只在 `omitted`
+里计数（`over_cap` 表示因超上限未落库的文本 part）。因此**不要**把 `input` 当成提问全文：
+它是有意收窄过的视图，`request_bytes` 才是这次请求的真实体积。
+
 ## 7. 实现要点
 
 - 手写 JSON-RPC 2.0 子集（`initialize`/`ping`/`tools/list`/`tools/call`），协议版本 `2025-06-18`。

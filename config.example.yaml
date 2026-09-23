@@ -114,9 +114,10 @@ billing:
 
 recording:
   # 输入通道四档（可在控制台按 Key 覆盖）：
-  #   user     - 只记用户自己写的输入（默认）：user 消息原样保留，系统/开发者指令、工具定义、
-  #              工具调用与工具输出、历史 assistant 轮次只留 omitted 计数与 request_bytes
-  #   full     - 整份请求正文（排障用：上游 400 需要客户端原样字节时临时打开）
+  #   user     - 只记用户自己写的输入（默认）：user 消息每条最多保留前 input_max_chars 个字符，
+  #              系统/开发者指令、工具定义、工具调用与工具输出、历史 assistant 轮次只留 omitted 计数
+  #              与 request_bytes
+  #   full     - 整份请求正文（排障用：上游 400 需要客户端原样字节时临时打开；不受字符上限影响）
   #   metadata - 不落正文，只留体积/状态等列内元数据
   #   off      - 不落正文（仍会写一行请求日志：状态、体积与身份维度都在，只是没有正文）
   #
@@ -127,6 +128,11 @@ recording:
   # 手段是停用该 Key。名字（account_name / api_key_name）是查询时从账户/Key 表现取的，日志行
   # 只存 id。
   record_input: user
+  # user 档的字符上限（M81）：每条 user 消息最多保留前 N 个字符（按字符切，中文按 1 个算），
+  # 超出部分丢弃并在录制文档里标 input_truncated=true / input_max_chars=N；消息里的非文本部分
+  # （图片等）只留 omitted 计数，不再连同 base64 一起落库。
+  # 0 = 不限制（回到「整条 user 消息原样落库」的旧行为）。full 档不受本开关影响。
+  input_max_chars: 100
   record_reasoning: false     # "save thinking text" checkbox - off by default, per key
   record_output_text: false   # "save final output text" checkbox - off by default, per key
   # 会话标题（M27）：客户端的标题调用产出的标题，记在那一行请求日志上。它是会话级元数据而不是

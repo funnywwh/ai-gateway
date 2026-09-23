@@ -5853,3 +5853,40 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
       `docs/TODO.md` 的 M80 小节（未完成项：控制台 UI、主机走查、发版）。
 - [x] **验证（worktree 内）**：`go build ./...`、`go vet ./...`、`go test ./...` 全绿；`go test ./internal/httpapi/
       ./internal/store/ ./internal/mcpsrv/` 亦全绿。本提交不升 `VERSION`、不部署。
+
+## M81 请求日志 `user` 档每条用户消息只留前 100 字符
+> 设计文档 `docs/design/m81-user-input-char-cap.md`。编号说明：M78（请求日志的路由路线）、
+> M79（沙箱工作区视图）、M80（Key 批量导入）已被并行工作区占用，本工作编号 M81。
+> 全部改动在一个独立工作区（`git worktree` + 分支 `m81-user-input-char-cap`）里完成，未触碰主工作区。
+
+- [x] 配置：`recording.input_max_chars`（默认 100，`0` = 不限，负值启动报错）
+      —— `Recording.InputMaxChars` + `Default()` + `Validate()`；测试钉住「默认 100」「显式 0 不被默认值覆盖」
+      「缺省键拿到 100」「负值报错」。
+- [x] 录制文档：`UserInputDocument(bodyBytes, maxChars)` 收上限参数（`internal/responses` 不 import
+      `internal/config`，见 `internal/arch/layering_test.go`），`clampUserMessage`/`clampContentParts`/
+      `takeText` 按**每条消息**共享预算截断文本；非文本 part 按类型进 `omitted`（`input_image`/`input_file`/
+      `unknown`），被预算吃掉的文本 part 计 `over_cap`，读不懂的 content 计 `message:user:content`；
+      文档带 `input_max_chars` 与 `input_truncated`。`takeText` 按 rune 取精确前缀（不复用 `clampRunes`：
+      它会 TrimSpace、且不回传用量，做逐 part 预算会计不对）。
+- [x] 写入路径：`recordInput` 的 `user` 分支传 `cfg.InputMaxChars`；请求日志、`store:true` 的
+      `responses.request_json`、hook 事件的 `input` 仍是「一次计算、三处同用」；本地拒绝路径
+      （`recordDenied`）复用同一函数，自动同口径；`/stats` 的 `request_log` 块新增 `input_max_chars`
+      （否则「线上到底有没有开上限」只能去翻配置文件）。
+- [x] 控制台：`pages/requests.js` 新增纯函数 `inputPanelTitle(row)`，详情弹窗输入面板标题变成
+      「输入（已截断：每条用户消息只留前 N 字符）」；`key_actions.js` 的四档文案与 `keys.js` 提示语、
+      `admin_routes.go` 的 `record_input_mode` 字段说明同步成「长消息按上限截断」（不写死 100：
+      上限是部署级配置，控制台看不到它的值）。
+- [x] 测试：`internal/config`（默认/0/负值/缺省）、`internal/responses`（新增 6 个用例：按条截断、
+      0 = 不限、非文本 part 丢弃、跨 part 共享预算、字符串形状 content、不可读 content）、
+      `internal/httpapi`（默认口径端到端截断 + `full` 不受影响 + `/stats` 暴露上限）、
+      `internal/webui/tests/requests_test.mjs`（vm 求值 `inputPanelTitle` 五种输入）、
+      `scripts/ui-harness/keys.page.html`（就地改 fixture 回放截断行与未截断行）。
+- [x] 文档：`docs/request-log.md`（通道矩阵新增一行 + 字符上限小节）、`config.example.yaml`、
+      `docs/mcp.md`（§6 形状与上限）、`docs/api-responses.md`（拒绝路径同样受限）、`README.md`
+      （M81 叙述 + 文档表状态）、`docs/design/m23-input-recording.md`（后续修订注记）、
+      `internal/mcpsrv/service.go` 的 `get_request` 工具说明（「别把 input 当提问全文」）。
+- [x] 验收（本会话沙箱实测）：`go vet ./...` 全过；`go test ./...` 全过（含 `internal/httpapi` 36.7s）；
+      `make ui-base` 全过（node v22 真跑，含新的 `requests_test.mjs` 断言）；`make build`（ui-dist 压缩镜像 +
+      overlay 二进制）成功写出 `bin/aigw`。沙箱里 Go 走工作区自带工具链 `.cache/go`
+      （`scripts/goenv.sh` 指向的 `$HOME/sdk/go` 在此不存在），命令用 `PATH="$PWD/.cache/go/bin:$PATH" make …`。
+- [x] 提交：单一 M81 提交（提交信息引用设计文档路径），并合并回 `main`。

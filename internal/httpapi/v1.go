@@ -711,7 +711,9 @@ type inputRecord struct {
 	Mode             string // full|user|metadata|off
 	Payload          string // the stored document ("" for metadata and off)
 	Bytes            int    // serialized size of the whole request body
-	Truncated        bool
+	// Truncated reports that the payload hit a cap: the per-message character cap (M81) or
+	// recording.max_bytes, which bounds every mode including "full".
+	Truncated bool
 
 	Dims     responses.Dimensions // client / workspace / session / call_kind
 	Model    string               // the model the client asked for (billed dimension)
@@ -722,9 +724,11 @@ type inputRecord struct {
 //
 // Three channels are recorded independently: this one decides what happens to the
 // client's request, and recordContent decides what happens to the model's thinking and
-// final text. The default here is "user": only the user's own input is stored, with a
-// tally of what was left out. "full" keeps the whole body for the times when an upstream
-// 400 has to be diagnosed against the exact bytes the client sent.
+// final text. The default here is "user": only the user's own input is stored — each user
+// message cut at recording.input_max_chars characters (M81) — with a tally of what was left
+// out. "full" keeps the whole body for the times when an upstream 400 has to be diagnosed
+// against the exact bytes the client sent, which is why the character cap does not apply to
+// it. Both content modes still end at recording.max_bytes.
 func (s *Server) recordInput(ctx context.Context, key *domain.APIKey, req *responses.Request, clientHint string) inputRecord {
 	cfg := s.deps.Config.Recording
 	rec := inputRecord{Mode: cfg.InputModeFor(key.RecordInputMode), StartedAt: time.Now().UTC()}
@@ -753,7 +757,7 @@ func (s *Server) recordInput(ctx context.Context, key *domain.APIKey, req *respo
 	case "full":
 		rec.Payload = string(raw)
 	case "user":
-		doc, err := req.UserInputDocument(len(raw))
+		doc, err := req.UserInputDocument(len(raw), cfg.InputMaxChars)
 		if err != nil {
 			// The request parsed, so this cannot normally happen; if it ever does, a row
 			// with the envelope and no body still beats no row at all — the operator has

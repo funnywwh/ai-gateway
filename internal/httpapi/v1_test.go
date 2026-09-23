@@ -606,6 +606,75 @@ func TestRecordingSwitchesAreIndependent(t *testing.T) {
 	}
 }
 
+// TestDefaultPolicyCapsEachUserMessage is the M81 rule end to end on the shipped default
+// (the fixture runs on config.Default() and the key is "inherit", i.e. the case an operator
+// never chose): every user message in the log keeps its first 100 characters, and the tail
+// of a long question never reaches the database. "full" is the exception, because its whole
+// purpose is the client's exact bytes.
+func TestDefaultPolicyCapsEachUserMessage(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// Two user messages, the shape a DSH turn really has: a runtime-context snapshot first,
+	// then the question. Both are longer than the cap.
+	boilerplate := "Current runtime context. " + strings.Repeat("context filler ", 20)
+	question := "请把请求日志的输入上限改成" + strings.Repeat("截断", 60) + "ZZ_PAST_THE_CAP"
+	body := `{"model":"echo-model","input":[` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"` + boilerplate + `"}]},` +
+		`{"type":"message","role":"user","content":[{"type":"input_text","text":"` + question + `"}]}]}`
+
+	resp := f.do(t, "POST", "/v1/responses", body, nil)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("request failed: %d", resp.StatusCode)
+	}
+	row, err := f.db.GetRequestLog(ctx, resp.Header.Get("x-request-id"))
+	if err != nil {
+		t.Fatalf("request log missing: %v", err)
+	}
+	if row.RecordInputMode != "user" {
+		t.Fatalf("record_input_mode = %q, want the resolved default", row.RecordInputMode)
+	}
+	if !strings.Contains(row.RequestJSON, `"input_max_chars":100`) ||
+		!strings.Contains(row.RequestJSON, `"input_truncated":true`) {
+		t.Fatalf("the row must say the input was capped at 100: %q", row.RequestJSON)
+	}
+	if strings.Contains(row.RequestJSON, "ZZ_PAST_THE_CAP") {
+		t.Fatalf("text past the cap reached the log: %q", row.RequestJSON)
+	}
+	boilerplateHead := string([]rune(boilerplate)[:100])
+	questionHead := string([]rune(question)[:100])
+	for _, head := range []string{boilerplateHead, questionHead} {
+		if !strings.Contains(row.RequestJSON, head) {
+			t.Fatalf("the head of a user message must survive: %q not in %q", head, row.RequestJSON)
+		}
+	}
+	// The cap is per message: a shared budget would have been spent on the boilerplate and
+	// the question's head would be missing above.
+	if row.RequestBytes <= len(questionHead)*2 {
+		t.Fatalf("request_bytes must still report the real request size: %+v", row)
+	}
+
+	// A key switched to full is diagnosing an upstream 400 against the client's exact
+	// bytes, so the character cap must not touch it.
+	if err := f.db.SetAPIKeyRecording(ctx, f.key.ID, false, false, "full"); err != nil {
+		t.Fatal(err)
+	}
+	f.verifier.Invalidate(secret.Prefix(testToken))
+	resp2 := f.do(t, "POST", "/v1/responses", body, nil)
+	resp2.Body.Close()
+	row2, err := f.db.GetRequestLog(ctx, resp2.Header.Get("x-request-id"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(row2.RequestJSON, "ZZ_PAST_THE_CAP") {
+		t.Fatalf(`full mode must keep the client's exact bytes: %q`, row2.RequestJSON)
+	}
+	if strings.Contains(row2.RequestJSON, "input_truncated") {
+		t.Fatalf("full mode must not be capped: %q", row2.RequestJSON)
+	}
+}
+
 // TestMetadataAndOffModesStoreNoBody pins the two modes that store no content: metadata
 // keeps the size of the request, off keeps nothing at all.
 func TestMetadataAndOffModesStoreNoBody(t *testing.T) {

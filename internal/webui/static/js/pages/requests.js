@@ -524,6 +524,20 @@ function formatTokens(value) {
   return n.toLocaleString('en-US');
 }
 
+// inputPanelTitle is the heading of the detail dialog's input panel. The default policy
+// stores only the head of each user message (M81), and a cut question is indistinguishable
+// from a short one by looking at the text — so the cap is stated in the heading. Without
+// this line an operator reading a 100-character "question" would have no way to know the
+// client sent more.
+function inputPanelTitle(row) {
+  if (!row.input_recorded) return '输入（未录制）';
+  const doc = row.input || {};
+  if (!doc.input_truncated) return '输入';
+  return doc.input_max_chars
+    ? '输入（已截断：每条用户消息只留前 ' + doc.input_max_chars + ' 字符）'
+    : '输入（已截断）';
+}
+
 async function detail(requestID) {
   const row = await api.get('/requests/' + encodeURIComponent(requestID));
   // api.get answers with whatever the body parsed to: an empty or unparseable body is
@@ -535,7 +549,7 @@ async function detail(requestID) {
   }
   const usage = row.usage || { metered: false };
   const body = el('div', { class: 'split' }, [
-    panel('输入' + (row.input_recorded ? '' : '（未录制）'), row.input),
+    panel(inputPanelTitle(row), row.input),
     panel('思考文本' + (row.reasoning_recorded ? '' : '（未录制）'), row.reasoning),
     panel('最终输出' + (row.output_text_recorded ? '' : '（未录制）'), row.output),
   ]);

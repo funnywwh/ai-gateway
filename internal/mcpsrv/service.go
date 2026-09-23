@@ -253,6 +253,9 @@ func (s *Service) queryTools() []queryTool {
 				"用在「这条请求到底发了什么」的追问上（先 list_requests 拿到 id）。" +
 				"request_id 必填且必须来自 list_requests，不要自己编 id（没有可省略的参数）。" +
 				"跨账户的 id 一律返回「找不到」，这是权限不是缺失。" +
+				"输入文本按录制策略收窄：默认每条用户消息只留开头若干字符（被截断时 input 里带 " +
+				"input_max_chars 与 input_truncated），工具定义、工具输出与消息里的图片不落库、只在 omitted 里计数。" +
+				"所以别把 input 当提问全文，request_bytes 才是这次请求的真实体积。" +
 				"返回：request_id、endpoint、status、created_at、api_key_id/api_key_name，以及 input/reasoning/output_text 三项" +
 				"（各自配 input_recorded/reasoning_recorded/output_text_recorded；未录制时给出 *_unavailable_reason 说明原因，不会用空串冒充内容）。",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"request_id":{"type":"string","description":"请求 id（x-request-id，形如 req_…），来自 list_requests；必填"}},"required":["request_id"]}`),

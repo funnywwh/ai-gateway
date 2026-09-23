@@ -485,9 +485,35 @@ try {
     const detailCached = () => [...modal().querySelectorAll('strong')]
       .find((n) => n.textContent === '缓存 tokens（已包含在输入中）：')?.nextElementSibling?.textContent;
     checks.cachedDetailNonzero = detailCached() === '960';
+    checks.inputPanelUntruncated = !t.includes('已截断：每条用户消息');
     closeButton().click();
     await settle();
     checks.closeDismisses = modal().querySelectorAll('.modal, .modal-backdrop').length === 0;
+
+    // The default policy keeps only the head of each user message (M81). A capped record is
+    // replayed in place, the way the cached-token cases above replay an older payload: the
+    // dialog must say the input was cut, because the text alone cannot.
+    const cappedRow = FIXTURES['/requests/req_demo0001'];
+    const savedInput = cappedRow.input;
+    try {
+      cappedRow.input = { ...savedInput, input_max_chars: 100, input_truncated: true };
+      find('详情').click();
+      await settle();
+      checks.truncatedInputDisclosed = modalText().includes('输入（已截断：每条用户消息只留前 100 字符）');
+      closeButton().click();
+      await settle();
+      // The same document without the flag must not claim a truncation that did not happen.
+      cappedRow.input = { ...savedInput, input_max_chars: 100 };
+      find('详情').click();
+      await settle();
+      checks.untruncatedInputStaysPlain = modalText().includes('输入')
+        && !modalText().includes('已截断');
+      closeButton().click();
+      await settle();
+    } finally {
+      cappedRow.input = savedInput;
+    }
+    checks.inputFixturesRestored = cappedRow.input === savedInput;
 
     // Replay an older metered payload without the optional cache dimension, then an
     // unmetered detail. Restore fixtures so the existing refresh regression stays intact.

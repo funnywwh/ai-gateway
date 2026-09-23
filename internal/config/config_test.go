@@ -28,6 +28,11 @@ func TestDefaultIsValid(t *testing.T) {
 	if cfg.Recording.RecordReasoning || cfg.Recording.RecordOutputText {
 		t.Errorf("thinking/final-output recording must default to off")
 	}
+	// 100 characters per user message: the default policy keeps each user message's head
+	// rather than the whole question (M81).
+	if cfg.Recording.InputMaxChars != 100 {
+		t.Errorf("input_max_chars default = %d, want 100", cfg.Recording.InputMaxChars)
+	}
 	if cfg.Recording.RetentionDays != 30 {
 		t.Errorf("retention default = %d, want 30 days", cfg.Recording.RetentionDays)
 	}
@@ -217,6 +222,7 @@ func TestValidateRejectsBadValues(t *testing.T) {
 		{"bad strategy", func(c *Config) { c.Routing.DefaultStrategy = "random" }},
 		{"bad inflight policy", func(c *Config) { c.Billing.InflightPolicy = "explode" }},
 		{"bad recording mode", func(c *Config) { c.Recording.RecordInput = "everything" }},
+		{"negative input cap", func(c *Config) { c.Recording.InputMaxChars = -1 }},
 		{"negative retention", func(c *Config) { c.Recording.RetentionDays = -1 }},
 		{"ratios inverted", func(c *Config) { c.Billing.InflightSoftRatio = 0.9; c.Billing.InflightHardRatio = 0.5 }},
 		{"backup without dir", func(c *Config) { c.Backup.Enabled = true; c.Backup.Dir = "" }},
@@ -229,6 +235,39 @@ func TestValidateRejectsBadValues(t *testing.T) {
 				t.Fatalf("expected validation error for %s", tc.name)
 			}
 		})
+	}
+}
+
+// An explicit 0 is a policy ("no cap"), not an absent value: if loading applied the 100
+// default over it, the documented escape hatch back to pre-M81 behaviour would be
+// unreachable. The other half of the pair is that an omitted key really does get 100.
+func TestLoadKeepsExplicitZeroInputCap(t *testing.T) {
+	write := func(name, body string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	cfg, err := Load(write("zero.yaml", "recording:\n  input_max_chars: 0\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Recording.InputMaxChars != 0 {
+		t.Fatalf("input_max_chars = %d, want 0 (unlimited)", cfg.Recording.InputMaxChars)
+	}
+	if cfg.Recording.RecordInput != "user" {
+		t.Fatalf("record_input = %q, want the default user", cfg.Recording.RecordInput)
+	}
+
+	loaded, err := Load(write("absent.yaml", "recording:\n  record_input: user\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Recording.InputMaxChars != 100 {
+		t.Fatalf("absent input_max_chars = %d, want the 100 default", loaded.Recording.InputMaxChars)
 	}
 }
 

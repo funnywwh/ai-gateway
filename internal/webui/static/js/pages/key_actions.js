@@ -6,10 +6,12 @@ import { api } from '../api.js';
 import { el, modal, toast, modalHead, modalBody, modalActions } from '../ui.js';
 
 // 与 internal/config.RecordingInputModes 对齐；internal/webui 的测试守着这份表不漂移。
+// user 档的字数上限（recording.input_max_chars，M81）是部署级配置、控制台看不到具体数值，
+// 所以这里只说「长消息按上限截断」，不写死 100。
 export const INPUT_MODES = [
-  { value: 'inherit', label: '继承全局默认（默认：只记用户输入）' },
-  { value: 'user', label: 'user：只记用户输入' },
-  { value: 'full', label: 'full：整份请求正文（排障用）' },
+  { value: 'inherit', label: '继承全局默认（默认：只记用户输入，长消息按上限截断）' },
+  { value: 'user', label: 'user：只记用户输入（长消息按上限截断）' },
+  { value: 'full', label: 'full：整份请求正文（排障用，不受上限影响）' },
   { value: 'metadata', label: 'metadata：只记元数据（不落正文）' },
   { value: 'off', label: 'off：不记录输入' },
 ];

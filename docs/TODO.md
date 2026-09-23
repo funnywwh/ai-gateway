@@ -1059,3 +1059,14 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 - [ ] 待宿主执行（可选）：拿一批真实迁移 key（哈希形式）跑一次 200 项批量，核对 `created/updated` 计数与
       逐把 `admin_lookup_key` 的归属
 - [ ] 发版：随下一个版本发布（本提交不升 `VERSION`、不部署）
+
+## M81 请求日志 `user` 档每条用户消息只留前 100 字符
+> 设计文档 `docs/design/m81-user-input-char-cap.md`（里程碑编号说明：M78/M79/M80 已被并行工作区占用）。
+> 本节已完成的 8 项记录见 `docs/todo_done.md` 的同名小节；下面只列未完成项。
+
+- [ ] **待宿主执行（真浏览器走查）**：`make ui-check` —— 本会话沙箱里 `/usr/bin/firefox` 是 snap 包装器
+      （答不出 Mozilla 版本），脚本按设计带原因跳过。新增断言在 `scripts/ui-harness/keys.page.html` 的
+      `#requests` 视图：详情弹窗必须出现「输入（已截断：每条用户消息只留前 100 字符）」，未截断的行不得
+      出现该提示；压缩镜像（`UI_STATIC_DIR` + `UI_HARNESS_GZIP=1`）再走一遍同样待宿主
+- [ ] **待安排（发版/部署）**：本改动目前只在代码与文档里，线上 `:8088` 仍是旧行为（需要时走
+      `release-version` 流程）

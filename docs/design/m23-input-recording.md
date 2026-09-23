@@ -3,6 +3,9 @@
 > 状态：已实现（本文件在实现前已在对话中输出并通过评审）。
 > 规格同步：`docs/api-responses.md`（限速维度）、`docs/mcp.md`（内容可见性、限额工具）、
 > `config.example.yaml`（`recording.record_input`）、`docs/TODO.md`（M23 清单）。
+> **后续修订**：`user` 档不再原样保留 user 消息——M81 起每条消息最多留前
+> `recording.input_max_chars` 个字符（默认 100），非文本 part 只留计数，见
+> `docs/design/m81-user-input-char-cap.md`。
 
 ## 目标
 

@@ -1453,6 +1453,11 @@ func TestPruneRequestsEndpointAndStats(t *testing.T) {
 	if _, ok := block["dropped"]; !ok {
 		t.Fatalf("the console needs the drop counter too: %v", block)
 	}
+	// The per-message character cap of the default input policy (M81) is otherwise
+	// invisible: a row written under it looks exactly like a short question.
+	if block["input_max_chars"] != float64(100) {
+		t.Fatalf("input_max_chars = %v, want the configured 100", block["input_max_chars"])
+	}
 
 	// Session stickiness is part of the routing state an operator has to be able to see
 	// (docs/routing.md §4.4): the counts say whether it is doing anything at all.

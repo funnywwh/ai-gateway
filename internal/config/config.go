@@ -225,6 +225,15 @@ type Recording struct {
 	// switch and is on by default; it is only ever written on the title call's own row.
 	RecordTitle bool `yaml:"record_title"`
 	MaxBytes    int  `yaml:"max_bytes"`
+	// InputMaxChars caps how much of ONE user message record_input=user keeps (M81): the
+	// default policy used to store each user message verbatim, which in an agent loop is a
+	// full copy of the question. The cap is per message rather than per document on
+	// purpose — a DSH request usually carries 2-3 user messages and the first one is a
+	// runtime-context snapshot, so a shared budget would spend itself on that boilerplate
+	// and hide the prompt the operator is looking for. 0 means no cap (the pre-M81
+	// behaviour, whole message). Only this channel is capped: "full" exists to keep the
+	// client's exact bytes for diagnosing an upstream 400.
+	InputMaxChars int `yaml:"input_max_chars"`
 	// RetentionDays is how long recorded content lives: request logs older than the
 	// window are pruned daily, and a stored response expires with it. 0 disables cleanup.
 	RetentionDays int `yaml:"retention_days"`
@@ -1033,8 +1042,12 @@ func Default() Config {
 			// Session titles are on by default: they are the one piece of a client's
 			// traffic that makes a request log readable at a glance, and they are
 			// metadata about the session rather than the user's own content.
-			RecordTitle:            true,
-			MaxBytes:               1048576,
+			RecordTitle: true,
+			MaxBytes:    1048576,
+			// 100 characters per user message: enough to recognise the question (and read
+			// a short one whole), small enough that the log is no longer a second copy of
+			// the conversation.
+			InputMaxChars:          100,
 			RetentionDays:          30,
 			DimensionRollupEnabled: true,
 			QueueSize:              16384,
@@ -1465,6 +1478,11 @@ func (c *Config) Validate() error {
 	}
 	if err := oneOf("recording.record_input", c.Recording.RecordInput, RecordingInputModes...); err != nil {
 		return err
+	}
+	// 0 switches the per-message character cap off (the whole user message is kept, the
+	// pre-M81 behaviour); a negative cap is a typo, not a policy.
+	if c.Recording.InputMaxChars < 0 {
+		return fmt.Errorf("recording.input_max_chars must be >= 0 (0 disables the per-message cap)")
 	}
 	// 0 switches retention off (nothing is pruned, stored responses never expire);
 	// a negative window is a typo, not a policy.
