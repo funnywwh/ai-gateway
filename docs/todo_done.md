@@ -6062,3 +6062,23 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 - [x] **验收**：`go vet ./...`（除 M79 遗留 copylocks）无输出、`go test -count=1 ./...` 全绿、
       `make ui-base` 全绿、`make build` 成功。
 - [x] **发版**：v4.3.2（patch），部署 rag-server + gptjp，记录见本文件「v4.3.2 发布记录」。
+
+### v4.3.2 发布记录（M82.1：往回找「最新一条有文本且不超过上限」的 user 消息，2026-09-23，部署到 rag-server 与 gptjp）
+
+> 需求原话：「现在是不是保持最后一条不为空的<=100的user消息？」——随后三轮确认：跳过空的、
+> 恰好 100 保留（`<=`）、末条非空但超长时**继续往前找**。档位 **patch**：把 v4.3.1 刚上的输入口径
+> 再修一次（同一功能范围内，无接口/形状变化——正文仍是纯文本，MCP 的 string/object 判定、
+> 详情的 `record_input_mode`、`/stats` 都不需要动）。
+
+| 项 | 值 |
+|---|---|
+| 版本 | **v4.3.2**（`VERSION` 4.3.1 → 4.3.2；release 提交 `0b9b629`，tag `v4.3.2`；**未推 `origin`**） |
+| 构建物 | `bin/aigw` **4.3.2 / `0b9b629`**，23,528,519 B，sha256 `65a4c7d6dac3756bb91c9fa771db9fa569fcacff78a8c917a6f648be0bb02981`（console minified：44 文件 728868→408518 B，gzip 39 文件 406157→161820 B） |
+| 部署范围 | rag-server `aigw-local` 与 gptjp `aigw.service`：4.3.1/`91075fb` → **4.3.2/`0b9b629`**；本次不动 dshgw |
+| 回滚点 | rag-server：`bin/aigw.prev-4.3.1-91075fb`；gptjp：`/opt/aigw/aigw.prev-4.3.1-91075fb`（两台 sha 均 `84282965a427e8e0b7d8c47bd28c9e1dd499aad5f93003c7b85326830ccf71c6`）。回滚 = `cp -p` 回该文件 + 重启对应单元 |
+| schema | **无迁移**（仍 27） |
+| 验证（两台） | `/version` 均为 `{"revision":"0b9b629","version":"4.3.2"}`（gptjp 另在 `https://gpt.lagenio.xyz/aigw/version` 一致）；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200（gptjp 重启后 `level=ERROR` 0 条） |
+| 验证（真机行级，rag-server） | 升级后最近 **16 行全部是纯文本**、**0 行含结构痕迹**、最长 **67 字符**（阈值 100 ⇒ 必须 ≤100）、**0 行为空**。对比 v4.3.1 时的同类抽样（14 行里 2 行为空）：新口径下末条为空/超长会**回退取前一条**，所以整行为空的情形显著减少——16 行样本只能作旁证，规则本身由测试钉死（恰好 100 保留 / 101 跳过并回退 / 五种空消息形态被跳过 / 一条都不合格才为空）。 |
+| 配置/数据变更 | 无（两台 `config.yaml` 未动；阈值仍是默认 100） |
+| 未做（待人工） | ① 真浏览器 `make ui-check`（「未保留」文案改成「没有不超过上限的用户消息」）；② 线上 MCP 冒烟无令牌；③ `dshgw-verify` 重启；④ `origin` 未推。gptjp 仍无 `user` 档流量（近 6 天只有控制台问答 = 强制 off），口径要在它下一次非控制台请求里才可见 |
+| 已知噪声 | rag-server 的 settlement 超时 + fallback 自动补回（与 v4.3.0/v4.3.1 记录同一条，非本次引入）；`internal/runtime` 的两条负载敏感计时断言在整仓测试并发跑时会偶发失败（单独复跑 3/3 通过，与本改动无关） |
