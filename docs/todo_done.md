@@ -5805,9 +5805,9 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 项 | 值 |
 |---|---|
 | 版本 | **v4.2.0**（`VERSION` 4.1.1 → 4.2.0，minor：M77 多机分布式运行 + 本次可选配置键；release 提交 `ecb4d03`，tag `v4.2.0`，未推 `origin`） |
-| 构建物 | `bin/dshgw` 4.2.0 / `ecb4d03`；`bin/aigw` 4.2.0 / `ecb4d03`（console minified 44 文件 718063→404574 B，gzip 39 文件 402213→160467 B）。本次**只换 dshgw**：aigw 侧只多了透传字段，静态面与本特性无关 |
+| 构建物 | **`bin/dshgw` 4.2.0 / `992fd70`**（合并提交；sha256 `99ebe6751dcf9c4aa98d3e8cbb4f0283b16eceb3d7c12dd9c8d896dc86c6cd84`，16863126 B）—— 就是部署脚本默认 `SRC` 指向的那份；`bin/aigw` 4.2.0 / `ecb4d03`（console minified 44 文件 718063→404574 B，gzip 39 文件 402213→160467 B）。本次**只换 dshgw**：aigw 侧只多了透传字段，静态面与本特性无关 |
 | 部署范围 | 本机 `dshgw-verify`（门户 18300 / 网关 18299 / 租户 18301+ / worker 18400+）：换 `bin/dshgw` + 幂等给 `$ROOT/dshgw.yaml` 的 `deploy:` 加 `sandbox_workspace: /workspace` + 重启单元。重启会重启**所有**租户 worker（含发起部署的会话），因此留给人工择时 |
-| 部署脚本 | 工作区根 `deploy-aigw-4.2.0.sh`（未入 git）：`--check-profile` 只渲染并打印绑定 → 默认段幂等加键（带 `.bak`）+ `.new`+`mv` 换二进制 + 重启 + 60s 就绪门禁 + 打印每个 worker argv 里是否出现 `/workspace`；门禁失败装回旧二进制与旧 `dshgw.yaml` 再重启 |
+| 部署脚本 | 工作区根 `deploy-aigw-4.2.0.sh`（未入 git）：`--check-profile` 用带视图键的**临时配置副本**渲染并打印绑定（不动线上文件）→ 默认段幂等加键（文本插入，保留注释；带 `.bak`）+ `render` 前置校验 + `.new`+`mv` 换二进制 + 重启 + 就绪门禁 + 打印每个 worker argv 里是否出现 `/workspace`；门禁失败装回旧二进制与旧 `dshgw.yaml` 再重启。`--rollback` 还原最近的回滚点与配置备份。**已用假部署根 + 桩 systemctl/curl/ps 演练**：`deploy-aigw-4.2.0-rehearse.sh` 五个场景 26 项断言全过（幂等加键、注释保留、回滚点、门禁失败自动回滚、显式回滚） |
 | 回滚 | 还原 `$ROOT/dshgw.yaml.bak-*`（或删键）+ 装回 `$ROOT/data/prev/bin/` 的上一个 `dshgw` + 重启 `dshgw-verify`；删键即回到今天的行为 |
 | 待人工 | ① 宿主执行 `deploy-aigw-4.2.0.sh`（含重启）；② 重启后在**新会话**里确认 `pwd`/`echo $HOME` 是 `/workspace`、`ls ~` 是工作区内容、选择器/终端/文件面板根是 `/workspace`、旧会话仍可打开；③ 允许 `bwrap --unshare-pid` 的宿主上跑真机版 `make dshgw-sandbox-test`（本会话沙箱禁非特权 userns，只跑了单测） |
 
