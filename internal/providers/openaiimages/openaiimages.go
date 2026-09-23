@@ -173,7 +173,7 @@ func (p *Provider) RunAction(ctx context.Context, name string, in json.RawMessag
 // imageOnlyError is what a chat-shaped call gets: this provider serves the Images API, and
 // saying so beats an empty answer or a confusing "no such endpoint".
 func imageOnlyError(model string) *pluginapi.Error {
-	return pluginapi.NewError("image_model_only",
+	return pluginapi.NewError(pluginapi.CodeImageModelOnly,
 		"openai-images: "+model+" serves the Images API; use POST /v1/images/generations "+
 			"(or /v1/images/edits) instead of the Responses API")
 }

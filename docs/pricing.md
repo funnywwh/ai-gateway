@@ -16,7 +16,9 @@
 | `input_cache_miss` | token | 缓存未命中输入 |
 | `output` | token | 输出 |
 | `reasoning` | token | 思考（默认计入 output，可单列） |
-| 扩展 | count/second | `image`、`audio_second`、`tool_call` |
+| `image_input` | token | 图片输入 token（参考图；M84 起由 `openai-images` 采集，官方定价另有图像输入档） |
+| `image_output` | token | 图像输出 token（M84 起由 `openai-images` 采集；GPT image 模型的主要成本） |
+| 扩展 | count/second | `image`（张数）、`audio_second`、`tool_call` |
 
 **缺失维度兜底**：上游未给分维度 usage 时，`input_cache_hit = 0`、其余计入 `input_cache_miss`，
 并标 `usage_dimensions_incomplete = true` + 告警（**宁可高估成本，不把缓存命中按未命中漏算**）。
@@ -29,6 +31,12 @@
 |---|---|---|
 | `input` | `input_cache_miss` | 上游没给缓存明细，按未命中计（保守方向） |
 | `reasoning` | `output` | 默认计入 output，可单列 |
+| `image_output` | `output` | 图像输出在图像计量之前就写在 `output` 档（gptjp 的图像价就是如此），不改规则也照原价计 |
+| `image_input` | `input`（再兜底 `input_cache_miss`） | 参考图输入按文本输入价计，与既有近似一致；写了自己的费率就精确计价 |
+
+回落是**链式**的：`image_input → input → input_cache_miss`，读取方（计价引擎与
+`WorstCaseRates` 预留）都沿链取第一个有费率的维度，因此只写了裸 `input` 的规则集也能给参考图计价。
+回落的来源会记进 `bucketed_dimensions`（例如 `image_input->input`），并按维度告警。
 
 两条硬约束：
 

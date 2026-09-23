@@ -1,6 +1,6 @@
 # Images API 兼容面（gpt-image 系列）
 
-> 状态：**规格（M84 实现）**。设计文档：`docs/design/m84-image-generation.md`。
+> 状态：**已实现（M84）**。设计文档：`docs/design/m84-image-generation.md`。
 > 相关：`docs/api-responses.md`（Responses 面）、`docs/api-providers.md`（`openai-chat`）、
 > `docs/plugin-protocol-v1.md`（`provider.images`）、`docs/pricing.md` §1（图像 token 维度）、
 > `docs/billing.md`（图片预留）、`docs/request-log.md`（图片请求的日志口径）。

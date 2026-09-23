@@ -15,7 +15,6 @@ import (
 	"github.com/winger/ai-gateway/internal/runtime"
 	"github.com/winger/ai-gateway/internal/usage"
 	"github.com/winger/ai-gateway/pkg/pluginapi"
-	"github.com/winger/ai-gateway/pkg/providerkit"
 )
 
 // The Images API surface (M84): POST /v1/images/generations and POST /v1/images/edits.
@@ -132,7 +131,9 @@ func (s *Server) serveImage(w http.ResponseWriter, r *http.Request, op, endpoint
 			// An image request has no max_output_tokens, so the usual formula would hold
 			// only the prompt — the cheap part of an image. The image-side holds stand in
 			// for it (billing.images_reserve_tokens) and are released at settlement.
-			EstInputTokens:    providerkit.EstimateTokens(req.Prompt, 0),
+			// The prompt is the only part of an image request that can be sized up front;
+			// the image side of the hold comes from the two fields below.
+			EstInputTokens:    estimateInputTokens([]byte(req.Prompt)),
 			ImageOutputTokens: int64(req.N) * s.imagesReserveTokens(),
 			ImageInputTokens:  int64(len(req.Input)) * s.imagesReserveTokens(),
 			DefaultMarkupBP:   s.deps.Config.Billing.DefaultMarkupBP,
@@ -220,10 +221,20 @@ func (s *Server) serveImage(w http.ResponseWriter, r *http.Request, op, endpoint
 					attemptUsage = streamEnd.Usage
 				}
 				if writeErr := s.writeImageCompleted(sse, op, completed, attemptUsage); writeErr != nil {
-					// The client is gone; there is nothing left to serve. Record what the
-					// upstream metered and stop.
+					// The client is gone; there is nothing left to serve. The upstream work
+					// is already paid for, so the attempt is recorded (as a failure caused by
+					// the client, not by the upstream) and the audit row still has to exist:
+					// a request nobody received is exactly the one an operator looks for.
+					failed := contextError(writeErr)
+					waitedMS := attempt.QueueWaitMS
+					elapsed := int(time.Since(attemptStarted).Milliseconds()) - waitedMS
+					if elapsed < 0 {
+						elapsed = 0
+					}
 					s.recordImageAttempt(ctx, key, account, req.Model, plan.Resolved, cand, i+1,
-						contextError(writeErr), int(time.Since(attemptStarted).Milliseconds()), attemptStarted, attemptUsage)
+						failed, elapsed, attemptStarted, attemptUsage)
+					s.emitImageHook(ctx, key, account, plan.Resolved, "failed", attemptUsage)
+					s.recordImageRequest(ctx, key, account, endpoint, req, plan.Resolved, "failed", len(body))
 					ticket.Settle(totalTokensOf(attemptUsage.Dimensions))
 					return
 				}

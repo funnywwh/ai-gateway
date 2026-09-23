@@ -152,6 +152,7 @@ Codex 的"远端压缩 v2"不是单独的端点，而是**一次普通的 `POST 
   | `context_window` | int ≥ 1 | 该模型**可服务路由中已申报值的最小值**；未申报则省略 |
   | `max_output_tokens` | int ≥ 1 | 同上（最大输出） |
   | `input_modalities` | string[] | 恒含 `text`；任一候选声明 `capabilities.image` 才含 `image` |
+  | `output_modalities` | string[] | 没有声明时省略；`["text"]`，或候选声明 `image_generation`（服务 Images API 的图片模型）时 `["image"]` |
   | `capabilities` | object(bool) | 候选**能力键的并集**（true 键）；一个都没声明则省略 |
   | `reasoning` | object | `{"mode":"default"\|"force","effort":"…"}`，来自模型级推理覆写；未配置则省略 |
 
@@ -160,6 +161,8 @@ Codex 的"远端压缩 v2"不是单独的端点，而是**一次普通的 `POST 
   容量取**最小值**，因为路由按优先级/权重挑候选、不看上下文长度，报最大值等于许下一个某些路由兑现不了的承诺。
   `0` 一律表示「未申报」，既不参与取最小值也不写入响应——把它当成事实会读成「这个模型没有上下文」。
   没有任何声明的模型只回 OpenAI 原有字段与 `input_modalities:["text"]`，老客户端行为不变。
+  `output_modalities` 是给**选择器**看的：文本对话的模型菜单（dshgw 渲染的租户 settings、控制台智能问答）
+  据此跳过输出不是文本的模型，而不是把「选了必然失败」的选项摆给用户。
   `reasoning` **不是档位表**：某档是否被上游接受是逐模型实测的事实（见
   `docs/design/m20-dsh-reasoning-effort.md` §6），网关不假装知道。
 - 带图片的请求（任一条目内容含 `type: input_image`）在路由上要求 `image` 能力：`routing.degradation=strip`（默认）

@@ -1110,24 +1110,14 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 > 需求原话：「aigw 支持 gpt-image 系列模型，支持这类模型的 provider 接口」。
 > 设计：`docs/design/m84-image-generation.md`；规格：`docs/api-images.md`、
 > `docs/plugin-protocol-v1.md`、`docs/routing.md`、`docs/pricing.md` §1、`docs/billing.md`、
-> `docs/request-log.md`、`docs/dshgw.md`。本里程碑在**独立工作区** `../ai-gateway-m84`（分支 `m84-images`）实现。
+> `docs/request-log.md`、`docs/dshgw.md`。代码与实测记录见 `docs/todo_done.md` 的同名小节；
+> 本里程碑在**独立工作区** `../ai-gateway-m84`（分支 `m84-images`）实现，不合并 `main`。
 
-- [ ] `pkg/pluginapi`：`ImageRequest` / `ImageResponse` / `image.partial`·`image.completed` 事件、
-  `images` 能力、可选接口 `ImageProvider`、`provider.images` / `provider.images.stream`、
-  `MaxFrameBytes` 8 MiB → 64 MiB（含协议文档的兼容性说明）
-- [ ] `internal/providers/openaiimages`：内建类型（generate/edit/stream、usage → 维度、错误分类、
-  文本请求返回 `image_model_only`）+ 注册点 + `schema_test`/`arch` 守卫
-- [ ] `internal/runtime`：`Dispatcher.Images` / `ImagesStream`（容量闸与熔断观测与 Chat 一致）
-- [ ] `internal/routing`：`ModelFacts.ImageGeneration`；图片路径丢弃 degraded 候选
-- [ ] 计量与计费：`image_input`/`image_output` 维度 + `dimensionFallbacks` 回落、
-  `billing.images_reserve_tokens` 预留、`server.images_max_body_bytes` 上限
-- [ ] `internal/httpapi`：`POST /v1/images/generations`（JSON）与 `POST /v1/images/edits`（multipart）、
-  流式 SSE、usage 落库与结算、请求日志（只记参数与图片元数据）、`/v1/models` 的 `output_modalities`、
-  智能问答模型下拉过滤、路由表守卫测试 +11 → +13
-- [ ] `internal/dshgw`：`output_modalities` 解码 + 租户 settings 跳过非文本输出模型（golden）
-- [ ] 文档与配置：`config.example.yaml` 两个新键与示例供应商、README 文档表、控制台能力示例提示
-- [ ] 本机验收：`make verify` 全绿 + 临时实例（假上游）curl 实测非流式/流式/edits/错误路径/计费与日志
-- [ ] **待宿主执行（线上验证）**：在 gptjp 建 `openai-images` 实例并映射 `gpt-image-*`，
-  用真实 Key 生图一次，核对 `usage_records` 的 `input`/`image_input`/`image_output` 与
-  `cost_micros`（图像输出价 × 输出 token），并确认租户 DSH 菜单不再出现该模型
-- [ ] **待安排**：随下一版本发版（本里程碑不升 `VERSION`、不部署、不合并 `main`）
+- [ ] **待宿主执行（线上验证）**：在 gptjp 建 `openai-images` 实例（上游写官方或中转的 `/v1/images/*`）
+      并映射 `gpt-image-*`，用真实 Key 生图一次，核对 `usage_records` 的 `input`/`image_input`/`image_output`
+      与 `cost_micros`（= 图像输出价 × 输出 token；gptjp 现有规则集不改也能算对），并确认租户 DSH 菜单
+      不再出现该模型（`dshgw sync-models` 后看 `settings.yaml`）
+- [ ] **待宿主执行（真浏览器走查）**：控制台「供应商」页新建 `openai-images` 类型时，字段说明与模板正常渲染
+      （本会话沙箱无可用 firefox，`make ui-check` 自带跳过）
+- [ ] **待安排**：随下一版本发版并部署（本里程碑不升 `VERSION`、不部署、不合并 `main`）
+

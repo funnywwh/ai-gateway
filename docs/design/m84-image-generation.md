@@ -1,6 +1,6 @@
 # M84 设计文档：图片生成（gpt-image 系列 · Images API · `openai-images` 供应商 · `provider.images` 协议）
 
-> 状态：**实现中（M84）**。
+> 状态：**已实现（M84）**。
 > 规格：[docs/api-images.md](../api-images.md)（对客面）、[docs/plugin-protocol-v1.md](../plugin-protocol-v1.md)（协议新增）、
 > [docs/routing.md](../routing.md)、[docs/pricing.md](../pricing.md) §1、[docs/billing.md](../billing.md)、
 > [docs/request-log.md](../request-log.md)、[docs/dshgw.md](../dshgw.md)。
@@ -399,7 +399,38 @@ client ◄── JSON {created,data[],usage,…} 或 SSE image_generation.* / im
 
 ## 12. 实现与设计差异
 
-（实现完成后回填。）
+实现与设计基本一致，下面是落地时改掉的几处（都是为了让"一个事实只有一个来源"）：
+
+1. **`ImageRequest` 没有 `Stream` 字段**（设计稿里有）：宿主调用哪个方法（`provider.images` vs
+   `provider.images.stream`）本身就说明了这一点，多一个可能与调用不一致的字段只会变成第二个真相。
+   网关侧把它留在解析结果 `imageCall.stream` 里。
+2. **事件载荷收在一个子对象里**：`Event.Image *ImageEvent`（而不是设计稿里摊平的 `ImageB64`/`PartialIndex`），
+   图片回显（b64、序号、size/quality/background/output_format/created）作为一个整体出行。
+3. **`ImageRequest.Extra` 走线上**（`json:"extra"`）：`Request.Extra` 只在宿主内可见（插件看不到），
+   图片插件需要一个真字段才能拿到未建模参数。
+4. **两个协议方法而不是一个带开关的方法**：`provider.images` 与 `provider.images.stream` 与既有的
+   `provider.complete` / `provider.stream` 一一对应，`Serve` 的分发代码也是照抄一份。
+5. **计费回落改成链式**：设计稿写的是 `image_input → input_cache_miss`，实现时发现只写裸 `input` 的规则集
+   （最简单的部署形态）会让参考图 token 落进 `unpriced`。改成 `image_input → input → input_cache_miss`，
+   并让计价引擎与 `WorstCaseRates` 都沿链取值（`fallbackChain`）。原来的"回落图不许有链"的约束因此被替换成
+   "可以有两跳，但读取方必须沿链走"。
+6. **上游错误状态对图片请求透出**：`/v1/responses` 对无法识别的 provider 错误一律回 500（既有行为，未改），
+   但图片请求把上游的 4xx 原样透出（`imageUpstreamError`），因为"尺寸不被支持"这类错误必须让调用方看到；
+   5xx 仍归为 502（从客户端视角就是网关侧失败）。
+7. **`image_model_only` 在 Responses 面映射成 400**：新增 `pluginapi.CodeImageModelOnly` 常量，
+   `toAPIError` 对这一个码特判——它是网关自己造的"端点用错了"，报 500 会把唯一的建议埋掉。
+   上游真实的 4xx 行为不变。
+8. **`billing.ImagesReserveTokens <= 0` 与 `server.ImagesMaxBodyBytes <= 0` 走代码内默认值**
+   （8192 / 32 MiB）而不是配置校验失败：与 `reserve_micros_default` 那类既有键的处理方式一致。
+
+实测（本机临时实例 + 假上游，2026-09-23，见 §9 的验收命令）：
+非流式/流式/edits 三条路径 200 且响应形状与官方一致；能力门禁、参数校验、413、文本请求打图片模型
+分别回 400/400/413/400（含可读文案）；`usage_records` 三个维度
+`input=20, image_input=5, image_output=4160`；把 gptjp 现有形态的成本规则集
+（`input=5/Mtok`、`output=30/Mtok`，不含图像维度）写上去后 `cost_micros=124925`
+= 20×5 + 5×5（回落 `input`）+ 4160×30（回落 `output`），`bucketed_dimensions` 记录两条回落。
+`go test ./...` 全绿。**`go vet ./...` 在本仓库 main 上本来就失败**
+（`internal/dshgw/config/sandboxview_test.go` 的 copylocks，M79 起既有），与本次改动无关。
 
 ## 13. 回滚
 

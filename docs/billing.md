@@ -54,6 +54,24 @@
 3. `Σ charge(ledger) == Σ usage_records.charge_micros`
 4. 预付账户余额不为负（`overshoot` 吸收策略下；`overdraft` 模式允许负至 `overdraft_limit_micros` 并立即 suspend）
 
+### 3.1 图片请求（M84）
+
+`POST /v1/images/generations|edits` 没有 `max_output_tokens` 可用，所以预留走**图像维度**而不是输出档：
+
+```
+reserve = ceil(n × billing.images_reserve_tokens × image_output 最贵费率)
+        + ceil(参考图数量 × billing.images_reserve_tokens × image_input 最贵费率)
+        + ceil(提示词估算 token × input 最贵费率)
+```
+
+`images_reserve_tokens`（默认 8192）是**每张图**的输出 token 预留，宁可多预留：结算按上游真实 usage，
+多出的部分当场释放；少预留才是预付费账户被打穿的原因。规则集没写图像费率时，链式回落取
+`output` / `input`（`docs/pricing.md` §1），完全没有费率时回退 `billing.reserve_micros_default`。
+
+**已知缺口（按设计保留）**：图片流被客户端中断时上游 usage 未知，该次尝试按 0 用量记失败
+（`terminated_reason=upstream_error`，`error_code=client_disconnected`），网关不会估算补账；
+这类请求在请求日志里看得到。
+
 ## 4. 长调用与在途额度
 
 **准入**（杜绝超卖）：

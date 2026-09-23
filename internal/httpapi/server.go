@@ -33,6 +33,7 @@ import (
 	"github.com/winger/ai-gateway/internal/store"
 	"github.com/winger/ai-gateway/internal/usage"
 	"github.com/winger/ai-gateway/internal/webaccess"
+	"github.com/winger/ai-gateway/pkg/pluginapi"
 )
 
 // AdminService is the management authentication port.
@@ -649,6 +650,13 @@ func toAPIError(err error) *domain.APIError {
 	// generic 500 an unrecognised error would produce.
 	if errors.Is(err, runtime.ErrProviderBusy) {
 		return domain.ErrProviderBusy(err.Error())
+	}
+	// A model that serves the Images API refuses a chat-shaped request (M84). The request is
+	// well formed and the key is authorised — the client picked the wrong endpoint — so the
+	// answer is a 400 carrying the provider's message, which names the right one, instead of a
+	// 500 that reads like a gateway fault.
+	if apiErr, ok := pluginapi.IsError(err); ok && apiErr.Code == pluginapi.CodeImageModelOnly {
+		return domain.ErrInvalidRequest(apiErr.Message)
 	}
 	return domain.ErrInternal(err.Error())
 }

@@ -91,12 +91,13 @@ M39 让「线上跑的是哪个版本」有一个能读的答案：版本号的�
 | `docs/todo_done.md` | 已完成记录归档（各里程碑清单、发布记录、实测数据） | 持续追加（只增不改） |
 | `docs/architecture.md` | 分层、模块边界与可替换扩展点 | 已落地（由 `internal/arch` 断言守护） |
 | `docs/design/` | 每个里程碑的设计文档（接口、数据流、决策、异常、测试策略、实现差异） | M0–M39 全部产出（M28 的决策记在 `docs/api-providers.md` 与 `docs/todo_done.md`） |
-| `docs/plugin-protocol-v1.md` | 插件协议 v1（帧/方法/事件/取消/背压/错误分类） | **已实现（M2）** |
+| `docs/plugin-protocol-v1.md` | 插件协议 v1（帧/方法/事件/取消/背压/错误分类，含**图片方法 `provider.images(.stream)` 与 `image.*` 事件**） | **已实现（M2，+M84 图片）** |
 | `docs/api-responses.md` | Responses 兼容面（端点/字段/SSE 事件/错误封装/认证与限速）、`GET /v1/models` 的能力扩展字段 | **已实现（M5，+M68 能力扩展字段）** |
+| `docs/api-images.md` | Images API 兼容面（`/v1/images/generations`\|`edits`、流式部分图、`openai-images` 供应商、能力键 `image_generation`、图像 token 计量与计费） | **已实现（M84）** |
 | `docs/api-providers.md` | openai-chat 供应商（配置开关、思考模式、用量维度、错误分类、DeepSeek 接入） | **已实现（M17）** |
 | `docs/provider-ui.md` | 控制台如何展示供应商配置说明（字段语义、配置与凭据两条通道、密钥录入路径与优先级、排障） | **已实现（M18）** |
-| `docs/routing.md` | 路由解析、候选过滤、负载均衡策略、熔断与冷却、**会话粘性**、**供应商并发上限与排队**、**供应商成本上限与复位**、**图片（`image`）能力** | **已实现（M3，+M38 粘性，+M44 并发排队，+M56 成本上限，+M68 image）** |
-| `docs/pricing.md` | 计量维度 × 有序价格规则集（分时/分档/分维度）；多币种（模型级币种 + 汇率换算） | **已实现（M11a / M22）** |
+| `docs/routing.md` | 路由解析、候选过滤、负载均衡策略、熔断与冷却、**会话粘性**、**供应商并发上限与排队**、**供应商成本上限与复位**、**图片输入（`image`）与图片生成（`image_generation`）能力** | **已实现（M3，+M38 粘性，+M44 并发排队，+M56 成本上限，+M68 image，+M84 image_generation）** |
+| `docs/pricing.md` | 计量维度 × 有序价格规则集（分时/分档/分维度，含图像 token 维度与链式回落）；多币种（模型级币种 + 汇率换算） | **已实现（M11a / M22 / M84 图像维度）** |
 | `docs/billing.md` | 计量、账本、在途额度、账单、充值、对账、赠送到期；账本币种与显示币种 | **已实现（M11/M12/M22）** |
 | `docs/mcp.md` | MCP 服务（11 个查询工具 + 3 个后台工具、令牌 scope、渐进披露、审计、内容可见性、stdio、**Key 批量导入与归属查询（`admin_import_keys` / `admin_lookup_key`，含明文形式的口径与边界）**） | **已实现（M6 + MCP-2 + M21 + M80 批量导入/归属查询）** |
 | `docs/backup.md` | 一致点备份、保留、校验与两阶段恢复 | **已实现（M16）** |

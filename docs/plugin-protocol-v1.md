@@ -83,6 +83,8 @@
 | `provider.list_models` | 宿主→插件 | 返回 `[]ModelInfo`（上游模型目录与能力） |
 | `provider.complete` | 宿主→插件 | 非流式：返回 `Response` |
 | `provider.stream` | 宿主→插件 | 流式：多次 `event` 后 `end` |
+| `provider.images` | 宿主→插件 | 图片：一元，返回 `ImageResponse`（M84） |
+| `provider.images.stream` | 宿主→插件 | 图片流式：多次 `event`（`image.*`）后 `end`（M84） |
 | `provider.health` | 宿主→插件 | 连通性探测 |
 | `provider.action` | 宿主→插件 | 交互动作（设备码登录等），返回 `ActionStatus` |
 | `provider.cancel` | 宿主→插件 | 取消某次调用（见 §7） |
@@ -101,6 +103,23 @@
    会让一次配置错误变成一轮盲查。上游的错误信封形状不止一种（`error.message`、`message`、`detail` 都见过），
    插件应把它们都取出来再回传。
 
+### 5.1 图片方法（M84）
+
+图片请求的载荷不是 Responses 形状（没有 instructions/input/tools），所以它有自己的一元载荷
+`ImageRequest` / `ImageResponse` 与自己的事件（§6）；`Request`/`Response` 一个字节没改，既有插件照常工作。
+
+- **能力**：握手 `capabilities.images = true`，并实现可选接口 `pluginapi.ImageProvider`
+  （`Images` / `ImagesStream`）。宿主用类型断言探测，没实现的插件收到图片方法时回
+  `unsupported_method`（流式是 `images_stream_unsupported`），不会崩溃。
+- **路由**：只有声明了映射行能力键 `image_generation`（编辑另需 `image`）的候选会收到图片请求；
+  文本请求则永远不会被派给只服务图片的插件（它会回非可重试的 `image_model_only`）。
+- **`ImageRequest` 的 `extra`** 是**真的上线**的字段（与 `Request.Extra` 不同，后者只在宿主内可见）：
+  图片上游的参数还在长（moderation、output_compression、input_fidelity…），插件得看得到它们。
+- **帧上限**：`MaxFrameBytes` 由 8 MiB 提到 **64 MiB**。图片载荷是 base64 放在一帧里，
+  一张 1024×1024 的 PNG 就有 2–4 MB。旧插件只会写 ≤8 MiB（新宿主照读），
+  **新插件写超过 8 MiB 的帧需要同批发布的新宿主**——网关与插件同仓发布，所以这是可接受的；
+  面向旧网关的第三方插件必须继续把帧控制在 8 MiB 以内。
+
 ## 6. 事件类型
 
 | event.type | 含义 |
@@ -112,6 +131,8 @@
 | `tool_call.arguments.delta` | 工具参数增量 |
 | `usage` | **最终**用量 |
 | `usage.delta` | **增量**用量（在途计量用；可带 `estimated:true`） |
+| `image.partial` | 图片流式：一张中间图（`image.b64_json` + `image.partial_image_index`），M84 |
+| `image.completed` | 图片流式：**成品图**（`image.b64_json` 与回显的 size/quality/background/output_format/created_at），M84 |
 | `finish` | **终止事件**：`reason` 是上游的终止原因原文（`stop`/`length`/`content_filter`/…）。宿主消费它，不作为事件转发给客户端（见下） |
 
 ### 6.1 流必须声明自己为什么结束
@@ -157,8 +178,13 @@
 | `input_cache_miss` | 缓存未命中的输入 token |
 | `output` | 输出 token |
 | `reasoning` | 思考 token（默认计入 output，可单列） |
+| `image_input` | 图片输入 token（参考图；M84，官方另有图像输入价） |
+| `image_output` | 图像输出 token（M84） |
 
-扩展维度（同机制）：`image`、`audio_second`、`tool_call`。
+扩展维度（同机制）：`image`（张数）、`audio_second`、`tool_call`。
+
+`image_input` / `image_output` 没有自有费率时按 `input_cache_miss` / `output` 计价
+（`docs/pricing.md` §1）：一个在图像计量之前写好的规则集不会因为图片请求变成 0 元。
 
 ## 9. 错误分类
 

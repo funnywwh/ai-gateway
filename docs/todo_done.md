@@ -6167,3 +6167,54 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 幂等 | 幂等键是 `kind:ref_id` 且**全局唯一**，所以 ref 必须带账户：`topup-20260923-100usd-<account_id>`。⚠️ 首次尝试用了一个共享 ref（`…-100usd-all`），结果只有第一个账户入账、其余 109 次被当重放跳过（该次 `applied=false`、`balance_after=0` 正是证据）；发现后改成逐账户 ref 重做，并按「余额已达 100 USD 就跳过」保证不重复入账 |
 | 核对 | 只读 SQLite：`balance_micros=100000000` 的账户 110 个、余额 0 的账户 0 个；唯一的非零偏差是自检账户 `zz-rebuild-selftest` 的 **-215 微美元**（它自己那 2 次真实探测请求的计费，closed 账户，不影响用户） |
 | 含义 | 账户 `billing_mode` 仍是 `postpaid`，正余额就是可用额度：请求按对客价（跟随成本侧官方价）从余额扣减，扣完即 `402 billing_hard_limit_reached`（自检时就复现过这条路径） |
+
+## M84 图片生成（gpt-image 系列 · Images API · `openai-images` 供应商 · `provider.images` 协议）
+
+> 需求原话：「aigw 支持 gpt-image 系列模型，支持这类模型的 provider 接口」。
+> 设计：`docs/design/m84-image-generation.md`；规格：`docs/api-images.md`、`docs/plugin-protocol-v1.md`、
+> `docs/routing.md`、`docs/pricing.md` §1、`docs/billing.md`、`docs/request-log.md`、`docs/dshgw.md`。
+> 代码在独立工作区 `../ai-gateway-m84`（分支 `m84-images`）。提交：`2b8e0e0`（设计+规格）、`5646cfb`（实现）。
+
+- [x] **对客面**：新增 `POST /v1/images/generations`（JSON）与 `POST /v1/images/edits`（multipart，
+      接受 `image` / `image[]` / `image[N]` 三种键、≤16 张参考图 + 可选 mask）与流式
+      （`stream:true`+`partial_images` → SSE `image_generation.partial_image`/`.completed`，
+      edits 为 `image_edit.*`）。认证、限速、余额预留、路由、容量闸、计量、结算、请求日志与 Responses 面同源。
+- [x] **规范化契约**：`pluginapi.ImageRequest`/`ImageResponse`、`image.partial`·`image.completed` 事件
+      （载荷收在 `Event.Image` 子对象里）、`Capabilities.Images`、可选接口 `ImageProvider`、
+      新方法 `provider.images` / `provider.images.stream`、`MaxFrameBytes` 8 MiB → 64 MiB
+      （协议文档写明新旧二进制混用的方向性）。
+- [x] **内建供应商 `openai-images`**：`internal/providers/openaiimages`（generate/edit/stream、
+      usage → `input`/`image_input`/`image_output`、错误分类、`timeout_s` 默认 300、
+      文本请求返回 `pluginapi.CodeImageModelOnly`）；注册点、`schema_test` 反射校验、`arch` 分层边齐。
+- [x] **路由与披露**：图片请求特征 `{image_generation}`（edits 追加 `{image}`）；图片路径在 `Plan` 之后
+      丢弃 degraded 候选（不受 `degradation=strip` 影响）；`ModelFacts.ImageGeneration`；
+      `GET /v1/models` 新增 `output_modalities`（`["image"]` / `["text"]`）。
+- [x] **计量与计费**：新维度 `image_input` / `image_output` + 链式回落
+      （`image_input → input → input_cache_miss`、`image_output → output`；`fallbackChain` 让计价引擎与
+      `WorstCaseRates` 都沿链取值）；`billing.images_reserve_tokens`（默认 8192/张）预留；
+      `server.images_max_body_bytes`（默认 32 MiB）请求上限；图片请求沿 `imageUpstreamError`
+      透出上游 4xx（Responses 面对不可识别错误仍是 500，行为未改），`image_model_only` → 400。
+- [x] **控制台 / DSH 侧**：能力键 `image_generation` 进字段说明与供应商页示例提示；
+      `internal/dshgw` 解码 `output_modalities` 并在 `SyncModels` 跳过输出不是文本的模型
+      （租户菜单不再出现必然失败的选项）；控制台智能问答的模型下拉同样跳过。
+- [x] **文档与配置**：`config.example.yaml` 两个新键 + `openai-images` 示例供应商；README 文档表新增
+      `docs/api-images.md`；`docs/plugin-protocol-v1.md` §5.1/§6/§8、`docs/routing.md`、`docs/pricing.md` §1、
+      `docs/billing.md` §3.1、`docs/request-log.md` §0、`docs/dshgw.md` §6a、`docs/api-providers.md` §0 同步。
+- [x] **本机验收（2026-09-23，临时实例 18099 + 假上游 18098，独立数据根）**：
+
+  | # | 检查 | 结果 |
+  |---|---|---|
+  | 1 | 非流式生图 | 200；`{created,data:[{b64_json}],usage,size,quality,background,output_format}`；`x-gateway-provider/model` 正确 |
+  | 2 | 流式生图 | `text/event-stream`；先 `image_generation.partial_image`（带 `partial_image_index`）后 `image_generation.completed`（带最终图与 `usage`）；规范化事件名未泄漏给客户端 |
+  | 3 | edits（`image[]` 与单数 `image` 各一次） | 200；上游收到 `image[]` 与原始 MIME |
+  | 4 | 能力门禁 | 只声明 `image_generation` 的模型做 edits → 400 `unsupported_parameter`（列出缺能力的候选）；未出网 |
+  | 5 | 参数校验 / 体积 | 缺 model/prompt、`n=11` → 400（带 `param`）；3 MB body 超 2 MiB 上限 → 413 `payload_too_large` |
+  | 6 | 文本请求打到图片模型 | 400 `invalid_request`，文案指向 `POST /v1/images/generations` |
+  | 7 | 计量 | `usage_records.dimensions_json = {"input":20,"image_input":5,"image_output":4160}`，`usage_source=provider`；失败尝试各写一行（`upstream_400` / `image_model_only`） |
+  | 8 | 计费（gptjp 现有形态的规则集：`input=5`/`output=30` USD 每 Mtok，**不含图像维度**） | `cost_micros=124925` = 20×5 + 5×5（回落 `input`）+ 4160×30（回落 `output`）；`bucketed_dimensions=[image_input->input,image_output->output]`；`charge=cost`（cost_follow 1.0×） |
+  | 9 | 请求日志 | `/v1/images/generations` 与 `/v1/images/edits` 各成行，`request_json` 只留 prompt（`record_input=user`），无 base64 |
+  | 10 | `go test ./...` | 全绿（含新增 `pkg/pluginapi`、`openaiimages`、`routing`/`pricing`/`billing`、`httpapi` 图片端到端、`dshgw/aigw`+`tenancy` 过滤用例） |
+
+  **注意**：`go vet ./...` 在本仓库 `main` 上本来就失败（`internal/dshgw/config/sandboxview_test.go`
+  的 copylocks，M79 起既有，与本次改动无关），所以 `make verify` 的 vet 一段过不去；等价做法是
+  `go test ./... && make ui-base && make build`（本次已跑，测试全绿）。
