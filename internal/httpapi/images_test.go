@@ -340,6 +340,86 @@ func TestImageRequestWithoutTheCapabilityIsRejectedLocally(t *testing.T) {
 	}
 }
 
+// TestImageRequestSkipsCandidatesThatDeclareNothing: "unknown capability" is permissive for a
+// chat request, but an image request has to land on a provider that said it can make an image.
+// This is the case a real deployment hits first: the model already has a route to a provider
+// whose row was never given a capability set (observed on gptjp: gpt-image-* routed to an
+// openai-responses provider with an empty declaration).
+func TestImageRequestSkipsCandidatesThatDeclareNothing(t *testing.T) {
+	up := newImageUpstream(t)
+	f := imageFixture(t, up)
+
+	// A third provider, declaring nothing, with a route to the same image model.
+	provID, err := f.db.UpsertProvider(context.Background(), &domain.Provider{
+		Name: "undeclared", Kind: "openai-responses", Enabled: true, Priority: 1, Weight: 100,
+		ConfigJSON: `{"base_url":"http://127.0.0.1:1/v1"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, err := f.db.GetModelByName(context.Background(), "image-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.UpsertProviderModel(context.Background(), &domain.ProviderModel{
+		ProviderID: provID, PublicModel: "image-model", UpstreamModel: "image-model", Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.UpsertRoute(context.Background(), &domain.Route{
+		ModelID: model.ID, ProviderID: provID, Priority: 1, Weight: 100, Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.registry.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// The undeclared provider has the better priority, so a permissive rule would pick it and
+	// fail there; the declaration decides instead.
+	resp := f.do(t, "POST", "/v1/images/generations", `{"model":"image-model","prompt":"a fox"}`, nil)
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", resp.StatusCode, raw)
+	}
+	if got := resp.Header.Get("x-gateway-provider"); got != "images" {
+		t.Fatalf("served by %q, want the declaring provider", got)
+	}
+
+	// With the declaring route disabled, the same request is refused instead of being handed
+	// to a provider that never claimed image support.
+	imagesProvider, err := f.db.GetProviderByName(context.Background(), "images")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := f.db.ListProviderModels(context.Background(), imagesProvider.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.PublicModel != "image-model" {
+			continue
+		}
+		row.Enabled = false
+		if _, err := f.db.UpsertProviderModel(context.Background(), row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.registry.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	resp = f.do(t, "POST", "/v1/images/generations", `{"model":"image-model","prompt":"a fox"}`, nil)
+	raw, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 when only undeclared candidates remain (%s)", resp.StatusCode, raw)
+	}
+	if !strings.Contains(string(raw), "do not declare") {
+		t.Fatalf("the error must say the declaration is missing: %s", raw)
+	}
+}
+
 // TestImageEditRequiresTheImageCapability: writing images is not reading them. A model that
 // declares only image_generation cannot serve an edit.
 func TestImageEditRequiresTheImageCapability(t *testing.T) {

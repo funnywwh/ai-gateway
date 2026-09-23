@@ -420,7 +420,13 @@ client ◄── JSON {created,data[],usage,…} 或 SSE image_generation.* / im
 7. **`image_model_only` 在 Responses 面映射成 400**：新增 `pluginapi.CodeImageModelOnly` 常量，
    `toAPIError` 对这一个码特判——它是网关自己造的"端点用错了"，报 500 会把唯一的建议埋掉。
    上游真实的 4xx 行为不变。
-8. **`billing.ImagesReserveTokens <= 0` 与 `server.ImagesMaxBodyBytes <= 0` 走代码内默认值**
+8. **图片路径改成"要求显式声明"而不是"丢弃降级候选"**：设计稿写的是"`Plan` 之后丢弃 `Degraded`
+   含这两个键的候选"。上线到 gptjp 时发现真实形态更糟——那里 `gpt-image-*` 早就有指向一个未写
+   `capabilities` 的 `openai-responses` 供应商的路由，而"未知能力"按仓库惯例是放行的，
+   于是图片请求会打到不会生图的供应商上并拿到一个不可重试的 500。改成 `imageCandidates` 直接读
+   `EffectiveCapabilities`：**必须声明**（未知/未写/`inherit` 一律不参与），失败时 400 且点名是哪些候选
+   没声明。端点本身就是新的，所以这不会改变任何既有流量的行为。
+9. **`billing.ImagesReserveTokens <= 0` 与 `server.ImagesMaxBodyBytes <= 0` 走代码内默认值**
    （8192 / 32 MiB）而不是配置校验失败：与 `reserve_micros_default` 那类既有键的处理方式一致。
 
 实测（本机临时实例 + 假上游，2026-09-23，见 §9 的验收命令）：

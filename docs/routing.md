@@ -84,10 +84,11 @@ grantedProviders = ∪( key.grants.providers, effectiveTags[].grants.providers )
 `image` 是 M68 加的特征：没有它，带图片的请求与纯文本请求走得一模一样，图片要么被上游忽略、
 要么在消息已经落库之后被拒。同一份能力还决定 `GET /v1/models` 披露什么（见 `docs/api-responses.md`）。
 
-`image_generation`（M84）是**输出**图片的能力：`POST /v1/images/generations` 只落到声明了它的候选，
-`POST /v1/images/edits` 还要求 `image`（参考图是输入）。这两条特征**不受 `degradation` 影响**：
-图片处理路径在 `Plan` 之后丢弃被标降级的候选（等价于强制 `reject`），因为把图片请求交给只会聊天的模型
-必然是上游 400，白花一次额度。文本请求不会落到只服务图片的候选上——那条路会得到供应商返回的
+`image_generation`（M84）是**输出**图片的能力：`POST /v1/images/generations` 只落到**显式声明**了它的候选，
+`POST /v1/images/edits` 还要求 `image`（参考图是输入）。这两条键在本路径上**强制要求声明**
+（比常规的「未知不拦」更严，见 `docs/api-images.md` §6.3）：没声明、未写 `capabilities`、
+或用 `capabilities_override: inherit` 解析成未知的候选都不参与，因为把图片请求交给只会聊天的模型
+必然是一次白花的尝试 + 一个不可重试的错误。文本请求不会落到只服务图片的候选上——那条路会得到供应商返回的
 `image_model_only`（非可重试的 400，文案指向 Images API）。
 
 ### 4.2 分层与层内策略

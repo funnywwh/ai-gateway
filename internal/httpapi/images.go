@@ -11,6 +11,7 @@ import (
 
 	"github.com/winger/ai-gateway/internal/billing"
 	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/winger/ai-gateway/internal/registry"
 	"github.com/winger/ai-gateway/internal/routing"
 	"github.com/winger/ai-gateway/internal/runtime"
 	"github.com/winger/ai-gateway/internal/usage"
@@ -110,12 +111,16 @@ func (s *Server) serveImage(w http.ResponseWriter, r *http.Request, op, endpoint
 		return
 	}
 
-	// Capability degradation does not apply to an image request (docs/api-images.md §6.3):
-	// `strip` would hand the request to a model that only chats, which can only end in an
-	// upstream 400 and a wasted attempt.
-	candidates, stripped := imageCandidates(plan.Candidates)
+	// An image request only goes to a candidate that *declares* it serves images
+	// (docs/api-images.md §6.3). This is deliberately stricter than the router's usual rule
+	// that an unknown capability must not block a candidate: an endpoint that has never
+	// advertised image support is not evidence that it can generate an image, and the failure
+	// mode is expensive — the request lands on a chat-only provider, which answers with a
+	// fatal error (no failover) after the client has already waited. The endpoint is new, so
+	// requiring the declaration breaks no existing traffic.
+	candidates, undeclared := imageCandidates(s.deps.Registry.Snapshot(), plan, op)
 	if len(candidates) == 0 {
-		denial := domain.ErrUnsupported(imageNoProviderMessage(plan, stripped))
+		denial := domain.ErrUnsupported(imageNoProviderMessage(plan, undeclared))
 		writeAPIError(w, denial)
 		s.recordImageDenied(ctx, key, account, endpoint, req, denial, len(body))
 		return
@@ -347,41 +352,61 @@ func imageFeatures(op string) map[string]bool {
 	return features
 }
 
-// imageCandidates drops the candidates whose image capabilities were merely "degraded".
+// imageCandidates keeps only the candidates whose provider-model row *declares* the
+// capabilities this image request needs, and returns the names of the ones it dropped.
 //
-// Routing's strip mode marks a missing capability and keeps the candidate; for an image
-// request that is the wrong trade (docs/api-images.md §6.3). The dropped provider names are
-// returned so the failure message can name what was missing.
-func imageCandidates(candidates []domain.Candidate) ([]domain.Candidate, []string) {
-	kept := make([]domain.Candidate, 0, len(candidates))
-	var stripped []string
-	for _, cand := range candidates {
-		lost := false
-		for _, feature := range cand.Degraded {
-			if feature == routing.CapabilityImageGeneration || feature == routing.CapabilityImage {
-				lost = true
+// Three kinds of candidate are dropped, and they are dropped for the same reason — none of
+// them promised to produce an image:
+//
+//   - one that declares `image_generation` false (or declares a set without it);
+//   - one that declares nothing at all: the router treats "unknown" as permissive so an
+//     undeclared model stays usable for chat, but a request whose whole point is an image has
+//     to land on a provider that says it can make one;
+//   - one whose declaration was resolved to unknown by `capabilities_override: inherit`,
+//     which is the documented "exempt from capability checks" escape hatch — for the image
+//     endpoint that escape hatch has no meaning, because there is no default behaviour to
+//     fall back to.
+//
+// The read is EffectiveCapabilities, i.e. exactly what routing and the model listing use, so
+// a candidate can never be routed here on a set of facts that the listing did not disclose.
+func imageCandidates(snap *registry.Snapshot, plan *routing.Result, op string) ([]domain.Candidate, []string) {
+	needed := []string{routing.CapabilityImageGeneration}
+	if op == pluginapi.ImageOpEdit {
+		needed = append(needed, routing.CapabilityImage)
+	}
+	kept := make([]domain.Candidate, 0, len(plan.Candidates))
+	var dropped []string
+	for _, cand := range plan.Candidates {
+		pm := snap.ProviderModel(cand.ProviderID, plan.Resolved.Canonical)
+		caps := routing.EffectiveCapabilities(pm)
+		declared := true
+		for _, key := range needed {
+			if !caps[key] {
+				declared = false
 				break
 			}
 		}
-		if lost {
-			stripped = append(stripped, cand.ProviderName)
+		if !declared {
+			dropped = append(dropped, cand.ProviderName)
 			continue
 		}
 		kept = append(kept, cand)
 	}
-	return kept, stripped
+	return kept, dropped
 }
 
 // imageNoProviderMessage explains a request no candidate can serve, naming the capability
-// that was missing rather than the generic "no available provider".
-func imageNoProviderMessage(plan *routing.Result, stripped []string) string {
+// that was missing and the candidates that did not declare it. An operator reading it should
+// not have to guess whether the model has no route or the route forgot its declaration.
+func imageNoProviderMessage(plan *routing.Result, undeclared []string) string {
 	model := ""
 	if plan != nil && plan.Resolved != nil {
 		model = plan.Resolved.Canonical
 	}
-	if len(stripped) > 0 {
+	if len(undeclared) > 0 {
 		return "no provider declares " + routing.CapabilityImageGeneration + " for model " + model +
-			" (candidates without the capability: " + strings.Join(stripped, ", ") + ")"
+			" (candidates that do not declare it: " + strings.Join(undeclared, ", ") +
+			"; add the capability to the provider-model row that should serve image requests)"
 	}
 	return "no provider can serve images for model " + model
 }
@@ -518,7 +543,17 @@ func (s *Server) writeImageStreamError(sse *sseWriter, err error) {
 // from the client's side.
 func imageUpstreamError(err error) *domain.APIError {
 	apiErr, ok := pluginapi.IsError(err)
-	if !ok || apiErr.HTTPStatus < 400 {
+	if !ok {
+		return toAPIError(err)
+	}
+	// A provider that cannot serve images at all is a configuration statement, not an
+	// upstream failure: the operator declared image_generation on a provider whose kind has
+	// no images implementation. Reporting it as a 400 with the provider's own words beats a
+	// 500 that reads like the gateway broke.
+	if apiErr.Code == "unsupported_method" {
+		return domain.ErrInvalidRequest(apiErr.Message)
+	}
+	if apiErr.HTTPStatus < 400 {
 		return toAPIError(err)
 	}
 	out := &domain.APIError{Status: apiErr.HTTPStatus, Code: apiErr.Code, Message: apiErr.Message}

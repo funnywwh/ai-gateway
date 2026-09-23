@@ -179,9 +179,17 @@ edits 的两条事件名换成 `image_edit.partial_image` / `image_edit.complete
 | `image_generation` | 该模型服务 Images API、**输出**图片 | 所有图片模型的映射行 |
 | `image` | 该模型接受图片**输入**（M68 语义） | 需要服务 `/v1/images/edits`（参考图）的模型 |
 
-图片请求只落到声明了 `image_generation` 的候选上；edits 额外要求 `image`。
-**图片请求不参与 `routing.degradation` 的 strip 降级**：没声明就是不可用（否则请求会打到只会聊天的
-模型上白花一次额度），全部候选都不可用 → 400 `unsupported`。
+图片请求只落到**显式声明**了 `image_generation` 的候选上；edits 额外要求 `image`。
+这里刻意比路由的常规规则严：常规规则是「未声明 = 未知 = 不拦」，而图片端点**要求声明**——
+一个从没声明过能生图的供应商，不是「可能能生图」的证据，而失败的代价是请求打到只会聊天的供应商上、
+等处完才拿到一个不可重试的错误。因此：
+
+- 声明里没有 `image_generation`（或声明为 false）→ 该候选不参与；
+- 映射行完全没写 `capabilities`（未知）→ 不参与；
+- `capabilities_override: inherit`（解析成未知）→ 不参与。
+
+端点本身是新的，所以「要求声明」不破坏任何既有流量。全部候选都不满足 → 400 `unsupported`，
+文案会点名「哪些候选没有声明」并提示去补映射行。
 
 ## 7. 计量与计费
 
