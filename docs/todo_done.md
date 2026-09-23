@@ -6218,3 +6218,18 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
   **注意**：`go vet ./...` 在本仓库 `main` 上本来就失败（`internal/dshgw/config/sandboxview_test.go`
   的 copylocks，M79 起既有，与本次改动无关），所以 `make verify` 的 vet 一段过不去；等价做法是
   `go test ./... && make ui-base && make build`（本次已跑，测试全绿）。
+
+### M84 部署到 gptjp（`47.91.16.118` / `gpt.lagenio.xyz`，2026-09-23，未发版）
+
+> 需求原话：「部署到gptjp 我来验证」。本次是**预览部署**：不升 `VERSION`、不打 tag（线上报 `4.3.3` +
+> M84 分支的 revision），验证通过后再决定发版。部署只换二进制，`/opt/aigw/config.yaml` 与 `data/` 未动。
+
+| 项 | 内容 |
+|---|---|
+| 构建 | 新工作区 `../ai-gateway-m84` 的 `make build`（release 形态：控制台 minified + gzip）；`aigw 4.3.3 (revision f5188d0, built 2026-09-23T11:31:18Z, console minified, transfer gzip)` |
+| 二进制 sha256 | `3e3a2e26b61b213b261c24e60610b3842b8553f38f0b0e8bbc481f508430fb3c`（本机与远端逐字节一致）；`config.yaml` sha256 `4c29f9ab…` 前后未变 |
+| 部署方式 | `rsync -z --partial` 落到 `/opt/aigw/aigw.new`（上行只有 ~40–300 KB/s，第一次 `scp` 超时，改用 rsync 续传）→ 双向 sha256 核对 → 远端 `aigw.new -version` 自证 → `cp -p` 拍回滚点 → `install -m 0755` → `systemctl restart aigw` |
+| 回滚点 | `/opt/aigw/aigw.prev-4.3.3-438daee`（线上原 4.3.3，sha `4017c2bf…`）、`/opt/aigw/aigw.prev-4.3.3-fcd5bcc`（本次第一次部署的 M84 构建，sha `2dce1b0c…`）。回滚 = `cp -p` 回该文件 + `systemctl restart aigw` |
+| 门禁 | `/aigw/version` = `{"version":"4.3.3","revision":"f5188d0","ui":"minified","ui_encoding":"gzip"}`；`healthz=200 readyz=200`；启动日志 `level=ERROR` **0** 行；`registry loaded summary="snapshot(models=24 providers=7 provider_models=67 routes=76 mappings=0 tags=3 accounts=111)"`；公网 `https://gpt.lagenio.xyz/aigw/version` 同源同值；`POST /aigw/v1/images/generations`（无 Key）→ 401（**新路由已在线**） |
+| 上线时发现并当场修掉的缺陷（`f5188d0`） | 第一次部署（`fcd5bcc`）后只读核对 gptjp 库发现：`gpt-image-2` 的四条启用路由全部指向**不会生图**的供应商（3 个 `plugin:provider-codex` + `azure`/`openai-responses`，其映射行 `capabilities_json` 为空 = 未知），而"未知能力放行"是仓库惯例 → 图片请求会打到它们身上并拿到不可重试的 500。改为 `imageCandidates` 强制要求**显式声明** `image_generation`（未写 / `inherit` / 声明 false 一律不参与），失败 400 并点名缺声明的候选；顺带把"provider kind 不支持图片"映射成可读 400。第二次部署（`f5188d0`）即含此修复 |
+| 待人工验证（用户执行） | ① 建一个 `openai-images` 实例（`base_url` 指向能讲 `/v1/images/generations` 的上游，凭据同上游 Key）并在其 `models[]` 声明 `{"image_generation":true,"image":true}`；② 「刷新模型」或手工建映射行 + 路由（公开名 `gpt-image-2`，上游名按上游要求）；③ `curl -X POST https://gpt.lagenio.xyz/aigw/v1/images/generations -H "Authorization: Bearer <Key>" -H 'Content-Type: application/json' -d '{"model":"gpt-image-2","prompt":"a red fox reading a book"}'`；④ 控制台「请求日志」应出现 `endpoint=/v1/images/generations` 的行，`usage_records` 的 `dimensions_json` 含 `input`/`image_input`/`image_output` |
