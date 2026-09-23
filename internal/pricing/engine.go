@@ -357,7 +357,7 @@ func tierMatches(tier Tier, dimensions map[string]int64) bool {
 }
 
 // dimensionFallbacks maps a metered dimension onto the dimension whose rate
-// prices it when the matched rule has no rate of its own. Both entries encode a
+// prices it when the matched rule has no rate of its own. Every entry encodes a
 // contract from docs/pricing.md §1:
 //
 //   - a bare `input` is input the upstream did not break down by cache status, so
@@ -369,24 +369,57 @@ func tierMatches(tier Tier, dimensions map[string]int64) bool {
 //     matching the documented default ("默认计入 output，可单列"). Plugins that
 //     split reasoning out of output would otherwise have it fall between the two
 //     dimensions and be charged at zero.
+//   - `image_input` / `image_output` are the image-token dimensions of an image
+//     model (M84). They fall back to the text dimensions so a rule set written
+//     before image metering existed keeps pricing image requests exactly as it did
+//     (the deployment's own tables put the image output rate in `output` and the
+//     text input rate in `input`), while a rule set that names them prices image
+//     tokens on its own terms.
 //
 // An explicit rate always wins, including an explicit zero, so a rule set can
-// still price either dimension on its own terms.
+// still price any of these dimensions on its own terms.
+//
+// `image_input -> input -> input_cache_miss` is a two-hop chain, which is why both
+// readers walk the chain (fallbackChain) instead of doing one lookup. The chain
+// matters: a rule set that names only a bare `input` — the shape every simple
+// deployment writes — must still price reference-image tokens, and stopping at
+// `input_cache_miss` would leave them at zero with a warning.
 var dimensionFallbacks = map[string]string{
-	"input":     "input_cache_miss",
-	"reasoning": "output",
+	"input":        "input_cache_miss",
+	"reasoning":    "output",
+	"image_input":  "input",
+	"image_output": "output",
+}
+
+// fallbackChain lists the dimensions to try for one metered dimension: itself,
+// then its fallback, then that fallback's fallback, and so on. A repeated entry
+// ends the walk, so a future cycle degrades into "no more candidates" instead of a
+// hang.
+func fallbackChain(dimension string) []string {
+	chain := []string{dimension}
+	seen := map[string]bool{dimension: true}
+	for current := dimension; ; {
+		source, ok := dimensionFallbacks[current]
+		if !ok || seen[source] {
+			return chain
+		}
+		seen[source] = true
+		chain = append(chain, source)
+		current = source
+	}
 }
 
 // resolveRate finds the rate that prices one metered dimension. The second result
 // names the dimension the rate was borrowed from, and is empty when the rule
 // priced the dimension by name.
 func resolveRate(dimension string, rates map[string]int64) (int64, string, bool) {
+	chain := fallbackChain(dimension)
 	if rate, ok := rates[dimension]; ok {
 		return rate, "", true
 	}
-	if fallback, ok := dimensionFallbacks[dimension]; ok {
-		if rate, ok := rates[fallback]; ok {
-			return rate, fallback, true
+	for _, source := range chain[1:] {
+		if rate, ok := rates[source]; ok {
+			return rate, source, true
 		}
 	}
 	return 0, "", false

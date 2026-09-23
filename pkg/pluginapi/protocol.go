@@ -21,20 +21,31 @@ const (
 
 // Methods understood by Serve / Client.
 const (
-	MethodInfo        = "provider.info"
-	MethodListModels  = "provider.list_models"
-	MethodComplete    = "provider.complete"
-	MethodStream      = "provider.stream"
-	MethodHealth      = "provider.health"
-	MethodAction      = "provider.action"
-	MethodCancel      = "provider.cancel"
-	MethodPing        = "ping"
-	MethodShutdown    = "shutdown"
-	MethodCredentials = "provider.credentials"
+	MethodInfo         = "provider.info"
+	MethodListModels   = "provider.list_models"
+	MethodComplete     = "provider.complete"
+	MethodStream       = "provider.stream"
+	MethodImages       = "provider.images"
+	MethodImagesStream = "provider.images.stream"
+	MethodHealth       = "provider.health"
+	MethodAction       = "provider.action"
+	MethodCancel       = "provider.cancel"
+	MethodPing         = "ping"
+	MethodShutdown     = "shutdown"
+	MethodCredentials  = "provider.credentials"
 )
 
 // MaxFrameBytes bounds a single NDJSON frame.
-const MaxFrameBytes = 8 << 20
+//
+// It went from 8 MiB to 64 MiB with the image methods (M84): an image payload is base64
+// inside a JSON frame, so one 1024x1024 PNG is ~2-4 MB on the wire and a multi-image
+// answer leaves the old ceiling far behind. Both sides of a connection use this constant,
+// so the raise is backwards compatible in one direction only: an older plugin never writes
+// more than 8 MiB (a new host reads it fine), while a new plugin writing a larger frame
+// needs a host that was built from this revision or later. Gateway and plugins ship
+// together, which is what makes that acceptable; a third-party plugin talking to an older
+// gateway must keep its frames under 8 MiB.
+const MaxFrameBytes = 64 << 20
 
 // newlineByte terminates every NDJSON frame. It is written as a byte slice
 // because this repository generates Go source without backslash escapes.

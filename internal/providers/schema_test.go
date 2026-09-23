@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/winger/ai-gateway/internal/providers/openaichat"
+	"github.com/winger/ai-gateway/internal/providers/openaiimages"
 	"github.com/winger/ai-gateway/internal/providers/openairesponses"
 	"github.com/winger/ai-gateway/internal/providers/testecho"
 )
@@ -20,6 +21,7 @@ func kindConfigs() map[string]any {
 	return map[string]any{
 		KindOpenAIChat:      openaichat.Config{},
 		KindOpenAIResponses: openairesponses.Config{},
+		KindOpenAIImages:    openaiimages.Config{},
 		KindTestEcho:        testecho.Config{},
 	}
 }
@@ -91,7 +93,7 @@ func TestSchemaPropertiesMatchConfigStructs(t *testing.T) {
 func TestCredentialsSchemaIsExplainedAndSealed(t *testing.T) {
 	// Kinds that authenticate upstream must document the api_key credential, and the
 	// config field of the same name must point at the credential channel.
-	for _, kind := range []string{KindOpenAIChat, KindOpenAIResponses} {
+	for _, kind := range []string{KindOpenAIChat, KindOpenAIResponses, KindOpenAIImages} {
 		ks := SchemaFor(kind)
 		creds := mustProps(t, kind, "credentials", ks.Credentials)
 		apiKey, ok := creds["api_key"]

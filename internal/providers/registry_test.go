@@ -4,11 +4,13 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/winger/ai-gateway/pkg/pluginapi"
 )
 
 func TestBuiltinKindsAndClassification(t *testing.T) {
 	kinds := BuiltinKinds()
-	if len(kinds) != 3 {
+	if len(kinds) != 4 {
 		t.Fatalf("builtin kinds = %v", kinds)
 	}
 	for _, k := range kinds {
@@ -30,6 +32,9 @@ func TestBuildRejectsBadConfig(t *testing.T) {
 	}
 	if _, err := Build(KindOpenAIResponses, "x", emptyBaseURL, "", nil); err == nil {
 		t.Fatal("openai-responses without base_url must fail")
+	}
+	if _, err := Build(KindOpenAIImages, "x", emptyBaseURL, "", nil); err == nil {
+		t.Fatal("openai-images without base_url must fail")
 	}
 	if _, err := Build("plugin:replay", "x", "", "", nil); err == nil {
 		t.Fatal("plugin kinds must be rejected by the builtin registry")
@@ -65,5 +70,24 @@ func TestBuildReturnsUsableProviders(t *testing.T) {
 	}
 	if !responses.Info().Capabilities.Stream {
 		t.Fatalf("responses capabilities wrong: %+v", responses.Info().Capabilities)
+	}
+
+	images, err := Build(KindOpenAIImages, "images", `{"base_url":"http://127.0.0.1:1/v1"}`, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !images.Info().Capabilities.Images {
+		t.Fatalf("images capabilities wrong: %+v", images.Info().Capabilities)
+	}
+	if _, ok := images.(interface {
+		Images(context.Context, *pluginapi.ImageRequest) (*pluginapi.ImageResponse, error)
+	}); !ok {
+		t.Fatal("the openai-images builtin must implement pluginapi.ImageProvider")
+	}
+	// A chat-shaped request must be refused with a message that says where to go instead.
+	if _, err := images.Complete(context.Background(), &pluginapi.Request{Model: "gpt-image-2"}); err == nil {
+		t.Fatal("a chat request to an image-only provider must fail")
+	} else if apiErr, ok := pluginapi.IsError(err); !ok || apiErr.Code != "image_model_only" {
+		t.Fatalf("error = %v, want image_model_only", err)
 	}
 }

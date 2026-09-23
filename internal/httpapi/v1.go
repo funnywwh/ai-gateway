@@ -1011,6 +1011,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		entry.MaxOutputTokens = facts.MaxOutputTokens
 		entry.Capabilities = facts.Capabilities
 		entry.InputModalities = inputModalities(facts)
+		entry.OutputModalities = outputModalities(facts)
 		if policy := plan.Reasoning; policy != nil {
 			entry.Reasoning = &responses.ModelReasoning{Mode: policy.Mode, Effort: policy.Effort}
 		}
@@ -1029,6 +1030,20 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 func inputModalities(facts routing.ModelFacts) []string {
 	if facts.Capabilities["image"] {
 		return []string{"text", "image"}
+	}
+	return []string{"text"}
+}
+
+// outputModalities renders what a model produces: image for a model that serves the Images
+// API, text otherwise — and nothing at all when the deployment declared no capabilities,
+// because "unknown" must not be published as "text-only" (an old client reading the old
+// fields sees exactly what it saw before).
+func outputModalities(facts routing.ModelFacts) []string {
+	if facts.Capabilities == nil {
+		return nil
+	}
+	if facts.ImageGeneration {
+		return []string{"image"}
 	}
 	return []string{"text"}
 }

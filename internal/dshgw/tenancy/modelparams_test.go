@@ -204,3 +204,37 @@ func TestRenderSettingsGolden(t *testing.T) {
 		t.Fatalf("rendered settings differ from %s:\n--- rendered ---\n%s\n--- golden ---\n%s", golden, text, want)
 	}
 }
+
+// TestRenderSettingsSkipsImageModels: an image-generation model serves the Images API, not a
+// chat turn. dsh's model menu is a text conversation, so offering one there can only fail —
+// the gateway still lists it for the Images API, and this renderer drops it (M84).
+func TestRenderSettingsSkipsImageModels(t *testing.T) {
+	profile, doc := renderProfile(t, []aigw.Model{
+		{ID: "text-model", Name: "Text", ContextWindow: 128000},
+		{ID: "gpt-image-2", Name: "Images", ImageOutput: true},
+		{ID: "another-text", Name: "Another"},
+	})
+	ids := make([]string, 0, len(profile.LLMPiAi.Providers["aigw"].Models))
+	for _, entry := range profile.LLMPiAi.Providers["aigw"].Models {
+		ids = append(ids, entry.ID)
+	}
+	if strings.Join(ids, ",") != "another-text,text-model" {
+		t.Fatalf("rendered models = %v, want the two text models only", ids)
+	}
+	if strings.Contains(doc, "gpt-image-2") {
+		t.Fatalf("an image model must not appear in the tenant profile:\n%s", doc)
+	}
+	// Whatever the default model ends up being, it must name a model that is actually in the
+	// list: pointing dsh at the skipped image model is the failure this guards.
+	if got := profile.AgentDefaultModel["aigw"]; got != "" {
+		found := false
+		for _, entry := range profile.LLMPiAi.Providers["aigw"].Models {
+			if entry.ID == got {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("agent-default-model = %q, which is not among the rendered models %v", got, ids)
+		}
+	}
+}

@@ -296,6 +296,111 @@ func (c *Client) Stream(ctx context.Context, req *Request, emit func(Event) erro
 	}
 }
 
+// Images performs one non-streaming image call.
+func (c *Client) Images(ctx context.Context, req *ImageRequest) (*ImageResponse, error) {
+	var out ImageResponse
+	err := c.unaryImages(ctx, MethodImages, req, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ImagesStream performs a streaming image call, invoking emit for every event.
+//
+// The returned StreamEnd carries the stream's terminal payload. Usage is NOT part of it for
+// a plugin: usage travels as an ordinary usage event (like a chat stream), which the caller
+// observes through emit. The runtime accumulates it so every provider kind reports the
+// metered quantity the same way.
+func (c *Client) ImagesStream(ctx context.Context, req *ImageRequest, emit func(Event) error) (*StreamEnd, error) {
+	id, cl := c.newCall()
+	defer c.dropCall(id, cl)
+
+	params, err := EncodeParams(req)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.enc.Write(Frame{ID: id, Method: MethodImagesStream, Params: params}); err != nil {
+		return nil, err
+	}
+
+	for {
+		select {
+		case frame := <-cl.ch:
+			switch frame.Type {
+			case FrameEvent:
+				if frame.Event != nil {
+					if err := emit(*frame.Event); err != nil {
+						c.Cancel(id, "emit_failed")
+						return nil, err
+					}
+				}
+			case FrameError:
+				return nil, frame.Error
+			case FrameEnd:
+				var end StreamEnd
+				if len(frame.Result) > 0 {
+					if err := json.Unmarshal(frame.Result, &end); err != nil {
+						return nil, fmt.Errorf("pluginapi: decode stream end: %w", err)
+					}
+				}
+				return &end, nil
+			}
+		case <-ctx.Done():
+			c.Cancel(id, "context_cancelled")
+			return nil, ctx.Err()
+		case <-cl.abandon:
+			return nil, ErrAbandoned
+		case <-c.done:
+			return nil, c.terminalErr()
+		}
+	}
+}
+
+// unaryImages is unary for image params: the chat-shaped unary takes *Request, and the two
+// payload types share no fields.
+func (c *Client) unaryImages(ctx context.Context, method string, req *ImageRequest, out any) error {
+	id, cl := c.newCall()
+	defer c.dropCall(id, cl)
+
+	var params json.RawMessage
+	if req != nil {
+		encoded, err := EncodeParams(req)
+		if err != nil {
+			return err
+		}
+		params = encoded
+	}
+	if err := c.enc.Write(Frame{ID: id, Method: method, Params: params}); err != nil {
+		return err
+	}
+
+	select {
+	case frame := <-cl.ch:
+		switch frame.Type {
+		case FrameError:
+			return frame.Error
+		case FrameResult:
+			if out == nil || len(frame.Result) == 0 {
+				return nil
+			}
+			if err := json.Unmarshal(frame.Result, out); err != nil {
+				return fmt.Errorf("pluginapi: decode result of %s: %w", method, err)
+			}
+			return nil
+		default:
+			return fmt.Errorf("pluginapi: unexpected frame type %q for %s", frame.Type, method)
+		}
+	case <-ctx.Done():
+		c.Cancel(id, "context_cancelled")
+		return ctx.Err()
+	case <-cl.abandon:
+		return ErrAbandoned
+	case <-c.done:
+		return c.terminalErr()
+	}
+}
+
 func (c *Client) unary(ctx context.Context, method string, req *Request, out any) error {
 	id, cl := c.newCall()
 	defer c.dropCall(id, cl)

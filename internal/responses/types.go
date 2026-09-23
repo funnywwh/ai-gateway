@@ -381,6 +381,13 @@ type Model struct {
 	// gateway serves carries text — and image appears only when a route declares it, because
 	// declaring it is also what routes an image-bearing request there.
 	InputModalities []string `json:"input_modalities,omitempty"`
+	// OutputModalities lists what the model produces. It is omitted entirely when no route
+	// declared any capability (a client reads that as "an ordinary text model"), reports
+	// ["text"] for a model whose capabilities are known and text-shaped, and ["image"] for one
+	// that serves the Images API. A client that offers a model picker for text chat — dshgw's
+	// tenant settings, the console's own chat — skips a model whose output is not text, which
+	// is the difference between a hidden option and an option that can only fail.
+	OutputModalities []string `json:"output_modalities,omitempty"`
 	// Capabilities is the union of the capability keys the routes declare true. Omitted when no
 	// route declares anything, which a client must read as "unknown", not as "nothing".
 	Capabilities map[string]bool `json:"capabilities,omitempty"`

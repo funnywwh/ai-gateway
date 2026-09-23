@@ -190,6 +190,7 @@ func capabilitiesSchema() map[string]any {
 		"tools":            boolProp("是否支持工具调用（请求带 function 工具时按它筛候选）"),
 		"reasoning":        boolProp("是否支持思考（请求带 reasoning.effort 时按它筛候选，也是 /v1/models 披露推理档位的依据）"),
 		"image":            boolProp("是否支持图片输入（请求含 input_image 时按它筛候选，也是 /v1/models 的 input_modalities 依据）"),
+		"image_generation": boolProp("是否服务 Images API（POST /v1/images/generations|edits，输出图片）；图片请求只落到声明了它的候选，也是 /v1/models 的 output_modalities 依据"),
 		"json_object":      boolProp("是否支持 text.format=json_object"),
 		"json_schema":      boolProp("是否支持 text.format=json_schema"),
 		"parallel_tools":   boolProp("是否支持并行工具调用"),

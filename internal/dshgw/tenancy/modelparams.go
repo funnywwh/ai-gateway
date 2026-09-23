@@ -117,12 +117,20 @@ func dshReasoningEfforts(model aigw.Model) any {
 // A duplicate id keeps its first disclosure rather than merging two rows, because aigw's own
 // listing is already de-duplicated and a second row for one id would mean one of them is
 // stale.
+//
+// A model that produces images is skipped: dsh's model menu is a text conversation, so an
+// image-generation model (aigw serves it through the Images API) can only ever fail there. The
+// gateway still lists it — the Images API is what uses it — and the filter is applied here, on
+// the one path that renders a text-only artifact.
 func dshModels(models []aigw.Model) []providerModel {
 	sorted := append([]aigw.Model(nil), models...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 	out := make([]providerModel, 0, len(sorted))
 	for _, model := range sorted {
-		if model.ID == "" || len(out) > 0 && out[len(out)-1].ID == model.ID {
+		if model.ID == "" || model.ImageOutput {
+			continue
+		}
+		if len(out) > 0 && out[len(out)-1].ID == model.ID {
 			continue
 		}
 		out = append(out, dshModel(model))

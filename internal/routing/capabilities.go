@@ -53,6 +53,12 @@ type ModelFacts struct {
 	MaxOutputTokens int
 	// Capabilities holds the declared-true keys of the candidates' union; nil = nothing declared.
 	Capabilities map[string]bool
+	// ImageGeneration reports that some candidate declared `image_generation`: this model
+	// serves the Images API and produces images rather than text. It is the fact a client
+	// listing turns into output_modalities, which is what keeps an image model out of a
+	// chat model picker (and out of DSH's tenant profile) instead of offering an option
+	// that can only fail.
+	ImageGeneration bool
 }
 
 // ModelFactsFor folds the candidate routes of one canonical model into the facts a client
@@ -79,10 +85,26 @@ func ModelFactsFor(snap *registry.Snapshot, canonical string, candidates []domai
 				facts.Capabilities = map[string]bool{}
 			}
 			facts.Capabilities[name] = true
+			if name == CapabilityImageGeneration {
+				facts.ImageGeneration = true
+			}
 		}
 	}
 	return facts
 }
+
+// Capability keys the gateway itself acts on. They are spelled here rather than inline so
+// the router, the model listing and the console's field documentation cannot drift apart;
+// docs/routing.md §2 is the operator-facing list.
+const (
+	// CapabilityImageGeneration marks a model that serves the Images API
+	// (POST /v1/images/generations and /v1/images/edits).
+	CapabilityImageGeneration = "image_generation"
+	// CapabilityImage marks a model that accepts image input. It predates
+	// CapabilityImageGeneration and keeps its original meaning: an edit needs both (it
+	// writes an image, and it reads the reference images).
+	CapabilityImage = "image"
+)
 
 // minDeclared folds one declared capacity into a running minimum, ignoring the zero that
 // means "not declared" on both sides.

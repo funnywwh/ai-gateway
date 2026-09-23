@@ -132,6 +132,51 @@ func (d *Dispatcher) Stream(ctx context.Context, providerID int64, req *pluginap
 	return end, Attempt{QueueWaitMS: int(waited.Milliseconds())}, err
 }
 
+// Images performs one non-streaming image attempt.
+//
+// It is deliberately the same shape as Complete: the capacity gate, the balancer's
+// in-flight accounting and the latency observation are what keep an image provider's health
+// visible to routing, and none of that depends on what the provider produces.
+func (d *Dispatcher) Images(ctx context.Context, providerID int64, req *pluginapi.ImageRequest) (*pluginapi.ImageResponse, Attempt, error) {
+	provider, permit, err := d.admit(ctx, providerID)
+	if err != nil {
+		return nil, Attempt{}, err
+	}
+	waited := permit.waitedFor()
+	defer permit.Release()
+
+	key := ProviderKey(providerID)
+	d.bal.Acquire(key)
+	started := time.Now()
+	defer d.bal.Release(key)
+
+	resp, err := d.images(ctx, provider, req)
+	d.bal.Observe(key, float64(time.Since(started).Milliseconds()), err == nil)
+	return resp, Attempt{QueueWaitMS: int(waited.Milliseconds())}, err
+}
+
+// ImagesStream performs one streaming image attempt. emit is called for every canonical
+// event; the returned StreamEnd carries the terminal reason and the metered usage, so the
+// caller never has to know whether the provider reported usage in an event or in the end
+// frame.
+func (d *Dispatcher) ImagesStream(ctx context.Context, providerID int64, req *pluginapi.ImageRequest, emit func(pluginapi.Event) error) (*pluginapi.StreamEnd, Attempt, error) {
+	provider, permit, err := d.admit(ctx, providerID)
+	if err != nil {
+		return nil, Attempt{}, err
+	}
+	waited := permit.waitedFor()
+	defer permit.Release()
+
+	key := ProviderKey(providerID)
+	d.bal.Acquire(key)
+	started := time.Now()
+	defer d.bal.Release(key)
+
+	end, err := d.imagesStream(ctx, provider, req, emit)
+	d.bal.Observe(key, float64(time.Since(started).Milliseconds()), err == nil)
+	return end, Attempt{QueueWaitMS: int(waited.Milliseconds())}, err
+}
+
 // admit loads the provider record and waits for a capacity slot. The gate is entered
 // *before* the balancer's in-flight counter, so requests that are only waiting are not
 // counted as load by least_inflight or by the latency EWMA — they have not touched the
@@ -229,6 +274,98 @@ func (d *Dispatcher) stream(ctx context.Context, provider *domain.Provider, req 
 		return nil, err
 	}
 	return client.Stream(ctx, req, emit)
+}
+
+// images performs one non-streaming image attempt against one provider.
+func (d *Dispatcher) images(ctx context.Context, provider *domain.Provider, req *pluginapi.ImageRequest) (*pluginapi.ImageResponse, error) {
+	if providers.IsBuiltin(provider.Kind) {
+		p, err := d.builtin(provider)
+		if err != nil {
+			return nil, err
+		}
+		ip, ok := p.(pluginapi.ImageProvider)
+		if !ok {
+			// A builtin kind that does not serve images was still mapped to an image model.
+			// Saying so beats a type assertion panic.
+			return nil, pluginapi.NewError("unsupported_method",
+				"provider kind "+provider.Kind+" does not serve image models")
+		}
+		return ip.Images(ctx, req)
+	}
+	client, err := d.pluginClient(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	return client.Images(ctx, req)
+}
+
+// imagesStream performs one streaming image attempt against one provider.
+//
+// Both provider kinds end here with the same contract: a StreamEnd carrying the terminal
+// reason, plus the usage the stream reported. For a builtin that means consuming the finish
+// event (which never reaches the caller) and the usage event; for a plugin the end frame
+// carries the reason while usage arrives as an event. Collecting it in one place is what
+// lets the caller meter an image stream without knowing which kind answered.
+func (d *Dispatcher) imagesStream(ctx context.Context, provider *domain.Provider, req *pluginapi.ImageRequest, emit func(pluginapi.Event) error) (*pluginapi.StreamEnd, error) {
+	var usage *pluginapi.Usage
+	observe := func(ev pluginapi.Event) {
+		if ev.Type == pluginapi.EventUsage && ev.Usage != nil {
+			usage = ev.Usage
+		}
+	}
+
+	if providers.IsBuiltin(provider.Kind) {
+		p, err := d.builtin(provider)
+		if err != nil {
+			return nil, err
+		}
+		ip, ok := p.(pluginapi.ImageProvider)
+		if !ok {
+			return nil, pluginapi.NewError("unsupported_method",
+				"provider kind "+provider.Kind+" does not serve image models")
+		}
+		var end *pluginapi.StreamEnd
+		err = ip.ImagesStream(ctx, req, func(ev pluginapi.Event) error {
+			if ev.Type == pluginapi.EventFinish {
+				end = &pluginapi.StreamEnd{FinishReason: ev.Reason}
+				return nil
+			}
+			observe(ev)
+			return emit(ev)
+		})
+		if err != nil {
+			return nil, err
+		}
+		// A builtin that produced no terminal event was cut off mid-generation: serving
+		// what it sent as a finished answer would hand the client half a picture.
+		if end == nil {
+			return nil, pluginapi.NewRetryableError("upstream_stream_incomplete",
+				"the upstream stream ended without reporting why it stopped", 502)
+		}
+		if usage != nil {
+			end.Usage = *usage
+		}
+		return end, nil
+	}
+
+	client, err := d.pluginClient(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	end, err := client.ImagesStream(ctx, req, func(ev pluginapi.Event) error {
+		observe(ev)
+		return emit(ev)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if end == nil {
+		end = &pluginapi.StreamEnd{}
+	}
+	if usage != nil {
+		end.Usage = *usage
+	}
+	return end, nil
 }
 
 // provider loads a provider record (snapshot first, database fallback).
