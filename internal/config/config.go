@@ -1077,7 +1077,7 @@ func Default() Config {
 			MaxSteps:              0,
 			MaxToolCalls:          0,
 			MaxToolResultBytes:    64 * 1024,
-			// 0 = no window: the whole conversation goes to the model (M84). Set a positive
+			// 0 = no window: the whole conversation goes to the model (M85). Set a positive
 			// pair to trade earlier turns for a smaller request.
 			MaxHistoryMessages:    0,
 			MaxHistoryBytes:       0,

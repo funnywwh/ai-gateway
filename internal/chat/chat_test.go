@@ -986,7 +986,7 @@ func TestHistoryTooLargeRefusesInsteadOfTruncatingTheQuestion(t *testing.T) {
 	}
 }
 
-// TestHistoryIsCompleteWhenNoWindowIsConfigured is the M84 behaviour: without the optional
+// TestHistoryIsCompleteWhenNoWindowIsConfigured is the M85 behaviour: without the optional
 // window the whole conversation is replayed, however old or long it is.
 func TestHistoryIsCompleteWhenNoWindowIsConfigured(t *testing.T) {
 	service, store, runner, _, session := chatFixture(t, Config{MaxSteps: 2})

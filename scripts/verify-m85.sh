@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 验证 M84「智能问答把整段会话历史都发给模型」在本机实例上是否真的生效。
+# 验证 M85「智能问答把整段会话历史都发给模型」在本机实例上是否真的生效。
 #
 # 它验证的是**行为**，不是配置：第 1 轮在会话开头埋一个 4 位数的「针」，然后灌 N 轮填充提问，
 # 最后问「第一条消息里我让你记住的数字是多少」。
@@ -9,10 +9,10 @@
 # （即超过旧窗口，不然这次验证不成立）；最后一轮的 input_tokens 不小于前面各轮 output 之和（旁证）。
 #
 # 用法：
-#   RUN_TURNS=1 GW_ADMIN_PASSWORD='管理员密码' scripts/verify-m84.sh
-#   BASE=http://127.0.0.1:8088/aigw RUN_TURNS=1 GW_ADMIN_PASSWORD='…' scripts/verify-m84.sh   # gptjp 这类带 base_path 的实例
-#   RUN_TURNS=1 N=5 … scripts/verify-m84.sh     # 只灌 5 轮（快速冒烟；注意 5 轮证不了「超过旧窗口」）
-#   KEEP=1 … scripts/verify-m84.sh              # 保留现场（排查用）
+#   RUN_TURNS=1 GW_ADMIN_PASSWORD='管理员密码' scripts/verify-m85.sh
+#   BASE=http://127.0.0.1:8088/aigw RUN_TURNS=1 GW_ADMIN_PASSWORD='…' scripts/verify-m85.sh   # gptjp 这类带 base_path 的实例
+#   RUN_TURNS=1 N=5 … scripts/verify-m85.sh     # 只灌 5 轮（快速冒烟；注意 5 轮证不了「超过旧窗口」）
+#   KEEP=1 … scripts/verify-m85.sh              # 保留现场（排查用）
 #
 # 副作用：一个 scope=query 的临时 MCP 令牌 + 一个会话 + **N+2 次真实计费的模型请求**（默认 23 次，
 # 都很短）。不跑 RUN_TURNS=1 时只做登录与版本核对，不产生任何模型调用，因此不花钱。
@@ -25,7 +25,7 @@ PASSWORD="${GW_ADMIN_PASSWORD:-}"
 RUN_TURNS="${RUN_TURNS:-0}"
 FILL="${N:-21}"
 KEEP="${KEEP:-0}"
-JAR="$(mktemp -t m84jar.XXXXXX)"
+JAR="$(mktemp -t m85jar.XXXXXX)"
 trap 'rm -f "$JAR"' EXIT
 
 PASS=0; FAIL=0; SKIP=0
@@ -106,7 +106,7 @@ printf '%s\n' "─────────────────────�
 # ── 1. 登录 ──────────────────────────────────────────────────────────────────
 echo "1) 登录"
 if [ -z "$PASSWORD" ]; then
-  echo "  需要管理员密码：GW_ADMIN_PASSWORD='…' scripts/verify-m84.sh" >&2
+  echo "  需要管理员密码：GW_ADMIN_PASSWORD='…' scripts/verify-m85.sh" >&2
   exit 2
 fi
 LOGIN_BODY=$(USER_NAME="$USER_NAME" PASSWORD="$PASSWORD" python3 -c \
@@ -118,7 +118,7 @@ case "$LOGIN" in
   *) bad "登录失败"; info "实际：$(printf '%s' "$LOGIN" | head -c 200)"; exit 1;;
 esac
 
-# ── 2. 这台跑的是含 M84 的版本吗 ─────────────────────────────────────────────
+# ── 2. 这台跑的是含 M85 的版本吗 ─────────────────────────────────────────────
 echo
 echo "2) 版本核对（整段回放是 4.4.0 起的行为）"
 VERSION_JSON=$(curl -s -m 10 "$BASE/version")
@@ -133,7 +133,7 @@ info "线上：$VER / $REV"
 if python3 -c 'import sys; parts=sys.argv[1].split(".")[:2]; raise SystemExit(0 if tuple(int(p) for p in parts) >= (4,4) else 1)' "$VER"; then
   ok "版本 ≥ 4.4.0：整段回放应当生效"
 else
-  bad "版本 $VER 早于 4.4.0：这台跑的还是没有 M84 的二进制（先发版/换二进制再验）"
+  bad "版本 $VER 早于 4.4.0：这台跑的还是没有 M85 的二进制（先发版/换二进制再验）"
   exit 1
 fi
 
@@ -176,12 +176,12 @@ ok "使用账户 #$ACCID 与 Key #$KEYID（模型 $MODEL）"
 echo
 echo "4) 建临时会话（一个 scope=query 的只读令牌 + 一个会话）"
 TOKRESP=$(curl -s -b "$JAR" -H 'Content-Type: application/json' \
-  -d "{\"name\":\"m84-verify-$$-$(rand_hex | head -c 8)\",\"account_id\":$ACCID,\"scope\":\"query\"}" \
+  -d "{\"name\":\"m85-verify-$$-$(rand_hex | head -c 8)\",\"account_id\":$ACCID,\"scope\":\"query\"}" \
   "$BASE/admin/api/v1/mcp-tokens")
 TOKID=$(get "$TOKRESP" "id")
 [ -n "$TOKID" ] && ok "临时令牌 #$TOKID（scope=query，只读）" || { bad "令牌签发失败"; exit 1; }
 SESSRESP=$(curl -s -b "$JAR" -H 'Content-Type: application/json' \
-  -d "{\"title\":\"M84 针测试\",\"model\":\"$MODEL\",\"account_id\":$ACCID,\"api_key_id\":$KEYID,\"mcp_token_id\":$TOKID}" \
+  -d "{\"title\":\"M85 针测试\",\"model\":\"$MODEL\",\"account_id\":$ACCID,\"api_key_id\":$KEYID,\"mcp_token_id\":$TOKID}" \
   "$BASE/admin/api/v1/chat/sessions")
 SID=$(get "$SESSRESP" "id")
 [ -n "$SID" ] && ok "临时会话 $SID" || { bad "会话创建失败"; info "$(printf '%s' "$SESSRESP" | head -c 200)"; exit 1; }
@@ -215,7 +215,7 @@ turns=0
 # run_turn <content> —— 发一轮，回填 IN_TOK / OUT_TOK / NOTICES / TEXT（制表符分隔取字段）。
 run_turn() {
   local body reply fields
-  body=$(turn_body "m84-$(rand_hex | head -c 12)" "$1")
+  body=$(turn_body "m85-$(rand_hex | head -c 12)" "$1")
   reply=$(curl -s -N -m 180 -b "$JAR" -H 'Content-Type: application/json' -d "$body" \
     "$BASE/admin/api/v1/chat/sessions/$SID/turns")
   fields=$(printf '%s' "$reply" | sse_fields)
