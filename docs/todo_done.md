@@ -6154,3 +6154,16 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 保密 | 全部打印与异常过 `redact()`；凭据只经 0600 临时文件（写完即碎）；`journalctl -u aigw` 与全部报告 JSON 扫 `sk-[A-Za-z0-9_-]{16,}` **命中 0**；明文密钥从未出现在终端、文件（除 9/14 那把 E26Q 替换密钥的存量文件）或本记录里 |
 | 未做（待人工/待你决定） | ① **MCP 令牌**要在控制台重新签发并更新客户端（明文只显示一次）；② **模型名口径变化**：智天成用户现在只能走 `deepseek-flash`/`deepseek-v4-flash`/`deepseek-v4-pro`/`deepseek-v4.1-flash`（他们近 30 天 99% 的请求是 `gpt-5.6-sol`/`gpt-6-astra`，这些名字会 403），需通知；③ **电商高频模型缺部署**：`gpt-5.5`（12,158 次/30d）与 `gpt-6-astra`（3,152 次）在这台 azure 上服务不了 —— 要么在 azure 补部署，要么把它们也授权给别的供应商 |
 | 未做（不在本次范围） | 不改 sub2api 任何数据（源 key 照旧可用，双跑）；不改 nginx；不动 `dshgw`；不发版（无 Go 代码改动） |
+
+### 重建后统一充值：110 个 active 账户各 100 USD（2026-09-23）
+
+> 需求原话：「给所有账户充100USD」。走管理接口 `POST /admin/api/v1/accounts/{id}/credits`
+> （`kind=topup`、`amount_usd=100.00`），逐账户一次调用，**没有**改动 `billing_mode` 或授信上限。
+
+| 项 | 值 |
+|---|---|
+| 前置核对 | `/admin/api/v1/billing/currency` → `ledger_currency=USD`（金额单位确认）；账户 111 个：**110 active + 1 closed**（`zz-rebuild-selftest`，重建自检留下的临时账户，不充） |
+| 结果 | **110 个 active 账户各 100.00 USD**，合计 **11,000.00 USD**；`ledger_entries` 新增 **110 条 `topup`**（合计恰好 11,000.00），`audit_logs` 的 `credit` 动作 219 条（含首次尝试的幂等重放） |
+| 幂等 | 幂等键是 `kind:ref_id` 且**全局唯一**，所以 ref 必须带账户：`topup-20260923-100usd-<account_id>`。⚠️ 首次尝试用了一个共享 ref（`…-100usd-all`），结果只有第一个账户入账、其余 109 次被当重放跳过（该次 `applied=false`、`balance_after=0` 正是证据）；发现后改成逐账户 ref 重做，并按「余额已达 100 USD 就跳过」保证不重复入账 |
+| 核对 | 只读 SQLite：`balance_micros=100000000` 的账户 110 个、余额 0 的账户 0 个；唯一的非零偏差是自检账户 `zz-rebuild-selftest` 的 **-215 微美元**（它自己那 2 次真实探测请求的计费，closed 账户，不影响用户） |
+| 含义 | 账户 `billing_mode` 仍是 `postpaid`，正余额就是可用额度：请求按对客价（跟随成本侧官方价）从余额扣减，扣完即 `402 billing_hard_limit_reached`（自检时就复现过这条路径） |
