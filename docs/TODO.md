@@ -1105,6 +1105,24 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 - [ ] **待宿主执行（真浏览器走查）**：`make ui-check`（「未保留」文案已改成「只有样板或超长用户消息」）
 - [ ] **待安排**：随 v4.3.3 发版并部署 rag-server + gptjp，并确认该租户的行恢复有正文（见 `docs/todo_done.md`）
 
+## M84 图片生成（gpt-image 系列 · Images API · `openai-images` 供应商 · `provider.images` 协议）
+
+> 需求原话：「aigw 支持 gpt-image 系列模型，支持这类模型的 provider 接口」。
+> 设计：`docs/design/m84-image-generation.md`；规格：`docs/api-images.md`、
+> `docs/plugin-protocol-v1.md`、`docs/routing.md`、`docs/pricing.md` §1、`docs/billing.md`、
+> `docs/request-log.md`、`docs/dshgw.md`。代码与实测记录见 `docs/todo_done.md` 的同名小节；
+> 本里程碑在**独立工作区** `../ai-gateway-m84`（分支 `m84-images`）实现；**已于 2026-09-23 并入 `main`**
+> （见 `docs/todo_done.md` 的 v4.5.0 发布记录），二进制随 v4.5.0 一起部署。
+
+- [ ] **待宿主执行（线上验证）**：在 gptjp 建 `openai-images` 实例（上游写官方或中转的 `/v1/images/*`）
+      并映射 `gpt-image-*`，用真实 Key 生图一次，核对 `usage_records` 的 `input`/`image_input`/`image_output`
+      与 `cost_micros`（= 图像输出价 × 输出 token；gptjp 现有规则集不改也能算对），并确认租户 DSH 菜单
+      不再出现该模型（`dshgw sync-models` 后看 `settings.yaml`）
+- [ ] **待宿主执行（真浏览器走查）**：控制台「供应商」页新建 `openai-images` 类型时，字段说明与模板正常渲染
+      （本会话沙箱无可用 firefox，`make ui-check` 自带跳过）
+- [ ] **待安排**：随 v4.5.0 发版并部署（`main` 已并入本里程碑，二进制含 Images API）
+
+
 ## M85 智能问答把整段会话历史都发给模型（历史窗口 0 = 不限制，默认 0）
 > 设计文档 `docs/design/m85-chat-full-history.md`（编号 M84 → M85：M84 被并行工作区的 Images API 占用）。
 > 需求原话：「智能问答要把会话里的所有历史记录都发给模型」。

@@ -617,3 +617,45 @@ func TestWorstCaseRatesCarryTheFallbackDimensions(t *testing.T) {
 		t.Fatalf("worst of nil = %v, want empty", got)
 	}
 }
+
+// Image tokens are metered under their own dimensions (M84). A rule set written before image
+// metering existed names neither of them, and the fallbacks are what keep such a deployment
+// pricing image requests exactly as it did: image output at the output rate, image input at the
+// cache-miss rate it would have used for text input.
+func TestImageDimensionsFallBackToTheTextRates(t *testing.T) {
+	set := mustParse(t, `{"rules": [{"id": "all", "order": 100, "when": {}, `+
+		`"rates": {"input_cache_miss": 200000, "input_cache_hit": 20000, "output": 3000000}}]}`)
+	result := Evaluate(Input{
+		Cost: set, At: time.Date(2026, 3, 2, 9, 0, 0, 0, time.UTC),
+		Dimensions: map[string]int64{"input": 20, "image_input": 5, "image_output": 4160},
+	})
+	want := ceilMicros(20, 200000) + ceilMicros(5, 200000) + ceilMicros(4160, 3000000)
+	if result.CostMicros != want {
+		t.Fatalf("cost = %d, want %d (image tokens priced through the fallbacks)", result.CostMicros, want)
+	}
+	if len(result.UnpricedDimensions) != 0 {
+		t.Fatalf("unpriced = %v, want none", result.UnpricedDimensions)
+	}
+	bucketed := strings.Join(result.BucketedDimensions, ",")
+	if !strings.Contains(bucketed, "image_output->output") || !strings.Contains(bucketed, "image_input->input_cache_miss") {
+		t.Fatalf("bucketed = %q, want both image fallbacks recorded", bucketed)
+	}
+
+	// An explicit image rate wins, including one that is cheaper than the text rate.
+	explicit := mustParse(t, `{"rules": [{"id": "all", "order": 100, "when": {}, `+
+		`"rates": {"input_cache_miss": 200000, "output": 3000000, "image_output": 1000000}}]}`)
+	withOwnRate := Evaluate(Input{
+		Cost: explicit, At: time.Date(2026, 3, 2, 9, 0, 0, 0, time.UTC),
+		Dimensions: map[string]int64{"image_output": 1000},
+	})
+	if withOwnRate.CostMicros != ceilMicros(1000, 1000000) {
+		t.Fatalf("cost = %d, want the explicit image_output rate", withOwnRate.CostMicros)
+	}
+
+	// The worst-case table carries the fallback too, which is what makes the reservation an
+	// upper bound for a deployer who never named an image rate.
+	worst := WorstCaseRates(set)
+	if worst["image_output"] < 3000000 || worst["image_input"] < 200000 {
+		t.Fatalf("worst-case rates = %v, want the image dimensions folded in", worst)
+	}
+}

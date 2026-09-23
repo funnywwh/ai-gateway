@@ -775,8 +775,8 @@ func TestAdminProviderKindsDocumentEveryBuiltin(t *testing.T) {
 	}
 	payload := decodeJSONBody(t, resp)
 	rows := payload["data"].([]any)
-	if len(rows) != 3 {
-		t.Fatalf("provider-kinds returned %d kinds, want the three builtin ones", len(rows))
+	if len(rows) != 4 {
+		t.Fatalf("provider-kinds returned %d kinds, want the four builtin ones", len(rows))
 	}
 	found := map[string]map[string]any{}
 	for _, row := range rows {

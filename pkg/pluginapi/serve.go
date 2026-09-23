@@ -180,11 +180,53 @@ func (s *server) handle(ctx context.Context, frame *Frame) bool {
 			return false
 		}
 		return s.dispatchStream(frame.ID, &req)
+	case MethodImages:
+		var req ImageRequest
+		if err := DecodeParams(frame.Params, &req); err != nil {
+			_ = s.writeError(frame.ID, NewError("bad_params", err.Error()))
+			return false
+		}
+		return s.dispatch(frame, func(reqCtx context.Context) (any, error) {
+			return s.images()(reqCtx, &req)
+		})
+	case MethodImagesStream:
+		var req ImageRequest
+		if err := DecodeParams(frame.Params, &req); err != nil {
+			_ = s.writeError(frame.ID, NewError("bad_params", err.Error()))
+			return false
+		}
+		return s.dispatchImagesStream(frame.ID, &req)
 	default:
 		if frame.ID != "" {
 			_ = s.writeError(frame.ID, NewError("unsupported_method", "unknown method: "+frame.Method))
 		}
 		return false
+	}
+}
+
+// images returns the provider's image entry point, or a function that fails the call.
+//
+// A plugin that never implements ImageProvider still receives provider.images if the host
+// sends it (an operator can point any instance at an image model). Answering with a
+// protocol error keeps that misconfiguration readable — "this plugin does not serve images"
+// — instead of a panic inside the plugin process.
+func (s *server) images() func(context.Context, *ImageRequest) (*ImageResponse, error) {
+	if p, ok := s.provider.(ImageProvider); ok {
+		return p.Images
+	}
+	return func(context.Context, *ImageRequest) (*ImageResponse, error) {
+		return nil, NewError("unsupported_method", "this plugin does not serve image models (provider.images is not implemented)")
+	}
+}
+
+// imagesStream returns the provider's streaming image entry point, or a failing one. See
+// images().
+func (s *server) imagesStream() func(context.Context, *ImageRequest, func(Event) error) error {
+	if p, ok := s.provider.(ImageProvider); ok {
+		return p.ImagesStream
+	}
+	return func(context.Context, *ImageRequest, func(Event) error) error {
+		return NewError("images_stream_unsupported", "this plugin does not serve image models (provider.images.stream is not implemented)")
 	}
 }
 
@@ -262,6 +304,53 @@ func (s *server) callSafely(ctx context.Context, fn func(context.Context) (any, 
 		}
 	}()
 	return fn(ctx)
+}
+
+// dispatchImagesStream is dispatchStream for provider.images.stream: the same frame
+// contract (any number of event frames, then one end frame the host reads the finish
+// reason from); only the provider entry point differs.
+func (s *server) dispatchImagesStream(id string, req *ImageRequest) bool {
+	reqCtx, cancel := s.register(id)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		defer s.unregister(id)
+		defer cancel()
+		if id == "" {
+			return
+		}
+		finishReason := "stop"
+		emit := func(ev Event) error {
+			if ev.Type == EventFinish {
+				if ev.Reason != "" {
+					finishReason = ev.Reason
+				}
+				return nil // terminal marker: reported in the end frame, not as an event
+			}
+			return s.enc.Write(Frame{ID: id, Type: FrameEvent, Event: &ev})
+		}
+		err := s.imagesStreamSafely(reqCtx, req, emit)
+		if err != nil {
+			if reqCtx.Err() != nil {
+				// Cancelled by the host: close as partial rather than as an error.
+				_ = s.writeEnd(id, StreamEnd{Partial: true, FinishReason: "cancelled"})
+				return
+			}
+			_ = s.writeError(id, toProtocolError(err))
+			return
+		}
+		_ = s.writeEnd(id, StreamEnd{FinishReason: finishReason})
+	}()
+	return false
+}
+
+func (s *server) imagesStreamSafely(ctx context.Context, req *ImageRequest, emit func(Event) error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("plugin panic: %v", r)
+		}
+	}()
+	return s.imagesStream()(ctx, req, emit)
 }
 
 func (s *server) streamSafely(ctx context.Context, req *Request, emit func(Event) error) (err error) {

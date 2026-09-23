@@ -1,12 +1,25 @@
 # 请求日志（规格）
 
-请求日志是网关的可观测面：每条 `/v1/responses` 请求留下一行，回答「谁在什么时候调用了什么、
-结果如何、花了多少」。本文件描述**目标行为**；实现里程碑见括号标注。
+请求日志是网关的可观测面：每条 `/v1/responses` 与 `/v1/images/*` 请求留下一行，回答
+「谁在什么时候调用了什么、结果如何、花了多少」。本文件描述**目标行为**；实现里程碑见括号标注。
 
 相关：`docs/design/m23-input-recording.md`（录制口径）、`docs/design/m25-log-retention.md`
 （写入兜底与保留期）、`docs/design/m27-request-dimensions.md`（身份维度与消耗度量）、
 `docs/design/m30-request-log-owner-dimensions.md`（用户/账户与 API Key 维度）、
 `docs/billing.md`（计量与账本口径）。
+
+## 0. 端点（M84）
+
+`endpoint` 列是 `/v1/responses`、`/v1/images/generations` 或 `/v1/images/edits`。
+图片请求的行与 Responses 行同一套身份/用量/费用列，但**正文口径不同**：
+
+- `record_input=user`：只留图片请求的 `prompt` 纯文本（`redact_paths` 含 `input` 时清空）。
+- `record_input=full`：留规范化后的请求文档——参数（`n`/`size`/`quality`/`stream`/`partial_images`…）
+  与每张参考图的 `{name,mime,bytes}`。**图片字节永不落库**：一次编辑的 base64 正文可达几十 MB，
+  落进去既撑爆库也没有审计价值。
+- 该行的 `client`/`workspace`/`session_id`/`call_kind` 为空：Images API 没有这些维度，
+  网关不编造（`model`/`resolved_model`/上游与路由维度照常记录）。
+- 图片流中途失败时行照写，`status=failed`；被本地拒绝的请求仍走 `recordDenied` 那条路。
 
 ## 1. 录制通道
 

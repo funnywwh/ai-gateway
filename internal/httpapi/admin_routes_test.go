@@ -203,7 +203,7 @@ func TestAdminRoutesAreRegisteredFromTheTable(t *testing.T) {
 	// Public routes: /v1 (6: models + the dshgw authorize check), health+ready+metrics+version
 	// (4) and the sandboxed preview document (1). pprof is off in this fixture, so public
 	// patterns are 11 plus the admin table.
-	if len(s.registered) != len(s.admin)+11 {
+	if len(s.registered) != len(s.admin)+13 {
 		t.Errorf("registered %d patterns, expected %d management entries plus 10 public routes",
 			len(s.registered), len(s.admin))
 	}

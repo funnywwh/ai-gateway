@@ -2,6 +2,15 @@
 
 > 状态：**已实现（M17）**。适用于内置供应商 kind `openai-chat`（`internal/providers/openaichat`）。
 
+## 0. 其他内建类型
+
+本文件只讲 `openai-chat`。另外两个内建类型各有自己的文档：
+
+| 类型 | 文档 |
+|---|---|
+| `openai-responses` | 与 `openai-chat` 同构（配置字段一致，`/responses` 与 `/models` 拼在 `base_url` 后）；见 `internal/providers/openairesponses/schema.go` 的说明 |
+| `openai-images` | [`docs/api-images.md`](api-images.md) §6：Images API（gpt-image 系列），只服务 `/images/generations` 与 `/images/edits` |
+
 ## 1. 范围
 
 `openai-chat` 对接 **OpenAI 兼容的 `/chat/completions`** 上游：DeepSeek、Qwen、Gemini（Google 官方兼容层，见 §4）、Ollama、vLLM、LM Studio、以及任何自称 OpenAI 兼容的服务。

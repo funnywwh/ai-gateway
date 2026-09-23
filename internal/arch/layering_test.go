@@ -65,11 +65,12 @@ var allowed = map[string][]string{
 	"internal/modelmap":    {"internal/domain", "internal/registry"},
 	"internal/routing":     {"internal/balancer", "internal/domain", "internal/modelmap", "internal/registry"},
 	"internal/providers": {
-		"internal/providers/openaichat", "internal/providers/openairesponses",
-		"internal/providers/testecho", "pkg/pluginapi",
+		"internal/providers/openaichat", "internal/providers/openaiimages",
+		"internal/providers/openairesponses", "internal/providers/testecho", "pkg/pluginapi",
 	},
 	"internal/providers/httpx":           {"pkg/pluginapi"},
 	"internal/providers/openaichat":      {"internal/providers/httpx", "pkg/pluginapi", "pkg/providerkit"},
+	"internal/providers/openaiimages":    {"internal/providers/httpx", "pkg/pluginapi", "pkg/providerkit"},
 	"internal/providers/openairesponses": {"internal/providers/httpx", "pkg/pluginapi", "pkg/providerkit"},
 	"internal/providers/testecho":        {"pkg/pluginapi", "pkg/providerkit"},
 	"internal/runtime": {

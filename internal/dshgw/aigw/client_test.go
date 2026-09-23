@@ -181,3 +181,38 @@ func TestValidateKeyToleratesMissingAndMalformedFacts(t *testing.T) {
 		}
 	}
 }
+
+// TestDisclosedImageOutput: an image model is recognised from either field aigw may fill in,
+// and an endpoint that discloses nothing must not have the fact invented for it — "unknown" and
+// "not text" lead to opposite decisions (M84).
+func TestDisclosedImageOutput(t *testing.T) {
+	cases := []struct {
+		name string
+		row  string
+		want bool
+	}{
+		{"output modalities say image", `{"id":"m","output_modalities":["image"]}`, true},
+		{"output modalities say text", `{"id":"m","output_modalities":["text"]}`, false},
+		{"capability says image_generation", `{"id":"m","capabilities":{"image_generation":true}}`, true},
+		{"old endpoint discloses nothing", `{"id":"m"}`, false},
+		{"capabilities without the key", `{"id":"m","capabilities":{"stream":true}}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"data":[` + tc.row + `]}`))
+			}))
+			defer srv.Close()
+			models, err := (&Client{BaseURL: srv.URL, HTTP: srv.Client()}).ValidateKey(context.Background(), "sk-abcdefghijkl")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(models) != 1 {
+				t.Fatalf("models = %+v", models)
+			}
+			if models[0].ImageOutput != tc.want {
+				t.Fatalf("ImageOutput = %v, want %v", models[0].ImageOutput, tc.want)
+			}
+		})
+	}
+}

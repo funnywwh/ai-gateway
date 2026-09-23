@@ -125,3 +125,31 @@ func TestModelFactsTreatInheritOverrideAsUndeclared(t *testing.T) {
 		t.Fatalf("context window = %d, want the declared 8192 (the override is about capabilities)", facts.ContextWindow)
 	}
 }
+
+// An image request only reaches a route that declares it, and "degraded" is not good enough:
+// the image data path drops such candidates itself (docs/api-images.md §6.3). These are the two
+// halves of that contract at the layer that owns the capability vocabulary.
+func TestImageGenerationCapabilityIsARoutingFact(t *testing.T) {
+	snap := factsSnapshot([]*domain.ProviderModel{
+		{ID: 1, ProviderID: 1, PublicModel: "gpt-image-2", CapabilitiesJSON: `{"image_generation":true,"image":true}`},
+	})
+	facts := ModelFactsFor(snap, "gpt-image-2", []domain.Candidate{{ProviderID: 1}, {ProviderID: 2}})
+	if !facts.ImageGeneration {
+		t.Fatalf("ImageGeneration = false, want true when a candidate declares %s", CapabilityImageGeneration)
+	}
+	if !facts.Capabilities[CapabilityImageGeneration] || !facts.Capabilities[CapabilityImage] {
+		t.Fatalf("capabilities = %v, want both image keys", facts.Capabilities)
+	}
+
+	// A text model declares nothing of the sort, so a client listing must not claim it does.
+	textSnap := factsSnapshot([]*domain.ProviderModel{
+		{ID: 1, ProviderID: 1, PublicModel: "chat", CapabilitiesJSON: `{"stream":true}`},
+	})
+	if ModelFactsFor(textSnap, "chat", []domain.Candidate{{ProviderID: 1}}).ImageGeneration {
+		t.Fatal("a text model must not be reported as an image generator")
+	}
+	// Unknown capabilities are not a claim either way.
+	if ModelFactsFor(textSnap, "missing", []domain.Candidate{{ProviderID: 9}}).ImageGeneration {
+		t.Fatal("an undeclared model must not be reported as an image generator")
+	}
+}

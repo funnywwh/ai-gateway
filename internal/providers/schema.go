@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/winger/ai-gateway/internal/providers/openaichat"
+	"github.com/winger/ai-gateway/internal/providers/openaiimages"
 	"github.com/winger/ai-gateway/internal/providers/openairesponses"
 	"github.com/winger/ai-gateway/internal/providers/testecho"
 )
@@ -56,6 +57,9 @@ func SchemaFor(kind string) KindSchema {
 	case KindOpenAIResponses:
 		config, credentials = openairesponses.Schema()
 		note, tmpl = openairesponses.Note(), openairesponses.Template()
+	case KindOpenAIImages:
+		config, credentials = openaiimages.Schema()
+		note, tmpl = openaiimages.Note(), openaiimages.Template()
 	case KindTestEcho:
 		config, credentials = testecho.Schema()
 		note, tmpl = testecho.Note(), testecho.Template()

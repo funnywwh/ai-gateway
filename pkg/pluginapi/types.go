@@ -15,15 +15,19 @@ const ProtocolVersion = 1
 
 // Capabilities describes what a plugin can do.
 type Capabilities struct {
-	Complete        bool     `json:"complete,omitempty"`
-	Stream          bool     `json:"stream,omitempty"`
-	ListModels      bool     `json:"list_models,omitempty"`
-	Health          bool     `json:"health,omitempty"`
-	UsageEstimated  bool     `json:"usage_estimated,omitempty"`
-	UsageDelta      bool     `json:"usage_delta,omitempty"`
-	UsageDimensions bool     `json:"usage_dimensions,omitempty"`
-	NeedsLogin      bool     `json:"needs_login,omitempty"`
-	Actions         []Action `json:"actions,omitempty"`
+	Complete        bool `json:"complete,omitempty"`
+	Stream          bool `json:"stream,omitempty"`
+	ListModels      bool `json:"list_models,omitempty"`
+	Health          bool `json:"health,omitempty"`
+	UsageEstimated  bool `json:"usage_estimated,omitempty"`
+	UsageDelta      bool `json:"usage_delta,omitempty"`
+	UsageDimensions bool `json:"usage_dimensions,omitempty"`
+	NeedsLogin      bool `json:"needs_login,omitempty"`
+	// Images declares that this plugin serves image models (provider.images /
+	// provider.images.stream, see ImageProvider). It is a separate axis from
+	// Complete/Stream: a plugin may serve images only, chat only, or both.
+	Images  bool     `json:"images,omitempty"`
+	Actions []Action `json:"actions,omitempty"`
 }
 
 // Action is an interactive operation exposed by a plugin (for example a device-code login).
@@ -332,6 +336,11 @@ type Event struct {
 	Estimated bool   `json:"estimated,omitempty"`
 	// Reason is the terminal finish reason carried by a finish event.
 	Reason string `json:"reason,omitempty"`
+	// Image carries the payload of an image.partial / image.completed event. It is one
+	// nested object rather than several more flat fields: the image echo (payload,
+	// partial index, size, quality, background, output format, created) travels as a unit
+	// and shares nothing with the chat-shaped fields above.
+	Image *ImageEvent `json:"image,omitempty"`
 }
 
 // Event type constants.

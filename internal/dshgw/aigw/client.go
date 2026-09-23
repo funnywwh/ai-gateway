@@ -42,6 +42,12 @@ type Model struct {
 	MaxOutputTokens int
 	// Images reports that the model accepts image input.
 	Images bool
+	// ImageOutput reports that the model produces images rather than text: aigw disclosed
+	// `output_modalities` without "text" (or declared the image_generation capability). Such a
+	// model serves the Images API — POST /v1/images/generations — and cannot answer a chat
+	// turn, so a text-only surface (dsh's model menu) must leave it out instead of offering an
+	// option that can only fail.
+	ImageOutput bool
 	// ReasoningSupported is the disclosed reasoning capability: true when a route declares
 	// it, false when the model's capability set was disclosed without it, and nil when no
 	// capability set was disclosed at all. The three lead to different DSH settings — a
@@ -57,13 +63,14 @@ type Model struct {
 // every other field is kept raw and read by the tolerant helpers below, so one malformed
 // value cannot fail the key validation that gates a tenant's whole model list.
 type modelRow struct {
-	ID              string          `json:"id"`
-	Name            json.RawMessage `json:"name"`
-	ContextWindow   json.RawMessage `json:"context_window"`
-	MaxOutputTokens json.RawMessage `json:"max_output_tokens"`
-	InputModalities json.RawMessage `json:"input_modalities"`
-	Capabilities    json.RawMessage `json:"capabilities"`
-	Reasoning       json.RawMessage `json:"reasoning"`
+	ID               string          `json:"id"`
+	Name             json.RawMessage `json:"name"`
+	ContextWindow    json.RawMessage `json:"context_window"`
+	MaxOutputTokens  json.RawMessage `json:"max_output_tokens"`
+	InputModalities  json.RawMessage `json:"input_modalities"`
+	OutputModalities json.RawMessage `json:"output_modalities"`
+	Capabilities     json.RawMessage `json:"capabilities"`
+	Reasoning        json.RawMessage `json:"reasoning"`
 }
 type modelList struct {
 	Data *[]modelRow `json:"data"`
@@ -71,6 +78,15 @@ type modelList struct {
 
 // modalityImage is the modality that decides whether a model may be sent an image.
 const modalityImage = "image"
+
+// modalityText is the output modality a text conversation needs. A model whose disclosed
+// output modalities do not include it produces something else (images).
+const modalityText = "text"
+
+// capabilityImageGeneration is aigw's capability key for a model that serves the Images API.
+// It is read as a second source of the same fact, so a consumer never has to know which of the
+// two fields an endpoint filled in.
+const capabilityImageGeneration = "image_generation"
 
 var directTransport = func() *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -165,6 +181,18 @@ func disclosedModel(row modelRow) Model {
 			model.Images = true
 		}
 	}
+	// Output modalities are only conclusive when the endpoint disclosed them at all: a missing
+	// field means "an older aigw, or a model with no capability declaration", which must not be
+	// read as "not text" — that would drop every model from a tenant's menu.
+	if outputs := disclosedStrings(row.OutputModalities); len(outputs) > 0 {
+		model.ImageOutput = true
+		for _, modality := range outputs {
+			if modality == modalityText {
+				model.ImageOutput = false
+				break
+			}
+		}
+	}
 	if capabilities, ok := disclosedCapabilities(row.Capabilities); ok {
 		supported := capabilities["reasoning"]
 		model.ReasoningSupported = &supported
@@ -173,6 +201,9 @@ func disclosedModel(row modelRow) Model {
 		// the two an endpoint chose to fill in.
 		if capabilities[modalityImage] {
 			model.Images = true
+		}
+		if capabilities[capabilityImageGeneration] {
+			model.ImageOutput = true
 		}
 	}
 	model.ReasoningForced = disclosedReasoningMode(row.Reasoning) == "force"

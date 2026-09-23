@@ -81,8 +81,15 @@ grantedProviders = ∪( key.grants.providers, effectiveTags[].grants.providers )
 能力字典写在**上游模型**（provider model）的 `capabilities` 里：**省略的键按未知处理，不拦候选**；
 声明为 `false` 的键会让带该特征的请求被剔除（`degradation=reject`）或标记降级（`strip`，默认）。
 `capabilities_override: inherit` 解析成「未知」，因此它是逐模型的逃生口。
-`image` 是 M68 新加的特征：没有它，带图片的请求与纯文本请求走得一模一样，图片要么被上游忽略、
+`image` 是 M68 加的特征：没有它，带图片的请求与纯文本请求走得一模一样，图片要么被上游忽略、
 要么在消息已经落库之后被拒。同一份能力还决定 `GET /v1/models` 披露什么（见 `docs/api-responses.md`）。
+
+`image_generation`（M84）是**输出**图片的能力：`POST /v1/images/generations` 只落到**显式声明**了它的候选，
+`POST /v1/images/edits` 还要求 `image`（参考图是输入）。这两条键在本路径上**强制要求声明**
+（比常规的「未知不拦」更严，见 `docs/api-images.md` §6.3）：没声明、未写 `capabilities`、
+或用 `capabilities_override: inherit` 解析成未知的候选都不参与，因为把图片请求交给只会聊天的模型
+必然是一次白花的尝试 + 一个不可重试的错误。文本请求不会落到只服务图片的候选上——那条路会得到供应商返回的
+`image_model_only`（非可重试的 400，文案指向 Images API）。
 
 ### 4.2 分层与层内策略
 

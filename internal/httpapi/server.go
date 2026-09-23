@@ -33,6 +33,7 @@ import (
 	"github.com/winger/ai-gateway/internal/store"
 	"github.com/winger/ai-gateway/internal/usage"
 	"github.com/winger/ai-gateway/internal/webaccess"
+	"github.com/winger/ai-gateway/pkg/pluginapi"
 )
 
 // AdminService is the management authentication port.
@@ -452,6 +453,10 @@ func (s *Server) routes() {
 	s.handle("GET /v1/responses/{id}", s.handleGetResponse)
 	s.handle("DELETE /v1/responses/{id}", s.handleDeleteResponse)
 	s.handle("GET /v1/models", s.handleListModels)
+	// The Images API surface (M84). Two endpoints, one shared handler: the operation
+	// decides the upstream path and the SSE event family, and nothing else differs.
+	s.handle("POST /v1/images/generations", s.handleImageGeneration)
+	s.handle("POST /v1/images/edits", s.handleImageEdit)
 	s.handle("POST /v1/dshgw/authorize", s.handleDSHGWAuthorize)
 	s.handle("POST /mcp", s.handleMCP)
 
@@ -646,6 +651,13 @@ func toAPIError(err error) *domain.APIError {
 	if errors.Is(err, runtime.ErrProviderBusy) {
 		return domain.ErrProviderBusy(err.Error())
 	}
+	// A model that serves the Images API refuses a chat-shaped request (M84). The request is
+	// well formed and the key is authorised — the client picked the wrong endpoint — so the
+	// answer is a 400 carrying the provider's message, which names the right one, instead of a
+	// 500 that reads like a gateway fault.
+	if apiErr, ok := pluginapi.IsError(err); ok && apiErr.Code == pluginapi.CodeImageModelOnly {
+		return domain.ErrInvalidRequest(apiErr.Message)
+	}
 	return domain.ErrInternal(err.Error())
 }
 
@@ -666,6 +678,29 @@ func newSSEWriter(w http.ResponseWriter) *sseWriter {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	return &sseWriter{w: w, flusher: flusher}
+}
+
+// sendRaw writes one SSE frame from an already-rendered payload.
+//
+// Send speaks the Responses event vocabulary (it takes a *responses.Event); the Images API
+// streams its own event names and payload keys, so image frames go out through here instead of
+// being dressed up as Responses events.
+func (s *sseWriter) sendRaw(event string, payload any) error {
+	if s.broken {
+		return errClientGone
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(s.w, "event: %s%cdata: %s%c%c", event, byte(0x0A), body, byte(0x0A), byte(0x0A)); err != nil {
+		s.broken = true
+		return errClientGone
+	}
+	if s.flusher != nil {
+		s.flusher.Flush()
+	}
+	return nil
 }
 
 // Send writes one SSE frame (escape-free framing: LF separators are written as bytes).

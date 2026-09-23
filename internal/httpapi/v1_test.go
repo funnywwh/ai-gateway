@@ -64,6 +64,9 @@ type fixtureSetup struct {
 	// so a test can start from a provider that is already over its budget.
 	costLimitMicros int64
 	costPeriod      string
+	// imagesMaxBodyBytes overrides server.images_max_body_bytes (M84) for the body-ceiling
+	// test; zero keeps the config default.
+	imagesMaxBodyBytes int64
 }
 
 // withProviderCostCap sets providers.cost_limit_micros / cost_period on the fixture's provider.
@@ -102,6 +105,9 @@ func newFixture(t testing.TB, opts ...fixtureOption) *fixture {
 
 	cfg := config.Default()
 	cfg.Database.Path = filepath.Join(t.TempDir(), "httpapi.db")
+	if setup.imagesMaxBodyBytes > 0 {
+		cfg.Server.ImagesMaxBodyBytes = setup.imagesMaxBodyBytes
+	}
 	db, err := store.Open(ctx, cfg.Database)
 	if err != nil {
 		t.Fatalf("open store: %v", err)

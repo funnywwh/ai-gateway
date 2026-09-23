@@ -165,6 +165,15 @@ type EstimateInput struct {
 	// the gateway cannot price the request at all, and holding nothing would let a
 	// prepaid account run unbounded.
 	DefaultReserveMicros int64
+	// ImageOutputTokens is the worst-case image-output token count of an image
+	// request (images × the configured per-image hold). An image request has no
+	// max_output_tokens to run the usual formula on, so without this the hold would
+	// cover the prompt and nothing else — and the prompt is the cheap part of an
+	// image. Zero for a request that never calls the Images API.
+	ImageOutputTokens int64
+	// ImageInputTokens is the worst-case reference-image token count (one hold per
+	// uploaded image). Zero for a generation.
+	ImageInputTokens int64
 }
 
 // EstimateReserve computes the amount to hold for one request using the most
@@ -188,6 +197,12 @@ func EstimateReserve(in EstimateInput) int64 {
 	total := int64(0)
 	total += in.MaxOutputTokens * worstRate(worstOf(costRates["output"], saleRates["output"]), in)
 	total += inputUnits * worstRate(worstOf(costRates["input"], saleRates["input"]), in)
+	// Image tokens are priced by their own dimensions when a rule set names them; the
+	// worst-case tables already carry the text fallback otherwise (see
+	// pricing.dimensionFallbacks), so asking for the image rate is always at least as
+	// expensive as the text one it would fall back to.
+	total += in.ImageOutputTokens * worstRate(worstOf(costRates["image_output"], saleRates["image_output"]), in)
+	total += in.ImageInputTokens * worstRate(worstOf(costRates["image_input"], saleRates["image_input"]), in)
 
 	reserve := ceilDiv(total, pricing.RateScale)
 	// A per-request fee is already an absolute amount, so it is added outside the

@@ -29,12 +29,14 @@ func WorstCaseRates(set *RuleSet) map[string]int64 {
 			out["per_request"] = rule.PerRequestFeeMicros
 		}
 	}
-	// Fold the fallbacks in after the explicit rates. The map is unordered, but the
-	// pairs do not chain (neither input_cache_miss nor output is itself a fallback
-	// source), so one pass reaches the same result every time.
-	for dimension, source := range dimensionFallbacks {
-		if rate := out[source]; rate > out[dimension] {
-			out[dimension] = rate
+	// Fold the fallback chains in after the explicit rates. Each chain is walked in
+	// full, so a two-hop chain (image_input -> input -> input_cache_miss) resolves
+	// the same way whatever order the map happens to iterate in.
+	for dimension := range dimensionFallbacks {
+		for _, source := range fallbackChain(dimension) {
+			if rate := out[source]; rate > out[dimension] {
+				out[dimension] = rate
+			}
 		}
 	}
 	return out

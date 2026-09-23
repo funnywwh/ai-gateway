@@ -24,6 +24,12 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("%s: %s", e.Code, e.Message)
 }
 
+// CodeImageModelOnly is the error code a provider returns when it is handed a chat-shaped
+// request for a model that serves the Images API instead (M84). It is a client-side
+// misconfiguration rather than an upstream failure, so the transport maps it onto a 400 with
+// the provider's own message — which names the endpoint to use.
+const CodeImageModelOnly = "image_model_only"
+
 // ErrKind values.
 const (
 	KindRetryable      = "retryable"

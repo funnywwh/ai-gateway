@@ -6210,3 +6210,68 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 影响 | 电商/E26Q（azure 授权）人群**现在能用 gpt-6-luna**；**gpt-6-sol 他们仍然用不了**——要么在 azure 资源上建 gpt-6-sol 部署，要么给相应标签加 codex 供应商授权（后者会改变「codex 供应商不接流量」的既定口径，需你决定） |
 | 健康 | 本次窗口 `level=ERROR` **0 条**；`/version` 仍 4.3.3、`NRestarts=0`（只写库，不动二进制与配置） |
 | 回滚 | `DELETE /admin/api/v1/provider-models/369` + `PATCH /admin/api/v1/routes/290 {"enabled":true}` 即回到执行前状态（两条路由本来就在，是控制台建的）；脚本改动见同日的 git 提交 |
+## M84 图片生成（gpt-image 系列 · Images API · `openai-images` 供应商 · `provider.images` 协议）
+
+> 需求原话：「aigw 支持 gpt-image 系列模型，支持这类模型的 provider 接口」。
+> 设计：`docs/design/m84-image-generation.md`；规格：`docs/api-images.md`、`docs/plugin-protocol-v1.md`、
+> `docs/routing.md`、`docs/pricing.md` §1、`docs/billing.md`、`docs/request-log.md`、`docs/dshgw.md`。
+> 代码在独立工作区 `../ai-gateway-m84`（分支 `m84-images`）。提交：`2b8e0e0`（设计+规格）、`5646cfb`（实现）。
+
+- [x] **对客面**：新增 `POST /v1/images/generations`（JSON）与 `POST /v1/images/edits`（multipart，
+      接受 `image` / `image[]` / `image[N]` 三种键、≤16 张参考图 + 可选 mask）与流式
+      （`stream:true`+`partial_images` → SSE `image_generation.partial_image`/`.completed`，
+      edits 为 `image_edit.*`）。认证、限速、余额预留、路由、容量闸、计量、结算、请求日志与 Responses 面同源。
+- [x] **规范化契约**：`pluginapi.ImageRequest`/`ImageResponse`、`image.partial`·`image.completed` 事件
+      （载荷收在 `Event.Image` 子对象里）、`Capabilities.Images`、可选接口 `ImageProvider`、
+      新方法 `provider.images` / `provider.images.stream`、`MaxFrameBytes` 8 MiB → 64 MiB
+      （协议文档写明新旧二进制混用的方向性）。
+- [x] **内建供应商 `openai-images`**：`internal/providers/openaiimages`（generate/edit/stream、
+      usage → `input`/`image_input`/`image_output`、错误分类、`timeout_s` 默认 300、
+      文本请求返回 `pluginapi.CodeImageModelOnly`）；注册点、`schema_test` 反射校验、`arch` 分层边齐。
+- [x] **路由与披露**：图片请求特征 `{image_generation}`（edits 追加 `{image}`）；图片路径在 `Plan` 之后
+      丢弃 degraded 候选（不受 `degradation=strip` 影响）；`ModelFacts.ImageGeneration`；
+      `GET /v1/models` 新增 `output_modalities`（`["image"]` / `["text"]`）。
+- [x] **计量与计费**：新维度 `image_input` / `image_output` + 链式回落
+      （`image_input → input → input_cache_miss`、`image_output → output`；`fallbackChain` 让计价引擎与
+      `WorstCaseRates` 都沿链取值）；`billing.images_reserve_tokens`（默认 8192/张）预留；
+      `server.images_max_body_bytes`（默认 32 MiB）请求上限；图片请求沿 `imageUpstreamError`
+      透出上游 4xx（Responses 面对不可识别错误仍是 500，行为未改），`image_model_only` → 400。
+- [x] **控制台 / DSH 侧**：能力键 `image_generation` 进字段说明与供应商页示例提示；
+      `internal/dshgw` 解码 `output_modalities` 并在 `SyncModels` 跳过输出不是文本的模型
+      （租户菜单不再出现必然失败的选项）；控制台智能问答的模型下拉同样跳过。
+- [x] **文档与配置**：`config.example.yaml` 两个新键 + `openai-images` 示例供应商；README 文档表新增
+      `docs/api-images.md`；`docs/plugin-protocol-v1.md` §5.1/§6/§8、`docs/routing.md`、`docs/pricing.md` §1、
+      `docs/billing.md` §3.1、`docs/request-log.md` §0、`docs/dshgw.md` §6a、`docs/api-providers.md` §0 同步。
+- [x] **本机验收（2026-09-23，临时实例 18099 + 假上游 18098，独立数据根）**：
+
+  | # | 检查 | 结果 |
+  |---|---|---|
+  | 1 | 非流式生图 | 200；`{created,data:[{b64_json}],usage,size,quality,background,output_format}`；`x-gateway-provider/model` 正确 |
+  | 2 | 流式生图 | `text/event-stream`；先 `image_generation.partial_image`（带 `partial_image_index`）后 `image_generation.completed`（带最终图与 `usage`）；规范化事件名未泄漏给客户端 |
+  | 3 | edits（`image[]` 与单数 `image` 各一次） | 200；上游收到 `image[]` 与原始 MIME |
+  | 4 | 能力门禁 | 只声明 `image_generation` 的模型做 edits → 400 `unsupported_parameter`（列出缺能力的候选）；未出网 |
+  | 5 | 参数校验 / 体积 | 缺 model/prompt、`n=11` → 400（带 `param`）；3 MB body 超 2 MiB 上限 → 413 `payload_too_large` |
+  | 6 | 文本请求打到图片模型 | 400 `invalid_request`，文案指向 `POST /v1/images/generations` |
+  | 7 | 计量 | `usage_records.dimensions_json = {"input":20,"image_input":5,"image_output":4160}`，`usage_source=provider`；失败尝试各写一行（`upstream_400` / `image_model_only`） |
+  | 8 | 计费（gptjp 现有形态的规则集：`input=5`/`output=30` USD 每 Mtok，**不含图像维度**） | `cost_micros=124925` = 20×5 + 5×5（回落 `input`）+ 4160×30（回落 `output`）；`bucketed_dimensions=[image_input->input,image_output->output]`；`charge=cost`（cost_follow 1.0×） |
+  | 9 | 请求日志 | `/v1/images/generations` 与 `/v1/images/edits` 各成行，`request_json` 只留 prompt（`record_input=user`），无 base64 |
+  | 10 | `go test ./...` | 全绿（含新增 `pkg/pluginapi`、`openaiimages`、`routing`/`pricing`/`billing`、`httpapi` 图片端到端、`dshgw/aigw`+`tenancy` 过滤用例） |
+
+  **注意**：`go vet ./...` 在本仓库 `main` 上本来就失败（`internal/dshgw/config/sandboxview_test.go`
+  的 copylocks，M79 起既有，与本次改动无关），所以 `make verify` 的 vet 一段过不去；等价做法是
+  `go test ./... && make ui-base && make build`（本次已跑，测试全绿）。
+
+### M84 部署到 gptjp（`47.91.16.118` / `gpt.lagenio.xyz`，2026-09-23，未发版）
+
+> 需求原话：「部署到gptjp 我来验证」。本次是**预览部署**：不升 `VERSION`、不打 tag（线上报 `4.3.3` +
+> M84 分支的 revision），验证通过后再决定发版。部署只换二进制，`/opt/aigw/config.yaml` 与 `data/` 未动。
+
+| 项 | 内容 |
+|---|---|
+| 构建 | 新工作区 `../ai-gateway-m84` 的 `make build`（release 形态：控制台 minified + gzip）；`aigw 4.3.3 (revision f5188d0, built 2026-09-23T11:31:18Z, console minified, transfer gzip)` |
+| 二进制 sha256 | `3e3a2e26b61b213b261c24e60610b3842b8553f38f0b0e8bbc481f508430fb3c`（本机与远端逐字节一致）；`config.yaml` sha256 `4c29f9ab…` 前后未变 |
+| 部署方式 | `rsync -z --partial` 落到 `/opt/aigw/aigw.new`（上行只有 ~40–300 KB/s，第一次 `scp` 超时，改用 rsync 续传）→ 双向 sha256 核对 → 远端 `aigw.new -version` 自证 → `cp -p` 拍回滚点 → `install -m 0755` → `systemctl restart aigw` |
+| 回滚点 | `/opt/aigw/aigw.prev-4.3.3-438daee`（线上原 4.3.3，sha `4017c2bf…`）、`/opt/aigw/aigw.prev-4.3.3-fcd5bcc`（本次第一次部署的 M84 构建，sha `2dce1b0c…`）。回滚 = `cp -p` 回该文件 + `systemctl restart aigw` |
+| 门禁 | `/aigw/version` = `{"version":"4.3.3","revision":"f5188d0","ui":"minified","ui_encoding":"gzip"}`；`healthz=200 readyz=200`；启动日志 `level=ERROR` **0** 行；`registry loaded summary="snapshot(models=24 providers=7 provider_models=67 routes=76 mappings=0 tags=3 accounts=111)"`；公网 `https://gpt.lagenio.xyz/aigw/version` 同源同值；`POST /aigw/v1/images/generations`（无 Key）→ 401（**新路由已在线**） |
+| 上线时发现并当场修掉的缺陷（`f5188d0`） | 第一次部署（`fcd5bcc`）后只读核对 gptjp 库发现：`gpt-image-2` 的四条启用路由全部指向**不会生图**的供应商（3 个 `plugin:provider-codex` + `azure`/`openai-responses`，其映射行 `capabilities_json` 为空 = 未知），而"未知能力放行"是仓库惯例 → 图片请求会打到它们身上并拿到不可重试的 500。改为 `imageCandidates` 强制要求**显式声明** `image_generation`（未写 / `inherit` / 声明 false 一律不参与），失败 400 并点名缺声明的候选；顺带把"provider kind 不支持图片"映射成可读 400。第二次部署（`f5188d0`）即含此修复 |
+| 待人工验证（用户执行） | ① 建一个 `openai-images` 实例（`base_url` 指向能讲 `/v1/images/generations` 的上游，凭据同上游 Key）并在其 `models[]` 声明 `{"image_generation":true,"image":true}`；② 「刷新模型」或手工建映射行 + 路由（公开名 `gpt-image-2`，上游名按上游要求）；③ `curl -X POST https://gpt.lagenio.xyz/aigw/v1/images/generations -H "Authorization: Bearer <Key>" -H 'Content-Type: application/json' -d '{"model":"gpt-image-2","prompt":"a red fox reading a book"}'`；④ 控制台「请求日志」应出现 `endpoint=/v1/images/generations` 的行，`usage_records` 的 `dimensions_json` 含 `input`/`image_input`/`image_output` |

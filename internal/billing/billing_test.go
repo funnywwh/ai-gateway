@@ -457,3 +457,47 @@ func TestEstimateReserveCoversInputForACacheSplitRuleSet(t *testing.T) {
 		t.Fatalf("reserve = %d holds only the output (%d): the prompt was held at zero", reserve, outputOnly)
 	}
 }
+
+// ceilUnits is one dimension's charge: units x rate / RateScale, rounded up.
+func ceilUnits(units, rate int64) int64 {
+	return (units*rate + pricing.RateScale - 1) / pricing.RateScale
+}
+
+// An image request has no max_output_tokens, so its hold comes from the image dimensions
+// instead of the output cap (M84). Without them a prepaid account could spend a whole image on a
+// hold that only covered the prompt.
+func TestEstimateReserveCoversImageTokens(t *testing.T) {
+	cost, err := pricing.ParseRuleSet(`{"rules": [{"id": "images", "order": 100, "when": {}, ` +
+		`"rates": {"input": 5000000, "image_output": 30000000}}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserve := EstimateReserve(EstimateInput{
+		Cost: cost, EstInputTokens: 25,
+		ImageOutputTokens: 2 * 8192, ImageInputTokens: 8192,
+	})
+	// 2*8192 image output tokens at 30 USD/Mtok + 8192 image input tokens at the image_input
+	// fallback (the text input rate, 5 USD/Mtok) + the prompt.
+	want := ceilUnits(2*8192, 30000000) + ceilUnits(8192, 5000000) + ceilUnits(25, 5000000)
+	if reserve != want {
+		t.Fatalf("reserve = %d, want %d", reserve, want)
+	}
+
+	// Without the image fields the same request would hold almost nothing: the regression this
+	// guards against.
+	promptOnly := EstimateReserve(EstimateInput{Cost: cost, EstInputTokens: 25})
+	if promptOnly >= reserve {
+		t.Fatalf("prompt-only reserve = %d, want far less than %d", promptOnly, reserve)
+	}
+
+	// The image rate is used when a rule set names it, and the text output rate is not enough.
+	priced, err := pricing.ParseRuleSet(`{"rules": [{"id": "split", "order": 100, "when": {}, ` +
+		`"rates": {"output": 1000000, "image_output": 30000000}}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	split := EstimateReserve(EstimateInput{Cost: priced, ImageOutputTokens: 1000})
+	if split != ceilUnits(1000, 30000000) {
+		t.Fatalf("reserve = %d, want the image output rate (30 USD/Mtok), not the text one", split)
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"github.com/winger/ai-gateway/internal/config"
 	"github.com/winger/ai-gateway/internal/domain"
 	"github.com/winger/ai-gateway/internal/ids"
+	"github.com/winger/ai-gateway/internal/routing"
 )
 
 // This file is the console chat's HTTP surface: conversations, questions, answers, skills
@@ -300,12 +301,18 @@ func (s *Server) handleAdminChatModels(w http.ResponseWriter, r *http.Request) {
 		if !model.Enabled || !granted(grant.Models, model.PublicName) {
 			continue
 		}
-		cands, err := s.deps.Router.Candidates(domain.RouteRequest{Model: model.PublicName, Key: key, Grant: grant})
-		if err != nil || len(cands) == 0 {
+		plan, err := s.deps.Router.Plan(domain.RouteRequest{Model: model.PublicName, Key: key, Grant: grant})
+		if err != nil || len(plan.Candidates) == 0 {
+			continue
+		}
+		// The console chat is a text conversation: an image-generation model would be an
+		// option that can only fail, so it is not offered (the same rule dshgw applies to a
+		// tenant's model list).
+		if routing.ModelFactsFor(snap, plan.Resolved.Canonical, plan.Candidates).ImageGeneration {
 			continue
 		}
 		models = append(models, map[string]any{
-			"id": model.PublicName, "has_tools": modelSupportsTools(cands),
+			"id": model.PublicName, "has_tools": modelSupportsTools(plan.Candidates),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": models, "account": account.Name})

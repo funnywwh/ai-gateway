@@ -260,6 +260,11 @@ dshgw --config <state>/config.yaml contract dsh               # 真实 dsh 契�
 | `input` | `input_modalities` | 声明了图片才写 `[text, image]`；纯文本省略（按文档回落路由 `defaultInput`，默认 `[text]`） |
 | `reasoningEfforts` | `capabilities.reasoning` + `reasoning.mode` | 见下 |
 
+**图片生成模型不进租户菜单（M84）**：aigw 服务 `gpt-image-*` 这类输出图片的模型时，会在
+`/v1/models` 把它们披露成 `output_modalities: ["image"]`（普通模型是 `["text"]`）。dsh 的模型菜单是
+文本对话，选中图片模型必然失败，所以 `SyncModels` 会**跳过**输出模态不含文本的模型——包括
+`agent-default-model` 也不会指向它们。这类模型仍由网关的 Images API 使用（`POST /v1/images/*`）。
+
 `reasoningEfforts` 四态（每种对应一句不同的事实，所以不能合并）：
 
 1. 声明支持思考且模型策略不是 `force` → 全 7 档 `{off: none, minimal: minimal, …, max: max}`；

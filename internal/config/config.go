@@ -52,6 +52,12 @@ type Server struct {
 	SecretKey    string `yaml:"secret_key"`
 	ReadTimeoutS int    `yaml:"read_timeout_s"`
 	MaxBodyBytes int64  `yaml:"max_body_bytes"`
+	// ImagesMaxBodyBytes bounds the body of the Images API endpoints (M84). It is a
+	// separate knob because the two payloads are not comparable: a Responses request
+	// is text, while an image edit carries reference images (the upstream allows up to
+	// 16 of them) and a base64 answer on the way back. Raising max_body_bytes for
+	// everybody to accommodate images would relax the text surface instead.
+	ImagesMaxBodyBytes int64 `yaml:"images_max_body_bytes"`
 	// Pprof exposes /debug/pprof. Off by default: a profiling endpoint should not be
 	// open in production.
 	Pprof bool `yaml:"pprof"`
@@ -168,45 +174,51 @@ type Billing struct {
 	// FXRates maps a currency to how many micros of the ledger currency one whole
 	// unit of it is worth: {CNY: 141000} means 1 CNY = 0.141000 USD. Integer micros
 	// only; the ledger currency itself must not appear here (it is always 1:1).
-	FXRates               map[string]int64 `yaml:"fx_rates"`
-	DefaultMarkupBP       int              `yaml:"default_markup_bp"`
-	BasisDefault          string           `yaml:"basis_default"` // cost_follow|absolute
-	PeakBoundary          string           `yaml:"peak_boundary"` // request_start|completion
-	ReasoningCountsAsOut  bool             `yaml:"reasoning_counts_as_output"`
-	PerRequestFeeScope    string           `yaml:"per_request_fee_scope"` // attempt|request
-	MinChargeMicros       int64            `yaml:"min_charge_micros"`
-	ChargeOnError         bool             `yaml:"charge_on_error"`
-	ChargeEstimated       bool             `yaml:"charge_estimated"`
-	ChargePartial         bool             `yaml:"charge_partial"`
-	RecordPartialCost     bool             `yaml:"record_partial_cost"`
-	PrepaidEnforce        bool             `yaml:"prepaid_enforce"`
-	RejectAs429           bool             `yaml:"reject_as_429"`
-	MonthlyUsageConds     bool             `yaml:"monthly_usage_conditions"`
-	ReservationMode       string           `yaml:"reservation_mode"` // max_tokens|fixed|hybrid
-	ReserveMicrosDefault  int64            `yaml:"reserve_micros_default"`
-	DefaultMaxOutputToken int              `yaml:"default_max_output_tokens"`
-	ReservationTTLS       int              `yaml:"reservation_ttl_s"`
-	ReservationHeartbeatS int              `yaml:"reservation_heartbeat_s"`
-	InflightCheckMS       int              `yaml:"inflight_check_interval_ms"`
-	InflightPolicy        string           `yaml:"inflight_policy"` // warn|throttle|abort|allow_overdraft
-	InflightSoftRatio     float64          `yaml:"inflight_soft_ratio"`
-	InflightHardRatio     float64          `yaml:"inflight_hard_ratio"`
-	OverdraftLimitMicros  int64            `yaml:"overdraft_limit_micros"`
-	OvershootPolicy       string           `yaml:"overshoot_policy"`  // absorb|overdraft
-	InflightEstimate      string           `yaml:"inflight_estimate"` // chars4|off
-	CancelGraceMS         int              `yaml:"cancel_grace_ms"`
-	UnavailableChargePol  string           `yaml:"unavailable_charge_policy"`
-	LowBalanceRatio       float64          `yaml:"low_balance_ratio"`
-	AutoSuspendDefault    bool             `yaml:"auto_suspend_default"`
-	AutoResumeDefault     bool             `yaml:"auto_resume_default"`
-	InvoicePeriod         string           `yaml:"invoice_period"`
-	PeriodStartDay        int              `yaml:"period_start_day"`
-	Timezone              string           `yaml:"timezone"`
-	FallbackFile          string           `yaml:"fallback_file"`
-	ReconcileCron         string           `yaml:"reconcile_cron"`
-	WriterBatchSize       int              `yaml:"writer_batch_size"`
-	WriterFlushMS         int              `yaml:"writer_flush_interval_ms"`
-	WriterQueueSize       int              `yaml:"writer_queue_size"`
+	FXRates              map[string]int64 `yaml:"fx_rates"`
+	DefaultMarkupBP      int              `yaml:"default_markup_bp"`
+	BasisDefault         string           `yaml:"basis_default"` // cost_follow|absolute
+	PeakBoundary         string           `yaml:"peak_boundary"` // request_start|completion
+	ReasoningCountsAsOut bool             `yaml:"reasoning_counts_as_output"`
+	PerRequestFeeScope   string           `yaml:"per_request_fee_scope"` // attempt|request
+	MinChargeMicros      int64            `yaml:"min_charge_micros"`
+	ChargeOnError        bool             `yaml:"charge_on_error"`
+	ChargeEstimated      bool             `yaml:"charge_estimated"`
+	ChargePartial        bool             `yaml:"charge_partial"`
+	RecordPartialCost    bool             `yaml:"record_partial_cost"`
+	PrepaidEnforce       bool             `yaml:"prepaid_enforce"`
+	RejectAs429          bool             `yaml:"reject_as_429"`
+	MonthlyUsageConds    bool             `yaml:"monthly_usage_conditions"`
+	ReservationMode      string           `yaml:"reservation_mode"` // max_tokens|fixed|hybrid
+	ReserveMicrosDefault int64            `yaml:"reserve_micros_default"`
+	// ImagesReserveTokens is the per-image output-token hold used to reserve balance
+	// for an Images API request (M84). An image request has no max_output_tokens to
+	// price the usual way, so the hold is "images × this number" at the image-output
+	// rate. It errs high on purpose: an over-hold is released at settlement, while an
+	// under-hold is what lets a prepaid account overspend.
+	ImagesReserveTokens   int64   `yaml:"images_reserve_tokens"`
+	DefaultMaxOutputToken int     `yaml:"default_max_output_tokens"`
+	ReservationTTLS       int     `yaml:"reservation_ttl_s"`
+	ReservationHeartbeatS int     `yaml:"reservation_heartbeat_s"`
+	InflightCheckMS       int     `yaml:"inflight_check_interval_ms"`
+	InflightPolicy        string  `yaml:"inflight_policy"` // warn|throttle|abort|allow_overdraft
+	InflightSoftRatio     float64 `yaml:"inflight_soft_ratio"`
+	InflightHardRatio     float64 `yaml:"inflight_hard_ratio"`
+	OverdraftLimitMicros  int64   `yaml:"overdraft_limit_micros"`
+	OvershootPolicy       string  `yaml:"overshoot_policy"`  // absorb|overdraft
+	InflightEstimate      string  `yaml:"inflight_estimate"` // chars4|off
+	CancelGraceMS         int     `yaml:"cancel_grace_ms"`
+	UnavailableChargePol  string  `yaml:"unavailable_charge_policy"`
+	LowBalanceRatio       float64 `yaml:"low_balance_ratio"`
+	AutoSuspendDefault    bool    `yaml:"auto_suspend_default"`
+	AutoResumeDefault     bool    `yaml:"auto_resume_default"`
+	InvoicePeriod         string  `yaml:"invoice_period"`
+	PeriodStartDay        int     `yaml:"period_start_day"`
+	Timezone              string  `yaml:"timezone"`
+	FallbackFile          string  `yaml:"fallback_file"`
+	ReconcileCron         string  `yaml:"reconcile_cron"`
+	WriterBatchSize       int     `yaml:"writer_batch_size"`
+	WriterFlushMS         int     `yaml:"writer_flush_interval_ms"`
+	WriterQueueSize       int     `yaml:"writer_queue_size"`
 }
 
 // RecordingInputModes are the accepted recording.record_input values, from the most
@@ -957,9 +969,10 @@ func Default() Config {
 			},
 		},
 		Server: Server{
-			Listen:       ":8080",
-			ReadTimeoutS: 30,
-			MaxBodyBytes: 10 * 1024 * 1024,
+			Listen:             ":8080",
+			ReadTimeoutS:       30,
+			MaxBodyBytes:       10 * 1024 * 1024,
+			ImagesMaxBodyBytes: 32 * 1024 * 1024,
 		},
 		Database: Database{
 			Path:          dataPath("aigw.db"),
@@ -1019,6 +1032,7 @@ func Default() Config {
 			MonthlyUsageConds:     false,
 			ReservationMode:       "max_tokens",
 			ReserveMicrosDefault:  20000,
+			ImagesReserveTokens:   8192,
 			DefaultMaxOutputToken: 4096,
 			ReservationTTLS:       660,
 			ReservationHeartbeatS: 15,
@@ -1487,6 +1501,9 @@ func (c *Config) Validate() error {
 	}
 	if b.WriterBatchSize <= 0 || b.WriterQueueSize <= 0 {
 		return fmt.Errorf("billing.writer_batch_size and writer_queue_size must be positive")
+	}
+	if b.ImagesReserveTokens < 0 {
+		return fmt.Errorf("billing.images_reserve_tokens must not be negative")
 	}
 	if err := oneOf("recording.record_input", c.Recording.RecordInput, RecordingInputModes...); err != nil {
 		return err

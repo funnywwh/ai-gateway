@@ -33,6 +33,7 @@
 | M60 | docs/design/m60-aigw-key-feishu-binding.md + docs/feishu.md | 是 |
 | M61 | docs/design/m61-dshgw-feishu-login.md | 是 |
 | M66 | docs/design/m66-console-admin-feishu-login.md + docs/feishu.md | 是 |
+| M84 | docs/design/m84-image-generation.md + docs/api-images.md | 是（要点已随计划在对话中确认） |
 
 ## 检查项（提交前自检）
 

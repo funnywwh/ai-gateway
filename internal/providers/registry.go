@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/winger/ai-gateway/internal/providers/openaichat"
+	"github.com/winger/ai-gateway/internal/providers/openaiimages"
 	"github.com/winger/ai-gateway/internal/providers/openairesponses"
 	"github.com/winger/ai-gateway/internal/providers/testecho"
 	"github.com/winger/ai-gateway/pkg/pluginapi"
@@ -16,12 +17,13 @@ import (
 const (
 	KindOpenAIChat      = "openai-chat"
 	KindOpenAIResponses = "openai-responses"
+	KindOpenAIImages    = "openai-images"
 	KindTestEcho        = "testecho"
 )
 
 // BuiltinKinds lists the builtin provider kinds (sorted).
 func BuiltinKinds() []string {
-	kinds := []string{KindOpenAIChat, KindOpenAIResponses, KindTestEcho}
+	kinds := []string{KindOpenAIChat, KindOpenAIResponses, KindOpenAIImages, KindTestEcho}
 	sort.Strings(kinds)
 	return kinds
 }
@@ -29,7 +31,7 @@ func BuiltinKinds() []string {
 // IsBuiltin reports whether kind refers to an in-process provider.
 func IsBuiltin(kind string) bool {
 	switch kind {
-	case KindOpenAIChat, KindOpenAIResponses, KindTestEcho:
+	case KindOpenAIChat, KindOpenAIResponses, KindOpenAIImages, KindTestEcho:
 		return true
 	default:
 		return false
@@ -43,6 +45,8 @@ func Build(kind, name, configJSON, stateDir string, creds map[string]string) (pl
 		return openaichat.New(name, configJSON, stateDir, creds)
 	case KindOpenAIResponses:
 		return openairesponses.New(name, configJSON, stateDir, creds)
+	case KindOpenAIImages:
+		return openaiimages.New(name, configJSON, stateDir, creds)
 	case KindTestEcho:
 		return testecho.New(configJSON, stateDir)
 	default:
