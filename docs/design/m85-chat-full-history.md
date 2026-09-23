@@ -136,4 +136,25 @@ func contextOverflowHint(message string) string
 
 ## 实现与设计差异
 
-（实现完成后回填。）
+实现与设计基本一致，有六点按代码事实收紧或补充：
+
+1. **「两个界各自独立」不只是语义问题，还修掉了一个真缺陷**。旧实现的判定是
+   `if plan.messages > 0 || plan.turns > 0 { … compare both … }`，两界必须同时非零才成立；一旦只配
+   `max_history_bytes`（messages = 0），`plan.messages + n > 0` 恒为真 → 除了最新一轮，**整段历史都被丢掉**。
+   这是设计里没写、写测试时才撞见的分支，实现改成两个 `> 0` 判定，并单独钉一条测试
+   （`TestBuildHistoryBoundsAreIndependent`）。
+2. **配对修形用「丢」而不是「补」**。设计只写了「自洽」。实现选择丢弃失去配对的那一半（与 chat 方言的
+   `providerkit.repairToolSequences` 一致），不合成一条「这一步没有执行」的假输出：合成会让模型以为工具
+   有结论，而 `refuseToolCall` 那类合成是**本轮内**的语义（这一步确实发生了、只是没执行），不是历史回放的
+   语义。另外 `call_id` 为空的 `function_call` / `function_call_output` 也一并丢弃（上游把它当必填键）。
+3. **上下文超限的提示靠「上游措辞匹配」，不靠状态码或上下文窗口推算**。chat 层拿不到路由事实
+   （`ContextWindow` 在 routing 里），而按状态码推断（400）会把「参数错」也误判。所以 `contextOverflowHint`
+   用 7 个大小写不敏感的措辞匹配，匹配不到就原样返回上游文本 —— 最坏情况是少一句中文提示，不会丢事实。
+4. **负值两层处理**：`internal/config` 校验层直接拒绝（运维笔误要在启动时报错），`internal/chat.withDefaults`
+   再把负值归一为 0（防御性，与 `MaxSteps` / `MaxToolCalls` 同形）。
+5. **真机验收脚本加了 `ACCOUNT_ID` / `KEY_ID` / `MODEL` 覆盖**。原设计只说「跑针测试」，但在生产实例上
+   「第一个能用的 Key」往往是客户的（gptjp 上 111 个账户、132 把 Key），一次 22 轮的小验证不该记到客户头上；
+   显式指定后，两台都用了运维自己的账户（rag-server #4/#8、gptjp #1/#117）。
+6. **交付被拆成两次发布**（设计里没预见）：v4.4.0 只上了 rag-server —— 部署前发现 gptjp 正跑着并行工作区的
+   **Images API 预览版**，覆盖会把它撤掉；用户决定先合并 `m84-images` 再一起部署，于是有了 v4.5.0
+   （`main` 同时含 M84 + M85，rag-server 与 gptjp 同版本）。里程碑编号也因此从 M84 改成 M85。

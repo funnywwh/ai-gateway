@@ -1120,13 +1120,13 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       不再出现该模型（`dshgw sync-models` 后看 `settings.yaml`）
 - [ ] **待宿主执行（真浏览器走查）**：控制台「供应商」页新建 `openai-images` 类型时，字段说明与模板正常渲染
       （本会话沙箱无可用 firefox，`make ui-check` 自带跳过）
-- [ ] **待安排**：随 v4.5.0 发版并部署（`main` 已并入本里程碑，二进制含 Images API）
 
 
 ## M85 智能问答把整段会话历史都发给模型（历史窗口 0 = 不限制，默认 0）
 > 设计文档 `docs/design/m85-chat-full-history.md`（编号 M84 → M85：M84 被并行工作区的 Images API 占用）。
 > 需求原话：「智能问答要把会话里的所有历史记录都发给模型」。
+> 本节已完成的 8 项与两条发布记录（v4.4.0 / v4.5.0）见 `docs/todo_done.md` 的同名小节。
 
-- [ ] **待宿主执行（真机针测试）**：`RUN_TURNS=1 GW_ADMIN_PASSWORD='…' scripts/verify-m85.sh`
-      （rag-server `localhost:8088` 与 gptjp `localhost:8088/aigw` 各一次；会计费，约 22 次小请求）
-- [ ] **待安排**：随 v4.4.0/v4.5.0 发版并部署 rag-server + gptjp 的线上验证（见 `docs/todo_done.md`）
+- [ ] **观察项（非阻塞）**：整段回放让每次提问的输入 token 随会话增长（22 轮的小会话已到 7.5K 输入）。
+      线上若开始出现「本会话历史已超出该模型的上下文上限」的失败，说明到了该给该部署设窗口、换大上下文模型、
+      或做历史摘要压缩（压缩是另一个里程碑，本次明确不做）

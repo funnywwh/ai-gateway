@@ -140,27 +140,32 @@ fi
 # ── 3. 找一个能路由模型的账户 + Key（只用现有的，不新建） ────────────────────
 echo
 echo "3) 找一个能路由模型的账户与 API Key（不新建）"
-KEYS=$(curl -s -b "$JAR" "$BASE/admin/api/v1/keys?limit=200")
-ACCID=""; KEYID=""; MODEL=""
-while read -r acc key; do
-  [ -n "$acc" ] || continue
-  candidate=$(get "$(curl -s -b "$JAR" "$BASE/admin/api/v1/chat/models?account_id=$acc&api_key_id=$key")" "data.0.id")
-  if [ -n "$candidate" ]; then
-    ACCID="$acc"; KEYID="$key"; MODEL="$candidate"
-    break
-  fi
-done < <(printf '%s' "$KEYS" | python3 -c '
+# ACCOUNT_ID / KEY_ID / MODEL 可以用环境变量指定：生产实例上「第一个能用的 Key」往往是客户的，
+# 那样会把这次验证记到客户头上（虽然只有几分钱）。指定了就只核对它能不能路由模型。
+ACCID="${ACCOUNT_ID:-}"; KEYID="${KEY_ID:-}"; MODEL="${MODEL:-}"
+if [ -z "$ACCID" ] || [ -z "$KEYID" ]; then
+  KEYS=$(curl -s -b "$JAR" "$BASE/admin/api/v1/keys?limit=200")
+  while read -r acc key; do
+    [ -n "$acc" ] || continue
+    candidate=$(get "$(curl -s -b "$JAR" "$BASE/admin/api/v1/chat/models?account_id=$acc&api_key_id=$key")" "data.0.id")
+    if [ -n "$candidate" ]; then
+      ACCID="$acc"; KEYID="$key"; MODEL="$candidate"
+      break
+    fi
+  done < <(printf '%s' "$KEYS" | python3 -c '
 import json,sys
 for row in json.load(sys.stdin).get("data", []):
     if row.get("status") == "active" and row.get("account_id"):
         print(row["account_id"], row["id"])
 ')
-if [ -z "$MODEL" ]; then
-  bad "没有任何 active Key 能列出可路由的模型；请先给某个账号授权一个模型"
+fi
+if [ -z "$ACCID" ] || [ -z "$KEYID" ]; then
+  bad "没有任何 active Key 能列出可路由的模型；请先给某个账号授权一个模型，或用 ACCOUNT_ID/KEY_ID 指定"
   exit 1
 fi
 # 针测试要跑 20+ 轮，挑一个便宜的名字（deepseek-flash / *mini* / *luna* 之类）；没有就用第一个。
-CHEAP=$(curl -s -b "$JAR" "$BASE/admin/api/v1/chat/models?account_id=$ACCID&api_key_id=$KEYID" | python3 -c '
+if [ -z "$MODEL" ]; then
+  CHEAP=$(curl -s -b "$JAR" "$BASE/admin/api/v1/chat/models?account_id=$ACCID&api_key_id=$KEYID" | python3 -c '
 import json,sys
 ids=[m.get("id","") for m in json.load(sys.stdin).get("data", [])]
 wanted=("flash","mini","luna","terra","cheap")
@@ -169,7 +174,12 @@ for name in ids:
         print(name); raise SystemExit
 print(ids[0] if ids else "")
 ')
-[ -n "$CHEAP" ] && MODEL="$CHEAP"
+  MODEL="$CHEAP"
+fi
+if [ -z "$MODEL" ]; then
+  bad "账户 #$ACCID / Key #$KEYID 列不出任何可路由的模型"
+  exit 1
+fi
 ok "使用账户 #$ACCID 与 Key #$KEYID（模型 $MODEL）"
 
 # ── 4. 临时令牌与会话 ───────────────────────────────────────────────────────

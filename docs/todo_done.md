@@ -6275,3 +6275,62 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 门禁 | `/aigw/version` = `{"version":"4.3.3","revision":"f5188d0","ui":"minified","ui_encoding":"gzip"}`；`healthz=200 readyz=200`；启动日志 `level=ERROR` **0** 行；`registry loaded summary="snapshot(models=24 providers=7 provider_models=67 routes=76 mappings=0 tags=3 accounts=111)"`；公网 `https://gpt.lagenio.xyz/aigw/version` 同源同值；`POST /aigw/v1/images/generations`（无 Key）→ 401（**新路由已在线**） |
 | 上线时发现并当场修掉的缺陷（`f5188d0`） | 第一次部署（`fcd5bcc`）后只读核对 gptjp 库发现：`gpt-image-2` 的四条启用路由全部指向**不会生图**的供应商（3 个 `plugin:provider-codex` + `azure`/`openai-responses`，其映射行 `capabilities_json` 为空 = 未知），而"未知能力放行"是仓库惯例 → 图片请求会打到它们身上并拿到不可重试的 500。改为 `imageCandidates` 强制要求**显式声明** `image_generation`（未写 / `inherit` / 声明 false 一律不参与），失败 400 并点名缺声明的候选；顺带把"provider kind 不支持图片"映射成可读 400。第二次部署（`f5188d0`）即含此修复 |
 | 待人工验证（用户执行） | ① 建一个 `openai-images` 实例（`base_url` 指向能讲 `/v1/images/generations` 的上游，凭据同上游 Key）并在其 `models[]` 声明 `{"image_generation":true,"image":true}`；② 「刷新模型」或手工建映射行 + 路由（公开名 `gpt-image-2`，上游名按上游要求）；③ `curl -X POST https://gpt.lagenio.xyz/aigw/v1/images/generations -H "Authorization: Bearer <Key>" -H 'Content-Type: application/json' -d '{"model":"gpt-image-2","prompt":"a red fox reading a book"}'`；④ 控制台「请求日志」应出现 `endpoint=/v1/images/generations` 的行，`usage_records` 的 `dimensions_json` 含 `input`/`image_input`/`image_output` |
+
+## M85 智能问答把整段会话历史都发给模型（历史窗口 0 = 不限制，默认 0）（2026-09-23）
+
+> 需求原话：「智能问答要把会话里的所有历史记录都发给模型」。设计文档 `docs/design/m85-chat-full-history.md`。
+> 编号说明：本条最初按 M84 编号并已发布 v4.4.0（`a089114`），随后发现 M84 已被并行工作区的
+> **Images API** 占用（分支 `m84-images`，且已以预览形态跑在 gptjp），于是改号 **M85**（`47b1e76`）。
+
+- [x] **口径**：`buildHistory` 的两个界改成**各自独立**（`maxMessages > 0` / `maxBytes > 0` 才参与判定），
+      0（或负）= 不限制、默认 0 —— 每次提问把该会话已存的全部消息按原顺序发给模型。旧实现的组合判断在
+      「只配 bytes」时会把历史全丢，本次拆开并各配一条测试钉住。
+- [x] **回放自洽**：新增 `pairToolItems`，丢弃没有输出的 `function_call` 与没有调用的
+      `function_call_output`（被中断的轮次会留下这种条目；没有窗口可以再把它挤出去，一条坏条目会让该
+      会话此后每个请求都失败）。
+- [x] **超限行为**：窗口模式下最新一轮装不下时该轮明确失败（文案改成「历史窗口」口径并点名两个配置键）；
+      上游因上下文超限拒绝时保留原文、追加一句中文处理办法（`contextOverflowHint`，匹配 7 种上游措辞）。
+- [x] **配置**：`chat.max_history_messages` / `max_history_bytes` 默认 40 / 262144 → **0 / 0**，校验放开 0
+      （负数与 1 仍拒绝）；`internal/chat.withDefaults` 不再把 0 填成默认值。
+- [x] **测试**：新增 `internal/chat/items_test.go`（6 组纯函数用例：无窗口全量、两个界各自独立、窗口裁剪、
+      `tooLarge` 边界、配对修形、回放丢弃未回答的调用）；`chat_test.go` 新增 3 组服务级用例（无窗口全量
+      回放且无「更早的」提示、回放丢弃未回答的调用、上下文超限提示的正反例）；`config_test.go` 增加
+      0 合法 / 负数报错 / 1 仍报错与默认值断言。
+- [x] **文档与文案**：`docs/chat.md`（§9 配置、「历史窗口」一节、§11 排障两行、§10 自查）、
+      `config.example.yaml`、`README.md` 文档表、`docs/TODO.md`、设计文档。
+- [x] **验收**：`go vet ./...` 只有 M79 遗留 copylocks；`go test -count=1 ./...` 仅既有环境相关失败
+      （`internal/dshgw/sandbox` 三条 —— 已在回退点 worktree 上复现；`internal/dshgw/browsermount` 一条 ——
+      单独复跑通过）；`make ui-base`、`make build` 全绿。
+- [x] **真机针测试**：新增 `scripts/verify-m85.sh`（第 1 轮埋 4 位数针 + 21 轮填充 + 回问；默认不跑，
+      `RUN_TURNS=1` 才计费，可用 `ACCOUNT_ID` / `KEY_ID` / `MODEL` 指定计费主体），
+      rag-server 与 gptjp 各一次，均 **11 通过 0 失败**，详见 v4.5.0 记录。
+
+### v4.4.0 发布记录（M85：整段历史回放，2026-09-23，只部署 rag-server）
+
+| 项 | 值 |
+|---|---|
+| 版本 | **v4.4.0**（`VERSION` 4.3.3 → 4.4.0；release 提交 `a089114`，tag `v4.4.0`） |
+| 构建物 | `bin/aigw` **4.4.0 / `a089114`**，23,498,568 B，sha256 `03cbbbcf228304ba75e1859159d82f4de87eb43406c429f8f01444359652eeae` |
+| 部署范围 | ① **rag-server** `aigw-local`：4.3.3/`438daee` → **4.4.0/`a089114`**（`/home/winger/work/ai_gateway/bin/aigw`）；② **gptjp 未部署** —— 部署前只读核对发现它的线上是**并行工作区的 Images API 预览版**（4.3.3/`f5188d0`），覆盖会把它撤掉，因此停下来交用户决定（结论：先合并再一起部署） |
+| 回滚点 | rag-server `bin/aigw.prev-4.3.3-438daee`（sha `4017c2bf…`）。回滚 = `cp -p` 回该文件 + `systemctl --user restart aigw-local`，`/version` 随之后退到 4.3.3 |
+| schema | **无迁移**（仍 27） |
+| 配置/数据变更 | **无**：两台 `config.yaml` 都没有显式写过 `chat.max_history_*`，所以新默认（0 = 不限制）直接生效 |
+| 验证（rag-server） | `/version` = `{"revision":"a089114","version":"4.4.0"}`；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200；日志 `aigw starting version=4.4.0 revision=a089114`（19:41:40）；本次窗口无新 `level=ERROR`（17:46 的 `reconciliation found a charge mismatch`（diff 3834 微美元）早于本次部署，属既有噪声） |
+
+### v4.5.0 发布记录（M85 + M84 Images API 合并进 main，2026-09-23，部署 rag-server + gptjp）
+
+| 项 | 值 |
+|---|---|
+| 版本 | **v4.5.0**（4.4.0 → 4.5.0；release 提交 `b8d7705`，tag `v4.5.0`）；合并提交 `b84a053`（`merge(m84)`），里程碑改号 `47b1e76` |
+| 构建物 | `bin/aigw` **4.5.0 / `b8d7705`**，23,676,624 B，sha256 `2bd7719cdc2b26a12c73c0870b684d5a80f6d1c82456415b42ddec5289a03d17`（console minified：44 文件 729028→408675 B，gzip 39 文件 406314→161913 B） |
+| 为什么要合并 | 用户决定：gptjp 跑的是并行工作区的 Images API 预览版（不在 `main` 上），先合并再一起部署，避免「升 M85 就把 Images API 从 gptjp 撤掉」。合并后 `main` 同时含 M84（Images API）与 M85（整段历史回放） |
+| 冲突解决 | 只有两处文档冲突（`docs/TODO.md`、`docs/todo_done.md`，都是各自在末尾追加），按「都保留」解决；并把 M84 一节的「不合并 `main` / 不部署」两句改成已合并、随 v4.5.0 部署。代码侧（`internal/config/config.go`、`config.example.yaml`、`README.md`）自动合并后逐项核对：M85 的 `chat.max_history_*` 默认 0 与 M84 的 `images_max_body_bytes` / `billing.images_reserve_tokens` 都在 |
+| 合并后验收 | `go vet` 只有 M79 遗留 copylocks；`go test -count=1 ./...` 仅 `internal/dshgw/sandbox` 三条（既有环境失败）与 `internal/dshgw/browsermount` 一条（单独复跑通过）；`make ui-base`、`make build` 全绿 |
+| 部署范围 | ① **rag-server**：4.4.0/`a089114` → **4.5.0/`b8d7705`**；② **gptjp**（`47.91.16.118`，`/opt/aigw`，`aigw.service`，`base_path: /aigw`）：4.3.3/`f5188d0` → **4.5.0/`b8d7705`** |
+| 回滚点 | rag-server `bin/aigw.prev-4.4.0-a089114`（sha `03cbbbcf…`）；gptjp `/opt/aigw/aigw.prev-4.3.3-f5188d0`（sha `3e3a2e26…`，与部署前线上二进制逐字节相同；同行工作区自己的 `aigw.prev-4.3.3-fcd5bcc` 未被动）。回滚 = `cp -p` 回滚点 + 重启对应单元 |
+| 传输（值得记一笔） | rag-server → gptjp 的上行只有约 44 KB/s：23.7 MB 的 `scp` 两次都在 9 分钟被掐断，第二次还与遗留进程抢同一个 `.new` 文件（rsync 与 scp 同时写，文件大小十几分钟不动）。清掉两份残留进程后改成 `gzip -6` 压到 12,732,860 B 再传（20:36→20:47），远端解压后 sha256 与构建物逐位一致，才允许替换 |
+| schema | **无迁移**（仍 27） |
+| 验证（两台） | `/version` 均为 `{"revision":"b8d7705","version":"4.5.0"}`（gptjp 另在公网 `https://gpt.lagenio.xyz/aigw/version` 同源同值，公网 `admin/ui/` 200）；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200；启动日志 `aigw starting version=4.5.0 revision=b8d7705`（rag-server 20:13:37、gptjp 20:47:19）；gptjp 本次窗口 `level=ERROR` 0 条；rag-server 局域网 `http://192.168.190.86:8088/version` 同值 |
+| 验证（真机针测试，M85 的核心验收） | `RUN_TURNS=1 scripts/verify-m85.sh` 两台各一次，均 **11 通过 0 失败**。rag-server：账户 #4 / Key #8 / `deepseek-flash`，针 **7136**，22 轮累计输入 159,421 token，会话 44 条消息，最后一轮输入 7,518 ≥ 前面输出合计 249。gptjp：账户 #1 / Key #117 / `deepseek-flash`，针 **6910**，累计输入 156,288，44 条消息，最后一轮输入 7,312 ≥ 100。两台全程**没有**出现过「更早的 N 轮对话没有随本次请求发送」，模型都答出了第 1 条消息里的数字 —— 44 > 40（旧默认窗口）说明旧行为下这条针必然已被丢弃 |
+| 成本与清理 | 两台各 22 次小请求（`deepseek-flash`，输出合计 249 / 100 token）；临时会话与 `scope=query` 令牌跑完即删，未使用 `KEEP`（不留现场） |
+| 未做 | ① rag-server 的公网入口没有 `/version` 路由（`chat.tirisen.hk/version` 与 `/aigw/version` 都是 `{"error":"Not found"}`），按惯例只验回环 + 局域网；② `origin` 未推（`main` 已在 `b8d7705`，tag `v4.4.0` / `v4.5.0` 只在本地）；③ `dshgw` 未动；④ gptjp 上 `openai-images` 实例与真实生图的线上验证仍待用户执行（M84 一节） |
