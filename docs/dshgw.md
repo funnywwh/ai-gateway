@@ -346,7 +346,8 @@ feishu:
 | 纵深防御 | 租户叶 `0700`（`doctor` 逐租户复核）+ dsh 内层 sandbox（本宿主 AppArmor 拒绝嵌套 bwrap，dsh 回退 Landlock） |
 
 `/etc/passwd` 绑的不是宿主原件，而是**每租户渲染的视图**（`<DshHome>/sandbox/passwd`，0644，每次渲染 profile 时重写）：
-沙箱里 `HOME` 是 workspace（runner 导出 `HOME=<workspace>`），而宿主 passwd 里本账号的 home 仍指向部署账号自己的家目录
+沙箱里 `HOME` 是 workspace（runner 导出 `HOME=<workspace>`；配置了 `deploy.sandbox_workspace` 时是该短路径，见 §7a），
+而宿主 passwd 里本账号的 home 仍指向部署账号自己的家目录
 —— 那个目录正好被 profile 的 `--tmpfs /home` 藏掉了。**OpenSSH 展开 `~` 用的是 `getpwuid()`，不是 `$HOME`**，所以不渲染视图时
 `~/.ssh/config`、`known_hosts`、默认私钥全都会落到那个被藏起来的目录上：网关写进 `<workspace>/.ssh/config` 的别名看不见，
 `ssh <别名>` 退化成"把别名当主机名做 DNS 解析"（`Could not resolve hostname aipc: Temporary failure in name resolution`）。
@@ -382,6 +383,42 @@ feishu:
 `dsh-browser-fs@0.2.0` 由模板固定版本与 integrity；它只访问用户在浏览器明确授权的**本机**目录，
 不改变服务器工作区、agent cwd 或 bash 执行位置。**已授权文件内容可能进入模型请求**，必须向使用者说明；
 可按部署（或租户）`--browser-fs off` 关闭，此时模板无需 browser-fs。
+
+## 7a. 工作区短路径视图（M79，可选，默认关闭）
+
+设计：`docs/design/m79-sandbox-workspace-view.md`。
+
+`deploy.sandbox_workspace` 给每个租户的工作区在沙箱里加**第二个视图**。留空 = 保持"只有宿主长路径"这一形态
+（`--bind <workspace> <workspace>`，与之前逐字节一致）；填 `/workspace` 时，profile 在这个绑定之外再加
+`--bind <workspace> /workspace`，并在 `--` 之前加 `--chdir /workspace`：
+
+| 租户读到的路径 | 来源 |
+|---|---|
+| `$HOME`、`~` | 短路径（`workerEnv` 导出 `HOME=<view>`；未配置时 = 宿主 workspace 路径） |
+| `/etc/passwd` 的家目录字段 | 同一个值 —— 两者必须一致，否则 `getpwuid()` 与 `$HOME` 又会分叉 |
+| 目录选择器（`picker-clamp`）的 root | 短路径。选择器决定"会话跑在哪条路径上"，所以它才是让新会话真的变短的那一环 |
+| 「终端」`cwd`/`cwdRoot`、文件管理器与变更审阅的 `root` | 短路径（这三个插件在沙箱**内**解析路径） |
+| 预注册工作区（`workspace_seed`） | 短路径 + 种子目录名（只影响新建/重新轮转的租户） |
+
+**为什么是绑定而不是符号链接**：进程的工作目录由 `getcwd()` 报告，它走的是挂载树，而不是"你进来的那个符号
+链接"，所以软链只能骗过显示层；只有真挂载点才能让 node 的 `process.cwd()`、bash 的 `$PWD` 与 agent 的 bash
+工具都看到短路径。代价是 bwrap 的 `--bind` **不递归**：workspace 里的每个挂载（browser 挂载点、`host_shares`、
+ssh 工作区）都必须在短路径下**再绑一次**，否则短路径视图里它们只是空目录（症状看起来像挂载坏了）。profile
+因此对每条 workspace 内部绑定生成"长路径 + 短路径"两份，容器类的只读保护也一并镜像 —— 否则短路径可以替换容器。
+
+**宿主路径不会被丢掉**：网关自己的状态（`registry.json`、dsh 已经写下的 `sessions/`、`workspace.json` 里侧栏
+登记的工作区、备份根）仍然用宿主长路径，它们都在宿主侧读写。切换视图**不迁移历史**：侧栏里以长路径登记的
+工作区照旧能打开（长路径仍绑定），新会话/新加的工作区用短路径。已存在租户的 `workspace.json` 不会被重写
+（"刷新只改 patch 行"的既有原则），picker 行由 `EnsureDirectoryPickerRow` 在每次 worker 启动时刷新 ——
+所以**重启该租户即可看到短路径**，不需要轮转密钥。
+
+**校验**（加载期失败，不是运行期 bwrap 报错）：必须绝对、clean、非 `/`；不得等于/位于 `/home`、`/root`、`/tmp`、
+`/var`、`/srv`、`/etc/dshgw` 这些被隐藏的根，也不得覆盖 `/usr`、`/etc`、`/bin`、`/sbin`、`/lib`、`/lib64`、
+`/proc`、`/dev` 这些运行时树；不得与 `state_dir`、`tenant_root`、`workspace_root`、插件目录互相包含。
+profile 侧还会拒绝与 node / dsh release 绑定树重叠的值。
+
+多节点部署（M77）：profile 由**承载租户的那台机器**渲染，所以键写在各节点自己的配置里；给同一路径
+（例如 `/workspace`）租户体验才一致。
 
 ## 7b. SSH 工作区（M64）
 

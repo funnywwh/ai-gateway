@@ -115,6 +115,10 @@ func TestBuildDshgwChildCarriesRootsAndPathMode(t *testing.T) {
 	cfg.Dshgw.PublicBaseURL = "https://chat.example/"
 	cfg.Dshgw.TenantPathPrefix = "/t"
 	cfg.Dshgw.PortalPathPrefix = "/dshgw"
+	// M79: the child renders the sandbox profiles, so the workspace view has to reach it through
+	// the generated file — a key accepted here and dropped on the way would look exactly like a
+	// deployment that never set it. Whitespace is trimmed on the way, as every other path is.
+	cfg.Dshgw.SandboxWorkspace = "  /workspace  "
 
 	child, err := buildDshgwChild(cfg, aigwBinary)
 	if err != nil {
@@ -131,6 +135,9 @@ func TestBuildDshgwChildCarriesRootsAndPathMode(t *testing.T) {
 	if generated.TenantPathPrefix != "/t" || generated.PortalPathPrefix != "/dshgw" {
 		t.Fatalf("prefixes = %q / %q", generated.TenantPathPrefix, generated.PortalPathPrefix)
 	}
+	if generated.Deploy.SandboxWorkspace != "/workspace" {
+		t.Fatalf("workspace view = %q, want the configured value with its whitespace trimmed", generated.Deploy.SandboxWorkspace)
+	}
 
 	// Unset means port mode plus state_dir-derived roots, not empty paths.
 	defaults, err := buildDshgwChild(childFixture(t))
@@ -142,6 +149,11 @@ func TestBuildDshgwChildCarriesRootsAndPathMode(t *testing.T) {
 	}
 	if defaults.config.TenantRoot == "" || defaults.config.WorkspaceRoot == "" {
 		t.Fatalf("default roots are empty: %q / %q", defaults.config.TenantRoot, defaults.config.WorkspaceRoot)
+	}
+	// Unset keeps the child's single-view shape: the workspace is only reachable at its host
+	// path, which is what HOME and the passwd view name.
+	if defaults.config.Deploy.SandboxWorkspace != "" {
+		t.Fatalf("workspace view defaulted to %q, want empty", defaults.config.Deploy.SandboxWorkspace)
 	}
 
 	// A base URL whose host disagrees with public_host is refused: the generated

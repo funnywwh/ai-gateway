@@ -113,6 +113,7 @@
 | `deploy.config_path` | `./dshgw.yaml` |
 | `dsh.node_bin` / `bin_js` / `current_link` | 空 → `DSHGW_NODE` / `DSHGW_DSH_ROOT` 兜底；仍须为绝对路径 |
 | `deploy.bwrap_bin` | `/usr/bin/bwrap`（运行时安装） |
+| `deploy.sandbox_workspace` | 空 = 关闭（M79）：工作区在沙箱里只有宿主长路径一个视图；配 `/workspace` 时另绑一个短路径，`HOME`/`~`、目录选择器、终端与两个工作区面板都用它 |
 
 ### 4.3 gwproxy（`gwproxy.yaml`）
 
@@ -136,6 +137,7 @@
 | `deploy.template_home` / `template_home` | `<state_dir>/template-home`（一键部署推送，或本机 `prepare-template.sh` 产出） |
 | `deploy.plugin_path` | **无默认值**（与独立形态同一门禁） |
 | `dsh.node_bin` / `bin_js` / `current_link`、`deploy.bwrap_bin` | 本机绝对路径（运行时安装，预检逐项校验） |
+| `deploy.sandbox_workspace` | 空 = 关闭（M79）；多节点部署给同一短路径（如 `/workspace`）租户体验才一致 |
 | `worker_port_lo` / `worker_port_hi` | 由节点记录给出；必须是本机未被占用的段 |
 | `aigw_base_url` | **必填**（worker 直连 aigw 取模型，不经过控制面） |
 | `admin_socket`、门户/公开端口、会话、飞书 | 节点模式**不使用**（不绑定门户与公开端口，不写会话） |

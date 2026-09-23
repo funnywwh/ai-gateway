@@ -103,6 +103,9 @@ func TestChildConfigValidatesAndWritesOnce(t *testing.T) {
 			TenantConfigRoot: "/home/u/.local/share/dshgw/tenants", TemplateHome: "/home/u/.local/share/dshgw/template-home",
 			ConfigPath: "/home/u/.local/share/dshgw/config.yaml",
 			BackupDir:  "/home/u/.local/share/dshgw/backups",
+			// M79: the generated file is the only channel between the deployment's setting and
+			// the child that renders the sandbox profiles, so it is pinned here.
+			SandboxWorkspace: "/workspace",
 		},
 	}
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -117,7 +120,7 @@ func TestChildConfigValidatesAndWritesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"public_host: dsh.example", "worker_user: u", "127.0.0.1:31699"} {
+	for _, want := range []string{"public_host: dsh.example", "worker_user: u", "127.0.0.1:31699", "sandbox_workspace: /workspace"} {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("generated config missing %q:\n%s", want, data)
 		}

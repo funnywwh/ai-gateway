@@ -32,6 +32,13 @@
 //     reason: the shell's own startup files are not in this whitelist, so
 //     without it `bash -i` has no aliases, no LS_COLORS and no coloured prompt,
 //     and a terminal with full colour support shows a monochrome `ls`.
+//   - the workspace is the sandbox's home directory — the runner exports HOME=<workspace> —
+//     and, when the deployment names a view path (M79, deploy.sandbox_workspace), it is bound
+//     twice: at its host path, which the gateway's own state already names (registry records,
+//     the session storages dsh wrote), and at the short view, which is what a tenant's prompt,
+//     picker and terminal print. bubblewrap's --bind does not carry submounts, so every mount
+//     inside the workspace is bound at both paths too: a view without them would show empty
+//     browser/ and ssh/ containers instead of the mounts the account created.
 //
 // This package is deliberately free of filesystem and process side effects: it
 // only computes argv, so the profile can be unit-tested and printed for review.
@@ -84,11 +91,17 @@ type Runtime struct {
 
 // Tenant is the subset of a registry tenant a profile needs.
 type Tenant struct {
-	Name        string
-	Workspace   string
-	DshHome     string
-	WorkerPort  int
-	Environment []string
+	Name      string
+	Workspace string
+	DshHome   string
+	// WorkspaceView is the optional short path the workspace is ALSO visible at inside the
+	// sandbox (M79): the deployment's deploy.sandbox_workspace, e.g. "/workspace". Empty keeps
+	// the single-view shape this profile had before the option existed. The long host path
+	// stays bound either way: the gateway's own state (registry records, the session storages
+	// dsh already wrote) names it, and a second view of one directory costs a single bind.
+	WorkspaceView string
+	WorkerPort    int
+	Environment   []string
 	// SSHMounts are the sshfs mount points the gateway made inside this tenant's workspace
 	// (M64). Each one is bound explicitly: bubblewrap's --bind does not carry submounts, so
 	// a mount inside the workspace is invisible to the sandbox unless its own path is bound,
@@ -139,6 +152,25 @@ func Profile(rt Runtime, t Tenant) ([]string, error) {
 	nodeBin, binJS, nodeRoot, dshRoot, workspace, dshHome, err := resolve(rt, t)
 	if err != nil {
 		return nil, err
+	}
+	// The optional short view of the workspace (M79). It is deployment configuration rather
+	// than registry data, but refusing a value that would undo the sandbox is still this
+	// package's job: the rules the configuration layer applies, plus the paths only a profile
+	// knows (the node runtime and the dsh release it binds).
+	view := t.WorkspaceView
+	if err := ValidateWorkspaceView(view); err != nil {
+		return nil, err
+	}
+	if view != "" {
+		for _, clash := range []struct{ path, label string }{
+			{workspace, "the tenant workspace"},
+			{nodeRoot, "the node runtime"},
+			{dshRoot, "the dsh release"},
+		} {
+			if err := workspaceViewCollides(view, clash.path, clash.label); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	argv := []string{bwrapBin(rt.BwrapBin)}
@@ -227,6 +259,9 @@ func Profile(rt Runtime, t Tenant) ([]string, error) {
 	if pluginDir, err := pluginDirectory(rt.PluginPath); err != nil {
 		return nil, err
 	} else if pluginDir != "" {
+		if err := workspaceViewCollides(view, pluginDir, "the picker plugin directory"); err != nil {
+			return nil, err
+		}
 		argv = append(argv, "--ro-bind", pluginDir, pluginDir)
 	}
 
@@ -241,6 +276,28 @@ func Profile(rt Runtime, t Tenant) ([]string, error) {
 		"--bind", workspace, workspace,
 		"--bind", filepath.Dir(dshHome), filepath.Dir(dshHome),
 	)
+	// The workspace is also visible at its short view path when the deployment names one (M79).
+	// Both views are kept on purpose: the long path is what the gateway's own state already
+	// names (registry records, session storages, workspaces a person added in the UI), so
+	// dropping it would strand that state, while the view is what makes the paths a tenant
+	// reads — its prompt, its picker, its terminal — short.
+	if view != "" {
+		argv = append(argv, "--bind", workspace, view)
+	}
+	// bind emits one binding and, with a view configured, the same binding again at the view
+	// path. bubblewrap's --bind does not carry submounts, so every mount inside the workspace
+	// (browser picks, operator host shares, ssh workspaces) is invisible under the view unless
+	// it is bound there too — and a view that showed an empty browser/ or ssh/ container would
+	// look like a broken mount rather than a missing binding.
+	bind := func(flag, source, target string) {
+		argv = append(argv, flag, source, target)
+		if view == "" {
+			return
+		}
+		if mirrored, ok := viewTarget(view, workspace, target); ok {
+			argv = append(argv, flag, source, mirrored)
+		}
+	}
 	// The account's ssh-workspace mounts, one explicit binding each. --bind-try tolerates a
 	// mount point that is not there (a record whose mount has not been re-made yet), and the
 	// containment check above already guarantees none of them leaves the workspace.
@@ -248,7 +305,7 @@ func Profile(rt Runtime, t Tenant) ([]string, error) {
 		if !within(workspace, mount) || mount == workspace {
 			return nil, fmt.Errorf("tenant %s ssh mount %s is not inside its workspace %s", t.Name, mount, workspace)
 		}
-		argv = append(argv, "--bind-try", mount, mount)
+		bind("--bind-try", mount, mount)
 	}
 
 	// Protect the mount container even before the first browser mount exists. A
@@ -270,7 +327,7 @@ func Profile(rt Runtime, t Tenant) ([]string, error) {
 		if resolved != root || !info.IsDir() || info.Mode().Perm()&0077 != 0 {
 			return nil, fmt.Errorf("browser mount root must be a private canonical directory: %s", root)
 		}
-		argv = append(argv, "--ro-bind", root, root)
+		bind("--ro-bind", root, root)
 	} else if len(t.BrowserMounts) > 0 {
 		return nil, fmt.Errorf("browser mounts require a protected browser mount root")
 	}
@@ -286,7 +343,7 @@ func Profile(rt Runtime, t Tenant) ([]string, error) {
 		if resolved != mount {
 			return nil, fmt.Errorf("browser mount %s contains symlinks", mount)
 		}
-		argv = append(argv, "--bind", mount, mount)
+		bind("--bind", mount, mount)
 	}
 
 	// Operator-declared host directories (M71), bound straight in: no sshfs, no FUSE, so
@@ -310,7 +367,7 @@ func Profile(rt Runtime, t Tenant) ([]string, error) {
 		if resolved != root || !info.IsDir() {
 			return nil, fmt.Errorf("host share root must be a canonical directory: %s", root)
 		}
-		argv = append(argv, "--ro-bind", root, root)
+		bind("--ro-bind", root, root)
 	} else if len(t.HostShares) > 0 {
 		return nil, fmt.Errorf("host shares require a protected host share root")
 	}
@@ -331,11 +388,18 @@ func Profile(rt Runtime, t Tenant) ([]string, error) {
 		if share.ReadOnly {
 			flag = "--ro-bind-try"
 		}
-		argv = append(argv, flag, share.Source, share.Target)
+		bind(flag, share.Source, share.Target)
 	}
 	// Devices and a private process view. The network namespace is deliberately
 	// shared: the worker must reach aigw.
 	argv = append(argv, "--dev", "/dev", "--proc", "/proc", "--unshare-pid", "--die-with-parent")
+	// A configured view also becomes the process's working directory: the mount gives the
+	// short path, and without this the worker's own cwd (and everything dsh derives from a
+	// fresh process cwd) would still print the long one. --chdir runs after the mounts above,
+	// so the destination exists by then.
+	if view != "" {
+		argv = append(argv, "--chdir", view)
+	}
 	argv = append(argv, "--")
 	argv = append(argv, nodeBin, binJS)
 	argv = append(argv, t.Environment...)
@@ -570,4 +634,58 @@ func within(root, path string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// sandboxRuntimeTrees are the sandbox paths a profile mounts for itself: the loader and shell
+// directories, the named files under /etc, the process view and the device tree. A workspace
+// view must not sit on one of them, nor inside a hidden root: the bind would replace what the
+// sandbox needs, and the symptom would be an unresolvable interpreter or a missing /etc/passwd
+// instead of a configuration error.
+var sandboxRuntimeTrees = []string{"/usr", "/etc", "/proc", "/dev", "/bin", "/sbin", "/lib", "/lib64"}
+
+// ValidateWorkspaceView rejects a workspace view no profile could mount safely. An empty value
+// means the option is off and is accepted, so callers can pass the configured value straight
+// through. It is exported because the configuration layer applies the same rules when it loads
+// an operator's deploy.sandbox_workspace: a bad value must fail on the host, not inside a
+// worker that never starts.
+func ValidateWorkspaceView(view string) error {
+	if strings.TrimSpace(view) == "" {
+		return nil
+	}
+	if err := safeAbsolute(view, "deploy.sandbox_workspace"); err != nil {
+		return err
+	}
+	if view == string(filepath.Separator) {
+		return fmt.Errorf("deploy.sandbox_workspace must not be the filesystem root")
+	}
+	for _, forbidden := range append(append([]string{}, hiddenRoots...), sandboxRuntimeTrees...) {
+		if view == forbidden || within(forbidden, view) {
+			return fmt.Errorf("deploy.sandbox_workspace %s is %s or inside it, which the sandbox hides or mounts itself", view, forbidden)
+		}
+	}
+	return nil
+}
+
+// workspaceViewCollides rejects a view that would sit on top of, inside, or above a path the
+// profile mounts for another purpose.
+func workspaceViewCollides(view, other, label string) error {
+	if view == "" || strings.TrimSpace(other) == "" {
+		return nil
+	}
+	if within(view, other) || within(other, view) {
+		return fmt.Errorf("sandbox workspace view %s overlaps %s %s", view, label, other)
+	}
+	return nil
+}
+
+// viewTarget maps a path inside the workspace onto the same path under the workspace's view:
+// with workspace /srv/t/alice and view /workspace, /srv/t/alice/browser/picked becomes
+// /workspace/browser/picked. The second return value is false for anything not strictly inside
+// the workspace — the workspace itself included, which the caller already bound.
+func viewTarget(view, workspace, target string) (string, bool) {
+	rel, err := filepath.Rel(workspace, target)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.Join(view, rel), true
 }

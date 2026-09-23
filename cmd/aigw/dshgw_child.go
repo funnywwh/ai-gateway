@@ -131,6 +131,9 @@ func buildDshgwChild(cfg *config.Config, aigwExecutable string) (*dshgwChild, er
 			TemplateHome:     templateHome,
 			ConfigPath:       filepath.Join(stateDir, "config.yaml"),
 			BackupDir:        filepath.Join(stateDir, "backups"),
+			// The child renders and validates the sandbox profile, so the workspace view (M79)
+			// is passed through verbatim: this side only knows that the deployment named one.
+			SandboxWorkspace: strings.TrimSpace(cfg.Dshgw.SandboxWorkspace),
 		},
 	}
 	// The child runs ssh, so its own configuration carries the feature; this side only has

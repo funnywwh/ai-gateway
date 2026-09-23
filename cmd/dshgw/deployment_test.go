@@ -214,7 +214,11 @@ func TestSandboxExecPrintRendersProfileFromConfiguration(t *testing.T) {
 		"dsh:\n  node_bin: " + filepath.Join(root, "dsh/node/bin/node") + "\n" +
 		"  bin_js: " + filepath.Join(root, "dsh/releases/r1/lib/bin.js") + "\n" +
 		"  current_link: " + filepath.Join(root, "dsh/current") + "\n" +
-		"deploy:\n  worker_user: " + current.Username + "\n"
+		"deploy:\n  worker_user: " + current.Username + "\n" +
+		// M79: the printed profile is the operator's review of what a tenant runs in, so the
+		// workspace view has to show up here — the workspace is bound at both paths, and the
+		// worker starts in the short one.
+		"  sandbox_workspace: /workspace\n"
 	mustWriteFile(t, configPath, doc, 0o600)
 	registryDoc := fmt.Sprintf(`{"version":1,"tenants":[{"name":"alice","uid":%d,"public_port":32601,"worker_port":32100,`+
 		`"key_prefix":"sk-aaaaaaaaa","dsh_home":%q,"workspace":%q,"created_at":"2025-01-01T00:00:00Z",`+
@@ -229,7 +233,10 @@ func TestSandboxExecPrintRendersProfileFromConfiguration(t *testing.T) {
 	// The profile is printed one argv element per line so it can be reviewed flag
 	// by flag; the assertions work on the joined form.
 	printed := strings.Join(strings.Fields(stdout.String()), " ")
-	for _, want := range []string{"--tmpfs /home", "--unshare-pid", workspace, "--die-with-parent"} {
+	for _, want := range []string{
+		"--tmpfs /home", "--unshare-pid", workspace, "--die-with-parent",
+		"--bind " + workspace + " /workspace", "--chdir /workspace",
+	} {
 		if !strings.Contains(printed, want) {
 			t.Errorf("printed profile is missing %q:\n%s", want, printed)
 		}

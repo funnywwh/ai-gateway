@@ -302,6 +302,14 @@ dshgw:
   #     plugin the tenant worker imports, and an unset path is refused at startup instead of
   #     silently falling back to an installation path.
   # node_bin / current_link: empty reads DSHGW_NODE / DSHGW_DSH_ROOT (runtime installs).
+  # 沙箱里的工作区短路径（M79）：留空 = 只有宿主长路径一个视图（HOME 与 /etc/passwd 视图都用它）。
+  # 填 /workspace 时，工作区同时绑在长路径与短路径上，HOME/~、目录选择器、终端、文件管理器与
+  # 变更审阅都以短路径为准，新建会话的路径与提示符随之变短；长路径保留绑定，因为网关自己的状态
+  # （registry、dsh 已写下的会话/工作区记录）仍然用它。该值不需要宿主上存在（bwrap 在空 tmpfs 根里
+  # 自己造），但不能是 /、/usr 这类运行时树、/home 这类被隐藏的根，也不能与 state_dir / tenant_root /
+  # workspace_root / 插件目录互相包含 —— 那些在加载期就会被拒绝。
+  # sandbox_workspace: /workspace
+  #
   # SSH 工作区（M64）：租户在自己的 dsh 里浏览/新建远端目录，网关把远端目录挂进该租户的
   # 工作区。子进程配置由本文件生成，因此这里写、子进程用；密钥即边界，且**一账号一把**
   # （identity_dir/<账号>，或让账号自己在界面上传）。别名清单一账号一份（ssh_config_dir/<账号>），

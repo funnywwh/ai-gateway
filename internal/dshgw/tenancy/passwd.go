@@ -57,7 +57,10 @@ func (m *Manager) prepareTenantPasswd(t registry.Tenant) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	view, err := sandbox.RenderPasswd(host, worker, t.Workspace)
+	// The home field is the workspace as the sandbox sees it, which is the same value HOME gets
+	// (runner.go, workerEnv): with a configured workspace view both name the short path, and
+	// without one both keep naming the host workspace path as before (M79).
+	view, err := sandbox.RenderPasswd(host, worker, sandboxWorkspacePath(m.Config, t))
 	if err != nil {
 		return "", err
 	}

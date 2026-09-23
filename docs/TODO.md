@@ -993,3 +993,38 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 - [ ] 实测记录回填：每请求 +1 跳 LAN 的 p50/p99 增量、流式无缓冲区证据、64 MiB 体与 WS 直通、
       一次部署耗时与载荷大小、节点/控制面重启恢复时间（写进设计文档 §11 与 `docs/dshgw.md` §8）
 - [ ] 收尾：单一 M77 提交（提交信息引用设计文档路径）
+
+## M79 沙箱内工作区短路径视图
+
+> 设计：`docs/design/m79-sandbox-workspace-view.md`；规格：`docs/dshgw.md` §7a、`docs/deployment-layout.md` §4.2/§4.4。
+> 需求原话：「实现 `~` 就等于 `<工作区>` 呢？并在沙箱里缩短路径」。默认关闭（`deploy.sandbox_workspace` 留空时
+> 行为与之前逐字节一致）。
+
+已完成（可复现）：
+
+- [x] `deploy.sandbox_workspace`（如 `/workspace`）：工作区在沙箱里绑两次（宿主长路径保留），`--chdir` 让
+      worker 进程 cwd 也落在视图上
+- [x] **镜像子挂载**：bwrap `--bind` 不递归，browser 容器/挂载、`host_shares`、ssh 工作区在视图下逐条再绑一次，
+      容器类的只读保护同样镜像（否则短路径可以替换容器）
+- [x] 租户可见渲染统一走 `sandboxWorkspacePath`：`HOME`、`/etc/passwd` 家目录、picker clamp root、终端
+      `cwd`/`cwdRoot`、文件管理器与变更审阅 `root`、`workspace_seed`
+- [x] **已存在租户重启即生效**：新增 `EnsureDirectoryPickerRow`，worker 启动时刷新 picker 行（只改 patch 行，
+      不重新渲染 artifacts，`workspace.json` 里用户加的工作区不受影响）
+- [x] 加载期校验：拒绝隐藏根、运行时树、非绝对/非 clean、与 state/tenant/workspace 根及插件目录互相包含；
+      profile 侧再拒绝与 node/dsh release、工作区本身重叠的值
+- [x] 监督形态透传（`dshgw.sandbox_workspace` → 生成的子配置）；多节点部署写在各节点配置里
+- [x] 单测：`sandbox`（视图绑定/镜像/校验/基线回归）、`config`（加载与重叠规则）、`tenancy`（HOME、passwd、
+      插件行、种子、picker 刷新）、`cmd/dshgw`（`sandbox-exec --print`）、`dshgwsup`/`cmd/aigw`（透传）
+- [x] `make dshgw-test` 全绿（Go + 插件 Node 测试 + python 计划测试）
+
+未完成 / 待宿主执行：
+
+- [ ] **真机 bwrap staging**（本会话沙箱禁非特权 userns）：`make dshgw-sandbox-test` 需要新增视图断言后在使用
+      `bwrap --unshare-pid` 的宿主上跑一次真机版
+- [ ] **生效**：把 `deploy.sandbox_workspace: /workspace` 写进 `$ROOT/dshgw.yaml` + 换 `bin/dshgw` +
+      重启 `dshgw-verify`（会重启所有租户 worker，含发起部署的会话）。脚本：工作区里的
+      `deploy-aigw-4.2.0.sh`（幂等加键、带备份与就绪门禁、失败装回旧二进制）
+- [ ] 观察项：browser-pick / `host_shares` / ssh 面板里**显示**的路径仍是宿主长路径（功能上两个视图都通，
+      显示长度是次要问题）；若要一起变短，需要把这些网关侧记录里的路径按视图映射渲染
+- [ ] 观察项：picker-clamp 用 `realpath` 校验，工作区内"指向长路径的符号链接"会被判为根外而拒绝（已知边界，
+      文档已写明）
