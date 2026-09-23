@@ -1104,3 +1104,10 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 
 - [ ] **待宿主执行（真浏览器走查）**：`make ui-check`（「未保留」文案已改成「只有样板或超长用户消息」）
 - [ ] **待安排**：随 v4.3.3 发版并部署 rag-server + gptjp，并确认该租户的行恢复有正文（见 `docs/todo_done.md`）
+
+## M84 智能问答把整段会话历史都发给模型（历史窗口 0 = 不限制，默认 0）
+> 设计文档 `docs/design/m84-chat-full-history.md`。需求原话：「智能问答要把会话里的所有历史记录都发给模型」。
+
+- [ ] **待宿主执行（真机针测试）**：`RUN_TURNS=1 GW_ADMIN_PASSWORD='…' scripts/verify-m84.sh`
+      （rag-server `localhost:8088` 与 gptjp `localhost:8088/aigw` 各一次；会计费，约 22 次小请求）
+- [ ] **待安排**：随 v4.4.0 发版并部署 rag-server + gptjp 的线上验证（见 `docs/todo_done.md`）

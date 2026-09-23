@@ -981,8 +981,123 @@ func TestHistoryTooLargeRefusesInsteadOfTruncatingTheQuestion(t *testing.T) {
 	if len(runner.calls) != 0 {
 		t.Fatal("a conversation that does not fit must not be sent half-way to a model")
 	}
-	if result.Assistant.Status != domain.ChatMessageFailed || !strings.Contains(result.Assistant.Error, "上下文上限") {
+	if result.Assistant.Status != domain.ChatMessageFailed || !strings.Contains(result.Assistant.Error, "历史窗口") {
 		t.Fatalf("failure not explained: %+v", result.Assistant)
+	}
+}
+
+// TestHistoryIsCompleteWhenNoWindowIsConfigured is the M84 behaviour: without the optional
+// window the whole conversation is replayed, however old or long it is.
+func TestHistoryIsCompleteWhenNoWindowIsConfigured(t *testing.T) {
+	service, store, runner, _, session := chatFixture(t, Config{MaxSteps: 2})
+	if got := service.Config().MaxHistoryMessages; got != 0 {
+		t.Fatalf("default history messages = %d, want 0 (no window)", got)
+	}
+	// Four finished turns and a lot of bytes — more than the old 40-message / 256 KiB
+	// window ever kept, with the needle in the first turn.
+	for i := 1; i <= 4; i++ {
+		if err := store.AppendChatMessage(context.Background(), &domain.ChatMessage{
+			ID: fmt.Sprintf("cmsg_old_%d", i), SessionID: session.ID, TurnID: fmt.Sprintf("turn_old_%d", i),
+			Role:    map[bool]string{true: domain.ChatRoleUser, false: domain.ChatRoleAssistant}[i%2 == 1],
+			Content: "第 " + fmt.Sprint(i) + " 条：记住 4271 " + strings.Repeat("填充 ", 2000), Status: domain.ChatMessageOK,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner.steps = []*StepResult{textStep("4271")}
+	events, emit := collectEvents()
+	if _, err := service.Turn(context.Background(), TurnRequest{
+		OwnerID: 1, Username: "admin", Role: RoleAdmin,
+		SessionID: session.ID, TurnID: "turn_new", Content: "我第一条消息里让你记住的数字是多少？",
+	}, emit); err != nil {
+		t.Fatal(err)
+	}
+	items := runner.calls[0].Items
+	if len(items) != 5 {
+		t.Fatalf("replayed items = %d, want the four stored messages plus the new question: %+v", len(items), items)
+	}
+	if !strings.Contains(string(items[0].Content), "记住 4271") {
+		t.Fatalf("the oldest message is missing from the replay: %s", items[0].Content)
+	}
+	for _, ev := range *events {
+		if ev.Type == EventNotice && strings.Contains(ev.Notice, "更早的") {
+			t.Fatalf("the dropped-history note must not appear without a window: %q", ev.Notice)
+		}
+	}
+}
+
+// TestReplayedHistoryDropsAnUnansweredToolCall: a turn stopped before its tool ran leaves a
+// function_call without an output, which providers reject. With no window to slide it out
+// of, the next question would fail forever, so it is dropped at the replay boundary.
+func TestReplayedHistoryDropsAnUnansweredToolCall(t *testing.T) {
+	service, store, runner, _, session := chatFixture(t, Config{MaxSteps: 2})
+	if err := store.AppendChatMessage(context.Background(), &domain.ChatMessage{
+		ID: "cmsg_stopped", SessionID: session.ID, TurnID: "turn_stopped", Role: domain.ChatRoleAssistant,
+		Content: "先查一下", Status: domain.ChatMessageAborted,
+		ProviderItems: encodeItems([]pluginapi.Item{
+			assistantTextItem("先查一下"),
+			functionCallItem("call_never_ran", "admin_request", `{"name":"admin_list_accounts"}`),
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner.steps = []*StepResult{textStep("继续")}
+	_, emit := collectEvents()
+	if _, err := service.Turn(context.Background(), TurnRequest{
+		OwnerID: 1, Username: "admin", Role: RoleAdmin,
+		SessionID: session.ID, TurnID: "turn_1", Content: "继续",
+	}, emit); err != nil {
+		t.Fatal(err)
+	}
+	var sawText bool
+	for _, item := range runner.calls[0].Items {
+		if item.Type == "function_call" {
+			t.Fatalf("an unanswered call reached the model: %+v", item)
+		}
+		if strings.Contains(string(item.Content), "先查一下") {
+			sawText = true
+		}
+	}
+	if !sawText {
+		t.Fatalf("the rest of the interrupted turn was dropped too: %+v", runner.calls[0].Items)
+	}
+}
+
+// TestContextOverflowFailureExplainsWhatToDo: with the whole conversation replayed, a
+// session that outgrows its model fails on every later question. The upstream says so in
+// its own words; the console adds what the operator can do about it.
+func TestContextOverflowFailureExplainsWhatToDo(t *testing.T) {
+	upstream := "This model's maximum context length is 128000 tokens. However, your messages resulted in 210744 tokens."
+	for _, tc := range []struct {
+		name    string
+		message string
+		want    bool
+	}{
+		{"context length", upstream, true},
+		{"codex phrasing", "Input exceeds the maximum number of tokens", true},
+		{"deepseek phrasing", "This model's maximum context length is 65536 tokens.", true},
+		{"unrelated failure", "insufficient balance", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service, _, runner, _, session := chatFixture(t, Config{MaxSteps: 2})
+			runner.err = &StepFailure{Status: 400, Code: "invalid_request_error", Message: tc.message}
+			_, emit := collectEvents()
+			result, err := service.Turn(context.Background(), TurnRequest{
+				OwnerID: 1, Username: "admin", Role: RoleAdmin,
+				SessionID: session.ID, TurnID: "turn_1", Content: "还有多少余额？",
+			}, emit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := result.Assistant.Error
+			if !strings.Contains(got, tc.message) {
+				t.Fatalf("the upstream message was not kept: %q", got)
+			}
+			hinted := strings.Contains(got, "chat.max_history_messages")
+			if hinted != tc.want {
+				t.Fatalf("hint = %v, want %v: %q", hinted, tc.want, got)
+			}
+		})
 	}
 }
 

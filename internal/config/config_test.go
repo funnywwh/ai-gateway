@@ -408,8 +408,10 @@ func TestLoadFXRatesFromYAML(t *testing.T) {
 
 // TestChatConfigIsValidated covers the console chat's own bounds. Each case is a value that
 // would otherwise make the console lie: a zero step budget silently falls back to a default,
-// a non-positive ticket TTL makes every preview unusable, and a history bound smaller than
-// one turn would cut a conversation in the middle of a tool call.
+// a non-positive ticket TTL makes every preview unusable, and a history window smaller than
+// one turn would cut a conversation in the middle of a tool call. The two history bounds are
+// 0 = "no window, send the whole conversation" (the default), so only negatives and a window
+// below one turn are refused.
 func TestChatConfigIsValidated(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -423,8 +425,11 @@ func TestChatConfigIsValidated(t *testing.T) {
 		{"negative steps", func(c *Config) { c.Chat.MaxSteps = -1 }, true},
 		{"negative tool calls", func(c *Config) { c.Chat.MaxToolCalls = -1 }, true},
 		{"zero tool result bytes", func(c *Config) { c.Chat.MaxToolResultBytes = 0 }, true},
+		{"zero history means no window", func(c *Config) { c.Chat.MaxHistoryMessages = 0; c.Chat.MaxHistoryBytes = 0 }, false},
+		{"positive history window", func(c *Config) { c.Chat.MaxHistoryMessages = 40; c.Chat.MaxHistoryBytes = 262144 }, false},
 		{"history below one turn", func(c *Config) { c.Chat.MaxHistoryMessages = 1 }, true},
-		{"zero history bytes", func(c *Config) { c.Chat.MaxHistoryBytes = 0 }, true},
+		{"negative history messages", func(c *Config) { c.Chat.MaxHistoryMessages = -1 }, true},
+		{"negative history bytes", func(c *Config) { c.Chat.MaxHistoryBytes = -1 }, true},
 		{"negative loaded skills", func(c *Config) { c.Chat.MaxLoadedSkills = -1 }, true},
 		{"zero skill bytes", func(c *Config) { c.Chat.MaxSkillBytes = 0 }, true},
 		{"zero artifact bytes", func(c *Config) { c.Chat.ArtifactMaxBytes = 0 }, true},

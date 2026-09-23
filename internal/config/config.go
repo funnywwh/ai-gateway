@@ -339,8 +339,12 @@ type Chat struct {
 	// MaxToolResultBytes truncates one management tool result before it is fed back to the
 	// model; a truncated result says so instead of silently losing the tail.
 	MaxToolResultBytes int `yaml:"max_tool_result_bytes"`
-	// MaxHistoryMessages / MaxHistoryBytes bound the replayed conversation. History is cut
-	// at whole turns so a tool call never loses its output.
+	// MaxHistoryMessages / MaxHistoryBytes are an optional window over the replayed
+	// conversation. 0 = no window: the whole conversation is sent to the model, which is the
+	// default. A positive value keeps the newest whole turns that fit — history is cut at
+	// whole turns so a tool call never loses its output — and notes the earlier ones in the
+	// transcript; a newest turn that does not fit at all fails that question rather than
+	// sending half of it.
 	MaxHistoryMessages int `yaml:"max_history_messages"`
 	MaxHistoryBytes    int `yaml:"max_history_bytes"`
 	// MaxLoadedSkills is a per-conversation limit, not a library limit: the library itself
@@ -1073,8 +1077,10 @@ func Default() Config {
 			MaxSteps:              0,
 			MaxToolCalls:          0,
 			MaxToolResultBytes:    64 * 1024,
-			MaxHistoryMessages:    40,
-			MaxHistoryBytes:       256 * 1024,
+			// 0 = no window: the whole conversation goes to the model (M84). Set a positive
+			// pair to trade earlier turns for a smaller request.
+			MaxHistoryMessages:    0,
+			MaxHistoryBytes:       0,
 			MaxLoadedSkills:       12,
 			MaxSkillBytes:         16 * 1024,
 			RecordReasoning:       true,
@@ -1607,11 +1613,16 @@ func validateChat(c *Config) error {
 	if chat.MaxToolResultBytes <= 0 {
 		return fmt.Errorf("chat.max_tool_result_bytes must be positive")
 	}
-	if chat.MaxHistoryMessages < 2 {
-		return fmt.Errorf("chat.max_history_messages must be >= 2 (one user message and its answer)")
+	// 0 sends the whole conversation (the default); a positive value is a window, and a
+	// window smaller than one turn is a typo rather than an intention.
+	if chat.MaxHistoryMessages < 0 {
+		return fmt.Errorf("chat.max_history_messages must be >= 0 (0 sends the whole conversation)")
 	}
-	if chat.MaxHistoryBytes <= 0 {
-		return fmt.Errorf("chat.max_history_bytes must be positive")
+	if chat.MaxHistoryMessages > 0 && chat.MaxHistoryMessages < 2 {
+		return fmt.Errorf("chat.max_history_messages must be 0 (no window) or >= 2 (one user message and its answer)")
+	}
+	if chat.MaxHistoryBytes < 0 {
+		return fmt.Errorf("chat.max_history_bytes must be >= 0 (0 sends the whole conversation)")
 	}
 	if chat.MaxLoadedSkills < 0 {
 		return fmt.Errorf("chat.max_loaded_skills must be >= 0")

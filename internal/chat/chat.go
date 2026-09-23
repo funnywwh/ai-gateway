@@ -97,6 +97,10 @@ type Config struct {
 	MaxSteps           int
 	MaxToolCalls       int
 	MaxToolResultBytes int
+	// MaxHistoryMessages / MaxHistoryBytes are an optional window over the replayed
+	// conversation. 0 (or less) means "not bounded": the whole conversation is sent, which
+	// is the default and what the console's history read is for. A positive value keeps the
+	// newest whole turns that fit and notes the earlier ones in the transcript.
 	MaxHistoryMessages int
 	MaxHistoryBytes    int
 	MaxLoadedSkills    int
@@ -302,14 +306,13 @@ func New(cfg Config, store Store, runner Runner, tools Tools, log *slog.Logger) 
 }
 
 // withDefaults fills in the values a zero config would otherwise turn into a broken
-// service. MaxSteps and MaxToolCalls are deliberately *not* defaulted: zero means "no
-// limit", which is what an operator who did not configure a ceiling asked for.
+// service. MaxSteps, MaxToolCalls and the two history bounds are deliberately *not*
+// defaulted: zero means "no limit", which is what an operator who did not configure a
+// ceiling or a window asked for.
 func withDefaults(cfg Config) Config {
 	def := Config{
 		Enabled:            true,
 		MaxToolResultBytes: 64 * 1024,
-		MaxHistoryMessages: 40,
-		MaxHistoryBytes:    256 * 1024,
 		MaxLoadedSkills:    12,
 		MaxSkillBytes:      16 * 1024,
 		RecordReasoning:    true,
@@ -323,11 +326,11 @@ func withDefaults(cfg Config) Config {
 	if cfg.MaxToolResultBytes <= 0 {
 		cfg.MaxToolResultBytes = def.MaxToolResultBytes
 	}
-	if cfg.MaxHistoryMessages <= 0 {
-		cfg.MaxHistoryMessages = def.MaxHistoryMessages
+	if cfg.MaxHistoryMessages < 0 {
+		cfg.MaxHistoryMessages = 0
 	}
-	if cfg.MaxHistoryBytes <= 0 {
-		cfg.MaxHistoryBytes = def.MaxHistoryBytes
+	if cfg.MaxHistoryBytes < 0 {
+		cfg.MaxHistoryBytes = 0
 	}
 	if cfg.MaxLoadedSkills < 0 {
 		cfg.MaxLoadedSkills = def.MaxLoadedSkills

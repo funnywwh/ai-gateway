@@ -202,8 +202,10 @@ func (s *Service) runTurn(ctx context.Context, session *domain.ChatSession, turn
 	history := buildHistory(messages, s.cfg.MaxHistoryMessages, s.cfg.MaxHistoryBytes)
 	if history.tooLarge {
 		// Sending half a question would produce an answer about a conversation nobody had.
+		// Only a configured window can get here; with no window the whole conversation is
+		// sent and the model's own context limit is what answers.
 		run.status, run.outcome = domain.ChatMessageFailed, OutcomeFailed
-		run.errMsg = "这段对话已经超出单次请求的上下文上限，请新建一个会话继续提问"
+		run.errMsg = "这一轮提问已经超出本会话配置的历史窗口（chat.max_history_messages / chat.max_history_bytes），没有发送给模型；可以把窗口调大，或新建一个会话继续提问"
 		s.emit(emit, Event{Type: EventNotice, TurnID: turn.TurnID, Level: LevelError, Notice: run.errMsg})
 		return run
 	}
@@ -263,7 +265,7 @@ func (s *Service) runTurn(ctx context.Context, session *domain.ChatSession, turn
 		})
 		if err != nil {
 			run.status, run.outcome = domain.ChatMessageFailed, OutcomeFailed
-			run.errMsg = stepErrorText(err)
+			run.errMsg = contextOverflowHint(stepErrorText(err))
 			if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 				run.status, run.outcome, run.errMsg = domain.ChatMessageAborted, OutcomeCancelled, "已停止生成"
 			}
@@ -748,6 +750,40 @@ func stepErrorText(err error) string {
 		return "模型调用失败"
 	}
 	return err.Error()
+}
+
+// contextOverflowWords are the shapes an upstream uses to say "this request does not fit my
+// context window". They are matched case-insensitively against the failure text; a provider
+// that phrases it differently loses only the hint, never the failure itself.
+var contextOverflowWords = []string{
+	"context length",
+	"context_length_exceeded",
+	"maximum context",
+	"context window",
+	"prompt is too long",
+	"exceeds the maximum number of tokens",
+	"input length",
+}
+
+// contextOverflowHint turns the one failure this gateway's default behaviour makes likely
+// into something the operator can act on. The whole conversation is replayed by default, so
+// a session that has grown past the model's context fails on every later question; the
+// upstream says that in its own words, and the sentence appended here says what to do about
+// it: start a new conversation, or have the window configured. Anything else is returned
+// untouched.
+func contextOverflowHint(message string) string {
+	if strings.TrimSpace(message) == "" {
+		return message
+	}
+	lower := strings.ToLower(message)
+	for _, word := range contextOverflowWords {
+		if !strings.Contains(lower, word) {
+			continue
+		}
+		return message + "\n\n本会话历史已超出该模型的上下文上限：请新建会话继续提问，" +
+			"或让运维把 chat.max_history_messages / chat.max_history_bytes 设为正整数，改用历史窗口。"
+	}
+	return message
 }
 
 func stepErrorCode(err error) string {
