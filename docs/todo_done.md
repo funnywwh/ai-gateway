@@ -6334,3 +6334,99 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 验证（真机针测试，M85 的核心验收） | `RUN_TURNS=1 scripts/verify-m85.sh` 两台各一次，均 **11 通过 0 失败**。rag-server：账户 #4 / Key #8 / `deepseek-flash`，针 **7136**，22 轮累计输入 159,421 token，会话 44 条消息，最后一轮输入 7,518 ≥ 前面输出合计 249。gptjp：账户 #1 / Key #117 / `deepseek-flash`，针 **6910**，累计输入 156,288，44 条消息，最后一轮输入 7,312 ≥ 100。两台全程**没有**出现过「更早的 N 轮对话没有随本次请求发送」，模型都答出了第 1 条消息里的数字 —— 44 > 40（旧默认窗口）说明旧行为下这条针必然已被丢弃 |
 | 成本与清理 | 两台各 22 次小请求（`deepseek-flash`，输出合计 249 / 100 token）；临时会话与 `scope=query` 令牌跑完即删，未使用 `KEEP`（不留现场） |
 | 未做 | ① rag-server 的公网入口没有 `/version` 路由（`chat.tirisen.hk/version` 与 `/aigw/version` 都是 `{"error":"Not found"}`），按惯例只验回环 + 局域网；② `origin` 未推（`main` 已在 `b8d7705`，tag `v4.4.0` / `v4.5.0` 只在本地）；③ `dshgw` 未动；④ gptjp 上 `openai-images` 实例与真实生图的线上验证仍待用户执行（M84 一节） |
+
+## M87 API Key 按哈希查找，前缀降级为展示列
+> 需求原话：「能不能改成 apikey 的 id 查找，api 请求时，先 hash，用 hash 查找，前缀只是用于给用户显示？」
+> →「我就是要解决『前缀必须唯一』，因为 sub2api 库里的 key 12 位前缀有重复」（驱动需求）。
+> 设计：`docs/design/m87-api-key-hash-lookup.md`（关键决策 D1–D13）。两处已量化的现状缺陷：① 前缀只有
+> 30 bit（MCP 15 bit），签发路径撞上就是 `ON CONFLICT ... DO UPDATE` 静默接管；② 负缓存按前缀键控，
+> 知道前缀的人能把该 key 持续打成 401。硬验收：gptjp sub2api 的 #24/#51（同为 `sk-f69aeca55`、
+> 哈希不同）必须能同时导入、同时可用（`docs/todo_done.md:2304`）。分两步上线，每步可回滚。
+
+- [x] 设计文档 `docs/design/m87-api-key-hash-lookup.md`（D1–D13、被否方案 §2.1、两个迁移、接口形状、两步上线、测试策略）
+- [x] **第一步**：迁移 `0028_api_key_hash_index.sql`（`api_keys.key_hash` / `mcp_tokens.token_hash` 唯一索引）；
+      `internal/apikey` 的查找键/正缓存/负缓存/`Invalidate` 换哈希；store 增 `Get/FindAPIKeyByHash`、
+      `GetMCPTokenByHash`，`Upsert*` 的 `ON CONFLICT` 列换哈希；创建 key 与 MCP token 加"预检 + 重生成 ≤3 次"；
+      `cmd/aigw` 的 `InvalidateKey` 回调签名换哈希
+- [x] **第二步**：迁移 `0029_api_key_prefix_display_only.sql`（前缀唯一索引 → 普通索引）；
+      导入冲突规则塌缩为"同哈希更新、否则新建"（删 `import:` 归属判定、批内前缀去重、409 分支）；
+      `keys/lookup` 的 `key_prefix` 分支改为返回 `count` + `keys[]`；`bootstrap` 的 merge 判定改按哈希；
+      **保留**第一步的预检重试（D13：护 dshgw legacy 前缀兜底，M88 上线后再评估）；`scripts/sub2api-migrate.py`
+      删冲突/重签逻辑；同步 m4 / m43 / m80 / m30 / api-responses / sub2api-migration / mcp 文档
+- [x] 测试：同前缀两把 key 各自可鉴权、负缓存不互相干扰、0028 遇重复哈希失败并回滚、
+      导入同哈希不同前缀 → 一行、`keys/lookup` 两分支形状、MCP 撞前缀被重试兜住
+- [x] 上线验收：抽 3 把线上 key 打 `/v1/models` 200 且改策略立即生效；
+      自造一对同前缀 key 走 `import-batch` 的 `dry_run` + 真实导入：两行同前缀不同哈希、两把明文各自 200、
+      `keys/lookup` 传该前缀返回 `count=2`
+
+### v4.6.0 发布记录（M87，2026-09-24）
+
+| 项 | 值 |
+|---|---|
+| 版本 | **v4.6.0**（4.5.0 → 4.6.0；release 提交 `ab29518`，tag `v4.6.0`） |
+| 构建物 | `bin/aigw` **4.6.0 / `ab29518`**，23,718,290 B，sha256 `dcbdc9b426d168762197bb6adead1436c65645ba02fd7a8b32da33f37bc0a0ea` |
+| 传输 | 沙箱 → gptjp 上行约 **39 KB/s**：23.7 MB 的 `scp` 两次超时，改 `gzip -1` 压缩后管道传输（约 11 MB，数分钟），远端解压后 sha256 与构建物逐位一致 |
+| 部署范围 | **gptjp**（`47.91.16.118`，`/opt/aigw`，`aigw.service`，`base_path: /aigw`），4.5.0/`b8d7705` → **4.6.0/`ab29518`**（同日随后被 v4.7.0 覆盖） |
+| 回滚点 | `/opt/aigw/aigw.prev-4.5.0-b8d7705-*`（与部署前线上二进制逐字节相同）；**DB 快照** `/opt/aigw/data/aigw.db.pre-m87-20260924-165211`（0600，SQLite `backup()` 在线快照） |
+| schema | **0027 → 0029**：0028 建 `idx_api_keys_hash` / `idx_mcp_tokens_hash` 唯一索引，0029 把前缀唯一索引降级为普通索引 |
+| 前置断言（升级前） | key 135 行、**重复 `key_hash` 0 组**、重复 `token_hash` 0 组（0028 失败会拒绝启动，所以先查） |
+| 验证（部署后） | `/aigw/version` = `{"revision":"ab29518","version":"4.6.0"}`；`healthz`/`readyz` 200；启动日志 `aigw starting version=4.6.0 revision=ab29518`，窗口内 `level=ERROR` 0 条；`idx_api_keys_hash`/`idx_mcp_tokens_hash` 为 UNIQUE、`idx_api_keys_prefix_lookup`/`idx_mcp_tokens_prefix_lookup` 为普通索引 |
+| **同前缀验收（驱动需求）** | 自造两把明文共用 12 字符前缀 `sk-m87shared`（尾段不同，各 52 字符）：`import-batch` `dry_run` → `created=2`；真实导入 → 库里两行（#166/#167，`key_prefix` 相同）；两把各自 `GET /v1/models` → **200 / 200**；`keys/lookup {"key_prefix":"sk-m87shared"}` → `count=2`；同明文重导 → `created=false` 且 id 不变（幂等）。测完两把 `status=disabled` |
+| 遗留 | ① 4 把验收 key（#162/#163/#166/#167）留在库里，全部已 disabled（网关没有删除 key 的路由）；② 线上最近 1 小时没有请求，因此「已发 key 零迁移」由单测/端到端测试覆盖，线上只能靠客户端抽查；③ sub2api 真数据 #24/#51 未导入（见下节「可选后续」）；④ `/opt/aigw/data/E26Q-reissue-key.txt` 仍在（当时重签的明文，未交付本人） |
+
+## M88 dshgw 只按账户映射租户（退役 key 前缀绑定）
+> 需求原话：「dshgw 也用 key hash 找租户」。评审结论：**不哈希化，直接删掉本地解析**——那条兜底只服务
+> "aigw 不返回租户名"的老 deployment（今天的登录前置必然先问 aigw），而哈希化还要背一次磁盘格式迁移
+> （`PreviousPrefixes` 的明文已被 `rotateKeyLocked` 覆盖，转不成哈希）。设计：
+> `docs/design/m88-dshgw-account-tenant-binding.md`（含 §7 实现与设计差异）。
+
+## M88 dshgw 只按账户映射租户（退役 key 前缀绑定）
+> 需求原话：「dshgw 也用 key hash 找租户」。评审结论：**不哈希化，直接删掉本地解析**——那条兜底只服务
+> "aigw 不返回租户名"的老 deployment（今天的登录前置必然先问 aigw），而哈希化还要背一次磁盘格式迁移
+> （`PreviousPrefixes` 的明文已被 `rotateKeyLocked` 覆盖，转不成哈希）。设计：
+> `docs/design/m88-dshgw-account-tenant-binding.md`。
+
+- [x] 设计文档 `docs/design/m88-dshgw-account-tenant-binding.md`（D1–D7、被否方案 §2.1、改动清单、回滚保险、测试策略）
+- [x] `resolveTenant` 删掉 `aigw.KeyPrefix` + `ByPrefix` 分支；`authTenant == ""` → 403 + 审计 reason `tenant_unmapped`；
+      `aigw.KeyPrefix()` 派生函数退役
+- [x] 注册表退役绑定设施：删 `ByPrefix`/`AddPrefix`/`RotatePrefix`/`Prefixes()`/`validPrefix`/`encodeKeyMap`/`LoadKeyMap`；
+      `validateUnique` 去掉前缀校验；`Save` 停写并删除 `keys.map`；`KeyPrefix`/`PreviousPrefixes` 字段保留只写不读（D4 回滚保险）
+- [x] CLI 与配置：删 `bind`/`cleanPrefix`/`--keep-old-prefix`；`whereis` 改为按账户名查租户；
+      `tenant list` 的 KeyPrefix 列标注"仅展示/回滚保险"；`key_map_path` 标 deprecated（配置是 `KnownFields(true)`，不能直接删）；
+      备份清单去掉 `keys.map`；`localdshgw.TenantInfo.KeyPrefix` 删除
+- [x] 测试：无 tenant 的 authorize 回答 → 403 + `tenant_unmapped`；**前缀匹配但账户不匹配的 key 必须被拒绝**（证明兜底没了）；
+      两租户同前缀也能 `Put`+`Save`；`Save` 后 `keys.map` 不存在；老 registry.json（带前缀字段）仍可加载；
+      回滚演练：新版本产出的 registry.json 交给老二进制能加载且老前缀仍能登录
+- [x] 文档：`docs/dshgw.md` §3 第 3 步改写为"按账户映射租户"、删 keys.map 说法；`docs/deployment-layout.md`、
+      `docs/design/m51-dshgw.md`、`docs/design/m63-data-root.md` 里 `keys.map` 说明改为历史遗留；
+      `deploy/dshgw/README.md` 写明升级要求 aigw ≥ M74
+
+### v4.7.0 发布记录（M88，aigw 侧；dshgw 待宿主重启，2026-09-24）
+
+| 项 | 值 |
+|---|---|
+| 版本 | **v4.7.0**（4.6.0 → 4.7.0；release 提交 `11e8254`，tag `v4.7.0`）。一个版本里含两个二进制：`bin/aigw`（M88 的 `internal/localdshgw` 改动）与 `bin/dshgw` 4.7.0/`11e8254` |
+| 构建物 | `bin/aigw` **4.7.0 / `11e8254`**，23,718,338 B，sha256 `cd573d67e5c8605ab0982a8904c22e9e56da52dfe34547bd7e35a9f63b361973`；`bin/dshgw` **4.7.0 / `11e8254`**，16,835,688 B（`make dshgw-build`） |
+| 部署范围 | ① **rag-server**（LAN，`~/work/ai_gateway/bin/aigw`，`aigw-local.service`）：4.5.0/`b8d7705` → **4.7.0/`11e8254`**（上传 1 秒，sha256 一致）；② **gptjp**：4.6.0/`ab29518` → **4.7.0/`11e8254`**；③ **dshgw 控制面（宿主 `dshgw-verify.service`）待宿主重启**，见下表 |
+| 回滚点 | rag-server `bin/aigw.prev-4.5.0-b8d7705-*`；gptjp `/opt/aigw/aigw.prev-4.6.0-ab29518-*`；dshgw 侧部署时按宿主脚本备份到 `data/prev/bin/` |
+| schema | rag-server `aigw-local.db` 63 把 key、gptjp 139 把 key，均升到 **0029**；两台 `dup key_hash` 均为 0 |
+| 验证（两台 aigw） | `/version` 均为 `{"revision":"11e8254","version":"4.7.0"}`（rag-server 在根路径，gptjp 在 `/aigw/version`）；`healthz`/`readyz` 200；启动日志无 ERROR |
+| 验证（M87 回归，gptjp 4.7.0 上重跑） | 把 #166/#167 临时置 `active`：两把明文各自 `GET /v1/models` → **200 / 200**；`keys/lookup` 传 `sk-m87shared` → `count=2`；随即重新 disabled。`idx_api_keys_hash` 仍是 `CREATE UNIQUE INDEX` |
+| 未做 | rag-server 的公网入口没有 `/version` 路由（历史惯例只验回环 + 局域网）；`origin` 未推（tag `v4.6.0`/`v4.7.0` 只在本地）；gptjp 上 sub2api 真数据未导入 |
+
+**待宿主执行（M88 的 dshgw 控制面，会重启全部租户 worker，含本会话）**：
+
+```bash
+ROOT=/home/winger/work/ai_gateway
+SRC=$ROOT/data/dshgw-verify/state/workspaces/dsh-tenant/work/ai-gateway/bin
+$SRC/dshgw --version                      # 期望 dshgw 4.7.0 (revision 11e8254…
+running=$($ROOT/bin/dshgw --version | sed 's/[^0-9A-Za-z._-]\+/-/g')
+cp -p $ROOT/bin/dshgw "$ROOT/data/prev/bin/dshgw.prev-running-$running"
+install -m 0755 $SRC/dshgw $ROOT/bin/dshgw.new && mv -f $ROOT/bin/dshgw.new $ROOT/bin/dshgw
+systemctl --user restart dshgw-verify && systemctl --user is-active dshgw-verify
+$ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
+```
+重启后验收：① 门户用一把 Key 登录某个已启用 DSH 的账号 → 进得去（走账户映射）；②
+`journalctl --user -u dshgw-verify --since "-5min" | grep tenant_unmapped` **应无输出**；
+③ `ls $ROOT/data/dshgw-verify/state/keys.map` **应不存在**（下一次 `Save` 会删掉它）；
+④ `$ROOT/bin/dshgw whereis <账号名>` 能打印租户行。回滚：`cp -p` 回备份 + 重启。
