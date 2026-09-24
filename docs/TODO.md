@@ -1160,3 +1160,48 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       `ai-gateway` 一个仓库；② 会话开在仓库子目录时仍是该仓库；③ workspace=`…/work` 的会话显示
       「该目录下的仓库」且不自动选中；④ 老会话（M79 之前的长路径 cwd）显示回退提示；
       ⑤ `plugin-state/git-diff.trace.jsonl` 出现 `version=0.2.0` 与作用域事件
+
+## M87 API Key 按哈希查找，前缀降级为展示列
+> 需求原话：「能不能改成 apikey 的 id 查找，api 请求时，先 hash，用 hash 查找，前缀只是用于给用户显示？」
+> →「我就是要解决『前缀必须唯一』，因为 sub2api 库里的 key 12 位前缀有重复」（驱动需求）。
+> 设计：`docs/design/m87-api-key-hash-lookup.md`（关键决策 D1–D13）。两处已量化的现状缺陷：① 前缀只有
+> 30 bit（MCP 15 bit），签发路径撞上就是 `ON CONFLICT ... DO UPDATE` 静默接管；② 负缓存按前缀键控，
+> 知道前缀的人能把该 key 持续打成 401。硬验收：gptjp sub2api 的 #24/#51（同为 `sk-f69aeca55`、
+> 哈希不同）必须能同时导入、同时可用（`docs/todo_done.md:2304`）。分两步上线，每步可回滚。
+
+- [x] 设计文档 `docs/design/m87-api-key-hash-lookup.md`（D1–D13、被否方案 §2.1、两个迁移、接口形状、两步上线、测试策略）
+- [ ] **第一步**：迁移 `0028_api_key_hash_index.sql`（`api_keys.key_hash` / `mcp_tokens.token_hash` 唯一索引）；
+      `internal/apikey` 的查找键/正缓存/负缓存/`Invalidate` 换哈希；store 增 `Get/FindAPIKeyByHash`、
+      `GetMCPTokenByHash`，`Upsert*` 的 `ON CONFLICT` 列换哈希；创建 key 与 MCP token 加"预检 + 重生成 ≤3 次"；
+      `cmd/aigw` 的 `InvalidateKey` 回调签名换哈希
+- [ ] **第二步**：迁移 `0029_api_key_prefix_display_only.sql`（前缀唯一索引 → 普通索引）；
+      导入冲突规则塌缩为"同哈希更新、否则新建"（删 `import:` 归属判定、批内前缀去重、409 分支）；
+      `keys/lookup` 的 `key_prefix` 分支改为返回 `count` + `keys[]`；`bootstrap` 的 merge 判定改按哈希；
+      **保留**第一步的预检重试（D13：护 dshgw legacy 前缀兜底，M88 上线后再评估）；`scripts/sub2api-migrate.py`
+      删冲突/重签逻辑；同步 m4 / m43 / m80 / m30 / api-responses / sub2api-migration / mcp 文档
+- [ ] 测试：同前缀两把 key 各自可鉴权、负缓存不互相干扰、0028 遇重复哈希失败并回滚、
+      导入同哈希不同前缀 → 一行、`keys/lookup` 两分支形状、MCP 撞前缀被重试兜住
+- [ ] 上线验收：第一步抽 3 把线上 key 打 `/v1/models` 200 且改策略立即生效；
+      第二步用 gptjp sub2api 的 #24/#51 走 `import-batch` 的 `dry_run` + 真实导入：两行同前缀不同哈希、
+      两把明文各自 200、`keys/lookup` 传 `sk-f69aeca55` 返回 `count=2`
+
+## M88 dshgw 只按账户映射租户（退役 key 前缀绑定）
+> 需求原话：「dshgw 也用 key hash 找租户」。评审结论：**不哈希化，直接删掉本地解析**——那条兜底只服务
+> "aigw 不返回租户名"的老 deployment（今天的登录前置必然先问 aigw），而哈希化还要背一次磁盘格式迁移
+> （`PreviousPrefixes` 的明文已被 `rotateKeyLocked` 覆盖，转不成哈希）。设计：
+> `docs/design/m88-dshgw-account-tenant-binding.md`。
+
+- [x] 设计文档 `docs/design/m88-dshgw-account-tenant-binding.md`（D1–D7、被否方案 §2.1、改动清单、回滚保险、测试策略）
+- [ ] `resolveTenant` 删掉 `aigw.KeyPrefix` + `ByPrefix` 分支；`authTenant == ""` → 403 + 审计 reason `tenant_unmapped`；
+      `aigw.KeyPrefix()` 派生函数退役
+- [ ] 注册表退役绑定设施：删 `ByPrefix`/`AddPrefix`/`RotatePrefix`/`Prefixes()`/`validPrefix`/`encodeKeyMap`/`LoadKeyMap`；
+      `validateUnique` 去掉前缀校验；`Save` 停写并删除 `keys.map`；`KeyPrefix`/`PreviousPrefixes` 字段保留只写不读（D4 回滚保险）
+- [ ] CLI 与配置：删 `bind`/`cleanPrefix`/`--keep-old-prefix`；`whereis` 改为按账户名查租户；
+      `tenant list` 的 KeyPrefix 列标注"仅展示/回滚保险"；`key_map_path` 标 deprecated（配置是 `KnownFields(true)`，不能直接删）；
+      备份清单去掉 `keys.map`；`localdshgw.TenantInfo.KeyPrefix` 删除
+- [ ] 测试：无 tenant 的 authorize 回答 → 403 + `tenant_unmapped`；**前缀匹配但账户不匹配的 key 必须被拒绝**（证明兜底没了）；
+      两租户同前缀也能 `Put`+`Save`；`Save` 后 `keys.map` 不存在；老 registry.json（带前缀字段）仍可加载；
+      回滚演练：新版本产出的 registry.json 交给老二进制能加载且老前缀仍能登录
+- [ ] 文档：`docs/dshgw.md` §3 第 3 步改写为"按账户映射租户"、删 keys.map 说法；`docs/deployment-layout.md`、
+      `docs/design/m51-dshgw.md`、`docs/design/m63-data-root.md` 里 `keys.map` 说明改为历史遗留；
+      `deploy/dshgw/README.md` 写明升级要求 aigw ≥ M74
