@@ -6380,12 +6380,6 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 > （`PreviousPrefixes` 的明文已被 `rotateKeyLocked` 覆盖，转不成哈希）。设计：
 > `docs/design/m88-dshgw-account-tenant-binding.md`（含 §7 实现与设计差异）。
 
-## M88 dshgw 只按账户映射租户（退役 key 前缀绑定）
-> 需求原话：「dshgw 也用 key hash 找租户」。评审结论：**不哈希化，直接删掉本地解析**——那条兜底只服务
-> "aigw 不返回租户名"的老 deployment（今天的登录前置必然先问 aigw），而哈希化还要背一次磁盘格式迁移
-> （`PreviousPrefixes` 的明文已被 `rotateKeyLocked` 覆盖，转不成哈希）。设计：
-> `docs/design/m88-dshgw-account-tenant-binding.md`。
-
 - [x] 设计文档 `docs/design/m88-dshgw-account-tenant-binding.md`（D1–D7、被否方案 §2.1、改动清单、回滚保险、测试策略）
 - [x] `resolveTenant` 删掉 `aigw.KeyPrefix` + `ByPrefix` 分支；`authTenant == ""` → 403 + 审计 reason `tenant_unmapped`；
       `aigw.KeyPrefix()` 派生函数退役
