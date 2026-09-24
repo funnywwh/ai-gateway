@@ -301,11 +301,8 @@ func (m *Manager) createLocked(ctx context.Context, name, key string, models []a
 	if browser != "on" && browser != "off" {
 		return created, fmt.Errorf("invalid browser-fs mode %q", browser)
 	}
-	if !opt.NoKeyPrefix {
-		if existing, ok := m.Registry.ByPrefix(key[:12]); ok {
-			return created, fmt.Errorf("key prefix already belongs to tenant %q", existing.Name)
-		}
-	}
+	// No prefix conflict check any more (M88): the label a tenant carries is written for display
+	// and for rollback compatibility, and nothing resolves a tenant by it.
 	account := strings.TrimSpace(opt.Account)
 	if account != "" {
 		// Checked before anything is written: a label that cannot be stored must fail the
@@ -972,7 +969,7 @@ func (m *Manager) setSuspended(name string, suspended bool) error {
 	})
 }
 
-func (m *Manager) RotateKey(ctx context.Context, t registry.Tenant, key string, models []aigw.Model, keepPrevious bool) error {
+func (m *Manager) RotateKey(ctx context.Context, t registry.Tenant, key string, models []aigw.Model) error {
 	if client, err := m.remoteFor(t); err != nil {
 		return err
 	} else if client != nil {
@@ -980,7 +977,7 @@ func (m *Manager) RotateKey(ctx context.Context, t registry.Tenant, key string, 
 		if keyErr != nil {
 			return keyErr
 		}
-		return m.rotateRemote(ctx, client, t, normalized, models, keepPrevious)
+		return m.rotateRemote(ctx, client, t, normalized, models)
 	}
 	return m.WithLifecycleLock(func() error {
 		current, ok := m.Registry.Get(t.Name)
@@ -990,18 +987,16 @@ func (m *Manager) RotateKey(ctx context.Context, t registry.Tenant, key string, 
 		if err := m.validateTenantPaths(current); err != nil {
 			return err
 		}
-		return m.rotateKeyLocked(ctx, current, key, models, keepPrevious)
+		return m.rotateKeyLocked(ctx, current, key, models)
 	})
 }
 
-func (m *Manager) rotateKeyLocked(ctx context.Context, t registry.Tenant, key string, models []aigw.Model, keepPrevious bool) (err error) {
+func (m *Manager) rotateKeyLocked(ctx context.Context, t registry.Tenant, key string, models []aigw.Model) (err error) {
 	key, err = aigw.NormalizeKey(key)
 	if err != nil {
 		return err
 	}
-	if existing, ok := m.Registry.ByPrefix(key[:12]); ok && existing.Name != t.Name {
-		return fmt.Errorf("key prefix already belongs to tenant %q", existing.Name)
-	}
+	// A label shared with another tenant is fine (M88): it is not what a login is resolved by.
 	credentialsPath := filepath.Join(t.DshHome, ".credentials.yaml")
 	settingsPath := filepath.Join(t.DshHome, "settings.yaml")
 	gatewayPath := filepath.Join(m.Config.Deploy.TenantConfigRoot, t.Name, "gateway.key")
@@ -1063,13 +1058,13 @@ func (m *Manager) rotateKeyLocked(ctx context.Context, t registry.Tenant, key st
 			if err = securefile.WriteAtomic(gatewayPath, []byte(key+"\n"), 0o640); err != nil {
 				return err
 			}
-			// Binding the new prefix is the control plane's job. A record that carries no prefix is
-			// a worker node's allocation entry (M77): the node holds the credential because its
-			// worker calls aigw, but "which key is this tenant" is decided in the registry that owns
-			// keys. Binding one here would duplicate that decision and reject the control plane's
-			// next rotation as a duplicate.
+			// The record's label follows the new credential, but no alias is kept: the login path
+			// resolves a tenant through the account mapping, so an old key still opens the same
+			// tenant for as long as aigw keeps it active (M88 — this used to need `keepPrevious`).
 			if t.KeyPrefix != "" {
-				if err = m.Registry.RotatePrefix(t.Name, key[:12], keepPrevious); err != nil {
+				updated, _ := m.Registry.Get(t.Name)
+				updated.KeyPrefix = key[:12]
+				if err = m.Registry.Put(updated); err != nil {
 					return err
 				}
 				rotatedRegistry = true
@@ -1086,27 +1081,6 @@ func (m *Manager) rotateKeyLocked(ctx context.Context, t registry.Tenant, key st
 		})
 	})
 }
-func (m *Manager) BindPrefix(tenant, prefix string) error {
-	return m.WithLifecycleLock(func() (err error) {
-		old, ok := m.Registry.Get(tenant)
-		if !ok {
-			return fmt.Errorf("tenant %q not found", tenant)
-		}
-		if err = m.Registry.AddPrefix(tenant, prefix); err != nil {
-			return err
-		}
-		if err = m.Registry.Save(); err != nil {
-			if rollbackErr := m.Registry.Put(old); rollbackErr != nil {
-				err = errors.Join(err, fmt.Errorf("rollback registry: %w", rollbackErr))
-			} else if rollbackErr := m.Registry.Save(); rollbackErr != nil {
-				err = errors.Join(err, fmt.Errorf("rollback registry: %w", rollbackErr))
-			}
-			return err
-		}
-		return nil
-	})
-}
-
 // EnsureProvisioned writes the files a tenant's dsh reads at startup when they are
 // missing: settings.yaml (provider + the models this key may use), .credentials.yaml
 // (the key reference), the profile patch, the workspace state and the stored gateway
@@ -1180,18 +1154,11 @@ func (m *Manager) EnsureProvisioned(ctx context.Context, t registry.Tenant, key 
 		if err := WriteArtifacts(artifacts); err != nil {
 			return err
 		}
-		// The key's own prefix becomes the tenant's, with the old one kept as a
-		// previous prefix so an existing binding is not silently dropped.
-		//
-		// Only for a record that already carries a prefix: an unbound record is a worker node's
-		// allocation entry (M77), where binding a prefix would duplicate the control plane's
-		// decision about which key logs into this tenant.
-		if current.KeyPrefix != "" {
-			if err := m.Registry.RotatePrefix(current.Name, normalized[:12], true); err != nil {
-				return err
-			}
-		}
+		// The record's label follows the new credential; no alias is kept (M88).
 		updated, _ := m.Registry.Get(current.Name)
+		if updated.KeyPrefix != "" {
+			updated.KeyPrefix = normalized[:12]
+		}
 		updated.ModelsPending = len(models) == 0
 		if err := m.Registry.Put(updated); err != nil {
 			return err

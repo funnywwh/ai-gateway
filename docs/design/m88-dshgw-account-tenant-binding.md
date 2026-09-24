@@ -81,4 +81,22 @@
 
 ## 7. 实现与设计差异
 
-（实现完成后回填）
+- **CLI 比计划多改了一处**：`login-url [PREFIX]` 也按前缀查租户（`ops.go`），所以它的参数改成
+  租户名；`bind` 删除并在 `main.go` 里留一句明确报错（告诉操作者用 `whereis ACCOUNT`），
+  `whereis` 是本里程碑新增的子命令。
+- **`key_map_path` 的"起点日志提示"没做**：`Save` 会删掉遗留的 `keys.map`，
+  启动时再打一条"该文件已废弃"属于重复告知；配置字段本身保留了注释说明
+  （`dec.KnownFields(true)` 也要求它继续存在）。
+- **`nodeproto.TenantSetKeyRequest.KeepPrevious` 直接删除**，不是标记废弃：两端都在本仓库、
+  一起部署，且 Go 的 JSON 解码忽略未知字段，所以新老控制面/节点混跑两个方向都不会出错。
+- **`validateTenant` 的检查改成 `validKeyLabel`**（可打印、非空格、≤64 字符，可空）：
+  计划写的是"删掉 `validPrefix`"，但字段还在写、老注册表还在读，留一个形状检查比完全没有约束好。
+- **测试面**：删掉 `TestBindPrefixRollsBackWhenDerivedRegistrySaveFails`（功能没了）、
+  `TestSamePrefixRotationRevokesOldAliases`/`TestRotateBackToAliasDoesNotDuplicatePrefix`
+  （别名机制没了）；新增 `TestByAccountFindsTheTenantWhateverItsLabel`、
+  `TestRejectDuplicatePortButAllowSharedKeyLabel`；
+  `TestPortalLoginFallsBackToPrefixBinding` 改写成
+  `TestPortalLoginRejectsPrefixMatchWithoutAccountMapping`（M88 的关键回归：前缀匹配不再放人进来）；
+  `TestSyncModelsRollsBack...` 的故障注入从 `keys.map` 换成"只读父目录"（派生文件没了）。
+- **keys.map 相关的测试改判**：`TestSaveLoadModesAndIndexes` 现在断言 `Save` 把遗留的
+  `keys.map` 删掉，`TestPrefixlessRecordRoundTrips` 断言保存后该文件不存在。

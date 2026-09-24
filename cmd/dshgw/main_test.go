@@ -124,7 +124,7 @@ func TestTenantListJSONIncludesReadOnlyMetadata(t *testing.T) {
 	r := registry.New(filepath.Join(state, "registry.json"), filepath.Join(state, "keys.map"))
 	tenant := registry.Tenant{
 		Name: "alice", UID: 4242, PublicPort: 32601, WorkerPort: 32100, KeyPrefix: "sk-aaaaaaaaa",
-		PreviousPrefixes: []string{"sk-bbbbbbbbb"}, DshHome: filepath.Join(root, "tenants/alice/.dsh"), Workspace: filepath.Join(root, "work/alice"),
+		DshHome: filepath.Join(root, "tenants/alice/.dsh"), Workspace: filepath.Join(root, "work/alice"),
 		CreatedAt: created, Handshake: registry.HandshakeOK,
 	}
 	if err := r.Put(tenant); err != nil {
@@ -171,9 +171,6 @@ func TestTenantListJSONIncludesReadOnlyMetadata(t *testing.T) {
 		if _, ok := row[gone]; ok {
 			t.Errorf("tenant list still reports the deleted %q field", gone)
 		}
-	}
-	if got, ok := row["previous_prefixes"].([]any); !ok || len(got) != 1 || got[0] != "sk-bbbbbbbbb" {
-		t.Errorf("previous_prefixes=%#v", row["previous_prefixes"])
 	}
 	if _, ok := row["gateway_key"]; ok {
 		t.Error("raw gateway key unexpectedly present")

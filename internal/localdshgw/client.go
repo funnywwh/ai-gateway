@@ -46,7 +46,6 @@ type TenantInfo struct {
 	LastLogin string `json:"last_login,omitempty"`
 	PortalURL string `json:"portal_url,omitempty"`
 	TenantURL string `json:"tenant_url,omitempty"`
-	KeyPrefix string `json:"key_prefix,omitempty"`
 }
 
 type Client struct {
@@ -185,9 +184,6 @@ func (c *Client) ListTenants(ctx context.Context) ([]TenantInfo, error) {
 		}
 		if v, ok := m["node"].(string); ok {
 			info.Node = v
-		}
-		if v, ok := m["key_prefix"].(string); ok {
-			info.KeyPrefix = v
 		}
 		if v, ok := m["handshake"].(string); ok {
 			info.Handshake = v

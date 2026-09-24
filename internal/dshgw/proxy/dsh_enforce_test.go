@@ -209,18 +209,23 @@ func TestDispatchIntervalModeCachesTheVerdict(t *testing.T) {
 	}
 }
 
-// Legacy deployments (aigw without tenant mapping) resolve by key-prefix binding: an
-// empty authorize tenant falls through to the registry prefix lookup.
-func TestPortalLoginFallsBackToPrefixBinding(t *testing.T) {
-	p, _, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+// M88 removed the prefix fallback: a key whose first 12 characters happen to match a tenant in
+// the registry no longer logs anybody in. Only aigw's account→tenant answer decides, and an
+// empty answer is a denial an operator can act on (it used to be "older aigw, guess by prefix").
+func TestPortalLoginRejectsPrefixMatchWithoutAccountMapping(t *testing.T) {
+	p, tenant, _, up := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	p.Authorizer = authorizerFunc(func(context.Context, string) (string, error) { return "", nil })
 	defer up.Close()
-	res, cookie := dshgwLogin(t, p)
-	if res.StatusCode != http.StatusFound || cookie == "" {
-		t.Fatalf("status=%d cookie=%q", res.StatusCode, cookie)
+
+	// The fixture tenant carries a key prefix, exactly like a deployment that ran the pre-M88
+	// code: the point is that nothing reads it any more.
+	if tenant.KeyPrefix == "" {
+		t.Fatal("the fixture must bind a key prefix for this test to mean anything")
 	}
-	if res.Header.Get("Location") != "https://dsh.test:32601/" {
-		t.Fatalf("location=%q", res.Header.Get("Location"))
+
+	res, cookie := dshgwLogin(t, p)
+	if res.StatusCode != http.StatusForbidden || cookie != "" {
+		t.Fatalf("a prefix match must not log in: status=%d cookie=%q", res.StatusCode, cookie)
 	}
 }
 

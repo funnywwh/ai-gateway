@@ -167,7 +167,7 @@ func (c *cli) tenantList(ctx context.Context, args []string) error {
 		fmt.Fprintln(c.stdout, string(data))
 		return nil
 	}
-	fmt.Fprintln(c.stdout, "TENANT\tNODE\tPUBLIC\tWORKER\tPREFIX\tRUNNING\tSUSPENDED\tPID\tHANDSHAKE\tPICKER\tBROWSER_FS\tMODELS_PENDING\tISOLATION\tLAST_LOGIN")
+	fmt.Fprintln(c.stdout, "TENANT\tNODE\tPUBLIC\tWORKER\tKEY_LABEL\tRUNNING\tSUSPENDED\tPID\tHANDSHAKE\tPICKER\tBROWSER_FS\tMODELS_PENDING\tISOLATION\tLAST_LOGIN")
 	for _, item := range rows {
 		fmt.Fprintf(c.stdout, "%s\t%s\t%d\t%d\t%s\t%t\t%t\t%d\t%s\t%s\t%s\t%t\t%s\t%s\n", item.Name, nodeLabel(deps.cfg, item.Node), item.PublicPort, item.WorkerPort, item.KeyPrefix, item.Running, item.Suspended, item.PID, item.Handshake, item.DirectoryPicker, item.BrowserFS, item.ModelsPending, item.Isolation, item.LastLogin)
 	}
@@ -177,7 +177,6 @@ func (c *cli) tenantList(ctx context.Context, args []string) error {
 func (c *cli) tenantRotate(ctx context.Context, args []string) error {
 	fs := c.flagSet("tenant rotate-key")
 	keyFile := fs.String("key-file", "", "read new API key from file")
-	keepOld := fs.Bool("keep-old-prefix", false, "retain old public prefix as login alias")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -200,7 +199,7 @@ func (c *cli) tenantRotate(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := deps.manager.RotateKey(ctx, tenant, key, models, *keepOld); err != nil {
+	if err := deps.manager.RotateKey(ctx, tenant, key, models); err != nil {
 		return err
 	}
 	fmt.Fprintf(c.stdout, "rotated tenant %s key (%d models)\n", tenant.Name, len(models))

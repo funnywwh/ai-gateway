@@ -269,35 +269,7 @@ func TestConcurrentManagersAllocateDistinctPorts(t *testing.T) {
 	}
 }
 
-func TestBindPrefixRollsBackWhenDerivedRegistrySaveFails(t *testing.T) {
-	m, _, _ := managerFixture(t)
-	tenant, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", models("model"), CreateOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(m.Config.KeyMapPath); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(m.Config.KeyMapPath, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	prefix := "sk-bbbbbbbbb"
-	if err := m.BindPrefix(tenant.Name, prefix); err == nil {
-		t.Fatal("derived registry save failure accepted")
-	}
-	if _, ok := m.Registry.ByPrefix(prefix); ok {
-		t.Fatal("failed prefix remains in memory")
-	}
-	loaded, err := registry.Load(m.Config.RegistryPath, m.Config.KeyMapPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := loaded.ByPrefix(prefix); ok {
-		t.Fatal("failed prefix remains in canonical registry")
-	}
-}
-
-func TestSyncModelsRollsBackSettingsAndRegistryWhenDerivedSaveFails(t *testing.T) {
+func TestSyncModelsRollsBackSettingsAndRegistryWhenSaveFails(t *testing.T) {
 	m, _, _ := managerFixture(t)
 	tenant, err := m.Create(context.Background(), "alice", "sk-aaaaaaaaa-rest", models("model"), CreateOptions{})
 	if err != nil {
@@ -308,14 +280,18 @@ func TestSyncModelsRollsBackSettingsAndRegistryWhenDerivedSaveFails(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(m.Config.KeyMapPath); err != nil {
+	// Force the registry write itself to fail. Before M88 this test wedged the derived keys.map
+	// file; that index is gone, so the failure has to come from the file Save actually writes —
+	// and it must leave the existing registry.json readable, which is what the last assertions
+	// check. A read-only parent directory does exactly that: WriteAtomic cannot create its temp
+	// file, while loading the file that is already there still works.
+	registryDir := filepath.Dir(m.Config.RegistryPath)
+	if err := os.Chmod(registryDir, 0o500); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(m.Config.KeyMapPath, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	defer func() { _ = os.Chmod(registryDir, 0o700) }()
 	if err := m.SyncModels(tenant, nil); err == nil {
-		t.Fatal("derived registry save failure accepted")
+		t.Fatal("registry save failure accepted")
 	}
 	gotSettings, err := os.ReadFile(settingsPath)
 	if err != nil {
@@ -361,7 +337,7 @@ func TestRotateAndSyncRejectRegistryPathsOutsideConfiguredRoots(t *testing.T) {
 			}
 			beforePID := runner.Status(tenant).PID
 			if operation == "rotate" {
-				err = m.RotateKey(context.Background(), tenant, "sk-bbbbbbbbb-rest", models("model"), false)
+				err = m.RotateKey(context.Background(), tenant, "sk-bbbbbbbbb-rest", models("model"))
 			} else {
 				err = m.SyncModels(tenant, models("model"))
 			}

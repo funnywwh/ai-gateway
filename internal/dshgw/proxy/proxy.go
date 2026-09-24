@@ -425,9 +425,13 @@ func (p *Proxy) login(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	tenant, resolved := p.resolveTenant(authTenant, key)
+	tenant, resolved := p.resolveTenant(authTenant)
 	if !resolved {
-		p.audit(r, "", "login_reject", "unbound key prefix", http.StatusForbidden)
+		// The account authenticated but names no tenant this machine hosts: either the account
+		// was never enabled for dsh, or aigw is older than M74 and answered without the mapping.
+		// Either way the honest answer is a denial an operator can act on — M88 removed the
+		// prefix fallback that used to guess here.
+		p.audit(r, "", "login_reject", "tenant_unmapped", http.StatusForbidden)
 		p.renderLogin(w, http.StatusForbidden, "该账号的 dsh 租户尚未就绪，请联系管理员启用或检查租户状态")
 		return
 	}
@@ -1101,21 +1105,22 @@ func (p *Proxy) authorizeDSH(ctx context.Context, key string) (string, error) {
 	return p.Authorizer.Authorize(ctx, key)
 }
 
-// resolveTenant maps the authorized account onto a dshgw tenant. The account mapping is
-// authoritative; legacy prefix binding only applies when aigw returned no tenant name
-// (older aigw without the mapping, or a deployment that has not enabled the account yet).
-func (p *Proxy) resolveTenant(authTenant, key string) (registry.Tenant, bool) {
-	if authTenant != "" {
-		if t, ok := p.Registry.Get(authTenant); ok {
-			return t, true
-		}
+// resolveTenant maps the authorized account onto a dshgw tenant by the name aigw answered with
+// (`accounts.dsh_tenant`).
+//
+// Until M88 there was a second path: when aigw returned no tenant name, the key's first 12
+// characters were looked up in the registry. It is gone — an aigw that cannot answer with a
+// tenant is an aigw this gateway does not admit logins from (the caller turns "not resolved"
+// into a 403 the operator can act on), and resolving tenants by a key prefix meant a shared
+// label could send someone to the wrong tenant.
+func (p *Proxy) resolveTenant(authTenant string) (registry.Tenant, bool) {
+	if authTenant == "" {
 		return registry.Tenant{}, false
 	}
-	prefix, err := aigw.KeyPrefix(key)
-	if err != nil {
-		return registry.Tenant{}, false
+	if t, ok := p.Registry.Get(authTenant); ok {
+		return t, true
 	}
-	return p.Registry.ByPrefix(prefix)
+	return registry.Tenant{}, false
 }
 
 // enforceDSHAccess is the request-time counterpart for dsh_enforce=per-request and

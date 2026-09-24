@@ -236,8 +236,8 @@ func TestSetPlacementRewritesWhatTheNodeOwns(t *testing.T) {
 }
 
 // TestPrefixlessRecordRoundTrips is the node's allocation table (M77): a record with no key
-// prefix — because the prefix belongs to the control plane — must save, reload and still be a
-// valid entry.
+// label — because the label belonged to the control plane — must save, reload and still be a
+// valid entry (M88 keeps the field but nothing resolves tenants by it).
 func TestPrefixlessRecordRoundTrips(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "registry.json")
@@ -258,15 +258,12 @@ func TestPrefixlessRecordRoundTrips(t *testing.T) {
 	if !ok || got.KeyPrefix != "" {
 		t.Fatalf("got = %+v (ok=%t)", got, ok)
 	}
-	if _, ok := reloaded.ByPrefix(""); ok {
-		t.Fatal("an empty prefix must never resolve as a key binding")
+	// Saving writes the registry and retires the derived key map (M88): there is no
+	// prefix→tenant index any more, so a file left by an older release must not survive.
+	if _, err := os.Stat(keyMap); !os.IsNotExist(err) {
+		t.Fatalf("keys.map must be gone after Save: %v", err)
 	}
-	// The derived key map has no entry for it, because there is no key to map.
-	data, err := os.ReadFile(keyMap)
-	if err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
-	if len(strings.TrimSpace(string(data))) != 0 {
-		t.Fatalf("key map = %q", data)
+	if len(reloaded.ByAccount("")) != 0 {
+		t.Fatal("an empty account must not resolve to a tenant")
 	}
 }

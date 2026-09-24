@@ -39,7 +39,10 @@ kind: "spec"
 
 1. 在门户表单中提交一个 Key。可接受裸 Key 或 `Bearer ` 前缀；不接受 URL 中的 Key 或重复表单 Key。
 2. 网关向 aigw `GET /v1/models` 验证：401 表示 Key 无效/停用；200 且 `data: []` 仍是有效身份。超时/不可达/其它状态不冒充“Key 无效”，登录返回 503。
-3. 用 Key 前 12 字节查 **canonical `registry.json`**。没有绑定就拒绝；登录不会自动建立 OS 用户。`keys.map` 是派生的运维索引，不是认证真相。
+3. 用 authorize 回答里的**租户名**查 **canonical `registry.json`**；查不到就拒绝（403，审计 reason `tenant_unmapped`）。登录不会自动建立 OS 用户。
+   > M88 之前这里还有一条兜底：拿 Key 的前 12 字节去 `registry.json` 里查前缀绑定。已删除——
+   > 它只服务「aigw 不回租户名」的旧部署，而且共享前缀会把人送进错误的租户。`keys.map`
+   > 这个派生索引随之退役（`Save` 会删掉旧文件）。
 4. 账号有 **≥2 把可用 Key** 时，先显示选择页（`/login/pick`，M72）再建会话；只有 1 把时直接进入下一步。
 5. 门户下发 `dshgw_s_<tenant>`，属性为 `HttpOnly; Secure; SameSite=Lax; Path=/`，然后 302 跳转租户端口。
 6. 服务端仅持久化浏览器 token 的 SHA-256，并保存该会话对应的 worker cookie。默认 TTL 为 7 天；浏览器逐响应续期，服务端落盘按 TTL 的 1%（一分钟至一小时）节流，过期判断不依赖浏览器。
@@ -59,8 +62,9 @@ kind: "spec"
 | `interval:<秒>` | 按租户缓存验证结果至指定间隔；不是即时吊销 |
 
 **账号级 dsh 开关（M52-rev2）**：门户登录在 Key 验证后追加调用 aigw `POST /v1/dshgw/authorize`，
-200 响应携带该账号的**租户名**——账号下所有 Key（含新建）都登录该租户，无需逐 Key 前缀绑定；
-仅当响应无租户名（旧版 aigw）时退回前缀绑定。后台「启用 DSH」按钮经本机 root 守护
+200 响应携带该账号的**租户名**——账号下所有 Key（含新建，含轮换前的旧 Key）都登录该租户，
+无需逐 Key 前缀绑定；**响应无租户名就是拒绝**（M88 起不再退回前缀绑定：那要求 aigw ≥ M74）。
+后台「启用 DSH」按钮经本机 root 守护
 （`dshgw admin-serve`，UNIX socket + 对端 UID 白名单，无 TCP）自动完成铸造 worker Key、
 创建/启动租户；「停用」停止 worker、吊销 worker Key 并保留数据。
 

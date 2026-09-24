@@ -40,6 +40,11 @@ export DSHGW_DSH_ROOT=/home/winger/.local/dsh-0.1.2-rc.1
 
 ## 2. 配置 aigw
 
+> **版本要求（M88 起）**：登录按 aigw 的**账户 → 租户**映射解析
+> （`POST /v1/dshgw/authorize` 回答里的 `tenant`），不再有"拿 Key 前 12 字节查前缀绑定"的兜底。
+> 因此 dshgw 要求 **aigw ≥ 4.x（含 M74 账户映射）**；更老的 aigw 会让登录返回 403
+> （审计 reason `tenant_unmapped`）。升级 dshgw 时请先升级 aigw。
+
 ```yaml
 server:
   listen: 127.0.0.1:8088

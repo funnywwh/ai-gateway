@@ -287,7 +287,7 @@ func (o managerOps) applyKey(ctx context.Context, name, key string, restart bool
 		return err
 	}
 	if !provisioned {
-		if err := o.m.RotateKey(ctx, t, key, models, false); err != nil {
+		if err := o.m.RotateKey(ctx, t, key, models); err != nil {
 			return err
 		}
 	}

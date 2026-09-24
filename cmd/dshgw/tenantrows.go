@@ -16,6 +16,9 @@ type TenantRow struct {
 	Name       string `json:"name"`
 	PublicPort int    `json:"public_port"`
 	WorkerPort int    `json:"worker_port"`
+	// KeyPrefix is the label the tenant's credential wears. It is display-only since M88 (logins
+	// resolve through aigw's account mapping) and is still written so a rollback to a pre-M88
+	// binary keeps working.
 	KeyPrefix  string `json:"key_prefix"`
 	// Node is where this tenant's worker runs (M77); empty means this machine.
 	Node string `json:"node"`

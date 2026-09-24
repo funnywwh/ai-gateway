@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,11 @@ func TestSaveLoadModesAndIndexes(t *testing.T) {
 	dir := t.TempDir()
 	rp := filepath.Join(dir, "registry.json")
 	kp := filepath.Join(dir, "keys.map")
+	// A file an older release left behind: Save must retire it (M88), because a stale
+	// prefix→tenant index is worse than no index at all.
+	if err := os.WriteFile(kp, []byte("sk-aaaaaaaaa alice\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
 	r := New(rp, kp)
 	if err := r.Put(tenant("alice", "sk-aaaaaaaaa", 32601, 32100)); err != nil {
 		t.Fatal(err)
@@ -25,28 +31,22 @@ func TestSaveLoadModesAndIndexes(t *testing.T) {
 	if err := r.Save(); err != nil {
 		t.Fatal(err)
 	}
-	for p, want := range map[string]os.FileMode{rp: 0o600, kp: 0o640} {
-		info, err := os.Stat(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Mode().Perm() != want {
-			t.Fatalf("%s mode=%o", p, info.Mode().Perm())
-		}
+	info, err := os.Stat(rp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("%s mode=%o", rp, info.Mode().Perm())
+	}
+	if _, err := os.Stat(kp); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("keys.map must be retired: %v", err)
 	}
 	got, err := Load(rp, kp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if x, ok := got.ByPrefix("sk-aaaaaaaaa"); !ok || x.Name != "alice" {
+	if x, ok := got.Get("alice"); !ok || x.KeyPrefix != "sk-aaaaaaaaa" {
 		t.Fatalf("lookup=%#v,%v", x, ok)
-	}
-	km, err := LoadKeyMap(kp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if km["sk-aaaaaaaaa"] != "alice" {
-		t.Fatalf("map=%v", km)
 	}
 }
 
@@ -65,16 +65,37 @@ func TestAssignPortsUsesRegistryAndListeners(t *testing.T) {
 	}
 }
 
-func TestRejectDuplicatePrefixOrPort(t *testing.T) {
+func TestRejectDuplicatePortButAllowSharedKeyLabel(t *testing.T) {
 	r := New("x", "y")
 	if err := r.Put(tenant("alice", "sk-aaaaaaaaa", 32601, 32100)); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Put(tenant("bob", "sk-aaaaaaaaa", 32602, 32101)); err == nil {
-		t.Fatal("duplicate prefix accepted")
+	// Two tenants may wear the same label (M88): nothing resolves a tenant by it any more, and
+	// two credentials sharing their first 12 characters is ordinary (M87).
+	if err := r.Put(tenant("bob", "sk-aaaaaaaaa", 32602, 32101)); err != nil {
+		t.Fatalf("a shared key label must be allowed: %v", err)
 	}
-	if err := r.Put(tenant("bob", "sk-bbbbbbbbb", 32601, 32101)); err == nil {
+	if err := r.Put(tenant("carol", "sk-ccccccccc", 32601, 32102)); err == nil {
 		t.Fatal("duplicate port accepted")
+	}
+}
+
+func TestByAccountFindsTheTenantWhateverItsLabel(t *testing.T) {
+	r := New("x", "y")
+	alice := tenant("alice", "sk-aaaaaaaaa", 32601, 32100)
+	alice.Account = "acme"
+	if err := r.Put(alice); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Put(tenant("bob", "sk-bbbbbbbbb", 32602, 32101)); err != nil {
+		t.Fatal(err)
+	}
+	got := r.ByAccount("ACME")
+	if len(got) != 1 || got[0].Name != "alice" {
+		t.Fatalf("ByAccount = %+v", got)
+	}
+	if len(r.ByAccount("")) != 0 || len(r.ByAccount("nobody")) != 0 {
+		t.Fatal("an unknown account must not match")
 	}
 }
 

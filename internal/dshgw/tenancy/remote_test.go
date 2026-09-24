@@ -271,7 +271,7 @@ func TestLifecycleDispatchesToTheNode(t *testing.T) {
 	if _, err := m.EnsureProvisioned(ctx, alice, "sk-remoteensure12345678ab", nil); err != nil {
 		t.Fatalf("EnsureProvisioned: %v", err)
 	}
-	if err := m.RotateKey(ctx, alice, "sk-remoterotate12345678ab", nil, true); err != nil {
+	if err := m.RotateKey(ctx, alice, "sk-remoterotate12345678ab", nil); err != nil {
 		t.Fatalf("RotateKey: %v", err)
 	}
 	if err := m.Enable(ctx, alice, false); err != nil {
@@ -296,18 +296,15 @@ func TestLifecycleDispatchesToTheNode(t *testing.T) {
 	if running := runner.Running(); len(running) != 0 {
 		t.Fatalf("a remote lifecycle call started a local worker: %+v", running)
 	}
-	// The rotation updated the key map prefix and the credential copy, and kept the outgoing
-	// prefix valid (keepPrevious), which is what stops a request signed with the old key from
-	// failing during the changeover.
+	// The rotation updated the label and the credential copy. No alias is kept any more (M88):
+	// aigw's account mapping decides the tenant, so an old key keeps working for exactly as long
+	// as aigw keeps it active — there is nothing for the registry to remember.
 	stored, _ := m.Registry.Get("alice")
 	if stored.KeyPrefix != "sk-remoterot" {
-		t.Fatalf("key prefix after rotation = %q", stored.KeyPrefix)
+		t.Fatalf("key label after rotation = %q", stored.KeyPrefix)
 	}
-	if _, ok := m.Registry.ByPrefix(stored.KeyPrefix); !ok {
-		t.Fatalf("the rotated prefix does not resolve: %+v", m.Registry.List())
-	}
-	if _, ok := m.Registry.ByPrefix("sk-aaaaaaaaa"); !ok {
-		t.Fatal("keepPrevious did not retain the outgoing prefix")
+	if len(stored.PreviousPrefixes) != 0 {
+		t.Fatalf("a rotation must not accumulate aliases: %+v", stored.PreviousPrefixes)
 	}
 	data, err := os.ReadFile(filepath.Join(m.Config.Deploy.TenantConfigRoot, "alice", "gateway.key"))
 	if err != nil {

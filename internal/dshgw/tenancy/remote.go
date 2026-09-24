@@ -281,18 +281,26 @@ func (m *Manager) writeGatewayKey(name, key string) error {
 }
 
 // rotateRemote rotates a tenant's worker credential on its node.
-func (m *Manager) rotateRemote(ctx context.Context, client *nodeclient.Client, t registry.Tenant, key string, models []aigw.Model, keepPrevious bool) error {
+func (m *Manager) rotateRemote(ctx context.Context, client *nodeclient.Client, t registry.Tenant, key string, models []aigw.Model) error {
 	request := nodeproto.TenantSetKeyRequest{
 		Name: t.Name, Account: t.Account, Key: key,
-		Models: nodeproto.ModelsToSpec(models), KeepPrevious: keepPrevious,
+		Models: nodeproto.ModelsToSpec(models),
 	}
 	if err := client.TenantSetKey(ctx, request); err != nil {
 		return fmt.Errorf("node %s: rotate key: %w", client.Name, err)
 	}
 	// The control plane's copy follows the node's, in the same order as the local rotation: the
-	// node has the new credential and the registry the new prefix, then this copy is replaced.
-	if err := m.Registry.RotatePrefix(t.Name, key[:12], keepPrevious); err != nil {
-		return err
+	// node has the new credential, then the label in the registry, then this copy is replaced.
+	// No alias is kept (M88): aigw's account mapping decides the tenant, not the prefix.
+	updated, ok := m.Registry.Get(t.Name)
+	if !ok {
+		return fmt.Errorf("tenant %q not found", t.Name)
+	}
+	if updated.KeyPrefix != "" {
+		updated.KeyPrefix = key[:12]
+		if err := m.Registry.Put(updated); err != nil {
+			return err
+		}
 	}
 	if err := m.Registry.Save(); err != nil {
 		return err

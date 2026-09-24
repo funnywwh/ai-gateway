@@ -17,30 +17,9 @@ import (
 	"time"
 )
 
-func (c *cli) bind(args []string) error {
-	if len(args) != 2 {
-		return errors.New("usage: dshgw bind PREFIX TENANT")
-	}
-	prefix, err := cleanPrefix(args[0])
-	if err != nil {
-		return err
-	}
-	deps, err := c.loadRuntime(false)
-	if err != nil {
-		return err
-	}
-	if _, err := tenantByName(deps.reg, args[1]); err != nil {
-		return err
-	}
-	if err := deps.manager.BindPrefix(args[1], prefix); err != nil {
-		return err
-	}
-	fmt.Fprintf(c.stdout, "bound prefix %s to tenant %s\n", prefix, args[1])
-	return nil
-}
 func (c *cli) loginURL(args []string) error {
 	if len(args) > 1 {
-		return errors.New("usage: dshgw login-url [PREFIX]")
+		return errors.New("usage: dshgw login-url [TENANT]")
 	}
 	deps, err := c.loadRuntime(false)
 	if err != nil {
@@ -50,15 +29,33 @@ func (c *cli) loginURL(args []string) error {
 		fmt.Fprintln(c.stdout, deps.cfg.WithTrailingSlash(deps.cfg.OriginForPort(deps.cfg.PortalPort)))
 		return nil
 	}
-	prefix, err := cleanPrefix(args[0])
+	// A tenant name, not a key prefix (M88): logins resolve through the account mapping, so a
+	// prefix no longer names a tenant. `whereis` is the way to go the other direction.
+	tenant, err := tenantByName(deps.reg, args[0])
 	if err != nil {
 		return err
 	}
-	tenant, ok := deps.reg.ByPrefix(prefix)
-	if !ok {
-		return errors.New("prefix is not bound")
-	}
 	fmt.Fprintln(c.stdout, deps.cfg.WithTrailingSlash(deps.cfg.TenantOrigin(tenant.Name)))
+	return nil
+}
+
+// whereis answers "which tenant does this account use?" — by the account label the tenant
+// carries, which is stable across key rotations (M88 replaced the prefix-based lookup here).
+func (c *cli) whereis(args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: dshgw whereis ACCOUNT")
+	}
+	deps, err := c.loadRuntime(false)
+	if err != nil {
+		return err
+	}
+	tenants := deps.reg.ByAccount(args[0])
+	if len(tenants) == 0 {
+		return fmt.Errorf("no tenant carries the account label %q", strings.TrimSpace(args[0]))
+	}
+	for _, tenant := range tenants {
+		fmt.Fprintf(c.stdout, "%s\t%s\t%d\t%d\n", tenant.Name, tenant.Account, tenant.PublicPort, tenant.WorkerPort)
+	}
 	return nil
 }
 func (c *cli) syncModels(ctx context.Context, args []string) error {

@@ -63,7 +63,9 @@ func execute(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "node":
 		err = app.node(ctx, rest[1:])
 	case "bind":
-		err = app.bind(rest[1:])
+		err = errors.New("`bind` was removed in M88: logins resolve tenants through aigw's account mapping, so a key prefix no longer names a tenant. Use `whereis ACCOUNT` to find a tenant.")
+	case "whereis":
+		err = app.whereis(rest[1:])
 	case "login-url":
 		err = app.loginURL(rest[1:])
 	case "sync-models":
@@ -113,8 +115,8 @@ Commands:
   node rotate-token NAME                 replace a node's shared secret on both sides
   node list|probe|reconcile NAME          inventory, health check, authoritative tenant list
   node audit NAME [LINES]                print a node's recent security events
-  bind PREFIX TENANT                     bind an additional public key prefix
-  login-url [PREFIX]                    print the portal or tenant URL
+  whereis ACCOUNT                        which tenant does this account use
+  login-url [TENANT]                     print the portal or tenant URL
   sync-models TENANT                     refresh DSH models from aigw
   revalidate [TENANT]                    validate stored tenant key(s)
   capture-url TENANT                     print the worker startup URL the runner captured

@@ -233,19 +233,6 @@ func tenantByName(reg *registry.Registry, name string) (registry.Tenant, error) 
 	}
 	return tenant, nil
 }
-func cleanPrefix(raw string) (string, error) {
-	prefix := strings.TrimSpace(raw)
-	if len(prefix) != 12 {
-		return "", errors.New("prefix must contain exactly 12 printable ASCII characters")
-	}
-	for _, b := range []byte(prefix) {
-		if b < 0x21 || b > 0x7e {
-			return "", errors.New("prefix must contain exactly 12 printable ASCII characters")
-		}
-	}
-	return prefix, nil
-}
-
 // nodeClientsFor builds one client per node from the merged node view (configuration + records).
 //
 // The token is resolved here: from the record, from a 0600 file the record names, or — for a node

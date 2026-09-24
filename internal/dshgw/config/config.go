@@ -546,6 +546,10 @@ type Config struct {
 	HandshakeDir      string            `yaml:"handshake_dir" json:"handshake_dir"`
 	StateDir          string            `yaml:"state_dir" json:"state_dir"`
 	RegistryPath      string            `yaml:"registry_path" json:"registry_path"`
+	// KeyMapPath is deprecated (M88): tenants are resolved through aigw's account mapping, so the
+	// derived prefix→tenant index is gone. The path is still parsed and remembered so that a
+	// registry Save can delete a file an older release left behind, and so existing configuration
+	// files keep loading unchanged (`dec.KnownFields(true)` rejects unknown keys).
 	KeyMapPath        string            `yaml:"key_map_path" json:"key_map_path"`
 	SessionPath       string            `yaml:"session_path" json:"session_path"`
 	AuditPath         string            `yaml:"audit_path" json:"audit_path"`

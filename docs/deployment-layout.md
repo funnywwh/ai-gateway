@@ -102,7 +102,7 @@
 | `-config` | `./dshgw.yaml` |
 | `state_dir` | `./data/dshgw` |
 | `tenant_root` / `workspace_root` | `<state_dir>/{tenants,workspaces}` |
-| `registry_path` / `key_map_path` | `<state_dir>/{registry.json,keys.map}` |
+| `registry_path` | `<state_dir>/registry.json`（`key_map_path` 自 M88 起废弃：该文件不再生成，下一次 `Save` 会把遗留的删掉） |
 | `session_path` / `audit_path` / `activity_path` | `<state_dir>/gateway/{sessions.json,audit.jsonl,activity.json}` |
 | `handshake_dir` | `<state_dir>/handshake` |
 | `admin_socket` | `<state_dir>/admin.sock` |
@@ -132,7 +132,7 @@
 | `node.name` / `node.listen` / `node.token_file` | **必填**；名字必须与控制面记录一致，`listen` 必须显式地址（拒绝 `0.0.0.0` 与空值） |
 | `state_dir` | `./data/dshgw-node`（一键部署写 `<deploy.dir>/state`） |
 | `tenant_root` / `workspace_root` | `<state_dir>/{tenants,workspaces}` |
-| `registry_path` / `key_map_path` | `<state_dir>/{registry.json,keys.map}`（该节点的**分配表**，由控制面推送） |
+| `registry_path` | `<state_dir>/registry.json`（该节点的**分配表**，由控制面推送；`key_map_path` 自 M88 起废弃） |
 | `handshake_dir` | `<state_dir>/handshake` |
 | `deploy.template_home` / `template_home` | `<state_dir>/template-home`（一键部署推送，或本机 `prepare-template.sh` 产出） |
 | `deploy.plugin_path` | **无默认值**（与独立形态同一门禁） |

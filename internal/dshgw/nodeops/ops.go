@@ -431,7 +431,7 @@ func (o *Ops) setKey(ctx context.Context, body []byte) (any, error) {
 	if !ok {
 		return nil, tenantUnknown(name)
 	}
-	if err := o.Manager.RotateKey(ctx, tenant, request.Key, nodeproto.ModelsFromSpec(request.Models), request.KeepPrevious); err != nil {
+	if err := o.Manager.RotateKey(ctx, tenant, request.Key, nodeproto.ModelsFromSpec(request.Models)); err != nil {
 		return nil, err
 	}
 	// The account label is recorded after the rotation: the rotation's own lifecycle lock reloads

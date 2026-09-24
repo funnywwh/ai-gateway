@@ -359,9 +359,10 @@ type TenantSetKeyRequest struct {
 	Account string      `json:"account,omitempty"`
 	Key     string      `json:"key"`
 	Models  []ModelSpec `json:"models,omitempty"`
-	// KeepPrevious keeps the outgoing key prefix valid for the same reason the local rotation
-	// does: requests signed with the old key must not fail during the changeover.
-	KeepPrevious bool `json:"keep_previous,omitempty"`
+	// Retired in M88: the field used to ask the node to keep the outgoing key prefix valid as a
+	// login alias. Tenants are resolved by aigw's account mapping now, so an old key stays usable
+	// for exactly as long as aigw keeps it active — no alias to maintain. Old control planes that
+	// still send it are harmless: the decoder ignores unknown fields.
 }
 
 // TenantEnsureProvisionedRequest writes the files a tenant's dsh reads at startup when they are

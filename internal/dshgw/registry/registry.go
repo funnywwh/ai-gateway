@@ -36,6 +36,11 @@ type Tenant struct {
 	UID              int            `json:"uid"`
 	PublicPort       int            `json:"public_port"`
 	WorkerPort       int            `json:"worker_port"`
+	// KeyPrefix and PreviousPrefixes are M88 leftovers: nothing resolves a tenant by them any
+	// more (the login path uses the account mapping aigw answers with), but they are still
+	// written so that rolling the binary back to a pre-M88 release keeps working, and so an
+	// operator reading registry.json can tell which credential a tenant was provisioned with.
+	// They may be shared with another tenant's key — the value is a label, not an identity.
 	KeyPrefix        string         `json:"key_prefix"`
 	PreviousPrefixes []string       `json:"previous_prefixes,omitempty"`
 	DshHome          string         `json:"dsh_home"`
@@ -81,15 +86,6 @@ func (t Tenant) EffectiveIsolation() string {
 		return IsolationUser
 	}
 	return t.Isolation
-}
-
-func (t Tenant) Prefixes() []string {
-	out := make([]string, 0, 1+len(t.PreviousPrefixes))
-	if t.KeyPrefix != "" {
-		out = append(out, t.KeyPrefix)
-	}
-	out = append(out, t.PreviousPrefixes...)
-	return out
 }
 
 type diskRegistry struct {
@@ -204,29 +200,28 @@ func validateTenant(t Tenant) error {
 	if !config.ValidNodeRef(t.Node) {
 		return fmt.Errorf("tenant %s names an invalid node %q", t.Name, t.Node)
 	}
-	// A record may carry no key prefix at all (M77): a worker node's allocation table says which
-	// tenants this machine hosts, while the key prefix — which key logs into which tenant — is
-	// bound in the control plane's registry. Requiring one here would force a node to invent a
-	// prefix for a tenant it adopted, and the invented value would collide with the uniqueness
-	// rule below. Everything else about the record is still validated.
-	if t.KeyPrefix != "" && !validPrefix(t.KeyPrefix) {
-		return fmt.Errorf("tenant %s key prefix must be empty or 12 printable non-space ASCII characters", t.Name)
+	// A record may carry no key prefix at all (M77 worker-node allocation rows), and since M88
+	// the value is a label rather than an identity: nothing is looked up by it, so the only
+	// thing worth checking is that it could have been read off a key. Duplicates are allowed —
+	// two tenants' credentials may share their first 12 characters, exactly like two API keys.
+	if t.KeyPrefix != "" && !validKeyLabel(t.KeyPrefix) {
+		return fmt.Errorf("tenant %s key prefix must be empty or printable non-space ASCII", t.Name)
 	}
-	seen := map[string]bool{t.KeyPrefix: true}
-	for _, prefix := range t.PreviousPrefixes {
-		if !validPrefix(prefix) || seen[prefix] {
-			return fmt.Errorf("tenant %s has invalid or duplicate previous prefix", t.Name)
+	for _, label := range t.PreviousPrefixes {
+		if !validKeyLabel(label) {
+			return fmt.Errorf("tenant %s has an invalid previous prefix", t.Name)
 		}
-		seen[prefix] = true
 	}
 	return nil
 }
 
-func validPrefix(prefix string) bool {
-	if len(prefix) != 12 {
+// validKeyLabel accepts what a display label may be: printable, no whitespace, bounded. It used
+// to demand exactly 12 characters, back when the prefix was the lookup key (M87/M88).
+func validKeyLabel(label string) bool {
+	if label == "" || len(label) > 64 {
 		return false
 	}
-	for _, b := range []byte(prefix) {
+	for _, b := range []byte(label) {
 		if b < 0x21 || b > 0x7e {
 			return false
 		}
@@ -261,10 +256,13 @@ func ValidateAccountLabel(account string) error {
 	return nil
 }
 
+// validateUnique keeps the two invariants that are still identities: a public port and a worker
+// port belong to exactly one tenant. Key prefixes are deliberately not checked any more (M88):
+// they are labels, and since the login path resolves a tenant through the account mapping, two
+// tenants wearing the same label is not a state the registry has an opinion about.
 func validateUnique(ts map[string]Tenant) error {
 	ports := map[int]string{}
 	workers := map[int]string{}
-	prefixes := map[string]string{}
 	for name, t := range ts {
 		if prior := ports[t.PublicPort]; prior != "" {
 			return fmt.Errorf("public port %d shared by %s and %s", t.PublicPort, prior, name)
@@ -274,12 +272,6 @@ func validateUnique(ts map[string]Tenant) error {
 			return fmt.Errorf("worker port %d shared by %s and %s", t.WorkerPort, prior, name)
 		}
 		workers[t.WorkerPort] = name
-		for _, p := range t.Prefixes() {
-			if prior := prefixes[p]; prior != "" {
-				return fmt.Errorf("key prefix %s shared by %s and %s", p, prior, name)
-			}
-			prefixes[p] = name
-		}
 	}
 	return nil
 }
@@ -314,17 +306,23 @@ func (r *Registry) ByPublicPort(port int) (Tenant, bool) {
 	}
 	return Tenant{}, false
 }
-func (r *Registry) ByPrefix(prefix string) (Tenant, bool) {
+// ByAccount returns every tenant whose account label matches. It replaced ByPrefix in M88:
+// "which tenant does this account use" is the question support actually asks, and unlike a key
+// prefix it is stable (every key of an account enters the same tenant).
+func (r *Registry) ByAccount(account string) []Tenant {
+	account = strings.TrimSpace(account)
+	if account == "" {
+		return nil
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	out := make([]Tenant, 0, 1)
 	for _, t := range r.tenants {
-		for _, p := range t.Prefixes() {
-			if p == prefix {
-				return copyTenant(t), true
-			}
+		if strings.EqualFold(strings.TrimSpace(t.Account), account) {
+			out = append(out, copyTenant(t))
 		}
 	}
-	return Tenant{}, false
+	return out
 }
 
 func (r *Registry) Put(t Tenant) error {
@@ -535,71 +533,6 @@ func clone(in map[string]Tenant) map[string]Tenant {
 	return out
 }
 
-func (r *Registry) RotatePrefix(name, prefix string, keepPrevious bool) error {
-	if !validPrefix(prefix) {
-		return errors.New("key prefix must contain exactly 12 printable non-space ASCII characters")
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	t, ok := r.tenants[name]
-	if !ok {
-		return fmt.Errorf("tenant %q not found", name)
-	}
-	next := clone(r.tenants)
-	if prefix == t.KeyPrefix {
-		if !keepPrevious {
-			t.PreviousPrefixes = nil
-			next[name] = t
-			r.tenants = next
-		}
-		return nil
-	}
-	var previous []string
-	if keepPrevious {
-		previous = append(previous, t.KeyPrefix)
-		for _, old := range t.PreviousPrefixes {
-			if old != prefix && old != t.KeyPrefix {
-				previous = append(previous, old)
-			}
-		}
-	}
-	t.PreviousPrefixes = previous
-	t.KeyPrefix = prefix
-	next[name] = t
-	if err := validateUnique(next); err != nil {
-		return err
-	}
-	r.tenants = next
-	return nil
-}
-
-// AddPrefix binds an additional login prefix without changing the credential
-// currently injected into the tenant worker.
-func (r *Registry) AddPrefix(name, prefix string) error {
-	if !validPrefix(prefix) {
-		return errors.New("key prefix must contain exactly 12 printable non-space ASCII characters")
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	t, ok := r.tenants[name]
-	if !ok {
-		return fmt.Errorf("tenant %q not found", name)
-	}
-	for _, current := range t.Prefixes() {
-		if current == prefix {
-			return nil
-		}
-	}
-	next := clone(r.tenants)
-	t.PreviousPrefixes = append(t.PreviousPrefixes, prefix)
-	next[name] = t
-	if err := validateUnique(next); err != nil {
-		return err
-	}
-	r.tenants = next
-	return nil
-}
-
 func (r *Registry) SetHandshake(name string, state HandshakeState) error {
 	if state != HandshakePending && state != HandshakeOK && state != HandshakeFailed {
 		return errors.New("invalid handshake state")
@@ -676,12 +609,13 @@ func (r *Registry) TenantPorts() map[string]int {
 	return out
 }
 
-// Save atomically replaces canonical registry.json (0600) and its derived,
-// operator-readable keys.map index (0640) under one flock. Authentication
-// always uses canonical registry.json, so a crash while updating the derived
-// map cannot grant or revoke access incorrectly; the next Save repairs it.
+// Save atomically replaces canonical registry.json (0600) under one flock.
+//
+// It also deletes the derived keys.map index if a previous release left one behind (M88): the
+// file mapped a key prefix to a tenant, and nothing resolves tenants by prefix any more, so
+// leaving it in place would only be a stale answer for whoever read it next.
 func (r *Registry) Save() error {
-	data, keyData, err := r.encoded()
+	data, err := r.encoded()
 	if err != nil {
 		return err
 	}
@@ -689,11 +623,18 @@ func (r *Registry) Save() error {
 		if err := securefile.WriteAtomic(r.path, data, 0o600); err != nil {
 			return err
 		}
-		return securefile.WriteAtomic(r.keyMapPath, keyData, 0o640)
+		if r.keyMapPath == "" {
+			return nil
+		}
+		err := securefile.RemoveFile(r.keyMapPath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
 	})
 }
 
-func (r *Registry) encoded() ([]byte, []byte, error) {
+func (r *Registry) encoded() ([]byte, error) {
 	r.mu.RLock()
 	tenants := make([]Tenant, 0, len(r.tenants))
 	for _, t := range r.tenants {
@@ -703,58 +644,9 @@ func (r *Registry) encoded() ([]byte, []byte, error) {
 	sort.Slice(tenants, func(i, j int) bool { return tenants[i].Name < tenants[j].Name })
 	data, err := json.MarshalIndent(diskRegistry{Version: Version, Tenants: tenants}, "", "  ")
 	if err != nil {
-		return nil, nil, err
-	}
-	data = append(data, '\n')
-	keyData, err := encodeKeyMap(tenants)
-	return data, keyData, err
-}
-
-func encodeKeyMap(tenants []Tenant) ([]byte, error) {
-	var lines []string
-	seen := map[string]string{}
-	for _, t := range tenants {
-		for _, p := range t.Prefixes() {
-			if prior := seen[p]; prior != "" && prior != t.Name {
-				return nil, fmt.Errorf("prefix %s is duplicated", p)
-			}
-			seen[p] = t.Name
-			lines = append(lines, p+" "+t.Name)
-		}
-	}
-	sort.Strings(lines)
-	if len(lines) == 0 {
-		return []byte{}, nil
-	}
-	return []byte(strings.Join(lines, "\n") + "\n"), nil
-}
-
-func LoadKeyMap(path string) (map[string]string, error) {
-	data, err := securefile.ReadLimitedRegular(path, 8<<20)
-	if errors.Is(err, os.ErrNotExist) {
-		return map[string]string{}, nil
-	}
-	if err != nil {
 		return nil, err
 	}
-	if err := securefile.CheckPermissions(path, 0o640); err != nil {
-		return nil, err
-	}
-	out := map[string]string{}
-	scan := bufio.NewScanner(bytes.NewReader(data))
-	line := 0
-	for scan.Scan() {
-		line++
-		fields := strings.Fields(scan.Text())
-		if len(fields) != 2 || !validPrefix(fields[0]) || !config.ValidTenantName(fields[1]) {
-			return nil, fmt.Errorf("invalid keys.map line %d", line)
-		}
-		if _, ok := out[fields[0]]; ok {
-			return nil, fmt.Errorf("duplicate key prefix on line %d", line)
-		}
-		out[fields[0]] = fields[1]
-	}
-	return out, scan.Err()
+	return append(data, '\n'), nil
 }
 
 // ListeningPorts parses `ss -H -ltn` output. The command execution remains in

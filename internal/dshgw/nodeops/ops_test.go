@@ -554,7 +554,7 @@ func TestSetKeyAndSyncModelsReachTheTenantsFiles(t *testing.T) {
 	ops, _, reg, _ := fixture(t)
 	createTenant(t, ops, "alice", "sk-nodekey1234567890abcd", 32601)
 	newKey := "sk-nodekey2234567890abcd"
-	if _, err := call(t, ops, "tenant-set-key", nodeproto.TenantSetKeyRequest{Name: "alice", Account: "li", Key: newKey, KeepPrevious: true}); err != nil {
+	if _, err := call(t, ops, "tenant-set-key", nodeproto.TenantSetKeyRequest{Name: "alice", Account: "li", Key: newKey}); err != nil {
 		t.Fatal(err)
 	}
 	stored, _ := reg.Get("alice")

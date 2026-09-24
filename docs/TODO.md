@@ -1192,16 +1192,16 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 > `docs/design/m88-dshgw-account-tenant-binding.md`。
 
 - [x] 设计文档 `docs/design/m88-dshgw-account-tenant-binding.md`（D1–D7、被否方案 §2.1、改动清单、回滚保险、测试策略）
-- [ ] `resolveTenant` 删掉 `aigw.KeyPrefix` + `ByPrefix` 分支；`authTenant == ""` → 403 + 审计 reason `tenant_unmapped`；
+- [x] `resolveTenant` 删掉 `aigw.KeyPrefix` + `ByPrefix` 分支；`authTenant == ""` → 403 + 审计 reason `tenant_unmapped`；
       `aigw.KeyPrefix()` 派生函数退役
-- [ ] 注册表退役绑定设施：删 `ByPrefix`/`AddPrefix`/`RotatePrefix`/`Prefixes()`/`validPrefix`/`encodeKeyMap`/`LoadKeyMap`；
+- [x] 注册表退役绑定设施：删 `ByPrefix`/`AddPrefix`/`RotatePrefix`/`Prefixes()`/`validPrefix`/`encodeKeyMap`/`LoadKeyMap`；
       `validateUnique` 去掉前缀校验；`Save` 停写并删除 `keys.map`；`KeyPrefix`/`PreviousPrefixes` 字段保留只写不读（D4 回滚保险）
-- [ ] CLI 与配置：删 `bind`/`cleanPrefix`/`--keep-old-prefix`；`whereis` 改为按账户名查租户；
+- [x] CLI 与配置：删 `bind`/`cleanPrefix`/`--keep-old-prefix`；`whereis` 改为按账户名查租户；
       `tenant list` 的 KeyPrefix 列标注"仅展示/回滚保险"；`key_map_path` 标 deprecated（配置是 `KnownFields(true)`，不能直接删）；
       备份清单去掉 `keys.map`；`localdshgw.TenantInfo.KeyPrefix` 删除
-- [ ] 测试：无 tenant 的 authorize 回答 → 403 + `tenant_unmapped`；**前缀匹配但账户不匹配的 key 必须被拒绝**（证明兜底没了）；
+- [x] 测试：无 tenant 的 authorize 回答 → 403 + `tenant_unmapped`；**前缀匹配但账户不匹配的 key 必须被拒绝**（证明兜底没了）；
       两租户同前缀也能 `Put`+`Save`；`Save` 后 `keys.map` 不存在；老 registry.json（带前缀字段）仍可加载；
       回滚演练：新版本产出的 registry.json 交给老二进制能加载且老前缀仍能登录
-- [ ] 文档：`docs/dshgw.md` §3 第 3 步改写为"按账户映射租户"、删 keys.map 说法；`docs/deployment-layout.md`、
+- [x] 文档：`docs/dshgw.md` §3 第 3 步改写为"按账户映射租户"、删 keys.map 说法；`docs/deployment-layout.md`、
       `docs/design/m51-dshgw.md`、`docs/design/m63-data-root.md` 里 `keys.map` 说明改为历史遗留；
       `deploy/dshgw/README.md` 写明升级要求 aigw ≥ M74

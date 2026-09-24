@@ -147,7 +147,7 @@ aigw (user unit aigw-local, WorkingDirectory=<部署根>)
  └─ 不监督 gwproxy
 
 dshgw (user unit dshgw-verify, --config ./dshgw.yaml)
- ├─ state ./data/dshgw-verify/state（registry/sessions/keys.map/handshake/tenants/workspaces/tenant-config/backups）
+ ├─ state ./data/dshgw-verify/state（registry/sessions/handshake/tenants/workspaces/tenant-config/backups；M88 之前的 keys.map 已废弃）
  ├─ 门户 18300、租户 18301+（每个租户独立 origin）、worker 18400+（bwrap）
  └─ template-home ./data/dshgw-verify/template-home
 
