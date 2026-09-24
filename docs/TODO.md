@@ -1160,3 +1160,21 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       `ai-gateway` 一个仓库；② 会话开在仓库子目录时仍是该仓库；③ workspace=`…/work` 的会话显示
       「该目录下的仓库」且不自动选中；④ 老会话（M79 之前的长路径 cwd）显示回退提示；
       ⑤ `plugin-state/git-diff.trace.jsonl` 出现 `version=0.2.0` 与作用域事件
+
+## M88 dshgw 只按账户映射租户（退役 key 前缀绑定）
+> 设计：`docs/design/m88-dshgw-account-tenant-binding.md`；需求原话：「dshgw 也用 key hash 找租户」，
+> 评审结论是不哈希化、直接删掉本地解析。**代码、测试、文档、v4.7.0 发布（aigw 侧已部署 gptjp +
+> rag-server）都已完成**，完整清单与发布记录见 `docs/todo_done.md` 同名小节；本节只留未完成项。
+
+- [ ] **待宿主执行（dshgw 控制面部署 + 线上验收）**：把 `bin/dshgw` 4.7.0/`11e8254` 换入
+      `/home/winger/work/ai_gateway/bin/dshgw`（备份到 `data/prev/bin/`）并
+      `systemctl --user restart dshgw-verify`——**会重启全部租户 worker，含本会话，需择时**。
+      完整命令与回滚见 `docs/todo_done.md` 的 v4.7.0 发布记录。验收：① 门户用一把 Key 登录已启用
+      DSH 的账号能进（账户映射）；② `journalctl --user -u dshgw-verify --since "-5min" |
+      grep tenant_unmapped` 无输出；③ `state/keys.map` 已不存在；④
+      `bin/dshgw whereis <账号名>` 有输出
+- [ ] **可选后续**：把 sub2api 的 #24/#51 真数据导入（现在两把都能原样进，没人需要换 key）：
+      `python3 /opt/aigw/sub2api_migrate.py plan` → `apply`；完成后
+      `shred -u /opt/aigw/data/E26Q-reissue-key.txt`（那把重签明文就没用了）
+- [ ] **可选后续**：清理 4 把已 disabled 的验收 key（gptjp #162/#163/#166/#167，网关没有删除 key 的路由，
+      需手工 `DELETE`）；以及是否把 tag `v4.6.0`/`v4.7.0` 推到 origin（当前只在本地）
