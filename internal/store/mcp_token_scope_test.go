@@ -25,7 +25,7 @@ func TestMCPTokenScopeRoundTrip(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := db.GetMCPTokenByPrefix(ctx, "aigw_mcp_le")
+	legacy, err := db.GetMCPTokenByHash(ctx, "hash-legacy")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestMCPTokenScopeRoundTrip(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	agent, err := db.GetMCPTokenByPrefix(ctx, "aigw_mcp_ad")
+	agent, err := db.GetMCPTokenByHash(ctx, "hash-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,12 +47,12 @@ func TestMCPTokenScopeRoundTrip(t *testing.T) {
 		t.Fatalf("scope = %q, want admin", agent.Scope)
 	}
 
-	// Upsert by prefix updates the scope (that is how the console downgrades a token).
+	// Upsert by hash updates the scope (that is how the console downgrades a token).
 	agent.Scope = "admin_read"
 	if _, err := db.UpsertMCPToken(ctx, agent); err != nil {
 		t.Fatal(err)
 	}
-	downgraded, err := db.GetMCPTokenByPrefix(ctx, "aigw_mcp_ad")
+	downgraded, err := db.GetMCPTokenByHash(ctx, "hash-agent")
 	if err != nil {
 		t.Fatal(err)
 	}

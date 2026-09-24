@@ -1,6 +1,6 @@
-// Package apikey verifies bearer API keys on the hot path: prefix-indexed lookup,
-// constant-time hash comparison and a short-lived positive/negative cache so normal
-// request handling never blocks on SQLite.
+// Package apikey verifies bearer API keys on the hot path: the presented token is hashed and
+// the row is fetched by that hash (M87), the stored hash is compared in constant time, and a
+// short-lived positive/negative cache keeps normal request handling off SQLite.
 package apikey
 
 import (
@@ -14,7 +14,7 @@ import (
 
 // Store is the persistence subset the verifier needs.
 type Store interface {
-	GetAPIKeyByPrefix(ctx context.Context, prefix string) (*domain.APIKey, error)
+	GetAPIKeyByHash(ctx context.Context, hash string) (*domain.APIKey, error)
 	// GetAPIKey resolves a key by database id. It exists for the console chat, which is an
 	// in-process client of the data plane: the browser session says *which* key may be
 	// spent, and no plaintext key ever exists to send as a bearer token.
@@ -100,39 +100,42 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*domain.APIKey, *d
 	if raw == "" {
 		return nil, nil, domain.ErrUnauthorized("missing API key")
 	}
-	prefix := secret.Prefix(raw)
-	wantHash := secret.Hash(raw)
+	// The lookup key is the SHA-256 of the presented token, not its display prefix (M87): the
+	// prefix carries only 30 bits of the secret (15 for an MCP token) and two keys may share
+	// one, while the hash pins exactly one row. The constant-time comparison below stays: it
+	// is what makes "the row was found" and "the secret matches" two separate facts.
+	hash := secret.Hash(raw)
 	now := v.now()
 
-	if e, ok := v.lookup(prefix, now); ok {
+	if e, ok := v.lookup(hash, now); ok {
 		if e.err != nil {
 			return nil, nil, e.err
 		}
-		if !secret.Equal(e.key.KeyHash, wantHash) {
+		if !secret.Equal(e.key.KeyHash, hash) {
 			return nil, nil, domain.ErrUnauthorized("invalid API key")
 		}
-		v.touchAsync(prefix, e, now)
+		v.touchAsync(hash, e, now)
 		return e.key, e.account, nil
 	}
 
-	key, err := v.store.GetAPIKeyByPrefix(ctx, prefix)
+	key, err := v.store.GetAPIKeyByHash(ctx, hash)
 	if err != nil {
 		if domain.IsUnauthorized(err) {
-			v.storeNegative(prefix, now)
+			v.storeNegative(hash, now)
 			return nil, nil, domain.ErrUnauthorized("invalid API key")
 		}
 		return nil, nil, err
 	}
-	if !secret.Equal(key.KeyHash, wantHash) {
-		v.storeNegative(prefix, now)
+	if !secret.Equal(key.KeyHash, hash) {
+		v.storeNegative(hash, now)
 		return nil, nil, domain.ErrUnauthorized("invalid API key")
 	}
 	if key.Status != "active" {
-		v.storeNegative(prefix, now)
+		v.storeNegative(hash, now)
 		return nil, nil, domain.ErrUnauthorized("API key is not active")
 	}
 	if key.ExpiresAt != nil && now.After(*key.ExpiresAt) {
-		v.storeNegative(prefix, now)
+		v.storeNegative(hash, now)
 		return nil, nil, domain.ErrUnauthorized("API key has expired")
 	}
 
@@ -152,8 +155,8 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*domain.APIKey, *d
 		touchedAt = *key.LastUsedAt
 	}
 	e := &entry{key: key, account: account, expiresAt: now.Add(v.cfg.TTL), touchedAt: touchedAt}
-	v.put(prefix, e)
-	v.touchAsync(prefix, e, now)
+	v.put(hash, e)
+	v.touchAsync(hash, e, now)
 	return key, account, nil
 }
 
@@ -208,10 +211,11 @@ func (v *Verifier) touchByID(ctx context.Context, key *domain.APIKey, now time.T
 	_ = v.store.TouchAPIKey(ctx, key.ID)
 }
 
-// Invalidate drops one cache entry (called by the admin API after a key write).
-func (v *Verifier) Invalidate(prefix string) {
+// Invalidate drops one cache entry, keyed by the token's hash (called by the admin API after a
+// key write: the row it just changed is named by its hash).
+func (v *Verifier) Invalidate(hash string) {
 	v.mu.Lock()
-	delete(v.cache, prefix)
+	delete(v.cache, hash)
 	v.mu.Unlock()
 }
 
@@ -229,9 +233,9 @@ func (v *Verifier) Size() int {
 	return len(v.cache)
 }
 
-func (v *Verifier) lookup(prefix string, now time.Time) (*entry, bool) {
+func (v *Verifier) lookup(hash string, now time.Time) (*entry, bool) {
 	v.mu.RLock()
-	e, ok := v.cache[prefix]
+	e, ok := v.cache[hash]
 	v.mu.RUnlock()
 	if !ok || now.After(e.expiresAt) {
 		return nil, false
@@ -239,52 +243,59 @@ func (v *Verifier) lookup(prefix string, now time.Time) (*entry, bool) {
 	return e, true
 }
 
-func (v *Verifier) storeNegative(prefix string, now time.Time) {
-	v.put(prefix, &entry{
+// storeNegative remembers a failed verification.
+//
+// The entry is keyed by the hash of the token that failed, never by its display prefix: a
+// prefix is not a secret (it is printed in the console and read off the key by whoever holds
+// it), so a prefix-keyed negative entry let anyone who knew a prefix hold that key down for as
+// long as they kept presenting garbage — and it made two keys that share a prefix share their
+// fate. One token's failure now only ever suppresses that token.
+func (v *Verifier) storeNegative(hash string, now time.Time) {
+	v.put(hash, &entry{
 		err:       domain.ErrUnauthorized("invalid API key"),
 		expiresAt: now.Add(v.cfg.NegativeTTL),
 	})
 }
 
-func (v *Verifier) put(prefix string, e *entry) {
+func (v *Verifier) put(hash string, e *entry) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if len(v.cache) >= v.cfg.MaxEntries {
 		v.purgeLocked(v.now())
 	}
-	v.cache[prefix] = e
+	v.cache[hash] = e
 }
 
 // purgeLocked removes expired entries; if the cache is still full it evicts the
 // entry that expires soonest. Callers must hold the write lock.
 func (v *Verifier) purgeLocked(now time.Time) {
-	for prefix, e := range v.cache {
+	for hash, e := range v.cache {
 		if now.After(e.expiresAt) {
-			delete(v.cache, prefix)
+			delete(v.cache, hash)
 		}
 	}
 	if len(v.cache) < v.cfg.MaxEntries {
 		return
 	}
-	var oldestPrefix string
+	var oldestHash string
 	var oldest time.Time
-	for prefix, e := range v.cache {
-		if oldestPrefix == "" || e.expiresAt.Before(oldest) {
-			oldestPrefix, oldest = prefix, e.expiresAt
+	for hash, e := range v.cache {
+		if oldestHash == "" || e.expiresAt.Before(oldest) {
+			oldestHash, oldest = hash, e.expiresAt
 		}
 	}
-	if oldestPrefix != "" {
-		delete(v.cache, oldestPrefix)
+	if oldestHash != "" {
+		delete(v.cache, oldestHash)
 	}
 }
 
 // touchAsync refreshes last_used_at at most once per TouchInterval, out of band.
-func (v *Verifier) touchAsync(prefix string, e *entry, now time.Time) {
+func (v *Verifier) touchAsync(hash string, e *entry, now time.Time) {
 	if now.Sub(e.touchedAt) < v.cfg.TouchInterval {
 		return
 	}
 	v.mu.Lock()
-	if cur, ok := v.cache[prefix]; ok && cur == e {
+	if cur, ok := v.cache[hash]; ok && cur == e {
 		e.touchedAt = now
 	}
 	v.mu.Unlock()

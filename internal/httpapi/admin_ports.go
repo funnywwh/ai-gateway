@@ -109,6 +109,10 @@ type MCPTokenAdmin interface {
 	ListMCPTokens(ctx context.Context, accountID int64) ([]*domain.MCPToken, error)
 	UpsertMCPToken(ctx context.Context, tok *domain.MCPToken) (int64, error)
 	RevokeMCPToken(ctx context.Context, id int64) error
+	// FindMCPTokenByPrefix reports any token carrying this display prefix, or (nil, nil) when
+	// it is unused. The mint path uses it to hand out a label nobody else wears (M87: the
+	// prefix is no longer an identity, so this is tidiness, not correctness).
+	FindMCPTokenByPrefix(ctx context.Context, prefix string) (*domain.MCPToken, error)
 }
 
 // SettingsAdmin reads and writes key/value settings.

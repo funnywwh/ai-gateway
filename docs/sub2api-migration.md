@@ -32,12 +32,12 @@ encode(sha256(convert_to(btrim(k.key),'UTF8')),'hex')   -- key_hash（与 Go 的
 2. 源 key 集合：`deleted_at IS NULL AND status='active'`；报告被排除的 key（已删除、配额耗尽）。
 3. key 形状：长度、`sk-` 前缀、全是可打印 ASCII、`key = btrim(key)`（否则前缀与哈希会与服务端
    归一化后的明文不一致）。
-4. **前缀唯一性**：待迁 key 的 `left(btrim(key),12)` 必须两两不同。网关的 `api_keys.key_prefix`
-   上有唯一索引，且数据面**只按 12 字符前缀查找**——同一个前缀不可能同时存在两把不同的 key。
-   发现冲突时**停下来**，按 §6 处理（不要试图导入两次：第二次会覆盖第一把，用户静默掉线）。
+4. **前缀可以重复**（M87 起）：`left(btrim(key),12)` 只是给人看的标签，数据面按 SHA-256 查找，
+   所以两把 key 共用前 12 个字符照原样导入即可，谁都不用换 key。`plan` 会把共享前缀的 key 列出来
+   供人核对，但不再因此停下（§6 是 M87 之前的口径，留作历史）。
 5. 目标侧干净度：要用的标签存在、每个标签的 `grants_json` 指向的供应商存在且启用；目标账户名
    未被无关账户占用（`accounts.name` 唯一，脚本按名 upsert）。
-6. 目标侧前置状态：本次迁移要写入的 key 前缀在 aigw 里要么不存在，要么就是同哈希（重跑）。
+6. 目标侧前置状态：目标库按**哈希**判重——同一明文已在库里就是幂等更新（重跑），不在就是新行。
 
 ## 3. 标签分配规则
 
@@ -63,7 +63,7 @@ python3 /opt/aigw/sub2api_migrate.py plan
 # 1. 回滚点：在线快照 aigw 数据库（0600），并断言本次迁移前没有别的账户/key/请求日志
 python3 /opt/aigw/sub2api_migrate.py snapshot
 
-# 2. 建账户 + 导入 key（幂等，可重跑；账号按名 upsert、key 按前缀 upsert）
+# 2. 建账户 + 导入 key（幂等，可重跑；账号按名 upsert、key 按哈希 upsert）
 python3 /opt/aigw/sub2api_migrate.py apply
 
 # 3. 结构核对：逐把 key 比对 aigw 库里的 prefix/hash/tags 与源库重算值，并读回生效标签
@@ -91,7 +91,7 @@ python3 /opt/aigw/sub2api_migrate.py report
 1. **迁移仍用哈希形式**：`apply` 搬的就是 `key_prefix`+`key_hash` 两个非秘密值，明文留在源库进程内。
    批量接口虽然也接受明文 `api_key`（给"客户端不改 key"的自定义值场景用），但迁移**不要**用它——
    那等于把明文送进网关进程与调用链，见 `docs/mcp.md` §5。
-2. **整批原子**：任何一项失败（未知账户、未知标签、前缀被别人的 key 占用、哈希格式错）就整体拒绝，
+2. **整批原子**：任何一项失败（未知账户、未知标签、哈希格式错）就整体拒绝，
    错误点名 `keys[i]`，一行都不写；修好后重跑是幂等的（同前缀同哈希 → `created:false`）。
 3. **先 `dry_run`**：`"dry_run":true` 用同一套校验与冲突判定回报"会发生什么"，不写库、不写审计，
    适合在真正 `apply` 之前拿一次预演结论。
@@ -108,20 +108,22 @@ python3 /opt/aigw/sub2api_migrate.py report
 | 结构 | `verify`：源库重算的 prefix/hash 与 aigw 行逐把比对 | 全部一致；每把 key 恰好一个标签；账户不带标签 |
 | 授权 | 读 `GET /admin/api/v1/keys?account_id=…` 的 `effective_tags` | 等于预期标签；**不存在空标签的 key**（空标签 = 回落到默认通配授权） |
 | 功能 | 每个标签挑一把 key，建控制台问答会话（`POST /admin/api/v1/chat/sessions` 指定 `account_id`+`api_key_id`，无需明文）发一句短提问，然后删除会话 | 有真实回答；`usage_records.provider_id` 等于该标签授权的供应商 |
-| 负向 | 用某个 key 的 12 字符前缀当 bearer 请求 `/v1/models` | 401（前缀是索引，不是密钥） |
+| 负向 | 用某个 key 的 12 字符前缀当 bearer 请求 `/v1/models` | 401（前缀是标签，不是密钥） |
 | 保密 | 对迁移日志、报告文件、`journalctl -u aigw` 搜 `sk-[A-Za-z0-9_-]{20,}` | 命中 0 |
 
-## 6. 前缀冲突（唯一会让人掉线的边界）
+## 6. 前缀冲突（M87 之前的口径，留作历史）
 
-12 字符前缀是查找入口，`api_keys.key_prefix` 唯一。若两把待迁 key 撞了前缀（随机 key 属小概率，
-但 sub2api 允许自定义 key，会人为造成），**只能有一把保留原明文**：
+> **2026-09-24 起本节不再是迁移的边界。** M87 把数据面的查找键从 12 字符前缀换成了 SHA-256
+> （`docs/design/m87-api-key-hash-lookup.md`）：前缀只是标签、可以重复，`api_keys.key_prefix`
+> 上也没有唯一索引了。于是两把 key 撞前缀时**两把都照原样导入**，两把各自可用，没有人需要换 key。
+> 下面的流程只描述 M87 之前的世界（gptjp 上 #24/#51 就是这么处理的：`docs/todo_done.md` 里记着
+> 保留 #51、把 #24 重签成 aigw #44）。
+
+当时 12 字符前缀是查找入口且唯一，撞了就**只能有一把保留原明文**：
 
 1. 保留一把（默认取最近使用的那把；`plan` 报告会标出冲突对）；
-2. 另一把在 aigw 用控制台/`POST /admin/api/v1/keys` **重新签发**，把新明文单独交付本人
-   （交付前不要把它写进任何文件或对话）；
+2. 另一把在 aigw 用控制台/`POST /admin/api/v1/keys` **重新签发**，把新明文单独交付本人；
 3. 报告里记录「源 key id → 新 aigw key id」，并提醒该用户换 key。
-
-不要用「导入两次」绕过：第二次会覆盖第一把。
 
 ## 7. 回滚
 
@@ -203,7 +205,11 @@ python3 /opt/aigw/sub2api_reimport.py report      # 写 sub2api-reimport-<ts>.js
 
 ### 9.4 前缀冲突：保留「实例原本持有的那一把」
 
-12 字符前缀是数据面查找入口且唯一。冲突时保留谁**不能**按「最近使用」拍脑袋：要保留**这台实例
+> **M87 之后这一段是历史。** `sub2api-reimport.py` 的冲突闸门保留着（它是保守的，不会再造成错），
+> 但新库按哈希查找、前缀可以重复，所以同一前缀的两把 key 都能原样重导，不需要再挑一个保留、
+> 也不需要任何替换密钥。
+
+12 字符前缀是数据面查找入口且唯一（M87 之前）。冲突时保留谁**不能**按「最近使用」拍脑袋：要保留**这台实例
 在换库前就持有该前缀的那把**（生产里正在用的），否则等于让一个真实客户端掉线。换库后目标库是空的，
 所以判定必须看 `snapshot` 产出的 `rebuild-export-*.json`（里面有换库前的 key→账户快照）。
 

@@ -520,8 +520,18 @@ func randomHex4() string {
 
 // mintDshgwKey creates the dedicated model credential for a tenant's worker. The plaintext
 // exists exactly once (inside this call) and is never persisted, logged or audited.
+//
+// The pre-check is the same tidiness rule the console's mint path uses (M87 D13): a worker key
+// whose display prefix collides with an existing one still authenticates, but dshgw's legacy
+// prefix→tenant fallback resolves by prefix, so it is handed a label nobody else wears.
 func (s *Server) mintDshgwKey(ctx context.Context, store KeyStore, accountID int64, tenant, actor string) (string, error) {
-	token := ids.APIKey()
+	token, err := mintTokenWithFreePrefix(ids.APIKey, func(prefix string) (bool, error) {
+		row, err := store.FindAPIKeyByPrefix(ctx, prefix)
+		return row != nil, err
+	})
+	if err != nil {
+		return "", err
+	}
 	key := &domain.APIKey{
 		AccountID: accountID, Name: "dshgw-" + tenant + "-" + randomHex4(),
 		KeyPrefix: secret.Prefix(token), KeyHash: secret.Hash(token),
@@ -1631,7 +1641,18 @@ func (s *Server) handleAdminCreateMCPToken(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	token := ids.MCPToken()
+	// An MCP token's prefix carries only 15 bits of the secret (aigw_mcp_ plus three base32
+	// characters), so two tokens sharing a label is not exotic — which is exactly why the mint
+	// path pre-checks it (M87 D13): the label is not an identity any more, but it is what a
+	// person reads off a token, and a duplicate makes support slower for no reason.
+	token, err := mintTokenWithFreePrefix(ids.MCPToken, func(prefix string) (bool, error) {
+		row, err := store.FindMCPTokenByPrefix(r.Context(), prefix)
+		return row != nil, err
+	})
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
 	record := &domain.MCPToken{
 		AccountID: accountID, Name: strings.TrimSpace(body.Name),
 		TokenHash: secret.Hash(token), TokenPrefix: secret.Prefix(token),

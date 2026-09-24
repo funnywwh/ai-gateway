@@ -225,8 +225,6 @@ func TestBatchImportAcceptsHashFormAndMixedBatches(t *testing.T) {
 // name the item: "invalid request" on a 200-item call would be unusable.
 func TestBatchImportIsAtomicAndNamesTheOffendingItem(t *testing.T) {
 	good := "sk-live-good-0123456789abcdef"
-	sharedA := "sk-shared-item-0123456789abcdef"
-	sharedB := "sk-shared-item-ffffffffffffffffff"
 
 	cases := []struct {
 		name       string
@@ -277,30 +275,6 @@ func TestBatchImportIsAtomicAndNamesTheOffendingItem(t *testing.T) {
 			item:       map[string]any{"name": "x", "account": "acme", "api_key": good, "policy": map[string]any{"rate_limit": 5}},
 			wantStatus: http.StatusBadRequest,
 			wantParts:  []string{"policy"},
-		},
-		{
-			name:       "prefix repeated inside the batch",
-			item:       map[string]any{"name": "second", "account": "acme", "api_key": sharedB},
-			extraItems: []map[string]any{{"name": "first", "account": "acme", "api_key": sharedA}},
-			wantStatus: http.StatusBadRequest,
-			// The offending item is the second one; the message points back at the first.
-			wantParts: []string{"already used by item 1", secret.Prefix(sharedA)},
-		},
-		{
-			name:       "prefix owned by a console-issued key",
-			item:       map[string]any{"name": "clash", "account": "acme", "api_key": sharedB},
-			wantStatus: http.StatusConflict,
-			seed: func(t *testing.T, f *adminFixture) {
-				t.Helper()
-				if _, err := f.db.UpsertAPIKey(context.Background(), &domain.APIKey{
-					AccountID: 1, Name: "console-key", KeyPrefix: secret.Prefix(sharedA),
-					KeyHash: secret.Hash(sharedA), Status: "active", CreatedBy: adminUser,
-					RecordInputMode: "inherit",
-				}); err != nil {
-					t.Fatal(err)
-				}
-			},
-			wantParts: []string{"console-key"},
 		},
 	}
 
@@ -481,6 +455,58 @@ func TestBatchImportRefreshesTheVerificationCache(t *testing.T) {
 	}
 }
 
+// Two keys may wear the same display prefix (M87): a row is identified by its hash, so a
+// sub2api-style source — where two people's keys happen to share their first 12 characters —
+// imports in one batch and both keys work. This is the case the whole milestone exists for.
+func TestBatchImportAcceptsTwoKeysSharingAPrefix(t *testing.T) {
+	f := newAdminFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	sharedA := "sk-shared-item-0123456789abcdef"
+	sharedB := "sk-shared-item-ffffffffffffffffff"
+	if secret.Prefix(sharedA) != secret.Prefix(sharedB) {
+		t.Fatalf("the fixture must share a prefix: %q vs %q", secret.Prefix(sharedA), secret.Prefix(sharedB))
+	}
+
+	body := batchJSON(plaintextItem("first", "acme", sharedA), plaintextItem("second", "acme", sharedB))
+	resp := f.call(t, http.MethodPost, "/admin/api/v1/keys/import-batch", body, cookie)
+	payload := decodeJSONBody(t, resp)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || payload["created"] != float64(2) {
+		t.Fatalf("status = %d payload = %v", resp.StatusCode, payload)
+	}
+	rows, err := f.db.ListAPIKeys(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want two keys sharing one label", len(rows))
+	}
+	for _, row := range rows {
+		if row.KeyPrefix != secret.Prefix(sharedA) {
+			t.Fatalf("row %d wears label %q, want the shared one", row.ID, row.KeyPrefix)
+		}
+	}
+	for _, token := range []string{sharedA, sharedB} {
+		resp := bearerCall(t, f, token)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("a key sharing a label did not authenticate: status = %d", resp.StatusCode)
+		}
+	}
+
+	// And the label answers with both rows when someone asks by it.
+	lookup := decodeJSONBody(t, f.call(t, http.MethodPost, "/admin/api/v1/keys/lookup",
+		`{"key_prefix":"`+secret.Prefix(sharedA)+`"}`, cookie))
+	if lookup["found"] != true || lookup["count"] != float64(2) {
+		t.Fatalf("lookup by a shared label = %v", lookup)
+	}
+	keys, ok := lookup["keys"].([]any)
+	if !ok || len(keys) != 2 {
+		t.Fatalf("a shared label must list every key: %v", lookup["keys"])
+	}
+}
+
 func TestBatchImportRequiresAnAdministrator(t *testing.T) {
 	f := newAdminFixture(t)
 	viewer := f.login(t, "reader", adminPassword)
@@ -535,8 +561,11 @@ func TestLookupKeyAnswersOwnership(t *testing.T) {
 	assertNoKeyMaterial(t, "the lookup response", fmt.Sprint(byKey), token)
 
 	byPrefix := lookup(t, `{"key_prefix":"`+secret.Prefix(token)+`"}`)
-	if byPrefix["found"] != true || byPrefix["matched"] != "prefix" {
-		t.Fatalf("lookup by prefix = %v", byPrefix)
+	if byPrefix["found"] != true || byPrefix["matched"] != "prefix" || byPrefix["count"] != float64(1) {
+		t.Fatalf("lookup by label = %v", byPrefix)
+	}
+	if list, ok := byPrefix["keys"].([]any); !ok || len(list) != 1 {
+		t.Fatalf("a label worn by one key must list exactly one: %v", byPrefix["keys"])
 	}
 
 	unknown := lookup(t, `{"key_prefix":"sk-nobody000"}`)
@@ -544,18 +573,35 @@ func TestLookupKeyAnswersOwnership(t *testing.T) {
 		t.Fatalf("an unknown prefix = %v", unknown)
 	}
 
-	// A key sharing the first 12 characters but not the secret: the answer must not name the
-	// row it collided with.
+	// A key sharing the first 12 characters but not the secret is simply another key (M87):
+	// nobody has registered it yet, so the answer must not describe the row it resembles.
 	clash := "sk-live-lookupX0123456789abcdef"
 	if secret.Prefix(clash) != secret.Prefix(token) {
 		t.Fatalf("the test key does not share a prefix: %s vs %s", secret.Prefix(clash), secret.Prefix(token))
 	}
-	mismatch := lookup(t, `{"api_key":"`+clash+`"}`)
-	if mismatch["found"] != false || mismatch["reason"] != "hash_mismatch" {
-		t.Fatalf("a hash mismatch = %v", mismatch)
+	unknownKey := lookup(t, `{"api_key":"`+clash+`"}`)
+	if unknownKey["found"] != false || unknownKey["reason"] != "unknown_key" {
+		t.Fatalf("a secret nobody registered = %v", unknownKey)
 	}
-	if mismatch["key"] != nil || mismatch["account"] != nil {
-		t.Fatalf("a hash mismatch must not describe the row: %v", mismatch)
+	if unknownKey["key"] != nil || unknownKey["account"] != nil {
+		t.Fatalf("an unknown secret must not describe any row: %v", unknownKey)
+	}
+
+	// Import it: same label as the key above, its own secret. Both stay live, and asking by the
+	// label now answers with both rows.
+	resp = f.call(t, http.MethodPost, "/admin/api/v1/keys/import-batch", batchJSON(plaintextItem("clash", "acme", clash)), cookie)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("importing the same-label key failed: %d", resp.StatusCode)
+	}
+	if resp := bearerCall(t, f, clash); resp.StatusCode != http.StatusOK {
+		t.Fatalf("the same-label key must authenticate: %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	shared := lookup(t, `{"key_prefix":"`+secret.Prefix(token)+`"}`)
+	if shared["count"] != float64(2) {
+		t.Fatalf("a shared label must report both keys: %v", shared)
 	}
 
 	// A disabled key still answers the ownership question, with its status.
@@ -595,11 +641,16 @@ func TestLookupKeyAnswersOwnership(t *testing.T) {
 			t.Fatalf("lookup %s status = %d, want 400 (%v)", bad, resp.StatusCode, decoded)
 		}
 	}
-	// A prefix that is not 12 characters is a 400, not a silent miss.
-	resp = f.call(t, http.MethodPost, "/admin/api/v1/keys/lookup", `{"key_prefix":"too-short"}`, cookie)
+	// A label that cannot be one is a 400; a short one is a legitimate miss, because the prefix
+	// stopped being a fixed-width lookup key in M87 and became a display label.
+	resp = f.call(t, http.MethodPost, "/admin/api/v1/keys/lookup", `{"key_prefix":"`+strings.Repeat("a", 65)+`"}`, cookie)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("a malformed prefix status = %d, want 400", resp.StatusCode)
+		t.Fatalf("an over-long label status = %d, want 400", resp.StatusCode)
+	}
+	short := decodeJSONBody(t, f.call(t, http.MethodPost, "/admin/api/v1/keys/lookup", `{"key_prefix":"too-short"}`, cookie))
+	if short["found"] != false || short["reason"] != "unknown_prefix" {
+		t.Fatalf("a short label must be an ordinary miss: %v", short)
 	}
 }
 

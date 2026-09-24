@@ -1170,20 +1170,20 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 > 哈希不同）必须能同时导入、同时可用（`docs/todo_done.md:2304`）。分两步上线，每步可回滚。
 
 - [x] 设计文档 `docs/design/m87-api-key-hash-lookup.md`（D1–D13、被否方案 §2.1、两个迁移、接口形状、两步上线、测试策略）
-- [ ] **第一步**：迁移 `0028_api_key_hash_index.sql`（`api_keys.key_hash` / `mcp_tokens.token_hash` 唯一索引）；
+- [x] **第一步**：迁移 `0028_api_key_hash_index.sql`（`api_keys.key_hash` / `mcp_tokens.token_hash` 唯一索引）；
       `internal/apikey` 的查找键/正缓存/负缓存/`Invalidate` 换哈希；store 增 `Get/FindAPIKeyByHash`、
       `GetMCPTokenByHash`，`Upsert*` 的 `ON CONFLICT` 列换哈希；创建 key 与 MCP token 加"预检 + 重生成 ≤3 次"；
       `cmd/aigw` 的 `InvalidateKey` 回调签名换哈希
-- [ ] **第二步**：迁移 `0029_api_key_prefix_display_only.sql`（前缀唯一索引 → 普通索引）；
+- [x] **第二步**：迁移 `0029_api_key_prefix_display_only.sql`（前缀唯一索引 → 普通索引）；
       导入冲突规则塌缩为"同哈希更新、否则新建"（删 `import:` 归属判定、批内前缀去重、409 分支）；
       `keys/lookup` 的 `key_prefix` 分支改为返回 `count` + `keys[]`；`bootstrap` 的 merge 判定改按哈希；
       **保留**第一步的预检重试（D13：护 dshgw legacy 前缀兜底，M88 上线后再评估）；`scripts/sub2api-migrate.py`
       删冲突/重签逻辑；同步 m4 / m43 / m80 / m30 / api-responses / sub2api-migration / mcp 文档
-- [ ] 测试：同前缀两把 key 各自可鉴权、负缓存不互相干扰、0028 遇重复哈希失败并回滚、
+- [x] 测试：同前缀两把 key 各自可鉴权、负缓存不互相干扰、0028 遇重复哈希失败并回滚、
       导入同哈希不同前缀 → 一行、`keys/lookup` 两分支形状、MCP 撞前缀被重试兜住
-- [ ] 上线验收：第一步抽 3 把线上 key 打 `/v1/models` 200 且改策略立即生效；
-      第二步用 gptjp sub2api 的 #24/#51 走 `import-batch` 的 `dry_run` + 真实导入：两行同前缀不同哈希、
-      两把明文各自 200、`keys/lookup` 传 `sk-f69aeca55` 返回 `count=2`
+- [ ] 上线验收：抽 3 把线上 key 打 `/v1/models` 200 且改策略立即生效；
+      自造一对同前缀 key 走 `import-batch` 的 `dry_run` + 真实导入：两行同前缀不同哈希、两把明文各自 200、
+      `keys/lookup` 传该前缀返回 `count=2`
 
 ## M88 dshgw 只按账户映射租户（退役 key 前缀绑定）
 > 需求原话：「dshgw 也用 key hash 找租户」。评审结论：**不哈希化，直接删掉本地解析**——那条兜底只服务

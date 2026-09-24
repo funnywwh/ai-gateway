@@ -141,8 +141,10 @@ func TestImportKeyValidatesItsInput(t *testing.T) {
 		body   string
 		status int
 	}{
-		{"short prefix", `{"name":"k","account_id":1,"key_prefix":"sk-123","key_hash":"` + secret.Hash(validToken) + `"}`, http.StatusBadRequest},
+		{"short prefix is a label, not a lookup key", `{"name":"k","account_id":1,"key_prefix":"sk-123","key_hash":"` + secret.Hash(validToken) + `"}`, http.StatusOK},
 		{"prefix with whitespace", `{"name":"k","account_id":1,"key_prefix":"sk-123 45678","key_hash":"` + secret.Hash(validToken) + `"}`, http.StatusBadRequest},
+		{"prefix longer than the label cap", `{"name":"k","account_id":1,"key_prefix":"` + strings.Repeat("a", 65) + `","key_hash":"` + secret.Hash(validToken) + `"}`, http.StatusBadRequest},
+		{"no prefix at all is allowed", `{"name":"k","account_id":1,"key_hash":"` + secret.Hash(validToken) + `"}`, http.StatusOK},
 		{"short hash", `{"name":"k","account_id":1,"key_prefix":"` + secret.Prefix(validToken) + `","key_hash":"abcd"}`, http.StatusBadRequest},
 		{"non hex hash", `{"name":"k","account_id":1,"key_prefix":"` + secret.Prefix(validToken) + `","key_hash":"` + strings.Repeat("z", 64) + `"}`, http.StatusBadRequest},
 		{"missing name", `{"account_id":1,"key_prefix":"` + secret.Prefix(validToken) + `","key_hash":"` + secret.Hash(validToken) + `"}`, http.StatusBadRequest},
@@ -163,7 +165,7 @@ func TestImportKeyValidatesItsInput(t *testing.T) {
 	}
 }
 
-func TestImportKeyIsIdempotentAndNeverTakesOverAConsoleKey(t *testing.T) {
+func TestImportKeyIsIdempotentAndASharedLabelIsNotATakeover(t *testing.T) {
 	f := newAdminFixture(t)
 	cookie := f.login(t, adminUser, adminPassword)
 	seedTags(t, f, "blue", "green")
@@ -191,23 +193,36 @@ func TestImportKeyIsIdempotentAndNeverTakesOverAConsoleKey(t *testing.T) {
 		t.Fatalf("stored keys = %d, want 1", len(keys))
 	}
 
-	// A key the console issued owns its prefix. An import that would replace it with a
-	// different secret is refused rather than silently invalidating that key.
+	// A *different* secret that happens to share the console key's display prefix is its own key,
+	// not a takeover (M87): a row is identified by its hash, and a label two people share is
+	// exactly what a sub2api-style source produces. Both keys must keep working.
 	console := decodeJSONBody(t, f.call(t, http.MethodPost, "/admin/api/v1/keys", `{"name":"console","account_id":1,"tags":["blue"]}`, cookie))
 	consoleToken, _ := console["key"].(string)
 	if consoleToken == "" {
 		t.Fatalf("console key creation returned no token: %v", console)
 	}
-	conflict := map[string]any{
-		"name": "stolen", "account_id": 1,
+	clash := map[string]any{
+		"name": "same-label", "account_id": 1,
 		"key_prefix": secret.Prefix(consoleToken),
 		"key_hash":   secret.Hash(consoleToken + "different"),
 	}
-	raw, _ := json.Marshal(conflict)
-	resp := f.call(t, http.MethodPost, "/admin/api/v1/keys/import", string(raw), cookie)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("status = %d, want 409 when a console key owns the prefix", resp.StatusCode)
+	raw, _ := json.Marshal(clash)
+	imported := decodeJSONBody(t, f.call(t, http.MethodPost, "/admin/api/v1/keys/import", string(raw), cookie))
+	if imported["created"] != true {
+		t.Fatalf("a key wearing somebody else's label must be created: %v", imported)
+	}
+	if imported["key_prefix"] != secret.Prefix(consoleToken) {
+		t.Fatalf("the label must be stored verbatim: %v", imported["key_prefix"])
+	}
+	if resp := bearerCall(t, f, consoleToken); resp.StatusCode != http.StatusOK {
+		t.Fatalf("the console key stopped working after an import wore its label: status = %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	if resp := bearerCall(t, f, consoleToken+"different"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("the imported key (same label, own secret) must authenticate: status = %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
 	}
 	// The same secret again is not a conflict: it is the same key.
 	same := map[string]any{
@@ -216,7 +231,7 @@ func TestImportKeyIsIdempotentAndNeverTakesOverAConsoleKey(t *testing.T) {
 		"key_hash":   secret.Hash(consoleToken),
 	}
 	raw, _ = json.Marshal(same)
-	resp = f.call(t, http.MethodPost, "/admin/api/v1/keys/import", string(raw), cookie)
+	resp := f.call(t, http.MethodPost, "/admin/api/v1/keys/import", string(raw), cookie)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("re-importing the same secret = %d, want 200", resp.StatusCode)

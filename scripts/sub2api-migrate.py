@@ -3,11 +3,15 @@
 
 为什么需要它：sub2api 里那些 key 已经在用户的客户端配置里，换 key 就要逐人重配；而把明文
 交给网关或运维脚本，意味着它会路过终端回显、shell 历史、临时文件或对话记录。ai_gateway 的
-key 表只存 `key_prefix`（明文前 12 字符）与 `key_hash`（明文 SHA-256），管理接口
-`POST /admin/api/v1/keys/import` 也只收这两个值。于是本脚本让**源库自己算哈希**：
+key 表只存 `key_prefix`（明文前 12 字符，自 M87 起**只是一张给人看的标签**）与 `key_hash`
+（明文 SHA-256，**它才是这一行的身份**），管理接口 `POST /admin/api/v1/keys/import` 也只收这两个值。
+于是本脚本让**源库自己算哈希**：
 
     left(btrim(key),12)                                  -> key_prefix
     encode(sha256(convert_to(btrim(key),'UTF8')),'hex')   -> key_hash   （与 Go 的 sha256 一致）
+
+M87 之后两把 key 可以共用同一个前缀（sub2api 允许自定义 key，真实数据里就会撞），所以前缀
+冲突不再是断言：全部照原样导入，两把 key 各自可用，没有人需要换 key。
 
 脚本从不 `SELECT key`，所以明文既不出 postgres 进程，也不会出现在任何输出里。
 
@@ -15,7 +19,7 @@ key 表只存 `key_prefix`（明文前 12 字符）与 `key_hash`（明文 SHA-2
 
   plan       只读：打印数据集、标签分配、全部断言与模型名覆盖，不做任何写入
   snapshot   写迁移前的数据库快照（0600）并断言目标实例还没有别人的账户/key/请求日志
-  apply      建账户 + 导入 key（幂等：账户按名 upsert、key 按前缀 upsert）
+  apply      建账户 + 导入 key（幂等：账户按名 upsert、key 按哈希 upsert，同一明文重跑只更新那一行）
   verify     结构核对：逐把 key 比对 aigw 库里的 prefix/hash/tags 与源库重算值
   report     写 /opt/aigw/data/sub2api-migration-<ts>.json（0600，无密钥材料）
 
@@ -352,9 +356,8 @@ def intent_mapping(src: Source, target: Target, intent_groups: dict[str, str]) -
     return mapping
 
 
-def assign(src: Source, target: Target, tags: list[str], intent_groups: dict[str, str],
-           reissue: set[int]) -> list[dict]:
-    """Return one assignment per key (reissued keys keep their slot but are not imported)."""
+def assign(src: Source, target: Target, tags: list[str], intent_groups: dict[str, str]) -> list[dict]:
+    """Return one assignment per key: tag, and why it landed there."""
     account_intent = intent_mapping(src, target, intent_groups)
     for tag in tags:
         if target.tag_by_name(tag) is None:
@@ -371,8 +374,7 @@ def assign(src: Source, target: Target, tags: list[str], intent_groups: dict[str
         per_user.setdefault(key.user_id, {})
         per_user[key.user_id][tag] = per_user[key.user_id].get(tag, 0) + 1
         assigned.add(key.id)
-        assignments.append({"key": key, "tag": tag, "reason": reason,
-                            "reissue": key.id in reissue})
+        assignments.append({"key": key, "tag": tag, "reason": reason})
 
     # 1. 先按既有分组意图绑定：只认显式列出的分组（它们的成员账号唯一，代表用户既有订阅）。
     #    不按「成员恰好只有一个」自动扩大范围——额度型分组（20刀/40刀/200刀）成员的多少
@@ -393,30 +395,15 @@ def assign(src: Source, target: Target, tags: list[str], intent_groups: dict[str
     return assignments
 
 
-def duplicate_prefixes(keys: list[SourceKey]) -> dict[str, list[SourceKey]]:
-    seen: dict[str, list[SourceKey]] = {}
-    for key in keys:
-        seen.setdefault(key.prefix, []).append(key)
-    return {prefix: group for prefix, group in seen.items() if len(group) > 1}
-
-
 # ---------------------------------------------------------------------------
 # 断言
 # ---------------------------------------------------------------------------
 
 
 def preflight(src: Source, target: Target, assignments: list[dict], tags: list[str],
-              reissue: set[int], db_path: str) -> list[str]:
+              db_path: str) -> list[str]:
     problems: list[str] = []
     problems.extend(src.shape_problems)
-
-    # 重签的 key 不导入，因此它的旧前缀不参与冲突判定：冲突正是它被重签的原因。
-    duplicates = duplicate_prefixes([a["key"] for a in assignments if not a["reissue"]])
-    for prefix, group in duplicates.items():
-        ids = ", ".join(f"#{k.id}" for k in group)
-        problems.append(
-            f"前缀冲突 {prefix}（key {ids}）：网关只按 12 字符前缀查找且该列唯一，"
-            "必须保留其中一把，另一把用 --reissue-key 在网关重签")
 
     names: dict[str, int] = {}
     for user in src.users:
@@ -435,18 +422,13 @@ def preflight(src: Source, target: Target, assignments: list[dict], tags: list[s
             problems.append(
                 f"目标账户 {user.username} 已存在且不是本迁移创建的（note={account.get('note')!r}）")
 
-    stored = {row["key_prefix"]: row for row in read_target_db(db_path)[0]}
+    # 目标侧的幂等性：同一明文（同一哈希）已经在库里，这次导入就是更新那一行，没有任何冲突。
+    # 前缀撞上别人的 label 也不再是问题（M87 起 label 可以共用）。
+    stored_hashes = {row["key_hash"] for row in read_target_db(db_path)[0]}
     for assignment in assignments:
         key = assignment["key"]
-        existing = stored.get(key.prefix)
-        if existing is None:
-            continue
-        if existing["key_hash"] != key.khash and not str(existing["created_by"]).startswith(IMPORT_MARKER):
-            problems.append(
-                f"前缀 {key.prefix} 已被控制台签发的 key #{existing['id']!s} 占用（{existing['name']}）："
-                "导入会返回 409")
-        if assignment["reissue"] and not str(existing["created_by"]).startswith(IMPORT_MARKER):
-            problems.append(f"重签占位的前缀 {key.prefix} 在目标网关里已被占用")
+        if key.khash in stored_hashes:
+            note_line(f"  · 源 key #{key.id} 的哈希已在目标库里：本次导入是幂等更新")
 
     for tag in tags:
         tag_row = target.tag_by_name(tag)
@@ -479,8 +461,7 @@ def preflight(src: Source, target: Target, assignments: list[dict], tags: list[s
 # ---------------------------------------------------------------------------
 
 
-def print_plan(src: Source, target: Target, assignments: list[dict], tags: list[str],
-               reissue: set[int]) -> None:
+def print_plan(src: Source, target: Target, assignments: list[dict], tags: list[str]) -> None:
     users = {user.id: user for user in src.users}
     note_line("")
     note_line("源数据集")
@@ -495,7 +476,7 @@ def print_plan(src: Source, target: Target, assignments: list[dict], tags: list[
         key = assignment["key"]
         user = users.get(key.user_id)
         label = f"{user.username}({user.id})" if user else f"用户 {key.user_id}"
-        mark = "重签" if assignment["reissue"] else assignment["reason"]
+        mark = assignment["reason"]
         note_line(f"{label:<18}{key.id:<6}{key.name[:24]:<26}{key.prefix:<15}"
                   f"{assignment['tag']:<10}{mark}")
 
@@ -504,16 +485,15 @@ def print_plan(src: Source, target: Target, assignments: list[dict], tags: list[
         counts[assignment["tag"]] += 1
     note_line("")
     note_line("分配结果：" + " / ".join(f"{tag}={counts[tag]}" for tag in tags))
-    if reissue:
-        kept = {a["key"].prefix for a in assignments if not a["reissue"]}
-        for assignment in assignments:
-            key = assignment["key"]
-            if assignment["reissue"] and key.prefix in kept:
-                others = [a["key"].id for a in assignments
-                          if not a["reissue"] and a["key"].prefix == key.prefix]
-                note_line(f"前缀冲突：key #{key.id} 与 key {others} 同为 {key.prefix}，"
-                          f"保留 {others}，key #{key.id} 在网关重签后绑 {assignment['tag']}")
-        note_line(f"需在网关重签的 key：{sorted(reissue)}（明文由控制台取出后单独交付本人）")
+
+    # 前缀相同的 key 会被完整导入（M87）：这里只是把这件事讲清楚，供人核对。
+    by_prefix: dict[str, list[SourceKey]] = {}
+    for assignment in assignments:
+        by_prefix.setdefault(assignment["key"].prefix, []).append(assignment["key"])
+    for prefix, group in sorted(by_prefix.items()):
+        if len(group) > 1:
+            ids = ", ".join(f"#{k.id}" for k in group)
+            note_line(f"共享前缀 {prefix}：key {ids}（各自独立，都能照常用）")
 
 
 def model_coverage(notes: str, days: int, db_path: str) -> list[tuple[str, int, bool]]:
@@ -544,23 +524,22 @@ def build_plan(args, gw: Gateway) -> tuple[Source, Target, list[dict]]:
     src = load_source(args.notes)
     target = load_target(gw)
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]
-    reissue = {int(v) for v in args.reissue_key}
     skip = {int(v) for v in args.skip_key}
-    for key_id in reissue | skip:
+    for key_id in skip:
         if not any(key.id == key_id for key in src.keys):
-            die(f"--reissue-key/--skip-key 指定的 key #{key_id} 不在待迁集合里")
+            die(f"--skip-key 指定的 key #{key_id} 不在待迁集合里")
     if skip:
         src.keys = [key for key in src.keys if key.id not in skip]
     intent_groups = dict(args.intent_group_map)
-    assignments = assign(src, target, tags, intent_groups, reissue)
+    assignments = assign(src, target, tags, intent_groups)
     return src, target, assignments
 
 
 def cmd_plan(args, gw: Gateway) -> int:
     src, target, assignments = build_plan(args, gw)
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]
-    print_plan(src, target, assignments, tags, {int(v) for v in args.reissue_key})
-    problems = preflight(src, target, assignments, tags, {int(v) for v in args.reissue_key}, args.db)
+    print_plan(src, target, assignments, tags)
+    problems = preflight(src, target, assignments, tags, args.db)
     note_line("")
     if problems:
         note_line("预检未通过：")
@@ -614,8 +593,7 @@ def cmd_snapshot(args, gw: Gateway) -> int:
 def cmd_apply(args, gw: Gateway) -> int:
     src, target, assignments = build_plan(args, gw)
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]
-    reissue = {int(v) for v in args.reissue_key}
-    problems = preflight(src, target, assignments, tags, reissue, args.db)
+    problems = preflight(src, target, assignments, tags, args.db)
     if problems:
         for problem in problems:
             note_line("  ✗ " + problem)
@@ -641,8 +619,6 @@ def cmd_apply(args, gw: Gateway) -> int:
             key = assignment["key"]
             if key.user_id != user.id:
                 continue
-            if assignment["reissue"]:
-                continue
             result = gw.call("POST", "/admin/api/v1/keys/import", {
                 "account_id": account["id"], "name": key.name,
                 "key_prefix": key.prefix, "key_hash": key.khash,
@@ -652,22 +628,24 @@ def cmd_apply(args, gw: Gateway) -> int:
                 imported += 1
             else:
                 updated += 1
-    note_line(f"账户新增 {created_users} 个；key 新增 {imported} 把、更新 {updated} 把（重签占位 {len(reissue)} 把未导入）")
+    note_line(f"账户新增 {created_users} 个；key 新增 {imported} 把、更新 {updated} 把")
     return 0
 
 
 def cmd_verify(args, gw: Gateway) -> int:
     src, target, assignments = build_plan(args, gw)
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]
-    reissue = {int(v) for v in args.reissue_key}
     keys, accounts = read_target_db(args.db)
     accounts_by_id = {a["id"]: a for a in accounts}
-    keys_by_prefix = {k["key_prefix"]: k for k in keys}
+    # 核对按哈希（M87）：前缀只是标签，两把 key 可以共用它。
+    keys_by_hash = {k["key_hash"]: k for k in keys}
     users = {user.id: user for user in src.users}
 
     failures: list[str] = []
     warnings: list[str] = []
     counts = {tag: 0 for tag in tags}
+    # 生效标签的复核按 key id 走：前缀可以重复，用它当键会把两把 key 混成一把。
+    verified_ids: dict[int, str] = {}
     for assignment in assignments:
         key = assignment["key"]
         user = users[key.user_id]
@@ -681,46 +659,30 @@ def cmd_verify(args, gw: Gateway) -> int:
             continue
         if row["tags_json"] not in ("", "[]"):
             failures.append(f"账户 {user.username} 带了标签 {row['tags_json']}：会与 key 标签取并集，必须为空")
-        if assignment["reissue"]:
-            candidates = [
-                k for k in keys
-                if k["account_id"] == account["id"]
-                and json.loads(k["tags_json"] or "[]") == [assignment["tag"]]
-                and k["key_prefix"] not in {a["key"].prefix for a in assignments}
-            ]
-            if len(candidates) == 1:
-                counts[assignment["tag"]] += 1
-                note_line(f"重签 key：源 key #{key.id} → aigw key #{candidates[0]['id']}"
-                          f"（{candidates[0]['key_prefix']}，标签 {assignment['tag']}）")
-            else:
-                warnings.append(f"重签 key 未就位：源 key #{key.id}（用户 {user.username}）"
-                                f"应在账户 {user.username} 下新建一把标签为 {assignment['tag']} 的 key")
-            continue
-        stored = keys_by_prefix.get(key.prefix)
+        stored = keys_by_hash.get(key.khash)
         if stored is None:
-            failures.append(f"key 缺失：前缀 {key.prefix}（源 key #{key.id}）")
+            failures.append(f"key 缺失：哈希 {key.khash[:12]}…（源 key #{key.id}，标签 {key.prefix}）")
             continue
-        if stored["key_hash"] != key.khash:
-            failures.append(f"哈希不一致：前缀 {key.prefix}（源 key #{key.id}）")
+        if stored["account_id"] != account["id"]:
+            failures.append(f"key 落在别的账户：源 key #{key.id}（account_id={stored['account_id']}）")
         if stored["status"] != "active":
-            failures.append(f"状态不是 active：前缀 {key.prefix} status={stored['status']}")
+            failures.append(f"状态不是 active：源 key #{key.id} status={stored['status']}")
         if not str(stored["created_by"]).startswith(IMPORT_MARKER):
-            failures.append(f"created_by 不是导入标记：前缀 {key.prefix} created_by={stored['created_by']}")
+            failures.append(f"created_by 不是导入标记：源 key #{key.id} created_by={stored['created_by']}")
         if json.loads(stored["tags_json"] or "[]") != [assignment["tag"]]:
-            failures.append(f"标签不符：前缀 {key.prefix} 库里是 {stored['tags_json']}，"
+            failures.append(f"标签不符：源 key #{key.id} 库里是 {stored['tags_json']}，"
                             f"预期 [\"{assignment['tag']}\"]")
+        verified_ids[stored["id"]] = assignment["tag"]
         counts[assignment["tag"]] += 1
 
     # 生效标签要经管理接口再确认一次：它走的是注册表快照 + 数据面同一套解析。
-    expected_by_prefix = {a["key"].prefix: a["tag"] for a in assignments if not a["reissue"]}
     for key_row in target.keys:
-        prefix = key_row.get("key_prefix")
-        expected = expected_by_prefix.get(prefix)
+        expected = verified_ids.get(key_row.get("id"))
         if expected is None:
             continue
         if key_row.get("effective_tags") != [expected]:
-            failures.append(f"生效标签不符：{prefix} effective_tags={key_row.get('effective_tags')}，"
-                            f"预期 [\"{expected}\"]")
+            failures.append(f"生效标签不符：key #{key_row.get('id')} "
+                            f"effective_tags={key_row.get('effective_tags')}，预期 [\"{expected}\"]")
 
     tag_summary = " / ".join(f"{tag}={counts[tag]}" for tag in tags)
     note_line(f"核对结果：{tag_summary}")
@@ -738,44 +700,26 @@ def cmd_verify(args, gw: Gateway) -> int:
 def cmd_report(args, gw: Gateway) -> int:
     src, target, assignments = build_plan(args, gw)
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]
-    reissue = {int(v) for v in args.reissue_key}
     keys, accounts = read_target_db(args.db)
-    keys_by_prefix = {k["key_prefix"]: k for k in keys}
+    # 按哈希回查（M87）：前缀可以重复，哈希不会。
+    keys_by_hash = {k["key_hash"]: k for k in keys}
     users = {user.id: user for user in src.users}
     accounts_by_name = {a["name"]: a for a in target.accounts}
 
-    # 重签的那把 key 在网关里换了一把全新的 key：它的旧前缀正是被保留那一把的前缀，
-    # 因此不能按前缀回查（会指到别人身上），要按「同一账户、同一标签、且前缀不属于任何源 key」
-    # 找出替换件——与 verify 用的是同一条判定。
-    source_prefixes = {a["key"].prefix for a in assignments}
     rows = []
     for assignment in assignments:
         key = assignment["key"]
         user = users[key.user_id]
         account = accounts_by_name.get(user.username) or {}
-        target_key_id = None
-        target_prefix = key.prefix
-        if assignment["reissue"]:
-            target_prefix = ""
-            for candidate in keys:
-                if candidate["account_id"] != account.get("id"):
-                    continue
-                if json.loads(candidate["tags_json"] or "[]") != [assignment["tag"]]:
-                    continue
-                if candidate["key_prefix"] in source_prefixes:
-                    continue
-                target_key_id, target_prefix = candidate["id"], candidate["key_prefix"]
-                break
-        else:
-            stored = keys_by_prefix.get(key.prefix)
-            target_key_id = None if stored is None else stored["id"]
+        stored = keys_by_hash.get(key.khash)
         rows.append({
             "source_user_id": user.id, "source_username": user.username, "source_email": user.email,
             "source_key_id": key.id, "source_key_name": key.name, "source_group_id": key.group_id,
-            "source_key_prefix": key.prefix, "target_key_prefix": target_prefix,
-            "tag": assignment["tag"], "reason": assignment["reason"], "reissue": assignment["reissue"],
+            "source_key_prefix": key.prefix,
+            "target_key_prefix": "" if stored is None else stored["key_prefix"],
+            "tag": assignment["tag"], "reason": assignment["reason"],
             "target_account_id": account.get("id"), "target_account_name": user.username,
-            "target_key_id": target_key_id,
+            "target_key_id": None if stored is None else stored["id"],
         })
     counts = {tag: 0 for tag in tags}
     for row in rows:
@@ -913,8 +857,6 @@ def main() -> int:
     parser.add_argument("--notes", default=DEFAULT_NOTES, help="源库 users.notes 过滤值")
     parser.add_argument("--tags", default=",".join(DEFAULT_TAGS), help="参与分配的目标标签，逗号分隔")
     parser.add_argument("--intent-group", default="", help="分组=标签,分组=标签（默认按 gptjp 的 1/2/3 研发帐号）")
-    parser.add_argument("--reissue-key", action="append", default=[],
-                        help="该源 key 不导入（前缀冲突或需换 key），但保留标签占位，由控制台重签")
     parser.add_argument("--skip-key", action="append", default=[], help="该源 key 完全跳过")
     parser.add_argument("--limit", type=int, default=0, help="apply 只处理前 N 把（分批）")
     parser.add_argument("--coverage-days", type=int, default=30, help="模型名覆盖统计的回溯天数")

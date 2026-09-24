@@ -60,6 +60,10 @@ type importBatchItem struct {
 // (keys[i].<field>). That is the decision recorded in the design document — M43 refused a
 // batch endpoint because "partial success" needs a state machine to describe, and this
 // endpoint keeps that refusal while giving the caller one call and one error report.
+//
+// Two items may share a display prefix (M87): the row is identified by its hash, so a repeated
+// label is a label, not a conflict — and a batch is exactly how a sub2api-style source, where
+// two people's keys share their first 12 characters, gets migrated.
 func (s *Server) handleAdminImportKeys(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.adminActor(w, r, true)
 	if !ok {
@@ -96,21 +100,12 @@ func (s *Server) handleAdminImportKeys(w http.ResponseWriter, r *http.Request) {
 	keys := make([]*domain.APIKey, 0, len(body.Keys))
 	created := make([]bool, 0, len(body.Keys))
 	sources := make([]string, 0, len(body.Keys))
-	seen := make(map[string]int, len(body.Keys))
 	for i := range body.Keys {
 		key, isNew, source, apiErr := s.prepareImportedKey(r.Context(), body.Keys[i], known, actor.Username)
 		if apiErr != nil {
 			writeAPIError(w, locateBatchError(apiErr, i))
 			return
 		}
-		// A prefix repeated inside one batch is ambiguous by construction: the second write
-		// would silently overwrite the first, so the batch is refused and both indexes named.
-		if first, dup := seen[key.KeyPrefix]; dup {
-			writeAPIError(w, batchItemError(i, fmt.Sprintf(
-				"key prefix %s is already used by item %d in this batch", key.KeyPrefix, first)))
-			return
-		}
-		seen[key.KeyPrefix] = i
 		keys = append(keys, key)
 		created = append(created, isNew)
 		sources = append(sources, source)
@@ -161,13 +156,13 @@ func (s *Server) prepareImportedKey(ctx context.Context, item importBatchItem, k
 			"api_key or key_prefix+key_hash is required").WithParam("api_key")
 	}
 	source := "hash"
-	var prefix, hash string
+	var label, hash string
 	var apiErr *domain.APIError
 	if plain {
 		source = "plaintext"
-		prefix, hash, apiErr = plaintextCredential(item.APIKey)
+		label, hash, apiErr = plaintextCredential(item.APIKey)
 	} else {
-		prefix, hash, apiErr = importedCredential(item.KeyPrefix, item.KeyHash)
+		label, hash, apiErr = importedCredential(item.KeyPrefix, item.KeyHash)
 	}
 	if apiErr != nil {
 		return nil, false, "", apiErr
@@ -214,25 +209,19 @@ func (s *Server) prepareImportedKey(ctx context.Context, item importBatchItem, k
 		return nil, false, "", apiErr
 	}
 
-	// The prefix is the table's lookup key, so an import may only take over a row it owns:
-	// the same secret again (same hash) or a row that already carries the import marker.
-	// Anything else would silently replace a key the console handed to somebody.
-	existing, err := s.deps.AdminStore.FindAPIKeyByPrefix(ctx, prefix)
+	// One row per secret (M87): the hash is the identity, so a key that is already here is an
+	// idempotent update while a different secret is always a new row — even when its label is
+	// already worn by somebody else's key.
+	existing, err := s.deps.AdminStore.FindAPIKeyByHash(ctx, hash)
 	if err != nil {
 		return nil, false, "", toAPIError(err)
 	}
 	created := existing == nil
-	if existing != nil && !secret.Equal(existing.KeyHash, hash) &&
-		!strings.HasPrefix(existing.CreatedBy, importedKeyPrefix) {
-		return nil, false, "", domain.ErrConflict(fmt.Sprintf(
-			"key prefix %s already belongs to key %q created by %q; disable or remove it first",
-			prefix, existing.Name, existing.CreatedBy))
-	}
 
 	return &domain.APIKey{
 		AccountID:       accountID,
 		Name:            name,
-		KeyPrefix:       prefix,
+		KeyPrefix:       label,
 		KeyHash:         hash,
 		TagsJSON:        marshalOrEmpty(item.Tags),
 		GrantsJSON:      marshalAny(item.Grants),
@@ -278,12 +267,17 @@ func batchImportPayload(dryRun bool, keys []*domain.APIKey, created []bool, ids 
 }
 
 // handleAdminLookupKey implements POST /admin/api/v1/keys/lookup (M80): given a key, or the
-// 12-character prefix that indexes it, answer which account it belongs to and in what state.
+// display prefix (label) it wears, answer which account it belongs to and in what state.
 //
 // It is a read: the route requires no more than the viewer role, and it deliberately does
 // not decide whether the key may be *used*. status and expires_at are reported verbatim —
 // the data plane's verifier is the only place that turns them into an admission decision,
 // and two implementations of that decision would eventually disagree in public.
+//
+// Since M87 the two branches answer different questions. A plaintext pins exactly one row (its
+// SHA-256 is the row's identity) and the answer carries that key and its account. A prefix is a
+// label two keys may share — sub2api-style sources make that ordinary — so that branch answers
+// with every match and no account of its own.
 func (s *Server) handleAdminLookupKey(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.adminActor(w, r, false); !ok {
 		return
@@ -297,88 +291,109 @@ func (s *Server) handleAdminLookupKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	plain := strings.TrimSpace(body.APIKey) != ""
-	byPrefix := strings.TrimSpace(body.KeyPrefix) != ""
+	byLabel := strings.TrimSpace(body.KeyPrefix) != ""
 	switch {
-	case plain && byPrefix:
+	case plain && byLabel:
 		writeAPIError(w, domain.ErrInvalidRequest("give either api_key or key_prefix, not both").WithParam("api_key"))
 		return
-	case !plain && !byPrefix:
+	case !plain && !byLabel:
 		writeAPIError(w, domain.ErrInvalidRequest("api_key or key_prefix is required").WithParam("api_key"))
 		return
 	}
 
-	prefix, hash, matched := "", "", ""
-	var apiErr *domain.APIError
 	if plain {
-		prefix, hash, apiErr = lookupPlaintext(body.APIKey)
-		matched = "hash"
-	} else {
-		prefix, apiErr = importedPrefix(body.KeyPrefix)
-		matched = "prefix"
+		hash, apiErr := lookupPlaintext(body.APIKey)
+		if apiErr != nil {
+			writeAPIError(w, apiErr)
+			return
+		}
+		row, err := s.deps.AdminStore.FindAPIKeyByHash(r.Context(), hash)
+		if err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		if row == nil {
+			// A secret nobody has registered. This is an answer, not an error, so a caller reads
+			// one shape whether or not the key is known.
+			writeJSON(w, http.StatusOK, map[string]any{
+				"found": false, "reason": "unknown_key", "matched": "hash",
+				"note": "没有任何 Key 的哈希与这把明文一致（明文不落库，网关只比对哈希）",
+			})
+			return
+		}
+		payload := map[string]any{
+			"found": true, "matched": "hash", "key": s.lookupKeyJSON(row),
+			"note": "这只回答归属与状态，不做鉴权判定：status/expires_at 如实报告，能不能用由数据面 verifier 决定",
+		}
+		account, err := s.deps.AdminStore.GetAccount(r.Context(), row.AccountID)
+		switch {
+		case err == nil:
+			payload["account"] = lookupAccountJSON(account)
+		case domain.IsNotFound(err):
+			// A key row whose account is gone is a real state a support call can land on; saying
+			// "the account no longer exists" beats a 404 that hides the key's prefix.
+			payload["account"] = nil
+			payload["note"] = payload["note"].(string) + "；该 Key 指向的账户已不存在"
+		default:
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		writeJSON(w, http.StatusOK, payload)
+		return
 	}
+
+	label, apiErr := keyLabel(body.KeyPrefix)
 	if apiErr != nil {
 		writeAPIError(w, apiErr)
 		return
 	}
-
-	row, err := s.deps.AdminStore.FindAPIKeyByPrefix(r.Context(), prefix)
+	rows, err := s.deps.AdminStore.ListAPIKeysByPrefix(r.Context(), label)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	if row == nil {
-		// A prefix nobody has ever stored. This is an answer, not an error, so an agent reads
-		// one shape whether or not the key exists.
+	if len(rows) == 0 {
+		// A label nobody has ever stored. Same shape as the plaintext miss: this is an answer.
 		writeJSON(w, http.StatusOK, map[string]any{
 			"found": false, "reason": "unknown_prefix",
-			"note": "没有任何 Key 用过这个前缀（明文分支给的哈希也没有可比较的行）",
+			"note": "没有任何 Key 用过这个前缀",
 		})
 		return
 	}
-	if plain && !secret.Equal(row.KeyHash, hash) {
-		// The prefix exists but the plaintext is not its owner. Naming the row here would turn
-		// the endpoint into "learn any account from a prefix"; the prefix branch is the
-		// supported way to ask that question, and the prefix is not a secret anyway.
-		writeJSON(w, http.StatusOK, map[string]any{
-			"found": false, "reason": "hash_mismatch", "matched": "prefix",
-			"note": "该前缀已有行，但你给的明文与它的哈希不匹配；要按标识查询请改用 key_prefix",
-		})
-		return
+	keys := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		keys = append(keys, s.lookupKeyJSON(row))
 	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"found": true, "matched": "prefix", "count": len(rows), "keys": keys,
+		"note": "前缀不是身份（M87）：同一前缀可能对应多把 key，这里全部列出；每一把能否使用由数据面 verifier 决定",
+	})
+}
 
+// lookupKeyJSON renders one key the way the lookup endpoint describes it. The account is not
+// part of it: the plaintext branch resolves the account separately, and a prefix match may span
+// several accounts, so a reader has account_id (and the console) to go by.
+func (s *Server) lookupKeyJSON(row *domain.APIKey) map[string]any {
 	accountTags, effectiveTags := s.keyTagFields(row)
-	payload := map[string]any{
-		"found": true, "matched": matched,
-		"key": map[string]any{
-			"id": row.ID, "name": row.Name, "account_id": row.AccountID,
-			"key_prefix": row.KeyPrefix, "status": row.Status,
-			"tags": jsonOrEmptyArray(row.TagsJSON), "account_tags": accountTags,
-			"effective_tags": effectiveTags, "created_by": row.CreatedBy,
-			"expires_at": timeOrNil(row.ExpiresAt), "last_used_at": timeOrNil(row.LastUsedAt),
-			"created_at": row.CreatedAt.UTC().Format(time.RFC3339),
-			"feishu":     feishuBindingJSON(row),
-		},
-		"note": "这只回答归属与状态，不做鉴权判定：status/expires_at 如实报告，能不能用由数据面 verifier 决定",
+	return map[string]any{
+		"id": row.ID, "name": row.Name, "account_id": row.AccountID,
+		"key_prefix": row.KeyPrefix, "status": row.Status,
+		"tags": jsonOrEmptyArray(row.TagsJSON), "account_tags": accountTags,
+		"effective_tags": effectiveTags, "created_by": row.CreatedBy,
+		"expires_at": timeOrNil(row.ExpiresAt), "last_used_at": timeOrNil(row.LastUsedAt),
+		"created_at": row.CreatedAt.UTC().Format(time.RFC3339),
+		"feishu":     feishuBindingJSON(row),
 	}
-	account, err := s.deps.AdminStore.GetAccount(r.Context(), row.AccountID)
-	switch {
-	case err == nil:
-		payload["account"] = map[string]any{
-			"id": account.ID, "name": account.Name, "status": account.Status,
-			"tags":        jsonOrEmptyArray(account.TagsJSON),
-			"dsh_enabled": account.DSHEnabled, "dsh_tenant": account.DshTenant,
-			"feishu": accountFeishuJSON(account),
-		}
-	case domain.IsNotFound(err):
-		// A key row whose account is gone is a real state a support call can land on; saying
-		// "the account no longer exists" beats a 404 that hides the key's prefix.
-		payload["account"] = nil
-		payload["note"] = payload["note"].(string) + "；该 Key 指向的账户已不存在"
-	default:
-		writeAPIError(w, toAPIError(err))
-		return
+}
+
+// lookupAccountJSON renders the account block the plaintext branch reports.
+func lookupAccountJSON(account *domain.Account) map[string]any {
+	return map[string]any{
+		"id": account.ID, "name": account.Name, "status": account.Status,
+		"tags":        jsonOrEmptyArray(account.TagsJSON),
+		"dsh_enabled": account.DSHEnabled, "dsh_tenant": account.DshTenant,
+		"feishu": accountFeishuJSON(account),
 	}
-	writeJSON(w, http.StatusOK, payload)
 }
 
 // plaintextCredential derives the lookup prefix and the hash from a key the caller supplied.
@@ -410,22 +425,22 @@ func plaintextCredential(raw string) (string, string, *domain.APIError) {
 	return secret.Prefix(key), secret.Hash(key), nil
 }
 
-// lookupPlaintext derives the same two values for the read path. It accepts a shorter value
+// lookupPlaintext derives the hash the read path looks a key up by. It accepts a shorter value
 // than the write path on purpose: a caller holding a malformed or truncated key must get
 // "not ours" (found=false) rather than a 400 that reveals how the gateway stores keys.
-func lookupPlaintext(raw string) (string, string, *domain.APIError) {
+func lookupPlaintext(raw string) (string, *domain.APIError) {
 	key := secret.Normalize(raw)
 	if key == "" {
-		return "", "", domain.ErrInvalidRequest("api_key is empty").WithParam("api_key")
+		return "", domain.ErrInvalidRequest("api_key is empty").WithParam("api_key")
 	}
 	if len(key) > maxPlaintextKeyLen {
-		return "", "", domain.ErrInvalidRequest(fmt.Sprintf(
+		return "", domain.ErrInvalidRequest(fmt.Sprintf(
 			"api_key must be at most %d characters", maxPlaintextKeyLen)).WithParam("api_key")
 	}
 	if apiErr := requirePrintable(key, "api_key"); apiErr != nil {
-		return "", "", apiErr
+		return "", apiErr
 	}
-	return secret.Prefix(key), secret.Hash(key), nil
+	return secret.Hash(key), nil
 }
 
 // requirePrintable rejects anything that could not have travelled as a bearer token.

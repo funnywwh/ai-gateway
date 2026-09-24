@@ -60,9 +60,18 @@ type AdminStore interface {
 	FindAdminUserByFeishuOpenID(ctx context.Context, openID string) (*domain.AdminUser, error)
 	BindAdminUserFeishu(ctx context.Context, id int64, binding domain.FeishuBinding) error
 	UnbindAdminUserFeishu(ctx context.Context, id int64) (bool, error)
-	// FindAPIKeyByPrefix reports a missing row as (nil, nil): the key importer must tell
-	// "new" from "already here" without the data plane's "unknown prefix is a 401" rule.
+	// FindAPIKeyByHash reports a missing row as (nil, nil): the key importer must tell "new"
+	// from "already here" without the data plane's "unknown hash is a 401" rule. Since M87 the
+	// hash — not the display prefix — is what "already here" means.
+	FindAPIKeyByHash(ctx context.Context, hash string) (*domain.APIKey, error)
+	// FindAPIKeyByPrefix reports any key wearing this display prefix, or (nil, nil) when none
+	// does. The mint path uses it to keep labels distinct, which stopped being a correctness
+	// requirement in M87 (the prefix is a label, not an identity).
 	FindAPIKeyByPrefix(ctx context.Context, prefix string) (*domain.APIKey, error)
+	// ListAPIKeysByPrefix returns every key wearing a prefix, because a shared prefix is now a
+	// legitimate state: the lookup endpoint answers with a list instead of pretending there is
+	// exactly one match.
+	ListAPIKeysByPrefix(ctx context.Context, prefix string) ([]*domain.APIKey, error)
 	UpsertAPIKey(ctx context.Context, k *domain.APIKey) (int64, error)
 	// UpsertAPIKeys writes a whole batch in one transaction (M80). The batch import validates
 	// every item first, so an error here means the database refused a row the checker
@@ -298,6 +307,36 @@ func (s *Server) handleAdminListKeys(w http.ResponseWriter, r *http.Request) {
 	writeList(w, window, len(out), page)
 }
 
+// mintPrefixAttempts caps how many times a mint path retries when the freshly generated token's
+// display prefix is already in use.
+const mintPrefixAttempts = 3
+
+// mintTokenWithFreePrefix generates a token and hands it back once no other row wears its
+// 12-character display prefix.
+//
+// Since M87 the prefix is only a label — two keys may share one and each still authenticates by
+// its own hash — so this is tidiness, not correctness. It is kept because (a) the console and
+// support read prefixes as "which key is this", and (b) dshgw's legacy prefix→tenant fallback
+// still resolves by prefix, so handing out distinct labels keeps that path unambiguous. mint()
+// runs afresh on every attempt, so a collision simply yields another token; three collisions in
+// a row is a ~30-bit coincidence three times over, and is reported instead of retried forever.
+func mintTokenWithFreePrefix(mint func() string, taken func(prefix string) (bool, error)) (string, error) {
+	var last string
+	for attempt := 0; attempt < mintPrefixAttempts; attempt++ {
+		token := mint()
+		prefix := secret.Prefix(token)
+		inUse, err := taken(prefix)
+		if err != nil {
+			return "", err
+		}
+		if !inUse {
+			return token, nil
+		}
+		last = prefix
+	}
+	return "", fmt.Errorf("no free key prefix after %d attempts (last collision: %s)", mintPrefixAttempts, last)
+}
+
 func (s *Server) handleAdminCreateKey(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.adminActor(w, r, true)
 	if !ok {
@@ -334,7 +373,14 @@ func (s *Server) handleAdminCreateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token := ids.APIKey()
+	token, err := mintTokenWithFreePrefix(ids.APIKey, func(prefix string) (bool, error) {
+		row, err := s.deps.AdminStore.FindAPIKeyByPrefix(r.Context(), prefix)
+		return row != nil, err
+	})
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
 	key := &domain.APIKey{
 		AccountID:       accountID,
 		Name:            body.Name,
@@ -363,19 +409,22 @@ func (s *Server) handleAdminCreateKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// importedKeyPrefix marks the keys that entered through the hash import path. It is what
-// lets a re-import refresh its own row while a key the console issued stays untouched.
+// importedKeyPrefix marks the keys that entered through an import path, so the console and the
+// audit trail can tell "an operator registered this credential" from "the console minted it".
+//
+// It used to double as an ownership rule ("a re-import may only take over a row it owns"), which
+// existed solely because the display prefix was the table's lookup key. Since M87 a row is
+// identified by its hash, so the marker is exactly what it looks like: provenance.
 const importedKeyPrefix = "import:"
 
-// handleAdminImportKey registers a key whose plaintext lives somewhere else: the caller
-// sends the lookup prefix and the SHA-256 of the secret, never the secret itself.
+// handleAdminImportKey registers a key whose plaintext lives somewhere else: the caller sends
+// the SHA-256 of the secret (and optionally a display label), never the secret itself.
 //
-// This is the migration path for keys that already work against another gateway. The
-// console's create endpoint mints a fresh token and shows it once; an import has nothing
-// to show, because the gateway never learns the plaintext. Two consequences are worth
-// stating plainly: the caller is responsible for the prefix and the hash coming from one
-// and the same secret (nothing here can verify that), and a key imported this way can only
-// be revoked by status — its plaintext cannot be re-displayed to anyone.
+// This is the migration path for keys that already work against another gateway. The console's
+// create endpoint mints a fresh token and shows it once; an import has nothing to show, because
+// the gateway never learns the plaintext. Two consequences are worth stating plainly: a key
+// registered this way can only be revoked by status (its plaintext cannot be re-displayed to
+// anyone), and the optional label is exactly that — a label, not an identity (M87).
 func (s *Server) handleAdminImportKey(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.adminActor(w, r, true)
 	if !ok {
@@ -401,7 +450,7 @@ func (s *Server) handleAdminImportKey(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
 		return
 	}
-	prefix, hash, apiErr := importedCredential(body.KeyPrefix, body.KeyHash)
+	label, hash, apiErr := importedCredential(body.KeyPrefix, body.KeyHash)
 	if apiErr != nil {
 		writeAPIError(w, apiErr)
 		return
@@ -467,26 +516,22 @@ func (s *Server) handleAdminImportKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The prefix is the table's lookup key, so an import may only take over a row it owns:
-	// the same secret again (same hash) or a row that already carries the import marker.
-	// Anything else would silently replace a key the console handed to somebody.
-	existing, err := s.deps.AdminStore.FindAPIKeyByPrefix(r.Context(), prefix)
+	// One row per secret (M87): the hash is the identity. The same hash again is an idempotent
+	// update — it may correct the label, the tags or the account — while a *different* hash is a
+	// new row even when somebody else's key already wears that label. That is the point of the
+	// milestone: sub2api-style sources let two people hold keys sharing their first 12
+	// characters, and a migration must not force one of them to change keys.
+	existing, err := s.deps.AdminStore.FindAPIKeyByHash(r.Context(), hash)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
 	created := existing == nil
-	if existing != nil && existing.KeyHash != hash && !strings.HasPrefix(existing.CreatedBy, importedKeyPrefix) {
-		writeAPIError(w, domain.ErrConflict(fmt.Sprintf(
-			"key prefix %s already belongs to key %q created by %q; disable or remove it first",
-			prefix, existing.Name, existing.CreatedBy)))
-		return
-	}
 
 	key := &domain.APIKey{
 		AccountID:       accountID,
 		Name:            strings.TrimSpace(body.Name),
-		KeyPrefix:       prefix,
+		KeyPrefix:       label,
 		KeyHash:         hash,
 		TagsJSON:        marshalOrEmpty(body.Tags),
 		GrantsJSON:      marshalAny(body.Grants),
@@ -502,58 +547,72 @@ func (s *Server) handleAdminImportKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The hash stays out of the audit trail on purpose: an operator reading the log needs
-	// to know that a key was imported and which prefix it took, and nothing more.
+	// to know that a key was imported and which label it took, and nothing more.
 	s.audit(r.Context(), actor.Username, "import", "api_key", strconv.FormatInt(id, 10),
-		map[string]any{"name": key.Name, "account_id": accountID, "key_prefix": prefix,
+		map[string]any{"name": key.Name, "account_id": accountID, "key_prefix": label,
 			"tags_set": body.Tags != nil, "status": status, "created": created}, "ok")
 	s.reload(r.Context(), "api key imported", false)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id": id, "name": key.Name, "account_id": accountID, "key_prefix": prefix,
+		"id": id, "name": key.Name, "account_id": accountID, "key_prefix": label,
 		"status": status, "tags": jsonOrEmptyArray(key.TagsJSON), "created": created,
-		"note": "only the prefix and its hash were written: the gateway does not know the plaintext",
+		"note": "only the label and its hash were written: the gateway does not know the plaintext",
 	})
 }
 
-// importedCredential validates the two halves of an imported key.
+// maxKeyLabelLen bounds the display label an import may attach to a key. It keeps the column and
+// the console cell readable; since M87 it has no security meaning, because the label is no longer
+// what a request is looked up by.
+const maxKeyLabelLen = 64
+
+// keyLabel validates the optional display label of an imported credential (M87).
 //
-// The prefix must have exactly the length the data plane looks up by (secret.PrefixLen) and
-// stay within printable ASCII; a shorter or padded prefix would index a row no bearer token
-// can ever match. The hash is the hex SHA-256 the verifier compares against, so accepting
-// anything else would store a key that cannot authenticate.
-func importedCredential(prefix, hash string) (string, string, *domain.APIError) {
-	prefix, apiErr := importedPrefix(prefix)
+// Before M87 this rule demanded exactly secret.PrefixLen characters, because the label *was* the
+// data plane's lookup key: a shorter or padded one would have indexed a row no bearer token could
+// ever match. The row is found by hash now, so an importer may attach any printable label (or
+// none), and an empty label simply shows as blank in the console.
+func keyLabel(label string) (string, *domain.APIError) {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return "", nil
+	}
+	if len(label) > maxKeyLabelLen {
+		return "", domain.ErrInvalidRequest(fmt.Sprintf(
+			"key_prefix must be at most %d characters", maxKeyLabelLen)).WithParam("key_prefix")
+	}
+	if apiErr := requirePrintable(label, "key_prefix"); apiErr != nil {
+		return "", apiErr
+	}
+	return label, nil
+}
+
+// importedCredential validates the two halves of an imported key: the hash is mandatory (it is
+// the row's identity, and the verifier compares against it), the label is optional.
+func importedCredential(label, hash string) (string, string, *domain.APIError) {
+	label, apiErr := keyLabel(label)
 	if apiErr != nil {
 		return "", "", apiErr
 	}
 	hash = strings.ToLower(strings.TrimSpace(hash))
-	if len(hash) != 64 {
+	if !isHexSHA256(hash) {
 		return "", "", domain.ErrInvalidRequest(
 			"key_hash must be the 64-character hex SHA-256 of the key").WithParam("key_hash")
 	}
-	for _, c := range []byte(hash) {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return "", "", domain.ErrInvalidRequest(
-				"key_hash must be the 64-character hex SHA-256 of the key").WithParam("key_hash")
-		}
-	}
-	return prefix, hash, nil
+	return label, hash, nil
 }
 
-// importedPrefix validates the lookup half of a credential on its own. The batch import
-// (M80) and the ownership lookup need exactly this rule without a hash beside it, and the
-// prefix is also the console-visible identifier of a key, so the rule lives in one place.
-func importedPrefix(prefix string) (string, *domain.APIError) {
-	prefix = strings.TrimSpace(prefix)
-	if len(prefix) != secret.PrefixLen {
-		return "", domain.ErrInvalidRequest(fmt.Sprintf(
-			"key_prefix must be exactly %d characters (the length the gateway indexes by)",
-			secret.PrefixLen)).WithParam("key_prefix")
+// isHexSHA256 reports whether the value is 64 lowercase hex characters, i.e. a SHA-256 digest in
+// the one spelling the verifier produces.
+func isHexSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
 	}
-	if apiErr := requirePrintable(prefix, "key_prefix"); apiErr != nil {
-		return "", apiErr
+	for _, c := range []byte(value) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
 	}
-	return prefix, nil
+	return true
 }
 
 // unknownTagName reports the first tag name that does not exist.
@@ -680,7 +739,9 @@ func (s *Server) handleAdminPatchKey(w http.ResponseWriter, r *http.Request) {
 		"policy_set": body.Policy != nil,
 	}, "ok")
 	if s.deps.InvalidateKey != nil {
-		s.deps.InvalidateKey(target.KeyPrefix)
+		// The cache is keyed by the token's hash (M87), and the row just written names it: the
+		// next request with this key re-reads status/expiry instead of riding a cached verdict.
+		s.deps.InvalidateKey(target.KeyHash)
 	}
 	if recOutput != recReasoning {
 		s.deps.Log.Info("recording policy changed",

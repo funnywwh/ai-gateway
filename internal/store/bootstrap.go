@@ -161,9 +161,12 @@ func (db *DB) seedAPIKeys(ctx context.Context, keys []config.BootstrapAPIKey, ac
 			CreatedBy:       "bootstrap",
 			TagsJSON:        tags,
 		}
-		existing, err := db.GetAPIKeyByPrefix(ctx, candidate.KeyPrefix)
+		// The row is matched by the secret's hash (M87): that is the key's identity, and it is
+		// what makes "the same key is already here" answerable even when two configured keys
+		// happen to share the first 12 characters.
+		existing, err := db.FindAPIKeyByHash(ctx, candidate.KeyHash)
 		switch {
-		case err == nil:
+		case err == nil && existing != nil:
 			if !merge {
 				continue
 			}
@@ -173,7 +176,7 @@ func (db *DB) seedAPIKeys(ctx context.Context, keys []config.BootstrapAPIKey, ac
 				return err
 			}
 			res.APIKeysUpdated++
-		case domain.IsUnauthorized(err):
+		case err == nil:
 			if _, err := db.UpsertAPIKey(ctx, candidate); err != nil {
 				return err
 			}

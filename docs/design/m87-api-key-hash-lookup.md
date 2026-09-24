@@ -167,4 +167,23 @@ CREATE INDEX IF NOT EXISTS idx_mcp_tokens_prefix_lookup ON mcp_tokens(token_pref
 
 ## 9. 实现与设计差异
 
-（实现完成后回填）
+- **一次上线，两个迁移文件一起发**：0028（唯一哈希索引）与 0029（前缀索引降级）随同一个版本
+  发布（计划 §2.1）。分两次的唯一收益是"只回滚二进制也安全"，而迁移前有 DB 快照、重复前缀
+  只由我们主动导入产生，快照能覆盖它。
+- **`importedCredential` 的放宽落成 `keyLabel`**：标签可选、≤64 字符、可打印；
+  旧的 `importedPrefix`（严格 12 字符）删除。`keys/lookup` 的前缀分支改由
+  `ListAPIKeysByPrefix` 支撑，命中多把时返回 `count` + `keys[]`，明文分支保留 `key` + `account`。
+- **`keys/lookup` 的明文分支去掉了 `hash_mismatch`**：按哈希查之后，"行存在但不是这把明文"
+  在物理上不可能发生，未知明文统一回答 `found:false, reason:"unknown_key"`。
+- **D13 的预检重试落在 `mintTokenWithFreePrefix`**，三处共用：控制台创建 key、控制台创建 MCP
+  token、`mintDshgwKey`（租户 worker 凭据）。
+- **`domain.Store` 与 `apikey.Store` 同步换名**（`GetAPIKeyByHash`），`GetAPIKeyByPrefix` 删除；
+  `FindAPIKeyByPrefix` 保留但语义收窄成"这个标签被占用了吗"。
+- **测试面**：`internal/apikey` 新增"同前缀两把 key 各自可用""负缓存不污染共享前缀"；
+  `internal/store` 新增 `keys_hash_lookup_test.go` 与 `migrate_m87_test.go`（重复哈希时迁移失败并回滚、
+  运维删行后重跑成功）；`internal/httpapi` 新增"同前缀一批导入两把都可用"，原有的 409 用例
+  改写为"共用标签不是接管"。
+- **文档同步**：m4 §1、m43、m80 §D2/§D5/§3.2/§5、`api-responses.md`、`mcp.md`、
+  `sub2api-migration.md` §2.4/§6/§9.4（后两处标注为 M87 之前的历史）。
+- **`scripts/sub2api-reimport.py` 未改**：它的前缀冲突闸门是保守检查（不会再造成错），
+  一次性换库工具留待需要时再简化；`scripts/sub2api-migrate.py` 的重签机制已整个删除。

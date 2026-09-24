@@ -39,28 +39,49 @@ func scanAPIKey(row rowScanner) (*domain.APIKey, error) {
 	return &k, nil
 }
 
-// GetAPIKeyByPrefix loads the key row used for lookup (hash comparison happens in the caller).
-func (db *DB) GetAPIKeyByPrefix(ctx context.Context, prefix string) (*domain.APIKey, error) {
-	row := db.read.QueryRowContext(ctx, "SELECT "+apiKeyCols+" FROM api_keys WHERE key_prefix = ?", prefix)
+// GetAPIKeyByHash loads the row the data plane authenticates against: the lookup key is the
+// SHA-256 of the presented token (M87), so exactly one row can match and the query is still a
+// single index probe. The constant-time comparison happens in the caller.
+func (db *DB) GetAPIKeyByHash(ctx context.Context, hash string) (*domain.APIKey, error) {
+	row := db.read.QueryRowContext(ctx, "SELECT "+apiKeyCols+" FROM api_keys WHERE key_hash = ?", hash)
 	k, err := scanAPIKey(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, domain.ErrUnauthorized("invalid API key")
 	}
 	if err != nil {
-		return nil, fmt.Errorf("store: get api key by prefix: %w", err)
+		return nil, fmt.Errorf("store: get api key by hash: %w", err)
 	}
 	return k, nil
 }
 
-// FindAPIKeyByPrefix is the administrative variant of GetAPIKeyByPrefix: a missing row is
+// FindAPIKeyByHash is the administrative variant of GetAPIKeyByHash: a missing row is
 // reported as (nil, nil) rather than as an authentication failure.
 //
-// The two differ on purpose. On the data plane an unknown prefix is indistinguishable from
-// a wrong secret and must not be described to the caller; the key importer, on the other
-// hand, has to tell "this key is new" from "this key is already here" before it overwrites
-// a row, and it is already behind an administrator session.
+// The two differ on purpose. On the data plane an unknown hash is indistinguishable from a
+// wrong secret and must not be described to the caller; the key importer, on the other hand,
+// has to tell "this key is new" from "this key is already here" before it writes a row, and
+// it is already behind an administrator session.
+func (db *DB) FindAPIKeyByHash(ctx context.Context, hash string) (*domain.APIKey, error) {
+	row := db.read.QueryRowContext(ctx, "SELECT "+apiKeyCols+" FROM api_keys WHERE key_hash = ?", hash)
+	k, err := scanAPIKey(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: find api key by hash: %w", err)
+	}
+	return k, nil
+}
+
+// FindAPIKeyByPrefix reports any one row carrying this display prefix, or (nil, nil) when the
+// prefix is unused.
+//
+// Since M87 the column is no longer unique, so this answers "is this label already taken"
+// (the mint-time pre-check, which keeps prefixes distinct for humans and for dshgw's legacy
+// prefix fallback) — not "which key is this". Use ListAPIKeysByPrefix for that question.
 func (db *DB) FindAPIKeyByPrefix(ctx context.Context, prefix string) (*domain.APIKey, error) {
-	row := db.read.QueryRowContext(ctx, "SELECT "+apiKeyCols+" FROM api_keys WHERE key_prefix = ?", prefix)
+	row := db.read.QueryRowContext(ctx,
+		"SELECT "+apiKeyCols+" FROM api_keys WHERE key_prefix = ? ORDER BY id LIMIT 1", prefix)
 	k, err := scanAPIKey(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -69,6 +90,34 @@ func (db *DB) FindAPIKeyByPrefix(ctx context.Context, prefix string) (*domain.AP
 		return nil, fmt.Errorf("store: find api key by prefix: %w", err)
 	}
 	return k, nil
+}
+
+// ListAPIKeysByPrefix returns every row whose display prefix matches, ordered by id.
+//
+// The prefix stopped being an identity in M87: two keys of different people may legitimately
+// carry the same label (sub2api, for instance, lets callers pick their own key values), so
+// "whose key is this prefix" is a list question and the admin lookup endpoint answers with all
+// matches instead of pretending there is one.
+func (db *DB) ListAPIKeysByPrefix(ctx context.Context, prefix string) ([]*domain.APIKey, error) {
+	rows, err := db.read.QueryContext(ctx,
+		"SELECT "+apiKeyCols+" FROM api_keys WHERE key_prefix = ? ORDER BY id", prefix)
+	if err != nil {
+		return nil, fmt.Errorf("store: list api keys by prefix: %w", err)
+	}
+	defer rows.Close()
+
+	out := []*domain.APIKey{}
+	for rows.Next() {
+		k, err := scanAPIKey(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan api key: %w", err)
+		}
+		out = append(out, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate api keys by prefix: %w", err)
+	}
+	return out, nil
 }
 
 // ListAPIKeys lists the keys of one account (accountID <= 0 means all accounts).
@@ -103,14 +152,19 @@ func (db *DB) ListAPIKeys(ctx context.Context, accountID int64) ([]*domain.APIKe
 
 // upsertAPIKeySQL writes one key row. It is shared by the single and the batch path so the
 // two cannot drift in which columns they write or which conflict clause they rely on.
+//
+// The conflict target is key_hash (M87): one row per secret, so re-importing the same key is
+// idempotent, while two different secrets that happen to share a display prefix get two rows.
+// key_prefix is in the SET list because a re-import may carry a corrected label — the label is
+// the only thing about a key an importer is allowed to change.
 const upsertAPIKeySQL = `
 INSERT INTO api_keys(account_id, name, key_prefix, key_hash, tags_json, grants_json, policy_json,
   record_input_mode, record_output_text, record_reasoning, status, expires_at, last_used_at, created_by, created_at)
 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(key_prefix) DO UPDATE SET
+ON CONFLICT(key_hash) DO UPDATE SET
   account_id = excluded.account_id,
   name = excluded.name,
-  key_hash = excluded.key_hash,
+  key_prefix = excluded.key_prefix,
   tags_json = excluded.tags_json,
   grants_json = excluded.grants_json,
   policy_json = excluded.policy_json,
@@ -161,8 +215,11 @@ func (db *DB) UpsertAPIKeys(ctx context.Context, keys []*domain.APIKey) ([]int64
 
 // upsertAPIKeyWith writes one key row through the given writer.
 func upsertAPIKeyWith(ctx context.Context, w keyWriter, k *domain.APIKey) (int64, error) {
-	if k == nil || k.KeyPrefix == "" || k.KeyHash == "" {
-		return 0, domain.ErrInvalidRequest("api key prefix and hash are required")
+	// Only the hash is required: it is the row's identity (M87). The prefix is a display
+	// label the importer may leave out — the gateway cannot verify it against the secret
+	// anyway when it never sees the plaintext.
+	if k == nil || k.KeyHash == "" {
+		return 0, domain.ErrInvalidRequest("api key hash is required")
 	}
 	if k.AccountID == 0 {
 		return 0, domain.ErrInvalidRequest("api key requires an account")
@@ -186,7 +243,7 @@ func upsertAPIKeyWith(ctx context.Context, w keyWriter, k *domain.APIKey) (int64
 	}
 
 	var id int64
-	if err := w.QueryRowContext(ctx, "SELECT id FROM api_keys WHERE key_prefix = ?", k.KeyPrefix).Scan(&id); err != nil {
+	if err := w.QueryRowContext(ctx, "SELECT id FROM api_keys WHERE key_hash = ?", k.KeyHash).Scan(&id); err != nil {
 		return 0, fmt.Errorf("store: resolve api key id: %w", err)
 	}
 	k.ID = id
@@ -364,15 +421,33 @@ func scanMCPToken(row rowScanner) (*domain.MCPToken, error) {
 	return &tok, nil
 }
 
-// GetMCPTokenByPrefix loads an MCP token row for hash comparison.
-func (db *DB) GetMCPTokenByPrefix(ctx context.Context, prefix string) (*domain.MCPToken, error) {
-	row := db.read.QueryRowContext(ctx, "SELECT "+mcpTokenCols+" FROM mcp_tokens WHERE token_prefix = ?", prefix)
+// GetMCPTokenByHash loads an MCP token row for hash comparison: the lookup key is the SHA-256
+// of the presented token (M87), so exactly one row can match.
+func (db *DB) GetMCPTokenByHash(ctx context.Context, hash string) (*domain.MCPToken, error) {
+	row := db.read.QueryRowContext(ctx, "SELECT "+mcpTokenCols+" FROM mcp_tokens WHERE token_hash = ?", hash)
 	tok, err := scanMCPToken(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, domain.ErrUnauthorized("invalid MCP token")
 	}
 	if err != nil {
-		return nil, fmt.Errorf("store: get mcp token: %w", err)
+		return nil, fmt.Errorf("store: get mcp token by hash: %w", err)
+	}
+	return tok, nil
+}
+
+// FindMCPTokenByPrefix reports any one token carrying this display prefix, or (nil, nil) when
+// it is unused. Since M87 the column is not unique; this is the mint-time pre-check that keeps
+// labels distinct (an MCP token's prefix carries only 15 bits of the secret, so two of them
+// colliding is not exotic — see M87 §1).
+func (db *DB) FindMCPTokenByPrefix(ctx context.Context, prefix string) (*domain.MCPToken, error) {
+	row := db.read.QueryRowContext(ctx,
+		"SELECT "+mcpTokenCols+" FROM mcp_tokens WHERE token_prefix = ? ORDER BY id LIMIT 1", prefix)
+	tok, err := scanMCPToken(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: find mcp token by prefix: %w", err)
 	}
 	return tok, nil
 }
@@ -428,10 +503,11 @@ func (db *DB) ListMCPTokens(ctx context.Context, accountID int64) ([]*domain.MCP
 	return out, nil
 }
 
-// UpsertMCPToken inserts or updates an MCP token (matched by token_prefix).
+// UpsertMCPToken inserts or updates an MCP token (matched by token_hash since M87: one row per
+// secret, so re-issuing is idempotent while a shared display prefix no longer collides).
 func (db *DB) UpsertMCPToken(ctx context.Context, tok *domain.MCPToken) (int64, error) {
-	if tok == nil || tok.TokenPrefix == "" || tok.TokenHash == "" {
-		return 0, domain.ErrInvalidRequest("mcp token prefix and hash are required")
+	if tok == nil || tok.TokenHash == "" {
+		return 0, domain.ErrInvalidRequest("mcp token hash is required")
 	}
 	if tok.AccountID == 0 {
 		return 0, domain.ErrInvalidRequest("mcp token requires an account")
@@ -450,10 +526,10 @@ func (db *DB) UpsertMCPToken(ctx context.Context, tok *domain.MCPToken) (int64, 
 	if _, err := db.write.ExecContext(ctx, `
 INSERT INTO mcp_tokens(account_id, name, token_hash, token_prefix, scope, status, last_used_at, expires_at, created_by, note, created_at)
 VALUES(?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(token_prefix) DO UPDATE SET
+ON CONFLICT(token_hash) DO UPDATE SET
   account_id = excluded.account_id,
   name = excluded.name,
-  token_hash = excluded.token_hash,
+  token_prefix = excluded.token_prefix,
   scope = excluded.scope,
   status = excluded.status,
   expires_at = excluded.expires_at,
@@ -463,7 +539,7 @@ ON CONFLICT(token_prefix) DO UPDATE SET
 		return 0, fmt.Errorf("store: upsert mcp token: %w", err)
 	}
 	var id int64
-	if err := db.write.QueryRowContext(ctx, "SELECT id FROM mcp_tokens WHERE token_prefix = ?", tok.TokenPrefix).Scan(&id); err != nil {
+	if err := db.write.QueryRowContext(ctx, "SELECT id FROM mcp_tokens WHERE token_hash = ?", tok.TokenHash).Scan(&id); err != nil {
 		return 0, fmt.Errorf("store: resolve mcp token id: %w", err)
 	}
 	tok.ID = id

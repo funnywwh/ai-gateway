@@ -34,7 +34,7 @@ func (f *adminFixture) seedScopedMCPToken(t *testing.T, token, scope string) *do
 	}); err != nil {
 		t.Fatal(err)
 	}
-	stored, err := f.db.GetMCPTokenByPrefix(ctx, secret.Prefix(token))
+	stored, err := f.db.GetMCPTokenByHash(ctx, secret.Hash(token))
 	if err != nil {
 		t.Fatal(err)
 	}

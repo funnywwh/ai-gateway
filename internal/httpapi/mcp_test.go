@@ -206,7 +206,7 @@ func TestMCPRevokedTokenIsRejected(t *testing.T) {
 	f.seedMCPToken(t)
 	ctx := context.Background()
 
-	row, err := f.db.GetMCPTokenByPrefix(ctx, secret.Prefix(testMCPToken))
+	row, err := f.db.GetMCPTokenByHash(ctx, secret.Hash(testMCPToken))
 	if err != nil {
 		t.Fatal(err)
 	}

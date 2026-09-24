@@ -646,9 +646,9 @@ func run() int {
 			dispatcher.SyncLimits()
 			return snap.String(), nil
 		},
-		InvalidateKey: func(prefix string) {
-			if prefix != "" {
-				verifier.Invalidate(prefix)
+		InvalidateKey: func(hash string) {
+			if hash != "" {
+				verifier.Invalidate(hash)
 			}
 		},
 		InvalidateAll: verifier.InvalidateAll,

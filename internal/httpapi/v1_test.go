@@ -128,7 +128,7 @@ func newFixture(t testing.TB, opts ...fixtureOption) *fixture {
 	if _, err := db.UpsertAPIKey(ctx, key); err != nil {
 		t.Fatal(err)
 	}
-	stored, err := db.GetAPIKeyByPrefix(ctx, secret.Prefix(testToken))
+	stored, err := db.GetAPIKeyByHash(ctx, secret.Hash(testToken))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -631,7 +631,7 @@ func TestRecordingSwitchesAreIndependent(t *testing.T) {
 	if err := f.db.SetAPIKeyRecording(ctx, f.key.ID, true, false, "full"); err != nil {
 		t.Fatal(err)
 	}
-	f.verifier.Invalidate(secret.Prefix(testToken))
+	f.verifier.Invalidate(secret.Hash(testToken))
 	resp2 := f.do(t, "POST", "/v1/responses", agentBody, nil)
 	resp2.Body.Close()
 	log2, err := f.db.GetRequestLog(ctx, resp2.Header.Get("x-request-id"))
@@ -731,7 +731,7 @@ func TestDefaultPolicyRecordsTheNewestMessageThatFits(t *testing.T) {
 	if err := f.db.SetAPIKeyRecording(ctx, f.key.ID, false, false, "full"); err != nil {
 		t.Fatal(err)
 	}
-	f.verifier.Invalidate(secret.Prefix(testToken))
+	f.verifier.Invalidate(secret.Hash(testToken))
 	row2 := f.postAndLog(t, longBody)
 	if !strings.Contains(row2.RequestJSON, "ZZ_PAST_THE_THRESHOLD") ||
 		!strings.Contains(row2.RequestJSON, question) {
@@ -752,7 +752,7 @@ func TestMetadataAndOffModesStoreNoBody(t *testing.T) {
 	if err := f.db.SetAPIKeyRecording(ctx, f.key.ID, false, false, "metadata"); err != nil {
 		t.Fatal(err)
 	}
-	f.verifier.Invalidate(secret.Prefix(testToken))
+	f.verifier.Invalidate(secret.Hash(testToken))
 	resp := f.do(t, "POST", "/v1/responses", agentBody, nil)
 	resp.Body.Close()
 	row, err := f.db.GetRequestLog(ctx, resp.Header.Get("x-request-id"))
@@ -772,7 +772,7 @@ func TestMetadataAndOffModesStoreNoBody(t *testing.T) {
 	if err := f.db.SetAPIKeyRecording(ctx, f.key.ID, false, false, "off"); err != nil {
 		t.Fatal(err)
 	}
-	f.verifier.Invalidate(secret.Prefix(testToken))
+	f.verifier.Invalidate(secret.Hash(testToken))
 	resp2 := f.do(t, "POST", "/v1/responses", agentBody, nil)
 	resp2.Body.Close()
 	row2, err := f.db.GetRequestLog(ctx, resp2.Header.Get("x-request-id"))
@@ -798,7 +798,7 @@ func TestEffectiveReasoningEffortIsLoggedWithoutRequestContent(t *testing.T) {
 	if err := f.db.SetAPIKeyRecording(ctx, f.key.ID, false, false, "off"); err != nil {
 		t.Fatal(err)
 	}
-	f.verifier.Invalidate(secret.Prefix(testToken))
+	f.verifier.Invalidate(secret.Hash(testToken))
 
 	model, err := f.db.GetModelByName(ctx, "echo-model")
 	if err != nil {
@@ -853,7 +853,7 @@ func TestFlatKeyPolicyIsEnforced(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
-	key, err := f.db.GetAPIKeyByPrefix(ctx, secret.Prefix(testToken))
+	key, err := f.db.GetAPIKeyByHash(ctx, secret.Hash(testToken))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -861,7 +861,7 @@ func TestFlatKeyPolicyIsEnforced(t *testing.T) {
 	if _, err := f.db.UpsertAPIKey(ctx, key); err != nil {
 		t.Fatal(err)
 	}
-	f.verifier.Invalidate(secret.Prefix(testToken))
+	f.verifier.Invalidate(secret.Hash(testToken))
 
 	first := f.do(t, "POST", "/v1/responses", nonStreamBody, nil)
 	first.Body.Close()
@@ -931,7 +931,7 @@ func TestDeniedRequestIsRedacted(t *testing.T) {
 	if err := f.db.SetAPIKeyRecording(ctx, f.key.ID, false, false, "full"); err != nil {
 		t.Fatal(err)
 	}
-	key, err := f.db.GetAPIKeyByPrefix(ctx, secret.Prefix(testToken))
+	key, err := f.db.GetAPIKeyByHash(ctx, secret.Hash(testToken))
 	if err != nil {
 		t.Fatal(err)
 	}

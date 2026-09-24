@@ -16,7 +16,10 @@ type Store interface {
 	UpsertAccount(ctx context.Context, a *Account) (int64, error)
 
 	// API keys
-	GetAPIKeyByPrefix(ctx context.Context, prefix string) (*APIKey, error)
+	// GetAPIKeyByHash is the data plane's lookup: the SHA-256 of the presented token is the
+	// key's identity (M87), so the row is one index probe away and the display prefix is free
+	// to be shared with another key.
+	GetAPIKeyByHash(ctx context.Context, hash string) (*APIKey, error)
 	ListAPIKeys(ctx context.Context, accountID int64) ([]*APIKey, error)
 	UpsertAPIKey(ctx context.Context, k *APIKey) (int64, error)
 

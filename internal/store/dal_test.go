@@ -132,7 +132,7 @@ func TestAPIKeyRoundTripAndRecordingToggles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := db.GetAPIKeyByPrefix(ctx, secret.Prefix(token))
+	got, err := db.GetAPIKeyByHash(ctx, secret.Hash(token))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestAPIKeyRoundTripAndRecordingToggles(t *testing.T) {
 	if err := db.SetAPIKeyRecording(ctx, id, true, false, "full"); err != nil {
 		t.Fatal(err)
 	}
-	updated, err := db.GetAPIKeyByPrefix(ctx, secret.Prefix(token))
+	updated, err := db.GetAPIKeyByHash(ctx, secret.Hash(token))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestAPIKeyRoundTripAndRecordingToggles(t *testing.T) {
 		t.Fatalf("input mode = %q", updated.RecordInputMode)
 	}
 
-	if _, err := db.GetAPIKeyByPrefix(ctx, "sk-gw-nope"); !domain.IsUnauthorized(err) {
+	if _, err := db.GetAPIKeyByHash(ctx, secret.Hash("sk-gw-nope")); !domain.IsUnauthorized(err) {
 		t.Fatalf("expected unauthorized, got %v", err)
 	}
 }

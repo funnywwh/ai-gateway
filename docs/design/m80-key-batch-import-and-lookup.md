@@ -35,10 +35,10 @@ MCP 侧（`docs/mcp.md` §4）已经有渐进披露的三工具桥，管理面�
 | # | 决策 | 取舍理由 |
 |---|---|---|
 | D1 | 批量走**新增独立路由** `POST /keys/import-batch`，不把 `POST /keys/import` 改成数组 | M43 拒绝过"把两种信任模型塞进一个 handler"；单条端点是 `docs/sub2api-migration.md` 里已发布的 runbook 承诺，改形状等于毁掉它。新端点纯增量 |
-| D2 | 批次语义 = **先全量校验、再单事务写入**（fail-fast），**不做部分成功** | M43 拒绝批量的原话是"部分成功会变成需要额外语义的状态机"。逐项校验（账户存在、标签存在、policy 严格解析、批内前缀不重复、与既有行不冲突）→ 任何一项失败即整体拒绝并点名 `keys[i]`，**一行都不写**；修好后重跑（同前缀同哈希幂等）。调用的代价是"一把坏 key 挡住整批"，换来的是"调用方永远不用理解半成品状态" |
+| D2 | 批次语义 = **先全量校验、再单事务写入**（fail-fast），**不做部分成功** | M43 拒绝批量的原话是"部分成功会变成需要额外语义的状态机"。逐项校验（账户存在、标签存在、policy 严格解析、与既有行的哈希冲突判定）→ 任何一项失败即整体拒绝并点名 `keys[i]`，**一行都不写**；修好后重跑（同哈希幂等）。调用的代价是"一把坏 key 挡住整批"，换来的是"调用方永远不用理解半成品状态"。**M87 起批内前缀重复不再是失败**（前缀是标签，可共用） |
 | D3 | 每项凭据**二选一**：明文 `api_key`（网关算前缀与哈希）或 `key_prefix`+`key_hash`（M43 形式），**可混在同一批** | 覆盖上面两个场景，且两种形式的校验、冲突判定、响应形状完全相同，只多一个分支。若只做明文形式，迁移脚本就得继续逐把调用；若只做哈希形式，BYO 场景仍缺 |
 | D4 | 接受明文是**对 M43「明文不进网关」取舍的一次有意反转**，护栏四条 | 自定义 apikey 的语义就是"值由调用方给"，绕不开明文。护栏：①`secret.Normalize` 后必须可打印 ASCII、无空白、`len > secret.PrefixLen`（否则 `secret.Prefix` 会把整把密钥当前缀存进**明文列**）、`len ≤ 512`；②明文不落库（只写前缀与哈希）；③不回显；④不进审计、不进日志。M43 的单条哈希导入保持不动，迁移仍推荐哈希形式（见 §6） |
-| D5 | 导入行仍用 `created_by = "import:<actor>"` 标记，冲突规则照抄 M43 | 同前缀同哈希 → 幂等更新；同前缀不同哈希且既有行由导入产生 → 允许接管（重跑/改正）；其余 → **409**，绝不静默顶掉控制台签发给别人的 key |
+| D5 | 导入行仍用 `created_by = "import:<actor>"` 标记；冲突规则在 **M87 之后塌缩成一条** | 同一哈希 → 幂等更新（可改正标签/账户/标签绑定）；不同哈希 → 新建一行。原来那套"同前缀不同哈希且既有行由导入产生才允许接管，否则 409"的规则随「前缀不再是身份」一起删除（`docs/design/m87-api-key-hash-lookup.md`） |
 | D6 | 审计 = **每项一行**（`action=import`, `target_type=api_key`），不另做批次摘要行 | 保住 M43 承诺的"谁在什么时候导入了哪个前缀"；控制台审计页与 `admin_list_audit_logs` 不必为批量新增渲染分支。行数上限 = 批次上限（200/次），可接受 |
 | D7 | 查询接口用 **POST**，不是 GET + query | 明文放 URL 会进浏览器历史与反向代理日志（本网关自身只在 panic 时记 path，但不能替调用方的链路背书）。读语义走 POST 有先例：`POST /pricing/simulate`、`/pricing/validate` |
 | D8 | 查询接口 `roleViewer`、非危险接口 | 它只回答"这把 key 是谁的"。viewer 本来就能从 `admin_list_keys` 看到所有前缀与账户，接口不放大任何可见性。它也**不做鉴权判定**：不校验 `status`/`expires_at`，只如实报告——能不能用是数据面 `internal/apikey` verifier 的职责，两处判定分开才不会出现"管理面说能用、请求却被 401"的鬼故事 |
@@ -107,8 +107,8 @@ MCP 侧（`docs/mcp.md` §4）已经有渐进披露的三工具桥，管理面�
 
 | 字段 | 必需 | 说明 |
 |---|---|---|
-| `api_key` | 二选一 | 明文；`Normalize` 后算前缀做索引查找，再 `secret.Equal` 比对哈希 |
-| `key_prefix` | 二选一 | 恰好 12 字符（与 `importedCredential` 同规则）；按标识查询，不需要秘密 |
+| `api_key` | 二选一 | 明文；`Normalize` 后算 SHA-256 按哈希查找，再 `secret.Equal` 比对（M87） |
+| `key_prefix` | 二选一 | 标签（≤64 可打印字符）；可能命中多把 key，所以这一支返回 `count` + `keys[]` |
 
 响应一律 `200`（"不是我们的 key"是答案，不是错误）：
 
@@ -124,15 +124,26 @@ MCP 侧（`docs/mcp.md` §4）已经有渐进披露的三工具桥，管理面�
 ```
 
 ```json
-{"found": false, "reason": "unknown_prefix"}
+{"found": false, "reason": "unknown_key", "matched": "hash",
+ "note": "没有任何 Key 的哈希与这把明文一致（明文不落库，网关只比对哈希）"}
 ```
 ```json
-{"found": false, "reason": "hash_mismatch", "matched": "prefix",
- "note": "该前缀已有行，但你给的明文与它的哈希不匹配；要按标识查询请改用 key_prefix"}
+{"found": false, "reason": "unknown_prefix"}
 ```
 
-`hash_mismatch` **不回显该行的 key/account**：避免把这个接口变成"知道前缀就能读出账户"的通道
-（前缀本来就在 `admin_list_keys` 里可见，真要查就用 `key_prefix` 分支）。任何分支都不回显明文/哈希。
+前缀分支自 M87 起可能命中多把 key（两个不同的人可以共用一个标签），形状是：
+
+```json
+{"found": true, "matched": "prefix", "count": 2, "keys": [
+   {"id": 7, "name": "laptop", "key_prefix": "sk-f69aeca55", "account_id": 4, "status": "active",
+    "tags": ["blue"], "effective_tags": ["acct", "blue"], "created_by": "import:ops"},
+   {"id": 9, "name": "phone", "key_prefix": "sk-f69aeca55", "account_id": 5, "status": "active",
+    "tags": ["green"], "effective_tags": ["green"], "created_by": "import:ops"}],
+ "note": "前缀不是身份（M87）：同一前缀可能对应多把 key，这里全部列出"}
+```
+
+`unknown_key` **不回显任何行**：明文不是标识、前缀不是密钥，接口不会因为"猜到了前缀"就说出
+账户。任何分支都不回显明文/哈希。
 
 ## 4. 数据流
 
@@ -140,13 +151,13 @@ MCP 侧（`docs/mcp.md` §4）已经有渐进披露的三工具桥，管理面�
 调用方（控制台 Cookie / MCP admin_request）
    → adminActor(w, r, true|false)              // 角色闸门
    → 逐项校验（纯函数，不写库）
-        api_key  → secret.Normalize → Prefix/Hash          （D4 护栏）
-        prefix+hash → importedCredential                    （M43 规则）
+        api_key  → secret.Normalize → Hash（+ 展示标签 Prefix）   （D4 护栏）
+        prefix+hash → importedCredential：哈希必需、标签可选         （M43 规则，M87 放宽）
         name / account / tags 存在性 / policy 严格解析 / status / expires_at
-        + 批内前缀去重 + 与既有行冲突判定（FindAPIKeyByPrefix）
-   → 任一项失败：400/404/409 + keys[i] 定位，直接返回，库无变化
+        + 与既有行的哈希冲突判定（FindAPIKeyByHash）
+   → 任一项失败：400/404 + keys[i] 定位，直接返回，库无变化
    → dry_run：返回"会发生什么"，同样不写库
-   → UpsertAPIKeys(ctx, keys)：db.write.BeginTx 单事务，逐行 INSERT … ON CONFLICT(key_prefix) DO UPDATE
+   → UpsertAPIKeys(ctx, keys)：db.write.BeginTx 单事务，逐行 INSERT … ON CONFLICT(key_hash) DO UPDATE
    → 逐项 s.audit(action=import, target_type=api_key, changes={name, account_id, key_prefix, created, batch:true, source})
    → s.reload(ctx, "api keys imported (batch)", false)   // 清验证缓存（含负缓存）+ registry 重载
    → 200 报告 {index,id,name,account_id,key_prefix,status,created,tags}
@@ -166,9 +177,9 @@ MCP 侧（`docs/mcp.md` §4）已经有渐进披露的三工具桥，管理面�
 | 未知标签名 | 400 | 授权会静默回落到默认通配（放大授权） |
 | `policy` 含未知字段 | 400 | 严格解析，与创建 Key 相同 |
 | `status` 非 `active`/`disabled`、`expires_at` 非 RFC3339 | 400 | |
-| 批内两把同前缀 | 400 | 点名两个下标；绝不让后一项覆盖前一项 |
-| 与既有行同前缀、哈希不同、既有行非导入产生 | 409 | 点名 `keys[i]` 与既有行 `created_by` |
-| 与既有行同前缀、哈希相同 | 200，`created:false` | 幂等重跑（换标签/账户即修正） |
+| 批内两把同前缀 | 200，两行 | M87 起前缀是标签：两把 key 各自独立（这正是迁移需要的） |
+| 与既有行同前缀、哈希不同 | 200，新建一行 | 既有那把 key 不受影响 |
+| 与既有行哈希相同 | 200，`created:false` | 幂等重跑（换标签/账户/展示标签即修正） |
 | 导入前该前缀被负缓存（5s 内认证失败过） | 导入后第一次请求立即生效 | `reload` 里的 `InvalidateAll`；写成测试 |
 | 明文值短于等于 12 字符 | 400 | 否则前缀列会存下整把密钥（明文泄漏到列表页与导出里） |
 | `dry_run=true` | 不写库、不写审计、不 reload | 响应 `id` 缺失已在字段说明里写明 |
@@ -193,7 +204,7 @@ MCP 侧（`docs/mcp.md` §4）已经有渐进披露的三工具桥，管理面�
 
 | 文件 | 用例 |
 |---|---|
-| `internal/httpapi/admin_keys_test.go`（新） | ①三把自定义明文一次导入 → 每把 `bearerCall` 200、响应无明文无哈希、库内哈希=明文 SHA-256；②纯哈希批与混合批；③原子性：未知标签/未知账户/批内重复前缀/与控制台 key 冲突 → 400/409 且**行数不变、无新审计**；④重跑幂等（`created:false`）；⑤`dry_run` 不写库不写审计；⑥明文形状表（空白/不可打印/≤12/>512/两式都给/都不给）；⑦负缓存失效（先 401 → 导入 → 立即 200）；⑧viewer 导入 403；⑨lookup 明文命中/前缀命中/未知前缀/哈希不匹配不回显/disabled 与过期如实报告；⑩lookup 对 viewer 开放 |
+| `internal/httpapi/admin_keys_test.go`（新） | ①三把自定义明文一次导入 → 每把 `bearerCall` 200、响应无明文无哈希、库内哈希=明文 SHA-256；②纯哈希批与混合批；③原子性：未知标签/未知账户 → 400/404 且**行数不变、无新审计**；④重跑幂等（`created:false`）；⑤`dry_run` 不写库不写审计；⑥明文形状表（空白/不可打印/≤12/>512/两式都给/都不给）；⑦负缓存失效（先 401 → 导入 → 立即 200）；⑧viewer 导入 403；⑨lookup 明文命中/标签命中（含**一把标签两把 key → `count=2`**）/未知哈希未知标签/disabled 与过期如实报告；⑩lookup 对 viewer 开放；⑪**同前缀两把明文一批导入 → 两行、两把都能认证**（M87 的驱动场景） |
 | `internal/store/keys_test.go` | `UpsertAPIKeys` 单事务：中途失败 → 无行写入；成功 → id 按序返回 |
 | `internal/httpapi/mcp_admin_test.go` | `admin_endpoints(filter=keys)` 两行 `tool` 非 null；`admin_describe admin_import_keys` 的数组 schema 与示例可写；无 `confirm` 被拒；scope=admin 带 confirm 成功且 key 立即可用；scope=admin_read 导入被拒、查询可用 |
 | `internal/httpapi/admin_routes_test.go` | `expectedAdminPatterns` 增两条；计数断言随之校验 |

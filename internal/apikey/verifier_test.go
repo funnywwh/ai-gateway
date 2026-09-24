@@ -11,22 +11,28 @@ import (
 )
 
 type fakeStore struct {
-	mu              sync.Mutex
-	key             *domain.APIKey
+	mu sync.Mutex
+	key *domain.APIKey
+	// siblings are further rows that answer lookups. The M87 regression needs two keys that share
+	// a display prefix, so one row is not enough.
+	siblings        []*domain.APIKey
 	account         *domain.Account
 	getKeyCalls     int
 	getAccountCalls int
 	touchCalls      int
 }
 
-func (f *fakeStore) GetAPIKeyByPrefix(ctx context.Context, prefix string) (*domain.APIKey, error) {
+func (f *fakeStore) GetAPIKeyByHash(ctx context.Context, hash string) (*domain.APIKey, error) {
 	f.mu.Lock()
 	f.getKeyCalls++
+	rows := append([]*domain.APIKey{f.key}, f.siblings...)
 	f.mu.Unlock()
-	if f.key == nil || f.key.KeyPrefix != prefix {
-		return nil, domain.ErrUnauthorized("invalid API key")
+	for _, k := range rows {
+		if k != nil && k.KeyHash == hash {
+			return k, nil
+		}
 	}
-	return f.key, nil
+	return nil, domain.ErrUnauthorized("invalid API key")
 }
 
 // GetAPIKey resolves a key by id, which is how the console chat names the key it bills.
@@ -110,19 +116,84 @@ func TestVerifyHappyPathAndCache(t *testing.T) {
 	}
 }
 
-func TestVerifyRejectsWrongHash(t *testing.T) {
+// A token that shares a known key's display prefix but is a different secret must be rejected:
+// the lookup key is the hash (M87), so wearing the same label can never admit a stranger.
+func TestVerifyRejectsTokenSharingAKnownPrefix(t *testing.T) {
 	store, v, _ := fixture()
-	// Same prefix, different secret => same prefix bucket, different hash.
 	other := secret.Prefix(token) + "different-suffix"
 	if secret.Prefix(other) != secret.Prefix(token) {
-		t.Skip("prefix collision setup no longer valid")
+		t.Fatalf("fixture must produce a shared display prefix: %q vs %q", secret.Prefix(other), secret.Prefix(token))
 	}
-	_, _, err := v.Verify(context.Background(), other)
-	if !domain.IsUnauthorized(err) {
+	if _, _, err := v.Verify(context.Background(), other); !domain.IsUnauthorized(err) {
 		t.Fatalf("expected 401, got %v", err)
 	}
 	if k, _, _ := store.counts(); k != 1 {
 		t.Fatalf("store lookups = %d", k)
+	}
+}
+
+// Two keys may legitimately share a display prefix (sub2api lets callers pick their own key
+// values, so a migration meets this on day one). Each one authenticates by its own hash, and
+// each keeps its own cache entry.
+func TestVerifyAcceptsTwoKeysSharingADisplayPrefix(t *testing.T) {
+	store, v, _ := fixture()
+	ctx := context.Background()
+
+	siblingToken := "sk-gw-test-token-1234567890-sibling"
+	if secret.Prefix(siblingToken) != secret.Prefix(token) {
+		t.Fatalf("fixture must produce a shared display prefix")
+	}
+	store.siblings = []*domain.APIKey{{
+		ID: 2, AccountID: 8, Name: "sibling",
+		KeyPrefix: secret.Prefix(siblingToken), KeyHash: secret.Hash(siblingToken),
+		Status: "active", RecordInputMode: "inherit",
+	}}
+
+	first, _, err := v.Verify(ctx, token)
+	if err != nil {
+		t.Fatalf("the first key of the pair must verify: %v", err)
+	}
+	second, _, err := v.Verify(ctx, siblingToken)
+	if err != nil {
+		t.Fatalf("the second key of the pair must verify: %v", err)
+	}
+	if first.ID == second.ID || first.AccountID == second.AccountID {
+		t.Fatalf("the two keys must stay distinct: %+v %+v", first, second)
+	}
+	if v.Size() != 2 {
+		t.Fatalf("a shared prefix must not collapse the entries: size = %d", v.Size())
+	}
+	// Both are cached, so a repeat costs no store lookup.
+	before, _, _ := store.counts()
+	if _, _, err := v.Verify(ctx, siblingToken); err != nil {
+		t.Fatal(err)
+	}
+	if after, _, _ := store.counts(); after != before {
+		t.Fatalf("a cached key re-read the store: %d -> %d", before, after)
+	}
+}
+
+// A failed verification is remembered against the presented token, never against its display
+// prefix: otherwise anyone who knew a prefix (a label, not a secret) could hold that key down
+// for as long as they kept presenting garbage — and two keys sharing a prefix shared their fate.
+func TestNegativeCacheDoesNotPoisonASharedPrefix(t *testing.T) {
+	store, v, _ := fixture()
+	ctx := context.Background()
+
+	garbage := secret.Prefix(token) + "-garbage-suffix"
+	if secret.Prefix(garbage) != secret.Prefix(token) {
+		t.Fatalf("fixture must produce a shared display prefix")
+	}
+	for i := 0; i < 3; i++ {
+		if _, _, err := v.Verify(ctx, garbage); !domain.IsUnauthorized(err) {
+			t.Fatalf("expected 401 for the impostor, got %v", err)
+		}
+	}
+	if _, _, err := v.Verify(ctx, token); err != nil {
+		t.Fatalf("the real key must still verify: %v", err)
+	}
+	if k, _, _ := store.counts(); k != 2 {
+		t.Fatalf("expected one lookup per distinct token, got %d", k)
 	}
 }
 
@@ -191,7 +262,7 @@ func TestInvalidateForcesReload(t *testing.T) {
 		t.Fatalf("lookups = %d", k)
 	}
 
-	v.Invalidate(secret.Prefix(token))
+	v.Invalidate(secret.Hash(token))
 	if _, _, err := v.Verify(ctx, token); err != nil {
 		t.Fatal(err)
 	}

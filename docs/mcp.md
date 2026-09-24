@@ -16,7 +16,8 @@
 - 传输：`POST /mcp`（MCP Streamable HTTP）。
 - 本地 agent 亦可使用 `bin/aigw mcp-serve --config <cfg> --account <name>`（stdio；本机信任，不走令牌；
   **只提供 11 个只读查询工具**；后台工具可使用第 10 节的 HTTP 转发模式）。
-- 鉴权：`Authorization: Bearer aigw_mcp_<token>`；令牌存 SHA-256 哈希 + 前缀索引（`mcp_tokens` 表），
+- 鉴权：`Authorization: Bearer aigw_mcp_<token>`；令牌存 SHA-256 哈希（唯一索引，M87 起按哈希查找）
+  + 前缀标签（`mcp_tokens` 表，只是给人看的，可重复），
   创建时**明文只显示一次**，支持轮换/吊销/过期。
 
 ## 2. 令牌 scope（权限的唯一闸门）
@@ -272,11 +273,12 @@ MCP 只读不可写；「谁在排队」看 `admin_stats.provider_capacity.provi
 }}
 ```
 返回：`{dry_run,total,created,updated,keys:[{index,id?,name,account_id,key_prefix,status,created,tags}]}`。
-**整批原子**：任何一项校验失败或前缀被别人占用（409）就整体拒绝，错误点名 `keys[i].<字段>`
+**整批原子**：任何一项校验失败就整体拒绝，错误点名 `keys[i].<字段>`（前缀撞车自 M87 起不是错误：
+两把 key 可以共用一个标签）
 （`error.param` 形如 `"keys[1].api_key"`），一行都不写。先演练用 `"dry_run":true`：同样校验、同样报错，
 但**不写库、不写审计**。上限 200 项/次。
 
-**归属查询**：给明文或 12 字符前缀，回答"这把 key 是谁的"：
+**归属查询**：给明文（按哈希唯一命中）或前缀标签（可能命中多把，返回 `count` + `keys[]`）：
 
 ```json
 {"name":"admin_request","arguments":{"name":"admin_lookup_key","body":{"api_key":"sk-live-…"}}}

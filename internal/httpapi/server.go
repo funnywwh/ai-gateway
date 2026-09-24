@@ -86,6 +86,9 @@ type KeyStore interface {
 	ListAPIKeys(ctx context.Context, accountID int64) ([]*domain.APIKey, error)
 	UpsertAPIKey(ctx context.Context, k *domain.APIKey) (int64, error)
 	ListAPIKeyFeishuIdentities(ctx context.Context) ([]domain.KeyFeishuIdentity, error)
+	// FindAPIKeyByPrefix is the mint-time pre-check: it reports any key wearing this display
+	// prefix, or (nil, nil) when none does (M87).
+	FindAPIKeyByPrefix(ctx context.Context, prefix string) (*domain.APIKey, error)
 }
 
 // DshgwAdminOps is the aigw-side view of the dshgw local provisioning channel. The key
@@ -226,8 +229,9 @@ type Deps struct {
 	PortalUsers PortalUserAdmin
 	// Reload rebuilds the routing snapshot after a write; InvalidateKey/All drop
 	// cached credentials; KeyCacheSize reports cache occupancy for /stats.
+	// The key to drop is named by the token's hash, which is what the cache is keyed by (M87).
 	Reload        func(ctx context.Context) (any, error)
-	InvalidateKey func(prefix string)
+	InvalidateKey func(hash string)
 	InvalidateAll func()
 	KeyCacheSize  func() int
 	Log           *slog.Logger

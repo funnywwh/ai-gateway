@@ -14,7 +14,10 @@ import (
 
 // MCPTokens is the persistence subset needed by the MCP endpoint.
 type MCPTokens interface {
-	GetMCPTokenByPrefix(ctx context.Context, prefix string) (*domain.MCPToken, error)
+	// GetMCPTokenByHash is the lookup the /mcp verifier performs: the presented token is
+	// hashed and the row is fetched by that hash (M87), so a display prefix shared with
+	// another token cannot make two tokens ambiguous.
+	GetMCPTokenByHash(ctx context.Context, hash string) (*domain.MCPToken, error)
 	// GetMCPTokenByID is what the console chat uses to resolve the token a conversation is
 	// bound to. It looks the row up by id rather than by secret, because the chat never holds
 	// the plaintext.
@@ -91,8 +94,9 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, domain.ErrUnauthorized("missing MCP token"))
 		return
 	}
-	row, err := s.deps.MCPTokens.GetMCPTokenByPrefix(r.Context(), secret.Prefix(token))
-	if err != nil || !secret.Equal(row.TokenHash, secret.Hash(token)) {
+	hash := secret.Hash(token)
+	row, err := s.deps.MCPTokens.GetMCPTokenByHash(r.Context(), hash)
+	if err != nil || !secret.Equal(row.TokenHash, hash) {
 		writeAPIError(w, domain.ErrUnauthorized("invalid MCP token"))
 		return
 	}
