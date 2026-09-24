@@ -1178,3 +1178,15 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       `shred -u /opt/aigw/data/E26Q-reissue-key.txt`（那把重签明文就没用了）
 - [ ] **可选后续**：清理 4 把已 disabled 的验收 key（gptjp #162/#163/#166/#167，网关没有删除 key 的路由，
       需手工 `DELETE`）；以及是否把 tag `v4.6.0`/`v4.7.0` 推到 origin（当前只在本地）
+
+## M89 代码脱敏（全仓清洗 + 发版强制检查 + 历史重写）
+> 设计：`docs/design/m89-code-desensitization.md`；需求原话：「项目代码脱敏」「修改 skill 要求发布版本时脱敏」。
+> 口径经确认：全仓库清洗、发布与部署入口列入例外保留真值、连 git 历史一起重写并强推 origin、
+> Go 模块路径改为 `github.com/funnywwh/ai-gateway`。规则表是 `scripts/desensitize.py`（单一真源）。
+
+- [~] 工具与规则表：`scripts/desensitize.py`（check/apply/check-history/inventory/strict）+ `scripts/test_desensitize.py` + Makefile 目标并入 `verify`
+- [~] 工作树清洗：`--apply` + 断言联动 + `make verify` / `make dshgw-test` + 重建 `bin/`
+- [~] 发版强制：技能新增「脱敏检查」步 + `scripts/release.sh` 硬门禁
+- [ ] 历史重写：`git bundle` 备份 → `filter-branch --tree-filter` 跑同一份规则 → `--check-history` = 0 → 强推 main 与 tags → 新克隆复核（**需操作者确认窗口，会换掉全部 sha，其它克隆必须重新 clone**）
+- [ ] 归档：设计文档「实现与设计差异」回填、`docs/todo_done.md` 发布记录
+- [ ] 已知后果（记录，不修）：文档里的历史 revision 短 sha 重写后不可解析；例外文件（`.dsh/skills/**`）刻意保留真实主机名与域名

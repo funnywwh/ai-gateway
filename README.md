@@ -165,12 +165,13 @@ make dshgw-verify  # 独立 dshgw 测试/构建/契约，不并入 aigw verify
 | `scripts/format-smoke.sh` | `response_format` 语义走查：真实二进制 + 假 DeepSeek，逐条读上游收到的请求体（无网、无 key、不花钱） |
 | `scripts/responses-thinking-smoke.sh` | `/responses` 流式思考走查：真实二进制 + 假 DeepSeek `/responses` 上游，断言客户端收到的 SSE 里思考先到、`item_id` 是上游的（无网、无 key、不花钱） |
 | `scripts/ui-badge-test.mjs`（`make ui-base`） | 左上角版本角标的 node 断言（三行 DOM shim，不需要浏览器）：两格内容、revision 为 `none` 时不显示、端点读不到时不报错 |
-| `scripts/release.sh`（skill `release-version`） | 发版：升 `VERSION`（a.b.c）→ 提交打 tag → `make build`；用法 `scripts/release.sh patch/minor/major` |
+| `scripts/release.sh`（skill `release-version`） | 发版：升 `VERSION`（a.b.c）→ 提交打 tag → `make build`；用法 `scripts/release.sh patch/minor/major`。发版前会先跑脱敏检查，不通过直接拒绝 |
+| `scripts/desensitize.py`（`make desensitize-check`） | 脱敏口径的**单一真源**（M89）：扫描/替换仓库里的真实环境标识（主机名/IP/域名/人名/邮箱/主机密钥指纹/Key 前缀/家目录）。`--check` 是发版门禁（0 = 干净）、`--apply` 清洗、`--check-history` 复核全部历史、`--strict` 审计刻意保留的例外；规则与例外见 `docs/design/m89-code-desensitization.md` |
 | `scripts/move_dshgw_state.sh` | 把 dshgw 的状态树搬进数据根：搬目录 + 改写 registry 与每租户文件里的绝对路径（dry-run 默认，见 `docs/deployment-layout.md` §7） |
 | `scripts/decommission_legacy_dshgw.sh` | 归档并下线旧的 root/systemd dshgw（先归档校验、再停单元与 nginx 转发、最后删三处目录；`--apply` 需 root） |
 | `make build` / `make ui-dist` | 发布构建：`ui-dist` 生成压缩混淆镜像 + gzip 副本（`.cache/ui-dist/static` + `overlay.json`），`build` 用它嵌入 `bin/aigw` |
 | `make build-src` | 不混淆构建：写 `bin/aigw-src`，**不碰** `bin/aigw`（源码版实例仅供调试，见 M54） |
-| `make verify` | vet + 全量测试 + 控制台 node 断言 + 构建 |
+| `make verify` | vet + 全量测试 + 控制台 node 断言 + 脱敏检查（`desensitize-test`/`desensitize-check`）+ 构建 |
 
 ## 压测基线（本机 i7-12700K，testecho 供应商）
 

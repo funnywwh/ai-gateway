@@ -35,6 +35,7 @@
 | M66 | docs/design/m66-console-admin-feishu-login.md + docs/feishu.md | 是 |
 | M84 | docs/design/m84-image-generation.md + docs/api-images.md | 是（要点已随计划在对话中确认） |
 | M86 | docs/design/m86-session-worktree-scope.md + docs/dshgw.md §7f、deploy/dshgw/README.md | 是（计划经确认后开工） |
+| M89 | docs/design/m89-code-desensitization.md | 是（计划经确认后开工） |
 
 ## 检查项（提交前自检）
 
@@ -44,6 +45,10 @@
 - [ ] docs/TODO.md 已同步（完成的条目已搬到 docs/todo_done.md，TODO 里只剩未完成项）
 - [ ] 设计文档"实现与设计差异"已回填
 - [ ] 规格文档的"状态"已更新为对应实现里程碑
+- [ ] **仓库内没有真实环境标识** → 已跑 `make desensitize-check`（等价于 `python3 scripts/desensitize.py --check`）。
+      新增的主机名/IP/域名/人名/邮箱/主机密钥指纹/Key 前缀要先补进 `scripts/desensitize.py` 的规则表再替换，
+      不要手工 sed；刻意保留的例外（`.dsh/skills/**`、`/home/winger/.local|.cache` 工具链路径）见
+      `docs/design/m89-code-desensitization.md`
 - [ ] **改了 MCP 工具说明或后台路由的 body 字段** → 已按 `docs/mcp.md` §4.5 补齐形状（`Schema`/`RawBody`）、
       示例（`exampleField`）与参数说明，并已跑 `go test ./internal/mcpsrv/ ./internal/httpapi/`。
       守卫测试与构造期 panic 会让漏写的字段直接失败：工具说明不完整时模型不会报错，它会拒绝执行或猜错字段

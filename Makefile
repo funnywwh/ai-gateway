@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) -X main.revision=$(REVISION) -X main.date=
 UIDIST ?= $(CURDIR)/.cache/ui-dist
 UI_OVERLAY ?= $(UIDIST)/overlay.json
 
-.PHONY: all build build-src ui-dist test vet fmt tidy run clean verify smoke plugin-example load ui-check ui-base version-check dshgw-build gwproxy-build dshgw-test dshgw-node-test dshgw-node-e2e dshgw-node-deploy-e2e dshgw-verify dshgw-sandbox-test dshgw-supervised-test dshgw-ssh-integration dshgw-ssh-e2e dshgw-browser-e2e dshgw-browser-reload-e2e
+.PHONY: all build build-src ui-dist test vet fmt tidy run clean verify smoke plugin-example load desensitize-check desensitize-test ui-check ui-base version-check dshgw-build gwproxy-build dshgw-test dshgw-node-test dshgw-node-e2e dshgw-node-deploy-e2e dshgw-verify dshgw-sandbox-test dshgw-supervised-test dshgw-ssh-integration dshgw-ssh-e2e dshgw-browser-e2e dshgw-browser-reload-e2e
 
 all: build
 
@@ -81,6 +81,17 @@ fmt:
 
 tidy:
 	@$(GOENV) go mod tidy
+
+# 脱敏（M89）：仓库里不许留下真实环境标识——主机名/IP/域名/人名/邮箱/主机密钥指纹/Key 前缀/
+# 家目录路径。规则表就是 scripts/desensitize.py 本身（口径的单一真源），这里只做两件机器能做的事：
+# 跑规则的单元测试，以及把当前工作树扫一遍（scripts/release.sh 发版前也调它，那里是硬门禁）。
+# 刻意保留的例外（`.dsh/skills/**` 运维 runbook、`/home/winger/.local|.cache` 工具链路径）由规则表声明，
+# 想审计这份残留就 `python3 scripts/desensitize.py --check --strict`。
+desensitize-test:
+	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_desensitize.py
+
+desensitize-check:
+	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/desensitize.py --check --quiet
 
 # dshgw is an independently deployable binary. These targets are deliberately
 # not prerequisites of the existing aigw verify/release path.
