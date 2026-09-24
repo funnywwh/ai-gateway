@@ -8,6 +8,12 @@
 set -a
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export PATH="$HOME/sdk/go/bin:$PATH"
+# Some workspaces carry the SDK inside the checkout's gitignored .cache/ instead of
+# $HOME/sdk (both exist in practice); prefer it only when it is actually there, so the
+# host layout keeps working unchanged.
+if [ -x "$ROOT/.cache/go/bin/go" ]; then
+  export PATH="$ROOT/.cache/go/bin:$PATH"
+fi
 export GOPATH="$ROOT/.cache/gopath"
 export GOMODCACHE="$ROOT/.cache/gomod"
 export GOCACHE="$ROOT/.cache/gobuild"
