@@ -6372,7 +6372,8 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 前置断言（升级前） | key 135 行、**重复 `key_hash` 0 组**、重复 `token_hash` 0 组（0028 失败会拒绝启动，所以先查） |
 | 验证（部署后） | `/aigw/version` = `{"revision":"ab29518","version":"4.6.0"}`；`healthz`/`readyz` 200；启动日志 `aigw starting version=4.6.0 revision=ab29518`，窗口内 `level=ERROR` 0 条；`idx_api_keys_hash`/`idx_mcp_tokens_hash` 为 UNIQUE、`idx_api_keys_prefix_lookup`/`idx_mcp_tokens_prefix_lookup` 为普通索引 |
 | **同前缀验收（驱动需求）** | 自造两把明文共用 12 字符前缀 `sk-m87shared`（尾段不同，各 52 字符）：`import-batch` `dry_run` → `created=2`；真实导入 → 库里两行（#166/#167，`key_prefix` 相同）；两把各自 `GET /v1/models` → **200 / 200**；`keys/lookup {"key_prefix":"sk-m87shared"}` → `count=2`；同明文重导 → `created=false` 且 id 不变（幂等）。测完两把 `status=disabled` |
-| 遗留 | ① 4 把验收 key（#162/#163/#166/#167）留在库里，全部已 disabled（网关没有删除 key 的路由）；② 线上最近 1 小时没有请求，因此「已发 key 零迁移」由单测/端到端测试覆盖，线上只能靠客户端抽查；③ sub2api 真数据 #24/#51 未导入（见下节「可选后续」）；④ `/opt/aigw/data/E26Q-reissue-key.txt` 仍在（当时重签的明文，未交付本人） |
+| **既有 key 零迁移（真机证据）** | 取 gptjp 上 `E26Q-reissue-key.txt` 里那把 **M87 之前**签发的 key（库里 #129 `图像 (替换原 sub2api key #24)`，`created_by=import:admin`，active），在升级后的网关上打 `GET /v1/models` → **200**（明文全程不进入对话，只比对首 12 字符与状态码） |
+| 遗留 | ① 4 把验收 key（#162/#163/#166/#167）留在库里，全部已 disabled（网关没有删除 key 的路由）；② sub2api 真数据 #24/#51 未导入（可选后续）；③ `/opt/aigw/data/E26Q-reissue-key.txt` 仍在（当时重签的明文，未交付本人；导入原始 key 后可 `shred -u`） |
 
 ## M88 dshgw 只按账户映射租户（退役 key 前缀绑定）
 > 需求原话：「dshgw 也用 key hash 找租户」。评审结论：**不哈希化，直接删掉本地解析**——那条兜底只服务
@@ -6406,6 +6407,7 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | schema | rag-server `aigw-local.db` 63 把 key、gptjp 139 把 key，均升到 **0029**；两台 `dup key_hash` 均为 0 |
 | 验证（两台 aigw） | `/version` 均为 `{"revision":"11e8254","version":"4.7.0"}`（rag-server 在根路径，gptjp 在 `/aigw/version`）；`healthz`/`readyz` 200；启动日志无 ERROR |
 | 验证（M87 回归，gptjp 4.7.0 上重跑） | 把 #166/#167 临时置 `active`：两把明文各自 `GET /v1/models` → **200 / 200**；`keys/lookup` 传 `sk-m87shared` → `count=2`；随即重新 disabled。`idx_api_keys_hash` 仍是 `CREATE UNIQUE INDEX` |
+| 验证（既有 key 零迁移） | 同上：M87 之前签发的 #129（label `sk-gw_36uvsq…`）在 4.7.0 上仍是 **200** |
 | 未做 | rag-server 的公网入口没有 `/version` 路由（历史惯例只验回环 + 局域网）；`origin` 未推（tag `v4.6.0`/`v4.7.0` 只在本地）；gptjp 上 sub2api 真数据未导入 |
 
 **待宿主执行（M88 的 dshgw 控制面，会重启全部租户 worker，含本会话）**：
