@@ -98,11 +98,11 @@ func (s *CompanySealer) Seal(appRowID int64, secret string) ([]byte, error) {
 }
 
 // companyOverrideScope namespaces the overrides of companies whose secret comes from the
-// configuration (M95). Distinct from companyScope on purpose: a row-id-sealed secret and an
+// configuration (M96). Distinct from companyScope on purpose: a row-id-sealed secret and an
 // app-id-sealed one are different facts and must not be interchangeable.
 const companyOverrideScope = "feishu_app_override"
 
-// SealByApp seals a client company's secret under its app id (M95). Empty input clears it, which the
+// SealByApp seals a client company's secret under its app id (M96). Empty input clears it, which the
 // caller expresses by deleting the override row instead.
 func (s *CompanySealer) SealByApp(appID, secret string) ([]byte, error) {
 	if !s.Ready() {

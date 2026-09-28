@@ -40,7 +40,7 @@
 | M92 | docs/design/m92-multi-company-feishu-org-sync.md + docs/org.md、docs/feishu.md §2b/§5c.6、docs/mcp.md §4 | 是（计划经确认后开工） |
 | M93 | docs/design/m93-console-managed-feishu-companies.md + docs/feishu.md §2b/§3/§5c.6、docs/org.md §3/§5/§6、docs/mcp.md §4 | 是（计划经确认后开工） |
 | M94 | docs/design/m94-editable-company-names.md + docs/org.md §5、docs/feishu.md §5c.6、docs/mcp.md §4 | 是（计划经确认后开工） |
-| M95 | docs/design/m95-company-edit-fields.md + docs/org.md §5、docs/feishu.md §5c.6、docs/mcp.md §4 | 是（计划经确认后开工；密钥可改由用户在确认时追加） |
+| M96 | docs/design/m96-company-edit-fields.md + docs/org.md §5、docs/feishu.md §5c.6、docs/mcp.md §4 | 是（计划经确认后开工；密钥可改由用户在确认时追加） |
 | M95 | docs/design/m95-console-collapsible-nav.md（无规格文档：只动导航 chrome，无 API/配置/字段变化） | 是（计划经确认后开工） |
 
 ## 检查项（提交前自检）

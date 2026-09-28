@@ -1,11 +1,13 @@
-# M95 设计文档：公司页的「编辑」——配置来源的公司也能改字段
+# M96 设计文档：公司页的「编辑」——配置来源的公司也能改字段
 
-> 状态：**已实现（M95）**。
+> 状态：**已实现（M96）**。
 > 前序：[M92 多公司组织架构导入](m92-multi-company-feishu-org-sync.md)、[M93 控制台管理公司](m93-console-managed-feishu-companies.md)、
 > [M94 可改公司名](m94-editable-company-names.md)。
 > 面向使用者的规格：[docs/org.md](../org.md) §5、[docs/feishu.md](../feishu.md) §5c.6、[docs/mcp.md](../mcp.md) §4。
 >
 > 需求原话（2026-09-28）：「"改名"应该改成"编辑"，编辑可编辑字段」。
+> **编号说明**：本里程碑起草时编号为 M95，但并行会话当天把 M95 用在了「控制台主菜单可折叠」上，
+> 因此落到 **M96**（设计与提交都以 M96 为准）。
 
 ## 1. 问题
 
@@ -46,7 +48,7 @@ M94 给身份应用与 `feishu.companies` 登记的公司开了「改名」这�
 
 ```sql
 -- M94 的 feishu_company_names 只有一列名字，而且 name NOT NULL（"存在即改了名"）；
--- M95 要表达"某几个字段被覆盖"，于是重建为 feishu_company_overrides：
+-- M96 要表达"某几个字段被覆盖"，于是重建为 feishu_company_overrides：
 -- 每列 NULL = 该字段未被覆盖（用配置里的值），非 NULL = 覆盖值
 -- （空字符串也是合法覆盖值：root_node 覆盖成空 = "用公司名当根节点名"）。
 -- 旧行（M94 改过的名字）原样搬过去，不丢。
@@ -73,7 +75,7 @@ DROP TABLE feishu_company_names;
 
 ```go
 // internal/domain/feishu_app.go
-// FeishuCompanyOverride 是控制台对"名字来自配置"的公司的字段覆盖（M95）。nil 字段 = 未覆盖。
+// FeishuCompanyOverride 是控制台对"名字来自配置"的公司的字段覆盖（M96）。nil 字段 = 未覆盖。
 type FeishuCompanyOverride struct {
     AppID    string
     Name     *string
@@ -111,7 +113,7 @@ Identity 行同规则（它的 Enabled 覆盖同样生效：停用本公司 = �
 控制台行：不变（自己的库行就是真源），Overridden 为空
 ```
 
-`RootName` 的解析顺序（M95 后）：**覆盖的 root_node（非 nil）> 配置的 root_node（非空）> 有效名字**。
+`RootName` 的解析顺序（M96 后）：**覆盖的 root_node（非 nil）> 配置的 root_node（非空）> 有效名字**。
 
 ## 5. 接口（把 M94 的"只接受 name"放宽）
 
@@ -178,7 +180,7 @@ Identity 行同规则（它的 Enabled 覆盖同样生效：停用本公司 = �
 | 4 | App Secret 的 AAD | 新增 `EncryptScopedKey/DecryptScopedKey`（AAD = scope + app_id）与 `CompanySealer.SealByApp/OpenByApp`（scope `feishu_app_override`），与按行 id 的 `feishu_app` 作用域**互不可解** | 行 id 与 app id 是两种句柄，混用会让一条密文在另一种语境下被解开 |
 | 5 | 身份应用的停用 | 与其它公司同一套守卫（`usableCompany`）：停用后按 app_id/名字解析 **和不带 company 的同步**都 400；节点与映射保留，登录流程不受影响 | 实现时发现旧代码的"省略 company = 本公司"那条快捷路径**跳过了停用/凭据检查**（M94 的覆盖语义让它第一次可达），已一并修掉 |
 | 6 | 测试 | 除设计的矩阵外，加了 `TestFeishuClientSecretOverrideIsUsed`：stub 现在**校验凭据**（Feishu 的 99991663），所以"覆盖的密钥真的被用上"是对着线上请求形状断言的，而不是看一个布尔字段 | 密钥覆盖最容易写成"存了但没用"；这条测试是它的反向证据 |
-| 7 | 静态/harness | `companies_test.mjs` 与 `companies` 视图的断言改成 M95 口径（四字段可编辑、客户公司密钥可编辑、本公司密钥只读、覆盖徽标、恢复配置值） | — |
+| 7 | 静态/harness | `companies_test.mjs` 与 `companies` 视图的断言改成 M96 口径（四字段可编辑、客户公司密钥可编辑、本公司密钥只读、覆盖徽标、恢复配置值） | — |
 
 **性能**：`BenchmarkPlan` 4948 B/45 allocs 不变（只动管理面）。
 

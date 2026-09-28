@@ -48,7 +48,7 @@ func (a *FeishuApp) CompanyNodeName() string {
 func (a *FeishuApp) HasSecret() bool { return a != nil && len(a.SecretEnc) > 0 }
 
 // FeishuCompanyOverride is what the console changed about a company whose values come from the
-// configuration (M95). A nil field means "not overridden: use the configured value"; an empty string
+// configuration (M96). A nil field means "not overridden: use the configured value"; an empty string
 // is a legitimate override (an empty root_node means "name the company node after the company").
 //
 // SecretEnc is the one exception to the "nil = not overridden" reading: an empty blob means the same

@@ -286,7 +286,7 @@ func TestFeishuRenameGuards(t *testing.T) {
 	cookie := f.login(t, adminUser, adminPassword)
 	ctx := context.Background()
 
-	// The four local fields are editable (M95), including on the identity application.
+	// The four local fields are editable (M96), including on the identity application.
 	for _, body := range []string{
 		`{"name":"新名字"}`,
 		`{"note":"x"}`,

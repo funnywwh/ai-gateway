@@ -213,7 +213,7 @@ func TestFeishuAppsRequireNameAndAppID(t *testing.T) {
 	}
 }
 
-// The console's field overrides (M94/M95): a company whose values come from the configuration has no
+// The console's field overrides (M94/M96): a company whose values come from the configuration has no
 // row to edit, so what the console changed lives here. A nil field means "use the configured value";
 // an override with nothing in it deletes the row.
 

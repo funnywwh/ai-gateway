@@ -209,7 +209,7 @@ func (db *DB) CountFeishuAppData(ctx context.Context, appID string) (nodes, link
 	return nodes, links, nil
 }
 
-// --- company field overrides (M94/M95) ----------------------------------------------------
+// --- company field overrides (M94/M96) ----------------------------------------------------
 //
 // A company whose values come from the configuration (the identity application, or a company in
 // feishu.companies) has no row of its own, so what the console changes about it is stored here: one

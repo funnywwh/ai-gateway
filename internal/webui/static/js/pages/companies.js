@@ -101,7 +101,7 @@ export async function render({ page, actions, session, navigate }) {
       onclick: () => navigate('/org?company=' + encodeURIComponent(row.app_id)),
     }));
     if (row.source !== 'console') {
-      // 配置来源的公司同样可以编辑（M95）：改的是"控制台覆盖"，配置文件仍是兜底。
+      // 配置来源的公司同样可以编辑（M96）：改的是"控制台覆盖"，配置文件仍是兜底。
       // 只读角色看不到写入口，与库行一致。
       if (!readonly) {
         buttons.push(el('button', { class: 'btn', text: '编辑', onclick: () => openEditor(row, () => view.refresh()) }));
@@ -228,7 +228,7 @@ export async function render({ page, actions, session, navigate }) {
   //     名字留空 = 回到配置里的名字。
   //
   // 根层已有同名节点时，这里直接把"下一步同步会怎样、怎么解"写在字段提示里——那是操作发生的地方。
-  // openEditor is the create/edit dialog. Three shapes (M94/M95):
+  // openEditor is the create/edit dialog. Three shapes (M94/M96):
   //
   //   - 控制台登记的公司：所有字段直接写库行；
   //   - 身份应用（本公司）：公司名/根节点名/备注/启用可改（写"控制台覆盖"），**密钥只读**——

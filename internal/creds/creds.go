@@ -56,7 +56,7 @@ func DecryptScoped(key []byte, scope string, id int64, ciphertext []byte) ([]byt
 }
 
 // EncryptScopedKey seals plaintext for one row of one scope, addressed by a *string* handle: the
-// console's per-company overrides are keyed by app id, not by a row id (M95).
+// console's per-company overrides are keyed by app id, not by a row id (M96).
 func EncryptScopedKey(key []byte, scope, handle string, plaintext []byte) ([]byte, error) {
 	if scope == "" || handle == "" {
 		return nil, fmt.Errorf("creds: scope and handle are required")

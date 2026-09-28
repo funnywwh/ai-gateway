@@ -140,7 +140,7 @@ try {
     checks.probeReported = [...document.querySelectorAll('.toast')].some((node) => node.textContent.includes('研发部'));
   }
 
-  // 编辑对话框（M94/M95）：公司名/根节点/备注/启停可改；本公司的密钥只读、其余字段已解锁。
+  // 编辑对话框（M94/M96）：公司名/根节点/备注/启停可改；本公司的密钥只读、其余字段已解锁。
   const renameButton = identityRowCells ? find('编辑', identityRowCells) : null;
   if (renameButton) {
     renameButton.click();
@@ -161,7 +161,7 @@ try {
     await settle();
   }
 
-  // 配置来源的客户公司（M95）：密钥字段可编辑、行上有「恢复配置值」。
+  // 配置来源的客户公司（M96）：密钥字段可编辑、行上有「恢复配置值」。
   const configRow = rows().find((row) => find('编辑', row) && row.textContent.includes('配置客户'));
   if (configRow) {
     checks.overriddenBadge = configRow.textContent.includes('已在控制台编辑');

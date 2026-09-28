@@ -46,7 +46,7 @@ type dirStub struct {
 	tokenRequests int
 	// requireAppID/requireSecret, when set, make the tenant-token call behave like Feishu: the
 	// credentials in the request body must match, or the app-level refusal comes back. It is how a
-	// test proves *which* secret was used (M95's override, say).
+	// test proves *which* secret was used (M96's override, say).
 	requireAppID  string
 	requireSecret string
 }

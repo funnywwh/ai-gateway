@@ -217,7 +217,7 @@ assert.match(consoleRow.cells.join(' '), /未建（同步时新建「某某科�
 
 // 只读来源没有写按钮：身份应用与配置公司在页面里只能看。
 const identityActions = table.options.rowActions(rows[0]).map(textOf);
-assert.ok(identityActions.includes('编辑'), 'the identity row offers 编辑 (M95)');
+assert.ok(identityActions.includes('编辑'), 'the identity row offers 编辑 (M96)');
 const consoleActions = table.options.rowActions(rows[1]).map(textOf);
 // Arrays built inside the module's VM context carry that context's prototypes, so compare their
 // contents as text rather than with deepStrictEqual.
@@ -328,7 +328,7 @@ console.log('companies_test.mjs: ok');
 // --- M94：公司名可改（含身份应用与配置来源的公司）-----------------------------------------
 
 // 身份应用行现在也有「改名」（配置来源的行都只有改名，凭据/根节点/备注/启停仍归配置）。
-// 编辑对话框（M95）：四个本地字段都能改；本公司（身份应用）的密钥只读，其余可编辑。
+// 编辑对话框（M96）：四个本地字段都能改；本公司（身份应用）的密钥只读，其余可编辑。
 calls.length = 0;
 modalResult = { ok: true };
 const renameButton = table.options.rowActions(rows[0]).find((button) => textOf(button) === '编辑');

@@ -39,7 +39,7 @@ type feishuCompanyRow struct {
 	// NameSource says where the effective name came from (M94): "row" (a console row's own name),
 	// "override" (the console edited a configuration-sourced company) or "config".
 	NameSource string
-	// Override is what the console changed about a configuration-sourced company (M95). Its zero value
+	// Override is what the console changed about a configuration-sourced company (M96). Its zero value
 	// means "nothing was overridden"; the row already carries the resulting values.
 	Override domain.FeishuCompanyOverride
 	// SecretConfigured reports whether a secret is stored (console rows) — never the secret.
@@ -76,7 +76,7 @@ func configFeishuCompanies(deps *FeishuDeps) []feishu.Company {
 func (s *Server) feishuCompanyRows(ctx context.Context) ([]feishuCompanyRow, error) {
 	configured := configFeishuCompanies(s.deps.Feishu)
 	store, storeReady := portReadyNoWrite(s.deps.FeishuApps)
-	// The console's field overrides (M94/M95) apply to configuration-sourced companies, which have no
+	// The console's field overrides (M94/M96) apply to configuration-sourced companies, which have no
 	// row to edit. A failure to read them costs the overrides, not the list: the configured values are
 	// always a usable answer.
 	overrides := map[string]domain.FeishuCompanyOverride{}
@@ -108,7 +108,7 @@ func (s *Server) feishuCompanyRows(ctx context.Context) ([]feishuCompanyRow, err
 		if override, ok := overrides[company.AppID]; ok {
 			row.Override = override
 			// Overrides win over the file, field by field: they are the operator's newer decision made
-			// where the company is managed (M95).
+			// where the company is managed (M96).
 			if override.Name != nil {
 				row.Name = *override.Name
 				row.NameSource = "override"
@@ -213,7 +213,7 @@ func (s *Server) feishuCompanyRowsOrConfig(ctx context.Context) []feishuCompanyR
 }
 
 // feishuClientForOverride builds the directory-read client of a company whose secret the console
-// overrode (M95). The secret is opened per call and never kept; the resulting client has its own
+// overrode (M96). The secret is opened per call and never kept; the resulting client has its own
 // tenant-token cache, which is the price of letting the console change a secret without a restart —
 // and the directory itself is cached for 60 s, so the extra token mints are bounded.
 func (s *Server) feishuClientForOverride(appID string, ciphertext []byte) (*feishu.Client, string) {
@@ -275,7 +275,7 @@ func (s *Server) resolveFeishuCompany(w http.ResponseWriter, r *http.Request, to
 	token = strings.TrimSpace(token)
 	if token == "" {
 		// The identity application, i.e. the M70 behavior every existing caller relies on — including
-		// the pause and credential guards, which apply to it like to any other company (M95 lets the
+		// the pause and credential guards, which apply to it like to any other company (M96 lets the
 		// console pause it).
 		return usableCompany(w, rows[0])
 	}
