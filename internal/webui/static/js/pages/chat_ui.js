@@ -10,13 +10,14 @@
 //  1. The channel is a MessagePort, not a message listener. The model's document shares its
 //     document with our injected script, so it can replace window.postMessage or post to the
 //     parent itself. Once the port is handed over, neither is possible: the port is bound to
-//     the frame's window at transfer time.
-//  2. The handshake is authenticated structurally, not by a secret. The port we hand over can
-//     only be received by the window that loaded the preview document, the injected script
-//     refuses to start when it is not that window's top document, and this side accepts a hello
-//     only from that exact frame. A secret was tried twice and removed twice: it cannot be read
-//     out of a sandboxed frame, and the CSP exception needed to hide it breaks the page's own
-//     inline scripts.
+//     the frame's window at transfer time. The console creates that port (the page cannot open a
+//     channel of its own) and transfers one end to the window the greeting came from.
+//  2. The handshake is authenticated structurally, not by a secret: only the window that loaded
+//     the preview document can be the `source` of a greeting that this side accepts, and the port
+//     goes to that window alone — a nested frame on the page is a different window, so it can
+//     neither be answered nor borrow the channel. A secret was tried twice and removed twice: it
+//     cannot be read out of a sandboxed frame, and the CSP exception needed to hide it breaks the
+//     page's own inline scripts.
 //  3. Nothing here writes HTML into the frame. The directive is applied as element
 //     construction and property assignment, exactly like the console's own Markdown and chart
 //     renderers, which never touch innerHTML either.
@@ -351,36 +352,58 @@ export function createUIPort({
   function onWindowMessage(ev) {
     if (closed) return;
     if (ev.source !== greetingSource()) return;
-    handleWindowMessage(ev.data, ev.ports);
+    handleWindowMessage(ev.data, ev.source);
   }
 
   // handleWindowMessage is the whole greeting decision, separated from the event so it can be
-  // driven directly. `ports` is what a real MessageEvent carries.
-  function handleWindowMessage(data, ports) {
+  // driven directly. `source` is the window the greeting came from (MessageEvent.source) — the
+  // only window a port is ever handed to.
+  //
+  // The page asks, the console gives. This direction matters and it is the one the code comments
+  // describe: a port the console transfers to `source` can be received by that window alone, and
+  // the page has no way to open a channel of its own. It also used to be nobody's job: this side
+  // waited for a hello that carried a port while the injected script waited for a port to be
+  // posted to it, so no message ever crossed and the toolbar said 不可交互 for the feature's whole
+  // life. The greeting therefore carries no port and is answered with one.
+  function handleWindowMessage(data, source) {
     if (closed) return;
     if (!data || data.aigw !== 'ui' || data.t !== 'hello') return;
-    if (data.framed === true) {
-      if (onLog) onLog('ignored a hello from a nested frame');
-      return;
+    if (channel) return; // one channel per preview; a repeated greeting is the retry, not a new ask
+    // The one window this preview will ever answer. In production the listener has already checked
+    // `ev.source` against it; the check is repeated here so that the exported entry point — the one
+    // a test drives — cannot hand a port to somebody else's window either.
+    const expected = greetingSource();
+    if (!expected) return; // the frame has no window yet (still detached): nobody to give it to
+    if (source && source !== expected) return;
+    const target = source || expected;
+    const pipe = new MessageChannel();
+    adoptPort(pipe.port1);
+    try {
+      target.postMessage({ aigw: 'ui', t: 'port' }, '*', [pipe.port2]);
+    } catch (err) {
+      closeChannel();
+      const why = err && err.message ? err.message : String(err);
+      if (onLog) onLog('handing the port to the frame failed: ' + why);
     }
-    const port = ports && ports[0];
-    if (!port) {
-      // A message-shaped object without a port is not our bridge; ignoring it is the whole
-      // point of using a port rather than this channel.
-      if (onLog) onLog('ignored a hello without a MessagePort');
-      return;
-    }
-    adoptPort(port);
+  }
+
+  function closeChannel() {
+    if (!channel) return;
+    channel.onmessage = null;
+    try { channel.close(); } catch (err) { /* already gone with the frame */ }
+    channel = null;
   }
 
   function adoptPort(port) {
     channel = port;
     channel.onmessage = (msg) => handleFrame(msg && msg.data);
     if (typeof channel.start === 'function') channel.start();
-    if (timer) { clearTimeout(timer); timer = null; }
-    publish({ status: 'ready', bridge: true, error: '' });
-    // Ready is the first event the page sends, and it is what says "the injected script ran".
-    // The console does not count it as a submission.
+    // Not ready yet, on purpose. The channel now exists, but "this page can talk to the console"
+    // is only true once the page's own script answers on it (the `ready` event below) — that ack
+    // is the only proof the transferred end actually arrived. Publishing ready here would show
+    // 已连接 for a handover the page never received, and the toolbar is the operator's only view
+    // into this channel.
+    publish({ bridge: true, error: '' });
   }
 
   function handleFrame(frame) {
@@ -389,6 +412,9 @@ export function createUIPort({
       case 'ev': {
         const name = String(frame.name || '');
         if (name === 'ready') {
+          // The page's ack ends the handshake: it is where "the injected script ran and got the
+          // port" becomes an observable fact. It is not a submission.
+          if (timer) { clearTimeout(timer); timer = null; }
           publish({ status: 'ready' });
           return;
         }
@@ -462,9 +488,10 @@ export function createUIPort({
 
   return {
     state,
-    // handleWindowMessage is exported for the harness: the greeting cannot be delivered through
-    // the frame's window (cross-origin object), so the test calls this with the same arguments a
-    // real MessageEvent would carry.
+    // handleWindowMessage is exported for tests: the greeting cannot be delivered through the
+    // frame's window (cross-origin object), so a test calls this with the same arguments the
+    // listener would — the message data and the window it came from. It also hands the port to
+    // that window, so a test that supplies a stand-in window can follow the whole handshake.
     handleWindowMessage,
     // sendToFrame carries the console's own frames: deltas while the answer streams, the
     // applied directive, the busy/idle state.
@@ -475,11 +502,7 @@ export function createUIPort({
       closed = true;
       if (timer) { clearTimeout(timer); timer = null; }
       window.removeEventListener('message', onWindowMessage);
-      if (channel) {
-        channel.onmessage = null;
-        try { channel.close(); } catch (err) { /* already gone with the frame */ }
-        channel = null;
-      }
+      closeChannel();
       publish({ status: 'closed' });
     },
   };

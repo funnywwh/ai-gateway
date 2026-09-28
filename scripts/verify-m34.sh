@@ -197,13 +197,18 @@ if [ -z "$ROTK" ]; then
   info "检查 config.yaml 的 chat 段：ui_bridge_enabled 必须是 true，改完 scripts/local-run.sh restart"
   exit 1
 fi
-# 页面 URL 必须带上凭证：注入脚本从**自己的 location** 读它，那是唯一别的文档看不到的地方。
+# 页面 URL 必须带上票据：注入脚本靠它拿到自己那份产物，而票据是服务端签的。
 PREVIEW_URL="$BASE$ROURL?ticket=$ROTK&bridge=1"
 H3=$(mktemp); B3=$(curl -s -D "$H3" "$PREVIEW_URL")
 have "响应头 X-Aigw-Bridge: 1" "$(cat "$H3")" 'X-Aigw-Bridge: 1'
 have "注入了 script#aigw-ui-bridge" "$B3" 'id="aigw-ui-bridge"'
 lack "注入标签不带任何凭证（没有 data-token）" "$B3" 'data-token'
-have "注入脚本只在自己是顶层文档时启动" "$B3" 'window.top'
+# 注入脚本**不能**判断"我是不是嵌套框架"：预览本来就是 iframe，`window.top` 是控制台窗口而不是
+# 这个帧的顶层文档，所以那句判断在任何一次预览里都为真、脚本当场退出——功能上线以来每一次「不可交互」
+# 都有它一份。这一条曾经反过来断言它的存在（把 bug 钉成了规格）。
+lack "注入脚本不会因为自己在 iframe 里就退出（window.top 那句）" "$B3" 'window.top'
+have "注入脚本仍会向父窗口发问候" "$B3" 'window.parent.postMessage'
+have "端口由控制台交给页面（脚本在等 {t:'port'}）" "$B3" "t !== 'port'"
 # 问候必须重发：宿主可能先挂载 frame 再注册监听，只发一次的问候会丢（这正是"等待握手 3 秒后
 # 变成不可交互"的原因）。
 have "问候会重发（不会因为一次丢失就永远握不上手）" "$B3" 'sayHello'

@@ -234,6 +234,15 @@ func TestUIPreviewBridgeScriptIsNotANetworkClient(t *testing.T) {
 			t.Errorf("the bridge script is missing %s", required)
 		}
 	}
+	// …and one thing it must never do again: decide for itself whether it is a nested frame. The
+	// preview IS framed by design, so `window.top` there is the *console's* window rather than "this
+	// frame's top document" — the test reads as "not the top document" and returns before the script
+	// ever greets. Every interactive preview in this feature's whole life reported 不可交互 because
+	// of that line, so its absence is a required property here rather than a coincidence.
+	if strings.Contains(script, "window.top") {
+		t.Error("the bridge script must not test window.top: the preview is always framed, so it " +
+			"would stop before greeting (see docs/design/m34-ui-bridge.md, decision 2e)")
+	}
 	// It is concatenated into arbitrary documents, so it must not depend on syntax an odd
 	// parser might refuse.
 	for _, forbidden := range []string{"=>", "${", "let ", "const "} {

@@ -291,10 +291,12 @@
 
 设计：`docs/design/m34-ui-bridge.md`；规格：`docs/chat.md` §4（可交互的界面）、§8（配置）、§9（排障）。
 
-**2026-09-28 补记**：整页预览的通道从 M34 起就是死的（握手的帧窗口被读成 null；`state.preview`
-槽里放的是 Promise 而不是句柄），界面上的表现就是本次要修的「不可交互」。两条都已修，
-"浏览器里那条 port 真的接通"**已经是自动断言**（`chat` 视图 live 阶段），不需要浏览器的那一半在
-`make verify` 的 `chat_preview_handshake_test.mjs` 里。详见设计文档「关键决策 2c / 2d」。
+**2026-09-28 补记**：整页预览的通道从 M34 起就没通过，一共四处，界面上的表现都是「不可交互」：
+握手把帧窗口提前读成 `null`；`state.preview` 槽里放的是 Promise 而不是句柄；**注入脚本在
+`window.top` 上判断"我是不是嵌套框架"，而预览本来就是 iframe，于是每次都在第一句就返回**；
+**端口两侧都在等对方建，谁都没有调用过 `MessageChannel`**。四条都已修，"浏览器里那条 port 真的接通"
+是自动断言（`chat` 视图 live 阶段），不需要浏览器的那一半由
+`chat_preview_handshake_test.mjs`（`make verify` 内，**两侧一起跑**）钉住。详见设计文档「决策 2c / 2d / 2e」。
 
 ### 测试与验收
 > 本节已完成的 8 项记录见 `docs/todo_done.md` 的同名小节；下面只列未完成项。

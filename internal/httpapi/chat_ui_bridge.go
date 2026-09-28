@@ -30,11 +30,21 @@ import (
 // So the injected script is authorized by `'unsafe-inline'` like the page's own code, and the
 // channel is authenticated structurally instead of by a secret:
 //
-//   * the offered port reaches exactly one window — the one that loaded this document — so only
-//     the page itself could ever hold it;
-//   * the injected script refuses to start when it is not the top document (`window.top` check),
-//     which is what stops a nested frame on the page from being the one that gets a port;
-//   * the host accepts a hello only from that exact frame window.
+//   * the console creates the MessagePort and transfers one end to the greeting's own source
+//     window, so that end can be received by exactly one window — the one that loaded this
+//     document;
+//   * the host accepts a hello only from that exact frame window (`event.source` must be the
+//     frame's `contentWindow`), so a nested frame on the page — a different window, even if it
+//     crafts the same message — never gets a port;
+//   * the page has no way to open a channel by itself: only the port the console hands out leads
+//     back to the console, and the console hands one out for that window alone.
+//
+// The script must NOT try to decide "am I a nested frame?" for itself. It cannot: this document
+// is framed by design, and `window.top` is the *console's* window, not this frame's top document.
+// A `window.top !== window` early return reads as "not the top document" and therefore killed
+// every preview there ever was — the script never ran, nothing ever greeted, `window.AIGW` was
+// never defined, and the only symptom was the toolbar saying 不可交互. The source check above is
+// what actually keeps other windows out.
 //
 // A token was tried first and removed: it cannot be read by the parent (a sandboxed document is
 // an opaque origin, so `frame.contentDocument` is null) without either a second request or a
@@ -88,13 +98,13 @@ func uiBridgeScript() string {
   // window.postMessage later.
   var post = window.parent.postMessage;
   if (typeof post !== 'function') { return; }
-  // Only the top document of the frame gets the port. A nested frame on the page is a different
-  // window and can post to the host itself, so without this it could be the one that receives a
-  // port and then speak for the preview. This is the whole authentication: the secret-free
-  // version of "prove you are the document we loaded".
-  var framed = false;
-  try { framed = window.top !== window; } catch (err) { framed = true; }
-  if (framed) { return; }
+  // No "am I a nested frame?" test here, deliberately. This document IS framed — the console loads
+  // it in a sandboxed iframe — so any such test answers "nested" and stops the script before it
+  // ever greets, which for this feature meant no preview ever handshook. What keeps a nested frame
+  // on the page from speaking for the preview is the host's identity check: it hands a port only
+  // to the window whose greeting came from the frame's own window, and a nested frame is a
+  // different window. (See the rationale at the top of chat_ui_bridge.go; it names the comparison
+  // that must not come back, and scripts/verify-m34.sh asserts it stays gone.)
   var port = null;
   var handlers = [];
   var byName = {};
@@ -413,11 +423,15 @@ func uiBridgeScript() string {
   // answers with a port: the host may not have installed its listener yet when this runs (it
   // attaches the frame and then listens, and the document can start loading in between), and a
   // dropped hello would otherwise leave a preview that can never connect. Repetition is
-  // harmless — the host ignores every offer after the first, and each one is identical.
+  // harmless — the host answers the first greeting and ignores the rest, and each one is identical.
+  //
+  // The greeting carries no port: the console creates the channel and transfers one end to this
+  // window (see the 'port' listener above). Both sides waiting for the other to open it is how
+  // this channel once deadlocked forever — no message ever crossed.
   function sayHello() {
     if (port || helloSent >= ` + strconv.Itoa(uiBridgeHelloAttempts) + `) { return; }
     helloSent++;
-    try { post.call(window.parent, { aigw: '` + uiBridgeKind + `', t: 'hello', framed: false }, '*'); }
+    try { post.call(window.parent, { aigw: '` + uiBridgeKind + `', t: 'hello' }, '*'); }
     catch (err) { /* a frame with no parent cannot be interactive */ }
   }
 

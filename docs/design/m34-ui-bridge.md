@@ -43,15 +43,22 @@ M34 补上这条回路，让「模型生成的界面」成为**用户与 AI 交�
 
 真正需要的事实是**结构性的**，不是秘密：
 
-1. 我们交出的 `MessagePort` 只能被**加载该文档的那个 window** 收到——端口在传递时就绑定了接收者，
+1. 控制台建 `MessagePort`，并把一端**传给发来问候的那个 window**——端口在传递时就绑定了接收者，
    之后不经过任何全局对象；
-2. 注入脚本**只在自己是顶层文档时才启动**（`window.top !== window` 直接返回）。页面里的嵌套框架
-   是另一个 window，它也能给宿主发消息，这一步就是把它挡在门外的全部；
-3. 宿主只接受来自**那个确切 frame window** 的 hello，而且必须带着 port。
+2. 宿主只接受来自**那个确切 frame window** 的 hello（`event.source === frame.contentWindow`），
+   所以页面里的嵌套框架（另一个 window）永远拿不到端口——它连"被回答"的资格都没有；
+3. 页面自己开不出通往控制台的通道：只有控制台递出去的那个端口能回来。
 
 三条合起来与"凭证"等价，且不需要任何策略例外、不需要落库、不需要额外请求。副作用是
 `injectUIBridge` 不再带参数，`chat_artifacts.bridge_token`（迁移 0012）成了一个空占位列
 （保留列不动已应用它的库，代码完全不读写，迁移文件里写明了缘由）。
+
+**第 2 条曾经写成一个致命的自检**（`window.top !== window` 就退出）：那是把"这个帧的顶层文档"
+和"整个页面的顶层文档"混为一谈。预览**本来就是** iframe，所以那句话在任何一次预览里都为真，
+脚本当场返回——`window.AIGW` 从未定义、问候从未发出。详见 2e。
+
+**第 1 条曾经谁都没做**：两侧都在等对方建通道（详见 2e）。所以"结构性"这三个字在 2026-09-28
+之前只是文档上的描述，不是代码里的事实。
 
 ### 2b. 问候必须重发，监听器必须比 frame 先就位
 
@@ -92,9 +99,65 @@ const greetingSource = () => (frameWindow !== undefined ? frameWindow : (frame ?
 if (ev.source !== greetingSource()) return;
 ```
 
-读时机对，其余一律不动：先注册监听器再挂载 frame、问候重发、`framed:true` 拒绝、必须带 port——
-这些是 2b 与决策 2 的成果，都保留。`frameWindow` 参数留着给"没有 DOM 的测试"用，但**真机 harness
-故意不传**：替身只能证明替身。
+读时机对，其余不动：先注册监听器再挂载 frame、问候重发都保留（`framed:true` 与"问候必须带 port"
+两条在 2e 里被删掉了——它们描述的是那个从没存在过的协议）。`frameWindow` 参数留着给"没有 DOM 的
+测试"用，但**真机 harness 故意不传**：替身只能证明替身。
+
+### 2e. 通道得有人真的建，而且脚本不能在 iframe 里判断自己是不是 iframe
+
+这一条是**第一性**的：前四条修完（2c、2d 以及更早的凭证与 CSP），实测**仍然**是「不可交互」。
+把注入脚本从服务端取出来逐行读，答案是两个结构性错误，它们从 M34 首次上线起就一起存在：
+
+**① 脚本第一句就返回。** 注入脚本里有这么一段自检：
+
+```js
+var framed = false;
+try { framed = window.top !== window; } catch (err) { framed = true; }
+if (framed) { return; }
+```
+
+写它的人想表达"我是这个帧的顶层文档，不是页面里嵌套的框架"。但 `window.top` 不是那个意思：
+规范写的是 `top` getter "return this's navigable's **top-level traversable's** active WindowProxy"，
+也就是**整个页面树的顶层窗口**。预览**本来就是**控制台 iframe 里的文档，所以 `window.top` 是控制台
+的 window、`window` 是帧自己的 window，这两个**永远不相等** → `framed` 永远为真 → 脚本当场返回。
+后果不是"少个握手"：`window.AIGW` 从未定义、`bind()` 从未执行、问候一个都没发出去。**每一次**
+「不可交互」都有它一份——包括前四次真机反馈修完之后的那一次。
+
+而且部署自查脚本 `scripts/verify-m34.sh` 当时**正面断言了这一行存在**（"注入脚本只在自己是顶层
+文档时启动" → `have ... 'window.top'`）：把一个 bug 钉成了规格，于是它再也没有机会被谁怀疑。
+
+**② 端口两侧都在等对方建。**
+
+- 注入脚本：`window.addEventListener('message', …)` 里等的是**控制台发来的** `{t:'port'}` 消息，
+  从 `ev.ports[0]` 拿端口；
+- 控制台：`handleWindowMessage` 要求问候**自带** `ports[0]`，否则"ignored a hello without a
+  MessagePort"。
+
+也就是说：A 等 B 先给端口，B 等 A 先给端口，**没有任何一方调用过 `new MessageChannel()`**。
+唯一建过通道的是 harness 里那段替身（`handOverPort`），它手工造了一条 `MessageChannel` 冒充帧内
+脚本——这正是它当初"跑通"的原因，也解释了为什么 833b405 删掉它之后，这条通道就再没有任何验证。
+
+**修法**（协议按文档本来描述的方向落地：页面请求、控制台交付）：
+
+```
+帧  → 控制台 : {aigw:'ui', t:'hello'}                 // 不带端口；每 600ms 重发，最多 6 次
+控制台 → 帧  : {aigw:'ui', t:'port'} + [port2]        // 只发给那个校验过的 window
+两侧各持一端  →  帧发 {t:'ev', name:'ready'}          // 这个 ack 才是「已连接」
+```
+
+- `handleWindowMessage(data, source)` 里 `new MessageChannel()`，`adoptPort(pipe.port1)`，再把
+  `port2` 传给 `source`（生产路径上 `source` 已经等于 `frame.contentWindow`；导出的入口自己再校验
+  一次，测试也没法把端口递给别人的 window）；
+- 删掉 `window.top` 自检：它想防的"嵌套框架冒充"由宿主的 `event.source` 身份校验覆盖，而那一条
+  是真的（嵌套框架是另一个 window）；
+- `adoptPort` **不再**直接发布 `ready`：端口交出去不等于页面收到了它。状态改为**帧自己在端口上发出
+  `ready` 时**才变「已连接」，握手超时也据此重置。这一步顺带修掉一个会骗人的徽章：端口没送达时
+  （脚本被 CSP 拦、页面自己被冻结）以前也会显示「已连接」。
+
+对应测试：`internal/webui/tests/chat_preview_handshake_test.mjs` 现在**两侧一起跑**——真控制台模块 +
+真注入脚本（放在一个 `window.top !== window` 的窗口里，也就是预览的真实处境），断言问候发出、
+端口交出、ack 回来；并断言上面两条都不会回来。`scripts/verify-m34.sh` 的那条断言反过来写：
+`lack ... 'window.top'`。
 
 ### 2d. 句柄槽里放的不是句柄（`state.preview` 是个 Promise）
 
@@ -290,9 +353,10 @@ export function describeUIOpsError(...)     // → 中文原因
 ```
 模型: ```html 表单``` ──控制台上传──▶ chat_artifacts(session,key 幂等 upsert)
    浏览器: GET /admin/chat-artifact/<id>?ticket=…&bridge=1
-        └─ 响应 = artifact 正文 + 注入的 AIGW 脚本（无凭证；授权是结构性的，见决策 2）
-   注入脚本: hello{ports:[MessagePort]} ─▶ 父侧校验(source === 到达时的 frame.contentWindow)
-        ◀── MessagePort ──  此后只走 port，页面全局环境无法插手
+        └─ 响应 = artifact 正文 + 注入的 AIGW 脚本（无凭证；授权是结构性的，见决策 2 与 2e）
+   注入脚本: {aigw:'ui', t:'hello'} ──▶ 父侧校验(source === 到达时的 frame.contentWindow)
+        ◀── {aigw:'ui', t:'port'} + [port2] ── 控制台建 MessageChannel，只交给上面那个 window
+   注入脚本: port: {t:'ev', name:'ready'} ──▶ 界面已就绪（徽章这时才变「已连接」，见 2e）
    用户填写 → submit 被拦截 → port: {t:'ev', name:'submit', v:{…}}
    控制台: content = "表单提交：…\n```json{source:ui_event,…}```"
         └─ 同一条 POST /admin/api/v1/chat/sessions/{id}/turns（SSE、幂等、计费）
@@ -400,8 +464,9 @@ artifact 正文按 `(session_id, key)` 幂等 upsert，页面新版本仍走同�
 | 层 | 覆盖方式 |
 |---|---|
 | `ui` 指令的解析与应用、事件载荷、回复解析 | harness `chat` 视图（纯函数，无 DOM 依赖） |
-| 服务端响应：注入、CSP、无凭证、沙箱边界、票据 scope、登出失效 | `scripts/verify-m34.sh` 对**真实二进制 + 全新库**（40 项） |
-| 注入脚本的语法与自检（ES5、无 fetch/eval/innerHTML、顶层文档检查、重发） | harness `bridge` 视图（真实浏览器解析） |
+| 服务端响应：注入、CSP、无凭证、沙箱边界、票据 scope、登出失效 | `scripts/verify-m34.sh` 对**真实二进制 + 全新库**（42 项） |
+| 注入脚本的语法与自检（ES5、无 fetch/eval/innerHTML、**没有 `window.top` 自检**、问候会重发） | harness `bridge` 视图（真实浏览器解析）+ `verify-m34.sh` 断言原文 |
+| **握手本身：问候发出 → 端口交出 → 页面 ack**（两侧一起跑，页面在"被 iframe 包着"的窗口里） | `internal/webui/tests/chat_preview_handshake_test.mjs`（`make verify` 内，无需浏览器） |
 | **浏览器里父窗口 ↔ 子框架那条 port 真的接通** | **harness `chat` 视图的 live 阶段**（真 iframe + 真注入脚本 + 真 MessagePort） |
 
 最后一行曾经被写成"结构上做不到"，那条判断**是错的**，值得留着当教训：当时想的是"驱动帧发来问候
@@ -431,10 +496,12 @@ artifact 正文按 `(session_id, key)` 幂等 upsert，页面新版本仍走同�
   了什么——它跑的是真文档、真注入脚本、真端口与真实 CSP，**不是**真部署的票据链路（产物 URL 由
   harness 服务器顶替；票据、scope、登出失效由 `scripts/verify-m34.sh` 对真二进制断言）。
   两层拼起来才是完整的：控制台侧的行为在浏览器里，服务端的授权在 Go 与自查脚本里。
-  > 这条"未验证"曾经以最直接的方式兑现过三次，都记在本页：**凭证放在父窗口读不到的地方**
+  > 这条"未验证"曾经以最直接的方式兑现了**四次**，都记在本页：**凭证放在父窗口读不到的地方**
   > （决策 2）、**用 nonce 藏凭证把页面自己的内联脚本一起拦掉**（决策 3）、**握手把帧窗口提前读成
-  > null**（决策 2c）。三次的共同点是**验证总在错误的那一层**：第一次是替身替掉了真实约束，
-  > 第二、三次是"这条通道测不了"的结论让人不再看它。所以现在这里写的是覆盖矩阵，而不是免责声明。
+  > null**（决策 2c）、**脚本在 iframe 里判断自己是不是 iframe + 两侧都在等对方建端口**（决策 2e）。
+  > 四次的共同点是**验证总在错误的那一层**：第一次是替身替掉了真实约束，之后几次是"这条通道测不了"
+  > 的结论让人不再看它，而其中一次甚至把 bug 写成了自查脚本里的断言。所以现在这里写的是覆盖矩阵，
+  > 而不是免责声明——而且矩阵的第一行就是"两侧一起跑"。
 - **`bridge` 视图（第 13 个视图）**：注入脚本是 Go 字符串拼接出来的，所以"Go 能编译"完全不能说明
   JavaScript 合法。`scripts/ui-harness/bridge_syntax.page.html` 在真实浏览器里用
   `new Function(source)` **只编译不执行**地验证它，并顺带断言无 `fetch`/`XHR`/`eval`/`innerHTML`/

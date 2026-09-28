@@ -59,6 +59,14 @@ try {
   // than a literal 'aigw:hello' — assert the frame, not one spelling of the message.
   checks.hasHandshake = SOURCE.indexOf("'hello'") >= 0 && SOURCE.indexOf("aigw: 'ui'") >= 0;
   checks.usesMessagePort = /ev\.ports/.test(SOURCE);
+  // …and it must not decide "am I a nested frame?" for itself: the preview is always framed, so a
+  // `window.top` test reads as "not the top document" and returns before the script ever greets.
+  // That guard is how this feature spent its whole life reporting 不可交互 — and note that this
+  // view only *parses* the script, so the behavioural half of the same fact is asserted where the
+  // script really runs: `chat` (live phase) in a browser, `chat_preview_handshake_test.mjs` under
+  // Node for both halves at once.
+  checks.noTopDocumentGuard = SOURCE.indexOf('window.top') < 0;
+  checks.greetsParent = SOURCE.indexOf('window.parent.postMessage') >= 0;
   checks.bindsSubmit = /addEventListener\('submit'/.test(SOURCE);
   checks.bindsDataAigwSend = SOURCE.indexOf('data-aigw-send') >= 0;
   checks.readsFormData = SOURCE.indexOf('FormData') >= 0;

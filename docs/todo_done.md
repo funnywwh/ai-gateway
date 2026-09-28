@@ -1576,15 +1576,37 @@
 - [x] 设计文档新增「哪些能自动测、哪些不能」一节，把四个层次的覆盖方式列成表
 - [x] `make verify` 全绿；`make ui-check` 13 视图全绿（chat 98 项）
 
-### 修正（真机反馈四）：整页预览的通道从 M34 起就没通过（帧窗口读成 null + 槽里放的是 Promise）
-- [x] 现象（用户报）：智能问答里 AI 生成的整页 HTML 界面「不可交互」
+### 修正（真机反馈四）：整页预览的通道从 M34 起就没通过（四个结构性缺陷）
+- [x] 现象（用户报）：智能问答里 AI 生成的整页 HTML 界面「不可交互」；修完前两条后**实测仍然失败**，
+      说明还有更靠前的东西——事实上有两条，而且它们才是第一性的
+- [x] 根因 C（脚本第一句就返回）：注入脚本里有 `var framed = false; try { framed = window.top !== window; }
+      catch (err) { framed = true; } if (framed) { return; }`。`window.top` 是**整个页面树的顶层窗口**
+      （规范：`top` getter 返回 "top-level traversable's active WindowProxy"），而预览**本来就是**控制台
+      iframe 里的文档，所以 `window.top !== window` 在任何一次预览里都为真 → 脚本当场返回：
+      `window.AIGW` 从未定义、`bind()` 从未执行、问候一个都没发出去。**每一次**「不可交互」都有它一份。
+      更糟的是 `scripts/verify-m34.sh` 当时正面断言这一行存在（`have ... 'window.top'`，文案写的是
+      "注入脚本只在自己是顶层文档时启动"）——bug 被钉成了规格
+- [x] 修法 C：删掉该自检（它想防的"嵌套框架冒充"由宿主的 `event.source` 身份校验负责，那一条是真的），
+      把理由写进 `chat_ui_bridge.go` 的文件头与脚本体；`verify-m34.sh` 的断言反过来写
+      （`lack ... 'window.top'`，并新增"仍会向父窗口发问候"），harness 的 `bridge` 视图加
+      `noTopDocumentGuard` / `greetsParent` 两条
+- [x] 根因 D（端口谁都没建）：注入脚本在等**控制台发来的** `{t:'port'}`（`ev.ports[0]`），控制台在等
+      问候**自带** `ports[0]`（否则记 "ignored a hello without a MessagePort"）。两侧互相等，**整个仓库
+      里没有任何一处调用过 `new MessageChannel()`**；唯一建过通道的是 833b405 删掉的 harness 替身
+      `handOverPort`——这正是它当年"跑通"、而删掉后再无验证的原因
+- [x] 修法 D（按文档本来描述的方向落地：页面请求、控制台交付）：`handleWindowMessage(data, source)`
+      里 `new MessageChannel()` → `adoptPort(port1)` → 把 `port2` 传给那个已校验的 source window；
+      问候不再携带端口。导出入口自己再校验一次 source，测试也无法把端口递给别人的窗口
+- [x] 顺带修掉一个会骗人的徽章：`adoptPort` 以前直接发布 `ready`，于是"端口交出去了但页面没收到"
+      （脚本被拦、页面被冻结）也会显示「已连接」。现在**只有帧在端口上发出 `ready` 时**才变「已连接」，
+      握手超时按这个重建
 - [x] 根因 A（握手时机）：真机反馈三那次为了修竞态把 `createUIPort(...)` 提到挂载之前，同一提交把身份
       校验收成了**创建时读一次**（`greetingSource = frame.contentWindow`）。而 iframe 连进文档前没有
       content window（规范把 "Create a new child navigable" 放在 post-connection steps，`contentWindow`
-      在 content navigable 为 null 时返回 null），于是那个值恒为 null，注入脚本的 6 次问候全部被
-      `ev.source !== null` 判掉 → 3 秒后「不可交互」，状态行还把它归因给模型的页面
+      在 content navigable 为 null 时返回 null），于是那个值恒为 null，问候全部被 `ev.source !== null`
+      判掉 → 3 秒后「不可交互」，状态行还把它归因给模型的页面
 - [x] 修法 A：`const greetingSource = () => (frameWindow !== undefined ? frameWindow : (frame ? frame.contentWindow : null))`，
-      在消息到达时解析；先注册监听器、问候重发、带 port 与 `framed:true` 的拒绝矩阵全部保留
+      在消息到达时解析；先注册监听器与问候重发保留
 - [x] 根因 B（句柄槽）：`const handle = openPreview({…}).catch(…)` 是 **Promise**（`openPreview` 是
       async），却被塞进 `state.preview`；`destroy()`（换预览/离开页面）、`isOpen()`（`sendUIEvent` 的
       `alive()`、`drainQueue`、`重新应用`）、`reply()`（回答回灌）三处全是 TypeError。表现不是报错，
@@ -1596,18 +1618,21 @@
       `scripts/ui-harness/preview_artifact.page.html`（模型风格页面 + 服务端会注入的那段脚本）、
       `server.py` 把 `/admin/chat-artifact/*` 答成这一页并带上**线上逐字**的 artifact CSP、
       `render_page.py` 支持 `__AIGW_BRIDGE__` 注入、`run.sh` 渲染这一页
-- [x] `chat` 视图新增 live 阶段断言（4 条）：徽章变 `已连接`（根因 A 的判据）、表单提交变成一条带
+- [x] `chat` 视图新增 live 阶段断言（4 条）：徽章变 `已连接`（根因 A/C/D 的判据）、表单提交变成一条带
       `"source":"ui_event"` + 字段值的提问、回答里的 `ui` 指令落到帧内 DOM 并**回声**回来
       （帧是不透明源，回声是父侧唯一能观测"控制台 → 页面"的通道；同时覆盖根因 B 的 `reply` 路径）
 - [x] `internal/webui/tests/chat_preview_handshake_test.mjs`：不需要浏览器的守卫，`make verify` 里就跑
-      （`make ui-base` 新增一条）。**方向性验证**：把 `chat_ui.js` 换回 HEAD 的版本 → 该测试红在
-      「a greeting from the frame after it is attached must complete the handshake」，恢复后绿
+      （`make ui-base` 新增一条），**两侧一起跑**——真控制台模块 + 真注入脚本（放在一个
+      `window.top !== window` 的窗口里，即预览的真实处境），断言问候发出、端口交出、ack 回来。
+      **方向性验证（四种组合）**：旧控制台+旧脚本 → 红在"注入脚本必须发出问候"；新控制台+旧脚本 → 同一条；
+      旧控制台+新脚本 → 红在"控制台必须建通道并把一端交给帧"；两侧都新 → 绿
 - [x] `TestHarnessPreviewCSPMatchesTheServer`：把 harness 的 `ARTIFACT_CSP` 副本钉在
       `chatArtifactCSP(domain.ChatArtifactHTML)` 上。**方向性验证**：把副本里 `script-src 'unsafe-inline'`
       改成 `'self'` → 红；改回 → 绿
-- [x] 文档：设计文档新增「关键决策 2c / 2d」并**推翻**原先"这条通道结构上无法自动测"的结论（写清
-      父窗口不需要碰帧内任何东西，让真帧自己发问候即可）、清掉数据流与接口一节里已不存在的 nonce/
-      凭证描述；`docs/chat.md` §10 的自查口径同步，§11 排障补「旧二进制/缓存」这一种
+- [x] 文档：设计文档新增「关键决策 2c / 2d / 2e」并**推翻**原先两条错误结论（"这条通道结构上无法自动测"、
+      "注入脚本只在自己是顶层文档时才启动"），数据流图按真实协议重画（问候不带端口、控制台交付端口、
+      `ready` 才算连上）、清掉 nonce/凭证的旧描述；`docs/chat.md` §10 的自查口径同步，§11 排障补
+      「旧二进制/缓存」这一种；harness README 的握手小节重写
 - [x] `make verify` 全绿（含新守卫）；`make ui-check` 的 `chat` 视图在宿主终端跑（沙箱里没有可用
       Firefox，run.sh 以 skip 退出）
 

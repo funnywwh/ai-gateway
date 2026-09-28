@@ -252,11 +252,13 @@ usage 脚注、`#/chat?session=` 深链、`#/skills` 的编辑/删除确认与�
 模型生成的 HTML5 页面提交表单要回到会话，这条链路横跨四个地方：服务端注入的脚本、iframe 的沙箱、
 控制台的 `MessagePort`、以及"提交就是一条正常提问"的计费路径。harness 覆盖的是**全部四段**：
 
-- **握手是一个拒绝矩阵**：`hello` 必须来自这个 frame 的窗口（而且这个窗口是**在问候到达时**解析的：
-  端口比 frame 先建，帧连进文档之前 `contentWindow` 是 null，读早了整条通道静默失效、工具栏只会说
-  「不可交互」——真机回归见 `docs/design/m34-ui-bridge.md` 决策 2c）、必须带 `MessagePort`、
-  `framed:true` 一律拒绝。错 source / 无 port / 错帧类型三种都被断言"状态没变"，因为这条通道的鉴权
-  全部在这里（没有凭证：旧设计里的 token 两度上线两度被拆，原因写在决策 2）。
+- **握手是一条"只回答一个人"的规则**：`hello` 必须来自这个 frame 的窗口，而且这个窗口是**在问候
+  到达时**解析的（端口比 frame 先建，帧连进文档之前 `contentWindow` 是 null；读早了整条通道静默
+  失效，工具栏只会说「不可交互」——真机回归见 `docs/design/m34-ui-bridge.md` 决策 2c）。端口由
+  **控制台**创建、只交给那个窗口（决策 2e：以前两侧都在等对方建通道，从来没有消息跨过去；脚本还曾
+  在 `window.top` 上判断"我是不是嵌套框架"，而预览本来就是 iframe）。问候不带端口，回答才带；
+  错 source 与错消息形状都被断言"什么都没发生"（没有凭证：旧设计里的 token 两度上线两度被拆，
+  原因写在决策 2）。
 - **`MessageChannel` 与 iframe 都是真的**（live 阶段）：`server.py` 把 `/admin/chat-artifact/*` 答成
   `preview_artifact.html`——一页模型风格的文档，`<head>` 里就是服务端会注入的那段脚本，响应头是线上
   逐字的 artifact CSP（`TestHarnessPreviewCSPMatchesTheServer` 钉着这份副本）。控制台走真实路径：
@@ -272,8 +274,9 @@ usage 脚注、`#/chat?session=` 深链、`#/skills` 的编辑/删除确认与�
 - **回灌**：`window.__uiReply` 让 stub 的回答带一个 ```` ```ui ```` 指令块，然后断言端口收到
   `{k:'d'}` 与 `{k:'done', ops:[…]}`。
 - **不需要浏览器的那一半**：`internal/webui/tests/chat_preview_handshake_test.mjs`（`make verify` 里
-  就跑）钉住握手的**时机**——端口在 frame 挂载前创建、帧窗口在问候到达时才解析。两条一起才完整：
-  浏览器里跑行为，Node 里钉时刻。
+  就跑）把**两侧一起跑**——真控制台模块 + 真注入脚本（放在一个 `window.top !== window` 的窗口里，
+  也就是预览的真实处境），断言问候发出、端口交出、ack 回来。它与 live 阶段是互补的：浏览器里测
+  真实 DOM 与真实端口传输，Node 里测"哪一半先发生、谁把端口交给谁"。
 
 与真实环境仍有两处差异（见 `docs/design/m34-ui-bridge.md`「未验证的部分」）：
 

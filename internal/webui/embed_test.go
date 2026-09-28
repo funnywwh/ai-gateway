@@ -340,7 +340,9 @@ func TestConsoleChatRoutesMatchTheServer(t *testing.T) {
 		}
 	}
 	uiSource := source("/js/pages/chat_ui.js")
-	for _, want := range []string{"parseUISpec", "applyUIOps", "createUIPort", "ev.ports"} {
+	// The exports the rest of the console reaches for. The handshake's own shape is pinned right
+	// below this block, against the uncommented source.
+	for _, want := range []string{"parseUISpec", "applyUIOps", "createUIPort", "MessageChannel"} {
 		if !strings.Contains(uiSource, want) {
 			t.Errorf("chat_ui.js is missing %s", want)
 		}
@@ -382,11 +384,20 @@ func TestConsoleChatRoutesMatchTheServer(t *testing.T) {
 		}
 	}
 	portSource := stripJSComments(source("/js/pages/chat_ui.js"))
-	// The three checks that carry the weight instead of a secret. The first compares against the
-	// frame's window, which the console holds as a value (`greetingSource`) because a sandboxed
-	// frame's window is a cross-origin object: it is good for `postMessage` and for an identity
-	// comparison, and for nothing else.
-	for _, want := range []string{"ev.source !== greetingSource", "data.framed === true", "ev.ports"} {
+	// The facts that carry the weight instead of a secret:
+	//   * the greeting must come from the frame's own window, compared against a *call* to
+	//     `greetingSource()` — that window only exists once the frame is attached, and the port is
+	//     created before that (reading it once captured null, which silently killed the handshake);
+	//   * the console creates the MessagePort and transfers one end to the greeting's source
+	//     window. Nobody created it for the feature's first releases: this side waited for a hello
+	//     that carried a port while the injected script waited to be handed one, so no message ever
+	//     crossed and every preview said 不可交互.
+	for _, want := range []string{
+		"ev.source !== greetingSource()",
+		"new MessageChannel()",
+		"t: 'port'",
+		"[pipe.port2]",
+	} {
 		if !strings.Contains(portSource, want) {
 			t.Errorf("the port must check %q before accepting a handshake", want)
 		}
