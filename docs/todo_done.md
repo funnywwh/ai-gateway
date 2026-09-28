@@ -6883,3 +6883,15 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
       `make ui-base` 全绿；`BenchmarkPlan` 4948 B/45 allocs 不变
 - [x] 文档：设计文档（含「实现与设计差异」7 条）、`docs/org.md` §5、`docs/feishu.md` §5c.6、
       `docs/mcp.md` §4、`docs/PROCESS.md` 已产出表、`docs/TODO.md` M96 小节
+
+### M96 发布记录：v4.11.0 部署到 rag-server（2026-09-28）
+
+- 版本：**v4.11.0**（`dd8b32f`），minor（配置来源的公司可改字段 + 客户公司密钥可覆盖）
+- 构建物：`bin/aigw` 4.11.0，`sha256 f3adc5028326607b54869c6d36b7276c77ac5d2407a9acb46a35584e41cbd269`
+- 回滚点：宿主 `bin/aigw.prev-4.10.1-ed470b5`（升级前是并行会话的 4.10.1）
+- 门禁：`go test ./internal/... ./cmd/...`、`make ui-base` 全绿；`BenchmarkPlan` 4948 B/45 allocs 不变
+- 宿主验证：`/version` = 4.11.0/`dd8b32f`；`/healthz`、`/readyz` 200；迁移到 **0033_feishu_company_overrides**；
+  `GET /org/feishu/companies` 匿名仍 401；新控制台资源 200；本次启动日志无 ERROR
+  （只过滤掉了已知的退出期 `audit write queue` 一条）
+- 说明：本里程碑起草时编号 M95，与并行会话同日的「控制台主菜单可折叠（M95）」撞号，已改为 **M96**；
+  代码与文档都按 M96 落，早前两个提交的 message 里仍写着 m95（历史不改写，以免影响并行会话）
