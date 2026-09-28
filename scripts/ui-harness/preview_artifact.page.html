@@ -1,0 +1,95 @@
+<!doctype html>
+<!--
+  One artifact-shaped preview page for the console harness — the model's side of the interactive
+  channel (M34).
+
+  This file is not served where it sits. scripts/ui-harness/run.sh renders it into the harness
+  site, and scripts/ui-harness/server.py answers every /admin/chat-artifact/* request with it,
+  carrying the same headers the gateway sends for an interactive preview (the artifact
+  Content-Security-Policy and X-Aigw-Bridge). The console therefore builds its frame against a
+  real URL, and the injected script below really runs — which is the whole point: the previous
+  version of this test could only look at the frame's URL, and the handshake could be (and was)
+  broken the entire time.
+
+  The placeholder in <head> is replaced with the exact script element the Go code injects, in the
+  same place (right after <head>). That script is authorized by `script-src 'unsafe-inline'`, like
+  this page's own inline script: a nonce or hash in that policy would make browsers ignore
+  'unsafe-inline' and take both of them down.
+  (This comment must not spell the placeholder token itself: render_page.py replaces every
+  occurrence — and refuses the page when there is more than one — because a second copy inside
+  prose is exactly the kind of thing nobody notices.)
+
+  The page behaves like a model-written page: it submits a form once, and it echoes back whatever
+  the console pushed into #result. The echo is the only way a test can observe the console→frame
+  direction — the frame is an opaque origin, so the parent cannot read this document at all (not
+  even frame.contentWindow.dispatchEvent, which throws SecurityError).
+
+  Timings are named because the harness waits on them: the submission happens once the channel is
+  open, and the echo comes ECHO_AFTER_SUBMIT_MS later — more than UI_LIMITS.minIntervalMs (1.5 s),
+  or the console would reject the echo as "过于频繁" and the test would fail for the wrong reason.
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>目标设备信息</title>
+<style>
+  body { font: 14px/1.6 system-ui, sans-serif; margin: 16px; color: #1f2937; }
+  label { display: block; margin: 8px 0; }
+  .aigw-msg { padding: 4px 8px; border-left: 3px solid #6b7280; }
+</style>
+__AIGW_BRIDGE__
+</head>
+<body>
+  <h2 id="title">目标设备信息</h2>
+  <form id="f" data-aigw-label="目标设备信息">
+    <label>区域 <input id="region" name="region" value="cn-north-1"></label>
+    <label>备注 <input id="note" name="note" value="现场核对"></label>
+    <label><input id="confirm" type="checkbox" name="confirm" checked> 已核对</label>
+    <button id="send" type="submit">提交</button>
+  </form>
+  <div id="result"></div>
+  <div data-aigw-status></div>
+  <script>
+    (function () {
+      var READY_POLL_MS = 100;
+      var READY_GIVE_UP_MS = 5000;
+      // Comfortably above UI_LIMITS.minIntervalMs (1.5 s): the console measures the gap between
+      // two submissions from the same preview, and a tight margin would make this test fail as
+      // "提交过于频繁" instead of testing what it means to test.
+      var ECHO_AFTER_SUBMIT_MS = 2200;
+      var waited = 0;
+
+      function ready() {
+        return !!(window.AIGW && typeof window.AIGW.isReady === 'function' && window.AIGW.isReady());
+      }
+
+      function echo() {
+        if (!ready()) return;
+        // The console→frame direction, observed through the only channel a test has: the page
+        // reports what it received. A `ui` directive the console applied to #result shows up
+        // here as data, which is what the harness asserts on.
+        window.AIGW.send('applied', {
+          text: (document.getElementById('result') || {}).textContent || '',
+          status: (document.querySelector('[data-aigw-status]') || {}).textContent || '',
+        });
+      }
+
+      // Submit a form the way a person would — by clicking the button the model was told to
+      // write — but only once the channel is open: a submission made before the port exists is
+      // dropped by the bridge (send() returns false), and the harness would then be measuring
+      // nothing.
+      var poll = setInterval(function () {
+        if (ready()) {
+          clearInterval(poll);
+          var button = document.getElementById('send');
+          if (button) button.click();
+          setTimeout(echo, ECHO_AFTER_SUBMIT_MS);
+          return;
+        }
+        waited += READY_POLL_MS;
+        if (waited >= READY_GIVE_UP_MS) clearInterval(poll);
+      }, READY_POLL_MS);
+    })();
+  </script>
+</body>
+</html>

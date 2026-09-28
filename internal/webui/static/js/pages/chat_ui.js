@@ -327,18 +327,30 @@ export function createUIPort({
   //   - it says it is the top document of that frame (a nested frame on the page can post to us
   //     itself, and it must not be able to speak for the preview);
   //   - it actually carries a port (a message-shaped object without one is not our script).
-  // The window the greeting must come from. In production this is the frame's own window; a test
-  // passes a stand-in because that property is a *cross-origin object* for the parent — the
-  // sandbox makes `frame.contentWindow` unusable for anything except `postMessage` (even
-  // dispatching an event at it throws a SecurityError), so a fake object is the only way to drive
-  // this half at all. That is why the greeting is dispatched through `handleWindowMessage` rather
-  // than by the frame's window: the logic under test must not depend on a capability the sandbox
-  // does not give us.
-  const greetingSource = frameWindow !== undefined ? frameWindow : (frame ? frame.contentWindow : null);
+  // The window the greeting must come from, resolved *when the greeting arrives* — never once,
+  // up front.
+  //
+  // That "when it arrives" is load-bearing, and it is a property of the DOM rather than a
+  // preference: an iframe has no content window until it is connected to a document (the spec
+  // creates the child navigable in the element's post-connection steps, and `contentWindow`
+  // returns null while there is none). The console deliberately creates the port *before* it
+  // attaches the frame — that ordering is what keeps the first greeting from being dropped —
+  // so an eager read here captures null, every hello fails the identity check below, and the
+  // only symptom is the toolbar saying 「不可交互」 three seconds later. It cost a release: the
+  // commit that fixed the dropped-greeting race (833b405) introduced this by reading the window
+  // once, and the harness could not see it because the block that drove this channel had just
+  // been deleted. See docs/design/m34-ui-bridge.md.
+  //
+  // In production this is the frame's own window; a test may pass a stand-in because that
+  // property is a *cross-origin object* for the parent — the sandbox makes `frame.contentWindow`
+  // usable for `postMessage` and identity comparison only (even dispatching an event at it
+  // throws a SecurityError). The live harness drives a real frame instead and passes nothing:
+  // a stand-in would only prove the stand-in works.
+  const greetingSource = () => (frameWindow !== undefined ? frameWindow : (frame ? frame.contentWindow : null));
 
   function onWindowMessage(ev) {
     if (closed) return;
-    if (ev.source !== greetingSource) return;
+    if (ev.source !== greetingSource()) return;
     handleWindowMessage(ev.data, ev.ports);
   }
 

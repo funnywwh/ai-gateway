@@ -250,26 +250,36 @@ usage 脚注、`#/chat?session=` 深链、`#/skills` 的编辑/删除确认与�
 ## M34 起：可交互预览的桥接断言（仍在 `chat` 视图内）
 
 模型生成的 HTML5 页面提交表单要回到会话，这条链路横跨四个地方：服务端注入的脚本、iframe 的沙箱、
-控制台的 `MessagePort`、以及"提交就是一条正常提问"的计费路径。harness 覆盖的是**中间两段加上最后一段**：
+控制台的 `MessagePort`、以及"提交就是一条正常提问"的计费路径。harness 覆盖的是**全部四段**：
 
-- **握手是一个拒绝矩阵**：`hello` 必须来自这个 frame、带这个 frame 的 token（从帧自己的文档里读，
-  不是 URL 里的票据）、且必须带 `MessagePort`。错 token、错 source、无 port、错帧类型四种都被断言
-  "状态没变"，因为这条通道的鉴权全部在这里。
-- **`MessageChannel` 是真的**：harness 建一条真 `MessageChannel`，把 `port2` 随 `hello` 交给控制台，
-  再用 `port1` 发事件、读回灌。这样测的是 `chat_ui.js` 的真代码，而不是一个模仿它的替身。
+- **握手是一个拒绝矩阵**：`hello` 必须来自这个 frame 的窗口（而且这个窗口是**在问候到达时**解析的：
+  端口比 frame 先建，帧连进文档之前 `contentWindow` 是 null，读早了整条通道静默失效、工具栏只会说
+  「不可交互」——真机回归见 `docs/design/m34-ui-bridge.md` 决策 2c）、必须带 `MessagePort`、
+  `framed:true` 一律拒绝。错 source / 无 port / 错帧类型三种都被断言"状态没变"，因为这条通道的鉴权
+  全部在这里（没有凭证：旧设计里的 token 两度上线两度被拆，原因写在决策 2）。
+- **`MessageChannel` 与 iframe 都是真的**（live 阶段）：`server.py` 把 `/admin/chat-artifact/*` 答成
+  `preview_artifact.html`——一页模型风格的文档，`<head>` 里就是服务端会注入的那段脚本，响应头是线上
+  逐字的 artifact CSP（`TestHarnessPreviewCSPMatchesTheServer` 钉着这份副本）。控制台走真实路径：
+  点「预览（可交互）」→ `openPreview` → 真 iframe → 真握手。页面按 prompt 的形状自己提交表单，再把
+  控制台推进 `#result` 的内容**回声**成第二次提交——帧是不透明源，父窗口读不到它（连
+  `dispatchEvent` 都抛 `SecurityError`），回声是观测"控制台 → 页面"方向的唯一通道。
+  断言：徽章变 `已连接`、第一次提交变成带 `"source":"ui_event"` 与字段值的提问、回声里带回
+  `ui` 指令写进页面的值。
 - **流可以被按住不放**：`sseStream()` 返回一个由测试推动的 `ReadableStream`（`window.__stream.frame/finish`），
   用来制造"模型还在回答时用户又提交了一次"——排队路径只能在那种时刻被观测到。
 - **提交就是提问**：断言读的是发往 `/chat/sessions/{id}/turns` 的**请求体**，必须是
   `label` + ```` ```json {"source":"ui_event",…} ````，并且带自己的幂等 `turn_id`。
 - **回灌**：`window.__uiReply` 让 stub 的回答带一个 ```` ```ui ```` 指令块，然后断言端口收到
   `{k:'d'}` 与 `{k:'done', ops:[…]}`。
+- **不需要浏览器的那一半**：`internal/webui/tests/chat_preview_handshake_test.mjs`（`make verify` 里
+  就跑）钉住握手的**时机**——端口在 frame 挂载前创建、帧窗口在问候到达时才解析。两条一起才完整：
+  浏览器里跑行为，Node 里钉时刻。
 
-两处与真实环境的差异要记住（见 `docs/design/m34-ui-bridge.md`「未验证的部分」）：
+与真实环境仍有两处差异（见 `docs/design/m34-ui-bridge.md`「未验证的部分」）：
 
-1. **帧内的注入脚本没有真跑**：harness 的静态服务器不提供带票据的产物 URL，所以
-   `contentDocument` 的 token 读取用一个**读取帧属性**的 stub 代替（也因此"错 token"这一格测的是
-   真代码）。注入脚本本身由 Go 侧测试钉住（无 fetch/eval/innerHTML、ES5、握手标记）。
-2. **没有真实模型**：表单是测试直接构造的 HTML，`ui_event` 的"模型如何响应"由脚本化 SSE 回答。
+1. **产物 URL 由 harness 服务器顶替**：票据、scope、`?bridge=1` 不能升权、登出后失效这些授权行为
+   由 `scripts/verify-m34.sh` 对**真实二进制**断言。harness 测的是控制台与帧之间的行为，不是授权。
+2. **没有真实模型**：表单是测试页面自己构造的，`ui_event` 的"模型如何响应"由脚本化 SSE 回答。
 
 `scripts/ui-harness/server.py` 取代了 `python3 -m http.server`：它给每个响应加 `no-store`。
 console 自己的 `max-age=300` 在生产里是对的，在这里会让浏览器跑**上一版**模块——第一次调试时

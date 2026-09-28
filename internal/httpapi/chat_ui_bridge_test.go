@@ -500,3 +500,30 @@ func TestUIBridgeScriptDumpForTheHarness(t *testing.T) {
 	}
 	t.Logf("refreshed %s in scripts/ui-harness/fixtures.json (%d bytes)", key, len(script))
 }
+
+// TestHarnessPreviewCSPMatchesTheServer keeps the browser harness measuring the policy a real
+// deployment sends.
+//
+// scripts/ui-harness/server.py answers every /admin/chat-artifact/* request with a rendered
+// preview page, and that route is what lets the `chat` view drive the *real* handshake: the
+// document arrives with the artifact's own Content-Security-Policy, so the injected script runs
+// under the same rules as in production. A copy that drifts — a `script-src` without
+// 'unsafe-inline' is the obvious way — would make the harness report a dead channel no user has,
+// which is the failure mode this whole area keeps producing. The console's own policy copy is
+// pinned the same way (internal/webui/tests/style_csp_test.mjs).
+func TestHarnessPreviewCSPMatchesTheServer(t *testing.T) {
+	path := filepath.Join("..", "..", "scripts", "ui-harness", "server.py")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Skipf("harness server is not present: %v", err)
+	}
+	match := regexp.MustCompile(`(?m)^ARTIFACT_CSP = "([^"]*)"$`).FindSubmatch(raw)
+	if match == nil {
+		t.Fatalf("%s must carry the artifact policy as a single-line ARTIFACT_CSP literal", path)
+	}
+	f := newChatFixture(t)
+	want := f.api.chatArtifactCSP(domain.ChatArtifactHTML)
+	if got := string(match[1]); got != want {
+		t.Fatalf("the harness preview policy has drifted from the server's:\n harness: %s\n server:  %s", got, want)
+	}
+}

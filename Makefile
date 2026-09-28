@@ -224,6 +224,10 @@ dshgw-verify: dshgw-test dshgw-build
 # style_csp_test.mjs rides along for the same reason: "控制台的行内样式必须走 CSSOM" 是一条源码
 # 不变式（CSP 的 style-src 'self' 会丢弃 style 属性），不需要浏览器就能钉住，而真机几何由
 # scripts/ui-harness 的 `csp` 视图负责。
+#
+# chat_preview_handshake_test.mjs 同理：握手必须**在问候到达时**再读帧窗口（先建端口、后挂载
+# frame 是刻意的顺序，而帧连进文档之前没有 content window），读早了整条通道静默失效，界面上只有
+# 一句「不可交互」。真机通道由 scripts/ui-harness 的 `chat` 视图 live 阶段负责。
 ui-base:
 	@if command -v node >/dev/null 2>&1; then \
 		node scripts/ui-base-test.mjs ; \
@@ -236,6 +240,7 @@ ui-base:
 		node internal/webui/tests/org_person_list_test.mjs || exit $$? ; \
 		node internal/webui/tests/tenant_name_test.mjs || exit $$? ; \
 		node internal/webui/tests/dshgw_nodes_wiring_test.mjs || exit $$? ; \
+		node --experimental-vm-modules internal/webui/tests/chat_preview_handshake_test.mjs || exit $$? ; \
 		node --experimental-vm-modules internal/webui/tests/org_assign_test.mjs || exit $$? ; \
 		node --experimental-vm-modules internal/webui/tests/keys_feishu_test.mjs || exit $$? ; \
 		node --experimental-vm-modules internal/webui/tests/org_feishu_test.mjs || exit $$? ; \

@@ -287,46 +287,37 @@ function json(body) {
   return { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify(body) };
 }
 
-// Console-side helpers for the interactive preview (M34).
-//
-// Three stubs used to live here and each one hid a real bug, so there are none now:
+// The interactive preview (M34). Two stubs used to live here and each one hid a real bug:
 //   * a fake `frame.contentDocument` handing over a handshake token — but a sandboxed document
 //     is an opaque origin, so in a real browser that property is null and every interactive
 //     preview reported "不可交互";
 //   * a token in the frame URL — which needed a CSP nonce to hide, and a nonce makes browsers
 //     ignore 'unsafe-inline', silently killing the model page's own inline scripts.
-// The channel is authenticated structurally now, so the harness only observes what the console
-// really puts on the wire and what it renders.
+// There are no stand-ins left. The channel is driven for real: server.py answers
+// /admin/chat-artifact/* with preview_artifact.page.html (the injected script included) under the
+// artifact's own CSP, so the real handshake runs inside a real sandboxed frame, and the parent
+// never touches that frame's window — it only listens. That last part is what the old
+// `frame.contentWindow.dispatchEvent` helper got wrong: a cross-origin object cannot be
+// dispatched at (SecurityError), but it does not need to be.
 
-// openInteractivePreview clicks the preview button and returns the frame the console built.
-async function openInteractivePreview() {
-  const button = find('预览（可交互）') || find('预览');
-  if (!button) return null;
-  button.click();
-  await settle();
-  return document.querySelector('.preview-frame');
+// The bridge's state can only be observed through the toolbar, which is the console's own DOM.
+function bridgeBadgeText() {
+  const badge = document.querySelector('.modal .bridge-badge');
+  return badge ? badge.textContent.trim() : '';
 }
 
-// handOverPort plays the frame's side of the handshake and returns a port the harness can use
-// to drive (and observe) the channel.
-async function handOverPort(frame, { withPort = true } = {}) {
-  const channel = new MessageChannel();
-  const seen = [];
-  channel.port1.onmessage = (ev) => seen.push(ev.data);
-  channel.port1.start();
-  frame.contentWindow.dispatchEvent(new MessageEvent('message', {
-    data: { aigw: 'ui', t: 'hello' },
-    source: frame.contentWindow,
-    ports: withPort ? [channel.port2] : [],
-  }));
-  await settle();
-  return { seen, port: channel.port1 };
+// waitFor polls the console's own DOM until a predicate holds. The channel is driven by real
+// timers inside the frame, so the assertions below cannot be reached by settle() alone (that
+// drains microtasks, and this needs wall-clock time).
+async function waitFor(predicate, timeoutMs, stepMs = 50) {
+  for (let waited = 0; waited <= timeoutMs; waited += stepMs) {
+    try { if (predicate()) return true; } catch (err) { /* keep polling */ }
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
+  try { return !!predicate(); } catch (err) { return false; }
 }
 
-// formEvent is one submission as the injected script sends it.
-function formEvent(port, { name = 'submit', label = '目标设备信息', data = { region: 'cn-north-1' } } = {}) {
-  port.postMessage({ t: 'ev', name, label, v: JSON.stringify(data) });
-}
+const turnRequestBody = (path) => JSON.parse((window.__sent || {})[path] || '{}');
 
 const errors = [];
 window.onerror = (msg) => errors.push('onerror: ' + msg);
@@ -489,6 +480,54 @@ try {
       // "不可交互" with no explanation anywhere.
       checks.previewModalRenders = !!document.querySelector('.modal .bridge-badge')
         && !!document.querySelector('.bridge-counter');
+
+      // ---- the live channel (M34) ------------------------------------------
+      // Everything above reads the console's own DOM or the URL it asked for. This is the part
+      // that used to be "a human has to look at it", and it is where the feature broke four
+      // times wearing four different disguises. It is drivable: the frame loads a real
+      // artifact-shaped response from this harness server (server.py serves
+      // /admin/chat-artifact/* as the injected document, under the artifact's own CSP), so the
+      // injected script greets us on its own and the real MessagePort carries real form data.
+      //
+      // The failing shape this pins is subtle and was shipped once: `createUIPort` runs *before*
+      // the frame is attached (that ordering is what keeps the first greeting from being
+      // dropped), and an iframe has no content window until it is connected to a document. A
+      // handshake that reads that window once, up front, captures null — every greeting is
+      // rejected, and three seconds later the toolbar says 不可交互 with a message blaming the
+      // model's page.
+      window.__uiReply = true; // the canned answer carries a `ui` op that writes #result
+      // The request log is a single slot per path (`window.__sent[path]` keeps the last body), so
+      // every assertion below also requires the body to have *changed*: without that, a leftover
+      // body from an earlier part of this view could satisfy a predicate the live channel never
+      // produced.
+      const rawTurnBody = () => String((window.__sent || {})['/chat/sessions/chat_1/turns'] || '');
+      let turnBaseline = rawTurnBody();
+      const newTurnBody = () => {
+        const raw = rawTurnBody();
+        if (!raw || raw === turnBaseline) return null;
+        turnBaseline = raw;
+        try { return JSON.parse(raw); } catch (err) { return null; }
+      };
+      checks.liveFrameConnected = await waitFor(() => bridgeBadgeText() === '已连接', 4000);
+      checks.liveBadgeSample = bridgeBadgeText();
+      // The fixture page submits its form once the channel is open; that submission has to
+      // become a question in this conversation, with the values the operator typed.
+      checks.liveSubmitBecomesQuestion = await waitFor(() => {
+        const body = newTurnBody();
+        return !!body && typeof body.content === 'string' && body.content.includes('"source":"ui_event"')
+          && body.content.includes('"region":"cn-north-1"');
+      }, 4000);
+      checks.liveSubmitSample = turnRequestBody('/chat/sessions/chat_1/turns').content || '';
+      // …and the answer has to reach the page: the fixture echoes what it found in #result after
+      // the turn, which is the only way the parent can observe the console→frame direction. The
+      // echo is also a second submission, so it proves the channel is reusable, not one-shot.
+      checks.liveDirectiveAppliedInPage = await waitFor(() => {
+        const body = newTurnBody();
+        return !!body && typeof body.content === 'string' && body.content.includes('"event":"applied"')
+          && body.content.includes('"text":"ok"');
+      }, 5000);
+      checks.liveCounterSample = (document.querySelector('.bridge-counter') || {}).textContent || '';
+      window.__uiReply = null;
       const close = [...document.querySelectorAll('.modal-actions button')].find((b) => b.textContent.trim() === '关闭');
       if (close) close.click();
       await settle();

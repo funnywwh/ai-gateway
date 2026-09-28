@@ -1576,6 +1576,41 @@
 - [x] 设计文档新增「哪些能自动测、哪些不能」一节，把四个层次的覆盖方式列成表
 - [x] `make verify` 全绿；`make ui-check` 13 视图全绿（chat 98 项）
 
+### 修正（真机反馈四）：整页预览的通道从 M34 起就没通过（帧窗口读成 null + 槽里放的是 Promise）
+- [x] 现象（用户报）：智能问答里 AI 生成的整页 HTML 界面「不可交互」
+- [x] 根因 A（握手时机）：真机反馈三那次为了修竞态把 `createUIPort(...)` 提到挂载之前，同一提交把身份
+      校验收成了**创建时读一次**（`greetingSource = frame.contentWindow`）。而 iframe 连进文档前没有
+      content window（规范把 "Create a new child navigable" 放在 post-connection steps，`contentWindow`
+      在 content navigable 为 null 时返回 null），于是那个值恒为 null，注入脚本的 6 次问候全部被
+      `ev.source !== null` 判掉 → 3 秒后「不可交互」，状态行还把它归因给模型的页面
+- [x] 修法 A：`const greetingSource = () => (frameWindow !== undefined ? frameWindow : (frame ? frame.contentWindow : null))`，
+      在消息到达时解析；先注册监听器、问候重发、带 port 与 `framed:true` 的拒绝矩阵全部保留
+- [x] 根因 B（句柄槽）：`const handle = openPreview({…}).catch(…)` 是 **Promise**（`openPreview` 是
+      async），却被塞进 `state.preview`；`destroy()`（换预览/离开页面）、`isOpen()`（`sendUIEvent` 的
+      `alive()`、`drainQueue`、`重新应用`）、`reply()`（回答回灌）三处全是 TypeError。表现不是报错，
+      而是**提交之后什么都没发生**——异常发生在 `runTurn` 发请求之前。A 让通道永远是死的，
+      `sendUIEvent` 根本走不到，所以 B 一直没有见证者
+- [x] 修法 B：只有 promise 的**结果**进槽（`.then((value) => …)`）；只让最新一次点击拥有槽位
+      （`state.previewOpens` 代际）；关弹窗时只有它自己打开的句柄能清空槽位；只读预览不进槽
+- [x] 真机通道搬进 harness（它一直可以，只是以前没找到方式）：新增
+      `scripts/ui-harness/preview_artifact.page.html`（模型风格页面 + 服务端会注入的那段脚本）、
+      `server.py` 把 `/admin/chat-artifact/*` 答成这一页并带上**线上逐字**的 artifact CSP、
+      `render_page.py` 支持 `__AIGW_BRIDGE__` 注入、`run.sh` 渲染这一页
+- [x] `chat` 视图新增 live 阶段断言（4 条）：徽章变 `已连接`（根因 A 的判据）、表单提交变成一条带
+      `"source":"ui_event"` + 字段值的提问、回答里的 `ui` 指令落到帧内 DOM 并**回声**回来
+      （帧是不透明源，回声是父侧唯一能观测"控制台 → 页面"的通道；同时覆盖根因 B 的 `reply` 路径）
+- [x] `internal/webui/tests/chat_preview_handshake_test.mjs`：不需要浏览器的守卫，`make verify` 里就跑
+      （`make ui-base` 新增一条）。**方向性验证**：把 `chat_ui.js` 换回 HEAD 的版本 → 该测试红在
+      「a greeting from the frame after it is attached must complete the handshake」，恢复后绿
+- [x] `TestHarnessPreviewCSPMatchesTheServer`：把 harness 的 `ARTIFACT_CSP` 副本钉在
+      `chatArtifactCSP(domain.ChatArtifactHTML)` 上。**方向性验证**：把副本里 `script-src 'unsafe-inline'`
+      改成 `'self'` → 红；改回 → 绿
+- [x] 文档：设计文档新增「关键决策 2c / 2d」并**推翻**原先"这条通道结构上无法自动测"的结论（写清
+      父窗口不需要碰帧内任何东西，让真帧自己发问候即可）、清掉数据流与接口一节里已不存在的 nonce/
+      凭证描述；`docs/chat.md` §10 的自查口径同步，§11 排障补「旧二进制/缓存」这一种
+- [x] `make verify` 全绿（含新守卫）；`make ui-check` 的 `chat` 视图在宿主终端跑（沙箱里没有可用
+      Firefox，run.sh 以 skip 退出）
+
 ### 顺手修掉的既有缺陷
 - [x] `UpsertChatArtifact` 冲突分支不覆盖 `id`，而上传处理器用自己新生成的 id 拼 URL 签票据 →
       同一代码块第二次预览拿到 **404 的 URL**。改成 `INSERT … RETURNING id` 并回写真实 id

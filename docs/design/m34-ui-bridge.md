@@ -65,6 +65,59 @@ iframe 一进 DOM 就开始加载，注入脚本可能在监听器存在之前�
 这条也说明一件事：**"先挂载再订阅"是一个很容易复发的模式**，而它在单测里看不见——只有把"谁先发生"
 当成被测事实时才会暴露。
 
+### 2c. 帧窗口必须**在问候到达时**再读（`contentWindow` 不是常量）
+
+2b 的修法把 `createUIPort(...)` 提到了 `frameHost.append(frame)` **之前**——顺序是对的，但同一次
+提交把那行身份校验从"到达时读"（`ev.source !== frame.contentWindow`）改成了**创建时读一次**：
+
+```js
+const greetingSource = frameWindow !== undefined ? frameWindow : (frame ? frame.contentWindow : null);
+```
+
+而 iframe 在**连进文档之前没有 content window**：规范把 "Create a new child navigable" 放在 iframe
+的 **post-connection steps** 里，`contentWindow` 在 content navigable 为 null 时返回 null（IDL 写的是
+可空的 `WindowProxy? contentWindow`，getter 是"return this's content window"）。于是那句在端口创建
+时**恒为 null**：注入脚本的每一次问候都被 `ev.source !== null` 判掉（消息事件一定有 source），
+3 秒后工具栏显示「不可交互」，而状态行把原因归给模型的页面。
+
+两个 bug 在同一个症状下叠了两层：**修一个竞态时新造了一个死锁**，而它们的现象一模一样。这是这条
+通道的第四次真机故障，而根子还是这一页反复出现的那句话：**验证落在了错误的那一层**——2b 顺手删掉了
+harness 里驱动这条通道的块（理由写在下面"哪些能自动测"一节），而 `docs/TODO.md` 的人工走查从 M34 起
+一直是未勾选项。所以这次除了修，还把"那条 port 真的接通"变成了自动断言。
+
+**修法**：把窗口读成**一次调用**，在消息到达时解析：
+
+```js
+const greetingSource = () => (frameWindow !== undefined ? frameWindow : (frame ? frame.contentWindow : null));
+if (ev.source !== greetingSource()) return;
+```
+
+读时机对，其余一律不动：先注册监听器再挂载 frame、问候重发、`framed:true` 拒绝、必须带 port——
+这些是 2b 与决策 2 的成果，都保留。`frameWindow` 参数留着给"没有 DOM 的测试"用，但**真机 harness
+故意不传**：替身只能证明替身。
+
+### 2d. 句柄槽里放的不是句柄（`state.preview` 是个 Promise）
+
+同一轮里发现的第二个缺陷，和 2c 一样从 M34 首次上线就在、也一直被同一个原因遮住：
+
+```js
+const handle = openPreview({…}).catch(…);   // openPreview 是 async：handle 是 Promise
+if (canInteract) state.preview = handle;    // 槽里从此是一个 Promise
+```
+
+`openPreview` 是 `async`（上传 payload 在前、帧存在在后），所以返回的永远是 **Promise**。而
+`state.preview` 被当成句柄用：`destroy()`（离开页面/换一个预览）、`isOpen()`（`sendUIEvent` 的
+`alive()`、`drainQueue`、`重新应用` 按钮）、`reply()`（把回答回灌页面）——三处全是 TypeError。
+现场表现不是报错，而是**提交之后什么都没发生**（异常发生在 `runTurn` 发请求之前的那次
+`onDelta({type:'busy'})` 里）。
+
+为什么没人看见：2c 让通道永远是死的，`sendUIEvent` 根本不可能被走到。**一个坏掉的通道会把它后面
+所有坏掉的东西一起藏起来**——这也是"通道"这件事值得单独测一遍的理由。
+
+修法：只有 promise 的**结果**进槽（`openPreview(...).then((value) => …)`），并且只让最新的那次点击
+拥有槽位（`state.previewOpens` 计数），关弹窗时也只有它自己打开的句柄能清空槽位；只读预览不进槽
+（它没有通道，`重新应用` 按钮在它上面无事可做）。
+
 ### 3. 注入脚本的授权：`'unsafe-inline'`，且**绝不能**加 nonce 或 hash
 
 注入脚本是内联脚本，它与模型页面自己的脚本共享同一条策略。因此它由 `script-src 'unsafe-inline'`
@@ -189,7 +242,7 @@ type chatArtifactRequest struct {
 }
 ```
 
-响应头：交互预览额外带 `script-src … 'nonce-<随机>'` 与 `X-Aigw-Bridge: 1`。
+响应头：交互预览额外带 `X-Aigw-Bridge: 1`（**没有凭证、也没有 CSP 例外**——决策 2 与决策 3）。
 `GET /admin/chat-artifact/{id}` 新增查询参数 `bridge=1`。
 
 ### 配置（`internal/config`）
@@ -237,8 +290,8 @@ export function describeUIOpsError(...)     // → 中文原因
 ```
 模型: ```html 表单``` ──控制台上传──▶ chat_artifacts(session,key 幂等 upsert)
    浏览器: GET /admin/chat-artifact/<id>?ticket=…&bridge=1
-        └─ 响应 = artifact 正文 + 注入的 AIGW 脚本（bridgeToken + CSP nonce）
-   注入脚本: hello{token} ─▶ 父侧校验(source === frame.contentWindow && token 相符)
+        └─ 响应 = artifact 正文 + 注入的 AIGW 脚本（无凭证；授权是结构性的，见决策 2）
+   注入脚本: hello{ports:[MessagePort]} ─▶ 父侧校验(source === 到达时的 frame.contentWindow)
         ◀── MessagePort ──  此后只走 port，页面全局环境无法插手
    用户填写 → submit 被拦截 → port: {t:'ev', name:'submit', v:{…}}
    控制台: content = "表单提交：…\n```json{source:ui_event,…}```"
@@ -265,12 +318,17 @@ export function describeUIOpsError(...)     // → 中文原因
 ## 测试策略
 
 - `internal/httpapi`（新增 `chat_ui_bridge_test.go`）：票据 scope 矩阵（交互票据/只读票据/旧三元
-  payload/伪造）、注入的存在性与幂等、SVG 永不注入、nonce 在响应头与标签两处一致、
-  `ui_bridge_enabled=false` 时 `bridge:true` → 400、注入脚本不含外部请求 API、
-  提示词与脚本同源契约、`ui_event` 走正常计费且正文仍不录制。
+  payload/伪造）、注入的存在性与幂等、SVG 永不注入、CSP 里既无 `nonce-` 也无 `sha256-`（有它们
+  浏览器会忽略 `'unsafe-inline'`）、`ui_bridge_enabled=false` 时 `bridge:true` → 400、注入脚本不含
+  外部请求 API、提示词与脚本同源契约、`ui_event` 走正常计费且正文仍不录制。
+  另有一条把 harness 的 artifact CSP 副本钉在 `chatArtifactCSP` 上
+  （`TestHarnessPreviewCSPMatchesTheServer`）。
 - `internal/webui/embed_test.go`：新资源内嵌、`chat_ui.js` 不出现 `innerHTML`。
-- `scripts/ui-harness/chat.page.html`：`parseUISpec`/`applyUIOps` 的单元断言 + 伪造 MessageEvent
-  的拒绝矩阵 + 一次完整的 `form → send → SSE 载荷 → ui 指令应用` 路径；新增 `bridge` 视图。
+- `internal/webui/tests/chat_preview_handshake_test.mjs`：握手的**时机**——端口在 frame 挂载前创建、
+  帧窗口在问候到达时才解析（决策 2c 的回归守卫，无需浏览器，`make verify` 里就跑）。
+- `scripts/ui-harness/chat.page.html`：`parseUISpec`/`applyUIOps` 的单元断言 + 拒绝矩阵 +
+  一次完整的 `form → send → SSE 载荷 → ui 指令应用` 路径，以及 live 阶段的真通道
+  （真 iframe + 真注入脚本 + 真 MessagePort，见"哪些能自动测"）；另有 `bridge` 视图解析脚本本体。
 - 出口：`make verify`、`make ui-check`，以及隔离实例（`:8099`、全新库、真实二进制）上的人工走查。
 
 ## 依赖
@@ -289,6 +347,10 @@ artifact 正文按 `(session_id, key)` 幂等 upsert，页面新版本仍走同�
    失败模式。"预览的 CSP 元标签可以放大服务端策略"这个残余风险在设计里没有写到，实现也没有解决
    它（它属于浏览器策略语义，不是本功能能修的），因此文档按"nonce 只用来标记脚本来源"来描述，
    不声称它能抵抗页面自己的策略。
+   > 这一条**后来被推翻了**：nonce 本身会让浏览器忽略 `'unsafe-inline'`，把模型页面自己的内联脚本
+   > 一起拦掉（真机反馈二）。现在既不注入凭证也不发 nonce，授权是结构性的——见决策 2 与决策 3；
+   > 代码里保留 `'unsafe-inline'` 且**禁止**任何 nonce/hash，由 `internal/httpapi` 的测试与
+   > `scripts/verify-m34.sh` 共同断言。
 
 2. **没有新增 `bridge` 视图，桥接断言全部落在 `chat` 视图里**（`chat` 61 → 75 项）。
    设计里写了"新增 bridge 视图"。实现时发现 `chat` 视图已经建立好了全部前置状态（会话、
@@ -340,34 +402,39 @@ artifact 正文按 `(session_id, key)` 幂等 upsert，页面新版本仍走同�
 | `ui` 指令的解析与应用、事件载荷、回复解析 | harness `chat` 视图（纯函数，无 DOM 依赖） |
 | 服务端响应：注入、CSP、无凭证、沙箱边界、票据 scope、登出失效 | `scripts/verify-m34.sh` 对**真实二进制 + 全新库**（40 项） |
 | 注入脚本的语法与自检（ES5、无 fetch/eval/innerHTML、顶层文档检查、重发） | harness `bridge` 视图（真实浏览器解析） |
-| **浏览器里父窗口 ↔ 子框架那条 port 真的接通** | **没有自动化**，只能人眼（`docs/chat.md` §10） |
+| **浏览器里父窗口 ↔ 子框架那条 port 真的接通** | **harness `chat` 视图的 live 阶段**（真 iframe + 真注入脚本 + 真 MessagePort） |
 
-最后一行不是"懒得写"，而是**结构上做不到**：驱动"帧发来问候"必须访问沙箱 frame 的 window，
-而它是不透明源里的**跨源对象**——父窗口对它连 `dispatchEvent` 都会抛 `SecurityError`（实测）。
-harness 里那块曾经"通过"，是因为用了 `contentDocument` 的替身，而那个替身正是让一个真实缺陷上线
-的原因。所以现在那块被删掉了，并在原地写清它为什么不可测——比留一个假通过要好。
+最后一行曾经被写成"结构上做不到"，那条判断**是错的**，值得留着当教训：当时想的是"驱动帧发来问候
+必须访问沙箱 frame 的 window"，而它是不透明源里的**跨源对象**——父窗口对它连 `dispatchEvent` 都会抛
+`SecurityError`（实测）。可父窗口根本不需要碰它：**让真帧自己发问候**就行。做到这一点只需要给
+控制台一份真的、artifact 形状的响应：
+
+- `scripts/ui-harness/preview_artifact.page.html`：一页模型风格的文档，`<head>` 里就是服务端会注入
+  的那段 `<script id="aigw-ui-bridge">`（由 `render_page.py` 从 harness 夹具取出，夹具又由
+  `TestUIBridgeScriptDumpForTheHarness` 每次 `go test` 重写）；
+- `scripts/ui-harness/server.py`：把 `/admin/chat-artifact/*` 全部答成这一页，并带上**线上逐字**的
+  artifact CSP（`TestHarnessPreviewCSPMatchesTheServer` 钉住这份副本，策略一松一紧都会红）；
+- 控制台侧沿用真实路径：点「预览（可交互）」→ `openPreview` → 真 iframe → 真握手；页面自己提交
+  表单，再把控制台推进 `#result` 的内容**回声**给会话——帧是不透明源，回声是父侧唯一能观测
+  "控制台 → 页面"方向的通道。
+
+于是 `chat` 视图现在断言：徽章变 `已连接`（2c 的判据）、表单提交变成一条带 `ui_event` 的提问、
+回答里的 `ui` 指令真的落到帧内 DOM 又回声回来（2d 的判据：`preview.reply` 走的是同一个槽）。
+一句话：**"只能人眼"通常意味着"还没找到不碰它的驱动方式"**，而不是"不可能"。
 
 ## 未验证的部分（如实记录）
 
 - **真实模型是否稳定产出可提交的表单**：离线环境无法证明。内建 `testecho` 供应商不产出 HTML，
   所以"模型写表单 → 用户提交 → 模型继续"这条链路的**模型侧**由脚本化 SSE 与人工走查覆盖，
   不是由自动测试证明的。
-- **真实浏览器里的 postMessage/MessagePort 通道**：harness 用 `MessageChannel` 驱动控制台侧
-  的端口（握手矩阵、限流、排队、回灌都跑了真代码），但帧内那一侧（注入脚本）没有在真实 iframe
-  里跑过——harness 的静态服务器不提供带票据的产物 URL。**注入脚本的语法**由 harness 的
-  `bridge` 视图覆盖（见下），语义（绑定 submit、握手标记、不用 fetch/innerHTML、ES5）由 Go 侧
-  测试与 `bridge` 视图共同断言，**运行**它仍然只能靠人工走查。
-  > 这段"未验证"很快就以最直接的方式兑现了：**上线后每一份交互预览都显示「不可交互」**，
-  > 原因正是本页「关键决策 2」里记的那个沙箱边界（父窗口读不到沙箱文档）。更值得记的是
-  > **为什么没测出来**：harness 当时用一个 stub 顶替了 `contentDocument`，于是"读不到"
-  > 这一条真实约束被替身抹平了。教训不是"要多写测试"，而是**替身要替得准**：替身只能替掉
-  > 被测代码不关心的东西，而"沙箱文档对父窗口不可见"恰恰是这段代码唯一在乎的事实。
-  > 现在那个 stub 已删除，harness 只观察控制台真正放到线上的东西。
-  >
-  > **紧接着还有第二次**：改用"控制台生成 token + 页面 URL 带参数"之后，为了让嵌套框架读不到
-  > 那个参数，给 `script-src` 加了 nonce——而 nonce 会让浏览器忽略 `'unsafe-inline'`，把模型页面
-  > 自己的内联脚本一起拦掉（日志见「决策 3」）。两次的教训是同一个：**别用秘密去解决一个结构性
-  > 问题**。凭证换成结构检查之后，既不碰 CSP，也不需要落库与额外请求。
+- **真实浏览器里的 postMessage/MessagePort 通道**：*已由 harness 覆盖*（见上一节），但要说清它证明
+  了什么——它跑的是真文档、真注入脚本、真端口与真实 CSP，**不是**真部署的票据链路（产物 URL 由
+  harness 服务器顶替；票据、scope、登出失效由 `scripts/verify-m34.sh` 对真二进制断言）。
+  两层拼起来才是完整的：控制台侧的行为在浏览器里，服务端的授权在 Go 与自查脚本里。
+  > 这条"未验证"曾经以最直接的方式兑现过三次，都记在本页：**凭证放在父窗口读不到的地方**
+  > （决策 2）、**用 nonce 藏凭证把页面自己的内联脚本一起拦掉**（决策 3）、**握手把帧窗口提前读成
+  > null**（决策 2c）。三次的共同点是**验证总在错误的那一层**：第一次是替身替掉了真实约束，
+  > 第二、三次是"这条通道测不了"的结论让人不再看它。所以现在这里写的是覆盖矩阵，而不是免责声明。
 - **`bridge` 视图（第 13 个视图）**：注入脚本是 Go 字符串拼接出来的，所以"Go 能编译"完全不能说明
   JavaScript 合法。`scripts/ui-harness/bridge_syntax.page.html` 在真实浏览器里用
   `new Function(source)` **只编译不执行**地验证它，并顺带断言无 `fetch`/`XHR`/`eval`/`innerHTML`/
@@ -378,4 +445,5 @@ harness 里那块曾经"通过"，是因为用了 `contentDocument` 的替身，
 - **`script-src 'nonce-…'` 在沙箱文档里的实际生效情况**：按 CSP 规范 nonce 不需要同源，实现也
   保留 `'unsafe-inline'`，因此即使某个浏览器忽略 nonce，页面也只是退回"脚本能跑但握手被
   拒绝"（工具栏会说明），不会变成白屏。这一点未在多个浏览器上实测。
+  （实现早已不再使用 nonce——决策 3 记了原因；这条留着是为了记住当时为什么判断它安全。）
 

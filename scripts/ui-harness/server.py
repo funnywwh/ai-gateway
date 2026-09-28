@@ -24,6 +24,14 @@ It serves the console's assets the way the binary does, with three deliberate di
   pages do) cannot run under this policy; the `csp` view is therefore a page with no inline
   script or style, only a same-origin module.
 
+* every `/admin/chat-artifact/…` request is answered with the rendered preview page and the
+  artifact's own headers (`ARTIFACT_CSP`, `X-Aigw-Bridge`), byte for byte what
+  `internal/httpapi/chat_artifact.go` sends for an interactive HTML preview. The console's
+  preview iframe therefore loads a *real* document at the URL it built, and the script the
+  server injects really runs — which is how the handshake between the console and the frame
+  is tested at all (it used to be "only a human can check this", and it was broken the whole
+  time). `TestHarnessPreviewCSPMatchesTheServer` pins this copy to the Go one.
+
 Usage: server.py <port>
 """
 import http.server
@@ -37,10 +45,34 @@ import sys
 #: another policy than the deployed one is worse than no harness, because it reports green.
 CONSOLE_CSP = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'"
 
+#: The policy a preview payload is served with, byte for byte what `chatArtifactCSP` returns for
+#: an HTML artifact on a deployment without `chat.artifact_allow_network` (`sandbox allow-scripts`
+#: and no allow-same-origin — the frame is an opaque origin — plus `script-src 'unsafe-inline'`,
+#: which is what authorizes both the model page's own scripts and the injected bridge).
+#:
+#: It matters that this is the deployed policy and not a convenient one: with `script-src` too
+#: strict the injected script never runs, and the harness would report a broken channel that
+#: users do not have. `TestHarnessPreviewCSPMatchesTheServer` (internal/httpapi) keeps the copy
+#: honest, the same way style_csp_test.mjs pins the console's.
+ARTIFACT_CSP = "sandbox allow-scripts; default-src 'none'; img-src data: blob:; media-src data: blob:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'"
+
+#: The path prefix the console builds its preview URL from, and the rendered page that answers it.
+ARTIFACT_PREFIX = "/admin/chat-artifact/"
+ARTIFACT_PAGE = "/preview_artifact.html"
+
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     #: Read once from the environment so every request agrees on the mode.
     gzip_sidecars = os.environ.get("UI_HARNESS_GZIP") == "1"
+
+    def do_GET(self):
+        # A preview URL carries a ticket query and an artifact id; neither means anything here.
+        # What is being exercised is the *document* the console loads and the headers it arrives
+        # with, so the path is rewritten before the static handler ever sees it.
+        self.artifact_response = self.path.split("?", 1)[0].startswith(ARTIFACT_PREFIX)
+        if self.artifact_response:
+            self.path = ARTIFACT_PAGE
+        super().do_GET()
 
     def send_head(self):
         if self.gzip_sidecars:
@@ -71,6 +103,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # 而报告发不出来时视图只会以 "no report" 失败（看起来像页面坏了，其实是策略在生效）。
         if self.path.split("?", 1)[0] == "/csp.html":
             self.send_header("Content-Security-Policy", CONSOLE_CSP)
+        # …and only a preview artifact carries the artifact's policy: that page has no inline
+        # script of its own beyond the model's, and running it under any other policy would test
+        # a preview nobody has.
+        if getattr(self, "artifact_response", False):
+            self.send_header("Content-Security-Policy", ARTIFACT_CSP)
+            self.send_header("X-Aigw-Bridge", "1")
         # A response that could have been answered two ways says so in both branches —
         # the compressed one above, and this one through the isfile check below — or a
         # shared cache could hand gzip to a client that never asked for it.

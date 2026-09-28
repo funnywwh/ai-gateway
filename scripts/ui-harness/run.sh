@@ -106,6 +106,12 @@ render_page "$ROOT/scripts/ui-harness/org.page.html" "$WORK/site/org.html"
 render_page "$ROOT/scripts/ui-harness/org_feishu.page.html" "$WORK/site/org-feishu.html"
 render_page "$ROOT/scripts/ui-harness/admins.page.html" "$WORK/site/admins.html"
 render_page "$ROOT/scripts/ui-harness/dshgw_nodes.page.html" "$WORK/site/dshgw-nodes.html"
+# 不是控制台页面：控制台预览 iframe 真正加载的那份文档。server.py 把 /admin/chat-artifact/*
+# 都答成这一页，并带上 artifact 自己的 CSP，所以那段注入脚本会在真浏览器里真的跑起来——「父窗口
+# 与子框架那条 port 到底通没通」从这一页起有自动断言，不再是"只能人眼"（见 chat 视图的 live 阶段）。
+# 这一步失败就直接退出：少一页的话，live 断言会因为帧加载到 404 而红，而红的是"通道坏了"，
+# 不是"夹具没渲染"——那种误导正是这个 harness 反复踩过的坑。
+render_page "$ROOT/scripts/ui-harness/preview_artifact.page.html" "$WORK/site/preview_artifact.html" || exit 2
 # `csp` 视图不走 render_page.py：它没有夹具可嵌（树控件不需要任何接口），而且它**不能**有内联
 # 脚本——那一页由 server.py 带着控制台真实的 CSP 送出，内联脚本在这条策略下会被拦掉。它由一页
 # 静态 HTML 加一个同源外部模块组成，后者是 script-src 'self' 唯一放行的形式。

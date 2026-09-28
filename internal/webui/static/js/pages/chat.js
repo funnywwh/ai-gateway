@@ -161,7 +161,18 @@ export async function render({ page, actions, session, route }) {
     notice: '',
     // The open preview, when it is interactive: the console's half of the bridge and where a
     // submission goes. One console has one open preview, so one slot is enough.
+    //
+    // The slot holds a *resolved* preview handle. openPreview is async (it uploads the payload
+    // before the frame exists), and putting what the call returns straight in here — which is
+    // what this did — meant a Promise lived in the slot: `destroy()`, `isOpen()` and `reply()`
+    // all threw TypeError on it, taking the submission path, the 「重新应用」 button and the
+    // reopen path down with them. The channel being dead is what hid it: nothing could ever
+    // reach sendUIEvent, so the throw had no witness.
     preview: null,
+    // Counts preview clicks. openPreview uploads before its frame exists, so a second click can
+    // land while the first is still opening; without this the older modal would claim the slot
+    // when it finally resolved and the newer page's submissions would be routed to it.
+    previewOpens: 0,
     // Submissions that arrived while a turn was in flight, oldest first. An inline form and an
     // interactive preview both land here; each entry remembers where it came from, because the
     // answer has to be patched back into the thing that asked.
@@ -844,10 +855,16 @@ export async function render({ page, actions, session, route }) {
           // One interactive preview at a time: a second one would need its own channel, and the
           // submissions of both would race for the same conversation.
           if (state.preview) { state.preview.destroy(); state.preview = null; }
-          // The promise is awaited here rather than left floating: openPreview runs to completion
-          // before a port exists, and a throw inside it used to surface only as an unhandled
-          // rejection in the console while the modal sat there saying nothing.
-          const handle = openPreview({
+          // The promise is awaited rather than left floating, and only its *value* goes into the
+          // slot: openPreview runs to completion before a port exists, and a throw inside it used
+          // to surface only as an unhandled rejection in the console while the modal sat there
+          // saying nothing. Storing the promise itself is what put a non-handle in state.preview
+          // (see the comment there) — every submission then died with `preview.isOpen is not a
+          // function`, so the failure looked like a dead page rather than a broken console.
+          const generation = state.previewOpens + 1;
+          state.previewOpens = generation;
+          let opened = null;
+          openPreview({
             sessionId: state.session.id,
             key: (message.id || 'live-' + (state.turnID || 'turn')) + ':' + code.getAttribute('data-block-index'),
             format: lang,
@@ -859,18 +876,28 @@ export async function render({ page, actions, session, route }) {
             // the stream the console owns, exactly like the composer's own stop button.
             onStop: () => { if (state.controller) state.controller.abort(); },
             // The modal can be closed without going through the page, so the slot is cleared
-            // from here rather than assumed to be still valid.
-            onClosed: () => { if (state.preview === handle) state.preview = null; },
+            // from here rather than assumed to be still valid. Only the preview this click
+            // opened may clear it: a newer click owns the slot even if this modal closes later.
+            onClosed: () => { if (state.preview === opened) state.preview = null; },
+          }).then((value) => {
+            opened = value;
+            // A read-only preview has no channel, so it stays out of the slot (the 「重新应用」
+            // button it would enable has nothing to send to). A modal the operator closed while
+            // it was still opening, or one a newer click has already replaced, must not claim it.
+            if (canInteract && value.isOpen() && generation === state.previewOpens) state.preview = value;
+            // 调试钩子：控制台里可以直接拿到这份预览的句柄（状态、端口、destroy），不必依赖弹窗 DOM。
+            window.__aigwPreview = value;
           }).catch((err) => {
             // A throw here is a bug in the preview, not a model problem: say so out loud instead
             // of leaving an unhandled rejection and a modal that never explains itself.
             toast('预览打开失败：' + api.errorMessage(err), 'error');
-            if (state.preview) { state.preview.destroy(); state.preview = null; }
+            // Same rule as the success path: only the newest click may touch the slot, or a stale
+            // failure would tear down the preview the operator is actually using.
+            if (generation === state.previewOpens && state.preview) {
+              state.preview.destroy();
+              state.preview = null;
+            }
           });
-          if (canInteract) state.preview = handle;
-          // 测试钩子：harness 需要驱动"帧发来问候"这一步，而帧的 window 对父窗口是跨源
-          // 对象（连 dispatchEvent 都会抛 SecurityError），所以只能拿到端口句柄直接调。
-          window.__aigwPreview = handle;
         });
         bar.append(preview);
       }
