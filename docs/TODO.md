@@ -1187,7 +1187,10 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       `python3 /opt/aigw/sub2api_migrate.py plan` → `apply`；完成后
       `shred -u /opt/aigw/data/K7QX-reissue-key.txt`（那把重签明文就没用了）
 - [ ] **可选后续**：清理 4 把已 disabled 的验收 key（gw-b #162/#163/#166/#167，网关没有删除 key 的路由，
-      需手工 `DELETE`）；以及是否把 tag `v4.6.0`/`v4.7.0` 推到 origin（当前只在本地）
+      需手工 `DELETE`）
+- [x] tag 已推 origin（2026-09-28）：`main` 快进到 `7cc5297`，并补齐 **v4.4.0 / v4.5.0 / v4.6.0 /
+      v4.7.0 / v4.7.2 / v4.7.3** 与新的 **v4.8.0 / v4.8.1**（远端 v4.x 标签从 v4.0.0 到 v4.8.1 无缺口）。
+      本地只剩 worktree 分支 `m84-images` 未推。
 
 ## M89 代码脱敏（全仓清洗 + 发版强制检查 + 历史重写）
 > 设计：`docs/design/m89-code-desensitization.md`；需求原话：「项目代码脱敏」「修改 skill 要求发布版本时脱敏」。
