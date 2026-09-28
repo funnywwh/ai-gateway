@@ -19,7 +19,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${UI_HARNESS_WORK:-$ROOT/.cache/ui-harness}"
 PORT="${UI_HARNESS_PORT:-8097}"
-VIEWS="docs detail capacity cost models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand tree csp org org-readonly org-person org-accounts org-bind org-sync org-sync-readonly org-sync-nonames admins admins-readonly login chatWeb chatWebOff nodes nodes-readonly"
+VIEWS="docs detail capacity cost models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand tree csp org org-readonly org-person org-accounts org-bind org-sync org-sync-readonly org-sync-nonames admins admins-readonly login chatWeb chatWebOff nodes nodes-readonly companies companies-readonly"
 FIXTURES="$ROOT/scripts/ui-harness/fixtures.json"
 REFRESH=0
 
@@ -105,6 +105,7 @@ render_page "$ROOT/scripts/ui-harness/tree.page.html" "$WORK/site/tree.html"
 render_page "$ROOT/scripts/ui-harness/org.page.html" "$WORK/site/org.html"
 render_page "$ROOT/scripts/ui-harness/org_feishu.page.html" "$WORK/site/org-feishu.html"
 render_page "$ROOT/scripts/ui-harness/admins.page.html" "$WORK/site/admins.html"
+render_page "$ROOT/scripts/ui-harness/companies.page.html" "$WORK/site/companies.html"
 render_page "$ROOT/scripts/ui-harness/dshgw_nodes.page.html" "$WORK/site/dshgw-nodes.html"
 # 不是控制台页面：控制台预览 iframe 真正加载的那份文档。server.py 把 /admin/chat-artifact/*
 # 都答成这一页，并带上 artifact 自己的 CSP，所以那段注入脚本会在真浏览器里真的跑起来——「父窗口
