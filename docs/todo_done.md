@@ -6505,11 +6505,29 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
 | 未做 | 未推 origin（M89 的历史重写要强推，届时一起）；**v4.7.1 仍未打 tag**（本次只打 v4.7.2）；其它实例未部署；租户 dsh worker 未重启（M90 的插件半要重启才生效，见 `docs/TODO.md` M90）；M89 的 `release.sh` 硬门禁与历史重写未做 |
 | 观察（非本次引入） | `make smoke` 引用的 `scripts/smoke.sh` 在本克隆里不存在（历史遗留，两克隆分叉所致）；`make dshgw-test` 在本克隆停在 `internal/dshgw/tenancy/settings_schema.test.mjs`（dsh 0.1.7 把 llm-pi-ai 的 providers 标成 volatile，宿主那份 dsh 升级提交已修） |
 
+### v4.7.3 发布记录（M91 请求日志整行可点 + M34 整页预览通道修复，本机 aigw-local；2026-09-28）
+
+| 项 | 值 |
+|---|---|
+| 起因 | ① 用户要求「发布版本，升级到 ssh gw-c 的 8088 实例」；② 真机反馈智能问答里模型生成的整页 HTML 界面「不可交互」——M34 那条通道从建立起就是死的（帧窗口读成 null + 句柄槽里放的是 Promise），见本文件「修正（真机反馈四）」一节；③ M91（请求日志整行可点）此前只落到工作区与走查证据，没部署 |
+| 版本 | **v4.7.3**（4.7.2 → 4.7.3，档位 patch：本批全是修复 + 工具 + 文档，无新端点 / 新配置项 / 新控制台页面）；修复提交 `d298901`（M34）、`581be9a`（ssh-workspace 插件）、`c87315d`（azure 价格与导入工具），release 提交 **`13f9fa3`**，已打 tag **v4.7.3** |
+| 构建物 | `bin/aigw` **4.7.3 / `13f9fa3`**，23,733,452 B，sha256 `6eacf465d5dd56f3433584609039f799b989aca03a558901143106034ee063cc`（控制台 minified：44 文件 736,584 → 409,514 B；gzip 407,153 → 162,264 B）。构建取自**干净树**（先分批提交在途改动，`release.sh` 的干净树门禁才放行） |
+| 脱敏门禁 | 发版前 `python3 scripts/desensitize.py --check --require-table` = **0 命中**（1 条既有 warning：`internal/secret/secret_test.go` 的 `sk-` 前缀样本）。本次 `--apply` 重写了 3 个文件——`scripts/official-pricing.sh`、`scripts/sub2api-azure-import.py`、`docs/releases/azure-chatgptkey-import-20260928.md`（新带进来的真实主机名 / 网段）；`release.sh` 里的硬门禁仍未接线（`docs/TODO.md` M89 那条还开着），这次靠手工跑 |
+| 部署范围 | **gw-c**（LAN，`~/work/ai_gateway/bin/aigw`，`aigw-local.service`）：4.7.2/`7469135` → **4.7.3/`13f9fa3`**（上传后两端 sha256 一致）；其它实例（gw-a / gw-b 等）本次**未部署** |
+| 回滚点 | gw-c `bin/aigw.prev-4.7.2-7469135-20260928-150110`（23,733,452 B，就是 v4.7.2 构建物）。回滚 = `cp -p` 回该文件 + `systemctl --user restart aigw-local`，`/version` 随之后退到 4.7.2/`7469135` |
+| 验证（探针） | `/version` = `{"revision":"13f9fa3","ui":"minified","ui_encoding":"gzip","version":"4.7.3"}`；`healthz` 200、`readyz` 200、`admin/ui/` 200；三个用户单元 `aigw-local` / `dshgw-verify` / `gwproxy-verify` 全 `active`（只重启了 aigw-local，租户 worker 与发布会话未掉线） |
+| 验证（就绪与启动日志） | 重启到 `/healthz` 200 **只用了 2 秒**（脚本轮询，90s 预算内）；`data/aigw-local.log`：`msg="aigw starting" version=4.7.3 revision=13f9fa3 ui=minified ui_encoding=gzip … listen=:8088` → `msg="http server listening" addr=:8088`，从启动行往后 **0 条 `level=ERROR`** |
+| 验证（资源真的换了） | 线上 `GET /admin/ui/js/pages/chat.js`、`chat_ui.js` 与本次 `make ui-dist` 的压缩产物**逐字节相同**（sha256 `bc9256620dcc…` / `d7359ce87d55…`）；`chat.js` 里 `previewOpens` 出现 2 次（根因 B 的修法）、`ui.js` 里 `onRowClick` 在（M91）——「内嵌资源随二进制换掉」是实测，不是版本号自证 |
+| 验证（真实流量） | 重启后按 `request_logs` 统计：**15 条请求全部 `completed`、0 条 non-completed**（`client=dsh`、`model=deepseek-flash`，即本发布会话自己的流量）；数据面探针 `/v1/models`、`/v1/responses`、`/v1/images/generations` 无凭据一律 **401**（鉴权在位），`/admin/api/v1/accounts` 无会话 401 |
+| 测试 | `go test ./cmd/... ./internal/... ./pkg/... ./examples/...` 全绿；`make ui-base` 全绿（含新增 `chat_preview_handshake_test.mjs`：`chat preview handshake checks passed`）；插件：`ssh-workspace/client.test.mjs` **101 断言**、`ssh-workspace.test.mjs` **248 断言**；`go vet` 本批未引入新问题（3 条 `internal/dshgw/config/sandboxview_test.go` 复制含锁结构体在 main 上本来就有） |
+| 未做 | 未推 origin（M89 的历史重写要强推，届时一起）；其它实例未部署；**宿主 `cmd/dshgw/plugin/` 未同步**——`581be9a` 的 ssh-workspace 修复要同步到 gw-c 的插件目录、并由租户 worker 下次启动/重启才生效（M90 的宿主同步流程）；M34 的浏览器人工走查仍是人的一步（`docs/TODO.md` M34）；M89 的 `release.sh` 硬门禁与历史重写未做 |
+| 观察（非本次引入） | `make dshgw-test` 里 `internal/dshgw/proxy` 的 `TestSettingsDescribeThroughGatewayWithRealWorker` 按 Makefile 的默认 `DSHGW_DSH_ROOT=/home/winger/.local/dsh-0.1.2-rc.1` 会红（该 release 已不在盘上，现役是 `dsh-0.1.7-alpha.2`）；显式传 0.1.7-alpha.2 后 5.6s 通过——Makefile 那个默认值该更新 |
+
 ## M91 请求日志列表整行可点打开详情
 
 > 需求原话：「请求日志的列表 点击 显示详情」。设计：`docs/design/m91-request-log-row-click-detail.md`。
 > 现状：每行**已有**「详情」按钮，缺口是点击面（19 个数据列 + 操作列在最右）。整行与按钮共用
-> `openDetail(row)`；「详情」按钮保留为键盘路径。未做项（部署）留在 `docs/TODO.md` 的 M91 小节。
+> `openDetail(row)`；「详情」按钮保留为键盘路径。整节已完成（含部署），发布记录见上面的 v4.7.3 一节。
 
 - [x] `internal/webui/static/js/ui.js`：`table()`/`pagedTable()` 新增**可选** `onRowClick`（不传即 DOM 逐字不变）；
       行仅在声明了 `onRowClick` 时才带 `class="row-click"` 与监听；两条守卫写在 `bodyRow()` 一处——
@@ -6535,3 +6553,6 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
       `chat` 的失败来自并行会话在飞的 `chat.page.html`/`chat_ui.js`，HEAD 上 110 项全绿）
 - [x] 文档：`docs/design/m91-request-log-row-click-detail.md`（含「实现与设计差异」回填）、
       `docs/request-log.md` §4 控制台段落与 §6 状态、`docs/PROCESS.md` 已产出表、`docs/TODO.md` M91 小节
+- [x] 部署（随 **v4.7.3**）：控制台资源内嵌在二进制里，随 v4.7.3 重建 `bin/aigw` 并重启 gw-c 的
+      `aigw-local.service` 生效；线上 `/admin/ui/js/ui.js` 已含 `onRowClick`、`app.css` 已含 `row-click`
+      （逐字节比对见 v4.7.3 发布记录）
