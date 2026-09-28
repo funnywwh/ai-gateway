@@ -209,62 +209,122 @@ func (db *DB) CountFeishuAppData(ctx context.Context, appID string) (nodes, link
 	return nodes, links, nil
 }
 
-// --- company name overrides (M94) ---------------------------------------------------------
+// --- company field overrides (M94/M95) ----------------------------------------------------
 //
-// A company whose name comes from the configuration (the identity application, or a company in
-// feishu.companies) has no row of its own, so a console rename is stored here instead. The override
-// wins over the configuration and loses to a console row's own name; deleting it returns the
-// company to the configured name.
+// A company whose values come from the configuration (the identity application, or a company in
+// feishu.companies) has no row of its own, so what the console changes about it is stored here: one
+// row per company, one column per overridden field, NULL meaning "use the configured value".
+//
+// The console row of a console-registered company is its own truth, so nothing writes overrides for
+// those; and the identity application never gets a secret override (its secret drives the login
+// flows), which the API layer enforces.
 
-// ListFeishuCompanyNames returns every override, keyed by app id.
-func (db *DB) ListFeishuCompanyNames(ctx context.Context) (map[string]string, error) {
-	rows, err := db.read.QueryContext(ctx, "SELECT app_id, name FROM feishu_company_names")
+const companyOverrideCols = "app_id, name, root_node, note, enabled, secret_enc, updated_by, updated_at"
+
+func scanCompanyOverride(row rowScanner) (domain.FeishuCompanyOverride, error) {
+	var (
+		override             domain.FeishuCompanyOverride
+		name, rootNode, note sql.NullString
+		enabled              sql.NullInt64
+		updatedAt            int64
+	)
+	if err := row.Scan(&override.AppID, &name, &rootNode, &note, &enabled, &override.SecretEnc,
+		&override.UpdatedBy, &updatedAt); err != nil {
+		return override, err
+	}
+	if name.Valid {
+		value := name.String
+		override.Name = &value
+	}
+	if rootNode.Valid {
+		value := rootNode.String
+		override.RootNode = &value
+	}
+	if note.Valid {
+		value := note.String
+		override.Note = &value
+	}
+	if enabled.Valid {
+		value := enabled.Int64 != 0
+		override.Enabled = &value
+	}
+	override.UpdatedAt = timeFromUnix(updatedAt)
+	return override, nil
+}
+
+// ListFeishuCompanyOverrides returns every override, keyed by app id.
+func (db *DB) ListFeishuCompanyOverrides(ctx context.Context) (map[string]domain.FeishuCompanyOverride, error) {
+	rows, err := db.read.QueryContext(ctx, "SELECT "+companyOverrideCols+" FROM feishu_company_overrides")
 	if err != nil {
-		return nil, fmt.Errorf("store: list feishu company names: %w", err)
+		return nil, fmt.Errorf("store: list feishu company overrides: %w", err)
 	}
 	defer rows.Close()
-	out := map[string]string{}
+	out := map[string]domain.FeishuCompanyOverride{}
 	for rows.Next() {
-		var appID, name string
-		if err := rows.Scan(&appID, &name); err != nil {
-			return nil, fmt.Errorf("store: scan feishu company name: %w", err)
+		override, err := scanCompanyOverride(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: scan feishu company override: %w", err)
 		}
-		out[appID] = name
+		out[override.AppID] = override
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: iterate feishu company names: %w", err)
+		return nil, fmt.Errorf("store: iterate feishu company overrides: %w", err)
 	}
 	return out, nil
 }
 
-// SetFeishuCompanyName writes (or replaces) one override.
-func (db *DB) SetFeishuCompanyName(ctx context.Context, appID, name, by string) error {
-	appID = strings.TrimSpace(appID)
-	name = strings.TrimSpace(name)
-	if appID == "" || name == "" {
-		return domain.ErrInvalidRequest("a company name override needs an app id and a name")
+// SetFeishuCompanyOverride writes one company's overrides, replacing the whole row. An override with
+// nothing in it deletes the row instead: "the row exists" has to mean "something was changed".
+func (db *DB) SetFeishuCompanyOverride(ctx context.Context, override domain.FeishuCompanyOverride) error {
+	appID := strings.TrimSpace(override.AppID)
+	if appID == "" {
+		return domain.ErrInvalidRequest("a company override needs an app id")
 	}
-	if _, err := db.write.ExecContext(ctx, `
-INSERT INTO feishu_company_names(app_id, name, updated_by, updated_at) VALUES(?,?,?,?)
-ON CONFLICT(app_id) DO UPDATE SET name = excluded.name, updated_by = excluded.updated_by,
-  updated_at = excluded.updated_at`,
-		appID, name, by, unix(time.Now())); err != nil {
-		return fmt.Errorf("store: set feishu company name for %s: %w", appID, err)
+	if override.Empty() {
+		_, err := db.DeleteFeishuCompanyOverride(ctx, appID)
+		return err
+	}
+	_, err := db.write.ExecContext(ctx, `
+INSERT INTO feishu_company_overrides(app_id, name, root_node, note, enabled, secret_enc, updated_by, updated_at)
+VALUES(?,?,?,?,?,?,?,?)
+ON CONFLICT(app_id) DO UPDATE SET
+  name = excluded.name, root_node = excluded.root_node, note = excluded.note,
+  enabled = excluded.enabled, secret_enc = excluded.secret_enc,
+  updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
+		appID, nullableString(override.Name), nullableString(override.RootNode), nullableString(override.Note),
+		nullableBool(override.Enabled), override.SecretEnc, override.UpdatedBy, unix(time.Now()))
+	if err != nil {
+		return fmt.Errorf("store: set feishu company override for %s: %w", appID, err)
 	}
 	return nil
 }
 
-// DeleteFeishuCompanyName drops one override and reports whether anything changed, so "back to the
-// configured name" is idempotent.
-func (db *DB) DeleteFeishuCompanyName(ctx context.Context, appID string) (bool, error) {
+// DeleteFeishuCompanyOverride drops one company's overrides ("back to the configured values") and
+// reports whether anything changed.
+func (db *DB) DeleteFeishuCompanyOverride(ctx context.Context, appID string) (bool, error) {
 	res, err := db.write.ExecContext(ctx,
-		"DELETE FROM feishu_company_names WHERE app_id = ?", strings.TrimSpace(appID))
+		"DELETE FROM feishu_company_overrides WHERE app_id = ?", strings.TrimSpace(appID))
 	if err != nil {
-		return false, fmt.Errorf("store: delete feishu company name for %s: %w", appID, err)
+		return false, fmt.Errorf("store: delete feishu company override for %s: %w", appID, err)
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("store: delete feishu company name for %s: %w", appID, err)
+		return false, fmt.Errorf("store: delete feishu company override for %s: %w", appID, err)
 	}
 	return affected > 0, nil
+}
+
+// nullableString keeps "not overridden" (nil) distinct from "overridden with an empty value".
+func nullableString(value *string) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func nullableBool(value *bool) any {
+	if value == nil {
+		return nil
+	}
+	return boolInt(*value)
 }

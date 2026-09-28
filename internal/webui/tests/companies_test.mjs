@@ -98,6 +98,10 @@ const companies = [
     note: '客户 A', secret_configured: true, client_ready: true, client_error: '', shadowed_by_config: false,
     warnings: [], root_node_id: null, root_node_name: '某某科技', root_will_create: true, root_blocked: false,
     company_nodes: 3, linked_accounts: 5 },
+  { id: null, app_id: 'cli_ddd', name: '配置客户', identity: false, source: 'config', enabled: true,
+    note: '', secret_configured: true, client_ready: true, client_error: '', shadowed_by_config: false,
+    warnings: [], root_node_id: null, root_node_name: '配置客户', root_will_create: true, root_blocked: false,
+    company_nodes: 0, linked_accounts: 0 },
   { id: 3, app_id: 'cli_ccc', name: '停用公司', identity: false, source: 'console', enabled: false,
     note: '', secret_configured: true, client_ready: true, client_error: '', shadowed_by_config: false,
     warnings: [], root_node_id: null, root_node_name: '停用公司', root_will_create: true, root_blocked: false,
@@ -198,14 +202,14 @@ await module.namespace.render({
 const table = tables[0];
 assert.ok(table, 'the page renders a table');
 const rows = table.options.load ? companies : [];
-assert.equal(rows.length, 3);
+assert.equal(rows.length, 4, 'the fixture carries the identity application, a console company, a config company and a paused one');
 
 // --- 行渲染 ------------------------------------------------------------------------------
 
 const wrappedRows = rows.map((row) => ({ row, cells: table.options.columns.map((col) => textOf(col.render ? col.render(row) : row[col.key])) }));
 const identityRow = wrappedRows[0];
 const consoleRow = wrappedRows[1];
-const disabledRow = wrappedRows[2];
+const disabledRow = wrappedRows[3];
 assert.match(identityRow.cells.join(' '), /身份应用/, 'the identity application is labelled as such');
 assert.match(consoleRow.cells.join(' '), /控制台/, 'a console-registered company is labelled as such');
 assert.match(disabledRow.cells.join(' '), /已停用/, 'a paused company says so');
@@ -213,8 +217,7 @@ assert.match(consoleRow.cells.join(' '), /未建（同步时新建「某某科�
 
 // 只读来源没有写按钮：身份应用与配置公司在页面里只能看。
 const identityActions = table.options.rowActions(rows[0]).map(textOf);
-assert.ok(identityActions.some((label) => label.includes('feishu.app_id')), 'the identity row points at the configuration setting');
-assert.ok(!identityActions.includes('编辑'), 'the identity row has no edit action');
+assert.ok(identityActions.includes('编辑'), 'the identity row offers 编辑 (M95)');
 const consoleActions = table.options.rowActions(rows[1]).map(textOf);
 // Arrays built inside the module's VM context carry that context's prototypes, so compare their
 // contents as text rather than with deepStrictEqual.
@@ -311,6 +314,8 @@ const viewerTable = tables[0];
 const viewerActionsForRow = viewerTable.options.rowActions(rows[1]).map(textOf);
 assert.ok(!viewerActionsForRow.includes('编辑') && !viewerActionsForRow.includes('删除登记'),
   'a viewer sees no write actions on a row');
+const viewerIdentity = viewerTable.options.rowActions(rows[0]).map(textOf);
+assert.ok(!viewerIdentity.includes('编辑'), 'a viewer cannot edit the identity company either');
 
 // --- ui.js: the dialog gained extra footer actions ---------------------------------------
 
@@ -323,36 +328,52 @@ console.log('companies_test.mjs: ok');
 // --- M94：公司名可改（含身份应用与配置来源的公司）-----------------------------------------
 
 // 身份应用行现在也有「改名」（配置来源的行都只有改名，凭据/根节点/备注/启停仍归配置）。
-const identityRenameActions = table.options.rowActions(rows[0]).map(textOf);
-assert.ok(identityRenameActions.includes('改名'), 'the identity row offers 改名');
-assert.ok(!identityRenameActions.includes('编辑'), 'the identity row still has no full edit (its credentials belong to the config)');
-assert.match(identityRenameActions.join(' '), /feishu\.app_id/, 'and it says which setting owns the rest');
-
-// 改名对话框：只有公司名可编辑，其余字段只读；提交只发 name，路径用 app_id。
+// 编辑对话框（M95）：四个本地字段都能改；本公司（身份应用）的密钥只读，其余可编辑。
 calls.length = 0;
 modalResult = { ok: true };
-const renameButton = table.options.rowActions(rows[0]).find((button) => textOf(button) === '改名');
+const renameButton = table.options.rowActions(rows[0]).find((button) => textOf(button) === '编辑');
 renameButton.click();
 await new Promise((resolve) => setTimeout(resolve, 0));
 const renameFields = modalArgs.fields;
 assert.equal(modalArgs.submitLabel, '保存');
-assert.equal(renameFields.find((field) => field.name === 'name').readonly, undefined, 'the name stays editable');
-for (const name of ['app_id', 'app_secret', 'root_node', 'note', 'enabled']) {
-  assert.equal(renameFields.find((field) => field.name === name).readonly, true, name + ' is read-only for a config-owned company');
+for (const name of ['name', 'root_node', 'note', 'enabled']) {
+  assert.equal(renameFields.find((field) => field.name === name).readonly, undefined, name + ' is editable for a config-owned company');
 }
-assert.equal(modalArgs.extraActions.length, 0, 'no 先测试连接 for a company whose secret lives in the config');
-await modalArgs.onSubmit({ name: '智天成', app_id: 'cli_aaa', app_secret: '', root_node: '', note: '', enabled: true });
+assert.equal(renameFields.find((field) => field.name === 'app_id').readonly, true, 'app_id stays read-only');
+assert.equal(renameFields.find((field) => field.name === 'app_secret').readonly, true,
+  'the identity application\'s secret stays read-only (it also signs the login flows)');
+assert.match(renameFields.find((field) => field.name === 'app_secret').hint, /feishu\.app_secret/);
+assert.equal(modalArgs.extraActions.length, 0, 'no 先测试连接 for the identity application');
+// 只改名字：提交体只带 name（值与原值相同的字段不发）。
+await modalArgs.onSubmit({ name: '智天成', app_id: 'cli_aaa', app_secret: '', root_node: '本公司', note: '', enabled: true });
 const renameCall = calls.find((call) => call.method === 'PATCH');
-assert.ok(renameCall, '改名 PATCHes the company');
+assert.ok(renameCall, '编辑 PATCHes the company');
 assert.equal(renameCall.path, '/org/feishu/companies/cli_aaa', 'a config-owned company is addressed by its app id');
 assert.equal(JSON.stringify(renameCall.body), JSON.stringify({ name: '智天成' }),
-  'only the name travels: the other fields belong to the configuration');
+  'only the changed field travels');
+
+// 客户公司的密钥可覆盖，且覆盖过的行给「恢复配置值」。
+const clientRow = rows.find((row) => row.app_id === 'cli_ddd');
+assert.ok(clientRow, 'the fixture carries a configuration-sourced client company');
+clientRow.overridden = ['secret'];
+clientRow.secret_overridden = true;
+await module.namespace.render({ page: node('div'), actions: node('div'), session: { role: 'admin' }, navigate: () => {} });
+const clientTable = tables[0];
+const clientActions = clientTable.options.rowActions(clientRow).map(textOf);
+assert.ok(clientActions.includes('编辑'), 'a config-sourced client company offers 编辑');
+assert.ok(clientActions.includes('恢复配置值'), 'an overridden company offers 恢复配置值');
+clientTable.options.rowActions(clientRow).find((button) => textOf(button) === '编辑').click();
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.notEqual(modalArgs.fields.find((field) => field.name === 'app_secret').readonly, true,
+  'a client company\'s secret is editable');
+assert.match(modalArgs.fields.find((field) => field.name === 'app_secret').hint, /已在控制台覆盖/);
+assert.ok(modalArgs.extraActions.length === 1, 'the probe action stays available for client companies');
 
 // 根层已有同名节点时，对话框在名字字段上直接给出两条出路。
 companies[0].root_name_taken = { node_id: 11, name: '智天成' };
 await module.namespace.render({ page: node('div'), actions: node('div'), session: { role: 'admin' }, navigate: () => {} });
 const warnedTable = tables[0];
-warnedTable.options.rowActions(rows[0]).find((button) => textOf(button) === '改名').click();
+warnedTable.options.rowActions(rows[0]).find((button) => textOf(button) === '编辑').click();
 await new Promise((resolve) => setTimeout(resolve, 0));
 const warnedHint = modalArgs.fields.find((field) => field.name === 'name').hint;
 assert.match(warnedHint, /先同步一次/, 'the conflict hint explains the sync-first way out');

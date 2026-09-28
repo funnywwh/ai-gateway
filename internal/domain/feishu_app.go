@@ -46,3 +46,46 @@ func (a *FeishuApp) CompanyNodeName() string {
 
 // HasSecret reports whether a secret is stored, without decrypting anything.
 func (a *FeishuApp) HasSecret() bool { return a != nil && len(a.SecretEnc) > 0 }
+
+// FeishuCompanyOverride is what the console changed about a company whose values come from the
+// configuration (M95). A nil field means "not overridden: use the configured value"; an empty string
+// is a legitimate override (an empty root_node means "name the company node after the company").
+//
+// SecretEnc is the one exception to the "nil = not overridden" reading: an empty blob means the same
+// thing, because an unset secret cannot be expressed as a value. The deployment's own application is
+// never stored here — its secret also drives the login flows.
+type FeishuCompanyOverride struct {
+	AppID     string
+	Name      *string
+	RootNode  *string
+	Note      *string
+	Enabled   *bool
+	SecretEnc []byte
+	UpdatedBy string
+	UpdatedAt time.Time
+}
+
+// Fields lists the overridden field names, for the console's badge and the list payload. Secret
+// material is never included, only the fact that it was overridden.
+func (o FeishuCompanyOverride) Fields() []string {
+	out := []string{}
+	if o.Name != nil {
+		out = append(out, "name")
+	}
+	if o.RootNode != nil {
+		out = append(out, "root_node")
+	}
+	if o.Note != nil {
+		out = append(out, "note")
+	}
+	if o.Enabled != nil {
+		out = append(out, "enabled")
+	}
+	if len(o.SecretEnc) > 0 {
+		out = append(out, "secret")
+	}
+	return out
+}
+
+// Empty reports whether nothing is overridden (the row should not exist).
+func (o FeishuCompanyOverride) Empty() bool { return len(o.Fields()) == 0 }

@@ -213,32 +213,92 @@ func TestFeishuAppsRequireNameAndAppID(t *testing.T) {
 	}
 }
 
-// The console's name overrides (M94): a company whose name comes from the configuration has no row
-// to rename, so the override is stored on its own. Deleting it means "back to the configured name".
+// The console's field overrides (M94/M95): a company whose values come from the configuration has no
+// row to edit, so what the console changed lives here. A nil field means "use the configured value";
+// an override with nothing in it deletes the row.
 
-func TestFeishuCompanyNameOverrides(t *testing.T) {
+func TestFeishuCompanyOverrides(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
+	str := func(v string) *string { return &v }
+	boolean := func(v bool) *bool { return &v }
 
-	if names, err := db.ListFeishuCompanyNames(ctx); err != nil || len(names) != 0 {
-		t.Fatalf("fresh overrides = %v %v, want none", names, err)
+	if overrides, err := db.ListFeishuCompanyOverrides(ctx); err != nil || len(overrides) != 0 {
+		t.Fatalf("fresh overrides = %v %v, want none", overrides, err)
 	}
-	if err := db.SetFeishuCompanyName(ctx, "cli_aaa", "智天成", "admin"); err != nil {
+	// Only the name first (the M94 shape), then more fields, then the secret.
+	if err := db.SetFeishuCompanyOverride(ctx, domain.FeishuCompanyOverride{
+		AppID: "cli_aaa", Name: str("智天成"), UpdatedBy: "admin",
+	}); err != nil {
 		t.Fatal(err)
 	}
-	// Re-setting the same company replaces the name instead of failing.
-	if err := db.SetFeishuCompanyName(ctx, "cli_aaa", "智天成（集团）", "admin2"); err != nil {
+	if err := db.SetFeishuCompanyOverride(ctx, domain.FeishuCompanyOverride{
+		AppID: "cli_aaa", Name: str("智天成"), Note: str("客户 A"), Enabled: boolean(false),
+		SecretEnc: []byte{9, 9, 9}, UpdatedBy: "admin2",
+	}); err != nil {
 		t.Fatal(err)
 	}
-	names, err := db.ListFeishuCompanyNames(ctx)
+	overrides, err := db.ListFeishuCompanyOverrides(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(names) != 1 || names["cli_aaa"] != "智天成（集团）" {
-		t.Fatalf("overrides = %v", names)
+	got := overrides["cli_aaa"]
+	if got.Name == nil || *got.Name != "智天成" || got.Note == nil || *got.Note != "客户 A" ||
+		got.Enabled == nil || *got.Enabled || len(got.SecretEnc) != 3 || got.UpdatedBy != "admin2" {
+		t.Fatalf("override = %+v", got)
+	}
+	if strings.Join(got.Fields(), ",") != "name,note,enabled,secret" {
+		t.Fatalf("fields = %v", got.Fields())
+	}
+	// An override with a nil field is "not overridden": the empty string is a real value.
+	if err := db.SetFeishuCompanyOverride(ctx, domain.FeishuCompanyOverride{
+		AppID: "cli_aaa", RootNode: str(""), UpdatedBy: "admin",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	overrides, _ = db.ListFeishuCompanyOverrides(ctx)
+	got = overrides["cli_aaa"]
+	if got.RootNode == nil || *got.RootNode != "" {
+		t.Fatalf("an empty root_node must survive as a value: %+v", got)
+	}
+	if got.Name != nil || got.Note != nil || got.Enabled != nil || len(got.SecretEnc) != 0 {
+		t.Fatalf("replacing an override must replace the whole row: %+v", got)
 	}
 
-	// The override never touches the company row of a console-registered company.
+	// The secret travels as an opaque blob; the store never inspects it.
+	var stored []byte
+	if err := db.read.QueryRowContext(ctx,
+		"SELECT secret_enc FROM feishu_company_overrides WHERE app_id = ?", "cli_aaa").Scan(&stored); err != nil {
+		t.Fatalf("the override row has no secret column value: %v", err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("a cleared secret left bytes behind: %v", stored)
+	}
+
+	// Nothing overridden deletes the row.
+	if err := db.SetFeishuCompanyOverride(ctx, domain.FeishuCompanyOverride{AppID: "cli_aaa"}); err != nil {
+		t.Fatal(err)
+	}
+	if overrides, _ = db.ListFeishuCompanyOverrides(ctx); len(overrides) != 0 {
+		t.Fatalf("an empty override left a row: %v", overrides)
+	}
+	// Deleting is idempotent.
+	changed, err := db.DeleteFeishuCompanyOverride(ctx, "cli_aaa")
+	if err != nil || changed {
+		t.Fatalf("delete on a missing row = %v %v", changed, err)
+	}
+	if err := db.SetFeishuCompanyOverride(ctx, domain.FeishuCompanyOverride{
+		AppID: "cli_aaa", Name: str("x"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err = db.DeleteFeishuCompanyOverride(ctx, "cli_aaa"); err != nil || !changed {
+		t.Fatalf("delete = %v %v", changed, err)
+	}
+	if err := db.SetFeishuCompanyOverride(ctx, domain.FeishuCompanyOverride{Name: str("x")}); err == nil {
+		t.Fatal("an override without an app id was accepted")
+	}
+	// A console row is unaffected by any of this.
 	if _, err := db.UpsertFeishuApp(ctx, &domain.FeishuApp{
 		Name: "甲方", AppID: "cli_bbb", SecretEnc: []byte{1}, Enabled: true,
 	}); err != nil {
@@ -246,27 +306,6 @@ func TestFeishuCompanyNameOverrides(t *testing.T) {
 	}
 	apps, err := db.ListFeishuApps(ctx)
 	if err != nil || len(apps) != 1 || apps[0].Name != "甲方" {
-		t.Fatalf("the override changed a console row: %+v %v", apps, err)
-	}
-
-	// Deleting is idempotent and reports whether anything changed.
-	changed, err := db.DeleteFeishuCompanyName(ctx, "cli_aaa")
-	if err != nil || !changed {
-		t.Fatalf("delete = %v %v", changed, err)
-	}
-	changed, err = db.DeleteFeishuCompanyName(ctx, "cli_aaa")
-	if err != nil || changed {
-		t.Fatalf("second delete = %v %v, want a no-op", changed, err)
-	}
-	if names, _ = db.ListFeishuCompanyNames(ctx); len(names) != 0 {
-		t.Fatalf("overrides survived the delete: %v", names)
-	}
-
-	// Empty input is a programming error, not "clear it": clearing has its own call.
-	if err := db.SetFeishuCompanyName(ctx, "cli_aaa", "", "admin"); err == nil {
-		t.Fatal("an empty name was accepted")
-	}
-	if err := db.SetFeishuCompanyName(ctx, "", "name", "admin"); err == nil {
-		t.Fatal("an empty app id was accepted")
+		t.Fatalf("an override changed a console row: %+v %v", apps, err)
 	}
 }

@@ -35,6 +35,11 @@ const COMPANIES = [
     note: '客户 A', secret_configured: true, client_ready: true, client_error: '', shadowed_by_config: false,
     warnings: [], root_node_id: null, root_node_name: '某某科技', root_will_create: true, root_blocked: false,
     company_nodes: 2, linked_accounts: 1 },
+  { id: null, app_id: 'cli_ddd', name: '配置客户', identity: false, source: 'config', enabled: true,
+    note: '', secret_configured: true, client_ready: true, client_error: '', shadowed_by_config: false,
+    name_source: 'config', overridden: ['secret'], overridden_by: 'admin', secret_overridden: true,
+    warnings: [], root_node_id: null, root_node_name: '配置客户', root_will_create: true, root_blocked: false,
+    company_nodes: 0, linked_accounts: 0 },
   { id: 3, app_id: 'cli_ccc', name: '停用公司', identity: false, source: 'console', enabled: false,
     note: '', secret_configured: true, client_ready: true, client_error: '', shadowed_by_config: false,
     warnings: [], root_node_id: null, root_node_name: '停用公司', root_will_create: true, root_blocked: false,
@@ -103,11 +108,11 @@ try {
   if (rendered && typeof rendered.then === 'function') await rendered;
   await settle();
 
-  checks.tableRendered = rows().length === 3;
+  checks.tableRendered = rows().length === 4;
   // M94：名字覆盖徽标 + 身份应用行的改名入口。
   checks.nameOverrideBadge = document.getElementById('page').textContent.includes('名字已在控制台改过');
   const identityRowCells = document.querySelectorAll('#page tbody tr')[0];
-  checks.identityRowOffersRename = !!find('改名', identityRowCells);
+  checks.identityRowOffersEdit = !!find('编辑', identityRowCells);
   const bodyText = document.getElementById('page').textContent;
   checks.identityRowLabelled = bodyText.includes('身份应用');
   checks.consoleRowLabelled = bodyText.includes('控制台');
@@ -135,8 +140,8 @@ try {
     checks.probeReported = [...document.querySelectorAll('.toast')].some((node) => node.textContent.includes('研发部'));
   }
 
-  // 改名对话框（M94）：名字可改、其余只读、名字字段里写着根层同名冲突的两条出路。
-  const renameButton = identityRowCells ? find('改名', identityRowCells) : null;
+  // 编辑对话框（M94/M95）：公司名/根节点/备注/启停可改；本公司的密钥只读、其余字段已解锁。
+  const renameButton = identityRowCells ? find('编辑', identityRowCells) : null;
   if (renameButton) {
     renameButton.click();
     await settle();
@@ -144,13 +149,28 @@ try {
       .find((node) => node.textContent.includes(labelText));
     const nameField = [...document.querySelectorAll('#modal-root input')]
       .find((input) => input.value === '智天成');
-    checks.renameDialogEditable = !!nameField && !nameField.readOnly && !nameField.disabled;
+    checks.editDialogEditable = !!nameField && !nameField.readOnly && !nameField.disabled;
     const secretField = [...document.querySelectorAll('#modal-root input')].find((input) => input.type === 'password');
-    checks.renameDialogSecretLocked = !!secretField && (secretField.readOnly || secretField.disabled);
-    checks.renameDialogHint = document.getElementById('modal-root').textContent.includes('先同步一次');
-    checks.renameDialogNoProbe = !find('先测试连接', document.getElementById('modal-root'));
+    checks.identitySecretLocked = !!secretField && (secretField.readOnly || secretField.disabled);
+    checks.editDialogHint = document.getElementById('modal-root').textContent.includes('先同步一次');
+    checks.editDialogNoProbe = !find('先测试连接', document.getElementById('modal-root'));
     void labeled;
     // 关掉对话框，后面的"新建公司"检查还要用同一个页面。
+    const cancel = find('取消', document.getElementById('modal-root'));
+    if (cancel) cancel.click();
+    await settle();
+  }
+
+  // 配置来源的客户公司（M95）：密钥字段可编辑、行上有「恢复配置值」。
+  const configRow = rows().find((row) => find('编辑', row) && row.textContent.includes('配置客户'));
+  if (configRow) {
+    checks.overriddenBadge = configRow.textContent.includes('已在控制台编辑');
+    checks.resetOverrideOffered = !!find('恢复配置值', configRow);
+    find('编辑', configRow).click();
+    await settle();
+    const secret = [...document.querySelectorAll('#modal-root input')].find((input) => input.type === 'password');
+    checks.clientSecretEditable = !!secret && !secret.readOnly && !secret.disabled;
+    checks.clientSecretHint = document.getElementById('modal-root').textContent.includes('已在控制台覆盖');
     const cancel = find('取消', document.getElementById('modal-root'));
     if (cancel) cancel.click();
     await settle();

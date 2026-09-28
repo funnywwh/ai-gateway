@@ -97,6 +97,41 @@ func (s *CompanySealer) Seal(appRowID int64, secret string) ([]byte, error) {
 	return EncryptScoped(s.key, companyScope, appRowID, []byte(secret))
 }
 
+// companyOverrideScope namespaces the overrides of companies whose secret comes from the
+// configuration (M95). Distinct from companyScope on purpose: a row-id-sealed secret and an
+// app-id-sealed one are different facts and must not be interchangeable.
+const companyOverrideScope = "feishu_app_override"
+
+// SealByApp seals a client company's secret under its app id (M95). Empty input clears it, which the
+// caller expresses by deleting the override row instead.
+func (s *CompanySealer) SealByApp(appID, secret string) ([]byte, error) {
+	if !s.Ready() {
+		return nil, fmt.Errorf("credentials_key is not configured")
+	}
+	if appID == "" {
+		return nil, fmt.Errorf("an app id is required to seal its secret")
+	}
+	return EncryptScopedKey(s.key, companyOverrideScope, appID, []byte(secret))
+}
+
+// OpenByApp decrypts a secret sealed by SealByApp.
+func (s *CompanySealer) OpenByApp(appID string, ciphertext []byte) (string, error) {
+	if !s.Ready() {
+		return "", fmt.Errorf("credentials_key is not configured")
+	}
+	if len(ciphertext) == 0 {
+		return "", nil
+	}
+	if appID == "" {
+		return "", fmt.Errorf("an app id is required to open its secret")
+	}
+	plaintext, err := DecryptScopedKey(s.key, companyOverrideScope, appID, ciphertext)
+	if err != nil {
+		return "", err
+	}
+	return string(plaintext), nil
+}
+
 // Open decrypts one company's app secret. A nil/empty blob answers ("", nil): "no secret stored" is a
 // state the caller reports, not an error.
 func (s *CompanySealer) Open(appRowID int64, ciphertext []byte) (string, error) {

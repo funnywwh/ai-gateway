@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -43,6 +44,11 @@ type dirStub struct {
 	failCode int
 	// tokenRequests counts tenant-token mints.
 	tokenRequests int
+	// requireAppID/requireSecret, when set, make the tenant-token call behave like Feishu: the
+	// credentials in the request body must match, or the app-level refusal comes back. It is how a
+	// test proves *which* secret was used (M95's override, say).
+	requireAppID  string
+	requireSecret string
 }
 
 func newDirStub(t *testing.T) *dirStub {
@@ -52,8 +58,23 @@ func newDirStub(t *testing.T) *dirStub {
 	mux.HandleFunc("/tenant-token", func(w http.ResponseWriter, r *http.Request) {
 		stub.mu.Lock()
 		stub.tokenRequests++
+		wantAppID, wantSecret := stub.requireAppID, stub.requireSecret
 		stub.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
+		if wantAppID != "" || wantSecret != "" {
+			// The token call carries the credentials as JSON (see Client.tenantAccessToken); mismatch
+			// answers Feishu's application-level refusal 99991663.
+			raw, _ := io.ReadAll(r.Body)
+			var sent struct {
+				AppID  string `json:"app_id"`
+				Secret string `json:"app_secret"`
+			}
+			_ = json.Unmarshal(raw, &sent)
+			if (wantAppID != "" && sent.AppID != wantAppID) || (wantSecret != "" && sent.Secret != wantSecret) {
+				writeRawJSON(w, `{"code":99991663,"msg":"app not found"}`)
+				return
+			}
+		}
 		_, _ = w.Write([]byte(`{"code":0,"tenant_access_token":"t-dir","expire":7200}`))
 	})
 	mux.HandleFunc("/contact/v3/departments", func(w http.ResponseWriter, r *http.Request) {

@@ -67,8 +67,10 @@ export async function render({ page, actions, session, navigate }) {
     const source = row.source === 'identity' ? '身份应用'
       : (row.source === 'config' ? '由配置提供' : '控制台');
     cells.push(badge(source, row.source === 'console' ? '' : 'ok'));
-    if (row.name_source === 'override') {
-      cells.push(badge('名字已在控制台改过', '', '清空名字并保存即回到配置里的名字'));
+    const overridden = row.overridden || [];
+    if (overridden.length) {
+      cells.push(badge('已在控制台编辑：' + overridden.map(overrideLabel).join('、'), '',
+        '这些字段由控制台覆盖，配置文件仍是兜底；点「恢复配置值」可还原'));
     }
     if (row.note) cells.push(el('span', { class: 'muted', text: row.note }));
     for (const warning of row.warnings || []) {
@@ -99,17 +101,14 @@ export async function render({ page, actions, session, navigate }) {
       onclick: () => navigate('/org?company=' + encodeURIComponent(row.app_id)),
     }));
     if (row.source !== 'console') {
-      // 名字对任何来源的公司都能改（M94）；其余字段仍归配置，页面在这里说明白。
-      buttons.push(el('button', {
-        class: 'btn', text: '改名', disabled: readonly,
-        onclick: () => openEditor(row, () => view.refresh()),
-      }));
-      buttons.push(el('span', {
-        class: 'muted',
-        text: row.source === 'identity'
-          ? '凭据与登录由 feishu.app_id 管理'
-          : '凭据与根节点由 feishu.companies 管理',
-      }));
+      // 配置来源的公司同样可以编辑（M95）：改的是"控制台覆盖"，配置文件仍是兜底。
+      // 只读角色看不到写入口，与库行一致。
+      if (!readonly) {
+        buttons.push(el('button', { class: 'btn', text: '编辑', onclick: () => openEditor(row, () => view.refresh()) }));
+        if ((row.overridden || []).length) {
+          buttons.push(el('button', { class: 'btn', text: '恢复配置值', onclick: () => resetOverrides(row) }));
+        }
+      }
       return buttons;
     }
     buttons.push(el('button', { class: 'btn', text: '测试连接', onclick: () => probe(row) }));
@@ -126,6 +125,33 @@ export async function render({ page, actions, session, navigate }) {
       }
     }
     return buttons;
+  }
+
+  function overrideLabel(field) {
+    switch (field) {
+      case 'name': return '公司名';
+      case 'root_node': return '根节点名';
+      case 'note': return '备注';
+      case 'enabled': return '启用';
+      case 'secret': return '密钥';
+      default: return field;
+    }
+  }
+
+  async function resetOverrides(row) {
+    const ok = await confirmDialog('恢复「' + row.name + '」的配置值',
+      '会把这家公司在控制台上改过的字段（' + (row.overridden || []).map(overrideLabel).join('、') +
+      '）全部清掉，回到配置文件里的值；公司节点名如果用的是覆盖名，也会跟着改回去。\n\n' +
+      '配置文件里的值不会被修改。');
+    if (!ok) return;
+    try {
+      const result = await api.patch('/org/feishu/companies/' + encodeURIComponent(row.app_id), { reset: true });
+      const renamed = result && result.node_renamed ? '（公司节点改回「' + result.node_renamed.name + '」）' : '';
+      toast('已恢复配置值' + renamed, 'ok');
+      await view.refresh();
+    } catch (err) {
+      toast(api.errorMessage(err), 'error');
+    }
   }
 
   function warningText(warning) {
@@ -202,56 +228,89 @@ export async function render({ page, actions, session, navigate }) {
   //     名字留空 = 回到配置里的名字。
   //
   // 根层已有同名节点时，这里直接把"下一步同步会怎样、怎么解"写在字段提示里——那是操作发生的地方。
+  // openEditor is the create/edit dialog. Three shapes (M94/M95):
+  //
+  //   - 控制台登记的公司：所有字段直接写库行；
+  //   - 身份应用（本公司）：公司名/根节点名/备注/启用可改（写"控制台覆盖"），**密钥只读**——
+  //     它的密钥同时用于飞书登录/绑定/扫码；
+  //   - feishu.companies 登记的客户公司：同样四项 + **密钥也可覆盖**（留空 = 用配置里的）。
+  //
+  // 覆盖不影响配置文件；「恢复配置值」把这家公司一次性还原。根层已有同名节点时，两条出路写在名字字段的提示里。
   function openEditor(row, done) {
     const editing = !!row;
     const configOwned = editing && row.source !== 'console';
+    const identity = editing && row.identity === true;
+    const overridden = (row && row.overridden) || [];
     const taken = editing && row.root_name_taken
       ? '根层已有同名节点「' + row.root_name_taken.name + '」，下一次同步会拒绝建公司节点：' +
         '先同步一次（用旧名字建出公司节点）再改名，或先在组织树里把那个节点改名/移走。'
       : '';
+    const secretHint = !configOwned
+      ? (editing ? '留空 = 保持不变；填了就替换（加密落库，永不回显）' : '加密落库（credentials_key），永不回显、不进日志与审计')
+      : (identity
+        ? '身份应用的密钥同时用于飞书登录/绑定/扫码，这里改不了：请改 feishu.app_secret'
+        : (row.secret_overridden
+          ? '已在控制台覆盖配置里的密钥（留空 = 保持不变；填新的替换）；点「恢复配置值」回到配置里的那把'
+          : '留空 = 用配置里的密钥（feishu.companies[].app_secret）；填了就覆盖'));
     const fields = [
-      { name: 'name', label: '公司名', required: !configOwned, value: editing ? row.name : '',
+      { name: 'name', label: '公司名', required: !configOwned || overridden.includes('name'), value: editing ? row.name : '',
         hint: (configOwned ? '留空并保存 = 回到配置里的名字。' : '≤64 字符，与其它公司重名会被拒绝；它也是公司节点的默认名。')
           + (taken ? ' ' + taken : '') },
       { name: 'app_id', label: 'App ID', required: !editing, value: editing ? row.app_id : '',
         hint: editing ? '创建后不可更改（它是已导入数据的归属键）' : 'cli_…，来自那家公司自己飞书应用的「凭证与基础信息」',
         readonly: editing },
       { name: 'app_secret', label: 'App Secret', type: 'password', required: !editing,
-        readonly: configOwned,
-        hint: configOwned ? '由配置管理（feishu.app_id / feishu.companies），这里改不了'
-          : (editing ? '留空 = 保持不变；填了就替换（加密落库，永不回显）' : '加密落库（credentials_key），永不回显、不进日志与审计') },
+        readonly: identity,
+        hint: secretHint },
       { name: 'root_node', label: '公司根节点名（可选）', value: editing ? (row.root_node_name || '') : '',
-        readonly: configOwned,
-        hint: configOwned ? '由配置管理（companies[].root_node）' : '留空则用公司名；指向已存在的同名根节点会被认领' },
-      { name: 'note', label: '备注', value: editing ? (row.note || '') : '', readonly: configOwned,
-        hint: configOwned ? '由配置管理' : '' },
+        hint: '留空则用公司名；指向已存在的同名根节点会被认领' },
+      { name: 'note', label: '备注', value: editing ? (row.note || '') : '' },
       { name: 'enabled', label: '启用', type: 'checkbox', value: editing ? row.enabled : true,
-        readonly: configOwned,
-        hint: configOwned ? '由配置管理' : '停用 = 暂不参与同步（数据保留）' },
+        hint: '停用 = 暂不参与同步（数据保留）' },
     ];
     return modal({
-      title: editing ? (configOwned ? '改公司名「' + row.name + '」' : '编辑公司「' + row.name + '」') : '新建公司',
+      title: editing ? '编辑公司「' + row.name + '」' : '新建公司',
       fields,
       submitLabel: editing ? '保存' : '创建',
       // 「先测试连接」用刚刚填的值探测一次，不关窗、不落库：密钥抄错与权限没发版本都能当场发现。
-      // 配置来源的公司没有可填的密钥，这个入口就不出现。
-      extraActions: configOwned ? [] : [{ label: '先测试连接', onClick: (values) => testBeforeSave(values) }],
+      // 本公司没有可填的密钥，这个入口就不出现。
+      extraActions: identity ? [] : [{ label: '先测试连接', onClick: (values) => testBeforeSave(values) }],
       onSubmit: async (values) => {
-        // 配置来源的公司只发 name：服务端对其它字段会 400（它们由配置管理）。
-        const handle = configOwned ? row.app_id : (editing ? row.id : null);
+        if (!editing) {
+          const created = await api.post('/org/feishu/companies', {
+            name: values.name, app_id: values.app_id, app_secret: values.app_secret,
+            root_node: values.root_node, note: values.note, enabled: values.enabled !== false,
+          });
+          toast('已登记「' + values.name + '」，可以开始同步了', 'ok');
+          return created;
+        }
+        // 配置来源的公司：只发"被改过或已有覆盖"的字段，其余保持不动；控制台登记的公司发全量。
         const body = configOwned
-          ? { name: values.name }
+          ? {}
           : { name: values.name, root_node: values.root_node, note: values.note, enabled: values.enabled !== false };
-        if (!editing) body.app_id = values.app_id;
-        if (!configOwned && values.app_secret) body.app_secret = values.app_secret;
-        const result = editing
-          ? await api.patch('/org/feishu/companies/' + encodeURIComponent(handle), body)
-          : await api.post('/org/feishu/companies', body);
+        if (configOwned) {
+          if (values.name !== row.name || overridden.includes('name')) body.name = values.name;
+          if (values.root_node !== (row.root_node_name || '') || overridden.includes('root_node')) {
+            body.root_node = values.root_node;
+          }
+          if (values.note !== (row.note || '') || overridden.includes('note')) body.note = values.note;
+          if ((values.enabled !== false) !== row.enabled || overridden.includes('enabled')) {
+            body.enabled = values.enabled !== false;
+          }
+        }
+        // 密钥：填了新值才发；本公司这个字段是只读的，不会走到这里。
+        if (!identity && values.app_secret) body.app_secret = values.app_secret;
+        if (!Object.keys(body).length) {
+          toast('没有改动', '');
+          return null;
+        }
+        const handle = configOwned ? row.app_id : row.id;
+        const result = await api.patch('/org/feishu/companies/' + encodeURIComponent(handle), body);
         const renamed = result && result.node_renamed ? '（公司节点也改成了「' + result.node_renamed.name + '」）' : '';
         const warned = result && (result.warnings || []).includes('root_name_taken')
           ? '；注意：根层已有同名节点，下一次同步会拒绝建公司节点（先同步一次再改名，或先处理那个节点）' : '';
-        toast(editing ? '已保存「' + values.name + '」' + renamed + warned
-          : '已登记「' + values.name + '」，可以开始同步了', warned ? 'error' : 'ok');
+        toast((configOwned ? '已更新「' + values.name + '」的控制台覆盖' : '已保存「' + values.name + '」') + renamed + warned,
+          warned ? 'error' : 'ok');
         return result;
       },
     }).then(async (result) => {

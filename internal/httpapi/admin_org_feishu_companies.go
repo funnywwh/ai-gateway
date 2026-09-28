@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/funnywwh/ai-gateway/internal/config"
 	"github.com/funnywwh/ai-gateway/internal/domain"
@@ -36,8 +37,11 @@ type feishuCompanyRow struct {
 	Enabled bool
 	Note    string
 	// NameSource says where the effective name came from (M94): "row" (a console row's own name),
-	// "override" (the console renamed a configuration-sourced company) or "config".
+	// "override" (the console edited a configuration-sourced company) or "config".
 	NameSource string
+	// Override is what the console changed about a configuration-sourced company (M95). Its zero value
+	// means "nothing was overridden"; the row already carries the resulting values.
+	Override domain.FeishuCompanyOverride
 	// SecretConfigured reports whether a secret is stored (console rows) — never the secret.
 	SecretConfigured bool
 	// ClientErr explains why no client could be built (an undecryptable secret, usually after a
@@ -72,21 +76,22 @@ func configFeishuCompanies(deps *FeishuDeps) []feishu.Company {
 func (s *Server) feishuCompanyRows(ctx context.Context) ([]feishuCompanyRow, error) {
 	configured := configFeishuCompanies(s.deps.Feishu)
 	store, storeReady := portReadyNoWrite(s.deps.FeishuApps)
-	// The console's name overrides (M94) apply to configuration-sourced companies, which have no
-	// row to rename. A failure to read them costs the override, not the list: the configured name
-	// is always a usable answer.
-	overrides := map[string]string{}
+	// The console's field overrides (M94/M95) apply to configuration-sourced companies, which have no
+	// row to edit. A failure to read them costs the overrides, not the list: the configured values are
+	// always a usable answer.
+	overrides := map[string]domain.FeishuCompanyOverride{}
 	if storeReady {
-		names, err := store.ListFeishuCompanyNames(ctx)
+		stored, err := store.ListFeishuCompanyOverrides(ctx)
 		if err != nil {
 			if s.deps.Log != nil {
-				s.deps.Log.Warn("reading feishu company name overrides failed", "err", err)
+				s.deps.Log.Warn("reading feishu company overrides failed", "err", err)
 			}
 		} else {
-			overrides = names
+			overrides = stored
 		}
 	}
 
+	cfg := s.feishuConfig()
 	rows := make([]feishuCompanyRow, 0, len(configured)+2)
 	byAppID := map[string]int{}
 	byName := map[string]int{}
@@ -100,12 +105,40 @@ func (s *Server) feishuCompanyRows(ctx context.Context) ([]feishuCompanyRow, err
 			Company: company, Source: source, Enabled: true, SecretConfigured: true,
 			NameSource: "config",
 		}
-		if override, ok := overrides[company.AppID]; ok && override != "" {
-			row.Name = override
-			row.NameSource = "override"
-			// An explicitly configured root_node still wins: it names a local node, not the company.
-			if strings.TrimSpace(company.RootName) == "" || company.RootName == company.Name {
-				row.RootName = override
+		if override, ok := overrides[company.AppID]; ok {
+			row.Override = override
+			// Overrides win over the file, field by field: they are the operator's newer decision made
+			// where the company is managed (M95).
+			if override.Name != nil {
+				row.Name = *override.Name
+				row.NameSource = "override"
+			}
+			// The company node's name: an override wins, else an explicitly configured root_node
+			// (a local node name the file states), else the effective company name. The identity
+			// application has no explicit root_node — its feishu.Company.RootName is just the
+			// company name — so a rename moves it, which is the whole point (M94).
+			switch {
+			case override.RootNode != nil:
+				row.RootName = *override.RootNode
+				if row.RootName == "" {
+					row.RootName = row.Name
+				}
+			case configuredExplicitRoot(cfg, company.AppID) != "":
+				row.RootName = configuredExplicitRoot(cfg, company.AppID)
+			default:
+				row.RootName = row.Name
+			}
+			if override.Note != nil {
+				row.Note = *override.Note
+			}
+			if override.Enabled != nil {
+				row.Enabled = *override.Enabled
+			}
+			// A client company's secret may be overridden too; the identity application's never is
+			// (the API layer refuses it), so this only ever rebuilds a client company's client.
+			if len(override.SecretEnc) > 0 {
+				row.Client, row.ClientErr = s.feishuClientForOverride(company.AppID, override.SecretEnc)
+				row.SecretConfigured = row.Client != nil
 			}
 		}
 		rows = append(rows, row)
@@ -179,6 +212,25 @@ func (s *Server) feishuCompanyRowsOrConfig(ctx context.Context) []feishuCompanyR
 	return out
 }
 
+// feishuClientForOverride builds the directory-read client of a company whose secret the console
+// overrode (M95). The secret is opened per call and never kept; the resulting client has its own
+// tenant-token cache, which is the price of letting the console change a secret without a restart —
+// and the directory itself is cached for 60 s, so the extra token mints are bounded.
+func (s *Server) feishuClientForOverride(appID string, ciphertext []byte) (*feishu.Client, string) {
+	secrets, ready := portReadyNoWrite(s.deps.FeishuAppSecrets)
+	if !ready {
+		return nil, "部署未配置 credentials_key，无法解密这家公司的密钥覆盖"
+	}
+	secret, err := secrets.OpenByApp(appID, ciphertext)
+	if err != nil {
+		return nil, "控制台保存的 App Secret 无法解密（credentials_key 可能已轮换）：请重新填写或「恢复配置值」"
+	}
+	if strings.TrimSpace(secret) == "" {
+		return nil, "控制台保存的 App Secret 为空"
+	}
+	return feishu.NewCompanyClient(s.feishuConfig(), appID, secret), ""
+}
+
 // feishuClientForApp builds the directory-read client of one console row. The secret is decrypted
 // here and nowhere else; a failure comes back as a reason string the console can show.
 func (s *Server) feishuClientForApp(app *domain.FeishuApp) (*feishu.Client, string) {
@@ -222,29 +274,37 @@ func (s *Server) resolveFeishuCompany(w http.ResponseWriter, r *http.Request, to
 	}
 	token = strings.TrimSpace(token)
 	if token == "" {
-		// The identity application, i.e. the M70 behavior every existing caller relies on.
-		return &rows[0].Company, true
+		// The identity application, i.e. the M70 behavior every existing caller relies on — including
+		// the pause and credential guards, which apply to it like to any other company (M95 lets the
+		// console pause it).
+		return usableCompany(w, rows[0])
 	}
 	for i := range rows {
 		row := rows[i]
 		if row.AppID != token && row.Name != token {
 			continue
 		}
-		if !row.Enabled {
-			writeAPIError(w, domain.ErrInvalidRequest(
-				"公司「"+row.Name+"」已在控制台停用：启用后再同步（节点与人员映射都还在）"))
-			return nil, false
-		}
-		if row.Client == nil {
-			writeAPIError(w, domain.ErrInvalidRequest(
-				"公司「"+row.Name+"」的凭据不可用："+row.ClientErr))
-			return nil, false
-		}
-		return &row.Company, true
+		return usableCompany(w, row)
 	}
 	writeAPIError(w, domain.ErrInvalidRequest(
 		"unknown company "+token+"; known companies: "+describeCompanyRows(rows)))
 	return nil, false
+}
+
+// usableCompany answers the two states that must not be resolved silently: a company the console
+// paused, and one whose stored credentials cannot be used.
+func usableCompany(w http.ResponseWriter, row feishuCompanyRow) (*feishu.Company, bool) {
+	if !row.Enabled {
+		writeAPIError(w, domain.ErrInvalidRequest(
+			"公司「"+row.Name+"」已在控制台停用：启用后再同步（节点与人员映射都还在）"))
+		return nil, false
+	}
+	if row.Client == nil {
+		writeAPIError(w, domain.ErrInvalidRequest(
+			"公司「"+row.Name+"」的凭据不可用："+row.ClientErr))
+		return nil, false
+	}
+	return &row.Company, true
 }
 
 // describeCompanyRows lists the known companies for an error message: name (source) + app id, so an
@@ -289,6 +349,15 @@ func (s *Server) companyNameMap(ctx context.Context) map[string]string {
 		out[row.AppID] = row.Name
 	}
 	return out
+}
+
+// overrideTime renders an override's timestamp, or nil when nothing was overridden.
+func overrideTime(override domain.FeishuCompanyOverride) *time.Time {
+	if override.Empty() || override.UpdatedAt.IsZero() {
+		return nil
+	}
+	at := override.UpdatedAt
+	return &at
 }
 
 // rootNameTaken reports the root-level node already wearing a company's name, when there is one.
@@ -415,6 +484,10 @@ func (s *Server) handleAdminListFeishuCompanies(w http.ResponseWriter, r *http.R
 			"client_ready":       row.Client != nil,
 			"client_error":       row.ClientErr,
 			"name_source":        row.NameSource,
+			"overridden":         row.Override.Fields(),
+			"overridden_by":      row.Override.UpdatedBy,
+			"overridden_at":      timeOrNil(overrideTime(row.Override)),
+			"secret_overridden":  len(row.Override.SecretEnc) > 0,
 			"shadowed_by_config": row.ShadowedByConfig,
 			"warnings":           row.Warnings,
 			"root_node_id":       jsonNilInt64(root.NodeID),

@@ -55,6 +55,23 @@ func DecryptScoped(key []byte, scope string, id int64, ciphertext []byte) ([]byt
 	return open(key, scopedAAD(scope, id), ciphertext)
 }
 
+// EncryptScopedKey seals plaintext for one row of one scope, addressed by a *string* handle: the
+// console's per-company overrides are keyed by app id, not by a row id (M95).
+func EncryptScopedKey(key []byte, scope, handle string, plaintext []byte) ([]byte, error) {
+	if scope == "" || handle == "" {
+		return nil, fmt.Errorf("creds: scope and handle are required")
+	}
+	return seal(key, scopedKeyAAD(scope, handle), plaintext)
+}
+
+// DecryptScopedKey opens ciphertext produced by EncryptScopedKey for the same scope and handle.
+func DecryptScopedKey(key []byte, scope, handle string, ciphertext []byte) ([]byte, error) {
+	if scope == "" || handle == "" {
+		return nil, fmt.Errorf("creds: scope and handle are required")
+	}
+	return open(key, scopedKeyAAD(scope, handle), ciphertext)
+}
+
 func seal(key, additional []byte, plaintext []byte) ([]byte, error) {
 	if len(key) == 0 {
 		return nil, fmt.Errorf("creds: encryption key is empty")
@@ -121,4 +138,14 @@ func scopedAAD(scope string, id int64) []byte {
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], uint64(id))
 	return append(out, buf[:]...)
+}
+
+// scopedKeyAAD is the same shape for a string handle ("scope, 0x00, app id"). It is deliberately not
+// the numeric form: the two live in different scopes anyway, and keeping them textually distinct
+// means a ciphertext cannot be moved between them even if a scope name is ever reused.
+func scopedKeyAAD(scope, handle string) []byte {
+	out := make([]byte, 0, len(scope)+1+len(handle))
+	out = append(out, scope...)
+	out = append(out, 0)
+	return append(out, handle...)
 }

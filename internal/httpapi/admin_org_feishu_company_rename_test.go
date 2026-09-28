@@ -271,12 +271,12 @@ func TestFeishuRenameConsoleCompanyByAppID(t *testing.T) {
 		t.Fatalf("row name = %q, want the new one", app.Name)
 	}
 	// The name override table is for configuration-sourced companies only.
-	names, err := f.db.ListFeishuCompanyNames(context.Background())
+	overrides, err := f.db.ListFeishuCompanyOverrides(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(names) != 0 {
-		t.Fatalf("a console company wrote an override: %v", names)
+	if len(overrides) != 0 {
+		t.Fatalf("a console company wrote an override: %v", overrides)
 	}
 }
 
@@ -286,18 +286,45 @@ func TestFeishuRenameGuards(t *testing.T) {
 	cookie := f.login(t, adminUser, adminPassword)
 	ctx := context.Background()
 
-	// A configuration-owned company accepts the name and nothing else.
+	// The four local fields are editable (M95), including on the identity application.
 	for _, body := range []string{
-		`{"name":"新名字","app_secret":"s"}`,
-		`{"name":"新名字","note":"x"}`,
-		`{"name":"新名字","enabled":false}`,
-		`{"name":"新名字","root_node":"x"}`,
+		`{"name":"新名字"}`,
+		`{"note":"x"}`,
+		`{"enabled":false}`,
+		`{"root_node":"新根节点"}`,
 	} {
 		status, out := renameCompany(t, f, cookie, f.identityAppID(), body)
-		message, _ := out["error"].(map[string]any)["message"].(string)
-		if status != http.StatusBadRequest || !strings.Contains(message, "feishu.") {
-			t.Fatalf("body %s = %d %v, want a 400 naming the configuration", body, status, out)
+		if status != http.StatusOK {
+			t.Fatalf("body %s = %d %v, want 200", body, status, out)
 		}
+	}
+	// The identity application's secret is the one field that stays in the configuration: it also
+	// signs the login flows, so a directory-only override would make the two disagree.
+	status, out := renameCompany(t, f, cookie, f.identityAppID(), `{"app_secret":"s"}`)
+	message, _ := out["error"].(map[string]any)["message"].(string)
+	if status != http.StatusBadRequest || !strings.Contains(message, "feishu.app_secret") {
+		t.Fatalf("identity secret override = %d %v, want a 400 naming feishu.app_secret", status, out)
+	}
+	// A client company's secret may be overridden (the fixture has credentials_key).
+	f2 := newOrgFeishuFixture(t)
+	f2.clientCompany(t)
+	cookie2 := f2.login(t, adminUser, adminPassword)
+	if status, out := renameCompany(t, f2, cookie2, "cli_bbb", `{"app_secret":"fresh-secret"}`); status != http.StatusOK {
+		t.Fatalf("client secret override = %d %v, want 200", status, out)
+	}
+	overrides, err := f2.db.ListFeishuCompanyOverrides(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(overrides["cli_bbb"].SecretEnc) == 0 {
+		t.Fatalf("the client secret was not stored: %+v", overrides["cli_bbb"])
+	}
+	// Clearing it goes back to the configured secret.
+	if status, out := renameCompany(t, f2, cookie2, "cli_bbb", `{"app_secret":""}`); status != http.StatusOK {
+		t.Fatalf("clearing the client secret = %d %v", status, out)
+	}
+	if overrides, _ = f2.db.ListFeishuCompanyOverrides(ctx); len(overrides["cli_bbb"].SecretEnc) != 0 {
+		t.Fatalf("the cleared secret is still stored: %+v", overrides["cli_bbb"])
 	}
 	// Name validation is the configuration's own rule.
 	for _, body := range []string{`{}`, `{"name":"cli_nope"}`, fmt.Sprintf(`{"name":%q}`, strings.Repeat("名", 65))} {
@@ -306,7 +333,7 @@ func TestFeishuRenameGuards(t *testing.T) {
 		}
 	}
 	// Colliding with another company is a 409 that names it.
-	status, out := renameCompany(t, f, cookie, f.identityAppID(), `{"name":"某某科技"}`)
+	status, out = renameCompany(t, f, cookie, f.identityAppID(), `{"name":"某某科技"}`)
 	if status != http.StatusConflict || !strings.Contains(out["error"].(map[string]any)["message"].(string), "feishu.companies") {
 		t.Fatalf("collision = %d %v, want a 409 naming the config company", status, out)
 	}
@@ -323,24 +350,30 @@ func TestFeishuRenameGuards(t *testing.T) {
 		t.Fatalf("viewer rename = %d, want 403", res.StatusCode)
 	}
 
-	// The company node rename can collide at the root level: refuse before writing the name.
-	if _, err := f.db.CreateOrgNode(ctx, &domain.OrgNode{
-		Name: "本公司", SortOrder: 100, FeishuAppID: f.identityAppID(),
+	// The company node rename can collide at the root level: refuse before writing the name. A fresh
+	// fixture keeps this scenario free of the overrides the cases above left behind.
+	f3 := newOrgFeishuFixture(t)
+	cookie3 := f3.login(t, adminUser, adminPassword)
+	if _, err := f3.db.CreateOrgNode(ctx, &domain.OrgNode{
+		Name: "本公司", SortOrder: 100, FeishuAppID: f3.identityAppID(),
 		FeishuDepartmentID: feishu.RootDepartmentID,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.db.CreateOrgNode(ctx, &domain.OrgNode{Name: "撞名", SortOrder: 100}); err != nil {
+	if _, err := f3.db.CreateOrgNode(ctx, &domain.OrgNode{Name: "撞名", SortOrder: 100}); err != nil {
 		t.Fatal(err)
 	}
-	status, out = renameCompany(t, f, cookie, f.identityAppID(), `{"name":"撞名"}`)
+	status, out = renameCompany(t, f3, cookie3, f3.identityAppID(), `{"name":"撞名"}`)
 	if status != http.StatusConflict {
 		t.Fatalf("node rename collision = %d %v, want 409", status, out)
 	}
-	// The name was not written: the company is still called 本公司.
-	row := identityCompanyRow(t, f, cookie)
+	// Nothing was written: the company is still called 本公司 and no override exists.
+	row := identityCompanyRow(t, f3, cookie3)
 	if row["name"] != "本公司" {
 		t.Fatalf("a refused rename still wrote the name: %v", row)
+	}
+	if overrides, _ := f3.db.ListFeishuCompanyOverrides(ctx); len(overrides) != 0 {
+		t.Fatalf("a refused rename left an override: %v", overrides)
 	}
 }
 
@@ -373,4 +406,147 @@ func warningCodes(payload map[string]any) []string {
 		}
 	}
 	return out
+}
+
+// The secret override of a client company must actually be used: the stub validates the credentials it
+// is handed, so "the console's secret replaced the configured one" is asserted against the wire, not
+// against a flag in the database.
+func TestFeishuClientSecretOverrideIsUsed(t *testing.T) {
+	f := newOrgFeishuFixture(t)
+	stub := newDirStub(t)
+	stub.departments = map[string][]dirDept{"0": {{OpenDepartmentID: "od_c", Name: "客户研发部"}}}
+	stub.members = map[string][]dirUser{"od_c": {}}
+	// Feishu (the stub) accepts exactly one secret, and it is not the one the configuration carries.
+	stub.requireAppID = "cli_bbb"
+	stub.requireSecret = "override-secret"
+	f.withCompany(t, "cli_bbb", "某某科技", stub)
+	installClientStub(t, f, stub)
+	cookie := f.login(t, adminUser, adminPassword)
+
+	// The configured secret is refused by the stub, so the directory read fails.
+	status, payload := f.callJSON(t, http.MethodGet, "/admin/api/v1/org/feishu/directory?company=cli_bbb", "", cookie)
+	if status != http.StatusBadGateway {
+		t.Fatalf("directory read with the configured secret = %d %v, want 502", status, payload)
+	}
+
+	// With the console's secret in place the read succeeds: the override really is what gets used.
+	if status, out := renameCompany(t, f, cookie, "cli_bbb", `{"app_secret":"override-secret"}`); status != http.StatusOK {
+		t.Fatalf("setting the secret override = %d %v", status, out)
+	}
+	status, payload = f.callJSON(t, http.MethodGet, "/admin/api/v1/org/feishu/directory?company=cli_bbb", "", cookie)
+	if status != http.StatusOK {
+		t.Fatalf("directory read with the override = %d %v, want 200", status, payload)
+	}
+	row := companyRowByAppID(t, f, cookie, "cli_bbb")
+	if row["secret_overridden"] != true {
+		t.Fatalf("secret_overridden = %v, want true", row["secret_overridden"])
+	}
+	if strings.Contains(fmt.Sprint(row), "override-secret") {
+		t.Fatalf("the list echoed the secret: %v", row)
+	}
+
+	// Clearing it goes back to the configuration, so the same read fails again.
+	if status, out := renameCompany(t, f, cookie, "cli_bbb", `{"app_secret":""}`); status != http.StatusOK {
+		t.Fatalf("clearing the secret override = %d %v", status, out)
+	}
+	status, _ = f.callJSON(t, http.MethodGet, "/admin/api/v1/org/feishu/directory?company=cli_bbb&refresh=true", "", cookie)
+	if status != http.StatusBadGateway {
+		t.Fatalf("directory read after clearing = %d, want 502 (back to the configured secret)", status)
+	}
+	// 「恢复配置值」 clears it too, and the row stops claiming an override.
+	if status, out := renameCompany(t, f, cookie, "cli_bbb", `{"app_secret":"override-secret"}`); status != http.StatusOK {
+		t.Fatalf("re-setting the override = %d %v", status, out)
+	}
+	if status, out := renameCompany(t, f, cookie, "cli_bbb", `{"reset":true}`); status != http.StatusOK {
+		t.Fatalf("reset = %d %v", status, out)
+	}
+	row = companyRowByAppID(t, f, cookie, "cli_bbb")
+	if row["secret_overridden"] != false || len(row["overridden"].([]any)) != 0 {
+		t.Fatalf("after reset the row still reports overrides: %v", row)
+	}
+}
+
+// companyRowByAppID returns one company's row from the list.
+func companyRowByAppID(t *testing.T, f *orgFeishuFixture, cookie, appID string) map[string]any {
+	t.Helper()
+	status, payload := f.callJSON(t, http.MethodGet, "/admin/api/v1/org/feishu/companies", "", cookie)
+	if status != http.StatusOK {
+		t.Fatalf("list status=%d payload=%v", status, payload)
+	}
+	for _, raw := range payload["data"].([]any) {
+		row := raw.(map[string]any)
+		if row["app_id"] == appID {
+			return row
+		}
+	}
+	t.Fatalf("company %s is missing from the list", appID)
+	return nil
+}
+
+// The other three override fields behave like the name: they win over the file, and a reset puts the
+// configured values back.
+func TestFeishuCompanyFieldOverrides(t *testing.T) {
+	f := newOrgFeishuFixture(t)
+	cookie := f.login(t, adminUser, adminPassword)
+	ctx := context.Background()
+
+	// root_node: the next sync must use the overridden name for the company node.
+	status, out := renameCompany(t, f, cookie, f.identityAppID(), `{"root_node":"智天成集团"}`)
+	if status != http.StatusOK {
+		t.Fatalf("root_node override = %d %v", status, out)
+	}
+	if status, out := f.callJSON(t, http.MethodPost, "/admin/api/v1/org/feishu/sync", "", cookie); status != http.StatusOK {
+		t.Fatalf("sync = %d %v", status, out)
+	}
+	root := companyNode(t, f, f.identityAppID())
+	if root == nil || root.Name != "智天成集团" {
+		t.Fatalf("company node = %+v, want the overridden name", root)
+	}
+
+	// note + enabled: the list reports them, and a paused company leaves the sync path.
+	if status, out := renameCompany(t, f, cookie, f.identityAppID(), `{"note":"客户 A","enabled":false}`); status != http.StatusOK {
+		t.Fatalf("note/enabled override = %d %v", status, out)
+	}
+	row := identityCompanyRow(t, f, cookie)
+	if row["note"] != "客户 A" || row["enabled"] != false {
+		t.Fatalf("row = %v", row)
+	}
+	if row["overridden"].([]any)[0] == nil {
+		t.Fatalf("overridden = %v, want the field list", row["overridden"])
+	}
+	if status, _ := f.callJSON(t, http.MethodPost, "/admin/api/v1/org/feishu/sync", "", cookie); status != http.StatusBadRequest {
+		t.Fatalf("sync of a paused company = %d, want 400", status)
+	}
+
+	// Omitting a field keeps its override; the response says which fields are overridden now.
+	if status, out := renameCompany(t, f, cookie, f.identityAppID(), `{"note":"客户 A2"}`); status != http.StatusOK {
+		t.Fatalf("partial edit = %d %v", status, out)
+	}
+	row = identityCompanyRow(t, f, cookie)
+	if row["enabled"] != false || row["note"] != "客户 A2" {
+		t.Fatalf("a partial edit dropped another override: %v", row)
+	}
+
+	// Reset puts everything back, including the company node's name.
+	if status, out := renameCompany(t, f, cookie, f.identityAppID(), `{"reset":true}`); status != http.StatusOK {
+		t.Fatalf("reset = %d %v", status, out)
+	}
+	row = identityCompanyRow(t, f, cookie)
+	if row["name"] != "本公司" || row["enabled"] != true || row["note"] != "" || len(row["overridden"].([]any)) != 0 {
+		t.Fatalf("after reset = %v", row)
+	}
+	if row["name_source"] != "config" {
+		t.Fatalf("name_source after reset = %v", row["name_source"])
+	}
+	renamed, err := f.db.GetOrgNode(ctx, root.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamed.Name != "本公司" {
+		t.Fatalf("the company node kept the overridden name: %q", renamed.Name)
+	}
+	// The cleared company syncs again.
+	if status, out := f.callJSON(t, http.MethodPost, "/admin/api/v1/org/feishu/sync", "", cookie); status != http.StatusOK {
+		t.Fatalf("sync after reset = %d %v", status, out)
+	}
 }

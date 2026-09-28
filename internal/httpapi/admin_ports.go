@@ -129,12 +129,12 @@ type FeishuCompanyAdmin interface {
 	SetFeishuAppEnabled(ctx context.Context, id int64, enabled bool, by string) error
 	DeleteFeishuApp(ctx context.Context, id int64) (bool, error)
 	CountFeishuAppData(ctx context.Context, appID string) (nodes, links int, err error)
-	// The name overrides (M94): the console may rename a company whose name comes from the
-	// configuration, and these three store that decision. An empty name means "back to the
-	// configured name", which is DeleteFeishuCompanyName's job.
-	ListFeishuCompanyNames(ctx context.Context) (map[string]string, error)
-	SetFeishuCompanyName(ctx context.Context, appID, name, by string) error
-	DeleteFeishuCompanyName(ctx context.Context, appID string) (bool, error)
+	// The field overrides (M94/M95): what the console changed about a company whose values come from
+	// the configuration. An override with nothing in it is deleted, so deleting the row means "back
+	// to the configured values".
+	ListFeishuCompanyOverrides(ctx context.Context) (map[string]domain.FeishuCompanyOverride, error)
+	SetFeishuCompanyOverride(ctx context.Context, override domain.FeishuCompanyOverride) error
+	DeleteFeishuCompanyOverride(ctx context.Context, appID string) (bool, error)
 }
 
 // FeishuCompanySecrets seals and opens one company's Feishu application secret. Only the paths that
@@ -142,8 +142,13 @@ type FeishuCompanyAdmin interface {
 // entry.
 type FeishuCompanySecrets interface {
 	Ready() bool
+	// Seal/Open address a console-registered company's secret by its row id; SealByApp/OpenByApp
+	// address a client company's secret override by its app id (M95). The two use different AAD
+	// scopes, so one kind of ciphertext can never be opened as the other.
 	Seal(appRowID int64, secret string) ([]byte, error)
 	Open(appRowID int64, ciphertext []byte) (string, error)
+	SealByApp(appID, secret string) ([]byte, error)
+	OpenByApp(appID string, ciphertext []byte) (string, error)
 }
 
 // HookAdmin manages outbound event sinks.

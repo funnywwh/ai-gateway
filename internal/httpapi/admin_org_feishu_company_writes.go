@@ -25,6 +25,11 @@ import (
 //     it changed;
 //   - deleting removes the registration, not the data.
 
+// maxCompanyNoteRunes bounds a company's note override. It matches what the console's account and
+// company dialogs accept, so a value that reaches the API by hand cannot be longer than what the UI
+// could have produced.
+const maxCompanyNoteRunes = 512
+
 // companyWriteGate is the shared pre-flight of the four write endpoints.
 type companyWriteGate struct {
 	Store FeishuCompanyAdmin
@@ -390,6 +395,8 @@ func (s *Server) renameCompanyByAppID(w http.ResponseWriter, r *http.Request, ga
 		Enabled   *bool   `json:"enabled"`
 		AppSecret *string `json:"app_secret"`
 		AppID     *string `json:"app_id"`
+		// Reset drops every override this company has, returning it to the configured values.
+		Reset bool `json:"reset"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
@@ -399,68 +406,153 @@ func (s *Server) renameCompanyByAppID(w http.ResponseWriter, r *http.Request, ga
 		writeAPIError(w, domain.ErrInvalidRequest("app_id 不可更改：它是已导入的节点与人员映射的归属键"))
 		return
 	}
-	for field, given := range map[string]bool{
-		"app_secret": body.AppSecret != nil,
-		"root_node":  body.RootNode != nil,
-		"note":       body.Note != nil,
-		"enabled":    body.Enabled != nil,
-	} {
-		if given {
-			writeAPIError(w, domain.ErrInvalidRequest(
-				"这家公司的名字来自配置，只能改 name；字段 "+field+
-					"由配置管理（feishu.app_id / feishu.companies），请在配置文件里改后重启"))
-			return
-		}
-	}
-	if body.Name == nil {
-		writeAPIError(w, domain.ErrInvalidRequest("name is required（这条路由只做改名）"))
+	identity := target.Identity
+	// A request that changes nothing is a mistake worth naming (the console path answers the same way).
+	if !body.Reset && body.Name == nil && body.RootNode == nil && body.Note == nil &&
+		body.Enabled == nil && body.AppSecret == nil {
+		writeAPIError(w, domain.ErrInvalidRequest(
+			"nothing to update: 至少给一个字段（name/root_node/note/enabled/app_secret），或传 {\"reset\": true} 恢复配置值"))
 		return
 	}
 
-	name := strings.TrimSpace(*body.Name)
-	clearing := name == ""
-	if !clearing {
-		clean, err := config.NormalizeCompanyName("name", name)
-		if err != nil {
-			writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
-			return
-		}
-		name = clean
-		if who, err := s.companyNameTaken(ctx, name, 0, appID); err != nil {
-			writeAPIError(w, toAPIError(err))
-			return
-		} else if who != "" {
-			writeAPIError(w, domain.ErrConflict(who))
-			return
-		}
-	}
-
-	// Renaming the company node needs the organization port; without it the node would keep the old
-	// name while the company page showed the new one.
+	// Editing the company node (its name follows a rename) needs the organization port; without it the
+	// page and the tree would disagree.
 	orgStore, ok := portReady(w, s.deps.Org, "organization management")
 	if !ok {
 		return
 	}
+	if body.Reset {
+		s.resetCompanyOverrides(w, r, gate, orgStore, target)
+		return
+	}
 
-	// Where the name comes from decides what "back to normal" means: an override may be deleted,
-	// while a console row always has a name of its own.
+	// The new override starts from what is stored and applies what this request carries: fields the
+	// caller omitted keep their stored override (or stay unoverridden).
+	override := target.Override
+	override.AppID = appID
+	override.UpdatedBy = gate.Actor
+	changes := map[string]any{}
+
+	if body.Name != nil {
+		name := strings.TrimSpace(*body.Name)
+		if name == "" {
+			override.Name = nil
+			changes["name"] = nil
+		} else {
+			clean, err := config.NormalizeCompanyName("name", name)
+			if err != nil {
+				writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
+				return
+			}
+			if who, err := s.companyNameTaken(ctx, clean, 0, appID); err != nil {
+				writeAPIError(w, toAPIError(err))
+				return
+			} else if who != "" {
+				writeAPIError(w, domain.ErrConflict(who))
+				return
+			}
+			override.Name = &clean
+			changes["name"] = clean
+		}
+	}
+	if body.RootNode != nil {
+		rootNode := strings.TrimSpace(*body.RootNode)
+		if rootNode != "" {
+			if _, err := domain.NormalizeOrgNodeName(rootNode); err != nil {
+				writeAPIError(w, domain.ErrInvalidRequest("root_node " + err.Error()))
+				return
+			}
+		}
+		override.RootNode = &rootNode
+		changes["root_node"] = rootNode
+	}
+	if body.Note != nil {
+		note := strings.TrimSpace(*body.Note)
+		if len([]rune(note)) > maxCompanyNoteRunes {
+			writeAPIError(w, domain.ErrInvalidRequest(
+				"note must be at most "+strconv.Itoa(maxCompanyNoteRunes)+" characters"))
+			return
+		}
+		override.Note = &note
+		changes["note"] = note
+	}
+	if body.Enabled != nil {
+		value := *body.Enabled
+		override.Enabled = &value
+		changes["enabled"] = value
+	}
+	if body.AppSecret != nil {
+		// The deployment's own application is the one company whose secret cannot be overridden here:
+		// it also signs the login flows, and a directory-only override would make the two disagree.
+		if identity {
+			writeAPIError(w, domain.ErrInvalidRequest(
+				"身份应用（本公司）的密钥同时用于飞书登录/绑定/扫码，不能在这里覆盖：请改 feishu.app_secret 后重启"))
+			return
+		}
+		secret := strings.TrimSpace(*body.AppSecret)
+		if secret == "" {
+			override.SecretEnc = nil
+			changes["secret"] = "cleared"
+		} else {
+			if !s.requireSecrets(w) {
+				return
+			}
+			seals, _ := portReadyNoWrite(s.deps.FeishuAppSecrets)
+			sealed, err := seals.SealByApp(appID, secret)
+			if err != nil {
+				writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
+				return
+			}
+			override.SecretEnc = sealed
+			// The value never reaches the audit trail: the fact that the key was replaced is what
+			// matters, the key itself is not.
+			changes["secret"] = "replaced"
+		}
+	}
+
+	// Where the company node's name comes from: the pending override says so when it carries a
+	// root_node, otherwise the file does (and an empty effective root name falls back to the name).
 	cfg := s.feishuConfig()
+	newRoot := pendingRootName(override, cfg, appID, target.Name)
 	oldRoot := target.RootName
-	newRoot := name
-	if clearing {
-		newRoot = configuredRootName(cfg, appID, target.Name)
-	}
-	if explicit := configuredExplicitRoot(cfg, appID); explicit != "" {
-		// An explicitly configured root_node names a local node and is not touched by a rename.
-		newRoot = explicit
-	}
 	if oldRoot == "" {
 		oldRoot = target.Name
 	}
-	if newRoot == "" {
-		newRoot = target.Name
+	warnings := []string{}
+	nodeRenamed := map[string]any(nil)
+	if oldRoot != newRoot && !body.Reset {
+		renamed, warn, err := s.renameCompanyNode(ctx, orgStore, target.AppID, oldRoot, newRoot)
+		if err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		nodeRenamed = renamed
+		warnings = append(warnings, warn...)
 	}
 
+	if err := gate.Store.SetFeishuCompanyOverride(ctx, override); err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	s.audit(ctx, gate.Actor, "update", "feishu_company", target.AppID, changes, "ok")
+	s.invalidateFeishuDirectory()
+
+	// The answer is the company as the list will render it next.
+	status, payload := s.companyRowPayload(ctx, target, override, nodeRenamed, warnings)
+	writeJSON(w, status, payload)
+	return
+}
+
+// resetCompanyOverrides drops every override of a configuration-sourced company ("back to the
+// configured values"), including the company node's name when it still wears the overridden one.
+func (s *Server) resetCompanyOverrides(w http.ResponseWriter, r *http.Request, gate companyWriteGate, orgStore OrgAdmin, target *feishuCompanyRow) {
+	ctx := r.Context()
+	cfg := s.feishuConfig()
+	newRoot := configuredRootName(cfg, target.AppID, target.Name)
+	oldRoot := target.RootName
+	if oldRoot == "" {
+		oldRoot = target.Name
+	}
 	warnings := []string{}
 	nodeRenamed := map[string]any(nil)
 	if oldRoot != newRoot {
@@ -472,42 +564,76 @@ func (s *Server) renameCompanyByAppID(w http.ResponseWriter, r *http.Request, ga
 		nodeRenamed = renamed
 		warnings = append(warnings, warn...)
 	}
-
-	if clearing {
-		if _, err := gate.Store.DeleteFeishuCompanyName(ctx, target.AppID); err != nil {
-			writeAPIError(w, toAPIError(err))
-			return
-		}
-	} else {
-		if err := gate.Store.SetFeishuCompanyName(ctx, target.AppID, name, gate.Actor); err != nil {
-			writeAPIError(w, toAPIError(err))
-			return
-		}
+	if _, err := gate.Store.DeleteFeishuCompanyOverride(ctx, target.AppID); err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
 	}
-	s.audit(ctx, gate.Actor, "update", "feishu_company", target.AppID, map[string]any{
-		"name": map[string]any{"from": target.Name, "to": name},
-	}, "ok")
+	s.audit(ctx, gate.Actor, "update", "feishu_company", target.AppID, map[string]any{"reset": true}, "ok")
 	s.invalidateFeishuDirectory()
-
-	// The answer is the company as the list would render it now.
-	status, payload := s.companyPagePayload(ctx, target.ID, http.StatusOK)
-	if payload["company"] != nil {
-		payload["company"].(map[string]any)["name"] = name
-		payload["company"].(map[string]any)["app_id"] = target.AppID
-		payload["company"].(map[string]any)["name_source"] = nameSourceAfterRename(clearing)
-	}
-	payload["app_id"] = target.AppID
-	payload["node_renamed"] = nodeRenamed
-	payload["warnings"] = warnings
+	status, payload := s.companyRowPayload(ctx, target, domain.FeishuCompanyOverride{}, nodeRenamed, warnings)
 	writeJSON(w, status, payload)
 }
 
-// nameSourceAfterRename reports what the list will say about the name next time it is read.
-func nameSourceAfterRename(cleared bool) string {
-	if cleared {
-		return "config"
+// pendingRootName answers what the company node will be called once the pending override is stored.
+func pendingRootName(override domain.FeishuCompanyOverride, cfg config.Feishu, appID, fallback string) string {
+	if override.RootNode != nil && *override.RootNode != "" {
+		return *override.RootNode
 	}
-	return "override"
+	if override.RootNode != nil && *override.RootNode == "" {
+		// An empty override means "name the node after the company", ignoring the file.
+		if override.Name != nil && *override.Name != "" {
+			return *override.Name
+		}
+		return configuredRootName(cfg, appID, fallback)
+	}
+	if explicit := configuredExplicitRoot(cfg, appID); explicit != "" {
+		return explicit
+	}
+	if override.Name != nil && *override.Name != "" {
+		return *override.Name
+	}
+	return configuredRootName(cfg, appID, fallback)
+}
+
+// companyRowPayload renders the company a write just produced, in the shape the list uses.
+func (s *Server) companyRowPayload(ctx context.Context, target *feishuCompanyRow, override domain.FeishuCompanyOverride, nodeRenamed map[string]any, warnings []string) (int, map[string]any) {
+	company := map[string]any{
+		"app_id": target.AppID, "id": jsonNilInt64(target.ID),
+		"name": target.Name, "identity": target.Identity, "source": target.Source,
+	}
+	if override.Name != nil {
+		company["name"] = *override.Name
+		company["name_source"] = "override"
+	}
+	if override.Name == nil {
+		// A reset (or a name cleared field by field) falls back to whatever the configuration says.
+		rows, err := s.feishuCompanyRows(ctx)
+		if err == nil {
+			for i := range rows {
+				if rows[i].AppID == target.AppID {
+					company["name"] = rows[i].Name
+					company["name_source"] = rows[i].NameSource
+					break
+				}
+			}
+		}
+	}
+	company["root_node"] = pendingRootName(override, s.feishuConfig(), target.AppID, target.Name)
+	company["enabled"] = target.Enabled
+	if override.Enabled != nil {
+		company["enabled"] = *override.Enabled
+	}
+	company["note"] = target.Note
+	if override.Note != nil {
+		company["note"] = *override.Note
+	}
+	company["overridden"] = override.Fields()
+	company["overridden_by"] = override.UpdatedBy
+	company["secret_overridden"] = len(override.SecretEnc) > 0
+	return http.StatusOK, map[string]any{
+		"ok": true, "app_id": target.AppID, "id": jsonNilInt64(target.ID),
+		"company": company, "node_renamed": nodeRenamed, "warnings": warnings,
+	}
 }
 
 // renameCompanyNode follows a company rename on the company node itself: if the node still carries
