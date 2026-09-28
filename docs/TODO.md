@@ -1254,5 +1254,15 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       验收新增检查项：`companyPickerShown`、`companyPickerListsBoth`、`directoryNamesCompany`、
       `headerNamesCompany`、`syncBodyCarriesCompany`、`syncConfirmNamesCompany`、`createPathCarriesOpenId`
 
+## M93 在控制台管理公司的飞书应用（新增/编辑/停用/删除 + 测试连接）
+> 设计：`docs/design/m93-console-managed-feishu-companies.md`；需求原话：「用户可以在管理后台添加每个公司的应用吗？」；
+> 评审选择：**做成控制台可管理**。规格：`docs/feishu.md` §2b/§3/§5c.6、`docs/org.md` §3/§5、`docs/mcp.md` §4、`config.example.yaml`。
+> **代码、测试、文档都已完成**，完整清单见 `docs/todo_done.md` 同名小节；本节只留未完成项。
 
-
+- [ ] **待宿主执行（部署 + 线上验收）**：升级后在控制台「公司」页登记一家真实客户公司 →
+      「测试连接」通过 → 保存 → 同步 → 停用再启用 → 删除登记（确认节点与映射保留）；
+      **全程不重启网关**。复核：`GET /admin/api/v1/org/feishu/companies` 的 `secret_configured` 为 true，
+      且 `sqlite3 data/aigw.db "SELECT hex(secret_enc) FROM feishu_apps"` 里**看不到**明文
+- [ ] **待宿主执行（浏览器走查）**：本沙箱没有 firefox。宿主上 `make ui-check`（或
+      `scripts/ui-harness/run.sh --views companies companies-readonly`），验收：三行公司、来源徽标、
+      停用行、「测试连接」只发 id、新建对话框密钥字段不预填、viewer 无写入口

@@ -71,6 +71,10 @@ Key 的策略最后生效，所以 Key 永远能覆盖组织与账号层的设�
 | DELETE | `/admin/api/v1/org/nodes/{id}` | `admin_delete_org_node` | admin |
 | PUT | `/admin/api/v1/org/nodes/{id}/accounts` | `admin_set_org_node_accounts` | admin |
 | GET | `/admin/api/v1/org/feishu/companies` | `admin_list_feishu_companies` | viewer |
+| POST | `/admin/api/v1/org/feishu/companies` | `admin_create_feishu_company` | admin |
+| PATCH | `/admin/api/v1/org/feishu/companies/{id}` | `admin_update_feishu_company` | admin |
+| DELETE | `/admin/api/v1/org/feishu/companies/{id}` | `admin_delete_feishu_company` | admin |
+| POST | `/admin/api/v1/org/feishu/companies/probe` | `admin_probe_feishu_company` | admin |
 | GET | `/admin/api/v1/org/feishu/directory?company=` | `admin_list_feishu_directory` | admin |
 | POST | `/admin/api/v1/org/feishu/sync`（body 可带 `company`） | `admin_sync_feishu_org` | admin |
 | POST/PUT/DELETE | `/admin/api/v1/org/feishu/users/{open_id}/account?company=` | `admin_create_account_from_feishu_user` / `admin_bind_account_feishu_user` / `admin_unbind_account_feishu_user` | admin |
@@ -80,9 +84,15 @@ Key 的策略最后生效，所以 Key 永远能覆盖组织与账号层的设�
 
 字段语义、形状与示例见 `admin_describe`（MCP）或控制台组织架构页；两者是同一张路由表。
 
-**`company` 参数（M92）**：公司标识，接受 **app_id**（`cli_…`）或配置里的**公司名**；**省略 = 本部署的
-身份应用（本公司）**，也就是 M70 的原有行为。未知值 400，消息里列出已知的 app_id 与公司名。
-缺省它是向后兼容的：只服务一家公司的部署一行都不用改。
+**`company` 参数（M92）**：公司标识，接受 **app_id**（`cli_…`）或**公司名**（配置里的，或控制台「公司」页
+登记的）；**省略 = 本部署的身份应用（本公司）**，也就是 M70 的原有行为。未知值 400，消息里列出已知的
+app_id 与公司名；**已停用**的公司按 app_id/名字解析时 400。缺省它是向后兼容的：只服务一家公司的部署一行都不用改。
+
+**公司的增删改（M93）**：`POST/PATCH/DELETE /org/feishu/companies`。身份应用（本公司）**不能**在这里改
+（它属于部署配置 `feishu.app_id`）；配置里 `feishu.companies[]` 登记的公司是只读的（改配置或另建一家）。
+`app_id` 创建后**不可改**（它是已导入数据的归属键）；可改名称/根节点名/备注/启停/密钥。
+**删除只删登记**：节点、人员映射、成员关系都保留；**停用**只是把它从同步下拉与解析里去掉。
+`POST …/companies/probe` 用给定或已存的密钥做一次**有界**目录读，当场回答"密钥被拒 / 缺两个只读权限 / 可读"。
 
 **列表返回的形状**（扁平 + 层级字段，前端不再自己算层级）：
 
@@ -158,9 +168,10 @@ Key 的策略最后生效，所以 Key 永远能覆盖组织与账号层的设�
     子树不一致"，另有「全选 / 清空」），一键「同步」补建缺失部门节点并自动合并**范围内**已匹配的人员；
     勾选部门的**上级**会自动补建（树里标「为层级补建」，其人员不在范围内）；范围外的人员在右侧置灰；
     匹配不上的人逐行「创建用户 / 绑定账号」。
-    - **顶部有公司下拉**（配置了 ≥2 家公司时出现，读 `GET /org/feishu/companies`）：每家公司用自己的飞书
+    - **顶部有公司下拉**（≥2 家公司时出现，读 `GET /org/feishu/companies`）：每家公司用自己的飞书
       自建应用凭据读通讯录，**同步进自己的公司节点**。不选 = 本公司（身份应用），行为与只服务一家公司时相同。
-      切换公司会重新读取该公司的目录并重置勾选（默认全选）。
+      切换公司会重新读取该公司的目录并重置勾选（默认全选）。**停用**的公司不在下拉里。
+    - 下拉旁有「管理公司…」，跳到**公司页**（`#/companies`，M93）增删改公司与测试连接。
     - 确认框会写明"将新建公司节点「X」"与"将把 N 个顶层部门移入公司节点"——后者只在
       [旧数据首次认领](feishu.md) 或有人把顶层部门手动移到根层时出现。
     - 合并与范围规则、飞书后台需要的权限与排障见
@@ -168,6 +179,18 @@ Key 的策略最后生效，所以 Key 永远能覆盖组织与账号层的设�
   - 账号行的**「飞书」列**（M92）：账号级飞书身份（DSH 登录身份，只有本公司有）优先显示；没有账号级身份
     但有公司级映射时显示 `公司名 · 姓名`（多于一条显示第一条 + `+N`）。公司级映射来自同步或在该公司
     作用域下的「绑定账号」，它**不产生登录能力**。
+- **公司页**（`#/companies`，「访问控制」组；**M93**）：登记"要导入哪些公司的组织架构"。一张表列出
+  身份应用 / 配置里的公司 / 控制台登记的公司：**公司**（含来源徽标）、**App ID**、**状态**、
+  **公司节点**、**节点数**、**已映射账号**、**操作**。
+  - 操作：**编辑**（名称/根节点名/备注/启停/替换密钥）、**测试连接**、**删除**、**同步**
+    （打开同步弹窗并预选这家公司）。
+  - **新建公司**：名称、App ID、App Secret（`password`，永不回显）、可选根节点名、备注、启用；
+    对话框里可以先点**「测试连接」**——当场区分"密钥被拒 / 缺两个只读权限 / 可读"，避免保存了才发现。
+  - 密钥**加密落库**（`credentials_key`），列表只显示"已配置/未配置"；`credentials_key` 没配的部署
+    不能在这里保存公司，页面提示改用 `feishu.companies`。
+  - **身份应用**与**配置里的公司**在这一页是只读的（标「由配置提供」）；`app_id` 创建后不可改；
+    **删除只删登记**（节点与人员映射保留）；**停用**只是把它从同步下拉里去掉。
+  - 只读角色（`role=viewer`）能看列表，看不到任何写操作与密钥材料。
 - **账户页**：「所属组织」列与**按组织筛选**（可选是否包含子节点）；新建/编辑账户里的
   「所属组织」是**勾选树字段**（一行当前归属路径 + 「分配组织…」按钮），提交时整表替换
   `org_node_ids`（空数组 = 移出全部组织）。账号表单本身由 `pages/account_actions.js` 提供，
@@ -248,8 +271,12 @@ view.refresh(nodes); view.setSelected(id); view.expandAll(); view.collapseAll();
 | 点「收起」收不起来 | 已修：详情行默认 `display:none`，只有 `.open` 才成为一行（`app.css` 的 `.org-person-detail` 门控）。这条规则曾缺失，于是"收起"只是把 `open` 类摘掉、内容照旧可见 |
 | 合成行「未归属账户」里的账号点不进任何节点 | 它不是一个节点：展开这些账号后用「分配组织」（`PATCH /accounts/{id}` 的 `org_node_ids`）把它们挂到某个节点下 |
 | 账号行的飞书操作看不见 | 只读角色（`role=viewer`）看不到绑定/解绑/停用等写操作；飞书未配置的部署也不会出现这些元素 |
-| 同步弹窗里没有公司下拉 | 只配了一家（本公司）：单公司时下拉不渲染，接口的 `company` 省略即本公司。要有下拉就在 `feishu.companies` 里加一家并重启 |
-| `company` 报 400 | 传了配置里不存在的 app_id/公司名：消息里列出已知的公司；公司是从配置读的，改名/新增都要改配置 + 重启 |
+| 同步弹窗里没有公司下拉 | 只有一家公司（本公司）：单公司时下拉不渲染，接口的 `company` 省略即本公司。要加公司在**公司页**（`#/companies`）新建，或写进 `feishu.companies`（后者要重启） |
+| `company` 报 400 | 传了不存在的 app_id/公司名（消息里列出已知的公司），或该公司**已停用**。在「公司」页确认识别与启停状态 |
+| 「公司」页保存时报 `credentials_key` | 部署没配 `credentials_key`，无法加密落库：配上它，或继续用 `feishu.companies` 配置（配置进来的公司在页面上只读） |
+| 公司行显示"密钥无法解密" | `credentials_key` 轮换过（或库行被手改）：在「公司」页编辑这家公司、重新填一次 App Secret 即可；填之前同步这家公司会 400 |
+| 想改公司的 app_id | `app_id` 是已导入节点/映射的归属键，不可改：新建一家（新 app_id）→ 同步 → 清理旧公司（`…/links` + 删节点）→ 删掉旧登记 |
+| 删了公司登记，节点还在 | 预期行为：删除**只删登记**（节点、成员关系、人员映射都保留）。要清数据用 `DELETE /org/feishu/companies/{app_id}/links` 与 `DELETE /org/nodes/{id}?cascade=true` |
 | 公司的「研发部」没有并到我的节点上 | 同名合并只在**同一父节点下**成立。现在顶层部门的目标父是**该公司的公司节点**，所以「研发部」要挂在公司节点下才会合并；根层的同名节点会在预览里报 `root_name_conflict` |
 | 公司节点建不出来（同步按钮灰着） | 根层已有一个同名节点，且它属于另一家公司或某个飞书部门：预览会报 `root_name_conflict` 并禁用「同步」，接口也会 409。给这家公司配 `feishu.companies[].root_node` 换名，或先重命名那个节点 |
 | 某公司的顶层部门自己回到了公司节点下 | 这是 M92 的**文档化不变量**（公司同步保证顶层部门在公司根下）。不想让它回来，就把整个公司节点移走，或给这批部门用另一个 `app_id`（= 另一家公司） |

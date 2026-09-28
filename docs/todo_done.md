@@ -6629,3 +6629,40 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
 - [x] 文档：设计文档（含「实现与设计差异」12 条 + 性能落点）、`docs/org.md`、`docs/feishu.md` §2b/§5c.6、
       `docs/mcp.md` §4、`config.example.yaml`、`docs/PROCESS.md` 已产出表、`docs/TODO.md` M92 小节
 
+## M93 在控制台管理公司的飞书应用（新增/编辑/停用/删除 + 测试连接）
+> 设计：`docs/design/m93-console-managed-feishu-companies.md`；规格：`docs/feishu.md` §2b/§3/§5c.6、
+> `docs/org.md` §3/§5、`docs/mcp.md` §4、`config.example.yaml`。
+> 需求原话：「用户可以在管理后台添加每个公司的应用吗？」→ 评审选择：做成控制台可管理。
+
+- [x] 设计文档与规格文档先行，并已贴到对话确认（`docs/PROCESS.md` 硬要求）
+- [x] `internal/creds`：`EncryptScoped/DecryptScoped`（AAD = scope + 0x00 + row id）与 `CompanySealer`；
+      旧的 `Encrypt/Decrypt` 保持"无作用域"（provider 密文一行不迁移）——`creds/company_test.go` 钉住
+      **跨作用域/跨表不可解**
+- [x] 迁移 `0031_feishu_apps.sql` + `domain.FeishuApp` + `store/feishu_apps.go`（CRUD、`(app_id)`/`(name)`
+      唯一冲突 409、启停、只删登记、`CountFeishuAppData`）
+- [x] 端口 `FeishuCompanyAdmin` / `FeishuCompanySecrets` + `cmd/aigw` 装配（`credentials_key` 空时
+      `NewCompanySealer(nil)`，写路径 400 并指向配置方式）
+- [x] 公司合并与解析（`admin_org_feishu_companies.go`）：身份应用 → 配置 → 控制台，app_id 为合并键、
+      配置优先；被覆盖的库行标 `shadowed_by_config`（可删、不可编辑）、同名库行标 `duplicate_name`；
+      停用/密钥不可解在解析时 400 并说明原因
+- [x] 路由 4 条进 `admin_routes.go`（自动成为 MCP 工具）：`admin_create_feishu_company`、
+      `admin_update_feishu_company`、`admin_delete_feishu_company`、`admin_probe_feishu_company`；
+      扩展 `GET /org/feishu/companies`（`id/source/enabled/note/secret_configured/client_ready/`
+      `client_error/shadowed_by_config/warnings/secrets_ready`）；字段与示例按 `docs/mcp.md` §4.5 补齐
+- [x] 审计：`create/update/delete` on `feishu_company`，只记 `secret_changed`（测试直接查 audit 表断言
+      明文不在条目里）；密钥从不回显、不进日志
+- [x] 控制台「公司」页 `#/companies`（router + 侧边栏「访问控制」组）：列表（公司/来源徽标/App ID/状态/
+      公司节点/节点数/已映射账号）+ 新建/编辑对话框（`password` 密钥、编辑时留空=不改、`app_id` 只读）
+      + 「先测试连接」（`ui.modal` 新增 `extraActions`）+ 停用/删除确认（写明"只删登记、数据保留"）
+      + 只读角色无写入口；同步弹窗下拉旁加「管理公司…」，公司行「同步」深链接 `#/org?company=`
+- [x] 测试：`creds/company_test.go`、`store/feishu_apps_test.go`、
+      `httpapi/admin_org_feishu_company_admin_test.go`（注册→同步→停用→删除全流程、viewer/无密钥/
+      重名/重复 app_id/app_id 不可改/被覆盖行守卫、probe 四态、密钥不可解密、`…/links` 清理仍可用）、
+      `internal/webui/tests/companies_test.mjs`（并入 `make ui-base`）、harness 新页
+      `scripts/ui-harness/companies.page.html` + 视图 `companies`/`companies-readonly`
+- [x] 验收证据：`go test ./internal/... ./cmd/...` 全绿；涉及包 `go vet` 干净；`make ui-base` 全绿；
+      `BenchmarkPlan` 4948 B/45 allocs、`BenchmarkResolveTagRecords` 0 B/0 allocs 与 288 B/9 allocs
+      与 M92 逐项相同
+- [x] 文档：设计文档（含「实现与设计差异」10 条）、`docs/feishu.md` §2b/§3/§5c.6、`docs/org.md` §3/§5/§6、
+      `docs/mcp.md` §4、`config.example.yaml`、`scripts/ui-harness/README.md`、`docs/PROCESS.md` 已产出表、
+      `docs/TODO.md` M93 小节

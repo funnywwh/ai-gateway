@@ -129,7 +129,15 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
   - `admin_purge_feishu_company_links`（`DELETE /org/feishu/companies/{app_id}/links`）只删这家公司的
     人员映射，不动节点与成员关系；对身份应用会 400（那要用各人的解绑接口）；
   - 账号 JSON 的 `feishu.links` 列出该公司级映射（`{app_id,company,open_id,name,…}`），节点 JSON 带
-    `feishu_app_id`/`company`。**公司是配置实体**：新增一家公司要改配置 + 重启，接口不提供公司 CRUD。
+    `feishu_app_id`/`company`。
+  - **公司可以在后台登记**（M93）：`admin_create_feishu_company`（`body.name`/`app_id`/`app_secret`，
+    可选 `root_node`/`note`/`enabled`；`app_secret` **加密落库**、永不回显、不进日志与审计）、
+    `admin_update_feishu_company`（`body.app_secret` 省略 = 不动；`app_id` 不可改）、
+    `admin_delete_feishu_company`（**只删登记**，节点与人员映射保留）、
+    `admin_probe_feishu_company`（用 `body.id` 或 `body.app_id`+`app_secret` 做一次有界目录读，
+    200 + `{ok,stage,message,…}` 回答"密钥被拒 / 缺两个只读权限 / 可读"）。
+    身份应用（本公司）与 `feishu.companies[]` 登记的公司在这几条接口上是只读的（400 并指出配置项）；
+    部署没配 `credentials_key` 时不能在这里保存公司（400）。
 
 - **控制台管理员与飞书扫码登录是后台可管理的**（M66，`group=admins`）：`admin_list_admin_users` 列出每个
   管理员账号（角色 `admin`/`viewer`、状态 `pending`/`active`/`disabled`、飞书绑定、是否已发出邀请、
