@@ -19,7 +19,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORK="${UI_HARNESS_WORK:-$ROOT/.cache/ui-harness}"
 PORT="${UI_HARNESS_PORT:-8097}"
-VIEWS="docs detail capacity cost models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand tree csp org org-readonly org-person org-accounts org-bind org-sync org-sync-readonly org-sync-nonames admins admins-readonly login chatWeb chatWebOff nodes nodes-readonly companies companies-readonly"
+VIEWS="docs detail capacity cost models create plugin plugin-cached currency keys requests paging chat noSkills skills form bridge brand tree csp org org-readonly org-person org-accounts org-bind org-sync org-sync-readonly org-sync-nonames admins admins-readonly login chatWeb chatWebOff nodes nodes-readonly companies companies-readonly sidebar"
 FIXTURES="$ROOT/scripts/ui-harness/fixtures.json"
 REFRESH=0
 
@@ -118,6 +118,9 @@ render_page "$ROOT/scripts/ui-harness/preview_artifact.page.html" "$WORK/site/pr
 # 静态 HTML 加一个同源外部模块组成，后者是 script-src 'self' 唯一放行的形式。
 cp "$ROOT/scripts/ui-harness/csp.page.html" "$WORK/site/csp.html"
 cp "$ROOT/scripts/ui-harness/csp.js" "$WORK/site/csp.js"
+# `sidebar` 视图（M95）也不需要夹具：它一枪不放（不 import app.js、不 stub fetch），直接渲染真实的
+# renderNav，靠改 location.hash 来"导航"。所以照 csp 的做法原样复制，不走 render_page.py。
+cp "$ROOT/scripts/ui-harness/sidebar.page.html" "$WORK/site/sidebar.html"
 
 page_for_view() {
   case "$1" in
@@ -152,6 +155,9 @@ page_for_view() {
     # 不是"管理员"页：登录卡片本身（app.js 无会话时渲染成什么样），因为「飞书扫码登录」
     # 这个入口只在这里、也只在浏览器里看得见。
     login) echo "admins.html" ;;
+    # 主菜单的分组折叠（M95）：真实的 renderNav + 真实的 app.css，量的是"收起后条目真的不在了"
+    # （offsetHeight === 0）而不是 DOM 里的属性对不对；无夹具、无请求。
+    sidebar) echo "sidebar.html" ;;
     *) echo "harness.html" ;;
   esac
 }

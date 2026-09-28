@@ -1283,3 +1283,22 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       `scripts/ui-harness/run.sh --views companies companies-readonly`），验收 M94 新增检查项：
       `nameOverrideBadge`、`identityRowOffersRename`、`renameDialogEditable`、`renameDialogSecretLocked`、
       `renameDialogHint`、`renameDialogNoProbe`
+
+## M95 控制台主菜单改成可折叠（分组手风琴 + 记忆折叠状态）
+> 设计：`docs/design/m95-console-collapsible-nav.md`；需求原话：「管理后台的主菜单改成可折叠」。
+> 已确认的两个选择：**分组可折叠**（不是整栏折叠）、**折叠状态记在浏览器里**（`localStorage`）。
+> 规格：**无**（只动控制台自己的导航 chrome，没有 API/配置/字段/数据变化；理由见设计文档开头）。
+> **代码、测试、文档都已完成**，完整清单见 `docs/todo_done.md` 同名小节；本节只留未完成项。
+
+- [ ] **待宿主执行（浏览器走查）**：本沙箱没有 firefox（`/usr/bin/firefox` 是 snap 壳子，`run.sh` 会跳过）。
+      宿主上 `scripts/ui-harness/run.sh --views sidebar`（或整轮 `make ui-check`），验收 M95 新增检查项：
+      `groupCount`、`groupNames`、`groupIsButton`、`linkCount`、`allExpandedByDefault`、`ariaControlsResolves`、
+      `openChevronPointsDown`、`chevronDrawn`、`foldFlipsAria`、`foldHidesItems`、`foldShortensMenu`、
+      `foldKeepsOtherGroups`、`foldChevronPointsRight`、`foldPersisted`、`coldLoadHonoursStorage`、
+      `activeGroupAlwaysOpen`、`activeLinkHighlighted`、`foldActiveGroupHonoured`、`unfoldRestores`、
+      `unfoldClearsStorage`、`keyboardReachable`、`noInlineStyles`、`noPageErrors`
+- [ ] **待宿主执行（人工看一眼）**：控制台收起「访问控制」→ 刷新仍是收起的；点该组里的页面（含深链接
+      `#/keys`）→ 该组自动展开且当前项高亮；在活动分组里点标题能收起；Tab 到分组标题、Enter/Space 可切换；
+      菜单整体明显变短
+- [ ] **待宿主执行（部署）**：控制台资源**内嵌在二进制里**，本改动要重新构建并重启网关才在线上可见
+      （`make build` → 部署 → 打开 `/admin/ui/` 确认分组标题可点）

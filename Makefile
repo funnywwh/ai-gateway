@@ -233,6 +233,7 @@ ui-base:
 		node scripts/ui-base-test.mjs ; \
 		node scripts/ui-badge-test.mjs ; \
 		node internal/webui/tests/style_csp_test.mjs || exit $$? ; \
+		node --experimental-vm-modules internal/webui/tests/nav_fold_test.mjs || exit $$? ; \
 		node internal/webui/tests/requests_test.mjs || exit $$? ; \
 		node internal/webui/tests/backups_bytes_test.mjs || exit $$? ; \
 		node internal/webui/tests/tags_binding_test.mjs || exit $$? ; \

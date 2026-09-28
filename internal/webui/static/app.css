@@ -30,8 +30,30 @@ a { color: var(--accent); }
   text-decoration:none; margin-bottom:2px; font-size:13.5px; }
 .sidebar nav a:hover { background: var(--panel-2); }
 .sidebar nav a.active { background: var(--accent); color:#fff; }
-.sidebar nav .group { padding:12px 10px 4px; font-size:11px; text-transform:uppercase;
-  letter-spacing:.08em; color:var(--muted); }
+/* The group title is the fold control (M95): a button that keeps the label's look, with the
+   arrow on the right. Button defaults are reset one by one here rather than by an inline style:
+   the console's CSP is `style-src 'self'`, and a style ATTRIBUTE is dropped whole by it (see
+   internal/webui/tests/style_csp_test.mjs for that incident). */
+.sidebar nav .group { display:flex; align-items:center; justify-content:space-between; gap:8px;
+  width:100%; padding:12px 10px 4px; border:0; background:none; cursor:pointer; text-align:left;
+  font:inherit; font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
+.sidebar nav .group:hover { color:var(--fg); }
+.sidebar nav .group:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+/* The fold arrow is drawn, never typed: ▸/▾ (U+25B8/U+25BE) are missing from plenty of operator
+   font stacks, where they render as an empty box (the tree control was reported exactly so).
+   A border triangle is CSS, needs no font and no network, and its state comes from the one
+   source of truth the DOM already carries — aria-expanded. */
+.sidebar nav .nav-chevron { flex:0 0 auto; width:0; height:0;
+  border-left:4px solid currentColor; border-top:3.5px solid transparent; border-bottom:3.5px solid transparent; }
+/* `[aria-expanded=true]` is written without quotes on purpose: esbuild drops the quotes around an
+   attribute value that is a valid identifier, and internal/webui/minify's selector guard compares
+   the source with the mirror selector-for-selector. Writing it here the way the mirror spells it
+   keeps that guard green without loosening it; both forms match the same elements. */
+.sidebar nav .group[aria-expanded=true] .nav-chevron { transform: rotate(90deg); }
+/* Folded items are hidden with the `hidden` attribute. Stated again here on purpose: the UA's
+   `[hidden]{display:none}` can be overridden by any author rule, and `.sidebar nav a{display:block}`
+   above is one — the attribute would sit on the element while every link stayed on screen. */
+.sidebar nav .nav-group[hidden] { display:none; }
 .sidebar-foot { flex:0 0 auto; border-top:1px solid var(--line); padding:10px; display:flex;
   justify-content:space-between; align-items:center; font-size:12.5px; color:var(--muted); }
 .main { display:flex; flex-direction:column; min-width:0; min-height:0; overflow:auto; }

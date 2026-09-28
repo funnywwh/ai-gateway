@@ -59,16 +59,104 @@ export async function loadPage(route) {
 
 export function navigate(path) { window.location.hash = '#' + path; }
 
+// Groups are foldable, and what is folded is remembered per browser: the menu is 24 links in a
+// 100vh scrolling column, so the groups an operator is not using cost him scroll distance on
+// every visit. The key follows the display currency's (`aigw.display_currency`, money.js): a view
+// preference lives in this browser, and the server is never told about it.
+const FOLD_KEY = 'aigw.nav_folded';
+let folded = null;
+
+// foldedGroups is the set of folded group names, read from localStorage once and kept in a
+// module-level Set afterwards. It cannot live in the DOM: renderNav rebuilds the whole nav on
+// every navigation, exactly when the state has to survive. Any failure — a private-mode
+// localStorage, a hand-edited value, storage disabled by policy — degrades to "nothing folded",
+// never to a console that will not draw its own menu.
+function foldedGroups() {
+  if (folded) return folded;
+  folded = new Set();
+  try {
+    const raw = window.localStorage.getItem(FOLD_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    if (Array.isArray(list)) list.forEach((name) => { if (typeof name === 'string') folded.add(name); });
+  } catch (err) { /* unreadable storage: this page keeps its own state in memory */ }
+  return folded;
+}
+
+function persistFolded(set) {
+  try { window.localStorage.setItem(FOLD_KEY, JSON.stringify([...set])); } catch (err) {
+    // Private mode: folding still works for this page, it just will not survive a reload.
+  }
+}
+
+// groupHeader builds the clickable group title. It is a <button> (reachable by Tab, toggled by
+// Enter/Space natively) carrying aria-expanded and aria-controls, so a folded group is
+// distinguishable from one that happens to have no items.
+//
+// The arrow is drawn by app.css (a border triangle) rather than typed: ▸/▾ (U+25B8/U+25BE) render
+// as an empty box on a font stack that lacks them — the accident that once put "方块" in front of
+// every parent row in the tree (arrowIcon in tree.js) and reduced the dialog's ✕ to nothing
+// (closeIcon in ui.js). An icon the console depends on is never a glyph.
+function groupHeader(name, open, index) {
+  const head = el2('button', {
+    class: 'group',
+    type: 'button',
+    'aria-expanded': open ? 'true' : 'false',
+    'aria-controls': 'nav-group-' + index,
+  });
+  head.append(el2('span', { text: name }), el2('span', { class: 'nav-chevron', 'aria-hidden': 'true' }));
+  return head;
+}
+
+// toggleGroup flips one group in place, updating the nodes it was handed instead of asking
+// renderNav to rebuild the nav: the button keeps focus and the menu keeps its scroll position.
+function toggleGroup(head, box, group) {
+  const open = head.getAttribute('aria-expanded') !== 'true';
+  head.setAttribute('aria-expanded', open ? 'true' : 'false');
+  box.hidden = !open;
+  const set = foldedGroups();
+  if (open) set.delete(group); else set.add(group);
+  persistFolded(set);
+}
+
+// appendGroup adds one group's header plus its (possibly folded) item container, wiring the
+// toggle, and returns the container the caller appends that group's links to.
+//
+// Everything the click handler needs is this call's own parameter or constant. That is the point:
+// a binding shared by every iteration of the render loop would leave each group's toggle folding
+// and remembering the LAST group — a bug no source reading notices, because the handler looks
+// right next to the node it was built from.
+function appendGroup(container, name, open, index) {
+  const head = groupHeader(name, open, index);
+  // The links go inside their own container rather than straight into <nav>: `hidden` is what
+  // folds them, and the UA rule `[hidden]{display:none}` loses to the author's
+  // `.sidebar nav a{display:block}` — the attribute would sit on the element while every link
+  // stayed on screen. A wrapper no author rule gives a display to cannot be overridden that way,
+  // and app.css states the rule again explicitly.
+  const items = el2('div', { class: 'nav-group', id: 'nav-group-' + index });
+  items.hidden = !open;
+  head.addEventListener('click', () => toggleGroup(head, items, name));
+  container.append(head, items);
+  return items;
+}
+
 export function renderNav(container) {
   container.replaceChildren();
-  let group = null;
   const active = currentRoute().path;
+  const activeGroup = (routes.find((route) => route.path === active) || routes[0]).group;
+  const foldedAway = foldedGroups();
+  let group = null;
+  let box = null;
+  let index = -1;
   for (const route of routes) {
     if (route.group !== group) {
       group = route.group;
-      container.append(el2('div', { class: 'group', text: group }));
+      index += 1;
+      // The group the operator is standing in is never drawn folded: a deep link, a reload or a
+      // page's own navigate() button must not hide the current location from the menu. This is
+      // also why rendering never writes the fold back — only toggleGroup does.
+      box = appendGroup(container, group, group === activeGroup || !foldedAway.has(group), index);
     }
-    container.append(el2('a', {
+    box.append(el2('a', {
       href: '#' + route.path,
       class: route.path === active ? 'active' : '',
       text: route.title + (route.milestone ? ' · ' + route.milestone : ''),

@@ -6734,3 +6734,40 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
   与 2026-09-23 记录的同类消息一致，不是本次启动的失败）
 - 待操作员（浏览器，需要管理员会话，本沙箱无凭据）：在「公司」页给「本公司」改名 → 按提示先同步一次 →
   再改名成真名（智天成）→ 公司节点随之改名 → 再同步一次应为 0 写入
+
+## M95 控制台主菜单改成可折叠（分组手风琴 + 记忆折叠状态）
+> 设计：`docs/design/m95-console-collapsible-nav.md`；规格：**无**（只动控制台自己的导航 chrome，
+> 没有 API/配置/字段/数据变化）。需求原话：「管理后台的主菜单改成可折叠」。
+> 已与用户确认：**分组可折叠**（不是整栏折叠）+ **折叠状态记在浏览器里**。
+
+- [x] 设计文档先行并已贴到对话确认（`docs/PROCESS.md` 硬要求；上面两个选择也是在那一步确认的）
+- [x] `js/router.js`：分组标题从 `<div class="group">` 变成
+      `<button.group type=button aria-expanded aria-controls>`；条目移进 `div.nav-group#nav-group-<i>`，
+      收起走 `hidden` 属性（`hidden` 直接打在 `<a>` 上会被 `.sidebar nav a{display:block}` 盖掉 ——
+      与组织树丢缩进同类的坑）
+- [x] 抽出 `appendGroup(container, name, open, index)`：标题/容器/处理器都建在这一次调用自己的作用域里
+- [x] 状态存在 `aigw.nav_folded`（分组名的 JSON 数组，与 `aigw.display_currency` 同一种本地视图偏好）；
+      读写在 `try/catch` 里：值不是数组 / JSON 坏掉 / 存储抛错，一律降级成"全展开 + 本次会话内有效"
+- [x] 活动分组恒展开（`group === activeGroup || !foldedAway.has(group)`）：深链接、刷新、页面内
+      `navigate()` 都不把"我在哪"藏起来；渲染只读存储，只有点击才写
+- [x] `app.css`：组标题按钮复位（flex/width/border/background/font）、CSS 画的三角箭头
+      （由 `[aria-expanded=true]` 驱动旋转，不打字形）、显式 `.sidebar nav .nav-group[hidden]{display:none}`；
+      新选择器全部限定在 `.sidebar nav` 之下
+- [x] 测试 `internal/webui/tests/nav_fold_test.mjs`：①–⑦ 源码不变式（存储键与 try、button+ARIA、
+      `hidden`、活动分组、CSS 三条规则与作用域、`app.js` 壳层接线、harness 注册）+ ⑧ 用
+      `vm.SourceTextModule` 加载**真的 `router.js`**（替身 DOM + 内存 localStorage）跑行为：点击收起、
+      写存储、冷启动读回、导航进被收起的那组、显式收起活动分组、再点开、三种坏存储的降级。
+      挂进 `Makefile` 的 `ui-base`
+- [x] 走查：`scripts/ui-harness/sidebar.page.html`（免快照、不发请求、直接渲染真实 `renderNav`）
+      + 视图 `sidebar`（`run.sh` 的 VIEWS / `page_for_view` / 复制页面，harness README 新增一节）
+- [x] **测试抓到的 2 个真 bug**：渲染循环里 `box` / `group` 每轮被重新赋值、又被 click 处理器闭包引用，
+      表现为"点任何一组都去折叠并记住最后一组（运维）"；两处都用 `appendGroup` 的独立作用域修掉
+- [x] 实现阶段发现并处理：esbuild 会去掉属性选择器值的引号，而 `internal/webui/minify` 的选择器守卫
+      逐条比对源码与镜像 —— 源码按镜像的写法写 `[aria-expanded=true]`（**不动守卫**），并注明原因
+- [x] 验收证据（本沙箱）：`node --experimental-vm-modules internal/webui/tests/nav_fold_test.mjs` 通过；
+      `make ui-base` 全绿；`go test ./internal/webui/...` 全绿；`make ui-dist` 后 minify 包测试全绿
+- [x] 文档：设计文档（含「实现与设计差异」4 条）、`scripts/ui-harness/README.md`、`docs/PROCESS.md`
+      已产出表、`docs/TODO.md` M95 小节
+
+（浏览器走查与部署未做：本沙箱没有可用的 firefox，且控制台资源要重新构建并重启才生效 —— 见
+`docs/TODO.md` M95 小节的待宿主项。）

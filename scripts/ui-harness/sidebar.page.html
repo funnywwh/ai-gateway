@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>sidebar console harness</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<!--
+  主菜单的分组折叠（M95）：走查页直接渲染**真实的** renderNav，不自己写一份导航。
+
+  骨架三行照抄 app.js 的 renderShell()（.app 的 220px 栅格 + .sidebar 的 100vh 列 + nav 的滚动区），
+  因为"收起后条目还在不在屏幕上"正是这一层布局决定的；壳层与这里的一致性由
+  internal/webui/tests/nav_fold_test.mjs 的静态断言钉着。
+
+  这一页不需要夹具：它不发任何请求，`renderNav` 自己读 location.hash（所以"导航"= 改 hash 后再渲染
+  一次，不用等 hashchange 任务，也不会把不存在的接口记成 unmatched）。
+  "刷新"用 `import('/js/router.js?reload=N')` 换一个**全新模块实例**——模块级的折叠缓存只在同一个
+  实例里有效，不换实例的话"记住折叠"会验成假绿。
+
+  几何是这里唯一能被判定的东西：控制台的 CSP 是 style-src 'self'，样式一旦被丢掉，DOM 里的
+  aria 与 hidden 全都还在，而 offsetHeight 会恒为 0 —— 断言读的是 offsetHeight。
+-->
+<div class="app">
+  <aside class="sidebar"><nav id="nav"></nav></aside>
+  <main class="main"></main>
+</div>
+<script>
+const errors = [];
+window.onerror = (msg) => errors.push('onerror: ' + msg);
+window.onunhandledrejection = (ev) => errors.push('rejection: ' + ev.reason);
+
+function report(data) {
+  data.errors = errors;
+  data.toasts = [...document.querySelectorAll('.toast')].map((n) => n.textContent);
+  const url = '/report?data=' + encodeURIComponent(JSON.stringify(data));
+  try { if (navigator.sendBeacon && navigator.sendBeacon(url)) return; } catch (err) { /* fall through */ }
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url, false);
+    xhr.send();
+  } catch (err) { /* reporting must never break the harness */ }
+}
+</script>
+<script type="module">
+import { renderNav } from '/js/router.js';
+
+// 先取视图名：下面会把 hash 改成路由（#/accounts）来模拟导航。
+const view = location.hash.replace('#', '') || 'sidebar';
+const checks = {};
+const settle = async () => { for (let i = 0; i < 400; i++) await Promise.resolve(); };
+
+const nav = () => document.querySelector('.sidebar nav');
+// nextNav 换一个空的 <nav> 进侧栏：配合 ?reload=N 的模块实例，等价于"新开一次控制台页面"。
+function nextNav() {
+  const node = document.createElement('nav');
+  document.querySelector('aside.sidebar').replaceChildren(node);
+  return node;
+}
+const headers = () => [...nav().querySelectorAll('button.group')];
+const headerOf = (name) => headers().find((head) => head.textContent.trim() === name);
+const boxOf = (name) => {
+  const head = headerOf(name);
+  return head ? document.getElementById(head.getAttribute('aria-controls')) : null;
+};
+const linksOf = (name) => (boxOf(name) ? [...boxOf(name).querySelectorAll('a')] : []);
+// 菜单的"内容高度"不能读 nav.scrollHeight：走查窗口是 1500x2400，菜单没有溢出时 scrollHeight
+// 就等于 nav 自己的高度（2400），收起一组它一个像素都不会变 —— 那条断言会恒假。改成量**最后一组
+// 容器的下边缘**：它与视口多高无关，只随条目进出而变。
+const contentHeight = () => {
+  const navNode = nav();
+  const last = navNode.lastElementChild;
+  return last ? last.getBoundingClientRect().bottom - navNode.getBoundingClientRect().top : 0;
+};
+const allVisible = (name) => linksOf(name).length > 0 && linksOf(name).every((a) => a.offsetHeight > 0);
+const allHidden = (name) => linksOf(name).length > 0 && linksOf(name).every((a) => a.offsetHeight === 0);
+const expanded = (name) => !!headerOf(name) && headerOf(name).getAttribute('aria-expanded') === 'true';
+const chevronTurns = (name) => {
+  const icon = headerOf(name) && headerOf(name).querySelector('.nav-chevron');
+  return icon ? getComputedStyle(icon).transform : 'missing';
+};
+
+try {
+  if (view === 'sidebar') {
+    renderNav(nav());
+    await settle();
+    const GROUPS = '总览,访问控制,路由配置,计费,可观测,运维';
+    const openHeight = contentHeight();
+
+    // ---- 结构：6 组 24 条，默认全展开（与改造前的观感一致）----
+    checks.groupCount = headers().length === 6;
+    checks.groupNames = headers().map((head) => head.textContent.trim()).join(',') === GROUPS;
+    checks.groupIsButton = headers().every((head) => head.tagName === 'BUTTON' && head.type === 'button');
+    checks.linkCount = nav().querySelectorAll('a').length === 24;
+    checks.allExpandedByDefault = headers().every((head) => expanded(head.textContent.trim()) && allVisible(head.textContent.trim()));
+    checks.ariaControlsResolves = headers().every((head) => {
+      const box = document.getElementById(head.getAttribute('aria-controls'));
+      return !!box && box !== head && head.nextElementSibling === box && box.querySelectorAll('a').length > 0;
+    });
+    checks.openChevronPointsDown = chevronTurns('总览') !== 'none' && chevronTurns('总览') !== 'missing';
+    checks.chevronDrawn = (() => {
+      const icon = headerOf('总览').querySelector('.nav-chevron');
+      const style = getComputedStyle(icon);
+      // CSS 画的三角：4px 左边界 + 上下透明边界，且元素里没有任何字形（打过 ▸/▾ 的话这里会有文本）。
+      return style.borderLeftWidth === '4px' && parseFloat(style.borderTopWidth) > 0
+        && style.borderLeftStyle === 'solid' && icon.textContent.trim() === '';
+    })();
+
+    // ---- 收起一个非当前分组：真的少了几百像素，不是"看着没变" ----
+    headerOf('访问控制').click();
+    await settle();
+    checks.foldFlipsAria = headerOf('访问控制').getAttribute('aria-expanded') === 'false';
+    checks.foldHidesItems = boxOf('访问控制').hidden === true && allHidden('访问控制')
+      && linksOf('访问控制').every((a) => a.offsetParent === null);
+    checks.foldShortensMenu = contentHeight() < openHeight - 100;
+    checks.foldKeepsOtherGroups = allVisible('总览') && allVisible('计费') && allVisible('运维')
+      && headers().filter((head) => head !== headerOf('访问控制'))
+        .every((head) => head.getAttribute('aria-expanded') === 'true');
+    checks.foldChevronPointsRight = chevronTurns('访问控制') === 'none';
+    checks.foldPersisted = (JSON.parse(localStorage.getItem('aigw.nav_folded') || 'null') || []).includes('访问控制');
+
+    // ---- 冷启动（等价于刷新）：换模块实例，状态只能来自 localStorage ----
+    // 后面几个阶段就用这个实例（它和一次真实页面加载的状态完全一致：内存里那份来自存储）。
+    const cold = await import('/js/router.js?reload=1');
+    cold.renderNav(nextNav());
+    await settle();
+    checks.coldLoadHonoursStorage = !expanded('访问控制') && allHidden('访问控制')
+      && expanded('总览') && allVisible('总览');
+
+    // ---- 导航进被收起的那一组：当前分组永远展开，且当前项高亮 ----
+    location.hash = '#/accounts';
+    cold.renderNav(nextNav());
+    await settle();
+    checks.activeGroupAlwaysOpen = expanded('访问控制') && allVisible('访问控制');
+    checks.activeLinkHighlighted = linksOf('访问控制')
+      .some((a) => a.getAttribute('href') === '#/accounts' && a.className.includes('active'));
+
+    // ---- 在活动分组里显式收起：允许（点击是操作者的意思），再点回来 ----
+    headerOf('访问控制').click();
+    await settle();
+    checks.foldActiveGroupHonoured = headerOf('访问控制').getAttribute('aria-expanded') === 'false'
+      && allHidden('访问控制');
+    headerOf('访问控制').click();
+    await settle();
+    checks.unfoldRestores = expanded('访问控制') && allVisible('访问控制');
+    checks.unfoldClearsStorage = !(JSON.parse(localStorage.getItem('aigw.nav_folded') || '[]')).includes('访问控制');
+
+    // ---- 键盘：标题是原生 button，能聚焦（Enter/Space 由元素本身提供）----
+    headerOf('运维').focus();
+    checks.keyboardReachable = document.activeElement === headerOf('运维')
+      && headerOf('运维').tabIndex === 0 && headerOf('运维').tagName === 'BUTTON';
+
+    // ---- 样式卫生：全程没有行内样式（严格 CSP 下 style 属性会被整条丢弃）----
+    checks.noInlineStyles = [...nav().querySelectorAll('*')].every((node) => !node.hasAttribute('style'));
+
+    checks.noPageErrors = errors.length === 0;
+    checks.sample = {
+      groups: headers().map((head) => head.textContent.trim() + ':' + head.getAttribute('aria-expanded')),
+      links: nav().querySelectorAll('a').length,
+      menuHeight: Math.round(openHeight) + ' -> ' + Math.round(contentHeight()),
+      folded: localStorage.getItem('aigw.nav_folded'),
+      hash: location.hash,
+    };
+  }
+
+  const bad = Object.keys(checks).filter((key) => checks[key] === false);
+  report({
+    view, stage: 'done', strictChecks: true,
+    ok: bad.length === 0 && errors.length === 0,
+    failed: bad, checks, errors,
+  });
+} catch (err) {
+  report({
+    view, stage: 'threw', strictChecks: true, ok: false, checks, errors,
+    thrown: String(err && err.stack ? err.stack : err),
+  });
+}
+</script>
+</body>
+</html>

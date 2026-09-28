@@ -47,7 +47,7 @@ UI_STATIC_DIR=$PWD/.cache/ui-dist/static UI_HARNESS_GZIP=1 scripts/ui-harness/ru
 
 **M50 起这是"压缩没有改变行为"的主要证据**：Go 侧的静态合约测试（`internal/webui/embed_test.go`、
 `internal/webui/tests/*.mjs`）读的是源码，看不到"只有压缩后才发生"的回归；对镜像跑一遍同样的
-全部视图（当前 33 个）、比对逐视图检查项，才是端到端的保证。harness 页按绝对路径 import（`/js/pages/chat.js`），
+全部视图（当前 38 个）、比对逐视图检查项，才是端到端的保证。harness 页按绝对路径 import（`/js/pages/chat.js`），
 而压缩保持同名文件与同名导出，所以两者走的是同一条路径。
 
 没有 firefox 或 python3 时脚本**跳过并以 0 退出**（与 `test-race` 的处理方式一致），
@@ -182,6 +182,22 @@ GW_BASE=http://127.0.0.1:8099 GW_COOKIE=... scripts/ui-harness/capture.py       
     地址（授权页与它的 cookie 是浏览器的事），谁把它改成 fetch，这条就是唯一会红的地方。
   - stub 对**没有夹具的请求返回 500，并把方法+路径记进 `unmatched`**（`noUnmatchedRequests` 因此失败）：
     静默回 `{}` 会把"页面调用了一个没人注册的接口"伪装成"服务端没什么可说的"。
+
+
+- **M95 起**：`sidebar.page.html`，视图 `sidebar`（1 个，**不需要快照**）：
+  控制台主菜单的分组折叠。这一页自己搭与 `renderShell()` 同形的骨架
+  （`.app > aside.sidebar > nav`）后调用**真实的 `renderNav`**——不 import `app.js`、不发任何请求，
+  因为折叠完全发生在 `renderNav` 内部，而 `renderNav` 自己读 `location.hash`，所以"导航"就是改 hash
+  后再渲染一次（不用等 `hashchange` 任务，`unmatched` 也不会被无关请求污染）。
+  - 量的是**几何**而不是属性：收起后该组 8 条链接的 `offsetHeight === 0` 且 `offsetParent === null`、
+    `nav.scrollHeight` 少掉一截、其余分组照旧；组标题是 `<button type=button>`（原生可聚焦、Enter/Space 切换）；
+    `aria-controls` 指向的元素确实是它的下一个兄弟；箭头（CSS 画的三角）在展开时被 `[aria-expanded=true]`
+    转成朝下、收起时回到朝右——**属性选择器真的匹配上了**只有浏览器能证明。
+  - "刷新后仍收起"用 `import('/js/router.js?reload=N')` 换**全新模块实例**：折叠状态是模块级的，
+    同一个实例重渲染会让这条断言变成假绿。
+  - 另外断言全程**没有行内样式**（严格 CSP 下 `style` 属性会被整条丢弃，而 DOM 里的 aria/hidden 全都还在：
+    这正是组织树丢缩进那次事故的形状）。
+  - `strictChecks: true`。
 
 ## 前三个坑（改这个 harness 前先读）
 
