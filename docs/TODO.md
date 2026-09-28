@@ -1190,3 +1190,37 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 - [ ] 历史重写：`git bundle` 备份 → `filter-branch --tree-filter` 跑同一份规则 → `--check-history` = 0 → 强推 main 与 tags → 新克隆复核（**需操作者确认窗口，会换掉全部 sha，其它克隆必须重新 clone**）
 - [ ] 归档：设计文档「实现与设计差异」回填、`docs/todo_done.md` 发布记录
 - [ ] 已知后果（记录，不修）：文档里的历史 revision 短 sha 重写后不可解析；例外文件（`.dsh/skills/**`）刻意保留真实主机名与域名
+
+## M90 租户插件自己挂浏览器 RPC 通道（修 dsh 0.1.7 下的 `transport failure … HTTP 405`）
+> 需求原话：「修复 dsh transport failure for /ssh-workspace/hosts: HTTP 405」「transport failure for
+> /dshgw-git-diff/hello: HTTP 405」。设计：`docs/design/m90-tenant-plugin-rpc-channel.md`。
+> 根因：`dsh-client-connection@0.1.7-alpha.2` 的 `HostConnectionService.register()` 读的是**服务自己**
+> context 的 `webServer`（该插件 `inject = ['credentials']`），任何调用方调 `ctx.connection.rpc.handle`
+> 都抛 `cannot get property "webServer" without inject` ⇒ 四个插件的通道一个也没挂上，浏览器 POST
+> 掉进 SPA 兜底座位的 405。零 Go 改动（行渲染与 `tenant_plugins` 开关不变）。
+
+- [x] 新增 `cmd/dshgw/plugin/lib/rpc-channel.js`：用 dsh 自己挂 `/api` 的原语
+      （`webServer.register({kind:'prefix',path,handler})` + `connection.admit`）挂插件通道，
+      信封与状态码逐条对齐 `rpcFetchHandler`（404/415/400/bad-request/500/413、abort 传 signal）；
+      四个宿主半（ssh-workspace / git-diff / web-tty / workspace-files）改用它，浏览器半一行不改
+- [x] 测试：`lib/rpc-channel.test.mjs` 11 项（真实 socket）并入 `make dshgw-test`；
+      `ssh-workspace`（248 断言）、`web-tty`（14 项）改为从真路由发请求；`workspace-files` 19 项、
+      `git-diff` 48 项照旧全绿
+- [x] 文档：设计文档、插件 README（git-diff / web-tty / workspace-files）、`docs/dshgw.md` §7f、
+      `deploy/dshgw/README.md`、两份 `config.example.yaml`（部署形状多一个 `lib/`，旧的三目录同步法会漏）
+- [x] 部署前置检查：`dshgw doctor` 与 `dshgw node doctor` 新增 `tenant-plugins-lib`
+      （`tenancy.SharedPluginModulePath` / `SharedPluginModuleRequired` + Go 测试），漏同步 `lib/` 时
+      在体检就 FAIL，而不是等四个面板的行一起加载失败
+- [x] 宿主同步（2026-09-28，本会话经 `ssh gw-c` 执行；宿主部署根
+      `/home/operator/work/ai_gateway`）：整个 `cmd/dshgw/plugin/`（含新增的 `lib/`，不含运行期
+      `git-diff/trace.jsonl`）同步过去，`diff -rq` 逐个文件确认与工作区一致；备份在宿主
+      `/tmp/plugin-before-20260928-093550`（回滚：`cp -a` 回去或 `git checkout -- cmd/dshgw/plugin`
+      ＋ `rm -rf cmd/dshgw/plugin/lib`）。同步后宿主侧跑通：`lib` 11/11、`ssh-workspace` 248 断言、
+      `web-tty` 14/14、`workspace-files` 19/19、`git-diff` 48/48
+- [ ] **待宿主执行（重启 + 线上验收）**：宿主上执行（**会中断该租户正在进行的回合，含本会话**）：
+      `printf '%s\n' '{"id":1,"op":"tenant-restart","name":"dsh-tenant"}' | nc -U /home/operator/work/ai_gateway/data/dshgw-verify/state/admin.sock`
+      验收：① 刷新页面后「终端 / 文件 / 变更 / 我的主机」四块面板都能出数据；② 对 web 口打
+      `/ssh-workspace/hosts` 与 `/dshgw-git-diff/hello` 回 **401**（要鉴权）而不是 405；③
+      `plugin-state/{git-diff.trace.jsonl,workspace-files.trace.jsonl,web-tty.trace.jsonl}` 出现新的
+      `rpc` 事件；④ 升级 dsh 版本后按设计文档 §3 的探针重跑一次。其余租户（dsh-alex、dsh-liuyang 等）
+      用的是同一份插件目录，下一次 worker 启动/重启即生效

@@ -43,6 +43,7 @@ const REVISION = new URL(import.meta.url).search
 
 const { GitService, clampInt, fail } = await import(`./git-service.js${REVISION}`)
 const { createHandlers, messageOf } = await import(`./rpc-handlers.js${REVISION}`)
+const { registerRpcChannel } = await import(`../lib/rpc-channel.js${REVISION}`)
 
 /** Stable cordis plugin name; also the client package name and the RPC channel root. */
 export const name = 'dshgw-git-diff'
@@ -172,13 +173,17 @@ export async function apply(ctx, rawConfig) {
 
   const { dispatch } = createHandlers({ service, config, trace, log, fail, messageOf })
 
-  ctx.effect(() => ctx.connection.rpc.handle(RPC_CHANNEL, async (endpoint, payload) => {
-    try {
-      return ok(await dispatch(endpoint, payload))
-    } catch (error) {
-      return failed(error)
-    }
-  }), 'git-diff: browser git RPC channel')
+  registerRpcChannel(ctx, {
+    channel: RPC_CHANNEL,
+    label: 'git-diff',
+    handler: async (endpoint, payload) => {
+      try {
+        return ok(await dispatch(endpoint, payload))
+      } catch (error) {
+        return failed(error)
+      }
+    },
+  })
 
   // A row reload or a plugin reload must not leave a git process scanning a 26 GiB checkout.
   ctx.effect(() => () => {

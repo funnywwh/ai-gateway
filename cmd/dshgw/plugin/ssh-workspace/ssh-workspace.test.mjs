@@ -8,6 +8,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
+import { callRpcRoute } from '../lib/rpc-channel.js'
+
 const pluginPath = process.env.DSHGW_SSH_PLUGIN || join(process.cwd(), 'cmd/dshgw/plugin/ssh-workspace/index.js')
 const plugin = await import(pathToFileURL(pluginPath).href + `?test=${Date.now()}`)
 
@@ -165,17 +167,25 @@ await writeFile(join(bin, 'ssh'), fakeSSH, { mode: 0o755 })
 await chmod(join(bin, 'ssh'), 0o755)
 process.env.PATH = `${bin}:${process.env.PATH}`
 
-const handlers = new Map()
+// The cordis context dsh hands a row, faked at the two services the channel mount names:
+// `inject(['connection','webServer'])` hands back a child context (as cordis does), and registering
+// the route there records it. Calls then travel through the real route — admission, envelope,
+// endpoint — so what is exercised is the transport a browser hits, not a stand-in for it.
+const routes = new Map()
 const applyCtx = {
-  connection: { rpc: { handle: (channel, handler) => { handlers.set(channel, handler); return () => {} } } },
-  effect: (fn) => fn(),
   logger: { info: () => {}, warn: () => {} },
+  effect: (fn) => fn(),
+  inject: (deps, callback) => callback({
+    connection: { admit: () => ({ peer: {} }) },
+    webServer: { register: (route) => { routes.set(route.path, route); return () => routes.delete(route.path) } },
+    effect: (fn) => fn(),
+  }),
 }
 
 try {
   plugin.apply(applyCtx, { mountSubdir: 'ssh', hosts: ['gw-a'], maxEntries: 2, connectTimeoutMs: 5000 })
-  check(handlers.has('/ssh-workspace'), 'the plugin registers its RPC channel')
-  const call = (endpoint, payload) => handlers.get('/ssh-workspace')(endpoint, payload, new AbortController().signal)
+  check(routes.has('/ssh-workspace'), 'the plugin registers its RPC channel')
+  const call = (endpoint, payload) => callRpcRoute(routes.get('/ssh-workspace'), endpoint, payload)
 
   const hosts = await call('hosts', {})
   equal(hosts.ok, true, 'hosts succeeds')

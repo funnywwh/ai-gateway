@@ -383,8 +383,9 @@ dshgw:
   # 和每账号状态路径都由网关决定；生成子进程配置时这三项**总是**被写下去，所以这里写 false
   # 不会被子的默认值翻回来。
   # 前置：把三个插件目录部署到子进程 plugin_path 同级的 web-tty/、workspace-files/、git-diff/
-  # （仓库里的 ./cmd/dshgw/plugin/ 已经是这个形状），`dshgw doctor` 会逐个检查；开着但没部署
-  # 时建户/轮换会直接失败，既有租户启动则只丢掉那一行并告警。
+  # （仓库里的 ./cmd/dshgw/plugin/ 已经是这个形状）**连同它们共用的 lib/** —— 四个宿主半都用
+  # cmd/dshgw/plugin/lib/rpc-channel.js 挂自己的浏览器 RPC 通道（见 docs/design/m90-*），
+  # `dshgw doctor` 会逐个检查；开着但没部署时建户/轮换会直接失败，既有租户启动则只丢掉那一行并告警。
   # 运行期状态按账号隔离：<该账号 DSH home>/plugin-state/{web-tty,workspace-files}.trace.jsonl
   # 与 git-diff.{trace.jsonl,cache.json} —— 共享目录里不留任何状态，扫描缓存也不跨账号。
   # 细节见 docs/dshgw.md §7f 与 docs/design/m75-tenant-plugins.md。

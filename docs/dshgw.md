@@ -651,7 +651,8 @@ tenant_plugins:            # 独立形态：dshgw.yaml；监督形态：aigw con
   root_label: 工作区        # 两个工作区面板对 root 的显示名；留空即此默认值
 ```
 
-**前置**：三个插件目录要在 `plugin_path` 同级（仓库里的 `./cmd/dshgw/plugin/` 已是这个形状；生产部署见
+**前置**：插件目录要在 `plugin_path` 同级（仓库里的 `./cmd/dshgw/plugin/` 已是这个形状，含四个宿主半
+共用的 `lib/rpc-channel.js`，见 `docs/design/m90-tenant-plugin-rpc-channel.md`；生产部署见
 [部署手册](../deploy/dshgw/README.md)）。`dshgw doctor` 会逐个体检（`web-tty-plugin`、`workspace-files-plugin`、
 `git-diff-plugin`）。开着但没部署时：**建户/轮换密钥直接失败**并给出缺失路径，既有租户启动只丢掉那一行
 并写一条 warning —— 一个行指向不存在的模块会让整棵插件树加载失败，所以宁可少一行，不可给一行坏行。
@@ -670,8 +671,9 @@ tenant_plugins:            # 独立形态：dshgw.yaml；监督形态：aigw con
 
 目录由插件在首次写入时创建（它以租户账号身份运行，只有它能在自己 home 下建出属主正确的目录）。
 关掉一个插件只移除行，插件文件留在原地。三块面板都走 `ctx.connection.rpc`（租户 origin 下、既有鉴权链），
-不新增端口、令牌或凭据。细节、决策依据与失败模式见
-[docs/design/m75-tenant-plugins.md](design/m75-tenant-plugins.md)。
+不新增端口、令牌或凭据；宿主半那一段通道由 `cmd/dshgw/plugin/lib/rpc-channel.js` 挂载（dsh 0.1.7 下
+`ctx.connection.rpc.handle` 挂不上，见 [m90](design/m90-tenant-plugin-rpc-channel.md)）。细节、决策依据与
+失败模式见 [docs/design/m75-tenant-plugins.md](design/m75-tenant-plugins.md)。
 
 ## 8. 多机分布式运行（M77，规格）
 

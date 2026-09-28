@@ -43,7 +43,7 @@ in that account's own patch instead.
 
 ```
 browser (client.js)                          tenant node process (index.js)
-  Panel  in shell.overlay                      ctx.connection.rpc  ->  RPC_CHANNEL '/dshgw-workspace-files'
+  Panel  in shell.overlay                      lib/rpc-channel.js -> RPC_CHANNEL '/dshgw-workspace-files'
   Entry  in sidebar.footer.action              rpc-handlers.js: hello/list/stat/readText/writeText/
       |                                          readChunk/writeChunk/mkdir/rename/remove/find/diag
       |  POST /dshgw-workspace-files/<endpoint>  fs-service.js: one root, one clamp, bounded I/O
@@ -52,7 +52,10 @@ browser (client.js)                          tenant node process (index.js)
 
 - **Transport**: `ctx.connection.rpc.call` — the same authenticated, same-origin channel the shipped
   ssh/browser-workspace plugins and `dshgw-web-tty` use. No websocket, no extra port, no second auth
-  story, no route of this plugin's own.
+  story, no route of this plugin's own. The host half is mounted by `../lib/rpc-channel.js`, because
+  `ctx.connection.rpc.handle` cannot mount a plugin channel on dsh 0.1.7-alpha.2 (it reads
+  `webServer` off the connection service's own context and throws
+  `cannot get property "webServer" without inject`); the browser side is unchanged.
 - **Chunked bytes**: file content crosses as base64 in `chunkBytes`-sized pieces, in both directions,
   so a 33 MiB video downloads as a loop of small authenticated POSTs and neither side holds the whole
   file twice. The browser asks the host how large a chunk it accepts (`hello().limits.chunkBytes`)

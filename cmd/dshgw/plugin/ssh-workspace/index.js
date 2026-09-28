@@ -18,9 +18,11 @@
 // directory, so there is no new listening port, no token and nothing to authenticate.
 //
 // The browser half (client.js) calls these endpoints over the harness's own authenticated
-// RPC channel (ctx.connection.rpc.handle), which is available to any plugin and needs no
-// generated code.
+// RPC channel (see ../lib/rpc-channel.js — the channel is mounted by hand because
+// `ctx.connection.rpc.handle` cannot mount one on dsh-0.1.7-alpha.2), which is available to any
+// plugin and needs no generated code.
 
+import { registerRpcChannel } from '../lib/rpc-channel.js'
 import { execFile } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile, lstat, open, unlink } from 'node:fs/promises'
 import { constants } from 'node:fs'
@@ -808,18 +810,22 @@ export function apply(ctx, rawConfig) {
     },
   }
 
-  ctx.effect(() => ctx.connection.rpc.handle(RPC_CHANNEL, async (endpoint, payload) => {
-    const handler = typeof endpoint === 'string' && Object.hasOwn(handlers, endpoint) ? handlers[endpoint] : undefined
-    if (handler === undefined) return failed(failure('ssh/invalid-path', `unknown endpoint ${JSON.stringify(endpoint)}`))
-    try {
-      return ok(await handler(payload))
-    } catch (error) {
-      if (!(error instanceof Failure)) {
-        ctx.logger?.warn?.(`ssh-workspace ${endpoint} failed: ${messageOf(error)}`)
+  registerRpcChannel(ctx, {
+    channel: RPC_CHANNEL,
+    label: 'ssh-workspace',
+    handler: async (endpoint, payload) => {
+      const handler = typeof endpoint === 'string' && Object.hasOwn(handlers, endpoint) ? handlers[endpoint] : undefined
+      if (handler === undefined) return failed(failure('ssh/invalid-path', `unknown endpoint ${JSON.stringify(endpoint)}`))
+      try {
+        return ok(await handler(payload))
+      } catch (error) {
+        if (!(error instanceof Failure)) {
+          ctx.logger?.warn?.(`ssh-workspace ${endpoint} failed: ${messageOf(error)}`)
+        }
+        return failed(error)
       }
-      return failed(error)
-    }
-  }), 'ssh-workspace: tenant ssh RPC channel')
+    },
+  })
 
   ctx.logger?.info?.(`ssh-workspace ready: mount container ${mountRoot}, identities ${sshKeyPath}`)
 }

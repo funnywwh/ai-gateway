@@ -11,6 +11,8 @@ import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
+import { callRpcRoute } from '../../lib/rpc-channel.js'
+
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PLUGIN_DIR = join(HERE, '..')
 // The trace goes to a throwaway directory, never next to the module: that is where a row without a
@@ -19,14 +21,34 @@ const TRACE = join(mkdtempSync(join(tmpdir(), 'dshgw-web-tty-test-')), 'trace.js
 
 const plugin = await import('../index.js')
 
-/** A cordis-shaped context that records what the plugin registers. */
+/**
+ * A cordis-shaped context that records what the plugin registers.
+ *
+ * The channel mount injects `connection`/`webServer` into a child context exactly as the real one
+ * does, and the registered route is the real route — so calls below travel through the transport a
+ * browser hits (admission, envelope, endpoint) rather than a stand-in for it.
+ */
 function createContext() {
   const effects = []
-  const channels = new Map()
+  const routes = new Map()
   const logs = []
+  const child = {
+    connection: { admit: () => ({ peer: {} }) },
+    webServer: {
+      register: (route) => {
+        routes.set(route.path, route)
+        return async () => { routes.delete(route.path) }
+      },
+    },
+    effect(callback, label) {
+      const dispose = callback()
+      effects.push({ label, dispose })
+      return dispose
+    },
+  }
   return {
     effects,
-    channels,
+    routes,
     logs,
     logger: { info: (message) => logs.push(message), warn: (message) => logs.push(`WARN ${message}`), error: (message) => logs.push(`ERROR ${message}`) },
     effect(callback, label) {
@@ -34,11 +56,7 @@ function createContext() {
       effects.push({ label, dispose })
       return dispose
     },
-    connection: {
-      rpc: {
-        handle: (channel, handler) => { channels.set(channel, handler); return async () => { channels.delete(channel) } },
-      },
-    },
+    inject: (deps, callback) => callback(child),
   }
 }
 
@@ -63,11 +81,11 @@ test('host: activates, resolves node-pty, and answers every endpoint over its ch
   const before = existsSync(TRACE) ? readFileSync(TRACE, 'utf8') : ''
   plugin.apply(ctx, { shell: '/bin/bash', args: ['--noprofile', '--norc', '-i'], trace: true, traceFile: TRACE })
 
-  assert.ok(ctx.channels.has('/dshgw-web-tty'), 'the browser channel is registered')
+  assert.ok(ctx.routes.has('/dshgw-web-tty'), 'the browser channel is registered')
   assert.ok(ctx.effects.some((effect) => effect.label === 'web-tty: terminal reaper'), 'the PTY reaper is registered')
 
-  const handler = ctx.channels.get('/dshgw-web-tty')
-  const envelope = async (endpoint, payload, signal) => await handler(endpoint, payload, signal)
+  const route = ctx.routes.get('/dshgw-web-tty')
+  const envelope = async (endpoint, payload, signal) => await callRpcRoute(route, endpoint, payload, { signal })
 
   const hello = await envelope('hello', {})
   assert.equal(hello.ok, true)
@@ -145,10 +163,10 @@ test('host: activates, resolves node-pty, and answers every endpoint over its ch
 test('host: a session cap of one rejects a second terminal with TOO_MANY', async () => {
   const ctx = createContext()
   plugin.apply(ctx, { maxSessions: 1, traceFile: TRACE })
-  const handler = ctx.channels.get('/dshgw-web-tty')
-  const first = await handler('open', {})
+  const route = ctx.routes.get('/dshgw-web-tty')
+  const first = await callRpcRoute(route, 'open', {})
   assert.equal(first.ok, true)
-  const second = await handler('open', {})
+  const second = await callRpcRoute(route, 'open', {})
   assert.equal(second.ok, false)
   assert.equal(second.error.code, 'TOO_MANY')
   for (const effect of ctx.effects) await effect.dispose?.()

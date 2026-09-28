@@ -152,7 +152,8 @@ account_card:
 # **三个都默认开启**（这就是本块存在的意义：账号不必有人手改它的 profile）。想看更窄的面就显式关：
 # 关掉即从每个租户的 profile 里移除该行（已存在的租户在下次 worker 启动时生效）。
 #
-# 前置：三个插件目录要部署在 plugin_path 同级的 web-tty/、workspace-files/、git-diff/ 下
+# 前置：三个插件目录要部署在 plugin_path 同级的 web-tty/、workspace-files/、git-diff/ 下，**连同
+# 它们共用的 lib/** —— 四个宿主半都用 cmd/dshgw/plugin/lib/rpc-channel.js 挂自己的浏览器 RPC 通道
 # （仓库里的 ./cmd/dshgw/plugin/ 已是这个形状）；`dshgw doctor` 逐个检查。开着但没部署时：
 # 建户/轮换密钥直接失败（会把路径说清楚），既有租户启动只丢那一行并写 warning —— 一个可选面板
 # 不该让账号起不来。

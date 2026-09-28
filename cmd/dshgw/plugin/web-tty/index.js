@@ -21,6 +21,7 @@ import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { registerRpcChannel } from '../lib/rpc-channel.js'
 import { createHandlers, num } from './rpc-handlers.js'
 import { TtyRegistry } from './tty-session.js'
 
@@ -171,20 +172,24 @@ export function apply(ctx, rawConfig) {
   })
   const { dispatch } = createHandlers({ registry, config, pty, trace, log })
 
-  ctx.effect(() => ctx.connection.rpc.handle(RPC_CHANNEL, async (endpoint, payload, signal) => {
-    const started = Date.now()
-    try {
-      const value = await dispatch(endpoint, payload, signal)
-      trace('rpc', { endpoint, ms: Date.now() - started })
-      return ok(value)
-    } catch (error) {
-      trace('rpc-failed', { endpoint, ms: Date.now() - started, message: messageOf(error) })
-      if (!(error?.code === 'NO_SESSION' || error?.code === 'TOO_MANY')) {
-        ctx.logger?.warn?.(`web-tty: ${endpoint} failed: ${messageOf(error)}`)
+  registerRpcChannel(ctx, {
+    channel: RPC_CHANNEL,
+    label: 'web-tty',
+    handler: async (endpoint, payload, signal) => {
+      const started = Date.now()
+      try {
+        const value = await dispatch(endpoint, payload, signal)
+        trace('rpc', { endpoint, ms: Date.now() - started })
+        return ok(value)
+      } catch (error) {
+        trace('rpc-failed', { endpoint, ms: Date.now() - started, message: messageOf(error) })
+        if (!(error?.code === 'NO_SESSION' || error?.code === 'TOO_MANY')) {
+          ctx.logger?.warn?.(`web-tty: ${endpoint} failed: ${messageOf(error)}`)
+        }
+        return failed(error)
       }
-      return failed(error)
-    }
-  }), 'web-tty: browser terminal RPC channel')
+    },
+  })
 
   if (config.idleTimeoutMs > 0) {
     const sweep = setInterval(() => {

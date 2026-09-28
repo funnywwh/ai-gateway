@@ -277,6 +277,14 @@ func (c *cli) doctor(ctx context.Context, args []string) error {
 		path := filepath.Join(filepath.Dir(deps.cfg.Deploy.PluginPath), plugin.dir, "index.js")
 		checks = append(checks, check{name: plugin.dir + "-plugin", run: func() error { _, err := os.Stat(path); return err }})
 	}
+	// Every plugin above imports one module from beside itself (lib/rpc-channel.js, the browser RPC
+	// channel mount). It is not part of any plugin directory, so a deployment that copied the plugin
+	// directories one by one is missing it — and a row whose import cannot resolve fails the whole
+	// plugin tree, not just its own panel.
+	if tenancy.SharedPluginModuleRequired(deps.cfg) {
+		path := tenancy.SharedPluginModulePath(deps.cfg)
+		checks = append(checks, check{name: "tenant-plugins-lib", run: func() error { _, err := os.Stat(path); return err }})
+	}
 	failures := 0
 	for _, item := range checks {
 		if err := item.run(); err != nil {

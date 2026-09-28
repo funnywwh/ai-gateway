@@ -402,6 +402,12 @@ func (c *cli) nodeDoctor(ctx context.Context) error {
 		path := filepath.Join(filepath.Dir(cfg.Deploy.PluginPath), plugin.dir, "index.js")
 		checks = append(checks, check{name: plugin.dir + "-plugin", run: func() error { _, err := os.Stat(path); return err }})
 	}
+	// The module every plugin above imports from beside itself (lib/rpc-channel.js); see the control
+	// plane's doctor for why a plugin directory alone is not a deployment.
+	if tenancy.SharedPluginModuleRequired(cfg) {
+		path := tenancy.SharedPluginModulePath(cfg)
+		checks = append(checks, check{name: "tenant-plugins-lib", run: func() error { _, err := os.Stat(path); return err }})
+	}
 	if cfg.SSHWorkspaces.Enabled {
 		checks = append(checks, check{name: "sshfs-bin", run: func() error {
 			if cfg.SSHWorkspaces.SSHFSBin != "" {

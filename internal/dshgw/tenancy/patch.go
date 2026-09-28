@@ -400,6 +400,35 @@ func tenantPluginInstalled(cfg *config.Config, dir string) error {
 	return nil
 }
 
+// SharedPluginModulePath is where the tenant plugins' one shared module has to be: they import it
+// from outside their own directory, so it ships beside them (`<plugin_path dir>/lib/rpc-channel.js`).
+//
+// It exists because dsh 0.1.7-alpha.2 cannot mount a plugin's browser RPC channel through
+// `ctx.connection.rpc.handle` (the service reads `webServer` off its own context and throws
+// `cannot get property "webServer" without inject` for every caller), so the four host halves mount
+// their channel themselves with the harness's own primitives. See
+// docs/design/m90-tenant-plugin-rpc-channel.md.
+func SharedPluginModulePath(cfg *config.Config) string {
+	return filepath.Join(filepath.Dir(cfg.Deploy.PluginPath), "lib", "rpc-channel.js")
+}
+
+// SharedPluginModuleRequired reports whether any plugin importing that module is switched on.
+//
+// The doctors ask this so a deployment that copied plugin directories one by one — the shape the
+// deploy docs used to describe — fails its check instead of every row: a row whose import cannot
+// resolve takes the account's whole plugin tree with it, exactly like a missing plugin directory.
+func SharedPluginModuleRequired(cfg *config.Config) bool {
+	if cfg.SSHWorkspaces.Enabled {
+		return true
+	}
+	for _, plugin := range tenantPlugins(cfg) {
+		if plugin.enabled {
+			return true
+		}
+	}
+	return false
+}
+
 // tenantPluginRows builds the rows of every enabled and deployed tenant-side plugin, in order.
 //
 // A missing plugin is an error here rather than a skipped row: this runs while a tenant is being

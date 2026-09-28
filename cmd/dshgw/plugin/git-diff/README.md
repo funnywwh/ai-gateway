@@ -116,7 +116,7 @@ committed yet.
 
 ```
 browser (client.js)                             tenant node process (index.js)
-  View  in conversation.view id 'git-diff'        ctx.connection.rpc.handle('/dshgw-git-diff')
+  View  in conversation.view id 'git-diff'        lib/rpc-channel.js mounts '/dshgw-git-diff'
     props.sessionId + useSessions                   rpc-handlers.js: hello/repos/status/scanStart/
       -> the session's workspace, on every call       scanStatus/scanCancel/diff/diag
         |                                           git-service.js: scopeOf (git work tree) + one
@@ -124,6 +124,13 @@ browser (client.js)                             tenant node process (index.js)
         `------{ workspace, repo, ... }---------->    results + cache.json
                                                     git, read-only, over the sshfs mount
 ```
+
+The channel is mounted by `../lib/rpc-channel.js`, not by `ctx.connection.rpc.handle`: on dsh
+0.1.7-alpha.2 the latter reads `webServer` off the connection service's own context and throws
+`cannot get property "webServer" without inject` for every caller, so no route is ever mounted and
+the browser's POST lands on the SPA fallback seat as `405 Method Not Allowed` — which the panel
+reports as `transport failure for /dshgw-git-diff/<endpoint>: HTTP 405`. The browser half is
+unchanged (`ctx.connection.rpc.call`).
 
 - **One scope per call, resolved by git.** Every repository-scoped endpoint carries `workspace`: the
   current session's directory, which the browser half reads from the shell's own session feed
@@ -140,7 +147,8 @@ browser (client.js)                             tenant node process (index.js)
 
 - **Transport**: `ctx.connection.rpc.call` — the same authenticated, same-origin channel the shipped
   ssh/browser-workspace plugins and the other `dshgw-*` plugins use. No websocket, no extra port, no
-  second authentication story, no route of this plugin's own. One envelope rule is load-bearing: the
+  second authentication story, no route of this plugin's own (the host half is mounted by
+  `../lib/rpc-channel.js`, see Architecture). One envelope rule is load-bearing: the
   shell builds the body with `JSON.stringify`, so a payload of `undefined` loses **the whole key**, and
   the host's schema keeps `payload` non-optional (`payload: z.unknown()`, zod 4) — it then answers
   `invalid client-request message` without ever calling the endpoint. Every call therefore passes

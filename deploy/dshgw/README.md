@@ -152,8 +152,9 @@ bin/dshgw --config ./dshgw.yaml sandbox-exec --print <租户> | grep -E 'workspa
 | 「文件」（侧栏底） | `workspace-files/` | 一切路径夹紧在该账号 workspace 内 |
 | 「变更」（会话主区 View） | `git-diff/` | 只读；`--no-optional-locks`，不动 `.git/index`；**作用域跟随当前会话的 git 工作区**（M86：宿主用 `rev-parse --show-toplevel` 判定，判不出就只列该目录下的仓库并标注，夹紧仍是该账号 workspace） |
 
-**部署动作只有一条**：把仓库里 `cmd/dshgw/plugin/{web-tty,workspace-files,git-diff}/` 三个目录
-按原样放到 `deploy.plugin_path` 所在目录（与 `picker-clamp.js`、`account-card/`、`browser-workspace/` 同级）。
+**部署动作只有一条**：把仓库里 `cmd/dshgw/plugin/{web-tty,workspace-files,git-diff,ssh-workspace}/` 与
+`cmd/dshgw/plugin/lib/`（四个宿主半共用的浏览器 RPC 通道挂载模块，`lib/rpc-channel.js`）按原样放到
+`deploy.plugin_path` 所在目录（与 `picker-clamp.js`、`account-card/`、`browser-workspace/` 同级）。
 本机部署根下的相对 `plugin_path`（`./cmd/dshgw/plugin/picker-clamp.js`）已经天然满足这一点，无需额外步骤。
 
 **升级时注意宿主半与浏览器半的生效方式不同**（M86 起）：只改 `client.js`/`client.src.js` 时，同步文件后

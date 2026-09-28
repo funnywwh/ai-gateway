@@ -17,6 +17,7 @@ import { appendFileSync, mkdirSync, statSync, truncateSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { registerRpcChannel } from '../lib/rpc-channel.js'
 import { WorkspaceFiles, clampInt, fail } from './fs-service.js'
 import { createHandlers, messageOf } from './rpc-handlers.js'
 
@@ -128,13 +129,17 @@ export async function apply(ctx, rawConfig) {
 
   const { dispatch } = createHandlers({ service, config, trace, log })
 
-  ctx.effect(() => ctx.connection.rpc.handle(RPC_CHANNEL, async (endpoint, payload) => {
-    try {
-      return ok(await dispatch(endpoint, payload))
-    } catch (error) {
-      return failed(error)
-    }
-  }), 'workspace-files: browser file RPC channel')
+  registerRpcChannel(ctx, {
+    channel: RPC_CHANNEL,
+    label: 'workspace-files',
+    handler: async (endpoint, payload) => {
+      try {
+        return ok(await dispatch(endpoint, payload))
+      } catch (error) {
+        return failed(error)
+      }
+    },
+  })
 
   trace('activated', {
     version: VERSION,

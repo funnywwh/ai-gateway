@@ -284,3 +284,36 @@ func TestTenantPluginsThatAreNotDeployed(t *testing.T) {
 		t.Fatalf("the deployed plugins lost their rows:\n%s", patch)
 	}
 }
+
+// M90: the four host halves import one module from beside their own directory, so "the plugin
+// directories are deployed" is not the same statement as "the plugins can load". The doctors ask
+// these two functions rather than repeating the path, and this pins both halves of the answer: the
+// path a deployment must satisfy, and when it has to exist (an all-off deployment owes nothing).
+func TestSharedPluginModuleIsRequiredWhileAnyImportingPluginIsOn(t *testing.T) {
+	cfg, _ := pluginFixture(t)
+	if got, want := SharedPluginModulePath(cfg), filepath.Join(repoPluginDir(), "lib", "rpc-channel.js"); got != want {
+		t.Fatalf("SharedPluginModulePath = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(SharedPluginModulePath(cfg)); err != nil {
+		t.Fatalf("this checkout ships the shared module the plugins import: %v", err)
+	}
+	if !SharedPluginModuleRequired(cfg) {
+		t.Fatal("all three tenant plugins are on, so the shared module is required")
+	}
+
+	// ssh-workspace imports it too, so the module is required even with the three switches off.
+	cfg.TenantPlugins = config.TenantPlugins{
+		WebTTY:         config.PluginSwitch{Enabled: false},
+		WorkspaceFiles: config.PluginSwitch{Enabled: false},
+		GitDiff:        config.PluginSwitch{Enabled: false},
+	}
+	cfg.SSHWorkspaces.Enabled = true
+	if !SharedPluginModuleRequired(cfg) {
+		t.Fatal("ssh-workspace's host half imports the shared module")
+	}
+
+	cfg.SSHWorkspaces.Enabled = false
+	if SharedPluginModuleRequired(cfg) {
+		t.Fatal("a deployment that ships no plugin owes no shared module")
+	}
+}

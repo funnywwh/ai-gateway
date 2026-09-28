@@ -27,7 +27,7 @@ own patch instead.
 
 ```
 browser (client.js)                       tenant node process (index.js)
-  xterm.js + fit addon                      ctx.connection.rpc  ->  RPC_CHANNEL '/dshgw-web-tty'
+  xterm.js + fit addon                      lib/rpc-channel.js -> RPC_CHANNEL '/dshgw-web-tty'
   sidebar.footer.action: 终端 row            rpc-handlers.js: hello/open/read/write/resize/close/list/diag
   shell.overlay:        panel + tabs        tty-session.js:   session registry + scrollback ring
       |                                        |
@@ -37,6 +37,10 @@ browser (client.js)                       tenant node process (index.js)
 
 - **Transport**: `ctx.connection.rpc.call` — the same authenticated, same-origin channel the
   shipped ssh/browser-workspace plugins use. No websocket, no extra port, no second auth story.
+  The host half of that channel is mounted by `../lib/rpc-channel.js` rather than by
+  `ctx.connection.rpc.handle`, which cannot mount a plugin channel on dsh 0.1.7-alpha.2 (it reads
+  `webServer` off the connection service's own context and throws `cannot get property "webServer"
+  without inject`); the browser side is unchanged and still just calls `ctx.connection.rpc.call`.
 - **`read` is a long poll.** The handler holds the POST until the PTY produces output past the
   caller's cursor, the child exits, the caller aborts, or `waitMs` elapses. Typing latency is
   therefore one round trip, not one poll interval, and an idle terminal costs one held request.
