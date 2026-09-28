@@ -6441,3 +6441,31 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
 | 验证（控制台面） | 管理员会话 `GET /admin/api/v1/backups?limit=5` → `total_bytes=12222103552`、`total=1`，行 `19 / 12222103552 / aigw-20260927-033028.db / ok / cron`（修复前两者都是 0）；`/admin/ui/js/pages/backups.js` 已带 `GiB` 档（12.2 GB 显示 11.38 GiB） |
 | 测试 | `make test` 全绿；`make ui-base` 全绿（新增 `internal/webui/tests/backups_bytes_test.mjs`）。两条新回归在改进前必失败（实测把 UPDATE 的 `size_bytes` 去掉后：`listed size_bytes = 0, want 507904`）。`make vet` 仍失败，原因是 **main 上本来就失败**（`internal/dshgw/config/sandboxview_test.go` 复制含 `sync.RWMutex` 的 `Config`，已在 `ad64654` 的干净检出上复现，非本次引入） |
 | 未做 | 未打 tag、未推 origin；其它实例未部署 4.7.1；控制台资源是 `Cache-Control: public, max-age=300`，浏览器要硬刷新（Ctrl+Shift+R）才拿到新格式化 |
+
+## M89 代码脱敏（工作树清洗落袋；规则表与发版强制仍进行中）
+> 设计：`docs/design/m89-code-desensitization.md`；需求原话：「项目代码脱敏」「修改 skill 要求发布版本时脱敏」。
+> 本节只收已完成的项，未完成的（release.sh 硬门禁、历史重写、归档）留在 `docs/TODO.md`。
+
+- [x] 工具与规则表改成两层：提交内通用规则（模块路径 owner、私有/文档网段之外的地址、允许域之外的邮箱、
+      真实形状的 SSH 指纹、非占位 `/home/<user>`、像真的 `sk-` 前缀）+ 本地真值表
+      `.cache/desensitize/tokens.tsv`（gitignore，永不入库；`--require-table` 是发版门禁用的开关）；
+      `scripts/test_desensitize.py` 覆盖两层规则、最长优先、幂等、历史与提交信息
+- [x] 工作树清洗落袋（提交 `6a99f63`）：486 个文件替换 + 1 处改名（表里的 rename 条目把
+      `docs/design/m36-deploy-<主机名>-prefix.md` 改成 `m36-deploy-prefix.md`，真实文件名看
+      `git show --summary 6a99f63`；该提交信息为说明清洗口径仍写了旧值，历史重写时由
+      `--filter-message` 一并抹掉）；语义不变，`make test` / `make ui-base` 复跑全绿，`bin/` 随 v4.7.2 重建
+
+### v4.7.2 发布记录（M90 插件通道修复 + M89 清洗落袋，本机 aigw-local；2026-09-28）
+
+| 项 | 值 |
+|---|---|
+| 起因 | 四个租户面板在 dsh 0.1.7-alpha.2 下全报 `transport failure for /<channel>/<endpoint>: HTTP 405`：`dsh-client-connection` 的 `HostConnectionService.register()` 读的是服务自己 context 的 `webServer`，`ctx.connection.rpc.handle` 对任何调用方都抛 `cannot get property "webServer" without inject` ⇒ 通道没挂上，浏览器 POST 掉进 SPA 兜底座位的 405。同时把 M89「工作树清洗」的 487 个在途改动落袋（v4.7.1 记录里等着的这一步） |
+| 版本 | **v4.7.2**（4.7.1 → 4.7.2；M89 清洗提交 `6a99f63`、M90 修复提交 `455c8c0`、release 提交 **`7469135`**，已打 tag **v4.7.2**） |
+| 构建物 | `bin/aigw` **4.7.2 / `7469135`**，23,733,452 B，sha256 `fb215a8ab00b9a3c7afe79750bb923f96beb6d54bb19a92ffe9bfb26b30bcf8e`（控制台 minified + gzip）；取自**干净树**（M89 清洗后重建，与 v4.7.1 那次"构建带在途改动"不同） |
+| 部署范围 | **gw-c**（LAN，`~/work/ai_gateway/bin/aigw`，`aigw-local.service`）：4.7.1/`645dbac` → **4.7.2/`7469135`**（上传后两端 sha256 一致）；其它实例（gw-a/gw-b 等）本次**未部署** |
+| 回滚点 | gw-c `bin/aigw.prev-4.7.1-645dbac-20260928-094841`（23,733,452 B）。回滚 = `cp -p` 回该文件 + `systemctl --user restart aigw-local`，`/version` 随之后退到 4.7.1/`645dbac` |
+| 验证（探针） | `/version` = `{"revision":"7469135","ui":"minified","ui_encoding":"gzip","version":"4.7.2"}`；`healthz` 200、`readyz` 200、`admin/ui/` 200；单元 `active`（`dshgw-verify` 未受影响，本会话未掉线） |
+| 验证（启动日志） | `data/aigw-local.log`：`msg="shutting down"` → `msg="aigw starting" version=4.7.2 revision=7469135 ui=minified ui_encoding=gzip …` → `msg="http server listening" addr=:8088`；从该启动行往后 **0 ERROR / 0 WARN** |
+| 测试 | `make test` 全绿；`make ui-base` 全绿；`python3 scripts/desensitize.py --check`（含 `--require-table`）= **0 命中**，`scripts/test_desensitize.py` 通过；插件套件：`lib/rpc-channel` 11/11、ssh-workspace 248 断言、web-tty 14/14、workspace-files 19/19、git-diff 48/48（工作区与宿主两侧都跑过） |
+| 未做 | 未推 origin（M89 的历史重写要强推，届时一起）；**v4.7.1 仍未打 tag**（本次只打 v4.7.2）；其它实例未部署；租户 dsh worker 未重启（M90 的插件半要重启才生效，见 `docs/TODO.md` M90）；M89 的 `release.sh` 硬门禁与历史重写未做 |
+| 观察（非本次引入） | `make smoke` 引用的 `scripts/smoke.sh` 在本克隆里不存在（历史遗留，两克隆分叉所致）；`make dshgw-test` 在本克隆停在 `internal/dshgw/tenancy/settings_schema.test.mjs`（dsh 0.1.7 把 llm-pi-ai 的 providers 标成 volatile，宿主那份 dsh 升级提交已修） |

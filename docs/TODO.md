@@ -1183,13 +1183,15 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 > 设计：`docs/design/m89-code-desensitization.md`；需求原话：「项目代码脱敏」「修改 skill 要求发布版本时脱敏」。
 > 口径经确认：全仓库清洗、发布与部署入口列入例外保留真值、连 git 历史一起重写并强推 origin、
 > Go 模块路径改为 `github.com/funnywwh/ai-gateway`。规则表是 `scripts/desensitize.py`（单一真源）。
+> **工具与工作树清洗已完成并落袋**（提交 `6a99f63`，随 v4.7.2 重建 `bin/`），记录见
+> `docs/todo_done.md` 的 M89 小节；本文件只留未完成项。
 
-- [~] 工具与规则表：`scripts/desensitize.py`（check/apply/check-history/inventory/strict）+ `scripts/test_desensitize.py` + Makefile 目标并入 `verify`
-- [~] 工作树清洗：`--apply` + 断言联动 + `make verify` / `make dshgw-test` + 重建 `bin/`
-- [~] 发版强制：技能新增「脱敏检查」步 + `scripts/release.sh` 硬门禁
+- [~] 发版强制：技能新增「脱敏检查」步 + `scripts/release.sh` 硬门禁（本次 v4.7.2 发版是**手工**跑的
+      `--check` 与 `--require-table`，脚本里还没接线）
 - [ ] 历史重写：`git bundle` 备份 → `filter-branch --tree-filter` 跑同一份规则 → `--check-history` = 0 → 强推 main 与 tags → 新克隆复核（**需操作者确认窗口，会换掉全部 sha，其它克隆必须重新 clone**）
 - [ ] 归档：设计文档「实现与设计差异」回填、`docs/todo_done.md` 发布记录
 - [ ] 已知后果（记录，不修）：文档里的历史 revision 短 sha 重写后不可解析；例外文件（`.dsh/skills/**`）刻意保留真实主机名与域名
+- [ ] 待定：v4.7.1（release 提交 `645dbac`）**仍未打 tag** —— v4.7.2 已打，补不补由操作者定
 
 ## M90 租户插件自己挂浏览器 RPC 通道（修 dsh 0.1.7 下的 `transport failure … HTTP 405`）
 > 需求原话：「修复 dsh transport failure for /ssh-workspace/hosts: HTTP 405」「transport failure for
@@ -1197,7 +1199,8 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 > 根因：`dsh-client-connection@0.1.7-alpha.2` 的 `HostConnectionService.register()` 读的是**服务自己**
 > context 的 `webServer`（该插件 `inject = ['credentials']`），任何调用方调 `ctx.connection.rpc.handle`
 > 都抛 `cannot get property "webServer" without inject` ⇒ 四个插件的通道一个也没挂上，浏览器 POST
-> 掉进 SPA 兜底座位的 405。零 Go 改动（行渲染与 `tenant_plugins` 开关不变）。
+> 掉进 SPA 兜底座位的 405。宿主半（`cmd/dshgw/plugin/`）改一行 Go 都不需要，aigw 侧只多了体检项
+> `tenant-plugins-lib`，随 **v4.7.2 部署到 gw-c**（见 `docs/todo_done.md` 的 v4.7.2 发布记录）。
 
 - [x] 新增 `cmd/dshgw/plugin/lib/rpc-channel.js`：用 dsh 自己挂 `/api` 的原语
       （`webServer.register({kind:'prefix',path,handler})` + `connection.admit`）挂插件通道，
