@@ -226,6 +226,7 @@ ui-base:
 		node scripts/ui-badge-test.mjs ; \
 		node internal/webui/tests/style_csp_test.mjs || exit $$? ; \
 		node internal/webui/tests/requests_test.mjs || exit $$? ; \
+		node internal/webui/tests/backups_bytes_test.mjs || exit $$? ; \
 		node internal/webui/tests/tags_binding_test.mjs || exit $$? ; \
 		node internal/webui/tests/org_tree_test.mjs || exit $$? ; \
 		node internal/webui/tests/org_person_list_test.mjs || exit $$? ; \

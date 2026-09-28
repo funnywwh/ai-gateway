@@ -41,7 +41,8 @@ type Config struct {
 // Store is the persistence the manager needs.
 type Store interface {
 	InsertBackupJob(ctx context.Context, job *Job) (int64, error)
-	FinishBackupJob(ctx context.Context, id int64, status, quickCheck, note, failure string) error
+	FinishBackupJob(ctx context.Context, job *Job, failure string) error
+	SetBackupJobSize(ctx context.Context, id, size int64) error
 	ListBackupJobs(ctx context.Context, limit int) ([]*Job, error)
 	GetBackupJob(ctx context.Context, id int64) (*Job, error)
 	DeleteBackupJob(ctx context.Context, id int64) error
@@ -142,7 +143,7 @@ func (m *Manager) Run(ctx context.Context, triggeredBy string) (*Job, error) {
 	job.Status = "ok"
 	finished := m.now()
 	job.FinishedAt = &finished
-	if err := m.store.FinishBackupJob(ctx, job.ID, job.Status, job.QuickCheck, job.Note, ""); err != nil {
+	if err := m.store.FinishBackupJob(ctx, job, ""); err != nil {
 		return nil, err
 	}
 	m.log.Info("backup finished",
@@ -200,7 +201,7 @@ func (m *Manager) fail(ctx context.Context, job *Job, cause error) (*Job, error)
 	if job.Note == "" {
 		job.Note = cause.Error()
 	}
-	if err := m.store.FinishBackupJob(ctx, job.ID, job.Status, job.QuickCheck, job.Note, cause.Error()); err != nil {
+	if err := m.store.FinishBackupJob(ctx, job, cause.Error()); err != nil {
 		m.log.Warn("recording the failed backup failed", "err", err)
 	}
 	m.emit("backup.failed", job)
@@ -225,6 +226,35 @@ func (m *Manager) Jobs(ctx context.Context, limit int) ([]*Job, error) {
 // Job loads one job.
 func (m *Manager) Job(ctx context.Context, id int64) (*Job, error) {
 	return m.store.GetBackupJob(ctx, id)
+}
+
+// RepairMissingSizes records the on-disk size for rows whose size was never written. Every
+// row created before v4.7.1 carries size_bytes = 0, because the finishing UPDATE did not
+// persist the size the manager measured — that is exactly what made the console read "0 B"
+// for a snapshot that is 12 GB on disk. A file that is gone is counted as skipped rather
+// than invented: zero is then the honest answer, and a missing file must never fail a start
+// (nor have its row deleted — it is the record of a snapshot that once existed). The rewrite
+// is idempotent, so a second start finds nothing to repair.
+func (m *Manager) RepairMissingSizes(ctx context.Context) (repaired, skipped int64, err error) {
+	jobs, err := m.store.ListBackupJobs(ctx, 1000)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, job := range jobs {
+		if job.SizeBytes != 0 || strings.TrimSpace(job.Path) == "" {
+			continue
+		}
+		info, statErr := os.Stat(job.Path)
+		if statErr != nil || info.Size() <= 0 {
+			skipped++
+			continue
+		}
+		if err := m.store.SetBackupJobSize(ctx, job.ID, info.Size()); err != nil {
+			return repaired, skipped, err
+		}
+		repaired++
+	}
+	return repaired, skipped, nil
 }
 
 // Delete removes a snapshot file and its record.

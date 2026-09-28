@@ -50,9 +50,15 @@ VALUES(?,?,?,?,?,?,?,?)`,
 	return id, nil
 }
 
-// FinishBackupJob closes out a backup.
-func (db *DB) FinishBackupJob(ctx context.Context, id int64, status, quickCheck, note, failure string) error {
-	finalNote := note
+// FinishBackupJob closes out a backup. It takes the whole job because the row's closing
+// facts — status, quick_check, note, and the snapshot size the manager measured — all
+// belong to the same record, and a size that is not written here is never written at all:
+// the console's 大小/占用 columns read exactly this column (v4.7.1).
+func (db *DB) FinishBackupJob(ctx context.Context, job *domain.BackupJob, failure string) error {
+	if job == nil {
+		return domain.ErrInvalidRequest("backup job is required")
+	}
+	finalNote := job.Note
 	if failure != "" {
 		if finalNote != "" {
 			finalNote += "; "
@@ -60,9 +66,20 @@ func (db *DB) FinishBackupJob(ctx context.Context, id int64, status, quickCheck,
 		finalNote += failure
 	}
 	if _, err := db.write.ExecContext(ctx, `
-UPDATE backup_jobs SET finished_at = ?, status = ?, quick_check = ?, note = ? WHERE id = ?`,
-		unix(time.Now()), status, quickCheck, finalNote, id); err != nil {
+UPDATE backup_jobs SET finished_at = ?, status = ?, quick_check = ?, note = ?, size_bytes = ? WHERE id = ?`,
+		unix(time.Now()), job.Status, job.QuickCheck, finalNote, job.SizeBytes, job.ID); err != nil {
 		return fmt.Errorf("store: finish backup job: %w", err)
+	}
+	return nil
+}
+
+// SetBackupJobSize rewrites one job's recorded snapshot size. It exists for the startup
+// repair of rows written before the size was persisted (see backup.Manager.RepairMissingSizes);
+// an id that is no longer there is not an error, because pruning can race a repair.
+func (db *DB) SetBackupJobSize(ctx context.Context, id, size int64) error {
+	if _, err := db.write.ExecContext(ctx,
+		`UPDATE backup_jobs SET size_bytes = ? WHERE id = ?`, size, id); err != nil {
+		return fmt.Errorf("store: set backup job size: %w", err)
 	}
 	return nil
 }

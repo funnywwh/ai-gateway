@@ -394,6 +394,19 @@ func run() int {
 
 	}
 
+	// Rows written before v4.7.1 never had their snapshot size persisted, so the console's
+	// 大小/占用 columns read a real 12 GB snapshot as "0 B". Repairing here — before the HTTP
+	// server exists — means the first page load is already right.
+	if repaired, skipped, err := backupManager.RepairMissingSizes(ctx); err != nil {
+
+		log.Warn("repairing older backup job sizes failed", "err", err)
+
+	} else if repaired > 0 || skipped > 0 {
+
+		log.Info("backup job sizes repaired", "repaired", repaired, "files_missing", skipped)
+
+	}
+
 	backupScheduler, err := backup.NewScheduler(backupManager, cfg.Backup.Cron)
 
 	if err != nil {

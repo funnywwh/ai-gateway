@@ -136,8 +136,86 @@ func TestBackupProducesAVerifiedSnapshot(t *testing.T) {
 	if len(jobs) != 1 || jobs[0].Status != "ok" {
 		t.Fatalf("backup_jobs = %+v", jobs)
 	}
+	// The size the manager measured has to be *in the row*: the console's 大小/占用 columns
+	// read the stored value, so a size that only lives in memory shows a finished snapshot as
+	// "0 B" (fixed in v4.7.1).
+	if jobs[0].SizeBytes != info.Size() {
+		t.Fatalf("backup_jobs.size_bytes = %d, want the snapshot size %d", jobs[0].SizeBytes, info.Size())
+	}
 	_ = db
 	_ = databasePath
+}
+
+// TestRepairMissingSizes covers the one-time repair for rows written before the finishing
+// UPDATE persisted the size (every pre-v4.7.1 row carries size_bytes = 0).
+func TestRepairMissingSizes(t *testing.T) {
+	ctx := context.Background()
+	manager, db, _ := newBackupFixture(t)
+
+	// A row that looks exactly like a legacy one: recorded as ok, size never written.
+	snapshot := filepath.Join(t.TempDir(), "aigw-20260927-033028.db")
+	content := make([]byte, 4096)
+	if err := os.WriteFile(snapshot, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacyID, err := db.InsertBackupJob(ctx, &domain.BackupJob{
+		Path: snapshot, Status: "ok", QuickCheck: "ok", TriggeredBy: "cron",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A row whose snapshot is gone must be left alone, not invented and not deleted.
+	missingID, err := db.InsertBackupJob(ctx, &domain.BackupJob{
+		Path: filepath.Join(t.TempDir(), "pruned-away.db"), Status: "ok", QuickCheck: "ok",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A row that already knows its size is not rewritten.
+	knownID, err := db.InsertBackupJob(ctx, &domain.BackupJob{
+		Path: snapshot, SizeBytes: 2048, Status: "ok", QuickCheck: "ok",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repaired, skipped, err := manager.RepairMissingSizes(ctx)
+	if err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if repaired != 1 || skipped != 1 {
+		t.Fatalf("repair = %d repaired / %d skipped, want 1 / 1", repaired, skipped)
+	}
+	legacy, err := db.GetBackupJob(ctx, legacyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.SizeBytes != int64(len(content)) {
+		t.Fatalf("repaired size = %d, want %d", legacy.SizeBytes, len(content))
+	}
+	missing, err := db.GetBackupJob(ctx, missingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missing.SizeBytes != 0 {
+		t.Fatalf("a row whose file is gone must keep size 0, got %d", missing.SizeBytes)
+	}
+	known, err := db.GetBackupJob(ctx, knownID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if known.SizeBytes != 2048 {
+		t.Fatalf("an already-sized row = %d, want 2048 untouched", known.SizeBytes)
+	}
+
+	// The repair is idempotent: a second start has nothing left to do.
+	repaired, skipped, err = manager.RepairMissingSizes(ctx)
+	if err != nil {
+		t.Fatalf("second repair: %v", err)
+	}
+	if repaired != 0 || skipped != 1 {
+		t.Fatalf("second repair = %d repaired / %d skipped, want 0 / 1", repaired, skipped)
+	}
 }
 
 func TestBackupVerifyFailureKeepsTheFile(t *testing.T) {

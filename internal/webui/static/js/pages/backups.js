@@ -6,7 +6,9 @@ const bytes = (value) => {
 	const n = Number(value || 0);
 	if (n < 1024) return n + ' B';
 	if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KiB';
-	return (n / 1024 / 1024).toFixed(2) + ' MiB';
+	// A real deployment's snapshot is over 10 GiB, and such a number is unreadable in MiB.
+	if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(2) + ' MiB';
+	return (n / 1024 / 1024 / 1024).toFixed(2) + ' GiB';
 };
 
 export async function render({ page, actions, session }) {
