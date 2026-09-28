@@ -64,3 +64,54 @@ func sortStrings(in []string) {
 		}
 	}
 }
+
+// companyScope namespaces the company secrets sealed by CompanySealer. It is a constant here so the
+// scope is one value for every writer and reader of those rows.
+const companyScope = "feishu_app"
+
+// CompanySealer seals one console-managed company's Feishu app secret (M93).
+//
+// It is a second type rather than a second method on Sealer because the AAD differs: a company
+// secret must not be openable with a provider's id (and the other way round), which is exactly
+// what the scoped AAD buys. Secrets are sealed and opened per request — the plaintext never lands
+// in a struct, a log line or a JSON payload.
+type CompanySealer struct {
+	key []byte
+}
+
+// NewCompanySealer wraps a derived key. An empty key yields a sealer that reports Ready() == false,
+// which the management API turns into "configure credentials_key, or keep using feishu.companies".
+func NewCompanySealer(key []byte) *CompanySealer { return &CompanySealer{key: key} }
+
+// Ready reports whether a usable key is configured.
+func (s *CompanySealer) Ready() bool { return s != nil && len(s.key) > 0 }
+
+// Seal encrypts one company's app secret. Empty input clears the stored secret.
+func (s *CompanySealer) Seal(appRowID int64, secret string) ([]byte, error) {
+	if !s.Ready() {
+		return nil, fmt.Errorf("credentials_key is not configured")
+	}
+	if appRowID <= 0 {
+		return nil, fmt.Errorf("a company row id is required to seal its secret")
+	}
+	return EncryptScoped(s.key, companyScope, appRowID, []byte(secret))
+}
+
+// Open decrypts one company's app secret. A nil/empty blob answers ("", nil): "no secret stored" is a
+// state the caller reports, not an error.
+func (s *CompanySealer) Open(appRowID int64, ciphertext []byte) (string, error) {
+	if !s.Ready() {
+		return "", fmt.Errorf("credentials_key is not configured")
+	}
+	if len(ciphertext) == 0 {
+		return "", nil
+	}
+	if appRowID <= 0 {
+		return "", fmt.Errorf("a company row id is required to open its secret")
+	}
+	plaintext, err := DecryptScoped(s.key, companyScope, appRowID, ciphertext)
+	if err != nil {
+		return "", err
+	}
+	return string(plaintext), nil
+}

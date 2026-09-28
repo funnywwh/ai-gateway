@@ -244,6 +244,7 @@ ui-base:
 		node --experimental-vm-modules internal/webui/tests/org_assign_test.mjs || exit $$? ; \
 		node --experimental-vm-modules internal/webui/tests/keys_feishu_test.mjs || exit $$? ; \
 		node --experimental-vm-modules internal/webui/tests/org_feishu_test.mjs || exit $$? ; \
+		node --experimental-vm-modules internal/webui/tests/companies_test.mjs || exit $$? ; \
 		node --experimental-vm-modules internal/webui/tests/account_feishu_test.mjs || exit $$? ; \
 		node --experimental-vm-modules internal/webui/tests/dshgw_nodes_test.mjs || exit $$? ; \
 	else \

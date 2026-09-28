@@ -334,6 +334,10 @@ func run() int {
 	} else {
 		credentialSealer = creds.NewSealer(credKey)
 	}
+	// M93: a client company's Feishu secret is sealed with the same key under its own AAD scope, so a
+	// deployment without credentials_key simply cannot register a company from the console — it is
+	// told to keep using feishu.companies rather than storing a secret in the clear.
+	companySealer := creds.NewCompanySealer(credKey)
 	queueWait := time.Duration(cfg.Routing.ProviderQueueWaitS) * time.Second
 	dispatcher := runtime.New(runtime.Config{
 		CredentialsKey:  credKey,
@@ -641,7 +645,11 @@ func run() int {
 		Tags:          db,
 		Org:           db,
 		FeishuPeople:  db,
-		HookStore:     db,
+		// M93: the console-managed company registry, and the sealer for those companies' secrets
+		// (the same credentials_key the provider credentials use, under its own AAD scope).
+		FeishuApps:       db,
+		FeishuAppSecrets: companySealer,
+		HookStore:        db,
 		MCPTokenStore: db,
 		Settings:      db,
 		Secrets:       credentialSealer,

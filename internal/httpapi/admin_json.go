@@ -271,7 +271,7 @@ func (s *Server) accountJSONContextFor(ctx context.Context) (accountJSONContext,
 	if err != nil {
 		return accountJSONContext{}, err
 	}
-	return accountJSONContext{Companies: s.feishuCompanies(), Links: links}, nil
+	return accountJSONContext{Companies: s.feishuCompaniesForDisplay(ctx), Links: links}, nil
 }
 
 // attachDshPlacements adds `dsh_node` to account payloads (M77): the worker node each account's

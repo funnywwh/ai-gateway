@@ -8,6 +8,7 @@ export const routes = [
   { path: '/keys', title: 'API Keys', module: './pages/keys.js', group: '访问控制' },
   { path: '/accounts', title: '账户', module: './pages/accounts.js', group: '访问控制' },
   { path: '/org', title: '组织架构', module: './pages/org.js', group: '访问控制' },
+  { path: '/companies', title: '公司', module: './pages/companies.js', group: '访问控制' },
   { path: '/tags', title: '标签', module: './pages/tags.js', group: '访问控制' },
   { path: '/mcp-tokens', title: 'MCP 令牌', module: './pages/mcp.js', group: '访问控制' },
   { path: '/redemption-codes', title: '兑换码', module: './pages/codes.js', group: '访问控制' },

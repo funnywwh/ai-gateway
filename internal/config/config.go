@@ -1409,16 +1409,33 @@ func (c *Config) validateFeishuCompanies() error {
 // to a company label: non-empty after trimming, at most 64 characters, and never mistakable for
 // an app id.
 func validateCompanyLabel(field, value string) error {
-	if value == "" {
-		return fmt.Errorf("%s must be set", field)
+	_, err := NormalizeCompanyName(field, value)
+	return err
+}
+
+// NormalizeCompanyName validates and trims one company label. It is exported because the console's
+// create/update path (M93) accepts company names at runtime and must apply exactly the rules this
+// file applies at startup — two implementations would drift, and the name becomes an org node name.
+// field is the setting name the error message should mention ("feishu.companies[2].name", say).
+func NormalizeCompanyName(field, value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", fmt.Errorf("%s must be set", field)
 	}
-	if n := utf8.RuneCountInString(value); n > feishuCompanyNameMaxRunes {
-		return fmt.Errorf("%s must be at most %d characters (got %d)", field, feishuCompanyNameMaxRunes, n)
+	if n := utf8.RuneCountInString(trimmed); n > feishuCompanyNameMaxRunes {
+		return "", fmt.Errorf("%s must be at most %d characters (got %d)", field, feishuCompanyNameMaxRunes, n)
 	}
-	if strings.HasPrefix(value, "cli_") {
-		return fmt.Errorf("%s must not start with cli_: that shape is an app id, and company parameters accept either", field)
+	if strings.HasPrefix(trimmed, "cli_") {
+		return "", fmt.Errorf("%s must not start with cli_: that shape is an app id, and company parameters accept either", field)
 	}
-	return nil
+	return trimmed, nil
+}
+
+// ValidFeishuAppID reports whether a value has the shape Feishu hands out for an App ID. The console
+// checks it before storing a company, so a typo is refused while the operator is still looking at the
+// form instead of surfacing on the first sync.
+func ValidFeishuAppID(appID string) bool {
+	return feishuAppIDRE.MatchString(strings.TrimSpace(appID))
 }
 
 // validateFeishu checks the identity block. Everything is checked only while the feature

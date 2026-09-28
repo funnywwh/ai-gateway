@@ -115,6 +115,31 @@ type FeishuPersonAdmin interface {
 	DeleteFeishuPersonLinksByApp(ctx context.Context, appID string) (int, error)
 }
 
+// FeishuCompanyAdmin is the console-managed company registry (M93): the rows that let an operator
+// onboard a client company without editing the configuration file. The deployment's own
+// application never appears here — it lives in feishu.app_id.
+//
+// The port never sees a plaintext secret: sealed bytes travel as opaque blobs between this layer
+// and the table (FeishuCompanySecrets does the sealing).
+type FeishuCompanyAdmin interface {
+	ListFeishuApps(ctx context.Context) ([]*domain.FeishuApp, error)
+	GetFeishuApp(ctx context.Context, id int64) (*domain.FeishuApp, error)
+	GetFeishuAppByAppID(ctx context.Context, appID string) (*domain.FeishuApp, error)
+	UpsertFeishuApp(ctx context.Context, app *domain.FeishuApp) (int64, error)
+	SetFeishuAppEnabled(ctx context.Context, id int64, enabled bool, by string) error
+	DeleteFeishuApp(ctx context.Context, id int64) (bool, error)
+	CountFeishuAppData(ctx context.Context, appID string) (nodes, links int, err error)
+}
+
+// FeishuCompanySecrets seals and opens one company's Feishu application secret. Only the paths that
+// build a Feishu client call Open; its result is never put into a payload, a log line or an audit
+// entry.
+type FeishuCompanySecrets interface {
+	Ready() bool
+	Seal(appRowID int64, secret string) ([]byte, error)
+	Open(appRowID int64, ciphertext []byte) (string, error)
+}
+
 // HookAdmin manages outbound event sinks.
 type HookAdmin interface {
 	ListHooks(ctx context.Context) ([]*domain.Hook, error)

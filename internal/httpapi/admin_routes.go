@@ -1157,8 +1157,60 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/org/feishu/companies", Handler: s.handleAdminListFeishuCompanies,
 			Name: "admin_list_feishu_companies", Group: groupOrg, Role: roleViewer,
-			Summary: "列出可导入组织架构的公司（M92）：每行给出 app_id、公司名、是否本部署的身份应用、" +
-				"该公司节点（已存在 / 本次会创建）、已导入的节点数与已映射账号数",
+			Summary: "列出可导入组织架构的公司（M92；M93 起含控制台登记的公司）：每行给出 id、app_id、公司名、" +
+				"来源（身份应用/配置/控制台）、启停、密钥是否已配置、公司节点、节点数与已映射账号数",
+			Notes: "身份应用（feishu.app_id）与 feishu.companies 登记的公司在这一页是只读的；" +
+				"控制台登记的公司用 admin_create_feishu_company / admin_update_feishu_company / " +
+				"admin_delete_feishu_company 管理。**响应里永远没有密钥材料**，只有 secret_configured 布尔值。",
+		},
+		{
+			Method: "POST", Path: "/admin/api/v1/org/feishu/companies", Handler: s.handleAdminCreateFeishuCompany,
+			Name: "admin_create_feishu_company", Group: groupOrg, Role: roleAdmin,
+			Summary:   "登记一家客户公司（其飞书自建应用），当场即可用于组织架构导入，不必改配置重启网关",
+			Dangerous: true, ConfirmReason: "会保存这家公司的 App Secret（加密落库）并用它去读那家公司的通讯录：之后一次「同步飞书」就能把该公司的部门与人员导入本地组织树",
+			Body: []adminField{
+				bodyRequired("name", "string", "公司展示名，也是它公司节点的默认名；≤64 字符、不得以 cli_ 开头，且与其它公司重名会 409"),
+				bodyRequired("app_id", "string", "该公司自己的飞书自建应用 App ID（cli_…）。创建后不可更改：它是已导入节点与人员映射的归属键"),
+				bodyRequired("app_secret", "string", "该应用的 App Secret。**加密落库**（AES-256-GCM，credentials_key），永不回显、不进日志与审计；部署未配置 credentials_key 时会 400 并提示改用 feishu.companies"),
+				bodyOptional("root_node", "string", "本地公司根节点名（默认 = name；可指向已建好的同名根节点）"),
+				bodyOptional("note", "string", "备注"),
+				bodyOptional("enabled", "boolean", "默认 true；false = 先登记但暂不参与同步"),
+			},
+		},
+		{
+			Method: "PATCH", Path: "/admin/api/v1/org/feishu/companies/{id}", Handler: s.handleAdminUpdateFeishuCompany,
+			Name: "admin_update_feishu_company", Group: groupOrg, Role: roleAdmin,
+			Summary:   "改一家控制台登记的公司的名称/根节点名/备注/启停，或替换它的 App Secret（只改传入的字段）",
+			Dangerous: true, ConfirmReason: "改名称或根节点名会改变同步时认领/新建的公司节点；替换密钥会立即用新密钥读该公司的通讯录；停用会让该公司从同步下拉消失（数据保留）",
+			Params: []adminField{pathParam("id", "公司登记的数字 id（admin_list_feishu_companies 的 data[].id）")},
+			Body: []adminField{
+				bodyOptional("name", "string", "新名称（≤64 字符，与其它公司重名会 409）"),
+				bodyOptional("root_node", "string", "新的本地公司根节点名（空字符串 = 回到用名称）"),
+				bodyOptional("note", "string", "备注"),
+				bodyOptional("enabled", "boolean", "false = 停用：不出现在同步下拉、按 app_id/名字解析时 400，节点与映射保留"),
+				bodyOptional("app_secret", "string", "替换 App Secret（省略 = 保持不变）。同样加密落库、不回显；审计只记 secret_changed"),
+			},
+		},
+		{
+			Method: "DELETE", Path: "/admin/api/v1/org/feishu/companies/{id}", Handler: s.handleAdminDeleteFeishuCompany,
+			Name: "admin_delete_feishu_company", Group: groupOrg, Role: roleAdmin,
+			Summary: "删除一家控制台登记的公司的**登记**（节点、成员关系与人员映射都保留）；响应回报仍留存的节点数与映射数",
+			Dangerous: true, ConfirmReason: "只删登记，不删数据：已导入的组织节点、成员关系与人员映射都保留，重新登记同一 app_id 会重新认领它们。要清数据另用 admin_purge_feishu_company_links 与 admin_delete_org_node",
+			Params: []adminField{pathParam("id", "公司登记的数字 id")},
+		},
+		{
+			Method: "POST", Path: "/admin/api/v1/org/feishu/companies/probe", Handler: s.handleAdminProbeFeishuCompany,
+			Name: "admin_probe_feishu_company", Group: groupOrg, Role: roleAdmin,
+			Summary: "测试连接：用给定（或已保存的）密钥读一小段通讯录，回答 密钥被拒 / 缺两个只读权限 / 可读；不写任何数据",
+			Notes: "两种用法：body.id = 用该登记已保存的密钥；或 body.app_id + body.app_secret = 还没保存就试。" +
+				"成功回答 {ok:true,stage:ok,departments_seen,names_available,samples}；" +
+				"失败也是 200 + {ok:false,stage:credentials|permission|names|rate_limited,message}（网络不通才 502）。" +
+				"**明文密钥只用于本次探测**：不落库、不回显、不进日志与审计。",
+			Body: []adminField{
+				bodyOptional("id", "integer", "已登记公司的数字 id：用它保存的密钥探测"),
+				bodyOptional("app_id", "string", "还没保存时直接给 App ID（cli_…）"),
+				bodyOptional("app_secret", "string", "还没保存时直接给 App Secret（只用于本次探测，不落库、不回显、不进日志与审计）"),
+			},
 		},
 		{
 			Method: "GET", Path: "/admin/api/v1/org/feishu/directory", Handler: s.handleAdminListFeishuDirectory,

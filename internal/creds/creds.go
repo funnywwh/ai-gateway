@@ -1,6 +1,15 @@
-// Package creds encrypts provider credentials at rest with AES-256-GCM.
-// The key comes from configuration (credentials_key); a provider id is bound as
-// additional authenticated data so one provider's ciphertext cannot be replayed for another.
+// Package creds encrypts secrets at rest with AES-256-GCM.
+// The key comes from configuration (credentials_key); the row id the secret belongs to is bound as
+// additional authenticated data so one row's ciphertext cannot be replayed for another.
+//
+// Two AAD shapes coexist, and they are deliberately not interchangeable:
+//
+//   - Encrypt/Decrypt (no scope) is the original provider-credential form. Providers still use it,
+//     and their stored ciphertext is never re-sealed — changing the AAD would make every existing
+//     row unreadable.
+//   - EncryptScoped/DecryptScoped namespaces the AAD with a scope string (M93, first used by the
+//     console-managed Feishu companies). Without it, a provider credential and a company secret
+//     whose numeric ids happen to match would be swappable between tables.
 package creds
 
 import (
@@ -18,8 +27,35 @@ func DeriveKey(passphrase string) []byte {
 	return sum[:]
 }
 
-// Encrypt seals plaintext for one provider.
+// Encrypt seals plaintext for one provider (the legacy, unscoped AAD).
 func Encrypt(key []byte, providerID int64, plaintext []byte) ([]byte, error) {
+	return seal(key, aad(providerID), plaintext)
+}
+
+// Decrypt opens ciphertext produced by Encrypt.
+func Decrypt(key []byte, providerID int64, ciphertext []byte) ([]byte, error) {
+	return open(key, aad(providerID), ciphertext)
+}
+
+// EncryptScoped seals plaintext for one row of one scope ("feishu_app", say). Callers that own a
+// new kind of secret must use this instead of Encrypt: sharing the AAD space across tables is what
+// makes ciphertexts replayable between them.
+func EncryptScoped(key []byte, scope string, id int64, plaintext []byte) ([]byte, error) {
+	if scope == "" {
+		return nil, fmt.Errorf("creds: scope is required")
+	}
+	return seal(key, scopedAAD(scope, id), plaintext)
+}
+
+// DecryptScoped opens ciphertext produced by EncryptScoped for the same scope and id.
+func DecryptScoped(key []byte, scope string, id int64, ciphertext []byte) ([]byte, error) {
+	if scope == "" {
+		return nil, fmt.Errorf("creds: scope is required")
+	}
+	return open(key, scopedAAD(scope, id), ciphertext)
+}
+
+func seal(key, additional []byte, plaintext []byte) ([]byte, error) {
 	if len(key) == 0 {
 		return nil, fmt.Errorf("creds: encryption key is empty")
 	}
@@ -31,11 +67,10 @@ func Encrypt(key []byte, providerID int64, plaintext []byte) ([]byte, error) {
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("creds: nonce: %w", err)
 	}
-	return gcm.Seal(nonce, nonce, plaintext, aad(providerID)), nil
+	return gcm.Seal(nonce, nonce, plaintext, additional), nil
 }
 
-// Decrypt opens ciphertext produced by Encrypt.
-func Decrypt(key []byte, providerID int64, ciphertext []byte) ([]byte, error) {
+func open(key, additional, ciphertext []byte) ([]byte, error) {
 	if len(key) == 0 {
 		return nil, fmt.Errorf("creds: encryption key is empty")
 	}
@@ -50,7 +85,7 @@ func Decrypt(key []byte, providerID int64, ciphertext []byte) ([]byte, error) {
 		return nil, fmt.Errorf("creds: ciphertext too short")
 	}
 	nonce, body := ciphertext[:gcm.NonceSize()], ciphertext[gcm.NonceSize():]
-	plaintext, err := gcm.Open(nil, nonce, body, aad(providerID))
+	plaintext, err := gcm.Open(nil, nonce, body, additional)
 	if err != nil {
 		return nil, fmt.Errorf("creds: decrypt: %w", err)
 	}
@@ -69,8 +104,21 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 	return gcm, nil
 }
 
+// aad is the legacy provider form: the row id alone. It is kept byte-for-byte so every provider
+// credential written before scopes existed keeps decrypting.
 func aad(providerID int64) []byte {
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], uint64(providerID))
 	return buf[:]
+}
+
+// scopedAAD is "scope, 0x00, row id": the scope keeps two tables' ciphertexts apart even when the
+// numeric ids coincide, and the NUL separator keeps ("a", 1) from colliding with ("a\x001", 0).
+func scopedAAD(scope string, id int64) []byte {
+	out := make([]byte, 0, len(scope)+1+8)
+	out = append(out, scope...)
+	out = append(out, 0)
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], uint64(id))
+	return append(out, buf[:]...)
 }

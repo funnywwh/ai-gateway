@@ -77,7 +77,7 @@ func (s *Server) handleAdminListOrgNodes(w http.ResponseWriter, r *http.Request)
 	}
 
 	index := orgtree.NewIndex(nodes)
-	companyNames := s.companyNameMap()
+	companyNames := s.companyNameMap(r.Context())
 	out := make([]map[string]any, 0, len(nodes))
 	for _, node := range index.Ordered() {
 		entry := orgNodeJSON(node, index, len(membersByNode[node.ID]), companyNames)
@@ -173,7 +173,7 @@ func (s *Server) handleAdminCreateOrgNode(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, apiErr)
 		return
 	}
-	writeJSON(w, http.StatusCreated, orgNodeJSON(node, index, 0, s.companyNameMap()))
+	writeJSON(w, http.StatusCreated, orgNodeJSON(node, index, 0, s.companyNameMap(r.Context())))
 }
 
 func (s *Server) handleAdminPatchOrgNode(w http.ResponseWriter, r *http.Request) {
@@ -264,7 +264,7 @@ func (s *Server) handleAdminPatchOrgNode(w http.ResponseWriter, r *http.Request)
 		writeAPIError(w, apiErr)
 		return
 	}
-	writeJSON(w, http.StatusOK, orgNodeJSON(node, index, 0, s.companyNameMap()))
+	writeJSON(w, http.StatusOK, orgNodeJSON(node, index, 0, s.companyNameMap(r.Context())))
 }
 
 func (s *Server) handleAdminDeleteOrgNode(w http.ResponseWriter, r *http.Request) {
@@ -558,16 +558,6 @@ func orgNodeJSON(node *domain.OrgNode, index *orgtree.Index, accountCount int, c
 		"created_at":    node.CreatedAt.UTC().Format(time.RFC3339),
 		"updated_at":    node.UpdatedAt.UTC().Format(time.RFC3339),
 	}
-}
-
-// companyNameMap maps every configured company's app id to its display name.
-func (s *Server) companyNameMap() map[string]string {
-	companies := s.feishuCompanies()
-	out := make(map[string]string, len(companies))
-	for i := range companies {
-		out[companies[i].AppID] = companies[i].Name
-	}
-	return out
 }
 
 // renderOrgPath builds the "根/…/自身" label path.

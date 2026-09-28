@@ -80,37 +80,6 @@ func (s *Server) invalidateFeishuDirectory() {
 	s.feishuDirMu.Unlock()
 }
 
-// feishuCompanies is the company list every org-sync endpoint resolves its `company` parameter
-// against. A deployment whose dependencies predate M92 (an older test fixture) has no list and
-// therefore behaves as the single-company deployment M70 supported.
-func (s *Server) feishuCompanies() []feishu.Company {
-	deps := s.deps.Feishu
-	if deps == nil {
-		return nil
-	}
-	if len(deps.Companies) > 0 {
-		return deps.Companies
-	}
-	if deps.Client != nil {
-		return []feishu.Company{{
-			AppID: deps.Client.AppID, Name: "本公司", RootName: "本公司", Identity: true, Client: deps.Client,
-		}}
-	}
-	return nil
-}
-
-// resolveFeishuCompany turns the request's company parameter (an app id or a company name) into
-// one company. An empty token is the identity application, which is what keeps every M70/M72
-// caller — scripts, MCP clients, the console's account binding — working unchanged.
-func (s *Server) resolveFeishuCompany(w http.ResponseWriter, token string) (*feishu.Company, bool) {
-	company, err := feishu.FindCompany(s.feishuCompanies(), token)
-	if err != nil {
-		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
-		return nil, false
-	}
-	return company, true
-}
-
 // feishuDirectoryGate is the shared pre-flight of all five endpoints: Feishu configured, the
 // actor an administrator, and the stores present.
 type feishuDirectoryGate struct {
@@ -839,7 +808,7 @@ func (s *Server) handleAdminListFeishuDirectory(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
-	company, ok := s.resolveFeishuCompany(w, r.URL.Query().Get("company"))
+	company, ok := s.resolveFeishuCompany(w, r, r.URL.Query().Get("company"))
 	if !ok {
 		return
 	}
@@ -1204,7 +1173,7 @@ func (s *Server) handleAdminSyncFeishuOrg(w http.ResponseWriter, r *http.Request
 	if companyToken == "" {
 		companyToken = r.URL.Query().Get("company")
 	}
-	company, ok := s.resolveFeishuCompany(w, companyToken)
+	company, ok := s.resolveFeishuCompany(w, r, companyToken)
 	if !ok {
 		return
 	}
@@ -1560,7 +1529,7 @@ func (s *Server) handleAdminCreateAccountFromFeishuUser(w http.ResponseWriter, r
 	if !ok {
 		return
 	}
-	company, ok := s.resolveFeishuCompany(w, r.URL.Query().Get("company"))
+	company, ok := s.resolveFeishuCompany(w, r, r.URL.Query().Get("company"))
 	if !ok {
 		return
 	}
@@ -1651,7 +1620,7 @@ func (s *Server) handleAdminBindAccountFeishuUser(w http.ResponseWriter, r *http
 	if !ok {
 		return
 	}
-	company, ok := s.resolveFeishuCompany(w, r.URL.Query().Get("company"))
+	company, ok := s.resolveFeishuCompany(w, r, r.URL.Query().Get("company"))
 	if !ok {
 		return
 	}
@@ -1748,7 +1717,7 @@ func (s *Server) handleAdminUnbindAccountFeishuUser(w http.ResponseWriter, r *ht
 	if !ok {
 		return
 	}
-	company, ok := s.resolveFeishuCompany(w, r.URL.Query().Get("company"))
+	company, ok := s.resolveFeishuCompany(w, r, r.URL.Query().Get("company"))
 	if !ok {
 		return
 	}

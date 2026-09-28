@@ -67,30 +67,6 @@ func NewCompanyClient(base config.Feishu, appID, secret string) *Client {
 	}
 }
 
-// FindCompany resolves a `company` parameter: an app id or a company name, exact after trimming.
-// An empty token is the identity application, which is what keeps M70/M72 callers — scripts, MCP
-// clients, the console's account binding — working unchanged.
-func FindCompany(list []Company, token string) (*Company, error) {
-	if len(list) == 0 {
-		return nil, fmt.Errorf("this deployment has no Feishu company configured")
-	}
-	token = strings.TrimSpace(token)
-	if token == "" {
-		for i := range list {
-			if list[i].Identity {
-				return &list[i], nil
-			}
-		}
-		return &list[0], nil
-	}
-	for i := range list {
-		if list[i].AppID == token || list[i].Name == token {
-			return &list[i], nil
-		}
-	}
-	return nil, fmt.Errorf("unknown company %q; known companies: %s", token, DescribeCompanies(list))
-}
-
 // DescribeCompanies renders the company list for an error message or a log line: name and app id,
 // so an operator can tell which value to pass. Secrets never appear here (there is nothing to
 // redact: the list carries none).

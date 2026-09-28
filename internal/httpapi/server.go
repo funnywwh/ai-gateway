@@ -183,8 +183,15 @@ type Deps struct {
 	// FeishuPeople is the company-scoped Feishu person ↔ account mapping of the directory sync
 	// (M92). A nil port makes the company-scoped routes answer 400 unsupported_parameter, the
 	// same convention every unwired port follows.
-	FeishuPeople  FeishuPersonAdmin
-	HookStore     HookAdmin
+	FeishuPeople FeishuPersonAdmin
+	// FeishuApps and FeishuAppSecrets are the console-managed company registry (M93): the rows and
+	// the sealing of their application secrets. A nil FeishuApps leaves the company list
+	// configuration-only (exactly what M92 shipped), and a nil FeishuAppSecrets makes the write
+	// paths answer 400 with the reason — which is what a deployment without credentials_key should
+	// say rather than storing a secret in the clear.
+	FeishuApps       FeishuCompanyAdmin
+	FeishuAppSecrets FeishuCompanySecrets
+	HookStore        HookAdmin
 	MCPTokenStore MCPTokenAdmin
 	Settings      SettingsAdmin
 	// Secrets seals provider credentials; Prober exercises providers out of band.

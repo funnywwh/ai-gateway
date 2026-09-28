@@ -37,7 +37,7 @@ const MEMBER_COLUMNS = [
   { key: 'ops', label: '操作', cls: 'c-ops' },
 ];
 
-export async function render({ page, actions, session }) {
+export async function render({ page, actions, session, route, navigate }) {
   const readonly = session.role !== 'admin';
   const refreshBtn = el('button', { class: 'btn', text: '刷新' });
   const createRoot = el('button', { class: 'btn btn-primary', text: '新建根节点', disabled: readonly });
@@ -92,7 +92,10 @@ export async function render({ page, actions, session }) {
   collapseAll.addEventListener('click', () => mainTree.collapseAll());
   createRoot.addEventListener('click', () => createNode(null));
   // 同步完成后整页重载：同步会创建节点、改变账号归属，树与成员数都要重新读。
-  syncFeishu.addEventListener('click', () => openFeishuSync({ onDone: (changed) => { if (changed) load(); } }));
+  // ?company= comes from the company page's 同步 action (M93): open the dialog on that company.
+  const wantedCompany = (route && route.params && route.params.get('company')) || '';
+  const openSync = () => openFeishuSync({ company: wantedCompany, navigate, onDone: (changed) => { if (changed) load(); } });
+  syncFeishu.addEventListener('click', openSync);
 
   function metaFor(node) {
     const parts = [];

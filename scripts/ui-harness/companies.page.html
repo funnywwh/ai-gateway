@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>companies console harness</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div id="app"></div>
+<div id="actions" class="toolbar"></div>
+<div id="page"></div>
+<div id="modal-root"></div>
+<div id="toasts" class="toasts"></div>
+<script>
+// 「公司」页（M93）的真实渲染走查。
+//
+// 这个 harness 页不嵌 fixtures.json：公司注册表的数据形状窄而自洽（列表 + 三个写动作），
+// 就地写一份 stub 比往全局快照里塞三个新端点更可读，也和 org_feishu.page.html 一样——
+// 它验证的是"界面拿到这些数据会渲染成什么"以及"它发出去的请求长什么样"。
+//
+// 两个视图：
+//   companies           管理员：列表、来源徽标、停用行、新建对话框、探测请求、删除确认
+//   companies-readonly  只读角色：新建/编辑/删除全部不可用
+const view = location.hash.replace('#', '') || 'companies';
+
+const COMPANIES = [
+  { id: null, app_id: 'cli_aaa', name: '本公司', identity: true, source: 'identity', enabled: true,
+    note: '', secret_configured: true, client_ready: true, client_error: '', shadowed_by_config: false,
+    warnings: [], root_node_id: 1, root_node_name: '本公司', root_will_create: false, root_blocked: false,
+    company_nodes: 3, linked_accounts: 5 },
+  { id: 2, app_id: 'cli_bbb', name: '某某科技', identity: false, source: 'console', enabled: true,
+    note: '客户 A', secret_configured: true, client_ready: true, client_error: '', shadowed_by_config: false,
+    warnings: [], root_node_id: null, root_node_name: '某某科技', root_will_create: true, root_blocked: false,
+    company_nodes: 2, linked_accounts: 1 },
+  { id: 3, app_id: 'cli_ccc', name: '停用公司', identity: false, source: 'console', enabled: false,
+    note: '', secret_configured: true, client_ready: true, client_error: '', shadowed_by_config: false,
+    warnings: [], root_node_id: null, root_node_name: '停用公司', root_will_create: true, root_blocked: false,
+    company_nodes: 0, linked_accounts: 0 },
+];
+
+window.fetch = async (url, options) => {
+  const target = String(url);
+  const path = target.replace(/^.*\/admin\/api\/v1/, '').split('?')[0];
+  const method = ((options && options.method) || 'GET').toUpperCase();
+  window.__calls = (window.__calls || []).concat([method + ' ' + target]);
+  if (options && options.body) window.__sent = (window.__sent || []).concat([{ path, method, body: options.body }]);
+  const ok = (payload, status) => ({ ok: true, status: status || 200, text: async () => JSON.stringify(payload) });
+
+  if (path === '/org/feishu/companies' && method === 'GET') {
+    return ok({ data: COMPANIES, count: COMPANIES.length, identity_app_id: 'cli_aaa', secrets_ready: true });
+  }
+  if (path === '/org/feishu/companies' && method === 'POST') {
+    return ok({ ok: true, id: 4, company: { id: 4, name: '新客户' } }, 201);
+  }
+  if (path === '/org/feishu/companies/probe' && method === 'POST') {
+    return ok({ ok: true, stage: 'ok', message: '可读：密钥有效，部门名称也能读到', departments_seen: 4,
+      names_available: true, samples: [{ id: 'od_1', name: '研发部' }] });
+  }
+  if (/^\/org\/feishu\/companies\/\d+$/.test(path)) {
+    if (method === 'PATCH') return ok({ ok: true, id: 2 });
+    if (method === 'DELETE') return ok({ ok: true, deleted: true, id: 2, name: '某某科技', app_id: 'cli_bbb', company_nodes: 2, linked_accounts: 1 });
+  }
+  return ok({ data: [] });
+};
+
+const errors = [];
+window.onerror = (msg) => errors.push('onerror: ' + msg);
+window.onunhandledrejection = (ev) => errors.push('rejection: ' + ev.reason);
+
+function report(data) {
+  data.errors = errors;
+  data.toasts = [...document.querySelectorAll('.toast')].map((n) => n.textContent);
+  const url = '/report?data=' + encodeURIComponent(JSON.stringify(data));
+  try { if (navigator.sendBeacon && navigator.sendBeacon(url)) return; } catch (err) { /* fall through */ }
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', url, false);
+    xhr.send();
+  } catch (err) { /* reporting must never break the harness */ }
+}
+</script>
+<script type="module">
+import { render } from '/js/pages/companies.js';
+
+const checks = {};
+const settle = async () => { for (let i = 0; i < 200; i++) await Promise.resolve(); };
+const page = document.getElementById('page');
+const actions = document.getElementById('actions');
+const find = (label, root) => [...(root || document).querySelectorAll('button')]
+  .find((b) => b.textContent.trim() === label);
+const rows = () => [...document.querySelectorAll('#page tbody tr')];
+
+try {
+  const readonly = view === 'companies-readonly';
+  window.__mockSession = { role: readonly ? 'viewer' : 'admin' };
+  const rendered = render({
+    page, actions, session: { role: readonly ? 'viewer' : 'admin' },
+    navigate: (path) => { window.__navigated = path; },
+  });
+  if (rendered && typeof rendered.then === 'function') await rendered;
+  await settle();
+
+  checks.tableRendered = rows().length === 3;
+  const bodyText = document.getElementById('page').textContent;
+  checks.identityRowLabelled = bodyText.includes('身份应用');
+  checks.consoleRowLabelled = bodyText.includes('控制台');
+  checks.disabledRowMarked = bodyText.includes('已停用');
+  checks.pendingRootExplained = bodyText.includes('未建（同步时新建「某某科技」）');
+  checks.secretNeverShown = !bodyText.includes('secret');
+  checks.createOffered = !!find('新建公司', actions) && find('新建公司', actions).disabled === readonly;
+
+  // 「同步」带着公司跳到组织架构页（深链接）。
+  const syncButton = rows().length ? find('同步', rows()[1]) : null;
+  if (syncButton) {
+    syncButton.click();
+    await settle();
+    checks.syncDeepLink = window.__navigated === '/org?company=cli_bbb';
+  }
+
+  // 「测试连接」只发 id：已保存的密钥留在服务端。
+  const probeButton = rows().length ? find('测试连接', rows()[1]) : null;
+  if (probeButton) {
+    probeButton.click();
+    await settle();
+    const probeCall = (window.__sent || []).filter((call) => call.path === '/org/feishu/companies/probe').pop();
+    checks.probeSendsOnlyID = !!probeCall && JSON.parse(probeCall.body).id === 2
+      && JSON.parse(probeCall.body).app_secret === undefined;
+    checks.probeReported = [...document.querySelectorAll('.toast')].some((node) => node.textContent.includes('研发部'));
+  }
+
+  // 新建对话框：六个字段、密钥是 password、没有预填值。
+  const createButton = find('新建公司', actions);
+  if (createButton && !readonly) {
+    createButton.click();
+    await settle();
+    const fields = [...document.querySelectorAll('#modal-root input, #modal-root select')];
+    checks.createDialogFields = fields.length >= 5;
+    const password = fields.find((input) => input.type === 'password');
+    checks.secretFieldIsPassword = !!password && password.value === '';
+    checks.createDialogHasProbe = !!find('先测试连接', document.getElementById('modal-root'));
+  }
+
+  report({ view, checks, errors });
+} catch (err) {
+  report({ view, checks, fatal: String(err && err.stack ? err.stack : err) });
+}
+</script>
+</body>
+</html>

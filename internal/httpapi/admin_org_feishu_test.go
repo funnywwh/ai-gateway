@@ -116,6 +116,10 @@ func newOrgFeishuFixture(t *testing.T) *orgFeishuFixture {
 	f := &orgFeishuFixture{feishuFixture: newFeishuFixture(t), dir: newDirStub(t)}
 	f.api.deps.Feishu.Client.TenantTokenURL = f.dir.server.URL + "/tenant-token"
 	f.api.deps.Feishu.Client.ContactURL = f.dir.server.URL + "/contact/v3"
+	// M93: console-registered companies build their clients from the configuration block, so the
+	// stub endpoints have to live there too (the identity client above is a shortcut).
+	f.api.deps.Config.Feishu.TenantTokenURL = f.dir.server.URL + "/tenant-token"
+	f.api.deps.Config.Feishu.ContactURL = f.dir.server.URL + "/contact/v3"
 	// M92: the identity application is always company #1. The fixture states it explicitly (the
 	// server can derive it from the client, but a test that depends on a fallback is a test that
 	// cannot tell the fallback from the feature).

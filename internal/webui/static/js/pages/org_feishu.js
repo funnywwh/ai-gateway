@@ -30,7 +30,7 @@ const CHANNEL_LABEL = {
   manual: '手工绑定',
 };
 
-export function openFeishuSync({ onDone } = {}) {
+export function openFeishuSync({ onDone, company, navigate } = {}) {
   const state = {
     payload: null,
     selectedDept: ROOT_ID,
@@ -39,9 +39,9 @@ export function openFeishuSync({ onDone } = {}) {
     loading: false,
     changed: false,
     // Which company this dialog is importing (M92): an app id, or '' for the deployment's own
-    // application. The company list comes from the configuration, so the dropdown is the only
-    // place the operator chooses it.
-    company: '',
+    // application. The registry has two sources (configuration and the console page, M93), so the
+    // dropdown — or the ?company= the company page passes in — is the only place it is chosen.
+    company: company || '',
     companies: [],
     // The departments this run will cover (design §12 D8–D15). Ids, plus the virtual root
     // "0" for the company-level people. seeded flips once the first payload has been read, so
@@ -156,7 +156,13 @@ export function openFeishuSync({ onDone } = {}) {
     try {
       const payload = await api.get('/org/feishu/companies');
       state.companies = payload.data || [];
-      state.company = payload.identity_app_id || (state.companies[0] || {}).app_id || '';
+      // A preselected company (?company=) wins as long as it is still in the list and enabled;
+      // otherwise fall back to the identity application, which is the M70 default.
+      const wanted = state.company;
+      const usable = state.companies.some((row) => row.app_id === wanted && row.enabled !== false);
+      if (!usable) {
+        state.company = payload.identity_app_id || (state.companies[0] || {}).app_id || '';
+      }
       renderCompanies();
     } catch (err) {
       // The dialog still works without the list (the server falls back to the identity
@@ -171,7 +177,9 @@ export function openFeishuSync({ onDone } = {}) {
   function renderCompanies() {
     companyHost.replaceChildren();
     if (state.companies.length < 2) return;
-    companySelect.replaceChildren(...state.companies.map((company) => el('option', {
+    // Only enabled companies are offered: a paused one has no directory to read (M93).
+    const usable = state.companies.filter((company) => company.enabled !== false);
+    companySelect.replaceChildren(...usable.map((company) => el('option', {
       value: company.app_id,
       text: company.name + (company.identity ? '（本公司）' : ''),
     })));
@@ -179,6 +187,22 @@ export function openFeishuSync({ onDone } = {}) {
     companyHost.append(el('label', { class: 'feishu-inline-check' }, [
       el('span', { class: 'muted', text: '公司：' }), companySelect,
     ]));
+    // The registry itself lives on its own page; the dialog stays about "this run".
+    companyHost.append(el('button', {
+      class: 'btn btn-link', text: '管理公司…',
+      onclick: () => { close(); goCompanies(); },
+    }));
+  }
+
+  // goCompanies leaves the dialog for the company registry page (M93). The page's router navigate
+  // is used when the caller provided it (the console does); the hash is the same contract the
+  // router listens to, which keeps the dialog usable from a harness without the shell.
+  function goCompanies() {
+    if (typeof navigate === 'function') {
+      navigate('/companies');
+      return;
+    }
+    window.location.hash = '#/companies';
   }
 
   // companyQuery is how the per-person calls address a person unambiguously: an open id is only

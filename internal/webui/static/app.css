@@ -556,3 +556,10 @@ textarea.form-input { resize:vertical; min-height:64px; }
 .feishu-picker-row input[type=radio] { flex:0 0 auto; width:15px; height:15px; margin:0; accent-color:var(--accent); }
 .feishu-picker-name { flex:0 1 auto; min-width:0; overflow-wrap:anywhere; }
 .feishu-picker-id { flex:0 0 auto; }
+
+/* 「公司」页（M93）：一行是一家公司的登记，密钥状态与来源都写在行内。 */
+.org-company-cell { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.org-company-name { font-weight:600; }
+.org-company-warning { flex-basis:100%; font-size:12px; }
+.org-company-notice { margin-top:10px; font-size:12.5px; line-height:1.6; }
+.org-company-notice strong { margin-right:2px; }

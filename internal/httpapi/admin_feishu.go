@@ -1128,7 +1128,7 @@ func (s *Server) handleAdminBindAccountFeishu(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": result,
 		"account": map[string]any{"id": account.ID, "name": account.Name},
 		"feishu": accountFeishuJSON(&domain.Account{FeishuOpenID: openID, FeishuName: strings.TrimSpace(body.Name)},
-			accountJSONContext{Companies: s.feishuCompanies()}),
+			accountJSONContext{Companies: s.feishuCompaniesForDisplay(r.Context())}),
 	})
 }
 

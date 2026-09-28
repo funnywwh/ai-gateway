@@ -19,6 +19,7 @@ import (
 	"github.com/funnywwh/ai-gateway/internal/balancer"
 	"github.com/funnywwh/ai-gateway/internal/billing"
 	"github.com/funnywwh/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/creds"
 	"github.com/funnywwh/ai-gateway/internal/domain"
 	"github.com/funnywwh/ai-gateway/internal/mcpsrv"
 	"github.com/funnywwh/ai-gateway/internal/pricing"
@@ -255,7 +256,11 @@ func newAdminFixtureWith(t *testing.T, unwired string, mutate func(*Deps)) *admi
 		Tags:           db,
 		Org:            db,
 		FeishuPeople:   db,
-		HookStore:      db,
+		// M93: the console-managed company registry uses the real store and the real scoped sealer,
+		// so "the secret is encrypted at rest" is asserted against the crypto that ships.
+		FeishuApps:       db,
+		FeishuAppSecrets: creds.NewCompanySealer(creds.DeriveKey("fixture-credentials-key")),
+		HookStore:        db,
 		MCPTokenStore:  db,
 		Settings:       db,
 		Secrets:        sealer,

@@ -180,7 +180,11 @@ export function modalActions(children) {
 }
 
 // modal renders a form and resolves with the collected values, or null on cancel.
-export function modal({ title, fields, submitLabel, onSubmit, wide }) {
+//
+// extraActions are optional footer buttons that receive the same collected values as onSubmit but do
+// not close the dialog — for "check it before saving" style actions (M93). A failure is reported in
+// the same error line as a failed submit, so a thrown error never loses the operator's input.
+export function modal({ title, fields, submitLabel, onSubmit, extraActions, wide }) {
   return new Promise((resolve) => {
     const root = document.getElementById('modal-root');
     const body = el('div', {}, fields.map(renderField));
@@ -200,11 +204,30 @@ export function modal({ title, fields, submitLabel, onSubmit, wide }) {
         submit.disabled = false;
       }
     });
+    const extras = (extraActions || []).map((action) => {
+      const button = el('button', { class: 'btn', text: action.label });
+      button.addEventListener('click', async () => {
+        const values = collect(fields, body);
+        if (!values) return;
+        button.disabled = true;
+        try {
+          await action.onClick(values);
+          error.textContent = '';
+          error.className = 'muted';
+        } catch (err) {
+          error.textContent = err && err.message ? err.message : String(err);
+          error.className = 'toast error';
+        } finally {
+          button.disabled = false;
+        }
+      });
+      return button;
+    });
     const cancel = el('button', { class: 'btn', text: '取消', onclick: () => close(null) });
     const dialog = el('div', { class: 'modal', style: wide ? 'width:min(900px,100%)' : '' }, [
       modalHead(title, () => close(null)),
       modalBody([body, error]),
-      modalActions([cancel, submit]),
+      modalActions([cancel, ...extras, submit]),
     ]);
     const backdrop = el('div', { class: 'modal-backdrop' }, [dialog]);
     backdrop.addEventListener('click', (ev) => { if (ev.target === backdrop) close(null); });
