@@ -281,6 +281,13 @@ func (s *Server) handleAdminListFeishuCompanies(w http.ResponseWriter, r *http.R
 		writeAPIError(w, domain.ErrUnsupported("feishu is not enabled on this deployment"))
 		return
 	}
+	// Any authenticated administrator may read the list (the route's role is viewer, not admin).
+	// The session check belongs here, in the handler: the route table's Role is what `admin_describe`
+	// and the MCP bridge match against, it is not HTTP middleware. Without this line the endpoint
+	// answered anyone who could reach the port — found on the live deployment on 2026-09-28.
+	if _, ok := s.adminActor(w, r, false); !ok {
+		return
+	}
 	orgStore, ok := portReady(w, s.deps.Org, "organization management")
 	if !ok {
 		return

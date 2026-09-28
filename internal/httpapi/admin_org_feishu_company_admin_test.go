@@ -428,3 +428,34 @@ func TestFeishuCompanyPurgeLinksStillWorks(t *testing.T) {
 // feishuCompanyForTest keeps the imported feishu package referenced from this file even if a future
 // edit stops using it inline.
 var _ = feishu.RootDepartmentID
+
+// Every company-registry route must refuse an anonymous caller. This exists because the list
+// endpoint shipped without the check in M92 and answered anyone who could reach the port (found on
+// the live deployment on 2026-09-28): the route table's Role is what admin_describe and the MCP
+// bridge match against, not HTTP middleware, so each handler has to authenticate itself.
+func TestFeishuCompanyRoutesRequireASession(t *testing.T) {
+	f := newOrgFeishuFixture(t)
+	cases := []struct {
+		method, path, body string
+	}{
+		{http.MethodGet, "/admin/api/v1/org/feishu/companies", ""},
+		{http.MethodPost, "/admin/api/v1/org/feishu/companies", `{"name":"x","app_id":"cli_x","app_secret":"s"}`},
+		{http.MethodPatch, "/admin/api/v1/org/feishu/companies/1", `{"note":"x"}`},
+		{http.MethodDelete, "/admin/api/v1/org/feishu/companies/1", ""},
+		{http.MethodPost, "/admin/api/v1/org/feishu/companies/probe", `{"app_id":"cli_x","app_secret":"s"}`},
+		{http.MethodDelete, "/admin/api/v1/org/feishu/companies/cli_x/links", ""},
+		{http.MethodGet, "/admin/api/v1/org/feishu/directory", ""},
+		{http.MethodPost, "/admin/api/v1/org/feishu/sync", ""},
+		{http.MethodPost, "/admin/api/v1/org/feishu/users/ou_1/account", `{}`},
+		{http.MethodPut, "/admin/api/v1/org/feishu/users/ou_1/account", `{"account_id":1}`},
+		{http.MethodDelete, "/admin/api/v1/org/feishu/users/ou_1/account", ""},
+	}
+	for _, tc := range cases {
+		res := f.call(t, tc.method, tc.path, tc.body, "")
+		status := res.StatusCode
+		res.Body.Close()
+		if status != http.StatusUnauthorized {
+			t.Errorf("%s %s without a session = %d, want 401", tc.method, tc.path, status)
+		}
+	}
+}
