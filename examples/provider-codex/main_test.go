@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // newTestProvider builds a provider wired to the given test servers.

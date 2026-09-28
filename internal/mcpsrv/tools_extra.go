@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/registry"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/registry"
 )
 
 // getDashboard answers the "how is my account doing" question in one call.

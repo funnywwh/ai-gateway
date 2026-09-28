@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // The windowed reads behind the management console's paged lists

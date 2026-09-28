@@ -9,9 +9,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/ids"
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/ids"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // maxQuestionBytes bounds one question. A question is a person typing into a box, so a

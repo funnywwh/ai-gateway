@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
 )
 
 var (

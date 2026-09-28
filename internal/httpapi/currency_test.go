@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/config"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/pricing"
+	"github.com/funnywwh/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/pricing"
 )
 
 // The multi-currency surface has to be checkable in three places: what the console

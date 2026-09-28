@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/config"
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // TestAccountNameUnicodeRoundTrip pins the store side of the rule: an email address or a

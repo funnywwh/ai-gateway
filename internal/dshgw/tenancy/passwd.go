@@ -15,9 +15,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
-	"github.com/winger/ai-gateway/internal/dshgw/sandbox"
-	"github.com/winger/ai-gateway/internal/dshgw/securefile"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/sandbox"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/securefile"
 )
 
 // hostPasswdPath is the host file every tenant view is rendered from.

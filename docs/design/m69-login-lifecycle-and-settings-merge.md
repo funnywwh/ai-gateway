@@ -57,9 +57,9 @@ kind: "design"
    这个形状 dshgw 渲染不出来：渲染器不写 `permission`/`ui-onboarding`，且模型为空时是**删键**
    而不是写空的 `providers` map。即：平台段被租户侧（租户页面的设置保存）写坏，而当时没有任何
    时机把它修回来——该租户的模型页从此是空的。
-2. 其余四户（`dsh-colin`/`dsh-lianchangliang`/`dsh-ranqiliang`/`dsh-yangmiao`）的 `settings.yaml`
+2. 其余四户（`dsh-alex`/`dsh-acct-c`/`dsh-acct-b`/`dsh-liuyang`）的 `settings.yaml`
    只剩 `ui-onboarding`：09:22 启动那轮同步拿到 `models=0`
-   （`data/dshgw-verify/dshgw.log`：`tenant models refreshed before worker start tenant=dsh-colin models=0`），
+   （`data/dshgw-verify/dshgw.log`：`tenant models refreshed before worker start tenant=dsh-alex models=0`），
    渲染器按"空列表 = 平台段为空"删掉了 aigw 段。而现在用它们各自的
    `data/dshgw-verify/state/tenant-config/<t>/gateway.key` 查 aigw 已经有 4 个模型
    （`curl -H "Authorization: Bearer …" http://127.0.0.1:8088/v1/models`）。

@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/winger/ai-gateway/internal/dshgw/aigw"
-	"github.com/winger/ai-gateway/internal/dshgw/config"
-	"github.com/winger/ai-gateway/internal/dshgw/securefile"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/aigw"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/securefile"
 )
 
 type KeySource interface{ Key(string) (string, error) }

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 const codeCols = `id, code_hash, amount_micros, expires_at, redeemed_by_account_id, redeemed_at,

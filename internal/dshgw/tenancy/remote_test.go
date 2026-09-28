@@ -14,12 +14,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/aigw"
-	"github.com/winger/ai-gateway/internal/dshgw/config"
-	"github.com/winger/ai-gateway/internal/dshgw/hostshare"
-	"github.com/winger/ai-gateway/internal/dshgw/nodeclient"
-	"github.com/winger/ai-gateway/internal/dshgw/nodeproto"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/aigw"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/hostshare"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeclient"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeproto"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 // fakeNode is a stand-in worker node: it records which operations the control plane sent and
@@ -574,7 +574,7 @@ func TestRemoteUnreachableIsReportedAsSuch(t *testing.T) {
 }
 
 func TestNodeClientsRequirePlaceholdersToBeReal(t *testing.T) {
-	if _, err := nodeclient.NewSet([]nodeclient.Spec{{Name: "node-a", BaseURL: "192.168.190.87:18400"}}); err == nil {
+	if _, err := nodeclient.NewSet([]nodeclient.Spec{{Name: "node-a", BaseURL: "192.0.2.102:18400"}}); err == nil {
 		t.Fatal("a node without an http:// address must be refused")
 	}
 	if _, err := nodeclient.NewSet([]nodeclient.Spec{{Name: "node-a", BaseURL: "http://x:1"}, {Name: "node-a", BaseURL: "http://y:1"}}); err == nil {

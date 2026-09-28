@@ -7,7 +7,7 @@
 1. **版本可读**：现在判断线上跑的是哪个版本，只能去 `journalctl` 翻启动日志里的 `version=56df9b5`
    ——一个 commit 前缀。要回答「线上是 0.3.0 吗」「这个后端是不是我发布的那个 revision」，
    必须有一个**机器可读的端点**和一个**人眼可见的位置**。
-2. **`response_format` 的语义修正**：线上 gpt001 的 `deepseek` 供应商配了
+2. **`response_format` 的语义修正**：线上 gw-a 的 `deepseek` 供应商配了
    `config.response_format="json_object"`，而 `openai-chat` 把这个值**无条件下发**给每个上游请求
    （`openaichat.go:477`），于是**所有**流量都变成 JSON 模式。DeepSeek 对不含 "json" 字样的提示词
    直接 400：`Prompt must contain the word 'json' in some form to use 'response_format' of type

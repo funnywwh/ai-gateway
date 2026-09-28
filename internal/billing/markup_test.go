@@ -3,7 +3,7 @@ package billing
 import (
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 func TestResolveMarkupPrecedence(t *testing.T) {

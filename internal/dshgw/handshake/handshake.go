@@ -16,9 +16,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/config"
-	"github.com/winger/ai-gateway/internal/dshgw/securefile"
-	"github.com/winger/ai-gateway/internal/dshgw/session"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/securefile"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/session"
 )
 
 type Source interface {

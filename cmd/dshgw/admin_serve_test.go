@@ -3,8 +3,8 @@ package main
 import (
 	"strings"
 
-	"github.com/winger/ai-gateway/internal/dshgw/nodedep"
-	"github.com/winger/ai-gateway/internal/dshgw/nodeproto"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodedep"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeproto"
 
 	"bufio"
 	"context"
@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/config"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 // M52: the admin socket is the console's provisioning channel. The protocol and the
@@ -197,7 +197,7 @@ func TestAdminServerLifecycleOpsAndPeerGate(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("ping: %+v", resp)
 	}
-	resp = adminCall(t, path, adminRequest{ID: 2, Op: "tenant-create", Name: "alice", Account: "李智超(colin)", Key: "sk-gw-test-key-000001", AllowEmptyModels: true})
+	resp = adminCall(t, path, adminRequest{ID: 2, Op: "tenant-create", Name: "alice", Account: "李雷(alex)", Key: "sk-gw-test-key-000001", AllowEmptyModels: true})
 	if !resp.OK || resp.Result["name"] != "alice" {
 		t.Fatalf("create: %+v", resp)
 	}
@@ -206,7 +206,7 @@ func TestAdminServerLifecycleOpsAndPeerGate(t *testing.T) {
 	}
 	// The account label is display data the tenant's sidebar shows (M67): it must survive the
 	// socket hop unchanged, non-ASCII included.
-	if len(ops.accounts) != 1 || ops.accounts[0] != "李智超(colin)" {
+	if len(ops.accounts) != 1 || ops.accounts[0] != "李雷(alex)" {
 		t.Fatalf("account label did not cross the channel: %+v", ops.accounts)
 	}
 	resp = adminCall(t, path, adminRequest{ID: 3, Op: "tenant-stop", Name: "alice"})
@@ -217,7 +217,7 @@ func TestAdminServerLifecycleOpsAndPeerGate(t *testing.T) {
 	if !resp.OK {
 		t.Fatalf("start: %+v", resp)
 	}
-	resp = adminCall(t, path, adminRequest{ID: 5, Op: "tenant-set-key", Name: "alice", Account: "李智超(colin)", Key: "sk-gw-test-key-000002"})
+	resp = adminCall(t, path, adminRequest{ID: 5, Op: "tenant-set-key", Name: "alice", Account: "李雷(alex)", Key: "sk-gw-test-key-000002"})
 	if !resp.OK {
 		t.Fatalf("set-key: %+v", resp)
 	}

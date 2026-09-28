@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/orgtree"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/orgtree"
 )
 
 // This file is the management surface of the organization structure: the node tree and the

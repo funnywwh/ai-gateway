@@ -2,7 +2,7 @@
 
 ## 现场证据
 
-gpt001 请求 `req_ckg3dm644ihnydn7gqxyvhlq` 在 19:41:35 失败，
+gw-a 请求 `req_ckg3dm644ihnydn7gqxyvhlq` 在 19:41:35 失败，
 模型 `gpt-6-astra`，错误 `stream_read_failed`，耗时 7204 ms。
 DSH 会话 `session-b78a7610-61ec-481d-abe8-4e13ab29deb6` 的第 36 步
 已收到 edit 工具的参数增量，随后收到错误并停止；网关未收到终态用量。

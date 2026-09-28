@@ -7,7 +7,7 @@ import (
 )
 
 func TestValidateHostSpec(t *testing.T) {
-	valid := []string{"gpt001", "aipc", "user@host", "user@10.0.0.1", "host.example.com", "h-1_2"}
+	valid := []string{"gw-a", "gw-d", "user@host", "user@10.0.0.1", "host.example.com", "h-1_2"}
 	for _, spec := range valid {
 		if err := ValidateHostSpec(spec); err != nil {
 			t.Errorf("ValidateHostSpec(%q) = %v, want nil", spec, err)
@@ -22,7 +22,7 @@ func TestValidateHostSpec(t *testing.T) {
 }
 
 func TestValidateRemotePath(t *testing.T) {
-	valid := []string{"/", "/home/winger", "/srv/app-1/子目录", "/a/b/..hidden"}
+	valid := []string{"/", "/home/operator", "/srv/app-1/子目录", "/a/b/..hidden"}
 	for _, path := range valid {
 		if err := ValidateRemotePath(path); err != nil {
 			t.Errorf("ValidateRemotePath(%q) = %v, want nil", path, err)
@@ -80,16 +80,16 @@ func TestWithin(t *testing.T) {
 
 func TestMountpointForIsDeterministicAndContained(t *testing.T) {
 	options := Options{MountSubdir: "ssh"}
-	workspace := "/state/workspaces/dsh-colin"
-	mountpoint, err := options.MountpointFor(workspace, "gpt001", "/opt/aigw")
+	workspace := "/state/workspaces/dsh-alex"
+	mountpoint, err := options.MountpointFor(workspace, "gw-a", "/opt/aigw")
 	if err != nil {
 		t.Fatalf("MountpointFor: %v", err)
 	}
-	want := filepath.Join(workspace, "ssh", "gpt001", "opt", "aigw")
+	want := filepath.Join(workspace, "ssh", "gw-a", "opt", "aigw")
 	if mountpoint != want {
 		t.Fatalf("MountpointFor = %q, want %q", mountpoint, want)
 	}
-	again, err := options.MountpointFor(workspace, "gpt001", "/opt/aigw")
+	again, err := options.MountpointFor(workspace, "gw-a", "/opt/aigw")
 	if err != nil || again != mountpoint {
 		t.Fatalf("MountpointFor is not deterministic: %q / %v", again, err)
 	}
@@ -97,14 +97,14 @@ func TestMountpointForIsDeterministicAndContained(t *testing.T) {
 	// validation, and the result is still checked against the workspace.
 	for _, tc := range []struct{ host, remote string }{
 		{"../escape", "/opt"},
-		{"gpt001", "/../../etc"},
-		{"gpt001", "relative"},
+		{"gw-a", "/../../etc"},
+		{"gw-a", "relative"},
 	} {
 		if _, err := options.MountpointFor(workspace, tc.host, tc.remote); err == nil {
 			t.Errorf("MountpointFor(%q, %q) = nil error, want refusal", tc.host, tc.remote)
 		}
 	}
-	if _, err := options.MountpointFor("relative/workspace", "gpt001", "/opt"); err == nil {
+	if _, err := options.MountpointFor("relative/workspace", "gw-a", "/opt"); err == nil {
 		t.Error("MountpointFor accepted a relative workspace")
 	}
 }
@@ -132,32 +132,32 @@ func TestParseSSHConfig(t *testing.T) {
 Host *
   User nobody
 
-Host gpt001
-    HostName gpt001.iotalking.top
+Host gw-a
+    HostName gw-a.example.com
     Port 2222
     User root
     # a nested comment
 
-Host aipc !skipme
-    HostName 192.168.140.252
+Host gw-d !skipme
+    HostName 192.0.2.108
 
-Host gpt001
+Host gw-a
     HostName ignored-second-block
 
 Host sz-test
-    HostName 47.106.94.177   # trailing comment
+    HostName 198.51.100.103   # trailing comment
 `)
 	hosts := ParseSSHConfig(document)
 	if len(hosts) != 3 {
 		t.Fatalf("parsed %d hosts, want 3: %+v", len(hosts), hosts)
 	}
-	if hosts[0].Name != "gpt001" || hosts[0].HostName != "gpt001.iotalking.top" || hosts[0].Port != 2222 || hosts[0].User != "root" {
+	if hosts[0].Name != "gw-a" || hosts[0].HostName != "gw-a.example.com" || hosts[0].Port != 2222 || hosts[0].User != "root" {
 		t.Errorf("first host = %+v", hosts[0])
 	}
-	if hosts[1].Name != "aipc" || hosts[1].HostName != "192.168.140.252" {
+	if hosts[1].Name != "gw-d" || hosts[1].HostName != "192.0.2.108" {
 		t.Errorf("second host = %+v", hosts[1])
 	}
-	if hosts[2].HostName != "47.106.94.177" {
+	if hosts[2].HostName != "198.51.100.103" {
 		t.Errorf("inline comment was not stripped: %+v", hosts[2])
 	}
 }
@@ -167,8 +167,8 @@ func TestPermitsUsesAllowList(t *testing.T) {
 	if err := open.permits("anything"); err != nil {
 		t.Fatalf("an empty allow-list must accept a valid spec, got %v", err)
 	}
-	closed := Options{Hosts: []string{"gpt001", "aipc"}}
-	if err := closed.permits("gpt001"); err != nil {
+	closed := Options{Hosts: []string{"gw-a", "gw-d"}}
+	if err := closed.permits("gw-a"); err != nil {
 		t.Fatalf("allow-listed host refused: %v", err)
 	}
 	if err := closed.permits("elsewhere"); CodeOf(err) != CodeHostUnknown {
@@ -205,7 +205,7 @@ func TestSSHFSArgsNeverAllowOther(t *testing.T) {
 		SSHFSOptions: []string{"reconnect", "allow_other", "allow_root"},
 	}
 	remote := newTestEnv(t, Options{}).remote
-	args := options.sshfsArgs(remote, "gpt001", "/opt/app", "/state/workspaces/dsh-a/ssh/gpt001/opt/app")
+	args := options.sshfsArgs(remote, "gw-a", "/opt/app", "/state/workspaces/dsh-a/ssh/gw-a/opt/app")
 	joined := strings.Join(args, " ")
 	if strings.Contains(joined, "allow_other") || strings.Contains(joined, "allow_root") {
 		t.Fatalf("sshfs arguments leak a cross-user option: %q", joined)
@@ -213,10 +213,10 @@ func TestSSHFSArgsNeverAllowOther(t *testing.T) {
 	if !strings.Contains(joined, "reconnect") {
 		t.Fatalf("configured options were dropped: %q", joined)
 	}
-	if args[len(args)-1] != "/state/workspaces/dsh-a/ssh/gpt001/opt/app" {
+	if args[len(args)-1] != "/state/workspaces/dsh-a/ssh/gw-a/opt/app" {
 		t.Fatalf("mount point is not the last argument: %q", joined)
 	}
-	if args[len(args)-2] != "gpt001:/opt/app" {
+	if args[len(args)-2] != "gw-a:/opt/app" {
 		t.Fatalf("source is not the second to last argument: %q", joined)
 	}
 }
@@ -224,9 +224,9 @@ func TestSSHFSArgsNeverAllowOther(t *testing.T) {
 func TestSSHArgsAreHardened(t *testing.T) {
 	options := Options{MountSubdir: "ssh", ConnectTimeout: 7_000_000_000}
 	remote := newTestEnv(t, Options{}).remote
-	args := options.sshArgs(remote, "gpt001", "true")
+	args := options.sshArgs(remote, "gw-a", "true")
 	joined := strings.Join(args, " ")
-	for _, want := range []string{"BatchMode=yes", "StrictHostKeyChecking=accept-new", "ConnectTimeout=7", `-- gpt001 sh -c 'true'`} {
+	for _, want := range []string{"BatchMode=yes", "StrictHostKeyChecking=accept-new", "ConnectTimeout=7", `-- gw-a sh -c 'true'`} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("ssh arguments %q lack %q", joined, want)
 		}
@@ -243,7 +243,7 @@ func TestSSHArgsAreHardened(t *testing.T) {
 		t.Errorf("ssh is pointed at a key outside the account workspace: %q", keyArg)
 	}
 	options.IdentityDir = "/etc/dshgw/ssh/keys"
-	joined = strings.Join(options.sshArgs(remote, "gpt001", "true"), " ")
+	joined = strings.Join(options.sshArgs(remote, "gw-a", "true"), " ")
 	if !strings.Contains(joined, filepath.Join(remote.Workspace, ".ssh", "id_rsa")) {
 		t.Errorf("ssh arguments do not name the account's own key: %q", joined)
 	}

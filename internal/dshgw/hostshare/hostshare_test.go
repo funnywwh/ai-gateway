@@ -22,13 +22,13 @@ func newService(t *testing.T, declarations ...Declaration) *Service {
 // A share is visible to exactly the accounts it names, and to no other.
 func TestSharesForFiltersByTenant(t *testing.T) {
 	service := newService(t,
-		Declaration{Name: "repo", Source: "/srv/repo", ReadOnly: true, Tenants: []string{"dsh-colin", "dsh-tenant"}},
+		Declaration{Name: "repo", Source: "/srv/repo", ReadOnly: true, Tenants: []string{"dsh-alex", "dsh-tenant"}},
 		Declaration{Name: "private", Source: "/srv/private", Tenants: []string{"dsh-tenant"}},
 	)
-	workspace := "/state/workspaces/dsh-colin"
-	shares := service.SharesFor("dsh-colin", workspace)
+	workspace := "/state/workspaces/dsh-alex"
+	shares := service.SharesFor("dsh-alex", workspace)
 	if len(shares) != 1 || shares[0].Name != "repo" {
-		t.Fatalf("dsh-colin shares = %+v, want only repo", shares)
+		t.Fatalf("dsh-alex shares = %+v, want only repo", shares)
 	}
 	if want := filepath.Join(workspace, "host", "repo"); shares[0].Target != want {
 		t.Errorf("target = %q, want %q", shares[0].Target, want)
@@ -36,7 +36,7 @@ func TestSharesForFiltersByTenant(t *testing.T) {
 	if !shares[0].ReadOnly {
 		t.Error("declaration was read-only but the binding is not")
 	}
-	if got := service.SharesFor("dsh-yangmiao", workspace); len(got) != 0 {
+	if got := service.SharesFor("dsh-liuyang", workspace); len(got) != 0 {
 		t.Errorf("an account the shares do not name got %+v", got)
 	}
 	// A write grant travels with the declaration.
@@ -54,16 +54,16 @@ func TestEnsureCreatesTargetsAndMirror(t *testing.T) {
 	if err := os.MkdirAll(source, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	workspace := filepath.Join(root, "state", "workspaces", "dsh-colin")
-	dshHome := filepath.Join(root, "state", "tenants", "dsh-colin", ".dsh")
+	workspace := filepath.Join(root, "state", "workspaces", "dsh-alex")
+	dshHome := filepath.Join(root, "state", "tenants", "dsh-alex", ".dsh")
 	if err := os.MkdirAll(dshHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	service := newService(t,
-		Declaration{Name: "shared", Source: source, ReadOnly: true, Tenants: []string{"dsh-colin"}},
-		Declaration{Name: "gone", Source: filepath.Join(root, "vanished"), Tenants: []string{"dsh-colin"}},
+		Declaration{Name: "shared", Source: source, ReadOnly: true, Tenants: []string{"dsh-alex"}},
+		Declaration{Name: "gone", Source: filepath.Join(root, "vanished"), Tenants: []string{"dsh-alex"}},
 	)
-	if err := service.Ensure("dsh-colin", workspace, dshHome); err != nil {
+	if err := service.Ensure("dsh-alex", workspace, dshHome); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 	for _, dir := range []string{service.ContainerFor(workspace), filepath.Join(workspace, "host", "shared")} {
@@ -94,7 +94,7 @@ func TestEnsureCreatesTargetsAndMirror(t *testing.T) {
 	if err := json.Unmarshal(data, &document); err != nil {
 		t.Fatalf("parsing the mirror: %v", err)
 	}
-	if document.Version != 1 || document.Tenant != "dsh-colin" || document.Subdir != "host" {
+	if document.Version != 1 || document.Tenant != "dsh-alex" || document.Subdir != "host" {
 		t.Errorf("mirror header = %+v", document)
 	}
 	if len(document.Shares) != 1 || document.Shares[0].Name != "shared" || !document.Shares[0].ReadOnly {
@@ -113,7 +113,7 @@ func TestEnsureCreatesTargetsAndMirror(t *testing.T) {
 		t.Fatal(err)
 	}
 	mixed := newService(t, Declaration{Name: "other", Source: other, Tenants: []string{"dsh-tenant"}})
-	if err := mixed.Ensure("dsh-colin", workspace, dshHome); err != nil {
+	if err := mixed.Ensure("dsh-alex", workspace, dshHome); err != nil {
 		t.Fatalf("Ensure for a foreign share: %v", err)
 	}
 	data, err = os.ReadFile(filepath.Join(dshHome, "host-shares.json"))
@@ -131,10 +131,10 @@ func TestNoDeclarationsMeansNoService(t *testing.T) {
 	if service.Enabled() {
 		t.Error("a service with no declarations reports itself enabled")
 	}
-	if shares := service.SharesFor("dsh-colin", "/w"); shares != nil {
+	if shares := service.SharesFor("dsh-alex", "/w"); shares != nil {
 		t.Errorf("shares = %+v, want none", shares)
 	}
-	if err := service.Ensure("dsh-colin", "/nonexistent/workspace", "/nonexistent/home"); err != nil {
+	if err := service.Ensure("dsh-alex", "/nonexistent/workspace", "/nonexistent/home"); err != nil {
 		t.Errorf("Ensure with no declarations did work: %v", err)
 	}
 }

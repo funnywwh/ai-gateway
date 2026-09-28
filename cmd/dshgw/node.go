@@ -17,16 +17,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/browsermount"
-	"github.com/winger/ai-gateway/internal/dshgw/config"
-	"github.com/winger/ai-gateway/internal/dshgw/nodeops"
-	"github.com/winger/ai-gateway/internal/dshgw/nodeplane"
-	"github.com/winger/ai-gateway/internal/dshgw/nodeproto"
-	"github.com/winger/ai-gateway/internal/dshgw/nodeserve"
-	"github.com/winger/ai-gateway/internal/dshgw/nodestore"
-	"github.com/winger/ai-gateway/internal/dshgw/sandbox"
-	"github.com/winger/ai-gateway/internal/dshgw/sshworkspace"
-	"github.com/winger/ai-gateway/internal/dshgw/tenancy"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/browsermount"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeops"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeplane"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeproto"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeserve"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodestore"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/sandbox"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/sshworkspace"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/tenancy"
 )
 
 // node is the multi-machine surface (M77). `serve` runs this process as a worker node; the

@@ -98,8 +98,8 @@ func TestSSHWorkspacesAcceptsPerAccountKeys(t *testing.T) {
 	if err := os.MkdirAll(keys, 0o700); err != nil {
 		t.Fatalf("preparing the key directory: %v", err)
 	}
-	sshKey(t, keys, "dsh-colin", 0o600)
-	cfg, err := Load(writeConfig(t, baseCfg+"ssh_workspaces:\n  enabled: true\n  identity_dir: "+keys+"\n  hosts: ['gpt001', 'aipc']\n"))
+	sshKey(t, keys, "dsh-alex", 0o600)
+	cfg, err := Load(writeConfig(t, baseCfg+"ssh_workspaces:\n  enabled: true\n  identity_dir: "+keys+"\n  hosts: ['gw-a', 'gw-d']\n"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestSSHWorkspacesConfigDirIsAPerAccountDirectory(t *testing.T) {
 	if err := os.Mkdir(seeds, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(seeds, "dsh-colin"), []byte("Host aipc\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(seeds, "dsh-alex"), []byte("Host gw-d\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(writeConfig(t, baseCfg+"ssh_workspaces:\n  enabled: true\n  ssh_config_dir: "+seeds+"\n"))
@@ -194,7 +194,7 @@ func TestSSHWorkspacesRefusesAnUnusableConfigDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	file := filepath.Join(dir, "config")
-	if err := os.WriteFile(file, []byte("Host aipc\n"), 0o644); err != nil {
+	if err := os.WriteFile(file, []byte("Host gw-d\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	missing := filepath.Join(dir, "absent")

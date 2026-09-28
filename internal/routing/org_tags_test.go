@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/registry"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/registry"
 )
 
 // orgFixture is the organization shape these tests inherit from:

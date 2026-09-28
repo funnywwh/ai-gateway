@@ -12,22 +12,22 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/admin"
-	"github.com/winger/ai-gateway/internal/apikey"
-	"github.com/winger/ai-gateway/internal/balancer"
-	"github.com/winger/ai-gateway/internal/billing"
-	"github.com/winger/ai-gateway/internal/chat"
-	"github.com/winger/ai-gateway/internal/config"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/ids"
-	"github.com/winger/ai-gateway/internal/mcpsrv"
-	"github.com/winger/ai-gateway/internal/quota"
-	"github.com/winger/ai-gateway/internal/registry"
-	"github.com/winger/ai-gateway/internal/routing"
-	"github.com/winger/ai-gateway/internal/runtime"
-	"github.com/winger/ai-gateway/internal/secret"
-	"github.com/winger/ai-gateway/internal/store"
-	"github.com/winger/ai-gateway/internal/usage"
+	"github.com/funnywwh/ai-gateway/internal/admin"
+	"github.com/funnywwh/ai-gateway/internal/apikey"
+	"github.com/funnywwh/ai-gateway/internal/balancer"
+	"github.com/funnywwh/ai-gateway/internal/billing"
+	"github.com/funnywwh/ai-gateway/internal/chat"
+	"github.com/funnywwh/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/ids"
+	"github.com/funnywwh/ai-gateway/internal/mcpsrv"
+	"github.com/funnywwh/ai-gateway/internal/quota"
+	"github.com/funnywwh/ai-gateway/internal/registry"
+	"github.com/funnywwh/ai-gateway/internal/routing"
+	"github.com/funnywwh/ai-gateway/internal/runtime"
+	"github.com/funnywwh/ai-gateway/internal/secret"
+	"github.com/funnywwh/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/usage"
 )
 
 // The console chat is the only feature that spends money on behalf of a *browser session*
@@ -687,12 +687,12 @@ func TestChatAdminTokenExecutesEveryEndpoint(t *testing.T) {
 	// The write the old console allowlist used to refuse. Creating an account is not marked
 	// dangerous, so it needs no confirm.
 	created := f.callTool(t, ctx, tools, access, map[string]any{
-		"name": "admin_create_account", "body": map[string]any{"name": "ranqiliang"},
+		"name": "admin_create_account", "body": map[string]any{"name": "acct-b"},
 	})
 	if created.IsError {
 		t.Fatalf("admin_create_account must be callable from the console chat: %+v", created.Value)
 	}
-	if _, err := f.db.GetAccountByName(ctx, "ranqiliang"); err != nil {
+	if _, err := f.db.GetAccountByName(ctx, "acct-b"); err != nil {
 		t.Fatalf("the account was not created: %v", err)
 	}
 

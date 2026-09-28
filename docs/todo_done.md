@@ -10,7 +10,7 @@
 ## M0 脚手架 + git 仓库
 - [x] git init（默认分支 main）+ 本地提交身份
 - [x] .gitignore（忽略 .cache/ data/ bin/ *.db billing-fallback.jsonl hooks-dead.jsonl）
-- [x] go.mod（module github.com/winger/ai-gateway, go 1.25）
+- [x] go.mod（module github.com/funnywwh/ai-gateway, go 1.25）
 - [x] scripts/goenv.sh（工作区本地 GOPATH/GOMODCACHE/GOCACHE + file:// 代理 + CGO_ENABLED=0）
 - [x] Makefile（build/test/vet/fmt/tidy/verify/run/plugin-example/smoke/clean）
 - [x] docs/design/m0-scaffold.md 设计文档
@@ -478,7 +478,7 @@
 
 - [x] make verify 全绿（vet + 全量测试 + build，含 `internal/arch` 分层断言）
 
-- [x] 端到端（真实代理 `http://192.168.140.252:2334`，2026-09-11）：**全链路打通，网关已服务真实请求**。代理侧：出口国家 CN → PH，探测不再报 `unsupported_country_region_territory`；凭据侧：经代理**真实刷新成功**（新的 `expires_at`/`last_refresh_at`，轮换后的 refresh_token 已落盘）；模型侧：`gpt-5.6-luna` 下 `/v1/responses` 非流式与流式均返回正确文本，`usage_records` 落库（含 `reasoning` 维度拆分），零价不产生账本分录
+- [x] 端到端（真实代理 `http://192.0.2.108:2334`，2026-09-11）：**全链路打通，网关已服务真实请求**。代理侧：出口国家 CN → PH，探测不再报 `unsupported_country_region_territory`；凭据侧：经代理**真实刷新成功**（新的 `expires_at`/`last_refresh_at`，轮换后的 refresh_token 已落盘）；模型侧：`gpt-5.6-luna` 下 `/v1/responses` 非流式与流式均返回正确文本，`usage_records` 落库（含 `reasoning` 维度拆分），零价不产生账本分录
 
 - [x] **更正一处先前错误结论**：我曾依据 `GET /backend-api/codex/models?client_version=…` 返回 `{"models":[]}` 判定"该账号无 Codex 授权"，这是**错的** —— 同一账号用 `gpt-5.6-luna` 完全可用。该目录端点对这类账号**不能作为授权判据**。被拒的 id 实为 `gpt-5`/`gpt-5-codex`/`codex-mini-latest`/`o3`/`gpt-5.1-codex`（均为 `not supported when using Codex with a ChatGPT account`）。另：`/responses` 强制要求 `stream:true`（`{"detail":"Stream must be set to true"}`），插件恒以流式发送，故不受影响
 
@@ -488,7 +488,7 @@
 
 - [x] 回填设计文档「实现与设计差异」（含 D7 修正与 7 个实现期发现），单提交并引用设计文档路径
 
-- [x] 环境前置（已解决）：代理最初从本机不可达（0.12s 快速 RST，疑似只绑回环）；在客户端开启局域网监听后 `192.168.140.252:2334` 于 0.11s 连通
+- [x] 环境前置（已解决）：代理最初从本机不可达（0.12s 快速 RST，疑似只绑回环）；在客户端开启局域网监听后 `192.0.2.108:2334` 于 0.11s 连通
 
 ### M10c 健康探测改为真实流式补全
 
@@ -1804,7 +1804,7 @@
 
 > 本节的未完成项仍在 `docs/TODO.md` 的同名小节。
 
-- [x] 部署（2026-09-13）：gpt001 已换成 `d637209`（`make build` → `scp` → `install` → `systemctl restart aigw`），
+- [x] 部署（2026-09-13）：gw-a 已换成 `d637209`（`make build` → `scp` → `install` → `systemctl restart aigw`），
       `readyz`/`healthz` 200、重启后 0 条 ERROR、公网 `mnl`/`gpt` 两个入口 200；
       启动日志 `strategy=weighted_random session_affinity=true affinity_ttl=30m0s affinity_max_entries=10000`；
       `/stats` 报 `version=d637209` 且 `affinity={entries,hits,...}` 随线上 DSH 会话增长。
@@ -1830,7 +1830,7 @@
 
 ### `response_format` 语义修正（线上故障）
 
-- [x] 复现与定位：线上 gpt001 的 `deepseek` 供应商 `config.response_format="json_object"`（存数据库、不在 `config.yaml`），
+- [x] 复现与定位：线上 gw-a 的 `deepseek` 供应商 `config.response_format="json_object"`（存数据库、不在 `config.yaml`），
       `openai-chat` 无条件下发 → DeepSeek 拒绝不含 "json" 的提示词；`journalctl -u aigw` 无该错误是因为
       **网关侧没有失败记录**（4xx 来自上游、请求被计费层正常收尾），只有 DSH 侧看到 `upstream_400`
 - [x] 代码：档位改由请求 `text.format` 决定（`requestFormat`），配置只作能力申报并保留取值校验；
@@ -1854,22 +1854,22 @@
 
 - [x] `scripts/release.sh`：`patch|minor|major` 升 `VERSION` → 提交 → 打 `v<a.b.c>` tag → `make build`；
       脏工作区、tag 已存在、非法档位一律拒绝
-- [x] `.dsh/skills/release-version/SKILL.md`：完整发布流程（定档位 → 升版本 → 部署 gpt001 → 用 `/version` 与
+- [x] `.dsh/skills/release-version/SKILL.md`：完整发布流程（定档位 → 升版本 → 部署 gw-a → 用 `/version` 与
       角标验证 → 回滚点 → 记录），含本次这条 `response_format` 坑的提示
 
 ### 首次发布记录（v0.1.0 → v0.1.4）
 
 - [x] `scripts/release.sh patch` 两次：`0.1.0`（`VERSION` 新建）→ `0.1.1` → `0.1.2`（tag 指向包含该版本号的 commit）
-- [x] 部署 gpt001：`scp` → `cp aigw aigw.prev-<时间戳>` → `install` → `systemctl restart aigw`；
+- [x] 部署 gw-a：`scp` → `cp aigw aigw.prev-<时间戳>` → `install` → `systemctl restart aigw`；
       回滚点 `/opt/aigw/aigw.prev-20260913-160120`（旧版 `d637209`）
 - [x] 验证：`/aigw/version` = `{"revision":"be84cdf","version":"0.1.2"}`、`/aigw/healthz` 200（含 revision）、
       `readyz` 200、启动日志 `version=0.1.2 revision=be84cdf` 且无 ERROR、管理面仍要会话（`auth/me` 401）、
-      公网 `https://mnl.iotalking.top/aigw/version` 同值、控制台 `admin/ui/js/brand.js` 已随二进制发布（200）
+      公网 `https://gw-a.example.org/aigw/version` 同值、控制台 `admin/ui/js/brand.js` 已随二进制发布（200）
 - [x] **上游真机对照（同一个 DeepSeek key，只差一个字段）**：无 `response_format` → 200；
       带 `{"type":"json_object"}` → 400 `Prompt must contain the word 'json' …`——线上那条失败的确切形状，
       证明删掉该字段是必需的，而不只是"看起来更干净"
 - [x] **端到端验收（2026-09-13，用 DSH 本体而非人工点按）**：宿主终端搭隔离 `DSH_HOME`
-      （拷 `settings.yaml`、把 aigw 供应商的 `baseURL` 指向 `ssh -L 18088:127.0.0.1:8088 gpt001` 隧道、
+      （拷 `settings.yaml`、把 aigw 供应商的 `baseURL` 指向 `ssh -L 18088:127.0.0.1:8088 gw-a` 隧道、
       `agent-default-model` 改成 `aigw/deepseek-flash`、密钥只走 `AIGW_API_KEY`），跑
       `node <DSH>/lib/bin.js --profile headless "用一句话回答：1+1 等于几？不要使用任何工具"`
       → 输出 `1+1 等于 2。`、**退出码 0**（此前同一形状首轮即 `upstream_400`）。
@@ -1882,7 +1882,7 @@
       → `0.1.3`（部署记录）→ `0.1.4`（端到端验收记录 + 工具形状防线）。每个 tag 都指向内含该版本号的 commit，
       所以构建产物自报的版本号与 `git log` 里能查到的来源一一对应——这正是"线上跑的是哪个版本"能当依据的原因
 - [x] 最终线上状态（2026-09-13 16:05）：`aigw 0.1.4 (revision 2d2d731)`，`readyz` 200、重启后 0 条 ERROR、
-      回滚点 `/opt/aigw/aigw.prev-20260913-160527`；公网 `https://mnl.iotalking.top/aigw/version` =
+      回滚点 `/opt/aigw/aigw.prev-20260913-160527`；公网 `https://gw-a.example.org/aigw/version` =
       `{"revision":"2d2d731","version":"0.1.4"}` 与宿主 `HEAD` 一致（`0.1.3` → `0.1.4` 的差异只在测试与文档，
       运行时二进制逐字节相同，仍然发版是为了让"线上版本 = 仓库版本"这条不变量成立）
 
@@ -1958,7 +1958,7 @@
 - **提交与 tag**：`2e8d3c8`（M40 实现）→ `e77af79`（`release: v0.2.0`，tag `v0.2.0` 指向它）
 - **构建物**：`aigw 0.2.0 (revision e77af79, built 2026-09-13T08:53:03Z)`，
   md5 `88b45d45999561928876c8dbd519e65a`（本地与上传后一致）
-- **部署目标**：gpt001 `127.0.0.1:8088`；**回滚点** `/opt/aigw/aigw.prev-20260913-165328`（= 0.1.4）
+- **部署目标**：gw-a `127.0.0.1:8088`；**回滚点** `/opt/aigw/aigw.prev-20260913-165328`（= 0.1.4）
 - **部署后验证**：
   - `GET /aigw/version` = `{"revision":"e77af79","version":"0.2.0"}`（公网 https 同一值，
     控制台角标 `brand.js` 读的就是这个端点，因此角标显示 `v0.2.0 e77af79`）
@@ -1982,7 +1982,7 @@
 
 - [x] 发布 **v0.2.4**（patch），修复 DSH 使用 Codex 订阅模型时可选工具参数被严格模式强制填写、导致 Full access 下反复无效提权的问题。
 - [x] 修复提交 `4b4f554`；发布提交与标签 `bcdb192` / `v0.2.4`。
-- [x] 网关与 Codex 插件均从发布提交构建，19:26 部署 gpt001；本地和线上 SHA-256 一致。
+- [x] 网关与 Codex 插件均从发布提交构建，19:26 部署 gw-a；本地和线上 SHA-256 一致。
 - [x] 验证：全量 Go 测试、go vet、format-smoke、版本角标测试通过；公网与本机 `/aigw/version` 返回 `0.2.4 / bcdb192`，healthz/readyz 正常；控制台页面与 brand.js 可访问，线上 brand.js 与发布源码一致。启动日志无 ERROR，Codex 插件成功启动。
 - [x] 发版前已用线上 gpt-6-astra 验证修复前后差异，并实际执行 pwd、回传工具结果完成第二轮；见 `docs/dsh-codex-tool-strict-fix.md`。
 - 回滚点：`/opt/aigw/aigw.pre-v0.2.4`、`/opt/aigw/plugins/provider-codex.pre-v0.2.4`；恢复两个二进制后重启 aigw。插件回滚点包含本次发版前已部署的 strict 修复。
@@ -1991,7 +1991,7 @@
 
 - [x] 根据最新标签 v0.2.4 与本次缺陷修复性质，发布 **v0.2.5**（patch）：客户端 `prompt_cache_key` 经标准供应商请求、插件 JSON 协议与 Codex 请求构造原样发送上游，空值省略；不改变会话粘性键的处理。
 - [x] 修复提交 `3e86f4a`；发布提交与标签 `eb8ca6b` / `v0.2.5`。
-- [x] 网关与 Codex 插件从发布提交构建，19:35（UTC+08:00）部署 gpt001；配置与数据未修改。
+- [x] 网关与 Codex 插件从发布提交构建，19:35（UTC+08:00）部署 gw-a；配置与数据未修改。
 - [x] 本地与线上 SHA-256 一致：网关 `43a71b46a3ea94aa02354c6adf045d22db4a300e2d9dc1c2c82f07b00bd43efb`；Codex 插件 `b5972c2b019fa4f6c66676cb1e38c5573afba45df21685badeeabeb1f1f6e17a`。
 - [x] 验证：全量 Go 测试、go vet、format-smoke、base path（10 项）与版本角标（11 项）测试通过。缓存键回归覆盖流式/非流式、缺省/空值及带空格、中文、超过 128 字节的键。
 - [x] 本机与公网 `/aigw/version` 返回 `0.2.5 / eb8ca6b`；healthz/readyz 正常；控制台页面 HTTP 200，线上 brand.js 与发布源码一致（通过资源与端点验证，未做浏览器目视验证）。启动日志无 ERROR，Codex 插件成功启动。
@@ -2067,36 +2067,36 @@
 - [x] `make verify`（vet + 全量 `go test ./...` + ui-base 跳过因无 node + build）、
   `go test ./internal/mcpsrv/ ./internal/httpapi/`、`scripts/format-smoke.sh`（普通请求不带 `response_format`、
   `json_object` 按需下发、非法 level 在解析期拒绝）全部通过。
-- [x] 12:00:37（UTC+08:00）部署 gpt001：先 `scp` 到 `/opt/aigw/aigw.new`，备份线上二进制后 `install` 并重启；
+- [x] 12:00:37（UTC+08:00）部署 gw-a：先 `scp` 到 `/opt/aigw/aigw.new`，备份线上二进制后 `install` 并重启；
   仅替换二进制，`/opt/aigw/config.yaml` 与数据目录未改动，服务 `active`。
 - [x] 本地与线上二进制 SHA-256 一致：`aa123f292a902402579f8d5cac3fb83652ba7643feb2200f2ac575a935e94502`。
-- [x] 验证：gpt001 `localhost:8088/aigw/version` 与公网 `https://mnl.iotalking.top/aigw/version` 均为
+- [x] 验证：gw-a `localhost:8088/aigw/version` 与公网 `https://gw-a.example.org/aigw/version` 均为
   `0.10.0 / 9368b07`；healthz/readyz 均 HTTP 200；启动日志 `version=0.10.0 revision=9368b07` 且重启后**无 ERROR**；
   控制台 HTTP 200，公网 `js/brand.js` 与源码 SHA-256 逐字节一致（`5c92efb8…`）→ 角标会显示 v0.10.0。
 - [x] 启动日志同时确认新闸门已接线：`provider capacity ready queue_wait=30s queue_max_waiters=100 limited_providers=1`。
-- [x] 12:03:28（UTC+08:00）部署 **gptjp**（`8.211.157.165`）同一个 `v0.10.0` 二进制：同样先落到 `/opt/aigw/aigw.new`、
+- [x] 12:03:28（UTC+08:00）部署 **gw-b**（`198.51.100.104`）同一个 `v0.10.0` 二进制：同样先落到 `/opt/aigw/aigw.new`、
   备份后 `install` 并重启；`/opt/aigw/config.yaml`（SHA-256 `d9b78f7f77f72377005c8c753e2c3ae6910aa306746ab4590195df1c68e75f46`）
   与数据目录未改动，`aigw.service` active。
-- [x] gptjp 验证：本机 `localhost:8088/aigw/version` 与公网 `https://gpt.lagenio.xyz/aigw/version` 均为
+- [x] gw-b 验证：本机 `localhost:8088/aigw/version` 与公网 `https://gw-b.example.com/aigw/version` 均为
   `0.10.0 / 9368b07`；healthz/readyz/控制台均 HTTP 200；启动日志 `version=0.10.0 revision=9368b07` 且重启后
   **无 ERROR**；公网 `js/brand.js` 与源码 SHA-256 一致（`5c92efb8…`）。
-- [x] gptjp 的闸门接线：`provider capacity ready queue_wait=30s queue_max_waiters=100 limited_providers=0`
+- [x] gw-b 的闸门接线：`provider capacity ready queue_wait=30s queue_max_waiters=100 limited_providers=0`
   —— 该机四个供应商（三个 codex 插件 + deepseek）的 `max_inflight` 全为 `0`，因此**行为与 0.9.0 完全一致**，
   没有任何排队；需要限流时再在控制台/MCP 设「最大并发」。
-- **运维须知（本次发布后行为变化，仅 gpt001）**：gpt001 上 `deepseek`（id 8）的 `max_inflight` 一直是 **2500**——
+- **运维须知（本次发布后行为变化，仅 gw-a）**：gw-a 上 `deepseek`（id 8）的 `max_inflight` 一直是 **2500**——
   该字段在 M44 之前存了不生效，现在**真的生效**了：该供应商最多 2500 个在途上游调用，超出后在队列中等待
   （30s / 最多 100 个排队），等待超时或队满才会换候选/返回 429 `provider_busy`。2500 对当前流量等于"不限"，
   无需处理；若本意是"完全不限"，把该字段写成 `0`（控制台「最大并发」或 MCP `admin_update_provider`），
-  0 表示不限且**不建闸门**。gptjp 上没有设过上限，不受影响。
-- 回滚点：gpt001 `/opt/aigw/aigw.prev-20260914-120037`、gptjp `/opt/aigw/aigw.prev-20260914-120328`
+  0 表示不限且**不建闸门**。gw-b 上没有设过上限，不受影响。
+- 回滚点：gw-a `/opt/aigw/aigw.prev-20260914-120037`、gw-b `/opt/aigw/aigw.prev-20260914-120328`
   （均为 v0.9.0，`338d4cc`）；`cp` 回对应二进制后 `systemctl restart aigw`，不回退数据库。
 - 两台机器的二进制 SHA-256 与本机构建一致：`aa123f292a902402579f8d5cac3fb83652ba7643feb2200f2ac575a935e94502`。
 - 未做：未对线上付费上游做并发/排队实测（无付费模型验证）；未做浏览器目视检查（以资源哈希、`/version`
   与探针替代）；`#plugin` UI harness 视图的既有失败仍未修（见上文 M44 边界）。
 
-### gptjp 插件版本错配修复与 deepseek-flash 别名下线（2026-09-14）
+### gw-b 插件版本错配修复与 deepseek-flash 别名下线（2026-09-14）
 
-- 背景：gptjp 的 `/opt/aigw/plugins/aigw-provider-codex` 是 **9/11 15:24 的旧构建**（`9c80dec1…`），
+- 背景：gw-b 的 `/opt/aigw/plugins/aigw-provider-codex` 是 **9/11 15:24 的旧构建**（`9c80dec1…`），
   而网关已是 9/14 的 0.9.0/0.10.0。旧插件缺 `0db0c19`（保留输入项未知字段）、`f1452d2`（数组型工具输出）、
   `a2599a3`（自定义工具调用）、`3e86f4a`（prompt_cache_key）四个修复，造成 11:34–11:41 共 **13 条失败**：
   6 条 `bad_params`（`json: cannot unmarshal array into Go struct field Item.input.output of type string`，
@@ -2122,19 +2122,19 @@
   `plugins/legacy-codex-plugin-20260911.bin`（旧名字会让宿主把它当成候选），避免下次部署再拷到旧文件。
 - 未做（三条待办）：① 插件的 `Info().Version` 硬编码 `0.1.0`，控制台与启动日志看不出构建差异——
   这正是本次错配无人察觉的原因，建议照网关用 ldflags 注入 version/revision；
-  ② `deepseek-flash` 现在只剩 provider 7，而三个标签（蓝精灵1/2/3）各自只授权一个 codex provider，
+  ② `deepseek-flash` 现在只剩 provider 7，而三个标签（测试标签1/2/3）各自只授权一个 codex provider，
   持这些标签的 key 调 `deepseek-flash` 会得 403 `permission_denied`，若希望其继续可用需在标签授权里
   加 `deepseek` 或重新确定别名口径（属产品口径，未擅自改）；③ 非流式失败请求只写计量、不写请求日志
   （`internal/httpapi/v1.go` 失败分支仅在 `req.Stream` 时 persist），11:04–11:05 有 9 条这样的记录。
 
-### gptjp「智能问答改不了供应商并发」的根因与修复（2026-09-14）
+### gw-b「智能问答改不了供应商并发」的根因与修复（2026-09-14）
 
-- 现象（用户报）：在 gptjp 的智能问答里让模型「把三个 codex 供应商的并发改成 3」，模型回一句
+- 现象（用户报）：在 gw-b 的智能问答里让模型「把三个 codex 供应商的并发改成 3」，模型回一句
   「我先查一下…」之后**这一轮就断了**（会话消息 `status=failed`、`error=模型这一轮没有正常结束`），
   永远走不到 `admin_update_provider`。两个会话 `chat_coigrlhiwkgflserk3bwjfui` /
   `chat_6uvtp4tqu7e5ai7p2szthjfy` 都是这个形态；审计里只有 `mcp.admin_call … ok` 的只读调用，
   从没有一次 provider 写入。
-- 根因：**不是权限、不是 MCP 工具面、也不是 M44 的并发闸门**，而是 gptjp 的 `deepseek`（id 7）
+- 根因：**不是权限、不是 MCP 工具面、也不是 M44 的并发闸门**，而是 gw-b 的 `deepseek`（id 7）
   供应商漏配 DeepSeek 的思考方言。每轮第 1 步（用户消息 → 模型决定调工具）成功，第 2 步
   （**回放工具结果**）被上游 400 拒绝：`usage_records.error_code=upstream_400` /
   `terminated_reason=upstream_error`（`req_ysojaxlkwaupdlrcvtzy64e3`、`req_dq2hdkw234xhc4zxp3po4krp`、
@@ -2142,10 +2142,10 @@
   上游的硬约束是「带工具的一轮 assistant 侧必须带 `reasoning_content` 键」（`docs/api-providers.md` §4），
   而网关的补键/文本折叠只在供应商配置打开 `thinking.replay_reasoning_content` 时生效
   （`pkg/providerkit/chatcompat.go`：`reasoningTurn := opts.ReplayReasoningContent && …`、
-  `foldAssistantTextIntoCall`、`requireReasoningKeys`）。gptjp 的 config 只有
-  `{"base_url":"https://api.deepseek.com","timeout_s":120}`；gpt001 的 deepseek（id 8）一直是对的
-  （`{"mode":"auto","style":"deepseek","replay_reasoning_content":true}`），所以只有 gptjp 有这个病。
-- 复现（gptjp，临时会话，跑完即删）：**"先写一句话 + 调 1 个工具" 必 400**；
+  `foldAssistantTextIntoCall`、`requireReasoningKeys`）。gw-b 的 config 只有
+  `{"base_url":"https://api.deepseek.com","timeout_s":120}`；gw-a 的 deepseek（id 8）一直是对的
+  （`{"mode":"auto","style":"deepseek","replay_reasoning_content":true}`），所以只有 gw-b 有这个病。
+- 复现（gw-b，临时会话，跑完即删）：**"先写一句话 + 调 1 个工具" 必 400**；
   "不写话、直接调 1 个工具" 反而通过。即触发条件是**assistant 侧在工具轮里带了文本**，
   而不是工具个数或结果大小——所以用户看到的「有时能聊、真要动手就断」并不是随机的。
 - [x] 修复：备份 `/opt/aigw/data/provider-config-backup-20260914-143714.json`（0600），
@@ -2162,7 +2162,7 @@
   三个供应商最终都是 `max_inflight=3`、`capacity.limit=3`；服务 `active`，0.11.0/`460eee7`，重启后无 ERROR。
 - 回滚：把 `/opt/aigw/data/provider-config-backup-20260914-143714.json` 里 id=7 的 `config` 原样 PATCH 回去
   （即删掉 `thinking` 块）即可；`max_inflight` 改回 `0` 即恢复不限。
-- 观察项（未改）：gptjp 的 `deepseek` 只服务 `deepseek-flash` 一族，任何"带文本的工具轮"在没有该方言时都会
+- 观察项（未改）：gw-b 的 `deepseek` 只服务 `deepseek-flash` 一族，任何"带文本的工具轮"在没有该方言时都会
   400，属于**供应商配置与上游方言不匹配**这一类问题；这类校验只在真机才会显形（离线假上游按规则判 400，
   但配置缺 `thinking` 时假上游也一样会放行），值得在部署清单里加一条「openai-chat 指向 DeepSeek 官方
   endpoint 时必须带 `thinking.style=deepseek` + `replay_reasoning_content=true`」。
@@ -2172,7 +2172,7 @@
 - [x] 根据 `v0.2.5..HEAD` 的新增能力与配置发布 minor：`0.2.5` → **`0.3.0`**。包含缓存 token 展示 `c72bb52`、Codex 无输出断流恢复 `bcd6f1a`、根会话标识 `4b1c32e`、M41 小时汇总 `ecae61a`。
 - [x] 发布提交 **`7e68bab`**，标签 **`v0.3.0`**；版本说明 `docs/releases/v0.3.0.md`。
 - [x] `make verify`、format-smoke 通过；汇总相关 race 与六组规模探针已通过；UI harness 因无 Firefox 跳过。
-- [x] 网关与 Codex 插件从发布提交构建，21:19:38（UTC+08:00）部署 gpt001；配置 SHA-256 保持一致，网关启动自动应用迁移 0013。
+- [x] 网关与 Codex 插件从发布提交构建，21:19:38（UTC+08:00）部署 gw-a；配置 SHA-256 保持一致，网关启动自动应用迁移 0013。
 - [x] 本地/线上 SHA-256 一致：网关 `c31db6367b496503d167fa82c7420d35a509fac061447d0ecd832300475b353a`；插件 `834a98c5d650eb0da99185464dbeff872a12fbacf92f076920a2efc895fe9145`。
 - [x] 本机/公网 `/aigw/version` = `0.3.0 / 7e68bab`，healthz/readyz/UI HTTP 200；线上 brand.js 与发布源码一致（资源与端点校验，无浏览器目视验证）。服务 active，插件成功启动，启动时段 ERROR 为 0。
 - [x] 数据库 `quick_check=ok`；历史发现游标 1428、完成标记为 true，9 个已结束小时已发布、81 条组合汇总、待处理小时为 0；当前小时继续实时补算。
@@ -2185,7 +2185,7 @@
 - [x] 发布 patch **0.3.1**：独立 Codex 标题线程精确提示词关联，支持乱序完成、候选冲突恢复及持久化证据；录制/脱敏策略限制见 `docs/releases/v0.3.1.md`。
 - [x] 修复提交 `b45d411`；发布提交 `ad42b4a`，标签 `v0.3.1`；main 与标签已推送 origin。
 - [x] `make verify`、format-smoke 通过；网关与 Codex 插件均从发布提交构建。
-- [x] 部署 gpt001，本地/线上 SHA-256 一致：网关 `dca7ac14e9f55225a129c72ff8be23833f1121ec1c54a7245f552d7742b7833d`，插件 `2a8a3c9c726dfe5c97da4b62fea10d19a56fbf3a82e8b6f641d8be7646983a65`。
+- [x] 部署 gw-a，本地/线上 SHA-256 一致：网关 `dca7ac14e9f55225a129c72ff8be23833f1121ec1c54a7245f552d7742b7833d`，插件 `2a8a3c9c726dfe5c97da4b62fea10d19a56fbf3a82e8b6f641d8be7646983a65`。
 - [x] 本机 `/aigw/version` 返回 `0.3.1 / ad42b4a`，healthz、readyz、UI 均 HTTP 200；服务 active，数据库 quick_check=ok，迁移 0014 存在，配置 SHA-256 与部署前一致。
 - 回滚点：`/opt/aigw/aigw.pre-v0.3.1`、`/opt/aigw/plugins/provider-codex.pre-v0.3.1`；数据库一致性备份 `/opt/aigw/backups-release/v0.3.1/aigw.sqlite`（0600，quick_check=ok）。回退不覆盖新计费数据。
 - 未额外发起付费上游请求；未进行公网或浏览器目视验证。新自动关联以集成回归为验证依据，先前人工修正的历史例子不作为自动关联实测。
@@ -2195,21 +2195,21 @@
 - [x] 账户名支持邮箱、中文等非空 Unicode 字符（trim 首尾 Unicode 空白、非空、有效 UTF-8、最多 64 个 Unicode 字符；不改大小写、不做 NFC），发布 minor **0.8.0**；规则与语义边界见 `docs/design/m8b-admin-resources.md` §7。
 - [x] 本版同时包含上一版之后的 **账号级标签继承**（`8a71c4e`）。实现提交 `29cb087`；发布提交 `c3ff39a`，标签 `v0.8.0`。
 - [x] 全量 `go test -count=1 ./...` 与 `go vet ./...` 通过；控制台 UI 走查 16 个 view 通过（`brand` 首轮超时，单独重跑通过）。
-- [x] 10:34:58（UTC+08:00）部署 gptjp（`8.211.157.165`）；仅替换 `/opt/aigw/aigw`，`/opt/aigw/config.yaml` 未改动（SHA-256 `d9b78f7f77f72377005c8c753e2c3ae6910aa306746ab4590195df1c68e75f46`），数据目录未动，`aigw.service` active。
-- [x] 本机与 gptjp 二进制 SHA-256 一致：`9350e02eb1092697bb1c9e0b0cdba8b5b29480bdce2047ac88ec4aa2b6762f06`。
-- [x] gptjp 本机与公网 `https://gpt.lagenio.xyz/aigw/version` 均返回 `0.8.0 / c3ff39a`；healthz/readyz 均 HTTP 200（上一版本记录中的 readyz 503 已恢复）；启动日志版本正确、重启后 `level=ERROR` 计数为 0。
+- [x] 10:34:58（UTC+08:00）部署 gw-b（`198.51.100.104`）；仅替换 `/opt/aigw/aigw`，`/opt/aigw/config.yaml` 未改动（SHA-256 `d9b78f7f77f72377005c8c753e2c3ae6910aa306746ab4590195df1c68e75f46`），数据目录未动，`aigw.service` active。
+- [x] 本机与 gw-b 二进制 SHA-256 一致：`9350e02eb1092697bb1c9e0b0cdba8b5b29480bdce2047ac88ec4aa2b6762f06`。
+- [x] gw-b 本机与公网 `https://gw-b.example.com/aigw/version` 均返回 `0.8.0 / c3ff39a`；healthz/readyz 均 HTTP 200（上一版本记录中的 readyz 503 已恢复）；启动日志版本正确、重启后 `level=ERROR` 计数为 0。
 - [x] 新能力生效证据（只读）：运行的实例已提供新控制台资源，`/aigw/admin/ui/js/pages/accounts.js` 第 36 行含「支持邮箱、中文和其他 Unicode 字符；去除首尾空白后最多 64 个字符」，公网同一资源同样命中。
-- [x] 10:35:56（UTC+08:00）同步升级 gpt001（`0.7.1 / 235e193` → `0.8.0 / c3ff39a`）；仅替换 `/opt/aigw/aigw`，`/opt/aigw/config.yaml` SHA-256 `b3531983905d52a54e75e6d0baaeb500c7496d182425017fa93936ac66a24153` 部署前后一致，数据目录未动，`aigw.service` active。
-- [x] gpt001 本机与公网 `https://mnl.iotalking.top/aigw/version` 均返回 `0.8.0 / c3ff39a`；healthz/readyz 均 HTTP 200；启动日志版本正确、重启后 `level=ERROR` 计数为 0；控制台公开页 HTTP 200，`/aigw/admin/ui/js/pages/accounts.js` 第 36 行含新提示（公网同一资源命中）。
+- [x] 10:35:56（UTC+08:00）同步升级 gw-a（`0.7.1 / 235e193` → `0.8.0 / c3ff39a`）；仅替换 `/opt/aigw/aigw`，`/opt/aigw/config.yaml` SHA-256 `b3531983905d52a54e75e6d0baaeb500c7496d182425017fa93936ac66a24153` 部署前后一致，数据目录未动，`aigw.service` active。
+- [x] gw-a 本机与公网 `https://gw-a.example.org/aigw/version` 均返回 `0.8.0 / c3ff39a`；healthz/readyz 均 HTTP 200；启动日志版本正确、重启后 `level=ERROR` 计数为 0；控制台公开页 HTTP 200，`/aigw/admin/ui/js/pages/accounts.js` 第 36 行含新提示（公网同一资源命中）。
 - 未在线上创建测试账户（避免污染生产数据），接口层行为由 `internal/httpapi`、`internal/store`、`internal/config` 的集成测试覆盖；未发起付费上游请求，未做浏览器目视检查。
-- 回滚点：gptjp `/opt/aigw/aigw.prev-20260914-103458`（v0.7.2）；gpt001 `/opt/aigw/aigw.prev-20260914-103556`（v0.7.1）。`cp` 回对应二进制后 `systemctl restart aigw`，不回退数据库。
+- 回滚点：gw-b `/opt/aigw/aigw.prev-20260914-103458`（v0.7.2）；gw-a `/opt/aigw/aigw.prev-20260914-103556`（v0.7.1）。`cp` 回对应二进制后 `systemctl restart aigw`，不回退数据库。
 
 ### v0.7.2 发布记录（2026-09-14）
 
 - [x] 发布 patch **0.7.2**；发布提交 `9cd209a`，标签 `v0.7.2`。
-- [x] 构建二进制版本为 `0.7.2`，revision `9cd209a`；部署 gptjp（`8.211.157.165`），服务 `aigw.service` active。
-- [x] 配置 `/opt/aigw/config.yaml` 使用 `server.base_path: /aigw`，公网前缀为 `https://gpt.lagenio.xyz/aigw/`；Nginx 配置已备份并重载。
-- [x] 本机与公网 `https://gpt.lagenio.xyz/aigw/version` 返回 `0.7.2 / 9cd209a`；healthz HTTP 200。
+- [x] 构建二进制版本为 `0.7.2`，revision `9cd209a`；部署 gw-b（`198.51.100.104`），服务 `aigw.service` active。
+- [x] 配置 `/opt/aigw/config.yaml` 使用 `server.base_path: /aigw`，公网前缀为 `https://gw-b.example.com/aigw/`；Nginx 配置已备份并重载。
+- [x] 本机与公网 `https://gw-b.example.com/aigw/version` 返回 `0.7.2 / 9cd209a`；healthz HTTP 200。
 - [x] 启动日志显示版本正确且无 ERROR；readyz 当前 HTTP 503，因为新实例尚无 providers/routes（服务本身已正常监听）。
 - 回滚点：远程 `/opt/aigw/aigw.prev-*` 与 `/home/nginxWebUI/nginx.conf.pre-aigw-*`；恢复二进制/配置后重启 `aigw` 并重载 `nginxWebUI`。
 
@@ -2218,8 +2218,8 @@
 - [x] 修复管理后台布局：左侧导航与“退出”项固定，工作区顶部标题栏固定，页面内容独立滚动；发布 patch **0.7.1**。
 - [x] 实现提交 `aa5b313`；发布提交 `235e193`，标签 `v0.7.1`；main 与标签已推送 origin。
 - [x] `make ui-base`、`make test` 通过；构建二进制版本为 `0.7.1`，revision `235e193`。
-- [x] 06:48（UTC+08:00）部署 gpt001，仅替换 `/opt/aigw/aigw`，配置与数据目录未修改，服务 active。
-- [x] gpt001 与公网 `https://mnl.iotalking.top/aigw/version` 均返回 `0.7.1 / 235e193`；healthz/readyz 均 HTTP 200，启动日志无 ERROR。
+- [x] 06:48（UTC+08:00）部署 gw-a，仅替换 `/opt/aigw/aigw`，配置与数据目录未修改，服务 active。
+- [x] gw-a 与公网 `https://gw-a.example.org/aigw/version` 均返回 `0.7.1 / 235e193`；healthz/readyz 均 HTTP 200，启动日志无 ERROR。
 - [x] 本地与线上二进制 SHA-256 一致：`0dd9f483d4bd2b8962dca869c7d75857659064152eea6c03bb71e9089e2e6bd2`。
 - 回滚点：`/opt/aigw/aigw.prev-20260914-064852`；恢复该二进制后重启 aigw，不回退数据库。
 
@@ -2228,8 +2228,8 @@
 - [x] 新增智能问答 `update_session_title` 工具：模型可更新当前会话标题，沿用 owner 校验、统一标题清洗和审计记录；发布 minor **0.7.0**。
 - [x] 实现提交 `935d0e8`；发布提交 `687aeae`，标签 `v0.7.0`。
 - [x] 全量 `go test ./...` 通过；构建二进制版本为 `0.7.0`，revision `687aeae`。
-- [x] 06:32（UTC+08:00）部署 gpt001；仅替换 `/opt/aigw/aigw`，配置与数据目录未修改，服务 active。
-- [x] gpt001 `/aigw/version` 返回 `0.7.0 / 687aeae`；healthz/readyz 均 HTTP 200，启动日志无 ERROR；公网 `https://mnl.iotalking.top/aigw/version` 同值。
+- [x] 06:32（UTC+08:00）部署 gw-a；仅替换 `/opt/aigw/aigw`，配置与数据目录未修改，服务 active。
+- [x] gw-a `/aigw/version` 返回 `0.7.0 / 687aeae`；healthz/readyz 均 HTTP 200，启动日志无 ERROR；公网 `https://gw-a.example.org/aigw/version` 同值。
 - [x] 本地与线上二进制 SHA-256 一致：`a6370b2e1b7fffaa5b5a17f8c7f9f091006580f9adb8a10f20a0fbda4547b848`。
 - 回滚点：`/opt/aigw/aigw.prev-20260914-063249`；恢复该二进制后重启 aigw，不回退数据库。
 
@@ -2237,8 +2237,8 @@
 
 - [x] 根据 v0.6.0 后的修复提交发布 patch **0.6.1**：`bb8776c` 修复聊天工具状态实时更新并记录 reasoning effort；`415cebe` 修复 DSH 最新运行时工作区解析、新版 developer 工作目录识别及会话最新非空工作区聚合。
 - [x] 发布提交 `6ca5f22`，标签 `v0.6.1`；`make verify`（vet、全量 Go 测试、UI base/badge/request-log 测试、构建）通过。
-- [x] 06:13:07（UTC+08:00）部署 gpt001，仅替换网关二进制；配置 SHA-256 部署前后一致，服务 active。启动时首次探针遇到端口尚未监听，自动重试成功。
-- [x] 本机二进制、gpt001 与公网 `/aigw/version` 均为 `0.6.1 / 6ca5f22`；healthz/readyz 正常，启动日志无 ERROR。公网 UI HTTP 200，角标 brand.js 与源码 SHA-256 一致（资源与版本端点验证，未做浏览器目视检查）。
+- [x] 06:13:07（UTC+08:00）部署 gw-a，仅替换网关二进制；配置 SHA-256 部署前后一致，服务 active。启动时首次探针遇到端口尚未监听，自动重试成功。
+- [x] 本机二进制、gw-a 与公网 `/aigw/version` 均为 `0.6.1 / 6ca5f22`；healthz/readyz 正常，启动日志无 ERROR。公网 UI HTTP 200，角标 brand.js 与源码 SHA-256 一致（资源与版本端点验证，未做浏览器目视检查）。
 - [x] 本地与线上二进制 SHA-256 一致：`361f5263d86e30db37a743d68e8bfad95de1b4e31df478e5c6ba19531573933e`。
 - 回滚点：`/opt/aigw/aigw.prev-20260914-061307`（v0.6.0）；恢复该二进制后重启 aigw，不回退数据库。未回填历史工作区，未发起付费模型测试。
 
@@ -2246,8 +2246,8 @@
 
 - [x] 新增规范/对外模型级 reasoning 配置（inherit/default/force）、管理 API/MCP 与控制台表单，发布 minor **0.6.0**；设计与操作说明见 `docs/design/model-reasoning.md`、`docs/mcp.md`。
 - [x] 实现提交 `9f88fee`；发布提交 `0af1c12`，标签 `v0.6.0`。全量 `go test -count=1 ./...` 与功能相关 race 测试通过。
-- [x] 05:44（UTC+08:00）部署 gpt001；仅替换 `/opt/aigw/aigw`，未修改 `/opt/aigw/config.yaml` 或数据目录，服务 active。
-- [x] 本机、gpt001 与公网 `/aigw/version` 均返回 `{"revision":"0af1c12","version":"0.6.0"}`；healthz/readyz 均 HTTP 200，启动日志无 ERROR。
+- [x] 05:44（UTC+08:00）部署 gw-a；仅替换 `/opt/aigw/aigw`，未修改 `/opt/aigw/config.yaml` 或数据目录，服务 active。
+- [x] 本机、gw-a 与公网 `/aigw/version` 均返回 `{"revision":"0af1c12","version":"0.6.0"}`；healthz/readyz 均 HTTP 200，启动日志无 ERROR。
 - [x] 回滚点：`/opt/aigw/aigw.prev-20260914-054404`；恢复该二进制后重启 aigw，不回退数据库。
 
 ### v0.5.0 发布记录（2026-09-13）
@@ -2255,8 +2255,8 @@
 - [x] 新增智能问答“创建技能”工具：通过 SSE 展示创建过程，生成草稿后由用户确认保存；发布 minor **0.5.0**。
 - [x] 实现提交 `d10f9fb`；发布提交 `1e40420`，标签 `v0.5.0`。
 - [x] 全量 `go test ./...` 通过；构建二进制版本为 `0.5.0`，revision `1e40420`。
-- [x] 部署 gpt001；服务 active，`/aigw/version` 返回 `{"revision":"1e40420","version":"0.5.0"}`，healthz/readyz 均 HTTP 200，启动日志无 ERROR。
-- [x] 公网 `https://mnl.iotalking.top/aigw/version` 返回 `0.5.0 / 1e40420`。
+- [x] 部署 gw-a；服务 active，`/aigw/version` 返回 `{"revision":"1e40420","version":"0.5.0"}`，healthz/readyz 均 HTTP 200，启动日志无 ERROR。
+- [x] 公网 `https://gw-a.example.org/aigw/version` 返回 `0.5.0 / 1e40420`。
 - 回滚点：本次部署生成的 `/opt/aigw/aigw.prev-20260913-223547`；恢复该二进制后重启 aigw，不回退数据库。
 
 ### v0.4.0 发布记录（2026-09-13）
@@ -2264,13 +2264,13 @@
 - [x] 新增 M42 stdio MCP 转发能力，发布 minor **0.4.0**；发布说明 `docs/releases/v0.4.0.md`。
 - [x] 实现提交 `97dfd6d`；发布提交 `13a120d`，标签 `v0.4.0`；main 与标签已原子推送 origin。
 - [x] 实现阶段 `make verify` 与命令包 race 测试通过；发布提交构建成功，二进制帮助包含 endpoint/token-env。
-- [x] 22:01:04（UTC+08:00）部署 gpt001；仅替换网关二进制，Codex 插件保留；配置 SHA-256 与部署前一致。
+- [x] 22:01:04（UTC+08:00）部署 gw-a；仅替换网关二进制，Codex 插件保留；配置 SHA-256 与部署前一致。
 - [x] 本地/线上网关 SHA-256 一致：`7731c8bfa0a976d1109e4fabb7d1e6717721edc680c72183d74ce0a43471ac33`。
 - [x] 本机与公网 `/aigw/version` 返回 `0.4.0 / 13a120d`；healthz/readyz 正常，UI 与 brand.js HTTP 200；公网 brand.js 与源码逐字节一致。服务 active，启动日志无 ERROR。重启后的首次连接尚未监听，自动重试后成功。
 - 回滚点：`/opt/aigw/aigw.pre-v0.4.0`（v0.3.1）；恢复该二进制后重启 aigw，不回退数据库。
 - 未发起付费模型验证，未做浏览器目视检查；新转发模式的权限和写入依赖真实 HTTP + 临时 SQLite 集成测试验证。
 
-## M43 API Key 哈希导入 + sub2api「智天成」用户迁移（2026-09-14）
+## M43 API Key 哈希导入 + sub2api「客户组一」用户迁移（2026-09-14）
 
 设计：`docs/design/m43-api-key-hash-import.md`；规格/运行手册：`docs/sub2api-migration.md`。
 
@@ -2281,37 +2281,37 @@
 - [x] 路由表条目含完整 body 形状/示例（`docs/mcp.md` §4.5 守卫通过）；MCP `admin` scope 自动可见。
 - [x] 测试：真实 bearer 认证/前缀与截断拒绝、响应与审计不含密钥材料、形状与错误表、幂等与 409、viewer 403、store 方法。
 - [x] `scripts/sub2api-migrate.py`：plan/snapshot/apply/verify/report；哈希在源库 SQL 内计算，脚本从不 `SELECT key`。
-- [x] 分配规则：显式意图分组（21/22/23 → 蓝精灵2/3/1，数据校验）+ 其余按 (全局最少, 该用户最少, 标签 id) 均衡。
+- [x] 分配规则：显式意图分组（21/22/23 → 测试标签2/3/1，数据校验）+ 其余按 (全局最少, 该用户最少, 标签 id) 均衡。
 - [x] 预检覆盖：key 形状、前缀唯一性与冲突处置（`--reissue-key`）、账户名冲突、标签授权完整性、目标库占用。
 - [x] 迁移工具补齐：`selftest`（自造密钥走同一导入接口 + 真实数据面请求，证明前缀/哈希链路；用 0600 令牌文件复用同一把自检 key）、`snapshot` 忽略自检残留、`plan` 报告模型名覆盖。
-- [x] gptjp 实测：`plan` 逐把核对分配（22 用户 / 32 key，蓝精灵1=11、蓝精灵2=11、蓝精灵3=10，其中 key #24 因前缀冲突重签）。
-- [x] gptjp 迁移执行：快照 → 建 22 个账户（不带标签）→ 导入 31 把 key → 重签 1 把（aigw key #44，标签 蓝精灵2）→ `verify` 全绿。
+- [x] gw-b 实测：`plan` 逐把核对分配（22 用户 / 32 key，测试标签1=11、测试标签2=11、测试标签3=10，其中 key #24 因前缀冲突重签）。
+- [x] gw-b 迁移执行：快照 → 建 22 个账户（不带标签）→ 导入 31 把 key → 重签 1 把（aigw key #44，标签 测试标签2）→ `verify` 全绿。
 - [x] 验证：三标签各用一把真实迁移 key 发一次请求，`usage_records.provider_id` 依次为 1/3/5；仅前缀与截断明文当 bearer 均 401；长 `sk-` 在 journal 命中 0、报告 0、数据库里 60 处命中全部是「前缀+该行 sha256」相邻字段。
 
 ### v0.9.0 发布记录（2026-09-14）
 
 - [x] 新增管理接口 `POST /admin/api/v1/keys/import`（只收前缀与哈希），发布 minor **0.9.0**；实现提交 `13841c3`，发布提交 `338d4cc`，标签 `v0.9.0`。
 - [x] `make verify`（vet + 全量 Go 测试 + 构建）通过；新增端点测试覆盖真机认证路径、形状表、409 冲突、幂等重跑、viewer 403 与审计无密钥材料。
-- [x] 11:00:23（UTC+08:00）部署 gptjp；仅替换 `/opt/aigw/aigw`，配置与数据目录未动，服务 active，回滚点 `/opt/aigw/aigw.prev-20260914-110023`（上一位 `…-103458` 为 v0.8.0）。
-- [x] 11:00:54（UTC+08:00）同步升级 gpt001（0.8.0 → 0.9.0），仅替换 `/opt/aigw/aigw`，配置与数据目录未动，服务 active，回滚点 `/opt/aigw/aigw.prev-20260914-110054`（上一位 `…-103556` 为 v0.8.0）。
+- [x] 11:00:23（UTC+08:00）部署 gw-b；仅替换 `/opt/aigw/aigw`，配置与数据目录未动，服务 active，回滚点 `/opt/aigw/aigw.prev-20260914-110023`（上一位 `…-103458` 为 v0.8.0）。
+- [x] 11:00:54（UTC+08:00）同步升级 gw-a（0.8.0 → 0.9.0），仅替换 `/opt/aigw/aigw`，配置与数据目录未动，服务 active，回滚点 `/opt/aigw/aigw.prev-20260914-110054`（上一位 `…-103556` 为 v0.8.0）。
 - [x] 两台机本机与本地二进制 SHA-256 一致：`a612ae9642db7b12bee34dcd16e8e7c2652cd8029200040317334241f6b1b1f1`；`/aigw/version` 均为 `0.9.0 / 338d4cc`，healthz/readyz 200，重启后 `level=ERROR` 计数 0。
 
-### M43 迁移执行记录：sub2api「智天成」→ gptjp ai_gateway（2026-09-14）
+### M43 迁移执行记录：sub2api「客户组一」→ gw-b ai_gateway（2026-09-14）
 
-- 来源：gptjp（8.211.157.165）sub2api 库，`users.notes='智天成' AND deleted_at IS NULL` → **22 个用户**；其未删除且 active 的 key → **32 把**（6 把已删除、1 把 `quota_exhausted` 未迁移，报告已列出）。
+- 来源：gw-b（198.51.100.104）sub2api 库，`users.notes='客户组一' AND deleted_at IS NULL` → **22 个用户**；其未删除且 active 的 key → **32 把**（6 把已删除、1 把 `quota_exhausted` 未迁移，报告已列出）。
 - 目标：同机 aigw（`/opt/aigw`，0.9.0）；账户名=sub2api 用户名，备注记 `sub2api user #<id> · <email>`，账户一律**不带标签**（避免与 key 标签取并集放大授权）。
-- 分配：显式意图分组 21/22/23 → 蓝精灵2/3/1（12 把），其余 20 把按 (全局最少, 该用户最少, 标签 id) 均衡 → **蓝精灵1=11 / 蓝精灵2=11 / 蓝精灵3=10**。
-- 前缀冲突：sub2api key #24（收纳/E26Q）与 #51（郑晓婷）前 12 字符同为 `sk-f69aeca55`；保留 #51，**#24 在网关重签**为 aigw key #44（标签 蓝精灵2），明文只在控制台/响应出现一次，已暂存 `/opt/aigw/data/E26Q-reissue-key.txt`（0600，待交付本人后 `shred -u`）。
-- 迁移前发现并修正的**目标侧缺陷**：三个已有标签的 `grants` 只有 `providers`、没有 `models`，因此绑上去的 key 每个请求都 403；管理 API 因标签名含中文而拒绝写入（名称校验是 ASCII-only），故按既有先例**直写 SQLite** 补 `"models":["*"]`（providers 原样），随后重启 reload 并用管理接口读回复核。改动前值：`蓝精灵1={"providers":["liuhui-wisskys-8-expiry"]}`、`蓝精灵2={"providers":["lizhichao-wisskys-3-expiry"]}`、`蓝精灵3={"providers":["lzhichao-lagenio-3-expiry"]}`。
+- 分配：显式意图分组 21/22/23 → 测试标签2/3/1（12 把），其余 20 把按 (全局最少, 该用户最少, 标签 id) 均衡 → **测试标签1=11 / 测试标签2=11 / 测试标签3=10**。
+- 前缀冲突：sub2api key #24（客户组三/K7QX）与 #51（孙倩）前 12 字符同为 `sk-000000000`；保留 #51，**#24 在网关重签**为 aigw key #44（标签 测试标签2），明文只在控制台/响应出现一次，已暂存 `/opt/aigw/data/K7QX-reissue-key.txt`（0600，待交付本人后 `shred -u`）。
+- 迁移前发现并修正的**目标侧缺陷**：三个已有标签的 `grants` 只有 `providers`、没有 `models`，因此绑上去的 key 每个请求都 403；管理 API 因标签名含中文而拒绝写入（名称校验是 ASCII-only），故按既有先例**直写 SQLite** 补 `"models":["*"]`（providers 原样），随后重启 reload 并用管理接口读回复核。改动前值：`测试标签1={"providers":["wangwu-corp-a-8-expiry"]}`、`测试标签2={"providers":["lilei-corp-a-3-expiry"]}`、`测试标签3={"providers":["lzhichao-lagenio-3-expiry"]}`。
 - 回滚点：`/opt/aigw/data/aigw.db.pre-sub2api-20260914-110412`（标签修正前）、`…-110602`（导入前，0600，均 quick_check=ok）；二进制 `/opt/aigw/aigw.prev-20260914-110023`。
-- 验证证据：`verify` 逐把比对源库重算的 prefix/hash 与 aigw 行（31/31 一致）、`effective_tags` 逐把等于预期单一标签、账户标签为空；三标签各用一把真实迁移 key 发一次请求，`usage_records.provider_id` = 1/3/5 且 status=completed（蓝精灵1 首轮遇到一次 `server_is_overloaded`，重试即成功）；前缀当 bearer、截断明文当 bearer、未知前缀、无 key 均 401。
+- 验证证据：`verify` 逐把比对源库重算的 prefix/hash 与 aigw 行（31/31 一致）、`effective_tags` 逐把等于预期单一标签、账户标签为空；三标签各用一把真实迁移 key 发一次请求，`usage_records.provider_id` = 1/3/5 且 status=completed（测试标签1 首轮遇到一次 `server_is_overloaded`，重试即成功）；前缀当 bearer、截断明文当 bearer、未知前缀、无 key 均 401。
 - 保密：明文只在 postgres 进程内算哈希（`encode(sha256(convert_to(btrim(key),'UTF8')),'hex')`），脚本从不 `SELECT key`；迁移窗口 journal 长 `sk-` 命中 0；报告 JSON 命中 0；aigw 库内 60 处长 `sk-` 命中经逐条比对**全部**是记录中 `key_prefix` 与 `key_hash` 相邻字段（长度恒为 76），无一处是明文。
 - 已知残留（自检工具产生，均停用）：账户 `zz-migration-selftest`（closed）+ 自检 key #1/#3/#5（disabled）、3 个已撤销的临时 MCP 令牌、`/opt/aigw/data/.selftest-token`（0600）。网关没有删除账户/key 的路由，故保留为记录。
 - 未迁移/未修（待决策）：计费余额与额度；（模型面）源库近 30 天有 **13 个模型名、2390 次请求**在 aigw 无对应 models/映射，其中 `gpt-4o`(974)、`gpt-5.4-mini`(622)、`gpt-5.6`(412) 量最大；另外两个**供应商映射错误**已实测确认：`deepseek-flash` → 上游 `gpt-5.6-astra`、`gpt-6` → 上游 `gpt-6` 都被 ChatGPT 拒绝（`model is not supported when using Codex with a ChatGPT account`）。sub2api 侧本次**没有任何写入**（双跑）。
 
 ## 中文标签名可编辑修复（2026-09-14）
 
-文档：`docs/tag-name-edit-fix.md`。起因：给 gptjp 的三个标签加 `deepseek` 供应商授权时，发现名字含中文的标签
+文档：`docs/tag-name-edit-fix.md`。起因：给 gw-b 的三个标签加 `deepseek` 供应商授权时，发现名字含中文的标签
 **无法通过管理 API 更新**——唯一写路径是按名字 upsert，而名字校验是 ASCII-only，于是这些行只能直写 SQLite
 （M43 迁移时已经这么绕过一次）。本次按缺陷修掉。
 
@@ -2327,7 +2327,7 @@
 - [x] 测试：`internal/httpapi/admin_tags_test.go`（中文名创建回归、名字边界、按 id 更新后 registry 快照已 reload、
   局部更新、改名 400、未知 id 404、被拒写入不动行、null 清空、viewer 403）、`internal/store/tags_test.go`、
   路由表守卫新增模式、`internal/webui/tests/tags_binding_test.mjs` 两条静态断言。
-- [x] 线上（gptjp，0.10.0 旧二进制）：`蓝精灵1/2/3` 的 grants 各加 `"deepseek"`（备份
+- [x] 线上（gw-b，0.10.0 旧二进制）：`测试标签1/2/3` 的 grants 各加 `"deepseek"`（备份
   `/opt/aigw/data/backups/aigw-pre-taggrant-20260914-140716.db`），用管理接口对 provider 7 发空 PATCH 触发
   registry reload（不重启、不改值、audit 有据）；验证：同一把 key 的 `/v1/models` 出现 4 个 deepseek 模型，
   `deepseek-flash` / `deepseek-v4-flash` 均 200，`usage_records.provider_id=7`（官方 deepseek，而非先前顶替它的
@@ -2345,40 +2345,40 @@
 - [x] `make verify` 等价执行（`go vet ./...` + `go test ./...` + `go build ./...`）全绿；新增
   `internal/domain/tag_name_test.go`、`internal/httpapi/admin_tags_test.go`、`internal/store/tags_test.go`
   与真实二进制 smoke（`.cache/probe/tag-patch-smoke.sh`）。本沙箱无 node，`make ui-base` 的 JS 断言以等价正则复核。
-- [x] 14:27:08（UTC+08:00）部署 **gptjp**；仅替换 `/opt/aigw/aigw`，`config.yaml` 与 `data/` 未动，服务 active，
+- [x] 14:27:08（UTC+08:00）部署 **gw-b**；仅替换 `/opt/aigw/aigw`，`config.yaml` 与 `data/` 未动，服务 active，
   回滚点 `/opt/aigw/aigw.prev-20260914-142708`（上一位 `…-120328` 为 0.10.0）。
 - [x] 本机与线上二进制 SHA-256 一致：`3ef8bfe36550082b8235885de1287af5331465fb5397c2274748f10b233b17bd`；
-  本机 `GET /aigw/version` 与对外 `https://gpt.lagenio.xyz/aigw/version` 均为 `0.11.0 / 460eee7`，
+  本机 `GET /aigw/version` 与对外 `https://gw-b.example.com/aigw/version` 均为 `0.11.0 / 460eee7`，
   healthz/readyz 200，启动日志 `level=ERROR` 计数 0，`registry loaded` 显示 tags=3。
 - [x] 线上功能验证（真实管理员会话，自检标签用后即删）：中文名 `POST /tags` 200（0.10.0 是 400）；
-  `PATCH /tags/{id}` 改授权 200 且名字不变；**`PATCH 蓝精灵3` 200**（原先只能直写 SQLite 的那一行）；
+  `PATCH /tags/{id}` 改授权 200 且名字不变；**`PATCH 测试标签3` 200**（原先只能直写 SQLite 的那一行）；
   改名 400 且带原因；`DELETE` 自检标签 200。回归：同一把迁移 key 的 `deepseek-flash` 请求仍 200（provider 7）。
-- [x] 控制台角标：`https://gpt.lagenio.xyz/aigw/admin/ui/` 左上角应显示 `v0.11.0  460eee7`（与 `/aigw/version` 同源，
+- [x] 控制台角标：`https://gw-b.example.com/aigw/admin/ui/` 左上角应显示 `v0.11.0  460eee7`（与 `/aigw/version` 同源，
   已用 curl 核对；浏览器目视待人工确认）。
 
 ### v0.12.0 发布记录（2026-09-14）
 
 - [x] 路由配置后台改为模型中心的双栏编辑器：左栏可过滤模型，右栏以 checkbox 多选供应商；每个选中供应商可编辑上游模型名，并通过单个“保存路由”提交创建、更新和删除。属于新增管理后台能力，按 **minor** 由 `0.11.0` 升至 **`0.12.0`**。
 - [x] 实现提交 `09cffc3`；发布提交 `60dc1ba`，标签 `v0.12.0`。`go test ./...`、`go vet ./...`、嵌入资源测试与模型页浏览器 UI harness 均通过；本环境无 Node，`make ui-base` 自动跳过。
-- [x] 15:07:27（UTC+08:00）部署 **gptjp**；仅替换 `/opt/aigw/aigw`，未改动 `config.yaml` 或 `data/`。服务 active，回滚点：`/opt/aigw/aigw.prev-20260914-150727`。
-- [x] 校验：本机、`gptjp` 本地及公网 `https://gpt.lagenio.xyz/aigw/version` 均返回 `0.12.0 / 60dc1ba`；`/aigw/healthz`、`/aigw/readyz` 均为 200；本次启动日志无 `level=ERROR`。公网控制台 `https://gpt.lagenio.xyz/aigw/admin/ui/` 返回 200，角标模块会读取同源 `/aigw/version` 并显示 `v0.12.0  60dc1ba`（资源/端点已核验，浏览器目视待人工确认）。
+- [x] 15:07:27（UTC+08:00）部署 **gw-b**；仅替换 `/opt/aigw/aigw`，未改动 `config.yaml` 或 `data/`。服务 active，回滚点：`/opt/aigw/aigw.prev-20260914-150727`。
+- [x] 校验：本机、`gw-b` 本地及公网 `https://gw-b.example.com/aigw/version` 均返回 `0.12.0 / 60dc1ba`；`/aigw/healthz`、`/aigw/readyz` 均为 200；本次启动日志无 `level=ERROR`。公网控制台 `https://gw-b.example.com/aigw/admin/ui/` 返回 200，角标模块会读取同源 `/aigw/version` 并显示 `v0.12.0  60dc1ba`（资源/端点已核验，浏览器目视待人工确认）。
 
-### gptjp 按官方价配置全部模型（2026-09-14）
+### gw-b 按官方价配置全部模型（2026-09-14）
 
-- 背景：gptjp 有 **52 行** `provider_models`，`pricing_rules_json` **全部为空**——成本侧无规则时
+- 背景：gw-b 有 **52 行** `provider_models`，`pricing_rules_json` **全部为空**——成本侧无规则时
   计价引擎按 0 计，`usage_records` 里 1080 条记录（近 30 天）中 `cost_micros > 0` 的有 **0 条**，
   客户请求全部免费。售价侧没有模型级 `sale_pricing_json`，走 `cost_follow` × `default_markup_bp`
-  （gptjp 是 10000 = 1.0×），所以**只写成本侧就够了**，客户价自动跟随官方价。
+  （gw-b 是 10000 = 1.0×），所以**只写成本侧就够了**，客户价自动跟随官方价。
 - [x] 新增 `scripts/official-pricing.sh`：先列实例上的**所有**供应商模型，再逐行取价写入。
   与既有的 `deepseek-official-pricing.sh` / `codex-official-pricing.sh` 是「并集 + 补齐」关系
   （那两个脚本各自写死一家、只覆盖当时知道的几个 id）。取价口径三条：
   ① **按 `upstream_model` 取价、不按 public 名**——同一个 public 名在不同供应商可能指向不同上游
-  （gptjp 上 `deepseek-v4-flash` 在三家 codex 上指向 `gpt-5.6-luna`、在 deepseek provider 上指向
+  （gw-b 上 `deepseek-v4-flash` 在三家 codex 上指向 `gpt-5.6-luna`、在 deepseek provider 上指向
   `deepseek-flash`；数据面 `ruleSetsFor` 也是按「实际使用的 provider + 对客模型」取成本表）；
-  ② **USD 直写**（官方英文页就是美元；gptjp 的 `billing.fx_rates` 是空表，写 CNY 规则集会被写时
+  ② **USD 直写**（官方英文页就是美元；gw-b 的 `billing.fx_rates` 是空表，写 CNY 规则集会被写时
   校验拒掉），费率为微美元/百万 token；③ **没有官方价的 id 不许猜**——显式白名单（附理由），
   名单外的未知 upstream 在**写入前整批中止**。干跑会登录（只读）并打印目标实例的真实逐行计划。
-- [x] 价格来源：OpenAI 官方定价页（本机出网被 Cloudflare 403，改从 gptjp 抓取，页面把定价表
+- [x] 价格来源：OpenAI 官方定价页（本机出网被 Cloudflare 403，改从 gw-b 抓取，页面把定价表
   JSON 内嵌在 Astro island 的 props 里）与 DeepSeek 官方定价页（英文页 USD）。规则集自检把官方
   关系写成断言（catch-all 存在、裸 `input` == 未命中价、缓存命中 == 输入价 1 折、长档输入 2×/输出
   1.5×、DeepSeek 空闲价 == 高峰价一半、图像取图像输出价、音频取音频价）。
@@ -2416,9 +2416,9 @@
 - [x] 顺手修正 `scripts/deepseek-official-pricing.sh` 两处已被推翻的内容：① 删除
   `deepseek-v4-pro-retire` 规则——官方定价页脚注 (2) 现在写的是「应广大用户要求，决定在
   2026-09-14 之后**继续提供** V4 Pro 的 API 服务，**计费方式保持不变**」，原规则从
-  2026-09-14T04:00:00Z 起把 Pro 请求按 Flash 价计费，会持续少计成本（已确认 gpt001 上从未写入过
+  2026-09-14T04:00:00Z 起把 Pro 请求按 Flash 价计费，会持续少计成本（已确认 gw-a 上从未写入过
   这条规则，故线上无影响）；② 改正「completion_tokens 已包含 reasoning_tokens」的注释——
-  gptjp 的 `usage_records` 里同时有 output 与 reasoning 的 476 条记录中有 **3 条 reasoning >
+  gw-b 的 `usage_records` 里同时有 output 与 reasoning 的 476 条记录中有 **3 条 reasoning >
   output**（最大 41 vs 23），若已包含则不可能出现，实际是 chatcompat 分开上报
   （`ChatUsageToDimensions` 不从 output 里扣），引擎兜底后总价恰好等于官方「CoT 按输出 token
   计费」；`unpriced_dimensions` 里不会出现 reasoning。
@@ -2431,17 +2431,17 @@
   `GET /admin/api/v1/router/explain?model=gpt-5.4` 三家全部 `not_mapped`（`chosen: null`）；
   ③ 三家 codex 上的死别名行 `deepseek-v4-flash → gpt-5.6-luna`、`deepseek-v4-pro → gpt-5.6-sol`
   按**上游**价计（luna / sol），与上一节「deepseek-flash 别名下线」遗留的口径问题同源；
-  ④ **gpt001 存在两处偏差**（本次只读核对，未改）：`gpt-5.6-sol` 与 `gpt-5.6-terra` 两行用的是
+  ④ **gw-a 存在两处偏差**（本次只读核对，未改）：`gpt-5.6-sol` 与 `gpt-5.6-terra` 两行用的是
   **luna 的费率**（200000/20000/1200000），比官方价低 20× 与 10×；`deepseek-flash` 只有一条
   **CNY 标准价**、没有分时（高峰期会按空闲价计）。需要时用修好的
-  `scripts/deepseek-official-pricing.sh` 与 `scripts/official-pricing.sh` 对 gpt001 复核后写入。
+  `scripts/deepseek-official-pricing.sh` 与 `scripts/official-pricing.sh` 对 gw-a 复核后写入。
 
 ### codex 长上下文 400：reasoning 条目的空值与身份（2026-09-14）
 
 - 现象（用户报）：codex 里上下文一长就断流——
   `stream disconnected before completion: missing_required_parameter: Missing required parameter:
   'input[N].summary'.`
-- 线上证据（gptjp，用户 codex 走的那台）：17:48:06–17:49:30 同一会话
+- 线上证据（gw-b，用户 codex 走的那台）：17:48:06–17:49:30 同一会话
   `01a09f08-03f3-7721-8047-d10cb870d17d` 连续 **6 次**失败（工作区 `D:\code\python\售后系统`、
   模型 `gpt-6-astra`、请求体 1,323,524 字节、latency 0.5–0.6s、
   `error_code=missing_required_parameter`）；当天同类失败 26 条分四组、**全部 client=codex**，
@@ -2455,7 +2455,7 @@
   3. **条目身份被换**：插件在 `response.output_item.done` 上跳过 message/reasoning/function_call
      （注释写着"已走 delta 路径"）→ 客户端拿到的是网关**拼出来**的条目（自造 id、无加密块），
      回灌必然 `Item with id 'rs_…' not found. Items are not persisted when store is set to false.`
-- 复现（gptjp，修前，同一份请求）：`summary:[]` → `missing_required_parameter: 'input[1].summary'`；
+- 复现（gw-b，修前，同一份请求）：`summary:[]` → `missing_required_parameter: 'input[1].summary'`；
   只修 summary 后 → `Item … not found`；把网关自己回给客户端的条目原样回灌 → 同样 `not found`。
   对照：`summary` 非空 + 带 `content` → `array_above_max_length`（该后端输入 reasoning 的
   content 上限为 0）；带 `status` → `unknown_parameter`。
@@ -2470,13 +2470,13 @@
     `encrypted_content`、`phase` 等字段到客户端）；插件转发所有完成条目；非流式 `Complete`
     按 id 去重；同一 id 重复送达幂等。
 - 部署记录与回滚点（两台都换了网关二进制 + 插件二进制）：
-  - gptjp：`/opt/aigw/aigw` sha256 `1fde3a6259857d3690fb463d217186684ee846ce7ecaf6d9cd379a65e0c45cc1`、
+  - gw-b：`/opt/aigw/aigw` sha256 `1fde3a6259857d3690fb463d217186684ee846ce7ecaf6d9cd379a65e0c45cc1`、
     `/opt/aigw/plugins/aigw-provider-codex` sha256
     `c4253de202628fab6d0f57df84152005bfb697b1cbcac98362240a38005e2ac1`；
     回滚 `/opt/aigw/aigw.prev-20260914-211131`（0.12.2，`effca7d8…`）+ 同目录
     `aigw-provider-codex.prev-20260914-211131`（`8225db6a…`）；0.12.1 与 0.12.0 的回滚点
     （`aigw.prev-20260914-210311`、`aigw.prev-20260914-210043`）也在同目录。
-  - gpt001：`/opt/aigw/aigw` sha256 `1fde3a62…`、`/opt/aigw/plugins/provider-codex`（**这台机器的
+  - gw-a：`/opt/aigw/aigw` sha256 `1fde3a62…`、`/opt/aigw/plugins/provider-codex`（**这台机器的
     插件二进制名字就是 `provider-codex`**）sha256 `c4253de2…`；回滚
     `/opt/aigw/aigw.prev-20260914-211206`（`aa123f292a90…`）+
     `/opt/aigw/rollback/provider-codex.prev-20260914-211206`（`2a8a3c9c726d…`）。
@@ -2489,7 +2489,7 @@
     空串保留、`status`/`content` 被剥、用户消息不长出 `summary`）+ 响应方向 7 项
     （一条 reasoning、上游 id 与 `encrypted_content` 都在、message 用上游 id、delta 仍逐字流出、
     每个条目只 done 一次）全绿。
-  - 线上（gptjp，真上游）：网关回给客户端的是上游条目
+  - 线上（gw-b，真上游）：网关回给客户端的是上游条目
     `rs_0de8f8f7d4fae21a016aa7f2dc62f887d08160ab14360f3c6d`（`encrypted_content` 1932 字节）
     与 `msg_0de8f8f7…`（带 `phase`）；**把这两个条目原样放回下一轮 `input` → `completed`**
     （修复前 `Item … not found`）。
@@ -2558,7 +2558,7 @@
     首行 → 查 `/chat/models`），只有三个账户是空的，且原因分两类：
     | 账户 | 首行 Key | 状态 | 结果 |
     |---|---|---|---|
-    | 30 E26Q | 36 图像 | active | 200 + `data:[]`（静默空） |
+    | 30 K7QX | 36 图像 | active | 200 + `data:[]`（静默空） |
     | **4 admin** | **5 wiki** | **suspended** | **401 `API key is not active`** |
     | 48 m45-e2e | 43 m45-livecheck | disabled | 401 同上 |
     | 其余 22 个 | 均 active | — | 4 个模型，正常 |
@@ -2576,7 +2576,7 @@
   发的是 8 而不是第一行。`chat` 视图 110 checks 全过（改前 108）。
   **变异验证**：把过滤器改回 `payload.data || []`，恰好 `newSessionKeyPickerOffersActiveOnly` /
   `newSessionCreateSendsActiveKey` 两项失败并以非 0 退出。
-- 未做（**数据问题，未改**）：E26Q 账户的 Key 都是 active，但标签 `E26Q` 的 grants 是
+- 未做（**数据问题，未改**）：K7QX 账户的 Key 都是 active，但标签 `K7QX` 的 grants 是
   `{"models":["*"],"providers":["azure"]}`，而本机库重建后 `providers` 表里只有 `deepseek`。
   tag 已经产生了 grant，所以 `auth.default_grant: all` 的兜底不生效，所有路由在
   `internal/routing/routing.go:470` 被判定 `not_granted` → 候选恒为 0 → `/chat/models` 是
@@ -2604,7 +2604,7 @@
 - 回滚点：`bin/aigw.prev-0.12.3`（= `.cache/deploy-0.12.4/aigw-rollback-0.12.3`，从 tag `v0.12.3`
   重新构建，`-version` 实测 `0.12.3 (revision 44f9de2)`）。回滚步骤（**必须先 stop**，
   否则 `cp` 撞 ETXTBSY）：
-  `ssh 127.0.0.1 'cd /home/winger/work/ai_gateway && scripts/local-run.sh stop && install -m 0755 bin/aigw.prev-0.12.3 bin/aigw && scripts/local-run.sh start'`
+  `ssh 127.0.0.1 'cd /home/operator/work/ai_gateway && scripts/local-run.sh stop && install -m 0755 bin/aigw.prev-0.12.3 bin/aigw && scripts/local-run.sh start'`
 - 部署脚本第一版的两个坑（都已修好并写进脚本头注释，值得记住）：
   1. **回滚点不能从 `bin/aigw` 抄**：`release.sh` 的 `make build` 早就把 `bin/aigw` 换成新版本了，
      部署时再 `cp bin/aigw` 得到的「备份」其实是新二进制（实测 sha256 与 0.12.4 完全相同，
@@ -2614,7 +2614,7 @@
      （revision 在前），模式却按 version 在前匹配，于是**部署明明成功却被判定失败并触发回滚**；
      回滚那一步又因为直接 `cp` 正在运行的 `bin/aigw` 撞上 `Text file busy` 而什么都没做。
      净结果是「部署成功 + 脚本报失败」。现在改成两个字段各自独立匹配，回滚也改成先 stop 再装。
-- 未做：**gpt001 生产环境未部署**（本次只要求升级本机 8088；线上仍是 0.12.3）。
+- 未做：**gw-a 生产环境未部署**（本次只要求升级本机 8088；线上仍是 0.12.3）。
 
 ## M48 Codex 远端压缩 v2（`compaction_trigger` → 恰好一个 `compaction` 输出项）
 
@@ -2661,8 +2661,8 @@
       healthz/readyz/`admin/ui` 均 200；回滚点 `bin/aigw.prev-0.12.4`（从在跑进程的 `/proc/<pid>/exe` 取出的真 0.12.4，
       不是被 `go build` 覆盖后的那份 —— 见 v0.12.4 记录里的坑）。部署后用同一套 codex 复测：第二轮 `context compacted`、
       第三轮正常继续，`request_logs` 里 `call_kind=compaction` 行 `status=completed`
-- 未做：**gpt001 生产未部署**（线上 `/aigw/version` 仍为 `0.12.3 / 44f9de2`）；本仓库面向该路径的发布流程是
-  `release-version`（升 VERSION → tag → 构建 → 部署 gpt001）。需要的话单独发一版
+- 未做：**gw-a 生产未部署**（线上 `/aigw/version` 仍为 `0.12.3 / 44f9de2`）；本仓库面向该路径的发布流程是
+  `release-version`（升 VERSION → tag → 构建 → 部署 gw-a）。需要的话单独发一版
 - 后续（本次不做）：`/responses/compact`（v1 unary）路径 —— v1 会替换客户端历史，需要单独设计
 
 ### v0.12.5 发布记录（2026-09-15）
@@ -2679,13 +2679,13 @@
 - [x] 回滚点（**停进程前**从 `/proc/<pid>/exe` 取真正在跑的那一份，不是被 `make build` 覆盖后的 `bin/aigw`）：
   `bin/aigw.prev-m48-db7d0d2`（= 带 M48 修复但未发版的 0.12.4，sha256 `b966aa76…`）与
   `bin/aigw.prev-0.12.4`（= 已发版 0.12.4，sha256 `f815f53b…`）。回滚：
-  `ssh localhost 'cd /home/winger/work/ai_gateway && scripts/local-run.sh stop && install -m 0755 bin/aigw.prev-<x> bin/aigw && scripts/local-run.sh start'`
+  `ssh localhost 'cd /home/operator/work/ai_gateway && scripts/local-run.sh stop && install -m 0755 bin/aigw.prev-<x> bin/aigw && scripts/local-run.sh start'`
 - [x] 控制台：`/admin/ui/` 200，服务的 `js/pages/requests.js` 里能查到 `上下文压缩`（1 处）——即嵌入资产
   确实是新构建；角标由 `js/brand.js` 读同源 `/version`，与上面的 `/version` 输出同源（浏览器目视待人工确认）。
 - [x] 线上功能复测（同一套 VSCode 自带 codex → 本机 `:8088`）：第二轮自动压缩输出 `context compacted`、
   无 `Error running remote compact task`/`Fatal error`，随后正常继续；`request_logs#1714` = `call_kind=compaction`、
   `status=completed`。
-- 未做：**gpt001 生产未部署**（公网 `/aigw/version` 仍为 `0.12.3 / 44f9de2`）。
+- 未做：**gw-a 生产未部署**（公网 `/aigw/version` 仍为 `0.12.3 / 44f9de2`）。
 
 ## 内联表单的 `ui` 指令「渲染不出来」：`message` 没样式 + 按钮选择器不存在（2026-09-15）
 
@@ -2738,7 +2738,7 @@
   一条副产品：`message` 的定位断言第一版写成 `firstElementChild === banner`，被 harness 直接判红——
   `order:-1` 只改**视觉**顺序，DOM 里 `showMessage` 永远 `appendChild`，所以改用
   `getBoundingClientRect()` 比较（这条教训也写进了 M35 文档）。
-- 未做：**gpt001 生产还没部署这个修复**（发布按发布流程另走）。本机的重建与验证见文末一节。
+- 未做：**gw-a 生产还没部署这个修复**（发布按发布流程另走）。本机的重建与验证见文末一节。
 
 ### 顺带修掉一个与本次无关的旧红：`plugin` 视图
 
@@ -2779,7 +2779,7 @@
   四份资产与工作区 **diff 全等**（即嵌入资产确实是 0.13.0 的新构建，角标由 `js/brand.js` 读同源
   `/version`，与之同源）。
 - [x] 回滚点：`bin/aigw.prev-0.12.5-a7a17ff`（0.12.5，**revision a7a17ff**，= 升级前在跑的版本）。
-  回滚：`cd /home/winger/work/ai_gateway && install -m 0755 bin/aigw.prev-0.12.5-a7a17ff bin/aigw && scripts/local-run.sh restart`
+  回滚：`cd /home/operator/work/ai_gateway && install -m 0755 bin/aigw.prev-0.12.5-a7a17ff bin/aigw && scripts/local-run.sh restart`
 - **更正一处上一轮的错误记录**：上一轮写的回滚点 `bin/aigw.prev-m35pre-a7a17ff` 其实**不是**在跑的
   那一版——它是 `0.12.5 (revision 740b861)`，比在跑版本多一个纯文档提交（`git diff --stat a7a17ff 740b861`
   只有 `docs/TODO.md`）。代码虽相同，但 `/version` 报的 revision 对不上，不能当"上一版"的回滚依据。
@@ -2795,7 +2795,7 @@
   对照修复前同一条指令：`background: transparent / border: 0px / padding: 0px`、排第 5 位、距视口 -2957px。
   注：这次模型没再发 `disable`，所以线上只证到 `message` 可见这一半；`#b_submit` 那一半由 harness 的
   `disableButtonById`/`disableWholeForm`/`buttonTypeSubmitNeverMatches` 三项断言覆盖（全绿）。
-- 未做：**gpt001 生产未部署**（公网 `/aigw/version` 仍为 `0.12.3 / 44f9de2`）。
+- 未做：**gw-a 生产未部署**（公网 `/aigw/version` 仍为 `0.12.3 / 44f9de2`）。
 
 ### 沙箱约束（为什么重启必须由人来做）
 
@@ -3108,7 +3108,7 @@ harness 之所以漏掉它，是因为 fixture 直接给了 `account_count` 字�
 （`paging` 视图的 URL 断言因此保持全绿；那是"不改变既有行为"的可执行证据）。
 
 > 范围外：按组织的用量/费用汇总、请求日志的组织维度分组、拖拽改父（用「父节点」下拉）、门户侧组织展示、
-> `bootstrap` 初始化组织、生产（gpt001）部署与发版。
+> `bootstrap` 初始化组织、生产（gw-a）部署与发版。
 
 ## M50 前端资源混淆压缩（2026-09-15）
 
@@ -3153,7 +3153,7 @@ harness 之所以漏掉它，是因为 fixture 直接给了 `account_count` 字�
 - 未做：传输层预压缩（`.br`/`.gz` + `Content-Encoding`）、发布 sourcemap（会抵消混淆）、
   控制流扁平化/字符串加密（需 npm 工具链，且会让既有静态合约测试与 harness 断言大面积失效）
 - 未做：**发版与部署**。本改动只在控制台资产与构建路径上，`VERSION` 未动（仍 0.14.0），
-  按 `release-version` skill 升版本/打 tag/部署 gpt001 是独立一步
+  按 `release-version` skill 升版本/打 tag/部署 gw-a 是独立一步
 
 ### v0.14.1 发布与部署记录（2026-09-15，本机 :8088 已升级）
 
@@ -3191,7 +3191,7 @@ harness 之所以漏掉它，是因为 fixture 直接给了 `account_count` 字�
       重启之后 `level=ERROR` 为 0。功能面只读走查：登录 200、`GET /org/nodes` 200（空树，端点已接线）、
       `GET /requests?limit=1` 200（返回真实 codex 行，身份列齐全）、`/v1/models` 401（未带 Key，符合预期）。
 - 回滚（如需，在宿主终端执行）：`cp data/aigw.prev-running-20260915-210057 bin/aigw && scripts/local-run.sh restart`。
-- 未做：**gpt001 生产未部署**（本次只要求升级本机 8088；线上仍为 `0.12.3 / 44f9de2`）。
+- 未做：**gw-a 生产未部署**（本次只要求升级本机 8088；线上仍为 `0.12.3 / 44f9de2`）。
 
 ---
 
@@ -3272,7 +3272,7 @@ harness 之所以漏掉它，是因为 fixture 直接给了 `account_count` 字�
 
 - [x] 建户全流程：useradd → 家目录 → DSH_HOME → unit → start → 回环 401 探针 → 再 enable
 
-- [x] 入口：**宿主 nginx** `conf.d/dshgw/*.conf`（门户端口 + 各租户端口，TLS 复用现有 `*.tirisen.hk`）；
+- [x] 入口：**宿主 nginx** `conf.d/dshgw/*.conf`（门户端口 + 各租户端口，TLS 复用现有 `*.example.net`）；
       **不动 nginxWebUI 数据库**（可选：经 WebUI 正规注册既有 `/dsh/` location 指向门户）
 
 - [x] `dshgw.service` 绑 `127.0.0.1:3099`（不依赖 docker0）
@@ -3341,7 +3341,7 @@ harness 之所以漏掉它，是因为 fixture 直接给了 `account_count` 字�
 - [x] 用户root回传A停用验收 `disabled-key-model-401-and-configured-session-policy` PASS：模型401、key_revalidate:off保留既有UI会话，B未受影响。真实新Key轮换未纳入此通过项。
 - [x] 临时Firefox 155.0.1原生表单对照：no-referrer使/login和/logout的Origin为字面量null；same-origin保留正确同源Origin。四例均为原生导航POST，不是手工Origin或fetch。临时回环/profile已清理；线上用户浏览器修复复验仍待执行。
 
-- [x] gateway更新后真实浏览器 Key B 登录返回302并打开 `https://chat.tirisen.hk:32602/`。
+- [x] gateway更新后真实浏览器 Key B 登录返回302并打开 `https://chat.example.com:32602/`。
 
 - [x] 门户第二阶段CSP修复与用户最终复验：显式允许registry内租户origin作为form-action重定向目标；用户确认更新后的CSP头及浏览器自动跳转成功。此前“手工可打开32602”不代表自动跳转；最终确认发生于CSP修复部署后。门户保持:32600，不实施/dsh/。增加CSP精确来源无通配符断言，proxy测试通过。
 
@@ -3539,7 +3539,7 @@ sha256 与压缩镜像全部相同），但"曾经不是"可证：M50 随 0.14.1
 | revision | `c8df8b8`（tag `v0.17.0`；`release: v0.17.0` 提交只含 `VERSION`） |
 | 内容 | M54 控制台资源形态自述（`ui`）、M55 控制台资源 gzip 预压缩（`ui_encoding`）、M56 供应商成本上限与复位 |
 | 构建 | `scripts/release.sh minor` → `ui: minified 37 files 572454 -> 336354 bytes (-41%); gzip 32 files 333993 -> 132850 bytes (-60%)`；`bin/aigw` 21,986,543 B |
-| 部署目标 | **本机 `:8088`**（`/home/winger/work/ai_gateway`，`scripts/local-run.sh`；用户指定，非 gpt001） |
+| 部署目标 | **本机 `:8088`**（`/home/operator/work/ai_gateway`，`scripts/local-run.sh`；用户指定，非 gw-a） |
 | 回滚点 | `bin/aigw.prev-0.16.0-9dc4ed2`（从正在运行的 `9dc4ed2` 进程的 `/proc/<pid>/exe` 取出，`-version` 自证 0.16.0；更早还有 `bin/aigw.prev-0.14.0-6bf8dce`、`bin/aigw.prev-running-0.14.0-6dc9082`） |
 | 部署方式 | ①`make build`（随 release.sh）；②`scripts/local-run.sh restart`（先按 pidfile 优雅停止旧实例，再 `setsid` 起新实例）——**这一步在 DSH 会话里做会被沙箱回收**（见下方「部署事故」）；③最终改用 `systemd-run --user --unit=aigw-local`（transient unit）启动，并由 `systemctl --user show -p MainPID` 回写 `data/aigw-local.pid`，使既有脚本的 status/stop/logs 仍可用 |
 
@@ -3586,7 +3586,7 @@ sha256 与压缩镜像全部相同），但"曾经不是"可证：M50 随 0.14.1
 - 没有对线上任何供应商设置成本上限（那是改配置，不是发布的一步）：M56 的"设上限 → 被剔除 → 复位恢复"
   与"周期自动重新起算"两条仍待人工用管理员会话验证。M56 自身的功能面由自动化验收覆盖
   （`make test`、`make ui-check` 的 `cost` 视图、`internal/httpapi/provider_cost_test.go` 端到端）。
-- 没有部署到 gpt001（本次用户指定只部署本机 `:8088`）。
+- 没有部署到 gw-a（本次用户指定只部署本机 `:8088`）。
 - 开机自启：当前是 transient 单元，重启机器后仍需手动起（与改动前同）。是否落一份常驻 unit 并 `enable`
   待用户决定。
 - 顺带发现（已另立观察项到 `docs/TODO.md`）：SIGTERM 优雅停机时，审计写队列在 15 秒宽限内没排空
@@ -3603,7 +3603,7 @@ sha256 与压缩镜像全部相同），但"曾经不是"可证：M50 随 0.14.1
 | revision | `65b61db`（tag `v0.18.0`；`release: v0.18.0` 提交只含 `VERSION`） |
 | 内容 | M57：dshgw bwrap 隔离模式（不建 per-tenant OS 用户）、`tenant re-isolate --to user\|bwrap`、`sandbox-exec`、doctor 的 bwrap 前置条件、worker unit 与安装产物、设计与部署文档 |
 | 构建 | `scripts/release.sh minor` → `ui: minified 37 files 572454 -> 336354 bytes (-41%); gzip 32 files 333993 -> 132850 bytes (-60%)`；`bin/aigw` 21,986,543 B |
-| 部署目标 | **本机 `:8088`**（`/home/winger/work/ai_gateway`；用户本次指定 "deploy local 8088"，非 gpt001） |
+| 部署目标 | **本机 `:8088`**（`/home/operator/work/ai_gateway`；用户本次指定 "deploy local 8088"，非 gw-a） |
 | 回滚点 | `bin/aigw.prev-0.17.0-e7e3e25`（升级前 on-disk 二进制，`-version` 自证 `0.17.0 (revision e7e3e25)`；更早还有 `bin/aigw.prev-0.16.0-9dc4ed2`、`bin/aigw.prev-0.14.0-6bf8dce`、`bin/aigw.prev-running-0.14.0-6dc9082`） |
 | 部署方式 | `systemd-run --user --unit=aigw-local --collect`（transient unit：`WorkingDirectory=<repo>`、`Restart=on-failure`、`StandardOutput/StandardError=append:data/aigw-local.log`），随后 `systemctl --user show -p MainPID --value aigw-local` 回写 `data/aigw-local.pid`，使 `scripts/local-run.sh status/stop/logs` 继续可用 |
 
@@ -3629,7 +3629,7 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 | `GET /readyz` | 200 |
 | `local-run.sh status` | `running (pid 1585697) listen=:8088`；`health: http://127.0.0.1:8088/admin/ui/ -> HTTP 200`；`console: minified · transfer: gzip` |
 | systemd 用户单元 | `ActiveState=active`、`Restart=on-failure`、`MainPID=1585697`（与 pidfile 一致） |
-| 启动日志 | `msg="aigw starting" version=0.18.0 revision=65b61db ui=minified ui_encoding=gzip config=/home/winger/work/ai_gateway/config.yaml listen=:8088 database=./data/aigw-local.db`；`msg="registry loaded" summary="snapshot(models=10 providers=6 provider_models=14 routes=14 mappings=0 tags=7 accounts=28)" ready=true`；**本次启动 0 条 `level=ERROR`** |
+| 启动日志 | `msg="aigw starting" version=0.18.0 revision=65b61db ui=minified ui_encoding=gzip config=/home/operator/work/ai_gateway/config.yaml listen=:8088 database=./data/aigw-local.db`；`msg="registry loaded" summary="snapshot(models=10 providers=6 provider_models=14 routes=14 mappings=0 tags=7 accounts=28)" ready=true`；**本次启动 0 条 `level=ERROR`** |
 | 数据面/控制面在线 | `/v1/models` 401（未带 Key）、`/admin/ui/` 200、`/admin/api/v1/providers` 401 |
 | 存活（关键） | 单元起于 18:52:13，跨工具调用并越过 v0.17.0 记录的 ~3 分钟回收阈值后仍 `active (running)`、MainPID 未变 |
 | 回归面 | M57 的改动全部在 `internal/dshgw`、`cmd/dshgw`、`deploy/dshgw`、docs 与 dshgw 构建目标内，aigw 不导入这些包；因此本版 aigw 的功能面与 v0.17.0 相同，`/version` 的 version/revision 是唯一变化 |
@@ -3640,7 +3640,7 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - **dshgw 未部署**：M57 的 bwrap 模式要在宿主 root 终端执行 `deploy/dshgw/install.sh` 并把
   `/etc/dshgw/config.yaml` 的 `deploy.isolation` 改为 `bwrap`（前置条件、验收与回滚命令见
   `deploy/dshgw/README.md` §7，待办清单见 `docs/TODO.md` M57）。本次只做版本发布 + 本机 aigw `:8088` 部署。
-- 没有部署到 gpt001（用户本次指定只部署本机）。
+- 没有部署到 gw-a（用户本次指定只部署本机）。
 - 开机自启仍未落地：`aigw-local` 是 transient 单元，重启机器后需手动起（与 v0.17.0 后的状态相同）。
 
 ## 发布记录 v1.0.0（2026-09-18，M58）
@@ -3652,7 +3652,7 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 | revision | `d22f744`（tag `v1.0.0`；`release: v1.0.0` 提交只含 `VERSION`） |
 | 内容 | M58：aigw 拉起并监督同目录 dshgw 子进程（同 UID、无 root、无 systemd、无共享服务账号，随 aigw 退出而停）；worker 为 dshgw 的 bwrap 子进程；每 worker 资源限额（systemd 用户 scope）+ 部署级汇总上限；公开面由 dshgw 自己绑定（无 nginx，TLS 可选）；worker 启动前自动同步模型；用户级常驻单元与开机自启；宿主迁移脚本（apply/rollback + 干跑 + 计划测试）；可选单域名入口反代 `bin/gwproxy`（路径前缀 + 前门跳转）；`scripts/dshgw_supervised_e2e.py` 24 步端到端验收 |
 | 构建 | `scripts/release.sh major` → `ui: minified 37 files 572454 -> 336354 bytes (-41%); gzip 32 files 333993 -> 132850 bytes (-60%)`；`bin/aigw` 22,206,049 B；另 `make dshgw-build gwproxy-build` 产出 `bin/dshgw`/`bin/gwproxy`（同版本 revision，`release.sh` 只构建 aigw） |
-| 部署目标 | **本机 `:8088`**（用户指定 "deploy local … 保持 8088 能用"，非 gpt001） |
+| 部署目标 | **本机 `:8088`**（用户指定 "deploy local … 保持 8088 能用"，非 gw-a） |
 | 回滚点 | `bin/aigw.prev-0.18.0-ec7b911`（升级前正在运行的二进制，从 `/proc/<pid>/exe` 原样抢救——`make build` 已覆盖磁盘文件；`-version` 自证 `0.18.0 (revision ec7b911)`）。更早还有 `bin/aigw.prev-0.17.0-e7e3e25`、`bin/aigw.prev-0.16.0-9dc4ed2`、`bin/aigw.prev-running-0.14.0-6dc9082` |
 
 验证（本机实测）：
@@ -3661,7 +3661,7 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - [x] 启动日志：`aigw starting` … `http server listening addr=:8088`
 - [x] 控制台角标数据源：`admin/ui/js/api.js` 里 `fetch(base + "/version")` → `brand.js` 渲染 `v<version>` + `revision`；该端点经前门返回 `1.0.0/d22f744`（角标本身需管理员登录，本次无口令故未直读像素）
 - [x] 三个二进制版本自证：`aigw 1.0.0`、`dshgw listening version=1.0.0 revision=d22f744`、`front proxy listening addr=0.0.0.0:8090`
-- [x] 域名前门（`http://192.168.190.86:8090`，用户级单元 `gwproxy-verify`）：`/` → 302 `/admin/ui/`；`/admin/ui/` 200；`/version` 200；`/dshgw/` → 302 `http://192.168.190.86:18300/`；`/t/dsh-tenant/` → 302 `http://192.168.190.86:18302/`
+- [x] 域名前门（`http://192.0.2.101:8090`，用户级单元 `gwproxy-verify`）：`/` → 302 `/admin/ui/`；`/admin/ui/` 200；`/version` 200；`/dshgw/` → 302 `http://192.0.2.101:18300/`；`/t/dsh-tenant/` → 302 `http://192.0.2.101:18302/`
 - [x] 每租户一个 origin（当前拓扑：同一域名 + 每租户一个端口）：门户 `:18300` 200；租户 `:18301`/`:18302` 未登录 302 回门户（预期）
 - [x] 旧 root/systemd 部署未受影响：`dshgw.service` active、5 个 `dsh-worker@*` active
 - [x] `make verify`、`make dshgw-test`、`make dshgw-supervised-test`（24 步）均为 0
@@ -3683,7 +3683,7 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 验证（本机实测）：
 
 - [x] `:8088` 直连：`/version` → `{"version":"1.1.0","revision":"d9ef80d"}`；`/healthz` 200、`/readyz` 200；本次启动 `level=ERROR` **0 行**
-- [x] 域名前门（`:8090`）：`/` → 302 `/admin/ui/`；`/admin/ui/` 200；`/version` 200（1.1.0/d9ef80d）；`/dshgw/` → 302 `http://192.168.190.86:18300/`；`/t/dsh-tenant/` → 302 `http://192.168.190.86:18302/`
+- [x] 域名前门（`:8090`）：`/` → 302 `/admin/ui/`；`/admin/ui/` 200；`/version` 200（1.1.0/d9ef80d）；`/dshgw/` → 302 `http://192.0.2.101:18300/`；`/t/dsh-tenant/` → 302 `http://192.0.2.101:18302/`
 - [x] 租户 origin：门户 `:18300` 200；`dsh-tenant` 租户 `:18302` 未登录 302 回门户（预期）；worker `/api` 401
 - [x] 版本自证：`dshgw listening version=1.1.0 revision=d9ef80d`；三个单元 `active`（`aigw-local`/`dshgw-verify`/`gwproxy-verify`）
 - [x] 旧 root/systemd 部署未受影响：`dshgw.service` active、5 个 `dsh-worker@*` active
@@ -3708,10 +3708,10 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - [x] `:8088` → `{"version":"1.1.1","revision":"5e64378"}`；`/healthz` 200、`/readyz` 200；本次启动 `level=ERROR` **0 行**
 - [x] `dshgw listening version=1.1.1 revision=5e64378`；域名前门 `:8090`：`/`→302 `/admin/ui/`、`/admin/ui/` 200、`/dshgw/`→302、`/t/dsh-tenant/`→302
 - [x] 该租户的 `settings.yaml` **仍有 6 个模型**（修复不触碰已有配置）；worker `/api` 401（就绪）
-- [x] 模型面板依赖的两个 RPC **经网关均为 200**：`POST /api/settings/describe`、`POST /api/credentials/describe`（带正确 `Origin: http://192.168.190.86:18302`）
+- [x] 模型面板依赖的两个 RPC **经网关均为 200**：`POST /api/settings/describe`、`POST /api/credentials/describe`（带正确 `Origin: http://192.0.2.101:18302`）
 - [x] 真浏览器（CDP）打开租户 origin：`<title>DeepSeek Harness`、界面显示模型 `deepseek-flash`、约 15 个 RPC 全 200、**零失败/零异常/零控制台错误**
 - [x] `make verify`、`make dshgw-test`、`make dshgw-supervised-test`（24 步）均为 0
-- [x] 观测到的另一条边界（已知、可诊断）：`public_host` 之外的 host 拼写会让非 GET 请求 403 `origin mismatch`（审计记录 `edge_reject`），例如 `localhost:18302`、`rag-server:18302`；租户必须按 `http://192.168.190.86:18302/` 访问（前门 `:8090/t/<t>/` 也会跳到该地址）
+- [x] 观测到的另一条边界（已知、可诊断）：`public_host` 之外的 host 拼写会让非 GET 请求 403 `origin mismatch`（审计记录 `edge_reject`），例如 `localhost:18302`、`gw-c:18302`；租户必须按 `http://192.0.2.101:18302/` 访问（前门 `:8090/t/<t>/` 也会跳到该地址）
 
 ## 发布记录 v1.2.1（2026-09-18，修：aigw 冷启动 34s 造成的登录 503 窗口）
 
@@ -3720,7 +3720,7 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 | 版本号 | `1.2.1`（`1.2.0` → `1.2.1`，**patch**：只修缺陷） |
 | revision | `33810c7`（tag `v1.2.1`） |
 | 起因 | 用户报「/dshgw 登录失败：认证服务暂不可用」 |
-| 诊断 | dshgw 的 503 是**正确行为**（aigw 不可达时宁可拒绝登录，也不放行一把无法验证的 Key）。真因是 aigw 重启后有 **34 秒**端口拒绝连接：`15:16:30.660 aigw starting → 15:17:04.762 http server listening`；同机上一次重启只要 1.0s。用户登录发生在 `15:16:34`（dshgw 日志 `source=192.168.140.252`），正好落在窗口内 |
+| 诊断 | dshgw 的 503 是**正确行为**（aigw 不可达时宁可拒绝登录，也不放行一把无法验证的 Key）。真因是 aigw 重启后有 **34 秒**端口拒绝连接：`15:16:30.660 aigw starting → 15:17:04.762 http server listening`；同机上一次重启只要 1.0s。用户登录发生在 `15:16:34`（dshgw 日志 `source=192.0.2.108`），正好落在窗口内 |
 | 根因 | `logJanitor.Start` 位于启动早期，其第一次保留清理**立即执行**，与该阶段紧随其后的 bootstrap 写入（`UpsertAdminUser`）共用同一个 SQLite 写连接 → 那条写排在清理之后。日志里"backup scheduler started"到"admin user ready"恰好空 34 秒，中间唯一动作就是这条写 |
 | 修复 | ① 显式 `net.Listen` 绑定端口后再启动 janitor（家务活不进启动关键路径），绑定失败如实报为绑定失败；② `scripts/aigw_user_service.sh` 加**就绪门禁**：install/restart 后轮询 `/healthz` 到 200 才算成功（读配置的 listen/base_path，容忍引号与 `":8088"` 无 host 写法）——修补的是我这边的流程缺陷：上次在 aigw 未就绪时报了"部署完成" |
 | 构建 | `scripts/release.sh patch`；另 `make dshgw-build gwproxy-build` |
@@ -3875,17 +3875,17 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 验证（真实流量实测，缺一不可）：
 
 - [x] `GET /version` → `{"version":"1.3.0","revision":"23a6ea9","ui":"minified","ui_encoding":"gzip"}`（重启前是 `1.2.3`/`3c475f7`）
-- [x] 经操作者实际使用的地址复核（gwproxy 8090）：`http://192.168.190.86:8090/version` 同上 —— 控制台角标取的就是这个端点
+- [x] 经操作者实际使用的地址复核（gwproxy 8090）：`http://192.0.2.101:8090/version` 同上 —— 控制台角标取的就是这个端点
 - [x] `/healthz`、`/readyz`、`/admin/ui/` → 全部 200
 - [x] 启动日志：`aigw starting version=1.3.0 revision=23a6ea9 … listen=:8088`，`level=ERROR` 0 条
-- [x] 飞书链路在重启后仍然就绪：日志出现 `feishu identity enabled app_id=cli_… callback=http://192.168.190.86:8090/feishu/callback dsh_login=true portal=http://192.168.190.86:18300`；
+- [x] 飞书链路在重启后仍然就绪：日志出现 `feishu identity enabled app_id=cli_… callback=http://192.0.2.101:8090/feishu/callback dsh_login=true portal=http://192.0.2.101:18300`；
       `GET /feishu/login` → 302 直达 `accounts.feishu.cn`（`client_id`/`redirect_uri` 正确）；门户 `:18300` 页面仍带「飞书登录」按钮
 - [x] `dshgw-verify`、`gwproxy-verify` 两个 unit 均 active
 
-**本次未部署 gpt001**：该主机上的 `/opt/aigw/aigw` 仍是 **2026-09-14 的 0.12.3（revision 44f9de2）**，
+**本次未部署 gw-a**：该主机上的 `/opt/aigw/aigw` 仍是 **2026-09-14 的 0.12.3（revision 44f9de2）**，
 而仓库已到 1.3.0；0.12.3 → 1.3.0 之间包含 M51/M52/M57/M58 的部署形态变更（root/systemd/nginx 生命周期被删、
 `dshgw.*` 与 `feishu.*` 等配置面新增、`/opt/dsh` 运行时与 admin socket 约定），**需要一次带配置与数据迁移的
-独立部署步骤**，不能只换二进制。用户未要求改 gpt001，故本次保持其现状并在此记录差异。
+独立部署步骤**，不能只换二进制。用户未要求改 gw-a，故本次保持其现状并在此记录差异。
 
 ## M62 完成记录（绑定飞书即自动启用 DSH）
 
@@ -3921,7 +3921,7 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - [x] `internal/hook`、`internal/pluginhost` 的默认值保持本地字面量（分层表禁止它们 import
       `internal/config`），改由新增测试钉住三者指向同一个数据根
 - [x] `internal/dshgw/config`：默认值从 `/var/lib/dshgw`、`/srv/dsh`、`/opt/dshgw/share/*`、
-      `/home/winger/backups/dshgw`、`/etc/dshgw/config.yaml` 改为
+      `/home/operator/backups/dshgw`、`/etc/dshgw/config.yaml` 改为
       `./data/dshgw` 及其派生（tenant/workspace/template/backup/tenant-config/admin.sock）；
       新增 `resolvePaths()`（相对路径按工作目录归一、`..` 拒绝）；`dsh.*` 空值走
       `DSHGW_NODE`/`DSHGW_DSH_ROOT`；`deploy.plugin_path` 无默认值，`clamp` 时必须显式
@@ -3936,7 +3936,7 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
       ② `admin_socket` 在独立形态没有默认值，`serve` 只在配置了 socket 时才起供应通道 —— 现在派生
       `<state_dir>/admin.sock`（与监督形态同一位置）
 - [x] 示例与脚本：`config.example.yaml`（dshgw 段路径说明）、`deploy/dshgw/config.example.yaml`
-      （相对路径、去掉 `/home/winger`）、`deploy/dshgw/frontproxy.example.yaml`、
+      （相对路径、去掉 `/home/operator`）、`deploy/dshgw/frontproxy.example.yaml`、
       `deploy/dshgw/prepare-template.sh`（模板默认进数据根）、`scripts/verify-dshgw.sh`
       （改为把相对示例重写进 `$TMP`，不再依赖示例里的机器路径）、`.gitignore` 加 `/dshgw.yaml`、`/gwproxy.yaml`
 
@@ -3981,7 +3981,7 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
       admin socket 可用（`nc -U data/dshgw-verify/state/admin.sock` 返回 `tenant-list`）
 - [x] `bin/dshgw --config ./dshgw.yaml doctor` 通过后重启 `aigw-local`：`:8088/version` 200、
       `/admin/ui/` 200、启动日志
-      `aigw starting version=1.3.0 … data_dir=/home/winger/work/ai_gateway/data`，重启后 `level=ERROR` 0 条
+      `aigw starting version=1.3.0 … data_dir=/home/operator/work/ai_gateway/data`，重启后 `level=ERROR` 0 条
 
 ### C：遗留 root 形态的下线脚本（待宿主 sudo 执行）
 
@@ -3992,10 +3992,10 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
       账号删除是独立开关（默认不做）
 - [x] 新增 `scripts/test_decommission_legacy_plan.py`（并入 `make dshgw-test`）：合成夹具断言
       "归档 → 停服 → 校验 → 删除"的顺序、归档覆盖面（state/etc/nginx/unit 文件）与 dry-run 零执行
-- [x] 本机 dry-run 复核：识别 8 个单元与 `dsh-worker@<dsh-e26q|dsh-tenant|dsh-dshgw-e2e-a/b|m51-e2e-…>`，
+- [x] 本机 dry-run 复核：识别 8 个单元与 `dsh-worker@<dsh-k7qx|dsh-tenant|dsh-dshgw-e2e-a/b|m51-e2e-…>`，
       计划里归档在停服之前、删除在最后；未执行任何更改
 - [x] **首次 `--apply` 实测暴露脚本自身的一个缺陷（已修）**：归档已经写好（22:33，三份 tar + units + 版本，
-      `var-lib-dshgw.tar.gz` 12922 条目、含 `registry.json`/`keys.map`/`dsh-e26q` 全部文件），但脚本在
+      `var-lib-dshgw.tar.gz` 12922 条目、含 `registry.json`/`keys.map`/`dsh-k7qx` 全部文件），但脚本在
       **安全校验**处退出 1、什么都没删。原因是校验写成 `tar -tzf … | grep -qF …`：`grep -q` 命中即退出 →
       `tar` 收到 SIGPIPE（退出 141）→ `set -o pipefail` 把**成功的归档**判成失败。修法：把清单落到临时文件再
       `grep -qxF`（无管道）；并新增 `--archive-only`（只归档+校验、不碰服务）与 `--etc-dir`，
@@ -4010,7 +4010,7 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - [x] 设计文档 `docs/design/m63-data-root.md`、规格文档 `docs/deployment-layout.md`（三分法、默认值表、
       相对路径规则、本机布局、迁移/下线 runbook、排障表）；README 文档表与「运行」章、`docs/dshgw.md`、
       `deploy/dshgw/README.md`（§2 路径规则、§8.1 下线、§8.2 搬移、§10 本机布局）、
-      skill `release-version`（gpt001 的数据根规则）同步更新
+      skill `release-version`（gw-a 的数据根规则）同步更新
 - [x] 未发版：`VERSION` 仍 1.3.0；默认值与配置语义有变化，如需对外声明版本按 skill 走 minor（记在 TODO）
 
 ### v2.0.0 发布与部署记录（2026-09-18，本机）
@@ -4027,13 +4027,13 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 **验证**（全部实测）：
 
 - `GET /version` → `{"revision":"3b7628d","ui":"minified","ui_encoding":"gzip","version":"2.0.0"}`；`/healthz`、`/readyz`、`/admin/ui/` 均 200
-- 启动日志：`aigw starting version=2.0.0 revision=3b7628d … database=./data/aigw-local.db data_dir=/home/winger/work/ai_gateway/data`；重启后 `level=ERROR` **0 条**
+- 启动日志：`aigw starting version=2.0.0 revision=3b7628d … database=./data/aigw-local.db data_dir=/home/operator/work/ai_gateway/data`；重启后 `level=ERROR` **0 条**
 - `dshgw listening version=2.0.0 revision=3b7628d`，且 `admin channel listening socket=…/data/dshgw-verify/state/admin.sock`（M63 新增的派生默认生效）
-- 5 个租户 worker（含 4 个真实租户）`GET /api` 全部 **401**；门户 `:18300` 200；`gwproxy :8090` 的 `/version` 200、`/dshgw/` 302 到门户、`/t/dsh-colin/` 302 到该租户自己的 origin
+- 5 个租户 worker（含 4 个真实租户）`GET /api` 全部 **401**；门户 `:18300` 200；`gwproxy :8090` 的 `/version` 200、`/dshgw/` 302 到门户、`/t/dsh-alex/` 302 到该租户自己的 origin
 - `bin/dshgw --config ./dshgw.yaml doctor`：39 项 OK（仅测试租户 `verify1` 缺 key/settings 两项，属既有状态）
-- 控制台角标：角标数据源即 `/version`（上面已确认 2.0.0/3b7628d），其渲染逻辑由 `make ui-base` 的 node 断言覆盖；浏览器打开 `http://192.168.190.86:8088/admin/ui/` 或 `:8090/admin/ui/` 即可看到
+- 控制台角标：角标数据源即 `/version`（上面已确认 2.0.0/3b7628d），其渲染逻辑由 `make ui-base` 的 node 断言覆盖；浏览器打开 `http://aigw.internal:8088/admin/ui/` 或 `:8090/admin/ui/` 即可看到
 
-**未部署 gpt001**：本次按用户要求只部署本机。gpt001 的 `/opt/aigw/aigw` 仍是 2026-09-14 的 0.12.3，
+**未部署 gw-a**：本次按用户要求只部署本机。gw-a 的 `/opt/aigw/aigw` 仍是 2026-09-14 的 0.12.3，
 跨 0.12.3 → 2.0.0 需要一次带配置与数据迁移的独立部署（M51/M52/M57/M58 的形态变更），另立步骤。
 
 ## M64 aigw 账号的 SSH 工作区（远端目录 → 挂载 → 该账号 DSH 里的工作区）
@@ -4063,77 +4063,77 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 
 ### M64 发布记录：2026-09-19 v2.1.0（仅本机）
 
-- [x] 用户确认仅更新本机，不操作 gpt001。功能提交 `b73533d`；标签 `v2.1.0` 指向 `15d6875aac943dab0faca10ba9daab58bc5118ba`，VERSION=2.1.0；未推送远程仓库。
+- [x] 用户确认仅更新本机，不操作 gw-a。功能提交 `b73533d`；标签 `v2.1.0` 指向 `15d6875aac943dab0faca10ba9daab58bc5118ba`，VERSION=2.1.0；未推送远程仓库。
 - [x] 内容：SSH 用户名/端口输入，账号默认与主机专用私钥上传、替换、删除及指纹展示；统一身份选择，修复 SSHFS 别名 User 参数兼容问题。
 - [x] `make dshgw-test` 全通过（SSH 后端189/客户端40/picker15断言）；`go test ./cmd/... ./internal/... ./pkg/... ./examples/... ./plugins/...` 通过，plugins 无 Go 包。`go test ./...` 包枚举长期无输出后取消，改用覆盖全部受版本管理 Go 源码的显式目录，避免遍历 data 下远端挂载。真实 SSHFS 默认密钥、主机专用+端口、别名 User/HostName/Port 三个集成用例通过，未跳过。
 - [x] `scripts/release.sh minor`、`make dshgw-build` 构建 aigw/dshgw 2.1.0，revision=15d6875；aigw UI=minified、transfer=gzip。运行进程与构建 SHA256 一致：aigw `96426bb6bf4507d3e74e17110282af3484fae603e5b85ca5aa4f004b8e248caf`，dshgw `bea173f7b6dfba2f0a3dc87da1227c3dbe9dca37fcf9236f2778c38ca677c0b2`。
 - [x] 回滚材料：`data/releases/v2.1.0-before-20260919-013825/` 保存旧 aigw、dshgw、ssh-workspace 插件及 ssh-mounts.json。回滚需停服务、恢复程序/插件、清理失效 SSHFS 端点后启动并验证挂载；不要覆盖运行中的二进制。未修改配置或账号密钥。
 - [x] 本机 aigw-local.service、dshgw-verify.service 已重启并 active。`http://127.0.0.1:8088/version` 返回 2.1.0 / 15d6875；healthz/readyz HTTP 200；`/admin/ui/` 和读取 `/version` 的 `js/api.js` HTTP 200（资源与端点验收，非浏览器视觉验收）。
-- [x] dsh-tenant、dsh-colin、dsh-ranqiliang、dsh-lianchangliang 已认证页面及新版插件均 HTTP 200。原 aipc:/home/winger/ZT20Q 和 winger@192.168.190.123:2222 的 /home/vscode/lagenio_ai_chat_and_image 两处挂载恢复，已确认在账号沙箱内可见。
+- [x] dsh-tenant、dsh-alex、dsh-acct-b、dsh-acct-c 已认证页面及新版插件均 HTTP 200。原 gw-d:/home/operator/ZT20Q 和 operator@192.0.2.106:2222 的 /home/vscode/lagenio_ai_chat_and_image 两处挂载恢复，已确认在账号沙箱内可见。
 - [x] aigw 启动日志无 ERROR；dshgw 重启窗口出现短暂 reverse proxy ERROR，worker ready 后访问验证正常。历史 verify1 缺 key/旧 profile 告警仍存在，未替它创建凭据。未修改当前 3080 Harness GUI。
 
-### v2.2.1 发布与部署记录（2026-09-19，本机 + gpt001）
+### v2.2.1 发布与部署记录（2026-09-19，本机 + gw-a）
 
 | 项 | 内容 |
 |---|---|
 | 版本 | **v2.2.1**（`VERSION` 2.2.0 → 2.2.1，tag `v2.2.1` 指向 `77979b4`）；档位 patch：只修缺陷，无对外形状变化 |
 | 本版内容 | ① M65 浏览器工作区的三个挂载缺陷（`0b2fd52`）② 飞书登录回调的跨站 Fetch Metadata 交接（`11223c9`，此前一直只在本机未提交的构建里运行，revision 标记 `f9759f7-feishu-handoff`） |
 | 构建 | `scripts/release.sh patch` + `make dshgw-build gwproxy-build plugin-example`：`bin/{aigw,dshgw,gwproxy}` 均为 `2.2.1 (revision 77979b4)`；控制台 minified + gzip（37 文件 578420→339390 B）；provider 插件重建并刷新到 `plugins/`（`examples/provider-*` 自 v0.12.3 起无改动，行为等价） |
-| 部署范围 | 用户指定「所有重建，重新部署」：本机三单元 + **gpt001**（跨 0.12.3 → 2.2.1） |
+| 部署范围 | 用户指定「所有重建，重新部署」：本机三单元 + **gw-a**（跨 0.12.3 → 2.2.1） |
 | 回滚点（本机） | `data/prev/bin/{aigw.prev-running-2.2.0-f9759f7-feishu-handoff, dshgw.prev-running-2.2.0-f9759f7, gwproxy.prev-running-2.2.0-f9759f7}`（发布前**正在运行**的构建，从运行进程/构建缓存取，`-version` 自证）；插件回滚点 `plugins/aigw-provider-{codex,replay}.pre-2.2.1-20260919-144854`；索引与回滚命令见 `data/prev/README.md` |
-| 回滚点（gpt001） | `/opt/aigw/aigw.prev-20260919-145116`（0.12.3）、`/opt/aigw/plugins/provider-codex.pre-20260919-145116`、`/opt/aigw/data/aigw.db.pre-2.2.1-20260919-145116`（停服后整库快照） |
+| 回滚点（gw-a） | `/opt/aigw/aigw.prev-20260919-145116`（0.12.3）、`/opt/aigw/plugins/provider-codex.pre-20260919-145116`、`/opt/aigw/data/aigw.db.pre-2.2.1-20260919-145116`（停服后整库快照） |
 
 **验证**（全部实测）：
 
 - 本机：`GET /version` → `{"revision":"77979b4","ui":"minified","ui_encoding":"gzip","version":"2.2.1"}`；`/healthz`、`/readyz` 200；`aigw-local`/`dshgw-verify`/`gwproxy-verify` 三个单元 active，重启后 `level=ERROR` **0 条**；门户 `:18300` 200、租户 origin 302；`gwproxy :8090` 的 `/version` 200、`/dshgw/` 302；11 个租户 worker 全部 ready
-- 真实 Chromium 走查本机线上租户 GUI：用 `dsh-tenant` 自己的 gateway key 经门户登录 → 进入 `https://chat.tirisen.hk:18302/` → 侧栏「浏览器工作区」行存在、tooltip 带完整风险文案、**JS 异常 0**。**没有点击该行**（点击会重启该账号 worker，属用户任务中断），所以这是"线上插件形态"的验收，不是线上挂载验收
+- 真实 Chromium 走查本机线上租户 GUI：用 `dsh-tenant` 自己的 gateway key 经门户登录 → 进入 `https://chat.example.com:18302/` → 侧栏「浏览器工作区」行存在、tooltip 带完整风险文案、**JS 异常 0**。**没有点击该行**（点击会重启该账号 worker，属用户任务中断），所以这是"线上插件形态"的验收，不是线上挂载验收
 - 线上租户页面 4 条 console error 全部是既有的无凭据 manifest/CORS 噪声（`<link rel=manifest>` 不带 cookie → 门户 302 → CORS），与本次改动无关
-- gpt001：`https://mnl.iotalking.top/aigw/version` → `2.2.1 / 77979b4`；`/aigw/healthz`、`/aigw/readyz`、`/aigw/admin/ui/` 均 200；`systemctl show aigw` → `NRestarts=0`、`ActiveEnterTimestamp=2026-09-19 14:51:43`；启动日志 `aigw starting version=2.2.1 revision=77979b4`，近 10 分钟 `level=ERROR` **0 条**；管理 API 登录 200、`/auth/me`=admin、`/stats` version=2.2.1、providers 3、keys 17（数据完好）；部署的 `plugins/provider-codex` 就地执行输出 `protocol 1 / name provider-codex / version 0.1.0` 握手
+- gw-a：`https://gw-a.example.org/aigw/version` → `2.2.1 / 77979b4`；`/aigw/healthz`、`/aigw/readyz`、`/aigw/admin/ui/` 均 200；`systemctl show aigw` → `NRestarts=0`、`ActiveEnterTimestamp=2026-09-19 14:51:43`；启动日志 `aigw starting version=2.2.1 revision=77979b4`，近 10 分钟 `level=ERROR` **0 条**；管理 API 登录 200、`/auth/me`=admin、`/stats` version=2.2.1、providers 3、keys 17（数据完好）；部署的 `plugins/provider-codex` 就地执行输出 `protocol 1 / name provider-codex / version 0.1.0` 握手
 - 端到端挂载：`scripts/browser_workspace_mount_e2e.py` **PASS 23 步**（发布前用 `go build -o /tmp/dshgw-e2e` 的同一源码验证；本次发布的 `bin/dshgw` 即含这些修复）
 
-**未做/限制**：gpt001 的跨版本部署按"只换二进制"完成——配置解析预检通过（新二进制能解析 `/opt/aigw/config.yaml`，只在写 `/opt/aigw/data` 时因本机权限失败）、迁移脚本全部为纯增量（无 DROP/RENAME，回滚到 0.12.3 不会因 schema 失败）、数据库在停服后整库快照；但**没有**对 gpt001 跑真实 codex 请求探测（避免消耗订阅额度与触发 refresh_token 轮换），插件进程按需启动；仓库未推送远程。
+**未做/限制**：gw-a 的跨版本部署按"只换二进制"完成——配置解析预检通过（新二进制能解析 `/opt/aigw/config.yaml`，只在写 `/opt/aigw/data` 时因本机权限失败）、迁移脚本全部为纯增量（无 DROP/RENAME，回滚到 0.12.3 不会因 schema 失败）、数据库在停服后整库快照；但**没有**对 gw-a 跑真实 codex 请求探测（避免消耗订阅额度与触发 refresh_token 轮换），插件进程按需启动；仓库未推送远程。
 
-### v2.3.0 发布与部署记录（2026-09-19，本机三单元；gpt001 未部署）
+### v2.3.0 发布与部署记录（2026-09-19，本机三单元；gw-a 未部署）
 
 | 项 | 内容 |
 |---|---|
 | 版本 | **v2.3.0**（`VERSION` 2.2.1 → 2.3.0，tag `v2.3.0` 指向 `2306c22`）；档位 minor：新增对外端点 `resume` 与恢复语义，无破坏性变更 |
 | 本版内容 | 浏览器工作区不再「一次刷新即报废」：① 网关给死掉的 poll 一个 45s 宽限期（`reconnectGrace`），期间 `resume` 接回**同一个**内核挂载/挂载点，不重建、不重启 worker；宽限期内立即从所有 worker profile 排除；同一挂载只允许一条 poll 连接，被顶掉的旧页面收到 `directory revoked` ② 插件在 IndexedDB 存能力令牌+目录句柄，页面内断线**自动重连**（无刷新无点击），刷新/换标签页后**点击恢复**同一挂载（不再弹系统目录选择器）③ 见 `docs/browser-workspace-verification.md` 的实测表 |
 | 构建 | `scripts/release.sh minor` → `aigw 2.3.0 (revision 2306c22)`；`make dshgw-build gwproxy-build plugin-example` → `dshgw`/`gwproxy` 均 `2.3.0 (revision 2306c22)`；控制台 minified + gzip（37 文件 578420→339390 B，gzip 337029→134182 B） |
-| 部署范围 | 用户指定「部署本机」：仅本机三单元（`aigw-local`、`dshgw-verify`、`gwproxy-verify`）。**gpt001 未部署**（公网 `mnl.iotalking.top/aigw/version` 仍为 2.2.1 / 77979b4，属预期） |
+| 部署范围 | 用户指定「部署本机」：仅本机三单元（`aigw-local`、`dshgw-verify`、`gwproxy-verify`）。**gw-a 未部署**（公网 `gw-a.example.org/aigw/version` 仍为 2.2.1 / 77979b4，属预期） |
 | 回滚点 | `data/prev/bin/{aigw,dshgw,gwproxy}.prev-running-2.2.1-77979b4`（发布前**正在运行**的构建，从 `/proc/<pid>/exe` 取；逐个 `-version` 自证 `2.2.1 (revision 77979b4)`）。回滚：`cp data/prev/bin/<file> bin/<name> && systemctl --user restart <unit>` |
 
 **验证**（全部实测）：
 
 - `http://127.0.0.1:8088/version` → `{"revision":"2306c22","ui":"minified","ui_encoding":"gzip","version":"2.3.0"}`；`/healthz`、`/readyz` 200；`/admin/ui/` 200
 - 三单元 `is-active` 均 active、`NRestarts=0`，且各自 `/proc/<pid>/exe` 指向 `bin/{aigw,dshgw,gwproxy}`（即新构建）
-- 门户 `:18300` 根路径（`--resolve chat.tirisen.hk`）200；租户 origin `:18302` 302；重启后 **6 个租户 worker**（dsh-tenant/dsh-colin/dsh-lianchangliang/dsh-ranqiliang/dsh-tenant/verify1）全部 `tenant worker ready`
+- 门户 `:18300` 根路径（`--resolve chat.example.com`）200；租户 origin `:18302` 302；重启后 **6 个租户 worker**（dsh-tenant/dsh-alex/dsh-acct-c/dsh-acct-b/dsh-tenant/verify1）全部 `tenant worker ready`
 - `POST /browser-workspace/hello`（无会话）→ 403：新网关的浏览器工作区端点存在且仍受会话校验保护
 - 发布前用同一源码在一次性 fixture 上跑完三条恢复路径：`scripts/browser_workspace_reload_e2e.py` **PASS**（`control=ALIVE reconnect=ALIVE reload=DEAD restore=ALIVE reopen=ALIVE`，恢复时只调 `resume`、挂载 id/路径不变）；`scripts/browser_workspace_mount_e2e.py` 同源码 PASS；网关单测 + 插件 31 项测试全绿
 
-**未做/限制**：本机没有对**线上租户**做一次真实点击走查（点击侧栏会重启该账号 worker，可能中断正在运行的任务，需用户同意后再做），因此"线上租户形态"的恢复验收只到端点+构建+fixture 级别的证据；gpt001 未部署；仓库未推送远程。发布前 dshgw 日志里仍能看到历史（12:17）的浏览器挂载清理失败重试告警 `browser mount expiry cleanup failed … connection timed out`，属本次改动之前留下的记录（重启时无残留挂载需要 CleanupStale 处理）。
+**未做/限制**：本机没有对**线上租户**做一次真实点击走查（点击侧栏会重启该账号 worker，可能中断正在运行的任务，需用户同意后再做），因此"线上租户形态"的恢复验收只到端点+构建+fixture 级别的证据；gw-a 未部署；仓库未推送远程。发布前 dshgw 日志里仍能看到历史（12:17）的浏览器挂载清理失败重试告警 `browser mount expiry cleanup failed … connection timed out`，属本次改动之前留下的记录（重启时无残留挂载需要 CleanupStale 处理）。
 
-### v2.4.0 发布与部署记录（2026-09-19，本机三单元；gpt001 未部署）
+### v2.4.0 发布与部署记录（2026-09-19，本机三单元；gw-a 未部署）
 
 | 项 | 内容 |
 |---|---|
 | 版本 | **v2.4.0**（`VERSION` 2.3.0 → 2.4.0，tag `v2.4.0` 指向 `58ef6bf`）；档位 minor：新增「一个账号同时挂载多个本机目录」与**稳定虚拟路径**（同一本机目录永远同一挂载点 ⇒ 同一 DSH 工作区 id/标题/会话），并对旧网关保持可用（客户端降级），无破坏性变更 |
 | 本版内容 | ① 网关：`open` 接受客户端稳定目录 key（挂载点 `<workspace>/browser/<key>`）、同 key 拒绝叠加挂载、幂等复用空挂载点、断开保留空挂载点而 `close{purge:true}` 才释放（tombstone 记住路径）、启动清理对稳定挂载点只卸载不删目录、每租户上限常量 4 ② 客户端：文件夹列表窗口（增/删/连接/断开/打开）、行体自适应点击 + 右侧图标固定打开列表、IndexedDB v2 记录与 v1 采纳、保存 8 个目录上限 ③ 旧网关降级（旧二进制 `DisallowUnknownFields` 拒绝 `key`/`purge` 时改不带它们重试） ④ 真机验收脚本 `browser_workspace_multi_e2e.py` 与探针/几何断言更新 |
 | 构建 | `scripts/release.sh minor` → `aigw 2.4.0 (revision 58ef6bf)`，控制台 minified + gzip（37 文件 578420→339390 B；gzip 337029→134182 B）；`make dshgw-build gwproxy-build plugin-example` → `dshgw`/`gwproxy` 均 `2.4.0 (revision 58ef6bf)`；provider 插件无改动（`plugins/` 工作区干净） |
-| 部署范围 | 用户指定「发布版本，本机部署」：仅本机三单元（`aigw-local`、`dshgw-verify`、`gwproxy-verify`）。**gpt001 未部署**（公网仍为 2.2.1 / 77979b4，属预期） |
+| 部署范围 | 用户指定「发布版本，本机部署」：仅本机三单元（`aigw-local`、`dshgw-verify`、`gwproxy-verify`）。**gw-a 未部署**（公网仍为 2.2.1 / 77979b4，属预期） |
 | 回滚点 | `data/prev/bin/{aigw,dshgw,gwproxy}.prev-running-2.3.0-2306c22`（发布前**正在运行**的构建，从 `/proc/<pid>/exe` 取；三个都自报 `2.3.0 (revision 2306c22)`，即 v2.3.0 的发布提交）。回滚：`cp data/prev/bin/<file> bin/<name> && systemctl --user restart <unit>`，索引见 `data/prev/README.md` |
 
 **验证**（全部实测）：
 
 - `http://127.0.0.1:8088/version` → `{"revision":"58ef6bf","ui":"minified","ui_encoding":"gzip","version":"2.4.0"}`；`/healthz`、`/readyz`、`/admin/ui/` 均 200
 - 三单元 `is-active` 均 active、`NRestarts=0`；`/proc/<pid>/exe` 的 SHA256 与 `bin/*` **逐一相同**（aigw `ca6f72b4…`、dshgw `af432922…`、gwproxy `d8707cf8…`）
-- 启动日志：`aigw starting version=2.4.0 revision=58ef6bf`、`dshgw listening version=2.4.0 revision=58ef6bf`，两处 `level=ERROR` **各 0 条**；5 个租户 worker（dsh-tenant/dsh-colin/dsh-lianchangliang/dsh-ranqiliang/verify1）全部 `tenant worker ready`
-- gwproxy（带 `Host: chat.tirisen.hk`）：`/version` → 2.4.0 / 58ef6bf，门户前缀 `/dshgw` → 302，`/admin/ui/` → 200；门户 `:18300` → 200；5 个租户 origin（18301–18305）→ 302（活着、待登录）
+- 启动日志：`aigw starting version=2.4.0 revision=58ef6bf`、`dshgw listening version=2.4.0 revision=58ef6bf`，两处 `level=ERROR` **各 0 条**；5 个租户 worker（dsh-tenant/dsh-alex/dsh-acct-c/dsh-acct-b/verify1）全部 `tenant worker ready`
+- gwproxy（带 `Host: chat.example.com`）：`/version` → 2.4.0 / 58ef6bf，门户前缀 `/dshgw` → 302，`/admin/ui/` → 200；门户 `:18300` → 200；5 个租户 origin（18301–18305）→ 302（活着、待登录）
 - 浏览器工作区端点存在且仍受会话校验保护：无会话 `POST /browser-workspace/hello` → **403**，无会话 `POST /browser-workspace/open`（带 `key`）→ **403**
-- **线上租户 GUI 实测**（真实 headless Chromium，用 `dsh-tenant` 自己的 gateway key 经门户登录到 `https://chat.tirisen.hk:18302/`）：侧栏行存在（`data-dshgw-state=idle`）、**行右侧文件夹图标存在即新 bundle 已被服务**；用真实鼠标事件点该图标一次 → 打开文件夹列表（0 个目录、按钮 `添加文件夹`/`关闭`），行相位不变；JS 异常 **0**、console error **0**。**没有点击行体**（连接/断开会重启该账号 worker，属用户任务中断）
+- **线上租户 GUI 实测**（真实 headless Chromium，用 `dsh-tenant` 自己的 gateway key 经门户登录到 `https://chat.example.com:18302/`）：侧栏行存在（`data-dshgw-state=idle`）、**行右侧文件夹图标存在即新 bundle 已被服务**；用真实鼠标事件点该图标一次 → 打开文件夹列表（0 个目录、按钮 `添加文件夹`/`关闭`），行相位不变；JS 异常 **0**、console error **0**。**没有点击行体**（连接/断开会重启该账号 worker，属用户任务中断）
 - 发布前用同一源码在一次性 fixture 上跑完四条真机验收：`browser_workspace_mount_e2e.py` **PASS 29 步**、`browser_workspace_reload_e2e.py` **PASS**（`control=ALIVE reconnect=ALIVE reload=DEAD restore=ALIVE reopen=ALIVE`）、`browser_workspace_multi_e2e.py` **PASS 22 步**（两个目录并存、逐目录断开/重连/删除、刷新后恢复、DSH 工作区 id 与路径不变）、`browser_workspace_ui_smoke.py` **PASS**；`make dshgw-browser-test` 全绿（网关单测 + 插件 **53 项**）
 
-**未做/限制**：gpt001 未部署（用户只要求本机）；线上租户**没有**做真实挂载验收（点行会重启该账号 worker，需要用户同意后另做），线上证据到「端点 + 新 bundle + 图标开窗 + 无 JS 异常」为止；仓库未推送远程；发布提交只改 `VERSION`，因此真机验收与发布二进制同源（`58ef6bf` 与 `e823087` 的 Go/JS 源码相同）。
+**未做/限制**：gw-a 未部署（用户只要求本机）；线上租户**没有**做真实挂载验收（点行会重启该账号 worker，需要用户同意后另做），线上证据到「端点 + 新 bundle + 图标开窗 + 无 JS 异常」为止；仓库未推送远程；发布提交只改 `VERSION`，因此真机验收与发布二进制同源（`58ef6bf` 与 `e823087` 的 Go/JS 源码相同）。
 
 ## M66 完成记录（控制台多管理员与管理员飞书扫码登录）
 
@@ -4170,8 +4170,8 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - [x] 端到端：`scripts/dshgw_supervised_e2e.py` 新增 `check_admin_feishu_login`（建号 → 邀请 → 另一浏览器
       绑定并登录 → 链接失效 → 扫码入口登录 → 客户身份被拒）
 - [x] **部署当天补的跨主机名交接**（见设计文档 §D9）：会话 cookie 属于主机名，而飞书回调只能跑在
-      登记给飞书的 origin 上；本机部署是「控制台在局域网 `http://192.168.190.86:8088`、回调在公网
-      `https://chat.tirisen.hk/feishu/callback`」，两者不同主机名，回调无法把 cookie 交给控制台。
+      登记给飞书的 origin 上；本机部署是「控制台在局域网 `http://aigw.internal:8088`、回调在公网
+      `https://chat.example.com/feishu/callback`」，两者不同主机名，回调无法把 cookie 交给控制台。
       于是补上 M61 给门户做过的同一件事：跨主机名时回调发一张**一次性票据**（新 `TicketModeConsole`，
       120 秒、单次兑换、绑定一个管理员），浏览器到控制台自己 origin 的 `/admin/feishu/session` 兑换；
       新增 `feishu.console_url` 说明控制台在浏览器里的地址（`GW_FEISHU_CONSOLE_URL` 可覆盖）。
@@ -4207,7 +4207,7 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 - [x] 单测：authorize 增开、注册表往返与非法值、admin 协议字段跨 socket、proxy 身份/退出/缓存清理、
       `account-card/client.test.mjs` 37 条断言；`Makefile` 的 `dshgw-test` 加上该测试
 - [x] **真机验收（接口面，2026-09-19 本机）**：authorize 返回 `account`/`feishu_name`（飞书绑定在**另一个**
-      Key 上）；`GET /dshgw/session/` 200 且 `name=李智超`、无 cookie 302 门户；`POST /dshgw/logout/`
+      Key 上）；`GET /dshgw/session/` 200 且 `name=李雷`、无 cookie 302 门户；`POST /dshgw/logout/`
       跨源 403 / GET 405 / 正确 Origin 303 且会话失效；`account_card.enabled: false` 重启后端点 404、
       租户页面不再出现该 bundle；租户页面确实加载 `dshgw-account-card/client.js`
 - [x] **真机抓到的缺陷与修复**：加载行原本指向 `client.js`，宿主 import 浏览器 bundle 触发
@@ -4273,16 +4273,16 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
       （日志里看不到那次的退出）——**长驻进程要由服务自己起**，最后用 `systemctl --user restart
       dshgw-verify` 让服务接管，五个 worker（18400–18404）全部 ready、四个租户 origin 都回 302。
       代价：dsh-tenant 的 SSH 工作区目录现在是空的，需要在租户界面里重新选一次该目录（挂载记录仍在
-      `state/ssh-mounts.json`，远端 `aipc:/home/winger/ZT20Q` 实测可达）
+      `state/ssh-mounts.json`，远端 `gw-d:/home/operator/ZT20Q` 实测可达）
 - [ ] 浏览器人工确认（模型菜单的推理档位、给 deepseek 模型附图片、重挂 SSH 工作区）
       见 `docs/TODO.md` M68 小节
 
-### v2.5.0 + v2.5.1 发布与部署记录（2026-09-19，本机三单元；gpt001 未部署）
+### v2.5.0 + v2.5.1 发布与部署记录（2026-09-19，本机三单元；gw-a 未部署）
 
 本版内容：**M66 控制台多管理员与管理员飞书扫码登录**（功能提交 `ba9b74f`；设计
 `docs/design/m66-console-admin-feishu-login.md`，规格 `docs/feishu.md` §5b），档位 **minor**
 （新增端点、新配置项、新控制台页面与新的登录方式），外加部署当天补的 **M66.1 跨主机名票据交接**
-（提交 `e29af48`，patch）。gpt001 未部署（用户只要求本机），仅 aigw 一个二进制有变化。
+（提交 `e29af48`，patch）。gw-a 未部署（用户只要求本机），仅 aigw 一个二进制有变化。
 
 | 项 | 内容 |
 |---|---|
@@ -4290,23 +4290,23 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 | 部署范围 | 本机三单元（`aigw-local`、`dshgw-verify`、`gwproxy-verify`）。只有 aigw 的代码变了，因此**只换并重启了 aigw**；dshgw 与 gwproxy 仍运行发布前那份构建（进程自 20:09 起未重启，代码未变） |
 | 回滚点（二进制） | `data/prev/bin/aigw.prev-running-2.4.0-58ef6bf`（v2.5.0 之前**正在运行**的构建）与 `data/prev/bin/aigw.prev-running-2.5.0-65b162e`（v2.5.1 之前正在运行的构建），都从 `/proc/<pid>/exe` 取并用 `-version` 自证 |
 | 回滚点（数据） | `data/prev/aigw-local.db.pre-2.5.0-20260919-2136`（迁移 0023 之前的整库一致快照，`sqlite3 .backup` 生成，`integrity_check=ok`）。迁移只做 `ALTER TABLE … ADD COLUMN` + 建索引，回滚到 2.4.0 不会因新列失败 |
-| 配置变更（单独一步，记录原因） | `config.yaml` 的 `feishu.console_url: "http://192.168.190.86:8088/admin/ui/"`：本机部署的控制台在局域网、飞书回调在公网 `https://chat.tirisen.hk/feishu/callback`，两者**主机名不同**，会话 cookie 无法跨主机送达，扫码/邀请登录需要一次性票据交接（设计 §D9）。改的是新键，不动任何既有键，发布只换二进制 |
+| 配置变更（单独一步，记录原因） | `config.yaml` 的 `feishu.console_url: "http://aigw.internal:8088/admin/ui/"`：本机部署的控制台在局域网、飞书回调在公网 `https://chat.example.com/feishu/callback`，两者**主机名不同**，会话 cookie 无法跨主机送达，扫码/邀请登录需要一次性票据交接（设计 §D9）。改的是新键，不动任何既有键，发布只换二进制 |
 | 验证（v2.5.1 线上） | `GET /version` → `{"revision":"64e7922","ui":"minified","ui_encoding":"gzip","version":"2.5.1"}`；`/healthz`、`/readyz` 200；`aigw-local`/`dshgw-verify`/`gwproxy-verify` 三个单元 active；启动日志 `aigw starting version=2.5.1 revision=64e7922 … database=./data/aigw-local.db`、`feishu identity enabled … admin_login=true`，重启后 `level=ERROR` **0 条** |
-| 验证（M66 端点） | 公开的 `GET /admin/api/v1/auth/methods` → `feishu.enabled=true` 且给出 `/feishu/login?mode=admin`；`GET /feishu/login?mode=admin` 与公网 `https://chat.tirisen.hk/feishu/login?mode=admin` 都 302 到真实飞书授权页（`redirect_uri=https://chat.tirisen.hk/feishu/callback`，state 里 `flow=admin`）；`/admin/feishu/session?ticket=junk` → 403（兑换路由存在且拒绝垃圾票据）；邀请入口页把浏览器带回的地址是 `http://192.168.190.86:8088/admin/ui/`（证明 `console_url` 生效）；公网 `/feishu/callback` 仍被服务（未知 state → 400 说明页） |
+| 验证（M66 端点） | 公开的 `GET /admin/api/v1/auth/methods` → `feishu.enabled=true` 且给出 `/feishu/login?mode=admin`；`GET /feishu/login?mode=admin` 与公网 `https://chat.example.com/feishu/login?mode=admin` 都 302 到真实飞书授权页（`redirect_uri=https://chat.example.com/feishu/callback`，state 里 `flow=admin`）；`/admin/feishu/session?ticket=junk` → 403（兑换路由存在且拒绝垃圾票据）；邀请入口页把浏览器带回的地址是 `http://aigw.internal:8088/admin/ui/`（证明 `console_url` 生效）；公网 `/feishu/callback` 仍被服务（未知 state → 400 说明页） |
 | 验证（管理面） | 用 bootstrap 管理员登录 → `/auth/me`=admin；`GET /admin/api/v1/admin-users` 显示 `admin`（role=admin、status=active、bootstrap=true、未绑定飞书），迁移 0023 在真实库上生效；当天的验收用临时账号走完「建号（pending）→ 生成邀请链接（公网 origin、3600 秒）→ 打开入口 302 到飞书 → 删除账号」，删除后列表回到 1 行，审计里留下 `create`/`invite`/`delete`（`target_type=admin_user`） |
 | 自动化验收 | `go test ./internal/... ./cmd/...` 全绿；`make ui-check` 全视图通过（含新增 `admins` 70 项、`admins-readonly` 10 项、`login` 9 项）；`make dshgw-supervised-test` **PASS 63 步**，其中 `admin-feishu-*` 13 项走的正是跨主机票据路径（`console_url` 故意设成 `http://127.0.0.1:<port>/admin/ui/`，回调是 `localhost`） |
 
 **未做/限制**：**真机扫码验收尚未执行**（需要用户的手机完成飞书授权，步骤见 `docs/TODO.md` M66）；
-本机控制台与回调不同主机名，操作者必须用 `http://192.168.190.86:8088/admin/ui/`（即 `console_url` 的值）
-打开控制台，扫码完成后浏览器会经一次票据兑换落到该地址；gpt001 未部署（公网 `mnl.iotalking.top/aigw/version`
+本机控制台与回调不同主机名，操作者必须用 `http://aigw.internal:8088/admin/ui/`（即 `console_url` 的值）
+打开控制台，扫码完成后浏览器会经一次票据兑换落到该地址；gw-a 未部署（公网 `gw-a.example.org/aigw/version`
 仍是 2.2.1）；仓库未推送远程。
 
-### v2.6.0 发布与部署记录（2026-09-20，本机三单元；gpt001 未部署）
+### v2.6.0 发布与部署记录（2026-09-20，本机三单元；gw-a 未部署）
 
 本版内容：**M67 租户侧栏的账号行与退出**（功能提交 `a72bd49`；设计
 `docs/design/m67-dshgw-account-card.md`，规格 `docs/dshgw.md` §7d），档位 **minor**
 （authorize 响应新增 `account`/`feishu_name`、新配置项 `account_card`、租户 origin 下新增两个端点、
-注册表新增 `tenants[].account`、新增插件目录）。按用户要求只发本机，gpt001 未部署。
+注册表新增 `tenants[].account`、新增插件目录）。按用户要求只发本机，gw-a 未部署。
 
 | 项 | 内容 |
 |---|---|
@@ -4317,21 +4317,21 @@ v0.17.0 记录过：在 DSH 会话里用 `scripts/local-run.sh restart` 起的�
 | 回滚点（数据） | 无需：本版只新增字段（注册表 `account`、authorize 响应字段）与配置键，不改表、不做数据库迁移 |
 | 配置变更 | 无（发布只换二进制）。本机 `dshgw.yaml` 的 `account_card.enabled: true` 是 M67 开发阶段写入的，随本次重启生效；aigw 侧的 `dshgw.account_card.enabled` 只在 aigw 监督 dshgw 的形态下有意义，本机不是该形态，故未加 |
 | 验证（版本与探针） | `GET /version` → `{"revision":"530ba5f","ui":"minified","ui_encoding":"gzip","version":"2.6.0"}`；`/healthz`、`/readyz` 200；三个单元 active；aigw 启动日志无 `level=ERROR` |
-| 验证（M67 全链路，部署后实测） | 门户登录 `POST :18300/login` 302 且下发 `dshgw_s_dsh-colin`；`GET :18303/dshgw/session/` → `{"tenant":"dsh-colin","account":"李智超(colin)","feishu_name":"李智超","name":"李智超"}`；租户页面引用 `dshgw-account-card/client.js`；`POST /dshgw/logout/` → 303 门户登录页；`POST /v1/dshgw/authorize`（worker Key）→ 带 `account`/`feishu_name` |
+| 验证（M67 全链路，部署后实测） | 门户登录 `POST :18300/login` 302 且下发 `dshgw_s_dsh-alex`；`GET :18303/dshgw/session/` → `{"tenant":"dsh-alex","account":"李雷(alex)","feishu_name":"李雷","name":"李雷"}`；租户页面引用 `dshgw-account-card/client.js`；`POST /dshgw/logout/` → 303 门户登录页；`POST /v1/dshgw/authorize`（worker Key）→ 带 `account`/`feishu_name` |
 | 验证（租户面） | 6 个租户 worker 全部 `worker ready`；既有浏览器会话保留（`sessions.json` 未被清理） |
 | 自动化验收 | `go test ./internal/... ./cmd/... ./pkg/...` 全绿；`make dshgw-test` 全绿（account-card client 51 条断言、ssh-workspace 189+44、picker-clamp 23、迁移/退役 dry-run）；`scripts/verify-dshgw.sh` 全部 PASS |
 
-**未做/限制**：gpt001 未部署（用户只要求本机）；M67 的「浏览器人工确认」一项仍开在 `docs/TODO.md`
+**未做/限制**：gw-a 未部署（用户只要求本机）；M67 的「浏览器人工确认」一项仍开在 `docs/TODO.md`
 M67 小节——接口面与插件加载已按上表验证，侧栏观感由使用者确认；工作区 `data/` 不纳入版本控制，
 部署物与回滚点都在其中，故本记录是这些路径的唯一书面出处。
 
-### v2.7.0 发布与部署记录（2026-09-20，本机三单元；gpt001 未部署）
+### v2.7.0 发布与部署记录（2026-09-20，本机三单元；gw-a 未部署）
 
 本版内容：**M68 aigw 供应商的模型参数来自 `/v1/models`**（功能提交 `574776d`；设计
 `docs/design/m68-aigw-model-capabilities.md`，规格 `docs/dshgw.md` §6a、`docs/api-responses.md`、
 `docs/routing.md` §4.1、`docs/api-providers.md` §2），档位 **minor**（`GET /v1/models` 新增六个能力字段、
 路由新增 `image` 能力键、dshgw 新增配置项 `image_request_max_bytes`、租户 profile 的模型条目开始带
-`contextWindow`/`maxTokens`/`input`/`reasoningEfforts`）。按用户要求只发本机，gpt001 未部署。
+`contextWindow`/`maxTokens`/`input`/`reasoningEfforts`）。按用户要求只发本机，gw-a 未部署。
 
 | 项 | 内容 |
 |---|---|
@@ -4352,13 +4352,13 @@ M67 小节——接口面与插件加载已按上表验证，侧栏观感由使�
 （`bwrap: Can't get type of source …` → worker `exit status 1`）。两次都用
 `fusermount3 -u <mountpoint>` + 重启 dshgw 救回；修法方向记在 `docs/TODO.md` M64 小节。
 代价：`dsh-tenant` 的 SSH 工作区目录当前为空，需要在该租户界面里重新选一次（挂载记录仍在
-`state/ssh-mounts.json`，远端 `aipc:/home/winger/ZT20Q` 实测可达）。
+`state/ssh-mounts.json`，远端 `gw-d:/home/operator/ZT20Q` 实测可达）。
 
-**未做/限制**：gpt001 未部署（用户只要求本机）；M68 的「浏览器人工确认」（模型菜单的推理档位、
+**未做/限制**：gw-a 未部署（用户只要求本机）；M68 的「浏览器人工确认」（模型菜单的推理档位、
 给 deepseek 模型附图片）与 M67 的侧栏观感仍开在 `docs/TODO.md` 对应小节；工作区 `data/` 不纳入版本控制，
 部署物与回滚点都在其中，故本记录是这些路径的唯一书面出处。
 
-### v2.7.1 发布与部署记录（2026-09-20，本机三单元；gpt001 未部署）
+### v2.7.1 发布与部署记录（2026-09-20，本机三单元；gw-a 未部署）
 
 本版内容：**aigw 独立形态下 admin socket 不可用时启动即点名告警**（修复提交 `d10caa0`，
 诊断见 `docs/TODO.md` 的「`dshgw.admin_socket` 与 M63 状态根脱节」小节）。档位 **patch**：
@@ -4376,12 +4376,12 @@ M67 小节——接口面与插件加载已按上表验证，侧栏观感由使�
 | 验证（版本与探针） | `GET /version` → `{"revision":"e8e2695","ui":"minified","ui_encoding":"gzip","version":"2.7.1"}`；`/healthz`、`/readyz` 200；三个单元 active；`readyz` **2 秒**就绪；重启后 `level=ERROR` **0 条** |
 | 验证（跑的就是这个构建） | `/proc/562211/exe` 与 `bin/aigw` 的 sha256 一致（`6c59b5b2…`）；启动行 `aigw starting version=2.7.1 revision=e8e2695 ui=minified ui_encoding=gzip` |
 | 验证（本版新增的自检） | 启动日志里 `dshgw admin channel` **0 条**：守卫只在独立形态且 socket 缺失/不是 socket 时告警，**静默即证明**配置里那个路径存在且是 socket |
-| 验证（本次修的那条链路，真机） | 修好之后、本版构建之前（11:04:12 CST）有**真实用户登录**打通了原先失败的路：`杨妙`（账号 36，此前 `dsh_enabled=0`、无租户）经飞书首登自动开通成功 → `dsh_enabled=1`/`dsh_tenant=dsh-yangmiao`；dshgw 侧 `11:04:17 tenant worker started`（pid 561926）→ `11:04:18 worker ready port=18405` → `11:04:21 edge listener started port=18306`，`11:04:49–50` 有来自 `192.168.190.222` 的真实浏览器请求落在该租户（`/manifest.webmanifest`）。admin 通道 `tenant-list` 现返回 **6 个**租户 |
+| 验证（本次修的那条链路，真机） | 修好之后、本版构建之前（11:04:12 CST）有**真实用户登录**打通了原先失败的路：`刘洋`（账号 36，此前 `dsh_enabled=0`、无租户）经飞书首登自动开通成功 → `dsh_enabled=1`/`dsh_tenant=dsh-liuyang`；dshgw 侧 `11:04:17 tenant worker started`（pid 561926）→ `11:04:18 worker ready port=18405` → `11:04:21 edge listener started port=18306`，`11:04:49–50` 有来自 `192.0.2.107` 的真实浏览器请求落在该租户（`/manifest.webmanifest`）。admin 通道 `tenant-list` 现返回 **6 个**租户 |
 | 验证（控制台角标） | `node scripts/ui-badge-test.mjs` 11 项通过（角标取数的模块接线）；角标在浏览器里读的就是 `serverRoot() + /version`，该端点在线上返回 2.7.1/`e8e2695`；`/admin/ui/` 与 `js/api.js` 均 200 且 `api.js` 内含 `/version`。**未做浏览器视觉确认**（无头环境） |
 | 验证（租户面未受影响） | 6 个 worker scope 全部 running；门户 `18300/` → 200；租户 origin（`18302/`）→ 302 跳门户；gwproxy `8090/version` → 200、`/dshgw/` → 302；aigw `/v1/models` 无 Key → 401（存活） |
 | 自动化验收 | 提交时 `go build`/`go vet`/`go test` 对 `./cmd/... ./internal/... ./pkg/... ./examples/...` 全绿（显式包模式：`./...` 在本机会走进 `./data` 的 FUSE 挂载而挂住，见 `docs/TODO.md`）；发布后用**发布二进制**跑 `scripts/format-smoke.sh`：A 普通请求 200 且上游收到 `response_format = null`、B `json_object` 200 且按需透传、C 非法等级在解析期 400，全部通过 |
 
-**未做/限制**：gpt001 未部署（用户只要求本机）；控制台角标是"资源与端点"级验收，没有浏览器截图；
+**未做/限制**：gw-a 未部署（用户只要求本机）；控制台角标是"资源与端点"级验收，没有浏览器截图；
 排障期间我用纯 HTTP 探过 TLS 端口，dshgw 日志里留下 6 条 `client sent an HTTP request to an HTTPS
 server` 的握手错误（`10:54:50`，无害噪声）。`docs/TODO.md` 里 M68 的「浏览器人工确认」与 M64 的
 sshfs 缺陷仍未关闭。
@@ -4460,7 +4460,7 @@ sshfs 缺陷仍未关闭。
       `dsh-tenant` 的 `providers: {}` 与 `refs: {}` 由第一次登录恢复（6 个模型 + 凭据引用 + records 保留）；
       `verify1` 保持历史状态（无 key，doctor 的 2 条已知 FAIL 不变）
 
-### v2.8.0 发布与部署记录（2026-09-21，本机 aigw + dshgw；gpt001 未部署）
+### v2.8.0 发布与部署记录（2026-09-21，本机 aigw + dshgw；gw-a 未部署）
 
 本版内容：**浏览器工作区挂载目录名用本地目录名（M65）**（功能提交 `dc9d240`）。档位 **minor**：
 新增对外端点 `allocate` 与按 key 释放 `close{key,purge:true}`，挂载目录命名语义变化（新挂载点的
@@ -4486,7 +4486,7 @@ sshfs 缺陷仍未关闭。
 - `bin/dshgw doctor`：仅 `verify1` 的历史 2 项 FAIL（缺 `gateway.key`、缺 `settings.yaml`，此前记录已注明且未替它造凭据），其余租户全 OK
 - 本版功能的真机验收：`make dshgw-test` 全绿（含新增 Go 用例与 56 个插件 Node 测试）；`make dshgw-browser-e2e` **PASS 29 步**（记录 `Path` 与内核挂载都在 `browser/picked`，页面调用序列 `allocate:200` 在 `open:200` 之前）、`dshgw-browser-multi-e2e` **PASS 22 步**（A/B 挂在 `browser/picked-a`、`browser/picked-b`，删除同时释放挂载/挂载点/工作区）、`dshgw-browser-reload-e2e` PASS（断线与刷新恢复都保持同一路径）。三次都用**同一份源码**构建的临时网关（revision 标注 `dad0c96` = 本版功能提交）+ 真实 Chromium/FUSE/bwrap，细节见 `docs/browser-workspace-verification.md` 新增一节
 
-**未做/限制**：gpt001 未部署（用户只要求本机，公网仍是旧版本）。本机升级后**没有**再用真实租户 key
+**未做/限制**：gw-a 未部署（用户只要求本机，公网仍是旧版本）。本机升级后**没有**再用真实租户 key
 复验 `allocate`/按 key 释放：state 里只有 12 字符 key 前缀（拿不到完整 key），portal 用 `sk-verify001`
 登录被拒（verify1 历史缺 key），而点击线上租户的浏览器工作区行会重启该账号 worker。这两条端点的线上
 证据是"同一份源码 + 同一套 e2e"，不是线上租户实测。排障期间我用纯 HTTP 探过 TLS 端口（09:22:07 六条
@@ -4494,7 +4494,7 @@ sshfs 缺陷仍未关闭。
 已有十六进制挂载点不迁移：要换成目录名就在租户页面删除该目录后重新添加（删除会释放旧路径，
 重新添加拿回目录名；换路径意味着工作区条目重建，旧工作区下 `cwd` 指向旧路径的会话不再归组）。
 
-### v2.9.1 发布与部署记录（2026-09-21，本机 aigw + dshgw；gpt001 未部署）
+### v2.9.1 发布与部署记录（2026-09-21，本机 aigw + dshgw；gw-a 未部署）
 
 本版内容：**M69 登录驱动的租户生命周期与「平台段 / 租户段」设置合并**（功能提交 `876f362`，
 修正提交 `d41c631`）。档位 **minor**：新增行为（每次登录同步平台段、退出即停该租户的 dsh、
@@ -4518,7 +4518,7 @@ v2.9.0（`ad563f2`）先落地，部署当天用真机数据把退出规则从"�
 - 跑的就是新构建：`/proc/<aigw pid>/exe` 与 `bin/aigw` sha256 相同（`cfbc28dc…`），
   `/proc/<dshgw pid>/exe` 与 `bin/dshgw` 相同（`34e39cf5…`）；启动行分别为
   `aigw starting version=2.9.1 revision=b561b0c`（10:22:20）与 `dshgw listening version=2.9.1 revision=b561b0c`（10:22:03）
-- 门户 18300 → 200；租户 18301–18306 全 302（带 `Host: chat.tirisen.hk:<port>`；不带端口的 Host 一律 404，
+- 门户 18300 → 200；租户 18301–18306 全 302（带 `Host: chat.example.com:<port>`；不带端口的 Host 一律 404，
   与既有"网关核对 authority"行为一致）；6 个 worker scope 全部 running、`18400–18405` 全部 `worker ready`
 - 噪声：`aigw-local` 重启后 `level=ERROR` **0 条**；`dshgw` 重启窗口有 8 条
   `dsh reverse proxy failed … *net.OpError`（10:22:03–10:22:12，worker 尚未就绪期间），
@@ -4534,15 +4534,15 @@ v2.9.0（`ad563f2`）先落地，部署当天用真机数据把退出规则从"�
 | 门户退出（`POST /logout`） | 303；审计 `logout_worker_stop dsh-tenant`；日志 `tenant dsh stopped on logout`；`18401` 无监听、worker 进程消失；`registry.json` 的 `suspended` 仍为 `false` |
 | 再登录 | `worker_started=true`，`18401` 恢复监听，`tenant worker ready` |
 | 租户侧栏退出（`POST /dshgw/logout/`，Origin 为该租户端口） | 303 → 门户；审计 `logout_worker_stop` + `tenant_logout_success`；worker 再次停止 |
-| 伪造 cookie 名（对 `dsh-colin` 发一个不存在的 token） | 303 但审计只有 `logout_success`：没有 `logout_worker_stop`，`dsh-colin` 的 worker 照常运行 |
+| 伪造 cookie 名（对 `dsh-alex` 发一个不存在的 token） | 303 但审计只有 `logout_success`：没有 `logout_worker_stop`，`dsh-alex` 的 worker 照常运行 |
 | 宿主机 settings | 全程 `sha256 ~/.dsh/settings.yaml` = `e4df6b3d…`（mtime 仍是 2026-09-20 16:54） |
 | 修回线上偏离 | 五个真实租户现在都有平台段（4/4/4/6/4 个模型）与 `AIGW_API_KEY` 引用；`verify1` 保持无 key 的历史状态 |
 
-**未做/限制**：gpt001 未部署；浏览器人工确认（`docs/TODO.md` M69 最后一条）未做——本机验收全部用
+**未做/限制**：gw-a 未部署；浏览器人工确认（`docs/TODO.md` M69 最后一条）未做——本机验收全部用
 HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退出是无条件停——同一个人另一个窗口的 dsh
 也会被停掉（重新登录即恢复），这是用真机数据换来的选择，理由见设计文档 §9 与 `docs/dshgw.md` §3b。
 
-### v2.10.0 发布与部署记录（2026-09-21，本机 aigw-local；gpt001 未部署）
+### v2.10.0 发布与部署记录（2026-09-21，本机 aigw-local；gw-a 未部署）
 
 本版内容：**M70 飞书通讯录同步（组织架构页「同步飞书」）**（功能提交 `cef4ae7`）。档位 **minor**：
 新增 5 条管理端点、2 个配置项（`feishu.tenant_token_url` / `feishu.contact_url`）与一个新的控制台弹窗，
@@ -4560,15 +4560,15 @@ HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退�
 **验证**（全部实测）：
 
 - `GET http://127.0.0.1:8088/version` → `{"revision":"602e6ad","ui":"minified","ui_encoding":"gzip","version":"2.10.0"}`；
-  `healthz=200`、`readyz=200`、`/admin/ui/` 200；`gwproxy :8090/version`（带 `Host: chat.tirisen.hk`）→ 2.10.0 / `602e6ad`
+  `healthz=200`、`readyz=200`、`/admin/ui/` 200；`gwproxy :8090/version`（带 `Host: chat.example.com`）→ 2.10.0 / `602e6ad`
 - 跑的就是新构建：`/proc/<aigw pid>/exe` 与 `bin/aigw` 的 sha256 前 8 位同为 `100050fd`；启动行
   `aigw starting version=2.10.0 revision=602e6ad ui=minified ui_encoding=gzip`（11:40:33），
-  随后 `http server listening addr=:8088` 与 `feishu identity enabled app_id=cli_aa27b25392f91bdb`；
+  随后 `http server listening addr=:8088` 与 `feishu identity enabled app_id=cli_0000000000000000`；
   **重启窗口 `level=ERROR` 0 条**
 - 新资产已随压缩包上线：`/admin/ui/js/pages/org_feishu.js` 200（11226 B，含 `openFeishuSync`）、
   `/admin/ui/js/pages/org.js` 200（已 import 该模块）、`/admin/ui/app.css` 200（含 `.feishu-sync-dialog`）；
   未认证 `GET /admin/api/v1/org/feishu/directory` → **401**
-- 门户与租户：`https://127.0.0.1:18300/`（`Host: chat.tirisen.hk:18300`）→ 200；租户 18301/18302 → 302（活着、待登录）
+- 门户与租户：`https://127.0.0.1:18300/`（`Host: chat.example.com:18300`）→ 200；租户 18301/18302 → 302（活着、待登录）
 - **M70 真机预览（真实飞书，升级后）**：`GET /admin/api/v1/org/feishu/directory` → 200，
   22 个部门全部「将创建」、90 人、**13 人自动匹配**（5 人走 `api_key` 通道＝M60 绑过的那 5 个账号，
   8 人走同名通道）、77 人待操作员决定；首次（未命中缓存）15.4 s，60 秒内重开 1.4 ms
@@ -4579,15 +4579,15 @@ HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退�
 
 **未做/限制**：**「同步」这个写库动作没有在真机上执行**——它会在线上组织架构里创建 22 个节点、
 给 13 个账户写身份并挂节点，属于操作员的决定，留给用户在控制台点。因此真机证据到"预览正确 + 写路径由
-单测/夹层覆盖"为止，`docs/TODO.md` M70 小节保留了这一条待办。gpt001 未部署（用户只要求本机）。
+单测/夹层覆盖"为止，`docs/TODO.md` M70 小节保留了这一条待办。gw-a 未部署（用户只要求本机）。
 另注：本机日志在 11:06/11:08 各有一条 `settlement could not be written; falling back to disk`
 （SQLite 争用超时，当时我正在跑全量测试套件），按设计的磁盘回退生效，与本版无关，重启后为 0 条。
 
-### v3.0.0 发布与部署记录（2026-09-21，本机 aigw-local + dshgw-verify；gpt001 未部署）
+### v3.0.0 发布与部署记录（2026-09-21，本机 aigw-local + dshgw-verify；gw-a 未部署）
 
 本版内容：**SSH 工作区别名改成「一账号一份」+ 新增「我的主机」**（`1d4921e`），以及
 **输入主机/用户名/端口时对话框不再抖动**（`0650b75`）。档位 **major**：删除配置键
-`ssh_workspaces.ssh_config_source`（本机旧值指向运维自己的 `/home/winger/.ssh/config`），
+`ssh_workspaces.ssh_config_source`（本机旧值指向运维自己的 `/home/operator/.ssh/config`），
 旧配置直接拒绝启动并要求改用 `ssh_config_dir` —— 属于「要运维改配置才能继续跑」的破坏性变更；
 同时该键在 aigw 侧（`dshgw.ssh_workspaces.*` 透传）一并改名。
 
@@ -4598,7 +4598,7 @@ HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退�
 | 构建物 | `bin/aigw` 3.0.0 / `f8d20d8`（console minified：39 文件 629359→365715 B，gzip 34 文件 363354→144494 B，sha256 `71796bea…`）；`bin/dshgw` 3.0.0 / `f8d20d8`（sha256 `9bb31a97…`）；`gwproxy` 本版无改动，未重建 |
 | 部署范围 | 本机 `aigw-local`（2.10.0 `602e6ad` → 3.0.0 `f8d20d8`，12:21:46）与 `dshgw-verify`（**2.9.1 `b561b0c` → 3.0.0 `f8d20d8`**，12:20:44）；`gwproxy-verify` 未动 |
 | 回滚点 | `data/prev/bin/dshgw.prev-running-2.9.1-b561b0c`（发布前在跑的 dshgw，`--version` 自证）；`data/dshgw-verify/backups/ssh-config-20260921-122011/`（同目录含 `dshgw.yaml.prev` 与 sha256 `34e39cf5…`）；aigw 回滚点见上一条记录（`data/prev/bin/aigw.prev-running-2.10.0-602e6ad` 由上次流程留存，本次未覆盖） |
-| 配置/数据变更 | `dshgw.yaml`：`ssh_config_source: /home/winger/.ssh/config` → `ssh_config_dir: ./data/dshgw-verify/ssh-configs`；新增账号种子目录 `data/dshgw-verify/ssh-configs/<账号>`（6 个，0644，由 `scripts/ssh_config_adopt.sh` 从各账号当时的 `<workspace>/.ssh/config` 收编）；**账号工作区内的 config 一个字节未动**（写一次语义） |
+| 配置/数据变更 | `dshgw.yaml`：`ssh_config_source: /home/operator/.ssh/config` → `ssh_config_dir: ./data/dshgw-verify/ssh-configs`；新增账号种子目录 `data/dshgw-verify/ssh-configs/<账号>`（6 个，0644，由 `scripts/ssh_config_adopt.sh` 从各账号当时的 `<workspace>/.ssh/config` 收编）；**账号工作区内的 config 一个字节未动**（写一次语义） |
 | 迁移顺序 | 合并 → `ssh_config_adopt.sh --dry-run` → 正式收编 6 个种子 → 改 `dshgw.yaml` → `make build` / `make dshgw-build` → 重启 |
 
 **验证**（全部实测）：
@@ -4610,10 +4610,10 @@ HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退�
   mount_subdir=ssh poll_interval=2s hosts=[]`；`/proc/<pid>/exe` 与 `bin/dshgw` 的 sha256 前 8 位同为
   `9bb31a97`；重启窗口 ERROR 7 条**全部**是 worker 启动瞬间的 `dsh reverse proxy failed … *net.OpError`
   （重启前同样存在），无 ssh 相关失败（`ssh remount failed` 0 条）
-- **6 个账号全部就绪**：dsh-colin/18402、dsh-tenant/18401、dsh-ranqiliang/18403、dsh-lianchangliang/18404、
-  dsh-yangmiao/18405、verify1/18400 均 `tenant worker ready`；verify1 仍是历史测试账号（无 gateway.key 的
+- **6 个账号全部就绪**：dsh-alex/18402、dsh-tenant/18401、dsh-acct-b/18403、dsh-acct-c/18404、
+  dsh-liuyang/18405、verify1/18400 均 `tenant worker ready`；verify1 仍是历史测试账号（无 gateway.key 的
   既有告警，未处理）
-- **既有挂载自愈**：`state/ssh-mounts.json` 里 dsh-tenant 的 `aipc:/home/winger` 在重启后由 `Reconcile`
+- **既有挂载自愈**：`state/ssh-mounts.json` 里 dsh-tenant 的 `gw-d:/home/operator` 在重启后由 `Reconcile`
   重新挂上（`fuse.sshfs` 在挂载表里，sshfs 守护进程的 argv 用的是本版组装方式：`ssh -F /dev/null` +
   `IdentityFile=<workspace>/.ssh/id_rsa`）
 - **账号 config 未被改写**：6 个 `<workspace>/.ssh/config` 与各自种子 `cmp` 一致，mtime 仍是 09-18/09-20
@@ -4626,7 +4626,7 @@ HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退�
 
 **未做/限制**：
 
-- **gpt001 未部署**（仍是 2.2.1 `77979b4`）：本次只要求本机；gpt001 落后 8 个版本，升级前需要先核对
+- **gw-a 未部署**（仍是 2.2.1 `77979b4`）：本次只要求本机；gw-a 落后 8 个版本，升级前需要先核对
   `/opt/aigw/config.yaml` 对新版配置面的兼容性（本次已确认它没有 `ssh_workspaces` 块，所以 ssh 这块
   不会挡升级），但整包跳跃不在本次范围
 - **「我的主机」浏览器人工验收未做**（需要真人点界面）：添加主机 → 复核 `<workspace>/.ssh/config` →
@@ -4639,7 +4639,7 @@ HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退�
   ssh-mounts.json、审计流与插件日志」是同一件事；修法是一行（把 serve 的 logger 注进去），
   留作下一轮
 
-### v3.0.1 发布与部署记录（2026-09-21，本机 aigw-local；gpt001 未部署）
+### v3.0.1 发布与部署记录（2026-09-21，本机 aigw-local；gw-a 未部署）
 
 本版内容：**M70 §12 的同步范围改成父子联动**（功能提交 `bb0929d`）。档位 **patch**：只是既有
 「同步飞书 · 同步范围」的交互修正——勾选/取消父部门连同子部门、半选表示"这一行与它的子树不一致"，
@@ -4657,12 +4657,12 @@ HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退�
 **验证**（全部实测）：
 
 - `GET http://127.0.0.1:8088/version` → `{"revision":"fa7964f","ui":"minified","ui_encoding":"gzip","version":"3.0.1"}`；
-  `healthz=200`、`readyz=200`、`/admin/ui/` 200；`gwproxy :8090/version`（带 `Host: chat.tirisen.hk`）→ 3.0.1 / `fa7964f`
+  `healthz=200`、`readyz=200`、`/admin/ui/` 200；`gwproxy :8090/version`（带 `Host: chat.example.com`）→ 3.0.1 / `fa7964f`
 - 跑的就是新构建：`/proc/<aigw pid>/exe` 与 `bin/aigw` 的 sha256 前 8 位同为 `2bda027f`；
   启动行 `aigw starting version=3.0.1 revision=fa7964f ui=minified ui_encoding=gzip`（14:05:07）；
   **重启窗口 `level=ERROR` 0 条**
 - 新交互真的随压缩包上线：`/admin/ui/js/pages/org_feishu.js` 里同时含联动提示文案与 `indeterminate` 用法
-- 门户与租户：`https://127.0.0.1:18300/`（`Host: chat.tirisen.hk:18300`）→ 200；租户 18301/18302 → 302（活着、待登录）
+- 门户与租户：`https://127.0.0.1:18300/`（`Host: chat.example.com:18300`）→ 200；租户 18301/18302 → 302（活着、待登录）
 - **真机预览（只读，未写库）**：全量 22 个部门 / 90 人、13 人可自动合并、8 人已同步；
   带 `?departments=<总经办>,0` 时 `departments=1 / departments_selected=2 / users_in_scope=7`、
   部门标注 `selected/included` 正确、`unknown_department_ids` 为空
@@ -4672,10 +4672,10 @@ HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退�
 说明"选择部门"已经在真机上被实际使用；账户级飞书身份 8 个（`feishu_bound_by = admin`，即手工
 「绑定账号」写入），`api_keys` 上的 5 个 M60 绑定保持不变。
 
-**未做/限制**：gpt001 未部署（用户只要求本机）；「同步」这个写库动作仍由操作员在控制台点击，
+**未做/限制**：gw-a 未部署（用户只要求本机）；「同步」这个写库动作仍由操作员在控制台点击，
 本版验收只跑了只读预览。
 
-### v3.1.0 发布与部署记录（2026-09-21，本机 aigw-local + dshgw-verify；gpt001 未部署）
+### v3.1.0 发布与部署记录（2026-09-21，本机 aigw-local + dshgw-verify；gw-a 未部署）
 
 本版内容：**M71 宿主目录工作区**（功能提交 `9f0f876`）、两个 ssh-workspace 修复，以及**工作区弹窗
 跟随 DSH 主题 + 右上角固定关闭按钮**（`5000879`）。档位 **minor**：M71 是对外新能力——新增配置项
@@ -4694,7 +4694,7 @@ HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退�
 **验证**（全部实测）：
 
 - `GET http://127.0.0.1:8088/version` → `{"revision":"69da1dd","ui":"minified","ui_encoding":"gzip","version":"3.1.0"}`；
-  `healthz=200`、`readyz=200`；`gwproxy :8090/version`（带 `Host: chat.tirisen.hk`）→ 3.1.0 / `69da1dd`
+  `healthz=200`、`readyz=200`；`gwproxy :8090/version`（带 `Host: chat.example.com`）→ 3.1.0 / `69da1dd`
 - 跑的就是新构建：`/proc/<aigw pid>/exe` 与 `bin/aigw` 的 sha256 前 8 位同为 `0df76233`
 - 启动行 `aigw starting version=3.1.0 revision=69da1dd ui=minified ui_encoding=gzip`（15:28:08）；
   启动窗口内 `level=ERROR` **0 条**；`registry loaded snapshot(models=10 providers=6 routes=16 accounts=30)` 正常
@@ -4707,10 +4707,10 @@ HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退�
 **之后**才拷的，内容就是新的 3.1.0——留着会让人误以为能回 3.0.1，已删除。正确顺序是**先备份正在跑的
 `bin/aigw` 再 `make build`**；下次发版按这个顺序做。
 
-**未做/限制**：gpt001 未部署（用户只要求本机）；`host_shares` 保持默认关闭，M71 的宿主目录挂载未在
+**未做/限制**：gw-a 未部署（用户只要求本机）；`host_shares` 保持默认关闭，M71 的宿主目录挂载未在
 真机启用；`dshgw` 二进制仍自报 3.0.1（未重建，非缺陷——它不随 `make build` 产出）。
 
-### v3.2.0 发布与部署记录（2026-09-21，本机 aigw-local + dshgw-verify；gpt001 未部署）
+### v3.2.0 发布与部署记录（2026-09-21，本机 aigw-local + dshgw-verify；gw-a 未部署）
 
 本版内容：**M72 账号级飞书身份、组织页整合、多 Key 登录选择**（功能提交 `181586c`…`2c88a1e`，
 见上一小节）。档位 **minor**：账号级飞书身份、门户选 Key 页、按需建租户、组织页成为人员/账号主界面
@@ -4731,12 +4731,12 @@ HTTP 客户端（curl）完成，没有真人点界面。**已知代价**：退�
 - `GET /version` → `{"revision":"67a1d13","ui":"minified","ui_encoding":"gzip","version":"3.2.0"}`；
   `healthz` / `readyz` 200；启动行 `aigw starting version=3.2.0 revision=67a1d13 ui=minified`
 - 本次启动窗口（17:20:42 起）`level=ERROR` **0 条**（日志里 19 条历史 ERROR 全部来自 16:17 的端口争抢事故，与本次无关）
-- 控制台 `GET /admin/ui/` 200、门户登录页 200（`https://chat.tirisen.hk:18300/`）；`bin/aigw` 与正在跑的
+- 控制台 `GET /admin/ui/` 200、门户登录页 200（`https://chat.example.com:18300/`）；`bin/aigw` 与正在跑的
   `/proc/<pid>/exe` 同一文件（17:20 重启后未再改动）
 - 版本自证：`./bin/aigw --version` → `3.2.0 (revision 67a1d13)`，与 tag 指向的提交一致
 
-**未做/限制**：**gpt001 未部署**——本次会话所在环境解析不到该主机（`Could not resolve hostname gpt001`），
-部署步骤没有执行；要发到线上就在能连上 gpt001 的地方按 release 技能第 3 步走（先备份再 install + restart）。
+**未做/限制**：**gw-a 未部署**——本次会话所在环境解析不到该主机（`Could not resolve hostname gw-a`），
+部署步骤没有执行；要发到线上就在能连上 gw-a 的地方按 release 技能第 3 步走（先备份再 install + restart）。
 M72 的真机验收里"用本人飞书身份走一次飞书登录"仍需手机，留在 `docs/TODO.md`。
 
 ## M72 完成记录（账号级飞书身份、组织页整合、多 Key 登录选择）
@@ -4798,7 +4798,7 @@ dshgw 审计 `login_key_selected`；`POST /v1/dshgw/authorize` 由 `actor=dshgw-
 
 ### 修掉组织页人员表与三类弹窗的六处问题（用户反馈，2026-09-21，v3.2.0 上线后）
 
-反馈现场是 `http://192.168.190.86:8088/admin/ui/#/org`（v3.2.0）。用户一次报了六件事，都是"看着能用、
+反馈现场是 `http://aigw.internal:8088/admin/ui/#/org`（v3.2.0）。用户一次报了六件事，都是"看着能用、
 实际不能用"或"逼人做机器该做的事"：
 
 1. **人员列表要改成多列表格**——原来是"一排徽标换行"，字段一多就分不清哪一格是谁的；
@@ -4881,7 +4881,7 @@ dshgw 审计 `login_key_selected`；`POST /v1/dshgw/authorize` 由 `actor=dshgw-
 `account_actions.js` 有 `createAccount`）。浏览器需要**硬刷新**（静态资源 `max-age=300`），
 人工走查条目留在 `docs/TODO.md`。
 
-**验证**（自动化，工作区 `/home/winger/work/ai_gateway-orgui`，分支 `feat/org-ui-tables-and-pickers`，
+**验证**（自动化，工作区 `/home/operator/work/ai_gateway-orgui`，分支 `feat/org-ui-tables-and-pickers`，
 已 `--ff-only` 合入 `main`：`4e0035f` / `3c46830` / `d655c0e`，合并后主检出复跑 ui-base、go test 与
 organize 六个视图全绿）：
 `make ui-base` 全绿（含新增 `org_assign_test.mjs`）；`scripts/ui-harness/run.sh` 全 **32** 个视图通过（新增 `org-bind`；另两个是 M73 的 `chatWeb`/`chatWebOff`）；
@@ -4895,9 +4895,9 @@ organize 六个视图全绿）：
 未完成项（真机/浏览器人工走查、历史租户改名决策）留在 `docs/TODO.md` 的 M74 小节。
 
 - [x] **规则只有一份实现**：`internal/httpapi/admin_catalog.go` 的 `dshTenantNameForAccount` ——
-      `dsh-` + 账号名的拼音/ASCII slug + `-` + `accounts.id`。中文名按拼音取**首读音**（陈景峰 →
-      `dsh-chenjingfeng-10`、杨妙 → `dsh-yangmiao-36`、长伟 → `dsh-zhangwei-<id>`），ASCII 原样保留
-      （`李智超(colin)` → `dsh-lizhichao-colin-8`、`E26Q` → `dsh-e26q-30`），无字母的名字回退
+      `dsh-` + 账号名的拼音/ASCII slug + `-` + `accounts.id`。中文名按拼音取**首读音**（王强 →
+      `dsh-wangqiang-10`、刘洋 → `dsh-liuyang-36`、长伟 → `dsh-zhangwei-<id>`），ASCII 原样保留
+      （`李雷(alex)` → `dsh-lilei-alex-8`、`K7QX` → `dsh-k7qx-30`），无字母的名字回退
       `dsh-tenant-<id>`。ID 让同音重名（两个张伟）天然不重；超长名按**整音节**截断、**ID 永不截断**
       （正数 int64 最多 19 位 → 拼音预算恒 ≥3，名字恒在 `^[a-z][a-z0-9-]{0,25}[a-z0-9]$` 内）。
 - [x] **拼音表两处消费者、一个出处**：`scripts/gen-pinyin.py` 现在同时输出既有的
@@ -4924,20 +4924,20 @@ organize 六个视图全绿）：
 
 ## 安全处置：dshgw 租户共用宿主 `id_rsa`（2026-09-22，本机 `dshgw-verify`）
 
-用户原话：「我发现一个严重的问题，dshgw的租户都在使用宿主winger的id_rsa」。
+用户原话：「我发现一个严重的问题，dshgw的租户都在使用宿主operator的id_rsa」。
 
 **事故与实测证据**：`dshgw.yaml` 的 `ssh_workspaces.identity_source` 指向部署账号自己的
-`/home/winger/.ssh/id_rsa`，`EnsureIdentity` 把它**逐字节复制**给每个「没有密钥」的账号——8 个租户
+`/home/operator/.ssh/id_rsa`，`EnsureIdentity` 把它**逐字节复制**给每个「没有密钥」的账号——8 个租户
 工作区的 `<workspace>/.ssh/id_rsa` 哈希全为 `0bdc634b…`（等于宿主私钥）。该密钥的公钥就在**本机**
 `~/.ssh/authorized_keys` 里，本机 sshd 监听 `0.0.0.0:22`，租户沙箱不 `--unshare-net`（`/home` 被
 tmpfs 覆盖，所以租户读不到宿主的真实 `~/.ssh`，读到的是工作区里那份**同一把密钥**）⇒ 任何租户都能从
-沙箱内 ssh 回宿主、成为部署账号（`uid=1000(winger)`，属 `sudo,docker,lxd` 组），进而读遍所有租户
+沙箱内 ssh 回宿主、成为部署账号（`uid=1000(operator)`，属 `sudo,docker,lxd` 组），进而读遍所有租户
 工作区与密钥、`config.yaml` 里的 aigw 密钥、`state/admin.sock` 这个 provisioning 通道。处置前实测：
-`ssh -i <租户工作区密钥> winger@127.0.0.1 'id'` **成功**返回 `uid=1000(winger)`。该密钥同时可登录
-**11 台**主机：aipc、android-build、dell-server、email-test、findo-test、gpt001(root)、gptjp、mnl、
-suyuan-sz、sz-test、us-test。审计里还留着 `dsh-tenant` 曾请求挂载 `rag-server:/home/winger/work/ai_gateway`
+`ssh -i <租户工作区密钥> operator@127.0.0.1 'id'` **成功**返回 `uid=1000(operator)`。该密钥同时可登录
+**11 台**主机：gw-d、android-build、dell-server、email-test、findo-test、gw-a(root)、gw-b、mnl、
+suyuan-sz、sz-test、us-test。审计里还留着 `dsh-tenant` 曾请求挂载 `gw-c:/home/operator/work/ai_gateway`
 （被自嵌套规则以 403 拒绝）。别名种子同样是宿主主机清单的副本（21 个别名，含内网 IP、跳板机
-`192.168.190.123:2222`、autodl 节点与用户名/端口）。**范围仅本机 `dshgw-verify`**：gpt001 的
+`192.0.2.106:2222`、autodl 节点与用户名/端口）。**范围仅本机 `dshgw-verify`**：gw-a 的
 `aigw.service` 与本机 `aigw-local` 的配置里都没有 `ssh_workspaces` 块（已 ssh 核对），
 `find data -path "*workspaces*/.ssh/id_rsa"` 也只有这 8 个。
 
@@ -4956,25 +4956,25 @@ suyuan-sz、sz-test、us-test。审计里还留着 `dsh-tenant` 曾请求挂载 
       （`checkOutsideDeploymentSSH`）。`EnsureIdentity` 现在只从 `identity_dir/<账号>` 取，
       没有共享来源，账号可以完全没有密钥。
 - [x] **C 轮换宿主密钥**：新增 `scripts/rotate_operator_ssh_key.sh`（默认 dry-run）。逐主机「先加新
-      公钥 → **验证通过** → 才删旧公钥 → 复测旧密钥被拒」，11 台 + **本机**（`winger@127.0.0.1`，
+      公钥 → **验证通过** → 才删旧公钥 → 复测旧密钥被拒」，11 台 + **本机**（`operator@127.0.0.1`，
       即逃逸路径）全部完成：`retired …: refused` / `current …: accepted` 逐台打印。旧密钥归档
       `~/keys/id_rsa.revoked-20260922-105659`（附 `.hosts` 清单），各远端留
       `authorized_keys.pre-rotation-20260922-105659`，本机同样留备份。新密钥
-      `SHA256:tiWQ6NYd… winger@rag-server-20260922-105659`（4096 RSA，就地替换，`~/.ssh/config` 里
+      `SHA256:tiWQ6NYd… operator@gw-c-20260922-105659`（4096 RSA，就地替换，`~/.ssh/config` 里
       指向 `~/.ssh/id_rsa` 的条目无需改动）。旧密钥 `SHA256:1zL/6wt8…` 现已在全部 11 台与本机失效。
 - [x] **D 一账号一把**：`provision` 子命令（拒绝安装与被撤销密钥相同的密钥、拒绝一号两用；**不重启
       worker**，直接把同一份字节写进 `<workspace>/.ssh/id_rsa`，因为重启会打断在线会话，而这就是
-      `EnsureIdentity` 本会做的那次写入）。6 个真实账号各生成一把独立 ed25519：dsh-colin、
-      dsh-chengjinfeng、dsh-lianchangliang、dsh-ranqiliang、dsh-yangmiao、dsh-tenant（指纹互不相同、
+      `EnsureIdentity` 本会做的那次写入）。6 个真实账号各生成一把独立 ed25519：dsh-alex、
+      dsh-acct-d、dsh-acct-c、dsh-acct-b、dsh-liuyang、dsh-tenant（指纹互不相同、
       均 ≠ 被撤销密钥）；`verify1`、`dsh-m51-test-a` 为测试账号，保持无密钥。按用户决定**仅**
-      `dsh-tenant` 被授权到 aipc / dell-server / android-build（逐台追加并**用租户自己的密钥+自己的
-      config 复验**）；其余 5 个「有密钥但任何主机都不可达」。**本机（rag-server / 192.168.190.86）
+      `dsh-tenant` 被授权到 gw-d / dell-server / android-build（逐台追加并**用租户自己的密钥+自己的
+      config 复验**）；其余 5 个「有密钥但任何主机都不可达」。**本机（gw-c / 192.0.2.101）
       不对任何租户授权。**
 - [x] **E 别名种子收口**：`trim-seeds` 子命令按「种子里出现过的别名 = 运维清单」算出每个账号
       **自己添加**的别名，把种子与活动 `<workspace>/.ssh/config` 同时改写（各留
       `.pre-trim-*` 快照，并落下 `.operator-inventory-*` 记录）。结果：21 个运维别名全部移除，
-      只有 `dsh-tenant` 自己的 `rag-server` 保留；随后按授权决定把它的别名表重写为
-      aipc / dell-server / android-build（与它被授权的远端一致，`rag-server` 这个指向网关主机的
+      只有 `dsh-tenant` 自己的 `gw-c` 保留；随后按授权决定把它的别名表重写为
+      gw-d / dell-server / android-build（与它被授权的远端一致，`gw-c` 这个指向网关主机的
       别名已移除，快照可还原）。
 - [x] 测试：`internal/dshgw/config`（新增「旧键被拒且点名 `identity_dir`」与「`identity_dir` 落在
       `~/.ssh` 内被拒」；清掉 `identity_source` 夹具）；`internal/dshgw/sshworkspace`（新的
@@ -4988,13 +4988,13 @@ suyuan-sz、sz-test、us-test。审计里还留着 `dsh-tenant` 曾请求挂载 
       python 计划脚本，含新增 83 条）；`scripts/ssh_workspace_e2e.py` **12 步 PASS**（含「仍写
       `identity_source` 的配置被拒且错误点名 `identity_dir`」「运维密钥/配置/数据根在租户沙箱内不可见」、
       `identity_dir` 预置的密钥真的挂载成功）。事后复测：等于被撤销密钥的文件 **0** 个；
-      旧密钥访问 gpt001 / 本机 **被拒**；任选三个租户的密钥访问 `winger@127.0.0.1` **被拒**；
-      `dsh-tenant` 的密钥在 aipc / dell-server / android-build **可用**、在 gpt001 与网关主机被拒；
+      旧密钥访问 gw-a / 本机 **被拒**；任选三个租户的密钥访问 `operator@127.0.0.1` **被拒**；
+      `dsh-tenant` 的密钥在 gw-d / dell-server / android-build **可用**、在 gw-a 与网关主机被拒；
       删掉无来源账号的 marker 后重启 worker，**不生成**密钥（共享来源确已消失）。
 - [ ] 遗留（不在本次范围）：用户另有这把密钥的副本（其他机器/脚本），需自行换成新密钥——旧副本已在
-      11 台 + 本机全面失效；**aipc 的 `~/.ssh/id_rsa` 仍是那把被撤销的密钥**（本次按用户要求为它补出了
-      `~/.ssh/id_rsa.pub`，指纹 `1zL/6wt8…`，**不得再授权到任何地方**；aipc 现在出站 ssh 全部不可用，
-      正确做法是在 aipc 上现生成一把新密钥就地替换）；`ssh_workspaces.hosts` 白名单目前为空
+      11 台 + 本机全面失效；**gw-d 的 `~/.ssh/id_rsa` 仍是那把被撤销的密钥**（本次按用户要求为它补出了
+      `~/.ssh/id_rsa.pub`，指纹 `1zL/6wt8…`，**不得再授权到任何地方**；gw-d 现在出站 ssh 全部不可用，
+      正确做法是在 gw-d 上现生成一把新密钥就地替换）；`ssh_workspaces.hosts` 白名单目前为空
       （可写任意 `user@host`），是否收紧待定；`aigw doctor` 报 `verify1` 缺 `gateway.key` 与
       `settings.yaml`，是 9-18 起就存在的历史漂移，与本次无关。
 
@@ -5178,7 +5178,7 @@ resource busy`，reaper 每 5 秒重试一次、刷了一小时；该账号 15:1
       `browser-workspace` 残留挂载 **0** 个、重启后 `browser mount expiry cleanup failed` **0** 条、
       `logout_worker_stop_failed` **0** 条；并且**现网那个死 sshfs 挂载自动被修好**：日志
       `WARN a recorded ssh workspace mount lost its daemon; replacing it` → `INFO ssh workspace remounted`
-      （审计 `ssh-mount-remount`），`.../dsh-tenant/ssh/aipc/home/winger/ZT20Q` 从
+      （审计 `ssh-mount-remount`），`.../dsh-tenant/ssh/gw-d/home/operator/ZT20Q` 从
       `ls: Transport endpoint is not connected` 变成可读（列出 Android.bp/Makefile/a-ztc 等）。
       顺带确认这本身就是 M64 那条缺陷的机理：**重启单元会杀掉 sshfs 守护进程、FUSE 条目却留在表里**，
       以前要人工 `fusermount3 -u` + 再重启，现在每次启动由 `Reconcile` 自动修好。
@@ -5209,10 +5209,10 @@ resource busy`，reaper 每 5 秒重试一次、刷了一小时；该账号 15:1
 > **M76 的修法**：`sshworkspace.remount`（`Reconcile` 启动时与 `Restore` 登录时共用）不再"表里有条目就跳过"，
 > 而是按**守护进程是否存在**（与 `MountsFor` 同一条规则）判定死挂载，先 `detachKeeping` 摘掉死条目
 > （保留记录与挂载点）再重挂。本机现网 2026-09-22 16:16 重启实测：`WARN a recorded ssh workspace mount lost
-> its daemon; replacing it` → `INFO ssh workspace remounted`，`.../dsh-tenant/ssh/aipc/home/winger/ZT20Q`
+> its daemon; replacing it` → `INFO ssh workspace remounted`，`.../dsh-tenant/ssh/gw-d/home/operator/ZT20Q`
 > 从 `Transport endpoint is not connected` 变成可读。
 
-### v4.0.0 发布与部署记录（2026-09-22，本机 aigw-local + dshgw-verify；gpt001 未部署）
+### v4.0.0 发布与部署记录（2026-09-22，本机 aigw-local + dshgw-verify；gw-a 未部署）
 
 本版内容（v3.2.0 之后未发布的 4 组改动）：**M74 租户名自动用 `dsh-<账号拼音>-<账号ID>`**（`8191c4e`，
 另含控制台绑定飞书弹窗的先弹后读 `d655c0e`）、**删除共享 SSH 密钥来源 `identity_source` + 安全处置**
@@ -5256,9 +5256,9 @@ resource busy`，reaper 每 5 秒重试一次、刷了一小时；该账号 15:1
   发布脚本自带 `version-check` + ui-dist 混淆（43 文件 -44%；gzip -60%）。
   `make verify` 未跑：本机 `go test ./...` 会走进 `./data`（含 6 GB 库与 GB 级浏览器工作区）而挂住，
   这是 M66 小节记录的既有现象，本次按仓库惯例用显式包目标替代。
-- **未做**：gpt001 未部署（用户要求本机）；M76 的「真人点一次退出」仍需用户会话（见 `docs/TODO.md` M76）。
+- **未做**：gw-a 未部署（用户要求本机）；M76 的「真人点一次退出」仍需用户会话（见 `docs/TODO.md` M76）。
 
-### v4.1.0 发布与部署记录（2026-09-22，本机 aigw-local + dshgw-verify；gpt001 未部署）
+### v4.1.0 发布与部署记录（2026-09-22，本机 aigw-local + dshgw-verify；gw-a 未部署）
 
 本版内容（v4.0.0 之后未发布的 5 个提交）：**每租户渲染 `/etc/passwd` 视图**（`0b3e36b`：沙箱里 `getpwuid` 的
 home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名做 DNS 解析"）、**沙箱补挂 `/etc/alternatives`**
@@ -5272,7 +5272,7 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 版本 | **v4.1.0**（`VERSION` 4.0.0 → 4.1.0；release 提交 `52796d4`，tag `v4.1.0`；记录提交 `8b99735`；两者已推 `origin/main` 与 `v4.1.0`） |
 | 构建物 | `bin/aigw` 4.1.0 / `52796d4`（console minified：43 文件 691497→390038 B，gzip 38 文件 387677→154683 B），sha256 `fed4a452c199555d9a026a7fbc258936d0aa729fdc7bdeef7daed81c5bc7d4d5`；`bin/dshgw` 4.1.0 / `52796d4`，sha256 `055b36dd9e36124b7330fc7abd79d70d392e46605a3331d03b966414473e978d`；`gwproxy` 本版无改动（`cmd/gwproxy` + `internal/frontproxy` 自 `58ef6bf` 起无提交），**未重建、未重启** |
 | 部署范围 | 本机 `aigw-local`（8088）与 `dshgw-verify`（门户 18300 / 网关 18299 / 租户 18301+ / worker 18400+）：4.0.0 / `24acbf4` → 4.1.0 / `52796d4`；`gwproxy-verify`（8090）未动 |
-| 部署方式 | **本次发布会话跑在 dshgw 租户沙箱里（cgroup `dshgw-worker-dsh-tenant-12.scope`，PID 1 = bwrap），换二进制 + 重启单元在沙箱里做不到**：部署根没挂进沙箱（那几层目录是 bwrap 造的空壳，写进去不会到宿主）、没有 `/run/user/1000` 所以 `systemctl --user` 连不上、PID namespace 看不到 8088 进程（无法发信号）、ssh 到宿主（`127.0.0.1` / `192.168.190.86`）是 `Permission denied`。因此按 `docs/TODO.md` 的既有约定交给**操作者在宿主终端执行** `deploy-aigw-4.1.0.sh`（工作区里，未入 git） |
+| 部署方式 | **本次发布会话跑在 dshgw 租户沙箱里（cgroup `dshgw-worker-dsh-tenant-12.scope`，PID 1 = bwrap），换二进制 + 重启单元在沙箱里做不到**：部署根没挂进沙箱（那几层目录是 bwrap 造的空壳，写进去不会到宿主）、没有 `/run/user/1000` 所以 `systemctl --user` 连不上、PID namespace 看不到 8088 进程（无法发信号）、ssh 到宿主（`127.0.0.1` / `192.0.2.101`）是 `Permission denied`。因此按 `docs/TODO.md` 的既有约定交给**操作者在宿主终端执行** `deploy-aigw-4.1.0.sh`（工作区里，未入 git） |
 | 回滚点 | 脚本换入前把盘上二进制拷到 `data/prev/bin/*.prev-running-<版本>-<revision>`（同名不同内容则另起名字，**绝不覆盖**历史——v4.0.0 小节记录的那次覆盖失误就是这么防的）。aigw 那份即 `data/prev/bin/aigw.prev-running-4.0.0-24acbf4` |
 | 配置/数据变更 | 无（发布只换二进制）：`config.yaml`、`data/`（除回滚点目录）未动 |
 
@@ -5284,15 +5284,15 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 **验证**（本机实测）：
 
 - `GET /version` → `{"revision":"52796d4","ui":"minified","ui_encoding":"gzip","version":"4.1.0"}`；
-  `healthz` 200、`readyz` 200、`/admin/ui/` 200；局域网 `http://192.168.190.86:8088/version` 同样是 4.1.0 / `52796d4`
+  `healthz` 200、`readyz` 200、`/admin/ui/` 200；局域网 `http://aigw.internal:8088/version` 同样是 4.1.0 / `52796d4`
   （与操作者控制台入口同源）。
 - 控制台角标（资源面证据）：`/admin/ui/js/brand.js` 200，其逻辑就是读 `/version` 后渲染
   `AI Gateway · v<version> · <revision>` ⇒ 角标为 `AI Gateway v4.1.0 52796d4`；`scripts/ui-base-test.mjs`
   **10 checks passed**、`scripts/ui-badge-test.mjs` **11 checks passed**。
 - **本版两处 dshgw 修复在真实租户沙箱里生效**（比端点更强的证据——本次会话本身就跑在 `dsh-tenant` 里）：
-  沙箱内 `/etc/passwd` 的当前账号行是 `winger:x:1000:1000:winger:<workspace>:/bin/bash`，
+  沙箱内 `/etc/passwd` 的当前账号行是 `operator:x:1000:1000:operator:<workspace>:/bin/bash`，
   `python3 -c 'pwd.getpwuid(os.getuid()).pw_dir'` == `$HOME` == `…/state/workspaces/dsh-tenant`
-  （换版本前这里指向宿主 `/home/winger`，正是 `ssh <别名>` 找不到 `~/.ssh/config` 的原因）；
+  （换版本前这里指向宿主 `/home/operator`，正是 `ssh <别名>` 找不到 `~/.ssh/config` 的原因）；
   `/etc/alternatives` 已挂入（分页修复随之生效）；租户 `~/.ssh/config` 的 4 个别名现在落在 `getpwuid` 指向的那个目录里。
 - dshgw 面：门户 18300 → 400、网关 18299 → 404（与换版本前逐项一致，都是"进程在听"）、本会话 worker 端口
   18401 → 401，重启后会话正常继续（会话历史保留）。
@@ -5301,7 +5301,7 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
   node：`internal/webui/tests/org_tree_test.mjs` 通过。
 - **未拿到（沙箱外，需操作者终端）**：宿主 `data/aigw-local.log` 的 `aigw starting` 与 `level=ERROR` 计数、
   `dshgw-verify` 的启动行。需要时在宿主执行
-  `grep -E "aigw starting|level=ERROR" /home/winger/work/ai_gateway/data/aigw-local.log | tail -5`
+  `grep -E "aigw starting|level=ERROR" /home/operator/work/ai_gateway/data/aigw-local.log | tail -5`
   与 `journalctl --user -u dshgw-verify --since "-5min" | grep -E "dshgw listening|level=ERROR"` 补两行。
 
 ### v4.1.1 发布与部署记录（2026-09-22，本机 aigw-local 8088 已升级；dshgw-verify 重启待人工择时）
@@ -5317,7 +5317,7 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 版本 | **v4.1.1**（`VERSION` 4.1.0 → 4.1.1；release 提交 `6f68aeb`，tag `v4.1.1`；两者已推 `origin/main` 与 `v4.1.1`） |
 | 构建物 | `bin/aigw` 4.1.1 / `6f68aeb`（console minified：43 文件 691497→390038 B，gzip 38 文件 387677→154683 B——本版前端无改动），sha256 `a528dcd493477d06712e2f31125684a6972258905f729a02249db8301610cdae`；`bin/dshgw` 4.1.1 / `6f68aeb`，sha256 `4a5926c76811cf8517772e0e337db236c642874087272d45df9374de79cb53d1`；`gwproxy` 本版无改动，**未重建、未重启** |
 | 部署范围 | 本机 `aigw-local`（8088）：4.1.0 / `52796d4` → 4.1.1 / `6f68aeb`；盘上 `bin/dshgw` 也已换成 4.1.1，但 `dshgw-verify`（门户 18300 / 网关 18299 / 租户 18301+ / worker 18400+）**进程仍是旧版**，重启后生效（见下"待人工"） |
-| 部署方式 | **本次 ssh 到宿主可行**（`ssh rag-server` → uid 1000 + `systemctl --user` 可达，与 v4.1.0 记录里"`Permission denied`"不同），因此换二进制、拍回滚点、重启 8088 由发布会话自己完成；脚本 `deploy-aigw-4.1.1.sh`（工作区根，未入 git）按影响面分段：`--check-profile`（只渲染 profile）→ 默认 A 段（换两份二进制 + 只重启 `aigw-local`，不碰任何租户 worker）→ `--with-dshgw` B 段（重启 `dshgw-verify`，会重启**所有**租户 worker 含本次会话，故默认不跑，留给人工择时） |
+| 部署方式 | **本次 ssh 到宿主可行**（`ssh gw-c` → uid 1000 + `systemctl --user` 可达，与 v4.1.0 记录里"`Permission denied`"不同），因此换二进制、拍回滚点、重启 8088 由发布会话自己完成；脚本 `deploy-aigw-4.1.1.sh`（工作区根，未入 git）按影响面分段：`--check-profile`（只渲染 profile）→ 默认 A 段（换两份二进制 + 只重启 `aigw-local`，不碰任何租户 worker）→ `--with-dshgw` B 段（重启 `dshgw-verify`，会重启**所有**租户 worker 含本次会话，故默认不跑，留给人工择时） |
 | 回滚点 | `data/prev/bin/aigw.prev-running-4.1.0-52796d4`（23287946 B）、`data/prev/bin/dshgw.prev-running-4.1.0-52796d4`（16025298 B）；同名不同内容时另起名字，绝不覆盖历史。回滚 = `cp -p` 回这两个文件 + `systemctl --user restart aigw-local`（脚本在门禁失败时会自动做，并对 aigw 再验一次 `/healthz`） |
 | 配置/数据变更 | 无：`config.yaml`、`dshgw.yaml`、`data/`（除 `data/prev/bin` 回滚点）未动 |
 
@@ -5329,11 +5329,11 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 **验证**（本机实测）：
 
 - `GET /version` → `{"revision":"6f68aeb","ui":"minified","ui_encoding":"gzip","version":"4.1.1"}`：回环
-  `http://127.0.0.1:8088/version` 与局域网 `http://192.168.190.86:8088/version` 同值。
+  `http://127.0.0.1:8088/version` 与局域网 `http://aigw.internal:8088/version` 同值。
 - 探针：`healthz` 200、`readyz` 200、`/admin/ui/` 200、`/admin/ui/js/brand.js` 200（其逻辑就是读 `/version`
   渲染角标）⇒ 控制台角标应为 `AI Gateway v4.1.1 6f68aeb`。
 - 启动日志（宿主 `data/aigw-local.log`）：`time=2026-09-22T20:47:59.797+08:00 level=INFO msg="aigw starting"
-  version=4.1.1 revision=6f68aeb ui=minified ui_encoding=gzip config=/home/winger/work/ai_gateway/config.yaml
+  version=4.1.1 revision=6f68aeb ui=minified ui_encoding=gzip config=/home/operator/work/ai_gateway/config.yaml
   listen=:8088`；本条之后没有新的 `level=ERROR`（文件里 17:47 那条 settlement 超时是上一次重启之前的旧记录）。
 - **沙箱补挂的 profile 面证据（重启前就能拿）**：用新 dshgw 渲染 profile（`sandbox-exec --print dsh-tenant`），
   argv 里出现 `--ro-bind …/state/tenants/dsh-tenant/.dsh/sandbox/bashrc /etc/bash.bashrc`；渲染出的视图
@@ -5343,12 +5343,12 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 - 发布前回归：`gofmt`/`go vet` 干净、`go build ./...` 通过、`go test ./internal/dshgw/... ./cmd/dshgw ./internal/arch`
   全绿（21 个包，exit 0）、`make dshgw-test` exit 0（88 ok / 0 fail）。
 - **踩到并绕过一个坑**：`dshgw.yaml` 用相对路径（`identity_dir: ./data/dshgw-verify/ssh-keys`），从 ssh（cwd=`$HOME`）
-  直接调 dshgw 会解析到 `/home/winger/data/...` 并报 `stat … no such file or directory`；单元里靠
-  `WorkingDirectory=/home/winger/work/ai_gateway` 才对。部署脚本因此先 `cd "$ROOT"`。
+  直接调 dshgw 会解析到 `/home/operator/data/...` 并报 `stat … no such file or directory`；单元里靠
+  `WorkingDirectory=/home/operator/work/ai_gateway` 才对。部署脚本因此先 `cd "$ROOT"`。
 
 **待人工（会重启所有租户 worker，因此不由发布会话自触发）**：
 
-- [ ] `bash /home/winger/work/ai_gateway/data/dshgw-verify/state/workspaces/dsh-tenant/deploy-aigw-4.1.1.sh --with-dshgw`
+- [ ] `bash /home/operator/work/ai_gateway/data/dshgw-verify/state/workspaces/dsh-tenant/deploy-aigw-4.1.1.sh --with-dshgw`
       —— 重启 `dshgw-verify`（B 段，60s 门禁；失败会自动把两份二进制回滚并重启两个单元）。它会结束所有租户
       DSH 会话（含发起部署的那个），会话历史保留、可继续。
 - [ ] 重启后肉眼验收：侧栏「终端」里 `ls` 出彩色、提示符是绿 `user@host` + 蓝 `cwd`；回归项：agent 的 bash
@@ -5584,24 +5584,24 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 - [x] 回归：全仓 `go test ./internal/... ./cmd/...`（含 `USER`/`LOGNAME` 未设置的环境）、`go vet ./...`、`gofmt` 全绿；
       `make dshgw-node-test`；两个验收脚本在 P6 重构后仍全过（多机 35 步、SSH 部署 17 步）。
 
-### v4.1.1 部署到 gptjp（`gpt.lagenio.xyz` / `gpt.tirisen.hk`）+ 打开飞书身份（2026-09-23）
+### v4.1.1 部署到 gw-b（`gw-b.example.com` / `gw-b.example.net`）+ 打开飞书身份（2026-09-23）
 
-> 需求原话：「将 v4.1.1 部署到 gptjp 的 https://gpt.lagenio.xyz/aigw 并用 rag-server 8088 实例的飞书配置参数设置，
-> https://gpt.tirisen.hk/aigw 同样同一个实例，告诉所有飞书的 callback」。
-> 决策（用户确认）：**不改代码**，只把回调登记进飞书应用白名单；主回调取 `gpt.tirisen.hk`。
-> 驱动脚本：`~/deploy-aigw-4.1.1-gptjp.sh`（阶段化：preflight/artifact/backup/config/dryrun/switch/verify/rollback），
-> 全过程日志 `~/deploy-gptjp-4.1.1.log`；回调登记探测器 `~/feishu-callback-check.sh`
+> 需求原话：「将 v4.1.1 部署到 gw-b 的 https://gw-b.example.com/aigw 并用 gw-c 8088 实例的飞书配置参数设置，
+> https://gw-b.example.net/aigw 同样同一个实例，告诉所有飞书的 callback」。
+> 决策（用户确认）：**不改代码**，只把回调登记进飞书应用白名单；主回调取 `gw-b.example.net`。
+> 驱动脚本：`~/deploy-aigw-4.1.1-gw-b.sh`（阶段化：preflight/artifact/backup/config/dryrun/switch/verify/rollback），
+> 全过程日志 `~/deploy-gw-b-4.1.1.log`；回调登记探测器 `~/feishu-callback-check.sh`
 > （均在沙箱租户工作区 `data/dshgw-verify/state/workspaces/dsh-tenant/` 下）。
 
-- [x] 目标机现状（升级前）：gptjp（`47.91.16.118`，root）`/opt/aigw` + 系统单元 `aigw.service`
+- [x] 目标机现状（升级前）：gw-b（`198.51.100.101`，root）`/opt/aigw` + 系统单元 `aigw.service`
       （`WorkingDirectory=/opt/aigw`、`:8088`、`server.base_path: /aigw`），版本 **0.12.3 / `44f9de2`**，
       二进制 sha256 `1fde3a62…`、配置 sha256 `d9b78f7f…`（与 9/14 记录一致）；DB schema 停在 `0017`，
       5 个供应商（3×`plugin:provider-codex`、`deepseek`、`azure`）/ 24 账号 / 41 key / 19 模型 / 4 标签。
       **两个域名早已由同一台 nginx（nginxWebUI，`/home/nginxWebUI/nginx.conf`）的 `location ^~ /aigw/`
       转发到 `127.0.0.1:8088`**，所以「同一个实例」这次**不需要改 nginx**。
 - [x] 构建物复用而非重建：直接用工作区 `bin/aigw`（`aigw 4.1.1 (revision 6f68aeb, built 2026-09-22T12:42:53Z,
-      console minified, transfer gzip)`，sha256 `a528dcd4…`）——它与 rag-server:8088 线上正在运行的那份
-      **逐字节相同**，所以 gptjp 与 8088 跑的是同一个已验收产物；`VERSION`/tag 未动（这不是发版）。
+      console minified, transfer gzip)`，sha256 `a528dcd4…`）——它与 gw-c:8088 线上正在运行的那份
+      **逐字节相同**，所以 gw-b 与 8088 跑的是同一个已验收产物；`VERSION`/tag 未动（这不是发版）。
       远端 `aigw.new --version` 与 sha256 双向核对一致后才继续。
 - [x] 回滚点（切换前拍下）：`/opt/aigw/aigw.prev-20260923-105204`（0.12.3）、
       `/opt/aigw/config.yaml.pre-feishu-20260923-105204`、
@@ -5609,13 +5609,13 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
       `pragma integrity_check` = ok、schema 17）；另存 `/opt/aigw/pre-upgrade-snapshot.json`（供应商健康/计数基线）。
 - [x] 配置变更**只在末尾追加一段**（其余行一字未动）：`feishu.enabled/app_id/app_secret/callback_url/admin_login`
       + `dsh_login: false`（本机没有 dshgw 门户；`dsh_login: true` 会让配置校验要求 `portal_url`）。
-      `app_id`/`app_secret` 取自 rag-server 8088 实例（`cli_aa27b25392f91bdb`）；`app_secret` 经 ssh 管道 +
+      `app_id`/`app_secret` 取自 gw-c 8088 实例（`cli_0000000000000000`）；`app_secret` 经 ssh 管道 +
       临时文件注入、写后即删、不进 argv，文件模式保持 `0600`。配置 sha256：`d9b78f7f…` → `3518c3e4…`。
 - [x] **迁移预演**（`/opt/aigw/dryrun-4.1.1-<ts>/`，端口 `127.0.0.1:18099`，全部断言通过）：
       DB 副本 → `4.1.1/6f68aeb` 起得来、`max(schema_migrations)` 17→**26**、
       `registry loaded summary="models=19 providers=5 provider_models=53 routes=47 tags=4 accounts=24" ready=true`、
       `healthz`/`admin/ui` 200、`readyz` 200、`level=ERROR` 0 条，并打印
-      `feishu identity enabled … callback=https://gpt.tirisen.hk/aigw/feishu/callback dsh_login=false admin_login=true`。
+      `feishu identity enabled … callback=https://gw-b.example.net/aigw/feishu/callback dsh_login=false admin_login=true`。
       **安全前提**：副本里把 3 个 codex 插件供应商的 `credentials_enc` 置空、`plugins.state_dir` 指向空目录——
       codex 的活跃刷新令牌只存在于生产的 `data/plugin-state/*/session.json`，预演因此**不可能**去刷新/轮换生产令牌。
 - [x] 切换与门禁：`install aigw.new → systemctl restart aigw`；`/aigw/version` 变 `4.1.1/6f68aeb`、
@@ -5623,8 +5623,8 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
       字段顺序是 `revision` 在前、`version` 在后，而断言把两者连写）**误判失败并自动回滚到 0.12.3**——
       回滚路径按设计生效（二进制 + 配置一起还原，重启后 `/version` 回到 `0.12.3/44f9de2`）；修好断言后重跑门禁通过。
       这一段同时证明「门禁真的能拦住」和「失败会自动退回旧版本」。
-- [x] 线上验收：本地 `localhost:8088/aigw/version` 与公网 `https://gpt.tirisen.hk/aigw/version`、
-      `https://gpt.lagenio.xyz/aigw/version` **均为 `4.1.1 / 6f68aeb`**（两个域名同一实例）；
+- [x] 线上验收：本地 `localhost:8088/aigw/version` 与公网 `https://gw-b.example.net/aigw/version`、
+      `https://gw-b.example.com/aigw/version` **均为 `4.1.1 / 6f68aeb`**（两个域名同一实例）；
       `healthz` 两域名均 200；启动日志 `aigw starting version=4.1.1 revision=6f68aeb`、`level=ERROR` 0 条；
       供应商逐条对比升级前快照**无变化**（5 个仍在、health/`last_error` 未退化），计数 24/41/5/19/4 不变。
 - [x] **真实流量探针（升级后逐个 `POST /aigw/admin/api/v1/providers/{id}/test`，管理口令取自 `.admin-password`）**：
@@ -5636,28 +5636,28 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
       `{"feishu":{"enabled":true,"label":"飞书扫码登录","login_url":"/feishu/login?mode=admin"},"password":true}`，
       即登录页已出现「飞书扫码登录」，口令登录照旧。
 - [x] 飞书路由：`GET /aigw/feishu/login?mode=admin` → **302** 到 `accounts.feishu.cn`，`redirect_uri` 正是
-      `https://gpt.tirisen.hk/aigw/feishu/callback`；`/aigw/feishu/callback`（无 `code`）→ 400；
+      `https://gw-b.example.net/aigw/feishu/callback`；`/aigw/feishu/callback`（无 `code`）→ 400；
       **`/aigw/feishu/login`（不带 `mode`，即门户流程）→ 404 是设计如此**（本部署 `dsh_login: false`，
       没有 dshgw 门户）；两个域名经 nginx 都是 302。
-- [x] 飞书侧可达性：从 gptjp 用该应用取 `tenant_access_token` 返回 `{"code":0,…}`（0.38s）→
+- [x] 飞书侧可达性：从 gw-b 用该应用取 `tenant_access_token` 返回 `{"code":0,…}`（0.38s）→
       无 IP 白名单/出网阻塞。
-- [x] **飞书后台回调登记（该配置没有 API，必须由应用管理员在浏览器做）**：应用 `cli_aa27b25392f91bdb` →
-      **安全设置 → 重定向 URL** 添加 `https://gpt.tirisen.hk/aigw/feishu/callback`（gptjp 生效那条）
-      与 `https://gpt.lagenio.xyz/aigw/feishu/callback`（别名域名）。登记前两条探测均为
+- [x] **飞书后台回调登记（该配置没有 API，必须由应用管理员在浏览器做）**：应用 `cli_0000000000000000` →
+      **安全设置 → 重定向 URL** 添加 `https://gw-b.example.net/aigw/feishu/callback`（gw-b 生效那条）
+      与 `https://gw-b.example.com/aigw/feishu/callback`（别名域名）。登记前两条探测均为
       `20029 redirect_uri unmatch`（连 `http`、末尾带 `/`、`:443`、丢 `/aigw`、带 `?x=1` 等 15 个变体一并扫过，全 20029）；
       **用户已在飞书后台登记完成**，复验四条全绿：
-      `chat.tirisen.hk/feishu/callback` ✅ / `192.168.190.86:8090/feishu/callback` ✅ /
-      `gpt.tirisen.hk/aigw/feishu/callback` ✅ / `gpt.lagenio.xyz/aigw/feishu/callback` ✅。
+      `chat.example.com/feishu/callback` ✅ / `192.0.2.101:8090/feishu/callback` ✅ /
+      `gw-b.example.net/aigw/feishu/callback` ✅ / `gw-b.example.com/aigw/feishu/callback` ✅。
       再做了一次**端到端接受性检查**：从两个域名的 `GET /aigw/feishu/login?mode=admin` 取出网关自己发出的
       `redirect_uri`，直接请求该授权地址——返回 **302 到 `passport.feishu.cn` 登录页**（而不是 20029 失败页），
       即用户点「飞书扫码登录」会被正常送到扫码页。剩下的只是人工验收：控制台
-      `https://gpt.tirisen.hk/aigw/admin/ui/` 用现有 `admin` 口令登录 → 管理员页生成邀请链接 →
+      `https://gw-b.example.net/aigw/admin/ui/` 用现有 `admin` 口令登录 → 管理员页生成邀请链接 →
       浏览器打开完成飞书绑定 → 试「飞书扫码登录」（**尚未做，需要操作者本人**）。
 - [x] 文档：`docs/feishu.md` §2 第 2 步从「添加唯一一条」改写为**多条目白名单**，并补上四个部署/域名的
       登记清单与「授权页 302 vs 20029」这条免浏览器判据（探测器脚本见工作区）。本次文档改动**未提交**——
       工作树正处于 M77 未提交状态，`git add docs/todo_done.md` 会把 M77 的进行中记录一并带入。
-- [x] 明确未做：不改代码（未加回调白名单机制）、不改 nginx/nginxWebUI、不在 gptjp 起 dshgw/门户、
-      不动 sub2api 及其容器、不动 rag-server:8088 的配置（只读它的飞书参数）、不重建 codex 插件
+- [x] 明确未做：不改代码（未加回调白名单机制）、不改 nginx/nginxWebUI、不在 gw-b 起 dshgw/门户、
+      不动 sub2api 及其容器、不动 gw-c:8088 的配置（只读它的飞书参数）、不重建 codex 插件
       （`git log v0.12.3..v4.1.1 -- pkg/pluginapi examples/provider-codex` 无提交，插件协议仍为 1）。
 
 ### P7 控制台 WebUI：DSH 节点页（2026-09-23）
@@ -5710,7 +5710,7 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 > 这条路从一开始就不会有变化：丢的不是距离，是整条样式。
 
 - [x] **发版部署（2026-09-23，本次补做）**：修随 **v4.3.0**（release 提交 `dccf435`，tag `v4.3.0`）第一次上
-      线上——部署到 **rag-server**（`aigw-local`：4.1.1/`6f68aeb` → 4.3.0/`dccf435`）与 **gptjp**
+      线上——部署到 **gw-c**（`aigw-local`：4.1.1/`6f68aeb` → 4.3.0/`dccf435`）与 **gw-b**
       （`aigw.service`：同一版本），两台 `admin/ui/js/brand.js` 均 200 ⇒ 控制台角标应为
       `AI Gateway v4.3.0 dccf435`。完整记录（回滚点、探针、schema 27、M81 行级证据）见本文件
       「v4.3.0 发布记录」。**仍未做**：真实浏览器复验（组织树缩进 22px、`wide` 弹窗 900px），
@@ -5776,7 +5776,7 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 
 > 设计：`docs/design/m79-sandbox-workspace-view.md`；规格：`docs/dshgw.md` §7a、`docs/deployment-layout.md` §4.2/§4.4、
 > `deploy/dshgw/README.md` §2；样例：`config.example.yaml`、`deploy/dshgw/{config,node}.example.yaml`。
-> 需求原话：「实现 `~` 就等于 `/home/winger/work/ai_gateway/data/dshgw-verify/state/workspaces/dsh-tenant` 呢？
+> 需求原话：「实现 `~` 就等于 `/home/operator/work/ai_gateway/data/dshgw-verify/state/workspaces/dsh-tenant` 呢？
 > 并在沙箱里缩短路径」。**默认关闭**：`deploy.sandbox_workspace` 留空时 argv/HOME/passwd 视图/渲染产物与之前逐字节一致
 > （单测里有这条回归断言）。
 
@@ -5963,9 +5963,9 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 - [ ] 观察项：`group_by=provider` 的大窗口耗时与本次新增的 `RequestAttempts`（每页一次点查）未做
       压测；请求数上限由候选数决定，暂不需要分页 `attempts`
 
-### v4.3.0 发布记录（M78 + M80 + M81 + 控制台 CSP 修复，2026-09-23，部署到 rag-server 与 gptjp）
+### v4.3.0 发布记录（M78 + M80 + M81 + 控制台 CSP 修复，2026-09-23，部署到 gw-c 与 gw-b）
 
-> 需求原话：「发布版本，部署到rag-server和gptjp」。
+> 需求原话：「发布版本，部署到gw-c和gw-b」。
 > 档位 **minor**：自 v4.2.0 起是三个纯新增里程碑（M78 请求日志的路由路线、M80 API Key 批量导入与按 Key
 > 查账户、M81 `user` 档每条用户消息字符上限）加一个控制台缺陷修复（`el()` 改走 CSSOM，修严格 CSP 丢弃
 > 行内 style）；**没有接口形状破坏**，两台线上只换二进制、`config.yaml` 一字未动即可继续跑。
@@ -5976,16 +5976,16 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 |---|---|
 | 版本 | **v4.3.0**（`VERSION` 4.2.0 → 4.3.0；release 提交 `dccf435`，tag `v4.3.0`；**未推 `origin`**——`origin/main` 仍停在 `a57e2a3`，v4.2.0 之后都没推） |
 | 构建物 | `bin/aigw` **4.3.0 / `dccf435`**，23,529,508 B，sha256 `c78074ead4a0fc22f222f184c1225c9557adbedd1a98681f7d9359583904d030`（console minified：44 文件 728097→408321 B，gzip 39 文件 405960→161739 B）；`bin/dshgw` **4.3.0 / `dccf435`**，16,863,126 B，sha256 `16d721995c7406df6c7fec6d5c57b5ba313b53ec26346b7922fe2a643dcfb126` |
-| 部署范围 | ① **rag-server**（`192.168.190.86`，uid `winger`，`systemctl --user`）：`aigw-local` 4.1.1/`6f68aeb` → **4.3.0/`dccf435`**（`/home/winger/work/ai_gateway/bin/aigw`）；盘上 `bin/dshgw` 同步换成 4.3.0，但 `dshgw-verify` **进程未重启**（留给人工择时）。② **gptjp**（`47.91.16.118`，root，系统单元 `aigw.service`，`/opt/aigw`，`base_path: /aigw`）：4.1.1/`6f68aeb` → **4.3.0/`dccf435`** |
-| 部署方式 | 都是「先落 `.new` → 双向核对 sha256 → 远端 `-version` 自证 → 拍回滚点 → 换入 → 重启 → 门禁」。rag-server：`scp bin/aigw rag-server:…/bin/aigw.new`（sha 匹配 `c78074ea…`）→ `cp -p bin/aigw bin/aigw.prev-4.1.1-6f68aeb` → `install -m 0755 aigw.new aigw` → `systemctl --user restart aigw-local`；gptjp：同样四步 + `systemctl restart aigw`。`config.yaml`/`data/` 未改 |
-| 回滚点 | rag-server：`bin/aigw.prev-4.1.1-6f68aeb`（sha `a528dcd493477d06712e2f31125684a6972258905f729a02249db8301610cdae`，就是 v4.1.1 构建物）、`bin/dshgw.prev-4.1.1-6f68aeb`；gptjp：`/opt/aigw/aigw.prev-4.1.1-6f68aeb`（同 `a528dcd4…`）。回滚 = `cp -p` 回该文件 + 重启对应单元（rag-server `systemctl --user restart aigw-local`、gptjp `systemctl restart aigw`），版本号随之退回 `4.1.1/6f68aeb` |
+| 部署范围 | ① **gw-c**（`192.0.2.101`，uid `operator`，`systemctl --user`）：`aigw-local` 4.1.1/`6f68aeb` → **4.3.0/`dccf435`**（`/home/operator/work/ai_gateway/bin/aigw`）；盘上 `bin/dshgw` 同步换成 4.3.0，但 `dshgw-verify` **进程未重启**（留给人工择时）。② **gw-b**（`198.51.100.101`，root，系统单元 `aigw.service`，`/opt/aigw`，`base_path: /aigw`）：4.1.1/`6f68aeb` → **4.3.0/`dccf435`** |
+| 部署方式 | 都是「先落 `.new` → 双向核对 sha256 → 远端 `-version` 自证 → 拍回滚点 → 换入 → 重启 → 门禁」。gw-c：`scp bin/aigw gw-c:…/bin/aigw.new`（sha 匹配 `c78074ea…`）→ `cp -p bin/aigw bin/aigw.prev-4.1.1-6f68aeb` → `install -m 0755 aigw.new aigw` → `systemctl --user restart aigw-local`；gw-b：同样四步 + `systemctl restart aigw`。`config.yaml`/`data/` 未改 |
+| 回滚点 | gw-c：`bin/aigw.prev-4.1.1-6f68aeb`（sha `a528dcd493477d06712e2f31125684a6972258905f729a02249db8301610cdae`，就是 v4.1.1 构建物）、`bin/dshgw.prev-4.1.1-6f68aeb`；gw-b：`/opt/aigw/aigw.prev-4.1.1-6f68aeb`（同 `a528dcd4…`）。回滚 = `cp -p` 回该文件 + 重启对应单元（gw-c `systemctl --user restart aigw-local`、gw-b `systemctl restart aigw`），版本号随之退回 `4.1.1/6f68aeb` |
 | schema 迁移 | 两台都自动完成 **26 → 27**（M78 的 `0027_request_route_identity.sql`：请求日志/计量行带上路由身份） |
-| 验证（rag-server） | `/version` 回环与局域网均 `{"revision":"dccf435","version":"4.3.0"}`；`healthz`/`readyz`/`admin/ui/`/`admin/ui/js/brand.js` 全 200；`data/aigw-local.log` 里 `aigw starting version=4.3.0 revision=dccf435 config=/home/winger/work/ai_gateway/config.yaml listen=:8088`（14:11:13），重启后无新 `level=ERROR` |
-| 验证（gptjp） | 本机 `localhost:8088/aigw/version` 与公网 `https://gpt.lagenio.xyz/aigw/version`、`https://gpt.tirisen.hk/aigw/version` 三处同为 `4.3.0/dccf435`；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200；`journalctl -u aigw` 启动行 `version=4.3.0 revision=dccf435`（14:13:41），4 分钟内 `level=ERROR` 0 条 |
-| 验证（M81 真机行级证据，rag-server） | 重启后新写的行：`record_input_mode=user`、`input_max_chars=100`、`input_truncated=true`，**每条 user 消息字符数从 813/851/390/333 降到 100**，并出现 `omitted["over_cap"]=1`（某条消息的后续文本 part 整段落在上限之外）；重启**之前**的历史行仍是 `input_max_chars` 缺省（不回填）。核对方式：只读打开 `data/aigw-local.db` 逐行解析 `request_json`（未打印任何用户正文） |
-| 配置/数据变更 | **无**。rag-server 的 `recording:` 段只有 `record_input: user` 与 `retention_days: 30`，没有 `input_max_chars` ⇒ 走默认 100；gptjp 连 `recording:` 段都没有 ⇒ 全默认，且 41 把 Key 全是 `inherit` ⇒ 解析为 `user` 档 |
-| 未做（待人工） | ① `dshgw-verify` 重启：会重启**所有**租户 worker（含发起部署的会话），本次只换盘上二进制；② gptjp 已经 ~5 天没有非控制台流量（最近 12 行是控制台问答，服务端按设计强制 `off`；最近一条 `mode=user` 的行在 2026-09-18），所以 `input_max_chars` 要等它下一次 user 档请求才会出现在它的日志里；③ 真浏览器 `make ui-check`（含 M81 新增的截断提示断言）与 CSP 修复的线上复验（`:8088/admin/ui/#/org` 组织树缩进 22px、`wide` 弹窗 900px）仍需在宿主浏览器里做一次 |
-| 既有噪声（非本次引入） | rag-server 的 `settlement could not be written; falling back to disk — store: begin settlement tx: context deadline exceeded`：12:07–12:28 有 4 条（**早于**本次重启），重启后 14:11:34 又 1 条（启动期写连接争用），当天共 **15 条**；全部走 `billing fallback` 落盘并由 `billing fallback replay finished scanned=1 replayed=1 failed=0`（14:12:13）自动补回，**没有丢账**（当天 replay 成功 38 次）——签名与 4.1.1 运行期一致，与 M78/M81 无关。另外 main 上还有 M79 遗留的 `go vet` copylocks（`internal/dshgw/config/sandboxview_test.go:76/92/105`），本次未动 |
+| 验证（gw-c） | `/version` 回环与局域网均 `{"revision":"dccf435","version":"4.3.0"}`；`healthz`/`readyz`/`admin/ui/`/`admin/ui/js/brand.js` 全 200；`data/aigw-local.log` 里 `aigw starting version=4.3.0 revision=dccf435 config=/home/operator/work/ai_gateway/config.yaml listen=:8088`（14:11:13），重启后无新 `level=ERROR` |
+| 验证（gw-b） | 本机 `localhost:8088/aigw/version` 与公网 `https://gw-b.example.com/aigw/version`、`https://gw-b.example.net/aigw/version` 三处同为 `4.3.0/dccf435`；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200；`journalctl -u aigw` 启动行 `version=4.3.0 revision=dccf435`（14:13:41），4 分钟内 `level=ERROR` 0 条 |
+| 验证（M81 真机行级证据，gw-c） | 重启后新写的行：`record_input_mode=user`、`input_max_chars=100`、`input_truncated=true`，**每条 user 消息字符数从 813/851/390/333 降到 100**，并出现 `omitted["over_cap"]=1`（某条消息的后续文本 part 整段落在上限之外）；重启**之前**的历史行仍是 `input_max_chars` 缺省（不回填）。核对方式：只读打开 `data/aigw-local.db` 逐行解析 `request_json`（未打印任何用户正文） |
+| 配置/数据变更 | **无**。gw-c 的 `recording:` 段只有 `record_input: user` 与 `retention_days: 30`，没有 `input_max_chars` ⇒ 走默认 100；gw-b 连 `recording:` 段都没有 ⇒ 全默认，且 41 把 Key 全是 `inherit` ⇒ 解析为 `user` 档 |
+| 未做（待人工） | ① `dshgw-verify` 重启：会重启**所有**租户 worker（含发起部署的会话），本次只换盘上二进制；② gw-b 已经 ~5 天没有非控制台流量（最近 12 行是控制台问答，服务端按设计强制 `off`；最近一条 `mode=user` 的行在 2026-09-18），所以 `input_max_chars` 要等它下一次 user 档请求才会出现在它的日志里；③ 真浏览器 `make ui-check`（含 M81 新增的截断提示断言）与 CSP 修复的线上复验（`:8088/admin/ui/#/org` 组织树缩进 22px、`wide` 弹窗 900px）仍需在宿主浏览器里做一次 |
+| 既有噪声（非本次引入） | gw-c 的 `settlement could not be written; falling back to disk — store: begin settlement tx: context deadline exceeded`：12:07–12:28 有 4 条（**早于**本次重启），重启后 14:11:34 又 1 条（启动期写连接争用），当天共 **15 条**；全部走 `billing fallback` 落盘并由 `billing fallback replay finished scanned=1 replayed=1 failed=0`（14:12:13）自动补回，**没有丢账**（当天 replay 成功 38 次）——签名与 4.1.1 运行期一致，与 M78/M81 无关。另外 main 上还有 M79 遗留的 `go vet` copylocks（`internal/dshgw/config/sandboxview_test.go:76/92/105`），本次未动 |
 
 
 ## M82 `user` 档只留最后一条合格 user 消息的纯文本
@@ -6022,7 +6022,7 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
       单独复跑两次均通过 —— 是负载敏感，不是本次改动。）
 - [x] **提交**：单一 M82 提交（提交信息引用设计文档路径），随后合并到 `main`。
 
-### v4.3.1 发布记录（M82：`user` 档只留最后一条合格 user 消息的纯文本，2026-09-23，部署到 rag-server 与 gptjp）
+### v4.3.1 发布记录（M82：`user` 档只留最后一条合格 user 消息的纯文本，2026-09-23，部署到 gw-c 与 gw-b）
 
 > 需求原话（连续三轮）：「>=100个字符的user消息就不用保持了」/「只保持排在最后面的<=100字符的user消息」/
 > 「之保持文本内容，不需要Json格式」/「如果后台设置保留全部时，不受这个限制」。
@@ -6035,15 +6035,15 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 |---|---|
 | 版本 | **v4.3.1**（`VERSION` 4.3.0 → 4.3.1；release 提交 `91075fb`，tag `v4.3.1`；**未推 `origin`**，origin/main 仍停在 `a57e2a3`） |
 | 构建物 | `bin/aigw` **4.3.1 / `91075fb`**，23,528,039 B，sha256 `84282965a427e8e0b7d8c47bd28c9e1dd499aad5f93003c7b85326830ccf71c6`（console minified：44 文件 728861→408527 B，gzip 39 文件 406166→161824 B） |
-| 部署范围 | ① **rag-server**（`192.168.190.86`，`systemctl --user`）：`aigw-local` 4.3.0/`dccf435` → **4.3.1/`91075fb`**；② **gptjp**（`47.91.16.118`，root，`aigw.service`，`/opt/aigw`）：4.3.0/`dccf435` → **4.3.1/`91075fb`**。本次**不动 dshgw**（本改动只在 aigw 侧：`internal/responses` + 读侧），`dshgw-verify` 的待重启事项仍单列 |
-| 回滚点 | rag-server：`bin/aigw.prev-4.3.0-dccf435`（sha `c78074ea…`）；gptjp：`/opt/aigw/aigw.prev-4.3.0-dccf435`（同 sha）。回滚 = `cp -p` 回该文件 + 重启对应单元，`/version` 随之后退到 `4.3.0/dccf435` |
+| 部署范围 | ① **gw-c**（`192.0.2.101`，`systemctl --user`）：`aigw-local` 4.3.0/`dccf435` → **4.3.1/`91075fb`**；② **gw-b**（`198.51.100.101`，root，`aigw.service`，`/opt/aigw`）：4.3.0/`dccf435` → **4.3.1/`91075fb`**。本次**不动 dshgw**（本改动只在 aigw 侧：`internal/responses` + 读侧），`dshgw-verify` 的待重启事项仍单列 |
+| 回滚点 | gw-c：`bin/aigw.prev-4.3.0-dccf435`（sha `c78074ea…`）；gw-b：`/opt/aigw/aigw.prev-4.3.0-dccf435`（同 sha）。回滚 = `cp -p` 回该文件 + 重启对应单元，`/version` 随之后退到 `4.3.0/dccf435` |
 | 部署方式 | 与 v4.3.0 相同：`.new` 上传 → 双向核对 sha256（`84282965…`）→ 远端 `-version` 自证 → 拍回滚点 → `install` 换入 → 重启 → 门禁（`/version`、`healthz`、`readyz`、控制台资源）。两台 `config.yaml`/`data/` 未动 |
 | schema | **无迁移**（M82 只用既有 TEXT 列）：两台仍是 **27** |
-| 验证（两台） | `/version` 均为 `{"revision":"91075fb","version":"4.3.1"}`（gptjp 另在 `https://gpt.lagenio.xyz/aigw/version` 与 `https://gpt.tirisen.hk/aigw/version` 三处一致）；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200；启动日志 `aigw starting version=4.3.1 revision=91075fb`（rag-server 14:55:17、gptjp 14:57:37）。gptjp 重启后 `level=ERROR` 0 条；rag-server 1 条，即下述既有 settlement 噪声 |
-| 验证（M82 真机行级证据，rag-server） | 升级后新写 14 行（只读解析、**未打印任何用户正文**）：**12 行是纯文本、0 行含结构痕迹**（不含 `{`/`"input"`/`omitted`/`max_chars`）、最长 **18 字符**（阈值 100 要求 <100），**2 行为空**（末条超长或无 user 消息）。全库计数：M81 期间的 406 行仍带 `input_truncated`、更早的 40810 行仍是 JSON 文档 —— **一行都没回填**；新形状的纯文本行 26 行。行内数值相等（「正文恰为最后一条 user 消息」）由 `internal/httpapi` 的端到端测试钉住：`row.RequestJSON == question` |
-| 配置/数据变更 | **无**：rag-server 的 `recording:` 段仍只有 `record_input: user` + `retention_days: 30`（未设 `input_max_chars` ⇒ 默认 100）；gptjp 无 `recording:` 段 ⇒ 全默认。要「保留全部」无需改配置：在该 Key 上切 `full` 即可 |
+| 验证（两台） | `/version` 均为 `{"revision":"91075fb","version":"4.3.1"}`（gw-b 另在 `https://gw-b.example.com/aigw/version` 与 `https://gw-b.example.net/aigw/version` 三处一致）；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200；启动日志 `aigw starting version=4.3.1 revision=91075fb`（gw-c 14:55:17、gw-b 14:57:37）。gw-b 重启后 `level=ERROR` 0 条；gw-c 1 条，即下述既有 settlement 噪声 |
+| 验证（M82 真机行级证据，gw-c） | 升级后新写 14 行（只读解析、**未打印任何用户正文**）：**12 行是纯文本、0 行含结构痕迹**（不含 `{`/`"input"`/`omitted`/`max_chars`）、最长 **18 字符**（阈值 100 要求 <100），**2 行为空**（末条超长或无 user 消息）。全库计数：M81 期间的 406 行仍带 `input_truncated`、更早的 40810 行仍是 JSON 文档 —— **一行都没回填**；新形状的纯文本行 26 行。行内数值相等（「正文恰为最后一条 user 消息」）由 `internal/httpapi` 的端到端测试钉住：`row.RequestJSON == question` |
+| 配置/数据变更 | **无**：gw-c 的 `recording:` 段仍只有 `record_input: user` + `retention_days: 30`（未设 `input_max_chars` ⇒ 默认 100）；gw-b 无 `recording:` 段 ⇒ 全默认。要「保留全部」无需改配置：在该 Key 上切 `full` 即可 |
 | 未做（待人工） | ① 真浏览器 `make ui-check`（M82 新增三条 `#requests` 回放断言：未保留 / 未录制 / 历史截断行）与压缩镜像走查；② 线上 MCP `get_request` 冒烟：本会话没有可用的 MCP 令牌（令牌只存哈希），两种形状（纯文本行 → string、`full`/历史行 → object）由 `internal/mcpsrv` 测试覆盖；③ `dshgw-verify` 重启（盘上 4.3.0，进程仍 4.1.1）；④ `origin` 未推 |
-| 既有噪声（非本次引入） | rag-server 升级后仍有 1 条 `settlement could not be written; falling back to disk — store: begin settlement tx: context deadline exceeded`（启动期写连接争用，当天累计 15+ 条），全部由 `billing fallback replay … failed=0` 自动补回，无丢账；信号与 v4.1.1/v4.3.0 期间完全一致 |
+| 既有噪声（非本次引入） | gw-c 升级后仍有 1 条 `settlement could not be written; falling back to disk — store: begin settlement tx: context deadline exceeded`（启动期写连接争用，当天累计 15+ 条），全部由 `billing fallback replay … failed=0` 自动补回，无丢账；信号与 v4.1.1/v4.3.0 期间完全一致 |
 
 ## M82.1 修订：往回找「最新一条有文本且不超过上限」的 user 消息（v4.3.2，2026-09-23）
 > 需求原话：「现在是不是保持最后一条不为空的<=100的user消息？」——随后确认：跳过空的、恰好 100 保留、
@@ -6061,9 +6061,9 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
       `internal/httpapi`（v1 注释、字段说明）、`internal/mcpsrv` 说明同步。
 - [x] **验收**：`go vet ./...`（除 M79 遗留 copylocks）无输出、`go test -count=1 ./...` 全绿、
       `make ui-base` 全绿、`make build` 成功。
-- [x] **发版**：v4.3.2（patch），部署 rag-server + gptjp，记录见本文件「v4.3.2 发布记录」。
+- [x] **发版**：v4.3.2（patch），部署 gw-c + gw-b，记录见本文件「v4.3.2 发布记录」。
 
-### v4.3.2 发布记录（M82.1：往回找「最新一条有文本且不超过上限」的 user 消息，2026-09-23，部署到 rag-server 与 gptjp）
+### v4.3.2 发布记录（M82.1：往回找「最新一条有文本且不超过上限」的 user 消息，2026-09-23，部署到 gw-c 与 gw-b）
 
 > 需求原话：「现在是不是保持最后一条不为空的<=100的user消息？」——随后三轮确认：跳过空的、
 > 恰好 100 保留（`<=`）、末条非空但超长时**继续往前找**。档位 **patch**：把 v4.3.1 刚上的输入口径
@@ -6074,21 +6074,21 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 |---|---|
 | 版本 | **v4.3.2**（`VERSION` 4.3.1 → 4.3.2；release 提交 `0b9b629`，tag `v4.3.2`；**未推 `origin`**） |
 | 构建物 | `bin/aigw` **4.3.2 / `0b9b629`**，23,528,519 B，sha256 `65a4c7d6dac3756bb91c9fa771db9fa569fcacff78a8c917a6f648be0bb02981`（console minified：44 文件 728868→408518 B，gzip 39 文件 406157→161820 B） |
-| 部署范围 | rag-server `aigw-local` 与 gptjp `aigw.service`：4.3.1/`91075fb` → **4.3.2/`0b9b629`**；本次不动 dshgw |
-| 回滚点 | rag-server：`bin/aigw.prev-4.3.1-91075fb`；gptjp：`/opt/aigw/aigw.prev-4.3.1-91075fb`（两台 sha 均 `84282965a427e8e0b7d8c47bd28c9e1dd499aad5f93003c7b85326830ccf71c6`）。回滚 = `cp -p` 回该文件 + 重启对应单元 |
+| 部署范围 | gw-c `aigw-local` 与 gw-b `aigw.service`：4.3.1/`91075fb` → **4.3.2/`0b9b629`**；本次不动 dshgw |
+| 回滚点 | gw-c：`bin/aigw.prev-4.3.1-91075fb`；gw-b：`/opt/aigw/aigw.prev-4.3.1-91075fb`（两台 sha 均 `84282965a427e8e0b7d8c47bd28c9e1dd499aad5f93003c7b85326830ccf71c6`）。回滚 = `cp -p` 回该文件 + 重启对应单元 |
 | schema | **无迁移**（仍 27） |
-| 验证（两台） | `/version` 均为 `{"revision":"0b9b629","version":"4.3.2"}`（gptjp 另在 `https://gpt.lagenio.xyz/aigw/version` 一致）；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200（gptjp 重启后 `level=ERROR` 0 条） |
-| 验证（真机行级，rag-server） | 升级后最近 **16 行全部是纯文本**、**0 行含结构痕迹**、最长 **67 字符**（阈值 100 ⇒ 必须 ≤100）、**0 行为空**。对比 v4.3.1 时的同类抽样（14 行里 2 行为空）：新口径下末条为空/超长会**回退取前一条**，所以整行为空的情形显著减少——16 行样本只能作旁证，规则本身由测试钉死（恰好 100 保留 / 101 跳过并回退 / 五种空消息形态被跳过 / 一条都不合格才为空）。 |
+| 验证（两台） | `/version` 均为 `{"revision":"0b9b629","version":"4.3.2"}`（gw-b 另在 `https://gw-b.example.com/aigw/version` 一致）；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200（gw-b 重启后 `level=ERROR` 0 条） |
+| 验证（真机行级，gw-c） | 升级后最近 **16 行全部是纯文本**、**0 行含结构痕迹**、最长 **67 字符**（阈值 100 ⇒ 必须 ≤100）、**0 行为空**。对比 v4.3.1 时的同类抽样（14 行里 2 行为空）：新口径下末条为空/超长会**回退取前一条**，所以整行为空的情形显著减少——16 行样本只能作旁证，规则本身由测试钉死（恰好 100 保留 / 101 跳过并回退 / 五种空消息形态被跳过 / 一条都不合格才为空）。 |
 | 配置/数据变更 | 无（两台 `config.yaml` 未动；阈值仍是默认 100） |
-| 未做（待人工） | ① 真浏览器 `make ui-check`（「未保留」文案改成「没有不超过上限的用户消息」）；② 线上 MCP 冒烟无令牌；③ `dshgw-verify` 重启；④ `origin` 未推。gptjp 仍无 `user` 档流量（近 6 天只有控制台问答 = 强制 off），口径要在它下一次非控制台请求里才可见 |
+| 未做（待人工） | ① 真浏览器 `make ui-check`（「未保留」文案改成「没有不超过上限的用户消息」）；② 线上 MCP 冒烟无令牌；③ `dshgw-verify` 重启；④ `origin` 未推。gw-b 仍无 `user` 档流量（近 6 天只有控制台问答 = 强制 off），口径要在它下一次非控制台请求里才可见 |
 | 推送 | 2026-09-23：`main` 由 `a57e2a3` 推进到 `3684789`，并推上 tag **v4.2.0 / v4.3.0 / v4.3.1 / v4.3.2**（`git@github.com:funnywwh/ai-gateway.git`）。此前 v4.2.0 起的各条发布记录都写着「未推 origin」，本次一并补齐；里程碑分支（m78/m79/m81/m82/m82.1）未推，它们都已合并进 main |
-| 已知噪声 | rag-server 的 settlement 超时 + fallback 自动补回（与 v4.3.0/v4.3.1 记录同一条，非本次引入）；`internal/runtime` 的两条负载敏感计时断言在整仓测试并发跑时会偶发失败（单独复跑 3/3 通过，与本改动无关） |
+| 已知噪声 | gw-c 的 settlement 超时 + fallback 自动补回（与 v4.3.0/v4.3.1 记录同一条，非本次引入）；`internal/runtime` 的两条负载敏感计时断言在整仓测试并发跑时会偶发失败（单独复跑 3/3 通过，与本改动无关） |
 
 ## M83 输入档只留「人说的话」（样板按标记跳过）（2026-09-23）
-> 需求原话：「dsh 发送的请求，一直是空的，你上去看看日志 rag-server 8088」。设计文档
+> 需求原话：「dsh 发送的请求，一直是空的，你上去看看日志 gw-c 8088」。设计文档
 > `docs/design/m83-user-input-human-only.md`。
 
-- [x] **现场与根因**：key 127（`dshgw-dsh-chengjinfeng-8e59`）14:00 前 352 行 0 空 → 阈值生效后 71 行
+- [x] **现场与根因**：key 127（`dshgw-dsh-acct-d-8e59`）14:00 前 352 行 0 空 → 阈值生效后 71 行
       **71 空**；对照 key 24（提问 2–44 字符）376 行仅 5 空。读它的会话文件（只暴露长度与开头标记）：
       人工提问 117/243/360/521 字符、runtime 快照 542/914、系统提示类 2167+477… 、回放粘贴 58+9855…
       —— **没有一条 ≤100**，所以「只留 ≤100 字符的最新一条」在它那里永远留不下东西。日志侧无任何相关告警，
@@ -6107,11 +6107,11 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
       `internal/httpapi`（注释与字段说明）、`internal/mcpsrv` 说明同步；M82 设计文档加 M83 取代注记。
 - [x] **验收**：`go vet ./...`（除 M79 遗留 copylocks）无输出、`go test -count=1 ./...` 全绿、
       `make ui-base` 全绿、`make build` 成功。
-- [x] **发版**：v4.3.3（patch），部署 rag-server + gptjp，记录见本文件「v4.3.3 发布记录」。
+- [x] **发版**：v4.3.3（patch），部署 gw-c + gw-b，记录见本文件「v4.3.3 发布记录」。
 
-### v4.3.3 发布记录（M83：输入档只留「人说的话」，2026-09-23，部署到 rag-server 与 gptjp）
+### v4.3.3 发布记录（M83：输入档只留「人说的话」，2026-09-23，部署到 gw-c 与 gw-b）
 
-> 需求原话：「dsh 发送的请求，一直是空的，你上去看看日志 rag-server 8088」。档位 **patch**，
+> 需求原话：「dsh 发送的请求，一直是空的，你上去看看日志 gw-c 8088」。档位 **patch**，
 > 但含两处**行为变更**：① 判定依据从「长度 ≤N」换成**样板标记**（真实提问常常比短的样板长、比长的样板短）；
 > ② `recording.input_max_chars` 默认 **100 → 2000**（角色从判定器变成防呆上限）。正文形状未变（纯文本），
 > 所以 MCP 的 string/object 判定、详情接口的 `record_input_mode`、`/stats` 都没动。
@@ -6120,39 +6120,39 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 |---|---|
 | 版本 | **v4.3.3**（`VERSION` 4.3.2 → 4.3.3；release 提交 `438daee`，tag `v4.3.3`） |
 | 构建物 | `bin/aigw` **4.3.3 / `438daee`**，23,529,027 B，sha256 `4017c2bf154d27eacbebcbaf1a175279ba534df54676bb0b7ffb3f12468eac23`（console minified：44 文件 728868→408515 B，gzip 39 文件 406154→161825 B） |
-| 部署范围 | rag-server `aigw-local` 与 gptjp `aigw.service`：4.3.2/`0b9b629` → **4.3.3/`438daee`**；本次不动 dshgw |
-| 回滚点 | rag-server：`bin/aigw.prev-4.3.2-0b9b629`；gptjp：`/opt/aigw/aigw.prev-4.3.2-0b9b629`（两台 sha 均 `65a4c7d6dac3756bb91c9fa771db9fa569fcacff78a8c917a6f648be0bb02981`） |
+| 部署范围 | gw-c `aigw-local` 与 gw-b `aigw.service`：4.3.2/`0b9b629` → **4.3.3/`438daee`**；本次不动 dshgw |
+| 回滚点 | gw-c：`bin/aigw.prev-4.3.2-0b9b629`；gw-b：`/opt/aigw/aigw.prev-4.3.2-0b9b629`（两台 sha 均 `65a4c7d6dac3756bb91c9fa771db9fa569fcacff78a8c917a6f648be0bb02981`） |
 | schema | **无迁移**（仍 27） |
-| 验证（两台） | `/version` 均为 `{"revision":"438daee","version":"4.3.3"}`（gptjp 另在 `https://gpt.lagenio.xyz/aigw/version` 一致）；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200；gptjp 重启后 `level=ERROR` 0 条 |
-| 验证（现场回归，rag-server） | **升级前**：key 127 阈值生效后 71 行 **71 空**。**升级后**：该租户最近 **12 行全部非空**，长度 303 / 117 字符，且逐行检查**不以任何样板标记开头** ⇒ 落库的是「人说的话」。检查脚本只读长度与开头标记，**未打印任何用户正文** |
+| 验证（两台） | `/version` 均为 `{"revision":"438daee","version":"4.3.3"}`（gw-b 另在 `https://gw-b.example.com/aigw/version` 一致）；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200；gw-b 重启后 `level=ERROR` 0 条 |
+| 验证（现场回归，gw-c） | **升级前**：key 127 阈值生效后 71 行 **71 空**。**升级后**：该租户最近 **12 行全部非空**，长度 303 / 117 字符，且逐行检查**不以任何样板标记开头** ⇒ 落库的是「人说的话」。检查脚本只读长度与开头标记，**未打印任何用户正文** |
 | 配置/数据变更 | 无（两台 `config.yaml` 未动；`input_max_chars` 两台都没显式设过，所以生效的就是新默认 2000） |
-| 未做（待人工） | ① 真浏览器 `make ui-check`（「未保留」文案已改成「只有样板或超长用户消息」）；② 线上 MCP 冒烟无令牌（两种形状由 `internal/mcpsrv` 测试覆盖）；③ `dshgw-verify` 重启（盘上 4.3.0、进程仍 4.1.1）；④ gptjp 仍无 `user` 档流量 |
+| 未做（待人工） | ① 真浏览器 `make ui-check`（「未保留」文案已改成「只有样板或超长用户消息」）；② 线上 MCP 冒烟无令牌（两种形状由 `internal/mcpsrv` 测试覆盖）；③ `dshgw-verify` 重启（盘上 4.3.0、进程仍 4.1.1）；④ gw-b 仍无 `user` 档流量 |
 | 已知噪声 | `internal/runtime` 与 `pkg/pluginapi` 各有一条负载敏感的计时断言在整仓测试并发跑时会偶发失败（各自单独复跑 2–3 次通过，与本改动无关）；M79 遗留的 `go vet` copylocks 未动 |
 
-## gptjp aigw 整库重建：从同机 sub2api 全量重导（2026-09-23）
+## gw-b aigw 整库重建：从同机 sub2api 全量重导（2026-09-23）
 
-> 需求原话：「帮我清空gptjp 的 aigw实例的数据库,从同机上的sub2api,重新导入所有账户,key,model,供应商azure」，
-> 中途更正标签口径：「添加『电商』、『智天成』、『E26Q』三个标签，智天成 只走deepseek供应商，『电商』『E26Q』走 azure」。
+> 需求原话：「帮我清空gw-b 的 aigw实例的数据库,从同机上的sub2api,重新导入所有账户,key,model,供应商azure」，
+> 中途更正标签口径：「添加『客户组二』、『客户组一』、『K7QX』三个标签，客户组一 只走deepseek供应商，『客户组二』『K7QX』走 azure」。
 > 运行手册见 `docs/sub2api-migration.md` §9。
 
 | 项 | 值 |
 |---|---|
-| 目标实例 | gptjp（`47.91.16.118`，root，`/opt/aigw`，`aigw.service`，`:8088`，`base_path: /aigw`）。执行时线上已是 **4.3.3 / `438daee`**（16:26 由 M83 发版部署，本次不动二进制），schema 27 |
+| 目标实例 | gw-b（`198.51.100.101`，root，`/opt/aigw`，`aigw.service`，`:8088`，`base_path: /aigw`）。执行时线上已是 **4.3.3 / `438daee`**（16:26 由 M83 发版部署，本次不动二进制），schema 27 |
 | 工具 | 新增 `scripts/sub2api-reimport.py`（1,772 行；sha256 `9f19e971a8bd5652750c479cc3302aeb24a2884a4b9f992d8a3d2c9ba3467a4e`），部署 `/opt/aigw/sub2api_reimport.py`（0700，与仓库副本逐字节一致）；子命令 `inventory/snapshot/wipe/providers/models/tags/accounts/selftest/verify/report/repair-prefix` |
-| 源数据集（执行时） | 存活用户 **110**、其活跃 key **128** 把（另有 7 把已删/非 active 排除）；**7** 个未软删的上游账号（1 LibbyGPT、4 funnywwh、5 antigravity、11 azure #2 已被源库软删，故不建） |
-| 人群 → 标签 | `E26Q`＝有活跃 key 属分组 20（2 人/9 把）→ `[azure]`；`智天成`＝`notes='智天成'`（20 人/26 把）→ `[deepseek]`；其余 `电商`（88 人/93 把）→ `[azure]`；标签写在账户级 |
+| 源数据集（执行时） | 存活用户 **110**、其活跃 key **128** 把（另有 7 把已删/非 active 排除）；**7** 个未软删的上游账号（1 ProviderA、4 owner、5 ProviderB、11 azure #2 已被源库软删，故不建） |
+| 人群 → 标签 | `K7QX`＝有活跃 key 属分组 20（2 人/9 把）→ `[azure]`；`客户组一`＝`notes='客户组一'`（20 人/26 把）→ `[deepseek]`；其余 `客户组二`（88 人/93 把）→ `[azure]`；标签写在账户级 |
 | 清库前基线 | 24 账户 / 41 key / 5 供应商 / 19 模型 / 53 上游模型 / 47 路由 / 4 标签；`request_logs` 1977、`usage_records` 1945、`ledger_entries` 998、`mcp_tokens` 2 个 active |
 | 回滚点 | `/opt/aigw/data/aigw.db.pre-rebuild-20260923-171836`（在线 sqlite3.backup，0600，quick_check=ok）、`…-171844`（换库时移走的现库）、`/opt/aigw/config.yaml.pre-rebuild-20260923-171836`（0600）；`data/plugin-state/` **全程未动** |
-| 清库 | `config.yaml` 追加 `bootstrap.admin`（口令沿用 `.admin-password`；gptjp 原本没有 `bootstrap` 段）→ 停服 → 移走 `aigw.db` → 起服。断言：`accounts/api_keys/providers/models/provider_models/routes/tags = 0`、`admin_users=1`、schema=27、`/version` 4.3.3 |
-| 重建结果 | **7 供应商**（3×`plugin:provider-codex`、`codex-zhuyecheng`、`deepseek`、`deepseek-dianshang`、`azure`）/ **22 模型** / 58 上游模型 / 61 路由 / **3 标签** / **111 账户**（110 + 自检）/ **132 key**（128 活跃 + 3 把自检停用 + 1 把误签停用） |
-| 供应商口径 | 供应商名只允许 `[A-Za-z0-9._-]`，故「deepseek电商」落名 `deepseek-dianshang`；`antigravity` 无对应 kind 不建；**不调用** `set_token`，不为任何 OAuth 凭据做主动刷新；codex 供应商**建而不接流量**（无标签授权）⇒ 不会把 sub2api 正在用的 ChatGPT `refresh_token` 抢掉 |
-| 前缀冲突 | `sk-f69aeca55` 同属源 key `#24`(E26Q) 与 `#51`(郑晓婷)。按「保留实例原本持有的那把」保留 `#51`（郑晓婷客户端不受影响）；`#24` 不导入；E26Q 用它 9/14 拿到的替换密钥（`E26Q-reissue-key.txt`，0600）**原样重导**（aigw key #129），客户端零改动。**过程留痕**：换库后目标库为空，脚本按「最近使用」误选了 `#24`，用 `repair-prefix --keep-source-key 51 --disable-key 128` 纠偏；`plan_reissues` 已改为优先看 `rebuild-export-*.json` 的换库前快照并注明成因 |
+| 清库 | `config.yaml` 追加 `bootstrap.admin`（口令沿用 `.admin-password`；gw-b 原本没有 `bootstrap` 段）→ 停服 → 移走 `aigw.db` → 起服。断言：`accounts/api_keys/providers/models/provider_models/routes/tags = 0`、`admin_users=1`、schema=27、`/version` 4.3.3 |
+| 重建结果 | **7 供应商**（3×`plugin:provider-codex`、`codex-zhangsan`、`deepseek`、`deepseek-kehuzuer`、`azure`）/ **22 模型** / 58 上游模型 / 61 路由 / **3 标签** / **111 账户**（110 + 自检）/ **132 key**（128 活跃 + 3 把自检停用 + 1 把误签停用） |
+| 供应商口径 | 供应商名只允许 `[A-Za-z0-9._-]`，故「deepseek客户组二」落名 `deepseek-kehuzuer`；`ProviderB` 无对应 kind 不建；**不调用** `set_token`，不为任何 OAuth 凭据做主动刷新；codex 供应商**建而不接流量**（无标签授权）⇒ 不会把 sub2api 正在用的 ChatGPT `refresh_token` 抢掉 |
+| 前缀冲突 | `sk-000000000` 同属源 key `#24`(K7QX) 与 `#51`(孙倩)。按「保留实例原本持有的那把」保留 `#51`（孙倩客户端不受影响）；`#24` 不导入；K7QX 用它 9/14 拿到的替换密钥（`K7QX-reissue-key.txt`，0600）**原样重导**（aigw key #129），客户端零改动。**过程留痕**：换库后目标库为空，脚本按「最近使用」误选了 `#24`，用 `repair-prefix --keep-source-key 51 --disable-key 128` 纠偏；`plan_reissues` 已改为优先看 `rebuild-export-*.json` 的换库前快照并注明成因 |
 | azure 可用性（核心结论） | 该资源**没有部署目录接口**（`models/refresh` 返空、`GET /models` 是 Foundry 市场目录 430 条、`/openai/deployments` 已下线）⇒ 只能靠真实请求判定。**可用**：`gpt-5.6-sol`、`gpt-5.6-luna`、`gpt-5.6-terra`、`gpt-4o`；`gpt-image-1.5`/`gpt-image-2` 非 404 而是 400（探测方式不适用）保持开启。**部署不存在**（`upstream_404`，路由已停用、上游模型行已删）：`gpt-5.5`、`gpt-6-astra`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-image-1`、`deepseek-v4-flash`、`deepseek-v4-pro` |
 | 定价 | `scripts/official-pricing.sh --apply`（GW_BASE=`/aigw`）：写入 **49** 行并逐行读回核对、`/pricing/simulate` 7 个用例全过、`/pricing/targets` 无缺费率维度。该脚本的价格表原先没有裸 `gpt-4o` 这个 upstream id（缺它会整批中止），本次补上其官方价条目（$2.50 输入 / $1.25 缓存命中 / $10 输出，每百万 tokens） |
-| 验证（结构与授权） | `verify` 全绿：128 把逐把比 prefix/hash、状态 active、`created_by` 是导入标记、账户挂对、**每把恰好一个生效标签**、标签集合=3 个、grants 指向的供应商存在且启用；分桶 智天成=26 / 电商=93 / E26Q=8（#24 未导入，故比源少 1） |
-| 验证（功能，真实请求） | `selftest`：智天成 → `deepseek-flash` **200**、电商 → `gpt-5.6-sol` **200**、E26Q → `gpt-5.6-sol` **200**；azure 逐模型真实探测 12 个（结论见上）；负向「把 12 字符前缀当 bearer」3/3 **401**；`/version` 4.3.3、`healthz`/`readyz`/`admin/ui/`/`admin/ui/js/brand.js` 全 200 |
-| 保密 | 全部打印与异常过 `redact()`；凭据只经 0600 临时文件（写完即碎）；`journalctl -u aigw` 与全部报告 JSON 扫 `sk-[A-Za-z0-9_-]{16,}` **命中 0**；明文密钥从未出现在终端、文件（除 9/14 那把 E26Q 替换密钥的存量文件）或本记录里 |
-| 未做（待人工/待你决定） | ① **MCP 令牌**要在控制台重新签发并更新客户端（明文只显示一次）；② **模型名口径变化**：智天成用户现在只能走 `deepseek-flash`/`deepseek-v4-flash`/`deepseek-v4-pro`/`deepseek-v4.1-flash`（他们近 30 天 99% 的请求是 `gpt-5.6-sol`/`gpt-6-astra`，这些名字会 403），需通知；③ **电商高频模型缺部署**：`gpt-5.5`（12,158 次/30d）与 `gpt-6-astra`（3,152 次）在这台 azure 上服务不了 —— 要么在 azure 补部署，要么把它们也授权给别的供应商 |
+| 验证（结构与授权） | `verify` 全绿：128 把逐把比 prefix/hash、状态 active、`created_by` 是导入标记、账户挂对、**每把恰好一个生效标签**、标签集合=3 个、grants 指向的供应商存在且启用；分桶 客户组一=26 / 客户组二=93 / K7QX=8（#24 未导入，故比源少 1） |
+| 验证（功能，真实请求） | `selftest`：客户组一 → `deepseek-flash` **200**、客户组二 → `gpt-5.6-sol` **200**、K7QX → `gpt-5.6-sol` **200**；azure 逐模型真实探测 12 个（结论见上）；负向「把 12 字符前缀当 bearer」3/3 **401**；`/version` 4.3.3、`healthz`/`readyz`/`admin/ui/`/`admin/ui/js/brand.js` 全 200 |
+| 保密 | 全部打印与异常过 `redact()`；凭据只经 0600 临时文件（写完即碎）；`journalctl -u aigw` 与全部报告 JSON 扫 `sk-[A-Za-z0-9_-]{16,}` **命中 0**；明文密钥从未出现在终端、文件（除 9/14 那把 K7QX 替换密钥的存量文件）或本记录里 |
+| 未做（待人工/待你决定） | ① **MCP 令牌**要在控制台重新签发并更新客户端（明文只显示一次）；② **模型名口径变化**：客户组一用户现在只能走 `deepseek-flash`/`deepseek-v4-flash`/`deepseek-v4-pro`/`deepseek-v4.1-flash`（他们近 30 天 99% 的请求是 `gpt-5.6-sol`/`gpt-6-astra`，这些名字会 403），需通知；③ **客户组二高频模型缺部署**：`gpt-5.5`（12,158 次/30d）与 `gpt-6-astra`（3,152 次）在这台 azure 上服务不了 —— 要么在 azure 补部署，要么把它们也授权给别的供应商 |
 | 未做（不在本次范围） | 不改 sub2api 任何数据（源 key 照旧可用，双跑）；不改 nginx；不动 `dshgw`；不发版（无 Go 代码改动） |
 
 ### 重建后统一充值：110 个 active 账户各 100 USD（2026-09-23）
@@ -6168,30 +6168,30 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 核对 | 只读 SQLite：`balance_micros=100000000` 的账户 110 个、余额 0 的账户 0 个；唯一的非零偏差是自检账户 `zz-rebuild-selftest` 的 **-215 微美元**（它自己那 2 次真实探测请求的计费，closed 账户，不影响用户） |
 | 含义 | 账户 `billing_mode` 仍是 `postpaid`，正余额就是可用额度：请求按对客价（跟随成本侧官方价）从余额扣减，扣完即 `402 billing_hard_limit_reached`（自检时就复现过这条路径） |
 
-### gptjp：所有 plugin:provider-codex 补 gpt-6-sol / gpt-6-luna 并按官方价计费（2026-09-23）
+### gw-b：所有 plugin:provider-codex 补 gpt-6-sol / gpt-6-luna 并按官方价计费（2026-09-23）
 
-> 需求原话：「pgptjp上的aigw给所有plugin:provider-codex 添加 gpt-6-sol,gpt-6-luna,并使用官方价格」。
-> 「pgptjp」在本环境解析不到（ssh 别名、known_hosts、会话记录、仓库文档四处都没有这个名字），
-> 按用户确认的目标机执行：**gptjp**（本环境唯一可达、且确实有 `plugin:provider-codex` 的实例）。
+> 需求原话：「pgw-b上的aigw给所有plugin:provider-codex 添加 gpt-6-sol,gpt-6-luna,并使用官方价格」。
+> 「pgw-b」在本环境解析不到（ssh 别名、known_hosts、会话记录、仓库文档四处都没有这个名字），
+> 按用户确认的目标机执行：**gw-b**（本环境唯一可达、且确实有 `plugin:provider-codex` 的实例）。
 
 | 项 | 值 |
 |---|---|
-| 目标实例 | gptjp（`47.91.16.118`，`gpt.lagenio.xyz` / `gpt.tirisen.hk`，root，`/opt/aigw`，`aigw.service`，`:8088`，`base_path: /aigw`）。执行时线上 **4.3.3 / `438daee`**（本次不动二进制），schema 27 |
-| 四个 codex 供应商 | `1 lzhichao-lagenio-3-expiry`、`3 lizhichao-wisskys-3-expiry`、`5 liuhui-wisskys-8-expiry`、`7 codex-zhuyecheng`（7 此前 0 行模型、只有 1 条路由） |
-| 官方价（Standard 档，2026-09-23 从 gptjp 抓官方定价页读出） | `gpt-6-sol` **2 / 0.2 / 2.5 / 10**（>272K 长档 4 / 0.4 / 5 / 15）；`gpt-6-luna` **0.1 / 0.01 / 0.125 / 0.5**（长档 0.2 / 0.02 / 0.25 / 0.75），USD/百万 tokens（输入/缓存命中/缓存写入/输出）。同一张表还有 Batch 与 Flex（0.5×）与 Fast mode（2×）档，按现网口径取 **Standard** |
+| 目标实例 | gw-b（`198.51.100.101`，`gw-b.example.com` / `gw-b.example.net`，root，`/opt/aigw`，`aigw.service`，`:8088`，`base_path: /aigw`）。执行时线上 **4.3.3 / `438daee`**（本次不动二进制），schema 27 |
+| 四个 codex 供应商 | `1 lzhichao-lagenio-3-expiry`、`3 lilei-corp-a-3-expiry`、`5 wangwu-corp-a-8-expiry`、`7 codex-zhangsan`（7 此前 0 行模型、只有 1 条路由） |
+| 官方价（Standard 档，2026-09-23 从 gw-b 抓官方定价页读出） | `gpt-6-sol` **2 / 0.2 / 2.5 / 10**（>272K 长档 4 / 0.4 / 5 / 15）；`gpt-6-luna` **0.1 / 0.01 / 0.125 / 0.5**（长档 0.2 / 0.02 / 0.25 / 0.75），USD/百万 tokens（输入/缓存命中/缓存写入/输出）。同一张表还有 Batch 与 Flex（0.5×）与 Fast mode（2×）档，按现网口径取 **Standard** |
 | 先探测再写（上游可用性） | 直连 `chatgpt.com/backend-api/codex/responses`（`stream:true`、prompt `hi`、用各账号自己的会话）：**4 个账号 × 2 个模型 = 8/8 HTTP 200**。目录端点不可信（这类账号返回 `{"models":[]}`），所以按 `examples/provider-codex/README.md` 的口径真发一次 |
 | 改动（仓库） | `scripts/official-pricing.sh`：价格表加两个模型（带 long-context 规则，并进 `LONG` 自检）、文件头补官方价两行与档位说明、**新增 `--plan-out FILE`**（导出的就是那张表的原文，杜绝第二处手抄价）、顺手修一处部署形态 bug（脚本拷到部署根下时 `ROOT` 会算成 `/opt`，读不到 `config.yaml`）。新增 `scripts/codex-add-models.py`（默认干跑；按 kind 找供应商 → 目录项 → 供应商模型行 → config.models → 路由，`--apply` 后逐项读回核对；下一节改名为 `scripts/add-provider-models.py`） |
 | 写入（实例） | **8 行 `provider_models`**（id 304–311，`public==upstream`、enabled、capabilities `{stream,tools,reasoning}`、**建行即带官方价**，不存在「有行无价」窗口）+ **2 个对客模型目录项**（id 23/24）+ **8 条路由**（id 281–288，prio/weight 100）+ 4 个供应商的 `config.models` 各追加 2 条（提交整份 config ⇒ 插件进程被停、下次请求懒启动） |
 | 计数变化 | 模型 22→**24**、上游模型 58→**66**、路由 66→**74**、成本侧定价目标 58→**66**（解析失败 0、`missing_rates` 无） |
 | 定价核对 | `official-pricing.sh --apply`：全 **57** 行逐行读回与计划一致 + 体检 0 解析失败；`/pricing/simulate` **9/9 与官方价逐位相等**：sol 标准档 200K+1M=**$10.40**、长档 300K+1M=**$16.20**、边界 272000 走标准档（$0.544）/272001 走长档；luna 标准 $0.52、长档 $0.81、边界 272000=$0.0272、缓存命中档 $0.502（标准）/ $0.006（长档） |
-| 路由核对 | `router/explain`：8 个「模型 × codex 供应商」组合**各有 1 个候选**；`azure` / `deepseek` / `deepseek-dianshang` 对新模型都是 **0 候选**（没被误授权到别的供应商） |
-| 端到端（真实请求） | 临时 key（账户 1，grants=4 个 codex 供应商）→ `GET /v1/models` 含两模型（19 个）→ `POST /v1/responses` 流式两模型均 **200 + `response.completed`**（回答「1+1=2。」）；计费 `cost_micros`：sol **130**（= 15 输入×2 + 10 输出×10，与官方价逐位相等）、luna **7**（= 15×0.1 + 10×0.5 = 6.5，引擎进位到整微美元）；`charge_micros == cost_micros`（默认加价 1.0×）；两条请求分别落在 `codex-zhuyecheng`(route 281) 与 `lizhichao-wisskys-3-expiry`(route 286)。用完把 key **停用**（`PATCH /admin/api/v1/keys/156`；key 没有 DELETE 接口） |
+| 路由核对 | `router/explain`：8 个「模型 × codex 供应商」组合**各有 1 个候选**；`azure` / `deepseek` / `deepseek-kehuzuer` 对新模型都是 **0 候选**（没被误授权到别的供应商） |
+| 端到端（真实请求） | 临时 key（账户 1，grants=4 个 codex 供应商）→ `GET /v1/models` 含两模型（19 个）→ `POST /v1/responses` 流式两模型均 **200 + `response.completed`**（回答「1+1=2。」）；计费 `cost_micros`：sol **130**（= 15 输入×2 + 10 输出×10，与官方价逐位相等）、luna **7**（= 15×0.1 + 10×0.5 = 6.5，引擎进位到整微美元）；`charge_micros == cost_micros`（默认加价 1.0×）；两条请求分别落在 `codex-zhangsan`(route 281) 与 `lilei-corp-a-3-expiry`(route 286)。用完把 key **停用**（`PATCH /admin/api/v1/keys/156`；key 没有 DELETE 接口） |
 | 供应商健康 | 改完 config 后逐个真实探测 **4/4 ok**（latency 2.0 / 1.9 / 11.2 / 2.2 s），日志有对应 `plugin started`；`/version` 仍 4.3.3、`healthz`/`readyz` 200、`NRestarts=0`、本次窗口 `level=ERROR` **0 条** |
 | 回滚点 | DB 一致快照 `/opt/aigw/data/backups/aigw-20260923-100328.db`（quick_check=ok，1,413,120 B，sha256 `57ad4c25837997e5c0625f44e2e8673de95cf53b200913aef9b47ca4d52c1fe3`，库内 22 模型/58 上游模型/66 路由）；改动前快照 `/opt/aigw/pre-gpt6-20260923-180305/`（providers、models、routes 与 4 个供应商的 config + 模型行）；旧脚本 `/opt/aigw/official-pricing.sh.pre-gpt6-20260923-180305`。**外科回滚**＝删那 8 行与 8 条路由、按快照 PATCH 回 4 个供应商 config |
-| 未做 / 边界 | ① **标签授权没有动**：3 个标签仍只授权 `azure`/`deepseek`，所以客户流量现在**仍然到不了 codex 供应商**（要给某个人群用，得另改标签或 key 的 grants）；② 只补这两个模型，没顺手补齐 `codex-zhuyecheng` 其余 15 个模型、也没删它的孤立行；③ 不动 azure/deepseek、不写售价侧（兜底 `cost_follow`×1.0 已等于官方价）、不发版（无 Go 改动） |
+| 未做 / 边界 | ① **标签授权没有动**：3 个标签仍只授权 `azure`/`deepseek`，所以客户流量现在**仍然到不了 codex 供应商**（要给某个人群用，得另改标签或 key 的 grants）；② 只补这两个模型，没顺手补齐 `codex-zhangsan` 其余 15 个模型、也没删它的孤立行；③ 不动 azure/deepseek、不写售价侧（兜底 `cost_follow`×1.0 已等于官方价）、不发版（无 Go 改动） |
 | 前提与假设 | 长上下文边界沿用仓库既有读数「输入 >272K」（`gte:272001`）：官方页只给 Short/Long 两列的费率（输入/缓存 2×、输出 1.5×），边界文字由客户端渲染、静态页里查不到；`context_window`/`max_output_tokens` 与同供应商现有 codex 行一致保持 **0**；这两个 id 走 ChatGPT 订阅后端属**影子成本**（README 的免责声明不变） |
 
-### gptjp：azure 供应商加 gpt-6-luna（gpt-6-sol 在该资源上没有部署）（2026-09-23）
+### gw-b：azure 供应商加 gpt-6-luna（gpt-6-sol 在该资源上没有部署）（2026-09-23）
 
 > 需求原话：「把新加的模型添加到azure供应商」。执行前发现 azure 上**已经有**这两条路由
 > （id 289/290，10:18:39/10:18:43 UTC 由控制台 admin 建），但**没有对应的供应商模型行**——
@@ -6206,8 +6206,8 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 脚本改名与扩展 | `scripts/codex-add-models.py` → **`scripts/add-provider-models.py`**：`--kind` 选一类供应商（默认仍是 `plugin:provider-codex`）或 `--provider NAME[,NAME]` 选具体供应商；builtin 供应商（azure/deepseek…）没有 `config.models` 那一步，干跑表里显示 `(不适用)` |
 | 定价 | `official-pricing.sh --apply`：全 **58** 行逐行读回与计划一致；成本侧目标 **67** 个、解析失败 0、缺费率维度无；`/pricing/simulate` gpt-6-luna 200K+1M = **$0.52**（官方价） |
 | 路由核对 | `router/explain`：gpt-6-luna @azure = **1 个候选**；gpt-6-sol @azure = 0，原因 `not_mapped` |
-| 端到端（真实请求） | 账户 1（标签 `智天成`+`电商` ⇒ 授权 deepseek+azure，与电商/E26Q 人群同一套授权）的临时 key：`/v1/models`（11 个）**有** gpt-6-luna、**没有** gpt-6-sol；gpt-6-luna **HTTP 200**、attempt 落在 **azure**（route 289），`cost_micros=18`（= 15 输入×0.1 + 32 输出×0.5 = 17.5 进位，与官方价一致）；gpt-6-sol **403 `permission_denied`**（该人群拿不到它）。临时 key 用完停用 |
-| 影响 | 电商/E26Q（azure 授权）人群**现在能用 gpt-6-luna**；**gpt-6-sol 他们仍然用不了**——要么在 azure 资源上建 gpt-6-sol 部署，要么给相应标签加 codex 供应商授权（后者会改变「codex 供应商不接流量」的既定口径，需你决定） |
+| 端到端（真实请求） | 账户 1（标签 `客户组一`+`客户组二` ⇒ 授权 deepseek+azure，与客户组二/K7QX 人群同一套授权）的临时 key：`/v1/models`（11 个）**有** gpt-6-luna、**没有** gpt-6-sol；gpt-6-luna **HTTP 200**、attempt 落在 **azure**（route 289），`cost_micros=18`（= 15 输入×0.1 + 32 输出×0.5 = 17.5 进位，与官方价一致）；gpt-6-sol **403 `permission_denied`**（该人群拿不到它）。临时 key 用完停用 |
+| 影响 | 客户组二/K7QX（azure 授权）人群**现在能用 gpt-6-luna**；**gpt-6-sol 他们仍然用不了**——要么在 azure 资源上建 gpt-6-sol 部署，要么给相应标签加 codex 供应商授权（后者会改变「codex 供应商不接流量」的既定口径，需你决定） |
 | 健康 | 本次窗口 `level=ERROR` **0 条**；`/version` 仍 4.3.3、`NRestarts=0`（只写库，不动二进制与配置） |
 | 回滚 | `DELETE /admin/api/v1/provider-models/369` + `PATCH /admin/api/v1/routes/290 {"enabled":true}` 即回到执行前状态（两条路由本来就在，是控制台建的）；脚本改动见同日的 git 提交 |
 ## M84 图片生成（gpt-image 系列 · Images API · `openai-images` 供应商 · `provider.images` 协议）
@@ -6253,7 +6253,7 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
   | 5 | 参数校验 / 体积 | 缺 model/prompt、`n=11` → 400（带 `param`）；3 MB body 超 2 MiB 上限 → 413 `payload_too_large` |
   | 6 | 文本请求打到图片模型 | 400 `invalid_request`，文案指向 `POST /v1/images/generations` |
   | 7 | 计量 | `usage_records.dimensions_json = {"input":20,"image_input":5,"image_output":4160}`，`usage_source=provider`；失败尝试各写一行（`upstream_400` / `image_model_only`） |
-  | 8 | 计费（gptjp 现有形态的规则集：`input=5`/`output=30` USD 每 Mtok，**不含图像维度**） | `cost_micros=124925` = 20×5 + 5×5（回落 `input`）+ 4160×30（回落 `output`）；`bucketed_dimensions=[image_input->input,image_output->output]`；`charge=cost`（cost_follow 1.0×） |
+  | 8 | 计费（gw-b 现有形态的规则集：`input=5`/`output=30` USD 每 Mtok，**不含图像维度**） | `cost_micros=124925` = 20×5 + 5×5（回落 `input`）+ 4160×30（回落 `output`）；`bucketed_dimensions=[image_input->input,image_output->output]`；`charge=cost`（cost_follow 1.0×） |
   | 9 | 请求日志 | `/v1/images/generations` 与 `/v1/images/edits` 各成行，`request_json` 只留 prompt（`record_input=user`），无 base64 |
   | 10 | `go test ./...` | 全绿（含新增 `pkg/pluginapi`、`openaiimages`、`routing`/`pricing`/`billing`、`httpapi` 图片端到端、`dshgw/aigw`+`tenancy` 过滤用例） |
 
@@ -6261,9 +6261,9 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
   的 copylocks，M79 起既有，与本次改动无关），所以 `make verify` 的 vet 一段过不去；等价做法是
   `go test ./... && make ui-base && make build`（本次已跑，测试全绿）。
 
-### M84 部署到 gptjp（`47.91.16.118` / `gpt.lagenio.xyz`，2026-09-23，未发版）
+### M84 部署到 gw-b（`198.51.100.101` / `gw-b.example.com`，2026-09-23，未发版）
 
-> 需求原话：「部署到gptjp 我来验证」。本次是**预览部署**：不升 `VERSION`、不打 tag（线上报 `4.3.3` +
+> 需求原话：「部署到gw-b 我来验证」。本次是**预览部署**：不升 `VERSION`、不打 tag（线上报 `4.3.3` +
 > M84 分支的 revision），验证通过后再决定发版。部署只换二进制，`/opt/aigw/config.yaml` 与 `data/` 未动。
 
 | 项 | 内容 |
@@ -6272,15 +6272,15 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 | 二进制 sha256 | `3e3a2e26b61b213b261c24e60610b3842b8553f38f0b0e8bbc481f508430fb3c`（本机与远端逐字节一致）；`config.yaml` sha256 `4c29f9ab…` 前后未变 |
 | 部署方式 | `rsync -z --partial` 落到 `/opt/aigw/aigw.new`（上行只有 ~40–300 KB/s，第一次 `scp` 超时，改用 rsync 续传）→ 双向 sha256 核对 → 远端 `aigw.new -version` 自证 → `cp -p` 拍回滚点 → `install -m 0755` → `systemctl restart aigw` |
 | 回滚点 | `/opt/aigw/aigw.prev-4.3.3-438daee`（线上原 4.3.3，sha `4017c2bf…`）、`/opt/aigw/aigw.prev-4.3.3-fcd5bcc`（本次第一次部署的 M84 构建，sha `2dce1b0c…`）。回滚 = `cp -p` 回该文件 + `systemctl restart aigw` |
-| 门禁 | `/aigw/version` = `{"version":"4.3.3","revision":"f5188d0","ui":"minified","ui_encoding":"gzip"}`；`healthz=200 readyz=200`；启动日志 `level=ERROR` **0** 行；`registry loaded summary="snapshot(models=24 providers=7 provider_models=67 routes=76 mappings=0 tags=3 accounts=111)"`；公网 `https://gpt.lagenio.xyz/aigw/version` 同源同值；`POST /aigw/v1/images/generations`（无 Key）→ 401（**新路由已在线**） |
-| 上线时发现并当场修掉的缺陷（`f5188d0`） | 第一次部署（`fcd5bcc`）后只读核对 gptjp 库发现：`gpt-image-2` 的四条启用路由全部指向**不会生图**的供应商（3 个 `plugin:provider-codex` + `azure`/`openai-responses`，其映射行 `capabilities_json` 为空 = 未知），而"未知能力放行"是仓库惯例 → 图片请求会打到它们身上并拿到不可重试的 500。改为 `imageCandidates` 强制要求**显式声明** `image_generation`（未写 / `inherit` / 声明 false 一律不参与），失败 400 并点名缺声明的候选；顺带把"provider kind 不支持图片"映射成可读 400。第二次部署（`f5188d0`）即含此修复 |
-| 待人工验证（用户执行） | ① 建一个 `openai-images` 实例（`base_url` 指向能讲 `/v1/images/generations` 的上游，凭据同上游 Key）并在其 `models[]` 声明 `{"image_generation":true,"image":true}`；② 「刷新模型」或手工建映射行 + 路由（公开名 `gpt-image-2`，上游名按上游要求）；③ `curl -X POST https://gpt.lagenio.xyz/aigw/v1/images/generations -H "Authorization: Bearer <Key>" -H 'Content-Type: application/json' -d '{"model":"gpt-image-2","prompt":"a red fox reading a book"}'`；④ 控制台「请求日志」应出现 `endpoint=/v1/images/generations` 的行，`usage_records` 的 `dimensions_json` 含 `input`/`image_input`/`image_output` |
+| 门禁 | `/aigw/version` = `{"version":"4.3.3","revision":"f5188d0","ui":"minified","ui_encoding":"gzip"}`；`healthz=200 readyz=200`；启动日志 `level=ERROR` **0** 行；`registry loaded summary="snapshot(models=24 providers=7 provider_models=67 routes=76 mappings=0 tags=3 accounts=111)"`；公网 `https://gw-b.example.com/aigw/version` 同源同值；`POST /aigw/v1/images/generations`（无 Key）→ 401（**新路由已在线**） |
+| 上线时发现并当场修掉的缺陷（`f5188d0`） | 第一次部署（`fcd5bcc`）后只读核对 gw-b 库发现：`gpt-image-2` 的四条启用路由全部指向**不会生图**的供应商（3 个 `plugin:provider-codex` + `azure`/`openai-responses`，其映射行 `capabilities_json` 为空 = 未知），而"未知能力放行"是仓库惯例 → 图片请求会打到它们身上并拿到不可重试的 500。改为 `imageCandidates` 强制要求**显式声明** `image_generation`（未写 / `inherit` / 声明 false 一律不参与），失败 400 并点名缺声明的候选；顺带把"provider kind 不支持图片"映射成可读 400。第二次部署（`f5188d0`）即含此修复 |
+| 待人工验证（用户执行） | ① 建一个 `openai-images` 实例（`base_url` 指向能讲 `/v1/images/generations` 的上游，凭据同上游 Key）并在其 `models[]` 声明 `{"image_generation":true,"image":true}`；② 「刷新模型」或手工建映射行 + 路由（公开名 `gpt-image-2`，上游名按上游要求）；③ `curl -X POST https://gw-b.example.com/aigw/v1/images/generations -H "Authorization: Bearer <Key>" -H 'Content-Type: application/json' -d '{"model":"gpt-image-2","prompt":"a red fox reading a book"}'`；④ 控制台「请求日志」应出现 `endpoint=/v1/images/generations` 的行，`usage_records` 的 `dimensions_json` 含 `input`/`image_input`/`image_output` |
 
 ## M85 智能问答把整段会话历史都发给模型（历史窗口 0 = 不限制，默认 0）（2026-09-23）
 
 > 需求原话：「智能问答要把会话里的所有历史记录都发给模型」。设计文档 `docs/design/m85-chat-full-history.md`。
 > 编号说明：本条最初按 M84 编号并已发布 v4.4.0（`a089114`），随后发现 M84 已被并行工作区的
-> **Images API** 占用（分支 `m84-images`，且已以预览形态跑在 gptjp），于是改号 **M85**（`47b1e76`）。
+> **Images API** 占用（分支 `m84-images`，且已以预览形态跑在 gw-b），于是改号 **M85**（`47b1e76`）。
 
 - [x] **口径**：`buildHistory` 的两个界改成**各自独立**（`maxMessages > 0` / `maxBytes > 0` 才参与判定），
       0（或负）= 不限制、默认 0 —— 每次提问把该会话已存的全部消息按原顺序发给模型。旧实现的组合判断在
@@ -6303,44 +6303,44 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
       单独复跑通过）；`make ui-base`、`make build` 全绿。
 - [x] **真机针测试**：新增 `scripts/verify-m85.sh`（第 1 轮埋 4 位数针 + 21 轮填充 + 回问；默认不跑，
       `RUN_TURNS=1` 才计费，可用 `ACCOUNT_ID` / `KEY_ID` / `MODEL` 指定计费主体），
-      rag-server 与 gptjp 各一次，均 **11 通过 0 失败**，详见 v4.5.0 记录。
+      gw-c 与 gw-b 各一次，均 **11 通过 0 失败**，详见 v4.5.0 记录。
 
-### v4.4.0 发布记录（M85：整段历史回放，2026-09-23，只部署 rag-server）
+### v4.4.0 发布记录（M85：整段历史回放，2026-09-23，只部署 gw-c）
 
 | 项 | 值 |
 |---|---|
 | 版本 | **v4.4.0**（`VERSION` 4.3.3 → 4.4.0；release 提交 `a089114`，tag `v4.4.0`） |
 | 构建物 | `bin/aigw` **4.4.0 / `a089114`**，23,498,568 B，sha256 `03cbbbcf228304ba75e1859159d82f4de87eb43406c429f8f01444359652eeae` |
-| 部署范围 | ① **rag-server** `aigw-local`：4.3.3/`438daee` → **4.4.0/`a089114`**（`/home/winger/work/ai_gateway/bin/aigw`）；② **gptjp 未部署** —— 部署前只读核对发现它的线上是**并行工作区的 Images API 预览版**（4.3.3/`f5188d0`），覆盖会把它撤掉，因此停下来交用户决定（结论：先合并再一起部署） |
-| 回滚点 | rag-server `bin/aigw.prev-4.3.3-438daee`（sha `4017c2bf…`）。回滚 = `cp -p` 回该文件 + `systemctl --user restart aigw-local`，`/version` 随之后退到 4.3.3 |
+| 部署范围 | ① **gw-c** `aigw-local`：4.3.3/`438daee` → **4.4.0/`a089114`**（`/home/operator/work/ai_gateway/bin/aigw`）；② **gw-b 未部署** —— 部署前只读核对发现它的线上是**并行工作区的 Images API 预览版**（4.3.3/`f5188d0`），覆盖会把它撤掉，因此停下来交用户决定（结论：先合并再一起部署） |
+| 回滚点 | gw-c `bin/aigw.prev-4.3.3-438daee`（sha `4017c2bf…`）。回滚 = `cp -p` 回该文件 + `systemctl --user restart aigw-local`，`/version` 随之后退到 4.3.3 |
 | schema | **无迁移**（仍 27） |
 | 配置/数据变更 | **无**：两台 `config.yaml` 都没有显式写过 `chat.max_history_*`，所以新默认（0 = 不限制）直接生效 |
-| 验证（rag-server） | `/version` = `{"revision":"a089114","version":"4.4.0"}`；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200；日志 `aigw starting version=4.4.0 revision=a089114`（19:41:40）；本次窗口无新 `level=ERROR`（17:46 的 `reconciliation found a charge mismatch`（diff 3834 微美元）早于本次部署，属既有噪声） |
+| 验证（gw-c） | `/version` = `{"revision":"a089114","version":"4.4.0"}`；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200；日志 `aigw starting version=4.4.0 revision=a089114`（19:41:40）；本次窗口无新 `level=ERROR`（17:46 的 `reconciliation found a charge mismatch`（diff 3834 微美元）早于本次部署，属既有噪声） |
 
-### v4.5.0 发布记录（M85 + M84 Images API 合并进 main，2026-09-23，部署 rag-server + gptjp）
+### v4.5.0 发布记录（M85 + M84 Images API 合并进 main，2026-09-23，部署 gw-c + gw-b）
 
 | 项 | 值 |
 |---|---|
 | 版本 | **v4.5.0**（4.4.0 → 4.5.0；release 提交 `b8d7705`，tag `v4.5.0`）；合并提交 `b84a053`（`merge(m84)`），里程碑改号 `47b1e76` |
 | 构建物 | `bin/aigw` **4.5.0 / `b8d7705`**，23,676,624 B，sha256 `2bd7719cdc2b26a12c73c0870b684d5a80f6d1c82456415b42ddec5289a03d17`（console minified：44 文件 729028→408675 B，gzip 39 文件 406314→161913 B） |
-| 为什么要合并 | 用户决定：gptjp 跑的是并行工作区的 Images API 预览版（不在 `main` 上），先合并再一起部署，避免「升 M85 就把 Images API 从 gptjp 撤掉」。合并后 `main` 同时含 M84（Images API）与 M85（整段历史回放） |
+| 为什么要合并 | 用户决定：gw-b 跑的是并行工作区的 Images API 预览版（不在 `main` 上），先合并再一起部署，避免「升 M85 就把 Images API 从 gw-b 撤掉」。合并后 `main` 同时含 M84（Images API）与 M85（整段历史回放） |
 | 冲突解决 | 只有两处文档冲突（`docs/TODO.md`、`docs/todo_done.md`，都是各自在末尾追加），按「都保留」解决；并把 M84 一节的「不合并 `main` / 不部署」两句改成已合并、随 v4.5.0 部署。代码侧（`internal/config/config.go`、`config.example.yaml`、`README.md`）自动合并后逐项核对：M85 的 `chat.max_history_*` 默认 0 与 M84 的 `images_max_body_bytes` / `billing.images_reserve_tokens` 都在 |
 | 合并后验收 | `go vet` 只有 M79 遗留 copylocks；`go test -count=1 ./...` 仅 `internal/dshgw/sandbox` 三条（既有环境失败）与 `internal/dshgw/browsermount` 一条（单独复跑通过）；`make ui-base`、`make build` 全绿 |
-| 部署范围 | ① **rag-server**：4.4.0/`a089114` → **4.5.0/`b8d7705`**；② **gptjp**（`47.91.16.118`，`/opt/aigw`，`aigw.service`，`base_path: /aigw`）：4.3.3/`f5188d0` → **4.5.0/`b8d7705`** |
-| 回滚点 | rag-server `bin/aigw.prev-4.4.0-a089114`（sha `03cbbbcf…`）；gptjp `/opt/aigw/aigw.prev-4.3.3-f5188d0`（sha `3e3a2e26…`，与部署前线上二进制逐字节相同；同行工作区自己的 `aigw.prev-4.3.3-fcd5bcc` 未被动）。回滚 = `cp -p` 回滚点 + 重启对应单元 |
-| 传输（值得记一笔） | rag-server → gptjp 的上行只有约 44 KB/s：23.7 MB 的 `scp` 两次都在 9 分钟被掐断，第二次还与遗留进程抢同一个 `.new` 文件（rsync 与 scp 同时写，文件大小十几分钟不动）。清掉两份残留进程后改成 `gzip -6` 压到 12,732,860 B 再传（20:36→20:47），远端解压后 sha256 与构建物逐位一致，才允许替换 |
+| 部署范围 | ① **gw-c**：4.4.0/`a089114` → **4.5.0/`b8d7705`**；② **gw-b**（`198.51.100.101`，`/opt/aigw`，`aigw.service`，`base_path: /aigw`）：4.3.3/`f5188d0` → **4.5.0/`b8d7705`** |
+| 回滚点 | gw-c `bin/aigw.prev-4.4.0-a089114`（sha `03cbbbcf…`）；gw-b `/opt/aigw/aigw.prev-4.3.3-f5188d0`（sha `3e3a2e26…`，与部署前线上二进制逐字节相同；同行工作区自己的 `aigw.prev-4.3.3-fcd5bcc` 未被动）。回滚 = `cp -p` 回滚点 + 重启对应单元 |
+| 传输（值得记一笔） | gw-c → gw-b 的上行只有约 44 KB/s：23.7 MB 的 `scp` 两次都在 9 分钟被掐断，第二次还与遗留进程抢同一个 `.new` 文件（rsync 与 scp 同时写，文件大小十几分钟不动）。清掉两份残留进程后改成 `gzip -6` 压到 12,732,860 B 再传（20:36→20:47），远端解压后 sha256 与构建物逐位一致，才允许替换 |
 | schema | **无迁移**（仍 27） |
-| 验证（两台） | `/version` 均为 `{"revision":"b8d7705","version":"4.5.0"}`（gptjp 另在公网 `https://gpt.lagenio.xyz/aigw/version` 同源同值，公网 `admin/ui/` 200）；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200；启动日志 `aigw starting version=4.5.0 revision=b8d7705`（rag-server 20:13:37、gptjp 20:47:19）；gptjp 本次窗口 `level=ERROR` 0 条；rag-server 局域网 `http://192.168.190.86:8088/version` 同值 |
-| 验证（真机针测试，M85 的核心验收） | `RUN_TURNS=1 scripts/verify-m85.sh` 两台各一次，均 **11 通过 0 失败**。rag-server：账户 #4 / Key #8 / `deepseek-flash`，针 **7136**，22 轮累计输入 159,421 token，会话 44 条消息，最后一轮输入 7,518 ≥ 前面输出合计 249。gptjp：账户 #1 / Key #117 / `deepseek-flash`，针 **6910**，累计输入 156,288，44 条消息，最后一轮输入 7,312 ≥ 100。两台全程**没有**出现过「更早的 N 轮对话没有随本次请求发送」，模型都答出了第 1 条消息里的数字 —— 44 > 40（旧默认窗口）说明旧行为下这条针必然已被丢弃 |
+| 验证（两台） | `/version` 均为 `{"revision":"b8d7705","version":"4.5.0"}`（gw-b 另在公网 `https://gw-b.example.com/aigw/version` 同源同值，公网 `admin/ui/` 200）；`healthz`/`readyz`/`admin/ui/`/`brand.js` 全 200；启动日志 `aigw starting version=4.5.0 revision=b8d7705`（gw-c 20:13:37、gw-b 20:47:19）；gw-b 本次窗口 `level=ERROR` 0 条；gw-c 局域网 `http://aigw.internal:8088/version` 同值 |
+| 验证（真机针测试，M85 的核心验收） | `RUN_TURNS=1 scripts/verify-m85.sh` 两台各一次，均 **11 通过 0 失败**。gw-c：账户 #4 / Key #8 / `deepseek-flash`，针 **7136**，22 轮累计输入 159,421 token，会话 44 条消息，最后一轮输入 7,518 ≥ 前面输出合计 249。gw-b：账户 #1 / Key #117 / `deepseek-flash`，针 **6910**，累计输入 156,288，44 条消息，最后一轮输入 7,312 ≥ 100。两台全程**没有**出现过「更早的 N 轮对话没有随本次请求发送」，模型都答出了第 1 条消息里的数字 —— 44 > 40（旧默认窗口）说明旧行为下这条针必然已被丢弃 |
 | 成本与清理 | 两台各 22 次小请求（`deepseek-flash`，输出合计 249 / 100 token）；临时会话与 `scope=query` 令牌跑完即删，未使用 `KEEP`（不留现场） |
-| 未做 | ① rag-server 的公网入口没有 `/version` 路由（`chat.tirisen.hk/version` 与 `/aigw/version` 都是 `{"error":"Not found"}`），按惯例只验回环 + 局域网；② `origin` 未推（`main` 已在 `b8d7705`，tag `v4.4.0` / `v4.5.0` 只在本地）；③ `dshgw` 未动；④ gptjp 上 `openai-images` 实例与真实生图的线上验证仍待用户执行（M84 一节） |
+| 未做 | ① gw-c 的公网入口没有 `/version` 路由（`chat.example.com/version` 与 `/aigw/version` 都是 `{"error":"Not found"}`），按惯例只验回环 + 局域网；② `origin` 未推（`main` 已在 `b8d7705`，tag `v4.4.0` / `v4.5.0` 只在本地）；③ `dshgw` 未动；④ gw-b 上 `openai-images` 实例与真实生图的线上验证仍待用户执行（M84 一节） |
 
 ## M87 API Key 按哈希查找，前缀降级为展示列
 > 需求原话：「能不能改成 apikey 的 id 查找，api 请求时，先 hash，用 hash 查找，前缀只是用于给用户显示？」
 > →「我就是要解决『前缀必须唯一』，因为 sub2api 库里的 key 12 位前缀有重复」（驱动需求）。
 > 设计：`docs/design/m87-api-key-hash-lookup.md`（关键决策 D1–D13）。两处已量化的现状缺陷：① 前缀只有
 > 30 bit（MCP 15 bit），签发路径撞上就是 `ON CONFLICT ... DO UPDATE` 静默接管；② 负缓存按前缀键控，
-> 知道前缀的人能把该 key 持续打成 401。硬验收：gptjp sub2api 的 #24/#51（同为 `sk-f69aeca55`、
+> 知道前缀的人能把该 key 持续打成 401。硬验收：gw-b sub2api 的 #24/#51（同为 `sk-000000000`、
 > 哈希不同）必须能同时导入、同时可用（`docs/todo_done.md:2304`）。分两步上线，每步可回滚。
 
 - [x] 设计文档 `docs/design/m87-api-key-hash-lookup.md`（D1–D13、被否方案 §2.1、两个迁移、接口形状、两步上线、测试策略）
@@ -6365,15 +6365,15 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 |---|---|
 | 版本 | **v4.6.0**（4.5.0 → 4.6.0；release 提交 `ab29518`，tag `v4.6.0`） |
 | 构建物 | `bin/aigw` **4.6.0 / `ab29518`**，23,718,290 B，sha256 `dcbdc9b426d168762197bb6adead1436c65645ba02fd7a8b32da33f37bc0a0ea` |
-| 传输 | 沙箱 → gptjp 上行约 **39 KB/s**：23.7 MB 的 `scp` 两次超时，改 `gzip -1` 压缩后管道传输（约 11 MB，数分钟），远端解压后 sha256 与构建物逐位一致 |
-| 部署范围 | **gptjp**（`47.91.16.118`，`/opt/aigw`，`aigw.service`，`base_path: /aigw`），4.5.0/`b8d7705` → **4.6.0/`ab29518`**（同日随后被 v4.7.0 覆盖） |
+| 传输 | 沙箱 → gw-b 上行约 **39 KB/s**：23.7 MB 的 `scp` 两次超时，改 `gzip -1` 压缩后管道传输（约 11 MB，数分钟），远端解压后 sha256 与构建物逐位一致 |
+| 部署范围 | **gw-b**（`198.51.100.101`，`/opt/aigw`，`aigw.service`，`base_path: /aigw`），4.5.0/`b8d7705` → **4.6.0/`ab29518`**（同日随后被 v4.7.0 覆盖） |
 | 回滚点 | `/opt/aigw/aigw.prev-4.5.0-b8d7705-*`（与部署前线上二进制逐字节相同）；**DB 快照** `/opt/aigw/data/aigw.db.pre-m87-20260924-165211`（0600，SQLite `backup()` 在线快照） |
 | schema | **0027 → 0029**：0028 建 `idx_api_keys_hash` / `idx_mcp_tokens_hash` 唯一索引，0029 把前缀唯一索引降级为普通索引 |
 | 前置断言（升级前） | key 135 行、**重复 `key_hash` 0 组**、重复 `token_hash` 0 组（0028 失败会拒绝启动，所以先查） |
 | 验证（部署后） | `/aigw/version` = `{"revision":"ab29518","version":"4.6.0"}`；`healthz`/`readyz` 200；启动日志 `aigw starting version=4.6.0 revision=ab29518`，窗口内 `level=ERROR` 0 条；`idx_api_keys_hash`/`idx_mcp_tokens_hash` 为 UNIQUE、`idx_api_keys_prefix_lookup`/`idx_mcp_tokens_prefix_lookup` 为普通索引 |
 | **同前缀验收（驱动需求）** | 自造两把明文共用 12 字符前缀 `sk-m87shared`（尾段不同，各 52 字符）：`import-batch` `dry_run` → `created=2`；真实导入 → 库里两行（#166/#167，`key_prefix` 相同）；两把各自 `GET /v1/models` → **200 / 200**；`keys/lookup {"key_prefix":"sk-m87shared"}` → `count=2`；同明文重导 → `created=false` 且 id 不变（幂等）。测完两把 `status=disabled` |
-| **既有 key 零迁移（真机证据）** | 取 gptjp 上 `E26Q-reissue-key.txt` 里那把 **M87 之前**签发的 key（库里 #129 `图像 (替换原 sub2api key #24)`，`created_by=import:admin`，active），在升级后的网关上打 `GET /v1/models` → **200**（明文全程不进入对话，只比对首 12 字符与状态码） |
-| 遗留 | ① 4 把验收 key（#162/#163/#166/#167）留在库里，全部已 disabled（网关没有删除 key 的路由）；② sub2api 真数据 #24/#51 未导入（可选后续）；③ `/opt/aigw/data/E26Q-reissue-key.txt` 仍在（当时重签的明文，未交付本人；导入原始 key 后可 `shred -u`） |
+| **既有 key 零迁移（真机证据）** | 取 gw-b 上 `K7QX-reissue-key.txt` 里那把 **M87 之前**签发的 key（库里 #129 `图像 (替换原 sub2api key #24)`，`created_by=import:admin`，active），在升级后的网关上打 `GET /v1/models` → **200**（明文全程不进入对话，只比对首 12 字符与状态码） |
+| 遗留 | ① 4 把验收 key（#162/#163/#166/#167）留在库里，全部已 disabled（网关没有删除 key 的路由）；② sub2api 真数据 #24/#51 未导入（可选后续）；③ `/opt/aigw/data/K7QX-reissue-key.txt` 仍在（当时重签的明文，未交付本人；导入原始 key 后可 `shred -u`） |
 
 ## M88 dshgw 只按账户映射租户（退役 key 前缀绑定）
 > 需求原话：「dshgw 也用 key hash 找租户」。评审结论：**不哈希化，直接删掉本地解析**——那条兜底只服务
@@ -6402,18 +6402,18 @@ home 与 workspace 一致，修 `ssh <别名>` 退化成"把别名当主机名�
 |---|---|
 | 版本 | **v4.7.0**（4.6.0 → 4.7.0；release 提交 `11e8254`，tag `v4.7.0`）。一个版本里含两个二进制：`bin/aigw`（M88 的 `internal/localdshgw` 改动）与 `bin/dshgw` 4.7.0/`11e8254` |
 | 构建物 | `bin/aigw` **4.7.0 / `11e8254`**，23,718,338 B，sha256 `cd573d67e5c8605ab0982a8904c22e9e56da52dfe34547bd7e35a9f63b361973`；`bin/dshgw` **4.7.0 / `11e8254`**，16,835,688 B（`make dshgw-build`） |
-| 部署范围 | ① **rag-server**（LAN，`~/work/ai_gateway/bin/aigw`，`aigw-local.service`）：4.5.0/`b8d7705` → **4.7.0/`11e8254`**（上传 1 秒，sha256 一致）；② **gptjp**：4.6.0/`ab29518` → **4.7.0/`11e8254`**；③ **dshgw 控制面（宿主 `dshgw-verify.service`）待宿主重启**，见下表 |
-| 回滚点 | rag-server `bin/aigw.prev-4.5.0-b8d7705-*`；gptjp `/opt/aigw/aigw.prev-4.6.0-ab29518-*`；dshgw 侧部署时按宿主脚本备份到 `data/prev/bin/` |
-| schema | rag-server `aigw-local.db` 63 把 key、gptjp 139 把 key，均升到 **0029**；两台 `dup key_hash` 均为 0 |
-| 验证（两台 aigw） | `/version` 均为 `{"revision":"11e8254","version":"4.7.0"}`（rag-server 在根路径，gptjp 在 `/aigw/version`）；`healthz`/`readyz` 200；启动日志无 ERROR |
-| 验证（M87 回归，gptjp 4.7.0 上重跑） | 把 #166/#167 临时置 `active`：两把明文各自 `GET /v1/models` → **200 / 200**；`keys/lookup` 传 `sk-m87shared` → `count=2`；随即重新 disabled。`idx_api_keys_hash` 仍是 `CREATE UNIQUE INDEX` |
+| 部署范围 | ① **gw-c**（LAN，`~/work/ai_gateway/bin/aigw`，`aigw-local.service`）：4.5.0/`b8d7705` → **4.7.0/`11e8254`**（上传 1 秒，sha256 一致）；② **gw-b**：4.6.0/`ab29518` → **4.7.0/`11e8254`**；③ **dshgw 控制面（宿主 `dshgw-verify.service`）待宿主重启**，见下表 |
+| 回滚点 | gw-c `bin/aigw.prev-4.5.0-b8d7705-*`；gw-b `/opt/aigw/aigw.prev-4.6.0-ab29518-*`；dshgw 侧部署时按宿主脚本备份到 `data/prev/bin/` |
+| schema | gw-c `aigw-local.db` 63 把 key、gw-b 139 把 key，均升到 **0029**；两台 `dup key_hash` 均为 0 |
+| 验证（两台 aigw） | `/version` 均为 `{"revision":"11e8254","version":"4.7.0"}`（gw-c 在根路径，gw-b 在 `/aigw/version`）；`healthz`/`readyz` 200；启动日志无 ERROR |
+| 验证（M87 回归，gw-b 4.7.0 上重跑） | 把 #166/#167 临时置 `active`：两把明文各自 `GET /v1/models` → **200 / 200**；`keys/lookup` 传 `sk-m87shared` → `count=2`；随即重新 disabled。`idx_api_keys_hash` 仍是 `CREATE UNIQUE INDEX` |
 | 验证（既有 key 零迁移） | 同上：M87 之前签发的 #129（label `sk-gw_36uvsq…`）在 4.7.0 上仍是 **200** |
-| 未做 | rag-server 的公网入口没有 `/version` 路由（历史惯例只验回环 + 局域网）；`origin` 未推（tag `v4.6.0`/`v4.7.0` 只在本地）；gptjp 上 sub2api 真数据未导入 |
+| 未做 | gw-c 的公网入口没有 `/version` 路由（历史惯例只验回环 + 局域网）；`origin` 未推（tag `v4.6.0`/`v4.7.0` 只在本地）；gw-b 上 sub2api 真数据未导入 |
 
 **待宿主执行（M88 的 dshgw 控制面，会重启全部租户 worker，含本会话）**：
 
 ```bash
-ROOT=/home/winger/work/ai_gateway
+ROOT=/home/operator/work/ai_gateway
 SRC=$ROOT/data/dshgw-verify/state/workspaces/dsh-tenant/work/ai-gateway/bin
 $SRC/dshgw --version                      # 期望 dshgw 4.7.0 (revision 11e8254…
 running=$($ROOT/bin/dshgw --version | sed 's/[^0-9A-Za-z._-]\+/-/g')

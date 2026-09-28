@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/aigw"
-	"github.com/winger/ai-gateway/internal/dshgw/feishu"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/aigw"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/feishu"
 )
 
 // The key picker (M72) is the third way into a tenant, and the only one where the browser posts a
@@ -62,7 +62,7 @@ func (a pickAuthorizer) Authorize(context.Context, string) (string, error) {
 }
 
 func (a pickAuthorizer) Identity(context.Context, string) (aigw.Identity, error) {
-	return aigw.Identity{Tenant: a.setup.tenant, Account: "李智超(colin)", AccountID: a.setup.accountID, Keys: a.setup.keys}, nil
+	return aigw.Identity{Tenant: a.setup.tenant, Account: "李雷(alex)", AccountID: a.setup.accountID, Keys: a.setup.keys}, nil
 }
 
 // pickRequest drives the picker: GET with a ticket in the query, POST with the ticket and the
@@ -132,7 +132,7 @@ func TestKeyPickRendersTheAccountsKeys(t *testing.T) {
 	}
 	body, _ := io.ReadAll(res.Body)
 	page := string(body)
-	for _, want := range []string{`name="key_id" value="11"`, `name="key_id" value="12"`, "laptop", "phone", "李智超(colin)"} {
+	for _, want := range []string{`name="key_id" value="11"`, `name="key_id" value="12"`, "laptop", "phone", "李雷(alex)"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("the picker is missing %q:\n%s", want, page)
 		}

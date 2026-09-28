@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/audit"
-	"github.com/winger/ai-gateway/internal/dshgw/proxy"
-	"github.com/winger/ai-gateway/internal/dshgw/tenancy"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/audit"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/proxy"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/tenancy"
 )
 
 // PrepareLogin is the login moment's lifecycle hook (M69), called once per successful sign-in

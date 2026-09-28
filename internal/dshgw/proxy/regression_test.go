@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/dshgw/aigw"
-	"github.com/winger/ai-gateway/internal/dshgw/session"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/aigw"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/session"
 )
 
 func TestLateResponseCannotOverwriteRefreshedCookie(t *testing.T) {

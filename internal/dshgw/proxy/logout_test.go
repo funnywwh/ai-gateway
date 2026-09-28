@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/dshgw/session"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/session"
 )
 
 func TestLogoutRequiresPostOriginAndRevokesAllMatchingCookies(t *testing.T) {

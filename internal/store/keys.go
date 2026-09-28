@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 const apiKeyCols = `id, account_id, name, key_prefix, key_hash, tags_json, grants_json, policy_json,

@@ -60,7 +60,7 @@ export function openFeishuSync({ onDone } = {}) {
   const includeBox = el('input', { type: 'checkbox', id: 'feishu-include-children' });
   includeBox.checked = state.includeChildren;
   includeBox.addEventListener('change', () => { state.includeChildren = includeBox.checked; renderPeople(); });
-  const peopleSearch = el('input', { type: 'search', placeholder: '按姓名过滤（支持拼音，如 ranqiliang）…' });
+  const peopleSearch = el('input', { type: 'search', placeholder: '按姓名过滤（支持拼音，如 acct-b）…' });
   peopleSearch.addEventListener('input', () => { state.query = peopleSearch.value; renderPeople(); });
   const peopleList = el('div', { class: 'feishu-user-list' });
   peopleHost.append(
@@ -541,7 +541,7 @@ export function openFeishuSync({ onDone } = {}) {
     if (preferred) chosen.id = preferred.id;
 
     const list = el('div', { class: 'feishu-picker-list' });
-    const filter = el('input', { type: 'search', placeholder: '按账号名过滤（支持拼音，如 ranqiliang）…' });
+    const filter = el('input', { type: 'search', placeholder: '按账号名过滤（支持拼音，如 acct-b）…' });
 
     function paint() {
       list.replaceChildren();

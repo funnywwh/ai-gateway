@@ -47,39 +47,39 @@ def main() -> int:
         root = Path(tmp)
         workspaces = root / "workspaces"
         dest = root / "ssh-configs"
-        make_account(workspaces, "dsh-colin", "Host aipc\n  HostName 10.0.0.1\n")
-        make_account(workspaces, "dsh-ran", "Host gpt001\n  HostName gpt001.example\n")
+        make_account(workspaces, "dsh-alex", "Host gw-d\n  HostName 10.0.0.1\n")
+        make_account(workspaces, "dsh-acct-e", "Host gw-a\n  HostName gw-a.example\n")
         make_account(workspaces, "dsh-empty", None)
         (workspaces / "not-an-account.txt").write_text("x\n", encoding="utf-8")
 
         # A dry run reports and writes nothing.
         dry = run("--workspaces", str(workspaces), "--dest", str(dest), "--dry-run", cwd=root)
         check(dry.returncode == 0, f"dry run failed: {dry.stderr}")
-        check("would   dsh-colin" in dry.stdout, "the dry run names the account it would adopt")
+        check("would   dsh-alex" in dry.stdout, "the dry run names the account it would adopt")
         check(not dest.exists(), "a dry run writes nothing")
         check("not-an-account.txt" not in dry.stdout, "a non-directory entry is not an account")
 
         # A real run adopts each account that has a config, and skips one that has none.
         first = run("--workspaces", str(workspaces), "--dest", str(dest), cwd=root)
         check(first.returncode == 0, f"adopt failed: {first.stderr}")
-        colin = dest / "dsh-colin"
-        check(colin.read_text(encoding="utf-8").startswith("Host aipc"), "the account's own config became its seed")
-        check((dest / "dsh-ran").exists(), "every account with a config is adopted")
+        alex = dest / "dsh-alex"
+        check(alex.read_text(encoding="utf-8").startswith("Host gw-d"), "the account's own config became its seed")
+        check((dest / "dsh-acct-e").exists(), "every account with a config is adopted")
         check(not (dest / "dsh-empty").exists(), "an account with no config gets no seed")
-        check(stat.S_IMODE(colin.stat().st_mode) == 0o644, "a seed is written 0644")
+        check(stat.S_IMODE(alex.stat().st_mode) == 0o644, "a seed is written 0644")
         check("adopted=2" in first.stdout, f"the summary counts what it did: {first.stdout!r}")
 
         # Idempotent: an existing seed is kept, never overwritten, and nothing is lost.
-        (dest / "dsh-colin").write_text("Host curated\n", encoding="utf-8")
+        (dest / "dsh-alex").write_text("Host curated\n", encoding="utf-8")
         second = run("--workspaces", str(workspaces), "--dest", str(dest), cwd=root)
         check(second.returncode == 0, f"the second run failed: {second.stderr}")
-        check((dest / "dsh-colin").read_text(encoding="utf-8") == "Host curated\n", "an existing seed is never overwritten")
+        check((dest / "dsh-alex").read_text(encoding="utf-8") == "Host curated\n", "an existing seed is never overwritten")
         check("kept=2" in second.stdout, f"the kept seeds are reported: {second.stdout!r}")
 
         # The workspaces themselves are untouched: the live deployment keeps reading them.
-        check((workspaces / "dsh-colin" / ".ssh" / "config").read_text(encoding="utf-8").startswith("Host aipc"),
+        check((workspaces / "dsh-alex" / ".ssh" / "config").read_text(encoding="utf-8").startswith("Host gw-d"),
               "an account workspace is not modified")
-        check(sorted(p.name for p in (workspaces / "dsh-colin" / ".ssh").iterdir()) == ["config"],
+        check(sorted(p.name for p in (workspaces / "dsh-alex" / ".ssh").iterdir()) == ["config"],
               "no file is added to an account's .ssh")
 
         # A missing workspace root is an error, not a silent no-op.

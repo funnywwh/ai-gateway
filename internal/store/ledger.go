@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // AppendLedger applies ledger entries atomically: each entry is inserted at most once

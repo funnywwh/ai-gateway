@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/config"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 // Stand-in processes only: no node, sandbox, mounts, network or real workers.

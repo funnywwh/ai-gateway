@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/registry"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/registry"
 )
 
 // Store is the read-only persistence subset the service needs.

@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/mcpsrv"
-	"github.com/winger/ai-gateway/internal/secret"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/mcpsrv"
+	"github.com/funnywwh/ai-gateway/internal/secret"
 )
 
 // MCPTokens is the persistence subset needed by the MCP endpoint.

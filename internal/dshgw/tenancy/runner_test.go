@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/config"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 // A 43-character token, the exact shape dsh prints in its startup URL.

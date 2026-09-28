@@ -215,7 +215,7 @@ Go 侧的静态合约测试读的是源码，天然看不到"只有压缩后才�
 ```
 $ make ui-dist
 ui: minified 37 files 559442 -> 329702 bytes (-41%) in 820ms
-ui: overlay -> /home/winger/work/ai_gateway/.cache/ui-dist/overlay.json
+ui: overlay -> /home/operator/work/ai_gateway/.cache/ui-dist/overlay.json
 ```
 
 | 文件（抽样） | 源 | 镜像 |

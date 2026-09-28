@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/config"
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // The console chat stores the only rows in this schema owned by an *administrator account*

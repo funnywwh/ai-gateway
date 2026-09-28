@@ -1,7 +1,7 @@
 # M43：API Key 哈希导入（`POST /admin/api/v1/keys/import`）
 
 > 状态：已实现。目标：把**已经在别处生效**的 API Key 搬进网关，让客户端不必改 key，
-> 而网关**全程不接触明文**。首个使用场景：gptjp 上 sub2api 的「智天成」用户与密钥迁移
+> 而网关**全程不接触明文**。首个使用场景：gw-b 上 sub2api 的「客户组一」用户与密钥迁移
 > （运行手册见 `docs/sub2api-migration.md`）。
 
 ## 1. 问题
@@ -56,8 +56,8 @@
 响应（200，**从不含明文、不含哈希**）：
 
 ```json
-{"id":7,"name":"lzhichao@lagenio.com","account_id":4,"key_prefix":"sk-62e1a0b4c",
- "status":"active","tags":["蓝精灵3"],"created":true,
+{"id":7,"name":"lilei@example.com","account_id":4,"key_prefix":"sk-000000000",
+ "status":"active","tags":["测试标签3"],"created":true,
  "note":"only the prefix and its hash were written: the gateway does not know the plaintext"}
 ```
 

@@ -93,7 +93,7 @@ const fakeCtx = {
         if (endpoint === 'hosts') {
           return {
             ok: true,
-            value: { aliases: [{ name: 'gpt001' }], allowList: [], mountSubdir: 'ssh', home: '/w/dsh-a', sshConfig: true, identity: true },
+            value: { aliases: [{ name: 'gw-a' }], allowList: [], mountSubdir: 'ssh', home: '/w/dsh-a', sshConfig: true, identity: true },
           }
         }
         if (endpoint === 'identityStatus') return { ok: true, value: { default: { configured: false }, host: { configured: false }, effective: 'none' } }
@@ -101,7 +101,7 @@ const fakeCtx = {
         if (endpoint === 'mounts') return { ok: true, value: { mounts: [], replies: [], mountSubdir: 'ssh', mirror: false } }
         if (endpoint === 'probe') return { ok: true, value: { host: payload.host, home: '/home/remote' } }
         if (endpoint === 'list') return { ok: true, value: { path: payload.path, entries: [], truncated: false } }
-        if (endpoint === 'open') return { ok: true, value: { id: 'open-1', host: payload.host, remote: payload.remote, mountpoint: '/w/dsh-a/ssh/gpt001/opt', pending: true } }
+        if (endpoint === 'open') return { ok: true, value: { id: 'open-1', host: payload.host, remote: payload.remote, mountpoint: '/w/dsh-a/ssh/gw-a/opt', pending: true } }
         return { ok: true, value: {} }
       },
     },
@@ -173,7 +173,7 @@ check(sections.some((node) => node && node.type === 'div' && node.props.classNam
 const serialized = JSON.stringify(dialogElement, (key, value) => (typeof value === 'function' ? '[fn]' : value))
 check(serialized.includes('SSH 工作区'), 'the dialog carries its title')
 check(serialized.includes('已挂载的远端目录'), 'the dialog lists mounts')
-check(serialized.includes('gpt001'), 'the host suggestion from the account config is offered')
+check(serialized.includes('gw-a'), 'the host suggestion from the account config is offered')
 check(serialized.includes('用户名') && serialized.includes('端口'), 'the dialog exposes independent SSH username and port fields')
 check(serialized.includes('SSH 私钥') && serialized.includes('当前生效'), 'the dialog exposes identity scope and effective status')
 check(serialized.includes('上传/替换') && serialized.includes('删除'), 'the dialog exposes identity replacement and deletion actions')
@@ -316,7 +316,7 @@ equal(newNameInput().props.value, 'logs', 'typing a host keeps the new-directory
 // these assertions are about the dialog: what it shows, and what it sends when a person adds,
 // picks or deletes a host.
 let entryList = [
-  { name: 'aipc', hostName: '192.168.140.252', user: 'winger', port: 22, key: { configured: false, fingerprint: '' }, mounted: false },
+  { name: 'gw-d', hostName: '192.0.2.108', user: 'operator', port: 22, key: { configured: false, fingerprint: '' }, mounted: false },
 ]
 const entryCalls = []
 fakeCtx.connection.rpc.call = async (channel, endpoint, payload) => {
@@ -357,8 +357,8 @@ fakeCtx.connection.rpc.call = async (channel, endpoint, payload) => {
 }
 await element.props.onClick()
 const hostSerialized = () => JSON.stringify(renderDialog(), (key, value) => (typeof value === 'function' ? '[fn]' : value))
-check(hostSerialized().includes('我的主机（1）') && hostSerialized().includes('aipc'), 'the account aliases are listed')
-check(hostSerialized().includes('winger@192.168.140.252:22'), 'an entry shows the identity it stands for')
+check(hostSerialized().includes('我的主机（1）') && hostSerialized().includes('gw-d'), 'the account aliases are listed')
+check(hostSerialized().includes('operator@192.0.2.108:22'), 'an entry shows the identity it stands for')
 equal(byKey('add').props.disabled, true, 'adding without an address is not possible')
 
 // Adding writes the entry through the account-side plugin and puts the new alias in 主机.
@@ -381,7 +381,7 @@ deepEqual(entryCalls.filter((call) => call.endpoint === 'identityStatus').at(-1)
 // Picking an entry clears the explicit 用户名/端口: those live in the entry's config block.
 byKey('use').props.onClick()
 await new Promise((resolve) => setTimeout(resolve, 0))
-equal(hostInput().props.value, 'aipc', 'picking an entry fills 主机 with its alias')
+equal(hostInput().props.value, 'gw-d', 'picking an entry fills 主机 with its alias')
 equal(byKey('user').props.value, '', 'picking an entry clears the explicit user')
 equal(byKey('entry-port').props.value, '', 'the add form is not the connection port field')
 
@@ -394,8 +394,8 @@ equal(entryCalls.length, beforeCancel, 'a cancelled delete issues no RPC')
 sandboxWindow.confirm = () => true
 byKey('remove').props.onClick()
 await new Promise((resolve) => setTimeout(resolve, 0))
-equal(entryCalls.findLast((call) => call.endpoint === 'deleteHost').payload.name, 'aipc', 'the confirmed delete names the entry')
-check(!hostSerialized().includes('winger@192.168.140.252:22'), 'the deleted entry is gone from the list')
+equal(entryCalls.findLast((call) => call.endpoint === 'deleteHost').payload.name, 'gw-d', 'the confirmed delete names the entry')
+check(!hostSerialized().includes('operator@192.0.2.108:22'), 'the deleted entry is gone from the list')
 
 // A refusal from the account side is shown, not swallowed.
 fakeCtx.connection.rpc.call = async (channel, endpoint, payload) => {

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
 )
 
 func storePath(t *testing.T) string {
@@ -43,13 +43,13 @@ func TestPutGetListDeleteRoundTrip(t *testing.T) {
 	}
 	node := Node{
 		Name:  "node-a",
-		URL:   "http://192.168.190.87:18400",
+		URL:   "http://192.0.2.102:18400",
 		Token: "node-a-token",
 		SSH: SSH{
-			Host:    "192.168.190.87",
+			Host:    "192.0.2.102",
 			Port:    22,
-			User:    "winger",
-			KeyFile: "/home/winger/.ssh/id_ed25519",
+			User:    "operator",
+			KeyFile: "/home/operator/.ssh/id_ed25519",
 		},
 		Deploy: Deploy{Dir: "/srv/dshgw-node", WorkerPortLo: 32100, WorkerPortHi: 32299},
 		Status: Status{State: StatePending},
@@ -73,7 +73,7 @@ func TestPutGetListDeleteRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("node-a is missing after reload")
 	}
-	if got.URL != node.URL || got.SSH.User != "winger" || got.Deploy.Dir != "/srv/dshgw-node" {
+	if got.URL != node.URL || got.SSH.User != "operator" || got.Deploy.Dir != "/srv/dshgw-node" {
 		t.Fatalf("reloaded node = %+v", got)
 	}
 	if got.CreatedAt.IsZero() || got.UpdatedAt.IsZero() {
@@ -104,9 +104,9 @@ func TestPutValidation(t *testing.T) {
 		{"empty name", Node{URL: "http://10.0.0.1:1", Token: "t"}, "node name"},
 		{"reserved name", Node{Name: "local", URL: "http://10.0.0.1:1", Token: "t"}, "must match"},
 		{"uppercase name", Node{Name: "Node-A", URL: "http://10.0.0.1:1", Token: "t"}, "must match"},
-		{"bad url", Node{Name: "node-a", URL: "192.168.190.87:18400", Token: "t"}, "http:// URL"},
-		{"https url", Node{Name: "node-a", URL: "https://192.168.190.87", Token: "t"}, "http:// URL"},
-		{"url with path", Node{Name: "node-a", URL: "http://192.168.190.87/node", Token: "t"}, "http:// URL"},
+		{"bad url", Node{Name: "node-a", URL: "192.0.2.102:18400", Token: "t"}, "http:// URL"},
+		{"https url", Node{Name: "node-a", URL: "https://192.0.2.102", Token: "t"}, "http:// URL"},
+		{"url with path", Node{Name: "node-a", URL: "http://192.0.2.102/node", Token: "t"}, "http:// URL"},
 		{"both token sources", Node{Name: "node-a", URL: "http://10.0.0.1:1", Token: "t", TokenFile: "/tmp/x"}, "not both"},
 		{"relative deploy dir", Node{Name: "node-a", URL: "http://10.0.0.1:1", Token: "t", Deploy: Deploy{Dir: "srv/node"}}, "absolute"},
 		{"inverted port band", Node{Name: "node-a", URL: "http://10.0.0.1:1", Token: "t", Deploy: Deploy{WorkerPortLo: 33, WorkerPortHi: 32}}, "low bound"},
@@ -126,7 +126,7 @@ func TestPutValidation(t *testing.T) {
 	}
 	// Registration with no address yet is legal, and so is an address with no secret yet: both are
 	// what "registered, not deployed" looks like. The deploy installs the token and records it.
-	if err := store.Put(Node{Name: "node-b", SSH: SSH{Host: "10.0.0.2", User: "winger", KeyFile: "/keys/b"}}); err != nil {
+	if err := store.Put(Node{Name: "node-b", SSH: SSH{Host: "10.0.0.2", User: "operator", KeyFile: "/keys/b"}}); err != nil {
 		t.Fatalf("a registered-but-undeployed node must be storable: %v", err)
 	}
 	if err := store.Put(Node{Name: "node-c", URL: "http://10.0.0.3:1", Status: Status{State: StatePending}}); err != nil {
@@ -145,17 +145,17 @@ func TestViewMergePrecedence(t *testing.T) {
 		Name:      "node-a",
 		URL:       "http://127.0.0.1:1",
 		Token:     "store-token",
-		SSH:       SSH{Host: "192.168.190.87", User: "winger", KeyFile: "/keys/a"},
+		SSH:       SSH{Host: "192.0.2.102", User: "operator", KeyFile: "/keys/a"},
 		Deploy:    Deploy{Dir: "/srv/node-a"},
 		Status:    Status{State: StateReady},
 		Overrides: Overrides{DirectoryPicker: "clamp"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(Node{Name: "node-b", URL: "http://192.168.190.88:18400", TokenFile: "/tokens/b"}); err != nil {
+	if err := store.Put(Node{Name: "node-b", URL: "http://192.0.2.103:18400", TokenFile: "/tokens/b"}); err != nil {
 		t.Fatal(err)
 	}
-	static := []config.Node{{Name: "node-a", URL: "http://192.168.190.87:18400", Token: "cfg-token"}}
+	static := []config.Node{{Name: "node-a", URL: "http://192.0.2.102:18400", Token: "cfg-token"}}
 	view, err := store.View(static)
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +167,7 @@ func TestViewMergePrecedence(t *testing.T) {
 	if a.Source != SourceConfig {
 		t.Fatalf("node-a source = %q, want config", a.Source)
 	}
-	if a.URL != "http://192.168.190.87:18400" || a.Token != "cfg-token" {
+	if a.URL != "http://192.0.2.102:18400" || a.Token != "cfg-token" {
 		t.Fatalf("configuration must win on identity: %+v", a)
 	}
 	if a.SSH.Host == "" || a.Deploy.Dir != "/srv/node-a" || a.Status.State != StateReady || a.Overrides.DirectoryPicker != "clamp" {

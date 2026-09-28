@@ -504,7 +504,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
             type: 'text',
             list: 'dshgw-ssh-hosts',
             value: current.host,
-            placeholder: 'gpt001 或 user@host',
+            placeholder: 'gw-a 或 user@host',
             onChange: (event) => { patch({ host: event.target.value }); hostChanged() },
           }),
           h('datalist', { id: 'dshgw-ssh-hosts', key: 'list' },
@@ -550,7 +550,7 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
             h('label', { key: 'label' }, '别名'),
             formField('name', '可选，默认用地址'),
             h('label', { key: 'label-2' }, '地址'),
-            formField('hostname', 'gpt001 或 10.0.0.5'),
+            formField('hostname', 'gw-a 或 10.0.0.5'),
           ]),
           h('div', { className: 'dshgw-ssh-row', key: 'add-2' }, [
             h('label', { key: 'label' }, '用户名'),

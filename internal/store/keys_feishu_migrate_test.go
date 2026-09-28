@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // M72 moves M60's key-level Feishu bindings onto their accounts, because from this milestone

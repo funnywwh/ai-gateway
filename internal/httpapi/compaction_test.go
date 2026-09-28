@@ -12,8 +12,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/responses"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/responses"
 )
 
 // compactionUpstream is an OpenAI-compatible upstream with no compaction of its own: it answers

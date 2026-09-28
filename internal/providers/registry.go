@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/winger/ai-gateway/internal/providers/openaichat"
-	"github.com/winger/ai-gateway/internal/providers/openaiimages"
-	"github.com/winger/ai-gateway/internal/providers/openairesponses"
-	"github.com/winger/ai-gateway/internal/providers/testecho"
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/internal/providers/openaichat"
+	"github.com/funnywwh/ai-gateway/internal/providers/openaiimages"
+	"github.com/funnywwh/ai-gateway/internal/providers/openairesponses"
+	"github.com/funnywwh/ai-gateway/internal/providers/testecho"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // Builtin kind names. Plugin kinds use the "plugin:<name>" form and are not built here.

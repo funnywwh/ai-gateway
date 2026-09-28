@@ -130,7 +130,7 @@ const settled = async () => { for (let i = 0; i < 300; i++) await Promise.resolv
 	const { serverRoot } = await import(pathToFileURL(path.join(root, 'internal/webui/static/js/base.js')).href);
 	for (const [url, want] of [
 		['http://127.0.0.1:8088/admin/ui/js/api.js', '/version'],
-		['https://mnl.iotalking.top/aigw/admin/ui/js/api.js', '/aigw/version'],
+		['https://gw-a.example.org/aigw/admin/ui/js/api.js', '/aigw/version'],
 	]) {
 		const got = serverRoot(url) + '/version';
 		check(`version URL under ${url}`, got === want, `${got} want ${want}`);

@@ -10,10 +10,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/winger/ai-gateway/internal/chat"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/ids"
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/internal/chat"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/ids"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // This file is the console chat's model transport. A chat step is not a bespoke model call:

@@ -47,19 +47,19 @@ func secondRemote(env *testEnv, tenant string) Remote {
 }
 
 func TestSeedConfigIsReadPerAccount(t *testing.T) {
-	dir := writeSeed(t, "dsh-colin", "Host colin-only\n  HostName 10.0.0.1\n", 0o644)
-	if err := os.WriteFile(filepath.Join(dir, "dsh-ran"), []byte("Host ran-only\n  HostName 10.0.0.2\n"), 0o644); err != nil {
+	dir := writeSeed(t, "dsh-alex", "Host alex-only\n  HostName 10.0.0.1\n", 0o644)
+	if err := os.WriteFile(filepath.Join(dir, "dsh-acct-e"), []byte("Host ran-only\n  HostName 10.0.0.2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	env := newTestEnv(t, Options{SSHConfigDir: dir})
 
-	if got := workspaceConfig(t, env.remote.Workspace); !strings.Contains(got, "Host colin-only") {
+	if got := workspaceConfig(t, env.remote.Workspace); !strings.Contains(got, "Host alex-only") {
 		t.Errorf("the account did not get its own seed:\n%s", got)
 	} else if strings.Contains(got, "ran-only") {
 		t.Errorf("the account got another account's seed:\n%s", got)
 	}
 
-	other := secondRemote(env, "dsh-ran")
+	other := secondRemote(env, "dsh-acct-e")
 	if err := os.MkdirAll(other.DshHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestSeedConfigIsReadPerAccount(t *testing.T) {
 	}
 	if got := workspaceConfig(t, other.Workspace); !strings.Contains(got, "Host ran-only") {
 		t.Errorf("the second account did not get its own seed:\n%s", got)
-	} else if strings.Contains(got, "colin-only") {
+	} else if strings.Contains(got, "alex-only") {
 		t.Errorf("the second account got another account's seed:\n%s", got)
 	}
 }
@@ -87,11 +87,11 @@ func TestSeedConfigMissingLeavesAnEmptyAliasList(t *testing.T) {
 // A seed is the operator's statement about which hosts the account may reach; one that cannot
 // be read as written is an error, never a silent "start with nothing".
 func TestSeedConfigRefusesUnusableFiles(t *testing.T) {
-	plain := "Host aipc\n  HostName 10.0.0.9\n"
+	plain := "Host gw-d\n  HostName 10.0.0.9\n"
 	t.Run("world writable", func(t *testing.T) {
-		dir := writeSeed(t, "dsh-colin", plain, 0o666)
+		dir := writeSeed(t, "dsh-alex", plain, 0o666)
 		env := newTestEnv(t, Options{SSHConfigDir: dir})
-		if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); err == nil {
+		if err := env.service.EnsureIdentity("dsh-alex", env.remote.Workspace, env.remote.DshHome); err == nil {
 			t.Fatal("a world-writable seed was accepted")
 		} else if CodeOf(err) != CodeInvalidState {
 			t.Fatalf("the refusal is not the seed check: %v", err)
@@ -103,38 +103,38 @@ func TestSeedConfigRefusesUnusableFiles(t *testing.T) {
 		if err := os.WriteFile(target, []byte(plain), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(target, filepath.Join(dir, "dsh-colin")); err != nil {
+		if err := os.Symlink(target, filepath.Join(dir, "dsh-alex")); err != nil {
 			t.Fatal(err)
 		}
 		env := newTestEnv(t, Options{SSHConfigDir: dir})
-		if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); err == nil {
+		if err := env.service.EnsureIdentity("dsh-alex", env.remote.Workspace, env.remote.DshHome); err == nil {
 			t.Fatal("a symlinked seed was accepted")
 		}
 	})
 	t.Run("hard linked", func(t *testing.T) {
-		dir := writeSeed(t, "dsh-colin", plain, 0o644)
-		if err := os.Link(filepath.Join(dir, "dsh-colin"), filepath.Join(dir, "elsewhere")); err != nil {
+		dir := writeSeed(t, "dsh-alex", plain, 0o644)
+		if err := os.Link(filepath.Join(dir, "dsh-alex"), filepath.Join(dir, "elsewhere")); err != nil {
 			t.Fatal(err)
 		}
 		env := newTestEnv(t, Options{SSHConfigDir: dir})
-		if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); err == nil {
+		if err := env.service.EnsureIdentity("dsh-alex", env.remote.Workspace, env.remote.DshHome); err == nil {
 			t.Fatal("a hard-linked seed was accepted")
 		}
 	})
 	t.Run("directory", func(t *testing.T) {
 		dir := t.TempDir()
-		if err := os.Mkdir(filepath.Join(dir, "dsh-colin"), 0o700); err != nil {
+		if err := os.Mkdir(filepath.Join(dir, "dsh-alex"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		env := newTestEnv(t, Options{SSHConfigDir: dir})
-		if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); err == nil {
+		if err := env.service.EnsureIdentity("dsh-alex", env.remote.Workspace, env.remote.DshHome); err == nil {
 			t.Fatal("a directory as a seed was accepted")
 		}
 	})
 	t.Run("oversized", func(t *testing.T) {
-		dir := writeSeed(t, "dsh-colin", strings.Repeat("# padding\n", 7000), 0o644)
+		dir := writeSeed(t, "dsh-alex", strings.Repeat("# padding\n", 7000), 0o644)
 		env := newTestEnv(t, Options{SSHConfigDir: dir})
-		if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); err == nil {
+		if err := env.service.EnsureIdentity("dsh-alex", env.remote.Workspace, env.remote.DshHome); err == nil {
 			t.Fatal("an oversized seed was accepted")
 		}
 	})
@@ -164,16 +164,16 @@ func TestTenantConfigNeverComesFromTheDeploymentAccountsSSHConfig(t *testing.T) 
 // The account owns its config once it exists: a later change to the seed (or none at all)
 // must not resurrect or overwrite what the account has — that is where 「我的主机」lives.
 func TestSeedChangesNeverOverwriteAnAccountsOwnConfig(t *testing.T) {
-	dir := writeSeed(t, "dsh-colin", "Host seeded\n  HostName 10.0.0.1\n", 0o644)
+	dir := writeSeed(t, "dsh-alex", "Host seeded\n  HostName 10.0.0.1\n", 0o644)
 	env := newTestEnv(t, Options{SSHConfigDir: dir})
 	accountOwned := "Host mine\n  HostName 10.0.0.7\n"
 	if err := os.WriteFile(filepath.Join(env.remote.Workspace, ".ssh", "config"), []byte(accountOwned), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "dsh-colin"), []byte("Host replaced\n  HostName 10.0.0.2\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "dsh-alex"), []byte("Host replaced\n  HostName 10.0.0.2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); err != nil {
+	if err := env.service.EnsureIdentity("dsh-alex", env.remote.Workspace, env.remote.DshHome); err != nil {
 		t.Fatalf("EnsureIdentity: %v", err)
 	}
 	if got := workspaceConfig(t, env.remote.Workspace); got != accountOwned {

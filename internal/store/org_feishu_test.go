@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // The org-node side of the directory sync (M70): the Feishu department link is what lets a

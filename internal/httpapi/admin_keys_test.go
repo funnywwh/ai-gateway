@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/ids"
-	"github.com/winger/ai-gateway/internal/secret"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/ids"
+	"github.com/funnywwh/ai-gateway/internal/secret"
 )
 
 // M80: the batch key import and the ownership lookup. These tests pin the three properties

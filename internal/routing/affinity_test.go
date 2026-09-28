@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/balancer"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/registry"
+	"github.com/funnywwh/ai-gateway/internal/balancer"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/registry"
 )
 
 // affinityFixture has three providers of one model: two sharing a priority tier and one in

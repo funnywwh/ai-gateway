@@ -15,13 +15,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/aigw"
-	"github.com/winger/ai-gateway/internal/dshgw/audit"
-	"github.com/winger/ai-gateway/internal/dshgw/config"
-	"github.com/winger/ai-gateway/internal/dshgw/nodeproto"
-	"github.com/winger/ai-gateway/internal/dshgw/proxy"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
-	"github.com/winger/ai-gateway/internal/dshgw/tenancy"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/aigw"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/audit"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeproto"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/proxy"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/tenancy"
 )
 
 // admin-serve is the M52 local provisioning channel: a root daemon listening on a UNIX

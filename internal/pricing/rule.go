@@ -15,7 +15,7 @@ import (
 
 	_ "time/tzdata" // the console and the gateway must not depend on host zoneinfo
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // RateScale is the denominator every rate is expressed against: rates are

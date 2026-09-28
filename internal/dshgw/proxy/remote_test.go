@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/nodeproto"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
-	"github.com/winger/ai-gateway/internal/dshgw/session"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeproto"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/session"
 )
 
 // The multi-machine tests (M77) reuse the package's single-machine fixture and swap in a fake

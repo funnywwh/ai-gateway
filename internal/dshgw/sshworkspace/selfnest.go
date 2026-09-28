@@ -14,9 +14,9 @@ import (
 // sshfs maps one remote directory onto one local mount point, and that mount point lives
 // inside the account's workspace (<workspace>/ssh/<host>/<remote path>). When the remote
 // directory is itself an ancestor of the mount point, the mounted tree contains the mount
-// point, so the mount contains itself: /home/winger/work/ai_gateway mounted from this very
-// host lands at .../workspaces/dsh-tenant/ssh/rag-server/home/winger/work/ai_gateway, which is
-// inside /home/winger/work/ai_gateway.
+// point, so the mount contains itself: /home/operator/work/ai_gateway mounted from this very
+// host lands at .../workspaces/dsh-tenant/ssh/gw-c/home/operator/work/ai_gateway, which is
+// inside /home/operator/work/ai_gateway.
 //
 // Nothing is broken at the moment of mounting. The damage starts with the first recursive
 // reader: `grep -r`, `find` and the workspace indexer descend into the mounted copy, meet the
@@ -44,7 +44,7 @@ var machineIDPath = "/etc/machine-id"
 
 // localHostAddresses collects every name this host answers to: its hostname (short and long
 // form), the loopback names, and each address of each interface. Comparing against all of them
-// is what makes an alias whose HostName is this host's own LAN address — the rag-server case —
+// is what makes an alias whose HostName is this host's own LAN address — the gw-c case —
 // recognizable without a single ssh round trip.
 func localHostAddresses() map[string]bool {
 	names := map[string]bool{
@@ -115,7 +115,7 @@ func (s *Service) refuseSelfNestedMount(ctx context.Context, remote Remote, host
 // isThisHost reports whether the ssh target is the gateway host itself, which is what makes the
 // remote directory a local directory and the containment question answerable here.
 func (s *Service) isThisHost(ctx context.Context, remote Remote, host string) bool {
-	// Resolving through the account's alias is what turns rag-server into 192.168.190.86. A
+	// Resolving through the account's alias is what turns gw-c into 192.0.2.101. A
 	// missing identity or an unreadable alias list is not this function's business: the mount
 	// that follows will fail on its own terms.
 	target, _, err := s.options.sshTarget(remote, host)
@@ -145,7 +145,7 @@ func (s *Service) isThisHost(ctx context.Context, remote Remote, host string) bo
 // ancestorOfMountpoint reports whether target names the mount point or one of its ancestors.
 //
 // It compares device and inode instead of path strings, because two spellings of one directory
-// are one directory: on this host /data/home/winger/work and /home/winger/work are two mount
+// are one directory: on this host /data/home/operator/work and /home/operator/work are two mount
 // points of the same ext4 file system, so a mount of the first is a mount of an ancestor of a
 // workspace under the second, and a string prefix test would have missed it. A symlinked
 // ancestor is caught for the same reason, since stat resolves the link.

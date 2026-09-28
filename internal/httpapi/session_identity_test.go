@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/responses"
-	"github.com/winger/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/responses"
+	"github.com/funnywwh/ai-gateway/internal/store"
 )
 
 func TestExplicitSessionGroupsDifferentCacheKeys(t *testing.T) {

@@ -32,7 +32,7 @@ func TestMountedAtDecodesEscapedPaths(t *testing.T) {
 	root := procFixture(t,
 		"proc /proc proc rw 0 0",
 		`dshgw-browser-workspace /srv/a\040b/browser/key fuse.browser-workspace rw 0 0`,
-		"winger@host:/home /srv/ssh/home fuse.sshfs rw 0 0",
+		"operator@host:/home /srv/ssh/home fuse.sshfs rw 0 0",
 	)
 	if got, err := MountedAt(root, "/srv/a b/browser/key"); err != nil || got != "fuse.browser-workspace" {
 		t.Fatalf("MountedAt(escaped) = %q, %v", got, err)

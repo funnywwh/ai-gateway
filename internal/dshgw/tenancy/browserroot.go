@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 // prepareBrowserMountRoot runs before launching a worker, never from a tenant

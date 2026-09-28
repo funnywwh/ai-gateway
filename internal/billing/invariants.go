@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/store"
 )
 
 // InvariantStore is the read-only view the audit needs. Reading it must happen in one

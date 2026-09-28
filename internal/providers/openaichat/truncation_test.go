@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // collect runs one stream and returns the text plus the events it saw.

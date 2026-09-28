@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // lf is the line feed used to build SSE frames (escape-free construction).

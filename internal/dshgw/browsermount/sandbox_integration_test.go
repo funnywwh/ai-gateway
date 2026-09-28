@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
-	fs "github.com/winger/ai-gateway/internal/dshgw/browserworkspace"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
-	"github.com/winger/ai-gateway/internal/dshgw/sandbox"
+	fs "github.com/funnywwh/ai-gateway/internal/dshgw/browserworkspace"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/sandbox"
 )
 
 // A real tenant profile must see the browser mount via its explicit bind. The

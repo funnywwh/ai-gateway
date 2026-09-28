@@ -52,11 +52,11 @@ GATEWAY = "http://127.0.0.1:8088/aigw"
 PASSWORD_FILE = "/opt/aigw/.admin-password"
 DB_PATH = "/opt/aigw/data/aigw.db"
 PSQL = ["docker", "exec", "-i", "sub2api-postgres", "psql", "-U", "sub2api", "-d", "sub2api"]
-DEFAULT_NOTES = "智天成"
-DEFAULT_TAGS = ["蓝精灵1", "蓝精灵2", "蓝精灵3"]
+DEFAULT_NOTES = "客户组一"
+DEFAULT_TAGS = ["测试标签1", "测试标签2", "测试标签3"]
 # 源分组 -> 目标标签：这些分组各自只含一个「已迁入 aigw 的供应商账号」，因此代表用户的既有订阅
 # 意图，先按它绑定，其余 key 再按均衡规则补齐。以数据校验，改不动就报错而不是猜。
-DEFAULT_INTENT_GROUPS = {"21": "蓝精灵2", "22": "蓝精灵3", "23": "蓝精灵1"}
+DEFAULT_INTENT_GROUPS = {"21": "测试标签2", "22": "测试标签3", "23": "测试标签1"}
 ACCOUNT_NOTE_PREFIX = "sub2api user #"
 IMPORT_MARKER = "import:"
 # Selftest residue is our own: the gateway has no delete route for accounts or keys, so the
@@ -856,7 +856,7 @@ def main() -> int:
     parser.add_argument("--db", default=DB_PATH, help="目标 ai_gateway 的 SQLite 路径（只读核对用）")
     parser.add_argument("--notes", default=DEFAULT_NOTES, help="源库 users.notes 过滤值")
     parser.add_argument("--tags", default=",".join(DEFAULT_TAGS), help="参与分配的目标标签，逗号分隔")
-    parser.add_argument("--intent-group", default="", help="分组=标签,分组=标签（默认按 gptjp 的 1/2/3 研发帐号）")
+    parser.add_argument("--intent-group", default="", help="分组=标签,分组=标签（默认按 gw-b 的 1/2/3 研发帐号）")
     parser.add_argument("--skip-key", action="append", default=[], help="该源 key 完全跳过")
     parser.add_argument("--limit", type=int, default=0, help="apply 只处理前 N 把（分批）")
     parser.add_argument("--coverage-days", type=int, default=30, help="模型名覆盖统计的回溯天数")

@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/admin"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/feishu"
-	"github.com/winger/ai-gateway/internal/ids"
+	"github.com/funnywwh/ai-gateway/internal/admin"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/feishu"
+	"github.com/funnywwh/ai-gateway/internal/ids"
 )
 
 // The console used to have exactly one administrator, seeded from bootstrap.admin. These

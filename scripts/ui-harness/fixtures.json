@@ -150,7 +150,7 @@
    {
     "account_id": 1,
     "id": 1,
-    "key_prefix": "sk-gw-981065ae",
+    "key_prefix": "sk-gw-00000000",
     "last_used_at": "2026-09-11T11:00:00Z",
     "name": "dev-key",
     "policy": {
@@ -1096,7 +1096,7 @@
     "account_name": "acme",
     "api_key_id": 1,
     "api_key_name": "dev-key",
-    "api_key_prefix": "sk-gw-981065ae",
+    "api_key_prefix": "sk-gw-00000000",
     "attempts": [
      {
       "attempt_no": 1,
@@ -1167,14 +1167,14 @@
      "reasoning_tokens": 12,
      "ttft_ms": 120
     },
-    "workspace": "/home/winger/work/ai_gateway"
+    "workspace": "/home/operator/work/ai_gateway"
    },
    {
     "account_id": 1,
     "account_name": "acme",
     "api_key_id": 1,
     "api_key_name": "dev-key",
-    "api_key_prefix": "sk-gw-981065ae",
+    "api_key_prefix": "sk-gw-00000000",
     "call_kind": "title",
     "client": "codex",
     "created_at": "2026-09-11T11:05:00Z",
@@ -1201,7 +1201,7 @@
      "reasoning_tokens": 0,
      "ttft_ms": 0
     },
-    "workspace": "/home/winger/work/other"
+    "workspace": "/home/operator/work/other"
    }
   ],
   "has_more": false,
@@ -1379,7 +1379,7 @@
    {
     "api_key_id": 1,
     "api_key_name": "dev-key",
-    "api_key_prefix": "sk-gw-981065ae",
+    "api_key_prefix": "sk-gw-00000000",
     "charge_micros": 7404,
     "cost_micros": 3702,
     "first_seen": "2026-09-11T11:00:00Z",
@@ -1422,7 +1422,7 @@
   "account_name": "acme",
   "api_key_id": 1,
   "api_key_name": "dev-key",
-  "api_key_prefix": "sk-gw-981065ae",
+  "api_key_prefix": "sk-gw-00000000",
   "attempts": [
    {
     "attempt_no": 1,
@@ -1507,7 +1507,7 @@
    "reasoning_tokens": 12,
    "ttft_ms": 120
   },
-  "workspace": "/home/winger/work/ai_gateway"
+  "workspace": "/home/operator/work/ai_gateway"
  },
  "/routes": {
   "count": 3,

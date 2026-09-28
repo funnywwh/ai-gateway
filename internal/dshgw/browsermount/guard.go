@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 // DetachedGuard protects offline CLI lifecycle operations. Only the serving

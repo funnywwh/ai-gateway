@@ -7,11 +7,11 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/winger/ai-gateway/internal/dshgw/aigw"
-	"github.com/winger/ai-gateway/internal/dshgw/config"
-	"github.com/winger/ai-gateway/internal/dshgw/proxy"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
-	"github.com/winger/ai-gateway/internal/dshgw/tenancy"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/aigw"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/proxy"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/tenancy"
 )
 
 // keyValidator is the part of the aigw client the refresh needs. It is an

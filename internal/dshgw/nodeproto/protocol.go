@@ -29,7 +29,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/aigw"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/aigw"
 )
 
 const (

@@ -27,8 +27,8 @@
 
 | 事实 | 证据 |
 |---|---|
-| 部署在 `192.168.190.86:8088` 的就是本仓库进程（v2.7.3，`systemctl --user` 单元 `aigw-local.service`） | `/version` + `ps` |
-| 应用 `cli_aa27b25392f91bdb` 可取 `tenant_access_token`，`contact/v3/departments`、`contact/v3/users` 均 code 0 | 直接调用实测 |
+| 部署在 `192.0.2.101:8088` 的就是本仓库进程（v2.7.3，`systemctl --user` 单元 `aigw-local.service`） | `/version` + `ps` |
+| 应用 `cli_0000000000000000` 可取 `tenant_access_token`，`contact/v3/departments`、`contact/v3/users` 均 code 0 | 直接调用实测 |
 | 但部门/人员**不含 `name`**，用户**不含 `department_ids`**（缺「获取部门基础信息」「获取用户基本信息」） | 响应体实测 → 只能按部门枚举成员 |
 | 飞书 `open_id` 与 `api_keys.feishu_open_id` 是同一套 id | 5 个已绑定 open_id 全部命中通讯录 |
 | 本地：28 个账户（20 个中文人名），`org_nodes` 0 行 | 只读查库 |

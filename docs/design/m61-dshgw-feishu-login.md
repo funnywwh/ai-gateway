@@ -91,7 +91,7 @@ dshgw 在端口模式默认按 `https` 生成 URL 并发 `Secure` cookie；明�
 ```yaml
 feishu:
   enabled: false
-  aigw_login_url: http://192.168.190.86:8090/feishu/login   # 浏览器可见的 aigw 入口
+  aigw_login_url: http://192.0.2.101:8090/feishu/login   # 浏览器可见的 aigw 入口
   ticket_secret: ""                                          # 与 aigw 相同（监督形态由 aigw 注入）
 ```
 

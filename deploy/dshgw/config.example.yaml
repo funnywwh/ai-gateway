@@ -16,7 +16,7 @@
 # nginx_include_path / nginx_binary / dshgw_binary / corepack_bin / worker_unit /
 # worker_unit_bwrap / worker_slice / gateway_unit / dsh_user_prefix / public_listen /
 # gateway_group / isolation，以及顶层 tls。严格解码器会拒绝它们。
-public_host: chat.tirisen.hk
+public_host: chat.example.com
 portal_port: 32600
 tenant_port_lo: 32601
 tenant_port_hi: 32799
@@ -26,7 +26,7 @@ listen: 127.0.0.1:3099          # dshgw 自己的监听地址；无 nginx 时租
 edge_port_header: X-DSHGW-Port
 max_header_bytes: 131072
 max_sessions: 10000
-aigw_base_url: http://192.168.190.86:8088
+aigw_base_url: http://aigw.internal:8088
 # 租户 dsh 一次请求里允许累积的 base64 图片载荷（M68，默认 7340032 = 7 MiB）。必须低于 aigw 的
 # server.max_body_bytes（默认 10485760）：网关对请求体是有界读取，超限时截断成 JSON 解析错误，
 # 而不是回一句「请求太大」。设了它 dsh 会把最旧的图片换成占位符，请求继续能成。
@@ -55,8 +55,8 @@ deploy:
   # 目录选择器插件没有默认值：directory_picker 为 clamp 时**必须**给出，否则配置加载失败。
   # 本仓库自带一份：cmd/dshgw/plugin/picker-clamp.js（相对部署根即可）。
   plugin_path: ./cmd/dshgw/plugin/picker-clamp.js
-  gateway_user: winger           # 网关自己以谁运行（aigw 的账号）
-  worker_user: winger            # 所有租户 worker 以谁运行：必须是已存在的非 root 账号
+  gateway_user: operator           # 网关自己以谁运行（aigw 的账号）
+  worker_user: operator            # 所有租户 worker 以谁运行：必须是已存在的非 root 账号
   bwrap_bin: /usr/bin/bwrap
   # 工作区在租户沙箱里的短路径（M79）。留空 = 只有宿主长路径一个视图（HOME 与 /etc/passwd 视图都用它）。
   # 设成 /workspace 时：工作区同时绑在长路径与短路径上，HOME/~、目录选择器、终端、文件管理器与变更
@@ -82,7 +82,7 @@ deploy:
 feishu:
   enabled: false
   # 浏览器可见的 aigw 登录入口（aigw 侧 feishu.callback_url 的 origin + /feishu/login）。
-  aigw_login_url: http://192.168.190.86:8090/feishu/login
+  aigw_login_url: http://192.0.2.101:8090/feishu/login
   # 必须与 aigw 的 feishu.ticket_secret 相同（aigw 留空时会由 credentials_key 派生并注入本文件）。
   ticket_secret: ""
 

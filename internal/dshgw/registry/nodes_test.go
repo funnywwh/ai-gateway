@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
 )
 
 // TestLegacyRegistryHasNoNode pins the compatibility rule the field was designed around: every

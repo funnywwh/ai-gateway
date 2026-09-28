@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/mcpsrv"
-	"github.com/winger/ai-gateway/internal/secret"
-	"github.com/winger/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/mcpsrv"
+	"github.com/funnywwh/ai-gateway/internal/secret"
+	"github.com/funnywwh/ai-gateway/internal/store"
 )
 
 // Three tokens, one per scope, so every branch of the permission model is

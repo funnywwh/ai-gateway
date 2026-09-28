@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/secret"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/secret"
 )
 
 // Store is the persistence subset the verifier needs.

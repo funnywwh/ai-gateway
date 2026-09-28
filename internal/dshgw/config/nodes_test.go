@@ -45,8 +45,8 @@ func TestNodeListValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	good := baseBody(root) + "nodes:\n" +
-		"  - name: node-a\n    url: http://192.168.190.87:18400\n    token_file: " + tokenFile + "\n" +
-		"  - name: node-b\n    url: http://192.168.190.88:18400\n    token: inline-token\n" +
+		"  - name: node-a\n    url: http://192.0.2.102:18400\n    token_file: " + tokenFile + "\n" +
+		"  - name: node-b\n    url: http://192.0.2.103:18400\n    token: inline-token\n" +
 		"default_node: node-b\n"
 	cfg, err := Load(writeConfig(t, good))
 	if err != nil {
@@ -185,8 +185,8 @@ func TestNodeTokenFileRules(t *testing.T) {
 func TestNodeModeValidation(t *testing.T) {
 	root := t.TempDir()
 	nodeBody := func(extra string) string {
-		return baseBody(root) + "aigw_base_url: http://192.168.190.86:8088\n" +
-			"node:\n  name: node-a\n  listen: 192.168.190.87:18400\n  token: node-token\n" + extra
+		return baseBody(root) + "aigw_base_url: http://aigw.internal:8088\n" +
+			"node:\n  name: node-a\n  listen: 192.0.2.102:18400\n  token: node-token\n" + extra
 	}
 	cfg, err := Load(writeConfig(t, nodeBody("")))
 	_ = cfg
@@ -199,7 +199,7 @@ func TestNodeModeValidation(t *testing.T) {
 	// The node-mode default data root is its own, so a node and a control plane may share a
 	// machine without sharing state.
 	bare := "public_host: dsh.example.test\ndeploy:\n  plugin_path: " + filepath.Join(root, "picker-clamp.js") + "\n" +
-		"node:\n  name: node-a\n  listen: 192.168.190.87:18400\n  token: node-token\n"
+		"node:\n  name: node-a\n  listen: 192.0.2.102:18400\n  token: node-token\n"
 	bareCfg, err := Load(writeConfig(t, bare))
 	if err != nil {
 		t.Fatal(err)
@@ -219,13 +219,13 @@ func TestNodeModeValidation(t *testing.T) {
 		{"missing listen", baseBody(root) + "node:\n  name: node-a\n  token: t\n", "node.listen is required"},
 		{"bare port", baseBody(root) + "node:\n  name: node-a\n  listen: ':18400'\n  token: t\n", "must name the interface"},
 		{"wildcard", baseBody(root) + "node:\n  name: node-a\n  listen: 0.0.0.0:18400\n  token: t\n", "wildcard"},
-		{"inside the worker band", baseBody(root) + "node:\n  name: node-a\n  listen: 192.168.190.87:32100\n  token: t\n", "worker port range"},
-		{"inside the public band", baseBody(root) + "node:\n  name: node-a\n  listen: 192.168.190.87:32601\n  token: t\n", "public portal/tenant port range"},
-		{"missing token", baseBody(root) + "node:\n  name: node-a\n  listen: 192.168.190.87:18400\n", "token or token_file"},
-		{"reserved name", baseBody(root) + "node:\n  name: local\n  listen: 192.168.190.87:18400\n  token: t\n", "must match"},
-		{"node carries a node list", baseBody(root) + "node:\n  name: node-a\n  listen: 192.168.190.87:18400\n  token: t\n" +
+		{"inside the worker band", baseBody(root) + "node:\n  name: node-a\n  listen: 192.0.2.102:32100\n  token: t\n", "worker port range"},
+		{"inside the public band", baseBody(root) + "node:\n  name: node-a\n  listen: 192.0.2.102:32601\n  token: t\n", "public portal/tenant port range"},
+		{"missing token", baseBody(root) + "node:\n  name: node-a\n  listen: 192.0.2.102:18400\n", "token or token_file"},
+		{"reserved name", baseBody(root) + "node:\n  name: local\n  listen: 192.0.2.102:18400\n  token: t\n", "must match"},
+		{"node carries a node list", baseBody(root) + "node:\n  name: node-a\n  listen: 192.0.2.102:18400\n  token: t\n" +
 			"nodes:\n  - {name: node-b, url: 'http://10.0.0.1:1', token: t}\n", "must not configure nodes"},
-		{"node carries a default node", baseBody(root) + "node:\n  name: node-a\n  listen: 192.168.190.87:18400\n  token: t\n" +
+		{"node carries a default node", baseBody(root) + "node:\n  name: node-a\n  listen: 192.0.2.102:18400\n  token: t\n" +
 			"default_node: node-b\n", "must not configure nodes"},
 	}
 	for _, tc := range cases {

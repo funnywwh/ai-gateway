@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/config"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 func policyFixture(t *testing.T) (*Manager, *WorkerRunner, registry.Tenant, string) {
@@ -232,7 +232,7 @@ func TestStopForLogoutDetachesMountsBeforeStoppingTheWorker(t *testing.T) {
 	var order []string
 	m, r, tenant, _ := policyFixture(t)
 	watching := &orderedBrowserHook{order: &order, attached: []string{filepath.Join(tenant.Workspace, "browser", "local")}}
-	ssh := &orderedSSHHook{order: &order, attached: []string{filepath.Join(tenant.Workspace, "ssh", "aipc", "home")}}
+	ssh := &orderedSSHHook{order: &order, attached: []string{filepath.Join(tenant.Workspace, "ssh", "gw-d", "home")}}
 	watching.duringDetach = func() {
 		if len(r.Running()) == 0 {
 			t.Error("the mounts were detached after the worker was already stopped")

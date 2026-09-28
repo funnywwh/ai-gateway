@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/ids"
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/internal/ids"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // Assembler translates canonical provider events into Responses API events and builds

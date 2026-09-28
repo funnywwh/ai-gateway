@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/providers/httpx"
-	"github.com/winger/ai-gateway/pkg/pluginapi"
-	"github.com/winger/ai-gateway/pkg/providerkit"
+	"github.com/funnywwh/ai-gateway/internal/providers/httpx"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/pkg/providerkit"
 )
 
 // Config is the provider configuration.

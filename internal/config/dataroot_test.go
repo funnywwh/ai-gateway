@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/hook"
-	"github.com/winger/ai-gateway/internal/pluginhost"
+	"github.com/funnywwh/ai-gateway/internal/hook"
+	"github.com/funnywwh/ai-gateway/internal/pluginhost"
 )
 
 // M63: the deployment has exactly one runtime data root, and every stateful default is

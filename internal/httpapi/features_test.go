@@ -5,7 +5,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/responses"
+	"github.com/funnywwh/ai-gateway/internal/responses"
 )
 
 // TestFeaturesOfMapsFormatLevelToCapability pins the capability a request actually needs.

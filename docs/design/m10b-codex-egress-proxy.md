@@ -9,7 +9,7 @@
 `HTTPS_PROXY` 再重启网关"。
 
 **要点**：这不是一个便利性功能，而是**可用性前提**。订阅端点与推理端点都由 OpenAI 按客户端 IP 的地区放行；
-在当前部署的出口（深圳，CHINANET，113.80.95.12）上，`auth.openai.com/oauth/token` 直接返回
+在当前部署的出口（深圳，CHINANET，198.51.100.105）上，`auth.openai.com/oauth/token` 直接返回
 `403 unsupported_country_region_territory`，`chatgpt.com` 更是连不通。凭据再正确也无法从这个出口使用。
 
 非目标：内建 provider 的代理支持（见第 7 节）；`no_proxy` 独立配置；代理健康预检；每供应商代理池；
@@ -262,14 +262,14 @@ func (p *provider) proxyError() error
    - 撤掉代理配置后探测回到 `unsupported_country_region_territory`，替身日志无新增流量
      ——**证明未配置时的默认路径未被破坏**。
 
-8. **真实代理下的端到端（2026-09-11 补测）**：代理 `http://192.168.140.252:2334` 可用后完成实测，**M10b 的目标全部达成**：
+8. **真实代理下的端到端（2026-09-11 补测）**：代理 `http://192.0.2.108:2334` 可用后完成实测，**M10b 的目标全部达成**：
 
    | 环节 | 结果 |
    |---|---|
    | 出口地区 | `ipinfo` 由国家 **CN** 变为 **PH**（Manila）；探测不再报 `unsupported_country_region_territory` |
    | 凭据刷新 | **成功**。`whoami` 报出新的 `expires_at=2026-09-21`、`last_refresh_at`，且轮换后的 refresh_token 已由插件落盘到 `session.json` |
    | 推理端点 | 已穿过 Cloudflare，返回**鉴权后的业务响应**（HTTP 400 + JSON），证明地区与凭据两道门都过了 |
-   | 代理生效 | `whoami` 报 `proxy=http://192.168.140.252:2334`、`proxy_source=config` |
+   | 代理生效 | `whoami` 报 `proxy=http://192.0.2.108:2334`、`proxy_source=config` |
 
    **出字的最后一环是模型 id**：`gpt-5-codex` 等 id 会被拒，而 **`gpt-5.6-luna` 可用**。换上该 id 后
    `/v1/responses` 非流式与流式均返回正确文本（`1+1等于2。` / `收到` / 流式 `delta` 分块拼接一致），

@@ -14,8 +14,8 @@ const base = await import(pathToFileURL(path.join(root, 'internal/webui/static/j
 const cases = [
 	['http://127.0.0.1:8088/admin/ui/js/api.js', '', '/admin/api/v1'],
 	['http://127.0.0.1:8088/admin/ui/js/pages/billing.js', '', '/admin/api/v1'],
-	['https://gpt.iotalking.top/aigw/admin/ui/js/api.js', '/aigw', '/aigw/admin/api/v1'],
-	['https://gpt.iotalking.top/aigw/admin/ui/js/pages/chat_artifact.js', '/aigw', '/aigw/admin/api/v1'],
+	['https://gw-a.example.net/aigw/admin/ui/js/api.js', '/aigw', '/aigw/admin/api/v1'],
+	['https://gw-a.example.net/aigw/admin/ui/js/pages/chat_artifact.js', '/aigw', '/aigw/admin/api/v1'],
 	['https://host/gateway/aigw/admin/ui/js/api.js', '/gateway/aigw', '/gateway/aigw/admin/api/v1'],
 	// A trailing-slash spelling of the console root, and a query the browser may append.
 	['https://host/aigw/admin/ui/js/api.js?v=2', '/aigw', '/aigw/admin/api/v1'],
@@ -38,7 +38,7 @@ for (const [url, wantMount, wantAPI] of cases) {
 // consolePath is what the console uses for links it builds itself (CSV export, backup
 // download, preview frame): it must stay inside the mount.
 for (const [url, wanted] of [
-	['https://gpt.iotalking.top/aigw/admin/ui/js/api.js', '/aigw/admin/api/v1/backups/7/download'],
+	['https://gw-a.example.net/aigw/admin/ui/js/api.js', '/aigw/admin/api/v1/backups/7/download'],
 	['http://127.0.0.1:8088/admin/ui/js/api.js', '/admin/api/v1/backups/7/download'],
 ]) {
 	const got = base.consolePath('/admin/api/v1/backups/7/download', url);

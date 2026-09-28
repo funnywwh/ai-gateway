@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/aigw"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/aigw"
 )
 
 func checkAPIKeyHeader(ctx context.Context, baseURL, key string) error {

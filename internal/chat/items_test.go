@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // buildHistory is the one decision point about what the model gets to see, so it is tested

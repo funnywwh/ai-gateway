@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	fs "github.com/winger/ai-gateway/internal/dshgw/browserworkspace"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	fs "github.com/funnywwh/ai-gateway/internal/dshgw/browserworkspace"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 type fakeMount struct {

@@ -135,9 +135,9 @@ MCP 侧（`docs/mcp.md` §4）已经有渐进披露的三工具桥，管理面�
 
 ```json
 {"found": true, "matched": "prefix", "count": 2, "keys": [
-   {"id": 7, "name": "laptop", "key_prefix": "sk-f69aeca55", "account_id": 4, "status": "active",
+   {"id": 7, "name": "laptop", "key_prefix": "sk-000000000", "account_id": 4, "status": "active",
     "tags": ["blue"], "effective_tags": ["acct", "blue"], "created_by": "import:ops"},
-   {"id": 9, "name": "phone", "key_prefix": "sk-f69aeca55", "account_id": 5, "status": "active",
+   {"id": 9, "name": "phone", "key_prefix": "sk-000000000", "account_id": 5, "status": "active",
     "tags": ["green"], "effective_tags": ["green"], "created_by": "import:ops"}],
  "note": "前缀不是身份（M87）：同一前缀可能对应多把 key，这里全部列出"}
 ```

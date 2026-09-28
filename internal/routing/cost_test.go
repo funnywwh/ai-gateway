@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/registry"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/registry"
 )
 
 // costGateStub marks providers as capped by id, so the filter can be tested without a

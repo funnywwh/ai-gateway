@@ -7,9 +7,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/winger/ai-gateway/internal/dshgw/config"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
-	"github.com/winger/ai-gateway/internal/dshgw/sandbox"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/sandbox"
 )
 
 // sandboxFailureExit is the launcher-failure status. Unit files and operators

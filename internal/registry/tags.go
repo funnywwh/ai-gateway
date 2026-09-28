@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // ResolveTagRecords returns the effective, existing tag records for an account/key pair.

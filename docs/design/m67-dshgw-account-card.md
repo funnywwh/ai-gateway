@@ -23,7 +23,7 @@
 
 ### D1 名字必须问 aigw，因此开关在 aigw 侧
 
-租户名（`dsh-colin`）是账号名 的 ASCII slug，人认不出来；飞书名（`李智超`）只存在于 aigw 的
+租户名（`dsh-alex`）是账号名 的 ASCII slug，人认不出来；飞书名（`李雷`）只存在于 aigw 的
 `api_keys.feishu_name`。dshgw 手里只有 worker Key，而**飞书绑定在「人的 Key」上，不在 worker Key 上**
 （[`mintDshgwKey`](../../internal/httpapi/admin_catalog.go) 造的 key 没有任何飞书字段），所以「只查
 当前认证 key」在真实部署里几乎永远查不到名字。
@@ -32,7 +32,7 @@
 （该账号**任一** Key 上的绑定）两个字段，纯新增、旧客户端忽略即可；已有调用点（门户登录、逐请求
 复核、dshgw 身份解析）共用同一次调用。查询失败只影响名字，绝不影响 `allowed`。
 
-**被否决的替代**：把账号名塞进 dshgw 注册表就完事（省一次调用，但显示的是 `colin` 这种 slug）；
+**被否决的替代**：把账号名塞进 dshgw 注册表就完事（省一次调用，但显示的是 `alex` 这种 slug）；
 把名字放进登录票据（要动票据契约与共享测试向量，且只覆盖飞书登录路径，API Key 登录仍然没有名字）。
 
 ### D2 账号名顺带落库，飞书名每次都问
@@ -212,10 +212,10 @@ account_card:
 
 | 检查 | 结果 |
 |---|---|
-| `POST /v1/dshgw/authorize`（用 dsh-colin 的 worker Key，直连 aigw 8088） | `{"account":"李智超(colin)","allowed":true,"feishu_name":"李智超","tenant":"dsh-colin"}` —— 绑定在**另一个** Key（`lzhichao@lagenio.com`）上，证明「扫该账号的 Key」这条路径真的能拿到名字 |
-| 账号名回填（admin socket `tenant-set-key` 带 `account`） | 注册表出现 `"account": "李智超(colin)"` |
-| `GET /dshgw/session/`（端口模式，带该租户会话 cookie） | 200 `{"ok":true,"value":{"authenticated":true,"tenant":"dsh-colin","account":"李智超(colin)","feishu_name":"李智超","name":"李智超"}}`，二次读取同样命中缓存 |
-| `GET /dshgw/session/`（无 cookie） | 302 到门户登录页（`https://chat.tirisen.hk:18300/`） |
+| `POST /v1/dshgw/authorize`（用 dsh-alex 的 worker Key，直连 aigw 8088） | `{"account":"李雷(alex)","allowed":true,"feishu_name":"李雷","tenant":"dsh-alex"}` —— 绑定在**另一个** Key（`lilei@example.com`）上，证明「扫该账号的 Key」这条路径真的能拿到名字 |
+| 账号名回填（admin socket `tenant-set-key` 带 `account`） | 注册表出现 `"account": "李雷(alex)"` |
+| `GET /dshgw/session/`（端口模式，带该租户会话 cookie） | 200 `{"ok":true,"value":{"authenticated":true,"tenant":"dsh-alex","account":"李雷(alex)","feishu_name":"李雷","name":"李雷"}}`，二次读取同样命中缓存 |
+| `GET /dshgw/session/`（无 cookie） | 302 到门户登录页（`https://chat.example.com:18300/`） |
 | `POST /dshgw/logout/` | 跨源 Origin → 403；`GET` → 405；正确 Origin → 303 + 清 cookie，随后同一 cookie 读身份变回 302 |
 | 错误行导致的故障与修复 | 见 §7 第 7 条：修复后四个租户 worker 全部 `ready`，租户页面恢复 |
 | 页面确实加载了浏览器半边 | 租户 `/` 的插件串里含 `dshgw-account-card/client.js`（排在 `dshgw-ssh-workspace`、`dshgw-browser-workspace` 之后） |

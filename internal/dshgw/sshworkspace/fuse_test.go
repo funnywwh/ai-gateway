@@ -194,7 +194,7 @@ func TestBreakWedgeReleasesAWedgedMount(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(remote, "file"), []byte("hello\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	mountCmd := exec.Command("sshfs", "-o", "BatchMode=yes,StrictHostKeyChecking=accept-new", "winger@127.0.0.1:"+remote, mount)
+	mountCmd := exec.Command("sshfs", "-o", "BatchMode=yes,StrictHostKeyChecking=accept-new", "operator@127.0.0.1:"+remote, mount)
 	if out, err := mountCmd.CombinedOutput(); err != nil {
 		t.Skipf("cannot make a local sshfs mount here: %v %s", err, out)
 	}

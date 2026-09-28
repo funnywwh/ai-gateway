@@ -335,9 +335,9 @@ export async function render({ page, actions, session }) {
       wide: true,
       fields: [
         { name: 'name', label: '节点名', value: '', placeholder: 'node-b（^[a-z][a-z0-9-]{0,25}$，不能是 local）' },
-        { name: 'listen', label: '节点监听地址', value: '', placeholder: '192.168.190.87:18400（host:port，不能是 0.0.0.0）' },
-        { name: 'ssh_host', label: 'ssh 主机', value: '', placeholder: '192.168.190.87' },
-        { name: 'ssh_user', label: 'ssh 账号', value: '', placeholder: 'winger（只支持密钥认证）' },
+        { name: 'listen', label: '节点监听地址', value: '', placeholder: '192.0.2.102:18400（host:port，不能是 0.0.0.0）' },
+        { name: 'ssh_host', label: 'ssh 主机', value: '', placeholder: '192.0.2.102' },
+        { name: 'ssh_user', label: 'ssh 账号', value: '', placeholder: 'operator（只支持密钥认证）' },
         { name: 'ssh_port', label: 'ssh 端口', value: '22' },
         { name: 'ssh_key_file', label: '私钥路径（控制面）', value: '', placeholder: '留空=<state>/node-ssh/<节点名>/id_ed25519' },
         { name: 'deploy_dir', label: '部署目录（目标机）', value: '', placeholder: '留空=/srv/dshgw-node' },

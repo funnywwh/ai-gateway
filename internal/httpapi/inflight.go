@@ -5,10 +5,10 @@ import (
 	"errors"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/billing"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/pricing"
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/internal/billing"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/pricing"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // errQuotaAborted ends a stream because the account ran out of quota mid-call.

@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/pricing"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/pricing"
 )
 
 // This file is the transport side of M22: it exposes the currency table to the

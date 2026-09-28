@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // TestBodyPassesTheReasoningControlThrough pins the one wire contract the DSH/pi-ai

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // feishuFixture creates one account with one active key and returns their ids.

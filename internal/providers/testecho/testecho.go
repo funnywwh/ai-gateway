@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/winger/ai-gateway/pkg/pluginapi"
-	"github.com/winger/ai-gateway/pkg/providerkit"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/pkg/providerkit"
 )
 
 // flattenContent turns a Responses content blob (string or array of parts) into text.

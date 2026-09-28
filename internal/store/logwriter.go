@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // LogWriter batches the two per-request audit writes (the `responses` row and the

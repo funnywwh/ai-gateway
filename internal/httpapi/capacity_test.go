@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/runtime"
+	"github.com/funnywwh/ai-gateway/internal/runtime"
 )
 
 // The provider concurrency ceiling is an end-to-end property: `providers.max_inflight` is

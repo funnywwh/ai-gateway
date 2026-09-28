@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // The system prompt is the whole reason the console chat behaves like a gateway operator

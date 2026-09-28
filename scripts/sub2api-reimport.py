@@ -5,12 +5,12 @@
 「整库重建」——把目标实例变成 sub2api 的一个镜像：全部存活用户 → 账户，全部活跃 key →
 导入的 key，sub2api 的上游账号 → 供应商，再按人群规则挂三个标签：
 
-    智天成  → 只授权 deepseek
-    电商    → 只授权 azure
-    E26Q    → 只授权 azure
+    客户组一  → 只授权 deepseek
+    客户组二    → 只授权 azure
+    K7QX    → 只授权 azure
 
-人群规则（可复算，先分组后备注）：有活跃 key 属于分组 20 的用户 → E26Q；否则 notes='智天成'
-→ 智天成；其余 → 电商。
+人群规则（可复算，先分组后备注）：有活跃 key 属于分组 20 的用户 → K7QX；否则 notes='客户组一'
+→ 客户组一；其余 → 客户组二。
 
 保密纪律（与 sub2api-migrate.py 同一条）：
   * key 的明文不出源库进程——前缀与哈希由源库 SQL 现算（`left(btrim(key),12)` 与
@@ -26,8 +26,8 @@
   wipe        换空库：config 补 bootstrap.admin（否则清库后无法登录）→ 停服 → 移走 db → 起服 → 断言空
   providers   按 sub2api 上游账号建 10 个供应商（codex 插件 / openai-chat / openai-responses）
   models      恢复对客模型 + 供应商模型 + 路由，并发现 azure 真实部署、补齐缺口
-  tags        建三个标签（智天成 / 电商 / E26Q）与授权
-  accounts    建 110 个账户并导入 128 把 key（含冲突重签与 E26Q 替换密钥重导）
+  tags        建三个标签（客户组一 / 客户组二 / K7QX）与授权
+  accounts    建 110 个账户并导入 128 把 key（含冲突重签与 K7QX 替换密钥重导）
   selftest    三个标签各一把自检 key 跑真实请求 + 负向 401
   verify      结构与授权核对（逐把比 prefix/hash、生效标签、分桶计数）
   report      写 /opt/aigw/data/sub2api-reimport-<ts>.json（0600，无密钥材料）
@@ -56,36 +56,36 @@ DB_PATH = "/opt/aigw/data/aigw.db"
 CONFIG_PATH = "/opt/aigw/config.yaml"
 DATA_DIR = "/opt/aigw/data"
 DEPLOY_DIR = "/opt/aigw"
-E26Q_REISSUE_FILE = "/opt/aigw/data/E26Q-reissue-key.txt"
+K7QX_REISSUE_FILE = "/opt/aigw/data/K7QX-reissue-key.txt"
 SERVICE = "aigw"
 PSQL = ["docker", "exec", "-i", "sub2api-postgres", "psql", "-U", "sub2api", "-d", "sub2api"]
 FIELD_SEP = "\x1f"
 
-E26Q_GROUP = "20"
-ZHITIANCHENG_NOTE = "智天成"
-POP_TAGS = ["智天成", "电商", "E26Q"]
+K7QX_GROUP = "20"
+ZHITIANCHENG_NOTE = "客户组一"
+POP_TAGS = ["客户组一", "客户组二", "K7QX"]
 TAG_GRANTS = {
-    "智天成": {"providers": ["deepseek"], "models": ["*"]},
-    "电商": {"providers": ["azure"], "models": ["*"]},
-    "E26Q": {"providers": ["azure"], "models": ["*"]},
+    "客户组一": {"providers": ["deepseek"], "models": ["*"]},
+    "客户组二": {"providers": ["azure"], "models": ["*"]},
+    "K7QX": {"providers": ["azure"], "models": ["*"]},
 }
 CODEX = "plugin:provider-codex"
 # (sub2api 上游账号 id, provider 名, kind, 源账号状态为 error 时是否建为 disabled)
 PROVIDER_SPECS = [
     (2, "lzhichao-lagenio-3-expiry", CODEX),
-    (3, "lizhichao-wisskys-3-expiry", CODEX),
-    (9, "liuhui-wisskys-8-expiry", CODEX),
-    (6, "codex-zhuyecheng", CODEX),
-    (4, "codex-funnywwh", CODEX),
+    (3, "lilei-corp-a-3-expiry", CODEX),
+    (9, "wangwu-corp-a-8-expiry", CODEX),
+    (6, "codex-zhangsan", CODEX),
+    (4, "codex-owner", CODEX),
     (1, "codex-libbygpt", CODEX),
     (7, "deepseek", "openai-chat"),
-    # 供应商名只允许 [A-Za-z0-9._-]（网关校验），所以「deepseek电商」用拼音落名。
-    (8, "deepseek-dianshang", "openai-chat"),
+    # 供应商名只允许 [A-Za-z0-9._-]（网关校验），所以「deepseek客户组二」用拼音落名。
+    (8, "deepseek-kehuzuer", "openai-chat"),
     (10, "azure", "openai-responses"),
     (11, "azure-2", "openai-responses"),
 ]
-# 明确不建：antigravity 不是 OpenAI 系上游，aigw 没有对应供应商类型。
-SKIP_SOURCE_ACCOUNTS = {5: "platform=antigravity（Google Cloud Code 系），aigw 无对应 kind"}
+# 明确不建：ProviderB 不是 OpenAI 系上游，aigw 没有对应供应商类型。
+SKIP_SOURCE_ACCOUNTS = {5: "platform=ProviderB（Google Cloud Code 系），aigw 无对应 kind"}
 ACCOUNT_NOTE_PREFIX = "sub2api user #"
 IMPORT_MARKER = "import:"
 SELFTEST_ACCOUNT = "zz-rebuild-selftest"
@@ -94,7 +94,7 @@ AZURE_SOURCE_ACCOUNT_ID = 10  # sub2api 上游账号：azure「ChatGPT 官 key�
 AZURE_POP_MODELS_FALLBACK = ["gpt-5.6-luna", "gpt-4o"]
 AZURE_MIN_REQUESTS = 5
 CANONICAL_MODEL_RE = re.compile(r"^[a-z0-9][a-z0-9.\-]*$")
-# 电商/E26Q 人群用得最多的几个模型：它们在 azure 上必须真实可用，其余只作记录。
+# 客户组二/K7QX 人群用得最多的几个模型：它们在 azure 上必须真实可用，其余只作记录。
 AZURE_REQUIRED_MODELS = ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra", "gpt-5.6-terra"]
 
 # 密钥材料的粗筛：只挡「完整密钥」，不挡 12 字符前缀——前缀是索引不是密钥（迁移报告里本来就要
@@ -237,16 +237,16 @@ def load_source(with_accounts: bool = False) -> Source:
 
 
 def usage_models_by_pop(days: int) -> dict[str, list[tuple[str, int]]]:
-    """近 N 天两个人群实际请求过的模型名（智天成 与 其余=电商+E26Q）。"""
+    """近 N 天两个人群实际请求过的模型名（客户组一 与 其余=客户组二+K7QX）。"""
     rows = psql(
         "SELECT CASE WHEN u.notes = " + sql_literal(ZHITIANCHENG_NOTE) +
-        " AND u.id NOT IN (SELECT DISTINCT user_id FROM api_keys WHERE group_id = " + E26Q_GROUP + ")"
-        "   THEN 'zhitiancheng' ELSE 'other' END AS pop, l.model, count(*) "
+        " AND u.id NOT IN (SELECT DISTINCT user_id FROM api_keys WHERE group_id = " + K7QX_GROUP + ")"
+        "   THEN 'kehuzuyi' ELSE 'other' END AS pop, l.model, count(*) "
         "FROM usage_logs l JOIN users u ON u.id = l.user_id "
         "WHERE u.deleted_at IS NULL AND l.created_at > now() - interval '" + str(int(days)) + " days' "
         "GROUP BY 1, 2 ORDER BY 1, 3 DESC;"
     )
-    out: dict[str, list[tuple[str, int]]] = {"zhitiancheng": [], "other": []}
+    out: dict[str, list[tuple[str, int]]] = {"kehuzuyi": [], "other": []}
     for row in rows:
         out.setdefault(row[0], []).append((row[1], int(row[2])))
     return out
@@ -411,15 +411,15 @@ def shred(path: str) -> None:
 
 
 def assign_tags(src: Source) -> dict[int, str]:
-    e26q_users = {key.user_id for key in src.keys if key.group_id == E26Q_GROUP}
+    k7qx_users = {key.user_id for key in src.keys if key.group_id == K7QX_GROUP}
     out: dict[int, str] = {}
     for user in src.users:
-        if user.id in e26q_users:
-            out[user.id] = "E26Q"
+        if user.id in k7qx_users:
+            out[user.id] = "K7QX"
         elif user.notes == ZHITIANCHENG_NOTE:
             out[user.id] = POP_TAGS[0]
         else:
-            out[user.id] = "电商"
+            out[user.id] = "客户组二"
     return out
 
 
@@ -475,8 +475,8 @@ def plan_reissues(src: Source, target: dict, export: dict | None = None) -> tupl
     return reissue, lines
 
 
-def read_e26q_replacement(path: str) -> tuple[str, str, str] | None:
-    """Read the plaintext of the key this instance minted for the E26Q user on 2026-09-14.
+def read_k7qx_replacement(path: str) -> tuple[str, str, str] | None:
+    """Read the plaintext of the key this instance minted for the K7QX user on 2026-09-14.
 
     It is the only user-facing key that exists *only* inside aigw (the source system never had
     it), so a rebuild would silently break that client. The value never leaves this process.
@@ -651,11 +651,11 @@ def cmd_inventory(args, gw: Gateway) -> int:
              f"改由控制台重签；保留 #{keep.id}（{user_by_id[keep.user_id].username}）")
 
     note("")
-    e26q = read_e26q_replacement(E26Q_REISSUE_FILE)
-    if e26q:
-        note(f"E26Q 替换密钥：{E26Q_REISSUE_FILE} 存在（前缀 {e26q[1]}），会原样重导到账户 E26Q")
+    k7qx = read_k7qx_replacement(K7QX_REISSUE_FILE)
+    if k7qx:
+        note(f"K7QX 替换密钥：{K7QX_REISSUE_FILE} 存在（前缀 {k7qx[1]}），会原样重导到账户 K7QX")
     else:
-        note(f"E26Q 替换密钥：{E26Q_REISSUE_FILE} 不存在——该用户可能需要在控制台重新取一把 key")
+        note(f"K7QX 替换密钥：{K7QX_REISSUE_FILE} 不存在——该用户可能需要在控制台重新取一把 key")
 
     note("")
     note(f"模型覆盖（近 {args.coverage_days} 天源库用量，目标侧还没有的名字将按 §4.2 补齐）")
@@ -665,7 +665,7 @@ def cmd_inventory(args, gw: Gateway) -> int:
     if not gaps:
         note("  全部命中")
     note("  人群用量前几名：")
-    for pop in ("zhitiancheng", "other"):
+    for pop in ("kehuzuyi", "other"):
         top = ", ".join(f"{m}={c}" for m, c in pop_usage.get(pop, [])[:6])
         note(f"    {pop}: {top}")
 
@@ -681,8 +681,8 @@ def cmd_inventory(args, gw: Gateway) -> int:
         if spec[2] != CODEX:
             continue
         state = os.path.join(DATA_DIR, "plugin-state", spec[1])
-        if spec[1] in ("lzhichao-lagenio-3-expiry", "lizhichao-wisskys-3-expiry",
-                       "liuhui-wisskys-8-expiry") \
+        if spec[1] in ("lzhichao-lagenio-3-expiry", "lilei-corp-a-3-expiry",
+                       "wangwu-corp-a-8-expiry") \
                 and spec[0] in live_specs and not os.path.isdir(state):
             problems.append(f"codex 供应商 {spec[1]} 的 plugin-state 目录缺失：{state}")
     for source_id in SKIP_SOURCE_ACCOUNTS:
@@ -972,7 +972,7 @@ def cmd_providers(args, gw: Gateway) -> int:
             "priority": 50, "weight": 100,
             "config": config,
             "credentials": creds,
-            "meta": {"source": "gptjp/sub2api", "source_account_id": source_id,
+            "meta": {"source": "gw-b/sub2api", "source_account_id": source_id,
                      "source_name": account.name, "source_status": account.status,
                      "source_type": account.atype, "reimport": time.strftime("%Y-%m-%d")},
         }
@@ -1124,7 +1124,7 @@ def cmd_models(args, gw: Gateway) -> int:
 
 
 def wanted_azure_models(args) -> list[str]:
-    """The model names the 电商/E26Q population actually asks for, plus the two known-good ones.
+    """The model names the 客户组二/K7QX population actually asks for, plus the two known-good ones.
 
     Three filters, all deliberate:
       * 音频转写端点（`*-transcribe`）不建：网关服务的是 /responses，不是转写接口；
@@ -1152,7 +1152,7 @@ def probe_azure_upstream(gw: Gateway, provider_id: dict[str, int]) -> dict:
     `GET <base_url>/models` with the `api-key` header. Read-only, and the key never leaves the
     process (it is never printed, and error text goes through redact()).
     """
-    azure_name = TAG_GRANTS["电商"]["providers"][0]
+    azure_name = TAG_GRANTS["客户组二"]["providers"][0]
     pid = provider_id.get(azure_name)
     result = {"provider": azure_name, "discovered": [], "canonical": {}, "refresh_error": "",
               "catalog_error": ""}
@@ -1194,11 +1194,11 @@ def probe_azure_upstream(gw: Gateway, provider_id: dict[str, int]) -> dict:
 
 
 def map_azure_models(gw: Gateway, args, provider_id: dict[str, int], probe: dict) -> dict:
-    """Map the models the 电商/E26Q population needs onto azure. Nothing is guessed: a name the
+    """Map the models the 客户组二/K7QX population needs onto azure. Nothing is guessed: a name the
     upstream catalogue does not have is reported as a gap instead of being written as a route
     that would fail at request time. The upstream spelling from the catalogue wins, because that
     is the deployment name the request has to carry."""
-    azure_name = TAG_GRANTS["电商"]["providers"][0]
+    azure_name = TAG_GRANTS["客户组二"]["providers"][0]
     pid = provider_id.get(azure_name)
     wanted = wanted_azure_models(args)
     discovered = list(probe.get("discovered") or [])
@@ -1359,17 +1359,17 @@ def cmd_accounts(args, gw: Gateway) -> int:
                  f"#{row['aigw_key_id']}（前缀 {row['aigw_key_prefix']}，标签 {row['tag']}）")
         note(f"重签明文：{reissue_file}（0600，交付后立刻 shred；未打印、未进报告）")
 
-    e26q = read_e26q_replacement(E26Q_REISSUE_FILE)
-    if e26q:
-        token, prefix, khash = e26q
-        account = accounts.get("E26Q")
+    k7qx = read_k7qx_replacement(K7QX_REISSUE_FILE)
+    if k7qx:
+        token, prefix, khash = k7qx
+        account = accounts.get("K7QX")
         if account is None:
-            note("  ! 没有名为 E26Q 的账户：E26Q 替换密钥未重导")
+            note("  ! 没有名为 K7QX 的账户：K7QX 替换密钥未重导")
         else:
             result = gw.call("POST", "/admin/api/v1/keys/import", {
                 "account_id": account["id"], "name": "图像 (替换原 sub2api key #24)",
-                "key_prefix": prefix, "key_hash": khash, "tags": ["E26Q"], "status": "active"})
-            note(f"  E26Q 替换密钥已重导：aigw key #{result.get('id')}（前缀 {prefix}，created="
+                "key_prefix": prefix, "key_hash": khash, "tags": ["K7QX"], "status": "active"})
+            note(f"  K7QX 替换密钥已重导：aigw key #{result.get('id')}（前缀 {prefix}，created="
                  f"{result.get('created')}）")
         del token
     return 0
@@ -1399,9 +1399,9 @@ def cmd_selftest(args, gw: Gateway) -> int:
         except json.JSONDecodeError:
             tokens = {}
     plan = {
-        "智天成": ("deepseek-flash", ["智天成"]),
-        "电商": (azure_models[0] if azure_models else "gpt-5.6-luna", ["电商"]),
-        "E26Q": (azure_models[0] if azure_models else "gpt-5.6-luna", ["E26Q"]),
+        "客户组一": ("deepseek-flash", ["客户组一"]),
+        "客户组二": (azure_models[0] if azure_models else "gpt-5.6-luna", ["客户组二"]),
+        "K7QX": (azure_models[0] if azure_models else "gpt-5.6-luna", ["K7QX"]),
     }
     failures = 0
     created_keys = []
@@ -1444,12 +1444,12 @@ def cmd_selftest(args, gw: Gateway) -> int:
     #   upstream_400「operation unsupported」→ 探测方式不适用（例如图像模型不接受文本请求），
     #     不算证伪，保持开启并记为未证实；
     #   其它 → 记录原文，不改路由（避免把上游抖动当成结论）。
-    probes = [m for m in azure_models if m not in (plan["电商"][0],)][:args.azure_probes]
+    probes = [m for m in azure_models if m not in (plan["客户组二"][0],)][:args.azure_probes]
     probed_ok: list[str] = []
     probed_bad: list[tuple[str, str]] = []
     probed_unverified: list[tuple[str, str]] = []
     if probes:
-        token = token_by_label.get("电商", "")
+        token = token_by_label.get("客户组二", "")
         note(f"azure 逐模型真实请求（{len(probes)} 个）：")
         for model in probes:
             set_azure_route_enabled(gw, model, True)
@@ -1473,7 +1473,7 @@ def cmd_selftest(args, gw: Gateway) -> int:
                 note(f"  已把 {len(disabled)} 条证伪（部署不存在）的 azure 路由置为 enabled=false："
                      + "、".join(disabled))
     missing_required = [m for m in AZURE_REQUIRED_MODELS
-                        if m not in probed_ok and m != plan["电商"][0]]
+                        if m not in probed_ok and m != plan["客户组二"][0]]
     probes_path = os.path.join(DATA_DIR, f"azure-probes-{stamp()}.json")
     with open(probes_path, "w") as fh:
         json.dump({"generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -1485,7 +1485,7 @@ def cmd_selftest(args, gw: Gateway) -> int:
     os.chmod(probes_path, 0o600)
     note(f"azure 逐模型结果：{probes_path}（0600）")
     if missing_required:
-        note(f"  ! 电商人群高频模型里有 {len(missing_required)} 个这台 azure 资源服务不了："
+        note(f"  ! 客户组二人群高频模型里有 {len(missing_required)} 个这台 azure 资源服务不了："
              + "、".join(missing_required)
              + "（要么在 azure 里建对应部署，要么把这些名字也授权给别的供应商）")
 
@@ -1502,7 +1502,7 @@ def cmd_selftest(args, gw: Gateway) -> int:
 
 
 def azure_selftest_models(gw: Gateway) -> list[str]:
-    """Prefer the azure deployments the 电商 population actually requests."""
+    """Prefer the azure deployments the 客户组二 population actually requests."""
     try:
         providers = {p["name"]: p for p in gw.list_all("/admin/api/v1/providers")}
     except GatewayError:
@@ -1522,7 +1522,7 @@ def set_azure_route_enabled(gw: Gateway, models, enabled: bool) -> list[str]:
     the previous run decided (a leftover disabled route would make the next probe report the
     gateway's own 403 instead of the upstream's answer), and to retire routes whose upstream
     deployment turned out not to exist."""
-    azure_name = TAG_GRANTS["电商"]["providers"][0]
+    azure_name = TAG_GRANTS["客户组二"]["providers"][0]
     targets = {models} if isinstance(models, str) else set(models)
     done: list[str] = []
     try:

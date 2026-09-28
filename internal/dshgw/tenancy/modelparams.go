@@ -9,7 +9,7 @@ package tenancy
 import (
 	"sort"
 
-	"github.com/winger/ai-gateway/internal/dshgw/aigw"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/aigw"
 )
 
 // providerModel is one entry of `llm-pi-ai.providers.aigw.models`.

@@ -19,7 +19,7 @@ func TestDimensionsReadsDSHAgentRequest(t *testing.T) {
 		"input":[
 			{"role":"developer","content":"You are an AI agent powered by DeepSeek Harness.\n\nThe DeepSeek Harness implementation checkout is at /home/winger/.local/dsh-0.1.2-rc.1/."},
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"重构请求日志"}]},
-			{"type":"message","role":"user","content":[{"type":"input_text","text":"Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nCurrent DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace: \"/home/winger/work/ai_gateway\". Some platform temporary areas may also be writable."}]}
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nCurrent DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace: \"/home/operator/work/ai_gateway\". Some platform temporary areas may also be writable."}]}
 		]
 	}`)
 
@@ -30,7 +30,7 @@ func TestDimensionsReadsDSHAgentRequest(t *testing.T) {
 	if got.SessionID != "session-ebf36761-3295-4881-bbec-73f80c9a4589" {
 		t.Fatalf("session_id = %q", got.SessionID)
 	}
-	if got.Workspace != "/home/winger/work/ai_gateway" {
+	if got.Workspace != "/home/operator/work/ai_gateway" {
 		t.Fatalf("workspace = %q", got.Workspace)
 	}
 }
@@ -122,7 +122,7 @@ func TestDimensionsReadsCodexRequest(t *testing.T) {
 		"instructions":"You are a coding agent running in the Codex CLI, a terminal-based coding assistant. Codex CLI is an open source project led by OpenAI.",
 		"input":[
 			{"type":"message","role":"developer","content":[{"type":"input_text","text":"<skills_instructions>\n## Skills\nA skill is a set of local instructions.\n</skills_instructions>"}]},
-			{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/home/winger/work/ai_gateway</cwd>\n  <shell>bash</shell>\n  <filesystem><workspace_roots><root>/home/winger/work/ai_gateway</root></workspace_roots></filesystem>\n</environment_context>"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/home/operator/work/ai_gateway</cwd>\n  <shell>bash</shell>\n  <filesystem><workspace_roots><root>/home/operator/work/ai_gateway</root></workspace_roots></filesystem>\n</environment_context>"}]},
 			{"type":"message","role":"user","content":[{"type":"input_text","text":"用一句话回答：1+1 等于几？"}]}
 		]
 	}`)
@@ -131,7 +131,7 @@ func TestDimensionsReadsCodexRequest(t *testing.T) {
 	if got.Client != ClientCodex || got.CallKind != CallKindAgent {
 		t.Fatalf("client/call_kind = %q/%q, want codex/agent", got.Client, got.CallKind)
 	}
-	if got.Workspace != "/home/winger/work/ai_gateway" {
+	if got.Workspace != "/home/operator/work/ai_gateway" {
 		t.Fatalf("workspace = %q", got.Workspace)
 	}
 	if got.SessionID != "01a08f27-cc56-7491-abf3-c5db92e442d9" {

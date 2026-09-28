@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/aigw"
-	"github.com/winger/ai-gateway/internal/dshgw/config"
-	"github.com/winger/ai-gateway/internal/dshgw/nodeproto"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
-	"github.com/winger/ai-gateway/internal/dshgw/sandbox"
-	"github.com/winger/ai-gateway/internal/dshgw/session"
-	"github.com/winger/ai-gateway/internal/dshgw/tenancy"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/aigw"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeproto"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/sandbox"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/session"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/tenancy"
 )
 
 // fixture builds a node-side Ops around a real manager whose workers are stand-in processes.

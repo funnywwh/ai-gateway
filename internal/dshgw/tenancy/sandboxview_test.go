@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 	"gopkg.in/yaml.v3"
 )
 

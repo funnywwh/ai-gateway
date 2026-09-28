@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/responses"
-	"github.com/winger/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/responses"
+	"github.com/funnywwh/ai-gateway/internal/store"
 )
 
 // The bodies below are the shapes M27's extractor keys on, trimmed to what it reads: a
@@ -25,14 +25,14 @@ const dshAgentBody = `{"model":"echo-model","stream":false,` +
 	`"input":[` +
 	`{"role":"developer","content":"You are an AI agent powered by DeepSeek Harness.\n\nThe DeepSeek Harness implementation checkout is at /home/winger/.local/dsh-0.1.2-rc.1/."},` +
 	`{"type":"message","role":"user","content":[{"type":"input_text","text":"重构请求日志"}]},` +
-	`{"type":"message","role":"user","content":[{"type":"input_text","text":"Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nCurrent DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace: \"/home/winger/work/ai_gateway\". Some platform temporary areas may also be writable."}]}` +
+	`{"type":"message","role":"user","content":[{"type":"input_text","text":"Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nCurrent DSH file policy: workspace-write. Any available operation enforced by the DSH file sandbox may modify files under the session workspace: \"/home/operator/work/ai_gateway\". Some platform temporary areas may also be writable."}]}` +
 	`]}`
 
 const codexAgentBody = `{"model":"echo-model","stream":false,` +
 	`"prompt_cache_key":"01a08f27-cc56-7491-abf3-c5db92e442d9",` +
 	`"instructions":"You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",` +
 	`"input":[` +
-	`{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/home/winger/work/ai_gateway</cwd>\n  <shell>bash</shell>\n</environment_context>"}]},` +
+	`{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/home/operator/work/ai_gateway</cwd>\n  <shell>bash</shell>\n</environment_context>"}]},` +
 	`{"type":"message","role":"user","content":[{"type":"input_text","text":"用一句话回答：1+1 等于几？"}]}` +
 	`]}`
 
@@ -78,7 +78,7 @@ func TestRequestLogRecordsDSHIdentity(t *testing.T) {
 	if row.Client != "dsh" {
 		t.Fatalf("client = %q, want dsh", row.Client)
 	}
-	if row.Workspace != "/home/winger/work/ai_gateway" {
+	if row.Workspace != "/home/operator/work/ai_gateway" {
 		t.Fatalf("workspace = %q", row.Workspace)
 	}
 	if row.SessionID != "session-ebf36761-3295-4881-bbec-73f80c9a4589" {
@@ -111,7 +111,7 @@ func TestRequestLogRecordsCodexIdentity(t *testing.T) {
 	if row.Client != "codex" {
 		t.Fatalf("client = %q, want codex", row.Client)
 	}
-	if row.Workspace != "/home/winger/work/ai_gateway" {
+	if row.Workspace != "/home/operator/work/ai_gateway" {
 		t.Fatalf("workspace = %q", row.Workspace)
 	}
 	if row.SessionID != "01a08f27-cc56-7491-abf3-c5db92e442d9" {
@@ -165,7 +165,7 @@ func TestRequestLogKeepsIdentityWhenInputRecordingIsOff(t *testing.T) {
 	if row.RecordInputMode != "off" || row.RequestJSON != "" {
 		t.Fatalf("off must keep the row without content: mode=%q body=%q", row.RecordInputMode, row.RequestJSON)
 	}
-	if row.Client != "dsh" || row.Workspace != "/home/winger/work/ai_gateway" ||
+	if row.Client != "dsh" || row.Workspace != "/home/operator/work/ai_gateway" ||
 		row.SessionID == "" || row.Model != "echo-model" {
 		t.Fatalf("identity must survive record_input=off: %+v", row)
 	}
@@ -265,7 +265,7 @@ func TestSkeletonRowKeepsIdentity(t *testing.T) {
 	rec := &domain.RequestLogRecord{
 		RequestID: "req_skeleton0001", Status: "completed", RequestJSON: `{"input":"ping"}`,
 		ResponseText: "answer", Client: "dsh", Model: "deepseek-flash", ResolvedModel: "deepseek-flash",
-		ReasoningEffort: "high", Workspace: "/home/winger/work/ai_gateway", SessionID: "session-abc", CallKind: "agent",
+		ReasoningEffort: "high", Workspace: "/home/operator/work/ai_gateway", SessionID: "session-abc", CallKind: "agent",
 	}
 	bare := skeletonLog(rec)
 
@@ -273,7 +273,7 @@ func TestSkeletonRowKeepsIdentity(t *testing.T) {
 		t.Fatalf("the skeleton must drop content: %+v", bare)
 	}
 	if bare.Client != "dsh" || bare.Model != "deepseek-flash" || bare.ResolvedModel != "deepseek-flash" ||
-		bare.ReasoningEffort != "high" || bare.Workspace != "/home/winger/work/ai_gateway" ||
+		bare.ReasoningEffort != "high" || bare.Workspace != "/home/operator/work/ai_gateway" ||
 		bare.SessionID != "session-abc" || bare.CallKind != "agent" {
 		t.Fatalf("the skeleton must keep the identity: %+v", bare)
 	}
@@ -301,7 +301,7 @@ func TestAdminRequestsCarryIdentityAndUsage(t *testing.T) {
 		RequestID: "req_dim0001", AccountID: 1, APIKeyID: 1, Endpoint: "/v1/responses",
 		Status: "completed", RecordInputMode: "user", Client: "dsh", Model: "luna",
 		ResolvedModel: "deepseek-flash", ReasoningEffort: "medium",
-		Workspace: "/home/winger/work/ai_gateway", SessionID: "session-ebf36761", CallKind: "agent", Title: "",
+		Workspace: "/home/operator/work/ai_gateway", SessionID: "session-ebf36761", CallKind: "agent", Title: "",
 	})
 	usage := &domain.UsageRecord{
 		RequestID: "req_dim0001", AttemptNo: 1, AccountID: 1, APIKeyID: 1,
@@ -326,7 +326,7 @@ func TestAdminRequestsCarryIdentityAndUsage(t *testing.T) {
 	if item["reasoning_effort"] != "medium" {
 		t.Fatalf("list row reasoning_effort = %v, want medium", item["reasoning_effort"])
 	}
-	if item["workspace"] != "/home/winger/work/ai_gateway" || item["session_id"] != "session-ebf36761" {
+	if item["workspace"] != "/home/operator/work/ai_gateway" || item["session_id"] != "session-ebf36761" {
 		t.Fatalf("list row lacks the workspace/session: %v", item)
 	}
 	got, _ := item["usage"].(map[string]any)
@@ -427,18 +427,18 @@ func TestAdminRequestDimensionsGroupsAndFilters(t *testing.T) {
 	seedIdentityRow(t, f, &domain.RequestLogRecord{
 		RequestID: "req_dim0010", AccountID: 1, APIKeyID: 1, Endpoint: "/v1/responses",
 		Status: "completed", Client: "dsh", Model: "deepseek-flash", ResolvedModel: "deepseek-flash",
-		Workspace: "/home/winger/work/ai_gateway", SessionID: "session-aaa", CallKind: "agent",
+		Workspace: "/home/operator/work/ai_gateway", SessionID: "session-aaa", CallKind: "agent",
 	})
 	seedIdentityRow(t, f, &domain.RequestLogRecord{
 		RequestID: "req_dim0011", AccountID: 1, APIKeyID: 1, Endpoint: "/v1/responses",
 		Status: "completed", Client: "dsh", Model: "deepseek-flash", ResolvedModel: "deepseek-flash",
-		Workspace: "/home/winger/work/ai_gateway", SessionID: "session-aaa", CallKind: "title",
+		Workspace: "/home/operator/work/ai_gateway", SessionID: "session-aaa", CallKind: "title",
 		Title: "从 dsh 和 codex 请求解析 workspace",
 	})
 	seedIdentityRow(t, f, &domain.RequestLogRecord{
 		RequestID: "req_dim0012", AccountID: 1, APIKeyID: 1, Endpoint: "/v1/responses",
 		Status: "completed", Client: "codex", Model: "gpt-5.6-luna", ResolvedModel: "gpt-5.6-luna",
-		Workspace: "/home/winger/work/ai_gateway", SessionID: "01a08f27", CallKind: "agent",
+		Workspace: "/home/operator/work/ai_gateway", SessionID: "01a08f27", CallKind: "agent",
 	})
 
 	body := decodeJSONBody(t, f.call(t, http.MethodGet,
@@ -488,7 +488,7 @@ func TestAdminRequestDimensionsGroupsAndFilters(t *testing.T) {
 			continue
 		}
 		found = true
-		if row["workspace"] != "/home/winger/work/ai_gateway" {
+		if row["workspace"] != "/home/operator/work/ai_gateway" {
 			t.Fatalf("session bucket lost its workspace: %v", row)
 		}
 		if row["title"] != "从 dsh 和 codex 请求解析 workspace" {
@@ -704,12 +704,12 @@ func TestAdminRequestsFilterByIdentity(t *testing.T) {
 	seedIdentityRow(t, f, &domain.RequestLogRecord{
 		RequestID: "req_dim0020", AccountID: 1, APIKeyID: 1, Endpoint: "/v1/responses",
 		Status: "completed", Client: "dsh", Model: "deepseek-flash",
-		SessionID: "session-ebf36761", Workspace: "/home/winger/work/ai_gateway",
+		SessionID: "session-ebf36761", Workspace: "/home/operator/work/ai_gateway",
 	})
 	seedIdentityRow(t, f, &domain.RequestLogRecord{
 		RequestID: "req_dim0021", AccountID: 1, APIKeyID: 1, Endpoint: "/v1/responses",
 		Status: "completed", Client: "codex", Model: "gpt-5.6-luna",
-		SessionID: "01a08f27", Workspace: "/home/winger/work/other",
+		SessionID: "01a08f27", Workspace: "/home/operator/work/other",
 	})
 
 	body := decodeJSONBody(t, f.call(t, http.MethodGet, "/admin/api/v1/requests?days=1&client=codex&limit=10", "", cookie))
@@ -735,7 +735,7 @@ func TestAdminRequestsFilterByIdentity(t *testing.T) {
 	}
 
 	workspaces := decodeJSONBody(t, f.call(t, http.MethodGet,
-		"/admin/api/v1/requests?days=1&workspace=/home/winger/work/other", "", cookie))
+		"/admin/api/v1/requests?days=1&workspace=/home/operator/work/other", "", cookie))
 	wrows, _ := workspaces["data"].([]any)
 	if len(wrows) != 1 {
 		t.Fatalf("workspace filter returned %d rows, want 1", len(wrows))

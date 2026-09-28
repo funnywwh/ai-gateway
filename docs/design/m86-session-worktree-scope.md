@@ -15,7 +15,7 @@
 | 事实 | 证据 |
 |---|---|
 | 行 root 由网关写死为账号工作区（或 M79 短路径） | `internal/dshgw/tenancy/patch.go` 的 `gitDiffRow()`；本机租户 `profiles/web/cordis.patch.yml` 里 `root: /…/state/workspaces/dsh-tenant` |
-| 现场表现是"全账号仓库" | `plugin-state/git-diff.trace.jsonl` 最后一条 `discover`：`root=…/state/workspaces/dsh-tenant`，`repos=[work/ai-gateway, work/ai-gateway-m84, work/deepseek-harness, ssh/aipc/home/winger/ZT20Q]` |
+| 现场表现是"全账号仓库" | `plugin-state/git-diff.trace.jsonl` 最后一条 `discover`：`root=…/state/workspaces/dsh-tenant`，`repos=[work/ai-gateway, work/ai-gateway-m84, work/deepseek-harness, ssh/gw-d/home/operator/ZT20Q]` |
 | **git 能给出精确答案** | 只读实测：`work/ai-gateway` → 自身；`work/ai-gateway/internal` → `work/ai-gateway`；`…/work` 与账号根 → `fatal: not a git repository`；`ssh/…/ZT20Q`（sshfs）→ 该挂载路径 |
 | 会话 cwd 的 work tree 就是它真正在改的仓库 | 3 个 `workspace = …/work/ai-gateway` 会话的工具调用里 595 处绝对路径引用逐个判 work tree：**100% 落在该仓库内，0 处落别处** |
 | "会话真正改过哪个仓库"没有一等事实 | 会话日志只有 header `cwd` + `tool/call` 的 arguments；这些会话以 `bash` 为主（抽查 149/166/171 次，`edit`/`write` 0~35）。DSH 记录"改过哪些文件"的唯一口径是 mutation 工具的 `locations`（`dsh-client-ui-deliverables` 用它渲染 deliverables 行），bash 改动不在其中；抽查的 `…/work` 会话实际在 `/tmp/ssh-probe2`（账号工作区之外）干活 |

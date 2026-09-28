@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/nodestore"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodestore"
 )
 
 // GenerateNodeConfig renders the worker node's configuration (M77).

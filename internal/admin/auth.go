@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/sessionauth"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/sessionauth"
 )
 
 // This package is a thin adapter over internal/sessionauth: the session machinery is

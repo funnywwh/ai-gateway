@@ -22,7 +22,7 @@
 node:
   name: node-a                    # 必须与控制面记录（nodes.json / config.yaml 的 nodes[]）同名
   # 监听地址：必须**显式写出具体地址**（内网 IP 或主机名）；0.0.0.0 与空值会被拒绝。
-  listen: 192.168.190.87:18400
+  listen: 192.0.2.102:18400
   # 与控制面共享的令牌：32 字节随机的 base64url。推荐用文件（一键部署生成 0600 文件）：
   token_file: /srv/dshgw-node/node-a.token
   # 也可以直接写在这里（令牌会出现在配置文件里，注意备份与权限）：
@@ -39,7 +39,7 @@ worker_port_hi: 32299
 
 # ── 与 aigw 的关系 ────────────────────────────────────────────────────────────
 # worker 直连 aigw 发模型请求（不经过控制面），节点启动/同步模型时也要读它。
-aigw_base_url: http://192.168.190.86:8088
+aigw_base_url: http://aigw.internal:8088
 # 注意：租户的模型授权与计费仍在 aigw 侧；本机只承载执行。
 
 # ── 运行时安装与产物（绝对路径；一键部署会推送 bin/plugins/template-home）────────
@@ -59,8 +59,8 @@ deploy:
   # 留空 = 只有宿主长路径一个视图；详见 deploy/dshgw/config.example.yaml 的同名键说明。
   sandbox_workspace: /workspace
   # 谁起 worker 谁生效：worker 以本机这个非 root 账号运行（与运行本进程的账号一致即可）。
-  worker_user: winger
-  gateway_user: winger
+  worker_user: operator
+  gateway_user: operator
 
 # ── 与单机形态一致的租户侧行为 ────────────────────────────────────────────────
 directory_picker: clamp           # clamp | browse
@@ -126,5 +126,5 @@ host_shares:
 #     default_node: local                 # 新租户缺省落在哪台（local = 控制面本机）
 #     nodes:                              # 静态/引导清单；控制台添加的节点存在 <state_dir>/nodes.json
 #       - name: node-a
-#         url: http://192.168.190.87:18400
+#         url: http://192.0.2.102:18400
 #         token_file: ./data/dshgw/nodes/node-a.token

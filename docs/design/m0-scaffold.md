@@ -8,7 +8,7 @@
 1. **构建环境内嵌化**：`scripts/goenv.sh` 把 GOPATH/GOMODCACHE/GOCACHE 指向工作区 `.cache/`，
    并把只读的 `$HOME/go/pkg/mod/cache/download` 作为 file:// 代理首选项。
    原因：沙箱内 `$HOME` 只读、无 C 编译器，必须 `CGO_ENABLED=0` 且缓存可写。
-2. **模块路径** `github.com/winger/ai-gateway`；公开 SDK 只放 `pkg/`，其余全部 `internal/`。
+2. **模块路径** `github.com/funnywwh/ai-gateway`；公开 SDK 只放 `pkg/`，其余全部 `internal/`。
 3. **分层（依赖单向）**：`internal/domain` 为依赖根（纯类型 + 接口，零内部依赖），
    后续 `store/registry/routing/billing/...` 只依赖 `domain` 的接口，装配集中在 `cmd/aigw`。
 4. **日志** 统一用标准库 `log/slog`（text/json 可切）。

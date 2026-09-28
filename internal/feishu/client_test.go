@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/config"
 )
 
 // stubFeishu is a local stand-in for the three Feishu endpoints: the authorization page is

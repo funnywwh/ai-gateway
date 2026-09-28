@@ -5,7 +5,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // tagsFor builds the tag table the inheritance tests resolve against. Priorities are chosen

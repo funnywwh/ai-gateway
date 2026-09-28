@@ -20,11 +20,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/aigw"
-	"github.com/winger/ai-gateway/internal/dshgw/audit"
-	"github.com/winger/ai-gateway/internal/dshgw/config"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
-	"github.com/winger/ai-gateway/internal/dshgw/session"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/aigw"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/audit"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/session"
 )
 
 type validatorFunc func(context.Context, string) ([]aigw.Model, error)
@@ -104,7 +104,7 @@ func fixture(t *testing.T, worker http.Handler) (*Proxy, registry.Tenant, string
 	cfg := &config.Config{PublicHost: "dsh.test", PortalPort: 32600, TenantPortLo: 32601, TenantPortHi: 32799, WorkerPortLo: port, WorkerPortHi: port, Listen: "127.0.0.1:3099", AigwBaseURL: "http://aigw.test", ValidateTimeout: config.Duration(time.Second), SessionTTL: config.Duration(time.Hour), KeyRevalidate: "off", LoginRate: config.RateLimit{Requests: 10, Window: config.Duration(time.Minute)}, DirectoryPicker: "clamp", PluginBrowserFS: "on", WorkspaceSeed: []string{"work"}, StateDir: dir, TenantRoot: filepath.Join(dir, "tenants"), WorkspaceRoot: filepath.Join(dir, "work"), HandshakeDir: filepath.Join(dir, "handshake"), RegistryPath: filepath.Join(dir, "registry.json"), KeyMapPath: filepath.Join(dir, "keys.map"), SessionPath: filepath.Join(dir, "sessions.json"), Deploy: config.DeployConfig{TenantConfigRoot: filepath.Join(dir, "tenant-config")}, AccountCard: config.AccountCard{Enabled: true}}
 	writeTenantKey(t, cfg.Deploy.TenantConfigRoot, "alice")
 	reg := registry.New(cfg.RegistryPath, cfg.KeyMapPath)
-	tenant := registry.Tenant{Name: "alice", UID: 1001, PublicPort: 32601, WorkerPort: port, KeyPrefix: "sk-aaaaaaaaa", DshHome: "/dsh", Workspace: "/work", CreatedAt: time.Now(), Handshake: registry.HandshakeOK, Account: "李智超(colin)"}
+	tenant := registry.Tenant{Name: "alice", UID: 1001, PublicPort: 32601, WorkerPort: port, KeyPrefix: "sk-aaaaaaaaa", DshHome: "/dsh", Workspace: "/work", CreatedAt: time.Now(), Handshake: registry.HandshakeOK, Account: "李雷(alex)"}
 	if err := reg.Put(tenant); err != nil {
 		t.Fatal(err)
 	}

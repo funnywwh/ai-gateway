@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // Request is the accepted subset of POST /v1/responses.

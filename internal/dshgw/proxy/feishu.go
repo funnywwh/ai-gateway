@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/winger/ai-gateway/internal/dshgw/aigw"
-	"github.com/winger/ai-gateway/internal/dshgw/feishu"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/aigw"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/feishu"
 )
 
 // feishuTicketCookieName is where aigw puts the login ticket. It is read here rather than

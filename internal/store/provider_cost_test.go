@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/config"
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // seedProviderCostUsage writes one metered attempt carrying an explicit provider, cost and

@@ -6,8 +6,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/store"
 )
 
 // RebuildStore is the persistence the ledger rebuild needs.

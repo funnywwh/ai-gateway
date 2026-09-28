@@ -18,8 +18,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	fs "github.com/winger/ai-gateway/internal/dshgw/browserworkspace"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	fs "github.com/funnywwh/ai-gateway/internal/dshgw/browserworkspace"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 const maxBody = 2 << 20

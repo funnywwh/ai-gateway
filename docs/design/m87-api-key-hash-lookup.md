@@ -6,7 +6,7 @@
 
 > 我就是要解决"前缀必须唯一"，因为 sub2api 库里的 key 12 位前缀有重复
 
-第二句是**驱动需求**：sub2api 允许自定义 key，前缀重复真实存在——gptjp 的 #24/#51 同为 `sk-f69aeca55`（两把 key 前 37 字符相同、只差 4 位），`docs/sub2api-migration.md` §6 因此让其中一个客户换了 key。所以本里程碑有一条**硬验收标准**：**前缀重复的两把 key 必须能同时导入、同时可用**（§6、§7）。
+第二句是**驱动需求**：sub2api 允许自定义 key，前缀重复真实存在——gw-b 的 #24/#51 同为 `sk-000000000`（两把 key 前 37 字符相同、只差 4 位），`docs/sub2api-migration.md` §6 因此让其中一个客户换了 key。所以本里程碑有一条**硬验收标准**：**前缀重复的两把 key 必须能同时导入、同时可用**（§6、§7）。
 
 三句话合起来是一件事，本设计按下面这条读法落地：
 
@@ -23,7 +23,7 @@
 | 撞车概率不可忽略 | 生日界：API key 1 万把 ≈ 4.6%、2 万把 ≈ 17%；MCP token 200 个 ≈ 46% |
 | 签发路径没有预检，撞上就是"静默接管" | `internal/httpapi/admin.go:341`（创建 key）、`admin_catalog.go:1637`（创建 MCP token）→ `UpsertAPIKey`/`UpsertMCPToken` 的 `ON CONFLICT(key_prefix/token_prefix) DO UPDATE`（`internal/store/keys.go:110`、`keys.go:453`） |
 | 负缓存按**前缀**键控，命中负条目直接 401、不再比哈希 | `internal/apikey/verifier.go:107-116`、`242-247`：知道某个前缀（前缀不是密钥）的人可以持续投毒，把该前缀下的合法 key 打成 401 |
-| 真实发生过一次 | gptjp 上 sub2api 的 key #24/#51 前 12 字符同为 `sk-f69aeca55`（两把 key 前 37 字符相同、只差 4 位），按 `docs/sub2api-migration.md` §6 重签了一把（`docs/todo_done.md:2304`） |
+| 真实发生过一次 | gw-b 上 sub2api 的 key #24/#51 前 12 字符同为 `sk-000000000`（两把 key 前 37 字符相同、只差 4 位），按 `docs/sub2api-migration.md` §6 重签了一把（`docs/todo_done.md:2304`） |
 | 导入路径的一堆特例，根源都是"前缀唯一" | `docs/design/m43-api-key-hash-import.md` §33（`import:` 归属规则）、`docs/design/m80-key-batch-import-and-lookup.md` §D5（批内前缀去重 + 409 规则） |
 | 现代 dshgw 不依赖前缀 | `internal/httpapi/v1.go:1103`（"every key of this account logs into it, so dshgw no longer needs a per-key prefix binding"）；`internal/dshgw/proxy/proxy.go:1105-1118`（`ByPrefix` 只在 aigw 没回 tenant 时的 legacy 兜底） |
 | 限速早已按 key id，不按前缀 | `internal/httpapi/v1.go:106` `scopeForKey(key.ID)` |
@@ -146,7 +146,7 @@ CREATE INDEX IF NOT EXISTS idx_mcp_tokens_prefix_lookup ON mcp_tokens(token_pref
 - 迁移 0029；§4 第二列改完；migration 脚本与文档同步。
 - 回滚注意：0029 之后**老二进制按前缀查会变得不确定**（同前缀多行时 `QueryRow` 任取一行）。真要回滚，先把重复前缀的行处理掉再回滚，或直接前滚。
 - 验证：库里人为造一对"同前缀、不同明文"的 key，两把都能各自鉴权成功；`keys/lookup` 传该前缀返回 `count=2`。
-- **本次的真实验收数据**：gptjp sub2api 的 #24/#51（同前缀 `sk-f69aeca55`、不同哈希）——两把都要能导入并各自 200（`docs/sub2api-migration.md` §2.4/§6 的"前缀冲突"流程随之删除）。
+- **本次的真实验收数据**：gw-b sub2api 的 #24/#51（同前缀 `sk-000000000`、不同哈希）——两把都要能导入并各自 200（`docs/sub2api-migration.md` §2.4/§6 的"前缀冲突"流程随之删除）。
 
 > （可选）只服务一个部署、且能接受"回滚前先清掉重复前缀"这个限制时，0028 + 0029 可以**同版本上线**，省一次发布。两步拆分的唯一目的是让"回滚二进制"始终安全。
 
@@ -156,7 +156,7 @@ CREATE INDEX IF NOT EXISTS idx_mcp_tokens_prefix_lookup ON mcp_tokens(token_pref
 - `internal/store`：① 迁移幂等；② 0028 在存在重复哈希时失败并回滚（构造重复行断言报错）；③ `UpsertAPIKey`：同哈希更新、不同哈希新建、同前缀两行共存；④ `ListAPIKeysByPrefix` 返回 2 行。
 - `internal/httpapi`：① 创建 key 时桩生成器连续吐同前缀 → 重试后两把都能用、控制台显示两个不同 id；② 导入：同哈希不同前缀 → 一行（展示前缀被改写）、不同哈希同前缀 → 两行、批内同前缀 → 允许（不再 400）；③ `keys/lookup` 两个分支的形状；④ MCP 签发撞前缀（15 bit 那档）被重试兜住。
 - `scripts/sub2api-migrate.py`：`plan` 不再因前缀冲突停下；`apply`/`verify` 逐把比对 prefix/hash 仍通过；报告不再有"重签"列。
-- **真实数据验收（驱动需求）**：拿 gptjp sub2api 的 #24/#51（同前缀、不同哈希）走一次 `keys/import-batch` 的 `dry_run`，再真实导入：库里出现两行同前缀、不同哈希；两把明文各自打 `/v1/models` 得 200；`keys/lookup` 传 `sk-f69aeca55` 返回 `count=2`。
+- **真实数据验收（驱动需求）**：拿 gw-b sub2api 的 #24/#51（同前缀、不同哈希）走一次 `keys/import-batch` 的 `dry_run`，再真实导入：库里出现两行同前缀、不同哈希；两把明文各自打 `/v1/models` 得 200；`keys/lookup` 传 `sk-000000000` 返回 `count=2`。
 - 回归：`docs/sub2api-migration.md` §5 的负向用例（拿前缀当 bearer → 401）仍然成立——**前缀不是密钥**这条性质不变。
 
 ## 8. 依赖与非目标

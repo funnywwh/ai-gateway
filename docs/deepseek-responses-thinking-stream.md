@@ -45,7 +45,7 @@ case "response.reasoning_summary_text.delta", "response.reasoning_text.delta", "
    不同上游用哪个名字是上游的方言，网关的职责是都听懂。既有订阅后端走的是 summary 名，行为不变。
 2. **带上 `item_id`**。这是 M47（条目身份保真）在思考路径上的延伸：客户端回灌上一轮的 reasoning 项时，
    带的是它收到的那个 id。如果网关自造 id（`rs_<随机>`），无状态上游会回
-   `Item with id 'rs_…' not found`——M47 在 gptjp 上踩过的正是这个。上游没给 id 时仍走兜底生成，
+   `Item with id 'rs_…' not found`——M47 在 gw-b 上踩过的正是这个。上游没给 id 时仍走兜底生成，
    `itemID(ev.ItemID, ids.Reasoning)` 的行为不变。
 
 ## 4. 测试

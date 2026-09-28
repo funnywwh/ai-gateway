@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // M80's batch import validates a whole batch before it writes, so the store method it calls

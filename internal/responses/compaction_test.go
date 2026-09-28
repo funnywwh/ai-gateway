@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 func compactionItem(encrypted string) pluginapi.Item {

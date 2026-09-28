@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/activity"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/activity"
 )
 
 // TenantRow is one tenant as the operator sees it: the record, plus the two things a record cannot

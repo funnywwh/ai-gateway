@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/secret"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/secret"
 )
 
 // This file holds the two credential-ownership endpoints added in M80: a batch import that

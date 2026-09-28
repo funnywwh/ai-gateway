@@ -3,8 +3,8 @@ package billing
 import (
 	"context"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/store"
 )
 
 // PageStore is the windowed read side the management console pages through. It is a

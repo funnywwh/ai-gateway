@@ -17,8 +17,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/audit"
-	"github.com/winger/ai-gateway/internal/dshgw/securefile"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/audit"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/securefile"
 )
 
 // RestartFunc restarts one tenant worker.

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // ---------------------------------------------------------------------------

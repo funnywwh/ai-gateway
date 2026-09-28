@@ -19,9 +19,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/ids"
-	"github.com/winger/ai-gateway/internal/secret"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/ids"
+	"github.com/funnywwh/ai-gateway/internal/secret"
 )
 
 const (

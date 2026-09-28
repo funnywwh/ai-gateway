@@ -3,7 +3,7 @@ package registry
 import (
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // The tag-resolution path runs on every authenticated request — the model list, the quota

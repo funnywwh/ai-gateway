@@ -18,8 +18,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/winger/ai-gateway/internal/dshgw/sandbox"
-	"github.com/winger/ai-gateway/internal/dshgw/securefile"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/sandbox"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/securefile"
 )
 
 // DefaultPath is where a standalone `dshgw` looks for its configuration when no
@@ -623,7 +623,7 @@ const DefaultPluginRootLabel = "工作区"
 
 func defaults() Config {
 	return Config{
-		PublicHost:           "chat.tirisen.hk",
+		PublicHost:           "chat.example.com",
 		PortalPort:           32600,
 		TenantPortLo:         32601,
 		TenantPortHi:         32799,
@@ -633,7 +633,7 @@ func defaults() Config {
 		EdgePortHeader:       "X-DSHGW-Port",
 		MaxHeaderBytes:       128 << 10,
 		MaxSessions:          10000,
-		AigwBaseURL:          "http://192.168.190.86:8088",
+		AigwBaseURL:          "http://aigw.internal:8088",
 		ImageRequestMaxBytes: defaultImageRequestMaxBytes,
 		ValidateTimeout:      Duration(5 * time.Second),
 		SessionTTL:           Duration(7 * 24 * time.Hour),

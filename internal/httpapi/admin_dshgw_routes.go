@@ -29,7 +29,7 @@ func (s *Server) dshgwAdminRoutes() []adminRoute {
 			Body: []adminField{
 				bodyRequired("name", "string", "节点名（^[a-z][a-z0-9-]{0,25}$，不能是 local）"),
 				bodyRequired("listen", "string",
-					"节点在**目标机上**绑定的地址 host:port（例如 192.168.190.87:18400）。不能是 0.0.0.0：控制面用它作 URL"),
+					"节点在**目标机上**绑定的地址 host:port（例如 192.0.2.102:18400）。不能是 0.0.0.0：控制面用它作 URL"),
 				bodyRequired("ssh_host", "string", "ssh 目标主机或 IP"),
 				bodyRequired("ssh_user", "string", "ssh 账号（只支持密钥认证，不支持密码）"),
 				bodyOptional("ssh_port", "integer", "ssh 端口，默认 22"),

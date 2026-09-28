@@ -11,14 +11,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/admin"
-	"github.com/winger/ai-gateway/internal/config"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/httpapi"
-	"github.com/winger/ai-gateway/internal/mcpsrv"
-	"github.com/winger/ai-gateway/internal/registry"
-	"github.com/winger/ai-gateway/internal/secret"
-	"github.com/winger/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/admin"
+	"github.com/funnywwh/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/httpapi"
+	"github.com/funnywwh/ai-gateway/internal/mcpsrv"
+	"github.com/funnywwh/ai-gateway/internal/registry"
+	"github.com/funnywwh/ai-gateway/internal/secret"
+	"github.com/funnywwh/ai-gateway/internal/store"
 )
 
 func TestRelayRealGatewayPermissions(t *testing.T) {

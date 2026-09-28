@@ -22,7 +22,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/frontproxy"
+	"github.com/funnywwh/ai-gateway/internal/frontproxy"
 )
 
 var (

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // DefaultCharsPerToken is the heuristic used when the upstream reports no usage.

@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/nodeproto"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeproto"
 )
 
 // DefaultHealthTimeout bounds one health probe; DefaultCallTimeout bounds one control
@@ -35,7 +35,7 @@ type Client struct {
 	// Name is the node name this client was built for. It is what error messages name, and
 	// what a health answer is checked against.
 	Name string
-	// BaseURL is the node's address, e.g. http://192.168.190.87:18400.
+	// BaseURL is the node's address, e.g. http://192.0.2.102:18400.
 	BaseURL string
 	// Token is the shared secret (from the node record or its token file).
 	Token string

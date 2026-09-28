@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // rowScanner is implemented by *sql.Row and *sql.Rows.

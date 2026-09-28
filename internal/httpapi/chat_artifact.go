@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/admin"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/ids"
+	"github.com/funnywwh/ai-gateway/internal/admin"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/ids"
 )
 
 // Previewing a model-authored HTML page or SVG needs a URL an iframe can load. Two designs

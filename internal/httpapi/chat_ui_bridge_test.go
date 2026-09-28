@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/chat"
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/chat"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // The interactive preview bridge is the one place where a model-authored document is allowed

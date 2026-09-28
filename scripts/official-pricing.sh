@@ -5,14 +5,14 @@
 #   scripts/official-pricing.sh                      # 干跑：登录（只读）→ 列目录 → 逐行取价 → 打印计划
 #   scripts/official-pricing.sh --apply              # 真正写入（并在写完后读回核对、试算、体检）
 #   scripts/official-pricing.sh --plan-out FILE      # 只把定价计划导出成 JSON（不登录、不写入）
-#   GW_BASE=https://gpt.lagenio.xyz/aigw scripts/official-pricing.sh --apply
+#   GW_BASE=https://gw-b.example.com/aigw scripts/official-pricing.sh --apply
 #
 # `--plan-out` 是给「补齐缺失的供应商模型」那类步骤用的（scripts/codex-add-models.py）：新建的
 # 行必须**当场**带上成本价，不能先建行、再等本脚本补价——那中间有一段时间是按 0 成本计费的。
 # 导出的 JSON 就是本脚本下面那张表的原文，所以价格只在这一处维护。
 #
 # 环境变量：GW_BASE（默认 http://127.0.0.1:8088；实例带 base_path 时要把前缀写进去，
-#          例如 gptjp 的 /aigw）、GW_ADMIN_USER / GW_ADMIN_PASS、CONFIG
+#          例如 gw-b 的 /aigw）、GW_ADMIN_USER / GW_ADMIN_PASS、CONFIG
 #          （凭据默认取自 $CONFIG 的 bootstrap.admin；CONFIG 默认是「仓库根/config.yaml」，
 #           脚本被拷到部署根下（如 /opt/aigw/official-pricing.sh）时 ROOT 推算到 /opt，
 #           这时会自动改用「与脚本同目录的 config.yaml」，也可以显式给
@@ -26,7 +26,7 @@
 # ── 取价口径（三条，都是刻意的）──────────────────────────────────────────────
 #
 # 1. **按上游模型取价，不按 public 名取价。** 成本侧规则描述的是「我方付上游多少钱」，
-#    而同一个 public 名在不同供应商上可以指向不同上游：gptjp 上 `deepseek-v4-flash` 在
+#    而同一个 public 名在不同供应商上可以指向不同上游：gw-b 上 `deepseek-v4-flash` 在
 #    三家 codex 供应商指向 `gpt-5.6-luna`、在 deepseek 供应商指向 `deepseek-flash`。
 #    按 public 名取价必然给其中一家记错成本，所以规则跟着 `upstream_model` 走。
 #    同理，DeepSeek 官方公告说旧名 `deepseek-v4-flash` 的请求由 V4.1-Flash 提供并按 Flash
@@ -65,7 +65,7 @@
 # ── 价格来源（2026-09-23 抓取；初版 2026-09-14）──────────────────────────────
 #
 # 本机出网访问 openai.com / developers.openai.com / platform.openai.com 一律被 Cloudflare
-# 403，但 **gptjp（gpt.lagenio.xyz，47.91.16.118）能取到官方定价页**，所以下面的 OpenAI 数字是
+# 403，但 **gw-b（gw-b.example.com，198.51.100.101）能取到官方定价页**，所以下面的 OpenAI 数字是
 # **从官方页面的定价表里逐条读出来的**（页面把每张表的 JSON 内嵌在 Astro island 的 props 属性里），
 # 不是二手转述。复核命令见文件末尾。
 #
@@ -93,7 +93,7 @@
 #       gpt-image-1.5  Image  8 / 2   / 32    Text 5 / 1.25 / 10
 #       gpt-image-2    Image  8 / 2   / 30    Text 5 / 1.25 / –
 #       gpt-image-2.5-flare / gpt-image-2.5-sunburst   同 gpt-image-2
-#     ⚠ 官方**没有**裸 `gpt-image-2.5` 这个 id（2.5 只有 -flare 与 -sunburst），gptjp 上那
+#     ⚠ 官方**没有**裸 `gpt-image-2.5` 这个 id（2.5 只有 -flare 与 -sunburst），gw-b 上那
 #       一行恰恰用的是裸 id；两者费率相同，脚本按 2.5 家族价写并在 title 里标注这一点。
 #     音频：官方当前列的是 gpt-audio / gpt-realtime 一族；**gpt-4o-audio-preview 与
 #       gpt-4o-realtime-preview 已经不在定价页上**（GPT-4o 于 2026-07 移除）。这两个 id 的
@@ -135,7 +135,7 @@ CONFIG="${CONFIG:-$ROOT/config.yaml}"
 if [ ! -f "$CONFIG" ] && [ -f "$SCRIPT_DIR/config.yaml" ]; then
   CONFIG="$SCRIPT_DIR/config.yaml"
 fi
-# 管理员凭据：环境变量优先；缺省从 config.yaml 的 bootstrap.admin 读（gptjp 的那份里就是这个段）。
+# 管理员凭据：环境变量优先；缺省从 config.yaml 的 bootstrap.admin 读（gw-b 的那份里就是这个段）。
 # 没有 config.yaml（例如只跑 --plan-out，或把脚本拿到没部署的机器上）不算错误：下面的检查会
 # 给出可读的提示，而不是让 `set -e` 在这里以一个 awk 的退出码收场。
 if [ -z "${GW_ADMIN_USER:-}" ] && [ -f "$CONFIG" ]; then
@@ -263,7 +263,7 @@ plan.update(openai_text("gpt-5.4",
     "官方未公布 >272K 的费率，故本规则集没有长上下文档）",
     2.50, 0.25, 15.00, long_ok=False))
 # gpt-4o（现行 gpt-4o-2024-08-06 档）：官方 $2.50 输入 / $1.25 缓存命中 / $10 输出（每百万 tokens），
-# 没有长上下文档位。补这一条是因为 gptjp 的 azure 供应商（sub2api 账号 10「ChatGPT 官 key」）真的部署了
+# 没有长上下文档位。补这一条是因为 gw-b 的 azure 供应商（sub2api 账号 10「ChatGPT 官 key」）真的部署了
 # gpt-4o 且已用真实请求验证，而本表原先没有裸 `gpt-4o` 这个 upstream id（缺失会让整批写入中止）。
 plan.update(openai_text("gpt-4o",
     "OpenAI 官方标准价 $2.50 输入 / $1.25 缓存命中 / $10 输出（每百万 tokens，<272K 上下文档；"

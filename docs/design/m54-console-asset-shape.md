@@ -12,7 +12,7 @@
 
 | 检查 | 实测 |
 |---|---|
-| 运行进程 | `/proc/1360138/exe` → `/home/winger/work/ai_gateway/bin/aigw`，监听 `*:8088` |
+| 运行进程 | `/proc/1360138/exe` → `/home/operator/work/ai_gateway/bin/aigw`，监听 `*:8088` |
 | `/version` | `{"revision":"9dc4ed2","version":"0.16.0"}`（进程 15:38:02 启动，二进制 15:32:42 构建） |
 | 逐文件内容 | 控制台 **37 个资产逐个 sha256 与 `.cache/ui-dist/static/` 的压缩镜像全部相同**（`js/app.js` 服务出 3007 B，源码 6097 B；`js/pages/chat.js` 27872 B，源码 65093 B） |
 | overlay | 35 条 = 37 − `index.html` − `favicon.svg`，与 M50 §10 记录一致 |
@@ -224,7 +224,7 @@ M50 §3.3 与 §6 里 `build-src` 的产物路径在实现后需要同步修订�
 
 ## 10. 验收记录（实测）
 
-环境：本机 `winger`，`source scripts/goenv.sh`，Go 1.25.5，版本 `0.16.0 / 9dc4ed2`。
+环境：本机 `operator`，`source scripts/goenv.sh`，Go 1.25.5，版本 `0.16.0 / 9dc4ed2`。
 
 ### 构建与产物形态
 

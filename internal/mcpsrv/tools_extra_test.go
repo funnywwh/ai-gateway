@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/config"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/registry"
-	"github.com/winger/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/registry"
+	"github.com/funnywwh/ai-gateway/internal/store"
 )
 
 func newMCPFixture(t *testing.T) (*Service, *store.DB, int64) {

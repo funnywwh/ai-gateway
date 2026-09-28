@@ -13,21 +13,21 @@
 | 改动范围 | **A+B+C+D 全做**：代码默认值与示例、本机验证栈搬进 `./data`、下线遗留 root 形态、清理旧二进制与缓存 |
 | 非数据配置文件（`dshgw.yaml`、`gwproxy.yaml`）放哪 | **部署根，与 `config.yaml` 并排**（配置归配置、数据归 `./data`） |
 | 旧二进制副本 | **全部归拢到 `./data/prev/` 并保留**（不删回滚点） |
-| 遗留 root 形态里的真实租户（E26Q） | **直接删除，只留归档**（`./data/prev/legacy-dshgw/`） |
+| 遗留 root 形态里的真实租户（K7QX） | **直接删除，只留归档**（`./data/prev/legacy-dshgw/`） |
 
 ## 2. 现状（已核实的事实，含证据）
 
 | 事实 | 证据 |
 |---|---|
 | aigw 侧默认已在 `./data`，但字面量分散在三处 | `internal/config/config.go:733/741/808/853/858`、`internal/hook/dispatcher.go:41`、`internal/pluginhost/host.go:48` |
-| dshgw 独立形态默认全是机器路径 | `internal/dshgw/config/config.go:255-266`：`/opt/dsh/node/bin/node`、`/opt/dsh/current`、`/srv/dsh`、`/var/lib/dshgw`、`/opt/dshgw/share/dsh-plugin/picker-clamp.js`、`/opt/dshgw/share/template-home`、`/home/winger/backups/dshgw`、`DefaultPath=/etc/dshgw/config.yaml` |
+| dshgw 独立形态默认全是机器路径 | `internal/dshgw/config/config.go:255-266`：`/opt/dsh/node/bin/node`、`/opt/dsh/current`、`/srv/dsh`、`/var/lib/dshgw`、`/opt/dshgw/share/dsh-plugin/picker-clamp.js`、`/opt/dshgw/share/template-home`、`/home/operator/backups/dshgw`、`DefaultPath=/etc/dshgw/config.yaml` |
 | 两个 CLI 的默认配置路径在 `/etc/dshgw` | `cmd/dshgw/main.go:33`、`cmd/gwproxy/main.go:37` |
 | **监督形态今天用默认库路径会启动失败** | `cmd/aigw/dshgw_child.go:40-43`：`stateDir = filepath.Dir("./data/aigw.db") + "/dshgw"` = `data/dshgw`，非绝对 → 直接报错"must be an absolute path"。子进程侧同样要求"干净绝对路径"（`internal/dshgw/config/config.go:506-530`、`internal/dshgwsup/childconfig.go:307`） |
 | **监督形态会静默继承 `/opt/dshgw/...` 默认** | `cmd/aigw/dshgw_child.go:96` 的 `template_home` 与 `:94` 的 `plugin_path` 未配置时为空，子配置 `omitempty` → 子进程回落到自身默认 `/opt/dshgw/share/template-home` 与 `/opt/dshgw/share/dsh-plugin/picker-clamp.js` |
 | `DirectoryPicker=clamp` 与空 `plugin_path` 的组合没有任何校验 | `internal/dshgw/tenancy/render.go:270-273` 会用空路径拼出 `file://` URL |
 | gwproxy 的 `registry_path` 必填且必须绝对 | `internal/frontproxy/config.go:230`；示例里写死了 `/home/winger/.local/share/dshgw/registry.json` |
-| 示例配置里全是机器相关绝对路径 | `deploy/dshgw/config.example.yaml:37-52`（`/home/winger/...`）、`deploy/dshgw/frontproxy.example.yaml:35` |
-| 本机有一个跑真实租户的 dshgw，数据在 `~/.local/share/dshgw-verify` | 该目录 15M：`dshgw.yaml`、`gwproxy.yaml`、`state/`、`template-home/`、`current`、日志；两个用户单元 `dshgw-verify`/`gwproxy-verify`。registry 里 5 个租户，其中 4 个对应真实 aigw 账号（`accounts.dsh_tenant` = dsh-colin / dsh-lianchangliang / dsh-ranqiliang / dsh-tenant） |
+| 示例配置里全是机器相关绝对路径 | `deploy/dshgw/config.example.yaml:37-52`（`/home/operator/...`）、`deploy/dshgw/frontproxy.example.yaml:35` |
+| 本机有一个跑真实租户的 dshgw，数据在 `~/.local/share/dshgw-verify` | 该目录 15M：`dshgw.yaml`、`gwproxy.yaml`、`state/`、`template-home/`、`current`、日志；两个用户单元 `dshgw-verify`/`gwproxy-verify`。registry 里 5 个租户，其中 4 个对应真实 aigw 账号（`accounts.dsh_tenant` = dsh-alex / dsh-acct-c / dsh-acct-b / dsh-tenant） |
 | 租户数据里嵌了旧绝对路径 | `state/registry.json`（`dsh_home`/`workspace`）、`tenants/*/.dsh/profiles/web/cordis.patch.yml`（picker `root:`）、`tenants/*/.dsh/storages/workspace.json`、`tenants/*/.dsh/storages/session_projcache/sessions/*.json`；而 `state/workspaces/**` 是租户自己的内容（含一份本仓库 clone） |
 | registry 里的路径被强校验，必须与 root 推导一致 | `internal/dshgw/registry/registry.go:177`、`internal/dshgw/tenancy/backup.go:92`、`internal/dshgw/sandbox/profile.go:205-206` |
 | 遗留 root 形态仍在运行 | `dshgw.service` + `dshgw-admin.service` + 6 个 `dsh-worker@`；`/opt/dshgw`、`/etc/dshgw`、`/var/lib/dshgw`；nginx `conf.d/dshgw/{01-portal,tenant-*}.conf` 在 `0.0.0.0:32600+` 终止 TLS 并转发 `127.0.0.1:3099` |
@@ -36,7 +36,7 @@
 ## 3. 目标布局
 
 ```
-<部署根>/                        # 本机 = /home/winger/work/ai_gateway（unit 的 WorkingDirectory）
+<部署根>/                        # 本机 = /home/operator/work/ai_gateway（unit 的 WorkingDirectory）
   config.yaml                    # aigw 配置（非数据，gitignore）
   dshgw.yaml                     # 独立形态 dshgw 配置（非数据）
   gwproxy.yaml                   # 入口反代配置（非数据）
@@ -86,12 +86,12 @@
    用**跨包断言测试**钉住"三处默认值指向同一个数据根"。
 6. **启动可观测**：`aigw starting` 日志新增 `data_dir` 与 `dshgw_state` 两个字段（解析后的绝对路径）。
    理由：把"数据落在哪"从"读代码/猜"变成"看一行日志"，这正是本次需求要消灭的模糊。
-7. **C 按"直接删除，只留归档"执行**：不把遗留租户迁进新形态。E26Q 的 DSH 会停服（用户已确认），
+7. **C 按"直接删除，只留归档"执行**：不把遗留租户迁进新形态。K7QX 的 DSH 会停服（用户已确认），
    归档留在 `./data/prev/legacy-dshgw/`。*取舍*：迁移（`scripts/migrate_dshgw_to_supervised.sh --apply`）
    能保住那个租户，但它会把 `/var/lib/dshgw` 的树按旧位置继续用，与"单一数据根"相悖；用户选择归档 + 重建。
 8. **不改本机拓扑**：`config.yaml` 的 `dshgw.enabled` 保持 `false`，4 个真实租户继续由独立 `dshgw-verify`
    （搬进 `./data` 后）服务。把本机 dshgw 收进 aigw 监督形态会让 aigw 重启波及 DSH 会话，是独立话题。
-9. **不发版**：`VERSION` 与 gpt001 本次不动（gpt001 已是 `/opt/aigw/{config.yaml,data}` 同根形态，
+9. **不发版**：`VERSION` 与 gw-a 本次不动（gw-a 已是 `/opt/aigw/{config.yaml,data}` 同根形态，
    天然符合新规则）。需要发版时按 skill `release-version` 独立执行。
 
 ## 5. 接口与改动点
@@ -202,7 +202,7 @@ gwproxy (user unit gwproxy-verify, --config ./gwproxy.yaml)
   3. `directory_picker: clamp` 现在**要求** `deploy.plugin_path`（此前为空会静默拼出 `file://` 空路径）；
   4. CLI 的 `-config` 默认值从 `/etc/dshgw/*` 变为 `./dshgw.yaml`、`./gwproxy.yaml`；
   5. 监督形态在默认（相对）库路径下**从"启动失败"变为可用**，且不再回落到 `/opt/dshgw` 默认。
-- 不受影响：`config.yaml` 现有内容（路径已是 `./data/...`）、`:8088` 数据面与控制台契约、gpt001 部署、
+- 不受影响：`config.yaml` 现有内容（路径已是 `./data/...`）、`:8088` 数据面与控制台契约、gw-a 部署、
   `data/aigw-local.db` 与 `data/backups` 的内容。
 
 ## 11. 实现与设计差异
@@ -257,5 +257,5 @@ gwproxy (user unit gwproxy-verify, --config ./gwproxy.yaml)
 - **未发版**：设计已声明不发版，实现保持一致（`VERSION` 仍 1.3.0）。代价是控制台角标与线上 revision
   在本次收尾时不变，运维无法仅凭版本号区分"含 M63 的 1.3.0"；已在 `docs/TODO.md` 记为待定项。
 - **C 的 `--apply` 未执行**：需要交互式 `sudo`，本会话只做到"脚本 + 计划测试 + 本机 dry-run 复核"，
-  执行步骤写在 `docs/TODO.md`（含"会停掉真实租户 E26Q"的提醒）。
+  执行步骤写在 `docs/TODO.md`（含"会停掉真实租户 K7QX"的提醒）。
 - **本机 dshgw 仍是独立形态**（未收进 aigw 监督形态）：理由见决策 8，记为可选项而非遗漏。

@@ -7,17 +7,17 @@ import (
 )
 
 func TestRenderPasswdPointsTheWorkerAccountAtTheGivenHome(t *testing.T) {
-	host := []byte("root:x:0:0:root:/root:/bin/bash\nwinger:x:1000:1000:winger:/home/winger:/bin/bash\nother:x:1001:1001::/home/other:/bin/sh\n")
-	view, err := RenderPasswd(host, "winger", "/srv/tenants/alice")
+	host := []byte("root:x:0:0:root:/root:/bin/bash\noperator:x:1000:1000:operator:/home/operator:/bin/bash\nother:x:1001:1001::/home/other:/bin/sh\n")
+	view, err := RenderPasswd(host, "operator", "/srv/tenants/alice")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "root:x:0:0:root:/root:/bin/bash\nwinger:x:1000:1000:winger:/srv/tenants/alice:/bin/bash\nother:x:1001:1001::/home/other:/bin/sh\n"
+	want := "root:x:0:0:root:/root:/bin/bash\noperator:x:1000:1000:operator:/srv/tenants/alice:/bin/bash\nother:x:1001:1001::/home/other:/bin/sh\n"
 	if string(view) != want {
 		t.Fatalf("view =\n%q\nwant\n%q", view, want)
 	}
 	// The renderer is pure: the caller's bytes are what it was handed.
-	if !strings.Contains(string(host), "/home/winger") {
+	if !strings.Contains(string(host), "/home/operator") {
 		t.Fatal("RenderPasswd rewrote its input")
 	}
 }
@@ -25,8 +25,8 @@ func TestRenderPasswdPointsTheWorkerAccountAtTheGivenHome(t *testing.T) {
 func TestRenderPasswdKeepsEveryOtherByte(t *testing.T) {
 	// An NIS entry, an unrelated account, and a file with no trailing newline must all survive
 	// untouched: only the worker account's home field is ours to change.
-	host := []byte("+::::::\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\nwinger:x:1000:1000::/home/winger:/bin/bash")
-	view, err := RenderPasswd(host, "winger", "/srv/alice")
+	host := []byte("+::::::\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\noperator:x:1000:1000::/home/operator:/bin/bash")
+	view, err := RenderPasswd(host, "operator", "/srv/alice")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,19 +36,19 @@ func TestRenderPasswdKeepsEveryOtherByte(t *testing.T) {
 	if !strings.Contains(string(view), "+::::::\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n") {
 		t.Fatalf("unrelated lines changed: %q", view)
 	}
-	if !strings.Contains(string(view), "winger:x:1000:1000::/srv/alice:/bin/bash") {
+	if !strings.Contains(string(view), "operator:x:1000:1000::/srv/alice:/bin/bash") {
 		t.Fatalf("the worker home was not rewritten: %q", view)
 	}
 }
 
 func TestRenderPasswdRefusesUnusableInput(t *testing.T) {
-	host := []byte("winger:x:1000:1000::/home/winger:/bin/bash\n")
+	host := []byte("operator:x:1000:1000::/home/operator:/bin/bash\n")
 	for _, tc := range []struct{ name, user, home string }{
 		{"an account that is not in the file", "dshgw", "/srv/alice"},
 		{"a blank account", " ", "/srv/alice"},
-		{"a relative home", "winger", "srv/alice"},
-		{"a home with a field separator", "winger", "/srv/a:b"},
-		{"a home with a newline", "winger", "/srv/a\nb"},
+		{"a relative home", "operator", "srv/alice"},
+		{"a home with a field separator", "operator", "/srv/a:b"},
+		{"a home with a newline", "operator", "/srv/a\nb"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := RenderPasswd(host, tc.user, tc.home); err == nil {

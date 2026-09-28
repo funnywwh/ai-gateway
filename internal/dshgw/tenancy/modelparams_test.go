@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/dshgw/aigw"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/aigw"
 	"gopkg.in/yaml.v3"
 )
 

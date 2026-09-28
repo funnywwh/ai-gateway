@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/retention"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/retention"
 )
 
 // skeletonWriteTimeout bounds the fallback write of a content-free request-log row.

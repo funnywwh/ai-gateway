@@ -13,7 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/winger/ai-gateway/pkg/providerkit"
+	"github.com/funnywwh/ai-gateway/pkg/providerkit"
 )
 
 // Client is one deployment's web access client: one search backend plus a guarded fetcher.

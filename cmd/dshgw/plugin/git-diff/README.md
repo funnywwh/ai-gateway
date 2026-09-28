@@ -189,9 +189,9 @@ rewrites:
 ```yaml
 - insert:
     - id: dshgw-git-diff
-      name: file:///home/winger/work/ai_gateway/data/dshgw-verify/state/tenants/dsh-tenant/.dsh/plugins/git-diff/index.js
+      name: file:///home/operator/work/ai_gateway/data/dshgw-verify/state/tenants/dsh-tenant/.dsh/plugins/git-diff/index.js
       config:
-        root: /home/winger/work/ai_gateway/data/dshgw-verify/state/workspaces/dsh-tenant
+        root: /home/operator/work/ai_gateway/data/dshgw-verify/state/workspaces/dsh-tenant
         rootLabel: 工作区
         maxRepoDepth: 6
         chunkTimeoutMs: 90000
@@ -296,7 +296,7 @@ session opened in a repository shows that repository alone (the label beside 变
 session opened in a parent directory (this tenant has `…/work` next to `…/work/ai-gateway`) shows
 **该目录下的仓库** with the repositories listed and one click away instead of silently picking one. On
 the AOSP tenant, a session in the ssh mount opens the same tree it always did — the writable
-`ssh/aipc/...` view rather than the read-only `browser/` mirror — while a session in the repository
+`ssh/gw-d/...` view rather than the read-only `browser/` mirror — while a session in the repository
 no longer lists its siblings. `trace.jsonl` gains `{"event":"discover"}` with the scope as `root`,
 `{"event":"scope"}` whenever the anchor is not a work tree, `{"event":"plan"}` and
 `{"event":"scan-start"}`, then one `scan-end` with the per-chunk timings.

@@ -8,7 +8,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/securefile"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/securefile"
 )
 
 // Mount is one recorded sshfs mount: what the gateway made, where it lands, and which

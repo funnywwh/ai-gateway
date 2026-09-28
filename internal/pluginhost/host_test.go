@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // buildExamplePlugin compiles examples/provider-replay so the tests exercise a real

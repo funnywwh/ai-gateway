@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/mcpsrv"
-	"github.com/winger/ai-gateway/internal/modelmap"
-	"github.com/winger/ai-gateway/internal/providers"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/mcpsrv"
+	"github.com/funnywwh/ai-gateway/internal/modelmap"
+	"github.com/funnywwh/ai-gateway/internal/providers"
 )
 
 // portReady returns a configured port or writes 501 and reports false. Every port

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 // A scope name is a systemd resource. systemd refuses to create a unit whose name is

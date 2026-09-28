@@ -2,7 +2,7 @@
 
 ## 原因与复现
 
-Codex CLI 0.153.4 通过 gpt001 的 `/aigw/v1` 调用模型，首轮可以
+Codex CLI 0.153.4 通过 gw-a 的 `/aigw/v1` 调用模型，首轮可以
 执行 shell；回传工具结果的第二轮返回 400：
 `input must be a string or an array of items`。
 
@@ -37,7 +37,7 @@ Codex CLI 0.153.4 通过 gpt001 的 `/aigw/v1` 调用模型，首轮可以
 - 回归测试先在修复前复现失败，再验证修复后通过，覆盖文本数组、图片数组、
   空数组、字符串兼容、非法类型、插件协议和 Codex 上游请求构造。
 - `go test ./...`、`go vet ./...`、`git diff --check` 通过。
-- 18:49 同时更新 gpt001 网关和 provider-codex；构建标识为
+- 18:49 同时更新 gw-a 网关和 provider-codex；构建标识为
   `0.2.2 / 595c650-input-array-fix`，服务 active。
 - Codex CLI 分别使用 `gpt-5.6-luna`、`gpt-6-astra` 执行
   `printf gateway_input_check`，捕获第二轮 output 为数组，最终回复均为

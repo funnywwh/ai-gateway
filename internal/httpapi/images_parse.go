@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // Bounds the gateway enforces before an upstream ever sees the request. They are the

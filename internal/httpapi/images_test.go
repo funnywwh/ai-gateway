@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // imageUpstream is a fake Images API upstream. It records what the gateway sent and answers
@@ -343,7 +343,7 @@ func TestImageRequestWithoutTheCapabilityIsRejectedLocally(t *testing.T) {
 // TestImageRequestSkipsCandidatesThatDeclareNothing: "unknown capability" is permissive for a
 // chat request, but an image request has to land on a provider that said it can make an image.
 // This is the case a real deployment hits first: the model already has a route to a provider
-// whose row was never given a capability set (observed on gptjp: gpt-image-* routed to an
+// whose row was never given a capability set (observed on gw-b: gpt-image-* routed to an
 // openai-responses provider with an empty declaration).
 func TestImageRequestSkipsCandidatesThatDeclareNothing(t *testing.T) {
 	up := newImageUpstream(t)

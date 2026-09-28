@@ -12,13 +12,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/balancer"
-	"github.com/winger/ai-gateway/internal/creds"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/pluginhost"
-	"github.com/winger/ai-gateway/internal/providers"
-	"github.com/winger/ai-gateway/internal/registry"
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/internal/balancer"
+	"github.com/funnywwh/ai-gateway/internal/creds"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/pluginhost"
+	"github.com/funnywwh/ai-gateway/internal/providers"
+	"github.com/funnywwh/ai-gateway/internal/registry"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // Store is the persistence subset the dispatcher needs.

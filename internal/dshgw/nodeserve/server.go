@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/nodeproto"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeproto"
 )
 
 // Handler is one control operation. It receives the raw request body and returns the value to

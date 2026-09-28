@@ -31,7 +31,7 @@ export function openFeishuPersonPicker({ account, onBound } = {}) {
 
   const status = el('div', { class: 'feishu-picker-status' });
   const notice = el('div', { class: 'feishu-picker-notice' });
-  const filter = el('input', { type: 'search', placeholder: '按姓名过滤（支持拼音，如 lizhichao）…' });
+  const filter = el('input', { type: 'search', placeholder: '按姓名过滤（支持拼音，如 lilei）…' });
   const list = el('div', { class: 'feishu-picker-list' });
   const current = el('span', { class: 'muted' });
   // 「刷新」走 refresh=true：绕过服务端那 60 秒缓存。刚在飞书里加的人要能立刻看到；读失败时

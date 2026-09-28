@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/config"
-	"github.com/winger/ai-gateway/internal/webaccess"
+	"github.com/funnywwh/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/webaccess"
 )
 
 // buildWebAccess turns the chat.web_access block into the console's internet access client, or

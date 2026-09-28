@@ -39,7 +39,7 @@
 - `.../state/workspaces/dsh-tenant/browser/ZT20Q` 自 **14:36:32** 起持续
   `fusermount3: failed to unmount … Device or resource busy`，reaper（`browsermount.expire`）每 5 秒
   重试一次，到 15:32 仍在刷（600+ 条 `browser mount expiry cleanup failed; will retry`）。
-- 同一账号的 `.../dsh-tenant/ssh/aipc/home/winger/ZT20Q`（sshfs）在它的 worker **已经停掉之后**
+- 同一账号的 `.../dsh-tenant/ssh/gw-d/home/operator/ZT20Q`（sshfs）在它的 worker **已经停掉之后**
   仍然挂着（03:50 挂上，一直没摘）。
 - `state/audit.jsonl` 里 15:14 / 15:23 / 15:24 三次 `POST /dshgw/logout/` 全部是
   `logout_worker_stop_failed`，而同一秒的日志是 `tenant worker exited tenant=dsh-tenant … signal: terminated`

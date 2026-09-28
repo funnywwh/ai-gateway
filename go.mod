@@ -1,4 +1,4 @@
-module github.com/winger/ai-gateway
+module github.com/funnywwh/ai-gateway
 
 go 1.25
 

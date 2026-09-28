@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/admin"
-	"github.com/winger/ai-gateway/internal/config"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/feishu"
-	"github.com/winger/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/admin"
+	"github.com/funnywwh/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/feishu"
+	"github.com/funnywwh/ai-gateway/internal/store"
 )
 
 // A prefixed deployment is not a second code path: the prefix is stripped once, at the

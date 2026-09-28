@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/config"
-	"github.com/winger/ai-gateway/internal/feishu"
-	"github.com/winger/ai-gateway/internal/httpapi"
+	"github.com/funnywwh/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/feishu"
+	"github.com/funnywwh/ai-gateway/internal/httpapi"
 )
 
 // buildFeishuDeps turns the configuration block into the identity integration, or nil when

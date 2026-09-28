@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/billing"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/pricing"
-	"github.com/winger/ai-gateway/internal/responses"
-	"github.com/winger/ai-gateway/internal/usage"
+	"github.com/funnywwh/ai-gateway/internal/billing"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/pricing"
+	"github.com/funnywwh/ai-gateway/internal/responses"
+	"github.com/funnywwh/ai-gateway/internal/usage"
 )
 
 // BillingPort is the billing surface the request path needs.

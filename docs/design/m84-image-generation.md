@@ -9,7 +9,7 @@
 > 本地核对样本是已安装 dsh 0.1.2-rc.1 自带的 `openai` SDK 类型定义（`node_modules/openai/resources/images.d.ts`）。
 >
 > 需求原话：「aigw 支持 gpt-image 系列模型，支持这类模型的 provider 接口」。
-> 现场：`scripts/official-pricing.sh` 已经把 `gpt-image-1 / 1.5 / 2 / 2.5` 的官方价写进 gptjp 的
+> 现场：`scripts/official-pricing.sh` 已经把 `gpt-image-1 / 1.5 / 2 / 2.5` 的官方价写进 gw-b 的
 > `provider_models.pricing_rules_json`（output 取图像输出价），但网关只有 `/v1/responses` 一个数据面入口，
 > 这些模型**无法被调用**。
 
@@ -37,7 +37,7 @@
    `image_generation.completed`（带最终 `b64_json` 与 `usage`）；edits 对应的前缀是 `image_edit.`。
 3. edits 用 multipart 提交（`image[]` 多张、`mask` 可选）成功；`image` / `image[]` / `image[N]` 三种键都收。
 4. `usage_records` 里该次尝试的 `dimensions_json` 含 `input`（提示词文本 token）、`image_input`（参考图 token）、
-   `image_output`（图像输出 token）；用 gptjp 现有图像价规则集（`output`=图像输出价、`input`=文本输入价）
+   `image_output`（图像输出 token）；用 gw-b 现有图像价规则集（`output`=图像输出价、`input`=文本输入价）
    复算，`cost_micros` 与 `scripts/official-pricing.sh` 的预期一致。
 5. 没有候选声明 `image_generation` 时返回 400（不是 500、也不是把请求发给文本模型）。
 6. 图片模型不出现在租户 DSH 的模型菜单、也不出现在控制台智能问答的模型下拉里。
@@ -68,7 +68,7 @@
 - 计费引擎本身不关心维度单位（`pricing.RateScale` 的注释：tokens、images、seconds 同一套），
   缺费率的兜底只有两条：`input → input_cache_miss`、`reasoning → output`（`dimensionFallbacks`）。
 - 图片能力键已存在但是**输入**语义：`capabilities.image` = 支持 `input_image`（M68）。
-  重新定义它会破坏 gptjp 上四条 deepseek 映射行的含义，因此新增独立键（见 D3）。
+  重新定义它会破坏 gw-b 上四条 deepseek 映射行的含义，因此新增独立键（见 D3）。
 
 ## 3. 关键决策
 
@@ -128,7 +128,7 @@
 | 缺 `input_tokens_details` 时 `input_tokens` | `input` | 中转可能不报明细，按文本输入价计（保守向：图像输入价 ≥ 文本输入价） |
 
 `dimensionFallbacks` 加 `image_input → input_cache_miss`、`image_output → output`，
-于是 gptjp 现有规则集**不改一个数**就能算出今天的预期值，而想精确计价的操作者可以补两条费率。
+于是 gw-b 现有规则集**不改一个数**就能算出今天的预期值，而想精确计价的操作者可以补两条费率。
 **不能**写成 `image_input → input`：那会与既有 `input → input_cache_miss` 形成两跳链，
 而 `WorstCaseRates` 的注释明确要求回落图无链、一次遍历即收敛。
 
@@ -421,7 +421,7 @@ client ◄── JSON {created,data[],usage,…} 或 SSE image_generation.* / im
    `toAPIError` 对这一个码特判——它是网关自己造的"端点用错了"，报 500 会把唯一的建议埋掉。
    上游真实的 4xx 行为不变。
 8. **图片路径改成"要求显式声明"而不是"丢弃降级候选"**：设计稿写的是"`Plan` 之后丢弃 `Degraded`
-   含这两个键的候选"。上线到 gptjp 时发现真实形态更糟——那里 `gpt-image-*` 早就有指向一个未写
+   含这两个键的候选"。上线到 gw-b 时发现真实形态更糟——那里 `gpt-image-*` 早就有指向一个未写
    `capabilities` 的 `openai-responses` 供应商的路由，而"未知能力"按仓库惯例是放行的，
    于是图片请求会打到不会生图的供应商上并拿到一个不可重试的 500。改成 `imageCandidates` 直接读
    `EffectiveCapabilities`：**必须声明**（未知/未写/`inherit` 一律不参与），失败时 400 且点名是哪些候选
@@ -432,7 +432,7 @@ client ◄── JSON {created,data[],usage,…} 或 SSE image_generation.* / im
 实测（本机临时实例 + 假上游，2026-09-23，见 §9 的验收命令）：
 非流式/流式/edits 三条路径 200 且响应形状与官方一致；能力门禁、参数校验、413、文本请求打图片模型
 分别回 400/400/413/400（含可读文案）；`usage_records` 三个维度
-`input=20, image_input=5, image_output=4160`；把 gptjp 现有形态的成本规则集
+`input=20, image_input=5, image_output=4160`；把 gw-b 现有形态的成本规则集
 （`input=5/Mtok`、`output=30/Mtok`，不含图像维度）写上去后 `cost_micros=124925`
 = 20×5 + 5×5（回落 `input`）+ 4160×30（回落 `output`），`bucketed_dimensions` 记录两条回落。
 `go test ./...` 全绿。**`go vet ./...` 在本仓库 main 上本来就失败**

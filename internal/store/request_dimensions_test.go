@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // seedDimensionRow writes one recorded request with an identity.
@@ -46,7 +46,7 @@ func TestRequestLogIdentityRoundTrip(t *testing.T) {
 		RequestID: "req_identity1", AccountID: 7, APIKeyID: 3, Endpoint: "/v1/responses",
 		Status: "completed", RecordInputMode: "user",
 		Client: "dsh", Model: "luna", ResolvedModel: "gpt-5.6-luna",
-		Workspace: "/home/winger/work/ai_gateway", SessionID: "session-abc",
+		Workspace: "/home/operator/work/ai_gateway", SessionID: "session-abc",
 		CallKind: "title", Title: "从 dsh 和 codex 请求解析 workspace",
 	})
 
@@ -56,7 +56,7 @@ func TestRequestLogIdentityRoundTrip(t *testing.T) {
 	}
 	got := page[0]
 	if got.Client != "dsh" || got.Model != "luna" || got.ResolvedModel != "gpt-5.6-luna" ||
-		got.Workspace != "/home/winger/work/ai_gateway" || got.SessionID != "session-abc" ||
+		got.Workspace != "/home/operator/work/ai_gateway" || got.SessionID != "session-abc" ||
 		got.CallKind != "title" || got.Title != "从 dsh 和 codex 请求解析 workspace" {
 		t.Fatalf("page row lost the identity: %+v", got)
 	}

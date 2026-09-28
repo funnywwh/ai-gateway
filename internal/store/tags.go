@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 const tagCols = "id, name, description, grants_json, policy_json, priority, created_at"

@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 type browserHandlerFunc func(http.ResponseWriter, *http.Request, registry.Tenant, string)

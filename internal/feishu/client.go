@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/config"
 )
 
 // maxBody caps every response this client reads. Feishu's answers are small; anything

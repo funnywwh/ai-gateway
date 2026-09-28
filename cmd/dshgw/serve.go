@@ -11,16 +11,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/activity"
-	"github.com/winger/ai-gateway/internal/dshgw/audit"
-	"github.com/winger/ai-gateway/internal/dshgw/browsermount"
-	"github.com/winger/ai-gateway/internal/dshgw/edge"
-	"github.com/winger/ai-gateway/internal/dshgw/feishu"
-	"github.com/winger/ai-gateway/internal/dshgw/handshake"
-	"github.com/winger/ai-gateway/internal/dshgw/nodeaudit"
-	"github.com/winger/ai-gateway/internal/dshgw/nodeup"
-	"github.com/winger/ai-gateway/internal/dshgw/proxy"
-	"github.com/winger/ai-gateway/internal/dshgw/sshworkspace"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/activity"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/audit"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/browsermount"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/edge"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/feishu"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/handshake"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeaudit"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeup"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/proxy"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/sshworkspace"
 )
 
 // pickTicketTTL bounds the key-pick ticket this process mints for its own key login (M72). The

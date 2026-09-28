@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 func TestVersionAndUsageExitCodes(t *testing.T) {
@@ -154,7 +154,7 @@ func TestTenantListJSONIncludesReadOnlyMetadata(t *testing.T) {
 		// tenant-config is a sibling of tenants (M63): sharing the tenant root would put
 		// gateway.key inside the tree the worker binds into the sandbox.
 		"gateway_key_path": filepath.Join(state, "tenant-config/alice/gateway.key"),
-		"aigw_base_url":    "http://192.168.190.86:8088", "key_revalidate": "off",
+		"aigw_base_url":    "http://aigw.internal:8088", "key_revalidate": "off",
 		"portal_url": "https://portal.example.test:32600/",
 	}
 	for key, want := range checks {

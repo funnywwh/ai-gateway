@@ -15,7 +15,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // MaxDepth is the deepest allowed chain of nodes, counting the root as depth 0.

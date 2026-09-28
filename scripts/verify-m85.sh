@@ -10,7 +10,7 @@
 #
 # 用法：
 #   RUN_TURNS=1 GW_ADMIN_PASSWORD='管理员密码' scripts/verify-m85.sh
-#   BASE=http://127.0.0.1:8088/aigw RUN_TURNS=1 GW_ADMIN_PASSWORD='…' scripts/verify-m85.sh   # gptjp 这类带 base_path 的实例
+#   BASE=http://127.0.0.1:8088/aigw RUN_TURNS=1 GW_ADMIN_PASSWORD='…' scripts/verify-m85.sh   # gw-b 这类带 base_path 的实例
 #   RUN_TURNS=1 N=5 … scripts/verify-m85.sh     # 只灌 5 轮（快速冒烟；注意 5 轮证不了「超过旧窗口」）
 #   KEEP=1 … scripts/verify-m85.sh              # 保留现场（排查用）
 #

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // The chat loop is where money, permissions and conversation state meet, so it is tested

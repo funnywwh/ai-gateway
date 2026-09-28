@@ -8,7 +8,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 const providerCols = `id, name, kind, display_name, config_json, config_version, credentials_enc,

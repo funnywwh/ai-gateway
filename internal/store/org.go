@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 const orgNodeCols = "id, parent_id, name, note, tags_json, sort_order, created_at, updated_at, feishu_department_id, feishu_synced_at"

@@ -27,8 +27,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/winger/ai-gateway/pkg/pluginapi"
-	"github.com/winger/ai-gateway/pkg/providerkit"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/pkg/providerkit"
 )
 
 const (

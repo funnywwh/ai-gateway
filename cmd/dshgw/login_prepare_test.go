@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/aigw"
-	"github.com/winger/ai-gateway/internal/dshgw/audit"
-	"github.com/winger/ai-gateway/internal/dshgw/config"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
-	"github.com/winger/ai-gateway/internal/dshgw/tenancy"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/aigw"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/audit"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/tenancy"
 )
 
 // recordingValidator remembers which key each model lookup used: the whole point of the login
@@ -335,7 +335,7 @@ func (h *loginMountHook) Restore(context.Context, string, string, string) error 
 		return h.restoreErr
 	}
 	if len(h.attached) == 0 {
-		h.attached = []string{"/srv/state/workspaces/alice/ssh/aipc/home"}
+		h.attached = []string{"/srv/state/workspaces/alice/ssh/gw-d/home"}
 	}
 	return nil
 }
@@ -393,7 +393,7 @@ func TestPrepareLoginSurvivesAMountThatCannotComeBack(t *testing.T) {
 	fixture := newLoginHarness(t, &recordingValidator{models: []aigw.Model{{ID: "deepseek-flash"}}})
 	sink := &auditRecorder{}
 	fixture.ops.auditor = sink
-	hook := &loginMountHook{restoreErr: errors.New("ssh: connect to host aipc port 22: Connection refused")}
+	hook := &loginMountHook{restoreErr: errors.New("ssh: connect to host gw-d port 22: Connection refused")}
 	fixture.manager.SSHWorkspaces = hook
 
 	if err := fixture.ops.PrepareLogin(context.Background(), "alice", ""); err != nil {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // FeishuBindingMove describes one identity the backfill wrote onto an account. The caller turns

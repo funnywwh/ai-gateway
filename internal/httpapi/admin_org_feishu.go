@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/feishu"
-	"github.com/winger/ai-gateway/internal/orgtree"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/feishu"
+	"github.com/funnywwh/ai-gateway/internal/orgtree"
 )
 
 // The console's half of the Feishu directory sync (M70): one read that renders the merge

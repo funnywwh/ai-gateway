@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/chat"
-	"github.com/winger/ai-gateway/internal/webaccess"
+	"github.com/funnywwh/ai-gateway/internal/chat"
+	"github.com/funnywwh/ai-gateway/internal/webaccess"
 )
 
 // The console's internet access (M73) adds two tools that are not MCP tools at all.

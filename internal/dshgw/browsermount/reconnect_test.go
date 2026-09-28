@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	fs "github.com/winger/ai-gateway/internal/dshgw/browserworkspace"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	fs "github.com/funnywwh/ai-gateway/internal/dshgw/browserworkspace"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 // cancelPoll drives one real poll request and then makes its client go away, which is

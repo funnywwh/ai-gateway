@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/audit"
-	"github.com/winger/ai-gateway/internal/dshgw/nodeclient"
-	"github.com/winger/ai-gateway/internal/dshgw/nodeproto"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/audit"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeclient"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeproto"
 )
 
 // fakeCursors stands in for the node store: the merger only needs "where did I get to".

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // The identity vocabulary recorded on every request log row. Client says which coding
@@ -36,7 +36,7 @@ const (
 const (
 	// Codex puts its system prompt in the top-level instructions field, never in a message.
 	codexInstructionPrefix = "You are a coding agent running in the Codex CLI"
-	// Captured from gpt001's Codex task-title request (#966). This is a user
+	// Captured from gw-a's Codex task-title request (#966). This is a user
 	// message, not the agent's instructions, and can request JSON title/description.
 	codexTitleUserPrefix = "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for a task that will be created from that prompt."
 	// Codex opens its first user message with the environment context block.

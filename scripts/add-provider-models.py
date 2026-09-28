@@ -11,9 +11,9 @@
   * `--provider NAME[,NAME]`：按名字选，忽略 kind；名字不存在直接报错。
 
 环境变量：
-  GW_BASE                 默认 http://127.0.0.1:8088（实例带 base_path 时要把前缀写进去，如 gptjp 的 /aigw）
+  GW_BASE                 默认 http://127.0.0.1:8088（实例带 base_path 时要把前缀写进去，如 gw-b 的 /aigw）
   GW_ADMIN_USER/PASS      缺省从 config.yaml 的 bootstrap.admin 读
-  GW_ADMIN_PASSWORD_FILE  直接给一份口令文件（gptjp 用 /opt/aigw/.admin-password）
+  GW_ADMIN_PASSWORD_FILE  直接给一份口令文件（gw-b 用 /opt/aigw/.admin-password）
   MODELS                  逗号分隔的模型 id，默认 gpt-6-sol,gpt-6-luna
   GW_KINDS / GW_PROVIDERS 与 --kind / --provider 等价
 

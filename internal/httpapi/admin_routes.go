@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"sort"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/store"
 )
 
 // This file is the single source of truth for the management surface: every

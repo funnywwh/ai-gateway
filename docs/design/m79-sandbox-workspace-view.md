@@ -2,7 +2,7 @@
 
 ## 0. 需求原话
 
-> 实现 `~` 就等于 `/home/winger/work/ai_gateway/data/dshgw-verify/state/workspaces/dsh-tenant` 呢？并在沙箱里缩短路径
+> 实现 `~` 就等于 `/home/operator/work/ai_gateway/data/dshgw-verify/state/workspaces/dsh-tenant` 呢？并在沙箱里缩短路径
 
 前置讨论确认了两件事：沙箱里的 `/home` 是 bwrap 自己挂的**私有 tmpfs**，只有 profile 显式绑定的路径才通到宿主；
 而租户工作区恰好是整个部署里最长的那条路径（`<部署根>/data/<部署名>/state/workspaces/<租户>/…`）。

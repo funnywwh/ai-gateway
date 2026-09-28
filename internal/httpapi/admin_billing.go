@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/store"
 )
 
 // LedgerAdmin reads balances and ledger history. The paged reads take a

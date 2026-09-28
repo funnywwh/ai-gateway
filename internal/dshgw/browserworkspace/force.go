@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/fusekernel"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/fusekernel"
 )
 
 // The forced detach of a browser-workspace mount (M76).

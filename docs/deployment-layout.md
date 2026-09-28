@@ -72,7 +72,7 @@
   为避免"数据到底落在哪"靠猜，aigw 启动日志会打印解析后的绝对数据根：
 
   ```
-  msg="aigw starting" … data_dir=/home/winger/work/ai_gateway/data dshgw_state=/home/winger/work/ai_gateway/data/dshgw
+  msg="aigw starting" … data_dir=/home/operator/work/ai_gateway/data dshgw_state=/home/operator/work/ai_gateway/data/dshgw
   ```
 
 - 配置里写相对路径是允许的（dshgw 与 gwproxy 同样在加载时归一为绝对路径），
@@ -145,7 +145,7 @@
 
 ## 5. 本机布局实例
 
-`<部署根> = /home/winger/work/ai_gateway`：
+`<部署根> = /home/operator/work/ai_gateway`：
 
 | 组件 | 单元 | 配置 | 数据 |
 |---|---|---|---|

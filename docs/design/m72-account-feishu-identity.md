@@ -201,8 +201,8 @@ feishu:
 
 ```jsonc
 // 200
-{"allowed":true,"tenant":"dsh-colin","account":"李智超(colin)","feishu_name":"李智超",
- "keys":[{"id":12,"name":"colin-laptop","key_prefix":"sk-gw-abc…","last_used_at":"2026-09-20T…Z"}]}
+{"allowed":true,"tenant":"dsh-alex","account":"李雷(alex)","feishu_name":"李雷",
+ "keys":[{"id":12,"name":"alex-laptop","key_prefix":"sk-gw-abc…","last_used_at":"2026-09-20T…Z"}]}
 // 403（新增原因）
 {"allowed":false,"reason":"provision_failed"}   // 自动建租户失败；详情只在 aigw 日志里
 ```
@@ -347,11 +347,11 @@ store.Open → MigrateKeyFeishuToAccounts()（D9）→ 计数/冲突日志 → B
    `select count(*) from api_keys where feishu_open_id<>''` = **0**，账号级身份 21 行。
 2. **Key 登录出现选择页**：用账号 6（练畅亮，4 把可用 Key）新建一把临时 Key 后 `POST /login` →
    **303 `/login/pick?ticket=…`**（不再直接进租户）；GET 该链接 → 200，页面列出 5 把 Key
-   （`kevin_test`/`Web Chat - ljl_dev`/`terry电脑`/`智天成mac mini`/临时 Key）、**不含** `dshgw-…` worker Key，
+   （`kevin_test`/`Web Chat - ljl_dev`/`terry电脑`/`客户组一mac mini`/临时 Key）、**不含** `dshgw-…` worker Key，
    也不含任何完整明文。
 3. **提交的 Key 不可信**：`key_id=999` → 403 且页面提示「这把 Key 现在不可用」；
    同一票据再次提交 → 403「已经使用过」；换新票据 `key_id=10` → 302 到租户并下发
-   `dshgw_s_dsh-lianchangliang` 会话 cookie；审计 `login_key_selected` 记 `reason=kevin_test`（Key 名）。
+   `dshgw_s_dsh-acct-c` 会话 cookie；审计 `login_key_selected` 记 `reason=kevin_test`（Key 名）。
 4. **按需建租户**：账号 98（m51-test-a，激活、无租户）先加一个带模型授权的临时标签，
    `POST /v1/dshgw/authorize` → 200 `tenant=dsh-m51-test-a`，无需任何后台点击；
    `registry.json` 出现该租户（端口 18307），审计 `dsh_enable` 的 **actor=`dshgw-auto`**。

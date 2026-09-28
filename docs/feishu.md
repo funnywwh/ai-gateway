@@ -46,14 +46,14 @@ kind: "spec"
    OAuth 的 `redirect_uri` 永远是这条配置值，**不是**从请求 Host 推导的（`feishu.DSHLoginURL`/`LoginURL`
    都由它派生），所以「同一个应用服务多个域名」的正确做法是：把每个域名的回调都登记进来，
    每个部署写自己那条；没登记的那条域名点登录会在同意页撞 20029。
-   当前已登记清单（`APP_ID=cli_aa27b25392f91bdb`）：
+   当前已登记清单（`APP_ID=cli_0000000000000000`）：
 
    | 部署 | 回调地址 | 角色 |
    |---|---|---|
-   | rag-server `:8088`（`chat.tirisen.hk`） | `https://chat.tirisen.hk/feishu/callback` | 生效（该部署 `GW_FEISHU_CALLBACK_URL`） |
-   | rag-server `:8088`（局域网） | `http://192.168.190.86:8090/feishu/callback` | 局域网入口 |
-   | gptjp（`gpt.tirisen.hk`） | `https://gpt.tirisen.hk/aigw/feishu/callback` | 生效（该部署 `feishu.callback_url`） |
-   | gptjp（`gpt.lagenio.xyz`） | `https://gpt.lagenio.xyz/aigw/feishu/callback` | 别名入口（同一实例；登记后可在白名单内换用） |
+   | gw-c `:8088`（`chat.example.com`） | `https://chat.example.com/feishu/callback` | 生效（该部署 `GW_FEISHU_CALLBACK_URL`） |
+   | gw-c `:8088`（局域网） | `http://192.0.2.101:8090/feishu/callback` | 局域网入口 |
+   | gw-b（`gw-b.example.net`） | `https://gw-b.example.net/aigw/feishu/callback` | 生效（该部署 `feishu.callback_url`） |
+   | gw-b（`gw-b.example.com`） | `https://gw-b.example.com/aigw/feishu/callback` | 别名入口（同一实例；登记后可在白名单内换用） |
 
    - 飞书允许 http 与非 443 端口（官方文档的示例就包含 `http://…:188/…`）；`?` 与 `#` 之后的部分不参与匹配。
    - 列表里没有的地址会跳到失败页 `{code: 2000, message: "redirect_uri unmatch"}` 或 20029。
@@ -81,7 +81,7 @@ feishu:
   enabled: true
   app_id: "cli_xxxxxxxx"
   app_secret: "xxxxxxxx"                     # 也可用 GW_FEISHU_APP_SECRET
-  callback_url: "http://192.168.190.86:8090/feishu/callback"   # 与飞书后台登记的一致
+  callback_url: "http://192.0.2.101:8090/feishu/callback"   # 与飞书后台登记的一致
   dsh_login: true                            # 开放门户登录（false 则只做控制台绑定）
   admin_login: true                          # 开放控制台管理员扫码登录（M66）
   invite_ttl_s: 3600                         # 管理员邀请链接有效期（300..604800 秒）
@@ -91,7 +91,7 @@ feishu:
   portal_url: ""                             # 空则由下面的 dshgw 块派生
 dshgw:
   enabled: true
-  public_host: 192.168.190.86
+  public_host: 192.0.2.101
   portal_port: 18300
   public_scheme: http                        # 明文 HTTP 部署必须写；否则发 Secure cookie 被浏览器丢弃
   auto_enable: true                          # M72：激活账号默认可用 DSH，首次登录按需建租户
@@ -235,10 +235,10 @@ dshgw:
 | 形态 | 行为 |
 |---|---|
 | 控制台与回调**同一主机名**（默认，`console_url` 留空或指到同一主机） | 回调直接 `Set-Cookie` 并 303 回控制台，与口令登录完全一样，少一跳 |
-| **不同主机名**（本机部署：控制台在 `http://192.168.190.86:8088`，回调在 `https://chat.tirisen.hk/feishu/callback`） | 回调发一张**一次性票据**，把浏览器送到控制台自己的 origin 上的 `/admin/feishu/session?ticket=…`；由那里签发会话——cookie 只能在控制台自己的 origin 上写，这正是 M61 给门户做过的同一件事 |
+| **不同主机名**（本机部署：控制台在 `http://aigw.internal:8088`，回调在 `https://chat.example.com/feishu/callback`） | 回调发一张**一次性票据**，把浏览器送到控制台自己的 origin 上的 `/admin/feishu/session?ticket=…`；由那里签发会话——cookie 只能在控制台自己的 origin 上写，这正是 M61 给门户做过的同一件事 |
 
 因此：**`feishu.console_url` 要写成操作者实际打开控制台的那个地址**（本机部署写
-`http://192.168.190.86:8088/admin/ui/`）。写错（或该写没写）时的现象是「扫码/邀请走完却回到登录页」
+`http://aigw.internal:8088/admin/ui/`）。写错（或该写没写）时的现象是「扫码/邀请走完却回到登录页」
 或「跳到了另一个 host 的 404」——因为会话 cookie 落在了回调那台主机上。
 
 票据的约束：有效期 `feishu.ticket_ttl_s`（默认 120 秒）、**只能兑换一次**、只对签发时那个管理员账号
@@ -387,7 +387,7 @@ dshgw:
 | 邀请链接提示「已经绑定到另一个管理员账号」 | 该飞书身份已绑在别的管理员上 | 先在那个账号上「解绑飞书」 |
 | 停用管理员后对方仍能操作 | 不可能：停用会立刻注销它的会话；但**改角色**只影响下一次请求 | 若角色改了却仍能写，说明改的是别的账号（列表按 id 排） |
 | 邀请后对方进不去，日志无异常 | 对方在**别的浏览器**打开了链接（绑定的是那个浏览器里的飞书身份） | 让本人重新在自己的浏览器里打开新链接 |
-| 扫码/邀请走完了，却回到登录页 | 控制台与回调**不同主机名**而 `feishu.console_url` 没写或写错：cookie 落在回调主机上 | 把 `console_url` 写成操作者实际访问的控制台地址（本机部署：`http://192.168.190.86:8088/admin/ui/`） |
+| 扫码/邀请走完了，却回到登录页 | 控制台与回调**不同主机名**而 `feishu.console_url` 没写或写错：cookie 落在回调主机上 | 把 `console_url` 写成操作者实际访问的控制台地址（本机部署：`http://aigw.internal:8088/admin/ui/`） |
 | 扫码成功后地址栏变成另一个主机 | 正常：跨主机形态下回调把浏览器交给控制台自己的 origin 兑换一次性票据 | 不需要处理；想少一跳就让控制台与回调同主机名 |
 | 兑换票据报「已过期」 | 票据 120 秒内没被兑换（浏览器停在中间页、被拦下来的重定向） | 重新扫码；票据一次性，重开旧链接无效 |
 | 用户被弹回门户、看不到具体错误 | 登录被拒 | 门户错误页会给出原因码；对应 §5 的几种情况 |

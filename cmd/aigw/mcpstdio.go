@@ -11,10 +11,10 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/winger/ai-gateway/internal/config"
-	"github.com/winger/ai-gateway/internal/mcpsrv"
-	"github.com/winger/ai-gateway/internal/registry"
-	"github.com/winger/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/mcpsrv"
+	"github.com/funnywwh/ai-gateway/internal/registry"
+	"github.com/funnywwh/ai-gateway/internal/store"
 )
 
 // runMCPServe speaks the MCP server protocol over stdio for one account.

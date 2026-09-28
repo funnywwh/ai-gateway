@@ -16,7 +16,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/winger/ai-gateway/internal/logx"
+	"github.com/funnywwh/ai-gateway/internal/logx"
 )
 
 // currencyRE mirrors pricing.CurrencyRE. The configuration checks the shape of
@@ -699,7 +699,7 @@ type Feishu struct {
 	// under its own purpose, so the invitation key and the state key never coincide.
 	InviteSecret string `yaml:"invite_secret"`
 	// ConsoleURL is the console as the operator's browser reaches it, e.g.
-	// "http://192.168.190.86:8088/admin/ui/". It is the console's answer to PortalURL, and it
+	// "http://aigw.internal:8088/admin/ui/". It is the console's answer to PortalURL, and it
 	// exists for one reason: a session cookie belongs to a host name, while the Feishu
 	// callback always runs on the origin registered with Feishu. When the two share a host
 	// name the callback hands the browser its cookie directly; when they do not (a LAN

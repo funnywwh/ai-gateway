@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // TestModelReasoningReachesSharedResponsesSupplier drives the real HTTP handler,

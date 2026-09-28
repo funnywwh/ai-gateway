@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/nodeproto"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeproto"
 )
 
 // nodeStub answers like a node agent: the token gate, the health endpoint and one control op.
@@ -169,7 +169,7 @@ func TestUnreachableAndTimeout(t *testing.T) {
 		}
 	})
 	t.Run("unusable address", func(t *testing.T) {
-		_, err := New("node-a", "192.168.190.87:18400", "secret").Probe(context.Background())
+		_, err := New("node-a", "192.0.2.102:18400", "secret").Probe(context.Background())
 		if !nodeproto.IsCode(err, nodeproto.CodeUnreachable) {
 			t.Fatalf("err = %v", err)
 		}

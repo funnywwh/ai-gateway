@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // seedTTFTUsage writes one metered attempt carrying an explicit TTFT.

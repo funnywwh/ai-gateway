@@ -3,7 +3,7 @@ package httpapi
 import (
 	"strconv"
 
-	"github.com/winger/ai-gateway/internal/runtime"
+	"github.com/funnywwh/ai-gateway/internal/runtime"
 )
 
 // Capacity reports the provider concurrency gates (M44): how many attempts each provider

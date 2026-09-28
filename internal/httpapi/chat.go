@@ -8,11 +8,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/winger/ai-gateway/internal/chat"
-	"github.com/winger/ai-gateway/internal/config"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/ids"
-	"github.com/winger/ai-gateway/internal/routing"
+	"github.com/funnywwh/ai-gateway/internal/chat"
+	"github.com/funnywwh/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/ids"
+	"github.com/funnywwh/ai-gateway/internal/routing"
 )
 
 // This file is the console chat's HTTP surface: conversations, questions, answers, skills

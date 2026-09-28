@@ -8,8 +8,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
-	"github.com/winger/ai-gateway/internal/dshgw/session"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/session"
 )
 
 // tenantRequest builds one request as the tenant's browser sends it: the tenant's own host
@@ -48,7 +48,7 @@ func TestTenantSessionEndpointNamesTheSignedInPerson(t *testing.T) {
 		t.Error("the identity route must not reach the worker")
 	}))
 	defer worker.Close()
-	auth := &identityAuthorizer{account: "李智超(colin)", feishu: "李智超"}
+	auth := &identityAuthorizer{account: "李雷(alex)", feishu: "李雷"}
 	p.Authorizer = auth
 	token := issue(t, p, tenant.Name, nil)
 
@@ -64,10 +64,10 @@ func TestTenantSessionEndpointNamesTheSignedInPerson(t *testing.T) {
 	if value["authenticated"] != true || value["tenant"] != tenant.Name {
 		t.Fatalf("identity=%v", value)
 	}
-	if value["feishu_name"] != "李智超" || value["account"] != "李智超(colin)" {
+	if value["feishu_name"] != "李雷" || value["account"] != "李雷(alex)" {
 		t.Fatalf("names=%v", value)
 	}
-	if value["name"] != "李智超" {
+	if value["name"] != "李雷" {
 		t.Fatalf("name=%v, want the Feishu name first", value["name"])
 	}
 
@@ -75,7 +75,7 @@ func TestTenantSessionEndpointNamesTheSignedInPerson(t *testing.T) {
 	// cache expires, and the second answer matches the first.
 	res = httptest.NewRecorder()
 	p.Dispatch().ServeHTTP(res, tenantRequest(t, http.MethodGet, accountSessionPath, "", token))
-	if res.Code != http.StatusOK || decodeIdentity(t, res)["feishu_name"] != "李智超" {
+	if res.Code != http.StatusOK || decodeIdentity(t, res)["feishu_name"] != "李雷" {
 		t.Fatalf("second read: status=%d body=%s", res.Code, res.Body.String())
 	}
 	if auth.calls != 1 {
@@ -98,7 +98,7 @@ func TestTenantSessionEndpointFallsBackToTheTenantName(t *testing.T) {
 		t.Fatalf("a display lookup must not fail the request: status=%d", res.Code)
 	}
 	value := decodeIdentity(t, res)
-	if value["name"] != "李智超(colin)" {
+	if value["name"] != "李雷(alex)" {
 		// The label recorded on the tenant is the fallback when aigw cannot be asked.
 		t.Fatalf("name=%v, want the tenant's recorded account label", value["name"])
 	}
@@ -219,7 +219,7 @@ func TestTenantLogoutRevokesOnlyThisTenantAndSendsThePortal(t *testing.T) {
 func TestIdentityCacheIsDroppedWhenATenantDisappears(t *testing.T) {
 	p, tenant, _, worker := fixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer worker.Close()
-	auth := &identityAuthorizer{account: "李智超(colin)", feishu: "李智超"}
+	auth := &identityAuthorizer{account: "李雷(alex)", feishu: "李雷"}
 	p.Authorizer = auth
 	// Warm the cache, then remove the tenant and let the reload notice: a name must not
 	// outlive the tenant it belonged to, or a recreated tenant would inherit it.

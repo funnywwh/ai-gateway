@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/pricing"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/pricing"
 )
 
 // Reservation is one in-flight request's hold on an account's balance.

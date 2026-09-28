@@ -7,7 +7,7 @@
 > 本文保留为历史记录（其中的协议、权限与信任边界的分析仍然有效）。
 
 > 状态：**已实现（M52-rev2，代码与回归完成；主机验收待执行、未提交）**。
-> 2026-09-16 两轮确认：①默认 `login` 档、停用即停 worker；②按用户要求升级为 **rev2**——启用=账号级授权，账号下所有 Key（含新建）都能登录，且启用/停用全部由后台按钮完成，不经 root CLI。前提：M51 的端口门户 `https://chat.tirisen.hk:32600/`
+> 2026-09-16 两轮确认：①默认 `login` 档、停用即停 worker；②按用户要求升级为 **rev2**——启用=账号级授权，账号下所有 Key（含新建）都能登录，且启用/停用全部由后台按钮完成，不经 root CLI。前提：M51 的端口门户 `https://chat.example.com:32600/`
 > 与已实现 dshgw 保持原样；M51 剩余主机验收与发布被本里程碑取代优先级，M51 未提交改动原样保留。
 > 背景决策：用户认为“租户自己粘贴 Key + 复杂真实 Key 轮换验收”操作过重，要求在 aigw 后台
 > 账号列表提供 dsh 入口的启用/停用按钮。
@@ -211,20 +211,20 @@ worker 端 /api 的 Host 防护（DNS rebinding/跨站），nginx loopback 转�
 
 ### 复核修正（2026-09-17）：差异来自入口 nginx，而非上游
 
-用户对照发现 `https://chat.tirisen.hk/dsh/` 的“设置/模型”不报错、租户端口 `:32604` 报错。复核证据：
+用户对照发现 `https://chat.example.com/dsh/` 的“设置/模型”不报错、租户端口 `:32604` 报错。复核证据：
 
 1. 两侧运行的都是同一份 DSH 0.1.2-rc.1（`~/.local/dsh-0.1.2-rc.1` 与 `/opt/dsh/current`），
    磁盘上的 `dsh-client-connection`/`dsh-client-ui-settings` 逐字节相同。
 2. 但**下发到浏览器**的插件包不同：`/dsh/` 的 bundle 里
-   `isLoopbackHostname` 首行为 `if (hostname === "chat.tirisen.hk" || hostname === "localhost" …)`，
+   `isLoopbackHostname` 首行为 `if (hostname === "chat.example.com" || hostname === "localhost" …)`，
    租户 worker 的是原版 `if (hostname === "localhost" || hostname === "[::1]")`。
 3. 改写者是宿主机 nginxWebUI 容器生成的 `/home/nginxWebUI/nginx.conf`：
    `location ^~ /dsh/` 内 `sub_filter 'if (hostname === "localhost" || hostname === "[::1]") return true;'
-   'if (hostname === "chat.tirisen.hk" || hostname === "localhost" || hostname === "[::1]") return true;'`
+   'if (hostname === "chat.example.com" || hostname === "localhost" || hostname === "[::1]") return true;'`
    （注释写明 “Extend that client-side allowlist to this LAN-only trusted domain”），并配
    `proxy_set_header Accept-Encoding ""` 保证过滤生效。dshgw 生成的租户 vhost 无此类指令。
 4. 日志佐证：nginx 访问日志中 40 次 `POST /api/settings/describe`（200）**全部** Referer 为
-   `https://chat.tirisen.hk/dsh/`；租户端口侧只出现 `credentials/describe`，从未发出
+   `https://chat.example.com/dsh/`；租户端口侧只出现 `credentials/describe`，从未发出
    `settings/describe`——与“memory 档不发 describe”的代码路径一致。
 5. 两侧加载的前端资源同名同内容（`index-Df-65__b.js` 等），因此差异只能来自下发时改写。
 

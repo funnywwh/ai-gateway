@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/billing"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/billing"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/store"
 )
 
 // InvoiceAdmin is the invoicing and credit surface the management API needs.

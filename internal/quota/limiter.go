@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // Slots is the number of one-second buckets in a sliding window (60s).

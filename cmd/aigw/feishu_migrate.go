@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"strconv"
 
-	"github.com/winger/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/store"
 )
 
 // migrateKeyFeishuBindings runs the M72 backfill once at startup and reports what it did.

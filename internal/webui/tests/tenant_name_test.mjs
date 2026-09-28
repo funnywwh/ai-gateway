@@ -24,9 +24,9 @@ for (const [name, source] of pages) {
   // suggestion is only the fallback for an account that has none.
   assert.match(source, /const suggested = [\w.]+\.dsh_tenant \|\| [\w.]+\.dsh_tenant_suggested \|\| ''/,
     name + ' must pre-fill dsh_tenant_suggested, falling back from the stored mapping');
-  // The dialog has to say what the pre-filled name means: an operator who sees dsh-chenjingfeng-10
-  // for 陈景峰 needs the rule by example, and needs to know nothing is renamed.
-  assert.ok(source.includes('dsh-chenjingfeng-10'),
+  // The dialog has to say what the pre-filled name means: an operator who sees dsh-wangqiang-10
+  // for 王强 needs the rule by example, and needs to know nothing is renamed.
+  assert.ok(source.includes('dsh-wangqiang-10'),
     name + ' must show the naming rule by example in the dialog hint');
   assert.ok(source.includes('已存在的租户名不会被改动'),
     name + ' must say that an existing tenant name is kept, not renamed');

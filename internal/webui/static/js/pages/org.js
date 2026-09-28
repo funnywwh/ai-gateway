@@ -588,7 +588,7 @@ export async function render({ page, actions, session }) {
       submitLabel: '启用',
       fields: [{ name: 'tenant', label: 'dsh 租户名', value: suggested,
         hint: '小写字母/数字/连字符；留空则沿用既有映射，或按账号名自动生成（' +
-          '例：陈景峰 / 10 → dsh-chenjingfeng-10）。已存在的租户名不会被改动' }],
+          '例：王强 / 10 → dsh-wangqiang-10）。已存在的租户名不会被改动' }],
       onSubmit: (values) => api.post('/accounts/' + account.id + '/dsh', {
         enabled: true, ...(values.tenant ? { tenant: values.tenant } : {}),
       }),

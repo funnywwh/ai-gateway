@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/winger/ai-gateway/internal/dshgw/config"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 	"gopkg.in/yaml.v3"
 	"os"
 	"os/exec"
@@ -136,7 +136,7 @@ func TestRenderPatchAddsTheSSHWorkspacePluginWhenEnabled(t *testing.T) {
 
 	cfg.SSHWorkspaces.Enabled = true
 	cfg.SSHWorkspaces.MountSubdir = "ssh"
-	cfg.SSHWorkspaces.Hosts = []string{"gpt001"}
+	cfg.SSHWorkspaces.Hosts = []string{"gw-a"}
 	cfg.SSHWorkspaces.MaxEntries = 25
 	cfg.SSHWorkspaces.ConnectTimeout = config.Duration(9000 * time.Millisecond)
 	enabled, err := RenderTenantArtifacts(cfg, tenant, "sk-secret", models("m"), TenantOptions{}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
@@ -150,7 +150,7 @@ func TestRenderPatchAddsTheSSHWorkspacePluginWhenEnabled(t *testing.T) {
 	if !strings.Contains(patch, want) {
 		t.Errorf("the patch does not name the ssh workspace plugin %q:\n%s", want, patch)
 	}
-	for _, fragment := range []string{"id: ssh-workspace", "mountSubdir: ssh", "gpt001", "maxEntries: 25", "connectTimeoutMs: 9000"} {
+	for _, fragment := range []string{"id: ssh-workspace", "mountSubdir: ssh", "gw-a", "maxEntries: 25", "connectTimeoutMs: 9000"} {
 		if !strings.Contains(patch, fragment) {
 			t.Errorf("the patch lacks %q:\n%s", fragment, patch)
 		}
@@ -194,7 +194,7 @@ func TestEnsureSSHWorkspaceRowFollowsTheSwitch(t *testing.T) {
 
 	// On: the row appears on a tenant that was provisioned before the switch existed.
 	cfg.SSHWorkspaces.Enabled = true
-	cfg.SSHWorkspaces.Hosts = []string{"gpt001"}
+	cfg.SSHWorkspaces.Hosts = []string{"gw-a"}
 	cfg.SSHWorkspaces.MountSubdir = "ssh"
 	if _, err := EnsureSSHWorkspaceRow(cfg, tenant); err != nil {
 		t.Fatalf("refresh with the feature on: %v", err)
@@ -203,7 +203,7 @@ func TestEnsureSSHWorkspaceRowFollowsTheSwitch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"ssh-workspace", "gpt001", "picker-clamp.js"} {
+	for _, want := range []string{"ssh-workspace", "gw-a", "picker-clamp.js"} {
 		if !strings.Contains(string(patchAfter), want) {
 			t.Errorf("refreshed patch lacks %q:\n%s", want, patchAfter)
 		}
@@ -217,12 +217,12 @@ func TestEnsureSSHWorkspaceRowFollowsTheSwitch(t *testing.T) {
 		t.Errorf("a second refresh stacked rows:\n%s", again)
 	}
 	// A changed configuration propagates.
-	cfg.SSHWorkspaces.Hosts = []string{"aipc"}
+	cfg.SSHWorkspaces.Hosts = []string{"gw-d"}
 	if _, err := EnsureSSHWorkspaceRow(cfg, tenant); err != nil {
 		t.Fatal(err)
 	}
 	changed, _ := os.ReadFile(patchPath)
-	if strings.Contains(string(changed), "gpt001") || !strings.Contains(string(changed), "aipc") {
+	if strings.Contains(string(changed), "gw-a") || !strings.Contains(string(changed), "gw-d") {
 		t.Errorf("the refresh did not carry the new host list:\n%s", changed)
 	}
 	// And the workspaces someone added are untouched.

@@ -262,14 +262,14 @@ M50 D5 的原文是"**不做**传输层预压缩（.br/.gz + Content-Encoding）
 
 ## 11. 验收记录（实测）
 
-环境：本机 `winger`，`source scripts/goenv.sh`，Go 1.25.5，revision `3c01859`（含 M54），版本 `0.16.0`。
+环境：本机 `operator`，`source scripts/goenv.sh`，Go 1.25.5，revision `3c01859`（含 M54），版本 `0.16.0`。
 
 ### 生成侧
 
 ```
 $ make ui-dist
 ui: minified 37 files 566807 -> 333162 bytes (-41%); gzip 32 files 330801 -> 131763 bytes (-60%) in 62ms
-ui: overlay -> /home/winger/work/ai_gateway/.cache/ui-dist/overlay.json (67 entries)
+ui: overlay -> /home/operator/work/ai_gateway/.cache/ui-dist/overlay.json (67 entries)
 ```
 
 - overlay 67 条 = 35 个被改写文件 + 32 个 sidecar；`index.html`、`favicon.svg`、`js/base.js`、
@@ -310,7 +310,7 @@ ui: overlay -> /home/winger/work/ai_gateway/.cache/ui-dist/overlay.json (67 entr
 
 ```
 $ UI_STATIC_DIR=$PWD/.cache/ui-dist/static UI_HARNESS_GZIP=1 scripts/ui-harness/run.sh
-assets: /home/winger/work/ai_gateway/.cache/ui-dist/static
+assets: /home/operator/work/ai_gateway/.cache/ui-dist/static
 gzip self-check: js/app.js 3007 -> 1593 B, Content-Encoding: gzip, Vary: Accept-Encoding
 …
 all views passed

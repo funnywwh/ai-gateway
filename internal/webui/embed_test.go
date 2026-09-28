@@ -13,9 +13,9 @@ import (
 	// Test-only import: the console assets and the server's accepted values are two
 	// halves of one contract, so the test needs the server's list. Production code in
 	// this package still imports nothing from the module (guarded by internal/arch).
-	"github.com/winger/ai-gateway/internal/chat"
-	"github.com/winger/ai-gateway/internal/config"
-	"github.com/winger/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/chat"
+	"github.com/funnywwh/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/store"
 )
 
 func TestConsoleAssetsAreEmbedded(t *testing.T) {

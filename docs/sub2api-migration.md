@@ -2,7 +2,7 @@
 
 > 面向使用者的运行手册。用于把**同一台机器上** sub2api（PostgreSQL + docker compose）里某个
 > 客户群体的用户与 API Key 搬到 ai_gateway，并按标签把用户分配到已有的上游订阅上。
-> 首次落地：gptjp（`8.211.157.165`）上备注为「智天成」的 22 个用户（2026-09-14，M43）。
+> 首次落地：gw-b（`198.51.100.104`）上备注为「客户组一」的 22 个用户（2026-09-14，M43）。
 >
 > 工具：`scripts/sub2api-migrate.py`（服务器上放 `/opt/aigw/sub2api_migrate.py`，0700）。
 
@@ -48,11 +48,11 @@ encode(sha256(convert_to(btrim(k.key),'UTF8')),'hex')   -- key_hash（与 Go 的
 
 1. **保留源系统意图**：如果 key 所属的 sub2api 分组里**只有一个**成员账号是本次迁入 aigw 的
    供应商（按 `providers.meta_json.source_account_id` 对应），则该 key 落到「授权该供应商的标签」。
-   例：gptjp 分组 21/22/23（1/2/3 研发帐号）→ 各自唯一的 Codex 账号 → 标签 蓝精灵2/3/1。
+   例：gw-b 分组 21/22/23（1/2/3 研发帐号）→ 各自唯一的 Codex 账号 → 标签 测试标签2/3/1。
 2. **均衡剩余**：其余 key 按源 key id 升序，逐个落到「(a) 全局计数最少 → (b) 该用户已占用最少 →
    (c) 标签 id 最小」的标签。规则确定、可复算，与执行顺序无关。
 
-gptjp 首次迁移的结果（32 把 key）：蓝精灵1 = 11、蓝精灵2 = 11、蓝精灵3 = 10。
+gw-b 首次迁移的结果（32 把 key）：测试标签1 = 11、测试标签2 = 11、测试标签3 = 10。
 
 ## 4. 怎么跑
 
@@ -82,8 +82,8 @@ python3 /opt/aigw/sub2api_migrate.py report
 
 ```json
 {"name":"admin_request","arguments":{"name":"admin_import_keys","confirm":true,
- "body":{"keys":[{"name":"lzhichao@lagenio.com","account":"acme",
-                  "key_prefix":"sk-62e1a0b4c","key_hash":"<64 位 hex>","tags":["蓝精灵3"]}]}}}
+ "body":{"keys":[{"name":"lilei@example.com","account":"acme",
+                  "key_prefix":"sk-000000000","key_hash":"<64 位 hex>","tags":["测试标签3"]}]}}}
 ```
 
 三条与单条导入一致的性质值得重申：
@@ -116,7 +116,7 @@ python3 /opt/aigw/sub2api_migrate.py report
 > **2026-09-24 起本节不再是迁移的边界。** M87 把数据面的查找键从 12 字符前缀换成了 SHA-256
 > （`docs/design/m87-api-key-hash-lookup.md`）：前缀只是标签、可以重复，`api_keys.key_prefix`
 > 上也没有唯一索引了。于是两把 key 撞前缀时**两把都照原样导入**，两把各自可用，没有人需要换 key。
-> 下面的流程只描述 M87 之前的世界（gptjp 上 #24/#51 就是这么处理的：`docs/todo_done.md` 里记着
+> 下面的流程只描述 M87 之前的世界（gw-b 上 #24/#51 就是这么处理的：`docs/todo_done.md` 里记着
 > 保留 #51、把 #24 重签成 aigw #44）。
 
 当时 12 字符前缀是查找入口且唯一，撞了就**只能有一把保留原明文**：
@@ -147,7 +147,7 @@ python3 /opt/aigw/sub2api_migrate.py report
 - **分组语义损失**：源系统里指向「未迁入 aigw 的账号」的分组（例如 apikey 型 deepseek 账号）
   在这边没有对应标签；这些 key 会按 §3 落到已有标签，若需要保留它们的原路由，得先建对应标签。
 
-## 9. 整库重建（全量重导）：gptjp，2026-09-23
+## 9. 整库重建（全量重导）：gw-b，2026-09-23
 
 §1–§8 是**增量**迁移（按 `users.notes` 挑一批人，往已有实例里加）。这一节是**整库重建**：
 把目标实例清成空库，再从 sub2api 全量重导，使它成为源系统的镜像。
@@ -178,9 +178,9 @@ python3 /opt/aigw/sub2api_reimport.py report      # 写 sub2api-reimport-<ts>.js
 
 | 标签 | 判定 | grants |
 |---|---|---|
-| `E26Q` | 有活跃 key 属于分组 20 | `providers:[azure]`、`models:["*"]` |
-| `智天成` | 否则 `notes='智天成'` | `providers:[deepseek]`、`models:["*"]` |
-| `电商` | 其余 | `providers:[azure]`、`models:["*"]` |
+| `K7QX` | 有活跃 key 属于分组 20 | `providers:[azure]`、`models:["*"]` |
+| `客户组一` | 否则 `notes='客户组一'` | `providers:[deepseek]`、`models:["*"]` |
+| `客户组二` | 其余 | `providers:[azure]`、`models:["*"]` |
 
 标签写在**账户级**（key 继承），一个账户恰好一个标签。2026-09-23 那次的结果：账户 20 / 88 / 2。
 
@@ -188,19 +188,19 @@ python3 /opt/aigw/sub2api_reimport.py report      # 写 sub2api-reimport-<ts>.js
 
 | 源账号 | provider | kind |
 |---|---|---|
-| 2 / 3 / 9 | `lzhichao-lagenio-3-expiry` / `lizhichao-wisskys-3-expiry` / `liuhui-wisskys-8-expiry` | `plugin:provider-codex` |
-| 6 | `codex-zhuyecheng` | `plugin:provider-codex` |
-| 7 / 8 | `deepseek` / `deepseek-dianshang` | `openai-chat` |
+| 2 / 3 / 9 | `lzhichao-lagenio-3-expiry` / `lilei-corp-a-3-expiry` / `wangwu-corp-a-8-expiry` | `plugin:provider-codex` |
+| 6 | `codex-zhangsan` | `plugin:provider-codex` |
+| 7 / 8 | `deepseek` / `deepseek-kehuzuer` | `openai-chat` |
 | 10 | `azure` | `openai-responses` |
 
 四条口径：
 
-1. **供应商名只允许 `[A-Za-z0-9._-]`**（网关校验），所以「deepseek电商」落名 `deepseek-dianshang`。
+1. **供应商名只允许 `[A-Za-z0-9._-]`**（网关校验），所以「deepseek客户组二」落名 `deepseek-kehuzuer`。
 2. **codex 供应商建而不接流量**：本次没有任何标签授权它们，因此不会触发 OAuth 刷新、也就不会把
    sub2api 手里那份正在使用的 `refresh_token` 抢掉。要启用必须两步：先给供应商补上游模型+路由，
    再把 provider 加进某个标签的 grants —— 并先确认 sub2api 侧已停用该账号（同一个 ChatGPT 账号
    只有一方能刷新）。
-3. `antigravity`（platform=antigravity，Google Cloud Code 系）没有对应 kind，**不建**。
+3. `ProviderB`（platform=ProviderB，Google Cloud Code 系）没有对应 kind，**不建**。
 4. **不调用** `POST /providers/{id}/actions/set_token`：不给任何 OAuth 凭据做主动刷新。
 
 ### 9.4 前缀冲突：保留「实例原本持有的那一把」
@@ -213,9 +213,9 @@ python3 /opt/aigw/sub2api_reimport.py report      # 写 sub2api-reimport-<ts>.js
 在换库前就持有该前缀的那把**（生产里正在用的），否则等于让一个真实客户端掉线。换库后目标库是空的，
 所以判定必须看 `snapshot` 产出的 `rebuild-export-*.json`（里面有换库前的 key→账户快照）。
 
-gptjp 本次：`sk-f69aeca55` 同时属于源 key `#24`（E26Q）与 `#51`（郑晓婷），实例原本持有者是郑晓婷
-⇒ 保留 `#51`，`#24` 不导入。E26Q 那一边**不需要新的明文**：它在 9/14 就拿到过这把 key 的替换密钥
-（`/opt/aigw/data/E26Q-reissue-key.txt`，0600），重建时把它**原样重导**即可，客户端不用改配置。
+gw-b 本次：`sk-000000000` 同时属于源 key `#24`（K7QX）与 `#51`（孙倩），实例原本持有者是孙倩
+⇒ 保留 `#51`，`#24` 不导入。K7QX 那一边**不需要新的明文**：它在 9/14 就拿到过这把 key 的替换密钥
+（`/opt/aigw/data/K7QX-reissue-key.txt`，0600），重建时把它**原样重导**即可，客户端不用改配置。
 脚本误判过一次（换库后按「最近使用」选了 `#24`），用 `repair-prefix --keep-source-key 51 --disable-key 128`
 纠偏，并把这次误判的成因写进 `plan_reissues` 的注释里。
 
@@ -231,15 +231,15 @@ azure 供应商没有可用的部署目录接口：`POST /providers/{id}/models/
 | `upstream_404 · The API deployment for this resource does not exist` | 部署不存在 → 路由 `enabled=false`，写进报告 |
 | `upstream_400 · The requested operation is unsupported` | 探测方式不适用（图像模型不接受文本请求）→ 保持开启，记为「未证实」 |
 
-2026-09-23 gptjp 的 azure（源账号 10「azure ChatGPT官key」）实测结果：
+2026-09-23 gw-b 的 azure（源账号 10「azure ChatGPT官key」）实测结果：
 
 - **可用**：`gpt-5.6-sol`、`gpt-5.6-luna`、`gpt-5.6-terra`、`gpt-4o`；另 `gpt-image-1.5`、`gpt-image-2`
   的上游不是 404 而是 400（探测方式不适用），保持开启。
 - **不可用（部署不存在，路由已停用、上游模型行已删）**：`gpt-5.5`、`gpt-6-astra`、`gpt-5.4`、
   `gpt-5.4-mini`、`gpt-image-1`、`deepseek-v4-flash`、`deepseek-v4-pro`。
-- ⚠️ 电商人群近 30 天用量最高的两个名字 `gpt-5.5`（12,158 次）与 `gpt-6-astra`（3,152 次）**在这台
+- ⚠️ 客户组二人群近 30 天用量最高的两个名字 `gpt-5.5`（12,158 次）与 `gpt-6-astra`（3,152 次）**在这台
   azure 上服务不了**。要么在 azure 资源里补这两个部署，要么把 `deepseek`（或某个 codex 供应商）
-  也加进「电商」标签的 grants。
+  也加进「客户组二」标签的 grants。
 
 ### 9.6 清库的连带与唯一登录方式
 
@@ -247,7 +247,7 @@ azure 供应商没有可用的部署目录接口：`POST /providers/{id}/models/
 并且**这些都不在 sub2api 侧**。两条必须做的事：
 
 1. `config.yaml` 会追加 `bootstrap.admin`（口令沿用 `/opt/aigw/.admin-password`，文件保持 0600）——
-   没有它清库后无人能登录管理接口。gptjp 原本没有 `bootstrap` 段，本次是新增的。
+   没有它清库后无人能登录管理接口。gw-b 原本没有 `bootstrap` 段，本次是新增的。
 2. **MCP 令牌要在控制台重新签发**（明文只显示一次，不在对话/文件里出现），并更新到对应客户端。
 
 ### 9.7 回滚

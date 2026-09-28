@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // proxyStore embeds the store port and counts the calls the service makes. It proves

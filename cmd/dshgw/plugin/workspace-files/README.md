@@ -92,9 +92,9 @@ never rewrites:
 ```yaml
 - insert:
     - id: dshgw-workspace-files
-      name: file:///home/winger/work/ai_gateway/data/dshgw-verify/state/tenants/dsh-tenant/.dsh/plugins/workspace-files/index.js
+      name: file:///home/operator/work/ai_gateway/data/dshgw-verify/state/tenants/dsh-tenant/.dsh/plugins/workspace-files/index.js
       config:
-        root: /home/winger/work/ai_gateway/data/dshgw-verify/state/workspaces/dsh-tenant
+        root: /home/operator/work/ai_gateway/data/dshgw-verify/state/workspaces/dsh-tenant
         rootLabel: 工作区
 ```
 

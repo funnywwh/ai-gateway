@@ -22,7 +22,7 @@
 
 ### 2.2 已存在的 nginx 适配器
 
-可读的实际配置在 `/home/winger/nginxwebui/nginx.conf:62-142`：
+可读的实际配置在 `/home/operator/nginxwebui/nginx.conf:62-142`：
 
 1. `/dsh` 重定向到 `/dsh/`。
 2. `/dsh/` 剥前缀后转到宿主 8443，再转到 DSH 3080。
@@ -45,9 +45,9 @@
 | `http://127.0.0.1:3080/` | 401，DSH authentication required | 原始服务正常执行认证 |
 | `http://127.0.0.1:3080/dsh/` | 404 | DSH 不直接识别该挂载路径 |
 | `http://127.0.0.1:8090/dsh/`，Host 为配置域名 | 404 | 当前 gwproxy 没有这个挂载 |
-| gwproxy `/t/dsh-colin/` | 302 到独立租户端口 | 当前是入口跳转，不是前缀 UI |
-| `https://chat.tirisen.hk/dsh/` | 401，同样的 DSH 认证提示 | 现有外部前缀可到达受保护的 DSH 入口 |
-| `https://chat.tirisen.hk/dsh/dsh-prefix-shim.js` | 200，2092 字节，no-store | 现有适配脚本确实在提供服务 |
+| gwproxy `/t/dsh-alex/` | 302 到独立租户端口 | 当前是入口跳转，不是前缀 UI |
+| `https://chat.example.com/dsh/` | 401，同样的 DSH 认证提示 | 现有外部前缀可到达受保护的 DSH 入口 |
+| `https://chat.example.com/dsh/dsh-prefix-shim.js` | 200，2092 字节，no-store | 现有适配脚本确实在提供服务 |
 
 另在 Node VM 中执行实际下载的 shim，使用假的网络构造器验证：
 
@@ -93,7 +93,7 @@
 ### 4.1 先支持单实例 `/dsh/`
 
 ```text
-浏览器 https://chat.tirisen.hk/dsh/
+浏览器 https://chat.example.com/dsh/
   → 现有 TLS 入口（保留 /dsh/，保留访问控制）
   → gwproxy :8090
       /dsh/       → DSH prefix adapter → 127.0.0.1:3080/
@@ -109,7 +109,7 @@ dsh_web:
   enabled: true
   prefix: /dsh
   upstream: http://127.0.0.1:3080
-  public_origin: https://chat.tirisen.hk
+  public_origin: https://chat.example.com
   compatibility: dsh-0.1.2-rc.1
 ```
 

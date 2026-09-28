@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/securefile"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/securefile"
 )
 
 const diskVersion = 1

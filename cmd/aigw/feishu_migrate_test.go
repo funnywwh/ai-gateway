@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/config"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/store"
 )
 
 // The startup backfill (M72) decides whether a person who could sign in yesterday still can
@@ -22,18 +22,18 @@ func TestMigrateKeyFeishuBindingsMovesAndReports(t *testing.T) {
 	db := openTestStore(t)
 	log, logged := capturingLogger()
 
-	accountID, err := db.UpsertAccount(ctx, &domain.Account{Name: "colin", BillingMode: domain.BillingPrepaid})
+	accountID, err := db.UpsertAccount(ctx, &domain.Account{Name: "alex", BillingMode: domain.BillingPrepaid})
 	if err != nil {
 		t.Fatal(err)
 	}
 	keyID, err := db.UpsertAPIKey(ctx, &domain.APIKey{
-		AccountID: accountID, Name: "colin-key", KeyPrefix: "sk-gw-colin", KeyHash: "hash-colin",
+		AccountID: accountID, Name: "alex-key", KeyPrefix: "sk-gw-alex", KeyHash: "hash-alex",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := db.BindAPIKeyFeishu(ctx, keyID, domain.FeishuBinding{
-		OpenID: "ou_colin", UnionID: "on_colin", Name: "李智超", BoundBy: "admin",
+		OpenID: "ou_alex", UnionID: "on_alex", Name: "李雷", BoundBy: "admin",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestMigrateKeyFeishuBindingsMovesAndReports(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if account.FeishuOpenID != "ou_colin" || account.FeishuBoundBy != "key-migration" {
+	if account.FeishuOpenID != "ou_alex" || account.FeishuBoundBy != "key-migration" {
 		t.Fatalf("the identity did not reach the account: %+v", account)
 	}
 	key, err := db.GetAPIKeyByID(ctx, keyID)
@@ -76,7 +76,7 @@ func TestMigrateKeyFeishuBindingsMovesAndReports(t *testing.T) {
 		if err := json.Unmarshal([]byte(entry.ChangesJSON), &changes); err != nil {
 			t.Fatalf("audit changes are not JSON: %v", err)
 		}
-		if changes["from_key_id"] != float64(keyID) || changes["open_id"] != "ou_colin" {
+		if changes["from_key_id"] != float64(keyID) || changes["open_id"] != "ou_alex" {
 			t.Fatalf("audit entry does not name the source: %v", changes)
 		}
 		found = true

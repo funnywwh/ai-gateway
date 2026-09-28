@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/nodeproto"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeproto"
 )
 
 const testToken = "0123456789abcdef0123456789abcdef"

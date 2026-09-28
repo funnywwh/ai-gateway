@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/balancer"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/registry"
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/internal/balancer"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/registry"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // These tests drive the real dispatcher against the builtin echo provider, so what is being

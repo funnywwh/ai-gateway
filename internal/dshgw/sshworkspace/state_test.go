@@ -20,10 +20,10 @@ func TestStoreWritesAnEmptyListWhenTheLastMountGoes(t *testing.T) {
 	store := NewStore(path)
 	mount := Mount{
 		Tenant:          "dsh-tenant",
-		Host:            "rag-server",
+		Host:            "gw-c",
 		Remote:          "/srv/docs",
 		CanonicalRemote: "/srv/docs",
-		Mountpoint:      "/state/workspaces/dsh-tenant/ssh/rag-server/srv/docs",
+		Mountpoint:      "/state/workspaces/dsh-tenant/ssh/gw-c/srv/docs",
 		CreatedAt:       time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC),
 	}
 	if _, err := store.Add(mount); err != nil {

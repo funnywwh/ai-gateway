@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/config"
-	dshgwconfig "github.com/winger/ai-gateway/internal/dshgw/config"
-	dshgwfeishu "github.com/winger/ai-gateway/internal/dshgw/feishu"
+	"github.com/funnywwh/ai-gateway/internal/config"
+	dshgwconfig "github.com/funnywwh/ai-gateway/internal/dshgw/config"
+	dshgwfeishu "github.com/funnywwh/ai-gateway/internal/dshgw/feishu"
 )
 
 // childFixture is a configuration that enables the supervised child, with every
@@ -294,7 +294,7 @@ func TestBuildDshgwChildInjectsTheFeishuHandoff(t *testing.T) {
 	cfg.Feishu.DSHLogin = true
 	cfg.Feishu.AppID = "cli_test"
 	cfg.Feishu.AppSecret = "secret"
-	cfg.Feishu.CallbackURL = "http://192.168.190.86:8090/feishu/callback"
+	cfg.Feishu.CallbackURL = "http://192.0.2.101:8090/feishu/callback"
 	// The timeouts and endpoints come from config.Default() in a real deployment (Load starts
 	// there); this fixture builds the struct literally, so it states them.
 	cfg.Feishu.StateTTLS = 600
@@ -312,7 +312,7 @@ func TestBuildDshgwChildInjectsTheFeishuHandoff(t *testing.T) {
 	if child.config.Feishu == nil || !child.config.Feishu.Enabled {
 		t.Fatal("the child was not told to serve Feishu login")
 	}
-	if got, want := child.config.Feishu.AigwLoginURL, "http://192.168.190.86:8090/feishu/login"; got != want {
+	if got, want := child.config.Feishu.AigwLoginURL, "http://192.0.2.101:8090/feishu/login"; got != want {
 		t.Fatalf("aigw_login_url = %q, want %q", got, want)
 	}
 	// The injected secret must be the one aigw signs with, or every login would fail
@@ -477,7 +477,7 @@ func TestBuildDshgwChildCarriesSSHWorkspaces(t *testing.T) {
 		Enabled:        true,
 		MountSubdir:    "ssh",
 		IdentityDir:    "./keys",
-		Hosts:          []string{"gpt001"},
+		Hosts:          []string{"gw-a"},
 		ConnectTimeout: "7s",
 		PollInterval:   "1s",
 		MaxEntries:     50,
@@ -493,7 +493,7 @@ func TestBuildDshgwChildCarriesSSHWorkspaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(filepath.Join(working, "keys"))
-	if err := os.WriteFile(filepath.Join(working, "keys", "dsh-colin"), []byte("PRIVATE KEY\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(working, "keys", "dsh-alex"), []byte("PRIVATE KEY\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	child, err := buildDshgwChild(cfg, aigwBinary)
@@ -510,7 +510,7 @@ func TestBuildDshgwChildCarriesSSHWorkspaces(t *testing.T) {
 	if ssh.ConnectTimeout != "7s" || ssh.PollInterval != "1s" {
 		t.Errorf("durations were rewritten: %q / %q", ssh.ConnectTimeout, ssh.PollInterval)
 	}
-	if ssh.MaxEntries != 50 || len(ssh.Hosts) != 1 || ssh.Hosts[0] != "gpt001" {
+	if ssh.MaxEntries != 50 || len(ssh.Hosts) != 1 || ssh.Hosts[0] != "gw-a" {
 		t.Errorf("ssh workspace values = %+v", ssh)
 	}
 

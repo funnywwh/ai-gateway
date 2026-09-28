@@ -14,16 +14,16 @@ import (
 // hangs in an uninterruptible state for every session of the account.
 //
 // The measured incident (2026-09-21) is the fixture for these tests: the host's own
-// /home/winger/work/ai_gateway, mounted at <workspace>/ssh/rag-server/home/winger/work/ai_gateway,
+// /home/operator/work/ai_gateway, mounted at <workspace>/ssh/gw-c/home/operator/work/ai_gateway,
 // which lives inside it.
 func TestAncestorOfMountpoint(t *testing.T) {
 	root := t.TempDir()
-	mountpoint := filepath.Join(root, "state", "workspaces", "dsh-tenant", "ssh", "rag-server", "lib")
+	mountpoint := filepath.Join(root, "state", "workspaces", "dsh-tenant", "ssh", "gw-c", "lib")
 	if err := os.MkdirAll(mountpoint, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	// A second spelling of the same directory, the way this host reaches one file system
-	// through two mount points (/data/home/winger/work and /home/winger/work): the answer must
+	// through two mount points (/data/home/operator/work and /home/operator/work): the answer must
 	// not depend on the string.
 	alias := filepath.Join(root, "alias")
 	if err := os.Symlink(root, alias); err != nil {
@@ -58,7 +58,7 @@ func TestAncestorOfMountpoint(t *testing.T) {
 	// Containment by identity is decided without ever stat'ing the mount point: a source whose
 	// path *is* the mount point answers immediately, and a source inside it is rejected on the
 	// paths alone (which is what keeps a stat off a wedged mount).
-	unmade := "/nonexistent/dshgw/ssh/rag-server"
+	unmade := "/nonexistent/dshgw/ssh/gw-c"
 	if !ancestorOfMountpoint(unmade, unmade) {
 		t.Error("an unmade mount point is not its own ancestor")
 	}
@@ -81,8 +81,8 @@ func TestRefuseSelfNestedMountOnlyForThisHost(t *testing.T) {
 
 	// A mount point under the fixture's own root, and a source that contains it: the source is
 	// the root itself.
-	workspace := filepath.Join(env.root, "state", "workspaces", "dsh-colin")
-	mountpoint := filepath.Join(workspace, "ssh", "rag-server", "sub")
+	workspace := filepath.Join(env.root, "state", "workspaces", "dsh-alex")
+	mountpoint := filepath.Join(workspace, "ssh", "gw-c", "sub")
 	if err := os.MkdirAll(mountpoint, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestRefuseSelfNestedMountOnlyForThisHost(t *testing.T) {
 // machine id — the second proof of "this host", and the only one available when a host is named
 // by something like a DNS alias.
 func TestRefuseSelfNestedMountByMachineID(t *testing.T) {
-	env := newTestEnv(t, Options{Hosts: []string{"rag-server"}})
+	env := newTestEnv(t, Options{Hosts: []string{"gw-c"}})
 	ctx := context.Background()
 
 	idFile := filepath.Join(env.root, "machine-id")
@@ -134,12 +134,12 @@ func TestRefuseSelfNestedMountByMachineID(t *testing.T) {
 		return unaliased(ctx, name, args, env2)
 	}
 
-	workspace := filepath.Join(env.root, "state", "workspaces", "dsh-colin")
-	mountpoint := filepath.Join(workspace, "ssh", "rag-server", "sub")
+	workspace := filepath.Join(env.root, "state", "workspaces", "dsh-alex")
+	mountpoint := filepath.Join(workspace, "ssh", "gw-c", "sub")
 	if err := os.MkdirAll(mountpoint, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.service.refuseSelfNestedMount(ctx, env.remote, "rag-server", env.root, mountpoint); CodeOf(err) != CodeForbidden {
+	if err := env.service.refuseSelfNestedMount(ctx, env.remote, "gw-c", env.root, mountpoint); CodeOf(err) != CodeForbidden {
 		t.Fatalf("code = %q, want %q (%v)", CodeOf(err), CodeForbidden, err)
 	}
 
@@ -150,7 +150,7 @@ func TestRefuseSelfNestedMountByMachineID(t *testing.T) {
 		}
 		return unaliased(ctx, name, args, env2)
 	}
-	if err := env.service.refuseSelfNestedMount(ctx, env.remote, "rag-server", env.root, mountpoint); err != nil {
+	if err := env.service.refuseSelfNestedMount(ctx, env.remote, "gw-c", env.root, mountpoint); err != nil {
 		t.Errorf("a directory on another machine was refused: %v", err)
 	}
 }
@@ -167,7 +167,7 @@ func TestOpenRefusesSelfNestedMount(t *testing.T) {
 	if calls := env.fake.callCount("sshfs "); calls != 0 {
 		t.Errorf("sshfs was run %d times for a mount that was refused", calls)
 	}
-	if mounts, err := env.service.Mounts("dsh-colin"); err != nil || len(mounts) != 0 {
+	if mounts, err := env.service.Mounts("dsh-alex"); err != nil || len(mounts) != 0 {
 		t.Errorf("mounts = %+v / %v, want nothing recorded", mounts, err)
 	}
 }
@@ -177,7 +177,7 @@ func TestOpenRefusesSelfNestedMount(t *testing.T) {
 func TestSshfsArgsAsksForSeveralConnections(t *testing.T) {
 	env := newTestEnv(t, Options{SSHFSOptions: []string{"reconnect", "idmap=user"}})
 	defaults := env.service.options
-	args := defaults.sshfsArgs(env.remote, "gpt001", "/opt/app", "/w/app")
+	args := defaults.sshfsArgs(env.remote, "gw-a", "/opt/app", "/w/app")
 	if !containsOption(args, "max_conns=") {
 		t.Errorf("args = %v, want a max_conns option", args)
 	}
@@ -185,7 +185,7 @@ func TestSshfsArgsAsksForSeveralConnections(t *testing.T) {
 		t.Errorf("args = %v, want the default of %d connections", args, defaultMaxConns)
 	}
 	configured := newTestEnv(t, Options{SSHFSOptions: []string{"reconnect", "max_conns=2"}})
-	args = configured.service.options.sshfsArgs(configured.remote, "gpt001", "/opt/app", "/w/app")
+	args = configured.service.options.sshfsArgs(configured.remote, "gw-a", "/opt/app", "/w/app")
 	if !containsOption(args, "max_conns=2") || containsOption(args, "max_conns=4") {
 		t.Errorf("args = %v, want the configured max_conns=2 alone", args)
 	}

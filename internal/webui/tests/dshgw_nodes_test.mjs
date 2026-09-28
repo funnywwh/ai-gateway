@@ -187,7 +187,7 @@ const settle = async () => { for (let i = 0; i < 200; i++) await Promise.resolve
 
 const NODES = [
   {
-    name: 'node-a', source: 'console', url: 'http://10.0.0.1:18400', ssh_host: '10.0.0.1', ssh_user: 'winger',
+    name: 'node-a', source: 'console', url: 'http://10.0.0.1:18400', ssh_host: '10.0.0.1', ssh_user: 'operator',
     default: true, state: 'ready', revision: 'abcdef1234567', features: { tenant_plugins: ['web-tty'], host_shares: 1 },
     tenants: 2, running: 1, reachable: true, probed_at: '2026-09-23T02:00:00Z', token_state: 'set',
   },
@@ -201,7 +201,7 @@ const TENANTS = [
   { name: 'bob', account: 'Bob', node: 'node-b', running: false, suspended: true, public_port: 32602, worker_port: 32901 },
 ];
 
-const FINGERPRINT = 'SHA256:TG5FPCWIAAQEtNNBi7nTG7iNFrQUGgyQQDxRnuuIOgE';
+const FINGERPRINT = 'SHA256:0000000000000000000000000000000000000000000';
 let listProbes = [];
 let deployBodies = [];
 let deployPolls = 0;
@@ -430,7 +430,7 @@ async function renderPage(role) {
   const dialog = modals.find((entry) => entry.title.includes('添加工作节点'));
   assert.ok(dialog, 'the registration form opens');
   const result = await dialog.onSubmit({
-    name: 'node-c', listen: '10.0.0.3:18400', ssh_host: '10.0.0.3', ssh_user: 'winger',
+    name: 'node-c', listen: '10.0.0.3:18400', ssh_host: '10.0.0.3', ssh_user: 'operator',
     ssh_port: '22', worker_port_lo: '', worker_port_hi: '', default: 'false',
   });
   assert.equal(result, true, 'a valid registration closes the form');

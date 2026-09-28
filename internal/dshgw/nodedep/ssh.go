@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/nodestore"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodestore"
 )
 
 // localExec runs one command on the control plane itself (ssh-keygen for fingerprints). It is a

@@ -6,7 +6,7 @@
 > `docs/design/m58-aigw-supervised-dshgw.md`、`deploy/dshgw/README.md` 与 `docs/dshgw.md`；
 > 本文保留为历史记录（其中的协议、权限与信任边界的分析仍然有效）。
 
-门户保持 `https://chat.tirisen.hk:32600/`，租户继续按端口隔离。全部必需验收通过后才允许提交/发布；本文件不是通过报告。
+门户保持 `https://chat.example.com:32600/`，租户继续按端口隔离。全部必需验收通过后才允许提交/发布；本文件不是通过报告。
 
 ## 1. 已有证据与缺口
 

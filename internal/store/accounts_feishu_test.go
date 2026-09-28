@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // The account-level Feishu identity (M70) mirrors the key-level one (M60) and exists for

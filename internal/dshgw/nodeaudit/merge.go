@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/audit"
-	"github.com/winger/ai-gateway/internal/dshgw/nodeclient"
-	"github.com/winger/ai-gateway/internal/dshgw/nodestore"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/audit"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeclient"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodestore"
 )
 
 // DefaultInterval is how often each node is drained. Node events are operational signals, not a

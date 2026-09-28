@@ -1,6 +1,6 @@
 package tenancy
 
-import "github.com/winger/ai-gateway/internal/dshgw/aigw"
+import "github.com/funnywwh/ai-gateway/internal/dshgw/aigw"
 
 // models builds the disclosed-model list a test hands to the renderer: an id and nothing
 // else, which is exactly what an aigw that predates the capability fields answers.

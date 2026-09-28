@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
 )
 
 func TestHotloadReportRequiresEveryAttestation(t *testing.T) {

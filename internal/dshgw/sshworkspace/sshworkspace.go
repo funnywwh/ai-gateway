@@ -151,8 +151,8 @@ func ValidateHostSpec(spec string) error {
 // SplitHostSpec separates an optional ":port" suffix from a host spec.
 //
 // It exists because ssh takes the port as a flag ("ssh -p 2222 host"), not as part of the
-// destination: a person who types `gpt001:2222` means the same thing but ssh would look up a
-// host literally named "gpt001:2222". IPv6 literals are not supported yet. The port stays in
+// destination: a person who types `gw-a:2222` means the same thing but ssh would look up a
+// host literally named "gw-a:2222". IPv6 literals are not supported yet. The port stays in
 // the recorded spec, so the mount point keeps naming what was asked for.
 func SplitHostSpec(spec string) (target string, port int, err error) {
 	if err := ValidateHostSpec(spec); err != nil {

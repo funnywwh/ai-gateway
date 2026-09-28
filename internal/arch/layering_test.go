@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const modulePath = "github.com/winger/ai-gateway/"
+const modulePath = "github.com/funnywwh/ai-gateway/"
 
 // allowed lists, per package, the module-internal packages it may import.
 // An entry of nil means: no module-internal imports at all.

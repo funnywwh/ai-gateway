@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 const modelCols = `id, public_name, display_name, aliases_json, enabled, sale_pricing_json,

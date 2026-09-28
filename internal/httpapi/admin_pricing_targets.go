@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/winger/ai-gateway/internal/billing"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/pricing"
+	"github.com/funnywwh/ai-gateway/internal/billing"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/pricing"
 )
 
 // handleAdminPricingTargets returns every editable price target in one call: the sale

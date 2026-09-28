@@ -60,7 +60,7 @@ class Deployment:
     def account(self, name: str, key: bytes | None) -> Path:
         home = self.workspaces / name / ".ssh"
         home.mkdir(parents=True, exist_ok=True)
-        (home / "config").write_text("Host aipc\n", encoding="utf-8")
+        (home / "config").write_text("Host gw-d\n", encoding="utf-8")
         if key is not None:
             (home / "id_rsa").write_bytes(key)
             (home / "id_rsa").chmod(0o600)
@@ -84,8 +84,8 @@ class Deployment:
 
 def make_deployment(root: Path) -> Deployment:
     deployment = Deployment(root)
-    deployment.account("dsh-colin", deployment.revoked.read_bytes())
-    deployment.account("dsh-ran", deployment.revoked.read_bytes())
+    deployment.account("dsh-alex", deployment.revoked.read_bytes())
+    deployment.account("dsh-acct-e", deployment.revoked.read_bytes())
     deployment.account("dsh-mine", b"MY OWN KEY\n")
     deployment.account("dsh-empty", None)
     deployment.write_registry()
@@ -113,29 +113,29 @@ def main() -> int:
         dry = purge(deployment)
         check(dry.returncode == 0, f"dry run failed: {dry.stderr}")
         check(f"revoked identity sha256 {key_hash}" in dry.stdout, "the dry run states the digest it matches")
-        check("would   dsh-colin" in dry.stdout and "would   dsh-ran" in dry.stdout,
+        check("would   dsh-alex" in dry.stdout and "would   dsh-acct-e" in dry.stdout,
               f"both accounts holding the key are listed: {dry.stdout!r}")
         check("would   dsh-mine" not in dry.stdout and "would   dsh-empty" not in dry.stdout,
               "an account with its own key, or none, is not a purge candidate")
         check("keep    dsh-mine" in dry.stdout, "an account's own key is reported as kept, not deleted")
         check("plan: 2 of 3 keys are the revoked identity" in dry.stdout, f"the summary counts keys: {dry.stdout!r}")
-        for name in ("dsh-colin", "dsh-ran", "dsh-mine"):
+        for name in ("dsh-alex", "dsh-acct-e", "dsh-mine"):
             check((deployment.workspaces / name / ".ssh" / "id_rsa").exists(),
                   f"a dry run left {name}'s key alone")
 
         # A recorded mount means the old session may still be live: refuse unless told otherwise.
-        deployment.write_mounts([{"tenant": "dsh-colin", "mountpoint": "/w/ssh/aipc/app"}])
+        deployment.write_mounts([{"tenant": "dsh-alex", "mountpoint": "/w/ssh/gw-d/app"}])
         blocked = purge(deployment, "--apply")
         check(blocked.returncode == 1, "a recorded mount stops the purge")
         check("--allow-mounted" in blocked.stderr, f"the refusal names the override: {blocked.stderr!r}")
-        check("dsh-colin" not in blocked.stdout, "nothing is deleted when the purge refuses")
+        check("dsh-alex" not in blocked.stdout, "nothing is deleted when the purge refuses")
         deployment.write_mounts([])
 
         # The real thing: the revoked copies go, the marker appears, everything else survives.
         applied = purge(deployment, "--apply")
         check(applied.returncode == 0, f"purge failed: {applied.stderr}")
         check("done: 2 of 3 keys reclaimed" in applied.stdout, f"summary: {applied.stdout!r}")
-        for name in ("dsh-colin", "dsh-ran"):
+        for name in ("dsh-alex", "dsh-acct-e"):
             home = deployment.workspaces / name / ".ssh"
             check(not (home / "id_rsa").exists(), f"{name}'s revoked key was deleted")
             marker = home / "identity-managed"
@@ -173,7 +173,7 @@ def main() -> int:
 
         # Provision must refuse the very key this repair exists to remove.
         refused = run(
-            "provision", "--tenant", "dsh-colin", "--key", str(corrupt),
+            "provision", "--tenant", "dsh-alex", "--key", str(corrupt),
             "--state-root", str(deployment.root), "--revoked-key", str(deployment.revoked),
             "--identity-dir", str(identity_dir), cwd=deployment.root,
         )
@@ -184,7 +184,7 @@ def main() -> int:
         # One key per account: a key already issued to another account is refused too.
         have_ssh_keygen = shutil.which("ssh-keygen") is not None
         if have_ssh_keygen:
-            for name in ("dsh-colin", "dsh-ran"):
+            for name in ("dsh-alex", "dsh-acct-e"):
                 generated = root / f"{name}.key"
                 made = subprocess.run(
                     ["ssh-keygen", "-t", "ed25519", "-N", "", "-C", f"{name}@test", "-f", str(generated)],
@@ -213,7 +213,7 @@ def main() -> int:
                 check(f"ssh-copy-id -i {target}.pub" in provisioned.stdout,
                       "the remote-authorisation step is named")
             shared = run(
-                "provision", "--tenant", "dsh-mine", "--key", str(root / "dsh-ran.key"),
+                "provision", "--tenant", "dsh-mine", "--key", str(root / "dsh-acct-e.key"),
                 "--state-root", str(deployment.root), "--revoked-key", str(deployment.revoked),
                 "--identity-dir", str(identity_dir), cwd=deployment.root,
             )
@@ -222,7 +222,7 @@ def main() -> int:
 
             # A dry run reports the plan and writes nothing.
             dry = run(
-                "provision", "--tenant", "dsh-empty", "--key", str(root / "dsh-colin.key"),
+                "provision", "--tenant", "dsh-empty", "--key", str(root / "dsh-alex.key"),
                 "--state-root", str(deployment.root), "--revoked-key", str(deployment.revoked),
                 "--identity-dir", str(root / "unused-keys"), cwd=deployment.root,
             )
@@ -246,7 +246,7 @@ def main() -> int:
             check("already holds a key of its own" in keep.stderr, f"the refusal says why: {keep.stderr!r}")
             check(existing.read_bytes() == b"MY OWN KEY\n", "the account's own key is untouched")
             forced = run(
-                "provision", "--tenant", "dsh-mine", "--key", str(root / "dsh-colin.key"),
+                "provision", "--tenant", "dsh-mine", "--key", str(root / "dsh-alex.key"),
                 "--state-root", str(deployment.root), "--revoked-key", str(deployment.revoked),
                 "--identity-dir", str(identity_dir), "--apply", "--force", cwd=deployment.root,
             )
@@ -312,16 +312,16 @@ def main() -> int:
         seeds = root / "ssh-configs"
         seeds.mkdir()
         inventory = (
-            "Host aipc\n  HostName 10.0.0.1\n  User ops\n\n"
-            "Host gpt001\n  HostName gpt001.example\n  User root\n  Port 2222\n"
+            "Host gw-d\n  HostName 10.0.0.1\n  User ops\n\n"
+            "Host gw-a\n  HostName gw-a.example\n  User root\n  Port 2222\n"
         )
-        (seeds / "dsh-colin").write_text(inventory, encoding="utf-8")
-        (seeds / "dsh-ran").write_text(inventory, encoding="utf-8")
-        # dsh-colin's live list is the operator inventory plus one alias it added itself;
-        # dsh-ran never added anything.
+        (seeds / "dsh-alex").write_text(inventory, encoding="utf-8")
+        (seeds / "dsh-acct-e").write_text(inventory, encoding="utf-8")
+        # dsh-alex's live list is the operator inventory plus one alias it added itself;
+        # dsh-acct-e never added anything.
         own = "\nHost my-server\n  HostName 10.9.9.9\n  User me\n"
-        (deployment.workspaces / "dsh-colin" / ".ssh" / "config").write_text(inventory + own, encoding="utf-8")
-        (deployment.workspaces / "dsh-ran" / ".ssh" / "config").write_text(inventory, encoding="utf-8")
+        (deployment.workspaces / "dsh-alex" / ".ssh" / "config").write_text(inventory + own, encoding="utf-8")
+        (deployment.workspaces / "dsh-acct-e" / ".ssh" / "config").write_text(inventory, encoding="utf-8")
 
         def trim(*extra: str) -> subprocess.CompletedProcess:
             return run(
@@ -333,22 +333,22 @@ def main() -> int:
         check(dry.returncode == 0, f"the trim plan failed: {dry.stderr}")
         check("keeps 1 (my-server)" in dry.stdout, f"only the account's own alias is kept: {dry.stdout!r}")
         check("would write seeds" in dry.stdout, "the plan says what it would write")
-        colin_config = deployment.workspaces / "dsh-colin" / ".ssh" / "config"
-        check("my-server" in colin_config.read_text(encoding="utf-8"), "a dry run changes nothing")
+        alex_config = deployment.workspaces / "dsh-alex" / ".ssh" / "config"
+        check("my-server" in alex_config.read_text(encoding="utf-8"), "a dry run changes nothing")
 
         applied = trim("--apply")
         check(applied.returncode == 0, f"the trim failed: {applied.stderr}")
-        colin_config = colin_config.read_text(encoding="utf-8")
-        check("my-server" in colin_config, "the account's own alias survives the trim")
-        check("aipc" not in colin_config and "gpt001" not in colin_config,
-              f"the operator inventory is gone from the live list: {colin_config!r}")
-        check("my-server" in (seeds / "dsh-colin").read_text(encoding="utf-8"),
+        alex_config = alex_config.read_text(encoding="utf-8")
+        check("my-server" in alex_config, "the account's own alias survives the trim")
+        check("gw-d" not in alex_config and "gw-a" not in alex_config,
+              f"the operator inventory is gone from the live list: {alex_config!r}")
+        check("my-server" in (seeds / "dsh-alex").read_text(encoding="utf-8"),
               "the seed keeps the account's own alias too")
-        check("aipc" not in (seeds / "dsh-colin").read_text(encoding="utf-8"),
+        check("gw-d" not in (seeds / "dsh-alex").read_text(encoding="utf-8"),
               "the seed no longer carries the operator inventory")
-        ran_seed = (seeds / "dsh-ran").read_text(encoding="utf-8")
+        ran_seed = (seeds / "dsh-acct-e").read_text(encoding="utf-8")
         check("Host" not in ran_seed, f"an account that added nothing ends up with no aliases: {ran_seed!r}")
-        check(any(p.name.startswith(".pre-trim-dsh-colin-") for p in seeds.iterdir()),
+        check(any(p.name.startswith(".pre-trim-dsh-alex-") for p in seeds.iterdir()),
               "the live alias list was snapshotted before it was rewritten")
         check(any(p.name.startswith(".operator-inventory-") for p in seeds.iterdir()),
               "the inventory the run used is recorded next to the seeds")

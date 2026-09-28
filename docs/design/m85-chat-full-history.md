@@ -6,7 +6,7 @@
 > 默认行为）。
 >
 > 里程碑编号说明：本条最初按 **M84** 编号并已提交（`2b7a3f7`、`a089114`），随后发现并行工作区
-> 的 **Images API** 已经占用 M84（分支 `m84-images`，且已以预览形态部署在 gptjp），因此改号 **M85**；
+> 的 **Images API** 已经占用 M84（分支 `m84-images`，且已以预览形态部署在 gw-b），因此改号 **M85**；
 > 已发布的 v4.4.0 构建物只含注释里的旧编号，行为不受影响。
 
 ## 目标
@@ -28,7 +28,7 @@
 - 配置了正整数窗口时，行为与今天逐字一致（整轮裁剪、条数提示、最新一轮装不下时该轮明确失败）；
 - 回放出去的历史**自洽**：不存在没有 `function_call_output` 的 `function_call`；
 - 会话长到超过模型上下文时，用户看到的是「上游原文 + 可操作的中文提示」，而不是一段英文 400；
-- 线上（rag-server 与 gptjp）用「针」验证：第 1 条消息里埋的数字，21 轮之后仍被模型答出，且全程没有
+- 线上（gw-c 与 gw-b）用「针」验证：第 1 条消息里埋的数字，21 轮之后仍被模型答出，且全程没有
   「更早的 N 轮…」提示。
 
 ## 关键决策
@@ -131,8 +131,8 @@ func contextOverflowHint(message string) string
 ## 环境说明（本次实现）
 
 工作区仓库在沙箱内没有 Go 工具链，也没有通用 DNS：`go vet` / `go test` / `make build` / 部署都通过
-`ssh rag-server`（可达；工作区路径与宿主在同一文件系统，`~/.ssh/config` 里有 `Host gptjp`）执行。
-真机目标是 rag-server（`systemctl --user aigw-local`）与 gptjp（`aigw.service`），gpt001 本次不在范围。
+`ssh gw-c`（可达；工作区路径与宿主在同一文件系统，`~/.ssh/config` 里有 `Host gw-b`）执行。
+真机目标是 gw-c（`systemctl --user aigw-local`）与 gw-b（`aigw.service`），gw-a 本次不在范围。
 
 ## 实现与设计差异
 
@@ -153,8 +153,8 @@ func contextOverflowHint(message string) string
 4. **负值两层处理**：`internal/config` 校验层直接拒绝（运维笔误要在启动时报错），`internal/chat.withDefaults`
    再把负值归一为 0（防御性，与 `MaxSteps` / `MaxToolCalls` 同形）。
 5. **真机验收脚本加了 `ACCOUNT_ID` / `KEY_ID` / `MODEL` 覆盖**。原设计只说「跑针测试」，但在生产实例上
-   「第一个能用的 Key」往往是客户的（gptjp 上 111 个账户、132 把 Key），一次 22 轮的小验证不该记到客户头上；
-   显式指定后，两台都用了运维自己的账户（rag-server #4/#8、gptjp #1/#117）。
-6. **交付被拆成两次发布**（设计里没预见）：v4.4.0 只上了 rag-server —— 部署前发现 gptjp 正跑着并行工作区的
+   「第一个能用的 Key」往往是客户的（gw-b 上 111 个账户、132 把 Key），一次 22 轮的小验证不该记到客户头上；
+   显式指定后，两台都用了运维自己的账户（gw-c #4/#8、gw-b #1/#117）。
+6. **交付被拆成两次发布**（设计里没预见）：v4.4.0 只上了 gw-c —— 部署前发现 gw-b 正跑着并行工作区的
    **Images API 预览版**，覆盖会把它撤掉；用户决定先合并 `m84-images` 再一起部署，于是有了 v4.5.0
-   （`main` 同时含 M84 + M85，rag-server 与 gptjp 同版本）。里程碑编号也因此从 M84 改成 M85。
+   （`main` 同时含 M84 + M85，gw-c 与 gw-b 同版本）。里程碑编号也因此从 M84 改成 M85。

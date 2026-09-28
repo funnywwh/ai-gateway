@@ -22,23 +22,23 @@ const FIXTURES = __FIXTURES__;
 
 const NODES = [
   {
-    name: 'node-a', source: 'console', listen: '192.168.190.87:18400', url: 'http://192.168.190.87:18400',
-    ssh_host: '192.168.190.87', ssh_user: 'winger', deploy_dir: '/srv/dshgw-node',
+    name: 'node-a', source: 'console', listen: '192.0.2.102:18400', url: 'http://192.0.2.102:18400',
+    ssh_host: '192.0.2.102', ssh_user: 'operator', deploy_dir: '/srv/dshgw-node',
     default: true, state: 'ready', version: 'dev', revision: 'abcdef1234567', protocol: 1,
     features: { tenant_plugins: ['web-tty', 'workspace-files', 'git-diff'], host_shares: 1, directory_picker: 'clamp' },
     tenants: 2, running: 1, reachable: true, probed_at: '2026-09-23T02:00:00Z', ready_at: '2026-09-23T01:00:00Z',
     token_state: 'set',
   },
   {
-    name: 'node-b', source: 'config', listen: '192.168.190.88:18400', url: 'http://192.168.190.88:18400',
-    ssh_host: '192.168.190.88', ssh_user: 'dshgw', deploy_dir: '/srv/dshgw-node',
+    name: 'node-b', source: 'config', listen: '192.0.2.103:18400', url: 'http://192.0.2.103:18400',
+    ssh_host: '192.0.2.103', ssh_user: 'dshgw', deploy_dir: '/srv/dshgw-node',
     default: false, state: 'unreachable', revision: '', features: {},
     tenants: 1, running: 0, reachable: false, probed_at: '2026-09-23T02:05:00Z', token_state: 'set',
-    error: 'node node-b is unreachable: dial tcp 192.168.190.88:18400: connect: connection refused',
+    error: 'node node-b is unreachable: dial tcp 192.0.2.103:18400: connect: connection refused',
   },
   {
-    name: 'node-c', source: 'console', listen: '192.168.190.89:18400', url: 'http://192.168.190.89:18400',
-    ssh_host: '192.168.190.89', ssh_user: 'winger', default: false,
+    name: 'node-c', source: 'console', listen: '192.0.2.104:18400', url: 'http://192.0.2.104:18400',
+    ssh_host: '192.0.2.104', ssh_user: 'operator', default: false,
     state: 'pending', tenants: 0, running: 0, reachable: false, token_state: 'missing', probed_at: null,
   },
 ];
@@ -60,7 +60,7 @@ function startJob(name, accept) {
   if (!accept) {
     // 第一次尝试：后端把指纹放在错误里，页面必须把它变成一次确认。
     return { status: 400, body: { error: { code: 'bad_request',
-      message: 'upload: 192.168.190.87 has host key SHA256:TG5FPCWIAAQEtNNBi7nTG7iNFrQUGgyQQDxRnuuIOgE; confirm it with --accept-host-key' } } };
+      message: 'upload: 192.0.2.102 has host key SHA256:0000000000000000000000000000000000000000000; confirm it with --accept-host-key' } } };
   }
   JOBS[name] = { step: 0, phases: [], accept };
   return { status: 202, body: { deploy: { node: name, running: true, state: 'deploying', phase: 'preflight' } } };
@@ -81,7 +81,7 @@ function pollJob(name) {
   const done = job.step >= PHASES.length;
   return { status: 200, body: { deploy: {
     node: name, running: !done, state: done ? 'ready' : 'deploying', phase,
-    systemd: true, rotated_token: !!job.accept.rotate_token, fingerprint: 'SHA256:TG5FPCWIAAQEtNNBi7nTG7iNFrQUGgyQQDxRnuuIOgE',
+    systemd: true, rotated_token: !!job.accept.rotate_token, fingerprint: 'SHA256:0000000000000000000000000000000000000000000',
     phases: job.phases.slice(),
     log_tail: job.phases.map((entry) => '[' + entry.name + '] out: ok').join('\n') + '\n',
   } } };
@@ -266,13 +266,13 @@ try {
   find('部署/升级').click();
   await settle();
   checks.fingerprintDialogShown = !!modal();
-  checks.fingerprintInDialog = modalText().includes('SHA256:TG5FPCWIAAQEtNNBi7nTG7iNFrQUGgyQQDxRnuuIOgE');
+  checks.fingerprintInDialog = modalText().includes('SHA256:0000000000000000000000000000000000000000000');
   const firstBody = (window.__deployBodies || [])[0] || {};
   checks.firstAttemptUnconfirmed = !firstBody.accept_host_key;
   find('确认').click();
   await settle();
   const bodies = window.__deployBodies || [];
-  checks.secondAttemptConfirmed = bodies.length >= 2 && bodies[1].accept_host_key === 'SHA256:TG5FPCWIAAQEtNNBi7nTG7iNFrQUGgyQQDxRnuuIOgE';
+  checks.secondAttemptConfirmed = bodies.length >= 2 && bodies[1].accept_host_key === 'SHA256:0000000000000000000000000000000000000000000';
 
   // 6. 部署抽屉：阶段表随轮询推进，日志尾部可见；结束后不再轮询。
   checks.drawerShown = !!modal() && modalText().includes('部署进度');
@@ -344,15 +344,15 @@ try {
   checks.addDialogShown = !!modal();
   const nameInput = modal().querySelector('input[name=name]');
   nameInput.value = 'node-d';
-  modal().querySelector('input[name=listen]').value = '192.168.190.90:18400';
-  modal().querySelector('input[name=ssh_host]').value = '192.168.190.90';
-  modal().querySelector('input[name=ssh_user]').value = 'winger';
+  modal().querySelector('input[name=listen]').value = '192.0.2.105:18400';
+  modal().querySelector('input[name=ssh_host]').value = '192.0.2.105';
+  modal().querySelector('input[name=ssh_user]').value = 'operator';
   find('注册').click();
   await settle();
   const added = (window.__added || [])[0] || {};
   checks.addSentName = added.name === 'node-d';
-  checks.addSentListen = added.listen === '192.168.190.90:18400';
-  checks.addSentSSH = added.ssh_host === '192.168.190.90' && added.ssh_user === 'winger';
+  checks.addSentListen = added.listen === '192.0.2.105:18400';
+  checks.addSentSSH = added.ssh_host === '192.0.2.105' && added.ssh_user === 'operator';
   checks.addKeepsPortsOptional = added.worker_port_lo === undefined;
   checks.addToastMentionsDeploy = (document.querySelector('.toasts') || { textContent: '' }).textContent.includes('部署');
 

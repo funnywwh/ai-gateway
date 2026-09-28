@@ -14,13 +14,13 @@ func TestNormalizeTagNameIsTheAccountNameRule(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"chinese", "蓝精灵3", "蓝精灵3"},
-		{"mixed script", "蓝精灵 3 号（测试）", "蓝精灵 3 号（测试）"},
+		{"chinese", "测试标签3", "测试标签3"},
+		{"mixed script", "测试标签 3 号（测试）", "测试标签 3 号（测试）"},
 		{"ascii identifier", "team.a-b", "team.a-b"},
 		{"punctuation", "tier #1 / trial", "tier #1 / trial"},
 		{"trim ascii spaces", "  deepseek  ", "deepseek"},
-		{"trim unicode space", "\u3000蓝精灵1\u3000", "蓝精灵1"},
-		{"inner whitespace kept", "蓝精灵 1", "蓝精灵 1"},
+		{"trim unicode space", "\u3000测试标签1\u3000", "测试标签1"},
+		{"inner whitespace kept", "测试标签 1", "测试标签 1"},
 		// 64 runes is the ceiling, counted as characters rather than bytes.
 		{"64 ascii", strings.Repeat("a", MaxTagNameRunes), strings.Repeat("a", MaxTagNameRunes)},
 		{"64 chinese", strings.Repeat("中", MaxTagNameRunes), strings.Repeat("中", MaxTagNameRunes)},
@@ -52,7 +52,7 @@ func TestNormalizeTagNameRejectsBlankAndOverlong(t *testing.T) {
 		{"unicode spaces only", "\u3000\t\n"},
 		{"65 ascii", strings.Repeat("a", MaxTagNameRunes+1)},
 		{"65 chinese", strings.Repeat("中", MaxTagNameRunes+1)},
-		{"invalid utf8", "蓝精灵\xff"},
+		{"invalid utf8", "测试标签\xff"},
 	} {
 		if got, err := NormalizeTagName(tc.in); err == nil {
 			t.Errorf("%s: NormalizeTagName(%q) = %q, want an error", tc.name, tc.in, got)

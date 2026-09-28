@@ -9,13 +9,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/billing"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/registry"
-	"github.com/winger/ai-gateway/internal/routing"
-	"github.com/winger/ai-gateway/internal/runtime"
-	"github.com/winger/ai-gateway/internal/usage"
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/internal/billing"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/registry"
+	"github.com/funnywwh/ai-gateway/internal/routing"
+	"github.com/funnywwh/ai-gateway/internal/runtime"
+	"github.com/funnywwh/ai-gateway/internal/usage"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // The Images API surface (M84): POST /v1/images/generations and POST /v1/images/edits.

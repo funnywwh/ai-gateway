@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // handleAdminExplainRouter runs the same resolution and candidate selection the data

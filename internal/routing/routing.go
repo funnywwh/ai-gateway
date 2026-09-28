@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/balancer"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/modelmap"
-	"github.com/winger/ai-gateway/internal/registry"
+	"github.com/funnywwh/ai-gateway/internal/balancer"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/modelmap"
+	"github.com/funnywwh/ai-gateway/internal/registry"
 )
 
 // Config mirrors the routing section of the configuration file.

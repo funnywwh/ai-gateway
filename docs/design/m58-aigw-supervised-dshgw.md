@@ -33,7 +33,7 @@ aigw（主程序，当前用户 euid）
 
 要点：
 
-- **一个 UID**：aigw、dshgw、所有租户 worker 都是同一个非 root 用户（本地即 `winger`）。
+- **一个 UID**：aigw、dshgw、所有租户 worker 都是同一个非 root 用户（本地即 `operator`）。
 - **隔离只来自 mount namespace**：租户之间、租户与宿主之间由 M57 的 bwrap profile 分隔（空 tmpfs 根 + 逐路径绑定 + 只读运行时 + 权限位）。**没有 UID 边界**。
 - **零特权**：安装 = 拷贝两个二进制到同一目录；运行 = 一个前台/用户级单元；建户/删户不再 `useradd`/`userdel`/`chown`/`systemctl`。
 
@@ -56,7 +56,7 @@ aigw（主程序，当前用户 euid）
 1. **没有 UID 边界**：所有租户 worker 与 aigw 同 UID。租户数据属主 = 当前登录用户，
    因此任何以该用户运行的进程都能读全部租户的 `.dsh/.credentials.yaml`（含各自 aigw Key）。
    M51 记录过的"root 与网关账号可冒充租户"在这里扩大为"**宿主登录用户即全部租户**"。
-2. **宿主账号的爆炸半径就是隔离失效时的地板**：本机 `winger` 在 `sudo`、`docker`、`lxd` 组里，
+2. **宿主账号的爆炸半径就是隔离失效时的地板**：本机 `operator` 在 `sudo`、`docker`、`lxd` 组里，
    所以 namespace 边界一旦失守，逃逸进程等价于 root。共享服务账号（`dshgw`，nologin、无附加组）
    原本提供的地板在这里没有了。
 3. **配置文件不再由 root 拥有**：profile 策略（bwrap 路径、挂载白名单、worker 账号）

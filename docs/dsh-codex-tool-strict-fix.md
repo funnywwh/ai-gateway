@@ -20,7 +20,7 @@ DSH 因目标权限不比当前权限更宽而拒绝调用。运行时上下文�
 - 回归测试先复现缺少显式 false，再验证修复；覆盖插件 JSON 边界、显式
   true/false、schema 保留、自定义工具以及调用方不可变性。
 - `go test ./...`、`go vet ./...`、`git diff --check` 通过。
-- gpt001 上以 `gpt-6-astra`、相同提示和 Bash schema 做流式对照：修复前省略
+- gw-a 上以 `gpt-6-astra`、相同提示和 Bash schema 做流式对照：修复前省略
   strict 会产生 `sandbox_permissions: "danger-full-access"` 和空 justification；
   显式 false 只产生 command/description。更新插件后，省略 strict 也只产生
   command/description。

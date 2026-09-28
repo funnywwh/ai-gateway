@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 func backupFixture(t *testing.T) (*Manager, *WorkerRunner, registry.Tenant) {

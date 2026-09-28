@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/feishu"
+	"github.com/funnywwh/ai-gateway/internal/feishu"
 )
 
 type vector struct {

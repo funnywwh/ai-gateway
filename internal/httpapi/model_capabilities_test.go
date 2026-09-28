@@ -6,8 +6,8 @@ import (
 	"io"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/responses"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/responses"
 )
 
 // capabilityEntry is the wire shape these tests read back. Every capability field is a

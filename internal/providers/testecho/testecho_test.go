@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 func TestCompleteEchoesAndReportsUsage(t *testing.T) {

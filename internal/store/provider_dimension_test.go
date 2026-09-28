@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // seedProviderUsage writes one metered attempt served by a named provider. providerID 0 is

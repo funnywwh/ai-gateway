@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // TestMCPTokenScopeRoundTrip covers the column added in migration 0006: a token

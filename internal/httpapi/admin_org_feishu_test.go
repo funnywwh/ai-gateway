@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // The directory-sync endpoints, tested against a stub that speaks the three Feishu calls

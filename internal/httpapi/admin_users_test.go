@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/admin"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/feishu"
+	"github.com/funnywwh/ai-gateway/internal/admin"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/feishu"
 )
 
 // The console's administrators themselves (M66): who exists, what they may do, how they get

@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/localdshgw"
-	"github.com/winger/ai-gateway/internal/secret"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/localdshgw"
+	"github.com/funnywwh/ai-gateway/internal/secret"
 )
 
 // M52: the dshgw authorize endpoint and the console's per-account dsh toggle share one
@@ -127,7 +127,7 @@ func TestDSHGWAuthorizeNamesTheAccountAndItsFeishuIdentity(t *testing.T) {
 	// scans the account's keys instead of only the authenticated one.
 	seedDSHGWKey(t, f, account.ID)
 	boundID, err := f.db.UpsertAPIKey(ctx, &domain.APIKey{
-		AccountID: account.ID, Name: "lzhichao@lagenio.com",
+		AccountID: account.ID, Name: "lilei@example.com",
 		KeyPrefix: secret.Prefix("sk-user-key-m67-abcdef123456"), KeyHash: secret.Hash("sk-user-key-m67-abcdef123456"),
 		Status: "active", RecordInputMode: "inherit",
 	})
@@ -144,7 +144,7 @@ func TestDSHGWAuthorizeNamesTheAccountAndItsFeishuIdentity(t *testing.T) {
 			t.Fatalf("before enable: status=%d payload=%v", status, payload)
 		}
 	}
-	if err := f.db.BindAPIKeyFeishu(ctx, boundID, domain.FeishuBinding{OpenID: "ou_m67", Name: "李智超", BoundBy: "tester"}); err != nil {
+	if err := f.db.BindAPIKeyFeishu(ctx, boundID, domain.FeishuBinding{OpenID: "ou_m67", Name: "李雷", BoundBy: "tester"}); err != nil {
 		t.Fatal(err)
 	}
 	if res := enableDSHForTest(t, f, account.ID); res != http.StatusOK {
@@ -158,7 +158,7 @@ func TestDSHGWAuthorizeNamesTheAccountAndItsFeishuIdentity(t *testing.T) {
 	if payload["account"] != account.Name {
 		t.Fatalf("account=%v, want the account's own name %q", payload["account"], account.Name)
 	}
-	if payload["feishu_name"] != "李智超" {
+	if payload["feishu_name"] != "李雷" {
 		t.Fatalf("feishu_name=%v, want the name bound to a key of the account", payload["feishu_name"])
 	}
 	if payload["tenant"] == nil || payload["tenant"] == "" {

@@ -15,7 +15,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/winger/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/config"
 )
 
 // DB holds the two connection pools over one SQLite file.

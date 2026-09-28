@@ -1,7 +1,7 @@
 package sshworkspace
 
 import (
-	"github.com/winger/ai-gateway/internal/dshgw/fusekernel"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/fusekernel"
 )
 
 // The wedged-mount escape hatch.

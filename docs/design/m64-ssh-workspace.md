@@ -31,7 +31,7 @@ aigw 账号（= dshgw 租户）登录自己的 DSH 之后，能：
 | # | 事实 | 证据 |
 |---|---|---|
 | F1 | 租户布局：`<workspace_root>/<账号>` 是会话 cwd 与 picker 的 clamp 根；`<tenant_root>/<账号>/.dsh` 是 DSH home | `internal/dshgw/tenancy/render.go:267-279`、`registry.Tenant` |
-| F2 | 现网（M63 布局）实际路径：部署根 `/home/winger/work/ai_gateway`，state 根 `./data/dshgw-verify/state`。`dsh-colin` → workspace `…/state/workspaces/dsh-colin`、dsh_home `…/state/tenants/dsh-colin/.dsh`、worker 18402、公开 18303 | 运行中 worker 的 bwrap argv + `registry.json` |
+| F2 | 现网（M63 布局）实际路径：部署根 `/home/operator/work/ai_gateway`，state 根 `./data/dshgw-verify/state`。`dsh-alex` → workspace `…/state/workspaces/dsh-alex`、dsh_home `…/state/tenants/dsh-alex/.dsh`、worker 18402、公开 18303 | 运行中 worker 的 bwrap argv + `registry.json` |
 | F3 | 租户 worker 的 `HOME` **就是**它的 workspace ⇒ `~/.ssh` 就是 `<workspace>/.ssh` | `internal/dshgw/tenancy/runner.go` 的 `workerEnv` |
 | F4 | 沙箱内 `ssh` 可用（`/usr` 整树只读绑定），`PATH` 含 `/usr/bin` | 同上 + `sandbox/profile.go` |
 | F5 | 沙箱网络命名空间**共享** ⇒ 出站 ssh 可达 | `sandbox/profile.go`（"deliberately shared: the worker must reach aigw"） |
@@ -217,7 +217,7 @@ ssh_workspaces:
 ## 15. 别名清单改成「一账号一份」+「我的主机」（2026-09-21）
 
 **动机**：设计里的 `ssh_config_source` 是**一个**文件，本机部署把它指向运维自己的
-`/home/winger/.ssh/config`（`dshgw.yaml:49`）。后果有两层：每个租户的工作区里都落了一整份运维认识的
+`/home/operator/.ssh/config`（`dshgw.yaml:49`）。后果有两层：每个租户的工作区里都落了一整份运维认识的
 主机清单（内网 IP、用户名、云主机入口），而且所有租户的别名完全相同 —— 一处改动等于替所有账号决定。
 本次把「一个全局文件」换成「一账号一份」，并把这份文件交给账号自己维护。
 

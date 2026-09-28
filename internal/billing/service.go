@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/store"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/store"
 )
 
 // ServiceStore is everything the billing service needs from persistence. It is one

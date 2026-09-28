@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
 )
 
 func tenant(name, prefix string, pub, worker int) Tenant {
@@ -170,11 +170,11 @@ func TestAccountLabelRoundTripAndLimits(t *testing.T) {
 	if got, _ := r.Get("alice"); got.Account != "" {
 		t.Fatalf("account = %q, want empty", got.Account)
 	}
-	if err := r.SetAccount("alice", "  李智超(colin)  "); err != nil {
+	if err := r.SetAccount("alice", "  李雷(alex)  "); err != nil {
 		t.Fatal(err)
 	}
 	// SetAccount trims, so a value from a form does not become a second, unequal label.
-	if got, _ := r.Get("alice"); got.Account != "李智超(colin)" {
+	if got, _ := r.Get("alice"); got.Account != "李雷(alex)" {
 		t.Fatalf("account = %q", got.Account)
 	}
 	if err := r.Save(); err != nil {
@@ -184,7 +184,7 @@ func TestAccountLabelRoundTripAndLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := loaded.Get("alice"); got.Account != "李智超(colin)" {
+	if got, _ := loaded.Get("alice"); got.Account != "李雷(alex)" {
 		t.Fatalf("account after reload = %q", got.Account)
 	}
 	// Unknown tenants and unusable labels are refusals, not silent writes.

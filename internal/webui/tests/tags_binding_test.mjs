@@ -30,7 +30,7 @@ assert.match(keys, /import \{ createKeyForAccount, editKey, toggleKey, showSecre
 assert.match(tags, /标签（账号与 API Key）/);
 // Editing goes by id (PATCH), never by name: the upsert is keyed by name, so an edit used
 // to fork a second tag — and it refused any name the writer did not accept, which left the
-// rows the importer created (蓝精灵1/2/3) permanently uneditable.
+// rows the importer created (测试标签1/2/3) permanently uneditable.
 assert.match(tags, /if \(row\) await api\.patch\('\/tags\/' \+ row\.id, values\)/);
 assert.match(tags, /else await api\.post\('\/tags', values\)/);
 // The name field is the identity while editing, so it is shown read-only.

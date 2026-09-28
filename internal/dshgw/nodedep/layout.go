@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/winger/ai-gateway/internal/dshgw/nodestore"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodestore"
 )
 
 // GenerateToken mints a node's shared secret: 32 random bytes, base64url, no padding, no

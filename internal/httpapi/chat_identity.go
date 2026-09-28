@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // The console chat is an in-process client of the gateway's own data plane. Two pieces of

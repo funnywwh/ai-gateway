@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/secret"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/secret"
 )
 
 // Two secrets may wear the same display label — sub2api lets callers pick their key values, so a

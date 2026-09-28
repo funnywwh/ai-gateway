@@ -75,7 +75,7 @@ never rewrites (it renders only `profiles/web/cordis.patch.yml`, `settings.yaml`
 ```yaml
 - insert:
     - id: dshgw-web-tty
-      name: file:///home/winger/work/ai_gateway/data/dshgw-verify/state/tenants/dsh-tenant/.dsh/plugins/web-tty/index.js
+      name: file:///home/operator/work/ai_gateway/data/dshgw-verify/state/tenants/dsh-tenant/.dsh/plugins/web-tty/index.js
 ```
 
 The web profile declares `patchReload: live`, so the host half activates in the running server

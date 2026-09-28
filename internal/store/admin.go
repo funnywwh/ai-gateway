@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // adminUserCols is the column list every administrator read shares, in the order

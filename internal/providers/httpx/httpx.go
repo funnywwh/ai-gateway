@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // MaxErrorBody caps how much of an upstream error body is read.

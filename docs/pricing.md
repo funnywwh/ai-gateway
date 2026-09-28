@@ -31,7 +31,7 @@
 |---|---|---|
 | `input` | `input_cache_miss` | 上游没给缓存明细，按未命中计（保守方向） |
 | `reasoning` | `output` | 默认计入 output，可单列 |
-| `image_output` | `output` | 图像输出在图像计量之前就写在 `output` 档（gptjp 的图像价就是如此），不改规则也照原价计 |
+| `image_output` | `output` | 图像输出在图像计量之前就写在 `output` 档（gw-b 的图像价就是如此），不改规则也照原价计 |
 | `image_input` | `input`（再兜底 `input_cache_miss`） | 参考图输入按文本输入价计，与既有近似一致；写了自己的费率就精确计价 |
 
 回落是**链式**的：`image_input → input → input_cache_miss`，读取方（计价引擎与

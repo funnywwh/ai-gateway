@@ -9,7 +9,7 @@ import (
 
 // M63: the standalone shape has one data root, and every default hangs off it. The
 // defaults used to be /var/lib/dshgw, /srv/dsh, /opt/dshgw/... and
-// /home/winger/backups/dshgw — machine paths from the deleted root install.
+// /home/operator/backups/dshgw — machine paths from the deleted root install.
 func TestDefaultsLiveUnderTheDataRoot(t *testing.T) {
 	wd, err := os.Getwd()
 	if err != nil {

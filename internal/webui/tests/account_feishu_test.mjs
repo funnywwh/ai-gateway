@@ -149,7 +149,7 @@ function collectText(entry, out = []) {
 const heldCalls = calls.length;
 holdDirectory = true;
 progressLabels.length = 0;
-directory = { names_available: true, users: [{ open_id: 'ou_a', name: '李智超', account: null }] };
+directory = { names_available: true, users: [{ open_id: 'ou_a', name: '李雷', account: null }] };
 const slowPicker = openFeishuPersonPicker({ account: { id: 7, name: 'acme' } });
 await new Promise((resolve) => setTimeout(resolve, 0));
 {
@@ -180,7 +180,7 @@ directory = null;
 directory = {
   names_available: true,
   users: [
-    { open_id: 'ou_a', name: '李智超', account: null },
+    { open_id: 'ou_a', name: '李雷', account: null },
     { open_id: 'ou_b', name: '王五', account: { id: 9, name: '老板' } },
     { open_id: 'ou_c', name: '张三', account: { id: 7, name: 'acme' } },
   ],
@@ -205,7 +205,7 @@ function findByClass(entry, className, out = []) {
 const dialog = lastDialog();
 const listRows = findByClass(dialog, 'feishu-picker-row');
 const text = listRows.map((row) => collectText(row).join(' ')).join(' | ');
-for (const want of ['李智超', '王五', '张三', 'ou_a', 'ou_b', 'ou_c']) {
+for (const want of ['李雷', '王五', '张三', 'ou_a', 'ou_b', 'ou_c']) {
   assert.ok(text.includes(want), 'the person list must contain ' + want + ': ' + text);
 }
 assert.ok(text.includes('已绑定「老板」'), 'a person taken by another account must say which account: ' + text);
@@ -276,7 +276,7 @@ const write = calls.find((call) => call.method === 'PUT');
 assert.ok(write, 'choosing a person must write the binding');
 assert.equal(write.path, '/accounts/7/feishu', 'the write goes to the account-level route (M72)');
 assert.equal(write.body.open_id, 'ou_a');
-assert.equal(write.body.name, '李智超');
+assert.equal(write.body.name, '李雷');
 assert.equal(await bindPromise, true);
 assert.ok(bound && bound.open_id === 'ou_a', 'the caller is told who was bound');
 assert.equal(toasts.at(-1).level, 'ok');

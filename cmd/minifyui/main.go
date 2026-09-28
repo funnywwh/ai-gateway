@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/winger/ai-gateway/internal/webui/minify"
+	"github.com/funnywwh/ai-gateway/internal/webui/minify"
 )
 
 func main() {

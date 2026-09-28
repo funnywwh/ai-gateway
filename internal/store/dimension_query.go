@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 const dimensionKeys = `account_id, api_key_id, client, model, resolved_model, workspace, session_id, call_kind`

@@ -12,14 +12,14 @@ func feishuFixture() Config {
 	cfg := Default()
 	cfg.CredentialsKey = "test-credentials-key"
 	cfg.Feishu.Enabled = true
-	cfg.Feishu.AppID = "cli_a5ca35a685b0x26e"
+	cfg.Feishu.AppID = "cli_0000000000000000"
 	cfg.Feishu.AppSecret = "secret-value"
-	cfg.Feishu.CallbackURL = "http://192.168.190.86:8090/feishu/callback"
+	cfg.Feishu.CallbackURL = "http://192.0.2.101:8090/feishu/callback"
 	cfg.Feishu.AuthorizeURL = "http://127.0.0.1:9099/authorize"
 	cfg.Feishu.TokenURL = "http://127.0.0.1:9099/token"
 	cfg.Feishu.UserInfoURL = "http://127.0.0.1:9099/userinfo"
 	cfg.Dshgw.Enabled = true
-	cfg.Dshgw.PublicHost = "192.168.190.86"
+	cfg.Dshgw.PublicHost = "192.0.2.101"
 	cfg.Dshgw.PortalPort = 18300
 	cfg.Dshgw.PublicScheme = "http"
 	return cfg
@@ -51,10 +51,10 @@ func TestFeishuEnabledBlockValidates(t *testing.T) {
 	}
 	// The two derived browser URLs are what the rest of the system states to Feishu and
 	// to the user, so they are worth pinning here.
-	if got, want := cfg.FeishuLoginURL(), "http://192.168.190.86:8090/feishu/login"; got != want {
+	if got, want := cfg.FeishuLoginURL(), "http://192.0.2.101:8090/feishu/login"; got != want {
 		t.Fatalf("login url = %q, want %q", got, want)
 	}
-	if got, want := cfg.DSHGWPortalURL(), "http://192.168.190.86:18300"; got != want {
+	if got, want := cfg.DSHGWPortalURL(), "http://192.0.2.101:18300"; got != want {
 		t.Fatalf("portal url = %q, want %q", got, want)
 	}
 }
@@ -65,10 +65,10 @@ func TestFeishuRejectsBadValues(t *testing.T) {
 		"app id not a cli id": func(c *Config) { c.Feishu.AppID = "a5ca35a685b0x26e" },
 		"missing app secret":  func(c *Config) { c.Feishu.AppSecret = "" },
 		"callback without the path": func(c *Config) {
-			c.Feishu.CallbackURL = "http://192.168.190.86:8090/oauth/return"
+			c.Feishu.CallbackURL = "http://192.0.2.101:8090/oauth/return"
 		},
 		"callback with a query": func(c *Config) {
-			c.Feishu.CallbackURL = "http://192.168.190.86:8090/feishu/callback?x=1"
+			c.Feishu.CallbackURL = "http://192.0.2.101:8090/feishu/callback?x=1"
 		},
 		"callback relative": func(c *Config) { c.Feishu.CallbackURL = "/feishu/callback" },
 		"public https endpoint on a non-loopback host": func(c *Config) {
@@ -130,7 +130,7 @@ func TestFeishuAdminLoginIsIndependent(t *testing.T) {
 	}
 	// The console URL is optional and may name a different host than the callback: that is
 	// exactly the deployment shape it exists for (a LAN console, a public callback).
-	cfg.Feishu.ConsoleURL = "http://192.168.190.86:8088/admin/ui/"
+	cfg.Feishu.ConsoleURL = "http://aigw.internal:8088/admin/ui/"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("an absolute console URL on another host was rejected: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestFeishuEnvOverrides(t *testing.T) {
 	cfg.Feishu.CallbackURL = ""
 	t.Setenv("GW_FEISHU_APP_ID", "cli_fromenv123")
 	t.Setenv("GW_FEISHU_APP_SECRET", "secret-from-env")
-	t.Setenv("GW_FEISHU_CALLBACK_URL", "http://192.168.190.86:8090/feishu/callback")
+	t.Setenv("GW_FEISHU_CALLBACK_URL", "http://192.0.2.101:8090/feishu/callback")
 	t.Setenv("GW_FEISHU_ADMIN_LOGIN", "false")
 	t.Setenv("GW_FEISHU_INVITE_TTL_S", "7200")
 	t.Setenv("GW_FEISHU_INVITE_SECRET", "invite-from-env")
@@ -226,7 +226,7 @@ func TestFeishuEnvOverrides(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("env-provided feishu settings were rejected: %v", err)
 	}
-	if cfg.Feishu.AppID != "cli_fromenv123" || !strings.HasPrefix(cfg.Feishu.CallbackURL, "http://192.168.190.86:8090") {
+	if cfg.Feishu.AppID != "cli_fromenv123" || !strings.HasPrefix(cfg.Feishu.CallbackURL, "http://192.0.2.101:8090") {
 		t.Fatalf("env overrides not applied: %+v", cfg.Feishu)
 	}
 }
@@ -238,9 +238,9 @@ func TestFeishuBlockIsDecodableFromYAML(t *testing.T) {
 	path := dir + "/config.yaml"
 	body := yamlListenOnly + `feishu:
   enabled: true
-  app_id: cli_a5ca35a685b0x26e
+  app_id: cli_0000000000000000
   app_secret: s3cret
-  callback_url: http://192.168.190.86:8090/feishu/callback
+  callback_url: http://192.0.2.101:8090/feishu/callback
   authorize_url: http://127.0.0.1:9099/authorize
   token_url: http://127.0.0.1:9099/token
   userinfo_url: http://127.0.0.1:9099/userinfo
@@ -248,7 +248,7 @@ func TestFeishuBlockIsDecodableFromYAML(t *testing.T) {
   admin_login: true
   invite_ttl_s: 1800
 dshgw:
-  public_host: 192.168.190.86
+  public_host: 192.0.2.101
   portal_port: 18300
   public_scheme: http
 credentials_key: test-credentials-key
@@ -260,7 +260,7 @@ credentials_key: test-credentials-key
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Feishu.Enabled || cfg.Feishu.AppID != "cli_a5ca35a685b0x26e" || cfg.Feishu.DSHLogin {
+	if !cfg.Feishu.Enabled || cfg.Feishu.AppID != "cli_0000000000000000" || cfg.Feishu.DSHLogin {
 		t.Fatalf("yaml block not decoded: %+v", cfg.Feishu)
 	}
 	if cfg.Dshgw.PublicScheme != "http" {

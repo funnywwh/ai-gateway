@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/chat"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/webaccess"
+	"github.com/funnywwh/ai-gateway/internal/chat"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/webaccess"
 )
 
 // bingResultPage is a minimal result page in the shape Bing served when M73 was written (the

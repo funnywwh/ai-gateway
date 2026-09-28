@@ -13,14 +13,14 @@
 
 | 账号（name / id） | 现在的候选 | 本里程碑的候选 |
 |---|---|---|
-| 陈景峰 / 10 | `dsh-tenant`（中文全被丢弃，落进共享兜底名） | `dsh-chenjingfeng-10` |
-| 杨妙 / 36 | `dsh-tenant` | `dsh-yangmiao-36` |
-| 李智超(colin) / 8 | `dsh-colin` | `dsh-lizhichao-colin-8` |
+| 王强 / 10 | `dsh-tenant`（中文全被丢弃，落进共享兜底名） | `dsh-wangqiang-10` |
+| 刘洋 / 36 | `dsh-tenant` | `dsh-liuyang-36` |
+| 李雷(alex) / 8 | `dsh-alex` | `dsh-lilei-alex-8` |
 | acme / 7 | `dsh-acme` | `dsh-acme-7` |
 | !!! / 5 | `dsh-tenant` | `dsh-tenant-5` |
 
 现状（M52）`dshTenantSlug(accountName)` 只保留 ASCII、其余折叠成 `-`，于是**所有中文名账号的候选
-都退化成同一个 `dsh-tenant`**；真实部署里 `dsh-chengjinfeng` / `dsh-yangmiao` / `dsh-lianchangliang`
+都退化成同一个 `dsh-tenant`**；真实部署里 `dsh-acct-d` / `dsh-liuyang` / `dsh-acct-c`
 都是操作员在弹窗里手敲的拼音。本里程碑把这件事变成自动的，并且把"重名"从"靠人去重"变成"靠 id 天然不重"。
 
 ## 2. 关键决策
@@ -65,7 +65,7 @@
 
 * `accounts.dsh_tenant` 非空时仍然优先（粘住）；
 * 弹窗里显式填的名字仍然优先（这是既有语义，也是运维改名/纠正的唯一入口）；
-* 本里程碑**不做**重命名、不做历史回填。`dsh-tenant`、`dsh-colin` 这些老租户保持原样。
+* 本里程碑**不做**重命名、不做历史回填。`dsh-tenant`、`dsh-alex` 这些老租户保持原样。
 
 ### D6 截断保 id、按音节截断
 
@@ -170,7 +170,7 @@ slug 规则（逐 rune 处理 `strings.ToLower(a.Name)`）：
   `math.MaxInt64` 的用例钉住。
 - **多加了两条断言**：控制台的 `dshTenantNameRE` 与 dshgw 的 `config.ValidTenantName` 交叉验证；
   "操作员手填一个以数字结尾的名字"现在必须被接受（现状是控制台自己 400，而 dshgw 接受）。
-- **控制台提示文案**两页都写了规则与例子（`dsh-chenjingfeng-10`）以及"已存在的租户名不会被改动"，
+- **控制台提示文案**两页都写了规则与例子（`dsh-wangqiang-10`）以及"已存在的租户名不会被改动"，
   由 `internal/webui/tests/tenant_name_test.mjs` 的文本断言守住。
 - 设计里的"去重循环不动"确实没动：ID 让同音重名基本不可达，保留它只是防御人工建的 dshgw 同名租户。
 

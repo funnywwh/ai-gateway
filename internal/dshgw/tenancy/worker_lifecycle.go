@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 // StopWorkerProcess destroys the worker namespace without changing the durable

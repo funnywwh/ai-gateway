@@ -91,15 +91,15 @@
 ### D9 控制台与回调不同主机名时，用一次性票据交接（部署时才发现）
 
 会话 cookie 属于**主机名**，而飞书回调只能跑在登记给飞书的那个 origin 上。本机部署的形态是
-「控制台在 `http://192.168.190.86:8088`（局域网，前门不对外暴露控制台），回调在
-`https://chat.tirisen.hk/feishu/callback`（公网，手机才够得着）」——两者**不同主机名**：
+「控制台在 `http://aigw.internal:8088`（局域网，前门不对外暴露控制台），回调在
+`https://chat.example.com/feishu/callback`（公网，手机才够得着）」——两者**不同主机名**：
 回调可以证明「这个人是谁」，却无法把会话 cookie 交给控制台那台主机。设计的 D2/D4 假设了同主机，
 部署当天就撞上了。
 
 补上 M61 给门户做过的同一件事：跨主机名时回调只发一张**一次性票据**
 （`TicketModeConsole`，120 秒、单次兑换、绑定一个管理员账号），把浏览器送到控制台自己 origin 上的
 `/admin/feishu/session?ticket=…`，由那里签发会话。新增 `feishu.console_url`（本部署写
-`http://192.168.190.86:8088/admin/ui/`）说明控制台在浏览器里的地址；同主机名时沿用直接写 cookie 的
+`http://aigw.internal:8088/admin/ui/`）说明控制台在浏览器里的地址；同主机名时沿用直接写 cookie 的
 路径（少一跳，且与 M61 的 `feishuSameHost` 口径一致）。
 
 票据与门户票据**同密钥不同 mode**（`dsh` / `console`，mode 在签名载荷里），两侧各只接受自己的 mode，

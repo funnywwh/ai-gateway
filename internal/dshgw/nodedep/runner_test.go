@@ -14,8 +14,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/dshgw/config"
-	"github.com/winger/ai-gateway/internal/dshgw/nodestore"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodestore"
 )
 
 // fakeRemote is a stand-in for the target machine: it runs the remote scripts locally against a

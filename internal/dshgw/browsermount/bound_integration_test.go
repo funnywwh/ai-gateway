@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
-	fs "github.com/winger/ai-gateway/internal/dshgw/browserworkspace"
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	fs "github.com/funnywwh/ai-gateway/internal/dshgw/browserworkspace"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 func requireBrowserWorkspaceSandbox(t *testing.T) {

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/chat"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/mcpsrv"
+	"github.com/funnywwh/ai-gateway/internal/chat"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/mcpsrv"
 )
 
 // The console chat is a plain MCP client. It holds no privileges of its own: every tool call

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 // The key is the mount point's basename, so what it may be IS the picker's question: the local

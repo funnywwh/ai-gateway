@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 const backupCols = `id, started_at, finished_at, path, size_bytes, status, quick_check, triggered_by, note`

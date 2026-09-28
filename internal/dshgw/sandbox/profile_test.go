@@ -360,7 +360,7 @@ func hasFlag(flags []string, want string) bool {
 
 func TestProfileBindsEverySSHMountInsideTheWorkspace(t *testing.T) {
 	f := newProfileFixture(t)
-	mountpoint := filepath.Join(f.alice.Workspace, "ssh", "gpt001", "opt", "app")
+	mountpoint := filepath.Join(f.alice.Workspace, "ssh", "gw-a", "opt", "app")
 	if err := os.MkdirAll(mountpoint, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +392,7 @@ func TestProfileBindsEverySSHMountInsideTheWorkspace(t *testing.T) {
 
 	// A mount record that points outside the account's workspace is refused outright: the
 	// registry is data, not authority.
-	f.alice.SSHMounts = []string{filepath.Join(f.root, "srv", "bob", "ssh", "gpt001", "opt")}
+	f.alice.SSHMounts = []string{filepath.Join(f.root, "srv", "bob", "ssh", "gw-a", "opt")}
 	if _, err := Profile(f.rt, f.alice); err == nil {
 		t.Fatal("a mount point outside the workspace was accepted")
 	}
@@ -411,7 +411,7 @@ func TestProfileWorkspaceViewBindsBothPathsAndMirrorsItsMounts(t *testing.T) {
 	mustMkdir(t, shareRoot, 0o700)
 	shareSource := filepath.Join(f.root, "operator-data")
 	mustMkdir(t, shareSource, 0o755)
-	sshMount := filepath.Join(f.alice.Workspace, "ssh", "gpt001", "opt", "app")
+	sshMount := filepath.Join(f.alice.Workspace, "ssh", "gw-a", "opt", "app")
 	mustMkdir(t, sshMount, 0o700)
 
 	alice := f.alice
@@ -450,7 +450,7 @@ func TestProfileWorkspaceViewBindsBothPathsAndMirrorsItsMounts(t *testing.T) {
 		{"an operator host share", "--ro-bind-try", shareSource, filepath.Join(shareRoot, "data")},
 		{"the mirrored host share", "--ro-bind-try", shareSource, "/workspace/host-shares/data"},
 		{"an ssh mount", "--bind-try", sshMount, sshMount},
-		{"the mirrored ssh mount", "--bind-try", sshMount, "/workspace/ssh/gpt001/opt/app"},
+		{"the mirrored ssh mount", "--bind-try", sshMount, "/workspace/ssh/gw-a/opt/app"},
 	} {
 		got, ok := byDestination[want.dst]
 		if !ok {
@@ -495,7 +495,7 @@ func TestValidateWorkspaceView(t *testing.T) {
 	for _, value := range []string{
 		"/",                                                    // the filesystem root: the whole sandbox would be the workspace
 		"/home", "/root", "/tmp", "/var", "/srv", "/etc/dshgw", // the hidden roots themselves
-		"/home/winger/workspace", // inside one: the bind would put a tree back into it
+		"/home/operator/workspace", // inside one: the bind would put a tree back into it
 		"/etc/passwd",            // a file the profile mounts for itself
 		"/usr", "/usr/local/ws", "/bin", "/lib64", "/proc/ws", "/dev/ws",
 		"workspace", "./workspace", // relative

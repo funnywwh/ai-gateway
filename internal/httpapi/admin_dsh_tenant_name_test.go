@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	dshgwconfig "github.com/winger/ai-gateway/internal/dshgw/config"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	dshgwconfig "github.com/funnywwh/ai-gateway/internal/dshgw/config"
 )
 
 // The name an account gets when nobody supplies one (M74). The table is the specification: every row
@@ -22,11 +22,11 @@ func TestDSHTenantNameForAccount(t *testing.T) {
 		id       int64
 		expected string
 	}{
-		{"chinese name becomes pinyin", "陈景峰", 10, "dsh-chenjingfeng-10"},
-		{"another chinese name", "杨妙", 36, "dsh-yangmiao-36"},
+		{"chinese name becomes pinyin", "王强", 10, "dsh-wangqiang-10"},
+		{"another chinese name", "刘洋", 36, "dsh-liuyang-36"},
 		{"ascii name keeps its shape", "acme", 7, "dsh-acme-7"},
-		{"mixed name keeps both halves", "李智超(colin)", 8, "dsh-lizhichao-colin-8"},
-		{"digits and letters survive", "E26Q", 30, "dsh-e26q-30"},
+		{"mixed name keeps both halves", "李雷(alex)", 8, "dsh-lilei-alex-8"},
+		{"digits and letters survive", "K7QX", 30, "dsh-k7qx-30"},
 		{"hyphens survive", "m51-test-a", 98, "dsh-m51-test-a-98"},
 		{"the same pinyin, different accounts", "张伟", 41, "dsh-zhangwei-41"},
 		{"polyphones take the table's first reading", "长伟", 5, "dsh-zhangwei-5"},
@@ -51,13 +51,13 @@ func TestDSHTenantNameForAccount(t *testing.T) {
 func TestDSHTenantNameAlwaysSatisfiesDshgwGrammar(t *testing.T) {
 	accounts := []*domain.Account{
 		{ID: 1, Name: "acme"},
-		{ID: 10, Name: "陈景峰"},
+		{ID: 10, Name: "王强"},
 		{ID: 415, Name: "张伟"},
 		{ID: 12, Name: "!!!"},
 		{ID: 16, Name: strings.Repeat("王", 30)},
 		{ID: 17, Name: strings.Repeat("x", 200)},
-		{ID: math.MaxInt64, Name: "陈景峰"},
-		{ID: 18, Name: "李智超(colin) 研发-1"},
+		{ID: math.MaxInt64, Name: "王强"},
+		{ID: 18, Name: "李雷(alex) 研发-1"},
 		{ID: 19, Name: "Ünïcödé"},
 		{ID: 20, Name: ""},
 	}
@@ -111,12 +111,12 @@ func TestAdminEnableDSHUsesTheDerivedNameAndAdvertisesIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A Chinese account name is the case that used to collapse into a shared dsh-tenant stem.
-	account.Name = "陈景峰"
+	account.Name = "王强"
 	if _, err := f.db.UpsertAccount(ctx, account); err != nil {
 		t.Fatal(err)
 	}
 	seedDSHGWKey(t, f, account.ID)
-	want := fmt.Sprintf("dsh-chenjingfeng-%d", account.ID)
+	want := fmt.Sprintf("dsh-wangqiang-%d", account.ID)
 
 	// The account list advertises the name the dialog should pre-fill.
 	row := findAccountRow(t, f, cookie, account.ID)
@@ -139,14 +139,14 @@ func TestAdminEnableDSHUsesTheDerivedNameAndAdvertisesIt(t *testing.T) {
 
 	// The automatic enable of a Feishu login runs the same function, so a tenant created with no
 	// operator in the loop carries the same kind of name.
-	second, err := f.db.UpsertAccount(ctx, &domain.Account{Name: "陈景峰二号", BillingMode: domain.BillingPostpaid, Status: "active"})
+	second, err := f.db.UpsertAccount(ctx, &domain.Account{Name: "王强二号", BillingMode: domain.BillingPostpaid, Status: "active"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	seedDSHGWKey(t, f, second)
 	f.api.deps.Feishu = &FeishuDeps{AutoEnableDSH: true}
 	outcome := f.api.autoEnableDSHForBinding(ctx, "dshgw-auto", &domain.APIKey{AccountID: second})
-	wantSecond := fmt.Sprintf("dsh-chenjingfengerhao-%d", second)
+	wantSecond := fmt.Sprintf("dsh-wangqiangerhao-%d", second)
 	if outcome.State != "enabled" || outcome.Tenant != wantSecond {
 		t.Fatalf("auto enable = %+v, want tenant %q", outcome, wantSecond)
 	}
@@ -191,7 +191,7 @@ func TestDSHTenantSuggestionDoesNotReplaceAStoredMapping(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A tenant name from before the rule existed: the pinyin of the operator's own choosing.
-	account.DshTenant = "dsh-colin"
+	account.DshTenant = "dsh-alex"
 	account.DSHEnabled = false
 	if _, err := f.db.UpsertAccount(ctx, account); err != nil {
 		t.Fatal(err)
@@ -199,17 +199,17 @@ func TestDSHTenantSuggestionDoesNotReplaceAStoredMapping(t *testing.T) {
 	seedDSHGWKey(t, f, account.ID)
 
 	row := findAccountRow(t, f, cookie, account.ID)
-	if row["dsh_tenant"] != "dsh-colin" {
+	if row["dsh_tenant"] != "dsh-alex" {
 		t.Fatalf("stored mapping = %v", row["dsh_tenant"])
 	}
-	if row["dsh_tenant_suggested"] == "dsh-colin" {
+	if row["dsh_tenant_suggested"] == "dsh-alex" {
 		t.Fatalf("the suggestion must be the rule's answer; the console decides what to pre-fill (got %v)",
 			row["dsh_tenant_suggested"])
 	}
 
 	answer := decodeJSONBody(t, f.call(t, http.MethodPost,
 		fmt.Sprintf("/admin/api/v1/accounts/%d/dsh", account.ID), `{"enabled":true}`, cookie))
-	if answer["tenant"] != "dsh-colin" {
+	if answer["tenant"] != "dsh-alex" {
 		t.Fatalf("re-enable renamed the tenant: %v", answer["tenant"])
 	}
 }

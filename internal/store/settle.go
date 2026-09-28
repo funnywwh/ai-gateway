@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // UsageCounter is the domain rollup type; the alias keeps call sites readable while the

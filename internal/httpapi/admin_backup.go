@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/backup"
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/backup"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // BackupAdmin is the backup surface the management API needs.

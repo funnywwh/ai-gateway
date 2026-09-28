@@ -15,13 +15,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/ids"
-	"github.com/winger/ai-gateway/internal/mcpsrv"
-	"github.com/winger/ai-gateway/internal/orgtree"
-	"github.com/winger/ai-gateway/internal/pinyin"
-	"github.com/winger/ai-gateway/internal/pricing"
-	"github.com/winger/ai-gateway/internal/secret"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/ids"
+	"github.com/funnywwh/ai-gateway/internal/mcpsrv"
+	"github.com/funnywwh/ai-gateway/internal/orgtree"
+	"github.com/funnywwh/ai-gateway/internal/pinyin"
+	"github.com/funnywwh/ai-gateway/internal/pricing"
+	"github.com/funnywwh/ai-gateway/internal/secret"
 )
 
 // ---------------------------------------------------------------------------
@@ -439,8 +439,8 @@ const (
 // dshTenantNameForAccount derives the tenant name an account gets when nobody supplies one (M74):
 // "dsh-" + the account name's pinyin/ASCII slug + "-" + the account id.
 //
-// 陈景峰/10 becomes dsh-chenjingfeng-10, 杨妙/36 becomes dsh-yangmiao-36, an account called
-// "李智超(colin)" becomes dsh-lizhichao-colin-8. Before this the slug kept ASCII only, so every
+// 王强/10 becomes dsh-wangqiang-10, 刘洋/36 becomes dsh-liuyang-36, an account called
+// "李雷(alex)" becomes dsh-lilei-alex-8. Before this the slug kept ASCII only, so every
 // Chinese-named account collapsed into the same shared stem (dsh-tenant) and operators typed the
 // pinyin by hand.
 //
@@ -469,7 +469,7 @@ func dshTenantNameForAccount(a *domain.Account) string {
 // source character: ASCII letters and digits survive as themselves, CJK characters become their
 // pinyin reading, and everything else becomes a single "-" separator (never a leading one, never two
 // in a row). Units rather than a finished string because truncation has to cut between syllables: a
-// name shortened in the middle of "chenjingfeng" would read as a different, wrong name.
+// name shortened in the middle of "wangqiang" would read as a different, wrong name.
 func dshAccountSlugUnits(name string) []string {
 	units := make([]string, 0, len(name))
 	lastDash := true
@@ -1420,7 +1420,7 @@ func (s *Server) handleAdminUpsertTag(w http.ResponseWriter, r *http.Request) {
 
 // handleAdminPatchTag updates one tag addressed by id. It exists next to the name-keyed
 // upsert because the id is the identity: an upsert cannot touch a row whose name the
-// writer would refuse (that is exactly how 蓝精灵1/2/3 became uneditable), and it cannot
+// writer would refuse (that is exactly how 测试标签1/2/3 became uneditable), and it cannot
 // tell a rename from a create.
 //
 // Only the fields present in the body change. `grants: null` / `policy: null` clear the

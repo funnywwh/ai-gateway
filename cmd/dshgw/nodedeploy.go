@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/nodedep"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodedep"
 )
 
 // The multi-machine node CLI (M77). `node add/update/remove` edit the control plane's node records;

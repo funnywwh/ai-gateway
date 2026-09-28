@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // Session stickiness (docs/routing.md §4.4): a client session that keeps its requests on

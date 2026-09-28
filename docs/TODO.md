@@ -527,7 +527,7 @@
 - [x] **查明「设置/模型」面板报错**（实测 + 代码）：dsh 只在 **loopback 页面**启用 host 持久化
       （`persistence = isLoopback ? "host" : "memory"`），非 loopback 页面该面板必然报
       "settings are unavailable in this browser"。同租户对照：`127.0.0.1` 页面正常、
-      `192.168.190.86` 页面报错。**模型本身可用**（清单由 dshgw 按账号授权自动配置）。
+      `192.0.2.101` 页面报错。**模型本身可用**（清单由 dshgw 按账号授权自动配置）。
       文档见 `deploy/dshgw/README.md` §10（含三条可选应对）
 - [ ] **上游反馈（可选）**：若希望 LAN 页面也能改设置，需要 dsh 提供"受信公网 host 视同 loopback"
       的开关（客户端 `transport.ownsHost` 目前是留白）——可向上游提需求，而不是本地打补丁
@@ -558,12 +558,12 @@
 定位：`api_keys` 上加飞书身份（`open_id` 1:1 唯一）、控制台 API Keys 页绑定/解绑、管理 API 与 MCP 解绑工具、
 飞书 OAuth（`/feishu/login` + 唯一回调 `/feishu/callback`，两种 flow）；绑定不参与数据面鉴权。
 
-- [ ] **真机验收**（需要飞书自建应用的 app_id/app_secret 与已登记的 `http://192.168.190.86:8090/feishu/callback`）：
+- [ ] **真机验收**（需要飞书自建应用的 app_id/app_secret 与已登记的 `http://192.0.2.101:8090/feishu/callback`）：
       控制台绑定 → 列表显示姓名 → 对该 Key 做一次「编辑」(PATCH) 后绑定仍在 → 解绑 →
       同一飞书账号绑第二把 Key 冲突且不覆盖 → 日志与审计中 `grep -cE 'access_token|app_secret'` = 0
 - [ ] **飞书后台输入框是否接受 IP 形式的重定向 URL**（官方文档允许 http 与非 443 端口，但未明确 IP）：
-      先试存；若被拒，回退方案是给 gwproxy 开 TLS（`*.tirisen.hk` 私钥当前账号可读）并把 `callback_url`
-      改成 `https://chat.tirisen.hk:8090/feishu/callback`（只改配置，不改代码）
+      先试存；若被拒，回退方案是给 gwproxy 开 TLS（`*.example.net` 私钥当前账号可读）并把 `callback_url`
+      改成 `https://chat.example.com:8090/feishu/callback`（只改配置，不改代码）
 
 ## M61 dshgw 门户飞书登录（消费 aigw 的票据）
 
@@ -598,7 +598,7 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 - [ ] **待宿主执行**（需要交互式 `sudo`，本会话无法执行）：遗留 root 形态的归档下线
       `sudo scripts/decommission_legacy_dshgw.sh --apply`（计划已在本机 dry-run 复核：归档 3 棵树 +
       nginx 转发 + 旧单元文件 → 停 8 个单元 → 校验归档含 `registry.json` → 删 `/opt/dshgw`、`/etc/dshgw`、
-      `/var/lib/dshgw`）。注意它会停掉旧形态里的真实租户 **E26Q**（`dsh_tenant=dsh-e26q`），
+      `/var/lib/dshgw`）。注意它会停掉旧形态里的真实租户 **K7QX**（`dsh_tenant=dsh-k7qx`），
       该租户的数据只留在 `data/prev/legacy-dshgw/`，需要时按归档重建
 - [ ] **可选**：`--remove-accounts`（删 `dsh-*` 账号与家目录）默认不执行，确认无其它用途后再单独跑
 - [ ] **可选（未做）**：把本机独立 dshgw 收进 aigw 监督形态（`dshgw.enabled: true`）。收益是少一个单元、
@@ -616,7 +616,7 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 - [x] **别名改一账号一份：本机部署（2026-09-21，v3.0.0）**：`scripts/ssh_config_adopt.sh` 收编了 6 个
       账号的 `<workspace>/.ssh/config` → `data/dshgw-verify/ssh-configs/<账号>`；`dshgw.yaml` 的
       `ssh_config_source` 换成 `ssh_config_dir: ./data/dshgw-verify/ssh-configs`；`bin/dshgw` 重建并在
-      12:20:44 重启 `dshgw-verify`（2.9.1 `b561b0c` → 3.0.0 `f8d20d8`），6 个 worker 全就绪、aipc 挂载被
+      12:20:44 重启 `dshgw-verify`（2.9.1 `b561b0c` → 3.0.0 `f8d20d8`），6 个 worker 全就绪、gw-d 挂载被
       `Reconcile` 重挂、账号 config 一个字节没动（与各自种子 `cmp` 一致）。完整记录见 `docs/todo_done.md`
       的 v3.0.0 小节；后续仍可逐账号裁剪种子并按需重置（改种子 → 删 `<workspace>/.ssh/config` → 重启该
       账号 worker）
@@ -639,9 +639,9 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
       对已记录的挂载点按"守护进程是否还在"探测，死条目先摘掉再重挂，记录与挂载点保留；本机现网 2026-09-22
       重启时实测自愈）。原文与操作教训已归档到 `docs/todo_done.md` 的 M76 小节
 
-- [x] **自嵌套挂载（2026-09-21 事故，已修）**：租户 dsh-tenant 挂 `rag-server:/home/winger/work/ai_gateway`
-      （`rag-server` 的 `HostName` 就是本机 `192.168.190.86`），而挂载点
-      `<workspace>/ssh/rag-server/home/winger/work/ai_gateway` 就在这个目录里 —— 挂载树包含挂载点本身。
+- [x] **自嵌套挂载（2026-09-21 事故，已修）**：租户 dsh-tenant 挂 `gw-c:/home/operator/work/ai_gateway`
+      （`gw-c` 的 `HostName` 就是本机 `192.0.2.101`），而挂载点
+      `<workspace>/ssh/gw-c/home/operator/work/ai_gateway` 就在这个目录里 —— 挂载树包含挂载点本身。
       一个会话在工作区根上跑 `grep -rn 扫码\|二维码\|qr … .` 之后：FUSE 连接 `834` 上积压 8 个无人应答
       请求，`grep`（`/proc/<pid>/fd` 已指向第二层同一目录）、`ls <挂载点>`、`ls <挂载点父目录>` 三个进程进
       **D 态**（`kill -9` 无效），该租户所有会话同时卡死。现场解救（无需 root）：`echo 1 > /sys/fs/fuse/
@@ -649,7 +649,7 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
       `fusermount3 -u -z <挂载点>` → 清 `state/ssh-mounts.json` 与该账号 `ssh-mounts.json` 的这条记录
       （否则下次 `Reconcile` 会把它重挂回来）。**已修**：`internal/dshgw/sshworkspace/selfnest.go` 在
       `mount()` 里拒绝「远端是本机且远端路径是挂载点祖先」的挂载（按设备号+inode 比较，因此
-      `/data/home/winger/work` 这个同 fs 的第二个挂载点也认得；地址或 `machine-id` 证明「本机」，
+      `/data/home/operator/work` 这个同 fs 的第二个挂载点也认得；地址或 `machine-id` 证明「本机」，
       别的机器上同样路径不受影响，本机上不含工作区的目录照常可挂），错误码 `mount/forbidden`、审计
       `ssh-mount-refused`；同时 sshfs 默认补 `max_conns=4`（配置可覆盖），一条挂载不再只有一个 sftp 通道。
 - [x] **宿主目录直挂（M71，2026-09-21 已实现）**：要挂本机目录不再走 sshfs —— `host_shares` 配置声明
@@ -675,7 +675,7 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 完成绑定并首次进入控制台，不需要口令。实现与自动化验收完成的条目见 `docs/todo_done.md` 同名小节。
 
 - [ ] **真机验收（需要手机 + 已登记的飞书自建应用）**：用**操作者实际访问的控制台地址**打开控制台
-      （本机部署是 `http://192.168.190.86:8088/admin/ui/`，即 `feishu.console_url` 的值）→ 在「管理员」页
+      （本机部署是 `http://aigw.internal:8088/admin/ui/`，即 `feishu.console_url` 的值）→ 在「管理员」页
       给一个账号生成邀请链接 → 在正确身份的手机/浏览器打开 → 扫码或点同意 → 回到控制台即为登录态；
       随后在登出状态下点「飞书扫码登录」再进一次；再把同一链接重开确认提示「已失效」
 - [ ] **真机验收（拒绝面）**：用一个只绑定了 API Key 的飞书账号走控制台登录 → 必须看到「尚未绑定任何
@@ -745,7 +745,7 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 ## M70 飞书通讯录同步（组织架构页「同步飞书」）
 
 设计：`docs/design/m70-feishu-org-sync.md`（§11 差异已回填）；规格：`docs/feishu.md` §5c、`docs/org.md` §3/§5/§6。
-需求（2026-09-21 用户原话）：「http://192.168.190.86:8088/admin/ui/#/org 右上角添加一个"同步飞书"，
+需求（2026-09-21 用户原话）：「http://aigw.internal:8088/admin/ui/#/org 右上角添加一个"同步飞书"，
 弹出组织机构树和人员，人员可以有"创建用户""绑定账号"操作，合并时同名合并，人员id相同合并」，
 随后补充「绑定账号时，弹出账号列表，可以拼音过滤」与「自动按人名匹配，不匹配的用户决定」。
 定位：把飞书通讯录（部门树 + 人员）合并进本地的组织节点与账户；一个已确认的「同步」动作 = 补建缺失部门
@@ -807,7 +807,7 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 
 - [ ] **人工走查（用户反馈后的六处界面改动）**：已 `make build` 并重启 `aigw-local`（控制台资源内嵌在
       二进制里），`/version` = `d655c0e`、新资源已在线；剩浏览器侧**硬刷新**（静态资源 `max-age=300`）
-      `http://192.168.190.86:8088/admin/ui/#/org`，逐条确认：人员列表是多列表格且列对齐；展开后点「收起」
+      `http://aigw.internal:8088/admin/ui/#/org`，逐条确认：人员列表是多列表格且列对齐；展开后点「收起」
       真的收起；「分配组织」弹出组织树勾选（勾父不连带子）；节点详情「新建成员」建完立刻在成员列表里；
       人员行「编辑」能改账号字段；「绑定飞书」点下去先看到弹窗与读取进度。自动化证据见 `docs/todo_done.md`
       的「修掉组织页人员表与三类弹窗的六处问题」小节
@@ -910,7 +910,7 @@ state/template/tenant/workspace/backup），配置留在部署根，运行时安
 
 已做（本机）：
 
-- [x] `config.yaml` → `dshgw.admin_socket: /home/winger/work/ai_gateway/data/dshgw-verify/state/admin.sock`
+- [x] `config.yaml` → `dshgw.admin_socket: /home/operator/work/ai_gateway/data/dshgw-verify/state/admin.sock`
       （该文件被 gitignore，故在此留痕）；`systemctl --user restart aigw-local.service` 后
       `aigw-local`/`dshgw-verify`/`gwproxy-verify` 三个单元 active，`/version` 仍是 2.7.0 / `6790dff`，
       `healthz`/`readyz` 200，重启后 `level=ERROR` 0 条
@@ -961,7 +961,7 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       `healthz`/`readyz`/`/admin/ui/` 200、启动行 `aigw starting version=4.1.1 revision=6f68aeb`。
       回滚点 `data/prev/bin/*.prev-running-4.1.0-52796d4`。详见 `docs/todo_done.md` 的 v4.1.1 小节
 - [ ] **待人工择时（会重启所有租户 worker，含发起部署的会话）**：
-      `bash /home/winger/work/ai_gateway/data/dshgw-verify/state/workspaces/dsh-tenant/deploy-aigw-4.1.1.sh --with-dshgw`
+      `bash /home/operator/work/ai_gateway/data/dshgw-verify/state/workspaces/dsh-tenant/deploy-aigw-4.1.1.sh --with-dshgw`
       —— 重启 `dshgw-verify` 让租户 worker 按新 profile 起（`/etc/bash.bashrc` 随之挂入）；随后在「终端」里确认
       `ls` 有色、提示符是绿 `user@host` + 蓝 `cwd`（回归：agent bash 工具里 `ls` 仍无色、`git log` 分页正常）
 
@@ -1002,7 +1002,7 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 > 现场与根因见 `docs/todo_done.md`「组织树没有缩进：控制台 CSP 丢弃行内 style 属性」。
 > 一句话：控制台 `style-src 'self'` 丢弃 style **属性**，组织树的缩进（以及另外 25 处行内样式）
 > 在线上等于不存在；修法是 `ui.js` 的 `el()` 改走 CSSOM。
-> **已随 v4.3.0（`dccf435`）发版并部署到 rag-server（`aigw-local`）与 gptjp（`aigw.service`）**，
+> **已随 v4.3.0（`dccf435`）发版并部署到 gw-c（`aigw-local`）与 gw-b（`aigw.service`）**，
 > 见 `docs/todo_done.md` 的「v4.3.0 发布记录」；下面只剩线上复验与观察项。
 
 - [ ] **发版后复验（必须在真实浏览器里看一次）**：打开 `:8088/admin/ui/#/org`，确认组织树每层缩进
@@ -1090,20 +1090,20 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 - [ ] **待宿主执行（真浏览器走查）**：`make ui-check` —— 本会话沙箱里 `/usr/bin/firefox` 是 snap 包装器
       （答不出 Mozilla 版本），脚本按设计带原因跳过。`#requests` 视图新增三条回放断言（未保留 / 未录制 /
       历史截断行），压缩镜像（`UI_STATIC_DIR` + `UI_HARNESS_GZIP=1`）同样待宿主
-- [ ] **待安排**：随 v4.3.1 发版并部署 rag-server + gptjp 的线上验证（见 `docs/todo_done.md` 的
+- [ ] **待安排**：随 v4.3.1 发版并部署 gw-c + gw-b 的线上验证（见 `docs/todo_done.md` 的
       v4.3.1 发布记录）；`dshgw-verify` 的待重启事项仍单列在 M77/M79 小节
 
 ## M82.1 修订：往回找「最新一条有文本且不超过上限」的 user 消息（v4.3.2）
 > 设计文档见 `docs/design/m82-user-input-tail-only-text.md` 的「M82.1 修订」节。
 
 - [ ] **待宿主执行（真浏览器走查）**：`make ui-check` 的 `#requests` 视图（「未保留」文案已改）
-- [ ] **待安排**：随 v4.3.2 发版并部署 rag-server + gptjp 的线上验证（见 `docs/todo_done.md`）
+- [ ] **待安排**：随 v4.3.2 发版并部署 gw-c + gw-b 的线上验证（见 `docs/todo_done.md`）
 
 ## M83 输入档只留「人说的话」（样板按标记跳过）
 > 设计文档 `docs/design/m83-user-input-human-only.md`。现场：某浏览器 DSH 租户 14:11 后 71 行请求日志全空。
 
 - [ ] **待宿主执行（真浏览器走查）**：`make ui-check`（「未保留」文案已改成「只有样板或超长用户消息」）
-- [ ] **待安排**：随 v4.3.3 发版并部署 rag-server + gptjp，并确认该租户的行恢复有正文（见 `docs/todo_done.md`）
+- [ ] **待安排**：随 v4.3.3 发版并部署 gw-c + gw-b，并确认该租户的行恢复有正文（见 `docs/todo_done.md`）
 
 ## M84 图片生成（gpt-image 系列 · Images API · `openai-images` 供应商 · `provider.images` 协议）
 
@@ -1114,9 +1114,9 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 > 本里程碑在**独立工作区** `../ai-gateway-m84`（分支 `m84-images`）实现；**已于 2026-09-23 并入 `main`**
 > （见 `docs/todo_done.md` 的 v4.5.0 发布记录），二进制随 v4.5.0 一起部署。
 
-- [ ] **待宿主执行（线上验证）**：在 gptjp 建 `openai-images` 实例（上游写官方或中转的 `/v1/images/*`）
+- [ ] **待宿主执行（线上验证）**：在 gw-b 建 `openai-images` 实例（上游写官方或中转的 `/v1/images/*`）
       并映射 `gpt-image-*`，用真实 Key 生图一次，核对 `usage_records` 的 `input`/`image_input`/`image_output`
-      与 `cost_micros`（= 图像输出价 × 输出 token；gptjp 现有规则集不改也能算对），并确认租户 DSH 菜单
+      与 `cost_micros`（= 图像输出价 × 输出 token；gw-b 现有规则集不改也能算对），并确认租户 DSH 菜单
       不再出现该模型（`dshgw sync-models` 后看 `settings.yaml`）
 - [ ] **待宿主执行（真浏览器走查）**：控制台「供应商」页新建 `openai-images` 类型时，字段说明与模板正常渲染
       （本会话沙箱无可用 firefox，`make ui-check` 自带跳过）
@@ -1152,10 +1152,10 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 - [x] 文档：设计文档、插件 README（作用域/接口/限制/验证）、`docs/dshgw.md` §7a/§7f、
       `deploy/dshgw/README.md`（含宿主半改动需重启 worker 的口径）
 - [ ] **待宿主执行（部署 + 线上验收）**：把 `cmd/dshgw/plugin/git-diff/` 同步到
-      `/home/winger/work/ai_gateway/cmd/dshgw/plugin/git-diff/`（沙箱内该目录只读），
+      `/home/operator/work/ai_gateway/cmd/dshgw/plugin/git-diff/`（沙箱内该目录只读），
       `cmp` 确认后按租户重启 worker：
       `printf '%s\n' '{"id":1,"op":"tenant-restart","name":"dsh-tenant"}' |
-      nc -U /home/winger/work/ai_gateway/data/dshgw-verify/state/admin.sock`，再刷新页面
+      nc -U /home/operator/work/ai_gateway/data/dshgw-verify/state/admin.sock`，再刷新页面
 - [ ] **待宿主执行（真浏览器走查）**：① 本会话（workspace=`…/work/ai-gateway`）打开「变更」只看到
       `ai-gateway` 一个仓库；② 会话开在仓库子目录时仍是该仓库；③ workspace=`…/work` 的会话显示
       「该目录下的仓库」且不自动选中；④ 老会话（M79 之前的长路径 cwd）显示回退提示；
@@ -1163,11 +1163,11 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 
 ## M88 dshgw 只按账户映射租户（退役 key 前缀绑定）
 > 设计：`docs/design/m88-dshgw-account-tenant-binding.md`；需求原话：「dshgw 也用 key hash 找租户」，
-> 评审结论是不哈希化、直接删掉本地解析。**代码、测试、文档、v4.7.0 发布（aigw 侧已部署 gptjp +
-> rag-server）都已完成**，完整清单与发布记录见 `docs/todo_done.md` 同名小节；本节只留未完成项。
+> 评审结论是不哈希化、直接删掉本地解析。**代码、测试、文档、v4.7.0 发布（aigw 侧已部署 gw-b +
+> gw-c）都已完成**，完整清单与发布记录见 `docs/todo_done.md` 同名小节；本节只留未完成项。
 
 - [ ] **待宿主执行（dshgw 控制面部署 + 线上验收）**：把 `bin/dshgw` 4.7.0/`11e8254` 换入
-      `/home/winger/work/ai_gateway/bin/dshgw`（备份到 `data/prev/bin/`）并
+      `/home/operator/work/ai_gateway/bin/dshgw`（备份到 `data/prev/bin/`）并
       `systemctl --user restart dshgw-verify`——**会重启全部租户 worker，含本会话，需择时**。
       完整命令与回滚见 `docs/todo_done.md` 的 v4.7.0 发布记录。验收：① 门户用一把 Key 登录已启用
       DSH 的账号能进（账户映射）；② `journalctl --user -u dshgw-verify --since "-5min" |
@@ -1175,8 +1175,8 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       `bin/dshgw whereis <账号名>` 有输出
 - [ ] **可选后续**：把 sub2api 的 #24/#51 真数据导入（现在两把都能原样进，没人需要换 key）：
       `python3 /opt/aigw/sub2api_migrate.py plan` → `apply`；完成后
-      `shred -u /opt/aigw/data/E26Q-reissue-key.txt`（那把重签明文就没用了）
-- [ ] **可选后续**：清理 4 把已 disabled 的验收 key（gptjp #162/#163/#166/#167，网关没有删除 key 的路由，
+      `shred -u /opt/aigw/data/K7QX-reissue-key.txt`（那把重签明文就没用了）
+- [ ] **可选后续**：清理 4 把已 disabled 的验收 key（gw-b #162/#163/#166/#167，网关没有删除 key 的路由，
       需手工 `DELETE`）；以及是否把 tag `v4.6.0`/`v4.7.0` 推到 origin（当前只在本地）
 
 ## M89 代码脱敏（全仓清洗 + 发版强制检查 + 历史重写）

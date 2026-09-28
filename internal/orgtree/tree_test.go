@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // node builds a node with a parent given as a plain value (0 = root).

@@ -14,8 +14,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/winger/ai-gateway/internal/config"
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // Index probes: what a new index on request_logs costs to write and buys to read.
@@ -110,7 +110,7 @@ func runProbe(t *testing.T, name string, maxVersion, rows, batch, payloadKB int,
 				fmt.Sprintf("req-%08d", n), key, account, "/v1/responses", body,
 				"", "", 0, 0, len(body), 0, 0, "user", 0, 0, "completed", unix(time.Now().UTC()),
 				client, "deepseek-flash", "deepseek-flash",
-				"/home/winger/work/ai_gateway", session, "agent", ""); err != nil {
+				"/home/operator/work/ai_gateway", session, "agent", ""); err != nil {
 				t.Fatalf("insert %d: %v", n, err)
 			}
 		}

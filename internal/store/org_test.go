@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // orgFixture creates the account plus the tree the organization tests work on:

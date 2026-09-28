@@ -504,7 +504,7 @@ public_scheme: https
 
 ## 10. 本机验证部署（已就绪）
 
-本机（`rag-server` / `192.168.190.86`）已按 §9 部署了**验证用**的入口，特点是**完全不动现有 `:8088`**：
+本机（`gw-c` / `192.0.2.101`）已按 §9 部署了**验证用**的入口，特点是**完全不动现有 `:8088`**：
 
 | 组件 | 形态 | 端口 | 与线上的关系 |
 |---|---|---|---|
@@ -521,24 +521,24 @@ public_scheme: https
 访问入口：
 
 ```bash
-http://192.168.190.86:8090/              # → 302 到 aigw 控制台
-http://192.168.190.86:8090/admin/ui/     # aigw 后台（控制台）
-http://192.168.190.86:8090/version       # aigw API
-http://192.168.190.86:8090/dshgw/        # dshgw 门户（登录页）
-http://192.168.190.86:8090/t/verify1/    # 租户 dsh（未登录会 302 回门户路径）
-http://192.168.190.86:8088/version       # 直连 aigw，仍然可用
+http://192.0.2.101:8090/              # → 302 到 aigw 控制台
+http://192.0.2.101:8090/admin/ui/     # aigw 后台（控制台）
+http://192.0.2.101:8090/version       # aigw API
+http://192.0.2.101:8090/dshgw/        # dshgw 门户（登录页）
+http://192.0.2.101:8090/t/verify1/    # 租户 dsh（未登录会 302 回门户路径）
+http://aigw.internal:8088/version       # 直连 aigw，仍然可用
 ```
 
 **实测结果**（本机，2026-09-18）：
 
 - `:8088` 直连 `/version`、`/healthz` 均 200 —— 反代上线没有影响它；
 - 根挂载的 aigw：`/` → 302 `/admin/ui/`；`/admin/ui/` 200；`/admin/ui` → 301 且**带端口**
-  （`http://192.168.190.86:8090/admin/ui/`，反代保留浏览器 authority，aigw 用它构造绝对跳转）；
+  （`http://192.0.2.101:8090/admin/ui/`，反代保留浏览器 authority，aigw 用它构造绝对跳转）；
   控制台静态资源 `/admin/ui/app.css`、`/admin/ui/js/app.js`、`/admin/ui/favicon.svg` 均 200；
   `/version`、`/healthz` 200；`/admin/api/v1/accounts` 401；
   **控制台响应与直连 `:8088` 逐字节一致**（`/admin/ui/` 669 字节、401 响应体相同）；
 - `/dshgw/` 200，登录表单 action 已是 `/dshgw/login`（dshgw 自己按 `public_base_url` 生成）；
-- `GET /t/verify1/` 未登录 → 302 到 `http://192.168.190.86:8090/dshgw/`（**路径式门户，不是 host:port**）；
+- `GET /t/verify1/` 未登录 → 302 到 `http://192.0.2.101:8090/dshgw/`（**路径式门户，不是 host:port**）；
 - `POST /t/verify1/api`（带 Origin）→ 401；
 - 注入一个临时会话后 `GET /t/verify1/` → **200（24KB 真实 dsh shell）**，HTML 里根绝对引用已被加上前缀
   （`href="/t/verify1/"`、`src="/t/verify1/plugins/??…"`），相对资源保持 `./assets/…`；
@@ -576,7 +576,7 @@ worker 照常起来）。给它装一把真实 Key，然后打开门户登录：
 ```bash
 printf '%s\n' '{"id":1,"op":"tenant-set-key","name":"dsh-tenant","key":"<你的 aigw Key>"}' \
   | nc -U data/dshgw-verify/state/admin.sock
-# 然后浏览器打开 http://192.168.190.86:8090/dshgw/ ，用同一把 Key 登录
+# 然后浏览器打开 http://192.0.2.101:8090/dshgw/ ，用同一把 Key 登录
 ```
 
 租户名必须是 **aigw 授权返回的那个**：控制台「启用 DSH」时写入 `accounts.dsh_tenant`，
@@ -608,7 +608,7 @@ isLoopback: transport?.ownsHost === true || pageLocation === void 0
             || isLoopbackHostname(pageLocation.hostname)   // localhost / ::1 / 127.0.0.0/8
 ```
 
-`pageLocation` 就是浏览器地址栏，所以页面只要不是 loopback 主机名（`192.168.190.86`、`chat.tirisen.hk`
+`pageLocation` 就是浏览器地址栏，所以页面只要不是 loopback 主机名（`192.0.2.101`、`chat.example.com`
 都算），面板就报错。实测 `--trusted-host` 只作用于**服务端** `/api` 的防 DNS-rebinding 栅栏，
 加上它面板依旧失败；`--host`/`--port` 无关。
 
@@ -643,9 +643,9 @@ settings_ui: lan        # 默认：LAN 页面也能用设置/模型（provider �
 | 页面 | `settings_ui: lan` | `settings_ui: loopback` |
 |---|---|---|
 | `http://127.0.0.1:<port>/` | 正常 | 正常 |
-| `http://192.168.190.86:<port>/`（LAN） | **正常**："Models / Enter your API keys to use models from the following providers." | "Loading the provider directory failed: settings are unavailable in this browser" |
+| `http://192.0.2.101:<port>/`（LAN） | **正常**："Models / Enter your API keys to use models from the following providers." | "Loading the provider directory failed: settings are unavailable in this browser" |
 
-本机既有部署 `https://chat.tirisen.hk/dsh/` 之所以能用，也是同一处声明 —— 它注入在自己的 nginx 层
+本机既有部署 `https://chat.example.com/dsh/` 之所以能用，也是同一处声明 —— 它注入在自己的 nginx 层
 （那份 `/dsh/` 配置本账号无读权限）。
 
 > 更正历史记录：本项目早先一度把这条报错记为"dsh 自身限制、配置无法绕过"，那是**错的** ——
@@ -814,7 +814,7 @@ curl -s -H "Authorization: Bearer $(cat /srv/dshgw-node/node-a.token)" \
 ```bash
 # —— 在控制面 ——
 # 7) 登记（url/token 与上面一致；控制台同样能做这件事）
-bin/dshgw --config ./dshgw.yaml node add node-a --url http://192.168.190.87:18400 \
+bin/dshgw --config ./dshgw.yaml node add node-a --url http://192.0.2.102:18400 \
   --token-file ./data/dshgw/nodes/node-a.token
 bin/dshgw --config ./dshgw.yaml node probe node-a      # 期望 ready + 同版本 revision
 bin/dshgw --config ./dshgw.yaml tenant create --node node-a <租户> --key-file <key文件>

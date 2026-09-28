@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/winger/ai-gateway/internal/dshgw/nodeproto"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/nodeproto"
 )
 
 // Spec is one node as the control plane's configuration and node store describe it. The token

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/webaccess"
-	"github.com/winger/ai-gateway/pkg/providerkit"
+	"github.com/funnywwh/ai-gateway/internal/webaccess"
+	"github.com/funnywwh/ai-gateway/pkg/providerkit"
 )
 
 // TestChatWebAccessDefaults pins the shipped defaults: the feature is off, and the values a

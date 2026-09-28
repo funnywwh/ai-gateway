@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/responses"
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/internal/responses"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // Codex uses custom tools (including its exec tool), not just JSON function

@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // The bug these tests pin: a tag whose name is not an ASCII identifier could not be
 // edited at all. The only write path was POST /tags — an upsert keyed by that very
-// name — so every edit of 蓝精灵1/2/3 answered 400 and the console's 编辑 button was
+// name — so every edit of 测试标签1/2/3 answered 400 and the console's 编辑 button was
 // useless for exactly the tags a deployment had imported.
 
 func TestAdminTagUpsertAcceptsNonASCIIName(t *testing.T) {
@@ -19,12 +19,12 @@ func TestAdminTagUpsertAcceptsNonASCIIName(t *testing.T) {
 	cookie := f.login(t, adminUser, adminPassword)
 
 	resp := f.call(t, http.MethodPost, "/admin/api/v1/tags",
-		`{"name":"蓝精灵3","description":"绑定 Codex 供应商","grants":{"providers":["codex"],"models":["*"]}}`, cookie)
+		`{"name":"测试标签3","description":"绑定 Codex 供应商","grants":{"providers":["codex"],"models":["*"]}}`, cookie)
 	payload := decodeJSONBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("creating a CJK-named tag status = %d: %v", resp.StatusCode, payload)
 	}
-	if payload["name"] != "蓝精灵3" {
+	if payload["name"] != "测试标签3" {
 		t.Fatalf("name round trip = %v", payload["name"])
 	}
 	if _, ok := payload["id"].(float64); !ok {
@@ -47,7 +47,7 @@ func TestAdminTagNameValidation(t *testing.T) {
 		{"64 characters is the limit", `{"name":"` + strings.Repeat("x", 64) + `"}`, http.StatusOK},
 		{"64 CJK characters are 64 characters", `{"name":"` + strings.Repeat("中", 64) + `"}`, http.StatusOK},
 		{"hyphen and dot stay valid", `{"name":"team.a-b"}`, http.StatusOK},
-		{"CJK with punctuation", `{"name":"蓝精灵 3 号（测试）"}`, http.StatusOK},
+		{"CJK with punctuation", `{"name":"测试标签 3 号（测试）"}`, http.StatusOK},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -68,8 +68,8 @@ func TestAdminTagPatchUpdatesNonASCIINamedTagByID(t *testing.T) {
 	// Seed the row the way the importer did: straight into the store, with a name the
 	// ASCII rule would have rejected.
 	id, err := f.db.UpsertTag(ctx, &domain.Tag{
-		Name: "蓝精灵1", Description: "绑定 Codex 供应商",
-		GrantsJSON: `{"providers":["liuhui-wisskys-8-expiry"],"models":["*"]}`, Priority: 100,
+		Name: "测试标签1", Description: "绑定 Codex 供应商",
+		GrantsJSON: `{"providers":["wangwu-corp-a-8-expiry"],"models":["*"]}`, Priority: 100,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -78,22 +78,22 @@ func TestAdminTagPatchUpdatesNonASCIINamedTagByID(t *testing.T) {
 	// The same edit through the name-keyed upsert still works (the name is accepted now),
 	// but it cannot express "these grants on that row" — that is what the id path is for.
 	resp := f.call(t, http.MethodPatch, "/admin/api/v1/tags/"+itoa(id),
-		`{"grants":{"providers":["liuhui-wisskys-8-expiry","deepseek"],"models":["*"]},"description":"绑定 Codex 供应商 + deepseek 官方"}`, cookie)
+		`{"grants":{"providers":["wangwu-corp-a-8-expiry","deepseek"],"models":["*"]},"description":"绑定 Codex 供应商 + deepseek 官方"}`, cookie)
 	payload := decodeJSONBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("patch status = %d: %v", resp.StatusCode, payload)
 	}
-	if payload["name"] != "蓝精灵1" {
+	if payload["name"] != "测试标签1" {
 		t.Fatalf("patch changed the name: %v", payload["name"])
 	}
 	if got := payload["description"]; got != "绑定 Codex 供应商 + deepseek 官方" {
 		t.Fatalf("description = %v", got)
 	}
-	assertJSONStrings(t, payload["grants"], `{"models":["*"],"providers":["liuhui-wisskys-8-expiry","deepseek"]}`)
+	assertJSONStrings(t, payload["grants"], `{"models":["*"],"providers":["wangwu-corp-a-8-expiry","deepseek"]}`)
 
 	// The datapath reads the registry snapshot, so the patch must have reloaded it.
 	snap := f.snapshot(t)
-	tag := snap.TagByName["蓝精灵1"]
+	tag := snap.TagByName["测试标签1"]
 	if tag == nil {
 		t.Fatal("patched tag is missing from the reloaded snapshot")
 	}
@@ -113,7 +113,7 @@ func TestAdminTagPatchUpdatesNonASCIINamedTagByID(t *testing.T) {
 	if partialPayload["description"] != "绑定 Codex 供应商 + deepseek 官方" {
 		t.Fatalf("an omitted field was not preserved: %v", partialPayload["description"])
 	}
-	assertJSONStrings(t, partialPayload["grants"], `{"models":["*"],"providers":["liuhui-wisskys-8-expiry","deepseek"]}`)
+	assertJSONStrings(t, partialPayload["grants"], `{"models":["*"],"providers":["wangwu-corp-a-8-expiry","deepseek"]}`)
 }
 
 func TestAdminTagPatchRejectsRenameAndUnknownID(t *testing.T) {
@@ -122,14 +122,14 @@ func TestAdminTagPatchRejectsRenameAndUnknownID(t *testing.T) {
 	ctx := context.Background()
 
 	id, err := f.db.UpsertTag(ctx, &domain.Tag{
-		Name: "蓝精灵2", GrantsJSON: `{"providers":["lizhichao-wisskys-3-expiry"],"models":["*"]}`, Priority: 100,
+		Name: "测试标签2", GrantsJSON: `{"providers":["lilei-corp-a-3-expiry"],"models":["*"]}`, Priority: 100,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Echoing the current name is what the console form does; it must stay a no-op.
-	echo := f.call(t, http.MethodPatch, "/admin/api/v1/tags/"+itoa(id), `{"name":"蓝精灵2"}`, cookie)
+	echo := f.call(t, http.MethodPatch, "/admin/api/v1/tags/"+itoa(id), `{"name":"测试标签2"}`, cookie)
 	_ = decodeJSONBody(t, echo)
 	if echo.StatusCode != http.StatusOK {
 		t.Fatalf("echoing the current name status = %d, want 200", echo.StatusCode)
@@ -156,7 +156,7 @@ func TestAdminTagPatchRejectsRenameAndUnknownID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.Name != "蓝精灵2" || stored.Priority != 100 {
+	if stored.Name != "测试标签2" || stored.Priority != 100 {
 		t.Fatalf("a rejected write changed the row: %+v", stored)
 	}
 }

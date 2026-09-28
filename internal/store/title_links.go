@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // Linking is part of the log transaction for both synchronous and batched writers.

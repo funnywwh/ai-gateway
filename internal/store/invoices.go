@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 const invoiceCols = `id, account_id, period_start, period_end, status, currency,

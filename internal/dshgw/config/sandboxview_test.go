@@ -34,7 +34,7 @@ func TestSandboxWorkspaceViewLoadsAndRejectsUnusableValues(t *testing.T) {
 		{"/usr", "a tree the profile mounts for itself"},
 		{"/usr/local/ws", "inside such a tree"},
 		{"/etc/passwd", "a file the profile mounts itself"},
-		{"/home/winger/ws", "inside a hidden root"},
+		{"/home/operator/ws", "inside a hidden root"},
 		{"/tmp/ws", "inside a hidden root"},
 		{"workspace", "relative"},
 		{"/workspace/", "not a clean path"},

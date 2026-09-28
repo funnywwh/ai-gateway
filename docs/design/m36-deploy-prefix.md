@@ -1,6 +1,6 @@
-# M36 部署：gpt001 上的 /aigw/ 前缀挂载
+# M36 部署：gw-a 上的 /aigw/ 前缀挂载
 
-> 状态：已落地（2026-09-13）。目标：`https://gpt.iotalking.top/aigw/` 前缀下**完整可用**
+> 状态：已落地（2026-09-13）。目标：`https://gw-a.example.net/aigw/` 前缀下**完整可用**
 > ——控制台、管理 API、OpenAI 兼容数据面、MCP、预览 iframe 全在同一个前缀里。
 
 ## 1. 问题
@@ -38,7 +38,7 @@ config.server.base_path: "/aigw"      # 空 = 挂在根上（默认，行为与�
 `api.js` 的 BASE、CSV 导出、备份下载、预览 iframe 全部改成 `consolePath()`/`apiRoot()`。
 一份构建同时服务 `/admin/ui/` 与 `/aigw/admin/ui/`，浏览器不需要被告知前缀。
 
-## 3. 部署形态（gpt001 = 47.80.68.113，Alibaba ECS ap-southeast-6）
+## 3. 部署形态（gw-a = 198.51.100.102，Alibaba ECS ap-southeast-6）
 
 - 二进制：`/opt/aigw/aigw`（`make build` 产物，`CGO_ENABLED=0` 静态）
 - 配置：`/opt/aigw/config.yaml`（600，`secret_key`/`credentials_key` 由 `openssl rand` 在本机生成）
@@ -59,10 +59,10 @@ config.server.base_path: "/aigw"      # 空 = 挂在根上（默认，行为与�
   }
   ```
 
-  两个 vhost 都 include 它：**`gpt.iotalking.top`**（本次新增的 server 块）与
-  **`mnl.iotalking.top`**（这台机器上原本就有的站，`/` 仍走 sub2api:8080、
+  两个 vhost 都 include 它：**`gw-a.example.net`**（本次新增的 server 块）与
+  **`gw-a.example.org`**（这台机器上原本就有的站，`/` 仍走 sub2api:8080、
   `/nginxwebui/` 仍走 nginxWebUI:9000，`/aigw/` 之后归网关）。
-  证书复用通配符 `*.iotalking.top`（ACMEdns 签发，覆盖这两个名字）。
+  证书复用通配符 `*.example.org`（ACMEdns 签发，覆盖这两个名字）。
 - 裸前缀 `/aigw` → `/aigw/` → `/aigw/admin/ui/`。
 
 ## 4. 验收（2026-09-13，实测）
@@ -77,9 +77,9 @@ config.server.base_path: "/aigw"      # 空 = 挂在根上（默认，行为与�
 | `/aigw/v1/models` | 200（带 key）/ 401（不带） |
 | 控制台会话 `POST /aigw/admin/api/v1/chat/sessions/{id}/turns` | SSE：turn → … → done |
 | 预览附件 `POST .../artifacts` | 返回 `url=/aigw/admin/chat-artifact/<id>`，带 ticket 取回 200 |
-| **真 DNS + 真证书**：`https://mnl.iotalking.top/aigw/...` | 控制台 200、登录 200（`Path=/aigw/admin`）、`/auth/me`、`/stats`、`/requests`、`/providers` 全 200、`/v1/models` 200、`/v1/responses` 返回正确文本、`ssl_verify=0` |
-| `https://gpt.iotalking.top/aigw/...`（`--resolve` 到 47.80.68.113） | TLS 校验通过，全部 200（等 DNS 记录落地即可用真名访问） |
-| 同机既有站的回归：`mnl.iotalking.top` 的 `/`、`/nginxwebui/`、`/hiddify`；`dsh`、`ng` 两个 vhost | 全部 200，未被 `/aigw/` 影响 |
+| **真 DNS + 真证书**：`https://gw-a.example.org/aigw/...` | 控制台 200、登录 200（`Path=/aigw/admin`）、`/auth/me`、`/stats`、`/requests`、`/providers` 全 200、`/v1/models` 200、`/v1/responses` 返回正确文本、`ssl_verify=0` |
+| `https://gw-a.example.net/aigw/...`（`--resolve` 到 198.51.100.102） | TLS 校验通过，全部 200（等 DNS 记录落地即可用真名访问） |
+| 同机既有站的回归：`gw-a.example.org` 的 `/`、`/nginxwebui/`、`/hiddify`；`dsh`、`ng` 两个 vhost | 全部 200，未被 `/aigw/` 影响 |
 | `make test` / `go vet` / `make build` | 全绿（含新增 `basepath_test.go`） |
 | `make ui-base`（node 推导挂载点） | 10 项通过 |
 
@@ -87,34 +87,34 @@ config.server.base_path: "/aigw"      # 空 = 挂在根上（默认，行为与�
 
 | 名字 | 当前 A 记录 | 状态 |
 |---|---|---|
-| `mnl.iotalking.top` | `47.80.68.113` | 已存在，实测可访问（真 DNS + 真证书） |
-| `gpt.iotalking.top` | 无（NXDOMAIN） | **待域名持有者添加** `gpt → 47.80.68.113` |
+| `gw-a.example.org` | `198.51.100.102` | 已存在，实测可访问（真 DNS + 真证书） |
+| `gw-a.example.net` | 无（NXDOMAIN） | **待域名持有者添加** `gpt → 198.51.100.102` |
 
-证书不需要新签：现有的 `*.iotalking.top`（ACMEdns 签发，2026-10-06 到期）已覆盖两个名字，
+证书不需要新签：现有的 `*.example.org`（ACMEdns 签发，2026-10-06 到期）已覆盖两个名字，
 HTTP 的 80 块也已就位（301 跳 443）。
 
 
 ## 5. 运维要点
 
-- **改代码后怎么上线**：`make build` → `scp bin/aigw gpt001:/tmp/aigw.new` →
+- **改代码后怎么上线**：`make build` → `scp bin/aigw gw-a:/tmp/aigw.new` →
   `install -m0755 /tmp/aigw.new /opt/aigw/aigw` → `systemctl restart aigw`。
   重装前 `/opt/aigw/aigw` 会被复制成 `aigw.prev-<时间戳>`，回滚就是一次 `mv`。
 - **前缀改回根路径**：把 `/opt/aigw/config.yaml` 的 `server.base_path` 改成 `""` 并重启，
   同时删掉 nginx 的 `location ^~ /aigw/`（服务端不会再把任何路径指向前缀）。
 - **日志与排障**：`journalctl -u aigw -f`；数据面 `/aigw/healthz`、`/aigw/readyz`、`/aigw/metrics`。
 - **备份**：`backup.enabled=true`，快照落在 `/opt/aigw/data/backups/`，控制台可下载/恢复。
-- **证书风险（值得盯一眼）**：通配符 `*.iotalking.top` 用的是 ACMEdns（`auth.nginxwebui.cn`）
+- **证书风险（值得盯一眼）**：通配符 `*.example.org` 用的是 ACMEdns（`auth.nginxwebui.cn`）
   验证，2026-10-06 到期，续期依赖那个第三方校验服务；它不是本仓库的一部分，
   如果续期失败，`gpt`/`dsh`/`ng` 三个 vhost 会一起到期 —— 到期前一周确认 acme.sh 续期日志。
-- **本机 /etc/hosts 的坑**：这台工作站的 `/etc/hosts` 里有 `103.59.145.127 gpt001.iotalking.top`
-  这条手工记录（那个 IP 已下线，公网 DNS 里 `gpt001.iotalking.top` 指向 47.80.68.113），
-  会让 `curl gpt001.iotalking.top` 静默连到一台不存在的机器。
+- **本机 /etc/hosts 的坑**：这台工作站的 `/etc/hosts` 里有 `198.51.100.106 gw-a.example.com`
+  这条手工记录（那个 IP 已下线，公网 DNS 里 `gw-a.example.com` 指向 198.51.100.102），
+  会让 `curl gw-a.example.com` 静默连到一台不存在的机器。
 
 ## 6. Codex 账号导入（sub2api → aigw）
 
 **来源**：同一台机器上跑着的 sub2api（`/opt/sub2api`，docker compose + postgres）。
 它的 `accounts` 表里存着 4 个 openai 账号：1 个 ChatGPT OAuth 订阅号
-（`funnywwh@gmail.com`，plan `prolite`）、2 个已停用的 OAuth 号（同邮箱的第二份、另一个邮箱的失效号，
+（`owner@example.com`，plan `prolite`）、2 个已停用的 OAuth 号（同邮箱的第二份、另一个邮箱的失效号，
 后者 401 `authentication token has been invalidated`）、1 个第三方中转的 apikey 号。这里只导入第 1 个。
 
 **做法**：用官方示例插件 `examples/provider-codex`（订阅型 Responses 后端 + OAuth 刷新），
@@ -131,7 +131,7 @@ HTTP 的 80 块也已就位（301 跳 443）。
 
 **实测**：`refresh_session` 真换到 access_token（有效期 2026-09-23）；健康探测（真实流式补全）
 `ok=true`、latency 2.5s；`POST /aigw/v1/responses` 非流式与 `stream=true` 都返回正确文本与 usage；
-公网域名 `https://mnl.iotalking.top/aigw/v1/responses` 同样通过。出网没有被墙：
+公网域名 `https://gw-a.example.org/aigw/v1/responses` 同样通过。出网没有被墙：
 这台机器直连 `chatgpt.com` 的 `/backend-api/*` 正常（首页 403 `cf-mitigated: challenge` 是 Cloudflare
 对浏览器的挑战，接口不受影响）。
 

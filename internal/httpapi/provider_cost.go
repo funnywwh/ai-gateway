@@ -4,8 +4,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/runtime"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/runtime"
 )
 
 // ProviderCost reports the per-provider cost cap state (M56): how much each capped upstream has

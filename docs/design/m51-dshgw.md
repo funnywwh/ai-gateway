@@ -23,7 +23,7 @@
 - 不修改 dsh 源码或发行包（全部定制走 dsh 自己的扩展点：`$DSH_HOME/cordis.patch.yml`、`settings.yaml`、进程环境变量）。
 - 不修改 aigw 的 Go 核心（`internal/httpapi`、`internal/routing`、`internal/billing` 等一律不动）。
 - 不做 per-tenant 容器 / user-namespace 隔离（实测否决，见 D3）。
-- 不新增 DNS 记录、不签发新证书（现状：`chat.tirisen.hk` 有 A 记录，证书 SAN 为 `*.tirisen.hk`）。
+- 不新增 DNS 记录、不签发新证书（现状：`chat.example.com` 有 A 记录，证书 SAN 为 `*.example.net`）。
 - 不把 aigw 的 `/admin/ui` 暴露到公网；不实现"登录即自动建户"；不实现"worker 侧只持占位 token、由网关注入真 Key"的加固形态（记为后续可选项）。
 
 ## 2. 关键决策
@@ -79,8 +79,8 @@ dsh 的浏览器会话 cookie 由 worker 用自身密钥签发，名字与签名
 ### D9 入口配置放宿主 nginx 的 include 目录，不动 nginxWebUI 的数据库
 
 nginxWebUI 容器会按其 `sqlite.db` **重生成** `nginx.conf`，手改的 location/server 会被静默丢弃（实测：其 DB 里 `/dsh` 计数为 0，而 `nginx.conf` 里存在手改路由）。
-因此：租户端口与门户端口的 server 块全部放**宿主 nginx**（`nginx 1.28.3`，由 `sudo` 管理，已有 `/etc/nginx/sites-enabled/dsh-web-8443.conf` 先例）的 `conf.d/dshgw/*.conf`，证书直接引用现成的 `*.tirisen.hk`（`/home/winger/nginxwebui/.acme.sh/*.tirisen.hk/`，宿主 root 可读）。
-**可选**：若希望保留既有习惯 URL `https://chat.tirisen.hk/dsh/`，则在 nginxWebUI 里**正规注册**一个 location（让 DB 拥有它，而不是手改文件）指向宿主 8443 的既有桥接（沿用现网 `container → host:8443 → 127.0.0.1` 模式）。
+因此：租户端口与门户端口的 server 块全部放**宿主 nginx**（`nginx 1.28.3`，由 `sudo` 管理，已有 `/etc/nginx/sites-enabled/dsh-web-8443.conf` 先例）的 `conf.d/dshgw/*.conf`，证书直接引用现成的 `*.example.net`（`/home/operator/nginxwebui/.acme.sh/*.example.net/`，宿主 root 可读）。
+**可选**：若希望保留既有习惯 URL `https://chat.example.com/dsh/`，则在 nginxWebUI 里**正规注册**一个 location（让 DB 拥有它，而不是手改文件）指向宿主 8443 的既有桥接（沿用现网 `container → host:8443 → 127.0.0.1` 模式）。
 取舍：多一套宿主 nginx 配置要管（已有先例与部署脚本），换取"控制台点保存不会打掉租户入口"。
 
 ### D10 会话网关绑回环
@@ -136,7 +136,7 @@ nginxWebUI 容器会按其 `sqlite.db` **重生成** `nginx.conf`，手改的 lo
 
 **为什么值得做**：工作区就是 dsh 沙箱的写根（`sandbox-policy.workspaceRoot = session.header.cwd ?? process.cwd()`）。把 `/` 或 `/etc` 选成工作区，agent 会把整个文件系统当自己的地盘去写，然后撞上大量 OS 权限拒绝——夹紧能挡掉这个脚枪。
 
-**必须说清的一点（容易被"remote"这个词误导）**：钉死 browse **不是**让租户选择"浏览器本机的目录"，而是让租户**在浏览器里浏览 dsh 宿主的文件系统**——browse 后端走 `node:fs` 列的是**服务端**（本部署即 rag-server）的目录，浏览器只是遥控器。反过来说，"选浏览器本机目录"在这个模型里**做不到**：① 浏览器的 File System Access API（`showDirectoryPicker()`）出于隐私**不返回绝对路径**，`<input webkitdirectory>` 也只给相对文件名，而 dsh 的工作区必须是**服务端绝对路径**（`workspace.create` 要求 fully-qualified POSIX 绝对路径，且该路径直接成为沙箱写根与 agent cwd）；② 即便拿到了路径字符串，dsh 宿主也打不开浏览器那台机器的目录。浏览器本机的目录只能以**上传文件/附件**的形式进入 dsh，不能当工作区。
+**必须说清的一点（容易被"remote"这个词误导）**：钉死 browse **不是**让租户选择"浏览器本机的目录"，而是让租户**在浏览器里浏览 dsh 宿主的文件系统**——browse 后端走 `node:fs` 列的是**服务端**（本部署即 gw-c）的目录，浏览器只是遥控器。反过来说，"选浏览器本机目录"在这个模型里**做不到**：① 浏览器的 File System Access API（`showDirectoryPicker()`）出于隐私**不返回绝对路径**，`<input webkitdirectory>` 也只给相对文件名，而 dsh 的工作区必须是**服务端绝对路径**（`workspace.create` 要求 fully-qualified POSIX 绝对路径，且该路径直接成为沙箱写根与 agent cwd）；② 即便拿到了路径字符串，dsh 宿主也打不开浏览器那台机器的目录。浏览器本机的目录只能以**上传文件/附件**的形式进入 dsh，不能当工作区。
 
 **诚实边界**：即使做了 `clamp`，租户的 **agent** 仍然读得到全世界可读的系统文件（`/usr`、`/etc` 等），因为它是普通进程；夹紧管的是"GUI 选目录"，不是"隐藏操作系统"。`PrivateTmp=yes` 额外让 `/tmp` 只显示该租户自己的私有 tmpfs。
 
@@ -173,14 +173,14 @@ nginxWebUI 容器会按其 `sqlite.db` **重生成** `nginx.conf`，手改的 lo
 
 ```go
 type Config struct {
-	PublicHost    string // 既有主机名，如 "chat.tirisen.hk"（不新增 DNS）
+	PublicHost    string // 既有主机名，如 "chat.example.com"（不新增 DNS）
 	PortalPort    int    // 门户（登录页）端口，如 32600
 	TenantPortLo  int    // 公开 TLS 段下限，如 32601（宿主 nginx）
 	TenantPortHi  int    // 公开 TLS 段上限，如 32799
 	WorkerPortLo  int    // worker 回环段下限，如 32100
 	WorkerPortHi  int    // worker 回环段上限，如 32299
 	Listen        string // "127.0.0.1:3099"
-	AigwBaseURL   string // "http://192.168.190.86:8088"
+	AigwBaseURL   string // "http://aigw.internal:8088"
 	ValidateTimeout time.Duration // 5s
 	SessionTTL    time.Duration // 7d（滑动续期）
 	KeyRevalidate string // "off" | "per-request" | "interval:<sec>"
@@ -385,7 +385,7 @@ dshgw-verify:  # vet + test + build + scripts/verify-dshgw.sh
 ## 7. 依赖
 
 - 外部：Go 1.25 标准库 + `gopkg.in/yaml.v3`（已在仓库依赖内）。**不新增第三方依赖**。
-- 运行时：dsh 发行包（`/opt/dsh`，未修改）、Node 22（跑 dsh）、systemd、aigw HTTP 面、**宿主 nginx**（公开端口 TLS，证书复用现有 `*.tirisen.hk`）。
+- 运行时：dsh 发行包（`/opt/dsh`，未修改）、Node 22（跑 dsh）、systemd、aigw HTTP 面、**宿主 nginx**（公开端口 TLS，证书复用现有 `*.example.net`）。
 - **不依赖**：新 DNS 记录、新证书、nginxWebUI 的数据库改动（可选）、docker0 地址。
 - 契约依赖（由契约测试锁定）：`GET /v1/models` 的 401/200 语义与 `key_prefix = 明文前 12 字符` 口径；dsh 的 CLI 参数、启动行格式、token 交换与 cookie authority 绑定、`$DSH_HOME` 布局与首启自举、凭据文件三键与权限要求。
 
@@ -428,7 +428,7 @@ dshgw-verify:  # vet + test + build + scripts/verify-dshgw.sh
 - disposable DSH 7 项基础契约、真实 picker 15 项断言：通过；另已加入并通过第 8 项 `credentials-live-hotload`。Node 使用 `/home/winger/.local/node-v22.23.1-linux-x64`，DSH 使用 `/home/winger/.local/dsh-0.1.2-rc.1`，未修改发行包。
 - 临时 browser-fs 0.2.0 模板：供应成功；复制后的 fresh HOME 不调用 pnpm；页面与实际广告的插件 client URL 200；普通 WS 路径 GET 426；有效 upgrade 101。
 - `make dshgw-verify` 的最终组合（最新二进制、unit 校验、模板与全部契约）：通过。`file bin/dshgw` 确认 x86-64 静态 ELF；后续 diff-check 发现的文档 EOF 空行已随清单归档修正。
-- 真实 aigw `http://192.168.190.86:8088/v1/models` 无凭据认证栅栏：CLI contract 通过（401）；没有使用真实 Key，不能据此认定其余 live Key 契约通过。
+- 真实 aigw `http://aigw.internal:8088/v1/models` 无凭据认证栅栏：CLI contract 通过（401）；没有使用真实 Key，不能据此认定其余 live Key 契约通过。
 - race 检测未运行：当前 PATH 无 gcc，`CGO_ENABLED=1 go test -race` 的前置条件缺失；普通并发测试已运行，不冒充 race 检测。
 
 新增自动化与人工执行接缝（2026-09-16）：
@@ -437,7 +437,7 @@ dshgw-verify:  # vet + test + build + scripts/verify-dshgw.sh
 - `tenant list --json` 追加只读 UID/user/unit/路径/创建时间/prefix alias/origin 元数据，不输出 Key/cookie；原有表格与 JSON 字段保持。
 - root 分阶段脚本 baseline/revoked/cleanup，外部机器单独 external：仅操作专用、身份匹配的临时租户。状态与 CLI 日志私有，公开报告始终不冒充全里程碑完成。
 - 脚本自测试通过 13 项；其模型请求协议另在真实一次性 DSH + 假 Responses 上验证，启用标题插件时依靠显式 rename 保证没有额外标题 LLM 请求。使用公开 session/list/rename/page 及 rpcId/turn 终态，不读取私有 session 日志猜游标。
-- 最新 `make dshgw-verify` 已包括以上检查并通过；真实 root 结果尚未回传。用户已选择人工 root 执行，测试实例 `http://192.168.190.86:8088`、Key 文件 `/root/dshgw-e2e/a.key`/`b.key`、模型 `deepseek-flash` 已确认；未读取或在聊天接收 Key 明文。
+- 最新 `make dshgw-verify` 已包括以上检查并通过；真实 root 结果尚未回传。用户已选择人工 root 执行，测试实例 `http://aigw.internal:8088`、Key 文件 `/root/dshgw-e2e/a.key`/`b.key`、模型 `deepseek-flash` 已确认；未读取或在聊天接收 Key 明文。
 
 **尚未完成（不计为通过）**：
 
@@ -459,10 +459,10 @@ dshgw-verify:  # vet + test + build + scripts/verify-dshgw.sh
 - 启动前检查发现：安装器 `/var/lib/dshgw` 的 `750 root:dshgw` 会阻止独立 tenant UID 穿过父目录；已改为 state `0751 root:dshgw`、tenant root `0711 root:root`，私有 tenant 叶仍 `0700`、Key 模式不变、绝不把 tenant 加入 gateway 组。建户在 registry 发布/worker start 前增加真正的 `runuser -u <tenant> -- /usr/bin/test` 读写探针，doctor 增加共享根遍历检查。新建配置叶目录显式 chmod0750，避免操作者先前 `umask077` 把 gateway 组 search bit 屏蔽。
 - gateway unit 由逐文件 ReadOnlyPaths 改成 `/etc/dshgw /var/lib/dshgw` 的目录级只读挂载，保留唯一可写 `/var/lib/dshgw/gateway`，避免原子替换 registry 时被单文件 bind mount 固定旧 inode。已加静态回归；真实 mount namespace 下的创建/registry可见性仍由下一阶段验收，不冒充 root mount 实测。
 - serve 与生命周期改为共用配置的 session store，修正 `max_sessions` 之前仅在生命周期加载生效的遗漏；容量回归通过。
-- **用户显式批准**现有 Key 已授权、可切 `auth.default_grant: none`。只读核对正在运行的 aigw（UID1000，工作目录本仓库，配置参数 `/home/winger/work/ai_gateway/config.yaml`，无 `GW_AUTH_DEFAULT_GRANT` 覆盖）。已仅修改该配置项及解释注释，私有回滚副本为 `.cache/dshgw-auth/config.before-none-7a4a5aa529a9.yaml`（0600，父目录0700，gitignored）；**尚未由 agent 重启进程，不宣称运行态已变更**。实际停启继续由用户 root 终端执行。
+- **用户显式批准**现有 Key 已授权、可切 `auth.default_grant: none`。只读核对正在运行的 aigw（UID1000，工作目录本仓库，配置参数 `/home/operator/work/ai_gateway/config.yaml`，无 `GW_AUTH_DEFAULT_GRANT` 覆盖）。已仅修改该配置项及解释注释，私有回滚副本为 `.cache/dshgw-auth/config.before-none-7a4a5aa529a9.yaml`（0600，父目录0700，gitignored）；**尚未由 agent 重启进程，不宣称运行态已变更**。实际停启继续由用户 root 终端执行。
 - 上述代码修正后 `go test ./...`、`go vet ./...`、`make dshgw-verify`、静态 ELF 检查与 `git diff --check` 均通过；新 dshgw 构建时间 `2026-09-15T22:34:17Z`，待宿主更新。没有创建 M51 commit。
 
-已提供人工接续脚本 `scripts/dshgw_stage2.sh`：要求显式授权/重启确认、拒绝活动 dshgw/workers、核对当前本地 aigw 身份/实际配置来源/环境，更新 dshgw 文件后按原 winger 身份重启 aigw；检查新日志 none、两把 Key 和 deepseek-flash，再仅启动回环 gateway。shell/嵌入 Python 语法及未确认/非 root 拒绝测试通过，**没有在 agent 工具执行真实重启，仍待用户 root 结果**。不自动打开 nginx 公网入口。
+已提供人工接续脚本 `scripts/dshgw_stage2.sh`：要求显式授权/重启确认、拒绝活动 dshgw/workers、核对当前本地 aigw 身份/实际配置来源/环境，更新 dshgw 文件后按原 operator 身份重启 aigw；检查新日志 none、两把 Key 和 deepseek-flash，再仅启动回环 gateway。shell/嵌入 Python 语法及未确认/非 root 拒绝测试通过，**没有在 agent 工具执行真实重启，仍待用户 root 结果**。不自动打开 nginx 公网入口。
 
 ### 阶段 2 回传（已执行）与 nginx 链路回归
 
@@ -499,16 +499,16 @@ dshgw-verify:  # vet + test + build + scripts/verify-dshgw.sh
 - 部署边界：确认后仅构建更新gateway；不重启aigw、DSH GUI或租户workers、不改VERSION、不提交M51。用户刷新门户后用B复验登录/退出，并回传不含Key/cookie的结果。
 
 
-- **用户真实主机复验回传**：更新 gateway 后，Key B 的 `POST /login` 返回 302，Location 为 `https://chat.tirisen.hk:32602/`，租户页面可打开。证明 same-origin 策略修复了原生浏览器登录跳转；退出按钮仍需单独确认成功状态。
+- **用户真实主机复验回传**：更新 gateway 后，Key B 的 `POST /login` 返回 302，Location 为 `https://chat.example.com:32602/`，租户页面可打开。证明 same-origin 策略修复了原生浏览器登录跳转；退出按钮仍需单独确认成功状态。
 
 
 ### 浏览器CSP修正与发布门槛确认
 
 此前仅凭租户页面可手工打开便记录“自动跳转成功”不准确。用户后续明确：POST /login为302但没有后续GET，浏览器报告form-action self阻止提交重定向。实际修复为门户CSP form-action包含self及registry的租户origins，保持其余CSP和严格Origin校验；用户已核对线上响应头并最终确认自动跳转成功。proxy回归新增精确CSP断言。退出仍待单独复验。
 
-用户最终决定保留 https://chat.tirisen.hk:32600/，取消/dsh/改动；要求所有主机验收完成后才提交发布。未完成项目保持TODO，不能以baseline或浏览器登录成功替代资源压力、真实轮换、外部TLS、目录授权与恢复演练。race仍缺gcc，不宣称通过。
+用户最终决定保留 https://chat.example.com:32600/，取消/dsh/改动；要求所有主机验收完成后才提交发布。未完成项目保持TODO，不能以baseline或浏览器登录成功替代资源压力、真实轮换、外部TLS、目录授权与恢复演练。race仍缺gcc，不宣称通过。
 
 
 ### 外部TLS探针回传（网络位置待确认）
 
-用户按不带-k、不跟随重定向的curl探针回传：32600为200、32601/32602均302到https://chat.tirisen.hk:32600/，三者tls_verify=0。公开端口HTTPS行为符合预期；待确认执行设备确为服务器之外及同局域网/不同网络后界定外部可达范围，不把此结果当作任意公网均可达。
+用户按不带-k、不跟随重定向的curl探针回传：32600为200、32601/32602均302到https://chat.example.com:32600/，三者tls_verify=0。公开端口HTTPS行为符合预期；待确认执行设备确为服务器之外及同局域网/不同网络后界定外部可达范围，不把此结果当作任意公网均可达。

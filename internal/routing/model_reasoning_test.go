@@ -3,8 +3,8 @@ package routing
 import (
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/registry"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/registry"
 )
 
 func reasoningSnapshot(reasoning string, mappings []*domain.ModelMapping, capabilities string) *registry.Snapshot {

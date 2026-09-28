@@ -149,7 +149,7 @@ func newTestEnv(t *testing.T, options Options) *testEnv {
 		if err := os.MkdirAll(keys, 0o700); err != nil {
 			t.Fatalf("preparing the key directory: %v", err)
 		}
-		if err := os.WriteFile(filepath.Join(keys, "dsh-colin"), []byte("PRIVATE KEY\n"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(keys, "dsh-alex"), []byte("PRIVATE KEY\n"), 0o600); err != nil {
 			t.Fatalf("writing the test key: %v", err)
 		}
 		options.IdentityDir = keys
@@ -185,9 +185,9 @@ func newTestEnv(t *testing.T, options Options) *testEnv {
 	service.now = func() time.Time { return time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC) }
 	env.service = service
 	env.remote = Remote{
-		Tenant:    "dsh-colin",
-		Workspace: filepath.Join(root, "state", "workspaces", "dsh-colin"),
-		DshHome:   filepath.Join(root, "state", "tenants", "dsh-colin", ".dsh"),
+		Tenant:    "dsh-alex",
+		Workspace: filepath.Join(root, "state", "workspaces", "dsh-alex"),
+		DshHome:   filepath.Join(root, "state", "tenants", "dsh-alex", ".dsh"),
 	}
 	if err := os.MkdirAll(env.remote.DshHome, 0o700); err != nil {
 		t.Fatalf("preparing the tenant home: %v", err)
@@ -199,32 +199,32 @@ func newTestEnv(t *testing.T, options Options) *testEnv {
 
 func TestOpenMountsRecordsAndRestarts(t *testing.T) {
 	env := newTestEnv(t, Options{})
-	mountpoint := filepath.Join(env.remote.Workspace, "ssh", "gpt001", "opt", "app")
+	mountpoint := filepath.Join(env.remote.Workspace, "ssh", "gw-a", "opt", "app")
 
-	mount, restarted, err := env.service.Open(context.Background(), env.remote, "gpt001", "/opt/app")
+	mount, restarted, err := env.service.Open(context.Background(), env.remote, "gw-a", "/opt/app")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	if !restarted {
 		t.Error("Open reported no restart, but a new mount is only visible after the worker starts again")
 	}
-	if mount.Mountpoint != mountpoint || mount.CanonicalRemote != "/opt/app" || mount.Tenant != "dsh-colin" {
+	if mount.Mountpoint != mountpoint || mount.CanonicalRemote != "/opt/app" || mount.Tenant != "dsh-alex" {
 		t.Fatalf("mount record = %+v", mount)
 	}
 	if !mount.CreatedAt.Equal(time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)) {
 		t.Errorf("CreatedAt = %v, want the injected clock", mount.CreatedAt)
 	}
-	recorded, err := env.service.Mounts("dsh-colin")
+	recorded, err := env.service.Mounts("dsh-alex")
 	if err != nil || len(recorded) != 1 {
 		t.Fatalf("recorded mounts = %+v / %v, want exactly one", recorded, err)
 	}
-	if len(env.restarts) != 1 || env.restarts[0] != "dsh-colin" {
-		t.Errorf("restarts = %v, want one restart of dsh-colin", env.restarts)
+	if len(env.restarts) != 1 || env.restarts[0] != "dsh-alex" {
+		t.Errorf("restarts = %v, want one restart of dsh-alex", env.restarts)
 	}
 	// Every level of the mount path is private to the account.
 	for _, dir := range []string{
 		filepath.Join(env.remote.Workspace, "ssh"),
-		filepath.Join(env.remote.Workspace, "ssh", "gpt001"),
+		filepath.Join(env.remote.Workspace, "ssh", "gw-a"),
 		mountpoint,
 	} {
 		info, err := os.Stat(dir)
@@ -248,11 +248,11 @@ func TestOpenMountsRecordsAndRestarts(t *testing.T) {
 func TestOpenIsIdempotentWhileMounted(t *testing.T) {
 	env := newTestEnv(t, Options{})
 	ctx := context.Background()
-	first, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	first, _, err := env.service.Open(ctx, env.remote, "gw-a", "/opt/app")
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	second, restarted, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	second, restarted, err := env.service.Open(ctx, env.remote, "gw-a", "/opt/app")
 	if err != nil {
 		t.Fatalf("second Open: %v", err)
 	}
@@ -275,8 +275,8 @@ func TestOpenUsesCanonicalRemotePathAsTheKey(t *testing.T) {
 	env.fake.canonical = "/srv/real-app"
 	// Two spellings that the remote reports as one directory must land on one mount point,
 	// otherwise the same tree would be mounted twice under two workspaces.
-	directories := filepath.Dir(filepath.Join(env.remote.Workspace, "ssh", "gpt001", "srv", "real-app"))
-	mount, _, err := env.service.Open(context.Background(), env.remote, "gpt001", "/srv/link")
+	directories := filepath.Dir(filepath.Join(env.remote.Workspace, "ssh", "gw-a", "srv", "real-app"))
+	mount, _, err := env.service.Open(context.Background(), env.remote, "gw-a", "/srv/link")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestOpenUsesCanonicalRemotePathAsTheKey(t *testing.T) {
 }
 
 func TestOpenRefusesUnusableInputs(t *testing.T) {
-	env := newTestEnv(t, Options{Hosts: []string{"gpt001"}})
+	env := newTestEnv(t, Options{Hosts: []string{"gw-a"}})
 	ctx := context.Background()
 	if _, _, err := env.service.Open(ctx, env.remote, "elsewhere", "/opt/app"); CodeOf(err) != CodeHostUnknown {
 		t.Errorf("off-list host code = %q, want %q", CodeOf(err), CodeHostUnknown)
@@ -297,13 +297,13 @@ func TestOpenRefusesUnusableInputs(t *testing.T) {
 	if _, _, err := env.service.Open(ctx, env.remote, "-oProxyCommand=x", "/opt/app"); CodeOf(err) != CodeHostUnknown {
 		t.Errorf("option-injection code = %q, want %q", CodeOf(err), CodeHostUnknown)
 	}
-	if _, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/../etc"); CodeOf(err) != CodeInvalidPath {
+	if _, _, err := env.service.Open(ctx, env.remote, "gw-a", "/opt/../etc"); CodeOf(err) != CodeInvalidPath {
 		t.Errorf("traversal code = %q, want %q", CodeOf(err), CodeInvalidPath)
 	}
-	if _, _, err := env.service.Open(ctx, Remote{Tenant: "dsh-colin"}, "gpt001", "/opt/app"); CodeOf(err) != CodeInvalidState {
+	if _, _, err := env.service.Open(ctx, Remote{Tenant: "dsh-alex"}, "gw-a", "/opt/app"); CodeOf(err) != CodeInvalidState {
 		t.Errorf("unresolved workspace code = %q, want %q", CodeOf(err), CodeInvalidState)
 	}
-	if mounts, _ := env.service.Mounts("dsh-colin"); len(mounts) != 0 {
+	if mounts, _ := env.service.Mounts("dsh-alex"); len(mounts) != 0 {
 		t.Errorf("a refused open recorded something: %+v", mounts)
 	}
 	if got := env.fake.callCount("sshfs "); got != 0 {
@@ -314,15 +314,15 @@ func TestOpenRefusesUnusableInputs(t *testing.T) {
 func TestOpenReportsSSHFailures(t *testing.T) {
 	env := newTestEnv(t, Options{})
 	env.fake.sshErr = errors.New("exit status 255")
-	env.fake.sshStderr = []byte("root@gpt001: Permission denied (publickey).")
-	if _, _, err := env.service.Open(context.Background(), env.remote, "gpt001", "/opt/app"); CodeOf(err) != CodeAuthFailed {
+	env.fake.sshStderr = []byte("root@gw-a: Permission denied (publickey).")
+	if _, _, err := env.service.Open(context.Background(), env.remote, "gw-a", "/opt/app"); CodeOf(err) != CodeAuthFailed {
 		t.Fatalf("code = %q, want %q (%v)", CodeOf(err), CodeAuthFailed, err)
 	}
 
 	env = newTestEnv(t, Options{})
 	env.fake.sshErr = errors.New("exit status 255")
-	env.fake.sshStderr = []byte("ssh: connect to host gpt001 port 22: Connection refused")
-	if _, _, err := env.service.Open(context.Background(), env.remote, "gpt001", "/opt/app"); CodeOf(err) != CodeUnreachable {
+	env.fake.sshStderr = []byte("ssh: connect to host gw-a port 22: Connection refused")
+	if _, _, err := env.service.Open(context.Background(), env.remote, "gw-a", "/opt/app"); CodeOf(err) != CodeUnreachable {
 		t.Fatalf("code = %q, want %q (%v)", CodeOf(err), CodeUnreachable, err)
 	}
 }
@@ -332,11 +332,11 @@ func TestOpenDetachesTheMountWhenSSHFSLiesBeyondTheObserver(t *testing.T) {
 	// mount that is not there, and the half-made attempt is detached.
 	env := newTestEnv(t, Options{})
 	env.service.mounted = func(string) (string, error) { return "", nil }
-	_, _, err := env.service.Open(context.Background(), env.remote, "gpt001", "/opt/app")
+	_, _, err := env.service.Open(context.Background(), env.remote, "gw-a", "/opt/app")
 	if CodeOf(err) != CodeMountFailed {
 		t.Fatalf("code = %q, want %q (%v)", CodeOf(err), CodeMountFailed, err)
 	}
-	if mounts, _ := env.service.Mounts("dsh-colin"); len(mounts) != 0 {
+	if mounts, _ := env.service.Mounts("dsh-alex"); len(mounts) != 0 {
 		t.Errorf("a failed mount was recorded: %+v", mounts)
 	}
 	if got := env.fake.callCount("fusermount3 -u"); got != 1 {
@@ -355,7 +355,7 @@ func TestOpenFailsWhenSSHFSIsMissing(t *testing.T) {
 		}
 		return "/usr/bin/" + file, nil
 	}
-	_, _, err := env.service.Open(context.Background(), env.remote, "gpt001", "/opt/app")
+	_, _, err := env.service.Open(context.Background(), env.remote, "gw-a", "/opt/app")
 	if CodeOf(err) != CodeSSHFSMissing {
 		t.Fatalf("code = %q, want %q (%v)", CodeOf(err), CodeSSHFSMissing, err)
 	}
@@ -363,9 +363,9 @@ func TestOpenFailsWhenSSHFSIsMissing(t *testing.T) {
 
 func TestOpenRefusesAForeignMountAtTheSamePlace(t *testing.T) {
 	env := newTestEnv(t, Options{})
-	mountpoint := filepath.Join(env.remote.Workspace, "ssh", "gpt001", "opt", "app")
+	mountpoint := filepath.Join(env.remote.Workspace, "ssh", "gw-a", "opt", "app")
 	env.fake.mounts[mountpoint] = "ext4"
-	_, _, err := env.service.Open(context.Background(), env.remote, "gpt001", "/opt/app")
+	_, _, err := env.service.Open(context.Background(), env.remote, "gw-a", "/opt/app")
 	if CodeOf(err) != CodeBusy {
 		t.Fatalf("code = %q, want %q (%v)", CodeOf(err), CodeBusy, err)
 	}
@@ -377,11 +377,11 @@ func TestOpenRefusesAForeignMountAtTheSamePlace(t *testing.T) {
 func TestCloseUnmountsForgetsAndRestarts(t *testing.T) {
 	env := newTestEnv(t, Options{})
 	ctx := context.Background()
-	mount, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	mount, _, err := env.service.Open(ctx, env.remote, "gw-a", "/opt/app")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	lazy, restarted, err := env.service.Close(ctx, "dsh-colin", env.remote.DshHome, mount.Mountpoint)
+	lazy, restarted, err := env.service.Close(ctx, "dsh-alex", env.remote.DshHome, mount.Mountpoint)
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestCloseUnmountsForgetsAndRestarts(t *testing.T) {
 	if !restarted {
 		t.Error("Close must restart the worker so the binding goes away with the mount")
 	}
-	if mounts, _ := env.service.Mounts("dsh-colin"); len(mounts) != 0 {
+	if mounts, _ := env.service.Mounts("dsh-alex"); len(mounts) != 0 {
 		t.Errorf("mounts after Close = %+v, want none", mounts)
 	}
 	if _, statErr := os.Stat(mount.Mountpoint); !errors.Is(statErr, os.ErrNotExist) {
@@ -402,12 +402,12 @@ func TestCloseUnmountsForgetsAndRestarts(t *testing.T) {
 func TestCloseLazyFallback(t *testing.T) {
 	env := newTestEnv(t, Options{})
 	ctx := context.Background()
-	mount, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	mount, _, err := env.service.Open(ctx, env.remote, "gw-a", "/opt/app")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	env.fake.unmountErr = errors.New("exit status 1")
-	lazy, _, err := env.service.Close(ctx, "dsh-colin", env.remote.DshHome, mount.Mountpoint)
+	lazy, _, err := env.service.Close(ctx, "dsh-alex", env.remote.DshHome, mount.Mountpoint)
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -422,7 +422,7 @@ func TestCloseLazyFallback(t *testing.T) {
 func TestOpenReplacesAMountWhoseDaemonDied(t *testing.T) {
 	env := newTestEnv(t, Options{})
 	ctx := context.Background()
-	first, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	first, _, err := env.service.Open(ctx, env.remote, "gw-a", "/opt/app")
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestOpenReplacesAMountWhoseDaemonDied(t *testing.T) {
 	fuseConnDir = func(fuseConn) string { return "" }
 	defer func() { fuseConnDir = previous }()
 
-	if _, restarted, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app"); err != nil {
+	if _, restarted, err := env.service.Open(ctx, env.remote, "gw-a", "/opt/app"); err != nil {
 		t.Fatalf("Open over a dead mount: %v", err)
 	} else if !restarted {
 		t.Error("a remount must restart the worker, or the sandbox keeps the dead mount bound")
@@ -442,7 +442,7 @@ func TestOpenReplacesAMountWhoseDaemonDied(t *testing.T) {
 	if got := env.fake.callCount("sshfs "); got != before+1 {
 		t.Errorf("sshfs was invoked %d times, want %d (the dead mount must be replaced)", got, before+1)
 	}
-	mounts, err := env.service.Mounts("dsh-colin")
+	mounts, err := env.service.Mounts("dsh-alex")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +457,7 @@ func TestOpenReplacesAMountWhoseDaemonDied(t *testing.T) {
 func TestMountsForSkipsAMountWithoutADaemon(t *testing.T) {
 	env := newTestEnv(t, Options{})
 	ctx := context.Background()
-	mount, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	mount, _, err := env.service.Open(ctx, env.remote, "gw-a", "/opt/app")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -465,15 +465,15 @@ func TestMountsForSkipsAMountWithoutADaemon(t *testing.T) {
 	defer func() { sshfsDaemonFor = previous }()
 
 	sshfsDaemonFor = func(string) int { return os.Getpid() }
-	if paths := env.service.MountsFor("dsh-colin"); len(paths) != 1 || paths[0] != mount.Mountpoint {
+	if paths := env.service.MountsFor("dsh-alex"); len(paths) != 1 || paths[0] != mount.Mountpoint {
 		t.Fatalf("a served mount was left out of the profile: %v", paths)
 	}
 	sshfsDaemonFor = func(string) int { return 0 }
-	if paths := env.service.MountsFor("dsh-colin"); len(paths) != 0 {
+	if paths := env.service.MountsFor("dsh-alex"); len(paths) != 0 {
 		t.Fatalf("a mount with no daemon was bound into the profile: %v", paths)
 	}
 	// The record survives: the account gets the mount back by opening it again.
-	if mounts, err := env.service.Mounts("dsh-colin"); err != nil || len(mounts) != 1 {
+	if mounts, err := env.service.Mounts("dsh-alex"); err != nil || len(mounts) != 1 {
 		t.Fatalf("mounts = %v err = %v, want the record kept", mounts, err)
 	}
 }
@@ -483,11 +483,11 @@ func TestMountsForSkipsAMountWithoutADaemon(t *testing.T) {
 func TestOpenLeavesALiveMountAlone(t *testing.T) {
 	env := newTestEnv(t, Options{})
 	ctx := context.Background()
-	if _, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app"); err != nil {
+	if _, _, err := env.service.Open(ctx, env.remote, "gw-a", "/opt/app"); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	before := env.fake.callCount("sshfs ")
-	if _, restarted, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app"); err != nil {
+	if _, restarted, err := env.service.Open(ctx, env.remote, "gw-a", "/opt/app"); err != nil {
 		t.Fatalf("second Open: %v", err)
 	} else if restarted {
 		t.Error("a live mount must not be remounted")
@@ -500,17 +500,17 @@ func TestOpenLeavesALiveMountAlone(t *testing.T) {
 func TestCloseRefusesForeignAndUnknownMounts(t *testing.T) {
 	env := newTestEnv(t, Options{})
 	ctx := context.Background()
-	mount, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	mount, _, err := env.service.Open(ctx, env.remote, "gw-a", "/opt/app")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	if _, _, err := env.service.Close(ctx, "dsh-other", env.remote.DshHome, mount.Mountpoint); CodeOf(err) != CodeForbidden {
 		t.Errorf("cross-account close code = %q, want %q", CodeOf(err), CodeForbidden)
 	}
-	if _, _, err := env.service.Close(ctx, "dsh-colin", env.remote.DshHome, filepath.Join(env.remote.Workspace, "ssh", "nope")); CodeOf(err) != CodeNotMounted {
+	if _, _, err := env.service.Close(ctx, "dsh-alex", env.remote.DshHome, filepath.Join(env.remote.Workspace, "ssh", "nope")); CodeOf(err) != CodeNotMounted {
 		t.Errorf("unknown mount code = %q, want %q", CodeOf(err), CodeNotMounted)
 	}
-	if mounts, _ := env.service.Mounts("dsh-colin"); len(mounts) != 1 {
+	if mounts, _ := env.service.Mounts("dsh-alex"); len(mounts) != 1 {
 		t.Errorf("a refused close changed the record: %+v", mounts)
 	}
 }
@@ -520,14 +520,14 @@ func TestDropTenantUnmountsEverything(t *testing.T) {
 	ctx := context.Background()
 	for _, remote := range []string{"/opt/app", "/srv/data"} {
 		env.fake.canonical = remote
-		if _, _, err := env.service.Open(ctx, env.remote, "gpt001", remote); err != nil {
+		if _, _, err := env.service.Open(ctx, env.remote, "gw-a", remote); err != nil {
 			t.Fatalf("Open(%s): %v", remote, err)
 		}
 	}
-	if err := env.service.DropTenant(ctx, "dsh-colin"); err != nil {
+	if err := env.service.DropTenant(ctx, "dsh-alex"); err != nil {
 		t.Fatalf("DropTenant: %v", err)
 	}
-	if mounts, _ := env.service.Mounts("dsh-colin"); len(mounts) != 0 {
+	if mounts, _ := env.service.Mounts("dsh-alex"); len(mounts) != 0 {
 		t.Errorf("mounts after DropTenant = %+v, want none", mounts)
 	}
 	if got := env.fake.callCount("fusermount3 -u"); got != 2 {
@@ -538,13 +538,13 @@ func TestDropTenantUnmountsEverything(t *testing.T) {
 func TestPollOnceServicesTheMailbox(t *testing.T) {
 	env := newTestEnv(t, Options{})
 	ctx := context.Background()
-	if err := WriteRequest(env.remote.DshHome, Request{ID: "req-open", Op: RequestOpen, Host: "gpt001", Remote: "/opt/app"}); err != nil {
+	if err := WriteRequest(env.remote.DshHome, Request{ID: "req-open", Op: RequestOpen, Host: "gw-a", Remote: "/opt/app"}); err != nil {
 		t.Fatalf("WriteRequest: %v", err)
 	}
 	if handled := env.service.PollOnce(ctx, []Remote{env.remote}); handled != 1 {
 		t.Fatalf("PollOnce handled %d requests, want 1", handled)
 	}
-	mounts, _ := env.service.Mounts("dsh-colin")
+	mounts, _ := env.service.Mounts("dsh-alex")
 	if len(mounts) != 1 {
 		t.Fatalf("mounts = %+v, want one", mounts)
 	}
@@ -565,13 +565,13 @@ func TestPollOnceServicesTheMailbox(t *testing.T) {
 	if handled := env.service.PollOnce(ctx, []Remote{env.remote}); handled != 1 {
 		t.Fatalf("PollOnce handled %d close requests, want 1", handled)
 	}
-	if left, _ := env.service.Mounts("dsh-colin"); len(left) != 0 {
+	if left, _ := env.service.Mounts("dsh-alex"); len(left) != 0 {
 		t.Errorf("mounts after close = %+v, want none", left)
 	}
 }
 
 func TestPollOnceReportsFailuresWithoutStopping(t *testing.T) {
-	env := newTestEnv(t, Options{Hosts: []string{"gpt001"}})
+	env := newTestEnv(t, Options{Hosts: []string{"gw-a"}})
 	if err := WriteRequest(env.remote.DshHome, Request{ID: "req-bad", Op: RequestOpen, Host: "elsewhere", Remote: "/opt/app"}); err != nil {
 		t.Fatalf("WriteRequest: %v", err)
 	}
@@ -591,7 +591,7 @@ func TestPollOnceReportsFailuresWithoutStopping(t *testing.T) {
 func TestReconcileRemountsWhatVanished(t *testing.T) {
 	env := newTestEnv(t, Options{})
 	ctx := context.Background()
-	mount, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	mount, _, err := env.service.Open(ctx, env.remote, "gw-a", "/opt/app")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -611,7 +611,7 @@ func TestReconcileRemountsWhatVanished(t *testing.T) {
 
 func TestEnsureIdentityProvisionsOnce(t *testing.T) {
 	env := newTestEnv(t, Options{})
-	if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); err != nil {
+	if err := env.service.EnsureIdentity("dsh-alex", env.remote.Workspace, env.remote.DshHome); err != nil {
 		t.Fatalf("EnsureIdentity: %v", err)
 	}
 	keyPath := filepath.Join(env.remote.Workspace, ".ssh", "id_rsa")
@@ -622,7 +622,7 @@ func TestEnsureIdentityProvisionsOnce(t *testing.T) {
 	if err := os.WriteFile(keyPath, []byte("TENANT ROTATED KEY\n"), 0o600); err != nil {
 		t.Fatalf("rotating the key: %v", err)
 	}
-	if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); err != nil {
+	if err := env.service.EnsureIdentity("dsh-alex", env.remote.Workspace, env.remote.DshHome); err != nil {
 		t.Fatalf("second EnsureIdentity: %v", err)
 	}
 	data, err := os.ReadFile(keyPath)
@@ -636,11 +636,11 @@ func TestEnsureIdentityProvisionsOnce(t *testing.T) {
 
 func TestEnsureIdentityPrefersTheAccountKey(t *testing.T) {
 	directory := t.TempDir()
-	if err := os.WriteFile(filepath.Join(directory, "dsh-colin"), []byte("ACCOUNT KEY\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "dsh-alex"), []byte("ACCOUNT KEY\n"), 0o600); err != nil {
 		t.Fatalf("writing the account key: %v", err)
 	}
 	env := newTestEnv(t, Options{IdentityDir: directory})
-	if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); err != nil {
+	if err := env.service.EnsureIdentity("dsh-alex", env.remote.Workspace, env.remote.DshHome); err != nil {
 		t.Fatalf("EnsureIdentity: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(env.remote.Workspace, ".ssh", "id_rsa"))
@@ -663,7 +663,7 @@ func TestEnsureIdentityNeverInventsAKeyWithoutASource(t *testing.T) {
 	if err := os.Remove(keyPath); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); err != nil {
+	if err := env.service.EnsureIdentity("dsh-alex", env.remote.Workspace, env.remote.DshHome); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(keyPath); !os.IsNotExist(err) {
@@ -678,18 +678,18 @@ func TestEnsureIdentityNeverInventsAKeyWithoutASource(t *testing.T) {
 	}
 	// And a mount reports the missing identity as an authentication failure, which is what the
 	// tenant's plugin shows as "this account has no ssh identity yet".
-	if _, _, err := env.service.Open(context.Background(), env.remote, "gpt001", "/opt/app"); CodeOf(err) != CodeAuthFailed {
+	if _, _, err := env.service.Open(context.Background(), env.remote, "gw-a", "/opt/app"); CodeOf(err) != CodeAuthFailed {
 		t.Fatalf("Open without an identity: code = %q (%v)", CodeOf(err), err)
 	}
 }
 
 func TestEnsureIdentityRefusesAWorldReadableAccountKey(t *testing.T) {
 	directory := t.TempDir()
-	if err := os.WriteFile(filepath.Join(directory, "dsh-colin"), []byte("PRIVATE KEY\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "dsh-alex"), []byte("PRIVATE KEY\n"), 0o644); err != nil {
 		t.Fatalf("writing the key: %v", err)
 	}
 	env := newTestEnv(t, Options{IdentityDir: directory})
-	if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); CodeOf(err) != CodeInvalidState {
+	if err := env.service.EnsureIdentity("dsh-alex", env.remote.Workspace, env.remote.DshHome); CodeOf(err) != CodeInvalidState {
 		t.Fatalf("code = %q, want %q (%v)", CodeOf(err), CodeInvalidState, err)
 	}
 }
@@ -699,15 +699,15 @@ func TestStoreRoundTripAndRefusals(t *testing.T) {
 	if mounts, err := store.Load(); err != nil || len(mounts) != 0 {
 		t.Fatalf("Load on a fresh store = %+v / %v, want empty", mounts, err)
 	}
-	first := Mount{Tenant: "dsh-a", Host: "gpt001", Remote: "/a", CanonicalRemote: "/a", Mountpoint: "/w/a"}
-	second := Mount{Tenant: "dsh-b", Host: "aipc", Remote: "/b", CanonicalRemote: "/b", Mountpoint: "/w/b"}
+	first := Mount{Tenant: "dsh-a", Host: "gw-a", Remote: "/a", CanonicalRemote: "/a", Mountpoint: "/w/a"}
+	second := Mount{Tenant: "dsh-b", Host: "gw-d", Remote: "/b", CanonicalRemote: "/b", Mountpoint: "/w/b"}
 	if _, err := store.Add(first); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if _, err := store.Add(second); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	if _, err := store.Add(Mount{Tenant: "dsh-a", Host: "gpt001", Remote: "/a2", CanonicalRemote: "/a2", Mountpoint: "/w/a"}); err != nil {
+	if _, err := store.Add(Mount{Tenant: "dsh-a", Host: "gw-a", Remote: "/a2", CanonicalRemote: "/a2", Mountpoint: "/w/a"}); err != nil {
 		t.Fatalf("re-adding one mount point: %v", err)
 	}
 	mounts, err := store.Load()
@@ -746,9 +746,9 @@ func TestStoreRoundTripAndRefusals(t *testing.T) {
 func TestMailboxValidation(t *testing.T) {
 	home := t.TempDir()
 	for _, req := range []Request{
-		{ID: "../escape", Op: RequestOpen, Host: "gpt001", Remote: "/a"},
+		{ID: "../escape", Op: RequestOpen, Host: "gw-a", Remote: "/a"},
 		{ID: "ok", Op: "delete"},
-		{ID: "ok", Op: RequestOpen, Host: "gpt001", Remote: "relative"},
+		{ID: "ok", Op: RequestOpen, Host: "gw-a", Remote: "relative"},
 		{ID: "ok", Op: RequestClose, Mountpoint: "relative"},
 	} {
 		if err := WriteRequest(home, req); err == nil {
@@ -779,25 +779,25 @@ func TestMailboxValidation(t *testing.T) {
 // which ssh reports on every call and which could pick the wrong key for a host.
 func TestEnsureIdentityProvisionsASanitizedAliasConfig(t *testing.T) {
 	dir := t.TempDir()
-	operatorConfig := filepath.Join(dir, "dsh-colin")
-	source := `Host gpt001
-  HostName gpt001.iotalking.top
+	operatorConfig := filepath.Join(dir, "dsh-alex")
+	source := `Host gw-a
+  HostName gw-a.example.com
   User root
   Port 2222
-  IdentityFile ~/keys/gpt001-prod.id_rsa
+  IdentityFile ~/keys/gw-a-prod.id_rsa
   ForwardAgent yes
 
 Host *
   User nobody
 
-Host aipc
-  HostName 192.168.140.252
+Host gw-d
+  HostName 192.0.2.108
 `
 	if err := os.WriteFile(operatorConfig, []byte(source), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	env := newTestEnv(t, Options{SSHConfigDir: dir})
-	if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); err != nil {
+	if err := env.service.EnsureIdentity("dsh-alex", env.remote.Workspace, env.remote.DshHome); err != nil {
 		t.Fatalf("EnsureIdentity: %v", err)
 	}
 	written, err := os.ReadFile(filepath.Join(env.remote.Workspace, ".ssh", "config"))
@@ -805,7 +805,7 @@ Host aipc
 		t.Fatalf("reading the provisioned config: %v", err)
 	}
 	text := string(written)
-	for _, want := range []string{"Host gpt001", "HostName gpt001.iotalking.top", "User root", "Port 2222", "Host aipc"} {
+	for _, want := range []string{"Host gw-a", "HostName gw-a.example.com", "User root", "Port 2222", "Host gw-d"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the alias list lacks %q:\n%s", want, text)
 		}
@@ -819,7 +819,7 @@ Host aipc
 	if err := os.WriteFile(filepath.Join(env.remote.Workspace, ".ssh", "config"), []byte("Host mine\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.service.EnsureIdentity("dsh-colin", env.remote.Workspace, env.remote.DshHome); err != nil {
+	if err := env.service.EnsureIdentity("dsh-alex", env.remote.Workspace, env.remote.DshHome); err != nil {
 		t.Fatal(err)
 	}
 	if again, _ := os.ReadFile(filepath.Join(env.remote.Workspace, ".ssh", "config")); string(again) != "Host mine\n" {
@@ -833,19 +833,19 @@ Host aipc
 func TestDetachTenantUnmountsAndKeepsEverything(t *testing.T) {
 	env := newTestEnv(t, Options{})
 	ctx := context.Background()
-	mount, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	mount, _, err := env.service.Open(ctx, env.remote, "gw-a", "/opt/app")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	restarts := len(env.restarts)
 
-	if err := env.service.DetachTenant(ctx, "dsh-colin"); err != nil {
+	if err := env.service.DetachTenant(ctx, "dsh-alex"); err != nil {
 		t.Fatalf("DetachTenant: %v", err)
 	}
 	if fstype, _ := env.service.mounted(mount.Mountpoint); fstype != "" {
 		t.Errorf("%s is still mounted as %s", mount.Mountpoint, fstype)
 	}
-	if mounts, _ := env.service.Mounts("dsh-colin"); len(mounts) != 1 {
+	if mounts, _ := env.service.Mounts("dsh-alex"); len(mounts) != 1 {
 		t.Errorf("mounts after DetachTenant = %+v, want the record kept", mounts)
 	}
 	if _, statErr := os.Stat(mount.Mountpoint); statErr != nil {
@@ -863,7 +863,7 @@ func TestDetachTenantUnmountsAndKeepsEverything(t *testing.T) {
 			env.restarts[restarts:])
 	}
 	// Idempotent: a second logout with nothing attached is not an error.
-	if err := env.service.DetachTenant(ctx, "dsh-colin"); err != nil {
+	if err := env.service.DetachTenant(ctx, "dsh-alex"); err != nil {
 		t.Fatalf("second DetachTenant: %v", err)
 	}
 }
@@ -873,7 +873,7 @@ func TestDetachTenantUnmountsAndKeepsEverything(t *testing.T) {
 func TestDetachTenantReportsAMountItCannotTake(t *testing.T) {
 	env := newTestEnv(t, Options{})
 	ctx := context.Background()
-	mount, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	mount, _, err := env.service.Open(ctx, env.remote, "gw-a", "/opt/app")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -884,14 +884,14 @@ func TestDetachTenantReportsAMountItCannotTake(t *testing.T) {
 	previous := fuseConnDir
 	fuseConnDir = func(fuseConn) string { return "" }
 	defer func() { fuseConnDir = previous }()
-	err = env.service.DetachTenant(ctx, "dsh-colin")
+	err = env.service.DetachTenant(ctx, "dsh-alex")
 	if err == nil {
 		t.Fatal("a mount that would not detach was reported as detached")
 	}
 	if CodeOf(err) != CodeMountFailed {
 		t.Errorf("code = %q, want %q (%v)", CodeOf(err), CodeMountFailed, err)
 	}
-	if mounts, _ := env.service.Mounts("dsh-colin"); len(mounts) != 1 || mounts[0].Mountpoint != mount.Mountpoint {
+	if mounts, _ := env.service.Mounts("dsh-alex"); len(mounts) != 1 || mounts[0].Mountpoint != mount.Mountpoint {
 		t.Errorf("the record was dropped although the mount stayed: %+v", mounts)
 	}
 }
@@ -901,11 +901,11 @@ func TestDetachTenantReportsAMountItCannotTake(t *testing.T) {
 func TestRestoreRemountsWhatLogoutDetached(t *testing.T) {
 	env := newTestEnv(t, Options{})
 	ctx := context.Background()
-	mount, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	mount, _, err := env.service.Open(ctx, env.remote, "gw-a", "/opt/app")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := env.service.DetachTenant(ctx, "dsh-colin"); err != nil {
+	if err := env.service.DetachTenant(ctx, "dsh-alex"); err != nil {
 		t.Fatalf("DetachTenant: %v", err)
 	}
 	before := env.fake.callCount("sshfs ")
@@ -940,7 +940,7 @@ func TestRestoreRemountsWhatLogoutDetached(t *testing.T) {
 func TestRestoreReplacesADeadMount(t *testing.T) {
 	env := newTestEnv(t, Options{})
 	ctx := context.Background()
-	mount, _, err := env.service.Open(ctx, env.remote, "gpt001", "/opt/app")
+	mount, _, err := env.service.Open(ctx, env.remote, "gw-a", "/opt/app")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -964,7 +964,7 @@ func TestRestoreReplacesADeadMount(t *testing.T) {
 	if fstype, _ := env.service.mounted(mount.Mountpoint); fstype == "" {
 		t.Fatalf("%s was not remounted over the dead entry", mount.Mountpoint)
 	}
-	if mounts, _ := env.service.Mounts("dsh-colin"); len(mounts) != 1 {
+	if mounts, _ := env.service.Mounts("dsh-alex"); len(mounts) != 1 {
 		t.Fatalf("mounts = %+v, want the one record kept", mounts)
 	}
 }

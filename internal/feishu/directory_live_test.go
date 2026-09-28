@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/config"
 	"gopkg.in/yaml.v3"
 )
 

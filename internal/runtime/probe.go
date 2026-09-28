@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/providers"
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/providers"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // Probe modes.

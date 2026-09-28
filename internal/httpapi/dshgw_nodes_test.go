@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/localdshgw"
+	"github.com/funnywwh/ai-gateway/internal/localdshgw"
 )
 
 // fakeDshgwNodes is the node half of the channel as the console sees it.

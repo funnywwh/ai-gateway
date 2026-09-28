@@ -12,16 +12,16 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/winger/ai-gateway/internal/billing"
-	"github.com/winger/ai-gateway/internal/config"
-	"github.com/winger/ai-gateway/internal/domain"
-	"github.com/winger/ai-gateway/internal/pricing"
-	"github.com/winger/ai-gateway/internal/quota"
-	"github.com/winger/ai-gateway/internal/responses"
-	"github.com/winger/ai-gateway/internal/routing"
-	"github.com/winger/ai-gateway/internal/runtime"
-	"github.com/winger/ai-gateway/internal/usage"
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/internal/billing"
+	"github.com/funnywwh/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/pricing"
+	"github.com/funnywwh/ai-gateway/internal/quota"
+	"github.com/funnywwh/ai-gateway/internal/responses"
+	"github.com/funnywwh/ai-gateway/internal/routing"
+	"github.com/funnywwh/ai-gateway/internal/runtime"
+	"github.com/funnywwh/ai-gateway/internal/usage"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 const (

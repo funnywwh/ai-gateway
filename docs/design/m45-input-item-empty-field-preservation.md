@@ -1,7 +1,7 @@
 # M45 设计：输入项的显式空值保真（codex 长上下文 400 的根因）
 
 > 前置：`docs/codex-input-array-fix.md`（数组型工具输出）、`docs/TODO.md` 的
-> 「gptjp 插件版本错配修复」（`additional_tools.tools` 被吞导致 `input[0].tools`）。
+> 「gw-b 插件版本错配修复」（`additional_tools.tools` 被吞导致 `input[0].tools`）。
 > 本文是设计记录，实现完成后回填第 8 节差异。
 
 ## 1. 现象与证据
@@ -9,7 +9,7 @@
 用户报（2026-09-14）：codex 里上下文一长就断流，
 `stream disconnected before completion: missing_required_parameter: Missing required parameter: 'input[N].summary'.`
 
-**线上证据（gptjp，用户 codex 走的那台）**
+**线上证据（gw-b，用户 codex 走的那台）**
 
 - 17:48:06–17:49:30 同一会话 `01a09f08-03f3-7721-8047-d10cb870d17d` 连续 **6 次**失败，
   工作区 `D:\code\python\售后系统`（与截图里那条消息一致），模型 `gpt-6-astra`，
@@ -36,7 +36,7 @@ in : {"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"abc"}
 out: {"encrypted_content":"abc","id":"rs_1","type":"reasoning"}      ← summary 被抹掉
 ```
 
-**线上复现**（gpt001，真上游，含 summary/encrypted_content 的完整历史项）
+**线上复现**（gw-a，真上游，含 summary/encrypted_content 的完整历史项）
 
 | 形态 | 上游裁决 |
 |---|---|

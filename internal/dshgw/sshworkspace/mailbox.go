@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/securefile"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/securefile"
 )
 
 // The mailbox is the whole control channel between a tenant's dsh and the gateway: a

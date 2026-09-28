@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/config"
 )
 
 // 复现并锁定一个真实缺陷：池级预编译语句通过 tx.StmtContext 执行会**自锁**。

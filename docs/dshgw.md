@@ -24,7 +24,7 @@ kind: "spec"
 
 | 用途 | 默认地址 |
 |---|---|
-| 门户 | `https://chat.tirisen.hk:32600/` |
+| 门户 | `https://chat.example.com:32600/` |
 | 租户应用 | 同一主机名的 `32601–32799`，每租户独占一个端口 |
 | 会话网关 | `127.0.0.1:3099`，只供本机 nginx 访问 |
 | worker | `127.0.0.1:32100–32299`，每租户独占一个端口 |
@@ -68,14 +68,14 @@ kind: "spec"
 （`dshgw admin-serve`，UNIX socket + 对端 UID 白名单，无 TCP）自动完成铸造 worker Key、
 创建/启动租户；「停用」停止 worker、吊销 worker Key 并保留数据。
 
-**租户名的自动生成规则（M74）**：`dsh-<账号名拼音>-<账号ID>` —— 陈景峰 / 10 →
-`dsh-chenjingfeng-10`，杨妙 / 36 → `dsh-yangmiao-36`，`李智超(colin)` / 8 →
-`dsh-lizhichao-colin-8`。规则只有一处实现（aigw 的 `dshTenantNameForAccount`）：控制台弹窗**预填**
+**租户名的自动生成规则（M74）**：`dsh-<账号名拼音>-<账号ID>` —— 王强 / 10 →
+`dsh-wangqiang-10`，刘洋 / 36 → `dsh-liuyang-36`，`李雷(alex)` / 8 →
+`dsh-lilei-alex-8`。规则只有一处实现（aigw 的 `dshTenantNameForAccount`）：控制台弹窗**预填**
 服务端下发的 `dsh_tenant_suggested`（仍可手改），飞书首登的自动开通走同一个函数，两条入口因此给出
 同一个名字。中文名取拼音表里的**首读音**（多音字 长 → zhang），ID 让同音同名（两个张伟）天然不重；
 名字超过 dshgw 的 27 字符上限时**先截断拼音、保留 ID**，且截断落在音节边界。
 **既有映射与显式请求名仍然优先**：规则只作用于"没有映射且没人指定"的账号，**不重命名**任何既有租户
-（`dsh-tenant`、`dsh-colin` 这类老名字保持原样）。
+（`dsh-tenant`、`dsh-alex` 这类老名字保持原样）。
 
 `dsh_enforce` 决定请求期是否复查：
 
@@ -143,10 +143,10 @@ isLoopbackHostname(pageLocation.hostname)`，`dsh-client-ui-settings` 据此取
 直接返回、视图恒为 `undefined`，模型页即报 "settings are unavailable in this browser"。
 判定只看 `location.hostname`，**不看端口**，也**不看** `--trusted-host`（后者仅是 worker 端 /api 的
 Host 防护）。真正的差异不在上游，而在入口 nginx 是否改写了该函数：宿主机 nginxWebUI 为既有
-`https://chat.tirisen.hk/dsh/` 写了 `sub_filter`，把
-`if (hostname === "localhost" || hostname === "[::1]")` 改写成同时接受 `chat.tirisen.hk`
+`https://chat.example.com/dsh/` 写了 `sub_filter`，把
+`if (hostname === "localhost" || hostname === "[::1]")` 改写成同时接受 `chat.example.com`
 （容器 `/home/nginxWebUI/nginx.conf` 的 `location ^~ /dsh/`），因此 `/dsh/` 下发的 bundle 中
-`isLoopbackHostname` 认 `chat.tirisen.hk` 为回环，设置/模型可用；dshgw 生成的租户 vhost
+`isLoopbackHostname` 认 `chat.example.com` 为回环，设置/模型可用；dshgw 生成的租户 vhost
 （`internal/dshgw/tenancy/render.go`）是纯透传、无任何 `sub_filter`，故 `:32604` 走原版闸门。
 `Accept-Encoding ""` 必须保留，否则上游压缩会让 `sub_filter` 失效。
 不受影响：会话对话、模型调用（默认模型由 `sync-models` 写入）、工作区目录选择与 browser-fs
@@ -247,7 +247,7 @@ dshgw --config <state>/config.yaml contract dsh               # 真实 dsh 契�
 
 ## 6. 模型与运行配置
 
-`aigw_base_url` 是网关根 URL，例如 `http://192.168.190.86:8088`，不要再加 `/v1`。验证访问 `/v1/models`；写入 dsh 的 provider 使用 `api: openai-responses`、`baseURL: <根URL>/v1`，因此模型请求是 **`POST /v1/responses`**。
+`aigw_base_url` 是网关根 URL，例如 `http://aigw.internal:8088`，不要再加 `/v1`。验证访问 `/v1/models`；写入 dsh 的 provider 使用 `api: openai-responses`、`baseURL: <根URL>/v1`，因此模型请求是 **`POST /v1/responses`**。
 
 生成的 provider 同时带 `compat.supportsStrictMode: true`，使普通 Responses 工具显式发送 `strict: false`，防止某些上游把可选参数（如 `sandbox_permissions`）变成必填；不放宽 DSH 沙箱或审批策略。
 
@@ -301,7 +301,7 @@ llm-pi-ai:
     aigw:
       apiKeyEnv: AIGW_API_KEY
       api: openai-responses
-      baseURL: http://192.168.190.86:8088/v1
+      baseURL: http://aigw.internal:8088/v1
       maxRequestImageBytes: 7340032
       compat: {supportsStrictMode: true}
       models:
@@ -332,7 +332,7 @@ llm-pi-ai:
 ```yaml
 feishu:
   enabled: true
-  aigw_login_url: http://192.168.190.86:8090/feishu/login   # 浏览器可见的 aigw 入口
+  aigw_login_url: http://192.0.2.101:8090/feishu/login   # 浏览器可见的 aigw 入口
   ticket_secret: "…"                                        # 与 aigw 的同一项一致
 ```
 
@@ -359,7 +359,7 @@ feishu:
 而宿主 passwd 里本账号的 home 仍指向部署账号自己的家目录
 —— 那个目录正好被 profile 的 `--tmpfs /home` 藏掉了。**OpenSSH 展开 `~` 用的是 `getpwuid()`，不是 `$HOME`**，所以不渲染视图时
 `~/.ssh/config`、`known_hosts`、默认私钥全都会落到那个被藏起来的目录上：网关写进 `<workspace>/.ssh/config` 的别名看不见，
-`ssh <别名>` 退化成"把别名当主机名做 DNS 解析"（`Could not resolve hostname aipc: Temporary failure in name resolution`）。
+`ssh <别名>` 退化成"把别名当主机名做 DNS 解析"（`Could not resolve hostname gw-d: Temporary failure in name resolution`）。
 视图只改「名字 → 家目录」这一个字段，其余条目与宿主一致；它落在租户自己的 DSH home 里，租户改写它也只会改变自己沙箱里的这一份
 视图，profile 不会拿它当挂载或权限的依据（同 `settings.yaml`：视图，不是边界）。
 
@@ -446,8 +446,8 @@ FUSE 连接上积压 8 个无人应答的请求，3 个进程进入 **D 态**（
 账号的**所有会话共用这一条挂载**，所以它们同时卡住。
 因此网关在挂载前判定并拒绝：**只有当 SSH 目标就是本机**（别名解析出的地址属于本机，或远端 `machine-id`
 与本机相同）**且远端路径是挂载点的祖先**时才拒绝。别的机器上同样的路径字符串是另一个目录，属于正常
-用法，不受影响；本机上不包含工作区的目录（例如 `/home/winger/ZT20Q`、`/tmp`）也照常可挂。判定按
-**设备号 + inode** 比较而不是字符串前缀 —— 本机 `/data/home/winger/work` 与 `/home/winger/work` 是同
+用法，不受影响；本机上不包含工作区的目录（例如 `/home/operator/ZT20Q`、`/tmp`）也照常可挂。判定按
+**设备号 + inode** 比较而不是字符串前缀 —— 本机 `/data/home/operator/work` 与 `/home/operator/work` 是同
 一个 ext4 的两次挂载，字符串比较会漏掉它。错误码 `mount/forbidden`，审计事件 `ssh-mount-refused`。
 
 **分工（为什么不是一个纯插件）**：ssh 那一半在租户沙箱内、用**该租户自己的密钥**完成（列目录、
@@ -618,7 +618,7 @@ EBUSY 就惰性 `-u -z`，仍不行就杀掉 sshfs 守护进程 / abort 这条 F
 - `tenants` 必须非空：没有「所有人」这种默认，一份宿主目录的授权要写明给谁。
 - 共享目录与 `state_dir` **必须不相交**（符号链接解析后再比）：`state_dir` 里有每个账号的工作区、`.dsh`、
   ssh 私钥与会话记录，一份包含它的共享等于把一个账号的数据交给另一个账号。因此
-  `/home/winger/work/ai_gateway`（本机部署根）会被拒 —— 请声明它下面具体那个子目录。
+  `/home/operator/work/ai_gateway`（本机部署根）会被拒 —— 请声明它下面具体那个子目录。
 - `subdir` 不能与 `ssh_workspaces.mount_subdir`、`workspace_seed` 撞名，必须是可见的单段目录名。
 - 宿主目录被删掉：该份共享在 worker 启动时被跳过并记一行日志，不让账号起不来。
 - 目标路径一律在 `<workspace>/<subdir>` 之内（`Profile` 会再校验一次，越界直接拒绝渲染）。
@@ -713,10 +713,10 @@ dshgw:
   default_node: local                                # 新租户缺省落在哪台；local = 控制面本机
   nodes:
     - name: node-a
-      url: http://192.168.190.87:18400               # 节点的 node.listen
+      url: http://192.0.2.102:18400               # 节点的 node.listen
       token_file: ./data/dshgw/nodes/node-a.token     # 0600；推荐用文件，令牌不进配置
     - name: node-b
-      url: http://192.168.190.88:18400
+      url: http://192.0.2.103:18400
       token: "<32 字节随机令牌的 base64url>"          # 也可以直接写在配置里
 ```
 
@@ -725,14 +725,14 @@ dshgw:
 ```yaml
 node:                          # 节点模式：只有写了这一段，`dshgw node serve` 才会启动
   name: node-a                 # 必须与控制面记录同名
-  listen: 192.168.190.87:18400 # 必须显式写出；拒绝 0.0.0.0 与空值
+  listen: 192.0.2.102:18400 # 必须显式写出；拒绝 0.0.0.0 与空值
   token_file: /srv/dshgw-node/node-a.token
 state_dir: /srv/dshgw-node/state
 tenant_root: /srv/dshgw-node/state/tenants
 workspace_root: /srv/dshgw-node/workspaces
 worker_port_lo: 32100
 worker_port_hi: 32299
-aigw_base_url: http://192.168.190.86:8088
+aigw_base_url: http://aigw.internal:8088
 deploy:
   template_home: /srv/dshgw-node/template-home
   plugin_path: /srv/dshgw-node/plugins/picker-clamp.js

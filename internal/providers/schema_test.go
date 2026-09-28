@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/providers/openaichat"
-	"github.com/winger/ai-gateway/internal/providers/openaiimages"
-	"github.com/winger/ai-gateway/internal/providers/openairesponses"
-	"github.com/winger/ai-gateway/internal/providers/testecho"
+	"github.com/funnywwh/ai-gateway/internal/providers/openaichat"
+	"github.com/funnywwh/ai-gateway/internal/providers/openaiimages"
+	"github.com/funnywwh/ai-gateway/internal/providers/openairesponses"
+	"github.com/funnywwh/ai-gateway/internal/providers/testecho"
 )
 
 // kindConfigs maps every builtin kind to the Go config struct whose fields the admin

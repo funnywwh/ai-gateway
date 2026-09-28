@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/dshgw/aigw"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/aigw"
 )
 
 // M52: the account-level dsh entitlement. Login always consults aigw's authorize check

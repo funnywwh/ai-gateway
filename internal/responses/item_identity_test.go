@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/pkg/pluginapi"
+	"github.com/funnywwh/ai-gateway/pkg/pluginapi"
 )
 
 // collect runs events through an assembler and returns the client-visible events plus the
@@ -35,7 +35,7 @@ func collect(t *testing.T, events ...pluginapi.Event) ([]Event, *Response) {
 // A codex client replays the items this gateway returned. The subscription backend is
 // stateless (store=false), so it can only accept a replayed reasoning item when the item
 // carries the id and the encrypted blob the backend itself issued. Production failure
-// (2026-09-14, gptjp): the gateway published a reasoning item with an id of its own making and
+// (2026-09-14, gw-b): the gateway published a reasoning item with an id of its own making and
 // no blob, and the client's next turn died with
 // "Item with id 'rs_…' not found. Items are not persisted when `store` is set to false."
 func TestFinishedItemUpgradesTheDeltaBuiltItemInPlace(t *testing.T) {

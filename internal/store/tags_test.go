@@ -5,17 +5,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
 // A tag is addressed by id for updates. The importer created rows whose name is not an
-// ASCII identifier (蓝精灵1/2/3), and an upsert keyed by name could not touch them.
+// ASCII identifier (测试标签1/2/3), and an upsert keyed by name could not touch them.
 func TestTagUpdateByIDHandlesNonASCIINames(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 
 	id, err := db.UpsertTag(ctx, &domain.Tag{
-		Name: "蓝精灵1", Description: "绑定 Codex 供应商",
+		Name: "测试标签1", Description: "绑定 Codex 供应商",
 		GrantsJSON: `{"providers":["codex-1"],"models":["*"]}`, Priority: 100,
 	})
 	if err != nil {
@@ -29,7 +29,7 @@ func TestTagUpdateByIDHandlesNonASCIINames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get by id: %v", err)
 	}
-	if got.Name != "蓝精灵1" || got.GrantsJSON != `{"providers":["codex-1"],"models":["*"]}` {
+	if got.Name != "测试标签1" || got.GrantsJSON != `{"providers":["codex-1"],"models":["*"]}` {
 		t.Fatalf("round trip mismatch: %+v", got)
 	}
 
@@ -47,7 +47,7 @@ func TestTagUpdateByIDHandlesNonASCIINames(t *testing.T) {
 	}
 
 	// The row keeps its id and is still reachable by its (unchanged) name.
-	byName, err := db.GetTagByName(ctx, "蓝精灵1")
+	byName, err := db.GetTagByName(ctx, "测试标签1")
 	if err != nil {
 		t.Fatal(err)
 	}

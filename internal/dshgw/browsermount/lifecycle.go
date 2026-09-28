@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/winger/ai-gateway/internal/dshgw/registry"
+	"github.com/funnywwh/ai-gateway/internal/dshgw/registry"
 )
 
 // close is the normal (HTTP/expiry) lifecycle: disconnect/exclude, replace the

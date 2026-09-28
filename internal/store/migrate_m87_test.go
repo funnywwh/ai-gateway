@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/winger/ai-gateway/internal/config"
+	"github.com/funnywwh/ai-gateway/internal/config"
 
 	_ "modernc.org/sqlite"
 )
@@ -105,7 +105,7 @@ func TestMigration0028RefusesDuplicateHashes(t *testing.T) {
 	}
 	// Two rows, same secret (same hash), different labels: the state an inconsistent import
 	// produces, and the only one 0028 cannot express.
-	for _, prefix := range []string{"sk-duplicate", "sk-f69aeca55"} {
+	for _, prefix := range []string{"sk-duplicate", "sk-000000000"} {
 		if _, err := raw.ExecContext(ctx, `
 			INSERT INTO api_keys(account_id, name, key_prefix, key_hash, tags_json, grants_json,
 			  policy_json, record_input_mode, record_output_text, record_reasoning, status,

@@ -38,7 +38,7 @@ const bundleSource = source
  */
 function setup (options = {}) {
   const {
-    session = { status: 200, body: { ok: true, value: { authenticated: true, tenant: 'dsh-colin', account: '李智超(colin)', feishu_name: '李智超', name: '李智超' } } },
+    session = { status: 200, body: { ok: true, value: { authenticated: true, tenant: 'dsh-alex', account: '李雷(alex)', feishu_name: '李雷', name: '李雷' } } },
     logout = { status: 303 },
     fetchFails = 0,
     logoutThrows = false,
@@ -249,9 +249,9 @@ const byKey = (node, key) => {
 
   const element = page.render({ wide: true })
   check(element !== null, 'the row renders once the identity is known')
-  equal(element.props['data-dshgw-account'], 'dsh-colin', 'the row carries the tenant it describes')
+  equal(element.props['data-dshgw-account'], 'dsh-alex', 'the row carries the tenant it describes')
   equal(element.props['data-dshgw-account-state'], 'ready', 'the row reports its own state')
-  check(page.text({ wide: true }).includes('李智超'), 'the Feishu name is what the row shows')
+  check(page.text({ wide: true }).includes('李雷'), 'the Feishu name is what the row shows')
 
   const logoutButton = findByClass(element, 'dshgw-account-logout')
   check(logoutButton !== null && logoutButton.type === 'button', '退出 is a button, not a link')
@@ -304,7 +304,7 @@ const byKey = (node, key) => {
   await new Promise((resolve) => setImmediate(resolve))
   const healed = page.render({ wide: true })
   equal(healed.props['data-dshgw-account-state'], 'ready', 'a retry that succeeds shows the identity')
-  check(page.text({ wide: true }).includes('李智超'), 'and the name comes back')
+  check(page.text({ wide: true }).includes('李雷'), 'and the name comes back')
 }
 
 // ── a logout whose redirect the browser cannot follow ────────────────────────────────

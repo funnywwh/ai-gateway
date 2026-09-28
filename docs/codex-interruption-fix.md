@@ -1,6 +1,6 @@
 # Codex 工具调用丢失修复（2026-09-13）
 
-gpt001 上的 Codex 会话在 18:09、18:11 收到“继续检查”的文字后结束。
+gw-a 上的 Codex 会话在 18:09、18:11 收到“继续检查”的文字后结束。
 网关日志显示 completed，不代表客户端收到了模型实际生成的工具调用。
 
 ## 原因与复现
@@ -29,7 +29,7 @@ Codex 适配器在上游完成该项时转发，保留工具的 `input`、`call_
 - 回归测试：`examples/provider-codex/custom_tool_test.go`，覆盖上游 SSE、
   插件 JSON 边界、客户端工具完成事件、最终响应、存储恢复及非流式重放。
 - `go test ./...`、`go vet ./...`、`git diff --check` 通过。
-- 18:35 同时更新 gpt001 的网关和插件，服务 ready。
+- 18:35 同时更新 gw-a 的网关和插件，服务 ready。
   实测网关返回 `custom_tool_call`，回传工具结果后模型完成后续回复。
   `gpt-5.6-luna` 与 `gpt-6-astra` 均通过；后者还覆盖带
   `role=developer` 的 `additional_tools` 输入项。
