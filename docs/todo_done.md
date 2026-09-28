@@ -6666,3 +6666,33 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
 - [x] 文档：设计文档（含「实现与设计差异」10 条）、`docs/feishu.md` §2b/§3/§5c.6、`docs/org.md` §3/§5/§6、
       `docs/mcp.md` §4、`config.example.yaml`、`scripts/ui-harness/README.md`、`docs/PROCESS.md` 已产出表、
       `docs/TODO.md` M93 小节
+
+### M92 + M93 发布记录：v4.8.0 / v4.8.1 部署到 rag-server（2026-09-28）
+
+- 版本：**v4.8.0**（`45f9d80`）→ **v4.8.1**（`dd4398a`，热修见下）；`VERSION` 4.7.3 → 4.8.0 → 4.8.1
+  （minor 因为 M92/M93 新增对外能力：新路由、新配置项、新控制台页面；4.8.1 是纯修复）
+- 构建物：`bin/aigw` 4.8.1，`sha256 c163520a50f848f6d399de84d0bdf67d2adf53c8f8fb4a8d451455f2f9c8320d`
+  （控制台 minified + gzip，761625 → 421582 B / gzip 419221 → 167273 B）
+- 目标：`rag-server`（`192.168.190.86`），部署根 `/home/winger/work/ai_gateway`，unit **aigw-local.service**
+  （用户级；`:8088`，无 base_path；前端代理在 `:8090` 按 Host `chat.tirisen.hk` 路由）
+- 回滚点（宿主 `bin/`）：`aigw.prev-4.7.3-13f9fa3`（升级前 4.7.3）、`aigw.prev-4.8.0-45f9d80`
+- 发布前门禁：工作树干净；`make desensitize-check` 0 findings（1 条刻意例外）；
+  `go test ./internal/... ./cmd/...` 全绿；`make ui-base` 全绿；
+  `BenchmarkPlan` 4948 B/45 allocs、`BenchmarkResolveTagRecords` 0 B/0 allocs 与 288 B/9 allocs 与改前相同
+- 宿主侧验证：
+  - `GET /version` → `{"version":"4.8.1","revision":"dd4398a"}`（loobpack `:8088` 与经代理的
+    `Host: chat.tirisen.hk` 两条路都验）；`/healthz`、`/readyz` 均 200；重启后日志 0 条 ERROR/panic
+  - 迁移：`aigw-local.db` 的 `schema_migrations` 到 **0031_feishu_apps**，`feishu_apps` 表已建
+  - M92 启动认领真的跑了：`legacy feishu org nodes adopted app_id=… nodes=9`（4.8.0 首次启动那一次）
+  - 新控制台页面已随二进制生效：`/admin/ui/js/pages/companies.js` 200（经代理同样 200）
+  - 未重启的旁路：本次只重启 `aigw-local.service`；本会话与全部租户由**独立的** `dshgw-verify.service`
+    提供，未受影响（部署前先核对了这一点）
+- **线上验收发现的缺陷（已修，4.8.1）**：M92 的 `GET /admin/api/v1/org/feishu/companies` 没有调用
+  `adminActor`——路由表的 `Role` 只被 `admin_describe` 与 MCP 桥使用，不是 HTTP 中间件，所以匿名请求
+  能读到公司名、app_id 与节点/账号计数。升级后逐条对比 viewer 路由时发现（`/org/nodes`、`/accounts`、
+  `/tags` 都是 401，只有它是 200）。修复：处理函数补 viewer 级会话校验 + 新增
+  `TestFeishuCompanyRoutesRequireASession`（11 条飞书路由逐个断言匿名 401，反向验证：删掉那行 → 该测试
+  立刻报 `GET … = 200`）。4.8.1 部署后该端点与其它 viewer 路由一致返回 401。
+- 待办（仍未做，见 `docs/TODO.md`）：M92 的"同步本公司 + 第二家公司"与 M93 的"登记一家真实客户公司"
+  需要管理员会话与那家公司的 App ID/Secret；浏览器走查（`make ui-check` 的 `companies`/`org-sync*` 视图）
+  需要宿主上的 firefox。
