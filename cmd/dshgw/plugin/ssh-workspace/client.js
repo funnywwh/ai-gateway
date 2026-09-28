@@ -21,8 +21,18 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
 
-    /** Required services: slot registry, authenticated RPC carrier, workspace control. */
-    const inject = ['slots', 'connection', 'remote.workspace', 'uiWorkspace']
+    /**
+     * Required services: slot registry, authenticated RPC carrier, workspace control.
+     *
+     * `remote` itself must be declared alongside the `remote.workspace` namespace. The gateway
+     * registers each Client Remote namespace under the service key `remote.<namespace>`
+     * (`remoteServiceKey()` in dsh-api-gateway), and Cordis resolves a lookup by walking up the
+     * fiber parent chain until a fiber's store holds it — meeting the intermediate `remote`
+     * service first. Declaring only the dotted leaf never grants that intermediate edge, so
+     * every access throws `cannot get property "remote" without inject`. The shipped workspace
+     * controller declares `['remote', 'remote.workspace']` for exactly this reason.
+     */
+    const inject = ['slots', 'connection', 'remote', 'remote.workspace', 'uiWorkspace']
 
     const RPC_CHANNEL = '/ssh-workspace'
     const POLL_MS = 2000
@@ -187,8 +197,9 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
         const workspace = created.value.workspace
         if (workspace.title !== title) {
           // Best effort: the registry defaults the title to the last path segment, which says
-          // nothing about where the directory actually lives.
-          const renamed = await ctx.remote.workspace.rename({ workspaceId: workspace.workspaceId, title })
+          // nothing about where the directory actually lives. The generated namespace takes
+          // positional arguments (workspaceId, title), not a request object.
+          const renamed = await ctx.remote.workspace.rename(workspace.workspaceId, title)
           if (renamed.ok !== true) ctx.logger?.warn?.(`ssh-workspace: rename failed: ${textOf(renamed.error)}`)
         }
         await ctx.uiWorkspace.connectWorkspace(workspace.workspaceId)
@@ -657,12 +668,14 @@ div:has(> .dshgw-ssh-action), div:has(> div > .dshgw-ssh-action) { flex-directio
                   type: 'button',
                   disabled: current.busy !== '',
                   onClick: () => {
-                    patch({ busy: 'workspace', error: '' })
+                    // The key names this mount, so the label change lands on the row the person
+                    // actually clicked instead of every 打开 button in the list.
+                    patch({ busy: `workspace:${mount.path}`, error: '' })
                     openWorkspace(mount.path, `${mount.host}:${mount.requested || mount.remote}`)
                       .then(() => patch({ busy: '' }))
                       .catch((error) => patch({ busy: '', error: textOf(error) }))
                   },
-                }, '打开'),
+                }, current.busy === `workspace:${mount.path}` ? '打开中…' : '打开'),
                 h('button', {
                   key: 'unmount',
                   type: 'button',

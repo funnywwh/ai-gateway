@@ -64,7 +64,12 @@ const exportsObject = registration.factory((specifier) => {
   throw new Error(`unexpected require(${specifier})`)
 })
 equal(typeof exportsObject.apply, 'function', 'the bundle exports apply')
-deepEqual(exportsObject.inject, ['slots', 'connection', 'remote.workspace', 'uiWorkspace'], 'the bundle declares the services it needs')
+deepEqual(exportsObject.inject, ['slots', 'connection', 'remote', 'remote.workspace', 'uiWorkspace'], 'the bundle declares the services it needs')
+// A namespaced Client Remote service resolves through its `remote` parent. Declaring the leaf
+// alone throws `cannot get property "remote" without inject` on first access, which is how the
+// 打开 button silently did nothing; keep the parent edge asserted so it cannot regress.
+check(exportsObject.inject.includes('remote'), 'the remote parent service is declared alongside its namespaces')
+check(exportsObject.inject.includes('remote.workspace'), 'the workspace namespace is declared')
 
 // ── apply() against a fake client context ────────────────────────────────────────────────
 const registered = []
@@ -112,9 +117,11 @@ const fakeCtx = {
         calls.push({ endpoint: 'workspace/create', payload })
         return { ok: true, value: { workspace: { workspaceId: 'ws-1', path: payload.path, title: 'opt' }, created: true } }
       },
-      rename: async (payload) => {
-        calls.push({ endpoint: 'workspace/rename', payload })
-        return { ok: true, value: { workspace: { workspaceId: payload.workspaceId, path: '', title: payload.title } } }
+      rename: async (workspaceId, title) => {
+        // Positional, exactly like the generated namespace: an object-shaped stub here would
+        // accept a call the real `ctx.remote.workspace` rejects.
+        calls.push({ endpoint: 'workspace/rename', payload: { workspaceId, title } })
+        return { ok: true, value: { workspace: { workspaceId, path: '', title } } }
       },
     },
   },
