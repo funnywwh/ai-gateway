@@ -6721,3 +6721,16 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
       涉及包 `go vet` 干净；`BenchmarkPlan` 4948 B/45 allocs 不变
 - [x] 文档：设计文档（含「实现与设计差异」7 条）、`docs/org.md` §5、`docs/feishu.md` §5c.6、
       `docs/mcp.md` §4、`config.example.yaml`、`docs/PROCESS.md` 已产出表、`docs/TODO.md` M94 小节
+
+### M94 发布记录：v4.9.0 部署到 rag-server（2026-09-28）
+
+- 版本：**v4.9.0**（`0c7ec58`），minor（新增对外能力：名字覆盖表 + PATCH 接受 app_id + 每行可改名）
+- 构建物：`bin/aigw` 4.9.0，`sha256 1532ef6a67e64792000a954af3a83f3e1ccac0abf1f93a1c881b869e00fe9e89`
+- 回滚点：宿主 `bin/aigw.prev-4.8.1-dd4398a`
+- 门禁：`go test ./internal/... ./cmd/...`、`make ui-base` 全绿；`BenchmarkPlan` 4948 B/45 allocs 不变
+- 宿主验证：`/version` = 4.9.0/`0c7ec58`；`/healthz`、`/readyz` 200；迁移到 **0032_feishu_company_names**；
+  新控制台资源 200；`GET /org/feishu/companies` 匿名仍 401（M92 的鉴权修复保持）；
+  启动日志无 ERROR（唯一一条 `audit write queue could not be drained` 是**上一个进程退出时**的，18:24:27.084，
+  与 2026-09-23 记录的同类消息一致，不是本次启动的失败）
+- 待操作员（浏览器，需要管理员会话，本沙箱无凭据）：在「公司」页给「本公司」改名 → 按提示先同步一次 →
+  再改名成真名（智天成）→ 公司节点随之改名 → 再同步一次应为 0 写入
