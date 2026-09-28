@@ -6895,3 +6895,27 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
   （只过滤掉了已知的退出期 `audit write queue` 一条）
 - 说明：本里程碑起草时编号 M95，与并行会话同日的「控制台主菜单可折叠（M95）」撞号，已改为 **M96**；
   代码与文档都按 M96 落，早前两个提交的 message 里仍写着 m95（历史不改写，以免影响并行会话）
+
+## v4.11.1 修复：读不通的公司把同步弹窗卡死 + 脱敏门禁归零（2026-09-28）
+
+- **报告**：「选择同步不了的公司后，在选择能同步的公司，组织架构显示不出来了」（附截图：弹窗只剩标题行，
+  树与人员都空着）。
+- **原因**：`openFeishuSync` 的 `load()` 开头是 `if (state.loading) return`。前一家公司的目录读取还挂着
+  （读不通的应用）时，切换公司/刷新触发的读取被这个互斥守卫直接吞掉；旧请求的响应只描述旧公司（或失败后
+  清空面板），于是弹窗停在"标题 + 空面板"，而且后续再怎么点都不会发请求。
+- **修法**：用序号（`loadSeq`）代替互斥守卫——每次读取都发起；过期响应（成功或失败）一律丢弃，只有最新
+  一次读取拥有 loading 与刷新按钮。旧响应不会再被当成新公司的数据渲染。
+- **回归测试**：`internal/webui/tests/org_feishu_test.mjs` 让某家公司的读取永不返回 → 切到它 → 切回能同步的
+  公司，断言「必须重新发请求」且树/人员被重新画出来。**反向验证**：改前该断言失败（请求根本没发出去）。
+- **顺带查过、确认无需改**：`account_feishu.js` 的同类守卫是安全的——那个弹窗的状态（含 `loading`）是
+  `openFeishuPersonPicker` 每次调用新建的（工厂内变量），不存在跨弹窗串状态；改了一版又按证据撤回。
+- **脱敏门禁归零**：`make desensitize-check` 当时以 76 findings 非 0 退出（M94/M96 的设计文档、M92–M95 的发布
+  记录里写了真实主机名/内网 IP/域名/家目录/客户名）。用规则表自带的 `python3 scripts/desensitize.py --apply`
+  就地替换为占位（`gw-c` / `192.0.2.101` / `chat.example.com` / `/home/operator` / `客户组一`），现在
+  **0 findings / 1 warning**（唯一那条是 `internal/secret/secret_test.go` 的刻意例外）。此前记录在案的
+  「56 findings 偏差」随之关闭。
+- **发布**：v4.11.1（`283a9e7`），`bin/aigw` sha256 `0c4bd8ec7025c558fbcbf54b4127993701bfc188bd87c38bdd4d30c7a582fbaa`，
+  部署到 gw-c（部署根 `/home/operator/work/ai_gateway`，unit `aigw-local.service`）；回滚点
+  `bin/aigw.prev-4.11.0-dd8b32f`；`/version` = 4.11.1/`283a9e7`，`/healthz`、`/readyz` 200，启动无 ERROR。
+  验证口径：部署的二进制与本地构建物逐字节相同（sha256 比对），minify 之后的资源里 grep 标识符没有意义，
+  因此行为验证（切公司不空树）留给浏览器，测试里那条断言就是它的机器可查版本。
