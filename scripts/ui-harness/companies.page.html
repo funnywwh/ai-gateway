@@ -24,10 +24,13 @@
 const view = location.hash.replace('#', '') || 'companies';
 
 const COMPANIES = [
-  { id: null, app_id: 'cli_aaa', name: '本公司', identity: true, source: 'identity', enabled: true,
+  // M94：身份应用这一行是"刚从本公司改名成智天成、但根层已有同名节点"的真实状态——
+  // 页面上要能看到「名字已在控制台改过」的徽标，以及改名对话框里的两条出路。
+  { id: null, app_id: 'cli_aaa', name: '智天成', identity: true, source: 'identity', enabled: true,
     note: '', secret_configured: true, client_ready: true, client_error: '', shadowed_by_config: false,
-    warnings: [], root_node_id: 1, root_node_name: '本公司', root_will_create: false, root_blocked: false,
-    company_nodes: 3, linked_accounts: 5 },
+    name_source: 'override', root_name_taken: { node_id: 11, name: '智天成' },
+    warnings: [], root_node_id: null, root_node_name: '智天成', root_will_create: false, root_blocked: true,
+    company_nodes: 0, linked_accounts: 5 },
   { id: 2, app_id: 'cli_bbb', name: '某某科技', identity: false, source: 'console', enabled: true,
     note: '客户 A', secret_configured: true, client_ready: true, client_error: '', shadowed_by_config: false,
     warnings: [], root_node_id: null, root_node_name: '某某科技', root_will_create: true, root_blocked: false,
@@ -101,6 +104,10 @@ try {
   await settle();
 
   checks.tableRendered = rows().length === 3;
+  // M94：名字覆盖徽标 + 身份应用行的改名入口。
+  checks.nameOverrideBadge = document.getElementById('page').textContent.includes('名字已在控制台改过');
+  const identityRowCells = document.querySelectorAll('#page tbody tr')[0];
+  checks.identityRowOffersRename = !!find('改名', identityRowCells);
   const bodyText = document.getElementById('page').textContent;
   checks.identityRowLabelled = bodyText.includes('身份应用');
   checks.consoleRowLabelled = bodyText.includes('控制台');
@@ -126,6 +133,27 @@ try {
     checks.probeSendsOnlyID = !!probeCall && JSON.parse(probeCall.body).id === 2
       && JSON.parse(probeCall.body).app_secret === undefined;
     checks.probeReported = [...document.querySelectorAll('.toast')].some((node) => node.textContent.includes('研发部'));
+  }
+
+  // 改名对话框（M94）：名字可改、其余只读、名字字段里写着根层同名冲突的两条出路。
+  const renameButton = identityRowCells ? find('改名', identityRowCells) : null;
+  if (renameButton) {
+    renameButton.click();
+    await settle();
+    const labeled = (labelText) => [...document.querySelectorAll('#modal-root label')]
+      .find((node) => node.textContent.includes(labelText));
+    const nameField = [...document.querySelectorAll('#modal-root input')]
+      .find((input) => input.value === '智天成');
+    checks.renameDialogEditable = !!nameField && !nameField.readOnly && !nameField.disabled;
+    const secretField = [...document.querySelectorAll('#modal-root input')].find((input) => input.type === 'password');
+    checks.renameDialogSecretLocked = !!secretField && (secretField.readOnly || secretField.disabled);
+    checks.renameDialogHint = document.getElementById('modal-root').textContent.includes('先同步一次');
+    checks.renameDialogNoProbe = !find('先测试连接', document.getElementById('modal-root'));
+    void labeled;
+    // 关掉对话框，后面的"新建公司"检查还要用同一个页面。
+    const cancel = find('取消', document.getElementById('modal-root'));
+    if (cancel) cancel.click();
+    await settle();
   }
 
   // 新建对话框：六个字段、密钥是 password、没有预填值。

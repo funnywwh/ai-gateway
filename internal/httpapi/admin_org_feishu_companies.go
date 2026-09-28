@@ -35,6 +35,9 @@ type feishuCompanyRow struct {
 	// Enabled false keeps the company and all its data but refuses to resolve it.
 	Enabled bool
 	Note    string
+	// NameSource says where the effective name came from (M94): "row" (a console row's own name),
+	// "override" (the console renamed a configuration-sourced company) or "config".
+	NameSource string
 	// SecretConfigured reports whether a secret is stored (console rows) — never the secret.
 	SecretConfigured bool
 	// ClientErr explains why no client could be built (an undecryptable secret, usually after a
@@ -68,6 +71,22 @@ func configFeishuCompanies(deps *FeishuDeps) []feishu.Company {
 // fixture that has not wired it) simply leaves the configuration half.
 func (s *Server) feishuCompanyRows(ctx context.Context) ([]feishuCompanyRow, error) {
 	configured := configFeishuCompanies(s.deps.Feishu)
+	store, storeReady := portReadyNoWrite(s.deps.FeishuApps)
+	// The console's name overrides (M94) apply to configuration-sourced companies, which have no
+	// row to rename. A failure to read them costs the override, not the list: the configured name
+	// is always a usable answer.
+	overrides := map[string]string{}
+	if storeReady {
+		names, err := store.ListFeishuCompanyNames(ctx)
+		if err != nil {
+			if s.deps.Log != nil {
+				s.deps.Log.Warn("reading feishu company name overrides failed", "err", err)
+			}
+		} else {
+			overrides = names
+		}
+	}
+
 	rows := make([]feishuCompanyRow, 0, len(configured)+2)
 	byAppID := map[string]int{}
 	byName := map[string]int{}
@@ -77,17 +96,26 @@ func (s *Server) feishuCompanyRows(ctx context.Context) ([]feishuCompanyRow, err
 		if company.Identity {
 			source = "identity"
 		}
-		rows = append(rows, feishuCompanyRow{
+		row := feishuCompanyRow{
 			Company: company, Source: source, Enabled: true, SecretConfigured: true,
-		})
+			NameSource: "config",
+		}
+		if override, ok := overrides[company.AppID]; ok && override != "" {
+			row.Name = override
+			row.NameSource = "override"
+			// An explicitly configured root_node still wins: it names a local node, not the company.
+			if strings.TrimSpace(company.RootName) == "" || company.RootName == company.Name {
+				row.RootName = override
+			}
+		}
+		rows = append(rows, row)
 		byAppID[company.AppID] = len(rows) - 1
-		if _, dup := byName[company.Name]; !dup {
-			byName[company.Name] = len(rows) - 1
+		if _, dup := byName[row.Name]; !dup {
+			byName[row.Name] = len(rows) - 1
 		}
 	}
 
-	store, ready := portReadyNoWrite(s.deps.FeishuApps)
-	if !ready {
+	if !storeReady {
 		return rows, nil
 	}
 	apps, err := store.ListFeishuApps(ctx)
@@ -100,7 +128,7 @@ func (s *Server) feishuCompanyRows(ctx context.Context) ([]feishuCompanyRow, err
 				AppID: app.AppID, Name: app.Name, RootName: app.CompanyNodeName(),
 			},
 			ID: app.ID, Source: "console", Enabled: app.Enabled, Note: app.Note,
-			SecretConfigured: app.HasSecret(),
+			SecretConfigured: app.HasSecret(), NameSource: "row",
 		}
 		if idx, shadowed := byAppID[app.AppID]; shadowed {
 			// Same application on both sides: one company. The configuration is authoritative, and
@@ -263,6 +291,22 @@ func (s *Server) companyNameMap(ctx context.Context) map[string]string {
 	return out
 }
 
+// rootNameTaken reports the root-level node already wearing a company's name, when there is one.
+// It is what the console shows next to a rename: the company node cannot be created while that node
+// sits at the root level, and the operator has two documented ways out (sync first, or rename/move
+// that node).
+func rootNameTaken(root *companyRootPlan, nodes []*domain.OrgNode) any {
+	if root == nil || root.NodeID != 0 {
+		return nil
+	}
+	for _, node := range nodes {
+		if node.ParentIDValue() == 0 && node.Name == root.Name {
+			return map[string]any{"node_id": node.ID, "name": node.Name}
+		}
+	}
+	return nil
+}
+
 // secretsReady reports whether the deployment can seal a company secret.
 func (s *Server) secretsReady() bool {
 	secrets, ok := portReadyNoWrite(s.deps.FeishuAppSecrets)
@@ -370,6 +414,7 @@ func (s *Server) handleAdminListFeishuCompanies(w http.ResponseWriter, r *http.R
 			"secret_configured":  row.SecretConfigured,
 			"client_ready":       row.Client != nil,
 			"client_error":       row.ClientErr,
+			"name_source":        row.NameSource,
 			"shadowed_by_config": row.ShadowedByConfig,
 			"warnings":           row.Warnings,
 			"root_node_id":       jsonNilInt64(root.NodeID),
@@ -377,6 +422,9 @@ func (s *Server) handleAdminListFeishuCompanies(w http.ResponseWriter, r *http.R
 			"root_matched":       root.Matched,
 			"root_will_create":   root.WillCreate,
 			"root_blocked":       root.Blocked,
+			// The root-level node that already wears this company's name (M94): the rename dialog
+			// uses it to explain what the next sync would do, and how to avoid the clash.
+			"root_name_taken":    rootNameTaken(root, nodes),
 			"company_nodes":      nodesByApp[row.AppID],
 			"linked_accounts":    linked,
 		})

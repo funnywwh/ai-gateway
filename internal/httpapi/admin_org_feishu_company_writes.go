@@ -80,13 +80,16 @@ func normalizeCompanyInput(name, appID, rootNode string) (string, string, string
 
 // companyNameTaken reports whether another company already uses that name, counting both sources.
 // It is the check the two unique indexes cannot do alone, since half the registry lives in a file.
-func (s *Server) companyNameTaken(ctx context.Context, name string, exceptID int64) (string, error) {
+func (s *Server) companyNameTaken(ctx context.Context, name string, exceptID int64, exceptAppID string) (string, error) {
 	rows, err := s.feishuCompanyRows(ctx)
 	if err != nil {
 		return "", err
 	}
 	for _, row := range rows {
-		if row.Name != name || (row.ID != 0 && row.ID == exceptID) {
+		if row.Name != name {
+			continue
+		}
+		if (row.ID != 0 && row.ID == exceptID) || (exceptAppID != "" && row.AppID == exceptAppID) {
 			continue
 		}
 		if row.Source == "console" {
@@ -159,7 +162,7 @@ func (s *Server) handleAdminCreateFeishuCompany(w http.ResponseWriter, r *http.R
 		writeAPIError(w, domain.ErrConflict(who))
 		return
 	}
-	if who, err := s.companyNameTaken(ctx, name, 0); err != nil {
+	if who, err := s.companyNameTaken(ctx, name, 0, ""); err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
 	} else if who != "" {
@@ -229,11 +232,23 @@ func (s *Server) handleAdminUpdateFeishuCompany(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	// The handle is either a console row's numeric id or a company's app id (M94). The app id form
+	// exists because the companies whose name comes from the configuration have no row to address —
+	// renaming them is the whole point of this milestone.
+	handle := strings.TrimSpace(r.PathValue("id"))
+	if id, err := strconv.ParseInt(handle, 10, 64); err == nil {
+		s.updateConsoleCompany(w, r, gate, id)
+		return
+	}
+	if handle == "" {
 		writeAPIError(w, domain.ErrInvalidRequest("invalid company id"))
 		return
 	}
+	s.renameCompanyByAppID(w, r, gate, handle)
+}
+
+// updateConsoleCompany is the M93 path: a console-registered company, addressed by its row id.
+func (s *Server) updateConsoleCompany(w http.ResponseWriter, r *http.Request, gate companyWriteGate, id int64) {
 	ctx := r.Context()
 	app, err := gate.Store.GetFeishuApp(ctx, id)
 	if err != nil {
@@ -273,7 +288,7 @@ func (s *Server) handleAdminUpdateFeishuCompany(w http.ResponseWriter, r *http.R
 			writeAPIError(w, toAPIError(err))
 			return
 		}
-		if who, err := s.companyNameTaken(ctx, name, id); err != nil {
+		if who, err := s.companyNameTaken(ctx, name, id, ""); err != nil {
 			writeAPIError(w, toAPIError(err))
 			return
 		} else if who != "" {
@@ -333,6 +348,246 @@ func (s *Server) handleAdminUpdateFeishuCompany(w http.ResponseWriter, r *http.R
 	}
 	status, payload := s.companyPagePayload(ctx, id, http.StatusOK)
 	writeJSON(w, status, payload)
+}
+
+// renameCompanyByAppID renames any company addressed by its app id (M94). It is the only write that
+// a configuration-sourced company accepts here: its credentials, root node, note and enabled flag
+// stay configuration-owned (M93's rule), but its *name* has no business requiring a restart.
+//
+// The write order is deliberate: the company node is renamed first (it is the write that can
+// conflict), the override is stored second. A failure therefore leaves the previous name in place
+// instead of a company whose node and name disagree.
+func (s *Server) renameCompanyByAppID(w http.ResponseWriter, r *http.Request, gate companyWriteGate, appID string) {
+	ctx := r.Context()
+	// The target is resolved before the body is read: a console-registered company addressed by app id
+	// is exactly the same write as addressing it by row id, so it delegates — and the body must still
+	// be unread for that handler to decode it.
+	rows, err := s.feishuCompanyRows(ctx)
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	var target *feishuCompanyRow
+	for i := range rows {
+		if rows[i].AppID == appID {
+			target = &rows[i]
+			break
+		}
+	}
+	if target == nil {
+		writeAPIError(w, domain.ErrNotFound("feishu company "+appID))
+		return
+	}
+	if target.Source == "console" && !target.ShadowedByConfig {
+		s.updateConsoleCompany(w, r, gate, target.ID)
+		return
+	}
+
+	var body struct {
+		Name      *string `json:"name"`
+		RootNode  *string `json:"root_node"`
+		Note      *string `json:"note"`
+		Enabled   *bool   `json:"enabled"`
+		AppSecret *string `json:"app_secret"`
+		AppID     *string `json:"app_id"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
+		return
+	}
+	if body.AppID != nil && strings.TrimSpace(*body.AppID) != appID {
+		writeAPIError(w, domain.ErrInvalidRequest("app_id 不可更改：它是已导入的节点与人员映射的归属键"))
+		return
+	}
+	for field, given := range map[string]bool{
+		"app_secret": body.AppSecret != nil,
+		"root_node":  body.RootNode != nil,
+		"note":       body.Note != nil,
+		"enabled":    body.Enabled != nil,
+	} {
+		if given {
+			writeAPIError(w, domain.ErrInvalidRequest(
+				"这家公司的名字来自配置，只能改 name；字段 "+field+
+					"由配置管理（feishu.app_id / feishu.companies），请在配置文件里改后重启"))
+			return
+		}
+	}
+	if body.Name == nil {
+		writeAPIError(w, domain.ErrInvalidRequest("name is required（这条路由只做改名）"))
+		return
+	}
+
+	name := strings.TrimSpace(*body.Name)
+	clearing := name == ""
+	if !clearing {
+		clean, err := config.NormalizeCompanyName("name", name)
+		if err != nil {
+			writeAPIError(w, domain.ErrInvalidRequest(err.Error()))
+			return
+		}
+		name = clean
+		if who, err := s.companyNameTaken(ctx, name, 0, appID); err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		} else if who != "" {
+			writeAPIError(w, domain.ErrConflict(who))
+			return
+		}
+	}
+
+	// Renaming the company node needs the organization port; without it the node would keep the old
+	// name while the company page showed the new one.
+	orgStore, ok := portReady(w, s.deps.Org, "organization management")
+	if !ok {
+		return
+	}
+
+	// Where the name comes from decides what "back to normal" means: an override may be deleted,
+	// while a console row always has a name of its own.
+	cfg := s.feishuConfig()
+	oldRoot := target.RootName
+	newRoot := name
+	if clearing {
+		newRoot = configuredRootName(cfg, appID, target.Name)
+	}
+	if explicit := configuredExplicitRoot(cfg, appID); explicit != "" {
+		// An explicitly configured root_node names a local node and is not touched by a rename.
+		newRoot = explicit
+	}
+	if oldRoot == "" {
+		oldRoot = target.Name
+	}
+	if newRoot == "" {
+		newRoot = target.Name
+	}
+
+	warnings := []string{}
+	nodeRenamed := map[string]any(nil)
+	if oldRoot != newRoot {
+		renamed, warn, err := s.renameCompanyNode(ctx, orgStore, target.AppID, oldRoot, newRoot)
+		if err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+		nodeRenamed = renamed
+		warnings = append(warnings, warn...)
+	}
+
+	if clearing {
+		if _, err := gate.Store.DeleteFeishuCompanyName(ctx, target.AppID); err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+	} else {
+		if err := gate.Store.SetFeishuCompanyName(ctx, target.AppID, name, gate.Actor); err != nil {
+			writeAPIError(w, toAPIError(err))
+			return
+		}
+	}
+	s.audit(ctx, gate.Actor, "update", "feishu_company", target.AppID, map[string]any{
+		"name": map[string]any{"from": target.Name, "to": name},
+	}, "ok")
+	s.invalidateFeishuDirectory()
+
+	// The answer is the company as the list would render it now.
+	status, payload := s.companyPagePayload(ctx, target.ID, http.StatusOK)
+	if payload["company"] != nil {
+		payload["company"].(map[string]any)["name"] = name
+		payload["company"].(map[string]any)["app_id"] = target.AppID
+		payload["company"].(map[string]any)["name_source"] = nameSourceAfterRename(clearing)
+	}
+	payload["app_id"] = target.AppID
+	payload["node_renamed"] = nodeRenamed
+	payload["warnings"] = warnings
+	writeJSON(w, status, payload)
+}
+
+// nameSourceAfterRename reports what the list will say about the name next time it is read.
+func nameSourceAfterRename(cleared bool) string {
+	if cleared {
+		return "config"
+	}
+	return "override"
+}
+
+// renameCompanyNode follows a company rename on the company node itself: if the node still carries
+// the company's previous root name, it is renamed too, so the page and the tree cannot disagree. A
+// node the operator renamed by hand (its name is no longer the old root name) is left alone.
+//
+// A root-level node that already wears the new name is *not* an error here: nothing has been written
+// yet, the rename itself is legitimate, and the next sync will refuse with the M92 reason. The
+// warning returned for that case carries the two ways out.
+func (s *Server) renameCompanyNode(ctx context.Context, orgStore OrgAdmin, appID, oldName, newName string) (map[string]any, []string, error) {
+	nodes, err := orgStore.ListOrgNodes(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	var companyNode *domain.OrgNode
+	for _, node := range nodes {
+		if node.FeishuAppID == appID && node.FeishuDepartmentID == feishu.RootDepartmentID {
+			companyNode = node
+			break
+		}
+	}
+	if companyNode == nil {
+		// The company node does not exist yet: renaming is enough, and the next sync will create it
+		// under the new name — unless a root-level node already wears that name, which the caller
+		// reports as a warning the operator can act on.
+		for _, node := range nodes {
+			if node.ParentIDValue() == 0 && node.Name == newName {
+				return nil, []string{"root_name_taken"}, nil
+			}
+		}
+		return nil, nil, nil
+	}
+	if companyNode.Name != oldName {
+		// Somebody renamed the node on purpose; a company rename must not undo that.
+		return nil, []string{"node_name_kept"}, nil
+	}
+	updated := *companyNode
+	updated.Name = newName
+	if err := orgStore.UpdateOrgNode(ctx, &updated); err != nil {
+		if toAPIError(err).Status == http.StatusConflict {
+			return nil, nil, domain.ErrConflict(
+				"根层已有名为「"+newName+"」的节点，公司节点改不了名：先把那个节点改名或移走，或改用别的公司名")
+		}
+		return nil, nil, err
+	}
+	for _, node := range nodes {
+		if node.ParentIDValue() == 0 && node.Name == newName && node.ID != companyNode.ID {
+			return map[string]any{"id": companyNode.ID, "name": newName}, []string{"root_name_taken"}, nil
+		}
+	}
+	return map[string]any{"id": companyNode.ID, "name": newName}, nil, nil
+}
+
+// configuredRootName resolves what a company's root node is called in the configuration (the identity
+// application's company_name, or a feishu.companies entry's root_node/name). It is how "clear the
+// override" knows what to go back to.
+func configuredRootName(cfg config.Feishu, appID, fallback string) string {
+	if strings.TrimSpace(cfg.AppID) == appID {
+		if name := strings.TrimSpace(cfg.CompanyName); name != "" {
+			return name
+		}
+		return "本公司"
+	}
+	for _, company := range cfg.Companies {
+		if strings.TrimSpace(company.AppID) == appID {
+			return company.RootNodeName()
+		}
+	}
+	return fallback
+}
+
+// configuredExplicitRoot returns a company's explicitly configured root_node, which a rename never
+// overrides.
+func configuredExplicitRoot(cfg config.Feishu, appID string) string {
+	for _, company := range cfg.Companies {
+		if strings.TrimSpace(company.AppID) == appID {
+			return strings.TrimSpace(company.RootNode)
+		}
+	}
+	return ""
 }
 
 // handleAdminDeleteFeishuCompany removes the registration. The organization data it brought in stays

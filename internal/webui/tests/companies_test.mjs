@@ -319,3 +319,44 @@ assert.match(uiSource, /extraActions/, 'ui.modal supports the extraActions the c
 assert.match(routerSource, /path: '\/companies'.*pages\/companies\.js/, 'the router serves the company page');
 
 console.log('companies_test.mjs: ok');
+
+// --- M94：公司名可改（含身份应用与配置来源的公司）-----------------------------------------
+
+// 身份应用行现在也有「改名」（配置来源的行都只有改名，凭据/根节点/备注/启停仍归配置）。
+const identityRenameActions = table.options.rowActions(rows[0]).map(textOf);
+assert.ok(identityRenameActions.includes('改名'), 'the identity row offers 改名');
+assert.ok(!identityRenameActions.includes('编辑'), 'the identity row still has no full edit (its credentials belong to the config)');
+assert.match(identityRenameActions.join(' '), /feishu\.app_id/, 'and it says which setting owns the rest');
+
+// 改名对话框：只有公司名可编辑，其余字段只读；提交只发 name，路径用 app_id。
+calls.length = 0;
+modalResult = { ok: true };
+const renameButton = table.options.rowActions(rows[0]).find((button) => textOf(button) === '改名');
+renameButton.click();
+await new Promise((resolve) => setTimeout(resolve, 0));
+const renameFields = modalArgs.fields;
+assert.equal(modalArgs.submitLabel, '保存');
+assert.equal(renameFields.find((field) => field.name === 'name').readonly, undefined, 'the name stays editable');
+for (const name of ['app_id', 'app_secret', 'root_node', 'note', 'enabled']) {
+  assert.equal(renameFields.find((field) => field.name === name).readonly, true, name + ' is read-only for a config-owned company');
+}
+assert.equal(modalArgs.extraActions.length, 0, 'no 先测试连接 for a company whose secret lives in the config');
+await modalArgs.onSubmit({ name: '智天成', app_id: 'cli_aaa', app_secret: '', root_node: '', note: '', enabled: true });
+const renameCall = calls.find((call) => call.method === 'PATCH');
+assert.ok(renameCall, '改名 PATCHes the company');
+assert.equal(renameCall.path, '/org/feishu/companies/cli_aaa', 'a config-owned company is addressed by its app id');
+assert.equal(JSON.stringify(renameCall.body), JSON.stringify({ name: '智天成' }),
+  'only the name travels: the other fields belong to the configuration');
+
+// 根层已有同名节点时，对话框在名字字段上直接给出两条出路。
+companies[0].root_name_taken = { node_id: 11, name: '智天成' };
+await module.namespace.render({ page: node('div'), actions: node('div'), session: { role: 'admin' }, navigate: () => {} });
+const warnedTable = tables[0];
+warnedTable.options.rowActions(rows[0]).find((button) => textOf(button) === '改名').click();
+await new Promise((resolve) => setTimeout(resolve, 0));
+const warnedHint = modalArgs.fields.find((field) => field.name === 'name').hint;
+assert.match(warnedHint, /先同步一次/, 'the conflict hint explains the sync-first way out');
+assert.match(warnedHint, /改名\/移走/, 'and the rename-the-node way out');
+companies[0].root_name_taken = null;
+
+console.log('companies_test.mjs: M94 checks passed');

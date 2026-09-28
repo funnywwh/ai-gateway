@@ -1180,9 +1180,13 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 		{
 			Method: "PATCH", Path: "/admin/api/v1/org/feishu/companies/{id}", Handler: s.handleAdminUpdateFeishuCompany,
 			Name: "admin_update_feishu_company", Group: groupOrg, Role: roleAdmin,
-			Summary:   "改一家控制台登记的公司的名称/根节点名/备注/启停，或替换它的 App Secret（只改传入的字段）",
+			Summary: "改公司的名字（任何来源的公司都可以：数字 id = 控制台登记的公司，app_id = 身份应用/feishu.companies 登记的公司），" +
+				"或改一家控制台登记的公司的根节点名/备注/启停/替换 App Secret（只改传入的字段）",
 			Dangerous: true, ConfirmReason: "改名称或根节点名会改变同步时认领/新建的公司节点；替换密钥会立即用新密钥读该公司的通讯录；停用会让该公司从同步下拉消失（数据保留）",
-			Params: []adminField{pathParam("id", "公司登记的数字 id（admin_list_feishu_companies 的 data[].id）")},
+			Params: []adminField{pathParam("id",
+				"公司标识：控制台登记的公司用它的数字 id（admin_list_feishu_companies 的 data[].id）；"+
+					"身份应用或 feishu.companies 登记的公司用 app_id（cli_…）——那种情况下只接受 name，"+
+					"其余字段由配置管理（给它们会 400 并点名配置项）")},
 			Body: []adminField{
 				bodyOptional("name", "string", "新名称（≤64 字符，与其它公司重名会 409）"),
 				bodyOptional("root_node", "string", "新的本地公司根节点名（空字符串 = 回到用名称）"),

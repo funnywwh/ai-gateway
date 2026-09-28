@@ -208,3 +208,63 @@ func (db *DB) CountFeishuAppData(ctx context.Context, appID string) (nodes, link
 	}
 	return nodes, links, nil
 }
+
+// --- company name overrides (M94) ---------------------------------------------------------
+//
+// A company whose name comes from the configuration (the identity application, or a company in
+// feishu.companies) has no row of its own, so a console rename is stored here instead. The override
+// wins over the configuration and loses to a console row's own name; deleting it returns the
+// company to the configured name.
+
+// ListFeishuCompanyNames returns every override, keyed by app id.
+func (db *DB) ListFeishuCompanyNames(ctx context.Context) (map[string]string, error) {
+	rows, err := db.read.QueryContext(ctx, "SELECT app_id, name FROM feishu_company_names")
+	if err != nil {
+		return nil, fmt.Errorf("store: list feishu company names: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var appID, name string
+		if err := rows.Scan(&appID, &name); err != nil {
+			return nil, fmt.Errorf("store: scan feishu company name: %w", err)
+		}
+		out[appID] = name
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate feishu company names: %w", err)
+	}
+	return out, nil
+}
+
+// SetFeishuCompanyName writes (or replaces) one override.
+func (db *DB) SetFeishuCompanyName(ctx context.Context, appID, name, by string) error {
+	appID = strings.TrimSpace(appID)
+	name = strings.TrimSpace(name)
+	if appID == "" || name == "" {
+		return domain.ErrInvalidRequest("a company name override needs an app id and a name")
+	}
+	if _, err := db.write.ExecContext(ctx, `
+INSERT INTO feishu_company_names(app_id, name, updated_by, updated_at) VALUES(?,?,?,?)
+ON CONFLICT(app_id) DO UPDATE SET name = excluded.name, updated_by = excluded.updated_by,
+  updated_at = excluded.updated_at`,
+		appID, name, by, unix(time.Now())); err != nil {
+		return fmt.Errorf("store: set feishu company name for %s: %w", appID, err)
+	}
+	return nil
+}
+
+// DeleteFeishuCompanyName drops one override and reports whether anything changed, so "back to the
+// configured name" is idempotent.
+func (db *DB) DeleteFeishuCompanyName(ctx context.Context, appID string) (bool, error) {
+	res, err := db.write.ExecContext(ctx,
+		"DELETE FROM feishu_company_names WHERE app_id = ?", strings.TrimSpace(appID))
+	if err != nil {
+		return false, fmt.Errorf("store: delete feishu company name for %s: %w", appID, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: delete feishu company name for %s: %w", appID, err)
+	}
+	return affected > 0, nil
+}

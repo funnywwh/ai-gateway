@@ -129,6 +129,12 @@ type FeishuCompanyAdmin interface {
 	SetFeishuAppEnabled(ctx context.Context, id int64, enabled bool, by string) error
 	DeleteFeishuApp(ctx context.Context, id int64) (bool, error)
 	CountFeishuAppData(ctx context.Context, appID string) (nodes, links int, err error)
+	// The name overrides (M94): the console may rename a company whose name comes from the
+	// configuration, and these three store that decision. An empty name means "back to the
+	// configured name", which is DeleteFeishuCompanyName's job.
+	ListFeishuCompanyNames(ctx context.Context) (map[string]string, error)
+	SetFeishuCompanyName(ctx context.Context, appID, name, by string) error
+	DeleteFeishuCompanyName(ctx context.Context, appID string) (bool, error)
 }
 
 // FeishuCompanySecrets seals and opens one company's Feishu application secret. Only the paths that

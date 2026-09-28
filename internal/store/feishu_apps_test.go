@@ -212,3 +212,61 @@ func TestFeishuAppsRequireNameAndAppID(t *testing.T) {
 		}
 	}
 }
+
+// The console's name overrides (M94): a company whose name comes from the configuration has no row
+// to rename, so the override is stored on its own. Deleting it means "back to the configured name".
+
+func TestFeishuCompanyNameOverrides(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+
+	if names, err := db.ListFeishuCompanyNames(ctx); err != nil || len(names) != 0 {
+		t.Fatalf("fresh overrides = %v %v, want none", names, err)
+	}
+	if err := db.SetFeishuCompanyName(ctx, "cli_aaa", "智天成", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	// Re-setting the same company replaces the name instead of failing.
+	if err := db.SetFeishuCompanyName(ctx, "cli_aaa", "智天成（集团）", "admin2"); err != nil {
+		t.Fatal(err)
+	}
+	names, err := db.ListFeishuCompanyNames(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 || names["cli_aaa"] != "智天成（集团）" {
+		t.Fatalf("overrides = %v", names)
+	}
+
+	// The override never touches the company row of a console-registered company.
+	if _, err := db.UpsertFeishuApp(ctx, &domain.FeishuApp{
+		Name: "甲方", AppID: "cli_bbb", SecretEnc: []byte{1}, Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	apps, err := db.ListFeishuApps(ctx)
+	if err != nil || len(apps) != 1 || apps[0].Name != "甲方" {
+		t.Fatalf("the override changed a console row: %+v %v", apps, err)
+	}
+
+	// Deleting is idempotent and reports whether anything changed.
+	changed, err := db.DeleteFeishuCompanyName(ctx, "cli_aaa")
+	if err != nil || !changed {
+		t.Fatalf("delete = %v %v", changed, err)
+	}
+	changed, err = db.DeleteFeishuCompanyName(ctx, "cli_aaa")
+	if err != nil || changed {
+		t.Fatalf("second delete = %v %v, want a no-op", changed, err)
+	}
+	if names, _ = db.ListFeishuCompanyNames(ctx); len(names) != 0 {
+		t.Fatalf("overrides survived the delete: %v", names)
+	}
+
+	// Empty input is a programming error, not "clear it": clearing has its own call.
+	if err := db.SetFeishuCompanyName(ctx, "cli_aaa", "", "admin"); err == nil {
+		t.Fatal("an empty name was accepted")
+	}
+	if err := db.SetFeishuCompanyName(ctx, "", "name", "admin"); err == nil {
+		t.Fatal("an empty app id was accepted")
+	}
+}

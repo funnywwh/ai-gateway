@@ -67,6 +67,9 @@ export async function render({ page, actions, session, navigate }) {
     const source = row.source === 'identity' ? '身份应用'
       : (row.source === 'config' ? '由配置提供' : '控制台');
     cells.push(badge(source, row.source === 'console' ? '' : 'ok'));
+    if (row.name_source === 'override') {
+      cells.push(badge('名字已在控制台改过', '', '清空名字并保存即回到配置里的名字'));
+    }
     if (row.note) cells.push(el('span', { class: 'muted', text: row.note }));
     for (const warning of row.warnings || []) {
       cells.push(el('div', { class: 'muted org-company-warning', text: warningText(warning) }));
@@ -90,13 +93,23 @@ export async function render({ page, actions, session, navigate }) {
 
   function actionsFor(row) {
     const buttons = [];
-    // 同步始终可用（它是这家公司最常做的事），其余动作只对控制台登记的公司开放。
+    // 同步始终可用（它是这家公司最常做的事）。
     buttons.push(el('button', {
       class: 'btn', text: '同步',
       onclick: () => navigate('/org?company=' + encodeURIComponent(row.app_id)),
     }));
     if (row.source !== 'console') {
-      buttons.push(el('span', { class: 'muted', text: row.source === 'identity' ? '由 feishu.app_id 管理' : '由 feishu.companies 管理' }));
+      // 名字对任何来源的公司都能改（M94）；其余字段仍归配置，页面在这里说明白。
+      buttons.push(el('button', {
+        class: 'btn', text: '改名', disabled: readonly,
+        onclick: () => openEditor(row, () => view.refresh()),
+      }));
+      buttons.push(el('span', {
+        class: 'muted',
+        text: row.source === 'identity'
+          ? '凭据与登录由 feishu.app_id 管理'
+          : '凭据与根节点由 feishu.companies 管理',
+      }));
       return buttons;
     }
     buttons.push(el('button', { class: 'btn', text: '测试连接', onclick: () => probe(row) }));
@@ -182,39 +195,63 @@ export async function render({ page, actions, session, navigate }) {
 
   // openEditor is the create/edit dialog. The secret field is a password input that is never
   // prefilled: "leave it empty" is how the operator says "keep the stored one".
+  // openEditor is the create/edit dialog. Two shapes live here (M94):
+  //
+  //   - 控制台登记的公司：全部字段可改；密钥是 password 且永不预填（留空 = 不改）。
+  //   - 身份应用 / feishu.companies 登记的公司：**只有公司名**可改，其余只读并注明由哪个配置项管理；
+  //     名字留空 = 回到配置里的名字。
+  //
+  // 根层已有同名节点时，这里直接把"下一步同步会怎样、怎么解"写在字段提示里——那是操作发生的地方。
   function openEditor(row, done) {
     const editing = !!row;
+    const configOwned = editing && row.source !== 'console';
+    const taken = editing && row.root_name_taken
+      ? '根层已有同名节点「' + row.root_name_taken.name + '」，下一次同步会拒绝建公司节点：' +
+        '先同步一次（用旧名字建出公司节点）再改名，或先在组织树里把那个节点改名/移走。'
+      : '';
     const fields = [
-      { name: 'name', label: '公司名', required: true, value: editing ? row.name : '',
-        hint: '≤64 字符，与其它公司重名会被拒绝；它也是公司节点的默认名' },
+      { name: 'name', label: '公司名', required: !configOwned, value: editing ? row.name : '',
+        hint: (configOwned ? '留空并保存 = 回到配置里的名字。' : '≤64 字符，与其它公司重名会被拒绝；它也是公司节点的默认名。')
+          + (taken ? ' ' + taken : '') },
       { name: 'app_id', label: 'App ID', required: !editing, value: editing ? row.app_id : '',
         hint: editing ? '创建后不可更改（它是已导入数据的归属键）' : 'cli_…，来自那家公司自己飞书应用的「凭证与基础信息」',
         readonly: editing },
       { name: 'app_secret', label: 'App Secret', type: 'password', required: !editing,
-        hint: editing ? '留空 = 保持不变；填了就替换（加密落库，永不回显）' : '加密落库（credentials_key），永不回显、不进日志与审计' },
+        readonly: configOwned,
+        hint: configOwned ? '由配置管理（feishu.app_id / feishu.companies），这里改不了'
+          : (editing ? '留空 = 保持不变；填了就替换（加密落库，永不回显）' : '加密落库（credentials_key），永不回显、不进日志与审计') },
       { name: 'root_node', label: '公司根节点名（可选）', value: editing ? (row.root_node_name || '') : '',
-        hint: '留空则用公司名；指向已存在的同名根节点会被认领' },
-      { name: 'note', label: '备注', value: editing ? (row.note || '') : '' },
+        readonly: configOwned,
+        hint: configOwned ? '由配置管理（companies[].root_node）' : '留空则用公司名；指向已存在的同名根节点会被认领' },
+      { name: 'note', label: '备注', value: editing ? (row.note || '') : '', readonly: configOwned,
+        hint: configOwned ? '由配置管理' : '' },
       { name: 'enabled', label: '启用', type: 'checkbox', value: editing ? row.enabled : true,
-        hint: '停用 = 暂不参与同步（数据保留）' },
+        readonly: configOwned,
+        hint: configOwned ? '由配置管理' : '停用 = 暂不参与同步（数据保留）' },
     ];
     return modal({
-      title: editing ? '编辑公司「' + row.name + '」' : '新建公司',
+      title: editing ? (configOwned ? '改公司名「' + row.name + '」' : '编辑公司「' + row.name + '」') : '新建公司',
       fields,
       submitLabel: editing ? '保存' : '创建',
       // 「先测试连接」用刚刚填的值探测一次，不关窗、不落库：密钥抄错与权限没发版本都能当场发现。
-      extraActions: [{ label: '先测试连接', onClick: (values) => testBeforeSave(values) }],
+      // 配置来源的公司没有可填的密钥，这个入口就不出现。
+      extraActions: configOwned ? [] : [{ label: '先测试连接', onClick: (values) => testBeforeSave(values) }],
       onSubmit: async (values) => {
-        const body = {
-          name: values.name, root_node: values.root_node, note: values.note,
-          enabled: values.enabled !== false,
-        };
+        // 配置来源的公司只发 name：服务端对其它字段会 400（它们由配置管理）。
+        const handle = configOwned ? row.app_id : (editing ? row.id : null);
+        const body = configOwned
+          ? { name: values.name }
+          : { name: values.name, root_node: values.root_node, note: values.note, enabled: values.enabled !== false };
         if (!editing) body.app_id = values.app_id;
-        if (values.app_secret) body.app_secret = values.app_secret;
+        if (!configOwned && values.app_secret) body.app_secret = values.app_secret;
         const result = editing
-          ? await api.patch('/org/feishu/companies/' + row.id, body)
+          ? await api.patch('/org/feishu/companies/' + encodeURIComponent(handle), body)
           : await api.post('/org/feishu/companies', body);
-        toast(editing ? '已保存「' + values.name + '」' : '已登记「' + values.name + '」，可以开始同步了', 'ok');
+        const renamed = result && result.node_renamed ? '（公司节点也改成了「' + result.node_renamed.name + '」）' : '';
+        const warned = result && (result.warnings || []).includes('root_name_taken')
+          ? '；注意：根层已有同名节点，下一次同步会拒绝建公司节点（先同步一次再改名，或先处理那个节点）' : '';
+        toast(editing ? '已保存「' + values.name + '」' + renamed + warned
+          : '已登记「' + values.name + '」，可以开始同步了', warned ? 'error' : 'ok');
         return result;
       },
     }).then(async (result) => {
