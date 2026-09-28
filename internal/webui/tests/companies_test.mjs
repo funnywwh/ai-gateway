@@ -345,11 +345,11 @@ assert.equal(renameFields.find((field) => field.name === 'app_secret').readonly,
 assert.match(renameFields.find((field) => field.name === 'app_secret').hint, /feishu\.app_secret/);
 assert.equal(modalArgs.extraActions.length, 0, 'no 先测试连接 for the identity application');
 // 只改名字：提交体只带 name（值与原值相同的字段不发）。
-await modalArgs.onSubmit({ name: '智天成', app_id: 'cli_aaa', app_secret: '', root_node: '本公司', note: '', enabled: true });
+await modalArgs.onSubmit({ name: '客户组一', app_id: 'cli_aaa', app_secret: '', root_node: '本公司', note: '', enabled: true });
 const renameCall = calls.find((call) => call.method === 'PATCH');
 assert.ok(renameCall, '编辑 PATCHes the company');
 assert.equal(renameCall.path, '/org/feishu/companies/cli_aaa', 'a config-owned company is addressed by its app id');
-assert.equal(JSON.stringify(renameCall.body), JSON.stringify({ name: '智天成' }),
+assert.equal(JSON.stringify(renameCall.body), JSON.stringify({ name: '客户组一' }),
   'only the changed field travels');
 
 // 客户公司的密钥可覆盖，且覆盖过的行给「恢复配置值」。
@@ -370,7 +370,7 @@ assert.match(modalArgs.fields.find((field) => field.name === 'app_secret').hint,
 assert.ok(modalArgs.extraActions.length === 1, 'the probe action stays available for client companies');
 
 // 根层已有同名节点时，对话框在名字字段上直接给出两条出路。
-companies[0].root_name_taken = { node_id: 11, name: '智天成' };
+companies[0].root_name_taken = { node_id: 11, name: '客户组一' };
 await module.namespace.render({ page: node('div'), actions: node('div'), session: { role: 'admin' }, navigate: () => {} });
 const warnedTable = tables[0];
 warnedTable.options.rowActions(rows[0]).find((button) => textOf(button) === '编辑').click();

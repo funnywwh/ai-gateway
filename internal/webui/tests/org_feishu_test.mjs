@@ -139,10 +139,17 @@ const directory = {
   warnings: [],
 };
 
+// hangDirectoryFor 里的公司，目录读取永不返回——用它可以复现"选了一家读不通的公司，再选回能读的
+// 公司时弹窗空掉"这个报告（2026-09-28）。
+const hangDirectoryFor = new Set();
+
 const api = {
   async get(path, params) {
     calls.push({ method: 'GET', path, params });
-    if (path === '/org/feishu/directory') return JSON.parse(JSON.stringify(directory));
+    if (path === '/org/feishu/directory') {
+      if (params && hangDirectoryFor.has(params.company)) return new Promise(() => {});
+      return JSON.parse(JSON.stringify(directory));
+    }
     // M92：公司下拉的数据源。两家公司才会渲染下拉（单公司部署与 M70 完全一致）。
     if (path === '/org/feishu/companies') {
       return { count: 2, identity_app_id: 'cli_aaa', data: [
@@ -399,6 +406,33 @@ assert.equal(afterSwitch[0].params.company, 'cli_bbb', '重新读取时带上新
 assert.equal(afterSwitch[0].params.refresh, undefined, '读取仍走服务端缓存（缓存按公司分桶）');
 assert.match(afterSwitch[1].params.departments, /^0,od_a,od_b$/,
   '新公司的勾选重新按全量播种，而不是沿用上一家公司的范围');
+
+// --- 读不通的公司不能把弹窗卡死（2026-09-28 报告）-------------------------------------
+//
+// 报告原话：「选择同步不了的公司后，在选择能同步的公司，组织架构显示不出来了」。
+// 旧的 load() 在 state.loading 为 true 时直接 return：前一家公司的读请求还挂着（或很慢），
+// 切回来的那次读取就被吞掉，弹窗只剩标题行、树和人员都空着。修好后：切换公司总是发起新读取，
+// 旧请求的响应被丢弃（序号），不会被当成新公司的数据渲染。
+
+hangDirectoryFor.add('cli_bbb');
+companySelect.value = 'cli_bbb';
+companySelect.listeners.change();
+await settle();
+const hangSwitchCalls = calls.filter((call) => call.path === '/org/feishu/directory');
+assert.equal(hangSwitchCalls[hangSwitchCalls.length - 1].params.company, 'cli_bbb', '切到读不通的公司会发请求');
+
+companySelect.value = 'cli_aaa';
+companySelect.listeners.change();
+await settle();
+const backCalls = calls.filter((call) => call.path === '/org/feishu/directory');
+assert.equal(backCalls[backCalls.length - 1].params.company, 'cli_aaa',
+  '切回能同步的公司必须重新读取：不能因为上一个请求还挂着就不发');
+// 树由 tree 控件自己渲染（测试里是 mock，只记录节点），所以断言节点而不是 DOM 文本。
+const backNames = treeInstance.nodes.map((item) => item.name);
+assert.ok(backNames.includes('研发部') && backNames.includes('市场部'),
+  '切回来之后组织树要有内容（回归：曾经因为前一个请求未返回而整棵树是空的）');
+assert.match(textOf(modalRoot), /王五/, '人员列表也重新渲染了');
+hangDirectoryFor.delete('cli_bbb');
 
 // --- a failed read reports itself instead of rendering an empty tree --------------------
 

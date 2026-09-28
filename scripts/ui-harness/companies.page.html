@@ -24,12 +24,12 @@
 const view = location.hash.replace('#', '') || 'companies';
 
 const COMPANIES = [
-  // M94：身份应用这一行是"刚从本公司改名成智天成、但根层已有同名节点"的真实状态——
+  // M94：身份应用这一行是"刚从本公司改名成客户组一、但根层已有同名节点"的真实状态——
   // 页面上要能看到「名字已在控制台改过」的徽标，以及改名对话框里的两条出路。
-  { id: null, app_id: 'cli_aaa', name: '智天成', identity: true, source: 'identity', enabled: true,
+  { id: null, app_id: 'cli_aaa', name: '客户组一', identity: true, source: 'identity', enabled: true,
     note: '', secret_configured: true, client_ready: true, client_error: '', shadowed_by_config: false,
-    name_source: 'override', root_name_taken: { node_id: 11, name: '智天成' },
-    warnings: [], root_node_id: null, root_node_name: '智天成', root_will_create: false, root_blocked: true,
+    name_source: 'override', root_name_taken: { node_id: 11, name: '客户组一' },
+    warnings: [], root_node_id: null, root_node_name: '客户组一', root_will_create: false, root_blocked: true,
     company_nodes: 0, linked_accounts: 5 },
   { id: 2, app_id: 'cli_bbb', name: '某某科技', identity: false, source: 'console', enabled: true,
     note: '客户 A', secret_configured: true, client_ready: true, client_error: '', shadowed_by_config: false,
@@ -148,7 +148,7 @@ try {
     const labeled = (labelText) => [...document.querySelectorAll('#modal-root label')]
       .find((node) => node.textContent.includes(labelText));
     const nameField = [...document.querySelectorAll('#modal-root input')]
-      .find((input) => input.value === '智天成');
+      .find((input) => input.value === '客户组一');
     checks.editDialogEditable = !!nameField && !nameField.readOnly && !nameField.disabled;
     const secretField = [...document.querySelectorAll('#modal-root input')].find((input) => input.type === 'password');
     checks.identitySecretLocked = !!secretField && (secretField.readOnly || secretField.disabled);

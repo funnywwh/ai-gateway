@@ -211,8 +211,16 @@ export function openFeishuSync({ onDone, company, navigate } = {}) {
     return state.company ? '?company=' + encodeURIComponent(state.company) : '';
   }
 
+  // loadSeq numbers the directory reads. A company switch (or a manual 刷新) supersedes whatever is
+  // still in flight: the older answer describes another company, so it is dropped instead of being
+  // rendered, and — this is the bug the numbering exists for — it must not block the newer read
+  // either. A request that never settles (a company whose application is unreachable) used to leave
+  // `state.loading` true forever, and every later switch was swallowed by the guard below: the
+  // dialog kept the old header line and painted no tree at all (reported 2026-09-28).
+  let loadSeq = 0;
+
   async function load(refresh) {
-    if (state.loading) return;
+    const seq = ++loadSeq;
     state.loading = true;
     refreshBtn.disabled = true;
     try {
@@ -224,6 +232,7 @@ export function openFeishuSync({ onDone, company, navigate } = {}) {
       // directory itself is cached for 60 s, so re-reading on every click is cheap.
       if (state.seeded) params.departments = scopeIds().join(',');
       const payload = await api.get('/org/feishu/directory', Object.keys(params).length ? params : undefined);
+      if (seq !== loadSeq) return; // superseded by a newer read (another company, or 刷新)
       state.payload = payload;
       if (!state.seeded) {
         // First payload: everything is in scope, so the dialog opens on the M70 behaviour and
@@ -240,6 +249,7 @@ export function openFeishuSync({ onDone, company, navigate } = {}) {
       }
       render();
     } catch (err) {
+      if (seq !== loadSeq) return; // a newer read owns the dialog now; its own failure will speak
       state.payload = null;
       subtitle.textContent = '读取飞书通讯录失败';
       notice.className = 'feishu-sync-notice error';
@@ -247,8 +257,11 @@ export function openFeishuSync({ onDone, company, navigate } = {}) {
       treeHost.replaceChildren();
       peopleHost.replaceChildren();
     } finally {
-      state.loading = false;
-      refreshBtn.disabled = false;
+      // Only the newest read owns the flags: the reseed below hands them to the next call.
+      if (seq === loadSeq) {
+        state.loading = false;
+        refreshBtn.disabled = false;
+      }
     }
   }
 

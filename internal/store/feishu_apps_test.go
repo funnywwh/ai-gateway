@@ -228,12 +228,12 @@ func TestFeishuCompanyOverrides(t *testing.T) {
 	}
 	// Only the name first (the M94 shape), then more fields, then the secret.
 	if err := db.SetFeishuCompanyOverride(ctx, domain.FeishuCompanyOverride{
-		AppID: "cli_aaa", Name: str("智天成"), UpdatedBy: "admin",
+		AppID: "cli_aaa", Name: str("客户组一"), UpdatedBy: "admin",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.SetFeishuCompanyOverride(ctx, domain.FeishuCompanyOverride{
-		AppID: "cli_aaa", Name: str("智天成"), Note: str("客户 A"), Enabled: boolean(false),
+		AppID: "cli_aaa", Name: str("客户组一"), Note: str("客户 A"), Enabled: boolean(false),
 		SecretEnc: []byte{9, 9, 9}, UpdatedBy: "admin2",
 	}); err != nil {
 		t.Fatal(err)
@@ -243,7 +243,7 @@ func TestFeishuCompanyOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := overrides["cli_aaa"]
-	if got.Name == nil || *got.Name != "智天成" || got.Note == nil || *got.Note != "客户 A" ||
+	if got.Name == nil || *got.Name != "客户组一" || got.Note == nil || *got.Note != "客户 A" ||
 		got.Enabled == nil || *got.Enabled || len(got.SecretEnc) != 3 || got.UpdatedBy != "admin2" {
 		t.Fatalf("override = %+v", got)
 	}

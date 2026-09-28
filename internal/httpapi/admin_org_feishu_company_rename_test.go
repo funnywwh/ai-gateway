@@ -50,11 +50,11 @@ func TestFeishuRenameIdentityCompany(t *testing.T) {
 		t.Fatalf("identity row = %v, want 本公司 from the configuration", before)
 	}
 
-	status, payload := renameCompany(t, f, cookie, f.identityAppID(), `{"name":"智天成"}`)
+	status, payload := renameCompany(t, f, cookie, f.identityAppID(), `{"name":"客户组一"}`)
 	if status != http.StatusOK {
 		t.Fatalf("rename status=%d payload=%v", status, payload)
 	}
-	if payload["app_id"] != f.identityAppID() || payload["company"].(map[string]any)["name"] != "智天成" {
+	if payload["app_id"] != f.identityAppID() || payload["company"].(map[string]any)["name"] != "客户组一" {
 		t.Fatalf("rename payload = %v", payload)
 	}
 	if payload["company"].(map[string]any)["name_source"] != "override" {
@@ -67,10 +67,10 @@ func TestFeishuRenameIdentityCompany(t *testing.T) {
 
 	// The list and the resolution both use the new name.
 	after := identityCompanyRow(t, f, cookie)
-	if after["name"] != "智天成" || after["name_source"] != "override" {
+	if after["name"] != "客户组一" || after["name_source"] != "override" {
 		t.Fatalf("identity row after rename = %v", after)
 	}
-	if status, _ := f.callJSON(t, http.MethodPost, "/admin/api/v1/org/feishu/sync", `{"company":"智天成"}`, cookie); status != http.StatusOK {
+	if status, _ := f.callJSON(t, http.MethodPost, "/admin/api/v1/org/feishu/sync", `{"company":"客户组一"}`, cookie); status != http.StatusOK {
 		t.Fatalf("sync by the new name = %d, want 200", status)
 	}
 
@@ -104,25 +104,25 @@ func TestFeishuRenameFollowsTheCompanyNode(t *testing.T) {
 	// A department node named exactly like the new company name, under the company node: that is
 	// the shape the real deployment has, and the sibling rule allows it (different parents).
 	inner, err := f.db.CreateOrgNode(ctx, &domain.OrgNode{
-		Name: "智天成", SortOrder: 100, FeishuAppID: f.identityAppID(), ParentID: &node.ID,
+		Name: "客户组一", SortOrder: 100, FeishuAppID: f.identityAppID(), ParentID: &node.ID,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	status, payload = renameCompany(t, f, cookie, f.identityAppID(), `{"name":"智天成"}`)
+	status, payload = renameCompany(t, f, cookie, f.identityAppID(), `{"name":"客户组一"}`)
 	if status != http.StatusOK {
 		t.Fatalf("rename status=%d payload=%v", status, payload)
 	}
 	renamed := payload["node_renamed"].(map[string]any)
-	if renamed["id"].(float64) != float64(node.ID) || renamed["name"] != "智天成" {
+	if renamed["id"].(float64) != float64(node.ID) || renamed["name"] != "客户组一" {
 		t.Fatalf("node_renamed = %v", renamed)
 	}
 	moved, err := f.db.GetOrgNode(ctx, node.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if moved.Name != "智天成" {
+	if moved.Name != "客户组一" {
 		t.Fatalf("company node = %q, want the new name", moved.Name)
 	}
 	// The same-named child node was not touched: it is a department, not the company.
@@ -130,7 +130,7 @@ func TestFeishuRenameFollowsTheCompanyNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if untouched.Name != "智天成" || untouched.ParentIDValue() != node.ID {
+	if untouched.Name != "客户组一" || untouched.ParentIDValue() != node.ID {
 		t.Fatalf("the department node was disturbed: %+v", untouched)
 	}
 
@@ -140,7 +140,7 @@ func TestFeishuRenameFollowsTheCompanyNode(t *testing.T) {
 	if err := f.db.UpdateOrgNode(ctx, &hand); err != nil {
 		t.Fatal(err)
 	}
-	status, payload = renameCompany(t, f, cookie, f.identityAppID(), `{"name":"智天成科技"}`)
+	status, payload = renameCompany(t, f, cookie, f.identityAppID(), `{"name":"客户组一科技"}`)
 	if status != http.StatusOK {
 		t.Fatalf("second rename status=%d payload=%v", status, payload)
 	}
@@ -166,7 +166,7 @@ func TestFeishuRenameReportsRootNameTaken(t *testing.T) {
 	// The real deployment's shape before its first sync: a legacy top-level department node named
 	// like the company, pinned to the identity application, no company node yet.
 	legacy, err := f.db.CreateOrgNode(ctx, &domain.OrgNode{
-		Name: "智天成", SortOrder: 100,
+		Name: "客户组一", SortOrder: 100,
 		FeishuAppID: f.identityAppID(), FeishuDepartmentID: "od_legacy",
 	})
 	if err != nil {
@@ -179,7 +179,7 @@ func TestFeishuRenameReportsRootNameTaken(t *testing.T) {
 		t.Fatalf("root_name_taken = %v, want nil while the name is still 本公司", before["root_name_taken"])
 	}
 
-	status, payload := renameCompany(t, f, cookie, f.identityAppID(), `{"name":"智天成"}`)
+	status, payload := renameCompany(t, f, cookie, f.identityAppID(), `{"name":"客户组一"}`)
 	if status != http.StatusOK {
 		t.Fatalf("the rename itself must succeed: %d %v", status, payload)
 	}
@@ -209,7 +209,7 @@ func TestFeishuRenameReportsRootNameTaken(t *testing.T) {
 	f2 := newOrgFeishuFixture(t)
 	cookie2 := f2.login(t, adminUser, adminPassword)
 	if _, err := f2.db.CreateOrgNode(ctx, &domain.OrgNode{
-		Name: "智天成", SortOrder: 100,
+		Name: "客户组一", SortOrder: 100,
 		FeishuAppID: f2.identityAppID(), FeishuDepartmentID: "od_legacy",
 	}); err != nil {
 		t.Fatal(err)
@@ -221,7 +221,7 @@ func TestFeishuRenameReportsRootNameTaken(t *testing.T) {
 	if root == nil {
 		t.Fatal("the company node was not created")
 	}
-	status, payload = renameCompany(t, f2, cookie2, f2.identityAppID(), `{"name":"智天成"}`)
+	status, payload = renameCompany(t, f2, cookie2, f2.identityAppID(), `{"name":"客户组一"}`)
 	if status != http.StatusOK || warningList(payload).has("root_name_taken") {
 		t.Fatalf("rename after the first sync = %d %v (no root_name_taken expected)", status, payload)
 	}
@@ -229,22 +229,22 @@ func TestFeishuRenameReportsRootNameTaken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if renamed.Name != "智天成" {
+	if renamed.Name != "客户组一" {
 		t.Fatalf("company node = %q", renamed.Name)
 	}
-	// Both nodes exist, one under the other: 智天成 → 智天成(部门) → 平台组…
+	// Both nodes exist, one under the other: 客户组一 → 客户组一(部门) → 平台组…
 	nodes, err := f2.db.ListOrgNodes(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sameName := 0
 	for _, node := range nodes {
-		if node.Name == "智天成" {
+		if node.Name == "客户组一" {
 			sameName++
 		}
 	}
 	if sameName != 2 {
-		t.Fatalf("nodes named 智天成 = %d, want the company node and the department node", sameName)
+		t.Fatalf("nodes named 客户组一 = %d, want the company node and the department node", sameName)
 	}
 }
 
@@ -491,7 +491,7 @@ func TestFeishuCompanyFieldOverrides(t *testing.T) {
 	ctx := context.Background()
 
 	// root_node: the next sync must use the overridden name for the company node.
-	status, out := renameCompany(t, f, cookie, f.identityAppID(), `{"root_node":"智天成集团"}`)
+	status, out := renameCompany(t, f, cookie, f.identityAppID(), `{"root_node":"客户组一集团"}`)
 	if status != http.StatusOK {
 		t.Fatalf("root_node override = %d %v", status, out)
 	}
@@ -499,7 +499,7 @@ func TestFeishuCompanyFieldOverrides(t *testing.T) {
 		t.Fatalf("sync = %d %v", status, out)
 	}
 	root := companyNode(t, f, f.identityAppID())
-	if root == nil || root.Name != "智天成集团" {
+	if root == nil || root.Name != "客户组一集团" {
 		t.Fatalf("company node = %+v, want the overridden name", root)
 	}
 

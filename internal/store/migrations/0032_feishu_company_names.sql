@@ -2,7 +2,7 @@
 --
 -- The identity application and the companies written into feishu.companies get their name from the
 -- configuration file, and the console could not change it (M93's rule: the file owns those rows).
--- That turned out to be the first thing an operator wants to fix — "the company is called 智天成,
+-- That turned out to be the first thing an operator wants to fix — "the company is called 客户组一,
 -- not 本公司" — and editing the file plus restarting the gateway is a poor answer to a rename.
 --
 -- So this table holds exactly one thing: a name override for companies that have no console row of
