@@ -6794,6 +6794,34 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
       且镜像里确实是新语义（`aigw.nav_open` 在、渲染规则 `=== activeGroup || opened.has(group)` 在）
 - 未做：发版与部署（线上仍是 v4.10.0 的"默认全展开"）—— 等是否发 v4.10.1 的决定；浏览器走查见 TODO
 
+### M95.1 发布记录：v4.10.1 部署到 rag-server（2026-09-28）
+
+- 版本：**v4.10.1**（`ed470b5`），patch（只改默认行为：菜单默认折叠；没有新端点/配置/页面）
+- 构建物：`bin/aigw` 4.10.1，
+  `sha256 234c8a04cadfe80adb272e46a07e4ce2cf7e5c151bb118852c1d87c17e80b2b1`
+  （控制台 minified 45 files 771748 → 424233 B；gzip 40 files 421872 → 168200 B）
+- 回滚点（宿主 `bin/`）：`aigw.prev-4.10.0-d60f24c`
+- 发布前门禁：`git diff --name-only v4.10.0..HEAD` 仍**没有任何 `.go` 文件**，Go 行为与基准不可能变化；
+  `node --experimental-vm-modules internal/webui/tests/nav_fold_test.mjs` 通过；`make ui-base` 全绿；
+  `go test ./internal/webui/...` 全绿；`make ui-dist` 后 minify 选择器契约全绿。
+  `make desensitize-check` 的偏差与上面 M95 发布记录**同一条**（56 findings 全部与 v4.9.0 内容逐字相同，
+  本版未新增），未作为阻塞项
+- 宿主侧验证：
+  - `GET /version` → `{"version":"4.10.1","revision":"ed470b5","ui":"minified","ui_encoding":"gzip"}`
+    （loopback `:8088` 与经代理 `Host: chat.tirisen.hk` → `:8090` 两条路都验）
+  - `/healthz`、`/readyz` 均 200；`/admin/ui/`、`/admin/ui/app.css`、`/admin/ui/js/router.js`、
+    `/admin/ui/js/pages/dashboard.js` 经代理全部 200
+  - **新默认确实在服务出去的资源里**：线上 `router.js` 命中 `aigw.nav_open`，且**不再出现**
+    `aigw.nav_folded`（旧键现在只出现在源码注释里，说明它的来历）
+  - 启动日志：`aigw starting version=4.10.1 revision=ed470b5 ui=minified ui_encoding=gzip`；
+    新进程（20:31:10 起）**0 条 WARN/ERROR** —— 20:31:10.045 那条 `audit write queue could not be drained`
+    属于**上一个进程的退出**（shutdown 从 20:30:55 开始、drain 超时），与 2026-09-23、M93/M94 记录里同一条
+  - 未重启的旁路：只重启了 `aigw-local.service`；`dshgw-verify.service` 重启前后都是 active
+- 待操作员（浏览器，需要管理员会话，本沙箱无凭据）：打开 `https://chat.tirisen.hk/admin/ui/` →
+  菜单默认只剩 6 个分组标题 + **当前分组**的条目；点别的分组展开、再点收起；刷新后仍记得打开过哪些；
+  直接访问 `#/keys` 这类深链接时对应分组自动展开（见 `docs/TODO.md` M95 小节）
+
+
 
 ### M95 发布记录：v4.10.0 部署到 rag-server（2026-09-28）
 
