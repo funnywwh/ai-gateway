@@ -248,6 +248,12 @@ UTC 小时读取八维实际组合的汇总表；当前小时、查询边界、�
 供应商下拉列 `/providers`（名字 + `#id`），超过 1000 个 Key 的部署下拉只列前 1000
 （配置类列表的既有上限），API 过滤对任意 id 仍精确。
 
+列表的**整行可点**（M91）：点行的任意非交互区域与点行末的「详情」按钮是同一个动作、同一个入口，
+打开该行的详情弹窗（这一页 19 个数据列 + 1 个操作列，操作列在最右边，窄窗口下要横向滚动才够得着）。
+两条不触发的规则：点击落在行内控件（按钮/链接/输入/`label`/`summary`/`[role=button|link]`）上时由控件自己处理，
+以及拖选文本（复制请求 id）之后的那一次不算打开——弹窗盖住选区会把这次复制吃掉。可点行显示手型；
+「详情」按钮保留，它是这条路径的键盘入口（行不可聚焦，一页 20 行加 20 个 Tab 停留点并不划算）。
+
 供应商的展示口径（M53）：列表「供应商」列显示该请求的**全部**计量供应商（失败转移的行是
 「A、B」，tooltip 写明两家都在这一行上有计量行），没有计量行的行显示「未计量」而不是空白；
 统计卡选「供应商」时行显示「名字 #id」，`id=0` 显示「（未知）」，且「请求数」表头写明各分组之和
@@ -294,13 +300,18 @@ tokens 与成本落在它们各自表头列的正下方；未计量的行只计�
 去重得出（顺序变为「首次尝试」）、控制台新增「上游模型」「路由路线」两列与详情「路由路线」区块、
 后台工具描述同步；`RequestProviders` 由 `RequestAttempts` 取代。设计与取舍见
 `docs/design/m78-request-log-route-path.md`。
+**已实现（M91）**：控制台请求日志列表**整行可点**打开详情——`ui.js` 的 `table()`/`pagedTable()`
+新增可选 `onRowClick`（不传即原行为，其它列表页零变化），行内控件与拖选文本不触发，入口与
+「详情」按钮共用 `openDetail(row)`（含 in-flight 守卫）；口径与取舍见
+`docs/design/m91-request-log-row-click-detail.md`。
 历史行（迁移 0008 之前）的七列为空，控制台显示「—」，聚合归入「（未知）」桶；
 `account_id`/`api_key_id` ≤ 0 的行归入「（未知）」桶，计数同样保留；迁移 0027 之前的计量行
 `route_id`/`upstream_model` 为空，控制台显示「（未知路由）」与「—」，同样不回填。
 
 相关设计：`docs/design/m27-request-dimensions.md`、`docs/design/m29-request-log-page-summary.md`、
 `docs/design/m30-request-log-owner-dimensions.md`、`docs/design/m31-request-log-stats-pagination.md`、
-`docs/design/m53-request-provider-dimension.md`、`docs/design/m78-request-log-route-path.md`。
+`docs/design/m53-request-provider-dimension.md`、`docs/design/m78-request-log-route-path.md`、
+`docs/design/m91-request-log-row-click-detail.md`。
 
 Codex 标题辅助请求根据元数据 `turn_trigger=thread_title` 或 user 消息开头的专用任务标题提示词识别为 `call_kind=title`。标题和描述一起返回时仅记录 `title`；损坏的 JSON 对象或缺失标题时留空。标题辅助请求可能使用独立的 `prompt_cache_key`，若携带显式根会话 ID 则归于根会话；没有明确的根会话标识时，已知 Codex 标题模板可通过同账户、Key、工作区内 ±120 秒的唯一首条提示词精确指纹候选关联；候选冲突时恢复独立分组。正文录制关闭/仅元数据、启用脱敏或混合媒体输入时不推断，详见 `session-grouping-fix.md`。历史日志未录制响应正文时不能恢复标题。
 

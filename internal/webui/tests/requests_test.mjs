@@ -130,3 +130,39 @@ assert.match(upstreamModelsCell(legacy).title, /迁移 0027/);
 assert.equal(routePathCell(legacy).text, '（未知路由） old ✓');
 
 console.log('Request log reasoning-effort and routing column checks passed.');
+
+// ---------------------------------------------------------------------------
+// 整行可点开详情（M91）：点击面从「最右边那个按钮」扩到整行。
+//
+// 行本身由 ui.js 的 table() 造（页面拿不到 <tr>），所以这一页只需证明三件事：整行与「详情」
+// 按钮走**同一个入口**、入口把失败收在自己身上、这一页确实开了那个入口；两条守卫（行内控件、
+// 拖选文本）在 ui.js 里，一并在这里钉住——它们没有别的 Node 侧落点。
+// ---------------------------------------------------------------------------
+assert.match(source, /onRowClick: \(row\) => openDetail\(row\)/,
+  '列表必须把整行接进 openDetail：M91 之后行本身就是入口');
+assert.match(source, /class: 'btn', text: '详情',\s*\n\s*onclick: \(\) => openDetail\(row\)/,
+  '「详情」按钮与整行必须同一个入口：键盘路径不能走另一条分支');
+const openStart = source.indexOf('function openDetail(row) {');
+const openEnd = source.indexOf('\nasync function detail', openStart);
+assert.ok(openStart >= 0 && openEnd > openStart, 'openDetail 必须存在');
+const openDetailSource = source.slice(openStart, openEnd);
+assert.match(openDetailSource, /if \(detailPending\) return;/,
+  'pending 期间第二次点击必须被丢掉：弹窗要等接口回来才挂进 DOM，双击会开两个');
+assert.match(openDetailSource, /\.catch\(\(err\) => toast\(api\.errorMessage\(err\), 'error'\)\)/,
+  '失败必须在入口处变成屏幕上的 toast——未捕获的 promise 只会进控制台');
+assert.match(openDetailSource, /detail\(row\.request_id\)/, 'openDetail 才是真正去取详情的那一处');
+// 全文件只允许有一次取详情：第二次出现就意味着有一条绕过 openDetail 的路径，失败处理会分叉。
+assert.equal((source.match(/detail\(row\.request_id\)/g) || []).length, 1,
+  '不允许存在绕过 openDetail 的第二条路径（失败处理会因此分叉）');
+
+const uiSource = await readFile(new URL('../static/js/ui.js', import.meta.url), 'utf8');
+assert.match(uiSource, /const ROW_CLICK_OWNERS = 'button, a, input, select, textarea, label, summary, \[role="button"\], \[role="link"\]'/,
+  '行内控件自己吃掉点击：否则「详情」按钮的这一次会再冒泡成一次行点击');
+assert.match(uiSource, /target\.closest\(ROW_CLICK_OWNERS\)/, '行点击必须放过落在控件上的那一次');
+assert.match(uiSource, /String\(window\.getSelection\(\)\)\.trim\(\)/,
+  '拖选文本（复制请求 id）之后的那次点击不能打开弹窗');
+assert.match(uiSource, /export function table\(\{[^}]*onRowClick[^}]*\}\)/,
+  'table() 的 onRowClick 必须是可选参数：不传的列表 DOM 不变');
+assert.match(uiSource, /export function pagedTable\(\{[^}]*onRowClick[^}]*\}\)/,
+  'pagedTable() 要把 onRowClick 透传给 table()');
+console.log('Request log row-click detail checks passed.');

@@ -6469,3 +6469,34 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
 | 测试 | `make test` 全绿；`make ui-base` 全绿；`python3 scripts/desensitize.py --check`（含 `--require-table`）= **0 命中**，`scripts/test_desensitize.py` 通过；插件套件：`lib/rpc-channel` 11/11、ssh-workspace 248 断言、web-tty 14/14、workspace-files 19/19、git-diff 48/48（工作区与宿主两侧都跑过） |
 | 未做 | 未推 origin（M89 的历史重写要强推，届时一起）；**v4.7.1 仍未打 tag**（本次只打 v4.7.2）；其它实例未部署；租户 dsh worker 未重启（M90 的插件半要重启才生效，见 `docs/TODO.md` M90）；M89 的 `release.sh` 硬门禁与历史重写未做 |
 | 观察（非本次引入） | `make smoke` 引用的 `scripts/smoke.sh` 在本克隆里不存在（历史遗留，两克隆分叉所致）；`make dshgw-test` 在本克隆停在 `internal/dshgw/tenancy/settings_schema.test.mjs`（dsh 0.1.7 把 llm-pi-ai 的 providers 标成 volatile，宿主那份 dsh 升级提交已修） |
+
+## M91 请求日志列表整行可点打开详情
+
+> 需求原话：「请求日志的列表 点击 显示详情」。设计：`docs/design/m91-request-log-row-click-detail.md`。
+> 现状：每行**已有**「详情」按钮，缺口是点击面（19 个数据列 + 操作列在最右）。整行与按钮共用
+> `openDetail(row)`；「详情」按钮保留为键盘路径。未做项（部署）留在 `docs/TODO.md` 的 M91 小节。
+
+- [x] `internal/webui/static/js/ui.js`：`table()`/`pagedTable()` 新增**可选** `onRowClick`（不传即 DOM 逐字不变）；
+      行仅在声明了 `onRowClick` 时才带 `class="row-click"` 与监听；两条守卫写在 `bodyRow()` 一处——
+      落在 `ROW_CLICK_OWNERS`（button/a/input/select/textarea/label/summary/`[role=button|link]`）上的点击
+      由控件自己处理，`window.getSelection()` 非空（拖选复制）不算打开
+- [x] `internal/webui/static/app.css`：`tbody tr.row-click { cursor:pointer; }`（样式落在 CSS 而不是行内
+      style——控制台 CSP 是 `style-src 'self'`，行内 `style` 属性会被整条丢弃）
+- [x] `internal/webui/static/js/pages/requests.js`：新增 `openDetail(row)`（整行与「详情」按钮的唯一入口，
+      `.catch` 转 toast、`detailPending` 挡住双击/冒泡带来的第二次）；`pagedTable` 传 `onRowClick`；
+      卡片说明补一句点击行为
+- [x] `internal/webui/tests/requests_test.mjs`：断言整行与按钮同一入口、`openDetail` 带 catch 与 pending
+      守卫、全文件只允许一次取详情、`ui.js` 两条守卫与两个新参数在
+- [x] `scripts/ui-harness/keys.page.html` 的 `#requests`：新增 9 项检查（`rowClickCellsFound`、
+      `rowClickOpensDetail`、`rowClickDialogCloses`、`rowClickCursor`、`statsRowsStayPlain`、
+      `detailButtonOpensOnce`、`detailButtonSameDialog`、`rowClickIgnoresSelection`、
+      `statsRowClickDoesNothing`），断言块逐项独立成立（缺功能只让相关项 FAIL，不抛到 catch）
+- [x] 验收证据：`node internal/webui/tests/requests_test.mjs` 4 段全过；`make ui-base` 全绿；
+      走查 `requests` **121 → 130 项全绿**（源码树 + `make ui-dist` 压缩镜像各一次）；
+      **反向对照**：副本里删掉 `onRowClick` 后同一走查 `failed=['rowClickOpensDetail','rowClickCursor']`
+      （工作树一字未改，用 `/tmp/static-norowclick`）；`make test` 全绿；`make desensitize-check` 0 命中。
+      全量走查的 3 个失败（`chat`/`nodes`/`nodes-readonly`）与本改动无关，已用 `git archive HEAD` 干净树
+      对照复现（`nodes` 8 项与 `nodes-readonly` 的 `readOnlyHidesAdd` 在 HEAD 上以同样名字失败；
+      `chat` 的失败来自并行会话在飞的 `chat.page.html`/`chat_ui.js`，HEAD 上 110 项全绿）
+- [x] 文档：`docs/design/m91-request-log-row-click-detail.md`（含「实现与设计差异」回填）、
+      `docs/request-log.md` §4 控制台段落与 §6 状态、`docs/PROCESS.md` 已产出表、`docs/TODO.md` M91 小节

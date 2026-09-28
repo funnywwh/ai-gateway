@@ -627,6 +627,59 @@ try {
     // The other two labels must survive the new one.
     checks.kindLabelsIntact = cell(listTable(), requestRow('req_demo0001'), '类型') === '会话轮次';
     window.__kindOverride = null;
+
+    // -------------------------------------------------------------------------
+    // 整行可点开详情（M91）：点击面从「最右边那个按钮」扩到整行。
+    //
+    // 行由 ui.js 的 table() 造，页面拿不到 <tr>，所以这里量的是真实 DOM：点行的数据格要开
+    // 这一行的详情、点按钮只能开一个（按钮自己处理一次，冒泡上来的行点击必须被吃掉）、
+    // 拖选文本后的那一下不算打开、手型只给真带处理器的行。夹具用 req_demo0001：它是快照里
+    // 唯一有详情的那一行。
+    // -------------------------------------------------------------------------
+    const clickableRow = requestRow('req_demo0001');
+    const listColumnNames = columnNames(listTable());
+    const rowCell = (label) => {
+      const index = listColumnNames.indexOf(label);
+      return clickableRow && index >= 0 ? clickableRow.children[index] : null;
+    };
+    // 每个断言独立成立：某个元素没找到就只让它对应的那一项为 false，不要一路抛到 catch——
+    // 「功能没做」在走查里必须读成"这几项 FAIL"，而不是"这一页炸了"。
+    const dialogOpen = () => !!modal().querySelector('.modal');
+    const closeIfOpen = () => { const btn = closeButton(); if (btn) btn.click(); };
+    checks.rowClickCellsFound = !!rowCell('时间') && !!rowCell('请求 ID');
+    // ① 点数据格（不是按钮）→ 开的就是这一行的详情，且是个能正常关掉的弹窗
+    if (rowCell('时间')) rowCell('时间').click();
+    await settle();
+    checks.rowClickOpensDetail = modalText().includes('请求 req_demo0001');
+    closeIfOpen();
+    await settle();
+    checks.rowClickDialogCloses = !dialogOpen();
+    // ② 手型：类与 app.css 两边都得住。统计卡的行不是点击目标，不该变成手型（范围只限列表）
+    checks.rowClickCursor = !!clickableRow && getComputedStyle(clickableRow).cursor === 'pointer';
+    checks.statsRowsStayPlain = getComputedStyle(statsTable().querySelector('tbody tr')).cursor !== 'pointer';
+    // ③ 点「详情」按钮只开一个弹窗：按钮的 handler 与冒泡到行的 handler 是同一个动作
+    find('详情').click();
+    await settle();
+    checks.detailButtonOpensOnce = document.querySelectorAll('#modal-root .modal-backdrop').length === 1;
+    checks.detailButtonSameDialog = modalText().includes('请求 req_demo0001');
+    closeIfOpen();
+    await settle();
+    // ④ 拖选请求 ID 之后的那次点击是「复制」，不是「打开」——弹窗盖住选区会把这次复制吃掉
+    const idCell = rowCell('请求 ID');
+    const idRange = document.createRange();
+    if (idCell) idRange.selectNodeContents(idCell);
+    const idSelection = window.getSelection();
+    idSelection.removeAllRanges();
+    if (idCell) idSelection.addRange(idRange);
+    if (idCell) idCell.click();
+    await settle();
+    checks.rowClickIgnoresSelection = !dialogOpen() && idSelection.toString().includes('req_demo0001');
+    idSelection.removeAllRanges();
+    // ⑤ 统计卡的行不带处理器：点它什么都不该发生（整行可点只开在列表这一个地方）
+    const statsCell = statsTable().querySelector('tbody tr td');
+    if (statsCell) statsCell.click();
+    await settle();
+    checks.statsRowClickDoesNothing = !!statsCell && !dialogOpen();
   }
 
   const flags = Object.entries(checks).filter(([, v]) => typeof v === 'boolean');

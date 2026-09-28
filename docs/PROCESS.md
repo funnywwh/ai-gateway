@@ -36,6 +36,7 @@
 | M84 | docs/design/m84-image-generation.md + docs/api-images.md | 是（要点已随计划在对话中确认） |
 | M86 | docs/design/m86-session-worktree-scope.md + docs/dshgw.md §7f、deploy/dshgw/README.md | 是（计划经确认后开工） |
 | M89 | docs/design/m89-code-desensitization.md | 是（计划经确认后开工） |
+| M91 | docs/design/m91-request-log-row-click-detail.md + docs/request-log.md §4/§6 | 是（计划经确认后开工） |
 
 ## 检查项（提交前自检）
 

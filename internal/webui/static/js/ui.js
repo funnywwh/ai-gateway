@@ -33,6 +33,13 @@ export function el(tag, attrs, children) {
 
 export function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
+// ROW_CLICK_OWNERS are the elements that answer a click themselves. A row that opens
+// something must not ALSO fire for a click that landed on one of these — the request log's
+// 「详情」 button would otherwise open its dialog twice (its own handler, then the bubbled
+// row handler). Native controls are matched by tag; anything passing itself off as one via
+// role is matched too, because a div styled as a button is still a button to whoever clicks it.
+const ROW_CLICK_OWNERS = 'button, a, input, select, textarea, label, summary, [role="button"], [role="link"]';
+
 export function card(title, children, actions) {
   const head = title ? el('div', { class: 'toolbar' }, [el('h2', { text: title, style: 'margin:0;flex:1' }), ...(actions || [])]) : null;
   return el('section', { class: 'card' }, [head, ...[].concat(children || [])]);
@@ -297,7 +304,14 @@ function collect(fields, body) {
 // not name gets an empty cell, so the row cannot drift out of alignment when a column is
 // added; colspan arithmetic at the call site is exactly what goes stale. Returning
 // nothing (or having no rows to show) renders no summary row at all.
-export function table({ columns, rows, filter, onFilter, empty, rowActions, filterPlaceholder, footer }) {
+//
+// onRowClick is for a list whose row IS the way in (the request log's "click the row to open
+// its detail"). It is optional on purpose: without it the rows are built exactly as they were
+// before — same element, same classes — so this stays a capability a list opts into, and every
+// other list keeps its behaviour. When it is given, one click on a row calls onRowClick(row)
+// once, unless the click belongs to a control inside the row or just finished selecting text
+// (both rules live in bodyRow below, with the reasons).
+export function table({ columns, rows, filter, onFilter, empty, rowActions, filterPlaceholder, footer, onRowClick }) {
   const wrap = el('div');
   let query = '';
   const head = el('thead', {}, [el('tr', {}, columns.map((col) => el('th', {
@@ -346,8 +360,33 @@ export function table({ columns, rows, filter, onFilter, empty, rowActions, filt
     for (const row of data) {
       const cells = columns.map((col) => el('td', {}, [col.render ? col.render(row) : text(row[col.key])]));
       if (rowActions) cells.push(el('td', { class: 'actions' }, rowActions(row)));
-      tbody.append(el('tr', {}, cells));
+      tbody.append(bodyRow(row, cells));
     }
+  }
+
+  // bodyRow builds one data row. It only becomes a click target when the list declared
+  // onRowClick, and only then does it carry .row-click (the cursor is scoped to rows that
+  // really have a handler — a row that merely highlights on hover is not clickable).
+  //
+  // Two clicks must not act as one, and one click must not act as two:
+  //
+  //   - A click that landed on a control inside the row belongs to that control. Without this
+  //     rule the request log's 「详情」 button would open its dialog and then the bubbled row
+  //     click would ask for it again.
+  //   - A click that ends a text selection is a copy, not an open. Operators select the request
+  //     id out of this table, and a dialog appearing over the selection would eat that copy.
+  function bodyRow(row, cells) {
+    if (!onRowClick) return el('tr', {}, cells);
+    return el('tr', {
+      class: 'row-click',
+      onclick: (ev) => {
+        const target = ev.target;
+        if (target && typeof target.closest === 'function' && target.closest(ROW_CLICK_OWNERS)) return;
+        const selected = window.getSelection ? String(window.getSelection()).trim() : '';
+        if (selected) return;
+        onRowClick(row);
+      },
+    }, cells);
   }
 
   // renderFooter places each summary cell under its own column, and an empty cell
@@ -440,7 +479,8 @@ export function pager({ limit, offset, total, pageSizes, unit, onChange }) {
 // footer is forwarded to table(): a paged list whose page carries a summary row (the
 // request log's token/cost totals) hands one in, and the summary is recomputed from the
 // rows of whichever page is on screen.
-export function pagedTable({ columns, load, pageSize, pageSizes, rowActions, empty, filter = true, onError, footer }) {
+// onRowClick is forwarded too, for the lists whose rows are themselves the way in.
+export function pagedTable({ columns, load, pageSize, pageSizes, rowActions, empty, filter = true, onError, footer, onRowClick }) {
   const state = { limit: pageSize || 20, offset: 0, total: 0, loaded: false };
   const host = el('div');
   const loading = el('div', { class: 'empty', text: '加载中…' });
@@ -475,7 +515,7 @@ export function pagedTable({ columns, load, pageSize, pageSizes, rowActions, emp
         continue;
       }
       if (!view) {
-        view = table({ columns, rows, filter, empty, rowActions, footer, filterPlaceholder: filter === false ? undefined : '本页过滤…' });
+        view = table({ columns, rows, filter, empty, rowActions, footer, onRowClick, filterPlaceholder: filter === false ? undefined : '本页过滤…' });
         clear(host);
         host.append(view.node);
       } else {

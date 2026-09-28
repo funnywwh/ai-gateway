@@ -134,10 +134,13 @@ export async function render({ page, actions, session }) {
     empty: '该窗口内没有请求日志',
     rowActions: (row) => [el('button', {
       class: 'btn', text: '详情',
-      // The click handler owns the failure: an unawaited promise here would surface as
-      // "Uncaught (in promise)" in the console instead of a message on screen.
-      onclick: () => detail(row.request_id).catch((err) => toast(api.errorMessage(err), 'error')),
+      onclick: () => openDetail(row),
     })],
+    // 整行可点（M91）：19 个数据列 + 操作列，操作列在最右边，窄窗口下要横向滚动才够得着它——
+    // 而操作者读的是左边那几列。点行与点「详情」是同一个动作、同一个入口；行内控件（按钮/链接/
+    // 输入）自己吃掉点击，拖选文本（复制请求 id）之后的那一下也不会打开，两条规则都在 ui.js 的
+    // bodyRow 里。「详情」按钮保留：它是键盘路径（行不可聚焦）。
+    onRowClick: (row) => openDetail(row),
     load: ({ limit, offset }) => api.get('/requests', { ...filterParams(), limit, offset }),
     // The summary row under the list: the page's tokens and money, in the same cells as
     // the columns above them (summaryCells).
@@ -353,6 +356,8 @@ export async function render({ page, actions, session }) {
   page.append(statsCard);
   page.append(card('请求日志', view.node, [
     days, accountFilter, keyFilter, providerFilter, client, model, sessionFilter, workspaceFilter,
+    // 点击行为写在筛选栏旁边：这一页的说明文字一直在解释「这一列是什么口径」，入口也是口径的一部分。
+    el('span', { class: 'muted', text: '点击任意一行打开该请求的详情（行内按钮与链接照旧各自处理；拖选文本不会误开）；「详情」按钮是同一条路径的键盘入口' }),
     el('span', { class: 'muted', text: '用户（账户）/API Key 与客户端/模型/推理强度/工作区/会话/标题、token 成本都是独立于正文口径记录的元数据（record_input=off 也记）；用户/Key/供应商的名字由各自的表读时解析，分组按 id；供应商按计量行的 provider_id 归属（同一模型的不同供应商各自计价，失败转移的请求会在每一家各计一次）；「上游模型」与「路由路线」也来自计量行——一次请求可以失败转移，所以那里是每次尝试一行：路线逐跳写「路由 #id 供应商 结果」，最后成功的那一跳带 ✓（失败带 ✗ 与错误码），上游模型是当时真正发出去的名字（路由可被编辑或删除，这里记的是快照，不随配置变化）；本地拒绝的请求没有计量行，显示「未计量」与「无上游尝试」，与「消耗为 0」不是一句话；标题来自会话的标题调用，成本来自计量表，与账单一致；列表底部的「本页汇总」只合计当前页已加载的行（含本页过滤），窗口口径看上方「维度统计」' }),
     hint]));
 
@@ -651,6 +656,25 @@ function inputPanelTitle(row) {
     return '输入（未保留：只有样板或超长用户消息）';
   }
   return '输入（未录制）';
+}
+
+// openDetail is the one way into the detail dialog: the row click and the 「详情」 button both
+// come through it, so the failure handling exists once. The handler owns the failure — an
+// unawaited promise would surface as "Uncaught (in promise)" in the console instead of a
+// message on screen.
+//
+// The pending flag exists because the dialog is appended only after the row arrives: two
+// clicks (a double click, or the button's own handler plus the row click bubbling up to it)
+// would otherwise ask for the same detail twice and stack two dialogs on top of each other.
+// The row click makes that easy to hit, which is why the guard belongs to the entry point and
+// not to either caller.
+let detailPending = false;
+function openDetail(row) {
+  if (detailPending) return;
+  detailPending = true;
+  detail(row.request_id)
+    .catch((err) => toast(api.errorMessage(err), 'error'))
+    .finally(() => { detailPending = false; });
 }
 
 async function detail(requestID) {

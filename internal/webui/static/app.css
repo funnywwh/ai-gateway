@@ -71,6 +71,12 @@ table { width:100%; border-collapse:collapse; font-size:13px; }
 th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
 th { color:var(--muted); font-weight:500; white-space:nowrap; cursor:pointer; }
 tbody tr:hover { background: var(--panel-2); }
+/* A row that is itself a click target (the request log: click a row to open its detail).
+   The class is what table() puts on rows that really carry a handler, so the pointer never
+   shows up on a row that merely highlights on hover — the same rule the summary row below
+   is about. The cursor has to live here and not in an inline style: the console's CSP is
+   style-src 'self', which drops style attributes whole. */
+tbody tr.row-click { cursor:pointer; }
 /* The summary row a list may carry under its own columns (the request log's page totals).
    It is built from td, not th: th carries the header's muted colour and the pointer
    cursor sortable columns need, which would make a total look clickable. */
