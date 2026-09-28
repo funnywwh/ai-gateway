@@ -1,8 +1,10 @@
 # 组织架构（规格）
 
-> 状态：**已实现（M49）**。
-> 设计见 `docs/design/m49-organization.md`。
-> 相关：`docs/routing.md`（授权并集与策略合并）、`docs/mcp.md`（后台工具）、`docs/billing.md`（账号即计费主体）。
+> 状态：**已实现（M49）；多公司导入（每家公司的飞书企业一个自建应用）已实现（M92）**。
+> 设计见 `docs/design/m49-organization.md`、`docs/design/m70-feishu-org-sync.md`、
+> `docs/design/m92-multi-company-feishu-org-sync.md`。
+> 相关：`docs/routing.md`（授权并集与策略合并）、`docs/mcp.md`（后台工具）、`docs/billing.md`（账号即计费主体）、
+> `docs/feishu.md`（飞书身份与通讯录同步）。
 
 组织架构回答「这家公司/这个部门有哪些账号」，并让**节点上绑定的标签被整棵子树继承**。
 它是一套**独立于标签**的实体：组织树管归属，标签管权限，两者在自己的页面与自己的接口里各自维护，
@@ -11,6 +13,16 @@
 ## 1. 形状
 
 - **多根森林**：`org_nodes.parent_id` 为空即根节点。可以有多个根（多家公司、多个事业部）。
+- **公司节点（M92）**：用飞书通讯录导入的每一家公司，在本地有自己的根节点——**公司节点**。
+  它的顶层部门挂在其下，所以"这家公司有哪些部门"在树里是一棵看得见的子树。
+  - 公司节点的标记是 `(feishu_app_id, feishu_department_id='0')`（飞书把公司本身当作虚拟部门 `"0"`），
+    因此**改公司名或改节点名都不会丢**这层关系；
+  - 公司节点的名字默认取配置里的公司名（`feishu.company_name` / `feishu.companies[].name`，可用
+    `companies[].root_node` 指定别的名字）。同步会**认领**根层已存在的同名节点（仅当它还没有被任何
+    公司/部门标记），不会重复建一个；
+  - **公司同步保证一条不变量**：该公司的顶层部门节点挂在该公司根节点下——手动把某个顶层部门移到根层，
+    下一次同步会把它移回（超过 16 层时跳过并告警，见 [docs/feishu.md §5c](feishu.md)）；
+  - 两家公司都有「研发部」时是**两个节点**（各自在公司根下），不会互相合并；人员同名也不会互相抢账号。
 - **兄弟节点内名字唯一**，不同父节点下可以同名（两个分公司都可以有「研发部」）。
 - 名字是**人类可读标签**：去除首尾空白后非空、最多 64 个 Unicode 字符，中文/标点/邮箱形式均可，
   与账号名、标签名同一套规则（`domain.normalizeLabel`）。名字**可以改**（组织节点按 id 寻址，
@@ -58,13 +70,19 @@ Key 的策略最后生效，所以 Key 永远能覆盖组织与账号层的设�
 | PATCH | `/admin/api/v1/org/nodes/{id}` | `admin_update_org_node` | admin |
 | DELETE | `/admin/api/v1/org/nodes/{id}` | `admin_delete_org_node` | admin |
 | PUT | `/admin/api/v1/org/nodes/{id}/accounts` | `admin_set_org_node_accounts` | admin |
-| GET | `/admin/api/v1/org/feishu/directory` | `admin_list_feishu_directory` | admin |
-| POST | `/admin/api/v1/org/feishu/sync` | `admin_sync_feishu_org` | admin |
-| POST/PUT/DELETE | `/admin/api/v1/org/feishu/users/{open_id}/account` | `admin_create_account_from_feishu_user` / `admin_bind_account_feishu_user` / `admin_unbind_account_feishu_user` | admin |
+| GET | `/admin/api/v1/org/feishu/companies` | `admin_list_feishu_companies` | viewer |
+| GET | `/admin/api/v1/org/feishu/directory?company=` | `admin_list_feishu_directory` | admin |
+| POST | `/admin/api/v1/org/feishu/sync`（body 可带 `company`） | `admin_sync_feishu_org` | admin |
+| POST/PUT/DELETE | `/admin/api/v1/org/feishu/users/{open_id}/account?company=` | `admin_create_account_from_feishu_user` / `admin_bind_account_feishu_user` / `admin_unbind_account_feishu_user` | admin |
+| DELETE | `/admin/api/v1/org/feishu/companies/{app_id}/links` | `admin_purge_feishu_company_links` | admin |
 | GET | `/admin/api/v1/accounts?org_node_id=&include_descendants=` | `admin_list_accounts` | viewer |
 | POST/PATCH | `/admin/api/v1/accounts`（body `org_node_ids`） | — | admin |
 
 字段语义、形状与示例见 `admin_describe`（MCP）或控制台组织架构页；两者是同一张路由表。
+
+**`company` 参数（M92）**：公司标识，接受 **app_id**（`cli_…`）或配置里的**公司名**；**省略 = 本部署的
+身份应用（本公司）**，也就是 M70 的原有行为。未知值 400，消息里列出已知的 app_id 与公司名。
+缺省它是向后兼容的：只服务一家公司的部署一行都不用改。
 
 **列表返回的形状**（扁平 + 层级字段，前端不再自己算层级）：
 
@@ -72,6 +90,7 @@ Key 的策略最后生效，所以 Key 永远能覆盖组织与账号层的设�
 {"data":[
   {"id":1,"parent_id":null,"name":"总部","path":"总部","depth":0,"sort_order":100,
    "note":"","tags":["internal"],"account_count":3,
+   "feishu_app_id":"","company":"",
    "accounts":[{"id":7,"name":"研发-张三"}],"accounts_truncated":false,
    "created_at":"2026-09-15T10:00:00Z","updated_at":"2026-09-15T10:00:00Z"},
   {"id":2,"parent_id":1,"name":"研发部","path":"总部/研发部","depth":1,"sort_order":100,
@@ -82,6 +101,8 @@ Key 的策略最后生效，所以 Key 永远能覆盖组织与账号层的设�
 
 - `path` 是「根/…/自身」的名字路径，用于下拉框与账户页的「所属组织」列。
 - `depth` 与 `parent_id` 让控制台一次性拿到可渲染的标量列表。
+- `feishu_app_id` 与 `company`（M92）：该节点是哪家公司导入进来的（手工节点与未被同步的节点都是空串；
+  `company` 是配置里的公司名，公司已从配置移除时它为空而 `feishu_app_id` 仍在）。
 - `accounts` 只在 `include_accounts=true` 时返回；超过上限会截断并置 `accounts_truncated: true`。
 
 ## 4. 删除与移动
@@ -132,13 +153,21 @@ Key 的策略最后生效，所以 Key 永远能覆盖组织与账号层的设�
       `zhangwei` 都能搜到 `长伟`）。节点树的过滤框同样支持。人员列表的过滤同时匹配账号名与飞书姓名。
     - **过滤框固定在列表上方**，不随成员列表滚动；
     - **勾选的成员自动排到最前**（含"已选 N 个"提示），取消勾选即回到原位。
-  - **同步飞书**（右上角，`role=admin`；M70）：弹出飞书组织结构树 + 人员列表，**勾选要同步的部门**
+  - **同步飞书**（右上角，`role=admin`；M70，多公司 M92）：弹出飞书组织结构树 + 人员列表，**勾选要同步的部门**
     （含合成根「飞书根组织」＝公司层人员；勾选/取消父部门会**连同其子部门**一起，半选表示"这一行与它的
     子树不一致"，另有「全选 / 清空」），一键「同步」补建缺失部门节点并自动合并**范围内**已匹配的人员；
     勾选部门的**上级**会自动补建（树里标「为层级补建」，其人员不在范围内）；范围外的人员在右侧置灰；
     匹配不上的人逐行「创建用户 / 绑定账号」。
-    合并与范围规则、飞书后台需要的权限与排障见
-    [docs/feishu.md §5c](feishu.md#5c-通讯录同步组织架构页同步飞书m70)。
+    - **顶部有公司下拉**（配置了 ≥2 家公司时出现，读 `GET /org/feishu/companies`）：每家公司用自己的飞书
+      自建应用凭据读通讯录，**同步进自己的公司节点**。不选 = 本公司（身份应用），行为与只服务一家公司时相同。
+      切换公司会重新读取该公司的目录并重置勾选（默认全选）。
+    - 确认框会写明"将新建公司节点「X」"与"将把 N 个顶层部门移入公司节点"——后者只在
+      [旧数据首次认领](feishu.md) 或有人把顶层部门手动移到根层时出现。
+    - 合并与范围规则、飞书后台需要的权限与排障见
+      [docs/feishu.md §5c](feishu.md#5c-通讯录同步组织架构页同步飞书m70)。
+  - 账号行的**「飞书」列**（M92）：账号级飞书身份（DSH 登录身份，只有本公司有）优先显示；没有账号级身份
+    但有公司级映射时显示 `公司名 · 姓名`（多于一条显示第一条 + `+N`）。公司级映射来自同步或在该公司
+    作用域下的「绑定账号」，它**不产生登录能力**。
 - **账户页**：「所属组织」列与**按组织筛选**（可选是否包含子节点）；新建/编辑账户里的
   「所属组织」是**勾选树字段**（一行当前归属路径 + 「分配组织…」按钮），提交时整表替换
   `org_node_ids`（空数组 = 移出全部组织）。账号表单本身由 `pages/account_actions.js` 提供，
@@ -219,3 +248,12 @@ view.refresh(nodes); view.setSelected(id); view.expandAll(); view.collapseAll();
 | 点「收起」收不起来 | 已修：详情行默认 `display:none`，只有 `.open` 才成为一行（`app.css` 的 `.org-person-detail` 门控）。这条规则曾缺失，于是"收起"只是把 `open` 类摘掉、内容照旧可见 |
 | 合成行「未归属账户」里的账号点不进任何节点 | 它不是一个节点：展开这些账号后用「分配组织」（`PATCH /accounts/{id}` 的 `org_node_ids`）把它们挂到某个节点下 |
 | 账号行的飞书操作看不见 | 只读角色（`role=viewer`）看不到绑定/解绑/停用等写操作；飞书未配置的部署也不会出现这些元素 |
+| 同步弹窗里没有公司下拉 | 只配了一家（本公司）：单公司时下拉不渲染，接口的 `company` 省略即本公司。要有下拉就在 `feishu.companies` 里加一家并重启 |
+| `company` 报 400 | 传了配置里不存在的 app_id/公司名：消息里列出已知的公司；公司是从配置读的，改名/新增都要改配置 + 重启 |
+| 公司的「研发部」没有并到我的节点上 | 同名合并只在**同一父节点下**成立。现在顶层部门的目标父是**该公司的公司节点**，所以「研发部」要挂在公司节点下才会合并；根层的同名节点会在预览里报 `root_name_conflict` |
+| 公司节点建不出来（同步按钮灰着） | 根层已有一个同名节点，且它属于另一家公司或某个飞书部门：预览会报 `root_name_conflict` 并禁用「同步」，接口也会 409。给这家公司配 `feishu.companies[].root_node` 换名，或先重命名那个节点 |
+| 某公司的顶层部门自己回到了公司节点下 | 这是 M92 的**文档化不变量**（公司同步保证顶层部门在公司根下）。不想让它回来，就把整个公司节点移走，或给这批部门用另一个 `app_id`（= 另一家公司） |
+| 同步后账号的「飞书」列只显示 `公司名 · 姓名` | 那是**公司级映射**（非本公司的人）：它只用于组织归属，不是登录身份。本公司（身份应用）的人才会写账号级身份并出现在门户登录的判定里 |
+| 公司的人登不进 DSH 门户 | 预期行为：只有**身份应用**（本公司）的飞书身份能登录。其它公司在自己的租户里没有本部署的应用，入口是 API Key 或本公司身份 |
+| 删掉公司节点后同步又建回来了 | 公司节点是同步的目标；删它等于删掉这家公司的整棵子树，下次同步会重建（成员关系已随子树删除） |
+| 公司从配置里移除后数据还在 | 预期行为：移除只停止同步，节点、映射、成员关系都保留。要清理映射用 `DELETE /org/feishu/companies/{app_id}/links`（只删映射），节点用 `DELETE /org/nodes/{id}?cascade=true` |

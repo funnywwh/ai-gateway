@@ -425,6 +425,19 @@ feishu:
   enabled: false
   app_id: ""                  # 凭证与基础信息 → App ID (cli_…)
   app_secret: ""              # 凭证与基础信息 → App Secret; prefer GW_FEISHU_APP_SECRET
+  # M92：这家应用代表哪家公司（本公司）。它是同步弹窗里的展示名，也是本公司组织节点的默认名；留空 = "本公司"。
+  company_name: ""
+  # M92：其它公司的飞书企业（各自一个自建应用），**只**用于把它们的组织架构导入本地组织树。
+  # 每家公司要在自己的租户里建自建应用、加两个只读权限（「获取部门基础信息」「获取用户基本信息」）、
+  # 把通讯录权限范围设为要同步的部门并发布版本（见 docs/feishu.md §2b）；不需要回调地址，也不做登录。
+  # 同步时选哪家公司由控制台弹窗的公司下拉决定（接口参数 company = app_id 或这里的 name）。
+  # 这家公司的人员只建立"人员 ↔ 账号"映射（可用于组织归属），**不产生 DSH 门户的飞书登录能力**。
+  # companies:
+  #   - name: "某某科技"                        # 唯一；≤64 字符；不能以 cli_ 开头
+  #     app_id: "cli_yyyyyyyy"
+  #     app_secret_env: "GW_FEISHU_ACME_SECRET" # 与 app_secret 二选一；env 优先（密钥不进 YAML）
+  #     # app_secret: ""
+  #     root_node: ""                          # 可选：本地公司根节点名（默认 = name；可指向已建好的同名根节点）
   # The absolute URL registered under 安全设置 → 重定向 URL, exactly as the browser sees it
   # (this deployment puts aigw behind the front proxy on 8090). Exactly one URL is
   # registered: it serves both the console binding and the portal login. Its path must be

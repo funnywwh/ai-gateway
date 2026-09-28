@@ -6581,3 +6581,51 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
 - [x] 部署（随 **v4.7.3**）：控制台资源内嵌在二进制里，随 v4.7.3 重建 `bin/aigw` 并重启 gw-c 的
       `aigw-local.service` 生效；线上 `/admin/ui/js/ui.js` 已含 `onRowClick`、`app.css` 已含 `row-click`
       （逐字节比对见 v4.7.3 发布记录）
+
+## M92 导入多家公司的组织架构（每家公司一个飞书自建应用）
+> 设计：`docs/design/m92-multi-company-feishu-org-sync.md`；规格：`docs/org.md` §1/§3/§5/§6、
+> `docs/feishu.md` §2b/§3/§5c.6、`docs/mcp.md` §4、`config.example.yaml`。
+> 需求原话：「如何实现导入不同公司的组织架构？」；评审确认：来源 = 每家公司的飞书企业（一个自建应用），
+> 范围 = 部门节点（每家一棵根）+ 人员 → 账号。
+
+- [x] 设计文档与规格文档先行，并已贴到对话确认（`docs/PROCESS.md` 硬要求）
+- [x] 迁移 `internal/store/migrations/0030_feishu_company_scope.sql`：`org_nodes.feishu_app_id` +
+      唯一索引改 `(feishu_app_id, NULLIF(feishu_department_id,''))` + 新表 `feishu_person_links`
+      （`PRIMARY KEY(app_id,open_id)`、`UNIQUE(app_id,account_id)`、账号删除级联）
+- [x] store（`internal/store/org_feishu.go`）：映射表 CRUD（`(app_id,open_id)` 幂等更新、
+      `(app_id,account_id)` 冲突 409）、`SetOrgNodeFeishuDepartment(nodeID, appID, deptID)` 公司作用域、
+      `SetOrgNodeParent`、`AdoptLegacyFeishuScope`（幂等；只认领"有部门 id 但没有公司"的节点）
+- [x] config：`feishu.company_name` + `feishu.companies[]`（`name`/`app_id`/`app_secret`/`app_secret_env`/
+      `root_node`）+ 校验矩阵（名字唯一且不得像 app_id、app_id 唯一且≠身份应用、密钥二选一、
+      根名唯一、公司数 ≤ 32、`enabled:false` 下不许配公司）
+- [x] `internal/feishu/company.go`：`Company`、`CompaniesFromConfig`（身份应用恒为第 0 家、复用同一个
+      client 与 token 缓存）、`NewCompanyClient`、`FindCompany`（app_id 或公司名，省略 = 身份应用）、
+      `DescribeCompanies`（日志只打名字与 app_id，绝不打密钥）
+- [x] `cmd/aigw`：装配 `FeishuDeps.Companies`；启动认领 `adoptLegacyFeishuScope`（日志一行
+      `legacy feishu org nodes adopted`，失败只记日志，与 M72 回填同约定）
+- [x] 同步算法（`internal/httpapi/admin_org_feishu.go`）：`planCompanyRoot`（marker → 同名认领 → 新建，
+      被占用则 `Blocked` 并在写任何数据前 409）、部门按 `(app_id, department_id)` 与**公司节点下**同父同名
+      匹配、顶层部门归位（`SetOrgNodeParent` + 高度守卫 16 层）、旧行补打公司（`WillStampScope`）、
+      人员映射（身份应用写 `accounts.feishu_*`、其它公司写映射表；同名只认"任何公司都没有映射"的账号）、
+      企业层人员挂公司节点、单个人操作共用同一套公司根解析
+- [x] 接口（进 `admin_routes.go` 同一张表 ⇒ 自动成为 MCP 工具，字段/示例按 `docs/mcp.md` §4.5 补齐）：
+      `GET /org/feishu/companies`、`company` 参数（directory query / sync body+query / per-person query）、
+      `DELETE /org/feishu/companies/{app_id}/links`（身份应用 400）；审计带 `company`；
+      节点 JSON 带 `feishu_app_id`/`company`，账号 JSON 的 `feishu.links` 恒存在
+- [x] 控制台：同步弹窗公司下拉（≥2 家才渲染，单公司部署请求形状与 M70 逐字相同）+ 目录/同步/逐人操作
+      都带 `company` + 确认框写明公司节点与归位数量 + 公司节点冲突时禁用「同步」；账号「飞书」列显示
+      公司级映射（`公司名 · 姓名`，多条 `+N`），人员过滤同时匹配这些姓名
+- [x] 测试：`internal/config/feishu_companies_test.go`（14 例校验矩阵 + env 密钥）、
+      `internal/store/org_company_test.go`（映射表幂等/冲突/级联/按公司清理 + 启动认领幂等）、
+      `internal/httpapi/admin_org_feishu_company_test.go`（两家公司同名部门不合并、同名人员不抢账号、
+      公司级映射不改登录身份、公司节点认领与旧顶层部门归位（含超深跳过）、公司根名冲突 409、
+      `company` 参数四种解析、公司列表接口与退场清理、账号/节点 JSON 形状）；
+      既有测试按新形状更新（公司节点计入 `created_nodes`、顶层部门挂在公司节点下、企业层人员获得
+      公司节点成员关系、无名同步仍建公司节点）
+- [x] 验收证据：`go test ./internal/... ./cmd/...` 全绿；`go vet`（涉及包）干净；
+      `make ui-base` 全绿（`org_feishu_test.mjs` 新增公司断言：下拉两家、目录/同步/逐人请求带 company、
+      切换公司重读并重置勾选、创建用户路径带 `?company=`）；性能 `BenchmarkPlan` 4948 B/**45 allocs**
+      与 `BenchmarkResolveTagRecords` 0 B/0 allocs、288 B/9 allocs 与改前逐项相同（未触碰请求路径）
+- [x] 文档：设计文档（含「实现与设计差异」12 条 + 性能落点）、`docs/org.md`、`docs/feishu.md` §2b/§5c.6、
+      `docs/mcp.md` §4、`config.example.yaml`、`docs/PROCESS.md` 已产出表、`docs/TODO.md` M92 小节
+

@@ -119,6 +119,18 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
   **节点上的标签会被整棵子树继承**：挂一个带 `grants` 的标签等于给该子树下所有账号的**全部 API Key** 放权，
   所以这几条路由标记为危险接口、`admin_describe` 会给出 `confirm_reason`。
 
+- **多家公司的飞书组织架构导入是后台可调的**（M92，同 `group=org`）：`admin_list_feishu_companies` 列出配置里的
+  公司（`app_id`、名字、是否本部署的身份应用、公司节点、节点数、已映射账号数）；`admin_list_feishu_directory`
+  与 `admin_sync_feishu_org` 以及三条人员接口都接受 **`company`**（app_id 或公司名，省略 = 本公司/身份应用）：
+  - `admin_sync_feishu_org` 的 `body.company` 决定这次同步哪家公司：该公司的顶层部门会挂到**它自己的公司节点**下，
+    人员按"本公司写账号级飞书身份（登录身份）、其它公司只写公司级映射（`feishu_person_links`，不产生登录能力）"合并；
+  - 响应里的 `company.root`（`node_id`/`matched`/`will_create`/`will_adopt`）与 `company.reparent_node_ids`
+    说明本次会新建/认领哪个公司节点、会把这公司的哪些顶层部门移入其下（`stats.reparent_nodes` 是数量）；
+  - `admin_purge_feishu_company_links`（`DELETE /org/feishu/companies/{app_id}/links`）只删这家公司的
+    人员映射，不动节点与成员关系；对身份应用会 400（那要用各人的解绑接口）；
+  - 账号 JSON 的 `feishu.links` 列出该公司级映射（`{app_id,company,open_id,name,…}`），节点 JSON 带
+    `feishu_app_id`/`company`。**公司是配置实体**：新增一家公司要改配置 + 重启，接口不提供公司 CRUD。
+
 - **控制台管理员与飞书扫码登录是后台可管理的**（M66，`group=admins`）：`admin_list_admin_users` 列出每个
   管理员账号（角色 `admin`/`viewer`、状态 `pending`/`active`/`disabled`、飞书绑定、是否已发出邀请、
   是否由 `bootstrap.admin` 配置重建）；`admin_create_admin_user` 建号（`body.password` 可省略 ——

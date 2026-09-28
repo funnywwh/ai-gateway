@@ -1238,4 +1238,21 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       `rpc` 事件；④ 升级 dsh 版本后按设计文档 §3 的探针重跑一次。其余租户（dsh-alex、dsh-liuyang 等）
       用的是同一份插件目录，下一次 worker 启动/重启即生效
 
+## M92 导入多家公司的组织架构（每家公司一个飞书自建应用）
+> 设计：`docs/design/m92-multi-company-feishu-org-sync.md`；需求原话：「如何实现导入不同公司的组织架构？」；
+> 评审确认：数据来源 = 各家公司的飞书企业（每家一个自建应用 App ID/Secret），导入范围 = 部门节点（每家一棵根）
+> + 人员 → 账号（自动合并已存在账号、缺失的按需创建）。
+> 规格：`docs/org.md` §1/§3/§5/§6、`docs/feishu.md` §2b/§3/§5c.6、`docs/mcp.md` §4、`config.example.yaml`。
+> **代码、测试、文档都已完成**，完整清单与验收证据见 `docs/todo_done.md` 同名小节；本节只留未完成项。
+
+- [ ] **待宿主执行（部署 + 线上验收）**：升级二进制 → 启动日志应出现 `legacy feishu org nodes adopted` →
+      同步本公司（确认"新建公司节点 + 移入 N 个顶层部门"，再同步一次显示 0 写入）→ 配置第二家公司的
+      `feishu.companies` 并重启 → 同步 → 核对：两家公司的树互不干扰、账号 JSON 的 `feishu.links` 正确、
+      门户飞书登录无回归（身份应用的路径未改）
+- [ ] **待宿主执行（浏览器走查）**：本沙箱没有 firefox，`make ui-check` 跑不了。宿主上执行
+      `make ui-check`（或 `scripts/ui-harness/run.sh --views org-sync org-sync-readonly org-sync-nonames`），
+      验收新增检查项：`companyPickerShown`、`companyPickerListsBoth`、`directoryNamesCompany`、
+      `headerNamesCompany`、`syncBodyCarriesCompany`、`syncConfirmNamesCompany`、`createPathCarriesOpenId`
+
+
 
