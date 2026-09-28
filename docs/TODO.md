@@ -1245,10 +1245,11 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 > 规格：`docs/org.md` §1/§3/§5/§6、`docs/feishu.md` §2b/§3/§5c.6、`docs/mcp.md` §4、`config.example.yaml`。
 > **代码、测试、文档都已完成**，完整清单与验收证据见 `docs/todo_done.md` 同名小节；本节只留未完成项。
 
-- [ ] **待宿主执行（部署 + 线上验收）**：升级二进制 → 启动日志应出现 `legacy feishu org nodes adopted` →
-      同步本公司（确认"新建公司节点 + 移入 N 个顶层部门"，再同步一次显示 0 写入）→ 配置第二家公司的
-      `feishu.companies` 并重启 → 同步 → 核对：两家公司的树互不干扰、账号 JSON 的 `feishu.links` 正确、
-      门户飞书登录无回归（身份应用的路径未改）
+- [x] 升级到 **v4.8.1** 并部署 rag-server：`/version` = 4.8.1/`dd4398a`，启动日志出现
+      `legacy feishu org nodes adopted … nodes=9`（迁移 0030/0031 已应用）。见 `docs/todo_done.md` 发布记录
+- [ ] **待操作员（需要管理员会话）**：同步本公司（确认"新建公司节点 + 移入 N 个顶层部门"，再同步一次显示
+      0 写入）→ 配置第二家公司的 `feishu.companies` 并重启 → 同步 → 核对：两家公司的树互不干扰、
+      账号 JSON 的 `feishu.links` 正确、门户飞书登录无回归（身份应用的路径未改）
 - [ ] **待宿主执行（浏览器走查）**：本沙箱没有 firefox，`make ui-check` 跑不了。宿主上执行
       `make ui-check`（或 `scripts/ui-harness/run.sh --views org-sync org-sync-readonly org-sync-nonames`），
       验收新增检查项：`companyPickerShown`、`companyPickerListsBoth`、`directoryNamesCompany`、
