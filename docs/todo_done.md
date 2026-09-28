@@ -6859,3 +6859,27 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
   点分组标题收起/展开 → 刷新后仍是收起的 → 点被收起分组里的页面 → 该组自动展开且当前项高亮；
   详见 `docs/TODO.md` M95 小节的浏览器走查项
 
+## M95 公司页的「编辑」：配置来源的公司也能改字段
+> 设计：`docs/design/m95-company-edit-fields.md`；规格：`docs/org.md` §5、`docs/feishu.md` §5c.6、`docs/mcp.md` §4。
+> 需求原话：「"改名"应该改成"编辑"，编辑可编辑字段」。
+
+- [x] 设计文档与规格文档先行，并已贴到对话确认（`docs/PROCESS.md` 硬要求；确认时用户追加"密钥也要能改"）
+- [x] 迁移 `0033_feishu_company_overrides.sql`：重建 M94 的覆盖表为五字段可空（name/root_node/note/enabled/secret_enc），
+      M94 的旧行原样搬迁
+- [x] `internal/creds`：`EncryptScopedKey/DecryptScopedKey`（字符串句柄 AAD）+ `CompanySealer.SealByApp/OpenByApp`
+      （scope `feishu_app_override`，与按行 id 的 `feishu_app` 互不可解）
+- [x] store：`List/Set/DeleteFeishuCompanyOverride`（整行替换、全空删行、delete 幂等）
+- [x] 合并：配置来源的行按 覆盖 > 配置 解析 name/root_node/note/enabled；客户公司的密钥覆盖在合并期按请求构造客户端
+      （失败写进 `client_error`）；列表加 `overridden`/`overridden_by`/`overridden_at`/`secret_overridden`
+- [x] PATCH 放宽到五个字段（省略 = 不动、密钥 `""` = 清除覆盖）+ `{"reset": true}`；**身份应用给密钥 400**
+      （密钥同时用于登录流程）；空请求 400；停用/凭据守卫统一到 `usableCompany`（顺带修掉"省略 company=本公司"
+      绕过停用检查的旧洞）
+- [x] 控制台：按钮统一「编辑」；四字段 + 客户公司密钥可编辑、本公司密钥只读并写明原因；覆盖徽标
+      「已在控制台编辑：…」；「恢复配置值」（含公司节点名跟随回去）；只读角色无写入口
+- [x] 测试：creds 跨封法不可解、store 覆盖增量/空值语义/全空删行、httpapi 四字段与 reset、
+      **密钥覆盖真的被用上**（stub 校验凭据 99991663：配置密钥被拒 → 覆盖后成功 → 清除后再次被拒）、
+      身份应用 400、viewer 403；静态断言与 harness 视图按 M95 口径更新
+- [x] 验收证据：`go test ./internal/... ./cmd/...` 全绿（`nodeaudit` 一次时序抖动，单跑 5/5 与全量重跑均绿，未改该包）；
+      `make ui-base` 全绿；`BenchmarkPlan` 4948 B/45 allocs 不变
+- [x] 文档：设计文档（含「实现与设计差异」7 条）、`docs/org.md` §5、`docs/feishu.md` §5c.6、
+      `docs/mcp.md` §4、`docs/PROCESS.md` 已产出表、`docs/TODO.md` M95 小节

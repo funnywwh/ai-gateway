@@ -1305,3 +1305,16 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 - [ ] **待操作员（人工看一眼，线上已是 v4.10.1）**：打开控制台 → 菜单默认只剩 6 个分组标题 + **当前分组**的
       条目；点别的分组展开、再点收起；刷新后仍记得打开过哪些；直接访问 `#/keys` 这类深链接时对应分组
       自动展开且当前项高亮
+
+## M95 公司页的「编辑」：配置来源的公司也能改字段
+> 设计：`docs/design/m95-company-edit-fields.md`；需求原话：「"改名"应该改成"编辑"，编辑可编辑字段」。
+> 规格：`docs/org.md` §5、`docs/feishu.md` §5c.6、`docs/mcp.md` §4。
+
+- [ ] 设计文档与规格文档先行并贴到对话确认（`docs/PROCESS.md` 硬要求）
+- [ ] 迁移 `0033_feishu_company_overrides.sql`（重建 M94 的覆盖表为四字段可空）+ store 三方法（list/set/delete）
+- [ ] 合并：配置来源的行按 覆盖 > 配置 解析 name/root_node/note/enabled；列表加 `overridden`/`overridden_by`/`overridden_at`
+- [ ] PATCH 放宽到四字段 + 客户公司的 `app_secret` 覆盖（身份应用 400）+ `{"reset": true}`；creds 加按 app_id 封口
+- [ ] 控制台：按钮统一「编辑」；四字段 + 客户公司密钥可编辑（本公司密钥只读）；覆盖徽标 + 「恢复配置值」
+- [ ] 测试：creds 跨封法不可解、store 覆盖增量/清空/旧行迁移、httpapi 四字段+密钥覆盖真的生效（stub 校验凭据）/reset/身份应用 400、静态测试与 harness
+- [ ] `go test`/`make ui-base` 全绿、性能基准不回归；回填设计文档「实现与设计差异」
+- [ ] **待宿主执行（部署 + 线上验收）**：在「公司」页编辑「本公司」→ 四项都能改 →「恢复配置值」能还原

@@ -132,8 +132,10 @@ M40 起每条工具说明都写清了**默认值与口径**，因为"省略参�
     `feishu_app_id`/`company`。
   - **公司可以在后台登记**（M93）：`admin_create_feishu_company`（`body.name`/`app_id`/`app_secret`，
     可选 `root_node`/`note`/`enabled`；`app_secret` **加密落库**、永不回显、不进日志与审计）、
-    `admin_update_feishu_company`（路径参数可以是数字 id 或 **app_id**——名字对任何来源的公司都可改，
-    配置来源的公司只接受 `name`/`adopt_root_node`；`body.app_secret` 省略 = 不动；`app_id` 不可改）、
+    `admin_update_feishu_company`（路径参数可以是数字 id 或 **app_id**：任何来源的公司都能改名字；
+    配置来源的公司还可以改 `root_node`/`note`/`enabled`（写的是控制台覆盖，配置仍是兜底），
+    `{"reset": true}` 清除全部覆盖回到配置值；客户公司还能覆盖 `app_secret`（加密落库，`""` = 清除覆盖），
+    但**身份应用给 `app_secret` 会 400**（它的密钥同时用于登录流程）；`app_id` 不可改）、
     `admin_delete_feishu_company`（**只删登记**，节点与人员映射保留）、
     `admin_probe_feishu_company`（用 `body.id` 或 `body.app_id`+`app_secret` 做一次有界目录读，
     200 + `{ok,stage,message,…}` 回答"密钥被拒 / 缺两个只读权限 / 可读"）。
