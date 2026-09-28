@@ -6769,5 +6769,39 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
 - [x] 文档：设计文档（含「实现与设计差异」4 条）、`scripts/ui-harness/README.md`、`docs/PROCESS.md`
       已产出表、`docs/TODO.md` M95 小节
 
-（浏览器走查与部署未做：本沙箱没有可用的 firefox，且控制台资源要重新构建并重启才生效 —— 见
-`docs/TODO.md` M95 小节的待宿主项。）
+### M95 发布记录：v4.10.0 部署到 rag-server（2026-09-28）
+
+- 版本：**v4.10.0**（`d60f24c`），minor（新增对外能力：控制台主菜单分组可折叠 + 折叠状态本地记忆）
+- 构建物：`bin/aigw` 4.10.0，
+  `sha256 011d7809be6352f8bb916e24b0334cd71fe605d3a929492e3d9e5b31afd25072`
+  （控制台 minified 45 files 770932 → 424236 B；gzip 40 files 421875 → 168203 B）
+- 目标：`rag-server`（`192.168.190.86`），部署根 `/home/winger/work/ai_gateway`，unit **aigw-local.service**
+  （用户级；`:8088`，无 base_path；前端代理在 `:8090` 按 Host `chat.tirisen.hk` 路由）
+- 回滚点（宿主 `bin/`）：`aigw.prev-4.9.0-0c7ec58`
+- 发布前门禁：`git diff --name-only v4.9.0..HEAD` **没有任何 `.go` 文件**（本版只动控制台资源、走查与文档），
+  因此 Go 行为与 `BenchmarkPlan` / `BenchmarkResolveTagRecords` 不可能变化，未重复跑基准；
+  `go test ./internal/... ./cmd/...` 全绿；`make ui-base` 全绿（含本版新增的 `nav_fold_test.mjs`）；
+  `make ui-dist` 后 minify 选择器契约测试全绿
+- **门禁偏差（记录在案，不是本次引入）**：`make desensitize-check` 仍以 **56 findings / 1 warning** 非 0 退出。
+  逐条比对过：这 57 条命中行与 `v4.9.0` 的内容**逐字相同**（`git show v4.9.0:<file>` 的第 N 行），
+  全部来自 M94 及更早的内容（`rag-server`、`192.168.190.86`、`/home/winger`、`智天成`、
+  `chat.tirisen.hk`、测试里的 `sk-` 前缀等），本版新增/改动的文件一条都没有。本次**未**把它当阻塞项
+  （4.9.0 已带着同样的 findings 上线），清理另开一次：按 `docs/PROCESS.md` 的检查项先把这些标识补进
+  `scripts/desensitize.py` 的规则表/例外，再做替换
+- 宿主侧验证：
+  - `GET /version` → `{"version":"4.10.0","revision":"d60f24c","ui":"minified","ui_encoding":"gzip"}`
+    （loopback `:8088` 与经代理 `Host: chat.tirisen.hk` → `:8090` 两条路都验）
+  - `/healthz`、`/readyz` 均 200（两条路）
+  - 启动日志：`aigw starting version=4.10.0 revision=d60f24c ui=minified ui_encoding=gzip`，随后
+    database/registry/routing/billing/backup 各子系统 ready、`http server listening addr=:8088`；
+    **重启后 0 条 ERROR**（日志里最后一条 ERROR 是 18:24:27 上一个进程退出时的
+    `audit write queue could not be drained`，与 2026-09-23、M94 记录里那条同类消息一致）
+  - **本版新增的界面真的随二进制生效**（控制台资源是内嵌的，这是这次发布的唯一实质变更）：
+    `/admin/ui/js/router.js` 里 `aigw.nav_folded` 与 `nav-group-` 各 1 处；
+    `/admin/ui/app.css` 里 `.sidebar nav .nav-group[hidden]` 与 `aria-expanded=true` 都在；
+    经代理取 `router.js` 同样命中
+  - 未重启的旁路：只重启了 `aigw-local.service`；租户侧 `dshgw-verify.service` 重启前后都是 active
+- 待操作员（浏览器，需要管理员会话，本沙箱无凭据）：打开 `https://chat.tirisen.hk/admin/ui/` →
+  点分组标题收起/展开 → 刷新后仍是收起的 → 点被收起分组里的页面 → 该组自动展开且当前项高亮；
+  详见 `docs/TODO.md` M95 小节的浏览器走查项
+
