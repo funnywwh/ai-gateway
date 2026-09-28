@@ -6696,3 +6696,28 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
 - 待办（仍未做，见 `docs/TODO.md`）：M92 的"同步本公司 + 第二家公司"与 M93 的"登记一家真实客户公司"
   需要管理员会话与那家公司的 App ID/Secret；浏览器走查（`make ui-check` 的 `companies`/`org-sync*` 视图）
   需要宿主上的 firefox。
+
+## M94 在控制台改公司名（含身份应用与配置里的公司）
+> 设计：`docs/design/m94-editable-company-names.md`；规格：`docs/org.md` §5、`docs/feishu.md` §5c.6、
+> `docs/mcp.md` §4、`config.example.yaml`。需求原话：「`…/admin/ui/#/companies` 要支持能修改公司名」。
+
+- [x] 设计文档与规格文档先行，并已贴到对话确认（`docs/PROCESS.md` 硬要求）
+- [x] 迁移 `0032_feishu_company_names.sql`（app_id 主键 + name + 写者/时间）+ store 三方法
+      （list/set/delete，delete 幂等、空名/空 app id 拒绝）
+- [x] 合并优先级：控制台行 name > 覆盖 > 配置名；显式 `root_node` 优先；列表加 `name_source`
+      （row/override/config）与 `root_name_taken`（根层同名节点）
+- [x] `PATCH /org/feishu/companies/{id}` 接受 **app_id**（`cli_…`）或数字 id；配置来源只接受 `name`，
+      其余字段 400 并点名 `feishu.app_id` / `feishu.companies`；控制台行用 app_id 访问时委托给按 id 的路径；
+      写顺序 = 先改公司节点名（唯一可能冲突的写）再写覆盖
+- [x] 连带改公司节点名（仅当它还在用旧的根名；手工改过的不动 → `node_name_kept` 警告）；清空名字回到配置名
+- [x] 两条出路的端到端：根层同名时改名照做 + `warnings:["root_name_taken"]`，同步仍按 M92 拒绝并给出指引；
+      **先同步再改名**这条路在测试里跑通（同一棵树里两个「智天成」并存于不同层级）
+- [x] 控制台：身份应用/配置来源的行有**改名**（其余字段只读并注明由哪个配置项管理）、
+      「名字已在控制台改过」徽标、冲突时对话框里写出两条出路、不提供无密钥可测的「先测试连接」
+- [x] 测试：`store` 覆盖表用例；`httpapi/admin_org_feishu_company_rename_test.go`（三条改名路径、跟随与
+      手工改名保护、根层同名两条出路、守卫矩阵含 viewer 403 与节点改名撞名 409）；`companies_test.mjs`
+      的 M94 断言；harness `companies` 视图补 6 项检查
+- [x] 验收证据：`go test ./internal/... ./cmd/...` 全绿；`make ui-base` 全绿（含新断言）；
+      涉及包 `go vet` 干净；`BenchmarkPlan` 4948 B/45 allocs 不变
+- [x] 文档：设计文档（含「实现与设计差异」7 条）、`docs/org.md` §5、`docs/feishu.md` §5c.6、
+      `docs/mcp.md` §4、`config.example.yaml`、`docs/PROCESS.md` 已产出表、`docs/TODO.md` M94 小节

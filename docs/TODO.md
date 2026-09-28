@@ -1270,3 +1270,16 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 - [ ] **待宿主执行（浏览器走查）**：本沙箱没有 firefox。宿主上 `make ui-check`（或
       `scripts/ui-harness/run.sh --views companies companies-readonly`），验收：三行公司、来源徽标、
       停用行、「测试连接」只发 id、新建对话框密钥字段不预填、viewer 无写入口
+
+## M94 在控制台改公司名（含身份应用与配置里的公司）
+> 设计：`docs/design/m94-editable-company-names.md`；需求原话：「`…/admin/ui/#/companies` 要支持能修改公司名」。
+> 规格：`docs/org.md` §5、`docs/feishu.md` §5c.6、`docs/mcp.md` §4、`config.example.yaml`。
+> **代码、测试、文档都已完成**，完整清单见 `docs/todo_done.md` 同名小节；本节只留未完成项。
+
+- [ ] **待宿主执行（部署 + 线上验收）**：升级后在「公司」页点「本公司」那一行的**改名** → 输入「智天成」保存
+      （此时会提示根层已有同名节点）→ 按提示**先点一次「同步飞书」**（公司节点建出、根层「智天成」被移入其下）
+      → 再改名成「智天成」→ 公司节点随之改名（树变成 智天成 → 智天成(部门) → 软件部…）→ 再同步一次应为 0 写入
+- [ ] **待宿主执行（浏览器走查）**：本沙箱没有 firefox。宿主上 `make ui-check`（或
+      `scripts/ui-harness/run.sh --views companies companies-readonly`），验收 M94 新增检查项：
+      `nameOverrideBadge`、`identityRowOffersRename`、`renameDialogEditable`、`renameDialogSecretLocked`、
+      `renameDialogHint`、`renameDialogNoProbe`
