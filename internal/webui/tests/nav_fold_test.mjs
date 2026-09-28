@@ -20,26 +20,31 @@ const router = await read('../static/js/router.js');
 const css = await read('../static/app.css');
 const app = await read('../static/js/app.js');
 
-// --- ① 折叠状态：浏览器本地偏好，读写都不许抛出去 -----------------------------------------
+// --- ① 打开过的分组：浏览器本地偏好，读写都不许抛出去 ---------------------------------------
 
-assert.match(router, /const FOLD_KEY = 'aigw\.nav_folded';/,
-  "折叠状态用 aigw.nav_folded（与 money.js 的 aigw.display_currency 同一种本地视图偏好）");
-assert.match(router, /try \{[^}]*localStorage\.getItem\(FOLD_KEY\)/,
+assert.match(router, /const OPEN_KEY = 'aigw\.nav_open';/,
+  '记住的是**被打开过的**分组（aigw.nav_open）：默认折叠之后，"不在集合里"已经等于折叠，只有打开过的需要记');
+assert.match(router, /try \{[^}]*localStorage\.getItem\(OPEN_KEY\)/,
   '读存储必须包 try：隐私模式/被策略禁用时 localStorage 会抛错，菜单不能因此画不出来');
-assert.match(router, /try \{[^}]*localStorage\.setItem\(FOLD_KEY/,
+assert.match(router, /try \{[^}]*localStorage\.setItem\(OPEN_KEY/,
   '写存储同样必须包 try');
 assert.match(router, /JSON\.parse\(raw\)/, '存储内容按 JSON 解析');
 assert.match(router, /Array\.isArray\(list\)/,
-  '值被手工改成别的形状时降级成"没有折叠"，而不是抛错或把字符串当分组名');
+  '值被手工改成别的形状时降级成"什么都没打开"，而不是抛错或把字符串当分组名');
 assert.match(router, /JSON\.stringify\(\[\.\.\.set\]\)/,
   '写回去的是分组名的 JSON 数组（跨版本可读，分组改名时旧记录自然失效）');
+assert.match(router, /if \(open\) set\.add\(group\); else set\.delete\(group\);/,
+  '集合的语义是"打开过"：点开就加入、收起就移除 —— 写反了就是把操作者做的事持久化成反的');
+assert.doesNotMatch(router, /localStorage\.[A-Za-z]+\([^)]*nav_folded/,
+  '旧的 aigw.nav_folded 不再读也不再写：默认折叠之后，它记过的那些组本来就都折着，不值得为它写一段迁移'
+  + '（注释里可以提它的来历，但不能再拿它当存储用）');
 
-// --- ② 活动分组恒展开 ---------------------------------------------------------------------
+// --- ② 默认折叠 + 当前分组恒展开 ------------------------------------------------------------
 
 assert.match(router, /const activeGroup = \(routes\.find\(\(route\) => route\.path === active\) \|\| routes\[0\]\)\.group;/,
   '要先算出当前路由所在的组');
-assert.match(router, /group === activeGroup \|\| !foldedAway\.has\(group\)/,
-  '当前分组永远不渲染成收起：深链接、刷新、页面内 navigate() 都不该把"我在哪"藏起来');
+assert.match(router, /group === activeGroup \|\| openedUp\.has\(group\)/,
+  '渲染规则：默认折叠，只有"当前路由所在的分组"与"操作者打开过的分组"是展开的');
 
 // --- ③ 组标题是按钮，且带完整 ARIA 契约 ---------------------------------------------------
 
@@ -200,7 +205,7 @@ const linksOf = (nav, name) => (boxOf(nav, name) ? boxOf(nav, name).children : [
 const isOpen = (nav, name) => !!headOf(nav, name) && headOf(nav, name).getAttribute('aria-expanded') === 'true'
   && boxOf(nav, name).hidden === false;
 
-// —— 默认：6 组 24 条，全展开，aria/结构契约齐 ——
+// —— 默认（无存储）：只展开当前页面所在的分组（hash '#/' → 总览），24 条链接仍在 DOM 里 ——
 const first = fakeDom(memoryStorage());
 const routerMod = await loadRouter(first.context);
 let nav = first.makeNode('nav');
@@ -210,59 +215,77 @@ assert.deepEqual(groupNames(nav), ['总览', '访问控制', '路由配置', '�
 assert.equal(nav.children.filter((child) => child.tag === 'a').length, 0,
   '条目必须全部落在分组容器里：直接挂在 nav 上的链接不会跟着分组一起收起');
 assert.equal(groupNames(nav).reduce((sum, name) => sum + linksOf(nav, name).length, 0), 24,
-  '24 条路由一条不少，且都在各自的分组容器里');
-assert.ok(groupNames(nav).every((name) => isOpen(nav, name)), '首次打开（无存储）时 6 组全展开');
+  '24 条路由一条不少，且都在各自的分组容器里（默认折叠只是收着，不是不画）');
+assert.deepEqual(groupNames(nav).filter((name) => isOpen(nav, name)), ['总览'],
+  '默认（无存储）只展开当前页面所在的分组，其余 5 组折叠');
 assert.ok(groupHeads(nav).every((head) => head.tag === 'button'
   && head.attributes['aria-controls'] === boxOf(nav, head.children[0].textContent).attributes.id),
   'aria-controls 必须指向本组的容器 id');
 assert.ok(nav.children.every((child, index) => (child.tag === 'button') === (index % 2 === 0)),
   'DOM 顺序是 标题-容器-标题-容器：容器紧跟在它的标题后面');
 
-// —— 收起一个非当前分组：只动它自己，并且写进存储 ——
+// —— 点开一个折叠的分组：只动它自己，并且写进存储 ——
 headOf(nav, '访问控制').click();
-assert.equal(headOf(nav, '访问控制').getAttribute('aria-expanded'), 'false', '点击后 aria-expanded 必须翻转');
-assert.equal(boxOf(nav, '访问控制').hidden, true, '点击后容器必须 hidden');
-assert.deepEqual(groupNames(nav).filter((name) => isOpen(nav, name)), ['总览', '路由配置', '计费', '可观测', '运维'],
-  '只收起被点的那一组，其余不受影响');
-assert.deepEqual(JSON.parse(first.win.localStorage.getItem('aigw.nav_folded')), ['访问控制'],
-  '折叠必须写进 aigw.nav_folded（分组名的 JSON 数组）');
+assert.equal(headOf(nav, '访问控制').getAttribute('aria-expanded'), 'true', '点击折叠的分组必须展开');
+assert.equal(boxOf(nav, '访问控制').hidden, false, '点击后容器必须取掉 hidden');
+assert.deepEqual(groupNames(nav).filter((name) => isOpen(nav, name)), ['总览', '访问控制'],
+  '只展开被点的那一组，其余不受影响');
+assert.deepEqual(JSON.parse(first.win.localStorage.getItem('aigw.nav_open')), ['访问控制'],
+  '打开过的分组必须写进 aigw.nav_open（分组名的 JSON 数组）');
 
-// —— 同一次页面会话里重渲染（每次导航都会发生）：收起状态不能丢 ——
+// —— 再点一次：收起来，并从存储里删掉 ——
+headOf(nav, '访问控制').click();
+assert.equal(isOpen(nav, '访问控制'), false, '再点一次收起');
+assert.deepEqual(JSON.parse(first.win.localStorage.getItem('aigw.nav_open')), [],
+  '收起必须从存储里移除，否则下次打开还会自己展开');
+headOf(nav, '访问控制').click();
+
+// —— 同一次页面会话里重渲染（每次导航都会发生）：打开状态不能丢 ——
 nav = first.makeNode('nav');
 routerMod.renderNav(nav);
-assert.equal(isOpen(nav, '访问控制'), false, 'renderNav 每次导航都重建导航，折叠状态必须活过重建');
+assert.equal(isOpen(nav, '访问控制'), true, 'renderNav 每次导航都重建导航，打开状态必须活过重建');
+assert.equal(isOpen(nav, '计费'), false, '没打开过的分组照旧折叠');
 
 // —— 冷启动（刷新）：换一个模块实例，状态只能来自存储 ——
 const coldMod = await loadRouter(first.context);
 nav = first.makeNode('nav');
 coldMod.renderNav(nav);
-assert.equal(isOpen(nav, '访问控制'), false, '刷新后仍然收起（从 localStorage 读回来）');
-assert.equal(isOpen(nav, '总览'), true, '没被收起的组照常展开');
+assert.equal(isOpen(nav, '访问控制'), true, '刷新后仍然记得打开过它（从 localStorage 读回来）');
+assert.equal(isOpen(nav, '总览'), true, '当前分组（总览）无论如何都展开');
+assert.deepEqual(groupNames(nav).filter((name) => isOpen(nav, name)), ['总览', '访问控制'],
+  '其余 4 组保持折叠');
 
-// —— 导航进被收起的那一组：当前分组恒展开，当前项高亮 ——
+// —— 导航进一个折叠的分组：当前分组恒展开，当前项高亮，存储不被改写 ——
 first.win.location.hash = '#/accounts';
 nav = first.makeNode('nav');
 coldMod.renderNav(nav);
 assert.equal(isOpen(nav, '访问控制'), true, '当前页面所在的分组必须展开，否则"我在哪"从菜单里消失了');
 assert.deepEqual(linksOf(nav, '访问控制').filter((link) => link.className.includes('active'))
   .map((link) => link.attributes.href), ['#/accounts'], '当前项仍然是高亮的那个');
-assert.deepEqual(JSON.parse(first.win.localStorage.getItem('aigw.nav_folded')), ['访问控制'],
-  '渲染只读存储：自动展开不该悄悄改掉操作者之前的收起选择');
+assert.deepEqual(JSON.parse(first.win.localStorage.getItem('aigw.nav_open')), ['访问控制'],
+  '渲染只读存储：自动展开不该写盘');
 
-// —— 在活动分组里显式收起：允许；再点开则把它从存储里删掉 ——
-headOf(nav, '访问控制').click();
-assert.equal(isOpen(nav, '访问控制'), false, '显式点击当前分组也照做（点击是操作者的意思）');
-headOf(nav, '访问控制').click();
-assert.equal(isOpen(nav, '访问控制'), true, '再点一次恢复展开');
-assert.deepEqual(JSON.parse(first.win.localStorage.getItem('aigw.nav_folded')), [],
-  '展开的组必须从存储里移除，否则下次打开还会是收起的');
+// —— 导航进一个从没打开过的分组：它"当前"，所以照样展开（这条正是默认折叠最危险的角落）——
+first.win.location.hash = '#/pricing';
+nav = first.makeNode('nav');
+coldMod.renderNav(nav);
+assert.equal(isOpen(nav, '计费'), true, '当前分组即使从没被打开过也要展开');
+assert.deepEqual(JSON.parse(first.win.localStorage.getItem('aigw.nav_open')), ['访问控制'],
+  '这次自动展开同样不写盘');
 
-// —— 存储坏掉/内容不对：降级成全展开，绝不抛错 ——
+// —— 在活动分组里显式点击：就地收起；下一次渲染它按"当前分组恒展开"回来 ——
+headOf(nav, '计费').click();
+assert.equal(isOpen(nav, '计费'), false, '显式点击当前分组也照做（点击是操作者的意思）');
+nav = first.makeNode('nav');
+coldMod.renderNav(nav);
+assert.equal(isOpen(nav, '计费'), true, '但渲染规则压过它：下一次渲染当前分组仍然展开');
+
+// —— 存储坏掉/内容不对：降级成"只有当前分组展开"，绝不抛错 ——
 for (const [label, storage] of [
   ['localStorage 抛错（隐私模式/被策略禁用）', brokenStorage()],
-  ['值不是合法 JSON', memoryStorage({ 'aigw.nav_folded': '{' })],
-  ['值不是数组', memoryStorage({ 'aigw.nav_folded': '"访问控制"' })],
-  ['数组里混了非字符串', memoryStorage({ 'aigw.nav_folded': '[1,null,"访问控制"]' })],
+  ['值不是合法 JSON', memoryStorage({ 'aigw.nav_open': '{' })],
+  ['值不是数组', memoryStorage({ 'aigw.nav_open': '"访问控制"' })],
+  ['数组里混了非字符串', memoryStorage({ 'aigw.nav_open': '[1,null,"访问控制"]' })],
 ]) {
   const dom = fakeDom(storage);
   const mod = await loadRouter(dom.context);
@@ -270,12 +293,10 @@ for (const [label, storage] of [
   mod.renderNav(bad);
   assert.equal(bad.children.filter((child) => child.tag === 'button').length, 6,
     `存储出问题时导航仍然要完整画出来：${label}`);
-  if (label.startsWith('数组里混')) {
-    assert.equal(isOpen(bad, '访问控制'), false, `只有分组名（字符串）算数：${label}`);
-  } else {
-    assert.ok(groupNames(bad).every((name) => isOpen(bad, name)),
-      `降级成"全部展开"，而不是白屏或半截菜单：${label}`);
-  }
+  const open = groupNames(bad).filter((name) => isOpen(bad, name));
+  const want = label.startsWith('数组里混') ? ['总览', '访问控制'] : ['总览'];
+  assert.deepEqual(open, want,
+    `降级成"只有当前分组展开"（坏值里的非字符串不算数），而不是白屏或半截菜单：${label}`);
 }
 
 console.log('nav_fold_test.mjs: all checks passed');

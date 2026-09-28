@@ -82,22 +82,25 @@ const chevronTurns = (name) => {
 
 try {
   if (view === 'sidebar') {
+    const GROUPS = '总览,访问控制,路由配置,计费,可观测,运维';
+    // 侧栏骨架里那一组的分组容器高度（与视口多高无关，只随条目进出而变）。
+    const openGroups = () => headers().map((head) => head.textContent.trim()).filter((name) => expanded(name));
+
+    // ---- 默认（没有存储）：只展开当前页面所在的分组（harness 的 hash 落回 routes[0] → 总览）----
     renderNav(nav());
     await settle();
-    const GROUPS = '总览,访问控制,路由配置,计费,可观测,运维';
-    const openHeight = contentHeight();
-
-    // ---- 结构：6 组 24 条，默认全展开（与改造前的观感一致）----
+    const foldedHeight = contentHeight();
     checks.groupCount = headers().length === 6;
     checks.groupNames = headers().map((head) => head.textContent.trim()).join(',') === GROUPS;
     checks.groupIsButton = headers().every((head) => head.tagName === 'BUTTON' && head.type === 'button');
     checks.linkCount = nav().querySelectorAll('a').length === 24;
-    checks.allExpandedByDefault = headers().every((head) => expanded(head.textContent.trim()) && allVisible(head.textContent.trim()));
+    checks.defaultShowsOnlyActiveGroup = openGroups().join(',') === '总览';
+    checks.defaultFoldsTheRest = ['访问控制', '路由配置', '计费', '可观测', '运维']
+      .every((name) => allHidden(name));
     checks.ariaControlsResolves = headers().every((head) => {
       const box = document.getElementById(head.getAttribute('aria-controls'));
       return !!box && box !== head && head.nextElementSibling === box && box.querySelectorAll('a').length > 0;
     });
-    checks.openChevronPointsDown = chevronTurns('总览') !== 'none' && chevronTurns('总览') !== 'missing';
     checks.chevronDrawn = (() => {
       const icon = headerOf('总览').querySelector('.nav-chevron');
       const style = getComputedStyle(icon);
@@ -105,45 +108,62 @@ try {
       return style.borderLeftWidth === '4px' && parseFloat(style.borderTopWidth) > 0
         && style.borderLeftStyle === 'solid' && icon.textContent.trim() === '';
     })();
+    checks.openChevronPointsDown = chevronTurns('总览') !== 'none' && chevronTurns('总览') !== 'missing';
+    checks.foldedChevronPointsRight = chevronTurns('计费') === 'none';
 
-    // ---- 收起一个非当前分组：真的少了几百像素，不是"看着没变" ----
+    // ---- 点开一个折叠的分组：条目真的回到屏幕上（不是只有属性变了），菜单真的变长 ----
     headerOf('访问控制').click();
     await settle();
-    checks.foldFlipsAria = headerOf('访问控制').getAttribute('aria-expanded') === 'false';
-    checks.foldHidesItems = boxOf('访问控制').hidden === true && allHidden('访问控制')
-      && linksOf('访问控制').every((a) => a.offsetParent === null);
-    checks.foldShortensMenu = contentHeight() < openHeight - 100;
-    checks.foldKeepsOtherGroups = allVisible('总览') && allVisible('计费') && allVisible('运维')
-      && headers().filter((head) => head !== headerOf('访问控制'))
-        .every((head) => head.getAttribute('aria-expanded') === 'true');
-    checks.foldChevronPointsRight = chevronTurns('访问控制') === 'none';
-    checks.foldPersisted = (JSON.parse(localStorage.getItem('aigw.nav_folded') || 'null') || []).includes('访问控制');
+    checks.openGroupFlipsAria = headerOf('访问控制').getAttribute('aria-expanded') === 'true';
+    checks.openGroupRevealsItems = boxOf('访问控制').hidden === false && allVisible('访问控制')
+      && linksOf('访问控制').every((a) => a.offsetParent !== null);
+    checks.openGroupLengthensMenu = contentHeight() > foldedHeight + 100;
+    checks.openKeepsOtherGroups = expanded('总览') && !expanded('计费') && !expanded('运维')
+      && allVisible('总览') && allHidden('计费');
+    checks.openGroupChevronTurnsDown = chevronTurns('访问控制') !== 'none' && chevronTurns('访问控制') !== 'missing';
+    checks.openPersisted = (JSON.parse(localStorage.getItem('aigw.nav_open') || 'null') || []).includes('访问控制');
+
+    // ---- 再点一次：收起来，并从存储里移除（留着的话下次打开会自己展开）----
+    headerOf('访问控制').click();
+    await settle();
+    checks.closeGroupHidesItems = headerOf('访问控制').getAttribute('aria-expanded') === 'false'
+      && allHidden('访问控制') && linksOf('访问控制').every((a) => a.offsetParent === null);
+    checks.closeClearsStorage = (JSON.parse(localStorage.getItem('aigw.nav_open') || '[]') || []).includes('访问控制') === false;
+    headerOf('访问控制').click();
+    await settle();
 
     // ---- 冷启动（等价于刷新）：换模块实例，状态只能来自 localStorage ----
-    // 后面几个阶段就用这个实例（它和一次真实页面加载的状态完全一致：内存里那份来自存储）。
     const cold = await import('/js/router.js?reload=1');
     cold.renderNav(nextNav());
     await settle();
-    checks.coldLoadHonoursStorage = !expanded('访问控制') && allHidden('访问控制')
-      && expanded('总览') && allVisible('总览');
+    checks.coldLoadHonoursStorage = expanded('访问控制') && allVisible('访问控制');
+    checks.coldLoadKeepsOthersFolded = expanded('总览') && !expanded('计费') && !expanded('运维');
 
-    // ---- 导航进被收起的那一组：当前分组永远展开，且当前项高亮 ----
-    location.hash = '#/accounts';
-    cold.renderNav(nextNav());
+    // ---- 导航进一个**从没打开过**的分组：它"当前"，所以照样展开（默认折叠最危险的角落）----
+    localStorage.removeItem('aigw.nav_open');
+    location.hash = '#/pricing';
+    (await import('/js/router.js?reload=2')).renderNav(nextNav());
     await settle();
-    checks.activeGroupAlwaysOpen = expanded('访问控制') && allVisible('访问控制');
-    checks.activeLinkHighlighted = linksOf('访问控制')
-      .some((a) => a.getAttribute('href') === '#/accounts' && a.className.includes('active'));
+    checks.activeGroupOpensThoughNeverOpened = expanded('计费') && allVisible('计费');
+    checks.navigationFoldsTheRest = openGroups().join(',') === '计费';
+    checks.activeLinkHighlighted = linksOf('计费')
+      .some((a) => a.getAttribute('href') === '#/pricing' && a.className.includes('active'));
+    checks.autoOpenDidNotWriteStorage = localStorage.getItem('aigw.nav_open') === null;
 
-    // ---- 在活动分组里显式收起：允许（点击是操作者的意思），再点回来 ----
-    headerOf('访问控制').click();
+    // ---- 在活动分组里显式点击：就地收起；再点回来；重新渲染时它按"当前分组恒展开"回来 ----
+    headerOf('计费').click();
     await settle();
-    checks.foldActiveGroupHonoured = headerOf('访问控制').getAttribute('aria-expanded') === 'false'
-      && allHidden('访问控制');
-    headerOf('访问控制').click();
+    checks.foldActiveGroupInPlace = headerOf('计费').getAttribute('aria-expanded') === 'false'
+      && allHidden('计费');
+    headerOf('计费').click();
     await settle();
-    checks.unfoldRestores = expanded('访问控制') && allVisible('访问控制');
-    checks.unfoldClearsStorage = !(JSON.parse(localStorage.getItem('aigw.nav_folded') || '[]')).includes('访问控制');
+    checks.openAgainRestores = expanded('计费') && allVisible('计费');
+    headerOf('计费').click();
+    await settle();
+    const warm = await import('/js/router.js?reload=3');
+    warm.renderNav(nextNav());
+    await settle();
+    checks.activeGroupReopensOnRender = expanded('计费') && allVisible('计费');
 
     // ---- 键盘：标题是原生 button，能聚焦（Enter/Space 由元素本身提供）----
     headerOf('运维').focus();
@@ -157,8 +177,8 @@ try {
     checks.sample = {
       groups: headers().map((head) => head.textContent.trim() + ':' + head.getAttribute('aria-expanded')),
       links: nav().querySelectorAll('a').length,
-      menuHeight: Math.round(openHeight) + ' -> ' + Math.round(contentHeight()),
-      folded: localStorage.getItem('aigw.nav_folded'),
+      menuHeight: Math.round(foldedHeight) + ' -> ' + Math.round(contentHeight()),
+      open: localStorage.getItem('aigw.nav_open'),
       hash: location.hash,
     };
   }

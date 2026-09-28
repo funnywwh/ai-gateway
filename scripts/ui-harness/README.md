@@ -189,12 +189,15 @@ GW_BASE=http://127.0.0.1:8099 GW_COOKIE=... scripts/ui-harness/capture.py       
   （`.app > aside.sidebar > nav`）后调用**真实的 `renderNav`**——不 import `app.js`、不发任何请求，
   因为折叠完全发生在 `renderNav` 内部，而 `renderNav` 自己读 `location.hash`，所以"导航"就是改 hash
   后再渲染一次（不用等 `hashchange` 任务，`unmatched` 也不会被无关请求污染）。
-  - 量的是**几何**而不是属性：收起后该组 8 条链接的 `offsetHeight === 0` 且 `offsetParent === null`、
-    `nav.scrollHeight` 少掉一截、其余分组照旧；组标题是 `<button type=button>`（原生可聚焦、Enter/Space 切换）；
-    `aria-controls` 指向的元素确实是它的下一个兄弟；箭头（CSS 画的三角）在展开时被 `[aria-expanded=true]`
-    转成朝下、收起时回到朝右——**属性选择器真的匹配上了**只有浏览器能证明。
-  - "刷新后仍收起"用 `import('/js/router.js?reload=N')` 换**全新模块实例**：折叠状态是模块级的，
-    同一个实例重渲染会让这条断言变成假绿。
+  - 量的是**几何**而不是属性：默认只展开当前分组，其余 5 组 8 条链接的 `offsetHeight === 0`
+    且 `offsetParent === null`；点开后条目回到屏幕上、菜单**真的变长**（量最后一组容器的下边缘，
+    不是 `nav.scrollHeight`——走查窗口 1500×2400 下菜单不溢出，那个值恒等于视口高度）；
+    组标题是 `<button type=button>`（原生可聚焦、Enter/Space 切换）；`aria-controls` 指向的元素确实是它的
+    下一个兄弟；箭头（CSS 画的三角）在展开时被 `[aria-expanded=true]` 转成朝下、收起时回到朝右——
+    **属性选择器真的匹配上了**只有浏览器能证明。
+  - "刷新后仍记得打开过哪些组"用 `import('/js/router.js?reload=N')` 换**全新模块实例**：状态是模块级的，
+    同一个实例重渲染会让这条断言变成假绿。另有一条专门盯默认折叠最危险的角落：
+    **导航进一个从没打开过的分组时它必须展开**（否则当前页在菜单里消失），且这次自动展开不写存储。
   - 另外断言全程**没有行内样式**（严格 CSP 下 `style` 属性会被整条丢弃，而 DOM 里的 aria/hidden 全都还在：
     这正是组织树丢缩进那次事故的形状）。
   - `strictChecks: true`。

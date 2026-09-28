@@ -1,6 +1,7 @@
 # M95 设计文档：控制台主菜单改成可折叠（分组手风琴 + 记忆折叠状态）
 
-> 状态：**已实现（M95）**。设计决策 D1–D8 与实现一致；实现阶段多出来的三件事记在第 11 节。
+> 状态：**已实现（M95，v4.10.0）**；默认折叠的修订见 §12（**M95.1，v4.10.1**）。
+> 设计决策 D1–D8 与实现一致；实现阶段多出来的四件事记在第 11 节。
 > 前序：[M9 Web 管理界面](m9-web-console.md)、[M50 控制台前端压缩混淆](m50-frontend-minify.md)、
 > [M55 控制台传输压缩](m55-console-transfer-compression.md)。
 > 面向使用者的规格：**无**（本次只动控制台自己的导航 chrome，没有 API、配置、字段或数据变化；
@@ -20,11 +21,11 @@
 ## 2. 目标
 
 1. 每个分组标题成为**可点击的控件**：点一下收起该组条目、再点展开；收起后条目不占位。
-2. 折叠状态**记住**：刷新、重开浏览器、跨会话保持（浏览器本地偏好）。
+2. **打开过哪些分组记住**：刷新、重开浏览器、跨会话保持（浏览器本地偏好）。
 3. **当前路由所在分组永远展开**：点导航、页面内 `navigate()`、深链接、刷新落在某页，
    都不会把"我在哪"从菜单里藏起来。
-4. 默认行为与今天**逐像素一致**（首次打开 6 组全展开），不使用行内样式（控制台的严格 CSP），
-   不引入字体依赖的图标字形。
+4. 默认**折叠**：首次打开只看到当前分组与 6 个组标题，而不是 24 条链接（M95.1 修订；初版是"与改造前
+   逐像素一致的默认全展开"，见 §12）。不使用行内样式（控制台的严格 CSP），不引入字体依赖的图标字形。
 
 ### 非目标
 
@@ -52,13 +53,13 @@
 | # | 决策 | 理由 / 否决的备选 |
 |---|---|---|
 | D1 | **分组手风琴**：6 个分组标题各自可折叠 | 菜单的瓶颈在纵向（24 项 / 100vh 滚动区），横向 220px 不是问题；**否决**整栏折叠（收起后不可导航，且要为 24 个条目设计图标），**否决**两者都做（两条 CSS 状态要一起测，收益不叠加） |
-| D2 | 状态存 `localStorage`，键 **`aigw.nav_folded`**，值是 JSON 数组、元素是分组名（`["访问控制","可观测"]`） | 沿用 `aigw.display_currency` 的同一种做法（浏览器本地视图偏好，服务端不需要知道）；用分组名而不是下标，读起来自解释，分组改名时旧记录自然失效、不做迁移 |
-| D3 | **活动分组恒展开**：`open = (group === activeGroup) \|\| !folded.has(group)`；渲染时**不回写**存储 | 把"我在哪"从菜单里藏起来是最糟的失败模式（深链接/页面内跳转都会踩到）。不回写是为了让启动只读、不写盘；代价是"在 A 组里显式点收起 A 组"会在下一次导航（同组）时被重新展开——显式点击当下仍被尊重（D6） |
+| D2 | 状态存 `localStorage`，键 **`aigw.nav_folded`**，值是 JSON 数组、元素是分组名（`["访问控制","可观测"]`） | 沿用 `aigw.display_currency` 的同一种做法（浏览器本地视图偏好，服务端不需要知道）；用分组名而不是下标，读起来自解释，分组改名时旧记录自然失效、不做迁移。**M95.1 修订**：默认改成折叠之后，记的是"打开过哪些"、键换成 `aigw.nav_open`（§12） |
+| D3 | **活动分组恒展开**：`open = (group === activeGroup) \|\| !folded.has(group)`；渲染时**不回写**存储 | 把"我在哪"从菜单里藏起来是最糟的失败模式（深链接/页面内跳转都会踩到）。不回写是为了让启动只读、不写盘；代价是"在 A 组里显式点收起 A 组"会在下一次导航（同组）时被重新展开——显式点击当下仍被尊重（D6）。**M95.1 修订**：式子里的第二项翻成 `opened.has(group)`（默认折叠），第一项不动 |
 | D4 | 条目包一层 `div.nav-group`，用 **`hidden` 属性**收起；并**显式**写一条 `.sidebar nav .nav-group[hidden]{display:none}` | UA 的 `[hidden]{display:none}` 是**作者样式可覆盖**的，而 `.sidebar nav a{display:block}` 正是作者样式：把 `hidden` 直接打在 `<a>` 上会"属性在、样式不在"（同一类事故在组织树里丢的是缩进）。包一层没有 display 规则的容器即可绕开，显式规则把它钉死；**否决**用类名 `.nav-group-folded`（`hidden` 同时把它移出无障碍树与页内查找，语义更准） |
 | D5 | 箭头用 **CSS border 三角**，状态由 `[aria-expanded="true"]` 驱动旋转 | 不打字形（D 见现状：`▸` 在缺字体机器上是空框）；CSS 画图标已有先例；状态只有一个真源（`aria-expanded`），CSS 只是它的表现。**否决**在 `ui.js` 加 `chevronIcon()`（多一条 `router.js → ui.js` 依赖与一份 SVG 代码，收益只是"和 `closeIcon` 同款"），**否决**复用 `tree.js` 的 `arrowIcon`（会把 20KB 的树控件拉进每次页面加载的壳层） |
 | D6 | 点击标题**就地更新**（改 `aria-expanded` 与 `box.hidden`，不整块重渲染） | 重新渲染会丢焦点与滚动位置；`renderNav` 本来就会在每次导航时重建，状态放在模块级 `Set` 而不是 DOM 里，两条路径不会打架 |
 | D7 | 折叠是**纯渲染层状态**：`routes` 不变、`renderNav(container)` 签名不变、`app.js` 不改 | 路由表是"有哪些页面"的真源，折叠是"怎么看"，不该混进表里；调用方不需要知道这件事 |
-| D8 | `localStorage` 的任何失败（隐私模式、被禁用、JSON 损坏、值不是数组）都**静默降级**成"全展开 + 本次会话内有效" | 与 `money.js` 同口径：`localStorage` 是可选能力，抛错或坏值不该让控制台白屏 |
+| D8 | `localStorage` 的任何失败（隐私模式、被禁用、JSON 损坏、值不是数组）都**静默降级**成"什么都没打开 + 本次会话内有效"（即：只展开当前分组） | 与 `money.js` 同口径：`localStorage` 是可选能力，抛错或坏值不该让控制台白屏 |
 
 ## 5. DOM 与存储契约
 
@@ -77,19 +78,24 @@
 ```
 
 ```js
-localStorage['aigw.nav_folded'] === '["访问控制","可观测"]'   // JSON 数组，元素为分组名
+localStorage['aigw.nav_open'] === '["访问控制","可观测"]'   // JSON 数组，元素为**被打开过的**分组名
 ```
 
 索引按渲染顺序从 0 递增，`aria-controls` 与 `id` 一一对应（`nav-group-<i>`）。
+
+> **M95.1 修订**：默认从"全展开"改成"只展开当前分组"之后，存储的语义从"折叠了哪些"翻成"打开过哪些"，
+> 键也从 `aigw.nav_folded` 换成 `aigw.nav_open`（见 §12）。下面 §6/§7 已按修订后的行为写。
 
 ## 6. 行为规格
 
 | 场景 | 行为 |
 |---|---|
-| 首次打开（无存储 / 存储损坏 / `localStorage` 抛错） | 6 组全展开，与今天一致；不报错、不写盘 |
-| 点击非活动分组的标题 | 就地翻转 `aria-expanded` 与 `hidden`，写回存储 |
-| 在 A 组页面里点击 A 组标题 | 允许收起（显式操作被尊重），存储里记下；导航回 A 组时下一次渲染重新展开（D3） |
-| 导航进 A 组的任意路由（点链接 / `navigate()` / 深链接 / 刷新落在 A） | A 组渲染为展开，存储不被改写 |
+| 首次打开（无存储 / 存储损坏 / `localStorage` 抛错） | **只展开当前路由所在的分组**，其余折叠（M95.1）；不报错、不写盘 |
+| 点击折叠的分组标题 | 展开它（条目回到屏幕上），把它写进存储；其余分组状态不变 |
+| 点击已展开的非活动分组标题 | 收起它，并把它从存储里移除 |
+| 在 A 组页面里点击 A 组标题 | 允许就地收起（显式操作被尊重）；下一次渲染（导航、换显示币种）按"当前分组恒展开"重新展开（D3） |
+| 导航进 A 组的任意路由（点链接 / `navigate()` / 深链接 / 刷新落在 A） | A 组渲染为展开 —— **即使它从没被打开过**；存储不被改写 |
+| 打开过 B 组后刷新/重开浏览器 | B 组仍是展开的（从存储读回） |
 | 存储里有已不存在的分组名 | 按名字匹配不到 → 自然忽略，不清理、不报错 |
 | 键盘 | 标题是原生 `button`：Tab 可达、Enter/Space 原生切换；`aria-controls` 指向真实存在的容器 |
 
@@ -100,10 +106,10 @@ localStorage['aigw.nav_folded'] === '["访问控制","可观测"]'   // JSON 数
 export function renderNav(container)            // 分组标题由 div 变为 button，条目移入 .nav-group
 
 // js/router.js —— 新增的内部函数（不导出）
-const FOLD_KEY = 'aigw.nav_folded';
-function foldedGroups()                         // → Set<string>，首次读 localStorage，之后用缓存
-function persistFolded(set)                     // 写回 localStorage，失败静默
-function toggleGroup(head, box, group)          // 就地翻转 + 持久化
+const OPEN_KEY = 'aigw.nav_open';
+function openedGroups()                         // → Set<string>，首次读 localStorage，之后用缓存
+function persistOpened(set)                     // 写回 localStorage，失败静默
+function toggleGroup(head, box, group)          // 就地翻转 + 持久化（打开=加入，收起=移除）
 ```
 
 不改：`routes`、`currentRoute()`、`startRouter()`、`loadPage()`、`navigate()`、本地 `el2()`、
@@ -126,17 +132,19 @@ function toggleGroup(head, box, group)          // 就地翻转 + 持久化
 ## 9. 测试策略
 
 1. **源码不变式（node，本环境可跑）**：`internal/webui/tests/nav_fold_test.mjs`
-   —— 存储键、`try/catch`、`button[aria-expanded][aria-controls]`、`.nav-group` + `hidden`、
-   活动分组恒展开的判据、三条 CSS 规则且选择器限定在 `.sidebar nav` 下、`app.js` 的壳层接线仍在、
-   harness 视图已注册。挂进 `Makefile` 的 `ui-base`（⇒ `make verify` 会跑）。
+   —— 存储键与语义方向（打开=加入、收起=移除）、`try/catch`、`button[aria-expanded][aria-controls]`、
+   `.nav-group` + `hidden`、默认折叠与活动分组恒展开的判据、三条 CSS 规则且选择器限定在
+   `.sidebar nav` 下、`app.js` 的壳层接线仍在、harness 视图已注册。挂进 `Makefile` 的 `ui-base`
+   （⇒ `make verify` 会跑）。
 2. **真机几何与交互（headless firefox，宿主上跑）**：`scripts/ui-harness/sidebar.page.html`，
    视图 `sidebar`。它自己搭与 `renderShell` 同形的骨架（`.app > aside.sidebar > nav`）后调用
    **真实的 `renderNav`**；"导航"= 改 `location.hash` 后再渲染一次（`renderNav` 自己读 hash，
    因此不需要 stub fetch、也不用等 `hashchange` 任务）。冷启动用
-   `await import('/js/router.js?reload=N')` 取全新模块实例（模块级缓存失效），这是"刷新后仍收起"
-   唯一诚实的验法。断言含：`foldHidesItems`（该组链接 `offsetHeight === 0`，其余组 > 0）、
-   `coldLoadHonoursStorage`、`activeGroupAlwaysOpen`、`foldActiveGroupHonoured`、`keyboardReachable`、
-   `noInlineStyles`。
+   `await import('/js/router.js?reload=N')` 取全新模块实例（模块级缓存失效），这是"刷新后仍记得
+   打开过哪些组"唯一诚实的验法。断言含：`defaultShowsOnlyActiveGroup`、`defaultFoldsTheRest`、
+   `openGroupRevealsItems` / `closeGroupHidesItems`（该组链接 `offsetHeight` 真为 0 或真 > 0）、
+   `openGroupLengthensMenu`、`coldLoadHonoursStorage`、`activeGroupOpensThoughNeverOpened`、
+   `autoOpenDidNotWriteStorage`、`keyboardReachable`、`noInlineStyles`。
 3. **回归**：`go test ./internal/webui/`（嵌入/CSP/路由注册）、`make ui-base`、`make desensitize-check`。
 4. **本环境的限制**：这里的 `/usr/bin/firefox` 是 snap 壳子（`--version` 答不出 Mozilla 版本），
    `run.sh` 会按既有逻辑跳过并以 0 退出 —— 与 M94 同样处理：新视图的浏览器验证作为**宿主待执行项**
@@ -179,4 +187,46 @@ function toggleGroup(head, box, group)          // 就地翻转 + 持久化
      一次（`renderNav` 自己读 hash），冷启动用 `import('/js/router.js?reload=N')` 换模块实例。
    - 额外加了一条设计里没写的不变量：新 CSS 选择器**全部**限定在 `.sidebar nav` 之下，免得波及
      别处同名的 `.group`（`billing.js` 的表格列）。
+
+## 12. M95.1 修订：菜单默认折叠（2026-09-28，v4.10.1）
+
+**需求原话**（v4.10.0 上线当天）：「菜单默认折叠」。已与用户确认粒度：**默认只展开当前页面所在的
+分组**，其余 5 组折叠（"活动分组恒展开"保留，即打开控制台仍能看到"我在哪"）。
+
+### 12.1 改了什么
+
+| 项 | 初版（v4.10.0） | 修订（v4.10.1） |
+|---|---|---|
+| 无存储时的默认 | 6 组全展开 | **只展开当前分组**，其余折叠 |
+| 存储的键 | `aigw.nav_folded` | **`aigw.nav_open`** |
+| 存储的语义 | 记"折叠了哪些" | 记"**打开过**哪些" |
+| 渲染规则 | `group === activeGroup \|\| !folded.has(group)` | `group === activeGroup \|\| opened.has(group)` |
+| 点击 | 打开=移除、收起=加入 | 打开=**加入**、收起=**移除** |
+| 降级（存储坏掉） | 全部展开 | 只展开当前分组（＝"什么都没打开"） |
+
+### 12.2 为什么换键而不是复用 `aigw.nav_folded`
+
+默认折叠之后，"不在集合里"本身就等于折叠 —— 只有**打开过**的分组需要记。若继续写"折叠过的集合"，
+就表达不出"这个组是我特意打开的"：默认折叠时它会被当成折叠，操作者每次都得重新点开（记忆功能失效）。
+两个方向的语义在同一个键名上无法兼容（`nav_folded` 读出来是"这些要折叠"，而默认已经是折叠），
+所以换一个名字说得清自己装了什么的键。
+
+**不做迁移**：旧键里的分组在新默认下本来就都是折叠的（用户当初折叠它们，现在也是折叠），
+所以直接不读、不写即可；`router.js` 的注释里留了一行说明它的来历。用户的旧值是"全部展开"
+（键为空/不存在）的情形也不需要迁移——新默认就是折叠，这正是他这次要的。
+
+### 12.3 边界（新增的一条）
+
+**导航进一个从没打开过的分组时，它必须展开**（它现在是"当前分组"）。这是"默认折叠"最容易踩坏的
+地方：少了这一条，点侧栏链接跳到 `/pricing` 之后，菜单里自己所在的那一组是折着的，反而看不到当前位置。
+`nav_fold_test.mjs` 与 harness 的 `sidebar` 视图各有一条专门盯这个角落的断言
+（`activeGroupOpensThoughNeverOpened` / 冷启动后 `总览` 仍展开），并额外断言**这次自动展开不写存储**
+（渲染只读，只有点击才写）。
+
+### 12.4 验证
+
+- `node --experimental-vm-modules internal/webui/tests/nav_fold_test.mjs`：默认只展开当前分组、
+  点开/收起、写存储方向、冷启动读回、`#/pricing` 自动展开且不写盘、四种坏存储降级 —— 全绿。
+- `make ui-base`、`go test ./internal/webui/...`、`make ui-dist` + minify 选择器契约：全绿。
+- harness `sidebar` 视图的检查项按新默认重写（30 项判定），宿主上跑 `run.sh --views sidebar`。
 

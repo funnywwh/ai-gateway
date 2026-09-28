@@ -6769,6 +6769,32 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
 - [x] 文档：设计文档（含「实现与设计差异」4 条）、`scripts/ui-harness/README.md`、`docs/PROCESS.md`
       已产出表、`docs/TODO.md` M95 小节
 
+### M95.1 修订：菜单默认折叠（2026-09-28，v4.10.0 上线当天）
+
+> 需求原话：「菜单默认折叠」。粒度经确认：**默认只展开当前页面所在的分组**，其余 5 组折叠
+> （「活动分组恒展开」保留）。设计文档 §12 是这一节的正本。
+
+- [x] `js/router.js`：存储的键与语义一起翻过来 —— `aigw.nav_folded`（记"折叠了哪些"）→
+      **`aigw.nav_open`（记"打开过哪些"）**；渲染规则 `group === activeGroup || opened.has(group)`；
+      点击 = 打开加入、收起移除。**不做迁移**：旧键里的组在新默认下本来就都折着，直接不读不写
+      （`router.js` 注释留了它的来历）
+- [x] 降级口径同步：存储抛错 / JSON 坏掉 / 值不是数组 → "什么都没打开"，也就是**只展开当前分组**
+      （不是初版的全展开）
+- [x] 新增一条边界断言：**导航进一个从没打开过的分组时它必须展开**（它现在是"当前"），
+      且这次自动展开**不写存储**（渲染只读，只有点击才写）—— 默认折叠最容易踩坏的就是这里
+- [x] 测试：`internal/webui/tests/nav_fold_test.mjs` 的源码不变式（新键名 + "打开=加入、收起=移除"
+      的方向断言）与 VM 行为段（默认只开当前组、点开/收起、冷启动读回、`#/pricing` 自动展开不写盘、
+      四种坏存储降级）全部按新默认重写；harness `sidebar` 视图的检查项重写为 30 项判定
+      （`defaultShowsOnlyActiveGroup`、`defaultFoldsTheRest`、`foldedChevronPointsRight`、
+      `openGroupLengthensMenu`、`activeGroupOpensThoughNeverOpened`、`autoOpenDidNotWriteStorage` 等）
+- [x] 文档：设计文档 §2/§4/§5/§6/§7/§9 就地更新 + 新增 §12（改了什么 / 为什么换键 / 边界 / 验证）、
+      `scripts/ui-harness/README.md` 的 M95 一节、`docs/TODO.md` M95 小节
+- [x] 验收证据（本沙箱）：`node --experimental-vm-modules internal/webui/tests/nav_fold_test.mjs` 通过；
+      `make ui-base` 全绿；`go test ./internal/webui/...` 全绿；`make ui-dist` 后 minify 契约全绿，
+      且镜像里确实是新语义（`aigw.nav_open` 在、渲染规则 `=== activeGroup || opened.has(group)` 在）
+- 未做：发版与部署（线上仍是 v4.10.0 的"默认全展开"）—— 等是否发 v4.10.1 的决定；浏览器走查见 TODO
+
+
 ### M95 发布记录：v4.10.0 部署到 rag-server（2026-09-28）
 
 - 版本：**v4.10.0**（`d60f24c`），minor（新增对外能力：控制台主菜单分组可折叠 + 折叠状态本地记忆）

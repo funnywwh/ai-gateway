@@ -59,32 +59,39 @@ export async function loadPage(route) {
 
 export function navigate(path) { window.location.hash = '#' + path; }
 
-// Groups are foldable, and what is folded is remembered per browser: the menu is 24 links in a
-// 100vh scrolling column, so the groups an operator is not using cost him scroll distance on
-// every visit. The key follows the display currency's (`aigw.display_currency`, money.js): a view
-// preference lives in this browser, and the server is never told about it.
-const FOLD_KEY = 'aigw.nav_folded';
-let folded = null;
+// Groups are foldable and start folded: the menu is 24 links in a 100vh scrolling column, and an
+// operator reads it to go somewhere, not to read all of it. What is drawn open by default is the
+// group the current page lives in (see renderNav) — so the menu opens as "where I am", not as a
+// wall of links. Which groups the operator opened himself is remembered per browser; the key
+// follows the display currency's (`aigw.display_currency`, money.js): a view preference lives in
+// this browser, and the server is never told about it.
+//
+// The stored set is the OPENED groups, not the folded ones (it was `aigw.nav_folded` until the
+// default flipped): with a folded default, "absent from the set" already means folded, and only
+// the opened ones need remembering. An old `aigw.nav_folded` value is simply not read any more —
+// every group it named is folded by default now anyway, and one is not worth a migration.
+const OPEN_KEY = 'aigw.nav_open';
+let opened = null;
 
-// foldedGroups is the set of folded group names, read from localStorage once and kept in a
-// module-level Set afterwards. It cannot live in the DOM: renderNav rebuilds the whole nav on
+// openedGroups is the set of group names the operator opened, read from localStorage once and kept
+// in a module-level Set afterwards. It cannot live in the DOM: renderNav rebuilds the whole nav on
 // every navigation, exactly when the state has to survive. Any failure — a private-mode
-// localStorage, a hand-edited value, storage disabled by policy — degrades to "nothing folded",
+// localStorage, a hand-edited value, storage disabled by policy — degrades to "nothing opened",
 // never to a console that will not draw its own menu.
-function foldedGroups() {
-  if (folded) return folded;
-  folded = new Set();
+function openedGroups() {
+  if (opened) return opened;
+  opened = new Set();
   try {
-    const raw = window.localStorage.getItem(FOLD_KEY);
+    const raw = window.localStorage.getItem(OPEN_KEY);
     const list = raw ? JSON.parse(raw) : [];
-    if (Array.isArray(list)) list.forEach((name) => { if (typeof name === 'string') folded.add(name); });
+    if (Array.isArray(list)) list.forEach((name) => { if (typeof name === 'string') opened.add(name); });
   } catch (err) { /* unreadable storage: this page keeps its own state in memory */ }
-  return folded;
+  return opened;
 }
 
-function persistFolded(set) {
-  try { window.localStorage.setItem(FOLD_KEY, JSON.stringify([...set])); } catch (err) {
-    // Private mode: folding still works for this page, it just will not survive a reload.
+function persistOpened(set) {
+  try { window.localStorage.setItem(OPEN_KEY, JSON.stringify([...set])); } catch (err) {
+    // Private mode: opening a group still works for this page, it just will not survive a reload.
   }
 }
 
@@ -109,13 +116,15 @@ function groupHeader(name, open, index) {
 
 // toggleGroup flips one group in place, updating the nodes it was handed instead of asking
 // renderNav to rebuild the nav: the button keeps focus and the menu keeps its scroll position.
+// The set it records holds the OPENED groups, so opening adds and closing removes — the other way
+// round would persist exactly the opposite of what the operator did.
 function toggleGroup(head, box, group) {
   const open = head.getAttribute('aria-expanded') !== 'true';
   head.setAttribute('aria-expanded', open ? 'true' : 'false');
   box.hidden = !open;
-  const set = foldedGroups();
-  if (open) set.delete(group); else set.add(group);
-  persistFolded(set);
+  const set = openedGroups();
+  if (open) set.add(group); else set.delete(group);
+  persistOpened(set);
 }
 
 // appendGroup adds one group's header plus its (possibly folded) item container, wiring the
@@ -143,7 +152,7 @@ export function renderNav(container) {
   container.replaceChildren();
   const active = currentRoute().path;
   const activeGroup = (routes.find((route) => route.path === active) || routes[0]).group;
-  const foldedAway = foldedGroups();
+  const openedUp = openedGroups();
   let group = null;
   let box = null;
   let index = -1;
@@ -151,10 +160,11 @@ export function renderNav(container) {
     if (route.group !== group) {
       group = route.group;
       index += 1;
-      // The group the operator is standing in is never drawn folded: a deep link, a reload or a
-      // page's own navigate() button must not hide the current location from the menu. This is
-      // also why rendering never writes the fold back — only toggleGroup does.
-      box = appendGroup(container, group, group === activeGroup || !foldedAway.has(group), index);
+      // A group is drawn folded unless the operator opened it. The one exception is the group the
+      // current page lives in: a deep link, a reload or a page's own navigate() button must leave
+      // the operator's location visible in the menu. That is also why rendering never writes the
+      // set back — only toggleGroup does.
+      box = appendGroup(container, group, group === activeGroup || openedUp.has(group), index);
     }
     box.append(el2('a', {
       href: '#' + route.path,

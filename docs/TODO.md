@@ -1284,20 +1284,26 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       `nameOverrideBadge`、`identityRowOffersRename`、`renameDialogEditable`、`renameDialogSecretLocked`、
       `renameDialogHint`、`renameDialogNoProbe`
 
-## M95 控制台主菜单改成可折叠（分组手风琴 + 记忆折叠状态）
-> 设计：`docs/design/m95-console-collapsible-nav.md`；需求原话：「管理后台的主菜单改成可折叠」。
-> 已确认的两个选择：**分组可折叠**（不是整栏折叠）、**折叠状态记在浏览器里**（`localStorage`）。
+## M95 控制台主菜单改成可折叠（分组手风琴 + 记忆打开状态）
+> 设计：`docs/design/m95-console-collapsible-nav.md`；需求原话：「管理后台的主菜单改成可折叠」，
+> 上线当天追加「菜单默认折叠」（粒度经确认：**只展开当前分组**）→ 修订见设计文档 §12（M95.1）。
+> 已确认的选择：**分组可折叠**（不是整栏折叠）、**状态记在浏览器里**、**默认折叠**。
 > 规格：**无**（只动控制台自己的导航 chrome，没有 API/配置/字段/数据变化；理由见设计文档开头）。
-> **代码、测试、文档、发布都已完成**（v4.10.0 已部署到 rag-server，见 `docs/todo_done.md` 同名小节的发布记录）；
-> 本节只留未完成项。
+> **代码、测试、文档、v4.10.0 发布都已完成**（见 `docs/todo_done.md` 同名小节）；M95.1（默认折叠）的代码与
+> 测试也已完成，**等是否发 v4.10.1 的决定**；本节只留未完成项。
 
 - [ ] **待宿主执行（浏览器走查）**：本沙箱没有 firefox（`/usr/bin/firefox` 是 snap 壳子，`run.sh` 会跳过）。
-      宿主上 `scripts/ui-harness/run.sh --views sidebar`（或整轮 `make ui-check`），验收 M95 新增检查项：
-      `groupCount`、`groupNames`、`groupIsButton`、`linkCount`、`allExpandedByDefault`、`ariaControlsResolves`、
-      `openChevronPointsDown`、`chevronDrawn`、`foldFlipsAria`、`foldHidesItems`、`foldShortensMenu`、
-      `foldKeepsOtherGroups`、`foldChevronPointsRight`、`foldPersisted`、`coldLoadHonoursStorage`、
-      `activeGroupAlwaysOpen`、`activeLinkHighlighted`、`foldActiveGroupHonoured`、`unfoldRestores`、
-      `unfoldClearsStorage`、`keyboardReachable`、`noInlineStyles`、`noPageErrors`
-- [ ] **待操作员（人工看一眼，线上已是 v4.10.0）**：`https://chat.tirisen.hk/admin/ui/` 收起「访问控制」→ 刷新
-      仍是收起的；点该组里的页面（含深链接 `#/keys`）→ 该组自动展开且当前项高亮；在活动分组里点标题能收起；
-      Tab 到分组标题、Enter/Space 可切换；菜单整体明显变短
+      宿主上 `scripts/ui-harness/run.sh --views sidebar`（或整轮 `make ui-check`），验收 M95/M95.1 的检查项：
+      `groupCount`、`groupNames`、`groupIsButton`、`linkCount`、`defaultShowsOnlyActiveGroup`、
+      `defaultFoldsTheRest`、`ariaControlsResolves`、`chevronDrawn`、`openChevronPointsDown`、
+      `foldedChevronPointsRight`、`openGroupFlipsAria`、`openGroupRevealsItems`、`openGroupLengthensMenu`、
+      `openKeepsOtherGroups`、`openGroupChevronTurnsDown`、`openPersisted`、`closeGroupHidesItems`、
+      `closeClearsStorage`、`coldLoadHonoursStorage`、`coldLoadKeepsOthersFolded`、
+      `activeGroupOpensThoughNeverOpened`、`navigationFoldsTheRest`、`activeLinkHighlighted`、
+      `autoOpenDidNotWriteStorage`、`foldActiveGroupInPlace`、`openAgainRestores`、`activeGroupReopensOnRender`、
+      `keyboardReachable`、`noInlineStyles`、`noPageErrors`
+- [ ] **待操作员（人工看一眼，线上 v4.10.0 还是旧默认；v4.10.1 部署后）**：打开控制台 →
+      菜单默认只剩 6 个分组标题 + **当前分组**的条目；点别的分组展开、再点收起；刷新后仍记得打开过哪些；
+      直接访问 `#/keys` 这类深链接时对应分组自动展开
+- [ ] **待定（问过用户）**：是否把 M95.1（默认折叠）发成 **v4.10.1（patch）** 并部署到 rag-server；
+      控制台资源内嵌在二进制里，不发版线上就还是"默认全展开"
