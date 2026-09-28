@@ -98,9 +98,10 @@ assert.match(org, /state\.membersLoaded = false;/, 'the save button must be re-a
 assert.match(org, /import \{ matchesQuery \} from '\.\.\/pinyin\.js'/, 'the org page must use the pinyin matcher');
 assert.match(org, /matcher: matchesQuery/, 'the node tree filter must match pinyin too');
 // M72：过滤同时匹配账号名与飞书姓名（组织页的人员行就是账号行）。
+// M92：公司级映射（feishu.links）里的姓名同样参与匹配。
 assert.match(org, /matchesPerson\(account, search\)/, 'the member filter must go through the person matcher');
-assert.match(org, /matchesQuery\(account\.name, search\) \|\| \(feishu \? matchesQuery\(feishu, search\) : false\)/,
-  'the person filter must match the account name and the Feishu name');
+assert.match(org, /names\.some\(\(name\) => matchesQuery\(name, search\)\)/,
+  'the person filter must match the account name and every Feishu name (identity + company links)');
 assert.match(org, /type: 'search', placeholder: '按账号名或飞书姓名过滤（支持拼音/, 'the member filter must say that pinyin works');
 assert.match(treeSrc, /matcher,/, 'the control must accept a matcher callback');
 assert.doesNotMatch(treeSrc, /import[^;]*pinyin/, 'the control must not depend on the pinyin table itself');

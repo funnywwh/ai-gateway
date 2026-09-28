@@ -1155,15 +1155,24 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 			},
 		},
 		{
+			Method: "GET", Path: "/admin/api/v1/org/feishu/companies", Handler: s.handleAdminListFeishuCompanies,
+			Name: "admin_list_feishu_companies", Group: groupOrg, Role: roleViewer,
+			Summary: "列出可导入组织架构的公司（M92）：每行给出 app_id、公司名、是否本部署的身份应用、" +
+				"该公司节点（已存在 / 本次会创建）、已导入的节点数与已映射账号数",
+		},
+		{
 			Method: "GET", Path: "/admin/api/v1/org/feishu/directory", Handler: s.handleAdminListFeishuDirectory,
 			Name: "admin_list_feishu_directory", Group: groupOrg, Role: roleAdmin,
-			Summary: "读取飞书通讯录（部门树 + 人员），并给出与本地组织节点/账户的合并预览：每个部门标注 已存在/将创建/按名合并，每个人员标注匹配通道（人员id/Key绑定/同名）或未匹配",
+			Summary: "读取飞书通讯录（部门树 + 人员），并给出与本地组织节点/账户的合并预览：每个部门标注 已存在/将创建/按名合并，每个人员标注匹配通道（人员id/同名）或未匹配；多公司部署可指定 company",
 			Query: []adminField{
+				queryParam("company", "string",
+					"公司标识：app_id（cli_…）或配置里的公司名。省略 = 本部署的身份应用（本公司）。"+
+						"公司由配置提供（feishu.company_name / feishu.companies），未知值 400 并列出已知公司"),
 				queryParam("refresh", "boolean",
-					"强制重新拉取飞书通讯录。默认结果走 60 秒缓存；任何同步/绑定写操作都会使缓存失效"),
+					"强制重新拉取飞书通讯录。默认结果走 60 秒缓存（按公司分别计）；任何同步/绑定写操作都会使缓存失效"),
 				queryParam("departments", "string",
 					"只统计这些飞书部门（open_department_id，逗号分隔或重复传参）的合并结果；"+
-						"可以传虚拟根 \"0\" 表示公司层人员（不属于任何部门的人）。"+
+						"可以传虚拟根 \"0\" 表示公司层人员（不属于任何部门的人，会挂到公司节点）。"+
 						"不传 = 全量。每个部门额外返回 selected/included，每个人额外返回 in_scope；"+
 						"stats 只统计范围内的对象。部门 id 在 admin_list_feishu_directory 的 departments[].id"),
 			},
@@ -1171,8 +1180,8 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 		{
 			Method: "POST", Path: "/admin/api/v1/org/feishu/sync", Handler: s.handleAdminSyncFeishuOrg,
 			Name: "admin_sync_feishu_org", Group: groupOrg, Role: roleAdmin,
-			Summary:   "执行一次飞书通讯录同步：补建缺失部门节点 + 自动合并已匹配人员（写入账户级飞书身份并挂入部门节点）。可只同步指定部门；幂等：重复执行写 0",
-			Dangerous: true, ConfirmReason: "会创建飞书里有而本地没有的组织节点（其名称就是部门名），并把自动匹配上的人员写上飞书身份、挂进其部门对应的节点——节点标签被子树继承，这会即时改变这些账号的生效授权",
+			Summary:   "执行一次飞书通讯录同步：创建/认领该公司的公司节点 + 补建缺失部门节点 + 自动合并已匹配人员（身份应用写账户级飞书身份，其它公司写公司级映射）。可只同步指定部门；幂等：重复执行写 0",
+			Dangerous: true, ConfirmReason: "会创建该公司的公司节点（其名称就是公司名）与飞书里有而本地没有的部门节点（顶层部门挂在公司节点下），并把自动匹配上的人员写入映射、挂进其部门对应的节点——节点标签被子树继承，这会即时改变这些账号的生效授权；旧部署首次同步还会把该公司原来建在根层的顶层部门移入公司节点",
 			Body: []adminField{
 				structuredField("department_ids", "array",
 					"只同步这些飞书部门（open_department_id，见 admin_list_feishu_directory 的 departments[].id）；"+
@@ -1181,14 +1190,27 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 						"不传这个字段 = 全量同步（M70 原有行为）；传空数组会 400；目录里不存在的 id 会被丢弃并在 "+
 						"unknown_department_ids 里回报，全都不认识时才 400",
 					arrayOfStrings("飞书部门 id 列表"), []any{"od_a1"}),
+				bodyOptional("company", "string",
+					"要同步哪家公司：app_id（cli_…）或配置里的公司名；省略 = 本部署的身份应用（本公司）。"+
+						"也可以用查询参数 ?company= 传（控制台就是这么做的）；两者同时给出时以 body 为准"),
 			},
+		},
+		{
+			Method: "DELETE", Path: "/admin/api/v1/org/feishu/companies/{app_id}/links", Handler: s.handleAdminPurgeFeishuCompanyLinks,
+			Name: "admin_purge_feishu_company_links", Group: groupOrg, Role: roleAdmin,
+			Summary: "删除某家公司的全部人员 → 账号映射（公司退场用）。只删映射：组织节点、成员关系、账号与 API Key 都不动；身份应用会 400（它的映射是登录身份，要逐人解绑）",
+			Dangerous: true, ConfirmReason: "删掉这家公司的映射后，下次同步会把这些人重新当作「未匹配」逐个交给操作员处理；账号、节点与成员关系不受影响，但映射本身不可恢复",
+			Params: []adminField{pathParam("app_id", "公司标识：app_id（cli_…）或配置里的公司名")},
 		},
 		{
 			Method: "POST", Path: "/admin/api/v1/org/feishu/users/{open_id}/account", Handler: s.handleAdminCreateAccountFromFeishuUser,
 			Name: "admin_create_account_from_feishu_user", Group: groupOrg, Role: roleAdmin,
-			Summary:   "为某个飞书人员创建本地账户（默认名=飞书姓名可改），写入其飞书身份并挂入其部门节点；同名账户已存在时 409 并建议改用绑定接口",
-			Dangerous: true, ConfirmReason: "会新建一个账户（prepaid、余额 0、启用自动停复），写入该飞书身份，并把账户挂进其部门对应的组织节点",
-			Params: []adminField{pathParam("open_id", "飞书人员的 open_id（ou_…，admin_list_feishu_directory 的人员列表给出）")},
+			Summary:   "为某个飞书人员创建本地账户（默认名=飞书姓名可改），写入其飞书身份（身份应用）或公司级映射（其它公司）并挂入其部门节点；同名账户已存在时 409 并建议改用绑定接口",
+			Dangerous: true, ConfirmReason: "会新建一个账户（prepaid、余额 0、启用自动停复），写入该飞书身份，并把账户挂进其部门对应的组织节点（顶层部门会自动建在该公司的公司节点下）",
+			Params: []adminField{pathParam("open_id", "飞书人员的 open_id（ou_…，admin_list_feishu_directory 的人员列表给出）。open_id 只在**一家公司内**唯一，所以其它公司必须同时传 company")},
+			Query: []adminField{
+				queryParam("company", "string", "公司标识（app_id 或公司名）；省略 = 本部署的身份应用（本公司）"),
+			},
 			Body: []adminField{
 				bodyOptional("name", "string",
 					"账户名；默认用飞书姓名。通讯录缺名称权限（names_unavailable）时必须手填，否则 400"),
@@ -1198,20 +1220,26 @@ func (s *Server) catalogAdminRoutes() []adminRoute {
 		{
 			Method: "PUT", Path: "/admin/api/v1/org/feishu/users/{open_id}/account", Handler: s.handleAdminBindAccountFeishuUser,
 			Name: "admin_bind_account_feishu_user", Group: groupOrg, Role: roleAdmin,
-			Summary:   "把某个飞书人员绑定到指定账户：写入账户级飞书身份（accounts.feishu_*），并顺带把账户挂入其部门节点。不影响 API Key 上的绑定，也不影响门户登录",
-			Dangerous: true, ConfirmReason: "该飞书人员之后的每次同步都会合并到这个账户；一个账户只能绑一个飞书身份（已绑别人时 409）",
+			Summary:   "把某个飞书人员绑定到指定账户：本公司写账户级飞书身份（accounts.feishu_*，就是门户登录身份），其它公司只写公司级映射（不产生登录能力）；两种都会顺带把账户挂入其部门节点",
+			Dangerous: true, ConfirmReason: "该飞书人员之后的每次同步都会合并到这个账户；身份应用下一个账户只能绑一个飞书身份（已绑别人时 409），其它公司下同一账户也只能对应一个人",
 			Params: []adminField{pathParam("open_id", "飞书人员的 open_id（ou_…）")},
+			Query: []adminField{
+				queryParam("company", "string", "公司标识（app_id 或公司名）；省略 = 本部署的身份应用（本公司）"),
+			},
 			Body: []adminField{
 				bodyRequired("account_id", "integer",
-					"要绑定到的账户数字 id（admin_list_accounts 给出）。该账户当前不能已绑定其他飞书身份"),
+					"要绑定到的账户数字 id（admin_list_accounts 给出）。身份应用下该账户当前不能已绑定其他飞书身份"),
 			},
 		},
 		{
 			Method: "DELETE", Path: "/admin/api/v1/org/feishu/users/{open_id}/account", Handler: s.handleAdminUnbindAccountFeishuUser,
 			Name: "admin_unbind_account_feishu_user", Group: groupOrg, Role: roleAdmin,
-			Summary:   "解除某个飞书人员与账户的绑定（幂等）。不动 API Key 上的绑定；解除后该人员在下次同步中变回「未匹配」",
-			Dangerous: true, ConfirmReason: "解除账户级飞书身份映射；不影响该账户本身、它的 Key 与任何登录能力",
+			Summary:   "解除某个飞书人员与账户的绑定（幂等）：本公司清账号级飞书身份，其它公司删该公司的人员映射；解除后该人员在下次同步中变回「未匹配」",
+			Dangerous: true, ConfirmReason: "解除这条映射；不影响该账户本身、它的 Key 与其它公司的映射（本公司则会影响门户飞书登录：那个身份就是登录身份）",
 			Params: []adminField{pathParam("open_id", "飞书人员的 open_id（ou_…）")},
+			Query: []adminField{
+				queryParam("company", "string", "公司标识（app_id 或公司名）；省略 = 本部署的身份应用（本公司）"),
+			},
 		},
 		{
 			Method: "GET", Path: "/admin/api/v1/mcp-tokens", Handler: s.handleAdminListMCPTokens,

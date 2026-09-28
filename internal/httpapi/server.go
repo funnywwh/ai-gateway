@@ -180,6 +180,10 @@ type Deps struct {
 	Models        ModelAdmin
 	Tags          TagAdmin
 	Org           OrgAdmin
+	// FeishuPeople is the company-scoped Feishu person ↔ account mapping of the directory sync
+	// (M92). A nil port makes the company-scoped routes answer 400 unsupported_parameter, the
+	// same convention every unwired port follows.
+	FeishuPeople  FeishuPersonAdmin
 	HookStore     HookAdmin
 	MCPTokenStore MCPTokenAdmin
 	Settings      SettingsAdmin
@@ -301,11 +305,13 @@ type Server struct {
 	// makes an outbound call before anyone is authenticated.
 	feishuMu    sync.Mutex
 	feishuRates map[string]*feishuRate
-	// Directory cache (M70): the Feishu contact walk costs about two calls per department,
-	// so the snapshot is reused for a short window and invalidated by any sync write. The
-	// mutex guards the pointer swap; the entry itself is immutable once published.
+	// Directory cache (M70; per company from M92): the Feishu contact walk costs about two calls
+	// per department, so the snapshot is reused for a short window and invalidated by any sync
+	// write. It is keyed by application id because each company is a separate tenant with its own
+	// rate limit — serving one company's walk to another's dialog would be both wrong and
+	// useless. The mutex guards the map; the entries themselves are immutable once published.
 	feishuDirMu    sync.Mutex
-	feishuDirCache *feishuDirectoryEntry
+	feishuDirCache map[string]*feishuDirectoryEntry
 	// Consumed console tickets (M66): a ticket that carried an administrator across host
 	// names is worth exactly one session. The set is bounded and pruned by expiry, so losing
 	// it to a restart reopens a window no longer than the ticket TTL.

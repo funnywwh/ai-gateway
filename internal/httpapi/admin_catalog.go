@@ -62,12 +62,19 @@ func (s *Server) handleAdminListAccounts(w http.ResponseWriter, r *http.Request)
 	}
 
 	out := make([]map[string]any, 0, len(list))
+	// The company-scoped Feishu mappings travel with every row (M92) for the same reason the
+	// memberships do: one read for the page, not one per account.
+	feishuCtx, err := s.accountJSONContextFor(r.Context())
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
 	for _, a := range list {
 		if !accountInOrgFilter(r, index, members[a.ID]) {
 			continue
 		}
 		nodeIDs, refs := orgRefsForAccounts(index, members[a.ID])
-		out = append(out, s.attachAccountOperatorFacts(r, accountJSON(a, nodeIDs, refs), a))
+		out = append(out, s.attachAccountOperatorFacts(r, accountJSON(a, nodeIDs, refs, feishuCtx), a))
 	}
 	// The placement is joined from dshgw once per answer (M77): the console shows which machine
 	// each account's tenant runs on, and the accounts page must not make one socket call per row.
@@ -206,7 +213,12 @@ func (s *Server) handleAdminCreateAccount(w http.ResponseWriter, r *http.Request
 		map[string]any{"name": a.Name, "billing_mode": mode, "tags_set": body.Tags != nil,
 			"org_node_ids": nodeIDs}, "ok")
 	s.reload(r.Context(), "account created", true)
-	writeJSON(w, http.StatusCreated, accountJSON(a, nodeIDs, refs))
+	feishuCtx, err := s.accountJSONContextFor(r.Context())
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	writeJSON(w, http.StatusCreated, accountJSON(a, nodeIDs, refs, feishuCtx))
 }
 
 // applyAccountOrgNodes replaces an account's organization memberships and returns the stored
@@ -361,7 +373,12 @@ func (s *Server) handleAdminPatchAccount(w http.ResponseWriter, r *http.Request)
 		map[string]any{"status": status, "billing_mode": string(a.BillingMode), "tags_set": body.Tags != nil,
 			"org_node_ids": nodeIDs, "org_set": body.OrgNodeIDs != nil}, "ok")
 	s.reload(r.Context(), "account updated", true)
-	writeJSON(w, http.StatusOK, accountJSON(a, nodeIDs, refs))
+	feishuCtx, err := s.accountJSONContextFor(r.Context())
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, accountJSON(a, nodeIDs, refs, feishuCtx))
 }
 
 // ---------------------------------------------------------------------------

@@ -5,9 +5,37 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strconv"
+	"strings"
 
 	"github.com/funnywwh/ai-gateway/internal/store"
 )
+
+// adoptLegacyFeishuScope stamps the identity application on org nodes that carry a Feishu
+// department link from before M92 but no company (M92).
+//
+// Before this milestone a deployment served exactly one Feishu enterprise, so such a link is
+// unambiguously the identity application's — a fact only the configuration knows, which is why
+// it is this startup call and not a SQL migration file. Nothing is moved here: the departments
+// are only labelled, and the first sync of that company is what adopts its top-level departments
+// under the company node (with the operator seeing it in the confirmation dialog).
+//
+// Same contract as the M72 backfill: idempotent (once every row is stamped the UPDATE matches
+// nothing), logged rather than fatal (an adoption that failed leaves the deployment behaving
+// exactly as it did before the upgrade).
+func adoptLegacyFeishuScope(ctx context.Context, db *store.DB, appID string, log *slog.Logger) {
+	if strings.TrimSpace(appID) == "" {
+		return
+	}
+	updated, err := db.AdoptLegacyFeishuScope(ctx, appID)
+	if err != nil {
+		log.Error("adopting legacy Feishu org nodes failed; they keep working as before", "err", err)
+		return
+	}
+	if updated == 0 {
+		return
+	}
+	log.Info("legacy feishu org nodes adopted", "app_id", appID, "nodes", updated)
+}
 
 // migrateKeyFeishuBindings runs the M72 backfill once at startup and reports what it did.
 //

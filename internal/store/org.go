@@ -13,7 +13,7 @@ import (
 	"github.com/funnywwh/ai-gateway/internal/domain"
 )
 
-const orgNodeCols = "id, parent_id, name, note, tags_json, sort_order, created_at, updated_at, feishu_department_id, feishu_synced_at"
+const orgNodeCols = "id, parent_id, name, note, tags_json, sort_order, created_at, updated_at, feishu_department_id, feishu_app_id, feishu_synced_at"
 
 func scanOrgNode(row rowScanner) (*domain.OrgNode, error) {
 	var (
@@ -23,7 +23,7 @@ func scanOrgNode(row rowScanner) (*domain.OrgNode, error) {
 		feishuSyncedAt       sql.NullInt64
 	)
 	if err := row.Scan(&n.ID, &parentID, &n.Name, &n.Note, &n.TagsJSON, &n.SortOrder, &createdAt, &updatedAt,
-		&n.FeishuDepartmentID, &feishuSyncedAt); err != nil {
+		&n.FeishuDepartmentID, &n.FeishuAppID, &feishuSyncedAt); err != nil {
 		return nil, err
 	}
 	if parentID.Valid {
@@ -100,10 +100,10 @@ func (db *DB) CreateOrgNode(ctx context.Context, n *domain.OrgNode) (int64, erro
 
 	res, err := db.write.ExecContext(ctx, `
 INSERT INTO org_nodes(parent_id, name, note, tags_json, sort_order, created_at, updated_at,
-  feishu_department_id, feishu_synced_at)
-VALUES(?,?,?,?,?,?,?,?,?)`,
+  feishu_department_id, feishu_app_id, feishu_synced_at)
+VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		int64PtrNull(n.ParentID), n.Name, n.Note, n.TagsJSON, n.SortOrder, unix(n.CreatedAt), unix(n.UpdatedAt),
-		n.FeishuDepartmentID, unixPtr(n.FeishuSyncedAt))
+		n.FeishuDepartmentID, n.FeishuAppID, unixPtr(n.FeishuSyncedAt))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return 0, domain.ErrConflict(siblingNameConflict(n))
@@ -391,29 +391,81 @@ func (db *DB) AddAccountOrgNodes(ctx context.Context, accountID int64, nodeIDs [
 	return nil
 }
 
-// SetOrgNodeFeishuDepartment writes (or clears, with an empty id) the node's Feishu
-// department link. Like the account binding it is a single-column UPDATE: UpdateOrgNode
-// deliberately does not list the column, so a console edit of name/parent/tags can never
-// clear the sync relationship.
-func (db *DB) SetOrgNodeFeishuDepartment(ctx context.Context, nodeID int64, departmentID string) error {
+// SetOrgNodeFeishuDepartment writes (or clears, with an empty department id) the node's Feishu
+// department link together with the company it belongs to (M92). Like the account binding it is
+// a single-column UPDATE: UpdateOrgNode deliberately does not list these columns, so a console
+// edit of name/parent/tags can never clear the sync relationship.
+//
+// The company is part of the write, not a separate statement: the uniqueness rule is
+// (application, department) — two companies may each own a department whose open id happens to
+// be the same string — so writing one without the other could momentarily claim a department id
+// for the wrong company.
+func (db *DB) SetOrgNodeFeishuDepartment(ctx context.Context, nodeID int64, appID, departmentID string) error {
 	departmentID = strings.TrimSpace(departmentID)
+	appID = strings.TrimSpace(appID)
 	var syncedAt any
 	if departmentID != "" {
 		syncedAt = unix(time.Now())
+	} else {
+		// Clearing the link clears the company with it: a department id without an owner is
+		// exactly the legacy shape the startup adoption exists to remove.
+		appID = ""
 	}
 	result, err := db.write.ExecContext(ctx,
-		"UPDATE org_nodes SET feishu_department_id = ?, feishu_synced_at = ? WHERE id = ?",
-		departmentID, syncedAt, nodeID)
+		"UPDATE org_nodes SET feishu_department_id = ?, feishu_app_id = ?, feishu_synced_at = ? WHERE id = ?",
+		departmentID, appID, syncedAt, nodeID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return domain.ErrConflict(fmt.Sprintf(
-				"another org node is already linked to Feishu department %s", departmentID))
+				"another org node is already linked to Feishu department %s of application %s", departmentID, appID))
 		}
 		return fmt.Errorf("store: link org node %d to Feishu: %w", nodeID, err)
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("store: link org node %d to Feishu: %w", nodeID, err)
+	}
+	if affected == 0 {
+		return domain.ErrNotFound("org node " + strconv.FormatInt(nodeID, 10))
+	}
+	return nil
+}
+
+// SetOrgNodeParent moves a node under another one (parentID 0 means "make it a root").
+//
+// It is its own statement, and not a call to UpdateOrgNode, because the only caller is the
+// directory sync adopting a company's top-level departments (M92): it knows the new parent and
+// must not carry — and therefore must not rewrite — the node's name, note or tags. The
+// parent must already exist, and a move that would collide with a sibling name is a conflict
+// rather than an error, because that is a state the operator can see and fix.
+func (db *DB) SetOrgNodeParent(ctx context.Context, nodeID, parentID int64) error {
+	if nodeID <= 0 {
+		return domain.ErrInvalidRequest("org node id is required")
+	}
+	if parentID != 0 {
+		if parentID == nodeID {
+			return domain.ErrInvalidRequest("an org node cannot be its own parent")
+		}
+		if _, err := db.GetOrgNode(ctx, parentID); err != nil {
+			return err
+		}
+	}
+	var parent any
+	if parentID != 0 {
+		parent = parentID
+	}
+	result, err := db.write.ExecContext(ctx,
+		"UPDATE org_nodes SET parent_id = ?, updated_at = ? WHERE id = ?",
+		parent, unix(time.Now()), nodeID)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return domain.ErrConflict("a sibling node with this name already exists under the target parent")
+		}
+		return fmt.Errorf("store: move org node %d under %d: %w", nodeID, parentID, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: move org node %d under %d: %w", nodeID, parentID, err)
 	}
 	if affected == 0 {
 		return domain.ErrNotFound("org node " + strconv.FormatInt(nodeID, 10))

@@ -98,6 +98,15 @@ window.fetch = async (url, options) => {
   if (path === '/accounts' && method === 'GET') {
     return ok({ data: ACCOUNTS, count: ACCOUNTS.length, total: ACCOUNTS.length, limit: 1000, offset: 0, has_more: false });
   }
+  if (path === '/org/feishu/companies' && method === 'GET') {
+    // M92：两家公司（本公司 + 一家客户）→ 弹窗渲染公司下拉；单公司部署不渲染。
+    return ok({ count: 2, identity_app_id: 'cli_aaa', data: [
+      { app_id: 'cli_aaa', name: '本公司', identity: true, root_node_id: null, root_node_name: '本公司',
+        company_nodes: 0, linked_accounts: 0 },
+      { app_id: 'cli_bbb', name: '某某科技', identity: false, root_node_id: null, root_node_name: '某某科技',
+        company_nodes: 0, linked_accounts: 0 },
+    ] });
+  }
   if (path === '/org/feishu/directory' && method === 'GET') {
     const names = !window.__noNames;
     // 缺数据权限时**部门与人员都没有名字**（这是真机的实际形状）：只剩下 id，
@@ -153,6 +162,11 @@ window.fetch = async (url, options) => {
     return ok({
       fetched_at: '2026-09-22T08:30:00Z', cached: !query.includes('refresh'), names_available: names,
       truncated: false, departments: scopedDepartments, users, users_truncated: false,
+      company: {
+        app_id: 'cli_aaa', name: '本公司', identity: true,
+        root: { node_id: null, name: '本公司', matched: '', will_create: true, will_adopt: false },
+        reparent_node_ids: [], warnings: [],
+      },
       stats, selection: requested, unknown_department_ids: unknown,
       warnings: names ? [] : ['names_unavailable'],
     });
@@ -244,6 +258,14 @@ try {
     checks.firstLoadUsesCache = !!firstDirectoryCall && !firstDirectoryCall.includes('refresh');
     checks.dialogOpen = !!dialog();
     checks.dialogHasBothPanes = !!document.querySelector('.feishu-sync-tree') && !!document.querySelector('.feishu-sync-people');
+
+    // M92：公司下拉。harness 的 stub 里有两家公司，所以下拉必须出现，且目录读带上选中的公司。
+    const companyPick = document.querySelector('.feishu-company-select');
+    checks.companyPickerShown = !!companyPick;
+    checks.companyPickerListsBoth = !!companyPick && companyPick.options.length === 2;
+    checks.directoryNamesCompany = !!firstDirectoryCall && firstDirectoryCall.includes('company=cli_aaa');
+    checks.headerNamesCompany = document.querySelector('.feishu-sync-subtitle')
+      .textContent.includes('公司「本公司」');
 
     // 左栏是飞书部门树：合成根 + 研发部 + 市场部 + 平台组（父在子前）。
     checks.treeShowsRoot = treeLabels().includes('飞书根组织');
@@ -427,10 +449,18 @@ try {
       checks.syncPosted = !!syncCall;
       const syncBody = (window.__sent || []).filter((call) => call.path === '/org/feishu/sync').pop();
       let syncSelection = null;
-      try { syncSelection = JSON.parse(syncBody.body).department_ids; } catch (err) { syncSelection = null; }
+      let syncCompany = null;
+      try {
+        const parsed = JSON.parse(syncBody.body);
+        syncSelection = parsed.department_ids;
+        syncCompany = parsed.company;
+      } catch (err) { syncSelection = null; }
       // 上一步只点了「研发部」（联动把「平台组」一起勾上），POST 必须照这个范围发。
       checks.syncBodyCarriesSelection = Array.isArray(syncSelection)
         && syncSelection.slice().sort().join(',') === 'od_a,od_a1';
+      // M92：同步必须指名道姓是哪家公司（open_id 只在公司内唯一，勾选也是按公司的目录算的）。
+      checks.syncBodyCarriesCompany = syncCompany === 'cli_aaa';
+      checks.syncConfirmNamesCompany = modalRoot().textContent.includes('公司：本公司');
       checks.syncToast = [...document.querySelectorAll('.toast')].some((node) => node.textContent.includes('同步完成'));
       checks.reloadedAfterSync = (window.__calls || []).some((call) => call.includes('/org/feishu/directory') && call.includes('refresh=true'));
 
@@ -446,7 +476,9 @@ try {
       await settle();
       const createCall = (window.__sent || []).find((call) => call.method === 'POST' && /\/org\/feishu\/users\/[^/]+\/account$/.test(call.path));
       checks.createPosted = !!createCall;
-      checks.createPathCarriesOpenId = !!createCall && createCall.path.endsWith('/org/feishu/users/ou_new/account');
+      // M92：人员接口必须带上公司（open_id 只在公司内唯一，服务端要按公司查通讯录）。
+      checks.createPathCarriesOpenId = !!createCall && createCall.path.endsWith('/org/feishu/users/ou_new/account')
+        && (createCall.query || '').includes('company=cli_aaa');
       let createBody = null;
       try { createBody = JSON.parse(createCall.body); } catch (err) { createBody = null; }
       checks.createBodyCarriesTypedName = !!createBody && createBody.name === '李四（市场）';

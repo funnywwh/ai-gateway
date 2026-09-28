@@ -486,6 +486,9 @@ textarea.form-input { resize:vertical; min-height:64px; }
    弹窗比普通对话框宽，因为一屏要看两栏；两侧都各自滚动，头部的统计行与底部的按钮始终可见。 */
 .feishu-sync-dialog { width:min(1080px, 100%); }
 .feishu-sync-head { gap:10px; }
+/* M92：公司下拉只在部署导入了多家公司时出现（单公司部署没有它，与 M70 完全一致）。 */
+.feishu-company-pick { flex:0 0 auto; }
+.feishu-company-pick .feishu-company-select { max-width:220px; }
 .feishu-sync-head .feishu-sync-subtitle { flex:1 1 auto; min-width:0; font-size:12.5px; white-space:normal; }
 .feishu-sync-notice { font-size:12.5px; line-height:1.6; padding:8px 10px; border-radius:8px; }
 .feishu-sync-notice:empty { display:none; }

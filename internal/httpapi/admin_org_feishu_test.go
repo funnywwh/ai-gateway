@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/feishu"
 )
 
 // The directory-sync endpoints, tested against a stub that speaks the three Feishu calls
@@ -115,6 +116,13 @@ func newOrgFeishuFixture(t *testing.T) *orgFeishuFixture {
 	f := &orgFeishuFixture{feishuFixture: newFeishuFixture(t), dir: newDirStub(t)}
 	f.api.deps.Feishu.Client.TenantTokenURL = f.dir.server.URL + "/tenant-token"
 	f.api.deps.Feishu.Client.ContactURL = f.dir.server.URL + "/contact/v3"
+	// M92: the identity application is always company #1. The fixture states it explicitly (the
+	// server can derive it from the client, but a test that depends on a fallback is a test that
+	// cannot tell the fallback from the feature).
+	client := f.api.deps.Feishu.Client
+	f.api.deps.Feishu.Companies = []feishu.Company{{
+		AppID: client.AppID, Name: "本公司", RootName: "本公司", Identity: true, Client: client,
+	}}
 	f.dir.departments = map[string][]dirDept{
 		"0": {
 			{OpenDepartmentID: "od_a", Name: "研发部"},
@@ -137,6 +145,40 @@ func newOrgFeishuFixture(t *testing.T) *orgFeishuFixture {
 		},
 	}
 	return f
+}
+
+// withCompany registers one more company (M92) whose directory is the given stub. It returns the
+// token to pass as `company=` — the app id, which is also the name the tests assert on.
+func (f *orgFeishuFixture) withCompany(t *testing.T, appID, name string, stub *dirStub) string {
+	t.Helper()
+	client := feishu.NewCompanyClient(f.api.deps.Config.Feishu, appID, "secret-"+appID)
+	client.TenantTokenURL = stub.server.URL + "/tenant-token"
+	client.ContactURL = stub.server.URL + "/contact/v3"
+	f.api.deps.Feishu.Companies = append(f.api.deps.Feishu.Companies, feishu.Company{
+		AppID: appID, Name: name, RootName: name, Client: client,
+	})
+	return appID
+}
+
+// identityAppID is the token a caller passes to address the deployment's own application.
+func (f *orgFeishuFixture) identityAppID() string {
+	return f.api.deps.Feishu.Companies[0].AppID
+}
+
+// companyNode returns the local node of one company's root (the node linked to the virtual root
+// "0"), or nil when it does not exist yet.
+func companyNode(t *testing.T, f *orgFeishuFixture, appID string) *domain.OrgNode {
+	t.Helper()
+	nodes, err := f.db.ListOrgNodes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range nodes {
+		if node.FeishuAppID == appID && node.FeishuDepartmentID == feishu.RootDepartmentID {
+			return node
+		}
+	}
+	return nil
 }
 
 func writeRawJSON(w http.ResponseWriter, body string) {
@@ -245,10 +287,23 @@ func TestFeishuDirectoryPreviewShowsTheMergeChannels(t *testing.T) {
 	if stats["departments_to_create"].(float64) != 3 {
 		t.Fatalf("departments_to_create = %v, want 3", stats["departments_to_create"])
 	}
+	// M92: the company node is part of the plan the operator confirms.
+	company := payload["company"].(map[string]any)
+	if company["app_id"] != f.identityAppID() || company["identity"] != true {
+		t.Fatalf("company block = %v", company)
+	}
+	root := company["root"].(map[string]any)
+	if root["will_create"] != true || root["name"] != "本公司" {
+		t.Fatalf("company root = %v, want a to-be-created 本公司 node", root)
+	}
 
 	_, a := departmentLocal(t, payload, "od_a")
 	if a["will_create"] != true || a["matched"] != "" {
 		t.Fatalf("研发部 local = %v, want will_create", a)
+	}
+	// A top-level department lands one level under the company node now, and the preview says so.
+	if a["local_depth"].(float64) != 1 {
+		t.Fatalf("研发部 local_depth = %v, want 1 (under the company node)", a["local_depth"])
 	}
 	_, a1 := departmentLocal(t, payload, "od_a1")
 	if a1["will_create"] != true {
@@ -334,10 +389,10 @@ func TestFeishuSyncCreatesNodesAndMergesMatchedPeople(t *testing.T) {
 		t.Fatalf("sync status=%d payload=%v", status, payload)
 	}
 	created := payload["created_nodes"].([]any)
-	if len(created) != 3 {
-		t.Fatalf("created nodes = %v, want 3", created)
+	if len(created) != 4 {
+		t.Fatalf("created nodes = %v, want the company node plus 3 departments", created)
 	}
-	// Parents first: 研发部 and 市场部 are roots, 平台组 hangs under 研发部.
+	// Parents first: the company node, then 研发部 and 市场部 under it, and 平台组 under 研发部.
 	nodes, err := f.db.ListOrgNodes(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -346,8 +401,14 @@ func TestFeishuSyncCreatesNodesAndMergesMatchedPeople(t *testing.T) {
 	for _, node := range nodes {
 		byName[node.Name] = node
 	}
+	root, ok := byName["本公司"]
+	if !ok || root.ParentID != nil || root.FeishuAppID != f.identityAppID() ||
+		root.FeishuDepartmentID != feishu.RootDepartmentID {
+		t.Fatalf("company node wrong: %+v", root)
+	}
 	dev, ok := byName["研发部"]
-	if !ok || dev.ParentID != nil || dev.FeishuDepartmentID != "od_a" || dev.FeishuSyncedAt == nil {
+	if !ok || dev.ParentID == nil || *dev.ParentID != root.ID ||
+		dev.FeishuDepartmentID != "od_a" || dev.FeishuSyncedAt == nil {
 		t.Fatalf("研发部 wrong: %+v", dev)
 	}
 	platform, ok := byName["平台组"]
@@ -399,10 +460,20 @@ func TestFeishuSyncCreatesNodesAndMergesMatchedPeople(t *testing.T) {
 		t.Fatal("the key-level binding must be untouched by a sync")
 	}
 
-	// The already-synced person produced no audit row and no second write.
+	// Two linked people: the same-name merge, and 老板 — whose identity was already in sync but
+	// who now also gains a membership on the company node (M92 gives company-level people a
+	// place in the tree; before this milestone they belonged to no node at all).
 	linked := payload["linked_users"].([]any)
-	if len(linked) != 1 {
-		t.Fatalf("linked users = %v, want the one same-name merge (老板 was already in sync)", linked)
+	if len(linked) != 2 {
+		t.Fatalf("linked users = %v, want the same-name merge and the company-level person", linked)
+	}
+	byOpenID := map[string]map[string]any{}
+	for _, raw := range linked {
+		entry := raw.(map[string]any)
+		byOpenID[entry["open_id"].(string)] = entry
+	}
+	if byOpenID["ou_wang"]["matched_by"] != "name" || byOpenID["ou_root"]["matched_by"] != "open_id" {
+		t.Fatalf("linked users = %v", linked)
 	}
 
 	// Idempotent: the second sync writes nothing.
@@ -458,8 +529,13 @@ func TestFeishuSyncWithoutNamePermissionSkipsNamelessDepartments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(nodes) != 0 {
-		t.Fatalf("a nameless sync created nodes: %v", nodes)
+	// The company node exists (it is named by the configuration, not by the directory), and
+	// nothing else: a nameless department must never become a node.
+	if len(nodes) != 1 {
+		t.Fatalf("a nameless sync created nodes beyond the company node: %v", nodes)
+	}
+	if nodes[0].FeishuDepartmentID != feishu.RootDepartmentID || nodes[0].Name != "本公司" {
+		t.Fatalf("the only node should be the company node: %+v", nodes[0])
 	}
 	acme, err := f.db.GetAccount(context.Background(), acmeID)
 	if err != nil {
@@ -746,11 +822,15 @@ func TestFeishuSyncHonorsDepartmentSelection(t *testing.T) {
 		t.Fatalf("sync status=%d payload=%v", status, payload)
 	}
 	created := payload["created_nodes"].([]any)
-	if len(created) != 1 {
-		t.Fatalf("created nodes = %v, want only 市场部", created)
+	if len(created) != 2 {
+		t.Fatalf("created nodes = %v, want the company node and 市场部", created)
 	}
-	if name := created[0].(map[string]any)["name"]; name != "市场部" {
-		t.Fatalf("created %v, want 市场部", name)
+	createdNames := map[string]bool{}
+	for _, raw := range created {
+		createdNames[raw.(map[string]any)["name"].(string)] = true
+	}
+	if !createdNames["市场部"] || !createdNames["本公司"] {
+		t.Fatalf("created %v, want 本公司 + 市场部", createdNames)
 	}
 	byName := nodeNames(t, f)
 	if _, ok := byName["研发部"]; ok {
@@ -828,7 +908,8 @@ func TestFeishuSyncCreatesAncestorsOfTheSelectionOnly(t *testing.T) {
 	}
 }
 
-// The company-level people (no department at all) follow the virtual root "0".
+// The company-level people (no department at all) follow the virtual root "0" and land on the
+// company node (M92).
 func TestFeishuSyncCompanyLevelPeopleFollowTheRoot(t *testing.T) {
 	f := newOrgFeishuFixture(t)
 	_, _, bossID := f.seedLocal(t)
@@ -842,16 +923,31 @@ func TestFeishuSyncCompanyLevelPeopleFollowTheRoot(t *testing.T) {
 	if stats["users_in_scope"].(float64) != 1 {
 		t.Fatalf("users_in_scope = %v, want only the company-level person", stats["users_in_scope"])
 	}
-	if got := payload["created_nodes"].([]any); len(got) != 0 {
-		t.Fatalf("the virtual root must not create a node: %v", got)
+	// The virtual root itself is not a department, but M92 gives it a node to hang people on:
+	// the company node.
+	created := payload["created_nodes"].([]any)
+	if len(created) != 1 || created[0].(map[string]any)["name"] != "本公司" {
+		t.Fatalf("created nodes = %v, want the company node alone", created)
 	}
-	// 老板 was already in sync, so nothing changed — the point is that they are *in scope*.
 	boss, err := f.db.GetAccount(context.Background(), bossID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if boss.FeishuOpenID != "ou_root" || boss.FeishuBoundBy != "sync" {
 		t.Fatalf("the company-level binding was disturbed: %+v", boss)
+	}
+	// The person belongs to no department, so the company node is where they are placed —
+	// that is what makes "everyone at the company itself" visible in the org tree.
+	root := companyNode(t, f, f.identityAppID())
+	if root == nil {
+		t.Fatal("the company node was not created")
+	}
+	memberships, err := f.db.ListOrgMembershipsByAccount(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := memberships[bossID]; len(got) != 1 || got[0] != root.ID {
+		t.Fatalf("老板 memberships = %v, want the company node %d", got, root.ID)
 	}
 }
 
@@ -938,8 +1034,8 @@ func TestFeishuSyncRefusesEmptyOrUnknownSelection(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("bodyless sync status=%d payload=%v", status, payload)
 	}
-	if got := len(payload["created_nodes"].([]any)); got != 3 {
-		t.Fatalf("bodyless sync created %d nodes, want all three departments", got)
+	if got := len(payload["created_nodes"].([]any)); got != 4 {
+		t.Fatalf("bodyless sync created %d nodes, want the company node plus all three departments", got)
 	}
 	stats := payload["stats"].(map[string]any)
 	if stats["departments_selected"].(float64) != 0 || stats["departments_ancestors"].(float64) != 0 {

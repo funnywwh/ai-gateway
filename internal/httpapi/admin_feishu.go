@@ -62,6 +62,13 @@ type FeishuDeps struct {
 	// DSH as a second step. See autoEnableDSHForBinding for what it deliberately refuses to
 	// do.
 	AutoEnableDSH bool
+	// Companies are the Feishu enterprises whose organization structures this deployment
+	// imports (M92), the identity application being the first one. Client above stays the
+	// identity client: the OAuth flows, the console binding and the portal login read it and
+	// must never end up on a client company's credentials. Empty (or just the identity entry)
+	// is the single-company deployment M70 supported, and every endpoint then behaves exactly
+	// as it did before.
+	Companies []feishu.Company
 }
 
 // feishuNoStore marks a Feishu handoff uncacheable. The responses here either redirect the
@@ -1120,7 +1127,8 @@ func (s *Server) handleAdminBindAccountFeishu(w http.ResponseWriter, r *http.Req
 	s.reload(r.Context(), "account feishu binding updated", true)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": result,
 		"account": map[string]any{"id": account.ID, "name": account.Name},
-		"feishu":  accountFeishuJSON(&domain.Account{FeishuOpenID: openID, FeishuName: strings.TrimSpace(body.Name)}),
+		"feishu": accountFeishuJSON(&domain.Account{FeishuOpenID: openID, FeishuName: strings.TrimSpace(body.Name)},
+			accountJSONContext{Companies: s.feishuCompanies()}),
 	})
 }
 

@@ -328,7 +328,12 @@ func (s *Server) handleAdminLookupKey(w http.ResponseWriter, r *http.Request) {
 		account, err := s.deps.AdminStore.GetAccount(r.Context(), row.AccountID)
 		switch {
 		case err == nil:
-			payload["account"] = lookupAccountJSON(account)
+			feishuCtx, ctxErr := s.accountJSONContextFor(r.Context())
+			if ctxErr != nil {
+				writeAPIError(w, toAPIError(ctxErr))
+				return
+			}
+			payload["account"] = lookupAccountJSON(account, feishuCtx)
 		case domain.IsNotFound(err):
 			// A key row whose account is gone is a real state a support call can land on; saying
 			// "the account no longer exists" beats a 404 that hides the key's prefix.
@@ -387,12 +392,12 @@ func (s *Server) lookupKeyJSON(row *domain.APIKey) map[string]any {
 }
 
 // lookupAccountJSON renders the account block the plaintext branch reports.
-func lookupAccountJSON(account *domain.Account) map[string]any {
+func lookupAccountJSON(account *domain.Account, feishuCtx accountJSONContext) map[string]any {
 	return map[string]any{
 		"id": account.ID, "name": account.Name, "status": account.Status,
 		"tags":        jsonOrEmptyArray(account.TagsJSON),
 		"dsh_enabled": account.DSHEnabled, "dsh_tenant": account.DshTenant,
-		"feishu": accountFeishuJSON(account),
+		"feishu": accountFeishuJSON(account, feishuCtx),
 	}
 }
 

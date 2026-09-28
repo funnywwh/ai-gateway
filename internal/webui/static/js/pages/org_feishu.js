@@ -38,6 +38,11 @@ export function openFeishuSync({ onDone } = {}) {
     query: '',
     loading: false,
     changed: false,
+    // Which company this dialog is importing (M92): an app id, or '' for the deployment's own
+    // application. The company list comes from the configuration, so the dropdown is the only
+    // place the operator chooses it.
+    company: '',
+    companies: [],
     // The departments this run will cover (design §12 D8–D15). Ids, plus the virtual root
     // "0" for the company-level people. seeded flips once the first payload has been read, so
     // "everything checked" is the default without racing the read.
@@ -77,12 +82,29 @@ export function openFeishuSync({ onDone } = {}) {
   const scopeLabel = el('span', { class: 'muted feishu-scope-label' });
   const selectAllBtn = el('button', { class: 'btn', text: '全选' });
   const clearBtn = el('button', { class: 'btn', text: '清空' });
+  // M92: one dropdown, only rendered when the deployment actually imports more than one
+  // company. A single-company deployment looks exactly as it did before.
+  const companySelect = el('select', { class: 'feishu-company-select' });
+  const companyHost = el('span', { class: 'feishu-company-pick' });
+  companySelect.addEventListener('change', () => {
+    state.company = companySelect.value;
+    // A different company is a different directory and a different org subtree: everything the
+    // dialog shows came from the previous one, so it starts over.
+    state.payload = null;
+    state.selectedDept = ROOT_ID;
+    state.selection.clear();
+    state.seeded = false;
+    scopeBoxes.clear();
+    treeHost.replaceChildren();
+    peopleHost.replaceChildren();
+    load(false);
+  });
   const close = () => { backdrop.remove(); if (onDone) onDone(state.changed); };
 
   const dialog = el('div', { class: 'modal feishu-sync-dialog' }, [
     modalHead('同步飞书组织架构', close),
     modalBody([
-      el('div', { class: 'toolbar feishu-sync-head' }, [subtitle, refreshBtn, syncBtn]),
+      el('div', { class: 'toolbar feishu-sync-head' }, [companyHost, subtitle, refreshBtn, syncBtn]),
       el('div', { class: 'toolbar feishu-scope-bar' }, [
         el('span', { class: 'muted', text: '同步范围：' }), scopeLabel,
         el('span', { class: 'muted feishu-scope-hint', text: '勾选/取消父部门会连同其子部门一起' }),
@@ -122,9 +144,48 @@ export function openFeishuSync({ onDone } = {}) {
   });
   clearBtn.addEventListener('click', () => { state.selection.clear(); applySelection(); });
 
-  load(false);
+  // The company list first: which directory to read depends on the answer, and a single-company
+  // deployment gets the same dialog as before.
+  loadCompanies().finally(() => load(false));
 
   // --- data ---------------------------------------------------------------
+
+  // loadCompanies fills the company dropdown (M92). A deployment with a single company keeps the
+  // M70 dialog: no dropdown, no company parameter, the identity application.
+  async function loadCompanies() {
+    try {
+      const payload = await api.get('/org/feishu/companies');
+      state.companies = payload.data || [];
+      state.company = payload.identity_app_id || (state.companies[0] || {}).app_id || '';
+      renderCompanies();
+    } catch (err) {
+      // The dialog still works without the list (the server falls back to the identity
+      // application), so a failed read is a notice rather than a dead end.
+      state.companies = [];
+      state.company = '';
+      companyHost.replaceChildren();
+      subtitle.textContent = '读取公司列表失败：' + api.errorMessage(err);
+    }
+  }
+
+  function renderCompanies() {
+    companyHost.replaceChildren();
+    if (state.companies.length < 2) return;
+    companySelect.replaceChildren(...state.companies.map((company) => el('option', {
+      value: company.app_id,
+      text: company.name + (company.identity ? '（本公司）' : ''),
+    })));
+    companySelect.value = state.company;
+    companyHost.append(el('label', { class: 'feishu-inline-check' }, [
+      el('span', { class: 'muted', text: '公司：' }), companySelect,
+    ]));
+  }
+
+  // companyQuery is how the per-person calls address a person unambiguously: an open id is only
+  // unique inside one company, so the company travels with the request.
+  function companyQuery() {
+    return state.company ? '?company=' + encodeURIComponent(state.company) : '';
+  }
 
   async function load(refresh) {
     if (state.loading) return;
@@ -133,6 +194,7 @@ export function openFeishuSync({ onDone } = {}) {
     try {
       const params = {};
       if (refresh) params.refresh = 'true';
+      if (state.company) params.company = state.company;
       // The scope travels with the read: the server's plan (and therefore the numbers in the
       // confirm dialog) describes exactly the departments that are ticked (design §12). The
       // directory itself is cached for 60 s, so re-reading on every click is cheap.
@@ -175,7 +237,13 @@ export function openFeishuSync({ onDone } = {}) {
     const cached = payload.cached ? '（60 秒缓存）' : '';
     const scope = stats.departments_ancestors
       ? '（含为层级补建 ' + stats.departments_ancestors + ' 个）' : '';
-    subtitle.textContent = '本次范围：部门 ' + stats.departments + scope +
+    const company = payload.company || {};
+    const root = company.root || {};
+    const rootNote = root.node_id
+      ? ' → 公司节点「' + root.name + '」'
+      : (root.will_create ? ' → 将新建公司节点「' + root.name + '」' : '');
+    subtitle.textContent = '公司「' + (company.name || '本公司') + '」' + rootNote +
+      ' · 本次范围：部门 ' + stats.departments + scope +
       '（将创建 ' + stats.departments_to_create + ' · 同名打标 ' + stats.departments_to_pin +
       ' · 跳过 ' + stats.departments_skipped + '）· 人员 ' + stats.users_in_scope + '/' + stats.users +
       '（可自动合并 ' + stats.users_matched + ' · 待决定 ' + stats.users_unmatched +
@@ -189,6 +257,12 @@ export function openFeishuSync({ onDone } = {}) {
         '创建账户需要手填名字，「同步」不会用编号创建部门。在飞书开放平台加上这两个权限并发布新版本后即可。';
     } else if (warnings.includes('directory_truncated')) {
       notice.textContent = '飞书通讯录超出单次读取上限，结果已截断：先处理已读到的部分，或分批同步。';
+    } else if (warnings.includes('root_name_conflict')) {
+      notice.textContent = '根层已有一个同名节点，无法作为这家公司的公司节点：' +
+        '给这家公司配一个 feishu.companies[].root_node（或先重命名那个节点）再同步。';
+    } else if (root.will_adopt) {
+      notice.textContent = '本次会把根层已有的「' + root.name + '」认领为这家公司的公司节点，' +
+        '该公司的顶层部门会挂到它下面。';
     } else if (payload.users_truncated) {
       notice.textContent = '人员列表显示已截断（仅前 ' + (payload.users || []).length + ' 人）。';
     } else {
@@ -215,8 +289,13 @@ export function openFeishuSync({ onDone } = {}) {
       (unknown.length ? '（' + unknown.length + ' 个 id 已不在通讯录里，已忽略：' + unknown.join(', ') + '）' : '');
     // Nothing ticked means "sync nothing", which is never what the operator wants: the button
     // says so instead of silently doing nothing (the API answers 400 for that case too).
-    syncBtn.disabled = picked === 0;
-    syncBtn.title = picked === 0 ? '请先勾选要同步的部门（至少一个）' : '';
+    // A blocked company node (M92) is the second reason the button is off: the server would
+    // refuse the whole run, and the notice above says which setting to fix.
+    const root = ((state.payload || {}).company || {}).root || {};
+    const blocked = root.blocked === true;
+    syncBtn.disabled = picked === 0 || blocked;
+    syncBtn.title = blocked ? '公司节点无法确定：请为这家公司配置 root_node（见上方提示）'
+      : (picked === 0 ? '请先勾选要同步的部门（至少一个）' : '');
   }
 
   // --- scope helpers ------------------------------------------------------
@@ -463,6 +542,8 @@ export function openFeishuSync({ onDone } = {}) {
 
   async function runSync() {
     const stats = state.payload ? state.payload.stats || {} : {};
+    const company = state.payload ? state.payload.company || {} : {};
+    const root = company.root || {};
     const ids = scopeIds();
     if (!ids.length) {
       toast('请先勾选要同步的部门', 'error');
@@ -470,22 +551,40 @@ export function openFeishuSync({ onDone } = {}) {
     }
     const ancestors = stats.departments_ancestors
       ? '（其中 ' + stats.departments_ancestors + ' 个是勾选部门的上级，为安放子节点一并创建）' : '';
+    // M92: where this company's subtree hangs is part of what the operator confirms — creating a
+    // company node and moving old top-level departments into it both change the tree.
+    const rootLine = root.will_create
+      ? '将新建公司节点「' + root.name + '」，本公司的顶层部门都挂在它下面。\n'
+      : (root.will_adopt
+        ? '将把根层已有的「' + root.name + '」认领为这家公司的公司节点。\n'
+        : (root.node_id ? '公司节点：「' + root.name + '」。\n' : ''));
+    const reparentLine = (stats.reparent_nodes || 0) > 0
+      ? '将把该公司原有的 ' + stats.reparent_nodes + ' 个顶层部门移入公司节点（它们此前建在根层）。\n' : '';
     const ok = await confirmDialog('执行一次飞书同步',
+      '公司：' + (company.name || '本公司') + '。\n' +
+      rootLine + reparentLine +
       '本次范围：已勾选 ' + (stats.departments_selected || 0) + ' 个节点，实际涉及 ' +
       (stats.departments || 0) + ' 个部门' + ancestors + '。\n\n' +
       '将创建 ' + (stats.departments_to_create || 0) + ' 个组织节点（名称即部门名），' +
-      '并把范围内的 ' + (stats.users_matched || 0) + ' 人写入飞书身份、挂进其部门节点' +
-      '（新增成员关系 ' + (stats.memberships_to_add || 0) + ' 条）；范围外的 ' +
+      '并把范围内的 ' + (stats.users_matched || 0) + ' 人写入' +
+      (company.identity ? '账户级飞书身份（即门户登录身份）' : '该公司的人员映射（只影响组织归属，不产生登录能力）') +
+      '、挂进其部门节点（新增成员关系 ' + (stats.memberships_to_add || 0) + ' 条）；范围外的 ' +
       (stats.users_out_of_scope || 0) + ' 人不动。' +
       '组织节点的标签会被整棵子树继承，所以这会立即改变这些账号的生效授权。' +
       '已存在/已匹配的内容不会重复写入，重复点「同步」是安全的。');
     if (!ok) return;
     try {
-      const result = await withBusy(syncBtn, '同步中', () => api.post('/org/feishu/sync', { department_ids: ids }));
+      // The company travels only when there is one to choose: a single-company deployment sends
+      // the M70 body verbatim (and the server defaults to the identity application anyway).
+      const body = { department_ids: ids };
+      if (state.company) body.company = state.company;
+      const result = await withBusy(syncBtn, '同步中', () => api.post('/org/feishu/sync', body));
       const created = (result.created_nodes || []).length;
       const linked = (result.linked_users || []).length;
+      const moved = (result.reparented_nodes || []).length;
       const skipped = (result.skipped_departments || []).length + (result.skipped_users || []).length;
       toast('同步完成：新建节点 ' + created + ' 个，合并人员 ' + linked + ' 人' +
+        (moved ? '，移入公司节点 ' + moved + ' 个部门' : '') +
         (skipped ? '，跳过 ' + skipped + ' 项（见弹窗与审计）' : ''), 'ok');
       state.changed = true;
       for (const row of (result.skipped_departments || []).concat(result.skipped_users || [])) {
@@ -507,11 +606,12 @@ export function openFeishuSync({ onDone } = {}) {
         { name: 'note', label: '备注' },
       ],
       submitLabel: '创建',
-      onSubmit: (values) => api.post('/org/feishu/users/' + encodeURIComponent(person.open_id) + '/account',
+      onSubmit: (values) => api.post(
+        '/org/feishu/users/' + encodeURIComponent(person.open_id) + '/account' + companyQuery(),
         { name: values.name, note: values.note }),
     });
     if (!created) return;
-    toast('已创建账户「' + created.account.name + '」并绑定飞书身份', 'ok');
+    toast('已创建账户「' + created.account.name + '」并建立飞书映射', 'ok');
     state.changed = true;
     await load(true);
   }
@@ -580,7 +680,7 @@ export function openFeishuSync({ onDone } = {}) {
         el('div', { class: 'modal feishu-picker-dialog' }, [
           modalHead('绑定账号：' + (person.name || person.open_id), () => closePicker(false)),
           modalBody([
-            el('div', { class: 'muted', text: '选择要把这个飞书人员绑定到哪个本地账户。绑定只写账户级飞书身份（同步映射），不影响 API Key 与门户登录。' }),
+            el('div', { class: 'muted', text: companyNote() }),
             filter,
             list,
           ]),
@@ -595,7 +695,7 @@ export function openFeishuSync({ onDone } = {}) {
                 }
                 const button = ev.currentTarget;
                 withBusy(button, '绑定中', () => api.put(
-                    '/org/feishu/users/' + encodeURIComponent(person.open_id) + '/account',
+                    '/org/feishu/users/' + encodeURIComponent(person.open_id) + '/account' + companyQuery(),
                     { account_id: chosen.id })).then(() => {
                   toast('已绑定到账户 #' + chosen.id, 'ok');
                   state.changed = true;
@@ -615,19 +715,40 @@ export function openFeishuSync({ onDone } = {}) {
   }
 
   async function unbind(person) {
+    const identity = currentCompany().identity !== false;
     const ok = await confirmDialog('解除飞书绑定',
       '确认解除「' + (person.name || person.open_id) + '」与账户' +
       (person.account ? '「' + person.account.name + '」' : '') + '的绑定吗？' +
-      '这只是解除账户级同步映射：账户、它的 API Key 以及门户登录都不受影响。');
+      (identity
+        ? '这是账户级飞书身份，也是这个人的门户登录身份：解除后他就不能用飞书登录 DSH 了（账户、API Key、组织归属都不受影响）。'
+        : '这只是「' + currentCompany().name + '」的人员映射：账户、它的 API Key、门户登录以及其它公司的映射都不受影响。'));
     if (!ok) return;
     try {
-      const result = await api.del('/org/feishu/users/' + encodeURIComponent(person.open_id) + '/account');
+      const result = await api.del('/org/feishu/users/' + encodeURIComponent(person.open_id) + '/account' + companyQuery());
       toast(result.unbound ? '已解绑' : '本来就没有绑定', result.unbound ? 'ok' : '');
       state.changed = true;
       await load(true);
     } catch (err) {
       toast(api.errorMessage(err), 'error');
     }
+  }
+
+  // currentCompany is the company the dialog is showing, from the payload the server sent (it
+  // echoes the resolved company, so an omitted parameter still has an answer).
+  function currentCompany() {
+    return (state.payload && state.payload.company) || { identity: true, name: '本公司' };
+  }
+
+  // companyNote says what a binding means for this company: the identity application's mapping is
+  // the portal login identity; another company's is organization membership only (M92).
+  function companyNote() {
+    const company = currentCompany();
+    if (company.identity !== false) {
+      return '选择要把这个飞书人员绑定到哪个本地账户。这是本部署的身份应用：绑定写入账户级飞书身份，' +
+        '它就是这个人用飞书登录 DSH 门户的身份（不影响 API Key）。';
+    }
+    return '选择要把「' + (company.name || '这家公司') + '」的这个人绑定到哪个本地账户。' +
+      '这只写人员映射（用于组织归属），不产生登录能力：这家公司的租户里没有本部署的应用。';
   }
 }
 
@@ -636,6 +757,9 @@ function skipReason(reason) {
     case 'sibling_name_exists': return '同一父节点下已有同名节点';
     case 'node_pinned_to_other_department': return '该节点已关联另一个飞书部门';
     case 'identity_taken': return '该账户已被另一个飞书身份绑定';
+    case 'account_taken': return '该账户在这家公司已对应另一个人';
+    case 'reparent_failed': return '移入公司节点失败（同级可能已有同名节点）';
+    case 'root_name_conflict': return '根层已有同名节点，无法作为公司节点';
     default: return reason || '未知原因';
   }
 }

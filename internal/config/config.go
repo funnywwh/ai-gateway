@@ -655,6 +655,16 @@ type Feishu struct {
 	// The secret must not be logged, echoed in an error page, or stored anywhere else.
 	AppID     string `yaml:"app_id"`
 	AppSecret string `yaml:"app_secret"`
+	// CompanyName says which company the application above belongs to (M92). It is the label of
+	// that company in the org-sync dialog and the default name of its company node in the local
+	// organization tree; empty means "本公司".
+	CompanyName string `yaml:"company_name"`
+	// Companies are the *other* Feishu enterprises whose organization structures this
+	// deployment imports (M92). Each one is a self-built app of that company's own tenant used
+	// for the contact-directory read only: identity, binding, portal login and console login
+	// always belong to the single application above, which is why these entries carry no
+	// callback URL and no signing keys. See docs/feishu.md §2b.
+	Companies []FeishuCompany `yaml:"companies"`
 	// CallbackURL is the absolute URL registered under 安全设置 → 重定向 URL, as the
 	// browser sees it. It is configured rather than derived because aigw cannot know
 	// the origin in front of it (a port, a front proxy, or a path prefix), and a wrong
@@ -727,6 +737,43 @@ type Feishu struct {
 	// covers one form submission, so it follows the ticket TTL rather than a session
 	// lifetime. Zero falls back to TicketTTLS.
 	PickTTLS int `yaml:"pick_ttl_s"`
+}
+
+// FeishuCompany is one additional company whose organization structure is imported into the
+// local org tree (M92). The name is human-facing; the app id identifies the company in stored
+// data (org_nodes.feishu_app_id, feishu_person_links.feishu_app_id), so changing it later is a
+// rename while changing the app id is a different company.
+type FeishuCompany struct {
+	// Name is the company's label in the console and the default name of its company node.
+	// It must be unique among companies (the dialog picks by it) and it must not look like an
+	// app id, so `company` parameters stay unambiguous.
+	Name string `yaml:"name"`
+	// AppID is that company's own self-built Feishu application.
+	AppID string `yaml:"app_id"`
+	// AppSecret is the application secret. AppSecretEnv may name an environment variable
+	// instead — it wins over a literal value — so the secret can stay out of the file.
+	AppSecret    string `yaml:"app_secret"`
+	AppSecretEnv string `yaml:"app_secret_env"`
+	// RootNode overrides the name of the local company node (default: Name). Point it at an
+	// existing root node to have the sync adopt that node instead of creating one.
+	RootNode string `yaml:"root_node"`
+}
+
+// RootNodeName is the name the local company node gets: the explicit override, else the
+// company's own name.
+func (c FeishuCompany) RootNodeName() string {
+	if value := strings.TrimSpace(c.RootNode); value != "" {
+		return value
+	}
+	return strings.TrimSpace(c.Name)
+}
+
+// IdentityCompanyName is the identity application's company label, defaulted.
+func (c *Config) IdentityCompanyName() string {
+	if value := strings.TrimSpace(c.Feishu.CompanyName); value != "" {
+		return value
+	}
+	return "本公司"
 }
 
 // FeishuLoginURL is the browser-visible entry point of the authorization flow. It is
@@ -1212,6 +1259,14 @@ func applyEnv(cfg *Config) error {
 	envInt(&cfg.Feishu.PickTTLS, "GW_FEISHU_PICK_TTL_S")
 	envStr(&cfg.Feishu.InviteSecret, "GW_FEISHU_INVITE_SECRET")
 	envStr(&cfg.Feishu.ConsoleURL, "GW_FEISHU_CONSOLE_URL")
+	// M92: a company's secret may name an environment variable instead of carrying the value in
+	// the file — the same reasoning as GW_FEISHU_APP_SECRET above. An unset variable is caught
+	// by validation with a message naming it, which is why this is not an error here.
+	for i := range cfg.Feishu.Companies {
+		if env := strings.TrimSpace(cfg.Feishu.Companies[i].AppSecretEnv); env != "" {
+			cfg.Feishu.Companies[i].AppSecret = os.Getenv(env)
+		}
+	}
 	envStr(&cfg.Log.Level, "GW_LOG_LEVEL")
 	envStr(&cfg.Log.Format, "GW_LOG_FORMAT")
 	envStr(&cfg.Plugins.Dir, "GW_PLUGINS_DIR")
@@ -1286,11 +1341,97 @@ func oneOf(field, value string, allowed ...string) error {
 // of a 20027/20002 error page during a user's first login.
 var feishuAppIDRE = regexp.MustCompile(`^cli_[A-Za-z0-9]+$`)
 
+const (
+	// feishuCompanyNameMaxRunes mirrors domain.MaxOrgNodeNameRunes: a company name becomes an
+	// organization node name, so it has to satisfy the same limit. The configuration checks it
+	// itself rather than importing domain — the config package depends on logx alone.
+	feishuCompanyNameMaxRunes = 64
+	// maxFeishuCompanies bounds the list so a fat-fingered configuration cannot turn the sync
+	// dialog into an unusable scroll. Twenty-odd client companies is the shape this exists for.
+	maxFeishuCompanies = 32
+)
+
+// validateFeishuCompanies checks the additional companies of the organization sync (M92).
+// Every interface addresses a company by app id or by name, so both must be unique — and a name
+// that looks like an app id would make `company` parameters ambiguous.
+func (c *Config) validateFeishuCompanies() error {
+	if len(c.Feishu.Companies) > maxFeishuCompanies {
+		return fmt.Errorf("feishu.companies has %d entries, at most %d are supported", len(c.Feishu.Companies), maxFeishuCompanies)
+	}
+	identityName := c.IdentityCompanyName()
+	if err := validateCompanyLabel("feishu.company_name", identityName); err != nil {
+		return err
+	}
+	// Owners, not indices: the message has to name the setting an operator can go and edit.
+	names := map[string]string{identityName: "feishu.company_name"}
+	roots := map[string]string{identityName: "feishu.company_name"}
+	apps := map[string]string{strings.TrimSpace(c.Feishu.AppID): "feishu.app_id"}
+	for i := range c.Feishu.Companies {
+		company := c.Feishu.Companies[i]
+		label := fmt.Sprintf("feishu.companies[%d]", i)
+
+		name := strings.TrimSpace(company.Name)
+		if err := validateCompanyLabel(label+".name", name); err != nil {
+			return err
+		}
+		if owner, exists := names[name]; exists {
+			return fmt.Errorf("%s.name %q is already used by %s", label, name, owner)
+		}
+
+		appID := strings.TrimSpace(company.AppID)
+		if !feishuAppIDRE.MatchString(appID) {
+			return fmt.Errorf("%s.app_id must be that company's own App ID (cli_…)", label)
+		}
+		if owner, exists := apps[appID]; exists {
+			return fmt.Errorf("%s.app_id is already used by %s (the identity application is always the first company)", label, owner)
+		}
+
+		if strings.TrimSpace(company.AppSecret) == "" {
+			if env := strings.TrimSpace(company.AppSecretEnv); env != "" {
+				return fmt.Errorf("%s.app_secret_env names the environment variable %s, which is empty or unset", label, env)
+			}
+			return fmt.Errorf("%s needs app_secret or app_secret_env (the app's 凭证与基础信息)", label)
+		}
+
+		root := company.RootNodeName()
+		if err := validateCompanyLabel(label+".root_node", root); err != nil {
+			return err
+		}
+		if owner, exists := roots[root]; exists {
+			return fmt.Errorf("%s.root_node %q collides with the company node of %s: two company nodes cannot share one name", label, root, owner)
+		}
+		names[name], apps[appID], roots[root] = label, label, label
+	}
+	return nil
+}
+
+// validateCompanyLabel applies the organization-node name rules (see domain.NormalizeOrgNodeName)
+// to a company label: non-empty after trimming, at most 64 characters, and never mistakable for
+// an app id.
+func validateCompanyLabel(field, value string) error {
+	if value == "" {
+		return fmt.Errorf("%s must be set", field)
+	}
+	if n := utf8.RuneCountInString(value); n > feishuCompanyNameMaxRunes {
+		return fmt.Errorf("%s must be at most %d characters (got %d)", field, feishuCompanyNameMaxRunes, n)
+	}
+	if strings.HasPrefix(value, "cli_") {
+		return fmt.Errorf("%s must not start with cli_: that shape is an app id, and company parameters accept either", field)
+	}
+	return nil
+}
+
 // validateFeishu checks the identity block. Everything is checked only while the feature
 // is on: a deployment that does not use Feishu must not be stopped from starting by
 // stale or half-filled values it never reads.
 func (c *Config) validateFeishu() error {
 	if !c.Feishu.Enabled {
+		// The extra companies are read through this same block (contact endpoints, timeout,
+		// identity app for the person mappings), so a block that is off cannot carry them:
+		// silently ignoring them would look like "configured but nothing happens".
+		if len(c.Feishu.Companies) > 0 {
+			return fmt.Errorf("feishu.companies is set but feishu.enabled is false; enable the Feishu block or remove the companies")
+		}
 		return nil
 	}
 	if !feishuAppIDRE.MatchString(strings.TrimSpace(c.Feishu.AppID)) {
@@ -1298,6 +1439,9 @@ func (c *Config) validateFeishu() error {
 	}
 	if strings.TrimSpace(c.Feishu.AppSecret) == "" {
 		return fmt.Errorf("feishu.app_secret must be set (it is read from the developer console's 凭证与基础信息)")
+	}
+	if err := c.validateFeishuCompanies(); err != nil {
+		return err
 	}
 	for label, raw := range map[string]string{
 		"feishu.callback_url": c.Feishu.CallbackURL,

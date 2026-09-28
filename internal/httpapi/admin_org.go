@@ -77,9 +77,10 @@ func (s *Server) handleAdminListOrgNodes(w http.ResponseWriter, r *http.Request)
 	}
 
 	index := orgtree.NewIndex(nodes)
+	companyNames := s.companyNameMap()
 	out := make([]map[string]any, 0, len(nodes))
 	for _, node := range index.Ordered() {
-		entry := orgNodeJSON(node, index, len(membersByNode[node.ID]))
+		entry := orgNodeJSON(node, index, len(membersByNode[node.ID]), companyNames)
 		if includeAccounts {
 			members := membersByNode[node.ID]
 			truncated := false
@@ -172,7 +173,7 @@ func (s *Server) handleAdminCreateOrgNode(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, apiErr)
 		return
 	}
-	writeJSON(w, http.StatusCreated, orgNodeJSON(node, index, 0))
+	writeJSON(w, http.StatusCreated, orgNodeJSON(node, index, 0, s.companyNameMap()))
 }
 
 func (s *Server) handleAdminPatchOrgNode(w http.ResponseWriter, r *http.Request) {
@@ -263,7 +264,7 @@ func (s *Server) handleAdminPatchOrgNode(w http.ResponseWriter, r *http.Request)
 		writeAPIError(w, apiErr)
 		return
 	}
-	writeJSON(w, http.StatusOK, orgNodeJSON(node, index, 0))
+	writeJSON(w, http.StatusOK, orgNodeJSON(node, index, 0, s.companyNameMap()))
 }
 
 func (s *Server) handleAdminDeleteOrgNode(w http.ResponseWriter, r *http.Request) {
@@ -328,6 +329,12 @@ func (s *Server) handleAdminListOrgNodeAccounts(w http.ResponseWriter, r *http.R
 		return
 	}
 	out := make([]map[string]any, 0, len(accountIDs))
+	// The company-scoped Feishu mappings are read once for the whole page (M92), like the accounts.
+	feishuCtx, err := s.accountJSONContextFor(r.Context())
+	if err != nil {
+		writeAPIError(w, toAPIError(err))
+		return
+	}
 	for _, accountID := range accountIDs {
 		entry := map[string]any{"id": accountID}
 		if account := accounts[accountID]; account != nil {
@@ -344,7 +351,7 @@ func (s *Server) handleAdminListOrgNodeAccounts(w http.ResponseWriter, r *http.R
 			entry["dsh_tenant_suggested"] = dshTenantNameForAccount(account)
 			entry["dsh_disabled_at"] = timeOrNil(account.DshDisabledAt)
 			entry["dsh_effective"] = accountDSHEffective(s.deps.Config != nil && s.deps.Config.Dshgw.AutoEnable, account)
-			entry["feishu"] = accountFeishuJSON(account)
+			entry["feishu"] = accountFeishuJSON(account, feishuCtx)
 			if s.deps.KeyStore != nil {
 				if keys, err := s.deps.KeyStore.ListAPIKeys(r.Context(), accountID); err == nil {
 					total := 0
@@ -520,8 +527,10 @@ func (s *Server) knownOrgTags(r *http.Request, names []string) ([]string, *domai
 	return cleaned, nil
 }
 
-// orgNodeJSON renders one node. index may be nil when ancestry is not needed.
-func orgNodeJSON(node *domain.OrgNode, index *orgtree.Index, accountCount int) map[string]any {
+// orgNodeJSON renders one node. index may be nil when ancestry is not needed; companyNames maps
+// a Feishu company's app id to its configured name (M92), so the console can label which company
+// brought a node in without a second lookup.
+func orgNodeJSON(node *domain.OrgNode, index *orgtree.Index, accountCount int, companyNames map[string]string) map[string]any {
 	parentID := any(nil)
 	if node.ParentID != nil {
 		parentID = *node.ParentID
@@ -541,9 +550,24 @@ func orgNodeJSON(node *domain.OrgNode, index *orgtree.Index, accountCount int) m
 		"tags":       orgNodeTagNames(node),
 		"sort_order": node.SortOrder, "depth": depth, "path": path,
 		"account_count": accountCount,
+		// M92: which company's directory brought this node in ("" = a hand-made node or one
+		// written before the company dimension existed). `company` is the configured name; an
+		// app id whose company left the configuration keeps the id and gets an empty name.
+		"feishu_app_id": node.FeishuAppID,
+		"company":       companyNames[node.FeishuAppID],
 		"created_at":    node.CreatedAt.UTC().Format(time.RFC3339),
 		"updated_at":    node.UpdatedAt.UTC().Format(time.RFC3339),
 	}
+}
+
+// companyNameMap maps every configured company's app id to its display name.
+func (s *Server) companyNameMap() map[string]string {
+	companies := s.feishuCompanies()
+	out := make(map[string]string, len(companies))
+	for i := range companies {
+		out[companies[i].AppID] = companies[i].Name
+	}
+	return out
 }
 
 // renderOrgPath builds the "根/…/自身" label path.

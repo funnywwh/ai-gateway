@@ -28,6 +28,12 @@ type OrgNode struct {
 	// rename on either side. Empty means "not linked". Written only by the sync paths —
 	// a console PATCH of the node must never clear it.
 	FeishuDepartmentID string
+	// FeishuAppID is the company this link belongs to (M92): the application id of the
+	// Feishu enterprise whose directory brought the node in. It scopes the department id,
+	// because open_department_id is unique only inside one tenant — two companies may well
+	// both have "od_a" for their own departments. Empty means "not linked" or "written
+	// before M92"; the startup adoption stamps the identity app on those legacy rows.
+	FeishuAppID string
 	// FeishuSyncedAt records when that link was last written. Display/audit only.
 	FeishuSyncedAt *time.Time
 }
@@ -47,4 +53,21 @@ func (n *OrgNode) ParentIDValue() int64 {
 type OrgMembership struct {
 	NodeID    int64
 	AccountID int64
+}
+
+// FeishuPersonLink is "this person, as that company's directory sees them, is this local
+// account" (M92). Only companies that are *not* the deployment's identity app get a row here:
+// the identity app's mapping lives on Account.FeishuOpenID, because that column is also the
+// DSH portal login identity (M72) and must stay the single source for "who may log in".
+//
+// OpenID is app-scoped (unique inside one tenant), which is why every lookup is by the pair
+// (AppID, OpenID) and never by the open id alone.
+type FeishuPersonLink struct {
+	AppID     string
+	OpenID    string
+	UnionID   string
+	Name      string
+	AccountID int64
+	BoundBy   string // "sync" for an automatic merge, an administrator's name otherwise
+	BoundAt   *time.Time
 }

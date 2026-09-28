@@ -254,6 +254,7 @@ func newAdminFixtureWith(t *testing.T, unwired string, mutate func(*Deps)) *admi
 		Models:         db,
 		Tags:           db,
 		Org:            db,
+		FeishuPeople:   db,
 		HookStore:      db,
 		MCPTokenStore:  db,
 		Settings:       db,

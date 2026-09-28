@@ -440,8 +440,19 @@ export async function render({ page, actions, session }) {
 
   function feishuBadge(account) {
     const feishu = account.feishu || {};
-    if (!feishu.bound) return el('span', { class: 'muted', text: '未绑飞书' });
-    return badge('飞书：' + (feishu.name || feishu.open_id), 'ok', feishu.open_id);
+    if (feishu.bound) {
+      return badge('飞书：' + (feishu.name || feishu.open_id), 'ok', feishu.open_id);
+    }
+    // M92: an account may carry company-scoped mappings without having an identity of its own
+    // (only the identity application's mapping is a login identity). Those are shown with the
+    // company's name, and the +N makes a second company visible without a second row.
+    const links = feishu.links || [];
+    if (links.length) {
+      const first = links[0];
+      const extra = links.length > 1 ? ' +' + (links.length - 1) : '';
+      return badge((first.company || first.app_id) + '：' + (first.name || first.open_id), '', first.open_id + extra);
+    }
+    return el('span', { class: 'muted', text: '未绑飞书' });
   }
 
   // keyBadge states how many keys the account has and, when more than one is usable, says out
@@ -743,11 +754,13 @@ export async function render({ page, actions, session }) {
 }
 
 // matchesPerson filters by account name OR Feishu name, so an operator who knows the person from
-// the directory can find the account even when the two names differ.
+// the directory can find the account even when the two names differ. Company-scoped mappings
+// count too (M92): the name an operator remembers may come from any of the companies' directories.
 function matchesPerson(account, search) {
   if (!search || !search.trim()) return true;
-  const feishu = (account.feishu && account.feishu.name) || '';
-  return matchesQuery(account.name, search) || (feishu ? matchesQuery(feishu, search) : false);
+  const feishu = account.feishu || {};
+  const names = [feishu.name].concat((feishu.links || []).map((link) => link.name)).filter(Boolean);
+  return matchesQuery(account.name, search) || names.some((name) => matchesQuery(name, search));
 }
 
 function splitList(value) {

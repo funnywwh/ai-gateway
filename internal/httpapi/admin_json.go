@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/funnywwh/ai-gateway/internal/domain"
+	"github.com/funnywwh/ai-gateway/internal/feishu"
 	"github.com/funnywwh/ai-gateway/internal/mcpsrv"
 	"github.com/funnywwh/ai-gateway/internal/modelmap"
 	"github.com/funnywwh/ai-gateway/internal/providers"
@@ -123,7 +124,10 @@ func validateDegradation(v string) error {
 // looked up here because the caller has already read them once for the whole page; both are
 // empty when the deployment has no organization port, which keeps the account contract stable
 // (the fields are always present, just empty).
-func accountJSON(a *domain.Account, nodeIDs []int64, orgs []map[string]any) map[string]any {
+//
+// ctx carries the page-wide Feishu facts (M92): the company list and the company-scoped person
+// mappings, also read once per page for the same reason.
+func accountJSON(a *domain.Account, nodeIDs []int64, orgs []map[string]any, ctx accountJSONContext) map[string]any {
 	if nodeIDs == nil {
 		nodeIDs = []int64{}
 	}
@@ -152,8 +156,9 @@ func accountJSON(a *domain.Account, nodeIDs []int64, orgs []map[string]any) map[
 		"dsh_disabled_at": timeOrNil(a.DshDisabledAt),
 		// The account's Feishu identity is the DSH portal login identity (M72). It travels with
 		// every account row because the console shows it — and binds it — from the organization
-		// page's person list rather than from the key rows.
-		"feishu":                   accountFeishuJSON(a),
+		// page's person list rather than from the key rows. From M92 it also carries the
+		// company-scoped mappings of the other companies (which never grant a login).
+		"feishu":                   accountFeishuJSON(a, ctx),
 		"inflight_policy_override": a.InflightPolicyOverride,
 		"price_overrides":          jsonOrNil(a.PriceOverridesJSON),
 		"status":                   a.Status, "note": a.Note,
@@ -162,19 +167,35 @@ func accountJSON(a *domain.Account, nodeIDs []int64, orgs []map[string]any) map[
 	}
 }
 
+// accountJSONContext is the page-wide Feishu data of one account list (M92). It exists so the
+// company list and the person mappings are read once per page instead of once per row.
+type accountJSONContext struct {
+	// Companies is the configured company list (identity application first).
+	Companies []feishu.Company
+	// Links maps an account id to its company-scoped mappings.
+	Links map[int64][]domain.FeishuPersonLink
+}
+
 // accountFeishuJSON is the console's view of an account's Feishu identity. Like the key-level
 // map (feishuBindingJSON) it always has the same shape, so the page never has to guess whether a
 // missing field means "unbound" or "older server".
-func accountFeishuJSON(a *domain.Account) map[string]any {
+//
+// `bound`/`open_id`/… describe the identity application — the only identity that can sign in to
+// the DSH portal. `links` lists the mappings of the other companies: same idea ("this person is
+// this account"), different consequence (organization membership only).
+func accountFeishuJSON(a *domain.Account, ctx accountJSONContext) map[string]any {
+	out := map[string]any{"bound": false, "links": feishuLinksJSON(ctx.Links[a.ID], ctx.Companies)}
 	if a == nil || a.FeishuOpenID == "" {
-		return map[string]any{"bound": false}
+		return out
 	}
-	out := map[string]any{
-		"bound":    true,
-		"open_id":  a.FeishuOpenID,
-		"name":     a.FeishuName,
-		"union_id": a.FeishuUnionID,
-		"bound_by": a.FeishuBoundBy,
+	out["bound"] = true
+	out["open_id"] = a.FeishuOpenID
+	out["name"] = a.FeishuName
+	out["union_id"] = a.FeishuUnionID
+	out["bound_by"] = a.FeishuBoundBy
+	if identity := identityCompany(ctx.Companies); identity != nil {
+		out["app_id"] = identity.AppID
+		out["company"] = identity.Name
 	}
 	if a.FeishuBoundAt != nil {
 		out["bound_at"] = a.FeishuBoundAt.UTC().Format(time.RFC3339)
@@ -182,6 +203,75 @@ func accountFeishuJSON(a *domain.Account) map[string]any {
 		out["bound_at"] = nil
 	}
 	return out
+}
+
+// feishuLinksJSON renders the company-scoped mappings, with the company name resolved from the
+// configuration (an app id whose company has left the configuration keeps its app id and gets an
+// empty name — the mapping still exists, and hiding it would be a lie).
+func feishuLinksJSON(links []domain.FeishuPersonLink, companies []feishu.Company) []map[string]any {
+	out := make([]map[string]any, 0, len(links))
+	for _, link := range links {
+		entry := map[string]any{
+			"app_id": link.AppID, "open_id": link.OpenID, "name": link.Name,
+			"union_id": link.UnionID, "bound_by": link.BoundBy,
+			"company": companyNameOf(companies, link.AppID),
+		}
+		if link.BoundAt != nil {
+			entry["bound_at"] = link.BoundAt.UTC().Format(time.RFC3339)
+		} else {
+			entry["bound_at"] = nil
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// identityCompany returns the deployment's own application in a company list.
+func identityCompany(companies []feishu.Company) *feishu.Company {
+	for i := range companies {
+		if companies[i].Identity {
+			return &companies[i]
+		}
+	}
+	return nil
+}
+
+// companyNameOf resolves an app id to the configured company name ("" when the company is not
+// configured any more).
+func companyNameOf(companies []feishu.Company, appID string) string {
+	for i := range companies {
+		if companies[i].AppID == appID {
+			return companies[i].Name
+		}
+	}
+	return ""
+}
+
+// feishuLinksByAccount reads the company-scoped mappings once. A deployment without the port
+// (or without Feishu) answers with an empty map: the account contract stays the same.
+func (s *Server) feishuLinksByAccount(ctx context.Context) (map[int64][]domain.FeishuPersonLink, error) {
+	out := map[int64][]domain.FeishuPersonLink{}
+	people, ready := portReadyNoWrite(s.deps.FeishuPeople)
+	if !ready {
+		return out, nil
+	}
+	links, err := people.ListFeishuPersonLinks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, link := range links {
+		out[link.AccountID] = append(out[link.AccountID], link)
+	}
+	return out, nil
+}
+
+// accountJSONContextFor builds the Feishu half of an account payload for one page.
+func (s *Server) accountJSONContextFor(ctx context.Context) (accountJSONContext, error) {
+	links, err := s.feishuLinksByAccount(ctx)
+	if err != nil {
+		return accountJSONContext{}, err
+	}
+	return accountJSONContext{Companies: s.feishuCompanies(), Links: links}, nil
 }
 
 // attachDshPlacements adds `dsh_node` to account payloads (M77): the worker node each account's

@@ -99,9 +99,9 @@ func TestMigration0028RefusesDuplicateHashes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(pending) != 2 {
+	if len(pending) < 2 || pending[0] != 28 || pending[1] != 29 {
 		raw.Close()
-		t.Fatalf("expected the two M87 migrations to be pending, got %v", pending)
+		t.Fatalf("expected the two M87 migrations (28, 29) to be pending, got %v", pending)
 	}
 	// Two rows, same secret (same hash), different labels: the state an inconsistent import
 	// produces, and the only one 0028 cannot express.

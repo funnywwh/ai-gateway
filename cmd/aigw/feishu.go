@@ -67,6 +67,11 @@ func buildFeishuDeps(cfg *config.Config, log *slog.Logger) (*httpapi.FeishuDeps,
 		// identity alone should not silently provision a tenant.
 		AutoEnableDSH: cfg.Feishu.DSHLogin && cfg.Feishu.AutoEnableDSH,
 	}
+	// M92: the identity application is company #1, plus every other company whose organization
+	// structure this deployment imports. The identity client is passed in so the two do not end
+	// up minting separate tenant tokens for the same application. The log line below lists names
+	// and app ids only — a client company's secret is never printed, like the identity app's.
+	deps.Companies = feishu.CompaniesFromConfig(cfg.Feishu, cfg.IdentityCompanyName(), deps.Client)
 	if cfg.Feishu.DSHLogin {
 		ticketKey, err := feishuTicketSecret(cfg)
 		if err != nil {
@@ -110,7 +115,11 @@ func buildFeishuDeps(cfg *config.Config, log *slog.Logger) (*httpapi.FeishuDeps,
 			"callback", cfg.Feishu.CallbackURL,
 			"dsh_login", cfg.Feishu.DSHLogin,
 			"admin_login", cfg.Feishu.AdminLogin,
-			"portal", deps.PortalURL)
+			"portal", deps.PortalURL,
+			// M92: how many companies' directories this deployment can import, and which.
+			// Names and app ids only; a secret never reaches a log line.
+			"companies", len(deps.Companies),
+			"company_list", feishu.DescribeCompanies(deps.Companies))
 	}
 	return deps, nil
 }

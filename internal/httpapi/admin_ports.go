@@ -92,9 +92,27 @@ type OrgAdmin interface {
 	// AddAccountOrgNodes attaches an account to nodes additively (M70): the sync knows the
 	// departments a person belongs to and must not replace the memberships a console set.
 	AddAccountOrgNodes(ctx context.Context, accountID int64, nodeIDs []int64) error
-	// SetOrgNodeFeishuDepartment stamps (or clears, with an empty id) the node's Feishu
-	// department link, so later syncs recognize the node by id instead of by name.
-	SetOrgNodeFeishuDepartment(ctx context.Context, nodeID int64, departmentID string) error
+	// SetOrgNodeFeishuDepartment stamps (or clears, with an empty department id) the node's
+	// Feishu department link together with the company it belongs to (M92), so later syncs
+	// recognize the node by (application, department) instead of by name.
+	SetOrgNodeFeishuDepartment(ctx context.Context, nodeID int64, appID, departmentID string) error
+	// SetOrgNodeParent moves one node (parentID 0 = make it a root). The directory sync uses it
+	// for one thing: adopting a company's legacy top-level departments under the company node,
+	// without rewriting their name, note or tags.
+	SetOrgNodeParent(ctx context.Context, nodeID, parentID int64) error
+}
+
+// FeishuPersonAdmin is the company-scoped person ↔ account mapping (M92): one row per
+// (company application, open id), and the account it maps to.
+//
+// It is a port of its own rather than part of OrgAdmin — a test double only has to implement the
+// resource family it exercises — and it deliberately does not touch the identity app's mapping,
+// which stays on the account (BindAccountFeishu): that one is the DSH portal login identity.
+type FeishuPersonAdmin interface {
+	ListFeishuPersonLinks(ctx context.Context) ([]domain.FeishuPersonLink, error)
+	UpsertFeishuPersonLink(ctx context.Context, link domain.FeishuPersonLink) error
+	DeleteFeishuPersonLink(ctx context.Context, appID, openID string) (bool, error)
+	DeleteFeishuPersonLinksByApp(ctx context.Context, appID string) (int, error)
 }
 
 // HookAdmin manages outbound event sinks.

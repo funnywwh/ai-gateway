@@ -87,7 +87,9 @@ assert.match(actionButtons, /disabled: readonly,/, 'the Feishu and organization 
 // --- filtering is a view, never the membership -----------------------------------------------
 
 assert.match(org, /function matchesPerson\(account, search\)/,
-  'the person filter must be its own function: it matches two fields');
+  'the person filter must be its own function: it matches the account name and every Feishu name');
+assert.match(org, /\(feishu\.links \|\| \[\]\)\.map\(\(link\) => link\.name\)/,
+  'M92: the filter must also match the names of company-scoped Feishu mappings');
 assert.match(org, /box\.disabled = readonly \|\| \(isFiltering && !box\.checked\);[\s\S]*?过滤时不能再加入成员/,
   'a filtered list must not ADD members (it is not the whole membership), while un-ticking stays possible');
 assert.match(org, /const filtering = search\.trim\(\) !== '';/,

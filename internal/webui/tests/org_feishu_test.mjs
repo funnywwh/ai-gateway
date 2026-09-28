@@ -108,6 +108,12 @@ function textOf(item) {
 
 const directory = {
   fetched_at: '2026-09-22T08:30:00Z', cached: false, names_available: true, truncated: false,
+  // M92：服务端回显这次是哪家公司、它的公司节点怎么落。
+  company: {
+    app_id: 'cli_aaa', name: '本公司', identity: true,
+    root: { node_id: null, name: '本公司', matched: '', will_create: true, will_adopt: false },
+    reparent_node_ids: [], warnings: [],
+  },
   departments: [
     { id: 'od_a', parent_id: null, name: '研发部', depth: 0, direct_user_count: 1, selected: true, included: true,
       local: { node_id: null, matched: '', will_create: true } },
@@ -137,6 +143,15 @@ const api = {
   async get(path, params) {
     calls.push({ method: 'GET', path, params });
     if (path === '/org/feishu/directory') return JSON.parse(JSON.stringify(directory));
+    // M92：公司下拉的数据源。两家公司才会渲染下拉（单公司部署与 M70 完全一致）。
+    if (path === '/org/feishu/companies') {
+      return { count: 2, identity_app_id: 'cli_aaa', data: [
+        { app_id: 'cli_aaa', name: '本公司', identity: true, root_node_id: null, root_node_name: '本公司',
+          company_nodes: 0, linked_accounts: 0 },
+        { app_id: 'cli_bbb', name: '某某科技', identity: false, root_node_id: null, root_node_name: '某某科技',
+          company_nodes: 0, linked_accounts: 0 },
+      ] };
+    }
     if (path === '/accounts') {
       return { data: [
         { id: 1, name: 'acme' }, { id: 7, name: '王五' }, { id: 4, name: '李四' }, { id: 3, name: '张三' },
@@ -147,8 +162,8 @@ const api = {
   post: async (path, body) => {
     calls.push({ method: 'POST', path, body });
     // The create-user route answers with the new account, which is what the dialog names in
-    // its confirmation toast.
-    if (/\/account$/.test(path)) return { ok: true, account: { id: 8, name: (body && body.name) || '新账户' } };
+    // its confirmation toast. M92：路径带 ?company=，所以不能锚定结尾。
+    if (/\/account(\?|$)/.test(path)) return { ok: true, account: { id: 8, name: (body && body.name) || '新账户' } };
     return { ok: true, created_nodes: [], linked_users: [] };
   },
   put: async (path, body) => { calls.push({ method: 'PUT', path, body }); return { ok: true, account: { id: body.account_id } }; },
@@ -234,7 +249,10 @@ await settle();
 const preview = calls.find((call) => call.path === '/org/feishu/directory');
 assert.ok(preview, 'opening the dialog must read the directory');
 assert.equal(preview.method, 'GET');
-assert.equal(preview.params, undefined, 'the first read takes the server cache');
+// M92：公司列表先读，目录读带上选中的公司（默认身份应用）。
+const companyRead = calls.find((call) => call.path === '/org/feishu/companies');
+assert.ok(companyRead, 'opening the dialog reads the company list first');
+assert.equal(preview.params.company, 'cli_aaa', 'the directory read names the company it is about');
 // …and then it re-reads once with the whole directory selected, which is what makes the
 // numbers in the confirm dialog the server's numbers for that exact scope.
 const seeded = calls.filter((call) => call.path === '/org/feishu/directory').pop();
@@ -244,6 +262,7 @@ assert.ok(modalRoot.children.length >= 1, 'the dialog is appended to #modal-root
 const dialog = modalRoot.children[0];
 const dialogText = textOf(dialog);
 assert.match(dialogText, /同步飞书组织架构/);
+assert.match(dialogText, /公司「本公司」/, 'the header names the company being imported');
 assert.match(dialogText, /将创建 1/, 'the header states how many departments will be created');
 assert.match(dialogText, /待决定 1/, 'the header states how many people need a decision');
 assert.ok(treeInstance, 'the department tree is built from the preview');
@@ -272,10 +291,12 @@ const sync = calls.find((call) => call.method === 'POST' && call.path === '/org/
 assert.ok(sync, 'a confirmed 同步 posts to the sync endpoint');
 assert.deepEqual([...sync.body.department_ids].sort(), ['0', 'od_a', 'od_b'],
   'the sync carries the scope the operator ticked');
+assert.equal(sync.body.company, 'cli_aaa', 'M92：同步带上选中的公司');
 // The parent/child cascade is a console affordance: what travels is the resulting explicit id
 // set, never a "descendants" flag the server would have to re-derive (that is what keeps the
 // preview's numbers and the sync's writes describing the same departments).
-assert.equal(Object.keys(sync.body).join(','), 'department_ids');
+assert.equal(Object.keys(sync.body).sort().join(','), 'company,department_ids',
+  'the body is the scope plus the company — nothing else');
 const refreshed = calls.filter((call) => call.path === '/org/feishu/directory').pop();
 // The objects come out of the module's own VM context, so compare fields rather than
 // prototypes.
@@ -301,9 +322,10 @@ assert.equal(modalArgs.fields[0].value, '李四', 'the form is prefilled with th
 const created = await modalArgs.onSubmit({ name: '李四（市场）', note: '' });
 await settle();
 assert.equal(created.account.id, 8);
-const createCall = calls.find((call) => call.method === 'POST' && /\/org\/feishu\/users\/.+\/account$/.test(call.path));
+const createCall = calls.find((call) => call.method === 'POST' && /\/org\/feishu\/users\/.+\/account/.test(call.path));
 assert.ok(createCall, '创建用户 posts to the person endpoint');
-assert.equal(createCall.path, '/org/feishu/users/ou_new/account', 'the path carries the open_id');
+assert.equal(createCall.path, '/org/feishu/users/ou_new/account?company=cli_aaa',
+  'the path carries the open_id and the company (an open id is only unique inside one company)');
 assert.equal(createCall.body.name, '李四（市场）');
 assert.equal(createCall.body.note, '');
 
@@ -338,9 +360,9 @@ const bindButton = picker.querySelectorAll('button').find((b) => b.text === '绑
 assert.ok(bindButton, 'the picker has a confirm button');
 bindButton.click();
 await settle();
-const bindCall = calls.find((call) => call.method === 'PUT' && /\/org\/feishu\/users\/.+\/account$/.test(call.path));
+const bindCall = calls.find((call) => call.method === 'PUT' && /\/org\/feishu\/users\/.+\/account/.test(call.path));
 assert.ok(bindCall, 'binding PUTs the person endpoint');
-assert.equal(bindCall.path, '/org/feishu/users/ou_new/account');
+assert.equal(bindCall.path, '/org/feishu/users/ou_new/account?company=cli_aaa');
 assert.equal(bindCall.body.account_id, 3, 'the chosen account id is what travels');
 
 // --- 解绑 confirms first, then deletes -------------------------------------------------
@@ -359,7 +381,24 @@ unbindButton.click();
 await settle();
 const unbind = calls.find((call) => call.method === 'DELETE');
 assert.ok(unbind, 'a confirmed 解绑 deletes the mapping');
-assert.equal(unbind.path, '/org/feishu/users/ou_wang/account');
+assert.equal(unbind.path, '/org/feishu/users/ou_wang/account?company=cli_aaa');
+
+// --- 公司下拉（M92）--------------------------------------------------------------------
+
+// 两家公司才渲染下拉；切换公司 = 换一份通讯录，弹窗要把旧数据清干净并重新读。
+const companySelect = dialog.querySelector('.feishu-company-select');
+assert.ok(companySelect, '≥2 家公司时渲染公司下拉');
+assert.equal(companySelect.children.length, 2, '下拉列出两家公司');
+const beforeSwitch = calls.length;
+companySelect.value = 'cli_bbb';
+companySelect.listeners.change();
+await settle();
+const afterSwitch = calls.slice(beforeSwitch).filter((call) => call.path === '/org/feishu/directory');
+assert.equal(afterSwitch.length, 2, '切换公司后重新读取目录（含 seeded 的那次重读）');
+assert.equal(afterSwitch[0].params.company, 'cli_bbb', '重新读取时带上新公司');
+assert.equal(afterSwitch[0].params.refresh, undefined, '读取仍走服务端缓存（缓存按公司分桶）');
+assert.match(afterSwitch[1].params.departments, /^0,od_a,od_b$/,
+  '新公司的勾选重新按全量播种，而不是沿用上一家公司的范围');
 
 // --- a failed read reports itself instead of rendering an empty tree --------------------
 

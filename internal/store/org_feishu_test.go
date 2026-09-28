@@ -20,18 +20,18 @@ func TestSetOrgNodeFeishuDepartmentRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if node.FeishuDepartmentID != "" || node.FeishuSyncedAt != nil {
+	if node.FeishuDepartmentID != "" || node.FeishuAppID != "" || node.FeishuSyncedAt != nil {
 		t.Fatalf("a fresh node carries a Feishu link: %+v", node)
 	}
 
-	if err := db.SetOrgNodeFeishuDepartment(ctx, ids["dev"], "od_dev"); err != nil {
+	if err := db.SetOrgNodeFeishuDepartment(ctx, ids["dev"], "cli_a", "od_dev"); err != nil {
 		t.Fatal(err)
 	}
 	linked, err := db.GetOrgNode(ctx, ids["dev"])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if linked.FeishuDepartmentID != "od_dev" || linked.FeishuSyncedAt == nil {
+	if linked.FeishuDepartmentID != "od_dev" || linked.FeishuAppID != "cli_a" || linked.FeishuSyncedAt == nil {
 		t.Fatalf("link not persisted: %+v", linked)
 	}
 
@@ -45,50 +45,112 @@ func TestSetOrgNodeFeishuDepartmentRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if renamed.Name != "研发中心" || renamed.FeishuDepartmentID != "od_dev" || renamed.FeishuSyncedAt == nil {
+	if renamed.Name != "研发中心" || renamed.FeishuDepartmentID != "od_dev" ||
+		renamed.FeishuAppID != "cli_a" || renamed.FeishuSyncedAt == nil {
 		t.Fatalf("a rename disturbed the Feishu link: %+v", renamed)
 	}
 
-	// Unlinking clears both fields and is idempotent.
-	if err := db.SetOrgNodeFeishuDepartment(ctx, ids["dev"], ""); err != nil {
+	// Unlinking clears all three fields (the company included: a department id without an owner
+	// is exactly the legacy shape M92 exists to remove) and is idempotent.
+	if err := db.SetOrgNodeFeishuDepartment(ctx, ids["dev"], "cli_a", ""); err != nil {
 		t.Fatal(err)
 	}
 	cleared, err := db.GetOrgNode(ctx, ids["dev"])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cleared.FeishuDepartmentID != "" || cleared.FeishuSyncedAt != nil {
+	if cleared.FeishuDepartmentID != "" || cleared.FeishuAppID != "" || cleared.FeishuSyncedAt != nil {
 		t.Fatalf("unlink left fields behind: %+v", cleared)
 	}
-	if err := db.SetOrgNodeFeishuDepartment(ctx, ids["dev"], ""); err != nil {
+	if err := db.SetOrgNodeFeishuDepartment(ctx, ids["dev"], "", ""); err != nil {
 		t.Fatalf("second unlink = %v", err)
 	}
-	if err := db.SetOrgNodeFeishuDepartment(ctx, 999999, "od_x"); err == nil {
+	if err := db.SetOrgNodeFeishuDepartment(ctx, 999999, "cli_a", "od_x"); err == nil {
 		t.Fatal("linking a non-existent node was accepted")
 	}
 }
 
-// One Feishu department links to at most one node — otherwise two syncs would keep
-// fighting over the same department, and the id-keyed lookup could not be a map lookup.
-func TestSetOrgNodeFeishuDepartmentIsUnique(t *testing.T) {
+// A department link is unique per company: one department of one company links to at most one
+// node (otherwise two syncs would keep fighting over it), while two companies may each have a
+// department whose open id happens to be the same string (M92).
+func TestSetOrgNodeFeishuDepartmentIsUniquePerCompany(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 	ids, _ := orgFixture(t, db)
 
-	if err := db.SetOrgNodeFeishuDepartment(ctx, ids["dev"], "od_shared"); err != nil {
+	if err := db.SetOrgNodeFeishuDepartment(ctx, ids["dev"], "cli_a", "od_shared"); err != nil {
 		t.Fatal(err)
 	}
-	err := db.SetOrgNodeFeishuDepartment(ctx, ids["sales"], "od_shared")
+	err := db.SetOrgNodeFeishuDepartment(ctx, ids["sales"], "cli_a", "od_shared")
 	if err == nil {
-		t.Fatal("the same department was linked to a second node")
+		t.Fatal("the same department of one company was linked to a second node")
 	}
 	var apiErr *domain.APIError
 	if !errors.As(err, &apiErr) || apiErr.Status != 409 {
 		t.Fatalf("conflict error = %v, want a 409 API error", err)
 	}
 	// Re-linking the same node is a refresh, not a conflict.
-	if err := db.SetOrgNodeFeishuDepartment(ctx, ids["dev"], "od_shared"); err != nil {
+	if err := db.SetOrgNodeFeishuDepartment(ctx, ids["dev"], "cli_a", "od_shared"); err != nil {
 		t.Fatalf("re-linking the same node = %v", err)
+	}
+	// The same open id under another company is that company's own department: allowed.
+	if err := db.SetOrgNodeFeishuDepartment(ctx, ids["sales"], "cli_b", "od_shared"); err != nil {
+		t.Fatalf("a department id of another company was refused: %v", err)
+	}
+	sales, err := db.GetOrgNode(ctx, ids["sales"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sales.FeishuAppID != "cli_b" || sales.FeishuDepartmentID != "od_shared" {
+		t.Fatalf("second company's link = %+v", sales)
+	}
+}
+
+// SetOrgNodeParent moves a node without touching anything else — it is how the sync adopts a
+// company's legacy top-level departments under the company node (M92).
+func TestSetOrgNodeParentMovesOnlyTheParent(t *testing.T) {
+	db := testDB(t)
+	ctx := context.Background()
+	ids, _ := orgFixture(t, db)
+
+	node, err := db.GetOrgNode(ctx, ids["dev"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetOrgNodeFeishuDepartment(ctx, ids["dev"], "cli_a", "od_dev"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetOrgNodeParent(ctx, ids["dev"], ids["hq"]); err != nil {
+		t.Fatal(err)
+	}
+	moved, err := db.GetOrgNode(ctx, ids["dev"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.ParentIDValue() != ids["hq"] {
+		t.Fatalf("parent = %d, want %d", moved.ParentIDValue(), ids["hq"])
+	}
+	// Name, note, tags and the Feishu link survive a move.
+	if moved.Name != node.Name || moved.Note != node.Note || moved.TagsJSON != node.TagsJSON ||
+		moved.FeishuAppID != "cli_a" || moved.FeishuDepartmentID != "od_dev" {
+		t.Fatalf("a move rewrote other columns: before %+v after %+v", node, moved)
+	}
+	// Parent 0 makes it a root again.
+	if err := db.SetOrgNodeParent(ctx, ids["dev"], 0); err != nil {
+		t.Fatal(err)
+	}
+	rooted, err := db.GetOrgNode(ctx, ids["dev"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rooted.ParentID != nil {
+		t.Fatalf("node still has a parent: %+v", rooted.ParentID)
+	}
+	if err := db.SetOrgNodeParent(ctx, ids["dev"], 999999); err == nil {
+		t.Fatal("moving under a non-existent node was accepted")
+	}
+	if err := db.SetOrgNodeParent(ctx, ids["dev"], ids["dev"]); err == nil {
+		t.Fatal("a node was made its own parent")
 	}
 }
 
