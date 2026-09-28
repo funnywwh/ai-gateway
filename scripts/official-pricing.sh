@@ -290,6 +290,14 @@ plan.update(image_model("gpt-image-2", 5.00, 1.25, 8.00, 2.00, 30.00))
 plan.update(image_model("gpt-image-2.5", 5.00, 1.25, 8.00, 2.00, 30.00,
     note="官方的 2.5 只有 gpt-image-2.5-flare 与 gpt-image-2.5-sunburst 两个 id，"
          "裸 `gpt-image-2.5` 不是官方 id，此处按 2.5 家族价（与 gpt-image-2 同价）计"))
+# 2.5 家族的两个**真实** id（上面的裸 `gpt-image-2.5` 是个别名式的兜底行）。补这两条是因为
+# gw-c 的 azure（源头 gw-b sub2api 账号 10「azureChatGPTkey」）真的部署了它们——真实请求
+# 返回 400 `operation unsupported`（存在，只是不接受文本请求），所以它们会进供应商模型行，而
+# 缺价会让整批写入中止。按 2.5 家族价：与 gpt-image-2 同档。
+plan.update(image_model("gpt-image-2.5-flare", 5.00, 1.25, 8.00, 2.00, 30.00,
+    note="官方 2.5 家族 id，价同 gpt-image-2"))
+plan.update(image_model("gpt-image-2.5-sunburst", 5.00, 1.25, 8.00, 2.00, 30.00,
+    note="官方 2.5 家族 id，价同 gpt-image-2"))
 
 # ── 音频模型：input/output 一律按音频档（这两个模型的典型用法就是音频进出）────
 def audio_model(model_id, text_in, text_out, audio_in, audio_out, cached_note):
@@ -359,7 +367,8 @@ for name in ("deepseek-flash", "deepseek-v4-pro"):
         assert off["rates"][dim] * 2 == peak["rates"][dim], f"{name}/{dim}：空闲价不是高峰价的一半"
 
 # 图像模型：output 必须是该模型的**图像输出**价（不是文本输出价）。
-for name, expect in (("gpt-image-1", 40), ("gpt-image-1.5", 32), ("gpt-image-2", 30), ("gpt-image-2.5", 30)):
+for name, expect in (("gpt-image-1", 40), ("gpt-image-1.5", 32), ("gpt-image-2", 30), ("gpt-image-2.5", 30),
+                     ("gpt-image-2.5-flare", 30), ("gpt-image-2.5-sunburst", 30)):
     assert plan[name]["rules"][0]["rates"]["output"] == usd(expect), f"{name}：图像输出价不对"
 # 音频模型：output 是音频输出价（$80），不是文本输出价。
 for name in ("gpt-4o-audio-preview", "gpt-4o-realtime-preview"):
