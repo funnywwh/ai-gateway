@@ -6426,3 +6426,18 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
 `journalctl --user -u dshgw-verify --since "-5min" | grep tenant_unmapped` **应无输出**；
 ③ `ls $ROOT/data/dshgw-verify/state/keys.map` **应不存在**（下一次 `Save` 会删掉它）；
 ④ `$ROOT/bin/dshgw whereis <账号名>` 能打印租户行。回滚：`cp -p` 回备份 + 重启。
+
+### v4.7.1 发布记录（备份尺寸落库，本机 aigw-local；2026-09-28）
+
+| 项 | 值 |
+|---|---|
+| 起因 | 用户反馈 `:8088` 备份页对一个 12 GB 的已验证快照一直显示 `0 B`。根因：`backup_jobs.size_bytes` 只在插入时写过（那一刻快照还没生成，值必然是 0），完成时的 `FinishBackupJob` 没有回写；内存里的 job 尺寸是对的，所以「立即备份」的提示看不出问题、列表重新读库才暴露 |
+| 版本 | **v4.7.1**（4.7.0 → 4.7.1；fix 提交 `8494d09`，release 提交 `645dbac`）。**未打 tag**：工作树仍有 M89「工作树清洗」的 487 个在途改动，`scripts/release.sh` 的干净树门禁跑不了，tag 等 M89 清洗落袋后补 |
+| 构建物 | `bin/aigw` **4.7.1 / `645dbac`**，23,733,452 B，sha256 `d31106497325a2010b6552ead8d95c66b75d1408d2d9f44905509a1e4b2ef248`（控制台 minified + gzip）。构建取自带 M89 在途改动的工作树，所以它比提交 `645dbac` 多带那批文本替换（语义无变化） |
+| 部署范围 | **gw-c**（LAN，`~/work/ai_gateway/bin/aigw`，`aigw-local.service`）：4.7.0/`11e8254` → **4.7.1/`645dbac`**（上传后两端 sha256 一致）；其它实例（gw-b 等）本次**未部署**，它们仍是 0 |
+| 回滚点 | gw-c `bin/aigw.prev-4.7.0-11e8254-20260928-085639`（23,718,338 B，就是 v4.7.0 构建物）。回滚 = `cp -p` 回该文件 + `systemctl --user restart aigw-local`，`/version` 随之后退到 4.7.0/`11e8254` |
+| 验证（探针） | `/version` = `{"revision":"645dbac","ui":"minified","ui_encoding":"gzip","version":"4.7.1"}`；`healthz` 200、`admin/ui/` 200；单元 `active` |
+| 验证（回填真机证据） | 启动日志 `msg="aigw starting" version=4.7.1 revision=645dbac …` 紧跟 `msg="backup job sizes repaired" repaired=1 files_missing=0`；`backup_jobs` 第 19 行 `size_bytes` 由 **0 → 12222103552**（= `data/backups/aigw-20260927-033028.db` 的实际大小） |
+| 验证（控制台面） | 管理员会话 `GET /admin/api/v1/backups?limit=5` → `total_bytes=12222103552`、`total=1`，行 `19 / 12222103552 / aigw-20260927-033028.db / ok / cron`（修复前两者都是 0）；`/admin/ui/js/pages/backups.js` 已带 `GiB` 档（12.2 GB 显示 11.38 GiB） |
+| 测试 | `make test` 全绿；`make ui-base` 全绿（新增 `internal/webui/tests/backups_bytes_test.mjs`）。两条新回归在改进前必失败（实测把 UPDATE 的 `size_bytes` 去掉后：`listed size_bytes = 0, want 507904`）。`make vet` 仍失败，原因是 **main 上本来就失败**（`internal/dshgw/config/sandboxview_test.go` 复制含 `sync.RWMutex` 的 `Config`，已在 `ad64654` 的干净检出上复现，非本次引入） |
+| 未做 | 未打 tag、未推 origin；其它实例未部署 4.7.1；控制台资源是 `Cache-Control: public, max-age=300`，浏览器要硬刷新（Ctrl+Shift+R）才拿到新格式化 |
