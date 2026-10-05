@@ -6919,3 +6919,78 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
   `bin/aigw.prev-4.11.0-dd8b32f`；`/version` = 4.11.1/`283a9e7`，`/healthz`、`/readyz` 200，启动无 ERROR。
   验证口径：部署的二进制与本地构建物逐字节相同（sha256 比对），minify 之后的资源里 grep 标识符没有意义，
   因此行为验证（切公司不空树）留给浏览器，测试里那条断言就是它的机器可查版本。
+
+## autodl-api / DeepSeek-V4.1-Flash 按 DeepSeek 官方价打五折计费（2026-10-05）
+
+> 本节记录两次改动：先按**美元**写五折价，随后按用户要求改成**人民币**计价（同样的价，只换币种）。
+> 最终生效的是 §2 的人民币版本；§1 保留为沿革与回滚参考。
+
+### 1) 初版：美元规则集（已被 §2 取代）
+
+- **需求原话**：「帮我配置 aigw 的 autodl-api DeepSeek-V4.1-Flash 的价格用 deepseek 官方价格打五折设置」。
+  确认口径时用户选了「**整张官方价目表打五折（保留分时）**」，而不是把某一档拍成平价。
+- **目标实例**：本机 `aigw-local.service` 实例（数据盘部署根，`127.0.0.1:8088`），供应商 `autodl-api`（id 1）、
+  模型映射 `DeepSeek-V4.1-Flash`（原 `pricing_rules` 为 **null** —— 成本侧无规则即按 0 计、客户请求不计费）。
+- **官方价来源**（2026-10-05 抓 `https://api-docs.deepseek.com/quick_start/pricing`，英文页即美元）：
+  `deepseek-flash` 的 MODEL VERSION 正是 **DeepSeek-V4.1-Flash**，缓存命中 $0.003 空闲 / $0.006 高峰、
+  未命中 $0.15 / $0.30、输出 $0.60 / $1.20（每百万 tokens）；高峰 = 北京时间周一至周五 09:00-12:00、
+  14:00-18:00 = 英文页的 UTC 01:00-04:00 / 06:00-10:00。空闲价恰为高峰价的一半。
+- **当时写入的价（官方美元价 ÷ 2）**：高峰 `3000 / 150000 / 600000`、空闲（catch-all）`1500 / 75000 / 300000`
+  （微美元/百万 token；即对客 $0.003 / $0.15 / $0.6 与 $0.0015 / $0.075 / $0.3）。规则 id
+  `deepseek-flash-half-peak`（order 10，两个 UTC 高峰窗口）与 `deepseek-flash-half-offpeak`（order 100，`when:{}` 兜底），
+  `currency: USD`（账本币种即 USD，不需要汇率表）。
+- **验收证据**：试算 4/4 与官方美元价 ÷ 2 一致（高峰 1M 未命中+1M 输出 = 750000 微美元）；真实请求的
+  `usage_records` 逐维度 `ceil(维度 × 半价费率)` 与库里 `cost_micros` 逐位相等（例 92416 hit + 529 miss + 521 out
+  → 336 微美元），`charge == cost`（cost_follow 1.0×）。
+
+### 2) 改版：人民币规则集（当前生效）
+
+- **需求原话**：「autodl-api给用人民币计价」，随后贴出价目表并确认取**第一列**（另一列是官方原价，数字差一倍）。
+- **目标价（元 / 百万 tokens，前一版美元价的同一个价，只是用人民币写）**：
+
+  | | 缓存命中 | 缓存未命中 | 输出 | 官方人民币原价（命中/未命中/输出） |
+  |---|---|---|---|---|
+  | 高峰 | **￥0.02** | **￥1** | **￥4** | ￥0.04 / ￥2 / ￥8 |
+  | 空闲 | **￥0.01** | **￥0.5** | **￥2** | ￥0.02 / ￥1 / ￥4 |
+
+  写进规则的费率（微元/百万 token，`pricing.RateScale`=1e6）：高峰 `20000 / 1000000 / 4000000`、
+  空闲 `10000 / 500000 / 2000000`，规则集 `{"currency":"CNY", ...}`，两条规则与上一版同名同序
+  （`deepseek-flash-half-peak` / `deepseek-flash-half-offpeak`）。
+- **来源**（2026-10-05 抓中文页 `https://api-docs.deepseek.com/zh-cn/quick_start/pricing/`）：
+  官方人民币原价 Flash 高峰 ￥0.04 / ￥2 / ￥8、空闲 ￥0.02 / ￥1 / ￥4，上表即其五折。官方文字口径：
+  「北京时间周一至周五（**不含中国法定节假日**）9:00-12:00、14:00-18:00 为高峰；其余时段，包括周末及
+  中国法定节假日全天均为空闲」「空闲时段价格为高峰时段价格的一半」。
+- **汇率（这次改动的关键前提）**：账本币种仍是 **USD**（M22：账本永远单一币种），CNY 规则集要入账就得换算，
+  且**写入被硬拒**——币种不在 `billing.fx_rates` 里时 `validateRuleSetCurrency` 返回
+  400 `currency CNY has no exchange rate`（`internal/httpapi/currency.go`）。取 **150000**
+  （1 元 = 0.150000 美元）：这是官方中英文两页**逐项隐含的同一个汇率**（￥2/百万 = $0.30/百万，六项全等
+  6.6667），用户从三个候选（150000 官方隐含 / 147567 市场中间价 / 140845≈7.1）中确认取它。
+  于是「改用人民币计价」是**币种改写**：客户实际被扣的美元与 §1 的美元规则集**逐位相同**
+  （0.5 元 = $0.075）；另两个候选会把同样的元价压低 1.6% / 6%。
+- **脚本改为人民币版**（`scripts/autodl-pricing.sh`）：元价同样由官方价在脚本里用整数算五折（除不尽即报错），
+  自检项除原有四条外新增两条——**元价 × 150000 逐项等于官方美元价**、**五折后的元价换回美元等于 §1 的美元五折**；
+  `--apply` 时先查 `GET /admin/api/v1/billing/currency`：汇率缺失则写入 150000，**存在但不等于 150000 就报错停下**
+  （静默按别的汇率计费是最坏结果）。干跑输出还额外打印 config.yaml 的 `fx_rates` 片段。
+- **三处落点**：规则写库 + 部署根 `config.yaml` 的
+  `bootstrap.providers[autodl-api].models[DeepSeek-V4.1-Flash].pricing_rules`（币种 CNY），
+  汇率写 `billing.fx_rates: {CNY: 150000}`。理由：`bootstrap.mode=upsert` 只在**行/设置不存在**时插入，
+  只写库的话「删 data/ 重建」出来的新库既没有价、也没有汇率，而 CNY 规则集没有汇率就是按 0 计费的请求。
+- **验收证据**：
+  - 试算（真实计价引擎）4/4：高峰 1M 未命中+1M 输出 → 成本原生 **CNY 5000000 微元（￥5）**、
+    账本 USD 750000；空闲同量 → ￥2.5 / $0.375；高峰 1M 缓存命中 → ￥0.02 / $0.003；
+    **周日 02:00 UTC 也算空闲**（周末无高峰）。四个场景的 `cost_currency=CNY`、`sale_currency=USD`、
+    `ledger_currency=USD`、账本数字与 §1 的美元规则集逐位相同。
+  - 真实请求（重启后，200）：快照 `cost_currency=CNY`、`fx_cost_ledger=150000`，库里
+    `cost_micros=1014` 微美元与 `ceil(原生 6759 微元 × 150000 / 1e6)` 逐位相等；`charge_micros=1016`
+    比成本高 2 微美元——这是 `docs/pricing.md` §9.2 的跨币种口径（`saleRate = ceil(costRate × rate)` 再逐维度
+    `ceil`），方向是多收不低收，不是错价。
+  - 重启后 `fx table ready ledger=USD currencies="[USD CNY]"`，规则与汇率都在；启动日志无 ERROR。
+  - 部署配置经 `yaml.safe_load` 校验：`currency USD`、`fx_rates {CNY: 150000}`、规则集 `currency CNY` 两条齐全。
+- **一处刻意的近似**（写在规则 title 里，控制台可见）：官方「中国法定节假日全天按空闲」在网关里表达不了——
+  规则只有 `time_windows`（星期 + 时刻），没有节假日日历，所以节假日会按高峰价计（对客户略偏高、方向保守）。
+  与 `scripts/deepseek-official-pricing.sh` 同一处近似。
+- **回滚**：要回到美元版就把该行 `pricing_rules` 重新写成 §1 的美元规则集（`scripts/autodl-pricing.sh` 的
+  上一版提交里那份，或直接写 `{"currency":"USD",...}` 的 `3000/150000/600000` + `1500/75000/300000`）；
+  要彻底不收费就写回 `null`（`POST /admin/api/v1/providers/1/models`，
+  `{"public_model":"DeepSeek-V4.1-Flash","pricing_rules":null}`）。汇率条目可留着（没有 CNY 规则集时它不参与任何计算）。
+
