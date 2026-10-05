@@ -6919,3 +6919,43 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
   `bin/aigw.prev-4.11.0-dd8b32f`；`/version` = 4.11.1/`283a9e7`，`/healthz`、`/readyz` 200，启动无 ERROR。
   验证口径：部署的二进制与本地构建物逐字节相同（sha256 比对），minify 之后的资源里 grep 标识符没有意义，
   因此行为验证（切公司不空树）留给浏览器，测试里那条断言就是它的机器可查版本。
+
+## autodl-api / DeepSeek-V4.1-Flash 按 DeepSeek 官方价打五折计费（2026-10-05）
+
+- **需求原话**：「帮我配置 aigw 的 autodl-api DeepSeek-V4.1-Flash 的价格用 deepseek 官方价格打五折设置」。
+  确认口径时用户选了「**整张官方价目表打五折（保留分时）**」，而不是把某一档拍成平价。
+- **目标实例**：本机 `aigw-local.service` 实例（数据盘部署根，`127.0.0.1:8088`），供应商 `autodl-api`（id 1）、
+  模型映射 `DeepSeek-V4.1-Flash`（原 `pricing_rules` 为 **null** —— 成本侧无规则即按 0 计、客户请求不计费）。
+- **官方价来源**（2026-10-05 抓 `https://api-docs.deepseek.com/quick_start/pricing`，英文页即美元）：
+  `deepseek-flash` 的 MODEL VERSION 正是 **DeepSeek-V4.1-Flash**，缓存命中 $0.003 空闲 / $0.006 高峰、
+  未命中 $0.15 / $0.30、输出 $0.60 / $1.20（每百万 tokens）；高峰 = 北京时间周一至周五 09:00-12:00、
+  14:00-18:00 = 英文页的 UTC 01:00-04:00 / 06:00-10:00。空闲价恰为高峰价的一半。
+- **写入的价（官方价 ÷ 2）**：高峰 `3000 / 150000 / 600000`、空闲（catch-all）`1500 / 75000 / 300000`
+  （微美元/百万 token；即对客 $0.003 / $0.15 / $0.6 与 $0.0015 / $0.075 / $0.3）。规则 id
+  `deepseek-flash-half-peak`（order 10，两个 UTC 高峰窗口）与 `deepseek-flash-half-offpeak`（order 100，`when:{}` 兜底），
+  `currency: USD`（账本币种即 USD，不需要汇率表）。
+- **为什么只写成本侧**：该模型没有 `models.sale_pricing`，售价走
+  `billing.basis_default=cost_follow` × `billing.default_markup_bp=10000`（=1.0×），所以成本价就是计费价。
+- **新增 `scripts/autodl-pricing.sh`**：默认干跑、`--apply` 才写。费率由官方价在脚本里用整数算出（五折 = 整除 2，
+  除不尽即报错，不做四舍五入），自检「两条规则顺序 / 空闲=高峰一半 / 两档都是官方价的 50% / 费率非 0」；
+  写入用部分更新（只提交 `public_model` + `pricing_rules`，不碰 capabilities/上下文/权重）；写后**读回逐字段比对**
+  并用真实计价引擎跑四个 `POST /pricing/simulate` 场景。脚本还会打印同一条规则的 bootstrap YAML 片段。
+- **两处落点**：规则既经管理 API 写库（脚本），也写进部署根 `config.yaml` 的
+  `bootstrap.providers[autodl-api].models[DeepSeek-V4.1-Flash].pricing_rules`——因为 `bootstrap.mode=upsert`
+  只在行不存在时插入，只写库的话「删 data/ 重建」出来的新行会没有价。单价只在脚本里维护，配置里放同一条 JSON。
+- **验收证据**：
+  - 试算（真实计价引擎）4/4 与官方价 ÷ 2 一致：高峰 1M 未命中+1M 输出 = 750000（官方 $1.50 → 半价 $0.75）、
+    空闲同量 = 375000、高峰 1M 缓存命中 = 3000、**周日 02:00 UTC 也算空闲**（周末无高峰）；
+    `cost_micros == charge_micros ==` 命中规则的期望值。
+  - 真实请求（重启前 + 重启后各一次，200）：`usage_records` 逐维度 `ceil(维度 × 半价费率)` 相加与库里的
+    `cost_micros` 逐位相等（例：`input_cache_hit 92416×1500 + input_cache_miss 529×75000 + output 521×300000`
+    = 139+40+157 = **336** 微美元），`charge == cost`（cost_follow 1.0×）。
+  - 重启后规则仍在库（upsert 不覆盖运行数据，也不需要重启），`bootstrap done … provider_models=0`，
+    启动日志无 ERROR；`/version` = 4.11.1/`622e548`。
+  - 部署配置经 `yaml.safe_load` 解析校验，`pricing_rules` 是合法 JSON 且两条规则齐全。
+- **已知近似**（写在规则 title 里，控制台可见）：官方「中国法定节假日全天按空闲」在网关里表达不了——规则只有
+  `time_windows`（星期 + 时刻），没有节假日日历，所以节假日会按高峰价计（对客户略偏高、方向保守）。
+  与 `scripts/deepseek-official-pricing.sh` 同一处近似。
+- **回滚**：把该行的 `pricing_rules` 写回 `null`（`POST /admin/api/v1/providers/1/models`，
+  `{"public_model":"DeepSeek-V4.1-Flash","pricing_rules":null}`），并删掉部署配置里的同名片段；
+  或重跑 `scripts/autodl-pricing.sh --apply` 覆盖成本次写入的同一份规则。
