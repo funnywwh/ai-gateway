@@ -259,7 +259,7 @@ func TestMCPDescribesTheDimensionBreakdownWindow(t *testing.T) {
 		name, _ := field["name"].(string)
 		fields[name] = field
 	}
-	for _, name := range []string{"limit", "offset", "sort", "group_by", "days"} {
+	for _, name := range []string{"limit", "offset", "sort", "group_by", "days", "from", "to"} {
 		if fields[name] == nil {
 			t.Fatalf("admin_describe must list the %q query parameter: %v", name, fields)
 		}
@@ -268,6 +268,18 @@ func TestMCPDescribesTheDimensionBreakdownWindow(t *testing.T) {
 	// keeps the test honest if the route entry is ever trimmed back.
 	if text, _ := fields["offset"]["description"].(string); text == "" {
 		t.Errorf("offset must be described, not just listed: %v", fields["offset"])
+	}
+	// M97: the explicit window is a pair of instants, and an agent that is not told so will
+	// send a date or a named calendar window (both 400). The descriptions have to say what
+	// the values are, what "from only" means, and that a from/to pair overrides days.
+	if text, _ := fields["from"]["description"].(string); !strings.Contains(text, "RFC3339") {
+		t.Errorf("from must say its format is RFC3339: %v", fields["from"])
+	}
+	if text, _ := fields["to"]["description"].(string); !strings.Contains(text, "RFC3339") {
+		t.Errorf("to must say its format is RFC3339: %v", fields["to"])
+	}
+	if text, _ := fields["days"]["description"].(string); !strings.Contains(text, "from") {
+		t.Errorf("days must say that from/to take precedence: %v", fields["days"])
 	}
 	if !strings.Contains(fields["limit"]["description"].(string), "分组数") {
 		t.Errorf("limit must say what it counts on this endpoint: %v", fields["limit"])

@@ -198,6 +198,27 @@ func dimensionQueryFields() []adminField {
 	}
 }
 
+// windowQueryFields is the time window of a request-log read (M97). The window's boundaries
+// belong to the timezone the operator reads the screen in, and the gateway does not know it:
+// the console resolves 当天/本周/本月/时间段 into absolute instants and sends those, so the
+// server needs neither a timezone setting nor calendar arithmetic of its own
+// (docs/design/m97-request-log-time-window.md D1/D2). They are declared once for the same
+// reason dimensionQueryFields is: the list and the breakdown share one window.
+func windowQueryFields() []adminField {
+	return []adminField{
+		queryParam("days", "integer",
+			"滚动窗口：最近 N 天（默认 7，最大 365）；给了 from/to 时被忽略（响应 window 回显实际生效的窗口）"),
+		queryParam("from", "string",
+			"窗口起点，RFC3339 时刻（例 2026-10-05T16:00:00.000Z）；非法取值返回 400。"+
+				"只给 from 时右端是服务端的「现在」（当天/本周/本月走这条：前端按本机时区算起点，"+
+				"右端交给服务端，避免浏览器时钟偏差裁掉最新写入的行）"),
+		queryParam("to", "string",
+			"窗口终点，RFC3339 时刻；省略 = 现在。两端都是闭区间（created_at >= from 且 <= to），"+
+				"所以「到某日为止」用该日的 23:59:59 表达即可（created_at 按整秒记）。"+
+				"from 晚于 to、或跨度超过 366 天返回 400"),
+	}
+}
+
 // prop describes one property of a hand-written body schema.
 func prop(typ, desc string) map[string]any {
 	return map[string]any{"type": typ, "description": desc}
@@ -786,9 +807,9 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 		{
 			Method: "GET", Path: "/admin/api/v1/requests", Handler: s.handleAdminRequests,
 			Name: "admin_list_requests", Group: groupRequests, Role: roleViewer,
-			Summary: "全部账户的请求日志（跨账户视图，可按账户/API Key、供应商、天数与身份维度过滤；带该请求的用户与 Key 名字、提供服务的供应商、路由到的模型与命中的映射规则、每次上游尝试的路由与上游模型（attempts：失败转移的行有多跳）、token 与成本）",
+			Summary: "全部账户的请求日志（跨账户视图，可按账户/API Key、供应商、时间窗口（days 滚动窗口或 from/to 显式区间）与身份维度过滤；带该请求的用户与 Key 名字、提供服务的供应商、路由到的模型与命中的映射规则、每次上游尝试的路由与上游模型（attempts：失败转移的行有多跳）、token 与成本）",
 			Query: append(append(pageRequests.fields(),
-				queryParam("days", "integer", "回溯天数，默认 7，最大 365")),
+				windowQueryFields()...),
 				dimensionQueryFields()...),
 		},
 		{
@@ -803,8 +824,7 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 				"因此失败转移的请求会在每一家各计一次，各分组「请求数」之和可能大于窗口总请求数，这是设计而非错误；" +
 				"该分组恒读原始计量行（小时汇总按请求预聚合，无法回答供应商），行里额外带 provider_id/provider_name，" +
 				"id 为 0（key 为空）是未计量或供应商未知的桶。带 provider_id 过滤时同样走原始计量行，筛选口径是「请求」：选中有该供应商计量行的请求（见 admin_list_requests）",
-			Query: append(append([]adminField{
-				queryParam("days", "integer", "回溯天数，默认 7，最大 365"),
+			Query: append(append(append([]adminField{
 				enumField(queryParam("group_by", "string",
 					"分组维度。provider（供应商）的口径与其他维度不同，用之前必须知道：成本与 token 按计量行归属到实际服务的那家供应商"+
 						"（同一模型的不同供应商各自计价，这正是该分组存在的理由），失败转移的请求会在每一家各计一次，"+
@@ -814,7 +834,7 @@ func (s *Server) systemAdminRoutes() []adminRoute {
 				enumField(queryParam("sort", "string",
 					"排序键（均为降序，同数按分组键升序）：last_seen 最近一次请求时间（默认）| requests 请求数 | charge 对客成本（与列表「成本」列同源 charge_micros）"),
 					store.RequestLogDimensionSorts...),
-			}, pageDimensions.fields()...), dimensionQueryFields()...),
+			}, windowQueryFields()...), pageDimensions.fields()...), dimensionQueryFields()...),
 		},
 		{
 			Method: "GET", Path: "/admin/api/v1/requests/{id}", Handler: s.handleAdminRequestDetail,

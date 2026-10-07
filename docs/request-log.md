@@ -154,9 +154,9 @@ token 口径与计费一致：输入 = `input + input_cache_hit + input_cache_mi
 
 | 端点 | 用途 |
 |---|---|
-| `GET /admin/api/v1/requests` | 分页列表；可按 `account_id`/`api_key_id`/`provider_id`/`days` 与六个身份维度过滤；每行含 7 个身份字段、`matched_rule`、`account_name`/`api_key_name`/`api_key_prefix`、`providers`（`[{id, name}]`，失败转移的行有多项，按首次尝试顺序）、`attempts`（每次上游尝试的 `route_id`/`provider_id`/`provider_name`/`upstream_model`/`status`/`error_code`/`terminated_reason`/`latency_ms`/`ttft_ms`/`cost_micros`/`charge_micros`/`created_at`，按 `attempt_no` 升序）与 `usage` |
+| `GET /admin/api/v1/requests` | 分页列表；可按 `account_id`/`api_key_id`/`provider_id`/`days` 或显式 `from`/`to` 窗口（见下「时间窗口」）与六个身份维度过滤；每行含 7 个身份字段、`matched_rule`、`account_name`/`api_key_name`/`api_key_prefix`、`providers`（`[{id, name}]`，失败转移的行有多项，按首次尝试顺序）、`attempts`（每次上游尝试的 `route_id`/`provider_id`/`provider_name`/`upstream_model`/`status`/`error_code`/`terminated_reason`/`latency_ms`/`ttft_ms`/`cost_micros`/`charge_micros`/`created_at`，按 `attempt_no` 升序）与 `usage` |
 | `GET /admin/api/v1/requests/{id}` | 单条详情：输入/思考/输出（按录制开关）＋身份＋`matched_rule`＋用户/Key/供应商的名字＋同上的 `attempts`（路由路线）＋消耗 |
-| `GET /admin/api/v1/requests/dimensions` | 维度统计（**可分页、可排序**）：`group_by=client\|model\|resolved_model\|workspace\|session\|call_kind\|account\|api_key\|provider`，汇总请求数、已计量数、token、成本与首次/最近出现时间；`session` 分组额外带标题与工作区，`account`/`api_key`/`provider` 分组额外带名字（`api_key` 还带前缀）；`sort=last_seen\|requests\|charge`（默认 `last_seen`），`limit`/`offset` 同列表契约，响应 `total` 是**分组数** |
+| `GET /admin/api/v1/requests/dimensions` | 维度统计（**可分页、可排序**）：`group_by=client\|model\|resolved_model\|workspace\|session\|call_kind\|account\|api_key\|provider`，汇总请求数、已计量数、token、成本与首次/最近出现时间；`sort=last_seen\|requests\|charge`（默认 `last_seen`），`limit`/`offset` 同列表契约，窗口过滤与列表同一套（`days` 或 `from`/`to`），响应 `total` 是**分组数**；`session` 分组额外带标题与工作区，`account`/`api_key`/`provider` 分组额外带名字（`api_key` 还带前缀） |
 | `POST /admin/api/v1/requests/prune` | 立即执行保留期清理（admin） |
 
 `account_id`/`api_key_id`/`provider_id` 是**精确匹配**的数字过滤；非数字取值返回 400 并指出参数名
@@ -165,6 +165,41 @@ token 口径与计费一致：输入 = `input + input_cache_hit + input_cache_mi
 `account`/`api_key` 分组的 `key` 是**数字 id 的字符串形式**（名字随行返回，因为 `api_keys.name`
 不唯一）；`key` 为空串表示未知桶：`account_id`/`api_key_id` ≤ 0 的历史行或兜底行，
 控制台显示「（未知）」，计数与其他桶一样保留。
+
+### 时间窗口（M97）
+
+列表与维度统计**共用**同一套窗口过滤，两种表达方式：
+
+| 参数 | 语义 |
+|---|---|
+| `days` | 滚动窗口：`now − days ~ now`，默认 7、取值 1..365（M24 起的既有行为） |
+| `from` / `to` | 显式窗口：RFC3339 **时刻**（例 `2026-10-05T16:00:00.000Z`） |
+
+组合规则：
+
+- 都不给 → `days`（默认 7）；
+- 只给 `from` → `from ~ now`（「当天/本周/本月」走这条，右端由**服务端**定义"现在"，
+  不受浏览器时钟偏差影响）；
+- 只给 `to` → `now − days ~ to`；
+- 两个都给 → `from ~ to`，**`days` 被忽略**；
+- `from` 晚于 `to` → 400（`param=from`）；跨度超过 **366 天** → 400（防全表扫）；
+  非 RFC3339 的取值 → 400 并指出参数名（与 `account_id` 同类，不静默忽略）。
+
+两侧都是**闭区间**（`created_at >= from AND created_at <= to`）。`created_at` 按整秒记，
+因此「到某日为止」用 `当日 23:59:59` 表达即可，不会漏掉该日最后一秒的行。
+
+响应回显生效窗口（UTC、RFC3339），与被问的参数区分开：
+
+```json
+{"window": {"from": "2026-09-30T16:00:00Z", "to": "2026-10-07T06:12:33Z"}}
+```
+
+控制台（M97）：窗口下拉在 `最近 1/3/7/30 天`（滚动）之后追加 **当天 / 本周（周一起）/ 本月 /
+时间段…**；**日历窗口的边界按浏览器本地时区计算**（与列表「时间」列的 `toLocaleString()` 口径一致），
+前端算好绝对时刻后以 `from`/`to` 发出，服务端不持有任何时区配置。「时间段…」弹窗选开始/结束日期，
+`from` = 起始日本地 `00:00:00`、`to` = 结束日本地 `23:59:59`；取消弹窗回到上一个选项（窗口不变）。
+生效窗口在工具栏写明（`窗口：2026-10-01 00:00 ~ 10-07 23:59（本地时间 · Asia/Shanghai）`），
+使「数据为什么是这些行」在屏幕上可见。
 
 ### 路由路线（M78）
 
@@ -304,6 +339,10 @@ tokens 与成本落在它们各自表头列的正下方；未计量的行只计�
 新增可选 `onRowClick`（不传即原行为，其它列表页零变化），行内控件与拖选文本不触发，入口与
 「详情」按钮共用 `openDetail(row)`（含 in-flight 守卫）；口径与取舍见
 `docs/design/m91-request-log-row-click-detail.md`。
+**已实现（M97）**：请求日志的时间窗口——列表与维度统计接受显式 `from`/`to`（RFC3339，闭区间，
+与 `days` 的优先级见「时间窗口」一节），响应回显生效窗口；控制台窗口下拉追加「当天 / 本周 / 本月 /
+时间段…」，日历边界按**浏览器本地时区**计算，「时间段…」弹窗选开始/结束日期；口径与取舍见
+`docs/design/m97-request-log-time-window.md`。
 历史行（迁移 0008 之前）的七列为空，控制台显示「—」，聚合归入「（未知）」桶；
 `account_id`/`api_key_id` ≤ 0 的行归入「（未知）」桶，计数同样保留；迁移 0027 之前的计量行
 `route_id`/`upstream_model` 为空，控制台显示「（未知路由）」与「—」，同样不回填。
@@ -311,7 +350,7 @@ tokens 与成本落在它们各自表头列的正下方；未计量的行只计�
 相关设计：`docs/design/m27-request-dimensions.md`、`docs/design/m29-request-log-page-summary.md`、
 `docs/design/m30-request-log-owner-dimensions.md`、`docs/design/m31-request-log-stats-pagination.md`、
 `docs/design/m53-request-provider-dimension.md`、`docs/design/m78-request-log-route-path.md`、
-`docs/design/m91-request-log-row-click-detail.md`。
+`docs/design/m91-request-log-row-click-detail.md`、`docs/design/m97-request-log-time-window.md`。
 
 Codex 标题辅助请求根据元数据 `turn_trigger=thread_title` 或 user 消息开头的专用任务标题提示词识别为 `call_kind=title`。标题和描述一起返回时仅记录 `title`；损坏的 JSON 对象或缺失标题时留空。标题辅助请求可能使用独立的 `prompt_cache_key`，若携带显式根会话 ID 则归于根会话；没有明确的根会话标识时，已知 Codex 标题模板可通过同账户、Key、工作区内 ±120 秒的唯一首条提示词精确指纹候选关联；候选冲突时恢复独立分组。正文录制关闭/仅元数据、启用脱敏或混合媒体输入时不推断，详见 `session-grouping-fix.md`。历史日志未录制响应正文时不能恢复标题。
 

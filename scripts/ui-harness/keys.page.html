@@ -680,6 +680,81 @@ try {
     if (statsCell) statsCell.click();
     await settle();
     checks.statsRowClickDoesNothing = !!statsCell && !dialogOpen();
+
+    // -------------------------------------------------------------------------
+    // 时间窗口（M97）：下拉里追加了当天/本周/本月/时间段，日历窗口的边界按**本机时区**算，
+    // 并以 from/to（绝对时刻）发给服务端。服务端只做 created_at 的闭区间、不持有时区配置，
+    // 所以「本地 00:00 到底是哪个 UTC 时刻」这件事只能在浏览器里量——这里量的是真正发出去的
+    // 原始 URL（查询串），因为一个"控件换了个名字但参数没发出去"的实现能渲染出一张像样的表。
+    // -------------------------------------------------------------------------
+    const pad = (n) => String(n).padStart(2, '0');
+    const dayValue = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+    const windowSelect = [...document.querySelectorAll('select')]
+      .find((s) => [...s.options].some((o) => o.value === 'today'));
+    checks.windowOptions = !!windowSelect
+      && ['d7', 'today', 'week', 'month', 'custom'].every((v) => [...windowSelect.options].some((o) => o.value === v));
+    // 当天：**只带 from**（右端交给服务端的「现在」，免得浏览器时钟偏差裁掉最新的行），
+    // 列表与维度统计两张表都换成这个窗口，且都不再带 days。
+    const winMark = (window.__urls || []).length;
+    windowSelect.value = 'today';
+    windowSelect.dispatchEvent(new Event('change'));
+    await settle();
+    const winUrls = urlsSince(winMark);
+    const localMidnight = new Date();
+    localMidnight.setHours(0, 0, 0, 0);
+    checks.windowTodaySendsFrom = winUrls.some((u) => u.includes('/requests?') && u.includes('from=') && !u.includes('days='));
+    checks.windowTodayIsLocalMidnight = winUrls.some((u) => u.includes(encodeURIComponent(localMidnight.toISOString())));
+    checks.windowBothTables = winUrls.some((u) => u.includes('/requests/dimensions?') && u.includes('from=') && !u.includes('days='));
+    // 生效窗口与「本地时间」都必须在屏幕上：日历窗口的边界是本机时区算的，而屏幕上除此之外
+    // 没有任何地方能说明「这条 10-06 23:40 的行为什么不在『当天』里」。
+    checks.windowHintLocalTime = pageText().includes('窗口：') && pageText().includes('本地时间');
+    checks.windowHintShowsBoundary = pageText().includes('00:00:00 ~ 现在');
+    checks.windowScrollLabelsKept = [...windowSelect.options].some((o) => o.textContent === '最近 7 天');
+    // 「改时间段」此刻不该出现：还没有自定义区间可改，摆一个点了要重新填的按钮只是噪声。
+    // find() 按文案找得到隐藏的按钮，所以要读 hidden 属性本身。
+    checks.rangeButtonHiddenByDefault = find('改时间段')?.hidden === true;
+
+    // 时间段：弹窗里两个 date 输入，默认是今天；确定后 from = 起始日本地 00:00、
+    // to = 结束日本地 23:59:59（含结束日整天）。
+    windowSelect.value = 'custom';
+    windowSelect.dispatchEvent(new Event('change'));
+    await settle();
+    const rangeInputs = () => [...modal().querySelectorAll('input[type=date]')];
+    checks.rangeDialogOpens = rangeInputs().length === 2;
+    checks.rangeDefaultsToday = rangeInputs().length === 2 && rangeInputs().every((i) => i.value === dayValue(new Date()));
+    const ranged = rangeInputs();
+    if (ranged.length === 2) { ranged[0].value = '2026-10-01'; ranged[1].value = '2026-10-07'; }
+    const rangeMark = (window.__urls || []).length;
+    find('确定').click();
+    await settle();
+    const rangeUrls = urlsSince(rangeMark);
+    checks.customRangeSendsBounds = rangeUrls.some((u) => u.includes('/requests?')
+      && u.includes(encodeURIComponent(new Date(2026, 9, 1, 0, 0, 0, 0).toISOString()))
+      && u.includes(encodeURIComponent(new Date(2026, 9, 7, 23, 59, 59, 0).toISOString())));
+    checks.customRangeLabel = pageText().includes('时间段：10-01 ~ 10-07');
+    // 「改时间段」只在自定义区间生效后出现：按文案找按钮会连隐藏的那个也找到，所以量的是
+    // hidden 属性（.btn 没有 display 规则，UA 的 [hidden]{display:none} 说了算）。
+    const rangeButton = find('改时间段');
+    checks.rangeButtonShown = !!rangeButton && rangeButton.hidden === false;
+
+    // 取消弹窗 = 回到上一个选项，窗口一动不动：停在一个没生效的「时间段…」上，屏幕上控件
+    // 说的窗口与表里的数据就会各说一套。
+    find('改时间段').click();
+    await settle();
+    const cancelMark = (window.__urls || []).length;
+    find('取消').click();
+    await settle();
+    checks.customCancelRestores = windowSelect.value === 'custom'
+      && pageText().includes('时间段：10-01 ~ 10-07')
+      && urlsSince(cancelMark).length === 0;
+    // 剩下的走查依赖默认窗口（最近 7 天）：这不只是收尾好看，它是「切回滚动窗口」这条路
+    // 也得走通（区间要被清掉，不能再出现在参数里）。
+    const resetMark = (window.__urls || []).length;
+    windowSelect.value = 'd7';
+    windowSelect.dispatchEvent(new Event('change'));
+    await settle();
+    checks.windowScrollRestoresDays = urlsSince(resetMark).some((u) => u.includes('/requests?') && u.includes('days=7') && !u.includes('from='));
+    checks.customLabelCleared = pageText().includes('时间段…') && !pageText().includes('时间段：10-01');
   }
 
   const flags = Object.entries(checks).filter(([, v]) => typeof v === 'boolean');
