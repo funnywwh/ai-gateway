@@ -17,6 +17,12 @@ __pycache__/
 # workspace-local toolchain caches (see scripts/goenv.sh)
 /.cache/
 
+# The coding agent's own session scratch (attachments a session was given, per-session
+# state). It is not a source artifact and it lives *inside* the worktree, so without this
+# line a `git add -A` at the end of a session commits whatever screenshot or log the agent
+# happened to be handed.
+/.uya-agent/
+
 # local deployment configuration: it carries the bootstrap admin password, API keys,
 # the session secret and credentials_key, so it must never enter git history.
 # Derive your own from config.example.yaml instead.

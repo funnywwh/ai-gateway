@@ -1319,8 +1319,27 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       `identityRowOffersEdit`、`editDialogEditable`、`identitySecretLocked`、`overriddenBadge`、
       `resetOverrideOffered`、`clientSecretEditable`
 
-## M97 `uya-agent` 作为一个独立的客户端维度取值
-> 设计：`docs/design/m97-uya-agent-client.md`；需求原话：「识别出来的是 dsh 客户端，要是 uya-agent」。
+## M97 请求日志的时间窗口：当天 / 本周 / 本月 / 时间段（按本地时间）
+> 设计：`docs/design/m97-request-log-time-window.md`；规格：`docs/request-log.md`「时间窗口（M97）」。
+> 需求原话（2026-10-07 截图批注）：「添加:当天、本周、本月、时间段」/「时间段点击后，弹出选择
+> 开始结束日期」/「按本地时间计算」。
+> **代码、测试、文档与「部署到本机」都已完成**（`make ui-base`/`make test`/`make build` 在本沙箱全绿，
+> 本机 `aigw-local` 已换到 4.11.1/`76568ca` 并验过，见 `docs/todo_done.md` 的 M97 小节与 v4.11.1
+> 部署记录；差异见设计文档 §10）。本节只留未完成项。
+
+- [ ] **待操作员肉眼确认**（本机 `:8088` 已在跑新版本，浏览器需硬刷新 Ctrl+Shift+R 拿新资源）：
+      打开 `http://127.0.0.1:8088/admin/ui/#/requests`，下拉里应出现「当天 / 本周（周一起）/ 本月 /
+      时间段…」；选「当天」两张表都只显示本地 00:00 起的行，工具栏写明窗口与本地时区；
+      选「时间段…」能选开始/结束日期，确定后选项变成「时间段：MM-DD ~ MM-DD」，取消则回到原窗口
+- [ ] **待宿主执行（浏览器走查）**：本沙箱没有 firefox（`run.sh` 会跳过；断言本身已用 chromium 在
+      本机跑过一轮全绿，见 `docs/todo_done.md`，但官方入口仍要宿主跑）。宿主上 `make ui-check`
+      （或 `scripts/ui-harness/run.sh --views requests`），验收检查项：`windowOptions`、
+      `windowTodaySendsFrom`、`windowTodayIsLocalMidnight`、`windowBothTables`、`windowHintLocalTime`、
+      `windowHintShowsBoundary`、`windowScrollLabelsKept`、`rangeButtonHiddenByDefault`、`rangeDialogOpens`、`rangeDefaultsToday`、
+      `customRangeSendsBounds`、`customRangeLabel`、`rangeButtonShown`、`customCancelRestores`、
+      `windowScrollRestoresDays`、`customLabelCleared`
+## M98 `uya-agent` 作为一个独立的客户端维度取值
+> 设计：`docs/design/m98-uya-agent-client.md`；需求原话：「识别出来的是 dsh 客户端，要是 uya-agent」。
 > 规格：`docs/request-log.md` §2（身份维度表 + `uya-agent` 那条说明）。
 > **代码、测试、文档都已完成**（清单见 `docs/todo_done.md` 同名小节）；本节只留未完成项。
 

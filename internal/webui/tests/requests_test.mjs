@@ -184,3 +184,111 @@ assert.match(uiSource, /export function table\(\{[^}]*onRowClick[^}]*\}\)/,
 assert.match(uiSource, /export function pagedTable\(\{[^}]*onRowClick[^}]*\}\)/,
   'pagedTable() 要把 onRowClick 透传给 table()');
 console.log('Request log row-click detail checks passed.');
+
+// ---------------------------------------------------------------------------
+// 时间窗口（M97）：当天 / 本周 / 本月 / 时间段，边界按**本机时区**算。
+//
+// 这一层钉的是「哪个时刻」——最难的也正是它：一个把本地 00:00 当成 UTC 00:00 的实现，在 UTC
+// 主机上跑起来与正确实现**完全一样**，只有在偏移非零的时区里才露馅，而线上操作员基本都不在
+// UTC。所以 Makefile 给这一行显式设了 TZ（见 ui-base），下面的断言也同时钉住"偏移被算进去了"：
+// 本地 00:00 的 UTC 时刻必须等于当天 0 点减去本机偏移，而不是 'T00:00:00.000Z'。
+//
+// 另一半是**右端**：日历窗口只发 from，让服务端定「现在」；时间段两端都发，结束日是 23:59:59。
+// ---------------------------------------------------------------------------
+const windowStart = source.indexOf('const pad2 =');
+const windowEnd = source.indexOf('\n// A request with no usage row', windowStart);
+assert.ok(windowStart >= 0, '窗口的纯函数必须存在（M97）');
+const windowSource = source.slice(windowStart, windowEnd > windowStart ? windowEnd : source.length);
+const localZone = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+if ((new Date(2026, 0, 1).getTimezoneOffset()) === 0) {
+  throw new Error('this node test needs a non-UTC TZ to mean anything; the Makefile sets one');
+}
+const windowContext = vm.runInNewContext(
+  `${windowSource}\n; ({ windowParamsOf, windowLabelOf, shortRange })`, { Intl, Date, String, Number });
+// 参数对象是另一个 vm 上下文里造的，原型不同，deepStrictEqual 会因此失败——比字段而不是比原型。
+const params = (kind, now, range) => JSON.parse(JSON.stringify(windowContext.windowParamsOf(kind, now, range)));
+const { windowLabelOf } = windowContext;
+const { shortRange } = windowContext;
+
+const offsetHours = -new Date(2026, 9, 7).getTimezoneOffset() / 60;
+const offsetStamp = (y, mo, d, h, mi, s) => {
+  const local = new Date(y, mo, d, h, mi, s);
+  return new Date(local.getTime()).toISOString();
+};
+// A Wednesday at 09:36 local; this week's Monday is the 5th, the month started on the 1st.
+const at = new Date(2026, 9, 7, 9, 36, 49);
+
+// 当天 / 本周 / 本月：**只带 from**，值是本地 00:00（不是 UTC 00:00），右端不出现。
+const today = params('today', at);
+assert.deepEqual(Object.keys(today), ['from'], '当天只发 from：右端是服务端的「现在」');
+assert.equal(today.from, offsetStamp(2026, 9, 7, 0, 0, 0), '当天必须是本机时区的 00:00');
+if (offsetHours !== 0) {
+  assert.notEqual(today.from, '2026-10-07T00:00:00.000Z', '本地 00:00 不是 UTC 00:00：偏移必须算进去');
+}
+assert.equal(params('week', at).from, offsetStamp(2026, 9, 5, 0, 0, 0), '本周从周一开始');
+assert.equal(params('month', at).from, offsetStamp(2026, 9, 1, 0, 0, 0), '本月从 1 日开始');
+assert.deepEqual(Object.keys(params('month', at)), ['from']);
+// 周日属于**上一周**：若按 getDay() 直接减，周日上午的「本周」会缩成当天。
+const sunday = new Date(2026, 9, 11, 9, 0, 0);
+assert.equal(params('week', sunday).from, offsetStamp(2026, 9, 5, 0, 0, 0),
+  '周日看「本周」仍然是本周一（不是当天）');
+// 跨月/跨年：1 月 1 日的「本周」落在去年 12 月。
+assert.equal(params('week', new Date(2027, 0, 1, 9, 0, 0)).from, offsetStamp(2026, 11, 28, 0, 0, 0),
+  '本周可以跨年：边界按日历算，不按"最近 N 天"算');
+
+// 滚动窗口：days 原样透传，且**不带** from（两条互斥的表达方式，服务端按 from 优先）。
+assert.deepEqual(params('d7', at), { days: '7' });
+assert.deepEqual(params('d1', at), { days: '1' });
+assert.deepEqual(params('d30', at), { days: '30' });
+
+// 时间段：两端都发，起始 00:00:00、结束 23:59:59（闭区间，含结束日最后一秒）。
+const custom = params('custom', at, { from: '2026-10-01', to: '2026-10-07' });
+assert.deepEqual(custom, {
+  from: offsetStamp(2026, 9, 1, 0, 0, 0),
+  to: offsetStamp(2026, 9, 7, 23, 59, 59),
+}, '时间段必须是本机时区的整天闭区间');
+assert.equal(shortRange({ from: '2026-10-01', to: '2026-10-07' }), '10-01 ~ 10-07');
+// 区间只给了一半（或解析不动）时不能瞎猜：退回默认的滚动窗口，而不是发一个假的边界。
+assert.deepEqual(params('custom', at, null), { days: '7' });
+assert.deepEqual(params('custom', at, { from: '2026-10-01' }), { days: '7' });
+assert.deepEqual(params('custom', at, { from: 'x', to: '2026-10-07' }), { days: '7' });
+// 未知取值不产生任何 from/to（服务端会把 days=undefined 忽略，但不能发出半个窗口）。
+assert.deepEqual(params('nonsense', at), { days: '7' });
+
+// 提示语：边界必须**写在屏幕上**（只有"当天"三个字时，00:00 到底按谁的时区无人能核对）。
+assert.match(windowLabelOf('today', null, at), /窗口：2026-10-07 00:00:00 ~ 现在/);
+assert.match(windowLabelOf('week', null, at), /窗口：2026-10-05 00:00:00（本周一） ~ 现在/);
+assert.match(windowLabelOf('month', null, at), /窗口：2026-10-01 00:00:00（本月 1 日） ~ 现在/);
+assert.match(windowLabelOf('custom', { from: '2026-10-01', to: '2026-10-07' }, at),
+  /窗口：2026-10-01 00:00:00 ~ 2026-10-07 23:59:59/);
+assert.match(windowLabelOf('d7', null, at), /最近 7 天/);
+// 提示语的时区限定只在**确实**按本地时间算的窗口上出现：滚动窗口是绝对的 N×24 小时，
+// 给它标一个时区名是把噪声当信息，也会让「本地时间」这四个字在别处变得不可信。
+const windowUsesLocalTime = vm.runInNewContext(
+  `${windowSource}\n; windowUsesLocalTime`, { Intl, Date, String, Number });
+for (const kind of ['today', 'week', 'month', 'custom']) {
+  assert.equal(windowUsesLocalTime(kind), true, kind + ' 的边界按本地时间算');
+}
+for (const kind of ['d1', 'd3', 'd7', 'd30']) {
+  assert.equal(windowUsesLocalTime(kind), false, kind + ' 是滚动窗口：没有时区可标');
+}
+
+// 源码接线：下拉必须有这四个新选项；窗口参数必须经 filterParams（唯一出口）到达三处调用，
+// 而 loadModelOptions 不能再直读下拉的 value——那样会把 days=today 发给只认整数的服务端，
+// 模型下拉会静默退回默认 7 天。
+assert.match(source, /\['today', '当天'\]/, '下拉必须有「当天」');
+assert.match(source, /\['week', '本周（周一起）'\]/, '下拉必须有「本周」');
+assert.match(source, /\['month', '本月'\]/, '下拉必须有「本月」');
+assert.match(source, /\['custom', '时间段…'\]/, '下拉必须有「时间段…」');
+for (const n of [1, 3, 7, 30]) {
+  assert.match(source, new RegExp(`\\['d${n}', '最近 ${n} 天'\\]`), `滚动窗口最近 ${n} 天必须保留`);
+}
+assert.match(source, /windowParamsOf\(windowSelect\.value, new Date\(\), windowRange\)/,
+  'filterParams 必须有窗口的唯一出口');
+assert.match(source, /api\.get\('\/requests\/dimensions', \{ \.\.\.windowParams\(\), group_by: 'model', limit: 50 \}\)/,
+  '模型下拉的窗口必须走 windowParams：直读下拉 value 会发出 days=today');
+assert.doesNotMatch(source, /days\.value/,
+  '窗口下拉的值不许被直接当 days 用：M97 起它的取值是语义名');
+assert.match(source, /filterParams\(\), group_by: groupBy\.value, sort: sortBy\.value/,
+  '统计卡与列表必须共用同一个窗口');
+console.log(`Request log time-window checks passed (TZ=${localZone}, offset=${offsetHours}h).`);
