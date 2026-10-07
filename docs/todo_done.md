@@ -7106,3 +7106,82 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
   原因是那个会话的请求**由部署前就在跑的 uya-agent 进程**发出（它的运行时上下文还是旧格式），
   M98 只负责「网关照客户端上报的值记」；新起的会话报的是主工作区（同批其它行都是
   `/home/winger/uya-agent`）。两仓的改动合起来才是完整的「客户端识别 + 工作区归类」
+
+## autodl-api 增补 `GLM-5.3-flash` 与 `hy4-preview`（2026-10-07）
+
+> 需求：把 AutoDL 的 `hy4-preview`、`GLM-5.3-flash` 加进本机 aigw 的 `autodl-api` 供应商。
+> 三层（`provider_models` + 对客模型 + 路由）一次补全，成本价按**会员价**那一列。
+> 脚本 `scripts/autodl-models.sh`（新增），部署根 `config.yaml` 的 bootstrap 同步。
+
+- **为什么单独开一个脚本**（而不是并进 `official-pricing.sh` 或 `add-provider-models.py`）：
+  那两个的价格真值来自**官方页价目表**（OpenAI / DeepSeek 的公开定价页），取不到价就整批中止；
+  而这两个是 AutoDL **转售的第三方模型**（智谱 GLM、腾讯混元），没有可引用的官方页价目表 ——
+  价格的真值只有 AutoDL 自己那张表。硬塞进去会让那个脚本的白名单语义
+  （「没有官方价 → 保持原样，不许猜」）失去意义，所以模型表与价都留在新脚本一处。
+- **价格来源（2026-10-07）**：AutoDL 模型详情页原价 + 会员折扣，折扣率**实测核对**过 ——
+  `GET /v1/models` 每个模型带 `member_discount`：`GLM-5.3-flash 0.7`、`hy4-preview 1`、
+  `DeepSeek-V4.1-Flash 0.5`，与用户截图逐项吻合（`0.800×0.7=0.560`、`0.230×0.7=0.161`、
+  `2.800×0.7=1.960`）。折后价（CNY 规则集，单条 catch-all，无分时价）：
+
+  | 对客模型 | 缓存命中 | 未命中 | 输出 | 折扣 |
+  |---|---|---|---|---|
+  | `GLM-5.3-flash` | ￥0.161 | ￥0.560 | ￥1.960 | 7/10（原价 ￥0.230/￥0.800/￥2.800） |
+  | `hy4-preview` | ￥0.300 | ￥6.000 | ￥18.000 | 1/1（无折扣） |
+
+- **一处容易踩的实测坑**：`member_discount` 只能读**列表**端点。
+  `GET /v1/models/{id}` 的该字段**恒为 0**（GLM 与 hy4 都回 0，而同一模型的列表项回 0.7 / 1）
+  —— 拿详情端点当真是错的。脚本的折扣自检读列表端点，并把这条写进注释与部署 README。
+- **折扣是账号状态**（会员到期就没了），所以折后价在脚本里是**常量**，折扣率只当
+  **写入前的一次自检**：给了 `AUTODL_API_KEY` 就直接问上游当前的 `member_discount`，
+  与脚本里那条不符即报错退出；没给 key 就**明说跳过了**（上游 key 在网关凭据通道里
+  AES-GCM 加密落库、管理面永不回显，脚本拿不到），不装作查过。
+- **`GLM-5.3-flash` 的推理档位只有三档**（实测，每档重复 3 次一致）：
+  `reasoning_effort` 的 `low`/`high`/`max` → 200，`none`/`minimal`/`medium`/`xhigh` → 400
+  `param=reasoning_effort`；且它**拒绝** `{"thinking":{"type":"disabled"}}`（400 `param=thinking.type`，
+  非 flash 那条的文案是「该模型始终思考，不支持关闭思考；请使用 low、high 或 max」）。
+  **网关的能力申报是布尔的**（`capabilities.reasoning: true`），装不下「只认三档」，
+  所以档位表由客户端侧按实测写（见 `README.md` 那一节的告诫）。
+  其余四项能力实测全通：流式、工具调用（含流式增量 `tool_calls`）、data URI 图片
+  （64×64 纯红图 → 答 "Red"）、`response_format:{json_object}`。
+- **`hy4-preview` 现在什么请求都 402**：`401008 The free trial quota for the service has been
+  exhausted and postpaid billing is not enabled`。chat/completions、`/responses`、
+  `/v1/anthropic/v1/messages` 三条路一致；连 `thinking:{type:"bogus"}` 这种必被参数校验
+  拒绝的请求也还是 402 ⇒ **参数校验不可达，能力一个都测不出来**。因此该行的
+  `capabilities` 留空 = **未申报**（网关把空能力读作「未知 → 不拦任何请求」，`/v1/models`
+  只披露 `input_modalities: ["text"]`）——这是「没测过」唯一诚实的表示，不替它猜。
+  `context_window` 取页面公布的 1024K（这条是能公布的事实）；`max_output_tokens` 留 0 = 未公布。
+  按用户口径**行照建、路由照启用**；真打一次会得到 500 `quota_exhausted`，并被网关按 quota
+  **冷却该路由 1800s**（既有机制，未改）。等上游开通后付费再按实测补齐能力与上限。
+- **写入顺序与幂等**：`POST /providers/{id}/models`（**同一笔带上 `pricing_rules`**）→
+  `POST /models` → `POST /routes`。顺序不能换 —— 先建行再补价会有一段时间按 0 成本计费
+  （`add-provider-models.py` 的注释里同一条纪律）。重跑先读回对照，三层逐字段一致就
+  报 `ok` 且一个字节都不写（避免无谓写入把路由冷却清掉）：实测第二次跑三层全 `ok`。
+  已有行的 `upstream_model` 与要补的不一致时**整批中止**，绝不覆盖。
+- **验收证据**：
+  - 干跑 + `--apply`：6 次写入全 200；读回核对「三层与计划逐字段一致」；
+    `router/explain` 两个模型各 1 个候选、`excluded` 空；
+    `pricing/simulate`（1M 未命中 + 1M 输出）：GLM 原生 CNY `2520000` 微元 / 账本 USD `378000`，
+    hy4 原生 `24000000` / 账本 `3600000`，命中规则即各自那条 catch-all。
+  - **真实请求**（经网关 `/v1/responses`，`GLM-5.3-flash`）：① 普通话 → 200 `completed`；
+    ② **工具轮 + `reasoning_content` 回放**（`function_call` + `function_call_output`）→ 200
+    `completed`，正文用上了工具结果；③ **模型自己发出的工具调用** → 200，
+    返回 `function_call get_weather {"city": "Beijing"}`。后两条正是 deepseek 方言
+    `replay_reasoning_content` 最会坏的地方（空串回放实测被上游接受）。
+  - **计价逐笔核对**：拿真实请求的 `usage` 反算（原生按维度 `ceil`、账本 = `ceil(原生合计 × 0.15)`）
+    三笔全部逐位相等（`2593→389`、`208→32`、`239→36`）。
+  - **重启回归**：改完 bootstrap 重启后 `bootstrap done … provider_models=0 models=0 routes=0`
+    （upsert 没重复插入）、`registry loaded summary="snapshot(models=3 providers=1
+    provider_models=3 routes=3)"`、`fx table ready ledger=USD currencies="[USD CNY]"`；
+    重启后真打一发 GLM 仍 200 且计费正确。日志 `level=ERROR` 计数与改动前**相同**（2 条，
+    都是 10-05 与 11:13 的历史「audit write queue」超时，与本次无关）。
+- **部署根 `config.yaml` 同步**（`bootstrap.mode=upsert` 只在行不存在时插入，所以重建库时
+  靠它带价播种）：`bootstrap.providers[autodl-api].models` 加两行（含 `pricing_rules`）、
+  `bootstrap.models` 加两个 `public_name`、`bootstrap.routes` 加两条 `priority: 10 / weight: 100`；
+  已用 `yaml.safe_load` 校验。备份 `config.yaml.bak-pre-glm-hy4-1791344649`。
+- **回滚**：`PATCH /admin/api/v1/routes/{id} {"enabled":false}` 先摘掉对客可见，
+  再 `DELETE /admin/api/v1/routes/{id}` + `DELETE /admin/api/v1/provider-models/{pm_id}`
+  逐层删净（价随供应商模型行一起消失）；部署配置覆盖回备份。
+- **顺带发现（未修，属既有状况）**：`scripts/official-pricing.sh` 在**本实例上是坏的** ——
+  `autodl-api/DeepSeek-V4.1-Flash` 既不在它的价格表也不在 `UNPRICED` 白名单，于是
+  「取不到价 1 行，整批中止（未写入任何一行）」。它现在**什么都写不了**（连别的供应商的行
+  也一起被中止）。与本轮改动无关，留给该脚本自己的线处理。
