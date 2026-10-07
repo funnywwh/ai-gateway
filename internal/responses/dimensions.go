@@ -11,7 +11,16 @@ import (
 // agent sent the request; CallKind says whether the request is the agent's own turn or
 // one of its auxiliary calls.
 const (
-	ClientDSH   = "dsh"
+	ClientDSH = "dsh"
+	// ClientUya is uya-agent: another coding agent on this host that speaks DSH's dialect
+	// on purpose (same session headers, same `session workspace:` line, same title
+	// prompts) but is NOT DSH. Recording it as `dsh` would merge two clients' consumption
+	// into one bucket, which is exactly what this column exists to prevent.
+	//
+	// It is the only client identified by User-Agent alone: nothing in its body is a
+	// marker we can match on, because its persona is its own text (deliberately — matching
+	// DSH's would mean impersonating it in the prompt the model sees).
+	ClientUya   = "uya-agent"
 	ClientCodex = "codex"
 	// ClientConsole is the gateway's own management console (the smart-chat page). It is a
 	// first-class client because its traffic is billed like any other: an operator asking
@@ -73,7 +82,7 @@ const (
 // Every field degrades to "" / ClientUnknown rather than failing: a request that cannot be
 // identified is still a request somebody has to be able to see.
 type Dimensions struct {
-	Client    string // dsh | codex | unknown
+	Client    string // dsh | uya-agent | codex | console | unknown
 	Workspace string // absolute workspace root, "" when the client did not send one
 	SessionID string // explicit root session identity, falling back to prompt_cache_key
 	CallKind  string // agent | title
@@ -154,8 +163,15 @@ func (r *Request) Dimensions(clientHint string) Dimensions {
 	case strings.HasPrefix(firstInstruction, dshDeveloperPrefix):
 		out.Client = ClientDSH
 	case out.CallKind == CallKindTitle:
-		// The title prompts are DSH's own; a title call is a DSH call.
+		// A title call carries no developer instruction, so the arms above cannot see who
+		// sent it. The prompts are DSH's, so DSH stays the default — a DSH title call whose
+		// User-Agent is absent (a user-defined provider entry may send none) must not
+		// degrade to unknown. uya-agent reuses those prompts verbatim, though, so an
+		// explicit hint wins: identical prompts do not mean an identical caller.
 		out.Client = ClientDSH
+		if hinted := clientFromHint(clientHint); hinted != ClientUnknown {
+			out.Client = hinted
+		}
 	default:
 		out.Client = clientFromHint(clientHint)
 	}
@@ -163,7 +179,10 @@ func (r *Request) Dimensions(clientHint string) Dimensions {
 	switch out.Client {
 	case ClientCodex:
 		out.Workspace = clampBytes(codexWorkspace(envContext), maxWorkspaceBytes)
-	case ClientDSH:
+	case ClientDSH, ClientUya:
+		// One implementation, two clients: uya-agent speaks DSH's dialect on purpose, so
+		// the workspace marker is read the same way. Spelling the branch out twice would
+		// make "fixed one, forgot the other" the default outcome (M97 §2 D3).
 		path := dshWorkspace(runtimeContext)
 		if path == "" {
 			path = workingDirectory
@@ -181,11 +200,19 @@ func (r *Request) Dimensions(clientHint string) Dimensions {
 // The console's own requests set "aigw-console/<version>" server-side (they never come
 // from a browser), so this marker is reliable for them in a way a client-supplied header
 // would not be; nothing security-relevant is decided from it either way.
+//
+// ORDER IS LOAD-BEARING, and uya-agent is why: its User-Agent is
+// "uya-agent/0.1 (deepseek-harness-compatible)" — it carries the uya-agent name AND the
+// deepseek-harness substring that older gateways matched on. Whichever case comes first
+// wins, so uya-agent must be tested before deepseek-harness, or uya-agent's requests
+// silently land in the dsh bucket again (see m97-uya-agent-client.md §2 D2).
 func clientFromHint(hint string) string {
 	hint = strings.ToLower(strings.TrimSpace(hint))
 	switch {
 	case hint == "":
 		return ClientUnknown
+	case strings.Contains(hint, "uya-agent"):
+		return ClientUya
 	case strings.Contains(hint, "deepseek-harness"), strings.Contains(hint, "dsh/"):
 		return ClientDSH
 	case strings.Contains(hint, "codex"):

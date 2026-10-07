@@ -185,7 +185,7 @@ func dimensionQueryFields() []adminField {
 	return []adminField{
 		queryParam("account_id", "integer", "按账户（用户）过滤；非数字返回 400"),
 		queryParam("api_key_id", "integer", "按 API Key 过滤（凭据 id，见 GET /keys）；非数字返回 400"),
-		queryParam("client", "string", "按客户端过滤：dsh | codex | unknown"),
+		queryParam("client", "string", "按客户端过滤：dsh | uya-agent | codex | console | unknown"),
 		queryParam("model", "string", "按请求的模型名过滤（账单口径，与发票分组一致）"),
 		queryParam("resolved_model", "string", "按路由后的规范模型名过滤"),
 		queryParam("workspace", "string", "按工作区根路径过滤"),

@@ -72,7 +72,7 @@
 
 | 列 | 含义 | 取值来源 |
 |---|---|---|
-| `client` | 哪个编码 agent 在调用 | `dsh` / `codex` / `console` / `unknown`（请求体结构优先，User-Agent 仅兜底；`console` 是控制台智能问答自己发的请求，User-Agent 由服务端设置） |
+| `client` | 哪个编码 agent 在调用 | `dsh` / `uya-agent` / `codex` / `console` / `unknown`（请求体结构优先，User-Agent 仅兜底；`console` 是控制台智能问答自己发的请求，User-Agent 由服务端设置；`uya-agent` 是 M97 新增的第五个取值，见下） |
 | `model` | 客户端请求的模型名 | 请求的 `model` 字段；**与账单口径一致**（发票按 `usage_records.model` 分组） |
 | `resolved_model` | 路由后的规范模型名 | 路由结果；被本地拒绝的请求为空 |
 | `workspace` | 客户端的工作区根路径 | DSH 的沙箱策略行 / Codex 的 `<environment_context><cwd>` |
@@ -117,6 +117,17 @@
 识别是**结构性**的：只看请求里该出现的位置（顶层 `instructions`、首条 developer 消息、以
 `<environment_context>` 开头的消息……），不做全文匹配——实测本机库里 265 行含 `Codex CLI`
 的记录里有 259 行其实是 DSH 请求，那段文字出现在它的工具输出里。
+
+**`uya-agent`（M97）**：本机另一个编码 agent，与 DSH 同方言但**不是** DSH——它逐字复用 DSH 的
+会话头、`session workspace: "<路径>"` 机读句与标题提示词，唯独 persona 是自己的文案。因此它
+既匹配不上 DSH 的正文规则，又**不**该被记成 DSH（那会让两个客户端的消耗混成一桶）。判定只有
+一处：它的 User-Agent 含 `uya-agent`。工作区、会话、标题三条取值与 `dsh` 走**同一条路**
+（`session workspace:` + 两个会话头），差别只在 `client` 这一列的值。它的 UA 里同时含
+`deepseek-harness`（为不认 `uya-agent` 的旧网关留的兜底），所以判定顺序是**载荷相关**的：
+`uya-agent` 必须排在 `deepseek-harness` 之前，改这一处要连带跑 UA 那组测试。
+
+历史行不回填：M97 之前写下的行仍显示 `dsh`/`unknown`（那正是当时的判定），改写历史等于伪造
+当时的结论。
 
 已知边界：DSH 只在 `workspace-write` 模式下把工作区写进请求，`read-only` 与
 `danger-full-access` 下 `workspace` 为空；会话经压缩后 runtime context 可能被替换，此时

@@ -280,7 +280,7 @@ type RequestLogRecord struct {
 	Status             string
 	CreatedAt          time.Time
 
-	// Client is dsh | codex | unknown; CallKind is agent | title.
+	// Client is dsh | uya-agent | codex | console | unknown; CallKind is agent | title.
 	Client string
 	// Model is the model name the client asked for (the billed dimension: usage_records
 	// and the invoice breakdown group by it); ResolvedModel is the canonical model the
