@@ -1,5 +1,5 @@
 import { api } from '../api.js';
-import { el, card, pagedTable, pager, toast, badge, formatTime, jsonBlock, statusBadge, confirmDialog, modalHead, modalBody, modalActions } from '../ui.js';
+import { el, card, pagedTable, pager, toast, badge, formatTime, jsonBlock, statusBadge, confirmDialog, modal, modalHead, modalBody, modalActions } from '../ui.js';
 import { initCurrency, money } from '../money.js';
 
 // Dimension labels for the statistics card. The keys are the API's group_by values.
@@ -18,13 +18,33 @@ const STATS_SORTS = [
   ['charge', '按成本'],
 ];
 
+// 时间窗口选项。前四个是**滚动**窗口（days=N，右端是服务端的「现在」）；后四个是**日历**
+// 窗口，边界属于操作员读屏幕的时区，而网关不知道那个时区——所以由本页按浏览器本地时间算好
+// 绝对时刻再发出去（windowParamsOf），服务端不持有任何时区配置。
+const WINDOW_KINDS = [
+  ['d1', '最近 1 天'], ['d3', '最近 3 天'], ['d7', '最近 7 天'], ['d30', '最近 30 天'],
+  ['today', '当天'], ['week', '本周（周一起）'], ['month', '本月'], ['custom', '时间段…'],
+];
+
 export async function render({ page, actions, session }) {
   // Cost is a ledger amount, so it renders in the operator's display currency like every
   // other money column in the console.
   await initCurrency();
 
-  const days = el('select', {}, [1, 3, 7, 30].map((n) => el('option', { value: n, text: '最近 ' + n + ' 天' })));
-  days.value = '7';
+  // 窗口控件的 tooltip 说明两种窗口的差别：滚动窗口与日历窗口不是同一句话，而屏幕上只有
+  // 一个下拉，不说清就会出现「选了当天却按最近 24 小时读」这种没人能察觉的偏差。
+  const zone = localZoneName();
+  const windowSelect = el('select', {
+    title: '时间窗口：最近 N 天是滚动窗口（到此刻为止的 N×24 小时）；当天/本周/本月/时间段按本机时区计算'
+      + (zone ? '（' + zone + '）' : '') + '，与列表「时间」列同一口径',
+  }, WINDOW_KINDS.map(([value, label]) => el('option', { value, text: label })));
+  windowSelect.value = 'd7';
+  // 自定义区间是**页面状态**，不是 DOM 状态：它的文案会被写进 <option>，读回文案就要依赖
+  // 渲染顺序（而 option 的文案同时是给人看的标签）。选中的窗口另有 lastWindow，供取消弹窗时回退。
+  let windowRange = null;
+  let lastWindow = 'd7';
+  const rangeButton = el('button', { class: 'btn', text: '改时间段', hidden: true });
+  const windowHint = el('span', { class: 'muted', text: '' });
   // The identity filters are server-side: filtering in the browser would only sift the
   // current page while "共 N 条" kept describing every request.
   const client = el('select', {}, [
@@ -99,8 +119,17 @@ export async function render({ page, actions, session }) {
     } catch (err) { toast(api.errorMessage(err), 'error'); }
   }
 
+  // windowParams is the window half of the query, and the single place the window control is
+  // read. It is separate from filterParams because the model dropdown needs the window (so it
+  // lists what this window used) but not the model filter itself — filtering that list by the
+  // selected model would leave the operator with a one-entry dropdown and no way back to the
+  // others.
+  function windowParams() {
+    return windowParamsOf(windowSelect.value, new Date(), windowRange);
+  }
+
   function filterParams() {
-    const params = { days: days.value, client: client.value, model: model.value };
+    const params = { ...windowParams(), client: client.value, model: model.value };
     if (accountFilter.value) params.account_id = accountFilter.value;
     if (keyFilter.value) params.api_key_id = keyFilter.value;
     if (providerFilter.value) params.provider_id = providerFilter.value;
@@ -294,9 +323,13 @@ export async function render({ page, actions, session }) {
 
   // The model dropdown is filled from the same statistics endpoint, so it offers the
   // models this window actually used rather than a configuration list that may be empty.
+  // The window comes from windowParams, not filterParams: the list must not be narrowed by
+  // the model filter it exists to set. It used to read the window select directly, which
+  // after M97 would send `days=today` — the server takes an integer, so the dropdown would
+  // silently fall back to its default window.
   async function loadModelOptions() {
     try {
-      const payload = await api.get('/requests/dimensions', { days: days.value, group_by: 'model', limit: 50 });
+      const payload = await api.get('/requests/dimensions', { ...windowParams(), group_by: 'model', limit: 50 });
       const current = model.value;
       const options = [el('option', { value: '', text: '全部模型' })];
       for (const row of payload.rows || []) {
@@ -351,11 +384,99 @@ export async function render({ page, actions, session }) {
     } catch (err) { /* a filter list that cannot load must not block the page */ }
   }
 
+  // applyWindow is the one path a window change takes. 「时间段…」is the only option that
+  // is *chosen before it is filled in*: as soon as the select says custom there is no
+  // interval yet, and applying that would be an empty window — so it asks first, and a
+  // cancelled dialog puts the select back (lastWindow) with the window untouched.
+  async function applyWindow(kind) {
+    if (kind === 'custom') {
+      const range = await pickRange();
+      if (!range) {
+        // 回退到上一个选项，并重画一遍：下拉此刻停在 custom 上，而窗口并没有变，不重画
+        // 就会出现「控件说的时间段」与「屏幕上还没变的提示」各说一套。
+        windowSelect.value = lastWindow;
+        renderWindow();
+        return false;
+      }
+      return applyRange(range);
+    }
+    // 从日历窗口切回滚动窗口时清掉区间：留着它会让「时间段：10-01 ~ 10-07」的文案和
+    // windowParamsOf 的返回各说一套。
+    windowRange = null;
+    lastWindow = kind;
+    reloadForWindow();
+    return true;
+  }
+
+  // applyRange applies an interval that has already been picked. 「改时间段」calls it
+  // directly — the select is already on custom there, so going through applyWindow('custom')
+  // would open the dialog a second time.
+  function applyRange(range) {
+    windowRange = range;
+    lastWindow = 'custom';
+    windowSelect.value = 'custom';
+    reloadForWindow();
+    return true;
+  }
+
+  // reloadForWindow is the shared tail of every window change: rewrite the toolbar, then
+  // restart both tables at page 1. The rows of the current page belong to a different
+  // window, so their offset means nothing (the same rule every other filter follows).
+  function reloadForWindow() {
+    renderWindow();
+    view.reset();
+    loadStats({ reset: true });
+    loadModelOptions();
+  }
+
+  // pickRange opens the start/end date dialog. Two `type=date` inputs rather than a
+  // third-party picker: the console has no build step and no dependencies, and the native
+  // control brings the local calendar, keyboard entry and the right date format for free.
+  // The dialog rejects from > to in place (modal() keeps the input and shows the message),
+  // so a typo never costs the operator the dates they already typed.
+  function pickRange() {
+    const today = dateInputValue(new Date());
+    const current = windowRange || { from: today, to: today };
+    return modal({
+      title: '时间段',
+      submitLabel: '确定',
+      fields: [
+        { name: 'from', label: '开始日期', type: 'date', value: current.from, required: true },
+        { name: 'to', label: '结束日期', type: 'date', value: current.to, required: true, hint: '含结束日当天（到本地时间 23:59:59）' },
+      ],
+      onSubmit: (values) => {
+        if (values.from > values.to) throw new Error('开始日期不能晚于结束日期');
+        return { from: values.from, to: values.to };
+      },
+    });
+  }
+
+  // renderWindow keeps the toolbar honest about the window in force: which instants it
+  // covers (the calendar windows are not "the last N hours", and the option label alone
+  // cannot say where the boundaries landed), and — only where it is true — that those
+  // boundaries were computed in the operator's timezone. A rolling window is an absolute
+  // N×24h span regardless of timezone, so claiming one for it would be noise.
+  function renderWindow() {
+    const custom = windowSelect.value === 'custom' && !!windowRange;
+    const options = [...windowSelect.options];
+    const chosen = options.find((o) => o.value === 'custom');
+    if (chosen) chosen.textContent = custom ? '时间段：' + shortRange(windowRange) : '时间段…';
+    rangeButton.hidden = !custom;
+    const kind = windowSelect.value;
+    const label = windowLabelOf(kind, windowRange, new Date());
+    if (!label) { windowHint.textContent = ''; return; }
+    const qualifier = windowUsesLocalTime(kind) ? '（本地时间' + (zone ? ' · ' + zone : '') + '）' : '';
+    windowHint.textContent = label + qualifier;
+  }
+
   // 统计卡在列表卡之上：它回答「谁在用、用哪个模型、花了多少」，是打开页面先看的问题；
   // 列表回答「具体是哪一条」。筛选栏留在列表卡里（它属于它筛的那张表），两张表共用。
   page.append(statsCard);
   page.append(card('请求日志', view.node, [
-    days, accountFilter, keyFilter, providerFilter, client, model, sessionFilter, workspaceFilter,
+    windowSelect, rangeButton, accountFilter, keyFilter, providerFilter, client, model, sessionFilter, workspaceFilter,
+    // 生效窗口与「本机时区」写在控件旁边：日历窗口的边界是本机时区算的，而屏幕上除了这一行
+    // 没有任何地方能说明「这条 10-06 23:40 的行为什么不在『当天』里」。
+    windowHint,
     // 点击行为写在筛选栏旁边：这一页的说明文字一直在解释「这一列是什么口径」，入口也是口径的一部分。
     el('span', { class: 'muted', text: '点击任意一行打开该请求的详情（行内按钮与链接照旧各自处理；拖选文本不会误开）；「详情」按钮是同一条路径的键盘入口' }),
     el('span', { class: 'muted', text: '用户（账户）/API Key 与客户端/模型/推理强度/工作区/会话/标题、token 成本都是独立于正文口径记录的元数据（record_input=off 也记）；用户/Key/供应商的名字由各自的表读时解析，分组按 id；供应商按计量行的 provider_id 归属（同一模型的不同供应商各自计价，失败转移的请求会在每一家各计一次）；「上游模型」与「路由路线」也来自计量行——一次请求可以失败转移，所以那里是每次尝试一行：路线逐跳写「路由 #id 供应商 结果」，最后成功的那一跳带 ✓（失败带 ✗ 与错误码），上游模型是当时真正发出去的名字（路由可被编辑或删除，这里记的是快照，不随配置变化）；本地拒绝的请求没有计量行，显示「未计量」与「无上游尝试」，与「消耗为 0」不是一句话；标题来自会话的标题调用，成本来自计量表，与账单一致；列表底部的「本页汇总」只合计当前页已加载的行（含本页过滤），窗口口径看上方「维度统计」' }),
@@ -363,7 +484,11 @@ export async function render({ page, actions, session }) {
 
   // Changing any filter restarts both tables at page 1: the rows of the current page belong
   // to a different filter, so their offset is meaningless.
-  days.addEventListener('change', () => { view.reset(); loadStats({ reset: true }); loadModelOptions(); });
+  windowSelect.addEventListener('change', () => applyWindow(windowSelect.value));
+  rangeButton.addEventListener('click', async () => {
+    const range = await pickRange();
+    if (range) applyRange(range);
+  });
   accountFilter.addEventListener('change', () => { view.reset(); loadStats({ reset: true }); loadKeyOptions(); });
   keyFilter.addEventListener('change', () => { view.reset(); loadStats({ reset: true }); });
   providerFilter.addEventListener('change', () => { view.reset(); loadStats({ reset: true }); });
@@ -383,7 +508,121 @@ export async function render({ page, actions, session }) {
   refresh.addEventListener('click', () => { view.refresh(); loadStats(); loadModelOptions(); loadAccountOptions(); loadProviderOptions(); });
   prune.addEventListener('click', () => pruneNow());
   await loadRetention();
+  renderWindow();
   await Promise.all([view.refresh(), loadStats(), loadModelOptions(), loadAccountOptions(), loadProviderOptions()]);
+}
+
+// ---------------------------------------------------------------------------
+// 时间窗口（M97）：把「窗口选项 + 本机时区」翻译成查询参数与给人看的一句话。
+// 四个纯函数，没有 DOM 依赖——node 侧（internal/webui/tests/requests_test.mjs）直接调用
+// 它们做断言，因为「本地 00:00 到底是哪个时刻」这件事正是最容易写错、又最难在浏览器里
+// 复现的部分（UTC 主机上跑，本地与 UTC 的差别根本看不见）。
+// ---------------------------------------------------------------------------
+
+const pad2 = (n) => String(n).padStart(2, '0');
+
+// dateInputValue renders a Date as the `YYYY-MM-DD` a date input speaks. It reads the
+// LOCAL calendar fields on purpose: the input shows a local date, and round-tripping it
+// through toISOString() would shift the day for every operator east or west of UTC.
+function dateInputValue(date) {
+  return date.getFullYear() + '-' + pad2(date.getMonth() + 1) + '-' + pad2(date.getDate());
+}
+
+// parseDateInput reads `YYYY-MM-DD` back into a local Date. The numeric three-argument
+// constructor keeps it in the machine's timezone; Date.parse('2026-10-01') would read it
+// as UTC midnight and land on the previous day for anyone west of Greenwich.
+function parseDateInput(text) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(text || ''));
+  if (!m) return null;
+  const date = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+// localDayStart / localDayEnd bracket one local calendar day. The end is 23:59:59 and not
+// the next day's 00:00 because the store's comparison is closed (`created_at <= to`) and
+// created_at is stamped in whole seconds: 23:59:59 includes the last second of the day and
+// there is no instant between it and midnight for a row to hide in.
+function localDayStart(date) { return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0); }
+function localDayEnd(date) { return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 0); }
+
+// startOfWeek is Monday 00:00 local. 本周 in Chinese usage is Monday through Sunday; a
+// Sunday start would make "this week" mean "today" for anyone reading the console on a
+// Sunday morning. getDay() reports 0 for Sunday, hence the +6.
+function startOfWeek(now) {
+  const back = (now.getDay() + 6) % 7;
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate() - back, 0, 0, 0, 0);
+}
+
+function startOfMonth(now) { return new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0); }
+
+// windowParamsOf is the single translation from the window control to query parameters.
+//
+//   {days: '7'}                      滚动窗口：右端是服务端的「现在」
+//   {from: '...Z'}                   当天/本周/本月：右端同样交给服务端
+//   {from: '...Z', to: '...Z'}       时间段：两端都由本机时区定死
+//
+// The calendar windows deliberately send only `from`: "from local midnight until now"
+// must not have its right edge decided by the operator's clock, or a browser a few minutes
+// slow would silently hide the newest rows (and the hint would claim otherwise). The
+// custom range sends both because "until the 3rd" is a statement about a day, not about
+// this instant.
+function windowParamsOf(kind, now = new Date(), range = null) {
+  if (kind === 'today') return { from: localDayStart(now).toISOString() };
+  if (kind === 'week') return { from: startOfWeek(now).toISOString() };
+  if (kind === 'month') return { from: startOfMonth(now).toISOString() };
+  if (kind === 'custom') {
+    const from = parseDateInput(range && range.from);
+    const to = parseDateInput(range && range.to);
+    if (!from || !to) return { days: '7' };
+    return { from: localDayStart(from).toISOString(), to: localDayEnd(to).toISOString() };
+  }
+  const days = /^d(\d+)$/.exec(String(kind || '')) ? String(kind).slice(1) : '7';
+  return { days };
+}
+
+// windowUsesLocalTime reports whether a window's boundaries were computed in the operator's
+// timezone. The calendar windows and a custom range are; the rolling windows are an
+// absolute span (N×24 hours back from the server's "now") and have no timezone to name.
+function windowUsesLocalTime(kind) {
+  return kind === 'today' || kind === 'week' || kind === 'month' || kind === 'custom';
+}
+
+// windowLabelOf is the sentence next to the control: the boundaries as local wall-clock
+// time. A window the operator cannot see is a window they cannot trust — "当天" alone does
+// not say whether the day starts at local midnight or at UTC midnight.
+function windowLabelOf(kind, range, now = new Date()) {
+  const clock = (date) => pad2(date.getHours()) + ':' + pad2(date.getMinutes()) + ':' + pad2(date.getSeconds());
+  const stamp = (date) => date.getFullYear() + '-' + pad2(date.getMonth() + 1) + '-' + pad2(date.getDate()) + ' ' + clock(date);
+  if (kind === 'today') return '窗口：' + stamp(localDayStart(now)) + ' ~ 现在';
+  if (kind === 'week') return '窗口：' + stamp(startOfWeek(now)) + '（本周一） ~ 现在';
+  if (kind === 'month') return '窗口：' + stamp(startOfMonth(now)) + '（本月 1 日） ~ 现在';
+  if (kind === 'custom') {
+    const from = parseDateInput(range && range.from);
+    const to = parseDateInput(range && range.to);
+    if (!from || !to) return '';
+    return '窗口：' + stamp(localDayStart(from)) + ' ~ ' + stamp(localDayEnd(to));
+  }
+  const days = /^d(\d+)$/.exec(String(kind || ''));
+  return days ? '窗口：最近 ' + days[1] + ' 天（滚动） ~ 现在' : '';
+}
+
+// shortRange renders a custom range for the option label: 「10-01 ~ 10-07」.
+function shortRange(range) {
+  const from = parseDateInput(range && range.from);
+  const to = parseDateInput(range && range.to);
+  if (!from || !to) return '';
+  const day = (date) => pad2(date.getMonth() + 1) + '-' + pad2(date.getDate());
+  return day(from) + ' ~ ' + day(to);
+}
+
+// localZoneName is the operator's timezone, from the platform. It is displayed next to the
+// window so "local time" is a fact on screen rather than an assumption. An engine that
+// cannot answer (older Safari, some privacy modes) yields '' and the hint drops the name —
+// inventing one would be worse than saying nothing.
+function localZoneName() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  } catch (err) { return ''; }
 }
 
 function reasoningEffortCell(row) {

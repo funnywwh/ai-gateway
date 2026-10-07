@@ -228,13 +228,18 @@ dshgw-verify: dshgw-test dshgw-build
 # chat_preview_handshake_test.mjs 同理：握手必须**在问候到达时**再读帧窗口（先建端口、后挂载
 # frame 是刻意的顺序，而帧连进文档之前没有 content window），读早了整条通道静默失效，界面上只有
 # 一句「不可交互」。真机通道由 scripts/ui-harness 的 `chat` 视图 live 阶段负责。
+#
+# requests_test.mjs 的 M97 部分要一个**非 UTC** 的时区才有意义：那一段钉的是「本地 00:00 是哪个
+# 时刻」，而 UTC 主机上正确实现与"把本地当成 UTC"的实现跑出来一模一样。TZ 只影响这一条命令的
+# 环境（不改宿主机设置），测试自己也检查了这一点（偏移为 0 直接失败），免得改天有人把它删掉之后
+# 这段断言悄悄变成永真。
 ui-base:
 	@if command -v node >/dev/null 2>&1; then \
 		node scripts/ui-base-test.mjs ; \
 		node scripts/ui-badge-test.mjs ; \
 		node internal/webui/tests/style_csp_test.mjs || exit $$? ; \
 		node --experimental-vm-modules internal/webui/tests/nav_fold_test.mjs || exit $$? ; \
-		node internal/webui/tests/requests_test.mjs || exit $$? ; \
+		TZ=Asia/Shanghai node internal/webui/tests/requests_test.mjs || exit $$? ; \
 		node internal/webui/tests/backups_bytes_test.mjs || exit $$? ; \
 		node internal/webui/tests/tags_binding_test.mjs || exit $$? ; \
 		node internal/webui/tests/org_tree_test.mjs || exit $$? ; \

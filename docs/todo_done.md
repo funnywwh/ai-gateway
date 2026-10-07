@@ -6994,3 +6994,36 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
   要彻底不收费就写回 `null`（`POST /admin/api/v1/providers/1/models`，
   `{"public_model":"DeepSeek-V4.1-Flash","pricing_rules":null}`）。汇率条目可留着（没有 CNY 规则集时它不参与任何计算）。
 
+## M97 请求日志的时间窗口：当天 / 本周 / 本月 / 时间段（按本地时间）
+
+> 设计：`docs/design/m97-request-log-time-window.md`；规格：`docs/request-log.md`「时间窗口（M97）」。
+> 需求原话（2026-10-07 截图批注）：「添加:当天、本周、本月、时间段」/「时间段点击后，弹出选择
+> 开始结束日期」/「按本地时间计算」。
+
+- [x] 设计文档 + 规格文档 + 清单先行落盘（`docs/PROCESS.md` 已产出表加 M97 行）
+- [x] **服务端**：`internal/httpapi/admin.go` 新增 `adminRequestWindow`（`from`/`to` RFC3339，闭区间；
+      只给 `from` 则右端是服务端的「现在」；`from>to`、跨度 > 366 天、非 RFC3339 一律 400 并带
+      `param`），`requestLogFilterFromQuery` 改为返回 `(filter, requestWindow, error)`；两个端点
+      响应新增 `window {from,to}`（列表用 `listPayload` 加字段，统计保留既有 `days` 回显）；
+      `adminWindow`/`adminDays` 原样不动（账本/发票调用方零影响）
+- [x] **路由表**：`windowQueryFields()` 一次性声明 `days`/`from`/`to` 与其描述，两个端点共用
+      （MCP `admin_describe` 因此可见）；`dimensionQueryFields` 注释同步
+- [x] **控制台**（`internal/webui/static/js/pages/requests.js`）：窗口下拉追加「当天 / 本周（周一起）/
+      本月 / 时间段…」（滚动窗口原样保留，默认仍是最近 7 天）；`windowParamsOf`/`windowLabelOf`/
+      `windowUsesLocalTime`/`localZoneName` 四个纯函数按**浏览器本地时区**算边界；「时间段…」弹
+      `type=date` 双日期弹窗（起始 00:00:00、结束 23:59:59，`from>to` 在弹窗内报错且不丢输入），
+      取消回退到上一个选项并重画工具栏；生效窗口与本地时区名写在筛选栏旁；「改时间段」按钮重开弹窗；
+      `windowParams()` 是窗口的唯一出口（列表、统计、模型下拉三处共用）
+- [x] **测试**：`internal/httpapi/request_window_test.go`（闭区间含两端、只给 from、`days` 被显式窗口
+      压过、两种窗口的回显、5 类非法输入 × 两个端点、`days` 的 4 个取值回归）；`mcp_admin_test.go`
+      名单加 `from`/`to` 并断言描述里写明 RFC3339 与优先级；`internal/webui/tests/requests_test.mjs`
+      新增时间窗口一节（本地 00:00/周一/1 日、只带 from、时间段两端、周日属上一周、跨年、非法区间
+      退回默认、提示语与时区限定、源码接线）；`scripts/ui-harness/keys.page.html` 的 requests 视图
+      新增 16 项断言（读原始 URL 的查询串）
+- [x] **Makefile**：`ui-base` 的 requests 那一行显式 `TZ=Asia/Shanghai`（UTC 主机上"本地时间"与 UTC
+      无法区分，测试自己也检查偏移必须非 0）
+- [x] 本沙箱验证：`make ui-base` 全绿、`make test`（除既有失败外）全绿、`make build` 通过、
+      `make desensitize-check` 与基线一致的 46 条既有 finding（无新增）
+- [x] **走查断言在本机浏览器里跑过**（沙箱没有 firefox，用 chromium + 一份仓库外临时脚本复刻
+      run.sh 的三步）：`#requests` 146 项全绿、`errors` 为空（含本文新增的 16 项）；`#keys` 17 项
+      全绿。官方入口 `make ui-check` 仍需宿主执行。

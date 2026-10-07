@@ -808,7 +808,7 @@ func (s *Server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	filter, err := requestLogFilterFromQuery(r)
+	filter, window, err := requestLogFilterFromQuery(r)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
@@ -890,18 +890,30 @@ func (s *Server) handleAdminRequests(w http.ResponseWriter, r *http.Request) {
 		payload["usage"] = usagePayload(usages[row.RequestID])
 		out = append(out, payload)
 	}
-	writeList(w, out, total, page)
+	payload := listPayload(out, total, page)
+	// The window the rows were read with, echoed as the same value the query used. An
+	// explicit from/to pair overrides `days`, and this is where that is visible.
+	payload["window"] = window.payload()
+	writeJSON(w, http.StatusOK, payload)
 }
 
 // requestLogFilterFromQuery reads the account/key, window and identity filters the console
 // and MCP pass. Unknown or empty dimension values are simply "no filter"; a dimension
 // filter is an exact match, which is what the indexed columns can serve.
 //
+// The window is returned alongside the filter because a handler has to echo the window it
+// actually used, and recomputing it would be a second answer to the same question: `days`
+// was resolved from the request, and an explicit from/to pair may have overridden it.
+//
 // The two numeric filters are rejected when they are not numbers. Silently ignoring a
 // malformed id answers "every account" to a question that asked for one, which is the
 // failure mode /invoices?account_id= was already fixed for; a 400 names the parameter
 // instead (docs/design/m30-request-log-owner-dimensions.md D8).
-func requestLogFilterFromQuery(r *http.Request) (domain.RequestLogFilter, error) {
+func requestLogFilterFromQuery(r *http.Request) (domain.RequestLogFilter, requestWindow, error) {
+	window, err := adminRequestWindow(r)
+	if err != nil {
+		return domain.RequestLogFilter{}, requestWindow{}, err
+	}
 	query := r.URL.Query()
 	filter := domain.RequestLogFilter{
 		Client:        query.Get("client"),
@@ -928,12 +940,12 @@ func requestLogFilterFromQuery(r *http.Request) (domain.RequestLogFilter, error)
 		}
 		parsed, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
-			return domain.RequestLogFilter{}, domain.ErrInvalidRequest(id.param + " must be an integer").WithParam(id.param)
+			return domain.RequestLogFilter{}, requestWindow{}, domain.ErrInvalidRequest(id.param + " must be an integer").WithParam(id.param)
 		}
 		*id.target = parsed
 	}
-	filter.From, filter.To = adminWindow(r)
-	return filter, nil
+	filter.From, filter.To = window.From, window.To
+	return filter, window, nil
 }
 
 // ownerLabels resolves the account and API-key labels of the rows (or dimension buckets)
@@ -1097,7 +1109,7 @@ func (s *Server) handleAdminRequestDimensions(w http.ResponseWriter, r *http.Req
 		writeAPIError(w, toAPIError(err))
 		return
 	}
-	filter, err := requestLogFilterFromQuery(r)
+	filter, window, err := requestLogFilterFromQuery(r)
 	if err != nil {
 		writeAPIError(w, toAPIError(err))
 		return
@@ -1180,7 +1192,8 @@ func (s *Server) handleAdminRequestDimensions(w http.ResponseWriter, r *http.Req
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"group_by": groupBy, "sort": sortKey, "days": adminDays(r),
-		"limit": page.Limit, "offset": page.Offset, "count": len(out),
+		"window": window.payload(),
+		"limit":  page.Limit, "offset": page.Offset, "count": len(out),
 		"total": total, "has_more": page.Offset+len(out) < total,
 		"dimensions": store.RequestLogDimensionNames, "rows": out,
 	})
@@ -1387,6 +1400,93 @@ func adminDays(r *http.Request) int {
 		}
 	}
 	return 7
+}
+
+// requestWindow is the effective time window of a request-log read: the two instants the
+// store is asked to keep rows between. It is a distinct type rather than a pair of
+// time.Time so a handler can hand it to the response and have the echoed window be the
+// same value the query used, never a recomputed one (docs/design/m31 D5's rule).
+type requestWindow struct {
+	From time.Time
+	To   time.Time
+}
+
+// payload renders the window for a response: both instants in UTC RFC3339, the same
+// spelling every other timestamp in these payloads uses. The console renders them in the
+// operator's local time (the window was expressed in that timezone to begin with).
+func (w requestWindow) payload() map[string]any {
+	return map[string]any{
+		"from": w.From.UTC().Format(time.RFC3339),
+		"to":   w.To.UTC().Format(time.RFC3339),
+	}
+}
+
+// requestWindowMaxSpan bounds an explicit from/to pair. It is a guard rail, not a policy:
+// without it "?from=1970-01-01T00:00:00Z" is a window that walks the whole time index, and
+// a typo in a date field would be the way to ask for it. 366 days matches the scale of the
+// rolling window's own 365-day cap, plus a day for leap years.
+const requestWindowMaxSpan = 366 * 24 * time.Hour
+
+// adminRequestWindow resolves the window of a request-log read: the rolling `days` window,
+// or an explicit RFC3339 `from`/`to` pair.
+//
+// The explicit pair exists because a calendar window ("today", "this week", "the 1st to the
+// 3rd") is not a number of days, and the boundaries belong to the timezone the operator is
+// reading the screen in. The console resolves them locally and sends absolute instants, so
+// the gateway needs neither a timezone setting nor calendar arithmetic of its own
+// (docs/design/m97-request-log-time-window.md D1/D2).
+//
+// Combination rules, each stated because there is a caller-visible answer for it:
+//
+//   - neither given → now-days ~ now, the behaviour every existing caller already has;
+//   - from only → from ~ now. The right edge is the server's "now" on purpose: a browser
+//     whose clock is slow would otherwise cut off the newest rows with no sign of why;
+//   - to only → now-days ~ to;
+//   - both → from ~ to, and `days` is ignored (the response echoes the window it used, so
+//     "days was ignored" is visible rather than silent).
+//
+// A malformed instant is rejected instead of ignored, the same rule account_id follows: a
+// window nobody applied answers "everything" to a question about a specific interval.
+func adminRequestWindow(r *http.Request) (requestWindow, error) {
+	query := r.URL.Query()
+	rawFrom, rawTo := query.Get("from"), query.Get("to")
+	now := time.Now().UTC()
+	if rawFrom == "" && rawTo == "" {
+		return requestWindow{From: now.AddDate(0, 0, -adminDays(r)), To: now}, nil
+	}
+	parse := func(param, raw string) (time.Time, error) {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return time.Time{}, domain.ErrInvalidRequest(param + " must be RFC3339").WithParam(param)
+		}
+		return parsed.UTC(), nil
+	}
+	window := requestWindow{}
+	if rawFrom != "" {
+		from, err := parse("from", rawFrom)
+		if err != nil {
+			return requestWindow{}, err
+		}
+		window.From = from
+	} else {
+		window.From = now.AddDate(0, 0, -adminDays(r))
+	}
+	if rawTo != "" {
+		to, err := parse("to", rawTo)
+		if err != nil {
+			return requestWindow{}, err
+		}
+		window.To = to
+	} else {
+		window.To = now
+	}
+	if window.From.After(window.To) {
+		return requestWindow{}, domain.ErrInvalidRequest("from must not be after to").WithParam("from")
+	}
+	if window.To.Sub(window.From) > requestWindowMaxSpan {
+		return requestWindow{}, domain.ErrInvalidRequest("from and to must span at most 366 days").WithParam("from")
+	}
+	return window, nil
 }
 
 func timeOrNil(t *time.Time) any {

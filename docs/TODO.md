@@ -1318,3 +1318,22 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       `scripts/ui-harness/run.sh --views companies companies-readonly`），验收检查项：
       `identityRowOffersEdit`、`editDialogEditable`、`identitySecretLocked`、`overriddenBadge`、
       `resetOverrideOffered`、`clientSecretEditable`
+
+## M97 请求日志的时间窗口：当天 / 本周 / 本月 / 时间段（按本地时间）
+> 设计：`docs/design/m97-request-log-time-window.md`；规格：`docs/request-log.md`「时间窗口（M97）」。
+> 需求原话（2026-10-07 截图批注）：「添加:当天、本周、本月、时间段」/「时间段点击后，弹出选择
+> 开始结束日期」/「按本地时间计算」。
+> **代码、测试、文档都已完成**（`make ui-base`、`make test`、`make build` 在本沙箱全绿，差异见设计
+> 文档 §10），已完成的清单见 `docs/todo_done.md` 同名小节；本节只留未完成项。
+
+- [ ] **待宿主执行（重启 + 线上验收）**：控制台资源内嵌在二进制里，升级后需
+      `./scripts/local-run.sh restart`，然后打开 `#/requests`：下拉里出现「当天 / 本周（周一起）/
+      本月 / 时间段…」；选「当天」列表与「维度统计」都只显示今天（本地 00:00 起）的行；
+      选「时间段…」能选开始/结束日期，确定后工具栏显示窗口与本地时区名，取消则回到原窗口
+- [ ] **待宿主执行（浏览器走查）**：本沙箱没有 firefox（`run.sh` 会跳过；断言本身已用 chromium 在
+      本机跑过一轮全绿，见 `docs/todo_done.md`，但官方入口仍要宿主跑）。宿主上 `make ui-check`
+      （或 `scripts/ui-harness/run.sh --views requests`），验收检查项：`windowOptions`、
+      `windowTodaySendsFrom`、`windowTodayIsLocalMidnight`、`windowBothTables`、`windowHintLocalTime`、
+      `windowHintShowsBoundary`、`windowScrollLabelsKept`、`rangeButtonHiddenByDefault`、`rangeDialogOpens`、`rangeDefaultsToday`、
+      `customRangeSendsBounds`、`customRangeLabel`、`rangeButtonShown`、`customCancelRestores`、
+      `windowScrollRestoresDays`、`customLabelCleared`
