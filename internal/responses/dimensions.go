@@ -182,7 +182,7 @@ func (r *Request) Dimensions(clientHint string) Dimensions {
 	case ClientDSH, ClientUya:
 		// One implementation, two clients: uya-agent speaks DSH's dialect on purpose, so
 		// the workspace marker is read the same way. Spelling the branch out twice would
-		// make "fixed one, forgot the other" the default outcome (M97 §2 D3).
+		// make "fixed one, forgot the other" the default outcome (M98 §2 D3).
 		path := dshWorkspace(runtimeContext)
 		if path == "" {
 			path = workingDirectory

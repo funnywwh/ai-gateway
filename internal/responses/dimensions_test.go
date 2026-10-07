@@ -204,7 +204,7 @@ func TestDimensionsFallBackToUserAgentHint(t *testing.T) {
 	// uya-agent's User-Agent carries BOTH names: its own, and the deepseek-harness
 	// substring kept for gateways that predate it. If the dsh arm ever moves ahead of the
 	// uya-agent arm this silently reports dsh again, which is the whole reason the pair of
-	// assertions below exists (M97 §2 D2).
+	// assertions below exists (M98 §2 D2).
 	if got := req.Dimensions("uya-agent/0.1 (deepseek-harness-compatible)"); got.Client != ClientUya {
 		t.Fatalf("client = %q, want uya-agent from the User-Agent hint", got.Client)
 	}
