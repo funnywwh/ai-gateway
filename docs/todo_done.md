@@ -7075,6 +7075,14 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
       `internal/mcpsrv` 四个包全绿（httpapi 239 s 全量）；`make ui-base` 全绿；`make build` 全绿
 - [x] 文档：设计文档（含 §8「实现与设计差异」4 条）、`docs/request-log.md` §2（表 + 一整段
       `uya-agent` 说明，含顺序那条告诫与「历史行不回填」）、`docs/PROCESS.md` 已产出表、`docs/TODO.md` M98 小节
+- [x] **端到端真实验证（隔离实例 + 真上游，未打扰线上网关）**：把 `make build` 的产物连同
+      线上库的 WAL 一致快照（`sqlite3 .backup`）跑在 `127.0.0.1:18089`，发三条真实请求 ——
+      ① uya-agent 的 agent 轮 ⇒ `client=uya-agent` / `workspace=/home/winger/uya-agent`；
+      ② uya-agent 的**标题调用** ⇒ `client=uya-agent` / `call_kind=title` / 标题抓到
+      「验证 uya-agent 识别」（这条正是改动前被「标题调用 = DSH」吞成 `dsh` 的那一类）；
+      ③ **真 DSH 的 UA**（`deepseek-harness/0.1.2 (+…)`）⇒ 仍 `client=dsh`（回归哨兵）。
+      **没有**把这份二进制装到线上：线上网关当时正服务 5 个会话，重启会打断在跑的回合，
+      换二进制+重启留给宿主（见 `docs/TODO.md` M98 的未完成项）。
 - [x] 既有失败如实记（**非本里程碑引入**，未追）：`make verify` 的 `vet` 步在
       `internal/dshgw/config/sandboxview_test.go` 报三处 `copylocks`（该文件最后一改在 `6a99f63`，
       本 diff 未碰 `internal/dshgw/**`）；`make desensitize-check` 46 处 finding 在未改动的 `main`

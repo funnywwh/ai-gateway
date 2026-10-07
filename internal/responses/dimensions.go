@@ -205,7 +205,7 @@ func (r *Request) Dimensions(clientHint string) Dimensions {
 // "uya-agent/0.1 (deepseek-harness-compatible)" — it carries the uya-agent name AND the
 // deepseek-harness substring that older gateways matched on. Whichever case comes first
 // wins, so uya-agent must be tested before deepseek-harness, or uya-agent's requests
-// silently land in the dsh bucket again (see m97-uya-agent-client.md §2 D2).
+// silently land in the dsh bucket again (see m98-uya-agent-client.md §2 D2).
 func clientFromHint(hint string) string {
 	hint = strings.ToLower(strings.TrimSpace(hint))
 	switch {

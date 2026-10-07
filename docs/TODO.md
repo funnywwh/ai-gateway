@@ -1343,11 +1343,13 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
 > 规格：`docs/request-log.md` §2（身份维度表 + `uya-agent` 那条说明）。
 > **代码、测试、文档都已完成**（清单见 `docs/todo_done.md` 同名小节）；本节只留未完成项。
 
-- [ ] **待宿主执行（部署 + 线上验收）**：把 `make build` 的产物装到部署根并重启 `aigw-local.service`
-      （本机网关此刻正在服务 5 个会话，重启会打断在跑的回合，所以留给宿主挑时机），然后跑一发
-      uya-agent 请求，在控制台「请求日志」页确认 `client=uya-agent`（不再是 `dsh`）、
-      `workspace` 是 git **主工作区**（不是 `.git/dsh-worktrees/session-*`），且客户端下拉里
-      能按 `uya-agent` 筛选
+- [ ] **待宿主执行（部署）**：把 `make build` 的产物装到部署根并重启 `aigw-local.service`。
+      **行为已经端到端验过**（`docs/todo_done.md` 的 M98 小节：隔离实例 + 真上游三条用例 ——
+      uya-agent 的 agent 轮与标题调用都记 `uya-agent`，真 DSH 的 UA 仍记 `dsh`），
+      所以剩下的只是「换二进制 + 重启」，不必再验行为。重启会打断正在跑的回合
+      （本机网关常年服务多个会话），挑时机这件事留给宿主。
+- [ ] **待宿主执行（控制台实看）**：部署后在「请求日志」页确认客户端列显示 `uya-agent`、
+      下拉能按它筛选，且 `workspace` 是 git **主工作区**（不是 `.git/dsh-worktrees/session-*`）
 - [ ] **待宿主执行（浏览器走查）**：本沙箱没有 firefox（`make ui-check` 会自动跳过；不需要浏览器的
       `internal/webui/tests/requests_test.mjs` 已并入 `make ui-base` 并跑过）。宿主上执行
       `make ui-check`，确认 `keys.page.html` 的 `clientFilter`（五个取值都能选，本次已改成逐项
