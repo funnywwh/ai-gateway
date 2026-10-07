@@ -7087,3 +7087,22 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
       `internal/dshgw/config/sandboxview_test.go` 报三处 `copylocks`（该文件最后一改在 `6a99f63`，
       本 diff 未碰 `internal/dshgw/**`）；`make desensitize-check` 46 处 finding 在未改动的 `main`
       检出上逐字相同，且本 diff 一条都没新增
+
+## M98 部署记录：v4.11.1 部署到本机 aigw-local（2026-10-07 11:27）
+> 部署：`aigw-local.service`（`/media/winger/_dde_data/aigw`，127.0.0.1:8088）
+> 4.11.1/`76568ca` → **4.11.1/`407c003`**（版本号未升，M98 是功能叠加）。
+
+- 构建物 `bin/aigw` sha256 `f677d807…5144`（24,024,313 B，控制台 minified+gzip），
+  部署根与仓库 `bin/` 逐字节一致
+- 回滚点 `bin/aigw.prev-20261007-112739`（4.11.1/`76568ca` 原物）
+- **先停后换**：直接 `cp` 会撞 `文本文件忙`（运行中的进程持有该 inode），
+  所以顺序是 `systemctl --user stop` → `cp` → `start`
+- 验证：`/version`=`407c003`、`healthz` 200、单元 active、启动行 revision=`407c003`；
+  控制台 `requests.js` 已带 `uya-agent` 下拉项
+- 线上真机读数（部署前基线 `MAX(id)=3917`）：部署后跑一发真 uya-agent 请求（`aigw-local`
+  提供方）⇒ 新行 `client=uya-agent` / `workspace=/home/winger/uya-agent`；
+  此后 `id>=3918` 的行全是 `uya-agent`，**没有一行再落 `dsh`**
+- 一个如实记录的观察：`id=3919` 的 `workspace` 仍是 `.git/dsh-worktrees/session-48888811-…`。
+  原因是那个会话的请求**由部署前就在跑的 uya-agent 进程**发出（它的运行时上下文还是旧格式），
+  M98 只负责「网关照客户端上报的值记」；新起的会话报的是主工作区（同批其它行都是
+  `/home/winger/uya-agent`）。两仓的改动合起来才是完整的「客户端识别 + 工作区归类」
