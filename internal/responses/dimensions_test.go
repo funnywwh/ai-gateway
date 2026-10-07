@@ -201,6 +201,16 @@ func TestDimensionsFallBackToUserAgentHint(t *testing.T) {
 	if got := req.Dimensions("deepseek-harness/0.1.2 (+https://github.com/deepseek-ai/deepseek-harness)"); got.Client != ClientDSH {
 		t.Fatalf("client = %q, want dsh from the User-Agent hint", got.Client)
 	}
+	// uya-agent's User-Agent carries BOTH names: its own, and the deepseek-harness
+	// substring kept for gateways that predate it. If the dsh arm ever moves ahead of the
+	// uya-agent arm this silently reports dsh again, which is the whole reason the pair of
+	// assertions below exists (M98 §2 D2).
+	if got := req.Dimensions("uya-agent/0.1 (deepseek-harness-compatible)"); got.Client != ClientUya {
+		t.Fatalf("client = %q, want uya-agent from the User-Agent hint", got.Client)
+	}
+	if got := req.Dimensions("uya-agent/0.1"); got.Client != ClientUya {
+		t.Fatalf("client = %q, want uya-agent from an older uya-agent UA too", got.Client)
+	}
 	if got := req.Dimensions("codex_cli_rs/0.50.0"); got.Client != ClientCodex {
 		t.Fatalf("client = %q, want codex from the User-Agent hint", got.Client)
 	}
@@ -214,6 +224,69 @@ func TestDimensionsFallBackToUserAgentHint(t *testing.T) {
 	}
 	if got := req.Dimensions(""); got.Client != ClientUnknown {
 		t.Fatalf("client = %q, want unknown", got.Client)
+	}
+}
+
+// uya-agent is identified by its User-Agent alone, and being identified is what fills the
+// workspace: the workspace arm is shared with dsh, so a client that falls through to
+// unknown loses its workspace too (that pairing is one bug, not two — M97 §1).
+func TestDimensionsReadsUyaAgentRequest(t *testing.T) {
+	req := parseBody(t, `{
+		"model":"DeepSeek-V4.1-Flash",
+		"input":[
+			{"role":"system","content":"You are a coding agent powered by the {{model}} model. Your working directory is /repo/worktree."},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"继续"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nCurrent uya-agent file policy: full access. The file tools are not confined and bash runs without a sandbox.\n\nCurrent workspace: /repo/worktree (all relative paths, the file tools, bash and /diff resolve against it).\nsession workspace: \"/repo\""}]}
+		]
+	}`)
+
+	got := req.Dimensions("uya-agent/0.1 (deepseek-harness-compatible)")
+	if got.Client != ClientUya {
+		t.Fatalf("client = %q, want uya-agent", got.Client)
+	}
+	if got.CallKind != CallKindAgent {
+		t.Fatalf("call_kind = %q, want agent", got.CallKind)
+	}
+	// uya-agent reports the *grouping key* here (a linked worktree folds back to the main
+	// checkout), so the recorded value is a repository, not a session-unique path.
+	if got.Workspace != "/repo" {
+		t.Fatalf("workspace = %q, want /repo", got.Workspace)
+	}
+}
+
+// A title call carries no developer instruction, so identity cannot come from the body.
+// DSH stays the default (its prompts are the ones being reused, and a DSH title call whose
+// provider sends no User-Agent must not degrade to unknown); an explicit hint wins.
+func TestDimensionsUyaTitleCallIsNotDSH(t *testing.T) {
+	const titleBody = `{
+		"model":"DeepSeek-V4.1-Flash",
+		"prompt_cache_key":"session-0f6f924a-bc5c-4254-b6f5-7019f7128525",
+		"input":[
+			{"role":"system","content":"Create a concise title for an AI coding-assistant session from the supplied human messages.\nReturn only the title on one line."},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"Generate the session title from this JSON array of human messages:\n[{\"seq\":0,\"text\":\"修复 aigw 识别\"}]"}]}
+		]
+	}`
+
+	for _, tc := range []struct {
+		hint string
+		want string
+	}{
+		{"uya-agent/0.1 (deepseek-harness-compatible)", ClientUya},
+		{"uya-agent/0.1", ClientUya},
+		{"deepseek-harness/0.1.2 (+https://github.com/deepseek-ai/deepseek-harness)", ClientDSH},
+		// No hint: DSH is the default for a title call, not unknown.
+		{"", ClientDSH},
+	} {
+		got := parseBody(t, titleBody).Dimensions(tc.hint)
+		if got.CallKind != CallKindTitle {
+			t.Fatalf("hint %q: call_kind = %q, want title", tc.hint, got.CallKind)
+		}
+		if got.Client != tc.want {
+			t.Fatalf("hint %q: client = %q, want %q", tc.hint, got.Client, tc.want)
+		}
+		if got.SessionID != "session-0f6f924a-bc5c-4254-b6f5-7019f7128525" {
+			t.Fatalf("hint %q: session_id = %q", tc.hint, got.SessionID)
+		}
 	}
 }
 

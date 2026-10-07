@@ -1338,3 +1338,21 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       `windowHintShowsBoundary`、`windowScrollLabelsKept`、`rangeButtonHiddenByDefault`、`rangeDialogOpens`、`rangeDefaultsToday`、
       `customRangeSendsBounds`、`customRangeLabel`、`rangeButtonShown`、`customCancelRestores`、
       `windowScrollRestoresDays`、`customLabelCleared`
+## M98 `uya-agent` 作为一个独立的客户端维度取值
+> 设计：`docs/design/m98-uya-agent-client.md`；需求原话：「识别出来的是 dsh 客户端，要是 uya-agent」。
+> 规格：`docs/request-log.md` §2（身份维度表 + `uya-agent` 那条说明）。
+> **代码、测试、文档都已完成**（清单见 `docs/todo_done.md` 同名小节）；本节只留未完成项。
+
+- [ ] **待宿主执行（部署）**：把 `make build` 的产物装到部署根并重启 `aigw-local.service`。
+      **行为已经端到端验过**（`docs/todo_done.md` 的 M98 小节：隔离实例 + 真上游三条用例 ——
+      uya-agent 的 agent 轮与标题调用都记 `uya-agent`，真 DSH 的 UA 仍记 `dsh`），
+      所以剩下的只是「换二进制 + 重启」，不必再验行为。重启会打断正在跑的回合
+      （本机网关常年服务多个会话），挑时机这件事留给宿主。
+- [ ] **待宿主执行（控制台实看）**：部署后在「请求日志」页确认客户端列显示 `uya-agent`、
+      下拉能按它筛选，且 `workspace` 是 git **主工作区**（不是 `.git/dsh-worktrees/session-*`）
+- [ ] **待宿主执行（浏览器走查）**：本沙箱没有 firefox（`make ui-check` 会自动跳过；不需要浏览器的
+      `internal/webui/tests/requests_test.mjs` 已并入 `make ui-base` 并跑过）。宿主上执行
+      `make ui-check`，确认 `keys.page.html` 的 `clientFilter`（五个取值都能选，本次已改成逐项
+      断言）与 `clientShown` 通过。**未做的事**：没往 `fixtures.json` 加 `uya-agent` 行 ——
+      那份夹具是 2 行，而走查里有若干只认「共 2 行」的断言（都属于浏览器路径，本沙箱跑不到），
+      加一行会连带动它们；留到宿主上能真跑 `ui-check` 时一起改更稳。

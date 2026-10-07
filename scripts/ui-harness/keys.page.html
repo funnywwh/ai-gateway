@@ -208,7 +208,10 @@ try {
     checks.columns = ['输出文本', '客户端', '模型', '推理强度', '工作区', '会话', '类型', '标题', '成本'].every((c) => pageText().includes(c));
     // The identity filters are the point of the page now: a client select, a model select
     // filled from the statistics endpoint, and free-text session/workspace boxes.
-    checks.clientFilter = [...document.querySelectorAll('select')].some((s) => [...s.options].some((o) => o.value === 'codex'));
+    // Every value the column can hold must be selectable here（M97 加了 `uya-agent`）：
+    // 表格里看得见、却筛不出来，运营就没法把它的消耗单独拎出来。
+    checks.clientFilter = [...document.querySelectorAll('select')].some((s) =>
+      ['dsh', 'uya-agent', 'codex', 'console', 'unknown'].every((v) => [...s.options].some((o) => o.value === v)));
     checks.modelFilter = [...document.querySelectorAll('select')].some((s) => [...s.options].some((o) => o.value === 'deepseek-flash'));
     checks.sessionFilter = !!document.querySelector('input[placeholder^="会话 id"]');
     // Identity columns render what was recorded, and the alias case shows both names.

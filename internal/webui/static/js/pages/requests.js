@@ -50,6 +50,7 @@ export async function render({ page, actions, session }) {
   const client = el('select', {}, [
     el('option', { value: '', text: '全部客户端' }),
     el('option', { value: 'dsh', text: 'DSH' }),
+    el('option', { value: 'uya-agent', text: 'uya-agent' }),
     el('option', { value: 'codex', text: 'Codex' }),
     el('option', { value: 'console', text: '控制台智能问答' }),
     el('option', { value: 'unknown', text: '未识别' }),

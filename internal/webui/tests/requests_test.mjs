@@ -155,6 +155,24 @@ assert.match(openDetailSource, /detail\(row\.request_id\)/, 'openDetail 才是�
 assert.equal((source.match(/detail\(row\.request_id\)/g) || []).length, 1,
   '不允许存在绕过 openDetail 的第二条路径（失败处理会因此分叉）');
 
+// The client filter must offer every value the column can hold: an operator who can see
+// `uya-agent` in the table but cannot filter by it has no way to isolate its consumption.
+// Read off the real option list rather than grepping, so a renamed label cannot pass.
+const clientSelectStart = source.indexOf("const client = el('select'");
+const clientSelectEnd = source.indexOf(']);', clientSelectStart);
+assert.ok(clientSelectStart >= 0 && clientSelectEnd > clientSelectStart,
+  '找不到客户端筛选下拉');
+const clientSelectSource = source.slice(clientSelectStart, clientSelectEnd);
+const clientValues = [...clientSelectSource.matchAll(/value: '([^']*)'/g)].map((m) => m[1]);
+for (const value of ['', 'dsh', 'uya-agent', 'codex', 'console', 'unknown']) {
+  assert.ok(clientValues.includes(value),
+    `客户端下拉缺少取值 ${JSON.stringify(value)}（现有：${clientValues.join(', ')}）`);
+}
+// …and the column must not be reduced to a known-value lookup that drops new ones: it
+// renders whatever the row carries, which is what makes adding a value a one-line change.
+assert.match(source, /render: \(row\) => \(row\.client \? badge\(row\.client/,
+  '客户端列必须原样渲染行里的值，不许按已知取值表映射（否则新增取值会显示不出来）');
+
 const uiSource = await readFile(new URL('../static/js/ui.js', import.meta.url), 'utf8');
 assert.match(uiSource, /const ROW_CLICK_OWNERS = 'button, a, input, select, textarea, label, summary, \[role="button"\], \[role="link"\]'/,
   '行内控件自己吃掉点击：否则「详情」按钮的这一次会再冒泡成一次行点击');

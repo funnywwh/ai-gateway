@@ -7045,3 +7045,45 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
 | 验证（数据面） | `POST /v1/responses`（`DeepSeek-V4.1-Flash`）`status=completed`、回答正确、usage 34/51 —— 重启没有影响转发 |
 | 测试 | 沙箱内 `make ui-base` 全绿（含新 `requests_test.mjs` 时间窗口一节，`TZ=Asia/Shanghai`）、`make test` 除既有失败外全绿、`make build` 通过、`make desensitize-check` 与基线一致；`#requests` 走查 146 项用 chromium 在本地浏览器跑过全绿 |
 | 未做 | 未打 tag（未升版本号，与 M96 同例）；`make ui-check` 官方入口（需 firefox）与「浏览器里肉眼确认新下拉」待宿主；其它实例未部署 |
+
+## M98 `uya-agent` 作为一个独立的客户端维度取值
+> 设计：`docs/design/m98-uya-agent-client.md`；规格：`docs/request-log.md` §2。
+> 需求原话：「识别出来的是 dsh 客户端，要是 uya-agent」。
+
+- [x] 设计文档与规格文档先行（`docs/PROCESS.md` 硬要求；设计文档写出后用户回「继续」即开工）
+- [x] `internal/responses/dimensions.go`：新增 `ClientUya = "uya-agent"` 常量；
+      `clientFromHint` 增一条判定并**放在 `deepseek-harness` 之前**（uya-agent 的 UA 同时含两个
+      名字，顺序即语义，注释里写明这条为什么是载荷相关的）
+- [x] 工作区取值改为 `case ClientDSH, ClientUya:` **共用一份实现**（uya-agent 刻意讲 DSH 的方言，
+      复制一段会让「改了一处忘了另一处」成为默认结果）
+- [x] 标题调用归属：仍是「title ⇒ dsh」的默认，但**显式 UA** 可覆盖 —— 原测试传空 hint 且期望
+      `dsh`，若照设计直接走 hint 会让「DSH 标题调用 + 不发 UA 的 provider」退化成 `unknown`
+      （把现有行为改坏；见设计文档 §8 差异 1）
+- [x] 控制台：`requests.js` 客户端下拉加 `uya-agent`；`admin_routes.go` 的 `client` 过滤说明补齐
+      （原来连 `console` 都没写进去）；`domain/entities.go` 与 `dimensions.go` 的取值注释同步
+- [x] 测试：`dimensions_test.go` 三条 —— UA 兜底加两条（我们的 UA / 旧版只剩 `uya-agent/0.1` 的 UA）、
+      新增 `TestDimensionsReadsUyaAgentRequest`（**同时钉 client 与 workspace**：这就是「客户端认不出」
+      与「工作区为空」是同一个 bug 那件事）、新增 `TestDimensionsUyaTitleCallIsNotDSH`（四种 hint 的
+      表驱动，含真 DSH UA 与空 hint 两条反向断言）
+- [x] 测试：`internal/webui/tests/requests_test.mjs` 钉住下拉的**取值集合**（读真实 option 列表，
+      不是 grep 标签）与「客户端列原样渲染行里的值」；`scripts/ui-harness/keys.page.html` 的
+      `clientFilter` 从「有没有 codex」改成五个取值逐项断言
+- [x] **防假绿对照（逐条验过）**：把 uya-agent 判定挪到 deepseek-harness 之后 ⇒ 三条测试全红
+      （`client = "dsh", want uya-agent`）；把工作区分支改回 dsh-only ⇒ 红
+      （`workspace = "", want /repo`）；摘掉下拉那一项 ⇒ `requests_test.mjs` 红
+- [x] 验收证据：`go vet` 与 `go test` 在 `internal/responses`、`internal/httpapi`、`internal/store`、
+      `internal/mcpsrv` 四个包全绿（httpapi 239 s 全量）；`make ui-base` 全绿；`make build` 全绿
+- [x] 文档：设计文档（含 §8「实现与设计差异」4 条）、`docs/request-log.md` §2（表 + 一整段
+      `uya-agent` 说明，含顺序那条告诫与「历史行不回填」）、`docs/PROCESS.md` 已产出表、`docs/TODO.md` M98 小节
+- [x] **端到端真实验证（隔离实例 + 真上游，未打扰线上网关）**：把 `make build` 的产物连同
+      线上库的 WAL 一致快照（`sqlite3 .backup`）跑在 `127.0.0.1:18089`，发三条真实请求 ——
+      ① uya-agent 的 agent 轮 ⇒ `client=uya-agent` / `workspace=/home/winger/uya-agent`；
+      ② uya-agent 的**标题调用** ⇒ `client=uya-agent` / `call_kind=title` / 标题抓到
+      「验证 uya-agent 识别」（这条正是改动前被「标题调用 = DSH」吞成 `dsh` 的那一类）；
+      ③ **真 DSH 的 UA**（`deepseek-harness/0.1.2 (+…)`）⇒ 仍 `client=dsh`（回归哨兵）。
+      **没有**把这份二进制装到线上：线上网关当时正服务 5 个会话，重启会打断在跑的回合，
+      换二进制+重启留给宿主（见 `docs/TODO.md` M98 的未完成项）。
+- [x] 既有失败如实记（**非本里程碑引入**，未追）：`make verify` 的 `vet` 步在
+      `internal/dshgw/config/sandboxview_test.go` 报三处 `copylocks`（该文件最后一改在 `6a99f63`，
+      本 diff 未碰 `internal/dshgw/**`）；`make desensitize-check` 46 处 finding 在未改动的 `main`
+      检出上逐字相同，且本 diff 一条都没新增
