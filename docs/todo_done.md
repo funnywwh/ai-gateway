@@ -7027,3 +7027,21 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
 - [x] **走查断言在本机浏览器里跑过**（沙箱没有 firefox，用 chromium + 一份仓库外临时脚本复刻
       run.sh 的三步）：`#requests` 146 项全绿、`errors` 为空（含本文新增的 16 项）；`#keys` 17 项
       全绿。官方入口 `make ui-check` 仍需宿主执行。
+
+### v4.11.1 部署记录（M97 请求日志时间窗口，本机 aigw-local；2026-10-07）
+
+| 项 | 值 |
+|---|---|
+| 起因 | 截图批注：「添加:当天、本周、本月、时间段」「时间段点击后，弹出选择开始结束日期」「按本地时间计算」。原窗口下拉只有滚动窗口（最近 1/3/7/30 天），表达不了日历窗口 |
+| 版本 | **v4.11.1**（版本号未变：M97 是功能叠加，未升号，与 M96 的 `f13a2d7` 同理）。revision **`76568ca`**（M97 提交；`a453e8f` 是它在 main 上的同内容提交，merge 提交 `76568ca` 是 HEAD） |
+| 推送 | 已推 origin/main：`622e548..76568ca`（含 5 个本地提交：三笔计费 + M97） |
+| 构建物 | `bin/aigw` **4.11.1 / `76568ca`**，24,024,513 B，sha256 `0b6b3853e45aa334fdfdaca95a0ec7453fe9557b7b3443b5ec63332e2b3e78c0`（控制台 minified + gzip），取自干净树 |
+| 部署范围 | **本机 `aigw-local.service`**（`/media/winger/_dde_data/aigw`，`127.0.0.1:8088`）：4.11.1/`622e548` → **4.11.1/`76568ca`**（部署根与仓库 `bin/aigw` sha256 一致；其它实例未部署） |
+| 回滚点 | `bin/aigw.prev-20261007-111303`（24,001,351 B = v4.11.1/`622e548` 原物）。回滚 = `install -m 0755 bin/aigw.prev-20261007-111303 bin/aigw && systemctl --user restart aigw-local.service`，`/version` 随之后退到 `622e548` |
+| 验证（探针） | `/version` = `{"revision":"76568ca","ui":"minified","ui_encoding":"gzip","version":"4.11.1"}`；`/healthz` 200、`/readyz` 200、`/admin/ui/` 200；单元 `active`，重启后 2 秒内可用 |
+| 验证（启动日志） | `data/aigw-local.log`：`msg="aigw starting" version=4.11.1 revision=76568ca ui=minified ui_encoding=gzip …`；该行**之后 0 ERROR**（它前面那条 `audit write queue could not be drained` 是**旧进程**退出时排空写队列超时，与 2026-10-05 那次重启同一签名，非本次引入） |
+| 验证（控制台资源） | `GET /admin/ui/js/pages/requests.js` 200（gzip，24,287 B 解压）：四个新选项 `"today","当天"` / `"week","本周（周一起）"` / `"month","本月"` / `"custom","时间段…"` 都在；窗口逻辑按本地时区（`getFullYear(),getMonth(),getDate(),0,0,0,0` 起点、`…,23,59,59,0` 终点、`getDay()` 周一推算）也在。模块图 `ui.js`/`api.js`/`money.js`/`base.js` 全 200 |
+| 验证（新接口真机） | 管理员会话 + 显式窗口：`?from=2026-10-06T16:00:00Z`（= 本地今天 00:00）→ 1664 行、`window.to` = 当前时刻；`?from=2026-10-04T16:00Z&to=2026-10-06T15:59:59Z`（本地 10-05 00:00 ~ 10-06 23:59:59）→ 2028 行且不含刚产生的行；`days=365` 与 `from` 同给时窗口按 `from`（1651 行，不含 20 天前的行）；`/requests/dimensions` 同窗口（`total` 分组数、`days` 仍回显 7、`window` 一致）；4 类非法输入（`from=yesterday`、`to=2026-10-07`、`from>to`、跨度 400 天）全部 400 且 `param` 正确 |
+| 验证（数据面） | `POST /v1/responses`（`DeepSeek-V4.1-Flash`）`status=completed`、回答正确、usage 34/51 —— 重启没有影响转发 |
+| 测试 | 沙箱内 `make ui-base` 全绿（含新 `requests_test.mjs` 时间窗口一节，`TZ=Asia/Shanghai`）、`make test` 除既有失败外全绿、`make build` 通过、`make desensitize-check` 与基线一致；`#requests` 走查 146 项用 chromium 在本地浏览器跑过全绿 |
+| 未做 | 未打 tag（未升版本号，与 M96 同例）；`make ui-check` 官方入口（需 firefox）与「浏览器里肉眼确认新下拉」待宿主；其它实例未部署 |
