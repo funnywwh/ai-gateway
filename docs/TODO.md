@@ -1354,3 +1354,21 @@ FUSE 挂载）。本机实测：`go list ./internal/...` 秒回，`go list ./...
       断言）与 `clientShown` 通过。**未做的事**：没往 `fixtures.json` 加 `uya-agent` 行 ——
       那份夹具是 2 行，而走查里有若干只认「共 2 行」的断言（都属于浏览器路径，本沙箱跑不到），
       加一行会连带动它们；留到宿主上能真跑 `ui-check` 时一起改更稳。
+
+## M99 发布 v4.12.0 并升级本机 `:8088`
+> 需求原话：「帮我升级本机 rag-server 8088」。发布记录见 `docs/todo_done.md` 的
+> 「发布 v4.12.0 并升级本机 `:8088`」小节；本节只留未完成项。
+
+- [ ] **待宿主执行（换二进制 + 重启）**：沙箱看不到宿主进程、部署根未挂载、`systemctl --user`
+      不可达，故部署交给宿主终端：
+      `bash deploy-aigw-4.12.0.sh --check` → `bash deploy-aigw-4.12.0.sh`（A 段，只重启
+      `aigw-local`，不打断租户 worker）。期望 `/version` = `4.12.0` / `2651b56`，
+      `healthz`/`readyz`/`/admin/ui/` 均 200，启动窗口 0 条 `level=ERROR`。
+      回滚点会自动拍成 `<部署根>/aigw.prev-<时间戳>`。
+- [ ] **待宿主择时（B 段）**：`bash deploy-aigw-4.12.0.sh --with-dshgw` 重启 `dshgw-verify`，
+      让盘上的 `bin/dshgw` 也在进程里生效（门户 18300 / 网关 18299 / 租户 18301+ / worker 18400+）。
+      **会重启所有租户 worker，含发起本次部署的会话**，所以默认不跑。
+- [ ] **待操作员肉眼确认（浏览器）**：硬刷新 `http://127.0.0.1:8088/admin/ui/#/requests`，
+      确认 M97 的时间窗口下拉（当天 / 本周 / 本月 / 时间段）与 M98 的 `uya-agent` 客户端下拉项
+      都在；`autodl-api` 下应能看到 `GLM-5.3-flash` 与 `hy4-preview`。
+      （控制台资源 `//go:embed` 进二进制，A 段重启后即生效。）

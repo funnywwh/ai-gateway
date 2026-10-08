@@ -7185,3 +7185,35 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
   `autodl-api/DeepSeek-V4.1-Flash` 既不在它的价格表也不在 `UNPRICED` 白名单，于是
   「取不到价 1 行，整批中止（未写入任何一行）」。它现在**什么都写不了**（连别的供应商的行
   也一起被中止）。与本轮改动无关，留给该脚本自己的线处理。
+
+## 发布 v4.12.0 并升级本机 `:8088`（2026-10-08）
+
+> 需求原话：「帮我升级本机 rag-server 8088」。`rag-server` 指的就是本仓库的 aigw 实例
+> （`aigw-local.service`，`/media/winger/_dde_data/aigw`，`127.0.0.1:8088`）。
+> 档位 **minor**：4.11.1 → **4.12.0**（含新对外能力，非纯缺陷修复）。
+
+- **起点事实**：线上 `:8088` 跑的是 **4.11.1 / `283a9e7`**（`/version` 实测），
+  比 `main` HEAD 落后 **14 个提交**：M97（请求日志时间窗口）、M98（`uya-agent` 作为独立
+  客户端维度）以及 `autodl-api` 的 `GLM-5.3-flash`/`hy4-preview` 三层补全 —— 这些**都还没
+  作为版本发布过**，所以本次一并升起。
+- **发布**：`./scripts/release.sh minor` → `VERSION` 4.11.1 → 4.12.0，提交 `2651b56`，
+  打 tag `v4.12.0`；`make build` 产出 `bin/aigw`（控制台 minified + gzip，
+  sha256 `49dab85c…d1c3`，24,063,993 B）。
+- **隔离冒烟（全程不动在跑的 `:8088`）**：新二进制在 `:8099` + 独立库起一次 ——
+  `/version` = `{"revision":"2651b56","ui":"minified","ui_encoding":"gzip","version":"4.12.0"}`、
+  `healthz` 200、`/admin/ui/` 200、控制台 `api.js` 为压缩产物、启动日志版本号与 revision 正确。
+  `readyz` 503 属**预期**：那份临时配置里 providers=0（`{"providers":0,…,"status":"not_ready"}`），
+  不是二进制缺陷。验证后端口释放、`.cache` 临时目录已清、`:8088` 的 `/version` 与 healthz 全程未变。
+- **部署方式（待宿主终端执行）**：本次发布会话跑在 dshgw 租户沙箱里（PID 1 = `bwrap`，
+  只看得见 7 个进程、部署根 `/media/winger/_dde_data/aigw` 不存在、无 `/run/user/1000`、
+  `ssh` 宿主不可达），因此「换二进制 + 重启单元」在沙箱里做不到 —— 与前几次发布（M98、v4.1.0）
+  同一原因。已产出宿主脚本 `deploy-aigw-4.12.0.sh`（工作区根，**未入 git**，与 v4.1.1 的
+  `deploy-aigw-4.1.1.sh` 同属一次性运维件）：
+  - `--check` 只读体检 → 默认 A 段（换 `bin/aigw` + 只重启 `aigw-local`，**不碰任何租户 worker**）
+    → `--with-dshgw` B 段（重启 `dshgw-verify`，会重启**所有**租户 worker 含发起会话，故默认不跑）。
+  - 脚本自带三道护栏：产物 `sha256` 与本次发布不符即拒装；换前拍回滚点
+    `aigw.prev-<时间戳>`；换后**就绪门禁**轮询 `/healthz` 到 200（90s 预算），超时**自动回滚**
+    并再次确认就绪 —— 修补的正是「没就绪就报部署完成」那类流程缺陷。
+  - 脚本逻辑已在沙箱内**用假部署根 + 隔离端口**验证：`--check` 对缺失部署根 fail-closed；
+    `wait_ready` 对健康端点 0s 通过、对死端点 3s 超时并走回滚分支。
+- **未做**：没有部署到线上（沙箱能力所限，交由宿主执行）；gw-b / gw-a 未动（本次用户只要本机）。
