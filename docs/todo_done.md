@@ -7217,3 +7217,34 @@ $ROOT/bin/dshgw --version                 # 期望 4.7.0/11e8254
   - 脚本逻辑已在沙箱内**用假部署根 + 隔离端口**验证：`--check` 对缺失部署根 fail-closed；
     `wait_ready` 对健康端点 0s 通过、对死端点 3s 超时并走回滚分支。
 - **未做**：没有部署到线上（沙箱能力所限，交由宿主执行）；gw-b / gw-a 未动（本次用户只要本机）。
+
+## 本机 dshgw-verify 开通工作区短路径视图（M79，2026-10-08）
+
+> 需求原话：「租户的 workspace 路径很长，能缩短吗？」→「帮我配置 rag-server 的 8088 实例」。
+> 结论：`rag-server` 的 :8088 是 aigw-local，**承载租户的是同部署根的 `dshgw-verify`**，配置在
+> `dshgw.yaml`；它的 M79 键一直没生效，因为跑的 dshgw 是 **4.1.1**（`KnownFields(true)` 会拒绝
+> 不认识的 `deploy.sandbox_workspace`，M79 随 v4.2.0 发布后本机从未重启过）。
+
+- **改动**：`bin/dshgw` 4.1.1/`6f68aeb` → **4.12.0/`fb9c281`**（从租户工作区克隆的当前源码
+  `make dshgw-build`，sha256 `b5410f78…`）；`dshgw.yaml` 的 `deploy:` 块加
+  `sandbox_workspace: /workspace`（宿主 `dshgw.yaml.bak-20261008-shortpath` 为配置回滚点，
+  `bin/dshgw.prev-pre-shortpath-20261008-192356` 为二进制回滚点；`systemctl --user restart dshgw-verify`）。
+- **预检（换前）**：新二进制加载新配置无未知键报错；渲染出的 dsh-tenant profile 与现状**逐字节相同**，
+  只多出 `--bind <ws> /workspace`、`/workspace/{browser,ssh/…}` 镜像子挂载与 `--chdir /workspace`
+  （14 行 diff，隔离面零意外）。
+- **生效证据**：banner `version=4.12.0 revision=fb9c281`；沙箱内 `HOME=/workspace`、
+  `readlink -f /workspace` = `/workspace`（真挂载点而非软链）、`getent passwd` 家目录同值；
+  worker argv 含绑定与 `--chdir`；**9/10 租户**的 picker/终端/文件/变更 root 已切 `/workspace`
+  （第 10 个 `verify1` 是测试租户，本就没有这些行）。老会话（长路径 cwd）不迁移，长路径仍绑定。
+- **脚本与报告**：宿主 `apply-dshgw-shortpath-20261008.sh`（幂等体检 `DRY_RUN=1`/`PRECHECK_ONLY=1`；
+  装前预检、装后 300s 就绪门禁、失败自动回滚）；报告
+  `data/dshgw-verify/shortpath-deploy-20261008-192356.log`。首跑因**脚本自己的断言阈值写严**
+  （`^/workspace$` 实际 2 行、要求 ≥4）在预检处 `die`，修阈值后第二次成功（exit 3 的告警也是同一
+  阈值：前缀 3 行 < 4，**未回滚**）。
+- **顺带发现（非本次引起，未修）**：dsh-tenant 的 ssh 工作区 `aipc` 两条挂载**今早 08:34** 起就失效
+  （审计 `ssh-mount-remount` 两条 500）；本次重启时外层一度挂回（19:31:36 200），嵌套 `ZT20Q` 是
+  卸不掉的死条目（19:31:37 500 "dead mount not detached"），随后两条一起失效。死条目已卸干净
+  （宿主 sshfs 挂载 0 条，`ssh-mounts.json` 记录仍在），**下次 dshgw 启动的 Reconcile 会自动重挂**；
+  也可由门户登出→登录触发的 `Restore` 路径恢复（两者都需要该租户 worker 再来一次才能进沙箱）。
+- **未做**：aigw `:8088` 自身仍是 4.11.1（M99 的部署待办见上文，与本次无关）；`cmd/dshgw/plugin/ssh-workspace/client.js`
+  与当前源码差 31 行（`inject` 少 `remote`）的既有漂移未动。
